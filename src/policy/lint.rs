@@ -82,31 +82,14 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
         let Some(r) = paths.get(i) else { continue };
         // The only `allow import` rule also denies the imports that no rule matches.
         let restricts_imports = rule.allow && matches!(rule.kind, RuleKind::Files(Access::Import, _)) && allow_imports == 1;
-        if !restricts_imports {
-            let (mut agree, mut oppose, mut needed) = (Vec::new(), Vec::new(), false);
-            let broader = paths.broader(r, copies);
-            for op in r.ops() {
-                match paths.decider(r, op, &broader, copies) {
-                    Some(j) if j.allow == r.allow => agree.push(j.index),
-                    Some(j) => oppose.push(j.index),
-                    None => needed = true,
-                }
-            }
-            for list in [&mut agree, &mut oppose] {
-                list.sort_unstable();
-                list.dedup();
-            }
-            let one = |list: &[usize], singular: &'static str, plural: &'static str| if list.len() == 1 { singular } else { plural };
-            let verb = match rule.allow {
-                true => one(&agree, "allows", "allow"),
-                false => one(&agree, "denies", "deny"),
+        if !restricts_imports && let Some((same_way, deciders)) = paths.deciders(r, copies) {
+            let one = |singular: &'static str, plural: &'static str| if deciders.len() == 1 { singular } else { plural };
+            let message = match (same_way, rule.allow) {
+                (true, true) => format!("{} already {} this", describe_all(&deciders), one("allows", "allow")),
+                (true, false) => format!("{} already {} this", describe_all(&deciders), one("denies", "deny")),
+                (false, _) => format!("{} {} precedence everywhere this rule applies", describe_all(&deciders), one("takes", "take")),
             };
-            if !needed && oppose.is_empty() {
-                warn(i, "redundant-rule", format!("{} already {verb} this", describe_all(&agree)));
-            } else if !needed && agree.is_empty() {
-                let verb = one(&oppose, "takes", "take");
-                warn(i, "overridden-rule", format!("{} {verb} precedence everywhere this rule applies", describe_all(&oppose)));
-            }
+            warn(i, if same_way { "redundant-rule" } else { "overridden-rule" }, message);
         }
         if let RuleKind::Http(_, url) = &rule.kind
             && !rule.allow
@@ -116,7 +99,7 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
             // written or as addresses that reach the rule's addresses.
             let found = bypass(url.host.clone(), &url.host).or_else(|| {
                 let denied = std::iter::once(url.host.clone()).chain(url.host.reaching_ranges()).collect::<Vec<_>>();
-                let mut reach = paths.opposed(r, copies).flat_map(|k| match k.scope {
+                let mut reach = paths.opposed(r, copies, 0).flat_map(|k| match k.scope {
                     Scope::Http { host, net: true, .. } => denied.iter().filter_map(|d| host.intersection(d)).collect(),
                     _ => Vec::new(),
                 });
@@ -383,12 +366,16 @@ struct PathRules<'a> {
     /// The position in `rules` of each policy rule (`usize::MAX` if not a
     /// file, http or net rule).
     at: Vec<usize>,
-    /// The rules by key and names before the first wildcard.
+    /// The rules by key and names before the first wildcard, highest tier
+    /// first.
     exact: FxHashMap<u64, Vec<usize>>,
     /// The rules by key and each leading part of their names before the
-    /// first wildcard.
+    /// first wildcard, highest tier first.
     within: FxHashMap<u64, Vec<usize>>,
     hasher: FxBuild,
+    /// The number of rules the indices have given.
+    #[cfg(test)]
+    visits: std::cell::Cell<usize>,
 }
 
 impl<'a> PathRules<'a> {
@@ -399,6 +386,8 @@ impl<'a> PathRules<'a> {
             exact: Default::default(),
             within: Default::default(),
             hasher: FxBuild::default(),
+            #[cfg(test)]
+            visits: Default::default(),
         };
         for (index, rule) in rules.iter().enumerate() {
             let Some(rule) = PathRule::new(index, rule, deny_private) else { continue };
@@ -414,6 +403,9 @@ impl<'a> PathRules<'a> {
             paths.at[index] = at;
             paths.rules.push(rule);
         }
+        for bucket in paths.exact.values_mut().chain(paths.within.values_mut()) {
+            bucket.sort_by_key(|&at| std::cmp::Reverse(paths.rules[at].rank.tier));
+        }
         paths
     }
 
@@ -421,9 +413,19 @@ impl<'a> PathRules<'a> {
         self.rules.get(self.at[index])
     }
 
-    /// The rules indexed in `map` by `key` and the names hashed as `h`.
-    fn lookup<'b>(&'b self, map: &'b FxHashMap<u64, Vec<usize>>, key: u64, h: u64) -> impl Iterator<Item = &'b PathRule<'a>> {
-        map.get(&self.hasher.hash_one((key, h))).into_iter().flatten().map(|&at| &self.rules[at])
+    /// The rules of at least tier `min_tier` indexed in `map` by `key` and
+    /// the names hashed as `h`.
+    fn lookup<'b>(
+        &'b self,
+        map: &'b FxHashMap<u64, Vec<usize>>,
+        key: u64,
+        h: u64,
+        min_tier: u32,
+    ) -> impl Iterator<Item = &'b PathRule<'a>> {
+        let found = map.get(&self.hasher.hash_one((key, h))).into_iter().flatten().map(|&at| &self.rules[at]);
+        #[cfg(test)]
+        let found = found.inspect(|_| self.visits.set(self.visits.get() + 1));
+        found.take_while(move |r| r.rank.tier >= min_tier)
     }
 
     fn hash_keys(&self, keys: Vec<Key>) -> Vec<u64> {
@@ -440,20 +442,41 @@ impl<'a> PathRules<'a> {
     /// The rules that the index gives as candidates for [`PathRules::broader`].
     fn maybe_broader<'b>(&'b self, i: &'b PathRule<'a>) -> impl Iterator<Item = &'b PathRule<'a>> {
         let keys = self.hash_keys(i.broader_keys());
-        keys.into_iter().flat_map(move |key| i.prefixes.iter().flat_map(move |&h| self.lookup(&self.exact, key, h)))
+        keys.into_iter().flat_map(move |key| i.prefixes.iter().flat_map(move |&h| self.lookup(&self.exact, key, h, 0)))
     }
 
-    /// The rules other than `copies` that decide the other way and may
-    /// match a request `i` matches (or one for a path below it, if they rank
-    /// below `i`). Only the rules whose names before the first wildcard
-    /// begin those of `i`, or are the start of them, may do so.
-    fn opposed<'b>(&'b self, i: &'b PathRule<'a>, copies: &'b [usize]) -> impl Iterator<Item = &'b PathRule<'a>> {
+    /// The rules of at least tier `min_tier`, other than `copies`, that
+    /// decide the other way and may match a request `i` matches (or one for
+    /// a path below it, if they rank below `i`). Only the rules whose names
+    /// before the first wildcard begin those of `i`, or are the start of
+    /// them, may do so.
+    fn opposed<'b>(&'b self, i: &'b PathRule<'a>, copies: &'b [usize], min_tier: u32) -> impl Iterator<Item = &'b PathRule<'a>> {
         let (&last, above) = i.prefixes.split_last().expect("the empty prefix");
         let found = self.hash_keys(i.related_keys()).into_iter().flat_map(move |key| {
-            let above = above.iter().flat_map(move |&h| self.lookup(&self.exact, key, h));
-            above.chain(self.lookup(&self.within, key, last))
+            let above = above.iter().flat_map(move |&h| self.lookup(&self.exact, key, h, min_tier));
+            above.chain(self.lookup(&self.within, key, last, min_tier))
         });
         found.filter(|k| k.allow != i.allow && !copies.contains(&k.index) && i.may_meet(k, k.rank.tier < i.rank.tier))
+    }
+
+    /// The rules that show that `i` is not needed, one for each kind of
+    /// request it decides, and whether they decide the same way as `i`.
+    /// `None` if no single rule shows this for some kind of request, or if
+    /// some of these rules decide the same way and others the other way.
+    fn deciders(&self, i: &PathRule<'a>, copies: &[usize]) -> Option<(bool, Vec<usize>)> {
+        let broader = self.broader(i, copies);
+        let mut same_way = None;
+        let mut deciders = Vec::new();
+        for op in i.ops() {
+            let j = self.decider(i, op, &broader, copies)?;
+            if *same_way.get_or_insert(j.allow == i.allow) != (j.allow == i.allow) {
+                return None;
+            }
+            deciders.push(j.index);
+        }
+        deciders.sort_unstable();
+        deciders.dedup();
+        Some((same_way?, deciders))
     }
 
     /// A rule that shows that `i` is not needed for requests of kind `op`:
@@ -465,7 +488,8 @@ impl<'a> PathRules<'a> {
     /// Where `i` decides a request for a path below a path `y` that `i`
     /// matches, `i` also decides the request for `y`, and every rule of the
     /// same tier as `i` ranks the same for both paths. So for such rules
-    /// only the paths `i` matches need to be considered.
+    /// only the paths `i` matches need to be considered. Rules of a lower
+    /// tier than a broader rule rank below it everywhere.
     fn decider<'b>(&'b self, i: &'b PathRule<'a>, op: Op, broader: &[&'b PathRule<'a>], copies: &'b [usize]) -> Option<&'b PathRule<'a>> {
         let broader = broader.iter().copied().filter(|j| j.decides_all(op));
         let instead = broader.clone().filter(|j| j.covers(i, false) && j.outranks(i)).max_by_key(|j| j.rank());
@@ -474,7 +498,7 @@ impl<'a> PathRules<'a> {
         }
         let agree = broader.filter(|j| j.allow == i.allow);
         agree
-            .filter(|j| self.opposed(i, copies).all(|k| !k.may_decide(op) || never_between(i, j, k)))
+            .filter(|j| self.opposed(i, copies, j.rank.tier).all(|k| !k.may_decide(op) || never_between(i, j, k)))
             .max_by_key(|j| (j.counts.0, j.rank()))
     }
 }
@@ -766,6 +790,34 @@ mod tests {
             lint("allow net 10.0.0.0/8\nallow http 10.0.0.1/x"),
             ["2:12: warning[redundant-rule]: line 1 (`10.0.0.0/8`) already allows this"]
         );
+    }
+
+    /// The rules the indices give to find which rules are not needed, for
+    /// each rule of a policy.
+    fn visits(text: &str) -> usize {
+        let rules = PolicyFile::parse(text, Path::new("/base"), None).unwrap().rules;
+        let paths = PathRules::new(rules.rules(), true);
+        for r in &paths.rules {
+            paths.deciders(r, &[r.index]);
+        }
+        paths.visits.get()
+    }
+
+    /// Finding which net rules are not needed takes work in proportion to
+    /// the number of rules, where http denies rank between a broad and a
+    /// narrow net rule (`*`, `*.example.com/aN`, `hN.example.com`), or below
+    /// both (`*.com/aN` under `*.example.com`).
+    #[test]
+    fn net_rules_are_compared_with_few_others() {
+        let net = |n: usize, broad: &str, deny: &str| {
+            let allow: String = (0..n).map(|i| format!("allow net h{i}.example.com\n")).collect();
+            let deny: String = (0..n).map(|i| format!("deny http {deny}/a{i}\n")).collect();
+            visits(&format!("allow net {broad}\n{allow}{deny}"))
+        };
+        for (broad, deny) in [("*", "*.example.com"), ("*.example.com", "*.com")] {
+            let (small, large) = (net(100, broad, deny), net(400, broad, deny));
+            assert!(large < 6 * small, "{broad} and {deny}: {small} visits for 100 rules, {large} for 400");
+        }
     }
 
     /// A policy line for paths under `/r` or for hosts that [`probes`] name.

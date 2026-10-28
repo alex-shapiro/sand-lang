@@ -98,12 +98,11 @@ Follow-up work, roughly in priority order.
       `-D warnings` in CI.
 - [ ] Report `env` and `listen` policy rules that broader rules already
       decide. The linter reports only exact repeats of these rules.
-- [ ] Make the policy linter near-linear when many rules of the other verb lie
-      below a broad rule: with 20,000 `allow read /r/hN`, 5,000 `deny
-      /r/*/aN` and `allow read /r`, `sand lint` takes 5 s, because it compares
-      each narrow rule with each deny rule. With 20,000 `allow net
-      hN.example.com`, 2,000 `deny http *.example.com/aN` and `allow net *`,
-      it takes 1.2 s.
+- [ ] Make the policy linter near-linear when many rules of the other verb
+      rank above the narrow rules that a broad rule covers: with 20,000
+      `allow read /r/hN`, 5,000 `deny /r/*/aN` and `allow read /r`, `sand
+      lint` takes 5 s, because it compares each narrow rule with each deny
+      rule.
 - [ ] Stop `sand lint` (and other commands that print) from panicking when
       stdout closes early (`sand lint a.policy | head`).
 
