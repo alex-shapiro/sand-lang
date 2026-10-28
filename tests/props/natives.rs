@@ -68,7 +68,7 @@ fn outer() -> impl Strategy<Value = Outer> {
 
 fn inner_lit(x: &Inner) -> String {
     let tags: Vec<String> = x.tags.iter().map(|t| str_lit(t)).collect();
-    format!("conv.Inner {{ n: {}, tags: [{}] }}", int_lit(x.n), tags.join(", "))
+    format!("conv.Inner(n: {}, tags: [{}])", int_lit(x.n), tags.join(", "))
 }
 
 fn outer_lit(x: &Outer) -> String {
@@ -78,7 +78,7 @@ fn outer_lit(x: &Outer) -> String {
     let scores = if scores.is_empty() { "[:]".to_string() } else { format!("[{}]", scores.join(", ")) };
     let b = x.pair.1.as_ref().map_or("None".to_string(), |s| format!("Some({})", str_lit(s)));
     format!(
-        "conv.Outer {{ name: {}, flag: {}, ratio: ({:?}), inner: {}, items: [{}], maybe: {maybe}, scores: {scores}, pair: ({}, {b}), count: {} }}",
+        "conv.Outer(name: {}, flag: {}, ratio: ({:?}), inner: {}, items: [{}], maybe: {maybe}, scores: {scores}, pair: ({}, {b}), count: {})",
         str_lit(&x.name),
         x.flag,
         x.ratio,
@@ -103,7 +103,7 @@ fn tree() -> impl Strategy<Value = Tree> {
 
 fn tree_lit(t: &Tree) -> String {
     let children: Vec<String> = t.children.iter().map(tree_lit).collect();
-    format!("tree.Tree {{ n: {}, children: [{}] }}", int_lit(t.n), children.join(", "))
+    format!("tree.Tree(n: {}, children: [{}])", int_lit(t.n), children.join(", "))
 }
 
 fn depth(t: &Tree) -> usize {
@@ -153,11 +153,11 @@ struct Pair {
 }
 
 const SHAPES: [(&str, &str, &str); 5] = [
-    ("dag.Fan { children: [] }", "dag.Fan { children: [a, a] }", "fan"),
-    ("dag.HashFan { children: [:] }", "dag.HashFan { children: [0: a, 1: a] }", "hash_fan"),
-    ("dag.TreeFan { children: [:] }", "dag.TreeFan { children: [\"l\": a, \"r\": a] }", "tree_fan"),
-    ("dag.Bin { left: None, right: None }", "dag.Bin { left: Some(a), right: Some(a) }", "bin"),
-    ("dag.Pair { children: None }", "dag.Pair { children: Some((a, a)) }", "pair"),
+    ("dag.Fan(children: [])", "dag.Fan(children: [a, a])", "fan"),
+    ("dag.HashFan(children: [:])", "dag.HashFan(children: [0: a, 1: a])", "hash_fan"),
+    ("dag.TreeFan(children: [:])", "dag.TreeFan(children: [\"l\": a, \"r\": a])", "tree_fan"),
+    ("dag.Bin(left: None, right: None)", "dag.Bin(left: Some(a), right: Some(a))", "bin"),
+    ("dag.Pair(children: None)", "dag.Pair(children: Some((a, a)))", "pair"),
 ];
 
 fn shared_dag(shape: usize, levels: u32, limits: Limits) -> Result<sandlang::Outcome, Error> {
@@ -216,7 +216,7 @@ proptest! {
             x
         });
         let src = format!(
-            "import tree\nlet t = {}\nprint(tree.echo(t) == t)\nvar deep = t\nfor _ in 0..{spine} {{\n    deep = tree.Tree {{ n: 0, children: [t, deep] }}\n}}\n\
+            "import tree\nlet t = {}\nprint(tree.echo(t) == t)\nvar deep = t\nfor _ in 0..{spine} {{\n    deep = tree.Tree(n: 0, children: [t, deep])\n}}\n\
              print(tree.echo(deep) == deep)",
             tree_lit(&value)
         );
@@ -251,7 +251,7 @@ proptest! {
         let build = if from_rust {
             "chain.make()".to_string()
         } else {
-            format!("var l: chain.Link? = None\nfor n in [{}] {{\n    l = Some(chain.Link {{ n, next: l }})\n}}\nl", backwards.join(", "))
+            format!("var l: chain.Link? = None\nfor n in [{}] {{\n    l = Some(chain.Link(n: n, next: l))\n}}\nl", backwards.join(", "))
         };
         let src = format!("import chain\nlet l = {{\n{build}\n}}?\nprint(chain.echo(l) == l)");
         let (r, out) = run(Config::new().module(m).gc_stress(gc_stress), &src);

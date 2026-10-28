@@ -103,8 +103,8 @@ struct Pair<T: Num> {
 
     fn sum_with(self, xs: [T]) -> T { xs.sum() + self.a + self.b }
 }
-print(Pair { a: 0.5, b: 0.25 }.sum_with([]))
-print(Pair { a: 1, b: 2 }.sum_with([3]))
+print(Pair(a: 0.5, b: 0.25).sum_with([]))
+print(Pair(a: 1, b: 2).sum_with([3]))
 --- stdout
 0.0
 3.5
@@ -165,7 +165,7 @@ struct Bag<T: Ord> {
     items: [T]
     fn biggest(self) -> T? { self.items.max() }
 }
-print(Bag { items: [4, 7, 1] }.biggest())
+print(Bag(items: [4, 7, 1]).biggest())
 --- stdout
 Some(7)
 
@@ -191,18 +191,18 @@ print(wrap("z", 2))
 === a recursive type does not implement a trait that a component does not implement
 struct A { b: B?, x: float }
 struct B { a: A? }
-let ok = B { a: None } == B { a: None }
-let bs = [B { a: None }: 1]
+let ok = B(a: None) == B(a: None)
+let bs = [B(a: None): 1]
 --- error
 4: B does not implement `Hash`
 
 === built-in traits of generic types depend on their arguments
 struct Pair<K, V> { k: K, v: V }
 struct Cell<T> { var t: T }
-let ok = [Pair { k: 1, v: "x" }: 1]
-let floats = [Pair { k: 1.5, v: "x" }: 1]
-let cells = [Cell { t: 1 }: 1]
-print(Pair { k: 1.5, v: [2] } == Pair { k: 1.5, v: [2] })
+let ok = [Pair(k: 1, v: "x"): 1]
+let floats = [Pair(k: 1.5, v: "x"): 1]
+let cells = [Cell(t: 1): 1]
+print(Pair(k: 1.5, v: [2]) == Pair(k: 1.5, v: [2]))
 --- error
 4: Pair<float, str> does not implement `Hash`
 5: Cell<int> does not implement `Hash`
@@ -225,13 +225,13 @@ struct Row { var n: int }
 struct Wrap<T> { items: [T] }
 struct Pair<T> { both: (T, T) }
 fn keys<T>(w: Wrap<T>) -> Set<Wrap<T>> {
-    set([w])
+    Set([w])
 }
 fn pairs<T>(p: Pair<T>) -> Set<Pair<T>> {
-    set([p])
+    Set([p])
 }
-let s = set([Row { n: 1 }])
-let t = set([[1.0]])
+let s = Set([Row(n: 1)])
+let t = Set([[1.0]])
 --- error
 5: Wrap<T> does not implement `Hash` because field `items` of `Wrap<T>` has type `[T]`
 8: Pair<T> does not implement `Hash` because field `both` of `Pair<T>` has type `(T, T)`; add `T: Hash`

@@ -80,16 +80,16 @@ pub fn escape_bytes(b: &[u8], out: &mut String) {
 }
 
 /// Pending output of `render`.
-enum Work {
+enum Work<'p> {
     Val(Value, usize, bool),
     Text(&'static str),
-    /// Elements `i..` of a list or the fields of a tuple, struct or variant
-    /// (with field names for structs), then `close`.
+    /// Remaining elements `i..` of a list, tuple, struct, or variant (prefixing
+    /// each element with `names[i]` if present), followed by `close`.
     Seq {
         obj: Value,
         i: usize,
         depth: usize,
-        names: Option<u32>,
+        names: Option<&'p [String]>,
         close: &'static str,
     },
     /// Entries `i..` of a map (`key: value`) or set, then `close`.
@@ -130,8 +130,8 @@ pub fn render_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Valu
                 if i > 0 {
                     out.push_str(", ");
                 }
-                if let Some(def) = names {
-                    out.push_str(&prog.types[def as usize].fields[i]);
+                if let Some(name) = names.and_then(|ns| ns.get(i)) {
+                    out.push_str(name);
                     out.push_str(": ");
                 }
                 work.push(Work::Seq { obj, i: i + 1, depth, names, close });
@@ -186,8 +186,13 @@ pub fn render_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Valu
                     | Value::VTag(..)
                     | Value::VObj(..) => {
                         let (id, payload) = v.as_inline_variant().unwrap_or((u32::MAX, Value::Unit));
-                        out.push_str(prog.variants.get(id as usize).map(|v| v.name.as_str()).unwrap_or("?"));
+                        let variant = prog.variants.get(id as usize);
+                        out.push_str(variant.map_or("?", |v| v.name.as_str()));
                         out.push('(');
+                        if let Some([name]) = variant.and_then(|v| v.field_names.as_deref()) {
+                            out.push_str(name);
+                            out.push_str(": ");
+                        }
                         work.push(Work::Text(")"));
                         work.push(Work::Val(payload, depth + 1, true));
                     }
@@ -226,24 +231,25 @@ pub fn render_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Valu
                             Obj::Struct(def, fields) => {
                                 let rt = &prog.types[*def as usize];
                                 if Some(*def) == error_def && !debug {
-                                    let kind = heap.str(fields[0]);
-                                    let msg = heap.str(fields[1]);
+                                    let msg = heap.str(fields[0]);
+                                    let kind = heap.str(fields[1]);
                                     scratch.check(heap, out.len() + kind.len() + msg.len())?;
                                     let _ = write!(out, "{kind}: {msg}");
                                     continue;
                                 }
                                 if fields.is_empty() {
-                                    let _ = write!(out, "{} {{}}", rt.name);
+                                    let _ = write!(out, "{}()", rt.name);
                                     continue;
                                 }
-                                let _ = write!(out, "{} {{ ", rt.name);
-                                work.push(Work::Seq { obj: v, i: 0, depth: d, names: Some(*def), close: " }" });
+                                let _ = write!(out, "{}(", rt.name);
+                                work.push(Work::Seq { obj: v, i: 0, depth: d, names: Some(&rt.fields), close: ")" });
                             }
                             Obj::Variant(id, _) => {
-                                let name = prog.variants.get(*id as usize).map(|v| v.name.as_str()).unwrap_or_default();
-                                out.push_str(name);
+                                let variant = prog.variants.get(*id as usize);
+                                out.push_str(variant.map_or("", |v| v.name.as_str()));
                                 out.push('(');
-                                work.push(Work::Seq { obj: v, i: 0, depth: d, names: None, close: ")" });
+                                let names = variant.and_then(|v| v.field_names.as_deref());
+                                work.push(Work::Seq { obj: v, i: 0, depth: d, names, close: ")" });
                             }
                             Obj::Closure(p, _) => {
                                 let name = &prog.protos[*p as usize].name;

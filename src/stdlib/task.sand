@@ -1,4 +1,4 @@
-//! Task coordination, timers, and channels (always in scope as `task`).
+//! Task coordination and timers (always in scope as `task`).
 
 /// Suspends the calling task for duration `d`.
 pub native fn sleep(d: duration)
@@ -25,6 +25,3 @@ pub fn timeout<T>(d: duration, f: fn() -> T) -> T? {
     }
     race([work, timer])
 }
-
-/// Creates a message channel (`capacity == 0` creates an unbounded channel).
-pub native fn channel<T>(capacity: int = 0) -> Channel<T>

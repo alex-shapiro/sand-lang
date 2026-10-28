@@ -53,13 +53,13 @@ true
 
 === independent rngs
 import random
-let r1 = random.rng(99)
-let r2 = random.rng(99)
+let r1 = random.Rng(99)
+let r2 = random.Rng(99)
 let a = [r1.int(0, 100) for _ in 0..10]
 let b = [r2.int(0, 100) for _ in 0..10]
 print(a == b)
-let r3 = random.rng(100)
-print([r3.int(0, 1000000) for _ in 0..10] != [random.rng(99).int(0, 1000000) for _ in 0..10])
+let r3 = random.Rng(100)
+print([r3.int(0, 1000000) for _ in 0..10] != [random.Rng(99).int(0, 1000000) for _ in 0..10])
 print(r1.float() < 1.0)
 --- stdout
 true
@@ -68,7 +68,7 @@ true
 
 === known sequence for a seed
 import random
-let r = random.rng(1)
+let r = random.Rng(1)
 print([r.int(0, 10) for _ in 0..10].len())
 --- stdout
 10

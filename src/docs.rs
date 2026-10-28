@@ -30,7 +30,8 @@ pub struct ItemDoc {
     /// Formatted Sand declaration (`enum Json`, `fn parse(text: str) -> Result<Json, Error>`).
     pub decl: String,
     pub doc: Option<String>,
-    /// Variants, fields, and methods of a type, or methods of a trait.
+    /// Constructor (`init`), variants, fields, and methods of a type, or
+    /// methods of a trait.
     pub members: Vec<MemberDoc>,
     /// Implemented traits (if this item is a type) or implementing types (if
     /// this item is a trait).
@@ -50,18 +51,20 @@ pub enum ItemKind {
     Value,
 }
 
-/// Documentation for a variant, field, or method.
+/// Documentation for a variant, field, method, or `init` of a type.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemberDoc {
     pub kind: MemberKind,
     pub name: String,
-    /// Formatted Sand declaration (`Circle(radius: float)`, `var count: int = 0`, `fn len(self) -> int`).
+    /// Formatted Sand declaration (`Regex(pattern: str) -> Result<Regex>`, `Circle(radius: float)`, `var count: int = 0`, `fn len(self) -> int`).
     pub decl: String,
     pub doc: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MemberKind {
+    /// Type constructor (`init`), formatted as `T(params) -> T`.
+    Construct,
     Variant,
     Field,
     Method,

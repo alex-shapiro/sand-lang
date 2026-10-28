@@ -328,16 +328,16 @@ fn hostile_runtime_programs_are_contained() {
         // Unbounded task spawning.
         "while true { spawn task.sleep(1h) }",
         // Unbounded channel growth.
-        "let ch = task.channel()\nwhile true { ch.send([1, 2, 3]) }",
+        "let ch = Channel()\nwhile true { ch.send([1, 2, 3]) }",
         // Huge repeat.
         "print(\"ab\".repeat(9223372036854775807).len())",
         "print([0; 1000000000].len())",
         // Map growth.
         "let m = [:]\nvar i = 0\nwhile true { m[i] = i.to_str()\n i += 1 }",
         // Cyclic structures.
-        "struct N { var next: N? }\nlet a = N { next: None }\na.next = Some(a)\nprint(a == a)\nprint(a)",
+        "struct N { var next: N? }\nlet a = N(next: None)\na.next = Some(a)\nprint(a == a)\nprint(a)",
         // Regex blow-up attempts.
-        "import regex\nprint(regex.new(\"(a{1000}){1000}\").is_err())",
+        "import regex\nprint(regex.Regex(\"(a{1000}){1000}\").is_err())",
         // JSON bombs.
         "import json\nlet t = \"[\".repeat(100000)\nprint(json.parse(t).is_err())",
         // Formatting huge widths.
@@ -365,7 +365,7 @@ fn random_json_and_uri_inputs() {
     }
     let lits: Vec<String> = cases.iter().map(|s| format!("{s:?}")).collect();
     let src = format!(
-        "import json\nimport uri\nimport base64\nimport regex\nimport time\nimport uuid\nvar n = 0\nfor s in [{}] {{\n    if json.parse(s).is_ok() {{ n += 1 }}\n    let typed: Result<json.Json> = json.decode(s)\n    if json.parse(s).ok() != typed.ok() {{ n -= 1000000 }}\n    if uri.parse(s).is_ok() {{ n += 1 }}\n    if base64.decode(s).is_ok() {{ n += 1 }}\n    if regex.new(s).is_ok() {{ n += 1 }}\n    if time.Instant.parse(s).is_ok() {{ n += 1 }}\n    if time.ZonedDateTime.parse(s).is_ok() {{ n += 1 }}\n    if time.PlainDate.parse(s).is_ok() {{ n += 1 }}\n    if time.Span.parse(s).is_ok() {{ n += 1 }}\n    if time.zone(s).is_ok() {{ n += 1 }}\n    if uuid.parse(s).is_ok() {{ n += 1 }}\n    let _ = uri.decode_component(s)\n    let _ = s.parse_float()\n}}\nprint(n >= 0)\n",
+        "import json\nimport uri\nimport base64\nimport regex\nimport time\nimport uuid\nvar n = 0\nfor s in [{}] {{\n    if json.parse(s).is_ok() {{ n += 1 }}\n    let typed: Result<json.Json> = json.decode(s)\n    if json.parse(s).ok() != typed.ok() {{ n -= 1000000 }}\n    if uri.parse(s).is_ok() {{ n += 1 }}\n    if base64.decode(s).is_ok() {{ n += 1 }}\n    if regex.Regex(s).is_ok() {{ n += 1 }}\n    if time.Instant.parse(s).is_ok() {{ n += 1 }}\n    if time.ZonedDateTime.parse(s).is_ok() {{ n += 1 }}\n    if time.PlainDate.parse(s).is_ok() {{ n += 1 }}\n    if time.Span.parse(s).is_ok() {{ n += 1 }}\n    if time.TimeZone(s).is_ok() {{ n += 1 }}\n    if uuid.parse(s).is_ok() {{ n += 1 }}\n    let _ = uri.decode_component(s)\n    let _ = s.parse_float()\n}}\nprint(n >= 0)\n",
         lits.join(", ")
     );
     let out = MemorySink::new();
@@ -418,14 +418,14 @@ fn hostile_native_work_is_contained() {
         format!("{dag}print(\"\\(a:?)\")"),
         format!("{dag}print([a, b, a, b].sorted().len())"),
         format!("{dag}print([a].contains(b))"),
-        format!("{dag}print(set([a]).len())"),
+        format!("{dag}print(Set([a]).len())"),
         format!("{dag}let m = [a: 1]\nprint(m.len())"),
         format!("import json\n{dag}print(json.encode(a).len())"),
         "let s = \"x\".repeat(20000000)\nvar n = 0\nwhile true { n += s.len() + s.find(\"y\").unwrap_or(0) }".into(),
         "let s = \"x\".repeat(20000000)\nlet m = [s: 1]\nwhile true { m.contains(s) }".into(),
         "let xs = (0..1000000).to_list()\nwhile true { xs.sorted() }".into(),
         "import crypto\nlet b = \"x\".repeat(20000000).bytes()\nwhile true { crypto.sha256(b) }".into(),
-        "import regex\nlet s = \"a\".repeat(20000000)\nlet r = regex.new(\"a\")?\nwhile true { r.find_all(s) }".into(),
+        "import regex\nlet s = \"a\".repeat(20000000)\nlet r = regex.Regex(\"a\")?\nwhile true { r.find_all(s) }".into(),
         "let s = \"ab,\".repeat(5000000)\nwhile true { s.split(\",\") }".into(),
     ];
     for src in &programs {
@@ -450,7 +450,7 @@ fn hostile_compile_inputs_are_contained() {
     }
     let mut chain = String::from("import json\n");
     for i in 0..20_000 {
-        chain += &format!("struct S{i} {{ next: S{} = S{} {{}} }}\n", i + 1, i + 1);
+        chain += &format!("struct S{i} {{ next: S{} = S{}() }}\n", i + 1, i + 1);
     }
     chain += "struct S20000 { v: int = 1 }\nlet s: Result<S0> = json.decode(\"{}\")\nprint(s.is_ok())\n";
     let programs = [

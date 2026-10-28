@@ -91,6 +91,10 @@ Follow-up work, roughly in priority order.
 
 ### Tooling
 
+- [ ] Make `sand fmt` idempotent when a multi-line expression contains line
+      comments (for example, `//r /\nf.7\t.// \n7/e\nf.//as\nf` shifts comments
+      on each formatting pass).
+
 - [ ] Fix broken intra-doc links to private items and run `cargo doc` with
       `-D warnings` in CI.
 - [ ] Compare `http` policy rules with wildcards in hosts or paths using the
@@ -104,14 +108,14 @@ Follow-up work, roughly in priority order.
       unterminated string) and remove the follow-on expectations from the spec
       tests.
 - [ ] Recover at the next `match` arm after an invalid pattern
-      (`1..5 =>`, `Rect(..) =>`) instead of reporting a spurious
+      (`1..5 =>`, `Point { x } =>`) instead of reporting a spurious
       `unexpected }` at the end of the `match`.
 - [ ] Suggest an enum in addition to a struct or tuple for mixed-type list
       literals (`[1, "a"]`).
 - [ ] Include the `<top level>` stack frame if a failing `assert` is the
       final top-level statement.
 - [ ] Deduplicate missing trait diagnostics within a single expression (for
-      example, `set([need(x), x])` with `x: float?` and `need<T: Hash>` reports
+      example, `Set([need(x), x])` with `x: float?` and `need<T: Hash>` reports
       `float? does not implement Hash` twice at overlapping spans).
 - [ ] Display the target type arguments for specialized `impl` blocks in the
       `Implements` section of `help` (for example, `help(List)` currently lists
@@ -156,19 +160,18 @@ Follow-up work, roughly in priority order.
 - [ ] Evaluate replacing string error kinds (`"not_found"`, `"invalid"`) with
       an enum.
 
-- [ ] **Construct all types with `T(...)`.** Replace struct literals with
-      named-argument calls (`Point(x: 1.0, y: 2.0)`, with defaults and
-      `..base`) and struct patterns with `Point(x, ..)`. Allow a type to
-      declare an `init` method (or a native `init` for an opaque type) that
-      replaces field-by-field construction and can return a `Result`. Inside
-      `init`, `Self(...)` performs field-by-field construction. Remove
-      module-level constructor functions (`time.date`, `regex.new`,
-      `random.rng`, `task.channel`, `set`, `error`) and the parser restriction
-      on struct literals in `if`, `while`, `match`, and `for` headers. Keep
-      static factory methods (`T.parse`, `T.from_x`).
-- [ ] Support `Rect(..)` and `Rect(w: w, h: h)` in enum variant patterns to
-      match variant construction (`Shape.Rect(w: 2.0, h: 3.0)`), as part of
-      the `T(...)` item above.
+- [ ] Support `Decode` for structs that declare `init` by calling `init` with
+      the JSON object's members as named arguments:
+      - Propagate `Err` results from deferred `Decoded::Pending` thunks in
+        `src/stdlib/json.rs` so that a fallible `init` fails `json.decode`.
+      - Pass trait dictionaries to `Decoded::Pending` thunks so that a generic
+        `init` can call trait methods on its type parameters.
+      - Execute `init` before inserting decoded structs into a `Set`, as
+        `json.decode` already does for computed field defaults.
+      - Verify that `init` is visible at the `json.decode` call site.
+- [ ] Preserve default parameter values in function types so that calls through
+      function values can omit defaulted arguments (for example,
+      `["a"].map(Error)`).
 - [ ] Reject `import` statements after non-import items or statements, as
       specified in §3.1.
 - [ ] Support trait objects (`dyn Trait`), associated types and constants, and

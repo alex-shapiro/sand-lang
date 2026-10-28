@@ -72,24 +72,27 @@ literals.
 //! documentation comment for the enclosing module (only before the first item)
 ```
 
-`help` shows doc comments (§12.15). A doc comment on an `extend` block
-documents a built-in type.
+`help` displays doc comments (§12.15). A doc comment on an `extend` block
+documents a built-in type. A `///` comment must appear on its own line before
+the item it documents; a `///` comment after code on the same line is a regular
+line comment. The lexer strips trailing whitespace from doc comment lines. A
+`//!` comment after the first item is a syntax error.
 
 ### 2.3 Line termination
 
 Newlines are significant. The lexer converts a newline into a statement
-terminator (`;`) when the last token on the line is one of:
+terminator (`;`) if the last token on the line is:
 
-- an identifier, keyword `self`, `Self`, `true`, `false`, `break`, `continue`, `return`
+- an identifier, a keyword after `.` (`x.or`), or the keyword `self`, `Self`, `true`, `false`, `break`, `continue` or `return`
 - a literal (number, duration, string, bytes)
 - a closing `)`, `]` or `}`
 - the postfix operator `?`
 - `..` or `..=`, which may end an open range (`let rest = 1..`)
 
 and the newline is **not** inside a `(...)` or `[...]` group. Inside `{...}`
-newlines are significant again, even when nested inside parentheses.
+newlines are significant again, even inside parentheses.
 
-No terminator is inserted if the next non-blank line starts with `.`,
+The lexer does not insert a terminator if the next non-blank line starts with `.`,
 `else`, `and`, `or`, `=>`, a binary operator, or a `-` followed by whitespace
 (see below). This permits chains such as:
 
@@ -270,7 +273,7 @@ importing a name that is not exported is an error. Qualified names are written
 `var` declarations, struct fields, and methods in `struct`, `enum`, and
 `extend` blocks. Other modules cannot reference a private item, access or match
 a private field, call a private method, or construct a struct that has a
-private field (through a struct literal or `json.decode`). Value formatting and
+private field (with `T(...)` or `json.decode`). Value formatting and
 `json.encode` include all struct fields regardless of visibility. Enum variants
 and the methods of a public trait are always public; `impl` blocks do not have
 visibility modifiers (§4.9). Importing modules can read a `pub var`, but only
@@ -307,7 +310,7 @@ fn greet(name: str, greeting: str = "Hello") {
   clause (`fn sum(self) -> T where T: Num`) also specifies trait bounds, and
   can constrain the type parameters of an enclosing generic `extend` block,
   struct, or enum for that method.
-- A type parameter marked `reflect` (`fn load<reflect T: Encode>(text: str)
+- A type parameter marked `reflect` (`fn load<reflect T: Decode>(text: str)
   -> Result<[T]>`) receives a runtime type description of its type argument. A
   function can forward `T` (or a composite type containing `T`, such as `[T]`)
   to another `reflect` type parameter, such as `json.decode<T>`. Every type
@@ -334,21 +337,41 @@ pub struct Point {
         (self.x * self.x + self.y * self.y).sqrt()
     }
 
-    pub fn origin() -> Point { Point { x: 0.0, y: 0.0 } }
+    pub fn origin() -> Point { Point(x: 0.0, y: 0.0) }
 }
 
 struct Counter {
     name: str
     pub var count: int = 0
 }
+
+pub struct Port {
+    n: int
+
+    /// Fails if `n` is not a TCP port number.
+    pub fn init(n: int) -> Result<Port> {
+        if n < 1 or n > 65535 { return Err(Error("no such port: \(n)", kind: "invalid")) }
+        Ok(Self(n: n))
+    }
+}
 ```
 
 - Fields are separated by newlines or commas and are immutable unless
-  declared `var`. If a struct literal omits a field, the engine evaluates the
-  field's default expression. A field default can use traits without methods
-  from the struct's type parameter bounds (`s: Set<T> = set([])` with
+  declared `var`. If a construction (§6.4) omits a field, the engine evaluates
+  the field's default expression. A field default can use traits without
+  methods from the struct's type parameter bounds (`s: Set<T> = Set([])` with
   `T: Hash`), but cannot use traits that declare methods (§4.9). Fields and
   methods are private to the declaring module unless marked `pub` (§3.3).
+- A struct can declare a static method `init` that returns `Self` or
+  `Result<Self, E>`. If a struct declares `init`, `T(args)` calls `init` and
+  returns its result (for example, `Port(80)` has type `Result<Port>`). Inside
+  `init`, `T(args)` and `Self(args)` construct the struct field by field. Native
+  modules can also declare `native fn init` on built-in or opaque types (such as
+  `Set([1, 2])` and `regex.Regex(pattern)`). Enums and traits cannot declare
+  `init`, and expressions cannot reference `T.init` as a member. `init` must
+  apply to all instances of the type: an `extend` block that declares `init`
+  cannot specialize the target's type parameters, and `init` cannot add trait
+  bounds beyond those declared on the type.
 - Methods are `fn` declarations inside the body. A method whose first parameter
   is `self` (no annotation) is an instance method, called as `value.method(...)`.
   Other methods are static, called as `Type.method(...)`.
@@ -380,11 +403,12 @@ enum Tree<T> {
 ```
 
 - Variants are separated by newlines or commas. A variant has zero or more
-  payload fields; payload fields may be named (`radius: float`) or positional
+  payload fields, which are all named (`radius: float`) or all positional
   (`float`).
 - Variants are referred to as `Enum.Variant` in expressions, e.g.
-  `Shape.Circle(1.0)` or `Shape.Circle(radius: 1.0)`. In patterns the enum
-  prefix may be omitted when the scrutinee type is known.
+  `Shape.Circle(1.0)` or `Shape.Circle(radius: 1.0)`. In a pattern, the enum
+  prefix is optional if the scrutinee type is known, and a sub-pattern can
+  match a named payload field by name: `Rect(h: height, ..)`.
 - `Option` and `Result` variants (`Some`, `None`, `Ok`, `Err`) are always in
   scope unqualified.
 - Enum values are immutable.
@@ -393,7 +417,7 @@ enum Tree<T> {
 
 ```sand
 extend Point {
-    fn scale(self, k: float) -> Point { Point { x: self.x * k, y: self.y * k } }
+    fn scale(self, k: float) -> Point { Point(x: self.x * k, y: self.y * k) }
 }
 ```
 
@@ -583,7 +607,7 @@ types require of its type parameters: given `struct Bag<T: Hash>`,
 `struct Outer<U> { b: Bag<U> }` infers `U: Hash`, and `help(Outer)` displays
 `struct Outer<U: Hash>`. Because `Set` elements and map keys require `Hash`, a
 field of type `Set<[int]>` is rejected at declaration time. The type checker
-verifies type constructor bounds on struct literals, enum variants, method
+verifies type constructor bounds on constructions, enum variants, method
 calls, struct fields, enum payloads, and `reflect` type arguments; other type
 annotations are not checked.
 
@@ -681,7 +705,7 @@ The prelude defines:
 ```sand
 pub enum Option<T> { Some(T), None }
 pub enum Result<T, E = Error> { Ok(T), Err(E) }
-pub struct Error { pub kind: str, pub message: str }
+pub struct Error { pub message: str, pub kind: str = "error" }
 ```
 
 `Error.kind` is a short machine-readable tag. Standard kinds are:
@@ -692,9 +716,9 @@ The prelude also defines the lazy iterator struct `Iter<T>` and the trait
 `Iterator<T>` (§12.13).
 
 Standard library and host modules define additional nominal types (such as
-`json.Json`, `http.Response`, and `net.Conn`). An _opaque_ type is bound to a
-registered Rust type (§16.3); it does not have fields, cannot be constructed
-with a struct literal, and can only be used through functions and methods. Opaque
+`json.Json`, `http.Response`, and `net.Conn`). An _opaque_ type binds a
+registered Rust type (§16.3); it does not have fields, and only its `init`
+(§4.2) or functions and methods in its module can construct its values. Opaque
 value types (such as `time.PlainDate`) are immutable, compare and hash by
 value, can implement `Ord`, and format as text (`2024-02-29`). Opaque object
 types (such as `net.Conn`) compare by identity and format as `<Type>`; tasks
@@ -708,7 +732,7 @@ error. Use `x.to_float()` or `f.to_int()`.
 
 ### 5.6 Built-in traits
 
-The prelude declares five built-in traits that govern equality, ordering,
+The prelude declares six built-in traits that govern equality, ordering,
 hashing, JSON serialization, and numeric arithmetic:
 
 | Trait    | Supertraits    | Implemented by                                                                                                                                                                              |
@@ -717,17 +741,19 @@ hashing, JSON serialization, and numeric arithmetic:
 | `Ord`    | `Eq`           | `int`, `float`, `bool`, `str`, `bytes`, `duration`, `()`, ordered value types (§5.4), and tuples, lists, `Option`, structs and enums all of whose components are `Ord`                      |
 | `Hash`   | `Eq`           | `int`, `bool`, `str`, `bytes`, `duration`, `()`, `Range`, value types (§5.4), and tuples, `Option`, `Result`, enums and structs **without `var` fields** all of whose components are `Hash` |
 | `Encode` |                | every type except function types, `Task`, `Channel`, native objects (§5.4), and types containing them                                                                                       |
+| `Decode` | `Encode`       | every `Encode` type except structs that declare `init` (§4.2) and types containing them                                                                                                     |
 | `Num`    | `Ord + Encode` | `int`, `float`                                                                                                                                                                              |
 
-The compiler automatically derives `Eq`, `Ord`, `Hash`, and `Encode` from a
-type's components: a struct or enum implements a derived trait if every
+The compiler automatically derives `Eq`, `Ord`, `Hash`, `Encode`, and `Decode`
+from a type's components: a struct or enum implements a derived trait if every
 field and variant payload implements it, and a generic type requires the trait
 on each type parameter used by those components. For example,
 `struct Pair<A, B> { a: A, b: B }` implements `Hash` if `A` and `B` implement
 `Hash`, and `help(Pair)` displays `Hash where A: Hash, B: Hash`. `==` and `!=`
 require `Eq`, `<`, `<=`, `>`, and `>=` require `Ord`, map keys and set elements
-require `Hash`, `json.encode` requires `Encode`, and arithmetic operators on
-type parameters require `Num`. Only the prelude implements `Num`.
+require `Hash`, `json.encode` requires `Encode`, `json.decode` requires
+`Decode`, and arithmetic operators on type parameters require `Num`. Only the
+prelude implements `Num`.
 
 Built-in traits can be used as bounds on type parameters, supertraits
 (`trait Keyed: Hash { ... }`), and `impl` blocks in the same way as
@@ -799,18 +825,28 @@ aliased). `n` must be an `int`; a negative `n` fails.
 Comprehensions may have several `for` clauses and `if` filters, evaluated left
 to right as nested loops: `[(x, y) for x in xs for y in ys if x != y]`.
 
-### 6.4 Struct literals
+### 6.4 Construction
 
 ```sand
-Point { x: 1.0, y: 2.0 }
-Point { x, y }                // field shorthand
-Point { x: 5.0, ..p }         // copy remaining fields from p
-geo.Point { x: 0.0, y: 0.0 }  // imported type
+Point(x: 1.0, y: 2.0)
+Point(1.0, 2.0)               // fields in declaration order
+Point(x: 5.0, ..p)            // copy the other fields from p
+geo.Point(x: 0.0, y: 0.0)     // imported type
+Set([1, 2])                   // a type that declares `init` (§4.2)
 ```
 
-All fields without defaults must be given (or come from `..base`). A struct
-literal is not permitted directly in the condition of `if`, `while`, `match`
-or the iterable of `for`; parenthesise it instead.
+`T(args)` constructs a value of type `T`. If `T` declares `init` (§4.2),
+`T(args)` calls `init`. Otherwise, positional arguments populate fields in
+declaration order, followed by named arguments (§6.6). A field-by-field
+construction must provide every field that does not have a default, either as
+an argument or via a trailing `..base` argument. `T(args)` cannot use `..base`
+if `T` declares `init`.
+
+Used as a value, a type name is a constructor function (for example,
+`lists.map(Set)`) that takes all `init` parameters or all struct fields in
+declaration order, ignoring defaults. `str` formats it as `<fn T>`, and stack
+traces display `init` frames as `T`. A variant with a payload can also be used
+as a function value (`xs.map(Some)`).
 
 ### 6.5 Operators
 
@@ -1149,8 +1185,9 @@ Some(p)  None         Option variants
 Ok(p)  Err(p)         Result variants
 Circle(p)             enum variant (enum inferred from scrutinee)
 Shape.Circle(p)       qualified variant
-Point { x, y: 0 }     struct
-Point { x, .. }
+Rect(h: p, ..)        named payload field; `..` ignores the other fields
+Point(x, y: 0)        struct
+Point(x, ..)
 []  [a, b]  [first, ..rest]  [.., last]   list patterns
 p1 | p2               alternatives (must bind the same names with the same types)
 ```
@@ -1158,9 +1195,11 @@ p1 | p2               alternatives (must bind the same names with the same types
 A binding pattern `name` that coincides with a payload-less variant of the
 scrutinee's enum type refers to that variant (`Empty` for a `Shape`, §4.3). A
 capitalized name that is not such a variant is a binding, which the linter
-reports as a likely mistyped variant (`variant-like-binding`, §17.2). Struct
-patterns must either mention every field or end with `..`. A pattern binds a
-name at most once.
+reports as a likely mistyped variant (`variant-like-binding`, §17.2). In a
+struct or variant pattern, positional sub-patterns match fields in declaration
+order, followed by named sub-patterns. The pattern must either match every
+field or end with `..`. Struct patterns match fields directly even if the
+struct declares `init`. A pattern binds each name at most once.
 
 ### 8.2 Guards
 
@@ -1225,10 +1264,10 @@ bytes and enum values are immutable, so sharing is unobservable.
 ### 10.2 Evaluation order
 
 Operands, arguments, list elements, and fields are evaluated left to right.
-Struct literal fields are evaluated in the order written; defaults are evaluated
-afterwards in declaration order. For assignment `a[i] = e`, `a` and `i` are
-evaluated before `e`; for compound assignment `a[i] += e`, `a` and `i` are
-evaluated once.
+The arguments of a construction are evaluated in source order, then `..base`,
+then the defaults of the remaining fields in declaration order. For assignment
+`a[i] = e`, `a` and `i` are evaluated before `e`; for compound assignment
+`a[i] += e`, `a` and `i` are evaluated once.
 
 ### 10.3 Errors
 
@@ -1314,13 +1353,14 @@ system's open-file limit is reached.
 | `(1, "a")`                          | `(1, "a")`                          | same                                                                            |
 | `Some(1)`                           | `Some(1)`                           | same                                                                            |
 | `None`                              | `None`                              | same                                                                            |
-| `Point { x: 1.0 }`                  | `Point { x: 1.0 }`                  | same                                                                            |
+| `Point(x: 1.0)`                     | `Point(x: 1.0)`                     | same                                                                            |
 | `Circle(2.0)`                       | `Circle(2.0)`                       | same                                                                            |
-| `Error`                             | `<kind>: <message>`                 | `Error { kind: "...", message: "..." }`                                         |
+| `Shape.Rect(w: 1.0, h: 2.0)`        | `Rect(w: 1.0, h: 2.0)`              | same                                                                            |
+| `Error`                             | `<kind>: <message>`                 | `Error(message: "...", kind: "...")`                                            |
 | function                            | `<fn name>`                         | same                                                                            |
 | task / channel                      | `<task>` / `<channel>`              | same                                                                            |
 | `0..3`                              | `0..3`                              | same                                                                            |
-| `time.date(2024, 2, 29)?`           | `2024-02-29`                        | same                                                                            |
+| `time.PlainDate(2024, 2, 29)?`      | `2024-02-29`                        | same                                                                            |
 | other opaque value                  | `<Regex>`                           | same                                                                            |
 
 Composite values print their components in debug form. The debug form of a
@@ -1391,9 +1431,12 @@ t.cancel()                        // cancels if still running
 | `task.all<T>(ts: [Task<T>]) -> [T]`                | wait for all, results in order                                     |
 | `task.race<T>(ts: [Task<T>]) -> T`                 | wait for the first to finish; cancel the rest; fails on empty list |
 | `task.timeout<T>(d: duration, f: fn() -> T) -> T?` | run `f` in a task; `None` (and cancel) if not done within `d`      |
-| `task.channel<T>(capacity: int = 0) -> Channel<T>` | create a channel; `0` means unbounded                              |
 
 ### 11.4 Channels
+
+`Channel(capacity: int = 0)` creates a `Channel<T>` that holds at most
+`capacity` queued messages. If `capacity` is `0`, the channel is unbounded. A
+negative capacity fails with kind `"invalid"`.
 
 | Method                   | Description                                                                  |
 | ------------------------ | ---------------------------------------------------------------------------- |
@@ -1427,8 +1470,6 @@ Always in scope without import.
 | `assert(cond: bool, msg: str = "condition is false")` | fail with `msg` (kind `assert`) if false  |
 | `todo() -> never`                                     | fail (kind `todo`): `not yet implemented` |
 | `exit(code: int) -> never`                            | stop the run (§10.4)                      |
-| `error(message: str, kind: str = "error") -> Error`   | construct an `Error`                      |
-| `set<T: Hash>(items: [T] = []) -> Set<T>`             | build a set                               |
 | `help(x)`, `help()`                                   | print documentation (§12.15)              |
 | `members(x) -> [str]`, `members() -> [str]`           | list member names (§12.15)                |
 
@@ -1552,6 +1593,7 @@ when absent and returns the stored value), `iter() -> Iter<(K, V)>` (§12.13).
 
 ### 12.10 `Set<T>`
 
+`Set(items: [T] = [])` creates a set of the distinct elements of `items`.
 `len`, `is_empty`, `add(x) -> bool` (true if newly added), `remove(x) -> bool`,
 `contains(x)`, `to_list() -> [T]`, `union(o)`, `intersection(o)`,
 `difference(o)`, `is_subset(o)`, `copy()`, `clear()`, `iter() -> Iter<T>`
@@ -1624,8 +1666,8 @@ impl Iterator<int> for Countdown {
         Some(self.n + 1)
     }
 }
-for x in (Countdown { n: 3 }) { print(x) }          // 3, 2, 1
-print(Countdown { n: 3 }.iter().map(x => x * 2).to_list())  // [6, 4, 2]
+for x in Countdown(n: 3) { print(x) }          // 3, 2, 1
+print(Countdown(n: 3).iter().map(x => x * 2).to_list())  // [6, 4, 2]
 fn total<I: Iterator<int>>(it: I) -> int { it.iter().sum() }
 ```
 
@@ -1638,7 +1680,7 @@ static sources:
 
 | Source                                                    | Elements                                                             |
 | --------------------------------------------------------- | -------------------------------------------------------------------- |
-| `Iter.from_fn(f: fn() -> T?)`                             | the results of `f` until it returns `None` (also `Iter { next: f }`) |
+| `Iter.from_fn(f: fn() -> T?)`                             | the results of `f` until it returns `None` (also `Iter(next: f)`)    |
 | `Iter.empty()`                                            | none                                                                 |
 | `Iter.once(x: T)`                                         | `x`                                                                  |
 | `Iter.repeat(x: T)`                                       | `x` forever                                                          |
@@ -1751,7 +1793,7 @@ shadows them as usual.
 
 Each module is imported with `import <name>`. I/O functions return `Result`
 values with the `Error` kinds of §5.4 and are subject to the policy (§14);
-unless stated otherwise, a denial is `Err(Error { kind: "permission_denied", ... })`.
+unless stated otherwise, a denial is `Err(Error(..., kind: "permission_denied"))`.
 
 ### 13.1 `base64`
 
@@ -2069,7 +2111,7 @@ pending, then waits; the run's limits and interrupts apply while it waits.
 pub enum Json { Null, Bool(bool), Int(int), Float(float), Str(str), Arr([Json]), Obj([str: Json]) }
 pub native fn parse(text: str) -> Result<Json>
 pub native fn encode<T: Encode>(value: T, indent: int = 0) -> str
-pub fn decode<reflect T: Encode>(text: str) -> Result<T>
+pub fn decode<reflect T: Decode>(text: str) -> Result<T>
 pub native fn to_json<T: Encode>(value: T) -> Json
 ```
 
@@ -2108,9 +2150,9 @@ kind `"invalid"`.
 unsupported key type fails with kind `"invalid"`. If a JSON object omits a
 struct field, `decode` uses the field's declared default, or `None` if the
 field is an `Option` without a default. Constant defaults (constructed from
-literals, `int` ranges, tuples, lists, maps, `set([...])`, enum variants, and
-struct literals, up to 65,536 nodes and 64 nesting levels) are constructed
-during decoding; non-constant defaults (such as `id: str = uuid.v4()`) are
+literals, `int` ranges, tuples, lists, maps, `Set([...])`, enum variants, and
+structs constructed field by field, up to 65,536 nodes and 64 nesting levels)
+are constructed during decoding; non-constant defaults (such as `id: str = uuid.v4()`) are
 evaluated after the entire input is parsed, inner structs before outer structs
 and fields in declaration order. Any other missing field or type mismatch fails
 with kind `"parse"` and the JSON path of the error (such as `$.items[2].name:
@@ -2197,13 +2239,13 @@ Engine-local PRNG (xoshiro256\*\*), seeded from host entropy unless the host
 sets a seed. `int(lo: int, hi: int) -> int` (uniform in `lo..hi`; fails if
 empty), `float() -> float` (`[0, 1)`), `bool() -> bool`,
 `choice<T>(xs: [T]) -> T?`, `shuffle<T>(xs: [T])`, `sample<T>(xs: [T], k: int)
--> [T]`, `bytes(n: int) -> bytes`, `seed(s: int)`. `random.rng(seed: int) -> Rng` returns a
+-> [T]`, `bytes(n: int) -> bytes`, `seed(s: int)`. `Rng(seed: int)` creates a
 generator independent of the engine's, with the same methods except `seed`.
 
 ### 13.12 `regex`
 
 ```sand
-pub native fn new(pattern: str) -> Result<Regex>
+regex.Regex(pattern: str) -> Result<Regex>
 regex.is_match(pattern, text) -> Result<bool>      // convenience
 r.is_match(text) -> bool
 r.find(text) -> Match?
@@ -2283,9 +2325,9 @@ form. `T.parse(text)` parses this text form (or a `strftime` pattern if
 
 Constructors:
 
-- `date(year, month, day)`, `time(hour, minute = 0, second = 0, millisecond = 0, microsecond = 0, nanosecond = 0)`, `datetime(year, month, day, hour = 0, ...)`, `year_month(year, month)`, and `month_day(month, day)` validate their components and return `Result<T>` (error kind `"invalid"`).
-- `span(years = 0, months = 0, weeks = 0, days = 0, hours = 0, ..., nanoseconds = 0)` fails with kind `"invalid"` if units have mixed signs.
-- `zone(name) -> Result<TimeZone>` accepts an IANA name (case-insensitive), `UTC`, or a whole-minute offset within `±23:59` (`+00:00` returns `UTC`), and returns an error of kind `"not_found"` otherwise.
+- `PlainDate(year, month, day)`, `PlainTime(hour, minute = 0, second = 0, millisecond = 0, microsecond = 0, nanosecond = 0)`, `PlainDateTime(year, month, day, hour = 0, ...)`, `PlainYearMonth(year, month)`, and `PlainMonthDay(month, day)` validate their components and return `Result<T>` (error kind `"invalid"`).
+- `Span(years = 0, months = 0, weeks = 0, days = 0, hours = 0, ..., nanoseconds = 0)` fails with kind `"invalid"` if units have mixed signs.
+- `TimeZone(name) -> Result<TimeZone>` accepts an IANA name (case-insensitive), `UTC`, or a whole-minute offset within `±23:59` (`+00:00` returns `UTC`), and returns an error of kind `"not_found"` otherwise.
 - `Instant.from_epoch_seconds`, `from_epoch_millis`, `from_epoch_nanos`; constants `UTC` and `MIDNIGHT`.
 
 Clocks:
@@ -2293,7 +2335,7 @@ Clocks:
 - `now() -> Instant` returns the current wall-clock time.
 - `local_zone() -> TimeZone` returns the configured host time zone (§16) if the policy permits `TimeZone`, or `UTC` if denied.
 - `now_zoned(zone = local_zone()) -> ZonedDateTime` and `today(zone = local_zone()) -> PlainDate`.
-- `stopwatch() -> Stopwatch` starts a monotonic timer; `sw.elapsed() -> duration` returns the elapsed time.
+- `Stopwatch()` starts a monotonic timer; `sw.elapsed() -> duration` returns the elapsed time.
 
 Methods:
 
@@ -2924,8 +2966,8 @@ The Rust return type of a registered function determines whether the function
 returns a Sand `Result` or aborts the run on failure:
 
 - `Result<T, HostError>` maps to the Sand return type `Result<T, Error>`.
-  Returning `Err(HostError::new(kind, message))` yields `Err(Error { kind,
-message })` in Sand, whereas `?` converts a `Ctl` into a `HostError` that
+  Returning `Err(HostError::new(kind, message))` yields `Err(Error(message,
+kind: kind))` in Sand, whereas `?` converts a `Ctl` into a `HostError` that
   halts or suspends the VM and converts a `std::io::Error` into a `HostError`
   with the corresponding standard error kind.
 - `Result<T, std::io::Error>`, `Result<T, String>`, and `Result<T, &str>` also
@@ -2982,6 +3024,7 @@ fn` with parameter names `arg1`, `arg2`, ... unless overridden by `params`.
 `help` lists registered types and functions in registration order before items
 declared in `NativeModule::source`. A function registered as `"Type.name"` is a
 method on `Type`, and takes `self` if its first parameter has type `Type`.
+A function registered as `"Type.init"` constructs `Type` (§4.2).
 Generic functions and functions with default parameter values must be declared
 explicitly with `native fn` in `NativeModule::source`.
 
@@ -3139,6 +3182,7 @@ these:
 | `naming`               | violates naming conventions (§2.4)                                                                                                                                                                                                      |
 | `bool-comparison`      | comparing with `true`/`false` literal                                                                                                                                                                                                   |
 | `self-assignment`      | `x = x`                                                                                                                                                                                                                                 |
+| `argument-order`       | positional construction argument or sub-pattern whose identifier matches a different field or `init` parameter (`Rect(h, w)` for `struct Rect { w: float, h: float }`)                                                                  |
 | `len-zero`             | `x.len() == 0` (use `is_empty()`)                                                                                                                                                                                                       |
 | `nan-comparison`       | a comparison with `nan`, which is always false (`!=` is always true); use `is_nan()`                                                                                                                                                    |
 | `empty-block`          | empty `if`/`else`/loop body                                                                                                                                                                                                             |
@@ -3166,10 +3210,10 @@ top-level name is not reported.
 
 The resource lints follow resources through each function. A resource is
 _created_ by a call that returns one (or a `Result`, option or tuple holding
-one) unless its result may come from an argument, and by a literal of a
-`Close` type (struct, list, option, ...), which takes over the resources it
-is built from. It is _handed on_ when returned, stored (in a field, list,
-map, set, global or channel), captured by `spawn`, taken over by a new
+one) unless its result may come from an argument, and by a construction or
+literal of a `Close` type (struct, list, option, ...), which takes over the
+resources it is built from. It is _handed on_ if it is returned, stored (in a
+field, list, map, set, global or channel), captured by `spawn`, taken over by a new
 resource, or passed to a parameter the callee hands on (calls through
 function values and trait dictionaries count as neither keeping nor
 returning their arguments). A created resource neither handed on nor bound
@@ -3204,10 +3248,13 @@ Rewrites files in canonical style: 4-space indentation, one statement per
 line, spaces around binary operators, no space before `(` in calls, `{` on
 the same line, trailing commas in multi-line lists/arguments/fields, at most
 one blank line in a row, one blank line around functions with a body,
-types, `extend`, traits, impls and tests, line width 100 (calls, lists,
-maps and parameter lists that do not fit are broken one element per line,
-and method chains that do not fit are broken before each method call),
-comments preserved. Trait and impl bodies are laid out like struct bodies,
+types, `extend`, traits, impls and tests, line width 100 (the formatter breaks
+calls, lists, maps, and parameter lists that exceed the line width across
+lines with each element on its own line, breaks patterns across lines if doing
+so allows the rest of the line to fit, and breaks method chains that exceed the
+line width before each method call), and comments preserved (the formatter
+converts any `///` comment that does not document an item to `//`).
+Trait and impl bodies are laid out like struct bodies,
 one method per line, with a blank line around methods with a body. String
 literals, including their interpolations, are copied verbatim. Formatting
 is idempotent and never changes the parse tree (modulo spans). `sand fmt -`
@@ -3283,7 +3330,8 @@ between inputs.
   later inputs.
   Code checked earlier keeps referring to what it referred to then. Methods
   (`extend`) and impls (§4.9) of a later input likewise replace those of
-  earlier inputs with the same name or for the same type.
+  earlier inputs with the same name or for the same type. A later input cannot
+  add `init` (§4.2) to a type declared in an earlier input.
 - A top-level variable's type must be inferred within the input that declares
   it.
 - An input that fails to compile has no effect. An input that fails with an

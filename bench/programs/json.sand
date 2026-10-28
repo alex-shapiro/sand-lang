@@ -62,7 +62,7 @@ fn record(rng: Rng, id: int) -> str {
 }
 
 fn generate(count: int) -> str {
-    let rng = Rng { state: 42 }
+    let rng = Rng(state: 42)
     "[\n" + [record(rng, i) for i in 0..count].join(",\n") + "\n]\n"
 }
 
@@ -71,7 +71,7 @@ struct Parser {
     var pos: int = 0
 
     fn parse(text: str) -> Result<J, str> {
-        let p = Parser { src: text.chars() }
+        let p = Parser(src: text.chars())
         let value = p.value()?
         p.skip_ws()
         if p.pos < p.src.len() { return Err("trailing characters at \(p.pos)") }
@@ -237,7 +237,7 @@ struct Stats {
     var max_depth: int = 0
 
     fn of(value: J) -> Stats {
-        let stats = Stats {}
+        let stats = Stats()
         stats.walk(value, 1)
         stats
     }

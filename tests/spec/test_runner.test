@@ -174,7 +174,7 @@ fn assert_true(cond: bool) {
 test "doubles" {
     test.assert_eq(double(2), 4)
     assert_eq(double(3), 6)
-    assert_err("x".parse_int().ok_or(error("invalid int")))
+    assert_err("x".parse_int().ok_or(Error("invalid int")))
 }
 
 test "module definitions shadow test module items" {

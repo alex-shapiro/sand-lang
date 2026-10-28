@@ -1,7 +1,7 @@
 //! Dates, times, calendar spans, time zones, and clocks.
 //!
 //! `duration` represents exact elapsed time (`1d` is always 24 hours). `Span`
-//! represents calendar and clock units (`span(days: 1)` preserves wall-clock
+//! represents calendar and clock units (`Span(days: 1)` preserves wall-clock
 //! time across daylight saving transitions). `ZonedDateTime` arithmetic accepts
 //! `Span` only so exact durations are not confused with calendar days.
 //!
@@ -46,11 +46,6 @@ pub let MIDNIGHT: PlainTime = midnight()
 
 native fn midnight() -> PlainTime
 
-/// Looks up a `TimeZone` by IANA identifier (case-insensitive), `"UTC"`, or a
-/// whole-minute UTC offset within `±23:59` (`"+00:00"` returns `UTC`). Fails
-/// with kind `"not_found"` if `name` is unknown.
-pub native fn zone(name: str) -> Result<TimeZone>
-
 /// Returns the host local time zone if permitted by the `TimeZone` capability,
 /// or `UTC` if denied.
 pub native fn local_zone() -> TimeZone
@@ -68,66 +63,13 @@ pub fn today(zone: TimeZone = local_zone()) -> PlainDate {
     now_zoned(zone).to_plain_date()
 }
 
-/// Constructs a `PlainDate`, or fails with kind `"invalid"` if the components
-/// do not form a valid Gregorian date.
-pub native fn date(year: int, month: int, day: int) -> Result<PlainDate>
-
-/// Constructs a `PlainTime`, or fails with kind `"invalid"` if any component is
-/// out of range.
-pub native fn time(
-    hour: int,
-    minute: int = 0,
-    second: int = 0,
-    millisecond: int = 0,
-    microsecond: int = 0,
-    nanosecond: int = 0,
-) -> Result<PlainTime>
-
-/// Constructs a `PlainDateTime`, or fails with kind `"invalid"` if any
-/// component is out of range.
-pub native fn datetime(
-    year: int,
-    month: int,
-    day: int,
-    hour: int = 0,
-    minute: int = 0,
-    second: int = 0,
-    millisecond: int = 0,
-    microsecond: int = 0,
-    nanosecond: int = 0,
-) -> Result<PlainDateTime>
-
-/// Constructs a `PlainYearMonth`, or fails with kind `"invalid"` if `year` or
-/// `month` is out of range.
-pub native fn year_month(year: int, month: int) -> Result<PlainYearMonth>
-
-/// Constructs a `PlainMonthDay` (including February 29), or fails with kind
-/// `"invalid"` if `month` or `day` is out of range.
-pub native fn month_day(month: int, day: int) -> Result<PlainMonthDay>
-
-/// Constructs a `Span` from calendar and clock units. Aborts with kind
-/// `"invalid"` if nonzero units have mixed signs, or `"overflow"` if a unit
-/// exceeds its supported range.
-pub native fn span(
-    years: int = 0,
-    months: int = 0,
-    weeks: int = 0,
-    days: int = 0,
-    hours: int = 0,
-    minutes: int = 0,
-    seconds: int = 0,
-    milliseconds: int = 0,
-    microseconds: int = 0,
-    nanoseconds: int = 0,
-) -> Span
-
 extend Stopwatch {
+    /// Starts a monotonic `Stopwatch`.
+    pub native fn init() -> Stopwatch
+
     /// Returns the elapsed `duration` since this `Stopwatch` was started.
     pub native fn elapsed(self) -> duration
 }
-
-/// Starts and returns a new monotonic `Stopwatch`.
-pub native fn stopwatch() -> Stopwatch
 
 extend Instant {
     /// Parses an RFC 3339 timestamp with `Z` or a numeric offset, or parses
@@ -312,6 +254,20 @@ extend ZonedDateTime {
 }
 
 extend PlainDateTime {
+    /// Constructs a `PlainDateTime`, or fails with kind `"invalid"` if any
+    /// component is out of range.
+    pub native fn init(
+        year: int,
+        month: int,
+        day: int,
+        hour: int = 0,
+        minute: int = 0,
+        second: int = 0,
+        millisecond: int = 0,
+        microsecond: int = 0,
+        nanosecond: int = 0,
+    ) -> Result<PlainDateTime>
+
     /// Parses an ISO 8601 date-time (`2024-03-10T03:30:00`), or parses `text`
     /// using the `strftime` pattern `format`.
     pub native fn parse(text: str, format: str = "") -> Result<PlainDateTime>
@@ -423,6 +379,10 @@ extend PlainDateTime {
 }
 
 extend PlainDate {
+    /// Constructs a `PlainDate`, or fails with kind `"invalid"` if the
+    /// components do not form a valid Gregorian date.
+    pub native fn init(year: int, month: int, day: int) -> Result<PlainDate>
+
     /// Parses an ISO 8601 date (`2024-03-10`), or parses `text` using the
     /// `strftime` pattern `format`.
     pub native fn parse(text: str, format: str = "") -> Result<PlainDate>
@@ -506,6 +466,17 @@ extend PlainDate {
 }
 
 extend PlainTime {
+    /// Constructs a `PlainTime`, or fails with kind `"invalid"` if any
+    /// component is out of range.
+    pub native fn init(
+        hour: int,
+        minute: int = 0,
+        second: int = 0,
+        millisecond: int = 0,
+        microsecond: int = 0,
+        nanosecond: int = 0,
+    ) -> Result<PlainTime>
+
     /// Parses an ISO 8601 wall-clock time (`03:30:00`), or parses `text` using
     /// the `strftime` pattern `format`.
     pub native fn parse(text: str, format: str = "") -> Result<PlainTime>
@@ -566,6 +537,10 @@ extend PlainTime {
 }
 
 extend PlainYearMonth {
+    /// Constructs a `PlainYearMonth`, or fails with kind `"invalid"` if
+    /// `year` or `month` is out of range.
+    pub native fn init(year: int, month: int) -> Result<PlainYearMonth>
+
     /// Parses an ISO 8601 year-month (`2024-03`).
     pub native fn parse(text: str) -> Result<PlainYearMonth>
 
@@ -609,6 +584,10 @@ extend PlainYearMonth {
 }
 
 extend PlainMonthDay {
+    /// Constructs a `PlainMonthDay` (including February 29), or fails with
+    /// kind `"invalid"` if `month` or `day` is out of range.
+    pub native fn init(month: int, day: int) -> Result<PlainMonthDay>
+
     /// Parses an ISO 8601 month-day (`03-10` or `--03-10`).
     pub native fn parse(text: str) -> Result<PlainMonthDay>
 
@@ -625,6 +604,22 @@ extend PlainMonthDay {
 }
 
 extend Span {
+    /// Constructs a `Span` from calendar and clock units. Aborts with kind
+    /// `"invalid"` if nonzero units have mixed signs, or `"overflow"` if a
+    /// unit exceeds its supported range.
+    pub native fn init(
+        years: int = 0,
+        months: int = 0,
+        weeks: int = 0,
+        days: int = 0,
+        hours: int = 0,
+        minutes: int = 0,
+        seconds: int = 0,
+        milliseconds: int = 0,
+        microseconds: int = 0,
+        nanoseconds: int = 0,
+    ) -> Span
+
     /// Parses an ISO 8601 duration (`P1Y2M3DT4H5M6.5S`) or human-readable
     /// duration (`1 year, 2 months`, `4h 30m`).
     pub native fn parse(text: str) -> Result<Span>
@@ -672,7 +667,7 @@ extend Span {
         microseconds: int = self.microseconds(),
         nanoseconds: int = self.nanoseconds(),
     ) -> Span {
-        span(
+        Span(
             years,
             months,
             weeks,
@@ -720,6 +715,11 @@ extend Span {
 }
 
 extend TimeZone {
+    /// Looks up a time zone by IANA identifier (case-insensitive), `"UTC"`,
+    /// or a whole-minute UTC offset within `±23:59` (`"+00:00"` returns
+    /// `UTC`). Fails with kind `"not_found"` if `name` is unknown.
+    pub native fn init(name: str) -> Result<TimeZone>
+
     /// Returns the canonical time zone identifier (`America/New_York`, `UTC`, or `+05:30`).
     pub native fn id(self) -> str
 }

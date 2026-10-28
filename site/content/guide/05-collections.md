@@ -84,12 +84,12 @@ Map keys and set elements must be hashable (`int`, `str`, `bool`, `bytes`, `dura
 A `Set<T>` stores unique values in insertion order:
 
 ```sand
-let tags = set(["red", "blue"])
+let tags = Set(["red", "blue"])
 print(tags.add("red"))
 print(tags.add("green"))
 print(tags.contains("blue"))
-print(tags.union(set(["blue", "pink"])))
-print(tags.intersection(set(["blue", "pink"])))
+print(tags.union(Set(["blue", "pink"])))
+print(tags.intersection(Set(["blue", "pink"])))
 ```
 
 `add` returns `true` if the value was newly inserted.

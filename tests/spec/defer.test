@@ -85,7 +85,7 @@ print(y)
 === question mark propagation runs defers
 fn parse(s: str) -> Result<int> {
     defer print("parse \(s) done")
-    let n = s.parse_int().ok_or(error("not a number"))?
+    let n = s.parse_int().ok_or(Error("not a number"))?
     Ok(n * 2)
 }
 print(parse("21"))
@@ -100,7 +100,7 @@ print(first([]))
 parse 21 done
 Ok(42)
 parse x done
-Err(Error { kind: "error", message: "not a number" })
+Err(Error(message: "not a number", kind: "error"))
 first done
 None
 
@@ -195,7 +195,7 @@ fn g() {
     print("g body")
 }
 g()
-let ch: Channel<int> = task.channel()
+let ch: Channel<int> = Channel()
 let t = spawn {
     defer ch.close()
     for i in 0..3 {
@@ -238,7 +238,7 @@ top-level done
 
 === top-level question mark failures run defers
 defer print("cleanup")
-let n = "x".parse_int().ok_or(error("bad"))?
+let n = "x".parse_int().ok_or(Error("bad"))?
 print(n)
 --- stdout
 cleanup

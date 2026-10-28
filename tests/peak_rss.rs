@@ -21,15 +21,15 @@ const FACTOR: f64 = 1.25;
 
 const PROGRAMS: &[(&str, &str)] = &[
     ("empty", "print(1)"),
-    ("channel of lists", "import task\nlet ch = task.channel(0)\nwhile true { ch.send([1, 2, 3]) }"),
+    ("channel of lists", "import task\nlet ch = Channel(0)\nwhile true { ch.send([1, 2, 3]) }"),
     ("list of lists", "let xs = []\nwhile true { xs.push([1, 2, 3]) }"),
     ("map growth", "let m: [int: [int]] = [:]\nvar i = 0\nwhile true {\n    m[i] = [i]\n    i += 1\n}"),
-    ("set growth", "let s: Set<str> = set()\nvar i = 0\nwhile true {\n    s.add(\"k\\(i)\")\n    i += 1\n}"),
+    ("set growth", "let s: Set<str> = Set()\nvar i = 0\nwhile true {\n    s.add(\"k\\(i)\")\n    i += 1\n}"),
     ("string building", "var s = \"\"\nwhile true { s += \"abcdefgh\" }"),
     ("list doubling", "let xs = []\nwhile true { xs.push(1) }"),
     (
         "type descriptions",
-        "import json\nstruct P<A, B> { a: A, b: B }\nfn make<reflect A: Encode, reflect B: Encode>(n: int, x: [A], y: [B]) -> fn() -> bool {\n    \
+        "import json\nstruct P<A, B> { a: A, b: B }\nfn make<reflect A: Decode, reflect B: Decode>(n: int, x: [A], y: [B]) -> fn() -> bool {\n    \
          if n == 0 {\n        return () => {\n            let r: Result<[(A, B)]> = json.decode(\"[]\")\n            r.is_ok()\n        }\n    }\n    \
          let w: [P<A, B>] = []\n    make(n - 1, w, w)\n}\nlet keep = []\nlet w: [int] = []\nwhile true { keep.push(make(100, w, w)) }",
     ),

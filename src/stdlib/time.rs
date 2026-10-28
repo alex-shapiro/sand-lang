@@ -872,7 +872,7 @@ pub(crate) fn module() -> NativeModule {
 
 fn register_module(m: &mut NativeModule) {
     m.function("utc", || TimeZone(tz::TimeZone::UTC));
-    m.vm_function("zone", |vm: &mut Vm, name: Val<String>| {
+    m.vm_function("TimeZone.init", |vm: &mut Vm, name: Val<String>| {
         let name = name.str(&vm.heap);
         vm.charge_bytes(name.len())?;
         vm.charge(64)?;
@@ -887,7 +887,7 @@ fn register_module(m: &mut NativeModule) {
         Ok(TimeZone(tz))
     });
     m.vm_function("now", |vm: &mut Vm| now(vm));
-    m.vm_function("stopwatch", |vm: &mut Vm| {
+    m.vm_function("Stopwatch.init", |vm: &mut Vm| {
         let start = vm.host.clock.now();
         vm.new_object(Stopwatch(start))
     });
@@ -899,15 +899,15 @@ fn register_module(m: &mut NativeModule) {
     m.function("midnight", Time::midnight);
     m.function("duration_span", |d: SignedDuration| jiff::Span::try_from(d).and_then(Span::new).map_err(jiff_error));
 
-    m.function("date", |y: i64, m: i64, d: i64| {
+    m.function("PlainDate.init", |y: i64, m: i64, d: i64| {
         let date = exact_date(y, m, d).ok_or_else(|| format!("no such date: {y:04}-{m:02}-{d:02}"));
         date.map_err(|e| HostError::new("invalid", e))
     });
-    m.function("time", |h: i64, m: i64, s: i64, ms: i64, us: i64, ns: i64| {
+    m.function("PlainTime.init", |h: i64, m: i64, s: i64, ms: i64, us: i64, ns: i64| {
         let t = exact_time([h, m, s, ms, us, ns]).ok_or_else(|| format!("no such time: {h:02}:{m:02}:{s:02}"));
         t.map_err(|e| HostError::new("invalid", e))
     });
-    m.function("datetime", |y: i64, m: i64, d: i64, h: i64, mi: i64, s: i64, ms: i64, us: i64, ns: i64| {
+    m.function("PlainDateTime.init", |y: i64, m: i64, d: i64, h: i64, mi: i64, s: i64, ms: i64, us: i64, ns: i64| {
         let dt = match (exact_date(y, m, d), exact_time([h, mi, s, ms, us, ns])) {
             (Some(date), Some(time)) => Ok(date.to_datetime(time)),
             (None, _) => Err(format!("no such date: {y:04}-{m:02}-{d:02}")),
@@ -915,15 +915,15 @@ fn register_module(m: &mut NativeModule) {
         };
         dt.map_err(|e| HostError::new("invalid", e))
     });
-    m.function("year_month", |y: i64, m: i64| {
+    m.function("PlainYearMonth.init", |y: i64, m: i64| {
         let ym = exact_date(y, m, 1).map(PlainYearMonth).ok_or_else(|| format!("no such month: {y:04}-{m:02}"));
         ym.map_err(|e| HostError::new("invalid", e))
     });
-    m.function("month_day", |m: i64, d: i64| {
+    m.function("PlainMonthDay.init", |m: i64, d: i64| {
         let md = exact_date(MONTH_DAY_YEAR.into(), m, d).map(PlainMonthDay).ok_or_else(|| format!("no such day: {m:02}-{d:02}"));
         md.map_err(|e| HostError::new("invalid", e))
     });
-    m.function("span", |y: i64, mo: i64, w: i64, d: i64, h: i64, mi: i64, s: i64, ms: i64, us: i64, ns: i64| {
+    m.function("Span.init", |y: i64, mo: i64, w: i64, d: i64, h: i64, mi: i64, s: i64, ms: i64, us: i64, ns: i64| {
         let units = [y, mo, w, d, h, mi, s, ms, us, ns];
         if units.iter().any(|&u| u > 0) && units.iter().any(|&u| u < 0) {
             return Err(Ctl::fail("invalid", "the units of a span must not have different signs"));

@@ -225,7 +225,13 @@ impl Reference {
             body.push_str(&format!(r#"<p class="related" id="{id}"><span>{heading}:</span></p><ul class="related-list">{list}</ul>"#));
         }
         let anchors = member_anchors(&item.members);
-        for (title, kind) in [("Variants", MemberKind::Variant), ("Fields", MemberKind::Field), ("Methods", MemberKind::Method)] {
+        let kinds = [
+            ("Construct", MemberKind::Construct),
+            ("Variants", MemberKind::Variant),
+            ("Fields", MemberKind::Field),
+            ("Methods", MemberKind::Method),
+        ];
+        for (title, kind) in kinds {
             let members: Vec<(usize, &MemberDoc)> = item.members.iter().enumerate().filter(|(_, x)| x.kind == kind).collect();
             if members.is_empty() {
                 continue;
@@ -358,6 +364,7 @@ fn member_anchors(members: &[MemberDoc]) -> Vec<String> {
 
 fn kind_label(kind: MemberKind) -> &'static str {
     match kind {
+        MemberKind::Construct => "construct",
         MemberKind::Variant => "variant",
         MemberKind::Field => "field",
         MemberKind::Method => "method",
@@ -416,7 +423,8 @@ mod tests {
     fn inline_code_resolves_to_items() {
         let r = reference();
         assert_eq!(r.resolve("regex", "Regex").as_deref(), Some("/std/regex/Regex/"));
-        assert_eq!(r.resolve("regex", "regex.new").as_deref(), Some("/std/regex/#new"));
+        assert_eq!(r.resolve("regex", "regex.is_match").as_deref(), Some("/std/regex/#is_match"));
+        assert_eq!(r.resolve("time", "time.PlainDate").as_deref(), Some("/std/time/PlainDate/"));
         assert_eq!(r.resolve("json", "Json.get").as_deref(), Some("/std/json/Json/#method.get"));
         assert_eq!(r.resolve("prelude", "str.split").as_deref(), Some("/std/prelude/str/#method.split"));
         assert_eq!(r.resolve("json", "Option").as_deref(), Some("/std/prelude/Option/"));

@@ -342,6 +342,9 @@ pub struct FormatSpecAst {
 pub struct Arg {
     pub name: Option<Ident>,
     pub value: Expr,
+    /// Indicates a trailing `..value` argument that copies remaining struct
+    /// fields from `value`.
+    pub spread: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -371,13 +374,6 @@ pub struct LambdaParam {
 }
 
 #[derive(Clone, Debug)]
-pub struct FieldInit {
-    pub name: Ident,
-    /// `None` for shorthand `Point { x }`.
-    pub value: Option<Expr>,
-}
-
-#[derive(Clone, Debug)]
 pub enum ExprKind {
     Unit,
     Bool(bool),
@@ -399,11 +395,6 @@ pub enum ExprKind {
     MapComp(Box<Expr>, Box<Expr>, Vec<CompClause>),
     Tuple(Vec<Expr>),
     Paren(Box<Expr>),
-    StructLit {
-        path: Vec<Ident>,
-        fields: Vec<FieldInit>,
-        base: Option<Box<Expr>>,
-    },
     Unary(UnOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
     Coalesce(Box<Expr>, Box<Expr>),
@@ -533,10 +524,18 @@ pub enum PatLit {
     Unit,
 }
 
-#[derive(Clone, Debug)]
-pub struct FieldPat {
-    pub name: Ident,
-    pub pattern: Option<Pattern>,
+#[derive(Clone, Debug, Default)]
+pub struct PatArgs {
+    pub positional: Vec<Pattern>,
+    pub named: Vec<(Ident, Pattern)>,
+    /// Indicates a trailing `..` that ignores unmentioned fields.
+    pub rest: bool,
+}
+
+impl PatArgs {
+    pub fn patterns(&self) -> impl Iterator<Item = &Pattern> {
+        self.positional.iter().chain(self.named.iter().map(|(_, p)| p))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -547,15 +546,11 @@ pub enum PatternKind {
     Literal(PatLit),
     Range(i64, i64),
     Tuple(Vec<Pattern>),
-    /// `Name(args)` or `Enum.Name(args)` or qualified `Enum.Name`.
-    Variant {
+    /// Struct or enum variant pattern (`Name(args)`, `Enum.Name(args)`,
+    /// `module.Type(args)`, or unit variant `Enum.Name` with `args: None`).
+    Ctor {
         path: Vec<Ident>,
-        args: Option<Vec<Pattern>>,
-    },
-    Struct {
-        path: Vec<Ident>,
-        fields: Vec<FieldPat>,
-        rest: bool,
+        args: Option<PatArgs>,
     },
     /// `[a, b, ..rest, z]`; `rest` is `Some(None)` for `..` and `Some(Some(name))` for `..name`.
     List {
@@ -572,15 +567,7 @@ impl Pattern {
         match &self.kind {
             PatternKind::Binding(id) => out.push(id.clone()),
             PatternKind::Tuple(ps) => ps.iter().for_each(|p| p.bindings(out)),
-            PatternKind::Variant { args: Some(ps), .. } => ps.iter().for_each(|p| p.bindings(out)),
-            PatternKind::Struct { fields, .. } => {
-                for f in fields {
-                    match &f.pattern {
-                        Some(p) => p.bindings(out),
-                        None => out.push(f.name.clone()),
-                    }
-                }
-            }
+            PatternKind::Ctor { args: Some(args), .. } => args.patterns().for_each(|p| p.bindings(out)),
             PatternKind::List { before, rest, after } => {
                 before.iter().for_each(|p| p.bindings(out));
                 if let Some(Some(r)) = rest {

@@ -430,7 +430,13 @@ impl<'a> Lexer<'a> {
                 let in_group = matches!(self.groups.last(), Some(Group::Paren(_) | Group::Bracket | Group::Interp { .. }));
                 // A line starting with `- ` continues the previous one; with `-x`, it is a new statement.
                 let continues = tok.continues_line() || (tok == Tok::Minus && !negates);
-                if !in_group && self.tokens.last().is_some_and(|t| t.tok.ends_statement()) && !continues {
+                let ends = match self.tokens.as_slice() {
+                    // A keyword after `.` is a member name (`x.or`).
+                    [.., Token { tok: Tok::Dot, .. }, t] if t.tok.is_keyword() => true,
+                    [.., t] => t.tok.ends_statement(),
+                    [] => false,
+                };
+                if !in_group && ends && !continues {
                     let at = at as u32;
                     self.tokens.push(Token { tok: Tok::Semi, lo: at, hi: at, newline_before: false, opens_lambda: false, negates: false });
                 }

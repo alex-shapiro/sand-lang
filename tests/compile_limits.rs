@@ -480,9 +480,9 @@ fn constant_field_defaults_are_bounded() {
     check(Config::new(), &wide).0.unwrap();
     let mut deep = String::from("import json\n");
     for i in 0..300 {
-        deep += &format!("struct S{i} {{ next: S{} = S{} {{}} }}\n", i + 1, i + 1);
+        deep += &format!("struct S{i} {{ next: S{} = S{}() }}\n", i + 1, i + 1);
     }
-    deep += "struct S300 { v: int = 1 }\nlet s: S0 = json.decode(\"{}\")?\nprint(s == S0 {})\n";
+    deep += "struct S300 { v: int = 1 }\nlet s: S0 = json.decode(\"{}\")?\nprint(s == S0())\n";
     let out = MemorySink::new();
     let mut engine = Engine::new(Config::new().stdout(out.clone())).unwrap();
     rt().block_on(engine.run_source("main.sand", &deep)).unwrap();
@@ -499,7 +499,7 @@ fn rust_field_defaults_are_built_once() {
     }
     let mut m = sandlang::NativeModule::new("lab");
     m.bind::<Big>();
-    let src = format!("import lab\nlet xs = [{}]\nprint(xs.len())\n", vec!["lab.Big {}"; 3000].join(", "));
+    let src = format!("import lab\nlet xs = [{}]\nprint(xs.len())\n", vec!["lab.Big()"; 3000].join(", "));
     let (r, took) = check(limits(|l| l.max_compile_fuel = Some(2_000_000)).module(m), &src);
     r.unwrap();
     assert!(took < FAST, "took {took:?}");
@@ -508,7 +508,7 @@ fn rust_field_defaults_are_built_once() {
 #[test]
 fn copies_of_constant_strings_are_charged_by_their_size() {
     let text = "x".repeat(1 << 16);
-    let fields = |ty: &str, n: usize| (0..n).map(|i| format!("f{i}: {ty} = {ty} {{}}")).collect::<Vec<_>>().join(", ");
+    let fields = |ty: &str, n: usize| (0..n).map(|i| format!("f{i}: {ty} = {ty}()")).collect::<Vec<_>>().join(", ");
     let mut src = format!("struct A {{ s: str = \"{text}\" }}\nstruct B {{ {} }}\nstruct C {{ {} }}\n", fields("A", 16), fields("B", 16));
     check(Config::new(), &src).0.unwrap();
     src += &format!("struct D {{ {} }}\n", fields("C", 16));

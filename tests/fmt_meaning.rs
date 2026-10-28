@@ -115,3 +115,50 @@ fn block_comments_stay_in_place() {
     }
     assert!(failures.is_empty(), "{} failures:\n\n{}", failures.len(), failures.iter().take(20).cloned().collect::<Vec<_>>().join("\n\n"));
 }
+
+#[test]
+fn trailing_spaces_in_doc_comments_do_not_change_the_meaning() {
+    for src in [
+        "//!( ",
+        "//! a \n//!\t\nfn f() {}\n",
+        "/// b  \nfn f() {}\n",
+        "\"\"///\nfn f(){}",
+        "let x = 1 /// c\nfn f() {}\n",
+        "let l=///\n3",
+        "///!",
+        "let x = 1\n////\n",
+        "///\n//!",
+        "/* a */\n//! b\nlet x = 1\n",
+    ] {
+        let formatted = format_source(src).unwrap();
+        assert_eq!(meaning(src), meaning(&formatted), "{src:?} formatted as {formatted:?}");
+    }
+    assert!(meaning("//!\0\ni//! \n/ t").is_err());
+}
+
+#[test]
+fn tuple_indices_on_number_literals_stay_indices() {
+    for src in ["(1 .0)\n", "print(2.5 .1)\n", "print(2 .0 .1)\n"] {
+        let formatted = format_source(src).unwrap();
+        assert_eq!(meaning(src), meaning(&formatted), "{src:?} formatted as {formatted:?}");
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
+    }
+}
+
+#[test]
+fn a_lone_base_argument_keeps_its_dots() {
+    for src in ["t(..3)\n", "let q = P(..p)\n", "let q = P(\n    ..p,\n)\n", "let q = P(x: 1, /* c */ ..p)\n"] {
+        let formatted = format_source(src).unwrap();
+        assert_eq!(meaning(src), meaning(&formatted), "{src:?} formatted as {formatted:?}");
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
+    }
+}
+
+#[test]
+fn a_member_named_by_a_keyword_ends_a_statement() {
+    for src in ["l.or;()\n", "l.and\n(1, 2)\n", "x.if\n[1]\n"] {
+        let formatted = format_source(src).unwrap();
+        assert_eq!(meaning(src), meaning(&formatted), "{src:?} formatted as {formatted:?}");
+        assert_eq!(format_source(&formatted).unwrap(), formatted, "{src:?}");
+    }
+}

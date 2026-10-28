@@ -39,7 +39,7 @@ struct Room {
 struct Game {
     rooms: [str: Room]
     var here: str
-    inventory: Set<str> = set()
+    inventory: Set<str> = Set()
     var moves: int = 0
     var won: bool = false
 
@@ -124,35 +124,35 @@ struct Game {
 
 fn world() -> [str: Room] {
     [
-        "hall": Room {
+        "hall": Room(
             name: "Great Hall",
             description: "A dusty hall with portraits on the walls.",
             exits: [Dir.North: "library", Dir.East: "kitchen"],
-            items: set(["lamp"]),
-        },
-        "library": Room {
+            items: Set(["lamp"]),
+        ),
+        "library": Room(
             name: "Library",
             description: "Shelves of crumbling books. A heavy door leads east.",
             exits: [Dir.South: "hall", Dir.East: "vault"],
-            items: set(["book"]),
+            items: Set(["book"]),
             locked: Some(Dir.East),
-        },
-        "kitchen": Room {
+        ),
+        "kitchen": Room(
             name: "Kitchen",
             description: "It smells of old bread.",
             exits: [Dir.West: "hall"],
-            items: set(["key", "bread"]),
-        },
-        "vault": Room {
+            items: Set(["key", "bread"]),
+        ),
+        "vault": Room(
             name: "Vault",
             description: "Gold glitters everywhere.",
             exits: [Dir.West: "library"],
-            items: set(["treasure"]),
-        },
+            items: Set(["treasure"]),
+        ),
     ]
 }
 
-let game = Game { rooms: world(), here: "hall" }
+let game = Game(rooms: world(), here: "hall")
 print(game.describe())
 while not game.won {
     io.stdout.write_str("> ")?

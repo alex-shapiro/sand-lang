@@ -133,7 +133,7 @@ print(geo.dist(3.0, 4.0))
 print(geo.country("XX"))
 ```
 
-Running the script above prints `5.0` and `Err(Error { kind: "not_found", message: "unknown country XX" })`.
+Running the script above prints `5.0` and `Err(Error(message: "unknown country XX", kind: "not_found"))`.
 
 Sand infers the Sand function signature from the Rust parameter and return types:
 
@@ -256,7 +256,7 @@ The script prints:
 
 ```text
 Ok("opened front")
-Err(Error { kind: "permission_denied", message: "permission denied: door back" })
+Err(Error(message: "permission denied: door back", kind: "permission_denied"))
 ```
 
 `NativeModule::source` attaches Sand source declarations to a native module. Use `native fn` declarations in the Sand source to specify default parameter values or generic type parameters for registered functions. `Engine::new` type-checks registered modules and returns `Error::Compile` if a `native fn` declaration does not match its Rust function signature.

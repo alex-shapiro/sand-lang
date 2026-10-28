@@ -1,4 +1,5 @@
-//! Automatic derivation of the built-in traits `Eq`, `Ord`, `Hash`, and `Encode`.
+//! Automatic derivation of the built-in traits `Eq`, `Ord`, `Hash`, `Encode`,
+//! and `Decode`.
 //!
 //! A constructed type implements a derived trait if its required type arguments
 //! implement that trait. [`Checker::derived_required_params`] returns the
@@ -33,7 +34,7 @@ impl Checker {
             Ctor::Int | Ctor::Bool | Ctor::Str | Ctor::Bytes | Ctor::Duration | Ctor::Unit | Ctor::Tuple => true,
             Ctor::Float | Ctor::List => b != Hash,
             Ctor::Range => b != Ord,
-            Ctor::Set | Ctor::Map => matches!(b, Eq | Encode),
+            Ctor::Set | Ctor::Map => matches!(b, Eq | Encode | Decode),
             Ctor::Fn => false,
         };
         ok.then(|| (0..n as u32).collect())
@@ -111,19 +112,26 @@ impl Checker {
         self.members(d).into_iter().map(Step::child).collect()
     }
 
+    fn declares_init(&self, d: usize) -> bool {
+        self.init_method(Ctor::Def(d as TypeDefId)).is_some()
+    }
+
     fn mutable_field(&self, d: usize) -> Option<Symbol> {
         self.types[d].fields().iter().find(|f| f.mutable).map(|f| f.name)
     }
 
-    /// Computes derived trait implementations for type definitions starting at
-    /// `first` using greatest fixed-point iteration so that mutually recursive
-    /// types implement a trait unless a component type refutes it.
-    pub(crate) fn derive_impls(&mut self, first: usize) {
+    /// Computes derived implementations of `traits` for type definitions
+    /// starting at `first` using greatest fixed-point iteration so that mutually
+    /// recursive types implement a trait unless a component type refutes it.
+    pub(crate) fn derive_impls(&mut self, first: usize, traits: &[Builtin]) {
         while self.derived.len() < self.types.len() {
             self.derived.push(std::array::from_fn(|_| Derived::Needs(Vec::new())));
         }
         let dependents = self.dependent_types(first);
-        for b in Builtin::ALL.iter().copied().filter(|b| b.is_derived()) {
+        for &b in traits {
+            for d in first..self.types.len() {
+                self.derived[d][b as usize] = Derived::Needs(Vec::new());
+            }
             self.propagate_to_fixed_point(first, &dependents, &mut |c, d| {
                 let new = c.derive(d, b);
                 let changed = new != c.derived[d][b as usize];
@@ -186,12 +194,13 @@ impl Checker {
         let mut required = Vec::new();
         let ok = match &def.kind {
             TypeDefKind::Opaque(kind) => match (b, kind) {
-                (Builtin::Eq, _) | (Builtin::Hash | Builtin::Encode, Opaque::Value(_)) => true,
+                (Builtin::Eq, _) | (Builtin::Hash | Builtin::Encode | Builtin::Decode, Opaque::Value(_)) => true,
                 (Builtin::Ord, Opaque::Value(v)) => v.ord,
                 _ => false,
             },
             _ => {
                 !(b == Builtin::Hash && self.mutable_field(d).is_some())
+                    && !(b == Builtin::Decode && self.declares_init(d))
                     && self.members(d).iter().all(|m| self.collect_required_params(m.child(), b, &def.generics, &mut required))
             }
         };
@@ -239,6 +248,7 @@ impl Checker {
             Step::Field(f, _) => format!("field `{}` of `{owner}` has type `{child}`", self.name(f)),
             Step::Payload(v, _) => format!("the payload of variant `{}` of `{owner}` has type `{child}`", self.name(v)),
             Step::Mutable(f) => format!("field `{}` of `{owner}` is mutable", self.name(f)),
+            Step::Init => format!("`{owner}` declares `init`, which decoding does not call"),
         });
     }
 
@@ -263,7 +273,7 @@ impl Checker {
                 return None;
             }
             let top = stack.last_mut()?;
-            if let Some(&Step::Mutable(_)) = top.parts.first() {
+            if let Some(&(Step::Mutable(_) | Step::Init)) = top.parts.first() {
                 break;
             }
             if top.next == top.parts.len() {
@@ -288,7 +298,7 @@ impl Checker {
             }
         }
         let leaf = stack.last()?.ty;
-        if let Some(&step @ Step::Mutable(_)) = stack.last()?.parts.first() {
+        if let Some(&step @ (Step::Mutable(_) | Step::Init)) = stack.last()?.parts.first() {
             return Some((leaf, step, leaf));
         }
         let member = |f: &Frame| matches!(f.via, Some(Step::Field(..) | Step::Payload(..)));
@@ -306,6 +316,9 @@ impl Checker {
                 {
                     return vec![Step::Mutable(f)];
                 }
+                if b == Builtin::Decode && self.declares_init(d) {
+                    return vec![Step::Init];
+                }
                 let (generics, args) = (self.types[d].generics.clone(), self.arena.list(args).to_vec());
                 let members = self.members(d);
                 members.into_iter().map(|m| m.with_child(self.arena.instantiate(m.child(), &generics, &args))).collect()
@@ -321,13 +334,14 @@ enum Step {
     Field(Symbol, TypeId),
     Payload(Symbol, TypeId),
     Mutable(Symbol),
+    Init,
 }
 
 impl Step {
     fn child(self) -> TypeId {
         match self {
             Step::Arg(_, _, x) | Step::Field(_, x) | Step::Payload(_, x) => x,
-            Step::Mutable(_) => TypeId::ERROR,
+            Step::Mutable(_) | Step::Init => TypeId::ERROR,
         }
     }
 
@@ -336,7 +350,7 @@ impl Step {
             Step::Arg(c, i, _) => Step::Arg(c, i, x),
             Step::Field(f, _) => Step::Field(f, x),
             Step::Payload(v, _) => Step::Payload(v, x),
-            Step::Mutable(f) => Step::Mutable(f),
+            Step::Mutable(_) | Step::Init => self,
         }
     }
 }

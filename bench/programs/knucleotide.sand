@@ -44,7 +44,7 @@ fn print_frequencies(seq: str, k: int) {
     print("")
 }
 
-let rng = Rng { state: 42 }
+let rng = Rng(state: 42)
 let seq = [random_base(rng) for _ in 0..LENGTH].join()
 
 print_frequencies(seq, 1)

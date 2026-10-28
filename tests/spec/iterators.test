@@ -77,9 +77,9 @@ print(counter.to_list())
 print((0..5).iter().map(i => i * i).to_list())
 print((1..=3).iter().to_list())
 print(["a": 1, "b": 2].iter().map(p => "\(p.0)=\(p.1)").to_list())
-print(set([3, 1]).iter().to_list())
+print(Set([3, 1]).iter().to_list())
 print("héllo".chars_iter().to_list())
-let ch: Channel<int> = task.channel()
+let ch: Channel<int> = Channel()
 spawn {
     for i in 0..3 {
         ch.send(i)
@@ -213,12 +213,12 @@ impl Iterator<int> for Countdown {
         Some(self.n + 1)
     }
 }
-for x in (Countdown { n: 3 }) {
+for x in Countdown(n: 3) {
     print(x)
 }
-print(Countdown { n: 4 }.iter().map(x => x * 2).to_list())
-print([x for x in (Countdown { n: 2 })])
-let c = Countdown { n: 5 }
+print(Countdown(n: 4).iter().map(x => x * 2).to_list())
+print([x for x in Countdown(n: 2)])
+let c = Countdown(n: 5)
 print(c.next())
 print(c.iter().take(2).to_list())
 print(c.n)
@@ -258,13 +258,13 @@ fn collect<T, I>(it: I) -> [T] where I: Iterator<T> {
 fn sum_all<T: Num, I: Iterator<T>>(it: I) -> T {
     it.iter().sum()
 }
-print(total(Countdown { n: 4 }))
+print(total(Countdown(n: 4)))
 print(total([5, 6].iter()))
-print(collect(Countdown { n: 2 }))
+print(collect(Countdown(n: 2)))
 print(collect("ab".chars_iter()))
 let fs: [float] = []
 print(sum_all(fs.iter()))
-print(sum_all(Countdown { n: 3 }))
+print(sum_all(Countdown(n: 3)))
 --- stdout
 10
 11
@@ -287,7 +287,7 @@ fn words(text: str) -> Iter<str> {
         }
         if current.is_empty() { None } else { Some(current) }
     }
-    Iter { next }
+    Iter(next)
 }
 print(words("  the quick, brown fox ").map(w => w.to_upper()).to_list())
 print(words("a b c d").step_by(2).join("+"))
@@ -297,7 +297,7 @@ a+c
 
 === iteration errors
 struct S { x: int }
-for x in (S { x: 1 }) {}
+for x in S(x: 1) {}
 for x in 5 {}
 struct Bad {}
 impl Iterator<int> for Bad {
@@ -428,6 +428,19 @@ print((t, (0..4).map(i => i * i), (0..10).filter(i => i % 4 == 0)))
 [3, 1, 0, 1, 0]
 (10, [0, 1, 4, 9], [0, 4, 8])
 
+=== native functions passed to fused pipelines
+import base64
+let xs = ["aGk=", "!"]
+print(xs.map(base64.decode))
+print(xs.iter().map(base64.decode).filter(r => r.is_ok()).count())
+print(["a", "b"].map(str.to_upper))
+print((-1..1).map(int.abs))
+--- stdout
+[Ok(b"hi"), Err(Error(message: "invalid base64: incorrect length or padding", kind: "parse"))]
+1
+["A", "B"]
+[1, 0]
+
 === skip and step_by stop if source is exhausted
 let skipped = [1, 2].iter().skip(4611686018427387904)
 let stepped = [1, 2, 3].iter().step_by(4611686018427387904)
@@ -509,7 +522,7 @@ for (k, v) in bi {
 }
 print(total)
 print(big.len())
-let s = set([1, 2, 3])
+let s = Set([1, 2, 3])
 let si = s.iter()
 s.remove(1)
 s.add(4)
@@ -542,7 +555,7 @@ for (k, v) in m {
 }
 print(m)
 // Nested loops over one set, changing it in the inner one.
-let s = set([1, 2])
+let s = Set([1, 2])
 for x in s {
     for y in s {
         s.add(x * 10 + y)
@@ -557,7 +570,7 @@ for (k, _) in n {
 n.remove(1)
 for (k, v) in n { print("\(k) \(v)") }
 // Clearing while iterating.
-let c = set(["p", "q"])
+let c = Set(["p", "q"])
 for x in c {
     c.clear()
     print(x)

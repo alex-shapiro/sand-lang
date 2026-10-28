@@ -95,7 +95,7 @@ fn parse_fields(line: str) -> Result<[str: str]> {
     let fields: [str: str] = [:]
     for part in line.split(";") {
         let Some((key, value)) = part.split_once("=") else {
-            return Err(error("expected key=value, got `\(part)`", kind: "syntax"))
+            return Err(Error("expected key=value, got `\(part)`", kind: "syntax"))
         }
         fields[key] = value
     }
@@ -104,32 +104,32 @@ fn parse_fields(line: str) -> Result<[str: str]> {
 
 fn field(fields: [str: str], key: str) -> Result<str> {
     let Some(value) = fields.get(key) else {
-        return Err(error("missing field `\(key)`", kind: "missing"))
+        return Err(Error("missing field `\(key)`", kind: "missing"))
     }
     Ok(value)
 }
 
 fn parse_int_field(fields: [str: str], key: str) -> Result<int> {
     let text = field(fields, key)?
-    text.parse_int().ok_or(error("field `\(key)`: `\(text)` is not an integer", kind: "int"))
+    text.parse_int().ok_or(Error("field `\(key)`: `\(text)` is not an integer", kind: "int"))
 }
 
 fn validate_age(age: int) -> Result<int> {
     if age < 0 or age > 130 {
-        return Err(error("field `age`: \(age) out of range", kind: "range"))
+        return Err(Error("field `age`: \(age) out of range", kind: "range"))
     }
     Ok(age)
 }
 
 fn validate_email(email: str) -> Result<(str, str)> {
     let Some((user, domain)) = email.split_once("@") else {
-        return Err(error("bad email `\(email)`: no @", kind: "email"))
+        return Err(Error("bad email `\(email)`: no @", kind: "email"))
     }
     if user.is_empty()
         or not domain.contains(".")
         or domain.starts_with(".")
         or domain.ends_with(".") {
-        return Err(error("bad email `\(email)`: bad domain", kind: "email"))
+        return Err(Error("bad email `\(email)`: bad domain", kind: "email"))
     }
     Ok((user, domain))
 }
@@ -137,16 +137,16 @@ fn validate_email(email: str) -> Result<(str, str)> {
 fn parse_tags(text: str) -> Result<[str]> {
     let tags = text.split(",")
     if tags.any(t => t.is_empty()) {
-        return Err(error("empty tag in `\(text)`", kind: "tag"))
+        return Err(Error("empty tag in `\(text)`", kind: "tag"))
     }
     Ok(tags)
 }
 
 fn parse_score(text: str) -> Result<float> {
     let score = text.parse_float()
-        .ok_or(error("field `score`: `\(text)` is not a number", kind: "score"))?
+        .ok_or(Error("field `score`: `\(text)` is not a number", kind: "score"))?
     if score < 0.0 or score > 100.0 {
-        return Err(error("field `score`: `\(text)` out of range", kind: "range"))
+        return Err(Error("field `score`: `\(text)` out of range", kind: "range"))
     }
     Ok(score)
 }
@@ -159,27 +159,23 @@ fn parse_person(line: str) -> Result<Person> {
     let (user, domain) = validate_email(field(fields, "email")?)?
     let tags = parse_tags(field(fields, "tags")?)?
     let score = parse_score(field(fields, "score")?)?
-    Ok(Person { id, name, age, user, domain, tags, score })
+    Ok(Person(id, name, age, user, domain, tags, score))
 }
 
 fn load(line: str, people: [int: Person]) -> Result<Person> {
     let person = parse_person(line)?
     if people.contains(person.id) {
-        return Err(error("duplicate id \(person.id)", kind: "duplicate"))
+        return Err(Error("duplicate id \(person.id)", kind: "duplicate"))
     }
     people[person.id] = person
     Ok(person)
 }
 
 fn top(counts: [str: int], n: int) -> str {
-    counts.entries()
-        .sorted_by(e => (-e.1, e.0))
-        .take(n)
-        .map(e => "\(e.0)=\(e.1)")
-        .join(" ")
+    counts.entries().sorted_by(e => (-e.1, e.0)).take(n).map(e => "\(e.0)=\(e.1)").join(" ")
 }
 
-let rng = Rng { state: 1234 }
+let rng = Rng(state: 1234)
 let lines = [generate(rng, i) for i in 0..RECORDS]
 
 let people: [int: Person] = [:]

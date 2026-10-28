@@ -112,7 +112,7 @@ fn run_runtime_errors_exit_1() {
     assert!(o.stderr.contains("main.sand:1"), "{o:?}");
 
     // `?` on an error at the top level of the main module.
-    let o = run("fn f() -> Result<int> { Err(error(\"nope\", kind: \"invalid\")) }\nlet x = f()?\nprint(x)", &[]);
+    let o = run("fn f() -> Result<int> { Err(Error(\"nope\", kind: \"invalid\")) }\nlet x = f()?\nprint(x)", &[]);
     assert_eq!(o.code, 1, "{o:?}");
     assert!(o.stderr.contains("error: invalid: nope\n    at <top level> (main.sand:2)"), "{o:?}");
     assert_eq!(o.stdout, "");
@@ -237,7 +237,7 @@ print(fs.write_text("data/in.txt", "clobbered").is_ok())
 
     // Nothing is allowed by default; --allow-all allows everything.
     let o = sand(dir.path(), &["run", "main.sand"]);
-    assert!(o.stdout.starts_with("Err(Error { kind: \"permission_denied\"") && o.stdout.ends_with("false\nfalse\nfalse\n"), "{o:?}");
+    assert!(o.stdout.starts_with("Err(Error(message: \"permission denied") && o.stdout.ends_with("false\nfalse\nfalse\n"), "{o:?}");
     let o = sand(dir.path(), &["run", "main.sand", "--allow-all"]);
     assert_eq!(o.stdout, "Ok(\"input\")\ntrue\ntrue\ntrue\n", "{o:?}");
 }
@@ -354,7 +354,7 @@ print(io.stdin.read_text().map(s => s.len()))
     let o = sand_in(dir.path(), &["run", "main.sand"], "first\nsecond\n", &[]);
     assert_eq!(
         o.stdout,
-        "error: permission_denied\nErr(Error { kind: \"permission_denied\", message: \"permission denied: read standard input\" })\n",
+        "error: permission_denied\nErr(Error(message: \"permission denied: read standard input\", kind: \"permission_denied\"))\n",
         "{o:?}"
     );
     let o = sand_in(dir.path(), &["run", "main.sand", "--allow-stdin"], "first\r\nsecond\n", &[]);
@@ -831,12 +831,10 @@ fn private_networks_are_denied_by_default() {
         args.extend_from_slice(flags);
         sand(dir.path(), &args).stdout
     };
-    assert!(run(&["--allow-net=*"]).starts_with("Err(Error { kind: \"permission_denied\""));
+    assert!(run(&["--allow-net=*"]).starts_with("Err(Error(message: \"permission denied"));
     assert_eq!(run(&["--allow-net=*", "--allow-private-net"]), "Ok(\"hi\")\n");
     assert_eq!(run(&["--allow-net=*,127.0.0.0/8"]), "Ok(\"hi\")\n");
-    assert!(
-        run(&["--allow-net=*", "--allow-private-net", "--deny-net=127.0.0.0/8"]).starts_with("Err(Error { kind: \"permission_denied\"")
-    );
+    assert!(run(&["--allow-net=*", "--allow-private-net", "--deny-net=127.0.0.0/8"]).starts_with("Err(Error(message: \"permission denied"));
 }
 
 /// If a script's standard output is a full pipe, then the script stops at its

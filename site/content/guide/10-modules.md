@@ -47,7 +47,7 @@ pub let UNIT = "m2"
 
 /// Returns a square with side length `side`.
 pub fn square(side: float) -> Rect {
-    Rect { w: side, h: side }
+    Rect(w: side, h: side)
 }
 
 fn is_valid(r: Rect) -> bool {
@@ -60,7 +60,7 @@ A `main.sand` file in the same directory can import `geometry.sand`:
 ```sand
 import "./geometry.sand"
 
-let r = geometry.Rect { w: 2.0, h: 3.0 }
+let r = geometry.Rect(w: 2.0, h: 3.0)
 print("\(r.area()) \(geometry.UNIT)")
 print(geometry.square(4.0).area())
 ```
@@ -72,7 +72,7 @@ import "./geometry" as geo
 from "./geometry.sand" import Rect, square
 
 print(geo.UNIT)
-print(square(1.0) == Rect { w: 1.0, h: 1.0 })
+print(square(1.0) == Rect(w: 1.0, h: 1.0))
 ```
 
 ## Visibility

@@ -97,12 +97,12 @@ print(task.timeout(5ms, () => after(1s, "too late")))
 
 ## Channels
 
-A `Channel<T>` is a FIFO message queue between tasks. Create a channel with `task.channel()`. `send(v)` enqueues a value, and `recv()` dequeues the oldest value, suspending while the channel is empty. Once the channel is closed and drained, `recv()` returns `None`.
+A `Channel<T>` is a FIFO message queue between tasks. Create a channel with `Channel()`. `send(v)` enqueues a value, and `recv()` dequeues the oldest value, suspending while the channel is empty. Once the channel is closed and drained, `recv()` returns `None`.
 
 Iterating over a channel with `for` receives values until the channel is closed and empty:
 
 ```sand
-let ch = task.channel()
+let ch = Channel()
 let producer = spawn {
     for word in ["red", "green", "blue"] {
         ch.send(word)
@@ -117,14 +117,14 @@ producer.wait()
 
 Close a channel after the last message is sent so that consumers waiting in `for` or `recv()` can finish.
 
-By default, channels are unbounded. `task.channel(capacity: n)` creates a bounded channel whose `send` method suspends the sender while the buffer holds `n` unread messages. `send` returns `false` if the channel is closed. `try_recv()` polls the channel without suspending, and `len()` returns the number of queued messages. See the [`task` reference](/std/task/) for all channel methods.
+By default, channels are unbounded. `Channel(capacity: n)` creates a bounded channel whose `send` method suspends the sender while the buffer holds `n` unread messages. `send` returns `false` if the channel is closed. `try_recv()` polls the channel without suspending, and `len()` returns the number of queued messages. See the [`Channel` reference](/std/prelude/Channel/) for all channel methods.
 
 ## Deadlock detection
 
 If all tasks are suspended and zero pending I/O operations or timers remain to wake them, Sand detects the deadlock and aborts the run:
 
 ```sand fails
-let ch: Channel<int> = task.channel()
+let ch: Channel<int> = Channel()
 print(ch.recv())
 ```
 

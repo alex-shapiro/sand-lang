@@ -108,6 +108,7 @@ Implements:
     Eq
     Ord
     Encode
+    Decode
     Describe
 struct Counter
 
@@ -120,6 +121,7 @@ Implements:
     Eq
     Ord
     Encode
+    Decode
 
 === built-in types, traits and type parameters
 help(Set)
@@ -129,8 +131,13 @@ f(1)
 --- stdout
 type Set<T>
 
-Insertion-ordered hash set constructed with `set([...])`. Sets are mutable
-reference types, and elements must implement `Hash`.
+Insertion-ordered hash set. Sets are mutable reference types, and elements
+must implement `Hash`.
+
+Construct:
+    Set(items: [T] = []) -> Set<T>
+        Creates a set of the distinct elements of `items`, in the order of their
+        first occurrence.
 
 Methods:
     fn len(self) -> int
@@ -166,6 +173,7 @@ Methods:
 Implements:
     Eq where T: Eq
     Encode where T: Encode
+    Decode where T: Decode
 trait Iterator<T>
 
 Sequential element source supporting `for` loops and lazy `Iter<T>` pipelines.
@@ -189,7 +197,7 @@ struct Point {
 }
 fn make() -> Point {
     print("evaluated")
-    Point { x: 1.0 }
+    Point(x: 1.0)
 }
 help(make())
 let p = make()
@@ -210,6 +218,7 @@ Implements:
     Eq
     Ord
     Encode
+    Decode
 evaluated
 field Point.x: float
 
@@ -279,7 +288,7 @@ struct Point {
     x: float
     fn norm(self) -> float { self.x }
 }
-let p = Point { x: 1.0 }
+let p = Point(x: 1.0)
 print(members(json))
 print(members(Point))
 print(members(p) == members(Point))
@@ -306,7 +315,6 @@ members(x) lists the names that may follow `x.`, and members() those
 in scope.
 
 Functions:
-    error    Constructs an `Error` with `message` and `kind`.
     print    Prints the display representation of `x` followed by a newline to
              standard output.
     eprint   Prints the display representation of `x` followed by a newline to
@@ -316,8 +324,6 @@ Functions:
              `false`.
     todo     Aborts execution with kind `"todo"` to mark unimplemented code.
     exit     Terminates the program immediately with exit status `code`.
-    set      Constructs a `Set<T>` containing the unique elements of `items` in
-             insertion order.
     help     Prints documentation for `x` (a module, type, trait, function,
              method, or string path).
     members  Returns the sorted member names accessible after `x.`, or the names
@@ -328,7 +334,7 @@ Types:
     Task<T>, Channel<T>, Error, Option<T>, Result<T, E>, Iter<T>
 
 Traits:
-    Close, Eq, Ord, Hash, Encode, Num, Iterator<T>
+    Close, Eq, Ord, Hash, Encode, Decode, Num, Iterator<T>
 
 Modules (help(name) describes one):
     base64      Base64 encoding and decoding (RFC 4648) with standard and
@@ -349,8 +355,7 @@ Modules (help(name) describes one):
     regex       Linear-time regular expressions backed by the Rust `regex`
                 engine.
     statistics  Descriptive statistics and linear regression on numeric lists.
-    task        Task coordination, timers, and channels (always in scope as
-                `task`).
+    task        Task coordination and timers (always in scope as `task`).
     test        Assertions and property-based testing helpers for `test` blocks.
     time        Dates, times, calendar spans, time zones, and clocks.
     uri         URI parsing, resolution, percent-encoding, and query string
@@ -485,6 +490,7 @@ Implements:
     Ord where T: Ord
     Hash where T: Hash
     Encode where T: Encode
+    Decode where T: Decode
     Close where T: Close
 
 === types show the traits of their type parameters once
@@ -508,3 +514,4 @@ Methods:
 Implements:
     Eq
     Encode where T: Encode
+    Decode where T: Decode

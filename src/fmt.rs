@@ -62,7 +62,7 @@ fn format_on_this_thread(src: &str, budget: &CompileBudget) -> Result<String, St
         let (line, col) = SourceFile::new("", src).line_col(err.span.lo);
         return Err(format!("{line}:{col}: {}", err.message));
     }
-    let mut f = Formatter::new(src, &parsed.comments, parsed.tokens, budget);
+    let mut f = Formatter::new(src, &parsed.comments, &parsed.docs, parsed.tokens, budget);
     let doc = f.module(&parsed.module);
     Ok(render(&doc, budget))
 }
@@ -176,6 +176,9 @@ enum Doc {
         force: bool,
         hug: bool,
         strict: bool,
+        /// Break only if the text after the closing 1-byte bracket fits on the
+        /// line (`ind + 1`).
+        break_if_rest_fits: bool,
     },
     Concat(Vec<Doc>),
 }
@@ -194,13 +197,13 @@ fn indent(doc: Doc) -> Doc {
 
 fn group(b: &CompileBudget, force: bool, doc: Doc) -> Doc {
     let force = force || needs_break(b, &doc);
-    Doc::Group { doc: Box::new(doc), force, hug: false, strict: false }
+    Doc::Group { doc: Box::new(doc), force, hug: false, strict: false, break_if_rest_fits: false }
 }
 
 /// A group that is flat only if it fits entirely (see [`Doc::Group`]).
 fn strict_group(b: &CompileBudget, force: bool, doc: Doc) -> Doc {
     let force = force || contains_hard(b, &doc);
-    Doc::Group { doc: Box::new(doc), force, hug: false, strict: true }
+    Doc::Group { doc: Box::new(doc), force, hug: false, strict: true, break_if_rest_fits: false }
 }
 
 /// True if `doc` contains a forced break outside of nested groups and hug groups.
@@ -321,12 +324,16 @@ fn render(doc: &Doc, b: &CompileBudget) -> String {
             Doc::Line | Doc::SoftLine | Doc::HardLine => p.newline(ind),
             Doc::IfBreak(broken, flat) => p.text(if mode == Mode::Break { broken } else { flat }),
             Doc::Indent(d) => stack.push((if mode == Mode::Break { ind + INDENT } else { ind }, mode, d)),
-            Doc::Group { doc: d, force, hug, strict } => {
+            Doc::Group { doc: d, force, hug, strict, break_if_rest_fits } => {
+                let flat = |d: &Doc, col: usize| fits(d, &stack, WIDTH as isize - col as isize, *strict, b);
                 let m = if *force {
                     Mode::Break
                 } else if mode == Mode::Strict {
                     Mode::Strict
-                } else if (mode == Mode::Flat && !hug) || fits(d, &stack, WIDTH as isize - p.col as isize, *strict, b) {
+                } else if (mode == Mode::Flat && !hug)
+                    || flat(d, p.col)
+                    || (*break_if_rest_fits && !flat(&Doc::Concat(Vec::new()), ind + 1))
+                {
                     if *strict { Mode::Strict } else { Mode::Flat }
                 } else {
                     Mode::Break
@@ -387,7 +394,7 @@ fn fits(next: &Doc, rest: &[(usize, Mode, &Doc)], mut width: isize, strict: bool
             Doc::SoftLine => {}
             Doc::IfBreak(broken, flat) => width -= if mode == Mode::Break { broken.len() } else { flat.len() } as isize,
             Doc::Indent(d) => stack.push((mode, d, how)),
-            Doc::Group { doc: d, force, hug, strict } => {
+            Doc::Group { doc: d, force, hug, strict, .. } => {
                 let (m, how) = match how {
                     _ if *force => (Mode::Break, how),
                     Measure::Rest if *hug => (Mode::Break, how),
@@ -480,12 +487,17 @@ enum CElem<'a> {
     Expr(&'a Expr),
     Arg(&'a Arg),
     Entry(&'a Expr, &'a Expr),
-    Field(&'a FieldInit),
-    /// `..base` in a struct literal, with the position of `..`.
+    /// `..base` in a construction, with the position of `..`.
     Base(&'a Expr, u32),
     Param(&'a Param),
     Data(&'a Data),
     DataEntry(&'a Expr, &'a Data),
+    Pat(&'a Pattern),
+    /// `name: pattern` in a constructor pattern.
+    NamedPat(&'a Ident, &'a Pattern),
+    /// `..` in a constructor pattern, or `..name` in a list pattern, with the
+    /// position of `..`.
+    Rest(u32, Option<&'a Ident>),
 }
 
 impl CElem<'_> {
@@ -494,11 +506,13 @@ impl CElem<'_> {
             CElem::Expr(e) => e.span.lo,
             CElem::Arg(a) => a.name.as_ref().map_or(a.value.span.lo, |n| n.span.lo),
             CElem::Entry(k, _) => k.span.lo,
-            CElem::Field(f) => f.name.span.lo,
             CElem::Base(_, lo) => *lo,
             CElem::Param(p) => p.span.lo,
             CElem::Data(d) => d.span().lo,
             CElem::DataEntry(k, _) => k.span.lo,
+            CElem::Pat(p) => p.span.lo,
+            CElem::NamedPat(n, _) => n.span.lo,
+            CElem::Rest(lo, _) => *lo,
         }
     }
 
@@ -507,9 +521,10 @@ impl CElem<'_> {
             CElem::Expr(e) | CElem::Base(e, _) => e.span.hi,
             CElem::Arg(a) => a.value.span.hi,
             CElem::Entry(_, v) => v.span.hi,
-            CElem::Field(f) => f.value.as_ref().map_or(f.name.span.hi, |v| v.span.hi),
             CElem::Param(p) => p.span.hi,
             CElem::Data(d) | CElem::DataEntry(_, d) => d.span().hi,
+            CElem::Pat(p) | CElem::NamedPat(_, p) => p.span.hi,
+            CElem::Rest(lo, name) => name.map_or(lo + 2, |n| n.span.hi),
         }
     }
 }
@@ -518,15 +533,16 @@ impl CElem<'_> {
 struct ListOpts {
     /// Break even if the list fits on one line.
     force: bool,
-    /// Spaces inside the brackets when printed flat (`Point { x: 1 }`).
-    pad: bool,
     /// Add a trailing comma when broken.
     trailing_comma: bool,
     /// The last element may break on its own (see [`Doc::Group`]).
     hug_last: bool,
+    /// Break only if doing so allows the remainder of the line to fit (see [`Doc::Group`]).
+    break_if_rest_fits: bool,
 }
 
-const LIST: ListOpts = ListOpts { force: false, pad: false, trailing_comma: true, hug_last: false };
+const LIST: ListOpts = ListOpts { force: false, trailing_comma: true, hug_last: false, break_if_rest_fits: false };
+const PATTERN: ListOpts = ListOpts { break_if_rest_fits: true, ..LIST };
 
 /// The operator and operands of a binary operation.
 fn binary_parts(e: &Expr) -> Option<(&'static str, &Expr, &Expr)> {
@@ -591,7 +607,7 @@ fn is_huggable(e: &Expr) -> bool {
         ExprKind::List(xs) => !xs.is_empty(),
         ExprKind::Map(xs) => !xs.is_empty(),
         ExprKind::Match { arms, .. } => !arms.is_empty(),
-        ExprKind::StructLit { .. } | ExprKind::If { .. } | ExprKind::Block(_) => true,
+        ExprKind::If { .. } | ExprKind::Block(_) => true,
         ExprKind::Lambda { body, .. } => is_block_like(body) || is_huggable(body),
         ExprKind::Paren(x) => is_huggable(x),
         _ => false,
@@ -624,6 +640,7 @@ fn is_line_comment(c: &Comment) -> bool {
 struct Formatter<'a> {
     src: &'a str,
     comments: &'a [Comment],
+    docs: &'a [u32],
     /// Source tokens, without inserted statement terminators.
     tokens: Vec<Token>,
     /// Positions of the line breaks of the source.
@@ -636,10 +653,10 @@ struct Formatter<'a> {
 }
 
 impl<'a> Formatter<'a> {
-    fn new(src: &'a str, comments: &'a [Comment], mut tokens: Vec<Token>, budget: &'a CompileBudget) -> Formatter<'a> {
+    fn new(src: &'a str, comments: &'a [Comment], docs: &'a [u32], mut tokens: Vec<Token>, budget: &'a CompileBudget) -> Formatter<'a> {
         tokens.retain(|t| !(t.tok == Tok::Semi && t.lo == t.hi) && t.tok != Tok::Eof);
         let newlines = src.bytes().enumerate().filter(|&(_, b)| b == b'\n').map(|(i, _)| i as u32).collect();
-        Formatter { src, comments, tokens, newlines, next: 0, deferred: Vec::new(), budget }
+        Formatter { src, comments, docs, tokens, newlines, next: 0, deferred: Vec::new(), budget }
     }
 
     // ------------------------------------------------------------------
@@ -746,8 +763,19 @@ impl<'a> Formatter<'a> {
     // ------------------------------------------------------------------
     // Comments
 
-    fn comment_text(&self, i: usize) -> &'a str {
-        self.comments[i].text(self.src).trim_end()
+    /// Returns the formatted text of comment `i`, rewriting unattached `///`
+    /// comments to `//` so that moving them cannot attach them to an item.
+    fn comment_text(&self, i: usize) -> String {
+        let c = &self.comments[i];
+        let text = c.text(self.src).trim_end();
+        match c.kind {
+            CommentKind::Doc if self.docs.binary_search(&c.lo).is_err() => {
+                // `///!` must not become the module doc comment `//!`.
+                let rest = &text[3..];
+                if rest.starts_with(['!', '/']) { format!("// {rest}") } else { format!("//{rest}") }
+            }
+            _ => text.to_string(),
+        }
     }
 
     fn has_comment_before(&self, pos: u32) -> bool {
@@ -1028,7 +1056,7 @@ impl<'a> Formatter<'a> {
         let mut parts = Vec::new();
         let mut hard = opts.force;
         for (i, &el) in elems.iter().enumerate() {
-            parts.push(if i == 0 && !opts.pad { Doc::SoftLine } else { Doc::Line });
+            parts.push(if i == 0 { Doc::SoftLine } else { Doc::Line });
             let at = parts.len();
             hard |= self.leading_comments(el.lo(), &mut parts);
             let mark = self.deferred.len();
@@ -1040,7 +1068,7 @@ impl<'a> Formatter<'a> {
             parts.push(doc);
             if next.is_some() {
                 parts.push(text(","));
-            } else if opts.trailing_comma && !matches!(el, CElem::Base(..)) {
+            } else if opts.trailing_comma && !matches!(el, CElem::Base(..) | CElem::Rest(..)) {
                 parts.push(Doc::IfBreak(",", ""));
             }
             let limit = next.map_or(close_pos, |n| n.lo());
@@ -1051,8 +1079,11 @@ impl<'a> Formatter<'a> {
             parts.push(text(self.comment_text(ci)));
             hard = true;
         }
-        let end = if opts.pad { Doc::Line } else { Doc::SoftLine };
-        prepend(pre, group(self.budget, hard, cat(vec![text(open), indent(cat(parts)), end, text(close)])))
+        let mut doc = group(self.budget, hard, cat(vec![text(open), indent(cat(parts)), Doc::SoftLine, text(close)]));
+        if let Doc::Group { break_if_rest_fits, .. } = &mut doc {
+            *break_if_rest_fits = opts.break_if_rest_fits;
+        }
+        prepend(pre, doc)
     }
 
     fn celem(&mut self, el: CElem<'a>) -> Doc {
@@ -1063,14 +1094,16 @@ impl<'a> Formatter<'a> {
                 None => self.expr(&a.value),
             },
             CElem::Entry(k, v) => cat(vec![self.expr(k), self.punct(k.span.hi, &Tok::Colon, ": "), self.expr(v)]),
-            CElem::Field(f) => match &f.value {
-                Some(v) => cat(vec![self.name(&f.name), self.punct(f.name.span.hi, &Tok::Colon, ": "), self.expr(v)]),
-                None => self.name(&f.name),
-            },
             CElem::Base(e, _) => cat(vec![text(".."), self.expr(e)]),
             CElem::Param(p) => self.param(p),
             CElem::Data(d) => self.data(d),
             CElem::DataEntry(k, v) => cat(vec![self.expr(k), self.punct(k.span.hi, &Tok::Colon, ": "), self.data(v)]),
+            CElem::Pat(p) => self.pat(p),
+            CElem::NamedPat(n, p) => cat(vec![self.name(n), self.punct(n.span.hi, &Tok::Colon, ": "), self.pat(p)]),
+            CElem::Rest(_, name) => match name {
+                Some(n) => cat(vec![text(".."), self.name(n)]),
+                None => text(".."),
+            },
         }
     }
 
@@ -1458,15 +1491,6 @@ impl<'a> Formatter<'a> {
                 self.comma_list(("(", ")"), e.span.lo, e.span.hi - 1, &elems, LIST)
             }
             ExprKind::Paren(x) => cat(vec![text("("), self.expr(x), self.text_at(e.span.hi - 1, ")")]),
-            ExprKind::StructLit { path, fields, base } => {
-                let open = self.find_tok(path.last().map_or(e.span.lo, |p| p.span.hi), &Tok::LBrace);
-                let mut elems: Vec<CElem> = fields.iter().map(CElem::Field).collect();
-                if let Some(b) = base {
-                    elems.push(CElem::Base(b, self.prev_tok(b.span.lo)));
-                }
-                let opts = ListOpts { force: self.newline_after(open), pad: true, ..LIST };
-                cat(vec![self.path(path), text(" "), self.comma_list(("{", "}"), open, e.span.hi - 1, &elems, opts)])
-            }
             ExprKind::Unary(op, x) => cat(vec![text(unop_text(*op)), self.expr(x)]),
             ExprKind::Binary(..) | ExprKind::Coalesce(..) => self.binary(e),
             ExprKind::Range { start, end, inclusive } => {
@@ -1750,7 +1774,12 @@ impl<'a> Formatter<'a> {
                 cat(vec![name, self.call_args(args, method.span.hi, op.span.hi - 1)])
             }
             ExprKind::Field(x, name) => self.dot(x.span.hi, |f| f.name(name)),
-            ExprKind::TupleField(x, i, span) => self.dot(x.span.hi, |f| prepend(f.inline_comments(span.lo), text(i.to_string()))),
+            ExprKind::TupleField(x, i, span) => {
+                let field = self.dot(x.span.hi, |f| prepend(f.inline_comments(span.lo), text(i.to_string())));
+                // Preserve a space before `.0` on numeric literals so that `1 .0` does not format as float literal `1.0`.
+                let number = matches!(x.kind, ExprKind::Int(_) | ExprKind::IntOverflow(_) | ExprKind::Float(_));
+                if number { cat(vec![text(" "), field]) } else { field }
+            }
             ExprKind::Index(x, idx) => {
                 let open = self.punct(x.span.hi, &Tok::LBracket, "[");
                 cat(vec![open, self.expr(idx), self.text_at(op.span.hi - 1, "]")])
@@ -1761,17 +1790,36 @@ impl<'a> Formatter<'a> {
         }
     }
 
+    fn pattern_list(&mut self, brackets: (&'static str, &'static str), open: u32, close: u32, elems: &[CElem<'a>]) -> Doc {
+        let atom = |el: &CElem| match el {
+            CElem::Pat(p) => {
+                matches!(p.kind, PatternKind::Wildcard | PatternKind::Binding(_) | PatternKind::Literal(_) | PatternKind::Range(..))
+            }
+            CElem::Rest(..) => true,
+            _ => false,
+        };
+        if let [el] = elems
+            && atom(el)
+            && !self.has_comment_before(close)
+        {
+            let pre = self.inline_comments(open);
+            return prepend(pre, cat(vec![text(brackets.0), self.celem(*el), text(brackets.1)]));
+        }
+        self.comma_list(brackets, open, close, elems, PATTERN)
+    }
+
     /// Call arguments; the `(` is the first one after `after`.
     fn call_args(&mut self, args: &'a [Arg], after: u32, close: u32) -> Doc {
         let open = self.find_tok(after, &Tok::LParen);
         let pre = self.inline_comments(open);
         if let [arg] = args {
             // A lone literal or name gains nothing from a line of its own.
-            if arg.name.is_none() && is_atom(&arg.value) && !self.has_comment_before(close) {
+            if arg.name.is_none() && !arg.spread && is_atom(&arg.value) && !self.has_comment_before(close) {
                 return prepend(pre, cat(vec![text("("), self.expr(&arg.value), text(")")]));
             }
         }
-        let elems: Vec<CElem> = args.iter().map(CElem::Arg).collect();
+        let elems: Vec<CElem> =
+            args.iter().map(|a| if a.spread { CElem::Base(&a.value, self.prev_tok(a.value.span.lo)) } else { CElem::Arg(a) }).collect();
         let hug = args.last().is_some_and(|a| is_huggable(&a.value));
         prepend(pre, self.comma_list(("(", ")"), open, close, &elems, ListOpts { hug_last: hug, ..LIST }))
     }
@@ -1859,63 +1907,33 @@ impl<'a> Formatter<'a> {
             PatternKind::Literal(PatLit::Unit) => cat(vec![text("("), self.text_at(p.span.hi - 1, ")")]),
             PatternKind::Literal(PatLit::Int(_)) | PatternKind::Range(..) => self.number(p.span),
             PatternKind::Tuple(ps) => {
-                let items = self.join(ps, Self::pat);
-                cat(vec![text("("), items, self.text_at(p.span.hi - 1, ")")])
+                let elems: Vec<CElem> = ps.iter().map(CElem::Pat).collect();
+                self.pattern_list(("(", ")"), p.span.lo, p.span.hi - 1, &elems)
             }
-            PatternKind::Variant { path, args } => {
-                let mut parts = vec![self.path(path)];
-                if let Some(args) = args {
-                    parts.push(self.punct(path[path.len() - 1].span.hi, &Tok::LParen, "("));
-                    parts.push(self.join(args, Self::pat));
-                    parts.push(self.text_at(p.span.hi - 1, ")"));
-                }
-                cat(parts)
-            }
-            PatternKind::Struct { path, fields, rest } => {
-                let mut parts = vec![self.path(path)];
-                let open = self.find_tok(path[path.len() - 1].span.hi, &Tok::LBrace);
-                if fields.is_empty() && !rest {
-                    parts.push(self.text_at(open, " {"));
-                    parts.push(self.text_at(p.span.hi - 1, "}"));
-                } else {
-                    parts.push(self.text_at(open, " { "));
-                    parts.push(self.join(fields, |f, field| match &field.pattern {
-                        Some(x) => cat(vec![f.name(&field.name), f.punct(field.name.span.hi, &Tok::Colon, ": "), f.pat(x)]),
-                        None => f.name(&field.name),
-                    }));
-                    if *rest {
-                        parts.push(text(if fields.is_empty() { "" } else { ", " }));
-                        parts.push(self.punct(open, &Tok::DotDot, ".."));
+            PatternKind::Ctor { path, args } => {
+                let name = self.path(path);
+                match args {
+                    Some(args) => {
+                        let open = self.find_tok(path[path.len() - 1].span.hi, &Tok::LParen);
+                        let mut elems: Vec<CElem> = args.positional.iter().map(CElem::Pat).collect();
+                        elems.extend(args.named.iter().map(|(n, x)| CElem::NamedPat(n, x)));
+                        if args.rest {
+                            let after = args.patterns().map(|x| x.span.hi).max().unwrap_or(open);
+                            elems.push(CElem::Rest(self.find_tok(after, &Tok::DotDot), None));
+                        }
+                        cat(vec![name, self.pattern_list(("(", ")"), open, p.span.hi - 1, &elems)])
                     }
-                    parts.push(self.text_at(p.span.hi - 1, " }"));
+                    None => name,
                 }
-                cat(parts)
             }
             PatternKind::List { before, rest, after } => {
-                let mut parts = vec![text("[")];
-                let mut first = true;
-                let mut sep = |parts: &mut Vec<Doc>| {
-                    if !std::mem::take(&mut first) {
-                        parts.push(text(", "));
-                    }
-                };
-                for x in before {
-                    sep(&mut parts);
-                    parts.push(self.pat(x));
-                }
+                let mut elems: Vec<CElem> = before.iter().map(CElem::Pat).collect();
                 if let Some(name) = rest {
-                    sep(&mut parts);
-                    parts.push(self.punct(before.last().map_or(p.span.lo, |x| x.span.hi), &Tok::DotDot, ".."));
-                    if let Some(name) = name {
-                        parts.push(self.name(name));
-                    }
+                    let at = self.find_tok(before.last().map_or(p.span.lo, |x| x.span.hi), &Tok::DotDot);
+                    elems.push(CElem::Rest(at, name.as_ref()));
                 }
-                for x in after {
-                    sep(&mut parts);
-                    parts.push(self.pat(x));
-                }
-                parts.push(self.text_at(p.span.hi - 1, "]"));
-                cat(parts)
+                elems.extend(after.iter().map(CElem::Pat));
+                self.pattern_list(("[", "]"), p.span.lo, p.span.hi - 1, &elems)
             }
             PatternKind::Or(ps) => {
                 let mut parts = Vec::new();

@@ -12,10 +12,10 @@ impl Describe for Word {
     fn describe(self) -> str { self.w }
     fn shout(self) -> str { "~\(self.w)~" }
 }
-let p = Point { x: 1, y: 2 }
+let p = Point(x: 1, y: 2)
 print(p.describe())
 print(p.shout())
-print(Word { w: "hi" }.shout())
+print(Word(w: "hi").shout())
 --- stdout
 point 1,2
 POINT 1,2!
@@ -34,7 +34,7 @@ impl Describe for int {
 }
 fn twice<T: Describe>(x: T) -> str { x.describe() + " " + x.describe() }
 fn all<T>(xs: [T]) -> [str] where T: Describe { xs.map(x => x.describe()) }
-print(twice(Point { x: 3 }))
+print(twice(Point(x: 3)))
 print(twice(7))
 print(all([1, 2]))
 --- stdout
@@ -209,7 +209,7 @@ struct Celsius { c: float }
 impl Into<float> for Celsius {
     fn into(self) -> float { self.c * 1.8 + 32.0 }
 }
-let f = Celsius { c: 100.0 }.into()
+let f = Celsius(c: 100.0).into()
 print(f + 0.5)
 --- stdout
 212.5
@@ -229,7 +229,7 @@ impl Show for str {
     fn show(self) -> str { "s:" + self }
 }
 fn show_it<T: Show>(x: T) -> str { x.show() }
-let b = Box { v: 3 }
+let b = Box(v: 3)
 print(show_it(b.into()))
 --- stdout
 s:boxed 3
@@ -271,8 +271,8 @@ impl<K: Hash, V: Describe> Describe for [K: V] {
     fn describe(self) -> str { "\(self.len()) entries, first " + (self.values().first().describe()) }
 }
 fn show<T: Describe>(x: T) -> str { x.describe() }
-let p = Point { x: 1 }
-print([p, Point { x: 2 }].describe())
+let p = Point(x: 1)
+print([p, Point(x: 2)].describe())
 print([[p], []].describe())
 print(show([Some(p), None]))
 print(["a": p].describe())
@@ -314,7 +314,7 @@ print("héllo".size())
 print(b"ab".size())
 print(().size())
 print((0..10).size())
-print(set([1, 2, 2]).size())
+print(Set([1, 2, 2]).size())
 print(("ab", ()).size())
 print(("a", b"xyz", 2s).size())
 --- stdout
@@ -351,7 +351,7 @@ impl<A, B> Describe for Pair<A, B> where A: Describe, B: Describe {
 }
 let t = Tree.Node(Tree.Leaf, 1, Tree.Node(Tree.Leaf, 2, Tree.Leaf))
 print(t.describe())
-print(Pair { a: 1, b: t }.describe())
+print(Pair(a: 1, b: t).describe())
 --- stdout
 (. 1 (. 2 .))
 <1, (. 1 (. 2 .))>
@@ -415,8 +415,8 @@ impl Mapper for Nums {
     fn map_all<V: Describe>(self, f: fn(int) -> V) -> [str] { self.xs.map(x => f(x).describe()) }
 }
 fn through_trait<M: Mapper>(m: M) -> str { m.first(x => x * 100) }
-print(Nums { xs: [1, 2] }.map_all(x => x + 1))
-print(through_trait(Nums { xs: [3] }))
+print(Nums(xs: [1, 2]).map_all(x => x + 1))
+print(through_trait(Nums(xs: [3])))
 --- stdout
 ["i2", "i3"]
 i300
@@ -441,7 +441,7 @@ fn collect<I: Iter<T>, T>(it: I) -> [T] {
     while let Some(x) = it.next() { out.push(x) }
     out
 }
-print(collect(Counter { i: 0, n: 4 }))
+print(collect(Counter(i: 0, n: 4)))
 --- stdout
 [1, 2, 3, 4]
 
@@ -460,7 +460,7 @@ impl Describe for int {
 }
 /// Describes one value.
 fn describe_one<T: Describe>(x: T) -> str { x.describe() }
-let ps = [Point { x: 1 }, Point { x: 2 }]
+let ps = [Point(x: 1), Point(x: 2)]
 print(ps.map(describe_one))
 print(ps.map(Point.describe))
 print(ps.map(Describe.describe))
@@ -468,7 +468,7 @@ print([1, 2].map(Describe.describe))
 let f = describe_one
 print(f(3))
 help(describe_one)
-print(describe_one(Point { x: 5 }))
+print(describe_one(Point(x: 5)))
 --- stdout
 ["P1", "P2"]
 ["P1", "P2"]
@@ -561,10 +561,10 @@ struct Box<T> {
 extend<T> Box<T> {
     fn twice(self) -> str where T: Describe { self.show() + self.show() }
 }
-let b = Box { item: 3 }
+let b = Box(item: 3)
 print(b.show())
 print(b.twice())
-print(Box { item: "plain" }.get())
+print(Box(item: "plain").get())
 print([b].map(Box.show))
 --- stdout
 Box(i3)
@@ -580,7 +580,7 @@ struct Box<T> {
     item: T
     fn show(self) -> str where T: Describe { self.item.describe() }
 }
-print(Box { item: 1 }.show())
+print(Box(item: 1).show())
 --- error
 8: int does not implement `Describe`
 
@@ -600,7 +600,7 @@ fn with_extra<T: Describe>(items: [T], text: str) -> str {
     let extra: [P] = json.decode(text).unwrap()
     items.map(x => x.describe()).join(",") + ";" + extra.map(p => p.describe()).join(",")
 }
-print(with_extra([P { x: 1 }], r#"[{"x": 2}, {"x": 3}]"#))
+print(with_extra([P(x: 1)], r#"[{"x": 2}, {"x": 3}]"#))
 --- stdout
 P1;P2,P3
 
@@ -655,7 +655,7 @@ struct Box<T> { item: T }
 extend<T: Describe> Box<T> {
     fn show(self) -> str { "[" + self.item.describe() + "]" }
 }
-print(Box { item: 4 }.show())
+print(Box(item: 4).show())
 --- stdout
 [i4]
 
@@ -673,7 +673,7 @@ impl Describe for P {
 impl Label for P {
     fn describe(self) -> str { "label \(self.x)" }
 }
-let p = P { x: 1 }
+let p = P(x: 1)
 print(Describe.describe(p))
 print(Label.describe(p))
 print([p].map(Label.describe))
@@ -696,7 +696,7 @@ impl Describe for P {
 impl Label for P {
     fn describe(self) -> str { "label" }
 }
-let p = P { x: 1 }
+let p = P(x: 1)
 print(Describe.describe(p))
 print(Label.describe(p))
 print(p.describe())
@@ -727,7 +727,7 @@ impl Describe for P {
     fn describe(self) -> str { "trait" }
 }
 fn generic<T: Describe>(x: T) -> str { x.describe() }
-let p = P { x: 1 }
+let p = P(x: 1)
 print(p.describe())
 print(Describe.describe(p))
 print(generic(p))
@@ -745,21 +745,21 @@ impl Show for P {
     fn to_str(self) -> str { "custom" }
 }
 fn show<T: Show>(x: T) -> str { x.to_str() }
-let p = P { x: 1 }
+let p = P(x: 1)
 print(p.to_str())
 print(show(p))
 print("\(p)")
 --- stdout
 custom
 custom
-P { x: 1 }
+P(x: 1)
 
 === marker traits
 trait Marker {}
 struct P { x: int }
 impl Marker for P {}
 fn only_marked<T: Marker>(x: T) -> T { x }
-print(only_marked(P { x: 2 }).x)
+print(only_marked(P(x: 2)).x)
 --- stdout
 2
 
@@ -773,13 +773,13 @@ impl shapes.Shape for Circle {
 }
 fn describe<T: Shape>(x: T) -> str { "\(x.name()) \(x.area())" }
 fn describe2<T: shapes.Shape>(x: T) -> str { x.name() }
-print(describe(Circle { r: 1.0 }))
-print(describe(shapes.Square { side: 2.0 }))
-print(describe2(shapes.Square { side: 3.0 }))
-print(shapes.total([Circle { r: 1.0 }, Circle { r: 2.0 }]))
-print(shapes.Shape.area(Circle { r: 2.0 }))
-print(shapes.Square { side: 2.0 }.area())
-print(shapes.Square { side: 2.0 }.size())
+print(describe(Circle(r: 1.0)))
+print(describe(shapes.Square(side: 2.0)))
+print(describe2(shapes.Square(side: 3.0)))
+print(shapes.total([Circle(r: 1.0), Circle(r: 2.0)]))
+print(shapes.Shape.area(Circle(r: 2.0)))
+print(shapes.Square(side: 2.0).area())
+print(shapes.Square(side: 2.0).size())
 --- file shapes.sand
 /// Something with an area.
 pub trait Shape {
@@ -837,7 +837,7 @@ impl Named for Point {
 === private traits are not visible to other modules
 import "./lib.sand"
 fn f<T: lib.Secret>(x: T) {}
-print(lib.P { x: 1 }.secret())
+print(lib.P(x: 1).secret())
 --- file lib.sand
 pub struct P { pub x: int }
 trait Secret {
@@ -963,9 +963,9 @@ impl<T: Describe> Describe for [T] {
     fn describe(self) -> str { "list" }
 }
 fn show<T: Describe>(x: T) -> str { x.describe() }
-print(show(Point { x: 1 }))
+print(show(Point(x: 1)))
 print(show(1))
-print(show([[Point { x: 1 }]]))
+print(show([[Point(x: 1)]]))
 print(show([["s"]]))
 print("s".describe())
 --- error
@@ -1252,7 +1252,7 @@ impl lib.Named for Mine {
 fn f<T: Combine>(x: T, n: int = 0) -> T { x.combine(x, n) }
 print(f(1))
 print(1.twice(2))
-print(Mine { x: 1 }.name())
+print(Mine(x: 1).name())
 --- file lib.sand
 pub trait Named {
     fn name(self) -> str
@@ -1269,7 +1269,7 @@ impl Keyed for Id {
     fn key(self) -> str { "id\(self.n)" }
 }
 fn keys<T: Keyed>(xs: [T]) -> [str] {
-    set(xs).to_list().map(x => x.key())
+    Set(xs).to_list().map(x => x.key())
 }
 trait Scale: Num {
     fn double(self) -> Self { self + self }
@@ -1277,8 +1277,8 @@ trait Scale: Num {
 impl Scale for int {}
 impl Scale for float {}
 fn bump<T: Scale>(x: T) -> T { x.double() + T.one() }
-print(keys([Id { n: 1 }, Id { n: 1 }, Id { n: 2 }]))
-print(Id { n: 1 }.same(Id { n: 1 }))
+print(keys([Id(n: 1), Id(n: 1), Id(n: 2)]))
+print(Id(n: 1).same(Id(n: 1)))
 print(bump(2))
 print(bump(0.5))
 --- stdout
@@ -1335,14 +1335,14 @@ enum Tree<T: Ord> {
         }
     }
 }
-print(Labeled { items: [1, 2] }.labels())
+print(Labeled(items: [1, 2]).labels())
 let t: Tree<int> = Tree.Leaf
 print(t.insert(3).insert(1).insert(2).items())
 --- stdout
 ["#1", "#2"]
 [1, 2, 3]
 
-=== struct literals, variants and methods check the traits of their type's parameters
+=== constructions, variants and methods check the traits of their type's parameters
 trait Describe {
     fn describe(self) -> str
 }
@@ -1355,11 +1355,11 @@ enum Tree<T: Describe> {
     Leaf
     Node(Tree<T>, T)
 }
-let l = Labeled { items: ["a"] }
+let l = Labeled(items: ["a"])
 print(l.labels())
 let t: Tree<str> = Tree.Leaf
 let n = Tree.Node(Tree.Leaf, 1.5)
-fn wrap<T>(x: T) -> Labeled<T> { Labeled { items: [x] } }
+fn wrap<T>(x: T) -> Labeled<T> { Labeled(items: [x]) }
 --- error
 13: str does not implement `Describe`
 14: str does not implement `Describe`
@@ -1380,8 +1380,8 @@ fn outer() {
 struct S { x: int }
 impl Hash for S {}
 impl Num for S {
-    fn zero() -> S { S { x: 0 } }
-    fn one() -> S { S { x: 1 } }
+    fn zero() -> S { S(x: 0) }
+    fn one() -> S { S(x: 1) }
 }
 trait Ord {}
 --- error
@@ -1421,9 +1421,9 @@ trait Keyed: Hash {
 impl Keyed for Hash {
     fn key(self) -> str { self.hex }
 }
-fn count<K: Hash>(xs: [K]) -> int { set(xs).len() }
-print(count([Hash { hex: "a" }, Hash { hex: "a" }]))
-print(Hash { hex: "b" }.key())
+fn count<K: Hash>(xs: [K]) -> int { Set(xs).len() }
+print(count([Hash(hex: "a"), Hash(hex: "a")]))
+print(Hash(hex: "b").key())
 --- stdout
 1
 b
@@ -1484,11 +1484,11 @@ struct Box<T: Into<Later>> {
 }
 struct Later { n: int }
 impl Into<Later> for int {
-    fn into(self) -> Later { Later { n: self } }
+    fn into(self) -> Later { Later(n: self) }
 }
-print(Box { v: 3 }.get())
+print(Box(v: 3).get())
 --- stdout
-Later { n: 3 }
+Later(n: 3)
 
 === extend blocks use the traits of their type's parameters
 trait Describe {
@@ -1501,10 +1501,10 @@ struct Bag<T: Hash + Describe> {
     items: [T]
 }
 extend<U> Bag<U> {
-    fn unique(self) -> int { set(self.items).len() }
+    fn unique(self) -> int { Set(self.items).len() }
     fn labels(self) -> [str] { self.items.map(x => x.describe()) }
 }
-let b = Bag { items: [1, 1, 2] }
+let b = Bag(items: [1, 1, 2])
 print(b.unique())
 print(b.labels())
 --- stdout
@@ -1546,7 +1546,7 @@ extend<U> Outer<U> {
 }
 enum A<T> { One(B<T>?), Zero }
 enum B<T> { Two(A<T>, [T: int]) }
-let o = Outer { b: Bag { items: set(["x"]) } }
+let o = Outer(b: Bag(items: Set(["x"])))
 print(o.has("x"))
 help(Outer)
 help(A)
@@ -1563,6 +1563,7 @@ Methods:
 Implements:
     Eq
     Encode where U: Encode
+    Decode where U: Decode
 enum A<T: Hash>
 
 Variants:
@@ -1572,6 +1573,7 @@ Variants:
 Implements:
     Eq
     Encode where T: Encode
+    Decode where T: Decode
 
 === field and payload types meet the requirements of their type constructors
 trait Describe { fn describe(self) -> str }
@@ -1591,7 +1593,7 @@ enum E { Keyed([float: int]) }
 trait Make { fn make() -> Self }
 impl Make for int { fn make() -> int { 7 } }
 struct Bag<T: Make + Ord> { x: T = T.make(), big: bool = false }
-struct Keys<T: Hash> { s: Set<T> = set([]) }
+struct Keys<T: Hash> { s: Set<T> = Set([]) }
 --- error
 3: field defaults cannot use `Make`, which type parameter `T` requires, because defaults receive no trait dictionaries
 

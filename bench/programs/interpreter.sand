@@ -103,8 +103,8 @@ enum Token {
     Eof
 }
 
-let KEYWORDS = set(["fn", "let", "if", "else", "while", "return", "and", "or", "not"])
-let TWO_CHAR_SYMS = set(["==", "!=", "<=", ">="])
+let KEYWORDS = Set(["fn", "let", "if", "else", "while", "return", "and", "or", "not"])
+let TWO_CHAR_SYMS = Set(["==", "!=", "<=", ">="])
 
 struct Lexer {
     src: [str]
@@ -272,7 +272,7 @@ struct Parser {
                         self.expect(Token.Sym(","))?
                     }
                 }
-                Ok(Stmt.Func(FnDef { name, params, body: self.block()? }))
+                Ok(Stmt.Func(FnDef(name, params, body: self.block()?)))
             }
             Keyword("let") => {
                 self.pos += 1
@@ -563,7 +563,7 @@ struct Env {
                 for (param, arg) in f.params.zip(args) {
                     frame[param] = arg
                 }
-                let callee = Env { scopes: [self.scopes[0], frame] }
+                let callee = Env(scopes: [self.scopes[0], frame])
                 match callee.run(f.body)? {
                     Return(v) => Ok(v)
                     Next => Ok(Value.Int(0))
@@ -593,8 +593,8 @@ fn binary(op: BinOp, a: Value, b: Value) -> Result<Value, str> {
 }
 
 fn parse(source: str) -> Result<([Token], [Stmt]), str> {
-    let tokens = Lexer { src: source.chars() }.tokens()?
-    let program = Parser { tokens }.program()?
+    let tokens = Lexer(src: source.chars()).tokens()?
+    let program = Parser(tokens).program()?
     Ok((tokens, program))
 }
 
@@ -608,4 +608,4 @@ for _ in 0..PARSE_ROUNDS {
 print("parsed \(PARSE_ROUNDS) times: \(token_total) tokens, \(stmt_total) statements")
 
 let (_, program) = parse(SOURCE)?
-Env { scopes: [[:]] }.run(program)?
+Env(scopes: [[:]]).run(program)?

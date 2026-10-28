@@ -79,6 +79,22 @@ fn f() {}
 /// Second line.
 fn f() {}
 
+=== a doc comment that does not document an item becomes a line comment
+let l = /// stray
+3
+fn f() {
+    /// on a local
+    let x = 1
+}
+--- fmt
+// stray
+let l = 3
+
+fn f() {
+    // on a local
+    let x = 1
+}
+
 === short inline blocks stay inline
 fn add(a: int, b: int) -> int { a + b }
 let v = if a { 1 } else { 2 }
@@ -189,13 +205,13 @@ let f: fn(int, str) -> bool = g
 
 === patterns are formatted
 match p {
-    Point{x:0,..}=>1
+    Point(x:0,..)=>1
     [a,..rest]|[a]=>2
     (a,b)if a>b=>3
 }
 --- fmt
 match p {
-    Point { x: 0, .. } => 1
+    Point(x: 0, ..) => 1
     [a, ..rest] | [a] => 2
     (a, b) if a > b => 3
 }
@@ -259,13 +275,13 @@ pub struct C {
     name: str
 }
 
-=== struct literals and comprehensions
-let p=Point{x:1,..q}
+=== constructions and comprehensions
+let p=Point(x:1,..q)
 let ys=[x*2 for x in xs if x>0]
 let m=[k:v for (k,v) in pairs]
 let e=[:]
 --- fmt
-let p = Point { x: 1, ..q }
+let p = Point(x: 1, ..q)
 let ys = [x * 2 for x in xs if x > 0]
 let m = [k: v for (k, v) in pairs]
 let e = [:]
@@ -402,3 +418,72 @@ pub struct Account {
 
     pub fn describe(self) -> str { self.owner }
 }
+
+=== long patterns are broken one element per line
+struct Rect { width_in_pixels: int, height_in_pixels: int, depth: int = 0 }
+let triple = (1, 2, 3)
+match Rect(width_in_pixels: 1, height_in_pixels: 2) {
+    Rect(width_in_pixels: the_width_of_the_rect, height_in_pixels: the_height_of_the_rect, ..) => print(1)
+}
+let (first_element_of_a_tuple, second_element_of_a_tuple, third_element_of_a_much_longer_tuple) = triple
+match [1, 2, 3] {
+    [first_element_of_a_list, second_element_of_a_list, ..all_the_other_elements_of_the_list] => print(2)
+    _ => print(3)
+}
+match Rect(1, 2) { Rect(w, // the width
+  ..) => print(w) }
+--- fmt
+struct Rect { width_in_pixels: int, height_in_pixels: int, depth: int = 0 }
+
+let triple = (1, 2, 3)
+match Rect(width_in_pixels: 1, height_in_pixels: 2) {
+    Rect(
+        width_in_pixels: the_width_of_the_rect,
+        height_in_pixels: the_height_of_the_rect,
+        ..
+    ) => print(1)
+}
+let (
+    first_element_of_a_tuple,
+    second_element_of_a_tuple,
+    third_element_of_a_much_longer_tuple,
+) = triple
+match [1, 2, 3] {
+    [
+        first_element_of_a_list,
+        second_element_of_a_list,
+        ..all_the_other_elements_of_the_list
+    ] => print(2)
+    _ => print(3)
+}
+match Rect(1, 2) {
+    Rect(
+        w, // the width
+        ..
+    ) => print(w)
+}
+
+=== a pattern that fits is not broken for the text after it
+match ["help"] {
+    ["help"] => print("a long text that makes this line longer than one hundred columns when printed")
+    _ => print(0)
+}
+match (1, 2) {
+    (first, second) => print("a long text that makes this line longer than one hundred columns, as here")
+}
+let (a, b) = ("a long text that makes this line longer than one hundred columns when it is printed", 1)
+--- fmt
+match ["help"] {
+    ["help"] => print("a long text that makes this line longer than one hundred columns when printed")
+    _ => print(0)
+}
+match (1, 2) {
+    (
+        first,
+        second,
+    ) => print("a long text that makes this line longer than one hundred columns, as here")
+}
+let (a, b) = (
+    "a long text that makes this line longer than one hundred columns when it is printed",
+    1,
+)

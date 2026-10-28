@@ -314,6 +314,11 @@ impl Checker {
                 return Some(Target::Field(d, i as u32, ty));
             }
         }
+        if name == "init" {
+            let ty = c.native_prefix(&self.types, &self.syms);
+            self.error(span, format!("`init` is not a member; construct a value with `{ty}(...)`"));
+            return None;
+        }
         if let Some(fs) = self.methods_named(c, name) {
             let fs: Vec<FnId> = self.methods_of(c).into_iter().filter(|f| fs.contains(f)).collect();
             if !fs.is_empty() {
@@ -457,9 +462,11 @@ impl Checker {
         names
     }
 
-    /// Returns the visible inherent methods of `c` in declaration order.
+    /// Returns the visible inherent methods of `c` (excluding `init`) in
+    /// declaration order.
     pub(super) fn methods_of(&self, c: Ctor) -> Vec<FnId> {
-        let shown = |f: FnId| self.visible(self.fns[f as usize].module, self.fns[f as usize].is_pub);
+        let init = self.init_method(c);
+        let shown = |f: FnId| self.visible(self.fns[f as usize].module, self.fns[f as usize].is_pub) && Some(f) != init;
         let mut fs: Vec<FnId> = self
             .methods
             .entries()
@@ -691,6 +698,11 @@ impl Checker {
                 })
                 .collect();
             section(out, "Fields", &fields);
+        }
+        if let Some(f) = self.init_method(c).filter(|&f| self.visible(self.fns[f as usize].module, self.fns[f as usize].is_pub)) {
+            let sig = self.signature(f, false);
+            let sig = format!("{}{}", c.native_prefix(&self.types, &self.syms), sig.strip_prefix("fn init").unwrap_or(&sig));
+            section(out, "Construct", &[(sig, self.fns[f as usize].doc.clone())]);
         }
         let methods: Vec<(String, Option<Arc<str>>)> = self
             .methods_of(c)
@@ -1050,8 +1062,8 @@ impl Checker {
             ConstVal::Range(a, b, inclusive) => format!("{a}..{}{b}", if *inclusive { "=" } else { "" }),
             ConstVal::Tuple(xs) => format!("({})", list(xs)),
             ConstVal::List(xs) => format!("[{}]", list(xs)),
-            ConstVal::Set(xs) if xs.is_empty() => "set()".into(),
-            ConstVal::Set(xs) => format!("set([{}])", list(xs)),
+            ConstVal::Set(xs) if xs.is_empty() => "Set()".into(),
+            ConstVal::Set(xs) => format!("Set([{}])", list(xs)),
             ConstVal::Map(kvs) if kvs.is_empty() => "[:]".into(),
             ConstVal::Map(kvs) => {
                 let entries: Vec<String> = kvs.iter().map(|(k, v)| format!("{}: {}", self.format_const(k), self.format_const(v))).collect();
@@ -1080,10 +1092,7 @@ impl Checker {
                 let def = &self.types[*d as usize];
                 let parts: Vec<String> =
                     def.fields().iter().zip(fields).map(|(f, x)| format!("{}: {}", self.name(f.name), self.format_const(x))).collect();
-                match parts.is_empty() {
-                    true => format!("{} {{}}", self.name(def.name)),
-                    false => format!("{} {{ {} }}", self.name(def.name), parts.join(", ")),
-                }
+                format!("{}({})", self.name(def.name), parts.join(", "))
             }
         }
     }

@@ -2,7 +2,7 @@
 import uuid
 import regex
 let id = uuid.v4()
-let r = regex.new("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")?
+let r = regex.Regex("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")?
 print(r.is_match(id))
 print(uuid.version(id))
 print(uuid.v4() != uuid.v4())

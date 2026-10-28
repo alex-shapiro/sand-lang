@@ -114,7 +114,7 @@ pub native fn encode<T: Encode>(value: T, indent: int = 0) -> str
 /// parsed. Fails with kind `"parse"` on invalid JSON syntax, missing required
 /// fields, or type mismatches, and fails with kind `"invalid"` if a map key
 /// type is not supported by `encode`.
-pub fn decode<reflect T: Encode>(text: str) -> Result<T> {
+pub fn decode<reflect T: Decode>(text: str) -> Result<T> {
     let decoded: Decoded<T> = decode_raw(text)
     match decoded {
         Done(value) => Ok(value)
@@ -128,7 +128,7 @@ pub fn decode<reflect T: Encode>(text: str) -> Result<T> {
     }
 }
 
-native fn decode_raw<reflect T: Encode>(text: str) -> Decoded<T>
+native fn decode_raw<reflect T: Decode>(text: str) -> Decoded<T>
 
 /// Converts `value` into a `Json` value using the same representation as
 /// `encode`. Aborts with kind `"invalid"` if `value` contains a map key type

@@ -191,7 +191,7 @@ bye
 import regex
 import json
 print("[0-9]{4} {x} }{ {{}}")
-print(regex.new("^[0-9]{4}$").unwrap().is_match("2024"))
+print(regex.Regex("^[0-9]{4}$").unwrap().is_match("2024"))
 let doc = json.parse("{\"a\": {\"b\": [1, 2]}}").unwrap()
 print(doc.path("a.b.1"))
 --- stdout
@@ -406,6 +406,26 @@ let café = 1
 ﻿print("bom ok")
 --- stdout
 bom ok
+
+=== module doc comments come before the first item
+//! The module.
+let x = 1 //! not the module
+print(x)
+--- error
+2: a `//!` module documentation comment must come before the first item
+
+=== a `///` after code on its line does not document an item
+let x = 1 /// about nothing
+/// Doubles.
+fn double(n: int) -> int { n * 2 }
+fn plain() {}
+help(double)
+help(plain)
+--- stdout
+fn double(n: int) -> int
+
+Doubles.
+fn plain()
 
 === unterminated block comment
 /* never closed

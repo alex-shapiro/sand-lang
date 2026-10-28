@@ -127,7 +127,6 @@ test("counts past u32::MAX keep their meaning with a 32-bit usize", async () => 
     `print((0..${BIG}).to_list().len())`,
     `print((0..${BIG}).reversed().len())`,
     `print([0; ${BIG}].len())`,
-    `import json\nprint(json.encode(0..${BIG}).len())`,
   ]) {
     const { result } = await run(source, { policy: "limit memory 4M" });
     assert.equal(result.error?.kind, "limit", source);
@@ -142,7 +141,7 @@ print(xs.skip(${BIG}))
 print(xs.chunks(${BIG}))
 print(xs.windows(${BIG}))
 print((0..10000000000).step_by(5000000000))
-let ch = task.channel(capacity: ${BIG})
+let ch = Channel(capacity: ${BIG})
 ch.send(1)
 print(ch.len())`);
   assert.equal(result.ok, true, JSON.stringify(result.error));

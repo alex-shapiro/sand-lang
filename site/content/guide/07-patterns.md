@@ -55,7 +55,7 @@ An or-pattern (`pat1 | pat2`) matches if any alternative matches; every alternat
 
 ### Enum variants
 
-A variant pattern matches a specific enum variant and destructures its payload positionally:
+A variant pattern matches a specific enum variant and destructures its payload, positionally or by field name (`Rect(h: height, ..)`):
 
 ```sand
 enum Shape {
@@ -69,7 +69,7 @@ fn name(s: Shape) -> str {
         Circle(r) if r == 0.0 => "a point"
         Circle(_) => "a circle"
         Rect(w, h) if w == h => "a square"
-        Rect(_, _) | Empty => "something else"
+        Rect(..) | Empty => "something else"
     }
 }
 
@@ -80,7 +80,7 @@ print(name(Shape.Empty))
 
 ### Structs
 
-A struct pattern matches fields by name (`field: pattern` or shorthand `field`), and `..` ignores any remaining fields:
+A struct pattern matches fields in declaration order or by name (`field: pattern`), and `..` ignores any remaining fields:
 
 ```sand
 struct User {
@@ -91,15 +91,15 @@ struct User {
 
 fn greet(u: User) -> str {
     match u {
-        User { admin: true, name, .. } => "welcome back, \(name)"
-        User { age: 0..=17, .. } => "hi"
-        User { name, .. } => "hello, \(name)"
+        User(admin: true, name: name, ..) => "welcome back, \(name)"
+        User(age: 0..=17, ..) => "hi"
+        User(name, ..) => "hello, \(name)"
     }
 }
 
-print(greet(User { name: "ann", age: 30, admin: true }))
-print(greet(User { name: "bo", age: 12, admin: false }))
-print(greet(User { name: "cy", age: 40, admin: false }))
+print(greet(User(name: "ann", age: 30, admin: true)))
+print(greet(User(name: "bo", age: 12, admin: false)))
+print(greet(User(name: "cy", age: 40, admin: false)))
 ```
 
 ### Lists

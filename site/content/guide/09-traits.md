@@ -30,7 +30,8 @@ An unconstrained type parameter `T` supports only storage, passing, and formatti
 | `Ord`    | `<`, `>`, `sorted()`, `max()`    | numbers, `str`, lists, tuples                                   |
 | `Hash`   | map keys and set elements        | `int`, `bool`, `str`, tuples                                    |
 | `Num`    | `+`, `-`, `*`, `/`, `T.zero()`   | `int`, `float`                                                  |
-| `Encode` | `json.encode()`, `json.decode()` | all types except functions, tasks, channels, and native objects |
+| `Encode` | `json.encode()`                  | all types except functions, tasks, channels, and native objects |
+| `Decode` | `json.decode()`                  | `Encode` types except structs that declare `init`               |
 
 ```sand
 fn largest<T: Ord>(xs: [T]) -> T? {
@@ -99,7 +100,7 @@ fn show<T: Describe>(x: T) {
     print(x.describe())
 }
 
-let p = Point { x: 1, y: 2 }
+let p = Point(x: 1, y: 2)
 show(p)
 print(p.shout())
 ```
@@ -173,7 +174,7 @@ impl Named for Dog {
 
 impl Greeter for Dog {}
 
-print(Dog { nick: "rex" }.greet())
+print(Dog(nick: "rex").greet())
 ```
 
 ## Impls for built-in types
@@ -222,13 +223,13 @@ impl Iterator<int> for Countdown {
     }
 }
 
-for x in (Countdown { n: 3 }) {
+for x in Countdown(n: 3) {
     print(x)
 }
-print(Countdown { n: 4 }.iter().map(x => x * 10).to_list())
+print(Countdown(n: 4).iter().map(x => x * 10).to_list())
 ```
 
-Enclose a struct literal in parentheses if it appears directly in a `for` loop header. For the complete list of iterator adapters and consumers, see the [`Iterator` reference](/std/prelude/Iterator/).
+For the complete list of iterator adapters and consumers, see the [`Iterator` reference](/std/prelude/Iterator/).
 
 ## Qualified calls
 
@@ -259,7 +260,7 @@ impl French for Guest {
     }
 }
 
-let g = Guest { name: "ann" }
+let g = Guest(name: "ann")
 print(English.hello(g))
 print(French.hello(g))
 ```
@@ -303,6 +304,6 @@ enum Shape {
     }
 }
 
-let shapes = [Shape.Round(Circle { r: 1.0 }), Shape.Boxy(Square { side: 2.0 })]
+let shapes = [Shape.Round(Circle(r: 1.0)), Shape.Boxy(Square(side: 2.0))]
 print(shapes.map(s => s.area()))
 ```

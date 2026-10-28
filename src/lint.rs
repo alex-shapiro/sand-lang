@@ -212,9 +212,6 @@ fn any_sub_expr(e: &Expr, f: &mut dyn FnMut(&Expr) -> bool) -> bool {
         ExprKind::Map(kvs) => kvs.iter().any(|(k, v)| f(k) || f(v)),
         ExprKind::ListComp(x, cs) => f(x) || clauses_any(cs, f),
         ExprKind::MapComp(k, v, cs) => f(k) || f(v) || clauses_any(cs, f),
-        ExprKind::StructLit { fields, base, .. } => {
-            fields.iter().any(|x| x.value.as_ref().is_some_and(&mut *f)) || base.as_deref().is_some_and(&mut *f)
-        }
         ExprKind::Unary(_, x)
         | ExprKind::Paren(x)
         | ExprKind::Try(x)
@@ -750,16 +747,6 @@ impl<'a> Linter<'a> {
                 self.expr(v);
                 self.pop_scope();
             }
-            ExprKind::StructLit { fields, base, .. } => {
-                for f in fields {
-                    if let Some(v) = &f.value {
-                        self.expr(v);
-                    }
-                }
-                if let Some(b) = base {
-                    self.expr(b);
-                }
-            }
             ExprKind::Unary(_, x)
             | ExprKind::Paren(x)
             | ExprKind::Try(x)
@@ -823,6 +810,9 @@ impl<'a> Linter<'a> {
             if f.mutable && !f.assigned {
                 self.warn(f.span.lo, "unnecessary-var", format!("`{}` is never reassigned; use `let`", f.name));
             }
+        }
+        for (sp, message) in lint.argument_order.iter().filter(|(sp, _)| sp.file == main) {
+            self.warn(sp.lo, "argument-order", message.clone());
         }
         for sp in lint.unused_results.iter().filter(|sp| sp.file == main) {
             self.warn(sp.lo, "unused-result", "this `Result` is discarded; handle it with `?`, `match` or `let _ =`".into());

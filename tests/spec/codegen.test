@@ -189,7 +189,7 @@ print([1, 2, 3, 4].filter(v => v > 2))
 4
 [3, 4]
 
-=== struct literals evaluate fields in source order
+=== constructions evaluate fields in source order
 struct P {
     x: int
     y: int
@@ -199,12 +199,12 @@ fn v(s: str, n: int) -> int {
     print(s)
     n
 }
-let p = P { y: v("y", 2), x: v("x", 1) }
-let q = P { z: v("z", 3), ..p }
+let p = P(y: v("y", 2), x: v("x", 1))
+let q = P(z: v("z", 3), ..p)
 let x = 5
-let r = P { x, y: x + 1 }
+let r = P(x, y: x + 1)
 print("\(p.x) \(p.y) \(p.z) \(q.x) \(q.y) \(q.z) \(r.x) \(r.y) \(r.z)")
-fn mk(a: int) -> P { P { x: a, y: a * 2 } }
+fn mk(a: int) -> P { P(x: a, y: a * 2) }
 print(mk(4).y)
 --- stdout
 y
@@ -328,7 +328,7 @@ fn f() -> int {
     n
 }
 print(f())
-let ch = task.channel()
+let ch = Channel()
 spawn {
     for i in 0..5 { ch.send(i * i) }
     ch.close()
@@ -339,7 +339,7 @@ for v in ch {
     s += v
 }
 print(s)
-let ch2 = task.channel()
+let ch2 = Channel()
 spawn {
     ch2.send((1, "a"))
     ch2.send((2, "b"))
@@ -394,7 +394,7 @@ struct P {
     x: int
     y: float
 }
-let p = P { x: 3, y: 1.5 }
+let p = P(x: 3, y: 1.5)
 print("P(\(p.x), \(p.y)) sum=\(p.x.to_float() + p.y) \(p:?) [\(p.x:>5)] \("lit")\("" + "x") \([1, 2]) \(Some("s"))")
 var s = ""
 for i in 0..5 { s += "\(i)," }
@@ -403,7 +403,7 @@ print(s)
 let name = "w"
 print("\(name)\(name:?)\(name:>3)")
 --- stdout
-P(3, 1.5) sum=4.5 P { x: 3, y: 1.5 } [    3] litx [1, 2] Some("s")
+P(3, 1.5) sum=4.5 P(x: 3, y: 1.5) [    3] litx [1, 2] Some("s")
 0,1,2,3,4,|0,1,2,3,4,|
 w"w"  w
 
@@ -421,7 +421,7 @@ for (k, (a, b)) in ["x": (1, 2)] { print("\(k) \(a) \(b)") }
 var fs: [fn() -> str] = []
 for (k, v) in ["p": 1, "q": 2] { fs.push(() => "\(k)\(v)") }
 print(fs.map(g => g()))
-let s = set([3, 1, 2])
+let s = Set([3, 1, 2])
 for x in s {
     s.remove(x)
     print(x)
@@ -472,9 +472,9 @@ let it = [1, 2, 3].iter()
 var s = 0
 while let Some(x) = it.next() { s += x }
 print(s)
-print(total([Sq { s: 2 }, Sq { s: 3 }]))
-print(last([Sq { s: 4 }], 3))
-let b = Box { f: x => x + 1, g: x => x * 2 }
+print(total([Sq(s: 2), Sq(s: 3)]))
+print(last([Sq(s: 4)], 3))
+let b = Box(f: x => x + 1, g: x => x * 2)
 var n = 0
 for i in 0..3 {
     n = b.f(n) + b.g(n)
@@ -633,7 +633,7 @@ m[big] = "big"
 m[(1, 2)] = "y"
 print("\(m.get((1, 2)) ?? "-") \(m.get((3000000000, 1)) ?? "-") \(m.get((2, 1)) ?? "-") \(m.contains((1, 2)))")
 print(m)
-print(set([(1, 2), (1, 2), (2, 1), big]).len())
+print(Set([(1, 2), (1, 2), (2, 1), big]).len())
 print([5, 6].enumerate())
 let (x, y) = a
 match c {
@@ -811,7 +811,7 @@ fn pair(n: int) -> (int, str)? {
     if n > 0 { Some((n, "n\(n)")) } else { None }
 }
 fn check(n: int) -> Result<int> {
-    if n < 0 { return Err(error("negative: \(n)")) }
+    if n < 0 { return Err(Error("negative: \(n)")) }
     Ok(n)
 }
 fn named(s: str) -> Shape { Shape.Named(s) }

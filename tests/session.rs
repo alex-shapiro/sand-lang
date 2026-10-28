@@ -151,9 +151,9 @@ fn later_definitions_shadow_earlier_ones() {
     r.ok("let greet = 42");
     assert_eq!(r.value("greet + 1"), "43");
     r.ok("struct Point { x: int, y: int }");
-    r.ok("let p = Point { x: 1, y: 2 }");
+    r.ok("let p = Point(x: 1, y: 2)");
     r.ok("struct Point { x: float }");
-    assert_eq!(r.value("Point { x: 1.5 }"), "Point { x: 1.5 }");
+    assert_eq!(r.value("Point(x: 1.5)"), "Point(x: 1.5)");
     assert_eq!(r.value("p.y"), "2");
     r.ok("enum Point { A, B }");
     assert_eq!(r.value("[Point.A, Point.B]"), "[A, B]");
@@ -166,7 +166,7 @@ fn later_definitions_shadow_earlier_ones() {
 fn types_methods_and_extend_across_inputs() {
     let mut r = Repl::new();
     r.ok("struct Counter {\n    var n: int = 0\n    fn inc(self) { self.n += 1 }\n}");
-    r.ok("let c = Counter {}");
+    r.ok("let c = Counter()");
     r.ok("c.inc()\nc.inc()");
     assert_eq!(r.value("c.n"), "2");
     r.ok("extend Counter {\n    fn get(self) -> int { self.n }\n}");
@@ -180,21 +180,33 @@ fn types_methods_and_extend_across_inputs() {
 }
 
 #[test]
+fn a_later_input_cannot_add_init() {
+    let mut r = Repl::new();
+    r.ok("import json\nstruct P { x: int }\nextend P {\n    fn get(self) -> int { self.x }\n}");
+    let msg = r.compile_error("extend P {\n    fn init(x: int) -> Result<P> { if x < 0 { Err(Error(\"neg\")) } else { Ok(P(x: x)) } }\n}");
+    assert!(msg.contains("`init` must be declared in the same input as `P`"), "{msg}");
+    r.ok(r#"let p: Result<P> = json.decode("{\"x\": -5}")"#);
+    assert_eq!(r.value("p"), "Ok(P(x: -5))");
+    r.ok("struct Q { x: int }\nextend Q {\n    fn init(x: int) -> Q { Q(x: x + 1) }\n}");
+    assert_eq!(r.value("Q(1)"), "Q(x: 2)");
+}
+
+#[test]
 fn reflect_descriptions_from_type_parameters_across_inputs() {
     let mut r = Repl::new();
     r.ok(r#"import json
 struct P { x: int }
-fn all<reflect T: Encode>(s: str) -> Result<[T]> { json.decode(s) }"#);
+fn all<reflect T: Decode>(s: str) -> Result<[T]> { json.decode(s) }"#);
     r.compile_error(
-        r#"fn opt<reflect T: Encode>(s: str) -> Result<T?> { json.decode(s) }
+        r#"fn opt<reflect T: Decode>(s: str) -> Result<T?> { json.decode(s) }
 let o: P? = opt("null")?
 let bad: int = "no""#,
     );
     r.ok(r#"let a: [P] = all("[{\"x\": 1}]")?"#);
-    assert_eq!(r.value("a"), "[P { x: 1 }]");
-    r.ok(r#"fn opt<reflect T: Encode>(s: str) -> Result<[T?]> { json.decode(s) }
+    assert_eq!(r.value("a"), "[P(x: 1)]");
+    r.ok(r#"fn opt<reflect T: Decode>(s: str) -> Result<[T?]> { json.decode(s) }
 let b: [[P]?] = opt("[null, [{\"x\": 2}]]")?"#);
-    assert_eq!(r.value("b"), "[None, Some([P { x: 2 }])]");
+    assert_eq!(r.value("b"), "[None, Some([P(x: 2)])]");
 }
 
 #[test]
@@ -203,7 +215,7 @@ fn traits_and_impls_across_inputs() {
     r.ok("trait Describe {\n    fn describe(self) -> str\n    fn shout(self) -> str { self.describe().to_upper() }\n}");
     r.ok("struct Cat { name: str }");
     r.ok("impl Describe for Cat {\n    fn describe(self) -> str { \"cat \\(self.name)\" }\n}");
-    assert_eq!(r.value("Cat { name: \"tom\" }.shout()"), "\"CAT TOM\"");
+    assert_eq!(r.value("Cat(name: \"tom\").shout()"), "\"CAT TOM\"");
     r.ok("fn all<T: Describe>(xs: [T]) -> [str] { xs.map(x => x.describe()) }");
     r.ok("impl Describe for int {\n    fn describe(self) -> str { \"int \\(self)\" }\n}");
     assert_eq!(r.value("all([1, 2])"), "[\"int 1\", \"int 2\"]");
@@ -222,13 +234,13 @@ fn iterators_labels_and_defer_across_inputs() {
     let mut r = Repl::new();
     r.ok("struct Countdown {\n    var n: int\n}");
     r.ok("impl Iterator<int> for Countdown {\n    fn next(self) -> int? {\n        if self.n <= 0 { return None }\n        self.n -= 1\n        Some(self.n + 1)\n    }\n}");
-    assert_eq!(r.value("Countdown { n: 3 }.iter().map(x => x * 10).to_list()"), "[30, 20, 10]");
+    assert_eq!(r.value("Countdown(n: 3).iter().map(x => x * 10).to_list()"), "[30, 20, 10]");
     r.ok("let evens = Iter.count_from(0).filter(x => x % 2 == 0)");
     assert_eq!(r.value("evens.take(3).to_list()"), "[0, 2, 4]");
     // The iterator persists between inputs (and is single-pass).
     assert_eq!(r.value("evens.first()"), "Some(6)");
     r.ok("var found = 0
-@outer for x in (Countdown { n: 5 }) {
+@outer for x in Countdown(n: 5) {
     for y in 0..x {
         if x * y == 6 {
             found = x
@@ -264,7 +276,7 @@ fn imports_mid_session() {
     let msg = r.compile_error("import regex\nlet bad: int = \"x\"");
     assert!(msg.contains("type mismatch"), "{msg}");
     r.ok("import regex");
-    assert_eq!(r.value("regex.new(\"a+\")?.is_match(\"caat\")"), "true");
+    assert_eq!(r.value("regex.Regex(\"a+\")?.is_match(\"caat\")"), "true");
     let msg = r.compile_error("import nope");
     assert!(msg.contains("unknown module `nope`"), "{msg}");
 }
@@ -406,7 +418,7 @@ fn exit_ends_the_input() {
 #[test]
 fn tasks_persist_across_inputs() {
     let mut r = Repl::new();
-    r.ok("let ch: Channel<int> = task.channel(10)");
+    r.ok("let ch: Channel<int> = Channel(10)");
     r.ok("let t = spawn {\n    var total = 0\n    for _ in 0..3 { total += ch.recv() ?? 0 }\n    total\n}");
     r.ok("ch.send(1);");
     r.ok("ch.send(2)\nch.send(3);");
@@ -555,12 +567,12 @@ fn top_level_use_bindings_persist_across_inputs() {
     r.ok("struct Res {\n    name: str\n    var closed: bool = false\n}");
     r.ok("impl Close for Res {\n    fn close(self) {\n        self.closed = true\n        print(\"closed \\(self.name)\")\n    }\n}");
     r.ok("let res = [1, 2]");
-    r.ok("use res = Res { name: \"a\" }");
+    r.ok("use res = Res(name: \"a\")");
     assert_eq!(r.value("res.closed"), "false");
     assert_eq!(r.value("res.name"), "\"a\"");
-    r.ok("use _ = Res { name: \"b\" }");
+    r.ok("use _ = Res(name: \"b\")");
     assert_eq!(r.take_out(), "");
-    r.ok("{\n    use inner = Res { name: \"c\" }\n}");
+    r.ok("{\n    use inner = Res(name: \"c\")\n}");
     assert_eq!(r.take_out(), "closed c\n");
     let msg = r.compile_error("use n = 1");
     assert!(msg.contains("`use` needs a value whose type implements `Close`"), "{msg}");
@@ -762,7 +774,7 @@ fn tasks_run_between_inputs() {
     assert!(r.idle(300).is_empty());
     assert_eq!(r.value("log"), "[\"tick\", \"tock\"]");
     assert_eq!(r.take_out(), "tick\n");
-    r.ok("let ch: Channel<int> = task.channel(1)\nlet reader = spawn ch.recv()");
+    r.ok("let ch: Channel<int> = Channel(1)\nlet reader = spawn ch.recv()");
     assert!(r.idle(50).is_empty());
     r.ok("ch.send(4);");
     assert_eq!(r.value("reader.wait()"), "Some(4)");
@@ -921,7 +933,7 @@ fn scripts_read_the_input_the_host_feeds() {
 fn redefined_types_are_told_apart_in_messages() {
     let mut r = Repl::new();
     r.ok("struct Point { x: int }");
-    r.ok("let p = Point { x: 1 }");
+    r.ok("let p = Point(x: 1)");
     r.ok("struct Point { x: int }");
     r.ok("fn f(q: Point) -> int { q.x }");
     let msg = r.compile_error("f(p)");

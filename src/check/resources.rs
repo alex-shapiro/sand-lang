@@ -549,7 +549,7 @@ impl Ctx<'_> {
             | HKind::Global(_)
             | HKind::FnValue { .. }
             | HKind::TypeDesc { .. }
-            | HKind::VariantFn { .. }
+            | HKind::CtorFn { .. }
             | HKind::Tag(_)
             | HKind::Continue { .. }
             | HKind::Evidence(_)
@@ -795,7 +795,9 @@ impl Ctx<'_> {
                     SinkKind::Store => "stored".to_string(),
                     SinkKind::Own(t) => format!("taken over by a new {}", self.ck.show(t)),
                     SinkKind::Spawn => "captured by a task".to_string(),
-                    SinkKind::Pass(g) => format!("passed to `{}`, which keeps it", self.ck.name(self.ck.fns[g as usize].name)),
+                    SinkKind::Pass(g) => {
+                        format!("passed to `{}`, which keeps it", self.ck.fns[g as usize].runtime_name(&self.ck.types, &self.ck.syms))
+                    }
                 };
                 let why = if borrowed {
                     "it is a parameter: the caller may close it while it is kept".to_string()

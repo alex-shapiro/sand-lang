@@ -100,7 +100,7 @@ struct Update {{
     range: str
     values: [[int]]
 }}
-print(http.post_json("{base}/a", Update {{ range: "A1:A3", values: [[1, 2, 3]] }})?.text()?)
+print(http.post_json("{base}/a", Update(range: "A1:A3", values: [[1, 2, 3]]))?.text()?)
 print(http.request_json("PATCH", "{base}/b", [1, 2], headers: [("content-type", "application/merge-patch+json")])?.text()?)
 print(http.put_json("{base}/c", ["k": 1])?.text()?)
 print(http.patch_json("{base}/d", "s")?.text()?)
@@ -238,7 +238,7 @@ fn concurrent_http_requests() {
         r#"
 import http
 import time
-let start = time.stopwatch()
+let start = time.Stopwatch()
 let ts = (0..8).map(i => spawn http.get("{base}/" + i.to_str()))
 print(task.all(ts).map(r => r.unwrap().text().unwrap()))
 print(start.elapsed() < 350ms)
@@ -712,8 +712,8 @@ print(up.write_str("late").unwrap_err().kind)
     assert_eq!(
         run_net(&src),
         "Ok(\"200 POST chunked one two\")\nOk(\"200 PUT - abc\")\n\
-         Err(Error { kind: \"invalid\", message: \"the body is longer than its content-length\" })\n\
-         Err(Error { kind: \"invalid\", message: \"the body is 1 bytes shorter than its content-length\" })\n\
+         Err(Error(message: \"the body is longer than its content-length\", kind: \"invalid\"))\n\
+         Err(Error(message: \"the body is 1 bytes shorter than its content-length\", kind: \"invalid\"))\n\
          Ok(\"301 \")\nclosed\n"
     );
     let reqs = server.requests.lock().unwrap();
@@ -1063,7 +1063,7 @@ import fs
 import http
 let server = http.serve("127.0.0.1", 0)?
 print("ready \(server.addr())")
-let served: Channel<()> = task.channel()
+let served: Channel<()> = Channel()
 let serving = spawn {
     use req = server.accept().unwrap()
     req.respond(200, b"ok").unwrap()

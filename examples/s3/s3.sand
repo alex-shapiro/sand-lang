@@ -48,12 +48,16 @@ pub struct Client {
             return Ok(None)
         }
         let r = check(resp)?
-        Ok(Some(ObjectInfo {
-            key,
-            size: r.header("content-length").and_then(s => s.parse_int()) ?? 0,
-            etag: (r.header("etag") ?? "").replace("\"", ""),
-            last_modified: r.header("last-modified") ?? "",
-        }))
+        Ok(
+            Some(
+                ObjectInfo(
+                    key,
+                    size: r.header("content-length").and_then(s => s.parse_int()) ?? 0,
+                    etag: (r.header("etag") ?? "").replace("\"", ""),
+                    last_modified: r.header("last-modified") ?? "",
+                ),
+            ),
+        )
     }
 
     pub fn delete_object(self, bucket: str, key: str) -> Result<()> {
@@ -74,12 +78,16 @@ pub struct Client {
             let resp = check(self.send("GET", bucket, "", query, [:], b"")?)?
             let xml = resp.text()?
             for block in xml_blocks(xml, "Contents") {
-                objects.push(ObjectInfo {
-                    key: xml_unescape(xml_text(block, "Key") ?? ""),
-                    size: xml_text(block, "Size").and_then(s => s.parse_int()) ?? 0,
-                    etag: (xml_text(block, "ETag") ?? "").replace("&quot;", "").replace("\"", ""),
-                    last_modified: xml_text(block, "LastModified") ?? "",
-                })
+                objects.push(
+                    ObjectInfo(
+                        key: xml_unescape(xml_text(block, "Key") ?? ""),
+                        size: xml_text(block, "Size").and_then(s => s.parse_int()) ?? 0,
+                        etag: (xml_text(block, "ETag") ?? "")
+                            .replace("&quot;", "")
+                            .replace("\"", ""),
+                        last_modified: xml_text(block, "LastModified") ?? "",
+                    ),
+                )
             }
             if xml_text(xml, "IsTruncated") != Some("true") {
                 break
@@ -108,14 +116,7 @@ pub struct Client {
         } else {
             ("\(bucket).\(host_base)", "/" + key)
         }
-        let request = SignedRequest {
-            method,
-            host,
-            path,
-            query,
-            headers: extra,
-            payload: body,
-        }
+        let request = SignedRequest(method, host, path, query, headers: extra, payload: body)
         let headers = sign(request, self.credentials, self.region, time.now())
         var url = "\(base.scheme)://\(host)\(uri.encode_path(path))"
         if not query.is_empty() {
@@ -155,7 +156,7 @@ fn check(resp: http.Response) -> Result<http.Response> {
     let text = resp.text() ?? ""
     let code = xml_text(text, "Code") ?? "HTTP\(resp.status)"
     let message = xml_text(text, "Message") ?? "request failed with status \(resp.status)"
-    Err(error("\(code): \(message)", kind: "http"))
+    Err(Error("\(code): \(message)", kind: "http"))
 }
 
 fn hex_sha256(data: bytes) -> str { crypto.sha256(data).to_hex() }
@@ -222,7 +223,7 @@ pub fn sign(req: SignedRequest, creds: Credentials, region: str, now: time.Insta
 // Just enough XML for S3 responses.
 
 fn xml_blocks(xml: str, tag: str) -> [str] {
-    let re = regex.new("(?s)<\(tag)>(.*?)</\(tag)>").unwrap()
+    let re = regex.Regex("(?s)<\(tag)>(.*?)</\(tag)>").unwrap()
     re.captures_all(xml).filter_map(c => c.text(1))
 }
 
@@ -242,18 +243,18 @@ fn xml_unescape(s: str) -> str {
 
 test "signature matches the AWS documentation example" {
     // https://docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-header-based-auth.html
-    let creds = Credentials {
+    let creds = Credentials(
         access_key: "AKIAIOSFODNN7EXAMPLE",
         secret_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-    }
-    let req = SignedRequest {
+    )
+    let req = SignedRequest(
         method: "GET",
         host: "examplebucket.s3.amazonaws.com",
         path: "/test.txt",
         query: [],
         headers: ["Range": "bytes=0-9"],
         payload: b"",
-    }
+    )
     let now = time.Instant.parse("2013-05-24T00:00:00Z").unwrap()
     let headers = sign(req, creds, "us-east-1", now)
     let auth = headers["authorization"]

@@ -59,7 +59,7 @@ struct Compiler<'a> {
     fn_protos: PVec<Option<u32>>,
     /// The constants made so far, to share them.
     consts: ConstTable,
-    variant_wrappers: PMap<u32, u32>,
+    ctor_wrappers: PMap<CtorTarget, u32>,
     /// Constant trait dictionaries by their elements.
     dict_consts: PMap<Vec<u32>, u32>,
     /// Shared type descriptions of `reflect` type arguments.
@@ -255,7 +255,7 @@ pub(crate) struct Incremental {
     fn_protos: PVec<Option<u32>>,
     /// The constants made so far, to share them.
     consts: ConstTable,
-    variant_wrappers: PMap<u32, u32>,
+    ctor_wrappers: PMap<CtorTarget, u32>,
     dict_consts: PMap<Vec<u32>, u32>,
     descs: reflect::DescCache,
     /// Number of tests compiled.
@@ -351,7 +351,7 @@ pub(crate) fn compile_more(mut input: CompileInput, prog: &mut Program, inc: &mu
         prog,
         fn_protos: std::mem::take(&mut inc.fn_protos),
         consts: std::mem::take(&mut inc.consts),
-        variant_wrappers: std::mem::take(&mut inc.variant_wrappers),
+        ctor_wrappers: std::mem::take(&mut inc.ctor_wrappers),
         dict_consts: std::mem::take(&mut inc.dict_consts),
         descs: std::mem::take(&mut inc.descs),
         errors: Vec::new(),
@@ -364,7 +364,7 @@ pub(crate) fn compile_more(mut input: CompileInput, prog: &mut Program, inc: &mu
     let entry = c.compile_new(input, inits, &mut inc.tests);
     inc.fn_protos = c.fn_protos;
     inc.consts = c.consts;
-    inc.variant_wrappers = c.variant_wrappers;
+    inc.ctor_wrappers = c.ctor_wrappers;
     inc.dict_consts = c.dict_consts;
     inc.descs = c.descs;
     if c.errors.is_empty() { Ok(entry) } else { Err(c.errors) }
@@ -814,7 +814,7 @@ impl<'a> Compiler<'a> {
             f.set_reg(p, r);
         }
         match (self.order.init_pos(fid), &body.body.kind) {
-            (Some(pos), HKind::Block(items)) if !items.is_empty() && self.struct_literal(&f, items).is_none() => {
+            (Some(pos), HKind::Block(items)) if !items.is_empty() && self.field_construction(&f, items).is_none() => {
                 self.ret_block(&mut f, items, Some(pos))
             }
             _ => self.ret_expr(&mut f, &body.body),
@@ -822,7 +822,7 @@ impl<'a> Compiler<'a> {
         let nregs = f.max_reg.max(1) as u16;
         let Finished { code, lines, cleanups, sites, inlined } = self.finish(f);
         self.prog.protos[proto_idx as usize] = Proto {
-            name: self.cp.name(fi.name).to_string(),
+            name: fi.runtime_name(&self.cp.types, &self.cp.syms),
             file: body.span.file,
             nparams: body.params.len() as u16,
             nregs,
@@ -932,7 +932,7 @@ impl<'a> Compiler<'a> {
         if f.sites.len() >= MAX_SITES {
             return k(self, f);
         }
-        let name = self.cp.name(self.cp.fns[func as usize].name).to_string();
+        let name = self.cp.fns[func as usize].runtime_name(&self.cp.types, &self.cp.syms);
         f.sites.push(InlineSite { name, file: body.span.file, line: f.line, parent: f.site });
         let saved = (f.site, f.file, f.line);
         f.site = f.sites.len() as u16;
@@ -1264,7 +1264,7 @@ impl<'a> Compiler<'a> {
         // calls cannot be tail calls.
         let tail = !defers_pending(f);
         match &e.kind {
-            HKind::Block(items) if !items.is_empty() && self.struct_literal(f, items).is_none() => self.ret_block(f, items, None),
+            HKind::Block(items) if !items.is_empty() && self.field_construction(f, items).is_none() => self.ret_block(f, items, None),
             HKind::Call { func, args, .. } if tail && self.fn_protos[*func as usize].is_some() => {
                 let proto = self.fn_protos[*func as usize].unwrap();
                 let base = self.call_args(f, args, 0);
@@ -1723,8 +1723,8 @@ impl<'a> Compiler<'a> {
                 self.mv(f, dst, base);
                 f.next_reg = mark;
             }
-            HKind::VariantFn { rt_id, arity } => {
-                let p = self.variant_wrapper(*rt_id, *arity, f.file);
+            HKind::CtorFn { target, arity } => {
+                let p = self.ctor_wrapper(*target, *arity, f.file);
                 let k = self.const_idx(Const::Fn(p));
                 self.emit(f, Op::LoadConst { dst, k });
             }
@@ -1755,12 +1755,12 @@ impl<'a> Compiler<'a> {
                 self.compile_assign(f, place, *op, *op_ty, value);
                 self.unit_to(f, dst);
             }
-            HKind::Block(items) if self.struct_literal(f, items).is_some() => {
-                let (n, def, fields) = self.struct_literal(f, items).unwrap();
+            HKind::Block(items) if self.field_construction(f, items).is_some() => {
+                let (n, def, fields) = self.field_construction(f, items).unwrap();
                 let mark = f.next_reg;
                 let start = self.alloc_n(f, fields.len());
-                // The fields given, in source order, straight into their
-                // registers; then the others (from `..base` or defaults).
+                // Evaluate explicit arguments in source order directly into their
+                // field registers, followed by `..base` and default fields.
                 let mut done = vec![false; fields.len()];
                 for it in &items[..n] {
                     let HKind::Let { pat, init, else_ } = &it.kind else { unreachable!() };
@@ -2613,11 +2613,10 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    /// A struct literal as the checker lowers it: hidden locals bound to the
-    /// fields given, in source order, then `MakeStruct` (see
-    /// `check_struct_lit`). Returns the number of `let`s, the struct and
-    /// its field values.
-    fn struct_literal<'e>(&self, f: &FnState, items: &'e [HExpr]) -> Option<(usize, TypeDefId, &'e [HExpr])> {
+    /// Matches a field-by-field struct construction block lowered by
+    /// `Checker::construct_fields` (`let` bindings for hoisted arguments in
+    /// source order followed by `MakeStruct`), returning `(num_lets, def, fields)`.
+    fn field_construction<'e>(&self, f: &FnState, items: &'e [HExpr]) -> Option<(usize, TypeDefId, &'e [HExpr])> {
         let (HKind::MakeStruct { def, fields }, lets) = (&items.last()?.kind, &items[..items.len() - 1]) else { return None };
         let hidden = |it: &HExpr| {
             matches!(&it.kind, HKind::Let { pat: HPat { kind: HPatKind::Bind(l), .. }, else_: None, .. }
@@ -2832,22 +2831,27 @@ impl<'a> Compiler<'a> {
         vec![self.emit(f, Op::JNotVariant { src, variant, off: 0 })]
     }
 
-    fn variant_wrapper(&mut self, rt: u32, arity: usize, file: u32) -> u32 {
-        if let Some(&p) = self.variant_wrappers.get(&rt) {
+    fn ctor_wrapper(&mut self, target: CtorTarget, arity: usize, file: u32) -> u32 {
+        if let Some(&p) = self.ctor_wrappers.get(&target) {
             return p;
         }
-        if rt > u16::MAX as u32 || arity >= MAX_REGS as usize {
-            self.errors.push(Diag::error(Span::new(file, 0, 0), "too many enum variants or fields in program"));
+        let (id, name) = match target {
+            CtorTarget::Variant(rt) => (rt, self.prog.variants.get(rt as usize).map(|v| v.name.clone())),
+            CtorTarget::Struct(d) => (d, self.prog.types.get(d as usize).map(|t| t.name.clone())),
+        };
+        if id > u16::MAX as u32 || arity >= MAX_REGS as usize {
+            self.errors.push(Diag::error(Span::new(file, 0, 0), "too many types, enum variants or fields in program"));
             return 0;
         }
-        let name = self.prog.variants.get(rt as usize).map(|v| v.name.clone()).unwrap_or_default();
-        let code = match arity {
-            1 => vec![Op::RetVariant { src: 0, variant: rt as u16 }],
-            _ => vec![Op::NewVariant { dst: arity as Reg, start: 0, variant: rt as u16 }, Op::Ret { src: arity as Reg }],
+        let (dst, id) = (arity as Reg, id as u16);
+        let code = match target {
+            CtorTarget::Variant(_) if arity == 1 => vec![Op::RetVariant { src: 0, variant: id }],
+            CtorTarget::Variant(_) => vec![Op::NewVariant { dst, start: 0, variant: id }, Op::Ret { src: dst }],
+            CtorTarget::Struct(_) => vec![Op::NewStruct { dst, start: 0, def: id }, Op::Ret { src: dst }],
         };
         let p = self.prog.protos.len() as u32;
         self.prog.protos.push(Proto {
-            name: name.clone(),
+            name: name.unwrap_or_default(),
             file,
             nparams: arity as u16,
             nregs: arity as u16 + 1,
@@ -2858,7 +2862,7 @@ impl<'a> Compiler<'a> {
             sites: Vec::new(),
             inlined: Vec::new(),
         });
-        self.variant_wrappers.insert(rt, p);
+        self.ctor_wrappers.insert(target, p);
         p
     }
 

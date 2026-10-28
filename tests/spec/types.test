@@ -236,19 +236,19 @@ fn generic<T: Count>(x: T, n: int) -> int {
     x.count(n)
 }
 fn direct(n: int) -> int {
-    Bag {}.count(n)
+    Bag().count(n)
 }
 fn with_default(n: int, k: int = direct(n)) -> int {
     k
 }
 let by_value = direct
 let by_lambda = (n: int) => direct(n)
-print(generic(Bag {}, 2))
+print(generic(Bag(), 2))
 print(by_value(2))
 print(by_lambda(2))
 print(with_default(2))
 let LATE = 10
-print(generic(Bag {}, 3))
+print(generic(Bag(), 3))
 print(by_value(3))
 print(by_lambda(3))
 print(with_default(3))
@@ -316,7 +316,7 @@ abab
 
 === operators are not defined for types
 struct V { x: float }
-let a = V { x: 1.0 }
+let a = V(x: 1.0)
 let b = a * 2.0
 let c = 2.0 * a
 let d = a + a
@@ -346,7 +346,7 @@ extend Box<int> {
         self.v * 2
     }
 }
-let b = Box { v: "a" }
+let b = Box(v: "a")
 print(b.twice())
 --- error
 8: no method `twice` on type Box<str>
@@ -359,7 +359,7 @@ extend Box<([int], int)> {
     }
 }
 let xs = []
-let b = Box { v: (xs, "a") }
+let b = Box(v: (xs, "a"))
 print(b.size())
 xs.push("s")
 --- error

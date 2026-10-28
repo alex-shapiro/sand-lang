@@ -31,9 +31,9 @@ pub trait Render {
 struct Money { cents: int }
 
 impl Monoid for Money {
-    fn empty() -> Money { Money { cents: 0 } }
+    fn empty() -> Money { Money(cents: 0) }
 
-    fn combine(self, other: Money) -> Money { Money { cents: self.cents + other.cents } }
+    fn combine(self, other: Money) -> Money { Money(cents: self.cents + other.cents) }
 }
 
 impl Render for Money {
@@ -44,13 +44,13 @@ impl Render for Money {
 struct Max<T> { value: T? }
 
 impl<T: Ord> Monoid for Max<T> {
-    fn empty() -> Max<T> { Max { value: None } }
+    fn empty() -> Max<T> { Max(value: None) }
 
     fn combine(self, other: Max<T>) -> Max<T> {
         match (self.value, other.value) {
-            (Some(a), Some(b)) => Max { value: Some(if a >= b { a } else { b }) }
-            (a, None) => Max { value: a }
-            (None, b) => Max { value: b }
+            (Some(a), Some(b)) => Max(value: Some(if a >= b { a } else { b }))
+            (a, None) => Max(value: a)
+            (None, b) => Max(value: b)
         }
     }
 }
@@ -102,7 +102,7 @@ struct Expense {
 /// Per expense: (count, (total, largest)).
 type Stats = (int, (Money, Max<Money>))
 
-fn stats(e: Expense) -> Stats { (1, (e.amount, Max { value: Some(e.amount) })) }
+fn stats(e: Expense) -> Stats { (1, (e.amount, Max(value: Some(e.amount)))) }
 
 /// Groups values by key, combining each group.
 fn summarize<K: Hash, V: Monoid>(pairs: [(K, V)]) -> [K: V] {
@@ -125,7 +125,7 @@ fn parse(line: str) -> Expense? {
     let [month, category, what, amount] = parts else { return None }
     let (whole, frac) = amount.split_once(".") ?? (amount, "0")
     let cents = whole.parse_int()? * 100 + frac.pad_end(2, "0")[..2].parse_int()?
-    Some(Expense { month, category, what, amount: Money { cents } })
+    Some(Expense(month, category, what, amount: Money(cents)))
 }
 
 let data = """

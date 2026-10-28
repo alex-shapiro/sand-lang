@@ -18,7 +18,7 @@ struct Rng {
 }
 
 fn generate(rows: int) -> str {
-    let rng = Rng { state: 7 }
+    let rng = Rng(state: 7)
     let lines = [HEADER]
     for _ in 0..rows {
         let month = rng.next(12) + 1
@@ -46,13 +46,15 @@ fn parse_sale(line: str) -> Result<Sale, str> {
     }
     let Some(quantity) = qty.parse_int() else { return Err("bad quantity `\(qty)`") }
     let Some(unit_price) = price.parse_float() else { return Err("bad price `\(price)`") }
-    Ok(Sale {
-        month: date[0..7],
-        region,
-        product,
-        quantity,
-        price: (unit_price * 100.0).round().to_int(),
-    })
+    Ok(
+        Sale(
+            month: date[0..7],
+            region: region,
+            product: product,
+            quantity: quantity,
+            price: (unit_price * 100.0).round().to_int(),
+        ),
+    )
 }
 
 /// Totals over a group of sales; prices and revenue are in cents.
@@ -103,16 +105,16 @@ let by_pair: [(str, str): Acc] = [:]
 let by_month: [str: Acc] = [:]
 for line in lines[1..] {
     let sale = parse_sale(line)?
-    by_pair.get_or_insert((sale.region, sale.product), Acc {}).add(sale.quantity, sale.price)
-    by_month.get_or_insert(sale.month, Acc {}).add(sale.quantity, sale.price)
+    by_pair.get_or_insert((sale.region, sale.product), Acc()).add(sale.quantity, sale.price)
+    by_month.get_or_insert(sale.month, Acc()).add(sale.quantity, sale.price)
 }
 
 let by_product: [str: Acc] = [:]
 let by_region: [str: Acc] = [:]
-let total = Acc {}
+let total = Acc()
 for ((region, product), acc) in by_pair {
-    by_product.get_or_insert(product, Acc {}).merge(acc)
-    by_region.get_or_insert(region, Acc {}).merge(acc)
+    by_product.get_or_insert(product, Acc()).merge(acc)
+    by_region.get_or_insert(region, Acc()).merge(acc)
     total.merge(acc)
 }
 

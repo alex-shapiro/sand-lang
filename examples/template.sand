@@ -59,7 +59,7 @@ enum Tok {
 // Lexing
 
 fn lex(src: str) -> Result<[Tok]> {
-    let re = regex.new(r"(?s)\{\{(.*?)\}\}|\{%(.*?)%\}|\{#.*?#\}")?
+    let re = regex.Regex(r"(?s)\{\{(.*?)\}\}|\{%(.*?)%\}|\{#.*?#\}")?
     let toks = []
     var last = 0
     for caps in re.captures_all(src) {
@@ -109,7 +109,7 @@ fn parse_operand(text: str) -> Result<Operand> {
     }
     let parts = text.trim().split(".")
     if parts.any(p => p.is_empty() or not p.replace("_", "a").is_alnum()) {
-        return Err(error("invalid expression `\(text)`", kind: "parse"))
+        return Err(Error("invalid expression `\(text)`", kind: "parse"))
     }
     Ok(Operand.Path(parts))
 }
@@ -146,23 +146,23 @@ fn parse_expr(text: str) -> Result<Expr> {
         match p.split_once("(") {
             Some((name, rest)) => {
                 let Some(inner) = rest.strip_suffix(")") else {
-                    return Err(error("unclosed filter arguments in `\(p)`", kind: "parse"))
+                    return Err(Error("unclosed filter arguments in `\(p)`", kind: "parse"))
                 }
                 let args = []
                 for a in split_outside_quotes(inner, ",") {
                     let Some(lit) = parse_literal(a) else {
                         return Err(
-                            error("filter arguments must be literals: `\(a)`", kind: "parse"),
+                            Error("filter arguments must be literals: `\(a)`", kind: "parse"),
                         )
                     }
                     args.push(lit)
                 }
-                filters.push(Filter { name: name.trim(), args })
+                filters.push(Filter(name: name.trim(), args: args))
             }
-            None => filters.push(Filter { name: p, args: [] })
+            None => filters.push(Filter(name: p, args: []))
         }
     }
-    Ok(Expr { value, filters })
+    Ok(Expr(value, filters))
 }
 
 fn parse_cond(text: str) -> Result<Cond> {
@@ -203,7 +203,7 @@ struct Parser {
         if stops.is_empty() {
             Ok((out, ""))
         } else {
-            Err(error("unexpected end of template, expected one of \(stops)", kind: "parse"))
+            Err(Error("unexpected end of template, expected one of \(stops)", kind: "parse"))
         }
     }
 
@@ -212,7 +212,7 @@ struct Parser {
             "for" => {
                 let parts = tag.split_whitespace()
                 if parts.len() != 4 or parts[2] != "in" {
-                    return Err(error("malformed for tag `\(tag)`", kind: "parse"))
+                    return Err(Error("malformed for tag `\(tag)`", kind: "parse"))
                 }
                 let (body, _) = self.nodes(["endfor"])?
                 Ok(Node.For(parts[1], parse_expr(parts[3])?, body))
@@ -233,13 +233,13 @@ struct Parser {
                     }
                 }
             }
-            _ => Err(error("unknown tag `\(tag)`", kind: "parse"))
+            _ => Err(Error("unknown tag `\(tag)`", kind: "parse"))
         }
     }
 }
 
 pub fn compile(src: str) -> Result<[Node]> {
-    let parser = Parser { toks: lex(src)? }
+    let parser = Parser(toks: lex(src)?)
     let (nodes, _) = parser.nodes([])?
     Ok(nodes)
 }
@@ -319,7 +319,7 @@ fn apply_filter(v: Json, f: Filter) -> Result<Json> {
         }
         "escape" => Ok(Json.Str(escape_html(display(v))))
         "trim" => Ok(Json.Str(display(v).trim()))
-        _ => Err(error("unknown filter `\(f.name)`", kind: "invalid"))
+        _ => Err(Error("unknown filter `\(f.name)`", kind: "invalid"))
     }
 }
 
@@ -403,7 +403,7 @@ pub fn render(template: str, data: Json) -> Result<str> {
     let nodes = compile(template)?
     let root = data.as_map() ?? [:]
     let out = []
-    render_nodes(nodes, Scope { frames: [root] }, out)?
+    render_nodes(nodes, Scope(frames: [root]), out)?
     Ok(out.join())
 }
 

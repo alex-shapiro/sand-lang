@@ -53,21 +53,22 @@ fn nanos(d: SignedDuration) -> i64 {
     d.as_nanos() as i64
 }
 
-/// Standard error record with a machine-readable `kind` tag and human-readable
-/// `message`.
+/// Standard error record with a human-readable `message` and a
+/// machine-readable `kind` tag (defaulting to `"error"`).
 #[derive(Clone, Debug, PartialEq, crate::SandStruct)]
 #[sand(module = "prelude")]
 pub(crate) struct Error {
-    /// Machine-readable category tag (such as `"not_found"` or `"permission_denied"`).
-    pub kind: String,
     /// Human-readable error description.
     pub message: String,
+    /// Machine-readable category tag (such as `"not_found"` or `"permission_denied"`).
+    #[sand(default = "error")]
+    pub kind: String,
 }
 
 pub(crate) fn prelude() -> NativeModule {
     let mut m = NativeModule::std("prelude", ModKind::Prelude, include_str!("prelude.sand"));
     m.builtin_type("Task", "Handle to a concurrent task started with `spawn`.", &["T"]);
-    m.builtin_type("Channel", "FIFO message queue for communicating between tasks (created with `task.channel`).", &["T"]);
+    m.builtin_type("Channel", "FIFO message queue for communicating between tasks.", &["T"]);
     m.bind::<Error>();
 
     // Globals.
@@ -83,7 +84,7 @@ pub(crate) fn prelude() -> NativeModule {
     });
     m.function("fail", |message: &str, kind: &str| -> Result<Never, Ctl> { fail(kind, message) });
     m.function("exit", |code: i64| -> Result<Never, Ctl> { Err(Ctl::exit(code.clamp(i32::MIN as i64, i32::MAX as i64) as i32)) });
-    m.vm_function("set", |vm: &mut Vm, items: List<Param<0, traits::Hash>>| -> Result<_, Ctl> {
+    m.vm_function("Set.init", |vm: &mut Vm, items: List<Param<0, traits::Hash>>| -> Result<_, Ctl> {
         let set = set_of(vm, items.items(&vm.heap))?;
         Ok(new_set(vm, set))
     });
@@ -96,6 +97,12 @@ pub(crate) fn prelude() -> NativeModule {
     m.vm_function("Task.cancel", |vm: &mut Vm, t: Val<Task<Param<0>>>| -> Result<_, Ctl> {
         vm.cancel_task(t.raw());
         Ok(())
+    });
+    m.vm_function("Channel.init", |vm: &mut Vm, cap: i64| -> Result<Val<Channel<Param<0>>>, Ctl> {
+        if cap < 0 {
+            return fail("invalid", "channel capacity must not be negative");
+        }
+        Ok(Val::from_raw(vm.heap.alloc(Obj::Channel(Box::new(ChannelObj::new(to_usize_saturating(cap)))))))
     });
     m.vm_function("Channel.send", |vm: &mut Vm, c: Val<Channel<Param<0>>>, x: Param<0>| {
         vm.block(BlockOn::Send(c.raw(), x.raw())).map(Val::<bool>::from_raw)
@@ -154,12 +161,6 @@ pub(crate) fn task() -> NativeModule {
         vm.check_memory(tasks.len().saturating_mul(SLOT))?;
         let tasks = tasks.to_vec();
         vm.block(BlockOn::Race(tasks)).map(Param::<0>::from_raw)
-    });
-    m.vm_function("channel", |vm: &mut Vm, cap: i64| -> Result<Val<Channel<Param<0>>>, Ctl> {
-        if cap < 0 {
-            return fail("invalid", "channel capacity must not be negative");
-        }
-        Ok(Val::from_raw(vm.heap.alloc(Obj::Channel(Box::new(ChannelObj::new(to_usize_saturating(cap)))))))
     });
     m
 }

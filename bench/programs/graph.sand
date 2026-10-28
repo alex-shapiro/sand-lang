@@ -18,7 +18,7 @@ struct Rng {
 
 /// Sizes of the connected components, in order of their first node in `ids`.
 fn component_sizes(ids: [int], adj: [int: [int]]) -> [int] {
-    let visited: Set<int> = set()
+    let visited: Set<int> = Set()
     let sizes = []
     for id in ids {
         if not visited.add(id) { continue }
@@ -72,7 +72,7 @@ fn topological_order(ids: [int], edges: [(int, int)]) -> [int] {
     order
 }
 
-let rng = Rng { state: 7 }
+let rng = Rng(state: 7)
 let ids = [rng.next(1_000_000_000) for _ in 0..NODES]
 let adj: [int: [int]] = [id: [] for id in ids]
 let edges: [(int, int)] = []
@@ -92,11 +92,7 @@ for _ in 0..EDGES {
 print("nodes \(adj.len()), edges \(edges.len())")
 
 let sizes = component_sizes(ids, adj)
-let largest = sizes
-    .sorted_by(s => -s)
-    .take(5)
-    .map(s => s.to_str())
-    .join(" ")
+let largest = sizes.sorted_by(s => -s).take(5).map(s => s.to_str()).join(" ")
 print("components \(sizes.len()), largest \(largest)")
 
 let hist = degree_histogram(adj)

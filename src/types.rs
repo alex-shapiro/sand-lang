@@ -506,7 +506,7 @@ impl Symbols {
 macro_rules! builtins {
     ($($name:ident),*) => {
         /// A prelude trait implemented by the VM (`Eq`, `Ord`, `Hash`, `Encode`,
-        /// or `Num`).
+        /// `Decode`, or `Num`).
         ///
         /// The prelude implements `Num` for `int` and `float`; the checker
         /// automatically derives the remaining built-in traits from type structure.
@@ -557,7 +557,7 @@ macro_rules! builtins {
     };
 }
 
-builtins!(Eq, Ord, Hash, Encode, Num);
+builtins!(Eq, Ord, Hash, Encode, Decode, Num);
 
 impl Builtin {
     pub fn parse(s: &str) -> Option<Builtin> {

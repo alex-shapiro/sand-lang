@@ -67,7 +67,7 @@ fn handle(c: Client) {
 }
 
 let port = match env.args().first() {
-    Some(arg) => arg.parse_int().ok_or(error("invalid port \(arg)", kind: "invalid"))?
+    Some(arg) => arg.parse_int().ok_or(Error("invalid port \(arg)", kind: "invalid"))?
     None => 7000
 }
 use listener = net.listen("127.0.0.1", port)?
@@ -76,7 +76,7 @@ print("listening on \(listener.addr())")
 loop {
     let conn = listener.accept()?
     next_id += 1
-    let client = Client { id: next_id, name: "guest\(next_id)", conn }
+    let client = Client(id: next_id, name: "guest\(next_id)", conn: conn)
     clients[client.id] = client
     log.info("client joined", fields: ["peer": "\(conn.peer_addr())"])
     spawn handle(client)
