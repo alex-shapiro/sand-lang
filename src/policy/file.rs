@@ -1010,7 +1010,17 @@ mod tests {
         let p = parse("allow net *");
         assert_eq!(decide(&p, net.clone()), Deny);
         let p = parse("allow net *\nallow private-net");
-        assert_eq!(decide(&p, net), Allow);
+        assert_eq!(decide(&p, net.clone()), Allow);
+        // `default allow` is not an explicit rule for internal destinations,
+        // but a prompt answer is.
+        let p = parse("default allow");
+        for host in ["10.1.2.3", "169.254.169.254", "localhost", "127.0.0.1", "::1"] {
+            assert_eq!(decide(&p, Capability::Net { host: host.into(), port: 80 }), Deny, "{host}");
+            assert_eq!(http(&p, "GET", &format!("http://{}/", super::format_host_port(host, 80))), Deny, "{host}");
+        }
+        assert_eq!(decide(&p, Capability::Net { host: "example.com".into(), port: 80 }), Allow);
+        assert_eq!(decide(&parse("default allow\nallow private-net"), net.clone()), Allow);
+        assert_eq!(decide(&parse("default prompt"), net), Prompt);
     }
 
     #[test]

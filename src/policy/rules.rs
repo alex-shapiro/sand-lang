@@ -422,6 +422,12 @@ impl RulePolicy {
             None => match cap {
                 Capability::Stdout | Capability::Stderr => Decision::Allow,
                 Capability::Import(_) if !self.others().imports_restricted => Decision::Allow,
+                // Only an explicit rule or a prompt answer allows an internal destination.
+                Capability::Net { host, port } | Capability::Http { host, port, .. }
+                    if self.fallback == Decision::Allow && self.deny_private && is_internal(&Dest::new(host, *port)) =>
+                {
+                    Decision::Deny
+                }
                 _ => self.fallback,
             },
         }
