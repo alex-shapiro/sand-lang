@@ -6,47 +6,35 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
-/// A host pattern (`host`, `*.domain`, `*`, an IP address, or a CIDR range)
-/// with an optional port.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct NetPattern {
     pub kind: HostKind,
-    /// `None` matches all ports.
     pub port: Option<u16>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum HostKind {
-    /// `*`: all hosts.
     Any,
-    /// `*.example.com`: strict subdomains.
     Suffix(String),
-    /// An exact lowercase hostname.
     Host(String),
-    /// A masked IP address or CIDR range (`10.0.0.0/8`, `fc00::/7`).
     Ip(IpAddr, u8),
 }
 
-/// Validates a network pattern (see [`super::RulePolicy::allow_net`]) and
-/// returns an error message if the pattern is invalid.
+/// Validates a pattern for [`super::RulePolicy::allow_net`].
 pub fn check_net_pattern(pattern: &str) -> Result<(), String> {
     NetPattern::parse(pattern).map(drop)
 }
 
-/// Returns true if `pattern` is a valid listen pattern (see [`super::RulePolicy::allow_listen`]).
+/// Returns true if `pattern` is valid for [`super::RulePolicy::allow_listen`].
 pub fn is_valid_listen_pattern(pattern: &str) -> bool {
     ListenPattern::parse(pattern).is_some()
 }
 
-/// Returns true if `host` is an unbracketed IP address or a valid hostname.
 #[cfg(feature = "os")]
 pub(crate) fn is_valid_host(host: &str) -> bool {
     host.parse::<IpAddr>().is_ok() || canonical_hostname(host).is_some()
 }
 
-/// Validates `name` as a hostname (at most 253 bytes of `.`-separated labels of
-/// 1 to 63 ASCII alphanumeric, `-`, or `_` characters) and returns it in
-/// lowercase without a trailing dot.
 fn canonical_hostname(name: &str) -> Option<String> {
     let name = name.strip_suffix('.').unwrap_or(name);
     let label_ok = |l: &str| (1..=63).contains(&l.len()) && l.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b));
@@ -54,8 +42,6 @@ fn canonical_hostname(name: &str) -> Option<String> {
 }
 
 impl NetPattern {
-    /// Parses a host pattern for a `net` or `http` rule. Rejects CIDR ranges
-    /// that have host bits set after the prefix length (`10.0.0.1/8`).
     pub(crate) fn parse(pattern: &str) -> Result<NetPattern, String> {
         let invalid =
             || format!("invalid host pattern `{pattern}` (expected a host, host:port, *.domain, *, an IP address or a CIDR range)");
@@ -114,14 +100,10 @@ impl NetPattern {
         Some(NetPattern { kind, port })
     }
 
-    /// Returns true if the pattern specifies an exact hostname, IP address, or CIDR range.
     pub(crate) fn is_explicit(&self) -> bool {
         matches!(self.kind, HostKind::Host(_) | HostKind::Ip(..))
     }
 
-    /// Returns the specificity score of the pattern. Exact hosts and single IP
-    /// addresses rank highest, followed by CIDR ranges and domain suffixes by
-    /// length, and then `*`. A port increases the score.
     pub(crate) fn rank(&self) -> u32 {
         let score = match &self.kind {
             HostKind::Host(_) => 3000,
@@ -133,14 +115,10 @@ impl NetPattern {
         score * 2 + self.port.is_some() as u32
     }
 
-    /// Returns true if `self` matches every destination that `other` matches.
     pub(crate) fn covers(&self, other: &NetPattern) -> bool {
         self.kind.covers(&other.kind) && self.port.is_none_or(|p| other.port == Some(p))
     }
 
-    /// Returns a pattern that matches the destinations matched by both `self`
-    /// and `other` without IPv6 address embeddings, or `None` if the patterns
-    /// are disjoint.
     pub(crate) fn intersection(&self, other: &NetPattern) -> Option<NetPattern> {
         let port = match (self.port, other.port) {
             (Some(a), Some(b)) if a != b => return None,
@@ -156,11 +134,9 @@ impl NetPattern {
         Some(NetPattern { kind: kind.clone(), port })
     }
 
-    /// Returns true if a destination can match both `self` and `other`. Any
-    /// two IP patterns can overlap because deny rules also match alternate IP
-    /// representations (see [`alternate_ips`]).
     pub(crate) fn may_meet(&self, other: &NetPattern) -> bool {
         let hosts = match (&self.kind, &other.kind) {
+            // Any two IP patterns can overlap through alternate IP representations.
             (HostKind::Any, _) | (_, HostKind::Any) | (HostKind::Ip(..), HostKind::Ip(..)) => true,
             (HostKind::Host(h), HostKind::Host(g)) => h == g,
             (HostKind::Suffix(s), HostKind::Host(h)) | (HostKind::Host(h), HostKind::Suffix(s)) => is_under(h, s),
@@ -170,11 +146,6 @@ impl NetPattern {
         hosts && (self.port.is_none() || other.port.is_none() || self.port == other.port)
     }
 
-    /// Returns the address ranges that a deny rule for `self` also matches
-    /// through alternate IP representations (see [`alternate_ips`]).
-    /// IPv4-compatible ranges (`::/96`) also include `::` and `::1`, which do
-    /// not embed an IPv4 address (see [`EMBEDDINGS`] and
-    /// [`NetPattern::denies_ip`]).
     pub(crate) fn reaching_ranges(&self) -> Vec<NetPattern> {
         let HostKind::Ip(net, len) = self.kind else { return Vec::new() };
         let range = |ip: IpAddr, len: u8| NetPattern { kind: HostKind::Ip(ip, len), port: self.port };
@@ -196,15 +167,11 @@ impl NetPattern {
         ranges
     }
 
-    /// Returns true if a deny rule for `self` matches `ip` directly or through
-    /// an alternate IP representation (see [`alternate_ips`]).
     pub(crate) fn denies_ip(&self, ip: IpAddr) -> bool {
         let ip = ip.to_canonical();
         std::iter::once(ip).chain(alternate_ips(ip)).any(|ip| self.kind.matches_ip(ip))
     }
 
-    /// Returns true if the pattern can match an internal destination (see
-    /// [`is_internal`]).
     pub(crate) fn may_match_internal(&self) -> bool {
         match &self.kind {
             HostKind::Any => true,
@@ -232,8 +199,6 @@ impl HostKind {
     }
 }
 
-/// Host labels, ports, and IP ranges used to construct probe destinations
-/// that match wildcard patterns without matching narrower rules.
 pub(crate) struct ProbeTargets {
     label: String,
     port: Option<u16>,
@@ -256,9 +221,6 @@ impl ProbeTargets {
         ProbeTargets { label, port, ranges }
     }
 
-    /// Returns a `(host, port)` destination that matches `pattern` and is
-    /// denied by `denied`, without matching any rule that is more specific
-    /// than `pattern`. Returns `None` if narrower rules cover `pattern`.
     pub(crate) fn dest(&self, pattern: &NetPattern, denied: &NetPattern) -> Option<(String, u16)> {
         let name = match &pattern.kind {
             HostKind::Any => self.label.clone(),
@@ -269,10 +231,6 @@ impl ProbeTargets {
         Some((name, pattern.port.or(self.port)?))
     }
 
-    /// Finds an IP address in `(net, len)` that satisfies `ok` and is not
-    /// contained in any narrower range in `ranges`. Prefers addresses without
-    /// alternate IP representations (see [`alternate_ips`]) and public
-    /// addresses over private addresses.
     fn address(net: IpAddr, len: u8, ranges: &[(IpAddr, u8)], ok: &dyn Fn(IpAddr) -> bool) -> Option<(u8, IpAddr)> {
         let inside: Vec<(IpAddr, u8)> =
             ranges.iter().copied().filter(|&(ip, l)| l > len && ip.is_ipv4() == net.is_ipv4() && mask(ip, len) == net).collect();
@@ -293,13 +251,10 @@ impl ProbeTargets {
     }
 }
 
-/// Yields the parent domains of `name` (for example, `"example.com"` and
-/// `"com"` for `"api.example.com"`).
 pub(crate) fn domains_above(name: &str) -> impl Iterator<Item = &str> {
     name.match_indices('.').map(|(i, _)| &name[i + 1..])
 }
 
-/// Yields all CIDR prefixes `(masked_ip, prefix_len)` that contain `(ip, len)`.
 pub(crate) fn enclosing_ranges(ip: IpAddr, len: u8) -> impl Iterator<Item = (IpAddr, u8)> {
     (0..=len).map(move |l| (mask(ip, l), l))
 }
@@ -335,7 +290,6 @@ fn full_len(ip: IpAddr) -> u8 {
     if ip.is_ipv4() { 32 } else { 128 }
 }
 
-/// `ip` with all but its first `len` bits cleared.
 fn mask(ip: IpAddr, len: u8) -> IpAddr {
     match ip {
         IpAddr::V4(v4) => IpAddr::V4(Ipv4Addr::from(u32::from(v4) & u32::MAX.checked_shl(32 - len as u32).unwrap_or(0))),
@@ -343,9 +297,7 @@ fn mask(ip: IpAddr, len: u8) -> IpAddr {
     }
 }
 
-/// A host or address a request names, as patterns are matched against it.
 pub(crate) struct Dest<'a> {
-    /// The name without a trailing dot, or the IP literal without brackets.
     pub name: &'a str,
     pub ip: Option<IpAddr>,
     pub port: u16,
@@ -358,19 +310,15 @@ impl<'a> Dest<'a> {
     }
 }
 
-/// Host patterns, indexed so that finding those matching a request takes
-/// a few lookups however many there are.
 #[derive(Debug)]
 pub(crate) struct HostIndex<T> {
     names: FxHashMap<Box<str>, Ported<T>>,
     suffixes: FxHashMap<Box<str>, Ported<T>>,
     ips: FxHashMap<(IpAddr, u8), Ported<T>>,
-    /// The prefix lengths of `ips`, IPv4 and IPv6.
     lens: [Vec<u8>; 2],
     any: Ported<T>,
 }
 
-/// Values of patterns, with their ports (`None`: any).
 type Ported<T> = Vec<(Option<u16>, T)>;
 
 impl<T> Default for HostIndex<T> {
@@ -402,10 +350,6 @@ impl<T> HostIndex<T> {
         }
     }
 
-    /// Calls `f(is_explicit, is_alternate_ip, entry)` for each pattern that
-    /// matches `dest`. `is_explicit` is true for exact hostnames, IP
-    /// addresses, and CIDR ranges; `is_alternate_ip` is true if an IP pattern
-    /// matched through [`alternate_ips`].
     pub(crate) fn find(&self, dest: &Dest, mut f: impl FnMut(bool, bool, &T)) {
         let mut each = |list: Option<&Ported<T>>, explicit: bool| {
             for (port, t) in list.into_iter().flatten() {
@@ -436,8 +380,6 @@ impl<T> HostIndex<T> {
         }
     }
 
-    /// Calls `f(is_alternate_ip, entry)` for each IP or CIDR pattern that
-    /// matches `(ip, port)`.
     pub(crate) fn find_ip(&self, ip: IpAddr, port: u16, mut f: impl FnMut(bool, &T)) {
         if self.ips.is_empty() {
             return;
@@ -456,13 +398,6 @@ impl<T> HostIndex<T> {
     }
 }
 
-/// Returns the target addresses that `ip` can reach through alternate IP
-/// representations so deny rules also block those addresses:
-/// - Unspecified addresses (`0.0.0.0` and `::`) reach each other and loopback
-///   (`127.0.0.1` and `::1`).
-/// - IPv6 addresses that embed an IPv4 address (IPv4-compatible,
-///   IPv4-translated, NAT64 `64:ff9b::/96`, and 6to4 `2002::/16`) reach that
-///   IPv4 address.
 fn alternate_ips(ip: IpAddr) -> Vec<IpAddr> {
     if ip.is_unspecified() {
         let other = if ip.is_ipv4() { IpAddr::V6(Ipv6Addr::UNSPECIFIED) } else { IpAddr::V4(Ipv4Addr::UNSPECIFIED) };
@@ -477,22 +412,15 @@ fn alternate_ips(ip: IpAddr) -> Vec<IpAddr> {
     }
 }
 
-/// IPv6 prefixes that embed a routable IPv4 address, stored as
-/// `(prefix_bits, prefix_len, ipv4_bit_shift)`: NAT64 (`64:ff9b::a.b.c.d`),
-/// 6to4 (`2002:aabb:ccdd::`), IPv4-translated (`::ffff:0:a.b.c.d`), and
-/// IPv4-compatible (`::a.b.c.d`, excluding `::` and `::1`).
+/// NAT64, 6to4, IPv4-translated, and IPv4-compatible IPv6 prefixes: prefix bits, prefix length, and IPv4 bit shift.
 const EMBEDDINGS: [(u128, u8, u32); 4] = [(0x64_ff9b << 96, 96, 0), (0x2002 << 112, 16, 80), (0xffff << 48, 96, 0), (0, 96, 0)];
 
-/// Extracts the embedded IPv4 address from an IPv6 address if it matches one
-/// of [`EMBEDDINGS`].
 fn embedded_ipv4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
     let bits = u128::from(ip);
     let (_, _, shift) = EMBEDDINGS.iter().find(|&&(prefix, len, _)| bits > 1 && mask(ip.into(), len) == Ipv6Addr::from(prefix))?;
     Some(Ipv4Addr::from((bits >> shift) as u32))
 }
 
-/// Parses an IP literal (with optional brackets for IPv6) and converts
-/// IPv4-mapped IPv6 addresses to IPv4.
 pub(crate) fn parse_ip(s: &str) -> Option<IpAddr> {
     body_ip(s.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(s))
 }
@@ -501,8 +429,6 @@ fn body_ip(s: &str) -> Option<IpAddr> {
     s.parse::<IpAddr>().ok().map(|ip| ip.to_canonical())
 }
 
-/// Returns true if `dest` is `localhost` or a non-public IP literal (see
-/// [`is_private_address`]).
 pub(crate) fn is_internal(dest: &Dest) -> bool {
     dest.ip.is_some_and(is_private_address) || is_localhost(dest.name)
 }
@@ -511,12 +437,12 @@ pub(crate) fn is_localhost(host: &str) -> bool {
     host.strip_suffix('.').unwrap_or(host).eq_ignore_ascii_case("localhost")
 }
 
-/// Whether `ip` is not a public unicast internet address: loopback, private
-/// (RFC 1918), shared/CGNAT (100.64/10), link-local, unique-local
-/// (`fc00::/7`), site-local, unspecified, multicast, broadcast, documentation,
-/// benchmarking and other reserved ranges. IPv6 forms that embed an IPv4
-/// address (IPv4-mapped, IPv4-compatible, NAT64 `64:ff9b::/96`, 6to4
-/// `2002::/16`) are classified by the embedded address.
+/// Returns true if `ip` is not a public unicast internet address.
+///
+/// Non-public addresses include loopback, private, shared/CGNAT, link-local,
+/// unique-local, site-local, unspecified, multicast, broadcast, documentation,
+/// benchmarking, and reserved ranges. IPv6 addresses that embed an IPv4
+/// address are classified by the embedded address.
 pub fn is_private_address(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => is_private_v4(v4),
@@ -526,11 +452,11 @@ pub fn is_private_address(ip: IpAddr) -> bool {
 
 fn is_private_v4(ip: Ipv4Addr) -> bool {
     let [a, b, c, _] = ip.octets();
-    a == 0                                      // "this network", unspecified
+    a == 0                                      // unspecified
         || a == 10                              // RFC 1918
-        || (a == 100 && (64..128).contains(&b)) // shared address space (CGNAT)
+        || (a == 100 && (64..128).contains(&b)) // CGNAT
         || a == 127                             // loopback
-        || (a == 169 && b == 254)               // link-local (incl. cloud metadata)
+        || (a == 169 && b == 254)               // link-local
         || (a == 172 && (16..32).contains(&b))  // RFC 1918
         || (a == 192 && b == 0 && c == 0)       // IETF protocol assignments
         || (a == 192 && b == 0 && c == 2)       // documentation
@@ -549,21 +475,19 @@ fn is_private_v6(ip: Ipv6Addr) -> bool {
         return is_private_v4(v4);
     }
     match s {
-        // Unspecified, loopback and IPv4-compatible addresses.
+        // Unspecified, loopback, and IPv4-compatible addresses.
         [0, 0, 0, 0, 0, 0, _, _] => true,
-        // IPv4-translated (RFC 6145): classified by the embedded IPv4 address.
-        [0, 0, 0, 0, 0xffff, 0, hi, lo] => embedded(hi, lo),
-        // NAT64 well-known prefix: classified by the embedded IPv4 address.
-        [0x64, 0xff9b, 0, 0, 0, 0, hi, lo] => embedded(hi, lo),
-        // Local-use NAT64, discard-only.
+        // IPv4-translated and NAT64 well-known prefix.
+        [0, 0, 0, 0, 0xffff, 0, hi, lo] | [0x64, 0xff9b, 0, 0, 0, 0, hi, lo] => embedded(hi, lo),
+        // Local-use NAT64 and discard-only.
         [0x64, 0xff9b, 1, ..] | [0x100, 0, 0, 0, ..] => true,
-        // 6to4: classified by the embedded IPv4 address.
+        // 6to4.
         [0x2002, hi, lo, ..] => embedded(hi, lo),
-        // IETF protocol assignments (incl. Teredo) and documentation.
+        // IETF protocol assignments and documentation.
         [0x2001, b, ..] if b < 0x200 => true,
         [0x2001, 0xdb8, ..] => true,
         [0x3fff, b, ..] if b < 0x1000 => true,
-        // Unique local, link-local, site-local, multicast.
+        // Unique-local, link-local, site-local, and multicast.
         [a, ..] => a & 0xfe00 == 0xfc00 || a & 0xffc0 == 0xfe80 || a & 0xffc0 == 0xfec0 || a & 0xff00 == 0xff00,
     }
 }
@@ -573,16 +497,12 @@ pub fn format_host_port(host: &str, port: u16) -> String {
     if host.contains(':') { format!("[{host}]:{port}") } else { format!("{host}:{port}") }
 }
 
-/// Formats `scheme://host[:port]`, omitting the port if it is the default for `scheme`.
 pub(crate) fn format_url_origin(scheme: &str, host: &str, port: u16) -> String {
     let default = if scheme == "http" { 80 } else { 443 };
     let host = if host.contains(':') { format!("[{host}]") } else { host.to_string() };
     if port == default { format!("{scheme}://{host}") } else { format!("{scheme}://{host}:{port}") }
 }
 
-/// Splits `host`, `host:port`, `[ipv6]`, or `[ipv6]:port` into an unbracketed
-/// host and an optional port string. Unbracketed IPv6 addresses are returned
-/// without a port.
 pub(crate) fn split_port(text: &str) -> Option<(&str, Option<&str>)> {
     match text.strip_prefix('[') {
         Some(rest) => {
@@ -597,12 +517,10 @@ pub(crate) fn split_port(text: &str) -> Option<(&str, Option<&str>)> {
     }
 }
 
-/// Parses an ASCII decimal port number.
 pub(crate) fn parse_port(text: &str) -> Option<u16> {
     if text.bytes().all(|b| b.is_ascii_digit()) { text.parse().ok() } else { None }
 }
 
-/// A parsed listen rule pattern (see [`super::RulePolicy::allow_listen`]).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ListenPattern {
     host: ListenHost,
@@ -631,7 +549,6 @@ impl ListenPattern {
         Some(ListenPattern { host, port })
     }
 
-    /// Returns the specificity score if `self` matches `addr`.
     pub(crate) fn matches(&self, addr: SocketAddr) -> Option<u32> {
         let host_ok = match self.host {
             ListenHost::Any => true,
@@ -643,7 +560,6 @@ impl ListenPattern {
     }
 }
 
-/// A URL pattern of an `http` rule: `[scheme://]host[:port][/path]`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct UrlPattern {
     pub scheme: Option<&'static str>,
@@ -652,9 +568,6 @@ pub(crate) struct UrlPattern {
 }
 
 impl UrlPattern {
-    /// Parses a pattern from its text. Without a port, a pattern with a
-    /// scheme matches the scheme's default port and one without matches
-    /// any port. Path names are percent-decoded.
     pub(crate) fn parse(text: &[Tok]) -> Result<UrlPattern, String> {
         let flat: String = text.iter().map(|t| t.0).collect();
         let (scheme, rest) = match flat.find("://").filter(|&i| !flat[..i].contains('/')) {
@@ -667,12 +580,12 @@ impl UrlPattern {
         };
         let text = |toks: &[Tok]| toks.iter().map(|t| t.0).collect::<String>();
         let slash_from = |from: usize| rest[from..].iter().position(|t| t.0 == '/').map_or(rest.len(), |i| from + i);
-        // Ignore `/` inside bracketed IPv6 ranges (`[fc00::/7]`).
+        // Ignore `/` inside bracketed IPv6 ranges.
         let mut end =
             slash_from(if rest.first().is_some_and(|t| t.0 == '[') { rest.iter().position(|t| t.0 == ']').unwrap_or(0) } else { 0 });
         // Treat a numeric segment immediately after a bare IP address as a
-        // CIDR prefix length (`10.0.0.0/8`) so CIDR ranges in `http` rules are
-        // rejected instead of parsed as URL paths.
+        // CIDR prefix length so that CIDR ranges in `http` rules are rejected
+        // instead of parsed as URL paths.
         let head = text(&rest[..end]);
         let mut address = None;
         if let Ok(NetPattern { kind: HostKind::Ip(ip, len), port: None }) = NetPattern::parse(&head)
@@ -726,8 +639,6 @@ impl UrlPattern {
     }
 }
 
-/// `s` with `%XX` escapes decoded, if they all are valid and decode to
-/// UTF-8.
 pub(crate) fn percent_decode(s: &str) -> Cow<'_, str> {
     if !s.contains('%') {
         return s.into();
@@ -747,10 +658,6 @@ pub(crate) fn percent_decode(s: &str) -> Cow<'_, str> {
     String::from_utf8(out).map_or(s.into(), Cow::Owned)
 }
 
-/// The names of a URL path as rules match them: split at `/`,
-/// percent-decoded, with empty names dropped and `.` and `..` resolved.
-/// Also returns, if a name decodes to text containing `/` or `\` (which a
-/// server may take as separators), the names split there too.
 pub(crate) fn url_segments(path: &str) -> (Vec<String>, Option<Vec<String>>) {
     let decoded: Vec<Cow<str>> = path.split('/').map(percent_decode).collect();
     let main = resolve_dots(decoded.iter().map(|n| &**n));

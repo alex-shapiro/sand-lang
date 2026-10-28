@@ -2432,7 +2432,7 @@ If two opposing rules have equal specificity, deny wins. Rules:
   - a host pattern may match any domain `*`, a specific domain `example.com` or strict subdomains `*.example.com`
   - a host pattern may also match an IP address (`127.0.0.1`, `::1`) or a CIDR range (`10.0.0.0/8`, `fc00::/7`),
     optionally with a port (`host:443`, `[::1]:8080`, `10.0.0.0/8:443`, `[fc00::/7]:443`).
-    The host bits after the prefix length of a CIDR range must be zero (for example, `10.0.0.1/8` is an error).
+    The host bits after the prefix length of a CIDR range must be zero.
   - Exact hosts and addresses are most specific, then ranges and domains (longer ones more), then `*`
   - A port increases rule specificity.
   - Host names must be ASCII and are compared case-insensitively, ignoring a trailing dot
@@ -2557,18 +2557,12 @@ All paths must be anchored, but they may be prefixed with a shortcut:
 - `../...` begins at the file's parent directory
 - `~/...` begins at the user's home directory
 
-URL patterns have the form `[scheme://]host[/path]`, where `host` is a
-single-address or domain host pattern (§14.5) and `path` is a sequence of
-percent-decoded path segments. A pattern with a scheme and without a port
-matches the default port of that scheme; a pattern without a scheme or a
-port matches all ports. CIDR ranges are valid only in `net` rules (for
-example, `deny net 10.0.0.0/8` denies both connections and HTTP requests to
-that range, whereas `deny http 10.0.0.0/8` is an error). If a URL path on an
-IP address starts with a number, include the full prefix length before the
-path (`10.0.0.1/32/8`, `[::1]/128/8`). An IP address in an `http` rule
-matches only URLs that contain that IP literal; it does not match hostnames
-that are resolved to that address (§14.6). Use a `deny net` rule to deny an
-address across all hostnames.
+URL patterns have the form `[scheme://]host[:port][/path]`, where `host` is a
+hostname, domain wildcard, or single IP address and `path` is a
+percent-decoded file path pattern. A pattern with a scheme and without a port
+matches the default port of that scheme; a pattern without a scheme or a port
+matches all ports. An IP address in an `http` rule matches only URLs with that
+IP literal, not hostnames that are resolved to it.
 
 HTTP Methods (`GET`, any case, or any upper-case word) precede URLs.
 If no method is present, an http rule matches every method.
@@ -2600,21 +2594,14 @@ writes methods in upper case, aligns the trailing comments of consecutive
 lines and removes runs of blank lines. `sandlang::policy::lint_policy`
 reports:
 
-| Lint                   | Description                                                                                                       |
-| ---------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `redundant-rule`       | a rule duplicates an earlier rule, or broader rules make the same decision for all requests that the rule matches |
-| `overridden-rule`      | rules with higher precedence make the opposite decision for all requests that a rule matches                      |
-| `bypassable-http-deny` | a `net` rule or `default allow` allows connections to a destination that a `deny http` rule matches               |
-| `unused-set`           | a `let` set is never referenced in a rule                                                                         |
+| Lint                   | Description                                                                                                          |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `redundant-rule`       | broader rules or an earlier identical rule already make the same decision                                            |
+| `overridden-rule`      | higher-precedence rules make the opposite decision for all matching requests                                         |
+| `bypassable-http-deny` | a `net` rule or `default allow` permits raw TCP connections to a destination that is denied by a `deny http` rule    |
+| `unused-set`           | a `let` set is not used in any rule                                                                                  |
 
-The linter compares file, `http`, and `net` rules by the requests that their
-patterns match, including wildcards (`net` rules also match HTTP requests for
-all methods and paths). It compares file paths lexically without resolving
-symlinks. The linter reports a rule only if, for each request kind that the
-rule decides, a single other rule makes it unnecessary. A word that
-references a set is reported only if every expanded rule of that word is
-unnecessary. Removing all reported rules at the same time does not change any
-policy decision.
+File paths are compared lexically without resolving symlinks.
 
 `sandlang::policy::rule_for(capability, allow)` gives, as a policy file
 line, the rule that decides a promptable request for good (e.g. `allow read

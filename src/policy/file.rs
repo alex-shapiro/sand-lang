@@ -1,5 +1,4 @@
-//! Policy files: a policy (rules and limits) as text, for `sand run
-//! --policy=FILE` and hosts that let users write policies (SPEC §14.7).
+//! Policy file parser and formatter.
 //!
 //! ```text
 //! let owners = alice bob            # a set, used as {owners}
@@ -36,7 +35,7 @@ pub struct PolicyFile {
     pub limits: Limits,
 }
 
-/// An error in a policy file, at a line and column (counted from 1).
+/// An error in a policy file, with 1-based line and column numbers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PolicyError {
     pub line: usize,
@@ -52,26 +51,23 @@ impl fmt::Display for PolicyError {
 
 impl std::error::Error for PolicyError {}
 
-/// Expansions of a word with set references above this many are errors.
 const MAX_EXPANSION: usize = 100_000;
 
 impl PolicyFile {
-    /// Parses a policy file. Relative paths (`./data`) are taken from
-    /// `base` (usually the file's directory), `~` is `home` (an error if
-    /// `None`). Reports every error.
+    /// Parses a policy file. Relative paths are resolved from `base`, and `~`
+    /// is resolved from `home` or rejected if `home` is `None`.
     pub fn parse(text: &str, base: &Path, home: Option<&Path>) -> Result<PolicyFile, Vec<PolicyError>> {
         parse(text, base, home).map(|p| p.file)
     }
 
-    /// The policy: the rules with the `default` decision (deny if none was
-    /// given), denying private networks unless `allow private-net` was given.
+    /// Builds a [`Policy`] using `default`, or `Deny` if omitted, and denying
+    /// private networks unless `allow private-net` is present.
     pub fn policy(&self) -> Policy {
         self.policy_or(Decision::Deny)
     }
 
-    /// Like [`PolicyFile::policy`], with `fallback` for requests no rule
-    /// decides when the file has no `default` line (e.g. `Prompt` where a
-    /// person is at hand to answer).
+    /// Builds a [`Policy`] like [`PolicyFile::policy`], using `fallback` if the
+    /// file has no `default` rule.
     pub fn policy_or(&self, fallback: Decision) -> Policy {
         Policy::rules(self.rule_policy(fallback))
     }
@@ -82,15 +78,12 @@ impl PolicyFile {
     }
 }
 
-/// A parsed policy file and its set metadata.
 pub(crate) struct Parsed {
     pub file: PolicyFile,
-    /// Declared sets: `(name, line, column, is_used)`.
     pub sets: Vec<(String, usize, usize, bool)>,
     pub default_line: Option<usize>,
 }
 
-/// A line of a policy file: words, and the comment (from its `#`).
 pub(crate) struct Line {
     pub words: Vec<Word>,
     pub comment: Option<String>,
@@ -99,24 +92,17 @@ pub(crate) struct Line {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Word {
     pub parts: Vec<Part>,
-    /// Column (from 1) of the word's first character.
     pub column: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Part {
-    /// Unquoted text, where `*` is a wildcard.
     Raw(String),
-    /// Quoted text, taken literally.
     Quoted(String),
-    /// `{name}`: each value of the set `name`.
     Ref(String),
 }
 
 impl Word {
-    /// The word's text if it uses no sets (a keyword, a name: quoting
-    /// does not change what a word says, only whether its `*`s are
-    /// wildcards).
     pub(crate) fn plain(&self) -> Option<Cow<'_, str>> {
         match self.parts.as_slice() {
             [Part::Raw(s) | Part::Quoted(s)] => Some(Cow::Borrowed(s)),
@@ -125,7 +111,6 @@ impl Word {
         }
     }
 
-    /// The word's text, quotes and wildcards aside.
     pub(crate) fn text(&self) -> String {
         self.parts
             .iter()
@@ -136,7 +121,6 @@ impl Word {
             .collect()
     }
 
-    /// The word's characters, marking unquoted `*`s as wildcards.
     pub(crate) fn tokens(&self) -> Vec<Tok> {
         let mut out = Vec::new();
         for p in &self.parts {
@@ -149,7 +133,6 @@ impl Word {
         out
     }
 
-    /// The word as a policy file writes it: quoting only what needs it.
     pub(crate) fn render(&self) -> String {
         let mut out = String::new();
         for p in &self.parts {
@@ -166,7 +149,6 @@ impl Word {
         out
     }
 
-    /// The word with its set references replaced by each of their values.
     fn expand(&self, sets: &FxHashMap<String, (Vec<Word>, usize)>, used: &mut FxHashMap<String, bool>) -> Result<Vec<Word>, String> {
         let mut out = vec![Word { parts: vec![], column: self.column }];
         for p in &self.parts {
@@ -189,8 +171,6 @@ impl Word {
     }
 }
 
-/// Text as a quoted part of a word, if it needs quoting to be read back
-/// literally.
 fn quote_part(s: &str, first: bool) -> String {
     let special = |c: char| c.is_whitespace() || matches!(c, ',' | '"' | '*' | '{' | '}');
     if !s.is_empty() && !s.contains(special) && !(first && s.starts_with('#')) {
@@ -199,10 +179,6 @@ fn quote_part(s: &str, first: bool) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-/// Splits a policy file into lines of words. Words are separated by spaces
-/// or commas; `"..."` quotes text (with `\"` and `\\` escapes), and a word
-/// may join quoted and unquoted text; `#` at the start of a word starts a
-/// comment.
 pub(crate) fn lex(text: &str) -> (Vec<Line>, Vec<PolicyError>) {
     let mut lines = Vec::new();
     let mut errors = Vec::new();
@@ -284,8 +260,6 @@ fn is_name(s: &str) -> bool {
 
 const KNOWN_METHODS: [&str; 9] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE", "CONNECT"];
 
-/// Whether a word of an `http` rule is a method: a standard method in any
-/// case, or any upper-case token (`PROPFIND`).
 pub(crate) fn is_method(word: &str) -> bool {
     KNOWN_METHODS.iter().any(|m| m.eq_ignore_ascii_case(word))
         || (word.bytes().any(|b| b.is_ascii_uppercase())
@@ -294,7 +268,6 @@ pub(crate) fn is_method(word: &str) -> bool {
 
 const CAPABILITIES: &str = "read, write, import, net, http, private-net, listen, env, stdin, stdout, stderr, timezone or custom";
 
-/// The context rules are parsed in.
 struct Context<'a> {
     base: &'a Path,
     home: Option<&'a Path>,
@@ -381,7 +354,6 @@ pub(crate) fn parse(text: &str, base: &Path, home: Option<&Path>) -> Result<Pars
 }
 
 impl Context<'_> {
-    /// Parses an `allow` or `deny` rule into `rules`.
     fn rule(
         &mut self,
         allow: bool,
@@ -493,8 +465,6 @@ impl Context<'_> {
         Ok(())
     }
 
-    /// Parses a path pattern: `/...`, `./...`, `../...` (from the base) or
-    /// `~/...` (from home), names separated by `/` (also `\` on Windows).
     fn path(&self, text: &[Tok]) -> Result<PathPattern, String> {
         let flat: String = text.iter().map(|t| t.0).collect();
         let sep = |c: char| c == '/' || (cfg!(windows) && c == '\\');
@@ -611,14 +581,12 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
     Some(format!("{verb} {rule}"))
 }
 
-/// Parses a size: a number of bytes with an optional `K`, `M` or `G` suffix
-/// (powers of 1024), e.g. `512`, `64K`, `256M`, `1G`. Sizes too large for
-/// `usize` saturate, as do suffixed ones too large for `u64`.
+/// Parses a byte count with an optional `K`, `M`, or `G` binary suffix. Values
+/// that overflow saturate.
 pub fn parse_size(s: &str) -> Result<usize, String> {
     parse_size_u64(s).map(crate::vm::value::u64_to_usize_saturating)
 }
 
-/// [`parse_size`] for byte counts kept as `u64` on every target.
 fn parse_size_u64(s: &str) -> Result<u64, String> {
     let s = s.trim();
     let (num, mult) = match s.chars().last() {

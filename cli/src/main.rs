@@ -25,9 +25,7 @@ const OPEN: u8 = 0;
 const CLOSED: u8 = 1;
 const FAILED: u8 = 2;
 
-/// Writes to standard output, ignoring broken-pipe errors after the reader
-/// closes the stream (`sand lint x.policy | head`). If another I/O error
-/// occurs, reports it once and causes `main` to exit with status 2.
+/// Writes to standard output, ignoring broken pipes and recording other I/O errors.
 fn write_out(args: std::fmt::Arguments) {
     write_to(&mut std::io::stdout(), &STDOUT, args);
 }

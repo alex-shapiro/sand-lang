@@ -16,18 +16,15 @@ use std::path::Path;
 
 /// Lints a policy file and returns any warnings found:
 ///
-/// - `redundant-rule`: a rule duplicates another rule, or broader rules already
-///   produce the same decision for all requests that it matches.
-/// - `overridden-rule`: higher-precedence rules produce the opposite decision
-///   for all requests that the rule matches.
-/// - `bypassable-http-deny`: a `deny http` rule matches a destination to which
-///   a `net` rule or `default allow` permits raw TCP connections.
-/// - `unused-set`: a `let` set is not referenced by any rule.
+/// - `redundant-rule`: broader rules or an earlier identical rule already make
+///   the same decision.
+/// - `overridden-rule`: higher-precedence rules make the opposite decision for
+///   all matching requests.
+/// - `bypassable-http-deny`: a `net` rule or `default allow` permits raw TCP
+///   connections to a destination that is denied by a `deny http` rule.
+/// - `unused-set`: a `let` set is not used in any rule.
 ///
-/// The linter compares file, HTTP, and network rules by pattern subsumption,
-/// including wildcards. File paths are compared lexically without symlink
-/// resolution. If all reported rules are removed at the same time, policy
-/// decisions do not change.
+/// File paths are compared lexically without resolving symlinks.
 pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<LintWarning>, Vec<PolicyError>> {
     let parsed = parse(text, base, home)?;
     let deny_private = !parsed.file.private_net;
@@ -68,9 +65,8 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
     for (i, r) in rules.iter().enumerate() {
         same.entry((r.allow, &r.kind)).or_default().push(i);
     }
-    // A pattern token that expands a set produces multiple rules at the same span.
-    // Evaluate tokens in reverse order and ignore rules from tokens already marked
-    // as redundant so that removing all reported tokens preserves every decision.
+    // Group rules expanded from the same source token and check them in reverse
+    // order so that a rule already marked as redundant cannot make an earlier rule redundant.
     let mut words: Vec<std::ops::Range<usize>> = Vec::new();
     for (i, r) in rules.iter().enumerate() {
         let Some(o) = &r.origin else { continue };
@@ -168,19 +164,12 @@ struct PathRule<'a> {
     index: usize,
     allow: bool,
     scope: Scope<'a>,
-    /// True if this rule can apply to internal network destinations.
     reaches_internal: bool,
-    /// True if the host pattern can match an internal network destination.
     internal: bool,
-    /// Path segments from the root (case-folded for `deny` rules).
     segs: Vec<Seg>,
-    /// Case-folded path segments, or `None` for an `allow` rule with
-    /// non-ASCII text adjacent to a wildcard.
     folded: Option<Vec<Seg>>,
-    /// Cumulative hashes of literal segments before the first wildcard.
     prefixes: Vec<u64>,
     rank: Rank,
-    /// Minimum and maximum segment counts matched by this pattern.
     counts: (usize, Option<usize>),
 }
 
@@ -269,7 +258,6 @@ impl<'a> PathRule<'a> {
         self.rank() > other.rank()
     }
 
-    /// Returns the segment slices to compare between two rules (case-folded unless both are `allow` rules).
     fn comparable<'b>(&'b self, other: &'b PathRule) -> Option<(&'b [Seg], &'b [Seg])> {
         if self.allow && other.allow {
             return Some((&self.segs, &other.segs));
@@ -277,7 +265,6 @@ impl<'a> PathRule<'a> {
         Some((self.folded.as_deref()?, other.folded.as_deref()?))
     }
 
-    /// Returns true if this rule matches every request matched by `other` (or an ancestor path if `below` is true).
     fn covers(&self, other: &PathRule, below: bool) -> bool {
         if (self.allow && !other.allow) || !self.scope_covers(other) {
             return false;
@@ -296,8 +283,6 @@ impl<'a> PathRule<'a> {
         }
     }
 
-    /// Returns true if a request matched by this rule (or a descendant path if `self_below` is true)
-    /// can also match `other` or a descendant of `other`.
     fn may_meet(&self, other: &PathRule, self_below: bool) -> bool {
         let scopes = match (&self.scope, &other.scope) {
             (Scope::Files(_), Scope::Files(_)) => true,
@@ -358,7 +343,6 @@ enum Key<'a> {
     Ips,
 }
 
-/// Index of file, HTTP, and network rules keyed by host category and literal path prefixes.
 struct PathRules<'a> {
     rules: Vec<PathRule<'a>>,
     at: Vec<usize>,
@@ -439,8 +423,6 @@ impl<'a> PathRules<'a> {
         found.filter(|k| k.allow != i.allow && i.may_meet(k, k.rank.tier < i.rank.tier))
     }
 
-    /// Returns the rules outside `excluded` that subsume or override `i` across all of its operations,
-    /// together with whether they have the same decision as `i`.
     fn deciders(&self, i: &PathRule<'a>, excluded: &dyn Fn(usize) -> bool) -> Option<(bool, Vec<usize>)> {
         let broader = self.broader(i, excluded);
         let mut same_decision = None;
@@ -457,8 +439,6 @@ impl<'a> PathRules<'a> {
         Some((same_decision?, deciders))
     }
 
-    /// Returns a rule from `broader` that either overrides `i` for operation `op`
-    /// or produces the same decision without an intervening opposing rule.
     fn decider<'b>(&'b self, i: &'b PathRule<'a>, op: Op, broader: &[&'b PathRule<'a>]) -> Option<&'b PathRule<'a>> {
         let broader = broader.iter().copied().filter(|j| j.decides_all(op));
         let instead = broader.clone().filter(|j| j.covers(i, false) && j.outranks(i)).max_by_key(|j| j.rank());
@@ -472,8 +452,6 @@ impl<'a> PathRules<'a> {
     }
 }
 
-/// Returns true if opposing rule `k` cannot rank between rule `i` and broader rule `j`
-/// on any request decided by `i`.
 fn never_between(i: &PathRule, j: &PathRule, k: &PathRule) -> bool {
     let k_deepest = match (k.counts.1, i.counts.1.filter(|_| k.rank.tier >= i.rank.tier)) {
         (Some(a), Some(b)) => Some(a.min(b)),

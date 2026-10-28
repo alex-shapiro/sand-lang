@@ -1,10 +1,4 @@
-//! Rule policies: allow and deny rules, and the indices that decide
-//! requests by them.
-//!
-//! The most specific matching rule decides a request; between equally
-//! specific rules deny wins. Rules are indexed by what they match (path
-//! names in a trie, hosts in hash tables), so a check costs about the same
-//! whatever the number of rules.
+//! Rule-based capability policies.
 
 use super::net::{
     Dest, HostIndex, HostKind, ListenPattern, NetPattern, UrlPattern, is_internal, is_localhost, is_private_address, parse_ip, url_segments,
@@ -18,13 +12,11 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-/// The file accesses a rule names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Access {
     Read,
     Write,
     Import,
-    /// Reading and writing (allow), or all access (deny).
     Any,
 }
 
@@ -33,8 +25,6 @@ pub(crate) const WRITE: u8 = 2;
 pub(crate) const IMPORT: u8 = 4;
 
 impl Access {
-    /// The requests a rule decides: writing implies reading, and what may
-    /// not be read may not be written or imported either.
     pub(crate) fn mask(self, allow: bool) -> u8 {
         match (self, allow) {
             (Access::Read, true) => READ,
@@ -46,15 +36,12 @@ impl Access {
     }
 }
 
-/// A file path pattern: an absolute path, then segments that start with a
-/// wildcard (no trailing `**`).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct PathPattern {
     pub prefix: PathBuf,
     pub rest: Vec<Seg>,
 }
 
-/// An environment variable name pattern (`HOME`, `AWS_*`, `*`).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum NamePattern {
     Exact(String),
@@ -79,7 +66,6 @@ impl NamePattern {
 pub(crate) enum RuleKind {
     Files(Access, PathPattern),
     Net(NetPattern),
-    /// Methods (upper case; `None`: any) and a URL pattern.
     Http(Option<Vec<String>>, UrlPattern),
     Listen(ListenPattern),
     Env(NamePattern),
@@ -91,8 +77,6 @@ pub(crate) enum RuleKind {
 }
 
 impl RuleKind {
-    /// Returns the HTTP matching parameters for `http` and `net` rules (`net`
-    /// rules match HTTP requests for all methods, schemes, and paths).
     pub(crate) fn http_match(&self) -> Option<HttpMatch<'_>> {
         match self {
             RuleKind::Http(methods, url) => {
@@ -103,9 +87,6 @@ impl RuleKind {
         }
     }
 
-    /// Returns the connection stages that the rule evaluates. A `net` rule
-    /// checks named connections ([`Capability::Net`]), and an IP or CIDR `net`
-    /// rule also checks resolved addresses ([`Capability::NetAddr`]).
     pub(crate) fn connections(&self) -> &'static [Connection] {
         match self {
             RuleKind::Net(NetPattern { kind: HostKind::Ip(..), .. }) => &[Connection::Named, Connection::Resolved],
@@ -115,22 +96,17 @@ impl RuleKind {
     }
 }
 
-/// HTTP request matching parameters for an `http` or `net` rule.
 #[derive(Clone, Copy)]
 pub(crate) struct HttpMatch<'a> {
-    /// Uppercase method names, or `None` to match all methods.
     pub methods: Option<&'a [String]>,
     pub scheme: Option<&'static str>,
     pub host: &'a NetPattern,
     pub path: &'a [Seg],
 }
 
-/// Connection stage checked by a `net` rule.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Connection {
-    /// Outgoing connection by hostname or IP literal ([`Capability::Net`]).
     Named,
-    /// Outgoing connection to a resolved IP address ([`Capability::NetAddr`]).
     Resolved,
 }
 
@@ -141,8 +117,6 @@ pub(crate) struct Rule {
     pub origin: Option<Origin>,
 }
 
-/// Where a rule was written: the line and column (from 1) of its pattern,
-/// and the pattern as written.
 #[derive(Clone, Debug)]
 pub(crate) struct Origin {
     pub line: usize,
@@ -150,9 +124,8 @@ pub(crate) struct Origin {
     pub text: String,
 }
 
-/// A rule-based policy: the most specific rule matching a request decides
-/// it (see SPEC §14.5), deny at a tie; requests matching no rule get the
-/// fallback decision.
+/// A rule-based policy where the most specific matching rule decides each
+/// request and `deny` wins ties; unmatched requests use the fallback decision.
 #[derive(Clone)]
 pub struct RulePolicy {
     rules: Vec<Rule>,
@@ -187,11 +160,11 @@ fn listen_pattern(pattern: &str) -> ListenPattern {
     ListenPattern::parse(pattern).unwrap_or_else(|| panic!("invalid listen pattern {pattern:?}"))
 }
 
-/// The paths of rules are taken literally (no wildcards) and cover what is
-/// below them; policy files ([`super::PolicyFile`]) write patterns.
+/// Rule paths are literal prefixes without wildcards; for wildcard patterns,
+/// use [`super::PolicyFile`].
 impl RulePolicy {
-    /// No rules: standard output and error and script imports (confined to
-    /// the module root) are allowed, everything else falls back to `Deny`.
+    /// Creates an empty policy that allows `Stdout`, `Stderr`, and module-root
+    /// imports, and falls back to `Deny` for all other requests.
     pub fn new() -> RulePolicy {
         RulePolicy::from_rules(vec![])
     }
@@ -236,11 +209,11 @@ impl RulePolicy {
     pub fn allow_read(self, p: impl AsRef<Path>) -> Self {
         self.files_rule(true, Access::Read, p.as_ref())
     }
-    /// Denies reading, writing and importing under `p`.
+    /// Denies reading, writing, and importing under `p`.
     pub fn deny_read(self, p: impl AsRef<Path>) -> Self {
         self.files_rule(false, Access::Read, p.as_ref())
     }
-    /// Allows writing (and reading) under `p`.
+    /// Allows reading and writing under `p`.
     pub fn allow_write(self, p: impl AsRef<Path>) -> Self {
         self.files_rule(true, Access::Write, p.as_ref())
     }
@@ -254,27 +227,26 @@ impl RulePolicy {
     pub fn deny_import(self, p: impl AsRef<Path>) -> Self {
         self.files_rule(false, Access::Import, p.as_ref())
     }
-    /// Allows outgoing connections. Patterns: `host`, `*.example.com`
-    /// (strict subdomains), `*`, an IP address (`127.0.0.1`, `::1`) or a
-    /// CIDR range (`10.0.0.0/8`, `fc00::/7`), each optionally with a port
-    /// (`host:443`, `[::1]:8080`, `10.0.0.0/8:443`, `[fc00::/7]:443`).
+    /// Allows outgoing connections to `pattern`: a hostname, `*.domain`, `*`,
+    /// an IP address, or a CIDR range, optionally with a `:port` suffix.
     ///
     /// # Panics
     ///
-    /// If the pattern is invalid (see [`super::check_net_pattern`]).
+    /// Panics if `pattern` is invalid; use [`super::check_net_pattern`] to
+    /// validate patterns before calling this method.
     pub fn allow_net(self, pattern: &str) -> Self {
         self.push(true, RuleKind::Net(net_pattern(pattern)))
     }
-    /// Denies outgoing connections ([`RulePolicy::allow_net`]'s patterns).
+    /// Denies outgoing connections matching `pattern`; see [`RulePolicy::allow_net`].
     pub fn deny_net(self, pattern: &str) -> Self {
         self.push(false, RuleKind::Net(net_pattern(pattern)))
     }
-    /// Allows HTTP requests: optional methods, then a URL pattern, as in a
-    /// policy file's `allow http` rule (`"GET POST api.example.com/v1/**"`).
+    /// Allows HTTP requests matching optional methods followed by a URL
+    /// pattern, such as `"GET POST api.example.com/v1/**"`.
     ///
     /// # Panics
     ///
-    /// If the rule is invalid.
+    /// Panics if `rule` is invalid.
     pub fn allow_http(self, rule: &str) -> Self {
         self.http(true, rule)
     }
@@ -290,17 +262,16 @@ impl RulePolicy {
         }
         self
     }
-    /// Denies connections to private and internal addresses (see
-    /// [`super::is_private_address`]), whether named directly or reached by
-    /// resolving a host name. Exempt are IP literals and `localhost` allowed
-    /// by an explicit (non-wildcard) pattern or by a prompt answer, and
-    /// resolved addresses matching an IP or range `allow_net` pattern.
+    /// Denies connections to private and internal addresses, as classified by
+    /// [`super::is_private_address`]. Explicit IP literal or `localhost`
+    /// rules, prompt approvals, and IP or CIDR `allow_net` rules for resolved
+    /// addresses remain allowed.
     pub fn deny_private_networks(mut self) -> Self {
         self.deny_private = true;
         self
     }
-    /// Allows binding a listener matching `pattern` (`ip:port`, `[ipv6]:port`,
-    /// `ip`, `localhost`, `*:port`, or `*`). Host `*` matches any address, port
+    /// Allows binding a listener matching `pattern`: `ip:port`, `[ipv6]:port`,
+    /// `ip`, `localhost`, `*:port`, or `*`. Host `*` matches any address, port
     /// `*` matches any port, and port `0` matches only an ephemeral port
     /// request.
     ///
@@ -310,7 +281,7 @@ impl RulePolicy {
     pub fn allow_listen(self, pattern: &str) -> Self {
         self.push(true, RuleKind::Listen(listen_pattern(pattern)))
     }
-    /// Denies binding a listener matching `pattern` (see [`RulePolicy::allow_listen`]).
+    /// Denies binding a listener matching `pattern`; see [`RulePolicy::allow_listen`].
     ///
     /// # Panics
     ///
@@ -318,13 +289,13 @@ impl RulePolicy {
     pub fn deny_listen(self, pattern: &str) -> Self {
         self.push(false, RuleKind::Listen(listen_pattern(pattern)))
     }
-    /// Allows reading environment variables: a name, a pattern with `*`
-    /// (`AWS_*`), or `*` for all of them.
+    /// Allows reading environment variables matching a name, a `*` pattern
+    /// such as `AWS_*`, or `*` for all variables.
     pub fn allow_env(self, name: &str) -> Self {
         self.push(true, RuleKind::Env(NamePattern::parse(name)))
     }
-    /// Denies reading matching variables. Listing all variables
-    /// (`Env("*")`) is denied while any variable is.
+    /// Denies reading matching environment variables. Listing all variables is
+    /// denied if any variable is denied.
     pub fn deny_env(self, name: &str) -> Self {
         self.push(false, RuleKind::Env(NamePattern::parse(name)))
     }
@@ -346,7 +317,7 @@ impl RulePolicy {
     pub fn deny_stderr(self) -> Self {
         self.push(false, RuleKind::Stderr)
     }
-    /// Allows a custom capability (`detail = None` allows any detail).
+    /// Allows a custom capability; `detail = None` allows any detail.
     pub fn allow_custom(self, name: &str, detail: Option<&str>) -> Self {
         self.push(true, RuleKind::Custom(name.to_string(), detail.map(String::from)))
     }
@@ -411,7 +382,6 @@ impl RulePolicy {
         self.check_normalized_in(&with(normal), space)
     }
 
-    /// Decides `cap`, whose path (if any) is normalized in `space`.
     pub(crate) fn check_normalized_in(&self, cap: &Capability, space: PathSpace) -> Decision {
         if let Capability::NetAddr { host, addr } = cap {
             return self.check_addr(host, *addr);
@@ -422,7 +392,6 @@ impl RulePolicy {
             None => match cap {
                 Capability::Stdout | Capability::Stderr => Decision::Allow,
                 Capability::Import(_) if !self.others().imports_restricted => Decision::Allow,
-                // Only an explicit rule or a prompt answer allows an internal destination.
                 Capability::Net { host, port } | Capability::Http { host, port, .. }
                     if self.fallback == Decision::Allow && self.deny_private && is_internal(&Dest::new(host, *port)) =>
                 {
@@ -438,7 +407,6 @@ impl RulePolicy {
         !index.deny.is_empty() && index.deny.any_below(&refs(&folded(&path_segments(path))), READ | WRITE)
     }
 
-    /// See [`super::Policy::protects_normalized_in`].
     pub(crate) fn protects_normalized_in(&self, path: &Path, space: PathSpace) -> bool {
         [READ, WRITE].into_iter().any(|op| {
             let mut best = Best::new(&[]);
@@ -447,9 +415,6 @@ impl RulePolicy {
         })
     }
 
-    /// The decision on a file capability normalized but for the spelling of
-    /// its final name, if it is the same for every spelling (see
-    /// [`super::Policy::decision_for_any_spelling`]).
     pub(crate) fn decision_for_any_spelling(&self, cap: &Capability, space: PathSpace) -> Option<Decision> {
         self.spelling_free_decision(cap, space).filter(|&d| d != Decision::Prompt)
     }
@@ -457,16 +422,12 @@ impl RulePolicy {
     fn spelling_free_decision(&self, cap: &Capability, space: PathSpace) -> Option<Decision> {
         let (Capability::FsRead(p) | Capability::FsWrite(p) | Capability::Import(p)) = cap else { return None };
         let index = self.files(space);
-        // Deny rules compare case-folded names.
         if index.allow.matches_last(&refs(&index.allow_input(&path_segments(p)))) {
             return None;
         }
         Some(self.check_normalized_in(cap, space))
     }
 
-    /// The rule deciding `cap` (normalized in `space`), leaving out the
-    /// rules `exclude`: whether it allows, and its index. `None` if no rule
-    /// matches.
     pub(crate) fn verdict(&self, cap: &Capability, space: PathSpace, exclude: &[usize]) -> Option<(bool, usize)> {
         let mut best = Best::new(exclude);
         let index = self.others();
@@ -593,10 +554,9 @@ impl RulePolicy {
         });
     }
 
-    /// Decides connecting to `addr`, an address `host` resolved to.
     fn check_addr(&self, host: &str, addr: std::net::SocketAddr) -> Decision {
         let ip = addr.ip().to_canonical();
-        // An IP literal was fully decided as `Net`, and resolves only to itself.
+        // An IP literal was already checked as `Net` and is resolved only to itself.
         if let Some(literal) = parse_ip(host) {
             return if literal == ip { Decision::Allow } else { Decision::Deny };
         }
@@ -626,8 +586,6 @@ impl RulePolicy {
     }
 }
 
-/// The path of the entry `p` itself, normalized in `space` without resolving
-/// the final name's spelling.
 pub(crate) fn entry_path(p: &Path, space: PathSpace) -> PathBuf {
     match space {
         #[cfg(feature = "os")]
@@ -638,7 +596,6 @@ pub(crate) fn entry_path(p: &Path, space: PathSpace) -> PathBuf {
     }
 }
 
-/// Names, folded as deny rules compare them.
 fn folded<'a>(names: &'a [Cow<'a, str>]) -> Vec<Cow<'a, str>> {
     names.iter().map(|s| fold_name(s)).collect()
 }
@@ -647,9 +604,6 @@ fn refs<S: AsRef<str>>(names: &[S]) -> Vec<&str> {
     names.iter().map(AsRef::as_ref).collect()
 }
 
-/// Returns true if an allow rule that matches a destination applies to the
-/// request. Allow rules do not match alternate IP representations, and do not
-/// match internal destinations unless the host pattern is explicit.
 pub(crate) fn allow_applies(explicit: bool, is_alternate_ip: bool, internal: bool) -> bool {
     !is_alternate_ip && (explicit || !internal)
 }
@@ -670,15 +624,10 @@ pub(crate) fn fold_segments(segs: &[Seg]) -> Vec<Seg> {
     segs.iter().map(|s| s.map(|n| fold_name(n).into_owned())).collect()
 }
 
-/// Rule specificity tuple: `[tier, path_depth, path_weight, has_methods]`.
 pub(crate) type Spec = [u32; 4];
 
-/// Specificity components of a file, `http`, or `net` rule excluding the
-/// matched path depth.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Rank {
-    /// Host pattern rank and scheme flag for `http` and `net` rules, or `0`
-    /// for file rules.
     pub tier: u32,
     pub weight: u32,
     pub methods: bool,
@@ -699,14 +648,10 @@ impl Rank {
     }
 }
 
-/// Returns the comparison key that orders matching rules by specificity, then
-/// deny before allow, and then earlier rules before later rules.
 pub(crate) fn precedence(spec: Spec, allow: bool, rule: usize) -> (Spec, bool, std::cmp::Reverse<usize>) {
     (spec, !allow, std::cmp::Reverse(rule))
 }
 
-/// The deciding rule among those offered: the most specific, deny at a
-/// tie, then the first.
 struct Best<'a> {
     exclude: &'a [usize],
     best: Option<(Spec, bool, std::cmp::Reverse<usize>)>,
@@ -730,14 +675,10 @@ impl<'a> Best<'a> {
     }
 }
 
-/// The file rules of a policy, with their paths normalized in one space.
 #[derive(Debug)]
 struct FileIndex {
     allow: Trie<FileEntry>,
-    /// Deny rules, by names folded with [`fold_name`]: they also match other
-    /// spellings a file system may equate.
     deny: Trie<FileEntry>,
-    /// Whether allow rules ignore case (Windows paths).
     caseless: bool,
 }
 
@@ -772,33 +713,24 @@ impl FileIndex {
         index
     }
 
-    /// Names as allow rules compare them.
     fn allow_input<'a>(&self, names: &'a [Cow<'a, str>]) -> Vec<Cow<'a, str>> {
         names.iter().map(|n| if self.caseless { Cow::Owned(n.to_lowercase()) } else { Cow::Borrowed(&**n) }).collect()
     }
 }
 
-/// Normalizes the paths of many rules as [`normalize_path`] does, taking
-/// one walk and one listing per directory rather than a walk per path.
 #[derive(Default)]
 struct Resolver {
-    /// Directories: normalized, and what they hold (`None`: not listed).
     dirs: FxHashMap<PathBuf, (PathBuf, Option<Listing>)>,
 }
 
 enum Listing {
-    /// The directory does not exist, so nothing in it does.
     Missing,
     Names {
-        /// The names of its regular files.
         files: hashbrown::HashSet<std::ffi::OsString, crate::vm::value::FxBuild>,
-        /// The folded names of all entries (see [`fold_name`]); `None` if
-        /// the listing was incomplete.
         folded: Option<hashbrown::HashSet<String, crate::vm::value::FxBuild>>,
     },
 }
 
-/// The most entries listed of a directory.
 const MAX_LISTING: usize = 1 << 20;
 
 impl Resolver {
@@ -860,11 +792,9 @@ struct Index {
     http: HostIndex<u32>,
     groups: Vec<HttpGroup>,
     listen: Vec<(ListenPattern, bool, u32)>,
-    /// Rules for variables by name, and those with patterns.
     env_names: FxHashMap<String, Vec<(bool, u32)>>,
     env: Vec<(NamePattern, bool, u32)>,
     unit: Vec<(Capability, bool, u32)>,
-    /// Custom rules by name: their detail, if any.
     custom: FxHashMap<String, Vec<(Option<String>, bool, u32)>>,
     imports_restricted: bool,
 }
@@ -879,7 +809,6 @@ struct NetEntry {
 #[derive(Debug, Default)]
 struct HttpGroup {
     allow: Trie<HttpEntry>,
-    /// Deny rules, by folded names (see [`FileIndex::deny`]).
     deny: Trie<HttpEntry>,
 }
 
@@ -940,7 +869,6 @@ impl Index {
 mod tests {
     use super::*;
 
-    /// Resolving many paths at once agrees with resolving each.
     #[test]
     fn the_resolver_agrees_with_normalize_path() {
         let base = normalize_path(&std::env::temp_dir()).join(format!("sand-policy-resolver-{}", std::process::id()));

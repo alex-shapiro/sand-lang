@@ -35,7 +35,7 @@ Follow-up work, roughly in priority order.
       (`tests/metering.rs`), `many_locals_resolve_in_linear_time`
       (`tests/compile_limits.rs`). Bound the work instead (fuel, instructions,
       the ratio between two input sizes in the same run).
-- [ ] `peak_rss_stays_near_the_memory_limit` (`tests/peak_rss.rs`) failed in
+- [ ] `peak_rss_stays_near_the_memory_limit` in `tests/peak_rss.rs` failed in
       7 of 9 runs on macOS because the "decoded computed defaults" case
       exceeds the 1.25 limit ratio at 1.32.
 - [ ] Run the playground page tests in CI across Chrome, Firefox, and Safari.
@@ -94,63 +94,43 @@ Follow-up work, roughly in priority order.
 
 ### Policy
 
-- [ ] **Represent built-in policy decisions as standard rules.** Code outside
-      the rule list currently decides some requests, which hides those
-      decisions from users, prompts, and the linter:
-      - `check_normalized_in` (`src/policy/rules.rs`) allows standard output
-        and standard error, and allows imports if the policy does not contain an
-        `allow import` rule.
-      - `deny_private_networks()` prevents wildcard allow rules and
-        `default allow` from allowing internal destinations (`is_internal`,
-        `allow_applies`), and allows `localhost` to connect to loopback
-        addresses (`check_addr`).
-
-      Convert these built-in decisions into standard rules at startup so the
-      rule evaluator handles all requests through one path. Remove the separate
-      private-network configuration (`deny_private_networks()`,
-      `PolicyFile::private_net`, `--allow-private-net`, and the linter's
-      `reaches_internal` and `internal` flags) and let the host API add the
-      equivalent standard rules:
-      - Give user rules precedence over built-in rules of equal specificity
-        (for example, a user `allow net localhost` overrides a built-in
-        `deny net localhost`), while keeping deny precedence between user rules
-        of equal specificity.
-      - Let explicit hostname rules decide the resolved addresses of that
-        hostname where safe so `allow net localhost` allows `127.0.0.1`
-        without a separate address rule.
-      - Match subdomains of `localhost` (`*.localhost`, RFC 6761) in
-        `is_localhost` (`src/policy/net.rs`) because they are resolved to
-        loopback addresses on macOS and `systemd-resolved`. Decide whether
+- [ ] **Represent built-in policy decisions as standard rules.** Built-in
+      decisions currently live outside the rule list, which hides them from
+      users, prompts, and the linter: `check_normalized_in` allows `Stdout`,
+      `Stderr`, and unrestricted imports when no `allow import` rule is
+      present, and `deny_private_networks()` blocks internal destinations on
+      wildcard allow rules and `default allow` while permitting loopback
+      addresses for `localhost`.
+      - Add these built-in decisions as standard rules at startup so that
+        the standard rule evaluator and linter handle all decisions uniformly.
+      - Remove `deny_private_networks()`, `PolicyFile::private_net`,
+        `--allow-private-net`, and the linter's `reaches_internal` and
+        `internal` flags, and expose host API helpers that add the equivalent
+        standard rules.
+      - Give user rules precedence over built-in rules of equal specificity,
+        while `deny` rules continue to win ties between user rules.
+      - Allow an explicit hostname rule such as `allow net localhost` to permit
+        the resolved addresses of that hostname without a separate address rule.
+      - Treat `*.localhost` as `localhost` per RFC 6761, and decide whether
         `allow net *.localhost` counts as an explicit rule.
-- [ ] **Connect to IP literals without DNS resolution.** Change
-      `resolve_allowed` (`src/stdlib/net.rs`) to connect directly to parsed IP
-      literals without calling the resolver or checking `Capability::NetAddr`,
-      and remove the IP-literal shortcut from `check_addr`.
-- [ ] **Check resolved addresses against HTTP address rules.**
-      `Capability::NetAddr` omits the HTTP method and path, so only `net` rules
-      currently check resolved addresses. For example, with `allow http *`,
-      `allow private-net`, and `deny http 10.0.0.5/admin`, a request to
-      `http://intranet/admin` is allowed if `intranet` is resolved to `10.0.0.5`.
-- [ ] **Generate policy rules for HTTP paths with encoded separators.**
-      `rule_for` (`src/policy/file.rs`) returns `None` if an HTTP path
-      contains `%2F` or `%5C`, which prevents prompts from saving a persistent
-      rule for those requests.
-- [ ] **Document IPv6 address embeddings and unspecified-address matching in
-      §14.5.** State that a deny rule for an IPv4 address also matches its
-      IPv6 embeddings (`::a00:1`, `::ffff:0:a00:1`, `64:ff9b::a00:1`, and
-      `2002:a00:1::`), and that a deny rule for `127.0.0.1` or `::1` also
-      matches `0.0.0.0` and `::`.
+- [ ] Connect directly to parsed IP literals in `resolve_allowed` without
+      calling the DNS resolver or checking `Capability::NetAddr`, and remove
+      the IP-literal shortcut from `check_addr`.
+- [ ] Check resolved addresses against `http` IP rules so that a hostname that
+      is resolved to a denied IP address is blocked on matching HTTP paths and
+      methods.
+- [ ] Support HTTP paths with encoded separators `%2F` and `%5C` in `rule_for`
+      so that "always" prompt answers can save rules for those requests.
+- [ ] Document in §14.5 that IPv4 deny rules also match IPv6-embedded IPv4
+      addresses and that loopback deny rules also match `0.0.0.0` and `::`.
 
 ### Tooling
 
 - [ ] Fix broken intra-doc links to private items and run `cargo doc` with
       `-D warnings` in CI.
-- [ ] Report `env` and `listen` policy rules that broader rules subsume instead
-      of reporting only exact duplicates.
+- [ ] Report `env` and `listen` policy rules that are subsumed by broader rules.
 - [ ] Index opposing rules in the policy linter to avoid quadratic comparisons
-      between narrow rules and opposing rules (for example, 20,000
-      `allow read /r/hN` rules with 5,000 `deny /r/*/aN` rules and
-      `allow read /r`).
+      between narrow rules and opposing rules.
 
 ### Diagnostics
 
