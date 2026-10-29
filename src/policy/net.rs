@@ -727,23 +727,35 @@ impl UrlPattern {
     }
 }
 
+/// Decodes the escapes of `s`. A `%` that starts no escape stays as it is,
+/// and the bytes that are not UTF-8 stay escaped (`%FF`), so that neither
+/// keeps the other escapes of `s`, such as `%2F`, from being decoded.
 pub(crate) fn percent_decode(s: &str) -> Cow<'_, str> {
     if !s.contains('%') {
         return s.into();
     }
     let hex = |b: Option<&u8>| b.and_then(|b| (*b as char).to_digit(16));
-    let (b, mut out, mut i) = (s.as_bytes(), Vec::with_capacity(s.len()), 0);
+    let (b, mut bytes, mut i) = (s.as_bytes(), Vec::with_capacity(s.len()), 0);
     while i < b.len() {
-        if b[i] == b'%' {
-            let (Some(h), Some(l)) = (hex(b.get(i + 1)), hex(b.get(i + 2))) else { return s.into() };
-            out.push((h << 4 | l) as u8);
-            i += 3;
-        } else {
-            out.push(b[i]);
-            i += 1;
+        match (b[i], hex(b.get(i + 1)), hex(b.get(i + 2))) {
+            (b'%', Some(h), Some(l)) => {
+                bytes.push((h << 4 | l) as u8);
+                i += 3;
+            }
+            (byte, ..) => {
+                bytes.push(byte);
+                i += 1;
+            }
         }
     }
-    String::from_utf8(out).map_or(s.into(), Cow::Owned)
+    let mut out = String::with_capacity(bytes.len());
+    for chunk in bytes.utf8_chunks() {
+        out.push_str(chunk.valid());
+        for byte in chunk.invalid() {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    Cow::Owned(out)
 }
 
 pub(crate) fn url_segments(path: &str) -> (Vec<String>, Option<Vec<String>>) {

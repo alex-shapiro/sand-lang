@@ -1163,6 +1163,16 @@ mod tests {
     }
 
     #[test]
+    fn a_bad_escape_does_not_hide_an_encoded_separator() {
+        let p = parse("allow http plaintext *\ndeny http a.com/admin/**");
+        for path in ["/admin%2Fx", "/admin%2F%FF", "/admin%2F%zz", "/admin%2Fa%", "/%FF/..%2Fadmin/x"] {
+            assert_eq!(http(&p, "GET", &format!("http://a.com{path}")), Deny, "{path}");
+        }
+        assert_eq!(http(&p, "GET", "http://a.com/admin%FF"), Allow, "a byte that is not UTF-8 is not a separator");
+        assert_eq!(errors("deny http a.com/x%2F%FF"), ["1:11: `x%2F%FF` holds a separator that servers may read as `/`: write `x/%FF`"]);
+    }
+
+    #[test]
     fn custom_rules_match_names_or_every_name() {
         let p = parse("allow custom *\ndeny custom db \"drop table\"\nprompt custom db\nallow custom \"*\" literal");
         let custom = |name: &str, detail: &str| decide(&p, Capability::Custom { name: name.into(), detail: detail.into() });
