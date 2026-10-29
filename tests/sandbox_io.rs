@@ -219,6 +219,43 @@ fn wildcards_reach_every_destination() {
     assert_eq!(p.check(&net("10.0.0.5", 443)), Decision::Prompt);
 }
 
+/// Every name under `localhost` is the loopback host (RFC 6761), which the
+/// engine connects to without DNS: deny and prompt rules for `localhost`
+/// match those names as other spellings of it, as they match the other
+/// representations of an address. Allow rules match only the name they give.
+#[test]
+fn localhost_rules_restrict_the_names_under_localhost() {
+    let p = RulePolicy::new().allow_net("plaintext *").deny_net("plaintext localhost").allow_net("localhost:8080");
+    for host in ["localhost", "app.localhost", "A.B.LocalHost."] {
+        assert_eq!(p.check(&plain(host, 5432)), Decision::Deny, "{host}");
+    }
+    assert_eq!(p.check(&net("localhost", 8080)), Decision::Allow);
+    assert_eq!(p.check(&net("app.localhost", 8080)), Decision::Prompt, "an allow rule names one name");
+    assert_eq!(p.check(&plain("localhost.example", 5432)), Decision::Allow);
+    let p = RulePolicy::new().allow_net("*").prompt_net("localhost");
+    assert_eq!(p.check(&net("x.localhost", 443)), Decision::Prompt);
+    // Of equal specificity, the deny rule wins.
+    let p = RulePolicy::new().allow_net("app.localhost").deny_net("localhost");
+    assert_eq!(p.check(&net("app.localhost", 443)), Decision::Deny);
+    let p = RulePolicy::new().allow_http("app.localhost/api").deny_http("localhost/api/admin");
+    let get = |host: &str, path: &str| Capability::Http {
+        method: "GET".into(),
+        scheme: "https".into(),
+        host: host.into(),
+        port: 443,
+        path: path.into(),
+    };
+    assert_eq!(p.check(&get("app.localhost", "/api/x")), Decision::Allow);
+    assert_eq!(p.check(&get("app.localhost", "/api/admin")), Decision::Deny);
+}
+
+#[test]
+fn names_under_localhost_cannot_reach_a_denied_localhost() {
+    let src = "import net\nprint(net.connect(\"localhost\", 5432).unwrap_err().kind)\nprint(net.connect(\"app.localhost\", 5432).unwrap_err().message)";
+    let r = run_with(src, |c| c.policy(RulePolicy::standard().allow_net("plaintext *").deny_net("plaintext localhost")));
+    assert_eq!(r.ok_stdout(), "permission_denied\npermission denied: connect to app.localhost:5432 (plaintext)\n");
+}
+
 #[test]
 fn transports_decide_raw_connections_and_resolved_addresses() {
     let p = RulePolicy::new().allow_net("tls plaintext *").deny_net("plaintext 10.0.0.0/8");
@@ -494,10 +531,8 @@ fn pooled_connections_are_reused_only_at_addresses_allowed_for_the_request() {
     let addr: SocketAddr = "10.0.0.5:80".parse().unwrap();
     let connected = Arc::new(Mutex::new(Vec::new()));
     let network = Arc::new(KeepAliveNetwork { addrs: vec![addr], connected: connected.clone() });
-    let policy = RulePolicy::standard()
-        .allow_http("plaintext GET api.example.com/a")
-        .allow_http("plaintext *")
-        .deny_net("plaintext 10.0.0.0/8");
+    let policy =
+        RulePolicy::standard().allow_http("plaintext GET api.example.com/a").allow_http("plaintext *").deny_net("plaintext 10.0.0.0/8");
     let src = r#"
 import http
 print(http.get("http://api.example.com/a")?.text()?)

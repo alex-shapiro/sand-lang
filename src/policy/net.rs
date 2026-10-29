@@ -145,8 +145,24 @@ impl NetPattern {
 
     /// Whether some destination may match both patterns. A pattern that is
     /// not `exact` (of a deny or prompt rule) also matches the alternate
-    /// representations of its addresses.
+    /// representations of its addresses, and the pattern `localhost` also
+    /// matches the names under it.
     pub(crate) fn may_meet(&self, other: &NetPattern, exact: bool, other_exact: bool) -> bool {
+        self.hosts_meet(other, exact, other_exact)
+            || self.names_under_localhost(exact).is_some_and(|p| p.hosts_meet(other, true, other_exact))
+            || other.names_under_localhost(other_exact).is_some_and(|p| self.hosts_meet(&p, exact, true))
+    }
+
+    /// The names under `localhost`, which the pattern `localhost` of a deny
+    /// or prompt rule (not `exact`) also matches.
+    pub(crate) fn names_under_localhost(&self, exact: bool) -> Option<NetPattern> {
+        match &self.kind {
+            HostKind::Host(h) if !exact && h == "localhost" => Some(NetPattern { kind: HostKind::Suffix(h.clone()), port: self.port }),
+            _ => None,
+        }
+    }
+
+    fn hosts_meet(&self, other: &NetPattern, exact: bool, other_exact: bool) -> bool {
         let overlap = |a: &NetPattern, b: &NetPattern| a.kind.covers(&b.kind) || b.kind.covers(&a.kind);
         let reaches =
             |strict: &NetPattern, exact: &NetPattern| overlap(strict, exact) || strict.reaching_ranges().iter().any(|r| overlap(r, exact));
@@ -361,16 +377,19 @@ impl<T> HostIndex<T> {
         }
     }
 
-    /// Calls `f(is_alternate_ip, value)` for each pattern matching `dest`.
+    /// Calls `f(is_alternate, value)` for each pattern matching `dest`.
+    /// `is_alternate` tells that the pattern matches another spelling of the
+    /// destination: another representation of its IP address, or the name
+    /// `localhost` for a name under it.
     pub(crate) fn find(&self, dest: &Dest, mut f: impl FnMut(bool, &T)) {
-        let mut each = |list: Option<&Ported<T>>| {
+        let mut each = |list: Option<&Ported<T>>, is_alternate: bool| {
             for (port, t) in list.into_iter().flatten() {
                 if port.is_none_or(|p| p == dest.port) {
-                    f(false, t);
+                    f(is_alternate, t);
                 }
             }
         };
-        each(Some(&self.any));
+        each(Some(&self.any), false);
         if let Some(ip) = dest.ip {
             self.find_ip(ip, dest.port, f);
             return;
@@ -383,11 +402,14 @@ impl<T> HostIndex<T> {
             dest.name
         };
         if !self.names.is_empty() {
-            each(self.names.get(name));
+            each(self.names.get(name), false);
+            if name != "localhost" && is_localhost(name) {
+                each(self.names.get("localhost"), true);
+            }
         }
         if !self.suffixes.is_empty() {
             for domain in domains_above(name) {
-                each(self.suffixes.get(domain));
+                each(self.suffixes.get(domain), false);
             }
         }
     }

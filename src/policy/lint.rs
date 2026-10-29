@@ -1,7 +1,7 @@
 //! Linter for policy files.
 
 use super::file::parse;
-use super::net::{HostKind, NetPattern, ProbeTargets, domains_above, enclosing_ranges};
+use super::net::{HostKind, NetPattern, ProbeTargets, domains_above, enclosing_ranges, is_localhost};
 use super::path::{self, Pattern, Seg, name_counts};
 use super::rules::{
     Connection, IMPORT, Precedence, READ, Rank, Rule, RuleKind, Transports, WRITE, fold_segments, method_matches, precedence,
@@ -117,7 +117,8 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
     let mut bypass_of = |i: usize| {
         let (RuleKind::Http(_, url, transports), false, Some(r)) = (&rules[i].kind, rules[i].exact(), paths.get(i)) else { return None };
         bypass(url.host.clone(), &url.host, *transports).or_else(|| {
-            let denied = std::iter::once(url.host.clone()).chain(url.host.reaching_ranges()).collect::<Vec<_>>();
+            let denied = [url.host.clone()].into_iter().chain(url.host.reaching_ranges()).chain(url.host.names_under_localhost(false));
+            let denied = denied.collect::<Vec<_>>();
             let mut reach = paths.opposed(r, 0).flat_map(|k| match k.scope {
                 Scope::Http { host, connections, .. } if connections.contains(&Connection::Named) => {
                     denied.iter().filter_map(|d| host.intersection(d)).collect()
@@ -334,7 +335,14 @@ impl<'a> PathRule<'a> {
         let Scope::Http { host, .. } = self.scope else { return vec![Key::Files] };
         match &host.kind {
             HostKind::Any => vec![Key::Any],
+            // Deny and prompt rules for `localhost` also match the names under it.
+            HostKind::Suffix(s) if is_localhost(s) => {
+                [Key::Any, Key::Suffix(s), Key::Name("localhost")].into_iter().chain(domains_above(s).map(Key::Suffix)).collect()
+            }
             HostKind::Suffix(s) => [Key::Any, Key::Suffix(s)].into_iter().chain(domains_above(s).map(Key::Suffix)).collect(),
+            HostKind::Host(h) if h != "localhost" && is_localhost(h) => {
+                [Key::Any, Key::Name(h), Key::Name("localhost")].into_iter().chain(domains_above(h).map(Key::Suffix)).collect()
+            }
             HostKind::Host(h) => [Key::Any, Key::Name(h)].into_iter().chain(domains_above(h).map(Key::Suffix)).collect(),
             HostKind::Ip(ip, len) => std::iter::once(Key::Any).chain(enclosing_ranges(*ip, *len).map(Key::Range)).collect(),
         }
@@ -345,6 +353,9 @@ impl<'a> PathRule<'a> {
         match &host.kind {
             HostKind::Any => vec![Key::Http],
             HostKind::Suffix(s) => [Key::Under(s)].into_iter().chain(self.broader_keys()).collect(),
+            HostKind::Host(h) if h == "localhost" && !self.exact() => {
+                [Key::Under("localhost"), Key::Suffix("localhost")].into_iter().chain(self.broader_keys()).collect()
+            }
             HostKind::Host(_) => self.broader_keys(),
             // Deny rules also match alternate IP representations.
             HostKind::Ip(..) => vec![Key::Any, Key::Ips],
@@ -658,6 +669,16 @@ mod tests {
                 "1:5: warning[unused-set]: no rule uses the set `unused`",
                 "4:18: warning[bypassable-http-deny]: line 3 (`api.example.com`) lets scripts connect to api.example.com:443 and send any request",
             ]
+        );
+        // A deny rule for `localhost` also restricts the names under it.
+        assert_eq!(
+            lint("allow net *.localhost\ndeny http localhost/admin"),
+            ["2:11: warning[bypassable-http-deny]: line 1 (`*.localhost`) lets scripts connect to *.localhost:443 and send any request"]
+        );
+        assert_eq!(lint("allow net app.localhost:8080\ndeny net localhost"), Vec::<String>::new());
+        assert_eq!(
+            lint("allow net *.localhost\ndeny net localhost\nallow net *.localhost"),
+            ["3:11: warning[redundant-rule]: the same as line 1 (`*.localhost`)"]
         );
         assert_eq!(
             lint("allow net *\ndeny http localhost/x\nprompt http POST localhost/y"),

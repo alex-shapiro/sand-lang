@@ -19,3 +19,4 @@ cc 1d0ec48a5b9a3fcb47ee9d360d08701cd1695a1c9874f759f9cda7f477224c5d # shrinks to
 cc 99891a455333df78cec59f8bc7ba5aad3e81e4a266f1b3ae98d44d6e284ef403 # shrinks to lines = ["deny http *", "allow net localhost"], default = "default prompt"
 cc 0736eef05456d22664686e59d67d00780c63a04a1cc1ff71cf45b6173c3679e5 # shrinks to lines = ["deny net *", "deny net example.com"], default = ""
 cc a99a7ca1a4271b9f7cfa82bf51318e204ddc503fcf306e9c4f4bf52dc595dd69 # shrinks to allow = false, broad_host = 1, narrow_host = 0, broad_port = false, broad_both = false, narrow_transport = 1, method = false, path = [], extra = [], narrow_first = true
+cc 36f819d558fe6e9085e0110afc2db46a653c95b175f1aafd82054ba391cbbd3f # shrinks to lines = ["deny http localhost", "allow net *.localhost"]

@@ -2504,6 +2504,9 @@ Specificity depends on the kind of request:
     embeds an IPv4 address (NAT64, 6to4, IPv4-translated, IPv4-compatible) is also that IPv4
     address. Thus `deny net 127.0.0.1` also denies `0.0.0.0`, `::` and `::ffff:0:7f00:1`. Allow
     patterns match only the address that the script used.
+  - In the same way, the deny and prompt host `localhost` also matches every name under it
+    (`app.localhost`), which is the same loopback host. `allow net localhost` matches only
+    `localhost`.
 
 - **HTTP(S) requests** (`Http`)
   - inherits net rules for the host pattern, port and transport
