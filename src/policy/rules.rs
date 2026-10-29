@@ -1229,3 +1229,37 @@ mod tests {
         std::fs::remove_dir_all(&base).unwrap();
     }
 }
+
+#[cfg(test)]
+mod props {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn strictness(d: Decision) -> u8 {
+        match d {
+            Decision::Allow => 0,
+            Decision::Prompt => 1,
+            Decision::Deny => 2,
+        }
+    }
+
+    proptest! {
+        /// The listing of all variables holds every variable, so no variable
+        /// gets a stricter decision than the listing, whatever the tiers.
+        #[test]
+        fn the_env_listing_is_as_strict_as_any_variable(
+            rules in prop::collection::vec((0..3usize, prop::sample::select(vec!["*", "A*", "AB*", "*_KEY", "A*B", "\"*\"", "HOME", "AWS_KEY", "AB", "*B*"])), 1..6),
+            defaults in prop::collection::vec((0..3usize, prop::sample::select(vec!["*", "A*", "HOME", "*_KEY"])), 0..3),
+        ) {
+            let verbs = ["allow", "deny", "prompt"];
+            let text = |rules: &[(usize, &str)]| rules.iter().map(|(v, n)| format!("{} env {n}\n", verbs[*v])).collect::<String>();
+            let parse = |text: &str| super::super::PolicyFile::parse(text, Path::new("/"), None).unwrap().rules;
+            let policy = parse(&text(&rules)).with_defaults(parse(&text(&defaults)));
+            let listing = policy.check(&Capability::Env("*".into()));
+            for name in ["HOME", "AWS_KEY", "AB", "A", "ABX_KEY", "AXB", "*", "X", "B", "XBX"] {
+                let one = policy.check(&Capability::Env(name.into()));
+                prop_assert!(strictness(listing) >= strictness(one), "{}{}listing: {:?}, {}: {:?}", text(&rules), text(&defaults), listing, name, one);
+            }
+        }
+    }
+}
