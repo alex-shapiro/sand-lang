@@ -9,8 +9,8 @@ use sandlang::jiff::civil::Date;
 use sandlang::time::TimeZone;
 use sandlang::vm::Vm;
 use sandlang::{
-    Capability, Config, Decision, Engine, Error, LimitKind, Limits, LogLevel, LogRecord, LogSink, MemorySink, NativeModule, Policy,
-    PromptAnswer, RulePolicy, ValueType,
+    Capability, Config, Decision, Engine, Error, LimitKind, Limits, LogLevel, LogRecord, LogSink, MemorySink, NativeModule, PromptAnswer,
+    ValueType,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -217,7 +217,10 @@ fn engine_can_run_multiple_sources_independently() {
 
 #[test]
 fn script_args_and_env_are_virtual() {
-    let config = Config::new().policy(Policy::allow_all()).args(vec!["a".into(), "b".into()]).env(vec![("ONLY".into(), "this".into())]);
+    let config = Config::new()
+        .policy(sandlang::RulePolicy::allow_all())
+        .args(vec!["a".into(), "b".into()])
+        .env(vec![("ONLY".into(), "this".into())]);
     let (r, out, _) = run_src(config, "import env\nprint(env.args())\nprint(env.get(\"ONLY\"))\nprint(env.get(\"PATH\"))");
     r.unwrap();
     assert_eq!(out, "[\"a\", \"b\"]\nSome(\"this\")\nNone\n");
@@ -657,13 +660,13 @@ fn local_time_zone_needs_the_capability() {
     let (r, out, _) = run_src(tokyo(), src);
     r.unwrap();
     assert_eq!(out, "UTC\n", "denied by default");
-    let (r, out, _) = run_src(tokyo().policy(Policy::rules(RulePolicy::new().allow_timezone())), src);
+    let (r, out, _) = run_src(tokyo().policy(sandlang::RulePolicy::standard().allow_timezone()), src);
     r.unwrap();
     assert_eq!(out, "Asia/Tokyo\n");
-    let (r, out, _) = run_src(Config::new().policy(Policy::allow_all()), src);
+    let (r, out, _) = run_src(Config::new().policy(sandlang::RulePolicy::allow_all()), src);
     r.unwrap();
     assert_eq!(out, "UTC\n", "no zone configured");
-    let deny = Policy::rules(RulePolicy::new().allow_timezone().deny_timezone());
+    let deny = sandlang::RulePolicy::standard().allow_timezone().deny_timezone();
     let (r, out, _) = run_src(tokyo().policy(deny), src);
     r.unwrap();
     assert_eq!(out, "UTC\n", "deny wins a tie");
@@ -673,8 +676,8 @@ fn local_time_zone_needs_the_capability() {
         seen.lock().unwrap().push(cap.to_string());
         std::future::ready(PromptAnswer::AllowOnce)
     };
-    let prompting = Policy::custom(|cap: &Capability| if *cap == Capability::TimeZone { Decision::Prompt } else { Decision::Allow });
-    let (r, out, _) = run_src(tokyo().policy(prompting).prompter(prompter), src);
+    let prompting = |cap: &Capability| if *cap == Capability::TimeZone { Decision::Prompt } else { Decision::Allow };
+    let (r, out, _) = run_src(tokyo().custom_policy(prompting).prompter(prompter), src);
     r.unwrap();
     assert_eq!(out, "Asia/Tokyo\n");
     assert_eq!(*asked.lock().unwrap(), ["read the local time zone"]);
@@ -711,12 +714,12 @@ help(conv.grid)
 print(conv.write("f", b"abc"))
 print(conv.write("g", b""))
 "#;
-    let policy = Policy::custom(|cap: &Capability| match cap {
+    let policy = |cap: &Capability| match cap {
         Capability::Custom { detail, .. } if detail == "f 3" => Decision::Allow,
         Capability::Custom { .. } => Decision::Deny,
         _ => Decision::Allow,
-    });
-    let (r, out, _) = run_src(Config::new().policy(policy).module(m.clone()), src);
+    };
+    let (r, out, _) = run_src(Config::new().custom_policy(policy).module(m.clone()), src);
     r.unwrap();
     assert_eq!(
         out,
@@ -1976,12 +1979,12 @@ fn native_module_custom_capability() {
         Ok(format!("opened {name}"))
     });
     let src = "import door\nprint(door.open(\"front\"))\nprint(door.open(\"back\"))";
-    let policy = Policy::custom(|cap: &Capability| match cap {
+    let policy = |cap: &Capability| match cap {
         Capability::Custom { detail, .. } if detail == "front" => Decision::Allow,
         Capability::Custom { .. } => Decision::Deny,
         _ => Decision::Allow,
-    });
-    let (r, out, _) = run_src(Config::new().policy(policy).module(m), src);
+    };
+    let (r, out, _) = run_src(Config::new().custom_policy(policy).module(m), src);
     r.unwrap();
     assert_eq!(out, "Ok(\"opened front\")\nErr(Error(message: \"permission denied: door back\", kind: \"permission_denied\"))\n");
 }
@@ -1997,8 +2000,7 @@ fn native_module_capability_prompts() {
         Ok(format!("opened {name}"))
     });
     let prompter = ScriptedPrompter::new(&[PromptAnswer::AllowOnce, PromptAnswer::DenyOnce]);
-    let policy =
-        Policy::custom(|cap: &Capability| if matches!(cap, Capability::Custom { .. }) { Decision::Prompt } else { Decision::Allow });
+    let policy = |cap: &Capability| if matches!(cap, Capability::Custom { .. }) { Decision::Prompt } else { Decision::Allow };
     let out = MemorySink::new();
     let mut engine = Engine::new(prompter.config(policy).module(m).stdout(out.clone())).unwrap();
     rt().block_on(engine.run_source("main.sand", "import door\nprint(door.open(\"front\"))\nprint(door.open(\"back\"))")).unwrap();
@@ -2020,7 +2022,7 @@ fn native_module_capability_prompts() {
 fn deny_all_blocks_io_but_allows_output() {
     let dir = TempDir::new("deny");
     dir.write("secret.txt", "s3cret");
-    let config = Config::new().policy(Policy::deny_all()).cwd(dir.path());
+    let config = Config::new().policy(sandlang::RulePolicy::standard()).cwd(dir.path());
     let src = r#"
 import fs
 import env
@@ -2039,8 +2041,8 @@ print(net.connect("127.0.0.1", 1).unwrap_err().kind)
 
 #[test]
 fn stdout_can_be_denied() {
-    let policy = Policy::custom(|cap: &Capability| if matches!(cap, Capability::Stdout) { Decision::Deny } else { Decision::Allow });
-    let (r, out, _) = run_src(Config::new().policy(policy), "print(\"x\")");
+    let policy = |cap: &Capability| if matches!(cap, Capability::Stdout) { Decision::Deny } else { Decision::Allow };
+    let (r, out, _) = run_src(Config::new().custom_policy(policy), "print(\"x\")");
     match r {
         Err(Error::Runtime { message, .. }) => {
             assert!(message.contains("permission denied: stdout"))
@@ -2054,8 +2056,8 @@ fn stdout_can_be_denied() {
 fn log_records_go_to_the_host_sink() {
     let records = Arc::new(Mutex::new(Vec::<LogRecord>::new()));
     let r2 = records.clone();
-    let policy = Policy::custom(|cap: &Capability| if matches!(cap, Capability::Stderr) { Decision::Deny } else { Decision::Allow });
-    let config = Config::new().policy(policy).log_sink(move |r: &LogRecord| r2.lock().unwrap().push(r.clone()));
+    let policy = |cap: &Capability| if matches!(cap, Capability::Stderr) { Decision::Deny } else { Decision::Allow };
+    let config = Config::new().custom_policy(policy).log_sink(move |r: &LogRecord| r2.lock().unwrap().push(r.clone()));
     let src = r#"
 import log
 fn start(user: str) {
@@ -2108,15 +2110,15 @@ fn log_sinks_select_levels() {
 #[test]
 fn hosts_set_the_starting_log_level() {
     let src = "import log\nlog.debug(\"d\")\nlog.set_level(log.Level.Info)\nlog.debug(\"hidden\")";
-    let (r, _, err) = run_src(Config::new().policy(Policy::allow_all()).log_level(LogLevel::Debug), src);
+    let (r, _, err) = run_src(Config::new().policy(sandlang::RulePolicy::allow_all()).log_level(LogLevel::Debug), src);
     r.unwrap();
     assert_eq!(err, "DEBUG d\n");
 }
 
 #[test]
 fn log_records_are_dropped_if_stderr_is_denied() {
-    let policy = Policy::custom(|cap: &Capability| if matches!(cap, Capability::Stderr) { Decision::Deny } else { Decision::Allow });
-    let (r, out, err) = run_src(Config::new().policy(policy), "import log\nlog.error(\"failed\")\nprint(\"done\")");
+    let policy = |cap: &Capability| if matches!(cap, Capability::Stderr) { Decision::Deny } else { Decision::Allow };
+    let (r, out, err) = run_src(Config::new().custom_policy(policy), "import log\nlog.error(\"failed\")\nprint(\"done\")");
     r.unwrap();
     assert_eq!((out.as_str(), err.as_str()), ("done\n", ""));
 }
@@ -2136,7 +2138,7 @@ fn log_records_count_against_the_output_limit() {
 
 #[test]
 fn stdin_requires_permission() {
-    let config = Config::new().policy(Policy::deny_all()).stdin_bytes(b"line\n".to_vec());
+    let config = Config::new().policy(sandlang::RulePolicy::standard()).stdin_bytes(b"line\n".to_vec());
     let (r, out, _) = run_src(config, "import io\nprint(io.stdin.read_line().unwrap_err().kind)");
     r.unwrap();
     assert_eq!(out, "permission_denied\n");
@@ -2152,8 +2154,8 @@ fn rule_policy_confines_paths() {
     #[cfg(unix)]
     std::os::unix::fs::symlink(dir.path().join("private/b.txt"), dir.path().join("public/link.txt")).unwrap();
 
-    let policy = RulePolicy::new().allow_read(dir.path().join("public")).allow_write(dir.path().join("public/sub"));
-    let config = Config::new().policy(Policy::rules(policy)).cwd(dir.path());
+    let policy = sandlang::RulePolicy::standard().allow_read(dir.path().join("public")).allow_write(dir.path().join("public/sub"));
+    let config = Config::new().policy(policy).cwd(dir.path());
     let src = r#"
 import fs
 print(fs.read_text("public/a.txt"))
@@ -2183,8 +2185,8 @@ fn rule_policy_deny_overrides_allow() {
     let dir = TempDir::new("denyover");
     dir.write("data/ok.txt", "ok");
     dir.write("data/secret/key.txt", "key");
-    let policy = RulePolicy::new().allow_read(dir.path().join("data")).deny_read(dir.path().join("data/secret"));
-    let config = Config::new().policy(Policy::rules(policy)).cwd(dir.path());
+    let policy = sandlang::RulePolicy::standard().allow_read(dir.path().join("data")).deny_read(dir.path().join("data/secret"));
+    let config = Config::new().policy(policy).cwd(dir.path());
     let (r, out, _) =
         run_src(config, "import fs\nprint(fs.read_text(\"data/ok.txt\").is_ok())\nprint(fs.read_text(\"data/secret/key.txt\").is_ok())");
     r.unwrap();
@@ -2193,43 +2195,48 @@ fn rule_policy_deny_overrides_allow() {
 
 #[test]
 fn rule_policy_network_hosts() {
-    let p = RulePolicy::new().allow_net("example.com").allow_net("*.example.org").allow_net("localhost:8080");
-    let check = |host: &str, port: u16| p.check(&Capability::Net { host: host.into(), port });
+    let p = sandlang::RulePolicy::standard().allow_net("example.com").allow_net("*.example.org").allow_net("localhost:8080");
+    let check = |host: &str, port: u16| p.check(&Capability::Net { host: host.into(), port, tls: true });
     assert_eq!(check("example.com", 443), Decision::Allow);
     assert_eq!(check("example.com", 80), Decision::Allow);
-    assert_eq!(check("evil.com", 80), Decision::Deny);
+    // Unmatched requests return `Decision::Prompt`.
+    assert_eq!(check("evil.com", 80), Decision::Prompt);
     assert_eq!(check("api.example.org", 443), Decision::Allow);
-    assert_eq!(check("example.org", 443), Decision::Deny);
+    assert_eq!(check("example.org", 443), Decision::Prompt);
     assert_eq!(check("localhost", 8080), Decision::Allow);
-    assert_eq!(check("localhost", 8081), Decision::Deny);
-    let prompting = RulePolicy::new().fallback(Decision::Prompt);
+    assert_eq!(check("localhost", 8081), Decision::Prompt);
+    let prompting = sandlang::RulePolicy::standard();
     assert_eq!(prompting.check(&Capability::Env("X".into())), Decision::Prompt);
     assert_eq!(prompting.check(&Capability::Stdout), Decision::Allow);
 }
 
 #[test]
 fn rule_policy_env_and_listen() {
-    let p = RulePolicy::new().allow_env("HOME").allow_listen("127.0.0.1:*").allow_listen("[::1]:0").allow_stdin();
+    let p = sandlang::RulePolicy::standard().allow_env("HOME").allow_listen("127.0.0.1:*").allow_listen("[::1]:0").allow_stdin();
     assert_eq!(p.check(&Capability::Env("HOME".into())), Decision::Allow);
-    assert_eq!(p.check(&Capability::Env("SECRET".into())), Decision::Deny);
+    assert_eq!(p.check(&Capability::Env("SECRET".into())), Decision::Prompt);
     let listen = |ip: &str, port| Capability::NetListen(std::net::SocketAddr::new(ip.parse().unwrap(), port));
     assert_eq!(p.check(&listen("127.0.0.1", 9000)), Decision::Allow);
     assert_eq!(p.check(&listen("::ffff:127.0.0.1", 9000)), Decision::Allow);
-    assert_eq!(p.check(&listen("0.0.0.0", 9000)), Decision::Deny);
+    assert_eq!(p.check(&listen("0.0.0.0", 9000)), Decision::Prompt);
     assert_eq!(p.check(&listen("::1", 0)), Decision::Allow);
-    assert_eq!(p.check(&listen("::1", 9000)), Decision::Deny, "port 0 allows only an ephemeral port");
+    assert_eq!(p.check(&listen("::1", 9000)), Decision::Prompt, "port 0 allows only an ephemeral port");
     assert_eq!(listen("::1", 0).to_string(), "listen on an ephemeral port at ::1");
     assert_eq!(p.check(&Capability::Stdin), Decision::Allow);
 
-    let p = RulePolicy::new().allow_listen("LocalHost").allow_listen("[::]:80").allow_listen("*:8080").deny_listen("localhost:22");
+    let p = sandlang::RulePolicy::standard()
+        .allow_listen("LocalHost")
+        .allow_listen("[::]:80")
+        .allow_listen("*:8080")
+        .deny_listen("localhost:22");
     assert_eq!(p.check(&listen("127.0.0.2", 3000)), Decision::Allow);
     assert_eq!(p.check(&listen("::1", 3000)), Decision::Allow);
     assert_eq!(p.check(&listen("127.0.0.1", 22)), Decision::Deny);
     assert_eq!(p.check(&listen("::ffff:127.0.0.1", 22)), Decision::Deny);
     assert_eq!(p.check(&listen("0:0::0", 80)), Decision::Allow);
-    assert_eq!(p.check(&listen("::", 81)), Decision::Deny);
+    assert_eq!(p.check(&listen("::", 81)), Decision::Prompt);
     assert_eq!(p.check(&listen("10.0.0.1", 8080)), Decision::Allow);
-    assert_eq!(p.check(&listen("10.0.0.1", 8081)), Decision::Deny);
+    assert_eq!(p.check(&listen("10.0.0.1", 8081)), Decision::Prompt);
     for invalid in [
         "[::1",
         "[::1]x",
@@ -2251,10 +2258,52 @@ fn denied_import_is_a_compile_error() {
     let dir = TempDir::new("imp");
     dir.write("lib.sand", "pub let X = 1");
     let main = dir.write("main.sand", "import \"./lib.sand\"\nprint(lib.X)");
-    let policy = Policy::custom(|cap: &Capability| if matches!(cap, Capability::Import(_)) { Decision::Deny } else { Decision::Allow });
-    let mut engine = Engine::new(Config::new().policy(policy)).unwrap();
+    let policy = |cap: &Capability| if matches!(cap, Capability::Import(_)) { Decision::Deny } else { Decision::Allow };
+    let mut engine = Engine::new(Config::new().custom_policy(policy)).unwrap();
     match rt().block_on(engine.run_file(&main)) {
         Err(Error::Compile(d)) => assert!(d[0].message.contains("permission denied"), "{d:?}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[cfg(feature = "os")]
+#[test]
+fn unallowed_import_reports_the_missing_rule() {
+    let dir = TempDir::new("imp-default");
+    dir.write("lib/util.sand", "pub let X = 1");
+    let main = dir.write("main.sand", "import \"./lib/util.sand\"\nprint(util.X)");
+    let lib = sandlang::policy::normalize_path(&dir.path().join("lib"));
+    let mut engine = Engine::new(Config::new()).unwrap();
+    match rt().block_on(engine.run_file(&main)) {
+        Err(Error::Compile(d)) => assert_eq!(
+            d[0].message,
+            format!(
+                "cannot import `./lib/util.sand`: permission denied; unmatched import requires a prompt, and a prompter is not configured; add `allow import {}` to allow it",
+                lib.display()
+            )
+        ),
+        other => panic!("{other:?}"),
+    }
+    let mut engine = Engine::new(Config::new().policy(sandlang::RulePolicy::standard().allow_import(&lib))).unwrap();
+    rt().block_on(engine.run_file(&main)).unwrap();
+    let util = lib.join("util.sand");
+    let policy = sandlang::RulePolicy::standard().allow_import(&lib).prompt_import(&util);
+    let mut engine = Engine::new(Config::new().policy(policy)).unwrap();
+    match rt().block_on(engine.run_file(&main)) {
+        Err(Error::Compile(d)) => assert_eq!(
+            d[0].message,
+            format!(
+                "cannot import `./lib/util.sand`: permission denied; the rule `prompt import {}` requires a prompt, and a prompter is not configured",
+                util.display()
+            )
+        ),
+        other => panic!("{other:?}"),
+    }
+    let engine = Engine::new(Config::new().prompter(|_: Capability| async { PromptAnswer::AllowOnce })).unwrap();
+    match engine.check_file(&main) {
+        Err(Error::Compile(d)) => {
+            assert!(d[0].message.contains("unmatched import requires a prompt, and cannot prompt during check"), "{}", d[0].message)
+        }
         other => panic!("{other:?}"),
     }
 }
@@ -2268,13 +2317,11 @@ fn prompt_answers() {
     let answers = Arc::new(Mutex::new(vec![PromptAnswer::AllowOnce, PromptAnswer::DenyOnce, PromptAnswer::AllowAlways]));
     let asked2 = asked.clone();
     let answers2 = answers.clone();
-    let config = Config::new().policy(Policy::rules(RulePolicy::new().fallback(Decision::Prompt))).cwd(dir.path()).prompter(
-        move |cap: Capability| {
-            asked2.lock().unwrap().push(cap.to_string());
-            let answer = answers2.lock().unwrap().remove(0);
-            async move { answer }
-        },
-    );
+    let config = Config::new().policy(sandlang::RulePolicy::standard()).cwd(dir.path()).prompter(move |cap: Capability| {
+        asked2.lock().unwrap().push(cap.to_string());
+        let answer = answers2.lock().unwrap().remove(0);
+        async move { answer }
+    });
     let src = r#"
 import fs
 print(fs.read_text("a.txt").is_ok())
@@ -2292,7 +2339,7 @@ print(fs.read_text("a.txt").is_ok())
 
 #[test]
 fn prompt_without_prompter_denies() {
-    let config = Config::new().policy(Policy::rules(RulePolicy::new().fallback(Decision::Prompt)));
+    let config = Config::new().policy(sandlang::RulePolicy::standard());
     let (r, out, _) = run_src(config, "import env\nprint(env.get(\"X\"))");
     r.unwrap();
     assert_eq!(out, "None\n");
@@ -2308,17 +2355,16 @@ fn prompts_suspend_all_execution() {
         t.fetch_add(1, Ordering::SeqCst);
     });
     let (t2, s2) = (ticks.clone(), stable.clone());
-    let config =
-        Config::new().module(m).policy(Policy::rules(RulePolicy::new().fallback(Decision::Prompt))).prompter(move |_cap: Capability| {
-            let (t, s) = (t2.clone(), s2.clone());
-            async move {
-                let before = t.load(Ordering::SeqCst);
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                let after = t.load(Ordering::SeqCst);
-                s.store(before > 0 && before == after, Ordering::SeqCst);
-                PromptAnswer::AllowOnce
-            }
-        });
+    let config = Config::new().module(m).policy(sandlang::RulePolicy::standard()).prompter(move |_cap: Capability| {
+        let (t, s) = (t2.clone(), s2.clone());
+        async move {
+            let before = t.load(Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let after = t.load(Ordering::SeqCst);
+            s.store(before > 0 && before == after, Ordering::SeqCst);
+            PromptAnswer::AllowOnce
+        }
+    });
     let src = r#"
 import probe
 import env
@@ -2354,9 +2400,12 @@ impl ScriptedPrompter {
     fn asked(&self) -> Vec<Capability> {
         std::mem::take(&mut *self.asked.lock().unwrap())
     }
-    fn config(&self, policy: Policy) -> Config {
+    fn config(&self, policy: impl sandlang::CustomPolicy + 'static) -> Config {
+        self.base().custom_policy(policy)
+    }
+    fn base(&self) -> Config {
         let p = self.clone();
-        Config::new().policy(policy).stdout(MemorySink::new()).prompter(move |cap: Capability| {
+        Config::new().stdout(MemorySink::new()).prompter(move |cap: Capability| {
             p.asked.lock().unwrap().push(cap);
             let mut answers = p.answers.lock().unwrap();
             let answer = if answers.is_empty() { PromptAnswer::DenyOnce } else { answers.remove(0) };
@@ -2365,8 +2414,8 @@ impl ScriptedPrompter {
     }
 }
 
-fn prompt_for_imports() -> Policy {
-    Policy::custom(|cap: &Capability| if matches!(cap, Capability::Import(_)) { Decision::Prompt } else { Decision::Allow })
+fn prompt_for_imports() -> impl sandlang::CustomPolicy {
+    |cap: &Capability| if matches!(cap, Capability::Import(_)) { Decision::Prompt } else { Decision::Allow }
 }
 
 fn import_cap(dir: &TempDir, rel: &str) -> Capability {
@@ -2376,7 +2425,7 @@ fn import_cap(dir: &TempDir, rel: &str) -> Capability {
 fn assert_import_denied(r: Result<sandlang::Outcome, Error>, import: &str) {
     match r {
         Err(Error::Compile(d)) => {
-            assert!(d.iter().any(|d| d.message == format!("cannot import `{import}`: permission denied")), "{d:?}")
+            assert!(d.iter().any(|d| d.message.starts_with(&format!("cannot import `{import}`: permission denied"))), "{d:?}")
         }
         other => panic!("expected a denied import, got {other:?}"),
     }
@@ -2445,7 +2494,7 @@ fn import_prompt_without_prompter_denies() {
     let dir = TempDir::new("impnoprompter");
     dir.write("lib.sand", "pub let X = 1");
     let main = dir.write("main.sand", "import \"./lib.sand\"\nprint(lib.X)");
-    let mut engine = Engine::new(Config::new().policy(prompt_for_imports())).unwrap();
+    let mut engine = Engine::new(Config::new().custom_policy(prompt_for_imports())).unwrap();
     assert_import_denied(rt().block_on(engine.run_file(&main)), "./lib.sand");
     // Standard modules are not script imports and are never prompted for.
     let prompter = ScriptedPrompter::new(&[]);
@@ -2493,9 +2542,8 @@ fn runtime_always_answers_last_for_the_engine() {
     let dir = TempDir::new("alwaysruntime");
     dir.write("a.txt", "A");
     let prompter = ScriptedPrompter::new(&[PromptAnswer::AllowAlways, PromptAnswer::DenyAlways]);
-    let policy = Policy::rules(RulePolicy::new().fallback(Decision::Prompt));
     let out = MemorySink::new();
-    let mut engine = Engine::new(prompter.config(policy).cwd(dir.path()).stdout(out.clone())).unwrap();
+    let mut engine = Engine::new(prompter.base().policy(sandlang::RulePolicy::standard()).cwd(dir.path()).stdout(out.clone())).unwrap();
     let src = "import fs\nimport env\nprint(fs.read_text(\"a.txt\").is_ok())\nprint(env.get(\"SAND_TEST_UNSET_VAR\"))";
     rt().block_on(engine.run_source("main.sand", src)).unwrap();
     assert_eq!(prompter.asked().len(), 2);
@@ -2880,7 +2928,7 @@ print(c.unwrap_err().kind)
 a.close()
 print(net.listen("127.0.0.1", 0).is_ok())
 "#;
-    let (r, out, _) = run_src(config.policy(Policy::allow_all()), src);
+    let (r, out, _) = run_src(config.policy(sandlang::RulePolicy::allow_all()), src);
     r.unwrap();
     assert_eq!(out, "limit\ntrue\n");
 }
@@ -2912,7 +2960,7 @@ fn interrupt_from_another_thread() {
 fn interrupt_stops_a_run_waiting_for_a_prompt() {
     let (asked_tx, asked_rx) = std::sync::mpsc::channel();
     let asked_tx = Mutex::new(asked_tx);
-    let config = Config::new().policy(Policy::rules(RulePolicy::new().fallback(Decision::Prompt))).prompter(move |_cap: Capability| {
+    let config = Config::new().policy(sandlang::RulePolicy::standard()).prompter(move |_cap: Capability| {
         let _ = asked_tx.lock().unwrap().send(());
         std::future::pending::<PromptAnswer>()
     });
@@ -3146,7 +3194,7 @@ fn rust_panics_in_natives_do_not_unwind_into_the_host() {
 #[test]
 fn rust_panics_in_host_code_become_internal_errors() {
     // A prompter is host code that runs inside the engine's future.
-    let config = Config::new().policy(Policy::rules(RulePolicy::new().fallback(Decision::Prompt))).prompter(|_cap: Capability| async {
+    let config = Config::new().policy(sandlang::RulePolicy::standard()).prompter(|_cap: Capability| async {
         panic!("prompter bug");
         #[allow(unreachable_code)]
         PromptAnswer::DenyOnce
@@ -3191,13 +3239,11 @@ fn once_answers_apply_only_to_the_call_that_asked() {
     let answers =
         Arc::new(Mutex::new(vec![PromptAnswer::AllowOnce, PromptAnswer::AllowOnce, PromptAnswer::DenyOnce, PromptAnswer::DenyOnce]));
     let (asked2, answers2) = (asked.clone(), answers.clone());
-    let config = Config::new().policy(Policy::rules(RulePolicy::new().fallback(Decision::Prompt))).cwd(dir.path()).prompter(
-        move |cap: Capability| {
-            asked2.lock().unwrap().push(cap.to_string());
-            let answer = answers2.lock().unwrap().remove(0);
-            async move { answer }
-        },
-    );
+    let config = Config::new().policy(sandlang::RulePolicy::standard()).cwd(dir.path()).prompter(move |cap: Capability| {
+        asked2.lock().unwrap().push(cap.to_string());
+        let answer = answers2.lock().unwrap().remove(0);
+        async move { answer }
+    });
     // `copy` asks for both capabilities; the first answer stays valid while
     // the call is retried for the second.
     let src = r#"
@@ -3226,7 +3272,7 @@ fn a_symlinked_main_file_imports_from_its_own_directory() {
     std::fs::create_dir_all(dir.path().join("bin")).unwrap();
     std::os::unix::fs::symlink(dir.path().join("proj/main.sand"), dir.path().join("bin/tool.sand")).unwrap();
     let out = MemorySink::new();
-    let mut engine = Engine::new(Config::new().policy(Policy::allow_all()).stdout(out.clone())).unwrap();
+    let mut engine = Engine::new(Config::new().policy(sandlang::RulePolicy::allow_all()).stdout(out.clone())).unwrap();
     rt().block_on(engine.run_file(dir.path().join("bin/tool.sand"))).unwrap();
     assert_eq!(out.contents(), "hello from lib\n");
 }

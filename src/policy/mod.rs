@@ -1,4 +1,4 @@
-//! Sandbox policy: capabilities, decisions, rule-based policies and prompting.
+//! Sandbox policy types, rule evaluation, and interactive prompts.
 
 use std::fmt;
 use std::future::Future;
@@ -20,22 +20,23 @@ pub use lint::lint_policy;
 use net::format_url_origin;
 pub use net::{check_net_pattern, format_host_port, is_private_address, is_valid_listen_pattern};
 #[cfg(feature = "os")]
-pub(crate) use net::{is_valid_host, parse_port, split_port};
+pub(crate) use net::{is_localhost, is_valid_host, parse_ip, parse_port, split_port};
 pub use rules::RulePolicy;
 
-/// A request to perform an effect outside the sandbox.
+/// A request for an operation outside the sandbox.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Capability {
     FsRead(PathBuf),
     FsWrite(PathBuf),
-    /// Outgoing connection to a hostname or unbracketed IP address.
+    /// Outgoing TCP connection to a hostname or unbracketed IP address.
     Net {
         host: String,
         port: u16,
+        tls: bool,
     },
-    /// An HTTP request. `host` is lower case, an IPv6 address without
-    /// brackets; `path` is the request's path without the query, with no
-    /// `.` or `..` segments (as sent).
+    /// Outgoing HTTP request. `host` is lowercase without brackets around
+    /// IPv6 addresses. `path` excludes the query string and has `.` and `..`
+    /// segments removed.
     Http {
         method: String,
         scheme: String,
@@ -43,25 +44,25 @@ pub enum Capability {
         port: u16,
         path: String,
     },
-    /// One address `host` resolved to, checked after `Net` was granted and
-    /// before connecting. Never prompted: a `Prompt` decision counts as
-    /// `Allow` (the `Net` request was already decided).
+    /// Resolved socket address for an allowed `Net` or `Http` request. A
+    /// `Prompt` decision from [`CustomPolicy::check`] is treated as `Allow`.
     NetAddr {
         host: String,
         addr: SocketAddr,
+        tls: bool,
     },
-    /// Binding a listener to `SocketAddr` (port `0` requests an ephemeral port).
+    /// TCP listener bind request. Port `0` requests an ephemeral port.
     NetListen(SocketAddr),
-    /// Environment variable (`"*"` for all).
+    /// Environment variable read request, or `"*"` to read all variables.
     Env(String),
     Stdin,
     Stdout,
     Stderr,
-    /// Reading the local time zone (`time.local_zone`).
+    /// Local time zone query.
     TimeZone,
-    /// Loading a script module.
+    /// Script module import.
     Import(PathBuf),
-    /// Defined by host native modules.
+    /// Capability defined by a native host module.
     Custom {
         name: String,
         detail: String,
@@ -73,14 +74,22 @@ impl fmt::Display for Capability {
         match self {
             Capability::FsRead(p) => write!(f, "read {}", p.display()),
             Capability::FsWrite(p) => write!(f, "write {}", p.display()),
-            Capability::Net { host, port } => write!(f, "connect to {}", format_host_port(host, *port)),
+            Capability::Net { host, port, tls: true } => write!(f, "connect to {}", format_host_port(host, *port)),
+            Capability::Net { host, port, tls: false } => write!(f, "connect to {} (plaintext)", format_host_port(host, *port)),
             Capability::Http { method, scheme, host, port, path } => {
                 write!(f, "{method} {}{path}", format_url_origin(scheme, host, *port))
             }
-            Capability::NetAddr { host, addr } if *host == addr.ip().to_string() => write!(f, "connect to {addr}"),
-            Capability::NetAddr { host, addr } => write!(f, "connect to {host} at {addr}"),
+            Capability::NetAddr { host, addr, tls } => {
+                if *host == addr.ip().to_string() {
+                    write!(f, "connect to {addr}")?
+                } else {
+                    write!(f, "connect to {host} at {addr}")?
+                }
+                if *tls { Ok(()) } else { write!(f, " (plaintext)") }
+            }
             Capability::NetListen(addr) if addr.port() == 0 => write!(f, "listen on an ephemeral port at {}", addr.ip()),
             Capability::NetListen(addr) => write!(f, "listen on {addr}"),
+            Capability::Env(n) if n == "*" => write!(f, "read all environment variables"),
             Capability::Env(n) => write!(f, "read environment variable {n}"),
             Capability::Stdin => write!(f, "read standard input"),
             Capability::Stdout => write!(f, "write standard output"),
@@ -92,7 +101,7 @@ impl fmt::Display for Capability {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Decision {
     Allow,
     Deny,
@@ -109,8 +118,8 @@ pub enum PromptAnswer {
 
 pub type PromptFuture = Pin<Box<dyn Future<Output = PromptAnswer> + Send>>;
 
-/// Asks the user about a capability. While a prompt is pending the engine
-/// runs no script code.
+/// Prompts the user to allow or deny a capability. Script execution pauses
+/// until the returned future completes.
 pub trait Prompter: Send + Sync {
     fn prompt(&self, cap: Capability) -> PromptFuture;
 }
@@ -125,28 +134,25 @@ where
     }
 }
 
-/// A host-defined policy (see [`Policy::custom`]).
-///
-/// Only [`CustomPolicy::check`] is required.
+/// Host-defined policy callback; see [`crate::Config::custom_policy`].
 pub trait CustomPolicy: Send + Sync {
-    /// Decides `cap`. File paths are normalized as [`normalize_path`] does.
+    /// Evaluates `cap`. File paths in `cap` are normalized with [`normalize_path`].
     fn check(&self, cap: &Capability) -> Decision;
 
-    /// Custome check on directory entry operation.
-    /// The path is normalized.
+    /// Evaluates an operation on a directory entry such as removal or
+    /// rename without following a final symlink.
     fn check_entry(&self, cap: &Capability) -> Decision {
         self.check(cap)
     }
 
-    /// Whether the policy may deny an entry at or below `path` (normalized
-    /// as an entry). If it may, the tree is scanned with
-    /// [`CustomPolicy::protects`] before it is moved or removed as a whole.
-    /// By default, always.
+    /// Returns `true` if the policy can deny an entry at or below `path`. If
+    /// this returns `true`, the engine scans the directory tree with
+    /// [`CustomPolicy::protects`] before moving or removing it.
     fn denies_under(&self, _path: &Path) -> bool {
         true
     }
 
-    /// Whether the entry at `path` (normalized) is protected.
+    /// Returns `true` if the entry at `path` is protected from removal or rename.
     fn protects(&self, path: &Path) -> bool {
         self.check(&Capability::FsRead(path.to_path_buf())) == Decision::Deny
             || self.check_entry(&Capability::FsWrite(path.to_path_buf())) == Decision::Deny
@@ -159,12 +165,8 @@ impl<F: Fn(&Capability) -> Decision + Send + Sync> CustomPolicy for F {
     }
 }
 
-/// A policy deciding capability requests.
-#[derive(Clone, Default)]
-pub enum Policy {
-    AllowAll,
-    #[default]
-    DenyAll,
+#[derive(Clone)]
+pub(crate) enum Policy {
     Rules(Arc<RulePolicy>),
     Custom(Arc<dyn CustomPolicy>),
 }
@@ -172,8 +174,6 @@ pub enum Policy {
 impl fmt::Debug for Policy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Policy::AllowAll => write!(f, "AllowAll"),
-            Policy::DenyAll => write!(f, "DenyAll"),
             Policy::Rules(r) => write!(f, "Rules({r:?})"),
             Policy::Custom(_) => write!(f, "Custom"),
         }
@@ -181,71 +181,51 @@ impl fmt::Debug for Policy {
 }
 
 impl Policy {
-    /// Everything allowed: only for trusted scripts.
-    pub fn allow_all() -> Policy {
-        Policy::AllowAll
-    }
-    /// Denies all capabilities except standard output, standard error, and module imports.
-    pub fn deny_all() -> Policy {
-        Policy::DenyAll
-    }
-    pub fn rules(r: RulePolicy) -> Policy {
-        Policy::Rules(Arc::new(r))
-    }
-    /// A host-defined policy.
-    pub fn custom(p: impl CustomPolicy + 'static) -> Policy {
-        Policy::Custom(Arc::new(p))
-    }
-
-    /// Decides `cap`. A rule policy first normalizes a file capability's path
-    /// with [`normalize_path`]; [`Policy::check_normalized`] skips that.
-    pub fn check(&self, cap: &Capability) -> Decision {
+    /// Evaluates `cap` against the host file system, normalizing file paths first.
+    pub(crate) fn check(&self, cap: &Capability) -> Decision {
         self.check_in(cap, PathSpace::Host)
     }
 
-    /// Like [`Policy::check`] for paths of the file system `space`.
     pub(crate) fn check_in(&self, cap: &Capability, space: PathSpace) -> Decision {
         match self {
-            Policy::AllowAll => Decision::Allow,
-            Policy::DenyAll => match cap {
-                Capability::Stdout | Capability::Stderr | Capability::Import(_) => Decision::Allow,
-                _ => Decision::Deny,
-            },
             Policy::Rules(r) => r.check_in(cap, space),
             Policy::Custom(p) => p.check(cap),
         }
     }
 
-    /// Like [`Policy::check`] for a capability whose path (`FsRead`,
-    /// `FsWrite`) the caller already normalized with [`normalize_path`]
-    /// (and will operate on exactly): a rule policy skips normalizing it
-    /// again, which costs a `realpath`.
-    pub fn check_normalized(&self, cap: &Capability) -> Decision {
-        self.check_normalized_in(cap, PathSpace::Host)
-    }
-
-    /// Like [`Policy::check_normalized`] for paths of the file system `space`
-    /// (normalized by it).
-    pub(crate) fn check_normalized_in(&self, cap: &Capability, space: PathSpace) -> Decision {
+    /// Checks whether a connection to `addr` resolved from an allowed `Net`
+    /// or `Http` `request` is permitted. Returns the denial reason on `Err`.
+    #[cfg(feature = "os")]
+    pub(crate) fn check_resolved(&self, request: &Capability, addr: SocketAddr) -> Result<(), String> {
         match self {
-            Policy::Rules(r) => r.check_normalized_in(cap, space),
-            _ => self.check_in(cap, space),
+            Policy::Rules(r) => r.resolved_verdict(request, addr).map_err(|rule| match rule {
+                Some(rule) => format!("is not allowed by {}", r.describe_rule(rule)),
+                None => "is not the requested address".to_string(),
+            }),
+            Policy::Custom(p) => {
+                let (Capability::Net { host, .. } | Capability::Http { host, .. }) = request else { return Ok(()) };
+                match p.check(&Capability::NetAddr { host: host.clone(), addr, tls: rules::uses_tls(request) }) {
+                    Decision::Deny if is_private_address(addr.ip()) => Err("is private or internal and is not allowed".into()),
+                    Decision::Deny => Err("is not allowed".into()),
+                    Decision::Allow | Decision::Prompt => Ok(()),
+                }
+            }
         }
     }
 
-    /// Like [`Policy::check`] for an operation on a directory entry itself
-    /// (removing or renaming it): a final symlink in an `FsRead`/`FsWrite`
-    /// path is the entry and is not resolved to its target.
-    pub fn check_entry(&self, cap: &Capability) -> Decision {
-        self.check_entry_in(cap, PathSpace::Host)
+    /// Evaluates `cap` if its file path is already normalized for `space`.
+    pub(crate) fn check_normalized_in(&self, cap: &Capability, space: PathSpace) -> Decision {
+        match self {
+            Policy::Rules(r) => r.check_normalized_in(cap, space),
+            Policy::Custom(p) => p.check(cap),
+        }
     }
 
-    /// Like [`Policy::check_entry`] for paths of the file system `space`.
+    /// Evaluates `cap` for a directory entry operation without following a final symlink.
     pub(crate) fn check_entry_in(&self, cap: &Capability, space: PathSpace) -> Decision {
         match self {
             Policy::Rules(r) => r.check_entry_in(cap, space),
             Policy::Custom(p) => p.check_entry(cap),
-            _ => self.check_in(cap, space),
         }
     }
 
@@ -253,77 +233,46 @@ impl Policy {
         match self {
             Policy::Rules(r) => r.check_normalized_in(cap, space),
             Policy::Custom(p) => p.check_entry(cap),
-            _ => self.check_in(cap, space),
         }
     }
 
-    /// The decision on `cap` (a file or import capability normalized except
-    /// for the final name's spelling) if it holds for every spelling. `None`
-    /// for a custom policy (which may compare paths exactly), an allow rule
-    /// naming the final name, or a prompt (which shows the path).
-    pub(crate) fn decision_for_any_spelling(&self, cap: &Capability, space: PathSpace) -> Option<Decision> {
+    /// Returns the decision for `cap` if the result does not depend on the
+    /// on-disk case or Unicode normalization of the final path component.
+    pub(crate) fn case_insensitive_decision(&self, cap: &Capability, space: PathSpace) -> Option<Decision> {
         match self {
-            Policy::AllowAll | Policy::DenyAll => Some(self.check_in(cap, space)),
             Policy::Custom(_) => None,
-            Policy::Rules(r) => r.decision_for_any_spelling(cap, space),
+            Policy::Rules(r) => r.case_insensitive_decision(cap, space),
         }
     }
 
-    /// Whether a deny rule may match `path` or a path below it. If one may,
-    /// the tree at `path` must be scanned for protected entries
-    /// ([`Policy::protects_normalized_in`]) before it is moved or removed.
-    pub fn denies_under(&self, path: &Path) -> bool {
-        self.denies_under_in(path, PathSpace::Host)
-    }
-
-    /// Like [`Policy::denies_under`] for a path of the file system `space`.
-    pub(crate) fn denies_under_in(&self, path: &Path, space: PathSpace) -> bool {
-        match self {
-            Policy::Rules(r) => r.denies_under_normalized_in(&rules::entry_path(path, space), space),
-            Policy::Custom(p) => p.denies_under(&rules::entry_path(path, space)),
-            _ => false,
-        }
-    }
-
-    /// Like [`Policy::denies_under_in`] for a path already normalized as
-    /// the path of an entry itself.
+    /// Returns `true` if a deny or prompt rule can match `path` or a descendant in `space`.
     pub(crate) fn denies_under_normalized_in(&self, path: &Path, space: PathSpace) -> bool {
         match self {
             Policy::Rules(r) => r.denies_under_normalized_in(path, space),
             Policy::Custom(p) => p.denies_under(path),
-            _ => false,
         }
     }
 
-    /// Whether a deny rule decides reading or writing the entry at `path`
-    /// (normalized in `space`). Such an entry protects every tree it is in:
-    /// none of them may be moved or removed as a whole, even if the policy
-    /// allows writing the tree's root.
+    /// Returns `true` if a deny rule matches reading or writing `path` in `space`.
     pub(crate) fn protects_normalized_in(&self, path: &Path, space: PathSpace) -> bool {
         match self {
             Policy::Rules(r) => r.protects_normalized_in(path, space),
             Policy::Custom(p) => p.protects(path),
-            _ => false,
         }
     }
 }
 
-/// The file system whose paths a check is about. A rule policy resolves its
-/// rules' paths for each: canonicalised on the host, lexically normalized
-/// for a memory file system ([`crate::MemFs`]).
+/// Target file system for path resolution during policy checks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PathSpace {
     Host,
     Memory,
 }
 
-/// Paths (as given by a script, before normalization) longer than this many
-/// bytes are denied by the file system functions and imports: no usable
-/// path is that long (`PATH_MAX` is 4096 bytes on Linux and 1024 on macOS),
-/// and normalizing one costs time in proportion to its length.
+/// Maximum script-supplied path length in bytes before normalization.
 pub const MAX_PATH_BYTES: usize = 4096;
 
-/// Resolves `.` and `..` lexically.
+/// Resolves `.` and `..` components lexically.
 pub(crate) fn lexical(p: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for c in p.components() {
@@ -338,13 +287,9 @@ pub(crate) fn lexical(p: &Path) -> PathBuf {
     out
 }
 
-/// Normalizes a path lexically (`.`, `..`), then resolves its longest
-/// existing prefix on the host's file system as `realpath` does: following
-/// symlinks and, on macOS, spelling components as stored and resolving
-/// firmlinks (`/System/Volumes/Data/Users` is `/Users`). A symlink whose
-/// target does not resolve is kept, with the rest of the path.
-///
-/// Without the `os` feature, paths are only normalized lexically.
+/// Normalizes `p` lexically and resolves the longest existing prefix on the
+/// host file system. Without the `os` feature, only lexical normalization is
+/// performed.
 pub fn normalize_path(p: &Path) -> PathBuf {
     #[cfg(feature = "os")]
     return crate::files::Fs::Host.resolve(&lexical(p));
@@ -352,7 +297,8 @@ pub fn normalize_path(p: &Path) -> PathBuf {
     return lexical(p);
 }
 
-/// Normalizes parent path components without resolving a final symlink component.
+/// Normalizes parent path components and records the on-disk name of the
+/// final component without following a final symlink.
 pub fn normalize_entry_path(p: &Path) -> PathBuf {
     #[cfg(feature = "os")]
     {
@@ -364,19 +310,13 @@ pub fn normalize_entry_path(p: &Path) -> PathBuf {
     return lexical(p);
 }
 
-/// The most directory entries read to find an entry's stored name when
-/// there is no other way (a symlink's; on macOS, a device's or an unreadable
-/// file's). In a larger directory the entry keeps the given name, which deny
-/// rules still match but allow rules must name exactly.
+/// Maximum number of directory entries scanned to recover the on-disk name
+/// of an entry that cannot be opened directly.
 pub const MAX_LINK_SCAN: usize = 4096;
 
-/// A caseless, normalization-insensitive form of a file name, coarser than
-/// the comparisons of case- and normalization-insensitive file systems:
-/// canonical decomposition (NFD), case folding (lower case of the upper case,
-/// twice, which also folds `ſ`, `ς`, `ß`, `ẞ`, ligatures and the Kelvin
-/// sign), NFD again, without default-ignorable characters (which HFS+
-/// ignores). Two names a file system may treat as the same entry have the
-/// same form.
+/// Returns a case-folded, NFD-normalized key with default-ignorable code
+/// points removed so names that compare equal on case- or
+/// normalization-insensitive file systems produce the same key.
 pub(crate) fn fold_name(name: &str) -> std::borrow::Cow<'_, str> {
     use unicode_normalization::UnicodeNormalization;
     if name.is_ascii() {
@@ -389,8 +329,6 @@ pub(crate) fn fold_name(name: &str) -> std::borrow::Cow<'_, str> {
     s.nfd().filter(|&c| !is_default_ignorable(c)).collect::<String>().into()
 }
 
-/// Unicode's Default_Ignorable_Code_Point characters (zero-width and
-/// formatting characters, variation selectors, ...).
 fn is_default_ignorable(c: char) -> bool {
     matches!(c as u32,
         0xAD | 0x34F | 0x61C | 0x115F..=0x1160 | 0x17B4..=0x17B5 | 0x180B..=0x180F
@@ -403,7 +341,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn folded_names_equate_what_file_systems_may_equate() {
+    fn fold_name_equates_case_and_normalization_variants() {
         let same = [
             ("secrets", "ſecrets"),
             ("secrets", "SECRETS"),
@@ -429,8 +367,6 @@ mod tests {
         assert_eq!(fold_name("plain.txt"), "plain.txt");
     }
 
-    /// The resolver agrees with `realpath` (the standard library's
-    /// `canonicalize`) on the longest prefix that resolves.
     #[test]
     #[cfg(all(feature = "os", unix))]
     fn normalization_finds_the_longest_existing_prefix() {
@@ -459,7 +395,6 @@ mod tests {
         ] {
             let p = base.join(rest);
             let expected = {
-                // The obvious algorithm: drop components from the end until it resolves.
                 let lexical = lexical(&p);
                 let mut existing = lexical.clone();
                 let mut tail = Vec::new();
@@ -473,7 +408,6 @@ mod tests {
             };
             assert_eq!(normalize_path(&p), expected, "{rest}");
         }
-        // Very long paths take few calls.
         let long = base.join("a/".repeat(100_000) + "b");
         let start = std::time::Instant::now();
         assert!(normalize_path(&long).starts_with(&base));
@@ -490,7 +424,6 @@ mod tests {
         std::fs::write(base.join("Dir/File.txt"), "").unwrap();
         std::os::unix::fs::symlink("/nowhere", base.join("Link")).unwrap();
         if !base.join("dir").exists() {
-            // A case-sensitive volume.
             std::fs::remove_dir_all(&base).unwrap();
             return;
         }
@@ -504,8 +437,8 @@ mod tests {
 
     #[cfg(all(feature = "os", target_os = "macos"))]
     #[test]
-    fn checks_decide_by_stored_names() {
-        let base = normalize_path(&std::env::temp_dir()).join(format!("sand-policy-spelling-{}", std::process::id()));
+    fn checks_use_stored_file_names() {
+        let base = normalize_path(&std::env::temp_dir()).join(format!("sand-policy-case-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(base.join("Dir/Sub")).unwrap();
         for f in ["Dir/File.txt", "Dir/Other.txt", "Dir/Sub/Secret.txt", "Dir/Sub/x.txt"] {
@@ -515,16 +448,14 @@ mod tests {
             std::fs::remove_dir_all(&base).unwrap();
             return;
         }
-        let p = Policy::rules(
-            RulePolicy::new()
-                .allow_read(base.join("Dir/File.txt"))
-                .allow_read(base.join("Dir/Sub"))
-                .deny_read(base.join("Dir/Sub/Secret.txt")),
-        );
+        let p = RulePolicy::new()
+            .allow_read(base.join("Dir/File.txt"))
+            .allow_read(base.join("Dir/Sub"))
+            .deny_read(base.join("Dir/Sub/Secret.txt"));
         for (given, want) in [
             ("dir/file.txt", Decision::Allow),
             ("DIR/FILE.TXT", Decision::Allow),
-            ("dir/other.txt", Decision::Deny),
+            ("dir/other.txt", Decision::Prompt),
             ("dir/sub/X.TXT", Decision::Allow),
             ("dir/sub/SECRET.txt", Decision::Deny),
             ("dir/sub/new.txt", Decision::Allow),

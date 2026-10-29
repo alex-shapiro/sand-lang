@@ -29,15 +29,15 @@ fn main() {
     let start = Instant::now();
     let file = PolicyFile::parse(&text, &base, None).unwrap();
     let parse = start.elapsed();
-    let policy = file.policy();
+    let policy = file.rules;
     let checks: Vec<(Capability, Decision)> = vec![
         (Capability::FsRead(base.join("data/d7/f7.txt")), Decision::Allow),
-        (Capability::FsRead(base.join("data/d7/f8.txt")), Decision::Deny),
+        (Capability::FsRead(base.join("data/d7/f8.txt")), Decision::Prompt),
         (Capability::FsRead(base.join("data/d7/x/y/k.secret")), Decision::Deny),
         (Capability::FsRead(base.join("data/d9/public/a/b")), Decision::Allow),
         (Capability::FsRead(base.join("data/d9/public/.env")), Decision::Deny),
         (http("POST", "api5.example.com", "/v1/users/5/repos"), Decision::Allow),
-        (http("POST", "api5.example.com", "/v1/users/6/repos"), Decision::Deny),
+        (http("POST", "api5.example.com", "/v1/users/6/repos"), Decision::Prompt),
         (http("DELETE", "x.example3.org", "/admin/x"), Decision::Deny),
         (http("GET", "a.example.net", "/"), Decision::Allow),
     ];

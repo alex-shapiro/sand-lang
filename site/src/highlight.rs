@@ -53,7 +53,7 @@ pub fn sand_linked(source: &str, link: &dyn Fn(&str) -> Option<String>) -> Strin
 }
 
 pub fn policy(source: &str) -> String {
-    const STATEMENTS: &[&str] = &["allow", "deny", "default", "limit", "let"];
+    const STATEMENTS: &[&str] = &["allow", "deny", "prompt", "limit", "let"];
     let mut out = String::new();
     for (i, line) in source.split('\n').enumerate() {
         if i > 0 {

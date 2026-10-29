@@ -94,35 +94,53 @@ Follow-up work, roughly in priority order.
 
 ### Policy
 
-- [ ] **Represent built-in policy decisions as standard rules.** Built-in
-      decisions currently live outside the rule list, which hides them from
-      users, prompts, and the linter: `check_normalized_in` allows `Stdout`,
-      `Stderr`, and unrestricted imports when no `allow import` rule is
-      present, and `deny_private_networks()` blocks internal destinations on
-      wildcard allow rules and `default allow` while permitting loopback
-      addresses for `localhost`.
-      - Add these built-in decisions as standard rules at startup so that
-        the standard rule evaluator and linter handle all decisions uniformly.
-      - Remove `deny_private_networks()`, `PolicyFile::private_net`,
-        `--allow-private-net`, and the linter's `reaches_internal` and
-        `internal` flags, and expose host API helpers that add the equivalent
-        standard rules.
-      - Give user rules precedence over built-in rules of equal specificity,
-        while `deny` rules continue to win ties between user rules.
-      - Allow an explicit hostname rule such as `allow net localhost` to permit
-        the resolved addresses of that hostname without a separate address rule.
-      - Treat `*.localhost` as `localhost` per RFC 6761, and decide whether
-        `allow net *.localhost` counts as an explicit rule.
 - [ ] Connect directly to parsed IP literals in `resolve_allowed` without
-      calling the DNS resolver or checking `Capability::NetAddr`, and remove
-      the IP-literal shortcut from `check_addr`.
-- [ ] Check resolved addresses against `http` IP rules so that a hostname that
-      is resolved to a denied IP address is blocked on matching HTTP paths and
-      methods.
+      checking `Capability::NetAddr`, and remove the IP-literal shortcut from
+      `RulePolicy::resolved_verdict`.
 - [ ] Support HTTP paths with encoded separators `%2F` and `%5C` in `rule_for`
-      so that "always" prompt answers can save rules for those requests.
-- [ ] Document in §14.5 that IPv4 deny rules also match IPv6-embedded IPv4
-      addresses and that loopback deny rules also match `0.0.0.0` and `::`.
+      so that "always" prompt answers can generate rules for those requests.
+- [ ] Evaluate HTTP paths that contain `;` parameters both with and without
+      matrix parameters in `url_segments` in `src/policy/net.rs` so that `deny http a.com/admin/**` blocks `/admin;x/secret` and `/public/..;/admin`.
+      Also distinguish raw non-UTF-8 bytes from percent-encoded `%25` sequences in `percent_decode` so that `allow http a.com/%25FF` does not match `/%FF`.
+- [ ] Support interactive prompts for resolved IP addresses that match a
+      `prompt` address rule instead of denying them during address resolution.
+- [ ] Include the originating HTTP method and URL on `Capability::NetAddr` so
+      that `CustomPolicy` and `RulePolicy::check` evaluate resolved addresses
+      with full request context.
+- [ ] Add exact-file and exact-path rule syntax so that `rule_for` generates
+      rules that match only the prompted file or URL path instead of a directory
+      subtree or host prefix.
+- [ ] Separate the `env.vars()` listing capability from `Capability::Env("*")`
+      or return `None` from `rule_for(&Capability::Env("*"))`, because `allow env *`
+      does not override existing `deny` or `prompt` rules on individual
+      variables.
+- [ ] Fold environment variable names case-insensitively on Windows in
+      `RulePolicy` to match Windows environment variable lookup.
+- [ ] Store the source file name or CLI flag on `Origin` so that
+      `RulePolicy::describe_rule` reports the exact file or flag instead of only
+      a line number.
+- [ ] Expand `lint_policy` to detect shadowed and redundant `env`, `stdin`,
+      `stdout`, `stderr`, `timezone`, `custom`, and `listen` rules, `allow net *.localhost`
+      rules overridden by `deny net localhost`, and quoted wildcard
+      literals such as `deny env "AWS_*"`.
+- [ ] Resolve or reject relative paths in `RulePolicy` file builder methods so
+      that `Display` always emits valid, parseable policy syntax.
+- [ ] Store "always" prompt answers as `RulePolicy` rules rather than exact
+      `Capability` values so that an "always" grant for `write /x/o.txt` also
+      permits `read /x/o.txt`.
+- [ ] Include any policy-denied IP addresses in the error message if
+      `resolve_allowed` fails to connect to the remaining allowed addresses.
+- [ ] Warn in `lint_policy` if an uppercase hostname in an `http` rule is
+      parsed as an HTTP method, e.g. `deny http LOCALHOST a.com`, or if a
+      lowercase method is parsed as a hostname, e.g. `allow http purge a.com`.
+- [ ] Add a callback for persisting "always" prompt rules from `rule_for` so
+      that host applications can save granted rules across sessions.
+- [ ] Warn in the CLI prompter before allowing plaintext network connections,
+      and display the resolved IP addresses in the prompt.
+- [ ] Rename `Capability::Custom` to `Capability::Module` to distinguish
+      native-module capabilities from `CustomPolicy`.
+- [ ] Support shared, dynamically updatable `RulePolicy` instances and remove
+      `CustomPolicy` once host applications migrate to rule policies.
 
 ### Tooling
 
@@ -194,9 +212,9 @@ Follow-up work, roughly in priority order.
       `fs.Kind` enum.
 - [ ] Evaluate replacing string error kinds (`"not_found"`, `"invalid"`) with
       an enum.
-
 - [ ] Support `Decode` for structs that declare `init` by calling `init` with
       the JSON object's members as named arguments:
+
       - Propagate `Err` results from deferred `Decoded::Pending` thunks in
         `src/stdlib/json.rs` so that a fallible `init` fails `json.decode`.
       - Pass trait dictionaries to `Decoded::Pending` thunks so that a generic
@@ -204,6 +222,7 @@ Follow-up work, roughly in priority order.
       - Execute `init` before inserting decoded structs into a `Set`, as
         `json.decode` already does for computed field defaults.
       - Verify that `init` is visible at the `json.decode` call site.
+
 - [ ] Preserve default parameter values in function types so that calls through
       function values can omit defaulted arguments (for example,
       `["a"].map(Error)`).
@@ -217,6 +236,7 @@ Follow-up work, roughly in priority order.
       bounds for structs, enums, and `extend` blocks. Extend well-formedness
       checking and implied bound inference to all remaining declarations and
       type annotations:
+
       - Infer implied trait bounds on functions, methods, and `impl` blocks from
         type parameters that appear as direct arguments to constrained type
         constructors in parameter types, return types, trait arguments, or
@@ -232,6 +252,7 @@ Follow-up work, roughly in priority order.
       - Include the origin of an inferred bound in diagnostic messages if a
         caller does not satisfy it (for example, "required because `size` takes
         a `Bag<T>`").
+
 - [ ] Allow struct field defaults to call methods from traits required by the
       struct's type parameters (`struct Bag<T: Make> { x: T = T.make() }`) by
       passing trait dictionaries to default-value helpers and `json.decode`

@@ -20,7 +20,7 @@ print(cbrt(27.0))
 print(pi)
 ```
 
-Place `import` declarations at the top of the file. The prelude (`print`, `Option`, `str` methods, and built-in traits) is always in scope. For the list of standard modules, see the [standard library reference](/std/).
+Place `import` declarations at the top of the file. The prelude, including `print`, `Option`, `str` methods, and built-in traits, is always in scope. For the list of standard modules, see the [standard library reference](/std/).
 
 ## Script modules
 
@@ -93,13 +93,13 @@ Sand executes the top-level statements of each imported module a single time, be
 
 Cyclical imports are rejected at compile time.
 
-Top-level `?` is allowed only in the entry module (see [Errors](/guide/errors/#at-the-top-level)); in an imported module, place fallible initialization inside a function that returns a `Result`.
+Top-level `?` is allowed only in the entry module; in an imported module, place fallible initialization inside a function that returns a `Result`. See [Errors](/guide/errors/#at-the-top-level) for details.
 
 ## Module root and import policy
 
-All script imports must stay inside the module root, which defaults to the directory of the entry file. Importing a path outside the module root (such as `"../shared.sand"`) is a compile error.
+All script imports must stay inside the module root, which defaults to the directory of the entry file. Importing a path outside the module root, such as `"../shared.sand"`, is a compile error.
 
-The compiler also checks each script import against the sandbox policy before loading the file. By default, the `sand` CLI allows all imports within the module root. In a policy file, `allow import` restricts imports to matching paths, and `deny import` blocks specific paths:
+The compiler checks each script import against the sandbox policy before loading the file. The `sand` CLI allows all imports inside the module root. An embedding host grants imports with `allow import` rules and blocks specific paths with `deny import`:
 
 ```policy
 deny import ./geometry.sand
@@ -113,7 +113,7 @@ error: cannot import `./geometry.sand`: permission denied
   |        ^^^^^^^^^^^^^^^^^
 ```
 
-For details on policy files, see [Sandbox and policies](/guide/sandbox/). Host applications that embed Sand can configure a custom module root and register native Rust modules (see [Embedding](/guide/embedding/)).
+For details on policy files, see [Sandbox and policies](/guide/sandbox/). Host applications that embed Sand can configure a custom module root and register native Rust modules. See [Embedding](/guide/embedding/) for details.
 
 ## Module documentation
 

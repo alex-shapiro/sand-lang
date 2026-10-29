@@ -8,7 +8,7 @@ use crate::files::{Fs, MemFs};
 use crate::modules::{ImportRef, ModuleGraph, Snapshot, Target, budget_error, native_info};
 use crate::native::{BoundType, NativeDecl, NativeModule, Signature, Type};
 use crate::platform::{Clock, Instant, SystemClock};
-use crate::policy::{Capability, Decision, Policy, PromptAnswer, Prompter};
+use crate::policy::{Capability, CustomPolicy, Decision, Policy, PromptAnswer, Prompter, RulePolicy};
 use crate::session::Session;
 use crate::stdlib;
 use crate::types::{FnId, ModId};
@@ -279,7 +279,7 @@ impl Default for Config {
 impl Config {
     pub fn new() -> Config {
         Config {
-            policy: Policy::deny_all(),
+            policy: Policy::Rules(Arc::new(RulePolicy::standard())),
             prompter: None,
             limits: Limits::default(),
             modules: Vec::new(),
@@ -333,8 +333,14 @@ impl Config {
         self.request_filter = Some(Arc::new(filter));
         self
     }
-    pub fn policy(mut self, p: Policy) -> Self {
-        self.policy = p;
+    /// Sets the rule policy, replacing any custom policy. Defaults to [`RulePolicy::standard`].
+    pub fn policy(mut self, p: RulePolicy) -> Self {
+        self.policy = Policy::Rules(Arc::new(p));
+        self
+    }
+    /// Sets a host-defined policy callback. Replaces any rule policy.
+    pub fn custom_policy(mut self, p: impl CustomPolicy + 'static) -> Self {
+        self.policy = Policy::Custom(Arc::new(p));
         self
     }
     pub fn prompter(mut self, p: impl Prompter + 'static) -> Self {
@@ -1145,16 +1151,15 @@ impl Engine {
     // ------------------------------------------------------------------
     // Loading and compiling
 
-    /// Checks (and if `prompt`, prompts for) importing the script at the
-    /// normalized `path`.
-    async fn check_import(&self, path: &Path, prompt: bool) -> bool {
+    /// Checks `path` against the import policy and prompts if `prompt` is true.
+    async fn check_import(&self, path: &Path, prompt: bool) -> Result<bool, &'static str> {
         let cap = Capability::Import(path.to_path_buf());
         if let Some(&d) = self.always.lock().unwrap_or_else(|e| e.into_inner()).get(&cap) {
-            return d;
+            return Ok(d);
         }
         match self.config.policy.check_normalized_in(&cap, self.config.fs.space()) {
-            Decision::Allow => true,
-            Decision::Deny => false,
+            Decision::Allow => Ok(true),
+            Decision::Deny => Ok(false),
             Decision::Prompt => match &self.config.prompter {
                 Some(p) if prompt => {
                     let answer = p.prompt(cap.clone()).await;
@@ -1162,10 +1167,23 @@ impl Engine {
                     if matches!(answer, PromptAnswer::AllowAlways | PromptAnswer::DenyAlways) {
                         self.always.lock().unwrap_or_else(|e| e.into_inner()).insert(cap, allowed);
                     }
-                    allowed
+                    Ok(allowed)
                 }
-                _ => false,
+                Some(_) => Err("cannot prompt during check"),
+                None => Err("a prompter is not configured"),
             },
+        }
+    }
+
+    fn format_unprompted_import_reason(&self, path: &Path, why: &str) -> String {
+        let Policy::Rules(rules) = &self.config.policy else { return format!("the policy requires a prompt, and {why}") };
+        match rules.verdict(&Capability::Import(path.to_path_buf()), self.config.fs.space(), &[]) {
+            Some((_, rule)) => format!("{} requires a prompt, and {why}", rules.describe_rule(rule)),
+            None => {
+                let dir = path.parent().unwrap_or(path);
+                let rule = RulePolicy::new().allow_import(dir).to_string();
+                format!("unmatched import requires a prompt, and {why}; add `{}` to allow it", rule.trim_end())
+            }
         }
     }
 
@@ -1418,8 +1436,9 @@ impl Engine {
             let asked = self.config.clock.now();
             let allowed = self.check_import(&target, d.prompt).await;
             *prompted += self.config.clock.now().saturating_duration_since(asked);
-            if !allowed {
-                errors.push(Diag::error(span, format!("cannot import `{import_label}`: permission denied")));
+            if allowed != Ok(true) {
+                let hint = allowed.err().map(|why| format!("; {}", self.format_unprompted_import_reason(&target, why))).unwrap_or_default();
+                errors.push(Diag::error(span, format!("cannot import `{import_label}`: permission denied{hint}")));
                 // Stop after a denied import to avoid prompting for remaining imports.
                 break;
             }

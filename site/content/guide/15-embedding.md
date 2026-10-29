@@ -42,12 +42,12 @@ Failed runs return a `sandlang::Error`:
 
 ## Configuration
 
-`Config::new()` denies all host capabilities except `stdout`, `stderr`, and imports within the module root. Use builder methods on `Config` to configure policies, limits, virtual files, and streams:
+`Config::new()` uses `RulePolicy::standard()`, which allows only writes to `stdout` and `stderr`. All other capabilities evaluate to `prompt` and are denied unless you configure a prompter. Use builder methods on `Config` to configure policies, limits, virtual files, and streams:
 
 ```rust
 # #[tokio::main(flavor = "current_thread")]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-use sandlang::{Config, Engine, Limits, MemFs, MemorySink, Policy, RulePolicy};
+use sandlang::{Config, Engine, Limits, MemFs, MemorySink, RulePolicy};
 use std::time::Duration;
 
 let files = MemFs::new();
@@ -63,7 +63,7 @@ print("sorted \(words.len()) words")
 "#;
 
 let config = Config::new()
-    .policy(Policy::rules(RulePolicy::new().allow_read("/data").allow_write("/out")))
+    .policy(RulePolicy::standard().allow_read("/data").allow_write("/out"))
     .limits(Limits {
         max_memory: Some(64 << 20),
         max_wall_time: Some(Duration::from_secs(5)),
@@ -80,7 +80,7 @@ let report = files.read("/out/report.txt")?;
 # }
 ```
 
-- **Policy.** `RulePolicy` provides builder methods for each policy rule (`allow_read`, `allow_write`, `allow_net`, `allow_http`, `allow_env`, `deny_read`, `deny_net`, `fallback`, and others). `Policy::allow_all()` grants all capabilities and should be used only for trusted scripts.
+- **Policy.** `RulePolicy` provides `allow_`, `deny_`, and `prompt_` builder methods for each capability kind, such as `allow_read`, `deny_net`, and `prompt_write`. `allow_net` and `allow_http` accept policy rule arguments such as `"plaintext localhost:8080"`. `RulePolicy::default()` is empty, `RulePolicy::standard()` allows `stdout` and `stderr`, and `RulePolicy::allow_all()` allows all capabilities for trusted scripts. `user_rules.with_defaults(host_rules)` appends fallback rules that apply only if a request does not match any rule in `user_rules`. `Config::custom_policy` replaces rule evaluation with a host-defined `CustomPolicy`.
 - **Limits.** `Limits` configures every resource bound described in [Sandbox and policies](/guide/sandbox/).
 - **Virtual file system.** `Config::memory_fs` replaces host disk access with an in-memory `MemFs`. Clones of a `MemFs` share the same underlying storage so the host can populate input files before a run and read output files afterward.
 - **Streams.** `Config::stdout` and `Config::stderr` redirect script output to a `MemorySink` or custom sink. `Config::stdin_bytes` supplies fixed input bytes.
@@ -91,20 +91,20 @@ To load a `.policy` file from disk, parse it with `sandlang::policy::PolicyFile`
 
 ```rust no_run
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
-# use sandlang::Config;
+# use sandlang::{Config, RulePolicy};
 use sandlang::policy::PolicyFile;
 use std::path::Path;
 
 let text = std::fs::read_to_string("app.policy")?;
 let file = PolicyFile::parse(&text, Path::new("."), None).expect("a valid policy file");
-let config = Config::new().policy(file.policy()).limits(file.limits.clone());
+let config = Config::new().policy(file.rules.with_defaults(RulePolicy::standard())).limits(file.limits);
 # Ok(())
 # }
 ```
 
-The second argument is the base directory for `./` paths, and the third argument is the optional home directory for `~/` paths.
+The second argument is the base directory for `./` paths, and the third argument is the optional home directory for `~/` paths. Appending `RulePolicy::standard()` via `with_defaults` allows `stdout` and `stderr` unless overridden by a rule in the policy file, such as `prompt stdout` or `deny stdout`.
 
-To handle `prompt` policy decisions, pass an async callback to `Config::prompter` that accepts a `Capability` and returns a `PromptAnswer`. If a prompter is not configured, `prompt` decisions default to `deny`.
+To handle `prompt` decisions, pass an async callback to `Config::prompter` that accepts a `Capability` and returns a `PromptAnswer`. If a prompter is not configured, the engine denies `prompt` decisions.
 
 ## Native modules
 
@@ -238,14 +238,14 @@ To check a sandbox capability inside a native function, register the function wi
 # #[tokio::main(flavor = "current_thread")]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 use sandlang::vm::Vm;
-use sandlang::{Capability, Config, Engine, HostError, NativeModule, Policy, RulePolicy};
+use sandlang::{Capability, Config, Engine, HostError, NativeModule, RulePolicy};
 
 let mut door = NativeModule::new("door");
 door.vm_function("open", |vm: &mut Vm, name: String| -> Result<String, HostError> {
     vm.require(&Capability::Custom { name: "door".into(), detail: name.clone() })?;
     Ok(format!("opened {name}"))
 });
-let policy = Policy::rules(RulePolicy::new().allow_custom("door", Some("front")));
+let policy = RulePolicy::standard().allow_custom("door", Some("front"));
 let mut engine = Engine::new(Config::new().module(door).policy(policy))?;
 engine.run_source("main.sand", "import door\nprint(door.open(\"front\"))\nprint(door.open(\"back\"))").await?;
 # Ok(())

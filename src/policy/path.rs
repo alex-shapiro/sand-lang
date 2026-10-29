@@ -1,18 +1,16 @@
-//! Path patterns (of files and URLs) and the trie that matches paths
-//! against many of them at once.
+//! File and URL path patterns and multi-pattern trie matching.
 //!
-//! A pattern is a sequence of segments, each a name, a name with `*`
-//! wildcards, `*` (any one name) or `**` (any number of names). A pattern
-//! covers the paths it matches and everything below them, so a trailing
-//! `**` adds nothing and is dropped.
+//! A pattern is a sequence of path segments: literal names, names with `*`
+//! wildcards, `*` for a single segment, or `**` for zero or more segments. A
+//! pattern is matched against both the target path and all descendants, so
+//! trailing `**` segments are stripped.
 
 use crate::vm::value::FxBuild;
 use std::borrow::Cow;
 use std::hash::{Hash, Hasher};
 use std::path::{Component, Path};
 
-/// A character of a pattern's text and whether it is a wildcard (an
-/// unquoted `*`).
+/// A character in a pattern and whether it is an unquoted `*` wildcard.
 pub(crate) type Tok = (char, bool);
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -24,7 +22,6 @@ pub(crate) enum Seg {
 }
 
 impl Seg {
-    /// Parses one segment's text.
     pub(crate) fn parse(text: &[Tok]) -> Result<Seg, String> {
         let stars = text.iter().filter(|t| t.1).count();
         if stars == 0 {
@@ -49,8 +46,7 @@ impl Seg {
         Ok(Seg::Glob(Glob(pieces.into_iter().map(String::into_boxed_str).collect())))
     }
 
-    /// How much the segment narrows what a pattern matches: names count 2,
-    /// names with wildcards 1.
+    /// Specificity weight of the segment: `2` for literals, `1` for globs, and `0` for `*` or `**`.
     pub(crate) fn weight(&self) -> u32 {
         match self {
             Seg::Lit(_) => 2,
@@ -59,8 +55,6 @@ impl Seg {
         }
     }
 
-    /// The segment with its names (and the pieces of its wildcard names)
-    /// mapped by `f`.
     pub(crate) fn map(&self, f: impl Fn(&str) -> String) -> Seg {
         match self {
             Seg::Lit(s) => Seg::Lit(f(s).into()),
@@ -70,8 +64,7 @@ impl Seg {
     }
 }
 
-/// A name with `*` wildcards, as the literal pieces around them (one more
-/// piece than wildcards).
+/// A segment pattern containing `*` wildcards, stored as the literal substrings around each `*`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Glob(Box<[Box<str>]>);
 
@@ -96,17 +89,13 @@ impl Glob {
         &self.0
     }
 
-    /// Whether this glob matches every name `other` matches. False when
-    /// unsure: it must find its first piece at the start of `other`'s first,
-    /// its last at the end of `other`'s last, and the pieces in between, in
-    /// order, within `other`'s pieces.
+    /// Conservative check for whether `self` covers `other`.
     fn covers(&self, other: &Glob) -> bool {
         let (p, q) = (&self.0, &other.0);
         let (first, last) = (&*p[0], &*p[p.len() - 1]);
         if !q[0].starts_with(first) || !q[q.len() - 1].ends_with(last) {
             return false;
         }
-        // Where the next middle piece may start: a piece of `other`, and an offset in it.
         let mut at = (0, first.len());
         for mid in &p[1..p.len() - 1] {
             loop {
@@ -126,8 +115,8 @@ impl Glob {
         true
     }
 
-    /// Whether some name may match both globs. True when unsure.
-    fn may_meet(&self, other: &Glob) -> bool {
+    /// Conservative check for whether any segment can match both `self` and `other`.
+    fn overlaps(&self, other: &Glob) -> bool {
         let (p, q) = (&self.0, &other.0);
         let prefixed = |a: &str, b: &str| a.starts_with(b) || b.starts_with(a);
         let suffixed = |a: &str, b: &str| a.ends_with(b) || b.ends_with(a);
@@ -135,8 +124,6 @@ impl Glob {
     }
 }
 
-/// Whether `a` matches every name `b` matches (single-name segments; false
-/// when unsure).
 fn name_covers(a: &Seg, b: &Seg) -> bool {
     match (a, b) {
         (Seg::Star, _) => true,
@@ -147,20 +134,18 @@ fn name_covers(a: &Seg, b: &Seg) -> bool {
     }
 }
 
-/// Whether some name may match both `a` and `b` (single-name segments;
-/// true when unsure).
-fn names_meet(a: &Seg, b: &Seg) -> bool {
+fn segments_overlap(a: &Seg, b: &Seg) -> bool {
     match (a, b) {
         (Seg::Star, _) | (_, Seg::Star) => true,
         (Seg::Lit(x), Seg::Lit(y)) => x == y,
         (Seg::Glob(g), Seg::Lit(y)) | (Seg::Lit(y), Seg::Glob(g)) => g.matches(y),
-        (Seg::Glob(g), Seg::Glob(h)) => g.may_meet(h),
+        (Seg::Glob(g), Seg::Glob(h)) => g.overlaps(h),
         _ => true,
     }
 }
 
-/// A pattern as [`covers`] and [`may_meet`] compare them: it matches whole
-/// paths only, and with `below` also the paths below them.
+/// A path pattern slice for [`covers`] and [`overlaps`]. If `below` is `true`,
+/// the pattern has an implicit trailing `**`.
 #[derive(Clone, Copy)]
 pub(crate) struct Pattern<'a> {
     pub segs: &'a [Seg],
@@ -179,8 +164,8 @@ impl<'a> Pattern<'a> {
     }
 }
 
-/// The number of leading names `a` and `b` have in common, or `None` if
-/// they differ in a name before either has a wildcard.
+/// Number of leading literal segments shared by `a` and `b`, or `None` if
+/// they differ before the first wildcard.
 fn common_names(a: Pattern, b: Pattern) -> Option<usize> {
     let mut n = 0;
     loop {
@@ -192,8 +177,6 @@ fn common_names(a: Pattern, b: Pattern) -> Option<usize> {
     }
 }
 
-/// Memoized results of comparing the segments of two patterns from
-/// position `start` on.
 struct Memo {
     start: usize,
     width: usize,
@@ -211,7 +194,7 @@ impl Memo {
     }
 }
 
-/// Whether `a` matches every path that `b` matches. False when unsure.
+/// Returns `true` if `a` covers `b`.
 pub(crate) fn covers(a: Pattern, b: Pattern) -> bool {
     fn go(a: Pattern, b: Pattern, i: usize, j: usize, memo: &mut Memo) -> bool {
         if let Some(r) = *memo.slot(i, j) {
@@ -219,7 +202,6 @@ pub(crate) fn covers(a: Pattern, b: Pattern) -> bool {
         }
         let r = match (a.get(i), b.get(j)) {
             (None, None) => true,
-            // Recursion base case: ** consumes zero components, or consumes the next component of b.
             (Some(Seg::GlobStar), _) => go(a, b, i + 1, j, memo) || (j < b.len() && go(a, b, i, j + 1, memo)),
             (None, Some(_)) | (Some(_), None) | (Some(_), Some(Seg::GlobStar)) => false,
             (Some(x), Some(y)) => name_covers(x, y) && go(a, b, i + 1, j + 1, memo),
@@ -231,8 +213,8 @@ pub(crate) fn covers(a: Pattern, b: Pattern) -> bool {
     go(a, b, n, n, &mut Memo::new(a, b, n))
 }
 
-/// Whether some path may match both patterns. True when unsure.
-pub(crate) fn may_meet(a: Pattern, b: Pattern) -> bool {
+/// Returns `true` if any path can match both `a` and `b`.
+pub(crate) fn overlaps(a: Pattern, b: Pattern) -> bool {
     fn go(a: Pattern, b: Pattern, i: usize, j: usize, memo: &mut Memo) -> bool {
         if let Some(r) = *memo.slot(i, j) {
             return r;
@@ -242,7 +224,7 @@ pub(crate) fn may_meet(a: Pattern, b: Pattern) -> bool {
             (Some(Seg::GlobStar), _) => go(a, b, i + 1, j, memo) || (j < b.len() && go(a, b, i, j + 1, memo)),
             (_, Some(Seg::GlobStar)) => go(a, b, i, j + 1, memo) || (i < a.len() && go(a, b, i + 1, j, memo)),
             (None, Some(_)) | (Some(_), None) => false,
-            (Some(x), Some(y)) => names_meet(x, y) && go(a, b, i + 1, j + 1, memo),
+            (Some(x), Some(y)) => segments_overlap(x, y) && go(a, b, i + 1, j + 1, memo),
         };
         *memo.slot(i, j) = Some(r);
         r
@@ -251,15 +233,13 @@ pub(crate) fn may_meet(a: Pattern, b: Pattern) -> bool {
     go(a, b, n, n, &mut Memo::new(a, b, n))
 }
 
-/// The fewest names a path matching `pattern` has, and the most (`None`:
-/// any number, after a `**`).
+/// Minimum and maximum number of segments matched by `pattern`, or `None` for the maximum if `pattern` contains `**`.
 pub(crate) fn name_counts(pattern: &[Seg]) -> (usize, Option<usize>) {
     let fixed = pattern.iter().filter(|s| **s != Seg::GlobStar).count();
     (fixed, (fixed == pattern.len()).then_some(fixed))
 }
 
-/// The names of a normalized path, its root (`/`, or a Windows prefix and
-/// root) first, as rules and requests are compared.
+/// Splits a normalized path into segment strings, starting with `/` or the Windows prefix.
 pub(crate) fn path_segments(p: &Path) -> Vec<Cow<'_, str>> {
     p.components()
         .filter_map(|c| match c {
@@ -271,30 +251,23 @@ pub(crate) fn path_segments(p: &Path) -> Vec<Cow<'_, str>> {
         .collect()
 }
 
-/// A trie of patterns: matching a path against all of them takes one
-/// step per name of the path (more where patterns have `**`), whatever
-/// their number.
+/// Trie for matching a path against multiple segment patterns.
 #[derive(Debug)]
 pub(crate) struct Trie<V> {
     nodes: Vec<Node<V>>,
-    /// The name children of every node.
     names: hashbrown::HashMap<Edge, u32, FxBuild>,
 }
 
 #[derive(Debug)]
 struct Node<V> {
     values: Vec<V>,
-    /// Bits of the values here and below ([`Trie::insert`]'s `mask`).
+    /// Bitmask of values stored at or below this node.
     below: u8,
     parent: u32,
-    /// Whether the node is a `**`, which may match more names.
     repeats: bool,
-    /// Whether a `**` is on the way to the node: only then can matching
-    /// reach it in several ways.
     after_globstar: bool,
     has_names: bool,
     globs: Vec<(Glob, u32)>,
-    /// Child for `*` (0: none; the root is no one's child).
     star: u32,
     globstar: u32,
 }
@@ -318,7 +291,6 @@ impl<V> Node<V> {
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct Edge(u32, Box<str>);
 
-/// An [`Edge`] to look up without allocating.
 struct EdgeRef<'a>(u32, &'a str);
 
 impl Hash for EdgeRef<'_> {
@@ -345,7 +317,6 @@ impl<V> Trie<V> {
         self.nodes.len() == 1 && self.nodes[0].values.is_empty()
     }
 
-    /// Adds `value` for `pattern`; `mask` marks it for [`Trie::any_below`].
     pub(crate) fn insert(&mut self, pattern: &[Seg], value: V, mask: u8) {
         let mut n = 0u32;
         for seg in pattern {
@@ -386,8 +357,6 @@ impl<V> Trie<V> {
         }
     }
 
-    /// Calls `f(node, i)` for every state of matching `input`: the node
-    /// reached having matched its first `i` names.
     fn states(&self, input: &[&str], mut f: impl FnMut(&Node<V>, usize)) {
         let mut stack = vec![(0u32, 0usize)];
         let mut seen = hashbrown::HashSet::<(u32, usize), FxBuild>::default();
@@ -397,7 +366,6 @@ impl<V> Trie<V> {
                 continue;
             }
             f(node, i);
-            // `**` matches no names, or one more than it has.
             if node.globstar != 0 {
                 stack.push((node.globstar, i));
             }
@@ -417,22 +385,19 @@ impl<V> Trie<V> {
         }
     }
 
-    /// Calls `f(value, depth)` for each pattern matching a leading part of
-    /// `input` (a path or one of its ancestors), with the number of names
-    /// it matched.
+    /// Calls `f(value, depth)` for each pattern that matches a prefix of `input`.
     pub(crate) fn matches(&self, input: &[&str], mut f: impl FnMut(&V, usize)) {
         self.states(input, |node, i| node.values.iter().for_each(|v| f(v, i)));
     }
 
-    /// Whether a value with a bit of `mask` has a pattern that may match
-    /// `input` or a path below it.
+    /// Returns `true` if any pattern with a bit in `mask` matches `input` or a descendant.
     pub(crate) fn any_below(&self, input: &[&str], mask: u8) -> bool {
         let mut found = false;
         self.states(input, |node, i| found |= i == input.len() && node.below & mask != 0);
         found
     }
 
-    /// Returns true if a pattern matches the final component of `input`.
+    /// Returns `true` if a literal or glob segment in the trie is reached at the last segment of `input`.
     pub(crate) fn matches_last(&self, input: &[&str]) -> bool {
         let mut found = false;
         self.states(input, |node, i| found |= i + 1 == input.len() && (node.has_names || !node.globs.is_empty()));
@@ -463,8 +428,6 @@ mod tests {
         out
     }
 
-    /// Matching takes a step per node and name at most, however many `**`
-    /// a pattern has.
     #[test]
     fn globstars_match_in_linear_time() {
         let mut t = Trie::default();
@@ -497,7 +460,7 @@ mod tests {
             Pattern { segs, below: false }
         }
         let covers = |a: &str, b: &str| super::covers(exact(&pattern(a)), exact(&pattern(b)));
-        let meet = |a: &str, b: &str| may_meet(exact(&pattern(a)), exact(&pattern(b)));
+        let meet = |a: &str, b: &str| overlaps(exact(&pattern(a)), exact(&pattern(b)));
         assert!(covers("r/**", "r/*") && covers("r/**", "r/a/**/b") && covers("r/**", "r"));
         assert!(!covers("r/*", "r/**") && !covers("r/*", "r"));
         assert!(covers("r/**/b", "r/*/b") && covers("r/**/b", "r/**/b") && covers("**/x", "r/**/x"));
@@ -505,7 +468,6 @@ mod tests {
         assert!(covers("r/*/b", "r/a/b") && !covers("r/a/b", "r/*/b"));
         assert!(covers("r/*.pem", "r/key*.pem") && covers("r/*.pem", "r/k.pem") && !covers("r/k*.pem", "r/*.pem"));
         assert!(covers("a*b*c", "ab*xbx*c") && covers("*b*", "x*b") && !covers("*b*", "x*y"));
-        // `a*a` matches `aa`, which `aa*a` does not.
         assert!(covers("a*a", "aa*a") && !covers("aa*a", "a*a"));
         assert!(meet("r/*.pem", "r/key*") && meet("r/**/x", "r/a/b/x") && meet("r/**", "r") && meet("r/*/**", "**/b"));
         assert!(!meet("r/a", "r/b") && !meet("r/*.pem", "r/*.key") && !meet("r/*", "r") && !meet("r/**/x", "s/**"));

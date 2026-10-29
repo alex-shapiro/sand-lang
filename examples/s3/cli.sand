@@ -1,6 +1,6 @@
 //! Command line S3 client.
 //!
-//! Usage: sand run --allow-net=... --allow-env=AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,S3_ENDPOINT \
+//! Usage: sand run --allow='net ...' --allow='env AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY S3_ENDPOINT' \
 //!            examples/s3/cli.sand -- COMMAND ARGS...
 //!
 //! Commands:

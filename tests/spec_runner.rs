@@ -34,7 +34,7 @@
 mod common;
 
 use common::rt;
-use sandlang::{Config, Engine, Error, MemFs, MemorySink, Policy};
+use sandlang::{Config, Engine, Error, MemFs, MemorySink};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -216,7 +216,7 @@ fn run_case(case: &Case, mode: Mode, backend: Backend) -> Result<(), String> {
 
     if let Some(expected) = get("lint") {
         dir.write("main.sand", &case.source);
-        let engine = Engine::new(dir.configure(Config::new().policy(Policy::allow_all()))).unwrap();
+        let engine = Engine::new(dir.configure(Config::new().policy(sandlang::RulePolicy::allow_all()))).unwrap();
         let warnings = engine.lint_source("main.sand", &case.source).map_err(|e| format!("lint failed: {e}"))?;
         let mut got: Vec<String> = warnings.iter().map(|w| format!("{}: {}", w.line, w.code)).collect();
         got.sort();
@@ -232,7 +232,7 @@ fn run_case(case: &Case, mode: Mode, backend: Backend) -> Result<(), String> {
     let main = dir.write("main.sand", &case.source);
     let out = MemorySink::new();
     let err = MemorySink::new();
-    let config = Config::new().policy(Policy::allow_all()).stdout(out.clone()).stderr(err.clone()).seed(42);
+    let config = Config::new().policy(sandlang::RulePolicy::allow_all()).stdout(out.clone()).stderr(err.clone()).seed(42);
     let mut config =
         dir.configure(config.gc_stress(mode == Mode::GcStress).retry_stress(mode == Mode::RetryStress).optimize(mode != Mode::Unoptimized));
     if let Some(stdin) = get("stdin") {

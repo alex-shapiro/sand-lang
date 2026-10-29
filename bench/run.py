@@ -60,6 +60,11 @@ class Step:
     stdin: Path | None = None
 
 
+def quoted(path: Path) -> str:
+    """Format `path` as a quoted policy rule word."""
+    return '"' + str(path).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def step(sand: Path, py: Path | None = None, lua: Path | None = None, args=(), flags=(), stdin=None) -> Step:
     progs = {"sand": sand}
     if py:
@@ -91,7 +96,7 @@ class Bench:
     def command(self, impl: str, s: Step) -> list[str]:
         prog = str(s.progs[impl])
         if impl == "sand":
-            return [self.exe["sand"], "run", prog, "--max-memory=8G", *s.flags, "--", *s.args]
+            return [self.exe["sand"], "run", prog, "--no-prompt", "--max-memory=8G", *s.flags, "--", *s.args]
         return [self.exe[impl], prog, *s.args]
 
     def env(self, w: Workload | None = None) -> dict[str, str]:
@@ -168,11 +173,11 @@ def examples(b: Bench) -> list[Workload]:
     # calc / adventure (stdin) ---------------------------------------------
     calc_in = tmp / "calc.txt"
     calc_in.write_text(gen.calc_script())
-    simple("calc", step(*ported("calc"), flags=["--allow-stdin"], stdin=calc_in))
+    simple("calc", step(*ported("calc"), stdin=calc_in))
 
     adv_in = tmp / "adventure.txt"
     adv_in.write_text(gen.adventure_script())
-    simple("adventure", step(*ported("adventure"), flags=["--allow-stdin"], stdin=adv_in))
+    simple("adventure", step(*ported("adventure"), stdin=adv_in))
 
     # template ---------------------------------------------------------------
     tdir = tmp / "template"
@@ -186,7 +191,7 @@ def examples(b: Bench) -> list[Workload]:
     for kind in ("render", "compile"):
         simple(
             f"template_{kind}",
-            step(*ported("template"), args=[str(tdir / f"{kind}.tmpl"), str(tdir / f"{kind}.json")], flags=[f"--allow-read={tdir}"]),
+            step(*ported("template"), args=[str(tdir / f"{kind}.tmpl"), str(tdir / f"{kind}.json")], flags=[f"--allow=read {quoted(tdir)}"]),
         )
 
     # ledger -------------------------------------------------------------------
@@ -199,7 +204,7 @@ def examples(b: Bench) -> list[Workload]:
     sdir = tmp / "search"
     sdir.mkdir()
     corpus = gen.search_corpus(sdir)
-    sflags = [f"--allow-read={sdir}", f"--allow-write={sdir}"]
+    sflags = [f"--allow=write {quoted(sdir)}"]
     sprog = (EXAMPLES / "search_index.sand", PY / "search_index.py")
 
     def idx(impl: str, kind: str = "base") -> Path:
@@ -243,11 +248,11 @@ def examples(b: Bench) -> list[Workload]:
     b.cleanups.append(page_server.close)
     base = f"http://{page_server.addr}"
     urls = [f"{base}/old"] + [f"{base}/page/{i}" for i in range(1, 48)] + [f"{base}/missing", f"{base}/data.json"]
-    simple("http_fetch", step(EXAMPLES / "http_fetch.sand", PY / "http_fetch.py", args=urls, flags=[f"--allow-net={page_server.addr}"]))
+    simple("http_fetch", step(EXAMPLES / "http_fetch.sand", PY / "http_fetch.py", args=urls, flags=[f"--allow=net plaintext {page_server.addr}"]))
 
     # chat_server ---------------------------------------------------------------------
     def chat(impl: str) -> tuple[float, bytes]:
-        s = step(EXAMPLES / "chat_server.sand", PY / "chat_server.py", args=["0"], flags=["--allow-listen=127.0.0.1:0"])
+        s = step(EXAMPLES / "chat_server.sand", PY / "chat_server.py", args=["0"], flags=["--allow=listen 127.0.0.1:0"])
         cmd = b.command(impl, s)
         start = time.perf_counter()
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=b.env())
@@ -279,10 +284,9 @@ def examples(b: Bench) -> list[Workload]:
         "AWS_REGION": "us-east-1",
     }
     s3flags = [
-        f"--allow-net={s3.addr}",
-        f"--allow-read={s3dir}",
-        f"--allow-write={s3dir}",
-        "--allow-env=AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,AWS_SESSION_TOKEN,AWS_REGION,S3_ENDPOINT",
+        f"--allow=net plaintext {s3.addr}",
+        f"--allow=write {quoted(s3dir)}",
+        "--allow=env AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION S3_ENDPOINT",
     ]
     os.environ.pop("AWS_SESSION_TOKEN", None)
     cli = (EXAMPLES / "s3" / "cli.sand", PY / "s3" / "cli.py")
@@ -359,7 +363,7 @@ def prepare(b: Bench, w: Workload):
                     EXAMPLES / "search_index.sand",
                     PY / "search_index.py",
                     args=["index", str(sdir / f"{impl}.base.json"), str(sdir / "corpus")],
-                    flags=[f"--allow-read={sdir}", f"--allow-write={sdir}"],
+                    flags=[f"--allow=write {quoted(sdir)}"],
                 )
                 subprocess.run(b.command(impl, s), cwd=sdir, check=True, stdout=subprocess.DEVNULL, env=b.env(w))
 

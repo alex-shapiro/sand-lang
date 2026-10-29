@@ -268,7 +268,7 @@ fn background_output_and_ctrl_c_leave_the_edited_input_alone() {
 fn scripts_read_lines_typed_while_an_input_runs() {
     let dir = TempDir::new("repl-tty-stdin");
     let history = dir.path().join("history");
-    let Some(mut repl) = Repl::start_with(dir.path(), &history, &["--allow-stdin"]) else { return };
+    let Some(mut repl) = Repl::start_with(dir.path(), &history, &[]) else { return };
     let mut reads = 0;
     repl.enter(&mut reads, "import io", None);
     repl.enter(&mut reads, "io.stdin.read_line()?", None);
@@ -291,4 +291,29 @@ fn scripts_read_lines_typed_while_an_input_runs() {
     }
     let saved = std::fs::read_to_string(&history).expect("history file");
     assert_eq!(saved.lines().collect::<Vec<_>>(), ["import io", "io.stdin.read_line()?", "40 + 2"], "{saved}");
+}
+
+#[test]
+fn the_repl_asks_on_the_terminal() {
+    let dir = TempDir::new("repl-tty-prompt");
+    dir.write("a.txt", "A");
+    let history = dir.path().join("history");
+    let Some(mut repl) = Repl::start(dir.path(), &history) else { return };
+    let mut reads = 0;
+    repl.enter(&mut reads, "import fs", None);
+    repl.keys("fs.read_text(\"a.txt\").is_ok()\r");
+    repl.wait("the question", |r| r.text().contains("sand: allow the script to read "));
+    repl.keys("a\r");
+    repl.wait("the answer", |r| r.text().lines().any(|l| l.trim().ends_with("true")));
+    reads += 1;
+    repl.enter(&mut reads, "fs.read_text(\"a.txt\")?", Some("\"A\""));
+    assert_eq!(repl.text().matches("sand: allow the script to read ").count(), 1, "always: {}", repl.text());
+    reads += 1;
+    repl.wait_for_read(reads);
+    repl.keys(CTRL_D);
+    let start = Instant::now();
+    while repl.child.try_wait().unwrap().is_none() {
+        assert!(start.elapsed() < TIMEOUT, "sand did not exit; the terminal shows:\n{}", repl.text());
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }

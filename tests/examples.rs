@@ -3,7 +3,7 @@
 mod common;
 
 use common::{HttpResponse, TempDir, http_server, rt};
-use sandlang::{Capability, Config, Decision, Engine, Error, MemorySink, Policy, RulePolicy};
+use sandlang::{Capability, Config, Decision, Engine, Error, MemorySink, RulePolicy};
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -64,8 +64,10 @@ fn examples_type_check_lint_and_are_formatted() {
     for rel in ALL_EXAMPLES {
         let path = example(rel);
         let source = std::fs::read_to_string(&path).unwrap();
-        let warnings =
-            Engine::new(Config::new().policy(Policy::deny_all())).unwrap().lint_file(&path).unwrap_or_else(|e| panic!("{rel}: {e}"));
+        let warnings = Engine::new(Config::new().policy(RulePolicy::standard().allow_import(example(""))))
+            .unwrap()
+            .lint_file(&path)
+            .unwrap_or_else(|e| panic!("{rel}: {e}"));
         assert!(warnings.is_empty(), "{rel} has lint warnings: {warnings:?}");
         let formatted = sandlang::fmt::format_source(&source).unwrap();
         assert!(formatted == source, "{rel} is not formatted:\n{}", first_diff(&source, &formatted));
@@ -110,7 +112,7 @@ fn ledger_report_with_traits() {
 #[test]
 fn calculator_interpreter() {
     let input = "1 + 2 * 3\nlet r = 2\npi * r ^ 2\n2 ^ 3 ^ 2\n-(4 - 6) * 2\nmax(1, sqrt(16), 3) + -3\n10 / 4\n10 / 0\nx + 1\n1 +\nsqrt(1, 2)\n7 % 4\nfoo(1)\n3 $ 4\n\n";
-    let config = Config::new().policy(Policy::rules(RulePolicy::new().allow_stdin())).stdin_bytes(input.as_bytes().to_vec());
+    let config = Config::new().policy(RulePolicy::standard().allow_stdin()).stdin_bytes(input.as_bytes().to_vec());
     let o = run_example("calc.sand", &[], config);
     assert_eq!(
         ok(&o),
@@ -129,8 +131,8 @@ fn template_engine() {
         "data.json",
         r#"{"title": "Team", "users": [{"name": "ann lee", "admin": true}, {"name": "bob"}], "count": 2, "tags": ["x", "y"]}"#,
     );
-    let policy = RulePolicy::new().allow_read(dir.path());
-    let o = run_example("template.sand", &[tmpl.to_str().unwrap(), data.to_str().unwrap()], Config::new().policy(Policy::rules(policy)));
+    let policy = RulePolicy::standard().allow_read(dir.path());
+    let o = run_example("template.sand", &[tmpl.to_str().unwrap(), data.to_str().unwrap()], Config::new().policy(policy));
     assert_eq!(ok(&o), "<h1>TEAM</h1>\n\n<ul>\n  <li>1. Ann Lee (admin),</li>\n  <li>2. Bob</li>\n</ul>\nmany\nn/a x, y 2\n&lt;b&gt;\n");
 }
 
@@ -142,7 +144,7 @@ fn template_engine_reports_errors() {
     let o = run_example(
         "template.sand",
         &[tmpl.to_str().unwrap(), data.to_str().unwrap()],
-        Config::new().policy(Policy::rules(RulePolicy::new().allow_read(dir.path()))),
+        Config::new().policy(RulePolicy::standard().allow_read(dir.path())),
     );
     assert!(o.failure().contains("unexpected end of template"), "{}", o.failure());
 }
@@ -150,7 +152,7 @@ fn template_engine_reports_errors() {
 #[test]
 fn text_adventure() {
     let input = "look\ntake lamp\ngo north\ne\nuse key\ns\ne\ntake key\ni\nw\nn\nuse key\neast\n";
-    let config = Config::new().policy(Policy::rules(RulePolicy::new().allow_stdin())).stdin_bytes(input.as_bytes().to_vec());
+    let config = Config::new().policy(RulePolicy::standard().allow_stdin()).stdin_bytes(input.as_bytes().to_vec());
     let o = run_example("adventure.sand", &[], config);
     let out = ok(&o);
     for expected in [
@@ -167,7 +169,7 @@ fn text_adventure() {
         assert!(out.contains(expected), "missing {expected:?} in:\n{out}");
     }
     // Quitting early.
-    let config = Config::new().policy(Policy::rules(RulePolicy::new().allow_stdin())).stdin_bytes(b"dance\nquit\n".to_vec());
+    let config = Config::new().policy(RulePolicy::standard().allow_stdin()).stdin_bytes(b"dance\nquit\n".to_vec());
     let o = run_example("adventure.sand", &[], config);
     let out = ok(&o);
     assert!(out.contains("I don't understand that."));
@@ -181,7 +183,7 @@ fn persisted_inverted_index() {
     dir.write("docs/b.txt", "A quick brown dog outpaces a quick red fox");
     dir.write("docs/sub/c.md", "Lorem ipsum dolor sit amet");
     dir.write("docs/d.log", "fox fox fox");
-    let config = || Config::new().cwd(dir.path()).policy(Policy::rules(RulePolicy::new().allow_read(dir.path()).allow_write(dir.path())));
+    let config = || Config::new().cwd(dir.path()).policy(RulePolicy::standard().allow_read(dir.path()).allow_write(dir.path()));
     let o = run_example("search_index.sand", &["index", "idx.json", "docs"], config());
     assert_eq!(ok(&o), "indexed 3 documents, 14 terms\n");
     assert!(dir.path().join("idx.json").exists());
@@ -207,7 +209,7 @@ fn persisted_inverted_index() {
     let o = run_example(
         "search_index.sand",
         &["index", "idx.json", "docs"],
-        Config::new().cwd(dir.path()).policy(Policy::rules(RulePolicy::new().allow_read(dir.path()))),
+        Config::new().cwd(dir.path()).policy(RulePolicy::standard().allow_read(dir.path())),
     );
     assert!(o.failure().contains("permission_denied"), "{}", o.failure());
 }
@@ -221,8 +223,8 @@ fn examples_are_unchanged_under_stress() {
         .write("page.tmpl", "{% for u in users %}{{ loop.index }}. {{ u.name | title }}{% if u.admin %} (admin){% endif %}\n{% endfor %}");
     let data = dir.write("data.json", r#"{"users": [{"name": "ann lee", "admin": true}, {"name": "bob"}]}"#);
     let (tmpl, data) = (tmpl.to_str().unwrap().to_string(), data.to_str().unwrap().to_string());
-    let stdin = |s: &str| Config::new().policy(Policy::rules(RulePolicy::new().allow_stdin())).stdin_bytes(s.as_bytes().to_vec());
-    let files = || Config::new().cwd(dir.path()).policy(Policy::rules(RulePolicy::new().allow_read(dir.path()).allow_write(dir.path())));
+    let stdin = |s: &str| Config::new().policy(RulePolicy::standard().allow_stdin()).stdin_bytes(s.as_bytes().to_vec());
+    let files = || Config::new().cwd(dir.path()).policy(RulePolicy::standard().allow_read(dir.path()).allow_write(dir.path()));
     type MakeConfig<'a> = Box<dyn Fn() -> Config + 'a>;
     let runs: Vec<(&str, Vec<&str>, MakeConfig)> = vec![
         ("life.sand", vec!["8"], Box::new(Config::new)),
@@ -274,11 +276,11 @@ fn http_client_fetches_and_parses_a_page() {
         _ => HttpResponse::new(404, "not found"),
     });
     let base = format!("http://{}", server.addr);
-    let policy = RulePolicy::new().allow_net(&server.addr.to_string());
+    let policy = RulePolicy::standard().allow_net(&format!("plaintext {}", server.addr));
     let o = run_example(
         "http_fetch.sand",
         &[&format!("{base}/old"), &format!("{base}/missing"), &format!("{base}/data.json")],
-        Config::new().policy(Policy::rules(policy)),
+        Config::new().policy(policy),
     );
     let expected = format!(
         "{base}/page [200]\ntitle: Test & Page\nheadings:\n  Main Heading\n    Sub\nlinks (3):\n  {base}/about\n  https://other.example/x?y=1\n  {base}/rel/page.html\n{base}/missing: http: {base}/missing returned status 404\n{base}/data.json: invalid: {base}/data.json is not HTML (application/json)\n"
@@ -291,7 +293,7 @@ fn http_client_fetches_and_parses_a_page() {
 #[test]
 fn http_client_is_sandboxed() {
     let server = http_server(|_| HttpResponse::new(200, "<title>x</title>").header("content-type", "text/html"));
-    let o = run_example("http_fetch.sand", &[&format!("http://{}/", server.addr)], Config::new().policy(Policy::deny_all()));
+    let o = run_example("http_fetch.sand", &[&format!("http://{}/", server.addr)], Config::new().policy(RulePolicy::standard()));
     assert!(ok(&o).contains("permission_denied"), "{}", o.stdout);
     assert!(server.requests.lock().unwrap().is_empty());
 }
@@ -300,8 +302,8 @@ fn http_client_is_sandboxed() {
 fn tcp_chat_server() {
     let out = MemorySink::new();
     let err = MemorySink::new();
-    let policy = RulePolicy::new().allow_listen("127.0.0.1:0");
-    let config = Config::new().policy(Policy::rules(policy)).stdout(out.clone()).stderr(err.clone()).args(vec!["0".into()]);
+    let policy = RulePolicy::standard().allow_listen("127.0.0.1:0");
+    let config = Config::new().policy(policy).stdout(out.clone()).stderr(err.clone()).args(vec!["0".into()]);
     let mut engine = Engine::new(config).unwrap();
     let interrupt = engine.interrupt_handle();
     let server = std::thread::spawn(move || rt().block_on(engine.run_file(example("chat_server.sand"))));
@@ -363,7 +365,7 @@ fn tcp_chat_server() {
 
 #[test]
 fn chat_server_cannot_listen_without_permission() {
-    let o = run_example("chat_server.sand", &["0"], Config::new().policy(Policy::deny_all()));
+    let o = run_example("chat_server.sand", &["0"], Config::new().policy(RulePolicy::standard()));
     assert!(o.failure().contains("permission_denied"), "{}", o.failure());
 }
 
@@ -443,8 +445,9 @@ fn s3_client_against_mock_server() {
             ("AWS_SECRET_ACCESS_KEY".to_string(), "secret".to_string()),
             ("S3_ENDPOINT".to_string(), endpoint.clone()),
         ];
-        let policy = RulePolicy::new()
-            .allow_net(&server.addr.to_string())
+        let policy = RulePolicy::standard()
+            .allow_import(example("s3"))
+            .allow_net(&format!("plaintext {}", server.addr))
             .allow_read(dir.path())
             .allow_write(dir.path())
             .allow_env("AWS_ACCESS_KEY_ID")
@@ -452,7 +455,7 @@ fn s3_client_against_mock_server() {
             .allow_env("AWS_SESSION_TOKEN")
             .allow_env("AWS_REGION")
             .allow_env("S3_ENDPOINT");
-        run_example("s3/cli.sand", args, Config::new().cwd(dir.path()).env(env).policy(Policy::rules(policy)))
+        run_example("s3/cli.sand", args, Config::new().cwd(dir.path()).env(env).policy(policy))
     };
 
     let o = run(&["put", "bucket", "notes/one.txt", "upload.txt"]);
@@ -513,11 +516,11 @@ fn percent_decode(s: &str) -> String {
 
 #[test]
 fn s3_cli_requires_credentials_permission() {
-    let policy = Policy::custom(|cap: &Capability| match cap {
+    let policy = |cap: &Capability| match cap {
         Capability::Env(_) => Decision::Deny,
         _ => Decision::Allow,
-    });
-    let o = run_example("s3/cli.sand", &["ls", "b"], Config::new().policy(policy));
+    };
+    let o = run_example("s3/cli.sand", &["ls", "b"], Config::new().custom_policy(policy));
     assert_eq!(o.result.as_ref().unwrap().exit_code, 1);
     assert!(o.stderr.contains("AWS_ACCESS_KEY_ID is not set"), "{}", o.stderr);
 }

@@ -66,7 +66,7 @@ pub(crate) fn cmd_repl(args: &[String]) -> Result<u8, String> {
     let screen = Screen::default();
     let mut config =
         opts.config.stdout(ReplSink { screen: screen.clone(), stderr: false }).stderr(ReplSink { screen: screen.clone(), stderr: true });
-    let feed = opts.script_stdin.then(StdinFeed::new);
+    let feed = Some(StdinFeed::new());
     if let Some(feed) = &feed {
         config = config.stdin_feed(feed);
     }

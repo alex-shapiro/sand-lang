@@ -9,14 +9,14 @@ use super::stream::{self, IoFailure, Suspended, line_read, read_line, read_to_en
 use crate::check::ModKind;
 use crate::native::{HostError, IntoValue, NativeModule, NativeObject, Val};
 use crate::network::{self, Network, Stream};
-use crate::policy::{Capability, Decision, Policy, format_host_port, is_private_address, is_valid_host, parse_port, split_port};
+use crate::policy::{Capability, Policy, format_host_port, is_localhost, is_valid_host, parse_ip, parse_port, split_port};
 use crate::vm::iomem::{Reservation, ResourceSlot};
 use crate::vm::value::{ValueType, to_usize_saturating};
 use crate::vm::{Ctl, Vm};
 use jiff::SignedDuration;
 use std::fmt;
 use std::future::Future;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, watch};
@@ -401,64 +401,62 @@ pub(crate) fn conn_handle(vm: &Vm, c: Val<Conn>) -> Result<ConnHandle, HostError
     c.get(&vm.heap)?.handle().ok_or_else(|| closed().into())
 }
 
-/// Resolves `host` once and returns the addresses the policy allows
-/// (`Capability::NetAddr`), so that a name cannot lead to an address the
-/// policy forbids (e.g. through DNS rebinding). Fails with kind
-/// `"permission_denied"` if every address is denied.
+/// Resolves the host of `request` and returns the addresses allowed by `policy`.
+/// Resolves `localhost` and its subdomains to loopback addresses without using
+/// the system resolver.
 pub(crate) async fn resolve_allowed(
     policy: &Policy,
     network: &dyn Network,
-    host: &str,
-    port: u16,
+    request: &Capability,
 ) -> Result<Vec<std::net::SocketAddr>, IoFailure> {
-    let addrs: Vec<std::net::SocketAddr> = match host.parse::<IpAddr>() {
-        Ok(ip) => vec![std::net::SocketAddr::new(ip, port)],
-        Err(_) => network.resolve(host, port).await?,
+    let (host, port) = match request {
+        Capability::Net { host, port, .. } | Capability::Http { host, port, .. } => (host.as_str(), *port),
+        _ => unreachable!("a connection request"),
+    };
+    let addrs: Vec<std::net::SocketAddr> = match parse_ip(host) {
+        Some(ip) => vec![std::net::SocketAddr::new(ip, port)],
+        None if is_localhost(host) => [Ipv4Addr::LOCALHOST.into(), Ipv6Addr::LOCALHOST.into()].map(|ip: IpAddr| (ip, port).into()).into(),
+        None => network.resolve(host, port).await?,
     };
     let mut denied = None;
     let mut allowed = Vec::with_capacity(addrs.len());
     for addr in addrs {
-        match policy.check(&Capability::NetAddr { host: host.to_string(), addr }) {
-            Decision::Deny => {
-                denied.get_or_insert(addr);
+        match policy.check_resolved(request, addr) {
+            Err(reason) => {
+                denied.get_or_insert((addr, reason));
             }
-            Decision::Allow | Decision::Prompt => allowed.push(addr),
+            Ok(()) => allowed.push(addr),
         }
     }
     match denied {
-        Some(addr) if allowed.is_empty() => {
-            let class = if is_private_address(addr.ip()) { " (private or internal)" } else { "" };
-            Err(IoFailure::new(
-                "permission_denied",
-                format!("permission denied: connect to {}: address {}{class} is not allowed", format_host_port(host, port), addr.ip()),
-            ))
-        }
+        Some((addr, reason)) if allowed.is_empty() => Err(IoFailure::new(
+            "permission_denied",
+            format!("permission denied: connect to {}: address {} {reason}", format_host_port(host, port), addr.ip()),
+        )),
         _ if allowed.is_empty() => Err(IoFailure::new("not_found", format!("no addresses found for {host}"))),
         _ => Ok(allowed),
     }
 }
 
-/// Resolves `host` through `network`, checks each resolved address against
-/// `policy`, and connects to the first allowed address.
 pub(crate) async fn connect_checked(
     policy: &Policy,
     network: &dyn Network,
-    host: &str,
-    port: u16,
+    request: &Capability,
 ) -> Result<(Box<dyn Stream>, std::net::SocketAddr), IoFailure> {
-    let addrs = resolve_allowed(policy, network, host, port).await?;
+    let addrs = resolve_allowed(policy, network, request).await?;
     Ok(network.connect(&addrs).await?)
 }
 
 fn connect(vm: &mut Vm, host: Val<String>, port: i64, timeout: SignedDuration) -> Suspended<Conn> {
     let (host, port) = check_endpoint(vm, host, port)?;
-    vm.require(&Capability::Net { host: host.clone(), port })?;
+    let request = Capability::Net { host: host.clone(), port, tls: false };
+    vm.require(&request)?;
     // Counted from the start: a connection attempt holds a socket.
     let slot = vm.resource_slot_with(CONN_BUFFER, "a connection")?;
     let timeout = stream::timeout(timeout);
     let (policy, network, clock) = (vm.host.policy.clone(), vm.host.network.clone(), vm.host.clock.clone());
     suspend_resource(slot, async move {
-        let open = connect_checked(&policy, &*network, &host, port);
+        let open = connect_checked(&policy, &*network, &request);
         match crate::platform::timeout(&*clock, timeout, open).await {
             Some(r) => r.map(|(stream, peer)| Conn::from_stream(stream, peer)),
             None => Err(IoFailure::new("timeout", format!("connecting to {} timed out", format_host_port(&host, port)))),
@@ -471,7 +469,8 @@ fn connect_tls(vm: &mut Vm, host: Val<String>, port: i64, timeout: SignedDuratio
         return Err(HostError::new("invalid", "TLS support is not enabled in this build"));
     }
     let (host, port) = check_endpoint(vm, host, port)?;
-    vm.require(&Capability::Net { host: host.clone(), port })?;
+    let request = Capability::Net { host: host.clone(), port, tls: true };
+    vm.require(&request)?;
     let slot = vm.resource_slot_with(CONN_BUFFER + TLS_BUFFERS, "a connection")?;
     let timeout = stream::timeout(timeout);
     let (policy, network, clock) = (vm.host.policy.clone(), vm.host.network.clone(), vm.host.clock.clone());
@@ -480,7 +479,7 @@ fn connect_tls(vm: &mut Vm, host: Val<String>, port: i64, timeout: SignedDuratio
     // accepts but never answers cannot hold the socket indefinitely.
     let target = format_host_port(&host, port);
     let open = async move {
-        let (stream, peer) = connect_checked(&policy, &*network, &host, port).await?;
+        let (stream, peer) = connect_checked(&policy, &*network, &request).await?;
         let tls = tls::connect(&settings, &host, stream).await?;
         let (r, w) = tokio::io::split(tls);
         Ok(Conn::new(Box::new(r), Box::new(w), peer.into()))

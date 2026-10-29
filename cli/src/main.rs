@@ -14,7 +14,7 @@ mod repl;
 
 use sandlang::policy::{PolicyFile, parse_duration, parse_size};
 use sandlang::time::TimeZone;
-use sandlang::{Capability, Config, Decision, Engine, Error, Policy, PromptAnswer};
+use sandlang::{Capability, Config, Engine, Error, PromptAnswer, RulePolicy};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -49,38 +49,34 @@ sand — the Sand language
 
 USAGE:
     sand run FILE [OPTIONS] [-- ARGS...]   run a script
-    sand check FILE...                     type check (FILE.policy: validate a policy)
-    sand lint FILE... [--allow-warnings]   report lint warnings (also of FILE.policy)
-    sand fmt FILE... [--check]             format files in place (or check; also FILE.policy)
+    sand check FILE...                     type check scripts or validate .policy files
+    sand lint FILE... [--allow-warnings]   report lint warnings in scripts or .policy files
+    sand fmt FILE... [--check]             format scripts or .policy files in place, or check formatting
     sand fmt - [--check]                   format standard input to standard output
-    sand test FILE... [OPTIONS]            run test blocks (options as for run)
+    sand test FILE... [OPTIONS]            run test blocks with run options
     sand repl [OPTIONS]                    interactive session
     sand --version
     sand COMMAND --help                    show this help
 
-RUN, TEST AND REPL OPTIONS (all access is denied unless allowed):
-    --policy=FILE            rules and limits from a policy file (the options below
-                             add to its rules and override its limits)
-    --allow-read=PATHS       comma-separated directories readable by the script
-    --allow-write=PATHS      directories writable (and readable) by the script
-    --allow-net=HOSTS        hosts the script may connect to (host, host:port, *.domain,
-                             IP address or CIDR range such as 10.0.0.0/8)
-    --deny-net=HOSTS         hosts, addresses or ranges the script may not connect to
-    --allow-private-net      allow connections to private and internal addresses
-                             (loopback, RFC 1918, link-local, ...); by default only
-                             IP literals, ranges and localhost allowed explicitly
-    --allow-listen=ADDRS     addresses the script may listen on (ip:port, ip, localhost
-                             or *:port; port * = any, 0 = ephemeral port)
-    --allow-env=NAMES        environment variables the script may read
-    --allow-stdin            allow reading standard input
-    --allow-timezone         allow reading the local time zone (otherwise UTC)
-    --allow-all              allow everything (trusted scripts only)
-    --prompt                 ask on the terminal for anything not allowed
-    --max-memory=SIZE        heap limit, e.g. 256M (default 512M)
+RUN, TEST AND REPL OPTIONS:
+    Scripts may print, read standard input and the time zone, and import modules.
+    For other capabilities, sand prompts on the terminal unless matched by a rule.
+    Without a terminal, sand denies unmatched requests and prints the required flag.
+
+    --allow=RULE             allow capabilities matching RULE, e.g.
+                             --allow='read ./data' --allow='net api.example.com'
+                             --allow='net plaintext localhost:8080' --allow='env HOME'
+    --deny=RULE              deny capabilities matching RULE, e.g. --deny='net 10.0.0.0/8'
+    --prompt=RULE            prompt for capabilities matching RULE, e.g. --prompt='write ./out'
+    --policy=FILE            load rules and limits from FILE; CLI flags add rules
+                             and override limits
+    --allow-all              allow all unmatched capabilities for trusted scripts
+    --no-prompt              deny unmatched requests instead of prompting
+    --max-memory=SIZE        heap limit, e.g. 256M; defaults to 512M
     --max-time=DURATION      wall-clock limit, e.g. 10s, 500ms, 2m
     --max-cpu=DURATION       CPU time limit
-    --max-instructions=N     instruction (fuel) limit
-    --max-compile-fuel=N     type checking work limit (default 10000000)
+    --max-instructions=N     instruction fuel limit
+    --max-compile-fuel=N     type-checking work limit; defaults to 10000000
     --seed=N                 seed the random number generator
 ";
 
@@ -134,7 +130,6 @@ struct RunOptions {
     config: Config,
     file: Option<PathBuf>,
     script_args: Vec<String>,
-    script_stdin: bool,
 }
 
 /// Parses run options into an engine configuration.
@@ -147,19 +142,24 @@ fn run_options(args: &[String]) -> Result<RunOptions, String> {
 fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, String> {
     // The policy file first, wherever it is given: the options add to it.
     let options = args.iter().position(|a| a == "--").map_or(args, |end| &args[..end]);
-    let mut policy_files = options.iter().filter_map(|a| a.strip_prefix("--policy=").or((a == "--policy").then_some("")));
+    let mut policy_files = options.iter().enumerate().filter_map(|(i, a)| match a.strip_prefix("--policy=") {
+        Some(path) => Some(path),
+        None => (a == "--policy").then(|| options.get(i + 1).filter(|v| !v.starts_with("--")).map_or("", String::as_str)),
+    });
     let policy_file = match (policy_files.next(), policy_files.next()) {
         (Some(_), Some(_)) => return Err("--policy given more than once".into()),
-        (Some(""), None) => return Err("--policy requires a value (--policy=FILE)".into()),
+        (Some(""), None) => return Err("--policy requires a value, e.g. --policy=FILE".into()),
         (Some(path), None) => Some(read_policy(Path::new(path))?),
         (None, _) => None,
     };
-    let (mut rules, default, mut allow_private_net, mut limits) = match policy_file {
-        Some(f) => (f.rules, f.default.unwrap_or(Decision::Deny), f.private_net, f.limits),
-        None => (Default::default(), Decision::Deny, false, Default::default()),
+    let home = std::env::home_dir();
+    let cwd = std::env::current_dir().map_err(|e| format!("cannot read the current directory: {e}"))?;
+    let (mut rules, mut limits) = match policy_file {
+        Some(f) => (f.rules, f.limits),
+        None => Default::default(),
     };
     let mut allow_all = false;
-    let mut prompt = (default == Decision::Prompt).then_some(PromptVia::Terminal);
+    let mut prompt = true;
     let mut seed = None;
     let mut file = None;
     let mut script_args = Vec::new();
@@ -174,60 +174,24 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
             script_args.extend(args[i..].iter().cloned());
             break;
         }
-        let (flag, value) = match a.split_once('=') {
+        let (flag, mut value) = match a.split_once('=') {
             Some((f, v)) => (f, Some(v.to_string())),
             None => (a.as_str(), None),
         };
-        let list = |v: &Option<String>| -> Result<Vec<String>, String> {
-            match v {
-                Some(v) => Ok(v.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()),
-                None => Err(format!("{flag} requires a value ({flag}=...)")),
-            }
-        };
+        if value.is_none() && TAKES_VALUE.contains(&flag) && i < options.len() && !args[i].starts_with("--") {
+            value = Some(args[i].clone());
+            i += 1;
+        }
         let required =
-            |v: &Option<String>| -> Result<String, String> { v.clone().ok_or_else(|| format!("{flag} requires a value ({flag}=...)")) };
+            |v: &Option<String>| -> Result<String, String> { v.clone().ok_or_else(|| format!("{flag} requires a value, e.g. {flag}=...")) };
         match flag {
-            "--allow-read" => {
-                for p in list(&value)? {
-                    rules = rules.allow_read(absolute(&p));
-                }
+            "--allow" | "--deny" | "--prompt" => {
+                let text = value.as_deref().ok_or_else(|| format!("{flag} requires a rule, e.g. {flag}='net api.example.com'"))?;
+                rules = rules.extend(parse_cli_rule(&flag[2..], text, &cwd, home.as_deref())?);
             }
-            "--allow-write" => {
-                for p in list(&value)? {
-                    rules = rules.allow_write(absolute(&p));
-                }
-            }
-            "--allow-net" => {
-                for h in list(&value)? {
-                    rules = rules.allow_net(&net_pattern(&h)?);
-                }
-            }
-            "--deny-net" => {
-                for h in list(&value)? {
-                    rules = rules.deny_net(&net_pattern(&h)?);
-                }
-            }
-            "--allow-listen" => {
-                for h in list(&value)? {
-                    rules = rules.allow_listen(&listen_pattern(&h)?);
-                }
-            }
-            "--allow-env" => {
-                for n in list(&value)? {
-                    rules = rules.allow_env(&n);
-                }
-            }
-            "--allow-stdin" | "--allow-timezone" | "--allow-all" | "--allow-private-net" | "--prompt" | "--prompt-stdin"
-                if value.is_some() =>
-            {
-                return Err(format!("{flag} does not take a value"));
-            }
-            "--allow-stdin" => rules = rules.allow_stdin(),
-            "--allow-timezone" => rules = rules.allow_timezone(),
-            "--allow-private-net" => allow_private_net = true,
+            "--allow-all" | "--no-prompt" if value.is_some() => return Err(format!("{flag} does not take a value")),
             "--allow-all" => allow_all = true,
-            "--prompt" => prompt = prompt.or(Some(PromptVia::Terminal)),
-            "--prompt-stdin" => prompt = Some(PromptVia::Stdin),
+            "--no-prompt" => prompt = false,
             "--policy" => {}
             "--max-memory" => limits.max_memory = Some(parse_size(&required(&value)?)?),
             "--max-time" => limits.max_wall_time = Some(parse_duration(&required(&value)?)?),
@@ -244,7 +208,7 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
                 let v = required(&value)?;
                 seed = Some(v.trim().parse::<u64>().map_err(|_| format!("invalid --seed value `{v}`"))?)
             }
-            f if f.starts_with("--") => return Err(format!("unknown option `{f}`")),
+            f if f.starts_with("--") => return Err(unknown_option(f)),
             _ => {
                 if file.is_none() {
                     file = Some(PathBuf::from(a));
@@ -255,38 +219,39 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
             }
         }
     }
-    // `--prompt` asks about what would be denied; a file's `default allow` stays.
-    rules = rules.fallback(if prompt.is_some() && default != Decision::Allow { Decision::Prompt } else { default });
-    if !allow_private_net {
-        rules = rules.deny_private_networks();
-    }
-    let policy = if allow_all { Policy::allow_all() } else { Policy::rules(rules) };
+    let policy = rules.with_defaults(default_rules(allow_all));
     let mut config = Config::new()
-        .policy(policy)
+        .policy(policy.clone())
         .limits(limits)
+        .inherit_stdin()
         .gc_stress(std::env::var_os("SAND_GC_STRESS").is_some())
         .dump_bytecode(std::env::var_os("SAND_DUMP_BYTECODE").is_some());
     if !files_only {
         config = config.args(script_args.clone());
     }
-    match prompt {
-        // Prompt answers come from standard input, so the script gets none.
-        Some(PromptVia::Stdin) => config = config.prompter(prompter(PromptVia::Stdin)),
-        Some(via) => config = config.inherit_stdin().prompter(prompter(via)),
-        None => config = config.inherit_stdin(),
-    }
+    config = config.prompter(prompter(prompt, policy));
     if let Some(s) = seed {
         config = config.seed(s);
     }
     if let Some(zone) = TimeZone::system() {
         config = config.time_zone(zone);
     }
-    let script_stdin = prompt != Some(PromptVia::Stdin);
-    Ok(RunOptions { config, file, script_args, script_stdin })
+    Ok(RunOptions { config, file, script_args })
 }
 
-/// Reads and parses a policy file (relative paths in it are relative to
-/// its directory).
+const TAKES_VALUE: &[&str] = &[
+    "--allow",
+    "--deny",
+    "--prompt",
+    "--policy",
+    "--max-memory",
+    "--max-time",
+    "--max-cpu",
+    "--max-instructions",
+    "--max-compile-fuel",
+    "--seed",
+];
+
 fn read_policy(path: &Path) -> Result<PolicyFile, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read policy file {}: {e}", path.display()))?;
     PolicyFile::parse(&text, &policy_base(path), std::env::home_dir().as_deref()).map_err(|errors| {
@@ -295,17 +260,14 @@ fn read_policy(path: &Path) -> Result<PolicyFile, String> {
     })
 }
 
-/// The directory relative paths in the policy file at `path` start from.
 fn policy_base(path: &Path) -> PathBuf {
     absolute(&path.to_string_lossy()).parent().map(Path::to_path_buf).unwrap_or_default()
 }
 
-/// Check whether `file` is a policy file.
 fn is_policy(file: &str) -> bool {
     Path::new(file).extension().is_some_and(|e| e == "policy")
 }
 
-/// Prints a policy file's errors; returns the exit status for them.
 fn report_policy_errors(file: &str, errors: &[sandlang::policy::PolicyError]) -> u8 {
     for e in errors {
         eprintln!("{file}:{e}");
@@ -313,36 +275,53 @@ fn report_policy_errors(file: &str, errors: &[sandlang::policy::PolicyError]) ->
     2
 }
 
-/// Rejects malformed network patterns (which would silently match nothing).
-fn net_pattern(p: &str) -> Result<String, String> {
-    sandlang::policy::check_net_pattern(p).map(|()| p.to_string())
+fn parse_cli_rule(verb: &str, text: &str, cwd: &Path, home: Option<&Path>) -> Result<RulePolicy, String> {
+    if verb == "allow" && text.trim() == "all" {
+        return Err(format!("`--allow={text}` is not a rule: use --allow-all to allow all capabilities by default"));
+    }
+    let file = PolicyFile::parse(&format!("{verb} {text}"), cwd, home).map_err(|errors| {
+        let messages: Vec<&str> = errors.iter().map(|e| e.message.as_str()).collect();
+        format!("invalid rule `--{verb}={text}`: {}", messages.join("; "))
+    })?;
+    Ok(file.rules)
 }
 
-fn listen_pattern(p: &str) -> Result<String, String> {
-    if sandlang::policy::is_valid_listen_pattern(p) { Ok(p.to_string()) } else { Err(format!("invalid listen pattern `{p}`")) }
+/// Default fallback rules for `sand run`, `sand test`, and `sand repl`.
+fn default_rules(all: bool) -> RulePolicy {
+    if all { RulePolicy::allow_all() } else { RulePolicy::standard().allow_stdin().allow_timezone().extend(allow_all_imports_policy()) }
+}
+
+fn allow_all_imports_policy() -> RulePolicy {
+    RulePolicy::new().extend(PolicyFile::parse("allow import **", Path::new("/"), None).expect("a valid rule").rules)
+}
+
+fn unknown_option(flag: &str) -> String {
+    let hint = match flag {
+        "--allow-read" => Some("use --allow='read ./PATH'"),
+        "--allow-write" => Some("use --allow='write ./PATH'"),
+        "--allow-net" => Some("use --allow='net HOST' for TLS, or --allow='net tls plaintext HOST'"),
+        "--deny-net" => Some("use --deny='net HOST'"),
+        "--allow-listen" => Some("use --allow='listen ADDR'"),
+        "--allow-env" => Some("use --allow='env NAME'"),
+        "--allow-private-net" => Some("specify internal hosts or IP ranges in `net` rules"),
+        "--allow-stdin" | "--allow-timezone" => Some("scripts may read standard input and the time zone by default"),
+        "--prompt-stdin" => Some("prompts use the controlling terminal, and --no-prompt denies unprompted requests"),
+        _ => None,
+    };
+    match hint {
+        Some(h) => format!("unknown option `{flag}`: {h}"),
+        None => format!("unknown option `{flag}`"),
+    }
 }
 
 fn absolute(p: &str) -> PathBuf {
     std::path::absolute(p).unwrap_or_else(|_| PathBuf::from(p))
 }
 
-/// Where `--prompt` asks its questions.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PromptVia {
-    /// The controlling terminal (`/dev/tty`, or `CONIN$`/`CONOUT$` on Windows),
-    /// never the script's standard streams: piped data must not answer prompts.
-    Terminal,
-    /// Standard input and error (hidden `--prompt-stdin` option, for tests and
-    /// automation; whoever writes the command line could pass `--allow-all` anyway).
-    Stdin,
-}
-
-/// How many unrecognised answers are tolerated before denying.
 const PROMPT_ATTEMPTS: usize = 3;
 
-/// The prompt dialogue: asks about `cap` on `output` and reads the answer from
-/// `input`. An empty answer, end of input or an I/O error denies (once).
-fn prompt_dialogue(cap: &Capability, input: &mut impl BufRead, output: &mut impl Write) -> PromptAnswer {
+/// Writes a prompt for `cap` to `output` and reads the user's answer from `input`.
+fn prompt_stream(cap: &Capability, input: &mut impl BufRead, output: &mut impl Write) -> PromptAnswer {
     let question = format!("sand: allow the script to {}? [y]es once, [a]lways, [n]o, [N]ever: ", sanitize(&cap.to_string()));
     for _ in 0..PROMPT_ATTEMPTS {
         let _ = output.write_all(question.as_bytes());
@@ -368,18 +347,11 @@ fn prompt_dialogue(cap: &Capability, input: &mut impl BufRead, output: &mut impl
     PromptAnswer::DenyOnce
 }
 
-/// Escapes control characters (newlines, terminal escape sequences) and
-/// other invisible or layout-changing characters (Unicode format characters
-/// such as bidirectional overrides, line and paragraph separators, unusual
-/// spaces, combining marks) so that script-chosen text such as a file name
-/// cannot spoof the question.
+/// Escapes control, formatting, and non-ASCII whitespace characters so that
+/// script-controlled text cannot spoof terminal output.
 fn sanitize(s: &str) -> String {
     s.chars()
         .map(|c| {
-            // `escape_debug` escapes exactly the characters Rust does not
-            // consider printable (categories Cc, Cf, Zl, Zp, Zs except the
-            // ASCII space, unassigned, ...) and grapheme extenders, besides
-            // quotes and backslashes, which are kept.
             if c.is_control() || (c.escape_debug().len() > 1 && !matches!(c, '\\' | '\'' | '"')) {
                 c.escape_debug().to_string()
             } else {
@@ -389,29 +361,24 @@ fn sanitize(s: &str) -> String {
         .collect()
 }
 
-/// Written to the terminal before each prompt, so that whatever state the
-/// script's output left the terminal in (concealed or invisible colors,
-/// alternate character sets, a half-written line), the question starts on a
-/// fresh line in the default rendition, after a marker line. `ESC [ ! p` is
-/// a soft terminal reset (DECSTR), `ESC [ 0 m` resets character attributes.
+/// Soft terminal reset (DECSTR `ESC [ ! p`) and attribute reset (`ESC [ 0 m`)
+/// written before each terminal prompt so that script output cannot hide or
+/// alter the prompt text.
 const TERMINAL_RESET: &str = if cfg!(windows) { "\r\n" } else { "\x1b[!p\x1b[0m\r\n" };
 const PROMPT_MARKER: &str = "---- sand: permission request (the script is paused) ----\r\n";
 
-/// The prompt dialogue on a terminal: resets the terminal's rendition first.
-fn terminal_dialogue(cap: &Capability, input: &mut impl BufRead, output: &mut impl Write) -> PromptAnswer {
+fn prompt_terminal(cap: &Capability, input: &mut impl BufRead, output: &mut impl Write) -> PromptAnswer {
     let _ = output.write_all(TERMINAL_RESET.as_bytes());
     let _ = output.write_all(PROMPT_MARKER.as_bytes());
-    prompt_dialogue(cap, input, output)
+    prompt_stream(cap, input, output)
 }
 
-/// Opens the controlling terminal for reading and writing.
 #[cfg(unix)]
 fn open_terminal() -> std::io::Result<(std::fs::File, std::fs::File)> {
     let tty = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty")?;
     Ok((tty.try_clone()?, tty))
 }
 
-/// Opens the console for reading and writing.
 #[cfg(windows)]
 fn open_terminal() -> std::io::Result<(std::fs::File, std::fs::File)> {
     let input = std::fs::OpenOptions::new().read(true).write(true).open("CONIN$")?;
@@ -421,27 +388,33 @@ fn open_terminal() -> std::io::Result<(std::fs::File, std::fs::File)> {
 
 #[cfg(not(any(unix, windows)))]
 fn open_terminal() -> std::io::Result<(std::fs::File, std::fs::File)> {
-    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "no terminal"))
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "controlling terminal is unavailable"))
 }
 
-/// Asks the user whether to allow a capability (blocking).
-fn ask(cap: Capability, via: PromptVia) -> PromptAnswer {
-    match via {
-        PromptVia::Terminal => match open_terminal() {
-            Ok((input, mut output)) => terminal_dialogue(&cap, &mut std::io::BufReader::new(input), &mut output),
-            Err(_) => {
-                eprintln!("sand: no terminal to ask for permission; denied: {}", sanitize(&cap.to_string()));
-                PromptAnswer::DenyOnce
-            }
-        },
-        PromptVia::Stdin => prompt_dialogue(&cap, &mut std::io::stdin().lock(), &mut std::io::stderr()),
+/// Prompts on the controlling terminal (`/dev/tty` or `CONIN$`/`CONOUT$`), or
+/// denies if `terminal` is false or unavailable.
+fn ask(cap: Capability, terminal: bool, policy: &RulePolicy) -> PromptAnswer {
+    match open_terminal().ok().filter(|_| terminal) {
+        Some((input, mut output)) => prompt_terminal(&cap, &mut std::io::BufReader::new(input), &mut output),
+        None => deny_without_prompt(&cap, policy),
     }
 }
 
-/// The prompter installed by `--prompt` (and `--prompt-stdin`).
-fn prompter(via: PromptVia) -> impl Fn(Capability) -> sandlang::policy::PromptFuture + Send + Sync + 'static {
+/// Denies `cap` for the rest of the run and prints the `--allow` flag that grants it.
+fn deny_without_prompt(cap: &Capability, policy: &RulePolicy) -> PromptAnswer {
+    let hint = sandlang::policy::rule_for(cap, true)
+        .and_then(|rule| Some((PolicyFile::parse(&rule, Path::new("/"), None).ok()?.rules, rule)))
+        .filter(|(rule, text)| sanitize(text) == *text && rule.clone().extend(policy.clone()).check(cap) == sandlang::Decision::Allow)
+        .map(|(_, rule)| format!("; pass --allow='{}' to allow it", rule.trim_start_matches("allow ").replace('\'', r"'\''")));
+    eprintln!("sand: denied: {}", sanitize(&format!("{cap}{}", hint.unwrap_or_default())));
+    PromptAnswer::DenyAlways
+}
+
+fn prompter(terminal: bool, policy: RulePolicy) -> impl Fn(Capability) -> sandlang::policy::PromptFuture + Send + Sync + 'static {
+    let policy = std::sync::Arc::new(policy);
     move |cap: Capability| -> sandlang::policy::PromptFuture {
-        Box::pin(async move { tokio::task::spawn_blocking(move || ask(cap, via)).await.unwrap_or(PromptAnswer::DenyOnce) })
+        let policy = policy.clone();
+        Box::pin(async move { tokio::task::spawn_blocking(move || ask(cap, terminal, &policy)).await.unwrap_or(PromptAnswer::DenyOnce) })
     }
 }
 
@@ -510,8 +483,7 @@ fn cmd_check(args: &[String]) -> Result<u8, String> {
             }
             continue;
         }
-        // Checking runs no script code; imports are confined to the module root.
-        let engine = Engine::new(Config::new().policy(Policy::deny_all())).map_err(|e| e.render())?;
+        let engine = Engine::new(Config::new().policy(allow_all_imports_policy())).map_err(|e| e.render())?;
         match engine.check_file(path) {
             Ok(()) => outln!("{f}: ok"),
             Err(e) => code = code.max(report_error(&e)),
@@ -532,7 +504,7 @@ fn cmd_lint(args: &[String]) -> Result<u8, String> {
                 Err(errors) => return Ok(report_policy_errors(f, &errors)),
             }
         } else {
-            Engine::new(Config::new().policy(Policy::deny_all())).and_then(|e| e.lint_file(f)).map_err(|e| e.to_string())
+            Engine::new(Config::new().policy(allow_all_imports_policy())).and_then(|e| e.lint_file(f)).map_err(|e| e.to_string())
         };
         match warnings {
             Ok(ws) => {
@@ -640,9 +612,9 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    fn dialogue(cap: &Capability, input: &str) -> (PromptAnswer, String) {
+    fn run_prompt(cap: &Capability, input: &str) -> (PromptAnswer, String) {
         let mut out = Vec::new();
-        let answer = prompt_dialogue(cap, &mut input.as_bytes(), &mut out);
+        let answer = prompt_stream(cap, &mut input.as_bytes(), &mut out);
         (answer, String::from_utf8(out).unwrap())
     }
 
@@ -691,7 +663,7 @@ mod tests {
             ("a", PromptAnswer::AllowAlways),
         ];
         for (input, want) in cases {
-            let (got, out) = dialogue(&read_cap(), input);
+            let (got, out) = run_prompt(&read_cap(), input);
             assert_eq!(got, want, "input {input:?}");
             assert_eq!(out, "sand: allow the script to read data.txt? [y]es once, [a]lways, [n]o, [N]ever: ", "input {input:?}");
         }
@@ -699,7 +671,7 @@ mod tests {
 
     #[test]
     fn prompt_asks_again_after_invalid_input() {
-        let (got, out) = dialogue(&read_cap(), "maybe\nyess\na\ny\n");
+        let (got, out) = run_prompt(&read_cap(), "maybe\nyess\na\ny\n");
         assert_eq!(got, PromptAnswer::AllowAlways);
         assert_eq!(out.matches("allow the script to read data.txt?").count(), 3);
         assert_eq!(out.matches("please answer y, a, n or N").count(), 2);
@@ -707,15 +679,15 @@ mod tests {
 
     #[test]
     fn prompt_denies_after_repeated_invalid_input() {
-        let (got, out) = dialogue(&read_cap(), "1\n2\n3\ny\n");
+        let (got, out) = run_prompt(&read_cap(), "1\n2\n3\ny\n");
         assert_eq!(got, PromptAnswer::DenyOnce);
         assert_eq!(out.matches("allow the script").count(), PROMPT_ATTEMPTS);
     }
 
     #[test]
     fn prompt_denies_at_end_of_input_or_on_error() {
-        assert_eq!(dialogue(&read_cap(), "").0, PromptAnswer::DenyOnce);
-        assert_eq!(dialogue(&read_cap(), "what\n").0, PromptAnswer::DenyOnce);
+        assert_eq!(run_prompt(&read_cap(), "").0, PromptAnswer::DenyOnce);
+        assert_eq!(run_prompt(&read_cap(), "what\n").0, PromptAnswer::DenyOnce);
 
         struct Broken;
         impl std::io::Read for Broken {
@@ -724,15 +696,14 @@ mod tests {
             }
         }
         let mut out = Vec::new();
-        assert_eq!(prompt_dialogue(&read_cap(), &mut std::io::BufReader::new(Broken), &mut out), PromptAnswer::DenyOnce);
-        // Invalid UTF-8 is an error too.
-        assert_eq!(prompt_dialogue(&read_cap(), &mut &b"\xff\xfe\n"[..], &mut out), PromptAnswer::DenyOnce);
+        assert_eq!(prompt_stream(&read_cap(), &mut std::io::BufReader::new(Broken), &mut out), PromptAnswer::DenyOnce);
+        assert_eq!(prompt_stream(&read_cap(), &mut &b"\xff\xfe\n"[..], &mut out), PromptAnswer::DenyOnce);
     }
 
     #[test]
     fn prompt_escapes_control_characters_from_the_script() {
         let cap = Capability::FsRead(PathBuf::from("x\nsand: allow the script to read safe.txt? \u{1b}[2K"));
-        let (_, out) = dialogue(&cap, "n\n");
+        let (_, out) = run_prompt(&cap, "n\n");
         assert_eq!(out.lines().count(), 1, "{out:?}");
         assert!(out.contains("x\\nsand: allow") && out.contains("\\u{1b}[2K"), "{out:?}");
         assert!(!out.contains('\u{1b}'));
@@ -740,8 +711,6 @@ mod tests {
 
     #[test]
     fn prompt_escapes_invisible_and_reordering_characters() {
-        // Bidirectional overrides and isolates, zero-width and other format
-        // characters, line/paragraph separators, unusual spaces.
         let tricky = [
             '\u{202e}',
             '\u{2066}',
@@ -757,20 +726,19 @@ mod tests {
         ];
         for c in tricky {
             let cap = Capability::FsRead(PathBuf::from(format!("/tmp/a{c}b")));
-            let (_, out) = dialogue(&cap, "n\n");
+            let (_, out) = run_prompt(&cap, "n\n");
             assert!(!out.contains(c), "{c:?} not escaped: {out:?}");
             assert!(out.contains(&c.escape_unicode().to_string()), "{out:?}");
         }
-        // Ordinary text is left alone.
         let cap = Capability::FsRead(PathBuf::from("/tmp/données/日本語 file's \"x\"\\y"));
-        let (_, out) = dialogue(&cap, "n\n");
+        let (_, out) = run_prompt(&cap, "n\n");
         assert!(out.contains("/tmp/données/日本語 file's \"x\"\\y?"), "{out:?}");
     }
 
     #[test]
     fn terminal_prompt_resets_the_terminal_first() {
         let mut out = Vec::new();
-        let answer = terminal_dialogue(&read_cap(), &mut "n\n".as_bytes(), &mut out);
+        let answer = prompt_terminal(&read_cap(), &mut "n\n".as_bytes(), &mut out);
         assert_eq!(answer, PromptAnswer::DenyOnce);
         let out = String::from_utf8(out).unwrap();
         let marker = out.find(PROMPT_MARKER).unwrap();

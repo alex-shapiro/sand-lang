@@ -428,6 +428,7 @@ pub(crate) struct ClientConn {
     slot: ResourceSlot,
     /// `scheme://host[:port]`.
     origin: String,
+    peer: std::net::SocketAddr,
 }
 
 impl ClientConn {
@@ -467,13 +468,14 @@ impl Pool {
         self.idle.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// The most recently used idle connection to `origin` that is ready for
-    /// a request, after closing those idle for longer than [`POOL_IDLE`].
-    fn take(&self, origin: &str) -> Option<ClientConn> {
+    /// Takes the most recently used idle connection to `origin` if `policy`
+    /// allows `request` to connect to its peer address.
+    fn take(&self, origin: &str, policy: &Policy, request: &crate::policy::Capability) -> Option<ClientConn> {
         let now = self.clock.now();
         let mut idle = self.idle();
         idle.retain(|(_, since)| now.saturating_duration_since(*since) < POOL_IDLE);
-        while let Some(i) = idle.iter().rposition(|(c, _)| c.origin == origin) {
+        let usable = |c: &ClientConn| c.origin == origin && policy.check_resolved(request, c.peer).is_ok();
+        while let Some(i) = idle.iter().rposition(|(c, _)| usable(c)) {
             let (mut conn, _) = idle.remove(i);
             if conn.is_ready() {
                 return Some(conn);
@@ -511,17 +513,17 @@ impl Pool {
     }
 }
 
-/// Connects to `url` at an address the policy allows.
 async fn connect(
     policy: &Policy,
     network: &dyn Network,
     tls: &TlsSettings,
+    method: &str,
     url: &Url,
     slot: ResourceSlot,
 ) -> Result<ClientConn, IoFailure> {
-    let (stream, _) = net::connect_checked(policy, network, &url.host, url.port).await?;
+    let (stream, peer) = net::connect_checked(policy, network, &url.capability(method)).await?;
     let stream = if url.scheme == "https" { Box::new(net::tls::connect(tls, &url.host, stream).await?) } else { stream };
-    Ok(ClientConn { stream: BufReader::with_capacity(net::CONN_BUFFER, stream), slot, origin: url.origin() })
+    Ok(ClientConn { stream: BufReader::with_capacity(net::CONN_BUFFER, stream), slot, origin: url.origin(), peer })
 }
 
 /// A response's head.
@@ -606,7 +608,7 @@ fn send(
     let mut res = vm.reserve_io(body.bytes(&vm.heap).len())?;
     req.check_policy(vm)?;
     let pool = vm.host.http_pool.clone();
-    let idle = pool.take(&req.url.origin());
+    let idle = pool.take(&req.url.origin(), &vm.host.policy, &req.url.capability(&req.method));
     let slot = match idle {
         Some(_) => None,
         None => {
@@ -656,7 +658,7 @@ fn send(
                         Err((e, _)) => return Err(e),
                     }
                 }
-                let conn = connect(&policy, &*network, &tls, &url, slot.expect("a slot for a new connection")).await?;
+                let conn = connect(&policy, &*network, &tls, &method, &url, slot.expect("a slot for a new connection")).await?;
                 exchange(conn, &request, head_only, &mut head_res).await.map_err(|(e, _)| e)
             };
             let r = match crate::platform::timeout(&*clock, timeout, run).await {
@@ -767,7 +769,7 @@ fn upload(
     let (policy, network, tls) = (vm.host.policy.clone(), vm.host.network.clone(), vm.host.tls.clone());
     let clock = vm.host.clock.clone();
     let open = async move {
-        let (stream, peer) = net::connect_checked(&policy, &*network, &url.host, url.port).await?;
+        let (stream, peer) = net::connect_checked(&policy, &*network, &url.capability(&method)).await?;
         if url.scheme != "https" {
             return Ok(net::Conn::from_stream(stream, peer));
         }

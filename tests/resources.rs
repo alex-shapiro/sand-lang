@@ -5,13 +5,13 @@
 mod common;
 
 use common::{HttpResponse, TempDir, http_server, rt, run_with};
-use sandlang::{Config, Engine, Limits, MemorySink, Policy, RulePolicy};
+use sandlang::{Config, Engine, Limits, MemorySink, RulePolicy};
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
 fn with_resources(n: usize) -> impl FnOnce(Config) -> Config {
     let limits = Limits { max_open_resources: n, max_wall_time: Some(Duration::from_secs(20)), ..Limits::default() };
-    move |c| c.policy(Policy::allow_all()).limits(limits)
+    move |c| c.policy(RulePolicy::allow_all()).limits(limits)
 }
 
 // ---------------------------------------------------------------------------
@@ -105,7 +105,7 @@ fn opening_files_is_checked_for_each_mode() {
     let dir = TempDir::new("open-modes");
     dir.write("ro/a.txt", "read only");
     dir.write("rw/b.txt", "writable");
-    let policy = RulePolicy::new().allow_read(dir.path().join("ro")).allow_write(dir.path().join("rw"));
+    let policy = RulePolicy::standard().allow_read(dir.path().join("ro")).allow_write(dir.path().join("rw"));
     let src = r#"
 import fs
 let modes = [fs.Mode.Read, fs.Mode.Write, fs.Mode.Append, fs.Mode.ReadWrite]
@@ -116,7 +116,7 @@ print(fs.open("ro/a.txt", fs.Mode.Write).unwrap_err().message)
 print(fs.read_text("ro/a.txt")?)
 "#;
     let cwd = dir.path().to_path_buf();
-    let r = run_with(src, move |c| c.policy(Policy::rules(policy)).cwd(cwd));
+    let r = run_with(src, move |c| c.policy(policy).cwd(cwd));
     assert_eq!(
         r.ok_stdout(),
         "[\"ok\", \"permission_denied\", \"permission_denied\", \"permission_denied\"]\n\
@@ -137,7 +137,7 @@ fn open_files_stay_the_files_the_policy_checked() {
     dir.write("allowed/data.txt", "allowed data\n");
     dir.write("secret/data.txt", "secret data\n");
     dir.write("sync/.keep", "");
-    let policy = RulePolicy::new()
+    let policy = RulePolicy::standard()
         .allow_write(dir.path().join("allowed"))
         .allow_write(dir.path().join("sync"))
         .allow_read(dir.path().join("swapped"));
@@ -157,7 +157,7 @@ f.write_str("still the allowed file\n")?
 print(fs.open("swapped/data.txt").unwrap_err().kind)
 "#;
     let out = MemorySink::new();
-    let config = Config::new().policy(Policy::rules(policy)).cwd(&root).stdout(out.clone());
+    let config = Config::new().policy(policy).cwd(&root).stdout(out.clone());
     let main = dir.write("main.sand", src);
     let mut engine = Engine::new(config).unwrap();
     let handle = std::thread::spawn(move || rt().block_on(engine.run_file(&main)));
@@ -198,7 +198,7 @@ print(g.read_line().unwrap_err().kind)
 "#;
     let cwd = dir.path().to_path_buf();
     let limits = Limits { max_memory: Some(8 << 20), ..Limits::default() };
-    let r = run_with(src, move |c| c.policy(Policy::allow_all()).limits(limits).cwd(cwd));
+    let r = run_with(src, move |c| c.policy(RulePolicy::allow_all()).limits(limits).cwd(cwd));
     assert_eq!(r.ok_stdout(), "limit\ntrue\nlimit\n");
 }
 
@@ -247,7 +247,7 @@ print(http.get("{base}/big").unwrap_err().kind)
     );
     let cwd = dir.path().to_path_buf();
     let limits = Limits { max_memory: Some(2 << 20), ..Limits::default() };
-    let r = run_with(&src, move |c| c.policy(Policy::allow_all()).limits(limits).cwd(cwd));
+    let r = run_with(&src, move |c| c.policy(RulePolicy::allow_all()).limits(limits).cwd(cwd));
     assert_eq!(r.ok_stdout(), format!("200\none\ntwo\nthree\n100000\n{0}\n{0}\nlimit\n", 3 << 20));
 }
 
@@ -295,7 +295,7 @@ for _ in 0..2 {
 }
 "#;
     let limits = Limits { max_wall_time: Some(Duration::from_secs(20)), ..Limits::default() };
-    let mut engine = Engine::new(Config::new().policy(Policy::allow_all()).limits(limits).stdout(out.clone())).unwrap();
+    let mut engine = Engine::new(Config::new().policy(RulePolicy::allow_all()).limits(limits).stdout(out.clone())).unwrap();
     let handle = std::thread::spawn(move || rt().block_on(engine.run_source("server.sand", src)));
     let start = Instant::now();
     let addr = loop {
@@ -338,7 +338,7 @@ use req = server.accept()?
 req.respond(200, b"served")?
 "#;
     let limits = Limits { max_open_resources: 20, max_wall_time: Some(Duration::from_secs(20)), ..Limits::default() };
-    let mut engine = Engine::new(Config::new().policy(Policy::allow_all()).limits(limits).stdout(out.clone())).unwrap();
+    let mut engine = Engine::new(Config::new().policy(RulePolicy::allow_all()).limits(limits).stdout(out.clone())).unwrap();
     let handle = std::thread::spawn(move || rt().block_on(engine.run_source("server.sand", src)));
     let start = Instant::now();
     let addr = loop {
@@ -391,13 +391,13 @@ fn removing_a_tree_checks_each_entry() {
             false
         }
     }
-    let policy = Policy::custom(Unscanned(move |cap: &sandlang::Capability| match cap {
+    let policy = Unscanned(move |cap: &sandlang::Capability| match cap {
         sandlang::Capability::FsWrite(p) | sandlang::Capability::FsRead(p) => {
             log.lock().unwrap().push(p.strip_prefix(&base).unwrap_or(p).display().to_string());
             if p.ends_with("keep.txt") { sandlang::Decision::Deny } else { sandlang::Decision::Allow }
         }
         _ => sandlang::Decision::Allow,
-    }));
+    });
     let src = r#"
 import fs
 let e = fs.remove_dir("tree", recursive: true).unwrap_err()
@@ -405,7 +405,7 @@ print(e.kind)
 print(e.message)
 "#;
     let cwd = root.clone();
-    let r = run_with(src, move |c| c.policy(policy).cwd(cwd));
+    let r = run_with(src, move |c| c.custom_policy(policy).cwd(cwd));
     assert_eq!(r.ok_stdout(), "permission_denied\npermission denied: write tree/sub/deep/keep.txt\n");
     assert!(root.join("tree/sub/deep/keep.txt").exists());
     let asked = asked.lock().unwrap().clone();
@@ -431,7 +431,7 @@ fn removing_a_tree_removes_names_that_are_not_utf8() {
     }
     let cwd = dir.path().to_path_buf();
     let r = run_with("import fs\nfs.remove_dir(\"tree\", recursive: true)?\nprint(fs.exists(\"tree\")?)", move |c| {
-        c.policy(Policy::allow_all()).cwd(cwd)
+        c.policy(RulePolicy::allow_all()).cwd(cwd)
     });
     assert_eq!(r.ok_stdout(), "false\n");
 }
@@ -469,7 +469,7 @@ print(f.read(1048576)?)
 print(f.read(1048576)?)
 "#;
     let limits = Limits { max_memory: Some(1 << 20), ..Limits::default() };
-    let r = run_with(src, move |c| c.policy(Policy::allow_all()).limits(limits));
+    let r = run_with(src, move |c| c.policy(RulePolicy::allow_all()).limits(limits));
     assert_eq!(r.ok_stdout(), "b\"abc\"\nb\"\"\n");
 }
 
@@ -479,7 +479,7 @@ fn server_script(
     limits: Limits,
 ) -> (String, std::thread::JoinHandle<Result<sandlang::Outcome, sandlang::Error>>, MemorySink) {
     let out = MemorySink::new();
-    let mut engine = Engine::new(Config::new().policy(Policy::allow_all()).limits(limits).stdout(out.clone())).unwrap();
+    let mut engine = Engine::new(Config::new().policy(RulePolicy::allow_all()).limits(limits).stdout(out.clone())).unwrap();
     let handle = std::thread::spawn(move || rt().block_on(engine.run_source("server.sand", src)));
     let start = Instant::now();
     let addr = loop {
