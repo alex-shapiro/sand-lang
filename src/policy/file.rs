@@ -458,7 +458,7 @@ impl Context<'_> {
                     "listen" => RuleKind::Listen(ListenPattern::parse(&word.text()).ok_or_else(|| {
                         (item.column, format!("invalid listen pattern `{}` (expected ip:port, ip, localhost, *:port or *)", word.text()))
                     })?),
-                    _ => RuleKind::Env(NamePattern::from_tokens(&word.tokens())),
+                    _ => RuleKind::Env(NamePattern::from_tokens(&word.tokens()).map_err(|m| (item.column, m))?),
                 };
                 rules.push(file_rule(decision, kind, origin));
             }
@@ -1011,6 +1011,13 @@ mod tests {
             let env = |name: &str| decide(&p, Capability::Env(name.into()));
             assert_eq!((env(name), env("AWS_SECRET_ACCESS_KEY"), env("*")), (Allow, Prompt, Prompt), "{name}");
         }
+    }
+
+    #[test]
+    fn double_stars_are_not_name_wildcards() {
+        let message = "`**` matches paths: in a name, `*` matches any characters (e.g. `AWS_*`)";
+        assert_eq!(errors("deny env AWS_**\nallow env **"), [format!("1:10: {message}"), format!("2:11: {message}")]);
+        assert_eq!(decide(&parse("deny env \"AWS_**\""), Capability::Env("AWS_**".into())), Deny);
     }
 
     #[test]

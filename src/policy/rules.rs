@@ -66,19 +66,24 @@ pub(crate) enum NamePattern {
 }
 
 impl NamePattern {
-    /// Parses a name in which every `*` is a wildcard.
+    /// Parses a name in which every `*` is a wildcard. A name with `**` is
+    /// literal.
     pub(crate) fn parse(name: &str) -> NamePattern {
         NamePattern::from_tokens(&name.chars().map(|c| (c, c == '*')).collect::<Vec<_>>())
+            .unwrap_or_else(|_| NamePattern::Exact(name.to_string()))
     }
 
     /// Parses a name from policy file text: only wildcard tokens (unquoted
     /// `*`) match other characters.
-    pub(crate) fn from_tokens(text: &[Tok]) -> NamePattern {
-        match Seg::parse(text) {
-            Ok(Seg::Glob(g)) => NamePattern::Glob(g),
-            Ok(Seg::Star | Seg::GlobStar) => NamePattern::Any,
-            _ => NamePattern::Exact(text.iter().map(|t| t.0).collect()),
+    pub(crate) fn from_tokens(text: &[Tok]) -> Result<NamePattern, String> {
+        if text.windows(2).any(|w| w[0].1 && w[1].1) {
+            return Err("`**` matches paths: in a name, `*` matches any characters (e.g. `AWS_*`)".into());
         }
+        Ok(match Seg::parse(text)? {
+            Seg::Lit(s) => NamePattern::Exact(s.into()),
+            Seg::Glob(g) => NamePattern::Glob(g),
+            Seg::Star | Seg::GlobStar => NamePattern::Any,
+        })
     }
 }
 
