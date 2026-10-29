@@ -42,7 +42,7 @@ Failed runs return a `sandlang::Error`:
 
 ## Configuration
 
-`Config::new()` uses the policy `RulePolicy::standard()`, which allows only writes to `stdout` and `stderr`. The engine denies every other request, or asks the prompter about it if you configure one. Use builder methods on `Config` to configure policies, limits, virtual files, and streams:
+`Config::new()` uses `RulePolicy::standard()`, which allows only writes to `stdout` and `stderr`. All other capabilities evaluate to `prompt` and are denied unless you configure a prompter. Use builder methods on `Config` to configure policies, limits, virtual files, and streams:
 
 ```rust
 # #[tokio::main(flavor = "current_thread")]
@@ -80,7 +80,7 @@ let report = files.read("/out/report.txt")?;
 # }
 ```
 
-- **Policy.** `RulePolicy` has an `allow_`, `deny_`, and `prompt_` builder method for each kind of rule (`allow_read`, `deny_net`, `prompt_write`, and others). `allow_net` and `allow_http` take the rest of a policy file rule, such as `"plaintext localhost:8080"`. `RulePolicy::default()` has no rules, `RulePolicy::standard()` allows `stdout` and `stderr`, and `RulePolicy::allow_all()` allows every capability: use it only for trusted scripts. `user_rules.with_defaults(host_rules)` adds the host's rules as default rules, which decide only the requests that no user rule matches. `Config::custom_policy` replaces the rules with a host-defined `CustomPolicy`.
+- **Policy.** `RulePolicy` provides `allow_`, `deny_`, and `prompt_` builder methods for each capability kind (`allow_read`, `deny_net`, `prompt_write`, and others). `allow_net` and `allow_http` accept policy rule arguments such as `"plaintext localhost:8080"`. `RulePolicy::default()` is empty, `RulePolicy::standard()` allows `stdout` and `stderr`, and `RulePolicy::allow_all()` allows all capabilities (for trusted scripts only). `user_rules.with_defaults(host_rules)` appends fallback rules that apply only if a request does not match any rule in `user_rules`. `Config::custom_policy` replaces rule evaluation with a host-defined `CustomPolicy`.
 - **Limits.** `Limits` configures every resource bound described in [Sandbox and policies](/guide/sandbox/).
 - **Virtual file system.** `Config::memory_fs` replaces host disk access with an in-memory `MemFs`. Clones of a `MemFs` share the same underlying storage so the host can populate input files before a run and read output files afterward.
 - **Streams.** `Config::stdout` and `Config::stderr` redirect script output to a `MemorySink` or custom sink. `Config::stdin_bytes` supplies fixed input bytes.
@@ -102,9 +102,9 @@ let config = Config::new().policy(file.rules.with_defaults(RulePolicy::standard(
 # }
 ```
 
-The second argument is the base directory for `./` paths, and the third argument is the optional home directory for `~/` paths. A policy file's rules are the whole policy. To let scripts print, add `RulePolicy::standard()` as default rules: they decide only what no rule of the file matches, so a `prompt stdout` in the file still asks.
+The second argument is the base directory for `./` paths, and the third argument is the optional home directory for `~/` paths. Appending `RulePolicy::standard()` via `with_defaults` allows `stdout` and `stderr` unless a rule in the policy file (such as `prompt stdout` or `deny stdout`) matches them.
 
-To handle `prompt` decisions, pass an async callback to `Config::prompter` that accepts a `Capability` and returns a `PromptAnswer`. A request that no rule matches also gets a `prompt` decision. If a prompter is not configured, the engine denies these requests.
+To handle `prompt` decisions, pass an async callback to `Config::prompter` that accepts a `Capability` and returns a `PromptAnswer`. If a prompter is not configured, the engine denies `prompt` decisions.
 
 ## Native modules
 

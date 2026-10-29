@@ -23,9 +23,7 @@ pub(crate) const WRITE: u8 = 2;
 pub(crate) const IMPORT: u8 = 4;
 
 impl Access {
-    /// The operations a rule for this access decides: an `allow` rule also
-    /// allows less (writing implies reading), a `deny` or `prompt` rule also
-    /// restricts more (reading guards writing and importing).
+    /// Bitmask of file operations governed by a rule with this access mode and decision.
     pub(crate) fn mask(self, decision: Decision) -> u8 {
         match (self, decision == Decision::Allow) {
             (Access::Read, true) => READ,
@@ -44,12 +42,10 @@ pub(crate) struct PathPattern {
 }
 
 impl PathPattern {
-    /// The pattern of every path, on every root.
     pub(crate) fn everything() -> PathPattern {
         PathPattern { prefix: PathBuf::new(), rest: vec![] }
     }
 
-    /// The pattern's segments, with its prefix normalized by `normalize`.
     pub(crate) fn segments(&self, normalize: impl FnOnce(&Path) -> PathBuf) -> Vec<Seg> {
         if self.prefix.as_os_str().is_empty() {
             return self.rest.clone();
@@ -66,18 +62,11 @@ pub(crate) enum NamePattern {
 }
 
 impl NamePattern {
-    /// Parses a name in which every `*` is a wildcard.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the name has `**`.
     pub(crate) fn parse(name: &str) -> NamePattern {
         NamePattern::from_tokens(&name.chars().map(|c| (c, c == '*')).collect::<Vec<_>>())
             .unwrap_or_else(|e| panic!("invalid name pattern {name:?}: {e}"))
     }
 
-    /// Parses a name from policy file text: only wildcard tokens (unquoted
-    /// `*`) match other characters.
     pub(crate) fn from_tokens(text: &[Tok]) -> Result<NamePattern, String> {
         if text.windows(2).any(|w| w[0].1 && w[1].1) {
             return Err("`**` matches paths: in a name, `*` matches any characters (e.g. `AWS_*`)".into());
@@ -91,8 +80,6 @@ impl NamePattern {
 }
 
 bitflags::bitflags! {
-    /// The transports that a `net` or `http` rule matches: TLS, plaintext,
-    /// or both ([`Transports::default_for`] a rule that names none).
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub(crate) struct Transports: u8 {
         const TLS = 1;
@@ -101,20 +88,17 @@ bitflags::bitflags! {
 }
 
 impl Transports {
-    /// The transport of a connection that uses TLS (`tls`) or not.
     pub(crate) fn of(tls: bool) -> Transports {
         if tls { Transports::TLS } else { Transports::PLAINTEXT }
     }
 
-    /// The transports of a rule with `decision` that names none: an allow
-    /// rule matches TLS only, a deny or prompt rule matches both, as it
-    /// matches every form of its address.
+    /// Default transport mask if a rule omits transport keywords: `TLS` for
+    /// `Allow`, and `TLS | PLAINTEXT` for `Deny` or `Prompt`.
     pub(crate) fn default_for(decision: Decision) -> Transports {
         if decision == Decision::Allow { Transports::TLS } else { Transports::all() }
     }
 }
 
-/// Whether the connection that `cap` (`Net` or `Http`) asks for uses TLS.
 pub(crate) fn uses_tls(cap: &Capability) -> bool {
     match cap {
         Capability::Net { tls, .. } => *tls,
@@ -134,7 +118,6 @@ pub(crate) enum RuleKind {
     Stdout,
     Stderr,
     TimeZone,
-    /// A custom capability's name (`None`: any name) and detail (`None`: any detail).
     Custom(Option<String>, Option<String>),
 }
 
@@ -176,12 +159,8 @@ pub(crate) enum Connection {
 pub(crate) struct Rule {
     pub decision: Decision,
     pub kind: RuleKind,
-    /// Where a policy file gives the rule.
     pub origin: Option<Origin>,
-    /// `0` for a rule, `n + 1` for a default rule of a policy whose rules
-    /// have at most tier `n` ([`RulePolicy::with_defaults`]). A rule of a
-    /// higher tier decides only the requests that no rule of a lower tier
-    /// matches.
+    /// Rule tier (`0` for primary rules, or higher for fallback rules added via [`RulePolicy::with_defaults`]).
     pub tier: u32,
 }
 
@@ -190,9 +169,7 @@ impl Rule {
         Rule { decision, kind, origin: None, tier: 0 }
     }
 
-    /// Whether the rule compares names exactly. Allow rules do; deny and
-    /// prompt rules match every spelling of their names and every
-    /// representation of their addresses.
+    /// Returns `true` if the rule matches only exact, case-sensitive names and canonical IP representations.
     pub(crate) fn exact(&self) -> bool {
         self.decision == Decision::Allow
     }
@@ -205,21 +182,17 @@ pub(crate) struct Origin {
     pub text: String,
 }
 
-/// A rule-based policy: the most specific rule that matches a request
-/// decides it. Of two rules with equal specificity, `deny` wins over
-/// `allow`, and `allow` wins over `prompt`. A request that no rule matches
-/// gets `Prompt`: the prompter asks the user, or, without a prompter, the
-/// engine denies the request. Default rules ([`RulePolicy::with_defaults`])
-/// decide only the requests that no other rule matches.
+/// A rule-based capability policy.
 ///
-/// The display of a policy lists its rules as policy file text, the default
-/// rules last.
+/// The most specific matching rule decides each request. On a specificity tie,
+/// `deny` overrides `allow`, and `allow` overrides `prompt`. If a request does
+/// not match any rule, [`RulePolicy::check`] returns [`Decision::Prompt`].
 #[derive(Clone, Default)]
 pub struct RulePolicy {
     rules: Vec<Rule>,
     host_files: OnceLock<Arc<FileIndex>>,
     memory_files: OnceLock<Arc<FileIndex>>,
-    others: OnceLock<Arc<Index>>,
+    non_file_index: OnceLock<Arc<Index>>,
 }
 
 impl fmt::Debug for RulePolicy {
@@ -236,26 +209,21 @@ fn custom(name: &str, detail: Option<&str>) -> RuleKind {
     RuleKind::Custom((name != "*").then(|| name.to_string()), detail.filter(|&d| d != "*").map(String::from))
 }
 
-/// Rule paths are literal prefixes without wildcards; for wildcard patterns,
-/// use [`super::PolicyFile`]. The file rule builders (`allow_read` and the
-/// others) panic if the path is empty.
+/// File rule builder methods (`allow_read`, `deny_read`, etc.) take literal
+/// path prefixes without wildcards and panic if the path is empty. To parse
+/// wildcard patterns, use [`super::PolicyFile`].
 impl RulePolicy {
-    /// Creates a policy without rules, the same as [`RulePolicy::default`]:
-    /// the prompter decides every request.
+    /// Creates an empty policy that returns [`Decision::Prompt`] for every request.
     pub fn new() -> RulePolicy {
         RulePolicy::default()
     }
 
-    /// Creates a policy that allows writing to standard output and standard
-    /// error (`allow stdout`, `allow stderr`).
+    /// Creates a policy that allows `stdout` and `stderr`.
     pub fn standard() -> RulePolicy {
         RulePolicy::new().allow_stdout().allow_stderr()
     }
 
-    /// Creates a policy with a rule that allows each kind of capability:
-    /// all files and imports, network connections with and without TLS,
-    /// listeners, environment variables, the standard streams, the time
-    /// zone, and every custom capability. Use it only for trusted scripts.
+    /// Creates a policy that allows all capabilities. Use this only for trusted scripts.
     pub fn allow_all() -> RulePolicy {
         let rules = [
             RuleKind::Files(Access::Any, PathPattern::everything()),
@@ -272,19 +240,13 @@ impl RulePolicy {
         rules.into_iter().fold(RulePolicy::new(), |p, kind| p.push(Decision::Allow, kind))
     }
 
-    /// Adds the rules of `other` after the rules of this policy. Default
-    /// rules stay default rules.
+    /// Appends the rules of `other` to this policy.
     pub fn extend(mut self, other: RulePolicy) -> RulePolicy {
         self.rules.extend(other.rules);
         self.changed()
     }
 
-    /// Adds every rule of `defaults` as a default rule, which decides only
-    /// the requests that no rule of this policy matches. A host uses it to
-    /// combine the user's rules with its own: with the defaults `allow
-    /// stdin` and `allow **`, the user's `prompt stdin` asks before reading
-    /// standard input, and `prompt write **` asks before every write. The
-    /// default rules of `defaults` stay below its other rules.
+    /// Appends `defaults` as fallback rules that apply only if the rules in `self` do not match a request.
     pub fn with_defaults(mut self, defaults: RulePolicy) -> RulePolicy {
         let below = self.rules.iter().map(|r| r.tier).max().unwrap_or(0) + 1;
         self.rules.extend(defaults.rules.into_iter().map(|r| Rule { tier: r.tier + below, ..r }));
@@ -303,7 +265,7 @@ impl RulePolicy {
     fn changed(mut self) -> Self {
         self.host_files = OnceLock::new();
         self.memory_files = OnceLock::new();
-        self.others = OnceLock::new();
+        self.non_file_index = OnceLock::new();
         self
     }
 
@@ -320,11 +282,6 @@ impl RulePolicy {
         self.push(decision, RuleKind::Files(access, PathPattern { prefix: p.to_path_buf(), rest: vec![] }))
     }
 
-    /// Adds the rules of the policy file line `{verb} {kind} {rest}`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the line is invalid.
     fn parsed(self, verb: &str, kind: &str, rest: &str) -> Self {
         let file = super::PolicyFile::parse(&format!("{verb} {kind} {rest}"), Path::new("/"), None)
             .unwrap_or_else(|e| panic!("invalid {kind} rule {rest:?}: {}", e[0].message));
@@ -339,7 +296,7 @@ impl RulePolicy {
     pub fn deny_read(self, p: impl AsRef<Path>) -> Self {
         self.files_rule(Decision::Deny, Access::Read, p.as_ref())
     }
-    /// Asks before reading, writing, or importing under `p`.
+    /// Prompts before reading, writing, or importing under `p`.
     pub fn prompt_read(self, p: impl AsRef<Path>) -> Self {
         self.files_rule(Decision::Prompt, Access::Read, p.as_ref())
     }
@@ -353,7 +310,7 @@ impl RulePolicy {
     pub fn prompt_write(self, p: impl AsRef<Path>) -> Self {
         self.files_rule(Decision::Prompt, Access::Write, p.as_ref())
     }
-    /// Allows importing the script modules under `p`.
+    /// Allows importing script modules under `p`.
     pub fn allow_import(self, p: impl AsRef<Path>) -> Self {
         self.files_rule(Decision::Allow, Access::Import, p.as_ref())
     }
@@ -363,33 +320,28 @@ impl RulePolicy {
     pub fn prompt_import(self, p: impl AsRef<Path>) -> Self {
         self.files_rule(Decision::Prompt, Access::Import, p.as_ref())
     }
-    /// Allows outgoing connections as the policy file rule `allow net
-    /// {rule}` does: optional transports (`tls`, `plaintext`; TLS only if
-    /// none), then hosts, such as `"api.example.com:443"` or
-    /// `"plaintext localhost:8080"`. A host is a hostname, `*.domain`, `*`,
-    /// an IP address, or a CIDR range, optionally with a `:port` suffix.
+    /// Adds an `allow net` rule with optional transport keywords (`tls`,
+    /// `plaintext`; defaults to `tls`) followed by host patterns (such as
+    /// `"api.example.com:443"` or `"plaintext localhost:8080"`).
     ///
     /// # Panics
     ///
-    /// Panics if `rule` is invalid; use [`super::check_net_pattern`] to
-    /// validate a host pattern.
+    /// Panics if `rule` is invalid. Use [`super::check_net_pattern`] to
+    /// validate a host pattern beforehand.
     pub fn allow_net(self, rule: &str) -> Self {
         self.parsed("allow", "net", rule)
     }
-    /// Denies outgoing connections, over TLS and plaintext unless `rule`
-    /// names a transport; see [`RulePolicy::allow_net`].
+    /// Adds a `deny net` rule (defaults to both `tls` and `plaintext`); see [`RulePolicy::allow_net`].
     pub fn deny_net(self, rule: &str) -> Self {
         self.parsed("deny", "net", rule)
     }
-    /// Asks before connecting, over TLS and plaintext unless `rule` names a
-    /// transport; see [`RulePolicy::allow_net`].
+    /// Adds a `prompt net` rule (defaults to both `tls` and `plaintext`); see [`RulePolicy::allow_net`].
     pub fn prompt_net(self, rule: &str) -> Self {
         self.parsed("prompt", "net", rule)
     }
-    /// Allows HTTP requests as the policy file rule `allow http {rule}`
-    /// does: optional transports and methods, then URL patterns, such as
-    /// `"GET POST api.example.com/v1/**"` or `"plaintext localhost:8080"`.
-    /// Without transports, the rule matches TLS only.
+    /// Adds an `allow http` rule with optional transport keywords (`tls`,
+    /// `plaintext`; defaults to `tls`), optional HTTP methods, and URL
+    /// patterns (such as `"GET POST api.example.com/v1/**"`).
     ///
     /// # Panics
     ///
@@ -397,20 +349,16 @@ impl RulePolicy {
     pub fn allow_http(self, rule: &str) -> Self {
         self.parsed("allow", "http", rule)
     }
-    /// Denies HTTP requests, over TLS and plaintext unless `rule` names a
-    /// transport; see [`RulePolicy::allow_http`].
+    /// Adds a `deny http` rule (defaults to both `tls` and `plaintext`); see [`RulePolicy::allow_http`].
     pub fn deny_http(self, rule: &str) -> Self {
         self.parsed("deny", "http", rule)
     }
-    /// Asks before HTTP requests, over TLS and plaintext unless `rule`
-    /// names a transport; see [`RulePolicy::allow_http`].
+    /// Adds a `prompt http` rule (defaults to both `tls` and `plaintext`); see [`RulePolicy::allow_http`].
     pub fn prompt_http(self, rule: &str) -> Self {
         self.parsed("prompt", "http", rule)
     }
-    /// Allows binding a listener matching `pattern`: `ip:port`, `[ipv6]:port`,
-    /// `ip`, `localhost`, `*:port`, or `*`. Host `*` matches any address, port
-    /// `*` matches any port, and port `0` matches only an ephemeral port
-    /// request.
+    /// Allows binding a listener matching `pattern` (`ip:port`, `[ipv6]:port`,
+    /// `ip`, `localhost`, `*:port`, or `*`).
     ///
     /// # Panics
     ///
@@ -426,7 +374,7 @@ impl RulePolicy {
     pub fn deny_listen(self, pattern: &str) -> Self {
         self.push(Decision::Deny, RuleKind::Listen(listen_pattern(pattern)))
     }
-    /// Asks before binding a listener matching `pattern`; see [`RulePolicy::allow_listen`].
+    /// Prompts before binding a listener matching `pattern`; see [`RulePolicy::allow_listen`].
     ///
     /// # Panics
     ///
@@ -434,23 +382,20 @@ impl RulePolicy {
     pub fn prompt_listen(self, pattern: &str) -> Self {
         self.push(Decision::Prompt, RuleKind::Listen(listen_pattern(pattern)))
     }
-    /// Allows reading environment variables matching a name, a `*` pattern
-    /// such as `AWS_*`, or `*` for all variables.
+    /// Allows reading environment variables matching an exact name, a `*`
+    /// glob pattern (such as `AWS_*`), or `*` for all variables.
     ///
     /// # Panics
     ///
-    /// Panics if `name` has `**`.
+    /// Panics if `name` contains `**`.
     pub fn allow_env(self, name: &str) -> Self {
         self.push(Decision::Allow, RuleKind::Env(NamePattern::parse(name)))
     }
-    /// Denies reading matching environment variables. Listing all variables
-    /// (`Env("*")`) gets the strictest decision of any one variable, so it is
-    /// denied if a variable is denied.
+    /// Denies reading matching environment variables; see [`RulePolicy::allow_env`].
     pub fn deny_env(self, name: &str) -> Self {
         self.push(Decision::Deny, RuleKind::Env(NamePattern::parse(name)))
     }
-    /// Asks before reading matching environment variables. Listing all
-    /// variables asks if a variable asks and none is denied.
+    /// Prompts before reading matching environment variables; see [`RulePolicy::allow_env`].
     pub fn prompt_env(self, name: &str) -> Self {
         self.push(Decision::Prompt, RuleKind::Env(NamePattern::parse(name)))
     }
@@ -490,9 +435,8 @@ impl RulePolicy {
     pub fn prompt_timezone(self) -> Self {
         self.push(Decision::Prompt, RuleKind::TimeZone)
     }
-    /// Allows a custom capability: `name` `"*"` matches every name, and
-    /// `detail` `None` or `Some("*")` matches every detail, as `allow custom
-    /// NAME *` in a policy file does.
+    /// Allows a custom capability. `"*"` for `name` matches any capability
+    /// name, and `None` or `Some("*")` for `detail` matches any detail.
     pub fn allow_custom(self, name: &str, detail: Option<&str>) -> Self {
         self.push(Decision::Allow, custom(name, detail))
     }
@@ -503,30 +447,23 @@ impl RulePolicy {
         self.push(Decision::Prompt, custom(name, detail))
     }
 
-    /// Decides `cap`: `Prompt` if no rule matches it. A file capability's
-    /// path is first normalized with [`super::normalize_path`].
+    /// Evaluates `cap`, normalizing file paths with [`super::normalize_path`].
     pub fn check(&self, cap: &Capability) -> Decision {
         self.check_in(cap, PathSpace::Host)
     }
 
-    /// Like [`RulePolicy::check`] for a capability whose path (`FsRead`,
-    /// `FsWrite`, `Import`) the caller already normalized with
-    /// [`super::normalize_path`]: skips normalizing it again, which costs a
-    /// `realpath`.
+    /// Evaluates `cap` if its file path is already normalized with [`super::normalize_path`].
     pub fn check_normalized(&self, cap: &Capability) -> Decision {
         self.check_normalized_in(cap, PathSpace::Host)
     }
 
-    /// Like [`RulePolicy::check`] for an operation on a directory entry
-    /// itself (removing or renaming it): a final symlink in an `FsRead` or
-    /// `FsWrite` path is the entry and is not resolved to its target.
+    /// Evaluates `cap` for a directory entry operation (such as removal or
+    /// rename) without following a final symlink.
     pub fn check_entry(&self, cap: &Capability) -> Decision {
         self.check_entry_in(cap, PathSpace::Host)
     }
 
-    /// Whether a deny or prompt rule may match `path` or a path below it. If
-    /// one may, the engine scans the tree at `path` for protected entries
-    /// before it moves or removes the tree.
+    /// Returns `true` if a deny or prompt rule can match `path` or a descendant.
     pub fn denies_under(&self, path: &Path) -> bool {
         self.denies_under_normalized_in(&entry_path(path, PathSpace::Host), PathSpace::Host)
     }
@@ -555,7 +492,7 @@ impl RulePolicy {
         if space == PathSpace::Host {
             let mut t = crate::files::Fs::Host.target(&lexical(p), mode);
             if !t.exact() {
-                if let Some(d) = self.spelling_free_decision(&with(t.path.clone()), space) {
+                if let Some(d) = self.unnormalized_name_decision(&with(t.path.clone()), space) {
                     return d;
                 }
                 t.fix_spelling();
@@ -570,9 +507,6 @@ impl RulePolicy {
         self.check_normalized_in(&with(normal), space)
     }
 
-    /// Decides `cap`: `Prompt` if no rule matches it. A `NetAddr` capability
-    /// is decided as an address that a `Net` request to its host resolved
-    /// to; see [`RulePolicy::check_resolved`].
     pub(crate) fn check_normalized_in(&self, cap: &Capability, space: PathSpace) -> Decision {
         if let Capability::NetAddr { host, addr, tls } = cap {
             return self.check_resolved(&Capability::Net { host: host.clone(), port: addr.port(), tls: *tls }, *addr);
@@ -580,64 +514,50 @@ impl RulePolicy {
         self.verdict(cap, space, &[]).map_or(Decision::Prompt, |(d, _)| d)
     }
 
-    /// Decides connecting to `addr`, an address that the host of `request`
-    /// (a `Net` or `Http` request that the policy did not deny) resolved to.
-    /// The engine makes this check before each connection, with the
-    /// script's request. Returns `Allow` or `Deny`, never `Prompt`.
+    /// Evaluates whether a connection to `addr` (resolved from an allowed
+    /// `Net` or `Http` `request`) is permitted. Returns [`Decision::Allow`]
+    /// or [`Decision::Deny`].
     ///
-    /// The rule that allowed `request`, or prompted for it, competes with the
-    /// address rules that match `addr` and the request's transport, by the
-    /// specificity of their hosts: a host name ranks as a single address, a
-    /// pattern of names under `localhost` above every range, and other
-    /// domain patterns and `*` below every address rule. If that rule wins, or if no address rule
-    /// matches, the connection is allowed. Otherwise the winning address
-    /// rule decides, and a `prompt` rule denies, because the request was
-    /// decided already.
+    /// The rule that matched `request` competes by host specificity against
+    /// IP and CIDR rules that match `addr`: an exact hostname ranks equal to
+    /// a single IP address, `*.localhost` ranks above CIDR ranges, and other
+    /// wildcard domain patterns (`*.domain` and `*`) rank below all IP and
+    /// CIDR rules. If the winning IP rule is a `deny` or `prompt` rule, this
+    /// method returns [`Decision::Deny`].
     pub fn check_resolved(&self, request: &Capability, addr: std::net::SocketAddr) -> Decision {
         if self.resolved_verdict(request, addr).is_ok() { Decision::Allow } else { Decision::Deny }
     }
 
-    /// Like [`RulePolicy::check_resolved`]. On a denial, returns the index
-    /// of the deciding rule, if a rule decides.
     pub(crate) fn resolved_verdict(&self, request: &Capability, addr: std::net::SocketAddr) -> Result<(), Option<usize>> {
         let (Capability::Net { host, .. } | Capability::Http { host, .. }) = request else { return Ok(()) };
         let ip = addr.ip().to_canonical();
-        // An IP literal was already checked as `Net` and is resolved only to itself.
         if let Some(literal) = parse_ip(host) {
             return if literal == ip { Ok(()) } else { Err(None) };
         }
-        // The address rules: for an HTTP request, the net and http rules for
-        // addresses that match it, and for a raw connection the net rules.
-        // Each reading of an HTTP path that a server may split at encoded
-        // separators is decided as a whole, and both must allow.
-        let index = self.others();
+        let index = self.non_file_index();
         if let Capability::Http { host, port, path, .. } = request {
             let dest = Dest::new(host, *port);
             let (names, alt) = url_segments(path);
             return std::iter::once(names).chain(alt).try_for_each(|names| {
-                let decider = self.http_reading(request, &names, &[], &|f| index.http.find(&dest, f));
-                let address = self.http_reading(request, &names, &[], &|f| index.http.find_ip(ip, addr.port(), f));
+                let decider = self.check_http_segments(request, &names, &[], &|f| index.http.find(&dest, f));
+                let address = self.check_http_segments(request, &names, &[], &|f| index.http.find_ip(ip, addr.port(), f));
                 self.resolve(decider, address)
             });
         }
         let transport = Transports::of(uses_tls(request));
         let mut best = Best::new(self, &[]);
         index.resolved.find_ip(ip, addr.port(), |is_alt, e| {
-            if applies(e.decision, is_alt) && e.transports.contains(transport) {
+            if matches_address_form(e.decision, is_alt) && e.transports.contains(transport) {
                 best.offer(e.rank.spec(0), e.decision, e.rule);
             }
         });
         self.resolve(self.verdict(request, PathSpace::Host, &[]), best.verdict())
     }
 
-    /// Decides a resolved address by the verdict of the request (`decider`)
-    /// and the verdict of the address rules (`address`); see
-    /// [`RulePolicy::check_resolved`].
     fn resolve(&self, decider: Option<(Decision, usize)>, address: Option<(Decision, usize)>) -> Result<(), Option<usize>> {
         let Some((decision, rule)) = address else { return Ok(()) };
         if let Some((d, decider)) = decider.filter(|&(d, _)| d != Decision::Deny) {
-            // By host specificity alone, whatever the tiers: a domain pattern
-            // does not allow addresses that a default rule denies.
+            // Compare by host specificity across all tiers so a wildcard domain rule cannot bypass a default IP deny rule.
             let key = |i: usize, d: Decision| resolution_key(&self.rules[i].kind, d);
             if key(decider, d) > key(rule, decision) {
                 return Ok(());
@@ -647,7 +567,7 @@ impl RulePolicy {
     }
 
     pub(crate) fn denies_under_normalized_in(&self, path: &Path, space: PathSpace) -> bool {
-        let index = self.files(space);
+        let index = self.file_index(space);
         !index.strict.is_empty() && index.strict.any_below(&refs(&folded(&path_segments(path))), READ | WRITE)
     }
 
@@ -659,24 +579,22 @@ impl RulePolicy {
         })
     }
 
-    pub(crate) fn decision_for_any_spelling(&self, cap: &Capability, space: PathSpace) -> Option<Decision> {
-        self.spelling_free_decision(cap, space).filter(|&d| d != Decision::Prompt)
+    pub(crate) fn case_insensitive_decision(&self, cap: &Capability, space: PathSpace) -> Option<Decision> {
+        self.unnormalized_name_decision(cap, space).filter(|&d| d != Decision::Prompt)
     }
 
-    fn spelling_free_decision(&self, cap: &Capability, space: PathSpace) -> Option<Decision> {
+    fn unnormalized_name_decision(&self, cap: &Capability, space: PathSpace) -> Option<Decision> {
         let (Capability::FsRead(p) | Capability::FsWrite(p) | Capability::Import(p)) = cap else { return None };
-        let index = self.files(space);
+        let index = self.file_index(space);
         if index.allow.matches_last(&refs(&index.allow_input(&path_segments(p)))) {
             return None;
         }
         Some(self.check_normalized_in(cap, space))
     }
 
-    /// The decision of the most specific rule matching `cap` (except the
-    /// rules in `exclude`), and its index.
     pub(crate) fn verdict(&self, cap: &Capability, space: PathSpace, exclude: &[usize]) -> Option<(Decision, usize)> {
         let mut best = Best::new(self, exclude);
-        let index = self.others();
+        let index = self.non_file_index();
         match cap {
             Capability::FsRead(p) => self.file_verdict(p, READ, space, &mut best),
             Capability::FsWrite(p) => self.file_verdict(p, WRITE, space, &mut best),
@@ -685,7 +603,7 @@ impl RulePolicy {
             Capability::NetAddr { .. } => {}
             Capability::Http { host, port, .. } => {
                 let dest = Dest::new(host, *port);
-                return self.http_best(cap, exclude, &|f| index.http.find(&dest, f));
+                return self.check_http(cap, exclude, &|f| index.http.find(&dest, f));
             }
             Capability::NetListen(addr) => {
                 for &(ref pattern, d, rule) in &index.listen {
@@ -695,10 +613,7 @@ impl RulePolicy {
                 }
             }
             Capability::Env(name) if name == "*" => {
-                // The listing holds every variable, so it gets the strictest
-                // decision of any one. Each rule's names have a variable that
-                // only the rules covering them all match: the exact name, or
-                // the pattern with `*` as a character that no rule has.
+                // Evaluate `Env("*")` against a representative sample for each rule and an unmatched character so the result equals the strictest decision for any variable.
                 let pieces = || index.env.iter().flat_map(|(p, ..)| if let NamePattern::Glob(g) = p { g.pieces() } else { &[] });
                 let used: std::collections::HashSet<char> =
                     index.env_names.keys().map(|n| &**n).chain(pieces().map(|p| &**p)).flat_map(str::chars).collect();
@@ -730,9 +645,8 @@ impl RulePolicy {
         best.verdict()
     }
 
-    /// The most specific rule that matches reading the variable `name`.
     fn env_verdict(&self, name: &str, exclude: &[usize]) -> Option<(Decision, usize)> {
-        let index = self.others();
+        let index = self.non_file_index();
         let mut best = Best::new(self, exclude);
         for &(d, rule) in index.env_names.get(name).into_iter().flatten() {
             best.offer([2, 0, 0, 0], d, rule);
@@ -749,7 +663,7 @@ impl RulePolicy {
     }
 
     fn file_verdict(&self, p: &Path, op: u8, space: PathSpace, best: &mut Best<'_>) {
-        let index = self.files(space);
+        let index = self.file_index(space);
         let mut offer = |e: &FileEntry, depth: usize| {
             if e.mask & op != 0 {
                 best.offer(e.rank.spec(depth), e.decision, e.rule);
@@ -766,27 +680,21 @@ impl RulePolicy {
 
     fn net_verdict(&self, dest: &Dest, tls: bool, best: &mut Best<'_>) {
         let transport = Transports::of(tls);
-        self.others().named.find(dest, |is_alt, e| {
-            if applies(e.decision, is_alt) && e.transports.contains(transport) {
+        self.non_file_index().named.find(dest, |is_alt, e| {
+            if matches_address_form(e.decision, is_alt) && e.transports.contains(transport) {
                 best.offer(e.rank.spec(0), e.decision, e.rule);
             }
         });
     }
 
-    /// The most specific rule that matches the HTTP request `cap` in the
-    /// groups that `find` gives. A path with encoded separators gets the
-    /// stricter decision of its two readings, since a server may split it
-    /// at those separators.
-    fn http_best(&self, cap: &Capability, exclude: &[usize], find: &FindGroups) -> Option<(Decision, usize)> {
+    fn check_http(&self, cap: &Capability, exclude: &[usize], find: &FindGroups) -> Option<(Decision, usize)> {
         let Capability::Http { path, .. } = cap else { return None };
         let (names, alt) = url_segments(path);
-        let verdicts = std::iter::once(names).chain(alt).map(|names| self.http_reading(cap, &names, exclude, find));
+        let verdicts = std::iter::once(names).chain(alt).map(|names| self.check_http_segments(cap, &names, exclude, find));
         verdicts.reduce(|main, alt| if strictness(alt) > strictness(main) { alt } else { main }).flatten()
     }
 
-    /// The most specific rule that matches the HTTP request `cap` with the
-    /// path `names` in the groups that `find` gives.
-    fn http_reading(&self, cap: &Capability, names: &[String], exclude: &[usize], find: &FindGroups) -> Option<(Decision, usize)> {
+    fn check_http_segments(&self, cap: &Capability, names: &[String], exclude: &[usize], find: &FindGroups) -> Option<(Decision, usize)> {
         let Capability::Http { method, .. } = cap else { return None };
         let mut best = Best::new(self, exclude);
         self.http_verdict(find, method, uses_tls(cap), names, &mut best);
@@ -794,7 +702,7 @@ impl RulePolicy {
     }
 
     fn http_verdict(&self, find: &FindGroups, method: &str, tls: bool, names: &[String], best: &mut Best<'_>) {
-        let index = self.others();
+        let index = self.non_file_index();
         if index.groups.is_empty() {
             return;
         }
@@ -809,7 +717,7 @@ impl RulePolicy {
                     best.offer(e.rank.spec(depth), e.decision, e.rule);
                 }
             };
-            if !group.allow.is_empty() && applies(Decision::Allow, is_alt) {
+            if !group.allow.is_empty() && matches_address_form(Decision::Allow, is_alt) {
                 group.allow.matches(&names, &mut offer);
             }
             if !group.strict.is_empty() {
@@ -819,7 +727,7 @@ impl RulePolicy {
         });
     }
 
-    fn files(&self, space: PathSpace) -> &FileIndex {
+    fn file_index(&self, space: PathSpace) -> &FileIndex {
         let cell = match space {
             PathSpace::Host => &self.host_files,
             PathSpace::Memory => &self.memory_files,
@@ -827,13 +735,12 @@ impl RulePolicy {
         cell.get_or_init(|| Arc::new(FileIndex::build(&self.rules, space)))
     }
 
-    fn others(&self) -> &Index {
-        self.others.get_or_init(|| Arc::new(Index::build(&self.rules)))
+    fn non_file_index(&self) -> &Index {
+        self.non_file_index.get_or_init(|| Arc::new(Index::build(&self.rules)))
     }
 }
 
 impl RulePolicy {
-    /// The rule at index `i`, for messages: "the rule `...` (line N)".
     pub(crate) fn describe_rule(&self, i: usize) -> String {
         let rule = &self.rules[i];
         match &rule.origin {
@@ -843,9 +750,6 @@ impl RulePolicy {
     }
 }
 
-/// Lists the rules as policy file text, by tier: the default rules after
-/// the others. The text has no tiers, so it parses to the same rules in one
-/// tier.
 impl fmt::Display for RulePolicy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut rules: Vec<&Rule> = self.rules.iter().collect();
@@ -875,13 +779,6 @@ fn refs<S: AsRef<str>>(names: &[S]) -> Vec<&str> {
     names.iter().map(AsRef::as_ref).collect()
 }
 
-/// The order in which a rule competes with address rules for a resolved
-/// address ([`RulePolicy::check_resolved`]): by the specificity of its host
-/// alone, then by its decision. A host name ranks as a single address and a
-/// pattern of the names under `localhost` as a narrower pattern, since both
-/// name one host. Other domain patterns rank below every address rule, as
-/// `*` does: they name hosts they do not know, so they do not decide the
-/// addresses of those hosts.
 pub(crate) fn resolution_key(kind: &RuleKind, decision: Decision) -> Precedence {
     let host = match kind.http_match() {
         Some(HttpMatch { host: NetPattern { kind: HostKind::Suffix(s), .. }, .. }) if !super::net::is_localhost(s) => 0,
@@ -891,10 +788,7 @@ pub(crate) fn resolution_key(kind: &RuleKind, decision: Decision) -> Precedence 
     precedence([host, 0, 0, 0], decision, usize::MAX)
 }
 
-/// Whether a rule with `decision` applies to a request through another
-/// representation of its address: deny and prompt rules do, allow rules do
-/// not.
-pub(crate) fn applies(decision: Decision, is_alternate_ip: bool) -> bool {
+pub(crate) fn matches_address_form(decision: Decision, is_alternate_ip: bool) -> bool {
     !is_alternate_ip || decision != Decision::Allow
 }
 
@@ -914,7 +808,6 @@ pub(crate) type Spec = [u32; 4];
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Rank {
-    /// The specificity of the rule's host (`0` for file rules).
     pub host: u32,
     pub weight: u32,
     pub methods: bool,
@@ -934,10 +827,7 @@ impl Rank {
     }
 }
 
-/// How strongly a decision holds against an opposite decision of a rule with
-/// equal specificity: `deny` wins over `allow`, which wins over `prompt` (so
-/// a rule saved from a prompt answer decides that prompt).
-pub(crate) fn strength(decision: Decision) -> u8 {
+pub(crate) fn decision_priority(decision: Decision) -> u8 {
     match decision {
         Decision::Deny => 2,
         Decision::Allow => 1,
@@ -945,14 +835,8 @@ pub(crate) fn strength(decision: Decision) -> u8 {
     }
 }
 
-/// Calls its argument with each group of http rules ([`HttpGroup`]) whose
-/// host matches a request, and whether the host matched another form of the
-/// request's address.
 type FindGroups<'a> = dyn Fn(&mut dyn FnMut(bool, &u32)) + 'a;
 
-/// How strict the verdict `v` of a request is: `Allow`, then `Prompt` (and
-/// no matching rule, which prompts), then `Deny`. A prompt rule ranks above
-/// no rule, to name it in messages.
 fn strictness(v: Option<(Decision, usize)>) -> (u8, bool) {
     match v {
         None => (1, false),
@@ -962,14 +846,12 @@ fn strictness(v: Option<(Decision, usize)>) -> (u8, bool) {
     }
 }
 
-/// The order of matching rules: the greatest decides.
 pub(crate) type Precedence = (Spec, u8, std::cmp::Reverse<usize>);
 
 pub(crate) fn precedence(spec: Spec, decision: Decision, rule: usize) -> Precedence {
-    (spec, strength(decision), std::cmp::Reverse(rule))
+    (spec, decision_priority(decision), std::cmp::Reverse(rule))
 }
 
-/// The most specific matching rule of the lowest tier.
 struct Best<'a> {
     exclude: &'a [usize],
     rules: &'a [Rule],
@@ -996,9 +878,7 @@ impl<'a> Best<'a> {
 
 #[derive(Debug)]
 struct FileIndex {
-    /// Allow rules, which compare names exactly.
     allow: Trie<FileEntry>,
-    /// Deny and prompt rules, which compare folded names.
     strict: Trie<FileEntry>,
     caseless: bool,
 }
@@ -1130,9 +1010,7 @@ struct NetEntry {
 
 #[derive(Debug, Default)]
 struct HttpGroup {
-    /// Allow rules, which compare path names exactly.
     allow: Trie<HttpEntry>,
-    /// Deny and prompt rules, which compare folded path names.
     strict: Trie<HttpEntry>,
 }
 
@@ -1244,8 +1122,6 @@ mod props {
     }
 
     proptest! {
-        /// The listing of all variables holds every variable, so no variable
-        /// gets a stricter decision than the listing, whatever the tiers.
         #[test]
         fn the_env_listing_is_as_strict_as_any_variable(
             rules in prop::collection::vec((0..3usize, prop::sample::select(vec!["*", "A*", "AB*", "*_KEY", "A*B", "\"*\"", "HOME", "AWS_KEY", "AB", "*B*"])), 1..6),

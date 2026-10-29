@@ -401,13 +401,9 @@ pub(crate) fn conn_handle(vm: &Vm, c: Val<Conn>) -> Result<ConnHandle, HostError
     c.get(&vm.heap)?.handle().ok_or_else(|| closed().into())
 }
 
-/// Resolves the host of `request` (a `Net` or `Http` request that the
-/// policy allowed) once and returns the addresses the policy allows
-/// ([`Policy::check_resolved`]), so that a name cannot lead to an address the
-/// policy forbids (e.g. through DNS rebinding). `localhost` and the names
-/// under it resolve to the loopback addresses (RFC 6761) without the
-/// resolver. Fails with kind `"permission_denied"` if every address is
-/// denied.
+/// Resolves the host of `request` and returns the addresses that `policy`
+/// allows (`localhost` and its subdomains resolve to loopback addresses
+/// without the system resolver).
 pub(crate) async fn resolve_allowed(
     policy: &Policy,
     network: &dyn Network,
@@ -442,8 +438,6 @@ pub(crate) async fn resolve_allowed(
     }
 }
 
-/// Resolves the host of `request` through `network`, checks each resolved
-/// address against `policy`, and connects to the first allowed address.
 pub(crate) async fn connect_checked(
     policy: &Policy,
     network: &dyn Network,

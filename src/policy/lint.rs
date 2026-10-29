@@ -82,7 +82,9 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
                 let rule = &rules[i];
                 let identical = same[&(rule.decision, &rule.kind)].iter().copied().find(|&c| is_kept(c));
                 let (decision, by, repeat) = match identical {
-                    Some(c) if paths.get(i).is_none_or(|r| paths.resolves_alike(r, &[c], &|j| !is_kept(j))) => (true, vec![c], true),
+                    Some(c) if paths.get(i).is_none_or(|r| paths.preserves_address_resolution(r, &[c], &|j| !is_kept(j))) => {
+                        (true, vec![c], true)
+                    }
                     _ => {
                         let (decision, by) = paths.deciders(paths.get(i)?, &|j| !is_kept(j))?;
                         (decision, by, false)
@@ -117,9 +119,10 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
     let mut bypass_of = |i: usize| {
         let (RuleKind::Http(_, url, transports), false, Some(r)) = (&rules[i].kind, rules[i].exact(), paths.get(i)) else { return None };
         bypass(url.host.clone(), &url.host, *transports).or_else(|| {
-            let denied = [url.host.clone()].into_iter().chain(url.host.reaching_ranges()).chain(url.host.names_under_localhost(false));
+            let denied =
+                [url.host.clone()].into_iter().chain(url.host.alternate_ip_ranges()).chain(url.host.localhost_subdomain_pattern(false));
             let denied = denied.collect::<Vec<_>>();
-            let mut reach = paths.opposed(r, 0).flat_map(|k| match k.scope {
+            let mut reach = paths.opposing_rules(r, 0).flat_map(|k| match k.scope {
                 Scope::Http { host, connections, .. } if connections.contains(&Connection::Named) => {
                     denied.iter().filter_map(|d| host.intersection(d)).collect()
                 }
@@ -159,9 +162,7 @@ struct PathRule<'a> {
     index: usize,
     decision: Decision,
     scope: Scope<'a>,
-    /// The rule's part in deciding resolved addresses (see
-    /// [`super::RulePolicy`]), if it may have one.
-    resolves: Option<Resolves>,
+    address_resolution: Option<AddressResolution>,
     segs: Vec<Seg>,
     folded: Option<Vec<Seg>>,
     prefixes: Vec<u64>,
@@ -169,11 +170,10 @@ struct PathRule<'a> {
     counts: (usize, Option<usize>),
 }
 
-/// What a rule does for a connection to a resolved address: a rule that
-/// allowed a host name (or asked about it) competes with the address rules
-/// that deny or ask about the address.
+/// Role and precedence of a rule during post-DNS address checks (see
+/// [`super::RulePolicy::check_resolved`]).
 #[derive(Clone, Copy)]
-struct Resolves {
+struct AddressResolution {
     role: Role,
     key: Precedence,
     port: Option<u16>,
@@ -186,8 +186,7 @@ enum Role {
     Address,
 }
 
-impl Resolves {
-    /// The lowest key of a rule whose host is as specific as `host`.
+impl AddressResolution {
     fn lowest(host: u32) -> Precedence {
         precedence([host, 0, 0, 0], Decision::Prompt, usize::MAX)
     }
@@ -208,7 +207,7 @@ impl<'a> PathRule<'a> {
                 (scope, http.path.to_vec(), Rank::http(&http))
             }
         };
-        let resolves = match scope {
+        let address_resolution = match scope {
             Scope::Http { host, transports, .. } => {
                 let role = match (&host.kind, rule.decision) {
                     (HostKind::Ip(..), Decision::Deny | Decision::Prompt) => Some(Role::Address),
@@ -216,7 +215,7 @@ impl<'a> PathRule<'a> {
                     _ => Some(Role::Name),
                 };
                 let key = resolution_key(&rule.kind, rule.decision);
-                role.map(|role| Resolves { role, key, port: host.port, transports })
+                role.map(|role| AddressResolution { role, key, port: host.port, transports })
             }
             Scope::Files(_) => None,
         };
@@ -235,7 +234,7 @@ impl<'a> PathRule<'a> {
             index,
             decision: rule.decision,
             scope,
-            resolves,
+            address_resolution,
             prefixes,
             rank,
             counts: name_counts(&raw),
@@ -310,18 +309,18 @@ impl<'a> PathRule<'a> {
         }
     }
 
-    fn may_meet(&self, other: &PathRule, self_below: bool) -> bool {
+    fn overlaps(&self, other: &PathRule, self_below: bool) -> bool {
         let scopes = match (&self.scope, &other.scope) {
             (Scope::Files(_), Scope::Files(_)) => true,
             (Scope::Http { host: a, transports: s, .. }, Scope::Http { host: b, transports: t, .. }) => {
-                a.may_meet(b, self.exact(), other.exact()) && s.intersects(*t)
+                a.overlaps(b, self.exact(), other.exact()) && s.intersects(*t)
             }
             _ => false,
         };
         scopes
             && self
                 .comparable(other)
-                .is_none_or(|(a, b)| path::may_meet(Pattern { segs: a, below: self_below }, Pattern { segs: b, below: true }))
+                .is_none_or(|(a, b)| path::overlaps(Pattern { segs: a, below: self_below }, Pattern { segs: b, below: true }))
     }
 
     fn broader_keys(&self) -> Vec<Key<'a>> {
@@ -332,7 +331,6 @@ impl<'a> PathRule<'a> {
             HostKind::Suffix(s) => (Key::Suffix(s), s.as_str()),
             HostKind::Host(h) => (Key::Name(h), h.as_str()),
         };
-        // Deny and prompt rules for `localhost` also match the names under it.
         let localhost = (name != "localhost" || matches!(own, Key::Suffix(_))) && is_localhost(name);
         [Key::Any, own].into_iter().chain(localhost.then_some(Key::Name("localhost"))).chain(domains_above(name).map(Key::Suffix)).collect()
     }
@@ -346,7 +344,6 @@ impl<'a> PathRule<'a> {
                 [Key::Under("localhost"), Key::Suffix("localhost")].into_iter().chain(self.broader_keys()).collect()
             }
             HostKind::Host(_) => self.broader_keys(),
-            // Deny rules also match alternate IP representations.
             HostKind::Ip(..) => vec![Key::Any, Key::Ips],
         }
     }
@@ -381,9 +378,7 @@ struct PathRules<'a> {
     at: Vec<usize>,
     exact: FxHashMap<u64, Vec<usize>>,
     within: FxHashMap<u64, Vec<usize>>,
-    /// The keys of the rules with each [`Role`] in resolving addresses, in
-    /// increasing order.
-    resolving: [Vec<(Precedence, usize)>; 2],
+    by_resolution_role: [Vec<(Precedence, usize)>; 2],
     hasher: FxBuild,
     #[cfg(test)]
     visits: std::cell::Cell<usize>,
@@ -396,7 +391,7 @@ impl<'a> PathRules<'a> {
             at: vec![usize::MAX; rules.len()],
             exact: Default::default(),
             within: Default::default(),
-            resolving: [Vec::new(), Vec::new()],
+            by_resolution_role: [Vec::new(), Vec::new()],
             hasher: FxBuild::default(),
             #[cfg(test)]
             visits: Default::default(),
@@ -412,8 +407,8 @@ impl<'a> PathRules<'a> {
                 let last = rule.prefixes[rule.prefixes.len() - 1];
                 paths.exact.entry(paths.hasher.hash_one((key, last))).or_default().push(at);
             }
-            if let Some(r) = rule.resolves {
-                paths.resolving[r.role as usize].push((r.key, at));
+            if let Some(r) = rule.address_resolution {
+                paths.by_resolution_role[r.role as usize].push((r.key, at));
             }
             paths.at[index] = at;
             paths.rules.push(rule);
@@ -421,27 +416,26 @@ impl<'a> PathRules<'a> {
         for bucket in paths.exact.values_mut().chain(paths.within.values_mut()) {
             bucket.sort_by_key(|&at| std::cmp::Reverse(paths.rules[at].rank.host));
         }
-        for list in &mut paths.resolving {
+        for list in &mut paths.by_resolution_role {
             list.sort_unstable_by_key(|e| e.0);
         }
         paths
     }
 
-    /// Whether removing `i` leaves the decisions on resolved addresses as
-    /// they are, if `deciders` take its place: no rule of the opposite role
-    /// ranks between them and `i` (see [`Resolves`]).
-    fn resolves_alike(&self, i: &PathRule, deciders: &[usize], excluded: &dyn Fn(usize) -> bool) -> bool {
-        let Some(r) = i.resolves else { return true };
-        let others = &self.resolving[match r.role {
+    /// Returns `true` if removing `i` in favor of `deciders` does not change
+    /// post-DNS address checks.
+    fn preserves_address_resolution(&self, i: &PathRule, deciders: &[usize], excluded: &dyn Fn(usize) -> bool) -> bool {
+        let Some(r) = i.address_resolution else { return true };
+        let others = &self.by_resolution_role[match r.role {
             Role::Name => Role::Address,
             Role::Address => Role::Name,
         } as usize];
         deciders.iter().all(|&j| {
-            let host = self.get(j).and_then(|j| j.resolves).map_or(0, |j| j.key.0[0]);
-            let from = others.partition_point(|e| e.0 < Resolves::lowest(host));
+            let host = self.get(j).and_then(|j| j.address_resolution).map_or(0, |j| j.key.0[0]);
+            let from = others.partition_point(|e| e.0 < AddressResolution::lowest(host));
             others[from..].iter().take_while(|e| e.0 <= r.key).all(|&(_, at)| {
                 let k = &self.rules[at];
-                let Some(kr) = k.resolves else { return true };
+                let Some(kr) = k.address_resolution else { return true };
                 let ports_differ = r.port.is_some() && kr.port.is_some() && r.port != kr.port;
                 excluded(k.index) || k.index == i.index || ports_differ || !r.transports.intersects(kr.transports)
             })
@@ -478,13 +472,13 @@ impl<'a> PathRules<'a> {
         keys.into_iter().flat_map(move |key| i.prefixes.iter().flat_map(move |&h| self.lookup(&self.exact, key, h, 0)))
     }
 
-    fn opposed<'b>(&'b self, i: &'b PathRule<'a>, min_host: u32) -> impl Iterator<Item = &'b PathRule<'a>> {
+    fn opposing_rules<'b>(&'b self, i: &'b PathRule<'a>, min_host: u32) -> impl Iterator<Item = &'b PathRule<'a>> {
         let (&last, above) = i.prefixes.split_last().expect("the empty prefix");
         let found = self.hash_keys(i.related_keys()).into_iter().flat_map(move |key| {
             let above = above.iter().flat_map(move |&h| self.lookup(&self.exact, key, h, min_host));
             above.chain(self.lookup(&self.within, key, last, min_host))
         });
-        found.filter(|k| k.decision != i.decision && i.may_meet(k, k.rank.host < i.rank.host))
+        found.filter(|k| k.decision != i.decision && i.overlaps(k, k.rank.host < i.rank.host))
     }
 
     fn deciders(&self, i: &PathRule<'a>, excluded: &dyn Fn(usize) -> bool) -> Option<(bool, Vec<usize>)> {
@@ -501,8 +495,7 @@ impl<'a> PathRules<'a> {
         deciders.sort_unstable();
         deciders.dedup();
         let same_decision = same_decision?;
-        // A rule that is overridden everywhere decides no request to resolve.
-        if same_decision && !self.resolves_alike(i, &deciders, excluded) {
+        if same_decision && !self.preserves_address_resolution(i, &deciders, excluded) {
             return None;
         }
         Some((same_decision, deciders))
@@ -516,12 +509,12 @@ impl<'a> PathRules<'a> {
         }
         let agree = broader.filter(|j| j.decision == i.decision);
         agree
-            .filter(|j| self.opposed(i, j.rank.host).all(|k| !k.may_decide(op) || never_between(i, j, k)))
+            .filter(|j| self.opposing_rules(i, j.rank.host).all(|k| !k.may_decide(op) || cannot_override_between(i, j, k)))
             .max_by_key(|j| (j.counts.0, j.rank()))
     }
 }
 
-fn never_between(i: &PathRule, j: &PathRule, k: &PathRule) -> bool {
+fn cannot_override_between(i: &PathRule, j: &PathRule, k: &PathRule) -> bool {
     let k_deepest = match (k.counts.1, i.counts.1.filter(|_| k.rank.host >= i.rank.host)) {
         (Some(a), Some(b)) => Some(a.min(b)),
         (a, b) => a.or(b),
@@ -659,7 +652,6 @@ mod tests {
                 "4:18: warning[bypassable-http-deny]: line 3 (`api.example.com`) lets scripts connect to api.example.com:443 and send any request",
             ]
         );
-        // A deny rule for `localhost` also restricts the names under it.
         assert_eq!(
             lint("allow net *.localhost\ndeny http localhost/admin"),
             ["2:11: warning[bypassable-http-deny]: line 1 (`*.localhost`) lets scripts connect to *.localhost:443 and send any request"]
@@ -676,7 +668,6 @@ mod tests {
                 "3:18: warning[bypassable-http-deny]: line 1 (`*`) lets scripts connect to localhost:443 and send any request",
             ]
         );
-        // A raw connection bypasses an http rule only over the transports that the rule restricts.
         assert_eq!(lint("allow net plaintext *\ndeny http tls api.example.com/x"), Vec::<String>::new());
         assert_eq!(
             lint("allow net plaintext *\ndeny http api.example.com/x"),
@@ -812,15 +803,13 @@ mod tests {
                 "6:11: warning[redundant-rule]: line 5 (`10.0.0.0/8`) already allows this",
             ]
         );
-        // An exact host rule also decides the addresses that its name resolves to, which a
-        // domain rule leaves to the address rules.
         assert_eq!(lint("deny net 10.0.0.0/8\nallow net *.example.com\nallow net api.example.com"), none);
         assert_eq!(lint("prompt http 10.0.0.5\nallow http *.example.com\nallow http api.example.com"), none, "an http address rule");
         assert_eq!(lint("prompt http 10.0.0.5\nallow net *.example.com\nallow net api.example.com"), none, "an http address rule");
         assert_eq!(
             lint("deny http 10.0.0.5/x\nallow http *.example.com\nallow http api.example.com"),
             ["3:12: warning[redundant-rule]: line 2 (`*.example.com`) already allows this"],
-            "a deny rule for an address wins over an exact name"
+            "a deny rule for an address wins over an exact hostname"
         );
         assert_eq!(lint("prompt net *\nprompt http 0.0.0.0"), none, "an http address rule decides resolved addresses");
         assert_eq!(
@@ -1037,7 +1026,6 @@ mod tests {
         ips.into_iter().flat_map(|ip| [443, 80, 8080].map(|port| std::net::SocketAddr::new(ip.parse().unwrap(), port)))
     }
 
-    /// HTTP requests and the addresses their hosts may resolve to.
     fn resolutions() -> &'static [(Capability, std::net::SocketAddr)] {
         static RESOLUTIONS: std::sync::LazyLock<Vec<(Capability, std::net::SocketAddr)>> = std::sync::LazyLock::new(|| {
             let mut out = Vec::new();
@@ -1129,7 +1117,6 @@ mod tests {
                     let (a, b) = (with.check_normalized_in(cap, PathSpace::Memory), without.check_normalized_in(cap, PathSpace::Memory));
                     prop_assert_eq!(a, b, "{}\nwithout lines {:?}: {}", text(&lines), removed.iter().map(|l| l + 1).collect::<Vec<_>>(), cap);
                 }
-                // Only a request that is not denied leads to a connection.
                 for (request, addr) in resolutions().iter().filter(|(r, _)| with.check_normalized_in(r, PathSpace::Memory) != crate::policy::Decision::Deny) {
                     let (a, b) = (with.check_resolved(request, *addr), without.check_resolved(request, *addr));
                     prop_assert_eq!(a, b, "{}\nwithout lines {:?}: {} at {}", text(&lines), removed.iter().map(|l| l + 1).collect::<Vec<_>>(), request, addr);
@@ -1137,9 +1124,6 @@ mod tests {
             }
         }
 
-        /// A server may read `%2F`, `%5C` and `\\` as `/`, so a path with them
-        /// never gets a looser decision than the path with `/` in their place,
-        /// for the request or for an address that its host resolves to.
         #[test]
         fn encoded_separators_never_loosen_a_decision(
             lines in prop::collection::vec(rule_line(), 1..7),
@@ -1223,8 +1207,6 @@ mod tests {
             let hosts = ["*", "*.example.com", "api.example.com"];
             let verb = if allow { "allow" } else { "deny" };
             let path: String = path.iter().map(|n| format!("/{n}")).collect();
-            // The narrow rule matches some of the broad rule's transports.
-            // A rule without transports matches TLS if it allows, and both if it denies.
             let transports: &[&str] = match (broad_both, allow) {
                 (true, _) => &["", "tls ", "plaintext ", "tls plaintext "],
                 (false, true) => &["", "tls "],

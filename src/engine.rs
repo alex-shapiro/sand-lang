@@ -333,14 +333,12 @@ impl Config {
         self.request_filter = Some(Arc::new(filter));
         self
     }
-    /// Sets the rule policy that decides the script's requests
-    /// ([`RulePolicy::standard`] by default). Replaces a custom policy.
+    /// Sets the rule policy (default: [`RulePolicy::standard`]). Replaces any custom policy.
     pub fn policy(mut self, p: RulePolicy) -> Self {
         self.policy = Policy::Rules(Arc::new(p));
         self
     }
-    /// Sets a host-defined policy that decides the script's requests instead
-    /// of rules. Replaces the rule policy.
+    /// Sets a host-defined policy callback. Replaces any rule policy.
     pub fn custom_policy(mut self, p: impl CustomPolicy + 'static) -> Self {
         self.policy = Policy::Custom(Arc::new(p));
         self
@@ -1153,9 +1151,7 @@ impl Engine {
     // ------------------------------------------------------------------
     // Loading and compiling
 
-    /// Checks (and if `prompt`, prompts for) importing the script at the
-    /// normalized `path`. Without an answer to a prompt, returns why no
-    /// prompt was shown: "no prompter can ask" or "checking does not ask".
+    /// Checks `path` against the import policy and prompts if `prompt` is true.
     async fn check_import(&self, path: &Path, prompt: bool) -> Result<bool, &'static str> {
         let cap = Capability::Import(path.to_path_buf());
         if let Some(&d) = self.always.lock().unwrap_or_else(|e| e.into_inner()).get(&cap) {
@@ -1179,9 +1175,7 @@ impl Engine {
         }
     }
 
-    /// Why importing the normalized `path` was not asked about: the rule
-    /// that asks, or the rule that would allow it.
-    fn unasked_import(&self, path: &Path, why: &str) -> String {
+    fn format_unprompted_import_reason(&self, path: &Path, why: &str) -> String {
         let Policy::Rules(rules) = &self.config.policy else { return format!("the policy asks about it, and {why}") };
         match rules.verdict(&Capability::Import(path.to_path_buf()), self.config.fs.space(), &[]) {
             Some((_, rule)) => format!("{} asks about it, and {why}", rules.describe_rule(rule)),
@@ -1443,7 +1437,8 @@ impl Engine {
             let allowed = self.check_import(&target, d.prompt).await;
             *prompted += self.config.clock.now().saturating_duration_since(asked);
             if allowed != Ok(true) {
-                let hint = allowed.err().map(|why| format!(" ({})", self.unasked_import(&target, why))).unwrap_or_default();
+                let hint =
+                    allowed.err().map(|why| format!(" ({})", self.format_unprompted_import_reason(&target, why))).unwrap_or_default();
                 errors.push(Diag::error(span, format!("cannot import `{import_label}`: permission denied{hint}")));
                 // Stop after a denied import to avoid prompting for remaining imports.
                 break;

@@ -2199,7 +2199,7 @@ fn rule_policy_network_hosts() {
     let check = |host: &str, port: u16| p.check(&Capability::Net { host: host.into(), port, tls: true });
     assert_eq!(check("example.com", 443), Decision::Allow);
     assert_eq!(check("example.com", 80), Decision::Allow);
-    // What no rule decides is asked about (a denial without a prompter).
+    // Unmatched requests return `Decision::Prompt`.
     assert_eq!(check("evil.com", 80), Decision::Prompt);
     assert_eq!(check("api.example.org", 443), Decision::Allow);
     assert_eq!(check("example.org", 443), Decision::Prompt);
@@ -2266,11 +2266,9 @@ fn denied_import_is_a_compile_error() {
     }
 }
 
-/// `Config::new()` allows no imports: the error names the rule that would
-/// allow one.
 #[cfg(feature = "os")]
 #[test]
-fn an_import_that_no_rule_decides_names_the_missing_rule() {
+fn unallowed_import_reports_the_missing_rule() {
     let dir = TempDir::new("imp-default");
     dir.write("lib/util.sand", "pub let X = 1");
     let main = dir.write("main.sand", "import \"./lib/util.sand\"\nprint(util.X)");
@@ -2288,7 +2286,6 @@ fn an_import_that_no_rule_decides_names_the_missing_rule() {
     }
     let mut engine = Engine::new(Config::new().policy(sandlang::RulePolicy::standard().allow_import(&lib))).unwrap();
     rt().block_on(engine.run_file(&main)).unwrap();
-    // A prompt rule that decides the import is named instead.
     let util = lib.join("util.sand");
     let policy = sandlang::RulePolicy::standard().allow_import(&lib).prompt_import(&util);
     let mut engine = Engine::new(Config::new().policy(policy)).unwrap();
@@ -2302,7 +2299,6 @@ fn an_import_that_no_rule_decides_names_the_missing_rule() {
         ),
         other => panic!("{other:?}"),
     }
-    // Checking never asks, even with a prompter.
     let engine = Engine::new(Config::new().prompter(|_: Capability| async { PromptAnswer::AllowOnce })).unwrap();
     match engine.check_file(&main) {
         Err(Error::Compile(d)) => assert!(d[0].message.contains("no rule allows it, and checking does not ask"), "{}", d[0].message),

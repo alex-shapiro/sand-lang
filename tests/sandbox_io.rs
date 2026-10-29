@@ -50,8 +50,8 @@ fn net_patterns_match_ip_literals_and_ranges() {
     assert_eq!(p.check(&net("EXAMPLE.com", 443)), Decision::Allow);
     // Range patterns never match names.
     assert_eq!(p.check(&net("10.example", 80)), Decision::Prompt);
-    // The rule that allows a host name also allows the addresses it resolves
-    // to, unless a more specific address rule decides otherwise.
+    // The rule that allows a host name also allows its resolved addresses
+    // unless a more specific address rule decides otherwise.
     assert_eq!(p.check(&net_addr("example.com", "127.0.0.1:443")), Decision::Allow);
     assert_eq!(p.check(&net_addr("example.com", "10.9.0.1:443")), Decision::Allow);
     assert_eq!(p.check(&net_addr("other.example", "10.9.0.1:443")), Decision::Deny);
@@ -213,16 +213,11 @@ fn wildcards_reach_every_destination() {
         assert_eq!(p.check(&plain(host, 80)), Decision::Prompt, "{host} without TLS");
     }
     assert_eq!(p.check(&net_addr("example.com", "127.0.0.1:80")), Decision::Allow);
-    // No rule means no connection: the prompter decides, and without one the engine denies.
     let p = RulePolicy::new();
     assert_eq!(p.check(&net("example.com", 443)), Decision::Prompt);
     assert_eq!(p.check(&net("10.0.0.5", 443)), Decision::Prompt);
 }
 
-/// Every name under `localhost` is the loopback host (RFC 6761), which the
-/// engine connects to without DNS: deny and prompt rules for `localhost`
-/// match those names as other spellings of it, as they match the other
-/// representations of an address. Allow rules match only the name they give.
 #[test]
 fn localhost_rules_restrict_the_names_under_localhost() {
     let p = RulePolicy::new().allow_net("plaintext *").deny_net("plaintext localhost").allow_net("localhost:8080");
@@ -230,11 +225,10 @@ fn localhost_rules_restrict_the_names_under_localhost() {
         assert_eq!(p.check(&plain(host, 5432)), Decision::Deny, "{host}");
     }
     assert_eq!(p.check(&net("localhost", 8080)), Decision::Allow);
-    assert_eq!(p.check(&net("app.localhost", 8080)), Decision::Prompt, "an allow rule names one name");
+    assert_eq!(p.check(&net("app.localhost", 8080)), Decision::Prompt, "an allow rule matches only its exact name");
     assert_eq!(p.check(&plain("localhost.example", 5432)), Decision::Allow);
     let p = RulePolicy::new().allow_net("*").prompt_net("localhost");
     assert_eq!(p.check(&net("x.localhost", 443)), Decision::Prompt);
-    // Of equal specificity, the deny rule wins.
     let p = RulePolicy::new().allow_net("app.localhost").deny_net("localhost");
     assert_eq!(p.check(&net("app.localhost", 443)), Decision::Deny);
     let p = RulePolicy::new().allow_http("app.localhost/api").deny_http("localhost/api/admin");
@@ -281,7 +275,6 @@ fn http_rules_for_addresses_decide_the_addresses_that_names_resolve_to() {
     let p = RulePolicy::new().allow_http("plaintext *").deny_http("169.254.169.254");
     assert_eq!(p.check_resolved(&get("GET", "metadata.evil.example", "/latest"), metadata), Decision::Deny);
     assert_eq!(p.check_resolved(&get("GET", "metadata.evil.example", "/latest"), "8.8.8.8:80".parse().unwrap()), Decision::Allow);
-    // Only the requests that the rule matches: paths and methods.
     let p = RulePolicy::new().allow_http("plaintext *").deny_http("10.0.0.5/admin").prompt_http("POST 10.0.0.5");
     let at = "10.0.0.5:80".parse().unwrap();
     assert_eq!(p.check_resolved(&get("GET", "app.example", "/admin/users"), at), Decision::Deny);
@@ -289,23 +282,17 @@ fn http_rules_for_addresses_decide_the_addresses_that_names_resolve_to() {
     assert_eq!(p.check_resolved(&get("GET", "app.example", "/x%2F..%2Fadmin"), at), Decision::Deny, "the stricter reading");
     assert_eq!(p.check_resolved(&get("GET", "app.example", "/public"), at), Decision::Allow);
     assert_eq!(p.check_resolved(&get("POST", "app.example", "/public"), at), Decision::Deny, "a prompt rule denies after resolution");
-    // Raw connections send no HTTP request, so http rules do not decide them.
     assert_eq!(p.check_resolved(&plain("app.example", 80), at), Decision::Allow);
-    // Net rules for addresses decide HTTP requests too, and an exact name
-    // outranks a range, but not an exact address.
     let p = RulePolicy::new().allow_http("plaintext db.internal").deny_net("10.0.0.0/8");
     assert_eq!(p.check_resolved(&get("GET", "db.internal", "/"), at), Decision::Allow);
     assert_eq!(p.check_resolved(&get("GET", "other.internal", "/"), at), Decision::Deny);
     let p = RulePolicy::new().allow_http("plaintext db.internal").deny_http("10.0.0.5");
     assert_eq!(p.check_resolved(&get("GET", "db.internal", "/"), at), Decision::Deny);
-    // Through every form of the address, as for net rules.
     let p = RulePolicy::new().allow_http("plaintext *").deny_http("127.0.0.1");
     assert_eq!(p.check_resolved(&get("GET", "evil.example", "/"), "[::ffff:127.0.0.1]:80".parse().unwrap()), Decision::Deny);
     assert_eq!(p.check_resolved(&get("GET", "evil.example", "/"), "0.0.0.0:80".parse().unwrap()), Decision::Deny);
 }
 
-/// A server may split a path at `%2F`, so each reading is decided as a
-/// whole, and the stricter decision holds.
 #[test]
 fn both_readings_of_an_encoded_path_decide_its_addresses() {
     let p = RulePolicy::new().allow_http("tls plaintext *").allow_http("plaintext api.example.com/*.txt").deny_net("10.0.0.0/8");
@@ -446,7 +433,6 @@ fn custom_builders_read_a_star_detail_as_any_detail() {
     assert_eq!(p.to_string(), "allow custom *\ndeny custom db\n");
 }
 
-/// `deny_env("AWS_**")` would otherwise deny only a variable named `AWS_**`.
 #[test]
 fn listing_all_variables_gets_the_strictest_decision_of_any_variable() {
     let all = Capability::Env("*".into());
@@ -456,13 +442,11 @@ fn listing_all_variables_gets_the_strictest_decision_of_any_variable() {
         (RulePolicy::new().allow_env("*").deny_env("SECRET"), Decision::Deny),
         (RulePolicy::new().allow_env("*").prompt_env("AWS_*"), Decision::Prompt),
         (RulePolicy::new().allow_env("*").prompt_env("AWS_*").deny_env("AWS_SECRET"), Decision::Deny),
-        // An allow rule that wins over every guard leaves nothing to guard.
         (RulePolicy::new().prompt_env("*").allow_env("*"), Decision::Allow),
         (RulePolicy::new().prompt_env("SECRET").allow_env("SECRET").allow_env("*"), Decision::Allow),
         (RulePolicy::new().allow_env("*").prompt_env("AWS_*").allow_env("AWS_*"), Decision::Allow),
         (RulePolicy::new().allow_env("*").prompt_env("AWS_*").allow_env("AWS_*_ID"), Decision::Prompt),
         (RulePolicy::new().allow_env("*").deny_env("A*").allow_env("AB*"), Decision::Deny),
-        // Default rules decide only the variables that no other rule matches.
         (RulePolicy::new().allow_env("*").with_defaults(RulePolicy::new().deny_env("SECRET")), Decision::Allow),
         (RulePolicy::new().allow_env("HOME").with_defaults(RulePolicy::allow_all()), Decision::Allow),
         (RulePolicy::new().deny_env("AWS_*").with_defaults(RulePolicy::allow_all()), Decision::Deny),
@@ -470,8 +454,6 @@ fn listing_all_variables_gets_the_strictest_decision_of_any_variable() {
     for (p, want) in cases {
         assert_eq!(p.check(&all), want, "{p}");
     }
-    // A variable named `*` (quoted) is one variable, and a rule may name any
-    // character, including the one that stands for `*` in a sample.
     let file = |text: &str| sandlang::policy::PolicyFile::parse(text, std::path::Path::new("/"), None).unwrap().rules;
     assert_eq!(file("allow env *\ndeny env \"*\"").check(&all), Decision::Deny);
     assert_eq!(file("allow env \"*\"").check(&all), Decision::Prompt);
@@ -629,16 +611,13 @@ fn prompt_answers_do_not_override_address_rules() {
     assert_eq!(run(RulePolicy::standard()), "Ok(\"hi\")\nOk(\"hi\")\n", "no rule restricts the addresses");
     let out = run(RulePolicy::standard().deny_net("plaintext 127.0.0.0/8"));
     let lines: Vec<&str> = out.lines().collect();
-    // `localhost` also resolves to `::1`, which the server does not listen on.
+    // `localhost` is also resolved to `::1`, which the server does not listen on.
     assert!(lines[0].starts_with("Err("), "{out}");
     assert!(lines[1].contains("address 127.0.0.1 is not allowed by the rule `deny net plaintext 127.0.0.0/8`"), "{out}");
     assert_eq!(prompts.lock().unwrap().len(), 4);
     assert_eq!(server.requests.lock().unwrap().len(), 2);
 }
 
-/// A network that resolves every name to `addrs`, records the addresses it
-/// connects to, and answers every request with `200 ok` on a keep-alive
-/// connection.
 struct KeepAliveNetwork {
     addrs: Vec<SocketAddr>,
     connected: Arc<Mutex<Vec<SocketAddr>>>,
@@ -681,9 +660,6 @@ impl sandlang::network::Network for KeepAliveNetwork {
     }
 }
 
-/// The address check holds for every request, also on a pooled connection
-/// that an earlier request opened: the rule that allowed the earlier request
-/// may vouch for an address that the rule of the next request does not.
 #[test]
 fn pooled_connections_are_reused_only_at_addresses_allowed_for_the_request() {
     let addr: SocketAddr = "10.0.0.5:80".parse().unwrap();
@@ -743,9 +719,6 @@ fn custom_policies_see_resolved_addresses_without_extra_prompts() {
     assert!(seen.contains(&format!("connect to [::1]:{port} (plaintext)")), "{seen:?}");
 }
 
-/// A custom policy sees the transport of a resolved address, so a rule
-/// policy that it delegates to decides plaintext connections by plaintext
-/// address rules.
 #[test]
 fn custom_policies_see_the_transport_of_resolved_addresses() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1657,10 +1630,8 @@ fn deny_rules_ignore_case() {
     assert!(p.denies_under(&d.join("Future")));
 }
 
-/// Unicode spellings a case- and normalization-insensitive file system
-/// (APFS) treats as the same name: `ſ`/`s`, `ς`/`σ`, NFC/NFD.
 #[test]
-fn deny_rules_match_unicode_equivalent_spellings() {
+fn deny_rules_match_unicode_equivalent_names() {
     let dir = TempDir::new("deny-unicode");
     let d = dir.path();
     let p = RulePolicy::standard()
@@ -1678,11 +1649,9 @@ fn deny_rules_match_unicode_equivalent_spellings() {
     assert_eq!(p.check(&Capability::FsWrite(d.join("future/secret"))), Decision::Allow);
 }
 
-/// Alternative spellings on APFS cannot rename or remove protected entries,
-/// or squat protected paths before they exist.
 #[cfg(target_os = "macos")]
 #[test]
-fn unicode_spellings_cannot_bypass_deny_rules_on_apfs() {
+fn unicode_equivalents_cannot_bypass_deny_rules_on_apfs() {
     let dir = TempDir::new("apfs-deny");
     dir.write("data/secrets/key.txt", "key");
     dir.write("data/config.json", "{}");
@@ -1781,7 +1750,7 @@ fn symlink_entries_keep_their_exact_names() {
 }
 
 #[test]
-fn denial_messages_use_the_scripts_spelling() {
+fn denial_messages_use_the_requested_path() {
     let dir = TempDir::new("deny-message");
     dir.write("data/private/key.txt", "key");
     #[cfg(unix)]
@@ -1899,8 +1868,6 @@ print(fs.read_text("a.txt")?)
     assert_eq!(r.ok_stdout(), "permission_denied\npermission_denied\npermission_denied\nrewritten\n");
 }
 
-/// The guide's recipe for a policy file: its rules decide first, and the
-/// standard rules only what they do not match, so `prompt stdout` asks.
 #[test]
 fn a_policy_file_over_the_standard_rules_keeps_its_prompt_rules() {
     let file = sandlang::policy::PolicyFile::parse("prompt stdout\nprompt stderr", std::path::Path::new("/"), None).unwrap();
@@ -1910,8 +1877,6 @@ fn a_policy_file_over_the_standard_rules_keeps_its_prompt_rules() {
     assert_eq!(r.stdout, "");
 }
 
-/// An empty path would be the pattern of every path on every root: a host
-/// that passes an unset directory must not allow everything.
 #[test]
 #[should_panic(expected = "an empty path")]
 fn file_builders_reject_an_empty_path() {

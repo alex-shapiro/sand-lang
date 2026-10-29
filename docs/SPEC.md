@@ -8,7 +8,7 @@ mediated through a host-defined policy with authorization rules and resource lim
 
 ## Contents
 
-1. [Design goals](#1-design-goals-informative)
+1. [Design goals](#1-design-goals)
 2. [Source text and lexical structure](#2-source-text-and-lexical-structure)
 3. [Programs, modules and imports](#3-programs-modules-and-imports)
 4. [Declarations](#4-declarations)
@@ -32,7 +32,7 @@ mediated through a host-defined policy with authorization rules and resource lim
 - Safety. It must be impossible for a script to affect state outside of the interpreter except where granted authorization by the host.
 - Correctness. It should be simple to write code that behaves correctly and difficult or impossible to write code that behaves incorrectly.
 - Inferred static typing. All Sand code is typed, and type inference is used wherever possible.
-- Elegance and familarity. Syntax must be concise and easy to understand for anyone who knows Rust, Python, or Swift.
+- Elegance and familiarity. Syntax must be concise and easy to understand for anyone who knows Rust, Python, or Swift.
 - Performance. Sand should be as fast and memory-efficient as possible for a safe bytecode interpreter.
 - Embeddable. A single process can embed multiple Sand interpreters and run them in parallel, safely.
 
@@ -290,8 +290,8 @@ fn greet(name: str, greeting: str = "Hello") {
   clause (`fn sum(self) -> T where T: Num`) also specifies trait bounds, and
   can constrain the type parameters of an enclosing generic `extend` block,
   struct, or enum for that method.
-- A type parameter marked `reflect` (`fn load<reflect T: Decode>(text: str)
--> Result<[T]>`) receives a runtime type description of its type argument. A
+- A type parameter marked `reflect` (`fn load<reflect T: Decode>(text: str) -> Result<[T]>`)
+  receives a runtime type description of its type argument. A
   function can forward `T` (or a composite type containing `T`, such as `[T]`)
   to another `reflect` type parameter, such as `json.decode<T>`. Every type
   parameter that appears in a `reflect` type argument must itself be declared
@@ -576,8 +576,8 @@ arguments satisfy all bounds required by that `impl` recursively (for example,
 `Point: Describe`). A type parameter satisfies its declared bounds and their
 supertraits, and `Self` satisfies the enclosing trait and its supertraits. The
 type checker verifies trait bounds at every instantiation and reports any
-unmet bound (for example, `str does not implement `Describe`(required for
-[str] to implement`Describe`)`).
+unmet bound (for example, ``str does not implement `Describe` (required for
+[str] to implement `Describe`)``).
 
 Functions, methods, `where` clauses, `impl` blocks, structs, and enums can
 declare trait bounds on their type parameters. Methods on a struct or enum
@@ -2411,196 +2411,166 @@ emptied and converted into a junction during rename.
 
 ### 14.3 Decisions
 
-A policy maps a request to `Allow`, `Deny` or `Prompt`. On `Prompt` the
-engine suspends execution and calls the host's prompter, waiting for an
-answer of `AllowOnce`, `AllowAlways`, `DenyOnce` or `DenyAlways`. If no
-prompter exists, the engine denies the request. An "Always" decision
-persists for the engine lifetime across all runs and compilations. A "Once"
-decision applies to a single request.
+A policy evaluates each capability request to `Allow`, `Deny`, or `Prompt`.
+If the policy returns `Prompt`, the engine suspends execution and calls the
+host prompter for `AllowOnce`, `AllowAlways`, `DenyOnce`, or `DenyAlways`.
+If the host does not configure a prompter, the engine denies the request.
+An `AllowAlways` or `DenyAlways` decision persists for the lifetime of the
+engine across all compilations and runs. An `AllowOnce` or `DenyOnce` decision
+applies to a single request.
 
-`Import` requests are determined during compilation by `check` and `lint`,
-once per script module, depth-first in import order, with the module's
-resolved absolute path. Standard and host modules are not script modules:
-importing them makes no request.
+The compiler checks `Import` requests during `check`, `lint`, and compilation,
+once per script module in depth-first import order, using the resolved absolute
+path of the module. Importing a standard library or host module does not
+generate an `Import` request.
 
 ### 14.4 Effects of a denial
 
 - I/O functions return `Err` with kind `"permission_denied"`.
-- A denied environment variable is treated as unset.
-- `print` and `eprint` fail (kind `permission_denied`) with `permission denied: stdout` / `stderr`
-- writes to `io.stdout` and `io.stderr` fail with kind `"permission_denied"`.
-- A denied `Import` raises a compile-time error.
+- A denied environment variable read returns `None` (or an empty map for `env.vars()`).
+- `print` and `eprint` fail with kind `"permission_denied"` (`permission denied: stdout` or `stderr`).
+- Writes to `io.stdout` and `io.stderr` return `Err` with kind `"permission_denied"`.
+- A denied `Import` causes a compile-time error.
 
 ### 14.5 Rule policies
 
-`Config::policy(RulePolicy)` sets the rules that decide the script's
-requests, and `Config::custom_policy(CustomPolicy)` replaces them with a
-host-defined policy. The default is `RulePolicy::standard()`.
+`RulePolicy` evaluates capability requests against specificity-ranked `allow`,
+`deny`, and `prompt` rules. `Config::policy(RulePolicy)` sets the rule policy
+for an engine (default `RulePolicy::standard()`), and
+`Config::custom_policy(CustomPolicy)` replaces it with a host-defined policy
+callback.
 
 | Constructor               | Rules                                                             |
 | ------------------------- | ----------------------------------------------------------------- |
-| `RulePolicy::default()`   | none                                                              |
+| `RulePolicy::default()`   | empty rule set                                                    |
 | `RulePolicy::standard()`  | `allow stdout`, `allow stderr`                                    |
-| `RulePolicy::allow_all()` | a rule that allows each kind of capability (trusted scripts only) |
+| `RulePolicy::allow_all()` | allows all capabilities (use only for trusted scripts)            |
 
-The most specific matching rule decides a request. Of two rules with equal
-specificity, `deny` wins over `allow`, and `allow` wins over `prompt`, so a
-rule saved from a prompt answer decides that request. A request that no rule
-matches gets `Prompt` (§14.3): the prompter decides it, or the engine denies
-it. The `Display` of a `RulePolicy` lists its rules as policy file text
-(§14.7), and `RulePolicy::extend` adds the rules of another policy.
+The most specific matching rule decides a request. If two rules have equal
+specificity, `deny` overrides `allow`, and `allow` overrides `prompt`. If a
+request does not match any rule, the policy returns `Prompt` (§14.3).
+`RulePolicy::extend` merges the rules of another `RulePolicy`, and `Display`
+formats a `RulePolicy` as `.policy` text (§14.7).
 
-`rules.with_defaults(defaults)` adds the rules of `defaults` as default rules,
-which decide only the requests that no other rule matches. A host combines
-the user's rules with its own this way, as the CLI does (§17.5). The default
-rules of `defaults` stay below its other rules. Resolved addresses (§14.6) are
-the exception: there, the rule that decided the request competes with the
-address rules by host specificity alone, so a user's domain pattern does not
-allow an address that a default rule denies. Among the address rules, the
-tiers apply.
+`RulePolicy::with_defaults(defaults)` appends fallback rules that apply only if
+the primary rules do not match a request. A host can use `with_defaults` to
+combine user rules with host defaults (§17.5). Existing default rules on
+`defaults` remain in the fallback tier. During stage-2 resolved-address checks
+(§14.6), the rule that allowed stage 1 competes with IP address rules by host
+specificity alone, so a user domain wildcard cannot bypass a default IP deny
+rule.
 
-Specificity depends on the kind of request:
+Specificity depends on the capability category:
 
-- **Files** (`FsRead`, `FsWrite`, `Import`)
-  - a path pattern matches the path and its subpaths: `/data` covers `/data/a/b`
-  - Each path segment may be a string, a name with `*` wildcards (`*.pem`),
-    standalone `*`, or standalone `**`. A pattern that starts with `**`
-    matches on every root, including all drives on Windows: `**` alone
-    matches every path.
-  - A path is "more specific" if it has more matching segments. For example,
-    `deny ~/**/*.pem` is more specific than `allow ~/project` for `~/project/key.pem`
-  - If two paths have equal depth, the one with fewer wildcards is more specific
-  - Write access implies read access
-  - Read denial implies write and import denial
+- **Files** (`FsRead`, `FsWrite`, `Import`):
+  - A path pattern matches the target path and all subpaths (`/data` matches `/data/a/b`).
+  - Each segment can be a literal string, a `*` wildcard (`*.pem`), standalone `*` (one segment), or standalone `**` (zero or more segments). A pattern that starts with `**` matches across all roots, including all Windows drives; `**` alone matches every path.
+  - A pattern with more non-`**` segments is more specific (`deny ~/**/*.pem` overrides `allow ~/project` for `~/project/key.pem`). At equal segment depth, a pattern with fewer wildcards is more specific.
+  - `FsWrite` access implies `FsRead` access. `FsRead` denial implies `FsWrite` and `Import` denial.
 
-- **Network Requests** (`Net`)
-  - a host pattern may match any domain `*`, a specific domain `example.com` or strict subdomains `*.example.com`
-  - a host pattern may also match an IP address (`127.0.0.1`, `::1`) or a CIDR range (`10.0.0.0/8`, `fc00::/7`),
-    optionally with a port (`host:443`, `[::1]:8080`, `10.0.0.0/8:443`, `[fc00::/7]:443`).
-    The host bits after the prefix length of a CIDR range must be zero.
-  - A rule matches connections over the transports it names: `tls`
-    (`net.connect_tls`, `https`), `plaintext` (`net.connect`, `http`), or
-    both. A rule that names no transport matches `tls` if it allows, and both if it denies or
-    prompts, so `deny net 10.0.0.0/8` also stops `http://10.0.0.5/`.
-  - Exact hosts and addresses are most specific. Then come patterns of names under `localhost`
-    (`*.localhost`, since RFC 6761 makes every such name the loopback host), then ranges and domains
-    (longer ones more), then `*`. An IPv4 range ranks as the IPv6 range that embeds it
-    (`10.0.0.0/8` as a `/104`).
-  - A port increases rule specificity. Transports do not: of an allow and a deny rule for the
-    same host and transport, the deny rule wins.
-  - Host names must be ASCII and are compared case-insensitively, ignoring a trailing dot
-  - IPv4-mapped IPv6 addresses are compared as IPv4.
-  - Deny and prompt address patterns also match other forms of their addresses: `0.0.0.0` and `::`
-    are the same address, and they also connect to `127.0.0.1` and `::1`. An IPv6 address that
-    embeds an IPv4 address (NAT64, 6to4, IPv4-translated, IPv4-compatible) is also that IPv4
-    address. Thus `deny net 127.0.0.1` also denies `0.0.0.0`, `::` and `::ffff:0:7f00:1`. Allow
-    patterns match only the address that the script used.
-  - In the same way, the deny and prompt host `localhost` also matches every name under it
-    (`app.localhost`), which is the same loopback host. `allow net localhost` matches only
-    `localhost`. As for every name, the rule does not match IP addresses: `deny net localhost
-127.0.0.0/8 ::1` keeps scripts off the loopback host.
+- **Network connections** (`Net`):
+  - A host pattern matches `*` (all domains), an exact domain (`example.com`), strict subdomains (`*.example.com`), an IP address (`127.0.0.1`, `::1`), or a CIDR prefix (`10.0.0.0/8`, `fc00::/7`) with zero host bits. Any host pattern can include a port (`host:443`, `[::1]:8080`, `10.0.0.0/8:443`, `[fc00::/7]:443`).
+  - A rule specifies `tls` (`net.connect_tls`, `https`), `plaintext` (`net.connect`, `http`), or both transports. If a rule omits the transport, `allow` matches `tls` only, whereas `deny` and `prompt` match both `tls` and `plaintext` (`deny net 10.0.0.0/8` also blocks `http://10.0.0.5/`).
+  - Specificity ranks exact hostnames and IP addresses first, then `*.localhost` (loopback names per RFC 6761), then CIDR prefixes and domain wildcards (longer prefixes and deeper domains rank higher), and finally `*`. An IPv4 `/N` prefix ranks at `N + 96` (`10.0.0.0/8` ranks as `/104`). A port increases specificity; transports do not affect specificity.
+  - Hostnames must be ASCII and are compared case-insensitively without trailing dots. IPv4-mapped IPv6 addresses are evaluated as IPv4 addresses.
+  - `allow` rules match only the literal address or hostname requested by the script. `deny` and `prompt` address rules also match equivalent unspecified (`0.0.0.0`, `::`), loopback (`127.0.0.1` and `::1` for unspecified addresses), and IPv4-embedded IPv6 addresses (NAT64, 6to4, IPv4-translated, IPv4-compatible), so `deny net 127.0.0.1` also blocks `0.0.0.0`, `::`, and `::ffff:0:7f00:1`.
+  - Similarly, a `deny` or `prompt` rule for `localhost` also matches `*.localhost`, whereas `allow net localhost` matches `localhost` only. Hostname rules do not match IP literals (`deny net localhost 127.0.0.0/8 ::1` blocks both loopback names and loopback IP addresses).
 
-- **HTTP(S) requests** (`Http`)
-  - inherits net rules for the host pattern, port and transport
-  - adds http methods and paths
-  - Specificity compares the host (as for `Net`), then path, then methods.
-  - URL paths are compared percent-decoded, without `.` and `..` segments
-  - A request whose path contains `\` or an encoded separator (`%2F`, `%5C`) gets the
-    stricter decision of its two readings, with and without those taken as separators.
-    A pattern cannot hold such a separator: write `/`.
-  - A net rule allowing a host lets scripts send it anything over `net`, even if `deny http` rules say otherwise
+- **HTTP requests** (`Http`):
+  - `Http` rules use the same host, port, and transport matching as `Net` rules, and add optional HTTP methods and URL path patterns.
+  - Specificity ranks the host (as in `Net`), then the URL path, and then the HTTP method.
+  - URL paths are percent-decoded and lexically normalized (`.` and `..` segments removed) before comparison.
+  - If a request path contains `\` or an encoded separator (`%2F`, `%5C`), the policy evaluates the path both with and without treating those characters as path separators and applies the stricter decision. Policy patterns must use `/` as the separator.
+  - An `allow net` rule for a destination permits raw TCP connections via `net` even if a `deny http` rule blocks HTTP requests to that destination.
 
-- **Environment variables** (`Env`)
-  - supports a name `AWS_SECRET_KEY` or a pattern (`AWS_*`), where `*` matches any characters
-    (`**` is an error)
-  - specific names are prioritized above wildcard patterns
-  - `Env("*")` (all variables) gets the strictest decision that any one variable gets: `Deny`,
-    then `Prompt`, then `Allow`. A variable that no rule matches gets `Prompt`, so only a rule
-    such as `allow env *` allows the listing
+- **Environment variables** (`Env`):
+  - A pattern matches an exact name (`AWS_SECRET_KEY`) or a `*` wildcard (`AWS_*`; `**` is invalid). Exact names are more specific than wildcards.
+  - `Env("*")` (used by `env.vars()`) receives the strictest decision across all possible variable names (`Deny`, then `Prompt`, then `Allow`). An unmatched variable evaluates to `Prompt`, so `env.vars()` requires a catch-all rule such as `allow env *` to succeed without prompting.
 
-- **Listen addresses** (`NetListen`)
-  - patterns are `ip:port`, `[ipv6]:port`, `ip`, `localhost` (any loopback address), `*:port`, or `*`
-  - host `*` matches any address, port `*` matches any port, and port `0` matches only an ephemeral port request
-  - IPv4-mapped IPv6 addresses are compared as IPv4
-  - specificity compares the host (`ip` or `localhost` before `*`), then the port
+- **Listening sockets** (`NetListen`):
+  - Patterns are `ip:port`, `[ipv6]:port`, `ip`, `localhost` (any loopback address), `*:port`, or `*`.
+  - Host `*` matches any bind address, port `*` matches any port, and port `0` matches only ephemeral port requests. IPv4-mapped IPv6 addresses are evaluated as IPv4 addresses.
+  - Specificity ranks the host (`ip` or `localhost` before `*`), then the port.
 
-- **Custom capabilities**:
-  - a native module may define its own capabilities
-  - a rule names one (`custom db`) or all (`custom *`), with an optional detail
-    (`custom db drop`; `*` or none: any detail); a name is more specific than
-    `*`, and a detail more specific than none. Names and details are exact:
-    quote a `*` that is part of one (`custom db "a*b"`)
+- **Custom capabilities** (`Custom`):
+  - Native modules can define custom capabilities.
+  - A rule matches a specific capability name (`custom db`) or all custom capabilities (`custom *`), with an optional detail (`custom db drop`, or `*` for any detail). An exact name is more specific than `*`, and an exact detail is more specific than `*` or an omitted detail. Quote literal asterisks (`custom db "a*b"`).
 
-Path rules are compared after normalization (§14.1). A rule's path is
-resolved when the policy decides its first request. Allow rules compare
-names exactly, ignoring case on Windows. Deny and prompt rules, on every platform,
-compare case-insensitively and normalization-insensitively (canonical
-decomposition, full case folding, default-ignorable characters removed), so
-they also cover other spellings, including of paths that do not exist yet
-(`data/ſecrets`, `café` precomposed or with a combining accent)
+The policy normalizes file paths before comparison (§14.1) and resolves each
+rule path on the first file request. `allow` rules compare path components
+exactly (or case-insensitively on Windows). `deny` and `prompt` rules compare
+path components case-insensitively and Unicode-normalization-insensitively
+(canonical decomposition, full case folding, and default-ignorable code points
+removed) on all platforms (`data/ſecrets`, precomposed `café`, and decomposed
+`cafe\u{301}` all match).
 
-On case-insensitive file systems, the engine resolves existing paths to
-on-disk names (`data/SECRETS` becomes `data/secrets`). For directory entry operations (§13.3),
-`RulePolicy::check_entry` evaluates the on-disk name without resolving symlinks in the last path component.
-If the system cannot read an on-disk name (a symlink outside macOS, a device, or an unopenable file),
-the engine scans the parent directory if it contains at most 4096 entries.
+On case-insensitive file systems, the engine resolves existing paths to their
+on-disk names (`data/SECRETS` is resolved to `data/secrets`). For directory entry
+operations (§13.3), `RulePolicy::check_entry` evaluates the on-disk name without
+following a symlink in the final path component. If the operating system cannot
+read the on-disk name directly (such as a symlink outside macOS, a device node,
+or an unopenable file), the engine scans the parent directory if it contains at
+most 4096 entries.
 
-A directory that holds an entry decided by a deny or prompt rule cannot be renamed, replaced
-or recursively removed as a whole. The tree is scanned for such entries only if
-`RulePolicy::denies_under` reports that a deny or prompt rule may match a path in it. For
-custom policies (`CustomPolicy`), the engine invokes `denies_under` and `protects`
-on the tree. By default, the engine scans trees and protects entries when reading
-or writing the entry is denied.
+The engine blocks `rename` and recursive `remove_dir` on any directory tree that
+contains an entry matched by a `deny` or `prompt` rule. The engine scans a
+directory tree only if `RulePolicy::denies_under` indicates that a `deny` or
+`prompt` rule can match a path inside it. For a `CustomPolicy`, the engine calls
+`CustomPolicy::denies_under` and `CustomPolicy::protects` on the tree, which by
+default protect any entry whose read or write access is denied.
 
 ### 14.6 Network destinations
 
-The engine checks an outgoing connection (`net.connect`, `net.connect_tls`,
-`http` requests and redirect hops) in two stages:
+The engine checks every outgoing network connection (`net.connect`,
+`net.connect_tls`, `http` requests, and redirect hops) in two stages:
 
-1. `Net(host, port, tls)` (for `http`, `Http(method, url)`) for the host name
-   or IP literal that the script used. The policy can prompt for this request.
-2. The engine resolves the name once and checks each address as
-   `NetAddr(host, addr, tls)`. The address of an IP literal is the literal.
-   The engine gives `localhost` and the names under it the addresses
-   `127.0.0.1` and `::1` without the system resolver (RFC 6761). The engine connects only to allowed addresses, in
-   resolver order. If the policy denies all addresses, the operation fails
-   with kind `"permission_denied"`, the address and the deciding rule.
+1. **Host check:** The engine checks `Net(host, port, tls)` (or
+   `Http(method, url)` for HTTP requests) against the hostname or IP literal
+   supplied by the script. The policy can prompt during this stage.
+2. **Resolved-address check:** The engine resolves the hostname once and checks
+   each resolved IP address as `NetAddr(host, addr, tls)`. An IP literal
+   evaluates to itself, and `localhost` or `*.localhost` evaluates to
+   `127.0.0.1` and `::1` without calling the system resolver (RFC 6761). The
+   engine connects only to allowed addresses, in resolver order. If the policy
+   denies all resolved addresses, the operation fails with kind
+   `"permission_denied"`, reporting the denied address and deciding rule.
    `NetAddr` never prompts.
 
-A rule policy decides an address in stage 2 with `RulePolicy::check_resolved`.
-The rule that allowed the stage 1 request (or prompted for it) competes with
-the address rules by the specificity of their hosts. The address rules are
-the rules for IP addresses that match the address and the request's transport:
-`net` rules, and for an HTTP request also `http` rules that match its method
-and path. An exact host name ranks as a single address, and
-a pattern of names under `localhost` ranks above every range. Other domain
-patterns and `*` rank below every address rule, because they name hosts that
-the user does not know. If the stage 1 rule wins, or no address rule matches,
-the engine connects. Otherwise the address rule decides, and a `prompt`
-address rule denies, because the engine cannot ask after resolution. A custom
-policy decides `NetAddr` itself, and `Prompt` counts as `Allow`.
+In stage 2, `RulePolicy::check_resolved` compares the host specificity of the
+rule that allowed stage 1 against all IP address rules that match the resolved
+address and transport (`net` rules, plus `http` rules that match the request
+method and path). An exact hostname has the same host specificity as a single IP
+address, and `*.localhost` ranks above all CIDR prefixes. Wildcard domain
+patterns (`*.example.com` and `*`) rank below all IP address rules. If the
+stage-1 rule has higher specificity or if the IP address rules do not match, the
+engine allows the address. Otherwise, the most specific IP address rule decides
+the address, and a `prompt` IP address rule denies the connection because stage
+2 cannot prompt. A `CustomPolicy` evaluates `NetAddr` directly and treats
+`Prompt` as `Allow`.
 
-So a deny rule for a range also stops the names whose addresses are in it.
-An attacker can point a public name at a local service: with `allow net
-plaintext *` and `deny net 10.0.0.0/8`, a request to `http://evil.example/`
-fails if DNS gives the address `10.0.0.5`. A rule that allows an exact name,
-such as `allow net db.internal`, outranks the range and lets the script
-connect to `10.0.0.5` through that name. `sandlang::policy::is_private_address` tells
-whether an address is in a private, loopback, link-local, or other
-non-public range.
+This two-stage check prevents DNS rebinding against denied IP ranges. For
+example, under `allow net plaintext *` and `deny net 10.0.0.0/8`, a request to
+`http://evil.example/` fails if DNS returns `10.0.0.5`, whereas an explicit
+hostname rule such as `allow net db.internal` outranks the `/8` prefix and
+permits connecting to `10.0.0.5` via `db.internal`.
+`sandlang::policy::is_private_address` reports whether an IP address belongs to
+a private, loopback, link-local, or other non-public range.
 
 ### 14.7 Policy files
 
-A policy file (`.policy`) contains policy rules and limits as text. Read it with
-`sand run --policy=FILE` (§17.5); parse it with `sandlang::policy::PolicyFile::parse(text, base, home)`,
-which gives its rules (`PolicyFile::rules`) and limits (`PolicyFile::limits`). The
-rules are the whole policy: a host that wants scripts to print adds the
-standard rules as default rules (`file.rules.with_defaults(RulePolicy::standard())`).
-Each line contains an independent statement. A comment begins with `#` and
-continues for the rest of the line. Words are separated by spaces or commas.
-Quoted text `"..."` (with `\"` and `\\` escapes) is parsed literally, so a quoted
-`*` is not considered a wildcard. A word may contain both quoted and unquoted text
-(`"/my data"/**`).
+A policy file (`.policy`) declares authorization rules and resource limits in a
+line-oriented text format. Pass a policy file to the CLI with
+`sand run --policy=FILE` (§17.5), or parse it in Rust with
+`sandlang::policy::PolicyFile::parse(text, base, home)` to obtain
+`PolicyFile::rules` and `PolicyFile::limits`. A parsed `PolicyFile` contains
+only the rules written in the file; a host can append default rules with
+`file.rules.with_defaults(RulePolicy::standard())`.
+
+Each line in a policy file is an independent statement. `#` starts a comment
+that extends to the end of the line. Spaces or commas separate words. Double
+quotes `"..."` (with `\"` and `\\` escapes) quote literal characters so that `*`
+is not treated as a wildcard. A single word can combine quoted and unquoted
+segments (`"/my data"/**`).
 
 ```policy
 # Read the system and the project; keep secrets out.
@@ -2634,55 +2604,53 @@ limit memory 64M  # the prompter decides the rest
 | `limit NAME VALUE`                                        | a limit (§15.1), below                                                          |
 | `let NAME = VALUE...`                                     | a set: `{NAME}` in any rule's word stands for each value                        |
 
-All paths must be anchored, but they may be prefixed with a shortcut:
+Every file path pattern must begin with one of the following prefixes:
 
-- `/...` begins at the root directory
-- `./...` begins at the file's directory
-- `../...` begins at the file's parent directory
-- `~/...` begins at the user's home directory
-- `**/...` begins at any directory, on every root
+- `/...`: root directory
+- `./...`: directory containing the policy file (or the base path passed to the parser)
+- `../...`: parent of `./`
+- `~/...`: user home directory
+- `**/...`: any directory on every root
 
-Transports (`tls`, `plaintext`, or both, in any case) precede the hosts of
-`net` and `http` rules. Without one, an allow rule matches TLS only, and a
-deny or prompt rule matches both. In their place, the scheme and protocol
-names `http`, `https`, `ws`, `wss`, `tcp`, `udp` and `ssl` are errors. A
-quoted word is never a transport or a method, and a trailing dot names a host
-with such a name (`tls.`, `delete.`).
+In `net` and `http` rules, optional transport keywords (`tls`, `plaintext`, or
+both, case-insensitive) precede the host or URL patterns. If a rule omits the
+transport, `allow` matches `tls` only, and `deny` or `prompt` matches both
+transports. Using a scheme or protocol name (`http`, `https`, `ws`, `wss`,
+`tcp`, `udp`, `ssl`) as a transport is a parse error. To match a hostname that
+collides with a transport or HTTP method keyword, quote the hostname or append a
+trailing dot (`"tls"`, `tls.`, `delete.`).
 
-URL patterns have the form `host[:port][/path]`, where `host` is a hostname,
-domain wildcard, or single IP address and `path` is a percent-decoded file
-path pattern. A pattern without a port matches all ports. URL patterns take no
-scheme: `https` is `tls` and `http` is `plaintext`. An `http` rule for an IP
-address also decides the requests to the names that have that address (§14.6).
+In `http` rules, optional uppercase HTTP methods (or case-insensitive standard
+methods such as `GET`) precede the URL patterns, before or after the transports.
+If an `http` rule omits the method, the rule matches all HTTP methods. URL
+patterns have the form `host[:port][/path]`, where `host` is a hostname, domain
+wildcard, or single IP address, and `path` is a percent-decoded path pattern. A
+URL pattern without a port matches all ports, and URL patterns never include a
+`scheme://` prefix. An `http` rule for an IP address also applies to stage-2
+resolved-address checks for HTTP requests (§14.6).
 
-HTTP Methods (`GET`, any case, or any upper-case word) precede URLs, before or
-after the transports. If no method is present, an http rule matches every method.
+A `let NAME = VALUE...` statement defines a reusable set of values anywhere in
+the file. Referencing `{NAME}` inside a rule expands to each value in the set
+(up to 100,000 expanded patterns per word or custom rule). Set values cannot
+reference other sets.
 
-A word with multiple set references allows every combination of set values
-(`{owners}/{repos}`), limited to 100,000 patterns per word (and per custom rule). A set may be defined
-anywhere in the file. A set may not contain another set.
+`limit NAME VALUE` configures engine resource limits (§15.1):
 
-A request that no rule matches gets `Prompt`: the host's prompter decides
-it, or the engine denies it.
+- `memory`, `output`, `source`, and `http-body` accept byte counts (`4096`, `64K`, `256M`, `1G`).
+- `time` (wall clock) and `cpu` accept durations (`500ms`, `10s`, `1.5m`, `2h`, `1d`).
+- `instructions`, `compile-fuel`, `tasks`, `call-depth`, and `open-resources` accept integer counts (`1_000_000`).
+- `none` removes the limit for `memory`, `time`, `cpu`, `instructions`, `compile-fuel`, or `output`.
 
-A policy file may contain limit rules:
+Unspecified limits retain their default values. The parser rejects any policy
+file that contains a syntax or validation error and reports the 1-based line and
+column on `PolicyError`.
 
-- `memory`, `output`, `source` and `http-body` take sizes (`4096`, `64K`, `256M`, `1G`)
-- `time` (wall clock) and `cpu` durations (`500ms`, `10s`, `1.5m`, `2h`, `1d`)
-- `instructions`, `compile-fuel`, `tasks`, `call-depth` and `open-resources` counts (`1_000_000`)
-- `none` removes `memory`, `time`, `cpu`, `instructions`, `compile-fuel` and `output` limits.
-
-Each system resource category that is not explicitly specified has a default value.
-
-A policy file with any error is rejected. Each `PolicyError` provides the line and
-column containing the error.
-
-Policy files are covered by `sand fmt`, `sand lint` and `sand check` (§17).
-The formatter separates words by single spaces, adds quotes where necessary
-and keeps the quotes of quoted text, writes transports in lower case and
-methods in upper case, aligns the trailing comments of consecutive
-lines and removes runs of blank lines. `sandlang::policy::lint_policy`
-reports:
+`sand fmt`, `sand lint`, and `sand check` (§17) support `.policy` files. The
+formatter normalizes whitespace, quotes special characters, preserves explicit
+quotes, lowercases transports, uppercases HTTP methods, aligns trailing comments
+on consecutive lines, and collapses multiple blank lines.
+`sandlang::policy::lint_policy` checks a policy file for the following warnings
+(comparing file paths lexically without resolving symlinks):
 
 | Lint                   | Description                                                                                                  |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------ |
@@ -2691,15 +2659,13 @@ reports:
 | `bypassable-http-deny` | a `net` rule permits raw TCP connections to a destination that a `deny http` or `prompt http` rule restricts |
 | `unused-set`           | a `let` set is not used in any rule                                                                          |
 
-An allow rule for an exact host name is not redundant under a domain pattern
-if an address rule ranks between them, because it also decides the addresses
-of the name (§14.6). File paths are compared lexically without
-resolving symlinks.
+An `allow` rule for an exact hostname is not flagged as `redundant-rule` under a
+domain wildcard if an IP address rule ranks between them, because the exact
+hostname rule also overrides the IP address rule during stage 2 (§14.6).
 
-`sandlang::policy::rule_for(capability, allow)` gives, as a policy file
-line, the rule that decides a promptable request for good (e.g. `allow read
-/data/a.txt`, `deny http tls GET example.com:443/a`), quoted as needed; the
-playground adds it to the policy when "always" or "never" is answered.
+`sandlang::policy::rule_for(capability, allow)` formats a persistent `allow` or
+`deny` rule line for a promptable `Capability` (for example,
+`allow read /data/a.txt` or `deny http tls GET example.com:443/a`).
 
 ---
 
@@ -2905,11 +2871,11 @@ so that panics do not unwind into the host.
 `Config` allows the host to virtualize every external input, output, and source
 of nondeterminism—streams, logging, process metadata, randomness, time, file
 systems (§16.4), and networking—so that script execution can be made completely
-deterministic. By default, `Config::new()` has the policy `RulePolicy::standard()`, which
-allows only `Stdout` and `Stderr`, and no prompter, so the engine denies every
-other request (imports too, unless a rule such as `allow import ./lib` allows
-them). It writes output to the process's standard streams and provides an
-empty standard input.
+deterministic. By default, `Config::new()` uses `RulePolicy::standard()` (which
+allows only `Stdout` and `Stderr`) without a prompter, so the engine denies all
+other capability requests, including script imports unless a rule such as
+`allow import ./lib` permits them. It writes output to the process standard
+streams and provides an empty standard input.
 
 The host can capture standard output and standard error or feed standard input
 into a running script. `Config::stdout` and `Config::stderr` redirect script
@@ -3328,58 +3294,57 @@ Runs the module's top-level code with output captured, then every `test` block
 as a separate task with a fresh view of top-level state _as initialized_. Each
 test passes if it completes without an error. Output: one line per test
 (`ok name` / `FAIL name: message`) and a summary `N passed, M failed`. Exit
-code 1 if any test failed, 2 for compile errors. `sand test` takes the
-policy and limit options of `sand run` (§17.5) and, like it, asks about
-what its rules do not decide. A test that exceeds a limit fails with the
-limit's message.
+code 1 if any test failed, 2 for compile errors. `sand test` accepts the policy
+and limit options of `sand run` (§17.5) and prompts for any capability request
+that the configured rules do not decide. A test that exceeds a resource limit
+fails with that limit's message.
 
 ### 17.5 `sand run FILE [-- ARGS...]`
 
-The CLI has these default rules: `allow stdout`, `allow stderr`, `allow
-stdin`, `allow timezone` and `allow import **`. A default rule decides only
-the requests that no rule of the user (an option or a policy file rule)
-matches (`RulePolicy::with_defaults`), so `--prompt=stdin` asks before the
-script reads standard input. The prompter decides every request that no rule
-decides: the CLI asks the user on the terminal.
+`sand run` executes `FILE` under a `RulePolicy` combined with the CLI default
+rules (`allow stdout`, `allow stderr`, `allow stdin`, `allow timezone`, and
+`allow import **`) via `RulePolicy::with_defaults` (§14.5). Default rules apply
+only if user rules (from CLI flags or `--policy=FILE`) do not match a request,
+so `--prompt=stdin` prompts before the script reads standard input. For any
+request that evaluates to `Prompt`, the CLI prompts interactively on the
+controlling terminal.
 
-Rules: `--allow=RULE`, `--deny=RULE` and `--prompt=RULE` add the rules of a
-policy file line (§14.7) without its verb, such as `--allow='read ./data'`,
-`--allow='net plaintext localhost:8080'` or `--deny=stdin`. Relative paths
-start from the working directory. `--policy=FILE` adds the rules of a policy
-file and its limits (the options add to its rules and override its limits).
-The options and the policy file's rules are one set of rules: of two rules
-with the same pattern, `deny` wins (§14.5), so an option cannot loosen a
-`deny` rule of the file. `--allow-all` makes `RulePolicy::allow_all()` the
-default rules, so it allows what no rule of the user matches:
-`--allow-all --prompt='write **'` asks before every write. `--no-prompt`
-denies what the CLI would ask about.
+Rule options (`--allow=RULE`, `--deny=RULE`, and `--prompt=RULE`) add rules
+using the `.policy` syntax without the leading verb (§14.7), such as
+`--allow='read ./data'`, `--allow='net plaintext localhost:8080'`, or
+`--deny=stdin`. Relative paths are resolved against the current working
+directory. `--policy=FILE` loads rules and limits from a `.policy` file; CLI
+rule flags merge into the same primary rule tier (`deny` overrides `allow` at
+equal specificity), and CLI limit flags override limits from the file.
+`--allow-all` replaces the CLI default tier with `RulePolicy::allow_all()`, so
+explicit `--deny` or `--prompt` flags still take precedence (`--allow-all
+--prompt='write **'` prompts before every file write). `--no-prompt` disables
+interactive prompts and denies any request that evaluates to `Prompt`.
 
-Limits: `--max-memory=BYTES` (suffixes K, M, G), `--max-time=DURATION`,
-`--max-cpu=DURATION`, `--max-instructions=N`, `--max-compile-fuel=N`.
-`--seed=N` seeds the random number generator. An option that takes a value
-takes it after `=` or as the next argument (`--allow 'read ./data'`), if
-that argument is not an option.
+Limit and execution options: `--max-memory=BYTES` (suffixes `K`, `M`, `G`),
+`--max-time=DURATION`, `--max-cpu=DURATION`, `--max-instructions=N`,
+`--max-compile-fuel=N`, and `--seed=N` (PRNG seed). Options that take a value
+accept either `--opt=VALUE` or `--opt VALUE`.
 
-The CLI gives the arguments after `--`, and the positional arguments after
-`FILE`, to the script. Exit code: the script's exit code (codes outside
-`0..=255` exit with 255), 1 for a runtime error or `?` failure, 2 for
-compile errors, 3 for limit violations. If the policy allows `TimeZone`,
-`time.local_zone()` returns the system time zone.
+Arguments after `--` and positional arguments after `FILE` are passed to the
+script (`env.args()`). Exit codes: the script's exit code (clamped to 255 if
+outside `0..=255`), `1` for an uncaught runtime error or `?` failure, `2` for a
+compile or usage error, and `3` for a resource limit error. If the policy
+allows `TimeZone`, `time.local_zone()` returns the host system time zone.
 
-The CLI asks on the controlling terminal (`/dev/tty`; the console on
-Windows), never on the script's standard streams, so piped input cannot
-answer. Without a terminal, or with `--no-prompt`, the CLI denies the request
-for the rest of the run and writes the option that allows it to standard
-error (`sand: denied: read /data/a.txt (--allow='read /data/a.txt' allows
-it)`). Answers:
-`y` (allow once), `a` (always), `n` or an empty line (deny once), `N`
-(never); end of input denies, and the CLI asks again after an unrecognized
-answer, up to three times before it denies. Control characters in the request are escaped,
-as are Unicode format characters (such as bidirectional overrides), line and
-paragraph separators, spaces other than U+0020 and combining marks. Before
-each question the terminal's rendition is reset (soft terminal reset and SGR
-reset, on a fresh line) and a marker line is shown, so output the script left
-concealed or styled cannot hide or imitate the question.
+Interactive prompts read and write directly on the controlling terminal
+(`/dev/tty` on Unix; the console on Windows) rather than the standard streams.
+If a controlling terminal is unavailable or `--no-prompt` is passed, the CLI
+denies the request for the remainder of the run and prints the corresponding
+`--allow` flag to standard error
+(`sand: denied: read /data/a.txt (--allow='read /data/a.txt' allows it)`).
+Valid prompt responses are `y` (allow once), `a` (allow always), `n` or an
+empty line (deny once), and `N` (deny always); end-of-input denies the request,
+and the CLI re-prompts up to three times on unrecognized input before denying.
+Before printing a prompt, the CLI escapes control characters, Unicode format
+characters, non-ASCII spaces, line/paragraph separators, and combining marks in
+the request text, resets terminal attributes (soft reset and SGR reset on a new
+line), and prints a separator line so script output cannot disguise the prompt.
 
 ### 17.6 `sand repl [OPTIONS]`
 

@@ -266,7 +266,7 @@ fn check(vm: &mut Vm, t: &mut Target, access: Access, shown: &str) -> Result<(),
     };
     if !t.exact() {
         let space = vm.host.fs.space();
-        let decided = if vm.has_answers() { None } else { vm.host.policy.decision_for_any_spelling(&cap(&t.path), space) };
+        let decided = if vm.has_answers() { None } else { vm.host.policy.case_insensitive_decision(&cap(&t.path), space) };
         match decided {
             Some(Decision::Allow) => return Ok(()),
             Some(_) => return Err(denied(&cap(&t.path), shown)),

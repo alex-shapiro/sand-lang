@@ -1,6 +1,4 @@
-//! Policy files: parsing, linting and checking never panic, formatting is
-//! idempotent, and the display of the rules parses to rules that decide the
-//! same way.
+//! Fuzz target for policy parsing, linting, formatting, and round-trip serialization.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use sandlang::Capability;

@@ -61,7 +61,7 @@ class Step:
 
 
 def quoted(path: Path) -> str:
-    """`path` as a quoted word of a policy rule."""
+    """Format `path` as a quoted policy rule word."""
     return '"' + str(path).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 

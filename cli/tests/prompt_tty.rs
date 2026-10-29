@@ -1,13 +1,4 @@
-//! End-to-end tests of the prompts of `sand run` on a real terminal.
-//!
-//! `sand run` asks on the controlling terminal (`/dev/tty` on Unix, the
-//! console's `CONIN$`/`CONOUT$` on Windows), never on the script's standard
-//! streams. These tests run `sand` on a pseudo-terminal (a Unix pty made the
-//! child's controlling terminal, or a Windows ConPTY pseudo console) through
-//! `portable-pty`, wait for each question to appear on it, type the answer
-//! and check what the script was allowed to do. If the platform cannot
-//! provide a pseudo-terminal at all (e.g. a container without `/dev/ptmx`),
-//! they print why and pass.
+//! End-to-end tests for `sand run` terminal prompts on a pseudo-terminal.
 
 mod common;
 
@@ -159,7 +150,6 @@ fn prompt_asks_on_the_terminal() {
         (&["y", "y", "n"], ["true", "true", "false"], 3),
         (&["a"], ["true", "true", "true"], 1),
         (&["N"], ["false", "false", "false"], 1),
-        // An unrecognised answer asks again; an empty one denies.
         (&["n", "maybe", "y", ""], ["false", "true", "false"], 4),
     ];
     for (answers, want, questions) in cases {
@@ -167,15 +157,12 @@ fn prompt_asks_on_the_terminal() {
         assert_eq!(t.code, 0, "answers {answers:?}:\n{}", t.text);
         assert_eq!(t.results(), want, "answers {answers:?}:\n{}", t.text);
         assert_eq!(t.text.matches(QUESTION).count(), questions, "answers {answers:?}:\n{}", t.text);
-        // Each question follows the marker and names the file.
         assert_eq!(t.text.matches(MARKER).count(), questions - usize::from(answers.contains(&"maybe")), "{}", t.text);
         assert!(t.text.contains("a.txt?"), "{}", t.text);
     }
-    // Rules still apply first: allowed reads are not asked about.
     let Some(t) = run_on_terminal(dir.path(), &["run", "main.sand", "--allow=read ./"], &[]) else { return };
     assert_eq!((t.code, t.results()), (0, vec!["true"; 3]), "{}", t.text);
     assert!(!t.text.contains(QUESTION), "{}", t.text);
-    // `--no-prompt` denies instead of asking.
     let Some(t) = run_on_terminal(dir.path(), &["run", "main.sand", "--no-prompt"], &[]) else { return };
     assert_eq!((t.code, t.results()), (0, vec!["false"; 3]), "{}", t.text);
     assert!(!t.text.contains(QUESTION), "{}", t.text);

@@ -186,7 +186,6 @@ fn https_requests_need_tls_rules() {
     let plaintext = RulePolicy::standard().allow_net("plaintext *");
     let r = run_with(&src, |c| trusting(c).policy(plaintext));
     assert!(r.failure().contains(&format!("permission denied: GET https://localhost:{port}/")), "{}", r.failure());
-    // A TLS connection needs a TLS rule, a plain connection a `plaintext` rule.
     let src = format!(
         "import net\nprint(net.connect_tls(\"localhost\", {port}).is_ok())\nprint(net.connect(\"localhost\", {port}).unwrap_err().message)"
     );

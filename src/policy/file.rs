@@ -22,12 +22,12 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// A parsed security policy file.
+/// A parsed policy file.
 #[derive(Clone, Debug)]
 pub struct PolicyFile {
     /// Policy rules.
     pub rules: RulePolicy,
-    /// Execution limits configured by policy limit directives.
+    /// Execution limits configured by `limit` directives.
     pub limits: Limits,
 }
 
@@ -99,8 +99,7 @@ impl Word {
             .collect()
     }
 
-    /// The text of a word without quotes or set references, which may be a
-    /// keyword: a transport or a method.
+    /// Returns the word text if all parts are unquoted literals without set references.
     pub(crate) fn bare(&self) -> Option<String> {
         self.parts.iter().map(|p| if let Part::Raw(s) = p { Some(s.as_str()) } else { None }).collect()
     }
@@ -117,9 +116,7 @@ impl Word {
         out
     }
 
-    /// The word as policy file text. Quoted parts keep their quotes: a
-    /// quoted part is never a keyword or a wildcard, also where a set
-    /// reference joins it with other text.
+    /// Formats the word as policy text, preserving quotes around quoted parts.
     pub(crate) fn render(&self) -> String {
         let mut out = String::new();
         for p in &self.parts {
@@ -170,7 +167,6 @@ fn quote(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-/// The transport that the bare word `word` names, in any case.
 pub(crate) fn transport(word: &str) -> Option<Transports> {
     if word.eq_ignore_ascii_case("tls") {
         Some(Transports::TLS)
@@ -181,9 +177,7 @@ pub(crate) fn transport(word: &str) -> Option<Transports> {
     }
 }
 
-/// Why the bare word `word`, where a transport may stand, is not one: the
-/// name of a scheme or protocol.
-fn not_a_transport(word: &str) -> Option<String> {
+fn invalid_transport_hint(word: &str) -> Option<String> {
     let lower = word.to_ascii_lowercase();
     let advice = match lower.as_str() {
         "http" => "write `plaintext` for unencrypted connections such as `http://`",
@@ -196,14 +190,9 @@ fn not_a_transport(word: &str) -> Option<String> {
     Some(format!("`{word}` is not a transport: {advice} (write `{lower}.` for a host named `{lower}`)"))
 }
 
-/// The words that name a capability after the verb.
 const KINDS: [&str; 12] = ["read", "write", "import", "net", "http", "listen", "env", "custom", "stdin", "stdout", "stderr", "timezone"];
 
-/// The fix for a word where a capability or a path may stand that is
-/// neither, but reads as a capability: in another case, a second one
-/// (`read ./x write ./y`), a verb, one joined to its argument by `:` or
-/// `=` (`read:./x`), or a URL.
-fn misread(word: &str) -> Option<String> {
+fn invalid_capability_hint(word: &str) -> Option<String> {
     let lower = word.to_ascii_lowercase();
     if KINDS.contains(&lower.as_str()) {
         return Some(if lower == word {
@@ -227,11 +216,8 @@ fn misread(word: &str) -> Option<String> {
     })
 }
 
-/// Whether the bare word `word` has a meaning as a keyword in some
-/// position: a transport, a scheme where a transport may stand, or a
-/// method.
 fn is_keyword(word: &str) -> bool {
-    transport(word).is_some() || not_a_transport(word).is_some() || is_method(word)
+    transport(word).is_some() || invalid_transport_hint(word).is_some() || is_method(word)
 }
 
 pub(crate) fn lex(text: &str) -> (Vec<Line>, Vec<PolicyError>) {
@@ -334,7 +320,6 @@ pub(crate) fn parse(text: &str, base: &Path, home: Option<&Path>) -> Result<Pars
     let (lines, mut errors) = lex(text);
     let mut cx = Context { base, home, sets: FxHashMap::default(), used: FxHashMap::default() };
     let mut sets = Vec::new();
-    // Sets first: rules may use them wherever they are defined.
     for (i, line) in lines.iter().enumerate() {
         let Some(first) = line.words.first() else { continue };
         if first.plain().as_deref() != Some("let") {
@@ -425,15 +410,15 @@ impl Context<'_> {
         rules: &mut Vec<Rule>,
     ) -> Result<(), (usize, String)> {
         let verb_text = verb(decision);
-        let Some((what, items)) = args.split_first() else {
-            let what = if decision == Decision::Prompt { "prompt for" } else { verb_text };
-            return Err((verb_word.column, format!("expected what to {what}: a path, or {CAPABILITIES}")));
+        let Some((first_arg, rest_args)) = args.split_first() else {
+            let action = if decision == Decision::Prompt { "prompt for" } else { verb_text };
+            return Err((verb_word.column, format!("expected what to {action}: a path, or {CAPABILITIES}")));
         };
-        let keyword = what.plain().filter(|w| w.bytes().all(|b| b.is_ascii_lowercase() || b == b'-'));
-        let (kind, items) = match keyword.as_deref() {
-            Some(k @ ("read" | "write" | "import" | "net" | "http" | "listen" | "env" | "custom")) => (k, items),
+        let keyword = first_arg.plain().filter(|w| w.bytes().all(|b| b.is_ascii_lowercase() || b == b'-'));
+        let (kind, rest_args) = match keyword.as_deref() {
+            Some(k @ ("read" | "write" | "import" | "net" | "http" | "listen" | "env" | "custom")) => (k, rest_args),
             Some(k @ ("stdin" | "stdout" | "stderr" | "timezone")) => {
-                if let Some(extra) = items.first() {
+                if let Some(extra) = rest_args.first() {
                     return Err((extra.column, format!("`{verb_text} {k}` takes no arguments")));
                 }
                 let kind = match k {
@@ -442,23 +427,24 @@ impl Context<'_> {
                     "stdout" => RuleKind::Stdout,
                     _ => RuleKind::Stderr,
                 };
-                rules.push(file_rule(decision, kind, Origin { line, column: what.column, text: k.to_string() }));
+                rules.push(file_rule(decision, kind, Origin { line, column: first_arg.column, text: k.to_string() }));
                 return Ok(());
             }
             Some("private-net") => {
                 return Err((
-                    what.column,
+                    first_arg.column,
                     "`private-net` is not a capability: name internal destinations in net rules, e.g. `allow net localhost:8080 10.0.0.0/8`"
                         .into(),
                 ));
             }
             Some(k) => {
-                let message = misread(k).unwrap_or_else(|| format!("unknown capability `{k}` (expected a path, or {CAPABILITIES})"));
-                return Err((what.column, message));
+                let message =
+                    invalid_capability_hint(k).unwrap_or_else(|| format!("unknown capability `{k}` (expected a path, or {CAPABILITIES})"));
+                return Err((first_arg.column, message));
             }
             None => ("files", args),
         };
-        if items.is_empty() {
+        if rest_args.is_empty() {
             let hint = match kind {
                 "custom" => format!("expected `{verb_text} custom NAME [DETAIL]`"),
                 "http" => {
@@ -466,15 +452,17 @@ impl Context<'_> {
                 }
                 _ => format!("`{verb_text} {kind}` needs at least one argument"),
             };
-            return Err((what.column, hint));
+            return Err((first_arg.column, hint));
         }
         if kind == "custom" {
-            let [name, detail @ ..] = items else { unreachable!() };
+            let [name, detail @ ..] = rest_args else { unreachable!() };
             if detail.len() > 1 {
                 return Err((detail[1].column, format!("expected `{verb_text} custom NAME [DETAIL]`")));
             }
             let details = match detail.first() {
-                Some(d) => self.expand(d)?.into_iter().map(|w| custom_part(&w).map_err(|m| (d.column, m))).collect::<Result<_, _>>()?,
+                Some(d) => {
+                    self.expand(d)?.into_iter().map(|w| parse_custom_pattern(&w).map_err(|m| (d.column, m))).collect::<Result<_, _>>()?
+                }
                 None => vec![None],
             };
             let names = self.expand(name)?;
@@ -482,7 +470,7 @@ impl Context<'_> {
                 return Err((name.column, format!("`{verb_text} custom` stands for more than {MAX_EXPANSION} rules")));
             }
             for word in names {
-                let name_pattern = custom_part(&word).map_err(|m| (name.column, m))?;
+                let name_pattern = parse_custom_pattern(&word).map_err(|m| (name.column, m))?;
                 for detail in &details {
                     let kind = RuleKind::Custom(name_pattern.clone(), detail.clone());
                     rules.push(file_rule(decision, kind, Origin { line, column: name.column, text: word.render() }));
@@ -493,7 +481,7 @@ impl Context<'_> {
         let mut methods: Option<Vec<String>> = None;
         let mut transports = Transports::empty();
         let mut urls = 0;
-        for item in items {
+        for item in rest_args {
             for word in &self.expand(item)? {
                 let bare = word.bare();
                 if matches!(kind, "net" | "http")
@@ -508,7 +496,7 @@ impl Context<'_> {
                         continue;
                     }
                     if urls == 0
-                        && let Some(hint) = not_a_transport(bare)
+                        && let Some(hint) = invalid_transport_hint(bare)
                     {
                         return Err((item.column, hint));
                     }
@@ -552,19 +540,17 @@ impl Context<'_> {
             }
         }
         if kind == "http" && urls == 0 {
-            let last = items.last().unwrap_or(what);
+            let last = rest_args.last().unwrap_or(first_arg);
             let after = if methods.is_some() { "methods" } else { "transports" };
             return Err((last.column, format!("`{verb_text} http` needs a URL pattern after its {after}, e.g. `api.example.com/v1`")));
         }
         if kind == "net" && urls == 0 {
-            let last = items.last().unwrap_or(what);
+            let last = rest_args.last().unwrap_or(first_arg);
             return Err((last.column, format!("`{verb_text} net` needs a host after its transports, e.g. `localhost:8080`")));
         }
         Ok(())
     }
 
-    /// The words that `word` stands for: one for each combination of the
-    /// values of its sets.
     fn expand(&mut self, word: &Word) -> Result<Vec<Word>, (usize, String)> {
         if !word.parts.iter().any(|p| matches!(p, Part::Ref(_))) {
             return Ok(vec![word.clone()]);
@@ -572,12 +558,11 @@ impl Context<'_> {
         word.expand(&self.sets, &mut self.used).map_err(|m| (word.column, m))
     }
 
-    /// The path pattern of `text`, whose word was not quoted if `bare`.
     fn path(&self, text: &[Tok], bare: bool) -> Result<PathPattern, String> {
         let flat: String = text.iter().map(|t| t.0).collect();
         let sep = |c: char| c == '/' || (cfg!(windows) && c == '\\');
         let unanchored = || {
-            misread(&flat).filter(|_| bare).unwrap_or_else(|| {
+            invalid_capability_hint(&flat).filter(|_| bare).unwrap_or_else(|| {
                 format!(
                     "path `{flat}` is not anchored: write `./{flat}` for `{}`, `~/...`, an absolute path, or `**/{flat}` for that name anywhere",
                     self.base.join(&flat).display()
@@ -585,7 +570,6 @@ impl Context<'_> {
             })
         };
         let starts = |s: &str| flat.starts_with(s) && flat[s.len()..].chars().next().is_none_or(sep);
-        // `**` matches every path on every root, including other drives on Windows.
         let anywhere = text.len() >= 2 && text[..2].iter().all(|t| t.0 == '*' && t.1) && text.get(2).is_none_or(|t| sep(t.0));
         let (mut prefix, rest): (PathBuf, &[Tok]) = if anywhere {
             (PathBuf::new(), text)
@@ -624,9 +608,7 @@ impl Context<'_> {
     }
 }
 
-/// A custom capability's name or detail: `None` for an unquoted `*`, which
-/// matches every name or detail.
-fn custom_part(word: &Word) -> Result<Option<String>, String> {
+fn parse_custom_pattern(word: &Word) -> Result<Option<String>, String> {
     let tokens = word.tokens();
     match tokens.as_slice() {
         [('*', true)] => Ok(None),
@@ -671,10 +653,8 @@ fn limit(l: &mut Limits, args: &[Word]) -> Result<(), String> {
     Ok(())
 }
 
-/// Generates a policy rule string for a capability prompt response, or
-/// `None` if no rule decides exactly `cap` (a path that is not UTF-8 or
-/// that has a line break, an HTTP request whose path has an encoded `/`,
-/// or a resolved address).
+/// Formats a policy rule that allows or denies `cap`, or returns `None` if
+/// `cap` cannot be represented as a single rule.
 pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
     let decision = if allow { Decision::Allow } else { Decision::Deny };
     let path = |p: &Path| p.to_str().map(|s| quote_part(s, true));
@@ -694,13 +674,11 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
                 "http" => transport_words(Transports::PLAINTEXT, decision),
                 _ => return None,
             };
-            // The script picks the method, which the parser must read as one.
             let method = method.to_ascii_uppercase();
-            if alt.is_some() || !is_method(&method) || transport(&method).is_some() || not_a_transport(&method).is_some() {
+            if alt.is_some() || !is_method(&method) || transport(&method).is_some() || invalid_transport_hint(&method).is_some() {
                 return None;
             }
-            // The port also keeps the parser from reading a numeric first
-            // path segment after an IP address as a CIDR prefix length.
+            // Always include the port so a numeric first path segment after an IP address is not parsed as a CIDR prefix length.
             let mut url = format_host_port(host, *port);
             for name in &names {
                 url.push('/');
@@ -710,7 +688,6 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
             format!("http {transport_word}{method} {url}")
         }
         Capability::NetListen(addr) => format!("listen {}", quote_part(&addr.to_string(), true)),
-        // `Env("*")` asks for every variable, which `env *` allows.
         Capability::Env(name) if name == "*" => "env *".into(),
         Capability::Env(name) => format!("env {}", quote_part(name, true)),
         Capability::Stdin => "stdin".into(),
@@ -720,7 +697,6 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
         Capability::Custom { name, detail } => format!("custom {} {}", quote_part(name, true), quote_part(detail, true)),
         Capability::NetAddr { .. } => return None,
     };
-    // Policy text cannot hold a line break, even in quotes.
     (!rule.contains(['\n', '\r'])).then(|| format!("{} {rule}", verb(decision)))
 }
 
@@ -761,7 +737,7 @@ impl fmt::Display for Rule {
                 }
                 if let HostKind::Ip(ip, _) = url.host.kind
                     && url.host.port.is_none()
-                    && url.path.first().is_some_and(looks_like_prefix_length)
+                    && url.path.first().is_some_and(is_numeric_prefix)
                 {
                     write!(f, "/{}", if ip.is_ipv6() { 128 } else { 32 })?;
                 }
@@ -789,8 +765,7 @@ impl fmt::Display for Rule {
     }
 }
 
-/// A host pattern as policy file text: a host named like a keyword (a
-/// transport, a scheme or a method) gets a trailing dot.
+/// Formats a host pattern as policy text, appending a trailing dot if the hostname matches a keyword.
 fn host_text(pattern: &NetPattern) -> String {
     match &pattern.kind {
         HostKind::Host(h) if is_keyword(h) => {
@@ -801,17 +776,12 @@ fn host_text(pattern: &NetPattern) -> String {
     }
 }
 
-/// Whether a URL pattern's first path segment `seg`, after an IP address
-/// without a port, reads as a prefix length (`10.0.0.1/8`) unless the
-/// address has its full length (`10.0.0.1/32/8`).
-fn looks_like_prefix_length(seg: &Seg) -> bool {
+fn is_numeric_prefix(seg: &Seg) -> bool {
     let Seg::Lit(name) = seg else { return false };
     let digits = name.split(':').next().unwrap_or_default();
     !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// The transport words of a rule with `decision` that matches `transports`,
-/// each followed by a space (none for the default of the decision).
 fn transport_words(transports: Transports, decision: Decision) -> &'static str {
     if transports == Transports::default_for(decision) {
         ""
@@ -824,9 +794,6 @@ fn transport_words(transports: Transports, decision: Decision) -> &'static str {
     }
 }
 
-/// A segment of a pattern as policy file text, with its names written by
-/// `name(text, first)`, where `first` tells whether the text starts the
-/// segment.
 fn render_seg(seg: &Seg, name: impl Fn(&str, bool) -> String) -> String {
     match seg {
         Seg::Lit(s) => name(s, true),
@@ -839,8 +806,7 @@ fn render_seg(seg: &Seg, name: impl Fn(&str, bool) -> String) -> String {
     }
 }
 
-/// Parses a byte count with an optional `K`, `M`, or `G` binary suffix. Values
-/// that overflow saturate.
+/// Parses a byte count with an optional `K`, `M`, or `G` binary suffix, saturating on overflow.
 pub fn parse_size(s: &str) -> Result<usize, String> {
     parse_size_u64(s).map(crate::vm::value::u64_to_usize_saturating)
 }
@@ -1001,7 +967,7 @@ mod tests {
     }
 
     #[test]
-    fn deny_rules_match_other_spellings_and_allow_rules_do_not() {
+    fn deny_rules_match_case_insensitively_and_allow_rules_do_not() {
         let p = parse("allow ./data\ndeny ./data/secrets\nallow read ./data/Secrets/public");
         assert_eq!(read(&p, "/base/data/SECRETS/x"), Deny);
         assert_eq!(read(&p, "/base/data/ſecrets/x"), Deny);
@@ -1057,7 +1023,6 @@ mod tests {
         assert_eq!(http(&p, "GET", "https://a.example.org:8080/api/v1/items/3"), Prompt, "a `plaintext` rule");
         assert_eq!(http(&p, "GET", "http://a.example.org:8080/api/admin/items"), Deny, "a tie");
         assert_eq!(http(&p, "GET", "http://localhost:3000/"), Allow, "named explicitly");
-        // Paths are compared as servers see them.
         assert_eq!(http(&p, "POST", "https://api.github.com/repos/me/../you/x"), Prompt);
         assert_eq!(http(&p, "POST", "https://api.github.com/repos/%6De/x"), Allow);
         assert_eq!(http(&p, "POST", "https://api.github.com/repos/me%2F..%2F..%2Fyou/x"), Prompt, "%2F may be a separator");
@@ -1106,14 +1071,13 @@ mod tests {
         assert_eq!(http(&p, "GET", "http://localhost:8080/x"), Allow);
         assert_eq!(http(&p, "GET", "https://localhost:8080/x"), Prompt);
         assert_eq!(http(&p, "POST", "http://localhost:8080/x"), Prompt);
-        // `net` rules decide HTTP requests by transport, too.
         assert_eq!(http(&p, "PUT", "https://db.example.com:5432/"), Allow);
         assert_eq!(http(&p, "PUT", "http://db.example.com:5432/"), Prompt);
         assert_eq!(http(&p, "PUT", "http://evil.com/"), Deny);
         assert_eq!(
             parse("allow net tls. plaintext.").rules.to_string(),
             "allow net tls.\nallow net plaintext.\n",
-            "a trailing dot names a host"
+            "a trailing dot specifies a hostname"
         );
         assert_eq!(
             errors("allow net localhost tls\nallow net tls\nallow http https://a.com\nallow http http://a.com/x"),
@@ -1240,7 +1204,6 @@ mod tests {
             errors("allow net \"*\"\nallow net \"*\".a.com\nallow http GET \"*\"/x\nallow listen \"*\":80"),
             [1, 2, 3, 4].map(|line| format!("{line}:{}: {message}", if line == 3 { 16 } else { 11 + (line == 4) as usize * 3 }))
         );
-        // A saved answer for a name with `*` decides that name only.
         for name in ["AWS_*", "**", "A*B"] {
             let p = parse(&rule_for(&Capability::Env(name.into()), true).unwrap());
             let env = |name: &str| decide(&p, Capability::Env(name.into()));
@@ -1312,7 +1275,6 @@ allow http GET a.com tls"
             ]
         );
         assert_eq!(parse("allow net udp. wss.").rules.to_string(), "allow net udp.\nallow net wss.\n");
-        // Quoted and dotted words are hosts.
         let p = parse("allow net \"tls\" http. a.com https\nallow http \"plaintext\"/x");
         assert_eq!(p.rules.to_string(), "allow net tls.\nallow net http.\nallow net a.com\nallow net https.\nallow http plaintext./x\n");
         assert_eq!(parse(&p.rules.to_string()).rules.to_string(), p.rules.to_string());
@@ -1476,7 +1438,6 @@ allow http GET a.com tls"
         for cap in &caps {
             for allow in [true, false] {
                 let rule = rule_for(cap, allow).unwrap_or_else(|| panic!("no rule for {cap:?}"));
-                // With the rule, a policy that would otherwise ask decides.
                 let p = parse(&rule);
                 let want = if allow { Allow } else { Deny };
                 assert_eq!(decide(&p, cap.clone()), want, "{rule}");
@@ -1494,7 +1455,6 @@ allow http GET a.com tls"
         assert_eq!(rule_for(&Capability::Env("A\rB".into()), true), None);
         let p = parse(&rule_for(caps.last().unwrap(), true).unwrap());
         assert_eq!(decide(&p, Capability::NetListen("[::1]:22".parse().unwrap())), Prompt);
-        // A script picks the method: one that reads as a keyword cannot be saved as a rule.
         let request = |method: &str| Capability::Http {
             method: method.into(),
             scheme: "https".into(),
@@ -1509,8 +1469,6 @@ allow http GET a.com tls"
         assert_eq!((decide(&p, request("PURGE")), decide(&p, request("DELETE"))), (Allow, Prompt));
     }
 
-    /// A word of the policy round-trip property: quoted and unquoted
-    /// wildcards, keywords, comment characters and escapes.
     fn word() -> impl proptest::strategy::Strategy<Value = String> {
         use proptest::strategy::Strategy;
         let words = [
@@ -1544,7 +1502,6 @@ allow http GET a.com tls"
         proptest::sample::select(words.to_vec()).prop_map(str::to_string)
     }
 
-    /// A rule of the policy round-trip property.
     fn line() -> impl proptest::strategy::Strategy<Value = String> {
         use proptest::prelude::*;
         let verb = prop::sample::select(vec!["allow", "deny", "prompt"]);
@@ -1583,8 +1540,6 @@ allow http GET a.com tls"
     }
 
     proptest::proptest! {
-        /// The display of a policy is policy text for the same rules, in
-        /// any directory.
         #[test]
         fn displayed_policies_reparse_to_the_same_rules(line in line()) {
             let Ok(file) = PolicyFile::parse(&line, Path::new("/base"), Some(Path::new("/home/me"))) else { return Ok(()) };
@@ -1651,20 +1606,19 @@ allow http GET a.com tls"
         );
         assert_eq!(read(&p, "/base/out/x"), Allow);
         assert_eq!(write(&p, "/base/out/x"), Prompt);
-        assert_eq!(write(&p, "/base/OUT/x"), Prompt, "prompt rules match other spellings");
+        assert_eq!(write(&p, "/base/OUT/x"), Prompt, "prompt rules match case-insensitively");
         assert_eq!(write(&p, "/base/src/x"), Allow);
         assert_eq!(http(&p, "POST", "https://api.example.com/x"), Prompt);
         assert_eq!(http(&p, "GET", "https://api.example.com/x"), Allow);
         assert_eq!(decide(&p, Capability::Env("AWS_KEY".into())), Prompt);
         assert_eq!(decide(&p, Capability::Env("*".into())), Prompt, "all variables include the asked ones");
-        // A path with an encoded separator gets the stricter decision of its two readings.
         let p = parse("allow http a.com b.com\nprompt http a.com/x/y");
         assert_eq!(http(&p, "GET", "https://a.com/x%2Fy"), Prompt);
         assert_eq!(http(&p, "GET", "https://a.com/x%2Fz"), Allow);
         assert_eq!(http(&p, "GET", "https://b.com/x%2Fy"), Allow);
         let p = parse("allow http a.com/x\nprompt http a.com/x/y");
         assert_eq!(http(&p, "GET", "https://a.com/x/z"), Allow);
-        assert_eq!(http(&p, "GET", "https://a.com/x%2Fz"), Prompt, "`x/z` as one name has no rule");
+        assert_eq!(http(&p, "GET", "https://a.com/x%2Fz"), Prompt, "`x/z` as a single segment has no matching rule");
         let p = parse("prompt http a.com\ndeny http a.com/x/y");
         assert_eq!(http(&p, "GET", "https://a.com/x%2Fy"), Deny);
         let p = parse("prompt read ./data\nallow read ./data\ndeny env X\nprompt env Y");
@@ -1705,7 +1659,6 @@ allow http GET a.com tls"
                 "allow custom db \"drop table\"",
             ]
         );
-        // The text means the same rules.
         let again = parse(&lines.join("\n"));
         assert_eq!(again.rules.to_string(), shown);
     }
@@ -1771,8 +1724,6 @@ allow http GET a.com tls"
         assert_eq!(parse_size("2k"), Ok(2048));
         assert_eq!(parse_size("1G"), Ok(1 << 30));
         assert!(parse_size("-1").is_err());
-        // Byte counts past 4 GiB keep their value where they are `u64`
-        // (the output limit) and saturate where they are `usize`.
         assert_eq!(parse_size_u64("8G"), Ok(8 << 30));
         assert_eq!(parse_size_u64("99999999999G"), Ok(u64::MAX));
         assert_eq!(parse_size("8589934592").map(|n| n as u64), Ok((8u64 << 30).min(usize::MAX as u64)));

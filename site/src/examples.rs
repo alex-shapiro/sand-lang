@@ -89,7 +89,7 @@ pub fn check_sand(runtime: &tokio::runtime::Runtime, source: &str, mode: Mode, f
 
 /// Default sandbox policy for documentation examples and playground snippets.
 pub const POLICY: &str = "\
-# Allow reading and writing in-memory files, printing, and imports; deny all other capabilities.
+# Allow in-memory file access, standard streams, and module imports.
 allow write /
 allow stdout
 allow stderr

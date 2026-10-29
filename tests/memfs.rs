@@ -204,8 +204,6 @@ fn checks_and_lints_see_the_memory_file_system() {
     assert!(warnings.iter().any(|w| w.message.contains("unused")), "{warnings:?}");
 }
 
-/// A rule's path is canonicalised on the host (`/tmp` is a symlink to
-/// `/private/tmp` on macOS) but matches memory paths as written.
 #[cfg(all(feature = "os", target_os = "macos"))]
 #[test]
 fn rules_match_memory_paths_as_written() {

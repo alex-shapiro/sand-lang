@@ -98,87 +98,53 @@ Follow-up work, roughly in priority order.
       checking `Capability::NetAddr`, and remove the IP-literal shortcut from
       `RulePolicy::resolved_verdict`.
 - [ ] Support HTTP paths with encoded separators `%2F` and `%5C` in `rule_for`
-      so that "always" prompt answers can save rules for those requests.
-- [ ] Give HTTP paths with `;` parameters a second reading without them, as
-      for encoded separators: Tomcat and Spring remove `;params` from each
-      segment, so `deny http a.com/admin/**` does not stop `GET
-      /admin;x/secret` or `/public/..;/admin` (`url_segments` in `net.rs`).
-      Also, `percent_decode` keeps a byte that is not UTF-8 as the text
-      `%FF`, which is also the decoding of `%25FF`, so `allow http
-      a.com/%25FF` also allows `GET /%FF`.
-- [ ] Prompt for a resolved address that a `prompt` address rule decides
-      (for example, a name that `allow net *` allows and that resolves to
-      `10.0.0.5`) instead of denying it. The check runs after the native call
-      returned to the event loop, so it needs a way to suspend the
-      connection for a prompt answer.
-- [ ] Give `Capability::NetAddr` the request that its host came from (method
-      and URL; it has the transport), so that custom policies and
-      `RulePolicy::check` decide resolved addresses as
-      `RulePolicy::check_resolved` does.
-- [ ] Make "always" answers saved with `rule_for` as narrow as the prompt.
-      A file rule is a prefix, so `allow read /x/data` from the prompt
-      `read /x/data` also allows `/x/data/secret/key.pem`. An http rule
-      without a path allows every path, so the prompt `GET
-      https://example.com/` saves a rule that also allows `GET /admin`. The
-      engine keeps the exact capability, so the same answer decides
-      differently in the run that asked and in the next run (the
-      playground). The path pattern language has no "this path only" form.
-- [ ] A saved `allow env *` (from an "always" answer to `env.vars()`) does
-      not decide the next `Env("*")` request while a deny or prompt rule
-      decides some variable: the listing gets the strictest decision of any
-      variable. `rule_for(Env("*"))` cannot express "allow the listing", so
-      it should return `None` or the listing needs its own rule.
-- [ ] Environment rules compare names case-sensitively (`env_names` in
-      `rules.rs`), but Windows environment names are case-insensitive, so
-      there `env.get("aws_secret_access_key")` reads the variable that `deny
-      env AWS_SECRET_ACCESS_KEY` denies. Fold names on Windows as file rules
-      do.
-- [ ] A denial by a command-line rule cites "(line 1)" for every flag, and
-      a denial by a policy file rule gives no file name
-      (`RulePolicy::describe_rule` knows only `Origin::line`). Give `Origin`
-      a source (`--deny=...` or the file).
-- [ ] The lint reports only identical repeats of rules without patterns
-      (`env`, `stdin`, `stdout`, `stderr`, `timezone`, `custom`, `listen`).
-      It misses overridden pairs (`allow env HOME` + `deny env HOME`, `prompt
-      stdin` + `allow stdin`), subsumed rules (`allow env *` + `allow env
-      HOME`), and a `prompt net a.com` beside `allow net a.com`. It also
-      misses `prompt write **` beside `allow **` (the allow rule always wins),
-      an allow rule that a `deny net localhost` always overrides (`allow net
-      app.localhost`: `NetPattern::covers` does not know that `localhost`
-      also matches the names under it), and a `deny env "AWS_*"` whose quoted
-      `*` matches no real variable.
-- [ ] The file rule builders keep a relative path as written, so the display
-      of `RulePolicy::new().allow_read("data")` (`allow read data`) does
-      not parse, and `deny_read("~/x")` or `deny_read("./x")` display as text
-      that parses to a home or base relative rule. Relative paths resolve
-      against the process (host) or `/` (`memory_path`), so the builders
-      need one meaning for them (or must reject them) before the display
-      can write them.
-- [ ] The engine remembers "always" answers per exact capability
-      (`Host::always`), so answering "always" to `write /x/o.txt` asks again
-      for `read /x/o.txt`, although a write rule also allows reading.
-      Remember the answer as the rule that `rule_for` gives instead.
-- [ ] If the policy denies some addresses of a name and the connection to
-      the others fails, the error shows only the connection error (`io:
-      Connection refused`), not the denied addresses and their rule
-      (`resolve_allowed` in `src/stdlib/net.rs`).
-- [ ] Lint rules whose words a reader may misread: `deny http LOCALHOST
-      a.com` reads `LOCALHOST` as a method (any upper-case word is one),
-      and `allow http purge a.com` reads `purge` as a host.
-- [ ] Let hosts persist "always" prompt answers: a hook that receives the
-      answer as a rule (`rule_for`) to save, so that a host such as Ash
-      Control can load it into the policy at the next start instead of
-      asking again.
-- [ ] Make the CLI prompter (and document for hosts) warn before allowing a
-      plaintext connection, and show the addresses that a name resolved to.
-- [ ] Simplify the terms of the policy API: "capability" (a request kind),
-      `Capability::Custom` (a request kind of a host module) and
-      `CustomPolicy` (a host-defined policy) are easy to confuse. For
-      example, rename `Capability::Custom` to `Capability::Module`.
-- [ ] Remove `CustomPolicy` (`Config::custom_policy`) once Ash Control
-      decides with rules: rules then need a shared, updatable form, since
-      Ash applies a grant to all conversations and resets the policy without
-      restarting the interpreter.
+      so that "always" prompt answers can generate rules for those requests.
+- [ ] Evaluate HTTP paths that contain `;` parameters both with and without
+      matrix parameters in `url_segments` (`src/policy/net.rs`) so that `deny
+      http a.com/admin/**` blocks `/admin;x/secret` and `/public/..;/admin`.
+      Also distinguish raw non-UTF-8 bytes from percent-encoded `%25` sequences
+      in `percent_decode` so that `allow http a.com/%25FF` does not match
+      `/%FF`.
+- [ ] Support interactive prompts for resolved IP addresses that match a
+      `prompt` address rule instead of denying them during address resolution.
+- [ ] Include the originating HTTP method and URL on `Capability::NetAddr` so
+      that `CustomPolicy` and `RulePolicy::check` evaluate resolved addresses
+      with full request context.
+- [ ] Add exact-file and exact-path rule syntax so that `rule_for` generates
+      rules that match only the prompted file or URL path instead of a directory
+      subtree or host prefix.
+- [ ] Separate the `env.vars()` listing capability from `Capability::Env("*")`
+      or return `None` from `rule_for(&Capability::Env("*"))`, because `allow
+      env *` does not override existing `deny` or `prompt` rules on individual
+      variables.
+- [ ] Fold environment variable names case-insensitively on Windows in
+      `RulePolicy` to match Windows environment variable lookup.
+- [ ] Store the source file name or CLI flag on `Origin` so that
+      `RulePolicy::describe_rule` reports the exact file or flag instead of only
+      a line number.
+- [ ] Expand `lint_policy` to detect shadowed and redundant `env`, `stdin`,
+      `stdout`, `stderr`, `timezone`, `custom`, and `listen` rules, `allow net
+      *.localhost` rules overridden by `deny net localhost`, and quoted wildcard
+      literals such as `deny env "AWS_*"`.
+- [ ] Resolve or reject relative paths in `RulePolicy` file builder methods so
+      that `Display` always emits valid, parseable policy syntax.
+- [ ] Store "always" prompt answers as `RulePolicy` rules rather than exact
+      `Capability` values so that an "always" grant for `write /x/o.txt` also
+      permits `read /x/o.txt`.
+- [ ] Include any policy-denied IP addresses in the error message if
+      `resolve_allowed` fails to connect to the remaining allowed addresses.
+- [ ] Warn in `lint_policy` if an uppercase hostname in an `http` rule is
+      parsed as an HTTP method (such as `deny http LOCALHOST a.com`) or a
+      lowercase method is parsed as a hostname (such as `allow http purge
+      a.com`).
+- [ ] Add a callback for persisting "always" prompt rules (`rule_for`) so that
+      host applications can save granted rules across sessions.
+- [ ] Warn in the CLI prompter before allowing plaintext network connections,
+      and display the resolved IP addresses in the prompt.
+- [ ] Rename `Capability::Custom` (for example, to `Capability::Module`) to
+      distinguish native-module capabilities from `CustomPolicy`.
+- [ ] Support shared, dynamically updatable `RulePolicy` instances and remove
+      `CustomPolicy` once host applications migrate to rule policies.
 
 ### Tooling
 

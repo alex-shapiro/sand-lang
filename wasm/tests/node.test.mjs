@@ -401,7 +401,6 @@ test("http requests are prompted for and denied without a rule", async () => {
     const source = `import http\nprint(http.get("http://127.0.0.1:${port}/hello").map(r => r.status))`;
     const denied = await run(source, { policy: "" });
     assert.match(denied.stdout, /permission_denied/);
-    // `allow net *` matches TLS connections: `http://` needs `plaintext`.
     const wildcard = await run(source, { policy: "allow net *" });
     assert.match(wildcard.stdout, /permission_denied/);
     const plaintext = await run(source, { policy: "allow net plaintext *" });
@@ -410,7 +409,6 @@ test("http requests are prompted for and denied without a rule", async () => {
     const prompted = await run(source, { policy: "" }, { onPrompt: (r) => (asked.push(r.description), "once") });
     assert.equal(prompted.stdout, "Ok(200)\n");
     assert.deepEqual(asked, [`GET http://127.0.0.1:${port}/hello`]);
-    // `http` rules name methods and paths.
     const routed = await run(source, { policy: `allow http plaintext GET 127.0.0.1:${port}/hello` });
     assert.equal(routed.stdout, "Ok(200)\n");
     const otherPath = await run(source, { policy: `allow http plaintext GET 127.0.0.1:${port}/other` });
@@ -456,7 +454,7 @@ test("waiting for prompt answers does not count against the time limit", async (
   assert.equal(stdout, "true\ntrue\n");
 });
 
-test("prompt requests carry the rules that answer them for good", async () => {
+test("prompt requests include the allow and deny rules", async () => {
   const requests = [];
   const source = 'import env\nimport fs\nprint(env.get("HOME"))\nprint(fs.read_text("/my notes.txt").is_ok())';
   await run(source, { files: { "/my notes.txt": "x" } }, { onPrompt: (r) => (requests.push(r), "deny") });
@@ -467,7 +465,6 @@ test("prompt requests carry the rules that answer them for good", async () => {
       ['allow read "/my notes.txt"', 'deny read "/my notes.txt"'],
     ],
   );
-  // With the rule, the next run decides without asking.
   const asked = [];
   const { stdout } = await run(source, { policy: requests.map((r) => r.allowRule).join("\n"), files: { "/my notes.txt": "x" }, env: { HOME: "/home/sand" } }, { onPrompt: (r) => (asked.push(r), "deny") });
   assert.deepEqual(asked, []);

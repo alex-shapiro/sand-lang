@@ -428,7 +428,6 @@ pub(crate) struct ClientConn {
     slot: ResourceSlot,
     /// `scheme://host[:port]`.
     origin: String,
-    /// The address connected to.
     peer: std::net::SocketAddr,
 }
 
@@ -469,9 +468,8 @@ impl Pool {
         self.idle.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// The most recently used idle connection to `origin` that is ready for
-    /// a request and whose address `policy` allows for `request`, after
-    /// closing those idle for longer than [`POOL_IDLE`].
+    /// Takes the most recently used idle connection to `origin` if `policy`
+    /// allows `request` to connect to its peer address.
     fn take(&self, origin: &str, policy: &Policy, request: &crate::policy::Capability) -> Option<ClientConn> {
         let now = self.clock.now();
         let mut idle = self.idle();
@@ -515,7 +513,6 @@ impl Pool {
     }
 }
 
-/// Connects to `url` for a `method` request, at an address the policy allows.
 async fn connect(
     policy: &Policy,
     network: &dyn Network,

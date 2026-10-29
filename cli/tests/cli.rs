@@ -1,5 +1,4 @@
-//! End-to-end tests of the `sand` command-line tool: subcommands, flag
-//! parsing, exit codes and standard streams. `prompt_tty.rs` tests prompts.
+//! End-to-end tests for the `sand` CLI. Terminal prompt tests are in `prompt_tty.rs`.
 
 mod common;
 
@@ -20,10 +19,8 @@ impl std::fmt::Debug for Out {
     }
 }
 
-/// Runs `sand ARGS` in `dir`, feeding `stdin` (closed after writing).
-/// `run`, `test` and `repl` get `--no-prompt`:
-/// the CLI asks on the controlling terminal, which a test run may share.
-/// `cli/tests/prompt_tty.rs` tests prompts on a pseudo-terminal.
+/// Runs `sand ARGS` in `dir` with `stdin`. Passes `--no-prompt` to `run`,
+/// `test`, and `repl` so that tests do not prompt on the controlling terminal.
 fn sand_in(dir: &Path, args: &[&str], stdin: &str, env: &[(&str, &str)]) -> Out {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_sand"));
     let mut args = args.to_vec();
@@ -875,8 +872,6 @@ fn net_rules_take_transports_and_decide_resolved_addresses() {
     assert!(removed.stderr.contains("unknown option `--allow-private-net`"), "{removed:?}");
 }
 
-/// `localhost` and the names under it are the loopback host (RFC 6761):
-/// Sand resolves them without the system resolver.
 #[test]
 fn localhost_names_reach_loopback() {
     let port = hi_server();
@@ -893,7 +888,6 @@ fn localhost_names_reach_loopback() {
     assert_eq!(o.stdout.matches("permission denied: GET http://").count(), 2, "{o:?}");
 }
 
-/// A policy file's rules add to the rules of the CLI.
 #[test]
 fn policy_files_add_to_the_cli_rules() {
     let port = hi_server();
@@ -913,8 +907,6 @@ fn policy_files_add_to_the_cli_rules() {
     }
 }
 
-/// The rules of the user (flags and a policy file) replace the CLI's
-/// default rule for the same requests, whatever their decision.
 #[test]
 fn user_rules_replace_the_defaults_for_the_same_requests() {
     let dir = script("cli-defaults", "import io\nprint(io.stdin.read_line().map_err(e => e.kind))");
@@ -925,12 +917,10 @@ fn user_rules_replace_the_defaults_for_the_same_requests() {
         sand_in(dir.path(), &args, "line\n", &[]).stdout
     };
     assert_eq!(read(&[]), "Ok(Some(\"line\"))\n");
-    // Without a prompter, a prompt denies.
     assert_eq!(read(&["--prompt=stdin"]), "Err(\"permission_denied\")\n");
     assert_eq!(read(&["--policy=p.policy"]), "Err(\"permission_denied\")\n");
     assert_eq!(read(&["--deny=stdin"]), "Err(\"permission_denied\")\n");
     assert_eq!(read(&["--allow-all", "--prompt=stdin"]), "Err(\"permission_denied\")\n");
-    // A broader rule of the user still decides what it matches.
     dir.write("lib.sand", "pub let X = 1");
     dir.write("w.sand", "import fs\nimport \"./lib.sand\"\nprint(lib.X)\nprint(fs.write_text(\"out.txt\", \"x\").map_err(e => e.kind))");
     let o = sand(dir.path(), &["run", "w.sand", "--allow-all", "--prompt=write **"]);
@@ -939,8 +929,6 @@ fn user_rules_replace_the_defaults_for_the_same_requests() {
     assert!(o.stderr.contains("cannot import `./lib.sand`: permission denied"), "{o:?}");
 }
 
-/// `--allow-all` allows what no other rule decides: `--deny` rules and the
-/// rules of a policy file still hold.
 #[test]
 fn allow_all_keeps_the_other_rules() {
     let dir = script(
@@ -993,14 +981,13 @@ fn a_blocked_stdout_does_not_outlast_the_time_limit() {
 }
 
 #[test]
-fn a_denial_without_asking_names_the_rule_that_allows_it() {
+fn denial_without_prompt_includes_the_allow_rule() {
     let dir = script("hint", "import fs\nfor i in 0..2 {\n    print(fs.read_text(\"a.txt\").is_ok())\n}\n");
     dir.write("a.txt", "A");
     let o = sand(dir.path(), &["run", "main.sand"]);
     assert_eq!((o.code, o.stdout.as_str()), (0, "false\nfalse\n"), "{o:?}");
     let path = std::fs::canonicalize(dir.path()).unwrap().join("a.txt");
     let hint = format!("sand: denied: read {} (--allow='read {}' allows it)\n", path.display(), path.display());
-    // Once per request: the answer is remembered.
     assert_eq!(o.stderr, hint, "{o:?}");
 }
 
@@ -1024,13 +1011,10 @@ fn denial_hints_are_shell_words_that_allow_the_request() {
     let o = sand(dir.path(), &["run", "main.sand"]);
     let path = std::fs::canonicalize(dir.path()).unwrap().join("it'\\''s.txt");
     assert!(o.stderr.contains(&format!("(--allow='read {}' allows it)", path.display())), "{o:?}");
-    // No hint that the escaping of control characters would change.
     let dir = script("hint-tab", "import fs\nprint(fs.read_text(\"a\\tb.txt\").is_ok())\n");
     dir.write("a\tb.txt", "A");
     let o = sand(dir.path(), &["run", "main.sand"]);
     assert!(o.stderr.starts_with("sand: denied: read ") && !o.stderr.contains("--allow"), "{o:?}");
-    // No hint where the rule would not decide the request: a prompt rule for
-    // some variables keeps the listing of all of them from `allow env *`.
     let dir = script("hint-env", "import env\nprint(env.vars().len() >= 0)\n");
     let o = sand(dir.path(), &["run", "main.sand", "--prompt=env AWS_*"]);
     assert_eq!(o.stderr, "sand: denied: read all environment variables\n", "{o:?}");

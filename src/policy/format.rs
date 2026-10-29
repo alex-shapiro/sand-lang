@@ -1,19 +1,17 @@
-//! The policy file formatter.
+//! Policy file formatter.
 
 use super::PolicyError;
 use super::file::{Line, is_method, lex, transport};
 
-/// Formats a policy file: words separated by single spaces, quotes added
-/// where needed and kept where written, transports in lower case, HTTP
-/// methods in upper case, trailing comments of consecutive lines aligned,
-/// and no runs of blank lines. Fails only on
-/// text that does not split into words (an unterminated quote).
+/// Formats a policy file into canonical whitespace, quoting, keyword case,
+/// and aligned trailing comments. Returns an error only if a quoted string is
+/// unterminated.
 pub fn format_policy(text: &str) -> Result<String, Vec<PolicyError>> {
     let (lines, errors) = lex(text);
     if !errors.is_empty() {
         return Err(errors);
     }
-    let code: Vec<String> = lines.iter().map(code).collect();
+    let code: Vec<String> = lines.iter().map(format_line_words).collect();
     let mut out = String::new();
     let mut blank = true;
     let mut i = 0;
@@ -27,7 +25,6 @@ pub fn format_policy(text: &str) -> Result<String, Vec<PolicyError>> {
             out.push('\n');
         }
         blank = false;
-        // Trailing comments of consecutive lines start in one column.
         let commented = |j: usize| !code[j].is_empty() && lines[j].comment.is_some();
         let end = if commented(i) { (i..lines.len()).find(|&j| !commented(j)).unwrap_or(lines.len()) } else { i + 1 };
         let width = (i..end).map(|j| code[j].chars().count()).max().unwrap_or(0);
@@ -45,13 +42,11 @@ pub fn format_policy(text: &str) -> Result<String, Vec<PolicyError>> {
     Ok(out)
 }
 
-/// A line's words, formatted.
-fn code(line: &Line) -> String {
+fn format_line_words(line: &Line) -> String {
     let connection = line.words.len() > 2
         && matches!(line.words[0].plain().as_deref(), Some("allow" | "deny" | "prompt"))
         && matches!(line.words[1].plain().as_deref(), Some("net" | "http"));
     let http = connection && line.words[1].plain().as_deref() == Some("http");
-    // Transports, then (in http rules) methods, as the parser reads them.
     let mut keywords = connection;
     let mut out = Vec::new();
     for (i, w) in line.words.iter().enumerate() {
@@ -125,8 +120,6 @@ mod tests {
         "localhost:8080",
     ];
 
-    /// A policy's rules as text and what it decides on some requests, or
-    /// its errors (formatting may move them to other lines).
     fn meaning(text: &str) -> Result<(String, Vec<crate::policy::Decision>), Vec<String>> {
         let file = PolicyFile::parse(text, Path::new("/base"), Some(Path::new("/home/me")))
             .map_err(|e| e.into_iter().map(|e| e.message).collect::<Vec<_>>())?;
@@ -155,7 +148,6 @@ mod tests {
         Ok((policy.to_string(), caps.iter().map(|c| policy.check_in(c, PathSpace::Memory)).collect()))
     }
 
-    /// A word of raw and quoted pieces, some of them parts of keywords.
     fn split_word() -> impl Strategy<Value = String> {
         let pieces = [
             "pl",
@@ -208,8 +200,6 @@ mod tests {
     }
 
     proptest! {
-        /// Formatting keeps the rules of policies whose words join quoted
-        /// text, raw text and sets.
         #[test]
         fn formatting_keeps_the_rules_of_split_quotes_and_sets(
             x in set_value(),
@@ -256,7 +246,6 @@ mod tests {
         assert!(format_policy("allow read \"open").is_err());
         let src = "allow http PLAINTEXT get a.com\nallow http \"get\" \"tls\"/x\nallow net TLS Plaintext a.com\n";
         let want = "allow http plaintext GET a.com\nallow http \"get\" \"tls\"/x\nallow net tls plaintext a.com\n";
-        // Quotes stay where a set reference joins them with other text, and on set values.
         for src in [
             "let x = aintext\nallow net \"pl\"{x} a.com\n",
             "let t = T\ndeny http \"GE\"{t} a.com\n",

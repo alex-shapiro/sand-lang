@@ -3,7 +3,7 @@ title = "Sandbox and policies"
 description = "Configure access to resources with policies and limits."
 +++
 
-A Sand script is isolated from the host system: the engine checks every external operation (files, network sockets, environment variables, standard input) against the policy before it executes the operation. By default, an embedding host denies what no rule allows, and `sand run` asks you.
+Sand isolates each script from the host system and checks every external operation against the sandbox policy before executing it. By default, an embedded engine denies capabilities that do not match an `allow` rule, and `sand run` prompts on the terminal.
 
 ## Capabilities
 
@@ -20,7 +20,7 @@ Each external operation requests a capability from the policy:
 | `import`                    | script module imports, by file path                      |
 | `custom`                    | custom capabilities checked by [native modules](/guide/embedding/) |
 
-Sand has neither a foreign function interface nor process-spawning APIs. Every host interaction passes through these capabilities.
+Sand does not provide a foreign function interface or process-spawning APIs. Every host interaction passes through these capabilities.
 
 ## Policy decisions
 
@@ -28,7 +28,7 @@ A policy evaluates each capability request to a decision:
 
 - **allow**: the engine performs the operation.
 - **deny**: the engine blocks the operation and returns a permission error to the script.
-- **prompt**: the engine suspends execution and asks the host prompter (`sand run` asks on the terminal). If the host has not configured a prompter, the engine denies the request. A request that no rule matches gets this decision.
+- **prompt**: the engine suspends execution and queries the host prompter (`sand run` prompts on the terminal). If the host does not configure a prompter, the engine denies the request. Capabilities that do not match any rule evaluate to `prompt`.
 
 ## Behavior on denial
 
@@ -58,7 +58,7 @@ A denied write to `stdout` or `stderr` aborts the run immediately, and a denied 
 
 ## Command-line flags
 
-`sand run`, `sand test`, and `sand repl` let scripts write to `stdout` and `stderr`, read standard input and the local time zone, and import modules. For anything else, Sand asks you on the terminal. Rules decide requests ahead of time: `--allow`, `--deny`, and `--prompt` each take one policy file rule without its verb:
+`sand run`, `sand test`, and `sand repl` allow scripts to write to `stdout` and `stderr`, read standard input and the local time zone, and import modules. For all other capabilities, Sand prompts on the terminal unless a rule matches. Pass `--allow`, `--deny`, or `--prompt` with a policy rule body to configure rules on the command line:
 
 ```sh
 sand run main.sand --allow='read ./data' --allow='write ./out'
@@ -66,22 +66,22 @@ sand run fetch.sand --allow='net api.example.com' --allow='env HOME LANG'
 sand run server.sand --allow='listen localhost:8080' --deny='net 10.0.0.0/8'
 ```
 
-| Flag              | Effect                                                      |
-| ----------------- | ----------------------------------------------------------- |
-| `--allow=RULE`    | allows what the rule matches, e.g. `--allow='read ./data'` |
-| `--deny=RULE`     | denies what the rule matches, e.g. `--deny=stdin`           |
-| `--prompt=RULE`   | asks about what the rule matches, e.g. `--prompt='write ./'` |
-| `--policy=FILE`   | rules and resource limits from a policy file                |
-| `--allow-all`     | allows what none of your rules match (only for trusted code) |
-| `--no-prompt`     | denies instead of asking                                    |
+| Flag              | Effect                                                                      |
+| ----------------- | --------------------------------------------------------------------------- |
+| `--allow=RULE`    | allows capabilities that match `RULE` (for example, `--allow='read ./data'`) |
+| `--deny=RULE`     | denies capabilities that match `RULE` (for example, `--deny=stdin`)         |
+| `--prompt=RULE`   | prompts for capabilities that match `RULE` (for example, `--prompt='write ./'`) |
+| `--policy=FILE`   | loads rules and resource limits from `FILE`                                 |
+| `--allow-all`     | allows capabilities that do not match any user rule (for trusted scripts)   |
+| `--no-prompt`     | denies unmatched and `prompt` capabilities instead of prompting             |
 
-Quote rules that contain spaces or `*`. Separate several values of one rule with spaces or commas. Relative paths start from the working directory. Allowing a directory grants access to all files and subdirectories within it. Without a terminal, or with `--no-prompt`, Sand denies what it would ask about and shows the `--allow` option that allows it.
+Quote rules that contain spaces or `*`, and separate multiple arguments in a rule with spaces or commas. Relative paths are resolved from the current working directory. Allowing a directory grants access to all files and subdirectories inside it. If `--no-prompt` is set or a controlling terminal is unavailable, Sand denies `prompt` decisions and prints the `--allow` flag that grants the capability.
 
-The default rules decide only what none of your rules match: `--prompt=stdin` asks before the script reads standard input, and `--allow-all --prompt='write **'` allows everything but asks before each write. The flags and the rules of a policy file are one set of rules, so a flag cannot loosen a `deny` rule of the file for the same pattern.
+User rules from flags and `--policy` files take precedence over the default CLI rules. For example, `--prompt=stdin` prompts before reading standard input, and `--allow-all --prompt='write **'` allows all operations except file writes, which still prompt. Flags and policy file rules belong to the same rule set, so an `--allow` flag does not override a `deny` rule of equal or higher specificity in a policy file.
 
 ## Policy files
 
-A policy file declares capability rules and resource limits in a single file, with a rule per line and `#` comments:
+A policy file declares capability rules and resource limits, with one statement per line and `#` comments:
 
 ```policy
 # Allow read/write in the project directory, except .env files.
@@ -100,7 +100,7 @@ Pass the policy file to `sand run`:
 sand run main.sand --policy=app.policy
 ```
 
-File paths in a policy file must start with `/`, `./` (resolved relative to the policy file directory), `../`, `~/`, or `**/` (any directory). `allow PATH` grants both read and write access; `allow read PATH` grants read-only access. A request that no rule matches goes to the prompter: `sand run` asks you, and a host without a prompter denies it.
+File paths in a policy file must start with `/`, `./` (relative to the policy file directory), `../`, `~/`, or `**/`. `allow PATH` grants both read and write access; `allow read PATH` grants read-only access. Capabilities that do not match any rule evaluate to `prompt`.
 
 `sand check`, `sand lint`, and `sand fmt` also operate on `.policy` files. `sand lint` warns about shadowed or redundant rules.
 
@@ -117,7 +117,7 @@ Sand canonicalizes paths and resolves `..` and symbolic links before checking th
 
 ### Prompt rules
 
-A `prompt` rule asks the user instead of deciding. Use it for operations that need a human decision each time, such as writing build output or posting to an API:
+A `prompt` rule queries the prompter instead of allowing or denying the request directly. Use `prompt` rules for operations that require confirmation inside an allowed scope, such as writing build output or sending `POST` requests:
 
 ```policy
 allow ./
@@ -125,27 +125,27 @@ prompt write ./dist
 prompt http POST api.github.com
 ```
 
-Without a prompter, a `prompt` rule denies the request.
+If the host does not configure a prompter, a `prompt` decision denies the request.
 
 ### Encrypted and plaintext connections
 
-An `allow net` or `allow http` rule matches TLS connections (`https`, `net.connect_tls`) unless it names a transport. Write `plaintext` for unencrypted connections (`http`, `net.connect`), or `tls plaintext` for both. A `deny` or `prompt` rule without a transport matches both, so it cannot miss the unencrypted connections:
+By default, `allow net` and `allow http` rules match only TLS connections (`https` and `net.connect_tls`). Specify `plaintext` to match unencrypted connections (`http` and `net.connect`), or `tls plaintext` to match both. `deny` and `prompt` rules without a transport keyword match both TLS and plaintext connections:
 
 ```policy
 allow http api.github.com            # https:// only
 allow http plaintext localhost:8080  # http:// only
 allow net tls plaintext db.internal  # both
-deny net plaintext *                 # no unencrypted connections
-deny net 10.0.0.0/8                  # neither
+deny net plaintext *                 # block unencrypted connections
+deny net 10.0.0.0/8                  # block both transports
 ```
 
-A transport does not make a rule more specific: `allow net plaintext x.example` and `deny net x.example` deny both. To allow only plaintext, write `deny net tls x.example`.
+Transport keywords do not change rule specificity: `allow net plaintext x.example` and `deny net x.example` have equal specificity, so `deny` wins for both transports. To allow only plaintext connections to a host, pair `allow net plaintext x.example` with `deny net tls x.example`.
 
 ### Resolved addresses
 
-`localhost` and every name under it (`app.localhost`) are the local machine: Sand connects them to `127.0.0.1` or `::1` without asking DNS. So `deny net localhost` also denies `app.localhost`. Like every rule for a name, it does not match IP addresses: to keep scripts off the local machine, write `deny net localhost 127.0.0.0/8 ::1`.
+After a hostname rule allows a connection, Sand resolves the hostname and checks each returned IP address against the policy's IP and CIDR rules. This check prevents DNS rebinding and blocks public hostnames that are resolved to denied internal networks. For example, with `allow net tls plaintext *` and `deny net 10.0.0.0/8`, Sand denies connections to any wildcard-matched hostname that is resolved to `10.0.0.5`. An exact hostname rule such as `allow net db.internal` is more specific than a CIDR range and allows connections to `db.internal` at `10.0.0.5`, whereas wildcard rules (`*` or `*.example.com`) do not override CIDR rules.
 
-Sand checks every IP address that DNS returns against the address rules, so that a public hostname cannot lead a script to an address the policy denies. With `allow net tls plaintext *` and `deny net 10.0.0.0/8`, a script cannot connect through a name that DNS gives the address `10.0.0.5`. A rule that names the exact host, such as `allow net db.internal`, is more specific than the range and lets the script connect through that name. A wildcard such as `*` or `*.example.com` does not.
+Sand resolves `localhost` and `*.localhost` directly to `127.0.0.1` and `::1` without querying DNS (RFC 6761). A `deny` or `prompt` rule for `localhost` also matches `*.localhost`. Because hostname rules do not match IP literals, block local connections completely with `deny net localhost 127.0.0.0/8 ::1`.
 
 ## Resource limits
 

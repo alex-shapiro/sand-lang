@@ -1,21 +1,15 @@
-//! Sand for the web: the engine compiled to WebAssembly, driven from
-//! JavaScript (with `wasm-bindgen`).
+//! WebAssembly bindings for the Sand engine.
 //!
-//! The engine is built without operating-system access: scripts see an
-//! in-memory file system (`MemFs`) the host fills and reads back, an
-//! environment and arguments the host gives, and standard input the host
-//! provides as text. Output and permission prompts go to JavaScript
-//! callbacks. A policy file (see `sandlang::policy::PolicyFile`) decides
-//! what scripts may do and sets their limits. Its rules add to rules that
-//! let scripts print and import modules; `onPrompt` decides what no rule
-//! decides.
+//! The engine runs without operating-system access. Scripts use an in-memory
+//! file system (`MemFs`), host-supplied environment variables, arguments, and
+//! standard input text, and JavaScript callbacks for output and permission
+//! prompts. A [`PolicyFile`] sets sandbox rules and resource limits. By
+//! default, scripts can write to standard output/error and import modules;
+//! `onPrompt` handles capabilities that do not match any rule.
 //!
-//! An engine runs one script (or session input) at a time and runs on the
-//! thread that calls it, so long computations block that thread: run
-//! engines in Web Workers, one or more per worker, to keep a page
-//! responsive and to run several at once. A run returns to the JavaScript
-//! event loop only while it waits (for a timer or a prompt); a worker that
-//! must stop a busy engine at once can be terminated.
+//! Each `Engine` runs one script or session input at a time on the calling
+//! thread. Run engines in Web Workers to avoid blocking the main thread or to
+//! execute multiple scripts concurrently.
 //!
 //! ```js
 //! import init, { Engine } from "./pkg/sandlang_wasm.js";
@@ -44,7 +38,7 @@ use wasm_bindgen::prelude::*;
 const TYPES: &str = r#"
 /** Options of `new Engine(options, hooks)`; every field is optional. */
 export interface EngineOptions {
-  /** A policy file: rules (`allow read /data`) and limits (`limit time 5s`). Output and imports are allowed where no rule of the policy matches; `onPrompt` decides what no rule decides. */
+  /** Policy file text with rules (`allow read /data`) and limits (`limit time 5s`). By default, output and module imports are allowed, and `onPrompt` handles unmatched capabilities. */
   policy?: string;
   /** Files of the in-memory file system, by absolute path. */
   files?: Record<string, string | Uint8Array>;
@@ -68,7 +62,7 @@ export interface EngineOptions {
 export interface EngineHooks {
   /** Receives output as it is produced. */
   onOutput?: (stream: "stdout" | "stderr", text: string) => void;
-  /** Answers a permission request: one the policy does not decide. Without it, such requests are denied. */
+  /** Handles permission requests that do not match any policy rule. If omitted, unmatched requests are denied. */
   onPrompt?: (request: PromptRequest) => PromptAnswer | Promise<PromptAnswer>;
 }
 
@@ -77,9 +71,9 @@ export interface PromptRequest {
   target: string;
   /** e.g. "read /data/a.txt" */
   description: string;
-  /** The policy rule that allows it from now on, e.g. "allow read /data/a.txt" (what "always" means as a rule). */
+  /** Policy rule that grants this request (for example, `"allow read /data/a.txt"`). */
   allowRule?: string;
-  /** The policy rule that denies it from now on (what "never" means as a rule). */
+  /** Policy rule that denies this request. */
   denyRule?: string;
 }
 
@@ -140,7 +134,6 @@ export interface EvalResult {
 export interface FileEntry { path: string; data: Uint8Array; }
 "#;
 
-/// The fields of `EngineOptions` (unknown ones, typically misspelt, are denied).
 const OPTION_KEYS: &[&str] = &["policy", "files", "env", "args", "stdin", "seed", "fileSystemCapacity", "cwd", "timeZone"];
 
 /// The JavaScript callbacks of an engine and its sessions, unregistered when
@@ -187,8 +180,6 @@ impl Engine {
         let key =
             Rc::new(HookKey(hooks::register(Hooks { on_output: function(&hooks, "onOutput")?, on_prompt: function(&hooks, "onPrompt")? })));
         let mut config = Config::new()
-            // Scripts may print and import modules unless the policy says
-            // otherwise; what no rule decides is asked about (`onPrompt`).
             .policy(policy.rules.with_defaults(sandlang::RulePolicy::standard().allow_import("/")))
             .limits(policy.limits.clone())
             .memory_fs(fs.clone())
