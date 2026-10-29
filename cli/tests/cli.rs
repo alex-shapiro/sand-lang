@@ -21,7 +21,7 @@ impl std::fmt::Debug for Out {
 }
 
 /// Runs `sand ARGS` in `dir`, feeding `stdin` (closed after writing).
-/// Runs `sand ARGS` in `dir`. `run`, `test` and `repl` get `--no-prompt`:
+/// `run`, `test` and `repl` get `--no-prompt`:
 /// the CLI asks on the controlling terminal, which a test run may share.
 /// `cli/tests/prompt_tty.rs` tests prompts on a pseudo-terminal.
 fn sand_in(dir: &Path, args: &[&str], stdin: &str, env: &[(&str, &str)]) -> Out {
@@ -195,7 +195,7 @@ fn bad_flags_and_values_exit_2_with_a_message() {
         ("--allow-all=1", "--allow-all does not take a value"),
         ("--allow-read=data", "unknown option `--allow-read` (use --allow='read ./PATH')"),
         ("--allow-net=*", "unknown option `--allow-net` (use --allow='net HOST')"),
-        ("--prompt-stdin", "unknown option `--prompt-stdin` (use nothing: questions go to the terminal, and --no-prompt denies instead)"),
+        ("--prompt-stdin", "unknown option `--prompt-stdin` (questions go to the terminal, and --no-prompt denies instead)"),
     ];
     for (flag, msg) in cases {
         let o = run("print(\"should not run\")", &[flag]);
@@ -901,6 +901,38 @@ fn policy_files_add_to_the_cli_rules() {
         assert_eq!(o.code, 2, "{o:?}");
         assert!(o.stderr.contains("old.policy:1:"), "{o:?}");
     }
+}
+
+/// The rules of the user (flags and a policy file) replace the CLI's
+/// default rule for the same requests, whatever their decision.
+#[test]
+fn user_rules_replace_the_defaults_for_the_same_requests() {
+    let dir = script("cli-defaults", "import io\nprint(io.stdin.read_line().map_err(e => e.kind))");
+    dir.write("p.policy", "prompt stdin\n");
+    let read = |flags: &[&str]| {
+        let mut args = vec!["run", "main.sand"];
+        args.extend_from_slice(flags);
+        sand_in(dir.path(), &args, "line\n", &[]).stdout
+    };
+    assert_eq!(read(&[]), "Ok(Some(\"line\"))\n");
+    // Without a prompter, a prompt denies.
+    assert_eq!(read(&["--prompt=stdin"]), "Err(\"permission_denied\")\n");
+    assert_eq!(read(&["--policy=p.policy"]), "Err(\"permission_denied\")\n");
+    assert_eq!(read(&["--deny=stdin"]), "Err(\"permission_denied\")\n");
+    assert_eq!(read(&["--allow-all", "--prompt=stdin"]), "Err(\"permission_denied\")\n");
+}
+
+/// `--allow-all` allows what no other rule decides: `--deny` rules and the
+/// rules of a policy file still hold.
+#[test]
+fn allow_all_keeps_the_other_rules() {
+    let dir = script("cli-allow-all", "import fs\nimport env\nprint(fs.read_text(\"secret.txt\").is_ok())\nprint(env.get(\"HOME\").is_some())\nprint(fs.read_text(\"main.sand\").is_ok())");
+    dir.write("secret.txt", "s3cret");
+    dir.write("p.policy", "deny ./secret.txt\ndeny env HOME\n");
+    let o = sand(dir.path(), &["run", "main.sand", "--allow-all", "--deny=./secret.txt", "--deny=env HOME"]);
+    assert_eq!(o.stdout, "false\nfalse\ntrue\n", "{o:?}");
+    let o = sand(dir.path(), &["run", "main.sand", "--allow-all", "--policy=p.policy"]);
+    assert_eq!(o.stdout, "false\nfalse\ntrue\n", "{o:?}");
 }
 
 #[test]

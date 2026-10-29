@@ -65,11 +65,11 @@ RUN, TEST AND REPL OPTIONS:
     --allow=RULE             allow what a policy file rule allows, e.g.
                              --allow='read ./data' --allow='net api.example.com'
                              --allow='net plaintext localhost:8080' --allow='env HOME'
-    --deny=RULE              deny what a rule matches, e.g. --deny='net 10.0.0.0/8'
+    --deny=RULE              deny what a rule matches, e.g. --deny='net tls plaintext 10.0.0.0/8'
     --prompt=RULE            ask about what a rule matches, e.g. --prompt='write ./out'
     --policy=FILE            rules and limits from a policy file (the options add
                              to its rules and override its limits)
-    --allow-all              allow everything (trusted scripts only)
+    --allow-all              allow everything that no other rule decides (trusted scripts only)
     --no-prompt              deny instead of asking
     --max-memory=SIZE        heap limit, e.g. 256M (default 512M)
     --max-time=DURATION      wall-clock limit, e.g. 10s, 500ms, 2m
@@ -150,12 +150,9 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
     };
     let home = std::env::home_dir();
     let cwd = std::env::current_dir().map_err(|e| format!("cannot read the current directory: {e}"))?;
-    // The user at the terminal is the host: scripts may read standard
-    // input and the time zone and import any module unless a rule says otherwise.
-    let base = RulePolicy::standard().allow_stdin().allow_timezone().extend(any_import());
     let (mut rules, mut limits) = match policy_file {
-        Some(f) => (base.extend(f.rules), f.limits),
-        None => (base, Default::default()),
+        Some(f) => (f.rules, f.limits),
+        None => Default::default(),
     };
     let mut allow_all = false;
     let mut prompt = true;
@@ -215,7 +212,7 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
         }
     }
     let mut config = Config::new()
-        .policy(if allow_all { RulePolicy::allow_all() } else { rules })
+        .policy(rules.with_defaults(default_rules(allow_all)))
         .limits(limits)
         .inherit_stdin()
         .gc_stress(std::env::var_os("SAND_GC_STRESS").is_some())
@@ -273,6 +270,14 @@ fn rule(verb: &str, text: &str, cwd: &Path, home: Option<&Path>) -> Result<RuleP
     Ok(file.rules)
 }
 
+/// The rules of `sand run`, `sand test` and `sand repl` that the user's
+/// rules can replace. The user at the terminal is the host: scripts may
+/// print, read standard input and the time zone, and import any module.
+/// `--allow-all` (`all`) allows everything else too.
+fn default_rules(all: bool) -> RulePolicy {
+    if all { RulePolicy::allow_all() } else { RulePolicy::standard().allow_stdin().allow_timezone().extend(any_import()) }
+}
+
 /// The policy of `sand check` and `sand lint`, which compile every module
 /// a script imports and run no code.
 fn any_import() -> RulePolicy {
@@ -281,20 +286,20 @@ fn any_import() -> RulePolicy {
 
 /// The error for an unknown option, with the replacement of a removed one.
 fn unknown_option(flag: &str) -> String {
-    let rule = match flag {
-        "--allow-read" => Some("--allow='read ./PATH'"),
-        "--allow-write" => Some("--allow='write ./PATH'"),
-        "--allow-net" => Some("--allow='net HOST'"),
-        "--deny-net" => Some("--deny='net HOST'"),
-        "--allow-listen" => Some("--allow='listen ADDR'"),
-        "--allow-env" => Some("--allow='env NAME'"),
-        "--allow-private-net" => Some("--allow='net 10.0.0.0/8' (or the hosts the script needs)"),
-        "--allow-stdin" | "--allow-timezone" => Some("nothing: scripts may read standard input and the time zone by default"),
-        "--prompt-stdin" => Some("nothing: questions go to the terminal, and --no-prompt denies instead"),
+    let hint = match flag {
+        "--allow-read" => Some("use --allow='read ./PATH'"),
+        "--allow-write" => Some("use --allow='write ./PATH'"),
+        "--allow-net" => Some("use --allow='net HOST'"),
+        "--deny-net" => Some("use --deny='net HOST'"),
+        "--allow-listen" => Some("use --allow='listen ADDR'"),
+        "--allow-env" => Some("use --allow='env NAME'"),
+        "--allow-private-net" => Some("no rule denies private addresses unless you add one, such as --deny='net tls plaintext 10.0.0.0/8'"),
+        "--allow-stdin" | "--allow-timezone" => Some("scripts may read standard input and the time zone by default"),
+        "--prompt-stdin" => Some("questions go to the terminal, and --no-prompt denies instead"),
         _ => None,
     };
-    match rule {
-        Some(r) => format!("unknown option `{flag}` (use {r})"),
+    match hint {
+        Some(h) => format!("unknown option `{flag}` ({h})"),
         None => format!("unknown option `{flag}`"),
     }
 }

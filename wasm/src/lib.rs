@@ -44,7 +44,7 @@ use wasm_bindgen::prelude::*;
 const TYPES: &str = r#"
 /** Options of `new Engine(options, hooks)`; every field is optional. */
 export interface EngineOptions {
-  /** A policy file: rules (`allow read /data`) and limits (`limit time 5s`). Default: deny everything but output. */
+  /** A policy file: rules (`allow read /data`) and limits (`limit time 5s`). Output and imports are allowed unless a rule for the same pattern says otherwise; `onPrompt` decides what no rule decides. */
   policy?: string;
   /** Files of the in-memory file system, by absolute path. */
   files?: Record<string, string | Uint8Array>;
@@ -189,7 +189,7 @@ impl Engine {
         let mut config = Config::new()
             // Scripts may print and import modules unless the policy says
             // otherwise; what no rule decides is asked about (`onPrompt`).
-            .policy(sandlang::RulePolicy::standard().allow_import("/").extend(policy.rules))
+            .policy(policy.rules.with_defaults(sandlang::RulePolicy::standard().allow_import("/")))
             .limits(policy.limits.clone())
             .memory_fs(fs.clone())
             .cwd(&cwd)

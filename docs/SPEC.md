@@ -2901,9 +2901,11 @@ so that panics do not unwind into the host.
 `Config` allows the host to virtualize every external input, output, and source
 of nondeterminism—streams, logging, process metadata, randomness, time, file
 systems (§16.4), and networking—so that script execution can be made completely
-deterministic. By default, `Config::new()` denies all capabilities except
-`Stdout`, `Stderr`, and imports within the module root, writes output to the
-process's standard streams, and provides an empty standard input.
+deterministic. By default, `Config::new()` has the policy `RulePolicy::standard()`, which
+allows only `Stdout` and `Stderr`, and no prompter, so the engine denies every
+other request (imports too, unless a rule such as `allow import ./lib` allows
+them). It writes output to the process's standard streams and provides an
+empty standard input.
 
 The host can capture standard output and standard error or feed standard input
 into a running script. `Config::stdout` and `Config::stderr` redirect script
@@ -3329,16 +3331,22 @@ limit's message.
 
 ### 17.5 `sand run FILE [-- ARGS...]`
 
-The CLI starts with these rules: `allow stdout`, `allow stderr`, `allow
-stdin`, `allow timezone` and `allow import **`. Its prompter decides every
-other request: the CLI asks the user on the terminal.
+The CLI has these default rules: `allow stdout`, `allow stderr`, `allow
+stdin`, `allow timezone` and `allow import **`. A rule of the user (an option
+or a policy file rule) with the same pattern replaces a default rule
+(`RulePolicy::with_defaults`), so `--prompt=stdin` asks before the script
+reads standard input. The prompter decides every request that no rule
+decides: the CLI asks the user on the terminal.
 
 Options: `--allow=RULE`, `--deny=RULE` and `--prompt=RULE` add the rules of a
 policy file line (§14.7) without its verb, such as `--allow='read ./data'`,
 `--allow='net plaintext localhost:8080'` or `--deny=stdin`; relative paths
 start from the working directory. `--policy=FILE` adds the rules of a policy
 file and its limits (the options add to its rules and override its limits).
-`--allow-all` allows everything (`RulePolicy::allow_all()`). `--no-prompt`
+The options and the policy file's rules are one set of rules: of two rules
+with the same pattern, `deny` wins (§14.5), so an option cannot loosen a
+`deny` rule of the file. `--allow-all` replaces the default rules with
+`RulePolicy::allow_all()`, which allows what the user's rules do not decide. `--no-prompt`
 denies what the CLI would ask about. Limits: `--max-memory=BYTES` (suffixes
 K, M, G), `--max-time=DURATION`, `--max-cpu=DURATION`,
 `--max-instructions=N`, `--max-compile-fuel=N`. `--seed=N` seeds the random

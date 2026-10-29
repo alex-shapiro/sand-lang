@@ -63,7 +63,7 @@ A denied write to `stdout` or `stderr` aborts the run immediately, and a denied 
 ```sh
 sand run main.sand --allow='read ./data' --allow='write ./out'
 sand run fetch.sand --allow='net api.example.com' --allow='env HOME LANG'
-sand run server.sand --allow='listen localhost:8080' --deny='net 10.0.0.0/8'
+sand run server.sand --allow='listen localhost:8080' --deny='net tls plaintext 10.0.0.0/8'
 ```
 
 | Flag              | Effect                                                      |
@@ -72,10 +72,12 @@ sand run server.sand --allow='listen localhost:8080' --deny='net 10.0.0.0/8'
 | `--deny=RULE`     | denies what the rule matches, e.g. `--deny=stdin`           |
 | `--prompt=RULE`   | asks about what the rule matches, e.g. `--prompt='write ./'` |
 | `--policy=FILE`   | rules and resource limits from a policy file                |
-| `--allow-all`     | all capabilities (use only for trusted code)                |
+| `--allow-all`     | allows what no other rule decides (only for trusted code)   |
 | `--no-prompt`     | denies instead of asking                                    |
 
-Quote rules that contain spaces or `*`. Separate several values of one rule with spaces or commas. Allowing a directory grants access to all files and subdirectories within it. Without a terminal, Sand denies what it would ask about.
+Quote rules that contain spaces or `*`. Separate several values of one rule with spaces or commas. Relative paths start from the working directory. Allowing a directory grants access to all files and subdirectories within it. Without a terminal, Sand denies what it would ask about.
+
+A rule of yours for the same requests as a default rule replaces it: `--prompt=stdin` asks before the script reads standard input, and `--deny=stdout` silences the script. The flags and the rules of a policy file are one set of rules, so a flag cannot loosen a `deny` rule of the file for the same pattern.
 
 ## Policy files
 
@@ -142,7 +144,7 @@ A rule with one transport is more specific than a rule with both, so `deny net t
 
 `localhost` and every name under it (`app.localhost`) are the local machine: Sand connects them to `127.0.0.1` or `::1` without asking DNS. So `deny net localhost` also denies `app.localhost`.
 
-Sand checks every IP address that DNS returns against the address rules, so that a public hostname cannot lead a script to an address the policy denies. With `allow net *` and `deny net 10.0.0.0/8`, a name that resolves to `10.0.0.5` cannot connect. A rule that names the exact host, such as `allow net db.internal`, is more specific than the range and lets that name connect. A wildcard such as `*` or `*.example.com` does not.
+Sand checks every IP address that DNS returns against the address rules, so that a public hostname cannot lead a script to an address the policy denies. With `allow net tls plaintext *` and `deny net tls plaintext 10.0.0.0/8`, a name that resolves to `10.0.0.5` cannot connect. A rule that names the exact host, such as `allow net db.internal`, is more specific than the range and lets that name connect. A wildcard such as `*` or `*.example.com` does not.
 
 ## Resource limits
 

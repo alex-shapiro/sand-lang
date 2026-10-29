@@ -255,6 +255,16 @@ impl RulePolicy {
         self.extend_rules(other.rules)
     }
 
+    /// Adds each rule of `defaults` for which this policy has no rule with
+    /// the same pattern (with any decision). A host uses it to combine the
+    /// user's rules with its own defaults: a user rule replaces the default
+    /// for the same requests, so `prompt stdin` asks even if the defaults
+    /// have `allow stdin`.
+    pub fn with_defaults(self, defaults: RulePolicy) -> RulePolicy {
+        let kept = defaults.rules.into_iter().filter(|d| !self.rules.iter().any(|r| r.kind == d.kind)).collect();
+        self.extend_rules(kept)
+    }
+
     pub(crate) fn rules(&self) -> &[Rule] {
         &self.rules
     }

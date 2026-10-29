@@ -326,6 +326,18 @@ fn rules_of_equal_specificity() {
 }
 
 #[test]
+fn user_rules_replace_defaults_with_the_same_pattern() {
+    let defaults = RulePolicy::standard().allow_stdin().allow_net("*").allow_read("/data");
+    let p = RulePolicy::new().prompt_stdin().deny_net("*").prompt_read("/data/x").with_defaults(defaults);
+    assert_eq!(p.check(&Capability::Stdin), Decision::Prompt);
+    assert_eq!(p.check(&net("example.com", 443)), Decision::Deny);
+    assert_eq!(p.check(&plain("example.com", 80)), Decision::Prompt, "`allow net *` matches TLS only");
+    assert_eq!(p.check(&Capability::FsRead("/data/x/y".into())), Decision::Prompt);
+    assert_eq!(p.check(&Capability::FsRead("/data/z".into())), Decision::Allow, "a narrower rule keeps the default");
+    assert_eq!(p.check(&Capability::Stdout), Decision::Allow);
+}
+
+#[test]
 fn constructors_start_with_their_rules() {
     let default = RulePolicy::default();
     assert_eq!(default.to_string(), "");
