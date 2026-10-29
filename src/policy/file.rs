@@ -219,8 +219,12 @@ fn misread(word: &str) -> Option<String> {
         return Some(format!("`{word}` is a URL, not a path: URLs go in `http` rules"));
     }
     let (head, rest) = word.split_once([':', '='])?;
+    let separator = &word[head.len()..=head.len()];
     let head = head.to_ascii_lowercase();
-    KINDS.contains(&head.as_str()).then(|| format!("write a space after the capability: `{head} {rest}`"))
+    KINDS.contains(&head.as_str()).then(|| match rest {
+        "" => format!("remove the `{separator}` after the capability: `{head}`"),
+        _ => format!("write a space after the capability: `{head} {rest}`"),
+    })
 }
 
 /// Whether the bare word `word` has a meaning as a keyword in some
@@ -1185,6 +1189,14 @@ mod tests {
                 "2:24: net rules take hosts, not URLs: remove `http://` and write `plaintext` before the hosts",
                 "3:16: net rules take hosts, not URLs: remove `https://` and write `tls` before the hosts",
             ]
+        );
+    }
+
+    #[test]
+    fn misread_advice_for_a_separator_before_a_space() {
+        assert_eq!(
+            errors("allow read: ./data\nallow stdin:"),
+            ["1:7: remove the `:` after the capability: `read`", "2:7: remove the `:` after the capability: `stdin`"]
         );
     }
 

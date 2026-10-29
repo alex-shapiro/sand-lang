@@ -99,6 +99,13 @@ Follow-up work, roughly in priority order.
       `RulePolicy::resolved_verdict`.
 - [ ] Support HTTP paths with encoded separators `%2F` and `%5C` in `rule_for`
       so that "always" prompt answers can save rules for those requests.
+- [ ] Give HTTP paths with `;` parameters a second reading without them, as
+      for encoded separators: Tomcat and Spring remove `;params` from each
+      segment, so `deny http a.com/admin/**` does not stop `GET
+      /admin;x/secret` or `/public/..;/admin` (`url_segments` in `net.rs`).
+      Also, `percent_decode` keeps a byte that is not UTF-8 as the text
+      `%FF`, which is also the decoding of `%25FF`, so `allow http
+      a.com/%25FF` also allows `GET /%FF`.
 - [ ] Prompt for a resolved address that a `prompt` address rule decides
       (for example, a name that `allow net *` allows and that resolves to
       `10.0.0.5`) instead of denying it. The check runs after the native call
