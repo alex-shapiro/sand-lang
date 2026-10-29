@@ -2395,19 +2395,19 @@ emptied and converted into a junction during rename.
 
 ### 14.2 Capabilities
 
-| Capability                  | Raised by                                        |
-| --------------------------- | ------------------------------------------------ |
-| `FsRead(path)`              | reading files, listing dirs, metadata            |
-| `FsWrite(path)`             | creating, writing, removing, renaming            |
-| `Net(host, port, tls)`      | outgoing TCP and TLS connections in `net`        |
-| `Http(method, url)`         | each `http` request and redirect hop             |
-| `NetAddr(host, addr, tls)`  | each resolved IP address for `host` (§14.6)      |
-| `NetListen(ip:port)`        | listening sockets                                |
-| `Env(name)`                 | environment variable reads, or `"*"` for all     |
-| `Stdin`, `Stdout`, `Stderr` | standard streams                                 |
-| `TimeZone`                  | `time.local_zone()`                              |
-| `Import(path)`              | loading a script module                          |
-| `Custom(name, detail)`      | host native modules                              |
+| Capability                  | Raised by                                    |
+| --------------------------- | -------------------------------------------- |
+| `FsRead(path)`              | reading files, listing dirs, metadata        |
+| `FsWrite(path)`             | creating, writing, removing, renaming        |
+| `Net(host, port, tls)`      | outgoing TCP and TLS connections in `net`    |
+| `Http(method, url)`         | each `http` request and redirect hop         |
+| `NetAddr(host, addr, tls)`  | each resolved IP address for `host` (§14.6)  |
+| `NetListen(ip:port)`        | listening sockets                            |
+| `Env(name)`                 | environment variable reads, or `"*"` for all |
+| `Stdin`, `Stdout`, `Stderr` | standard streams                             |
+| `TimeZone`                  | `time.local_zone()`                          |
+| `Import(path)`              | loading a script module                      |
+| `Custom(name, detail)`      | host native modules                          |
 
 ### 14.3 Decisions
 
@@ -2440,11 +2440,11 @@ for an engine and defaults to `RulePolicy::standard()`.
 `Config::custom_policy(CustomPolicy)` replaces the rule policy with a
 host-defined policy callback.
 
-| Constructor               | Rules                                                  |
-| ------------------------- | ------------------------------------------------------ |
-| `RulePolicy::default()`   | empty rule set                                         |
-| `RulePolicy::standard()`  | `allow stdout`, `allow stderr`                         |
-| `RulePolicy::allow_all()` | allows all capabilities for trusted scripts            |
+| Constructor               | Rules                                       |
+| ------------------------- | ------------------------------------------- |
+| `RulePolicy::default()`   | empty rule set                              |
+| `RulePolicy::standard()`  | `allow stdout`, `allow stderr`              |
+| `RulePolicy::allow_all()` | allows all capabilities for trusted scripts |
 
 `RulePolicy` evaluates each request using the most specific matching rule. If
 two rules have equal specificity, `deny` overrides `allow`, and `allow`
