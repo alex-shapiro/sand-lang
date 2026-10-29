@@ -188,7 +188,9 @@ fn not_a_transport(word: &str) -> Option<String> {
     let advice = match lower.as_str() {
         "http" => "write `plaintext` for unencrypted connections such as `http://`",
         "tcp" => "write `plaintext` for unencrypted connections, or `tls plaintext` for both",
-        "https" | "ssl" => "rules match TLS connections unless they say `plaintext`, so remove it",
+        "https" | "ssl" | "wss" => "rules match TLS connections unless they say `plaintext`, so remove it",
+        "ws" => "write `plaintext` for unencrypted connections such as `ws://`",
+        "udp" => "rules match TCP connections, the only kind that scripts make",
         _ => return None,
     };
     Some(format!("`{word}` is not a transport: {advice} (write `{lower}.` for a host named `{lower}`)"))
@@ -465,7 +467,7 @@ impl Context<'_> {
                 {
                     if let Some(t) = transport(bare) {
                         if urls > 0 {
-                            return Err((item.column, "transports (`tls`, `plaintext`) come before the hosts".into()));
+                            return Err((item.column, format!("transports (`tls`, `plaintext`) come before the {}", if kind == "http" { "URL patterns" } else { "hosts" })));
                         }
                         transports |= t;
                         continue;
@@ -591,7 +593,7 @@ fn custom_part(word: &Word) -> Result<Option<String>, String> {
     match tokens.as_slice() {
         [('*', true)] => Ok(None),
         t if t.iter().any(|t| t.1) => Err(format!(
-            "custom names and details are exact or `*`: quote a `*` that is part of the name (`\"{}\"`)",
+            "custom names and details are exact or `*`: quote a `*` that is part of the text (`\"{}\"`)",
             word.text().replace('"', "\\\"")
         )),
         t => Ok(Some(t.iter().map(|t| t.0).collect())),
@@ -1100,7 +1102,7 @@ mod tests {
         let env = |name: &str| decide(&p, Capability::Env(name.into()));
         assert_eq!((env("AWS_*"), env("AWS_KEY")), (Allow, Prompt));
         assert_eq!((env("A*BC"), env("AXBC")), (Allow, Prompt));
-        let message = "a quoted `*` is not a wildcard, and a host cannot contain `*` (remove the quotes)";
+        let message = "a quoted `*` is not a wildcard, and an address or port cannot contain `*` (remove the quotes)";
         assert_eq!(
             errors("allow net \"*\"\nallow net \"*\".a.com\nallow http GET \"*\"/x\nallow listen \"*\":80"),
             [1, 2, 3, 4].map(|line| format!("{line}:{}: {message}", if line == 3 { 16 } else { 11 + (line == 4) as usize * 3 }))
@@ -1143,8 +1145,8 @@ mod tests {
         assert_eq!(
             errors("deny custom db drop*\ndeny custom a*b"),
             [
-                "1:16: custom names and details are exact or `*`: quote a `*` that is part of the name (`\"drop*\"`)",
-                "2:13: custom names and details are exact or `*`: quote a `*` that is part of the name (`\"a*b\"`)",
+                "1:16: custom names and details are exact or `*`: quote a `*` that is part of the text (`\"drop*\"`)",
+                "2:13: custom names and details are exact or `*`: quote a `*` that is part of the text (`\"a*b\"`)",
             ]
         );
     }
@@ -1167,6 +1169,17 @@ mod tests {
                 "4:11: `ssl` is not a transport: rules match TLS connections unless they say `plaintext`, so remove it (write `ssl.` for a host named `ssl`)",
             ]
         );
+        assert_eq!(
+            errors("allow net udp localhost:53
+allow http ws a.com
+allow http GET a.com tls"),
+            [
+                "1:11: `udp` is not a transport: rules match TCP connections, the only kind that scripts make (write `udp.` for a host named `udp`)",
+                "2:12: `ws` is not a transport: write `plaintext` for unencrypted connections such as `ws://` (write `ws.` for a host named `ws`)",
+                "3:22: transports (`tls`, `plaintext`) come before the URL patterns",
+            ]
+        );
+        assert_eq!(parse("allow net udp. wss.").rules.to_string(), "allow net udp.\nallow net wss.\n");
         // Quoted and dotted words are hosts.
         let p = parse("allow net \"tls\" http. a.com https\nallow http \"plaintext\"/x");
         assert_eq!(p.rules.to_string(), "allow net tls.\nallow net http.\nallow net a.com\nallow net https.\nallow http plaintext./x\n");
