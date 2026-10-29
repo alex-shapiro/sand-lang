@@ -1,0 +1,5 @@
+import fs
+for i in 0..3 {
+    fs.write_text("/tmp/sand-034.txt", "run \(i)\n")?
+    print("read back: \(fs.read_text("/tmp/sand-034.txt")?.trim())")
+}

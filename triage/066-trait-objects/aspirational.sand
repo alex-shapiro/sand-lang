@@ -1,0 +1,19 @@
+trait Shape {
+    fn area(self) -> float
+    fn name(self) -> str
+}
+struct Circle { r: float }
+struct Rect { w: float, h: float }
+impl Shape for Circle {
+    fn area(self) -> float { 3.14159 * self.r * self.r }
+    fn name(self) -> str { "circle" }
+}
+impl Shape for Rect {
+    fn area(self) -> float { self.w * self.h }
+    fn name(self) -> str { "rect" }
+}
+
+let shapes: [dyn Shape] = [Circle(r: 1.0), Rect(w: 2.0, h: 3.0)]
+for s in shapes {
+    print("\(s.name()): \(s.area())")
+}

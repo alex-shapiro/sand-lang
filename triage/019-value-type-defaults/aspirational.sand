@@ -1,0 +1,11 @@
+import json
+import time
+
+struct Retention {
+    name: str
+    since: time.PlainDate = time.PlainDate(2000, 1, 1).unwrap()
+    last_run: time.Instant = time.Instant.from_epoch_seconds(0)
+}
+
+let r: Retention = json.decode("{\"name\": \"logs\"}")?
+print(r)

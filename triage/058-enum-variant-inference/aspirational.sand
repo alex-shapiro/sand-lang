@@ -1,0 +1,20 @@
+import fs
+import time
+
+enum Color { Red, Green, Blue }
+
+fn paint(c: Color) -> str {
+    match c {
+        Red => "red"
+        Green => "green"
+        Blue => "blue"
+    }
+}
+
+use f = fs.open("/tmp/triage-lang1/out.txt", Write)?
+f.write_str("hi\n")?
+let start = time.PlainDate(2024, 1, 1)?
+let end = time.PlainDate(2024, 3, 15)?
+print(start.until(end, largest: Month, smallest: Day))
+let c: Color = Green
+print("\(paint(Red)) \(c == Green)")

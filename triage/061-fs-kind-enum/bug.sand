@@ -1,0 +1,11 @@
+import fs
+
+fn walk(dir: str) -> Result<()> {
+    for name in fs.list_dir(dir)? {
+        let path = fs.join([dir, name])
+        let m = fs.metadata(path)?
+        if m.is_file { print("file \(path)") } else { walk(path)? }
+    }
+    Ok(())
+}
+walk("tree")?

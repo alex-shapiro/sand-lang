@@ -1,0 +1,9 @@
+import json
+fn default_val() -> int { 1 }
+struct P { a: int = default_val(), b: int = default_val() }
+let text = "[" + "{},".repeat(100000) + "{}]"
+let keep = []
+while true {
+    let r: Result<[P]> = json.decode(text)
+    keep.push(r)
+}

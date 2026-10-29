@@ -1,0 +1,17 @@
+import json
+
+struct Window {
+    pub start: int
+    pub end: int
+
+    pub fn init(start: int, end: int) -> Result<Window> {
+        if start > end { return Err(Error("start \(start) is after end \(end)", kind: "invalid")) }
+        Ok(Self(start: start, end: end))
+    }
+}
+struct Job {
+    pub name: str
+    pub window: Window
+}
+let job: Job = json.decode("{\"name\": \"backup\", \"window\": {\"start\": 9, \"end\": 5}}")?
+print(job.window.start)

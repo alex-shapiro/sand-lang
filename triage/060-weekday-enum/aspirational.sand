@@ -1,0 +1,8 @@
+import time
+
+let friday = time.PlainDate(2026, 10, 30)?
+let weekend = match friday.day_of_week() {
+    Saturday | Sunday => true
+    Monday | Tuesday | Wednesday | Thursday | Friday => false
+}
+print("friday is weekend: \(weekend)")

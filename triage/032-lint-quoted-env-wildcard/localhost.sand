@@ -1,0 +1,5 @@
+import net
+match net.connect("app.localhost", 8080) {
+    Ok(_) => print("connected"),
+    Err(e) => print("app.localhost:8080: \(e)"),
+}

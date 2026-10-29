@@ -1,0 +1,6 @@
+import json
+import "./side.sand"
+
+print("main: first line")
+print(json.encode([1]))
+print(side.hi())

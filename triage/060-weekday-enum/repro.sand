@@ -1,0 +1,7 @@
+import time
+
+let friday = time.PlainDate(2026, 10, 30)?
+let sunday = time.PlainDate(2026, 11, 1)?
+print("friday is weekend: \(friday.day_of_week() >= 5)")
+print("sunday detected: \(sunday.day_of_week() == 0)")
+print("friday is weekend (correct): \(friday.day_of_week() >= 6)")

@@ -1,0 +1,1 @@
+allow http plaintext purge localhost:9/cache

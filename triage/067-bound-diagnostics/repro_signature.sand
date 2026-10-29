@@ -1,0 +1,7 @@
+struct Index<K: Hash> { keys: Set<K> = Set() }
+
+pub fn lookup(index: Index<float>, key: float) -> bool { false }
+
+pub fn size<T>(b: Index<T>) -> int { 0 }
+
+print("library loaded")

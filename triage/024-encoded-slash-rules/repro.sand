@@ -1,0 +1,6 @@
+import http
+
+match http.get("http://127.0.0.1:18931/api/v4/projects/group%2Fproject") {
+    Ok(r) => print("status \(r.status)"),
+    Err(e) => print("\(e)"),
+}

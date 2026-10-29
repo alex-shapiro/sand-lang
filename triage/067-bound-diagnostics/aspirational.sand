@@ -1,0 +1,5 @@
+struct Bag<T: Hash> { items: Set<T> = Set() }
+
+fn first<T>(b: Bag<T>) -> T? { b.items.to_list().first() }
+
+print(first(Bag(items: Set([3, 4]))))

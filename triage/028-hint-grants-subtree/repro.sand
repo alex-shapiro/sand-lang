@@ -1,0 +1,6 @@
+import env
+import fs
+
+let home = env.args()[0]
+print("list: \(fs.list_dir(home))")
+print("key: \(fs.read_text(home + "/.ssh/id_ed25519"))")

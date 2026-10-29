@@ -1,0 +1,6 @@
+import fs
+
+fn last_modified(path: str) -> Instant? {
+    fs.metadata(path).ok()?.modified
+}
+print(last_modified("notes.txt"))

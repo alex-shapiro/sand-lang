@@ -1,0 +1,2 @@
+allow net plaintext *.localhost
+deny net localhost

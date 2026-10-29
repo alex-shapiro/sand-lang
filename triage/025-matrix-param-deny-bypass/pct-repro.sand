@@ -1,0 +1,8 @@
+import http
+
+for path in ["/%25FF", "/%FF", "/%FE"] {
+    match http.get("http://127.0.0.1:18931" + path) {
+        Ok(r) => print("\(path) -> \(r.text().unwrap_or("?"))"),
+        Err(e) => print("\(path) -> \(e)"),
+    }
+}

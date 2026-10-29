@@ -1,0 +1,5 @@
+fn greet(name: str, greeting: str = "Hello") -> str { "\(greeting), \(name)!" }
+print(["disk full", "timeout"].map(m => Error(m)))
+print(["Ann", "Bo"].map(n => greet(n)))
+let f = (n: str) => greet(n)
+print(f("Cy"))

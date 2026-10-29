@@ -1,0 +1,12 @@
+import time
+
+let a = time.Span(hours: 25)
+let b = time.Span(days: 1)
+let verdict = match a.compare(b) {
+    -1 => "shorter"
+    0 => "same"
+    1 => "longer"
+    _ => fail("compare returned an unexpected value")
+}
+print(verdict)
+print("longer (typo 2): \(a.compare(b) == 2)")

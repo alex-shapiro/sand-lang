@@ -1,0 +1,8 @@
+import fs
+
+var i = 0
+while i < 100000 {
+    fs.write_text("C:/work/in/item.txt", "data")
+    let _ = fs.rename("C:/work/in/item.txt", "C:/work/out/item.txt")
+    i += 1
+}

@@ -1,0 +1,2 @@
+fn area(w int, h: int) -> int { w * h }
+print(area(2, 3))

@@ -1,0 +1,2 @@
+allow http plaintext GET 127.0.0.1:18931
+deny http 127.0.0.1:18931/admin/**

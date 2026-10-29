@@ -1,0 +1,7 @@
+trait Describe {
+    fn describe(self) -> str
+}
+impl Describe for [int] {
+    fn describe(self) -> str { "ints" }
+}
+help([str])

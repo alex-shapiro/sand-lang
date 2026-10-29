@@ -1,0 +1,5 @@
+import http
+match http.get("http://localhost:8765/") {
+    Ok(r) => print("status \(r.status)"),
+    Err(e) => print("\(e)"),
+}
