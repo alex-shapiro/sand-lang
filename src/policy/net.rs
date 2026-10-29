@@ -64,7 +64,7 @@ impl NetPattern {
         let flat: String = text.iter().map(|t| t.0).collect();
         if let Some((scheme, rest)) = flat.split_once("://") {
             let host = rest.split('/').next().unwrap_or(rest);
-            let advice = match without_scheme(scheme, host) {
+            let advice = match without_scheme("net", scheme, host) {
                 Some(write) => format!("write `{write}`"),
                 None => format!("remove `{scheme}://`"),
             };
@@ -627,15 +627,16 @@ pub(crate) struct UrlPattern {
     pub path: Vec<Seg>,
 }
 
-/// What to write in a rule, which takes no scheme, for `scheme://rest`:
-/// `plaintext rest` for an unencrypted scheme, `rest` for an encrypted one,
-/// and `None` for another scheme.
-fn without_scheme(scheme: &str, rest: &str) -> Option<String> {
-    match scheme.to_ascii_lowercase().as_str() {
-        "http" | "ws" | "tcp" => Some(format!("plaintext {rest}")),
-        "https" | "wss" | "ssl" | "tls" => Some(rest.to_string()),
-        _ => None,
-    }
+/// What to write in a `kind` rule (`net` or `http`), which takes no scheme,
+/// for `scheme://rest`: the transport of the scheme, then `rest`, or `None`
+/// for another scheme.
+fn without_scheme(kind: &str, scheme: &str, rest: &str) -> Option<String> {
+    let transport = match scheme.to_ascii_lowercase().as_str() {
+        "http" | "ws" | "tcp" => "plaintext",
+        "https" | "wss" | "ssl" | "tls" => "tls",
+        _ => return None,
+    };
+    Some(format!("{kind} {transport} {rest}"))
 }
 
 pub(crate) const QUOTED_STAR_IN_HOST: &str =
@@ -646,7 +647,7 @@ impl UrlPattern {
         let flat: String = text.iter().map(|t| t.0).collect();
         if let Some(i) = flat.find("://").filter(|&i| !flat[..i].contains('/')) {
             let (scheme, rest) = (&flat[..i], &flat[i + 3..]);
-            return Err(match without_scheme(scheme, rest) {
+            return Err(match without_scheme("http", scheme, rest) {
                 Some(write) => format!("URL patterns take no scheme: write `{write}` for `{flat}`"),
                 None => format!("URL patterns take no scheme (remove `{scheme}://`)"),
             });

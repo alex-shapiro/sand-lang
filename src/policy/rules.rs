@@ -91,8 +91,8 @@ impl NamePattern {
 }
 
 bitflags::bitflags! {
-    /// The transports that a `net` or `http` rule matches: TLS (the
-    /// default), plaintext, or both.
+    /// The transports that a `net` or `http` rule matches: TLS, plaintext,
+    /// or both ([`Transports::default_for`] a rule that names none).
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub(crate) struct Transports: u8 {
         const TLS = 1;
@@ -364,8 +364,8 @@ impl RulePolicy {
         self.files_rule(Decision::Prompt, Access::Import, p.as_ref())
     }
     /// Allows outgoing connections as the policy file rule `allow net
-    /// {rule}` does: optional transports (`tls`, the default, and
-    /// `plaintext`), then hosts, such as `"api.example.com:443"` or
+    /// {rule}` does: optional transports (`tls`, `plaintext`; TLS only if
+    /// none), then hosts, such as `"api.example.com:443"` or
     /// `"plaintext localhost:8080"`. A host is a hostname, `*.domain`, `*`,
     /// an IP address, or a CIDR range, optionally with a `:port` suffix.
     ///
@@ -376,17 +376,20 @@ impl RulePolicy {
     pub fn allow_net(self, rule: &str) -> Self {
         self.parsed("allow", "net", rule)
     }
-    /// Denies outgoing connections; see [`RulePolicy::allow_net`].
+    /// Denies outgoing connections, over TLS and plaintext unless `rule`
+    /// names a transport; see [`RulePolicy::allow_net`].
     pub fn deny_net(self, rule: &str) -> Self {
         self.parsed("deny", "net", rule)
     }
-    /// Asks before connecting; see [`RulePolicy::allow_net`].
+    /// Asks before connecting, over TLS and plaintext unless `rule` names a
+    /// transport; see [`RulePolicy::allow_net`].
     pub fn prompt_net(self, rule: &str) -> Self {
         self.parsed("prompt", "net", rule)
     }
     /// Allows HTTP requests as the policy file rule `allow http {rule}`
     /// does: optional transports and methods, then URL patterns, such as
     /// `"GET POST api.example.com/v1/**"` or `"plaintext localhost:8080"`.
+    /// Without transports, the rule matches TLS only.
     ///
     /// # Panics
     ///
@@ -394,9 +397,13 @@ impl RulePolicy {
     pub fn allow_http(self, rule: &str) -> Self {
         self.parsed("allow", "http", rule)
     }
+    /// Denies HTTP requests, over TLS and plaintext unless `rule` names a
+    /// transport; see [`RulePolicy::allow_http`].
     pub fn deny_http(self, rule: &str) -> Self {
         self.parsed("deny", "http", rule)
     }
+    /// Asks before HTTP requests, over TLS and plaintext unless `rule`
+    /// names a transport; see [`RulePolicy::allow_http`].
     pub fn prompt_http(self, rule: &str) -> Self {
         self.parsed("prompt", "http", rule)
     }

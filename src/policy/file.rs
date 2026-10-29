@@ -188,7 +188,7 @@ fn not_a_transport(word: &str) -> Option<String> {
     let advice = match lower.as_str() {
         "http" => "write `plaintext` for unencrypted connections such as `http://`",
         "tcp" => "write `plaintext` for unencrypted connections, or `tls plaintext` for both",
-        "https" | "ssl" | "wss" => "rules match TLS connections unless they say `plaintext`, so remove it",
+        "https" | "ssl" | "wss" => "write `tls` for encrypted connections",
         "ws" => "write `plaintext` for unencrypted connections such as `ws://`",
         "udp" => "rules match TCP connections, the only kind that scripts make",
         _ => return None,
@@ -1112,8 +1112,8 @@ mod tests {
             [
                 "1:21: transports (`tls`, `plaintext`) come before the hosts",
                 "2:11: `allow net` needs a host after its transports, e.g. `localhost:8080`",
-                "3:12: URL patterns take no scheme: write `a.com` for `https://a.com`",
-                "4:12: URL patterns take no scheme: write `plaintext a.com/x` for `http://a.com/x`",
+                "3:12: URL patterns take no scheme: write `http tls a.com` for `https://a.com`",
+                "4:12: URL patterns take no scheme: write `http plaintext a.com/x` for `http://a.com/x`",
             ]
         );
     }
@@ -1141,10 +1141,10 @@ mod tests {
                 "4:7: write a space after the capability: `env HOME`",
                 "5:16: `write` is another capability: give each rule its own line (or option)",
                 "6:7: a rule has one verb: remove `allow`",
-                "7:11: net rules take hosts, not URLs: write `plaintext a.com`",
-                "8:11: net rules take hosts, not URLs: write `plaintext db:5432`",
-                "9:12: URL patterns take no scheme: write `plaintext a.com/x` for `ws://a.com/x`",
-                "10:12: URL patterns take no scheme: write `a.com/x` for `wss://a.com/x`",
+                "7:11: net rules take hosts, not URLs: write `net plaintext a.com`",
+                "8:11: net rules take hosts, not URLs: write `net plaintext db:5432`",
+                "9:12: URL patterns take no scheme: write `http plaintext a.com/x` for `ws://a.com/x`",
+                "10:12: URL patterns take no scheme: write `http tls a.com/x` for `wss://a.com/x`",
                 "11:11: net rules take hosts, not URLs: remove `gopher://`",
             ]
         );
@@ -1246,8 +1246,8 @@ mod tests {
             [
                 "1:11: `http` is not a transport: write `plaintext` for unencrypted connections such as `http://` (write `http.` for a host named `http`)",
                 "2:10: `TCP` is not a transport: write `plaintext` for unencrypted connections, or `tls plaintext` for both (write `tcp.` for a host named `tcp`)",
-                "3:16: `https` is not a transport: rules match TLS connections unless they say `plaintext`, so remove it (write `https.` for a host named `https`)",
-                "4:11: `ssl` is not a transport: rules match TLS connections unless they say `plaintext`, so remove it (write `ssl.` for a host named `ssl`)",
+                "3:16: `https` is not a transport: write `tls` for encrypted connections (write `https.` for a host named `https`)",
+                "4:11: `ssl` is not a transport: write `tls` for encrypted connections (write `ssl.` for a host named `ssl`)",
             ]
         );
         assert_eq!(
@@ -1703,8 +1703,8 @@ allow http GET a.com tls"
         assert_eq!(
             errors("allow net https://api.example.com/v1\nallow net http://localhost:8080"),
             [
-                "1:11: net rules take hosts, not URLs: write `api.example.com`",
-                "2:11: net rules take hosts, not URLs: write `plaintext localhost:8080`",
+                "1:11: net rules take hosts, not URLs: write `net tls api.example.com`",
+                "2:11: net rules take hosts, not URLs: write `net plaintext localhost:8080`",
             ]
         );
         assert_eq!(errors("allow read ~/x"), Vec::<String>::new());
