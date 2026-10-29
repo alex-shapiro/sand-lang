@@ -13,6 +13,8 @@ writable, yet a write lands elsewhere. A runtime that sells itself as safe for
 untrusted code must not let a confined script reach outside its granted paths,
 even under a race.
 
+**Scope.** The escape needs a second process outside the sandbox that converts the folder into a junction. Sand code cannot make junctions or symlinks, so a script cannot do this attack alone.
+
 **Reproduce.** Not executed; the triage host is macOS. The scenario, actors,
 and the exact window are in `attack.md`, derived from `src/files/windows.rs`
 (the `rename` function at line 839 and the module comment at lines 17-22, which

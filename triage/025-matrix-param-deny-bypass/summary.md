@@ -5,6 +5,8 @@ TODO item 025 (Policy): "Evaluate HTTP paths that contain `;` parameters both wi
 **Pain.** I deny an admin area on a server and allow the rest. A script adds a `;` parameter to a path segment, and the request gets through. Tomcat, Spring, and Jetty remove `;...` from each segment before routing, so the server returns the denied page.
 **Why it matters.** This is a deny bypass. The policy and `sand lint` both report no problem, so I get no warning.
 
+**Scope.** The bypass occurs only on servers that read `;` parameters and `..;` as Tomcat does. A Sand server reads `..;` as a normal segment, the same as the policy, so pure Sand programs are not affected.
+
 **Reproduce.** Start `python3 -I server.py 18931` in an empty directory. This server removes `;...` from each segment, as Tomcat does. Then run:
 
     sand run repro.sand --policy=repro.policy --no-prompt

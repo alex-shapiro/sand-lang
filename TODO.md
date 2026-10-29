@@ -10,39 +10,16 @@ Triage status:
 
 ## Tier 1: trust
 
-Untrusted code does something that the policy author forbade, or a prompt misleads the user.
+With a correct policy, untrusted code does something that the policy forbids.
 
-- [ ] 🔴 [025](triage/025-matrix-param-deny-bypass/summary.md) _Policy._ Evaluate HTTP paths that contain `;` parameters both with and without
-      matrix parameters in `url_segments` in `src/policy/net.rs` so that `deny http a.com/admin/**` blocks `/admin;x/secret` and `/public/..;/admin`.
-      Also distinguish raw non-UTF-8 bytes from percent-encoded `%25` sequences in `percent_decode` so that `allow http a.com/%25FF` does not match `/%FF`.
-- [ ] 🔴 [032](triage/032-lint-quoted-env-wildcard/summary.md) _Policy._ Expand `lint_policy` to detect shadowed and redundant `env`, `stdin`,
-      `stdout`, `stderr`, `timezone`, `custom`, and `listen` rules, `allow net *.localhost`
-      rules overridden by `deny net localhost`, and quoted wildcard
-      literals such as `deny env "AWS_*"`.
-- [ ] 🔴 [036](triage/036-lint-http-method-host-confusion/summary.md) _Policy._ Warn in `lint_policy` if an uppercase hostname in an `http` rule is
-      parsed as an HTTP method, e.g. `deny http LOCALHOST a.com`, or if a
-      lowercase method is parsed as a hostname, e.g. `allow http purge a.com`.
-- [ ] 🔴 [027](triage/027-netaddr-missing-request-context/summary.md) _Policy._ Include the originating HTTP method and URL on `Capability::NetAddr` so
-      that `CustomPolicy` and `RulePolicy::check` evaluate resolved addresses
-      with full request context.
-- [ ] 🔴 [040](triage/040-live-policy-needs-custom-policy/summary.md) _Policy._ Support shared, dynamically updatable `RulePolicy` instances and remove
-      `CustomPolicy` once host applications migrate to rule policies.
-- [ ] 🔴 [028](triage/028-hint-grants-subtree/summary.md) _Policy._ Add exact-file and exact-path rule syntax so that `rule_for` generates
-      rules that match only the prompted file or URL path instead of a directory
-      subtree or host prefix.
-- [ ] 🔴 [038](triage/038-prompt-hides-resolved-address/summary.md) _Policy._ Warn in the CLI prompter before allowing plaintext network connections,
-      and display the resolved IP addresses in the prompt.
-- [ ] 🔴 [034](triage/034-always-answer-exact-capability/summary.md) _Policy._ Store "always" prompt answers as `RulePolicy` rules rather than exact
-      `Capability` values so that an "always" grant for `write /x/o.txt` also
-      permits `read /x/o.txt`.
+- [ ] 🔴 [030](triage/030-windows-env-case/summary.md) _Policy._ Fold environment variable names case-insensitively on Windows in
+      `RulePolicy` to match Windows environment variable lookup.
 - [ ] 🔴 [002](triage/002-windows-rename-junction-race/summary.md) _Sandbox._ **Windows rename.** Windows does not provide a safe API to rename files
       by handle (`fs_at`, `winx`, and `cap-std` all rename by path). `rename`
       keeps every directory on both paths open so that the directories cannot
       be renamed or replaced. However, a caller can still empty a parent
       directory and convert it into a junction during the call; `rename`
       detects this change after the operation instead of preventing it.
-- [ ] 🔴 [030](triage/030-windows-env-case/summary.md) _Policy._ Fold environment variable names case-insensitively on Windows in
-      `RulePolicy` to match Windows environment variable lookup.
 
 ## Tier 2: host reliability
 
@@ -61,6 +38,11 @@ A host cannot rely on limits, stability, or control of the engine.
 - [ ] 🔴 [019](triage/019-value-type-defaults/summary.md) _Embedding._ Represent `ValueType` constants in `ConstVal` by their text form so that
       `#[sand(default)]` supports value-type fields and `json.decode` evaluates
       constant value-type defaults directly.
+- [ ] 🔴 [027](triage/027-netaddr-missing-request-context/summary.md) _Policy._ Include the originating HTTP method and URL on `Capability::NetAddr` so
+      that `CustomPolicy` and `RulePolicy::check` evaluate resolved addresses
+      with full request context.
+- [ ] 🔴 [040](triage/040-live-policy-needs-custom-policy/summary.md) _Policy._ Support shared, dynamically updatable `RulePolicy` instances and remove
+      `CustomPolicy` once host applications migrate to rule policies.
 - [ ] 🔴 [015](triage/015-web-stop-busy-engine/summary.md) _Web._ Stopping a busy engine in the browser terminates its worker, since
       `Engine::interrupt` only reaches an engine while it waits. With
       cross-origin isolation (COOP/COEP), the interrupt flag could live in a
@@ -100,8 +82,7 @@ Common scripts fail, need workarounds, or get misleading errors. LLMs write most
       an enum.
 - [ ] 🔴 [072](triage/072-explicit-type-args/summary.md) _Diagnostics._ Accept explicit type arguments in calls
       (`json.decode<Config>(text)`), or make the parser error suggest
-      `let config: Config = json.decode(text)` instead of `comparison operators
-    cannot be chained`.
+      `let config: Config = json.decode(text)` instead of `comparison operators cannot be chained`.
 - [ ] 🔴 [045](triage/045-parser-follow-on-errors/summary.md) _Diagnostics._ Suppress follow-on parser errors after an initial syntax error
       (`unexpected }` after a missing `,` or `:`, `expected )` after an
       unterminated string) and remove the follow-on expectations from the spec
@@ -146,16 +127,34 @@ Users see the problem, but it rarely blocks them.
       fields can use Rust range types and `#[sand(default)]`.
 - [ ] 🔴 [024](triage/024-encoded-slash-rules/summary.md) _Policy._ Support HTTP paths with encoded separators `%2F` and `%5C` in `rule_for`
       so that "always" prompt answers can generate rules for those requests.
+- [ ] 🔴 [025](triage/025-matrix-param-deny-bypass/summary.md) _Policy._ Evaluate HTTP paths that contain `;` parameters both with and without
+      matrix parameters in `url_segments` in `src/policy/net.rs` so that `deny http a.com/admin/**` blocks `/admin;x/secret` and `/public/..;/admin`.
+      Also distinguish raw non-UTF-8 bytes from percent-encoded `%25` sequences in `percent_decode` so that `allow http a.com/%25FF` does not match `/%FF`.
 - [ ] 🔴 [026](triage/026-prompt-ip-rule-never-prompts/summary.md) _Policy._ Support interactive prompts for resolved IP addresses that match a
       `prompt` address rule instead of denying them during address resolution.
+- [ ] 🔴 [028](triage/028-hint-grants-subtree/summary.md) _Policy._ Add exact-file and exact-path rule syntax so that `rule_for` generates
+      rules that match only the prompted file or URL path instead of a directory
+      subtree or host prefix.
 - [ ] 🔴 [029](triage/029-env-listing/summary.md) _Policy._ Separate the `env.vars()` listing capability from `Capability::Env("*")`
       or return `None` from `rule_for(&Capability::Env("*"))`, because `allow env *`
       does not override existing `deny` or `prompt` rules on individual
       variables.
+- [ ] 🔴 [032](triage/032-lint-quoted-env-wildcard/summary.md) _Policy._ Expand `lint_policy` to detect shadowed and redundant `env`, `stdin`,
+      `stdout`, `stderr`, `timezone`, `custom`, and `listen` rules, `allow net *.localhost`
+      rules overridden by `deny net localhost`, and quoted wildcard
+      literals such as `deny env "AWS_*"`.
 - [ ] 🔴 [033](triage/033-relative-builder-paths/summary.md) _Policy._ Resolve or reject relative paths in `RulePolicy` file builder methods so
       that `Display` always emits valid, parseable policy syntax.
+- [ ] 🔴 [034](triage/034-always-answer-exact-capability/summary.md) _Policy._ Store "always" prompt answers as `RulePolicy` rules rather than exact
+      `Capability` values so that an "always" grant for `write /x/o.txt` also
+      permits `read /x/o.txt`.
 - [ ] 🔴 [035](triage/035-denied-address-missing-from-error/summary.md) _Policy._ Include any policy-denied IP addresses in the error message if
       `resolve_allowed` fails to connect to the remaining allowed addresses.
+- [ ] 🔴 [036](triage/036-lint-http-method-host-confusion/summary.md) _Policy._ Warn in `lint_policy` if an uppercase hostname in an `http` rule is
+      parsed as an HTTP method, e.g. `deny http LOCALHOST a.com`, or if a
+      lowercase method is parsed as a hostname, e.g. `allow http purge a.com`.
+- [ ] 🔴 [038](triage/038-prompt-hides-resolved-address/summary.md) _Policy._ Warn in the CLI prompter before allowing plaintext network connections,
+      and display the resolved IP addresses in the prompt.
 - [ ] 🔴 [041](triage/041-fmt-comment-drift/summary.md) _Tooling._ Make `sand fmt` idempotent when a multi-line expression contains line
       comments (for example, `//r /\nf.7\t.// \n7/e\nf.//as\nf` shifts comments
       on each formatting pass).
