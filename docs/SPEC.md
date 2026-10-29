@@ -2583,8 +2583,10 @@ The engine checks an outgoing connection (`net.connect`, `net.connect_tls`,
 
 A rule policy decides an address in stage 2 with `RulePolicy::check_resolved`.
 The rule that allowed the stage 1 request (or prompted for it) competes with
-the address rules that match the address and the request's transport, by the
-specificity of their hosts. An exact host name ranks as a single address, and
+the address rules by the specificity of their hosts. The address rules are
+the rules for IP addresses that match the address and the request's transport:
+`net` rules, and for an HTTP request also `http` rules that match its method
+and path. An exact host name ranks as a single address, and
 a pattern of names under `localhost` ranks above every range. Other domain
 patterns and `*` rank below every address rule, because they name hosts that
 the user does not know. If the stage 1 rule wins, or no address rule matches,
@@ -2664,9 +2666,8 @@ with such a name (`tls.`, `delete.`).
 URL patterns have the form `host[:port][/path]`, where `host` is a hostname,
 domain wildcard, or single IP address and `path` is a percent-decoded file
 path pattern. A pattern without a port matches all ports. URL patterns take no
-scheme: `https` is `tls` and `http` is `plaintext`. An IP address in an `http`
-rule matches only URLs with that IP literal, not hostnames that are resolved
-to it.
+scheme: `https` is `tls` and `http` is `plaintext`. An `http` rule for an IP
+address also decides the requests to names that resolve to it (§14.6).
 
 HTTP Methods (`GET`, any case, or any upper-case word) precede URLs, before or
 after the transports. If no method is present, an http rule matches every method.

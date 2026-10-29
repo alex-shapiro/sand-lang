@@ -598,14 +598,22 @@ impl RulePolicy {
         if let Some(literal) = parse_ip(host) {
             return if literal == ip { Ok(()) } else { Err(None) };
         }
-        let transport = Transports::of(uses_tls(request));
-        let mut best = Best::new(self, &[]);
-        self.others().resolved.find_ip(ip, addr.port(), |is_alt, e| {
-            if applies(e.decision, is_alt) && e.transports.contains(transport) {
-                best.offer(e.rank.spec(0), e.decision, e.rule);
-            }
-        });
-        let Some((decision, rule)) = best.verdict() else { return Ok(()) };
+        // The address rules: for an HTTP request, the net and http rules for
+        // addresses that match it, and for a raw connection the net rules.
+        let index = self.others();
+        let address_rule = if let Capability::Http { .. } = request {
+            self.http_best(request, &[], |f| index.http.find_ip(ip, addr.port(), f))
+        } else {
+            let transport = Transports::of(uses_tls(request));
+            let mut best = Best::new(self, &[]);
+            index.resolved.find_ip(ip, addr.port(), |is_alt, e| {
+                if applies(e.decision, is_alt) && e.transports.contains(transport) {
+                    best.offer(e.rank.spec(0), e.decision, e.rule);
+                }
+            });
+            best.verdict()
+        };
+        let Some((decision, rule)) = address_rule else { return Ok(()) };
         if let Some((d, decider)) = self.verdict(request, PathSpace::Host, &[]).filter(|&(d, _)| d != Decision::Deny) {
             // By host specificity alone, whatever the tiers: a domain pattern
             // does not vouch for addresses that a default rule denies.
@@ -654,25 +662,9 @@ impl RulePolicy {
             Capability::Import(p) => self.file_verdict(p, IMPORT, space, &mut best),
             Capability::Net { host, port, tls } => self.net_verdict(&Dest::new(host, *port), *tls, &mut best),
             Capability::NetAddr { .. } => {}
-            Capability::Http { method, scheme, host, port, path } => {
+            Capability::Http { host, port, .. } => {
                 let dest = Dest::new(host, *port);
-                let (names, alt) = url_segments(path);
-                let tls = scheme.eq_ignore_ascii_case("https");
-                self.http_verdict(&dest, method, tls, &names, &mut best);
-                let Some(alt) = alt else { return best.verdict() };
-                // A server may split at decoded separators: both readings
-                // must be allowed.
-                let mut other = Best::new(self, exclude);
-                self.http_verdict(&dest, method, tls, &alt, &mut other);
-                // The stricter of the two decisions holds, which may be the
-                // prompt for an unmatched request.
-                let strictness = |v: Option<(Decision, usize)>| match v.map_or(Decision::Prompt, |(d, _)| d) {
-                    Decision::Allow => 0,
-                    Decision::Prompt => 1,
-                    Decision::Deny => 2,
-                };
-                let (main, alt) = (best.verdict(), other.verdict());
-                return if strictness(alt) > strictness(main) { alt } else { main };
+                return self.http_best(cap, exclude, |f| index.http.find(&dest, f));
             }
             Capability::NetListen(addr) => {
                 for &(ref pattern, d, rule) in &index.listen {
@@ -765,7 +757,31 @@ impl RulePolicy {
         });
     }
 
-    fn http_verdict(&self, dest: &Dest, method: &str, tls: bool, names: &[String], best: &mut Best<'_>) {
+    /// The most specific rule that matches the HTTP request `cap` in the
+    /// groups that `find` gives. A path with encoded separators
+    /// gets the stricter decision of its two readings, since a server may
+    /// split it at those separators.
+    fn http_best(&self, cap: &Capability, exclude: &[usize], find: impl Fn(&mut dyn FnMut(bool, &u32))) -> Option<(Decision, usize)> {
+        let Capability::Http { method, path, .. } = cap else { return None };
+        let (names, alt) = url_segments(path);
+        let tls = uses_tls(cap);
+        let mut best = Best::new(self, exclude);
+        self.http_verdict(&find, method, tls, &names, &mut best);
+        let Some(alt) = alt else { return best.verdict() };
+        let mut other = Best::new(self, exclude);
+        self.http_verdict(&find, method, tls, &alt, &mut other);
+        // The stricter of the two decisions holds, which may be the prompt
+        // for an unmatched request.
+        let strictness = |v: Option<(Decision, usize)>| match v.map_or(Decision::Prompt, |(d, _)| d) {
+            Decision::Allow => 0,
+            Decision::Prompt => 1,
+            Decision::Deny => 2,
+        };
+        let (main, alt) = (best.verdict(), other.verdict());
+        if strictness(alt) > strictness(main) { alt } else { main }
+    }
+
+    fn http_verdict(&self, find: &FindGroups, method: &str, tls: bool, names: &[String], best: &mut Best<'_>) {
         let index = self.others();
         if index.groups.is_empty() {
             return;
@@ -773,7 +789,7 @@ impl RulePolicy {
         let method = method.to_ascii_uppercase();
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
         let mut folded_names = None;
-        index.http.find(dest, |is_alt, &group| {
+        find(&mut |is_alt, &group| {
             let group = &index.groups[group as usize];
             let transport = Transports::of(tls);
             let mut offer = |e: &HttpEntry, depth: usize| {
@@ -915,6 +931,11 @@ pub(crate) fn strength(decision: Decision) -> u8 {
         Decision::Prompt => 0,
     }
 }
+
+/// Calls its argument with each group of http rules ([`HttpGroup`]) whose
+/// host matches a request, and whether the host matched another form of the
+/// request's address.
+type FindGroups<'a> = dyn Fn(&mut dyn FnMut(bool, &u32)) + 'a;
 
 /// The order of matching rules: the greatest decides.
 pub(crate) type Precedence = (Spec, u8, std::cmp::Reverse<usize>);

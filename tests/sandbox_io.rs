@@ -269,6 +269,42 @@ fn transports_decide_raw_connections_and_resolved_addresses() {
 }
 
 #[test]
+fn http_rules_for_addresses_decide_the_addresses_that_names_resolve_to() {
+    let get = |method: &str, host: &str, path: &str| Capability::Http {
+        method: method.into(),
+        scheme: "http".into(),
+        host: host.into(),
+        port: 80,
+        path: path.into(),
+    };
+    let metadata: SocketAddr = "169.254.169.254:80".parse().unwrap();
+    let p = RulePolicy::new().allow_http("plaintext *").deny_http("169.254.169.254");
+    assert_eq!(p.check_resolved(&get("GET", "metadata.evil.example", "/latest"), metadata), Decision::Deny);
+    assert_eq!(p.check_resolved(&get("GET", "metadata.evil.example", "/latest"), "8.8.8.8:80".parse().unwrap()), Decision::Allow);
+    // Only the requests that the rule matches: paths and methods.
+    let p = RulePolicy::new().allow_http("plaintext *").deny_http("10.0.0.5/admin").prompt_http("POST 10.0.0.5");
+    let at = "10.0.0.5:80".parse().unwrap();
+    assert_eq!(p.check_resolved(&get("GET", "app.example", "/admin/users"), at), Decision::Deny);
+    assert_eq!(p.check_resolved(&get("GET", "app.example", "/%61dmin"), at), Decision::Deny, "paths compare decoded");
+    assert_eq!(p.check_resolved(&get("GET", "app.example", "/x%2F..%2Fadmin"), at), Decision::Deny, "the stricter reading");
+    assert_eq!(p.check_resolved(&get("GET", "app.example", "/public"), at), Decision::Allow);
+    assert_eq!(p.check_resolved(&get("POST", "app.example", "/public"), at), Decision::Deny, "a prompt rule denies after resolution");
+    // Raw connections send no HTTP request, so http rules do not decide them.
+    assert_eq!(p.check_resolved(&plain("app.example", 80), at), Decision::Allow);
+    // Net rules for addresses decide HTTP requests too, and an exact name
+    // outranks a range, but not an exact address.
+    let p = RulePolicy::new().allow_http("plaintext db.internal").deny_net("10.0.0.0/8");
+    assert_eq!(p.check_resolved(&get("GET", "db.internal", "/"), at), Decision::Allow);
+    assert_eq!(p.check_resolved(&get("GET", "other.internal", "/"), at), Decision::Deny);
+    let p = RulePolicy::new().allow_http("plaintext db.internal").deny_http("10.0.0.5");
+    assert_eq!(p.check_resolved(&get("GET", "db.internal", "/"), at), Decision::Deny);
+    // Through every form of the address, as for net rules.
+    let p = RulePolicy::new().allow_http("plaintext *").deny_http("127.0.0.1");
+    assert_eq!(p.check_resolved(&get("GET", "evil.example", "/"), "[::ffff:127.0.0.1]:80".parse().unwrap()), Decision::Deny);
+    assert_eq!(p.check_resolved(&get("GET", "evil.example", "/"), "0.0.0.0:80".parse().unwrap()), Decision::Deny);
+}
+
+#[test]
 fn explicit_host_rules_allow_the_addresses_they_resolve_to() {
     let p = RulePolicy::new().allow_net("db.internal").allow_net("*.corp.example").deny_net("10.0.0.0/8").deny_net("10.0.0.6");
     assert_eq!(p.check(&net_addr("db.internal", "10.0.0.5:5432")), Decision::Allow, "an exact name outranks a range");

@@ -209,11 +209,9 @@ impl<'a> PathRule<'a> {
             }
         };
         let resolves = match scope {
-            Scope::Http { host, connections, .. } => {
+            Scope::Http { host, .. } => {
                 let role = match (&host.kind, rule.decision) {
-                    (HostKind::Ip(..), Decision::Deny | Decision::Prompt) if connections.contains(&Connection::Resolved) => {
-                        Some(Role::Address)
-                    }
+                    (HostKind::Ip(..), Decision::Deny | Decision::Prompt) => Some(Role::Address),
                     (HostKind::Ip(..), _) | (_, Decision::Deny) => None,
                     _ => Some(Role::Name),
                 };
@@ -822,6 +820,14 @@ mod tests {
         // An exact host rule also decides the addresses that its name resolves to, which a
         // domain rule leaves to the address rules.
         assert_eq!(lint("deny net 10.0.0.0/8\nallow net *.example.com\nallow net api.example.com"), none);
+        assert_eq!(lint("prompt http 10.0.0.5\nallow http *.example.com\nallow http api.example.com"), none, "an http address rule");
+        assert_eq!(lint("prompt http 10.0.0.5\nallow net *.example.com\nallow net api.example.com"), none, "an http address rule");
+        assert_eq!(
+            lint("deny http 10.0.0.5/x\nallow http *.example.com\nallow http api.example.com"),
+            ["3:12: warning[redundant-rule]: line 2 (`*.example.com`) already allows this"],
+            "a deny rule for an address wins over an exact name"
+        );
+        assert_eq!(lint("prompt net *\nprompt http 0.0.0.0"), none, "an http address rule decides resolved addresses");
         assert_eq!(
             lint("deny net 10.0.0.0/8\nallow net *.example.com\nallow net *.api.example.com"),
             ["3:11: warning[redundant-rule]: line 2 (`*.example.com`) already allows this"]

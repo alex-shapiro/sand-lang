@@ -97,9 +97,6 @@ Follow-up work, roughly in priority order.
 - [ ] Connect directly to parsed IP literals in `resolve_allowed` without
       checking `Capability::NetAddr`, and remove the IP-literal shortcut from
       `RulePolicy::resolved_verdict`.
-- [ ] Check resolved addresses against `http` IP rules so that a hostname that
-      is resolved to a denied IP address is blocked on matching HTTP paths and
-      methods.
 - [ ] Support HTTP paths with encoded separators `%2F` and `%5C` in `rule_for`
       so that "always" prompt answers can save rules for those requests.
 - [ ] Prompt for a resolved address that a `prompt` address rule decides
