@@ -366,6 +366,15 @@ fn default_rules_decide_only_what_no_other_rule_matches() {
 }
 
 #[test]
+fn custom_builders_read_a_star_detail_as_any_detail() {
+    let drop = Capability::Custom { name: "db".into(), detail: "drop".into() };
+    let p = RulePolicy::new().allow_custom("*", None).deny_custom("db", Some("*"));
+    assert_eq!(p.check(&drop), Decision::Deny);
+    assert_eq!(p.to_string(), "allow custom *\ndeny custom db\n");
+}
+
+/// `deny_env("AWS_**")` would otherwise deny only a variable named `AWS_**`.
+#[test]
 #[should_panic(expected = "invalid name pattern \"AWS_**\"")]
 fn env_builders_reject_double_stars() {
     let _ = RulePolicy::new().deny_env("AWS_**");

@@ -229,7 +229,7 @@ fn listen_pattern(pattern: &str) -> ListenPattern {
 }
 
 fn custom(name: &str, detail: Option<&str>) -> RuleKind {
-    RuleKind::Custom((name != "*").then(|| name.to_string()), detail.map(String::from))
+    RuleKind::Custom((name != "*").then(|| name.to_string()), detail.filter(|&d| d != "*").map(String::from))
 }
 
 /// Rule paths are literal prefixes without wildcards; for wildcard patterns,
@@ -478,7 +478,8 @@ impl RulePolicy {
         self.push(Decision::Prompt, RuleKind::TimeZone)
     }
     /// Allows a custom capability: `name` `"*"` matches every name, and
-    /// `detail` `None` matches every detail.
+    /// `detail` `None` or `Some("*")` matches every detail, as `allow custom
+    /// NAME *` in a policy file does.
     pub fn allow_custom(self, name: &str, detail: Option<&str>) -> Self {
         self.push(Decision::Allow, custom(name, detail))
     }
