@@ -637,7 +637,7 @@ impl RulePolicy {
         let Some((decision, rule)) = address else { return Ok(()) };
         if let Some((d, decider)) = decider.filter(|&(d, _)| d != Decision::Deny) {
             // By host specificity alone, whatever the tiers: a domain pattern
-            // does not vouch for addresses that a default rule denies.
+            // does not allow addresses that a default rule denies.
             let key = |i: usize, d: Decision| resolution_key(&self.rules[i].kind, d);
             if key(decider, d) > key(rule, decision) {
                 return Ok(());
@@ -880,8 +880,8 @@ fn refs<S: AsRef<str>>(names: &[S]) -> Vec<&str> {
 /// alone, then by its decision. A host name ranks as a single address and a
 /// pattern of the names under `localhost` as a narrower pattern, since both
 /// name one host. Other domain patterns rank below every address rule, as
-/// `*` does: they name hosts they do not know, so they do not vouch for the
-/// addresses those hosts resolve to.
+/// `*` does: they name hosts they do not know, so they do not decide the
+/// addresses of those hosts.
 pub(crate) fn resolution_key(kind: &RuleKind, decision: Decision) -> Precedence {
     let tier = match kind.http_match() {
         Some(HttpMatch { host: NetPattern { kind: HostKind::Suffix(s), .. }, .. }) if !super::net::is_localhost(s) => 0,

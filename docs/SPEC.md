@@ -2474,8 +2474,10 @@ it. The `Display` of a `RulePolicy` lists its rules as policy file text
 which decide only the requests that no other rule matches. A host combines
 the user's rules with its own this way, as the CLI does (§17.5). The default
 rules of `defaults` stay below its other rules. Resolved addresses (§14.6) are
-the exception: there, rules compete by host specificity alone, so a user's
-domain pattern does not vouch for an address that a default rule denies.
+the exception: there, the rule that decided the request competes with the
+address rules by host specificity alone, so a user's domain pattern does not
+allow an address that a default rule denies. Among the address rules, the
+tiers apply.
 
 Specificity depends on the kind of request:
 
@@ -2578,9 +2580,9 @@ The engine checks an outgoing connection (`net.connect`, `net.connect_tls`,
 1. `Net(host, port, tls)` (for `http`, `Http(method, url)`) for the host name
    or IP literal that the script used. The policy can prompt for this request.
 2. The engine resolves the name once and checks each address as
-   `NetAddr(host, addr, tls)`. An IP literal resolves to itself. `localhost` and
-   the names under it resolve to `127.0.0.1` and `::1` without the system
-   resolver (RFC 6761). The engine connects only to allowed addresses, in
+   `NetAddr(host, addr, tls)`. The address of an IP literal is the literal.
+   The engine gives `localhost` and the names under it the addresses
+   `127.0.0.1` and `::1` without the system resolver (RFC 6761). The engine connects only to allowed addresses, in
    resolver order. If the policy denies all addresses, the operation fails
    with kind `"permission_denied"`, the address and the deciding rule.
    `NetAddr` never prompts.
@@ -2598,12 +2600,12 @@ the engine connects. Otherwise the address rule decides, and a `prompt`
 address rule denies, because the engine cannot ask after resolution. A custom
 policy decides `NetAddr` itself, and `Prompt` counts as `Allow`.
 
-So a deny rule for a range also stops the names that resolve into it. An
-attacker can point a public name at a local service: with `allow net
+So a deny rule for a range also stops the names whose addresses are in it.
+An attacker can point a public name at a local service: with `allow net
 plaintext *` and `deny net 10.0.0.0/8`, a request to `http://evil.example/`
-that resolves to `10.0.0.5` fails. A rule that allows
-an exact name, such as `allow net db.internal`, outranks the range and lets
-that name reach `10.0.0.5`. `sandlang::policy::is_private_address` tells
+fails if DNS gives the address `10.0.0.5`. A rule that allows an exact name,
+such as `allow net db.internal`, outranks the range and lets the script
+connect to `10.0.0.5` through that name. `sandlang::policy::is_private_address` tells
 whether an address is in a private, loopback, link-local, or other
 non-public range.
 
@@ -2624,15 +2626,15 @@ Quoted text `"..."` (with `\"` and `\\` escapes) is parsed literally, so a quote
 # Read the system and the project; keep secrets out.
 let owners = alice bob
 allow read /usr /System ~/.gitconfig
-allow ./                                 # read and write the project
-deny ./**/.env                           # the more specific rule wins
-prompt write ./dist                      # ask before writing the build output
+allow ./             # read and write the project
+deny ./**/.env       # the more specific rule wins
+prompt write ./dist  # ask before writing the build output
 deny ~/Documents/*
 allow http GET HEAD api.github.com
 allow http POST PATCH api.github.com/repos/{owners}/**
-allow net plaintext localhost:8080       # the development server, over http://
+allow net plaintext localhost:8080  # the development server, over http://
 allow env HOME USER LC_*
-limit memory 64M                         # the prompter decides the rest
+limit memory 64M  # the prompter decides the rest
 ```
 
 | Statement                                                 | Meaning                                                                         |
@@ -2671,7 +2673,7 @@ URL patterns have the form `host[:port][/path]`, where `host` is a hostname,
 domain wildcard, or single IP address and `path` is a percent-decoded file
 path pattern. A pattern without a port matches all ports. URL patterns take no
 scheme: `https` is `tls` and `http` is `plaintext`. An `http` rule for an IP
-address also decides the requests to names that resolve to it (§14.6).
+address also decides the requests to the names that have that address (§14.6).
 
 HTTP Methods (`GET`, any case, or any upper-case word) precede URLs, before or
 after the transports. If no method is present, an http rule matches every method.
@@ -2711,12 +2713,12 @@ reports:
 
 An allow rule for an exact host name is not redundant under a domain pattern
 if an address rule ranks between them, because it also decides the addresses
-that the name resolves to (§14.6). File paths are compared lexically without
+of the name (§14.6). File paths are compared lexically without
 resolving symlinks.
 
 `sandlang::policy::rule_for(capability, allow)` gives, as a policy file
 line, the rule that decides a promptable request for good (e.g. `allow read
-/data/a.txt`, `deny http GET example.com:443/a`), quoted as needed; the
+/data/a.txt`, `deny http tls GET example.com:443/a`), quoted as needed; the
 playground adds it to the policy when "always" or "never" is answered.
 
 ---
@@ -2868,14 +2870,14 @@ next: P<[T]>? }` cannot be described.
 
 The `sandlang` crate embeds the Sand compiler and virtual machine in a Rust host
 application. Each `Engine` encapsulates an isolated execution environment
-configured through `Config` with a sandbox `Policy` (§14), resource `Limits`
+configured through `Config` with a sandbox policy (§14), resource `Limits`
 (§15), host I/O providers, and optional `NativeModule` definitions. Engines do
 not share mutable state and `Engine` implements `Send`, so a host can run
 multiple engines concurrently across threads or asynchronous tasks (or
 interleaved on a single thread in WebAssembly, §16.5).
 
 ```rust
-use sandlang::{Config, Engine, Limits, NativeModule, Policy};
+use sandlang::{Config, Engine, Limits, NativeModule, RulePolicy};
 
 let mut module = NativeModule::new("geo");
 module.function("dist", |a: f64, b: f64| -> f64 { (a * a + b * b).sqrt() });
@@ -2972,8 +2974,8 @@ constructing an `Engine`. `Config::module_root`, `Config::cwd`, and
 `Config::library` set the directories used for relative file paths and `import`
 resolution (§3.2), where registered standard and host modules
 (`Engine::module_names`) take precedence over library scripts. `Config::policy`
-and `Config::prompter` set the active `Policy` and interactive `Prompter`
-(§14).
+(or `Config::custom_policy`) and `Config::prompter` set the policy and the
+interactive `Prompter` (§14).
 
 ### 16.3 Native modules
 
@@ -3360,9 +3362,9 @@ matches (`RulePolicy::with_defaults`), so `--prompt=stdin` asks before the
 script reads standard input. The prompter decides every request that no rule
 decides: the CLI asks the user on the terminal.
 
-Options: `--allow=RULE`, `--deny=RULE` and `--prompt=RULE` add the rules of a
+Rules: `--allow=RULE`, `--deny=RULE` and `--prompt=RULE` add the rules of a
 policy file line (§14.7) without its verb, such as `--allow='read ./data'`,
-`--allow='net plaintext localhost:8080'` or `--deny=stdin`; relative paths
+`--allow='net plaintext localhost:8080'` or `--deny=stdin`. Relative paths
 start from the working directory. `--policy=FILE` adds the rules of a policy
 file and its limits (the options add to its rules and override its limits).
 The options and the policy file's rules are one set of rules: of two rules
@@ -3370,13 +3372,17 @@ with the same pattern, `deny` wins (§14.5), so an option cannot loosen a
 `deny` rule of the file. `--allow-all` makes `RulePolicy::allow_all()` the
 default rules, so it allows what no rule of the user matches:
 `--allow-all --prompt='write **'` asks before every write. `--no-prompt`
-denies what the CLI would ask about. An option that takes a value takes it
-after `=` or as the next argument (`--allow 'read ./data'`). Limits: `--max-memory=BYTES` (suffixes
-K, M, G), `--max-time=DURATION`, `--max-cpu=DURATION`,
-`--max-instructions=N`, `--max-compile-fuel=N`. `--seed=N` seeds the random
-number generator. Arguments after `--`, and positional arguments after
-`FILE`, are passed to the script. Exit code: the script's exit code (codes
-outside `0..=255` exit with 255), 1 for a runtime error or `?` failure, 2 for
+denies what the CLI would ask about.
+
+Limits: `--max-memory=BYTES` (suffixes K, M, G), `--max-time=DURATION`,
+`--max-cpu=DURATION`, `--max-instructions=N`, `--max-compile-fuel=N`.
+`--seed=N` seeds the random number generator. An option that takes a value
+takes it after `=` or as the next argument (`--allow 'read ./data'`), if
+that argument is not an option.
+
+The CLI gives the arguments after `--`, and the positional arguments after
+`FILE`, to the script. Exit code: the script's exit code (codes outside
+`0..=255` exit with 255), 1 for a runtime error or `?` failure, 2 for
 compile errors, 3 for limit violations. If the policy allows `TimeZone`,
 `time.local_zone()` returns the system time zone.
 
@@ -3387,8 +3393,8 @@ for the rest of the run and writes the option that allows it to standard
 error (`sand: denied: read /data/a.txt (--allow='read /data/a.txt' allows
 it)`). Answers:
 `y` (allow once), `a` (always), `n` or an empty line (deny once), `N`
-(never); end of input denies, and an unrecognized answer is asked again up to
-three times before denying. Control characters in the request are escaped,
+(never); end of input denies, and the CLI asks again after an unrecognized
+answer, up to three times before it denies. Control characters in the request are escaped,
 as are Unicode format characters (such as bidirectional overrides), line and
 paragraph separators, spaces other than U+0020 and combining marks. Before
 each question the terminal's rendition is reset (soft terminal reset and SGR

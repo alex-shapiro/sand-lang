@@ -2,13 +2,13 @@
 //! limits, asserting that the engine never returns an internal error.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use sandlang::{Config, Engine, Error, Limits, MemorySink, Policy};
+use sandlang::{Config, Engine, Error, Limits, MemorySink, RulePolicy};
 use std::time::Duration;
 
 fuzz_target!(|data: &[u8]| {
     let Ok(src) = std::str::from_utf8(data) else { return };
     let config = Config::new()
-        .policy(Policy::deny_all())
+        .policy(RulePolicy::standard())
         .stdout(MemorySink::new())
         .stderr(MemorySink::new())
         .limits(Limits {
