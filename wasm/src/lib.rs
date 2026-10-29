@@ -6,7 +6,9 @@
 //! environment and arguments the host gives, and standard input the host
 //! provides as text. Output and permission prompts go to JavaScript
 //! callbacks. A policy file (see `sandlang::policy::PolicyFile`) decides
-//! what scripts may do and sets their limits.
+//! what scripts may do and sets their limits. Its rules add to rules that
+//! let scripts print and import modules; `onPrompt` decides what no rule
+//! decides.
 //!
 //! An engine runs one script (or session input) at a time and runs on the
 //! thread that calls it, so long computations block that thread: run
@@ -32,7 +34,7 @@ use hooks::{Hooks, JsOutput, JsPrompter};
 use js_sys::{Array, Object, Reflect};
 use sandlang::lint::LintWarning;
 use sandlang::policy::{PolicyError, PolicyFile};
-use sandlang::{Config, Decision, Diagnostic, Error, MemFs, Severity};
+use sandlang::{Config, Diagnostic, Error, MemFs, Severity};
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
@@ -185,8 +187,9 @@ impl Engine {
         let key =
             Rc::new(HookKey(hooks::register(Hooks { on_output: function(&hooks, "onOutput")?, on_prompt: function(&hooks, "onPrompt")? })));
         let mut config = Config::new()
-            // What the policy does not decide is asked about (`onPrompt`).
-            .policy(policy.policy_or(Decision::Prompt))
+            // Scripts may print and import modules unless the policy says
+            // otherwise; what no rule decides is asked about (`onPrompt`).
+            .policy(sandlang::RulePolicy::standard().allow_import("/").extend(policy.rules))
             .limits(policy.limits.clone())
             .memory_fs(fs.clone())
             .cwd(&cwd)

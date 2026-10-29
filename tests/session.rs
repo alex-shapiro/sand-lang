@@ -8,8 +8,7 @@ mod common;
 use common::{TempDir, rt};
 use sandlang::session::RESET_NOTE;
 use sandlang::{
-    Capability, Config, Decision, Engine, Error, LimitKind, Limits, MemorySink, NativeModule, Policy, PromptAnswer, RulePolicy, Session,
-    StdinFeed,
+    Capability, Config, Decision, Engine, Error, LimitKind, Limits, MemorySink, NativeModule, PromptAnswer, Session, StdinFeed,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -260,7 +259,7 @@ fn iterators_labels_and_defer_across_inputs() {
 fn imports_mid_session() {
     let dir = TempDir::new("session-import");
     dir.write("geo.sand", "pub fn area(w: float, h: float) -> float { w * h }\nprint(\"geo loaded\")\n");
-    let mut r = Repl::with(Config::new().policy(Policy::allow_all()).module_root(dir.path()).cwd(dir.path()));
+    let mut r = Repl::with(Config::new().policy(sandlang::RulePolicy::allow_all()).module_root(dir.path()).cwd(dir.path()));
     r.ok("import json");
     assert_eq!(r.value("json.encode(json.parse(\"[1, 2]\")?)"), "\"[1,2]\"");
     r.ok("from math import cbrt");
@@ -288,7 +287,8 @@ fn import_library_module_by_name() {
     dir.write("tools/geo.sand", "import units\npub fn area(w: float, h: float) -> float { units.scale(w * h) }\n");
     dir.write("tools/units.sand", "pub fn scale(x: float) -> float { x * 2.0 }\n");
     let library = dir.path().join("tools");
-    let mut r = Repl::with(Config::new().policy(Policy::allow_all()).module_root(dir.path()).cwd(dir.path()).library(&library));
+    let mut r =
+        Repl::with(Config::new().policy(sandlang::RulePolicy::allow_all()).module_root(dir.path()).cwd(dir.path()).library(&library));
     r.ok("import geo");
     assert_eq!(r.value("geo.area(2.0, 3.0)"), "12.0");
     r.ok("from units import scale");
@@ -305,8 +305,8 @@ fn check_library_import_policy() {
     let dir = TempDir::new("session-library-policy");
     dir.write("tools/geo.sand", "pub fn one() -> int { 1 }\n");
     let library = dir.path().join("tools");
-    let policy = Policy::custom(|cap: &Capability| if matches!(cap, Capability::Import(_)) { Decision::Deny } else { Decision::Allow });
-    let mut r = Repl::with(Config::new().policy(policy).module_root(dir.path()).library(&library));
+    let policy = |cap: &Capability| if matches!(cap, Capability::Import(_)) { Decision::Deny } else { Decision::Allow };
+    let mut r = Repl::with(Config::new().custom_policy(policy).module_root(dir.path()).library(&library));
     let msg = r.compile_error("import geo");
     assert!(msg.contains("cannot import `geo`: permission denied"), "{msg}");
 }
@@ -318,7 +318,7 @@ fn reload_modified_module_on_import() {
     dir.write("tools/geo.sand", "import units\npub fn area() -> float { units.scale(1.0) }\nprint(\"geo v1\")\n");
     dir.write("tools/units.sand", "pub fn scale(x: float) -> float { x * 2.0 }\n");
     let library = dir.path().join("tools");
-    let mut r = Repl::with(Config::new().policy(Policy::allow_all()).module_root(dir.path()).library(&library));
+    let mut r = Repl::with(Config::new().policy(sandlang::RulePolicy::allow_all()).module_root(dir.path()).library(&library));
     r.ok("import geo");
     assert_eq!(r.take_out(), "geo v1\n");
     r.ok("let before = geo.area");
@@ -498,8 +498,8 @@ fn dropping_an_eval_future_leaves_a_usable_session() {
         if n.fetch_add(1, Ordering::SeqCst) == 0 { Box::pin(std::future::pending()) } else { Box::pin(async { PromptAnswer::AllowOnce }) }
     };
     // Imports are prompted for (only those under `elsewhere` would be allowed).
-    let rules = RulePolicy::new().allow_import(dir.path().join("elsewhere")).fallback(sandlang::Decision::Prompt);
-    let policy = Policy::rules(rules);
+    let rules = sandlang::RulePolicy::standard().allow_import(dir.path().join("elsewhere"));
+    let policy = rules;
     let mut r = Repl::with(Config::new().policy(policy).prompter(prompter).module_root(dir.path()).cwd(dir.path()));
     let timeout = |r: &mut Repl, src: &str| {
         let Repl { rt, session, .. } = r;
@@ -583,7 +583,7 @@ fn top_level_use_bindings_persist_across_inputs() {
 fn a_file_bound_with_top_level_use_stays_open_for_later_inputs() {
     let dir = TempDir::new("session-use");
     std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
-    let policy = Policy::rules(RulePolicy::new().fallback(sandlang::Decision::Allow));
+    let policy = sandlang::RulePolicy::allow_all();
     let mut r = Repl::with(Config::new().policy(policy).cwd(dir.path()).module_root(dir.path()));
     r.ok("import fs");
     r.ok("use f = fs.open(\"a.txt\")?");
@@ -602,7 +602,7 @@ fn always_answers_persist_and_prompts_happen_once() {
         let _ = cap;
         Box::pin(async { PromptAnswer::AllowAlways })
     };
-    let policy = Policy::rules(RulePolicy::new().fallback(sandlang::Decision::Prompt));
+    let policy = sandlang::RulePolicy::standard();
     let mut r = Repl::with(Config::new().policy(policy).prompter(prompter).cwd(dir.path()).module_root(dir.path()));
     r.ok("import fs");
     assert_eq!(r.value("fs.read_text(\"a.txt\")?"), "\"hello\"");
@@ -738,7 +738,7 @@ fn always_answers_survive_a_reset() {
         n.fetch_add(1, Ordering::SeqCst);
         Box::pin(async { PromptAnswer::AllowAlways })
     };
-    let policy = Policy::rules(RulePolicy::new().fallback(sandlang::Decision::Prompt));
+    let policy = sandlang::RulePolicy::standard();
     let mut r = Repl::with(Config::new().policy(policy).prompter(prompter).cwd(dir.path()).module_root(dir.path()));
     let msg = r.internal_error("import fs\nlet a = fs.read_text(\"a.txt\")?\nlet b = fs.read_text(\"b.txt\")?");
     assert_reset(&r, &msg, "prompter bug");
@@ -843,7 +843,7 @@ fn prompts_between_inputs_wait_for_the_input() {
         }
         Box::pin(async { PromptAnswer::AllowOnce })
     };
-    let policy = Policy::rules(RulePolicy::new().fallback(sandlang::Decision::Prompt));
+    let policy = sandlang::RulePolicy::standard();
     let mut r = Repl::with(Config::new().policy(policy).prompter(prompter).cwd(dir.path()).module_root(dir.path()));
     r.ok("import fs");
     let before = asked.load(Ordering::SeqCst);
@@ -897,7 +897,7 @@ fn types_of_generic_functions() {
 #[test]
 fn scripts_read_the_input_the_host_feeds() {
     let feed = StdinFeed::new();
-    let mut r = Repl::with(Config::new().policy(Policy::allow_all()).stdin_feed(&feed));
+    let mut r = Repl::with(Config::new().policy(sandlang::RulePolicy::allow_all()).stdin_feed(&feed));
     r.ok("import io");
     // Data sent ahead is kept until read.
     feed.send("early\npart");

@@ -1,5 +1,5 @@
 //! End-to-end tests of the `sand` command-line tool: subcommands, flag
-//! parsing, exit codes, standard streams and the `--prompt-stdin` prompter.
+//! parsing, exit codes and standard streams. `prompt_tty.rs` tests prompts.
 
 mod common;
 
@@ -21,9 +21,16 @@ impl std::fmt::Debug for Out {
 }
 
 /// Runs `sand ARGS` in `dir`, feeding `stdin` (closed after writing).
+/// Runs `sand ARGS` in `dir`. `run`, `test` and `repl` get `--no-prompt`:
+/// the CLI asks on the controlling terminal, which a test run may share.
+/// `cli/tests/prompt_tty.rs` tests prompts on a pseudo-terminal.
 fn sand_in(dir: &Path, args: &[&str], stdin: &str, env: &[(&str, &str)]) -> Out {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_sand"));
-    cmd.args(args).current_dir(dir).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut args = args.to_vec();
+    if matches!(args.first(), Some(&("run" | "test" | "repl"))) && !args.contains(&"--no-prompt") {
+        args.insert(1, "--no-prompt");
+    }
+    cmd.args(&args).current_dir(dir).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     for (k, v) in env {
         cmd.env(k, v);
     }
@@ -180,10 +187,15 @@ fn bad_flags_and_values_exit_2_with_a_message() {
         ("--max-compile-fuel=lots", "invalid --max-compile-fuel value `lots`"),
         ("--seed=abc", "invalid --seed value `abc`"),
         ("--seed", "--seed requires a value"),
-        ("--allow-read", "--allow-read requires a value"),
-        ("--allow-stdin=yes", "--allow-stdin does not take a value"),
+        ("--allow", "--allow requires a rule, e.g. --allow='net api.example.com'"),
+        ("--allow=raed ./x", "invalid rule `--allow=raed ./x`: unknown capability `raed`"),
+        ("--deny=read data", "invalid rule `--deny=read data`: path `data` is not anchored"),
+        ("--prompt=net", "invalid rule `--prompt=net`: `prompt net` needs at least one argument"),
+        ("--no-prompt=yes", "--no-prompt does not take a value"),
         ("--allow-all=1", "--allow-all does not take a value"),
-        ("--prompt=y", "--prompt does not take a value"),
+        ("--allow-read=data", "unknown option `--allow-read` (use --allow='read ./PATH')"),
+        ("--allow-net=*", "unknown option `--allow-net` (use --allow='net HOST')"),
+        ("--prompt-stdin", "unknown option `--prompt-stdin` (use nothing: questions go to the terminal, and --no-prompt denies instead)"),
     ];
     for (flag, msg) in cases {
         let o = run("print(\"should not run\")", &[flag]);
@@ -230,12 +242,12 @@ print(fs.write_text("data/in.txt", "clobbered").is_ok())
     dir.write("data/in.txt", "input");
     dir.write("secret.txt", "secret");
     std::fs::create_dir_all(dir.path().join("out")).unwrap();
-    let o = sand(dir.path(), &["run", "main.sand", "--allow-read=data", "--allow-write=out"]);
+    let o = sand(dir.path(), &["run", "main.sand", "--allow=read ./data", "--allow=write ./out"]);
     assert_eq!((o.code, o.stdout.as_str()), (0, "Ok(\"input\")\nfalse\ntrue\nfalse\n"), "{o:?}");
     assert_eq!(std::fs::read_to_string(dir.path().join("out/result.txt")).unwrap(), "written");
     assert_eq!(std::fs::read_to_string(dir.path().join("data/in.txt")).unwrap(), "input");
 
-    // Nothing is allowed by default; --allow-all allows everything.
+    // Files are not allowed by default; --allow-all allows everything.
     let o = sand(dir.path(), &["run", "main.sand"]);
     assert!(o.stdout.starts_with("Err(Error(message: \"permission denied") && o.stdout.ends_with("false\nfalse\nfalse\n"), "{o:?}");
     let o = sand(dir.path(), &["run", "main.sand", "--allow-all"]);
@@ -270,8 +282,12 @@ while true { i += 1 }
     assert!(o.stderr.contains("instruction limit exceeded"), "{o:?}");
 
     // Options add rules to the file's and override its limits.
-    let o =
-        sand_in(dir.path(), &["run", "main.sand", "--allow-write=out", "--policy=conf/app.policy", "--max-instructions=200000"], "", &vars);
+    let o = sand_in(
+        dir.path(),
+        &["run", "main.sand", "--allow=write ./out", "--policy=conf/app.policy", "--max-instructions=200000"],
+        "",
+        &vars,
+    );
     assert_eq!((o.code, o.stdout.as_str()), (3, "Ok(\"input\")\nfalse\ntrue\nSome(\"on\")\n"), "{o:?}");
 
     // Errors name the file and line; the script does not run.
@@ -321,22 +337,12 @@ fn policy_files_are_checked_formatted_and_linted() {
 }
 
 #[test]
-fn policy_file_default_prompt_asks() {
-    let dir = script("policyprompt", "import fs\nprint(fs.read_text(\"a.txt\").is_ok())");
-    dir.write("a.txt", "A");
-    dir.write("ask.policy", "default prompt\n");
-    let o = sand_in(dir.path(), &["run", "main.sand", "--policy=ask.policy", "--prompt-stdin"], "y\n", &[]);
-    assert_eq!((o.code, o.stdout.as_str()), (0, "true\n"), "{o:?}");
-    assert!(o.stderr.contains("sand: allow the script to read "), "{o:?}");
-}
-
-#[test]
 fn allow_env_names() {
     let dir = script("envflags", "import env\nprint(env.get(\"SAND_CLI_ALLOWED\"))\nprint(env.get(\"SAND_CLI_OTHER\"))");
     let vars = [("SAND_CLI_ALLOWED", "yes"), ("SAND_CLI_OTHER", "hidden")];
-    let o = sand_in(dir.path(), &["run", "main.sand", "--allow-env=SAND_CLI_ALLOWED"], "", &vars);
+    let o = sand_in(dir.path(), &["run", "main.sand", "--allow=env SAND_CLI_ALLOWED"], "", &vars);
     assert_eq!((o.code, o.stdout.as_str()), (0, "Some(\"yes\")\nNone\n"), "{o:?}");
-    let o = sand_in(dir.path(), &["run", "main.sand", "--allow-env=SAND_CLI_ALLOWED,SAND_CLI_OTHER"], "", &vars);
+    let o = sand_in(dir.path(), &["run", "main.sand", "--allow=env SAND_CLI_ALLOWED,SAND_CLI_OTHER"], "", &vars);
     assert_eq!(o.stdout, "Some(\"yes\")\nSome(\"hidden\")\n", "{o:?}");
 }
 
@@ -351,41 +357,23 @@ match io.stdin.read_line() {
 print(io.stdin.read_text().map(s => s.len()))
 "#;
     let dir = script("stdin", src);
-    let o = sand_in(dir.path(), &["run", "main.sand"], "first\nsecond\n", &[]);
+    // Scripts may read standard input unless a rule denies it.
+    let o = sand_in(dir.path(), &["run", "main.sand"], "first\r\nsecond\n", &[]);
+    assert_eq!((o.code, o.stdout.as_str()), (0, "line: first\nOk(7)\n"), "{o:?}");
+    let o = sand_in(dir.path(), &["run", "main.sand"], "", &[]);
+    assert_eq!(o.stdout, "eof\nOk(0)\n", "{o:?}");
+    let o = sand_in(dir.path(), &["run", "main.sand", "--deny=stdin"], "first\nsecond\n", &[]);
     assert_eq!(
         o.stdout,
         "error: permission_denied\nErr(Error(message: \"permission denied: read standard input\", kind: \"permission_denied\"))\n",
         "{o:?}"
     );
-    let o = sand_in(dir.path(), &["run", "main.sand", "--allow-stdin"], "first\r\nsecond\n", &[]);
-    assert_eq!((o.code, o.stdout.as_str()), (0, "line: first\nOk(7)\n"), "{o:?}");
-    let o = sand_in(dir.path(), &["run", "main.sand", "--allow-stdin"], "", &[]);
-    assert_eq!(o.stdout, "eof\nOk(0)\n", "{o:?}");
-}
-
-#[test]
-fn prompt_answers_from_stdin() {
-    let src =
-        "import fs\nprint(fs.read_text(\"a.txt\").is_ok())\nprint(fs.read_text(\"a.txt\").is_ok())\nprint(fs.read_text(\"a.txt\").is_ok())";
-    let dir = script("prompt", src);
-    dir.write("a.txt", "A");
-    let cases = [
-        ("y\ny\nn\n", "true\ntrue\nfalse\n", 3),
-        ("a\n", "true\ntrue\ntrue\n", 1),
-        ("N\n", "false\nfalse\nfalse\n", 1),
-        ("n\nmaybe\ny\n\n", "false\ntrue\nfalse\n", 4),
-        // End of input denies.
-        ("", "false\nfalse\nfalse\n", 3),
-    ];
-    for (answers, want, questions) in cases {
-        let o = sand_in(dir.path(), &["run", "main.sand", "--prompt-stdin"], answers, &[]);
-        assert_eq!((o.code, o.stdout.as_str()), (0, want), "answers {answers:?}: {o:?}");
-        assert_eq!(o.stderr.matches("sand: allow the script to read ").count(), questions, "answers {answers:?}: {o:?}");
-        assert!(o.stderr.contains("a.txt?"), "{o:?}");
-    }
-    // Rules still apply first: allowed reads are not prompted for.
-    let o = sand_in(dir.path(), &["run", "main.sand", "--prompt-stdin", "--allow-read=."], "n\n", &[]);
-    assert_eq!((o.stdout.as_str(), o.stderr.as_str()), ("true\ntrue\ntrue\n", ""), "{o:?}");
+    // So may they read the time zone.
+    let zone = script("zone", "import time\nprint(time.local_zone().id())");
+    let o = sand_in(zone.path(), &["run", "main.sand"], "", &[("TZ", "Asia/Tokyo")]);
+    assert_eq!(o.stdout, "Asia/Tokyo\n", "{o:?}");
+    let o = sand_in(zone.path(), &["run", "main.sand", "--deny=timezone"], "", &[("TZ", "Asia/Tokyo")]);
+    assert_eq!(o.stdout, "UTC\n", "{o:?}");
 }
 
 // ---------------------------------------------------------------------------
@@ -435,8 +423,8 @@ fn lint_command() {
 #[test]
 fn output_stops_quietly_if_stdout_is_closed() {
     let dir = TempDir::new("lint-pipe");
-    let rules: String = (0..20_000).map(|i| format!("allow net h{i}.example.com\n")).collect();
-    dir.write("big.policy", &format!("allow net *\n{rules}"));
+    let rules: String = (0..20_000).map(|i| format!("deny net h{i}.example.com\n")).collect();
+    dir.write("big.policy", &format!("deny net *\n{rules}"));
     let mut child = Command::new(env!("CARGO_BIN_EXE_sand"))
         .args(["lint", "big.policy"])
         .current_dir(dir.path())
@@ -450,7 +438,7 @@ fn output_stops_quietly_if_stdout_is_closed() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!((out.status.code(), stderr.as_ref()), (Some(1), ""));
     let mut child = Command::new(env!("CARGO_BIN_EXE_sand"))
-        .arg("repl")
+        .args(["repl", "--no-prompt"])
         .current_dir(dir.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -554,8 +542,8 @@ fn test_command_denies_by_default_and_takes_run_options() {
     let o = sand(dir.path(), &["test", "t.sand"]);
     assert_eq!(o.code, 1, "{o:?}");
     assert!(o.stdout.contains("FAIL reads: assert: denied") && o.stdout.contains("FAIL env: assert: no env"), "{o:?}");
-    let allow = format!("--allow-read={}", dir.path().display());
-    let o = sand(dir.path(), &["test", "t.sand", &allow, "--allow-env=HOME"]);
+    let allow = format!("--allow=read {}", dir.path().display());
+    let o = sand(dir.path(), &["test", "t.sand", &allow, "--allow=env HOME"]);
     assert_eq!((o.code, o.stdout.as_str()), (0, "ok reads\nok env\n2 passed, 0 failed\n"), "{o:?}");
     let o = sand(dir.path(), &["test", "--allow-all", "t.sand"]);
     assert_eq!(o.code, 0, "{o:?}");
@@ -600,7 +588,7 @@ fn repl_runs_each_input_once() {
     assert_eq!(o.stderr, "", "{o:?}");
     // Effects such as writing files happen once too.
     let input = "import fs\nfs.write_text(\"log.txt\", \"x\")?\nfs.write_text(\"log.txt\", fs.read_text(\"log.txt\")? + \"y\")?\nfs.read_text(\"log.txt\")?\n";
-    let o = sand_in(dir.path(), &["repl", "--allow-write=."], input, &[]);
+    let o = sand_in(dir.path(), &["repl", "--allow=write ./"], input, &[]);
     assert_eq!(repl_shown(&o.stdout), ["\"xy\""], "{o:?}");
 }
 
@@ -665,21 +653,9 @@ fn repl_exit_ends_the_session() {
 fn repl_passes_lines_to_scripts_that_wait_for_them() {
     let dir = TempDir::new("repl-stdin");
     let input = "import io\nio.stdin.read_line()?\nfor the script\nlet t = spawn io.stdin.read_line()\n40 + 2\nt.wait()?\nlate\nio.stdin.read_line()?\n";
-    let o = sand_in(dir.path(), &["repl", "--allow-stdin"], input, &[]);
+    let o = sand_in(dir.path(), &["repl"], input, &[]);
     assert_eq!(o.code, 0, "{o:?}");
     assert_eq!(repl_shown(&o.stdout), ["Some(\"for the script\")", "42", "Some(\"late\")", "None"], "{o:?}");
-}
-
-#[test]
-fn repl_prompts_with_the_prompter() {
-    let dir = TempDir::new("repl-prompt");
-    dir.write("a.txt", "A");
-    // The answer is read from standard input after the line that asks.
-    let input = "import fs\nfs.read_text(\"a.txt\")?\na\nfs.read_text(\"a.txt\")?\nfs.read_text(\"a.txt\").is_ok()\n";
-    let o = sand_in(dir.path(), &["repl", "--prompt-stdin"], input, &[]);
-    assert_eq!(o.code, 0, "{o:?}");
-    assert_eq!(repl_shown(&o.stdout), ["\"A\"", "\"A\"", "true"], "{o:?}");
-    assert_eq!(o.stderr.matches("sand: allow the script to read ").count(), 1, "{o:?}");
 }
 
 /// Ctrl-C (SIGINT) interrupts the running input, or discards a partial one,
@@ -689,7 +665,7 @@ fn repl_prompts_with_the_prompter() {
 fn repl_ctrl_c_interrupts_the_input() {
     let dir = TempDir::new("repl-sigint");
     let mut child = Command::new(env!("CARGO_BIN_EXE_sand"))
-        .arg("repl")
+        .args(["repl", "--no-prompt"])
         .current_dir(dir.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -733,7 +709,7 @@ struct LiveRepl {
 impl LiveRepl {
     fn start(dir: &Path) -> LiveRepl {
         let mut child = Command::new(env!("CARGO_BIN_EXE_sand"))
-            .arg("repl")
+            .args(["repl", "--no-prompt"])
             .current_dir(dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -871,26 +847,68 @@ fn hi_server() -> u16 {
 // Relies on the resolver accepting `127.1` for 127.0.0.1 (glibc, macOS).
 #[cfg(unix)]
 #[test]
-fn private_networks_are_denied_by_default() {
+fn net_rules_take_transports_and_decide_resolved_addresses() {
     let port = hi_server();
     let dir = script("net", &format!("import http\nprint(http.get(\"http://127.1:{port}/\").map(r => r.text().unwrap()))"));
     let run = |flags: &[&str]| {
         let mut args = vec!["run", "main.sand"];
         args.extend_from_slice(flags);
-        sand(dir.path(), &args).stdout
+        sand(dir.path(), &args)
     };
-    assert!(run(&["--allow-net=*"]).starts_with("Err(Error(message: \"permission denied"));
-    assert_eq!(run(&["--allow-net=*", "--allow-private-net"]), "Ok(\"hi\")\n");
-    assert_eq!(run(&["--allow-net=*,127.0.0.0/8"]), "Ok(\"hi\")\n");
-    assert!(run(&["--allow-net=*", "--allow-private-net", "--deny-net=127.0.0.0/8"]).starts_with("Err(Error(message: \"permission denied"));
+    // `*` matches TLS connections only: `http://` needs `plaintext`.
+    assert!(run(&["--allow=net *"]).stdout.starts_with("Err(Error(message: \"permission denied: GET http://127.1"), "TLS only");
+    assert_eq!(run(&["--allow=net plaintext *"]).stdout, "Ok(\"hi\")\n");
+    let denied = run(&["--allow=net plaintext *", "--deny=net tls plaintext 127.0.0.0/8"]).stdout;
+    assert!(denied.contains("address 127.0.0.1 is not allowed by the rule `deny net tls plaintext 127.0.0.0/8`"), "{denied}");
+    let removed = run(&["--allow-private-net"]);
+    assert_eq!(removed.code, 2, "{removed:?}");
+    assert!(removed.stderr.contains("unknown option `--allow-private-net`"), "{removed:?}");
+}
+
+/// `localhost` and the names under it are the loopback host (RFC 6761):
+/// Sand resolves them without the system resolver.
+#[test]
+fn localhost_names_reach_loopback() {
+    let port = hi_server();
+    let get = |host: &str| format!("print(http.get(\"http://{host}:{port}/\").map(r => r.text().unwrap()))\n");
+    let dir = script("localhost", &format!("import http\n{}{}", get("localhost"), get("app.localhost")));
+    let run = |flags: &[&str]| {
+        let mut args = vec!["run", "main.sand"];
+        args.extend_from_slice(flags);
+        sand(dir.path(), &args)
+    };
+    let o = run(&[&format!("--allow=net plaintext localhost:{port} *.localhost")]);
+    assert_eq!(o.stdout, "Ok(\"hi\")\nOk(\"hi\")\n", "{o:?}");
+    let o = run(&[]);
+    assert_eq!(o.stdout.matches("permission denied: GET http://").count(), 2, "{o:?}");
+}
+
+/// A policy file's rules add to the rules of the CLI.
+#[test]
+fn policy_files_add_to_the_cli_rules() {
+    let port = hi_server();
+    let dir = script("cli-rules", &format!("import http\nprint(http.get(\"http://localhost:{port}/\").is_ok())\nprint(\"out\")"));
+    dir.write("app.policy", "allow net plaintext localhost\ndeny stdout\n");
+    let o = sand(dir.path(), &["run", "main.sand", "--policy=app.policy"]);
+    assert_ne!(o.code, 0, "{o:?}");
+    assert!(o.stderr.contains("permission denied: stdout"), "{o:?}");
+    dir.write("app.policy", "allow net plaintext localhost\n");
+    let o = sand(dir.path(), &["run", "main.sand", "--policy=app.policy"]);
+    assert_eq!((o.code, o.stdout.as_str()), (0, "true\nout\n"), "{o:?}");
+    for old in ["allow private-net\n", "default prompt\n"] {
+        dir.write("old.policy", old);
+        let o = sand(dir.path(), &["check", "old.policy"]);
+        assert_eq!(o.code, 2, "{o:?}");
+        assert!(o.stderr.contains("old.policy:1:"), "{o:?}");
+    }
 }
 
 #[test]
 fn invalid_network_patterns_are_explained() {
-    let out = run("print(1)", &["--allow-net=10.0.0.1/8"]);
+    let out = run("print(1)", &["--allow=net 10.0.0.1/8"]);
     assert_eq!(out.code, 2, "{}", out.stderr);
     assert!(out.stderr.contains("`10.0.0.1/8` has bits set after its prefix length: write `10.0.0.0/8`"), "{}", out.stderr);
-    let out = run("print(1)", &["--deny-net=a..b"]);
+    let out = run("print(1)", &["--deny=net a..b"]);
     assert_eq!(out.code, 2, "{}", out.stderr);
     assert!(out.stderr.contains("invalid host pattern `a..b`"), "{}", out.stderr);
 }
@@ -901,7 +919,7 @@ fn invalid_network_patterns_are_explained() {
 fn a_blocked_stdout_does_not_outlast_the_time_limit() {
     let dir = script("blocked", "while true { print(\"x\".repeat(1000)) }");
     let mut child = Command::new(env!("CARGO_BIN_EXE_sand"))
-        .args(["run", "main.sand", "--max-time=300ms"])
+        .args(["run", "main.sand", "--no-prompt", "--max-time=300ms"])
         .current_dir(dir.path())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

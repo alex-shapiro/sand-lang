@@ -221,7 +221,7 @@ print(fs.read_text("/b.txt").is_ok())`;
     await new Promise((r) => setTimeout(r, 1));
     return answers[request.target];
   };
-  const { result, stdout } = await run(source, { policy: "default prompt", files: { "/a.txt": "A", "/b.txt": "B" } }, { onPrompt });
+  const { result, stdout } = await run(source, { files: { "/a.txt": "A", "/b.txt": "B" } }, { onPrompt });
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(stdout, "true\ntrue\nfalse\n");
   assert.deepEqual(
@@ -233,9 +233,9 @@ print(fs.read_text("/b.txt").is_ok())`;
     ],
   );
   // "always" is remembered by the engine; a failing callback denies.
-  const always = await run(source, { policy: "default prompt", files: { "/a.txt": "A", "/b.txt": "B" } }, { onPrompt: () => "always" });
+  const always = await run(source, { files: { "/a.txt": "A", "/b.txt": "B" } }, { onPrompt: () => "always" });
   assert.equal(always.stdout, "true\ntrue\ntrue\n");
-  const broken = await run(source, { policy: "default prompt", files: { "/a.txt": "A" } }, { onPrompt: () => { throw new Error("no"); } });
+  const broken = await run(source, { files: { "/a.txt": "A" } }, { onPrompt: () => { throw new Error("no"); } });
   assert.equal(broken.stdout, "false\nfalse\nfalse\n");
 });
 
@@ -252,7 +252,7 @@ test("invalid policies and options are reported", () => {
     () => new sand.Engine({ policy: "allow read /x\nalow net *\nlimit memory lots" }, {}),
     (e) => {
       assert.deepEqual(e.policyErrors, [
-        { line: 2, column: 1, message: "unknown rule `alow` (rules start with `allow`, `deny`, `default`, `limit` or `let`)" },
+        { line: 2, column: 1, message: "unknown rule `alow` (rules start with `allow`, `deny`, `prompt`, `limit` or `let`)" },
         { line: 3, column: 7, message: "invalid size `lots` (use e.g. 4096, 64K, 256M, 1G)" },
       ]);
       return /invalid policy/.test(e.message);
@@ -377,7 +377,7 @@ print(http.get("${base}/slow", timeout: 50ms).unwrap_err().kind)
     print("\\(s.status) \\(s.body.read(5)?) \\(s.body.read_text()?)")
 }
 `;
-    const policy = `allow net 127.0.0.1:${port}\nlimit http-body 10K`;
+    const policy = `allow net plaintext 127.0.0.1:${port}\nlimit http-body 10K`;
     const { result, stdout } = await run(source, { policy });
     assert.equal(result.ok, true, JSON.stringify(result));
     const lines = stdout.trim().split("\n");
@@ -401,17 +401,19 @@ test("http requests are prompted for and denied without a rule", async () => {
     const source = `import http\nprint(http.get("http://127.0.0.1:${port}/hello").map(r => r.status))`;
     const denied = await run(source, { policy: "" });
     assert.match(denied.stdout, /permission_denied/);
-    // An IP literal on a private network needs an explicit rule, even with `allow net *`.
+    // `allow net *` matches TLS connections: `http://` needs `plaintext`.
     const wildcard = await run(source, { policy: "allow net *" });
     assert.match(wildcard.stdout, /permission_denied/);
+    const plaintext = await run(source, { policy: "allow net plaintext *" });
+    assert.equal(plaintext.stdout, "Ok(200)\n");
     const asked = [];
-    const prompted = await run(source, { policy: "default prompt" }, { onPrompt: (r) => (asked.push(r.description), "once") });
+    const prompted = await run(source, { policy: "" }, { onPrompt: (r) => (asked.push(r.description), "once") });
     assert.equal(prompted.stdout, "Ok(200)\n");
     assert.deepEqual(asked, [`GET http://127.0.0.1:${port}/hello`]);
     // `http` rules name methods and paths.
-    const routed = await run(source, { policy: `allow http GET 127.0.0.1:${port}/hello` });
+    const routed = await run(source, { policy: `allow http plaintext GET 127.0.0.1:${port}/hello` });
     assert.equal(routed.stdout, "Ok(200)\n");
-    const otherPath = await run(source, { policy: `allow http GET 127.0.0.1:${port}/other` });
+    const otherPath = await run(source, { policy: `allow http plaintext GET 127.0.0.1:${port}/other` });
     assert.match(otherPath.stdout, /permission_denied/);
   } finally {
     close();
@@ -449,7 +451,7 @@ test("sessions continue a program, and run its tasks between inputs", async () =
 test("waiting for prompt answers does not count against the time limit", async () => {
   const slowYes = () => new Promise((resolve) => setTimeout(() => resolve("once"), 600));
   const source = 'import fs\nprint(fs.read_text("/a.txt").is_ok())\nprint(fs.read_text("/a.txt").is_ok())';
-  const { result, stdout } = await run(source, { policy: "default prompt\nlimit time 200ms", files: { "/a.txt": "A" } }, { onPrompt: slowYes });
+  const { result, stdout } = await run(source, { policy: "limit time 200ms", files: { "/a.txt": "A" } }, { onPrompt: slowYes });
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(stdout, "true\ntrue\n");
 });
@@ -473,6 +475,6 @@ test("prompt requests carry the rules that answer them for good", async () => {
 });
 
 test("requests the browser blocks say so", async () => {
-  const { stdout } = await run('import http\nlet e = http.get("http://127.0.0.1:1/").unwrap_err()\nprint("\\(e.kind): \\(e.message)")', { policy: "allow net 127.0.0.1:1" });
+  const { stdout } = await run('import http\nlet e = http.get("http://127.0.0.1:1/").unwrap_err()\nprint("\\(e.kind): \\(e.message)")', { policy: "allow net plaintext 127.0.0.1:1" });
   assert.equal(stdout, "io: the browser blocked the request to http://127.0.0.1:1/: 127.0.0.1:1 does not let pages of other sites read its answers (CORS), or it cannot be reached\n");
 });

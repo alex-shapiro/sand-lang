@@ -1,6 +1,6 @@
-//! End-to-end tests of `sand run --prompt` on a real terminal.
+//! End-to-end tests of the prompts of `sand run` on a real terminal.
 //!
-//! `--prompt` asks on the controlling terminal (`/dev/tty` on Unix, the
+//! `sand run` asks on the controlling terminal (`/dev/tty` on Unix, the
 //! console's `CONIN$`/`CONOUT$` on Windows), never on the script's standard
 //! streams. These tests run `sand` on a pseudo-terminal (a Unix pty made the
 //! child's controlling terminal, or a Windows ConPTY pseudo console) through
@@ -163,7 +163,7 @@ fn prompt_asks_on_the_terminal() {
         (&["n", "maybe", "y", ""], ["false", "true", "false"], 4),
     ];
     for (answers, want, questions) in cases {
-        let Some(t) = run_on_terminal(dir.path(), &["run", "main.sand", "--prompt"], answers) else { return };
+        let Some(t) = run_on_terminal(dir.path(), &["run", "main.sand"], answers) else { return };
         assert_eq!(t.code, 0, "answers {answers:?}:\n{}", t.text);
         assert_eq!(t.results(), want, "answers {answers:?}:\n{}", t.text);
         assert_eq!(t.text.matches(QUESTION).count(), questions, "answers {answers:?}:\n{}", t.text);
@@ -172,7 +172,21 @@ fn prompt_asks_on_the_terminal() {
         assert!(t.text.contains("a.txt?"), "{}", t.text);
     }
     // Rules still apply first: allowed reads are not asked about.
-    let Some(t) = run_on_terminal(dir.path(), &["run", "main.sand", "--prompt", "--allow-read=."], &[]) else { return };
+    let Some(t) = run_on_terminal(dir.path(), &["run", "main.sand", "--allow=read ./"], &[]) else { return };
     assert_eq!((t.code, t.results()), (0, vec!["true"; 3]), "{}", t.text);
     assert!(!t.text.contains(QUESTION), "{}", t.text);
+    // `--no-prompt` denies instead of asking.
+    let Some(t) = run_on_terminal(dir.path(), &["run", "main.sand", "--no-prompt"], &[]) else { return };
+    assert_eq!((t.code, t.results()), (0, vec!["false"; 3]), "{}", t.text);
+    assert!(!t.text.contains(QUESTION), "{}", t.text);
+}
+
+#[test]
+fn prompt_rules_ask() {
+    let dir = reader_script();
+    dir.write("ask.policy", "allow read ./\nprompt read ./a.txt\n");
+    let Some(t) = run_on_terminal(dir.path(), &["run", "main.sand", "--policy=ask.policy"], &["y", "n", "a"]) else { return };
+    assert_eq!((t.code, t.results()), (0, vec!["true", "false", "true"]), "{}", t.text);
+    let Some(t) = run_on_terminal(dir.path(), &["run", "main.sand", "--prompt=read ./a.txt"], &["n", "y", "y"]) else { return };
+    assert_eq!((t.code, t.results()), (0, vec!["false", "true", "true"]), "{}", t.text);
 }

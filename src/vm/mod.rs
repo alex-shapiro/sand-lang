@@ -466,7 +466,7 @@ pub fn entropy_seed() -> u64 {
 
 /// Engine services available to natives.
 pub struct Host {
-    pub policy: Policy,
+    pub(crate) policy: Policy,
     pub prompter: Option<Arc<dyn Prompter>>,
     pub grants_once: Vec<Capability>,
     pub denies_once: Vec<Capability>,

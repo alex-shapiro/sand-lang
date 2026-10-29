@@ -94,35 +94,36 @@ Follow-up work, roughly in priority order.
 
 ### Policy
 
-- [ ] **Represent built-in policy decisions as standard rules.** Built-in
-      decisions currently live outside the rule list, which hides them from
-      users, prompts, and the linter: `check_normalized_in` allows `Stdout`,
-      `Stderr`, and unrestricted imports when no `allow import` rule is
-      present, and `deny_private_networks()` blocks internal destinations on
-      wildcard allow rules and `default allow` while permitting loopback
-      addresses for `localhost`.
-      - Add these built-in decisions as standard rules at startup so that
-        the standard rule evaluator and linter handle all decisions uniformly.
-      - Remove `deny_private_networks()`, `PolicyFile::private_net`,
-        `--allow-private-net`, and the linter's `reaches_internal` and
-        `internal` flags, and expose host API helpers that add the equivalent
-        standard rules.
-      - Give user rules precedence over built-in rules of equal specificity,
-        while `deny` rules continue to win ties between user rules.
-      - Allow an explicit hostname rule such as `allow net localhost` to permit
-        the resolved addresses of that hostname without a separate address rule.
-      - Treat `*.localhost` as `localhost` per RFC 6761, and decide whether
-        `allow net *.localhost` counts as an explicit rule.
 - [ ] Connect directly to parsed IP literals in `resolve_allowed` without
-      calling the DNS resolver or checking `Capability::NetAddr`, and remove
-      the IP-literal shortcut from `check_addr`.
+      checking `Capability::NetAddr`, and remove the IP-literal shortcut from
+      `RulePolicy::resolved_verdict`.
 - [ ] Check resolved addresses against `http` IP rules so that a hostname that
       is resolved to a denied IP address is blocked on matching HTTP paths and
       methods.
 - [ ] Support HTTP paths with encoded separators `%2F` and `%5C` in `rule_for`
       so that "always" prompt answers can save rules for those requests.
-- [ ] Document in §14.5 that IPv4 deny rules also match IPv6-embedded IPv4
-      addresses and that loopback deny rules also match `0.0.0.0` and `::`.
+- [ ] Prompt for a resolved address that a `prompt` address rule decides
+      (for example, a name that `allow net *` allows and that resolves to
+      `10.0.0.5`) instead of denying it. The check runs after the native call
+      returned to the event loop, so it needs a way to suspend the
+      connection for a prompt answer.
+- [ ] Give `Capability::NetAddr` the request that its host came from (method,
+      URL, transport), so that custom policies and `RulePolicy::check` decide
+      resolved addresses as `RulePolicy::check_resolved` does.
+- [ ] Let hosts persist "always" prompt answers: a hook that receives the
+      answer as a rule (`rule_for`) to save, so that a host such as Ash
+      Control can load it into the policy at the next start instead of
+      asking again.
+- [ ] Make the CLI prompter (and document for hosts) warn before allowing a
+      plaintext connection, and show the addresses that a name resolved to.
+- [ ] Simplify the terms of the policy API: "capability" (a request kind),
+      `Capability::Custom` (a request kind of a host module) and
+      `CustomPolicy` (a host-defined policy) are easy to confuse. For
+      example, rename `Capability::Custom` to `Capability::Module`.
+- [ ] Remove `CustomPolicy` (`Config::custom_policy`) once Ash Control
+      decides with rules: rules then need a shared, updatable form, since
+      Ash applies a grant to all conversations and resets the policy without
+      restarting the interpreter.
 
 ### Tooling
 

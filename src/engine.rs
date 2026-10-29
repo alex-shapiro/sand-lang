@@ -8,7 +8,7 @@ use crate::files::{Fs, MemFs};
 use crate::modules::{ImportRef, ModuleGraph, Snapshot, Target, budget_error, native_info};
 use crate::native::{BoundType, NativeDecl, NativeModule, Signature, Type};
 use crate::platform::{Clock, Instant, SystemClock};
-use crate::policy::{Capability, Decision, Policy, PromptAnswer, Prompter};
+use crate::policy::{Capability, CustomPolicy, Decision, Policy, PromptAnswer, Prompter, RulePolicy};
 use crate::session::Session;
 use crate::stdlib;
 use crate::types::{FnId, ModId};
@@ -279,7 +279,7 @@ impl Default for Config {
 impl Config {
     pub fn new() -> Config {
         Config {
-            policy: Policy::deny_all(),
+            policy: Policy::Rules(Arc::new(RulePolicy::standard())),
             prompter: None,
             limits: Limits::default(),
             modules: Vec::new(),
@@ -333,8 +333,16 @@ impl Config {
         self.request_filter = Some(Arc::new(filter));
         self
     }
-    pub fn policy(mut self, p: Policy) -> Self {
-        self.policy = p;
+    /// Sets the rule policy that decides the script's requests
+    /// ([`RulePolicy::standard`] by default). Replaces a custom policy.
+    pub fn policy(mut self, p: RulePolicy) -> Self {
+        self.policy = Policy::Rules(Arc::new(p));
+        self
+    }
+    /// Sets a host-defined policy that decides the script's requests instead
+    /// of rules. Replaces the rule policy.
+    pub fn custom_policy(mut self, p: impl CustomPolicy + 'static) -> Self {
+        self.policy = Policy::Custom(Arc::new(p));
         self
     }
     pub fn prompter(mut self, p: impl Prompter + 'static) -> Self {

@@ -159,7 +159,7 @@ fn describe(cap: &Capability) -> (&'static str, String) {
         Capability::FsRead(p) => ("read", p.display().to_string()),
         Capability::FsWrite(p) => ("write", p.display().to_string()),
         Capability::Import(p) => ("import", p.display().to_string()),
-        Capability::Net { host, port } => ("net", format_host_port(host, *port)),
+        Capability::Net { host, port, .. } => ("net", format_host_port(host, *port)),
         Capability::Http { .. } => ("http", cap.to_string().split_once(' ').map_or_else(String::new, |(_, url)| url.to_string())),
         Capability::NetAddr { addr, .. } => ("net", addr.to_string()),
         Capability::NetListen(addr) => ("listen", addr.to_string()),

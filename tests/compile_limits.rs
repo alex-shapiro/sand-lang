@@ -8,7 +8,7 @@ mod common;
 use common::{TempDir, rt};
 use sandlang::check::budget::CompileBudget;
 use sandlang::platform::{Deadline, SystemClock};
-use sandlang::{Config, Engine, Error, LimitKind, Limits, MemorySink, Policy};
+use sandlang::{Config, Engine, Error, LimitKind, Limits, MemorySink};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
@@ -326,7 +326,7 @@ fn source_size_limit_covers_imports() {
     let main = dir.write("main.sand", "import \"a\"\nimport \"b\"\nprint(a.f() + b.f())\n");
     let config = |max: usize| {
         Config::new()
-            .policy(Policy::allow_all())
+            .policy(sandlang::RulePolicy::allow_all())
             .cwd(dir.path())
             .stdout(MemorySink::new())
             .limits(Limits { max_source_bytes: max, ..Limits::default() })
@@ -350,7 +350,7 @@ fn run_files(files: &[(&str, &str)], main: &str) -> Result<String, Error> {
     }
     let main = dir.write("main.sand", main);
     let out = MemorySink::new();
-    let mut engine = Engine::new(Config::new().policy(Policy::allow_all()).cwd(dir.path()).stdout(out.clone())).unwrap();
+    let mut engine = Engine::new(Config::new().policy(sandlang::RulePolicy::allow_all()).cwd(dir.path()).stdout(out.clone())).unwrap();
     rt().block_on(engine.run_file(&main))?;
     Ok(out.contents())
 }

@@ -100,15 +100,19 @@ impl NetPattern {
         Some(NetPattern { kind, port })
     }
 
-    pub(crate) fn is_explicit(&self) -> bool {
-        matches!(self.kind, HostKind::Host(_) | HostKind::Ip(..))
-    }
-
     pub(crate) fn rank(&self) -> u32 {
         let score = match &self.kind {
             HostKind::Host(_) => 3000,
             HostKind::Ip(ip, len) if *len == full_len(*ip) => 3000,
+            // An IPv4 range is as narrow as the IPv6 range that embeds it in
+            // its last 32 bits, so a deny rule for an IPv4 range outranks
+            // an IPv6 range that contains its embedded forms.
+            HostKind::Ip(IpAddr::V4(_), len) => 2096 + *len as u32,
             HostKind::Ip(_, len) => 2000 + *len as u32,
+            // Every name under `localhost` is the loopback host (RFC 6761):
+            // such a pattern names one destination, more narrowly than any
+            // range or other domain.
+            HostKind::Suffix(s) if is_localhost(s) => 2900 + s.split('.').count() as u32,
             HostKind::Suffix(s) => 2000 + s.split('.').count() as u32,
             HostKind::Any => 0,
         };
@@ -134,10 +138,21 @@ impl NetPattern {
         Some(NetPattern { kind: kind.clone(), port })
     }
 
-    pub(crate) fn may_meet(&self, other: &NetPattern) -> bool {
+    /// Whether some destination may match both patterns. A pattern that is
+    /// not `exact` (of a deny or prompt rule) also matches the alternate
+    /// representations of its addresses.
+    pub(crate) fn may_meet(&self, other: &NetPattern, exact: bool, other_exact: bool) -> bool {
+        let overlap = |a: &NetPattern, b: &NetPattern| a.kind.covers(&b.kind) || b.kind.covers(&a.kind);
+        let reaches =
+            |strict: &NetPattern, exact: &NetPattern| overlap(strict, exact) || strict.reaching_ranges().iter().any(|r| overlap(r, exact));
         let hosts = match (&self.kind, &other.kind) {
-            // Any two IP patterns can overlap through alternate IP representations.
-            (HostKind::Any, _) | (_, HostKind::Any) | (HostKind::Ip(..), HostKind::Ip(..)) => true,
+            (HostKind::Ip(..), HostKind::Ip(..)) => match (exact, other_exact) {
+                (true, true) => overlap(self, other),
+                (false, true) => reaches(self, other),
+                (true, false) => reaches(other, self),
+                (false, false) => true,
+            },
+            (HostKind::Any, _) | (_, HostKind::Any) => true,
             (HostKind::Host(h), HostKind::Host(g)) => h == g,
             (HostKind::Suffix(s), HostKind::Host(h)) | (HostKind::Host(h), HostKind::Suffix(s)) => is_under(h, s),
             (HostKind::Suffix(s), HostKind::Suffix(t)) => s == t || is_under(s, t) || is_under(t, s),
@@ -170,15 +185,6 @@ impl NetPattern {
     pub(crate) fn denies_ip(&self, ip: IpAddr) -> bool {
         let ip = ip.to_canonical();
         std::iter::once(ip).chain(alternate_ips(ip)).any(|ip| self.kind.matches_ip(ip))
-    }
-
-    pub(crate) fn may_match_internal(&self) -> bool {
-        match &self.kind {
-            HostKind::Any => true,
-            HostKind::Host(h) => is_localhost(h),
-            HostKind::Ip(ip, len) => *len < full_len(*ip) || is_private_address(*ip),
-            HostKind::Suffix(_) => false,
-        }
     }
 }
 
@@ -350,17 +356,18 @@ impl<T> HostIndex<T> {
         }
     }
 
-    pub(crate) fn find(&self, dest: &Dest, mut f: impl FnMut(bool, bool, &T)) {
-        let mut each = |list: Option<&Ported<T>>, explicit: bool| {
+    /// Calls `f(is_alternate_ip, value)` for each pattern matching `dest`.
+    pub(crate) fn find(&self, dest: &Dest, mut f: impl FnMut(bool, &T)) {
+        let mut each = |list: Option<&Ported<T>>| {
             for (port, t) in list.into_iter().flatten() {
                 if port.is_none_or(|p| p == dest.port) {
-                    f(explicit, false, t);
+                    f(false, t);
                 }
             }
         };
-        each(Some(&self.any), false);
+        each(Some(&self.any));
         if let Some(ip) = dest.ip {
-            self.find_ip(ip, dest.port, |is_alt, t| f(true, is_alt, t));
+            self.find_ip(ip, dest.port, f);
             return;
         }
         let lower;
@@ -371,11 +378,11 @@ impl<T> HostIndex<T> {
             dest.name
         };
         if !self.names.is_empty() {
-            each(self.names.get(name), true);
+            each(self.names.get(name));
         }
         if !self.suffixes.is_empty() {
             for domain in domains_above(name) {
-                each(self.suffixes.get(domain), false);
+                each(self.suffixes.get(domain));
             }
         }
     }
@@ -429,12 +436,49 @@ fn body_ip(s: &str) -> Option<IpAddr> {
     s.parse::<IpAddr>().ok().map(|ip| ip.to_canonical())
 }
 
-pub(crate) fn is_internal(dest: &Dest) -> bool {
-    dest.ip.is_some_and(is_private_address) || is_localhost(dest.name)
+/// Whether `host` is `localhost` or a name under it, which RFC 6761 reserves
+/// for the loopback host.
+pub(crate) fn is_localhost(host: &str) -> bool {
+    let host = host.strip_suffix('.').unwrap_or(host).as_bytes();
+    let tail = b".localhost";
+    host.eq_ignore_ascii_case(&tail[1..]) || (host.len() > tail.len() && host[host.len() - tail.len()..].eq_ignore_ascii_case(tail))
 }
 
-pub(crate) fn is_localhost(host: &str) -> bool {
-    host.strip_suffix('.').unwrap_or(host).eq_ignore_ascii_case("localhost")
+/// The internal address ranges: every IP address outside them (and outside
+/// them in its IPv4 form, if it embeds an IPv4 address) is a public unicast
+/// internet address.
+const INTERNAL_RANGES: [&str; 24] = [
+    "0.0.0.0/8",       // unspecified ("this network")
+    "10.0.0.0/8",      // RFC 1918
+    "100.64.0.0/10",   // shared address space (CGNAT)
+    "127.0.0.0/8",     // loopback
+    "169.254.0.0/16",  // link-local
+    "172.16.0.0/12",   // RFC 1918
+    "192.0.0.0/24",    // IETF protocol assignments
+    "192.0.2.0/24",    // documentation
+    "192.88.99.0/24",  // 6to4 relay anycast
+    "192.168.0.0/16",  // RFC 1918
+    "198.18.0.0/15",   // benchmarking
+    "198.51.100.0/24", // documentation
+    "203.0.113.0/24",  // documentation
+    "224.0.0.0/3",     // multicast, reserved, and broadcast
+    "::/96",           // unspecified, loopback, and IPv4-compatible
+    "64:ff9b:1::/48",  // local-use NAT64
+    "100::/64",        // discard-only
+    "2001::/23",       // IETF protocol assignments
+    "2001:db8::/32",   // documentation
+    "3fff::/20",       // documentation
+    "fc00::/7",        // unique-local
+    "fe80::/10",       // link-local
+    "fec0::/10",       // site-local
+    "ff00::/8",        // multicast
+];
+
+/// [`INTERNAL_RANGES`] as patterns.
+fn internal_ranges() -> &'static [NetPattern] {
+    static PATTERNS: std::sync::LazyLock<Vec<NetPattern>> =
+        std::sync::LazyLock::new(|| INTERNAL_RANGES.iter().map(|p| NetPattern::parse(p).expect("a valid range")).collect());
+    &PATTERNS
 }
 
 /// Returns true if `ip` is not a public unicast internet address.
@@ -444,52 +488,7 @@ pub(crate) fn is_localhost(host: &str) -> bool {
 /// benchmarking, and reserved ranges. IPv6 addresses that embed an IPv4
 /// address are classified by the embedded address.
 pub fn is_private_address(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => is_private_v4(v4),
-        IpAddr::V6(v6) => is_private_v6(v6),
-    }
-}
-
-fn is_private_v4(ip: Ipv4Addr) -> bool {
-    let [a, b, c, _] = ip.octets();
-    a == 0                                      // unspecified
-        || a == 10                              // RFC 1918
-        || (a == 100 && (64..128).contains(&b)) // CGNAT
-        || a == 127                             // loopback
-        || (a == 169 && b == 254)               // link-local
-        || (a == 172 && (16..32).contains(&b))  // RFC 1918
-        || (a == 192 && b == 0 && c == 0)       // IETF protocol assignments
-        || (a == 192 && b == 0 && c == 2)       // documentation
-        || (a == 192 && b == 88 && c == 99)     // 6to4 relay anycast
-        || (a == 192 && b == 168)               // RFC 1918
-        || (a == 198 && (18..20).contains(&b))  // benchmarking
-        || (a == 198 && b == 51 && c == 100)    // documentation
-        || (a == 203 && b == 0 && c == 113)     // documentation
-        || a >= 224 // multicast, reserved, broadcast
-}
-
-fn is_private_v6(ip: Ipv6Addr) -> bool {
-    let s = ip.segments();
-    let embedded = |hi: u16, lo: u16| is_private_v4(Ipv4Addr::from(((hi as u32) << 16) | lo as u32));
-    if let Some(v4) = ip.to_ipv4_mapped() {
-        return is_private_v4(v4);
-    }
-    match s {
-        // Unspecified, loopback, and IPv4-compatible addresses.
-        [0, 0, 0, 0, 0, 0, _, _] => true,
-        // IPv4-translated and NAT64 well-known prefix.
-        [0, 0, 0, 0, 0xffff, 0, hi, lo] | [0x64, 0xff9b, 0, 0, 0, 0, hi, lo] => embedded(hi, lo),
-        // Local-use NAT64 and discard-only.
-        [0x64, 0xff9b, 1, ..] | [0x100, 0, 0, 0, ..] => true,
-        // 6to4.
-        [0x2002, hi, lo, ..] => embedded(hi, lo),
-        // IETF protocol assignments and documentation.
-        [0x2001, b, ..] if b < 0x200 => true,
-        [0x2001, 0xdb8, ..] => true,
-        [0x3fff, b, ..] if b < 0x1000 => true,
-        // Unique-local, link-local, site-local, and multicast.
-        [a, ..] => a & 0xfe00 == 0xfc00 || a & 0xffc0 == 0xfe80 || a & 0xffc0 == 0xfec0 || a & 0xff00 == 0xff00,
-    }
+    internal_ranges().iter().any(|p| p.denies_ip(ip))
 }
 
 /// Formats `host` and `port` as `host:port`, enclosing IPv6 addresses in brackets.
@@ -534,6 +533,21 @@ enum ListenHost {
     Ip(IpAddr),
 }
 
+impl std::fmt::Display for ListenPattern {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (&self.host, self.port) {
+            (ListenHost::Any, _) => write!(f, "*")?,
+            (ListenHost::Loopback, _) => write!(f, "localhost")?,
+            (ListenHost::Ip(ip @ IpAddr::V6(_)), Some(_)) => write!(f, "[{ip}]")?,
+            (ListenHost::Ip(ip), _) => write!(f, "{ip}")?,
+        }
+        match self.port {
+            Some(p) => write!(f, ":{p}"),
+            None => Ok(()),
+        }
+    }
+}
+
 impl ListenPattern {
     pub(crate) fn parse(text: &str) -> Option<ListenPattern> {
         let (host, port) = split_port(text)?;
@@ -562,7 +576,6 @@ impl ListenPattern {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct UrlPattern {
-    pub scheme: Option<&'static str>,
     pub host: NetPattern,
     pub path: Vec<Seg>,
 }
@@ -570,14 +583,17 @@ pub(crate) struct UrlPattern {
 impl UrlPattern {
     pub(crate) fn parse(text: &[Tok]) -> Result<UrlPattern, String> {
         let flat: String = text.iter().map(|t| t.0).collect();
-        let (scheme, rest) = match flat.find("://").filter(|&i| !flat[..i].contains('/')) {
-            Some(i) => match flat[..i].to_ascii_lowercase().as_str() {
-                "http" => (Some("http"), &text[7..]),
-                "https" => (Some("https"), &text[8..]),
-                _ => return Err(format!("unsupported scheme `{}` (expected http or https)", &flat[..i])),
-            },
-            None => (None, text),
-        };
+        if let Some(i) = flat.find("://").filter(|&i| !flat[..i].contains('/')) {
+            let rest = &flat[i + 3..];
+            return Err(match flat[..i].to_ascii_lowercase().as_str() {
+                "http" => format!(
+                    "URL patterns take no scheme: write `plaintext {rest}` for `{flat}` (rules match HTTPS unless they say `plaintext`)"
+                ),
+                "https" => format!("URL patterns take no scheme: write `{rest}` (rules match HTTPS unless they say `plaintext`)"),
+                _ => format!("URL patterns take no scheme (remove `{}://`)", &flat[..i]),
+            });
+        }
+        let rest = text;
         let text = |toks: &[Tok]| toks.iter().map(|t| t.0).collect::<String>();
         let slash_from = |from: usize| rest[from..].iter().position(|t| t.0 == '/').map_or(rest.len(), |i| from + i);
         // Ignore `/` inside bracketed IPv6 ranges.
@@ -614,10 +630,7 @@ impl UrlPattern {
             }
             return Err(message);
         }
-        let mut host = NetPattern::parse(&authority)?;
-        if host.port.is_none() {
-            host.port = scheme.map(|s| if s == "http" { 80 } else { 443 });
-        }
+        let host = NetPattern::parse(&authority)?;
         let mut path = Vec::new();
         for seg in rest.get(end + 1..).unwrap_or_default().split(|t| t.0 == '/' && !t.1) {
             if seg.is_empty() {
@@ -635,7 +648,7 @@ impl UrlPattern {
         while path.last() == Some(&Seg::GlobStar) {
             path.pop();
         }
-        Ok(UrlPattern { scheme, host, path })
+        Ok(UrlPattern { host, path })
     }
 }
 
@@ -688,7 +701,101 @@ mod tests {
         UrlPattern::parse(&text.chars().map(|c| (c, false)).collect::<Vec<_>>())
     }
 
+    #[test]
+    fn localhost_names_are_the_names_under_localhost() {
+        for name in ["localhost", "LOCALHOST", "localhost.", "app.localhost", "a.b.LocalHost.", "x-1.localhost"] {
+            assert!(is_localhost(name), "{name}");
+        }
+        for name in ["localhost.com", "notlocalhost", "local", "app.localhost.com", "xlocalhost", ""] {
+            assert!(!is_localhost(name), "{name}");
+        }
+        // A pattern of names under `localhost` ranks between every range and an exact name.
+        let rank = |p: &str| NetPattern::parse(p).unwrap().rank();
+        assert!(rank("*.localhost") > rank("[::]/127") && rank("*.localhost") > rank("10.0.0.0/31"));
+        assert!(rank("*.a.localhost") > rank("*.localhost") && rank("*.a.localhost") < rank("a.localhost"));
+        assert!(rank("*.example.com") < rank("10.0.0.0/8"));
+    }
+
+    /// A direct classification, to compare with the internal ranges.
+    fn is_private_oracle(ip: IpAddr) -> bool {
+        fn v4(ip: Ipv4Addr) -> bool {
+            let [a, b, c, _] = ip.octets();
+            a == 0
+                || a == 10
+                || (a == 100 && (64..128).contains(&b))
+                || a == 127
+                || (a == 169 && b == 254)
+                || (a == 172 && (16..32).contains(&b))
+                || (a == 192 && b == 0 && c == 0)
+                || (a == 192 && b == 0 && c == 2)
+                || (a == 192 && b == 88 && c == 99)
+                || (a == 192 && b == 168)
+                || (a == 198 && (18..20).contains(&b))
+                || (a == 198 && b == 51 && c == 100)
+                || (a == 203 && b == 0 && c == 113)
+                || a >= 224
+        }
+        let ip6 = match ip {
+            IpAddr::V4(ip) => return v4(ip),
+            IpAddr::V6(ip) => ip,
+        };
+        if let Some(ip) = ip6.to_ipv4_mapped() {
+            return v4(ip);
+        }
+        let embedded = |hi: u16, lo: u16| v4(Ipv4Addr::from(((hi as u32) << 16) | lo as u32));
+        match ip6.segments() {
+            [0, 0, 0, 0, 0, 0, _, _] => true,
+            [0, 0, 0, 0, 0xffff, 0, hi, lo] | [0x64, 0xff9b, 0, 0, 0, 0, hi, lo] => embedded(hi, lo),
+            [0x64, 0xff9b, 1, ..] | [0x100, 0, 0, 0, ..] => true,
+            [0x2002, hi, lo, ..] => embedded(hi, lo),
+            [0x2001, b, ..] if b < 0x200 => true,
+            [0x2001, 0xdb8, ..] => true,
+            [0x3fff, b, ..] if b < 0x1000 => true,
+            [a, ..] => a & 0xfe00 == 0xfc00 || a & 0xffc0 == 0xfe80 || a & 0xffc0 == 0xfec0 || a & 0xff00 == 0xff00,
+        }
+    }
+
+    /// Addresses near the edges of the internal ranges and of the forms that
+    /// embed IPv4 addresses.
+    fn edge_address() -> impl Strategy<Value = IpAddr> {
+        let edges: Vec<IpAddr> = INTERNAL_RANGES
+            .iter()
+            .chain(&["64:ff9b::/96", "2002::/16", "::ffff:0:0/96", "::ffff:0:0:0/96"])
+            .flat_map(|r| {
+                let NetPattern { kind: HostKind::Ip(ip, len), .. } = NetPattern::parse(r).unwrap() else { unreachable!() };
+                let host = |offset: i128| -> IpAddr {
+                    match ip {
+                        IpAddr::V4(v4) => Ipv4Addr::from((u32::from(v4) as i128 + offset) as u32).into(),
+                        IpAddr::V6(v6) => Ipv6Addr::from((u128::from(v6) as i128).wrapping_add(offset) as u128).into(),
+                    }
+                };
+                let size = 1i128.checked_shl((full_len(ip) - len) as u32).unwrap_or(i128::MAX);
+                [host(-1), host(0), host(1), host(size - 1), host(size)]
+            })
+            .collect();
+        prop::sample::select(edges)
+    }
+
     proptest! {
+        #[test]
+        fn internal_ranges_classify_addresses_as_before(
+            v4 in any::<u32>(),
+            v6 in any::<u128>(),
+            embed in 0..EMBEDDINGS.len(),
+            edge in edge_address(),
+        ) {
+            let (prefix, _, shift) = EMBEDDINGS[embed];
+            for ip in [
+                IpAddr::V4(v4.into()),
+                IpAddr::V6(v6.into()),
+                IpAddr::V6(Ipv6Addr::from(prefix | (v4 as u128) << shift)),
+                IpAddr::V6(Ipv4Addr::from(v4).to_ipv6_mapped()),
+                edge,
+            ] {
+                prop_assert_eq!(is_private_address(ip), is_private_oracle(ip), "{}", ip);
+            }
+        }
+
         #[test]
         fn embedded_addresses_are_in_reaching_ranges(form in 0..EMBEDDINGS.len(), v4 in any::<u32>(), noise in any::<u128>()) {
             let (prefix, len, shift) = EMBEDDINGS[form];
@@ -708,11 +815,16 @@ mod tests {
                 "10.0.0.0/8", "10.0.0.0/8:443", "[fc00::/7]", "[fc00::]/7", "[fc00::]/7:443", "[fc00::/7]:443", "fc00::/7",
                 "::ffff:10.0.0.0/104", "10.0.0.1/8", "[fc00::1/7]", "[::1]:x", "a..b", "10.0.0.1/32", "[::1]/128", "::ffff:10.0.0.1/128",
             ]),
-            scheme in prop::sample::select(vec!["", "https://"]),
+            scheme in prop::sample::select(vec!["", "https://", "http://"]),
             path in prop::collection::vec(prop::sample::select(vec!["a", "8", "24", "128", "2024", "8:1", "*", "**"]), 0..3),
         ) {
             let path: String = path.iter().map(|n| format!("/{n}")).collect();
             let parsed = url(&format!("{scheme}{host}{path}"));
+            if !scheme.is_empty() {
+                let error = parsed.unwrap_err();
+                prop_assert!(error.starts_with("URL patterns take no scheme"), "{}", error);
+                return Ok(());
+            }
             let bare_address = !host.contains('/') && matches!(NetPattern::parse(host), Ok(NetPattern { kind: HostKind::Ip(ip, len), port: None }) if len == full_len(ip));
             let first = path.split('/').nth(1).map(|n| n.split(':').next().unwrap_or(n));
             let max = if host.contains(':') { 128 } else { 32 };
@@ -731,10 +843,7 @@ mod tests {
                 return Ok(());
             }
             match NetPattern::parse(&host) {
-                Ok(mut expected) => {
-                    if expected.port.is_none() && !scheme.is_empty() {
-                        expected.port = Some(443);
-                    }
+                Ok(expected) => {
                     let parsed = parsed.unwrap();
                     prop_assert_eq!(&parsed.host, &expected);
                     prop_assert_eq!(parsed.path, url(&format!("example.com{path}")).unwrap().path);

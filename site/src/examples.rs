@@ -89,9 +89,11 @@ pub fn check_sand(runtime: &tokio::runtime::Runtime, source: &str, mode: Mode, f
 
 /// Default sandbox policy for documentation examples and playground snippets.
 pub const POLICY: &str = "\
-# Allow reading and writing in-memory files; deny all other capabilities.
+# Allow reading and writing in-memory files, printing, and imports; deny all other capabilities.
 allow write /
-default deny
+allow stdout
+allow stderr
+allow import /
 limit time 10s
 ";
 
@@ -107,8 +109,7 @@ fn engine(files: &[(String, String)]) -> (Engine, MemorySink) {
         fs.write(format!("/{name}"), text).expect("module fits in memory");
     }
     let policy = check_policy(POLICY).expect("default policy is valid");
-    let config =
-        Config::new().memory_fs(fs).policy(policy.policy()).limits(policy.limits).seed(42).stdout(sink.clone()).stderr(sink.clone());
+    let config = Config::new().memory_fs(fs).policy(policy.rules).limits(policy.limits).seed(42).stdout(sink.clone()).stderr(sink.clone());
     (Engine::new(config).unwrap(), sink)
 }
 

@@ -20,7 +20,7 @@ pub use lint::lint_policy;
 use net::format_url_origin;
 pub use net::{check_net_pattern, format_host_port, is_private_address, is_valid_listen_pattern};
 #[cfg(feature = "os")]
-pub(crate) use net::{is_valid_host, parse_port, split_port};
+pub(crate) use net::{is_localhost, is_valid_host, parse_port, split_port};
 pub use rules::RulePolicy;
 
 /// A request to perform an effect outside the sandbox.
@@ -28,10 +28,12 @@ pub use rules::RulePolicy;
 pub enum Capability {
     FsRead(PathBuf),
     FsWrite(PathBuf),
-    /// Outgoing connection to a hostname or unbracketed IP address.
+    /// Outgoing connection to a hostname or unbracketed IP address, with TLS
+    /// (`net.connect_tls`) or without it (`net.connect`).
     Net {
         host: String,
         port: u16,
+        tls: bool,
     },
     /// An HTTP request. `host` is lower case, an IPv6 address without
     /// brackets; `path` is the request's path without the query, with no
@@ -73,7 +75,8 @@ impl fmt::Display for Capability {
         match self {
             Capability::FsRead(p) => write!(f, "read {}", p.display()),
             Capability::FsWrite(p) => write!(f, "write {}", p.display()),
-            Capability::Net { host, port } => write!(f, "connect to {}", format_host_port(host, *port)),
+            Capability::Net { host, port, tls: true } => write!(f, "connect to {}", format_host_port(host, *port)),
+            Capability::Net { host, port, tls: false } => write!(f, "connect to {} (plaintext)", format_host_port(host, *port)),
             Capability::Http { method, scheme, host, port, path } => {
                 write!(f, "{method} {}{path}", format_url_origin(scheme, host, *port))
             }
@@ -92,7 +95,7 @@ impl fmt::Display for Capability {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Decision {
     Allow,
     Deny,
@@ -159,12 +162,9 @@ impl<F: Fn(&Capability) -> Decision + Send + Sync> CustomPolicy for F {
     }
 }
 
-/// A policy deciding capability requests.
-#[derive(Clone, Default)]
-pub enum Policy {
-    AllowAll,
-    #[default]
-    DenyAll,
+/// The policy of an engine: a rule policy, or a host-defined policy.
+#[derive(Clone)]
+pub(crate) enum Policy {
     Rules(Arc<RulePolicy>),
     Custom(Arc<dyn CustomPolicy>),
 }
@@ -172,8 +172,6 @@ pub enum Policy {
 impl fmt::Debug for Policy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Policy::AllowAll => write!(f, "AllowAll"),
-            Policy::DenyAll => write!(f, "DenyAll"),
             Policy::Rules(r) => write!(f, "Rules({r:?})"),
             Policy::Custom(_) => write!(f, "Custom"),
         }
@@ -181,71 +179,61 @@ impl fmt::Debug for Policy {
 }
 
 impl Policy {
-    /// Everything allowed: only for trusted scripts.
-    pub fn allow_all() -> Policy {
-        Policy::AllowAll
-    }
-    /// Denies all capabilities except standard output, standard error, and module imports.
-    pub fn deny_all() -> Policy {
-        Policy::DenyAll
-    }
-    pub fn rules(r: RulePolicy) -> Policy {
-        Policy::Rules(Arc::new(r))
-    }
-    /// A host-defined policy.
-    pub fn custom(p: impl CustomPolicy + 'static) -> Policy {
-        Policy::Custom(Arc::new(p))
-    }
-
     /// Decides `cap`. A rule policy first normalizes a file capability's path
     /// with [`normalize_path`]; [`Policy::check_normalized`] skips that.
-    pub fn check(&self, cap: &Capability) -> Decision {
+    pub(crate) fn check(&self, cap: &Capability) -> Decision {
         self.check_in(cap, PathSpace::Host)
     }
 
     /// Like [`Policy::check`] for paths of the file system `space`.
     pub(crate) fn check_in(&self, cap: &Capability, space: PathSpace) -> Decision {
         match self {
-            Policy::AllowAll => Decision::Allow,
-            Policy::DenyAll => match cap {
-                Capability::Stdout | Capability::Stderr | Capability::Import(_) => Decision::Allow,
-                _ => Decision::Deny,
-            },
             Policy::Rules(r) => r.check_in(cap, space),
             Policy::Custom(p) => p.check(cap),
         }
     }
 
-    /// Like [`Policy::check`] for a capability whose path (`FsRead`,
-    /// `FsWrite`) the caller already normalized with [`normalize_path`]
-    /// (and will operate on exactly): a rule policy skips normalizing it
-    /// again, which costs a `realpath`.
-    pub fn check_normalized(&self, cap: &Capability) -> Decision {
-        self.check_normalized_in(cap, PathSpace::Host)
-    }
-
-    /// Like [`Policy::check_normalized`] for paths of the file system `space`
-    /// (normalized by it).
-    pub(crate) fn check_normalized_in(&self, cap: &Capability, space: PathSpace) -> Decision {
+    /// Decides connecting to `addr`, an address that the host of `request`
+    /// (an allowed `Net` or `Http` request) resolved to: as
+    /// [`RulePolicy::check_resolved`] does, or by the `NetAddr` capability,
+    /// where a `Prompt` decision counts as `Allow`. On a denial, returns the
+    /// reason to report.
+    #[cfg(feature = "os")]
+    pub(crate) fn check_resolved(&self, request: &Capability, addr: SocketAddr) -> Result<(), String> {
         match self {
-            Policy::Rules(r) => r.check_normalized_in(cap, space),
-            _ => self.check_in(cap, space),
+            Policy::Rules(r) => r.resolved_verdict(request, addr).map_err(|rule| match rule {
+                Some(rule) => format!("is not allowed by {}", r.describe_rule(rule)),
+                None => "is not the requested address".to_string(),
+            }),
+            Policy::Custom(p) => {
+                let (Capability::Net { host, .. } | Capability::Http { host, .. }) = request else { return Ok(()) };
+                match p.check(&Capability::NetAddr { host: host.clone(), addr }) {
+                    Decision::Deny if is_private_address(addr.ip()) => Err("(private or internal) is not allowed".into()),
+                    Decision::Deny => Err("is not allowed".into()),
+                    Decision::Allow | Decision::Prompt => Ok(()),
+                }
+            }
         }
     }
 
-    /// Like [`Policy::check`] for an operation on a directory entry itself
-    /// (removing or renaming it): a final symlink in an `FsRead`/`FsWrite`
-    /// path is the entry and is not resolved to its target.
-    pub fn check_entry(&self, cap: &Capability) -> Decision {
-        self.check_entry_in(cap, PathSpace::Host)
+    /// Like [`Policy::check`] for a capability whose path (`FsRead`,
+    /// `FsWrite`) the caller already normalized for the file system `space`
+    /// (and will operate on exactly): a rule policy skips normalizing it
+    /// again, which costs a `realpath`.
+    pub(crate) fn check_normalized_in(&self, cap: &Capability, space: PathSpace) -> Decision {
+        match self {
+            Policy::Rules(r) => r.check_normalized_in(cap, space),
+            Policy::Custom(p) => p.check(cap),
+        }
     }
 
-    /// Like [`Policy::check_entry`] for paths of the file system `space`.
+    /// Like [`Policy::check_in`] for an operation on a directory entry itself
+    /// (removing or renaming it): a final symlink in an `FsRead`/`FsWrite`
+    /// path is the entry and is not resolved to its target.
     pub(crate) fn check_entry_in(&self, cap: &Capability, space: PathSpace) -> Decision {
         match self {
             Policy::Rules(r) => r.check_entry_in(cap, space),
             Policy::Custom(p) => p.check_entry(cap),
-            _ => self.check_in(cap, space),
         }
     }
 
@@ -253,7 +241,6 @@ impl Policy {
         match self {
             Policy::Rules(r) => r.check_normalized_in(cap, space),
             Policy::Custom(p) => p.check_entry(cap),
-            _ => self.check_in(cap, space),
         }
     }
 
@@ -263,35 +250,19 @@ impl Policy {
     /// naming the final name, or a prompt (which shows the path).
     pub(crate) fn decision_for_any_spelling(&self, cap: &Capability, space: PathSpace) -> Option<Decision> {
         match self {
-            Policy::AllowAll | Policy::DenyAll => Some(self.check_in(cap, space)),
             Policy::Custom(_) => None,
             Policy::Rules(r) => r.decision_for_any_spelling(cap, space),
         }
     }
 
-    /// Whether a deny rule may match `path` or a path below it. If one may,
-    /// the tree at `path` must be scanned for protected entries
+    /// Whether a deny or prompt rule may match `path` (normalized as the
+    /// path of an entry itself) or a path below it. If one may, the tree at
+    /// `path` must be scanned for protected entries
     /// ([`Policy::protects_normalized_in`]) before it is moved or removed.
-    pub fn denies_under(&self, path: &Path) -> bool {
-        self.denies_under_in(path, PathSpace::Host)
-    }
-
-    /// Like [`Policy::denies_under`] for a path of the file system `space`.
-    pub(crate) fn denies_under_in(&self, path: &Path, space: PathSpace) -> bool {
-        match self {
-            Policy::Rules(r) => r.denies_under_normalized_in(&rules::entry_path(path, space), space),
-            Policy::Custom(p) => p.denies_under(&rules::entry_path(path, space)),
-            _ => false,
-        }
-    }
-
-    /// Like [`Policy::denies_under_in`] for a path already normalized as
-    /// the path of an entry itself.
     pub(crate) fn denies_under_normalized_in(&self, path: &Path, space: PathSpace) -> bool {
         match self {
             Policy::Rules(r) => r.denies_under_normalized_in(path, space),
             Policy::Custom(p) => p.denies_under(path),
-            _ => false,
         }
     }
 
@@ -303,7 +274,6 @@ impl Policy {
         match self {
             Policy::Rules(r) => r.protects_normalized_in(path, space),
             Policy::Custom(p) => p.protects(path),
-            _ => false,
         }
     }
 }
@@ -515,16 +485,14 @@ mod tests {
             std::fs::remove_dir_all(&base).unwrap();
             return;
         }
-        let p = Policy::rules(
-            RulePolicy::new()
-                .allow_read(base.join("Dir/File.txt"))
-                .allow_read(base.join("Dir/Sub"))
-                .deny_read(base.join("Dir/Sub/Secret.txt")),
-        );
+        let p = RulePolicy::new()
+            .allow_read(base.join("Dir/File.txt"))
+            .allow_read(base.join("Dir/Sub"))
+            .deny_read(base.join("Dir/Sub/Secret.txt"));
         for (given, want) in [
             ("dir/file.txt", Decision::Allow),
             ("DIR/FILE.TXT", Decision::Allow),
-            ("dir/other.txt", Decision::Deny),
+            ("dir/other.txt", Decision::Prompt),
             ("dir/sub/X.TXT", Decision::Allow),
             ("dir/sub/SECRET.txt", Decision::Deny),
             ("dir/sub/new.txt", Decision::Allow),

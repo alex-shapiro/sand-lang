@@ -1,6 +1,6 @@
 //! A line-oriented TCP chat server.
 //!
-//! Usage: sand run --allow-listen=127.0.0.1:7000 examples/chat_server.sand -- 7000
+//! Usage: sand run --allow='listen 127.0.0.1:7000' examples/chat_server.sand -- 7000
 //!
 //! Commands: `/nick NAME`, `/who`, `/quit`. Any other line is broadcast.
 

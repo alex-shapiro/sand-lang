@@ -8,7 +8,7 @@
 mod common;
 
 use common::rt;
-use sandlang::{Config, Engine, Error, Limits, MemorySink, Policy};
+use sandlang::{Config, Engine, Error, Limits, MemorySink};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::Duration;
 
@@ -36,7 +36,7 @@ fn iters(default: usize) -> usize {
 }
 
 fn limited_config() -> Config {
-    Config::new().policy(Policy::deny_all()).stdout(MemorySink::new()).stderr(MemorySink::new()).limits(Limits {
+    Config::new().policy(sandlang::RulePolicy::standard()).stdout(MemorySink::new()).stderr(MemorySink::new()).limits(Limits {
         max_instructions: Some(200_000),
         max_memory: Some(32 << 20),
         max_wall_time: Some(Duration::from_secs(2)),

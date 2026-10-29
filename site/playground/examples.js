@@ -93,7 +93,7 @@ report("read standard input", io.stdin.read_line())
 print("\nNetwork:")
 report("GET https://api.github.com/zen", http.get("https://api.github.com/zen"))
 report("GET https://en.wikipedia.org/api/rest_v1/page/summary/Sand", http.get("https://en.wikipedia.org/api/rest_v1/page/summary/Sand"))
-report("GET http://192.168.0.1/ (a private address)", http.get("http://192.168.0.1/"))
+report("GET http://192.168.0.1/ (on the local network)", http.get("http://192.168.0.1/"))
 `,
       "data/greeting.txt": "Hello from a file!\n",
       "data/private/key.txt": "the key to everything\n",
@@ -127,7 +127,7 @@ limit time 10s
         "allowed  read standard input",
         "allowed  GET https://api.github.com/zen",
         "denied   GET https://en.wikipedia.org/api/rest_v1/page/summary/Sand: permission denied: GET https://en.wikipedia.org/api/rest_v1/page/summary/Sand",
-        "denied   GET http://192.168.0.1/ (a private address): permission denied",
+        "denied   GET http://192.168.0.1/ (on the local network): permission denied",
       ],
       writes: ["/out/note.txt"],
     },

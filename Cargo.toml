@@ -21,6 +21,7 @@ tls = ["os", "dep:rustls", "dep:tokio-rustls", "dep:webpki-roots"]
 
 [dependencies]
 sandlang-macros = { path = "macros" }
+bitflags = "2"
 tokio = { version = "1", features = ["rt", "sync", "io-util"] }
 regex-automata = { version = "0.4.16", default-features = false, features = ["std", "syntax", "meta", "nfa-pikevm", "nfa-backtrack", "hybrid", "dfa-onepass", "perf-inline", "perf-literal", "unicode"] }
 rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std", "tls12"] }

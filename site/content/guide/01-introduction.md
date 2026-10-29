@@ -53,7 +53,7 @@ Run the script with `sand run`:
 sand run hello.sand
 ```
 
-`sand run` denies access to external files, network hosts, and environment variables by default. Pass flags such as `--allow-read=DIR` and `--allow-net=HOST` to grant capabilities, and flags such as `--max-time=5s` to set resource limits. See [Sandbox and policies](/guide/sandbox/) for details.
+`sand run` asks before a script accesses external files, network hosts, or environment variables. Pass rules such as `--allow='read ./data'` and `--allow='net api.example.com'` to grant capabilities ahead of time, and flags such as `--max-time=5s` to set resource limits. See [Sandbox and policies](/guide/sandbox/) for details.
 
 ## The REPL
 

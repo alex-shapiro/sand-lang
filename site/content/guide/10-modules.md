@@ -99,7 +99,7 @@ Top-level `?` is allowed only in the entry module (see [Errors](/guide/errors/#a
 
 All script imports must stay inside the module root, which defaults to the directory of the entry file. Importing a path outside the module root (such as `"../shared.sand"`) is a compile error.
 
-The compiler also checks each script import against the sandbox policy before loading the file. By default, the `sand` CLI allows all imports within the module root. In a policy file, `allow import` restricts imports to matching paths, and `deny import` blocks specific paths:
+The compiler also checks each script import against the sandbox policy before loading the file. The `sand` CLI allows all imports within the module root. An embedding host lists the imports it allows with `allow import` rules. `deny import` blocks specific paths:
 
 ```policy
 deny import ./geometry.sand

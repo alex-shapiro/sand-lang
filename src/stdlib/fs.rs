@@ -385,12 +385,11 @@ fn ok_unit<T>(_: &mut Vm, _: T) -> FsResult<()> {
 fn remove_tree(vm: &mut Vm, path: Val<String>) -> FsResult<()> {
     let (shown, mut t) = target(vm, path, Mode::Entry)?;
     check(vm, &mut t, Access::Write, &shown)?;
-    let scan = !matches!(vm.host.policy, Policy::AllowAll);
     let (fs, permits, root) = (vm.host.fs.clone(), vm.permits(), t.path.clone());
     let mut res = vm.io_reservation();
     let removed = vm.offload(move |allowance| -> Result<io::Result<()>, Halt> {
         if fs.stat(&t).is_ok_and(|m| m.kind == EntryKind::Dir)
-            && let Err(e) = scan_tree(&fs, &permits.policy, &t, None, scan.then_some(&permits), &mut res, allowance)?
+            && let Err(e) = scan_tree(&fs, &permits.policy, &t, None, Some(&permits), &mut res, allowance)?
         {
             return Ok(Err(e));
         }

@@ -1136,6 +1136,7 @@ dependencies = [
 name = "sandlang"
 version = "0.1.0"
 dependencies = [
+ "bitflags 2.13.2",
  "compact_str",
  "fs_at",
  "getrandom 0.4.3",

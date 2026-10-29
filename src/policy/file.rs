@@ -7,14 +7,15 @@
 //! deny ./**/.env
 //! allow http GET api.github.com
 //! allow http POST api.github.com/repos/{owners}/**
-//! default prompt
+//! prompt write ./out
+//! default deny
 //! limit memory 64M
 //! ```
 
-use super::net::{ListenPattern, NetPattern, UrlPattern, format_host_port, format_url_origin, parse_ip, url_segments};
+use super::net::{HostKind, ListenPattern, NetPattern, UrlPattern, format_host_port, url_segments};
 use super::path::{Seg, Tok};
-use super::rules::{Access, NamePattern, Origin, PathPattern, Rule, RuleKind};
-use super::{Capability, Decision, Policy, RulePolicy};
+use super::rules::{Access, NamePattern, Origin, PathPattern, Rule, RuleKind, Transports};
+use super::{Capability, Decision, RulePolicy};
 use crate::Limits;
 use crate::vm::value::FxHashMap;
 use std::borrow::Cow;
@@ -27,10 +28,6 @@ use std::time::Duration;
 pub struct PolicyFile {
     /// Policy rules.
     pub rules: RulePolicy,
-    /// Fallback decision for unmatched requests.
-    pub default: Option<Decision>,
-    /// True if private network connections are allowed.
-    pub private_net: bool,
     /// Execution limits configured by policy limit directives.
     pub limits: Limits,
 }
@@ -59,29 +56,11 @@ impl PolicyFile {
     pub fn parse(text: &str, base: &Path, home: Option<&Path>) -> Result<PolicyFile, Vec<PolicyError>> {
         parse(text, base, home).map(|p| p.file)
     }
-
-    /// Builds a [`Policy`] using `default`, or `Deny` if omitted, and denying
-    /// private networks unless `allow private-net` is present.
-    pub fn policy(&self) -> Policy {
-        self.policy_or(Decision::Deny)
-    }
-
-    /// Builds a [`Policy`] like [`PolicyFile::policy`], using `fallback` if the
-    /// file has no `default` rule.
-    pub fn policy_or(&self, fallback: Decision) -> Policy {
-        Policy::rules(self.rule_policy(fallback))
-    }
-
-    pub(crate) fn rule_policy(&self, fallback: Decision) -> RulePolicy {
-        let rules = self.rules.clone().fallback(self.default.unwrap_or(fallback));
-        if self.private_net { rules } else { rules.deny_private_networks() }
-    }
 }
 
 pub(crate) struct Parsed {
     pub file: PolicyFile,
     pub sets: Vec<(String, usize, usize, bool)>,
-    pub default_line: Option<usize>,
 }
 
 pub(crate) struct Line {
@@ -266,7 +245,7 @@ pub(crate) fn is_method(word: &str) -> bool {
             && word.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-' || b == b'_'))
 }
 
-const CAPABILITIES: &str = "read, write, import, net, http, private-net, listen, env, stdin, stdout, stderr, timezone or custom";
+const CAPABILITIES: &str = "read, write, import, net, http, listen, env, stdin, stdout, stderr, timezone or custom";
 
 struct Context<'a> {
     base: &'a Path,
@@ -307,37 +286,24 @@ pub(crate) fn parse(text: &str, base: &Path, home: Option<&Path>) -> Result<Pars
             cx.sets.insert(name_text, (values.to_vec(), i + 1));
         }
     }
-    let mut file = PolicyFile { rules: RulePolicy::new(), default: None, private_net: false, limits: Limits::default() };
+    let mut file = PolicyFile { rules: RulePolicy::new(), limits: Limits::default() };
     let mut rules = Vec::new();
-    let mut default_line = None;
     for (i, line) in lines.iter().enumerate() {
         let Some((first, args)) = line.words.split_first() else { continue };
         let error = |column, message: String| PolicyError { line: i + 1, column, message };
         let result = match first.plain().as_deref() {
             Some("let") => Ok(()),
-            Some(verb @ ("allow" | "deny")) => cx.rule(verb == "allow", first, args, i + 1, &mut rules, &mut file.private_net),
-            Some("default") => match args {
-                [d] => match d.plain().as_deref() {
-                    Some("deny" | "prompt" | "allow") if default_line.is_some() => {
-                        Err((d.column, format!("`default` was already given on line {}", default_line.unwrap_or(0))))
-                    }
-                    Some(d @ ("deny" | "prompt" | "allow")) => {
-                        default_line = Some(i + 1);
-                        file.default = Some(match d {
-                            "allow" => Decision::Allow,
-                            "prompt" => Decision::Prompt,
-                            _ => Decision::Deny,
-                        });
-                        Ok(())
-                    }
-                    _ => Err((d.column, format!("unknown default `{}` (expected `deny`, `prompt` or `allow`)", d.text()))),
-                },
-                _ => Err((first.column, "expected `default deny`, `default prompt` or `default allow`".into())),
-            },
+            Some(verb @ ("allow" | "deny" | "prompt")) => cx.rule(decision(verb), first, args, i + 1, &mut rules),
+            Some("default") => Err((
+                first.column,
+                "a policy has no `default`: a request that no rule matches prompts the user (or is denied without a prompter); \
+                 write rules for what to allow or deny"
+                    .into(),
+            )),
             Some("limit") => limit(&mut file.limits, args).map_err(|m| (args.first().unwrap_or(first).column, m)),
             _ => Err((
                 first.column,
-                format!("unknown rule `{}` (rules start with `allow`, `deny`, `default`, `limit` or `let`)", first.text()),
+                format!("unknown rule `{}` (rules start with `allow`, `deny`, `prompt`, `limit` or `let`)", first.text()),
             )),
         };
         if let Err((column, message)) = result {
@@ -348,53 +314,67 @@ pub(crate) fn parse(text: &str, base: &Path, home: Option<&Path>) -> Result<Pars
         errors.sort_by_key(|e| (e.line, e.column));
         return Err(errors);
     }
-    file.rules = RulePolicy::new().extend(rules);
+    file.rules = RulePolicy::new().extend_rules(rules);
     let sets = sets.into_iter().map(|(name, line, column)| (name.clone(), line, column, cx.used.contains_key(&name))).collect();
-    Ok(Parsed { file, sets, default_line })
+    Ok(Parsed { file, sets })
+}
+
+fn decision(verb: &str) -> Decision {
+    match verb {
+        "allow" => Decision::Allow,
+        "prompt" => Decision::Prompt,
+        _ => Decision::Deny,
+    }
+}
+
+pub(crate) fn verb(decision: Decision) -> &'static str {
+    match decision {
+        Decision::Allow => "allow",
+        Decision::Deny => "deny",
+        Decision::Prompt => "prompt",
+    }
+}
+
+fn file_rule(decision: Decision, kind: RuleKind, origin: Origin) -> Rule {
+    Rule { decision, kind, origin: Some(origin) }
 }
 
 impl Context<'_> {
     fn rule(
         &mut self,
-        allow: bool,
-        verb: &Word,
+        decision: Decision,
+        verb_word: &Word,
         args: &[Word],
         line: usize,
         rules: &mut Vec<Rule>,
-        private_net: &mut bool,
     ) -> Result<(), (usize, String)> {
-        let verb_text = if allow { "allow" } else { "deny" };
+        let verb_text = verb(decision);
         let Some((what, items)) = args.split_first() else {
-            return Err((verb.column, format!("expected what to {verb_text}: a path, or {CAPABILITIES}")));
+            let what = if decision == Decision::Prompt { "prompt for" } else { verb_text };
+            return Err((verb_word.column, format!("expected what to {what}: a path, or {CAPABILITIES}")));
         };
         let keyword = what.plain().filter(|w| w.bytes().all(|b| b.is_ascii_lowercase() || b == b'-'));
         let (kind, items) = match keyword.as_deref() {
             Some(k @ ("read" | "write" | "import" | "net" | "http" | "listen" | "env" | "custom")) => (k, items),
-            Some(k @ ("stdin" | "stdout" | "stderr" | "timezone" | "private-net")) => {
+            Some(k @ ("stdin" | "stdout" | "stderr" | "timezone")) => {
                 if let Some(extra) = items.first() {
                     return Err((extra.column, format!("`{verb_text} {k}` takes no arguments")));
                 }
-                let kind = match (allow, k) {
-                    (true, "private-net") => {
-                        *private_net = true;
-                        return Ok(());
-                    }
-                    (false, "private-net") => {
-                        return Err((
-                            what.column,
-                            "`deny private-net` is not a rule: private and internal addresses are reached only where allowed".into(),
-                        ));
-                    }
-                    (true, "stdout" | "stderr") => {
-                        return Err((what.column, format!("standard {} is allowed unless denied (`deny {k}`)", &k[3..])));
-                    }
-                    (_, "stdin") => RuleKind::Stdin,
-                    (_, "timezone") => RuleKind::TimeZone,
-                    (_, "stdout") => RuleKind::Stdout,
+                let kind = match k {
+                    "stdin" => RuleKind::Stdin,
+                    "timezone" => RuleKind::TimeZone,
+                    "stdout" => RuleKind::Stdout,
                     _ => RuleKind::Stderr,
                 };
-                rules.push(Rule { allow, kind, origin: Some(Origin { line, column: what.column, text: k.to_string() }) });
+                rules.push(file_rule(decision, kind, Origin { line, column: what.column, text: k.to_string() }));
                 return Ok(());
+            }
+            Some("private-net") => {
+                return Err((
+                    what.column,
+                    "`private-net` is not a capability: name internal destinations in net rules, e.g. `allow net localhost:8080 10.0.0.0/8`"
+                        .into(),
+                ));
             }
             Some(k) => return Err((what.column, format!("unknown capability `{k}` (expected a path, or {CAPABILITIES})"))),
             None => ("files", args),
@@ -402,7 +382,9 @@ impl Context<'_> {
         if items.is_empty() {
             let hint = match kind {
                 "custom" => format!("expected `{verb_text} custom NAME [DETAIL]`"),
-                "http" => format!("expected `{verb_text} http [METHOD...] URL...`, e.g. `{verb_text} http GET api.example.com/v1`"),
+                "http" => {
+                    format!("expected `{verb_text} http [TRANSPORT...] [METHOD...] URL...`, e.g. `{verb_text} http GET api.example.com/v1`")
+                }
                 _ => format!("`{verb_text} {kind}` needs at least one argument"),
             };
             return Err((what.column, hint));
@@ -412,13 +394,30 @@ impl Context<'_> {
             if detail.len() > 1 {
                 return Err((detail[1].column, format!("expected `{verb_text} custom NAME [DETAIL]`")));
             }
-            let kind = RuleKind::Custom(name.text(), detail.first().map(Word::text));
-            rules.push(Rule { allow, kind, origin: Some(Origin { line, column: name.column, text: name.render() }) });
+            let any = matches!(name.parts.as_slice(), [Part::Raw(n)] if n == "*");
+            let kind = RuleKind::Custom((!any).then(|| name.text()), detail.first().map(Word::text));
+            rules.push(file_rule(decision, kind, Origin { line, column: name.column, text: name.render() }));
             return Ok(());
         }
         let mut methods: Option<Vec<String>> = None;
+        let mut transports = Transports::empty();
         let mut urls = 0;
         for item in items {
+            if matches!(kind, "net" | "http") {
+                let transport = match item.parts.as_slice() {
+                    [Part::Raw(w)] if w == "tls" => Some(Transports::TLS),
+                    [Part::Raw(w)] if w == "plaintext" => Some(Transports::PLAINTEXT),
+                    _ => None,
+                };
+                if let Some(t) = transport {
+                    if urls > 0 {
+                        return Err((item.column, "transports (`tls`, `plaintext`) come before the hosts".into()));
+                    }
+                    transports |= t;
+                    continue;
+                }
+            }
+            let transports = if transports.is_empty() { Transports::TLS } else { transports };
             let expanded;
             let words = if item.parts.iter().any(|p| matches!(p, Part::Ref(_))) {
                 expanded = item.expand(&self.sets, &mut self.used).map_err(|m| (item.column, m))?;
@@ -427,7 +426,7 @@ impl Context<'_> {
                 std::slice::from_ref(item)
             };
             for word in words {
-                let origin = Some(Origin { line, column: item.column, text: word.render() });
+                let origin = Origin { line, column: item.column, text: word.render() };
                 let kind = match kind {
                     "files" | "read" | "write" | "import" => {
                         let access = match kind {
@@ -438,7 +437,10 @@ impl Context<'_> {
                         };
                         RuleKind::Files(access, self.path(&word.tokens()).map_err(|m| (item.column, m))?)
                     }
-                    "net" => RuleKind::Net(NetPattern::parse(&word.text()).map_err(|m| (item.column, m))?),
+                    "net" => {
+                        urls += 1;
+                        RuleKind::Net(NetPattern::parse(&word.text()).map_err(|m| (item.column, m))?, transports)
+                    }
                     "http" if is_method(&word.text()) => {
                         if urls > 0 {
                             return Err((item.column, "methods come before the URL patterns".into()));
@@ -448,19 +450,23 @@ impl Context<'_> {
                     }
                     "http" => {
                         urls += 1;
-                        RuleKind::Http(methods.clone(), UrlPattern::parse(&word.tokens()).map_err(|m| (item.column, m))?)
+                        RuleKind::Http(methods.clone(), UrlPattern::parse(&word.tokens()).map_err(|m| (item.column, m))?, transports)
                     }
                     "listen" => RuleKind::Listen(ListenPattern::parse(&word.text()).ok_or_else(|| {
                         (item.column, format!("invalid listen pattern `{}` (expected ip:port, ip, localhost, *:port or *)", word.text()))
                     })?),
                     _ => RuleKind::Env(NamePattern::parse(&word.text())),
                 };
-                rules.push(Rule { allow, kind, origin });
+                rules.push(file_rule(decision, kind, origin));
             }
         }
         if kind == "http" && urls == 0 {
             let last = items.last().unwrap_or(what);
             return Err((last.column, format!("`{verb_text} http` needs a URL pattern after its methods, e.g. `api.example.com/v1`")));
+        }
+        if kind == "net" && urls == 0 {
+            let last = items.last().unwrap_or(what);
+            return Err((last.column, format!("`{verb_text} net` needs a host after its transports, e.g. `localhost:8080`")));
         }
         Ok(())
     }
@@ -469,10 +475,16 @@ impl Context<'_> {
         let flat: String = text.iter().map(|t| t.0).collect();
         let sep = |c: char| c == '/' || (cfg!(windows) && c == '\\');
         let unanchored = || {
-            format!("path `{flat}` is not anchored: write `./{flat}` for a path relative to the policy file, `~/...` or an absolute path")
+            format!(
+                "path `{flat}` is not anchored: write `./{flat}` for a path relative to the policy file, `~/...`, an absolute path, or `**/{flat}` for that name anywhere"
+            )
         };
         let starts = |s: &str| flat.starts_with(s) && flat[s.len()..].chars().next().is_none_or(sep);
-        let (mut prefix, rest): (PathBuf, &[Tok]) = if starts("~") {
+        // `**` matches every path on every root, including other drives on Windows.
+        let anywhere = text.len() >= 2 && text[..2].iter().all(|t| t.0 == '*' && t.1) && text.get(2).is_none_or(|t| sep(t.0));
+        let (mut prefix, rest): (PathBuf, &[Tok]) = if anywhere {
+            (PathBuf::new(), text)
+        } else if starts("~") {
             let home = self.home.ok_or("`~` cannot be used here: there is no home directory")?;
             (home.to_path_buf(), &text[1..])
         } else if starts(".") || starts("..") {
@@ -545,28 +557,30 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
         Capability::FsRead(p) => format!("read {}", path(p)?),
         Capability::FsWrite(p) => format!("write {}", path(p)?),
         Capability::Import(p) => format!("import {}", path(p)?),
-        Capability::Net { host, port } => {
+        Capability::Net { host, port, tls } => {
             let pattern = format_host_port(host, *port);
             NetPattern::parse(&pattern).ok()?;
-            format!("net {pattern}")
+            format!("net {}{pattern}", if *tls { "" } else { "plaintext " })
         }
         Capability::Http { method, scheme, host, port, path } => {
             let (names, alt) = url_segments(path);
-            if alt.is_some() || !is_method(&method.to_ascii_uppercase()) || !matches!(scheme.as_str(), "http" | "https") {
+            let transport = match scheme.as_str() {
+                "https" => "",
+                "http" => "plaintext ",
+                _ => return None,
+            };
+            if alt.is_some() || !is_method(&method.to_ascii_uppercase()) {
                 return None;
             }
-            // Include the port for IP addresses so the parser does not treat a
-            // numeric first path segment as a CIDR prefix length.
-            let mut url = match parse_ip(host) {
-                Some(_) => format!("{scheme}://{}", format_host_port(host, *port)),
-                None => format_url_origin(scheme, host, *port),
-            };
+            // The port also keeps the parser from reading a numeric first
+            // path segment after an IP address as a CIDR prefix length.
+            let mut url = format_host_port(host, *port);
             for name in &names {
                 url.push('/');
                 url.push_str(&crate::stdlib::uri_encode(name, b"!$&'()+;=:@-._~"));
             }
             UrlPattern::parse(&url.chars().map(|c| (c, false)).collect::<Vec<_>>()).ok()?;
-            format!("http {} {url}", method.to_ascii_uppercase())
+            format!("http {transport}{} {url}", method.to_ascii_uppercase())
         }
         Capability::NetListen(addr) => format!("listen {}", quote_part(&addr.to_string(), true)),
         Capability::Env(name) => format!("env {}", quote_part(name, true)),
@@ -579,6 +593,105 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
         Capability::NetAddr { .. } => return None,
     };
     Some(format!("{verb} {rule}"))
+}
+
+impl fmt::Display for Rule {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} {}", verb(self.decision), self.kind)
+    }
+}
+
+impl fmt::Display for RuleKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RuleKind::Files(access, pattern) => {
+                let access = match access {
+                    Access::Read => "read ",
+                    Access::Write => "write ",
+                    Access::Import => "import ",
+                    Access::Any => "",
+                };
+                let mut path = match pattern.prefix.to_str() {
+                    Some("") if pattern.rest.is_empty() => "**".to_string(),
+                    Some("") => String::new(),
+                    Some(prefix) => quote_part(prefix, true),
+                    None => quote_part(&pattern.prefix.to_string_lossy(), true),
+                };
+                for seg in &pattern.rest {
+                    if !path.is_empty() && !path.ends_with(['/', '\\']) {
+                        path.push('/');
+                    }
+                    path += &render_seg(seg, |s| quote_part(s, false));
+                }
+                write!(f, "{access}{path}")
+            }
+            RuleKind::Net(pattern, transports) => write!(f, "net {}{}", transport_words(*transports), host_text(pattern)),
+            RuleKind::Http(methods, url, transports) => {
+                write!(f, "http {}", transport_words(*transports))?;
+                for m in methods.iter().flatten() {
+                    write!(f, "{m} ")?;
+                }
+                match (&url.host.kind, url.host.port) {
+                    (HostKind::Ip(ip @ std::net::IpAddr::V6(_), _), None) => write!(f, "[{ip}]")?,
+                    _ => write!(f, "{}", host_text(&url.host))?,
+                }
+                for seg in &url.path {
+                    write!(f, "/{}", render_seg(seg, |s| crate::stdlib::uri_encode(s, b"!$&'()+;=:@-._~")))?;
+                }
+                Ok(())
+            }
+            RuleKind::Listen(pattern) => write!(f, "listen {pattern}"),
+            RuleKind::Env(NamePattern::Exact(name)) => write!(f, "env {}", quote_part(name, false)),
+            RuleKind::Env(NamePattern::Glob(g)) => write!(f, "env {}", render_seg(&Seg::Glob(g.clone()), |s| quote_part(s, false))),
+            RuleKind::Env(NamePattern::Any) => write!(f, "env *"),
+            RuleKind::Stdin => write!(f, "stdin"),
+            RuleKind::Stdout => write!(f, "stdout"),
+            RuleKind::Stderr => write!(f, "stderr"),
+            RuleKind::TimeZone => write!(f, "timezone"),
+            RuleKind::Custom(name, detail) => {
+                write!(f, "custom {}", name.as_deref().map_or_else(|| "*".to_string(), |n| quote_part(n, false)))?;
+                match detail {
+                    Some(detail) => write!(f, " {}", quote_part(detail, false)),
+                    None => Ok(()),
+                }
+            }
+        }
+    }
+}
+
+/// A host pattern as policy file text: a host named like a transport word
+/// gets a trailing dot.
+fn host_text(pattern: &NetPattern) -> String {
+    match &pattern.kind {
+        HostKind::Host(h) if h == "tls" || h == "plaintext" => {
+            let port = pattern.port.map_or_else(String::new, |p| format!(":{p}"));
+            format!("{h}.{port}")
+        }
+        _ => pattern.to_string(),
+    }
+}
+
+/// The transport words of a rule that matches `transports`, each followed
+/// by a space (none for TLS, the default).
+fn transport_words(transports: Transports) -> &'static str {
+    if transports == Transports::TLS {
+        ""
+    } else if transports == Transports::PLAINTEXT {
+        "plaintext "
+    } else {
+        "tls plaintext "
+    }
+}
+
+/// A segment of a pattern as policy file text, with its names written by
+/// `name`.
+fn render_seg(seg: &Seg, name: impl Fn(&str) -> String) -> String {
+    match seg {
+        Seg::Lit(s) => name(s),
+        Seg::Glob(g) => g.pieces().iter().map(|p| if p.is_empty() { String::new() } else { name(p) }).collect::<Vec<_>>().join("*"),
+        Seg::Star => "*".into(),
+        Seg::GlobStar => "**".into(),
+    }
 }
 
 /// Parses a byte count with an optional `K`, `M`, or `G` binary suffix. Values
@@ -634,7 +747,7 @@ mod tests {
     }
 
     fn decide(p: &PolicyFile, cap: Capability) -> Decision {
-        p.policy().check_in(&cap, PathSpace::Memory)
+        p.rules.check_in(&cap, PathSpace::Memory)
     }
 
     fn read(p: &PolicyFile, path: &str) -> Decision {
@@ -668,7 +781,6 @@ mod tests {
              deny read ./data/secrets\n\
              allow env HOME,USER\n\
              allow net api.example.com:443 *.example.org\n\
-             default prompt\n\
              limit memory 64M\n\
              limit time 1.5s\n\
              limit instructions 1_000_000\n\
@@ -678,16 +790,16 @@ mod tests {
         assert_eq!(read(&p, "/with space/x"), Allow);
         assert_eq!(read(&p, "/base/data/secrets/x"), Deny);
         assert_eq!(read(&p, "/out/x"), Allow, "write implies read");
-        assert_eq!(write(&p, "/base/data/x"), Prompt, "the default decides the rest");
+        assert_eq!(write(&p, "/base/data/x"), Prompt, "no rule decides it");
         assert_eq!(decide(&p, Capability::Env("USER".into())), Allow);
-        assert_eq!(decide(&p, Capability::Net { host: "a.example.org".into(), port: 80 }), Allow);
-        assert_eq!(decide(&p, Capability::Net { host: "localhost".into(), port: 80 }), Prompt);
-        assert_eq!(decide(&p, Capability::Stdout), Allow);
+        assert_eq!(decide(&p, Capability::Net { host: "a.example.org".into(), port: 80, tls: true }), Allow);
+        assert_eq!(decide(&p, Capability::Net { host: "a.example.org".into(), port: 80, tls: false }), Prompt, "a TLS rule");
+        assert_eq!(decide(&p, Capability::Net { host: "localhost".into(), port: 80, tls: true }), Prompt);
+        assert_eq!(decide(&p, Capability::Stdout), Prompt, "a policy file allows only what its rules allow");
         assert_eq!(p.limits.max_memory, Some(64 << 20));
         assert_eq!(p.limits.max_wall_time, Some(Duration::from_millis(1500)));
         assert_eq!(p.limits.max_instructions, Some(1_000_000));
         assert_eq!(p.limits.max_cpu_time, None);
-        assert!(!p.private_net);
     }
 
     #[test]
@@ -703,21 +815,21 @@ mod tests {
         );
         assert_eq!(read(&p, "/System"), Allow);
         assert_eq!(read(&p, "/System/Library/x"), Allow);
-        assert_eq!(read(&p, "/Systemd"), Deny);
+        assert_eq!(read(&p, "/Systemd"), Prompt);
         assert_eq!(read(&p, "/home/me/notes/a.md"), Allow);
-        assert_eq!(read(&p, "/home/me/notes/a.txt"), Deny);
-        assert_eq!(read(&p, "/home/me/notes/sub/a.md"), Deny, "`*` stays within a directory");
+        assert_eq!(read(&p, "/home/me/notes/a.txt"), Prompt);
+        assert_eq!(read(&p, "/home/me/notes/sub/a.md"), Prompt, "`*` stays within a directory");
         assert_eq!(write(&p, "/base/src/main.sand"), Allow);
         assert_eq!(read(&p, "/base/.env"), Deny);
         assert_eq!(write(&p, "/base/a/b/.env/x"), Deny);
         assert_eq!(read(&p, "/base/a/b/.envrc"), Allow);
-        assert_eq!(read(&p, "/home/me/Documents"), Deny, "no rule");
+        assert_eq!(read(&p, "/home/me/Documents"), Prompt, "no rule");
         assert_eq!(read(&p, "/home/me/Documents/taxes/2024.pdf"), Deny);
         assert_eq!(write(&p, "/home/me/Documents/project/x"), Allow, "more specific than `~/Documents/*`");
         assert_eq!(read(&p, "/base/lib/generated/x"), Allow);
         assert_eq!(write(&p, "/base/lib/generated/x"), Deny);
         assert_eq!(read(&p, "/lit/*"), Allow, "quoted wildcards are literal");
-        assert_eq!(read(&p, "/lit/x"), Deny);
+        assert_eq!(read(&p, "/lit/x"), Prompt);
     }
 
     #[test]
@@ -762,7 +874,7 @@ mod tests {
              let dirs = ./a /b",
         );
         assert_eq!(http(&p, "POST", "https://api.github.com/repos/bob/two/issues"), Allow);
-        assert_eq!(http(&p, "POST", "https://api.github.com/repos/carol/two/issues"), Deny);
+        assert_eq!(http(&p, "POST", "https://api.github.com/repos/carol/two/issues"), Prompt);
         assert_eq!(read(&p, "/base/a/x.txt"), Allow);
         assert_eq!(read(&p, "/b/x.txt"), Allow);
         assert_eq!(errors("allow read {nope}"), ["1:12: no set `nope` (define it: `let nope = ...`)"]);
@@ -780,30 +892,102 @@ mod tests {
              allow http POST api.github.com/repos/me/**\n\
              allow http api.github.com/repos/me/scratch\n\
              deny http DELETE api.github.com\n\
-             allow http https://example.com/public\n\
-             allow http *.example.org:8080/api/*/items\n\
-             deny http *.example.org:8080/api/admin/*\n\
-             allow http localhost:3000",
+             allow http example.com:443/public\n\
+             allow http plaintext *.example.org:8080/api/*/items\n\
+             deny http plaintext *.example.org:8080/api/admin/*\n\
+             allow http plaintext localhost:3000",
         );
         assert_eq!(http(&p, "GET", "https://github.com/me/repo"), Allow);
         assert_eq!(http(&p, "get", "https://github.com/"), Allow, "methods ignore case");
-        assert_eq!(http(&p, "POST", "https://github.com/x"), Deny);
+        assert_eq!(http(&p, "POST", "https://github.com/x"), Prompt, "no rule");
         assert_eq!(http(&p, "POST", "https://api.github.com/repos/me/x/issues"), Allow);
-        assert_eq!(http(&p, "POST", "https://api.github.com/repos/you/x"), Deny);
+        assert_eq!(http(&p, "POST", "https://api.github.com/repos/you/x"), Prompt);
         assert_eq!(http(&p, "DELETE", "https://api.github.com/repos/me/x"), Deny);
         assert_eq!(http(&p, "DELETE", "https://api.github.com/repos/me/scratch/x"), Allow, "the deeper match wins");
         assert_eq!(http(&p, "DELETE", "https://api.github.com/user"), Deny);
         assert_eq!(http(&p, "PUT", "https://example.com/public/a"), Allow);
-        assert_eq!(http(&p, "PUT", "http://example.com/public/a"), Deny, "the scheme was given");
-        assert_eq!(http(&p, "PUT", "https://example.com:8443/public/a"), Deny, "its default port too");
+        assert_eq!(http(&p, "PUT", "http://example.com:443/public/a"), Prompt, "rules match TLS unless they say `plaintext`");
+        assert_eq!(http(&p, "PUT", "https://example.com:8443/public/a"), Prompt, "another port");
         assert_eq!(http(&p, "GET", "http://a.example.org:8080/api/v1/items/3"), Allow);
+        assert_eq!(http(&p, "GET", "https://a.example.org:8080/api/v1/items/3"), Prompt, "a `plaintext` rule");
         assert_eq!(http(&p, "GET", "http://a.example.org:8080/api/admin/items"), Deny, "a tie");
         assert_eq!(http(&p, "GET", "http://localhost:3000/"), Allow, "named explicitly");
         // Paths are compared as servers see them.
-        assert_eq!(http(&p, "POST", "https://api.github.com/repos/me/../you/x"), Deny);
+        assert_eq!(http(&p, "POST", "https://api.github.com/repos/me/../you/x"), Prompt);
         assert_eq!(http(&p, "POST", "https://api.github.com/repos/%6De/x"), Allow);
-        assert_eq!(http(&p, "POST", "https://api.github.com/repos/me%2F..%2F..%2Fyou/x"), Deny, "%2F may be a separator");
+        assert_eq!(http(&p, "POST", "https://api.github.com/repos/me%2F..%2F..%2Fyou/x"), Prompt, "%2F may be a separator");
         assert_eq!(http(&p, "GET", "http://a.example.org:8080/api/ADMIN/items"), Deny, "deny rules ignore case");
+    }
+
+    #[test]
+    fn transports_select_tls_plaintext_or_both() {
+        let p = parse(
+            "allow net db.example.com:5432\n\
+             allow net plaintext localhost:5432\n\
+             allow net tls plaintext cache.example.com\n\
+             deny net tls plaintext evil.com\n\
+             allow net tls plaintext *.corp.example\n\
+             deny net plaintext *.corp.example\n\
+             deny net tls plaintext legacy.example\n\
+             allow net plaintext legacy.example\n\
+             allow http plaintext GET localhost:8080",
+        );
+        let net = |host: &str, port: u16, tls: bool| decide(&p, Capability::Net { host: host.into(), port, tls });
+        assert_eq!(net("db.example.com", 5432, true), Allow);
+        assert_eq!(net("db.example.com", 5432, false), Prompt, "TLS is the default");
+        assert_eq!(net("localhost", 5432, false), Allow);
+        assert_eq!(net("localhost", 5432, true), Prompt);
+        assert_eq!((net("cache.example.com", 6379, true), net("cache.example.com", 6379, false)), (Allow, Allow));
+        assert_eq!((net("evil.com", 443, true), net("evil.com", 443, false)), (Deny, Deny));
+        assert_eq!((net("a.corp.example", 80, true), net("a.corp.example", 80, false)), (Allow, Deny), "a deny for plaintext only");
+        assert_eq!(
+            (net("legacy.example", 80, true), net("legacy.example", 80, false)),
+            (Deny, Allow),
+            "one transport is more specific than both"
+        );
+        assert_eq!(http(&p, "GET", "http://localhost:8080/x"), Allow);
+        assert_eq!(http(&p, "GET", "https://localhost:8080/x"), Prompt);
+        assert_eq!(http(&p, "POST", "http://localhost:8080/x"), Prompt);
+        // `net` rules decide HTTP requests by transport, too.
+        assert_eq!(http(&p, "PUT", "https://db.example.com:5432/"), Allow);
+        assert_eq!(http(&p, "PUT", "http://db.example.com:5432/"), Prompt);
+        assert_eq!(http(&p, "PUT", "http://evil.com/"), Deny);
+        assert_eq!(
+            parse("allow net tls. plaintext.").rules.to_string(),
+            "allow net tls.\nallow net plaintext.\n",
+            "a trailing dot names a host"
+        );
+        assert_eq!(
+            errors("allow net localhost tls\nallow net tls\nallow http https://a.com\nallow http http://a.com/x"),
+            [
+                "1:21: transports (`tls`, `plaintext`) come before the hosts",
+                "2:11: `allow net` needs a host after its transports, e.g. `localhost:8080`",
+                "3:12: URL patterns take no scheme: write `a.com` (rules match HTTPS unless they say `plaintext`)",
+                "4:12: URL patterns take no scheme: write `plaintext a.com/x` for `http://a.com/x` (rules match HTTPS unless they say `plaintext`)",
+            ]
+        );
+    }
+
+    #[test]
+    fn custom_rules_match_names_or_every_name() {
+        let p = parse("allow custom *\ndeny custom db \"drop table\"\nprompt custom db\nallow custom \"*\" literal");
+        let custom = |name: &str, detail: &str| decide(&p, Capability::Custom { name: name.into(), detail: detail.into() });
+        assert_eq!(custom("door", "front"), Allow);
+        assert_eq!(custom("db", "select"), Prompt, "a name is more specific than `*`");
+        assert_eq!(custom("db", "drop table"), Deny);
+        assert_eq!(custom("*", "literal"), Allow);
+        assert_eq!(p.rules.to_string(), "allow custom *\ndeny custom db \"drop table\"\nprompt custom db\nallow custom \"*\" literal\n");
+    }
+
+    #[test]
+    fn double_stars_match_every_path_on_every_root() {
+        let p = parse("allow import **\ndeny **/.env\nallow read /data");
+        assert_eq!(decide(&p, Capability::Import(PathBuf::from("/anywhere/x.sand"))), Allow);
+        assert_eq!(read(&p, "/data/.env"), Deny);
+        assert_eq!(read(&p, "/other/sub/.env"), Deny);
+        assert_eq!(read(&p, "/data/x"), Allow);
+        assert_eq!(read(&p, "/other/x"), Prompt);
+        assert_eq!(p.rules.to_string(), "allow import **\ndeny **/.env\nallow read /data\n");
     }
 
     #[test]
@@ -812,22 +996,23 @@ mod tests {
         assert_eq!(http(&p, "PATCH", "https://api.example.com/x"), Allow);
         assert_eq!(http(&p, "DELETE", "https://api.example.com/admin/x"), Deny);
         assert_eq!(http(&p, "GET", "https://other.com/x"), Allow);
-        assert_eq!(decide(&p, Capability::Net { host: "other.com".into(), port: 443 }), Deny);
-        let p = parse("allow http *\nallow private-net\ndeny net 10.0.0.0/8");
+        assert_eq!(decide(&p, Capability::Net { host: "other.com".into(), port: 443, tls: true }), Prompt);
+        let p = parse("allow http tls plaintext *\ndeny net tls plaintext 10.0.0.0/8");
         assert_eq!(http(&p, "GET", "http://10.1.2.3/x"), Deny);
-        assert_eq!(http(&p, "GET", "http://[::ffff:10.1.2.3]/x"), Deny);
+        assert_eq!(http(&p, "GET", "https://[::ffff:10.1.2.3]/x"), Deny);
         assert_eq!(http(&p, "GET", "http://8.8.8.8/x"), Allow);
         let p = parse("allow net localhost:8080");
         assert_eq!(http(&p, "GET", "https://localhost:8080/"), Allow);
         let p = parse("allow http *");
-        assert_eq!(http(&p, "GET", "http://127.0.0.1/"), Deny, "private addresses need an explicit rule");
-        assert_eq!(http(&p, "GET", "http://localhost/"), Deny);
+        assert_eq!(http(&p, "GET", "https://127.0.0.1/"), Allow, "`*` reaches every host");
+        assert_eq!(http(&p, "GET", "http://127.0.0.1/"), Prompt, "over TLS");
     }
 
     #[test]
     fn http_rules_take_single_addresses() {
-        let p =
-            parse("allow http *\nallow private-net\ndeny http 10.0.0.1/x\ndeny http GET [fd00::1]/admin\ndeny http [2001:db8::5]:8080/x");
+        let p = parse(
+            "allow http plaintext *\ndeny http plaintext 10.0.0.1/x\ndeny http plaintext GET [fd00::1]/admin\ndeny http plaintext [2001:db8::5]:8080/x",
+        );
         assert_eq!(http(&p, "GET", "http://10.0.0.1/x"), Deny);
         assert_eq!(http(&p, "GET", "http://[::ffff:10.0.0.1]/x"), Deny);
         assert_eq!(http(&p, "GET", "http://10.0.0.2/x"), Allow);
@@ -835,12 +1020,12 @@ mod tests {
         assert_eq!(http(&p, "GET", "http://[fd00::1]/x"), Allow);
         assert_eq!(http(&p, "GET", "http://[2001:db8::5]:8080/x"), Deny);
         assert_eq!(http(&p, "GET", "http://[2001:db8::5]/x"), Allow);
-        let p = parse("allow http *\nallow private-net\ndeny http [::1]/admin\ndeny http 10.0.0.1:80/8");
+        let p = parse("allow http plaintext *\ndeny http plaintext [::1]/admin\ndeny http plaintext 10.0.0.1:80/8");
         assert_eq!(http(&p, "GET", "http://[::1]/admin"), Deny);
         assert_eq!(http(&p, "GET", "http://[::1]/x"), Allow);
         assert_eq!(http(&p, "GET", "http://10.0.0.1/8"), Deny);
         assert_eq!(http(&p, "GET", "http://10.0.0.1/x"), Allow);
-        let p = parse("allow http *\nallow private-net\ndeny http 10.0.0.1/32/8\ndeny http [::]/128/8");
+        let p = parse("allow http plaintext *\ndeny http plaintext 10.0.0.1/32/8\ndeny http plaintext [::]/128/8");
         assert_eq!(http(&p, "GET", "http://10.0.0.1/8"), Deny);
         assert_eq!(http(&p, "GET", "http://10.0.0.2/8"), Allow);
         assert_eq!(http(&p, "GET", "http://[::]/8"), Deny);
@@ -869,7 +1054,10 @@ mod tests {
 
     #[test]
     fn every_capability_can_be_denied() {
-        let p = parse("default allow\ndeny env SECRET AWS_*\ndeny stdin\ndeny listen *:22\ndeny import /base/vendor\ndeny custom db write");
+        let p = parse(
+            "allow env *\nallow stdin\nallow listen *\nallow import /\nallow custom *\n\
+             deny env SECRET AWS_*\ndeny stdin\ndeny listen *:22\ndeny import /base/vendor\ndeny custom db write",
+        );
         assert_eq!(decide(&p, Capability::Env("SECRET".into())), Deny);
         assert_eq!(decide(&p, Capability::Env("AWS_KEY".into())), Deny);
         assert_eq!(decide(&p, Capability::Env("OTHER".into())), Allow);
@@ -888,12 +1076,12 @@ mod tests {
 
     #[test]
     fn imports_are_restricted_by_import_rules_and_read_denies() {
-        let p = parse("deny read ./private");
+        let p = parse("allow import **\ndeny read ./private");
         assert_eq!(decide(&p, Capability::Import(PathBuf::from("/base/lib/x.sand"))), Allow);
         assert_eq!(decide(&p, Capability::Import(PathBuf::from("/base/private/x.sand"))), Deny);
         let p = parse("allow import ./lib\ndeny read ./lib/private\nallow import ./lib/private/ok.sand");
         assert_eq!(decide(&p, Capability::Import(PathBuf::from("/base/lib/x.sand"))), Allow);
-        assert_eq!(decide(&p, Capability::Import(PathBuf::from("/base/other.sand"))), Deny);
+        assert_eq!(decide(&p, Capability::Import(PathBuf::from("/base/other.sand"))), Prompt);
         assert_eq!(decide(&p, Capability::Import(PathBuf::from("/base/lib/private/x.sand"))), Deny);
         assert_eq!(decide(&p, Capability::Import(PathBuf::from("/base/lib/private/ok.sand"))), Allow);
     }
@@ -905,9 +1093,9 @@ mod tests {
             Capability::FsWrite(PathBuf::from("/out/#hash")),
             Capability::FsRead(PathBuf::from("/data/*/{x}")),
             Capability::Import(PathBuf::from("/lib/util.sand")),
-            Capability::Net { host: "api.example.com".into(), port: 443 },
-            Capability::Net { host: "::1".into(), port: 8080 },
-            Capability::Net { host: "10.0.0.5".into(), port: 80 },
+            Capability::Net { host: "api.example.com".into(), port: 443, tls: true },
+            Capability::Net { host: "::1".into(), port: 8080, tls: true },
+            Capability::Net { host: "10.0.0.5".into(), port: 80, tls: true },
             Capability::Http {
                 method: "GET".into(),
                 scheme: "https".into(),
@@ -928,18 +1116,20 @@ mod tests {
             for allow in [true, false] {
                 let rule = rule_for(cap, allow).unwrap_or_else(|| panic!("no rule for {cap:?}"));
                 // With the rule, a policy that would otherwise ask decides.
-                let p = parse(&format!("default prompt\nallow private-net\n{rule}"));
+                let p = parse(&rule);
                 let want = if allow { Allow } else { Deny };
                 assert_eq!(decide(&p, cap.clone()), want, "{rule}");
             }
         }
         assert_eq!(rule_for(&caps[0], true).unwrap(), "allow read \"/data/a file, \\\"quoted\\\".txt\"");
         assert_eq!(rule_for(&caps[2], true).unwrap(), "allow read \"/data/*/{x}\"");
-        assert_eq!(rule_for(&caps[7], true).unwrap(), "allow http GET https://api.example.com/a%20b/%2A/%25/x%3Fy");
-        assert_eq!(rule_for(&caps[8], false).unwrap(), "deny http POST http://[::1]:8080");
+        assert_eq!(rule_for(&caps[7], true).unwrap(), "allow http GET api.example.com:443/a%20b/%2A/%25/x%3Fy");
+        assert_eq!(rule_for(&caps[8], false).unwrap(), "deny http plaintext POST [::1]:8080");
+        let plain = Capability::Net { host: "localhost".into(), port: 5432, tls: false };
+        assert_eq!(rule_for(&plain, true).unwrap(), "allow net plaintext localhost:5432");
         assert_eq!(rule_for(&Capability::Stdout, true), None);
         assert_eq!(rule_for(&Capability::Stdout, false).as_deref(), Some("deny stdout"));
-        let p = parse(&format!("default prompt\n{}", rule_for(caps.last().unwrap(), true).unwrap()));
+        let p = parse(&rule_for(caps.last().unwrap(), true).unwrap());
         assert_eq!(decide(&p, Capability::NetListen("[::1]:22".parse().unwrap())), Prompt);
     }
 
@@ -971,7 +1161,7 @@ mod tests {
             for allow in [true, false] {
                 let rule = rule_for(&cap(ip), allow);
                 proptest::prop_assert!(rule.is_some(), "no rule for {}", cap(ip));
-                let p = parse(&format!("default prompt\nallow private-net\n{}", rule.unwrap()));
+                let p = parse(&rule.unwrap());
                 proptest::prop_assert_eq!(decide(&p, cap(ip)), if allow { Allow } else { Deny }, "{}", cap(ip));
                 proptest::prop_assert_eq!(decide(&p, cap(other)), Prompt, "{}: {}", rule_for(&cap(ip), allow).unwrap(), cap(other));
             }
@@ -979,52 +1169,121 @@ mod tests {
     }
 
     #[test]
-    fn private_networks_are_denied_unless_allowed() {
-        let net = Capability::Net { host: "10.1.2.3".into(), port: 80 };
+    fn wildcards_reach_every_destination() {
         let p = parse("allow net *");
-        assert_eq!(decide(&p, net.clone()), Deny);
-        let p = parse("allow net *\nallow private-net");
-        assert_eq!(decide(&p, net.clone()), Allow);
-        let p = parse("default allow");
-        for host in ["10.1.2.3", "169.254.169.254", "localhost", "127.0.0.1", "::1"] {
-            assert_eq!(decide(&p, Capability::Net { host: host.into(), port: 80 }), Deny, "{host}");
-            assert_eq!(http(&p, "GET", &format!("http://{}/", super::format_host_port(host, 80))), Deny, "{host}");
+        for host in ["10.1.2.3", "169.254.169.254", "localhost", "app.localhost", "127.0.0.1", "::1", "example.com"] {
+            assert_eq!(decide(&p, Capability::Net { host: host.into(), port: 80, tls: true }), Allow, "{host}");
         }
-        assert_eq!(decide(&p, Capability::Net { host: "example.com".into(), port: 80 }), Allow);
-        assert_eq!(decide(&parse("default allow\nallow private-net"), net.clone()), Allow);
-        assert_eq!(decide(&parse("default prompt"), net), Prompt);
+        assert_eq!(decide(&p, Capability::Net { host: "example.com".into(), port: 80, tls: false }), Prompt);
+        assert_eq!(
+            errors("allow private-net\ndeny private-net"),
+            [
+                "1:7: `private-net` is not a capability: name internal destinations in net rules, e.g. `allow net localhost:8080 10.0.0.0/8`",
+                "2:6: `private-net` is not a capability: name internal destinations in net rules, e.g. `allow net localhost:8080 10.0.0.0/8`",
+            ]
+        );
+    }
+
+    #[test]
+    fn prompt_rules_ask_and_yield_to_allow_rules_of_equal_specificity() {
+        let p = parse(
+            "allow ./\nprompt write ./out\nprompt http POST api.example.com\nallow http api.example.com\nprompt env AWS_*\nallow env HOME",
+        );
+        assert_eq!(read(&p, "/base/out/x"), Allow);
+        assert_eq!(write(&p, "/base/out/x"), Prompt);
+        assert_eq!(write(&p, "/base/OUT/x"), Prompt, "prompt rules match other spellings");
+        assert_eq!(write(&p, "/base/src/x"), Allow);
+        assert_eq!(http(&p, "POST", "https://api.example.com/x"), Prompt);
+        assert_eq!(http(&p, "GET", "https://api.example.com/x"), Allow);
+        assert_eq!(decide(&p, Capability::Env("AWS_KEY".into())), Prompt);
+        assert_eq!(decide(&p, Capability::Env("*".into())), Prompt, "all variables include the asked ones");
+        // A path with an encoded separator gets the stricter decision of its two readings.
+        let p = parse("allow http a.com b.com\nprompt http a.com/x/y");
+        assert_eq!(http(&p, "GET", "https://a.com/x%2Fy"), Prompt);
+        assert_eq!(http(&p, "GET", "https://a.com/x%2Fz"), Allow);
+        assert_eq!(http(&p, "GET", "https://b.com/x%2Fy"), Allow);
+        let p = parse("allow http a.com/x\nprompt http a.com/x/y");
+        assert_eq!(http(&p, "GET", "https://a.com/x/z"), Allow);
+        assert_eq!(http(&p, "GET", "https://a.com/x%2Fz"), Prompt, "`x/z` as one name has no rule");
+        let p = parse("prompt http a.com/x%2Fy\ndeny http a.com/x/y");
+        assert_eq!(http(&p, "GET", "https://a.com/x%2Fy"), Deny);
+        let p = parse("prompt read ./data\nallow read ./data\ndeny env X\nprompt env Y");
+        assert_eq!(read(&p, "/base/data/x"), Allow);
+        assert_eq!(decide(&p, Capability::Env("*".into())), Deny);
+    }
+
+    #[test]
+    fn rules_display_as_policy_text() {
+        let text = "allow read /data/*.txt \"/my data\"/x\ndeny ./out/**/secret\nprompt import /lib\nallow net *.example.com:443 [::1]:80 10.0.0.0/8\n\
+                    allow net plaintext localhost:5432\nallow net tls plaintext db.internal\n\
+                    deny http GET POST api.example.com/v1/*\ndeny http plaintext [::1]:8080/a%20b\nallow listen *:8080 [::1]:0 localhost\n\
+                    prompt env AWS_* HOME\nallow stdin\ndeny timezone\nallow custom db \"drop table\"";
+        let p = parse(text);
+        let shown = p.rules.to_string();
+        let lines: Vec<&str> = shown.lines().collect();
+        assert_eq!(
+            lines,
+            [
+                "allow read /data/*.txt",
+                "allow read \"/my data/x\"",
+                "deny /base/out/**/secret",
+                "prompt import /lib",
+                "allow net *.example.com:443",
+                "allow net [::1]:80",
+                "allow net 10.0.0.0/8",
+                "allow net plaintext localhost:5432",
+                "allow net tls plaintext db.internal",
+                "deny http GET POST api.example.com/v1/*",
+                "deny http plaintext [::1]:8080/a%20b",
+                "allow listen *:8080",
+                "allow listen [::1]:0",
+                "allow listen localhost",
+                "prompt env AWS_*",
+                "prompt env HOME",
+                "allow stdin",
+                "deny timezone",
+                "allow custom db \"drop table\"",
+            ]
+        );
+        // The text means the same rules.
+        let again = parse(&lines.join("\n"));
+        assert_eq!(again.rules.to_string(), shown);
     }
 
     #[test]
     fn every_error_is_reported_with_its_place() {
         assert_eq!(
             errors(
-                "alow read /x\nallow\nallow net not a pattern!\nlimit memory lots\nlimit\ndefault maybe\nallow stdout\ndeny custom\nallow read \"open\n\
+                "alow read /x\nallow\nallow net not a pattern!\nlimit memory lots\nlimit\ndefault deny\nallow stdout\ndeny custom\nallow read \"open\n\
                  allow raed /x\nallow read data\nallow read ~user\nallow http GET\nallow http a.com GET\nallow http ftp://x\nallow read /a/**/../b\n\
                  allow read /a/b**\nallow http a.com/x?y"
             ),
             [
-                "1:1: unknown rule `alow` (rules start with `allow`, `deny`, `default`, `limit` or `let`)",
-                "2:1: expected what to allow: a path, or read, write, import, net, http, private-net, listen, env, stdin, stdout, stderr, timezone or custom",
+                "1:1: unknown rule `alow` (rules start with `allow`, `deny`, `prompt`, `limit` or `let`)",
+                "2:1: expected what to allow: a path, or read, write, import, net, http, listen, env, stdin, stdout, stderr, timezone or custom",
                 "3:17: invalid host pattern `pattern!` (expected a host, host:port, *.domain, *, an IP address or a CIDR range)",
                 "4:7: invalid size `lots` (use e.g. 4096, 64K, 256M, 1G)",
                 "5:1: expected `limit NAME VALUE`, e.g. `limit memory 64M`",
-                "6:9: unknown default `maybe` (expected `deny`, `prompt` or `allow`)",
-                "7:7: standard out is allowed unless denied (`deny stdout`)",
+                "6:1: a policy has no `default`: a request that no rule matches prompts the user (or is denied without a prompter); write rules for what to allow or deny",
                 "8:6: expected `deny custom NAME [DETAIL]`",
                 "9:12: unterminated quotes",
-                "10:7: unknown capability `raed` (expected a path, or read, write, import, net, http, private-net, listen, env, stdin, stdout, stderr, timezone or custom)",
-                "11:12: path `data` is not anchored: write `./data` for a path relative to the policy file, `~/...` or an absolute path",
-                "12:12: path `~user` is not anchored: write `./~user` for a path relative to the policy file, `~/...` or an absolute path",
+                "10:7: unknown capability `raed` (expected a path, or read, write, import, net, http, listen, env, stdin, stdout, stderr, timezone or custom)",
+                "11:12: path `data` is not anchored: write `./data` for a path relative to the policy file, `~/...`, an absolute path, or `**/data` for that name anywhere",
+                "12:12: path `~user` is not anchored: write `./~user` for a path relative to the policy file, `~/...`, an absolute path, or `**/~user` for that name anywhere",
                 "13:12: `allow http` needs a URL pattern after its methods, e.g. `api.example.com/v1`",
                 "14:18: methods come before the URL patterns",
-                "15:12: unsupported scheme `ftp` (expected http or https)",
+                "15:12: URL patterns take no scheme (remove `ftp://`)",
                 "16:12: `..` cannot follow a wildcard",
                 "17:12: `**` must be a whole path segment",
                 "18:12: URL patterns match paths, not queries (remove the `?...`)",
             ]
         );
-        assert_eq!(errors("default deny\ndefault allow"), ["2:9: `default` was already given on line 1"]);
+        assert_eq!(
+            errors("prompt"),
+            [
+                "1:1: expected what to prompt for: a path, or read, write, import, net, http, listen, env, stdin, stdout, stderr, timezone or custom"
+            ]
+        );
         assert_eq!(errors("allow stdin now"), ["1:13: `allow stdin` takes no arguments"]);
         assert_eq!(errors("allow read ~/x"), Vec::<String>::new());
         assert_eq!(

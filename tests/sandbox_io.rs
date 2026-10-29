@@ -5,17 +5,21 @@ mod common;
 
 use common::{HttpResponse, TempDir, http_server, run_with};
 use sandlang::policy::is_private_address;
-use sandlang::{Capability, Decision, Limits, Policy, PromptAnswer, RulePolicy};
+use sandlang::{Capability, Decision, Limits, PromptAnswer, RulePolicy};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
-// Network: patterns, private ranges and resolved addresses
+// Network: patterns, transports and resolved addresses
 // ---------------------------------------------------------------------------
 
 fn net(host: &str, port: u16) -> Capability {
-    Capability::Net { host: host.into(), port }
+    Capability::Net { host: host.into(), port, tls: true }
+}
+
+fn plain(host: &str, port: u16) -> Capability {
+    Capability::Net { host: host.into(), port, tls: false }
 }
 
 fn net_addr(host: &str, addr: &str) -> Capability {
@@ -33,23 +37,27 @@ fn net_patterns_match_ip_literals_and_ranges() {
         .deny_net("10.9.0.0/16");
     assert_eq!(p.check(&net("10.1.2.3", 80)), Decision::Allow);
     assert_eq!(p.check(&net("10.9.2.3", 80)), Decision::Deny);
-    assert_eq!(p.check(&net("11.0.0.1", 80)), Decision::Deny);
+    assert_eq!(p.check(&net("11.0.0.1", 80)), Decision::Prompt, "no rule");
     assert_eq!(p.check(&net("192.168.1.5", 8080)), Decision::Allow);
-    assert_eq!(p.check(&net("192.168.1.5", 8081)), Decision::Deny);
+    assert_eq!(p.check(&net("192.168.1.5", 8081)), Decision::Prompt);
     assert_eq!(p.check(&net("::1", 9000)), Decision::Allow);
     assert_eq!(p.check(&net("[::1]", 9000)), Decision::Allow);
-    assert_eq!(p.check(&net("::1", 9001)), Decision::Deny);
+    assert_eq!(p.check(&net("::1", 9001)), Decision::Prompt);
     assert_eq!(p.check(&net("fd12::1", 1)), Decision::Allow);
     // IPv4-mapped IPv6 literals are the IPv4 address.
     assert_eq!(p.check(&net("::ffff:10.1.2.3", 80)), Decision::Allow);
     assert_eq!(p.check(&net("::ffff:10.9.2.3", 80)), Decision::Deny);
     assert_eq!(p.check(&net("EXAMPLE.com", 443)), Decision::Allow);
     // Range patterns never match names.
-    assert_eq!(p.check(&net("10.example", 80)), Decision::Deny);
-    // Without `deny_private_networks`, resolved addresses are only checked against deny ranges.
+    assert_eq!(p.check(&net("10.example", 80)), Decision::Prompt);
+    // The rule that allows a host name also allows the addresses it resolves
+    // to, unless a more specific address rule decides otherwise.
     assert_eq!(p.check(&net_addr("example.com", "127.0.0.1:443")), Decision::Allow);
-    assert_eq!(p.check(&net_addr("example.com", "10.9.0.1:443")), Decision::Deny);
-    assert_eq!(p.check(&net_addr("example.com", "[::ffff:10.9.0.1]:443")), Decision::Deny);
+    assert_eq!(p.check(&net_addr("example.com", "10.9.0.1:443")), Decision::Allow);
+    assert_eq!(p.check(&net_addr("other.example", "10.9.0.1:443")), Decision::Deny);
+    assert_eq!(p.check(&net_addr("other.example", "[::ffff:10.9.0.1]:443")), Decision::Deny);
+    assert_eq!(p.check(&net_addr("other.example", "10.1.0.1:443")), Decision::Allow);
+    assert_eq!(p.check(&net_addr("other.example", "127.0.0.1:443")), Decision::Allow, "no rule restricts the address");
 }
 
 #[test]
@@ -75,14 +83,15 @@ fn deny_ranges_match_alternate_ip_representations() {
         assert_eq!(p.check(&net(host, 8080)), Decision::Allow, "{host}");
     }
     for (deny, hosts) in [("0.0.0.0", ["::", "[::]", "64:ff9b::"]), ("[::]", ["0.0.0.0", "::ffff:0.0.0.0", "64:ff9b::"])] {
-        let p = RulePolicy::new().allow_net("*").deny_net(deny).deny_private_networks();
+        let p = RulePolicy::new().allow_net("*").deny_net(deny);
         let p = p.allow_net("0.0.0.0").allow_net("[::]").allow_net("[64:ff9b::]");
         for host in hosts {
             assert_eq!(p.check(&net(host, 80)), Decision::Deny, "deny {deny}: {host}");
         }
     }
+    // An allow rule does not apply to other representations of its address.
     let p = RulePolicy::new().allow_net("127.0.0.1");
-    assert_eq!(p.check(&net("0.0.0.0", 80)), Decision::Deny);
+    assert_eq!(p.check(&net("0.0.0.0", 80)), Decision::Prompt);
 }
 
 #[test]
@@ -94,14 +103,14 @@ fn net_pattern_edge_cases() {
         .allow_net("::ffff:10.0.0.0/104")
         .deny_net("evil.com")
         .deny_net("*.bad.org");
-    assert_eq!(p.check(&net("ab\u{e9}xample.com", 80)), Decision::Deny);
+    assert_eq!(p.check(&net("ab\u{e9}xample.com", 80)), Decision::Prompt);
     assert_eq!(p.check(&net("\u{e9}.example.com", 80)), Decision::Allow);
     assert_eq!(p.check(&net("api.example.com.", 80)), Decision::Allow);
     assert_eq!(RulePolicy::new().allow_net("*").deny_net("evil.com").check(&net("EVIL.com.", 80)), Decision::Deny);
     assert_eq!(RulePolicy::new().allow_net("*").deny_net("*.bad.org").check(&net("x.bad.org.", 80)), Decision::Deny);
     assert_eq!(p.check(&net("fd00::1", 1)), Decision::Allow);
     assert_eq!(p.check(&net("2001:db8::5", 443)), Decision::Allow);
-    assert_eq!(p.check(&net("2001:db8::5", 80)), Decision::Deny);
+    assert_eq!(p.check(&net("2001:db8::5", 80)), Decision::Prompt);
     assert_eq!(p.check(&net("10.2.3.4", 80)), Decision::Allow);
     use sandlang::policy::check_net_pattern;
     for ok in [
@@ -197,48 +206,115 @@ fn private_address_classification() {
 }
 
 #[test]
-fn deny_private_networks_rules() {
-    let p = RulePolicy::new().allow_net("*").deny_private_networks();
-    // Names are allowed by the wildcard; their addresses are checked after resolution.
-    assert_eq!(p.check(&net("example.com", 80)), Decision::Allow);
-    assert_eq!(p.check(&net_addr("example.com", "93.184.215.14:80")), Decision::Allow);
-    assert_eq!(p.check(&net_addr("example.com", "127.0.0.1:80")), Decision::Deny);
-    assert_eq!(p.check(&net_addr("example.com", "[::ffff:169.254.169.254]:80")), Decision::Deny);
-    assert_eq!(p.check(&net_addr("example.com", "[fd00::1]:80")), Decision::Deny);
-    // Internal IP literals and localhost need an explicit rule: the wildcard is not enough.
-    assert_eq!(p.check(&net("127.0.0.1", 80)), Decision::Deny);
-    assert_eq!(p.check(&net("::ffff:127.0.0.1", 80)), Decision::Deny);
-    assert_eq!(p.check(&net("localhost", 80)), Decision::Deny);
-    assert_eq!(p.check(&net("8.8.8.8", 53)), Decision::Allow);
-
-    let p = RulePolicy::new().allow_net("127.0.0.1:8080").allow_net("localhost").allow_net("10.0.0.0/8").deny_private_networks();
-    assert_eq!(p.check(&net("127.0.0.1", 8080)), Decision::Allow);
-    assert_eq!(p.check(&net("127.0.0.1", 8081)), Decision::Deny);
-    assert_eq!(p.check(&net_addr("127.0.0.1", "127.0.0.1:8080")), Decision::Allow);
-    assert_eq!(p.check(&net("localhost", 1234)), Decision::Allow);
-    assert_eq!(p.check(&net_addr("localhost", "[::1]:1234")), Decision::Allow);
-    assert_eq!(p.check(&net_addr("localhost", "127.0.0.1:1234")), Decision::Allow);
-    // `localhost` must resolve to loopback.
-    assert_eq!(p.check(&net_addr("localhost", "192.168.0.1:1234")), Decision::Deny);
-    // Range allow rules exempt resolved addresses.
-    assert_eq!(p.check(&net_addr("db.internal", "10.1.1.1:5432")), Decision::Allow);
-    assert_eq!(p.check(&net_addr("db.internal", "192.168.1.1:5432")), Decision::Deny);
-
-    // With a prompting fallback, an internal literal is asked about rather than allowed by `*`.
-    let p = RulePolicy::new().allow_net("*").deny_private_networks().fallback(Decision::Prompt);
-    assert_eq!(p.check(&net("127.0.0.1", 80)), Decision::Prompt);
-    assert_eq!(p.check(&net_addr("example.com", "127.0.0.1:80")), Decision::Deny);
+fn wildcards_reach_every_destination() {
+    let p = RulePolicy::new().allow_net("*");
+    for host in ["example.com", "127.0.0.1", "::ffff:127.0.0.1", "10.1.2.3", "169.254.169.254", "localhost", "app.localhost"] {
+        assert_eq!(p.check(&net(host, 80)), Decision::Allow, "{host}");
+        assert_eq!(p.check(&plain(host, 80)), Decision::Prompt, "{host} without TLS");
+    }
+    assert_eq!(p.check(&net_addr("example.com", "127.0.0.1:80")), Decision::Allow);
+    // No rule means no connection: the prompter decides, and without one the engine denies.
+    let p = RulePolicy::new();
+    assert_eq!(p.check(&net("example.com", 443)), Decision::Prompt);
+    assert_eq!(p.check(&net("10.0.0.5", 443)), Decision::Prompt);
 }
 
-#[cfg(unix)]
-fn private_policy() -> Policy {
-    Policy::rules(RulePolicy::new().allow_net("*").deny_private_networks())
+#[test]
+fn transports_decide_raw_connections_and_resolved_addresses() {
+    let p = RulePolicy::new().allow_net("tls plaintext *").deny_net("plaintext 10.0.0.0/8");
+    let resolved =
+        |tls: bool, addr: &str| p.check_resolved(&Capability::Net { host: "db.internal".into(), port: 5432, tls }, addr.parse().unwrap());
+    assert_eq!(resolved(true, "10.0.0.5:5432"), Decision::Allow, "the deny rule is for plaintext");
+    assert_eq!(resolved(false, "10.0.0.5:5432"), Decision::Deny);
+    assert_eq!(resolved(false, "8.8.8.8:5432"), Decision::Allow);
+    assert_eq!(p.check(&plain("10.0.0.5", 5432)), Decision::Deny);
+    assert_eq!(p.check(&net("10.0.0.5", 5432)), Decision::Allow);
+}
+
+#[test]
+fn explicit_host_rules_allow_the_addresses_they_resolve_to() {
+    let p = RulePolicy::new().allow_net("db.internal").allow_net("*.corp.example").deny_net("10.0.0.0/8").deny_net("10.0.0.6");
+    assert_eq!(p.check(&net_addr("db.internal", "10.0.0.5:5432")), Decision::Allow, "an exact name outranks a range");
+    assert_eq!(p.check(&net_addr("db.internal", "10.0.0.6:5432")), Decision::Deny, "a tie with an exact address");
+    assert_eq!(p.check(&net_addr("db.corp.example", "10.0.0.5:5432")), Decision::Deny, "a domain pattern vouches for no address");
+    assert_eq!(p.check(&net_addr("db.corp.example", "8.8.8.8:5432")), Decision::Allow);
+    // `*.localhost` names the loopback host, so it ranks above every range.
+    let p = RulePolicy::new().allow_net("*.localhost").deny_net("127.0.0.0/8");
+    assert_eq!(p.check(&net_addr("app.localhost", "127.0.0.1:3000")), Decision::Allow);
+    assert_eq!(p.check(&net_addr("example.com", "127.0.0.1:3000")), Decision::Deny);
+    // A prompt rule cannot ask about a resolved address, so it denies it, unless it decided the name.
+    let p = RulePolicy::new().prompt_net("db.internal").allow_net("*").prompt_net("93.184.0.0/16");
+    assert_eq!(p.check(&net("db.internal", 5432)), Decision::Prompt);
+    assert_eq!(p.check(&net_addr("db.internal", "93.184.0.5:5432")), Decision::Allow);
+    assert_eq!(p.check(&net_addr("example.com", "93.184.215.14:443")), Decision::Deny);
+    // An HTTP rule that allows a request also decides the addresses of its host.
+    let p = RulePolicy::new().allow_http("GET db.internal/api").deny_net("10.0.0.0/8");
+    let get = |path: &str| Capability::Http {
+        method: "GET".into(),
+        scheme: "https".into(),
+        host: "db.internal".into(),
+        port: 443,
+        path: path.into(),
+    };
+    let addr: SocketAddr = "10.0.0.5:443".parse().unwrap();
+    assert_eq!(p.check_resolved(&get("/api/x"), addr), Decision::Allow);
+    assert_eq!(p.check_resolved(&get("/other"), addr), Decision::Deny);
+    assert_eq!(p.check(&net_addr("db.internal", "10.0.0.5:443")), Decision::Deny, "as a `Net` request");
+}
+
+#[test]
+fn rules_of_equal_specificity() {
+    // `deny` wins over `allow`, which wins over `prompt`.
+    let p = RulePolicy::new().allow_net("a.com").deny_net("a.com").allow_net("b.com").prompt_net("b.com");
+    assert_eq!(p.check(&net("a.com", 80)), Decision::Deny);
+    assert_eq!(p.check(&net("b.com", 80)), Decision::Allow);
+    let p = RulePolicy::new().prompt_write("/out").allow_read("/out").deny_read("/out/secret");
+    assert_eq!(p.check(&Capability::FsWrite("/out/x".into())), Decision::Prompt);
+    assert_eq!(p.check(&Capability::FsRead("/out/x".into())), Decision::Allow);
+    assert_eq!(p.check(&Capability::FsRead("/out/secret".into())), Decision::Deny);
+    // One transport is more specific than both.
+    let p = RulePolicy::new().deny_net("tls plaintext legacy.example").allow_net("plaintext legacy.example");
+    assert_eq!((p.check(&net("legacy.example", 80)), p.check(&plain("legacy.example", 80))), (Decision::Deny, Decision::Allow));
+}
+
+#[test]
+fn constructors_start_with_their_rules() {
+    let default = RulePolicy::default();
+    assert_eq!(default.to_string(), "");
+    assert_eq!(default.check(&Capability::Stdout), Decision::Prompt);
+    let standard = RulePolicy::standard();
+    assert_eq!(standard.to_string(), "allow stdout\nallow stderr\n");
+    assert_eq!(standard.check(&Capability::Stdout), Decision::Allow);
+    assert_eq!(standard.check(&Capability::Import("/lib/x.sand".into())), Decision::Prompt);
+    let all = RulePolicy::allow_all();
+    assert_eq!(
+        all.to_string(),
+        "allow **\nallow import **\nallow net tls plaintext *\nallow listen *\nallow env *\nallow stdin\nallow stdout\nallow stderr\nallow timezone\nallow custom *\n"
+    );
+    for cap in [
+        Capability::FsWrite("/any/where".into()),
+        Capability::Import("/lib/x.sand".into()),
+        net("10.0.0.1", 22),
+        plain("example.com", 80),
+        Capability::Http { method: "PUT".into(), scheme: "http".into(), host: "localhost".into(), port: 8080, path: "/".into() },
+        net_addr("example.com", "127.0.0.1:443"),
+        Capability::NetListen("0.0.0.0:80".parse().unwrap()),
+        Capability::Env("*".into()),
+        Capability::Stdin,
+        Capability::TimeZone,
+        Capability::Custom { name: "door".into(), detail: "front".into() },
+    ] {
+        assert_eq!(all.check(&cap), Decision::Allow, "{cap}");
+    }
+    // A policy file's text lists the same rules.
+    let text = all.to_string();
+    assert_eq!(sandlang::policy::PolicyFile::parse(&text, std::path::Path::new("/"), None).unwrap().rules.to_string(), text);
 }
 
 // Relies on the resolver accepting `127.1` for 127.0.0.1 (glibc, macOS).
 #[cfg(unix)]
 #[test]
-fn names_resolving_to_private_addresses_are_denied() {
+fn names_resolving_to_denied_addresses_are_denied() {
     let server = http_server(|_| HttpResponse::new(200, "internal"));
     let port = server.addr.port();
     // `127.1` and `2130706433` are not IP literals, but the resolver maps them to 127.0.0.1.
@@ -248,15 +324,23 @@ import http
 import net
 for host in ["127.1", "2130706433", "localhost", "127.0.0.1"] {{
     let e = http.get("http://\(host):{port}/").unwrap_err()
-    print("\(e.kind): \(e.message.contains("127.0.0.1") or e.message.contains("::1"))")
+    print("\(e.kind): \(e.message)")
 }}
 print(net.connect("127.1", {port}).unwrap_err().kind)
 "#
     );
-    let r = run_with(&src, |c| c.policy(private_policy()));
+    let policy = RulePolicy::standard().allow_net("tls plaintext *").deny_net("tls plaintext 127.0.0.0/8 [::1]");
+    let r = run_with(&src, |c| c.policy(policy));
+    let rule = "the rule `deny net tls plaintext 127.0.0.0/8`";
     assert_eq!(
         r.ok_stdout(),
-        "permission_denied: true\npermission_denied: true\npermission_denied: false\npermission_denied: true\npermission_denied\n"
+        format!(
+            "permission_denied: permission denied: connect to 127.1:{port}: address 127.0.0.1 is not allowed by {rule}\n\
+             permission_denied: permission denied: connect to 2130706433:{port}: address 127.0.0.1 is not allowed by {rule}\n\
+             permission_denied: permission denied: connect to localhost:{port}: address 127.0.0.1 is not allowed by {rule}\n\
+             permission_denied: permission denied: GET http://127.0.0.1:{port}/\n\
+             permission_denied\n"
+        )
     );
     assert!(server.requests.lock().unwrap().is_empty());
 }
@@ -264,7 +348,7 @@ print(net.connect("127.1", {port}).unwrap_err().kind)
 // Relies on the resolver accepting `127.1` for 127.0.0.1 (glibc, macOS).
 #[cfg(unix)]
 #[test]
-fn explicitly_allowed_internal_hosts_still_work() {
+fn explicitly_allowed_hosts_reach_denied_ranges() {
     let server = http_server(|_| HttpResponse::new(200, "hi"));
     let port = server.addr.port();
     let src = format!(
@@ -273,36 +357,77 @@ import http
 import net
 print(http.get("http://127.0.0.1:{port}/").map(r => r.text().unwrap()))
 print(http.get("http://localhost:{port}/").map(r => r.text().unwrap()))
+print(http.get("http://app.localhost:{port}/").map(r => r.text().unwrap()))
 print(http.get("http://127.1:{port}/").map(r => r.text().unwrap()))
 print(net.connect("127.0.0.1", {port}).is_ok())
 "#
     );
     // `127.1` is allowed by name only through `*`; its address by the explicit IP rule.
-    let policy = RulePolicy::new().allow_net("*").allow_net(&format!("127.0.0.1:{port}")).allow_net("localhost").deny_private_networks();
-    let r = run_with(&src, |c| c.policy(Policy::rules(policy)));
-    assert_eq!(r.ok_stdout(), "Ok(\"hi\")\nOk(\"hi\")\nOk(\"hi\")\ntrue\n");
+    let policy = RulePolicy::standard()
+        .allow_net("tls plaintext *")
+        .deny_net("tls plaintext 127.0.0.0/8 [::1]")
+        .allow_net(&format!("plaintext 127.0.0.1:{port}"))
+        .allow_net("plaintext localhost *.localhost");
+    let r = run_with(&src, |c| c.policy(policy));
+    assert_eq!(r.ok_stdout(), "Ok(\"hi\")\nOk(\"hi\")\nOk(\"hi\")\nOk(\"hi\")\ntrue\n");
 }
 
 // Relies on the resolver accepting `127.1` for 127.0.0.1 (glibc, macOS).
 #[cfg(unix)]
 #[test]
-fn redirects_to_private_addresses_are_denied() {
+fn redirects_to_denied_addresses_are_denied() {
     let target = http_server(|_| HttpResponse::new(200, "secret"));
     let tport = target.addr.port();
     let origin = http_server(move |req| match req.path() {
         "/name" => HttpResponse::new(302, "").header("location", &format!("http://127.1:{tport}/")),
+        "/tls" => HttpResponse::new(302, "").header("location", "http://example.com/"),
         _ => HttpResponse::new(302, "").header("location", &format!("http://localhost:{tport}/")),
     });
     // The origin is allowed explicitly; the redirect targets only by the wildcard.
-    let policy = RulePolicy::new().allow_net("*").allow_net(&origin.addr.to_string()).deny_private_networks();
+    let policy = RulePolicy::standard()
+        .allow_net("tls plaintext *")
+        .deny_net("tls plaintext 127.0.0.0/8 [::1]")
+        .allow_net(&format!("plaintext {}", origin.addr));
     let src = format!(
         "import http\nprint(http.get(\"http://{0}/name\").unwrap_err().kind)\nprint(http.get(\"http://{0}/local\").unwrap_err().kind)",
         origin.addr
     );
-    let r = run_with(&src, |c| c.policy(Policy::rules(policy)));
+    let r = run_with(&src, |c| c.policy(policy));
     assert_eq!(r.ok_stdout(), "permission_denied\npermission_denied\n");
     assert_eq!(origin.requests.lock().unwrap().len(), 2);
     assert!(target.requests.lock().unwrap().is_empty());
+}
+
+// Relies on the resolver accepting `127.1` for 127.0.0.1 (glibc, macOS).
+#[cfg(unix)]
+#[test]
+fn prompt_answers_do_not_override_address_rules() {
+    let server = http_server(|_| HttpResponse::new(200, "hi"));
+    let port = server.addr.port();
+    let src = format!(
+        "import http\nfor host in [\"localhost\", \"127.1\"] {{\n    print(http.get(\"http://\\(host):{port}/\").map(r => r.text().unwrap()))\n}}"
+    );
+    let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let asked = prompts.clone();
+    let run = |policy: RulePolicy| {
+        let asked = asked.clone();
+        run_with(&src, move |c| {
+            c.policy(policy).prompter(move |cap: Capability| {
+                asked.lock().unwrap().push(cap.to_string());
+                async { PromptAnswer::AllowOnce }
+            })
+        })
+        .ok_stdout()
+        .to_string()
+    };
+    assert_eq!(run(RulePolicy::standard()), "Ok(\"hi\")\nOk(\"hi\")\n", "no rule restricts the addresses");
+    let out = run(RulePolicy::standard().deny_net("plaintext 127.0.0.0/8"));
+    let lines: Vec<&str> = out.lines().collect();
+    // `localhost` also resolves to `::1`, which the server does not listen on.
+    assert!(lines[0].starts_with("Err("), "{out}");
+    assert!(lines[1].contains("address 127.0.0.1 is not allowed by the rule `deny net plaintext 127.0.0.0/8`"), "{out}");
+    assert_eq!(prompts.lock().unwrap().len(), 4);
+    assert_eq!(server.requests.lock().unwrap().len(), 2);
 }
 
 #[test]
@@ -313,18 +438,18 @@ fn custom_policies_see_resolved_addresses_without_extra_prompts() {
     let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
     let (seen2, prompts2) = (seen.clone(), prompts.clone());
     // Asks about everything; denies one resolved address.
-    let policy = Policy::custom(move |cap: &Capability| {
+    let policy = move |cap: &Capability| {
         seen2.lock().unwrap().push(cap.to_string());
         match cap {
             Capability::NetAddr { addr, .. } if addr.ip().is_ipv6() => Decision::Deny,
             Capability::Stdout | Capability::Stderr => Decision::Allow,
             _ => Decision::Prompt,
         }
-    });
+    };
     let src =
         format!("import net\nprint(net.connect(\"127.0.0.1\", {port}).is_ok())\nprint(net.connect(\"::1\", {port}).unwrap_err().message)");
     let r = run_with(&src, |c| {
-        c.policy(policy).prompter(move |cap: Capability| {
+        c.custom_policy(policy).prompter(move |cap: Capability| {
             prompts2.lock().unwrap().push(cap.to_string());
             async { PromptAnswer::AllowOnce }
         })
@@ -334,7 +459,10 @@ fn custom_policies_see_resolved_addresses_without_extra_prompts() {
         format!("true\npermission denied: connect to [::1]:{port}: address ::1 (private or internal) is not allowed\n")
     );
     // One prompt per connection: the `Prompt` answer for the resolved address counts as `Allow`.
-    assert_eq!(*prompts.lock().unwrap(), vec![format!("connect to 127.0.0.1:{port}"), format!("connect to [::1]:{port}")]);
+    assert_eq!(
+        *prompts.lock().unwrap(),
+        vec![format!("connect to 127.0.0.1:{port} (plaintext)"), format!("connect to [::1]:{port} (plaintext)")]
+    );
     let seen = seen.lock().unwrap();
     assert!(seen.contains(&format!("connect to 127.0.0.1:{port}")), "{seen:?}");
     assert!(seen.contains(&format!("connect to [::1]:{port}")), "{seen:?}");
@@ -353,7 +481,7 @@ fn net_addr_capability_display() {
 
 fn rules(dir: &TempDir, policy: RulePolicy) -> impl FnOnce(sandlang::Config) -> sandlang::Config {
     let cwd = dir.path().to_path_buf();
-    move |c| c.policy(Policy::rules(policy)).cwd(cwd)
+    move |c| c.policy(policy).cwd(cwd)
 }
 
 #[cfg(unix)]
@@ -364,28 +492,28 @@ fn entry_checks_do_not_resolve_a_final_symlink() {
     std::fs::create_dir_all(dir.path().join("allowed")).unwrap();
     std::os::unix::fs::symlink(dir.path().join("outside/target.txt"), dir.path().join("allowed/link")).unwrap();
     let link = Capability::FsWrite(dir.path().join("allowed/link"));
-    let p = Policy::rules(RulePolicy::new().allow_write(dir.path().join("allowed")));
-    assert_eq!(p.check(&link), Decision::Deny);
+    let p = RulePolicy::standard().allow_write(dir.path().join("allowed"));
+    assert_eq!(p.check(&link), Decision::Prompt, "no rule allows the target");
     assert_eq!(p.check_entry(&link), Decision::Allow);
     // Symlinks in the directories leading to the entry are still resolved.
     std::os::unix::fs::symlink(dir.path().join("outside"), dir.path().join("allowed/dir_link")).unwrap();
-    assert_eq!(p.check_entry(&Capability::FsWrite(dir.path().join("allowed/dir_link/target.txt"))), Decision::Deny);
-    assert_eq!(Policy::allow_all().check_entry(&link), Decision::Allow);
+    assert_eq!(p.check_entry(&Capability::FsWrite(dir.path().join("allowed/dir_link/target.txt"))), Decision::Prompt);
+    assert_eq!(RulePolicy::allow_all().check_entry(&link), Decision::Allow);
 }
 
 #[test]
 fn denies_under_finds_deny_rules_inside_a_tree() {
     let dir = TempDir::new("denies-under");
     let d = dir.path();
-    let p = Policy::rules(RulePolicy::new().allow_write(d).deny_read(d.join("a/b/secret")).deny_write(d.join("c/locked")));
+    let p = RulePolicy::standard().allow_write(d).deny_read(d.join("a/b/secret")).deny_write(d.join("c/locked"));
     assert!(p.denies_under(d));
     assert!(p.denies_under(&d.join("a")));
     assert!(p.denies_under(&d.join("a/b/secret")));
     assert!(p.denies_under(&d.join("c")));
     assert!(!p.denies_under(&d.join("a/other")));
     assert!(!p.denies_under(&d.join("ab")));
-    assert!(!Policy::allow_all().denies_under(d));
-    assert!(Policy::custom(|_: &Capability| Decision::Deny).denies_under(d));
+    assert!(!RulePolicy::allow_all().denies_under(d));
+    assert!(sandlang::CustomPolicy::denies_under(&|_: &Capability| Decision::Deny, d));
 }
 
 #[cfg(unix)]
@@ -411,7 +539,7 @@ print(fs.metadata("allowed/dangling").unwrap_err().kind)
 fs.remove_file("allowed/dangling")?
 print(fs.list_dir("allowed")?)
 "#;
-    let r = run_with(src, rules(&dir, RulePolicy::new().allow_write(dir.path().join("allowed"))));
+    let r = run_with(src, rules(&dir, RulePolicy::standard().allow_write(dir.path().join("allowed"))));
     assert_eq!(
         r.ok_stdout(),
         "permission_denied\npermission_denied\ntrue\npermission_denied\npermission_denied\npermission_denied\nOk(false)\npermission_denied\n[\"dangling_dir\", \"real.txt\"]\n"
@@ -441,7 +569,7 @@ fs.remove_file("allowed/renamed.txt")?
 fs.remove_dir("allowed/tree", recursive: true)?
 print(fs.list_dir("allowed")?)
 "#;
-    let r = run_with(src, rules(&dir, RulePolicy::new().allow_write(dir.path().join("allowed"))));
+    let r = run_with(src, rules(&dir, RulePolicy::standard().allow_write(dir.path().join("allowed"))));
     assert_eq!(r.ok_stdout(), "permission_denied\npermission_denied\npermission_denied\n[]\n");
     assert_eq!(std::fs::read_to_string(dir.path().join("outside/target.txt")).unwrap(), "target");
     assert!(dir.path().join("outside/dir/keep.txt").exists());
@@ -457,7 +585,8 @@ fn deny_patterns_protect_matching_files_and_the_trees_that_hold_them() {
     let policy =
         sandlang::policy::PolicyFile::parse("allow ./project\ndeny ./project/**/.env\ndeny write ./project/*/*.md", dir.path(), None)
             .unwrap()
-            .policy();
+            .rules;
+    let policy = RulePolicy::standard().extend(policy);
     let cwd = dir.path().to_path_buf();
     let src = r#"
 import fs
@@ -491,7 +620,7 @@ fn renaming_or_removing_trees_respects_deny_rules_inside() {
     dir.write("data/b/inner/n.txt", "n");
     dir.write("data/c/x.txt", "x");
     let data = dir.path().join("data");
-    let policy = RulePolicy::new().allow_write(&data).deny_read(data.join("a/secret")).deny_write(data.join("locked/inner"));
+    let policy = RulePolicy::standard().allow_write(&data).deny_read(data.join("a/secret")).deny_write(data.join("locked/inner"));
     let src = r#"
 import fs
 print(fs.read_text("data/a/secret/key.txt").unwrap_err().kind)
@@ -515,17 +644,17 @@ print(fs.list_dir("data")?)
     );
     assert!(dir.path().join("data/a/secret/key.txt").exists());
 
-    let custom = Policy::custom(|_: &Capability| Decision::Allow);
+    let custom = |_: &Capability| Decision::Allow;
     let cwd = dir.path().to_path_buf();
     let src = "import fs\nfs.rename(\"data/a\", \"data/moved\")?\nprint(fs.exists(\"data/moved/secret/key.txt\")?)";
-    let r = run_with(src, move |c| c.policy(custom).cwd(cwd));
+    let r = run_with(src, move |c| c.custom_policy(custom).cwd(cwd));
     assert_eq!(r.ok_stdout(), "true\n");
 
     let secret = sandlang::policy::normalize_path(&dir.path().join("data/moved/secret/key.txt"));
-    let custom = Policy::custom(move |cap: &Capability| match cap {
+    let custom = move |cap: &Capability| match cap {
         Capability::FsRead(p) | Capability::FsWrite(p) if *p == secret => Decision::Deny,
         _ => Decision::Allow,
-    });
+    };
     let cwd = dir.path().to_path_buf();
     let src = r#"
 import fs
@@ -533,7 +662,7 @@ print(fs.remove_dir("data/moved", recursive: true).unwrap_err().kind)
 print(fs.rename("data/moved", "data/again").unwrap_err().kind)
 print(fs.exists("data/moved/public.txt")?)
 "#;
-    let r = run_with(src, move |c| c.policy(custom).cwd(cwd));
+    let r = run_with(src, move |c| c.custom_policy(custom).cwd(cwd));
     assert_eq!(r.ok_stdout(), "permission_denied\npermission_denied\ntrue\n");
 }
 
@@ -551,7 +680,7 @@ print(fs.write_text("pipe", "x").unwrap_err().kind)
 print(fs.read_bytes("sub").unwrap_err().kind)
 print(fs.metadata("pipe")?.is_file)
 "#;
-    let r = run_with(src, rules(&dir, RulePolicy::new().allow_write(dir.path())));
+    let r = run_with(src, rules(&dir, RulePolicy::standard().allow_write(dir.path())));
     // Opening a FIFO without a reader for writing fails at once (ENXIO).
     assert_eq!(r.ok_stdout(), "invalid\nio\ninvalid\nfalse\n");
 }
@@ -573,7 +702,7 @@ fs.rename("allowed/link", "allowed/moved")?
 fs.remove_file("allowed/moved")?
 print(fs.list_dir("allowed")?)
 "#;
-    let r = run_with(src, rules(&dir, RulePolicy::new().allow_write(dir.path().join("allowed"))));
+    let r = run_with(src, rules(&dir, RulePolicy::standard().allow_write(dir.path().join("allowed"))));
     assert_eq!(r.ok_stdout(), "permission_denied\npermission_denied\npermission_denied\n[\"real.txt\"]\n");
     assert_eq!(std::fs::read_to_string(target.join("keep.txt")).unwrap(), "keep");
     assert!(!target.join("new.txt").exists());
@@ -627,8 +756,8 @@ print("secret reads: \(secret)")
 print(public > 0)
 "#;
     let cwd = dir.path().join("allowed");
-    let policy = RulePolicy::new().allow_write(&cwd);
-    let r = run_with(src, move |c| c.policy(Policy::rules(policy)).cwd(cwd));
+    let policy = RulePolicy::standard().allow_write(&cwd);
+    let r = run_with(src, move |c| c.policy(policy).cwd(cwd));
     assert_eq!(r.ok_stdout(), "secret reads: 0\ntrue\n");
 }
 
@@ -723,9 +852,9 @@ print(seen.get("SECRET") ?? 0)
 print(seen.get("listed") ?? 0)
 print((seen.get("public") ?? 0) > 0)
 "#;
-    let policy = RulePolicy::new().allow_write(&allowed);
+    let policy = RulePolicy::standard().allow_write(&allowed);
     let cwd = allowed.clone();
-    let r = run_with(src, move |c| c.policy(Policy::rules(policy)).cwd(cwd));
+    let r = run_with(src, move |c| c.policy(policy).cwd(cwd));
     let rounds = racer.finish();
     assert_eq!(r.ok_stdout(), "0\n0\ntrue\n", "after {rounds} swaps");
     let mut names: Vec<_> = std::fs::read_dir(&outside).unwrap().map(|e| e.unwrap().file_name()).collect();
@@ -764,9 +893,9 @@ for i in 0..3000 {
 }
 print("done")
 "#;
-    let policy = RulePolicy::new().allow_write(&allowed);
+    let policy = RulePolicy::standard().allow_write(&allowed);
     let cwd = allowed.clone();
-    let r = run_with(src, move |c| c.policy(Policy::rules(policy)).cwd(cwd));
+    let r = run_with(src, move |c| c.policy(policy).cwd(cwd));
     racer.finish();
     assert_eq!(r.ok_stdout(), "done\n");
     assert_eq!(std::fs::read_to_string(outside.join("victim.txt")).unwrap(), "intact");
@@ -808,9 +937,9 @@ print(fs.read_text("a/b/parent/b/file.txt")?)
 print(fs.read_text("a/sneaky/allowed/a/b/file.txt")?)
 print(fs.list_dir("a/b/parent")?)
 "#;
-    let policy = RulePolicy::new().allow_write(&allowed);
+    let policy = RulePolicy::standard().allow_write(&allowed);
     let cwd = allowed.clone();
-    let r = run_with(src, move |c| c.policy(Policy::rules(policy)).cwd(cwd));
+    let r = run_with(src, move |c| c.policy(policy).cwd(cwd));
     assert_eq!(r.ok_stdout(), format!("{}false\npublic\npublic\n[\"b\", \"sneaky\"]\n", "permission_denied\n".repeat(8)));
     assert!(!dir.path().join("outside/new.txt").exists());
 }
@@ -843,7 +972,7 @@ fn case_variants_cannot_bypass_the_policy() {
     dir.write("data/public.txt", "public");
     let data = dir.path().join("data");
     symlink(data.join("Private"), data.join("link")).unwrap();
-    let policy = RulePolicy::new().allow_write(&data).deny_read(data.join("Private"));
+    let policy = RulePolicy::standard().allow_write(&data).deny_read(data.join("Private"));
     let src = r#"
 import fs
 for p in ["data/Private/key.txt", "data/private/key.txt", "data/PRIVATE/KEY.TXT", "data/pRiVaTe/Key.Txt", "data/LINK/key.txt"] {
@@ -865,10 +994,10 @@ print(fs.read_text("data/PUBLIC.TXT")?)
 
     // A custom policy that denies one file, compared exactly.
     let secret = data.join("Private/key.txt");
-    let custom = Policy::custom(move |cap: &Capability| match cap {
+    let custom = move |cap: &Capability| match cap {
         Capability::FsRead(p) | Capability::FsWrite(p) if *p == secret => Decision::Deny,
         _ => Decision::Allow,
-    });
+    };
     let src = r#"
 import fs
 print(fs.read_text("data/PRIVATE/KEY.TXT").unwrap_err().kind)
@@ -878,13 +1007,13 @@ print(fs.read_text("data/LINK/Key.txt").unwrap_err().kind)
 print(fs.read_text("data/README.txt")?)
 "#;
     let cwd = dir.path().to_path_buf();
-    let r = run_with(src, move |c| c.policy(custom).cwd(cwd));
+    let r = run_with(src, move |c| c.custom_policy(custom).cwd(cwd));
     assert_eq!(r.ok_stdout(), "permission_denied\npermission_denied\npermission_denied\npermission_denied\nreadme\n");
 
     // An allow rule for one file; prompts for the rest show stored names.
     let asked = Arc::new(Mutex::new(Vec::new()));
     let log = asked.clone();
-    let policy = Policy::rules(RulePolicy::new().allow_read(data.join("Readme.TXT")).fallback(Decision::Prompt));
+    let policy = RulePolicy::standard().allow_read(data.join("Readme.TXT"));
     let src = r#"
 import fs
 print(fs.read_text("data/README.txt")?)
@@ -934,9 +1063,9 @@ fs.rename("\(p)/f.txt", "\(p)/g.txt")?
 fs.remove_dir("directory-number-0-" + "x".repeat(40), recursive: true)?
 print(fs.list_dir(".")?)
 "#;
-    let policy = RulePolicy::new().allow_write(&allowed);
+    let policy = RulePolicy::standard().allow_write(&allowed);
     let cwd = allowed.clone();
-    let r = run_with(src, move |c| c.policy(Policy::rules(policy)).cwd(cwd));
+    let r = run_with(src, move |c| c.policy(policy).cwd(cwd));
     assert_eq!(r.ok_stdout(), "true\ndeep\n[\"f.txt\"]\npermission_denied\npermission_denied\npermission_denied\n[]\n");
     assert!(!dir.path().join("outside/new.txt").exists());
 }
@@ -959,7 +1088,7 @@ fn names_that_are_not_utf8() {
     std::fs::create_dir_all(odd.join("work")).unwrap();
     std::fs::write(odd.join("work/notes.txt"), "notes").unwrap();
     symlink(OsStr::from_bytes(b"../caf\xe9"), odd.join("work/up")).unwrap();
-    let policy = RulePolicy::new().allow_write(&odd).deny_read(odd.join("key.txt"));
+    let policy = RulePolicy::standard().allow_write(&odd).deny_read(odd.join("key.txt"));
     let src = r#"
 import fs
 print(fs.read_text("notes.txt")?)
@@ -970,7 +1099,7 @@ fs.write_text("up/new.txt", "ok")?
 print(fs.list_dir("..")?.len())
 "#;
     let cwd = odd.join("work");
-    let r = run_with(src, move |c| c.policy(Policy::rules(policy)).cwd(cwd));
+    let r = run_with(src, move |c| c.policy(policy).cwd(cwd));
     assert_eq!(r.ok_stdout(), "notes\npermission_denied\npermission_denied\n[\"key.txt\", \"work\"]\n3\n");
     assert_eq!(std::fs::read_to_string(odd.join("new.txt")).unwrap(), "ok");
 }
@@ -995,9 +1124,9 @@ print(fs.is_file("dangling")?)
 fs.rename("dangling", "renamed")?
 print(fs.list_dir(".")?)
 "#;
-    let policy = RulePolicy::new().allow_write(&allowed);
+    let policy = RulePolicy::standard().allow_write(&allowed);
     let cwd = allowed.clone();
-    let r = run_with(src, move |c| c.policy(Policy::rules(policy)).cwd(cwd));
+    let r = run_with(src, move |c| c.policy(policy).cwd(cwd));
     assert_eq!(r.ok_stdout(), "permission_denied\npermission_denied\npermission_denied\nfalse\n[\"dangling_dir\", \"renamed\", \"sub\"]\n");
     assert!(!allowed.join("missing.txt").exists() && !allowed.join("sub/missing").exists());
 }
@@ -1009,7 +1138,7 @@ print(fs.list_dir(".")?)
 fn limited(bytes: usize) -> impl FnOnce(sandlang::Config) -> sandlang::Config {
     // The wall time limit turns buffers left pending forever into a failure.
     let limits = Limits { max_memory: Some(bytes), max_wall_time: Some(Duration::from_secs(10)), ..Limits::default() };
-    move |c| c.policy(Policy::allow_all()).limits(limits)
+    move |c| c.policy(RulePolicy::allow_all()).limits(limits)
 }
 
 /// An HTTP server whose responses send their head and the first `sent`
@@ -1134,7 +1263,7 @@ print("still running")
 "#;
     let out = sandlang::MemorySink::new();
     let limits = Limits { max_memory: Some(8 << 20), max_wall_time: Some(Duration::from_secs(20)), ..Limits::default() };
-    let config = sandlang::Config::new().policy(Policy::allow_all()).limits(limits).stdout(out.clone());
+    let config = sandlang::Config::new().policy(RulePolicy::allow_all()).limits(limits).stdout(out.clone());
     let mut engine = sandlang::Engine::new(config).unwrap();
     let handle = std::thread::spawn(move || common::rt().block_on(engine.run_source("server.sand", src)));
     let start = Instant::now();
@@ -1225,7 +1354,7 @@ fn oversized_files_and_input_fail_before_being_read() {
 fn deny_rules_ignore_case() {
     let dir = TempDir::new("deny-case");
     let d = dir.path();
-    let p = Policy::rules(RulePolicy::new().allow_write(d).deny_read(d.join("future/secret")));
+    let p = RulePolicy::standard().allow_write(d).deny_read(d.join("future/secret"));
     assert_eq!(p.check(&Capability::FsRead(d.join("future/Secret/x"))), Decision::Deny);
     assert_eq!(p.check(&Capability::FsWrite(d.join("FUTURE/secret/x"))), Decision::Deny);
     assert_eq!(p.check(&Capability::FsWrite(d.join("future/other"))), Decision::Allow);
@@ -1238,9 +1367,11 @@ fn deny_rules_ignore_case() {
 fn deny_rules_match_unicode_equivalent_spellings() {
     let dir = TempDir::new("deny-unicode");
     let d = dir.path();
-    let p = Policy::rules(
-        RulePolicy::new().allow_write(d).deny_read(d.join("future/secrets")).deny_write(d.join("café.json")).deny_write(d.join("λόγος")),
-    );
+    let p = RulePolicy::standard()
+        .allow_write(d)
+        .deny_read(d.join("future/secrets"))
+        .deny_write(d.join("café.json"))
+        .deny_write(d.join("λόγος"));
     for denied in ["future/ſecrets/x", "FUTURE/SECRETS", "cafe\u{301}.json", "CAFÉ.JSON", "λόγοσ", "future/se\u{200b}crets"] {
         assert_eq!(p.check(&Capability::FsWrite(d.join(denied))), Decision::Deny, "{denied}");
         assert_eq!(p.check_entry(&Capability::FsWrite(d.join(denied))), Decision::Deny, "{denied}");
@@ -1261,7 +1392,7 @@ fn unicode_spellings_cannot_bypass_deny_rules_on_apfs() {
     dir.write("data/config.json", "{}");
     let data = dir.path().join("data");
     let policy = || {
-        RulePolicy::new()
+        RulePolicy::standard()
             .allow_write(&data)
             .deny_read(data.join("secrets"))
             .deny_write(data.join("config.json"))
@@ -1287,7 +1418,7 @@ print(fs.list_dir("data")?)
     assert!(dir.path().join("data/secrets/key.txt").exists() && dir.path().join("data/config.json").exists());
 
     // Existing entries are resolved to their on-disk names: the policy sees `secrets`.
-    let p = Policy::rules(policy());
+    let p = policy();
     let stored = sandlang::policy::normalize_entry_path(&data.join("ſecrets"));
     assert_eq!(stored, data.join("secrets"));
     assert_eq!(p.check_entry(&Capability::FsWrite(data.join("CONFIG.JSON"))), Decision::Deny);
@@ -1315,7 +1446,7 @@ fn symlink_entries_are_resolved_to_on_disk_names() {
     }
     // The policy resolves its rules' paths when it first decides, here
     // before `Later` exists.
-    let p = Policy::rules(RulePolicy::new().allow_write(data.join("Later")));
+    let p = RulePolicy::standard().allow_write(data.join("Later"));
     assert_eq!(p.check_entry(&Capability::FsWrite(data.join("Later"))), Decision::Allow);
     symlink(dir.path().join("outside/target.txt"), data.join("Later")).unwrap();
     assert_eq!(p.check_entry(&Capability::FsWrite(data.join("LATER"))), Decision::Allow);
@@ -1326,7 +1457,7 @@ fn symlink_entries_are_resolved_to_on_disk_names() {
         Capability::FsWrite(data.join("Link.txt")),
         Capability::FsWrite(data.join("renamed.txt")),
     ];
-    let policy = Policy::custom(move |cap: &Capability| if allowed.contains(cap) { Decision::Allow } else { Decision::Deny });
+    let policy = move |cap: &Capability| if allowed.contains(cap) { Decision::Allow } else { Decision::Deny };
     let src = r#"
 import fs
 fs.rename("data/LINK.TXT", "data/renamed.txt")?
@@ -1334,7 +1465,7 @@ print(fs.list_dir("data")?)
 print(fs.remove_file("data/CAFE\u{301}-LINK").unwrap_err().kind)
 "#;
     let cwd = dir.path().to_path_buf();
-    let r = run_with(src, move |c| c.policy(policy).cwd(cwd));
+    let r = run_with(src, move |c| c.custom_policy(policy).cwd(cwd));
     assert_eq!(r.ok_stdout(), "[\"Later\", \"caf\u{e9}-link\", \"renamed.txt\"]\npermission_denied\n");
     assert_eq!(std::fs::read_to_string(dir.path().join("outside/target.txt")).unwrap(), "target");
 }
@@ -1359,7 +1490,7 @@ fn denial_messages_use_the_scripts_spelling() {
     dir.write("data/private/key.txt", "key");
     #[cfg(unix)]
     std::os::unix::fs::symlink(dir.path().join("data/private"), dir.path().join("data/link")).unwrap();
-    let policy = RulePolicy::new().allow_read(dir.path().join("data/public"));
+    let policy = RulePolicy::standard().allow_read(dir.path().join("data/public"));
     let src = r#"
 import fs
 print(fs.read_text("data/../data/private/key.txt").unwrap_err().message)
@@ -1391,7 +1522,7 @@ print(fs.read_text("a/".repeat(200) + "b").unwrap_err().kind)
 print(fs.exists("x\u{0}y").unwrap_err().kind)
 "#;
     let start = Instant::now();
-    let r = run_with(src, rules(&dir, RulePolicy::new().allow_write(dir.path())));
+    let r = run_with(src, rules(&dir, RulePolicy::standard().allow_write(dir.path())));
     assert_eq!(r.ok_stdout(), "invalid\ninvalid\nnot_found\ninvalid\n");
     assert!(start.elapsed() < Duration::from_secs(5), "{:?}", start.elapsed());
 }
@@ -1406,7 +1537,7 @@ import fs
 print(fs.create_dir("out/data/x", recursive: true).unwrap_err().kind)
 print(fs.exists("out")?)
 "#;
-    let policy = RulePolicy::new().allow_write(&allowed).allow_read(dir.path());
+    let policy = RulePolicy::standard().allow_write(&allowed).allow_read(dir.path());
     let r = run_with(src, rules(&dir, policy.clone()));
     assert_eq!(r.ok_stdout(), "permission_denied\nfalse\n");
     std::fs::create_dir(dir.path().join("out")).unwrap();
@@ -1424,7 +1555,7 @@ fn copies_do_not_keep_permission_bits() {
     std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o4755)).unwrap();
     let r = run_with(
         "import fs\nfs.copy(\"tool.sh\", \"copy.sh\")?\nprint(fs.read_text(\"copy.sh\")?)",
-        rules(&dir, RulePolicy::new().allow_write(dir.path())),
+        rules(&dir, RulePolicy::standard().allow_write(dir.path())),
     );
     assert_eq!(r.ok_stdout(), "#!/bin/sh\n\n");
     let mode = std::fs::metadata(dir.path().join("copy.sh")).unwrap().permissions().mode();
@@ -1468,6 +1599,6 @@ print(fs.rename("new.txt", "renamed.txt").unwrap_err().kind)
 print(fs.remove_dir("d", recursive: true).unwrap_err().kind)
 print(fs.read_text("a.txt")?)
 "#;
-    let r = run_with(src, move |c| c.policy(Policy::custom(NoRemoval)).cwd(cwd));
+    let r = run_with(src, move |c| c.custom_policy(NoRemoval).cwd(cwd));
     assert_eq!(r.ok_stdout(), "permission_denied\npermission_denied\npermission_denied\nrewritten\n");
 }

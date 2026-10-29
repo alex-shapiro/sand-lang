@@ -1,6 +1,6 @@
 use super::{check, int, int_lit, str_lit};
 use proptest::prelude::*;
-use sandlang::{Config, Engine, Error, MemorySink, Policy};
+use sandlang::{Config, Engine, Error, MemorySink};
 
 #[derive(Clone, Debug)]
 enum Ty {
@@ -202,7 +202,7 @@ proptest! {
             inputs.join(", ")
         );
         let out = MemorySink::new();
-        let mut engine = Engine::new(Config::new().policy(Policy::deny_all()).stdout(out.clone())).unwrap();
+        let mut engine = Engine::new(Config::new().policy(sandlang::RulePolicy::standard()).stdout(out.clone())).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
         match rt.block_on(engine.run_source("main.sand", &src)) {
             Ok(_) => {

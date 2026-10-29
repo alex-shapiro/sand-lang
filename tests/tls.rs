@@ -5,11 +5,11 @@
 mod common;
 
 use common::{HttpResponse, http_server, https_server, run_with, tls_acceptor, tls_test_root};
-use sandlang::{Config, Policy, RulePolicy};
+use sandlang::{Config, RulePolicy};
 
 /// Allows everything and trusts the test root.
 fn trusting(c: Config) -> Config {
-    c.policy(Policy::allow_all()).tls_root_certificates(vec![tls_test_root()])
+    c.policy(RulePolicy::allow_all()).tls_root_certificates(vec![tls_test_root()])
 }
 
 /// A TLS server that answers each line with its upper-case form.
@@ -97,7 +97,7 @@ print(c.unwrap_err().message.contains("certificate"))
         echo.port()
     );
     // The bundled web PKI roots do not include the test root.
-    let r = run_with(&src, |c| c.policy(Policy::allow_all()));
+    let r = run_with(&src, |c| c.policy(RulePolicy::allow_all()));
     assert_eq!(r.ok_stdout(), "invalid\ntrue\ntrue\n");
     assert!(server.requests.lock().unwrap().is_empty());
 }
@@ -176,16 +176,22 @@ print(b.text()?)
 }
 
 #[test]
-fn https_with_private_network_policy() {
+fn https_requests_need_tls_rules() {
     let server = https_server(|_| HttpResponse::new(200, "ok"));
     let port = server.addr.port();
     let src = format!("import http\nprint(http.get(\"https://localhost:{port}/\")?.text()?)");
-    let allowed = RulePolicy::new().allow_net(&format!("localhost:{port}")).deny_private_networks();
-    let r = run_with(&src, |c| trusting(c).policy(Policy::rules(allowed)));
+    let allowed = RulePolicy::standard().allow_net(&format!("localhost:{port}"));
+    let r = run_with(&src, |c| trusting(c).policy(allowed));
     assert_eq!(r.ok_stdout(), "ok\n");
-    let wildcard = RulePolicy::new().allow_net("*").deny_private_networks();
-    let r = run_with(&src, |c| trusting(c).policy(Policy::rules(wildcard)));
+    let plaintext = RulePolicy::standard().allow_net("plaintext *");
+    let r = run_with(&src, |c| trusting(c).policy(plaintext));
     assert!(r.failure().contains(&format!("permission denied: GET https://localhost:{port}/")), "{}", r.failure());
+    // A TLS connection needs a TLS rule, a plain connection a `plaintext` rule.
+    let src = format!(
+        "import net\nprint(net.connect_tls(\"localhost\", {port}).is_ok())\nprint(net.connect(\"localhost\", {port}).unwrap_err().message)"
+    );
+    let r = run_with(&src, |c| trusting(c).policy(RulePolicy::standard().allow_net("localhost")));
+    assert_eq!(r.ok_stdout(), format!("true\npermission denied: connect to localhost:{port} (plaintext)\n"));
 }
 
 #[test]
@@ -195,7 +201,7 @@ fn invalid_extra_root_fails_cleanly() {
         "import http\nlet e = http.get(\"https://localhost:{}/\").unwrap_err()\nprint(e.kind)\nprint(e.message)",
         server.addr.port()
     );
-    let r = run_with(&src, |c| c.policy(Policy::allow_all()).tls_root_certificates(vec![b"not a certificate".to_vec()]));
+    let r = run_with(&src, |c| c.policy(RulePolicy::allow_all()).tls_root_certificates(vec![b"not a certificate".to_vec()]));
     let out = r.ok_stdout();
     assert!(out.starts_with("io\nTLS setup failed: invalid root certificate #1"), "{out}");
 }

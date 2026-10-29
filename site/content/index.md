@@ -117,12 +117,12 @@ Sand also runs in WebAssembly. See it in action in the [playground](/play/).
 ```rust
 # #[tokio::main(flavor = "current_thread")]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-use sandlang::{Config, Engine, NativeModule, Policy};
+use sandlang::{Config, Engine, NativeModule, RulePolicy};
 
 let mut geo = NativeModule::new("geo");
 geo.function("dist", |a: f64, b: f64| -> f64 { (a * a + b * b).sqrt() });
 
-let config = Config::new().policy(Policy::deny_all()).module(geo);
+let config = Config::new().policy(RulePolicy::standard()).module(geo);
 let mut engine = Engine::new(config)?;
 engine.run_source("main.sand", "import geo\nprint(geo.dist(3.0, 4.0))").await?;
 # Ok(())

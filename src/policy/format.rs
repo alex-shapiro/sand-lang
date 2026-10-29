@@ -47,7 +47,7 @@ pub fn format_policy(text: &str) -> Result<String, Vec<PolicyError>> {
 /// A line's words, formatted.
 fn code(line: &Line) -> String {
     let http = line.words.len() > 2
-        && matches!(line.words[0].plain().as_deref(), Some("allow" | "deny"))
+        && matches!(line.words[0].plain().as_deref(), Some("allow" | "deny" | "prompt"))
         && line.words[1].plain().as_deref() == Some("http");
     let mut methods = http;
     let mut out = Vec::new();
@@ -117,7 +117,7 @@ mod tests {
     fn meaning(text: &str) -> Result<Vec<crate::policy::Decision>, Vec<String>> {
         let file = PolicyFile::parse(text, Path::new("/base"), Some(Path::new("/home/me")))
             .map_err(|e| e.into_iter().map(|e| e.message).collect::<Vec<_>>())?;
-        let policy = file.policy();
+        let policy = file.rules;
         let path = |p: &str| PathBuf::from(p);
         let http = |m: &str, path: &str| Capability::Http {
             method: m.into(),
@@ -135,7 +135,7 @@ mod tests {
             Capability::Import(path("/base/a/m.sand")),
             Capability::Env("x".into()),
             Capability::Stdin,
-            Capability::Net { host: "w.example.com".into(), port: 443 },
+            Capability::Net { host: "w.example.com".into(), port: 443, tls: true },
             http("GET", "/v1/z"),
             http("POST", "/"),
         ];
@@ -162,9 +162,10 @@ mod tests {
     fn formats_words_quotes_methods_comments_and_blank_lines() {
         let src = "\n\n# Policy\nallow  read  \"/data\",\"/my data\"/**   # mine\n\
                    deny ./x # x\n\n\n\nallow http get, head  api.example.com\nlet  hosts =  a.com,b.com\n\
-                   allow net {hosts}\n  limit memory 64M  \n\n";
+                   allow net {hosts}\n  limit memory 64M  \nprompt  http post   api.example.com\n\n";
         let want = "# Policy\nallow read /data \"/my data\"/**  # mine\ndeny ./x                        # x\n\n\
-                    allow http GET HEAD api.example.com\nlet hosts = a.com b.com\nallow net {hosts}\nlimit memory 64M\n";
+                    allow http GET HEAD api.example.com\nlet hosts = a.com b.com\nallow net {hosts}\nlimit memory 64M\n\
+                    prompt http POST api.example.com\n";
         assert_eq!(format_policy(src).unwrap(), want);
         assert_eq!(format_policy(want).unwrap(), want);
         assert_eq!(format_policy("").unwrap(), "");

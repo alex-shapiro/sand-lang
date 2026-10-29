@@ -1,6 +1,6 @@
 //! Fetches a web page and reports its title, headings and links.
 //!
-//! Usage: sand run --allow-net=example.com examples/http_fetch.sand -- https://example.com/
+//! Usage: sand run --allow='net example.com' examples/http_fetch.sand -- https://example.com/
 
 import env
 import http

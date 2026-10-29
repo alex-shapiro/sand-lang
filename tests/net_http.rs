@@ -3,12 +3,12 @@
 mod common;
 
 use common::{HttpResponse, http_server, run_with};
-use sandlang::{Config, Engine, Error, Limits, MemorySink, Policy, RulePolicy};
+use sandlang::{Config, Engine, Error, Limits, MemorySink, RulePolicy};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::time::{Duration, Instant};
 
 fn run_net(src: &str) -> String {
-    let r = run_with(src, |c| c.policy(Policy::allow_all()));
+    let r = run_with(src, |c| c.policy(RulePolicy::allow_all()));
     r.ok_stdout().to_string()
 }
 
@@ -143,9 +143,9 @@ fn http_redirects_are_checked_against_policy() {
     let target = http_server(|_| HttpResponse::new(200, "secret"));
     let target_addr = target.addr;
     let origin = http_server(move |_| HttpResponse::new(302, "").header("location", &format!("http://{target_addr}/x")));
-    let policy = RulePolicy::new().allow_net(&origin.addr.to_string());
+    let policy = RulePolicy::standard().allow_net(&origin.addr.to_string());
     let src = format!("import http\nprint(http.get(\"http://{}/\").unwrap_err().kind)", origin.addr);
-    let r = run_with(&src, |c| c.policy(Policy::rules(policy)));
+    let r = run_with(&src, |c| c.policy(policy));
     assert_eq!(r.ok_stdout(), "permission_denied\n");
     assert!(target.requests.lock().unwrap().is_empty());
 }
@@ -157,10 +157,10 @@ fn http_rules_decide_methods_and_routes() {
         path => HttpResponse::new(200, format!("{} {path}", req.method)),
     });
     let addr = server.addr;
-    let policy = RulePolicy::new()
-        .allow_http(&format!("GET {addr}/api/** {addr}/old"))
-        .allow_http(&format!("POST {addr}/api/items"))
-        .deny_http(&format!("{addr}/api/admin"));
+    let policy = RulePolicy::standard()
+        .allow_http(&format!("plaintext GET {addr}/api/** {addr}/old"))
+        .allow_http(&format!("plaintext POST {addr}/api/items"))
+        .deny_http(&format!("plaintext {addr}/api/admin"));
     let src = format!(
         r#"
 import http
@@ -179,7 +179,7 @@ show(http.get("http://{addr}/api/v1/%2e%2e/%2E%2E/private"))
 show(http.get("http://{addr}/old"))
 "#
     );
-    let r = run_with(&src, |c| c.policy(Policy::rules(policy)));
+    let r = run_with(&src, |c| c.policy(policy));
     assert_eq!(
         r.ok_stdout(),
         format!(
@@ -197,7 +197,7 @@ show(http.get("http://{addr}/old"))
 fn http_body_limit() {
     let server = http_server(|_| HttpResponse::new(200, vec![b'x'; 100_000]));
     let src = format!("import http\nprint(http.get(\"http://{}/\").unwrap_err().kind)", server.addr);
-    let r = run_with(&src, |c| c.policy(Policy::allow_all()).limits(Limits { max_http_body: 1000, ..Limits::default() }));
+    let r = run_with(&src, |c| c.policy(RulePolicy::allow_all()).limits(Limits { max_http_body: 1000, ..Limits::default() }));
     assert_eq!(r.ok_stdout(), "limit\n");
 }
 
@@ -284,7 +284,7 @@ for _ in 0..2 {
     req.respond(201, body.bytes(), headers: [("x-reply", "1")])?
 }
 "#;
-    let mut engine = Engine::new(Config::new().policy(Policy::allow_all()).stdout(out.clone())).unwrap();
+    let mut engine = Engine::new(Config::new().policy(RulePolicy::allow_all()).stdout(out.clone())).unwrap();
     let handle = std::thread::spawn(move || common::rt().block_on(engine.run_source("server.sand", src)));
     let start = Instant::now();
     let addr = loop {
@@ -440,12 +440,12 @@ print(accepts.map(t => t.wait().is_ok()))
 fn net_permissions() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    let policy = RulePolicy::new().allow_net("localhost");
+    let policy = RulePolicy::standard().allow_net("localhost");
     let src = format!(
         "import net\nprint(net.connect(\"127.0.0.1\", {}).unwrap_err().kind)\nprint(net.listen(\"127.0.0.1\", 0).unwrap_err().kind)",
         addr.port()
     );
-    let r = run_with(&src, |c| c.policy(Policy::rules(policy)));
+    let r = run_with(&src, |c| c.policy(policy));
     assert_eq!(r.ok_stdout(), "permission_denied\npermission_denied\n");
 }
 
@@ -454,7 +454,7 @@ fn closing_engine_closes_sockets() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let src = format!("import net\nlet c = net.connect(\"127.0.0.1\", {})?\nc.write_str(\"hi\")?", addr.port());
-    let r = run_with(&src, |c| c.policy(Policy::allow_all()));
+    let r = run_with(&src, |c| c.policy(RulePolicy::allow_all()));
     r.ok_stdout();
     let (mut s, _) = listener.accept().unwrap();
     s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
@@ -471,7 +471,7 @@ fn errors_are_distinguishable() {
         .map(String::from)
         .chain([format!("net.connect(\"{}.com\", 80)", "a".repeat(64)), "net.listen(\"localhost\", 8080)".into()])
     {
-        let r = run_with(&format!("import net\nlet c = {call}?"), |c| c.policy(Policy::allow_all()));
+        let r = run_with(&format!("import net\nlet c = {call}?"), |c| c.policy(RulePolicy::allow_all()));
         assert!(r.failure().starts_with("invalid: "), "{call}: {}", r.failure());
     }
     let _ = Error::Interrupted;
@@ -522,7 +522,7 @@ pending.cancel()
 "#
     );
     let limits = Limits { max_open_resources: 4, max_wall_time: Some(Duration::from_secs(20)), ..Limits::default() };
-    let r = run_with(&src, |c| c.policy(Policy::allow_all()).limits(limits));
+    let r = run_with(&src, |c| c.policy(RulePolicy::allow_all()).limits(limits));
     // The listener and the pending accept leave two of the four slots.
     assert_eq!(r.ok_stdout(), "limit\nlimit\nlimit\nlistening on a released slot\n2\n");
 }
@@ -533,7 +533,7 @@ fn tls_handshakes_time_out() {
     let addr = silent_server();
     let src = format!("import net\nlet e = net.connect_tls(\"127.0.0.1\", {}, timeout: 200ms).unwrap_err()\nprint(e.kind)", addr.port());
     let start = Instant::now();
-    let r = run_with(&src, |c| c.policy(Policy::allow_all()));
+    let r = run_with(&src, |c| c.policy(RulePolicy::allow_all()));
     assert_eq!(r.ok_stdout(), "timeout\n");
     assert!(start.elapsed() < Duration::from_secs(10));
 }
@@ -542,7 +542,7 @@ fn tls_handshakes_time_out() {
 /// and the run's thread.
 fn start_server_script(src: &'static str, limits: Limits) -> (String, std::thread::JoinHandle<Result<sandlang::Outcome, Error>>) {
     let out = MemorySink::new();
-    let config = Config::new().policy(Policy::allow_all()).limits(limits).stdout(out.clone());
+    let config = Config::new().policy(RulePolicy::allow_all()).limits(limits).stdout(out.clone());
     let mut engine = Engine::new(config).unwrap();
     let handle = std::thread::spawn(move || common::rt().block_on(engine.run_source("server.sand", src)));
     let start = Instant::now();
@@ -617,7 +617,7 @@ listener.close()
 print(server.wait() > 0)
 "#;
     let limits = Limits { max_memory: Some(1 << 20), ..Limits::default() };
-    let r = run_with(src, |c| c.policy(Policy::allow_all()).limits(limits));
+    let r = run_with(src, |c| c.policy(RulePolicy::allow_all()).limits(limits));
     let out = r.ok_stdout();
     let lines: Vec<&str> = out.lines().collect();
     assert!(lines[0].starts_with("limit: cannot open a connection"), "{out}");
@@ -673,7 +673,7 @@ fn unlimited_http_bodies() {
     });
     let src = format!("import http\nprint(http.get(\"http://{addr}/\")?.text()?)");
     let limits = Limits { max_http_body: usize::MAX, ..Limits::default() };
-    let r = run_with(&src, |c| c.policy(Policy::allow_all()).limits(limits));
+    let r = run_with(&src, |c| c.policy(RulePolicy::allow_all()).limits(limits));
     assert_eq!(r.ok_stdout(), "to the end\n");
 }
 
@@ -931,7 +931,7 @@ print(http.get({})?.text()?)
         urls[0]
     );
     let limits = Limits { max_open_resources: 2, ..Limits::default() };
-    let r = run_with(&src, |c| c.policy(Policy::allow_all()).limits(limits));
+    let r = run_with(&src, |c| c.policy(RulePolicy::allow_all()).limits(limits));
     assert_eq!(r.ok_stdout(), "ok\nok\nok\nok\nok\n");
 }
 
@@ -1050,7 +1050,7 @@ use b = fs.open("b.txt", fs.Mode.Write)?
 print("opened")
 "#;
     let limits = Limits { max_open_resources: 4, ..Limits::default() };
-    let r = run_with(src, |c| c.policy(Policy::allow_all()).limits(limits));
+    let r = run_with(src, |c| c.policy(RulePolicy::allow_all()).limits(limits));
     assert_eq!(r.ok_stdout(), "ok\nopened\n");
 }
 
@@ -1080,7 +1080,7 @@ serving.cancel()
     let dir = common::TempDir::new("waiting");
     let out = MemorySink::new();
     let limits = Limits { max_open_resources: 3, max_wall_time: Some(Duration::from_secs(20)), ..Limits::default() };
-    let config = Config::new().policy(Policy::allow_all()).limits(limits).stdout(out.clone()).cwd(dir.path());
+    let config = Config::new().policy(RulePolicy::allow_all()).limits(limits).stdout(out.clone()).cwd(dir.path());
     let mut engine = Engine::new(config).unwrap();
     let handle = std::thread::spawn(move || common::rt().block_on(engine.run_source("server.sand", src)));
     let start = Instant::now();
