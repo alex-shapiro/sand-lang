@@ -428,6 +428,8 @@ pub(crate) struct ClientConn {
     slot: ResourceSlot,
     /// `scheme://host[:port]`.
     origin: String,
+    /// The address connected to.
+    peer: std::net::SocketAddr,
 }
 
 impl ClientConn {
@@ -468,12 +470,14 @@ impl Pool {
     }
 
     /// The most recently used idle connection to `origin` that is ready for
-    /// a request, after closing those idle for longer than [`POOL_IDLE`].
-    fn take(&self, origin: &str) -> Option<ClientConn> {
+    /// a request and whose address `policy` allows for `request`, after
+    /// closing those idle for longer than [`POOL_IDLE`].
+    fn take(&self, origin: &str, policy: &Policy, request: &crate::policy::Capability) -> Option<ClientConn> {
         let now = self.clock.now();
         let mut idle = self.idle();
         idle.retain(|(_, since)| now.saturating_duration_since(*since) < POOL_IDLE);
-        while let Some(i) = idle.iter().rposition(|(c, _)| c.origin == origin) {
+        let usable = |c: &ClientConn| c.origin == origin && policy.check_resolved(request, c.peer).is_ok();
+        while let Some(i) = idle.iter().rposition(|(c, _)| usable(c)) {
             let (mut conn, _) = idle.remove(i);
             if conn.is_ready() {
                 return Some(conn);
@@ -520,9 +524,9 @@ async fn connect(
     url: &Url,
     slot: ResourceSlot,
 ) -> Result<ClientConn, IoFailure> {
-    let (stream, _) = net::connect_checked(policy, network, &url.capability(method)).await?;
+    let (stream, peer) = net::connect_checked(policy, network, &url.capability(method)).await?;
     let stream = if url.scheme == "https" { Box::new(net::tls::connect(tls, &url.host, stream).await?) } else { stream };
-    Ok(ClientConn { stream: BufReader::with_capacity(net::CONN_BUFFER, stream), slot, origin: url.origin() })
+    Ok(ClientConn { stream: BufReader::with_capacity(net::CONN_BUFFER, stream), slot, origin: url.origin(), peer })
 }
 
 /// A response's head.
@@ -607,7 +611,7 @@ fn send(
     let mut res = vm.reserve_io(body.bytes(&vm.heap).len())?;
     req.check_policy(vm)?;
     let pool = vm.host.http_pool.clone();
-    let idle = pool.take(&req.url.origin());
+    let idle = pool.take(&req.url.origin(), &vm.host.policy, &req.url.capability(&req.method));
     let slot = match idle {
         Some(_) => None,
         None => {

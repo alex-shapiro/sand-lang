@@ -430,6 +430,77 @@ fn prompt_answers_do_not_override_address_rules() {
     assert_eq!(server.requests.lock().unwrap().len(), 2);
 }
 
+/// A network that resolves every name to `addrs`, records the addresses it
+/// connects to, and answers every request with `200 ok` on a keep-alive
+/// connection.
+struct KeepAliveNetwork {
+    addrs: Vec<SocketAddr>,
+    connected: Arc<Mutex<Vec<SocketAddr>>>,
+}
+
+impl sandlang::network::Network for KeepAliveNetwork {
+    fn resolve<'a>(&'a self, _host: &'a str, port: u16) -> sandlang::network::NetworkFuture<'a, Vec<SocketAddr>> {
+        let addrs = self.addrs.iter().map(|a| SocketAddr::new(a.ip(), port)).collect();
+        Box::pin(async move { Ok(addrs) })
+    }
+
+    fn connect<'a>(
+        &'a self,
+        addrs: &'a [SocketAddr],
+    ) -> sandlang::network::NetworkFuture<'a, (Box<dyn sandlang::network::Stream>, SocketAddr)> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        self.connected.lock().unwrap().push(addrs[0]);
+        let (client, server) = tokio::io::duplex(1 << 16);
+        tokio::spawn(async move {
+            let mut server = tokio::io::BufReader::new(server);
+            loop {
+                let mut line = String::new();
+                while line != "\r\n" {
+                    line.clear();
+                    if server.read_line(&mut line).await.unwrap_or(0) == 0 {
+                        return;
+                    }
+                }
+                if server.get_mut().write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok").await.is_err() {
+                    return;
+                }
+            }
+        });
+        let peer = addrs[0];
+        Box::pin(async move { Ok((Box::new(client) as Box<dyn sandlang::network::Stream>, peer)) })
+    }
+
+    fn listen(&self, _addr: SocketAddr) -> sandlang::network::NetworkFuture<'_, Box<dyn sandlang::network::Listener>> {
+        Box::pin(async { Err(std::io::Error::other("no listening")) })
+    }
+}
+
+/// The address check holds for every request, also on a pooled connection
+/// that an earlier request opened: the rule that allowed the earlier request
+/// may vouch for an address that the rule of the next request does not.
+#[test]
+fn pooled_connections_are_reused_only_at_addresses_allowed_for_the_request() {
+    let addr: SocketAddr = "10.0.0.5:80".parse().unwrap();
+    let connected = Arc::new(Mutex::new(Vec::new()));
+    let network = Arc::new(KeepAliveNetwork { addrs: vec![addr], connected: connected.clone() });
+    let policy = RulePolicy::standard()
+        .allow_http("plaintext GET api.example.com/a")
+        .allow_http("plaintext *")
+        .deny_net("plaintext 10.0.0.0/8");
+    let src = r#"
+import http
+print(http.get("http://api.example.com/a")?.text()?)
+print(http.post("http://api.example.com/b", b"x").map(r => r.status).map_err(e => e.message))
+print(http.get("http://api.example.com/a").map(r => r.status))
+"#;
+    let r = run_with(src, |c| c.policy(policy).network(network));
+    assert_eq!(
+        r.ok_stdout(),
+        "ok\nErr(\"permission denied: connect to api.example.com:80: address 10.0.0.5 is not allowed by the rule `deny net plaintext 10.0.0.0/8`\")\nOk(200)\n"
+    );
+    assert_eq!(*connected.lock().unwrap(), [addr], "the last request reuses the first connection");
+}
+
 #[test]
 fn custom_policies_see_resolved_addresses_without_extra_prompts() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
