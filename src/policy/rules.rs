@@ -678,27 +678,19 @@ impl RulePolicy {
                 // The listing holds every variable, so it gets the strictest
                 // decision of any one. Each rule's names have a variable that
                 // only the rules covering them all match: the exact name, or
-                // the pattern with `*` as a character that no name has.
+                // the pattern with `*` as a character that no rule has.
+                let pieces = || index.env.iter().flat_map(|(p, ..)| if let NamePattern::Glob(g) = p { g.pieces() } else { &[] });
+                let used: std::collections::HashSet<char> =
+                    index.env_names.keys().map(|n| &**n).chain(pieces().map(|p| &**p)).flat_map(str::chars).collect();
+                let unused = (0..=u32::from(char::MAX)).filter_map(char::from_u32).find(|c| !used.contains(c)).unwrap_or('\0');
                 let samples = index.env_names.keys().cloned().chain(index.env.iter().map(|(p, ..)| match p {
-                    NamePattern::Glob(g) => g.pieces().join("\0"),
-                    _ => "\0".into(),
+                    NamePattern::Glob(g) => g.pieces().join(&*unused.to_string()),
+                    _ => unused.to_string(),
                 }));
-                let verdicts = samples.chain(["\0".into()]).map(|n| self.verdict(&Capability::Env(n), space, exclude));
+                let verdicts = samples.chain([unused.to_string()]).map(|n| self.env_verdict(&n, exclude));
                 return verdicts.max_by_key(|&v| strictness(v)).flatten();
             }
-            Capability::Env(name) => {
-                for &(d, rule) in index.env_names.get(name.as_str()).into_iter().flatten() {
-                    best.offer([2, 0, 0, 0], d, rule);
-                }
-                for &(ref pattern, d, rule) in &index.env {
-                    let spec = match pattern {
-                        NamePattern::Glob(g) if g.matches(name) => [1, g.pieces().iter().map(|p| p.len() as u32).sum(), 0, 0],
-                        NamePattern::Any => [0; 4],
-                        _ => continue,
-                    };
-                    best.offer(spec, d, rule);
-                }
-            }
+            Capability::Env(name) => return self.env_verdict(name, exclude),
             Capability::Stdin | Capability::Stdout | Capability::Stderr | Capability::TimeZone => {
                 for &(ref kind, d, rule) in &index.unit {
                     if std::mem::discriminant(kind) == std::mem::discriminant(cap) {
@@ -714,6 +706,24 @@ impl RulePolicy {
                     }
                 }
             }
+        }
+        best.verdict()
+    }
+
+    /// The most specific rule that matches reading the variable `name`.
+    fn env_verdict(&self, name: &str, exclude: &[usize]) -> Option<(Decision, usize)> {
+        let index = self.others();
+        let mut best = Best::new(self, exclude);
+        for &(d, rule) in index.env_names.get(name).into_iter().flatten() {
+            best.offer([2, 0, 0, 0], d, rule);
+        }
+        for &(ref pattern, d, rule) in &index.env {
+            let spec = match pattern {
+                NamePattern::Glob(g) if g.matches(name) => [1, g.pieces().iter().map(|p| p.len() as u32).sum(), 0, 0],
+                NamePattern::Any => [0; 4],
+                _ => continue,
+            };
+            best.offer(spec, d, rule);
         }
         best.verdict()
     }

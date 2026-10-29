@@ -452,6 +452,13 @@ fn listing_all_variables_gets_the_strictest_decision_of_any_variable() {
     for (p, want) in cases {
         assert_eq!(p.check(&all), want, "{p}");
     }
+    // A variable named `*` (quoted) is one variable, and a rule may name any
+    // character, including the one that stands for `*` in a sample.
+    let file = |text: &str| sandlang::policy::PolicyFile::parse(text, std::path::Path::new("/"), None).unwrap().rules;
+    assert_eq!(file("allow env *\ndeny env \"*\"").check(&all), Decision::Deny);
+    assert_eq!(file("allow env \"*\"").check(&all), Decision::Prompt);
+    let p = RulePolicy::new().allow_env("*").deny_env("*_KEY").allow_env("\0_KEY");
+    assert_eq!((p.check(&Capability::Env("AWS_KEY".into())), p.check(&all)), (Decision::Deny, Decision::Deny));
 }
 
 #[test]
