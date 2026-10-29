@@ -988,3 +988,28 @@ fn a_blocked_stdout_does_not_outlast_the_time_limit() {
     assert_eq!(child.wait().unwrap().code(), Some(3));
     assert!(out.len() > 1 << 20);
 }
+
+#[test]
+fn a_denial_without_asking_names_the_rule_that_allows_it() {
+    let dir = script("hint", "import fs\nfor i in 0..2 {\n    print(fs.read_text(\"a.txt\").is_ok())\n}\n");
+    dir.write("a.txt", "A");
+    let o = sand(dir.path(), &["run", "main.sand"]);
+    assert_eq!((o.code, o.stdout.as_str()), (0, "false\nfalse\n"), "{o:?}");
+    let path = std::fs::canonicalize(dir.path()).unwrap().join("a.txt");
+    let hint = format!("sand: denied: read {} (--allow='read {}' allows it)\n", path.display(), path.display());
+    // Once per request: the answer is remembered.
+    assert_eq!(o.stderr, hint, "{o:?}");
+}
+
+#[test]
+fn rule_options_take_their_value_after_a_space() {
+    let dir = script("space", "import fs\nprint(fs.read_text(\"a.txt\").unwrap())\n");
+    dir.write("a.txt", "A");
+    dir.write("read.policy", "allow read ./a.txt\n");
+    let o = sand(dir.path(), &["run", "main.sand", "--allow", "read ./a.txt"]);
+    assert_eq!((o.code, o.stdout.as_str()), (0, "A\n"), "{o:?}");
+    let o = sand(dir.path(), &["run", "--policy", "read.policy", "main.sand"]);
+    assert_eq!((o.code, o.stdout.as_str()), (0, "A\n"), "{o:?}");
+    let o = sand(dir.path(), &["run", "main.sand", "--deny", "read ./a.txt", "--allow", "read ./"]);
+    assert_eq!(o.code, 1, "{o:?}");
+}

@@ -75,7 +75,7 @@ sand run server.sand --allow='listen localhost:8080' --deny='net tls plaintext 1
 | `--allow-all`     | allows what none of your rules match (only for trusted code) |
 | `--no-prompt`     | denies instead of asking                                    |
 
-Quote rules that contain spaces or `*`. Separate several values of one rule with spaces or commas. Relative paths start from the working directory. Allowing a directory grants access to all files and subdirectories within it. Without a terminal, Sand denies what it would ask about.
+Quote rules that contain spaces or `*`. Separate several values of one rule with spaces or commas. Relative paths start from the working directory. Allowing a directory grants access to all files and subdirectories within it. Without a terminal, or with `--no-prompt`, Sand denies what it would ask about and shows the `--allow` option that allows it.
 
 The default rules decide only what none of your rules match: `--prompt=stdin` asks before the script reads standard input, and `--allow-all --prompt='write **'` allows everything but asks before each write. The flags and the rules of a policy file are one set of rules, so a flag cannot loosen a `deny` rule of the file for the same pattern.
 

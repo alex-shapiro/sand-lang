@@ -3363,7 +3363,8 @@ with the same pattern, `deny` wins (§14.5), so an option cannot loosen a
 `deny` rule of the file. `--allow-all` makes `RulePolicy::allow_all()` the
 default rules, so it allows what no rule of the user matches:
 `--allow-all --prompt='write **'` asks before every write. `--no-prompt`
-denies what the CLI would ask about. Limits: `--max-memory=BYTES` (suffixes
+denies what the CLI would ask about. An option that takes a value takes it
+after `=` or as the next argument (`--allow 'read ./data'`). Limits: `--max-memory=BYTES` (suffixes
 K, M, G), `--max-time=DURATION`, `--max-cpu=DURATION`,
 `--max-instructions=N`, `--max-compile-fuel=N`. `--seed=N` seeds the random
 number generator. Arguments after `--`, and positional arguments after
@@ -3374,7 +3375,10 @@ compile errors, 3 for limit violations. If the policy allows `TimeZone`,
 
 The CLI asks on the controlling terminal (`/dev/tty`; the console on
 Windows), never on the script's standard streams, so piped input cannot
-answer; without a terminal, the CLI denies what it would ask about. Answers:
+answer. Without a terminal, or with `--no-prompt`, the CLI denies the request
+for the rest of the run and writes the option that allows it to standard
+error (`sand: denied: read /data/a.txt (--allow='read /data/a.txt' allows
+it)`). Answers:
 `y` (allow once), `a` (always), `n` or an empty line (deny once), `N`
 (never); end of input denies, and an unrecognized answer is asked again up to
 three times before denying. Control characters in the request are escaped,
