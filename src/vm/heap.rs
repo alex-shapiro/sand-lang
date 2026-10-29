@@ -122,8 +122,8 @@ pub struct Heap {
     /// Make the next collection a major one when `bytes` exceeds this.
     pub major_at: usize,
     pub limit: Option<usize>,
-    /// Bytes of the collector's mark bits, of its lists of remembered and
-    /// gray objects and of its `dirty` entries, measured when the arena grows by 64 slots and by every
+    /// Bytes of the collector's mark bits, its lists of remembered, gray and
+    /// to-be-traced objects, and its `dirty` entries, measured when the arena grows by 64 slots and by every
     /// collection and step of an incremental collection.
     tables: usize,
     /// The most slots that the arena has held since it last shrank. Their
@@ -626,10 +626,15 @@ impl Heap {
     fn measure_tables(&mut self) {
         let bitmaps = [&self.marks, &self.remembered_bits, &self.partial_bits, &self.tail_bits, &self.cmarks, &self.gray_bits];
         let words: usize = bitmaps.iter().map(|b| b.capacity()).sum();
+        // A hash map has 8 buckets per 7 entries of capacity, each with a
+        // control byte.
+        let dirty = self.dirty.capacity() * (std::mem::size_of::<(u32, DirtyList)>() + 1) * 8 / 7;
         self.tables = words * std::mem::size_of::<u64>()
             + self.remembered.capacity() * std::mem::size_of::<u32>()
-            + self.dirty.capacity() * std::mem::size_of::<(u32, DirtyList)>()
-            + self.gray.capacity() * std::mem::size_of::<(u32, usize)>();
+            + dirty
+            + self.gray.capacity() * std::mem::size_of::<(u32, usize)>()
+            + self.worklist.capacity() * std::mem::size_of::<u32>()
+            + self.scan.capacity() * std::mem::size_of::<(u32, usize)>();
     }
 
     #[inline]
@@ -1794,6 +1799,16 @@ mod tests {
         assert_eq!(barrier_tables(&heap), 0);
     }
 
+    #[test]
+    fn the_heap_counts_the_work_lists_that_a_minor_collection_keeps() {
+        let mut heap = Heap::new(None, usize::MAX);
+        let roots: Vec<Value> = (0..200_000).map(|i| heap.new_str(format!("a young string, long enough, {i}"))).collect();
+        heap.collect(roots.iter().copied(), false);
+        let work = heap.worklist.capacity() * std::mem::size_of::<u32>() + heap.scan.capacity() * std::mem::size_of::<(u32, usize)>();
+        assert!(work > 0);
+        assert!(heap.tables >= work, "{} bytes of tables counted, {work} bytes of work lists", heap.tables);
+    }
+
     fn new_channel(heap: &mut Heap) -> Value {
         heap.alloc(Obj::Channel(Box::new(ChannelObj::new(0))))
     }
@@ -2087,6 +2102,192 @@ mod tests {
                     match c {
                         Ok(text) => proptest::prop_assert_eq!(heap.str(*v), text.as_str()),
                         Err(items) => proptest::prop_assert_eq!(heap.list(*v), items.as_slice()),
+                    }
+                }
+            }
+        }
+    }
+
+    /// A change to an old list or map, or a step of the collector.
+    #[derive(Clone, Debug)]
+    enum BarrierOp {
+        /// Stores a new string (or an int) at an index of list `c`.
+        Store(usize, usize, bool),
+        Push(usize),
+        Pop(usize),
+        Clear(usize),
+        /// Inserts a new string at an index (moves the elements after it).
+        Insert(usize, usize),
+        Remove(usize, usize),
+        /// Replaces the value of map entry `s`, or appends an entry.
+        MapStore(usize, usize),
+        MapPush(usize),
+        /// Removes an entry and closes the gap, as compaction does.
+        MapRemove(usize, usize),
+        /// Allocates unreachable strings.
+        Garbage(usize),
+        Collect(bool),
+        /// Starts an incremental cycle, or runs one step of it.
+        Cycle,
+    }
+
+    fn barrier_op() -> impl proptest::strategy::Strategy<Value = BarrierOp> {
+        use proptest::prelude::*;
+        let c = 0usize..9;
+        prop_oneof![
+            8 => (c.clone(), any::<usize>(), any::<bool>()).prop_map(|(c, i, s)| BarrierOp::Store(c, i, s)),
+            4 => c.clone().prop_map(BarrierOp::Push),
+            3 => c.clone().prop_map(BarrierOp::Pop),
+            1 => c.clone().prop_map(BarrierOp::Clear),
+            1 => (c.clone(), any::<usize>()).prop_map(|(c, i)| BarrierOp::Insert(c, i)),
+            1 => (c.clone(), any::<usize>()).prop_map(|(c, i)| BarrierOp::Remove(c, i)),
+            4 => (0usize..2, any::<usize>()).prop_map(|(m, s)| BarrierOp::MapStore(m, s)),
+            2 => (0usize..2).prop_map(BarrierOp::MapPush),
+            1 => (0usize..2, any::<usize>()).prop_map(|(m, s)| BarrierOp::MapRemove(m, s)),
+            2 => (0usize..20).prop_map(BarrierOp::Garbage),
+            3 => any::<bool>().prop_map(BarrierOp::Collect),
+            3 => Just(BarrierOp::Cycle),
+        ]
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(512))]
+
+        /// Old lists and maps of lengths around `PARTIAL_MIN` receive young
+        /// values by every kind of store while minor, major and incremental
+        /// collections run. Only the containers are roots: every value that
+        /// they hold must stay intact.
+        #[test]
+        fn old_containers_keep_the_young_values_stored_into_them(ops in proptest::collection::vec(barrier_op(), 1..300)) {
+            let mut heap = Heap::new(None, usize::MAX);
+            // Small steps, so that stores happen between the steps of a cycle.
+            heap.stress = true;
+            let lens = [0, 5, PARTIAL_MIN - 1, PARTIAL_MIN, PARTIAL_MIN + 1, 200, 300, 1000, SCAN_CHUNK + 10];
+            let lists: Vec<Value> = lens.iter().map(|&n| heap.new_list(vec![Value::Int(0); n])).collect();
+            let mut model: Vec<Vec<Option<String>>> = lens.iter().map(|&n| vec![None; n]).collect();
+            let map_lens = [10, 300];
+            let maps: Vec<Value> = map_lens
+                .iter()
+                .map(|&n| {
+                    let entries = (0..n).map(|i| Some((Value::Int(i as i64), Value::Int(0)))).collect();
+                    heap.alloc(Obj::Map(Box::new(MapObj { entries, live: n, ..MapObj::default() })))
+                })
+                .collect();
+            let mut map_model: Vec<Vec<Option<String>>> = map_lens.iter().map(|&n| vec![None; n]).collect();
+            let roots: Vec<Value> = lists.iter().chain(&maps).copied().collect();
+            heap.collect(roots.iter().copied(), true);
+            let mut n = 0;
+            let mut text = || {
+                n += 1;
+                format!("young string number {n}, long enough to be on the heap")
+            };
+            for op in ops {
+                match op {
+                    BarrierOp::Store(c, i, s) => {
+                        if model[c].is_empty() {
+                            continue;
+                        }
+                        let i = i % model[c].len();
+                        let (v, t) = if s {
+                            let t = text();
+                            (heap.new_str(t.as_str()), Some(t))
+                        } else {
+                            (Value::Int(0), None)
+                        };
+                        heap.list_mut_storing(lists[c], i, v).unwrap()[i] = v;
+                        model[c][i] = t;
+                    }
+                    BarrierOp::Push(c) => {
+                        let t = text();
+                        let v = heap.new_str(t.as_str());
+                        heap.list_push(lists[c], v).unwrap();
+                        model[c].push(Some(t));
+                    }
+                    BarrierOp::Pop(c) => {
+                        heap.list_shrink(lists[c]).unwrap().pop();
+                        model[c].pop();
+                    }
+                    BarrierOp::Clear(c) => {
+                        heap.list_shrink(lists[c]).unwrap().clear();
+                        model[c].clear();
+                    }
+                    BarrierOp::Insert(c, i) => {
+                        let i = i % (model[c].len() + 1);
+                        let t = text();
+                        let v = heap.new_str(t.as_str());
+                        heap.list_mut(lists[c]).insert(i, v);
+                        model[c].insert(i, Some(t));
+                    }
+                    BarrierOp::Remove(c, i) => {
+                        if model[c].is_empty() {
+                            continue;
+                        }
+                        let i = i % model[c].len();
+                        heap.list_mut(lists[c]).remove(i);
+                        model[c].remove(i);
+                    }
+                    BarrierOp::MapStore(m, s) => {
+                        if map_model[m].is_empty() {
+                            continue;
+                        }
+                        let s = s % map_model[m].len();
+                        let t = text();
+                        let v = heap.new_str(t.as_str());
+                        let Obj::Map(mo) = heap.entries_mut_storing(maps[m], s, false, &[Value::Int(s as i64), v]) else { unreachable!() };
+                        mo.entries[s] = Some((Value::Int(s as i64), v));
+                        map_model[m][s] = Some(t);
+                    }
+                    BarrierOp::MapPush(m) => {
+                        let s = map_model[m].len();
+                        let t = text();
+                        let v = heap.new_str(t.as_str());
+                        let Obj::Map(mo) = heap.entries_mut_storing(maps[m], s, true, &[Value::Int(s as i64), v]) else { unreachable!() };
+                        mo.entries.push(Some((Value::Int(s as i64), v)));
+                        map_model[m].push(Some(t));
+                    }
+                    BarrierOp::MapRemove(m, s) => {
+                        if map_model[m].is_empty() {
+                            continue;
+                        }
+                        let s = s % map_model[m].len();
+                        let Obj::Map(mo) = heap.get_mut(maps[m]) else { unreachable!() };
+                        mo.entries.remove(s);
+                        map_model[m].remove(s);
+                    }
+                    BarrierOp::Garbage(k) => {
+                        for _ in 0..k {
+                            let t = text();
+                            heap.new_str(t);
+                        }
+                    }
+                    BarrierOp::Collect(major) => heap.collect(roots.iter().copied(), major),
+                    BarrierOp::Cycle => {
+                        if !heap.cycle_active() {
+                            heap.start_cycle(roots.iter().copied());
+                        } else if heap.cycle_step() {
+                            heap.finish_marking(roots.iter().copied());
+                        }
+                    }
+                }
+                for (c, items) in model.iter().enumerate() {
+                    let list = heap.list(lists[c]);
+                    proptest::prop_assert_eq!(list.len(), items.len());
+                    for (i, (&v, t)) in list.iter().zip(items).enumerate() {
+                        match t {
+                            Some(t) => proptest::prop_assert_eq!(heap.str(v), t.as_str(), "list {} index {}", c, i),
+                            None => proptest::prop_assert_eq!(v, Value::Int(0)),
+                        }
+                    }
+                }
+                for (m, items) in map_model.iter().enumerate() {
+                    let Obj::Map(mo) = heap.get(maps[m]) else { unreachable!() };
+                    proptest::prop_assert_eq!(mo.entries.len(), items.len());
+                    for (s, (e, t)) in mo.entries.iter().zip(items).enumerate() {
+                        let v = e.unwrap().1;
+                        match t {
+                            Some(t) => proptest::prop_assert_eq!(heap.str(v), t.as_str(), "map {} entry {}", m, s),
+                            None => proptest::prop_assert_eq!(v, Value::Int(0)),
+                        }
                     }
                 }
             }
