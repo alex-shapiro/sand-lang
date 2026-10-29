@@ -883,12 +883,12 @@ fn refs<S: AsRef<str>>(names: &[S]) -> Vec<&str> {
 /// `*` does: they name hosts they do not know, so they do not decide the
 /// addresses of those hosts.
 pub(crate) fn resolution_key(kind: &RuleKind, decision: Decision) -> Precedence {
-    let tier = match kind.http_match() {
+    let host = match kind.http_match() {
         Some(HttpMatch { host: NetPattern { kind: HostKind::Suffix(s), .. }, .. }) if !super::net::is_localhost(s) => 0,
         Some(http) => http.host.host_rank(),
         None => 0,
     };
-    precedence([tier, 0, 0, 0], decision, usize::MAX)
+    precedence([host, 0, 0, 0], decision, usize::MAX)
 }
 
 /// Whether a rule with `decision` applies to a request through another
@@ -914,22 +914,23 @@ pub(crate) type Spec = [u32; 4];
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Rank {
-    pub tier: u32,
+    /// The specificity of the rule's host (`0` for file rules).
+    pub host: u32,
     pub weight: u32,
     pub methods: bool,
 }
 
 impl Rank {
     pub(crate) fn file(segs: &[Seg]) -> Rank {
-        Rank { tier: 0, weight: segs.iter().map(Seg::weight).sum(), methods: false }
+        Rank { host: 0, weight: segs.iter().map(Seg::weight).sum(), methods: false }
     }
 
     pub(crate) fn http(http: &HttpMatch) -> Rank {
-        Rank { tier: http.host.rank(), weight: http.path.iter().map(Seg::weight).sum(), methods: http.methods.is_some() }
+        Rank { host: http.host.rank(), weight: http.path.iter().map(Seg::weight).sum(), methods: http.methods.is_some() }
     }
 
     pub(crate) fn spec(self, depth: usize) -> Spec {
-        [self.tier, depth as u32, self.weight, self.methods as u32]
+        [self.host, depth as u32, self.weight, self.methods as u32]
     }
 }
 

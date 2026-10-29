@@ -187,9 +187,9 @@ enum Role {
 }
 
 impl Resolves {
-    /// The lowest key of a rule whose host is as specific as one of `tier`.
-    fn lowest(tier: u32) -> Precedence {
-        precedence([tier, 0, 0, 0], Decision::Prompt, usize::MAX)
+    /// The lowest key of a rule whose host is as specific as `host`.
+    fn lowest(host: u32) -> Precedence {
+        precedence([host, 0, 0, 0], Decision::Prompt, usize::MAX)
     }
 }
 
@@ -209,19 +209,14 @@ impl<'a> PathRule<'a> {
             }
         };
         let resolves = match scope {
-            Scope::Http { host, .. } => {
+            Scope::Http { host, transports, .. } => {
                 let role = match (&host.kind, rule.decision) {
                     (HostKind::Ip(..), Decision::Deny | Decision::Prompt) => Some(Role::Address),
                     (HostKind::Ip(..), _) | (_, Decision::Deny) => None,
                     _ => Some(Role::Name),
                 };
                 let key = resolution_key(&rule.kind, rule.decision);
-                role.map(|role| Resolves {
-                    role,
-                    key,
-                    port: host.port,
-                    transports: rule.kind.http_match().map_or(Transports::all(), |h| h.transports),
-                })
+                role.map(|role| Resolves { role, key, port: host.port, transports })
             }
             Scope::Files(_) => None,
         };
@@ -424,7 +419,7 @@ impl<'a> PathRules<'a> {
             paths.rules.push(rule);
         }
         for bucket in paths.exact.values_mut().chain(paths.within.values_mut()) {
-            bucket.sort_by_key(|&at| std::cmp::Reverse(paths.rules[at].rank.tier));
+            bucket.sort_by_key(|&at| std::cmp::Reverse(paths.rules[at].rank.host));
         }
         for list in &mut paths.resolving {
             list.sort_unstable_by_key(|e| e.0);
@@ -442,8 +437,8 @@ impl<'a> PathRules<'a> {
             Role::Address => Role::Name,
         } as usize];
         deciders.iter().all(|&j| {
-            let tier = self.get(j).and_then(|j| j.resolves).map_or(0, |j| j.key.0[0]);
-            let from = others.partition_point(|e| e.0 < Resolves::lowest(tier));
+            let host = self.get(j).and_then(|j| j.resolves).map_or(0, |j| j.key.0[0]);
+            let from = others.partition_point(|e| e.0 < Resolves::lowest(host));
             others[from..].iter().take_while(|e| e.0 <= r.key).all(|&(_, at)| {
                 let k = &self.rules[at];
                 let Some(kr) = k.resolves else { return true };
@@ -462,12 +457,12 @@ impl<'a> PathRules<'a> {
         map: &'b FxHashMap<u64, Vec<usize>>,
         key: u64,
         h: u64,
-        min_tier: u32,
+        min_host: u32,
     ) -> impl Iterator<Item = &'b PathRule<'a>> {
         let found = map.get(&self.hasher.hash_one((key, h))).into_iter().flatten().map(|&at| &self.rules[at]);
         #[cfg(test)]
         let found = found.inspect(|_| self.visits.set(self.visits.get() + 1));
-        found.take_while(move |r| r.rank.tier >= min_tier)
+        found.take_while(move |r| r.rank.host >= min_host)
     }
 
     fn hash_keys(&self, keys: Vec<Key>) -> Vec<u64> {
@@ -483,13 +478,13 @@ impl<'a> PathRules<'a> {
         keys.into_iter().flat_map(move |key| i.prefixes.iter().flat_map(move |&h| self.lookup(&self.exact, key, h, 0)))
     }
 
-    fn opposed<'b>(&'b self, i: &'b PathRule<'a>, min_tier: u32) -> impl Iterator<Item = &'b PathRule<'a>> {
+    fn opposed<'b>(&'b self, i: &'b PathRule<'a>, min_host: u32) -> impl Iterator<Item = &'b PathRule<'a>> {
         let (&last, above) = i.prefixes.split_last().expect("the empty prefix");
         let found = self.hash_keys(i.related_keys()).into_iter().flat_map(move |key| {
-            let above = above.iter().flat_map(move |&h| self.lookup(&self.exact, key, h, min_tier));
-            above.chain(self.lookup(&self.within, key, last, min_tier))
+            let above = above.iter().flat_map(move |&h| self.lookup(&self.exact, key, h, min_host));
+            above.chain(self.lookup(&self.within, key, last, min_host))
         });
-        found.filter(|k| k.decision != i.decision && i.may_meet(k, k.rank.tier < i.rank.tier))
+        found.filter(|k| k.decision != i.decision && i.may_meet(k, k.rank.host < i.rank.host))
     }
 
     fn deciders(&self, i: &PathRule<'a>, excluded: &dyn Fn(usize) -> bool) -> Option<(bool, Vec<usize>)> {
@@ -521,22 +516,22 @@ impl<'a> PathRules<'a> {
         }
         let agree = broader.filter(|j| j.decision == i.decision);
         agree
-            .filter(|j| self.opposed(i, j.rank.tier).all(|k| !k.may_decide(op) || never_between(i, j, k)))
+            .filter(|j| self.opposed(i, j.rank.host).all(|k| !k.may_decide(op) || never_between(i, j, k)))
             .max_by_key(|j| (j.counts.0, j.rank()))
     }
 }
 
 fn never_between(i: &PathRule, j: &PathRule, k: &PathRule) -> bool {
-    let k_deepest = match (k.counts.1, i.counts.1.filter(|_| k.rank.tier >= i.rank.tier)) {
+    let k_deepest = match (k.counts.1, i.counts.1.filter(|_| k.rank.host >= i.rank.host)) {
         (Some(a), Some(b)) => Some(a.min(b)),
         (a, b) => a.or(b),
     };
-    let below_j = match k.rank.tier.cmp(&j.rank.tier) {
+    let below_j = match k.rank.host.cmp(&j.rank.host) {
         std::cmp::Ordering::Less => true,
         std::cmp::Ordering::Greater => false,
         std::cmp::Ordering::Equal => k_deepest.is_some_and(|d| j.counts.0 > d || (j.counts.0 == d && j.outranks(k))),
     };
-    let above_i = match k.rank.tier.cmp(&i.rank.tier) {
+    let above_i = match k.rank.host.cmp(&i.rank.host) {
         std::cmp::Ordering::Greater => true,
         std::cmp::Ordering::Less => false,
         std::cmp::Ordering::Equal => i.counts.1.is_some_and(|d| d <= k.counts.0) && k.outranks(i),
