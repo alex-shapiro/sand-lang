@@ -2,18 +2,13 @@
 
 Version 0.1
 
-Sand is a small, statically typed, expression-oriented scripting language with a
-sandboxed bytecode virtual machine written in safe Rust. It is designed to be
-embedded: every effect a script can have on the outside world goes through a
-host-defined policy, and every engine runs under host-defined resource limits.
-
-This document is normative. Sections marked _(informative)_ are not.
-
----
+Sand is a sandboxed, statically typed scripting language. It is designed to be
+embedded safely in a larger Rust process: all effects on the outside world are
+mediated through a host-defined policy with authorization rules and resource limits.
 
 ## Contents
 
-1. [Design goals](#1-design-goals-informative) _(informative)_
+1. [Design goals](#1-design-goals-informative)
 2. [Source text and lexical structure](#2-source-text-and-lexical-structure)
 3. [Programs, modules and imports](#3-programs-modules-and-imports)
 4. [Declarations](#4-declarations)
@@ -32,36 +27,21 @@ This document is normative. Sections marked _(informative)_ are not.
 17. [Tooling](#17-tooling)
 18. [Diagnostics](#18-diagnostics)
 
----
+## 1. Design goals
 
-## 1. Design goals _(informative)_
-
-- **Correct by default.** Immutable bindings, explicit mutation (`var` bindings and
-  `var` fields), checked integer arithmetic, exhaustive pattern matching, no null,
-  errors as values (`Result`, `Option`), and a linter that flags dubious code.
-- **Well typed, lightly annotated.** Function signatures are annotated; everything
-  inside a function body is inferred.
-- **Elegant.** Few keywords, expression-oriented blocks, string interpolation,
-  comprehensions, method chaining, named and default arguments, duration
-  literals.
-- **Fast without a JIT.** Static types let the compiler emit specialised
-  instructions (integer add, float compare-and-branch, direct calls) for a
-  register-based VM.
-- **Sandboxed.** No ambient authority. Files, network, environment, standard
-  streams and module imports are all mediated by a policy, which may ask the user
-  interactively. There is no FFI, no subprocess, no IPC, no `mmap`.
-- **Embeddable.** An `Engine` is `Send`, single-threaded internally, and many may
-  run concurrently in one process.
-
----
+- Safety. It must be impossible for a script to affect state outside of the interpreter except where granted authorization by the host.
+- Correctness. It should be simple to write code that behaves correctly and difficult or impossible to write code that behaves incorrectly.
+- Inferred static typing. All Sand code is typed, and type inference is used wherever possible.
+- Elegance and familarity. Syntax must be concise and easy to understand for anyone who knows Rust, Python, or Swift.
+- Performance. Sand should be as fast and memory-efficient as possible for a safe bytecode interpreter.
+- Embeddable. A single process can embed multiple Sand interpreters and run them in parallel, safely.
 
 ## 2. Source text and lexical structure
 
 ### 2.1 Encoding
 
 Source files are UTF-8. A leading byte-order mark is ignored. Source files use the
-extension `.sand`. Non-ASCII characters may appear only in comments and string
-literals.
+extension `.sand`. Non-ASCII characters may appear only in comments and string literals.
 
 ### 2.2 Comments
 
@@ -311,7 +291,7 @@ fn greet(name: str, greeting: str = "Hello") {
   can constrain the type parameters of an enclosing generic `extend` block,
   struct, or enum for that method.
 - A type parameter marked `reflect` (`fn load<reflect T: Decode>(text: str)
-  -> Result<[T]>`) receives a runtime type description of its type argument. A
+-> Result<[T]>`) receives a runtime type description of its type argument. A
   function can forward `T` (or a composite type containing `T`, such as `[T]`)
   to another `reflect` type parameter, such as `json.decode<T>`. Every type
   parameter that appears in a `reflect` type argument must itself be declared
@@ -596,8 +576,8 @@ arguments satisfy all bounds required by that `impl` recursively (for example,
 `Point: Describe`). A type parameter satisfies its declared bounds and their
 supertraits, and `Self` satisfies the enclosing trait and its supertraits. The
 type checker verifies trait bounds at every instantiation and reports any
-unmet bound (for example, `str does not implement `Describe` (required for
-[str] to implement `Describe`)`).
+unmet bound (for example, `str does not implement `Describe`(required for
+[str] to implement`Describe`)`).
 
 Functions, methods, `where` clauses, `impl` blocks, structs, and enums can
 declare trait bounds on their type parameters. Methods on a struct or enum
@@ -1678,14 +1658,14 @@ obtained with `iter()` from lists, maps (`(key, value)` pairs), sets, ranges,
 channels and any `Iterator`, with `chars_iter()` from strings, or from these
 static sources:
 
-| Source                                                    | Elements                                                             |
-| --------------------------------------------------------- | -------------------------------------------------------------------- |
-| `Iter.from_fn(f: fn() -> T?)`                             | the results of `f` until it returns `None` (also `Iter(next: f)`)    |
-| `Iter.empty()`                                            | none                                                                 |
-| `Iter.once(x: T)`                                         | `x`                                                                  |
-| `Iter.repeat(x: T)`                                       | `x` forever                                                          |
-| `Iter.count_from(start: int, step: int = 1) -> Iter<int>` | `start`, `start + step`, ... forever                                 |
-| `Iter.successors(first: T?, f: fn(T) -> T?)`              | `first`, then `f` of the previous element until `None`               |
+| Source                                                    | Elements                                                          |
+| --------------------------------------------------------- | ----------------------------------------------------------------- |
+| `Iter.from_fn(f: fn() -> T?)`                             | the results of `f` until it returns `None` (also `Iter(next: f)`) |
+| `Iter.empty()`                                            | none                                                              |
+| `Iter.once(x: T)`                                         | `x`                                                               |
+| `Iter.repeat(x: T)`                                       | `x` forever                                                       |
+| `Iter.count_from(start: int, step: int = 1) -> Iter<int>` | `start`, `start + step`, ... forever                              |
+| `Iter.successors(first: T?, f: fn(T) -> T?)`              | `first`, then `f` of the previous element until `None`            |
 
 **Adapters** return a new `Iter` and do no work until it is consumed:
 `map<U>(f: fn(T) -> U)`, `filter(f: fn(T) -> bool)`, `filter_map<U>(f: fn(T) ->
@@ -2518,7 +2498,7 @@ Specificity depends on the kind of request:
   - In the same way, the deny and prompt host `localhost` also matches every name under it
     (`app.localhost`), which is the same loopback host. `allow net localhost` matches only
     `localhost`. As for every name, the rule does not match IP addresses: `deny net localhost
-    127.0.0.0/8 ::1` keeps scripts off the loopback host.
+127.0.0.0/8 ::1` keeps scripts off the loopback host.
 
 - **HTTP(S) requests** (`Http`)
   - inherits net rules for the host pattern, port and transport
@@ -2704,12 +2684,12 @@ methods in upper case, aligns the trailing comments of consecutive
 lines and removes runs of blank lines. `sandlang::policy::lint_policy`
 reports:
 
-| Lint                   | Description                                                                                                          |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `redundant-rule`       | broader rules or an earlier identical rule already make the same decision                                            |
-| `overridden-rule`      | higher-precedence rules make another decision for all matching requests                                              |
-| `bypassable-http-deny` | a `net` rule permits raw TCP connections to a destination that a `deny http` or `prompt http` rule restricts         |
-| `unused-set`           | a `let` set is not used in any rule                                                                                  |
+| Lint                   | Description                                                                                                  |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `redundant-rule`       | broader rules or an earlier identical rule already make the same decision                                    |
+| `overridden-rule`      | higher-precedence rules make another decision for all matching requests                                      |
+| `bypassable-http-deny` | a `net` rule permits raw TCP connections to a destination that a `deny http` or `prompt http` rule restricts |
+| `unused-set`           | a `let` set is not used in any rule                                                                          |
 
 An allow rule for an exact host name is not redundant under a domain pattern
 if an address rule ranks between them, because it also decides the addresses
@@ -3064,21 +3044,21 @@ requirement by failing the first memory or resource check in each `vm_function`
 call. Return-value conversion does not fail on the memory limit; instead, the
 engine collects garbage and checks the memory limit after the call completes.
 
-| Rust type                                          | Sand type                                              |
-| -------------------------------------------------- | ------------------------------------------------------ |
-| `i64`, `f64`, `bool`, `()`, `jiff::SignedDuration` | `int`, `float`, `bool`, `()`, `duration`               |
-| `String`, `&str`; `Vec<u8>`, `&[u8]`               | `str`; `bytes`                                         |
-| `Vec<T>`, `Option<T>`, tuples of 2 to 8 elements   | `[T]`, `T?`, tuples                                    |
-| `Box<T>`                                           | `T`                                                    |
-| `HashMap<K, V>`, `BTreeMap<K, V>`, `IndexMap<K, V>` | `[K: V]`                                              |
-| `HashSet<T>`, `BTreeSet<T>`                        | `Set<T>`                                               |
-| `Result<T, E>`                                     | `Result<T, Error>` or `T` (determined by `E`)          |
-| `Never`                                            | `never`                                                |
-| `sandlang::json::Json`                             | `json.Json`                                            |
-| bound type `T` (see above)                         | `T` (or `&T` for a borrowed object parameter)          |
-| `Val<T>`                                           | `T` (passed as an uncopied heap handle)                |
-| `Param<N, B>`, `Reflect<N>`                        | `N`-th type parameter and its runtime type description |
-| `Num<N>`                                           | `Num` evidence of the `N`-th type parameter            |
+| Rust type                                           | Sand type                                              |
+| --------------------------------------------------- | ------------------------------------------------------ |
+| `i64`, `f64`, `bool`, `()`, `jiff::SignedDuration`  | `int`, `float`, `bool`, `()`, `duration`               |
+| `String`, `&str`; `Vec<u8>`, `&[u8]`                | `str`; `bytes`                                         |
+| `Vec<T>`, `Option<T>`, tuples of 2 to 8 elements    | `[T]`, `T?`, tuples                                    |
+| `Box<T>`                                            | `T`                                                    |
+| `HashMap<K, V>`, `BTreeMap<K, V>`, `IndexMap<K, V>` | `[K: V]`                                               |
+| `HashSet<T>`, `BTreeSet<T>`                         | `Set<T>`                                               |
+| `Result<T, E>`                                      | `Result<T, Error>` or `T` (determined by `E`)          |
+| `Never`                                             | `never`                                                |
+| `sandlang::json::Json`                              | `json.Json`                                            |
+| bound type `T` (see above)                          | `T` (or `&T` for a borrowed object parameter)          |
+| `Val<T>`                                            | `T` (passed as an uncopied heap handle)                |
+| `Param<N, B>`, `Reflect<N>`                         | `N`-th type parameter and its runtime type description |
+| `Num<N>`                                            | `Num` evidence of the `N`-th type parameter            |
 
 `Param<N, B>` specifies the built-in traits `B` (`traits::Eq`, `traits::Ord`,
 `traits::Hash`, `traits::Num`, `traits::Encode`, or a tuple such as
