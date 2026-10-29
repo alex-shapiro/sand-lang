@@ -107,9 +107,37 @@ Follow-up work, roughly in priority order.
       `10.0.0.5`) instead of denying it. The check runs after the native call
       returned to the event loop, so it needs a way to suspend the
       connection for a prompt answer.
-- [ ] Give `Capability::NetAddr` the request that its host came from (method,
-      URL, transport), so that custom policies and `RulePolicy::check` decide
-      resolved addresses as `RulePolicy::check_resolved` does.
+- [ ] Give `Capability::NetAddr` the request that its host came from (method
+      and URL; it has the transport), so that custom policies and
+      `RulePolicy::check` decide resolved addresses as
+      `RulePolicy::check_resolved` does.
+- [ ] Make "always" answers saved with `rule_for` as narrow as the prompt.
+      A file rule is a prefix, so `allow read /x/data` from the prompt
+      `read /x/data` also allows `/x/data/secret/key.pem`. An http rule
+      without a path allows every path, so the prompt `GET
+      https://example.com/` saves a rule that also allows `GET /admin`. The
+      engine keeps the exact capability, so the same answer decides
+      differently in the run that asked and in the next run (the
+      playground). The path pattern language has no "this path only" form.
+- [ ] A saved `allow env *` (from an "always" answer to `env.vars()`) does
+      not decide the next `Env("*")` request while a deny or prompt rule
+      for some variable exists: `RulePolicy::verdict` lets those rules guard
+      the listing first. `rule_for(Env("*"))` cannot express "allow the
+      listing", so it should return `None` or the listing needs its own rule.
+- [ ] Environment rules compare names case-sensitively (`env_names` in
+      `rules.rs`), but Windows environment names are case-insensitive, so
+      there `env.get("aws_secret_access_key")` reads the variable that `deny
+      env AWS_SECRET_ACCESS_KEY` denies. Fold names on Windows as file rules
+      do.
+- [ ] A denial by a command-line rule cites "(line 1)" for every flag, and
+      a denial by a policy file rule gives no file name
+      (`RulePolicy::describe_rule` knows only `Origin::line`). Give `Origin`
+      a source (`--deny=...` or the file).
+- [ ] The lint reports only identical repeats of rules without patterns
+      (`env`, `stdin`, `stdout`, `stderr`, `timezone`, `custom`, `listen`).
+      It misses overridden pairs (`allow env HOME` + `deny env HOME`, `prompt
+      stdin` + `allow stdin`), subsumed rules (`allow env *` + `allow env
+      HOME`), and a `prompt net a.com` beside `allow net a.com`.
 - [ ] Let hosts persist "always" prompt answers: a hook that receives the
       answer as a rule (`rule_for`) to save, so that a host such as Ash
       Control can load it into the policy at the next start instead of
