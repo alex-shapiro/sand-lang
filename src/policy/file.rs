@@ -537,7 +537,8 @@ impl Context<'_> {
         let sep = |c: char| c == '/' || (cfg!(windows) && c == '\\');
         let unanchored = || {
             format!(
-                "path `{flat}` is not anchored: write `./{flat}` for a path relative to the policy file, `~/...`, an absolute path, or `**/{flat}` for that name anywhere"
+                "path `{flat}` is not anchored: write `./{flat}` for `{}`, `~/...`, an absolute path, or `**/{flat}` for that name anywhere",
+                self.base.join(&flat).display()
             )
         };
         let starts = |s: &str| flat.starts_with(s) && flat[s.len()..].chars().next().is_none_or(sep);
@@ -1511,8 +1512,8 @@ mod tests {
                 "8:6: expected `deny custom NAME [DETAIL]`",
                 "9:12: unterminated quotes",
                 "10:7: unknown capability `raed` (expected a path, or read, write, import, net, http, listen, env, stdin, stdout, stderr, timezone or custom)",
-                "11:12: path `data` is not anchored: write `./data` for a path relative to the policy file, `~/...`, an absolute path, or `**/data` for that name anywhere",
-                "12:12: path `~user` is not anchored: write `./~user` for a path relative to the policy file, `~/...`, an absolute path, or `**/~user` for that name anywhere",
+                "11:12: path `data` is not anchored: write `./data` for `/base/data`, `~/...`, an absolute path, or `**/data` for that name anywhere",
+                "12:12: path `~user` is not anchored: write `./~user` for `/base/~user`, `~/...`, an absolute path, or `**/~user` for that name anywhere",
                 "13:12: `allow http` needs a URL pattern after its methods, e.g. `api.example.com/v1`",
                 "14:18: methods come before the URL patterns",
                 "15:12: URL patterns take no scheme (remove `ftp://`)",

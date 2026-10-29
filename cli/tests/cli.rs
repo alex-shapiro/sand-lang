@@ -199,6 +199,11 @@ fn bad_flags_and_values_exit_2_with_a_message() {
         ("--allow-net=*", "unknown option `--allow-net` (use --allow='net HOST')"),
         ("--prompt-stdin", "unknown option `--prompt-stdin` (questions go to the terminal, and --no-prompt denies instead)"),
     ];
+    // A relative path starts from the working directory, not from a policy file.
+    let dir = script("anchor", "print(1)");
+    let o = sand(dir.path(), &["run", "main.sand", "--allow=read data"]);
+    let cwd = std::fs::canonicalize(dir.path()).unwrap();
+    assert!(o.stderr.contains(&format!("write `./data` for `{}`", cwd.join("data").display())), "{o:?}");
     for (flag, msg) in cases {
         let o = run("print(\"should not run\")", &[flag]);
         assert_eq!(o.code, 2, "{flag}: {o:?}");
