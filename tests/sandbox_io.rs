@@ -23,7 +23,7 @@ fn plain(host: &str, port: u16) -> Capability {
 }
 
 fn net_addr(host: &str, addr: &str) -> Capability {
-    Capability::NetAddr { host: host.into(), addr: addr.parse().unwrap() }
+    Capability::NetAddr { host: host.into(), addr: addr.parse().unwrap(), tls: true }
 }
 
 #[test]
@@ -77,7 +77,7 @@ fn deny_ranges_match_alternate_ip_representations() {
     ] {
         assert_eq!(p.check(&net(host, 8080)), Decision::Deny, "{host}");
         let addr = SocketAddr::new(host.trim_matches(['[', ']']).parse::<IpAddr>().unwrap(), 8080);
-        assert_eq!(p.check(&Capability::NetAddr { host: "example.com".into(), addr }), Decision::Deny, "{host}");
+        assert_eq!(p.check(&Capability::NetAddr { host: "example.com".into(), addr, tls: true }), Decision::Deny, "{host}");
     }
     for host in ["8.8.8.8", "2001:4860::8888", "64:ff9b::808:808", "2002:808:808::"] {
         assert_eq!(p.check(&net(host, 8080)), Decision::Allow, "{host}");
@@ -593,15 +593,33 @@ fn custom_policies_see_resolved_addresses_without_extra_prompts() {
         vec![format!("connect to 127.0.0.1:{port} (plaintext)"), format!("connect to [::1]:{port} (plaintext)")]
     );
     let seen = seen.lock().unwrap();
-    assert!(seen.contains(&format!("connect to 127.0.0.1:{port}")), "{seen:?}");
-    assert!(seen.contains(&format!("connect to [::1]:{port}")), "{seen:?}");
+    assert!(seen.contains(&format!("connect to 127.0.0.1:{port} (plaintext)")), "{seen:?}");
+    assert!(seen.contains(&format!("connect to [::1]:{port} (plaintext)")), "{seen:?}");
+}
+
+/// A custom policy sees the transport of a resolved address, so a rule
+/// policy that it delegates to decides plaintext connections by plaintext
+/// address rules.
+#[test]
+fn custom_policies_see_the_transport_of_resolved_addresses() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let rules = RulePolicy::standard().allow_net("plaintext *").deny_net("plaintext 127.0.0.0/8 ::1");
+    let src = format!("import net\nprint(net.connect(\"localhost\", {port}).map_err(e => e.message))");
+    let r = run_with(&src, |c| c.custom_policy(move |cap: &Capability| rules.check(cap)));
+    assert_eq!(
+        r.ok_stdout(),
+        format!("Err(\"permission denied: connect to localhost:{port}: address 127.0.0.1 (private or internal) is not allowed\")\n")
+    );
 }
 
 #[test]
 fn net_addr_capability_display() {
     let addr: SocketAddr = "93.184.215.14:443".parse().unwrap();
-    assert_eq!(Capability::NetAddr { host: "example.com".into(), addr }.to_string(), "connect to example.com at 93.184.215.14:443");
-    assert_eq!(Capability::NetAddr { host: "93.184.215.14".into(), addr }.to_string(), "connect to 93.184.215.14:443");
+    let at = |host: &str, tls: bool| Capability::NetAddr { host: host.into(), addr, tls }.to_string();
+    assert_eq!(at("example.com", true), "connect to example.com at 93.184.215.14:443");
+    assert_eq!(at("93.184.215.14", true), "connect to 93.184.215.14:443");
+    assert_eq!(at("example.com", false), "connect to example.com at 93.184.215.14:443 (plaintext)");
 }
 
 // ---------------------------------------------------------------------------

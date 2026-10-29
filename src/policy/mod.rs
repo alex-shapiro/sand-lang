@@ -45,12 +45,14 @@ pub enum Capability {
         port: u16,
         path: String,
     },
-    /// One address `host` resolved to, checked after `Net` was granted and
-    /// before connecting. Never prompted: a `Prompt` decision counts as
-    /// `Allow` (the `Net` request was already decided).
+    /// One address `host` resolved to, checked after `Net` or `Http` was
+    /// granted and before connecting with TLS (`tls`) or without it. Never
+    /// prompted: a `Prompt` decision counts as `Allow` (the request was
+    /// already decided).
     NetAddr {
         host: String,
         addr: SocketAddr,
+        tls: bool,
     },
     /// Binding a listener to `SocketAddr` (port `0` requests an ephemeral port).
     NetListen(SocketAddr),
@@ -80,8 +82,14 @@ impl fmt::Display for Capability {
             Capability::Http { method, scheme, host, port, path } => {
                 write!(f, "{method} {}{path}", format_url_origin(scheme, host, *port))
             }
-            Capability::NetAddr { host, addr } if *host == addr.ip().to_string() => write!(f, "connect to {addr}"),
-            Capability::NetAddr { host, addr } => write!(f, "connect to {host} at {addr}"),
+            Capability::NetAddr { host, addr, tls } => {
+                if *host == addr.ip().to_string() {
+                    write!(f, "connect to {addr}")?
+                } else {
+                    write!(f, "connect to {host} at {addr}")?
+                }
+                if *tls { Ok(()) } else { write!(f, " (plaintext)") }
+            }
             Capability::NetListen(addr) if addr.port() == 0 => write!(f, "listen on an ephemeral port at {}", addr.ip()),
             Capability::NetListen(addr) => write!(f, "listen on {addr}"),
             Capability::Env(n) => write!(f, "read environment variable {n}"),
@@ -207,7 +215,7 @@ impl Policy {
             }),
             Policy::Custom(p) => {
                 let (Capability::Net { host, .. } | Capability::Http { host, .. }) = request else { return Ok(()) };
-                match p.check(&Capability::NetAddr { host: host.clone(), addr }) {
+                match p.check(&Capability::NetAddr { host: host.clone(), addr, tls: rules::uses_tls(request) }) {
                     Decision::Deny if is_private_address(addr.ip()) => Err("(private or internal) is not allowed".into()),
                     Decision::Deny => Err("is not allowed".into()),
                     Decision::Allow | Decision::Prompt => Ok(()),

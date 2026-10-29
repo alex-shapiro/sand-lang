@@ -527,11 +527,11 @@ impl RulePolicy {
     }
 
     /// Decides `cap`: `Prompt` if no rule matches it. A `NetAddr` capability
-    /// is decided as an address that a TLS `Net` request to its host resolved
+    /// is decided as an address that a `Net` request to its host resolved
     /// to; see [`RulePolicy::check_resolved`].
     pub(crate) fn check_normalized_in(&self, cap: &Capability, space: PathSpace) -> Decision {
-        if let Capability::NetAddr { host, addr } = cap {
-            return self.check_resolved(&Capability::Net { host: host.clone(), port: addr.port(), tls: true }, *addr);
+        if let Capability::NetAddr { host, addr, tls } = cap {
+            return self.check_resolved(&Capability::Net { host: host.clone(), port: addr.port(), tls: *tls }, *addr);
         }
         self.verdict(cap, space, &[]).map_or(Decision::Prompt, |(d, _)| d)
     }

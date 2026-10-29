@@ -926,7 +926,10 @@ fn user_rules_replace_the_defaults_for_the_same_requests() {
 /// rules of a policy file still hold.
 #[test]
 fn allow_all_keeps_the_other_rules() {
-    let dir = script("cli-allow-all", "import fs\nimport env\nprint(fs.read_text(\"secret.txt\").is_ok())\nprint(env.get(\"HOME\").is_some())\nprint(fs.read_text(\"main.sand\").is_ok())");
+    let dir = script(
+        "cli-allow-all",
+        "import fs\nimport env\nprint(fs.read_text(\"secret.txt\").is_ok())\nprint(env.get(\"HOME\").is_some())\nprint(fs.read_text(\"main.sand\").is_ok())",
+    );
     dir.write("secret.txt", "s3cret");
     dir.write("p.policy", "deny ./secret.txt\ndeny env HOME\n");
     let o = sand(dir.path(), &["run", "main.sand", "--allow-all", "--deny=./secret.txt", "--deny=env HOME"]);

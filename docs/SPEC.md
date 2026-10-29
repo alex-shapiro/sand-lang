@@ -2421,7 +2421,7 @@ emptied and converted into a junction during rename.
 | `FsWrite(path)`             | creating, writing, removing, renaming      |
 | `Net(host, port, tls)`      | outgoing TCP and TLS connections (`net`)   |
 | `Http(method, url)`         | each `http` request and redirect hop       |
-| `NetAddr(host, addr)`       | each address `host` resolved to (§14.6)    |
+| `NetAddr(host, addr, tls)`  | each address `host` resolved to (§14.6)    |
 | `NetListen(ip:port)`        | listening sockets                          |
 | `Env(name)`                 | environment variable reads (`"*"` for all) |
 | `Stdin`, `Stdout`, `Stderr` | standard streams                           |
@@ -2561,7 +2561,7 @@ The engine checks an outgoing connection (`net.connect`, `net.connect_tls`,
 1. `Net(host, port, tls)` (for `http`, `Http(method, url)`) for the host name
    or IP literal that the script used. The policy can prompt for this request.
 2. The engine resolves the name once and checks each address as
-   `NetAddr(host, addr)`. An IP literal resolves to itself. `localhost` and
+   `NetAddr(host, addr, tls)`. An IP literal resolves to itself. `localhost` and
    the names under it resolve to `127.0.0.1` and `::1` without the system
    resolver (RFC 6761). The engine connects only to allowed addresses, in
    resolver order. If the policy denies all addresses, the operation fails

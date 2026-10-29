@@ -1026,7 +1026,7 @@ mod tests {
         }
         for host in RESOLVED_HOSTS {
             for addr in addresses() {
-                probes.push(Capability::NetAddr { host: host.into(), addr });
+                probes.extend([true, false].map(|tls| Capability::NetAddr { host: host.into(), addr, tls }));
             }
         }
         probes
