@@ -1,0 +1,6 @@
+import json
+
+struct Config { name: str, port: int }
+
+let config = json.decode<Config>("{\"name\": \"api\", \"port\": 8080}")?
+print(config.port)
