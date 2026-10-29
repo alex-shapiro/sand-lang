@@ -1016,3 +1016,30 @@ fn rule_options_take_their_value_after_a_space() {
     let o = sand(dir.path(), &["run", "main.sand", "--deny", "read ./a.txt", "--allow", "read ./"]);
     assert_eq!(o.code, 1, "{o:?}");
 }
+
+#[test]
+fn denial_hints_are_shell_words_that_allow_the_request() {
+    let dir = script("hint-quote", "import fs\nprint(fs.read_text(\"it's.txt\").is_ok())\n");
+    dir.write("it's.txt", "A");
+    let o = sand(dir.path(), &["run", "main.sand"]);
+    let path = std::fs::canonicalize(dir.path()).unwrap().join("it'\\''s.txt");
+    assert!(o.stderr.contains(&format!("(--allow='read {}' allows it)", path.display())), "{o:?}");
+    // No hint where the rule would not decide the request: a prompt rule for
+    // some variables keeps the listing of all of them from `allow env *`.
+    let dir = script("hint-env", "import env\nprint(env.vars().len() >= 0)\n");
+    let o = sand(dir.path(), &["run", "main.sand", "--prompt=env AWS_*"]);
+    assert_eq!(o.stderr, "sand: denied: read all environment variables\n", "{o:?}");
+}
+
+#[test]
+fn an_option_without_a_value_does_not_take_the_next_option() {
+    for (args, msg) in [
+        (&["--allow", "--deny=stdin"][..], "--allow requires a rule"),
+        (&["--max-time", "--no-prompt"][..], "--max-time requires a value"),
+        (&["--policy", "--allow-all"][..], "--policy requires a value"),
+    ] {
+        let o = run("print(1)", args);
+        assert_eq!(o.code, 2, "{args:?}: {o:?}");
+        assert!(o.stderr.contains(msg), "{args:?}: {o:?}");
+    }
+}

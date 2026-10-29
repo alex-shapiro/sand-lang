@@ -70,7 +70,7 @@ RUN, TEST AND REPL OPTIONS:
     --prompt=RULE            ask about what a rule matches, e.g. --prompt='write ./out'
     --policy=FILE            rules and limits from a policy file (the options add
                              to its rules and override its limits)
-    --allow-all              allow everything that no rule of yours matches (trusted scripts only)
+    --allow-all              allow what no rule of yours matches (trusted scripts only)
     --no-prompt              deny instead of asking, as without a terminal
     --max-memory=SIZE        heap limit, e.g. 256M (default 512M)
     --max-time=DURATION      wall-clock limit, e.g. 10s, 500ms, 2m
@@ -144,7 +144,7 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
     let options = args.iter().position(|a| a == "--").map_or(args, |end| &args[..end]);
     let mut policy_files = options.iter().enumerate().filter_map(|(i, a)| match a.strip_prefix("--policy=") {
         Some(path) => Some(path),
-        None => (a == "--policy").then(|| options.get(i + 1).map_or("", String::as_str)),
+        None => (a == "--policy").then(|| options.get(i + 1).filter(|v| !v.starts_with("--")).map_or("", String::as_str)),
     });
     let policy_file = match (policy_files.next(), policy_files.next()) {
         (Some(_), Some(_)) => return Err("--policy given more than once".into()),
@@ -178,7 +178,7 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
             Some((f, v)) => (f, Some(v.to_string())),
             None => (a.as_str(), None),
         };
-        if value.is_none() && TAKES_VALUE.contains(&flag) && i < options.len() {
+        if value.is_none() && TAKES_VALUE.contains(&flag) && i < options.len() && !args[i].starts_with("--") {
             value = Some(args[i].clone());
             i += 1;
         }
@@ -222,8 +222,9 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
             }
         }
     }
+    let policy = rules.with_defaults(default_rules(allow_all));
     let mut config = Config::new()
-        .policy(rules.with_defaults(default_rules(allow_all)))
+        .policy(policy.clone())
         .limits(limits)
         .inherit_stdin()
         .gc_stress(std::env::var_os("SAND_GC_STRESS").is_some())
@@ -231,7 +232,7 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
     if !files_only {
         config = config.args(script_args.clone());
     }
-    config = config.prompter(prompter(prompt));
+    config = config.prompter(prompter(prompt, policy));
     if let Some(s) = seed {
         config = config.seed(s);
     }
@@ -241,7 +242,8 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
     Ok(RunOptions { config, file, script_args })
 }
 
-/// The options that take a value, after `=` or as the next argument.
+/// The options that take a value, after `=` or as the next argument (which
+/// is not an option).
 const TAKES_VALUE: &[&str] = &[
     "--allow",
     "--deny",
@@ -425,29 +427,31 @@ fn open_terminal() -> std::io::Result<(std::fs::File, std::fs::File)> {
 /// terminal (`/dev/tty`, or `CONIN$`/`CONOUT$` on Windows), never on the
 /// script's standard streams: piped data must not answer prompts. Without
 /// a terminal, or if `terminal` is false (`--no-prompt`), denies.
-fn ask(cap: Capability, terminal: bool) -> PromptAnswer {
+fn ask(cap: Capability, terminal: bool, policy: &RulePolicy) -> PromptAnswer {
     match open_terminal().ok().filter(|_| terminal) {
         Some((input, mut output)) => terminal_dialogue(&cap, &mut std::io::BufReader::new(input), &mut output),
-        None => deny_unasked(&cap),
+        None => deny_unasked(&cap, policy),
     }
 }
 
 /// Denies `cap` for the rest of the run, and tells the user on standard
-/// error which option allows it.
-fn deny_unasked(cap: &Capability) -> PromptAnswer {
-    let hint = match sandlang::policy::rule_for(cap, true) {
-        Some(rule) => format!(" (--allow='{}' allows it)", rule.strip_prefix("allow ").unwrap_or(&rule)),
-        None => String::new(),
-    };
-    eprintln!("sand: denied: {}", sanitize(&format!("{cap}{hint}")));
+/// error which option allows it, if one added to `policy` does.
+fn deny_unasked(cap: &Capability, policy: &RulePolicy) -> PromptAnswer {
+    let hint = sandlang::policy::rule_for(cap, true)
+        .and_then(|rule| Some((PolicyFile::parse(&rule, Path::new("/"), None).ok()?.rules, rule)))
+        .filter(|(rule, _)| rule.clone().extend(policy.clone()).check(cap) == sandlang::Decision::Allow)
+        .map(|(_, rule)| format!(" (--allow='{}' allows it)", rule.trim_start_matches("allow ").replace('\'', r"'\''")));
+    eprintln!("sand: denied: {}", sanitize(&format!("{cap}{}", hint.unwrap_or_default())));
     PromptAnswer::DenyAlways
 }
 
-/// The prompter of `sand run`, `sand test` and `sand repl`: asks on the
-/// terminal, or with `--no-prompt` (not `terminal`), denies.
-fn prompter(terminal: bool) -> impl Fn(Capability) -> sandlang::policy::PromptFuture + Send + Sync + 'static {
+/// The prompter of `sand run`, `sand test` and `sand repl` with `policy`:
+/// asks on the terminal, or with `--no-prompt` (not `terminal`), denies.
+fn prompter(terminal: bool, policy: RulePolicy) -> impl Fn(Capability) -> sandlang::policy::PromptFuture + Send + Sync + 'static {
+    let policy = std::sync::Arc::new(policy);
     move |cap: Capability| -> sandlang::policy::PromptFuture {
-        Box::pin(async move { tokio::task::spawn_blocking(move || ask(cap, terminal)).await.unwrap_or(PromptAnswer::DenyOnce) })
+        let policy = policy.clone();
+        Box::pin(async move { tokio::task::spawn_blocking(move || ask(cap, terminal, &policy)).await.unwrap_or(PromptAnswer::DenyOnce) })
     }
 }
 
