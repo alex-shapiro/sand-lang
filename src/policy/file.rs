@@ -1151,6 +1151,18 @@ mod tests {
     }
 
     #[test]
+    fn url_patterns_reject_separators_that_servers_may_split_at() {
+        assert_eq!(
+            errors("deny http a.com/x%2Fy\ndeny http a.com/x%5cy/z\ndeny http \"a.com/x\\\\y\""),
+            [
+                "1:11: `x%2Fy` holds a separator that servers may read as `/`: write `x/y`",
+                "2:11: `x%5cy` holds a separator that servers may read as `/`: write `x/y`",
+                "3:11: `x\\y` holds a separator that servers may read as `/`: write `x/y`",
+            ]
+        );
+    }
+
+    #[test]
     fn custom_rules_match_names_or_every_name() {
         let p = parse("allow custom *\ndeny custom db \"drop table\"\nprompt custom db\nallow custom \"*\" literal");
         let custom = |name: &str, detail: &str| decide(&p, Capability::Custom { name: name.into(), detail: detail.into() });
@@ -1604,7 +1616,7 @@ allow http GET a.com tls"
         let p = parse("allow http a.com/x\nprompt http a.com/x/y");
         assert_eq!(http(&p, "GET", "https://a.com/x/z"), Allow);
         assert_eq!(http(&p, "GET", "https://a.com/x%2Fz"), Prompt, "`x/z` as one name has no rule");
-        let p = parse("prompt http a.com/x%2Fy\ndeny http a.com/x/y");
+        let p = parse("prompt http a.com\ndeny http a.com/x/y");
         assert_eq!(http(&p, "GET", "https://a.com/x%2Fy"), Deny);
         let p = parse("prompt read ./data\nallow read ./data\ndeny env X\nprompt env Y");
         assert_eq!(read(&p, "/base/data/x"), Allow);

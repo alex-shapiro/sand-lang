@@ -700,7 +700,20 @@ impl UrlPattern {
             if seg.iter().any(|t| t.0 == '?' && !t.1) {
                 return Err("URL patterns match paths, not queries (remove the `?...`)".into());
             }
+            let raw = text(seg);
             let seg = Seg::parse(seg)?.map(|s| percent_decode(s).into_owned());
+            // A request's path with such a separator gets the stricter decision
+            // of its two readings, which a pattern cannot express.
+            let mut names = match &seg {
+                Seg::Lit(s) => std::slice::from_ref(s),
+                Seg::Glob(g) => g.pieces(),
+                Seg::Star | Seg::GlobStar => &[],
+            }
+            .iter();
+            if names.any(|n| n.contains(['/', '\\'])) {
+                let split = percent_decode(&raw).replace('\\', "/");
+                return Err(format!("`{raw}` holds a separator that servers may read as `/`: write `{split}`"));
+            }
             if matches!(&seg, Seg::Lit(s) if &**s == "." || &**s == "..") {
                 return Err("URL patterns cannot contain `.` or `..` segments".into());
             }

@@ -2525,6 +2525,7 @@ Specificity depends on the kind of request:
   - URL paths are compared percent-decoded, without `.` and `..` segments
   - A request whose path contains `\` or an encoded separator (`%2F`, `%5C`) gets the
     stricter decision of its two readings, with and without those taken as separators.
+    A pattern cannot hold such a separator: write `/`.
   - A net rule allowing a host lets scripts send it anything over `net`, even if `deny http` rules say otherwise
 
 - **Environment variables** (`Env`)
