@@ -337,6 +337,13 @@ fn user_rules_replace_defaults_with_the_same_pattern() {
     assert_eq!(p.check(&Capability::Stdout), Decision::Allow);
 }
 
+/// `deny_env("AWS_**")` would otherwise deny only a variable named `AWS_**`.
+#[test]
+#[should_panic(expected = "invalid name pattern \"AWS_**\"")]
+fn env_builders_reject_double_stars() {
+    let _ = RulePolicy::new().deny_env("AWS_**");
+}
+
 #[test]
 fn constructors_start_with_their_rules() {
     let default = RulePolicy::default();

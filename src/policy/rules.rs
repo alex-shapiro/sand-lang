@@ -66,11 +66,14 @@ pub(crate) enum NamePattern {
 }
 
 impl NamePattern {
-    /// Parses a name in which every `*` is a wildcard. A name with `**` is
-    /// literal.
+    /// Parses a name in which every `*` is a wildcard.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the name has `**`.
     pub(crate) fn parse(name: &str) -> NamePattern {
         NamePattern::from_tokens(&name.chars().map(|c| (c, c == '*')).collect::<Vec<_>>())
-            .unwrap_or_else(|_| NamePattern::Exact(name.to_string()))
+            .unwrap_or_else(|e| panic!("invalid name pattern {name:?}: {e}"))
     }
 
     /// Parses a name from policy file text: only wildcard tokens (unquoted
@@ -407,6 +410,10 @@ impl RulePolicy {
     }
     /// Allows reading environment variables matching a name, a `*` pattern
     /// such as `AWS_*`, or `*` for all variables.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `name` has `**`.
     pub fn allow_env(self, name: &str) -> Self {
         self.push(Decision::Allow, RuleKind::Env(NamePattern::parse(name)))
     }
