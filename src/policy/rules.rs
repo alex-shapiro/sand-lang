@@ -202,12 +202,17 @@ pub(crate) struct Origin {
 /// decides it. Of two rules with equal specificity, `deny` wins over
 /// `allow`, and `allow` wins over `prompt`. A request that no rule matches
 /// gets `Prompt`: the prompter asks the user, or, without a prompter, the
-/// engine denies the request.
+/// engine denies the request. Default rules ([`RulePolicy::with_defaults`])
+/// decide only the requests that no other rule matches.
 ///
-/// The display of a policy lists its rules as policy file text.
+/// The display of a policy lists its rules as policy file text, the default
+/// rules last.
 #[derive(Clone, Default)]
 pub struct RulePolicy {
+    /// The rules, then the default rules.
     rules: Vec<Rule>,
+    /// The number of rules before the default rules.
+    user: usize,
     host_files: OnceLock<Arc<FileIndex>>,
     memory_files: OnceLock<Arc<FileIndex>>,
     others: OnceLock<Arc<Index>>,
@@ -262,19 +267,23 @@ impl RulePolicy {
         rules.into_iter().fold(RulePolicy::new(), |p, kind| p.push(Decision::Allow, kind))
     }
 
-    /// Adds the rules of `other` after the rules of this policy.
-    pub fn extend(self, other: RulePolicy) -> RulePolicy {
-        self.extend_rules(other.rules)
+    /// Adds the rules of `other` after the rules of this policy, and its
+    /// default rules after the default rules of this policy.
+    pub fn extend(self, mut other: RulePolicy) -> RulePolicy {
+        let defaults = other.rules.split_off(other.user);
+        let mut policy = self.extend_rules(other.rules);
+        policy.rules.extend(defaults);
+        policy.changed()
     }
 
-    /// Adds each rule of `defaults` for which this policy has no rule with
-    /// the same pattern (with any decision). A host uses it to combine the
-    /// user's rules with its own defaults: a user rule replaces the default
-    /// for the same requests, so `prompt stdin` asks even if the defaults
-    /// have `allow stdin`.
-    pub fn with_defaults(self, defaults: RulePolicy) -> RulePolicy {
-        let kept = defaults.rules.into_iter().filter(|d| !self.rules.iter().any(|r| r.kind == d.kind)).collect();
-        self.extend_rules(kept)
+    /// Adds every rule of `defaults` as a default rule, which decides only
+    /// the requests that no rule of this policy matches. A host uses it to
+    /// combine the user's rules with its own: with the defaults `allow
+    /// stdin` and `allow **`, the user's `prompt stdin` asks before reading
+    /// standard input, and `prompt write **` asks before every write.
+    pub fn with_defaults(mut self, defaults: RulePolicy) -> RulePolicy {
+        self.rules.extend(defaults.rules);
+        self.changed()
     }
 
     pub(crate) fn rules(&self) -> &[Rule] {
@@ -282,7 +291,12 @@ impl RulePolicy {
     }
 
     pub(crate) fn push_rule(mut self, rule: Rule) -> Self {
-        self.rules.push(rule);
+        self.rules.insert(self.user, rule);
+        self.user += 1;
+        self.changed()
+    }
+
+    fn changed(mut self) -> Self {
         self.host_files = OnceLock::new();
         self.memory_files = OnceLock::new();
         self.others = OnceLock::new();
@@ -579,7 +593,7 @@ impl RulePolicy {
             return if literal == ip { Ok(()) } else { Err(None) };
         }
         let transport = Transports::of(uses_tls(request));
-        let mut best = Best::new(&[]);
+        let mut best = Best::new(self, &[]);
         self.others().resolved.find_ip(ip, addr.port(), |is_alt, e| {
             if applies(e.decision, is_alt) && e.transports.contains(transport) {
                 best.offer(e.rank.spec(0), e.decision, e.rule);
@@ -587,7 +601,7 @@ impl RulePolicy {
         });
         let Some((decision, rule)) = best.verdict() else { return Ok(()) };
         if let Some((d, decider)) = self.verdict(request, PathSpace::Host, &[]).filter(|&(d, _)| d != Decision::Deny) {
-            let key = |i: usize, d: Decision| resolution_key(&self.rules[i].kind, d);
+            let key = |i: usize, d: Decision| (i < self.user, resolution_key(&self.rules[i].kind, d));
             if key(decider, d) > key(rule, decision) {
                 return Ok(());
             }
@@ -602,7 +616,7 @@ impl RulePolicy {
 
     pub(crate) fn protects_normalized_in(&self, path: &Path, space: PathSpace) -> bool {
         [READ, WRITE].into_iter().any(|op| {
-            let mut best = Best::new(&[]);
+            let mut best = Best::new(self, &[]);
             self.file_verdict(path, op, space, &mut best);
             best.verdict().is_some_and(|(d, _)| d != Decision::Allow)
         })
@@ -624,7 +638,7 @@ impl RulePolicy {
     /// The decision of the most specific rule matching `cap` (except the
     /// rules in `exclude`), and its index.
     pub(crate) fn verdict(&self, cap: &Capability, space: PathSpace, exclude: &[usize]) -> Option<(Decision, usize)> {
-        let mut best = Best::new(exclude);
+        let mut best = Best::new(self, exclude);
         let index = self.others();
         match cap {
             Capability::FsRead(p) => self.file_verdict(p, READ, space, &mut best),
@@ -640,7 +654,7 @@ impl RulePolicy {
                 let Some(alt) = alt else { return best.verdict() };
                 // A server may split at decoded separators: both readings
                 // must be allowed.
-                let mut other = Best::new(exclude);
+                let mut other = Best::new(self, exclude);
                 self.http_verdict(&dest, method, tls, &alt, &mut other);
                 // The stricter of the two decisions holds, which may be the
                 // prompt for an unmatched request.
@@ -661,18 +675,25 @@ impl RulePolicy {
             }
             Capability::Env(name) if name == "*" => {
                 // All variables cannot be had while some are denied, or
-                // without asking while some ask.
-                let named = index.env_names.values().flatten().copied();
-                let guards = named.chain(index.env.iter().map(|&(_, d, rule)| (d, rule)));
-                let guard = guards
-                    .filter(|&(d, rule)| d != Decision::Allow && !exclude.contains(&(rule as usize)))
-                    .max_by_key(|&(d, rule)| (d == Decision::Deny, std::cmp::Reverse(rule)));
-                if let Some((d, rule)) = guard {
-                    return Some((d, rule as usize));
-                }
-                for &(ref pattern, d, rule) in &index.env {
-                    if *pattern == NamePattern::Any {
-                        best.offer([0; 4], d, rule);
+                // without asking while some ask. The default rules decide
+                // only if no other rule is about the listing.
+                for defaults in [false, true] {
+                    let in_tier = |rule: u32| (rule as usize >= self.user) == defaults && !exclude.contains(&(rule as usize));
+                    let named = index.env_names.values().flatten().copied();
+                    let guards = named.chain(index.env.iter().map(|&(_, d, rule)| (d, rule)));
+                    let guard = guards
+                        .filter(|&(d, rule)| d != Decision::Allow && in_tier(rule))
+                        .max_by_key(|&(d, rule)| (d == Decision::Deny, std::cmp::Reverse(rule)));
+                    if let Some((d, rule)) = guard {
+                        return Some((d, rule as usize));
+                    }
+                    for &(ref pattern, d, rule) in &index.env {
+                        if *pattern == NamePattern::Any && in_tier(rule) {
+                            best.offer([0; 4], d, rule);
+                        }
+                    }
+                    if best.verdict().is_some() {
+                        break;
                     }
                 }
             }
@@ -888,26 +909,29 @@ pub(crate) fn precedence(spec: Spec, decision: Decision, rule: usize) -> Precede
     (spec, strength(decision), std::cmp::Reverse(rule))
 }
 
+/// The most specific matching rule: a rule before the default rules
+/// (`rule < user`) wins over every default rule.
 struct Best<'a> {
     exclude: &'a [usize],
-    best: Option<(Precedence, Decision)>,
+    user: usize,
+    best: Option<((bool, Precedence), Decision)>,
 }
 
 impl<'a> Best<'a> {
-    fn new(exclude: &'a [usize]) -> Best<'a> {
-        Best { exclude, best: None }
+    fn new(policy: &RulePolicy, exclude: &'a [usize]) -> Best<'a> {
+        Best { exclude, user: policy.user, best: None }
     }
 
     fn offer(&mut self, spec: Spec, decision: Decision, rule: u32) {
         let rule = rule as usize;
-        let candidate = precedence(spec, decision, rule);
+        let candidate = (rule < self.user, precedence(spec, decision, rule));
         if !self.exclude.contains(&rule) && self.best.is_none_or(|(b, _)| candidate > b) {
             self.best = Some((candidate, decision));
         }
     }
 
     fn verdict(&self) -> Option<(Decision, usize)> {
-        self.best.map(|((.., rule), decision)| (decision, rule.0))
+        self.best.map(|((_, (.., rule)), decision)| (decision, rule.0))
     }
 }
 

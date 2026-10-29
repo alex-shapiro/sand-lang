@@ -69,7 +69,7 @@ RUN, TEST AND REPL OPTIONS:
     --prompt=RULE            ask about what a rule matches, e.g. --prompt='write ./out'
     --policy=FILE            rules and limits from a policy file (the options add
                              to its rules and override its limits)
-    --allow-all              allow everything that no other rule decides (trusted scripts only)
+    --allow-all              allow everything that no rule of yours matches (trusted scripts only)
     --no-prompt              deny instead of asking
     --max-memory=SIZE        heap limit, e.g. 256M (default 512M)
     --max-time=DURATION      wall-clock limit, e.g. 10s, 500ms, 2m
@@ -273,10 +273,10 @@ fn rule(verb: &str, text: &str, cwd: &Path, home: Option<&Path>) -> Result<RuleP
     Ok(file.rules)
 }
 
-/// The rules of `sand run`, `sand test` and `sand repl` that the user's
-/// rules can replace. The user at the terminal is the host: scripts may
-/// print, read standard input and the time zone, and import any module.
-/// `--allow-all` (`all`) allows everything else too.
+/// The default rules of `sand run`, `sand test` and `sand repl`, which
+/// decide what no rule of the user matches. The user at the terminal is
+/// the host: scripts may print, read standard input and the time zone, and
+/// import any module. `--allow-all` (`all`) allows everything else too.
 fn default_rules(all: bool) -> RulePolicy {
     if all { RulePolicy::allow_all() } else { RulePolicy::standard().allow_stdin().allow_timezone().extend(any_import()) }
 }

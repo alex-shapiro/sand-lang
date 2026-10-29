@@ -326,18 +326,45 @@ fn rules_of_equal_specificity() {
 }
 
 #[test]
-fn user_rules_replace_defaults_with_the_same_pattern() {
+fn default_rules_decide_only_what_no_other_rule_matches() {
+    let write = |path: &str| Capability::FsWrite(path.into());
+    let p = RulePolicy::new().prompt_write("/").with_defaults(RulePolicy::allow_all());
+    assert_eq!(p.check_normalized(&write("/tmp/x")), Decision::Prompt);
+    assert_eq!(p.check_normalized(&Capability::FsRead("/tmp/x".into())), Decision::Allow);
+    // A read rule also guards imports, against a default import rule.
+    let import = Capability::Import("/x/a.sand".into());
+    let p = RulePolicy::new().prompt_read("/").with_defaults(RulePolicy::standard().allow_import("/"));
+    assert_eq!(p.check_normalized(&import), Decision::Prompt);
+    assert_eq!(RulePolicy::standard().allow_import("/").check_normalized(&import), Decision::Allow);
+    // An http rule competes with a default net rule.
+    let get = Capability::Http { method: "GET".into(), scheme: "https".into(), host: "a.com".into(), port: 443, path: "/".into() };
+    let p = RulePolicy::new().prompt_http("tls plaintext *").with_defaults(RulePolicy::allow_all());
+    assert_eq!(p.check(&get), Decision::Prompt);
+    // A narrower rule decides only what it matches.
     let defaults = RulePolicy::standard().allow_stdin().allow_net("*").allow_read("/data");
     let p = RulePolicy::new().prompt_stdin().deny_net("*").prompt_read("/data/x").with_defaults(defaults);
     assert_eq!(p.check(&Capability::Stdin), Decision::Prompt);
     assert_eq!(p.check(&net("example.com", 443)), Decision::Deny);
     assert_eq!(p.check(&plain("example.com", 80)), Decision::Prompt, "`allow net *` matches TLS only");
-    assert_eq!(p.check(&Capability::FsRead("/data/x/y".into())), Decision::Prompt);
-    assert_eq!(p.check(&Capability::FsRead("/data/z".into())), Decision::Allow, "a narrower rule keeps the default");
+    assert_eq!(p.check_normalized(&Capability::FsRead("/data/x/y".into())), Decision::Prompt);
+    assert_eq!(p.check_normalized(&Capability::FsRead("/data/z".into())), Decision::Allow);
     assert_eq!(p.check(&Capability::Stdout), Decision::Allow);
+    // Rules added later are still before the defaults, and `extend` keeps both kinds.
+    let p = RulePolicy::new().with_defaults(RulePolicy::allow_all()).deny_stdout();
+    assert_eq!(p.check(&Capability::Stdout), Decision::Deny);
+    let p = RulePolicy::new().extend(RulePolicy::new().with_defaults(RulePolicy::new().deny_stdin())).allow_stdin();
+    assert_eq!(p.check(&Capability::Stdin), Decision::Allow);
+    // The listing of all variables, with a guarded variable among the defaults or the rules.
+    let all = Capability::Env("*".into());
+    let p = RulePolicy::new().allow_env("*").with_defaults(RulePolicy::new().prompt_env("SECRET"));
+    assert_eq!(p.check(&all), Decision::Allow);
+    let p = RulePolicy::new().prompt_env("SECRET").with_defaults(RulePolicy::allow_all());
+    assert_eq!(p.check(&all), Decision::Prompt);
+    // A rule that allowed a request also outranks default address rules.
+    let p = RulePolicy::new().allow_net("*").with_defaults(RulePolicy::new().deny_net("10.0.0.0/8"));
+    assert_eq!(p.check_resolved(&net("example.com", 443), "10.0.0.5:443".parse().unwrap()), Decision::Allow);
 }
 
-/// `deny_env("AWS_**")` would otherwise deny only a variable named `AWS_**`.
 #[test]
 #[should_panic(expected = "invalid name pattern \"AWS_**\"")]
 fn env_builders_reject_double_stars() {

@@ -927,6 +927,13 @@ fn user_rules_replace_the_defaults_for_the_same_requests() {
     assert_eq!(read(&["--policy=p.policy"]), "Err(\"permission_denied\")\n");
     assert_eq!(read(&["--deny=stdin"]), "Err(\"permission_denied\")\n");
     assert_eq!(read(&["--allow-all", "--prompt=stdin"]), "Err(\"permission_denied\")\n");
+    // A broader rule of the user still decides what it matches.
+    dir.write("lib.sand", "pub let X = 1");
+    dir.write("w.sand", "import fs\nimport \"./lib.sand\"\nprint(lib.X)\nprint(fs.write_text(\"out.txt\", \"x\").map_err(e => e.kind))");
+    let o = sand(dir.path(), &["run", "w.sand", "--allow-all", "--prompt=write **"]);
+    assert_eq!(o.stdout, "1\nErr(\"permission_denied\")\n", "{o:?}");
+    let o = sand(dir.path(), &["run", "w.sand", "--prompt=read **"]);
+    assert!(o.stderr.contains("cannot import `./lib.sand`: permission denied"), "{o:?}");
 }
 
 /// `--allow-all` allows what no other rule decides: `--deny` rules and the

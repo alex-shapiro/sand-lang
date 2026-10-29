@@ -44,7 +44,7 @@ use wasm_bindgen::prelude::*;
 const TYPES: &str = r#"
 /** Options of `new Engine(options, hooks)`; every field is optional. */
 export interface EngineOptions {
-  /** A policy file: rules (`allow read /data`) and limits (`limit time 5s`). Output and imports are allowed unless a rule for the same pattern says otherwise; `onPrompt` decides what no rule decides. */
+  /** A policy file: rules (`allow read /data`) and limits (`limit time 5s`). Output and imports are allowed where no rule of the policy matches; `onPrompt` decides what no rule decides. */
   policy?: string;
   /** Files of the in-memory file system, by absolute path. */
   files?: Record<string, string | Uint8Array>;
