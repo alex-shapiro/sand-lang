@@ -2867,6 +2867,29 @@ print(m.len())
     assert_eq!(out, "30\n");
 }
 
+/// The computed defaults of a decoded struct cost one closure per struct,
+/// not one per field, so a decode needs a small part of the limit.
+#[test]
+fn decoding_many_structs_with_computed_defaults_fits_the_memory_limit() {
+    let src = r#"
+import json
+fn one() -> int { 1 }
+struct P {
+    a: int = one(), b: int = one(), c: int = one(), d: int = one()
+    e: int = one(), f: int = one(), g: int = one(), h: int = one()
+    i: int = one(), j: int = one(), k: int = one(), l: int = one()
+    m: int = one(), n: int = one(), o: int = one(), p: int = one()
+}
+let text = "[" + "{},".repeat(99999) + "{}]"
+let ps: [P] = json.decode(text)?
+print("\(ps.len()) \(ps[99999].p)")
+"#;
+    let limits = Limits { max_memory: Some(64 << 20), ..Limits::default() };
+    let (r, out, _) = run_src(Config::new().limits(limits), src);
+    r.unwrap();
+    assert_eq!(out, "100000 1\n");
+}
+
 #[test]
 fn old_lists_receiving_young_values_between_minor_collections() {
     // Large old lists get young strings stored at scattered indices (more
