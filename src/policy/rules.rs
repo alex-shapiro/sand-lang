@@ -1,7 +1,7 @@
 //! Rule-based capability policies.
 
 use super::net::{Dest, HostIndex, HostKind, ListenPattern, NetPattern, UrlPattern, parse_ip, url_segments};
-use super::path::{Glob, Seg, Trie, path_segments};
+use super::path::{Glob, Seg, Tok, Trie, path_segments};
 use super::{Capability, Decision, PathSpace, fold_name, lexical, normalize_path};
 use crate::files::Mode;
 use crate::vm::value::FxHashMap;
@@ -66,14 +66,18 @@ pub(crate) enum NamePattern {
 }
 
 impl NamePattern {
+    /// Parses a name in which every `*` is a wildcard.
     pub(crate) fn parse(name: &str) -> NamePattern {
-        if name == "*" {
-            return NamePattern::Any;
-        }
-        match Seg::parse(&name.chars().map(|c| (c, c == '*')).collect::<Vec<_>>()) {
+        NamePattern::from_tokens(&name.chars().map(|c| (c, c == '*')).collect::<Vec<_>>())
+    }
+
+    /// Parses a name from policy file text: only wildcard tokens (unquoted
+    /// `*`) match other characters.
+    pub(crate) fn from_tokens(text: &[Tok]) -> NamePattern {
+        match Seg::parse(text) {
             Ok(Seg::Glob(g)) => NamePattern::Glob(g),
             Ok(Seg::Star | Seg::GlobStar) => NamePattern::Any,
-            _ => NamePattern::Exact(name.to_string()),
+            _ => NamePattern::Exact(text.iter().map(|t| t.0).collect()),
         }
     }
 }

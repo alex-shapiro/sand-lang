@@ -12,7 +12,7 @@
 //! limit memory 64M
 //! ```
 
-use super::net::{HostKind, ListenPattern, NetPattern, UrlPattern, format_host_port, url_segments};
+use super::net::{HostKind, ListenPattern, NetPattern, QUOTED_STAR_IN_HOST, UrlPattern, format_host_port, url_segments};
 use super::path::{Seg, Tok};
 use super::rules::{Access, NamePattern, Origin, PathPattern, Rule, RuleKind, Transports};
 use super::{Capability, Decision, RulePolicy};
@@ -439,7 +439,7 @@ impl Context<'_> {
                     }
                     "net" => {
                         urls += 1;
-                        RuleKind::Net(NetPattern::parse(&word.text()).map_err(|m| (item.column, m))?, transports)
+                        RuleKind::Net(NetPattern::from_tokens(&word.tokens()).map_err(|m| (item.column, m))?, transports)
                     }
                     "http" if is_method(&word.text()) => {
                         if urls > 0 {
@@ -452,10 +452,13 @@ impl Context<'_> {
                         urls += 1;
                         RuleKind::Http(methods.clone(), UrlPattern::parse(&word.tokens()).map_err(|m| (item.column, m))?, transports)
                     }
+                    "listen" if word.tokens().iter().any(|&(c, wild)| c == '*' && !wild) => {
+                        return Err((item.column, QUOTED_STAR_IN_HOST.into()));
+                    }
                     "listen" => RuleKind::Listen(ListenPattern::parse(&word.text()).ok_or_else(|| {
                         (item.column, format!("invalid listen pattern `{}` (expected ip:port, ip, localhost, *:port or *)", word.text()))
                     })?),
-                    _ => RuleKind::Env(NamePattern::parse(&word.text())),
+                    _ => RuleKind::Env(NamePattern::from_tokens(&word.tokens())),
                 };
                 rules.push(file_rule(decision, kind, origin));
             }
@@ -586,6 +589,8 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
             format!("http {transport}{} {url}", method.to_ascii_uppercase())
         }
         Capability::NetListen(addr) => format!("listen {}", quote_part(&addr.to_string(), true)),
+        // `Env("*")` asks for every variable, which `env *` allows.
+        Capability::Env(name) if name == "*" => "env *".into(),
         Capability::Env(name) => format!("env {}", quote_part(name, true)),
         Capability::Stdin => "stdin".into(),
         Capability::TimeZone => "timezone".into(),
@@ -987,6 +992,25 @@ mod tests {
         let p = parse("allow read /\ndeny read /../etc\ndeny /./a/../b");
         assert_eq!(p.rules.to_string(), "allow read /\ndeny read /etc\ndeny /b\n");
         assert_eq!(read(&p, "/etc/passwd"), Deny);
+    }
+
+    #[test]
+    fn quoted_stars_are_not_wildcards() {
+        let p = parse("allow env \"AWS_*\" A\"*\"B*");
+        let env = |name: &str| decide(&p, Capability::Env(name.into()));
+        assert_eq!((env("AWS_*"), env("AWS_KEY")), (Allow, Prompt));
+        assert_eq!((env("A*BC"), env("AXBC")), (Allow, Prompt));
+        let message = "a quoted `*` is not a wildcard, and a host cannot contain `*` (remove the quotes)";
+        assert_eq!(
+            errors("allow net \"*\"\nallow net \"*\".a.com\nallow http GET \"*\"/x\nallow listen \"*\":80"),
+            [1, 2, 3, 4].map(|line| format!("{line}:{}: {message}", if line == 3 { 16 } else { 11 + (line == 4) as usize * 3 }))
+        );
+        // A saved answer for a name with `*` decides that name only.
+        for name in ["AWS_*", "**", "A*B"] {
+            let p = parse(&rule_for(&Capability::Env(name.into()), true).unwrap());
+            let env = |name: &str| decide(&p, Capability::Env(name.into()));
+            assert_eq!((env(name), env("AWS_SECRET_ACCESS_KEY"), env("*")), (Allow, Prompt, Prompt), "{name}");
+        }
     }
 
     #[test]

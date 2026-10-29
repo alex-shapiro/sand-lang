@@ -55,6 +55,15 @@ impl NetPattern {
         Ok(parsed)
     }
 
+    /// Parses a host pattern from policy file text. A quoted `*` is not a
+    /// wildcard, and no host contains `*`.
+    pub(crate) fn from_tokens(text: &[Tok]) -> Result<NetPattern, String> {
+        if text.iter().any(|&(c, wild)| c == '*' && !wild) {
+            return Err(QUOTED_STAR_IN_HOST.into());
+        }
+        NetPattern::parse(&text.iter().map(|t| t.0).collect::<String>())
+    }
+
     fn parse_unmasked(pattern: &str) -> Option<NetPattern> {
         let (body, port): (String, Option<&str>) = if let Some(rest) = pattern.strip_prefix('[') {
             let (inner, after) = rest.split_once(']')?;
@@ -607,6 +616,8 @@ pub(crate) struct UrlPattern {
     pub path: Vec<Seg>,
 }
 
+pub(crate) const QUOTED_STAR_IN_HOST: &str = "a quoted `*` is not a wildcard, and a host cannot contain `*` (remove the quotes)";
+
 impl UrlPattern {
     pub(crate) fn parse(text: &[Tok]) -> Result<UrlPattern, String> {
         let flat: String = text.iter().map(|t| t.0).collect();
@@ -643,6 +654,9 @@ impl UrlPattern {
                 end = next;
                 address = Some((ip, after));
             }
+        }
+        if rest[..end].iter().any(|&(c, wild)| c == '*' && !wild) {
+            return Err(QUOTED_STAR_IN_HOST.into());
         }
         let authority = text(&rest[..end]);
         if let Some(NetPattern { kind: HostKind::Ip(ip, len), port }) = NetPattern::parse_unmasked(&authority)
@@ -725,7 +739,7 @@ mod tests {
     use proptest::prelude::*;
 
     fn url(text: &str) -> Result<UrlPattern, String> {
-        UrlPattern::parse(&text.chars().map(|c| (c, false)).collect::<Vec<_>>())
+        UrlPattern::parse(&text.chars().map(|c| (c, c == '*')).collect::<Vec<_>>())
     }
 
     #[test]
