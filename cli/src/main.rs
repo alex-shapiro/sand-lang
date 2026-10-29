@@ -178,7 +178,10 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
             |v: &Option<String>| -> Result<String, String> { v.clone().ok_or_else(|| format!("{flag} requires a value ({flag}=...)")) };
         match flag {
             "--allow" | "--deny" | "--prompt" => {
-                let text = value.as_deref().ok_or_else(|| format!("{flag} requires a rule, e.g. {flag}='net api.example.com'"))?;
+                let text = value.as_deref().ok_or_else(|| {
+                    let asks = if flag == "--prompt" { " (sand asks about what no rule decides by default)" } else { "" };
+                    format!("{flag} requires a rule, e.g. {flag}='net api.example.com'{asks}")
+                })?;
                 rules = rules.extend(rule(&flag[2..], text, &cwd, home.as_deref())?);
             }
             "--allow-all" | "--no-prompt" if value.is_some() => return Err(format!("{flag} does not take a value")),

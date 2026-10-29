@@ -188,6 +188,8 @@ fn bad_flags_and_values_exit_2_with_a_message() {
         ("--seed=abc", "invalid --seed value `abc`"),
         ("--seed", "--seed requires a value"),
         ("--allow", "--allow requires a rule, e.g. --allow='net api.example.com'"),
+        ("--prompt", "--prompt requires a rule, e.g. --prompt='net api.example.com' (sand asks about what no rule decides by default)"),
+        ("--allow-private-net", "unknown option `--allow-private-net` (no rule denies private addresses unless you add one"),
         ("--allow=raed ./x", "invalid rule `--allow=raed ./x`: unknown capability `raed`"),
         ("--deny=read data", "invalid rule `--deny=read data`: path `data` is not anchored"),
         ("--prompt=net", "invalid rule `--prompt=net`: `prompt net` needs at least one argument"),
