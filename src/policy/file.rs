@@ -173,7 +173,7 @@ fn quote(s: &str) -> String {
 }
 
 /// The transport that the bare word `word` names, in any case.
-fn transport(word: &str) -> Option<Transports> {
+pub(crate) fn transport(word: &str) -> Option<Transports> {
     if word.eq_ignore_ascii_case("tls") {
         Some(Transports::TLS)
     } else if word.eq_ignore_ascii_case("plaintext") {

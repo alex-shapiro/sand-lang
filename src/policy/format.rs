@@ -1,10 +1,11 @@
 //! The policy file formatter.
 
 use super::PolicyError;
-use super::file::{Line, is_method, lex};
+use super::file::{Line, is_method, lex, transport};
 
 /// Formats a policy file: words separated by single spaces and quoted only
-/// where needed, HTTP methods in upper case, trailing comments of
+/// where needed, transports in lower case, HTTP methods in upper case,
+/// trailing comments of
 /// consecutive lines aligned, and no runs of blank lines. Fails only on
 /// text that does not split into words (an unterminated quote).
 pub fn format_policy(text: &str) -> Result<String, Vec<PolicyError>> {
@@ -46,17 +47,20 @@ pub fn format_policy(text: &str) -> Result<String, Vec<PolicyError>> {
 
 /// A line's words, formatted.
 fn code(line: &Line) -> String {
-    let http = line.words.len() > 2
+    let connection = line.words.len() > 2
         && matches!(line.words[0].plain().as_deref(), Some("allow" | "deny" | "prompt"))
-        && line.words[1].plain().as_deref() == Some("http");
-    let mut methods = http;
+        && matches!(line.words[1].plain().as_deref(), Some("net" | "http"));
+    let http = connection && line.words[1].plain().as_deref() == Some("http");
+    // Transports, then (in http rules) methods, as the parser reads them.
+    let mut keywords = connection;
     let mut out = Vec::new();
     for (i, w) in line.words.iter().enumerate() {
         let mut text = w.render();
-        if i >= 2 && methods {
-            match w.plain().filter(|p| is_method(p)) {
-                Some(m) => text = m.to_ascii_uppercase(),
-                None => methods = false,
+        if i >= 2 && keywords {
+            match w.bare() {
+                Some(t) if transport(&t).is_some() => text = t.to_ascii_lowercase(),
+                Some(m) if http && is_method(&m) => text = m.to_ascii_uppercase(),
+                _ => keywords = false,
             }
         }
         out.push(text);
@@ -110,11 +114,20 @@ mod tests {
         "\"*\"",
         "/b/x",
         "stdin",
+        "tls",
+        "plaintext",
+        "PLAINTEXT",
+        "custom",
+        "listen",
+        "\"get\"",
+        "\"tls\"",
+        "http.",
+        "localhost:8080",
     ];
 
-    /// What a policy decides on some requests, or its errors (formatting
-    /// may move them to other lines).
-    fn meaning(text: &str) -> Result<Vec<crate::policy::Decision>, Vec<String>> {
+    /// A policy's rules as text and what it decides on some requests, or
+    /// its errors (formatting may move them to other lines).
+    fn meaning(text: &str) -> Result<(String, Vec<crate::policy::Decision>), Vec<String>> {
         let file = PolicyFile::parse(text, Path::new("/base"), Some(Path::new("/home/me")))
             .map_err(|e| e.into_iter().map(|e| e.message).collect::<Vec<_>>())?;
         let policy = file.rules;
@@ -139,7 +152,7 @@ mod tests {
             http("GET", "/v1/z"),
             http("POST", "/"),
         ];
-        Ok(caps.iter().map(|c| policy.check_in(c, PathSpace::Memory)).collect())
+        Ok((policy.to_string(), caps.iter().map(|c| policy.check_in(c, PathSpace::Memory)).collect()))
     }
 
     proptest! {
@@ -171,5 +184,8 @@ mod tests {
         assert_eq!(format_policy("").unwrap(), "");
         assert_eq!(format_policy("allow read \"*\" \"#x\" \"{a}\" \"a\\\"b\"").unwrap(), "allow read \"*\" \"#x\" \"{a}\" \"a\\\"b\"\n");
         assert!(format_policy("allow read \"open").is_err());
+        let src = "allow http PLAINTEXT get a.com\nallow http \"get\" \"tls\"/x\nallow net TLS Plaintext a.com\n";
+        let want = "allow http plaintext GET a.com\nallow http \"get\" tls/x\nallow net tls plaintext a.com\n";
+        assert_eq!(format_policy(src).unwrap(), want);
     }
 }
