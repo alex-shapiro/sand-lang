@@ -9,16 +9,16 @@ Sand isolates each script from the host system and checks every external operati
 
 The engine checks a capability for each external operation:
 
-| Capability                  | Controlled operations                                    |
-| --------------------------- | -------------------------------------------------------- |
-| `read`, `write`             | file system access, checked per canonical path           |
-| `net`, `http`               | TCP/TLS connections and HTTP requests, by host:port      |
-| `listen`                    | TCP listeners, by bind address                           |
-| `env`                       | environment variable reads, by variable name             |
-| `stdin`, `stdout`, `stderr` | standard input, output, and error streams                |
-| `timezone`                  | `time.local_zone()`                                      |
-| `import`                    | script module imports, by file path                      |
-| `custom`                    | custom capabilities checked by [native modules](/guide/embedding/) |
+| Capability                  | Controlled operations                               |
+| --------------------------- | --------------------------------------------------- |
+| `read`, `write`             | file system access, checked per canonical path      |
+| `net`, `http`               | TCP/TLS connections and HTTP requests, by host:port |
+| `listen`                    | TCP listeners, by bind address                      |
+| `env`                       | environment variable reads, by variable name        |
+| `stdin`, `stdout`, `stderr` | standard input, output, and error streams           |
+| `timezone`                  | `time.local_zone()`                                 |
+| `import`                    | script module imports, by file path                 |
+| `custom`                    | custom capabilities checked by native modules       |
 
 Sand does not provide a foreign function interface or process-spawning APIs. Every host interaction passes through these capabilities.
 
@@ -66,14 +66,14 @@ sand run fetch.sand --allow='net api.example.com' --allow='env HOME LANG'
 sand run server.sand --allow='listen localhost:8080' --deny='net 10.0.0.0/8'
 ```
 
-| Flag              | Effect                                                                      |
-| ----------------- | --------------------------------------------------------------------------- |
-| `--allow=RULE`    | allows capabilities matched by `RULE`, e.g. `--allow='read ./data'`         |
-| `--deny=RULE`     | denies capabilities matched by `RULE`, e.g. `--deny=stdin`                  |
-| `--prompt=RULE`   | prompts for capabilities matched by `RULE`, e.g. `--prompt='write ./'`      |
-| `--policy=FILE`   | loads rules and resource limits from `FILE`                                 |
-| `--allow-all`     | allows unmatched capabilities for trusted scripts                           |
-| `--no-prompt`     | denies unmatched and `prompt` capabilities instead of prompting             |
+| Flag            | Effect                                                        |
+| --------------- | ------------------------------------------------------------- |
+| `--allow=RULE`  | allow capabilities matched by `RULE`                          |
+| `--deny=RULE`   | deny capabilities matched by `RULE`                           |
+| `--prompt=RULE` | prompt for capabilities matched by `RULE`                     |
+| `--policy=FILE` | load rules and resource limits from `FILE`                    |
+| `--allow-all`   | allow unmatched capabilities for trusted scripts              |
+| `--no-prompt`   | deny unmatched and `prompt` capabilities instead of prompting |
 
 Quote rules that contain spaces or `*`, and separate multiple arguments in a rule with spaces or commas. Relative paths are resolved from the current working directory. An `allow` rule for a directory grants access to all files and subdirectories inside it. If `--no-prompt` is set or a controlling terminal is unavailable, Sand denies `prompt` decisions and prints the `--allow` flag that grants the capability.
 

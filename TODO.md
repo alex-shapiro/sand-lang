@@ -100,11 +100,8 @@ Follow-up work, roughly in priority order.
 - [ ] Support HTTP paths with encoded separators `%2F` and `%5C` in `rule_for`
       so that "always" prompt answers can generate rules for those requests.
 - [ ] Evaluate HTTP paths that contain `;` parameters both with and without
-      matrix parameters in `url_segments` in `src/policy/net.rs` so that `deny
-      http a.com/admin/**` blocks `/admin;x/secret` and `/public/..;/admin`.
-      Also distinguish raw non-UTF-8 bytes from percent-encoded `%25` sequences
-      in `percent_decode` so that `allow http a.com/%25FF` does not match
-      `/%FF`.
+      matrix parameters in `url_segments` in `src/policy/net.rs` so that `deny http a.com/admin/**` blocks `/admin;x/secret` and `/public/..;/admin`.
+      Also distinguish raw non-UTF-8 bytes from percent-encoded `%25` sequences in `percent_decode` so that `allow http a.com/%25FF` does not match `/%FF`.
 - [ ] Support interactive prompts for resolved IP addresses that match a
       `prompt` address rule instead of denying them during address resolution.
 - [ ] Include the originating HTTP method and URL on `Capability::NetAddr` so
@@ -114,8 +111,8 @@ Follow-up work, roughly in priority order.
       rules that match only the prompted file or URL path instead of a directory
       subtree or host prefix.
 - [ ] Separate the `env.vars()` listing capability from `Capability::Env("*")`
-      or return `None` from `rule_for(&Capability::Env("*"))`, because `allow
-      env *` does not override existing `deny` or `prompt` rules on individual
+      or return `None` from `rule_for(&Capability::Env("*"))`, because `allow env *`
+      does not override existing `deny` or `prompt` rules on individual
       variables.
 - [ ] Fold environment variable names case-insensitively on Windows in
       `RulePolicy` to match Windows environment variable lookup.
@@ -123,8 +120,8 @@ Follow-up work, roughly in priority order.
       `RulePolicy::describe_rule` reports the exact file or flag instead of only
       a line number.
 - [ ] Expand `lint_policy` to detect shadowed and redundant `env`, `stdin`,
-      `stdout`, `stderr`, `timezone`, `custom`, and `listen` rules, `allow net
-      *.localhost` rules overridden by `deny net localhost`, and quoted wildcard
+      `stdout`, `stderr`, `timezone`, `custom`, and `listen` rules, `allow net *.localhost`
+      rules overridden by `deny net localhost`, and quoted wildcard
       literals such as `deny env "AWS_*"`.
 - [ ] Resolve or reject relative paths in `RulePolicy` file builder methods so
       that `Display` always emits valid, parseable policy syntax.
@@ -215,9 +212,9 @@ Follow-up work, roughly in priority order.
       `fs.Kind` enum.
 - [ ] Evaluate replacing string error kinds (`"not_found"`, `"invalid"`) with
       an enum.
-
 - [ ] Support `Decode` for structs that declare `init` by calling `init` with
       the JSON object's members as named arguments:
+
       - Propagate `Err` results from deferred `Decoded::Pending` thunks in
         `src/stdlib/json.rs` so that a fallible `init` fails `json.decode`.
       - Pass trait dictionaries to `Decoded::Pending` thunks so that a generic
@@ -225,6 +222,7 @@ Follow-up work, roughly in priority order.
       - Execute `init` before inserting decoded structs into a `Set`, as
         `json.decode` already does for computed field defaults.
       - Verify that `init` is visible at the `json.decode` call site.
+
 - [ ] Preserve default parameter values in function types so that calls through
       function values can omit defaulted arguments (for example,
       `["a"].map(Error)`).
@@ -238,6 +236,7 @@ Follow-up work, roughly in priority order.
       bounds for structs, enums, and `extend` blocks. Extend well-formedness
       checking and implied bound inference to all remaining declarations and
       type annotations:
+
       - Infer implied trait bounds on functions, methods, and `impl` blocks from
         type parameters that appear as direct arguments to constrained type
         constructors in parameter types, return types, trait arguments, or
@@ -253,6 +252,7 @@ Follow-up work, roughly in priority order.
       - Include the origin of an inferred bound in diagnostic messages if a
         caller does not satisfy it (for example, "required because `size` takes
         a `Bag<T>`").
+
 - [ ] Allow struct field defaults to call methods from traits required by the
       struct's type parameters (`struct Bag<T: Make> { x: T = T.make() }`) by
       passing trait dictionaries to default-value helpers and `json.decode`
