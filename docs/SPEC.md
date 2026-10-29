@@ -2691,10 +2691,10 @@ Configurable per engine:
 
 Memory is the engine's accounting, enforced after garbage collection, of
 live heap objects (with their buffers and map and set indexes), the heap
-slots of freed objects until new objects use them, the tables of the
-garbage collector, tasks (call stacks, and lists of tasks waiting for a
-task or channel; a call that would grow a stack beyond the limit fails with
-the memory limit), and the
+slots of freed objects until new objects use them or the heap gives them
+back to the allocator, the tables of the garbage collector, tasks (call
+stacks, and lists of tasks waiting for a task or channel; a call that would
+grow a stack beyond the limit fails with the memory limit), and the
 buffers of pending I/O (file and socket reads, HTTP requests and responses
 in transfer, standard input, copies of data being written) from the start
 of the operation until its result becomes a value. An I/O operation whose
