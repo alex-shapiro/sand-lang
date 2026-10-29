@@ -97,12 +97,12 @@ use std::path::Path;
 
 let text = std::fs::read_to_string("app.policy")?;
 let file = PolicyFile::parse(&text, Path::new("."), None).expect("a valid policy file");
-let config = Config::new().policy(RulePolicy::standard().extend(file.rules)).limits(file.limits);
+let config = Config::new().policy(file.rules.with_defaults(RulePolicy::standard())).limits(file.limits);
 # Ok(())
 # }
 ```
 
-The second argument is the base directory for `./` paths, and the third argument is the optional home directory for `~/` paths. A policy file's rules are the whole policy: extend `RulePolicy::standard()` with them so that scripts can print.
+The second argument is the base directory for `./` paths, and the third argument is the optional home directory for `~/` paths. A policy file's rules are the whole policy. To let scripts print, add `RulePolicy::standard()` as default rules: they decide only what no rule of the file matches, so a `prompt stdout` in the file still asks.
 
 To handle `prompt` decisions, pass an async callback to `Config::prompter` that accepts a `Capability` and returns a `PromptAnswer`. A request that no rule matches also gets a `prompt` decision. If a prompter is not configured, the engine denies these requests.
 

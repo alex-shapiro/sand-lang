@@ -3,7 +3,7 @@ title = "Sandbox and policies"
 description = "Configure access to resources with policies and limits."
 +++
 
-By default, a Sand script is isolated from the host system: it cannot access files, network sockets, environment variables, or standard input unless the active policy grants permission. The engine checks every external operation against the policy before executing it.
+A Sand script is isolated from the host system: the engine checks every external operation (files, network sockets, environment variables, standard input) against the policy before it executes the operation. By default, an embedding host denies what no rule allows, and `sand run` asks you.
 
 ## Capabilities
 

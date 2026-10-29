@@ -2611,8 +2611,8 @@ non-public range.
 A policy file (`.policy`) contains policy rules and limits as text. Read it with
 `sand run --policy=FILE` (§17.5); parse it with `sandlang::policy::PolicyFile::parse(text, base, home)`,
 which gives its rules (`PolicyFile::rules`) and limits (`PolicyFile::limits`). The
-rules are the whole policy: a host that wants scripts to print extends
-`RulePolicy::standard()` with them.
+rules are the whole policy: a host that wants scripts to print adds the
+standard rules as default rules (`file.rules.with_defaults(RulePolicy::standard())`).
 Each line contains an independent statement. A comment begins with `#` and
 continues for the rest of the line. Words are separated by spaces or commas.
 Quoted text `"..."` (with `\"` and `\\` escapes) is parsed literally, so a quoted

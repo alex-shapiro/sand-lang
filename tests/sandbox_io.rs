@@ -1873,3 +1873,14 @@ print(fs.read_text("a.txt")?)
     let r = run_with(src, move |c| c.custom_policy(NoRemoval).cwd(cwd));
     assert_eq!(r.ok_stdout(), "permission_denied\npermission_denied\npermission_denied\nrewritten\n");
 }
+
+/// The guide's recipe for a policy file: its rules decide first, and the
+/// standard rules only what they do not match, so `prompt stdout` asks.
+#[test]
+fn a_policy_file_over_the_standard_rules_keeps_its_prompt_rules() {
+    let file = sandlang::policy::PolicyFile::parse("prompt stdout\nprompt stderr", std::path::Path::new("/"), None).unwrap();
+    let policy = file.rules.with_defaults(RulePolicy::standard());
+    assert_eq!((policy.check(&Capability::Stdout), policy.check(&Capability::Stderr)), (Decision::Prompt, Decision::Prompt));
+    let r = run_with("print(\"printed\")", |c| c.policy(policy));
+    assert_eq!(r.stdout, "");
+}

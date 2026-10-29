@@ -137,15 +137,17 @@ where
     }
 }
 
-/// A host-defined policy (see [`Policy::custom`]).
+/// A host-defined policy, which decides requests instead of rules (see
+/// [`crate::Config::custom_policy`]).
 ///
 /// Only [`CustomPolicy::check`] is required.
 pub trait CustomPolicy: Send + Sync {
     /// Decides `cap`. File paths are normalized as [`normalize_path`] does.
     fn check(&self, cap: &Capability) -> Decision;
 
-    /// Custome check on directory entry operation.
-    /// The path is normalized.
+    /// Decides an operation on a directory entry itself (removing or
+    /// renaming it), whose final symlink is not resolved. The path is
+    /// normalized.
     fn check_entry(&self, cap: &Capability) -> Decision {
         self.check(cap)
     }
@@ -189,7 +191,7 @@ impl fmt::Debug for Policy {
 
 impl Policy {
     /// Decides `cap`. A rule policy first normalizes a file capability's path
-    /// with [`normalize_path`]; [`Policy::check_normalized`] skips that.
+    /// with [`normalize_path`]; [`Policy::check_normalized_in`] skips that.
     pub(crate) fn check(&self, cap: &Capability) -> Decision {
         self.check_in(cap, PathSpace::Host)
     }
