@@ -122,6 +122,10 @@ pub struct Heap {
     /// Make the next collection a major one when `bytes` exceeds this.
     pub major_at: usize,
     pub limit: Option<usize>,
+    /// Bytes of the collector's mark bits and of its lists of remembered and
+    /// gray objects, measured when the arena grows by 64 slots and by every
+    /// collection and step of an incremental collection.
+    tables: usize,
     /// Memory of the fibers (value stacks, frames, waiter and race lists),
     /// counted against `limit` with the heap: incremented as they grow and
     /// recomputed by every collection.
@@ -175,6 +179,7 @@ pub struct Heap {
 }
 
 const SPARE_LENS: usize = 4;
+const OBJ_SIZE: usize = std::mem::size_of::<Obj>();
 /// Maximum number of objects per chunk in [`Staging`].
 const STAGE_CHUNK: usize = 4096;
 const CHUNK_BYTES: usize = STAGE_CHUNK * std::mem::size_of::<(u32, Obj)>();
@@ -213,6 +218,8 @@ impl Staging<'_> {
                 Obj::Free(next) => next,
                 _ => unreachable!("corrupt free list"),
             };
+            // The heap already counts the free slot.
+            self.bytes -= OBJ_SIZE;
             h
         } else {
             self.end += 1;
@@ -309,6 +316,9 @@ const ELEMS_PER_DIRTY_INDEX: usize = 8;
 
 const NONE: u32 = u32::MAX;
 const MIN_GC: usize = 4 << 20;
+/// The fewest free slots at the end of the arena that a major collection
+/// gives back to the allocator (fewer stay allocated, to save reallocations).
+const SHRINK_SLOTS: usize = 4096;
 /// Bytes allocated between minor collections, at most.
 const NURSERY: usize = 8 << 20;
 /// Resources allocated between collections at most (see
@@ -351,6 +361,7 @@ impl Heap {
             next_gc: MIN_GC,
             major_at: MIN_GC,
             limit,
+            tables: 0,
             fiber_bytes: 0,
             live_objects: 0,
             young_resources: 0,
@@ -417,6 +428,7 @@ impl Heap {
                 self.tail_bits.push(0);
                 self.cmarks.push(0);
                 self.gray_bits.push(0);
+                self.measure_tables();
             }
             (self.objs.len() - 1) as u32
         };
@@ -574,9 +586,28 @@ impl Heap {
         matches!(self.limit, Some(l) if self.used().saturating_add(self.io_memory.reserved()) > l)
     }
 
-    /// Memory used by heap objects and fibers (not counting pending I/O).
+    /// Memory used by heap objects and fibers (not counting pending I/O),
+    /// including the arena slots and collector tables that objects freed
+    /// earlier leave behind.
     pub fn used(&self) -> usize {
-        self.bytes.saturating_add(self.fiber_bytes).saturating_add(self.spare_bytes)
+        self.bytes.saturating_add(self.fiber_bytes).saturating_add(self.spare_bytes).saturating_add(self.overhead())
+    }
+
+    /// Memory of the arena's free slots and of the collector's tables.
+    #[inline]
+    fn overhead(&self) -> usize {
+        self.objs.len().saturating_sub(self.live_objects) * OBJ_SIZE + self.young.capacity() * std::mem::size_of::<u32>() + self.tables
+    }
+
+    /// Updates `tables`.
+    #[cold]
+    #[inline(never)]
+    fn measure_tables(&mut self) {
+        let bitmaps = [&self.marks, &self.remembered_bits, &self.partial_bits, &self.tail_bits, &self.cmarks, &self.gray_bits];
+        let words: usize = bitmaps.iter().map(|b| b.capacity()).sum();
+        self.tables = words * std::mem::size_of::<u64>()
+            + self.remembered.capacity() * std::mem::size_of::<u32>()
+            + self.gray.capacity() * std::mem::size_of::<(u32, usize)>();
     }
 
     #[inline]
@@ -591,6 +622,12 @@ impl Heap {
     #[inline]
     pub fn obj(&self, h: u32) -> &Obj {
         &self.objs[h as usize]
+    }
+
+    /// The object with weak handle `h` (one the collector does not trace),
+    /// or `None` if a major collection gave its slot back.
+    pub fn weak(&self, h: u32) -> Option<&Obj> {
+        self.objs.get(h as usize)
     }
 
     /// Returns a mutable reference to the object for `v` and records a write
@@ -1188,6 +1225,11 @@ impl Heap {
     fn release(&mut self, h: u32) {
         let obj = std::mem::replace(&mut self.objs[h as usize], Obj::Free(self.free_head));
         self.free_head = h;
+        self.keep_box(obj);
+    }
+
+    /// Drops freed object `obj`, keeping its box if it is small.
+    fn keep_box(&mut self, obj: Obj) {
         if let Obj::Tuple(b) | Obj::Struct(_, b) | Obj::Variant(_, b) | Obj::Closure(_, b) = obj
             && let Some(spare) = b.len().checked_sub(1).and_then(|i| self.spare.get_mut(i))
             && spare.len() < SPARE_MAX
@@ -1270,6 +1312,10 @@ impl Heap {
         self.trace();
         if major {
             self.sweep_all();
+            // The lists are empty: give their memory back.
+            self.young = Vec::new();
+            self.remembered = Vec::new();
+            self.gray = Vec::new();
         } else {
             let young = std::mem::take(&mut self.young);
             let mut freed = 0;
@@ -1287,24 +1333,61 @@ impl Heap {
         }
         self.young.clear();
         self.set_thresholds(major);
+        self.measure_tables();
     }
 
+    /// Frees all unmarked objects. The free list is rebuilt in slot order,
+    /// so that new objects fill the lowest slots and the free slots at the
+    /// end of the arena can be given back.
     fn sweep_all(&mut self) {
         let mut live_bytes = 0;
         let mut live = 0;
-        for i in 0..self.objs.len() {
-            if matches!(self.objs[i], Obj::Free(_)) {
-                continue;
-            }
+        let mut end = self.objs.len();
+        self.free_head = NONE;
+        for i in (0..self.objs.len()).rev() {
             if self.is_marked(i as u32) {
                 live_bytes += self.objs[i].size();
                 live += 1;
-            } else {
-                self.release(i as u32);
+                continue;
             }
+            let obj = std::mem::replace(&mut self.objs[i], Obj::Free(self.free_head));
+            if end == i + 1 {
+                end = i;
+            } else {
+                self.free_head = i as u32;
+            }
+            self.keep_box(obj);
         }
         self.bytes = live_bytes;
         self.live_objects = live;
+        self.truncate(end);
+    }
+
+    /// Gives back the free slots at and after `len`, which are not on the
+    /// free list, and the collector's tables for them.
+    fn truncate(&mut self, len: usize) {
+        if len == self.objs.len() {
+            return;
+        }
+        let words = len.div_ceil(64);
+        let shrink = self.objs.len() - len >= SHRINK_SLOTS;
+        self.objs.truncate(len);
+        for bits in
+            [&mut self.marks, &mut self.remembered_bits, &mut self.partial_bits, &mut self.tail_bits, &mut self.cmarks, &mut self.gray_bits]
+        {
+            bits.truncate(words);
+            if let Some(last) = bits.last_mut()
+                && !len.is_multiple_of(64)
+            {
+                *last &= (1 << (len % 64)) - 1;
+            }
+            if shrink {
+                bits.shrink_to_fit();
+            }
+        }
+        if shrink {
+            self.objs.shrink_to_fit();
+        }
     }
 
     fn set_thresholds(&mut self, major: bool) {
@@ -1373,6 +1456,7 @@ impl Heap {
         self.cycle_live = self.bytes;
         self.step_bytes = self.bytes;
         self.update_next_gc();
+        self.measure_tables();
     }
 
     /// Runs one step of the incremental collection. Returns true if marking
@@ -1380,7 +1464,7 @@ impl Heap {
     pub fn cycle_step(&mut self) -> bool {
         let allocated = self.bytes.saturating_sub(self.step_bytes).max(STEP_BYTES);
         self.step_bytes = self.bytes;
-        match self.phase {
+        let done = match self.phase {
             Phase::Marking => {
                 let budget = if self.stress { (self.live_objects / 8).max(64) } else { (allocated / 16 * MARK_PACE).max(MIN_MARK_WORK) };
                 self.mark_some(budget);
@@ -1399,7 +1483,9 @@ impl Heap {
                 false
             }
             Phase::Idle => false,
-        }
+        };
+        self.measure_tables();
+        done
     }
 
     /// Completes the marking: shades the roots again and drains the worklist.
@@ -1422,6 +1508,7 @@ impl Heap {
         self.phase = Phase::Sweeping;
         self.sweep_at = 0;
         self.update_next_gc();
+        self.measure_tables();
     }
 
     /// Abandons incremental collection.
@@ -1600,7 +1687,9 @@ mod tests {
         let n = (STAGE_CHUNK - 4) + 3 * STAGE_CHUNK;
         let size = std::mem::size_of::<(u32, Obj)>();
         let mut heap = Heap::new(None, usize::MAX);
-        let used = heap.used();
+        // Without free slots, the overhead is the collector's tables.
+        let used = |heap: &Heap| heap.used() - heap.overhead();
+        let before = used(&heap);
         let buffer = heap.staged(|_, st| {
             for i in 0..n {
                 st.new_list(vec![Value::Int(i as i64)]);
@@ -1611,9 +1700,9 @@ mod tests {
         let objs = (n + STAGE_CHUNK) * size;
         assert!(buffer >= objs && buffer < objs + 1024, "{buffer}");
         let lists = n * Obj::List(vec![Value::Int(0)]).size();
-        assert_eq!(heap.used() - used, lists + 3 * CHUNK_BYTES);
+        assert_eq!(used(&heap) - before, lists + 3 * CHUNK_BYTES);
         heap.collect((0..n).map(|i| Value::Obj(i as u32)), true);
-        assert_eq!(heap.used() - used, lists);
+        assert_eq!(used(&heap) - before, lists);
     }
 
     #[test]
@@ -1768,5 +1857,155 @@ mod tests {
         assert!(heap.used() <= limit, "{} bytes used", heap.used());
         heap.collect([ch], true);
         heap.channel_push(ch, Value::Int(0)).unwrap();
+    }
+
+    /// The handles on the free list, in order.
+    fn free_list(heap: &Heap) -> Vec<u32> {
+        let mut out = Vec::new();
+        let mut h = heap.free_head;
+        while h != NONE {
+            out.push(h);
+            let Obj::Free(next) = heap.objs[h as usize] else { panic!("slot {h} on the free list is in use") };
+            h = next;
+        }
+        out
+    }
+
+    #[test]
+    fn free_slots_count_as_used_until_objects_take_them() {
+        let mut heap = Heap::new(None, usize::MAX);
+        let keep = heap.new_str("keep");
+        let garbage: Vec<Value> = (0..1000).map(|i| heap.new_list(vec![Value::Int(i)])).collect();
+        let top = heap.new_str("top");
+        heap.collect([keep, top], true);
+        assert_eq!(free_list(&heap), (1..=1000).collect::<Vec<u32>>());
+        let used = heap.used();
+        assert!(used >= heap.bytes + 1000 * OBJ_SIZE, "{used} bytes used");
+        // New objects without contents of their own take free slots, from
+        // the lowest, and add only to the list of young objects.
+        let young = |heap: &Heap| heap.young.capacity() * std::mem::size_of::<u32>();
+        let ranges: Vec<Value> = (0..10).map(|i| heap.alloc(Obj::Range(i, i, false))).collect();
+        assert_eq!(ranges, garbage[..10]);
+        assert_eq!(heap.used() - young(&heap), used);
+        let staged = heap.staged(|_, st| st.alloc(Obj::Range(0, 0, false)));
+        assert_eq!(staged, garbage[10]);
+        assert_eq!(heap.used() - young(&heap), used);
+    }
+
+    #[test]
+    fn a_major_collection_gives_back_the_free_slots_at_the_end_of_the_arena() {
+        let mut heap = Heap::new(None, usize::MAX);
+        let keep = heap.new_str("keep");
+        let n = 4 * SHRINK_SLOTS;
+        let list = heap.new_list((0..n as i64).map(Value::Int).collect());
+        for i in 0..n {
+            let item = heap.new_str(format!("an item, {i}"));
+            heap.list_mut(list)[i] = item;
+        }
+        heap.collect([keep, list], true);
+        let full = heap.used();
+        heap.collect([keep], true);
+        assert_eq!(heap.objs.len(), 1);
+        assert!(heap.objs.capacity() < SHRINK_SLOTS, "{} slots kept", heap.objs.capacity());
+        assert!(full - heap.used() >= (n + 1) * OBJ_SIZE, "{full} bytes, then {}", heap.used());
+        assert_eq!(heap.str(keep), "keep");
+        assert_eq!(free_list(&heap), Vec::<u32>::new());
+        // The tables of the collector shrink with the arena: a new object is
+        // young and unmarked.
+        let young = heap.new_str("young");
+        assert!(!heap.is_marked(young.handle().unwrap()));
+        heap.collect([keep], false);
+        assert_eq!(heap.objs.len(), 2);
+        assert_eq!(free_list(&heap), vec![1]);
+    }
+
+    #[derive(Clone, Debug)]
+    enum Op {
+        /// Allocates a string, rooted or not.
+        Str(bool),
+        /// Allocates a list of the given rooted values (by index), rooted.
+        List(Vec<usize>),
+        /// Stages strings, rooting every other one.
+        Stage(usize),
+        /// Drops a root (by index).
+        Drop(usize),
+        Collect(bool),
+    }
+
+    fn op() -> impl proptest::strategy::Strategy<Value = Op> {
+        use proptest::prelude::*;
+        prop_oneof![
+            8 => any::<bool>().prop_map(Op::Str),
+            2 => prop::collection::vec(any::<usize>(), 0..4).prop_map(Op::List),
+            1 => (0usize..40).prop_map(Op::Stage),
+            4 => any::<usize>().prop_map(Op::Drop),
+            1 => any::<bool>().prop_map(Op::Collect),
+        ]
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
+
+        #[test]
+        fn the_heap_counts_every_slot_and_keeps_rooted_values(ops in proptest::collection::vec(op(), 1..200)) {
+            let mut heap = Heap::new(None, usize::MAX);
+            // Rooted values, with the text of each string or the roots a list holds.
+            let mut roots: Vec<(Value, Result<String, Vec<Value>>)> = Vec::new();
+            let mut n = 0;
+            for op in ops {
+                match op {
+                    Op::Str(rooted) => {
+                        n += 1;
+                        let v = heap.new_str(format!("string {n} with some text"));
+                        if rooted {
+                            roots.push((v, Ok(format!("string {n} with some text"))));
+                        }
+                    }
+                    Op::List(items) => {
+                        let items: Vec<Value> = items.iter().filter(|_| !roots.is_empty()).map(|i| roots[i % roots.len()].0).collect();
+                        let v = heap.new_list(items.clone());
+                        roots.push((v, Err(items)));
+                    }
+                    Op::Stage(k) => {
+                        let texts: Vec<String> = (0..k).map(|i| format!("staged {n}.{i}")).collect();
+                        let vs = heap.staged(|_, st| texts.iter().map(|t| st.new_str(t.as_str())).collect::<Vec<_>>());
+                        roots.extend(vs.into_iter().zip(texts).step_by(2).map(|(v, t)| (v, Ok(t))));
+                        n += 1;
+                    }
+                    Op::Drop(i) if !roots.is_empty() => {
+                        drop(roots.remove(i % roots.len()));
+                    }
+                    Op::Drop(_) => {}
+                    Op::Collect(major) => {
+                        // Values that rooted lists hold stay reachable.
+                        let mut all: Vec<Value> = roots.iter().map(|r| r.0).collect();
+                        for (_, c) in &roots {
+                            if let Err(items) = c {
+                                all.extend(items);
+                            }
+                        }
+                        heap.collect(all, major);
+                        let free = free_list(&heap);
+                        if major {
+                            proptest::prop_assert!(free.windows(2).all(|w| w[0] < w[1]), "free list out of order: {free:?}");
+                            proptest::prop_assert!(heap.objs.last().is_none_or(|o| !matches!(o, Obj::Free(_))), "free slot at the end");
+                            let sizes: usize = heap.objs.iter().filter(|o| !matches!(o, Obj::Free(_))).map(Obj::size).sum();
+                            proptest::prop_assert_eq!(heap.bytes, sizes);
+                        }
+                    }
+                }
+                let free = free_list(&heap);
+                let in_use = heap.objs.iter().filter(|o| !matches!(o, Obj::Free(_))).count();
+                proptest::prop_assert_eq!(free.len() + in_use, heap.objs.len(), "every free slot is on the free list once");
+                proptest::prop_assert_eq!(heap.live_objects, in_use);
+                proptest::prop_assert!(heap.overhead() >= free.len() * OBJ_SIZE);
+                for (v, c) in &roots {
+                    match c {
+                        Ok(text) => proptest::prop_assert_eq!(heap.str(*v), text.as_str()),
+                        Err(items) => proptest::prop_assert_eq!(heap.list(*v), items.as_slice()),
+                    }
+                }
+            }
+        }
     }
 }

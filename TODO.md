@@ -25,9 +25,18 @@ Untrusted code violates a valid policy.
 
 The host cannot rely on engine limits, stability, or control.
 
-- [ ] 🔴 [007](triage/007-memory-limit-overshoot/summary.md) _Test coverage._ `peak_rss_stays_near_the_memory_limit` in `tests/peak_rss.rs` failed in
-      7 of 9 runs on macOS because the "decoded computed defaults" case
-      exceeds the 1.25 limit ratio at 1.32.
+- [ ] ❓ _Memory._ Bound the peak memory of the process by `max_memory` independently of
+      the system allocator. The limit counts what the engine holds, but the
+      allocator keeps freed memory: on macOS, a script that frees 1M small
+      lists and then allocates 1 KiB strings peaks at 1.2 to 1.3 times
+      `max_memory`. If the engine allocates small object contents from its
+      own pools of fixed-size blocks, it can count that memory and give it back.
+- [ ] ❓ _Memory._ Grow the heap's object arena in fixed-size segments instead of one `Vec`.
+      A major collection gives back only the free slots after the last live
+      object, so slots freed below a live object count against `max_memory`
+      until new objects use them. Segments would let a collection give back
+      every empty segment, and growth would not copy the arena on platforms
+      whose allocator copies a large block to grow it.
 - [ ] 🔴 [052](triage/052-dead-temporaries-rooted/summary.md) _Performance._ Clear dead temporaries before native calls so that inlined allocations
       do not stay rooted in caller frame registers during garbage collection.
 - [ ] 🔴 [017](triage/017-json-host-depth/summary.md) _Embedding._ Convert `Json` values to and from Rust iteratively so that
@@ -245,6 +254,13 @@ Visible defects that rarely block users.
 - [ ] ⚪ Cache instantiated `TypeDesc` objects in `Op::Describe` by their
       template and argument descriptions to avoid allocation on each generic
       `reflect` call.
+- [ ] ❓ Make the speed of the interpreter loop independent of code alignment. On
+      Apple silicon, unrelated changes elsewhere in the crate move the loop
+      and change `integer loop 10M`, `game of life` and `option ? chains` in
+      `benches/vm.rs` by up to 13% at equal instruction counts; with
+      `-C llvm-args=-align-loops=64`, the differences go away. Align the
+      dispatch loop, or build benchmarks with aligned loops so that they
+      compare changes reliably.
 - [ ] ⚪ Replace the VM dispatch loop with a threaded dispatch table once Rust
       stabilizes the `become` keyword for guaranteed tail calls.
 

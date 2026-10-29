@@ -4299,6 +4299,10 @@ fn walk_pruned<'e>(e: &'e HExpr, f: &mut impl FnMut(&'e HExpr) -> bool) {
     }
 }
 
+/// The most computed field defaults that one fill function evaluates: one
+/// per bit of its mask that fits the `i32` of `Op::LoadInt`.
+const FILL_BITS: usize = 31;
+
 /// Emits constants and helper functions for runtime type descriptors.
 struct DescCode<'p> {
     cp: &'p CheckedProgram,
@@ -4336,13 +4340,34 @@ impl reflect::DescSink for DescCode<'_> {
         (self.prog.desc_templates.len() - 1) as u32
     }
 
-    fn field_fill(&mut self, def: TypeDefId, index: u32, helper: FnId) -> Option<u32> {
-        let proto = (*self.fn_protos.get(helper as usize)?)?;
-        let idx = u16::try_from(index).ok()?;
+    fn struct_fill(&mut self, def: TypeDefId, fields: &[(u32, FnId)]) -> Vec<Option<(u32, u8)>> {
         let file = self.cp.types[def as usize].span.file;
-        // r0 holds the struct; r1 holds the evaluated default value.
-        let code = vec![Op::CallDirect { base: 1, proto }, Op::SetField { obj: 0, idx, src: 1 }, Op::RetUnit];
-        Some(self.add(file, 1, 2, code))
+        let fills: Vec<_> =
+            fields.iter().map(|&(index, helper)| Some((u16::try_from(index).ok()?, (*self.fn_protos.get(helper as usize)?)?))).collect();
+        let mut out = vec![None; fields.len()];
+        let present: Vec<usize> = (0..fields.len()).filter(|&i| fills[i].is_some()).collect();
+        for group in present.chunks(FILL_BITS) {
+            // r0 holds the struct and r1 the mask; r2 tests a bit; r3 holds
+            // the evaluated default value.
+            let mut code = Vec::with_capacity(6 * group.len() + 1);
+            for (bit, &i) in group.iter().enumerate() {
+                let (idx, proto) = fills[i].unwrap();
+                code.extend([
+                    Op::LoadInt { dst: 2, v: 1 << bit },
+                    Op::BitAnd { dst: 2, a: 1, b: 2 },
+                    Op::EqIK { dst: 2, a: 2, k: 0 },
+                    Op::JmpIf { cond: 2, off: 2 },
+                    Op::CallDirect { base: 3, proto },
+                    Op::SetField { obj: 0, idx, src: 3 },
+                ]);
+            }
+            code.push(Op::RetUnit);
+            let fill = self.add(file, 2, 4, code);
+            for (bit, &i) in group.iter().enumerate() {
+                out[i] = Some((fill, bit as u8));
+            }
+        }
+        out
     }
 
     fn set_fill(&mut self) -> u32 {

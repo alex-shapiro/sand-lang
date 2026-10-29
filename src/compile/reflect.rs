@@ -16,7 +16,7 @@
 
 use crate::check::CheckedProgram;
 use crate::check::persist::PMap;
-use crate::types::{FnId, Opaque, PARAM_PLACEHOLDER, Ty, TyList, TypeArena, TypeDefId, TypeDefKind, TypeId, TypePrinter};
+use crate::types::{FieldDef, FnId, Opaque, PARAM_PLACEHOLDER, Ty, TyList, TypeArena, TypeDefId, TypeDefKind, TypeId, TypePrinter};
 use crate::vm::value::{DescTemplate, FieldDefault, MAX_DESC_DEPTH, TypeDesc, truncate_type_name};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -41,13 +41,17 @@ pub(crate) struct DescCache {
     consts: PMap<Key, u32>,
     /// Template indices for parameterized reflected types.
     templates: PMap<Key, u32>,
-    /// Helper function prototypes for computed field defaults, keyed by `(def, field_index)`.
-    field_fills: PMap<(TypeDefId, u32), u32>,
+    /// The fills of the computed field defaults of structs.
+    struct_fills: PMap<TypeDefId, StructFills>,
     /// Helper function prototype that populates a set from a list.
     set_fill: Option<u32>,
     /// Work units consumed during the current compilation.
     total: usize,
 }
+
+/// For each field of a struct with a computed default: the prototype that
+/// fills the field and the field's bit in the prototype's mask.
+type StructFills = Arc<[Option<(u32, u8)>]>;
 
 /// Emits constants, templates, and helper functions referenced by type descriptors.
 pub(crate) trait DescSink {
@@ -55,8 +59,12 @@ pub(crate) trait DescSink {
     fn constant(&mut self, desc: Arc<TypeDesc>) -> u32;
     /// Adds `t` to the program templates and returns its template index.
     fn template(&mut self, t: DescTemplate) -> u32;
-    /// Emits a helper function that evaluates `helper` and assigns the result to field `index` of struct `def`.
-    fn field_fill(&mut self, def: TypeDefId, index: u32, helper: FnId) -> Option<u32>;
+    /// Emits helper functions that evaluate the computed defaults of struct
+    /// `def`, given as `(field index, helper)`. Each helper function captures
+    /// the struct and a mask of the fields to fill, and fills them in order.
+    /// Returns, for each of `fields`, its helper function and its bit in the
+    /// mask, or `None` if it has none.
+    fn struct_fill(&mut self, def: TypeDefId, fields: &[(u32, FnId)]) -> Vec<Option<(u32, u8)>>;
     /// Emits a helper function that inserts elements from a captured list into a captured set.
     fn set_fill(&mut self) -> u32;
 }
@@ -266,13 +274,20 @@ impl Builder<'_, '_> {
         }
     }
 
-    fn field_fill(&mut self, d: TypeDefId, index: u32, helper: FnId) -> Option<u32> {
-        if let Some(&p) = self.cache.field_fills.get(&(d, index)) {
-            return Some(p);
+    /// The fill of each computed default of struct `d`, by field index.
+    fn struct_fills(&mut self, d: TypeDefId, fields: &[FieldDef]) -> StructFills {
+        if let Some(f) = self.cache.struct_fills.get(&d) {
+            return f.clone();
         }
-        let p = self.sink.field_fill(d, index, helper)?;
-        self.cache.field_fills.insert((d, index), p);
-        Some(p)
+        let computed: Vec<(u32, FnId)> =
+            fields.iter().enumerate().filter_map(|(i, f)| Some((i as u32, f.default.filter(|_| f.const_default.is_none())?))).collect();
+        let mut fills = vec![None; fields.len()];
+        for ((i, _), fill) in computed.iter().zip(self.sink.struct_fill(d, &computed)) {
+            fills[*i as usize] = fill;
+        }
+        let fills: Arc<[_]> = fills.into();
+        self.cache.struct_fills.insert(d, fills.clone());
+        fills
     }
 
     fn show(&self, t: TypeId) -> String {
@@ -323,6 +338,7 @@ impl Builder<'_, '_> {
         let mut l = None;
         let desc = match &def.kind {
             TypeDefKind::Struct { fields } => {
+                let fills = self.struct_fills(d, fields);
                 let fields = fields
                     .iter()
                     .enumerate()
@@ -330,12 +346,9 @@ impl Builder<'_, '_> {
                         let ft = self.arena.instantiate(f.ty, &def.generics, &args);
                         let (fd, lf) = self.desc(ft);
                         l = min_depth(l, lf);
-                        let default = match (&f.const_default, f.default) {
+                        let default = match (&f.const_default, fills[i]) {
                             (Some(c), _) => FieldDefault::Const(c.clone()),
-                            (None, Some(helper)) => match self.field_fill(d, i as u32, helper) {
-                                Some(fill) => FieldDefault::Computed(fill),
-                                None => FieldDefault::None,
-                            },
+                            (None, Some((fill, bit))) => FieldDefault::Computed { fill, bit },
                             (None, None) => FieldDefault::None,
                         };
                         (name_of(f.name), fd, default)

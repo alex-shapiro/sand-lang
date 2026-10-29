@@ -18,7 +18,7 @@ const MIN_PRUNE: usize = 8;
 
 /// Whether `it` is an iterator reading map or set `h` in place.
 fn reads_in_place(heap: &Heap, it: u32, h: u32) -> bool {
-    matches!(heap.get(Value::Obj(it)), Obj::IterFn(IterSrc::Map { map: o, .. } | IterSrc::Set { set: o, .. }) if *o == h)
+    matches!(heap.weak(it), Some(Obj::IterFn(IterSrc::Map { map: o, .. } | IterSrc::Set { set: o, .. })) if *o == h)
 }
 
 /// The first live entry of map `map` at or after `slot`, and its slot.

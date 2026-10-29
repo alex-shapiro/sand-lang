@@ -640,8 +640,8 @@ pub struct SetObj {
 /// The iterators that may be reading a map or set in place: handles of
 /// `Obj::IterFn`s, held weakly (not traced). A handle is stale once its
 /// iterator is exhausted, has moved to a copy, or was collected (and its
-/// slot maybe reused): `Vm::unpin` checks each one is still an iterator
-/// reading this object in place. A copy of the map or set has no pins.
+/// slot maybe reused or given back): `Vm::unpin` checks each one is still an
+/// iterator reading this object in place. A copy of the map or set has no pins.
 #[derive(Debug, Default)]
 pub struct Pins {
     pub its: Vec<u32>,
@@ -1111,8 +1111,13 @@ pub enum FieldDefault {
     None,
     /// Compile-time constant shared across [`DescTemplate`] instantiations.
     Const(Arc<crate::types::ConstVal>),
-    /// Prototype index of the helper function that evaluates a non-constant default and writes it to the captured struct.
-    Computed(u32),
+    /// A non-constant default, evaluated by helper function `fill` after
+    /// decoding. `fill` captures the struct and a mask of the fields to fill,
+    /// in which this field is bit `bit`.
+    Computed {
+        fill: u32,
+        bit: u8,
+    },
 }
 
 /// Enum variant descriptor: `(name, runtime_id, payload_types, payload_field_names)`.
