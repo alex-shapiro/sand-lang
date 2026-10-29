@@ -1123,7 +1123,10 @@ mod tests {
         assert_eq!((custom("db", "drop"), custom("db", "truncate"), custom("db", "select")), (Deny, Deny, Allow));
         assert_eq!((custom("fs", "delete"), custom("fs", "*")), (Deny, Deny));
         assert_eq!((custom("kv", "*"), custom("kv", "get")), (Allow, Allow));
-        assert_eq!(p.rules.to_string(), "allow custom *\ndeny custom db drop\ndeny custom db truncate\ndeny custom fs\nallow custom kv \"*\"\n");
+        assert_eq!(
+            p.rules.to_string(),
+            "allow custom *\ndeny custom db drop\ndeny custom db truncate\ndeny custom fs\nallow custom kv \"*\"\n"
+        );
         assert_eq!(
             errors("deny custom db drop*\ndeny custom a*b"),
             [
@@ -1138,7 +1141,10 @@ mod tests {
         let p = parse("allow http tls plaintext *\ndeny http PLAINTEXT api.example.com\nlet t = plaintext\ndeny net {t} Tls evil.com");
         assert_eq!(http(&p, "GET", "http://api.example.com/"), Deny);
         assert_eq!(decide(&p, Capability::Net { host: "evil.com".into(), port: 80, tls: false }), Deny);
-        assert_eq!(p.rules.to_string(), "allow http tls plaintext *\ndeny http plaintext api.example.com\ndeny net tls plaintext evil.com\n");
+        assert_eq!(
+            p.rules.to_string(),
+            "allow http tls plaintext *\ndeny http plaintext api.example.com\ndeny net tls plaintext evil.com\n"
+        );
         assert_eq!(
             errors("deny http http evil.com\ndeny net TCP evil.com\nallow http GET https a.com\nallow net ssl a.com"),
             [
@@ -1350,8 +1356,32 @@ mod tests {
     fn word() -> impl proptest::strategy::Strategy<Value = String> {
         use proptest::strategy::Strategy;
         let words = [
-            "a", "B", "\"a b\"", "\"*\"", "*", "x*", "\"x\"*", "\"{x}\"", "\"tls\"", "tls.", "\"plaintext\"", "\"a,b\"", "\"\\\"q\"",
-            "é", "\"\"", "\"%2F\"", "%41", "\"..\"", "\"#\"", "\"#a\"", "\"#\"*", "a#", "\"http\"", "\"GET\"", "8", "32",
+            "a",
+            "B",
+            "\"a b\"",
+            "\"*\"",
+            "*",
+            "x*",
+            "\"x\"*",
+            "\"{x}\"",
+            "\"tls\"",
+            "tls.",
+            "\"plaintext\"",
+            "\"a,b\"",
+            "\"\\\"q\"",
+            "é",
+            "\"\"",
+            "\"%2F\"",
+            "%41",
+            "\"..\"",
+            "\"#\"",
+            "\"#a\"",
+            "\"#\"*",
+            "a#",
+            "\"http\"",
+            "\"GET\"",
+            "8",
+            "32",
         ];
         proptest::sample::select(words.to_vec()).prop_map(str::to_string)
     }
@@ -1363,8 +1393,22 @@ mod tests {
         let path = || prop::collection::vec(word(), 0..4).prop_map(|w| w.iter().map(|n| format!("/{n}")).collect::<String>());
         let root = prop::sample::select(vec!["/r", "./", "~", "**", "\"/my dir\""]);
         let host = prop::sample::select(vec![
-            "a.com", "*.a.com", "*", "10.0.0.1", "[::1]", "[::]", "10.0.0.1:80", "[::1]:8080", "tls.", "plaintext.:80", "10.0.0.0/8",
-            "delete.", "http.", "\"get\"", "10.0.0.1/32", "[::1]/128",
+            "a.com",
+            "*.a.com",
+            "*",
+            "10.0.0.1",
+            "[::1]",
+            "[::]",
+            "10.0.0.1:80",
+            "[::1]:8080",
+            "tls.",
+            "plaintext.:80",
+            "10.0.0.0/8",
+            "delete.",
+            "http.",
+            "\"get\"",
+            "10.0.0.1/32",
+            "[::1]/128",
         ]);
         let transport = prop::sample::select(vec!["", "tls ", "plaintext ", "tls plaintext ", "PLAINTEXT "]);
         let methods = prop::sample::select(vec!["", "GET ", "post ", "M-SEARCH "]);
@@ -1543,7 +1587,10 @@ mod tests {
             ]
         );
         assert_eq!(errors("allow stdin now"), ["1:13: `allow stdin` takes no arguments"]);
-        assert_eq!(errors("deny http plaintext"), ["1:11: `deny http` needs a URL pattern after its transports, e.g. `api.example.com/v1`"]);
+        assert_eq!(
+            errors("deny http plaintext"),
+            ["1:11: `deny http` needs a URL pattern after its transports, e.g. `api.example.com/v1`"]
+        );
         assert_eq!(
             errors("allow net https://api.example.com/v1\nallow net http://localhost:8080"),
             [

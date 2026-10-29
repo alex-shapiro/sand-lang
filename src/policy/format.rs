@@ -158,15 +158,53 @@ mod tests {
     /// A word of raw and quoted pieces, some of them parts of keywords.
     fn split_word() -> impl Strategy<Value = String> {
         let pieces = [
-            "pl", "aintext", "\"pl\"", "\"aintext\"", "t", "ls", "\"t\"", "\"ls\"", "GE", "T", "\"GE\"", "\"T\"", "\"\"", "{x}", "{y}", "*",
-            "\"*\"", "a.com", "\".com\"", "#", "\"#\"", ":80", "/8", "10.0.0.1", "\"10.0.0.1\"", "/p",
+            "pl",
+            "aintext",
+            "\"pl\"",
+            "\"aintext\"",
+            "t",
+            "ls",
+            "\"t\"",
+            "\"ls\"",
+            "GE",
+            "T",
+            "\"GE\"",
+            "\"T\"",
+            "\"\"",
+            "{x}",
+            "{y}",
+            "*",
+            "\"*\"",
+            "a.com",
+            "\".com\"",
+            "#",
+            "\"#\"",
+            ":80",
+            "/8",
+            "10.0.0.1",
+            "\"10.0.0.1\"",
+            "/p",
         ];
         let word = prop::collection::vec(prop::sample::select(pieces.to_vec()), 1..4).prop_map(|p| p.concat());
         word.prop_filter("not a comment", |w| !w.starts_with('#'))
     }
 
     fn set_value() -> impl Strategy<Value = &'static str> {
-        prop::sample::select(vec!["pl", "\"pl\"", "aintext", "\"aintext\"", "T", "\"T\"", "tls", "\"tls\"", "GET", "\"GET\"", "a.com", "*", "\"*\""])
+        prop::sample::select(vec![
+            "pl",
+            "\"pl\"",
+            "aintext",
+            "\"aintext\"",
+            "T",
+            "\"T\"",
+            "tls",
+            "\"tls\"",
+            "GET",
+            "\"GET\"",
+            "a.com",
+            "*",
+            "\"*\"",
+        ])
     }
 
     proptest! {
@@ -219,7 +257,11 @@ mod tests {
         let src = "allow http PLAINTEXT get a.com\nallow http \"get\" \"tls\"/x\nallow net TLS Plaintext a.com\n";
         let want = "allow http plaintext GET a.com\nallow http \"get\" \"tls\"/x\nallow net tls plaintext a.com\n";
         // Quotes stay where a set reference joins them with other text, and on set values.
-        for src in ["let x = aintext\nallow net \"pl\"{x} a.com\n", "let t = T\ndeny http \"GE\"{t} a.com\n", "let x = \"pl\"\nallow net {x}aintext a.com\n"] {
+        for src in [
+            "let x = aintext\nallow net \"pl\"{x} a.com\n",
+            "let t = T\ndeny http \"GE\"{t} a.com\n",
+            "let x = \"pl\"\nallow net {x}aintext a.com\n",
+        ] {
             assert_eq!(format_policy(src).unwrap(), src);
         }
         assert_eq!(format_policy(src).unwrap(), want);
