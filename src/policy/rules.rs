@@ -601,21 +601,34 @@ impl RulePolicy {
         }
         // The address rules: for an HTTP request, the net and http rules for
         // addresses that match it, and for a raw connection the net rules.
+        // Each reading of an HTTP path that a server may split at encoded
+        // separators is decided as a whole, and both must allow.
         let index = self.others();
-        let address_rule = if let Capability::Http { .. } = request {
-            self.http_best(request, &[], |f| index.http.find_ip(ip, addr.port(), f))
-        } else {
-            let transport = Transports::of(uses_tls(request));
-            let mut best = Best::new(self, &[]);
-            index.resolved.find_ip(ip, addr.port(), |is_alt, e| {
-                if applies(e.decision, is_alt) && e.transports.contains(transport) {
-                    best.offer(e.rank.spec(0), e.decision, e.rule);
-                }
+        if let Capability::Http { host, port, path, .. } = request {
+            let dest = Dest::new(host, *port);
+            let (names, alt) = url_segments(path);
+            return std::iter::once(names).chain(alt).try_for_each(|names| {
+                let decider = self.http_reading(request, &names, &[], &|f| index.http.find(&dest, f));
+                let address = self.http_reading(request, &names, &[], &|f| index.http.find_ip(ip, addr.port(), f));
+                self.resolve(decider, address)
             });
-            best.verdict()
-        };
-        let Some((decision, rule)) = address_rule else { return Ok(()) };
-        if let Some((d, decider)) = self.verdict(request, PathSpace::Host, &[]).filter(|&(d, _)| d != Decision::Deny) {
+        }
+        let transport = Transports::of(uses_tls(request));
+        let mut best = Best::new(self, &[]);
+        index.resolved.find_ip(ip, addr.port(), |is_alt, e| {
+            if applies(e.decision, is_alt) && e.transports.contains(transport) {
+                best.offer(e.rank.spec(0), e.decision, e.rule);
+            }
+        });
+        self.resolve(self.verdict(request, PathSpace::Host, &[]), best.verdict())
+    }
+
+    /// Decides a resolved address by the verdict of the request (`decider`)
+    /// and the verdict of the address rules (`address`); see
+    /// [`RulePolicy::check_resolved`].
+    fn resolve(&self, decider: Option<(Decision, usize)>, address: Option<(Decision, usize)>) -> Result<(), Option<usize>> {
+        let Some((decision, rule)) = address else { return Ok(()) };
+        if let Some((d, decider)) = decider.filter(|&(d, _)| d != Decision::Deny) {
             // By host specificity alone, whatever the tiers: a domain pattern
             // does not vouch for addresses that a default rule denies.
             let key = |i: usize, d: Decision| resolution_key(&self.rules[i].kind, d);
@@ -665,7 +678,7 @@ impl RulePolicy {
             Capability::NetAddr { .. } => {}
             Capability::Http { host, port, .. } => {
                 let dest = Dest::new(host, *port);
-                return self.http_best(cap, exclude, |f| index.http.find(&dest, f));
+                return self.http_best(cap, exclude, &|f| index.http.find(&dest, f));
             }
             Capability::NetListen(addr) => {
                 for &(ref pattern, d, rule) in &index.listen {
@@ -754,20 +767,23 @@ impl RulePolicy {
     }
 
     /// The most specific rule that matches the HTTP request `cap` in the
-    /// groups that `find` gives. A path with encoded separators
-    /// gets the stricter decision of its two readings, since a server may
-    /// split it at those separators.
-    fn http_best(&self, cap: &Capability, exclude: &[usize], find: impl Fn(&mut dyn FnMut(bool, &u32))) -> Option<(Decision, usize)> {
-        let Capability::Http { method, path, .. } = cap else { return None };
+    /// groups that `find` gives. A path with encoded separators gets the
+    /// stricter decision of its two readings, since a server may split it
+    /// at those separators.
+    fn http_best(&self, cap: &Capability, exclude: &[usize], find: &FindGroups) -> Option<(Decision, usize)> {
+        let Capability::Http { path, .. } = cap else { return None };
         let (names, alt) = url_segments(path);
-        let tls = uses_tls(cap);
+        let verdicts = std::iter::once(names).chain(alt).map(|names| self.http_reading(cap, &names, exclude, find));
+        verdicts.reduce(|main, alt| if strictness(alt) > strictness(main) { alt } else { main }).flatten()
+    }
+
+    /// The most specific rule that matches the HTTP request `cap` with the
+    /// path `names` in the groups that `find` gives.
+    fn http_reading(&self, cap: &Capability, names: &[String], exclude: &[usize], find: &FindGroups) -> Option<(Decision, usize)> {
+        let Capability::Http { method, .. } = cap else { return None };
         let mut best = Best::new(self, exclude);
-        self.http_verdict(&find, method, tls, &names, &mut best);
-        let Some(alt) = alt else { return best.verdict() };
-        let mut other = Best::new(self, exclude);
-        self.http_verdict(&find, method, tls, &alt, &mut other);
-        let (main, alt) = (best.verdict(), other.verdict());
-        if strictness(alt) > strictness(main) { alt } else { main }
+        self.http_verdict(find, method, uses_tls(cap), names, &mut best);
+        best.verdict()
     }
 
     fn http_verdict(&self, find: &FindGroups, method: &str, tls: bool, names: &[String], best: &mut Best<'_>) {

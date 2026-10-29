@@ -304,6 +304,24 @@ fn http_rules_for_addresses_decide_the_addresses_that_names_resolve_to() {
     assert_eq!(p.check_resolved(&get("GET", "evil.example", "/"), "0.0.0.0:80".parse().unwrap()), Decision::Deny);
 }
 
+/// A server may split a path at `%2F`, so each reading is decided as a
+/// whole, and the stricter decision holds.
+#[test]
+fn both_readings_of_an_encoded_path_decide_its_addresses() {
+    let p = RulePolicy::new().allow_http("tls plaintext *").allow_http("plaintext api.example.com/*.txt").deny_net("10.0.0.0/8");
+    let get = |path: &str| Capability::Http {
+        method: "GET".into(),
+        scheme: "http".into(),
+        host: "api.example.com".into(),
+        port: 80,
+        path: path.into(),
+    };
+    let at: SocketAddr = "10.0.0.5:80".parse().unwrap();
+    assert_eq!(p.check_resolved(&get("/a/b.txt"), at), Decision::Deny);
+    assert_eq!(p.check_resolved(&get("/a%2Fb.txt"), at), Decision::Deny);
+    assert_eq!(p.check_resolved(&get("/b.txt"), at), Decision::Allow, "the exact name outranks the range");
+}
+
 #[test]
 fn explicit_host_rules_allow_the_addresses_they_resolve_to() {
     let p = RulePolicy::new().allow_net("db.internal").allow_net("*.corp.example").deny_net("10.0.0.0/8").deny_net("10.0.0.6");
