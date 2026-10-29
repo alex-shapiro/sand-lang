@@ -1,6 +1,5 @@
 import fs
 
-// `help(fs.Metadata)` shows `modified: Instant?`
 fn last_modified(path: str) -> Instant? {
     fs.metadata(path).ok()?.modified
 }

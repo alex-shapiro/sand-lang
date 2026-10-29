@@ -1,5 +1,3 @@
-// Workaround: no `dyn Shape`, so wrap every implementor in an enum and
-// forward each trait method by hand.
 trait Shape {
     fn area(self) -> float
     fn name(self) -> str

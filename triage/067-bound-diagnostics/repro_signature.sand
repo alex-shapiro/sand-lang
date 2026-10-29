@@ -1,9 +1,7 @@
 struct Index<K: Hash> { keys: Set<K> = Set() }
 
-// Compiles, but no caller can ever construct an `Index<float>`.
 pub fn lookup(index: Index<float>, key: float) -> bool { false }
 
-// Compiles without `T: Hash`; a body that touches `b.items` fails instead.
 pub fn size<T>(b: Index<T>) -> int { 0 }
 
 print("library loaded")

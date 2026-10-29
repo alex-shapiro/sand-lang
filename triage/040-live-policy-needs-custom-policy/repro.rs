@@ -1,10 +1,9 @@
-// Run: `cargo run` in a scratch crate that depends on sandlang and tokio (nothing needs to listen on port 9).
 use sandlang::policy::PolicyFile;
 use sandlang::{Capability, Config, Decision, Engine, MemorySink, RulePolicy};
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
-const RULES: &str = "allow http plaintext *\ndeny http 127.0.0.1/admin [::1]/admin  # keep scripts out of the local admin UI\n";
+const RULES: &str = "allow http plaintext *\ndeny http 127.0.0.1/admin [::1]/admin\n";
 const SRC: &str = "import http\nmatch http.get(\"http://localhost:9/admin\") {\n    Ok(r) => print(\"status \\(r.status)\"),\n    Err(e) => print(\"\\(e)\"),\n}";
 
 fn run(config: Config) -> String {

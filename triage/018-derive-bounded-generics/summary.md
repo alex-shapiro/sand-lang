@@ -1,18 +1,20 @@
-# A bounded generic Rust type cannot derive `SandStruct` if it nests or refers to itself
+# `#[derive(SandStruct)]` fails on bounded generic types that nest or reference `Self`
 
-TODO item 018 (Embedding): "Support fields of type `Self` and nested generic types with…"
+`#[derive(SandStruct)]` and `#[derive(SandEnum)]` fail to compile if a field
+uses a bounded generic type such as `Sorted<T>` where `Sorted<T: Ord>`, or
+`Self` inside a bounded generic type such as `Vec<Self>` in `Tree<K: Ord>`. The
+derive macro substitutes `sandlang::native::Param<N>` for each type parameter
+to describe field types, and `Param<N>` does not implement Rust traits such as
+`Ord`.
 
-**Pain.** I bind a sorted collection `struct Sorted<T: Ord>` with `#[derive(SandStruct)]`. If another derived type holds a `Sorted<T>` field, or if the type has a `Vec<Self>` field, the crate does not compile. The error names `sandlang::native::Param<0>`, a type that I did not write.
+Building `repro.rs` or `repro_self.rs` fails with:
 
-**Why it matters.** `T: Ord` on a sorted or tree type is ordinary Rust. The error does not tell me the workaround: remove the bound from the struct.
-
-**Reproduce.** In a scratch crate that depends on `sandlang`, `cargo build` with `repro.rs` (nested `Sorted<T>`) or `repro_self.rs` (`Tree<K: Ord>` with `children: Vec<Self>`). Both give:
 ```
 error[E0277]: the trait bound `sandlang::native::Param<0>: std::cmp::Ord` is not satisfied
 17 |     members: Sorted<T>,
    |              ^^^^^^^^^ the trait `std::cmp::Ord` is not implemented for `sandlang::native::Param<0>`
 note: required by a bound in `Sorted`
 ```
-These cases compile: `Vec<Self>` in a non-generic type, `Vec<Self>` in an unbounded generic type, and `Sorted<T: Ord>` alone.
 
-**Aspirational.** Both files compile unchanged, and `Sorted<T: Ord>` becomes a Sand type with `T: Ord`.
+Both files should compile without requiring the user to remove trait bounds
+from the struct definition.

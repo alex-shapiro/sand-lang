@@ -1,5 +1,5 @@
 import fs
-// Workaround: test both flags and add a third branch for "neither".
+
 fn walk(dir: str) -> Result<()> {
     for name in fs.list_dir(dir)? {
         let path = fs.join([dir, name])

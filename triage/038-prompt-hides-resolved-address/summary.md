@@ -1,14 +1,19 @@
-# I approve what looks like an internet host, and the script reaches a service on my machine
+# CLI network prompts omit resolved IP addresses and plaintext warnings
 
-TODO item 038 (Policy): "Warn in the CLI prompter before allowing plaintext network connections, and display…"
+If the CLI prompts the user for an HTTP or network connection, the prompt
+displays only the requested URL or hostname. It does not display the resolved
+IP addresses or warn that the connection is unencrypted, so a user who approves
+`http://status-7f000001.nip.io:8765/` grants access to `127.0.0.1:8765` without
+seeing the loopback address.
 
-**Pain.** The prompt asks `allow the script to GET http://status-7f000001.nip.io:8765/?`. I answer `y`, and the script reads my local service on 127.0.0.1. The prompt does not show the resolved address, and with the CLI defaults no rule blocks private addresses. The prompt also gives no warning that the request is unencrypted; it only shows `http://`.
-**Why it matters.** The user decides from the prompt text. A hostname can point anywhere, including a router or an admin UI on the LAN.
+Start a local server with `python3 -m http.server 8765 --bind 127.0.0.1 &` and
+run on a terminal:
 
-**Reproduce.** `python3 -m http.server 8765 --bind 127.0.0.1 &` (needs a working DNS lookup of nip.io), then on a pty:
+```
+$ sand run repro.sand
+sand: allow the script to GET http://status-7f000001.nip.io:8765/? [y]es once, [a]lways, [n]o, [N]ever: y
+status 200: ...
+```
 
-    (sleep 2; echo y; sleep 2) | script -q /dev/null sand run repro.sand
-    sand: allow the script to GET http://status-7f000001.nip.io:8765/? [y]es once, [a]lways, [n]o, [N]ever: y
-    status 200: router admin page
-
-**Aspirational.** `GET http://status-7f000001.nip.io:8765/ (resolves to 127.0.0.1, a loopback address; unencrypted)?`
+The CLI prompter should display the resolved IP addresses and warn before
+allowing plaintext network connections.

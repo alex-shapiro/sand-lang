@@ -1,2 +1,1 @@
-# The host lets the script move files only inside its own work folder.
 allow write C:/work/in C:/work/out

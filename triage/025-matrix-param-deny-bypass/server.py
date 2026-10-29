@@ -1,5 +1,3 @@
-# Run: python3 -I server.py 18931   (in an empty directory)
-# Serves /admin/secret. Like Tomcat/Spring/Jetty, strips ";params" from each path segment, then resolves dot segments.
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -18,7 +16,7 @@ def normalize(raw):
     return "/" + "/".join(out)
 
 
-class H(BaseHTTPRequestHandler):
+class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = normalize(self.path)
         body = (
@@ -34,8 +32,8 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def log_message(self, *a):
+    def log_message(self, *args):
         pass
 
 
-HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+HTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()

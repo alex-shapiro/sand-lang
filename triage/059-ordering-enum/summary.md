@@ -1,18 +1,21 @@
-# Comparing two time spans gives me a magic int that `match` cannot check
+# `time.Span.compare` returns `-1`, `0`, or `1` instead of an `Ordering` enum
 
-TODO item 059 (Language): "Add an `Ordering` enum to the prelude and return it…"
+`time.Span` does not implement `Ord`, and `time.Span.compare` returns `-1`,
+`0`, or `1` as an `int`. Because the return type is `int`, a `match` expression
+requires a wildcard `_` arm, and comparing the result against an invalid
+integer constant such as `2` compiles without warnings.
 
-**Pain.** `Span` does not implement `Ord`, so `a.compare(b)` is the only way to order two spans. It returns `-1`, `0`, or `1`. A `match` on it needs a dead `_` arm, and a wrong constant (`== 2`) compiles and is always false. The Rust idiom `Less => … Equal => … Greater => …` binds `Less` as a variable and fails with `unreachable pattern`.
+Run:
 
-**Why it matters.** Rust and Swift users expect an `Ordering` value. With an int, the compiler cannot find a missing or impossible case.
-
-**Reproduce.**
 ```
-sand run repro.sand            # workaround
+$ sand run repro.sand
 longer
-longer (typo 2): false         # no warning from check or lint
-sand check aspirational.sand
-error: unreachable pattern     (at `Equal =>` and `Greater =>`)
+longer (typo 2): false
+
+$ sand check aspirational.sand
+error: unreachable pattern
 ```
 
-**Aspirational.** `aspirational.sand`: `compare` returns `Ordering`, and the three-arm `match` is exhaustive. Today `Span.compare` is the only standard API that returns an ordering int, so the scope is small.
+Adding a prelude `Ordering` enum with `Less`, `Equal`, and `Greater` variants
+and returning it from `time.Span.compare` makes three-way comparisons
+exhaustive without a wildcard arm, as in `aspirational.sand`.

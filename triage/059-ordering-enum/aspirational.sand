@@ -1,6 +1,5 @@
-// `compare` returns the prelude enum `Ordering { Less, Equal, Greater }`;
-// the match is exhaustive without a wildcard.
 import time
+
 let a = time.Span(hours: 25)
 let b = time.Span(days: 1)
 let verdict = match a.compare(b) {

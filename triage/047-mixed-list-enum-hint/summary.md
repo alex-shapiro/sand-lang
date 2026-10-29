@@ -1,15 +1,17 @@
-# The mixed-type list hint suggests a struct or tuple when only an enum works
+# Mixed-type list diagnostics suggest structs and tuples but omit enums
 
-TODO item 047 (Diagnostics): "Suggest an enum in addition to a struct or tuple…"
+If a list literal contains elements of different types such as
+`[Circle(r: 1.0), Square(s: 2.0)]`, the type mismatch diagnostic suggests using
+a struct or a tuple, neither of which supports iterating over a heterogeneous
+collection.
 
-**Pain.** I put a `Circle` and a `Square` in one list. The error tells me to "use a struct or a tuple for mixed values". Neither one lets me iterate a list of different shapes. The spec says to use an enum, but the error does not mention it.
+Run:
 
-**Why it matters.** LLMs follow the hint literally. Here the hint sends them to a wrong design and costs at least one more round trip.
-
-**Reproduce.**
 ```
-sand check repro.sand
+$ sand check repro.sand
 error: type mismatch: expected Circle, found Square; all elements of a list have one
        type, so use a struct or a tuple for mixed values
 ```
-**Aspirational.** The hint also suggests an enum. `aspirational.sand` shows the enum version, which runs and prints `3.14` and `4.0`.
+
+The diagnostic hint should also suggest wrapping the variants in an enum, as
+shown in `aspirational.sand`.

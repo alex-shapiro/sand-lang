@@ -1,14 +1,17 @@
-# `help` shows type names that I cannot use as written
+# `help` displays types from other modules without their module prefix
 
-TODO item 051 (Diagnostics): "Qualify types from other modules in `help` output…"
+`help(fs.Metadata)` prints `modified: Instant?` instead of
+`modified: time.Instant?`, and `help(http.Request)` prints `conn: Conn` instead
+of `conn: net.Conn`. Using the unqualified type name in a script that imports
+only `fs` or `http` fails with `unknown type`.
 
-**Pain.** `help(fs.Metadata)` shows `modified: Instant?`, and `help(http.Request)` shows `conn: Conn` and `-> Result<Json, Error>`. I copy `Instant?` into my function signature and get `unknown type Instant`. The type is `time.Instant`, and the error gives no hint.
+Run:
 
-**Why it matters.** LLMs copy signatures from `help` output into their code. Unqualified names from other modules cause a failed check and a guess about the correct module.
-
-**Reproduce.**
 ```
-sand check repro.sand
-error: unknown type `Instant`   --> repro.sand:4:32
+$ sand check repro.sand
+error: unknown type `Instant`   --> repro.sand:3:32
 ```
-**Aspirational.** `help` prints `modified: time.Instant?`, so the copied type resolves (`aspirational.sand` passes `sand check`).
+
+`help` should qualify types defined in other modules with their module name so
+that signatures copied from `help` output are valid as written, as in
+`aspirational.sand`.

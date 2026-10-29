@@ -1,6 +1,5 @@
 import json
-// `json.decode` calls `init` with the object's members as named arguments,
-// and an `Err` from `init` fails the decode.
+
 struct Window {
     pub start: int
     pub end: int

@@ -1,4 +1,3 @@
-// Workaround: wrap every defaulted function or constructor in a lambda.
 fn greet(name: str, greeting: str = "Hello") -> str { "\(greeting), \(name)!" }
 print(["disk full", "timeout"].map(m => Error(m)))
 print(["Ann", "Bo"].map(n => greet(n)))

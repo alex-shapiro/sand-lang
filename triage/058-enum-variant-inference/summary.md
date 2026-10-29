@@ -1,21 +1,21 @@
-# I must spell out the full enum path for every variant, even where the type is known
+# Enum variants in expressions require full qualification even if the expected type is known
 
-TODO item 058 (Language): "Infer the enum type of a variant expression from the expected type…"
+Pattern matching infers the enum type of unqualified variants such as `Red =>`,
+but expressions reject unqualified variants such as `Write` and leading-dot
+variants such as `.Write`. Callers must qualify every enum variant with its
+module and type identifier, such as `fs.Mode.Write`, `time.Unit.Month`, and
+`Color.Green`, in function arguments, annotated bindings, and comparisons.
 
-**Pain.** `match` lets me write `Red =>`, but an argument, an annotated `let`, or a comparison rejects `Red` with `undefined name`. I must write `fs.Mode.Write`, `time.Unit.Month`, and `Color.Green` at every use. Swift users write `.write`, Rust users import the variants; neither works.
+Run:
 
-**Why it matters.** Calls into `fs` and `time` with option enums get long and noisy. The rule differs between patterns and expressions, so the first try of an LLM or a new user fails to compile.
-
-**Reproduce.**
 ```
-sand run repro.sand --allow='write /tmp/triage-lang1' --no-prompt   # full paths: prints P2M14D, red true
-sand check aspirational.sand
+$ sand check aspirational.sand
 error: undefined name `Write`
 error: undefined name `Month`
 error: undefined name `Day`
 error: undefined name `Green`
 error: undefined name `Red`
 ```
-`fs.open(path, .Write)` fails with `expected expression, found '.'`.
 
-**Aspirational.** `aspirational.sand`: the expected type selects the enum, as patterns already do.
+Inferring the enum type of a variant expression from the expected type allows
+`aspirational.sand` to compile without repeating the enum path at each use.

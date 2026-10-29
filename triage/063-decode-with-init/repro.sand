@@ -1,6 +1,5 @@
 import json
-// Workaround: decode into a copy of each struct without `init`,
-// then call `init` by hand for every validated field.
+
 struct Window {
     pub start: int
     pub end: int

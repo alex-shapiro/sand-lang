@@ -1,5 +1,3 @@
-// A list of `dyn Shape` holds any type that implements `Shape`.
-// Each call dispatches through the value's own `impl`.
 trait Shape {
     fn area(self) -> float
     fn name(self) -> str

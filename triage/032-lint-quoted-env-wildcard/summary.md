@@ -1,17 +1,23 @@
-# `deny env "AWS_*"` leaks AWS secrets, and `sand lint` says nothing
+# `sand lint` misses quoted wildcards in `env` rules and `*.localhost` rules overridden by `deny net localhost`
 
-TODO item 032 (Policy): "Expand `lint_policy` to detect shadowed and redundant `env`, `stdin`…"
+Quoting a pattern in a policy file turns `*` into a literal character, so
+`deny env "AWS_*"` matches only the literal variable `AWS_*` and allows the
+script to read `AWS_SECRET_ACCESS_KEY`. Similarly, `deny net localhost`
+overrides `allow net *.localhost` at runtime. `lint_policy` reports neither
+issue, and for `env`, `stdin`, `stdout`, `stderr`, `timezone`, `custom`, and
+`listen` rules it checks only for exact duplicates.
 
-**Pain.** I write `deny env "AWS_*"` to keep cloud credentials out. The quotes make `*` a literal character, so the rule matches only a variable named `AWS_*`, and the script reads `AWS_SECRET_ACCESS_KEY`. In the same way, `deny net localhost` silently overrides `allow net *.localhost`, so my dev servers are unreachable. `sand lint` warns about neither.
-**Why it matters.** For `env`, `stdin`, `stdout`, `stderr`, `timezone`, `custom`, and `listen` rules, the linter reports only exact duplicates. Shell users and LLMs often quote wildcards, and here the result is a credential leak.
+Run:
 
-**Reproduce.**
+```
+$ sand lint repro.policy localhost.policy
+$ AWS_SECRET_ACCESS_KEY=hunter2 sand run repro.sand --policy=repro.policy --no-prompt
+HOME: /Users/alex
+AWS_SECRET_ACCESS_KEY: hunter2
+$ sand run localhost.sand --policy=localhost.policy --no-prompt
+app.localhost:8080: permission_denied: permission denied: connect to app.localhost:8080 (plaintext)
+```
 
-    sand lint repro.policy localhost.policy        # no output, exit 0
-    AWS_SECRET_ACCESS_KEY=hunter2 sand run repro.sand --policy=repro.policy --no-prompt
-    HOME: /Users/alex
-    AWS_SECRET_ACCESS_KEY: hunter2                 # with unquoted AWS_*: <denied>
-    sand run localhost.sand --policy=localhost.policy --no-prompt
-    app.localhost:8080: permission_denied: permission denied: connect to app.localhost:8080 (plaintext)
-
-**Aspirational.** Lint warns that `"AWS_*"` matches only the literal name and suggests `AWS_*`. It reports `allow net *.localhost` as `overridden-rule`.
+`lint_policy` should warn if a quoted literal contains `*` and report shadowed
+and redundant rules across all rule kinds, including `*.localhost` rules
+overridden by `localhost`.

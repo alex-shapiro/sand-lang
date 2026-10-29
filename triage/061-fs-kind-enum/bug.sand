@@ -1,6 +1,5 @@
 import fs
-// The natural walk: "not a file" means "a directory". A FIFO, socket, or device
-// has `is_file == false` and `is_dir == false`, so the walk calls `list_dir` on it.
+
 fn walk(dir: str) -> Result<()> {
     for name in fs.list_dir(dir)? {
         let path = fs.join([dir, name])

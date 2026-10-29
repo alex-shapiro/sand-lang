@@ -1,6 +1,3 @@
-// `Bag<T>` in the signature implies `T: Hash`, so the body can use the set.
-// A bad annotation, such as `Bag<float>` or `Set<(float, float)>`, gets one
-// error at the annotation itself.
 struct Bag<T: Hash> { items: Set<T> = Set() }
 
 fn first<T>(b: Bag<T>) -> T? { b.items.to_list().first() }

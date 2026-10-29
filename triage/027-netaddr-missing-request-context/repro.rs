@@ -1,4 +1,3 @@
-// Run: start ../025-matrix-param-deny-bypass/server.py on port 18931, then build this as a bin in a crate with deps sandlang (path) and tokio (features ["rt"]).
 use sandlang::{Capability, Config, Engine, MemorySink, RulePolicy};
 
 const SCRIPT: &str = r#"
@@ -9,7 +8,6 @@ match http.get("http://localhost:18931/admin/secret") {
 }
 "#;
 
-/// "Allow GET anywhere, but never reach the admin path of the loopback service."
 fn rules() -> RulePolicy {
     RulePolicy::standard()
         .allow_http("plaintext GET *")
@@ -32,10 +30,10 @@ fn main() {
     println!("Same RulePolicy behind an audit-logging CustomPolicy:");
     let inner = rules();
     run(Config::new().custom_policy(move |cap: &Capability| {
-        let d = inner.check(cap);
+        let decision = inner.check(cap);
         if !matches!(cap, Capability::Stdout) {
-            println!("  audit: {cap} -> {d:?}");
+            println!("  audit: {cap} -> {decision:?}");
         }
-        d
+        decision
     }));
 }

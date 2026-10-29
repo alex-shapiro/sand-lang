@@ -1,5 +1,3 @@
-// The expected type (parameter, annotation, or other operand) selects the enum,
-// as it does in patterns. `.Write` (Swift style) is an alternative spelling.
 import fs
 import time
 

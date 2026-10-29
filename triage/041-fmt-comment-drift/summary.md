@@ -1,17 +1,19 @@
-# `sand fmt` moves comments up one statement on each pass after nested tuple indexing
+# `sand fmt` shifts line comments upward on each pass after nested tuple indexing
 
-TODO item 041 (Tooling): "Make `sand fmt` idempotent when a multi-line expression contains line…"
+If a statement contains a nested tuple index such as `grid.0.0`, `sand fmt`
+moves subsequent line comments above the preceding statement on each formatting
+pass. As a result, `sand fmt` is not idempotent and detaches comments from the
+statements they describe.
 
-**Pain.** I write ordinary code that reads nested tuples (`grid.0.0`) and puts a comment above the next line. Each `sand fmt` pass moves each comment up by one statement. After three passes, all comments sit at the top of the file, and they describe the wrong lines.
+Run:
 
-**Why it matters.** The formatter silently destroys the meaning of comments, and `sand fmt --check` fails again after every `sand fmt`. The trigger is the nested tuple index, not a multi-line expression: comments in multi-line calls, chains, lists, and binary expressions stay stable in my tests.
-
-**Reproduce.**
 ```
 cp repro.sand /tmp/g.sand
 for i in 1 2 3; do sand fmt /tmp/g.sand; done; cat /tmp/g.sand
 ```
-Observed after pass 3 (passes 1 and 2 also give different output):
+
+After three passes, all three line comments move above `let a = grid.0.0`:
+
 ```
 let grid = ((1, 2), (3, 4))
 // d is bottom right
@@ -20,6 +22,7 @@ let grid = ((1, 2), (3, 4))
 let a = grid.0.0
 
 let b = grid.0.1
-...
 ```
-One pass on `print(p.0.1)\n// done\np.1.print()` also moves `// done` into the `print(...)` argument list.
+
+`sand fmt` must preserve comment positions and produce identical output on
+repeated passes.

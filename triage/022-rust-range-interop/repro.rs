@@ -1,7 +1,5 @@
-// Run: CARGO_TARGET_DIR=/tmp/triage-embed/target cargo build --bin range022
 use std::ops::{Range, RangeInclusive};
 
-/// A slice of lines to show, such as `View(lines: 10..20)`.
 #[derive(Clone, sandlang::SandStruct)]
 #[sand(module = "editor")]
 struct View {
@@ -10,7 +8,7 @@ struct View {
 }
 
 fn main() {
-    let mut m = sandlang::NativeModule::new("editor");
-    m.bind::<View>();
-    m.function("count", |r: RangeInclusive<i64>| r.count() as i64);
+    let mut module = sandlang::NativeModule::new("editor");
+    module.bind::<View>();
+    module.function("count", |range: RangeInclusive<i64>| range.count() as i64);
 }

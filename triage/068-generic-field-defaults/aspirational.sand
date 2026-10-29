@@ -1,7 +1,5 @@
 import json
 
-// `T.zero()` runs with the `Num` methods of the struct's `T`, in `Stats()`
-// and when `json.decode` fills a missing field.
 struct Stats<T: Num> {
     var total: T = T.zero()
     var count: int = 0

@@ -1,15 +1,8 @@
-// Run on Windows: sand run repro.sand --policy=repro.policy --no-prompt.
-// A second, unrelated process (no Sand involved) repeatedly empties the
-// folder C:/work/out and converts it into a junction that points outside
-// the allowed area, then back to a folder. See attack.md.
 import fs
 
 var i = 0
 while i < 100000 {
     fs.write_text("C:/work/in/item.txt", "data")
-    // The policy allows this rename: both paths resolve under C:/work.
-    // If the destination parent became a junction mid-call, the file may
-    // land under the junction's target, outside C:/work.
     let _ = fs.rename("C:/work/in/item.txt", "C:/work/out/item.txt")
     i += 1
 }

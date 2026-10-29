@@ -1,4 +1,4 @@
 fn count(c: str) -> int { c.repeat(12_000_000).len() }
 
-print(count("x")) // the 12 MB string is garbage after this line
-print(count("y")) // fails: the first string is still live
+print(count("x"))
+print(count("y"))

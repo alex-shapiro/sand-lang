@@ -1,18 +1,22 @@
-# "Always" and "Never" answers cover only the exact request, so the CLI asks again about the same file or folder
+# "Always" and "Never" prompt answers match only the exact capability instead of applying policy rules
 
-TODO item 034 (Policy): "Store \"always\" prompt answers as `RulePolicy` rules rather than exact…"
+The engine stores `PromptAnswer::AllowAlways` and `PromptAnswer::DenyAlways` as
+exact `Capability` values rather than `RulePolicy` rules. Answering "always" to
+`write /tmp/sand-034.txt` prompts again if the script reads the same file, even
+though `allow write` implies `read`. Similarly, answering "Never" to
+`read /etc/ssh` prompts again if the script reads `/etc/ssh/ssh_host_ed25519_key`.
 
-**Pain.** I answer "always" when a script writes `/tmp/sand-034.txt`, and it asks again when the script reads the file back. Worse, I answer "Never" to `read /etc/ssh`, and the next prompt asks me about `/etc/ssh/ssh_host_ed25519_key`.
-**Why it matters.** The policy rule `allow write X` implies read, and `deny read DIR` covers the whole subtree, but the answers do not. Each extra prompt about a secret is one more chance to press `y` by mistake.
+Run on a terminal:
 
-**Reproduce.** (on a pty: `(sleep 1; echo a; sleep 1; echo a; sleep 1) | script -q /dev/null sand run repro.sand`)
+```
+$ sand run repro.sand
+sand: allow the script to write /private/tmp/sand-034.txt? … : a
+sand: allow the script to read /private/tmp/sand-034.txt? … : a
 
-    sand: allow the script to write /private/tmp/sand-034.txt? … : a
-    sand: allow the script to read /private/tmp/sand-034.txt? … : a
-    read back: run 0 …
+$ sand run never_dir.sand
+sand: allow the script to read /private/etc/ssh? … : N
+sand: allow the script to read /private/etc/ssh/ssh_host_ed25519_key? … : n
+```
 
-    sand run never_dir.sand
-    sand: allow the script to read /private/etc/ssh? … : N
-    sand: allow the script to read /private/etc/ssh/ssh_host_ed25519_key? … : n
-
-**Aspirational.** "Never" on `read /etc/ssh` acts like `deny read /etc/ssh` for the rest of the run, and "always" on a write also covers the read.
+Storing "always" and "Never" answers as `RulePolicy` rules ensures that a write
+grant covers reads of the same file and a directory denial covers its subtree.

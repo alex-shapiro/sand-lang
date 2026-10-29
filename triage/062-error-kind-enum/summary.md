@@ -1,18 +1,21 @@
-# A misspelled error kind compiles, so my error handler silently never runs
+# String error kinds allow misspelled `Error.kind` comparisons to compile without warnings
 
-TODO item 062 (Language): "Evaluate replacing string error kinds (`\"not_found\"`, `\"invalid\"`) with…"
+`Error.kind` is a `str` such as `"not_found"` or `"invalid"`. If a script
+compares `e.kind` against a misspelled string such as `"notfound"`, `"NotFound"`,
+or `"not-found"`, `sand check` and `sand lint` report nothing and the error
+handler branch never executes.
 
-**Pain.** To handle a missing file, I compare `e.kind` with a string. If I write `"notfound"`, `"NotFound"`, or `"not-found"` (the Rust, Python, or HTTP habit), `check` and `lint` pass and the fallback never runs. The script fails only when the file is really missing, often in production.
+Run:
 
-**Why it matters.** Error handling is the code that runs least often in testing, so a silent typo there is the most likely to ship. Kinds are also passed to `Error(..., kind:)` and `fail(..., kind:)`, where the same typo goes unseen.
-
-**Reproduce.**
 ```
-sand check bug.sand && sand lint bug.sand    # ok
-sand run bug.sand --allow='read ./' --no-prompt
+$ sand check bug.sand && sand lint bug.sand
+$ sand run bug.sand --allow='read ./' --no-prompt
 error: not_found: cannot read config: not_found: missing-config.json: ...
-sand run repro.sand --allow='read ./' --no-prompt   # exact string "not_found"
+
+$ sand run repro.sand --allow='read ./' --no-prompt
 {}
 ```
 
-**Aspirational.** `aspirational.sand` compares with an enum variant, so a typo is a compile error. The enum needs a case for custom kinds (for example `Other(str)`), because scripts and native modules define their own kinds. A cheaper option: a lint for string literals compared with `Error.kind` that are not standard kinds.
+Replacing string error kinds with an `ErrorKind` enum that includes an
+`Other(str)` variant for custom error kinds turns misspelled error kinds into
+compile-time errors, as in `aspirational.sand`.

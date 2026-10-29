@@ -1,5 +1,3 @@
-// Run: CARGO_TARGET_DIR=/tmp/triage-embed/target cargo build --bin tree018
-/// A search tree whose children are of the same type.
 #[derive(Clone, sandlang::SandStruct)]
 #[sand(module = "coll")]
 struct Tree<K: Ord> {
@@ -8,6 +6,6 @@ struct Tree<K: Ord> {
 }
 
 fn main() {
-    let mut m = sandlang::NativeModule::new("coll");
-    m.bind::<Tree<i64>>();
+    let mut module = sandlang::NativeModule::new("coll");
+    module.bind::<Tree<i64>>();
 }

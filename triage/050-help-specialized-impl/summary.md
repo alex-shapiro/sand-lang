@@ -1,14 +1,19 @@
-# `help` says a type implements a trait that it does not implement
+# `help` lists specialized trait implementations without their target type arguments
 
-TODO item 050 (Diagnostics): "Display the target type arguments for specialized `impl` blocks…"
+If a trait is implemented for a concrete instantiation of a generic type such
+as `impl Describe for [int]`, `help([str])` lists `Describe` in the `Implements`
+section without its target type argument `[int]`. Calling `["a"].describe()`
+then fails type checking because `[str]` does not implement `Describe`.
 
-**Pain.** I implement `Describe` for `[int]` only. `help([str])` lists `Describe` in its `Implements` section without a condition, next to entries like `Eq where T: Eq`. I trust it, call `["a"].describe()`, and get `[str] does not implement Describe`.
+Run:
 
-**Why it matters.** LLMs use `help` to find out what they can call. Here `help` gives wrong information and causes a failed check.
-
-**Reproduce.**
 ```
-sand run repro.sand        # Implements: ... Close where T: Close / Describe
-sand check repro-call.sand # error: [str] does not implement `Describe`
+$ sand run repro.sand
+Implements: ... Close where T: Close / Describe
+
+$ sand check repro-call.sand
+error: [str] does not implement `Describe`
 ```
-**Aspirational.** `help` lists the entry as `Describe for [int]`.
+
+`help` should display the target type arguments for specialized implementations,
+such as `Describe for [int]`.

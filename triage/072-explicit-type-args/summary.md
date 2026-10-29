@@ -1,14 +1,18 @@
-# `json.decode<Config>(text)` fails with an error about chained comparisons
+# Explicit type arguments in calls fail with a chained comparison error
 
-TODO item 072 (Diagnostics): "Accept explicit type arguments in calls, or make the parser error…"
+Sand does not support explicit type arguments on function calls, so the parser
+interprets `<` and `>` in `json.decode<Config>(text)` as comparison operators
+and reports `comparison operators cannot be chained`. The diagnostic does not
+mention type arguments or suggest adding a type annotation on the `let`
+binding.
 
-**Pain.** I write `json.decode<Config>(text)`, as I would in TypeScript, Swift, or Rust (`::<>`). Sand reports `comparison operators cannot be chained`. The error does not mention types, so I do not know that the fix is `let config: Config = json.decode(text)`.
-**Why it matters.** Typed JSON decoding is one of the most common things a script does, and LLMs write this form first. Each attempt costs a round trip, and the error points the fix in the wrong direction.
+Run:
 
-**Reproduce.**
+```
+$ sand run repro.sand
+error: comparison operators cannot be chained
+  --> repro.sand:5:32
+```
 
-    sand run repro.sand
-    error: comparison operators cannot be chained
-      --> repro.sand:5:32
-
-**Aspirational.** `aspirational.sand` runs today. Sand accepts `json.decode<Config>(text)`, or the parser error suggests the annotated `let` form.
+The parser should either accept explicit type arguments in calls or suggest
+writing `let config: Config = json.decode(text)`, as in `aspirational.sand`.

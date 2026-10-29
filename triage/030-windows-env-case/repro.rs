@@ -1,4 +1,3 @@
-// Run: build this as a bin in a crate with a path dependency on sandlang.
 use sandlang::{Capability, RulePolicy};
 
 fn main() {

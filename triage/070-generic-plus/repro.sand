@@ -1,5 +1,3 @@
-// Workaround: `+` on a type parameter requires `Num` (int and float only), so
-// I declare my own trait and implement it for each type by hand.
 trait Concat {
     fn concat(self, other: Self) -> Self
 }

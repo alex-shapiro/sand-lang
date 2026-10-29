@@ -1,5 +1,3 @@
-// The cause is `Set<(float, float)>` on line 3, but no error points there.
-// `float` does not implement `Hash`.
 fn dedupe(points: [(float, float)]) -> Set<(float, float)> {
     let seen: Set<(float, float)> = Set()
     for p in points {

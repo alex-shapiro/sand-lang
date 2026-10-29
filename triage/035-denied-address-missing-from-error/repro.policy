@@ -1,2 +1,2 @@
 allow http plaintext *
-deny net [::]/0   # no IPv6 egress
+deny net [::]/0

@@ -1,8 +1,6 @@
-// Run: start ../025-matrix-param-deny-bypass/server.py on port 18931, then build this as a bin in a crate with deps sandlang (path) and tokio (features ["rt"]).
 use sandlang::{Capability, Config, Engine, MemorySink, PromptAnswer, RulePolicy};
 
 fn main() {
-    // "Allow GET anywhere, but ask me before connecting to a loopback address."
     let policy = RulePolicy::standard().allow_http("plaintext GET *").prompt_net("127.0.0.0/8 ::1");
     let prompter = |cap: Capability| async move {
         println!("  PROMPT: {cap}  -> answering y");
