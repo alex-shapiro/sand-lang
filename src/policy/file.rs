@@ -117,16 +117,15 @@ impl Word {
         out
     }
 
+    /// The word as policy file text. Quoted parts keep their quotes: a
+    /// quoted part is never a keyword or a wildcard, also where a set
+    /// reference joins it with other text.
     pub(crate) fn render(&self) -> String {
-        let quoted = self.parts.iter().any(|p| matches!(p, Part::Quoted(_)));
-        if quoted && !self.parts.iter().any(|p| matches!(p, Part::Ref(_))) && is_keyword(&self.text()) {
-            return quote(&self.text());
-        }
         let mut out = String::new();
         for p in &self.parts {
             match p {
                 Part::Raw(s) => out.push_str(s),
-                Part::Quoted(s) => out.push_str(&quote_part(s, out.is_empty())),
+                Part::Quoted(s) => out.push_str(&quote(s)),
                 Part::Ref(n) => {
                     out.push('{');
                     out.push_str(n);

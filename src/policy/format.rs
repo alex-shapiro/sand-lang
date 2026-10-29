@@ -155,7 +155,39 @@ mod tests {
         Ok((policy.to_string(), caps.iter().map(|c| policy.check_in(c, PathSpace::Memory)).collect()))
     }
 
+    /// A word of raw and quoted pieces, some of them parts of keywords.
+    fn split_word() -> impl Strategy<Value = String> {
+        let pieces = [
+            "pl", "aintext", "\"pl\"", "\"aintext\"", "t", "ls", "\"t\"", "\"ls\"", "GE", "T", "\"GE\"", "\"T\"", "\"\"", "{x}", "{y}", "*",
+            "\"*\"", "a.com", "\".com\"", "#", "\"#\"", ":80", "/8", "10.0.0.1", "\"10.0.0.1\"", "/p",
+        ];
+        let word = prop::collection::vec(prop::sample::select(pieces.to_vec()), 1..4).prop_map(|p| p.concat());
+        word.prop_filter("not a comment", |w| !w.starts_with('#'))
+    }
+
+    fn set_value() -> impl Strategy<Value = &'static str> {
+        prop::sample::select(vec!["pl", "\"pl\"", "aintext", "\"aintext\"", "T", "\"T\"", "tls", "\"tls\"", "GET", "\"GET\"", "a.com", "*", "\"*\""])
+    }
+
     proptest! {
+        /// Formatting keeps the rules of policies whose words join quoted
+        /// text, raw text and sets.
+        #[test]
+        fn formatting_keeps_the_rules_of_split_quotes_and_sets(
+            x in set_value(),
+            y in set_value(),
+            verb in prop::sample::select(vec!["allow", "deny"]),
+            kind in prop::sample::select(vec!["net", "http", "env", "custom"]),
+            words in prop::collection::vec(split_word(), 1..4),
+        ) {
+            let text = format!("let x = {x}\nlet y = {y}\n{verb} {kind} {}\n", words.join(" "));
+            let Ok(before) = PolicyFile::parse(&text, Path::new("/base"), None) else { return Ok(()) };
+            let formatted = format_policy(&text).unwrap();
+            let after = PolicyFile::parse(&formatted, Path::new("/base"), None);
+            prop_assert!(after.is_ok(), "{:?} -> {:?}", text, formatted);
+            prop_assert_eq!(before.rules.to_string(), after.unwrap().rules.to_string(), "{:?} -> {:?}", text, formatted);
+        }
+
         #[test]
         fn formatting_is_idempotent_and_keeps_the_meaning(
             lines in proptest::collection::vec(proptest::collection::vec((0..WORDS.len(), 0..3usize), 0..7), 0..6)
@@ -176,7 +208,7 @@ mod tests {
         let src = "\n\n# Policy\nallow  read  \"/data\",\"/my data\"/**   # mine\n\
                    deny ./x # x\n\n\n\nallow http get, head  api.example.com\nlet  hosts =  a.com,b.com\n\
                    allow net {hosts}\n  limit memory 64M  \nprompt  http post   api.example.com\n\n";
-        let want = "# Policy\nallow read /data \"/my data\"/**  # mine\ndeny ./x                        # x\n\n\
+        let want = "# Policy\nallow read \"/data\" \"/my data\"/**  # mine\ndeny ./x                          # x\n\n\
                     allow http GET HEAD api.example.com\nlet hosts = a.com b.com\nallow net {hosts}\nlimit memory 64M\n\
                     prompt http POST api.example.com\n";
         assert_eq!(format_policy(src).unwrap(), want);
@@ -185,7 +217,11 @@ mod tests {
         assert_eq!(format_policy("allow read \"*\" \"#x\" \"{a}\" \"a\\\"b\"").unwrap(), "allow read \"*\" \"#x\" \"{a}\" \"a\\\"b\"\n");
         assert!(format_policy("allow read \"open").is_err());
         let src = "allow http PLAINTEXT get a.com\nallow http \"get\" \"tls\"/x\nallow net TLS Plaintext a.com\n";
-        let want = "allow http plaintext GET a.com\nallow http \"get\" tls/x\nallow net tls plaintext a.com\n";
+        let want = "allow http plaintext GET a.com\nallow http \"get\" \"tls\"/x\nallow net tls plaintext a.com\n";
+        // Quotes stay where a set reference joins them with other text, and on set values.
+        for src in ["let x = aintext\nallow net \"pl\"{x} a.com\n", "let t = T\ndeny http \"GE\"{t} a.com\n", "let x = \"pl\"\nallow net {x}aintext a.com\n"] {
+            assert_eq!(format_policy(src).unwrap(), src);
+        }
         assert_eq!(format_policy(src).unwrap(), want);
     }
 }
