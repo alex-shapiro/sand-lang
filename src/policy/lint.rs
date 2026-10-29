@@ -333,19 +333,15 @@ impl<'a> PathRule<'a> {
 
     fn broader_keys(&self) -> Vec<Key<'a>> {
         let Scope::Http { host, .. } = self.scope else { return vec![Key::Files] };
-        match &host.kind {
-            HostKind::Any => vec![Key::Any],
-            // Deny and prompt rules for `localhost` also match the names under it.
-            HostKind::Suffix(s) if is_localhost(s) => {
-                [Key::Any, Key::Suffix(s), Key::Name("localhost")].into_iter().chain(domains_above(s).map(Key::Suffix)).collect()
-            }
-            HostKind::Suffix(s) => [Key::Any, Key::Suffix(s)].into_iter().chain(domains_above(s).map(Key::Suffix)).collect(),
-            HostKind::Host(h) if h != "localhost" && is_localhost(h) => {
-                [Key::Any, Key::Name(h), Key::Name("localhost")].into_iter().chain(domains_above(h).map(Key::Suffix)).collect()
-            }
-            HostKind::Host(h) => [Key::Any, Key::Name(h)].into_iter().chain(domains_above(h).map(Key::Suffix)).collect(),
-            HostKind::Ip(ip, len) => std::iter::once(Key::Any).chain(enclosing_ranges(*ip, *len).map(Key::Range)).collect(),
-        }
+        let (own, name) = match &host.kind {
+            HostKind::Any => return vec![Key::Any],
+            HostKind::Ip(ip, len) => return std::iter::once(Key::Any).chain(enclosing_ranges(*ip, *len).map(Key::Range)).collect(),
+            HostKind::Suffix(s) => (Key::Suffix(s), s.as_str()),
+            HostKind::Host(h) => (Key::Name(h), h.as_str()),
+        };
+        // Deny and prompt rules for `localhost` also match the names under it.
+        let localhost = (name != "localhost" || matches!(own, Key::Suffix(_))) && is_localhost(name);
+        [Key::Any, own].into_iter().chain(localhost.then_some(Key::Name("localhost"))).chain(domains_above(name).map(Key::Suffix)).collect()
     }
 
     fn related_keys(&self) -> Vec<Key<'a>> {

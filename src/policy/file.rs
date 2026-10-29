@@ -467,7 +467,8 @@ impl Context<'_> {
                 {
                     if let Some(t) = transport(bare) {
                         if urls > 0 {
-                            return Err((item.column, format!("transports (`tls`, `plaintext`) come before the {}", if kind == "http" { "URL patterns" } else { "hosts" })));
+                            let hosts = if kind == "http" { "URL patterns" } else { "hosts" };
+                            return Err((item.column, format!("transports (`tls`, `plaintext`) come before the {hosts}")));
                         }
                         transports |= t;
                         continue;
@@ -1170,9 +1171,11 @@ mod tests {
             ]
         );
         assert_eq!(
-            errors("allow net udp localhost:53
+            errors(
+                "allow net udp localhost:53
 allow http ws a.com
-allow http GET a.com tls"),
+allow http GET a.com tls"
+            ),
             [
                 "1:11: `udp` is not a transport: rules match TCP connections, the only kind that scripts make (write `udp.` for a host named `udp`)",
                 "2:12: `ws` is not a transport: write `plaintext` for unencrypted connections such as `ws://` (write `ws.` for a host named `ws`)",

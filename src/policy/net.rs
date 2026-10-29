@@ -622,7 +622,8 @@ pub(crate) struct UrlPattern {
     pub path: Vec<Seg>,
 }
 
-pub(crate) const QUOTED_STAR_IN_HOST: &str = "a quoted `*` is not a wildcard, and an address or port cannot contain `*` (remove the quotes)";
+pub(crate) const QUOTED_STAR_IN_HOST: &str =
+    "a quoted `*` is not a wildcard, and an address or port cannot contain `*` (remove the quotes)";
 
 impl UrlPattern {
     pub(crate) fn parse(text: &[Tok]) -> Result<UrlPattern, String> {
