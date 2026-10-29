@@ -37,6 +37,11 @@ const PROGRAMS: &[(&str, &str)] = &[
          let w: [P<A, B>] = []\n    make(n - 1, w, w)\n}\nlet keep = []\nlet w: [int] = []\nwhile true { keep.push(make(100, w, w)) }",
     ),
     (
+        "old lists storing a young value",
+        "let shared = [0]\nlet ls: [[[int]]] = []\nvar k = 0\nwhile true {\n    for _ in 0..100000 { ls.push([shared]) }\n    \
+         let y = [k]\n    k += 1\n    for i in 0..ls.len() { ls[i][0] = y }\n}",
+    ),
+    (
         "decoded computed defaults",
         "import json\nfn one() -> int { 1 }\nstruct P { a: int = one(), b: int = one() }\nlet text = \"[\" + \"{},\".repeat(100000) + \"{}]\"\n\
          let keep = []\nwhile true {\n    let r: Result<[P]> = json.decode(text)\n    keep.push(r)\n}",

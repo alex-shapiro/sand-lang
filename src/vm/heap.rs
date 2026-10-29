@@ -122,8 +122,8 @@ pub struct Heap {
     /// Make the next collection a major one when `bytes` exceeds this.
     pub major_at: usize,
     pub limit: Option<usize>,
-    /// Bytes of the collector's mark bits and of its lists of remembered and
-    /// gray objects, measured when the arena grows by 64 slots and by every
+    /// Bytes of the collector's mark bits, of its lists of remembered and
+    /// gray objects and of its `dirty` entries, measured when the arena grows by 64 slots and by every
     /// collection and step of an incremental collection.
     tables: usize,
     /// The most slots that the arena has held since it last shrank. Their
@@ -309,13 +309,18 @@ struct DirtyList {
 }
 
 /// A partially remembered list (or a map's or set's entries) records at most
-/// one stored index per this many elements (at least one); beyond that it
-/// is scanned in full. The index lists are not counted against the memory
-/// limit, and stores allocate nothing, so they need not lead to the
-/// collection that empties the lists. The lists must therefore stay small
-/// relative to their objects: a fixed allowance would let a script hold
-/// unaccounted memory by storing young values into many small old lists.
+/// one stored index per this many elements; beyond that it is scanned in
+/// full. Stores allocate nothing, so they need not lead to the collection
+/// that empties the `dirty` entries and their index lists, or to a check of
+/// the memory limit. The entries must therefore stay small relative to
+/// their objects: a fixed allowance would let a script hold memory beyond
+/// the limit by storing young values into many old lists.
 const ELEMS_PER_DIRTY_INDEX: usize = 8;
+
+/// Lists (and maps' and sets' entries) shorter than this are remembered in
+/// full, without a `dirty` entry: a minor collection scans them quickly,
+/// and the entry would take more memory than their elements.
+const PARTIAL_MIN: usize = 128;
 
 const NONE: u32 = u32::MAX;
 const MIN_GC: usize = 4 << 20;
@@ -532,6 +537,9 @@ impl Heap {
         if self.remembered_bits[w] & b == 0 {
             self.remembered_bits[w] |= b;
             self.remembered.push(h);
+            if self.entries_len(h) < PARTIAL_MIN {
+                return;
+            }
             self.partial_bits[w] |= b;
             self.dirty.insert(h, DirtyList { from: NONE, idx: Vec::new() });
         } else if self.partial_bits[w] & b == 0 || (push && self.tail_bits[w] & b != 0) {
@@ -541,21 +549,26 @@ impl Heap {
         self.mark_dirty(h, index, push);
     }
 
-    #[cold]
-    fn mark_dirty(&mut self, h: u32, index: usize, push: bool) {
-        let (w, b) = ((h / 64) as usize, 1u64 << (h % 64));
-        let index = index.min(NONE as usize - 1) as u32;
-        let len = match &self.objs[h as usize] {
+    /// The number of elements of list `h`, or of the entries of map or set `h`.
+    fn entries_len(&self, h: u32) -> usize {
+        match &self.objs[h as usize] {
             Obj::List(l) => l.len(),
             Obj::Map(m) => m.entries.len(),
             Obj::Set(s) => s.entries.len(),
             _ => 0,
-        };
+        }
+    }
+
+    #[cold]
+    fn mark_dirty(&mut self, h: u32, index: usize, push: bool) {
+        let (w, b) = ((h / 64) as usize, 1u64 << (h % 64));
+        let index = index.min(NONE as usize - 1) as u32;
+        let len = self.entries_len(h);
         let Some(d) = self.dirty.get_mut(&h) else { return };
         if push {
             d.from = d.from.min(index);
             self.tail_bits[w] |= b;
-        } else if d.idx.len() < (len / ELEMS_PER_DIRTY_INDEX).max(1) {
+        } else if d.idx.len() < len / ELEMS_PER_DIRTY_INDEX {
             d.idx.push(index);
         } else {
             self.remember_fully(h);
@@ -615,6 +628,7 @@ impl Heap {
         let words: usize = bitmaps.iter().map(|b| b.capacity()).sum();
         self.tables = words * std::mem::size_of::<u64>()
             + self.remembered.capacity() * std::mem::size_of::<u32>()
+            + self.dirty.capacity() * std::mem::size_of::<(u32, DirtyList)>()
             + self.gray.capacity() * std::mem::size_of::<(u32, usize)>();
     }
 
@@ -1210,23 +1224,8 @@ impl Heap {
         self.marks[(h / 64) as usize] & (1 << (h % 64)) != 0
     }
 
-    /// Marks every unmarked object reachable from the worklist and from the
-    /// containers on `scan`. The worklist is emptied first, so that it never
-    /// holds more than one chunk of a big container's children.
     fn trace(&mut self) {
-        let Heap { objs, marks, worklist, scan, .. } = self;
-        loop {
-            let (h, start) = match worklist.pop() {
-                Some(h) => (h, 0),
-                None => match scan.pop() {
-                    Some(c) => c,
-                    None => break,
-                },
-            };
-            if let Some(next) = chunk_children(&objs[h as usize], start, |v| mark(marks, worklist, v)) {
-                scan.push((h, next));
-            }
-        }
+        trace(&self.objs, &mut self.marks, &mut self.worklist, &mut self.scan);
     }
 
     /// Puts slot `h` on the free list, keeping a small box for reuse.
@@ -1286,8 +1285,9 @@ impl Heap {
             if major {
                 continue;
             }
-            // Scan the old objects that may point to young ones. For a
-            // partially remembered object, scan only the changed parts.
+            // Scan the old objects that may point to young ones, one at a
+            // time so that `scan` stays short. For a partially remembered
+            // object, scan only the changed parts.
             let mut mark = |v: Value| mark(marks, worklist, v);
             match (partial, &objs[h as usize]) {
                 (true, Obj::Channel(c)) => {
@@ -1314,6 +1314,7 @@ impl Heap {
                 }
                 _ => scan.push((h, 0)),
             }
+            trace(objs, marks, worklist, scan);
         }
         dirty.clear();
         remembered.clear();
@@ -1323,6 +1324,9 @@ impl Heap {
             // The lists are empty: give their memory back.
             self.young = Vec::new();
             self.remembered = Vec::new();
+            self.dirty = FxHashMap::default();
+            self.worklist = Vec::new();
+            self.scan = Vec::new();
             self.gray = Vec::new();
         } else {
             let young = std::mem::take(&mut self.young);
@@ -1592,6 +1596,24 @@ impl Heap {
     }
 }
 
+/// Marks every unmarked object reachable from `worklist` and from the
+/// containers on `scan`. The worklist is emptied first, so that it never
+/// holds more than one chunk of a big container's children.
+fn trace(objs: &[Obj], marks: &mut [u64], worklist: &mut Vec<u32>, scan: &mut Vec<(u32, usize)>) {
+    loop {
+        let (h, start) = match worklist.pop() {
+            Some(h) => (h, 0),
+            None => match scan.pop() {
+                Some(c) => c,
+                None => break,
+            },
+        };
+        if let Some(next) = chunk_children(&objs[h as usize], start, |v| mark(marks, worklist, v)) {
+            scan.push((h, next));
+        }
+    }
+}
+
 #[inline]
 fn test_bit(bits: &[u64], h: u32) -> bool {
     bits[(h / 64) as usize] & (1 << (h % 64)) != 0
@@ -1736,6 +1758,40 @@ mod tests {
         heap.collect(roots.iter().copied(), false);
         assert_eq!(heap.str(heap.list(big)[0]), "young");
         assert_eq!(heap.str(heap.list(lists[7])[0]), "young");
+    }
+
+    /// Bytes of the tables that the write barrier fills.
+    fn barrier_tables(heap: &Heap) -> usize {
+        heap.dirty.capacity() * std::mem::size_of::<(u32, DirtyList)>()
+            + heap.dirty.values().map(|d| d.idx.capacity() * std::mem::size_of::<u32>()).sum::<usize>()
+            + heap.remembered.capacity() * std::mem::size_of::<u32>()
+    }
+
+    #[test]
+    fn the_write_barrier_needs_little_memory_beside_the_containers_it_tracks() {
+        let mut heap = Heap::new(None, usize::MAX);
+        let small: Vec<Value> = (0..100_000).map(|_| heap.new_list(vec![Value::Int(0)])).collect();
+        let big: Vec<Value> = (0..1000).map(|_| heap.new_list(vec![Value::Int(0); 1000])).collect();
+        let roots: Vec<Value> = small.iter().chain(&big).copied().collect();
+        heap.collect(roots.iter().copied(), true);
+        let young = heap.new_str("a young string, long enough to be on the heap");
+        for &l in &small {
+            heap.list_mut_storing(l, 0, young).unwrap()[0] = young;
+        }
+        for &l in &big {
+            for i in (0..1000).step_by(7) {
+                heap.list_mut_storing(l, i, young).unwrap()[i] = young;
+            }
+        }
+        let tables = barrier_tables(&heap);
+        assert!(tables <= heap.bytes / 8, "{tables} bytes of tables for {} bytes of objects", heap.bytes);
+        heap.collect(roots.iter().copied(), false);
+        assert!(heap.list(small[5])[0] == young && heap.list(big[5])[994] == young);
+        // Tracing the remembered objects needs little memory either.
+        let work = heap.scan.capacity() * std::mem::size_of::<(u32, usize)>() + heap.worklist.capacity() * std::mem::size_of::<u32>();
+        assert!(work <= SCAN_CHUNK * 64, "{work} bytes of work lists");
+        heap.collect(roots.iter().copied(), true);
+        assert_eq!(barrier_tables(&heap), 0);
     }
 
     fn new_channel(heap: &mut Heap) -> Value {
