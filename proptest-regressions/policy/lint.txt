@@ -23,3 +23,4 @@ cc 36f819d558fe6e9085e0110afc2db46a653c95b175f1aafd82054ba391cbbd3f # shrinks to
 cc 0d86fb9545a12402131d0a3e9a410f14803f746dd940da96f34683ff7ccf945c # shrinks to allow = false, broad_host = 1, narrow_host = 0, broad_port = false, broad_both = false, narrow_transport = 1, method = false, path = [], extra = [], narrow_first = true
 cc 7b5cd5478d3f4ccbd5920ff95ea001486a175544b0f40bf4fd5e93a268bb007f # shrinks to allow = false, broad_host = 1, narrow_host = 0, broad_port = false, broad_both = true, narrow_transport = 0, method = false, path = [], extra = [], narrow_first = true
 cc 1025a5c6d1b95b5e604e5ca3f0102c8b38de7d91c2db0c8f8677404b752be4b4 # shrinks to lines = ["prompt net *", "prompt http 0.0.0.0"]
+cc 6a2b1287b31cf54b73fdae5bda557c1b1e5ec86f03e74926568258b0807acc9c # shrinks to lines = ["deny http 0.0.0.0/a"], names = ["a", "%FF"], seps = ["%2F", "/", "/", "/"], host = "example.com", https = false

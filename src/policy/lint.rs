@@ -1137,6 +1137,44 @@ mod tests {
             }
         }
 
+        /// A server may read `%2F`, `%5C` and `\\` as `/`, so a path with them
+        /// never gets a looser decision than the path with `/` in their place,
+        /// for the request or for an address that its host resolves to.
+        #[test]
+        fn encoded_separators_never_loosen_a_decision(
+            lines in prop::collection::vec(rule_line(), 1..7),
+            names in prop::collection::vec(prop::sample::select(vec!["a", "A", "b", "k1", "x.txt", "%FF", "%zz", "..", "%2e%2e"]), 1..5),
+            seps in prop::collection::vec(prop::sample::select(vec!["/", "%2F", "%2f", "%5C", "\\"]), 4),
+            host in prop::sample::select(RESOLVED_HOSTS.to_vec()),
+            https in any::<bool>(),
+        ) {
+            let text = lines.join("\n") + SETS;
+            let policy = PolicyFile::parse(&text, Path::new("/base"), Some(Path::new("/home/me"))).unwrap().rules;
+            let mut encoded = String::new();
+            let mut plain = String::new();
+            for (i, name) in names.iter().enumerate() {
+                encoded += if i == 0 { "/" } else { seps[i - 1] };
+                plain.push('/');
+                encoded += name;
+                plain += name;
+            }
+            let (scheme, port) = if https { ("https", 443) } else { ("http", 80) };
+            let get = |path: &str| Capability::Http { method: "GET".into(), scheme: scheme.into(), host: host.into(), port, path: path.into() };
+            let strictness = |d: crate::policy::Decision| match d {
+                crate::policy::Decision::Allow => 0,
+                crate::policy::Decision::Prompt => 1,
+                crate::policy::Decision::Deny => 2,
+            };
+            let (a, b) = (policy.check_normalized_in(&get(&encoded), PathSpace::Memory), policy.check_normalized_in(&get(&plain), PathSpace::Memory));
+            prop_assert!(strictness(a) >= strictness(b), "{}\n{}: {:?}, {}: {:?}", text, encoded, a, plain, b);
+            if a != crate::policy::Decision::Deny {
+                for addr in addresses().filter(|a| a.port() == port) {
+                    let (a, b) = (policy.check_resolved(&get(&encoded), addr), policy.check_resolved(&get(&plain), addr));
+                    prop_assert!(strictness(a) >= strictness(b), "{}\n{} at {}: {:?}, {}: {:?}", text, encoded, addr, a, plain, b);
+                }
+            }
+        }
+
         #[test]
         fn bypassable_http_denies_are_reported(
             lines in prop::collection::vec(rule_line(), 1..9),
