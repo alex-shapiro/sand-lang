@@ -614,12 +614,15 @@ fn custom_policies_see_the_transport_of_resolved_addresses() {
 }
 
 #[test]
-fn net_addr_capability_display() {
+fn capability_display() {
     let addr: SocketAddr = "93.184.215.14:443".parse().unwrap();
     let at = |host: &str, tls: bool| Capability::NetAddr { host: host.into(), addr, tls }.to_string();
     assert_eq!(at("example.com", true), "connect to example.com at 93.184.215.14:443");
     assert_eq!(at("93.184.215.14", true), "connect to 93.184.215.14:443");
     assert_eq!(at("example.com", false), "connect to example.com at 93.184.215.14:443 (plaintext)");
+    // A prompt for every variable says so.
+    assert_eq!(Capability::Env("*".into()).to_string(), "read all environment variables");
+    assert_eq!(Capability::Env("HOME".into()).to_string(), "read environment variable HOME");
 }
 
 // ---------------------------------------------------------------------------

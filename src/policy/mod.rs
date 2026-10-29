@@ -92,6 +92,7 @@ impl fmt::Display for Capability {
             }
             Capability::NetListen(addr) if addr.port() == 0 => write!(f, "listen on an ephemeral port at {}", addr.ip()),
             Capability::NetListen(addr) => write!(f, "listen on {addr}"),
+            Capability::Env(n) if n == "*" => write!(f, "read all environment variables"),
             Capability::Env(n) => write!(f, "read environment variable {n}"),
             Capability::Stdin => write!(f, "read standard input"),
             Capability::Stdout => write!(f, "write standard output"),
