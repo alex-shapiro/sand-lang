@@ -1,0 +1,7 @@
+// §3.1 puts imports before all other items, but this file compiles.
+// `side` runs before line 3, and `json` is usable before its `import`.
+print("main: line 3")
+print(json.encode([1]))
+import json
+import "./side.sand"
+print(side.hi())

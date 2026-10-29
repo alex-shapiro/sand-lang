@@ -1,0 +1,2 @@
+allow env *
+deny env "AWS_*"   # keep cloud credentials out

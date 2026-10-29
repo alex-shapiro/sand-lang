@@ -1,0 +1,7 @@
+import fs
+import time
+
+// `help(fs.Metadata)` shows `modified: time.Instant?`, so the copied type resolves.
+fn last_modified(path: str) -> time.Instant? {
+    fs.metadata(path).ok()?.modified
+}

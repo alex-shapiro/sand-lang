@@ -1,0 +1,48 @@
+// Workaround: no `dyn Shape`, so wrap every implementor in an enum and
+// forward each trait method by hand.
+trait Shape {
+    fn area(self) -> float
+    fn name(self) -> str
+}
+
+struct Circle { r: float }
+
+struct Rect { w: float, h: float }
+
+impl Shape for Circle {
+    fn area(self) -> float { 3.14159 * self.r * self.r }
+
+    fn name(self) -> str { "circle" }
+}
+
+impl Shape for Rect {
+    fn area(self) -> float { self.w * self.h }
+
+    fn name(self) -> str { "rect" }
+}
+
+enum AnyShape {
+    C(Circle)
+    R(Rect)
+}
+
+impl Shape for AnyShape {
+    fn area(self) -> float {
+        match self {
+            C(c) => c.area()
+            R(r) => r.area()
+        }
+    }
+
+    fn name(self) -> str {
+        match self {
+            C(c) => c.name()
+            R(r) => r.name()
+        }
+    }
+}
+
+let shapes = [AnyShape.C(Circle(r: 1.0)), AnyShape.R(Rect(w: 2.0, h: 3.0))]
+for s in shapes {
+    print("\(s.name()): \(s.area())")
+}

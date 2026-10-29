@@ -1,0 +1,7 @@
+import http
+for method in ["PURGE", "DELETE"] {
+    match http.request(method, "http://localhost:9/cache/index.html") {
+        Ok(r) => print("\(method): status \(r.status)"),
+        Err(e) => print("\(method): \(e)"),
+    }
+}

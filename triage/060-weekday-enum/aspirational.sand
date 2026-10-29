@@ -1,0 +1,9 @@
+// `day_of_week()` returns `time.Weekday { Monday, ..., Sunday }`.
+// Wrong names do not compile, and a `match` must cover all seven days.
+import time
+let friday = time.PlainDate(2026, 10, 30)?
+let weekend = match friday.day_of_week() {
+    Saturday | Sunday => true
+    Monday | Tuesday | Wednesday | Thursday | Friday => false
+}
+print("friday is weekend: \(weekend)")

@@ -1,0 +1,2 @@
+# Allow one GitLab-style project, and no other project.
+allow http plaintext GET 127.0.0.1:18931/api/v4/projects/group%2Fproject

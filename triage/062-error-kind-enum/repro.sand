@@ -1,0 +1,8 @@
+import fs
+// Workaround: copy the exact kind string from the spec (§5.4).
+let text = match fs.read_text("missing-config.json") {
+    Ok(t) => t
+    Err(e) if e.kind == "not_found" => "{}"
+    Err(e) => fail("cannot read config: \(e)", kind: e.kind)
+}
+print(text)

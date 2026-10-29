@@ -1,0 +1,9 @@
+import time
+let friday = time.PlainDate(2026, 10, 30)?
+let sunday = time.PlainDate(2026, 11, 1)?
+// Python habit (Monday = 0, so Saturday = 5): Friday becomes a weekend day.
+print("friday is weekend: \(friday.day_of_week() >= 5)")
+// JavaScript habit (Sunday = 0): never true.
+print("sunday detected: \(sunday.day_of_week() == 0)")
+// Correct, but only with the 1 = Monday .. 7 = Sunday rule from the spec.
+print("friday is weekend (correct): \(friday.day_of_week() >= 6)")

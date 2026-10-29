@@ -1,0 +1,4 @@
+let shapes = [Circle(r: 1.0), Square(s: 2.0)]
+struct Circle { r: float }
+struct Square { s: float }
+print(shapes)

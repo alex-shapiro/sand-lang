@@ -1,0 +1,25 @@
+// Workaround: `+` on a type parameter requires `Num` (int and float only), so
+// I declare my own trait and implement it for each type by hand.
+trait Concat {
+    fn concat(self, other: Self) -> Self
+}
+
+impl Concat for str {
+    fn concat(self, other: str) -> str { self + other }
+}
+
+impl<T> Concat for [T] {
+    fn concat(self, other: [T]) -> [T] { self + other }
+}
+
+impl Concat for int {
+    fn concat(self, other: int) -> int { self + other }
+}
+
+fn concat_all<T: Concat>(xs: [T], start: T) -> T {
+    xs.fold(start, (a, b) => a.concat(b))
+}
+
+print(concat_all(["a", "b"], ""))
+print(concat_all([[1], [2, 3]], []))
+print(concat_all([1, 2], 0))

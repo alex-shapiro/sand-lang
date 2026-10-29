@@ -1,0 +1,2 @@
+# The deploy script may only purge the CDN cache.
+allow http plaintext purge localhost:9/cache

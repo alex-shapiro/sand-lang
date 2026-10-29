@@ -1,0 +1,6 @@
+// A function value keeps its parameter defaults, so it fits `fn(str) -> _`.
+fn greet(name: str, greeting: str = "Hello") -> str { "\(greeting), \(name)!" }
+print(["disk full", "timeout"].map(Error))
+print(["Ann", "Bo"].map(greet))
+let f = greet
+print(f("Cy"))

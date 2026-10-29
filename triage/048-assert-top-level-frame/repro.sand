@@ -1,0 +1,3 @@
+fn total(xs: [int]) -> int { xs.sum() }
+let t = total([1, 2])
+assert(t == 4, "total is not 4")

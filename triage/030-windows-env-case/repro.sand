@@ -1,0 +1,4 @@
+import env
+
+print("exact: \(env.get("AWS_SECRET_ACCESS_KEY"))")
+print("lower: \(env.get("aws_secret_access_key"))")

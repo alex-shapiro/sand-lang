@@ -1,0 +1,4 @@
+import env
+for name in ["HOME", "AWS_SECRET_ACCESS_KEY"] {
+    print("\(name): \(env.get(name) ?? "<denied>")")
+}

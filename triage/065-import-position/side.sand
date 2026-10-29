@@ -1,0 +1,2 @@
+print("side: module body runs")
+pub fn hi() -> str { "hi" }

@@ -1,0 +1,7 @@
+import http
+for url in ["http://localhost:9/admin", "http://127.0.0.1:9/admin"] {
+    match http.get(url) {
+        Ok(r) => print("\(url): status \(r.status)"),
+        Err(e) => print("\(url): \(e)"),
+    }
+}

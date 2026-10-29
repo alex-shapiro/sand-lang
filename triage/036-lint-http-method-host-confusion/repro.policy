@@ -1,0 +1,2 @@
+allow http plaintext *
+deny http LOCALHOST 127.0.0.1   # no local services

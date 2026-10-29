@@ -1,0 +1,3 @@
+import fs
+print("list: \(fs.list_dir("/etc/ssh"))")
+print("read: \(fs.read_text("/etc/ssh/ssh_host_ed25519_key"))")

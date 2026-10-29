@@ -1,0 +1,9 @@
+let grid = ((1, 2), (3, 4))
+let a = grid.0.0
+// b is top right
+let b = grid.0.1
+// c is bottom left
+let c = grid.1.0
+// d is bottom right
+let d = grid.1.1
+print(a + b + c + d)

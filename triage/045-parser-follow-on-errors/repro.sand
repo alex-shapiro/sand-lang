@@ -1,0 +1,10 @@
+fn greet(name: str) -> str {
+    "hello, {name}
+}
+
+fn main() {
+    print(greet("ana"))
+    print(greet("bo"))
+}
+
+main()

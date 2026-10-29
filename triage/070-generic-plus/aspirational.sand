@@ -1,0 +1,9 @@
+// A prelude `Add` trait covers every type that supports `+`:
+// int, float, duration, str, bytes, and lists.
+fn concat_all<T: Add>(xs: [T], start: T) -> T {
+    xs.fold(start, (a, b) => a + b)
+}
+
+print(concat_all(["a", "b"], ""))
+print(concat_all([[1], [2, 3]], []))
+print(concat_all([1, 2], 0))

@@ -1,0 +1,14 @@
+import fs
+// `Metadata.kind: fs.Kind { File, Dir, Other }`; `match` makes me handle `Other`.
+fn walk(dir: str) -> Result<()> {
+    for name in fs.list_dir(dir)? {
+        let path = fs.join([dir, name])
+        match fs.metadata(path)?.kind {
+            File => print("file \(path)")
+            Dir => walk(path)?
+            Other => print("skip \(path)")
+        }
+    }
+    Ok(())
+}
+walk("tree")?

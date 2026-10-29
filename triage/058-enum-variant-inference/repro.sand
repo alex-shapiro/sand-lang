@@ -1,0 +1,21 @@
+// Workaround: write the full enum path at every call and comparison.
+import fs
+import time
+
+enum Color { Red, Green, Blue }
+
+fn paint(c: Color) -> str {
+    match c {
+        Red => "red"      // patterns already infer the enum
+        Green => "green"
+        Blue => "blue"
+    }
+}
+
+use f = fs.open("/tmp/triage-lang1/out.txt", fs.Mode.Write)?
+f.write_str("hi\n")?
+let start = time.PlainDate(2024, 1, 1)?
+let end = time.PlainDate(2024, 3, 15)?
+print(start.until(end, largest: time.Unit.Month, smallest: time.Unit.Day))
+let c: Color = Color.Green
+print("\(paint(Color.Red)) \(c == Color.Green)")

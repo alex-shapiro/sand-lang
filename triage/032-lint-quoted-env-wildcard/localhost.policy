@@ -1,0 +1,2 @@
+allow net plaintext *.localhost   # local dev servers
+deny net localhost                # but not the bare host

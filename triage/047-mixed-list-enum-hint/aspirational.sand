@@ -1,0 +1,13 @@
+struct Circle { r: float }
+struct Square { s: float }
+enum Shape {
+    Circle(Circle),
+    Square(Square),
+}
+let shapes = [Shape.Circle(Circle(r: 1.0)), Shape.Square(Square(s: 2.0))]
+for shape in shapes {
+    match shape {
+        Shape.Circle(c) => print(3.14 * c.r * c.r),
+        Shape.Square(s) => print(s.s * s.s),
+    }
+}

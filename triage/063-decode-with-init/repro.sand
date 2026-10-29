@@ -1,0 +1,25 @@
+import json
+// Workaround: decode into a copy of each struct without `init`,
+// then call `init` by hand for every validated field.
+struct Window {
+    pub start: int
+    pub end: int
+
+    pub fn init(start: int, end: int) -> Result<Window> {
+        if start > end { return Err(Error("start \(start) is after end \(end)", kind: "invalid")) }
+        Ok(Self(start: start, end: end))
+    }
+}
+struct Job {
+    pub name: str
+    pub window: Window
+}
+struct RawWindow { start: int, end: int }
+struct RawJob { name: str, window: RawWindow }
+
+fn decode_job(text: str) -> Result<Job> {
+    let raw: RawJob = json.decode(text)?
+    Ok(Job(name: raw.name, window: Window(raw.window.start, raw.window.end)?))
+}
+let job = decode_job("{\"name\": \"backup\", \"window\": {\"start\": 9, \"end\": 5}}")?
+print(job.window.start)

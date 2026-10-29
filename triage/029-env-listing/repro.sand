@@ -1,0 +1,5 @@
+import env
+
+print("HOME = \(env.get("HOME"))")
+print("secret = \(env.get("AWS_SECRET_ACCESS_KEY"))")
+print("env.vars() has \(env.vars().len()) entries")
