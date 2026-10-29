@@ -490,7 +490,10 @@ impl Context<'_> {
         } else if starts(".") || starts("..") {
             (self.base.to_path_buf(), text)
         } else if flat.starts_with('/') || (cfg!(windows) && Path::new(&flat).is_absolute()) {
-            let root = Path::new(&flat).components().take_while(|c| !matches!(c, std::path::Component::Normal(_))).collect::<PathBuf>();
+            let root = Path::new(&flat)
+                .components()
+                .take_while(|c| matches!(c, std::path::Component::Prefix(_) | std::path::Component::RootDir))
+                .collect::<PathBuf>();
             let skip = root.as_os_str().to_string_lossy().chars().count().min(text.len());
             (root, &text[skip..])
         } else {
@@ -977,6 +980,13 @@ mod tests {
         assert_eq!(custom("db", "drop table"), Deny);
         assert_eq!(custom("*", "literal"), Allow);
         assert_eq!(p.rules.to_string(), "allow custom *\ndeny custom db \"drop table\"\nprompt custom db\nallow custom \"*\" literal\n");
+    }
+
+    #[test]
+    fn dot_dot_at_the_root_stays_at_the_root() {
+        let p = parse("allow read /\ndeny read /../etc\ndeny /./a/../b");
+        assert_eq!(p.rules.to_string(), "allow read /\ndeny read /etc\ndeny /b\n");
+        assert_eq!(read(&p, "/etc/passwd"), Deny);
     }
 
     #[test]
