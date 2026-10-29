@@ -1154,15 +1154,16 @@ impl Engine {
     // Loading and compiling
 
     /// Checks (and if `prompt`, prompts for) importing the script at the
-    /// normalized `path`. `None` if the policy prompts and no prompter asks.
-    async fn check_import(&self, path: &Path, prompt: bool) -> Option<bool> {
+    /// normalized `path`. Without an answer to a prompt, returns why no
+    /// prompt was shown: "no prompter can ask" or "checking does not ask".
+    async fn check_import(&self, path: &Path, prompt: bool) -> Result<bool, &'static str> {
         let cap = Capability::Import(path.to_path_buf());
         if let Some(&d) = self.always.lock().unwrap_or_else(|e| e.into_inner()).get(&cap) {
-            return Some(d);
+            return Ok(d);
         }
         match self.config.policy.check_normalized_in(&cap, self.config.fs.space()) {
-            Decision::Allow => Some(true),
-            Decision::Deny => Some(false),
+            Decision::Allow => Ok(true),
+            Decision::Deny => Ok(false),
             Decision::Prompt => match &self.config.prompter {
                 Some(p) if prompt => {
                     let answer = p.prompt(cap.clone()).await;
@@ -1170,10 +1171,25 @@ impl Engine {
                     if matches!(answer, PromptAnswer::AllowAlways | PromptAnswer::DenyAlways) {
                         self.always.lock().unwrap_or_else(|e| e.into_inner()).insert(cap, allowed);
                     }
-                    Some(allowed)
+                    Ok(allowed)
                 }
-                _ => None,
+                Some(_) => Err("checking does not ask"),
+                None => Err("no prompter can ask"),
             },
+        }
+    }
+
+    /// Why importing the normalized `path` was not asked about: the rule
+    /// that asks, or the rule that would allow it.
+    fn unasked_import(&self, path: &Path, why: &str) -> String {
+        let Policy::Rules(rules) = &self.config.policy else { return format!("the policy asks about it, and {why}") };
+        match rules.verdict(&Capability::Import(path.to_path_buf()), self.config.fs.space(), &[]) {
+            Some((_, rule)) => format!("{} asks about it, and {why}", rules.describe_rule(rule)),
+            None => {
+                let dir = path.parent().unwrap_or(path);
+                let rule = RulePolicy::new().allow_import(dir).to_string();
+                format!("no rule allows it, and {why}; a rule such as `{}` allows it", rule.trim_end())
+            }
         }
     }
 
@@ -1426,14 +1442,8 @@ impl Engine {
             let asked = self.config.clock.now();
             let allowed = self.check_import(&target, d.prompt).await;
             *prompted += self.config.clock.now().saturating_duration_since(asked);
-            if allowed != Some(true) {
-                let hint = match (allowed, target.parent()) {
-                    (None, Some(dir)) => {
-                        let rule = RulePolicy::new().allow_import(dir).to_string();
-                        format!(" (no rule allows it and no prompter can ask; a rule such as `{}` allows it)", rule.trim_end())
-                    }
-                    _ => String::new(),
-                };
+            if allowed != Ok(true) {
+                let hint = allowed.err().map(|why| format!(" ({})", self.unasked_import(&target, why))).unwrap_or_default();
                 errors.push(Diag::error(span, format!("cannot import `{import_label}`: permission denied{hint}")));
                 // Stop after a denied import to avoid prompting for remaining imports.
                 break;

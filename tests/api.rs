@@ -2280,7 +2280,7 @@ fn an_import_that_no_rule_decides_names_the_missing_rule() {
         Err(Error::Compile(d)) => assert_eq!(
             d[0].message,
             format!(
-                "cannot import `./lib/util.sand`: permission denied (no rule allows it and no prompter can ask; a rule such as `allow import {}` allows it)",
+                "cannot import `./lib/util.sand`: permission denied (no rule allows it, and no prompter can ask; a rule such as `allow import {}` allows it)",
                 lib.display()
             )
         ),
@@ -2288,6 +2288,26 @@ fn an_import_that_no_rule_decides_names_the_missing_rule() {
     }
     let mut engine = Engine::new(Config::new().policy(sandlang::RulePolicy::standard().allow_import(&lib))).unwrap();
     rt().block_on(engine.run_file(&main)).unwrap();
+    // A prompt rule that decides the import is named instead.
+    let util = lib.join("util.sand");
+    let policy = sandlang::RulePolicy::standard().allow_import(&lib).prompt_import(&util);
+    let mut engine = Engine::new(Config::new().policy(policy)).unwrap();
+    match rt().block_on(engine.run_file(&main)) {
+        Err(Error::Compile(d)) => assert_eq!(
+            d[0].message,
+            format!(
+                "cannot import `./lib/util.sand`: permission denied (the rule `prompt import {}` asks about it, and no prompter can ask)",
+                util.display()
+            )
+        ),
+        other => panic!("{other:?}"),
+    }
+    // Checking never asks, even with a prompter.
+    let engine = Engine::new(Config::new().prompter(|_: Capability| async { PromptAnswer::AllowOnce })).unwrap();
+    match engine.check_file(&main) {
+        Err(Error::Compile(d)) => assert!(d[0].message.contains("no rule allows it, and checking does not ask"), "{}", d[0].message),
+        other => panic!("{other:?}"),
+    }
 }
 
 #[cfg(feature = "os")]
