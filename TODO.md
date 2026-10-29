@@ -137,7 +137,12 @@ Follow-up work, roughly in priority order.
       (`env`, `stdin`, `stdout`, `stderr`, `timezone`, `custom`, `listen`).
       It misses overridden pairs (`allow env HOME` + `deny env HOME`, `prompt
       stdin` + `allow stdin`), subsumed rules (`allow env *` + `allow env
-      HOME`), and a `prompt net a.com` beside `allow net a.com`.
+      HOME`), and a `prompt net a.com` beside `allow net a.com`. It also
+      misses `prompt write **` beside `allow **` (the allow rule always wins),
+      an allow rule that a `deny net localhost` always overrides (`allow net
+      app.localhost`: `NetPattern::covers` does not know that `localhost`
+      also matches the names under it), and a `deny env "AWS_*"` whose quoted
+      `*` matches no real variable.
 - [ ] Let hosts persist "always" prompt answers: a hook that receives the
       answer as a rule (`rule_for`) to save, so that a host such as Ash
       Control can load it into the policy at the next start instead of
