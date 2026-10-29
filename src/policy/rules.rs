@@ -426,11 +426,17 @@ impl RulePolicy {
     pub fn deny_stdout(self) -> Self {
         self.push(Decision::Deny, RuleKind::Stdout)
     }
+    pub fn prompt_stdout(self) -> Self {
+        self.push(Decision::Prompt, RuleKind::Stdout)
+    }
     pub fn allow_stderr(self) -> Self {
         self.push(Decision::Allow, RuleKind::Stderr)
     }
     pub fn deny_stderr(self) -> Self {
         self.push(Decision::Deny, RuleKind::Stderr)
+    }
+    pub fn prompt_stderr(self) -> Self {
+        self.push(Decision::Prompt, RuleKind::Stderr)
     }
     pub fn allow_timezone(self) -> Self {
         self.push(Decision::Allow, RuleKind::TimeZone)

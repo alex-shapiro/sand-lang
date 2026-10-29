@@ -305,7 +305,7 @@ export function highlightPolicy(text) {
       const [start, word] = [base + w.index, w[0]];
       const end = start + word.length;
       if (word.startsWith("#")) out.push([start, end, "comment"]);
-      else if (index === 0) out.push([start, end, /^(allow|deny|prompt|default|limit|let)$/.test(word) ? "keyword" : "invalid"]);
+      else if (index === 0) out.push([start, end, /^(allow|deny|prompt|limit|let)$/.test(word) ? "keyword" : "invalid"]);
       else if (index === 1 && first !== "let" && !/^[/.~]/.test(word)) out.push([start, end, "type"]);
       else if (word.startsWith('"')) out.push([start, end, "string"]);
       else if (/^\d[\d_.]*([kKmMgG]|ns|us|ms|s|m|h)?$/.test(word)) out.push([start, end, "number"]);
