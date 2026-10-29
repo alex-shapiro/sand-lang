@@ -1024,6 +1024,11 @@ fn denial_hints_are_shell_words_that_allow_the_request() {
     let o = sand(dir.path(), &["run", "main.sand"]);
     let path = std::fs::canonicalize(dir.path()).unwrap().join("it'\\''s.txt");
     assert!(o.stderr.contains(&format!("(--allow='read {}' allows it)", path.display())), "{o:?}");
+    // No hint that the escaping of control characters would change.
+    let dir = script("hint-tab", "import fs\nprint(fs.read_text(\"a\\tb.txt\").is_ok())\n");
+    dir.write("a\tb.txt", "A");
+    let o = sand(dir.path(), &["run", "main.sand"]);
+    assert!(o.stderr.starts_with("sand: denied: read ") && !o.stderr.contains("--allow"), "{o:?}");
     // No hint where the rule would not decide the request: a prompt rule for
     // some variables keeps the listing of all of them from `allow env *`.
     let dir = script("hint-env", "import env\nprint(env.vars().len() >= 0)\n");

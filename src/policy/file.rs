@@ -201,8 +201,8 @@ const KINDS: [&str; 12] = ["read", "write", "import", "net", "http", "listen", "
 
 /// The fix for a word where a capability or a path may stand that is
 /// neither, but reads as a capability: in another case, a second one
-/// (`read ./x write ./y`), a verb, or one joined to its argument by `:` or
-/// `=` (`read:./x`).
+/// (`read ./x write ./y`), a verb, one joined to its argument by `:` or
+/// `=` (`read:./x`), or a URL.
 fn misread(word: &str) -> Option<String> {
     let lower = word.to_ascii_lowercase();
     if KINDS.contains(&lower.as_str()) {
@@ -214,6 +214,9 @@ fn misread(word: &str) -> Option<String> {
     }
     if ["allow", "deny", "prompt"].contains(&lower.as_str()) {
         return Some(format!("a rule has one verb: remove `{word}`"));
+    }
+    if word.contains("://") {
+        return Some(format!("`{word}` is a URL, not a path: URLs go in `http` rules"));
     }
     let (head, rest) = word.split_once([':', '='])?;
     let head = head.to_ascii_lowercase();
@@ -516,7 +519,7 @@ impl Context<'_> {
                             "import" => Access::Import,
                             _ => Access::Any,
                         };
-                        RuleKind::Files(access, self.path(&word.tokens()).map_err(|m| (item.column, m))?)
+                        RuleKind::Files(access, self.path(&word.tokens(), bare.is_some()).map_err(|m| (item.column, m))?)
                     }
                     "net" => {
                         urls += 1;
@@ -565,11 +568,12 @@ impl Context<'_> {
         word.expand(&self.sets, &mut self.used).map_err(|m| (word.column, m))
     }
 
-    fn path(&self, text: &[Tok]) -> Result<PathPattern, String> {
+    /// The path pattern of `text`, whose word was not quoted if `bare`.
+    fn path(&self, text: &[Tok], bare: bool) -> Result<PathPattern, String> {
         let flat: String = text.iter().map(|t| t.0).collect();
         let sep = |c: char| c == '/' || (cfg!(windows) && c == '\\');
         let unanchored = || {
-            misread(&flat).unwrap_or_else(|| {
+            misread(&flat).filter(|_| bare).unwrap_or_else(|| {
                 format!(
                     "path `{flat}` is not anchored: write `./{flat}` for `{}`, `~/...`, an absolute path, or `**/{flat}` for that name anywhere",
                     self.base.join(&flat).display()
@@ -1180,6 +1184,17 @@ mod tests {
                 "1:16: URL patterns take no scheme: remove `https://` and write `tls` before the URL patterns",
                 "2:24: net rules take hosts, not URLs: remove `http://` and write `plaintext` before the hosts",
                 "3:16: net rules take hosts, not URLs: remove `https://` and write `tls` before the hosts",
+            ]
+        );
+    }
+
+    #[test]
+    fn misread_advice_skips_urls_and_quoted_words() {
+        assert_eq!(
+            errors("allow read http://a.com/x\nallow \"Read\""),
+            [
+                "1:12: `http://a.com/x` is a URL, not a path: URLs go in `http` rules",
+                "2:7: path `Read` is not anchored: write `./Read` for `/base/Read`, `~/...`, an absolute path, or `**/Read` for that name anywhere",
             ]
         );
     }

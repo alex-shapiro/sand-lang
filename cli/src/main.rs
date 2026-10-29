@@ -435,11 +435,12 @@ fn ask(cap: Capability, terminal: bool, policy: &RulePolicy) -> PromptAnswer {
 }
 
 /// Denies `cap` for the rest of the run, and tells the user on standard
-/// error which option allows it, if one added to `policy` does.
+/// error which option allows it, if one added to `policy` does and the
+/// terminal can show it as it is.
 fn deny_unasked(cap: &Capability, policy: &RulePolicy) -> PromptAnswer {
     let hint = sandlang::policy::rule_for(cap, true)
         .and_then(|rule| Some((PolicyFile::parse(&rule, Path::new("/"), None).ok()?.rules, rule)))
-        .filter(|(rule, _)| rule.clone().extend(policy.clone()).check(cap) == sandlang::Decision::Allow)
+        .filter(|(rule, text)| sanitize(text) == *text && rule.clone().extend(policy.clone()).check(cap) == sandlang::Decision::Allow)
         .map(|(_, rule)| format!(" (--allow='{}' allows it)", rule.trim_start_matches("allow ").replace('\'', r"'\''")));
     eprintln!("sand: denied: {}", sanitize(&format!("{cap}{}", hint.unwrap_or_default())));
     PromptAnswer::DenyAlways
