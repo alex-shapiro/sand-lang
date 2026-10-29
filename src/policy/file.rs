@@ -645,12 +645,14 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
         }
         Capability::Http { method, scheme, host, port, path } => {
             let (names, alt) = url_segments(path);
-            let transport = match scheme.as_str() {
+            let transport_word = match scheme.as_str() {
                 "https" => "",
                 "http" => "plaintext ",
                 _ => return None,
             };
-            if alt.is_some() || !is_method(&method.to_ascii_uppercase()) {
+            // The script picks the method, which the parser must read as one.
+            let method = method.to_ascii_uppercase();
+            if alt.is_some() || !is_method(&method) || transport(&method).is_some() || not_a_transport(&method).is_some() {
                 return None;
             }
             // The port also keeps the parser from reading a numeric first
@@ -661,7 +663,7 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
                 url.push_str(&crate::stdlib::uri_encode(name, b"!$&'()+;=:@-._~"));
             }
             UrlPattern::parse(&url.chars().map(|c| (c, false)).collect::<Vec<_>>()).ok()?;
-            format!("http {transport}{} {url}", method.to_ascii_uppercase())
+            format!("http {transport_word}{method} {url}")
         }
         Capability::NetListen(addr) => format!("listen {}", quote_part(&addr.to_string(), true)),
         // `Env("*")` asks for every variable, which `env *` allows.
@@ -1328,6 +1330,19 @@ mod tests {
         assert_eq!(rule_for(&Capability::Env("A\rB".into()), true), None);
         let p = parse(&rule_for(caps.last().unwrap(), true).unwrap());
         assert_eq!(decide(&p, Capability::NetListen("[::1]:22".parse().unwrap())), Prompt);
+        // A script picks the method: one that reads as a keyword cannot be saved as a rule.
+        let request = |method: &str| Capability::Http {
+            method: method.into(),
+            scheme: "https".into(),
+            host: "api.example.com".into(),
+            port: 443,
+            path: "/x".into(),
+        };
+        for method in ["TLS", "tls", "PLAINTEXT", "Plaintext", "HTTP", "HTTPS", "TCP", "SSL"] {
+            assert_eq!(rule_for(&request(method), true), None, "{method}");
+        }
+        let p = parse(&rule_for(&request("PURGE"), true).unwrap());
+        assert_eq!((decide(&p, request("PURGE")), decide(&p, request("DELETE"))), (Allow, Prompt));
     }
 
     /// A word of the policy round-trip property: quoted and unquoted
