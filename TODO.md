@@ -31,12 +31,13 @@ The host cannot rely on engine limits, stability, or control.
       lists and then allocates 1 KiB strings peaks at 1.2 to 1.3 times
       `max_memory`. If the engine allocates small object contents from its
       own pools of fixed-size blocks, it can count that memory and give it back.
-- [ ] ❓ _Memory._ Bound the collector's gray list during incremental marking. The
-      barrier of `Heap::get_mut` adds each changed object that was marked
-      to `gray` (16 bytes each). Only allocation runs the steps that empty
-      the list and measure it, and only a collection checks the limit, so a
-      loop that changes many old objects and allocates nothing can grow the
-      list by up to 16 bytes per object without a check.
+- [ ] ❓ _Memory._ Check the limit when the write barrier grows its lists. The barrier
+      adds each changed old object to `remembered` (4 bytes) and, during
+      incremental marking, each changed marked object to `gray` (16 bytes).
+      Only allocation leads to the collections and steps that empty and
+      measure these lists, so a loop that changes many old objects and
+      allocates nothing can grow them by up to 20 bytes per object, plus
+      spare capacity, without a check.
 - [ ] ❓ _Memory._ Grow the heap's object arena in fixed-size segments instead of one `Vec`.
       A full collection gives back only the free slots after the last live
       object, and an incremental one gives back none, so slots freed below a
