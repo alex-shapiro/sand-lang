@@ -1080,6 +1080,15 @@ mod tests {
     }
 
     #[test]
+    fn an_ip_address_with_a_trailing_dot_is_the_address() {
+        let p = parse("allow net tls plaintext *\ndeny net 169.254.169.254.\nallow http 10.0.0.1./x");
+        let net = |host: &str| decide(&p, Capability::Net { host: host.into(), port: 80, tls: true });
+        assert_eq!((net("169.254.169.254"), net("169.254.169.254.")), (Deny, Deny));
+        assert_eq!(p.rules.to_string(), "allow net tls plaintext *\ndeny net 169.254.169.254\nallow http 10.0.0.1/x\n");
+        assert_eq!(http(&p, "GET", "https://10.0.0.1/x"), Allow);
+    }
+
+    #[test]
     fn custom_rules_match_names_or_every_name() {
         let p = parse("allow custom *\ndeny custom db \"drop table\"\nprompt custom db\nallow custom \"*\" literal");
         let custom = |name: &str, detail: &str| decide(&p, Capability::Custom { name: name.into(), detail: detail.into() });

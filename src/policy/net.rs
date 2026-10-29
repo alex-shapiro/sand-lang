@@ -474,8 +474,10 @@ pub(crate) fn parse_ip(s: &str) -> Option<IpAddr> {
     body_ip(s.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(s))
 }
 
+/// The IP address `s`, which may end in a dot as a host name may: resolvers
+/// read `10.0.0.1.` as `10.0.0.1`.
 fn body_ip(s: &str) -> Option<IpAddr> {
-    s.parse::<IpAddr>().ok().map(|ip| ip.to_canonical())
+    s.strip_suffix('.').unwrap_or(s).parse::<IpAddr>().ok().map(|ip| ip.to_canonical())
 }
 
 /// Whether `host` is `localhost` or a name under it, which RFC 6761 reserves

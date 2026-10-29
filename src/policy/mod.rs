@@ -20,7 +20,7 @@ pub use lint::lint_policy;
 use net::format_url_origin;
 pub use net::{check_net_pattern, format_host_port, is_private_address, is_valid_listen_pattern};
 #[cfg(feature = "os")]
-pub(crate) use net::{is_localhost, is_valid_host, parse_port, split_port};
+pub(crate) use net::{is_localhost, is_valid_host, parse_ip, parse_port, split_port};
 pub use rules::RulePolicy;
 
 /// A request to perform an effect outside the sandbox.

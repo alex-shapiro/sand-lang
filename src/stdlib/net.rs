@@ -9,7 +9,7 @@ use super::stream::{self, IoFailure, Suspended, line_read, read_line, read_to_en
 use crate::check::ModKind;
 use crate::native::{HostError, IntoValue, NativeModule, NativeObject, Val};
 use crate::network::{self, Network, Stream};
-use crate::policy::{Capability, Policy, format_host_port, is_localhost, is_valid_host, parse_port, split_port};
+use crate::policy::{Capability, Policy, format_host_port, is_localhost, is_valid_host, parse_ip, parse_port, split_port};
 use crate::vm::iomem::{Reservation, ResourceSlot};
 use crate::vm::value::{ValueType, to_usize_saturating};
 use crate::vm::{Ctl, Vm};
@@ -417,10 +417,10 @@ pub(crate) async fn resolve_allowed(
         Capability::Net { host, port, .. } | Capability::Http { host, port, .. } => (host.as_str(), *port),
         _ => unreachable!("a connection request"),
     };
-    let addrs: Vec<std::net::SocketAddr> = match host.parse::<IpAddr>() {
-        Ok(ip) => vec![std::net::SocketAddr::new(ip, port)],
-        Err(_) if is_localhost(host) => [Ipv4Addr::LOCALHOST.into(), Ipv6Addr::LOCALHOST.into()].map(|ip: IpAddr| (ip, port).into()).into(),
-        Err(_) => network.resolve(host, port).await?,
+    let addrs: Vec<std::net::SocketAddr> = match parse_ip(host) {
+        Some(ip) => vec![std::net::SocketAddr::new(ip, port)],
+        None if is_localhost(host) => [Ipv4Addr::LOCALHOST.into(), Ipv6Addr::LOCALHOST.into()].map(|ip: IpAddr| (ip, port).into()).into(),
+        None => network.resolve(host, port).await?,
     };
     let mut denied = None;
     let mut allowed = Vec::with_capacity(addrs.len());
