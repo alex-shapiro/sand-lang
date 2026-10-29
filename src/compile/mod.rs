@@ -4349,14 +4349,13 @@ impl reflect::DescSink for DescCode<'_> {
         for group in present.chunks(FILL_BITS) {
             // r0 holds the struct and r1 the mask; r2 tests a bit; r3 holds
             // the evaluated default value.
-            let mut code = Vec::with_capacity(6 * group.len() + 1);
+            let mut code = Vec::with_capacity(5 * group.len() + 1);
             for (bit, &i) in group.iter().enumerate() {
                 let (idx, proto) = fills[i].unwrap();
                 code.extend([
                     Op::LoadInt { dst: 2, v: 1 << bit },
                     Op::BitAnd { dst: 2, a: 1, b: 2 },
-                    Op::EqIK { dst: 2, a: 2, k: 0 },
-                    Op::JmpIf { cond: 2, off: 2 },
+                    Op::JNneIK { a: 2, k: 0, off: 2 },
                     Op::CallDirect { base: 3, proto },
                     Op::SetField { obj: 0, idx, src: 3 },
                 ]);
