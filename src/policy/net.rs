@@ -100,8 +100,14 @@ impl NetPattern {
         Some(NetPattern { kind, port })
     }
 
+    /// The specificity of the pattern: its host's, then whether it names a port.
     pub(crate) fn rank(&self) -> u32 {
-        let score = match &self.kind {
+        self.host_rank() * 2 + self.port.is_some() as u32
+    }
+
+    /// The specificity of the pattern's host.
+    pub(crate) fn host_rank(&self) -> u32 {
+        match &self.kind {
             HostKind::Host(_) => 3000,
             HostKind::Ip(ip, len) if *len == full_len(*ip) => 3000,
             // An IPv4 range is as narrow as the IPv6 range that embeds it in
@@ -115,8 +121,7 @@ impl NetPattern {
             HostKind::Suffix(s) if is_localhost(s) => 2900 + s.split('.').count() as u32,
             HostKind::Suffix(s) => 2000 + s.split('.').count() as u32,
             HostKind::Any => 0,
-        };
-        score * 2 + self.port.is_some() as u32
+        }
     }
 
     pub(crate) fn covers(&self, other: &NetPattern) -> bool {

@@ -238,6 +238,17 @@ fn explicit_host_rules_allow_the_addresses_they_resolve_to() {
     assert_eq!(p.check(&net_addr("db.internal", "10.0.0.6:5432")), Decision::Deny, "a tie with an exact address");
     assert_eq!(p.check(&net_addr("db.corp.example", "10.0.0.5:5432")), Decision::Deny, "a domain pattern vouches for no address");
     assert_eq!(p.check(&net_addr("db.corp.example", "8.8.8.8:5432")), Decision::Allow);
+    // Only the hosts compete: the port and the transports of either rule do not break the tie.
+    let metadata: SocketAddr = "169.254.169.254:443".parse().unwrap();
+    for (allow, deny) in [
+        ("example.com", "tls plaintext 169.254.169.254"),
+        ("example.com:443", "169.254.169.254"),
+        ("tls example.com:443", "tls plaintext 169.254.169.254"),
+        ("example.com", "169.254.169.254:443"),
+    ] {
+        let p = RulePolicy::new().allow_net(allow).deny_net(deny);
+        assert_eq!(p.check_resolved(&net("example.com", 443), metadata), Decision::Deny, "allow net {allow}, deny net {deny}");
+    }
     // `*.localhost` names the loopback host, so it ranks above every range.
     let p = RulePolicy::new().allow_net("*.localhost").deny_net("127.0.0.0/8");
     assert_eq!(p.check(&net_addr("app.localhost", "127.0.0.1:3000")), Decision::Allow);

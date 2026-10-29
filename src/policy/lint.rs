@@ -5,7 +5,7 @@ use super::net::{HostKind, NetPattern, ProbeTargets, domains_above, enclosing_ra
 use super::path::{self, Pattern, Seg, name_counts};
 use super::rules::{
     Connection, IMPORT, Precedence, READ, Rank, Rule, RuleKind, Transports, WRITE, fold_segments, method_matches, precedence,
-    resolution_tier,
+    resolution_key,
 };
 use super::{Capability, Decision, PathSpace, PolicyError};
 use crate::lint::LintWarning;
@@ -216,7 +216,7 @@ impl<'a> PathRule<'a> {
                     (HostKind::Ip(..), _) | (_, Decision::Deny) => None,
                     _ => Some(Role::Name),
                 };
-                let key = precedence([resolution_tier(&rule.kind), 0, 0, 0], rule.decision, usize::MAX);
+                let key = resolution_key(&rule.kind, rule.decision);
                 role.map(|role| Resolves {
                     role,
                     key,

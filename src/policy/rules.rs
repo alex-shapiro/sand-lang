@@ -555,7 +555,7 @@ impl RulePolicy {
         });
         let Some((decision, rule)) = best.verdict() else { return Ok(()) };
         if let Some((d, decider)) = self.verdict(request, PathSpace::Host, &[]).filter(|&(d, _)| d != Decision::Deny) {
-            let key = |i: usize, d: Decision| precedence([resolution_tier(&self.rules[i].kind), 0, 0, 0], d, usize::MAX);
+            let key = |i: usize, d: Decision| resolution_key(&self.rules[i].kind, d);
             if key(decider, d) > key(rule, decision) {
                 return Ok(());
             }
@@ -779,18 +779,20 @@ fn refs<S: AsRef<str>>(names: &[S]) -> Vec<&str> {
     names.iter().map(AsRef::as_ref).collect()
 }
 
-/// The specificity of a rule's host when it competes with address rules
-/// for a resolved address ([`RulePolicy::check_resolved`]). A host name
-/// ranks as a single address and a pattern of the names under `localhost`
-/// as a narrower pattern, since both name one host. Other domain patterns
-/// rank below every address rule, as `*` does: they name hosts they do not
-/// know, so they do not vouch for the addresses those hosts resolve to.
-pub(crate) fn resolution_tier(kind: &RuleKind) -> u32 {
-    match kind.http_match() {
+/// The order in which a rule competes with address rules for a resolved
+/// address ([`RulePolicy::check_resolved`]): by the specificity of its host
+/// alone, then by its decision. A host name ranks as a single address and a
+/// pattern of the names under `localhost` as a narrower pattern, since both
+/// name one host. Other domain patterns rank below every address rule, as
+/// `*` does: they name hosts they do not know, so they do not vouch for the
+/// addresses those hosts resolve to.
+pub(crate) fn resolution_key(kind: &RuleKind, decision: Decision) -> Precedence {
+    let tier = match kind.http_match() {
         Some(HttpMatch { host: NetPattern { kind: HostKind::Suffix(s), .. }, .. }) if !super::net::is_localhost(s) => 0,
-        Some(http) => Rank::http(&http).tier,
+        Some(http) => http.host.host_rank(),
         None => 0,
-    }
+    };
+    precedence([tier, 0, 0, 0], decision, usize::MAX)
 }
 
 /// Whether a rule with `decision` applies to a request through another
