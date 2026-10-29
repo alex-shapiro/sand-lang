@@ -430,6 +430,31 @@ fn custom_builders_read_a_star_detail_as_any_detail() {
 
 /// `deny_env("AWS_**")` would otherwise deny only a variable named `AWS_**`.
 #[test]
+fn listing_all_variables_gets_the_strictest_decision_of_any_variable() {
+    let all = Capability::Env("*".into());
+    let cases = [
+        (RulePolicy::new().allow_env("*"), Decision::Allow),
+        (RulePolicy::new().allow_env("HOME"), Decision::Prompt),
+        (RulePolicy::new().allow_env("*").deny_env("SECRET"), Decision::Deny),
+        (RulePolicy::new().allow_env("*").prompt_env("AWS_*"), Decision::Prompt),
+        (RulePolicy::new().allow_env("*").prompt_env("AWS_*").deny_env("AWS_SECRET"), Decision::Deny),
+        // An allow rule that wins over every guard leaves nothing to guard.
+        (RulePolicy::new().prompt_env("*").allow_env("*"), Decision::Allow),
+        (RulePolicy::new().prompt_env("SECRET").allow_env("SECRET").allow_env("*"), Decision::Allow),
+        (RulePolicy::new().allow_env("*").prompt_env("AWS_*").allow_env("AWS_*"), Decision::Allow),
+        (RulePolicy::new().allow_env("*").prompt_env("AWS_*").allow_env("AWS_*_ID"), Decision::Prompt),
+        (RulePolicy::new().allow_env("*").deny_env("A*").allow_env("AB*"), Decision::Deny),
+        // Default rules decide only the variables that no other rule matches.
+        (RulePolicy::new().allow_env("*").with_defaults(RulePolicy::new().deny_env("SECRET")), Decision::Allow),
+        (RulePolicy::new().allow_env("HOME").with_defaults(RulePolicy::allow_all()), Decision::Allow),
+        (RulePolicy::new().deny_env("AWS_*").with_defaults(RulePolicy::allow_all()), Decision::Deny),
+    ];
+    for (p, want) in cases {
+        assert_eq!(p.check(&all), want, "{p}");
+    }
+}
+
+#[test]
 #[should_panic(expected = "invalid name pattern \"AWS_**\"")]
 fn env_builders_reject_double_stars() {
     let _ = RulePolicy::new().deny_env("AWS_**");

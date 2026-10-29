@@ -118,9 +118,9 @@ Follow-up work, roughly in priority order.
       playground). The path pattern language has no "this path only" form.
 - [ ] A saved `allow env *` (from an "always" answer to `env.vars()`) does
       not decide the next `Env("*")` request while a deny or prompt rule
-      for some variable exists: `RulePolicy::verdict` lets those rules guard
-      the listing first. `rule_for(Env("*"))` cannot express "allow the
-      listing", so it should return `None` or the listing needs its own rule.
+      decides some variable: the listing gets the strictest decision of any
+      variable. `rule_for(Env("*"))` cannot express "allow the listing", so
+      it should return `None` or the listing needs its own rule.
 - [ ] Environment rules compare names case-sensitively (`env_names` in
       `rules.rs`), but Windows environment names are case-insensitive, so
       there `env.get("aws_secret_access_key")` reads the variable that `deny

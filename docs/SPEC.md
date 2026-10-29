@@ -2531,6 +2531,9 @@ Specificity depends on the kind of request:
   - supports a name `AWS_SECRET_KEY` or a pattern (`AWS_*`), where `*` matches any characters
     (`**` is an error)
   - specific names are prioritized above wildcard patterns
+  - `Env("*")` (all variables) gets the strictest decision that any one variable gets: `Deny`,
+    then `Prompt`, then `Allow`. A variable that no rule matches gets `Prompt`, so only a rule
+    such as `allow env *` allows the listing
 
 - **Listen addresses** (`NetListen`)
   - patterns are `ip:port`, `[ipv6]:port`, `ip`, `localhost` (any loopback address), `*:port`, or `*`

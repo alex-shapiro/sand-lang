@@ -434,15 +434,14 @@ impl RulePolicy {
     pub fn allow_env(self, name: &str) -> Self {
         self.push(Decision::Allow, RuleKind::Env(NamePattern::parse(name)))
     }
-    /// Denies reading matching environment variables. Listing all variables is
-    /// denied if any variable is denied (by a rule of the tier that decides
-    /// the listing; see [`RulePolicy::with_defaults`]).
+    /// Denies reading matching environment variables. Listing all variables
+    /// (`Env("*")`) gets the strictest decision of any one variable, so it is
+    /// denied if a variable is denied.
     pub fn deny_env(self, name: &str) -> Self {
         self.push(Decision::Deny, RuleKind::Env(NamePattern::parse(name)))
     }
     /// Asks before reading matching environment variables. Listing all
-    /// variables asks if any variable asks (and none is denied), as for
-    /// [`RulePolicy::deny_env`].
+    /// variables asks if a variable asks and none is denied.
     pub fn prompt_env(self, name: &str) -> Self {
         self.push(Decision::Prompt, RuleKind::Env(NamePattern::parse(name)))
     }
@@ -674,31 +673,16 @@ impl RulePolicy {
                 }
             }
             Capability::Env(name) if name == "*" => {
-                // All variables cannot be had while some are denied, or
-                // without asking while some ask. The default rules decide
-                // only if no other rule is about the listing.
-                let mut tiers: Vec<u32> = self.rules.iter().map(|r| r.tier).collect();
-                tiers.sort_unstable();
-                tiers.dedup();
-                for tier in tiers {
-                    let in_tier = |rule: u32| self.rules[rule as usize].tier == tier && !exclude.contains(&(rule as usize));
-                    let named = index.env_names.values().flatten().copied();
-                    let guards = named.chain(index.env.iter().map(|&(_, d, rule)| (d, rule)));
-                    let guard = guards
-                        .filter(|&(d, rule)| d != Decision::Allow && in_tier(rule))
-                        .max_by_key(|&(d, rule)| (d == Decision::Deny, std::cmp::Reverse(rule)));
-                    if let Some((d, rule)) = guard {
-                        return Some((d, rule as usize));
-                    }
-                    for &(ref pattern, d, rule) in &index.env {
-                        if *pattern == NamePattern::Any && in_tier(rule) {
-                            best.offer([0; 4], d, rule);
-                        }
-                    }
-                    if best.verdict().is_some() {
-                        break;
-                    }
-                }
+                // The listing holds every variable, so it gets the strictest
+                // decision of any one. Each rule's names have a variable that
+                // only the rules covering them all match: the exact name, or
+                // the pattern with `*` as a character that no name has.
+                let samples = index.env_names.keys().cloned().chain(index.env.iter().map(|(p, ..)| match p {
+                    NamePattern::Glob(g) => g.pieces().join("\0"),
+                    _ => "\0".into(),
+                }));
+                let verdicts = samples.chain(["\0".into()]).map(|n| self.verdict(&Capability::Env(n), space, exclude));
+                return verdicts.max_by_key(|&v| strictness(v)).flatten();
             }
             Capability::Env(name) => {
                 for &(d, rule) in index.env_names.get(name.as_str()).into_iter().flatten() {
@@ -770,13 +754,6 @@ impl RulePolicy {
         let Some(alt) = alt else { return best.verdict() };
         let mut other = Best::new(self, exclude);
         self.http_verdict(&find, method, tls, &alt, &mut other);
-        // The stricter of the two decisions holds, which may be the prompt
-        // for an unmatched request.
-        let strictness = |v: Option<(Decision, usize)>| match v.map_or(Decision::Prompt, |(d, _)| d) {
-            Decision::Allow => 0,
-            Decision::Prompt => 1,
-            Decision::Deny => 2,
-        };
         let (main, alt) = (best.verdict(), other.verdict());
         if strictness(alt) > strictness(main) { alt } else { main }
     }
@@ -936,6 +913,18 @@ pub(crate) fn strength(decision: Decision) -> u8 {
 /// host matches a request, and whether the host matched another form of the
 /// request's address.
 type FindGroups<'a> = dyn Fn(&mut dyn FnMut(bool, &u32)) + 'a;
+
+/// How strict the verdict `v` of a request is: `Allow`, then `Prompt` (and
+/// no matching rule, which prompts), then `Deny`. A prompt rule ranks above
+/// no rule, to name it in messages.
+fn strictness(v: Option<(Decision, usize)>) -> (u8, bool) {
+    match v {
+        None => (1, false),
+        Some((Decision::Allow, _)) => (0, true),
+        Some((Decision::Prompt, _)) => (1, true),
+        Some((Decision::Deny, _)) => (2, true),
+    }
+}
 
 /// The order of matching rules: the greatest decides.
 pub(crate) type Precedence = (Spec, u8, std::cmp::Reverse<usize>);
