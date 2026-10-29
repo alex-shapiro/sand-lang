@@ -441,7 +441,11 @@ impl Context<'_> {
                 Some(d) => self.expand(d)?.into_iter().map(|w| custom_part(&w).map_err(|m| (d.column, m))).collect::<Result<_, _>>()?,
                 None => vec![None],
             };
-            for word in self.expand(name)? {
+            let names = self.expand(name)?;
+            if names.len().saturating_mul(details.len()) > MAX_EXPANSION {
+                return Err((name.column, format!("`{verb_text} custom` stands for more than {MAX_EXPANSION} rules")));
+            }
+            for word in names {
                 let name_pattern = custom_part(&word).map_err(|m| (name.column, m))?;
                 for detail in &details {
                     let kind = RuleKind::Custom(name_pattern.clone(), detail.clone());
@@ -1114,6 +1118,15 @@ mod tests {
         let message = "`**` matches paths: in a name, `*` matches any characters (e.g. `AWS_*`)";
         assert_eq!(errors("deny env AWS_**\nallow env **"), [format!("1:10: {message}"), format!("2:11: {message}")]);
         assert_eq!(decide(&parse("deny env \"AWS_**\""), Capability::Env("AWS_**".into())), Deny);
+    }
+
+    #[test]
+    fn custom_rules_have_the_expansion_limit() {
+        let values: Vec<String> = (0..400).map(|i| format!("v{i}")).collect();
+        let text = format!("let a = {}\ndeny custom {{a}} {{a}}", values.join(" "));
+        assert_eq!(errors(&text), ["2:13: `deny custom` stands for more than 100000 rules"]);
+        let text = format!("let a = {}\ndeny custom {{a}} x", values.join(" "));
+        assert_eq!(parse(&text).rules.to_string().lines().count(), 400);
     }
 
     #[test]
