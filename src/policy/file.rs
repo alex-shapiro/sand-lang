@@ -627,7 +627,10 @@ fn limit(l: &mut Limits, args: &[Word]) -> Result<(), String> {
     Ok(())
 }
 
-/// Generates a policy rule string for a capability prompt response.
+/// Generates a policy rule string for a capability prompt response, or
+/// `None` if no rule decides exactly `cap` (a path that is not UTF-8 or
+/// that has a line break, an HTTP request whose path has an encoded `/`,
+/// or a resolved address).
 pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
     let verb = if allow { "allow" } else { "deny" };
     let path = |p: &Path| p.to_str().map(|s| quote_part(s, true));
@@ -666,13 +669,13 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
         Capability::Env(name) => format!("env {}", quote_part(name, true)),
         Capability::Stdin => "stdin".into(),
         Capability::TimeZone => "timezone".into(),
-        Capability::Stdout | Capability::Stderr if allow => return None,
         Capability::Stdout => "stdout".into(),
         Capability::Stderr => "stderr".into(),
         Capability::Custom { name, detail } => format!("custom {} {}", quote_part(name, true), quote_part(detail, true)),
         Capability::NetAddr { .. } => return None,
     };
-    Some(format!("{verb} {rule}"))
+    // Policy text cannot hold a line break, even in quotes.
+    (!rule.contains(['\n', '\r'])).then(|| format!("{verb} {rule}"))
 }
 
 impl fmt::Display for Rule {
@@ -701,7 +704,7 @@ impl fmt::Display for RuleKind {
                     if !path.is_empty() && !path.ends_with(['/', '\\']) {
                         path.push('/');
                     }
-                    path += &render_seg(seg, |s| quote_part(s, false));
+                    path += &render_seg(seg, |s, _| quote_part(s, false));
                 }
                 write!(f, "{access}{path}")
             }
@@ -715,23 +718,29 @@ impl fmt::Display for RuleKind {
                     (HostKind::Ip(ip @ std::net::IpAddr::V6(_), _), None) => write!(f, "[{ip}]")?,
                     _ => write!(f, "{}", host_text(&url.host))?,
                 }
+                if let HostKind::Ip(ip, _) = url.host.kind
+                    && url.host.port.is_none()
+                    && url.path.first().is_some_and(looks_like_prefix_length)
+                {
+                    write!(f, "/{}", if ip.is_ipv6() { 128 } else { 32 })?;
+                }
                 for seg in &url.path {
-                    write!(f, "/{}", render_seg(seg, |s| crate::stdlib::uri_encode(s, b"!$&'()+;=:@-._~")))?;
+                    write!(f, "/{}", render_seg(seg, |s, _| crate::stdlib::uri_encode(s, b"!$&'()+;=:@-._~")))?;
                 }
                 Ok(())
             }
             RuleKind::Listen(pattern) => write!(f, "listen {pattern}"),
-            RuleKind::Env(NamePattern::Exact(name)) => write!(f, "env {}", quote_part(name, false)),
-            RuleKind::Env(NamePattern::Glob(g)) => write!(f, "env {}", render_seg(&Seg::Glob(g.clone()), |s| quote_part(s, false))),
+            RuleKind::Env(NamePattern::Exact(name)) => write!(f, "env {}", quote_part(name, true)),
+            RuleKind::Env(NamePattern::Glob(g)) => write!(f, "env {}", render_seg(&Seg::Glob(g.clone()), quote_part)),
             RuleKind::Env(NamePattern::Any) => write!(f, "env *"),
             RuleKind::Stdin => write!(f, "stdin"),
             RuleKind::Stdout => write!(f, "stdout"),
             RuleKind::Stderr => write!(f, "stderr"),
             RuleKind::TimeZone => write!(f, "timezone"),
             RuleKind::Custom(name, detail) => {
-                write!(f, "custom {}", name.as_deref().map_or_else(|| "*".to_string(), |n| quote_part(n, false)))?;
+                write!(f, "custom {}", name.as_deref().map_or_else(|| "*".to_string(), |n| quote_part(n, true)))?;
                 match detail {
-                    Some(detail) => write!(f, " {}", quote_part(detail, false)),
+                    Some(detail) => write!(f, " {}", quote_part(detail, true)),
                     None => Ok(()),
                 }
             }
@@ -739,16 +748,25 @@ impl fmt::Display for RuleKind {
     }
 }
 
-/// A host pattern as policy file text: a host named like a transport or a
-/// scheme gets a trailing dot.
+/// A host pattern as policy file text: a host named like a keyword (a
+/// transport, a scheme or a method) gets a trailing dot.
 fn host_text(pattern: &NetPattern) -> String {
     match &pattern.kind {
-        HostKind::Host(h) if transport(h).is_some() || not_a_transport(h).is_some() => {
+        HostKind::Host(h) if is_keyword(h) => {
             let port = pattern.port.map_or_else(String::new, |p| format!(":{p}"));
             format!("{h}.{port}")
         }
         _ => pattern.to_string(),
     }
+}
+
+/// Whether a URL pattern's first path segment `seg`, after an IP address
+/// without a port, reads as a prefix length (`10.0.0.1/8`) unless the
+/// address has its full length (`10.0.0.1/32/8`).
+fn looks_like_prefix_length(seg: &Seg) -> bool {
+    let Seg::Lit(name) = seg else { return false };
+    let digits = name.split(':').next().unwrap_or_default();
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// The transport words of a rule that matches `transports`, each followed
@@ -764,11 +782,15 @@ fn transport_words(transports: Transports) -> &'static str {
 }
 
 /// A segment of a pattern as policy file text, with its names written by
-/// `name`.
-fn render_seg(seg: &Seg, name: impl Fn(&str) -> String) -> String {
+/// `name(text, first)`, where `first` tells whether the text starts the
+/// segment.
+fn render_seg(seg: &Seg, name: impl Fn(&str, bool) -> String) -> String {
     match seg {
-        Seg::Lit(s) => name(s),
-        Seg::Glob(g) => g.pieces().iter().map(|p| if p.is_empty() { String::new() } else { name(p) }).collect::<Vec<_>>().join("*"),
+        Seg::Lit(s) => name(s, true),
+        Seg::Glob(g) => {
+            let pieces = g.pieces().iter().enumerate();
+            pieces.map(|(i, p)| if p.is_empty() { String::new() } else { name(p, i == 0) }).collect::<Vec<_>>().join("*")
+        }
         Seg::Star => "*".into(),
         Seg::GlobStar => "**".into(),
     }
@@ -1132,6 +1154,22 @@ mod tests {
     }
 
     #[test]
+    fn displayed_rules_reparse_to_the_same_rules() {
+        for text in [
+            "allow custom slack \"#general\"",
+            "deny env \"#X\" \"#a\"*",
+            "deny http plaintext 10.0.0.1/32/8 10.0.0.1/32/8:1 [::]/128/8",
+            "allow http post.:8080 delete. \"get\"/x",
+        ] {
+            let shown = parse(text).rules.to_string();
+            let again = PolicyFile::parse(&shown, Path::new("/"), None).map(|f| f.rules.to_string());
+            assert_eq!(again.as_deref(), Ok(shown.as_str()), "{text}");
+        }
+        let p = parse(&parse("allow custom slack \"#general\"").rules.to_string());
+        assert_eq!(decide(&p, Capability::Custom { name: "slack".into(), detail: "#random".into() }), Prompt);
+    }
+
+    #[test]
     fn double_stars_match_every_path_on_every_root() {
         let p = parse("allow import **\ndeny **/.env\nallow read /data");
         assert_eq!(decide(&p, Capability::Import(PathBuf::from("/anywhere/x.sand"))), Allow);
@@ -1263,6 +1301,11 @@ mod tests {
             Capability::TimeZone,
             Capability::Custom { name: "db".into(), detail: "drop table".into() },
             Capability::NetListen("[::1]:0".parse().unwrap()),
+            Capability::Stdout,
+            Capability::Stderr,
+            Capability::Env("#X".into()),
+            Capability::Custom { name: "#chan".into(), detail: "#general".into() },
+            Capability::Net { host: "delete".into(), port: 443, tls: false },
         ];
         for cap in &caps {
             for allow in [true, false] {
@@ -1279,13 +1322,61 @@ mod tests {
         assert_eq!(rule_for(&caps[8], false).unwrap(), "deny http plaintext POST [::1]:8080");
         let plain = Capability::Net { host: "localhost".into(), port: 5432, tls: false };
         assert_eq!(rule_for(&plain, true).unwrap(), "allow net plaintext localhost:5432");
-        assert_eq!(rule_for(&Capability::Stdout, true), None);
-        assert_eq!(rule_for(&Capability::Stdout, false).as_deref(), Some("deny stdout"));
+        assert_eq!(rule_for(&Capability::Stdout, true).as_deref(), Some("allow stdout"));
+        assert_eq!(rule_for(&Capability::Stderr, false).as_deref(), Some("deny stderr"));
+        assert_eq!(rule_for(&Capability::FsRead(PathBuf::from("/tmp/a\nb")), true), None);
+        assert_eq!(rule_for(&Capability::Env("A\rB".into()), true), None);
         let p = parse(&rule_for(caps.last().unwrap(), true).unwrap());
         assert_eq!(decide(&p, Capability::NetListen("[::1]:22".parse().unwrap())), Prompt);
     }
 
+    /// A word of the policy round-trip property: quoted and unquoted
+    /// wildcards, keywords, comment characters and escapes.
+    fn word() -> impl proptest::strategy::Strategy<Value = String> {
+        use proptest::strategy::Strategy;
+        let words = [
+            "a", "B", "\"a b\"", "\"*\"", "*", "x*", "\"x\"*", "\"{x}\"", "\"tls\"", "tls.", "\"plaintext\"", "\"a,b\"", "\"\\\"q\"",
+            "é", "\"\"", "\"%2F\"", "%41", "\"..\"", "\"#\"", "\"#a\"", "\"#\"*", "a#", "\"http\"", "\"GET\"", "8", "32",
+        ];
+        proptest::sample::select(words.to_vec()).prop_map(str::to_string)
+    }
+
+    /// A rule of the policy round-trip property.
+    fn line() -> impl proptest::strategy::Strategy<Value = String> {
+        use proptest::prelude::*;
+        let verb = prop::sample::select(vec!["allow", "deny", "prompt"]);
+        let path = || prop::collection::vec(word(), 0..4).prop_map(|w| w.iter().map(|n| format!("/{n}")).collect::<String>());
+        let root = prop::sample::select(vec!["/r", "./", "~", "**", "\"/my dir\""]);
+        let host = prop::sample::select(vec![
+            "a.com", "*.a.com", "*", "10.0.0.1", "[::1]", "[::]", "10.0.0.1:80", "[::1]:8080", "tls.", "plaintext.:80", "10.0.0.0/8",
+            "delete.", "http.", "\"get\"", "10.0.0.1/32", "[::1]/128",
+        ]);
+        let transport = prop::sample::select(vec!["", "tls ", "plaintext ", "tls plaintext ", "PLAINTEXT "]);
+        let methods = prop::sample::select(vec!["", "GET ", "post ", "M-SEARCH "]);
+        let access = prop::sample::select(vec!["", "read ", "write ", "import "]);
+        prop_oneof![
+            (verb.clone(), access, root, path()).prop_map(|(v, a, r, p)| format!("{v} {a}{r}{p}")),
+            (verb.clone(), transport.clone(), methods, host.clone(), path()).prop_map(|(v, t, m, h, p)| format!("{v} http {t}{m}{h}{p}")),
+            (verb.clone(), transport, host).prop_map(|(v, t, h)| format!("{v} net {t}{h}")),
+            (verb.clone(), word()).prop_map(|(v, w)| format!("{v} env {w}")),
+            (verb.clone(), word(), prop::option::of(word())).prop_map(|(v, n, d)| format!("{v} custom {n} {}", d.unwrap_or_default())),
+            (verb, prop::sample::select(vec!["*", "*:80", "localhost", "[::1]:0", "::1", "127.0.0.1:*"]))
+                .prop_map(|(v, l)| format!("{v} listen {l}")),
+        ]
+    }
+
     proptest::proptest! {
+        /// The display of a policy is policy text for the same rules, in
+        /// any directory.
+        #[test]
+        fn displayed_policies_reparse_to_the_same_rules(line in line()) {
+            let Ok(file) = PolicyFile::parse(&line, Path::new("/base"), Some(Path::new("/home/me"))) else { return Ok(()) };
+            let shown = file.rules.to_string();
+            let again = PolicyFile::parse(&shown, Path::new("/elsewhere"), Some(Path::new("/other")));
+            proptest::prop_assert!(again.is_ok(), "{:?} -> {:?} -> {:?}", line, shown, again.err());
+            proptest::prop_assert_eq!(&again.unwrap().rules.to_string(), &shown, "{:?}", line);
+        }
+
         #[test]
         fn rules_for_http_requests_to_addresses_match_single_address(
             bits in proptest::prelude::any::<u128>(),
