@@ -36,7 +36,7 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
         }
     };
     let describe = |i: usize| match &rules[i].origin {
-        Some(o) => format!("line {} (`{}`)", o.line, o.text),
+        Some(o) => format!("`{}` on line {}", o.text, o.line),
         None => policy.describe_rule(i),
     };
     let describe_all = |rules: &[usize]| match rules {
@@ -77,7 +77,7 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
     for word in words.iter().rev() {
         let is_kept = |j: usize| !word.contains(&j) && !removed[j];
         let find_subsuming = || {
-            let (mut same_decision, mut deciders, mut repeats) = (None, Vec::new(), true);
+            let (mut same_decision, mut subsuming, mut repeats) = (None, Vec::new(), true);
             for i in word.clone() {
                 let rule = &rules[i];
                 let identical = same[&(rule.decision, &rule.kind)].iter().copied().find(|&c| is_kept(c));
@@ -86,31 +86,31 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
                         (true, vec![c], true)
                     }
                     _ => {
-                        let (decision, by) = paths.deciders(paths.get(i)?, &|j| !is_kept(j))?;
+                        let (decision, by) = paths.subsuming_rules(paths.get(i)?, &|j| !is_kept(j))?;
                         (decision, by, false)
                     }
                 };
                 if *same_decision.get_or_insert(decision) != decision {
                     return None;
                 }
-                deciders.extend(by);
+                subsuming.extend(by);
                 repeats &= repeat;
             }
-            Some((same_decision?, deciders, repeats))
+            Some((same_decision?, subsuming, repeats))
         };
-        let Some((same_decision, mut deciders, repeat)) = find_subsuming() else { continue };
-        deciders.sort_unstable();
-        deciders.dedup();
-        let is_single = deciders.len() == 1;
+        let Some((same_decision, mut subsuming, repeat)) = find_subsuming() else { continue };
+        subsuming.sort_unstable();
+        subsuming.dedup();
+        let is_single = subsuming.len() == 1;
         let message = match (same_decision, rules[word.start].decision) {
-            _ if repeat && word.len() == 1 => format!("the same as {}", describe(deciders[0])),
-            (true, Decision::Allow) => format!("{} already {} this", describe_all(&deciders), if is_single { "allows" } else { "allow" }),
-            (true, Decision::Deny) => format!("{} already {} this", describe_all(&deciders), if is_single { "denies" } else { "deny" }),
+            _ if repeat && word.len() == 1 => format!("duplicate of {}", describe(subsuming[0])),
+            (true, Decision::Allow) => format!("{} already {} this", describe_all(&subsuming), if is_single { "allows" } else { "allow" }),
+            (true, Decision::Deny) => format!("{} already {} this", describe_all(&subsuming), if is_single { "denies" } else { "deny" }),
             (true, Decision::Prompt) => {
-                format!("{} already {} for this", describe_all(&deciders), if is_single { "prompts" } else { "prompt" })
+                format!("{} already {} for this", describe_all(&subsuming), if is_single { "prompts" } else { "prompt" })
             }
             (false, _) => {
-                format!("{} {} precedence everywhere this rule applies", describe_all(&deciders), if is_single { "takes" } else { "take" })
+                format!("{} {} precedence everywhere this rule applies", describe_all(&subsuming), if is_single { "takes" } else { "take" })
             }
         };
         warn(word.start, if same_decision { "redundant-rule" } else { "overridden-rule" }, message);
@@ -134,12 +134,12 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
     for word in &words {
         let mut firsts = word.clone().filter(|&i| same[&(rules[i].decision, &rules[i].kind)][0] == i);
         if let Some((by, reach)) = firsts.find_map(&mut bypass_of) {
-            warn(word.start, "bypassable-http-deny", format!("{by} lets scripts connect to {reach} and send any request"));
+            warn(word.start, "bypassable-http-deny", format!("{by} permits raw TCP connections to {reach}, bypassing this HTTP rule"));
         }
     }
     for (name, line, column, used) in parsed.sets {
         if !used {
-            warnings.push(LintWarning { code: "unused-set", message: format!("no rule uses the set `{name}`"), line, column });
+            warnings.push(LintWarning { code: "unused-set", message: format!("set `{name}` is unused"), line, column });
         }
     }
     warnings.sort_by_key(|w| (w.line, w.column));
@@ -170,8 +170,8 @@ struct PathRule<'a> {
     counts: (usize, Option<usize>),
 }
 
-/// Role and precedence of a rule during post-DNS address checks (see
-/// [`super::RulePolicy::check_resolved`]).
+/// Role and precedence of a rule during post-DNS address checks; see
+/// [`super::RulePolicy::check_resolved`].
 #[derive(Clone, Copy)]
 struct AddressResolution {
     role: Role,
@@ -256,17 +256,17 @@ impl<'a> PathRule<'a> {
         }
     }
 
-    fn decides_all(&self, op: Op) -> bool {
+    fn matches_all_ops(&self, op: Op) -> bool {
         match (&self.scope, op) {
             (Scope::Files(mask), Op::File(op)) => mask & op != 0,
             (Scope::Http { methods, .. }, Op::Method(Some(m))) => method_matches(*methods, m),
             (Scope::Http { methods, .. }, Op::Method(None)) => methods.is_none(),
-            (_, Op::Connect(_)) => self.may_decide(op),
+            (_, Op::Connect(_)) => self.matches_op(op),
             _ => false,
         }
     }
 
-    fn may_decide(&self, op: Op) -> bool {
+    fn matches_op(&self, op: Op) -> bool {
         match (&self.scope, op) {
             (Scope::Files(mask), Op::File(op)) => mask & op != 0,
             (Scope::Http { methods, .. }, Op::Method(m)) => m.is_none_or(|m| method_matches(*methods, m)),
@@ -422,15 +422,15 @@ impl<'a> PathRules<'a> {
         paths
     }
 
-    /// Returns `true` if removing `i` in favor of `deciders` does not change
+    /// Returns `true` if removing `i` in favor of `subsuming` does not change
     /// post-DNS address checks.
-    fn preserves_address_resolution(&self, i: &PathRule, deciders: &[usize], excluded: &dyn Fn(usize) -> bool) -> bool {
+    fn preserves_address_resolution(&self, i: &PathRule, subsuming: &[usize], excluded: &dyn Fn(usize) -> bool) -> bool {
         let Some(r) = i.address_resolution else { return true };
         let others = &self.by_resolution_role[match r.role {
             Role::Name => Role::Address,
             Role::Address => Role::Name,
         } as usize];
-        deciders.iter().all(|&j| {
+        subsuming.iter().all(|&j| {
             let host = self.get(j).and_then(|j| j.address_resolution).map_or(0, |j| j.key.0[0]);
             let from = others.partition_point(|e| e.0 < AddressResolution::lowest(host));
             others[from..].iter().take_while(|e| e.0 <= r.key).all(|&(_, at)| {
@@ -481,35 +481,35 @@ impl<'a> PathRules<'a> {
         found.filter(|k| k.decision != i.decision && i.overlaps(k, k.rank.host < i.rank.host))
     }
 
-    fn deciders(&self, i: &PathRule<'a>, excluded: &dyn Fn(usize) -> bool) -> Option<(bool, Vec<usize>)> {
+    fn subsuming_rules(&self, i: &PathRule<'a>, excluded: &dyn Fn(usize) -> bool) -> Option<(bool, Vec<usize>)> {
         let broader = self.broader(i, excluded);
         let mut same_decision = None;
-        let mut deciders = Vec::new();
+        let mut subsuming = Vec::new();
         for op in i.ops() {
-            let j = self.decider(i, op, &broader)?;
+            let j = self.subsuming_rule(i, op, &broader)?;
             if *same_decision.get_or_insert(j.decision == i.decision) != (j.decision == i.decision) {
                 return None;
             }
-            deciders.push(j.index);
+            subsuming.push(j.index);
         }
-        deciders.sort_unstable();
-        deciders.dedup();
+        subsuming.sort_unstable();
+        subsuming.dedup();
         let same_decision = same_decision?;
-        if same_decision && !self.preserves_address_resolution(i, &deciders, excluded) {
+        if same_decision && !self.preserves_address_resolution(i, &subsuming, excluded) {
             return None;
         }
-        Some((same_decision, deciders))
+        Some((same_decision, subsuming))
     }
 
-    fn decider<'b>(&'b self, i: &'b PathRule<'a>, op: Op, broader: &[&'b PathRule<'a>]) -> Option<&'b PathRule<'a>> {
-        let broader = broader.iter().copied().filter(|j| j.decides_all(op));
+    fn subsuming_rule<'b>(&'b self, i: &'b PathRule<'a>, op: Op, broader: &[&'b PathRule<'a>]) -> Option<&'b PathRule<'a>> {
+        let broader = broader.iter().copied().filter(|j| j.matches_all_ops(op));
         let instead = broader.clone().filter(|j| j.covers(i, false) && j.outranks(i)).max_by_key(|j| j.rank());
         if instead.is_some() {
             return instead;
         }
         let agree = broader.filter(|j| j.decision == i.decision);
         agree
-            .filter(|j| self.opposing_rules(i, j.rank.host).all(|k| !k.may_decide(op) || cannot_override_between(i, j, k)))
+            .filter(|j| self.opposing_rules(i, j.rank.host).all(|k| !k.matches_op(op) || cannot_override_between(i, j, k)))
             .max_by_key(|j| (j.counts.0, j.rank()))
     }
 }
@@ -547,19 +547,19 @@ mod tests {
         assert_eq!(
             lint("allow ./data\nallow read ./data/x\nallow read ./data/x\ndeny ~/.ssh\ndeny ~/.ssh/id\nallow write ./out\ndeny ./out"),
             [
-                "2:12: warning[redundant-rule]: line 1 (`./data`) already allows this",
-                "3:12: warning[redundant-rule]: the same as line 2 (`./data/x`)",
-                "5:6: warning[redundant-rule]: line 4 (`~/.ssh`) already denies this",
-                "6:13: warning[overridden-rule]: line 7 (`./out`) takes precedence everywhere this rule applies",
+                "2:12: warning[redundant-rule]: `./data` on line 1 already allows this",
+                "3:12: warning[redundant-rule]: duplicate of `./data/x` on line 2",
+                "5:6: warning[redundant-rule]: `~/.ssh` on line 4 already denies this",
+                "6:13: warning[overridden-rule]: `./out` on line 7 takes precedence everywhere this rule applies",
             ]
         );
         assert_eq!(lint("deny ~/\nallow ./project\ndeny ./project/.env\nallow read ./project/.env/public"), Vec::<String>::new());
-        assert_eq!(lint("allow read ./a\nallow write ./a"), ["1:12: warning[redundant-rule]: line 2 (`./a`) already allows this"]);
+        assert_eq!(lint("allow read ./a\nallow write ./a"), ["1:12: warning[redundant-rule]: `./a` on line 2 already allows this"]);
         assert_eq!(lint("allow read ./a\nallow write ./a/b"), Vec::<String>::new());
-        assert_eq!(lint("allow write ./a\nallow read ./a"), ["2:12: warning[redundant-rule]: line 1 (`./a`) already allows this"]);
+        assert_eq!(lint("allow write ./a\nallow read ./a"), ["2:12: warning[redundant-rule]: `./a` on line 1 already allows this"]);
         assert_eq!(
             lint("allow import ./lib/a\ndeny ./lib/a\nallow import ./src"),
-            ["1:14: warning[overridden-rule]: line 2 (`./lib/a`) takes precedence everywhere this rule applies"]
+            ["1:14: warning[overridden-rule]: `./lib/a` on line 2 takes precedence everywhere this rule applies"]
         );
     }
 
@@ -570,40 +570,40 @@ mod tests {
         assert_eq!(lint("let h = a.com x.org\nallow net *.com\nallow net {h}"), none);
         assert_eq!(
             lint("allow net a.com\nlet h = a.com x.org\nallow net {h}"),
-            ["1:11: warning[redundant-rule]: the same as line 3 (`a.com`)"]
+            ["1:11: warning[redundant-rule]: duplicate of `a.com` on line 3"]
         );
         assert_eq!(lint("let h = *.com a.com x.org\nallow net {h}"), none);
         assert_eq!(lint("let h = a.com a.com\nallow net {h}"), none);
         assert_eq!(
             lint("deny /r/*/secret\nlet d = a b\ndeny /r/{d}/secret"),
-            ["3:6: warning[redundant-rule]: line 1 (`/r/*/secret`) already denies this"]
+            ["3:6: warning[redundant-rule]: `/r/*/secret` on line 1 already denies this"]
         );
         assert_eq!(
             lint("allow net a.com b.com\nlet h = a.com b.com\nallow net {h}"),
-            ["3:11: warning[redundant-rule]: line 1 (`a.com`) and line 1 (`b.com`) already allow this"]
+            ["3:11: warning[redundant-rule]: `a.com` on line 1 and `b.com` on line 1 already allow this"]
         );
         assert_eq!(
             lint("let h = a.com b.com\nallow net *\ndeny http {h}/admin"),
-            ["3:11: warning[bypassable-http-deny]: line 2 (`*`) lets scripts connect to a.com:443 and send any request"]
+            ["3:11: warning[bypassable-http-deny]: `*` on line 2 permits raw TCP connections to a.com:443, bypassing this HTTP rule"]
         );
     }
 
     #[test]
     fn reported_rules_do_not_justify_others() {
-        assert_eq!(lint("allow /r\ndeny /r/a\ndeny read /r/a"), ["3:11: warning[redundant-rule]: line 2 (`/r/a`) already denies this"]);
+        assert_eq!(lint("allow /r\ndeny /r/a\ndeny read /r/a"), ["3:11: warning[redundant-rule]: `/r/a` on line 2 already denies this"]);
         assert_eq!(
             lint("allow http a.com\ndeny http a.com/admin\ndeny http a.com/ADMIN"),
-            ["3:11: warning[redundant-rule]: line 2 (`a.com/admin`) already denies this"]
+            ["3:11: warning[redundant-rule]: `a.com/admin` on line 2 already denies this"]
         );
         assert_eq!(
             lint("allow http GET POST a.com\nallow http POST GET a.com"),
-            ["2:21: warning[redundant-rule]: line 1 (`a.com`) already allows this"]
+            ["2:21: warning[redundant-rule]: `a.com` on line 1 already allows this"]
         );
         assert_eq!(
             lint("allow import /r/a\nallow import /r/b\ndeny /r/a\ndeny /r/b"),
             [
-                "1:14: warning[overridden-rule]: line 3 (`/r/a`) takes precedence everywhere this rule applies",
-                "2:14: warning[overridden-rule]: line 4 (`/r/b`) takes precedence everywhere this rule applies",
+                "1:14: warning[overridden-rule]: `/r/a` on line 3 takes precedence everywhere this rule applies",
+                "2:14: warning[overridden-rule]: `/r/b` on line 4 takes precedence everywhere this rule applies",
             ]
         );
     }
@@ -614,9 +614,9 @@ mod tests {
         assert_eq!(
             lint("allow read ./src\nallow read ./src/**/*.rs\ndeny ./a/**/.env\ndeny ./a/b/.env\nallow ./out/*\ndeny ./out/*"),
             [
-                "2:12: warning[redundant-rule]: line 1 (`./src`) already allows this",
-                "4:6: warning[redundant-rule]: line 3 (`./a/**/.env`) already denies this",
-                "5:7: warning[overridden-rule]: line 6 (`./out/*`) takes precedence everywhere this rule applies",
+                "2:12: warning[redundant-rule]: `./src` on line 1 already allows this",
+                "4:6: warning[redundant-rule]: `./a/**/.env` on line 3 already denies this",
+                "5:7: warning[overridden-rule]: `./out/*` on line 6 takes precedence everywhere this rule applies",
             ]
         );
         assert_eq!(lint("allow read ./src\nallow read ./src/**/*.rs\ndeny ./**/.env"), none);
@@ -626,20 +626,20 @@ mod tests {
         assert_eq!(lint("deny ~/\nallow ./project\ndeny ./project/.env\nallow read ./project/.env/*"), none);
         assert_eq!(
             lint("allow ./data\ndeny ./data/secret\nallow read ./data/*"),
-            ["3:12: warning[redundant-rule]: line 1 (`./data`) already allows this"]
+            ["3:12: warning[redundant-rule]: `./data` on line 1 already allows this"]
         );
         assert_eq!(
             lint("deny ~/\nallow ~/proj\nallow read ~/proj/src/*.rs"),
-            ["3:12: warning[redundant-rule]: line 2 (`~/proj`) already allows this"]
+            ["3:12: warning[redundant-rule]: `~/proj` on line 2 already allows this"]
         );
         assert_eq!(
             lint("allow ./A/*\ndeny ./a/*"),
-            ["1:7: warning[overridden-rule]: line 2 (`./a/*`) takes precedence everywhere this rule applies"]
+            ["1:7: warning[overridden-rule]: `./a/*` on line 2 takes precedence everywhere this rule applies"]
         );
         assert_eq!(lint("deny ./a/*\nallow ./a/*.TXT\nallow ./A/*.txt"), none);
         assert_eq!(
             lint("let ext = pem key\ndeny ./**/*.{ext}\ndeny ./keys/*.pem"),
-            ["3:6: warning[redundant-rule]: line 2 (`./**/*.pem`) already denies this"]
+            ["3:6: warning[redundant-rule]: `./**/*.pem` on line 2 already denies this"]
         );
     }
 
@@ -648,97 +648,107 @@ mod tests {
         assert_eq!(
             lint("let unused = a\nlet hosts = api.example.com\nallow net {hosts}\ndeny http DELETE {hosts}/x\ndeny http other.com"),
             [
-                "1:5: warning[unused-set]: no rule uses the set `unused`",
-                "4:18: warning[bypassable-http-deny]: line 3 (`api.example.com`) lets scripts connect to api.example.com:443 and send any request",
+                "1:5: warning[unused-set]: set `unused` is unused",
+                "4:18: warning[bypassable-http-deny]: `api.example.com` on line 3 permits raw TCP connections to api.example.com:443, bypassing this HTTP rule",
             ]
         );
         assert_eq!(
             lint("allow net *.localhost\ndeny http localhost/admin"),
-            ["2:11: warning[bypassable-http-deny]: line 1 (`*.localhost`) lets scripts connect to *.localhost:443 and send any request"]
+            [
+                "2:11: warning[bypassable-http-deny]: `*.localhost` on line 1 permits raw TCP connections to *.localhost:443, bypassing this HTTP rule"
+            ]
         );
         assert_eq!(lint("allow net app.localhost:8080\ndeny net localhost"), Vec::<String>::new());
         assert_eq!(
             lint("allow net *.localhost\ndeny net localhost\nallow net *.localhost"),
-            ["3:11: warning[redundant-rule]: the same as line 1 (`*.localhost`)"]
+            ["3:11: warning[redundant-rule]: duplicate of `*.localhost` on line 1"]
         );
         assert_eq!(
             lint("allow net *\ndeny http localhost/x\nprompt http POST localhost/y"),
             [
-                "2:11: warning[bypassable-http-deny]: line 1 (`*`) lets scripts connect to localhost:443 and send any request",
-                "3:18: warning[bypassable-http-deny]: line 1 (`*`) lets scripts connect to localhost:443 and send any request",
+                "2:11: warning[bypassable-http-deny]: `*` on line 1 permits raw TCP connections to localhost:443, bypassing this HTTP rule",
+                "3:18: warning[bypassable-http-deny]: `*` on line 1 permits raw TCP connections to localhost:443, bypassing this HTTP rule",
             ]
         );
         assert_eq!(lint("allow net plaintext *\ndeny http tls api.example.com/x"), Vec::<String>::new());
         assert_eq!(
             lint("allow net plaintext *\ndeny http api.example.com/x"),
             [
-                "2:11: warning[bypassable-http-deny]: line 1 (`*`) lets scripts connect to api.example.com:443 without TLS and send any request"
+                "2:11: warning[bypassable-http-deny]: `*` on line 1 permits raw TCP connections to api.example.com:443 without TLS, bypassing this HTTP rule"
             ]
         );
         assert_eq!(
             lint("allow net *.example.com\ndeny http *.example.com/admin\nallow net *\ndeny http POST *"),
             [
-                "2:11: warning[bypassable-http-deny]: line 1 (`*.example.com`) lets scripts connect to *.example.com:443 and send any request",
-                "4:16: warning[bypassable-http-deny]: line 3 (`*`) lets scripts connect to *:443 and send any request",
+                "2:11: warning[bypassable-http-deny]: `*.example.com` on line 1 permits raw TCP connections to *.example.com:443, bypassing this HTTP rule",
+                "4:16: warning[bypassable-http-deny]: `*` on line 3 permits raw TCP connections to *:443, bypassing this HTTP rule",
             ]
         );
         assert_eq!(
             lint("deny net *\nallow net api.example.com\ndeny http *.example.com/admin"),
             [
-                "3:11: warning[redundant-rule]: line 1 (`*`) already denies this",
-                "3:11: warning[bypassable-http-deny]: line 2 (`api.example.com`) lets scripts connect to api.example.com:443 and send any request",
+                "3:11: warning[redundant-rule]: `*` on line 1 already denies this",
+                "3:11: warning[bypassable-http-deny]: `api.example.com` on line 2 permits raw TCP connections to api.example.com:443, bypassing this HTTP rule",
             ]
         );
         assert_eq!(
             lint("allow net api.example.com:8080\ndeny http api.example.com/x"),
             [
-                "2:11: warning[bypassable-http-deny]: line 1 (`api.example.com:8080`) lets scripts connect to api.example.com:8080 and send any request"
+                "2:11: warning[bypassable-http-deny]: `api.example.com:8080` on line 1 permits raw TCP connections to api.example.com:8080, bypassing this HTTP rule"
             ]
         );
         assert_eq!(
             lint("allow net *\ndeny net *:443\ndeny http api.example.com/x"),
-            ["3:11: warning[bypassable-http-deny]: line 1 (`*`) lets scripts connect to api.example.com:80 and send any request"]
+            [
+                "3:11: warning[bypassable-http-deny]: `*` on line 1 permits raw TCP connections to api.example.com:80, bypassing this HTTP rule"
+            ]
         );
         assert_eq!(
             lint("allow net 10.0.0.0/8\ndeny net 10.0.0.1\ndeny net 10.128.0.0/9\ndeny http *"),
-            ["4:11: warning[bypassable-http-deny]: line 1 (`10.0.0.0/8`) lets scripts connect to 10.0.0.0/8:443 and send any request"]
+            [
+                "4:11: warning[bypassable-http-deny]: `10.0.0.0/8` on line 1 permits raw TCP connections to 10.0.0.0/8:443, bypassing this HTTP rule"
+            ]
         );
         assert_eq!(lint("allow net 10.0.0.0/8\ndeny net 10.0.0.0/9\ndeny net 10.128.0.0/9\ndeny http *"), Vec::<String>::new());
         assert_eq!(
             lint("allow net [::]/0\ndeny http 8.8.8.8/admin"),
-            ["2:11: warning[bypassable-http-deny]: line 1 (`[::]/0`) lets scripts connect to [64:ff9b::808:808]:443 and send any request"]
+            [
+                "2:11: warning[bypassable-http-deny]: `[::]/0` on line 1 permits raw TCP connections to [64:ff9b::808:808]:443, bypassing this HTTP rule"
+            ]
         );
         assert_eq!(
             lint("allow net [2002::]/16\ndeny http 8.8.8.8"),
             [
-                "2:11: warning[bypassable-http-deny]: line 1 (`[2002::]/16`) lets scripts connect to [2002:808:808::/48]:443 and send any request"
+                "2:11: warning[bypassable-http-deny]: `[2002::]/16` on line 1 permits raw TCP connections to [2002:808:808::/48]:443, bypassing this HTTP rule"
             ]
         );
         assert_eq!(
             lint("allow net [2002::]/16\ndeny http 10.0.0.1"),
             [
-                "2:11: warning[bypassable-http-deny]: line 1 (`[2002::]/16`) lets scripts connect to [2002:a00:1::/48]:443 and send any request"
+                "2:11: warning[bypassable-http-deny]: `[2002::]/16` on line 1 permits raw TCP connections to [2002:a00:1::/48]:443, bypassing this HTTP rule"
             ]
         );
         assert_eq!(lint("allow net [fc00::]/7\ndeny http 10.0.0.1"), Vec::<String>::new());
         assert_eq!(
             lint("allow net [64:ff9b::]/96\ndeny http 1.0.0.0/x"),
             [
-                "2:11: warning[bypassable-http-deny]: line 1 (`[64:ff9b::]/96`) lets scripts connect to [64:ff9b::100:0]:443 and send any request"
+                "2:11: warning[bypassable-http-deny]: `[64:ff9b::]/96` on line 1 permits raw TCP connections to [64:ff9b::100:0]:443, bypassing this HTTP rule"
             ]
         );
         assert_eq!(
             lint("allow net [64:ff9b::]/96\ndeny http 0.0.0.0/x"),
-            ["2:11: warning[bypassable-http-deny]: line 1 (`[64:ff9b::]/96`) lets scripts connect to [64:ff9b::]:443 and send any request"]
+            [
+                "2:11: warning[bypassable-http-deny]: `[64:ff9b::]/96` on line 1 permits raw TCP connections to [64:ff9b::]:443, bypassing this HTTP rule"
+            ]
         );
         assert_eq!(
             lint("allow net *\ndeny net api.example.com\ndeny http api.example.com/admin"),
-            ["3:11: warning[redundant-rule]: line 2 (`api.example.com`) already denies this"]
+            ["3:11: warning[redundant-rule]: `api.example.com` on line 2 already denies this"]
         );
         assert_eq!(lint("deny http api.example.com/admin"), Vec::<String>::new());
         assert_eq!(
             lint("allow net *\ndeny net *.example.com\ndeny http *.example.com/a"),
-            ["3:11: warning[redundant-rule]: line 2 (`*.example.com`) already denies this"]
+            ["3:11: warning[redundant-rule]: `*.example.com` on line 2 already denies this"]
         );
     }
 
@@ -747,46 +757,46 @@ mod tests {
         let none = Vec::<String>::new();
         assert_eq!(
             lint("deny http *.example.com/admin\ndeny http DELETE api.example.com/ADMIN/**"),
-            ["2:18: warning[redundant-rule]: line 1 (`*.example.com/admin`) already denies this"]
+            ["2:18: warning[redundant-rule]: `*.example.com/admin` on line 1 already denies this"]
         );
         assert_eq!(
             lint("allow http *.example.com:443/v1\nallow http GET a.example.com:443/v1/*.json\nallow http *.b.example.com:443/v1/x"),
             [
-                "2:16: warning[redundant-rule]: line 1 (`*.example.com:443/v1`) already allows this",
-                "3:12: warning[redundant-rule]: line 1 (`*.example.com:443/v1`) already allows this",
+                "2:16: warning[redundant-rule]: `*.example.com:443/v1` on line 1 already allows this",
+                "3:12: warning[redundant-rule]: `*.example.com:443/v1` on line 1 already allows this",
             ]
         );
         assert_eq!(
             lint("allow http api.example.com:443/v1\nallow http GET api.example.com:443/v1/*.json"),
-            ["2:16: warning[redundant-rule]: line 1 (`api.example.com:443/v1`) already allows this"]
+            ["2:16: warning[redundant-rule]: `api.example.com:443/v1` on line 1 already allows this"]
         );
         assert_eq!(lint("allow http api.example.com\nallow http plaintext api.example.com/x"), none);
         assert_eq!(
             lint("allow http tls plaintext api.example.com\nallow http plaintext api.example.com/x"),
-            ["2:22: warning[redundant-rule]: line 1 (`api.example.com`) already allows this"]
+            ["2:22: warning[redundant-rule]: `api.example.com` on line 1 already allows this"]
         );
         assert_eq!(lint("allow http api.example.com:8080\nallow http api.example.com:443/x"), none);
         assert_eq!(lint("allow http a.com/Admin\nallow http a.com/admin/x"), none);
         assert_eq!(
             lint("allow net *.example.com\nallow http GET a.example.com/v1\ndeny net x.com\ndeny http POST x.com/a"),
             [
-                "2:16: warning[redundant-rule]: line 1 (`*.example.com`) already allows this",
-                "4:16: warning[redundant-rule]: line 3 (`x.com`) already denies this",
+                "2:16: warning[redundant-rule]: `*.example.com` on line 1 already allows this",
+                "4:16: warning[redundant-rule]: `x.com` on line 3 already denies this",
             ]
         );
         assert_eq!(
             lint("allow http api.example.com\ndeny net api.example.com"),
-            ["1:12: warning[overridden-rule]: line 2 (`api.example.com`) takes precedence everywhere this rule applies"]
+            ["1:12: warning[overridden-rule]: `api.example.com` on line 2 takes precedence everywhere this rule applies"]
         );
         assert_eq!(
             lint("allow http GET a.com\nallow http POST a.com\nallow http GET POST a.com/v1"),
-            ["3:21: warning[redundant-rule]: line 1 (`a.com`) and line 2 (`a.com`) already allow this"]
+            ["3:21: warning[redundant-rule]: `a.com` on line 1 and `a.com` on line 2 already allow this"]
         );
         assert_eq!(lint("allow http GET a.com\nallow http GET POST a.com/v1"), none);
         assert_eq!(lint("allow http GET a.com/x\nallow http a.com/x/y"), none);
         assert_eq!(
             lint("allow http GET a.com/x\ndeny http GET POST a.com/x"),
-            ["1:16: warning[overridden-rule]: line 2 (`a.com/x`) takes precedence everywhere this rule applies"]
+            ["1:16: warning[overridden-rule]: `a.com/x` on line 2 takes precedence everywhere this rule applies"]
         );
     }
 
@@ -798,46 +808,45 @@ mod tests {
                 "allow net *.example.com\nallow net api.example.com\ndeny net *\ndeny net x.com:443\nallow net 10.0.0.0/8\nallow net 10.1.2.3"
             ),
             [
-                "2:11: warning[redundant-rule]: line 1 (`*.example.com`) already allows this",
-                "4:10: warning[redundant-rule]: line 3 (`*`) already denies this",
-                "6:11: warning[redundant-rule]: line 5 (`10.0.0.0/8`) already allows this",
+                "2:11: warning[redundant-rule]: `*.example.com` on line 1 already allows this",
+                "4:10: warning[redundant-rule]: `*` on line 3 already denies this",
+                "6:11: warning[redundant-rule]: `10.0.0.0/8` on line 5 already allows this",
             ]
         );
         assert_eq!(lint("deny net 10.0.0.0/8\nallow net *.example.com\nallow net api.example.com"), none);
-        assert_eq!(lint("prompt http 10.0.0.5\nallow http *.example.com\nallow http api.example.com"), none, "an http address rule");
-        assert_eq!(lint("prompt http 10.0.0.5\nallow net *.example.com\nallow net api.example.com"), none, "an http address rule");
+        assert_eq!(lint("prompt http 10.0.0.5\nallow http *.example.com\nallow http api.example.com"), none);
+        assert_eq!(lint("prompt http 10.0.0.5\nallow net *.example.com\nallow net api.example.com"), none);
         assert_eq!(
             lint("deny http 10.0.0.5/x\nallow http *.example.com\nallow http api.example.com"),
-            ["3:12: warning[redundant-rule]: line 2 (`*.example.com`) already allows this"],
-            "a deny rule for an address wins over an exact hostname"
+            ["3:12: warning[redundant-rule]: `*.example.com` on line 2 already allows this"],
         );
-        assert_eq!(lint("prompt net *\nprompt http 0.0.0.0"), none, "an http address rule decides resolved addresses");
+        assert_eq!(lint("prompt net *\nprompt http 0.0.0.0"), none);
         assert_eq!(
             lint("deny net 10.0.0.0/8\nallow net *.example.com\nallow net *.api.example.com"),
-            ["3:11: warning[redundant-rule]: line 2 (`*.example.com`) already allows this"]
+            ["3:11: warning[redundant-rule]: `*.example.com` on line 2 already allows this"]
         );
         assert_eq!(
             lint("allow net api.example.com\ndeny net api.example.com"),
-            ["1:11: warning[overridden-rule]: line 2 (`api.example.com`) takes precedence everywhere this rule applies"]
+            ["1:11: warning[overridden-rule]: `api.example.com` on line 2 takes precedence everywhere this rule applies"]
         );
         assert_eq!(lint("allow http *.example.com\nallow net api.example.com"), none);
         assert_eq!(lint("allow net *\ndeny net *.example.com\nallow net api.example.com"), none);
         assert_eq!(lint("deny net *\ndeny net 10.0.0.0/8"), none);
         assert_eq!(lint("allow net *\nallow net 8.8.8.8"), none);
-        assert_eq!(lint("allow net *\nallow net localhost"), ["2:11: warning[redundant-rule]: line 1 (`*`) already allows this"]);
-        assert_eq!(lint("allow net plaintext *\nallow net localhost"), none, "other transports");
+        assert_eq!(lint("allow net *\nallow net localhost"), ["2:11: warning[redundant-rule]: `*` on line 1 already allows this"]);
+        assert_eq!(lint("allow net plaintext *\nallow net localhost"), none);
         assert_eq!(
             lint("allow net *.localhost\nallow net a.localhost:80\nallow net 127.0.0.0/8\nallow net 127.0.0.0/16"),
             [
-                "2:11: warning[redundant-rule]: line 1 (`*.localhost`) already allows this",
-                "4:11: warning[redundant-rule]: line 3 (`127.0.0.0/8`) already allows this",
+                "2:11: warning[redundant-rule]: `*.localhost` on line 1 already allows this",
+                "4:11: warning[redundant-rule]: `127.0.0.0/8` on line 3 already allows this",
             ]
         );
     }
 
     #[test]
     fn rules_without_patterns_and_custom_rules() {
-        assert_eq!(lint("allow stdout\ndeny stdin\nallow stdout"), ["3:7: warning[redundant-rule]: the same as line 1 (`stdout`)"]);
+        assert_eq!(lint("allow stdout\ndeny stdin\nallow stdout"), ["3:7: warning[redundant-rule]: duplicate of `stdout` on line 1"]);
         assert_eq!(lint("allow custom *\nallow custom db\ndeny custom db drop"), Vec::<String>::new());
     }
 
@@ -857,7 +866,7 @@ mod tests {
         assert_eq!(lint("allow http *.example.com\ndeny http api.example.com/admin\nallow http GET api.example.com/admin/x"), none);
         assert_eq!(
             lint("allow http api.example.com\ndeny http *.example.com/a/b\nallow http api.example.com/a"),
-            ["3:12: warning[redundant-rule]: line 1 (`api.example.com`) already allows this"]
+            ["3:12: warning[redundant-rule]: `api.example.com` on line 1 already allows this"]
         );
         assert_eq!(lint("allow http *\ndeny http *.example.com/a/b\nallow http api.example.com/a"), none);
     }
@@ -867,13 +876,13 @@ mod tests {
         assert_eq!(
             lint("allow http *\nallow http localhost/x\nallow http 10.0.0.1/x\nallow http plaintext *.localhost/x"),
             [
-                "2:12: warning[redundant-rule]: line 1 (`*`) already allows this",
-                "3:12: warning[redundant-rule]: line 1 (`*`) already allows this",
+                "2:12: warning[redundant-rule]: `*` on line 1 already allows this",
+                "3:12: warning[redundant-rule]: `*` on line 1 already allows this",
             ]
         );
         assert_eq!(
             lint("allow net 10.0.0.0/8\nallow http 10.0.0.1/x"),
-            ["2:12: warning[redundant-rule]: line 1 (`10.0.0.0/8`) already allows this"]
+            ["2:12: warning[redundant-rule]: `10.0.0.0/8` on line 1 already allows this"]
         );
     }
 
@@ -881,7 +890,7 @@ mod tests {
         let rules: Vec<Rule> = PolicyFile::parse(text, Path::new("/base"), None).unwrap().rules.rules().to_vec();
         let paths = PathRules::new(&rules);
         for r in &paths.rules {
-            paths.deciders(r, &|j| j == r.index);
+            paths.subsuming_rules(r, &|j| j == r.index);
         }
         paths.visits.get()
     }

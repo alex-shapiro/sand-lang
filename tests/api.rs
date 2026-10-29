@@ -2278,7 +2278,7 @@ fn unallowed_import_reports_the_missing_rule() {
         Err(Error::Compile(d)) => assert_eq!(
             d[0].message,
             format!(
-                "cannot import `./lib/util.sand`: permission denied (no rule allows it, and no prompter can ask; a rule such as `allow import {}` allows it)",
+                "cannot import `./lib/util.sand`: permission denied; unmatched import requires a prompt, and a prompter is not configured; add `allow import {}` to allow it",
                 lib.display()
             )
         ),
@@ -2293,7 +2293,7 @@ fn unallowed_import_reports_the_missing_rule() {
         Err(Error::Compile(d)) => assert_eq!(
             d[0].message,
             format!(
-                "cannot import `./lib/util.sand`: permission denied (the rule `prompt import {}` asks about it, and no prompter can ask)",
+                "cannot import `./lib/util.sand`: permission denied; the rule `prompt import {}` requires a prompt, and a prompter is not configured",
                 util.display()
             )
         ),
@@ -2301,7 +2301,9 @@ fn unallowed_import_reports_the_missing_rule() {
     }
     let engine = Engine::new(Config::new().prompter(|_: Capability| async { PromptAnswer::AllowOnce })).unwrap();
     match engine.check_file(&main) {
-        Err(Error::Compile(d)) => assert!(d[0].message.contains("no rule allows it, and checking does not ask"), "{}", d[0].message),
+        Err(Error::Compile(d)) => {
+            assert!(d[0].message.contains("unmatched import requires a prompt, and cannot prompt during check"), "{}", d[0].message)
+        }
         other => panic!("{other:?}"),
     }
 }

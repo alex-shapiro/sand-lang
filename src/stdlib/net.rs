@@ -401,9 +401,9 @@ pub(crate) fn conn_handle(vm: &Vm, c: Val<Conn>) -> Result<ConnHandle, HostError
     c.get(&vm.heap)?.handle().ok_or_else(|| closed().into())
 }
 
-/// Resolves the host of `request` and returns the addresses that `policy`
-/// allows (`localhost` and its subdomains resolve to loopback addresses
-/// without the system resolver).
+/// Resolves the host of `request` and returns the addresses allowed by `policy`.
+/// Resolves `localhost` and its subdomains to loopback addresses without using
+/// the system resolver.
 pub(crate) async fn resolve_allowed(
     policy: &Policy,
     network: &dyn Network,

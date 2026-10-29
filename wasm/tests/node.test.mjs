@@ -242,9 +242,9 @@ print(fs.read_text("/b.txt").is_ok())`;
 test("policies are formatted and linted", () => {
   assert.equal(sand.formatPolicy("allow  read /a,/b   # x\ndeny ~/.ssh"), "allow read /a /b  # x\ndeny ~/.ssh\n");
   assert.deepEqual(sand.lintPolicy("allow /data\nallow read ./data/x", "/"), [
-    { code: "redundant-rule", message: "line 1 (`/data`) already allows this", line: 2, column: 12 },
+    { code: "redundant-rule", message: "`/data` on line 1 already allows this", line: 2, column: 12 },
   ]);
-  assert.throws(() => sand.lintPolicy("allow read ~/x"), (e) => e.policyErrors[0].message.startsWith("`~` cannot be used here"));
+  assert.throws(() => sand.lintPolicy("allow read ~/x"), (e) => e.policyErrors[0].message.startsWith("cannot resolve `~`"));
 });
 
 test("invalid policies and options are reported", () => {
@@ -252,8 +252,8 @@ test("invalid policies and options are reported", () => {
     () => new sand.Engine({ policy: "allow read /x\nalow net *\nlimit memory lots" }, {}),
     (e) => {
       assert.deepEqual(e.policyErrors, [
-        { line: 2, column: 1, message: "unknown rule `alow` (rules start with `allow`, `deny`, `prompt`, `limit` or `let`)" },
-        { line: 3, column: 7, message: "invalid size `lots` (use e.g. 4096, 64K, 256M, 1G)" },
+        { line: 2, column: 1, message: "unknown directive `alow`: expected `allow`, `deny`, `prompt`, `limit`, or `let`" },
+        { line: 3, column: 7, message: "invalid size `lots`: use e.g. 4096, 64K, 256M, or 1G" },
       ]);
       return /invalid policy/.test(e.message);
     },
@@ -288,7 +288,7 @@ test("files changed since a generation", async () => {
   assert.deepEqual(changed, [["/b.txt", "B"], ["/d.txt", "D"]]);
 });
 
-test("errors carry their exit code", async () => {
+test("errors include their exit code", async () => {
   const { result } = await run('fail("boom")');
   assert.deepEqual([result.exitCode, result.error.exitCode, result.error.kind], [1, 1, "runtime"]);
   const session = new sand.Engine({}, {}).session();

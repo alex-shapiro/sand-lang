@@ -1,9 +1,9 @@
 //! File and URL path patterns and multi-pattern trie matching.
 //!
 //! A pattern is a sequence of path segments: literal names, names with `*`
-//! wildcards, `*` (a single segment), or `**` (zero or more segments). Every
-//! pattern matches both its target path and all descendants, so trailing `**`
-//! segments are stripped.
+//! wildcards, `*` for a single segment, or `**` for zero or more segments. A
+//! pattern is matched against both the target path and all descendants, so
+//! trailing `**` segments are stripped.
 
 use crate::vm::value::FxBuild;
 use std::borrow::Cow;
@@ -89,7 +89,7 @@ impl Glob {
         &self.0
     }
 
-    /// Conservative check for whether `self` matches every segment that `other` matches.
+    /// Conservative check for whether `self` covers `other`.
     fn covers(&self, other: &Glob) -> bool {
         let (p, q) = (&self.0, &other.0);
         let (first, last) = (&*p[0], &*p[p.len() - 1]);
@@ -194,7 +194,7 @@ impl Memo {
     }
 }
 
-/// Returns `true` if `a` matches every path that `b` matches.
+/// Returns `true` if `a` covers `b`.
 pub(crate) fn covers(a: Pattern, b: Pattern) -> bool {
     fn go(a: Pattern, b: Pattern, i: usize, j: usize, memo: &mut Memo) -> bool {
         if let Some(r) = *memo.slot(i, j) {
@@ -233,7 +233,7 @@ pub(crate) fn overlaps(a: Pattern, b: Pattern) -> bool {
     go(a, b, n, n, &mut Memo::new(a, b, n))
 }
 
-/// Minimum and maximum number of segments matched by `pattern` (`None` if `pattern` contains `**`).
+/// Minimum and maximum number of segments matched by `pattern`, or `None` for the maximum if `pattern` contains `**`.
 pub(crate) fn name_counts(pattern: &[Seg]) -> (usize, Option<usize>) {
     let fixed = pattern.iter().filter(|s| **s != Seg::GlobStar).count();
     (fixed, (fixed == pattern.len()).then_some(fixed))

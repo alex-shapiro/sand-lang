@@ -26,7 +26,7 @@ fn files() -> MemFs {
 }
 
 #[test]
-fn rules_decide_on_memory_paths() {
+fn rules_evaluate_memory_paths() {
     let fs = files();
     let rules = RulePolicy::standard().allow_read("/data").deny_read("/data/secret").allow_write("/out");
     let src = r#"import fs

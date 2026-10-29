@@ -49,34 +49,34 @@ sand — the Sand language
 
 USAGE:
     sand run FILE [OPTIONS] [-- ARGS...]   run a script
-    sand check FILE...                     type check (FILE.policy: validate a policy)
-    sand lint FILE... [--allow-warnings]   report lint warnings (also of FILE.policy)
-    sand fmt FILE... [--check]             format files in place (or check; also FILE.policy)
+    sand check FILE...                     type check scripts or validate .policy files
+    sand lint FILE... [--allow-warnings]   report lint warnings in scripts or .policy files
+    sand fmt FILE... [--check]             format scripts or .policy files in place, or check formatting
     sand fmt - [--check]                   format standard input to standard output
-    sand test FILE... [OPTIONS]            run test blocks (options as for run)
+    sand test FILE... [OPTIONS]            run test blocks with run options
     sand repl [OPTIONS]                    interactive session
     sand --version
     sand COMMAND --help                    show this help
 
 RUN, TEST AND REPL OPTIONS:
     Scripts may print, read standard input and the time zone, and import modules.
-    For anything else, sand asks on the terminal unless a rule decides. Without a
-    terminal, sand denies and shows the option that allows the request.
+    For other capabilities, sand prompts on the terminal unless matched by a rule.
+    Without a terminal, sand denies unmatched requests and prints the required flag.
 
-    --allow=RULE             allow what a policy file rule allows, e.g.
+    --allow=RULE             allow capabilities matching RULE, e.g.
                              --allow='read ./data' --allow='net api.example.com'
                              --allow='net plaintext localhost:8080' --allow='env HOME'
-    --deny=RULE              deny what a rule matches, e.g. --deny='net 10.0.0.0/8'
-    --prompt=RULE            ask about what a rule matches, e.g. --prompt='write ./out'
-    --policy=FILE            rules and limits from a policy file (the options add
-                             to its rules and override its limits)
-    --allow-all              allow what no rule of yours matches (trusted scripts only)
-    --no-prompt              deny instead of asking, as without a terminal
-    --max-memory=SIZE        heap limit, e.g. 256M (default 512M)
+    --deny=RULE              deny capabilities matching RULE, e.g. --deny='net 10.0.0.0/8'
+    --prompt=RULE            prompt for capabilities matching RULE, e.g. --prompt='write ./out'
+    --policy=FILE            load rules and limits from FILE; CLI flags add rules
+                             and override limits
+    --allow-all              allow all unmatched capabilities for trusted scripts
+    --no-prompt              deny unmatched requests instead of prompting
+    --max-memory=SIZE        heap limit, e.g. 256M; defaults to 512M
     --max-time=DURATION      wall-clock limit, e.g. 10s, 500ms, 2m
     --max-cpu=DURATION       CPU time limit
-    --max-instructions=N     instruction (fuel) limit
-    --max-compile-fuel=N     type checking work limit (default 10000000)
+    --max-instructions=N     instruction fuel limit
+    --max-compile-fuel=N     type-checking work limit; defaults to 10000000
     --seed=N                 seed the random number generator
 ";
 
@@ -148,7 +148,7 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
     });
     let policy_file = match (policy_files.next(), policy_files.next()) {
         (Some(_), Some(_)) => return Err("--policy given more than once".into()),
-        (Some(""), None) => return Err("--policy requires a value (--policy=FILE)".into()),
+        (Some(""), None) => return Err("--policy requires a value, e.g. --policy=FILE".into()),
         (Some(path), None) => Some(read_policy(Path::new(path))?),
         (None, _) => None,
     };
@@ -183,13 +183,10 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
             i += 1;
         }
         let required =
-            |v: &Option<String>| -> Result<String, String> { v.clone().ok_or_else(|| format!("{flag} requires a value ({flag}=...)")) };
+            |v: &Option<String>| -> Result<String, String> { v.clone().ok_or_else(|| format!("{flag} requires a value, e.g. {flag}=...")) };
         match flag {
             "--allow" | "--deny" | "--prompt" => {
-                let text = value.as_deref().ok_or_else(|| {
-                    let asks = if flag == "--prompt" { " (sand asks about what no rule decides by default)" } else { "" };
-                    format!("{flag} requires a rule, e.g. {flag}='net api.example.com'{asks}")
-                })?;
+                let text = value.as_deref().ok_or_else(|| format!("{flag} requires a rule, e.g. {flag}='net api.example.com'"))?;
                 rules = rules.extend(parse_cli_rule(&flag[2..], text, &cwd, home.as_deref())?);
             }
             "--allow-all" | "--no-prompt" if value.is_some() => return Err(format!("{flag} does not take a value")),
@@ -280,7 +277,7 @@ fn report_policy_errors(file: &str, errors: &[sandlang::policy::PolicyError]) ->
 
 fn parse_cli_rule(verb: &str, text: &str, cwd: &Path, home: Option<&Path>) -> Result<RulePolicy, String> {
     if verb == "allow" && text.trim() == "all" {
-        return Err(format!("`--allow={text}` is not a rule: --allow-all allows what no rule of yours matches"));
+        return Err(format!("`--allow={text}` is not a rule: use --allow-all to allow all capabilities by default"));
     }
     let file = PolicyFile::parse(&format!("{verb} {text}"), cwd, home).map_err(|errors| {
         let messages: Vec<&str> = errors.iter().map(|e| e.message.as_str()).collect();
@@ -306,13 +303,13 @@ fn unknown_option(flag: &str) -> String {
         "--deny-net" => Some("use --deny='net HOST'"),
         "--allow-listen" => Some("use --allow='listen ADDR'"),
         "--allow-env" => Some("use --allow='env NAME'"),
-        "--allow-private-net" => Some("no rule denies private addresses unless you add one, such as --deny='net 10.0.0.0/8'"),
+        "--allow-private-net" => Some("specify internal hosts or IP ranges in `net` rules"),
         "--allow-stdin" | "--allow-timezone" => Some("scripts may read standard input and the time zone by default"),
-        "--prompt-stdin" => Some("questions go to the terminal, and --no-prompt denies instead"),
+        "--prompt-stdin" => Some("prompts use the controlling terminal, and --no-prompt denies unprompted requests"),
         _ => None,
     };
     match hint {
-        Some(h) => format!("unknown option `{flag}` ({h})"),
+        Some(h) => format!("unknown option `{flag}`: {h}"),
         None => format!("unknown option `{flag}`"),
     }
 }
@@ -391,7 +388,7 @@ fn open_terminal() -> std::io::Result<(std::fs::File, std::fs::File)> {
 
 #[cfg(not(any(unix, windows)))]
 fn open_terminal() -> std::io::Result<(std::fs::File, std::fs::File)> {
-    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "no terminal"))
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "controlling terminal is unavailable"))
 }
 
 /// Prompts on the controlling terminal (`/dev/tty` or `CONIN$`/`CONOUT$`), or
@@ -408,7 +405,7 @@ fn deny_without_prompt(cap: &Capability, policy: &RulePolicy) -> PromptAnswer {
     let hint = sandlang::policy::rule_for(cap, true)
         .and_then(|rule| Some((PolicyFile::parse(&rule, Path::new("/"), None).ok()?.rules, rule)))
         .filter(|(rule, text)| sanitize(text) == *text && rule.clone().extend(policy.clone()).check(cap) == sandlang::Decision::Allow)
-        .map(|(_, rule)| format!(" (--allow='{}' allows it)", rule.trim_start_matches("allow ").replace('\'', r"'\''")));
+        .map(|(_, rule)| format!("; pass --allow='{}' to allow it", rule.trim_start_matches("allow ").replace('\'', r"'\''")));
     eprintln!("sand: denied: {}", sanitize(&format!("{cap}{}", hint.unwrap_or_default())));
     PromptAnswer::DenyAlways
 }

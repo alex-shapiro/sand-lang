@@ -151,7 +151,7 @@ fn http_redirects_are_checked_against_policy() {
 }
 
 #[test]
-fn http_rules_decide_methods_and_routes() {
+fn http_rules_filter_methods_and_routes() {
     let server = http_server(|req| match req.path() {
         "/old" => HttpResponse::new(302, "").header("location", "/private/x"),
         path => HttpResponse::new(200, format!("{} {path}", req.method)),
@@ -188,7 +188,6 @@ show(http.get("http://{addr}/old"))
              permission denied: GET http://{addr}/private\npermission denied: GET http://{addr}/private/x\n"
         )
     );
-    // Denied requests reach no server, and the server saw the paths as checked.
     let seen: Vec<String> = server.requests.lock().unwrap().iter().map(|r| r.target.clone()).collect();
     assert_eq!(seen, ["/api/v1", "/api/items", "/api/v2", "/old"]);
 }

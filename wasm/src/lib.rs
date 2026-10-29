@@ -1,13 +1,13 @@
 //! WebAssembly bindings for the Sand engine.
 //!
 //! The engine runs without operating-system access. Scripts use an in-memory
-//! file system (`MemFs`), host-supplied environment variables, arguments, and
-//! standard input text, and JavaScript callbacks for output and permission
-//! prompts. A [`PolicyFile`] sets sandbox rules and resource limits. By
-//! default, scripts can write to standard output/error and import modules;
-//! `onPrompt` handles capabilities that do not match any rule.
+//! file system, host-supplied environment variables, arguments, and standard
+//! input text, and JavaScript callbacks for output and permission prompts. A
+//! [`PolicyFile`] sets sandbox rules and resource limits. By default, scripts
+//! can write to standard output/error and import modules; `onPrompt` handles
+//! capabilities that do not match any rule.
 //!
-//! Each `Engine` runs one script or session input at a time on the calling
+//! Each `Engine` runs a single script or session input at a time on the calling
 //! thread. Run engines in Web Workers to avoid blocking the main thread or to
 //! execute multiple scripts concurrently.
 //!
@@ -38,7 +38,7 @@ use wasm_bindgen::prelude::*;
 const TYPES: &str = r#"
 /** Options of `new Engine(options, hooks)`; every field is optional. */
 export interface EngineOptions {
-  /** Policy file text with rules (`allow read /data`) and limits (`limit time 5s`). By default, output and module imports are allowed, and `onPrompt` handles unmatched capabilities. */
+  /** Policy file text with rules and limits. By default, output and module imports are allowed, and `onPrompt` handles unmatched capabilities. */
   policy?: string;
   /** Files of the in-memory file system, by absolute path. */
   files?: Record<string, string | Uint8Array>;
@@ -71,7 +71,7 @@ export interface PromptRequest {
   target: string;
   /** e.g. "read /data/a.txt" */
   description: string;
-  /** Policy rule that grants this request (for example, `"allow read /data/a.txt"`). */
+  /** Policy rule that grants this request, e.g. `"allow read /data/a.txt"`. */
   allowRule?: string;
   /** Policy rule that denies this request. */
   denyRule?: string;

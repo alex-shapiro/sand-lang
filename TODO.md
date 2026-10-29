@@ -100,7 +100,7 @@ Follow-up work, roughly in priority order.
 - [ ] Support HTTP paths with encoded separators `%2F` and `%5C` in `rule_for`
       so that "always" prompt answers can generate rules for those requests.
 - [ ] Evaluate HTTP paths that contain `;` parameters both with and without
-      matrix parameters in `url_segments` (`src/policy/net.rs`) so that `deny
+      matrix parameters in `url_segments` in `src/policy/net.rs` so that `deny
       http a.com/admin/**` blocks `/admin;x/secret` and `/public/..;/admin`.
       Also distinguish raw non-UTF-8 bytes from percent-encoded `%25` sequences
       in `percent_decode` so that `allow http a.com/%25FF` does not match
@@ -134,15 +134,14 @@ Follow-up work, roughly in priority order.
 - [ ] Include any policy-denied IP addresses in the error message if
       `resolve_allowed` fails to connect to the remaining allowed addresses.
 - [ ] Warn in `lint_policy` if an uppercase hostname in an `http` rule is
-      parsed as an HTTP method (such as `deny http LOCALHOST a.com`) or a
-      lowercase method is parsed as a hostname (such as `allow http purge
-      a.com`).
-- [ ] Add a callback for persisting "always" prompt rules (`rule_for`) so that
-      host applications can save granted rules across sessions.
+      parsed as an HTTP method, e.g. `deny http LOCALHOST a.com`, or if a
+      lowercase method is parsed as a hostname, e.g. `allow http purge a.com`.
+- [ ] Add a callback for persisting "always" prompt rules from `rule_for` so
+      that host applications can save granted rules across sessions.
 - [ ] Warn in the CLI prompter before allowing plaintext network connections,
       and display the resolved IP addresses in the prompt.
-- [ ] Rename `Capability::Custom` (for example, to `Capability::Module`) to
-      distinguish native-module capabilities from `CustomPolicy`.
+- [ ] Rename `Capability::Custom` to `Capability::Module` to distinguish
+      native-module capabilities from `CustomPolicy`.
 - [ ] Support shared, dynamically updatable `RulePolicy` instances and remove
       `CustomPolicy` once host applications migrate to rule policies.
 

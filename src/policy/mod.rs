@@ -134,13 +134,13 @@ where
     }
 }
 
-/// Host-defined policy callback (see [`crate::Config::custom_policy`]).
+/// Host-defined policy callback; see [`crate::Config::custom_policy`].
 pub trait CustomPolicy: Send + Sync {
     /// Evaluates `cap`. File paths in `cap` are normalized with [`normalize_path`].
     fn check(&self, cap: &Capability) -> Decision;
 
-    /// Evaluates an operation on a directory entry (such as removal or
-    /// rename) where a final symlink is not followed.
+    /// Evaluates an operation on a directory entry such as removal or
+    /// rename without following a final symlink.
     fn check_entry(&self, cap: &Capability) -> Decision {
         self.check(cap)
     }
@@ -193,8 +193,8 @@ impl Policy {
         }
     }
 
-    /// Checks whether a connection to `addr` (resolved from an allowed `Net`
-    /// or `Http` `request`) is permitted. Returns the denial reason on `Err`.
+    /// Checks whether a connection to `addr` resolved from an allowed `Net`
+    /// or `Http` `request` is permitted. Returns the denial reason on `Err`.
     #[cfg(feature = "os")]
     pub(crate) fn check_resolved(&self, request: &Capability, addr: SocketAddr) -> Result<(), String> {
         match self {
@@ -205,7 +205,7 @@ impl Policy {
             Policy::Custom(p) => {
                 let (Capability::Net { host, .. } | Capability::Http { host, .. }) = request else { return Ok(()) };
                 match p.check(&Capability::NetAddr { host: host.clone(), addr, tls: rules::uses_tls(request) }) {
-                    Decision::Deny if is_private_address(addr.ip()) => Err("(private or internal) is not allowed".into()),
+                    Decision::Deny if is_private_address(addr.ip()) => Err("is private or internal and is not allowed".into()),
                     Decision::Deny => Err("is not allowed".into()),
                     Decision::Allow | Decision::Prompt => Ok(()),
                 }
@@ -341,7 +341,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn folded_names_equate_what_file_systems_may_equate() {
+    fn fold_name_equates_case_and_normalization_variants() {
         let same = [
             ("secrets", "ſecrets"),
             ("secrets", "SECRETS"),
@@ -437,7 +437,7 @@ mod tests {
 
     #[cfg(all(feature = "os", target_os = "macos"))]
     #[test]
-    fn checks_decide_by_stored_names() {
+    fn checks_use_stored_file_names() {
         let base = normalize_path(&std::env::temp_dir()).join(format!("sand-policy-case-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(base.join("Dir/Sub")).unwrap();

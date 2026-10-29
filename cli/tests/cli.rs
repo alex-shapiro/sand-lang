@@ -185,19 +185,22 @@ fn bad_flags_and_values_exit_2_with_a_message() {
         ("--seed=abc", "invalid --seed value `abc`"),
         ("--seed", "--seed requires a value"),
         ("--allow", "--allow requires a rule, e.g. --allow='net api.example.com'"),
-        ("--prompt", "--prompt requires a rule, e.g. --prompt='net api.example.com' (sand asks about what no rule decides by default)"),
-        ("--allow-private-net", "unknown option `--allow-private-net` (no rule denies private addresses unless you add one"),
+        ("--prompt", "--prompt requires a rule, e.g. --prompt='net api.example.com'"),
+        ("--allow-private-net", "unknown option `--allow-private-net`: specify internal hosts or IP ranges in `net` rules"),
         ("--allow=raed ./x", "invalid rule `--allow=raed ./x`: unknown capability `raed`"),
         ("--deny=read data", "invalid rule `--deny=read data`: path `data` is not anchored"),
-        ("--allow=read:./x", "invalid rule `--allow=read:./x`: write a space after the capability: `read ./x`"),
-        ("--allow=all", "`--allow=all` is not a rule: --allow-all allows what no rule of yours matches"),
-        ("--prompt=net", "invalid rule `--prompt=net`: `prompt net` needs at least one argument"),
+        ("--allow=read:./x", "invalid rule `--allow=read:./x`: put a space after the capability: `read ./x`"),
+        ("--allow=all", "`--allow=all` is not a rule: use --allow-all to allow all capabilities by default"),
+        ("--prompt=net", "invalid rule `--prompt=net`: `prompt net` requires arguments"),
         ("--no-prompt=yes", "--no-prompt does not take a value"),
         ("--allow-all=1", "--allow-all does not take a value"),
-        ("--allow-read=data", "unknown option `--allow-read` (use --allow='read ./PATH')"),
-        ("--allow-net=*", "unknown option `--allow-net` (use --allow='net HOST' for TLS, or --allow='net tls plaintext HOST')"),
-        ("--deny-net=*", "unknown option `--deny-net` (use --deny='net HOST')"),
-        ("--prompt-stdin", "unknown option `--prompt-stdin` (questions go to the terminal, and --no-prompt denies instead)"),
+        ("--allow-read=data", "unknown option `--allow-read`: use --allow='read ./PATH'"),
+        ("--allow-net=*", "unknown option `--allow-net`: use --allow='net HOST' for TLS, or --allow='net tls plaintext HOST'"),
+        ("--deny-net=*", "unknown option `--deny-net`: use --deny='net HOST'"),
+        (
+            "--prompt-stdin",
+            "unknown option `--prompt-stdin`: prompts use the controlling terminal, and --no-prompt denies unprompted requests",
+        ),
     ];
     // A relative path starts from the working directory, not from a policy file.
     let dir = script("anchor", "print(1)");
@@ -297,11 +300,10 @@ while true { i += 1 }
     );
     assert_eq!((o.code, o.stdout.as_str()), (3, "Ok(\"input\")\nfalse\ntrue\nSome(\"on\")\n"), "{o:?}");
 
-    // Errors name the file and line; the script does not run.
     dir.write("bad.policy", "allow read .\nalow net *\nlimit memory lots\n");
     let o = sand(dir.path(), &["run", "main.sand", "--policy=bad.policy"]);
     assert_eq!(o.code, 2, "{o:?}");
-    assert!(o.stderr.contains("bad.policy:2:1: unknown rule `alow`"), "{o:?}");
+    assert!(o.stderr.contains("bad.policy:2:1: unknown directive `alow`"), "{o:?}");
     assert!(o.stderr.contains("bad.policy:3:7: invalid size `lots`"), "{o:?}");
     assert_eq!(o.stdout, "");
     let o = sand(dir.path(), &["run", "main.sand", "--policy=missing.policy"]);
@@ -320,8 +322,8 @@ fn policy_files_are_checked_formatted_and_linted() {
     assert_eq!(o.code, 1, "{o:?}");
     assert_eq!(
         o.stdout,
-        "app.policy:1:20: warning[redundant-rule]: line 1 (`./data`) already allows this\n\
-         app.policy:2:5: warning[unused-set]: no rule uses the set `unused`\n",
+        "app.policy:1:20: warning[redundant-rule]: `./data` on line 1 already allows this\n\
+         app.policy:2:5: warning[unused-set]: set `unused` is unused\n",
         "{o:?}"
     );
     let o = sand(dir.path(), &["fmt", "--check", "app.policy"]);
@@ -854,7 +856,7 @@ fn hi_server() -> u16 {
 // Relies on the resolver accepting `127.1` for 127.0.0.1 (glibc, macOS).
 #[cfg(unix)]
 #[test]
-fn net_rules_take_transports_and_decide_resolved_addresses() {
+fn net_rules_filter_transports_and_resolved_addresses() {
     let port = hi_server();
     let dir = script("net", &format!("import http\nprint(http.get(\"http://127.1:{port}/\").map(r => r.text().unwrap()))"));
     let run = |flags: &[&str]| {
@@ -862,7 +864,6 @@ fn net_rules_take_transports_and_decide_resolved_addresses() {
         args.extend_from_slice(flags);
         sand(dir.path(), &args)
     };
-    // `*` matches TLS connections only: `http://` needs `plaintext`.
     assert!(run(&["--allow=net *"]).stdout.starts_with("Err(Error(message: \"permission denied: GET http://127.1"), "TLS only");
     assert_eq!(run(&["--allow=net plaintext *"]).stdout, "Ok(\"hi\")\n");
     let denied = run(&["--allow=net plaintext *", "--deny=net 127.0.0.0/8"]).stdout;
@@ -873,7 +874,7 @@ fn net_rules_take_transports_and_decide_resolved_addresses() {
 }
 
 #[test]
-fn localhost_names_reach_loopback() {
+fn localhost_subdomains_resolve_to_loopback() {
     let port = hi_server();
     let get = |host: &str| format!("print(http.get(\"http://{host}:{port}/\").map(r => r.text().unwrap()))\n");
     let dir = script("localhost", &format!("import http\n{}{}", get("localhost"), get("app.localhost")));
@@ -947,14 +948,12 @@ fn allow_all_keeps_the_other_rules() {
 fn invalid_network_patterns_are_explained() {
     let out = run("print(1)", &["--allow=net 10.0.0.1/8"]);
     assert_eq!(out.code, 2, "{}", out.stderr);
-    assert!(out.stderr.contains("`10.0.0.1/8` has bits set after its prefix length: write `10.0.0.0/8`"), "{}", out.stderr);
+    assert!(out.stderr.contains("`10.0.0.1/8` has host bits set after the prefix length: write `10.0.0.0/8`"), "{}", out.stderr);
     let out = run("print(1)", &["--deny=net a..b"]);
     assert_eq!(out.code, 2, "{}", out.stderr);
     assert!(out.stderr.contains("invalid host pattern `a..b`"), "{}", out.stderr);
 }
 
-/// If a script's standard output is a full pipe, then the script stops at its
-/// time limit.
 #[test]
 fn a_blocked_stdout_does_not_outlast_the_time_limit() {
     let dir = script("blocked", "while true { print(\"x\".repeat(1000)) }");
@@ -987,7 +986,7 @@ fn denial_without_prompt_includes_the_allow_rule() {
     let o = sand(dir.path(), &["run", "main.sand"]);
     assert_eq!((o.code, o.stdout.as_str()), (0, "false\nfalse\n"), "{o:?}");
     let path = std::fs::canonicalize(dir.path()).unwrap().join("a.txt");
-    let hint = format!("sand: denied: read {} (--allow='read {}' allows it)\n", path.display(), path.display());
+    let hint = format!("sand: denied: read {}; pass --allow='read {}' to allow it\n", path.display(), path.display());
     assert_eq!(o.stderr, hint, "{o:?}");
 }
 
@@ -1010,7 +1009,7 @@ fn denial_hints_are_shell_words_that_allow_the_request() {
     dir.write("it's.txt", "A");
     let o = sand(dir.path(), &["run", "main.sand"]);
     let path = std::fs::canonicalize(dir.path()).unwrap().join("it'\\''s.txt");
-    assert!(o.stderr.contains(&format!("(--allow='read {}' allows it)", path.display())), "{o:?}");
+    assert!(o.stderr.contains(&format!("; pass --allow='read {}' to allow it", path.display())), "{o:?}");
     let dir = script("hint-tab", "import fs\nprint(fs.read_text(\"a\\tb.txt\").is_ok())\n");
     dir.write("a\tb.txt", "A");
     let o = sand(dir.path(), &["run", "main.sand"]);

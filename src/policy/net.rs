@@ -44,13 +44,13 @@ fn canonical_hostname(name: &str) -> Option<String> {
 impl NetPattern {
     pub(crate) fn parse(pattern: &str) -> Result<NetPattern, String> {
         let invalid =
-            || format!("invalid host pattern `{pattern}` (expected a host, host:port, *.domain, *, an IP address or a CIDR range)");
+            || format!("invalid host pattern `{pattern}`: expected a host, host:port, *.domain, *, an IP address, or a CIDR range");
         let parsed = NetPattern::parse_unmasked(pattern).ok_or_else(invalid)?;
         if let HostKind::Ip(ip, len) = parsed.kind
             && mask(ip, len) != ip
         {
             let range = NetPattern { kind: HostKind::Ip(mask(ip, len), len), ..parsed };
-            return Err(format!("`{pattern}` has bits set after its prefix length: write `{range}`"));
+            return Err(format!("`{pattern}` has host bits set after the prefix length: write `{range}`"));
         }
         Ok(parsed)
     }
@@ -62,7 +62,7 @@ impl NetPattern {
         }
         let flat: String = text.iter().map(|t| t.0).collect();
         if let Some((scheme, _)) = flat.split_once("://") {
-            return Err(format!("net rules take hosts, not URLs: {}", scheme_removal_hint(scheme, "hosts")));
+            return Err(format!("net rules require host patterns, not URLs: {}", scheme_removal_hint(scheme, "hosts")));
         }
         NetPattern::parse(&flat)
     }
@@ -150,8 +150,8 @@ impl NetPattern {
     }
 
     /// Returns `true` if any destination can match both patterns. If `exact`
-    /// is `false` (for deny and prompt rules), alternate IP representations
-    /// and subdomains of `localhost` are included.
+    /// is `false`, alternate IP representations and subdomains of `localhost`
+    /// are included.
     pub(crate) fn overlaps(&self, other: &NetPattern, exact: bool, other_exact: bool) -> bool {
         self.hosts_overlap(other, exact, other_exact)
             || self.localhost_subdomain_pattern(exact).is_some_and(|p| p.hosts_overlap(other, true, other_exact))
@@ -449,7 +449,7 @@ fn alternate_ips(ip: IpAddr) -> Vec<IpAddr> {
     }
 }
 
-/// NAT64, 6to4, IPv4-translated, and IPv4-compatible IPv6 prefixes: `(prefix_bits, prefix_len, ipv4_shift)`.
+/// NAT64, 6to4, IPv4-translated, and IPv4-compatible IPv6 prefixes as `(prefix_bits, prefix_len, ipv4_shift)` tuples.
 const EMBEDDINGS: [(u128, u8, u32); 4] = [(0x64_ff9b << 96, 96, 0), (0x2002 << 112, 16, 80), (0xffff << 48, 96, 0), (0, 96, 0)];
 
 fn embedded_ipv4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
@@ -467,7 +467,7 @@ fn parse_unbracketed_ip(s: &str) -> Option<IpAddr> {
     s.strip_suffix('.').unwrap_or(s).parse::<IpAddr>().ok().map(|ip| ip.to_canonical())
 }
 
-/// Returns `true` if `host` is `localhost` or a subdomain of `localhost` (RFC 6761).
+/// Returns `true` if `host` is `localhost` or a subdomain of `localhost`.
 pub(crate) fn is_localhost(host: &str) -> bool {
     let host = host.strip_suffix('.').unwrap_or(host).as_bytes();
     let tail = b".localhost";
@@ -476,9 +476,9 @@ pub(crate) fn is_localhost(host: &str) -> bool {
 
 /// Non-public IPv4 and IPv6 CIDR ranges.
 const INTERNAL_RANGES: [&str; 24] = [
-    "0.0.0.0/8",       // unspecified ("this network")
+    "0.0.0.0/8",       // unspecified
     "10.0.0.0/8",      // RFC 1918
-    "100.64.0.0/10",   // shared address space (CGNAT)
+    "100.64.0.0/10",   // shared address space
     "127.0.0.0/8",     // loopback
     "169.254.0.0/16",  // link-local
     "172.16.0.0/12",   // RFC 1918
@@ -615,14 +615,13 @@ fn scheme_removal_hint(scheme: &str, hosts: &str) -> String {
     }
 }
 
-pub(crate) const QUOTED_STAR_IN_HOST: &str =
-    "a quoted `*` is not a wildcard, and an address or port cannot contain `*` (remove the quotes)";
+pub(crate) const QUOTED_STAR_IN_HOST: &str = "a quoted `*` is not a wildcard, and an address or port cannot contain `*`: remove the quotes";
 
 impl UrlPattern {
     pub(crate) fn parse(text: &[Tok]) -> Result<UrlPattern, String> {
         let flat: String = text.iter().map(|t| t.0).collect();
         if let Some(i) = flat.find("://").filter(|&i| !flat[..i].contains('/')) {
-            return Err(format!("URL patterns take no scheme: {}", scheme_removal_hint(&flat[..i], "URL patterns")));
+            return Err(format!("URL patterns must not include a scheme: {}", scheme_removal_hint(&flat[..i], "URL patterns")));
         }
         let rest = text;
         let text = |toks: &[Tok]| toks.iter().map(|t| t.0).collect::<String>();
@@ -655,7 +654,7 @@ impl UrlPattern {
         {
             let range = NetPattern { kind: HostKind::Ip(mask(ip, len), len), port };
             let mut message =
-                format!("`{authority}` is a range, and http rules match single addresses: write a net rule for the range (`net {range}`)");
+                format!("`{authority}` is a CIDR range, and `http` rules accept only single IP addresses: use `net {range}` for the range");
             if let Some((ip, name)) = address {
                 let full = if ip.is_ipv6() { format!("[{ip}]/128") } else { format!("{ip}/32") };
                 message += &format!(", or `{full}/{name}` for the path `/{name}` on `{ip}`");
@@ -669,7 +668,7 @@ impl UrlPattern {
                 continue;
             }
             if seg.iter().any(|t| t.0 == '?' && !t.1) {
-                return Err("URL patterns match paths, not queries (remove the `?...`)".into());
+                return Err("URL patterns must not include a query string: remove `?...`".into());
             }
             let raw = text(seg);
             let seg = Seg::parse(seg)?.map(|s| percent_decode(s).into_owned());
@@ -681,7 +680,7 @@ impl UrlPattern {
             .iter();
             if names.any(|n| n.contains(['/', '\\'])) {
                 let split = percent_decode(&raw).replace('\\', "/");
-                return Err(format!("`{raw}` holds a separator that servers may read as `/`: write `{split}`"));
+                return Err(format!("`{raw}` contains an encoded or backslash path separator: write `{split}`"));
             }
             if matches!(&seg, Seg::Lit(s) if &**s == "." || &**s == "..") {
                 return Err("URL patterns cannot contain `.` or `..` segments".into());
@@ -756,7 +755,7 @@ mod tests {
     }
 
     #[test]
-    fn localhost_names_are_the_names_under_localhost() {
+    fn localhost_domain_matching_and_ranking() {
         for name in ["localhost", "LOCALHOST", "localhost.", "app.localhost", "a.b.LocalHost.", "x-1.localhost"] {
             assert!(is_localhost(name), "{name}");
         }
@@ -828,7 +827,7 @@ mod tests {
 
     proptest! {
         #[test]
-        fn internal_ranges_classify_addresses_as_before(
+        fn internal_ranges_match_oracle(
             v4 in any::<u32>(),
             v6 in any::<u128>(),
             embed in 0..EMBEDDINGS.len(),
@@ -855,7 +854,7 @@ mod tests {
             prop_assert_eq!(embedded, (u128::from(ip) > 1).then(|| Ipv4Addr::from(v4)));
             let ranges = NetPattern { kind: HostKind::Ip(Ipv4Addr::from(v4).into(), 32), port: None }.alternate_ip_ranges();
             let reached = ranges.iter().any(|r| r.kind.matches_ip(ip.into()));
-            prop_assert!(reached, "{} in none of {:?}", ip, ranges);
+            prop_assert!(reached, "{} missing from {:?}", ip, ranges);
         }
 
         #[test]
@@ -872,7 +871,7 @@ mod tests {
             let parsed = url(&format!("{scheme}{host}{path}"));
             if !scheme.is_empty() {
                 let error = parsed.unwrap_err();
-                prop_assert!(error.starts_with("URL patterns take no scheme"), "{}", error);
+                prop_assert!(error.starts_with("URL patterns must not include a scheme"), "{}", error);
                 return Ok(());
             }
             let bare_address = !host.contains('/') && matches!(NetPattern::parse(host), Ok(NetPattern { kind: HostKind::Ip(ip, len), port: None }) if len == full_len(ip));
@@ -889,7 +888,7 @@ mod tests {
                 && len < full_len(ip)
             {
                 let error = parsed.unwrap_err();
-                prop_assert!(error.starts_with(&format!("`{host}` is a range, and http rules match single addresses")), "{}", error);
+                prop_assert!(error.starts_with(&format!("`{host}` is a CIDR range, and `http` rules accept only single IP addresses")), "{}", error);
                 return Ok(());
             }
             match NetPattern::parse(&host) {

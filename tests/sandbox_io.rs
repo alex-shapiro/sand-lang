@@ -37,27 +37,23 @@ fn net_patterns_match_ip_literals_and_ranges() {
         .deny_net("10.9.0.0/16");
     assert_eq!(p.check(&net("10.1.2.3", 80)), Decision::Allow);
     assert_eq!(p.check(&net("10.9.2.3", 80)), Decision::Deny);
-    assert_eq!(p.check(&net("11.0.0.1", 80)), Decision::Prompt, "no rule");
+    assert_eq!(p.check(&net("11.0.0.1", 80)), Decision::Prompt, "unmatched");
     assert_eq!(p.check(&net("192.168.1.5", 8080)), Decision::Allow);
     assert_eq!(p.check(&net("192.168.1.5", 8081)), Decision::Prompt);
     assert_eq!(p.check(&net("::1", 9000)), Decision::Allow);
     assert_eq!(p.check(&net("[::1]", 9000)), Decision::Allow);
     assert_eq!(p.check(&net("::1", 9001)), Decision::Prompt);
     assert_eq!(p.check(&net("fd12::1", 1)), Decision::Allow);
-    // IPv4-mapped IPv6 literals are the IPv4 address.
     assert_eq!(p.check(&net("::ffff:10.1.2.3", 80)), Decision::Allow);
     assert_eq!(p.check(&net("::ffff:10.9.2.3", 80)), Decision::Deny);
     assert_eq!(p.check(&net("EXAMPLE.com", 443)), Decision::Allow);
-    // Range patterns never match names.
     assert_eq!(p.check(&net("10.example", 80)), Decision::Prompt);
-    // The rule that allows a host name also allows its resolved addresses
-    // unless a more specific address rule decides otherwise.
     assert_eq!(p.check(&net_addr("example.com", "127.0.0.1:443")), Decision::Allow);
     assert_eq!(p.check(&net_addr("example.com", "10.9.0.1:443")), Decision::Allow);
     assert_eq!(p.check(&net_addr("other.example", "10.9.0.1:443")), Decision::Deny);
     assert_eq!(p.check(&net_addr("other.example", "[::ffff:10.9.0.1]:443")), Decision::Deny);
     assert_eq!(p.check(&net_addr("other.example", "10.1.0.1:443")), Decision::Allow);
-    assert_eq!(p.check(&net_addr("other.example", "127.0.0.1:443")), Decision::Allow, "no rule restricts the address");
+    assert_eq!(p.check(&net_addr("other.example", "127.0.0.1:443")), Decision::Allow);
 }
 
 #[test]
@@ -251,11 +247,11 @@ fn names_under_localhost_cannot_reach_a_denied_localhost() {
 }
 
 #[test]
-fn transports_decide_raw_connections_and_resolved_addresses() {
+fn transports_filter_raw_connections_and_resolved_addresses() {
     let p = RulePolicy::new().allow_net("tls plaintext *").deny_net("plaintext 10.0.0.0/8");
     let resolved =
         |tls: bool, addr: &str| p.check_resolved(&Capability::Net { host: "db.internal".into(), port: 5432, tls }, addr.parse().unwrap());
-    assert_eq!(resolved(true, "10.0.0.5:5432"), Decision::Allow, "the deny rule is for plaintext");
+    assert_eq!(resolved(true, "10.0.0.5:5432"), Decision::Allow);
     assert_eq!(resolved(false, "10.0.0.5:5432"), Decision::Deny);
     assert_eq!(resolved(false, "8.8.8.8:5432"), Decision::Allow);
     assert_eq!(p.check(&plain("10.0.0.5", 5432)), Decision::Deny);
@@ -263,7 +259,7 @@ fn transports_decide_raw_connections_and_resolved_addresses() {
 }
 
 #[test]
-fn http_rules_for_addresses_decide_the_addresses_that_names_resolve_to() {
+fn http_address_rules_apply_to_resolved_addresses() {
     let get = |method: &str, host: &str, path: &str| Capability::Http {
         method: method.into(),
         scheme: "http".into(),
@@ -278,10 +274,10 @@ fn http_rules_for_addresses_decide_the_addresses_that_names_resolve_to() {
     let p = RulePolicy::new().allow_http("plaintext *").deny_http("10.0.0.5/admin").prompt_http("POST 10.0.0.5");
     let at = "10.0.0.5:80".parse().unwrap();
     assert_eq!(p.check_resolved(&get("GET", "app.example", "/admin/users"), at), Decision::Deny);
-    assert_eq!(p.check_resolved(&get("GET", "app.example", "/%61dmin"), at), Decision::Deny, "paths compare decoded");
-    assert_eq!(p.check_resolved(&get("GET", "app.example", "/x%2F..%2Fadmin"), at), Decision::Deny, "the stricter reading");
+    assert_eq!(p.check_resolved(&get("GET", "app.example", "/%61dmin"), at), Decision::Deny);
+    assert_eq!(p.check_resolved(&get("GET", "app.example", "/x%2F..%2Fadmin"), at), Decision::Deny);
     assert_eq!(p.check_resolved(&get("GET", "app.example", "/public"), at), Decision::Allow);
-    assert_eq!(p.check_resolved(&get("POST", "app.example", "/public"), at), Decision::Deny, "a prompt rule denies after resolution");
+    assert_eq!(p.check_resolved(&get("POST", "app.example", "/public"), at), Decision::Deny);
     assert_eq!(p.check_resolved(&plain("app.example", 80), at), Decision::Allow);
     let p = RulePolicy::new().allow_http("plaintext db.internal").deny_net("10.0.0.0/8");
     assert_eq!(p.check_resolved(&get("GET", "db.internal", "/"), at), Decision::Allow);
@@ -294,7 +290,7 @@ fn http_rules_for_addresses_decide_the_addresses_that_names_resolve_to() {
 }
 
 #[test]
-fn both_readings_of_an_encoded_path_decide_its_addresses() {
+fn encoded_path_separators_are_checked_at_resolved_addresses() {
     let p = RulePolicy::new().allow_http("tls plaintext *").allow_http("plaintext api.example.com/*.txt").deny_net("10.0.0.0/8");
     let get = |path: &str| Capability::Http {
         method: "GET".into(),
@@ -306,17 +302,16 @@ fn both_readings_of_an_encoded_path_decide_its_addresses() {
     let at: SocketAddr = "10.0.0.5:80".parse().unwrap();
     assert_eq!(p.check_resolved(&get("/a/b.txt"), at), Decision::Deny);
     assert_eq!(p.check_resolved(&get("/a%2Fb.txt"), at), Decision::Deny);
-    assert_eq!(p.check_resolved(&get("/b.txt"), at), Decision::Allow, "the exact name outranks the range");
+    assert_eq!(p.check_resolved(&get("/b.txt"), at), Decision::Allow);
 }
 
 #[test]
-fn explicit_host_rules_allow_the_addresses_they_resolve_to() {
+fn explicit_host_rules_outrank_cidr_prefixes_at_resolved_addresses() {
     let p = RulePolicy::new().allow_net("db.internal").allow_net("*.corp.example").deny_net("10.0.0.0/8").deny_net("10.0.0.6");
-    assert_eq!(p.check(&net_addr("db.internal", "10.0.0.5:5432")), Decision::Allow, "an exact name outranks a range");
-    assert_eq!(p.check(&net_addr("db.internal", "10.0.0.6:5432")), Decision::Deny, "a tie with an exact address");
-    assert_eq!(p.check(&net_addr("db.corp.example", "10.0.0.5:5432")), Decision::Deny, "a domain pattern vouches for no address");
+    assert_eq!(p.check(&net_addr("db.internal", "10.0.0.5:5432")), Decision::Allow);
+    assert_eq!(p.check(&net_addr("db.internal", "10.0.0.6:5432")), Decision::Deny);
+    assert_eq!(p.check(&net_addr("db.corp.example", "10.0.0.5:5432")), Decision::Deny);
     assert_eq!(p.check(&net_addr("db.corp.example", "8.8.8.8:5432")), Decision::Allow);
-    // Only the hosts compete: the port and the transports of either rule do not break the tie.
     let metadata: SocketAddr = "169.254.169.254:443".parse().unwrap();
     for (allow, deny) in [
         ("example.com", "tls plaintext 169.254.169.254"),
@@ -327,16 +322,13 @@ fn explicit_host_rules_allow_the_addresses_they_resolve_to() {
         let p = RulePolicy::new().allow_net(allow).deny_net(deny);
         assert_eq!(p.check_resolved(&net("example.com", 443), metadata), Decision::Deny, "allow net {allow}, deny net {deny}");
     }
-    // `*.localhost` names the loopback host, so it ranks above every range.
     let p = RulePolicy::new().allow_net("*.localhost").deny_net("127.0.0.0/8");
     assert_eq!(p.check(&net_addr("app.localhost", "127.0.0.1:3000")), Decision::Allow);
     assert_eq!(p.check(&net_addr("example.com", "127.0.0.1:3000")), Decision::Deny);
-    // A prompt rule cannot ask about a resolved address, so it denies it, unless it decided the name.
     let p = RulePolicy::new().prompt_net("db.internal").allow_net("*").prompt_net("93.184.0.0/16");
     assert_eq!(p.check(&net("db.internal", 5432)), Decision::Prompt);
     assert_eq!(p.check(&net_addr("db.internal", "93.184.0.5:5432")), Decision::Allow);
     assert_eq!(p.check(&net_addr("example.com", "93.184.215.14:443")), Decision::Deny);
-    // An HTTP rule that allows a request also decides the addresses of its host.
     let p = RulePolicy::new().allow_http("GET db.internal/api").deny_net("10.0.0.0/8");
     let get = |path: &str| Capability::Http {
         method: "GET".into(),
@@ -348,12 +340,11 @@ fn explicit_host_rules_allow_the_addresses_they_resolve_to() {
     let addr: SocketAddr = "10.0.0.5:443".parse().unwrap();
     assert_eq!(p.check_resolved(&get("/api/x"), addr), Decision::Allow);
     assert_eq!(p.check_resolved(&get("/other"), addr), Decision::Deny);
-    assert_eq!(p.check(&net_addr("db.internal", "10.0.0.5:443")), Decision::Deny, "as a `Net` request");
+    assert_eq!(p.check(&net_addr("db.internal", "10.0.0.5:443")), Decision::Deny);
 }
 
 #[test]
 fn rules_of_equal_specificity() {
-    // `deny` wins over `allow`, which wins over `prompt`.
     let p = RulePolicy::new().allow_net("a.com").deny_net("a.com").allow_net("b.com").prompt_net("b.com");
     assert_eq!(p.check(&net("a.com", 80)), Decision::Deny);
     assert_eq!(p.check(&net("b.com", 80)), Decision::Allow);
@@ -361,8 +352,6 @@ fn rules_of_equal_specificity() {
     assert_eq!(p.check(&Capability::FsWrite("/out/x".into())), Decision::Prompt);
     assert_eq!(p.check(&Capability::FsRead("/out/x".into())), Decision::Allow);
     assert_eq!(p.check(&Capability::FsRead("/out/secret".into())), Decision::Deny);
-    // A transport does not make a rule more specific, and a deny rule
-    // without one matches both.
     let p = RulePolicy::new().deny_net("legacy.example").allow_net("plaintext legacy.example");
     assert_eq!((p.check(&net("legacy.example", 80)), p.check(&plain("legacy.example", 80))), (Decision::Deny, Decision::Deny));
     let p = RulePolicy::new().deny_net("tls legacy.example").allow_net("plaintext legacy.example");
@@ -370,44 +359,37 @@ fn rules_of_equal_specificity() {
 }
 
 #[test]
-fn default_rules_decide_only_what_no_other_rule_matches() {
+fn default_rules_apply_only_to_unmatched_requests() {
     let write = |path: &str| Capability::FsWrite(path.into());
     let p = RulePolicy::new().prompt_write("/").with_defaults(RulePolicy::allow_all());
     assert_eq!(p.check_normalized(&write("/tmp/x")), Decision::Prompt);
     assert_eq!(p.check_normalized(&Capability::FsRead("/tmp/x".into())), Decision::Allow);
-    // A read rule also guards imports, against a default import rule.
     let import = Capability::Import("/x/a.sand".into());
     let p = RulePolicy::new().prompt_read("/").with_defaults(RulePolicy::standard().allow_import("/"));
     assert_eq!(p.check_normalized(&import), Decision::Prompt);
     assert_eq!(RulePolicy::standard().allow_import("/").check_normalized(&import), Decision::Allow);
-    // An http rule competes with a default net rule.
     let get = Capability::Http { method: "GET".into(), scheme: "https".into(), host: "a.com".into(), port: 443, path: "/".into() };
     let p = RulePolicy::new().prompt_http("*").with_defaults(RulePolicy::allow_all());
     assert_eq!(p.check(&get), Decision::Prompt);
-    // A narrower rule decides only what it matches.
     let defaults = RulePolicy::standard().allow_stdin().allow_net("*").allow_read("/data");
     let p = RulePolicy::new().prompt_stdin().deny_net("*").prompt_read("/data/x").with_defaults(defaults);
     assert_eq!(p.check(&Capability::Stdin), Decision::Prompt);
     assert_eq!(p.check(&net("example.com", 443)), Decision::Deny);
-    assert_eq!(p.check(&plain("example.com", 80)), Decision::Deny, "`deny net *` matches both transports");
+    assert_eq!(p.check(&plain("example.com", 80)), Decision::Deny);
     let tls_only = RulePolicy::new().with_defaults(RulePolicy::new().allow_net("*"));
-    assert_eq!(tls_only.check(&plain("example.com", 80)), Decision::Prompt, "`allow net *` matches TLS only");
+    assert_eq!(tls_only.check(&plain("example.com", 80)), Decision::Prompt);
     assert_eq!(p.check_normalized(&Capability::FsRead("/data/x/y".into())), Decision::Prompt);
     assert_eq!(p.check_normalized(&Capability::FsRead("/data/z".into())), Decision::Allow);
     assert_eq!(p.check(&Capability::Stdout), Decision::Allow);
-    // Rules added later are still before the defaults, and `extend` keeps both kinds.
     let p = RulePolicy::new().with_defaults(RulePolicy::allow_all()).deny_stdout();
     assert_eq!(p.check(&Capability::Stdout), Decision::Deny);
     let p = RulePolicy::new().extend(RulePolicy::new().with_defaults(RulePolicy::new().deny_stdin())).allow_stdin();
     assert_eq!(p.check(&Capability::Stdin), Decision::Allow);
-    // The listing of all variables, with a guarded variable among the defaults or the rules.
     let all = Capability::Env("*".into());
     let p = RulePolicy::new().allow_env("*").with_defaults(RulePolicy::new().prompt_env("SECRET"));
     assert_eq!(p.check(&all), Decision::Allow);
     let p = RulePolicy::new().prompt_env("SECRET").with_defaults(RulePolicy::allow_all());
     assert_eq!(p.check(&all), Decision::Prompt);
-    // Resolved addresses compare hosts across tiers: a domain pattern does
-    // not vouch for an address that a default rule denies, and an exact name does.
     let metadata: SocketAddr = "169.254.169.254:80".parse().unwrap();
     let floor = || RulePolicy::new().deny_net("169.254.0.0/16");
     let p = RulePolicy::new().allow_net("tls plaintext *.example.com").with_defaults(floor());
@@ -416,7 +398,6 @@ fn default_rules_decide_only_what_no_other_rule_matches() {
     assert_eq!(p.check_resolved(&plain("evil.example", 80), metadata), Decision::Deny);
     let p = RulePolicy::new().allow_net("tls plaintext meta.internal").with_defaults(floor());
     assert_eq!(p.check_resolved(&plain("meta.internal", 80), metadata), Decision::Allow);
-    // The defaults of the defaults stay below them.
     let host = RulePolicy::new().prompt_write("/").with_defaults(RulePolicy::allow_all());
     let write = Capability::FsWrite("/tmp/x".into());
     assert_eq!(host.check_normalized(&write), Decision::Prompt);
@@ -501,10 +482,9 @@ fn constructors_start_with_their_rules() {
     assert_eq!(sandlang::policy::PolicyFile::parse(&text, std::path::Path::new("/"), None).unwrap().rules.to_string(), text);
 }
 
-// Relies on the resolver accepting `127.1` for 127.0.0.1 (glibc, macOS).
 #[cfg(unix)]
 #[test]
-fn names_resolving_to_denied_addresses_are_denied() {
+fn hosts_resolved_to_denied_addresses_are_blocked() {
     let server = http_server(|_| HttpResponse::new(200, "internal"));
     let port = server.addr.port();
     // `127.1` and `2130706433` are not IP literals, but the resolver maps them to 127.0.0.1.
@@ -608,7 +588,7 @@ fn prompt_answers_do_not_override_address_rules() {
         .ok_stdout()
         .to_string()
     };
-    assert_eq!(run(RulePolicy::standard()), "Ok(\"hi\")\nOk(\"hi\")\n", "no rule restricts the addresses");
+    assert_eq!(run(RulePolicy::standard()), "Ok(\"hi\")\nOk(\"hi\")\n");
     let out = run(RulePolicy::standard().deny_net("plaintext 127.0.0.0/8"));
     let lines: Vec<&str> = out.lines().collect();
     // `localhost` is also resolved to `::1`, which the server does not listen on.
@@ -656,7 +636,7 @@ impl sandlang::network::Network for KeepAliveNetwork {
     }
 
     fn listen(&self, _addr: SocketAddr) -> sandlang::network::NetworkFuture<'_, Box<dyn sandlang::network::Listener>> {
-        Box::pin(async { Err(std::io::Error::other("no listening")) })
+        Box::pin(async { Err(std::io::Error::other("unsupported")) })
     }
 }
 
@@ -688,7 +668,6 @@ fn custom_policies_see_resolved_addresses_without_extra_prompts() {
     let seen = Arc::new(Mutex::new(Vec::<String>::new()));
     let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
     let (seen2, prompts2) = (seen.clone(), prompts.clone());
-    // Asks about everything; denies one resolved address.
     let policy = move |cap: &Capability| {
         seen2.lock().unwrap().push(cap.to_string());
         match cap {
@@ -707,9 +686,8 @@ fn custom_policies_see_resolved_addresses_without_extra_prompts() {
     });
     assert_eq!(
         r.ok_stdout(),
-        format!("true\npermission denied: connect to [::1]:{port}: address ::1 (private or internal) is not allowed\n")
+        format!("true\npermission denied: connect to [::1]:{port}: address ::1 is private or internal and is not allowed\n")
     );
-    // One prompt per connection: the `Prompt` answer for the resolved address counts as `Allow`.
     assert_eq!(
         *prompts.lock().unwrap(),
         vec![format!("connect to 127.0.0.1:{port} (plaintext)"), format!("connect to [::1]:{port} (plaintext)")]
@@ -728,7 +706,7 @@ fn custom_policies_see_the_transport_of_resolved_addresses() {
     let r = run_with(&src, |c| c.custom_policy(move |cap: &Capability| rules.check(cap)));
     assert_eq!(
         r.ok_stdout(),
-        format!("Err(\"permission denied: connect to localhost:{port}: address 127.0.0.1 (private or internal) is not allowed\")\n")
+        format!("Err(\"permission denied: connect to localhost:{port}: address 127.0.0.1 is private or internal and is not allowed\")\n")
     );
 }
 
@@ -739,7 +717,6 @@ fn capability_display() {
     assert_eq!(at("example.com", true), "connect to example.com at 93.184.215.14:443");
     assert_eq!(at("93.184.215.14", true), "connect to 93.184.215.14:443");
     assert_eq!(at("example.com", false), "connect to example.com at 93.184.215.14:443 (plaintext)");
-    // A prompt for every variable says so.
     assert_eq!(Capability::Env("*".into()).to_string(), "read all environment variables");
     assert_eq!(Capability::Env("HOME".into()).to_string(), "read environment variable HOME");
 }
@@ -762,7 +739,7 @@ fn entry_checks_do_not_resolve_a_final_symlink() {
     std::os::unix::fs::symlink(dir.path().join("outside/target.txt"), dir.path().join("allowed/link")).unwrap();
     let link = Capability::FsWrite(dir.path().join("allowed/link"));
     let p = RulePolicy::standard().allow_write(dir.path().join("allowed"));
-    assert_eq!(p.check(&link), Decision::Prompt, "no rule allows the target");
+    assert_eq!(p.check(&link), Decision::Prompt);
     assert_eq!(p.check_entry(&link), Decision::Allow);
     // Symlinks in the directories leading to the entry are still resolved.
     std::os::unix::fs::symlink(dir.path().join("outside"), dir.path().join("allowed/dir_link")).unwrap();
@@ -1222,11 +1199,6 @@ fn case_insensitive(dir: &std::path::Path) -> bool {
     insensitive
 }
 
-/// On a case-insensitive volume, every spelling of a protected path is
-/// denied, whether it reaches the protected entry directly, through a
-/// symlink or as a directory to create below; custom policies and prompts
-/// see the stored spelling; and allow rules naming one entry match all its
-/// spellings.
 #[cfg(unix)]
 #[test]
 fn case_variants_cannot_bypass_the_policy() {
@@ -1616,9 +1588,6 @@ fn oversized_files_and_input_fail_before_being_read() {
     assert_eq!(r.ok_stdout(), "Some(\"one\")\ntwo\n\n");
 }
 
-/// File systems may be case insensitive: a deny rule for a path that does
-/// not exist yet must not be bypassed by spelling it differently (on every
-/// platform, since Linux has case-insensitive directories and mounts too).
 #[test]
 fn deny_rules_ignore_case() {
     let dir = TempDir::new("deny-case");
@@ -1838,7 +1807,7 @@ fn path_helpers_are_metered() {
 }
 
 #[test]
-fn custom_policies_decide_entry_operations_apart() {
+fn custom_policies_evaluate_entry_operations_separately() {
     struct NoRemoval;
     impl sandlang::CustomPolicy for NoRemoval {
         fn check(&self, _: &Capability) -> Decision {
@@ -1878,7 +1847,7 @@ fn a_policy_file_over_the_standard_rules_keeps_its_prompt_rules() {
 }
 
 #[test]
-#[should_panic(expected = "an empty path")]
+#[should_panic(expected = "empty path in file rule")]
 fn file_builders_reject_an_empty_path() {
     let _ = RulePolicy::new().allow_read("");
 }

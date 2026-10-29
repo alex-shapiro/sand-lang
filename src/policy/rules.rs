@@ -69,7 +69,7 @@ impl NamePattern {
 
     pub(crate) fn from_tokens(text: &[Tok]) -> Result<NamePattern, String> {
         if text.windows(2).any(|w| w[0].1 && w[1].1) {
-            return Err("`**` matches paths: in a name, `*` matches any characters (e.g. `AWS_*`)".into());
+            return Err("cannot use `**` in an environment variable pattern: use `*` to match any characters, e.g. `AWS_*`".into());
         }
         Ok(match Seg::parse(text)? {
             Seg::Lit(s) => NamePattern::Exact(s.into()),
@@ -160,7 +160,7 @@ pub(crate) struct Rule {
     pub decision: Decision,
     pub kind: RuleKind,
     pub origin: Option<Origin>,
-    /// Rule tier (`0` for primary rules, or higher for fallback rules added via [`RulePolicy::with_defaults`]).
+    /// Rule tier, where `0` is for primary rules and higher values are for fallback rules added via [`RulePolicy::with_defaults`].
     pub tier: u32,
 }
 
@@ -184,9 +184,10 @@ pub(crate) struct Origin {
 
 /// A rule-based capability policy.
 ///
-/// The most specific matching rule decides each request. On a specificity tie,
-/// `deny` overrides `allow`, and `allow` overrides `prompt`. If a request does
-/// not match any rule, [`RulePolicy::check`] returns [`Decision::Prompt`].
+/// Evaluates each request using the most specific matching rule. On a
+/// specificity tie, `deny` overrides `allow`, and `allow` overrides `prompt`.
+/// If a request does not match any rule, [`RulePolicy::check`] returns
+/// [`Decision::Prompt`].
 #[derive(Clone, Default)]
 pub struct RulePolicy {
     rules: Vec<Rule>,
@@ -209,9 +210,9 @@ fn custom(name: &str, detail: Option<&str>) -> RuleKind {
     RuleKind::Custom((name != "*").then(|| name.to_string()), detail.filter(|&d| d != "*").map(String::from))
 }
 
-/// File rule builder methods (`allow_read`, `deny_read`, etc.) take literal
-/// path prefixes without wildcards and panic if the path is empty. To parse
-/// wildcard patterns, use [`super::PolicyFile`].
+/// File rule builder methods such as [`RulePolicy::allow_read`] and
+/// [`RulePolicy::deny_read`] take literal path prefixes without wildcards and
+/// panic if the path is empty. To parse wildcard patterns, use [`super::PolicyFile`].
 impl RulePolicy {
     /// Creates an empty policy that returns [`Decision::Prompt`] for every request.
     pub fn new() -> RulePolicy {
@@ -278,7 +279,7 @@ impl RulePolicy {
     }
 
     fn files_rule(self, decision: Decision, access: Access, p: &Path) -> Self {
-        assert!(!p.as_os_str().is_empty(), "an empty path in a file rule: use `**` in a policy file for every path");
+        assert!(!p.as_os_str().is_empty(), "empty path in file rule: use `**` in a policy file to match all paths");
         self.push(decision, RuleKind::Files(access, PathPattern { prefix: p.to_path_buf(), rest: vec![] }))
     }
 
@@ -320,9 +321,9 @@ impl RulePolicy {
     pub fn prompt_import(self, p: impl AsRef<Path>) -> Self {
         self.files_rule(Decision::Prompt, Access::Import, p.as_ref())
     }
-    /// Adds an `allow net` rule with optional transport keywords (`tls`,
-    /// `plaintext`; defaults to `tls`) followed by host patterns (such as
-    /// `"api.example.com:443"` or `"plaintext localhost:8080"`).
+    /// Adds an `allow net` rule with optional transport keywords `tls` and
+    /// `plaintext` followed by host patterns such as `"api.example.com:443"`
+    /// or `"plaintext localhost:8080"`. Defaults to `tls`.
     ///
     /// # Panics
     ///
@@ -331,17 +332,17 @@ impl RulePolicy {
     pub fn allow_net(self, rule: &str) -> Self {
         self.parsed("allow", "net", rule)
     }
-    /// Adds a `deny net` rule (defaults to both `tls` and `plaintext`); see [`RulePolicy::allow_net`].
+    /// Adds a `deny net` rule, defaulting to both `tls` and `plaintext`; see [`RulePolicy::allow_net`].
     pub fn deny_net(self, rule: &str) -> Self {
         self.parsed("deny", "net", rule)
     }
-    /// Adds a `prompt net` rule (defaults to both `tls` and `plaintext`); see [`RulePolicy::allow_net`].
+    /// Adds a `prompt net` rule, defaulting to both `tls` and `plaintext`; see [`RulePolicy::allow_net`].
     pub fn prompt_net(self, rule: &str) -> Self {
         self.parsed("prompt", "net", rule)
     }
-    /// Adds an `allow http` rule with optional transport keywords (`tls`,
-    /// `plaintext`; defaults to `tls`), optional HTTP methods, and URL
-    /// patterns (such as `"GET POST api.example.com/v1/**"`).
+    /// Adds an `allow http` rule with optional transport keywords `tls` and
+    /// `plaintext`, optional HTTP methods, and URL patterns such as
+    /// `"GET POST api.example.com/v1/**"`. Defaults to `tls`.
     ///
     /// # Panics
     ///
@@ -349,16 +350,16 @@ impl RulePolicy {
     pub fn allow_http(self, rule: &str) -> Self {
         self.parsed("allow", "http", rule)
     }
-    /// Adds a `deny http` rule (defaults to both `tls` and `plaintext`); see [`RulePolicy::allow_http`].
+    /// Adds a `deny http` rule, defaulting to both `tls` and `plaintext`; see [`RulePolicy::allow_http`].
     pub fn deny_http(self, rule: &str) -> Self {
         self.parsed("deny", "http", rule)
     }
-    /// Adds a `prompt http` rule (defaults to both `tls` and `plaintext`); see [`RulePolicy::allow_http`].
+    /// Adds a `prompt http` rule, defaulting to both `tls` and `plaintext`; see [`RulePolicy::allow_http`].
     pub fn prompt_http(self, rule: &str) -> Self {
         self.parsed("prompt", "http", rule)
     }
-    /// Allows binding a listener matching `pattern` (`ip:port`, `[ipv6]:port`,
-    /// `ip`, `localhost`, `*:port`, or `*`).
+    /// Allows binding a listener matching `pattern`, which may be `ip:port`,
+    /// `[ipv6]:port`, `ip`, `localhost`, `*:port`, or `*`.
     ///
     /// # Panics
     ///
@@ -383,7 +384,7 @@ impl RulePolicy {
         self.push(Decision::Prompt, RuleKind::Listen(listen_pattern(pattern)))
     }
     /// Allows reading environment variables matching an exact name, a `*`
-    /// glob pattern (such as `AWS_*`), or `*` for all variables.
+    /// glob pattern such as `AWS_*`, or `*` for all variables.
     ///
     /// # Panics
     ///
@@ -457,8 +458,8 @@ impl RulePolicy {
         self.check_normalized_in(cap, PathSpace::Host)
     }
 
-    /// Evaluates `cap` for a directory entry operation (such as removal or
-    /// rename) without following a final symlink.
+    /// Evaluates `cap` for a directory entry operation such as removal or
+    /// rename without following a final symlink.
     pub fn check_entry(&self, cap: &Capability) -> Decision {
         self.check_entry_in(cap, PathSpace::Host)
     }
@@ -514,16 +515,16 @@ impl RulePolicy {
         self.verdict(cap, space, &[]).map_or(Decision::Prompt, |(d, _)| d)
     }
 
-    /// Evaluates whether a connection to `addr` (resolved from an allowed
-    /// `Net` or `Http` `request`) is permitted. Returns [`Decision::Allow`]
+    /// Evaluates whether a connection to `addr` resolved from an allowed
+    /// `Net` or `Http` `request` is permitted. Returns [`Decision::Allow`]
     /// or [`Decision::Deny`].
     ///
-    /// The rule that matched `request` competes by host specificity against
+    /// The rule that matched `request` is compared by host specificity against
     /// IP and CIDR rules that match `addr`: an exact hostname ranks equal to
     /// a single IP address, `*.localhost` ranks above CIDR ranges, and other
-    /// wildcard domain patterns (`*.domain` and `*`) rank below all IP and
-    /// CIDR rules. If the winning IP rule is a `deny` or `prompt` rule, this
-    /// method returns [`Decision::Deny`].
+    /// wildcard domain patterns such as `*.domain` and `*` rank below all IP
+    /// and CIDR rules. If the winning IP rule is a `deny` or `prompt` rule,
+    /// this method returns [`Decision::Deny`].
     pub fn check_resolved(&self, request: &Capability, addr: std::net::SocketAddr) -> Decision {
         if self.resolved_verdict(request, addr).is_ok() { Decision::Allow } else { Decision::Deny }
     }
@@ -744,7 +745,7 @@ impl RulePolicy {
     pub(crate) fn describe_rule(&self, i: usize) -> String {
         let rule = &self.rules[i];
         match &rule.origin {
-            Some(o) => format!("the rule `{rule}` (line {})", o.line),
+            Some(o) => format!("the rule `{rule}` on line {}", o.line),
             None => format!("the rule `{rule}`"),
         }
     }
@@ -974,7 +975,7 @@ impl Resolver {
             (resolved, listing)
         });
         match listing {
-            // Regular files and nonexistent entries resolve directly;
+            // Regular files and nonexistent entries are resolved directly;
             // directories may be firmlinks or junctions requiring a full walk.
             Some(Listing::Missing) => resolved.join(name),
             Some(Listing::Names { files, .. }) if files.contains(name) => resolved.join(name),
