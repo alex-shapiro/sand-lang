@@ -192,6 +192,8 @@ fn bad_flags_and_values_exit_2_with_a_message() {
         ("--allow-private-net", "unknown option `--allow-private-net` (no rule denies private addresses unless you add one"),
         ("--allow=raed ./x", "invalid rule `--allow=raed ./x`: unknown capability `raed`"),
         ("--deny=read data", "invalid rule `--deny=read data`: path `data` is not anchored"),
+        ("--allow=read:./x", "invalid rule `--allow=read:./x`: write a space after the capability: `read ./x`"),
+        ("--allow=all", "`--allow=all` is not a rule: --allow-all allows what no rule of yours matches"),
         ("--prompt=net", "invalid rule `--prompt=net`: `prompt net` needs at least one argument"),
         ("--no-prompt=yes", "--no-prompt does not take a value"),
         ("--allow-all=1", "--allow-all does not take a value"),

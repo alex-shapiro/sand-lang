@@ -196,6 +196,30 @@ fn not_a_transport(word: &str) -> Option<String> {
     Some(format!("`{word}` is not a transport: {advice} (write `{lower}.` for a host named `{lower}`)"))
 }
 
+/// The words that name a capability after the verb.
+const KINDS: [&str; 12] = ["read", "write", "import", "net", "http", "listen", "env", "custom", "stdin", "stdout", "stderr", "timezone"];
+
+/// The fix for a word where a capability or a path may stand that is
+/// neither, but reads as a capability: in another case, a second one
+/// (`read ./x write ./y`), a verb, or one joined to its argument by `:` or
+/// `=` (`read:./x`).
+fn misread(word: &str) -> Option<String> {
+    let lower = word.to_ascii_lowercase();
+    if KINDS.contains(&lower.as_str()) {
+        return Some(if lower == word {
+            format!("`{word}` is another capability: give each rule its own line (or option)")
+        } else {
+            format!("capabilities are lower case: write `{lower}`")
+        });
+    }
+    if ["allow", "deny", "prompt"].contains(&lower.as_str()) {
+        return Some(format!("a rule has one verb: remove `{word}`"));
+    }
+    let (head, rest) = word.split_once([':', '='])?;
+    let head = head.to_ascii_lowercase();
+    KINDS.contains(&head.as_str()).then(|| format!("write a space after the capability: `{head} {rest}`"))
+}
+
 /// Whether the bare word `word` has a meaning as a keyword in some
 /// position: a transport, a scheme where a transport may stand, or a
 /// method.
@@ -421,7 +445,10 @@ impl Context<'_> {
                         .into(),
                 ));
             }
-            Some(k) => return Err((what.column, format!("unknown capability `{k}` (expected a path, or {CAPABILITIES})"))),
+            Some(k) => {
+                let message = misread(k).unwrap_or_else(|| format!("unknown capability `{k}` (expected a path, or {CAPABILITIES})"));
+                return Err((what.column, message));
+            }
             None => ("files", args),
         };
         if items.is_empty() {
@@ -542,10 +569,12 @@ impl Context<'_> {
         let flat: String = text.iter().map(|t| t.0).collect();
         let sep = |c: char| c == '/' || (cfg!(windows) && c == '\\');
         let unanchored = || {
-            format!(
-                "path `{flat}` is not anchored: write `./{flat}` for `{}`, `~/...`, an absolute path, or `**/{flat}` for that name anywhere",
-                self.base.join(&flat).display()
-            )
+            misread(&flat).unwrap_or_else(|| {
+                format!(
+                    "path `{flat}` is not anchored: write `./{flat}` for `{}`, `~/...`, an absolute path, or `**/{flat}` for that name anywhere",
+                    self.base.join(&flat).display()
+                )
+            })
         };
         let starts = |s: &str| flat.starts_with(s) && flat[s.len()..].chars().next().is_none_or(sep);
         // `**` matches every path on every root, including other drives on Windows.
@@ -1083,8 +1112,8 @@ mod tests {
             [
                 "1:21: transports (`tls`, `plaintext`) come before the hosts",
                 "2:11: `allow net` needs a host after its transports, e.g. `localhost:8080`",
-                "3:12: URL patterns take no scheme: write `a.com` (rules match HTTPS unless they say `plaintext`)",
-                "4:12: URL patterns take no scheme: write `plaintext a.com/x` for `http://a.com/x` (rules match HTTPS unless they say `plaintext`)",
+                "3:12: URL patterns take no scheme: write `a.com` for `https://a.com`",
+                "4:12: URL patterns take no scheme: write `plaintext a.com/x` for `http://a.com/x`",
             ]
         );
     }
@@ -1096,6 +1125,29 @@ mod tests {
         assert_eq!((net("169.254.169.254"), net("169.254.169.254.")), (Deny, Deny));
         assert_eq!(p.rules.to_string(), "allow net tls plaintext *\ndeny net 169.254.169.254\nallow http 10.0.0.1/x\n");
         assert_eq!(http(&p, "GET", "https://10.0.0.1/x"), Allow);
+    }
+
+    #[test]
+    fn errors_name_the_fix_for_misread_capabilities_and_schemes() {
+        assert_eq!(
+            errors(
+                "allow NET a.com\nallow Read ./x\nallow read:./x\nallow env=HOME\nallow read ./x write ./y\nallow allow read ./x\n\
+                 allow net ws://a.com\nallow net tcp://db:5432\nallow http ws://a.com/x\nallow http wss://a.com/x\nallow net gopher://a.com"
+            ),
+            [
+                "1:7: capabilities are lower case: write `net`",
+                "2:7: capabilities are lower case: write `read`",
+                "3:7: write a space after the capability: `read ./x`",
+                "4:7: write a space after the capability: `env HOME`",
+                "5:16: `write` is another capability: give each rule its own line (or option)",
+                "6:7: a rule has one verb: remove `allow`",
+                "7:11: net rules take hosts, not URLs: write `plaintext a.com`",
+                "8:11: net rules take hosts, not URLs: write `plaintext db:5432`",
+                "9:12: URL patterns take no scheme: write `plaintext a.com/x` for `ws://a.com/x`",
+                "10:12: URL patterns take no scheme: write `a.com/x` for `wss://a.com/x`",
+                "11:11: net rules take hosts, not URLs: remove `gopher://`",
+            ]
+        );
     }
 
     #[test]
@@ -1639,8 +1691,8 @@ allow http GET a.com tls"
         assert_eq!(
             errors("allow net https://api.example.com/v1\nallow net http://localhost:8080"),
             [
-                "1:11: net rules take hosts, not URLs: write `api.example.com` (net rules match TLS unless they say `plaintext`)",
-                "2:11: net rules take hosts, not URLs: write `plaintext localhost:8080` (net rules match TLS unless they say `plaintext`)",
+                "1:11: net rules take hosts, not URLs: write `api.example.com`",
+                "2:11: net rules take hosts, not URLs: write `plaintext localhost:8080`",
             ]
         );
         assert_eq!(errors("allow read ~/x"), Vec::<String>::new());

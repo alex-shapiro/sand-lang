@@ -64,8 +64,11 @@ impl NetPattern {
         let flat: String = text.iter().map(|t| t.0).collect();
         if let Some((scheme, rest)) = flat.split_once("://") {
             let host = rest.split('/').next().unwrap_or(rest);
-            let write = if scheme.eq_ignore_ascii_case("http") { format!("plaintext {host}") } else { host.to_string() };
-            return Err(format!("net rules take hosts, not URLs: write `{write}` (net rules match TLS unless they say `plaintext`)"));
+            let advice = match without_scheme(scheme, host) {
+                Some(write) => format!("write `{write}`"),
+                None => format!("remove `{scheme}://`"),
+            };
+            return Err(format!("net rules take hosts, not URLs: {advice}"));
         }
         NetPattern::parse(&flat)
     }
@@ -624,6 +627,17 @@ pub(crate) struct UrlPattern {
     pub path: Vec<Seg>,
 }
 
+/// What to write in a rule, which takes no scheme, for `scheme://rest`:
+/// `plaintext rest` for an unencrypted scheme, `rest` for an encrypted one,
+/// and `None` for another scheme.
+fn without_scheme(scheme: &str, rest: &str) -> Option<String> {
+    match scheme.to_ascii_lowercase().as_str() {
+        "http" | "ws" | "tcp" => Some(format!("plaintext {rest}")),
+        "https" | "wss" | "ssl" | "tls" => Some(rest.to_string()),
+        _ => None,
+    }
+}
+
 pub(crate) const QUOTED_STAR_IN_HOST: &str =
     "a quoted `*` is not a wildcard, and an address or port cannot contain `*` (remove the quotes)";
 
@@ -631,13 +645,10 @@ impl UrlPattern {
     pub(crate) fn parse(text: &[Tok]) -> Result<UrlPattern, String> {
         let flat: String = text.iter().map(|t| t.0).collect();
         if let Some(i) = flat.find("://").filter(|&i| !flat[..i].contains('/')) {
-            let rest = &flat[i + 3..];
-            return Err(match flat[..i].to_ascii_lowercase().as_str() {
-                "http" => format!(
-                    "URL patterns take no scheme: write `plaintext {rest}` for `{flat}` (rules match HTTPS unless they say `plaintext`)"
-                ),
-                "https" => format!("URL patterns take no scheme: write `{rest}` (rules match HTTPS unless they say `plaintext`)"),
-                _ => format!("URL patterns take no scheme (remove `{}://`)", &flat[..i]),
+            let (scheme, rest) = (&flat[..i], &flat[i + 3..]);
+            return Err(match without_scheme(scheme, rest) {
+                Some(write) => format!("URL patterns take no scheme: write `{write}` for `{flat}`"),
+                None => format!("URL patterns take no scheme (remove `{scheme}://`)"),
             });
         }
         let rest = text;

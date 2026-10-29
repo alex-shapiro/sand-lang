@@ -286,6 +286,9 @@ fn report_policy_errors(file: &str, errors: &[sandlang::policy::PolicyError]) ->
 /// The rules of the policy file line `{verb} {text}`, with relative paths
 /// starting from `cwd`.
 fn rule(verb: &str, text: &str, cwd: &Path, home: Option<&Path>) -> Result<RulePolicy, String> {
+    if verb == "allow" && text.trim() == "all" {
+        return Err(format!("`--allow={text}` is not a rule: --allow-all allows what no rule of yours matches"));
+    }
     let file = PolicyFile::parse(&format!("{verb} {text}"), cwd, home).map_err(|errors| {
         let messages: Vec<&str> = errors.iter().map(|e| e.message.as_str()).collect();
         format!("invalid rule `--{verb}={text}`: {}", messages.join("; "))
