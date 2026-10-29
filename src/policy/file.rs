@@ -8,7 +8,6 @@
 //! allow http GET api.github.com
 //! allow http POST api.github.com/repos/{owners}/**
 //! prompt write ./out
-//! default deny
 //! limit memory 64M
 //! ```
 
@@ -514,7 +513,8 @@ impl Context<'_> {
         }
         if kind == "http" && urls == 0 {
             let last = items.last().unwrap_or(what);
-            return Err((last.column, format!("`{verb_text} http` needs a URL pattern after its methods, e.g. `api.example.com/v1`")));
+            let after = if methods.is_some() { "methods" } else { "transports" };
+            return Err((last.column, format!("`{verb_text} http` needs a URL pattern after its {after}, e.g. `api.example.com/v1`")));
         }
         if kind == "net" && urls == 0 {
             let last = items.last().unwrap_or(what);
@@ -1528,6 +1528,14 @@ mod tests {
             ]
         );
         assert_eq!(errors("allow stdin now"), ["1:13: `allow stdin` takes no arguments"]);
+        assert_eq!(errors("deny http plaintext"), ["1:11: `deny http` needs a URL pattern after its transports, e.g. `api.example.com/v1`"]);
+        assert_eq!(
+            errors("allow net https://api.example.com/v1\nallow net http://localhost:8080"),
+            [
+                "1:11: net rules take hosts, not URLs: write `api.example.com` (net rules match TLS unless they say `plaintext`)",
+                "2:11: net rules take hosts, not URLs: write `plaintext localhost:8080` (net rules match TLS unless they say `plaintext`)",
+            ]
+        );
         assert_eq!(errors("allow read ~/x"), Vec::<String>::new());
         assert_eq!(
             PolicyFile::parse("allow read ~/x", Path::new("/"), None).unwrap_err()[0].message,

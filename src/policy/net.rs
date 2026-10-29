@@ -61,7 +61,13 @@ impl NetPattern {
         if text.iter().any(|&(c, wild)| c == '*' && !wild) {
             return Err(QUOTED_STAR_IN_HOST.into());
         }
-        NetPattern::parse(&text.iter().map(|t| t.0).collect::<String>())
+        let flat: String = text.iter().map(|t| t.0).collect();
+        if let Some((scheme, rest)) = flat.split_once("://") {
+            let host = rest.split('/').next().unwrap_or(rest);
+            let write = if scheme.eq_ignore_ascii_case("http") { format!("plaintext {host}") } else { host.to_string() };
+            return Err(format!("net rules take hosts, not URLs: write `{write}` (net rules match TLS unless they say `plaintext`)"));
+        }
+        NetPattern::parse(&flat)
     }
 
     fn parse_unmasked(pattern: &str) -> Option<NetPattern> {
