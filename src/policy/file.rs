@@ -100,6 +100,12 @@ impl Word {
             .collect()
     }
 
+    /// The text of a word without quotes or set references, which may be a
+    /// keyword: a transport or a method.
+    pub(crate) fn bare(&self) -> Option<String> {
+        self.parts.iter().map(|p| if let Part::Raw(s) = p { Some(s.as_str()) } else { None }).collect()
+    }
+
     pub(crate) fn tokens(&self) -> Vec<Tok> {
         let mut out = Vec::new();
         for p in &self.parts {
@@ -113,6 +119,10 @@ impl Word {
     }
 
     pub(crate) fn render(&self) -> String {
+        let quoted = self.parts.iter().any(|p| matches!(p, Part::Quoted(_)));
+        if quoted && !self.parts.iter().any(|p| matches!(p, Part::Ref(_))) && is_keyword(&self.text()) {
+            return quote(&self.text());
+        }
         let mut out = String::new();
         for p in &self.parts {
             match p {
@@ -155,7 +165,42 @@ fn quote_part(s: &str, first: bool) -> String {
     if !s.is_empty() && !s.contains(special) && !(first && s.starts_with('#')) {
         return s.to_string();
     }
+    quote(s)
+}
+
+fn quote(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// The transport that the bare word `word` names, in any case.
+fn transport(word: &str) -> Option<Transports> {
+    if word.eq_ignore_ascii_case("tls") {
+        Some(Transports::TLS)
+    } else if word.eq_ignore_ascii_case("plaintext") {
+        Some(Transports::PLAINTEXT)
+    } else {
+        None
+    }
+}
+
+/// Why the bare word `word`, where a transport may stand, is not one: the
+/// name of a scheme or protocol.
+fn not_a_transport(word: &str) -> Option<String> {
+    let lower = word.to_ascii_lowercase();
+    let advice = match lower.as_str() {
+        "http" => "write `plaintext` for unencrypted connections such as `http://`",
+        "tcp" => "write `plaintext` for unencrypted connections, or `tls plaintext` for both",
+        "https" | "ssl" => "rules match TLS connections unless they say `plaintext`, so remove it",
+        _ => return None,
+    };
+    Some(format!("`{word}` is not a transport: {advice} (write `{lower}.` for a host named `{lower}`)"))
+}
+
+/// Whether the bare word `word` has a meaning as a keyword in some
+/// position: a transport, a scheme where a transport may stand, or a
+/// method.
+fn is_keyword(word: &str) -> bool {
+    transport(word).is_some() || not_a_transport(word).is_some() || is_method(word)
 }
 
 pub(crate) fn lex(text: &str) -> (Vec<Line>, Vec<PolicyError>) {
@@ -411,22 +456,25 @@ impl Context<'_> {
         let mut transports = Transports::empty();
         let mut urls = 0;
         for item in items {
-            if matches!(kind, "net" | "http") {
-                let transport = match item.parts.as_slice() {
-                    [Part::Raw(w)] if w == "tls" => Some(Transports::TLS),
-                    [Part::Raw(w)] if w == "plaintext" => Some(Transports::PLAINTEXT),
-                    _ => None,
-                };
-                if let Some(t) = transport {
-                    if urls > 0 {
-                        return Err((item.column, "transports (`tls`, `plaintext`) come before the hosts".into()));
-                    }
-                    transports |= t;
-                    continue;
-                }
-            }
-            let transports = if transports.is_empty() { Transports::TLS } else { transports };
             for word in &self.expand(item)? {
+                let bare = word.bare();
+                if matches!(kind, "net" | "http")
+                    && let Some(bare) = &bare
+                {
+                    if let Some(t) = transport(bare) {
+                        if urls > 0 {
+                            return Err((item.column, "transports (`tls`, `plaintext`) come before the hosts".into()));
+                        }
+                        transports |= t;
+                        continue;
+                    }
+                    if urls == 0
+                        && let Some(hint) = not_a_transport(bare)
+                    {
+                        return Err((item.column, hint));
+                    }
+                }
+                let transports = if transports.is_empty() { Transports::TLS } else { transports };
                 let origin = Origin { line, column: item.column, text: word.render() };
                 let kind = match kind {
                     "files" | "read" | "write" | "import" => {
@@ -442,7 +490,7 @@ impl Context<'_> {
                         urls += 1;
                         RuleKind::Net(NetPattern::from_tokens(&word.tokens()).map_err(|m| (item.column, m))?, transports)
                     }
-                    "http" if is_method(&word.text()) => {
+                    "http" if bare.as_deref().is_some_and(is_method) => {
                         if urls > 0 {
                             return Err((item.column, "methods come before the URL patterns".into()));
                         }
@@ -691,11 +739,11 @@ impl fmt::Display for RuleKind {
     }
 }
 
-/// A host pattern as policy file text: a host named like a transport word
-/// gets a trailing dot.
+/// A host pattern as policy file text: a host named like a transport or a
+/// scheme gets a trailing dot.
 fn host_text(pattern: &NetPattern) -> String {
     match &pattern.kind {
-        HostKind::Host(h) if h == "tls" || h == "plaintext" => {
+        HostKind::Host(h) if transport(h).is_some() || not_a_transport(h).is_some() => {
             let port = pattern.port.map_or_else(String::new, |p| format!(":{p}"));
             format!("{h}.{port}")
         }
@@ -1059,6 +1107,28 @@ mod tests {
                 "2:13: custom names and details are exact or `*`: quote a `*` that is part of the name (`\"a*b\"`)",
             ]
         );
+    }
+
+    #[test]
+    fn transports_are_words_in_any_case_and_schemes_are_not_transports() {
+        let p = parse("allow http tls plaintext *\ndeny http PLAINTEXT api.example.com\nlet t = plaintext\ndeny net {t} Tls evil.com");
+        assert_eq!(http(&p, "GET", "http://api.example.com/"), Deny);
+        assert_eq!(decide(&p, Capability::Net { host: "evil.com".into(), port: 80, tls: false }), Deny);
+        assert_eq!(p.rules.to_string(), "allow http tls plaintext *\ndeny http plaintext api.example.com\ndeny net tls plaintext evil.com\n");
+        assert_eq!(
+            errors("deny http http evil.com\ndeny net TCP evil.com\nallow http GET https a.com\nallow net ssl a.com"),
+            [
+                "1:11: `http` is not a transport: write `plaintext` for unencrypted connections such as `http://` (write `http.` for a host named `http`)",
+                "2:10: `TCP` is not a transport: write `plaintext` for unencrypted connections, or `tls plaintext` for both (write `tcp.` for a host named `tcp`)",
+                "3:16: `https` is not a transport: rules match TLS connections unless they say `plaintext`, so remove it (write `https.` for a host named `https`)",
+                "4:11: `ssl` is not a transport: rules match TLS connections unless they say `plaintext`, so remove it (write `ssl.` for a host named `ssl`)",
+            ]
+        );
+        // Quoted and dotted words are hosts.
+        let p = parse("allow net \"tls\" http. a.com https\nallow http \"plaintext\"/x");
+        assert_eq!(p.rules.to_string(), "allow net tls.\nallow net http.\nallow net a.com\nallow net https.\nallow http plaintext./x\n");
+        assert_eq!(parse(&p.rules.to_string()).rules.to_string(), p.rules.to_string());
+        assert_eq!(http(&parse("allow http \"GET\""), "POST", "https://get/x"), Allow);
     }
 
     #[test]
