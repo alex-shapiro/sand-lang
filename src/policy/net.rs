@@ -62,13 +62,8 @@ impl NetPattern {
             return Err(QUOTED_STAR_IN_HOST.into());
         }
         let flat: String = text.iter().map(|t| t.0).collect();
-        if let Some((scheme, rest)) = flat.split_once("://") {
-            let host = rest.split('/').next().unwrap_or(rest);
-            let advice = match without_scheme("net", scheme, host) {
-                Some(write) => format!("write `{write}`"),
-                None => format!("remove `{scheme}://`"),
-            };
-            return Err(format!("net rules take hosts, not URLs: {advice}"));
+        if let Some((scheme, _)) = flat.split_once("://") {
+            return Err(format!("net rules take hosts, not URLs: {}", without_scheme(scheme, "hosts")));
         }
         NetPattern::parse(&flat)
     }
@@ -627,16 +622,14 @@ pub(crate) struct UrlPattern {
     pub path: Vec<Seg>,
 }
 
-/// What to write in a `kind` rule (`net` or `http`), which takes no scheme,
-/// for `scheme://rest`: the transport of the scheme, then `rest`, or `None`
-/// for another scheme.
-fn without_scheme(kind: &str, scheme: &str, rest: &str) -> Option<String> {
-    let transport = match scheme.to_ascii_lowercase().as_str() {
-        "http" | "ws" | "tcp" => "plaintext",
-        "https" | "wss" | "ssl" | "tls" => "tls",
-        _ => return None,
-    };
-    Some(format!("{kind} {transport} {rest}"))
+/// How to write `scheme://` in a rule, which takes no scheme, before its
+/// `hosts` (hosts or URL patterns): as its transport, if it has one.
+fn without_scheme(scheme: &str, hosts: &str) -> String {
+    match scheme.to_ascii_lowercase().as_str() {
+        "http" | "ws" | "tcp" => format!("remove `{scheme}://` and write `plaintext` before the {hosts}"),
+        "https" | "wss" | "ssl" | "tls" => format!("remove `{scheme}://` and write `tls` before the {hosts}"),
+        _ => format!("remove `{scheme}://`"),
+    }
 }
 
 pub(crate) const QUOTED_STAR_IN_HOST: &str =
@@ -646,11 +639,7 @@ impl UrlPattern {
     pub(crate) fn parse(text: &[Tok]) -> Result<UrlPattern, String> {
         let flat: String = text.iter().map(|t| t.0).collect();
         if let Some(i) = flat.find("://").filter(|&i| !flat[..i].contains('/')) {
-            let (scheme, rest) = (&flat[..i], &flat[i + 3..]);
-            return Err(match without_scheme("http", scheme, rest) {
-                Some(write) => format!("URL patterns take no scheme: write `{write}` for `{flat}`"),
-                None => format!("URL patterns take no scheme (remove `{scheme}://`)"),
-            });
+            return Err(format!("URL patterns take no scheme: {}", without_scheme(&flat[..i], "URL patterns")));
         }
         let rest = text;
         let text = |toks: &[Tok]| toks.iter().map(|t| t.0).collect::<String>();

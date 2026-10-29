@@ -1112,8 +1112,8 @@ mod tests {
             [
                 "1:21: transports (`tls`, `plaintext`) come before the hosts",
                 "2:11: `allow net` needs a host after its transports, e.g. `localhost:8080`",
-                "3:12: URL patterns take no scheme: write `http tls a.com` for `https://a.com`",
-                "4:12: URL patterns take no scheme: write `http plaintext a.com/x` for `http://a.com/x`",
+                "3:12: URL patterns take no scheme: remove `https://` and write `tls` before the URL patterns",
+                "4:12: URL patterns take no scheme: remove `http://` and write `plaintext` before the URL patterns",
             ]
         );
     }
@@ -1141,10 +1141,10 @@ mod tests {
                 "4:7: write a space after the capability: `env HOME`",
                 "5:16: `write` is another capability: give each rule its own line (or option)",
                 "6:7: a rule has one verb: remove `allow`",
-                "7:11: net rules take hosts, not URLs: write `net plaintext a.com`",
-                "8:11: net rules take hosts, not URLs: write `net plaintext db:5432`",
-                "9:12: URL patterns take no scheme: write `http plaintext a.com/x` for `ws://a.com/x`",
-                "10:12: URL patterns take no scheme: write `http tls a.com/x` for `wss://a.com/x`",
+                "7:11: net rules take hosts, not URLs: remove `ws://` and write `plaintext` before the hosts",
+                "8:11: net rules take hosts, not URLs: remove `tcp://` and write `plaintext` before the hosts",
+                "9:12: URL patterns take no scheme: remove `ws://` and write `plaintext` before the URL patterns",
+                "10:12: URL patterns take no scheme: remove `wss://` and write `tls` before the URL patterns",
                 "11:11: net rules take hosts, not URLs: remove `gopher://`",
             ]
         );
@@ -1170,6 +1170,18 @@ mod tests {
         }
         assert_eq!(http(&p, "GET", "http://a.com/admin%FF"), Allow, "a byte that is not UTF-8 is not a separator");
         assert_eq!(errors("deny http a.com/x%2F%FF"), ["1:11: `x%2F%FF` holds a separator that servers may read as `/`: write `x/%FF`"]);
+    }
+
+    #[test]
+    fn scheme_advice_keeps_the_rest_of_the_rule() {
+        assert_eq!(
+            errors("allow http GET https://a.com/x\ndeny net tls plaintext http://a.com\ndeny net a.com https://b.com"),
+            [
+                "1:16: URL patterns take no scheme: remove `https://` and write `tls` before the URL patterns",
+                "2:24: net rules take hosts, not URLs: remove `http://` and write `plaintext` before the hosts",
+                "3:16: net rules take hosts, not URLs: remove `https://` and write `tls` before the hosts",
+            ]
+        );
     }
 
     #[test]
@@ -1693,7 +1705,7 @@ allow http GET a.com tls"
                 "12:12: path `~user` is not anchored: write `./~user` for `/base/~user`, `~/...`, an absolute path, or `**/~user` for that name anywhere",
                 "13:12: `allow http` needs a URL pattern after its methods, e.g. `api.example.com/v1`",
                 "14:18: methods come before the URL patterns",
-                "15:12: URL patterns take no scheme (remove `ftp://`)",
+                "15:12: URL patterns take no scheme: remove `ftp://`",
                 "16:12: `..` cannot follow a wildcard",
                 "17:12: `**` must be a whole path segment",
                 "18:12: URL patterns match paths, not queries (remove the `?...`)",
@@ -1713,8 +1725,8 @@ allow http GET a.com tls"
         assert_eq!(
             errors("allow net https://api.example.com/v1\nallow net http://localhost:8080"),
             [
-                "1:11: net rules take hosts, not URLs: write `net tls api.example.com`",
-                "2:11: net rules take hosts, not URLs: write `net plaintext localhost:8080`",
+                "1:11: net rules take hosts, not URLs: remove `https://` and write `tls` before the hosts",
+                "2:11: net rules take hosts, not URLs: remove `http://` and write `plaintext` before the hosts",
             ]
         );
         assert_eq!(errors("allow read ~/x"), Vec::<String>::new());
