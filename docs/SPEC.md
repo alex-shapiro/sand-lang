@@ -2506,7 +2506,8 @@ Specificity depends on the kind of request:
     patterns match only the address that the script used.
   - In the same way, the deny and prompt host `localhost` also matches every name under it
     (`app.localhost`), which is the same loopback host. `allow net localhost` matches only
-    `localhost`.
+    `localhost`. As for every name, the rule does not match IP addresses: `deny net tls
+    plaintext localhost 127.0.0.0/8 ::1` keeps scripts off the loopback host.
 
 - **HTTP(S) requests** (`Http`)
   - inherits net rules for the host pattern, port and transport
@@ -2518,7 +2519,8 @@ Specificity depends on the kind of request:
   - A net rule allowing a host lets scripts send it anything over `net`, even if `deny http` rules say otherwise
 
 - **Environment variables** (`Env`)
-  - supports a name `AWS_SECRET_KEY` or a pattern (`AWS_*`)
+  - supports a name `AWS_SECRET_KEY` or a pattern (`AWS_*`), where `*` matches any characters
+    (`**` is an error)
   - specific names are prioritized above wildcard patterns
 
 - **Listen addresses** (`NetListen`)
@@ -2643,9 +2645,11 @@ All paths must be anchored, but they may be prefixed with a shortcut:
 - `~/...` begins at the user's home directory
 - `**/...` begins at any directory, on every root
 
-Transports (`tls`, `plaintext`, or both) precede the hosts of `net` and `http`
-rules; without one, a rule matches TLS only. A trailing dot names a host
-called `tls` or `plaintext` (`tls.`).
+Transports (`tls`, `plaintext`, or both, in any case) precede the hosts of
+`net` and `http` rules; without one, a rule matches TLS only. In their place,
+the scheme and protocol names `http`, `https`, `tcp` and `ssl` are errors. A
+quoted word is never a transport or a method, and a trailing dot names a host
+with such a name (`tls.`, `delete.`).
 
 URL patterns have the form `host[:port][/path]`, where `host` is a hostname,
 domain wildcard, or single IP address and `path` is a percent-decoded file
@@ -2658,7 +2662,7 @@ HTTP Methods (`GET`, any case, or any upper-case word) precede URLs, before or
 after the transports. If no method is present, an http rule matches every method.
 
 A word with multiple set references allows every combination of set values
-(`{owners}/{repos}`), limited to 100,000 combination. A set may be defined
+(`{owners}/{repos}`), limited to 100,000 combinations per rule. A set may be defined
 anywhere in the file. A set may not contain another set.
 
 A request that no rule matches gets `Prompt`: the host's prompter decides
@@ -2677,8 +2681,9 @@ A policy file with any error is rejected. Each `PolicyError` provides the line a
 column containing the error.
 
 Policy files are covered by `sand fmt`, `sand lint` and `sand check` (§17).
-The formatter separates words by single spaces, adds quotes where necessary,
-writes methods in upper case, aligns the trailing comments of consecutive
+The formatter separates words by single spaces, adds quotes where necessary
+and keeps the quotes of quoted text, writes transports in lower case and
+methods in upper case, aligns the trailing comments of consecutive
 lines and removes runs of blank lines. `sandlang::policy::lint_policy`
 reports:
 

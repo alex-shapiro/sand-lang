@@ -142,7 +142,7 @@ A rule with one transport is more specific than a rule with both, so `deny net t
 
 ### Resolved addresses
 
-`localhost` and every name under it (`app.localhost`) are the local machine: Sand connects them to `127.0.0.1` or `::1` without asking DNS. So `deny net localhost` also denies `app.localhost`.
+`localhost` and every name under it (`app.localhost`) are the local machine: Sand connects them to `127.0.0.1` or `::1` without asking DNS. So `deny net localhost` also denies `app.localhost`. Like every rule for a name, it does not match IP addresses: to keep scripts off the local machine, write `deny net tls plaintext localhost 127.0.0.0/8 ::1`.
 
 Sand checks every IP address that DNS returns against the address rules, so that a public hostname cannot lead a script to an address the policy denies. With `allow net tls plaintext *` and `deny net tls plaintext 10.0.0.0/8`, a name that resolves to `10.0.0.5` cannot connect. A rule that names the exact host, such as `allow net db.internal`, is more specific than the range and lets that name connect. A wildcard such as `*` or `*.example.com` does not.
 
