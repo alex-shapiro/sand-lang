@@ -1154,15 +1154,15 @@ impl Engine {
     // Loading and compiling
 
     /// Checks (and if `prompt`, prompts for) importing the script at the
-    /// normalized `path`.
-    async fn check_import(&self, path: &Path, prompt: bool) -> bool {
+    /// normalized `path`. `None` if the policy prompts and no prompter asks.
+    async fn check_import(&self, path: &Path, prompt: bool) -> Option<bool> {
         let cap = Capability::Import(path.to_path_buf());
         if let Some(&d) = self.always.lock().unwrap_or_else(|e| e.into_inner()).get(&cap) {
-            return d;
+            return Some(d);
         }
         match self.config.policy.check_normalized_in(&cap, self.config.fs.space()) {
-            Decision::Allow => true,
-            Decision::Deny => false,
+            Decision::Allow => Some(true),
+            Decision::Deny => Some(false),
             Decision::Prompt => match &self.config.prompter {
                 Some(p) if prompt => {
                     let answer = p.prompt(cap.clone()).await;
@@ -1170,9 +1170,9 @@ impl Engine {
                     if matches!(answer, PromptAnswer::AllowAlways | PromptAnswer::DenyAlways) {
                         self.always.lock().unwrap_or_else(|e| e.into_inner()).insert(cap, allowed);
                     }
-                    allowed
+                    Some(allowed)
                 }
-                _ => false,
+                _ => None,
             },
         }
     }
@@ -1426,8 +1426,15 @@ impl Engine {
             let asked = self.config.clock.now();
             let allowed = self.check_import(&target, d.prompt).await;
             *prompted += self.config.clock.now().saturating_duration_since(asked);
-            if !allowed {
-                errors.push(Diag::error(span, format!("cannot import `{import_label}`: permission denied")));
+            if allowed != Some(true) {
+                let hint = match (allowed, target.parent()) {
+                    (None, Some(dir)) => {
+                        let rule = RulePolicy::new().allow_import(dir).to_string();
+                        format!(" (no rule allows it and no prompter can ask; a rule such as `{}` allows it)", rule.trim_end())
+                    }
+                    _ => String::new(),
+                };
+                errors.push(Diag::error(span, format!("cannot import `{import_label}`: permission denied{hint}")));
                 // Stop after a denied import to avoid prompting for remaining imports.
                 break;
             }

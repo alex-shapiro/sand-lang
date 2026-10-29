@@ -2266,6 +2266,30 @@ fn denied_import_is_a_compile_error() {
     }
 }
 
+/// `Config::new()` allows no imports: the error names the rule that would
+/// allow one.
+#[cfg(feature = "os")]
+#[test]
+fn an_import_that_no_rule_decides_names_the_missing_rule() {
+    let dir = TempDir::new("imp-default");
+    dir.write("lib/util.sand", "pub let X = 1");
+    let main = dir.write("main.sand", "import \"./lib/util.sand\"\nprint(util.X)");
+    let lib = sandlang::policy::normalize_path(&dir.path().join("lib"));
+    let mut engine = Engine::new(Config::new()).unwrap();
+    match rt().block_on(engine.run_file(&main)) {
+        Err(Error::Compile(d)) => assert_eq!(
+            d[0].message,
+            format!(
+                "cannot import `./lib/util.sand`: permission denied (no rule allows it and no prompter can ask; a rule such as `allow import {}` allows it)",
+                lib.display()
+            )
+        ),
+        other => panic!("{other:?}"),
+    }
+    let mut engine = Engine::new(Config::new().policy(sandlang::RulePolicy::standard().allow_import(&lib))).unwrap();
+    rt().block_on(engine.run_file(&main)).unwrap();
+}
+
 #[cfg(feature = "os")]
 #[test]
 fn prompt_answers() {
@@ -2383,7 +2407,7 @@ fn import_cap(dir: &TempDir, rel: &str) -> Capability {
 fn assert_import_denied(r: Result<sandlang::Outcome, Error>, import: &str) {
     match r {
         Err(Error::Compile(d)) => {
-            assert!(d.iter().any(|d| d.message == format!("cannot import `{import}`: permission denied")), "{d:?}")
+            assert!(d.iter().any(|d| d.message.starts_with(&format!("cannot import `{import}`: permission denied"))), "{d:?}")
         }
         other => panic!("expected a denied import, got {other:?}"),
     }
