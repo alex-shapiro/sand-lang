@@ -320,8 +320,11 @@ fn rules_of_equal_specificity() {
     assert_eq!(p.check(&Capability::FsWrite("/out/x".into())), Decision::Prompt);
     assert_eq!(p.check(&Capability::FsRead("/out/x".into())), Decision::Allow);
     assert_eq!(p.check(&Capability::FsRead("/out/secret".into())), Decision::Deny);
-    // One transport is more specific than both.
-    let p = RulePolicy::new().deny_net("tls plaintext legacy.example").allow_net("plaintext legacy.example");
+    // A transport does not make a rule more specific, and a deny rule
+    // without one matches both.
+    let p = RulePolicy::new().deny_net("legacy.example").allow_net("plaintext legacy.example");
+    assert_eq!((p.check(&net("legacy.example", 80)), p.check(&plain("legacy.example", 80))), (Decision::Deny, Decision::Deny));
+    let p = RulePolicy::new().deny_net("tls legacy.example").allow_net("plaintext legacy.example");
     assert_eq!((p.check(&net("legacy.example", 80)), p.check(&plain("legacy.example", 80))), (Decision::Deny, Decision::Allow));
 }
 
@@ -338,14 +341,16 @@ fn default_rules_decide_only_what_no_other_rule_matches() {
     assert_eq!(RulePolicy::standard().allow_import("/").check_normalized(&import), Decision::Allow);
     // An http rule competes with a default net rule.
     let get = Capability::Http { method: "GET".into(), scheme: "https".into(), host: "a.com".into(), port: 443, path: "/".into() };
-    let p = RulePolicy::new().prompt_http("tls plaintext *").with_defaults(RulePolicy::allow_all());
+    let p = RulePolicy::new().prompt_http("*").with_defaults(RulePolicy::allow_all());
     assert_eq!(p.check(&get), Decision::Prompt);
     // A narrower rule decides only what it matches.
     let defaults = RulePolicy::standard().allow_stdin().allow_net("*").allow_read("/data");
     let p = RulePolicy::new().prompt_stdin().deny_net("*").prompt_read("/data/x").with_defaults(defaults);
     assert_eq!(p.check(&Capability::Stdin), Decision::Prompt);
     assert_eq!(p.check(&net("example.com", 443)), Decision::Deny);
-    assert_eq!(p.check(&plain("example.com", 80)), Decision::Prompt, "`allow net *` matches TLS only");
+    assert_eq!(p.check(&plain("example.com", 80)), Decision::Deny, "`deny net *` matches both transports");
+    let tls_only = RulePolicy::new().with_defaults(RulePolicy::new().allow_net("*"));
+    assert_eq!(tls_only.check(&plain("example.com", 80)), Decision::Prompt, "`allow net *` matches TLS only");
     assert_eq!(p.check_normalized(&Capability::FsRead("/data/x/y".into())), Decision::Prompt);
     assert_eq!(p.check_normalized(&Capability::FsRead("/data/z".into())), Decision::Allow);
     assert_eq!(p.check(&Capability::Stdout), Decision::Allow);
@@ -363,7 +368,7 @@ fn default_rules_decide_only_what_no_other_rule_matches() {
     // Resolved addresses compare hosts across tiers: a domain pattern does
     // not vouch for an address that a default rule denies, and an exact name does.
     let metadata: SocketAddr = "169.254.169.254:80".parse().unwrap();
-    let floor = || RulePolicy::new().deny_net("tls plaintext 169.254.0.0/16");
+    let floor = || RulePolicy::new().deny_net("169.254.0.0/16");
     let p = RulePolicy::new().allow_net("tls plaintext *.example.com").with_defaults(floor());
     assert_eq!(p.check_resolved(&plain("evil.example.com", 80), metadata), Decision::Deny);
     let p = RulePolicy::new().allow_net("tls plaintext *").with_defaults(floor());
@@ -446,9 +451,9 @@ for host in ["127.1", "2130706433", "localhost", "127.0.0.1"] {{
 print(net.connect("127.1", {port}).unwrap_err().kind)
 "#
     );
-    let policy = RulePolicy::standard().allow_net("tls plaintext *").deny_net("tls plaintext 127.0.0.0/8 [::1]");
+    let policy = RulePolicy::standard().allow_net("tls plaintext *").deny_net("127.0.0.0/8 [::1]");
     let r = run_with(&src, |c| c.policy(policy));
-    let rule = "the rule `deny net tls plaintext 127.0.0.0/8`";
+    let rule = "the rule `deny net 127.0.0.0/8`";
     assert_eq!(
         r.ok_stdout(),
         format!(
@@ -482,7 +487,7 @@ print(net.connect("127.0.0.1", {port}).is_ok())
     // `127.1` is allowed by name only through `*`; its address by the explicit IP rule.
     let policy = RulePolicy::standard()
         .allow_net("tls plaintext *")
-        .deny_net("tls plaintext 127.0.0.0/8 [::1]")
+        .deny_net("127.0.0.0/8 [::1]")
         .allow_net(&format!("plaintext 127.0.0.1:{port}"))
         .allow_net("plaintext localhost *.localhost");
     let r = run_with(&src, |c| c.policy(policy));
@@ -501,10 +506,8 @@ fn redirects_to_denied_addresses_are_denied() {
         _ => HttpResponse::new(302, "").header("location", &format!("http://localhost:{tport}/")),
     });
     // The origin is allowed explicitly; the redirect targets only by the wildcard.
-    let policy = RulePolicy::standard()
-        .allow_net("tls plaintext *")
-        .deny_net("tls plaintext 127.0.0.0/8 [::1]")
-        .allow_net(&format!("plaintext {}", origin.addr));
+    let policy =
+        RulePolicy::standard().allow_net("tls plaintext *").deny_net("127.0.0.0/8 [::1]").allow_net(&format!("plaintext {}", origin.addr));
     let src = format!(
         "import http\nprint(http.get(\"http://{0}/name\").unwrap_err().kind)\nprint(http.get(\"http://{0}/local\").unwrap_err().kind)",
         origin.addr

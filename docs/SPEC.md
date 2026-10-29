@@ -2498,12 +2498,14 @@ Specificity depends on the kind of request:
     The host bits after the prefix length of a CIDR range must be zero.
   - A rule matches connections over the transports it names: `tls`
     (`net.connect_tls`, `https`), `plaintext` (`net.connect`, `http`), or
-    both. A rule that names no transport matches `tls` only.
+    both. A rule that names no transport matches `tls` if it allows, and both if it denies or
+    prompts, so `deny net 10.0.0.0/8` also stops `http://10.0.0.5/`.
   - Exact hosts and addresses are most specific. Then come patterns of names under `localhost`
     (`*.localhost`, since RFC 6761 makes every such name the loopback host), then ranges and domains
     (longer ones more), then `*`. An IPv4 range ranks as the IPv6 range that embeds it
     (`10.0.0.0/8` as a `/104`).
-  - A port increases rule specificity, and so does a single transport (over both).
+  - A port increases rule specificity. Transports do not: of an allow and a deny rule for the
+    same host and transport, the deny rule wins.
   - Host names must be ASCII and are compared case-insensitively, ignoring a trailing dot
   - IPv4-mapped IPv6 addresses are compared as IPv4.
   - Deny and prompt address patterns also match other forms of their addresses: `0.0.0.0` and `::`
@@ -2513,8 +2515,8 @@ Specificity depends on the kind of request:
     patterns match only the address that the script used.
   - In the same way, the deny and prompt host `localhost` also matches every name under it
     (`app.localhost`), which is the same loopback host. `allow net localhost` matches only
-    `localhost`. As for every name, the rule does not match IP addresses: `deny net tls
-    plaintext localhost 127.0.0.0/8 ::1` keeps scripts off the loopback host.
+    `localhost`. As for every name, the rule does not match IP addresses: `deny net localhost
+    127.0.0.0/8 ::1` keeps scripts off the loopback host.
 
 - **HTTP(S) requests** (`Http`)
   - inherits net rules for the host pattern, port and transport
@@ -2590,10 +2592,10 @@ the engine connects. Otherwise the address rule decides, and a `prompt`
 address rule denies, because the engine cannot ask after resolution. A custom
 policy decides `NetAddr` itself, and `Prompt` counts as `Allow`.
 
-So a deny rule for a range also stops names that resolve into it, as a public
-name that an attacker points at a local service does: with `allow net
-plaintext *` and `deny net tls plaintext 10.0.0.0/8`, a request to
-`http://evil.example/` that resolves to `10.0.0.5` fails. A rule that allows
+So a deny rule for a range also stops the names that resolve into it. An
+attacker can point a public name at a local service: with `allow net
+plaintext *` and `deny net 10.0.0.0/8`, a request to `http://evil.example/`
+that resolves to `10.0.0.5` fails. A rule that allows
 an exact name, such as `allow net db.internal`, outranks the range and lets
 that name reach `10.0.0.5`. `sandlang::policy::is_private_address` tells
 whether an address is in a private, loopback, link-local, or other
@@ -2653,9 +2655,9 @@ All paths must be anchored, but they may be prefixed with a shortcut:
 - `**/...` begins at any directory, on every root
 
 Transports (`tls`, `plaintext`, or both, in any case) precede the hosts of
-`net` and `http` rules; without one, a rule matches TLS only. In their place,
-the scheme and protocol names `http`, `https`, `ws`, `wss`, `tcp`, `udp` and
-`ssl` are errors. A
+`net` and `http` rules. Without one, an allow rule matches TLS only, and a
+deny or prompt rule matches both. In their place, the scheme and protocol
+names `http`, `https`, `ws`, `wss`, `tcp`, `udp` and `ssl` are errors. A
 quoted word is never a transport or a method, and a trailing dot names a host
 with such a name (`tls.`, `delete.`).
 

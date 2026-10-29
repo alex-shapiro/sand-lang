@@ -66,7 +66,7 @@ RUN, TEST AND REPL OPTIONS:
     --allow=RULE             allow what a policy file rule allows, e.g.
                              --allow='read ./data' --allow='net api.example.com'
                              --allow='net plaintext localhost:8080' --allow='env HOME'
-    --deny=RULE              deny what a rule matches, e.g. --deny='net tls plaintext 10.0.0.0/8'
+    --deny=RULE              deny what a rule matches, e.g. --deny='net 10.0.0.0/8'
     --prompt=RULE            ask about what a rule matches, e.g. --prompt='write ./out'
     --policy=FILE            rules and limits from a policy file (the options add
                              to its rules and override its limits)
@@ -312,11 +312,11 @@ fn unknown_option(flag: &str) -> String {
     let hint = match flag {
         "--allow-read" => Some("use --allow='read ./PATH'"),
         "--allow-write" => Some("use --allow='write ./PATH'"),
-        "--allow-net" => Some("use --allow='net HOST'"),
+        "--allow-net" => Some("use --allow='net HOST' for TLS, or --allow='net tls plaintext HOST'"),
         "--deny-net" => Some("use --deny='net HOST'"),
         "--allow-listen" => Some("use --allow='listen ADDR'"),
         "--allow-env" => Some("use --allow='env NAME'"),
-        "--allow-private-net" => Some("no rule denies private addresses unless you add one, such as --deny='net tls plaintext 10.0.0.0/8'"),
+        "--allow-private-net" => Some("no rule denies private addresses unless you add one, such as --deny='net 10.0.0.0/8'"),
         "--allow-stdin" | "--allow-timezone" => Some("scripts may read standard input and the time zone by default"),
         "--prompt-stdin" => Some("questions go to the terminal, and --no-prompt denies instead"),
         _ => None,

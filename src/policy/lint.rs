@@ -684,11 +684,11 @@ mod tests {
             ]
         );
         // A raw connection bypasses an http rule only over the transports that the rule restricts.
-        assert_eq!(lint("allow net plaintext *\ndeny http api.example.com/x"), Vec::<String>::new());
+        assert_eq!(lint("allow net plaintext *\ndeny http tls api.example.com/x"), Vec::<String>::new());
         assert_eq!(
-            lint("allow net plaintext *\ndeny http tls plaintext api.example.com/x"),
+            lint("allow net plaintext *\ndeny http api.example.com/x"),
             [
-                "2:25: warning[bypassable-http-deny]: line 1 (`*`) lets scripts connect to api.example.com:443 without TLS and send any request"
+                "2:11: warning[bypassable-http-deny]: line 1 (`*`) lets scripts connect to api.example.com:443 without TLS and send any request"
             ]
         );
         assert_eq!(
@@ -1185,10 +1185,15 @@ mod tests {
             let verb = if allow { "allow" } else { "deny" };
             let path: String = path.iter().map(|n| format!("/{n}")).collect();
             // The narrow rule matches some of the broad rule's transports.
-            let transports: &[&str] = if broad_both { &["", "tls ", "plaintext ", "tls plaintext "] } else { &["", "tls "] };
+            // A rule without transports matches TLS if it allows, and both if it denies.
+            let transports: &[&str] = match (broad_both, allow) {
+                (true, _) => &["", "tls ", "plaintext ", "tls plaintext "],
+                (false, true) => &["", "tls "],
+                (false, false) => &["tls "],
+            };
             let broad = format!(
                 "{verb} http {}{}{}{path}",
-                if broad_both { "tls plaintext " } else { "" },
+                if broad_both { "tls plaintext " } else { "tls " },
                 hosts[broad_host],
                 if broad_port { ":443" } else { "" }
             );
@@ -1202,9 +1207,8 @@ mod tests {
             );
             let (text, line) = if narrow_first { (format!("{narrow}\n{broad}"), 1) } else { (format!("{broad}\n{narrow}"), 2) };
             let warnings = lint_policy(&text, Path::new("/base"), None).unwrap();
-            // `tls` is the default transport.
-            let same = |rule: &str| rule.replacen("http tls plaintext ", "http both ", 1).replacen("http tls ", "http ", 1);
-            let line = if same(&narrow) == same(&broad) { 2 } else { line };
+            let kind = |rule: &str| super::super::PolicyFile::parse(rule, Path::new("/base"), None).unwrap().rules.rules()[0].kind.clone();
+            let line = if kind(&narrow) == kind(&broad) { 2 } else { line };
             prop_assert!(warnings.iter().any(|w| w.line == line && w.code == "redundant-rule"), "{}: {:?}", text, warnings);
         }
     }

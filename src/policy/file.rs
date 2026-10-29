@@ -479,7 +479,7 @@ impl Context<'_> {
                         return Err((item.column, hint));
                     }
                 }
-                let transports = if transports.is_empty() { Transports::TLS } else { transports };
+                let transports = if transports.is_empty() { Transports::default_for(decision) } else { transports };
                 let origin = Origin { line, column: item.column, text: word.render() };
                 let kind = match kind {
                     "files" | "read" | "write" | "import" => {
@@ -639,7 +639,7 @@ fn limit(l: &mut Limits, args: &[Word]) -> Result<(), String> {
 /// that has a line break, an HTTP request whose path has an encoded `/`,
 /// or a resolved address).
 pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
-    let verb = if allow { "allow" } else { "deny" };
+    let decision = if allow { Decision::Allow } else { Decision::Deny };
     let path = |p: &Path| p.to_str().map(|s| quote_part(s, true));
     let rule = match cap {
         Capability::FsRead(p) => format!("read {}", path(p)?),
@@ -648,13 +648,13 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
         Capability::Net { host, port, tls } => {
             let pattern = format_host_port(host, *port);
             NetPattern::parse(&pattern).ok()?;
-            format!("net {}{pattern}", if *tls { "" } else { "plaintext " })
+            format!("net {}{pattern}", transport_words(Transports::of(*tls), decision))
         }
         Capability::Http { method, scheme, host, port, path } => {
             let (names, alt) = url_segments(path);
             let transport_word = match scheme.as_str() {
-                "https" => "",
-                "http" => "plaintext ",
+                "https" => transport_words(Transports::TLS, decision),
+                "http" => transport_words(Transports::PLAINTEXT, decision),
                 _ => return None,
             };
             // The script picks the method, which the parser must read as one.
@@ -684,18 +684,13 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
         Capability::NetAddr { .. } => return None,
     };
     // Policy text cannot hold a line break, even in quotes.
-    (!rule.contains(['\n', '\r'])).then(|| format!("{verb} {rule}"))
+    (!rule.contains(['\n', '\r'])).then(|| format!("{} {rule}", verb(decision)))
 }
 
 impl fmt::Display for Rule {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} {}", verb(self.decision), self.kind)
-    }
-}
-
-impl fmt::Display for RuleKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
+        write!(f, "{} ", verb(self.decision))?;
+        match &self.kind {
             RuleKind::Files(access, pattern) => {
                 let access = match access {
                     Access::Read => "read ",
@@ -717,9 +712,9 @@ impl fmt::Display for RuleKind {
                 }
                 write!(f, "{access}{path}")
             }
-            RuleKind::Net(pattern, transports) => write!(f, "net {}{}", transport_words(*transports), host_text(pattern)),
+            RuleKind::Net(pattern, transports) => write!(f, "net {}{}", transport_words(*transports, self.decision), host_text(pattern)),
             RuleKind::Http(methods, url, transports) => {
-                write!(f, "http {}", transport_words(*transports))?;
+                write!(f, "http {}", transport_words(*transports, self.decision))?;
                 for m in methods.iter().flatten() {
                     write!(f, "{m} ")?;
                 }
@@ -778,11 +773,13 @@ fn looks_like_prefix_length(seg: &Seg) -> bool {
     !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// The transport words of a rule that matches `transports`, each followed
-/// by a space (none for TLS, the default).
-fn transport_words(transports: Transports) -> &'static str {
-    if transports == Transports::TLS {
+/// The transport words of a rule with `decision` that matches `transports`,
+/// each followed by a space (none for the default of the decision).
+fn transport_words(transports: Transports, decision: Decision) -> &'static str {
+    if transports == Transports::default_for(decision) {
         ""
+    } else if transports == Transports::TLS {
+        "tls "
     } else if transports == Transports::PLAINTEXT {
         "plaintext "
     } else {
@@ -1036,11 +1033,15 @@ mod tests {
             "allow net db.example.com:5432\n\
              allow net plaintext localhost:5432\n\
              allow net tls plaintext cache.example.com\n\
-             deny net tls plaintext evil.com\n\
+             deny net evil.com\n\
              allow net tls plaintext *.corp.example\n\
              deny net plaintext *.corp.example\n\
-             deny net tls plaintext legacy.example\n\
+             deny net tls legacy.example\n\
              allow net plaintext legacy.example\n\
+             allow net plaintext old.example\n\
+             deny net old.example\n\
+             allow net tls plaintext tls-first.example\n\
+             deny net plaintext tls-first.example\n\
              allow http plaintext GET localhost:8080",
         );
         let net = |host: &str, port: u16, tls: bool| decide(&p, Capability::Net { host: host.into(), port, tls });
@@ -1049,12 +1050,21 @@ mod tests {
         assert_eq!(net("localhost", 5432, false), Allow);
         assert_eq!(net("localhost", 5432, true), Prompt);
         assert_eq!((net("cache.example.com", 6379, true), net("cache.example.com", 6379, false)), (Allow, Allow));
-        assert_eq!((net("evil.com", 443, true), net("evil.com", 443, false)), (Deny, Deny));
+        assert_eq!((net("evil.com", 443, true), net("evil.com", 443, false)), (Deny, Deny), "a deny rule matches both by default");
         assert_eq!((net("a.corp.example", 80, true), net("a.corp.example", 80, false)), (Allow, Deny), "a deny for plaintext only");
+        assert_eq!((net("legacy.example", 80, true), net("legacy.example", 80, false)), (Deny, Allow));
         assert_eq!(
-            (net("legacy.example", 80, true), net("legacy.example", 80, false)),
-            (Deny, Allow),
-            "one transport is more specific than both"
+            (net("old.example", 80, true), net("old.example", 80, false)),
+            (Deny, Deny),
+            "a transport does not make a rule more specific"
+        );
+        assert_eq!((net("tls-first.example", 80, true), net("tls-first.example", 80, false)), (Allow, Deny));
+        assert_eq!(
+            parse("deny net a\ndeny net tls a\nprompt http plaintext a\nprompt http tls plaintext a\nallow net tls a\nallow net tls plaintext a")
+                .rules
+                .to_string(),
+            "deny net a\ndeny net tls a\nprompt http plaintext a\nprompt http a\nallow net a\nallow net tls plaintext a\n",
+            "the display names transports where they differ from the default of the decision"
         );
         assert_eq!(http(&p, "GET", "http://localhost:8080/x"), Allow);
         assert_eq!(http(&p, "GET", "https://localhost:8080/x"), Prompt);
@@ -1166,10 +1176,7 @@ mod tests {
         let p = parse("allow http tls plaintext *\ndeny http PLAINTEXT api.example.com\nlet t = plaintext\ndeny net {t} Tls evil.com");
         assert_eq!(http(&p, "GET", "http://api.example.com/"), Deny);
         assert_eq!(decide(&p, Capability::Net { host: "evil.com".into(), port: 80, tls: false }), Deny);
-        assert_eq!(
-            p.rules.to_string(),
-            "allow http tls plaintext *\ndeny http plaintext api.example.com\ndeny net tls plaintext evil.com\n"
-        );
+        assert_eq!(p.rules.to_string(), "allow http tls plaintext *\ndeny http plaintext api.example.com\ndeny net evil.com\n");
         assert_eq!(
             errors("deny http http evil.com\ndeny net TCP evil.com\nallow http GET https a.com\nallow net ssl a.com"),
             [
@@ -1233,7 +1240,7 @@ allow http GET a.com tls"
         assert_eq!(http(&p, "DELETE", "https://api.example.com/admin/x"), Deny);
         assert_eq!(http(&p, "GET", "https://other.com/x"), Allow);
         assert_eq!(decide(&p, Capability::Net { host: "other.com".into(), port: 443, tls: true }), Prompt);
-        let p = parse("allow http tls plaintext *\ndeny net tls plaintext 10.0.0.0/8");
+        let p = parse("allow http tls plaintext *\ndeny net 10.0.0.0/8");
         assert_eq!(http(&p, "GET", "http://10.1.2.3/x"), Deny);
         assert_eq!(http(&p, "GET", "https://[::ffff:10.1.2.3]/x"), Deny);
         assert_eq!(http(&p, "GET", "http://8.8.8.8/x"), Allow);

@@ -63,7 +63,7 @@ A denied write to `stdout` or `stderr` aborts the run immediately, and a denied 
 ```sh
 sand run main.sand --allow='read ./data' --allow='write ./out'
 sand run fetch.sand --allow='net api.example.com' --allow='env HOME LANG'
-sand run server.sand --allow='listen localhost:8080' --deny='net tls plaintext 10.0.0.0/8'
+sand run server.sand --allow='listen localhost:8080' --deny='net 10.0.0.0/8'
 ```
 
 | Flag              | Effect                                                      |
@@ -129,22 +129,23 @@ Without a prompter, a `prompt` rule denies the request.
 
 ### Encrypted and plaintext connections
 
-A `net` or `http` rule matches TLS connections (`https`, `net.connect_tls`) unless it names a transport. Write `plaintext` for unencrypted connections (`http`, `net.connect`), or `tls plaintext` for both:
+An `allow net` or `allow http` rule matches TLS connections (`https`, `net.connect_tls`) unless it names a transport. Write `plaintext` for unencrypted connections (`http`, `net.connect`), or `tls plaintext` for both. A `deny` or `prompt` rule without a transport matches both, so it cannot miss the unencrypted connections:
 
 ```policy
 allow http api.github.com            # https:// only
 allow http plaintext localhost:8080  # http:// only
 allow net tls plaintext db.internal  # both
 deny net plaintext *                 # no unencrypted connections
+deny net 10.0.0.0/8                  # neither
 ```
 
-A rule with one transport is more specific than a rule with both, so `deny net tls plaintext x.example` and `allow net plaintext x.example` allow only plaintext.
+A transport does not make a rule more specific: `allow net plaintext x.example` and `deny net x.example` deny both. To allow only plaintext, write `deny net tls x.example`.
 
 ### Resolved addresses
 
-`localhost` and every name under it (`app.localhost`) are the local machine: Sand connects them to `127.0.0.1` or `::1` without asking DNS. So `deny net localhost` also denies `app.localhost`. Like every rule for a name, it does not match IP addresses: to keep scripts off the local machine, write `deny net tls plaintext localhost 127.0.0.0/8 ::1`.
+`localhost` and every name under it (`app.localhost`) are the local machine: Sand connects them to `127.0.0.1` or `::1` without asking DNS. So `deny net localhost` also denies `app.localhost`. Like every rule for a name, it does not match IP addresses: to keep scripts off the local machine, write `deny net localhost 127.0.0.0/8 ::1`.
 
-Sand checks every IP address that DNS returns against the address rules, so that a public hostname cannot lead a script to an address the policy denies. With `allow net tls plaintext *` and `deny net tls plaintext 10.0.0.0/8`, a name that resolves to `10.0.0.5` cannot connect. A rule that names the exact host, such as `allow net db.internal`, is more specific than the range and lets that name connect. A wildcard such as `*` or `*.example.com` does not.
+Sand checks every IP address that DNS returns against the address rules, so that a public hostname cannot lead a script to an address the policy denies. With `allow net tls plaintext *` and `deny net 10.0.0.0/8`, a name that resolves to `10.0.0.5` cannot connect. A rule that names the exact host, such as `allow net db.internal`, is more specific than the range and lets that name connect. A wildcard such as `*` or `*.example.com` does not.
 
 ## Resource limits
 

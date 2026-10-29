@@ -106,9 +106,11 @@ impl Transports {
         if tls { Transports::TLS } else { Transports::PLAINTEXT }
     }
 
-    /// Whether the rule matches one transport, which makes it more specific.
-    pub(crate) fn single(self) -> bool {
-        self.bits().count_ones() == 1
+    /// The transports of a rule with `decision` that names none: an allow
+    /// rule matches TLS only, a deny or prompt rule matches both, as it
+    /// matches every form of its address.
+    pub(crate) fn default_for(decision: Decision) -> Transports {
+        if decision == Decision::Allow { Transports::TLS } else { Transports::all() }
     }
 }
 
@@ -895,8 +897,7 @@ impl Rank {
     }
 
     pub(crate) fn http(http: &HttpMatch) -> Rank {
-        let tier = http.host.rank() * 2 + http.transports.single() as u32;
-        Rank { tier, weight: http.path.iter().map(Seg::weight).sum(), methods: http.methods.is_some() }
+        Rank { tier: http.host.rank(), weight: http.path.iter().map(Seg::weight).sum(), methods: http.methods.is_some() }
     }
 
     pub(crate) fn spec(self, depth: usize) -> Spec {

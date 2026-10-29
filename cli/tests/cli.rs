@@ -196,7 +196,8 @@ fn bad_flags_and_values_exit_2_with_a_message() {
         ("--no-prompt=yes", "--no-prompt does not take a value"),
         ("--allow-all=1", "--allow-all does not take a value"),
         ("--allow-read=data", "unknown option `--allow-read` (use --allow='read ./PATH')"),
-        ("--allow-net=*", "unknown option `--allow-net` (use --allow='net HOST')"),
+        ("--allow-net=*", "unknown option `--allow-net` (use --allow='net HOST' for TLS, or --allow='net tls plaintext HOST')"),
+        ("--deny-net=*", "unknown option `--deny-net` (use --deny='net HOST')"),
         ("--prompt-stdin", "unknown option `--prompt-stdin` (questions go to the terminal, and --no-prompt denies instead)"),
     ];
     // A relative path starts from the working directory, not from a policy file.
@@ -865,8 +866,8 @@ fn net_rules_take_transports_and_decide_resolved_addresses() {
     // `*` matches TLS connections only: `http://` needs `plaintext`.
     assert!(run(&["--allow=net *"]).stdout.starts_with("Err(Error(message: \"permission denied: GET http://127.1"), "TLS only");
     assert_eq!(run(&["--allow=net plaintext *"]).stdout, "Ok(\"hi\")\n");
-    let denied = run(&["--allow=net plaintext *", "--deny=net tls plaintext 127.0.0.0/8"]).stdout;
-    assert!(denied.contains("address 127.0.0.1 is not allowed by the rule `deny net tls plaintext 127.0.0.0/8`"), "{denied}");
+    let denied = run(&["--allow=net plaintext *", "--deny=net 127.0.0.0/8"]).stdout;
+    assert!(denied.contains("address 127.0.0.1 is not allowed by the rule `deny net 127.0.0.0/8`"), "{denied}");
     let removed = run(&["--allow-private-net"]);
     assert_eq!(removed.code, 2, "{removed:?}");
     assert!(removed.stderr.contains("unknown option `--allow-private-net`"), "{removed:?}");
