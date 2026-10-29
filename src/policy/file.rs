@@ -394,9 +394,17 @@ impl Context<'_> {
             if detail.len() > 1 {
                 return Err((detail[1].column, format!("expected `{verb_text} custom NAME [DETAIL]`")));
             }
-            let any = matches!(name.parts.as_slice(), [Part::Raw(n)] if n == "*");
-            let kind = RuleKind::Custom((!any).then(|| name.text()), detail.first().map(Word::text));
-            rules.push(file_rule(decision, kind, Origin { line, column: name.column, text: name.render() }));
+            let details = match detail.first() {
+                Some(d) => self.expand(d)?.into_iter().map(|w| custom_part(&w).map_err(|m| (d.column, m))).collect::<Result<_, _>>()?,
+                None => vec![None],
+            };
+            for word in self.expand(name)? {
+                let name_pattern = custom_part(&word).map_err(|m| (name.column, m))?;
+                for detail in &details {
+                    let kind = RuleKind::Custom(name_pattern.clone(), detail.clone());
+                    rules.push(file_rule(decision, kind, Origin { line, column: name.column, text: word.render() }));
+                }
+            }
             return Ok(());
         }
         let mut methods: Option<Vec<String>> = None;
@@ -418,14 +426,7 @@ impl Context<'_> {
                 }
             }
             let transports = if transports.is_empty() { Transports::TLS } else { transports };
-            let expanded;
-            let words = if item.parts.iter().any(|p| matches!(p, Part::Ref(_))) {
-                expanded = item.expand(&self.sets, &mut self.used).map_err(|m| (item.column, m))?;
-                &expanded[..]
-            } else {
-                std::slice::from_ref(item)
-            };
-            for word in words {
+            for word in &self.expand(item)? {
                 let origin = Origin { line, column: item.column, text: word.render() };
                 let kind = match kind {
                     "files" | "read" | "write" | "import" => {
@@ -474,6 +475,15 @@ impl Context<'_> {
         Ok(())
     }
 
+    /// The words that `word` stands for: one for each combination of the
+    /// values of its sets.
+    fn expand(&mut self, word: &Word) -> Result<Vec<Word>, (usize, String)> {
+        if !word.parts.iter().any(|p| matches!(p, Part::Ref(_))) {
+            return Ok(vec![word.clone()]);
+        }
+        word.expand(&self.sets, &mut self.used).map_err(|m| (word.column, m))
+    }
+
     fn path(&self, text: &[Tok]) -> Result<PathPattern, String> {
         let flat: String = text.iter().map(|t| t.0).collect();
         let sep = |c: char| c == '/' || (cfg!(windows) && c == '\\');
@@ -519,6 +529,20 @@ impl Context<'_> {
             segs.pop();
         }
         Ok(PathPattern { prefix, rest: segs })
+    }
+}
+
+/// A custom capability's name or detail: `None` for an unquoted `*`, which
+/// matches every name or detail.
+fn custom_part(word: &Word) -> Result<Option<String>, String> {
+    let tokens = word.tokens();
+    match tokens.as_slice() {
+        [('*', true)] => Ok(None),
+        t if t.iter().any(|t| t.1) => Err(format!(
+            "custom names and details are exact or `*`: quote a `*` that is part of the name (`\"{}\"`)",
+            word.text().replace('"', "\\\"")
+        )),
+        t => Ok(Some(t.iter().map(|t| t.0).collect())),
     }
 }
 
@@ -1018,6 +1042,23 @@ mod tests {
         let message = "`**` matches paths: in a name, `*` matches any characters (e.g. `AWS_*`)";
         assert_eq!(errors("deny env AWS_**\nallow env **"), [format!("1:10: {message}"), format!("2:11: {message}")]);
         assert_eq!(decide(&parse("deny env \"AWS_**\""), Capability::Env("AWS_**".into())), Deny);
+    }
+
+    #[test]
+    fn custom_rules_expand_sets_and_take_any_detail() {
+        let p = parse("allow custom *\nlet danger = drop truncate\ndeny custom db {danger}\ndeny custom fs *\nallow custom kv \"*\"");
+        let custom = |name: &str, detail: &str| decide(&p, Capability::Custom { name: name.into(), detail: detail.into() });
+        assert_eq!((custom("db", "drop"), custom("db", "truncate"), custom("db", "select")), (Deny, Deny, Allow));
+        assert_eq!((custom("fs", "delete"), custom("fs", "*")), (Deny, Deny));
+        assert_eq!((custom("kv", "*"), custom("kv", "get")), (Allow, Allow));
+        assert_eq!(p.rules.to_string(), "allow custom *\ndeny custom db drop\ndeny custom db truncate\ndeny custom fs\nallow custom kv \"*\"\n");
+        assert_eq!(
+            errors("deny custom db drop*\ndeny custom a*b"),
+            [
+                "1:16: custom names and details are exact or `*`: quote a `*` that is part of the name (`\"drop*\"`)",
+                "2:13: custom names and details are exact or `*`: quote a `*` that is part of the name (`\"a*b\"`)",
+            ]
+        );
     }
 
     #[test]

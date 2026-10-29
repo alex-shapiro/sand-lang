@@ -2529,8 +2529,10 @@ Specificity depends on the kind of request:
 
 - **Custom capabilities**:
   - a native module may define its own capabilities
-  - a rule names one (`custom db`) or all (`custom *`), with an optional detail;
-    a name is more specific than `*`, and a detail more specific than none
+  - a rule names one (`custom db`) or all (`custom *`), with an optional detail
+    (`custom db drop`; `*` or none: any detail); a name is more specific than
+    `*`, and a detail more specific than none. Names and details are exact:
+    quote a `*` that is part of one (`custom db "a*b"`)
 
 Path rules are compared after normalization (§14.1). A rule's path is
 resolved when the policy decides its first request. Allow rules compare
@@ -2628,7 +2630,7 @@ limit memory 64M                         # the prompter decides the rest
 | `allow env NAME...`, `deny env NAME...`                   | environment variables (`AWS_*`; `*`: all)                                       |
 | `allow stdin`, `deny stdin`, `deny stdout`, ...           | standard streams                                                                |
 | `allow timezone`, `deny timezone`                         | the local time zone                                                             |
-| `allow custom NAME [DETAIL]`, `deny custom NAME [DETAIL]` | a host-defined capability (`*`: any name; any detail if omitted)                |
+| `allow custom NAME [DETAIL]`, `deny custom NAME [DETAIL]` | a host-defined capability (`*`: any name or detail; any detail if omitted)      |
 | `prompt ...`                                              | as `allow ...`, but asks the prompter (§14.5)                                   |
 | `limit NAME VALUE`                                        | a limit (§15.1), below                                                          |
 | `let NAME = VALUE...`                                     | a set: `{NAME}` in any rule's word stands for each value                        |
