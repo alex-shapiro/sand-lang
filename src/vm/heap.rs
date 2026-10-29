@@ -126,6 +126,9 @@ pub struct Heap {
     /// gray objects, measured when the arena grows by 64 slots and by every
     /// collection and step of an incremental collection.
     tables: usize,
+    /// The most slots that the arena has held since it last shrank. Their
+    /// memory stays resident after a major collection gives slots back.
+    arena_top: usize,
     /// Memory of the fibers (value stacks, frames, waiter and race lists),
     /// counted against `limit` with the heap: incremented as they grow and
     /// recomputed by every collection.
@@ -316,8 +319,9 @@ const ELEMS_PER_DIRTY_INDEX: usize = 8;
 
 const NONE: u32 = u32::MAX;
 const MIN_GC: usize = 4 << 20;
-/// The fewest free slots at the end of the arena that a major collection
-/// gives back to the allocator (fewer stay allocated, to save reallocations).
+/// The fewest slots given back by major collections since the arena last
+/// shrank that make it shrink (fewer stay allocated and counted, to save
+/// reallocations).
 const SHRINK_SLOTS: usize = 4096;
 /// Bytes allocated between minor collections, at most.
 const NURSERY: usize = 8 << 20;
@@ -362,6 +366,7 @@ impl Heap {
             major_at: MIN_GC,
             limit,
             tables: 0,
+            arena_top: 0,
             fiber_bytes: 0,
             live_objects: 0,
             young_resources: 0,
@@ -593,10 +598,13 @@ impl Heap {
         self.bytes.saturating_add(self.fiber_bytes).saturating_add(self.spare_bytes).saturating_add(self.overhead())
     }
 
-    /// Memory of the arena's free slots and of the collector's tables.
+    /// Memory of the arena's free and given-back slots and of the
+    /// collector's tables.
     #[inline]
     fn overhead(&self) -> usize {
-        self.objs.len().saturating_sub(self.live_objects) * OBJ_SIZE + self.young.capacity() * std::mem::size_of::<u32>() + self.tables
+        self.arena_top.max(self.objs.len()).saturating_sub(self.live_objects) * OBJ_SIZE
+            + self.young.capacity() * std::mem::size_of::<u32>()
+            + self.tables
     }
 
     /// Updates `tables`.
@@ -1370,7 +1378,11 @@ impl Heap {
             return;
         }
         let words = len.div_ceil(64);
-        let shrink = self.objs.len() - len >= SHRINK_SLOTS;
+        self.arena_top = self.arena_top.max(self.objs.len());
+        let shrink = self.arena_top - len >= SHRINK_SLOTS;
+        if shrink {
+            self.arena_top = len;
+        }
         self.objs.truncate(len);
         for bits in
             [&mut self.marks, &mut self.remembered_bits, &mut self.partial_bits, &mut self.tail_bits, &mut self.cmarks, &mut self.gray_bits]
@@ -1917,6 +1929,22 @@ mod tests {
         heap.collect([keep], false);
         assert_eq!(heap.objs.len(), 2);
         assert_eq!(free_list(&heap), vec![1]);
+    }
+
+    #[test]
+    fn slots_given_back_in_small_runs_count_until_the_arena_shrinks() {
+        let mut heap = Heap::new(None, usize::MAX);
+        let n = 64 * SHRINK_SLOTS;
+        let mut live: Vec<Value> = (0..n).map(|i| heap.new_list(vec![Value::Int(i as i64)])).collect();
+        heap.collect(live.iter().copied(), true);
+        while live.len() > SHRINK_SLOTS {
+            live.truncate(live.len() - (SHRINK_SLOTS - 1));
+            heap.collect(live.iter().copied(), true);
+            // The arena's slots up to the most it held are resident.
+            let resident = heap.objs.capacity().min(n) - heap.live_objects;
+            assert!(heap.overhead() >= resident * OBJ_SIZE, "{} bytes counted, {resident} slots resident", heap.overhead());
+        }
+        assert!(heap.objs.capacity() < 2 * SHRINK_SLOTS, "{} slots kept", heap.objs.capacity());
     }
 
     #[derive(Clone, Debug)]

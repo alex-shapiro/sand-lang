@@ -31,10 +31,19 @@ The host cannot rely on engine limits, stability, or control.
       lists and then allocates 1 KiB strings peaks at 1.2 to 1.3 times
       `max_memory`. If the engine allocates small object contents from its
       own pools of fixed-size blocks, it can count that memory and give it back.
+- [ ] ❓ _Memory._ Bound the collector's gray list during incremental marking. The
+      barrier of `Heap::get_mut` adds each changed object that was marked
+      to `gray` (16 bytes each). Only allocation runs the steps that empty
+      the list and measure it, and only a collection checks the limit, so a
+      loop that changes many old objects and allocates nothing can grow the
+      list by up to 16 bytes per object without a check.
 - [ ] ❓ _Memory._ Grow the heap's object arena in fixed-size segments instead of one `Vec`.
-      A major collection gives back only the free slots after the last live
-      object, so slots freed below a live object count against `max_memory`
-      until new objects use them. Segments would let a collection give back
+      A full collection gives back only the free slots after the last live
+      object, and an incremental one gives back none, so slots freed below a
+      live object count against `max_memory` until new objects use them. The
+      incremental sweep also puts the slots it frees on the free list in
+      descending order, so new objects fill the highest free slots first and
+      keep the end of the arena in use. Segments would let a collection give back
       every empty segment, and growth would not copy the arena on platforms
       whose allocator copies a large block to grow it.
 - [ ] 🔴 [052](triage/052-dead-temporaries-rooted/summary.md) _Performance._ Clear dead temporaries before native calls so that inlined allocations
