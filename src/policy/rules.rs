@@ -237,7 +237,8 @@ fn custom(name: &str, detail: Option<&str>) -> RuleKind {
 }
 
 /// Rule paths are literal prefixes without wildcards; for wildcard patterns,
-/// use [`super::PolicyFile`].
+/// use [`super::PolicyFile`]. The file rule builders (`allow_read` and the
+/// others) panic if the path is empty.
 impl RulePolicy {
     /// Creates a policy without rules, the same as [`RulePolicy::default`]:
     /// the prompter decides every request.
@@ -315,6 +316,7 @@ impl RulePolicy {
     }
 
     fn files_rule(self, decision: Decision, access: Access, p: &Path) -> Self {
+        assert!(!p.as_os_str().is_empty(), "an empty path in a file rule: use `**` in a policy file for every path");
         self.push(decision, RuleKind::Files(access, PathPattern { prefix: p.to_path_buf(), rest: vec![] }))
     }
 

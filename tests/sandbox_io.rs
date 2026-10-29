@@ -1884,3 +1884,11 @@ fn a_policy_file_over_the_standard_rules_keeps_its_prompt_rules() {
     let r = run_with("print(\"printed\")", |c| c.policy(policy));
     assert_eq!(r.stdout, "");
 }
+
+/// An empty path would be the pattern of every path on every root: a host
+/// that passes an unset directory must not allow everything.
+#[test]
+#[should_panic(expected = "an empty path")]
+fn file_builders_reject_an_empty_path() {
+    let _ = RulePolicy::new().allow_read("");
+}
