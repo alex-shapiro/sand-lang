@@ -140,6 +140,24 @@ Follow-up work, roughly in priority order.
       app.localhost`: `NetPattern::covers` does not know that `localhost`
       also matches the names under it), and a `deny env "AWS_*"` whose quoted
       `*` matches no real variable.
+- [ ] The file rule builders keep a relative path as written, so the display
+      of `RulePolicy::new().allow_read("data")` (`allow read data`) does
+      not parse, and `deny_read("~/x")` or `deny_read("./x")` display as text
+      that parses to a home or base relative rule. Relative paths resolve
+      against the process (host) or `/` (`memory_path`), so the builders
+      need one meaning for them (or must reject them) before the display
+      can write them.
+- [ ] The engine remembers "always" answers per exact capability
+      (`Host::always`), so answering "always" to `write /x/o.txt` asks again
+      for `read /x/o.txt`, although a write rule also allows reading.
+      Remember the answer as the rule that `rule_for` gives instead.
+- [ ] If the policy denies some addresses of a name and the connection to
+      the others fails, the error shows only the connection error (`io:
+      Connection refused`), not the denied addresses and their rule
+      (`resolve_allowed` in `src/stdlib/net.rs`).
+- [ ] Lint rules whose words a reader may misread: `deny http LOCALHOST
+      a.com` reads `LOCALHOST` as a method (any upper-case word is one),
+      and `allow http purge a.com` reads `purge` as a host.
 - [ ] Let hosts persist "always" prompt answers: a hook that receives the
       answer as a rule (`rule_for`) to save, so that a host such as Ash
       Control can load it into the policy at the next start instead of
