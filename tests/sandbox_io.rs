@@ -360,9 +360,23 @@ fn default_rules_decide_only_what_no_other_rule_matches() {
     assert_eq!(p.check(&all), Decision::Allow);
     let p = RulePolicy::new().prompt_env("SECRET").with_defaults(RulePolicy::allow_all());
     assert_eq!(p.check(&all), Decision::Prompt);
-    // A rule that allowed a request also outranks default address rules.
-    let p = RulePolicy::new().allow_net("*").with_defaults(RulePolicy::new().deny_net("10.0.0.0/8"));
-    assert_eq!(p.check_resolved(&net("example.com", 443), "10.0.0.5:443".parse().unwrap()), Decision::Allow);
+    // Resolved addresses compare hosts across tiers: a domain pattern does
+    // not vouch for an address that a default rule denies, and an exact name does.
+    let metadata: SocketAddr = "169.254.169.254:80".parse().unwrap();
+    let floor = || RulePolicy::new().deny_net("tls plaintext 169.254.0.0/16");
+    let p = RulePolicy::new().allow_net("tls plaintext *.example.com").with_defaults(floor());
+    assert_eq!(p.check_resolved(&plain("evil.example.com", 80), metadata), Decision::Deny);
+    let p = RulePolicy::new().allow_net("tls plaintext *").with_defaults(floor());
+    assert_eq!(p.check_resolved(&plain("evil.example", 80), metadata), Decision::Deny);
+    let p = RulePolicy::new().allow_net("tls plaintext meta.internal").with_defaults(floor());
+    assert_eq!(p.check_resolved(&plain("meta.internal", 80), metadata), Decision::Allow);
+    // The defaults of the defaults stay below them.
+    let host = RulePolicy::new().prompt_write("/").with_defaults(RulePolicy::allow_all());
+    let write = Capability::FsWrite("/tmp/x".into());
+    assert_eq!(host.check_normalized(&write), Decision::Prompt);
+    assert_eq!(RulePolicy::standard().with_defaults(host.clone()).check_normalized(&write), Decision::Prompt);
+    assert_eq!(RulePolicy::new().extend(host.clone()).check_normalized(&write), Decision::Prompt);
+    assert_eq!(host.to_string(), RulePolicy::new().prompt_write("/").extend(RulePolicy::allow_all()).to_string());
 }
 
 #[test]

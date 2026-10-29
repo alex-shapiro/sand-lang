@@ -176,11 +176,16 @@ pub(crate) struct Rule {
     pub kind: RuleKind,
     /// Where a policy file gives the rule.
     pub origin: Option<Origin>,
+    /// `0` for a rule, `n + 1` for a default rule of a policy whose rules
+    /// have at most tier `n` ([`RulePolicy::with_defaults`]). A rule of a
+    /// higher tier decides only the requests that no rule of a lower tier
+    /// matches.
+    pub tier: u32,
 }
 
 impl Rule {
     pub(crate) fn new(decision: Decision, kind: RuleKind) -> Rule {
-        Rule { decision, kind, origin: None }
+        Rule { decision, kind, origin: None, tier: 0 }
     }
 
     /// Whether the rule compares names exactly. Allow rules do; deny and
@@ -209,10 +214,7 @@ pub(crate) struct Origin {
 /// rules last.
 #[derive(Clone, Default)]
 pub struct RulePolicy {
-    /// The rules, then the default rules.
     rules: Vec<Rule>,
-    /// The number of rules before the default rules.
-    user: usize,
     host_files: OnceLock<Arc<FileIndex>>,
     memory_files: OnceLock<Arc<FileIndex>>,
     others: OnceLock<Arc<Index>>,
@@ -267,22 +269,22 @@ impl RulePolicy {
         rules.into_iter().fold(RulePolicy::new(), |p, kind| p.push(Decision::Allow, kind))
     }
 
-    /// Adds the rules of `other` after the rules of this policy, and its
-    /// default rules after the default rules of this policy.
-    pub fn extend(self, mut other: RulePolicy) -> RulePolicy {
-        let defaults = other.rules.split_off(other.user);
-        let mut policy = self.extend_rules(other.rules);
-        policy.rules.extend(defaults);
-        policy.changed()
+    /// Adds the rules of `other` after the rules of this policy. Default
+    /// rules stay default rules.
+    pub fn extend(mut self, other: RulePolicy) -> RulePolicy {
+        self.rules.extend(other.rules);
+        self.changed()
     }
 
     /// Adds every rule of `defaults` as a default rule, which decides only
     /// the requests that no rule of this policy matches. A host uses it to
     /// combine the user's rules with its own: with the defaults `allow
     /// stdin` and `allow **`, the user's `prompt stdin` asks before reading
-    /// standard input, and `prompt write **` asks before every write.
+    /// standard input, and `prompt write **` asks before every write. The
+    /// default rules of `defaults` stay below its other rules.
     pub fn with_defaults(mut self, defaults: RulePolicy) -> RulePolicy {
-        self.rules.extend(defaults.rules);
+        let below = self.rules.iter().map(|r| r.tier).max().unwrap_or(0) + 1;
+        self.rules.extend(defaults.rules.into_iter().map(|r| Rule { tier: r.tier + below, ..r }));
         self.changed()
     }
 
@@ -291,8 +293,7 @@ impl RulePolicy {
     }
 
     pub(crate) fn push_rule(mut self, rule: Rule) -> Self {
-        self.rules.insert(self.user, rule);
-        self.user += 1;
+        self.rules.push(rule);
         self.changed()
     }
 
@@ -432,12 +433,14 @@ impl RulePolicy {
         self.push(Decision::Allow, RuleKind::Env(NamePattern::parse(name)))
     }
     /// Denies reading matching environment variables. Listing all variables is
-    /// denied if any variable is denied.
+    /// denied if any variable is denied (by a rule of the tier that decides
+    /// the listing; see [`RulePolicy::with_defaults`]).
     pub fn deny_env(self, name: &str) -> Self {
         self.push(Decision::Deny, RuleKind::Env(NamePattern::parse(name)))
     }
     /// Asks before reading matching environment variables. Listing all
-    /// variables asks if any variable asks (and none is denied).
+    /// variables asks if any variable asks (and none is denied), as for
+    /// [`RulePolicy::deny_env`].
     pub fn prompt_env(self, name: &str) -> Self {
         self.push(Decision::Prompt, RuleKind::Env(NamePattern::parse(name)))
     }
@@ -602,7 +605,9 @@ impl RulePolicy {
         });
         let Some((decision, rule)) = best.verdict() else { return Ok(()) };
         if let Some((d, decider)) = self.verdict(request, PathSpace::Host, &[]).filter(|&(d, _)| d != Decision::Deny) {
-            let key = |i: usize, d: Decision| (i < self.user, resolution_key(&self.rules[i].kind, d));
+            // By host specificity alone, whatever the tiers: a domain pattern
+            // does not vouch for addresses that a default rule denies.
+            let key = |i: usize, d: Decision| resolution_key(&self.rules[i].kind, d);
             if key(decider, d) > key(rule, decision) {
                 return Ok(());
             }
@@ -678,8 +683,11 @@ impl RulePolicy {
                 // All variables cannot be had while some are denied, or
                 // without asking while some ask. The default rules decide
                 // only if no other rule is about the listing.
-                for defaults in [false, true] {
-                    let in_tier = |rule: u32| (rule as usize >= self.user) == defaults && !exclude.contains(&(rule as usize));
+                let mut tiers: Vec<u32> = self.rules.iter().map(|r| r.tier).collect();
+                tiers.sort_unstable();
+                tiers.dedup();
+                for tier in tiers {
+                    let in_tier = |rule: u32| self.rules[rule as usize].tier == tier && !exclude.contains(&(rule as usize));
                     let named = index.env_names.values().flatten().copied();
                     let guards = named.chain(index.env.iter().map(|&(_, d, rule)| (d, rule)));
                     let guard = guards
@@ -805,10 +813,14 @@ impl RulePolicy {
     }
 }
 
-/// Lists the rules as policy file text.
+/// Lists the rules as policy file text, by tier: the default rules after
+/// the others. The text has no tiers, so it parses to the same rules in one
+/// tier.
 impl fmt::Display for RulePolicy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for rule in &self.rules {
+        let mut rules: Vec<&Rule> = self.rules.iter().collect();
+        rules.sort_by_key(|r| r.tier);
+        for rule in rules {
             writeln!(f, "{rule}")?;
         }
         Ok(())
@@ -910,22 +922,21 @@ pub(crate) fn precedence(spec: Spec, decision: Decision, rule: usize) -> Precede
     (spec, strength(decision), std::cmp::Reverse(rule))
 }
 
-/// The most specific matching rule: a rule before the default rules
-/// (`rule < user`) wins over every default rule.
+/// The most specific matching rule of the lowest tier.
 struct Best<'a> {
     exclude: &'a [usize],
-    user: usize,
-    best: Option<((bool, Precedence), Decision)>,
+    rules: &'a [Rule],
+    best: Option<((std::cmp::Reverse<u32>, Precedence), Decision)>,
 }
 
 impl<'a> Best<'a> {
-    fn new(policy: &RulePolicy, exclude: &'a [usize]) -> Best<'a> {
-        Best { exclude, user: policy.user, best: None }
+    fn new(policy: &'a RulePolicy, exclude: &'a [usize]) -> Best<'a> {
+        Best { exclude, rules: &policy.rules, best: None }
     }
 
     fn offer(&mut self, spec: Spec, decision: Decision, rule: u32) {
         let rule = rule as usize;
-        let candidate = (rule < self.user, precedence(spec, decision, rule));
+        let candidate = (std::cmp::Reverse(self.rules[rule].tier), precedence(spec, decision, rule));
         if !self.exclude.contains(&rule) && self.best.is_none_or(|(b, _)| candidate > b) {
             self.best = Some((candidate, decision));
         }

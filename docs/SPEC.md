@@ -2470,6 +2470,13 @@ matches gets `Prompt` (§14.3): the prompter decides it, or the engine denies
 it. The `Display` of a `RulePolicy` lists its rules as policy file text
 (§14.7), and `RulePolicy::extend` adds the rules of another policy.
 
+`rules.with_defaults(defaults)` adds the rules of `defaults` as default rules,
+which decide only the requests that no other rule matches. A host combines
+the user's rules with its own this way, as the CLI does (§17.5). The default
+rules of `defaults` stay below its other rules. Resolved addresses (§14.6) are
+the exception: there, rules compete by host specificity alone, so a user's
+domain pattern does not vouch for an address that a default rule denies.
+
 Specificity depends on the kind of request:
 
 - **Files** (`FsRead`, `FsWrite`, `Import`)
@@ -2647,7 +2654,8 @@ All paths must be anchored, but they may be prefixed with a shortcut:
 
 Transports (`tls`, `plaintext`, or both, in any case) precede the hosts of
 `net` and `http` rules; without one, a rule matches TLS only. In their place,
-the scheme and protocol names `http`, `https`, `tcp` and `ssl` are errors. A
+the scheme and protocol names `http`, `https`, `ws`, `wss`, `tcp`, `udp` and
+`ssl` are errors. A
 quoted word is never a transport or a method, and a trailing dot names a host
 with such a name (`tls.`, `delete.`).
 
@@ -2662,7 +2670,7 @@ HTTP Methods (`GET`, any case, or any upper-case word) precede URLs, before or
 after the transports. If no method is present, an http rule matches every method.
 
 A word with multiple set references allows every combination of set values
-(`{owners}/{repos}`), limited to 100,000 combinations per rule. A set may be defined
+(`{owners}/{repos}`), limited to 100,000 patterns per word (and per custom rule). A set may be defined
 anywhere in the file. A set may not contain another set.
 
 A request that no rule matches gets `Prompt`: the host's prompter decides

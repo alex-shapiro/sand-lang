@@ -3,10 +3,10 @@
 use super::PolicyError;
 use super::file::{Line, is_method, lex, transport};
 
-/// Formats a policy file: words separated by single spaces and quoted only
-/// where needed, transports in lower case, HTTP methods in upper case,
-/// trailing comments of
-/// consecutive lines aligned, and no runs of blank lines. Fails only on
+/// Formats a policy file: words separated by single spaces, quotes added
+/// where needed and kept where written, transports in lower case, HTTP
+/// methods in upper case, trailing comments of consecutive lines aligned,
+/// and no runs of blank lines. Fails only on
 /// text that does not split into words (an unterminated quote).
 pub fn format_policy(text: &str) -> Result<String, Vec<PolicyError>> {
     let (lines, errors) = lex(text);
