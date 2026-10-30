@@ -21,7 +21,7 @@ use crate::vm::compare::{hash_key, str_hash};
 use crate::vm::heap::{Heap, Staging};
 use crate::vm::meter::{BYTES_PER_UNIT, Meter, SLOW_BYTES_PER_UNIT, Scratch};
 use crate::vm::value::{
-    FieldDefault, FieldDesc, FxHashMap, KeyTable, MAP_ENTRY_SIZE, MapObj, Obj, TypeDesc, Value, ValueRef, VariantDesc, slot_fits,
+    FieldDefault, FieldDesc, FxHashMap, KeyIndex, KeyTable, MAP_ENTRY_SIZE, MapObj, Obj, TypeDesc, Value, ValueRef, VariantDesc, slot_fits,
 };
 use crate::vm::{Ctl, NResult, Vm, fail, internal, without_trait};
 use hashbrown::HashTable;
@@ -383,11 +383,22 @@ impl<'a, 's, 'h> Build<'a, 's, 'h> {
         Ok(())
     }
 
-    /// Stages a map assembled with [`Build::put`].
+    /// Adds the entry `key: value` to `m`, whose keys all differ from `key`.
+    /// A map takes entries through either `append` or [`Build::put`], not both.
+    fn append(&mut self, m: &MapBuild, hash: u64, key: Value, value: Value) -> Result<(), Ctl> {
+        if !slot_fits(self.entries.len() - m.base) {
+            return fail("limit", "map too large");
+        }
+        self.pending += ENTRY_PENDING;
+        self.entries.push(Entry { hash, text: None, key, value });
+        Ok(())
+    }
+
+    /// Stages a map assembled with [`Build::put`] or [`Build::append`].
     fn map(&mut self, m: MapBuild) -> Value {
         let n = self.entries.len() - m.base;
-        let mut map = MapObj { entries: Vec::with_capacity(n), live: n, ..MapObj::default() };
-        map.index.reserve(n);
+        let index = KeyIndex::for_keys(n, self.entries[m.base..].iter().map(|e| e.key));
+        let mut map = MapObj { entries: Vec::with_capacity(n), live: n, index, ..MapObj::default() };
         for (slot, e) in self.entries.drain(m.base..).enumerate() {
             map.index.insert(e.key, e.hash, slot);
             map.entries.push(Some((e.key, e.value)));
@@ -487,8 +498,9 @@ trait Walk {
     type Frame;
     type Out;
 
-    /// Converts a leaf, or opens a container.
-    fn open(&mut self, node: Self::Node) -> Result<Step<Self::Frame, Self::Out>, Ctl>;
+    /// Converts a leaf, or pushes the frame of a container onto `open` and
+    /// returns `None`.
+    fn open(&mut self, node: Self::Node, open: &mut Vec<Self::Frame>) -> Result<Option<Self::Out>, Ctl>;
     /// The next child of `f`, or `None` after the last child.
     fn next(&mut self, f: &mut Self::Frame) -> Result<Option<Self::Node>, Ctl>;
     /// Adds the converted child that [`Walk::next`] returned last to `f`.
@@ -496,37 +508,30 @@ trait Walk {
     fn close(&mut self, f: Self::Frame) -> Self::Out;
 }
 
-enum Step<F, O> {
-    Open(F),
-    Leaf(O),
-}
-
 /// Converts `root`, failing if it has more than [`MAX_DEPTH`] nested containers.
 fn walk<W: Walk>(w: &mut W, root: W::Node) -> Result<W::Out, Ctl> {
-    let mut top = match w.open(root)? {
-        Step::Open(f) => f,
-        Step::Leaf(out) => return Ok(out),
-    };
-    let mut parents = Vec::new();
-    loop {
-        match w.next(&mut top)? {
-            Some(child) => match w.open(child)? {
-                Step::Leaf(out) => w.put(&mut top, out)?,
-                Step::Open(_) if parents.len() + 1 >= MAX_DEPTH => return fail("limit", "value too deeply nested to convert"),
-                Step::Open(f) => parents.push(std::mem::replace(&mut top, f)),
+    let mut open = Vec::new();
+    if let Some(out) = w.open(root, &mut open)? {
+        return Ok(out);
+    }
+    while let Some(top) = open.last_mut() {
+        let out = match w.next(top)? {
+            Some(child) => match w.open(child, &mut open)? {
+                Some(out) => out,
+                None if open.len() > MAX_DEPTH => return fail("limit", "value too deeply nested to convert"),
+                None => continue,
             },
-            None => {
-                let out = w.close(top);
-                match parents.pop() {
-                    Some(parent) => {
-                        top = parent;
-                        w.put(&mut top, out)?;
-                    }
-                    None => return Ok(out),
-                }
-            }
+            None => match open.pop() {
+                Some(f) => w.close(f),
+                None => break,
+            },
+        };
+        match open.last_mut() {
+            Some(top) => w.put(top, out)?,
+            None => return Ok(out),
         }
     }
+    internal("json: a walk without a result")
 }
 
 /// Reads `json.Json` values on the heap into Rust [`Json`] values.
@@ -563,15 +568,15 @@ impl<'h> Walk for Reader<'h, '_> {
     type Frame = ReadFrame<'h>;
     type Out = Json;
 
-    fn open(&mut self, v: Value) -> Result<Step<ReadFrame<'h>, Json>, Ctl> {
+    fn open(&mut self, v: Value, open: &mut Vec<ReadFrame<'h>>) -> Result<Option<Json>, Ctl> {
         let (vm, ids) = (self.vm, self.ids);
         vm.charge(1)?;
         let id = vm.heap.variant_id(v);
         if id == ids.null {
-            return Ok(Step::Leaf(Json::Null));
+            return Ok(Some(Json::Null));
         }
         let payload = vm.heap.field(v, 0).ok_or_else(mismatch::<Json>)?;
-        Ok(Step::Leaf(match (id, payload) {
+        Ok(Some(match (id, payload) {
             (_, Value::Bool(b)) if id == ids.bool_ => Json::Bool(b),
             (_, Value::Int(i)) if id == ids.int => Json::Int(i),
             (_, Value::Float(f)) if id == ids.float => Json::Float(f),
@@ -580,14 +585,16 @@ impl<'h> Walk for Reader<'h, '_> {
                 let Obj::List(items) = vm.heap.get(payload) else { return Err(mismatch::<Json>()) };
                 self.conv.alloc(vm, items.len().saturating_mul(std::mem::size_of::<Json>()))?;
                 vm.charge(items.len() as u64)?;
-                return Ok(Step::Open(ReadFrame::Arr(Vec::with_capacity(items.len()), items.iter())));
+                open.push(ReadFrame::Arr(Vec::with_capacity(items.len()), items.iter()));
+                return Ok(None);
             }
             _ if id == ids.obj => {
                 let Obj::Map(m) = vm.heap.get(payload) else { return Err(mismatch::<Json>()) };
                 self.conv.alloc(vm, m.live.saturating_mul(OBJ_ENTRY))?;
                 vm.charge(m.live as u64)?;
                 let fields = indexmap::IndexMap::with_capacity(m.live);
-                return Ok(Step::Open(ReadFrame::Obj(fields, m.entries.iter(), String::new())));
+                open.push(ReadFrame::Obj(fields, m.entries.iter(), String::new()));
+                return Ok(None);
             }
             _ => return Err(mismatch::<Json>()),
         }))
@@ -642,11 +649,11 @@ impl Walk for Writer<'_, '_, '_> {
     type Frame = WriteFrame;
     type Out = Value;
 
-    fn open(&mut self, j: Json) -> Result<Step<WriteFrame, Value>, Ctl> {
+    fn open(&mut self, j: Json, open: &mut Vec<WriteFrame>) -> Result<Option<Value>, Ctl> {
         let (b, ids) = (&mut self.b, self.ids);
         b.reserve()?;
         b.meter.charge(1)?;
-        Ok(Step::Leaf(match j {
+        Ok(Some(match j {
             Json::Null => Value::Tag(ids.null),
             Json::Bool(x) => b.st.new_variant(ids.bool_, &[Value::Bool(x)]),
             Json::Int(i) => b.st.new_variant(ids.int, &[Value::Int(i)]),
@@ -657,8 +664,14 @@ impl Walk for Writer<'_, '_, '_> {
                 let s = b.st.new_str(s);
                 b.st.new_variant(ids.str_, &[s])
             }
-            Json::Arr(items) => return Ok(Step::Open(WriteFrame::Arr(items.into_iter(), Vec::new()))),
-            Json::Obj(fields) => return Ok(Step::Open(WriteFrame::Obj(fields.into_iter(), b.start_map(), String::new(), 0))),
+            Json::Arr(items) => {
+                open.push(WriteFrame::Arr(items.into_iter(), Vec::new()));
+                return Ok(None);
+            }
+            Json::Obj(fields) => {
+                open.push(WriteFrame::Obj(fields.into_iter(), b.start_map(), String::new(), 0));
+                return Ok(None);
+            }
         }))
     }
 
@@ -680,9 +693,8 @@ impl Walk for Writer<'_, '_, '_> {
         match f {
             WriteFrame::Arr(_, out) => self.b.push(out, child),
             WriteFrame::Obj(_, m, key, hash) => {
-                let text = Cow::Owned(std::mem::take(key));
-                let k = self.b.key(&text, *hash);
-                self.b.put(m, *hash, Some(text), k, child)
+                let k = self.b.key(&Cow::Owned(std::mem::take(key)), *hash);
+                self.b.append(m, *hash, k, child)
             }
         }
     }

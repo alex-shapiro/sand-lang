@@ -48,12 +48,15 @@ The host cannot rely on engine limits, stability, or control.
       nesting level, and the 256-level limit does not bound its stack use: in
       an unoptimized build, derived `Json` conversion overflowed a 512 KiB
       thread stack at 100 levels, which aborts the host process.
-- [ ] ❓ _Embedding._ Run `json.parse`, `json.encode`, `json.decode`, and `json.to_json`
-      with the explicit-stack `walk` in `src/stdlib/json.rs`. They recurse once
-      per nesting level, so in an unoptimized build `parse` overflows a 512 KiB
-      thread stack at 173 levels and `encode` at 88 levels, below the 512-level
-      limit. `to_json` also does not check the depth of the `Json` values that
-      it embeds, so it can return a value that `encode` rejects.
+- [ ] ❓ _Embedding._ Make `json.parse`, `json.encode`, `json.decode`, and `json.to_json`
+      use constant stack without loss of speed. They recurse once per nesting
+      level. At 512 levels, an unoptimized build needs 2 MiB of stack for
+      `parse` and `decode` and more than 2 MiB for `encode`, so a script can
+      abort a debug host that runs it on a default 2 MiB thread. A release
+      build needs 256 KiB. Rewrites on the explicit-stack `walk` in
+      `src/stdlib/json.rs` were 10–35% slower in release builds: one loop for
+      all container kinds keeps its state in memory and dispatches on each
+      child, where recursion has a loop for each kind.
 - [ ] 🔴 [019](triage/019-value-type-defaults/summary.md) _Embedding._ Represent `ValueType` constants in `ConstVal` by their text form so that
       `#[sand(default)]` supports value-type fields and `json.decode` evaluates
       constant value-type defaults directly.

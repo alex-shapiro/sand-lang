@@ -451,6 +451,16 @@ fn dense_fits(k: i64, count: usize) -> bool {
 }
 
 impl KeyIndex {
+    /// An empty index with room for the `n` keys `keys`.
+    pub fn for_keys(n: usize, mut keys: impl Iterator<Item = Value>) -> KeyIndex {
+        if keys.all(|k| matches!(k, Value::Int(i) if dense_fits(i, n))) {
+            return KeyIndex::default();
+        }
+        let mut t = KeyTable::default();
+        t.reserve(n);
+        KeyIndex::Hashed(t)
+    }
+
     /// The slot of int key `k` (`eq(slot)` tells whether it holds `k`).
     #[inline]
     pub fn find_int(&self, k: i64, eq: impl FnMut(usize) -> bool) -> Option<usize> {
@@ -1656,6 +1666,19 @@ impl Obj {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indexes_for_known_keys_hold_them_all_without_growing() {
+        let strs = (0..100).map(|i| Value::Obj(i));
+        let KeyIndex::Hashed(t) = KeyIndex::for_keys(100, strs) else { panic!("string keys need a hashed index") };
+        assert!(t.capacity() >= 100, "{}", t.capacity());
+        let KeyIndex::Hashed(t) = KeyIndex::for_keys(3, [0, 1, 1 << 40].map(Value::Int).into_iter()) else {
+            panic!("sparse int keys need a hashed index")
+        };
+        assert!(t.capacity() >= 3, "{}", t.capacity());
+        assert!(matches!(KeyIndex::for_keys(3, [2, 0, 1].map(Value::Int).into_iter()), KeyIndex::Dense { .. }));
+        assert!(matches!(KeyIndex::for_keys(0, std::iter::empty()), KeyIndex::Dense { .. }));
+    }
 
     #[test]
     fn deep_descriptions_drop_on_a_small_stack() {
