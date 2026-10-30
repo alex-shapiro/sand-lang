@@ -2140,7 +2140,10 @@ expected str`, with type names truncated at 256 bytes with `…`).
 
 `parse`, `decode`, `encode`, and `to_json` accept at most 512 nested arrays and
 objects. Deeper input makes `parse` and `decode` fail with kind `"parse"`, and
-a deeper value makes `encode` and `to_json` abort with kind `"limit"`.
+a deeper value makes `encode` and `to_json` abort with kind `"limit"`. `to_json`
+embeds `Json` values unchanged and does not count their levels, so its result
+can be deeper than 512 levels; `encode` and conversion to Rust reject such a
+value.
 
 ### 13.8 `log`
 
