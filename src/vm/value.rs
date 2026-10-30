@@ -451,7 +451,8 @@ fn dense_fits(k: i64, count: usize) -> bool {
 }
 
 impl KeyIndex {
-    /// An empty index with room for the `n` keys `keys`.
+    /// An empty index for the `n` keys `keys`: dense if they are small ints,
+    /// otherwise hashed with room for all `n`.
     pub fn for_keys(n: usize, mut keys: impl Iterator<Item = Value>) -> KeyIndex {
         if keys.all(|k| matches!(k, Value::Int(i) if dense_fits(i, n))) {
             return KeyIndex::default();

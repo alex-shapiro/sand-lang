@@ -1993,6 +1993,7 @@ impl<'a> Converter<'a, '_, '_> {
         self.check_depth(depth)?;
         let payload = match &rt.field_names {
             Some(names) => {
+                self.check_depth(depth + 1)?;
                 let mut out = self.b.start_map();
                 for (name, &x) in names.iter().zip(fields) {
                     let x = self.convert(x, depth + 2)?;

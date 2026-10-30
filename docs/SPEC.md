@@ -2138,9 +2138,9 @@ and fields in declaration order. Any other missing field or type mismatch fails
 with kind `"parse"` and the JSON path of the error (such as `$.items[2].name:
 expected str`, with type names truncated at 256 bytes with `…`).
 
-`parse`, `decode`, and `encode` accept at most 512 nested arrays and objects.
-Deeper input makes `parse` and `decode` fail with kind `"parse"`, and a deeper
-value makes `encode` abort with kind `"limit"`.
+`parse`, `decode`, `encode`, and `to_json` accept at most 512 nested arrays and
+objects. Deeper input makes `parse` and `decode` fail with kind `"parse"`, and
+a deeper value makes `encode` and `to_json` abort with kind `"limit"`.
 
 ### 13.8 `log`
 
