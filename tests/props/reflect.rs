@@ -407,7 +407,6 @@ proptest! {
     }
 }
 
-/// A field of a struct for `json_decode_runs_the_computed_defaults_of_missing_fields_in_order`.
 #[derive(Clone, Copy, Debug)]
 enum Field {
     Computed,
@@ -423,13 +422,8 @@ fn fields() -> impl Strategy<Value = Vec<Field>> {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
 
-    /// Decodes a list of records, each a struct with the generated fields and
-    /// a nested struct with three computed defaults, and checks the values
-    /// and the order of the calls of the defaults against a model: after
-    /// decoding, each struct in post-order runs the defaults of its missing
-    /// fields in declaration order.
     #[test]
-    fn json_decode_runs_the_computed_defaults_of_missing_fields_in_order(
+    fn json_decode_evaluates_missing_computed_defaults_in_order(
         fields in fields(),
         present in prop::collection::vec((prop::collection::vec(any::<bool>(), 100), any::<u8>()), 1..4),
     ) {

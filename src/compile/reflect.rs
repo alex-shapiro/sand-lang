@@ -41,7 +41,7 @@ pub(crate) struct DescCache {
     consts: PMap<Key, u32>,
     /// Template indices for parameterized reflected types.
     templates: PMap<Key, u32>,
-    /// The fills of the computed field defaults of structs.
+    /// Helper function prototypes and mask bits for computed struct field defaults.
     struct_fills: PMap<TypeDefId, StructFills>,
     /// Helper function prototype that populates a set from a list.
     set_fill: Option<u32>,
@@ -49,8 +49,7 @@ pub(crate) struct DescCache {
     total: usize,
 }
 
-/// For each field of a struct with a computed default: the prototype that
-/// fills the field and the field's bit in the prototype's mask.
+/// Per-field `(fill_proto, mask_bit)` pairs for computed defaults of a struct.
 type StructFills = Arc<[Option<(u32, u8)>]>;
 
 /// Emits constants, templates, and helper functions referenced by type descriptors.
@@ -59,11 +58,10 @@ pub(crate) trait DescSink {
     fn constant(&mut self, desc: Arc<TypeDesc>) -> u32;
     /// Adds `t` to the program templates and returns its template index.
     fn template(&mut self, t: DescTemplate) -> u32;
-    /// Emits helper functions that evaluate the computed defaults of struct
-    /// `def`, given as `(field index, helper)`. Each helper function captures
-    /// the struct and a mask of the fields to fill, and fills them in order.
-    /// Returns, for each of `fields`, its helper function and its bit in the
-    /// mask, or `None` if it has none.
+    /// Emits helper functions that evaluate the computed field defaults
+    /// `(field_index, helper_fn)` of struct `def` for each set bit in a
+    /// captured bitmask. Returns the `(fill_proto, mask_bit)` pair for each
+    /// entry in `fields`.
     fn struct_fill(&mut self, def: TypeDefId, fields: &[(u32, FnId)]) -> Vec<Option<(u32, u8)>>;
     /// Emits a helper function that inserts elements from a captured list into a captured set.
     fn set_fill(&mut self) -> u32;
@@ -274,7 +272,6 @@ impl Builder<'_, '_> {
         }
     }
 
-    /// The fill of each computed default of struct `d`, by field index.
     fn struct_fills(&mut self, d: TypeDefId, fields: &[FieldDef]) -> StructFills {
         if let Some(f) = self.cache.struct_fills.get(&d) {
             return f.clone();

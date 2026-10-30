@@ -1052,7 +1052,6 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
             return Err(e);
         }
         let mut values = Vec::with_capacity(fields.len());
-        // The fills to run, with the masks of their fields to fill.
         let mut computed: Vec<(u32, i64)> = Vec::new();
         for (i, (field, ty, default)) in fields.iter().enumerate() {
             values.push(match (self.slots[base + i], default, &**ty) {

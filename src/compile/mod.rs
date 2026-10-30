@@ -4299,8 +4299,8 @@ fn walk_pruned<'e>(e: &'e HExpr, f: &mut impl FnMut(&'e HExpr) -> bool) {
     }
 }
 
-/// The most computed field defaults that one fill function evaluates: one
-/// per bit of its mask that fits the `i32` of `Op::LoadInt`.
+/// Maximum number of computed field defaults per fill function, limited by
+/// the 31 non-negative bit positions of an `i32` `Op::LoadInt` mask.
 const FILL_BITS: usize = 31;
 
 /// Emits constants and helper functions for runtime type descriptors.
@@ -4347,8 +4347,7 @@ impl reflect::DescSink for DescCode<'_> {
         let mut out = vec![None; fields.len()];
         let present: Vec<usize> = (0..fields.len()).filter(|&i| fills[i].is_some()).collect();
         for group in present.chunks(FILL_BITS) {
-            // r0 holds the struct and r1 the mask; r2 tests a bit; r3 holds
-            // the evaluated default value.
+            // r0 holds the struct; r1 holds the field bitmask; r2 holds the masked bit; r3 holds the default value.
             let mut code = Vec::with_capacity(5 * group.len() + 1);
             for (bit, &i) in group.iter().enumerate() {
                 let (idx, proto) = fills[i].unwrap();

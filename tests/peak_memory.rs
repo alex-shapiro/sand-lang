@@ -1,13 +1,11 @@
-//! Checks that the peak memory of a process running a script stays within a
-//! small factor of the script's `max_memory`, for several ways of growing
-//! data.
+//! Verifies that peak process memory stays within [`FACTOR`] of `max_memory`
+//! across workloads that grow heap data until hitting the memory limit.
 //!
-//! Peak memory is measured per process, so the test runs its own binary once
-//! per program, selecting the program with an environment variable. On Apple
-//! platforms, the test reads the peak physical footprint, which the system
-//! uses to limit the memory of a process: the peak resident set size also
-//! counts freed pages, which the kernel takes back only when it needs memory.
-//! On other platforms, the test reads the peak resident set size.
+//! Each workload runs in a child process so that the operating system records
+//! an independent peak memory measurement. On Apple platforms, the test
+//! measures peak physical footprint via `/usr/bin/time -l` because `ru_maxrss`
+//! includes freed pages that the kernel has not reclaimed. On other Unix
+//! platforms, the test reads `ru_maxrss`.
 #![cfg(unix)]
 
 mod common;
@@ -17,9 +15,7 @@ use std::process::Command;
 
 const LIMIT: usize = 128 << 20;
 
-/// The largest allowed ratio of peak memory, minus the peak memory of an
-/// empty program, to the limit. It is above 1 because the limit counts what
-/// the engine holds, not the memory that the allocator keeps in addition.
+/// Maximum allowed ratio of net peak process memory to [`LIMIT`].
 const FACTOR: f64 = 1.25;
 
 const PROGRAMS: &[(&str, &str)] = &[
@@ -63,8 +59,6 @@ const PROGRAMS: &[(&str, &str)] = &[
 const CASE: &str = "SAND_PEAK_MEMORY_CASE";
 const TEST: &str = "peak_memory_stays_near_the_memory_limit";
 
-/// Runs the program `name` in this process and prints the peak resident set
-/// size.
 fn run_case(name: &str) {
     let (_, src) = PROGRAMS.iter().find(|(n, _)| *n == name).unwrap();
     let limits = Limits { max_memory: Some(LIMIT), ..Default::default() };
@@ -79,7 +73,6 @@ fn run_case(name: &str) {
     println!("peak rss: {}", if cfg!(target_vendor = "apple") { max_rss } else { max_rss << 10 });
 }
 
-/// The peak memory, in bytes, of a process that runs the program `name`.
 fn peak_memory_of(name: &str) -> usize {
     let exe = std::env::current_exe().unwrap();
     let args = [TEST, "--exact", "--nocapture", "--test-threads=1"];

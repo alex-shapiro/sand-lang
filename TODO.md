@@ -25,28 +25,22 @@ Untrusted code violates a valid policy.
 
 The host cannot rely on engine limits, stability, or control.
 
-- [ ] ❓ _Memory._ Bound the peak memory of the process by `max_memory` independently of
-      the system allocator. The limit counts what the engine holds, but the
-      allocator keeps freed memory: on macOS, a script that frees 1M small
-      lists and then allocates 1 KiB strings peaks at 1.2 to 1.3 times
-      `max_memory`. If the engine allocates small object contents from its
-      own pools of fixed-size blocks, it can count that memory and give it back.
-- [ ] ❓ _Memory._ Check the limit when the write barrier grows its lists. The barrier
-      adds each changed old object to `remembered` (4 bytes) and, during
-      incremental marking, each changed marked object to `gray` (16 bytes).
-      Only allocation leads to the collections and steps that empty and
-      measure these lists, so a loop that changes many old objects and
-      allocates nothing can grow them by up to 20 bytes per object, plus
-      spare capacity, without a check.
-- [ ] ❓ _Memory._ Grow the heap's object arena in fixed-size segments instead of one `Vec`.
-      A full collection gives back only the free slots after the last live
-      object, and an incremental one gives back none, so slots freed below a
-      live object count against `max_memory` until new objects use them. The
-      incremental sweep also puts the slots it frees on the free list in
-      descending order, so new objects fill the highest free slots first and
-      keep the end of the arena in use. Segments would let a collection give back
-      every empty segment, and growth would not copy the arena on platforms
-      whose allocator copies a large block to grow it.
+- [ ] ❓ _Memory._ Allocate small object buffers from fixed-size block pools so that the
+      engine accounts for retained pool capacity against `max_memory`. If a
+      script frees small buffers and then allocates larger ones, the system
+      allocator retains the freed blocks and peak process memory can reach
+      1.3x `max_memory`.
+- [ ] ❓ _Memory._ Account for `remembered` and `gray` growth in the write barrier and
+      trigger garbage collection if they exceed `max_memory`. A loop that
+      mutates old objects without allocating does not trigger collection or
+      table measurement, so `remembered` and `gray` can grow by 20 bytes per
+      object plus spare capacity without a limit check.
+- [ ] ❓ _Memory._ Store the object arena in fixed-size segments instead of a single `Vec`
+      so that collections can release any empty segment and growing the arena
+      does not copy existing slots. A contiguous `Vec` can release only
+      trailing free slots after a full sweep, and incremental sweeps prepend
+      freed slots to the free list in descending index order so that new
+      allocations reuse high-index slots first.
 - [ ] 🔴 [052](triage/052-dead-temporaries-rooted/summary.md) _Performance._ Clear dead temporaries before native calls so that inlined allocations
       do not stay rooted in caller frame registers during garbage collection.
 - [ ] 🔴 [017](triage/017-json-host-depth/summary.md) _Embedding._ Convert `Json` values to and from Rust iteratively so that
@@ -264,13 +258,11 @@ Visible defects that rarely block users.
 - [ ] ⚪ Cache instantiated `TypeDesc` objects in `Op::Describe` by their
       template and argument descriptions to avoid allocation on each generic
       `reflect` call.
-- [ ] ❓ Make the speed of the interpreter loop independent of code alignment. On
-      Apple silicon, unrelated changes elsewhere in the crate move the loop
-      and change `integer loop 10M`, `game of life` and `option ? chains` in
-      `benches/vm.rs` by up to 13% at equal instruction counts; with
-      `-C llvm-args=-align-loops=64`, the differences go away. Align the
-      dispatch loop, or build benchmarks with aligned loops so that they
-      compare changes reliably.
+- [ ] ❓ Align the VM dispatch loop or build benchmarks with
+      `-C llvm-args=-align-loops=64` so that unrelated code changes do not
+      shift loop alignment. On Apple silicon, code placement changes alter
+      `integer loop 10M`, `game of life`, and `option ? chains` in
+      `benches/vm.rs` by up to 13% at identical instruction counts.
 - [ ] ⚪ Replace the VM dispatch loop with a threaded dispatch table once Rust
       stabilizes the `become` keyword for guaranteed tail calls.
 

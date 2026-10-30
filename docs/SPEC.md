@@ -2690,11 +2690,10 @@ Configurable per engine:
 | `max_compile_fuel`   | 10,000,000 | compile error: `program too complex to compile` (§15.3)                                                                                                        |
 
 Memory is the engine's accounting, enforced after garbage collection, of
-live heap objects (with their buffers and map and set indexes), the heap
-slots of freed objects until new objects use them or the heap gives them
-back to the allocator, the tables of the garbage collector, tasks (call
-stacks, and lists of tasks waiting for a task or channel; a call that would
-grow a stack beyond the limit fails with the memory limit), and the
+live heap objects (with their buffers and map and set indexes), freed heap
+slots that have not been reused or released, garbage collector tables, tasks
+(call stacks, and lists of tasks waiting for a task or channel; a call that
+would grow a stack beyond the limit fails with the memory limit), and the
 buffers of pending I/O (file and socket reads, HTTP requests and responses
 in transfer, standard input, copies of data being written) from the start
 of the operation until its result becomes a value. An I/O operation whose
@@ -2713,12 +2712,10 @@ and lists, display and JSON text, sort buffers) before or while it grows,
 collecting garbage before reporting the limit, so a script cannot make the
 host allocate much beyond `max_memory`.
 
-The limit does not count the memory that the system allocator keeps for
-itself: its overhead, and freed memory that it has not given back to the
-operating system yet. For typical scripts, this memory is less than 25% of
-`max_memory`. It can be more if a script frees much data and then allocates
-data of other sizes, because the allocator decides when to give freed
-memory back.
+`max_memory` does not include system allocator metadata or freed blocks that
+the allocator retains. This allocator overhead is typically under 25% of
+`max_memory`, but can be higher if a script frees many allocations of one
+size class and then allocates another size class.
 
 In a session (§16.6, §17.6), the instruction, CPU time, wall time and
 output limits apply to each input; the memory limit to the session's

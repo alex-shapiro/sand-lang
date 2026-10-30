@@ -122,12 +122,10 @@ pub struct Heap {
     /// Make the next collection a major one when `bytes` exceeds this.
     pub major_at: usize,
     pub limit: Option<usize>,
-    /// Bytes of the collector's mark bits, its lists of remembered, gray and
-    /// to-be-traced objects, and its `dirty` entries, measured when the arena grows by 64 slots and by every
-    /// collection and step of an incremental collection.
+    /// Byte capacity of the collector bitmaps, worklists, and `dirty` map,
+    /// updated if the arena adds a 64-slot word or finishes a collection step.
     tables: usize,
-    /// The most slots that the arena has held since it last shrank. Their
-    /// memory stays resident after a major collection gives slots back.
+    /// Peak length of `objs` since its capacity last shrank.
     arena_top: usize,
     /// Memory of the fibers (value stacks, frames, waiter and race lists),
     /// counted against `limit` with the heap: incremented as they grow and
@@ -221,7 +219,7 @@ impl Staging<'_> {
                 Obj::Free(next) => next,
                 _ => unreachable!("corrupt free list"),
             };
-            // The heap already counts the free slot.
+            // `obj.size()` includes `OBJ_SIZE`, which `Heap::overhead` already counts for free slots.
             self.bytes -= OBJ_SIZE;
             h
         } else {
@@ -308,25 +306,21 @@ struct DirtyList {
     idx: Vec<u32>,
 }
 
-/// A partially remembered list (or a map's or set's entries) records at most
-/// one stored index per this many elements; beyond that it is scanned in
-/// full. Stores allocate nothing, so they need not lead to the collection
-/// that empties the `dirty` entries and their index lists, or to a check of
-/// the memory limit. The entries must therefore stay small relative to
-/// their objects: a fixed allowance would let a script hold memory beyond
-/// the limit by storing young values into many old lists.
+/// Minimum number of container elements per recorded index in [`DirtyList`].
+/// If more indices are mutated, the collector scans the container in full.
+/// Bounding [`DirtyList`] proportional to container length prevents unallocated
+/// stores from growing `dirty` beyond `max_memory` between collections.
 const ELEMS_PER_DIRTY_INDEX: usize = 8;
 
-/// Lists (and maps' and sets' entries) shorter than this are remembered in
-/// full, without a `dirty` entry: a minor collection scans them quickly,
-/// and the entry would take more memory than their elements.
+/// Minimum container length eligible for partial write-barrier tracking in
+/// `dirty`. Shorter containers are scanned in full during minor collections
+/// because a `dirty` entry would use more memory than the elements.
 const PARTIAL_MIN: usize = 128;
 
 const NONE: u32 = u32::MAX;
 const MIN_GC: usize = 4 << 20;
-/// The fewest slots given back by major collections since the arena last
-/// shrank that make it shrink (fewer stay allocated and counted, to save
-/// reallocations).
+/// Minimum number of trailing slots truncated since the last shrink before
+/// `objs` and the collector bitmaps shrink their capacity.
 const SHRINK_SLOTS: usize = 4096;
 /// Bytes allocated between minor collections, at most.
 const NURSERY: usize = 8 << 20;
@@ -549,7 +543,6 @@ impl Heap {
         self.mark_dirty(h, index, push);
     }
 
-    /// The number of elements of list `h`, or of the entries of map or set `h`.
     fn entries_len(&self, h: u32) -> usize {
         match &self.objs[h as usize] {
             Obj::List(l) => l.len(),
@@ -604,15 +597,13 @@ impl Heap {
         matches!(self.limit, Some(l) if self.used().saturating_add(self.io_memory.reserved()) > l)
     }
 
-    /// Memory used by heap objects and fibers (not counting pending I/O),
-    /// including the arena slots and collector tables that objects freed
-    /// earlier leave behind.
+    /// Memory used by heap objects, fibers, retained arena slots, and collector
+    /// tables, excluding pending I/O.
     pub fn used(&self) -> usize {
         self.bytes.saturating_add(self.fiber_bytes).saturating_add(self.spare_bytes).saturating_add(self.overhead())
     }
 
-    /// Memory of the arena's free and given-back slots and of the
-    /// collector's tables.
+    /// Byte capacity of unused arena slots and collector tables.
     #[inline]
     fn overhead(&self) -> usize {
         self.arena_top.max(self.objs.len()).saturating_sub(self.live_objects) * OBJ_SIZE
@@ -620,14 +611,12 @@ impl Heap {
             + self.tables
     }
 
-    /// Updates `tables`.
     #[cold]
     #[inline(never)]
     fn measure_tables(&mut self) {
         let bitmaps = [&self.marks, &self.remembered_bits, &self.partial_bits, &self.tail_bits, &self.cmarks, &self.gray_bits];
         let words: usize = bitmaps.iter().map(|b| b.capacity()).sum();
-        // A hash map has 8 buckets per 7 entries of capacity, each with a
-        // control byte.
+        // `HashMap` allocates 8 buckets and 8 control bytes for every 7 entries of capacity.
         let dirty = self.dirty.capacity() * (std::mem::size_of::<(u32, DirtyList)>() + 1) * 8 / 7;
         self.tables = words * std::mem::size_of::<u64>()
             + self.remembered.capacity() * std::mem::size_of::<u32>()
@@ -651,8 +640,8 @@ impl Heap {
         &self.objs[h as usize]
     }
 
-    /// The object with weak handle `h` (one the collector does not trace),
-    /// or `None` if a major collection gave its slot back.
+    /// Returns the object at untraced handle `h`, or `None` if the arena was
+    /// truncated past `h`.
     pub fn weak(&self, h: u32) -> Option<&Obj> {
         self.objs.get(h as usize)
     }
@@ -1233,14 +1222,12 @@ impl Heap {
         trace(&self.objs, &mut self.marks, &mut self.worklist, &mut self.scan);
     }
 
-    /// Puts slot `h` on the free list, keeping a small box for reuse.
     fn release(&mut self, h: u32) {
         let obj = std::mem::replace(&mut self.objs[h as usize], Obj::Free(self.free_head));
         self.free_head = h;
         self.keep_box(obj);
     }
 
-    /// Drops freed object `obj`, keeping its box if it is small.
     fn keep_box(&mut self, obj: Obj) {
         if let Obj::Tuple(b) | Obj::Struct(_, b) | Obj::Variant(_, b) | Obj::Closure(_, b) = obj
             && let Some(spare) = b.len().checked_sub(1).and_then(|i| self.spare.get_mut(i))
@@ -1290,9 +1277,6 @@ impl Heap {
             if major {
                 continue;
             }
-            // Scan the old objects that may point to young ones, one at a
-            // time so that `scan` stays short. For a partially remembered
-            // object, scan only the changed parts.
             let mut mark = |v: Value| mark(marks, worklist, v);
             match (partial, &objs[h as usize]) {
                 (true, Obj::Channel(c)) => {
@@ -1319,6 +1303,8 @@ impl Heap {
                 }
                 _ => scan.push((h, 0)),
             }
+            // Drain `worklist` and `scan` after each remembered container so
+            // that `scan` holds at most one root container at a time.
             trace(objs, marks, worklist, scan);
         }
         dirty.clear();
@@ -1326,7 +1312,6 @@ impl Heap {
         self.trace();
         if major {
             self.sweep_all();
-            // The lists are empty: give their memory back.
             self.young = Vec::new();
             self.remembered = Vec::new();
             self.dirty = FxHashMap::default();
@@ -1353,9 +1338,8 @@ impl Heap {
         self.measure_tables();
     }
 
-    /// Frees all unmarked objects. The free list is rebuilt in slot order,
-    /// so that new objects fill the lowest slots and the free slots at the
-    /// end of the arena can be given back.
+    /// Sweeps the arena in reverse index order so that `free_head` is sorted
+    /// in ascending order and trailing free slots can be truncated.
     fn sweep_all(&mut self) {
         let mut live_bytes = 0;
         let mut live = 0;
@@ -1380,8 +1364,9 @@ impl Heap {
         self.truncate(end);
     }
 
-    /// Gives back the free slots at and after `len`, which are not on the
-    /// free list, and the collector's tables for them.
+    /// Truncates trailing free slots starting at `len` and shrinks the arena
+    /// and collector bitmaps if at least [`SHRINK_SLOTS`] slots have been
+    /// truncated since the last shrink.
     fn truncate(&mut self, len: usize) {
         if len == self.objs.len() {
             return;
@@ -1601,9 +1586,9 @@ impl Heap {
     }
 }
 
-/// Marks every unmarked object reachable from `worklist` and from the
-/// containers on `scan`. The worklist is emptied first, so that it never
-/// holds more than one chunk of a big container's children.
+/// Marks all unmarked objects reachable from `worklist` and `scan`, draining
+/// `worklist` before each `scan` chunk so that `worklist` holds at most one
+/// chunk of a large container at a time.
 fn trace(objs: &[Obj], marks: &mut [u64], worklist: &mut Vec<u32>, scan: &mut Vec<(u32, usize)>) {
     loop {
         let (h, start) = match worklist.pop() {
@@ -1726,7 +1711,6 @@ mod tests {
         let n = (STAGE_CHUNK - 4) + 3 * STAGE_CHUNK;
         let size = std::mem::size_of::<(u32, Obj)>();
         let mut heap = Heap::new(None, usize::MAX);
-        // Without free slots, the overhead is the collector's tables.
         let used = |heap: &Heap| heap.used() - heap.overhead();
         let before = used(&heap);
         let buffer = heap.staged(|_, st| {
@@ -1765,7 +1749,6 @@ mod tests {
         assert_eq!(heap.str(heap.list(lists[7])[0]), "young");
     }
 
-    /// Bytes of the tables that the write barrier fills.
     fn barrier_tables(heap: &Heap) -> usize {
         heap.dirty.capacity() * std::mem::size_of::<(u32, DirtyList)>()
             + heap.dirty.values().map(|d| d.idx.capacity() * std::mem::size_of::<u32>()).sum::<usize>()
@@ -1773,7 +1756,7 @@ mod tests {
     }
 
     #[test]
-    fn the_write_barrier_needs_little_memory_beside_the_containers_it_tracks() {
+    fn write_barrier_tables_are_bounded_by_container_size() {
         let mut heap = Heap::new(None, usize::MAX);
         let small: Vec<Value> = (0..100_000).map(|_| heap.new_list(vec![Value::Int(0)])).collect();
         let big: Vec<Value> = (0..1000).map(|_| heap.new_list(vec![Value::Int(0); 1000])).collect();
@@ -1792,7 +1775,6 @@ mod tests {
         assert!(tables <= heap.bytes / 8, "{tables} bytes of tables for {} bytes of objects", heap.bytes);
         heap.collect(roots.iter().copied(), false);
         assert!(heap.list(small[5])[0] == young && heap.list(big[5])[994] == young);
-        // Tracing the remembered objects needs little memory either.
         let work = heap.scan.capacity() * std::mem::size_of::<(u32, usize)>() + heap.worklist.capacity() * std::mem::size_of::<u32>();
         assert!(work <= SCAN_CHUNK * 64, "{work} bytes of work lists");
         heap.collect(roots.iter().copied(), true);
@@ -1800,7 +1782,7 @@ mod tests {
     }
 
     #[test]
-    fn the_heap_counts_the_work_lists_that_a_minor_collection_keeps() {
+    fn minor_collection_accounts_for_retained_worklists() {
         let mut heap = Heap::new(None, usize::MAX);
         let roots: Vec<Value> = (0..200_000).map(|i| heap.new_str(format!("a young string, long enough, {i}"))).collect();
         heap.collect(roots.iter().copied(), false);
@@ -1942,7 +1924,6 @@ mod tests {
         heap.channel_push(ch, Value::Int(0)).unwrap();
     }
 
-    /// The handles on the free list, in order.
     fn free_list(heap: &Heap) -> Vec<u32> {
         let mut out = Vec::new();
         let mut h = heap.free_head;
@@ -1955,7 +1936,7 @@ mod tests {
     }
 
     #[test]
-    fn free_slots_count_as_used_until_objects_take_them() {
+    fn free_slots_are_counted_until_reused() {
         let mut heap = Heap::new(None, usize::MAX);
         let keep = heap.new_str("keep");
         let garbage: Vec<Value> = (0..1000).map(|i| heap.new_list(vec![Value::Int(i)])).collect();
@@ -1964,8 +1945,6 @@ mod tests {
         assert_eq!(free_list(&heap), (1..=1000).collect::<Vec<u32>>());
         let used = heap.used();
         assert!(used >= heap.bytes + 1000 * OBJ_SIZE, "{used} bytes used");
-        // New objects without contents of their own take free slots, from
-        // the lowest, and add only to the list of young objects.
         let young = |heap: &Heap| heap.young.capacity() * std::mem::size_of::<u32>();
         let ranges: Vec<Value> = (0..10).map(|i| heap.alloc(Obj::Range(i, i, false))).collect();
         assert_eq!(ranges, garbage[..10]);
@@ -1976,7 +1955,7 @@ mod tests {
     }
 
     #[test]
-    fn a_major_collection_gives_back_the_free_slots_at_the_end_of_the_arena() {
+    fn major_collection_truncates_trailing_free_slots() {
         let mut heap = Heap::new(None, usize::MAX);
         let keep = heap.new_str("keep");
         let n = 4 * SHRINK_SLOTS;
@@ -1993,8 +1972,6 @@ mod tests {
         assert!(full - heap.used() >= (n + 1) * OBJ_SIZE, "{full} bytes, then {}", heap.used());
         assert_eq!(heap.str(keep), "keep");
         assert_eq!(free_list(&heap), Vec::<u32>::new());
-        // The tables of the collector shrink with the arena: a new object is
-        // young and unmarked.
         let young = heap.new_str("young");
         assert!(!heap.is_marked(young.handle().unwrap()));
         heap.collect([keep], false);
@@ -2003,7 +1980,7 @@ mod tests {
     }
 
     #[test]
-    fn slots_given_back_in_small_runs_count_until_the_arena_shrinks() {
+    fn truncated_slots_are_counted_until_arena_shrinks() {
         let mut heap = Heap::new(None, usize::MAX);
         let n = 64 * SHRINK_SLOTS;
         let mut live: Vec<Value> = (0..n).map(|i| heap.new_list(vec![Value::Int(i as i64)])).collect();
@@ -2011,7 +1988,6 @@ mod tests {
         while live.len() > SHRINK_SLOTS {
             live.truncate(live.len() - (SHRINK_SLOTS - 1));
             heap.collect(live.iter().copied(), true);
-            // The arena's slots up to the most it held are resident.
             let resident = heap.objs.capacity().min(n) - heap.live_objects;
             assert!(heap.overhead() >= resident * OBJ_SIZE, "{} bytes counted, {resident} slots resident", heap.overhead());
         }
@@ -2020,13 +1996,9 @@ mod tests {
 
     #[derive(Clone, Debug)]
     enum Op {
-        /// Allocates a string, rooted or not.
         Str(bool),
-        /// Allocates a list of the given rooted values (by index), rooted.
         List(Vec<usize>),
-        /// Stages strings, rooting every other one.
         Stage(usize),
-        /// Drops a root (by index).
         Drop(usize),
         Collect(bool),
     }
@@ -2046,9 +2018,8 @@ mod tests {
         #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
 
         #[test]
-        fn the_heap_counts_every_slot_and_keeps_rooted_values(ops in proptest::collection::vec(op(), 1..200)) {
+        fn heap_accounts_for_all_slots_and_preserves_roots(ops in proptest::collection::vec(op(), 1..200)) {
             let mut heap = Heap::new(None, usize::MAX);
-            // Rooted values, with the text of each string or the roots a list holds.
             let mut roots: Vec<(Value, Result<String, Vec<Value>>)> = Vec::new();
             let mut n = 0;
             for op in ops {
@@ -2076,7 +2047,6 @@ mod tests {
                     }
                     Op::Drop(_) => {}
                     Op::Collect(major) => {
-                        // Values that rooted lists hold stay reachable.
                         let mut all: Vec<Value> = roots.iter().map(|r| r.0).collect();
                         for (_, c) in &roots {
                             if let Err(items) = c {
@@ -2108,26 +2078,19 @@ mod tests {
         }
     }
 
-    /// A change to an old list or map, or a step of the collector.
     #[derive(Clone, Debug)]
     enum BarrierOp {
-        /// Stores a new string (or an int) at an index of list `c`.
         Store(usize, usize, bool),
         Push(usize),
         Pop(usize),
         Clear(usize),
-        /// Inserts a new string at an index (moves the elements after it).
         Insert(usize, usize),
         Remove(usize, usize),
-        /// Replaces the value of map entry `s`, or appends an entry.
         MapStore(usize, usize),
         MapPush(usize),
-        /// Removes an entry and closes the gap, as compaction does.
         MapRemove(usize, usize),
-        /// Allocates unreachable strings.
         Garbage(usize),
         Collect(bool),
-        /// Starts an incremental cycle, or runs one step of it.
         Cycle,
     }
 
@@ -2153,14 +2116,9 @@ mod tests {
     proptest::proptest! {
         #![proptest_config(proptest::prelude::ProptestConfig::with_cases(512))]
 
-        /// Old lists and maps of lengths around `PARTIAL_MIN` receive young
-        /// values by every kind of store while minor, major and incremental
-        /// collections run. Only the containers are roots: every value that
-        /// they hold must stay intact.
         #[test]
-        fn old_containers_keep_the_young_values_stored_into_them(ops in proptest::collection::vec(barrier_op(), 1..300)) {
+        fn write_barrier_preserves_young_values_in_old_containers(ops in proptest::collection::vec(barrier_op(), 1..300)) {
             let mut heap = Heap::new(None, usize::MAX);
-            // Small steps, so that stores happen between the steps of a cycle.
             heap.stress = true;
             let lens = [0, 5, PARTIAL_MIN - 1, PARTIAL_MIN, PARTIAL_MIN + 1, 200, 300, 1000, SCAN_CHUNK + 10];
             let lists: Vec<Value> = lens.iter().map(|&n| heap.new_list(vec![Value::Int(0); n])).collect();

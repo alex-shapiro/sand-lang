@@ -2840,12 +2840,8 @@ fn write_barrier_under_gc_stress() {
     assert_eq!(normal, stressed);
 }
 
-/// A map keeps a weak handle of each iterator that reads it in place. After
-/// the iterator dies, a major collection can give its slot back with the
-/// end of the arena; changing the map must then skip the stale handle. A
-/// task makes the garbage, as no register of a finished task keeps it.
 #[test]
-fn maps_change_after_their_iterators_and_the_arena_end_are_freed() {
+fn map_mutation_ignores_truncated_iterator_pins() {
     let src = r#"
 let m: [int: int] = [:]
 for i in 0..10 { m[i] = i }
@@ -2867,8 +2863,6 @@ print(m.len())
     assert_eq!(out, "30\n");
 }
 
-/// The computed defaults of a decoded struct cost one closure per struct,
-/// not one per field, so a decode needs a small part of the limit.
 #[test]
 fn decoding_many_structs_with_computed_defaults_fits_the_memory_limit() {
     let src = r#"
