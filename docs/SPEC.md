@@ -2955,7 +2955,9 @@ implement `NamedType`, `SandType`, `FromValue`, and `IntoValue`. Every derived
 type requires `#[sand(module = "<module>")]` and accepts `#[sand(name = "<Name>")]`
 to override its Sand name, `#[sand(private)]` to keep the type private to its
 module, and `#[sand(crate = <path>)]` to specify a renamed `sandlang`
-dependency. Rust doc comments, including `#[doc = include_str!("...")]`, become
+dependency. `SandEnum` and `SandStruct` also accept
+`#[sand(manual_conversion)]`, which leaves out `FromValue` and `IntoValue` so
+that the type implements them itself. Rust doc comments, including `#[doc = include_str!("...")]`, become
 Sand documentation. Compilation fails if a type, variant, or field name is a
 Sand keyword or is not a valid Sand identifier.
 

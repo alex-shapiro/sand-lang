@@ -1669,7 +1669,7 @@ mod tests {
 
     #[test]
     fn indexes_for_known_keys_hold_them_all_without_growing() {
-        let strs = (0..100).map(|i| Value::Obj(i));
+        let strs = (0..100).map(Value::Obj);
         let KeyIndex::Hashed(t) = KeyIndex::for_keys(100, strs) else { panic!("string keys need a hashed index") };
         assert!(t.capacity() >= 100, "{}", t.capacity());
         let KeyIndex::Hashed(t) = KeyIndex::for_keys(3, [0, 1, 1 << 40].map(Value::Int).into_iter()) else {

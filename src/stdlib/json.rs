@@ -11,8 +11,8 @@ use super::base64;
 use crate::check::ModKind;
 use crate::native::traits;
 use crate::native::{
-    Binding, Constant, Conversion, EnumType, EnumVariant, FromValue, HostError, IntoValue, NamedType, NativeModule, Param, Reflect,
-    SandType, Type, Val, VariantField, mismatch, variant_const, variant_index,
+    Constant, Conversion, EnumType, FromValue, HostError, IntoValue, NamedType, NativeModule, Param, Reflect, Val, mismatch, variant_const,
+    variant_index,
 };
 use crate::syntax::lexer::is_ident;
 use crate::types::ConstVal;
@@ -38,11 +38,8 @@ const NODE: usize = 64;
 /// A dynamic JSON value. Plain integers that fit in a 64-bit signed `int` parse
 /// as `Int`; all other numbers parse as `Float`. Object entries preserve
 /// insertion order.
-///
-/// Conversion between Sand and Rust accepts values with up to 512 nested
-/// arrays and objects, the same limit as `json.parse`, and uses a constant
-/// amount of stack. A deeper value stops the script with a `limit` error.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, crate::SandEnum)]
+#[sand(module = "json", manual_conversion)]
 pub enum Json {
     /// JSON `null`.
     Null,
@@ -414,52 +411,6 @@ const ENTRY_PENDING: usize = std::mem::size_of::<Entry>() + MAP_ENTRY_SIZE;
 
 // ---------------------------------------------------------------------------
 // Conversion between Sand and Rust `Json` values
-
-impl NamedType for Json {
-    const MODULE: &'static str = "json";
-    const NAME: &'static str = "Json";
-    const DOC: &'static str = "A dynamic JSON value. Plain integers that fit in a 64-bit signed `int` parse\n\
-                               as `Int`; all other numbers parse as `Float`. Object entries preserve\n\
-                               insertion order.";
-    const PUBLIC: bool = true;
-    fn binding() -> Binding<Json> {
-        Binding::of_enum()
-    }
-}
-
-impl SandType for Json {
-    fn sand_type() -> Type {
-        Type::bound::<Json>(Vec::new())
-    }
-}
-
-impl EnumType for Json {
-    const VARIANTS: &'static [EnumVariant] = &[
-        EnumVariant { name: "Null", doc: "JSON `null`.", fields: &[] },
-        EnumVariant { name: "Bool", doc: "JSON boolean (`true` or `false`).", fields: &[VariantField { name: None, ty: bool::sand_type }] },
-        EnumVariant { name: "Int", doc: "Exact 64-bit signed integer.", fields: &[VariantField { name: None, ty: i64::sand_type }] },
-        EnumVariant { name: "Float", doc: "IEEE-754 floating-point number.", fields: &[VariantField { name: None, ty: f64::sand_type }] },
-        EnumVariant { name: "Str", doc: "UTF-8 string.", fields: &[VariantField { name: None, ty: String::sand_type }] },
-        EnumVariant { name: "Arr", doc: "JSON array.", fields: &[VariantField { name: None, ty: Vec::<Json>::sand_type }] },
-        EnumVariant {
-            name: "Obj",
-            doc: "Insertion-ordered JSON object.",
-            fields: &[VariantField { name: None, ty: indexmap::IndexMap::<String, Json>::sand_type }],
-        },
-    ];
-
-    fn index(&self) -> usize {
-        match self {
-            Json::Null => 0,
-            Json::Bool(_) => 1,
-            Json::Int(_) => 2,
-            Json::Float(_) => 3,
-            Json::Str(_) => 4,
-            Json::Arr(_) => 5,
-            Json::Obj(_) => 6,
-        }
-    }
-}
 
 impl FromValue for Json {
     type Item<'a> = Json;

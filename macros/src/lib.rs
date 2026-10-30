@@ -7,6 +7,8 @@
 //! - `#[sand(private)]`: makes the type private to its module.
 //! - `#[sand(crate = <path>)]`: sets the path to the `sandlang` crate (defaults
 //!   to `::sandlang`).
+//! - `#[sand(manual_conversion)]` (`SandEnum` and `SandStruct` only): omits
+//!   the `FromValue` and `IntoValue` impls, which the type then implements.
 //!
 //! The macros copy Rust doc comments (including `#[doc = include_str!("...")]`)
 //! into the Sand documentation.
@@ -77,6 +79,8 @@ struct TypeAttrs {
     public: bool,
     krate: Path,
     doc: Tokens,
+    /// The type implements `FromValue` and `IntoValue` itself.
+    manual: bool,
 }
 
 fn parse_type_attrs(input: &DeriveInput, derive: &str) -> syn::Result<TypeAttrs> {
@@ -84,6 +88,7 @@ fn parse_type_attrs(input: &DeriveInput, derive: &str) -> syn::Result<TypeAttrs>
     let mut module = None;
     let mut name = LitStr::new(&ty.unraw().to_string(), ty.span());
     let mut public = true;
+    let mut manual = false;
     let mut krate: Path = parse_quote!(::sandlang);
     for attr in input.attrs.iter().filter(|a| a.path().is_ident("sand")) {
         attr.parse_nested_meta(|meta| {
@@ -95,6 +100,10 @@ fn parse_type_attrs(input: &DeriveInput, derive: &str) -> syn::Result<TypeAttrs>
                 public = false;
             } else if meta.path.is_ident("crate") {
                 krate = meta.value()?.parse()?;
+            } else if meta.path.is_ident("manual_conversion") && matches!(derive, "SandEnum" | "SandStruct") {
+                manual = true;
+            } else if matches!(derive, "SandEnum" | "SandStruct") {
+                return Err(meta.error("expected `module`, `name`, `private`, `crate` or `manual_conversion`"));
             } else {
                 return Err(meta.error("expected `module`, `name`, `private` or `crate`"));
             }
@@ -104,7 +113,7 @@ fn parse_type_attrs(input: &DeriveInput, derive: &str) -> syn::Result<TypeAttrs>
     let Some(module) = module else {
         return Err(Error::new(Span::call_site(), format!("`{derive}` requires `#[sand(module = \"...\")]`")));
     };
-    Ok(TypeAttrs { module, name, public, krate, doc: doc_expr(&input.attrs) })
+    Ok(TypeAttrs { module, name, public, krate, doc: doc_expr(&input.attrs), manual })
 }
 
 struct TypeParams {
@@ -226,7 +235,7 @@ fn reject_member_attrs(data: &Data) -> syn::Result<()> {
 }
 
 fn expand_named_type(input: &DeriveInput, a: &TypeAttrs, type_params: &TypeParams, binding: Tokens) -> Tokens {
-    let TypeAttrs { module, name, public, krate, doc } = a;
+    let TypeAttrs { module, name, public, krate, doc, .. } = a;
     let ty = &input.ident;
     let check = assert_type_name(krate, "type", &name.value(), name.span());
     let (imp, tyg, wh) = type_params.split_for_impl(input, |_| quote!(#krate::native::SandType));
@@ -375,7 +384,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
     let named = expand_named_type(input, &attrs, &type_params, quote! { #krate::native::Binding::of_enum() });
     let sand_type = expand_sand_type(input, krate, &type_params);
     let (imp, tyg, wh, wh_from, wh_into) = split_conversion_generics(input, krate, &type_params);
-    Ok(quote! {
+    let reflection = quote! {
         #named
         #sand_type
         #(#checks)*
@@ -387,6 +396,12 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
                 }
             }
         }
+    };
+    if attrs.manual {
+        return Ok(reflection);
+    }
+    Ok(quote! {
+        #reflection
         impl #imp #krate::native::FromValue for #ty #tyg #wh_from {
             type Item<'a> = Self;
             #[allow(unused_variables)]
@@ -532,13 +547,19 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
     let named = expand_named_type(input, &attrs, &type_params, quote! { #krate::native::Binding::of_struct() });
     let sand_type = expand_sand_type(input, krate, &type_params);
     let (imp, tyg, wh, wh_from, wh_into) = split_conversion_generics(input, krate, &type_params);
-    Ok(quote! {
+    let reflection = quote! {
         #named
         #sand_type
         #(#checks)*
         impl #imp #krate::native::StructType for #ty #tyg #wh {
             const FIELDS: &'static [#krate::native::StructField] = &[#(#infos),*];
         }
+    };
+    if attrs.manual {
+        return Ok(reflection);
+    }
+    Ok(quote! {
+        #reflection
         impl #imp #krate::native::FromValue for #ty #tyg #wh_from {
             type Item<'a> = Self;
             #[allow(unused_variables)]
@@ -704,7 +725,7 @@ mod tests {
 
     #[test]
     fn invalid_derives_are_rejected() {
-        let cases: [(Derive, &str, &str); 13] = [
+        let cases: [(Derive, &str, &str); 14] = [
             (sand_struct, "#[sand(module = \"m\")] struct S(i64);", "`SandStruct` requires named fields"),
             (sand_struct, "#[sand(module = \"m\")] enum S { A }", "`SandStruct` can only be derived for structs"),
             (sand_struct, "#[sand(module = \"m\")] struct S<'a> { x: &'a str }", "lifetime or const parameters"),
@@ -725,11 +746,31 @@ mod tests {
                 "#[sand(module = \"m\")] enum E { A { #[sand(name = \"y\")] x: i64, y: i64 } }",
                 "the Sand payload name `y` is used twice",
             ),
-            (sand_enum, "#[sand(module = \"m\", public)] enum E { A }", "expected `module`, `name`, `private` or `crate`"),
+            (
+                sand_enum,
+                "#[sand(module = \"m\", public)] enum E { A }",
+                "expected `module`, `name`, `private`, `crate` or `manual_conversion`",
+            ),
+            (sand_object, "#[sand(module = \"m\", manual_conversion)] struct O;", "expected `module`, `name`, `private` or `crate`"),
         ];
         for (f, src, msg) in cases {
             let out = expand(f, src);
             assert!(out.starts_with("error: ") && out.contains(msg), "{src}: {out}");
+        }
+    }
+
+    #[test]
+    fn manual_conversion_leaves_out_only_the_conversion_impls() {
+        let cases: [(Derive, &str, &str); 2] =
+            [(sand_enum, "enum E { A(i64) }", "EnumType for E"), (sand_struct, "struct S { x: i64 }", "StructType for S")];
+        for (f, item, reflection) in cases {
+            let derived = expand(f, &format!("#[sand(module = \"m\")] {item}"));
+            let manual = expand(f, &format!("#[sand(module = \"m\", manual_conversion)] {item}"));
+            for out in [&derived, &manual] {
+                assert!(out.contains("NamedType for") && out.contains("SandType for") && out.contains(reflection), "{out}");
+            }
+            assert!(derived.contains("FromValue for") && derived.contains("IntoValue for"), "{derived}");
+            assert!(!manual.contains("FromValue for") && !manual.contains("IntoValue for"), "{manual}");
         }
     }
 }
