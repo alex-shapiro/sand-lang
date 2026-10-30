@@ -43,9 +43,17 @@ The host cannot rely on engine limits, stability, or control.
       allocations reuse high-index slots first.
 - [ ] 🔴 [052](triage/052-dead-temporaries-rooted/summary.md) _Performance._ Clear dead temporaries before native calls so that inlined allocations
       do not stay rooted in caller frame registers during garbage collection.
-- [ ] 🔴 [017](triage/017-json-host-depth/summary.md) _Embedding._ Convert `Json` values to and from Rust iteratively so that
-      conversion accepts the full 512 nesting levels of `json.parse` without
-      overflowing a 512 KiB thread stack.
+- [ ] ❓ _Embedding._ Convert derived `SandEnum` and `SandStruct` values with an explicit
+      stack, as `Json` conversion does. Derived conversion recurses once per
+      nesting level, and the 256-level limit does not bound its stack use: in
+      an unoptimized build, derived `Json` conversion overflowed a 512 KiB
+      thread stack at 100 levels, which aborts the host process.
+- [ ] ❓ _Embedding._ Run `json.parse`, `json.encode`, `json.decode`, and `json.to_json`
+      with the explicit-stack `walk` in `src/stdlib/json.rs`. They recurse once
+      per nesting level, so in an unoptimized build `parse` overflows a 512 KiB
+      thread stack at 173 levels and `encode` at 88 levels, below the 512-level
+      limit. `to_json` also does not check the depth of the `Json` values that
+      it embeds, so it can return a value that `encode` rejects.
 - [ ] 🔴 [019](triage/019-value-type-defaults/summary.md) _Embedding._ Represent `ValueType` constants in `ConstVal` by their text form so that
       `#[sand(default)]` supports value-type fields and `json.decode` evaluates
       constant value-type defaults directly.

@@ -1556,6 +1556,33 @@ help(conf.Settings)
     assert_eq!(out, format!("{s}\n1\nb\"\"\n{d}\n{help}"));
 }
 
+fn default_doc() -> sandlang::json::Json {
+    use sandlang::json::Json;
+    Json::Obj(
+        [("on".to_string(), Json::Arr(vec![Json::Bool(true), Json::Int(-1), Json::Float(0.5), Json::Str("x".into()), Json::Null]))]
+            .into_iter()
+            .collect(),
+    )
+}
+
+#[derive(Clone, Debug, PartialEq, sandlang::SandStruct)]
+#[sand(module = "conf")]
+struct Doc {
+    #[sand(default = default_doc())]
+    body: sandlang::json::Json,
+}
+
+#[test]
+fn rust_json_field_defaults_are_constants() {
+    let mut m = NativeModule::new("conf");
+    m.bind::<Doc>();
+    m.function("same", |d: Doc| d.body == default_doc());
+    let src = "import conf\nimport json\nlet d = conf.Doc()\nprint(json.encode(d.body))\nprint(conf.same(d))\nlet e: conf.Doc = json.decode(\"{}\")?\nprint(conf.same(e))\n";
+    let (r, out, _) = run_src(Config::new().module(m), src);
+    r.unwrap();
+    assert_eq!(out, "{\"on\":[true,-1,0.5,\"x\",null]}\ntrue\ntrue\n");
+}
+
 #[test]
 #[should_panic(expected = "the default of field `at` of `Bad` is not a Sand constant")]
 fn rust_field_defaults_must_be_sand_constants() {
@@ -1821,6 +1848,40 @@ print(doc.keys(json.Json.Null))
     let (r, out, _) = run_src(Config::new().module(m), src);
     r.unwrap();
     assert_eq!(out, "[\"b\", \"a\", \"c\"]\n{\"z\":1,\"a\":[null,true,1.5,\"s\"]}\ntrue\nSome(1.5)\n[]\n");
+}
+
+#[test]
+fn json_values_convert_at_the_full_parse_depth_on_a_small_stack() {
+    use sandlang::json::Json;
+    /// `n` nested containers, alternately arrays and objects, with siblings.
+    fn nest(n: usize) -> Json {
+        (0..n).fold(Json::Str("leaf".into()), |j, i| match i % 2 {
+            0 => Json::Arr(vec![Json::Int(i as i64), j, Json::Null]),
+            _ => Json::Obj([("a".to_string(), Json::Bool(true)), ("k".to_string(), j)].into_iter().collect()),
+        })
+    }
+    let run = |src: &'static str| {
+        let run = move || {
+            let mut m = NativeModule::new("doc");
+            m.function("make", |n: i64| nest(n as usize));
+            m.function("check", |j: Json, n: i64| j == nest(n as usize));
+            run_src(Config::new().module(m), &format!("import doc\nimport json\n{src}"))
+        };
+        std::thread::Builder::new().stack_size(512 << 10).spawn(run).unwrap().join().unwrap()
+    };
+    let (r, out, _) = run("let text = json.encode(doc.make(512))\nlet parsed = json.parse(text)?\nprint(doc.check(parsed, 512))\n\
+         print(json.encode(parsed) == text)\nprint(doc.check(json.Json.Obj([\"k\": doc.make(511)]), 512))");
+    r.unwrap();
+    assert_eq!(out, "true\ntrue\nfalse\n");
+    for src in [
+        "print(doc.make(513))",
+        "print(doc.check(json.Json.Arr([doc.make(512)]), 513))",
+        "var j = json.Json.Null\nfor _ in 0..100000 {\n    j = json.Json.Arr([j])\n}\nprint(doc.check(j, 0))",
+    ] {
+        let (r, _, _) = run(src);
+        let Err(Error::Runtime { message, .. }) = r else { panic!("{src}: expected a runtime error, got {r:?}") };
+        assert_eq!(message, "limit: value too deeply nested to convert", "{src}");
+    }
 }
 
 #[derive(Clone, Copy, sandlang::SandEnum)]

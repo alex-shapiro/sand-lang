@@ -112,6 +112,32 @@ print(json.parse(deep).unwrap_err().message)
 --- stdout
 nesting too deep at line 1, column 513
 
+=== encoding accepts the nesting depth that parsing accepts
+import json
+var a = json.Json.Arr([])
+var o = json.Json.Obj([:])
+for _ in 0..511 {
+    a = json.Json.Arr([a])
+    o = json.Json.Arr([o])
+}
+print(json.parse(json.encode(a))? == a)
+print(json.parse(json.encode(o))? == o)
+print(json.to_json(a) == a)
+--- stdout
+true
+true
+true
+
+=== encoding fails beyond the nesting depth that parsing accepts
+import json
+var o = json.Json.Obj([:])
+for _ in 0..512 {
+    o = json.Json.Arr([o])
+}
+print(json.encode(o))
+--- fail
+value too deeply nested to encode as JSON
+
 === numbers
 import json
 print(json.encode(json.parse("[0, -1, 1e3, 1.5e-2, 123456789012, 2.0]")?))

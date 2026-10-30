@@ -10,7 +10,10 @@
 use super::base64;
 use crate::check::ModKind;
 use crate::native::traits;
-use crate::native::{EnumType, HostError, NamedType, NativeModule, Param, Reflect, Val, variant_index};
+use crate::native::{
+    Binding, Constant, Conversion, EnumType, EnumVariant, FromValue, HostError, IntoValue, NamedType, NativeModule, Param, Reflect,
+    SandType, Type, Val, VariantField, mismatch, variant_const, variant_index,
+};
 use crate::syntax::lexer::is_ident;
 use crate::types::ConstVal;
 use crate::vm::bytecode::Program;
@@ -35,8 +38,11 @@ const NODE: usize = 64;
 /// A dynamic JSON value. Plain integers that fit in a 64-bit signed `int` parse
 /// as `Int`; all other numbers parse as `Float`. Object entries preserve
 /// insertion order.
-#[derive(Clone, Debug, PartialEq, crate::SandEnum)]
-#[sand(module = "json")]
+///
+/// Conversion between Sand and Rust accepts values with up to 512 nested
+/// arrays and objects, the same limit as `json.parse`, and uses a constant
+/// amount of stack. A deeper value stops the script with a `limit` error.
+#[derive(Clone, Debug, PartialEq)]
 pub enum Json {
     /// JSON `null`.
     Null,
@@ -394,6 +400,307 @@ impl<'a, 's, 'h> Build<'a, 's, 'h> {
 
 /// Bytes counted per entry of a map being assembled.
 const ENTRY_PENDING: usize = std::mem::size_of::<Entry>() + MAP_ENTRY_SIZE;
+
+// ---------------------------------------------------------------------------
+// Conversion between Sand and Rust `Json` values
+
+impl NamedType for Json {
+    const MODULE: &'static str = "json";
+    const NAME: &'static str = "Json";
+    const DOC: &'static str = "A dynamic JSON value. Plain integers that fit in a 64-bit signed `int` parse\n\
+                               as `Int`; all other numbers parse as `Float`. Object entries preserve\n\
+                               insertion order.";
+    const PUBLIC: bool = true;
+    fn binding() -> Binding<Json> {
+        Binding::of_enum()
+    }
+}
+
+impl SandType for Json {
+    fn sand_type() -> Type {
+        Type::bound::<Json>(Vec::new())
+    }
+}
+
+impl EnumType for Json {
+    const VARIANTS: &'static [EnumVariant] = &[
+        EnumVariant { name: "Null", doc: "JSON `null`.", fields: &[] },
+        EnumVariant { name: "Bool", doc: "JSON boolean (`true` or `false`).", fields: &[VariantField { name: None, ty: bool::sand_type }] },
+        EnumVariant { name: "Int", doc: "Exact 64-bit signed integer.", fields: &[VariantField { name: None, ty: i64::sand_type }] },
+        EnumVariant { name: "Float", doc: "IEEE-754 floating-point number.", fields: &[VariantField { name: None, ty: f64::sand_type }] },
+        EnumVariant { name: "Str", doc: "UTF-8 string.", fields: &[VariantField { name: None, ty: String::sand_type }] },
+        EnumVariant { name: "Arr", doc: "JSON array.", fields: &[VariantField { name: None, ty: Vec::<Json>::sand_type }] },
+        EnumVariant {
+            name: "Obj",
+            doc: "Insertion-ordered JSON object.",
+            fields: &[VariantField { name: None, ty: indexmap::IndexMap::<String, Json>::sand_type }],
+        },
+    ];
+
+    fn index(&self) -> usize {
+        match self {
+            Json::Null => 0,
+            Json::Bool(_) => 1,
+            Json::Int(_) => 2,
+            Json::Float(_) => 3,
+            Json::Str(_) => 4,
+            Json::Arr(_) => 5,
+            Json::Obj(_) => 6,
+        }
+    }
+}
+
+impl FromValue for Json {
+    type Item<'a> = Json;
+    fn from_value(vm: &Vm, v: Value, conv: &mut Conversion) -> Result<Json, Ctl> {
+        walk(&mut Reader { vm, ids: JsonIds::of(&vm.prog)?, conv }, v)
+    }
+}
+
+impl IntoValue for Json {
+    fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl> {
+        let ids = JsonIds::of(&vm.prog)?;
+        let meter = &vm.meter;
+        vm.heap.staged(|heap, st| walk(&mut Writer { b: Build::new(heap, st, meter), ids }, self))
+    }
+
+    fn to_const(&self) -> Option<Constant> {
+        let payload = match self {
+            Json::Null => None,
+            Json::Bool(b) => Some(b.to_const()),
+            Json::Int(i) => Some(i.to_const()),
+            Json::Float(f) => Some(f.to_const()),
+            Json::Str(s) => Some(s.to_const()),
+            Json::Arr(items) => Some(items.to_const()),
+            Json::Obj(fields) => Some(fields.to_const()),
+        };
+        variant_const::<Json>(self.index(), payload)
+    }
+}
+
+/// A depth-first conversion of a tree of arrays and objects. [`walk`] keeps
+/// the open containers in a `Vec`, so the stack use does not depend on the
+/// depth of the tree.
+trait Walk {
+    type Node;
+    /// A container whose children are being converted.
+    type Frame;
+    type Out;
+
+    /// Converts a leaf, or opens a container.
+    fn open(&mut self, node: Self::Node) -> Result<Step<Self::Frame, Self::Out>, Ctl>;
+    /// The next child of `f`, or `None` after the last child.
+    fn next(&mut self, f: &mut Self::Frame) -> Result<Option<Self::Node>, Ctl>;
+    /// Adds the converted child that [`Walk::next`] returned last to `f`.
+    fn put(&mut self, f: &mut Self::Frame, child: Self::Out) -> Result<(), Ctl>;
+    fn close(&mut self, f: Self::Frame) -> Self::Out;
+}
+
+enum Step<F, O> {
+    Open(F),
+    Leaf(O),
+}
+
+/// Converts `root`, failing if it has more than [`MAX_DEPTH`] nested containers.
+fn walk<W: Walk>(w: &mut W, root: W::Node) -> Result<W::Out, Ctl> {
+    let mut top = match w.open(root)? {
+        Step::Open(f) => f,
+        Step::Leaf(out) => return Ok(out),
+    };
+    let mut parents = Vec::new();
+    loop {
+        match w.next(&mut top)? {
+            Some(child) => match w.open(child)? {
+                Step::Leaf(out) => w.put(&mut top, out)?,
+                Step::Open(_) if parents.len() + 1 >= MAX_DEPTH => return fail("limit", "value too deeply nested to convert"),
+                Step::Open(f) => parents.push(std::mem::replace(&mut top, f)),
+            },
+            None => {
+                let out = w.close(top);
+                match parents.pop() {
+                    Some(parent) => {
+                        top = parent;
+                        w.put(&mut top, out)?;
+                    }
+                    None => return Ok(out),
+                }
+            }
+        }
+    }
+}
+
+/// Reads `json.Json` values on the heap into Rust [`Json`] values.
+struct Reader<'h, 'c> {
+    vm: &'h Vm,
+    ids: JsonIds,
+    conv: &'c mut Conversion,
+}
+
+enum ReadFrame<'h> {
+    Arr(Vec<Json>, std::slice::Iter<'h, Value>),
+    /// An object, the remaining entries, and the key of the entry being read.
+    Obj(indexmap::IndexMap<String, Json>, std::slice::Iter<'h, Option<(Value, Value)>>, String),
+}
+
+/// Rust memory held per object entry: the entry and its slot in the hash index.
+const OBJ_ENTRY: usize = std::mem::size_of::<(u64, String, Json)>() + std::mem::size_of::<usize>();
+
+impl<'h> Reader<'h, '_> {
+    fn string(&mut self, v: Value) -> Result<String, Ctl> {
+        let s = match self.vm.heap.get(v) {
+            Obj::Str(s) => &**s,
+            Obj::StrBuf(s) => s.as_str(),
+            _ => return Err(mismatch::<Json>()),
+        };
+        self.conv.alloc(self.vm, s.len())?;
+        self.vm.charge_bytes(s.len())?;
+        Ok(s.to_string())
+    }
+}
+
+impl<'h> Walk for Reader<'h, '_> {
+    type Node = Value;
+    type Frame = ReadFrame<'h>;
+    type Out = Json;
+
+    fn open(&mut self, v: Value) -> Result<Step<ReadFrame<'h>, Json>, Ctl> {
+        let (vm, ids) = (self.vm, self.ids);
+        vm.charge(1)?;
+        let id = vm.heap.variant_id(v);
+        if id == ids.null {
+            return Ok(Step::Leaf(Json::Null));
+        }
+        let payload = vm.heap.field(v, 0).ok_or_else(mismatch::<Json>)?;
+        Ok(Step::Leaf(match (id, payload) {
+            (_, Value::Bool(b)) if id == ids.bool_ => Json::Bool(b),
+            (_, Value::Int(i)) if id == ids.int => Json::Int(i),
+            (_, Value::Float(f)) if id == ids.float => Json::Float(f),
+            _ if id == ids.str_ => Json::Str(self.string(payload)?),
+            _ if id == ids.arr => {
+                let Obj::List(items) = vm.heap.get(payload) else { return Err(mismatch::<Json>()) };
+                self.conv.alloc(vm, items.len().saturating_mul(std::mem::size_of::<Json>()))?;
+                vm.charge(items.len() as u64)?;
+                return Ok(Step::Open(ReadFrame::Arr(Vec::with_capacity(items.len()), items.iter())));
+            }
+            _ if id == ids.obj => {
+                let Obj::Map(m) = vm.heap.get(payload) else { return Err(mismatch::<Json>()) };
+                self.conv.alloc(vm, m.live.saturating_mul(OBJ_ENTRY))?;
+                vm.charge(m.live as u64)?;
+                let fields = indexmap::IndexMap::with_capacity(m.live);
+                return Ok(Step::Open(ReadFrame::Obj(fields, m.entries.iter(), String::new())));
+            }
+            _ => return Err(mismatch::<Json>()),
+        }))
+    }
+
+    fn next(&mut self, f: &mut ReadFrame<'h>) -> Result<Option<Value>, Ctl> {
+        Ok(match f {
+            ReadFrame::Arr(_, items) => items.next().copied(),
+            ReadFrame::Obj(_, entries, key) => match entries.find_map(|e| *e) {
+                Some((k, v)) => {
+                    *key = self.string(k)?;
+                    Some(v)
+                }
+                None => None,
+            },
+        })
+    }
+
+    fn put(&mut self, f: &mut ReadFrame<'h>, child: Json) -> Result<(), Ctl> {
+        match f {
+            ReadFrame::Arr(items, _) => items.push(child),
+            ReadFrame::Obj(fields, _, key) => {
+                fields.insert(std::mem::take(key), child);
+            }
+        }
+        Ok(())
+    }
+
+    fn close(&mut self, f: ReadFrame<'h>) -> Json {
+        match f {
+            ReadFrame::Arr(items, _) => Json::Arr(items),
+            ReadFrame::Obj(fields, _, _) => Json::Obj(fields),
+        }
+    }
+}
+
+/// Stages Rust [`Json`] values as `json.Json` values.
+struct Writer<'a, 's, 'h> {
+    b: Build<'a, 's, 'h>,
+    ids: JsonIds,
+}
+
+enum WriteFrame {
+    Arr(std::vec::IntoIter<Json>, Vec<Value>),
+    /// An object, the remaining entries, and the key and hash of the entry
+    /// being written.
+    Obj(indexmap::map::IntoIter<String, Json>, MapBuild, String, u64),
+}
+
+impl Walk for Writer<'_, '_, '_> {
+    type Node = Json;
+    type Frame = WriteFrame;
+    type Out = Value;
+
+    fn open(&mut self, j: Json) -> Result<Step<WriteFrame, Value>, Ctl> {
+        let (b, ids) = (&mut self.b, self.ids);
+        b.reserve()?;
+        b.meter.charge(1)?;
+        Ok(Step::Leaf(match j {
+            Json::Null => Value::Tag(ids.null),
+            Json::Bool(x) => b.st.new_variant(ids.bool_, &[Value::Bool(x)]),
+            Json::Int(i) => b.st.new_variant(ids.int, &[Value::Int(i)]),
+            Json::Float(f) => b.st.new_variant(ids.float, &[Value::Float(f)]),
+            Json::Str(s) => {
+                b.st.check_memory((NODE + b.pending).saturating_add(s.len()))?;
+                b.meter.charge_bytes(s.len())?;
+                let s = b.st.new_str(s);
+                b.st.new_variant(ids.str_, &[s])
+            }
+            Json::Arr(items) => return Ok(Step::Open(WriteFrame::Arr(items.into_iter(), Vec::new()))),
+            Json::Obj(fields) => return Ok(Step::Open(WriteFrame::Obj(fields.into_iter(), b.start_map(), String::new(), 0))),
+        }))
+    }
+
+    fn next(&mut self, f: &mut WriteFrame) -> Result<Option<Json>, Ctl> {
+        Ok(match f {
+            WriteFrame::Arr(items, _) => items.next(),
+            WriteFrame::Obj(entries, _, key, hash) => match entries.next() {
+                Some((k, v)) => {
+                    *hash = self.b.hash(&k)?;
+                    *key = k;
+                    Some(v)
+                }
+                None => None,
+            },
+        })
+    }
+
+    fn put(&mut self, f: &mut WriteFrame, child: Value) -> Result<(), Ctl> {
+        match f {
+            WriteFrame::Arr(_, out) => self.b.push(out, child),
+            WriteFrame::Obj(_, m, key, hash) => {
+                let text = Cow::Owned(std::mem::take(key));
+                let k = self.b.key(&text, *hash);
+                self.b.put(m, *hash, Some(text), k, child)
+            }
+        }
+    }
+
+    fn close(&mut self, f: WriteFrame) -> Value {
+        let ids = self.ids;
+        match f {
+            WriteFrame::Arr(_, out) => {
+                let list = self.b.list(out);
+                self.b.st.new_variant(ids.arr, &[list])
+            }
+            WriteFrame::Obj(_, m, _, _) => {
+                let map = self.b.map(m);
+                self.b.st.new_variant(ids.obj, &[map])
+            }
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Parsing
@@ -1340,12 +1647,12 @@ impl Encoder<'_> {
 
     /// Writes `[items...]` (`len` items).
     fn array(&mut self, len: usize, items: impl Iterator<Item = Value>, level: usize) -> Result<(), Ctl> {
+        if level >= MAX_DEPTH {
+            return fail("limit", "value too deeply nested to encode as JSON");
+        }
         if len == 0 {
             self.out.push_str("[]");
             return Ok(());
-        }
-        if level >= MAX_DEPTH {
-            return fail("limit", "value too deeply nested to encode as JSON");
         }
         self.out.push('[');
         for (i, x) in items.enumerate() {
@@ -1369,12 +1676,12 @@ impl Encoder<'_> {
         level: usize,
         mut entry: impl FnMut(&mut Self, T) -> Result<Value, Ctl>,
     ) -> Result<(), Ctl> {
+        if level >= MAX_DEPTH {
+            return fail("limit", "value too deeply nested to encode as JSON");
+        }
         if len == 0 {
             self.out.push_str("{}");
             return Ok(());
-        }
-        if level >= MAX_DEPTH {
-            return fail("limit", "value too deeply nested to encode as JSON");
         }
         self.out.push('{');
         for (i, e) in entries.enumerate() {

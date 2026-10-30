@@ -1,5 +1,6 @@
 use super::{int, int_lit, str_lit};
 use proptest::prelude::*;
+use proptest::test_runner::TestCaseError;
 use sandlang::json::Json;
 use sandlang::native::{Num, Param, Val, traits};
 use sandlang::vm::{Ctl, Vm};
@@ -148,20 +149,102 @@ fn fig_module(seen: Arc<Mutex<Vec<Fig>>>, made: Fig) -> NativeModule {
     m
 }
 
-fn json() -> impl Strategy<Value = Json> {
-    let leaf = prop_oneof![
+fn json_leaf() -> impl Strategy<Value = Json> {
+    prop_oneof![
         Just(Json::Null),
         any::<bool>().prop_map(Json::Bool),
         int().prop_map(Json::Int),
         float().prop_map(Json::Float),
         text().prop_map(Json::Str),
-    ];
-    leaf.prop_recursive(5, 48, 5, |inner| {
+    ]
+}
+
+fn json() -> impl Strategy<Value = Json> {
+    json_leaf().prop_recursive(5, 48, 5, |inner| {
         prop_oneof![
             prop::collection::vec(inner.clone(), 0..5).prop_map(Json::Arr),
             prop::collection::vec((text(), inner), 0..5).prop_map(|kvs| Json::Obj(kvs.into_iter().collect())),
         ]
     })
+}
+
+/// A Sand expression that builds `j`.
+fn json_lit(j: &Json) -> String {
+    match j {
+        Json::Null => "json.Json.Null".into(),
+        Json::Bool(b) => format!("json.Json.Bool({b})"),
+        Json::Int(i) => format!("json.Json.Int({})", int_lit(*i)),
+        Json::Float(f) => format!("json.Json.Float({})", float_lit(*f)),
+        Json::Str(s) => format!("json.Json.Str({})", str_lit(s)),
+        Json::Arr(items) => format!("json.Json.Arr([{}])", items.iter().map(json_lit).collect::<Vec<_>>().join(", ")),
+        Json::Obj(fields) if fields.is_empty() => "json.Json.Obj([:])".into(),
+        Json::Obj(fields) => {
+            let entries: Vec<String> = fields.iter().map(|(k, v)| format!("{}: {}", str_lit(k), json_lit(v))).collect();
+            format!("json.Json.Obj([{}])", entries.join(", "))
+        }
+    }
+}
+
+/// The number of nested arrays and objects in `j`.
+fn json_depth(j: &Json) -> usize {
+    match j {
+        Json::Arr(items) => 1 + items.iter().map(json_depth).max().unwrap_or(0),
+        Json::Obj(fields) => 1 + fields.values().map(json_depth).max().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// A level of a deep `Json` value: an array or an object that holds the
+/// level below it between two optional siblings.
+#[derive(Clone, Debug)]
+struct Level {
+    obj: bool,
+    key: String,
+    before: Option<Json>,
+    after: Option<Json>,
+}
+
+impl Level {
+    /// The entries of the level around `inner`, with object keys.
+    fn entries<T>(&self, inner: T, sibling: impl Fn(&Json) -> T) -> Vec<(String, T)> {
+        let before = self.before.as_ref().map(|j| (format!("{}<", self.key), sibling(j)));
+        let after = self.after.as_ref().map(|j| (format!("{}>", self.key), sibling(j)));
+        before.into_iter().chain([(self.key.clone(), inner)]).chain(after).collect()
+    }
+
+    fn wrap(&self, inner: Json) -> Json {
+        let entries = self.entries(inner, Json::clone);
+        match self.obj {
+            true => Json::Obj(entries.into_iter().collect()),
+            false => Json::Arr(entries.into_iter().map(|(_, j)| j).collect()),
+        }
+    }
+
+    /// A Sand statement that wraps `j` in this level.
+    fn wrap_lit(&self) -> String {
+        let entries = self.entries("j".to_string(), json_lit);
+        match self.obj {
+            true => {
+                let entries: Vec<String> = entries.iter().map(|(k, v)| format!("{}: {v}", str_lit(k))).collect();
+                format!("j = json.Json.Obj([{}])", entries.join(", "))
+            }
+            false => format!("j = json.Json.Arr([{}])", entries.into_iter().map(|(_, v)| v).collect::<Vec<_>>().join(", ")),
+        }
+    }
+}
+
+fn level() -> impl Strategy<Value = Level> {
+    (any::<bool>(), text(), prop::option::of(json_leaf()), prop::option::of(json_leaf())).prop_map(|(obj, key, before, after)| Level {
+        obj,
+        key,
+        before,
+        after,
+    })
+}
+
+/// Levels around a `json()` value: few, or enough to cross the 512 nesting limit.
+fn levels() -> impl Strategy<Value = Vec<Level>> {
+    prop_oneof![prop::collection::vec(level(), 0..8), prop::collection::vec(level(), 500..520)]
 }
 
 fn sum_module() -> NativeModule {
@@ -309,6 +392,48 @@ proptest! {
         prop_assert!(r.is_ok(), "{r:?}\n{src}");
         prop_assert_eq!(out, "true\ntrue\n");
         prop_assert_eq!(seen.lock().unwrap().clone(), vec![value.clone(), value]);
+    }
+
+    #[test]
+    fn deep_json_values_round_trip_on_a_small_stack(
+        bottom in json(),
+        levels in levels(),
+        from_rust in any::<bool>(),
+        gc_stress in any::<bool>(),
+    ) {
+        let value = levels.iter().fold(bottom.clone(), |j, l| l.wrap(j));
+        let build = match from_rust {
+            true => "var j = doc.make()".to_string(),
+            false => {
+                let wraps: Vec<String> = levels.iter().map(Level::wrap_lit).collect();
+                format!("var j = {}\n{}", json_lit(&bottom), wraps.join("\n"))
+            }
+        };
+        let src = format!("import doc\nimport json\n{build}\nprint(doc.echo(j) == j)");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (s, made, script) = (seen.clone(), value.clone(), src.clone());
+        let engine = move || {
+            let mut m = NativeModule::new("doc");
+            m.function("echo", move |j: Json| {
+                s.lock().unwrap().push(j.clone());
+                j
+            });
+            m.function("make", move || made.clone());
+            run(Config::new().module(m).gc_stress(gc_stress), &script)
+        };
+        let (r, out) = std::thread::Builder::new().stack_size(512 << 10).spawn(engine).unwrap().join().unwrap();
+        if json_depth(&value) <= 512 {
+            prop_assert!(r.is_ok(), "{r:?}\n{src}");
+            prop_assert_eq!(out, "true\n");
+            prop_assert_eq!(seen.lock().unwrap().clone(), vec![value]);
+        } else {
+            let message = match r {
+                Err(Error::Runtime { message, .. }) => message,
+                r => return Err(TestCaseError::fail(format!("expected a runtime error, got {r:?}"))),
+            };
+            prop_assert_eq!(message, "limit: value too deeply nested to convert");
+            prop_assert!(seen.lock().unwrap().is_empty());
+        }
     }
 
     #[test]
