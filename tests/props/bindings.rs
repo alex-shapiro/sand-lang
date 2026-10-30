@@ -168,7 +168,6 @@ fn json() -> impl Strategy<Value = Json> {
     })
 }
 
-/// A Sand expression that builds `j`.
 fn json_lit(j: &Json) -> String {
     match j {
         Json::Null => "json.Json.Null".into(),
@@ -185,7 +184,6 @@ fn json_lit(j: &Json) -> String {
     }
 }
 
-/// The number of nested arrays and objects in `j`.
 fn json_depth(j: &Json) -> usize {
     match j {
         Json::Arr(items) => 1 + items.iter().map(json_depth).max().unwrap_or(0),
@@ -194,18 +192,15 @@ fn json_depth(j: &Json) -> usize {
     }
 }
 
-/// A level of a deep `Json` value: an array or an object that holds the
-/// level below it between two optional siblings.
 #[derive(Clone, Debug)]
-struct Level {
-    obj: bool,
+struct JsonLayer {
+    is_object: bool,
     key: String,
     before: Option<Json>,
     after: Option<Json>,
 }
 
-impl Level {
-    /// The entries of the level around `inner`, with object keys.
+impl JsonLayer {
     fn entries<T>(&self, inner: T, sibling: impl Fn(&Json) -> T) -> Vec<(String, T)> {
         let before = self.before.as_ref().map(|j| (format!("{}<", self.key), sibling(j)));
         let after = self.after.as_ref().map(|j| (format!("{}>", self.key), sibling(j)));
@@ -214,16 +209,15 @@ impl Level {
 
     fn wrap(&self, inner: Json) -> Json {
         let entries = self.entries(inner, Json::clone);
-        match self.obj {
+        match self.is_object {
             true => Json::Obj(entries.into_iter().collect()),
             false => Json::Arr(entries.into_iter().map(|(_, j)| j).collect()),
         }
     }
 
-    /// A Sand statement that wraps `j` in this level.
-    fn wrap_lit(&self) -> String {
+    fn wrap_stmt(&self) -> String {
         let entries = self.entries("j".to_string(), json_lit);
-        match self.obj {
+        match self.is_object {
             true => {
                 let entries: Vec<String> = entries.iter().map(|(k, v)| format!("{}: {v}", str_lit(k))).collect();
                 format!("j = json.Json.Obj([{}])", entries.join(", "))
@@ -233,18 +227,13 @@ impl Level {
     }
 }
 
-fn level() -> impl Strategy<Value = Level> {
-    (any::<bool>(), text(), prop::option::of(json_leaf()), prop::option::of(json_leaf())).prop_map(|(obj, key, before, after)| Level {
-        obj,
-        key,
-        before,
-        after,
-    })
+fn json_layer() -> impl Strategy<Value = JsonLayer> {
+    (any::<bool>(), text(), prop::option::of(json_leaf()), prop::option::of(json_leaf()))
+        .prop_map(|(is_object, key, before, after)| JsonLayer { is_object, key, before, after })
 }
 
-/// Levels around a `json()` value: few, or enough to cross the 512 nesting limit.
-fn levels() -> impl Strategy<Value = Vec<Level>> {
-    prop_oneof![prop::collection::vec(level(), 0..8), prop::collection::vec(level(), 500..520)]
+fn json_layers() -> impl Strategy<Value = Vec<JsonLayer>> {
+    prop_oneof![prop::collection::vec(json_layer(), 0..8), prop::collection::vec(json_layer(), 500..520)]
 }
 
 fn sum_module() -> NativeModule {
@@ -395,17 +384,17 @@ proptest! {
     }
 
     #[test]
-    fn deep_json_values_round_trip_on_a_small_stack(
+    fn round_trip_deep_json_values_on_small_stack(
         bottom in json(),
-        levels in levels(),
+        layers in json_layers(),
         from_rust in any::<bool>(),
         gc_stress in any::<bool>(),
     ) {
-        let value = levels.iter().fold(bottom.clone(), |j, l| l.wrap(j));
+        let value = layers.iter().fold(bottom.clone(), |j, l| l.wrap(j));
         let build = match from_rust {
             true => "var j = doc.make()".to_string(),
             false => {
-                let wraps: Vec<String> = levels.iter().map(Level::wrap_lit).collect();
+                let wraps: Vec<String> = layers.iter().map(JsonLayer::wrap_stmt).collect();
                 format!("var j = {}\n{}", json_lit(&bottom), wraps.join("\n"))
             }
         };

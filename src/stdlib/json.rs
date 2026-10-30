@@ -1,11 +1,9 @@
-//! The `json` module: a JSON parser and printer, plus reflection-based
-//! conversion between JSON and typed values (`encode`, `decode`, `to_json`).
+//! JSON parsing, encoding, and reflection-based conversion between JSON and Sand values.
 //!
-//! Parsing and conversion build their results with `Heap::staged`, reading
-//! the input text (or the value converted) where it lives on the heap:
-//! strings are copied once, from the input into their heap objects, and
-//! object keys that repeat within a document share one string. Encoding
-//! walks the value on the heap and writes the text directly.
+//! `parse`, `decode`, `to_json`, and Rust `Json` conversion stage output values with
+//! `Heap::staged` while reading input directly from the heap. Each string is copied
+//! once into a heap object, and repeated object keys share a single heap string.
+//! `encode` traverses heap values directly and writes serialized JSON into an output buffer.
 
 use super::base64;
 use crate::check::ModKind;
@@ -28,16 +26,18 @@ use hashbrown::HashTable;
 use std::borrow::Cow;
 use std::fmt::Write;
 
-/// Maximum nesting of arrays and objects, both when parsing and printing.
+/// Maximum nesting depth of JSON arrays and objects.
 const MAX_DEPTH: usize = 512;
 
-/// Approximate heap cost of one value built (a string, list, map or struct
-/// header), checked against the memory limit before each.
-const NODE: usize = 64;
+/// Estimated heap size in bytes of a staged string, list, map, or struct header.
+const NODE_BYTES: usize = 64;
 
-/// A dynamic JSON value. Plain integers that fit in a 64-bit signed `int` parse
-/// as `Int`; all other numbers parse as `Float`. Object entries preserve
-/// insertion order.
+/// A dynamic JSON value.
+///
+/// `json.parse` decodes integers without a fraction or exponent that fit in a
+/// 64-bit signed `int` as `Int`, and all other numbers as `Float`. Object
+/// entries preserve insertion order. Conversion between Sand and Rust supports
+/// up to 512 nested arrays and objects.
 #[derive(Clone, Debug, PartialEq, crate::SandEnum)]
 #[sand(module = "json", manual_conversion)]
 pub enum Json {
@@ -235,44 +235,43 @@ fn into_result<T>(r: PResult<Value>) -> Result<Val<T>, HostError> {
 // ---------------------------------------------------------------------------
 // Building values
 
-/// Object keys longer than this are not shared between occurrences.
-const MAX_SHARED_KEY: usize = 64;
-/// Distinct keys shared per call, at most.
+/// Maximum byte length of a deduplicated object key.
+const MAX_SHARED_KEY_LEN: usize = 64;
+/// Maximum number of distinct object keys deduplicated per operation.
 const MAX_SHARED_KEYS: usize = 4096;
-/// Maps being assembled look their keys up by a scan up to this size, and
-/// through a hash index beyond.
+/// Maximum number of entries in an in-progress map before [`Build`] switches
+/// from linear scan to a hash index.
 const SCANNED_KEYS: usize = 16;
 
-/// Builds staged values: checks memory, shares repeated object keys, and
-/// assembles maps outside the heap (keys are hashed by their text, as staged
-/// strings cannot be read back from the heap yet).
+/// Stages lists, maps, and deduplicated object keys while tracking temporary
+/// memory against the heap limit.
+///
+/// Staged strings cannot be read from the heap before commit, so map keys are
+/// hashed and compared by their text in `entries`.
 struct Build<'a, 's, 'h> {
     heap: &'a Heap,
     st: &'s mut Staging<'h>,
     meter: &'a Meter,
-    /// Bytes held by the lists and maps being assembled, and by `keys`.
+    /// Temporary bytes allocated in `keys`, `entries`, and in-progress list buffers.
     pending: usize,
-    /// The strings of object keys seen so far, with their texts and hashes.
+    /// Deduplicated object key strings indexed by hash.
     keys: HashTable<(u64, Cow<'a, str>, Value)>,
-    /// The entries of the maps being assembled (each map's entries follow
-    /// those of the maps enclosing it).
+    /// Flattened stack of entries for all in-progress maps.
     entries: Vec<Entry<'a>>,
 }
 
-/// An entry of a map being assembled.
 struct Entry<'a> {
     hash: u64,
-    /// The key's text, if it is a string (other keys are inline values:
-    /// numbers, booleans, payload-less variants).
+    /// Key text for string keys, or `None` for inline keys.
     text: Option<Cow<'a, str>>,
     key: Value,
     value: Value,
 }
 
-/// A map being assembled by [`Build`]: its entries are `entries[base..]`.
+/// An in-progress map whose entries start at `Build::entries[base..]`.
 struct MapBuild {
     base: usize,
-    /// The slots of the entries by hash, once there are many.
+    /// Hash index over `entries[base..]`, allocated after the map exceeds `SCANNED_KEYS` entries.
     index: Option<KeyTable>,
 }
 
@@ -281,19 +280,17 @@ impl<'a, 's, 'h> Build<'a, 's, 'h> {
         Build { heap, st, meter, pending: 0, keys: HashTable::new(), entries: Vec::new() }
     }
 
-    /// Checks that a value's heap objects fit besides those being assembled.
     fn reserve(&self) -> Result<(), Ctl> {
-        self.st.check_memory(NODE + self.pending)
+        self.st.check_memory(NODE_BYTES + self.pending)
     }
 
-    /// Appends `v` to a list being assembled, checking its buffer's growth
-    /// against the memory limit first: elements that are inline values
-    /// (numbers, booleans, `null`) stage no object, so the buffer would
-    /// otherwise grow unchecked until the list is complete.
+    /// Appends `v` to `items` after checking list buffer growth against the
+    /// memory limit. Inline values do not allocate heap objects during staging,
+    /// so `items` must be metered as it grows.
     fn push(&mut self, items: &mut Vec<Value>, v: Value) -> Result<(), Ctl> {
         if items.len() == items.capacity() {
             let more = items.capacity().max(4);
-            self.st.check_memory((NODE + self.pending).saturating_add(more.saturating_mul(2 * std::mem::size_of::<Value>())))?;
+            self.st.check_memory((NODE_BYTES + self.pending).saturating_add(more.saturating_mul(2 * std::mem::size_of::<Value>())))?;
             let before = items.capacity();
             items.reserve_exact(more);
             self.pending += (items.capacity() - before) * std::mem::size_of::<Value>();
@@ -302,29 +299,27 @@ impl<'a, 's, 'h> Build<'a, 's, 'h> {
         Ok(())
     }
 
-    /// Stages a list assembled with [`Build::push`].
+    /// Commits a list assembled with [`Build::push`] to staging.
     fn list(&mut self, items: Vec<Value>) -> Value {
         self.pending = self.pending.saturating_sub(items.capacity() * std::mem::size_of::<Value>());
         self.st.new_list(items)
     }
 
-    /// The hash of a string key with text `text`, charging for it.
     fn hash(&self, text: &str) -> Result<u64, Ctl> {
         self.meter.charge_bytes(text.len())?;
         Ok(str_hash(text))
     }
 
-    /// The string of object key `key` (whose hash is `hash`): shared with
-    /// earlier occurrences of the same key (strings are immutable).
-    // A `Cow`, to keep a borrowed key borrowed in the table.
+    /// Returns a staged string for `key`, reusing an existing string if `key`
+    /// was already interned.
     #[allow(clippy::ptr_arg)]
     fn key(&mut self, key: &Cow<'a, str>, hash: u64) -> Value {
         if let Some(&(_, _, v)) = self.keys.find(hash, |e| e.1 == *key) {
             return v;
         }
         let v = self.st.new_str(&**key);
-        if key.len() <= MAX_SHARED_KEY && self.keys.len() < MAX_SHARED_KEYS {
-            self.pending += 2 * NODE + key.len();
+        if key.len() <= MAX_SHARED_KEY_LEN && self.keys.len() < MAX_SHARED_KEYS {
+            self.pending += 2 * NODE_BYTES + key.len();
             self.keys.insert_unique(hash, (hash, key.clone(), v), |e| e.0);
         }
         v
@@ -334,8 +329,7 @@ impl<'a, 's, 'h> Build<'a, 's, 'h> {
         MapBuild { base: self.entries.len(), index: None }
     }
 
-    /// Adds the entry `key: value` to `m`, replacing the entry of an equal
-    /// key. `text` is the key's text if it is a string, and `hash` its hash.
+    /// Inserts `key: value` into `m`, replacing any existing entry with an equal key.
     fn put(&mut self, m: &mut MapBuild, hash: u64, text: Option<Cow<'a, str>>, key: Value, value: Value) -> Result<(), Ctl> {
         let segment = &self.entries[m.base..];
         let same = |e: &Entry| {
@@ -380,8 +374,9 @@ impl<'a, 's, 'h> Build<'a, 's, 'h> {
         Ok(())
     }
 
-    /// Adds the entry `key: value` to `m`, whose keys all differ from `key`.
-    /// A map takes entries through either `append` or [`Build::put`], not both.
+    /// Appends `key: value` to `m` without checking for duplicate keys. Callers
+    /// must ensure that all keys in `m` are distinct and must not mix `append`
+    /// and [`Build::put`] on the same `MapBuild`.
     fn append(&mut self, m: &MapBuild, hash: u64, key: Value, value: Value) -> Result<(), Ctl> {
         if !slot_fits(self.entries.len() - m.base) {
             return fail("limit", "map too large");
@@ -391,7 +386,7 @@ impl<'a, 's, 'h> Build<'a, 's, 'h> {
         Ok(())
     }
 
-    /// Stages a map assembled with [`Build::put`] or [`Build::append`].
+    /// Commits a map assembled with [`Build::put`] or [`Build::append`] to staging.
     fn map(&mut self, m: MapBuild) -> Value {
         let n = self.entries.len() - m.base;
         let index = KeyIndex::for_keys(n, self.entries[m.base..].iter().map(|e| e.key));
@@ -406,7 +401,6 @@ impl<'a, 's, 'h> Build<'a, 's, 'h> {
     }
 }
 
-/// Bytes counted per entry of a map being assembled.
 const ENTRY_PENDING: usize = std::mem::size_of::<Entry>() + MAP_ENTRY_SIZE;
 
 // ---------------------------------------------------------------------------
@@ -440,52 +434,51 @@ impl IntoValue for Json {
     }
 }
 
-/// A depth-first conversion of a tree of arrays and objects. [`walk`] keeps
-/// the open containers in a `Vec`, so the stack use does not depend on the
-/// depth of the tree.
+/// Visitor for iterative depth-first conversion of nested JSON arrays and objects.
 trait Walk {
     type Node;
-    /// A container whose children are being converted.
     type Frame;
     type Out;
 
-    /// Converts a leaf, or pushes the frame of a container onto `open` and
-    /// returns `None`.
-    fn open(&mut self, node: Self::Node, open: &mut Vec<Self::Frame>) -> Result<Option<Self::Out>, Ctl>;
-    /// The next child of `f`, or `None` after the last child.
-    fn next(&mut self, f: &mut Self::Frame) -> Result<Option<Self::Node>, Ctl>;
-    /// Adds the converted child that [`Walk::next`] returned last to `f`.
-    fn put(&mut self, f: &mut Self::Frame, child: Self::Out) -> Result<(), Ctl>;
-    fn close(&mut self, f: Self::Frame) -> Self::Out;
+    /// Converts a leaf node directly, or pushes a container frame onto `stack`
+    /// and returns `None`.
+    fn open(&mut self, node: Self::Node, stack: &mut Vec<Self::Frame>) -> Result<Option<Self::Out>, Ctl>;
+    /// Returns the next child of `frame`, or `None` if all children are converted.
+    fn next(&mut self, frame: &mut Self::Frame) -> Result<Option<Self::Node>, Ctl>;
+    /// Appends a converted child value to `frame`.
+    fn put(&mut self, frame: &mut Self::Frame, child: Self::Out) -> Result<(), Ctl>;
+    /// Finishes `frame` and returns the converted container.
+    fn close(&mut self, frame: Self::Frame) -> Self::Out;
 }
 
-/// Converts `root`, failing if it has more than [`MAX_DEPTH`] nested containers.
+/// Converts `root` iteratively using an explicit frame stack, and fails if
+/// container nesting exceeds [`MAX_DEPTH`].
 fn walk<W: Walk>(w: &mut W, root: W::Node) -> Result<W::Out, Ctl> {
-    let mut open = Vec::new();
-    if let Some(out) = w.open(root, &mut open)? {
+    let mut stack = Vec::new();
+    if let Some(out) = w.open(root, &mut stack)? {
         return Ok(out);
     }
-    while let Some(top) = open.last_mut() {
+    while let Some(top) = stack.last_mut() {
         let out = match w.next(top)? {
-            Some(child) => match w.open(child, &mut open)? {
+            Some(child) => match w.open(child, &mut stack)? {
                 Some(out) => out,
-                None if open.len() > MAX_DEPTH => return fail("limit", "value too deeply nested to convert"),
+                None if stack.len() > MAX_DEPTH => return fail("limit", "value too deeply nested to convert"),
                 None => continue,
             },
-            None => match open.pop() {
-                Some(f) => w.close(f),
+            None => match stack.pop() {
+                Some(frame) => w.close(frame),
                 None => break,
             },
         };
-        match open.last_mut() {
+        match stack.last_mut() {
             Some(top) => w.put(top, out)?,
             None => return Ok(out),
         }
     }
-    internal("json: a walk without a result")
+    internal("json: empty conversion stack")
 }
 
-/// Reads `json.Json` values on the heap into Rust [`Json`] values.
+/// Converts heap `json.Json` values into Rust [`Json`] values.
 struct Reader<'h, 'c> {
     vm: &'h Vm,
     ids: JsonIds,
@@ -494,12 +487,12 @@ struct Reader<'h, 'c> {
 
 enum ReadFrame<'h> {
     Arr(Vec<Json>, std::slice::Iter<'h, Value>),
-    /// An object, the remaining entries, and the key of the entry being read.
+    /// In-progress object map, remaining heap map entries, and current entry key.
     Obj(indexmap::IndexMap<String, Json>, std::slice::Iter<'h, Option<(Value, Value)>>, String),
 }
 
-/// Rust memory held per object entry: the entry and its slot in the hash index.
-const OBJ_ENTRY: usize = std::mem::size_of::<(u64, String, Json)>() + std::mem::size_of::<usize>();
+/// Estimated heap bytes per `IndexMap<String, Json>` entry, including the hash table bucket.
+const OBJ_ENTRY_BYTES: usize = std::mem::size_of::<(u64, String, Json)>() + std::mem::size_of::<usize>();
 
 impl<'h> Reader<'h, '_> {
     fn string(&mut self, v: Value) -> Result<String, Ctl> {
@@ -519,7 +512,7 @@ impl<'h> Walk for Reader<'h, '_> {
     type Frame = ReadFrame<'h>;
     type Out = Json;
 
-    fn open(&mut self, v: Value, open: &mut Vec<ReadFrame<'h>>) -> Result<Option<Json>, Ctl> {
+    fn open(&mut self, v: Value, stack: &mut Vec<ReadFrame<'h>>) -> Result<Option<Json>, Ctl> {
         let (vm, ids) = (self.vm, self.ids);
         vm.charge(1)?;
         let id = vm.heap.variant_id(v);
@@ -536,23 +529,23 @@ impl<'h> Walk for Reader<'h, '_> {
                 let Obj::List(items) = vm.heap.get(payload) else { return Err(mismatch::<Json>()) };
                 self.conv.alloc(vm, items.len().saturating_mul(std::mem::size_of::<Json>()))?;
                 vm.charge(items.len() as u64)?;
-                open.push(ReadFrame::Arr(Vec::with_capacity(items.len()), items.iter()));
+                stack.push(ReadFrame::Arr(Vec::with_capacity(items.len()), items.iter()));
                 return Ok(None);
             }
             _ if id == ids.obj => {
                 let Obj::Map(m) = vm.heap.get(payload) else { return Err(mismatch::<Json>()) };
-                self.conv.alloc(vm, m.live.saturating_mul(OBJ_ENTRY))?;
+                self.conv.alloc(vm, m.live.saturating_mul(OBJ_ENTRY_BYTES))?;
                 vm.charge(m.live as u64)?;
                 let fields = indexmap::IndexMap::with_capacity(m.live);
-                open.push(ReadFrame::Obj(fields, m.entries.iter(), String::new()));
+                stack.push(ReadFrame::Obj(fields, m.entries.iter(), String::new()));
                 return Ok(None);
             }
             _ => return Err(mismatch::<Json>()),
         }))
     }
 
-    fn next(&mut self, f: &mut ReadFrame<'h>) -> Result<Option<Value>, Ctl> {
-        Ok(match f {
+    fn next(&mut self, frame: &mut ReadFrame<'h>) -> Result<Option<Value>, Ctl> {
+        Ok(match frame {
             ReadFrame::Arr(_, items) => items.next().copied(),
             ReadFrame::Obj(_, entries, key) => match entries.find_map(|e| *e) {
                 Some((k, v)) => {
@@ -564,8 +557,8 @@ impl<'h> Walk for Reader<'h, '_> {
         })
     }
 
-    fn put(&mut self, f: &mut ReadFrame<'h>, child: Json) -> Result<(), Ctl> {
-        match f {
+    fn put(&mut self, frame: &mut ReadFrame<'h>, child: Json) -> Result<(), Ctl> {
+        match frame {
             ReadFrame::Arr(items, _) => items.push(child),
             ReadFrame::Obj(fields, _, key) => {
                 fields.insert(std::mem::take(key), child);
@@ -574,15 +567,15 @@ impl<'h> Walk for Reader<'h, '_> {
         Ok(())
     }
 
-    fn close(&mut self, f: ReadFrame<'h>) -> Json {
-        match f {
+    fn close(&mut self, frame: ReadFrame<'h>) -> Json {
+        match frame {
             ReadFrame::Arr(items, _) => Json::Arr(items),
             ReadFrame::Obj(fields, _, _) => Json::Obj(fields),
         }
     }
 }
 
-/// Stages Rust [`Json`] values as `json.Json` values.
+/// Converts Rust [`Json`] values into staged heap `json.Json` values.
 struct Writer<'a, 's, 'h> {
     b: Build<'a, 's, 'h>,
     ids: JsonIds,
@@ -590,8 +583,7 @@ struct Writer<'a, 's, 'h> {
 
 enum WriteFrame {
     Arr(std::vec::IntoIter<Json>, Vec<Value>),
-    /// An object, the remaining entries, and the key and hash of the entry
-    /// being written.
+    /// In-progress map, remaining object entries, and current key and hash.
     Obj(indexmap::map::IntoIter<String, Json>, MapBuild, String, u64),
 }
 
@@ -600,7 +592,7 @@ impl Walk for Writer<'_, '_, '_> {
     type Frame = WriteFrame;
     type Out = Value;
 
-    fn open(&mut self, j: Json, open: &mut Vec<WriteFrame>) -> Result<Option<Value>, Ctl> {
+    fn open(&mut self, j: Json, stack: &mut Vec<WriteFrame>) -> Result<Option<Value>, Ctl> {
         let (b, ids) = (&mut self.b, self.ids);
         b.reserve()?;
         b.meter.charge(1)?;
@@ -610,24 +602,24 @@ impl Walk for Writer<'_, '_, '_> {
             Json::Int(i) => b.st.new_variant(ids.int, &[Value::Int(i)]),
             Json::Float(f) => b.st.new_variant(ids.float, &[Value::Float(f)]),
             Json::Str(s) => {
-                b.st.check_memory((NODE + b.pending).saturating_add(s.len()))?;
+                b.st.check_memory((NODE_BYTES + b.pending).saturating_add(s.len()))?;
                 b.meter.charge_bytes(s.len())?;
                 let s = b.st.new_str(s);
                 b.st.new_variant(ids.str_, &[s])
             }
             Json::Arr(items) => {
-                open.push(WriteFrame::Arr(items.into_iter(), Vec::new()));
+                stack.push(WriteFrame::Arr(items.into_iter(), Vec::new()));
                 return Ok(None);
             }
             Json::Obj(fields) => {
-                open.push(WriteFrame::Obj(fields.into_iter(), b.start_map(), String::new(), 0));
+                stack.push(WriteFrame::Obj(fields.into_iter(), b.start_map(), String::new(), 0));
                 return Ok(None);
             }
         }))
     }
 
-    fn next(&mut self, f: &mut WriteFrame) -> Result<Option<Json>, Ctl> {
-        Ok(match f {
+    fn next(&mut self, frame: &mut WriteFrame) -> Result<Option<Json>, Ctl> {
+        Ok(match frame {
             WriteFrame::Arr(items, _) => items.next(),
             WriteFrame::Obj(entries, _, key, hash) => match entries.next() {
                 Some((k, v)) => {
@@ -640,8 +632,8 @@ impl Walk for Writer<'_, '_, '_> {
         })
     }
 
-    fn put(&mut self, f: &mut WriteFrame, child: Value) -> Result<(), Ctl> {
-        match f {
+    fn put(&mut self, frame: &mut WriteFrame, child: Value) -> Result<(), Ctl> {
+        match frame {
             WriteFrame::Arr(_, out) => self.b.push(out, child),
             WriteFrame::Obj(_, m, key, hash) => {
                 let k = self.b.key(&Cow::Owned(std::mem::take(key)), *hash);
@@ -650,9 +642,9 @@ impl Walk for Writer<'_, '_, '_> {
         }
     }
 
-    fn close(&mut self, f: WriteFrame) -> Value {
+    fn close(&mut self, frame: WriteFrame) -> Value {
         let ids = self.ids;
-        match f {
+        match frame {
             WriteFrame::Arr(_, out) => {
                 let list = self.b.list(out);
                 self.b.st.new_variant(ids.arr, &[list])
@@ -668,7 +660,7 @@ impl Walk for Writer<'_, '_, '_> {
 // ---------------------------------------------------------------------------
 // Parsing
 
-/// A JSON number, kept as text so integers convert exactly.
+/// Unparsed JSON number slice.
 struct Number<'a> {
     text: &'a str,
     is_int: bool,
@@ -679,8 +671,9 @@ impl Number<'_> {
         self.text.parse().unwrap_or(f64::NAN)
     }
 
-    /// The number as a `json.Json` payload: an `int` if it is written without
-    /// a fraction or exponent and fits (`-0` stays a float, keeping its sign).
+    /// Parses the number as an `Int` payload if it does not have a fraction or
+    /// exponent, is not `-0`, and fits in an `i64`; otherwise parses it as a
+    /// `Float` payload.
     fn value(&self) -> Value {
         match self.text.parse::<i64>() {
             Ok(i) if self.is_int && !(i == 0 && self.text.starts_with('-')) => Value::Int(i),
@@ -688,7 +681,7 @@ impl Number<'_> {
         }
     }
 
-    /// The value if it is integral and fits in an `int`.
+    /// Parses the number as an `i64` if it is an integer within `i64` range.
     fn int(&self) -> Option<i64> {
         if self.is_int {
             return self.text.parse().ok();
@@ -703,7 +696,7 @@ struct Parser<'a> {
     b: &'a [u8],
     pos: usize,
     depth: usize,
-    /// Input consumed up to here has been charged to the meter.
+    /// Byte offset up to which input has been charged to the meter.
     charged: usize,
 }
 
@@ -712,8 +705,7 @@ impl<'a> Parser<'a> {
         Parser { src, b: src.as_bytes(), pos: 0, depth: 0, charged: 0 }
     }
 
-    /// Charges one unit per value plus the input consumed since the last
-    /// charge, so that parsing huge documents costs fuel and can be stopped.
+    /// Charges fuel for a parsed value and any input bytes consumed since the last charge.
     fn charge(&mut self, meter: &Meter) -> Result<(), Ctl> {
         let consumed = self.pos.saturating_sub(self.charged);
         self.charged = self.pos;
@@ -729,7 +721,6 @@ impl<'a> Parser<'a> {
         Error::Parse(format!("{what} at line {line}, column {col}"))
     }
 
-    /// An error for whatever is at the current position.
     fn unexpected(&self) -> Error {
         match self.src.get(self.pos..).and_then(|s| s.chars().next()) {
             None => self.err_at(self.pos, "unexpected end of input"),
@@ -755,7 +746,6 @@ impl<'a> Parser<'a> {
         hit
     }
 
-    /// Requires the end of input (after whitespace).
     fn finish(&mut self) -> PResult<()> {
         self.ws();
         if self.pos < self.b.len() { Err(self.unexpected()) } else { Ok(()) }
@@ -822,9 +812,8 @@ impl<'a> Parser<'a> {
         Ok(u32::from_str_radix(h, 16).unwrap_or(0))
     }
 
-    /// A string literal; the current byte is the opening quote. Borrowed
-    /// from the input unless it has escapes; with `keep` false the text is
-    /// only validated (the result is then meaningless).
+    /// Parses a JSON string starting at the opening quote. If `keep` is false,
+    /// validates the string without accumulating decoded characters.
     fn string(&mut self, keep: bool) -> PResult<Cow<'a, str>> {
         self.pos += 1;
         let mut out: Option<String> = None;
@@ -898,7 +887,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Skips a value without building it (still validating its syntax).
+    /// Validates and skips a single JSON value without staging heap objects.
     fn skip(&mut self) -> PResult<()> {
         self.ws();
         match self.peek() {
@@ -913,8 +902,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parses a value into a `json.Json`. Every `Json` value is a tag or an
-    /// inline variant, so only its payload's objects are staged.
+    /// Parses a JSON value into a staged `json.Json` value.
     fn parse_json(&mut self, b: &mut Build<'a, '_, '_>, ids: &JsonIds) -> PResult<Value> {
         self.ws();
         self.charge(b.meter)?;
@@ -963,12 +951,11 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// Iteration over arrays and objects, shared by the untyped parser and the
-/// typed decoder (whose callbacks need the decoder's state).
+/// Delimiter handling for JSON arrays and objects, shared by [`Parser`] and [`Decoder`].
 trait Source<'a>: Sized {
     fn parser(&mut self) -> &mut Parser<'a>;
 
-    /// Parses `[v, ...]`, calling `f` with the parser before each element.
+    /// Parses a JSON array and calls `f` to parse each element.
     fn array(&mut self, mut f: impl FnMut(&mut Self, usize) -> PResult<()>) -> PResult<()> {
         self.parser().enter()?;
         self.parser().ws();
@@ -991,8 +978,8 @@ trait Source<'a>: Sized {
         Ok(())
     }
 
-    /// Parses `{"key": v, ...}`, calling `f` with each key (meaningless
-    /// unless `keys`) before its value.
+    /// Parses a JSON object and calls `f` for each entry. Decodes key escapes
+    /// only if `keys` is true.
     fn object(&mut self, keys: bool, mut f: impl FnMut(&mut Self, Cow<'a, str>) -> PResult<()>) -> PResult<()> {
         self.parser().enter()?;
         self.parser().ws();
@@ -1038,7 +1025,8 @@ enum Seg<'a> {
     Index(usize),
 }
 
-/// Structs with more fields than this find them through a hash index.
+/// Maximum number of struct fields searched by linear scan before [`Decoder`]
+/// builds a hash index.
 const INDEXED_FIELDS: usize = 8;
 
 /// Decodes JSON text into values described by a [`TypeDesc`].
@@ -1056,7 +1044,7 @@ struct Decoder<'a, 'd, 's, 'h> {
     indexes: FxHashMap<u32, FxHashMap<&'d str, usize>>,
     /// Staged sets and maps to populate after their elements are committed to the heap.
     fills: Vec<Fill>,
-    /// Deferred thunks that evaluate computed field defaults and populate sets (see [`Decoded::Pending`]).
+    /// Deferred closures that evaluate computed field defaults and populate sets.
     thunks: Vec<Value>,
 }
 
@@ -1072,16 +1060,14 @@ impl<'a> Source<'a> for Decoder<'a, '_, '_, '_> {
     }
 }
 
-/// Names compared per fuel unit when looking up a key among the fields of a
-/// struct or the variants of an enum.
+/// Number of field or variant name comparisons per fuel unit.
 const LOOKUPS_PER_UNIT: usize = 16;
 
-/// The position of the first of `items` that `is` accepts, charging for the
-/// comparisons: a type may have thousands of fields, and a document may
-/// repeat a key that is not among them any number of times.
-fn lookup<T>(meter: &Meter, items: &[T], is: impl Fn(&T) -> bool) -> Result<Option<usize>, Ctl> {
+/// Returns the index of the first element in `items` that satisfies `pred`,
+/// charging fuel proportional to `items.len()`.
+fn lookup<T>(meter: &Meter, items: &[T], pred: impl Fn(&T) -> bool) -> Result<Option<usize>, Ctl> {
     meter.charge(1 + (items.len() / LOOKUPS_PER_UNIT) as u64)?;
-    Ok(items.iter().position(is))
+    Ok(items.iter().position(pred))
 }
 
 const QUOTED_KEY: usize = 64;
@@ -1126,8 +1112,6 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
         Error::Invalid(format!("{}: cannot decode {what}", self.path_str()))
     }
 
-    /// The error for a value of the wrong kind: a syntax error if there is no
-    /// value at all, otherwise `expected <what>`.
     fn mismatch(&self, what: &str) -> Error {
         match self.p.peek() {
             Some(b'n' | b't' | b'f' | b'"' | b'-' | b'0'..=b'9' | b'[' | b'{') => self.fail(&format!("expected {what}")),
@@ -1196,8 +1180,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                 Ok(self.b.st.new_bytes(b))
             }
             TypeDesc::Option(_) => {
-                // A loop, not recursion: the layers of `T??` read no JSON
-                // nesting, so the nesting limit does not bound them.
+                // Unwrap nested `Option` layers iteratively because `T??` does not consume JSON nesting depth.
                 let (mut inner, mut layers) = (t, 0);
                 while let TypeDesc::Option(e) = inner {
                     (inner, layers) = (e, layers + 1);
@@ -1298,7 +1281,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
             }
             TypeDesc::Range => self.decode_range(),
             TypeDesc::Unsupported(name) => Err(self.unsupported(&format!("values of type {name}"))),
-            TypeDesc::Param(_) => Err(Error::Ctl(Ctl::internal("json.decode: a type parameter without a description"))),
+            TypeDesc::Param(_) => Err(Error::Ctl(Ctl::internal("json.decode: uninstantiated type parameter"))),
         }
     }
 
@@ -1433,9 +1416,8 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
         Ok(self.b.st.alloc(Obj::Range(start, end, inclusive)))
     }
 
-    /// The field of struct `id` named `key`: `guess` (the field after the
-    /// last one found, as documents usually list fields in order) first,
-    /// then by an index (large structs) or a scan.
+    /// Looks up field `key` in struct `id`. Checks `guess` first for fields
+    /// that appear in declaration order, then uses a hash index or linear scan.
     fn field_index(&mut self, id: u32, fields: &'d [FieldDesc], key: &str, guess: usize) -> Result<Option<usize>, Ctl> {
         if fields.get(guess).is_some_and(|f| f.0 == key) {
             return Ok(Some(guess));
@@ -1454,8 +1436,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
         Ok(self.indexes[&id].get(key).copied())
     }
 
-    /// Converts an object key to a map key of type `t`, with its text if it
-    /// is a string.
+    /// Parses a JSON object key as a Sand map key of type `t`.
     fn map_key(&mut self, t: &TypeDesc, key: Cow<'a, str>) -> PResult<(Value, u64, Option<Cow<'a, str>>)> {
         let quoted = super::truncate(&key, QUOTED_KEY);
         let bad = |d: &Self| d.fail(&format!("invalid map key `{quoted}`"));
@@ -1489,8 +1470,6 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
         Ok((k, hash_key(self.b.heap, self.b.meter, k)?, None))
     }
 
-    /// An enum: `"Variant"` for payload-less variants, otherwise
-    /// `{"Variant": [payload...]}` or `{"Variant": {"field": ...}}`.
     fn decode_enum(&mut self, name: &str, variants: &'d [VariantDesc]) -> PResult<Value> {
         let find = |d: &Self, tag: &str| match lookup(d.b.meter, variants, |v| v.0 == tag)? {
             Some(i) => Ok(&variants[i]),
@@ -1566,8 +1545,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
 // ---------------------------------------------------------------------------
 // Encoding
 
-/// Writes the JSON text of values on the heap (spec §13.7), compact or
-/// pretty-printed.
+/// Serializes heap values to compact or pretty-printed JSON text.
 struct Encoder<'v> {
     prog: &'v Program,
     heap: &'v Heap,
@@ -1575,14 +1553,14 @@ struct Encoder<'v> {
     ids: JsonIds,
     indent: usize,
     out: String,
-    /// Output up to here has been charged to the meter.
+    /// Byte offset in `out` up to which output has been charged to the meter.
     charged: usize,
     scratch: Scratch,
 }
 
 impl Encoder<'_> {
-    /// Charges one unit per value plus the output written since the last
-    /// charge, and checks the output buffer against the memory limit.
+    /// Charges fuel for an encoded value and any output bytes written since the
+    /// last charge, and checks `out` capacity against the memory limit.
     fn step(&mut self) -> Result<(), Ctl> {
         let written = self.out.len() - self.charged;
         self.charged = self.out.len();
@@ -1608,7 +1586,6 @@ impl Encoder<'_> {
         Ok(())
     }
 
-    /// Writes `[items...]` (`len` items).
     fn array(&mut self, len: usize, items: impl Iterator<Item = Value>, level: usize) -> Result<(), Ctl> {
         if level >= MAX_DEPTH {
             return fail("limit", "value too deeply nested to encode as JSON");
@@ -1630,8 +1607,8 @@ impl Encoder<'_> {
         Ok(())
     }
 
-    /// Writes `{"key": value, ...}` (`len` entries); `entry` writes the key
-    /// of an entry and returns its value.
+    /// Writes a JSON object with `len` entries. `entry` writes each key and
+    /// returns the entry value.
     fn object<T>(
         &mut self,
         len: usize,
@@ -1664,7 +1641,6 @@ impl Encoder<'_> {
     fn value(&mut self, mut v: Value, level: usize) -> Result<(), Ctl> {
         self.step()?;
         let (prog, heap) = (self.prog, self.heap);
-        // `Some(x)` encodes as `x`.
         while heap.variant_id(v) == prog.ids.some {
             self.meter.charge(1)?;
             v = heap.field(v, 0).unwrap_or(Value::Unit);
@@ -1731,7 +1707,7 @@ impl Encoder<'_> {
     }
 
     fn variant(&mut self, id: u32, fields: &[Value], level: usize) -> Result<(), Ctl> {
-        let Some(rt) = self.prog.variants.get(id as usize) else { return internal("json.encode: a variant id without a variant") };
+        let Some(rt) = self.prog.variants.get(id as usize) else { return internal("json.encode: unknown variant ID") };
         if self.ids.has(id) {
             return self.value(fields.first().copied().unwrap_or(Value::Unit), level);
         }
@@ -1756,7 +1732,7 @@ impl Encoder<'_> {
     }
 }
 
-/// Formats finite floats with a fraction or exponent (`2.0`, `1e20`) and non-finite floats as `null`.
+/// Formats a finite float with a decimal point or exponent, or writes `null` if the float is non-finite.
 fn write_float(out: &mut String, f: f64) {
     if f.is_finite() {
         let _ = write!(out, "{f:?}");
@@ -1786,7 +1762,7 @@ fn format_map_key<'v>(prog: &'v Program, heap: &'v Heap, k: Value) -> Result<Cow
     })
 }
 
-/// The length of `s` as written by [`write_str`].
+/// Returns the byte length of `s` after JSON string escaping and quoting.
 fn escaped_len(s: &str) -> usize {
     let escapes: usize = s
         .bytes()
@@ -1830,16 +1806,16 @@ fn write_str(out: &mut String, s: &str) {
 // ---------------------------------------------------------------------------
 // Conversion to `Json` values
 
-/// Converts values on the heap to `json.Json` values (staged). Strings are
-/// shared, not copied: `Json.Str(s)` holds the converted string itself.
+/// Converts heap values into staged `json.Json` values, reusing existing heap
+/// strings without copying.
 struct Converter<'a, 's, 'h> {
     prog: &'a Program,
     heap: &'a Heap,
     b: Build<'a, 's, 'h>,
     ids: JsonIds,
-    /// The strings of the field names of each struct converted, by definition.
+    /// Cached heap strings for struct field names, indexed by struct definition ID.
     fields: FxHashMap<u32, Vec<Value>>,
-    /// The strings of the names of payload-less variants converted.
+    /// Cached heap strings for unit enum variant names, indexed by variant ID.
     names: FxHashMap<u32, Value>,
 }
 
@@ -1850,11 +1826,9 @@ impl<'a> Converter<'a, '_, '_> {
         self.b.meter.charge(1)?;
         loop {
             let id = heap.variant_id(v);
-            // `Json` values are shared.
             if ids.has(id) {
                 return Ok(v);
             }
-            // `Some(x)` converts as `x`.
             if id != prog.ids.some {
                 break;
             }
@@ -1959,7 +1933,6 @@ impl<'a> Converter<'a, '_, '_> {
         })
     }
 
-    /// Adds the entry `key: value` to `m`, where `key` is a string with text `text`.
     fn put(&mut self, m: &mut MapBuild, key: Value, text: Cow<'a, str>, value: Value) -> Result<(), Ctl> {
         let hash = self.b.hash(&text)?;
         self.b.put(m, hash, Some(text), key, value)
@@ -1969,7 +1942,6 @@ impl<'a> Converter<'a, '_, '_> {
         if depth >= MAX_DEPTH { fail("limit", "value too deeply nested to convert to JSON") } else { Ok(()) }
     }
 
-    /// The string of the name of variant `id` (one per call).
     fn variant_name(&mut self, id: u32) -> Value {
         let prog = self.prog;
         *self.names.entry(id).or_insert_with(|| self.b.st.new_str(prog.variants[id as usize].name.as_str()))
@@ -1986,10 +1958,9 @@ impl<'a> Converter<'a, '_, '_> {
         Ok(self.b.st.new_variant(self.ids.arr, &[list]))
     }
 
-    /// A variant with a payload: `{"Name": payload}`.
     fn variant(&mut self, id: u32, fields: &[Value], depth: usize) -> NResult {
         let (prog, ids) = (self.prog, self.ids);
-        let Some(rt) = prog.variants.get(id as usize) else { return internal("json.encode: a variant id without a variant") };
+        let Some(rt) = prog.variants.get(id as usize) else { return internal("json.encode: unknown variant ID") };
         self.check_depth(depth)?;
         let payload = match &rt.field_names {
             Some(names) => {

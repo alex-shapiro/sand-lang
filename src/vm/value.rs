@@ -421,16 +421,13 @@ pub fn int_hash(i: i64) -> u64 {
     h.finish()
 }
 
-/// The index of a map or set: the slots of its entries by key.
+/// Entry slot index for a map or set.
 ///
-/// While every key is a non-negative int below a bound proportional to the
-/// number of keys, the index is a table by key, which needs no hashing;
-/// otherwise it is a [`KeyTable`]. A dense index becomes hashed when a key
-/// does not fit; a hashed one may become dense again where it would grow
-/// (see [`KeyIndex::densify`]).
+/// Maps and sets whose keys are all small non-negative integers use a direct
+/// lookup table indexed by key; all other maps and sets use a [`KeyTable`].
 #[derive(Clone, Debug)]
 pub enum KeyIndex {
-    /// `slots[k]` is one more than the slot of key `k`, or 0.
+    /// Direct lookup table where `slots[k]` stores `slot + 1`, or `0` if empty.
     Dense {
         slots: Vec<u32>,
         count: usize,
@@ -444,21 +441,21 @@ impl Default for KeyIndex {
     }
 }
 
-/// Whether an int key `k` may be in a dense index of `count` keys.
 #[inline]
 fn dense_fits(k: i64, count: usize) -> bool {
     0 <= k && (k as u64) < 8 * count as u64 + 64
 }
 
 impl KeyIndex {
-    /// An empty index for the `n` keys `keys`: dense if they are small ints,
-    /// otherwise hashed with room for all `n`.
-    pub fn for_keys(n: usize, mut keys: impl Iterator<Item = Value>) -> KeyIndex {
-        if keys.all(|k| matches!(k, Value::Int(i) if dense_fits(i, n))) {
+    /// Creates an empty index for `count` keys. Returns a dense index if all
+    /// keys are small non-negative integers, or a hash index preallocated for
+    /// `count` entries.
+    pub fn for_keys(count: usize, mut keys: impl Iterator<Item = Value>) -> KeyIndex {
+        if keys.all(|k| matches!(k, Value::Int(i) if dense_fits(i, count))) {
             return KeyIndex::default();
         }
         let mut t = KeyTable::default();
-        t.reserve(n);
+        t.reserve(count);
         KeyIndex::Hashed(t)
     }
 
@@ -1669,7 +1666,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn indexes_for_known_keys_hold_them_all_without_growing() {
+    fn for_keys_selects_dense_or_preallocated_hashed_index() {
         let strs = (0..100).map(Value::Obj);
         let KeyIndex::Hashed(t) = KeyIndex::for_keys(100, strs) else { panic!("string keys need a hashed index") };
         assert!(t.capacity() >= 100, "{}", t.capacity());

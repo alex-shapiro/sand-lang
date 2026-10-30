@@ -43,20 +43,14 @@ The host cannot rely on engine limits, stability, or control.
       allocations reuse high-index slots first.
 - [ ] 🔴 [052](triage/052-dead-temporaries-rooted/summary.md) _Performance._ Clear dead temporaries before native calls so that inlined allocations
       do not stay rooted in caller frame registers during garbage collection.
-- [ ] ❓ _Embedding._ Convert derived `SandEnum` and `SandStruct` values with an explicit
-      stack, as `Json` conversion does. Derived conversion recurses once per
-      nesting level, and the 256-level limit does not bound its stack use: in
-      an unoptimized build, derived `Json` conversion overflowed a 512 KiB
-      thread stack at 100 levels, which aborts the host process.
-- [ ] ❓ _Embedding._ Make `json.parse`, `json.encode`, `json.decode`, and `json.to_json`
-      use constant stack without loss of speed. They recurse once per nesting
-      level. At 512 levels, an unoptimized build needs 2 MiB of stack for
-      `parse` and `decode` and more than 2 MiB for `encode`, so a script can
-      abort a debug host that runs it on a default 2 MiB thread. A release
-      build needs 256 KiB. Rewrites on the explicit-stack `walk` in
-      `src/stdlib/json.rs` were 10–35% slower in release builds: one loop for
-      all container kinds keeps its state in memory and dispatches on each
-      child, where recursion has a loop for each kind.
+- [ ] ❓ _Embedding._ Convert derived `SandEnum` and `SandStruct` values iteratively with an
+      explicit stack. The derived `FromValue` and `IntoValue` implementations
+      recurse once per nesting level, so deep values can overflow a small host
+      thread stack in debug builds before reaching the 256-level limit.
+- [ ] ❓ _Embedding._ Convert `json.parse`, `json.encode`, `json.decode`, and `json.to_json`
+      to use an explicit stack without regressing throughput. These functions
+      recurse up to the 512-level nesting limit, which can overflow a 2 MiB
+      thread stack in debug builds.
 - [ ] 🔴 [019](triage/019-value-type-defaults/summary.md) _Embedding._ Represent `ValueType` constants in `ConstVal` by their text form so that
       `#[sand(default)]` supports value-type fields and `json.decode` evaluates
       constant value-type defaults directly.

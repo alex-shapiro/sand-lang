@@ -1851,9 +1851,8 @@ print(doc.keys(json.Json.Null))
 }
 
 #[test]
-fn json_values_convert_at_the_full_parse_depth_on_a_small_stack() {
+fn convert_deep_json_values_on_small_stack() {
     use sandlang::json::Json;
-    /// `n` nested containers, alternately arrays and objects, with siblings.
     fn nest(n: usize) -> Json {
         (0..n).fold(Json::Str("leaf".into()), |j, i| match i % 2 {
             0 => Json::Arr(vec![Json::Int(i as i64), j, Json::Null]),

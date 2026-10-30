@@ -2138,12 +2138,11 @@ and fields in declaration order. Any other missing field or type mismatch fails
 with kind `"parse"` and the JSON path of the error (such as `$.items[2].name:
 expected str`, with type names truncated at 256 bytes with `…`).
 
-`parse`, `decode`, `encode`, and `to_json` accept at most 512 nested arrays and
-objects. Deeper input makes `parse` and `decode` fail with kind `"parse"`, and
-a deeper value makes `encode` and `to_json` abort with kind `"limit"`. `to_json`
-embeds `Json` values unchanged and does not count their levels, so its result
-can be deeper than 512 levels; `encode` and conversion to Rust reject such a
-value.
+`parse`, `decode`, `encode`, and `to_json` limit array and object nesting to
+512 levels. If a document exceeds this limit, `parse` and `decode` fail with
+kind `"parse"`. If a value exceeds this limit, `encode` and `to_json` abort
+with kind `"limit"`. `to_json` reuses existing `Json` values without traversing
+them, so its result can exceed 512 levels.
 
 ### 13.8 `log`
 
@@ -2959,8 +2958,8 @@ type requires `#[sand(module = "<module>")]` and accepts `#[sand(name = "<Name>"
 to override its Sand name, `#[sand(private)]` to keep the type private to its
 module, and `#[sand(crate = <path>)]` to specify a renamed `sandlang`
 dependency. `SandEnum` and `SandStruct` also accept
-`#[sand(manual_conversion)]`, which leaves out `FromValue` and `IntoValue` so
-that the type implements them itself. Rust doc comments, including `#[doc = include_str!("...")]`, become
+`#[sand(manual_conversion)]` to omit the derived `FromValue` and `IntoValue`
+implementations. Rust doc comments, including `#[doc = include_str!("...")]`, become
 Sand documentation. Compilation fails if a type, variant, or field name is a
 Sand keyword or is not a valid Sand identifier.
 
@@ -2994,10 +2993,8 @@ Because the engine copies each reachable struct and enum value during
 conversion and charges fuel and memory for each copy, shared references in a
 Sand value produce independent Rust copies. Conversion aborts with kind
 `"limit"` if the nesting of structs and enum payloads exceeds 256 levels, such
-as in a cyclic value. A `json.Json` value converts with a constant amount of
-the host thread's stack and accepts up to 512 nested arrays and objects, the
-limit of `json.parse`. Module Sand source can define methods on any bound type
-with `extend`.
+as in a cyclic value, or if a `json.Json` value exceeds 512 nested arrays and
+objects. Module Sand source can define methods on any bound type with `extend`.
 
 The Rust return type of a registered function determines whether the function
 returns a Sand `Result` or aborts the run on failure:
