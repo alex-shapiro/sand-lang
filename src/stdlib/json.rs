@@ -1052,7 +1052,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
             return Err(e);
         }
         let mut values = Vec::with_capacity(fields.len());
-        let mut computed = Vec::new();
+        let mut computed: Vec<(u32, i64)> = Vec::new();
         for (i, (field, ty, default)) in fields.iter().enumerate() {
             values.push(match (self.slots[base + i], default, &**ty) {
                 (Some(v), _, _) => v,
@@ -1063,8 +1063,11 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                         return Err(e);
                     }
                 },
-                (None, FieldDefault::Computed(fill), _) => {
-                    computed.push(*fill);
+                (None, FieldDefault::Computed { fill, bit }, _) => {
+                    match computed.last_mut() {
+                        Some((f, mask)) if f == fill => *mask |= 1 << bit,
+                        _ => computed.push((*fill, 1 << bit)),
+                    }
                     Value::Unit
                 }
                 (None, FieldDefault::None, TypeDesc::Option(_)) => Value::Tag(self.ids.none),
@@ -1076,8 +1079,8 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
         }
         self.slots.truncate(base);
         let s = self.b.st.alloc(Obj::Struct(def, values.into_boxed_slice()));
-        for fill in computed {
-            self.thunk(fill, Box::new([s]))?;
+        for (fill, mask) in computed {
+            self.thunk(fill, Box::new([s, Value::Int(mask)]))?;
         }
         Ok(s)
     }

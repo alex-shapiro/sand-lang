@@ -2690,7 +2690,8 @@ Configurable per engine:
 | `max_compile_fuel`   | 10,000,000 | compile error: `program too complex to compile` (§15.3)                                                                                                        |
 
 Memory is the engine's accounting, enforced after garbage collection, of
-live heap objects (with their buffers and map and set indexes), tasks
+live heap objects (with their buffers and map and set indexes), freed heap
+slots that have not been reused or released, garbage collector tables, tasks
 (call stacks, and lists of tasks waiting for a task or channel; a call that
 would grow a stack beyond the limit fails with the memory limit), and the
 buffers of pending I/O (file and socket reads, HTTP requests and responses
@@ -2710,6 +2711,11 @@ check the Rust-side scratch space of a result they build (output strings
 and lists, display and JSON text, sort buffers) before or while it grows,
 collecting garbage before reporting the limit, so a script cannot make the
 host allocate much beyond `max_memory`.
+
+`max_memory` does not include system allocator metadata or freed blocks that
+the allocator retains. This allocator overhead is typically under 25% of
+`max_memory`, but can be higher if a script frees many allocations of one
+size class and then allocates another size class.
 
 In a session (§16.6, §17.6), the instruction, CPU time, wall time and
 output limits apply to each input; the memory limit to the session's

@@ -25,9 +25,22 @@ Untrusted code violates a valid policy.
 
 The host cannot rely on engine limits, stability, or control.
 
-- [ ] 🔴 [007](triage/007-memory-limit-overshoot/summary.md) _Test coverage._ `peak_rss_stays_near_the_memory_limit` in `tests/peak_rss.rs` failed in
-      7 of 9 runs on macOS because the "decoded computed defaults" case
-      exceeds the 1.25 limit ratio at 1.32.
+- [ ] ❓ _Memory._ Allocate small object buffers from fixed-size block pools so that the
+      engine accounts for retained pool capacity against `max_memory`. If a
+      script frees small buffers and then allocates larger ones, the system
+      allocator retains the freed blocks and peak process memory can reach
+      1.3x `max_memory`.
+- [ ] ❓ _Memory._ Account for `remembered` and `gray` growth in the write barrier and
+      trigger garbage collection if they exceed `max_memory`. A loop that
+      mutates old objects without allocating does not trigger collection or
+      table measurement, so `remembered` and `gray` can grow by 20 bytes per
+      object plus spare capacity without a limit check.
+- [ ] ❓ _Memory._ Store the object arena in fixed-size segments instead of a single `Vec`
+      so that collections can release any empty segment and growing the arena
+      does not copy existing slots. A contiguous `Vec` can release only
+      trailing free slots after a full sweep, and incremental sweeps prepend
+      freed slots to the free list in descending index order so that new
+      allocations reuse high-index slots first.
 - [ ] 🔴 [052](triage/052-dead-temporaries-rooted/summary.md) _Performance._ Clear dead temporaries before native calls so that inlined allocations
       do not stay rooted in caller frame registers during garbage collection.
 - [ ] 🔴 [017](triage/017-json-host-depth/summary.md) _Embedding._ Convert `Json` values to and from Rust iteratively so that
@@ -245,6 +258,11 @@ Visible defects that rarely block users.
 - [ ] ⚪ Cache instantiated `TypeDesc` objects in `Op::Describe` by their
       template and argument descriptions to avoid allocation on each generic
       `reflect` call.
+- [ ] ❓ Align the VM dispatch loop or build benchmarks with
+      `-C llvm-args=-align-loops=64` so that unrelated code changes do not
+      shift loop alignment. On Apple silicon, code placement changes alter
+      `integer loop 10M`, `game of life`, and `option ? chains` in
+      `benches/vm.rs` by up to 13% at identical instruction counts.
 - [ ] ⚪ Replace the VM dispatch loop with a threaded dispatch table once Rust
       stabilizes the `become` keyword for guaranteed tail calls.
 

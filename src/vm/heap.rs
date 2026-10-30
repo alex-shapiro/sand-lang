@@ -122,6 +122,11 @@ pub struct Heap {
     /// Make the next collection a major one when `bytes` exceeds this.
     pub major_at: usize,
     pub limit: Option<usize>,
+    /// Byte capacity of the collector bitmaps, worklists, and `dirty` map,
+    /// updated if the arena adds a 64-slot word or finishes a collection step.
+    tables: usize,
+    /// Peak length of `objs` since its capacity last shrank.
+    arena_top: usize,
     /// Memory of the fibers (value stacks, frames, waiter and race lists),
     /// counted against `limit` with the heap: incremented as they grow and
     /// recomputed by every collection.
@@ -175,6 +180,7 @@ pub struct Heap {
 }
 
 const SPARE_LENS: usize = 4;
+const OBJ_SIZE: usize = std::mem::size_of::<Obj>();
 /// Maximum number of objects per chunk in [`Staging`].
 const STAGE_CHUNK: usize = 4096;
 const CHUNK_BYTES: usize = STAGE_CHUNK * std::mem::size_of::<(u32, Obj)>();
@@ -213,6 +219,8 @@ impl Staging<'_> {
                 Obj::Free(next) => next,
                 _ => unreachable!("corrupt free list"),
             };
+            // `obj.size()` includes `OBJ_SIZE`, which `Heap::overhead` already counts for free slots.
+            self.bytes -= OBJ_SIZE;
             h
         } else {
             self.end += 1;
@@ -298,17 +306,22 @@ struct DirtyList {
     idx: Vec<u32>,
 }
 
-/// A partially remembered list (or a map's or set's entries) records at most
-/// one stored index per this many elements (at least one); beyond that it
-/// is scanned in full. The index lists are not counted against the memory
-/// limit, and stores allocate nothing, so they need not lead to the
-/// collection that empties the lists. The lists must therefore stay small
-/// relative to their objects: a fixed allowance would let a script hold
-/// unaccounted memory by storing young values into many small old lists.
+/// Minimum number of container elements per recorded index in [`DirtyList`].
+/// If more indices are mutated, the collector scans the container in full.
+/// Bounding [`DirtyList`] proportional to container length prevents unallocated
+/// stores from growing `dirty` beyond `max_memory` between collections.
 const ELEMS_PER_DIRTY_INDEX: usize = 8;
+
+/// Minimum container length eligible for partial write-barrier tracking in
+/// `dirty`. Shorter containers are scanned in full during minor collections
+/// because a `dirty` entry would use more memory than the elements.
+const PARTIAL_MIN: usize = 128;
 
 const NONE: u32 = u32::MAX;
 const MIN_GC: usize = 4 << 20;
+/// Minimum number of trailing slots truncated since the last shrink before
+/// `objs` and the collector bitmaps shrink their capacity.
+const SHRINK_SLOTS: usize = 4096;
 /// Bytes allocated between minor collections, at most.
 const NURSERY: usize = 8 << 20;
 /// Resources allocated between collections at most (see
@@ -351,6 +364,8 @@ impl Heap {
             next_gc: MIN_GC,
             major_at: MIN_GC,
             limit,
+            tables: 0,
+            arena_top: 0,
             fiber_bytes: 0,
             live_objects: 0,
             young_resources: 0,
@@ -417,6 +432,7 @@ impl Heap {
                 self.tail_bits.push(0);
                 self.cmarks.push(0);
                 self.gray_bits.push(0);
+                self.measure_tables();
             }
             (self.objs.len() - 1) as u32
         };
@@ -515,6 +531,9 @@ impl Heap {
         if self.remembered_bits[w] & b == 0 {
             self.remembered_bits[w] |= b;
             self.remembered.push(h);
+            if self.entries_len(h) < PARTIAL_MIN {
+                return;
+            }
             self.partial_bits[w] |= b;
             self.dirty.insert(h, DirtyList { from: NONE, idx: Vec::new() });
         } else if self.partial_bits[w] & b == 0 || (push && self.tail_bits[w] & b != 0) {
@@ -524,21 +543,25 @@ impl Heap {
         self.mark_dirty(h, index, push);
     }
 
-    #[cold]
-    fn mark_dirty(&mut self, h: u32, index: usize, push: bool) {
-        let (w, b) = ((h / 64) as usize, 1u64 << (h % 64));
-        let index = index.min(NONE as usize - 1) as u32;
-        let len = match &self.objs[h as usize] {
+    fn entries_len(&self, h: u32) -> usize {
+        match &self.objs[h as usize] {
             Obj::List(l) => l.len(),
             Obj::Map(m) => m.entries.len(),
             Obj::Set(s) => s.entries.len(),
             _ => 0,
-        };
+        }
+    }
+
+    #[cold]
+    fn mark_dirty(&mut self, h: u32, index: usize, push: bool) {
+        let (w, b) = ((h / 64) as usize, 1u64 << (h % 64));
+        let index = index.min(NONE as usize - 1) as u32;
+        let len = self.entries_len(h);
         let Some(d) = self.dirty.get_mut(&h) else { return };
         if push {
             d.from = d.from.min(index);
             self.tail_bits[w] |= b;
-        } else if d.idx.len() < (len / ELEMS_PER_DIRTY_INDEX).max(1) {
+        } else if d.idx.len() < len / ELEMS_PER_DIRTY_INDEX {
             d.idx.push(index);
         } else {
             self.remember_fully(h);
@@ -574,9 +597,33 @@ impl Heap {
         matches!(self.limit, Some(l) if self.used().saturating_add(self.io_memory.reserved()) > l)
     }
 
-    /// Memory used by heap objects and fibers (not counting pending I/O).
+    /// Memory used by heap objects, fibers, retained arena slots, and collector
+    /// tables, excluding pending I/O.
     pub fn used(&self) -> usize {
-        self.bytes.saturating_add(self.fiber_bytes).saturating_add(self.spare_bytes)
+        self.bytes.saturating_add(self.fiber_bytes).saturating_add(self.spare_bytes).saturating_add(self.overhead())
+    }
+
+    /// Byte capacity of unused arena slots and collector tables.
+    #[inline]
+    fn overhead(&self) -> usize {
+        self.arena_top.max(self.objs.len()).saturating_sub(self.live_objects) * OBJ_SIZE
+            + self.young.capacity() * std::mem::size_of::<u32>()
+            + self.tables
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn measure_tables(&mut self) {
+        let bitmaps = [&self.marks, &self.remembered_bits, &self.partial_bits, &self.tail_bits, &self.cmarks, &self.gray_bits];
+        let words: usize = bitmaps.iter().map(|b| b.capacity()).sum();
+        // `HashMap` allocates 8 buckets and 8 control bytes for every 7 entries of capacity.
+        let dirty = self.dirty.capacity() * (std::mem::size_of::<(u32, DirtyList)>() + 1) * 8 / 7;
+        self.tables = words * std::mem::size_of::<u64>()
+            + self.remembered.capacity() * std::mem::size_of::<u32>()
+            + dirty
+            + self.gray.capacity() * std::mem::size_of::<(u32, usize)>()
+            + self.worklist.capacity() * std::mem::size_of::<u32>()
+            + self.scan.capacity() * std::mem::size_of::<(u32, usize)>();
     }
 
     #[inline]
@@ -591,6 +638,12 @@ impl Heap {
     #[inline]
     pub fn obj(&self, h: u32) -> &Obj {
         &self.objs[h as usize]
+    }
+
+    /// Returns the object at untraced handle `h`, or `None` if the arena was
+    /// truncated past `h`.
+    pub fn weak(&self, h: u32) -> Option<&Obj> {
+        self.objs.get(h as usize)
     }
 
     /// Returns a mutable reference to the object for `v` and records a write
@@ -1165,29 +1218,17 @@ impl Heap {
         self.marks[(h / 64) as usize] & (1 << (h % 64)) != 0
     }
 
-    /// Marks every unmarked object reachable from the worklist and from the
-    /// containers on `scan`. The worklist is emptied first, so that it never
-    /// holds more than one chunk of a big container's children.
     fn trace(&mut self) {
-        let Heap { objs, marks, worklist, scan, .. } = self;
-        loop {
-            let (h, start) = match worklist.pop() {
-                Some(h) => (h, 0),
-                None => match scan.pop() {
-                    Some(c) => c,
-                    None => break,
-                },
-            };
-            if let Some(next) = chunk_children(&objs[h as usize], start, |v| mark(marks, worklist, v)) {
-                scan.push((h, next));
-            }
-        }
+        trace(&self.objs, &mut self.marks, &mut self.worklist, &mut self.scan);
     }
 
-    /// Puts slot `h` on the free list, keeping a small box for reuse.
     fn release(&mut self, h: u32) {
         let obj = std::mem::replace(&mut self.objs[h as usize], Obj::Free(self.free_head));
         self.free_head = h;
+        self.keep_box(obj);
+    }
+
+    fn keep_box(&mut self, obj: Obj) {
         if let Obj::Tuple(b) | Obj::Struct(_, b) | Obj::Variant(_, b) | Obj::Closure(_, b) = obj
             && let Some(spare) = b.len().checked_sub(1).and_then(|i| self.spare.get_mut(i))
             && spare.len() < SPARE_MAX
@@ -1236,8 +1277,6 @@ impl Heap {
             if major {
                 continue;
             }
-            // Scan the old objects that may point to young ones. For a
-            // partially remembered object, scan only the changed parts.
             let mut mark = |v: Value| mark(marks, worklist, v);
             match (partial, &objs[h as usize]) {
                 (true, Obj::Channel(c)) => {
@@ -1264,12 +1303,21 @@ impl Heap {
                 }
                 _ => scan.push((h, 0)),
             }
+            // Drain `worklist` and `scan` after each remembered container so
+            // that `scan` holds at most one root container at a time.
+            trace(objs, marks, worklist, scan);
         }
         dirty.clear();
         remembered.clear();
         self.trace();
         if major {
             self.sweep_all();
+            self.young = Vec::new();
+            self.remembered = Vec::new();
+            self.dirty = FxHashMap::default();
+            self.worklist = Vec::new();
+            self.scan = Vec::new();
+            self.gray = Vec::new();
         } else {
             let young = std::mem::take(&mut self.young);
             let mut freed = 0;
@@ -1287,24 +1335,65 @@ impl Heap {
         }
         self.young.clear();
         self.set_thresholds(major);
+        self.measure_tables();
     }
 
+    /// Sweeps the arena in reverse index order so that `free_head` is sorted
+    /// in ascending order and trailing free slots can be truncated.
     fn sweep_all(&mut self) {
         let mut live_bytes = 0;
         let mut live = 0;
-        for i in 0..self.objs.len() {
-            if matches!(self.objs[i], Obj::Free(_)) {
-                continue;
-            }
+        let mut end = self.objs.len();
+        self.free_head = NONE;
+        for i in (0..self.objs.len()).rev() {
             if self.is_marked(i as u32) {
                 live_bytes += self.objs[i].size();
                 live += 1;
-            } else {
-                self.release(i as u32);
+                continue;
             }
+            let obj = std::mem::replace(&mut self.objs[i], Obj::Free(self.free_head));
+            if end == i + 1 {
+                end = i;
+            } else {
+                self.free_head = i as u32;
+            }
+            self.keep_box(obj);
         }
         self.bytes = live_bytes;
         self.live_objects = live;
+        self.truncate(end);
+    }
+
+    /// Truncates trailing free slots starting at `len` and shrinks the arena
+    /// and collector bitmaps if at least [`SHRINK_SLOTS`] slots have been
+    /// truncated since the last shrink.
+    fn truncate(&mut self, len: usize) {
+        if len == self.objs.len() {
+            return;
+        }
+        let words = len.div_ceil(64);
+        self.arena_top = self.arena_top.max(self.objs.len());
+        let shrink = self.arena_top - len >= SHRINK_SLOTS;
+        if shrink {
+            self.arena_top = len;
+        }
+        self.objs.truncate(len);
+        for bits in
+            [&mut self.marks, &mut self.remembered_bits, &mut self.partial_bits, &mut self.tail_bits, &mut self.cmarks, &mut self.gray_bits]
+        {
+            bits.truncate(words);
+            if let Some(last) = bits.last_mut()
+                && !len.is_multiple_of(64)
+            {
+                *last &= (1 << (len % 64)) - 1;
+            }
+            if shrink {
+                bits.shrink_to_fit();
+            }
+        }
+        if shrink {
+            self.objs.shrink_to_fit();
+        }
     }
 
     fn set_thresholds(&mut self, major: bool) {
@@ -1373,6 +1462,7 @@ impl Heap {
         self.cycle_live = self.bytes;
         self.step_bytes = self.bytes;
         self.update_next_gc();
+        self.measure_tables();
     }
 
     /// Runs one step of the incremental collection. Returns true if marking
@@ -1380,7 +1470,7 @@ impl Heap {
     pub fn cycle_step(&mut self) -> bool {
         let allocated = self.bytes.saturating_sub(self.step_bytes).max(STEP_BYTES);
         self.step_bytes = self.bytes;
-        match self.phase {
+        let done = match self.phase {
             Phase::Marking => {
                 let budget = if self.stress { (self.live_objects / 8).max(64) } else { (allocated / 16 * MARK_PACE).max(MIN_MARK_WORK) };
                 self.mark_some(budget);
@@ -1399,7 +1489,9 @@ impl Heap {
                 false
             }
             Phase::Idle => false,
-        }
+        };
+        self.measure_tables();
+        done
     }
 
     /// Completes the marking: shades the roots again and drains the worklist.
@@ -1422,6 +1514,7 @@ impl Heap {
         self.phase = Phase::Sweeping;
         self.sweep_at = 0;
         self.update_next_gc();
+        self.measure_tables();
     }
 
     /// Abandons incremental collection.
@@ -1489,6 +1582,24 @@ impl Heap {
             self.stats.collections += 1;
             self.stats.majors += 1;
             self.set_thresholds(true);
+        }
+    }
+}
+
+/// Marks all unmarked objects reachable from `worklist` and `scan`, draining
+/// `worklist` before each `scan` chunk so that `worklist` holds at most one
+/// chunk of a large container at a time.
+fn trace(objs: &[Obj], marks: &mut [u64], worklist: &mut Vec<u32>, scan: &mut Vec<(u32, usize)>) {
+    loop {
+        let (h, start) = match worklist.pop() {
+            Some(h) => (h, 0),
+            None => match scan.pop() {
+                Some(c) => c,
+                None => break,
+            },
+        };
+        if let Some(next) = chunk_children(&objs[h as usize], start, |v| mark(marks, worklist, v)) {
+            scan.push((h, next));
         }
     }
 }
@@ -1600,7 +1711,8 @@ mod tests {
         let n = (STAGE_CHUNK - 4) + 3 * STAGE_CHUNK;
         let size = std::mem::size_of::<(u32, Obj)>();
         let mut heap = Heap::new(None, usize::MAX);
-        let used = heap.used();
+        let used = |heap: &Heap| heap.used() - heap.overhead();
+        let before = used(&heap);
         let buffer = heap.staged(|_, st| {
             for i in 0..n {
                 st.new_list(vec![Value::Int(i as i64)]);
@@ -1611,9 +1723,9 @@ mod tests {
         let objs = (n + STAGE_CHUNK) * size;
         assert!(buffer >= objs && buffer < objs + 1024, "{buffer}");
         let lists = n * Obj::List(vec![Value::Int(0)]).size();
-        assert_eq!(heap.used() - used, lists + 3 * CHUNK_BYTES);
+        assert_eq!(used(&heap) - before, lists + 3 * CHUNK_BYTES);
         heap.collect((0..n).map(|i| Value::Obj(i as u32)), true);
-        assert_eq!(heap.used() - used, lists);
+        assert_eq!(used(&heap) - before, lists);
     }
 
     #[test]
@@ -1635,6 +1747,48 @@ mod tests {
         heap.collect(roots.iter().copied(), false);
         assert_eq!(heap.str(heap.list(big)[0]), "young");
         assert_eq!(heap.str(heap.list(lists[7])[0]), "young");
+    }
+
+    fn barrier_tables(heap: &Heap) -> usize {
+        heap.dirty.capacity() * std::mem::size_of::<(u32, DirtyList)>()
+            + heap.dirty.values().map(|d| d.idx.capacity() * std::mem::size_of::<u32>()).sum::<usize>()
+            + heap.remembered.capacity() * std::mem::size_of::<u32>()
+    }
+
+    #[test]
+    fn write_barrier_tables_are_bounded_by_container_size() {
+        let mut heap = Heap::new(None, usize::MAX);
+        let small: Vec<Value> = (0..100_000).map(|_| heap.new_list(vec![Value::Int(0)])).collect();
+        let big: Vec<Value> = (0..1000).map(|_| heap.new_list(vec![Value::Int(0); 1000])).collect();
+        let roots: Vec<Value> = small.iter().chain(&big).copied().collect();
+        heap.collect(roots.iter().copied(), true);
+        let young = heap.new_str("a young string, long enough to be on the heap");
+        for &l in &small {
+            heap.list_mut_storing(l, 0, young).unwrap()[0] = young;
+        }
+        for &l in &big {
+            for i in (0..1000).step_by(7) {
+                heap.list_mut_storing(l, i, young).unwrap()[i] = young;
+            }
+        }
+        let tables = barrier_tables(&heap);
+        assert!(tables <= heap.bytes / 8, "{tables} bytes of tables for {} bytes of objects", heap.bytes);
+        heap.collect(roots.iter().copied(), false);
+        assert!(heap.list(small[5])[0] == young && heap.list(big[5])[994] == young);
+        let work = heap.scan.capacity() * std::mem::size_of::<(u32, usize)>() + heap.worklist.capacity() * std::mem::size_of::<u32>();
+        assert!(work <= SCAN_CHUNK * 64, "{work} bytes of work lists");
+        heap.collect(roots.iter().copied(), true);
+        assert_eq!(barrier_tables(&heap), 0);
+    }
+
+    #[test]
+    fn minor_collection_accounts_for_retained_worklists() {
+        let mut heap = Heap::new(None, usize::MAX);
+        let roots: Vec<Value> = (0..200_000).map(|i| heap.new_str(format!("a young string, long enough, {i}"))).collect();
+        heap.collect(roots.iter().copied(), false);
+        let work = heap.worklist.capacity() * std::mem::size_of::<u32>() + heap.scan.capacity() * std::mem::size_of::<(u32, usize)>();
+        assert!(work > 0);
+        assert!(heap.tables >= work, "{} bytes of tables counted, {work} bytes of work lists", heap.tables);
     }
 
     fn new_channel(heap: &mut Heap) -> Value {
@@ -1768,5 +1922,333 @@ mod tests {
         assert!(heap.used() <= limit, "{} bytes used", heap.used());
         heap.collect([ch], true);
         heap.channel_push(ch, Value::Int(0)).unwrap();
+    }
+
+    fn free_list(heap: &Heap) -> Vec<u32> {
+        let mut out = Vec::new();
+        let mut h = heap.free_head;
+        while h != NONE {
+            out.push(h);
+            let Obj::Free(next) = heap.objs[h as usize] else { panic!("slot {h} on the free list is in use") };
+            h = next;
+        }
+        out
+    }
+
+    #[test]
+    fn free_slots_are_counted_until_reused() {
+        let mut heap = Heap::new(None, usize::MAX);
+        let keep = heap.new_str("keep");
+        let garbage: Vec<Value> = (0..1000).map(|i| heap.new_list(vec![Value::Int(i)])).collect();
+        let top = heap.new_str("top");
+        heap.collect([keep, top], true);
+        assert_eq!(free_list(&heap), (1..=1000).collect::<Vec<u32>>());
+        let used = heap.used();
+        assert!(used >= heap.bytes + 1000 * OBJ_SIZE, "{used} bytes used");
+        let young = |heap: &Heap| heap.young.capacity() * std::mem::size_of::<u32>();
+        let ranges: Vec<Value> = (0..10).map(|i| heap.alloc(Obj::Range(i, i, false))).collect();
+        assert_eq!(ranges, garbage[..10]);
+        assert_eq!(heap.used() - young(&heap), used);
+        let staged = heap.staged(|_, st| st.alloc(Obj::Range(0, 0, false)));
+        assert_eq!(staged, garbage[10]);
+        assert_eq!(heap.used() - young(&heap), used);
+    }
+
+    #[test]
+    fn major_collection_truncates_trailing_free_slots() {
+        let mut heap = Heap::new(None, usize::MAX);
+        let keep = heap.new_str("keep");
+        let n = 4 * SHRINK_SLOTS;
+        let list = heap.new_list((0..n as i64).map(Value::Int).collect());
+        for i in 0..n {
+            let item = heap.new_str(format!("an item, {i}"));
+            heap.list_mut(list)[i] = item;
+        }
+        heap.collect([keep, list], true);
+        let full = heap.used();
+        heap.collect([keep], true);
+        assert_eq!(heap.objs.len(), 1);
+        assert!(heap.objs.capacity() < SHRINK_SLOTS, "{} slots kept", heap.objs.capacity());
+        assert!(full - heap.used() >= (n + 1) * OBJ_SIZE, "{full} bytes, then {}", heap.used());
+        assert_eq!(heap.str(keep), "keep");
+        assert_eq!(free_list(&heap), Vec::<u32>::new());
+        let young = heap.new_str("young");
+        assert!(!heap.is_marked(young.handle().unwrap()));
+        heap.collect([keep], false);
+        assert_eq!(heap.objs.len(), 2);
+        assert_eq!(free_list(&heap), vec![1]);
+    }
+
+    #[test]
+    fn truncated_slots_are_counted_until_arena_shrinks() {
+        let mut heap = Heap::new(None, usize::MAX);
+        let n = 64 * SHRINK_SLOTS;
+        let mut live: Vec<Value> = (0..n).map(|i| heap.new_list(vec![Value::Int(i as i64)])).collect();
+        heap.collect(live.iter().copied(), true);
+        while live.len() > SHRINK_SLOTS {
+            live.truncate(live.len() - (SHRINK_SLOTS - 1));
+            heap.collect(live.iter().copied(), true);
+            let resident = heap.objs.capacity().min(n) - heap.live_objects;
+            assert!(heap.overhead() >= resident * OBJ_SIZE, "{} bytes counted, {resident} slots resident", heap.overhead());
+        }
+        assert!(heap.objs.capacity() < 2 * SHRINK_SLOTS, "{} slots kept", heap.objs.capacity());
+    }
+
+    #[derive(Clone, Debug)]
+    enum Op {
+        Str(bool),
+        List(Vec<usize>),
+        Stage(usize),
+        Drop(usize),
+        Collect(bool),
+    }
+
+    fn op() -> impl proptest::strategy::Strategy<Value = Op> {
+        use proptest::prelude::*;
+        prop_oneof![
+            8 => any::<bool>().prop_map(Op::Str),
+            2 => prop::collection::vec(any::<usize>(), 0..4).prop_map(Op::List),
+            1 => (0usize..40).prop_map(Op::Stage),
+            4 => any::<usize>().prop_map(Op::Drop),
+            1 => any::<bool>().prop_map(Op::Collect),
+        ]
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
+
+        #[test]
+        fn heap_accounts_for_all_slots_and_preserves_roots(ops in proptest::collection::vec(op(), 1..200)) {
+            let mut heap = Heap::new(None, usize::MAX);
+            let mut roots: Vec<(Value, Result<String, Vec<Value>>)> = Vec::new();
+            let mut n = 0;
+            for op in ops {
+                match op {
+                    Op::Str(rooted) => {
+                        n += 1;
+                        let v = heap.new_str(format!("string {n} with some text"));
+                        if rooted {
+                            roots.push((v, Ok(format!("string {n} with some text"))));
+                        }
+                    }
+                    Op::List(items) => {
+                        let items: Vec<Value> = items.iter().filter(|_| !roots.is_empty()).map(|i| roots[i % roots.len()].0).collect();
+                        let v = heap.new_list(items.clone());
+                        roots.push((v, Err(items)));
+                    }
+                    Op::Stage(k) => {
+                        let texts: Vec<String> = (0..k).map(|i| format!("staged {n}.{i}")).collect();
+                        let vs = heap.staged(|_, st| texts.iter().map(|t| st.new_str(t.as_str())).collect::<Vec<_>>());
+                        roots.extend(vs.into_iter().zip(texts).step_by(2).map(|(v, t)| (v, Ok(t))));
+                        n += 1;
+                    }
+                    Op::Drop(i) if !roots.is_empty() => {
+                        drop(roots.remove(i % roots.len()));
+                    }
+                    Op::Drop(_) => {}
+                    Op::Collect(major) => {
+                        let mut all: Vec<Value> = roots.iter().map(|r| r.0).collect();
+                        for (_, c) in &roots {
+                            if let Err(items) = c {
+                                all.extend(items);
+                            }
+                        }
+                        heap.collect(all, major);
+                        let free = free_list(&heap);
+                        if major {
+                            proptest::prop_assert!(free.windows(2).all(|w| w[0] < w[1]), "free list out of order: {free:?}");
+                            proptest::prop_assert!(heap.objs.last().is_none_or(|o| !matches!(o, Obj::Free(_))), "free slot at the end");
+                            let sizes: usize = heap.objs.iter().filter(|o| !matches!(o, Obj::Free(_))).map(Obj::size).sum();
+                            proptest::prop_assert_eq!(heap.bytes, sizes);
+                        }
+                    }
+                }
+                let free = free_list(&heap);
+                let in_use = heap.objs.iter().filter(|o| !matches!(o, Obj::Free(_))).count();
+                proptest::prop_assert_eq!(free.len() + in_use, heap.objs.len(), "every free slot is on the free list once");
+                proptest::prop_assert_eq!(heap.live_objects, in_use);
+                proptest::prop_assert!(heap.overhead() >= free.len() * OBJ_SIZE);
+                for (v, c) in &roots {
+                    match c {
+                        Ok(text) => proptest::prop_assert_eq!(heap.str(*v), text.as_str()),
+                        Err(items) => proptest::prop_assert_eq!(heap.list(*v), items.as_slice()),
+                    }
+                }
+            }
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    enum BarrierOp {
+        Store(usize, usize, bool),
+        Push(usize),
+        Pop(usize),
+        Clear(usize),
+        Insert(usize, usize),
+        Remove(usize, usize),
+        MapStore(usize, usize),
+        MapPush(usize),
+        MapRemove(usize, usize),
+        Garbage(usize),
+        Collect(bool),
+        Cycle,
+    }
+
+    fn barrier_op() -> impl proptest::strategy::Strategy<Value = BarrierOp> {
+        use proptest::prelude::*;
+        let c = 0usize..9;
+        prop_oneof![
+            8 => (c.clone(), any::<usize>(), any::<bool>()).prop_map(|(c, i, s)| BarrierOp::Store(c, i, s)),
+            4 => c.clone().prop_map(BarrierOp::Push),
+            3 => c.clone().prop_map(BarrierOp::Pop),
+            1 => c.clone().prop_map(BarrierOp::Clear),
+            1 => (c.clone(), any::<usize>()).prop_map(|(c, i)| BarrierOp::Insert(c, i)),
+            1 => (c.clone(), any::<usize>()).prop_map(|(c, i)| BarrierOp::Remove(c, i)),
+            4 => (0usize..2, any::<usize>()).prop_map(|(m, s)| BarrierOp::MapStore(m, s)),
+            2 => (0usize..2).prop_map(BarrierOp::MapPush),
+            1 => (0usize..2, any::<usize>()).prop_map(|(m, s)| BarrierOp::MapRemove(m, s)),
+            2 => (0usize..20).prop_map(BarrierOp::Garbage),
+            3 => any::<bool>().prop_map(BarrierOp::Collect),
+            3 => Just(BarrierOp::Cycle),
+        ]
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(512))]
+
+        #[test]
+        fn write_barrier_preserves_young_values_in_old_containers(ops in proptest::collection::vec(barrier_op(), 1..300)) {
+            let mut heap = Heap::new(None, usize::MAX);
+            heap.stress = true;
+            let lens = [0, 5, PARTIAL_MIN - 1, PARTIAL_MIN, PARTIAL_MIN + 1, 200, 300, 1000, SCAN_CHUNK + 10];
+            let lists: Vec<Value> = lens.iter().map(|&n| heap.new_list(vec![Value::Int(0); n])).collect();
+            let mut model: Vec<Vec<Option<String>>> = lens.iter().map(|&n| vec![None; n]).collect();
+            let map_lens = [10, 300];
+            let maps: Vec<Value> = map_lens
+                .iter()
+                .map(|&n| {
+                    let entries = (0..n).map(|i| Some((Value::Int(i as i64), Value::Int(0)))).collect();
+                    heap.alloc(Obj::Map(Box::new(MapObj { entries, live: n, ..MapObj::default() })))
+                })
+                .collect();
+            let mut map_model: Vec<Vec<Option<String>>> = map_lens.iter().map(|&n| vec![None; n]).collect();
+            let roots: Vec<Value> = lists.iter().chain(&maps).copied().collect();
+            heap.collect(roots.iter().copied(), true);
+            let mut n = 0;
+            let mut text = || {
+                n += 1;
+                format!("young string number {n}, long enough to be on the heap")
+            };
+            for op in ops {
+                match op {
+                    BarrierOp::Store(c, i, s) => {
+                        if model[c].is_empty() {
+                            continue;
+                        }
+                        let i = i % model[c].len();
+                        let (v, t) = if s {
+                            let t = text();
+                            (heap.new_str(t.as_str()), Some(t))
+                        } else {
+                            (Value::Int(0), None)
+                        };
+                        heap.list_mut_storing(lists[c], i, v).unwrap()[i] = v;
+                        model[c][i] = t;
+                    }
+                    BarrierOp::Push(c) => {
+                        let t = text();
+                        let v = heap.new_str(t.as_str());
+                        heap.list_push(lists[c], v).unwrap();
+                        model[c].push(Some(t));
+                    }
+                    BarrierOp::Pop(c) => {
+                        heap.list_shrink(lists[c]).unwrap().pop();
+                        model[c].pop();
+                    }
+                    BarrierOp::Clear(c) => {
+                        heap.list_shrink(lists[c]).unwrap().clear();
+                        model[c].clear();
+                    }
+                    BarrierOp::Insert(c, i) => {
+                        let i = i % (model[c].len() + 1);
+                        let t = text();
+                        let v = heap.new_str(t.as_str());
+                        heap.list_mut(lists[c]).insert(i, v);
+                        model[c].insert(i, Some(t));
+                    }
+                    BarrierOp::Remove(c, i) => {
+                        if model[c].is_empty() {
+                            continue;
+                        }
+                        let i = i % model[c].len();
+                        heap.list_mut(lists[c]).remove(i);
+                        model[c].remove(i);
+                    }
+                    BarrierOp::MapStore(m, s) => {
+                        if map_model[m].is_empty() {
+                            continue;
+                        }
+                        let s = s % map_model[m].len();
+                        let t = text();
+                        let v = heap.new_str(t.as_str());
+                        let Obj::Map(mo) = heap.entries_mut_storing(maps[m], s, false, &[Value::Int(s as i64), v]) else { unreachable!() };
+                        mo.entries[s] = Some((Value::Int(s as i64), v));
+                        map_model[m][s] = Some(t);
+                    }
+                    BarrierOp::MapPush(m) => {
+                        let s = map_model[m].len();
+                        let t = text();
+                        let v = heap.new_str(t.as_str());
+                        let Obj::Map(mo) = heap.entries_mut_storing(maps[m], s, true, &[Value::Int(s as i64), v]) else { unreachable!() };
+                        mo.entries.push(Some((Value::Int(s as i64), v)));
+                        map_model[m].push(Some(t));
+                    }
+                    BarrierOp::MapRemove(m, s) => {
+                        if map_model[m].is_empty() {
+                            continue;
+                        }
+                        let s = s % map_model[m].len();
+                        let Obj::Map(mo) = heap.get_mut(maps[m]) else { unreachable!() };
+                        mo.entries.remove(s);
+                        map_model[m].remove(s);
+                    }
+                    BarrierOp::Garbage(k) => {
+                        for _ in 0..k {
+                            let t = text();
+                            heap.new_str(t);
+                        }
+                    }
+                    BarrierOp::Collect(major) => heap.collect(roots.iter().copied(), major),
+                    BarrierOp::Cycle => {
+                        if !heap.cycle_active() {
+                            heap.start_cycle(roots.iter().copied());
+                        } else if heap.cycle_step() {
+                            heap.finish_marking(roots.iter().copied());
+                        }
+                    }
+                }
+                for (c, items) in model.iter().enumerate() {
+                    let list = heap.list(lists[c]);
+                    proptest::prop_assert_eq!(list.len(), items.len());
+                    for (i, (&v, t)) in list.iter().zip(items).enumerate() {
+                        match t {
+                            Some(t) => proptest::prop_assert_eq!(heap.str(v), t.as_str(), "list {} index {}", c, i),
+                            None => proptest::prop_assert_eq!(v, Value::Int(0)),
+                        }
+                    }
+                }
+                for (m, items) in map_model.iter().enumerate() {
+                    let Obj::Map(mo) = heap.get(maps[m]) else { unreachable!() };
+                    proptest::prop_assert_eq!(mo.entries.len(), items.len());
+                    for (s, (e, t)) in mo.entries.iter().zip(items).enumerate() {
+                        let v = e.unwrap().1;
+                        match t {
+                            Some(t) => proptest::prop_assert_eq!(heap.str(v), t.as_str(), "map {} entry {}", m, s),
+                            None => proptest::prop_assert_eq!(v, Value::Int(0)),
+                        }
+                    }
+                }
+            }
+        }
     }
 }

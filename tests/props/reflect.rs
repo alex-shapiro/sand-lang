@@ -407,6 +407,80 @@ proptest! {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum Field {
+    Computed,
+    Constant,
+    Required,
+}
+
+fn fields() -> impl Strategy<Value = Vec<Field>> {
+    let field = prop_oneof![6 => Just(Field::Computed), 1 => Just(Field::Constant), 1 => Just(Field::Required)];
+    prop::collection::vec(field, 1..100)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn json_decode_evaluates_missing_computed_defaults_in_order(
+        fields in fields(),
+        present in prop::collection::vec((prop::collection::vec(any::<bool>(), 100), any::<u8>()), 1..4),
+    ) {
+        let mut decls = Vec::new();
+        for (i, f) in fields.iter().enumerate() {
+            decls.push(match f {
+                Field::Computed => format!("    f{i}: int = note({i})"),
+                Field::Constant => format!("    f{i}: int = {}", -1 - i as i64),
+                Field::Required => format!("    f{i}: int"),
+            });
+        }
+        let mut records = Vec::new();
+        let (mut calls, mut values) = (Vec::new(), Vec::new());
+        for (has, inner) in &present {
+            let mut keys = Vec::new();
+            let mut inner_keys = Vec::new();
+            let mut inner_values = Vec::new();
+            for j in 0..3 {
+                if inner & (1 << j) != 0 {
+                    inner_keys.push(format!("\\\"g{j}\\\": {}", 2000 + j));
+                    inner_values.push((2000 + j).to_string());
+                } else {
+                    calls.push((1000 + j).to_string());
+                    inner_values.push((1000 + j).to_string());
+                }
+            }
+            keys.push(format!("\\\"inner\\\": {{{}}}", inner_keys.join(", ")));
+            let mut row = Vec::new();
+            for (i, f) in fields.iter().enumerate() {
+                if has[i] || matches!(f, Field::Required) {
+                    keys.push(format!("\\\"f{i}\\\": {}", 100 + i));
+                    row.push((100 + i).to_string());
+                } else if matches!(f, Field::Computed) {
+                    calls.push(i.to_string());
+                    row.push(i.to_string());
+                } else {
+                    row.push((-1 - i as i64).to_string());
+                }
+            }
+            records.push(format!("{{{}}}", keys.join(", ")));
+            values.push(format!("[{}]\n[{}]", row.join(", "), inner_values.join(", ")));
+        }
+        let fields_of = |n: usize, prefix: char| (0..n).map(|i| format!("r.{prefix}{i}")).collect::<Vec<_>>().join(", ");
+        let src = format!(
+            "import json\nvar calls: [int] = []\nfn note(i: int) -> int {{\n    calls.push(i)\n    i\n}}\n\
+             struct Inner {{ g0: int = note(1000), g1: int = note(1001), g2: int = note(1002) }}\n\
+             struct S {{\n    inner: Inner\n{}\n}}\n\
+             let rs: [S] = json.decode(\"[{}]\")?\nfor r in rs {{\n    print([{}])\n    let r = r.inner\n    print([{}])\n}}\nprint(calls)",
+            decls.join("\n"),
+            records.join(", "),
+            fields_of(fields.len(), 'f'),
+            fields_of(3, 'g'),
+        );
+        check(&src, &format!("{}\n[{}]\n", values.join("\n"), calls.join(", ")), None)?;
+    }
+}
+
 fn list_shape() -> impl Strategy<Value = (usize, usize)> {
     (1usize..4).prop_flat_map(|width| {
         let max_depth = match width {
