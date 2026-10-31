@@ -212,31 +212,30 @@ from "./shapes.sand" import Shape, area
 ```
 
 Script paths are resolved relative to the importing module's directory; the
-`.sand` extension may be omitted, and other files cannot be imported. The
-resolved path must lie within the **module root**: the main module's directory
-unless the host configures another. A symlinked main file's imports and module
-root are those of its target. Every script import is checked against the
-policy as `Import(path)` (§14).
+`.sand` extension may be omitted, and other files cannot be imported. By default,
+a module path must lie within the **module root**, the main module's directory.
+A symlinked main file's imports and module root are those of its target. Each script
+import is checked against the policy as `Import(path)` (§14).
 
-A module name (`json`) is resolved first to a host-registered native module,
-then to a standard-library module, and then to `<library>/<name>.sand` if
-`Config::library` is set. The engine checks a library module against the policy
-as `Import(path)`, and the library directory can be outside the module root.
-Only `pub` items are visible to importers; accessing a non-`pub` item or
-importing a name that is not exported is an error. Qualified names are written
-`module.name` and `module.Type`.
+A module name is resolved first to a host-registered native module, then to a stdlib module,
+and then to `<library>/<name>.sand` if `Config::library` is set. The engine checks a library
+module against the policy as `Import(path)`, and the library directory can be outside the module root.
+
+Module items marked as `pub` are visible to importers; non-`pub` items are not.
+Importing a non-exported item fails at compile time.
+
+Imported items are qualified by their module name: `module.name` and `module.Type`.
 
 ### 3.3 Visibility
 
-`pub` may precede top-level `fn`, `struct`, `enum`, `trait`, `type`, `let`, and
-`var` declarations, struct fields, and methods in `struct`, `enum`, and
-`extend` blocks. Other modules cannot reference a private item, access or match
-a private field, call a private method, or construct a struct that has a
-private field (with `T(...)` or `json.decode`). Value formatting and
-`json.encode` include all struct fields regardless of visibility. Enum variants
-and the methods of a public trait are always public; `impl` blocks do not have
-visibility modifiers (§4.9). Importing modules can read a `pub var`, but only
-the declaring module can assign to it.
+Any item declaration may be exposed publicly with a `pub` prefix: `pub fn`.
+An item that lacks a `pub` prefix is considered private and cannot be referenced
+outside of its module.
+
+Value formatting and `json.encode` include all struct fields regardless of visibility.
+A public enum's variants and a public trait's methods are always public. `impl` blocks
+do not have visibility modifiers (§4.9). Importing modules can read a `pub var`, but only
+the declaring module can set it.
 
 ## 4. Declarations
 
@@ -253,34 +252,34 @@ fn greet(name: str, greeting: str = "Hello") {
 }
 ```
 
-- Every parameter has a type annotation. Parameters may have default values;
-  defaults are evaluated at each call that omits them, in the callee's
-  module scope, and may refer to earlier parameters. Parameters with defaults
-  must follow all parameters without them.
-- The return type follows `->`; if omitted it is `()` (unit).
-- The body is a block whose value is returned. In a function returning `()`,
-  the value of the final expression is discarded.
-- Type parameters are listed in `<...>`. A `:` after a type parameter specifies
-  the traits (§4.9) that its type arguments must implement, including built-in
-  traits (§5.6), module-qualified traits, and generic traits:
-  `T: Ord + Describe`, `T: geo.Shape`, `T: Into<str>`. A trailing `where`
-  clause (`fn sum(self) -> T where T: Num`) also specifies trait bounds, and
-  can constrain the type parameters of an enclosing generic `extend` block,
-  struct, or enum for that method.
-- A type parameter marked `reflect` (`fn load<reflect T: Decode>(text: str) -> Result<[T]>`)
-  receives a runtime type description of its type argument. A
-  function can forward `T` (or a composite type containing `T`, such as `[T]`)
-  to another `reflect` type parameter, such as `json.decode<T>`. Every type
-  parameter that appears in a `reflect` type argument must itself be declared
-  `reflect` on the enclosing function. If recursive calls nest constructed type
-  descriptions more than 256 levels deep, execution aborts with kind `"limit"`.
-  Local functions, trait methods, and `impl` methods cannot declare `reflect`
-  type parameters.
-- Functions may be declared inside blocks; such local functions may capture
-  enclosing variables and may call themselves recursively. Local functions
-  declared consecutively in the same block may call each other. Their type
-  parameters can only require traits that do not declare methods (such as `Eq`
-  or `Hash`).
+Each function parameter must have a type annotation.
+The function return type follows `->`; if omitted it is `()` (unit).
+
+Parameters may have default values. Defaults are evaluated at each call that omits them,
+in the callee's module scope. The default expression may refer to earlier parameters.
+Parameters with defaults must follow all parameters without them.
+
+The function body is a block whose value is returned. If a function returns `()`,
+the final expression value is discarded.
+
+Type parameters are listed in `<...>`. A `:` after a type parameter specifies
+the traits (§4.9) that its type arguments must implement: `T: Ord + Describe`, `T: geo.Shape`, `T: Into<str>`.
+A trailing `where` clause (`fn sum(self) -> T where T: Num`) also specifies trait bounds, and
+can constrain the type parameters of an enclosing generic `extend` block,
+struct, or enum for that method.
+
+A type parameter marked `reflect` (`fn load<reflect T: Decode>(text: str) -> Result<[T]>`)
+receives a runtime type description of its type argument. `T` may be forwarded to another
+`reflect` type parameter, such as `json.decode<T>`. Each type parameter that appears
+in a `reflect` type argument must itself be declared `reflect` on the enclosing function.
+Local functions, trait methods, and `impl` methods cannot declare `reflect` type parameters.
+
+If recursive calls nest constructed type descriptions more than 256 levels deep, execution aborts
+with kind `"limit"`.
+
+A function may be declared inside a block; such a function may capture enclosing variables and
+and may call itself recursively. Local functions declared consecutively in the same block
+may call each other. Their type parameters can only require traits that do not declare methods.
 
 ### 4.2 Structs
 
@@ -313,28 +312,33 @@ pub struct Port {
 }
 ```
 
-- Fields are separated by newlines or commas and are immutable unless
-  declared `var`. If a construction (§6.4) omits a field, the engine evaluates
-  the field's default expression. A field default can use traits without
-  methods from the struct's type parameter bounds (`s: Set<T> = Set([])` with
-  `T: Hash`), but cannot use traits that declare methods (§4.9). Fields and
-  methods are private to the declaring module unless marked `pub` (§3.3).
-- A struct can declare a static method `init` that returns `Self` or
-  `Result<Self, E>`. If a struct declares `init`, `T(args)` calls `init` and
-  returns its result (for example, `Port(80)` has type `Result<Port>`). Inside
-  `init`, `T(args)` and `Self(args)` construct the struct field by field. Native
-  modules can also declare `native fn init` on built-in or opaque types (such as
-  `Set([1, 2])` and `regex.Regex(pattern)`). Enums and traits cannot declare
-  `init`, and expressions cannot reference `T.init` as a member. `init` must
-  apply to all instances of the type: an `extend` block that declares `init`
-  cannot specialize the target's type parameters, and `init` cannot add trait
-  bounds beyond those declared on the type.
-- Methods are `fn` declarations inside the body. A method whose first parameter
-  is `self` (no annotation) is an instance method, called as `value.method(...)`.
-  Other methods are static, called as `Type.method(...)`.
-- Within the body, `Self` refers to the struct type (with its type parameters).
-- Structs may be generic: `struct Pair<A, B> { first: A, second: B }`.
-- Structs have reference semantics: assigning a struct value shares it.
+Structs are reference types; variable assignment shares a struct value without copying it.
+
+Struct fields are separated by newlines or commas. A field is immutable unless
+declared `var`. If a field defines a default and the type construction omits
+that field, it is is evaluated with its default expression. A field default can
+use traits without methods from the struct's type parameter bounds (`s: Set<T> = Set([])`
+with `T: Hash`), but cannot use traits that declare methods (§4.9).
+
+Fields and methods are private unless marked `pub` (§3.3).
+
+A struct can declare a static method `init` that returns `Self` or `Result<Self, E>`.
+If a struct declares `init`, `T(args)` calls `init` and returns its result.
+Inside `init`, `T(args)` and `Self(args)` construct the struct field by field.
+Native modules may declare `native fn init` on built-in or opaque types like
+`Set([1, 2])` and `regex.Regex(pattern)`).
+
+Enums and traits cannot declare `init`, and expressions cannot reference `T.init` as a member.
+`init` must apply to all instances of a type: an `extend` block that declares `init` cannot
+specialize the target's type parameters, and `init` cannot add trait bounds beyond those
+declared on the type.
+
+A struct declaration body may include methods. A method whose first parameter is `self` (no annotation)
+is an instance method, called as `value.method(...)`. Any other method is static, called as `Type.method(...)`.
+
+Within the struct declaration body, `Self` refers to the struct type (with its type parameters).
+
+A struct may be generic: `struct Pair<A, B> { first: A, second: B }`.
 
 ### 4.3 Enums
 
@@ -359,16 +363,18 @@ enum Tree<T> {
 }
 ```
 
-- Variants are separated by newlines or commas. A variant has zero or more
-  payload fields, which are all named (`radius: float`) or all positional
-  (`float`).
-- Variants are referred to as `Enum.Variant` in expressions, e.g.
-  `Shape.Circle(1.0)` or `Shape.Circle(radius: 1.0)`. In a pattern, the enum
-  prefix is optional if the scrutinee type is known, and a sub-pattern can
-  match a named payload field by name: `Rect(h: height, ..)`.
-- `Option` and `Result` variants (`Some`, `None`, `Ok`, `Err`) are always in
-  scope unqualified.
-- Enum values are immutable.
+Enum variants are separated by newlines or commas. A variant has zero or more
+payload fields, which are all named or all positional.
+
+Variants are referred to as `Enum.Variant` in expressions, e.g.
+`Shape.Circle(1.0)` or `Shape.Circle(radius: 1.0)`. In a pattern, the enum
+prefix is optional if the scrutinee type is known, and a sub-pattern can
+match a named payload field by name: `Rect(h: height, ..)`.
+
+`Option` and `Result` variants (`Some`, `None`, `Ok`, `Err`) are always in
+scope, unqualified.
+
+Enum values are immutable.
 
 ### 4.4 Extending types
 
@@ -378,11 +384,9 @@ extend Point {
 }
 ```
 
-An `extend` block adds methods to a struct or enum declared in the **same
-module**. Only the prelude and native module declarations may extend built-in
-types (`extend str { ... }`, `extend<T> [T] { ... }`). Any module may add
-methods to built-in types by implementing one of its own traits for them
-(§4.9).
+An `extend` block adds methods to a struct or enum declared in the same module.
+Types defined outside of the current module may be "extended" without an `extend`
+block by implementing a trait (§4.9).
 
 ### 4.5 Type aliases
 
@@ -391,8 +395,8 @@ type Grid = [[bool]]
 type Pair<T> = (T, T)
 ```
 
-Aliases are transparent: `Grid` and `[[bool]]` are the same type. Aliases may
-not be recursive, and their type parameters cannot require traits.
+Type aliases are transparent: `Grid` and `[[bool]]` are considered the same type.
+Aliases may not be recursive, and their type parameters must not require traits.
 
 ### 4.6 Top-level variables
 
@@ -402,12 +406,12 @@ pub let LIMITS = [1, 2, 3]
 var counter = 0
 ```
 
-Top-level `let` and `var` follow the same rules as local bindings; their types
-must be fully inferred from their initializer and module-level uses.
+Top-level `let` and `var` declarations follow the same rules as local bindings.
+Types must be fully inferred from their initializer and module-level uses.
 
 ### 4.7 Native declarations
 
-The prelude, standard library, and host native modules can declare `native`
+The prelude, standard library, and native modules can declare `native`
 functions and methods without a body. The module provides the Rust
 implementation, and the engine verifies that the declared Sand signature
 matches the Rust function signature (§16.3). User scripts cannot declare
@@ -434,10 +438,10 @@ test "addition is commutative" {
 }
 ```
 
-The name is a string literal without interpolation. Test blocks are ignored by
-`run` and executed by the test runner (§17.4). Inside a test block, the `test`
+A test block name is a string literal without interpolation. Test blocks are ignored
+during normal runs and executed by the test runner (§17.4). Inside a test block, the `test`
 module (§13.14) and its public items are imported automatically, at lower
-precedence than module definitions and the prelude. `?` propagates `None`
+precedence than module definitions and the prelude. Within a test, `?` returns `None`
 and `Err` as test failures (§6.8).
 
 ### 4.9 Traits and impls
@@ -448,30 +452,38 @@ can call the methods of the traits that its type parameters require.
 ```sand
 /// Things with a textual description.
 pub trait Describe {
-    fn describe(self) -> str                // required method
-    /// A default method; it may call the trait's other methods.
+    // required method
+    fn describe(self) -> str
+
+    /// A default method may call the trait's other methods.
     fn shout(self) -> str { self.describe().to_upper() }
 }
 
 pub trait Monoid {
-    fn empty() -> Self                      // static method: no `self`
+    // static method: no `self`
+    fn empty() -> Self
     fn combine(self, other: Self) -> Self
 }
 
-pub trait Shape: Describe + Eq {            // supertraits
+// trait requires supertraits
+pub trait Shape: Describe + Eq {
     fn area(self) -> float
 }
 
-pub trait Into<T> {                         // a trait with a type parameter
+// trait with a type parameter
+pub trait Into<T> {
     fn into(self) -> T
 }
 
 impl Describe for Point {
     fn describe(self) -> str { "(\(self.x), \(self.y))" }
 }
-impl<T: Describe> Describe for [T] {        // conditional (generic) impl
+
+// conditional (generic) impl
+impl<T: Describe> Describe for [T] {
     fn describe(self) -> str { "[" + self.map(x => x.describe()).join(", ") + "]" }
 }
+
 impl Monoid for int {
     fn empty() -> int { 0 }
     fn combine(self, other: int) -> int { self + other }
@@ -480,72 +492,79 @@ impl Monoid for int {
 fn concat_all<T: Monoid>(xs: [T]) -> T {
     xs.fold(T.empty(), (acc, x) => acc.combine(x))
 }
+
 fn show_all<T>(xs: [T]) -> str where T: Describe { xs.describe() }
 ```
 
-**Trait declarations.**
+#### Trait declarations
 
-- A trait body contains method declarations, optionally preceded by doc
-  comments. A method without a body is **required**; a method with a body is
-  a **default** method that applies to any `impl` that does not override it.
-  Methods whose first parameter is `self` are instance methods; all other
-  methods are static methods. Trait methods cannot use `pub` (they share the
-  visibility of the trait) or `native`.
-- Within a trait declaration, `Self` represents the implementing type. Because
-  `Self` implements the trait and its supertraits, default methods can call any
-  method of the trait (`self.describe()`, `Self.empty()`) or of its supertraits.
-- A trait can declare type parameters (`trait Into<T>`), which cannot have
-  trait bounds. Trait methods can declare their own type parameters with trait
-  bounds, and `where` clauses on a trait method can constrain only the method's
-  own type parameters.
-- Default values on trait method parameters must be constants (literals, `[]`,
-  `[:]`, or `None`).
-- **Supertraits** follow a `:`: `trait Shape: Describe + Eq`. Any type parameter
-  bounded by `Shape` also satisfies `Describe` and `Eq`. Supertrait hierarchies
-  cannot contain cycles.
-- Traits share the type namespace. In a trait bound after `:`, a module-local
-  type does not shadow a prelude trait of the same name (`struct Hash` does not
-  shadow `T: Hash`). User code cannot redefine or implement built-in traits
-  (§5.6).
+A trait body contains method declarations. It is optionally preceded by doc
+comments. Any trait method without a body is required; any method with a body
+is a "default" method applied to any `impl` that does not override it.
 
-**Impls.** An `impl` block (`impl<P...> Trait<Args> for Type where ... { methods }`)
-implements a trait for a target type.
+Methods whose first parameter is `self` are instance methods; all other
+methods are static methods. Trait methods share the visibility of the trait.
 
-- The target type must have a type constructor: a struct, an enum (including
-  `Option` and `Result`), `Error`, an opaque type, a tuple (each arity is a
-  distinct constructor), or a built-in type (`int`, `float`, `bool`, `str`,
-  `bytes`, `duration`, `()`, `Range`, `[T]`, `[K: V]`, `Set<T>`, `Task<T>`, or
-  `Channel<T>`). Function types and bare type parameters
-  (`impl<T> Trait for T`) are not valid target types. Target type arguments can
-  be concrete types (`impl Describe for [int]`).
-- Every type parameter of an `impl` block must appear in the target type or in
-  the trait arguments. Trait bounds declared on the `impl` block (in `<...>` or
-  in a `where` clause) must hold at every use of the `impl` (for example,
-  `impl<T: Describe> Describe for [T]` implements `Describe` for `[T]` if `T`
-  implements `Describe`).
-- An `impl` block must define every required method of the trait, may override
-  default methods, and cannot declare methods that are not in the trait. Each
-  method signature must match the trait declaration after substituting the
-  target type for `Self` and the `impl` trait arguments for the trait's type
-  parameters (method type parameters may be renamed if they declare equivalent
-  trait bounds). Methods in an `impl` block cannot specify `pub`, parameter
-  defaults (the trait's defaults apply), or bounds on the `impl` block's type
-  parameters. Within an `impl` block, `Self` is an alias for the target type.
-- **Supertraits:** the target type must implement every supertrait of the
-  implemented trait under the `impl` block's trait bounds.
-- **Coherence:** a trait can have at most one implementation for a given type
-  constructor and unifiable trait arguments. Two `impl` blocks for the same
-  trait and type constructor conflict if their trait arguments unify:
-  `impl Into<str> for int` and `impl Into<float> for int` do not conflict,
-  whereas `impl Describe for [int]` and `impl Describe for [str]` conflict.
-- **Orphan rule:** an `impl` block must appear in the module that declares the
-  trait or the module that declares the target type. Because the prelude
-  declares built-in types, other modules can implement only their own traits for
-  built-in types.
-- Implementations are unnamed and always visible once their declaring module is
-  loaded.
+Within a trait declaration, `Self` represents the implementing type. Because
+`Self` implements the trait and its supertraits, default methods can call any
+method of the trait (`self.describe()`, `Self.empty()`) or of its supertraits.
 
-**Trait bounds.** A type argument passed to a parameter bounded by
+A trait can declare type parameters (`trait Into<T>`) that do not have trait bounds.
+Trait methods can declare their own type parameters with trait bounds, and `where`
+clauses on a trait method can constrain only the method's own type parameters.
+
+Default values on trait method parameters must be constants.
+
+Supertraits follow a `:`: `trait Shape: Describe + Eq`. Any type parameter
+bounded by `Shape` must also satisfy `Describe` and `Eq`. Supertrait hierarchies
+must not contain cycles.
+
+Traits share the type namespace. In a trait bound after `:`, a module-local
+type does not shadow a prelude trait of the same name (`struct Hash` does not
+shadow `T: Hash`). User code cannot redefine or implement built-in traits.
+
+#### Trait Impls
+
+An `impl` block implements a trait for a target type.
+
+The target type must have a type constructor. Function types and bare type parameters are not valid target types.
+Target type arguments can be concrete types (`impl Describe for [int]`).
+
+Each type parameter of an `impl` block must appear in the target type or in
+the trait arguments. Trait bounds declared on the `impl` block (in `<...>` or
+in a `where` clause) must hold at every use of the `impl` (for example,
+`impl<T: Describe> Describe for [T]` implements `Describe` for `[T]` if `T`
+implements `Describe`).
+
+An `impl` block must define every required method of the trait, may override
+default methods, and cannot declare methods that are not in the trait. Each
+method signature must match the trait declaration after substituting the
+target type for `Self` and the `impl` trait arguments for the trait's type
+parameters (method type parameters may be renamed if they declare equivalent
+trait bounds). Methods in an `impl` block cannot specify `pub`, parameter
+defaults (the trait's defaults apply), or bounds on the `impl` block's type
+parameters. Within an `impl` block, `Self` is an alias for the target type.
+
+**Supertraits:** the target type must implement every supertrait of the
+implemented trait under the `impl` block's trait bounds.
+
+**Coherence:** a trait can have at most one implementation for a given type
+constructor and unifiable trait arguments. Two `impl` blocks for the same
+trait and type constructor conflict if their trait arguments unify:
+`impl Into<str> for int` and `impl Into<float> for int` do not conflict,
+whereas `impl Describe for [int]` and `impl Describe for [str]` conflict.
+
+**Orphan rule:** an `impl` block must appear in the module that declares the
+trait or the module that declares the target type. Because the prelude
+declares built-in types, other modules can implement only their own traits for
+built-in types.
+
+Implementations are unnamed and always visible once their declaring module is
+loaded.
+
+#### Trait bounds
+
+A type argument passed to a parameter bounded by
 `T: Trait<Args>` must satisfy that bound. A concrete type satisfies a bound
 through a matching `impl` (explicit or compiler-derived, §5.6) if the type
 arguments satisfy all bounds required by that `impl` recursively (for example,
@@ -572,7 +591,9 @@ A trait that does not declare methods in itself or its supertraits
 (`trait Marker {}`, and all built-in traits except `Num`) does not pass a
 runtime method dictionary to generic functions.
 
-**Method calls.** For a call `e.m(args)`:
+#### Trait method calls
+
+For a call `e.m(args)`:
 
 - If the receiver type is a type parameter, the type checker resolves `m` among
   the parameter's declared traits and their supertraits.
