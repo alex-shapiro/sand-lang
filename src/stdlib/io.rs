@@ -32,19 +32,17 @@ pub(crate) fn module() -> NativeModule {
     m
 }
 
-/// The type of `io.stdin`. Reading requires the `Stdin` capability.
+/// A handle to the standard input stream.
 #[derive(crate::SandObject)]
 #[sand(module = "io")]
 struct Stdin;
 
-/// The type of `io.stdout`. Writing requires the `Stdout` capability and counts
-/// toward `max_output_bytes`.
+/// A handle to the standard output stream.
 #[derive(crate::SandObject)]
 #[sand(module = "io")]
 struct Stdout;
 
-/// The type of `io.stderr`. Writing requires the `Stderr` capability and counts
-/// toward `max_output_bytes`.
+/// A handle to the standard error stream.
 #[derive(crate::SandObject)]
 #[sand(module = "io")]
 struct Stderr;
