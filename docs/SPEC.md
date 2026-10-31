@@ -153,28 +153,20 @@ text (`"[0-9]{4}"`, `"{\"a\": 1}"`).
 
 **Interpolation**: inside a non-raw string, `\(expr)` inserts the display form
 (§10.9) of `expr`; `\(expr:spec)` applies a format specification (§10.10). The
-expression is lexed as ordinary code up to the `)` closing the `\(` (nested
-parentheses do not end it) and may contain any tokens, including strings with
-their own interpolations (`"\(xs.map(x => "<\(x)>"))"`). The spec begins at
-the first `:` not nested inside `()`, `[]`, `{}` or a string and ends at the
-next `)`, which ends the interpolation. A line break is allowed only inside
-brackets opened within the interpolation; elsewhere, including in a spec, it
-is an error (`unterminated interpolation`), reported at the `\(`. `\()` is an
-error (`empty interpolation`).
+expression is lexed as ordinary code and may contain any tokens, including strings
+with their own interpolations like `"\(xs.map(x => "<\(x)>"))"`. A line break is allowed inside
+brackets opened within the interpolation; elsewhere, including in a spec, it is an
+`unterminated interpolation` error, reported at the `\(`. `\()` is an `empty interpolation` error.
 
-**Multi-line strings**: `"""` starts a block string ending at the next `"""`
-outside its interpolations; escapes and interpolation work as in `"..."`. A
-newline right after the opening `"""` is removed, and the leading whitespace
-common to the non-blank lines and the closing `"""` line (unless it is the
-first line) is removed from every line. Lines that start inside an
-interpolation are code: neither counted nor dedented.
+**Multi-line strings**: `"""` starts a string that ends at the next `"""`.
+Escapes and interpolation work normally. A newline right after the opening `"""` is removed,
+and the leading whitespace common to the non-blank lines and the closing `"""` line is removed
+from every line. Lines that start inside an interpolation are code.
 
-**Raw strings**: `r"..."`, `r#"..."#`, `r##"..."##`, ... have no escapes and no
-interpolation.
+**Raw strings**: `r"..."`, `r#"..."#`, `r##"..."##` strings do not support escapes or interpolation.
 
-**Bytes**: `b"..."` produces a `bytes` value. Escapes as in strings plus
-`\xNN`; no interpolation (`\(` is an invalid escape). Non-ASCII characters
-are encoded as UTF-8.
+**Byte strings**: `b"..."` produces a `bytes` value. Escapes work as in strings, plus `\xNN`.
+Interpolation is not allowed. Non-ASCII characters are encoded as UTF-8.
 
 ### 2.6 Operators and punctuation
 
@@ -187,29 +179,26 @@ are encoded as UTF-8.
 
 `!` occurs only in a macro call (§6.13). Negation is written `not`.
 
----
-
 ## 3. Programs, modules and imports
 
 ### 3.1 Modules
 
-Every source file is a module. A module consists of an optional module doc
-comment, `import` declarations, then any mix of item declarations (§4),
-`test` blocks and top-level statements.
+Each source file is a module. A module consists of an optional module doc
+comment, `import` declarations, then a mix of item declarations (§4), `test` blocks,
+and top-level statements.
 
 When a module is executed, its top-level statements and top-level `let`/`var`
 initializers run in source order. Functions, types and methods may be referred
 to before their textual definition. A top-level variable read before its
-initializer has run fails (kind `uninitialized`).
+initializer has run fails as `uninitialized`.
 
-The **main module** is the module the host asks the engine to run. Each imported
+The **main** module is the module the host asks the engine to run. Each imported
 module is executed exactly once, before the first module that imports it,
-following a depth-first order of `import` declarations. Import cycles are a
-compile-time error.
+following a depth-first order of `import` declarations. Cyclical imports fail at
+compile-time.
 
-A session (`sand repl`, §17.6) is a main module whose items arrive one input
-at a time; each input is checked and run when it arrives, and may shadow the
-names of earlier inputs.
+A REPL session (`sand repl`, §17.6) is implemented as a main module whose items arrive one at a time.
+Each input is checked and run on arrival, and may shadow the names of earlier inputs.
 
 ### 3.2 Imports
 
@@ -248,8 +237,6 @@ private field (with `T(...)` or `json.decode`). Value formatting and
 and the methods of a public trait are always public; `impl` blocks do not have
 visibility modifiers (§4.9). Importing modules can read a `pub var`, but only
 the declaring module can assign to it.
-
----
 
 ## 4. Declarations
 
@@ -623,8 +610,6 @@ function value.
 Traits are not types: Sand does not have trait objects (`dyn Trait`). Use an
 enum to store values of different concrete types in a single collection.
 
----
-
 ## 5. Types
 
 ### 5.1 Primitive types
@@ -739,8 +724,6 @@ fn total<T: Num>(xs: [T]) -> T {
 let none: [float] = []
 print(total(none))            // 0.0
 ```
-
----
 
 ## 6. Expressions
 
@@ -1033,8 +1016,6 @@ import; a binding named `json` does not change it. Newlines inside a data
 value do not end statements, and a trailing comma is allowed. The formatter
 writes every object with braces.
 
----
-
 ## 7. Statements
 
 ```sand
@@ -1139,8 +1120,6 @@ fn first_line(path: str) -> Result<str?> {
 A resource that no `use` closes is still closed at the latest when the
 garbage collector finds it unreachable (§10.8).
 
----
-
 ## 8. Patterns
 
 ### 8.1 Syntax
@@ -1187,8 +1166,6 @@ whose check exceeds a fixed amount of work (e.g. or-patterns in many tuple
 positions) is rejected with `pattern too complex to check for exhaustiveness`
 (§15.3).
 
----
-
 ## 9. Type checking and inference
 
 - Each module is checked after the modules it imports.
@@ -1219,8 +1196,6 @@ needed`).
   (type constructors and leaves); larger types, which only arise by repeated
   doubling (`let b = (a, a)`, or similar aliases or generic calls), are
   rejected with `type too large`. §15.3 lists the other compile-time limits.
-
----
 
 ## 10. Runtime semantics
 
@@ -1356,8 +1331,6 @@ the largest unit among `d`, `h`, `m`, `s`, `ms`, `us`, `ns` that keeps the value
 Examples: `"\(3.14159:.2)"` → `3.14`; `"\(42:>5)"` → `   42`; `"\(7:03)"` →
 `007`; `"\(255:x)"` → `ff`; `"\("ab":*^6)"` → `**ab**`; `"\("hi":?)"` → `"hi"`.
 
----
-
 ## 11. Concurrency and asynchronous I/O
 
 ### 11.1 Model
@@ -1423,8 +1396,6 @@ negative capacity fails with kind `"invalid"`.
 While the engine waits for an interactive policy decision (§14.3), no task
 runs and no timers fire for scripts; the decision is applied before execution
 resumes. (The host can still interrupt the run meanwhile, §15.1.)
-
----
 
 ## 12. The prelude
 
@@ -1756,8 +1727,6 @@ prelude's.
 
 Neither can be used as a function value. Defining `help` or `members`
 shadows them as usual.
-
----
 
 ## 13. Standard library
 
@@ -2356,8 +2325,6 @@ https 443, ws 80, wss 443, ftp 21).
 forms; returns lower-case hyphenated), `is_valid(s: str) -> bool`,
 `version(s: str) -> int?`.
 
----
-
 ## 14. Sandbox and policy
 
 ### 14.1 Principles
@@ -2662,8 +2629,6 @@ hostname rule also overrides the IP address rule during stage 2 (§14.6).
 `deny` rule line for a promptable `Capability`, such as `allow read /data/a.txt`
 or `deny http tls GET example.com:443/a`.
 
----
-
 ## 15. Resource limits
 
 ### 15.1 Limits
@@ -2810,8 +2775,6 @@ next: P<[T]>? }` cannot be described.
   several hundred bytes per source byte, bounded by `max_source_bytes`,
   which hosts compiling untrusted code under a small memory limit should
   lower accordingly.
-
----
 
 ## 16. Embedding API (Rust)
 
@@ -3177,8 +3140,6 @@ automatically resets itself, appends `" (the session was reset)"` from
 to `true` until the next call while preserving remembered `"always"` prompt
 decisions.
 
----
-
 ## 17. Tooling
 
 All subcommands exit with code 2, after a message on standard error, for usage
@@ -3444,8 +3405,6 @@ Commands (on a line of their own):
 | `:test`       | run the `test` blocks entered so far, against the current state (the last block of each name; effects persist), and print a report as `sand test` does |
 | `:reset`      | forget all inputs and start a fresh session ("always" answers are kept)                                                                                |
 | `:quit`, `:q` | end the session (exit code 0)                                                                                                                          |
-
----
 
 ## 18. Diagnostics
 
