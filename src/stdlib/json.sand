@@ -1,26 +1,18 @@
-//! JSON (RFC 8259) parsing, serialization, and typed conversion.
+//! JSON encoding and decoding (RFC 8259).
 //!
-//! `encode`, `to_json`, and `decode` map Sand types to and from JSON as follows:
+//! ### Enum Encodings
 //!
-//! - `bool`, `int`, `float`, and `str` map to JSON booleans, numbers, and
-//!   strings. Finite `float` values always include a decimal point or exponent;
-//!   `NaN` and `±inf` encode as `null` and are rejected by `decode` for `float`
-//!   fields.
-//! - `()` maps to `null`.
-//! - `[T]`, `Set<T>`, and non-empty tuples map to JSON arrays.
-//! - `[K: V]` and structs map to JSON objects in insertion or declaration
-//!   order. Map keys must be `str`, `int`, `duration`, `bool`, unit enum
-//!   variants, or value types (`time.*`, `net.SocketAddr`).
-//! - `Option<T>` maps `Some(x)` to the representation of `x` and `None` to
-//!   `null`. If a nested `Option` holds `Some(None)`, it is wrapped as
-//!   `{"Some": null}` so it remains distinguishable from an outer `None`.
-//! - Enum variants without payload fields map to strings such as `"Red"`.
-//!   Variants with a single payload field map to `{"Variant": payload}`, and
-//!   variants with multiple payload fields map to `{"Variant": [f0, f1, ...]}`.
-//! - `bytes` maps to a standard Base64 string, `duration` maps to an integer
-//!   nanosecond count, `Range` maps to `{"start": int, "end": int, "inclusive":
-//!   bool}`, and value types (`time.*`, `net.SocketAddr`) map to their
-//!   canonical text representations.
+//! - Unit enum variants map to strings like `"Red"`
+//! - Tuple variants with a single payload field map to `{"Variant": payload}`
+//! - Tuple variants with multiple payload fields map to `{"Variant": [f0, f1, ...]}`
+//! - Struct variants map to `{"Variant": {...}}`
+//!
+//! ### Other Type Encodings
+//!
+//! - `bytes` maps to a standard Base64 string
+//! - `duration` maps to an integer nanosecond count
+//! - `Range` maps to `{"start": int, "end": int, "inclusive": bool}`
+//! - native value types like `time.*` and `net.SocketAddr` map to their canonical text representations
 
 extend Json {
     /// Returns the field `key` if `self` is an `Obj`, or `None` otherwise.
