@@ -7,7 +7,7 @@ description = "Sand is a statically typed scripting language that runs untrusted
 
 <h1 class="wordmark">Sand</h1>
 
-<p class="tagline">An interpreter for running untrusted code, safely.</p>
+<p class="tagline">An interpreter for running untrusted code safely.</p>
 
 <div class="actions">
 <a class="button primary" href="/guide/">Read the guide</a>
@@ -27,11 +27,11 @@ description = "Sand is a statically typed scripting language that runs untrusted
 <section class="feature">
 <div>
 
-## Capability-based sandboxing
+## Sandboxing
 
-The sand interpreter is sandboxed by default. Operations that touch outside resources, like file and network I/O, must be checked against a security policy before they execute. The interpeter pauses during each check to prevent untrusted code from taking unwanted actions.
+Each Sand interpreter is sandboxed. Operations that touch outside resources, like file and network I/O, must be checked against a security policy before they execute. The interpeter pauses during each check to prevent untrusted code from taking unwanted actions.
 
-Policies also enforce limits on memory and compute.
+Sandbox policies also enforce limits on memory and compute.
 
 </div>
 <div>
@@ -109,7 +109,7 @@ print(task.all(tasks))
 
 Sand is designed to be embedded in larger Rust programs. Multiple interpreters can run concurrently in a single process, each with its own policy.
 
-Sand also runs in WebAssembly. See it in action in the [playground](/play/).
+Sand also runs in WebAssembly. Try it in your browser with the [Sand playground](/play/).
 
 </div>
 <div>
