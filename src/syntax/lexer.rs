@@ -237,7 +237,6 @@ pub struct Token {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommentKind {
     Line,
-    Block,
     Doc,
     ModuleDoc,
 }
@@ -260,7 +259,7 @@ pub struct Lexed {
     pub tokens: Vec<Token>,
     pub comments: Vec<Comment>,
     pub errors: Vec<Diag>,
-    /// The source ends inside a string, a comment or brackets.
+    /// The source ends inside a string or brackets.
     pub open: bool,
 }
 
@@ -350,9 +349,9 @@ pub fn lex(src: &str, file: FileId) -> Lexed {
 }
 
 /// Whether `source` is a complete input for a front end that reads it line
-/// by line (`sand repl`): it does not end inside a string, a comment or
-/// brackets, its last token can end a statement (§2.3), and it does not end
-/// with a doc comment (which belongs to the item that follows).
+/// by line (`sand repl`): it does not end inside a string or brackets, its
+/// last token can end a statement (§2.3), and it does not end with a doc
+/// comment (which belongs to the item that follows).
 pub fn is_complete(source: &str) -> bool {
     let lexed = lex(source, 0);
     let last = lexed.tokens.iter().rev().find(|t| !matches!(t.tok, Tok::Semi | Tok::Eof));
@@ -495,7 +494,7 @@ impl<'a> Lexer<'a> {
                     }
                 },
                 b'/' if self.peek(1) == b'/' => self.line_comment(),
-                b'/' if self.peek(1) == b'*' => self.block_comment(),
+                b'/' if self.peek(1) == b'*' => self.slash_star(),
                 b'0'..=b'9' => self.number(),
                 b'"' if self.peek(1) == b'"' && self.peek(2) == b'"' => self.triple_string(),
                 b'"' => {
@@ -567,29 +566,12 @@ impl<'a> Lexer<'a> {
         self.comments.push(Comment { kind, lo: lo as u32, hi: hi as u32 });
     }
 
-    fn block_comment(&mut self) {
+    /// Rejects `/*`, which no valid code contains, and skips to the next `*/`
+    /// so that the text in between causes no further errors.
+    fn slash_star(&mut self) {
         let lo = self.pos;
-        self.pos += 2;
-        let mut depth = 1;
-        while self.pos < self.bytes.len() {
-            if self.bytes[self.pos] == b'/' && self.peek(1) == b'*' {
-                depth += 1;
-                self.pos += 2;
-            } else if self.bytes[self.pos] == b'*' && self.peek(1) == b'/' {
-                depth -= 1;
-                self.pos += 2;
-                if depth == 0 {
-                    break;
-                }
-            } else {
-                self.pos += 1;
-            }
-        }
-        if depth > 0 {
-            self.error(lo, lo + 2, "unterminated block comment");
-            self.open = true;
-        }
-        self.comments.push(Comment { kind: CommentKind::Block, lo: lo as u32, hi: self.pos as u32 });
+        self.error(lo, lo + 2, "Sand has no block comments: start each comment line with `//`");
+        self.pos = self.src[lo + 2..].find("*/").map_or(self.bytes.len(), |n| lo + n + 4);
     }
 
     fn number(&mut self) {
@@ -1200,12 +1182,21 @@ mod tests {
     }
 
     #[test]
+    fn slash_star_is_one_error() {
+        let lexed = lex("let x = 1 /* a\n * b */ + 2\n/* c", 0);
+        let errors: Vec<_> = lexed.errors.iter().map(|e| (e.span.lo, e.message.as_str())).collect();
+        let msg = "Sand has no block comments: start each comment line with `//`";
+        assert_eq!(errors, [(10, msg), (27, msg)]);
+        assert!(lexed.comments.is_empty());
+        assert_eq!(lexed.tokens.iter().filter(|t| t.tok == Tok::Plus).count(), 1);
+    }
+
+    #[test]
     fn completeness() {
-        for complete in ["", "x", "let x = 1", "f(1)\n", "x;", "\"a\\(1)\"", "\"{\"", "/* c */", "1..", "// c\nx"] {
+        for complete in ["", "x", "let x = 1", "f(1)\n", "x;", "\"a\\(1)\"", "\"{\"", "1..", "// c\nx"] {
             assert!(is_complete(complete), "{complete:?}");
         }
-        for incomplete in
-            ["f(", "\"abc", "\"a\\(1", "\"a\\(f(", "\"\"\"\n\\(", "/* c", "x +", "x.", "if x {} else", "/// doc", "r#\"x", "let x ="]
+        for incomplete in ["f(", "\"abc", "\"a\\(1", "\"a\\(f(", "\"\"\"\n\\(", "x +", "x.", "if x {} else", "/// doc", "r#\"x", "let x ="]
         {
             assert!(!is_complete(incomplete), "{incomplete:?}");
         }

@@ -3,11 +3,10 @@ print("hello, world")
 --- stdout
 hello, world
 
-=== line and block comments
+=== line comments
 // a comment
 print(1) // trailing
-/* block
-   /* nested */ still comment */
+// another comment
 print(2)
 --- stdout
 1
@@ -427,11 +426,12 @@ fn double(n: int) -> int
 Doubles.
 fn plain()
 
-=== unterminated block comment
-/* never closed
+=== block comments are a syntax error
+/* a block
+   comment */
 print(1)
 --- error
-unterminated block comment
+1: Sand has no block comments: start each comment line with `//`
 
 === duration literal with float precision
 print(1.25ms)

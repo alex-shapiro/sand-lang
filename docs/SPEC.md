@@ -47,7 +47,6 @@ extension `.sand`. Non-ASCII characters may appear only in comments and string l
 
 ```sand
 // line comment
-/* block comment, /* may nest */ */
 /// documentation comment for the following item, field, variant or method
 //! documentation comment for the enclosing module (only before the first item)
 ```
@@ -69,7 +68,7 @@ terminator (`;`) if the last token on the line is:
 - the postfix operator `?`
 - `..` or `..=`, which may end an open range (`let rest = 1..`)
 
-and the newline is **not** inside a `(...)` or `[...]` group. Inside `{...}`
+and the newline is not inside a `(...)` or `[...]` group. Inside `{...}`
 newlines are significant again, even inside parentheses.
 
 The lexer does not insert a terminator if the next non-blank line starts with `.`,
@@ -85,15 +84,11 @@ let total = items
 
 **Minus and whitespace.** `-` is the only operator that is both prefix and
 binary; where the grammar cannot tell which is meant, whitespace decides. A
-`-` with whitespace (space, tab, line break or start of source) before it and
-none after it (`-x`) is a negation:
+`-` with whitespace before it and none after it (`-x`) is a negation:
 
-- at the start of a line it begins a new statement, whatever the previous
-  line ends with (the linter reports it if it has no effect, `no-effect`,
-  §17.2);
-- after an operand (on the same line, or the next line inside `(...)` or
-  `[...]`) it is an error (an ambiguous `-`): `a -b` and `[1` / `-2]` are
-  rejected rather than read as `a - b` and `[1 - 2]`.
+- at the start of a line it begins a new statement, whatever the previous line ends with;
+- after an operand on the same line, or the next line inside `(...)` or `[...]` it is an
+  error (an ambiguous `-`): `a -b` and `[1` / `-2]` are rejected rather than read as `a - b` and `[1 - 2]`.
 
 Every other `-` subtracts after an operand and negates elsewhere: `a - b`,
 `a-b` and `a- b` subtract; `-a`, `f(-a)`, `[1, -2]`, `x = -1` and the second
@@ -105,9 +100,8 @@ let total = base
     - discount
 ```
 
-The formatter prints subtraction with spaces on both sides and negation with
-none after, so formatted code means what it says. Explicit `;` may separate
-statements on one line; redundant terminators are ignored.
+The formatter prints subtraction with spaces on both sides and negation with none after.
+Explicit `;` may separate statements on one line; redundant terminators are ignored.
 
 ### 2.4 Identifiers and keywords
 
@@ -128,30 +122,26 @@ followed by a string literal starts a test block, and `from` followed by a
 module name or path and `import` starts a selective import. In all other
 positions, `test` and `from` are ordinary identifiers.
 
-By convention (enforced by the linter): types, traits, enum variants and type
-parameters are `UpperCamelCase`; functions, variables, fields, modules and loop
-labels are `snake_case`; top-level `let` constants may also be
-`SCREAMING_SNAKE_CASE`. The identifier `_` is a wildcard and may not be read.
+Identifiers use convention casing, enforced by the linter. Types, traits, enum variants,
+and type parameters are `UpperCamelCase`; functions, variables, fields, modules and loop
+labels are `snake_case`; top-level `let` constants may also be `SCREAMING_SNAKE_CASE`.
+The identifier `_` is a wildcard and may not be read.
 
 ### 2.5 Literals
 
 **Integers**: `0`, `42`, `1_000_000`, `0xff`, `0b1010`, `0o777`. Underscores may
-separate digits. A decimal literal must fit in a 64-bit signed integer (the
-literal `9223372036854775808` is permitted only as the operand of unary minus).
+separate digits. A decimal literal must fit in a 64-bit signed integer.
 A hexadecimal, binary or octal literal may be any 64-bit pattern, read as a
 two's complement integer: `0x7FFF_FFFF_FFFF_FFFF` is the largest `int`,
 `0x8000_0000_0000_0000` the smallest and `0xFFFF_FFFF_FFFF_FFFF` is `-1`.
 
-**Floats**: `1.0`, `0.5`, `1e9`, `2.5e-3`, `1_000.5`, `inf` (positive
-infinity), `nan` (not a number). A float must have digits on both sides of a
-`.`; `1.` and `.5` are not floats.
+**Floats**: `1.0`, `0.5`, `1e9`, `2.5e-3`, `1_000.5`, `inf`, `nan`.
+A float must have digits on both sides of a `.`; `1.` and `.5` are not valid floats.
 
 **Durations**: an integer or float literal immediately followed by a unit:
 `ns`, `us`, `ms`, `s`, `m`, `h`, `d` (24 hours), `w` (7 days). Examples: `250ms`,
-`1.5s`, `2h`, `3d`. The value is
-stored as a signed 64-bit number of nanoseconds, computed exactly from the
-decimal literal (`1.005s` is 1,005,000,000 ns); fractional nanoseconds are
-truncated.
+`1.5s`, `2h`, `3d`. The value is stored as a signed 64-bit number of nanoseconds.
+Fractional nanoseconds are truncated.
 
 **Booleans**: `true`, `false`.
 
@@ -3410,8 +3400,8 @@ between inputs.
   the error says so.
 - `test` blocks are checked but not run when entered.
 
-Lines are read until the input is complete: while brackets, a string or a
-block comment are open, or the last token cannot end a statement (a binary
+Lines are read until the input is complete: while brackets or a string
+are open, or the last token cannot end a statement (a binary
 operator, `=`, `,`, `.`, `:`, `=>`, `->`, `else`, ...), or the last line is
 a doc comment, the REPL prompts with `...` for more. A command line is
 always complete. Ctrl-C interrupts the input being run (the session

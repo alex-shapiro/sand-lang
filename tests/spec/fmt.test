@@ -55,7 +55,7 @@ struct S { x: int }
 // leading comment
 let a = 1 // trailing comment
 
-/* block */
+// comment before f
 fn f() {
     // inside
     print(a)
@@ -64,7 +64,7 @@ fn f() {
 // leading comment
 let a = 1 // trailing comment
 
-/* block */
+// comment before f
 fn f() {
     // inside
     print(a)
@@ -340,11 +340,6 @@ let total = first_quantity_with_a_long_name
 let diff = first_quantity_with_a_long_name * 2
     - second_quantity_with_a_long_name * 3
     - third_quantity_x
-
-=== comments stay next to the operator
-let x = 1 /* one */ + 2
---- fmt
-let x = 1 /* one */ + 2
 
 === interpolations with nested strings, brackets and braces are kept verbatim
 let xs=[1,2]
