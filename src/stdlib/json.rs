@@ -1,4 +1,4 @@
-//! JSON parsing, serialization, and reflection-based conversion.
+//! JSON encoding and decoding.
 
 use super::base64;
 use crate::check::ModKind;
