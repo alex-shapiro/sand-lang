@@ -27,8 +27,9 @@ use syn::{
 /// Supports unit, tuple, and struct variants, and type parameters. Each payload
 /// type must implement `IntoValue` and owned `FromValue`.
 ///
-/// Use `#[sand(name = "<name>")]` on a struct variant field to override its Sand
-/// field name.
+/// Optional attributes:
+///
+/// - `#[sand(name = "<name>")]` on a struct variant field overrides its Sand field name.
 #[proc_macro_derive(SandEnum, attributes(sand))]
 pub fn derive_sand_enum(input: TokenStream) -> TokenStream {
     expand(input, sand_enum)
@@ -41,12 +42,12 @@ pub fn derive_sand_enum(input: TokenStream) -> TokenStream {
 /// Rust type parameters define Sand type parameters.
 ///
 /// Optional field attributes:
+///
 /// - `#[sand(name = "<name>")]`: overrides the Sand field name.
-/// - `#[sand(private)]`: makes the field private to its module.
-/// - `#[sand(var)]`: makes the field mutable in Sand.
-/// - `#[sand(default)]` or `#[sand(default = <expr>)]`: sets the Sand default
-///   value to `Default::default()` or `Into::into(<expr>)`. `IntoValue::to_const`
-///   must return `Some` for the default value.
+/// - `#[sand(private)]`: makes the field private.
+/// - `#[sand(var)]`: makes the field mutable.
+/// - `#[sand(default)]` or `#[sand(default = <expr>)]`: sets a default value from the `Default` trait or `Into::into(<expr>)`.
+///   `IntoValue::to_const` must return `Some` for the default value.
 #[proc_macro_derive(SandStruct, attributes(sand))]
 pub fn derive_sand_struct(input: TokenStream) -> TokenStream {
     expand(input, sand_struct)
