@@ -498,9 +498,8 @@ fn show_all<T>(xs: [T]) -> str where T: Describe { xs.describe() }
 
 #### Trait declarations
 
-A trait body contains method declarations. It is optionally preceded by doc
-comments. Any trait method without a body is required; any method with a body
-is a "default" method applied to any `impl` that does not override it.
+A trait body may contain method declarations. Any trait method without a body is required;
+any method with a body is a "default" method applied to any `impl` that does not override it.
 
 Methods whose first parameter is `self` are instance methods; all other
 methods are static methods. Trait methods share the visibility of the trait.
@@ -527,69 +526,60 @@ shadow `T: Hash`). User code cannot redefine or implement built-in traits.
 
 An `impl` block implements a trait for a target type.
 
-The target type must have a type constructor. Function types and bare type parameters are not valid target types.
-Target type arguments can be concrete types (`impl Describe for [int]`).
+The target type must have a type constructor. Function types and bare type parameters
+are not valid target types. Target type arguments can be concrete types like `impl Describe for [int]`.
 
-Each type parameter of an `impl` block must appear in the target type or in
-the trait arguments. Trait bounds declared on the `impl` block (in `<...>` or
-in a `where` clause) must hold at every use of the `impl` (for example,
-`impl<T: Describe> Describe for [T]` implements `Describe` for `[T]` if `T`
-implements `Describe`).
+Each type parameter of an `impl` block must appear in the target type or in trait arguments.
+Trait bounds declared on the `impl` block must hold for every use of the `impl`.
 
 An `impl` block must define every required method of the trait, may override
-default methods, and cannot declare methods that are not in the trait. Each
+default methods, and must not declare methods that are not in the trait. Each
 method signature must match the trait declaration after substituting the
 target type for `Self` and the `impl` trait arguments for the trait's type
-parameters (method type parameters may be renamed if they declare equivalent
-trait bounds). Methods in an `impl` block cannot specify `pub`, parameter
-defaults (the trait's defaults apply), or bounds on the `impl` block's type
-parameters. Within an `impl` block, `Self` is an alias for the target type.
+parameters. Method type parameters may be renamed if they declare equivalent
+trait bounds.
 
-**Supertraits:** the target type must implement every supertrait of the
-implemented trait under the `impl` block's trait bounds.
+Methods in an `impl` block cannot specify `pub`, parameter defaults, or bounds
+on the `impl` block's type parameters. Within an `impl` block, `Self` is an alias
+for the target type.
 
-**Coherence:** a trait can have at most one implementation for a given type
-constructor and unifiable trait arguments. Two `impl` blocks for the same
-trait and type constructor conflict if their trait arguments unify:
-`impl Into<str> for int` and `impl Into<float> for int` do not conflict,
-whereas `impl Describe for [int]` and `impl Describe for [str]` conflict.
+The target type must implement every supertrait of the implemented trait under the
+`impl` block's trait bounds.
 
-**Orphan rule:** an `impl` block must appear in the module that declares the
-trait or the module that declares the target type. Because the prelude
-declares built-in types, other modules can implement only their own traits for
-built-in types.
+A trait must have at most one implementation for a given type constructor and
+unifiable trait arguments. Two `impl` blocks for the same trait and type constructor
+conflict if their trait arguments unify: `impl Into<str> for int` and `impl Into<float> for int`
+do not conflict, but `impl Describe for [int]` and `impl Describe for [str]` do conflict.
 
-Implementations are unnamed and always visible once their declaring module is
-loaded.
+**The Orphan rule:** an `impl` block must appear in the module that declares the
+trait or the module that declares the target type.
+
+Implementations are unnamed and always visible once their declaring module is loaded.
 
 #### Trait bounds
 
-A type argument passed to a parameter bounded by
-`T: Trait<Args>` must satisfy that bound. A concrete type satisfies a bound
-through a matching `impl` (explicit or compiler-derived, §5.6) if the type
-arguments satisfy all bounds required by that `impl` recursively (for example,
-`[[Point]]: Describe` requires `[Point]: Describe`, which requires
-`Point: Describe`). A type parameter satisfies its declared bounds and their
-supertraits, and `Self` satisfies the enclosing trait and its supertraits. The
-type checker verifies trait bounds at every instantiation and reports any
-unmet bound (for example, ``str does not implement `Describe` (required for
-[str] to implement `Describe`)``).
+A type argument passed to a parameter bounded by `T: Trait<Args>` must satisfy that bound.
+A concrete type satisfies a bound through a matching `impl` if the type arguments satisfy
+all bounds required by that `impl` recursively. For example, `[[Point]]: Describe` requires
+`[Point]: Describe`, which requires `Point: Describe`. A type parameter satisfies its declared
+bounds and their supertraits, and `Self` satisfies the enclosing trait and its supertraits. The
+type checker verifies trait bounds at every instantiation and reports any unmet bound.
+Example: ``str does not implement `Describe` (required for [str] to implement `Describe`)``).
 
-Functions, methods, `where` clauses, `impl` blocks, structs, and enums can
-declare trait bounds on their type parameters. Methods on a struct or enum
-(including methods in `extend` blocks) inherit the type parameter bounds of the
-type. A struct or enum also infers any bounds that its field or variant payload
-types require of its type parameters: given `struct Bag<T: Hash>`,
-`struct Outer<U> { b: Bag<U> }` infers `U: Hash`, and `help(Outer)` displays
-`struct Outer<U: Hash>`. Because `Set` elements and map keys require `Hash`, a
-field of type `Set<[int]>` is rejected at declaration time. The type checker
-verifies type constructor bounds on constructions, enum variants, method
-calls, struct fields, enum payloads, and `reflect` type arguments; other type
-annotations are not checked.
+Functions, methods, `where` clauses, `impl` blocks, structs, and enums may declare trait bounds
+on their type parameters. Methods on a struct or enum, including methods in `extend` blocks,
+inherit the type parameter bounds of the type. A struct or enum also infers any bounds that its
+field or variant payload types require of its type parameters.
 
-A trait that does not declare methods in itself or its supertraits
-(`trait Marker {}`, and all built-in traits except `Num`) does not pass a
-runtime method dictionary to generic functions.
+For example, given `struct Bag<T: Hash>`, `struct Outer<U> { b: Bag<U> }` infers `U: Hash`,
+and `help(Outer)` displays `struct Outer<U: Hash>`. Because `Set` elements and map keys require
+`Hash`, a field of type `Set<[int]>` is rejected at declaration time.
+
+The type checker verifies type constructor bounds on constructions, enum variants, method calls,
+struct fields, enum payloads, and `reflect` type arguments. Other type annotations are not checked.
+
+A trait that does not declare methods in itself or its supertraits, for example `trait Marker {}`,
+does not pass a runtime method dictionary to generic functions.
 
 #### Trait method calls
 
