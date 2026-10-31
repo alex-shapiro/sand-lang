@@ -1,15 +1,14 @@
-//! Derive macros that bind Rust types to Sand types in a `NativeModule`.
+//! Derive macros that bind Rust types to Sand types.
 //!
-//! Each derive macro requires `#[sand(module = "<module>")]` on the type and
-//! accepts these optional type attributes:
-//! - `#[sand(name = "<Name>")]`: overrides the Sand type name.
-//! - `#[sand(private)]`: makes the type private to its module.
-//! - `#[sand(crate = <path>)]`: overrides the `::sandlang` crate path.
-//! - `#[sand(manual_conversion)]`: omits the `FromValue` and `IntoValue`
-//!   implementations on `SandEnum` and `SandStruct` types.
+//! Each type requires a `#[sand(module = "<module>")]` attribute and accepts
+//! optional type attributes:
 //!
-//! The macros copy Rust doc comments, including `#[doc = include_str!("...")]`,
-//! into the Sand documentation.
+//! - `#[sand(name = "<Name>")]` overrides the Sand type name.
+//! - `#[sand(private)]` makes the type private.
+//! - `#[sand(crate = <path>)]` overrides the `::sandlang` crate path.
+//! - `#[sand(manual_conversion)]` omits `FromValue` and `IntoValue` implementations.
+//!
+//! Rust doc comments, including `#[doc = include_str!("...")]`, are copied into Sand docs.
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as Tokens};
@@ -22,31 +21,26 @@ use syn::{
     parse_macro_input, parse_quote,
 };
 
-/// Derives `NamedType`, `EnumType`, `SandType`, `FromValue`, and `IntoValue`
-/// for an enum.
+/// Declare a sandlang enum.
 ///
-/// The macro binds unit variants to variants without payloads, tuple variants
-/// to positional payloads, and struct variants to named payloads. Use
-/// `#[sand(name = "<name>")]` on a struct variant field to override its Sand
-/// field name. Each payload type must implement `IntoValue` and owned
-/// `FromValue`. Rust type parameters define Sand type parameters.
+/// Implements `NamedType`, `EnumType`, `SandType`, `FromValue`, and `IntoValue`.
+/// Supports unit, tuple, and struct variants, and type parameters. Each payload
+/// type must implement `IntoValue` and owned `FromValue`.
+///
+/// Use `#[sand(name = "<name>")]` on a struct variant field to override its Sand
+/// field name.
 #[proc_macro_derive(SandEnum, attributes(sand))]
 pub fn derive_sand_enum(input: TokenStream) -> TokenStream {
     expand(input, sand_enum)
 }
 
-/// Derives `NamedType`, `ObjectType`, `SandType`, `FromValue`, and `IntoValue`
-/// for an opaque host object type that implements `NativeObject`.
-#[proc_macro_derive(SandObject, attributes(sand))]
-pub fn derive_sand_object(input: TokenStream) -> TokenStream {
-    expand(input, sand_object)
-}
-
-/// Derives `NamedType`, `StructType`, `SandType`, `FromValue`, and `IntoValue`
-/// for a struct with named fields.
+/// Declare a sandlang struct.
 ///
-/// Each field type must implement `IntoValue` and owned `FromValue`. Rust type
-/// parameters define Sand type parameters. Optional field attributes:
+/// Implements `NamedType`, `StructType`, `SandType`, `FromValue`, and `IntoValue`.
+/// Each field type must implement `IntoValue` and owned `FromValue`.
+/// Rust type parameters define Sand type parameters.
+///
+/// Optional field attributes:
 /// - `#[sand(name = "<name>")]`: overrides the Sand field name.
 /// - `#[sand(private)]`: makes the field private to its module.
 /// - `#[sand(var)]`: makes the field mutable in Sand.
@@ -58,8 +52,19 @@ pub fn derive_sand_struct(input: TokenStream) -> TokenStream {
     expand(input, sand_struct)
 }
 
-/// Derives `NamedType`, `SandType`, `FromValue`, and `IntoValue` for a type
-/// that implements `ValueType`.
+/// Declare an sandlang opaque native type.
+///
+/// Implements `NamedType`, `ObjectType`, `SandType`, `FromValue`, and `IntoValue`
+/// The type must implement the `NativeObject` marker trait.
+#[proc_macro_derive(SandObject, attributes(sand))]
+pub fn derive_sand_object(input: TokenStream) -> TokenStream {
+    expand(input, sand_object)
+}
+
+/// Declare a sandlang value type.
+///
+/// Implements `NamedType`, `SandType`, `FromValue`, and `IntoValue`.
+/// The type must implement the `ValueType` marker trait.
 #[proc_macro_derive(SandValue, attributes(sand))]
 pub fn derive_sand_value(input: TokenStream) -> TokenStream {
     expand(input, sand_value)
