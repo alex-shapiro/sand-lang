@@ -51,8 +51,8 @@ pub fn derive_sand_object(input: TokenStream) -> TokenStream {
 /// - `#[sand(private)]`: makes the field private to its module.
 /// - `#[sand(var)]`: makes the field mutable in Sand.
 /// - `#[sand(default)]` or `#[sand(default = <expr>)]`: sets the Sand default
-///   value to `Default::default()` or `Into::into(<expr>)`. The default value
-///   must convert to a `Constant` via `IntoValue::to_const`.
+///   value to `Default::default()` or `Into::into(<expr>)`. `IntoValue::to_const`
+///   must return `Some` for the default value.
 #[proc_macro_derive(SandStruct, attributes(sand))]
 pub fn derive_sand_struct(input: TokenStream) -> TokenStream {
     expand(input, sand_struct)
@@ -158,8 +158,6 @@ impl TypeParams {
         Ok(Self { params, canonical_self })
     }
 
-    /// Replaces `Self` and each type parameter in `ty` with `Param<N>` so the
-    /// resulting type describes the field for all monomorphizations.
     fn substitute(&self, krate: &Path, ty: &Type) -> Type {
         struct Subst<'a>(&'a TypeParams, &'a Path);
         impl VisitMut for Subst<'_> {
@@ -594,8 +592,6 @@ fn sand_value(input: &DeriveInput) -> syn::Result<Tokens> {
     })
 }
 
-/// Builds a compile-time `&'static str` expression from `#[doc = ...]`
-/// attributes, preserving non-literal expressions such as `include_str!(...)`.
 fn doc_expr(attrs: &[Attribute]) -> Tokens {
     let mut parts = Vec::new();
     for a in attrs {

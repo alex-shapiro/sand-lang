@@ -1,9 +1,4 @@
-//! JSON parsing, encoding, and reflection-based conversion between JSON and Sand values.
-//!
-//! `parse`, `decode`, `to_json`, and Rust `Json` conversion stage output values with
-//! `Heap::staged` while reading input directly from the heap. Each string is copied
-//! once into a heap object, and repeated object keys share a single heap string.
-//! `encode` traverses heap values directly and writes serialized JSON into an output buffer.
+//! JSON parsing, serialization, and reflection-based conversion.
 
 use super::base64;
 use crate::check::ModKind;
@@ -26,24 +21,20 @@ use hashbrown::HashTable;
 use std::borrow::Cow;
 use std::fmt::Write;
 
-/// Maximum nesting depth of JSON arrays and objects.
 const MAX_DEPTH: usize = 512;
-
-/// Estimated heap size in bytes of a staged string, list, map, or struct header.
 const NODE_BYTES: usize = 64;
 
-/// A dynamic JSON value.
+/// Dynamic JSON value.
 ///
-/// `json.parse` decodes integers without a fraction or exponent that fit in a
-/// 64-bit signed `int` as `Int`, and all other numbers as `Float`. Object
-/// entries preserve insertion order. Conversion between Sand and Rust supports
-/// up to 512 nested arrays and objects.
+/// Integers in the 64-bit signed `int` range without a fraction or exponent are
+/// represented as `Int`. All other numbers are represented as `Float`. Host
+/// conversion supports up to 512 nested arrays and objects.
 #[derive(Clone, Debug, PartialEq, crate::SandEnum)]
 #[sand(module = "json", manual_conversion)]
 pub enum Json {
     /// JSON `null`.
     Null,
-    /// JSON boolean (`true` or `false`).
+    /// JSON boolean.
     Bool(bool),
     /// Exact 64-bit signed integer.
     Int(i64),
@@ -57,7 +48,6 @@ pub enum Json {
     Obj(indexmap::IndexMap<String, Json>),
 }
 
-/// Runtime variant IDs for `Json` in a compiled program.
 #[derive(Clone, Copy)]
 struct JsonIds {
     first: u32,
@@ -108,7 +98,7 @@ pub(crate) fn module() -> NativeModule {
         let ids = JsonIds::of(&vm.prog)?;
         let meter = &vm.meter;
         let r = vm.heap.staged(|heap, st| {
-            let mut b = Build::new(heap, st, meter);
+            let mut b = Builder::new(heap, st, meter);
             let mut p = Parser::new(text.str(heap));
             let r = p.parse_json(&mut b, &ids).and_then(|v| p.finish().map(|()| v));
             p.charge(meter)?;
@@ -141,7 +131,7 @@ pub(crate) fn module() -> NativeModule {
         let (r, fills) = vm.heap.staged(|heap, st| {
             let mut d = Decoder {
                 p: Parser::new(text.str(heap)),
-                b: Build::new(heap, st, meter),
+                b: Builder::new(heap, st, meter),
                 ids,
                 path: Vec::new(),
                 stack: Vec::new(),
@@ -187,7 +177,7 @@ pub(crate) fn module() -> NativeModule {
         let (prog, meter) = (&vm.prog, &vm.meter);
         let v = vm.heap.staged(|heap, st| {
             let mut c =
-                Converter { prog, heap, b: Build::new(heap, st, meter), ids, fields: FxHashMap::default(), names: FxHashMap::default() };
+                Converter { prog, heap, b: Builder::new(heap, st, meter), ids, fields: FxHashMap::default(), names: FxHashMap::default() };
             c.convert(value.raw(), 0)
         })?;
         Ok(Val::from_raw(v))
@@ -195,20 +185,14 @@ pub(crate) fn module() -> NativeModule {
     m
 }
 
-/// Intermediate result returned by `decode_raw` and finalized by `decode`.
 #[derive(crate::SandEnum)]
 #[sand(module = "json", private)]
 enum Decoded<T> {
-    /// Fully decoded value.
     Done(T),
-    /// Decoded value accompanied by deferred thunks that evaluate non-constant
-    /// field defaults and populate sets containing those structs.
     Pending(T, Val<Vec<fn()>>),
-    /// Parse or type error encountered during decoding.
     Failed(super::Error),
 }
 
-/// Failure while parsing or decoding.
 enum Error {
     Parse(String),
     Invalid(String),
@@ -232,61 +216,42 @@ fn into_result<T>(r: PResult<Value>) -> Result<Val<T>, HostError> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Building values
-
-/// Maximum byte length of a deduplicated object key.
 const MAX_SHARED_KEY_LEN: usize = 64;
-/// Maximum number of distinct object keys deduplicated per operation.
 const MAX_SHARED_KEYS: usize = 4096;
-/// Maximum number of entries in an in-progress map before [`Build`] switches
-/// from linear scan to a hash index.
 const SCANNED_KEYS: usize = 16;
 
-/// Stages lists, maps, and deduplicated object keys while tracking temporary
-/// memory against the heap limit.
-///
-/// Staged strings cannot be read from the heap before commit, so map keys are
-/// hashed and compared by their text in `entries`.
-struct Build<'a, 's, 'h> {
+struct Builder<'a, 's, 'h> {
     heap: &'a Heap,
     st: &'s mut Staging<'h>,
     meter: &'a Meter,
-    /// Temporary bytes allocated in `keys`, `entries`, and in-progress list buffers.
     pending: usize,
-    /// Deduplicated object key strings indexed by hash.
     keys: HashTable<(u64, Cow<'a, str>, Value)>,
-    /// Flattened stack of entries for all in-progress maps.
     entries: Vec<Entry<'a>>,
 }
 
 struct Entry<'a> {
     hash: u64,
-    /// Key text for string keys, or `None` for inline keys.
+    /// String key text used for equality checks before staged strings are committed to the heap.
     text: Option<Cow<'a, str>>,
     key: Value,
     value: Value,
 }
 
-/// An in-progress map whose entries start at `Build::entries[base..]`.
-struct MapBuild {
+struct MapBuilder {
     base: usize,
-    /// Hash index over `entries[base..]`, allocated after the map exceeds `SCANNED_KEYS` entries.
     index: Option<KeyTable>,
 }
 
-impl<'a, 's, 'h> Build<'a, 's, 'h> {
+impl<'a, 's, 'h> Builder<'a, 's, 'h> {
     fn new(heap: &'a Heap, st: &'s mut Staging<'h>, meter: &'a Meter) -> Self {
-        Build { heap, st, meter, pending: 0, keys: HashTable::new(), entries: Vec::new() }
+        Builder { heap, st, meter, pending: 0, keys: HashTable::new(), entries: Vec::new() }
     }
 
     fn reserve(&self) -> Result<(), Ctl> {
         self.st.check_memory(NODE_BYTES + self.pending)
     }
 
-    /// Appends `v` to `items` after checking list buffer growth against the
-    /// memory limit. Inline values do not allocate heap objects during staging,
-    /// so `items` must be metered as it grows.
+    /// Checks list buffer growth against the memory limit so that lists of inline values cannot grow unchecked.
     fn push(&mut self, items: &mut Vec<Value>, v: Value) -> Result<(), Ctl> {
         if items.len() == items.capacity() {
             let more = items.capacity().max(4);
@@ -299,7 +264,6 @@ impl<'a, 's, 'h> Build<'a, 's, 'h> {
         Ok(())
     }
 
-    /// Commits a list assembled with [`Build::push`] to staging.
     fn list(&mut self, items: Vec<Value>) -> Value {
         self.pending = self.pending.saturating_sub(items.capacity() * std::mem::size_of::<Value>());
         self.st.new_list(items)
@@ -310,8 +274,6 @@ impl<'a, 's, 'h> Build<'a, 's, 'h> {
         Ok(str_hash(text))
     }
 
-    /// Returns a staged string for `key`, reusing an existing string if `key`
-    /// was already interned.
     #[allow(clippy::ptr_arg)]
     fn key(&mut self, key: &Cow<'a, str>, hash: u64) -> Value {
         if let Some(&(_, _, v)) = self.keys.find(hash, |e| e.1 == *key) {
@@ -325,12 +287,11 @@ impl<'a, 's, 'h> Build<'a, 's, 'h> {
         v
     }
 
-    fn start_map(&self) -> MapBuild {
-        MapBuild { base: self.entries.len(), index: None }
+    fn start_map(&self) -> MapBuilder {
+        MapBuilder { base: self.entries.len(), index: None }
     }
 
-    /// Inserts `key: value` into `m`, replacing any existing entry with an equal key.
-    fn put(&mut self, m: &mut MapBuild, hash: u64, text: Option<Cow<'a, str>>, key: Value, value: Value) -> Result<(), Ctl> {
+    fn put(&mut self, m: &mut MapBuilder, hash: u64, text: Option<Cow<'a, str>>, key: Value, value: Value) -> Result<(), Ctl> {
         let segment = &self.entries[m.base..];
         let same = |e: &Entry| {
             e.hash == hash
@@ -374,10 +335,9 @@ impl<'a, 's, 'h> Build<'a, 's, 'h> {
         Ok(())
     }
 
-    /// Appends `key: value` to `m` without checking for duplicate keys. Callers
-    /// must ensure that all keys in `m` are distinct and must not mix `append`
-    /// and [`Build::put`] on the same `MapBuild`.
-    fn append(&mut self, m: &MapBuild, hash: u64, key: Value, value: Value) -> Result<(), Ctl> {
+    /// Appends a unique key and value to `m`. Do not call with duplicate keys
+    /// or mix with [`Builder::put`] on the same [`MapBuilder`].
+    fn append(&mut self, m: &MapBuilder, hash: u64, key: Value, value: Value) -> Result<(), Ctl> {
         if !slot_fits(self.entries.len() - m.base) {
             return fail("limit", "map too large");
         }
@@ -386,8 +346,7 @@ impl<'a, 's, 'h> Build<'a, 's, 'h> {
         Ok(())
     }
 
-    /// Commits a map assembled with [`Build::put`] or [`Build::append`] to staging.
-    fn map(&mut self, m: MapBuild) -> Value {
+    fn map(&mut self, m: MapBuilder) -> Value {
         let n = self.entries.len() - m.base;
         let index = KeyIndex::for_keys(n, self.entries[m.base..].iter().map(|e| e.key));
         let mut map = MapObj { entries: Vec::with_capacity(n), live: n, index, ..MapObj::default() };
@@ -403,9 +362,6 @@ impl<'a, 's, 'h> Build<'a, 's, 'h> {
 
 const ENTRY_PENDING: usize = std::mem::size_of::<Entry>() + MAP_ENTRY_SIZE;
 
-// ---------------------------------------------------------------------------
-// Conversion between Sand and Rust `Json` values
-
 impl FromValue for Json {
     type Item<'a> = Json;
     fn from_value(vm: &Vm, v: Value, conv: &mut Conversion) -> Result<Json, Ctl> {
@@ -417,7 +373,7 @@ impl IntoValue for Json {
     fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl> {
         let ids = JsonIds::of(&vm.prog)?;
         let meter = &vm.meter;
-        vm.heap.staged(|heap, st| walk(&mut Writer { b: Build::new(heap, st, meter), ids }, self))
+        vm.heap.staged(|heap, st| walk(&mut Writer { b: Builder::new(heap, st, meter), ids }, self))
     }
 
     fn to_const(&self) -> Option<Constant> {
@@ -434,25 +390,17 @@ impl IntoValue for Json {
     }
 }
 
-/// Visitor for iterative depth-first conversion of nested JSON arrays and objects.
 trait Walk {
     type Node;
     type Frame;
     type Out;
 
-    /// Converts a leaf node directly, or pushes a container frame onto `stack`
-    /// and returns `None`.
     fn open(&mut self, node: Self::Node, stack: &mut Vec<Self::Frame>) -> Result<Option<Self::Out>, Ctl>;
-    /// Returns the next child of `frame`, or `None` if all children are converted.
     fn next(&mut self, frame: &mut Self::Frame) -> Result<Option<Self::Node>, Ctl>;
-    /// Appends a converted child value to `frame`.
     fn put(&mut self, frame: &mut Self::Frame, child: Self::Out) -> Result<(), Ctl>;
-    /// Finishes `frame` and returns the converted container.
     fn close(&mut self, frame: Self::Frame) -> Self::Out;
 }
 
-/// Converts `root` iteratively using an explicit frame stack, and fails if
-/// container nesting exceeds [`MAX_DEPTH`].
 fn walk<W: Walk>(w: &mut W, root: W::Node) -> Result<W::Out, Ctl> {
     let mut stack = Vec::new();
     if let Some(out) = w.open(root, &mut stack)? {
@@ -478,7 +426,6 @@ fn walk<W: Walk>(w: &mut W, root: W::Node) -> Result<W::Out, Ctl> {
     internal("json: empty conversion stack")
 }
 
-/// Converts heap `json.Json` values into Rust [`Json`] values.
 struct Reader<'h, 'c> {
     vm: &'h Vm,
     ids: JsonIds,
@@ -487,11 +434,9 @@ struct Reader<'h, 'c> {
 
 enum ReadFrame<'h> {
     Arr(Vec<Json>, std::slice::Iter<'h, Value>),
-    /// In-progress object map, remaining heap map entries, and current entry key.
     Obj(indexmap::IndexMap<String, Json>, std::slice::Iter<'h, Option<(Value, Value)>>, String),
 }
 
-/// Estimated heap bytes per `IndexMap<String, Json>` entry, including the hash table bucket.
 const OBJ_ENTRY_BYTES: usize = std::mem::size_of::<(u64, String, Json)>() + std::mem::size_of::<usize>();
 
 impl<'h> Reader<'h, '_> {
@@ -575,16 +520,14 @@ impl<'h> Walk for Reader<'h, '_> {
     }
 }
 
-/// Converts Rust [`Json`] values into staged heap `json.Json` values.
 struct Writer<'a, 's, 'h> {
-    b: Build<'a, 's, 'h>,
+    b: Builder<'a, 's, 'h>,
     ids: JsonIds,
 }
 
 enum WriteFrame {
     Arr(std::vec::IntoIter<Json>, Vec<Value>),
-    /// In-progress map, remaining object entries, and current key and hash.
-    Obj(indexmap::map::IntoIter<String, Json>, MapBuild, String, u64),
+    Obj(indexmap::map::IntoIter<String, Json>, MapBuilder, String, u64),
 }
 
 impl Walk for Writer<'_, '_, '_> {
@@ -657,10 +600,6 @@ impl Walk for Writer<'_, '_, '_> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Parsing
-
-/// Unparsed JSON number slice.
 struct Number<'a> {
     text: &'a str,
     is_int: bool,
@@ -671,9 +610,6 @@ impl Number<'_> {
         self.text.parse().unwrap_or(f64::NAN)
     }
 
-    /// Parses the number as an `Int` payload if it does not have a fraction or
-    /// exponent, is not `-0`, and fits in an `i64`; otherwise parses it as a
-    /// `Float` payload.
     fn value(&self) -> Value {
         match self.text.parse::<i64>() {
             Ok(i) if self.is_int && !(i == 0 && self.text.starts_with('-')) => Value::Int(i),
@@ -681,7 +617,6 @@ impl Number<'_> {
         }
     }
 
-    /// Parses the number as an `i64` if it is an integer within `i64` range.
     fn int(&self) -> Option<i64> {
         if self.is_int {
             return self.text.parse().ok();
@@ -696,7 +631,6 @@ struct Parser<'a> {
     b: &'a [u8],
     pos: usize,
     depth: usize,
-    /// Byte offset up to which input has been charged to the meter.
     charged: usize,
 }
 
@@ -705,7 +639,6 @@ impl<'a> Parser<'a> {
         Parser { src, b: src.as_bytes(), pos: 0, depth: 0, charged: 0 }
     }
 
-    /// Charges fuel for a parsed value and any input bytes consumed since the last charge.
     fn charge(&mut self, meter: &Meter) -> Result<(), Ctl> {
         let consumed = self.pos.saturating_sub(self.charged);
         self.charged = self.pos;
@@ -812,8 +745,6 @@ impl<'a> Parser<'a> {
         Ok(u32::from_str_radix(h, 16).unwrap_or(0))
     }
 
-    /// Parses a JSON string starting at the opening quote. If `keep` is false,
-    /// validates the string without accumulating decoded characters.
     fn string(&mut self, keep: bool) -> PResult<Cow<'a, str>> {
         self.pos += 1;
         let mut out: Option<String> = None;
@@ -887,7 +818,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Validates and skips a single JSON value without staging heap objects.
     fn skip(&mut self) -> PResult<()> {
         self.ws();
         match self.peek() {
@@ -902,8 +832,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parses a JSON value into a staged `json.Json` value.
-    fn parse_json(&mut self, b: &mut Build<'a, '_, '_>, ids: &JsonIds) -> PResult<Value> {
+    fn parse_json(&mut self, b: &mut Builder<'a, '_, '_>, ids: &JsonIds) -> PResult<Value> {
         self.ws();
         self.charge(b.meter)?;
         b.reserve()?;
@@ -951,11 +880,9 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// Delimiter handling for JSON arrays and objects, shared by [`Parser`] and [`Decoder`].
 trait Source<'a>: Sized {
     fn parser(&mut self) -> &mut Parser<'a>;
 
-    /// Parses a JSON array and calls `f` to parse each element.
     fn array(&mut self, mut f: impl FnMut(&mut Self, usize) -> PResult<()>) -> PResult<()> {
         self.parser().enter()?;
         self.parser().ws();
@@ -978,8 +905,6 @@ trait Source<'a>: Sized {
         Ok(())
     }
 
-    /// Parses a JSON object and calls `f` for each entry. Decodes key escapes
-    /// only if `keys` is true.
     fn object(&mut self, keys: bool, mut f: impl FnMut(&mut Self, Cow<'a, str>) -> PResult<()>) -> PResult<()> {
         self.parser().enter()?;
         self.parser().ws();
@@ -1017,38 +942,25 @@ impl<'a> Source<'a> for Parser<'a> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Typed decoding
-
 enum Seg<'a> {
     Key(Cow<'a, str>),
     Index(usize),
 }
 
-/// Maximum number of struct fields searched by linear scan before [`Decoder`]
-/// builds a hash index.
 const INDEXED_FIELDS: usize = 8;
 
-/// Decodes JSON text into values described by a [`TypeDesc`].
 struct Decoder<'a, 'd, 's, 'h> {
     p: Parser<'a>,
-    b: Build<'a, 's, 'h>,
+    b: Builder<'a, 's, 'h>,
     ids: crate::vm::bytecode::RtIds,
-    /// Current JSON path for diagnostic messages.
     path: Vec<Seg<'a>>,
-    /// Active enclosing struct and enum descriptors used to resolve recursive references.
     stack: Vec<&'d TypeDesc>,
-    /// Decoded field values for in-progress structs.
     slots: Vec<Option<Value>>,
-    /// Field name lookup tables for large structs, keyed by struct instance ID.
     indexes: FxHashMap<u32, FxHashMap<&'d str, usize>>,
-    /// Staged sets and maps to populate after their elements are committed to the heap.
     fills: Vec<Fill>,
-    /// Deferred closures that evaluate computed field defaults and populate sets.
     thunks: Vec<Value>,
 }
 
-/// Deferred elements or entries to insert into a staged set or map after heap allocation.
 enum Fill {
     Set(Value, Vec<Value>),
     Map(Value, Vec<(Value, Value)>),
@@ -1060,11 +972,8 @@ impl<'a> Source<'a> for Decoder<'a, '_, '_, '_> {
     }
 }
 
-/// Number of field or variant name comparisons per fuel unit.
 const LOOKUPS_PER_UNIT: usize = 16;
 
-/// Returns the index of the first element in `items` that satisfies `pred`,
-/// charging fuel proportional to `items.len()`.
 fn lookup<T>(meter: &Meter, items: &[T], pred: impl Fn(&T) -> bool) -> Result<Option<usize>, Ctl> {
     meter.charge(1 + (items.len() / LOOKUPS_PER_UNIT) as u64)?;
     Ok(items.iter().position(pred))
@@ -1180,7 +1089,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                 Ok(self.b.st.new_bytes(b))
             }
             TypeDesc::Option(_) => {
-                // Unwrap nested `Option` layers iteratively because `T??` does not consume JSON nesting depth.
+                // Handle nested `Option` types iteratively because they do not increment `self.p.depth`.
                 let (mut inner, mut layers) = (t, 0);
                 while let TypeDesc::Option(e) = inner {
                     (inner, layers) = (e, layers + 1);
@@ -1218,7 +1127,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                 if self.thunks.len() == thunks {
                     self.fills.push(Fill::Set(set, items));
                 } else {
-                    // Defer set insertion until element field defaults have been evaluated.
+                    // Defer set insertion until element field default thunks have run, so elements are hashed with their initialized fields.
                     let items = self.b.list(items);
                     self.thunk(*fill, Box::new([set, items]))?;
                 }
@@ -1416,8 +1325,6 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
         Ok(self.b.st.alloc(Obj::Range(start, end, inclusive)))
     }
 
-    /// Looks up field `key` in struct `id`. Checks `guess` first for fields
-    /// that appear in declaration order, then uses a hash index or linear scan.
     fn field_index(&mut self, id: u32, fields: &'d [FieldDesc], key: &str, guess: usize) -> Result<Option<usize>, Ctl> {
         if fields.get(guess).is_some_and(|f| f.0 == key) {
             return Ok(Some(guess));
@@ -1436,7 +1343,6 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
         Ok(self.indexes[&id].get(key).copied())
     }
 
-    /// Parses a JSON object key as a Sand map key of type `t`.
     fn map_key(&mut self, t: &TypeDesc, key: Cow<'a, str>) -> PResult<(Value, u64, Option<Cow<'a, str>>)> {
         let quoted = super::truncate(&key, QUOTED_KEY);
         let bad = |d: &Self| d.fail(&format!("invalid map key `{quoted}`"));
@@ -1461,7 +1367,6 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                 self.b.meter.charge_bytes(key.len())?;
                 let v = parse(&key).map_err(|msg| self.fail(&format!("invalid map key `{quoted}`: {msg}")))?;
                 let Some(x) = v.value() else { return Err(Error::Ctl(Ctl::internal("json.decode: not a value"))) };
-                // Staged object keys are deduplicated by their canonical text.
                 let (hash, text) = (x.value_hash(), x.text());
                 return Ok((self.b.st.alloc(v), hash, Some(Cow::Owned(text))));
             }
@@ -1542,10 +1447,6 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Encoding
-
-/// Serializes heap values to compact or pretty-printed JSON text.
 struct Encoder<'v> {
     prog: &'v Program,
     heap: &'v Heap,
@@ -1553,14 +1454,11 @@ struct Encoder<'v> {
     ids: JsonIds,
     indent: usize,
     out: String,
-    /// Byte offset in `out` up to which output has been charged to the meter.
     charged: usize,
     scratch: Scratch,
 }
 
 impl Encoder<'_> {
-    /// Charges fuel for an encoded value and any output bytes written since the
-    /// last charge, and checks `out` capacity against the memory limit.
     fn step(&mut self) -> Result<(), Ctl> {
         let written = self.out.len() - self.charged;
         self.charged = self.out.len();
@@ -1607,8 +1505,6 @@ impl Encoder<'_> {
         Ok(())
     }
 
-    /// Writes a JSON object with `len` entries. `entry` writes each key and
-    /// returns the entry value.
     fn object<T>(
         &mut self,
         len: usize,
@@ -1732,7 +1628,6 @@ impl Encoder<'_> {
     }
 }
 
-/// Formats a finite float with a decimal point or exponent, or writes `null` if the float is non-finite.
 fn write_float(out: &mut String, f: f64) {
     if f.is_finite() {
         let _ = write!(out, "{f:?}");
@@ -1746,7 +1641,6 @@ fn json_number(st: &mut Staging, ids: &JsonIds, n: Value) -> Value {
     st.new_variant(id, &[n])
 }
 
-/// Formats a map key `k` as a JSON object key string, or fails with kind `"invalid"` if `k` cannot be represented as a JSON key.
 fn format_map_key<'v>(prog: &'v Program, heap: &'v Heap, k: Value) -> Result<Cow<'v, str>, Ctl> {
     let bad = || fail("invalid", "a JSON object key must be a string, int, duration, bool, payload-less variant, or value type");
     Ok(match k {
@@ -1762,7 +1656,6 @@ fn format_map_key<'v>(prog: &'v Program, heap: &'v Heap, k: Value) -> Result<Cow
     })
 }
 
-/// Returns the byte length of `s` after JSON string escaping and quoting.
 fn escaped_len(s: &str) -> usize {
     let escapes: usize = s
         .bytes()
@@ -1803,19 +1696,12 @@ fn write_str(out: &mut String, s: &str) {
     out.push('"');
 }
 
-// ---------------------------------------------------------------------------
-// Conversion to `Json` values
-
-/// Converts heap values into staged `json.Json` values, reusing existing heap
-/// strings without copying.
 struct Converter<'a, 's, 'h> {
     prog: &'a Program,
     heap: &'a Heap,
-    b: Build<'a, 's, 'h>,
+    b: Builder<'a, 's, 'h>,
     ids: JsonIds,
-    /// Cached heap strings for struct field names, indexed by struct definition ID.
     fields: FxHashMap<u32, Vec<Value>>,
-    /// Cached heap strings for unit enum variant names, indexed by variant ID.
     names: FxHashMap<u32, Value>,
 }
 
@@ -1933,7 +1819,7 @@ impl<'a> Converter<'a, '_, '_> {
         })
     }
 
-    fn put(&mut self, m: &mut MapBuild, key: Value, text: Cow<'a, str>, value: Value) -> Result<(), Ctl> {
+    fn put(&mut self, m: &mut MapBuilder, key: Value, text: Cow<'a, str>, value: Value) -> Result<(), Ctl> {
         let hash = self.b.hash(&text)?;
         self.b.put(m, hash, Some(text), key, value)
     }

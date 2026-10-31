@@ -58,7 +58,7 @@ help("Option<T>.unwrap")
 fn json.parse(text: str) -> Result<Json, Error>
 
 Parses `text` as a `Json` value. Fails with kind `"parse"` on invalid syntax
-or if array/object nesting exceeds 512 levels.
+or if array or object nesting exceeds 512 levels.
 fn List.len(self) -> int
 
 Returns the number of elements in the list.

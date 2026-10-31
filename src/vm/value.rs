@@ -422,9 +422,6 @@ pub fn int_hash(i: i64) -> u64 {
 }
 
 /// Entry slot index for a map or set.
-///
-/// Maps and sets whose keys are all small non-negative integers use a direct
-/// lookup table indexed by key; all other maps and sets use a [`KeyTable`].
 #[derive(Clone, Debug)]
 pub enum KeyIndex {
     /// Direct lookup table where `slots[k]` stores `slot + 1`, or `0` if empty.
@@ -447,9 +444,8 @@ fn dense_fits(k: i64, count: usize) -> bool {
 }
 
 impl KeyIndex {
-    /// Creates an empty index for `count` keys. Returns a dense index if all
-    /// keys are small non-negative integers, or a hash index preallocated for
-    /// `count` entries.
+    /// Returns an empty dense index if all `keys` fit in a dense table for
+    /// `count` entries, or a preallocated hash index.
     pub fn for_keys(count: usize, mut keys: impl Iterator<Item = Value>) -> KeyIndex {
         if keys.all(|k| matches!(k, Value::Int(i) if dense_fits(i, count))) {
             return KeyIndex::default();
