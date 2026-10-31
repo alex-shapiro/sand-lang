@@ -15,7 +15,7 @@ mediated through a host-defined policy with authorization rules and resource lim
 5. [Types](#5-types)
 6. [Expressions](#6-expressions)
 7. [Statements](#7-statements)
-8. [Patterns](#8-patterns)
+8. [Pattern Matching](#8-pattern-matching)
 9. [Type checking and inference](#9-type-checking-and-inference)
 10. [Runtime semantics](#10-runtime-semantics)
 11. [Concurrency and asynchronous I/O](#11-concurrency-and-asynchronous-io)
