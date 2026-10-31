@@ -1,9 +1,14 @@
-//! TCP listeners and client connections (including TLS).
+//! TCP listeners and client connections, including TLS.
 //!
-//! Outgoing connections require the `Net(host:port)` capability, and listeners
-//! require `NetListen(ip:port)`. Open sockets and in-flight connection
-//! attempts count toward `max_open_resources` until closed. Bind sockets with
-//! `use` to close them at block exit:
+//! Outgoing connections check the policy in two stages: `Net(host:port)` is
+//! checked before DNS resolution, and `NetAddr` is checked against each
+//! resolved IP address before connecting. Listeners require
+//! `NetListen(ip:port)`.
+//!
+//! Open `Listener` and `Conn` handles, as well as in-flight `connect`,
+//! `connect_tls`, and `accept` calls, each occupy a slot against
+//! `max_open_resources` until closed or completed. Bind sockets with `use` to
+//! close them at block exit:
 //!
 //! ```
 //! use conn = net.connect("example.com", 80)?
@@ -13,20 +18,30 @@
 
 import io
 
-/// Binds a TCP listener to `ip` and `port` (such as `"127.0.0.1"` or `"::"`).
-/// If `port` is `0`, the operating system assigns an ephemeral port. An IPv6
-/// listener accepts only IPv6 connections.
+/// Binds a TCP listener to `ip` and `port`, such as `"127.0.0.1"` or `"::"`.
+///
+/// Requires `NetListen(ip:port)`. `ip` must be a valid IPv4 or IPv6 literal,
+/// excluding IPv4-mapped IPv6 addresses, and `port` must be in `0..=65535`;
+/// otherwise `listen` fails with kind `"invalid"`. If `port` is `0`, the
+/// operating system assigns an ephemeral port. An IPv6 listener sets `IPV6_V6ONLY`
+/// and accepts only IPv6 connections.
 pub native fn listen(ip: str, port: int) -> Result<Listener>
 
-/// Opens a TCP connection to `host` (a hostname or unbracketed IP address) and
-/// `port`, or fails with kind `"timeout"` if the connection does not complete
-/// within `timeout`.
+/// Opens a TCP connection to `host` and `port`, or fails with kind `"timeout"`
+/// if the connection does not complete within `timeout`.
+///
+/// `host` must be a valid DNS name or an unbracketed IPv4 or IPv6 address, and
+/// `port` must be in `0..=65535`; otherwise `connect` fails with kind
+/// `"invalid"`.
 pub native fn connect(host: str, port: int, timeout: duration = 30s) -> Result<Conn>
 
 /// Opens a TLS-encrypted TCP connection to `host` and `port`, and verifies the
 /// server certificate against the bundled Web PKI roots and any custom host
-/// roots (requires the `tls` feature). Fails with kind `"timeout"` if the TCP
-/// connection and TLS handshake do not complete within `timeout`.
+/// roots.
+///
+/// Requires the `tls` crate feature. Fails with kind `"invalid"` if certificate
+/// verification fails or if `tls` is not enabled, or with kind `"timeout"` if
+/// the TCP connection and TLS handshake do not complete within `timeout`.
 pub native fn connect_tls(host: str, port: int, timeout: duration = 30s) -> Result<Conn>
 
 /// Parses `"host:port"` or `"[ipv6]:port"` into an unbracketed host and port,
@@ -38,7 +53,7 @@ pub native fn connect_tls(host: str, port: int, timeout: duration = 30s) -> Resu
 pub native fn split_host_port(text: str) -> Result<(str, int)>
 
 extend SocketAddr {
-    /// Returns the IP address string (such as `"127.0.0.1"` or `"::1"`).
+    /// Returns the IP address string, such as `"127.0.0.1"` or `"::1"`.
     pub native fn ip(self) -> str
     /// Returns the port number.
     pub native fn port(self) -> int
@@ -46,6 +61,9 @@ extend SocketAddr {
 
 extend Listener {
     /// Waits for and returns the next incoming TCP connection.
+    ///
+    /// If multiple tasks call `accept` on the same `Listener`, they receive
+    /// incoming connections in FIFO order.
     pub native fn accept(self) -> Result<Conn>
     /// Returns the bound local address.
     pub native fn addr(self) -> SocketAddr
@@ -58,8 +76,8 @@ impl Close for Listener {
 }
 
 impl io.Reader for Conn {
-    /// Reads up to `max` bytes as soon as data is available (up to the 8 KiB
-    /// read buffer), or returns `b""` at end-of-stream.
+    /// Reads up to `max` bytes from the 8 KiB read buffer as soon as data is
+    /// available, or returns `b""` at end-of-stream.
     native fn read(self, max: int) -> Result<bytes>
     native fn read_line(self) -> Result<str?>
     /// Reads all remaining bytes until the remote peer closes its write half.

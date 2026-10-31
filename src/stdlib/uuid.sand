@@ -39,7 +39,7 @@ pub fn is_valid(s: str) -> bool {
     parse(s).is_ok()
 }
 
-/// Returns the version number of UUID `s` (such as `4` or `7`), or `None` if
+/// Returns the version number of UUID `s`, such as `4` or `7`, or `None` if
 /// `s` is not a valid UUID.
 pub fn version(s: str) -> int? {
     let id = parse(s).ok()?

@@ -453,10 +453,13 @@ const MAX_READ: usize = 1 << 20;
 /// Fuel charged per system call (about a microsecond).
 const SYSCALL_FUEL: u64 = 16;
 
-/// An open file handle returned by `open`. Reads and writes advance the file
-/// cursor (`Mode.Append` always writes at the end). Bind a `File` with `use`
-/// or call `close` to release the underlying descriptor; operations on a
-/// closed file return an `Err` with kind `"closed"`.
+/// An open file handle returned by `open`.
+///
+/// Reads and writes advance the file cursor, except that `Mode.Append` always
+/// writes at the end of the file. Reads use an internal 16 KiB buffer counted
+/// against `max_memory`, `read(max)` returns at most 1 MiB per call, and writes
+/// are unbuffered. Bind a `File` with `use` or call `close` to release the
+/// underlying descriptor; operations on a closed file fail with kind `"closed"`.
 #[derive(crate::SandObject)]
 #[sand(module = "fs", name = "File")]
 struct FileObj {

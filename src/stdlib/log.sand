@@ -1,8 +1,16 @@
 //! Structured leveled logging.
 //!
-//! By default, the engine writes records to standard error as
-//! `LEVEL message key=value ...` if the policy allows `Stderr`. The host can
-//! redirect records to a custom sink.
+//! Each engine starts at `Level.Info` unless configured by the host. Records
+//! below the active level are discarded before formatting, and emitted records
+//! count toward `max_output_bytes`.
+//!
+//! If the host configures a custom `LogSink`, records are delivered to that
+//! sink without checking a sandbox capability. Otherwise, records are written
+//! to the engine's `stderr` stream if the policy grants `Stderr`, or discarded
+//! if `Stderr` is denied. The default formatter writes one line per record as
+//! `LEVEL message key=value ...`, quoting empty messages, messages with control
+//! characters, and keys or values that are empty or contain whitespace, control
+//! characters, `"`, or `=`.
 
 /// Logs `msg` and optional `fields` at level `debug`.
 pub native fn debug(msg: str, fields: [str: str] = [:])
@@ -16,8 +24,8 @@ pub native fn warn(msg: str, fields: [str: str] = [:])
 /// Logs `msg` and optional `fields` at level `error`.
 pub native fn error(msg: str, fields: [str: str] = [:])
 
-/// Sets the minimum active log level (defaults to `Level.Info` unless
-/// configured by the host).
+/// Sets the minimum active log level. Defaults to `Level.Info` unless
+/// configured by the host.
 pub native fn set_level(level: Level)
 
 /// Disables logging until the next `set_level` call.

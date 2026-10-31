@@ -54,13 +54,13 @@ fn nanos(d: SignedDuration) -> i64 {
 }
 
 /// Standard error record with a human-readable `message` and a
-/// machine-readable `kind` tag (defaulting to `"error"`).
+/// machine-readable `kind` tag that defaults to `"error"`.
 #[derive(Clone, Debug, PartialEq, crate::SandStruct)]
 #[sand(module = "prelude")]
 pub(crate) struct Error {
     /// Human-readable error description.
     pub message: String,
-    /// Machine-readable category tag (such as `"not_found"` or `"permission_denied"`).
+    /// Machine-readable category tag such as `"not_found"` or `"permission_denied"`.
     #[sand(default = "error")]
     pub kind: String,
 }

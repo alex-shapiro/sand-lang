@@ -1,7 +1,16 @@
 //! Linear-time regular expressions backed by the Rust `regex` engine.
 //!
+//! Patterns support Unicode character classes (`\d`, `\w`, `\s`, `\p{Greek}`),
+//! repetitions (`*`, `+`, `?`, `{m,n}`, and non-greedy `*?`, `+?`),
+//! alternation (`|`), word boundaries (`\b`, `\B`), line and text anchors
+//! (`^`, `$`, `\A`, `\z`), inline flags (`(?i)`, `(?m)`, `(?s)`, `(?u)`), and
+//! numbered or named capture groups (`(a)`, `(?P<name>a)`, `(?:a)`). Look-around
+//! and backreferences are not supported so that matching always runs in linear
+//! time.
+//!
 //! Match offsets are UTF-8 byte indices into the input string. Use raw string
-//! literals (`r"\d{4}"`) for patterns with backslash escapes.
+//! literals (`r"\d{4}"`) for patterns with backslash escapes. Each `Regex`
+//! counts its compiled automaton and lazy DFA cache against `max_memory`.
 
 extend Captures {
     /// Returns capture group `i`, or `None` if group `i` did not participate or
@@ -62,8 +71,8 @@ extend Regex {
     /// or `${1}` to numbered groups, `${name}` to named groups, and `$$` to a
     /// literal `$`.
     pub native fn replace(self, text: str, rep: str) -> str
-    /// Replaces all non-overlapping matches in `text` with `rep` (using the
-    /// same expansion rules as `replace`).
+    /// Replaces all non-overlapping matches in `text` with `rep`, using the
+    /// same expansion rules as `replace`.
     pub native fn replace_all(self, text: str, rep: str) -> str
     /// Splits `text` into substrings separated by non-overlapping matches.
     pub native fn split(self, text: str) -> [str]

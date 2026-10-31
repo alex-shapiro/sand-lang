@@ -1,4 +1,4 @@
-//! Pseudo-random number generation (`xoshiro256**`, non-cryptographic).
+//! Non-cryptographic `xoshiro256**` pseudo-random number generation.
 //!
 //! Module-level functions use the engine generator, which is seeded from host
 //! entropy unless overridden by `Config::seed` or `seed`. Call `Rng(seed)` to
@@ -7,7 +7,8 @@
 /// Reseeds the engine generator with `s` for deterministic output.
 pub native fn seed(s: int)
 
-/// Returns a uniformly distributed integer in `lo..hi`, or aborts if `lo >= hi`.
+/// Returns a uniformly distributed integer in `lo..hi`, or aborts with kind
+/// `"invalid"` if `lo >= hi`.
 pub native fn int(lo: int, hi: int) -> int
 
 /// Returns a uniformly distributed float in `[0.0, 1.0)`.
@@ -22,11 +23,11 @@ pub native fn choice<T>(xs: [T]) -> T?
 /// Shuffles `xs` in place using the Fisher-Yates algorithm.
 pub native fn shuffle<T>(xs: [T])
 
-/// Returns `k` distinct elements from `xs` in random order (or all elements if
-/// `k >= xs.len()`).
+/// Returns `k` distinct elements from `xs` in random order, clamping `k` to
+/// `0..=xs.len()`.
 pub native fn sample<T>(xs: [T], k: int) -> [T]
 
-/// Returns `n` pseudo-random bytes.
+/// Returns `n` pseudo-random bytes, clamping negative `n` to `0`.
 pub native fn bytes(n: int) -> bytes
 
 extend Rng {
@@ -34,7 +35,8 @@ extend Rng {
     /// generator.
     pub native fn init(seed: int) -> Rng
 
-    /// Returns a uniformly distributed integer in `lo..hi`, or aborts if `lo >= hi`.
+    /// Returns a uniformly distributed integer in `lo..hi`, or aborts with kind
+    /// `"invalid"` if `lo >= hi`.
     pub native fn int(self, lo: int, hi: int) -> int
     /// Returns a uniformly distributed float in `[0.0, 1.0)`.
     pub native fn float(self) -> float
@@ -44,8 +46,9 @@ extend Rng {
     pub native fn choice<T>(self, xs: [T]) -> T?
     /// Shuffles `xs` in place.
     pub native fn shuffle<T>(self, xs: [T])
-    /// Returns `k` distinct elements from `xs` in random order.
+    /// Returns `k` distinct elements from `xs` in random order, clamping `k` to
+    /// `0..=xs.len()`.
     pub native fn sample<T>(self, xs: [T], k: int) -> [T]
-    /// Returns `n` pseudo-random bytes.
+    /// Returns `n` pseudo-random bytes, clamping negative `n` to `0`.
     pub native fn bytes(self, n: int) -> bytes
 }

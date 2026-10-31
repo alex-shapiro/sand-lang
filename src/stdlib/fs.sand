@@ -1,12 +1,44 @@
 //! File system operations on files, directories, and paths.
 //!
 //! Relative paths are resolved against the engine working directory, and every
-//! operation is checked against the active sandbox policy.
+//! file system operation is checked against the active sandbox policy.
+//!
+//! `/` is accepted as a path separator on all platforms, and `\` is also
+//! accepted on Windows. Paths longer than 4096 bytes or containing a NUL byte
+//! fail with kind `"invalid"`. On Windows, paths with a component that is a
+//! reserved device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`,
+//! `LPT1`–`LPT9`, with or without an extension) or that ends with `.` or a
+//! space also fail with kind `"invalid"`. `join`, `basename`, `dirname`, and
+//! `extension` are lexical operations that do not access the file system or
+//! require a capability.
+//!
+//! `read_text`, `read_bytes`, `exists`, `is_file`, `is_dir`, `list_dir`, and
+//! `metadata` require `FsRead`. `write_text`, `write_bytes`, `create_dir`,
+//! `remove_file`, `remove_dir`, and `rename` require `FsWrite`. `copy` requires
+//! `FsRead` on `src` and `FsWrite` on `dst`. Reading, writing, opening, and
+//! copying accept regular files only and fail with kind `"invalid"` on
+//! directories or special files.
+//!
+//! On the host file system, most operations follow symbolic links and check the
+//! policy on the resolved target path. If a symbolic link is dangling,
+//! `exists`, `is_file`, and `is_dir` return `Ok(false)`, while other operations
+//! fail with kind `"permission_denied"`. `remove_file`, `remove_dir`, and
+//! `rename` operate on the directory entry itself without following a final
+//! symbolic link.
+//!
+//! If the engine is configured with an in-memory file system (`MemFs`), paths
+//! are normalized lexically relative to `/`, entry names are case-sensitive
+//! UTF-8 strings, and writes that exceed the configured capacity fail with kind
+//! `"limit"`.
 
 import io
 
-/// Opens the regular file at `path` with `mode`. The sandbox policy is checked
-/// at the time of the `open` call.
+/// Opens the regular file at `path` with `mode`.
+///
+/// `open` checks `FsRead`, `FsWrite`, or both according to `mode` at the time
+/// of the call. Subsequent operations on the returned `File` do not re-check
+/// the policy. Each open `File` counts toward `max_open_resources` until it is
+/// closed or garbage-collected.
 ///
 /// ```
 /// use f = fs.open("data.csv")?
@@ -34,6 +66,10 @@ impl Close for File {
 
 extend File {
     /// Moves the file cursor to byte offset `pos` from the start of the file.
+    ///
+    /// Seeking past the end of the file is permitted; a subsequent write at
+    /// that position extends the file and fills the gap with zero bytes. Fails
+    /// with kind `"invalid"` if `pos` is negative.
     pub native fn seek(self, pos: int) -> Result<()>
     /// Returns the current byte offset of the file cursor.
     pub native fn position(self) -> Result<int>
@@ -42,6 +78,9 @@ extend File {
     pub native fn metadata(self) -> Result<Metadata>
 
     /// Truncates or zero-extends the file to `len` bytes.
+    ///
+    /// Fails with kind `"invalid"` if `len` is negative or if `self` was opened
+    /// with `Mode.Read`.
     pub native fn set_len(self, len: int) -> Result<()>
     /// Flushes buffered file data and metadata to persistent storage (`fsync`).
     pub native fn sync(self) -> Result<()>
@@ -49,11 +88,11 @@ extend File {
     pub native fn path(self) -> str
 }
 
-/// Reads the entire file at `path` as UTF-8 text, or fails with kind
+/// Reads the entire regular file at `path` as UTF-8 text, or fails with kind
 /// `"invalid"` if the file contains invalid UTF-8.
 pub native fn read_text(path: str) -> Result<str>
 
-/// Reads the entire file at `path` as raw bytes.
+/// Reads the entire regular file at `path` as raw bytes.
 pub native fn read_bytes(path: str) -> Result<bytes>
 
 /// Writes `text` to `path`, creating or truncating the file.
@@ -71,29 +110,40 @@ pub native fn is_file(path: str) -> Result<bool>
 /// Returns `true` if `path` resolves to a directory.
 pub native fn is_dir(path: str) -> Result<bool>
 
-/// Returns the entry names in directory `path` in sorted order.
+/// Returns the entry names in directory `path` in sorted order, excluding `.`
+/// and `..`.
 pub native fn list_dir(path: str) -> Result<[str]>
 
 /// Creates a directory at `path`. If `recursive` is `true`, creates missing
-/// parent directories and succeeds if the directory already exists.
+/// parent directories, checks `FsWrite` for each directory it creates, and
+/// succeeds if the target directory already exists.
 pub native fn create_dir(path: str, recursive: bool = false) -> Result<()>
 
-/// Removes the file or symbolic link at `path`.
+/// Removes the file or symbolic link at `path` without following a final
+/// symbolic link.
 pub native fn remove_file(path: str) -> Result<()>
 
 /// Removes an empty directory at `path`, or removes the directory and all of
-/// its contents if `recursive` is `true`. Checks every entry against the
-/// sandbox policy before deletion and removes symbolic links without following
-/// them.
+/// its contents if `recursive` is `true`.
+///
+/// Recursive removal checks `FsWrite` for every entry in the directory tree and
+/// removes symbolic links without following them. If any entry is denied by the
+/// policy or requires a permission prompt, `remove_dir` fails with kind
+/// `"permission_denied"`.
 pub fn remove_dir(path: str, recursive: bool = false) -> Result<()> {
     if recursive { remove_tree(path) } else { remove_empty_dir(path) }
 }
 
 /// Renames or moves `src` to `dst`, replacing `dst` if it is an existing file.
-/// Fails if any path inside `src` or `dst` is denied by the sandbox policy.
+///
+/// Operates on the directory entry at `src` without following a final symbolic
+/// link. If `src` is a directory, checks `FsWrite` on every entry inside `src`
+/// and at its new location under `dst`, failing with kind `"permission_denied"`
+/// if any entry is denied or requires a permission prompt.
 pub native fn rename(src: str, dst: str) -> Result<()>
 
-/// Copies the contents of regular file `src` to `dst`.
+/// Copies the contents of regular file `src` to `dst`, creating or truncating
+/// `dst` with default permissions.
 pub native fn copy(src: str, dst: str) -> Result<()>
 
 /// Returns metadata for the file or directory at `path`.

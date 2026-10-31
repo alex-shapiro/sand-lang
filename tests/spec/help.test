@@ -46,8 +46,8 @@ Functions:
     fn is_valid(s: str) -> bool
         Returns `true` if `s` is a valid UUID in any format accepted by `parse`.
     fn version(s: str) -> int?
-        Returns the version number of UUID `s` (such as `4` or `7`), or `None`
-        if `s` is not a valid UUID.
+        Returns the version number of UUID `s`, such as `4` or `7`, or `None` if
+        `s` is not a valid UUID.
 
 === a string identifies a module or an item
 import json
@@ -57,8 +57,12 @@ help("Option<T>.unwrap")
 --- stdout
 fn json.parse(text: str) -> Result<Json, Error>
 
-Parses `text` as a `Json` value. Fails with kind `"parse"` on invalid syntax
-or if array or object nesting exceeds 512 levels.
+Parses `text` as a `Json` value.
+
+Numbers without a decimal point, exponent, or `-0` that fit in a 64-bit
+signed integer parse as `Json.Int`; all other numbers parse as `Json.Float`.
+Fails with kind `"parse"` if syntax is invalid or if array or object nesting
+exceeds 512 levels.
 fn List.len(self) -> int
 
 Returns the number of elements in the list.
@@ -320,12 +324,12 @@ Functions:
     eprint   Prints the display representation of `x` followed by a newline to
              standard error.
     fail     Aborts execution immediately with an uncaught runtime error.
-    assert   Aborts execution with `message` (kind `"assert"`) if `cond` is
+    assert   Aborts execution with `message` and kind `"assert"` if `cond` is
              `false`.
     todo     Aborts execution with kind `"todo"` to mark unimplemented code.
     exit     Terminates the program immediately with exit status `code`.
-    help     Prints documentation for `x` (a module, type, trait, function,
-             method, or string path).
+    help     Prints documentation for `x`, which may be a module, type, trait,
+             function, method, or string path.
     members  Returns the sorted member names accessible after `x.`, or the names
              in scope if called as `members()`.
 
@@ -349,13 +353,13 @@ Modules (help(name) describes one):
     json        JSON (RFC 8259) parsing, serialization, and typed conversion.
     log         Structured leveled logging.
     math        Mathematical constants and functions on `float` and `int`.
-    net         TCP listeners and client connections (including TLS).
-    random      Pseudo-random number generation (`xoshiro256**`,
-                non-cryptographic).
+    net         TCP listeners and client connections, including TLS.
+    random      Non-cryptographic `xoshiro256**` pseudo-random number
+                generation.
     regex       Linear-time regular expressions backed by the Rust `regex`
                 engine.
     statistics  Descriptive statistics and linear regression on numeric lists.
-    task        Task coordination and timers (always in scope as `task`).
+    task        Task coordination and timers, always in scope as `task`.
     test        Assertions and property-based testing helpers for `test` blocks.
     time        Dates, times, calendar spans, time zones, and clocks.
     uri         URI parsing, resolution, percent-encoding, and query string

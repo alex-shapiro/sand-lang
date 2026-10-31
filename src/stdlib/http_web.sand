@@ -1,8 +1,11 @@
 //! HTTP client backed by the browser Fetch API.
 //!
-//! Requests require the `Net(host:port)` capability. Cross-origin responses
-//! are subject to browser CORS rules, redirects fail with kind `"http"`, and
-//! response bodies larger than `max_http_body` fail with kind `"limit"`.
+//! Requests require the `Http` and `Net(host:port)` capabilities. The browser
+//! controls forbidden request headers, omits ambient cookies (`credentials:
+//! "omit"`), and enforces CORS rules on cross-origin responses. Redirects are
+//! not followed and fail with kind `"http"`. The browser buffers the full
+//! response body before `open` returns, so `max_http_body` applies to `open` as
+//! well as `request`, and `timeout` covers the entire exchange.
 
 import io
 import json

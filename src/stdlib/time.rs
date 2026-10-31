@@ -69,10 +69,10 @@ macro_rules! bind_jiff_types {
 }
 
 bind_jiff_types! {
-    Timestamp => "Instant": "An exact point on the UTC timeline (such as `2024-03-10T07:30:00Z`).",
-    DateTime => "PlainDateTime": "A calendar date and wall-clock time without a time zone (such as `2024-03-10T03:30:00`).",
-    Date => "PlainDate": "A calendar date without a time zone (such as `2024-03-10`).",
-    Time => "PlainTime": "A wall-clock time of day without a date or time zone (such as `03:30:00`).",
+    Timestamp => "Instant": "An exact point on the UTC timeline, such as `2024-03-10T07:30:00Z`.",
+    DateTime => "PlainDateTime": "A calendar date and wall-clock time without a time zone, such as `2024-03-10T03:30:00`.",
+    Date => "PlainDate": "A calendar date without a time zone, such as `2024-03-10`.",
+    Time => "PlainTime": "A wall-clock time of day without a date or time zone, such as `03:30:00`.",
 }
 
 impl ValueType for Timestamp {
@@ -135,8 +135,8 @@ fn zone_key(tz: &tz::TimeZone) -> ZoneKey<'_> {
     }
 }
 
-/// An exact instant paired with a `TimeZone` (such as
-/// `2024-03-10T03:30:00-04:00[America/New_York]`), ordered by instant and then
+/// An exact instant paired with a `TimeZone`, such as
+/// `2024-03-10T03:30:00-04:00[America/New_York]`, ordered by instant and then
 /// by zone ID.
 #[derive(Clone, Debug, crate::SandValue)]
 #[sand(module = "time")]
@@ -201,7 +201,7 @@ fn write_year(f: &mut fmt::Formatter<'_>, year: i16) -> fmt::Result {
     if (0..=9999).contains(&year) { write!(f, "{year:04}") } else { write!(f, "{year:+07}") }
 }
 
-/// A calendar year and month without a day (such as `2024-03`).
+/// A calendar year and month without a day, such as `2024-03`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, crate::SandValue)]
 #[sand(module = "time")]
 pub struct PlainYearMonth(Date);
@@ -238,7 +238,7 @@ impl ValueType for PlainYearMonth {
 /// Reference leap year used to store `PlainMonthDay` as a `Date`.
 const MONTH_DAY_YEAR: i16 = 1972;
 
-/// A calendar month and day without a year (such as `03-10`).
+/// A calendar month and day without a year, such as `03-10`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, crate::SandValue)]
 #[sand(module = "time")]
 pub struct PlainMonthDay(Date);
@@ -278,10 +278,13 @@ impl ValueType for PlainMonthDay {
     }
 }
 
-/// A signed calendar and clock duration (such as `P1M2DT3H`). `span`
-/// normalizes sub-second units into seconds (`span(milliseconds: 1500)` stores
-/// 1 second and 500 milliseconds). Two spans are equal only if all unit fields match
-/// (`span(hours: 24) != span(days: 1)`).
+/// A signed calendar and clock duration, such as `P1M2DT3H`.
+///
+/// `Span` normalizes sub-second units into seconds, so
+/// `Span(milliseconds: 1500)` stores 1 second and 500 milliseconds. Two spans
+/// are equal only if all unit fields match (`Span(hours: 24) != Span(days: 1)`).
+/// `Span` does not implement `Ord` because calendar units have variable length;
+/// use `Span.compare` to order spans.
 #[derive(Clone, Copy, Debug, crate::SandValue)]
 #[sand(module = "time")]
 pub struct Span(jiff::Span);
@@ -356,8 +359,10 @@ impl ValueType for Span {
 }
 
 /// A time zone identifier: an IANA zone (`America/New_York`), `UTC`, or a fixed
-/// minute offset (`+05:30`). Two zones are equal if their canonical IDs match
-/// (`zone("Etc/UTC") != UTC`).
+/// minute offset (`+05:30`).
+///
+/// Two zones are equal if their canonical IDs match
+/// (`TimeZone("Etc/UTC")? != UTC`).
 #[derive(Clone, Debug, crate::SandValue)]
 #[sand(module = "time")]
 pub struct TimeZone(tz::TimeZone);
@@ -561,16 +566,16 @@ pub mod enums {
         HalfEven,
     }
 
-    /// Strategy for resolving wall-clock times that fall in a daylight saving gap
-    /// (skipped time) or fold (repeated time).
+    /// Strategy for resolving wall-clock times that fall in a daylight saving
+    /// gap or fold.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, crate::SandEnum)]
     #[sand(module = "time")]
     pub enum Disambiguation {
         /// Advances by the gap length in a gap, and selects the earlier occurrence in a fold.
         Compatible,
-        /// Selects the earlier instant (moving backward by the gap length in a gap).
+        /// Selects the earlier instant, moving backward by the gap length in a gap.
         Earlier,
-        /// Selects the later instant (moving forward by the gap length in a gap).
+        /// Selects the later instant, moving forward by the gap length in a gap.
         Later,
     }
 

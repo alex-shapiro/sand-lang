@@ -4,7 +4,7 @@ let MAX_DRAINED = 64 * 1024
 /// A complete HTTP response returned by `request`. Header names are normalized
 /// to lowercase.
 pub struct Response {
-    /// HTTP status code (such as `200` or `404`).
+    /// HTTP status code, such as `200` or `404`.
     pub status: int
     /// Response headers in receipt order, with lowercase names.
     pub headers: [(str, str)]
@@ -28,12 +28,13 @@ pub struct Response {
         self.status >= 200 and self.status <= 299
     }
 
-    /// Returns the first value for header `name` (case-insensitive).
+    /// Returns the first value for header `name`, matched case-insensitively.
     pub fn header(self, name: str) -> str? {
         find_header(self.headers, name)
     }
 
-    /// Returns all values for header `name` (case-insensitive) in receipt order.
+    /// Returns all values for header `name`, matched case-insensitively, in
+    /// receipt order.
     pub fn header_values(self, name: str) -> [str] {
         header_values(self.headers, name)
     }
@@ -45,12 +46,13 @@ extend Stream {
         self.status >= 200 and self.status <= 299
     }
 
-    /// Returns the first value for header `name` (case-insensitive).
+    /// Returns the first value for header `name`, matched case-insensitively.
     pub fn header(self, name: str) -> str? {
         find_header(self.headers, name)
     }
 
-    /// Returns all values for header `name` (case-insensitive) in receipt order.
+    /// Returns all values for header `name`, matched case-insensitively, in
+    /// receipt order.
     pub fn header_values(self, name: str) -> [str] {
         header_values(self.headers, name)
     }
@@ -160,11 +162,14 @@ pub fn request_json<T: Encode>(
     )
 }
 
-/// Sends an HTTP request and reads the entire response body. Follows up to 10
-/// redirects (`301`, `302`, `303`, `307`, `308`) if `follow_redirects` is
-/// `true`, converting `303` redirects into bodyless `GET` requests. Non-2xx
-/// status codes are returned in `Response` rather than as `Err`. Fails with
-/// kind `"limit"` if the response body exceeds `max_http_body`.
+/// Sends an HTTP request and reads the entire response body.
+///
+/// Follows up to 10 redirects (`301`, `302`, `303`, `307`, `308`) if
+/// `follow_redirects` is `true`, converting `303` redirects into bodyless `GET`
+/// requests and stripping `Authorization`, `Cookie`, and `Proxy-Authorization`
+/// headers on cross-origin redirects. Non-2xx status codes are returned in
+/// `Response` rather than as `Err`. Fails with kind `"limit"` if the response
+/// body exceeds `max_http_body`.
 pub fn request(
     method: str,
     url: str,
@@ -185,9 +190,12 @@ pub fn request(
     Ok(Response(status: s.status, headers: s.headers, body: data, url: s.url))
 }
 
-/// Sends an HTTP request and returns a `Stream` as soon as the response headers
-/// arrive so the body can be read incrementally. Bind the returned `Stream`
-/// with `use` or close it after reading.
+/// Sends an HTTP request and returns a `Stream` once the response headers
+/// arrive so the body can be read incrementally.
+///
+/// `timeout` covers connecting, sending the request, and reading the response
+/// headers, as well as each individual read on `Stream.body`. Bind the returned
+/// `Stream` with `use` or close it after reading.
 ///
 /// ```
 /// use resp = http.open("GET", "https://example.com/big.iso")?

@@ -26,9 +26,11 @@ const NODE_BYTES: usize = 64;
 
 /// Dynamic JSON value.
 ///
-/// Integers in the 64-bit signed `int` range are represented as `Int`.
-/// All other numbers are represented as `Float`. Supports up to 512
-/// levels of nesting.
+/// Integers in the 64-bit signed `int` range without a fractional part,
+/// exponent, or `-0` are represented as `Int`, and all other numbers are
+/// represented as `Float`. `Json` equality is variant-exact, so
+/// `Json.Int(1) != Json.Float(1.0)`; use `as_float()` or `as_int()` to read
+/// numbers across both variants. Supports up to 512 levels of nesting.
 #[derive(Clone, Debug, PartialEq, crate::SandEnum)]
 #[sand(module = "json", manual_conversion)]
 pub enum Json {

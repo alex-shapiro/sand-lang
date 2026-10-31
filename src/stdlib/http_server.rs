@@ -186,15 +186,15 @@ fn evict_beyond(reads: &[Pending], cap: usize) {
 #[derive(crate::SandStruct)]
 #[sand(module = "http")]
 struct Request {
-    /// HTTP request method (such as `"GET"` or `"POST"`).
-    method: String,
+    /// HTTP request method, such as `"GET"` or `"POST"`.
+    pub method: String,
     /// Request path before `?`.
-    path: String,
-    /// Raw query string after `?` (or `""` if absent).
-    query: String,
+    pub path: String,
+    /// Raw query string after `?`, or `""` if absent.
+    pub query: String,
     /// Request headers in receipt order, with lowercase names.
-    headers: Vec<(String, String)>,
-    /// Streaming request body (`read_all`, `bytes`, `text`, and `json` enforce `max_http_body`).
+    pub headers: Vec<(String, String)>,
+    /// Streaming request body. `read_all`, `bytes`, `text`, and `json` enforce `max_http_body`.
     body: Val<Body>,
     /// Underlying client connection.
     conn: Val<net::Conn>,

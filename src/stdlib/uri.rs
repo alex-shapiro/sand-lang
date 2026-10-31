@@ -4,20 +4,20 @@ use crate::check::ModKind;
 use crate::native::{HostError, NativeModule, Val};
 use crate::vm::{Ctl, Vm};
 
-/// A parsed URI (RFC 3986). `host` is `Some` if the URI includes an authority
+/// A parsed RFC 3986 URI. `host` is `Some` if the URI includes an authority
 /// component (`//...`). IPv6 host literals omit the enclosing brackets.
 #[derive(crate::SandStruct)]
 #[sand(module = "uri")]
 struct Uri {
-    /// Lowercase URI scheme (such as `"https"`).
+    /// Lowercase URI scheme, such as `"https"`.
     scheme: String,
     /// Optional `userinfo` component before `@`.
     userinfo: Option<String>,
-    /// Hostname or IP literal (without brackets for IPv6), if an authority is present.
+    /// Hostname or IP literal without brackets for IPv6, if an authority is present.
     host: Option<String>,
     /// Explicit port number, if present.
     port: Option<i64>,
-    /// URI path component (may be `""`).
+    /// URI path component, which may be `""`.
     path: String,
     /// Raw query component after `?`, without the leading `?`.
     query: Option<String>,

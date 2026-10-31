@@ -1,4 +1,26 @@
 //! JSON (RFC 8259) parsing, serialization, and typed conversion.
+//!
+//! `encode`, `to_json`, and `decode` map Sand types to and from JSON as follows:
+//!
+//! - `bool`, `int`, `float`, and `str` map to JSON booleans, numbers, and
+//!   strings. Finite `float` values always include a decimal point or exponent;
+//!   `NaN` and `±inf` encode as `null` and are rejected by `decode` for `float`
+//!   fields.
+//! - `()` maps to `null`.
+//! - `[T]`, `Set<T>`, and non-empty tuples map to JSON arrays.
+//! - `[K: V]` and structs map to JSON objects in insertion or declaration
+//!   order. Map keys must be `str`, `int`, `duration`, `bool`, unit enum
+//!   variants, or value types (`time.*`, `net.SocketAddr`).
+//! - `Option<T>` maps `Some(x)` to the representation of `x` and `None` to
+//!   `null`. If a nested `Option` holds `Some(None)`, it is wrapped as
+//!   `{"Some": null}` so it remains distinguishable from an outer `None`.
+//! - Enum variants without payload fields map to strings such as `"Red"`.
+//!   Variants with a single payload field map to `{"Variant": payload}`, and
+//!   variants with multiple payload fields map to `{"Variant": [f0, f1, ...]}`.
+//! - `bytes` maps to a standard Base64 string, `duration` maps to an integer
+//!   nanosecond count, `Range` maps to `{"start": int, "end": int, "inclusive":
+//!   bool}`, and value types (`time.*`, `net.SocketAddr`) map to their
+//!   canonical text representations.
 
 extend Json {
     /// Returns the field `key` if `self` is an `Obj`, or `None` otherwise.
@@ -95,26 +117,38 @@ extend Json {
     }
 }
 
-/// Parses `text` as a `Json` value. Fails with kind `"parse"` if syntax is invalid
-/// or if nesting exceeds 512 levels.
+/// Parses `text` as a `Json` value.
+///
+/// Numbers without a decimal point, exponent, or `-0` that fit in a 64-bit
+/// signed integer parse as `Json.Int`; all other numbers parse as `Json.Float`.
+/// Fails with kind `"parse"` if syntax is invalid or if array or object nesting
+/// exceeds 512 levels.
 pub native fn parse(text: str) -> Result<Json>
 
-/// Serializes `value` as JSON text. Emits compact output if `indent == 0`, or
-/// pretty-prints with `indent` spaces per level. Finite floats include a
-/// decimal point or exponent. `NaN` or infinite floats are serialized as
-/// `null`. Aborts with kind `"invalid"` if a map key is not a `str`, `int`,
-/// `duration`, `bool`, unit enum variant, or value type, or with kind `"limit"`
-/// if array or object nesting exceeds 512 levels.
+/// Serializes `value` as JSON text.
+///
+/// Emits compact output if `indent <= 0`, or pretty-prints with `indent` spaces
+/// per level. Finite floats include a decimal point or exponent, and `NaN` or
+/// infinite floats are serialized as `null`. Aborts with kind `"invalid"` if a
+/// map key is not a `str`, `int`, `duration`, `bool`, unit enum variant, or
+/// value type, or with kind `"limit"` if array or object nesting exceeds 512
+/// levels.
 pub native fn encode<T: Encode>(value: T, indent: int = 0) -> str
 
 /// Parses `text` and decodes it into a value of type `T`.
 ///
-/// If a struct field is omitted from a JSON object, `decode` uses the field's
-/// declared default, or `None` if the field is an `Option` without a default.
-/// Non-constant field defaults are evaluated in post-order after `text` is
-/// parsed. Fails with kind `"parse"` on invalid JSON syntax, missing required
-/// fields, or type mismatches, and fails with kind `"invalid"` if a map key
-/// type is not supported by `encode`.
+/// Unknown object fields are ignored, and duplicate keys overwrite earlier
+/// values. A `float` target accepts any JSON number, and an `int` target
+/// accepts a JSON integer or an integral float within `±2^53`. If a struct
+/// field is omitted from a JSON object, `decode` uses the field's declared
+/// default, or `None` if the field is an `Option` without a default. Constant
+/// defaults are filled inline during parsing, and non-constant default
+/// expressions are evaluated in post-order after parsing succeeds.
+///
+/// Fails with kind `"parse"` on invalid JSON syntax, missing required fields,
+/// or type mismatches, including the JSON path such as `$.items[2].price` in
+/// the error message. Fails with kind `"invalid"` if a target map key type is
+/// not supported by `encode`.
 pub fn decode<reflect T: Decode>(text: str) -> Result<T> {
     let decoded: Decoded<T> = decode_raw(text)
     match decoded {
