@@ -1102,38 +1102,34 @@ cancelling it again has no effect. Deferred code may suspend.
 
 ### 7.2 `use`
 
-A **resource** is a value whose type implements the prelude trait `Close`
-(§12.14), such as an open file, a connection or an HTTP body. `use` binds one
-and closes it when the enclosing block exits:
+A **resource** is a value whose type implements the prelude trait `Close` (§12.14).
+Files and network connections are both resources. To automatically close a resource
+when it leaves scope, bind it with `use`:
 
 ```sand
 fn first_line(path: str) -> Result<str?> {
     use f = fs.open(path)?
-    f.read_line()                       // f is closed after this, on every path
+    f.read_line() // f closes after this
 }
 ```
 
-- `use name = e` (or `use name: T = e`) binds `e` immutably like `let` and
-  closes it as `defer Close.close(name)` would (§7.1): on every exit, last
-  declared first, interleaved with the block's defers. `use _ = e` keeps the
-  value only to close it (`use _ = lock.acquire()`).
-- The type of `e` must implement `Close` (a compile error otherwise); a
-  `Result` of one needs `?` first. The trait's method is called even if the
-  type also has an inherent `close`.
-- A `use` binding is a name or `_`, not a pattern, and is local to its block;
-  at a module's top level it is closed when the top-level code finishes. In a
-  session (§17.6), a top-level `use` binds a session variable, as `let` does:
-  later inputs may read it, and no input closes it (it is closed like a
-  resource that no `use` closes, below).
-- A copy of the value kept beyond the block (stored, returned, captured by a
-  task) refers to a closed resource, whose operations fail with kind `"closed"`. The
-  linter reports such escapes (`resource-escapes`, §17.2) and resources
-  never closed (`unclosed-resource`).
+`use name = e` (or `use name: T = e`) binds `e` immutably like `let` and
+closes it as `defer Close.close(name)` would (§7.1): on every exit, last
+declared first, interleaved with the block's defers. `use _ = e` keeps the
+value only to close it (`use _ = lock.acquire()`).
 
-A resource that no `use` closes is still closed at the latest when the
-garbage collector finds it unreachable (§10.8).
+A `use` binding is a name or `_` and is local to its block. If `use` is bound
+at a module's top level it is closed when the top-level code finishes executing.
+In a session (§17.6), a top-level `use` binds a session variable, as `let`.
+Later inputs may read it and it is closed like a resource that is never closed.
 
-## 8. Patterns
+If a `use` value is copied and referenced beyond the block close, operations fail
+with kind `"closed"`. The linter reports escapes and unclosed resources.
+
+Even without `use`, an unclosed resource may closed manually, or at latest is closed
+automatically when it is unreferenced during garbage collection (§10.8).
+
+## 8. Pattern Matching
 
 ### 8.1 Syntax
 
@@ -1155,24 +1151,26 @@ p1 | p2               alternatives (must bind the same names with the same types
 ```
 
 A binding pattern `name` that coincides with a payload-less variant of the
-scrutinee's enum type refers to that variant (`Empty` for a `Shape`, §4.3). A
-capitalized name that is not such a variant is a binding, which the linter
-reports as a likely mistyped variant (`variant-like-binding`, §17.2). In a
-struct or variant pattern, positional sub-patterns match fields in declaration
+scrutinee's enum type refers to that variant (`Empty` for a `Shape`, §4.3).
+
+In a struct or variant pattern, positional sub-patterns match fields in declaration
 order, followed by named sub-patterns. The pattern must either match every
 field or end with `..`. Struct patterns match fields directly even if the
 struct declares `init`. A pattern binds each name at most once.
 
+A capitalized name that is not an enum variant is considered a binding. The linter reports
+any capitalized binding as a potential typo. (§17.2).
+
 ### 8.2 Guards
 
-`pattern if cond => body` matches only when `cond` is true. Guards do not count
+`pattern if cond => body` matches only if `cond` is true. Guards do not count
 towards exhaustiveness.
 
 ### 8.3 Exhaustiveness and reachability
 
-A `match` must be exhaustive; otherwise it is a compile error listing a
-missing pattern. Types with infinitely many values (`int`, `str`, lists, ...)
-need a wildcard or binding arm (for lists, `[]` plus `[_, .._]` suffices). An
+A `match` must be exhaustive or else it fails as a compile error.
+
+Types with infinitely many values require a wildcard or binding arm. An
 arm covered by earlier arms is a compile error (`unreachable pattern`). A
 `match`, or refutability check of a `let`, `for` or comprehension pattern,
 whose check exceeds a fixed amount of work (e.g. or-patterns in many tuple
@@ -1229,11 +1227,11 @@ then the defaults of the remaining fields in declaration order. For assignment
 
 ### 10.3 Errors
 
-A run **fails with an error** when the script cannot go on. The run ends (all
-tasks), or in a session (§16.6, §17.6) the input does, with a runtime error:
-`<kind>: <message>`, the display form of an `Error` (§5.4), and a stack trace
-of `file:line` entries. Tools report it as `error: <kind>: <message>`, leaving
-out a kind of `error`. A run fails with an error from:
+A run fails with an error if execution cannot continue. All tasks in the run end.
+In a REPL session, the input ends with runtime error `<kind>: <message>`, the
+display form of an `Error` (§5.4), and a stack trace of `file:line` entries.
+Tools report it as `error: <kind>: <message>`, leaving out a kind of `error`.
+A run fails with an error from:
 
 - a top-level `?` on `Err(err)` (§6.8) or a top-level `return` of `Err(err)`
   (§6.9): the error `err`;
@@ -1249,14 +1247,13 @@ out a kind of `error`. A run fails with an error from:
   (a global used before initialization), and `permission_denied` (a denied
   `print`).
 
-Scripts cannot catch errors, and failing does not run deferred expressions
+Scripts cannot catch failures, and failing does not run deferred expressions
 (§7.1), except those of the top level for a top-level `?` or `return`; the
 test runner isolates errors per test.
 
 An **internal error** is a bug: an invariant of the engine broke, or a Rust
-panic was caught in the engine or in a host native. It also ends the run, and
-tools report it as `internal error: <message>`; a session in which one happens
-is reset (§16.6).
+panic was caught in the engine or in a host native. It ends the run, and
+tools report it as `internal error: <message>`.
 
 ### 10.4 Exit
 
