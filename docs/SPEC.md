@@ -1233,27 +1233,29 @@ display form of an `Error` (§5.4), and a stack trace of `file:line` entries.
 Tools report it as `error: <kind>: <message>`, leaving out a kind of `error`.
 A run fails with an error from:
 
-- a top-level `?` on `Err(err)` (§6.8) or a top-level `return` of `Err(err)`
-  (§6.9): the error `err`;
-- `fail(message, kind)` (§12.1), whose kind defaults to `"error"`;
-- faults detected while the script runs, with these kinds: `bounds` (an index,
-  slice or byte out of range), `not_found` (a missing map key), `overflow`
-  (integer or duration overflow), `invalid` (division by zero, a negative
-  exponent, an argument out of its domain, a value JSON cannot encode),
-  `limit` (stack overflow, nesting beyond 2,000 levels while printing,
-  comparing or hashing a value, too many tasks), `unwrap` (`unwrap`/`expect`
-  on `None`/`Err`), `assert` (a failed `assert`), `todo` (`todo()`),
-  `cancelled` (waiting on a cancelled task), `deadlock` and `uninitialized`
-  (a global used before initialization), and `permission_denied` (a denied
-  `print`).
+- a top-level `?` or a top-level `return Err(...)`
+- `fail(message, kind)` (§12.1)
+- a fault detected during the run the script
 
-Scripts cannot catch failures, and failing does not run deferred expressions
+  - `bounds` on an out-of-range index, slice or byte
+  - `not_found` on a missing map key
+  - `overflow` on integer or duration overflow
+  - `invalid` on division by zero, a negative exponent, an argument out of its domain, a value JSON cannot encode
+  - `limit` on stack overflow, nesting beyond 2,000 levels while printing, comparing or hashing a value, too many tasks
+  - `unwrap` on `unwrap`/`expect` on `None`/`Err`
+  - `assert` on a failed `assert`
+  - `todo` on `todo()`
+  - `cancelled` if waiting on a cancelled task
+  - `deadlock` and `uninitialized` on a global used before initialization
+  - `permission_denied` on sandbox permission denial
+
+Scripts cannot catch faults, and failing does not run deferred expressions
 (§7.1), except those of the top level for a top-level `?` or `return`; the
 test runner isolates errors per test.
 
-An **internal error** is a bug: an invariant of the engine broke, or a Rust
-panic was caught in the engine or in a host native. It ends the run, and
-tools report it as `internal error: <message>`.
+An **internal error** is a bug. It occurs if a Sand engine invariant is broken,
+or else if a Rust panic was caught in the engine or in a host native.
+Any internal error ends a run and is reported as `internal error: <message>`.
 
 ### 10.4 Exit
 
@@ -1262,11 +1264,10 @@ code. It does not terminate the host process.
 
 ### 10.5 Functions and closures
 
-Calls are by value (references for reference types). Recursion depth is bounded
-by the `max_call_depth` limit (default 10,000); exceeding it fails with
-`stack overflow`. Tail calls (`return f(x)` or a call in tail position of the
-function body) do not consume stack depth, except while deferred expressions
-(§7.1) are pending, since they run after the call returns.
+Function calls are by value. Recursion depth is bounded by the `max_call_depth` limit,
+with default 10,000. Exceeding recursion depth fails with `stack overflow`. Tail calls
+do not consume stack depth, except while deferred expressions (§7.1) are pending,
+since they run after the call returns.
 
 ### 10.6 Maps and sets
 
@@ -1289,42 +1290,37 @@ system's open-file limit is reached.
 
 ### 10.9 Display and debug forms
 
-`to_str()` (display form; used by `print` and interpolation) and `debug()`
-(debug form; used inside composite values) are:
+Every Sand type has a display form used in `print` and in string interpolation expressions,
+and a debug form used in composite values. The display form is created with `.to_str()`.
+The debug form is created with `debug()`. Examples:
 
-| Value                               | Display                             | Debug                                                                           |
-| ----------------------------------- | ----------------------------------- | ------------------------------------------------------------------------------- |
-| `42`                                | `42`                                | `42`                                                                            |
-| `1.0`, `0.1`, `1e100`, `nan`, `inf` | `1.0`, `0.1`, `1e100`, `nan`, `inf` | same                                                                            |
-| `true`                              | `true`                              | `true`                                                                          |
-| `"hi"`                              | `hi`                                | `"hi"` (escaped with `\"`, `\\`, `\n`, `\r`, `\t`, `\u{..}` for other controls) |
-| `b"a\x00"`                          | `b"a\x00"`                          | same                                                                            |
-| `1500ms`                            | `1.5s`                              | same                                                                            |
-| `()`                                | `()`                                | `()`                                                                            |
-| `[1, 2]`                            | `[1, 2]`                            | same                                                                            |
-| `["a": 1]`                          | `["a": 1]`                          | same                                                                            |
-| `[:]`                               | `[:]`                               | same                                                                            |
-| `Set` of 1, 2                       | `Set([1, 2])`                       | same                                                                            |
-| `(1, "a")`                          | `(1, "a")`                          | same                                                                            |
-| `Some(1)`                           | `Some(1)`                           | same                                                                            |
-| `None`                              | `None`                              | same                                                                            |
-| `Point(x: 1.0)`                     | `Point(x: 1.0)`                     | same                                                                            |
-| `Circle(2.0)`                       | `Circle(2.0)`                       | same                                                                            |
-| `Shape.Rect(w: 1.0, h: 2.0)`        | `Rect(w: 1.0, h: 2.0)`              | same                                                                            |
-| `Error`                             | `<kind>: <message>`                 | `Error(message: "...", kind: "...")`                                            |
-| function                            | `<fn name>`                         | same                                                                            |
-| task / channel                      | `<task>` / `<channel>`              | same                                                                            |
-| `0..3`                              | `0..3`                              | same                                                                            |
-| `time.PlainDate(2024, 2, 29)?`      | `2024-02-29`                        | same                                                                            |
-| other opaque value                  | `<Regex>`                           | same                                                                            |
+| Value                               | Display                             | Debug                                |
+| ----------------------------------- | ----------------------------------- | ------------------------------------ |
+| `42`                                | `42`                                | same                                 |
+| `1.0`, `0.1`, `1e100`, `nan`, `inf` | `1.0`, `0.1`, `1e100`, `nan`, `inf` | same                                 |
+| `true`                              | `true`                              | same                                 |
+| `"hi"`                              | `hi`                                | `"hi"`                               |
+| `b"a\x00"`                          | `b"a\x00"`                          | same                                 |
+| `1500ms`                            | `1.5s`                              | same                                 |
+| `()`                                | `()`                                | same                                 |
+| `[1, 2]`                            | `[1, 2]`                            | same                                 |
+| `["a": 1]`                          | `["a": 1]`                          | same                                 |
+| `[:]`                               | `[:]`                               | same                                 |
+| `Set` of 1, 2                       | `Set([1, 2])`                       | same                                 |
+| `(1, "a")`                          | `(1, "a")`                          | same                                 |
+| `Some(1)`                           | `Some(1)`                           | same                                 |
+| `None`                              | `None`                              | same                                 |
+| `Point(x: 1.0)`                     | `Point(x: 1.0)`                     | same                                 |
+| `Circle(2.0)`                       | `Circle(2.0)`                       | same                                 |
+| `Shape.Rect(w: 1.0, h: 2.0)`        | `Rect(w: 1.0, h: 2.0)`              | same                                 |
+| `Error`                             | `<kind>: <message>`                 | `Error(message: "...", kind: "...")` |
+| function                            | `<fn name>`                         | same                                 |
+| task / channel                      | `<task>` / `<channel>`              | same                                 |
+| `0..3`                              | `0..3`                              | same                                 |
+| `time.PlainDate(2024, 2, 29)?`      | `2024-02-29`                        | same                                 |
+| other opaque value                  | `<Regex>`                           | same                                 |
 
-Composite values print their components in debug form. The debug form of a
-string is a string literal that evaluates to it. Durations display with
-the largest unit among `d`, `h`, `m`, `s`, `ms`, `us`, `ns` that keeps the value
-`>= 1`, using the shortest float representation of the value in that unit:
-`90s` displays as `1.5m`, `36h` as `1.5d`, `1500ms` as `1.5s`, `0ns` as `0s`.
-
-### 10.10 Format specifications
+### 10.10 Interpolation Format Specifications
 
 `\(expr:spec)` with `spec = [[fill]align][sign][0][width][.precision][type]`:
 
@@ -1338,8 +1334,14 @@ the largest unit among `d`, `h`, `m`, `s`, `ms`, `us`, `ns` that keeps the value
 - `type`: `x` / `X` hex, `b` binary, `o` octal (ints only); `e` scientific
   (floats); `?` debug form.
 
-Examples: `"\(3.14159:.2)"` → `3.14`; `"\(42:>5)"` → `   42`; `"\(7:03)"` →
-`007`; `"\(255:x)"` → `ff`; `"\("ab":*^6)"` → `**ab**`; `"\("hi":?)"` → `"hi"`.
+Examples:
+
+- `"\(3.14159:.2)"` → `3.14`
+- `"\(42:>5)"` → `   42`
+- `"\(7:03)"` → `007`
+- `"\(255:x)"` → `ff`
+- `"\("ab":*^6)"` → `**ab**`
+- `"\("hi":?)"` → `"hi"`.
 
 ## 11. Concurrency and asynchronous I/O
 
