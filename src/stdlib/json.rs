@@ -26,9 +26,9 @@ const NODE_BYTES: usize = 64;
 
 /// Dynamic JSON value.
 ///
-/// Integers in the 64-bit signed `int` range without a fraction or exponent are
-/// represented as `Int`. All other numbers are represented as `Float`. Host
-/// conversion supports up to 512 nested arrays and objects.
+/// Integers in the 64-bit signed `int` range are represented as `Int`.
+/// All other numbers are represented as `Float`. Supports up to 512
+/// levels of nesting.
 #[derive(Clone, Debug, PartialEq, crate::SandEnum)]
 #[sand(module = "json", manual_conversion)]
 pub enum Json {
