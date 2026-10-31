@@ -1483,43 +1483,7 @@ intrinsic.
 
 ## 13. Standard library
 
-Standard library modules are imported with `import <name>` (§3.2), except
-`task`, which is always in scope in the prelude (§11.3). Full documentation for
-every module, type, and function is available in the standard library reference
-and through `help(<module>)` (§12.4).
-
-Fallible operations return `Result<T, Error>` using the standard `Error.kind`
-tags defined in §5.4. Operations that access external resources check the
-engine's sandbox policy (§14) before performing any effect and return
-`Err(Error(..., kind: "permission_denied"))` if denied, except `env.get`,
-`env.vars`, and `time.local_zone`, which fall back to `None`, `[:]`, and
-`time.UTC`.
-
-The `http` and `net` modules require the `os` crate feature (§16.4) on native
-targets; importing `net` without `os` is a compile-time error. On
-`wasm32-unknown-unknown` (§16.5), `http` provides an HTTP client backed by the
-browser Fetch API.
-
-| Module       | Summary                                                                    |
-| ------------ | -------------------------------------------------------------------------- |
-| `base64`     | Standard and URL-safe Base64 encoding and decoding (RFC 4648)              |
-| `crypto`     | SHA-256, SHA-1, MD5, HMAC-SHA256, and constant-time byte comparison        |
-| `env`        | Environment variables (`Env` capability) and command-line arguments        |
-| `fs`         | File system and lexical path operations (`FsRead` and `FsWrite`)           |
-| `http`       | HTTP/1.1 client and server (`Http`, `Net`, `NetAddr`, `NetListen`)         |
-| `io`         | `Reader` and `Writer` traits and `stdin`, `stdout`, and `stderr` streams   |
-| `json`       | RFC 8259 JSON parsing, `Encode`/`Decode` serialization, and `Json` values  |
-| `log`        | Structured leveled logging routed to `LogSink` or `stderr`                 |
-| `math`       | Mathematical constants (`pi`, `e`, `tau`) and transcendental/integer funcs |
-| `net`        | TCP listeners and client connections, including TLS (`Net`, `NetListen`)   |
-| `random`     | Deterministic and seeded `xoshiro256**` pseudo-random number generation    |
-| `regex`      | Linear-time regular expressions backed by the Rust `regex` engine          |
-| `statistics` | Descriptive statistics, quantiles, correlation, and linear regression      |
-| `task`       | Task coordination (`all`, `race`, `timeout`, `yield_now`) and `sleep`      |
-| `test`       | Test assertions and deterministic property-based testing (`property`)      |
-| `time`       | ISO 8601 / RFC 9557 dates, times, calendar spans, IANA time zones, clocks  |
-| `uri`        | RFC 3986 URI parsing, relative resolution, percent-encoding, query strings |
-| `uuid`       | RFC 9562 UUIDv4 and monotonic UUIDv7 generation, parsing, and validation   |
+Standard library documentation is available in the standard library reference and through `help(<module>)` (§12.4).
 
 ## 14. Sandbox and policy
 
@@ -1527,8 +1491,8 @@ browser Fetch API.
 
 - Scripts have no access to the outside world except through standard library
   and host native functions.
-- Every such access is described by a **capability request** and checked by the
-  engine's policy **before** the effect occurs.
+- Every such access is described by a capability request and checked by the
+  engine's policy before the effect occurs.
 - The VM has no FFI, does not spawn processes, does not use IPC, shared memory
   or `mmap`, and never executes generated machine code.
 - Paths are normalized lexically (`.`/`..` resolved). The longest existing
@@ -1839,7 +1803,7 @@ Configurable per engine:
 | `max_wall_time`      | unlimited  | run fails: `time limit exceeded` (covers compiling and running, from the start of compilation, excluding waits for prompt answers)                             |
 | `max_call_depth`     | 10,000     | fails: `limit: stack overflow`                                                                                                                                 |
 | `max_tasks`          | 10,000     | `spawn` fails: `limit: task limit exceeded`                                                                                                                    |
-| `max_open_resources` | 1,024      | opening files, connect/listen/accept and HTTP requests fail with kind `"limit"` (after a collection, §10.8; pending operations' sockets count)                  |
+| `max_open_resources` | 1,024      | opening files, connect/listen/accept and HTTP requests fail with kind `"limit"` (after a collection, §10.8; pending operations' sockets count)                 |
 | `max_output_bytes`   | unlimited  | writes fail: `output limit exceeded`                                                                                                                           |
 | `max_http_body`      | 64 MiB     | HTTP read fails with kind `"limit"`                                                                                                                            |
 | `max_source_bytes`   | 16 MiB     | compile error: `source too large` (the main file and all imported scripts together; the standard library is not counted)                                       |
