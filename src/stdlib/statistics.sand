@@ -1,9 +1,4 @@
 //! Descriptive statistics and linear regression on numeric lists.
-//!
-//! Functions return `None` for empty inputs, or for inputs with fewer than two
-//! elements in `variance`, `stdev`, `correlation`, and `linear_regression`,
-//! except `sum`, which returns `0.0`. `NaN` values in `min`, `max`, `median`,
-//! `mode`, and `quantile` are ordered after `+inf`.
 
 /// Returns the arithmetic mean of `xs`, or `None` if `xs` is empty.
 pub native fn mean(xs: [float]) -> float?
