@@ -1290,9 +1290,8 @@ system's open-file limit is reached.
 
 ### 10.9 Display and debug forms
 
-Every Sand type has a display form used in `print` and in string interpolation expressions,
-and a debug form used in composite values. The display form is created with `.to_str()`.
-The debug form is created with `debug()`. Examples:
+Each Sand type can be formatted for display or debug. The display form is created with `.to_str()`.
+The debug form is created with `.debug()`. Examples:
 
 | Value                               | Display                             | Debug                                |
 | ----------------------------------- | ----------------------------------- | ------------------------------------ |
@@ -1347,16 +1346,16 @@ Examples:
 
 ### 11.1 Model
 
-An engine runs one task at a time on one OS thread. All I/O is asynchronous:
+Each engine runs one task at a time on one OS thread. All I/O is asynchronous:
 when a task performs I/O it is suspended and other ready tasks run. There is no
 `async`/`await` coloring — any function may suspend. Tasks are scheduled
-cooperatively with preemption at instruction-count boundaries, so a busy loop in
-one task does not starve others.
+cooperatively with preemption at instruction-count boundaries to prevent
+a busy loop in one task from starving others.
 
-When the main module's top-level code finishes, the run ends: unfinished tasks
+When the main module's top-level code finishes, the run ends. Unfinished tasks
 are cancelled, and their pending defers run until they finish or wait for I/O,
-a timer or another task. If every task is blocked and no I/O or timer is pending, the run
-fails with `deadlock: all tasks are blocked`.
+a timer or another task. If every task is blocked and no I/O or timer is pending,
+the run fails with `deadlock: all tasks are blocked`.
 
 ### 11.2 Tasks
 
@@ -1367,14 +1366,14 @@ t.is_done()                       // bool
 t.cancel()                        // cancels if still running
 ```
 
-- `spawn e` creates a task which starts running at the next scheduling point.
+- `spawn e` creates a task that starts at the next scheduling point.
 - `t.wait()` returns the task's result. Waiting on a cancelled task fails
   with `task cancelled`. Waiting on a task more than once returns the same
   value.
 - Cancelling a task stops it at its next suspension point or instruction
-  boundary and drops its pending I/O; it is done at once (waiting on it
-  fails) and then runs its pending deferred expressions (§7.1). A deferred
-  expression interrupted by the cancellation does not resume.
+  boundary and drops its pending I/O. Cancellation is immediate and runs
+  all pending `defer` blocks (§7.1). A deferred expression interrupted by
+  the cancellation does not resume.
 - An error in any task aborts the run (§10.3).
 
 ### 11.3 The `task` module (prelude-visible as `task`)
@@ -1390,8 +1389,8 @@ t.cancel()                        // cancels if still running
 ### 11.4 Channels
 
 `Channel(capacity: int = 0)` creates a `Channel<T>` that holds at most
-`capacity` queued messages. If `capacity` is `0`, the channel is unbounded. A
-negative capacity fails with kind `"invalid"`.
+`capacity` queued messages. If `capacity` is `0`, the channel is unbounded.
+A negative capacity fails as `"invalid"`.
 
 | Method                   | Description                                                                  |
 | ------------------------ | ---------------------------------------------------------------------------- |
@@ -1403,28 +1402,27 @@ negative capacity fails with kind `"invalid"`.
 | `ch.is_closed() -> bool` |                                                                              |
 | `ch.iter() -> Iter<T>`   | lazy iterator receiving messages until the channel is closed and empty       |
 
-### 11.5 Prompts suspend everything
+### 11.5 Prompts suspend execution
 
-While the engine waits for an interactive policy decision (§14.3), no task
-runs and no timers fire for scripts; the decision is applied before execution
-resumes. (The host can still interrupt the run meanwhile, §15.1.)
+All tasks pause while the engine waits on an interactive policy prompt (§14.3).
+The decision must be applied before execution resumes.
 
 ## 12. The prelude
 
-Always in scope without import.
+Prelude items are always in scope.
 
 ### 12.1 Functions
 
-| Function                                              | Description                               |
-| ----------------------------------------------------- | ----------------------------------------- |
-| `print<T>(x: T)`                                      | write display form + `"\n"` to stdout     |
-| `eprint<T>(x: T)`                                     | write display form + `"\n"` to stderr     |
-| `fail(message: str, kind: str = "error") -> never`    | fail with an error (§10.3)                |
-| `assert(cond: bool, msg: str = "condition is false")` | fail with `msg` (kind `assert`) if false  |
-| `todo() -> never`                                     | fail (kind `todo`): `not yet implemented` |
-| `exit(code: int) -> never`                            | stop the run (§10.4)                      |
-| `help(x)`, `help()`                                   | print documentation (§12.15)              |
-| `members(x) -> [str]`, `members() -> [str]`           | list member names (§12.15)                |
+| Function                                              | Description                            |
+| ----------------------------------------------------- | -------------------------------------- |
+| `print<T>(x: T)`                                      | write display form + `"\n"` to stdout  |
+| `eprint<T>(x: T)`                                     | write display form + `"\n"` to stderr  |
+| `fail(message: str, kind: str = "error") -> never`    | fail with an error (§10.3)             |
+| `assert(cond: bool, msg: str = "condition is false")` | fail with `msg` if false               |
+| `todo() -> never`                                     | fail as `not yet implemented`          |
+| `exit(code: int) -> never`                            | stop the run with an exit code (§10.4) |
+| `help(x)`, `help()`                                   | print documentation (§12.15)           |
+| `members(x) -> [str]`, `members() -> [str]`           | list member names (§12.15)             |
 
 ### 12.2 Universal methods
 
@@ -1587,10 +1585,10 @@ Iter<int>` (§12.13).
 
 ### 12.13 Iterators
 
-The methods of lists, maps and ranges above are **eager**: `xs.map(f)` calls
-`f` on every element at once and builds a new list. **Lazy iterators** do the
-work only when elements are requested, one at a time, so pipelines build no
-intermediate lists, can stop early, and can draw from endless sources:
+Lists, map, and range methods above are eager. For example, `xs.map(f)` calls
+`f` on every element at once and builds a new list. Lazy iterators are different.
+They do work only when elements are requested, one at a time, so pipelines avoid
+building intermediate lists, stop early, and can iterate over endless sources:
 
 ```sand
 let firsts = Iter.count_from(1).map(n => n * n).filter(n => n % 3 == 0).take(3)
@@ -1598,7 +1596,7 @@ print(firsts.to_list())                       // [9, 36, 81]
 for (i, line) in text.lines().iter().enumerate().skip(1) { ... }
 ```
 
-**The trait.** The prelude declares
+The prelude declares an `Iterator` trait:
 
 ```sand
 pub trait Iterator<T> {
@@ -1624,12 +1622,10 @@ print(Countdown(n: 3).iter().map(x => x * 2).to_list())  // [6, 4, 2]
 fn total<I: Iterator<int>>(it: I) -> int { it.iter().sum() }
 ```
 
-**The `Iter<T>` struct** is the prelude's lazy iterator: `pub struct Iter<T>
-{ next: fn() -> T? }`, a function producing the next element, which
-implements `Iterator<T>` (its `iter()` returns the iterator itself). It is
-obtained with `iter()` from lists, maps (`(key, value)` pairs), sets, ranges,
-channels and any `Iterator`, with `chars_iter()` from strings, or from these
-static sources:
+The prelude declares a lazy `Iter<T>` struct that implements `Iterator<T>`.
+It is obtained with `iter()` from lists, maps (`(key, value)` pairs), sets,
+ranges, channels and any `Iterator`, with `chars_iter()` from strings, or from
+static methods:
 
 | Source                                                    | Elements                                                          |
 | --------------------------------------------------------- | ----------------------------------------------------------------- |
@@ -1640,7 +1636,7 @@ static sources:
 | `Iter.count_from(start: int, step: int = 1) -> Iter<int>` | `start`, `start + step`, ... forever                              |
 | `Iter.successors(first: T?, f: fn(T) -> T?)`              | `first`, then `f` of the previous element until `None`            |
 
-**Adapters** return a new `Iter` and do no work until it is consumed:
+Adapters return a new `Iter` and do no work until it is consumed:
 `map<U>(f: fn(T) -> U)`, `filter(f: fn(T) -> bool)`, `filter_map<U>(f: fn(T) ->
 U?)`, `flat_map<U>(f: fn(T) -> Iter<U>)`, `enumerate() -> Iter<(int, T)>`,
 `zip<U>(other: Iter<U>) -> Iter<(T, U)>` (ends with the shorter), `chain(other:
@@ -1649,7 +1645,7 @@ Iter<T>)`, `take(n: int)` (pulls at most `n` elements from its source),
 element, then every `n`-th; fails if `n <= 0`), `inspect(f: fn(T))` (calls `f`
 on each element as it passes).
 
-**Consumers** pull elements: `to_list() -> [T]`, `to_set() -> Set<T>` (`T:
+Consumers pull elements from an iterator: `to_list() -> [T]`, `to_set() -> Set<T>` (`T:
 Hash`), `to_map() -> [K: V]` (for `Iter<(K, V)>`, `K: Hash`; a repeated key
 keeps its last value), `join(sep: str = "") -> str` (for `Iter<str>`),
 `each(f: fn(T))`, `fold<A>(init: A, f: fn(A, T) -> A) -> A`, `reduce(f: fn(T, T)
@@ -1661,33 +1657,38 @@ and `all(f)` (stop at the first decisive element), `find(f) -> T?`,
 T?` (`T: Ord`; the first minimal/maximal), `min_by`/`max_by<K: Ord>(key: fn(T)
 -> K) -> T?`. A `for` loop over an `Iter` is a consumer too.
 
-**Semantics.**
+#### Iterator Semantics
 
-- **Laziness.** Creating an iterator or applying an adapter calls no
-  function; each element is produced when a consumer asks for it, passing
-  through the whole pipeline before the next one is requested. Adapters
-  request only what they need: `Iter.repeat(1).take(3).sum()` terminates.
-- **Single pass.** An iterator is a reference to its state: elements taken
-  by any consumer (or by `next()` on any copy of the iterator, including one
-  wrapped by an adapter) are gone. Consuming an exhausted iterator yields no
-  elements.
-- **Exhaustion.** List, range, map, set, string, and channel iterators
-  return `None` after exhaustion; `Iter.from_fn` iterators call
-  their function on each request. Adapters stop pulling from their source as
-  soon as it returns `None`.
-- **Mutation.** A list iterator behaves like a `for` loop (§6.9), with the
-  length taken when `iter()` is called. Map and set iterators work on a
-  snapshot of the entries taken by `iter()`, unaffected by later changes. A
-  channel iterator receives live, suspending while the channel is empty.
-- **Limits.** Iterators are ordinary Sand code: every element costs at least
-  one unit of fuel (§15.2), so endless iterators are bounded by the
-  instruction, time and memory limits (§15) like any loop.
-- **Cost** _(informative)_. A pipeline written as one expression where it is
-  consumed (`for x in xs.iter().map(f).filter(g) { ... }`,
-  `xs.iter().map(f).sum()`), like an eager method taking a function
-  (`xs.map(f)`), compiles to a single loop costing about as much as a
-  hand-written one. An iterator stored and consumed later costs about one
-  closure call per adapter and element.
+**Laziness.** Creating an iterator or applying an adapter calls no
+function; each element is produced when a consumer asks for it, passing
+through the whole pipeline before the next one is requested. Adapters
+request only what they need: `Iter.repeat(1).take(3).sum()` terminates.
+
+**Single pass.** An iterator is a reference to its state: elements taken
+by any consumer (or by `next()` on any copy of the iterator, including one
+wrapped by an adapter) are gone. Consuming an exhausted iterator yields no
+elements.
+
+**Exhaustion.** List, range, map, set, string, and channel iterators
+return `None` after exhaustion; `Iter.from_fn` iterators call
+their function on each request. Adapters stop pulling from their source as
+soon as it returns `None`.
+
+**Mutation.** A list iterator behaves like a `for` loop (§6.9), with the
+length taken when `iter()` is called. Map and set iterators work on a
+snapshot of the entries taken by `iter()`, unaffected by later changes. A
+channel iterator receives live, suspending while the channel is empty.
+
+**Limits.** Iterators are ordinary Sand code: every element costs at least
+one unit of fuel (§15.2), so endless iterators are bounded by the
+instruction, time and memory limits (§15) like any loop.
+
+**Cost.** A pipeline written as one expression where it is
+consumed (`for x in xs.iter().map(f).filter(g) { ... }`,
+`xs.iter().map(f).sum()`), like an eager method taking a function
+(`xs.map(f)`), compiles to a single loop with similar performance as a
+hand-written one. An iterator that is stored and consumed later costs
+about one closure call per adapter and element.
 
 ### 12.14 `Close`
 
@@ -1708,37 +1709,32 @@ resource again does nothing; its other operations fail with kind
 
 ### 12.15 `help` and `members`
 
-The checker evaluates calls of `help` and `members`, whose argument may
-be what no other function takes:
+The checker evaluates calls of `help` and `members` to give the caller interactive help:
 
-- a module, imported or not (`help(json)`);
-- a type, trait or type parameter (`help(str)`, `help([int])`,
-  `help(json.Json)`, `help(Close)`, `help(T)`);
-- a function, method, trait method, field, variant or variable
-  (`help(print)`, `help(str.split)`, `help(xs.map)`, `help(p.x)`,
-  `help(Some)`, `help(math.pi)`, `help(xs)`);
-- a string literal that identifies any of those targets (`help("json.Json.get")`);
-  its first segment may be written as a type (`"List.map"`, `"[T].map"`,
-  `"Set<T>.add"`, `"int?.unwrap"`);
-- any other expression, which stands for its type and is not evaluated
-  (`help(f())`, `help([1, 2])`).
+- a module, whether imported or not: `help(json)`
+- a type, trait or type parameter: `help(json.Json)`
+- a function, method, trait method, field, variant or variable: `help(json.Json.get)`
+- a string literal that identifies any of those targets: `help("json.Json.get")`
+- a non-evaluated expression: `help([1, 2])`
 
 `help(x)` prints the documentation of `x` to standard output, as `print`
-would: its declaration and doc comment (for a variable, its declared or
-inferred type), and for a module its items, for a type its variants,
-fields, methods and the traits it implements, for a trait its methods and
-implementing types, for any other expression its type and that type's
-documentation. Lists of items show the first sentence of each
-doc comment. `help()` prints an overview of the prelude and the modules.
+would. It contains `x`'s declaration and doc comment, and for a module its items,
+for a type its variants, fields, methods and the traits it implements, for a trait
+its methods and implementing types, for any other expression its type and that type's
+documentation.
 
-`members(x)` returns the names that may follow `x.`, sorted: a module's
-public items, or the variants, fields and methods (including those of
-visible trait impls, `to_str` and `debug`) of a type or of an
+Calling `help` on a list of items shows the first sentence of each doc comment.
+
+`help()` prints an overview of the prelude and the modules.
+
+`members(x)` returns the list names in `x.`, sorted: a module's
+public items, or the variants, fields and methods of a type or of an
 expression's type. `members()` returns the names in scope, excluding the
-prelude's.
+prelude.
 
-Neither can be used as a function value. Defining `help` or `members`
-shadows them as usual.
+Neither `help` nor `members` can be used as a function value.
+
+A script may define an item named `help` or `members`, shadowing the built-in functions.
 
 ## 13. Standard library
 
