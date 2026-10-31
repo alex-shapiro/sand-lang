@@ -769,10 +769,9 @@ module, imported name, or prelude item.
 (1, "one")                // (int, str)
 ```
 
-`[e; n]` evaluates `e` **once per element** (so nested lists are never
-aliased). `n` must be an `int`; a negative `n` fails.
+`[e; n]` evaluates `e` once per element. `n` must be a non-negative `int`.
 
-Comprehensions may have several `for` clauses and `if` filters, evaluated left
+Comprehensions may include multiple `for` clauses and `if` filters, evaluated left
 to right as nested loops: `[(x, y) for x in xs for y in ys if x != y]`.
 
 ### 6.4 Construction
@@ -800,59 +799,65 @@ as a function value (`xs.map(Some)`).
 
 ### 6.5 Operators
 
-**Arithmetic** `+ - * / % **` and unary `-` require both operands to have the
-same `Num` type, with these additions:
+#### Arithmetic
 
-- `str + str`, `bytes + bytes`, `[T] + [T]` concatenate (producing new values).
-- If the operand type of `+` is not yet known (`let add = (a, b) => a + b`), the
-  type checker verifies that the inferred operand type is a `Num` type,
-  `duration`, `str`, `bytes`, or a list (for example, `add(true, false)` is a
-  compile error).
-- `duration + duration`, `duration - duration`, `-duration`,
-  `duration * k`, `k * duration` and `duration / k` produce `duration`,
-  where `k` is any `Num` (a type parameter `k: T` requires `T: Num`);
-  a `float` factor gives the exact product truncated toward zero to whole
-  nanoseconds, and fails (kind `overflow`) if it is not finite or
-  the product is out of range;
-  a `float` divisor gives the exact quotient truncated toward zero to whole
-  nanoseconds, is `0s` if the divisor is infinite, fails (kind `invalid`)
-  if it is zero, and fails (kind `overflow`) if it is `nan` or the quotient
-  is out of range;
-  `duration / duration` produces `float`.
+`+ - * / % **` and unary `-` require both operands to have the same `Num` type.
+Additional allowed implementations:
+
+- concatenation: `str + str`, `bytes + bytes`, `[T] + [T]`
+- `duration + duration`, `duration - duration`, `-duration`
+- `duration * k`, `k * duration` and `duration / k` produce `duration`,
+  where `k: Num`. A `float` divisor gives the exact quotient truncated
+  toward zero to whole nanoseconds. If the divisor is infinite, it returns `0s`.
+  If the divisor is zero, it fails as `invalid`. If the divisor is `nan` or if
+  the quotient is out of range, it fails as `overflow`.
+- `duration / duration` produces `float`.
 
 Integer semantics:
 
-- Overflow in `+ - * **`, unary `-`, and `/` fails with `overflow: integer overflow`.
-- `/` is **floor division** and `%` is **floor modulo**: `-7 / 2 == -4`,
-  `-7 % 2 == 1`, `7 % -2 == -1`. Division or modulo by zero fails with
-  `division by zero`.
-- `a ** b` with `b < 0` fails with `invalid: negative exponent`.
+- Overflow in `+ - * **`, unary `-`, and `/` fails as `overflow`.
+- `/` is floor division and `%` is floor modulo: `-7 / 2 == -4`, `-7 % 2 == 1`, `7 % -2 == -1`.
+- Division or modulo by zero fails as `invalid`.
+- `a ** b` with `b < 0` fails as `invalid`.
 
-Float semantics: IEEE-754 with round-to-nearest. `/` by zero yields `inf`,
-`-inf` or `nan`. `%` is floor modulo (`a - b * floor(a / b)`). `**` is `powf`.
+Float semantics: IEEE-754 with round-to-nearest.
 
-**Bitwise** `& | ^ << >> ~` operate on `int`. `>>` is arithmetic. A shift
-amount outside `0..64` fails with `invalid: shift out of range`.
+- `/` by zero returns `inf`, `-inf` or `nan`.
+- `%` is floor modulo (`a - b * floor(a / b)`).
+- `**` is `powf`.
 
-**Comparison** `== !=` require `Eq` operands of the same type and compare
-structurally. `< <= > >=` require `Ord` operands of the same type. Ordering is:
-numeric for numbers (NaN compares false with everything); lexicographic by
-bytes for `str` and `bytes`; `false < true`; lexicographic for tuples and lists;
-for enums, by variant declaration order then payload; for structs, field by
-field in declaration order. Floats inside composites use the total order where
-`nan` is greater than every other float and equal to itself.
+#### Bitwise
 
-Values of reference types (lists, maps, sets, structs) are compared **by
-content**. Tasks, channels, and non-value opaque types (§5.4) are compared by
-identity.
+`& | ^ << >> ~` operate on `int`. `>>` is arithmetic. A shift
+outside `0..64` fails with `invalid: shift out of range`.
 
-**Logical** `and`, `or`, `not` take and return `bool`; `and`/`or` short-circuit.
+#### Comparison
 
-**Range** `a..b` (exclusive) and `a..=b` (inclusive) require `int` operands and
-produce a `Range`.
+`== !=` require `Eq` operands of the same type and compare structurally.
+`< <= > >=` require `Ord` operands of the same type.
 
-**Coalesce** `a ?? b`: if `a: T?`, yields the payload of `Some` or else
-evaluates `b: T`. If `a: Result<T, E>`, yields the `Ok` payload or else `b`.
+Ordering rules:
+
+- `bool`: `false < true`
+- `int` and `float`: numeric; comparison with `nan` always returns false and `nan` is greater than every other float.
+- `str` and `bytes`: lexicographic
+- enums: variant declaration order, then payload
+- structs: field by field in declaration order
+- collections: compared by content
+- opaque types: compared by identity
+
+#### Logical
+
+`and`, `or`, `not` take and return `bool`; `and`/`or` short-circuit.
+
+#### Range
+
+`a..b` (exclusive) and `a..=b` (inclusive) require `int` operands and produce a `Range`.
+
+#### Coalesce
+
+`a ?? b`: if `a: T?`, returns the payload of `Some` or else evaluates `b: T`.
+If `a: Result<T, E>`, returns the `Ok` payload or else `b`.
 
 ### 6.6 Calls
 
@@ -865,35 +870,37 @@ Describe.describe(p)          // trait method in qualified form (§4.9)
 http.get(url, timeout: 5s)    // module function with named argument
 ```
 
-Positional arguments come first, then named arguments in any order. Named and
-default arguments are available when the callee is statically known (a function
-or method name); calls through function-typed values take positional arguments
-only.
+Positional arguments ordered first, then named arguments in any order.
+Named and default arguments are available if the callee is known at compile time;
+calls through function-typed values take positional arguments only.
 
 ### 6.7 Field access, indexing and slicing
 
 - `s.f` reads struct field `f`; `t.0`, `t.1` read tuple elements.
-- `xs[i]` indexes a list (fails with kind `bounds` unless `0 <= i < len`).
-- `m[k]` looks up a map key (fails with kind `not_found` if absent).
+- `xs[i]` indexes a list. An out of bounds error has kind `bounds`.
+- `m[k]` looks up a map key. If the key is absent, it fails with kind `not_found`.
 - `s[i]` on `str` and `bytes` is not permitted; use slices or methods.
-- `xs[a..b]`, `xs[a..]`, `xs[..b]`, `xs[a..=b]` produce a new list. On `str`
-  and `bytes`, slices produce new values and indices are **byte** offsets. A
-  slice bound out of range, `a > b`, or a `str` bound that is not on a
-  character boundary fails.
+- `xs[a..b]`, `xs[a..]`, `xs[..b]`, `xs[a..=b]` produce a new list.
+  On `str` and `bytes`, slices produce new values and indices are byte offsets.
+  Slicing fails if the range is out of bounds, if `a > b`, or if a range index is
+  not on a character boundary.
 
 ### 6.8 Option and error propagation
 
-- Postfix `e?` where `e: T?` evaluates to the `Some` payload or returns `None`
-  from the enclosing function, whose return type must be an `Option`.
-- Postfix `e?` where `e: Result<T, E>` evaluates to the `Ok` payload or returns
-  `Err(err)` from the enclosing function, whose return type must be
-  `Result<_, E>` with the same `E`.
-- At the top level of the main module or in a test block, `e?` unwraps `Some`
-  and `Ok`. On `Err(err)`, `e?` fails execution with `err` (§10.3). On `None`,
-  `e?` fails execution with an error of kind `none`. Using `?` at the top level
-  of an imported module is an error.
-- `?` is not permitted inside a lambda unless the lambda's return type is an
-  appropriate `Option`/`Result`.
+Postfix `e?` where `e: T?` evaluates to the `Some` payload or returns `None`
+from the enclosing function, whose return type must be an `Option`.
+
+Postfix `e?` where `e: Result<T, E>` evaluates to the `Ok` payload or returns
+`Err(err)` from the enclosing function, whose return type must be
+`Result<_, E>` with the same `E`.
+
+At the top level of the main module or in a test block, `e?` unwraps `Some`
+and `Ok`. On `Err(err)`, `e?` fails execution with `err` (§10.3). On `None`,
+`e?` fails execution with an error of kind `none`. Using `?` at the top level
+of an imported module is an error.
+
+`?` is not permitted inside a lambda unless the lambda's return type is an
+appropriate `Option`/`Result`.
 
 ### 6.9 Blocks and control flow expressions
 
@@ -908,53 +915,56 @@ while let Some(line) = conn.read_line()? { ... }
 for x in iterable { ... }
 ```
 
-- A block's value is its final expression statement, or `()` if it ends with a
-  non-expression statement or is empty.
-- `if` without `else` has type `()`; its body's value is discarded. With `else`,
-  both branches must have the same type, unless the `if` is used as a statement.
-- `match` arms are separated by newlines or commas. Arms must be exhaustive
-  (§8.3). All arm bodies must have the same type unless the `match` is used as a
-  statement.
-- `loop` evaluates to the value given to `break` (or `()` if `break` has no
-  value). `while` and `for` evaluate to `()`; `break` in them takes no value.
-- `for` (and a comprehension `for` clause) iterates over a `Range`
-  (integers), `[T]` (elements), `[K: V]` (`(K, V)` tuples), `Set<T>`
-  (elements), `Channel<T>` (messages received live until it is closed and
-  empty), or any value whose type implements the prelude trait `Iterator<T>`
-  (§12.13), such as `Iter<T>`, calling `next()` before each iteration until it
-  returns `None`. The loop binding may be a pattern: `for (k, v) in map`. A
-  list loop visits indices `0..n`, `n` being the length when the loop starts,
-  reading each element when visited and stopping early if the list shrinks.
-  Maps and sets are iterated over a snapshot taken when the loop starts.
-- `break` and `continue` refer to the innermost loop. `return e` returns from
-  the innermost function or lambda. At the top level of the main module,
-  `return` ends the program (or the session input, §17.6) and may return a
-  value of any type; returning `Err(err)` fails with `err` (§10.3). At the
-  top level of an imported module it is an error. All three have type `never`.
-- **Labels.** A loop may be labeled by writing `@name` before `loop`, `while`
-  or `for`, on the same line; `break @name` and `continue @name` then refer to
-  that loop from anywhere in its body, including nested loops:
+A block's value is its final expression statement, or `()` if it ends with a
+non-expression statement or is empty.
 
-  ```sand
-  @rows for row in grid {
-      for x in row {
-          if x < 0 { break @rows }       // leaves both loops
-          if x == 0 { continue @rows }   // next row
-      }
-  }
-  let found = @search loop {
-      for p in candidates() {
-          if good(p) { break @search p }
-      }
-  }
-  ```
+`if` without `else` has type `()`; its body's value is discarded. With `else`,
+both branches must have the same type, unless the `if` is used as a statement.
 
-  `break @name value` is allowed only when `@name` labels a `loop`;
-  `continue @name` may target any loop (on `loop`, it restarts the body).
-  Labels name loops of the current function or lambda only: `break` and
-  `continue` cannot leave a lambda or local function. An unknown label, or one
-  already used by an enclosing loop of the same function, is a compile error.
-  Labels are not values. The label must directly follow the `@`.
+`match` arms are separated by newlines or commas. Arms must be exhaustive
+(§8.3). All arm bodies must have the same type unless the `match` is used as a
+statement.
+
+`loop` evaluates to the value given to `break` (or `()` if `break` has no
+value). `while` and `for` evaluate to `()`; `break` in them takes no value.
+
+`for` iterates over any value whose type implements the `Iterator<T>` trait (§12.13),
+calling `next()` before each iteration until it returns `None`. A for loop binding
+may be a pattern: `for (k, v) in map`.
+
+A list loop visits indices `0..n`, where `n` is the length when the loop starts.
+It visits each element once and stops early if the list shrinks during iteration.
+Maps and sets are iterated over a snapshot taken when the loop starts.
+
+`break` and `continue` refer to the innermost loop. `return e` returns from
+the innermost function or lambda.
+
+At the top level of the main module, `return` ends the program and may return a
+value of any type; returning `Err(err)` fails with `err` (§10.3). At the top level
+of an imported module it is an error. All three have type `never`.
+
+#### Labels
+
+A loop may be labeled by writing `@name` before `loop`, `while`
+or `for`, on the same line; `break @name` and `continue @name` then refer to
+that loop from anywhere in its body, including nested loops:
+
+```sand
+@rows for row in grid {
+    for x in row {
+        if x < 0 { break @rows }       // leaves both loops
+        if x == 0 { continue @rows }   // next row
+    }
+}
+let found = @search loop {
+    for p in candidates() {
+        if good(p) { break @search p }
+    }
+}
+```
+
+Loop labels must be declared locally: `break` and `continue` cannot exit a lambda or local function.
+An unknown label, or one already used by an enclosing loop of the same function, is a compile error.
 
 ### 6.10 Lambdas
 
