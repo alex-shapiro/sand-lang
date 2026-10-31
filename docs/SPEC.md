@@ -681,8 +681,7 @@ pub struct Error { pub message: str, pub kind: str = "error" }
 The prelude also defines the lazy iterator struct `Iter<T>` and the trait
 `Iterator<T>` (§12.13).
 
-Standard library and host modules define additional nominal types (such as
-`json.Json`, `http.Response`, and `net.Conn`). An _opaque_ type binds a
+Standard library and host modules define additional nominal types. An _opaque_ type binds a
 registered Rust type (§16.3); it does not have fields, and only its `init`
 (§4.2) or functions and methods in its module can construct its values. Opaque
 value types (such as `time.PlainDate`) are immutable, compare and hash by
@@ -698,43 +697,30 @@ error. Use `x.to_float()` or `f.to_int()`.
 
 ### 5.6 Built-in traits
 
-The prelude declares six built-in traits that govern equality, ordering,
-hashing, JSON serialization, and numeric arithmetic:
+The prelude declares six built-in traits:
 
-| Trait    | Supertraits    | Implemented by                                                                                                                                                                              |
-| -------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Eq`     |                | every type except function types (and types containing them)                                                                                                                                |
-| `Ord`    | `Eq`           | `int`, `float`, `bool`, `str`, `bytes`, `duration`, `()`, ordered value types (§5.4), and tuples, lists, `Option`, structs and enums all of whose components are `Ord`                      |
-| `Hash`   | `Eq`           | `int`, `bool`, `str`, `bytes`, `duration`, `()`, `Range`, value types (§5.4), and tuples, `Option`, `Result`, enums and structs **without `var` fields** all of whose components are `Hash` |
-| `Encode` |                | every type except function types, `Task`, `Channel`, native objects (§5.4), and types containing them                                                                                       |
-| `Decode` | `Encode`       | every `Encode` type except structs that declare `init` (§4.2) and types containing them                                                                                                     |
-| `Num`    | `Ord + Encode` | `int`, `float`                                                                                                                                                                              |
+| Trait    | Supertraits    | Implemented by                                                                                                                                                                             |
+| -------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `Eq`     |                | every type except function types, and types containing them                                                                                                                                |
+| `Ord`    | `Eq`           | `int`, `float`, `bool`, `str`, `bytes`, `duration`, `()`, ordered value types (§5.4), and tuples, lists, `Option`, structs and enums all of whose components are `Ord`                     |
+| `Hash`   | `Eq`           | `int`, `bool`, `str`, `bytes`, `duration`, `()`, `Range`, value types (§5.4), and tuples, `Option`, `Result`, enums and structs without `var` fields where all components implement `Hash` |
+| `Encode` |                | every type except function types, `Task`, `Channel`, native objects (§5.4), and types containing them                                                                                      |
+| `Decode` | `Encode`       | every `Encode` type except structs that declare `init` (§4.2) and types containing them                                                                                                    |
+| `Num`    | `Ord + Encode` | `int`, `float`                                                                                                                                                                             |
 
-The compiler automatically derives `Eq`, `Ord`, `Hash`, `Encode`, and `Decode`
-from a type's components: a struct or enum implements a derived trait if every
-field and variant payload implements it, and a generic type requires the trait
-on each type parameter used by those components. For example,
-`struct Pair<A, B> { a: A, b: B }` implements `Hash` if `A` and `B` implement
-`Hash`, and `help(Pair)` displays `Hash where A: Hash, B: Hash`. `==` and `!=`
-require `Eq`, `<`, `<=`, `>`, and `>=` require `Ord`, map keys and set elements
-require `Hash`, `json.encode` requires `Encode`, `json.decode` requires
-`Decode`, and arithmetic operators on type parameters require `Num`. Only the
-prelude implements `Num`.
+The compiler automatically derives `Eq`, `Ord`, `Hash`, `Encode`, and `Decode` from a type's components.
+A struct or enum implements a derived trait if every field and variant payload implements it, and a generic
+type requires the trait on each type parameter used by those components.
 
-Built-in traits can be used as bounds on type parameters, supertraits
-(`trait Keyed: Hash { ... }`), and `impl` blocks in the same way as
-user-defined traits (§4.9). `Num` declares the static methods `zero()` and
-`one()` for the additive and multiplicative identities (`0`/`1` for `int` and
-`0.0`/`1.0` for `float`), which allows generic functions to fold empty
-collections:
+Example: `struct Pair<A, B> { a: A, b: B }` implements `Hash` if `A` and `B` implement `Hash`,
+and `help(Pair)` displays `Hash where A: Hash, B: Hash`.
 
-```sand
-fn total<T: Num>(xs: [T]) -> T {
-    xs.fold(T.zero(), (a, b) => a + b)
-}
-let none: [float] = []
-print(total(none))            // 0.0
-```
+Built-in trait conformance is a prerequisite for some operator use:
+
+- `==` and `!=` require `Eq`
+- `<`, `<=`, `>`, and `>=` require `Ord`
+
+Built-in traits may be used as bounds on type parameters, supertraits, and `impl` blocks in the same way as user-defined traits (§4.9).
 
 ## 6. Expressions
 
