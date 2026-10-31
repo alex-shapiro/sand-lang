@@ -647,7 +647,6 @@ fn input_completeness() {
         "print(\"a \\(x",
         "print(\"a \\(f(x,",
         "\"\"\"\nabc",
-        "/* c",
         "1 +",
         "xs\n    .map(f).",
         "let x =",

@@ -107,7 +107,7 @@ pub fn highlight(source: &str) -> Vec<(usize, usize, Highlight)> {
 fn comment(c: &Comment) -> Highlight {
     match c.kind {
         CommentKind::Doc | CommentKind::ModuleDoc => Highlight::DocComment,
-        CommentKind::Line | CommentKind::Block => Highlight::Comment,
+        CommentKind::Line => Highlight::Comment,
     }
 }
 
@@ -159,7 +159,6 @@ mod tests {
     fn incomplete_source_is_highlighted() {
         assert_eq!(show("fn f() { \"unterminated"), [("fn", "keyword"), ("f", "call"), ("\"unterminated", "string")]);
         assert_eq!(show("json!({\"a\": null})"), [("json!", "call"), ("\"a\"", "string")]);
-        assert_eq!(show("/* open"), [("/* open", "comment")]);
         assert!(highlight("\"\\(\"").iter().all(|&(lo, hi, _)| lo < hi && hi <= 4));
     }
 }

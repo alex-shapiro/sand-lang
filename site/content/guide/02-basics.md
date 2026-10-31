@@ -7,11 +7,10 @@ A Sand script consists of statements executed from top to bottom. This chapter i
 
 ## Comments
 
-Line comments start with `//`, block comments use `/* ... */` and can nest, and doc comments (`///` or `//!`) attach documentation that `help()` can display at runtime:
+Line comments start with `//`, and doc comments (`///` or `//!`) attach documentation that `help()` can display at runtime:
 
 ```sand
 // A line comment.
-/* A block comment. /* Nested block comment. */ */
 
 /// Returns the ultimate answer.
 fn answer() -> int { 42 }

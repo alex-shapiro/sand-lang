@@ -1,7 +1,7 @@
 //! Formatting preserves meaning: for every source of the spec tests and
 //! every example, the formatted text has the same syntax tree (positions
-//! aside) and its block comments between the same tokens (see
-//! `sandlang::fmt::meaning`), and formatting it again changes nothing.
+//! aside, see `sandlang::fmt::meaning`), and formatting it again changes
+//! nothing.
 
 use sandlang::fmt::{format_source, meaning};
 use std::path::{Path, PathBuf};
@@ -84,9 +84,9 @@ fn formatting_preserves_meaning() {
     assert!(failures.is_empty(), "{} of {checked} sources:\n\n{}", failures.len(), failures.join("\n\n"));
 }
 
-/// A block comment between any two tokens stays between them.
+/// A line comment after any token is kept once, and the result is stable.
 #[test]
-fn block_comments_stay_in_place() {
+fn line_comments_after_any_token_are_kept() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut sources: Vec<(String, String)> = Vec::new();
     for file in ["fmt", "patterns", "structs", "traits"] {
@@ -94,6 +94,7 @@ fn block_comments_stay_in_place() {
         sources.extend(cases(&std::fs::read_to_string(&p).unwrap()).into_iter().map(|(n, s)| (format!("{file} / {n}"), s)));
     }
     let mut failures = Vec::new();
+    let mut checked = 0;
     for (name, src) in &sources {
         let parsed = sandlang::syntax::parse_module(src, 0);
         if !parsed.errors.is_empty() {
@@ -102,17 +103,20 @@ fn block_comments_stay_in_place() {
         // After each token (at most 150 per source).
         for t in parsed.tokens.iter().filter(|t| t.hi > t.lo).take(150) {
             let at = t.hi as usize;
-            let commented = format!("{} /* c */{}", &src[..at], &src[at..]);
+            let commented = format!("{} // c\n{}", &src[..at], &src[at..]);
             let Ok(before) = meaning(&commented) else { continue };
+            checked += 1;
             let Ok(formatted) = format_source(&commented) else {
                 failures.push(format!("{name}: cannot format\n{commented}"));
                 continue;
             };
-            if meaning(&formatted).as_ref() != Ok(&before) {
+            let kept = formatted.matches("// c").count() == src.matches("// c").count() + 1;
+            if !kept || meaning(&formatted).as_ref() != Ok(&before) || format_source(&formatted).as_ref() != Ok(&formatted) {
                 failures.push(format!("{name}:\n{commented}--- formatted\n{formatted}"));
             }
         }
     }
+    assert!(checked > 5000, "only {checked} sources checked");
     assert!(failures.is_empty(), "{} failures:\n\n{}", failures.len(), failures.iter().take(20).cloned().collect::<Vec<_>>().join("\n\n"));
 }
 
@@ -128,7 +132,7 @@ fn trailing_spaces_in_doc_comments_do_not_change_the_meaning() {
         "///!",
         "let x = 1\n////\n",
         "///\n//!",
-        "/* a */\n//! b\nlet x = 1\n",
+        "// a\n//! b\nlet x = 1\n",
     ] {
         let formatted = format_source(src).unwrap();
         assert_eq!(meaning(src), meaning(&formatted), "{src:?} formatted as {formatted:?}");
@@ -147,7 +151,7 @@ fn tuple_indices_on_number_literals_stay_indices() {
 
 #[test]
 fn a_lone_base_argument_keeps_its_dots() {
-    for src in ["t(..3)\n", "let q = P(..p)\n", "let q = P(\n    ..p,\n)\n", "let q = P(x: 1, /* c */ ..p)\n"] {
+    for src in ["t(..3)\n", "let q = P(..p)\n", "let q = P(\n    ..p,\n)\n", "let q = P(x: 1, // c\n..p)\n"] {
         let formatted = format_source(src).unwrap();
         assert_eq!(meaning(src), meaning(&formatted), "{src:?} formatted as {formatted:?}");
         assert_eq!(format_source(&formatted).unwrap(), formatted);

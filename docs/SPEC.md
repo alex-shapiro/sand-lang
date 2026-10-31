@@ -47,7 +47,6 @@ extension `.sand`. Non-ASCII characters may appear only in comments and string l
 
 ```sand
 // line comment
-/* block comment, /* may nest */ */
 /// documentation comment for the following item, field, variant or method
 //! documentation comment for the enclosing module (only before the first item)
 ```
@@ -69,7 +68,7 @@ terminator (`;`) if the last token on the line is:
 - the postfix operator `?`
 - `..` or `..=`, which may end an open range (`let rest = 1..`)
 
-and the newline is **not** inside a `(...)` or `[...]` group. Inside `{...}`
+and the newline is not inside a `(...)` or `[...]` group. Inside `{...}`
 newlines are significant again, even inside parentheses.
 
 The lexer does not insert a terminator if the next non-blank line starts with `.`,
@@ -85,15 +84,11 @@ let total = items
 
 **Minus and whitespace.** `-` is the only operator that is both prefix and
 binary; where the grammar cannot tell which is meant, whitespace decides. A
-`-` with whitespace (space, tab, line break or start of source) before it and
-none after it (`-x`) is a negation:
+`-` with whitespace before it and none after it (`-x`) is a negation:
 
-- at the start of a line it begins a new statement, whatever the previous
-  line ends with (the linter reports it if it has no effect, `no-effect`,
-  §17.2);
-- after an operand (on the same line, or the next line inside `(...)` or
-  `[...]`) it is an error (an ambiguous `-`): `a -b` and `[1` / `-2]` are
-  rejected rather than read as `a - b` and `[1 - 2]`.
+- at the start of a line it begins a new statement, whatever the previous line ends with;
+- after an operand on the same line, or the next line inside `(...)` or `[...]` it is an
+  error (an ambiguous `-`): `a -b` and `[1` / `-2]` are rejected rather than read as `a - b` and `[1 - 2]`.
 
 Every other `-` subtracts after an operand and negates elsewhere: `a - b`,
 `a-b` and `a- b` subtract; `-a`, `f(-a)`, `[1, -2]`, `x = -1` and the second
@@ -105,9 +100,8 @@ let total = base
     - discount
 ```
 
-The formatter prints subtraction with spaces on both sides and negation with
-none after, so formatted code means what it says. Explicit `;` may separate
-statements on one line; redundant terminators are ignored.
+The formatter prints subtraction with spaces on both sides and negation with none after.
+Explicit `;` may separate statements on one line; redundant terminators are ignored.
 
 ### 2.4 Identifiers and keywords
 
@@ -128,30 +122,26 @@ followed by a string literal starts a test block, and `from` followed by a
 module name or path and `import` starts a selective import. In all other
 positions, `test` and `from` are ordinary identifiers.
 
-By convention (enforced by the linter): types, traits, enum variants and type
-parameters are `UpperCamelCase`; functions, variables, fields, modules and loop
-labels are `snake_case`; top-level `let` constants may also be
-`SCREAMING_SNAKE_CASE`. The identifier `_` is a wildcard and may not be read.
+Identifiers use convention casing, enforced by the linter. Types, traits, enum variants,
+and type parameters are `UpperCamelCase`; functions, variables, fields, modules and loop
+labels are `snake_case`; top-level `let` constants may also be `SCREAMING_SNAKE_CASE`.
+The identifier `_` is a wildcard and may not be read.
 
 ### 2.5 Literals
 
 **Integers**: `0`, `42`, `1_000_000`, `0xff`, `0b1010`, `0o777`. Underscores may
-separate digits. A decimal literal must fit in a 64-bit signed integer (the
-literal `9223372036854775808` is permitted only as the operand of unary minus).
+separate digits. A decimal literal must fit in a 64-bit signed integer.
 A hexadecimal, binary or octal literal may be any 64-bit pattern, read as a
 two's complement integer: `0x7FFF_FFFF_FFFF_FFFF` is the largest `int`,
 `0x8000_0000_0000_0000` the smallest and `0xFFFF_FFFF_FFFF_FFFF` is `-1`.
 
-**Floats**: `1.0`, `0.5`, `1e9`, `2.5e-3`, `1_000.5`, `inf` (positive
-infinity), `nan` (not a number). A float must have digits on both sides of a
-`.`; `1.` and `.5` are not floats.
+**Floats**: `1.0`, `0.5`, `1e9`, `2.5e-3`, `1_000.5`, `inf`, `nan`.
+A float must have digits on both sides of a `.`; `1.` and `.5` are not valid floats.
 
 **Durations**: an integer or float literal immediately followed by a unit:
 `ns`, `us`, `ms`, `s`, `m`, `h`, `d` (24 hours), `w` (7 days). Examples: `250ms`,
-`1.5s`, `2h`, `3d`. The value is
-stored as a signed 64-bit number of nanoseconds, computed exactly from the
-decimal literal (`1.005s` is 1,005,000,000 ns); fractional nanoseconds are
-truncated.
+`1.5s`, `2h`, `3d`. The value is stored as a signed 64-bit number of nanoseconds.
+Fractional nanoseconds are truncated.
 
 **Booleans**: `true`, `false`.
 
@@ -163,28 +153,20 @@ text (`"[0-9]{4}"`, `"{\"a\": 1}"`).
 
 **Interpolation**: inside a non-raw string, `\(expr)` inserts the display form
 (§10.9) of `expr`; `\(expr:spec)` applies a format specification (§10.10). The
-expression is lexed as ordinary code up to the `)` closing the `\(` (nested
-parentheses do not end it) and may contain any tokens, including strings with
-their own interpolations (`"\(xs.map(x => "<\(x)>"))"`). The spec begins at
-the first `:` not nested inside `()`, `[]`, `{}` or a string and ends at the
-next `)`, which ends the interpolation. A line break is allowed only inside
-brackets opened within the interpolation; elsewhere, including in a spec, it
-is an error (`unterminated interpolation`), reported at the `\(`. `\()` is an
-error (`empty interpolation`).
+expression is lexed as ordinary code and may contain any tokens, including strings
+with their own interpolations like `"\(xs.map(x => "<\(x)>"))"`. A line break is allowed inside
+brackets opened within the interpolation; elsewhere, including in a spec, it is an
+`unterminated interpolation` error, reported at the `\(`. `\()` is an `empty interpolation` error.
 
-**Multi-line strings**: `"""` starts a block string ending at the next `"""`
-outside its interpolations; escapes and interpolation work as in `"..."`. A
-newline right after the opening `"""` is removed, and the leading whitespace
-common to the non-blank lines and the closing `"""` line (unless it is the
-first line) is removed from every line. Lines that start inside an
-interpolation are code: neither counted nor dedented.
+**Multi-line strings**: `"""` starts a string that ends at the next `"""`.
+Escapes and interpolation work normally. A newline right after the opening `"""` is removed,
+and the leading whitespace common to the non-blank lines and the closing `"""` line is removed
+from every line. Lines that start inside an interpolation are code.
 
-**Raw strings**: `r"..."`, `r#"..."#`, `r##"..."##`, ... have no escapes and no
-interpolation.
+**Raw strings**: `r"..."`, `r#"..."#`, `r##"..."##` strings do not support escapes or interpolation.
 
-**Bytes**: `b"..."` produces a `bytes` value. Escapes as in strings plus
-`\xNN`; no interpolation (`\(` is an invalid escape). Non-ASCII characters
-are encoded as UTF-8.
+**Byte strings**: `b"..."` produces a `bytes` value. Escapes work as in strings, plus `\xNN`.
+Interpolation is not allowed. Non-ASCII characters are encoded as UTF-8.
 
 ### 2.6 Operators and punctuation
 
@@ -197,29 +179,26 @@ are encoded as UTF-8.
 
 `!` occurs only in a macro call (§6.13). Negation is written `not`.
 
----
-
 ## 3. Programs, modules and imports
 
 ### 3.1 Modules
 
-Every source file is a module. A module consists of an optional module doc
-comment, `import` declarations, then any mix of item declarations (§4),
-`test` blocks and top-level statements.
+Each source file is a module. A module consists of an optional module doc
+comment, `import` declarations, then a mix of item declarations (§4), `test` blocks,
+and top-level statements.
 
 When a module is executed, its top-level statements and top-level `let`/`var`
 initializers run in source order. Functions, types and methods may be referred
 to before their textual definition. A top-level variable read before its
-initializer has run fails (kind `uninitialized`).
+initializer has run fails as `uninitialized`.
 
-The **main module** is the module the host asks the engine to run. Each imported
+The **main** module is the module the host asks the engine to run. Each imported
 module is executed exactly once, before the first module that imports it,
-following a depth-first order of `import` declarations. Import cycles are a
-compile-time error.
+following a depth-first order of `import` declarations. Cyclical imports fail at
+compile-time.
 
-A session (`sand repl`, §17.6) is a main module whose items arrive one input
-at a time; each input is checked and run when it arrives, and may shadow the
-names of earlier inputs.
+A REPL session (`sand repl`, §17.6) is implemented as a main module whose items arrive one at a time.
+Each input is checked and run on arrival, and may shadow the names of earlier inputs.
 
 ### 3.2 Imports
 
@@ -233,33 +212,30 @@ from "./shapes.sand" import Shape, area
 ```
 
 Script paths are resolved relative to the importing module's directory; the
-`.sand` extension may be omitted, and other files cannot be imported. The
-resolved path must lie within the **module root**: the main module's directory
-unless the host configures another. A symlinked main file's imports and module
-root are those of its target. Every script import is checked against the
-policy as `Import(path)` (§14).
+`.sand` extension may be omitted, and other files cannot be imported. By default,
+a module path must lie within the **module root**, the main module's directory.
+A symlinked main file's imports and module root are those of its target. Each script
+import is checked against the policy as `Import(path)` (§14).
 
-A module name (`json`) is resolved first to a host-registered native module,
-then to a standard-library module, and then to `<library>/<name>.sand` if
-`Config::library` is set. The engine checks a library module against the policy
-as `Import(path)`, and the library directory can be outside the module root.
-Only `pub` items are visible to importers; accessing a non-`pub` item or
-importing a name that is not exported is an error. Qualified names are written
-`module.name` and `module.Type`.
+A module name is resolved first to a host-registered native module, then to a stdlib module,
+and then to `<library>/<name>.sand` if `Config::library` is set. The engine checks a library
+module against the policy as `Import(path)`, and the library directory can be outside the module root.
+
+Module items marked as `pub` are visible to importers; non-`pub` items are not.
+Importing a non-exported item fails at compile time.
+
+Imported items are qualified by their module name: `module.name` and `module.Type`.
 
 ### 3.3 Visibility
 
-`pub` may precede top-level `fn`, `struct`, `enum`, `trait`, `type`, `let`, and
-`var` declarations, struct fields, and methods in `struct`, `enum`, and
-`extend` blocks. Other modules cannot reference a private item, access or match
-a private field, call a private method, or construct a struct that has a
-private field (with `T(...)` or `json.decode`). Value formatting and
-`json.encode` include all struct fields regardless of visibility. Enum variants
-and the methods of a public trait are always public; `impl` blocks do not have
-visibility modifiers (§4.9). Importing modules can read a `pub var`, but only
-the declaring module can assign to it.
+Any item declaration may be exposed publicly with a `pub` prefix: `pub fn`.
+An item that lacks a `pub` prefix is considered private and cannot be referenced
+outside of its module.
 
----
+Value formatting and `json.encode` include all struct fields regardless of visibility.
+A public enum's variants and a public trait's methods are always public. `impl` blocks
+do not have visibility modifiers (§4.9). Importing modules can read a `pub var`, but only
+the declaring module can set it.
 
 ## 4. Declarations
 
@@ -276,34 +252,34 @@ fn greet(name: str, greeting: str = "Hello") {
 }
 ```
 
-- Every parameter has a type annotation. Parameters may have default values;
-  defaults are evaluated at each call that omits them, in the callee's
-  module scope, and may refer to earlier parameters. Parameters with defaults
-  must follow all parameters without them.
-- The return type follows `->`; if omitted it is `()` (unit).
-- The body is a block whose value is returned. In a function returning `()`,
-  the value of the final expression is discarded.
-- Type parameters are listed in `<...>`. A `:` after a type parameter specifies
-  the traits (§4.9) that its type arguments must implement, including built-in
-  traits (§5.6), module-qualified traits, and generic traits:
-  `T: Ord + Describe`, `T: geo.Shape`, `T: Into<str>`. A trailing `where`
-  clause (`fn sum(self) -> T where T: Num`) also specifies trait bounds, and
-  can constrain the type parameters of an enclosing generic `extend` block,
-  struct, or enum for that method.
-- A type parameter marked `reflect` (`fn load<reflect T: Decode>(text: str) -> Result<[T]>`)
-  receives a runtime type description of its type argument. A
-  function can forward `T` (or a composite type containing `T`, such as `[T]`)
-  to another `reflect` type parameter, such as `json.decode<T>`. Every type
-  parameter that appears in a `reflect` type argument must itself be declared
-  `reflect` on the enclosing function. If recursive calls nest constructed type
-  descriptions more than 256 levels deep, execution aborts with kind `"limit"`.
-  Local functions, trait methods, and `impl` methods cannot declare `reflect`
-  type parameters.
-- Functions may be declared inside blocks; such local functions may capture
-  enclosing variables and may call themselves recursively. Local functions
-  declared consecutively in the same block may call each other. Their type
-  parameters can only require traits that do not declare methods (such as `Eq`
-  or `Hash`).
+Each function parameter must have a type annotation.
+The function return type follows `->`; if omitted it is `()` (unit).
+
+Parameters may have default values. Defaults are evaluated at each call that omits them,
+in the callee's module scope. The default expression may refer to earlier parameters.
+Parameters with defaults must follow all parameters without them.
+
+The function body is a block whose value is returned. If a function returns `()`,
+the final expression value is discarded.
+
+Type parameters are listed in `<...>`. A `:` after a type parameter specifies
+the traits (§4.9) that its type arguments must implement: `T: Ord + Describe`, `T: geo.Shape`, `T: Into<str>`.
+A trailing `where` clause (`fn sum(self) -> T where T: Num`) also specifies trait bounds, and
+can constrain the type parameters of an enclosing generic `extend` block,
+struct, or enum for that method.
+
+A type parameter marked `reflect` (`fn load<reflect T: Decode>(text: str) -> Result<[T]>`)
+receives a runtime type description of its type argument. `T` may be forwarded to another
+`reflect` type parameter, such as `json.decode<T>`. Each type parameter that appears
+in a `reflect` type argument must itself be declared `reflect` on the enclosing function.
+Local functions, trait methods, and `impl` methods cannot declare `reflect` type parameters.
+
+If recursive calls nest constructed type descriptions more than 256 levels deep, execution aborts
+with kind `"limit"`.
+
+A function may be declared inside a block; such a function may capture enclosing variables and
+and may call itself recursively. Local functions declared consecutively in the same block
+may call each other. Their type parameters can only require traits that do not declare methods.
 
 ### 4.2 Structs
 
@@ -336,28 +312,33 @@ pub struct Port {
 }
 ```
 
-- Fields are separated by newlines or commas and are immutable unless
-  declared `var`. If a construction (§6.4) omits a field, the engine evaluates
-  the field's default expression. A field default can use traits without
-  methods from the struct's type parameter bounds (`s: Set<T> = Set([])` with
-  `T: Hash`), but cannot use traits that declare methods (§4.9). Fields and
-  methods are private to the declaring module unless marked `pub` (§3.3).
-- A struct can declare a static method `init` that returns `Self` or
-  `Result<Self, E>`. If a struct declares `init`, `T(args)` calls `init` and
-  returns its result (for example, `Port(80)` has type `Result<Port>`). Inside
-  `init`, `T(args)` and `Self(args)` construct the struct field by field. Native
-  modules can also declare `native fn init` on built-in or opaque types (such as
-  `Set([1, 2])` and `regex.Regex(pattern)`). Enums and traits cannot declare
-  `init`, and expressions cannot reference `T.init` as a member. `init` must
-  apply to all instances of the type: an `extend` block that declares `init`
-  cannot specialize the target's type parameters, and `init` cannot add trait
-  bounds beyond those declared on the type.
-- Methods are `fn` declarations inside the body. A method whose first parameter
-  is `self` (no annotation) is an instance method, called as `value.method(...)`.
-  Other methods are static, called as `Type.method(...)`.
-- Within the body, `Self` refers to the struct type (with its type parameters).
-- Structs may be generic: `struct Pair<A, B> { first: A, second: B }`.
-- Structs have reference semantics: assigning a struct value shares it.
+Structs are reference types; variable assignment shares a struct value without copying it.
+
+Struct fields are separated by newlines or commas. A field is immutable unless
+declared `var`. If a field defines a default and the type construction omits
+that field, it is is evaluated with its default expression. A field default can
+use traits without methods from the struct's type parameter bounds (`s: Set<T> = Set([])`
+with `T: Hash`), but cannot use traits that declare methods (§4.9).
+
+Fields and methods are private unless marked `pub` (§3.3).
+
+A struct can declare a static method `init` that returns `Self` or `Result<Self, E>`.
+If a struct declares `init`, `T(args)` calls `init` and returns its result.
+Inside `init`, `T(args)` and `Self(args)` construct the struct field by field.
+Native modules may declare `native fn init` on built-in or opaque types like
+`Set([1, 2])` and `regex.Regex(pattern)`).
+
+Enums and traits cannot declare `init`, and expressions cannot reference `T.init` as a member.
+`init` must apply to all instances of a type: an `extend` block that declares `init` cannot
+specialize the target's type parameters, and `init` cannot add trait bounds beyond those
+declared on the type.
+
+A struct declaration body may include methods. A method whose first parameter is `self` (no annotation)
+is an instance method, called as `value.method(...)`. Any other method is static, called as `Type.method(...)`.
+
+Within the struct declaration body, `Self` refers to the struct type (with its type parameters).
+
+A struct may be generic: `struct Pair<A, B> { first: A, second: B }`.
 
 ### 4.3 Enums
 
@@ -382,16 +363,18 @@ enum Tree<T> {
 }
 ```
 
-- Variants are separated by newlines or commas. A variant has zero or more
-  payload fields, which are all named (`radius: float`) or all positional
-  (`float`).
-- Variants are referred to as `Enum.Variant` in expressions, e.g.
-  `Shape.Circle(1.0)` or `Shape.Circle(radius: 1.0)`. In a pattern, the enum
-  prefix is optional if the scrutinee type is known, and a sub-pattern can
-  match a named payload field by name: `Rect(h: height, ..)`.
-- `Option` and `Result` variants (`Some`, `None`, `Ok`, `Err`) are always in
-  scope unqualified.
-- Enum values are immutable.
+Enum variants are separated by newlines or commas. A variant has zero or more
+payload fields, which are all named or all positional.
+
+Variants are referred to as `Enum.Variant` in expressions, e.g.
+`Shape.Circle(1.0)` or `Shape.Circle(radius: 1.0)`. In a pattern, the enum
+prefix is optional if the scrutinee type is known, and a sub-pattern can
+match a named payload field by name: `Rect(h: height, ..)`.
+
+`Option` and `Result` variants (`Some`, `None`, `Ok`, `Err`) are always in
+scope, unqualified.
+
+Enum values are immutable.
 
 ### 4.4 Extending types
 
@@ -401,11 +384,9 @@ extend Point {
 }
 ```
 
-An `extend` block adds methods to a struct or enum declared in the **same
-module**. Only the prelude and native module declarations may extend built-in
-types (`extend str { ... }`, `extend<T> [T] { ... }`). Any module may add
-methods to built-in types by implementing one of its own traits for them
-(§4.9).
+An `extend` block adds methods to a struct or enum declared in the same module.
+Types defined outside of the current module may be "extended" without an `extend`
+block by implementing a trait (§4.9).
 
 ### 4.5 Type aliases
 
@@ -414,8 +395,8 @@ type Grid = [[bool]]
 type Pair<T> = (T, T)
 ```
 
-Aliases are transparent: `Grid` and `[[bool]]` are the same type. Aliases may
-not be recursive, and their type parameters cannot require traits.
+Type aliases are transparent: `Grid` and `[[bool]]` are considered the same type.
+Aliases may not be recursive, and their type parameters must not require traits.
 
 ### 4.6 Top-level variables
 
@@ -425,12 +406,12 @@ pub let LIMITS = [1, 2, 3]
 var counter = 0
 ```
 
-Top-level `let` and `var` follow the same rules as local bindings; their types
-must be fully inferred from their initializer and module-level uses.
+Top-level `let` and `var` declarations follow the same rules as local bindings.
+Types must be fully inferred from their initializer and module-level uses.
 
 ### 4.7 Native declarations
 
-The prelude, standard library, and host native modules can declare `native`
+The prelude, standard library, and native modules can declare `native`
 functions and methods without a body. The module provides the Rust
 implementation, and the engine verifies that the declared Sand signature
 matches the Rust function signature (§16.3). User scripts cannot declare
@@ -457,10 +438,10 @@ test "addition is commutative" {
 }
 ```
 
-The name is a string literal without interpolation. Test blocks are ignored by
-`run` and executed by the test runner (§17.4). Inside a test block, the `test`
+A test block name is a string literal without interpolation. Test blocks are ignored
+during normal runs and executed by the test runner (§17.4). Inside a test block, the `test`
 module (§13.14) and its public items are imported automatically, at lower
-precedence than module definitions and the prelude. `?` propagates `None`
+precedence than module definitions and the prelude. Within a test, `?` returns `None`
 and `Err` as test failures (§6.8).
 
 ### 4.9 Traits and impls
@@ -471,30 +452,38 @@ can call the methods of the traits that its type parameters require.
 ```sand
 /// Things with a textual description.
 pub trait Describe {
-    fn describe(self) -> str                // required method
-    /// A default method; it may call the trait's other methods.
+    // required method
+    fn describe(self) -> str
+
+    /// A default method may call the trait's other methods.
     fn shout(self) -> str { self.describe().to_upper() }
 }
 
 pub trait Monoid {
-    fn empty() -> Self                      // static method: no `self`
+    // static method: no `self`
+    fn empty() -> Self
     fn combine(self, other: Self) -> Self
 }
 
-pub trait Shape: Describe + Eq {            // supertraits
+// trait requires supertraits
+pub trait Shape: Describe + Eq {
     fn area(self) -> float
 }
 
-pub trait Into<T> {                         // a trait with a type parameter
+// trait with a type parameter
+pub trait Into<T> {
     fn into(self) -> T
 }
 
 impl Describe for Point {
     fn describe(self) -> str { "(\(self.x), \(self.y))" }
 }
-impl<T: Describe> Describe for [T] {        // conditional (generic) impl
+
+// conditional (generic) impl
+impl<T: Describe> Describe for [T] {
     fn describe(self) -> str { "[" + self.map(x => x.describe()).join(", ") + "]" }
 }
+
 impl Monoid for int {
     fn empty() -> int { 0 }
     fn combine(self, other: int) -> int { self + other }
@@ -503,99 +492,98 @@ impl Monoid for int {
 fn concat_all<T: Monoid>(xs: [T]) -> T {
     xs.fold(T.empty(), (acc, x) => acc.combine(x))
 }
+
 fn show_all<T>(xs: [T]) -> str where T: Describe { xs.describe() }
 ```
 
-**Trait declarations.**
+#### Trait declarations
 
-- A trait body contains method declarations, optionally preceded by doc
-  comments. A method without a body is **required**; a method with a body is
-  a **default** method that applies to any `impl` that does not override it.
-  Methods whose first parameter is `self` are instance methods; all other
-  methods are static methods. Trait methods cannot use `pub` (they share the
-  visibility of the trait) or `native`.
-- Within a trait declaration, `Self` represents the implementing type. Because
-  `Self` implements the trait and its supertraits, default methods can call any
-  method of the trait (`self.describe()`, `Self.empty()`) or of its supertraits.
-- A trait can declare type parameters (`trait Into<T>`), which cannot have
-  trait bounds. Trait methods can declare their own type parameters with trait
-  bounds, and `where` clauses on a trait method can constrain only the method's
-  own type parameters.
-- Default values on trait method parameters must be constants (literals, `[]`,
-  `[:]`, or `None`).
-- **Supertraits** follow a `:`: `trait Shape: Describe + Eq`. Any type parameter
-  bounded by `Shape` also satisfies `Describe` and `Eq`. Supertrait hierarchies
-  cannot contain cycles.
-- Traits share the type namespace. In a trait bound after `:`, a module-local
-  type does not shadow a prelude trait of the same name (`struct Hash` does not
-  shadow `T: Hash`). User code cannot redefine or implement built-in traits
-  (§5.6).
+A trait body may contain method declarations. Any trait method without a body is required;
+any method with a body is a "default" method applied to any `impl` that does not override it.
 
-**Impls.** An `impl` block (`impl<P...> Trait<Args> for Type where ... { methods }`)
-implements a trait for a target type.
+Methods whose first parameter is `self` are instance methods; all other
+methods are static methods. Trait methods share the visibility of the trait.
 
-- The target type must have a type constructor: a struct, an enum (including
-  `Option` and `Result`), `Error`, an opaque type, a tuple (each arity is a
-  distinct constructor), or a built-in type (`int`, `float`, `bool`, `str`,
-  `bytes`, `duration`, `()`, `Range`, `[T]`, `[K: V]`, `Set<T>`, `Task<T>`, or
-  `Channel<T>`). Function types and bare type parameters
-  (`impl<T> Trait for T`) are not valid target types. Target type arguments can
-  be concrete types (`impl Describe for [int]`).
-- Every type parameter of an `impl` block must appear in the target type or in
-  the trait arguments. Trait bounds declared on the `impl` block (in `<...>` or
-  in a `where` clause) must hold at every use of the `impl` (for example,
-  `impl<T: Describe> Describe for [T]` implements `Describe` for `[T]` if `T`
-  implements `Describe`).
-- An `impl` block must define every required method of the trait, may override
-  default methods, and cannot declare methods that are not in the trait. Each
-  method signature must match the trait declaration after substituting the
-  target type for `Self` and the `impl` trait arguments for the trait's type
-  parameters (method type parameters may be renamed if they declare equivalent
-  trait bounds). Methods in an `impl` block cannot specify `pub`, parameter
-  defaults (the trait's defaults apply), or bounds on the `impl` block's type
-  parameters. Within an `impl` block, `Self` is an alias for the target type.
-- **Supertraits:** the target type must implement every supertrait of the
-  implemented trait under the `impl` block's trait bounds.
-- **Coherence:** a trait can have at most one implementation for a given type
-  constructor and unifiable trait arguments. Two `impl` blocks for the same
-  trait and type constructor conflict if their trait arguments unify:
-  `impl Into<str> for int` and `impl Into<float> for int` do not conflict,
-  whereas `impl Describe for [int]` and `impl Describe for [str]` conflict.
-- **Orphan rule:** an `impl` block must appear in the module that declares the
-  trait or the module that declares the target type. Because the prelude
-  declares built-in types, other modules can implement only their own traits for
-  built-in types.
-- Implementations are unnamed and always visible once their declaring module is
-  loaded.
+Within a trait declaration, `Self` represents the implementing type. Because
+`Self` implements the trait and its supertraits, default methods can call any
+method of the trait (`self.describe()`, `Self.empty()`) or of its supertraits.
 
-**Trait bounds.** A type argument passed to a parameter bounded by
-`T: Trait<Args>` must satisfy that bound. A concrete type satisfies a bound
-through a matching `impl` (explicit or compiler-derived, §5.6) if the type
-arguments satisfy all bounds required by that `impl` recursively (for example,
-`[[Point]]: Describe` requires `[Point]: Describe`, which requires
-`Point: Describe`). A type parameter satisfies its declared bounds and their
-supertraits, and `Self` satisfies the enclosing trait and its supertraits. The
-type checker verifies trait bounds at every instantiation and reports any
-unmet bound (for example, ``str does not implement `Describe` (required for
-[str] to implement `Describe`)``).
+A trait can declare type parameters (`trait Into<T>`) that do not have trait bounds.
+Trait methods can declare their own type parameters with trait bounds, and `where`
+clauses on a trait method can constrain only the method's own type parameters.
 
-Functions, methods, `where` clauses, `impl` blocks, structs, and enums can
-declare trait bounds on their type parameters. Methods on a struct or enum
-(including methods in `extend` blocks) inherit the type parameter bounds of the
-type. A struct or enum also infers any bounds that its field or variant payload
-types require of its type parameters: given `struct Bag<T: Hash>`,
-`struct Outer<U> { b: Bag<U> }` infers `U: Hash`, and `help(Outer)` displays
-`struct Outer<U: Hash>`. Because `Set` elements and map keys require `Hash`, a
-field of type `Set<[int]>` is rejected at declaration time. The type checker
-verifies type constructor bounds on constructions, enum variants, method
-calls, struct fields, enum payloads, and `reflect` type arguments; other type
-annotations are not checked.
+Default values on trait method parameters must be constants.
 
-A trait that does not declare methods in itself or its supertraits
-(`trait Marker {}`, and all built-in traits except `Num`) does not pass a
-runtime method dictionary to generic functions.
+Supertraits follow a `:`: `trait Shape: Describe + Eq`. Any type parameter
+bounded by `Shape` must also satisfy `Describe` and `Eq`. Supertrait hierarchies
+must not contain cycles.
 
-**Method calls.** For a call `e.m(args)`:
+Traits share the type namespace. In a trait bound after `:`, a module-local
+type does not shadow a prelude trait of the same name (`struct Hash` does not
+shadow `T: Hash`). User code cannot redefine or implement built-in traits.
+
+#### Trait Impls
+
+An `impl` block implements a trait for a target type.
+
+The target type must have a type constructor. Function types and bare type parameters
+are not valid target types. Target type arguments can be concrete types like `impl Describe for [int]`.
+
+Each type parameter of an `impl` block must appear in the target type or in trait arguments.
+Trait bounds declared on the `impl` block must hold for every use of the `impl`.
+
+An `impl` block must define every required method of the trait, may override
+default methods, and must not declare methods that are not in the trait. Each
+method signature must match the trait declaration after substituting the
+target type for `Self` and the `impl` trait arguments for the trait's type
+parameters. Method type parameters may be renamed if they declare equivalent
+trait bounds.
+
+Methods in an `impl` block cannot specify `pub`, parameter defaults, or bounds
+on the `impl` block's type parameters. Within an `impl` block, `Self` is an alias
+for the target type.
+
+The target type must implement every supertrait of the implemented trait under the
+`impl` block's trait bounds.
+
+A trait must have at most one implementation for a given type constructor and
+unifiable trait arguments. Two `impl` blocks for the same trait and type constructor
+conflict if their trait arguments unify: `impl Into<str> for int` and `impl Into<float> for int`
+do not conflict, but `impl Describe for [int]` and `impl Describe for [str]` do conflict.
+
+**The Orphan rule:** an `impl` block must appear in the module that declares the
+trait or the module that declares the target type.
+
+Implementations are unnamed and always visible once their declaring module is loaded.
+
+#### Trait bounds
+
+A type argument passed to a parameter bounded by `T: Trait<Args>` must satisfy that bound.
+A concrete type satisfies a bound through a matching `impl` if the type arguments satisfy
+all bounds required by that `impl` recursively. For example, `[[Point]]: Describe` requires
+`[Point]: Describe`, which requires `Point: Describe`. A type parameter satisfies its declared
+bounds and their supertraits, and `Self` satisfies the enclosing trait and its supertraits. The
+type checker verifies trait bounds at every instantiation and reports any unmet bound.
+Example: ``str does not implement `Describe` (required for [str] to implement `Describe`)``).
+
+Functions, methods, `where` clauses, `impl` blocks, structs, and enums may declare trait bounds
+on their type parameters. Methods on a struct or enum, including methods in `extend` blocks,
+inherit the type parameter bounds of the type. A struct or enum also infers any bounds that its
+field or variant payload types require of its type parameters.
+
+For example, given `struct Bag<T: Hash>`, `struct Outer<U> { b: Bag<U> }` infers `U: Hash`,
+and `help(Outer)` displays `struct Outer<U: Hash>`. Because `Set` elements and map keys require
+`Hash`, a field of type `Set<[int]>` is rejected at declaration time.
+
+The type checker verifies type constructor bounds on constructions, enum variants, method calls,
+struct fields, enum payloads, and `reflect` type arguments. Other type annotations are not checked.
+
+A trait that does not declare methods in itself or its supertraits, for example `trait Marker {}`,
+does not pass a runtime method dictionary to generic functions.
+
+#### Trait method calls
+
+For a call `e.m(args)`:
 
 - If the receiver type is a type parameter, the type checker resolves `m` among
   the parameter's declared traits and their supertraits.
@@ -632,8 +620,6 @@ function value.
 
 Traits are not types: Sand does not have trait objects (`dyn Trait`). Use an
 enum to store values of different concrete types in a single collection.
-
----
 
 ## 5. Types
 
@@ -695,8 +681,7 @@ pub struct Error { pub message: str, pub kind: str = "error" }
 The prelude also defines the lazy iterator struct `Iter<T>` and the trait
 `Iterator<T>` (§12.13).
 
-Standard library and host modules define additional nominal types (such as
-`json.Json`, `http.Response`, and `net.Conn`). An _opaque_ type binds a
+Standard library and host modules define additional nominal types. An _opaque_ type binds a
 registered Rust type (§16.3); it does not have fields, and only its `init`
 (§4.2) or functions and methods in its module can construct its values. Opaque
 value types (such as `time.PlainDate`) are immutable, compare and hash by
@@ -712,45 +697,30 @@ error. Use `x.to_float()` or `f.to_int()`.
 
 ### 5.6 Built-in traits
 
-The prelude declares six built-in traits that govern equality, ordering,
-hashing, JSON serialization, and numeric arithmetic:
+The prelude declares six built-in traits:
 
-| Trait    | Supertraits    | Implemented by                                                                                                                                                                              |
-| -------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Eq`     |                | every type except function types (and types containing them)                                                                                                                                |
-| `Ord`    | `Eq`           | `int`, `float`, `bool`, `str`, `bytes`, `duration`, `()`, ordered value types (§5.4), and tuples, lists, `Option`, structs and enums all of whose components are `Ord`                      |
-| `Hash`   | `Eq`           | `int`, `bool`, `str`, `bytes`, `duration`, `()`, `Range`, value types (§5.4), and tuples, `Option`, `Result`, enums and structs **without `var` fields** all of whose components are `Hash` |
-| `Encode` |                | every type except function types, `Task`, `Channel`, native objects (§5.4), and types containing them                                                                                       |
-| `Decode` | `Encode`       | every `Encode` type except structs that declare `init` (§4.2) and types containing them                                                                                                     |
-| `Num`    | `Ord + Encode` | `int`, `float`                                                                                                                                                                              |
+| Trait    | Supertraits    | Implemented by                                                                                                                                                                             |
+| -------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `Eq`     |                | every type except function types, and types containing them                                                                                                                                |
+| `Ord`    | `Eq`           | `int`, `float`, `bool`, `str`, `bytes`, `duration`, `()`, ordered value types (§5.4), and tuples, lists, `Option`, structs and enums all of whose components are `Ord`                     |
+| `Hash`   | `Eq`           | `int`, `bool`, `str`, `bytes`, `duration`, `()`, `Range`, value types (§5.4), and tuples, `Option`, `Result`, enums and structs without `var` fields where all components implement `Hash` |
+| `Encode` |                | every type except function types, `Task`, `Channel`, native objects (§5.4), and types containing them                                                                                      |
+| `Decode` | `Encode`       | every `Encode` type except structs that declare `init` (§4.2) and types containing them                                                                                                    |
+| `Num`    | `Ord + Encode` | `int`, `float`                                                                                                                                                                             |
 
-The compiler automatically derives `Eq`, `Ord`, `Hash`, `Encode`, and `Decode`
-from a type's components: a struct or enum implements a derived trait if every
-field and variant payload implements it, and a generic type requires the trait
-on each type parameter used by those components. For example,
-`struct Pair<A, B> { a: A, b: B }` implements `Hash` if `A` and `B` implement
-`Hash`, and `help(Pair)` displays `Hash where A: Hash, B: Hash`. `==` and `!=`
-require `Eq`, `<`, `<=`, `>`, and `>=` require `Ord`, map keys and set elements
-require `Hash`, `json.encode` requires `Encode`, `json.decode` requires
-`Decode`, and arithmetic operators on type parameters require `Num`. Only the
-prelude implements `Num`.
+The compiler automatically derives `Eq`, `Ord`, `Hash`, `Encode`, and `Decode` from a type's components.
+A struct or enum implements a derived trait if every field and variant payload implements it, and a generic
+type requires the trait on each type parameter used by those components.
 
-Built-in traits can be used as bounds on type parameters, supertraits
-(`trait Keyed: Hash { ... }`), and `impl` blocks in the same way as
-user-defined traits (§4.9). `Num` declares the static methods `zero()` and
-`one()` for the additive and multiplicative identities (`0`/`1` for `int` and
-`0.0`/`1.0` for `float`), which allows generic functions to fold empty
-collections:
+Example: `struct Pair<A, B> { a: A, b: B }` implements `Hash` if `A` and `B` implement `Hash`,
+and `help(Pair)` displays `Hash where A: Hash, B: Hash`.
 
-```sand
-fn total<T: Num>(xs: [T]) -> T {
-    xs.fold(T.zero(), (a, b) => a + b)
-}
-let none: [float] = []
-print(total(none))            // 0.0
-```
+Built-in trait conformance is a prerequisite for some operator use:
 
----
+- `==` and `!=` require `Eq`
+- `<`, `<=`, `>`, and `>=` require `Ord`
+
+Built-in traits may be used as bounds on type parameters, supertraits, and `impl` blocks in the same way as user-defined traits (§4.9).
 
 ## 6. Expressions
 
@@ -799,10 +769,9 @@ module, imported name, or prelude item.
 (1, "one")                // (int, str)
 ```
 
-`[e; n]` evaluates `e` **once per element** (so nested lists are never
-aliased). `n` must be an `int`; a negative `n` fails.
+`[e; n]` evaluates `e` once per element. `n` must be a non-negative `int`.
 
-Comprehensions may have several `for` clauses and `if` filters, evaluated left
+Comprehensions may include multiple `for` clauses and `if` filters, evaluated left
 to right as nested loops: `[(x, y) for x in xs for y in ys if x != y]`.
 
 ### 6.4 Construction
@@ -830,59 +799,65 @@ as a function value (`xs.map(Some)`).
 
 ### 6.5 Operators
 
-**Arithmetic** `+ - * / % **` and unary `-` require both operands to have the
-same `Num` type, with these additions:
+#### Arithmetic
 
-- `str + str`, `bytes + bytes`, `[T] + [T]` concatenate (producing new values).
-- If the operand type of `+` is not yet known (`let add = (a, b) => a + b`), the
-  type checker verifies that the inferred operand type is a `Num` type,
-  `duration`, `str`, `bytes`, or a list (for example, `add(true, false)` is a
-  compile error).
-- `duration + duration`, `duration - duration`, `-duration`,
-  `duration * k`, `k * duration` and `duration / k` produce `duration`,
-  where `k` is any `Num` (a type parameter `k: T` requires `T: Num`);
-  a `float` factor gives the exact product truncated toward zero to whole
-  nanoseconds, and fails (kind `overflow`) if it is not finite or
-  the product is out of range;
-  a `float` divisor gives the exact quotient truncated toward zero to whole
-  nanoseconds, is `0s` if the divisor is infinite, fails (kind `invalid`)
-  if it is zero, and fails (kind `overflow`) if it is `nan` or the quotient
-  is out of range;
-  `duration / duration` produces `float`.
+`+ - * / % **` and unary `-` require both operands to have the same `Num` type.
+Additional allowed implementations:
+
+- concatenation: `str + str`, `bytes + bytes`, `[T] + [T]`
+- `duration + duration`, `duration - duration`, `-duration`
+- `duration * k`, `k * duration` and `duration / k` produce `duration`,
+  where `k: Num`. A `float` divisor gives the exact quotient truncated
+  toward zero to whole nanoseconds. If the divisor is infinite, it returns `0s`.
+  If the divisor is zero, it fails as `invalid`. If the divisor is `nan` or if
+  the quotient is out of range, it fails as `overflow`.
+- `duration / duration` produces `float`.
 
 Integer semantics:
 
-- Overflow in `+ - * **`, unary `-`, and `/` fails with `overflow: integer overflow`.
-- `/` is **floor division** and `%` is **floor modulo**: `-7 / 2 == -4`,
-  `-7 % 2 == 1`, `7 % -2 == -1`. Division or modulo by zero fails with
-  `division by zero`.
-- `a ** b` with `b < 0` fails with `invalid: negative exponent`.
+- Overflow in `+ - * **`, unary `-`, and `/` fails as `overflow`.
+- `/` is floor division and `%` is floor modulo: `-7 / 2 == -4`, `-7 % 2 == 1`, `7 % -2 == -1`.
+- Division or modulo by zero fails as `invalid`.
+- `a ** b` with `b < 0` fails as `invalid`.
 
-Float semantics: IEEE-754 with round-to-nearest. `/` by zero yields `inf`,
-`-inf` or `nan`. `%` is floor modulo (`a - b * floor(a / b)`). `**` is `powf`.
+Float semantics: IEEE-754 with round-to-nearest.
 
-**Bitwise** `& | ^ << >> ~` operate on `int`. `>>` is arithmetic. A shift
-amount outside `0..64` fails with `invalid: shift out of range`.
+- `/` by zero returns `inf`, `-inf` or `nan`.
+- `%` is floor modulo (`a - b * floor(a / b)`).
+- `**` is `powf`.
 
-**Comparison** `== !=` require `Eq` operands of the same type and compare
-structurally. `< <= > >=` require `Ord` operands of the same type. Ordering is:
-numeric for numbers (NaN compares false with everything); lexicographic by
-bytes for `str` and `bytes`; `false < true`; lexicographic for tuples and lists;
-for enums, by variant declaration order then payload; for structs, field by
-field in declaration order. Floats inside composites use the total order where
-`nan` is greater than every other float and equal to itself.
+#### Bitwise
 
-Values of reference types (lists, maps, sets, structs) are compared **by
-content**. Tasks, channels, and non-value opaque types (§5.4) are compared by
-identity.
+`& | ^ << >> ~` operate on `int`. `>>` is arithmetic. A shift
+outside `0..64` fails with `invalid: shift out of range`.
 
-**Logical** `and`, `or`, `not` take and return `bool`; `and`/`or` short-circuit.
+#### Comparison
 
-**Range** `a..b` (exclusive) and `a..=b` (inclusive) require `int` operands and
-produce a `Range`.
+`== !=` require `Eq` operands of the same type and compare structurally.
+`< <= > >=` require `Ord` operands of the same type.
 
-**Coalesce** `a ?? b`: if `a: T?`, yields the payload of `Some` or else
-evaluates `b: T`. If `a: Result<T, E>`, yields the `Ok` payload or else `b`.
+Ordering rules:
+
+- `bool`: `false < true`
+- `int` and `float`: numeric; comparison with `nan` always returns false and `nan` is greater than every other float.
+- `str` and `bytes`: lexicographic
+- enums: variant declaration order, then payload
+- structs: field by field in declaration order
+- collections: compared by content
+- opaque types: compared by identity
+
+#### Logical
+
+`and`, `or`, `not` take and return `bool`; `and`/`or` short-circuit.
+
+#### Range
+
+`a..b` (exclusive) and `a..=b` (inclusive) require `int` operands and produce a `Range`.
+
+#### Coalesce
+
+`a ?? b`: if `a: T?`, returns the payload of `Some` or else evaluates `b: T`.
+If `a: Result<T, E>`, returns the `Ok` payload or else `b`.
 
 ### 6.6 Calls
 
@@ -895,35 +870,37 @@ Describe.describe(p)          // trait method in qualified form (§4.9)
 http.get(url, timeout: 5s)    // module function with named argument
 ```
 
-Positional arguments come first, then named arguments in any order. Named and
-default arguments are available when the callee is statically known (a function
-or method name); calls through function-typed values take positional arguments
-only.
+Positional arguments ordered first, then named arguments in any order.
+Named and default arguments are available if the callee is known at compile time;
+calls through function-typed values take positional arguments only.
 
 ### 6.7 Field access, indexing and slicing
 
 - `s.f` reads struct field `f`; `t.0`, `t.1` read tuple elements.
-- `xs[i]` indexes a list (fails with kind `bounds` unless `0 <= i < len`).
-- `m[k]` looks up a map key (fails with kind `not_found` if absent).
+- `xs[i]` indexes a list. An out of bounds error has kind `bounds`.
+- `m[k]` looks up a map key. If the key is absent, it fails with kind `not_found`.
 - `s[i]` on `str` and `bytes` is not permitted; use slices or methods.
-- `xs[a..b]`, `xs[a..]`, `xs[..b]`, `xs[a..=b]` produce a new list. On `str`
-  and `bytes`, slices produce new values and indices are **byte** offsets. A
-  slice bound out of range, `a > b`, or a `str` bound that is not on a
-  character boundary fails.
+- `xs[a..b]`, `xs[a..]`, `xs[..b]`, `xs[a..=b]` produce a new list.
+  On `str` and `bytes`, slices produce new values and indices are byte offsets.
+  Slicing fails if the range is out of bounds, if `a > b`, or if a range index is
+  not on a character boundary.
 
 ### 6.8 Option and error propagation
 
-- Postfix `e?` where `e: T?` evaluates to the `Some` payload or returns `None`
-  from the enclosing function, whose return type must be an `Option`.
-- Postfix `e?` where `e: Result<T, E>` evaluates to the `Ok` payload or returns
-  `Err(err)` from the enclosing function, whose return type must be
-  `Result<_, E>` with the same `E`.
-- At the top level of the main module or in a test block, `e?` unwraps `Some`
-  and `Ok`. On `Err(err)`, `e?` fails execution with `err` (§10.3). On `None`,
-  `e?` fails execution with an error of kind `none`. Using `?` at the top level
-  of an imported module is an error.
-- `?` is not permitted inside a lambda unless the lambda's return type is an
-  appropriate `Option`/`Result`.
+Postfix `e?` where `e: T?` evaluates to the `Some` payload or returns `None`
+from the enclosing function, whose return type must be an `Option`.
+
+Postfix `e?` where `e: Result<T, E>` evaluates to the `Ok` payload or returns
+`Err(err)` from the enclosing function, whose return type must be
+`Result<_, E>` with the same `E`.
+
+At the top level of the main module or in a test block, `e?` unwraps `Some`
+and `Ok`. On `Err(err)`, `e?` fails execution with `err` (§10.3). On `None`,
+`e?` fails execution with an error of kind `none`. Using `?` at the top level
+of an imported module is an error.
+
+`?` is not permitted inside a lambda unless the lambda's return type is an
+appropriate `Option`/`Result`.
 
 ### 6.9 Blocks and control flow expressions
 
@@ -938,53 +915,56 @@ while let Some(line) = conn.read_line()? { ... }
 for x in iterable { ... }
 ```
 
-- A block's value is its final expression statement, or `()` if it ends with a
-  non-expression statement or is empty.
-- `if` without `else` has type `()`; its body's value is discarded. With `else`,
-  both branches must have the same type, unless the `if` is used as a statement.
-- `match` arms are separated by newlines or commas. Arms must be exhaustive
-  (§8.3). All arm bodies must have the same type unless the `match` is used as a
-  statement.
-- `loop` evaluates to the value given to `break` (or `()` if `break` has no
-  value). `while` and `for` evaluate to `()`; `break` in them takes no value.
-- `for` (and a comprehension `for` clause) iterates over a `Range`
-  (integers), `[T]` (elements), `[K: V]` (`(K, V)` tuples), `Set<T>`
-  (elements), `Channel<T>` (messages received live until it is closed and
-  empty), or any value whose type implements the prelude trait `Iterator<T>`
-  (§12.13), such as `Iter<T>`, calling `next()` before each iteration until it
-  returns `None`. The loop binding may be a pattern: `for (k, v) in map`. A
-  list loop visits indices `0..n`, `n` being the length when the loop starts,
-  reading each element when visited and stopping early if the list shrinks.
-  Maps and sets are iterated over a snapshot taken when the loop starts.
-- `break` and `continue` refer to the innermost loop. `return e` returns from
-  the innermost function or lambda. At the top level of the main module,
-  `return` ends the program (or the session input, §17.6) and may return a
-  value of any type; returning `Err(err)` fails with `err` (§10.3). At the
-  top level of an imported module it is an error. All three have type `never`.
-- **Labels.** A loop may be labeled by writing `@name` before `loop`, `while`
-  or `for`, on the same line; `break @name` and `continue @name` then refer to
-  that loop from anywhere in its body, including nested loops:
+A block's value is its final expression statement, or `()` if it ends with a
+non-expression statement or is empty.
 
-  ```sand
-  @rows for row in grid {
-      for x in row {
-          if x < 0 { break @rows }       // leaves both loops
-          if x == 0 { continue @rows }   // next row
-      }
-  }
-  let found = @search loop {
-      for p in candidates() {
-          if good(p) { break @search p }
-      }
-  }
-  ```
+`if` without `else` has type `()`; its body's value is discarded. With `else`,
+both branches must have the same type, unless the `if` is used as a statement.
 
-  `break @name value` is allowed only when `@name` labels a `loop`;
-  `continue @name` may target any loop (on `loop`, it restarts the body).
-  Labels name loops of the current function or lambda only: `break` and
-  `continue` cannot leave a lambda or local function. An unknown label, or one
-  already used by an enclosing loop of the same function, is a compile error.
-  Labels are not values. The label must directly follow the `@`.
+`match` arms are separated by newlines or commas. Arms must be exhaustive
+(§8.3). All arm bodies must have the same type unless the `match` is used as a
+statement.
+
+`loop` evaluates to the value given to `break` (or `()` if `break` has no
+value). `while` and `for` evaluate to `()`; `break` in them takes no value.
+
+`for` iterates over any value whose type implements the `Iterator<T>` trait (§12.13),
+calling `next()` before each iteration until it returns `None`. A for loop binding
+may be a pattern: `for (k, v) in map`.
+
+A list loop visits indices `0..n`, where `n` is the length when the loop starts.
+It visits each element once and stops early if the list shrinks during iteration.
+Maps and sets are iterated over a snapshot taken when the loop starts.
+
+`break` and `continue` refer to the innermost loop. `return e` returns from
+the innermost function or lambda.
+
+At the top level of the main module, `return` ends the program and may return a
+value of any type; returning `Err(err)` fails with `err` (§10.3). At the top level
+of an imported module it is an error. All three have type `never`.
+
+#### Labels
+
+A loop may be labeled by writing `@name` before `loop`, `while`
+or `for`, on the same line; `break @name` and `continue @name` then refer to
+that loop from anywhere in its body, including nested loops:
+
+```sand
+@rows for row in grid {
+    for x in row {
+        if x < 0 { break @rows }       // leaves both loops
+        if x == 0 { continue @rows }   // next row
+    }
+}
+let found = @search loop {
+    for p in candidates() {
+        if good(p) { break @search p }
+    }
+}
+```
+
+Loop labels must be declared locally: `break` and `continue` cannot exit a lambda or local function.
+An unknown label, or one already used by an enclosing loop of the same function, is a compile error.
 
 ### 6.10 Lambdas
 
@@ -1006,8 +986,7 @@ mutation inside the lambda is visible outside and vice versa.
 
 ### 6.11 String interpolation
 
-`"\(a) + \(b) = \(a + b)"` builds a string from the display forms (§10.9) of the
-embedded expressions, which may have any type. Lexical rules: §2.5.
+`"\(a) + \(b) = \(a + b)"` builds a string from the display forms (§10.9) of the embedded expressions.
 
 ### 6.12 `spawn`
 
@@ -1016,9 +995,10 @@ embedded expressions, which may have any type. Lexical rules: §2.5.
 
 ### 6.13 Macros
 
-A macro call is written `name!(argument)`, always with parentheses. The only
-macro is `json!`, which builds a `json.Json` value (§13.7) from JSON syntax
-whose values can be Sand expressions:
+A macro call is written `name!(argument)`, always with parentheses.
+
+The only macro today is `json!`, which builds a `json.Json` value (§13.7) from
+JSON literals and Sand expressions:
 
 ```sand
 let body = json!({
@@ -1028,7 +1008,7 @@ let body = json!({
 })
 ```
 
-The argument is a **data value**, one of:
+The argument is one of:
 
 - an object, `{k: v, ...}` or `[k: v, ...]`, where each key `k` is an
   expression of type `str` and each value `v` is a data value. `{}` and `[:]`
@@ -1042,8 +1022,6 @@ The argument is a **data value**, one of:
 import; a binding named `json` does not change it. Newlines inside a data
 value do not end statements, and a trailing comma is allowed. The formatter
 writes every object with braces.
-
----
 
 ## 7. Statements
 
@@ -1063,17 +1041,20 @@ defer conn.close()            // run when the enclosing block exits (§7.1)
 use f = fs.open(path)?        // close `f` when the enclosing block exits (§7.2)
 ```
 
-- Rebinding a name with `let` in the same block shadows it.
-- Only `var` variables, `var` fields, list elements and map entries can be
-  assigned. Assigning a `let` binding or non-`var` field is a compile error.
-- `let ... else` requires the `else` block to have type `never`.
-- An expression statement whose value has type `Result<_, _>` and is unused
-  is reported by the linter (`unused-result`).
+Rebinding a name with `let` in the same block shadows it.
+
+Only `var` variables, `var` fields, list elements and map entries can be
+assigned. Assigning a `let` binding or non-`var` field is a compile error.
+
+`let ... else` requires the `else` block to have type `never`.
+
+An expression statement whose value has type `Result<_, _>` and is unused
+is reported by the linter (`unused-result`).
 
 ### 7.1 `defer`
 
 `defer e` (usually `defer { ... }` or `defer x.close()`) schedules `e` to run
-when the **enclosing block** exits, however it exits:
+when the enclosing block exits, however it exits:
 
 ```sand
 fn copy(src: str, host: str, port: int) -> Result<()> {
@@ -1086,72 +1067,69 @@ fn copy(src: str, host: str, port: int) -> Result<()> {
 }
 ```
 
-- **When.** The deferred expressions of a block run when control leaves the
-  block: by falling off its end (after its value is computed), by `break` or
-  `continue` (labeled or not) to a loop outside the block, by `return`, by
-  `?` propagating an error or `None`, or through the diverging `else` of
-  `let ... else`. A `defer` statement that was not reached does not run; a
-  `defer` in a loop body runs at the end of each iteration that reached it.
-  The blocks of function bodies, lambdas, `spawn` expressions, `test` blocks
-  and the top level of a module are blocks too: top-level defers run when the
-  module's top-level code finishes (or when a top-level `?` or `return`
-  stops the program).
-- **Order.** Defers run in reverse order of declaration (last first); when an
-  exit leaves several blocks, the innermost block's defers run first.
-- **Values.** A block's value, a `break` value and a `return` value are
-  computed first, then the defers run, then control leaves: `return f()`
-  calls `f()` before the defers (so it is not a tail call), and a defer that
-  assigns a variable does not change a value already computed from it.
-- **Variables.** The deferred expression sees the variables in scope at the
-  `defer` statement and reads them when it runs (not when it is declared):
-  `var s = 1; defer print(s); s = 2` prints `2`.
-- **Restrictions.** The deferred expression must have type `()` (write
-  `defer { let _ = f() }` to discard a value), and must not leave itself:
-  `return`, `?`, and `break`/`continue` to a loop outside it are compile
-  errors (loops, lambdas and `let ... else` inside it are fine). Deferred
-  code is compiled into every exit of its block, so a function with very many
-  defers and exits can exceed a compile-time limit (§15.3).
-- **Errors and cancellation.** An error (§10.3) or `exit` aborts the run
-  without running defers. A cancelled task (§11.2) runs its pending defers,
-  innermost first; cancelling it again has no effect. Deferred code may
-  suspend like any code.
+Deferred expressions in a block run when control leaves the block: by falling
+off its end (after its value is computed), by `break` or `continue` to a loop
+outside the block, by `return`, by `?` propagating an error or `None`, or through
+the diverging `else` of `let ... else`. A `defer` statement that was not reached
+does not run; a `defer` in a loop body runs at the end of each iteration that reached it.
+
+The blocks of function bodies, lambdas, `spawn` expressions, `test` blocks
+and the top level of a module are blocks too.
+
+Top-level defers run when the module's top-level code finishes, or when a top-level
+`?` or `return` stops the program.
+
+Defers run in reverse order of declaration (last first); when an
+exit leaves several blocks, the innermost block's defers run first.
+
+A block's value, a `break` value and a `return` value are
+computed first, then the defers run, then control leaves: `return f()`
+calls `f()` before the defers, and a defer that assigns a variable does
+not change a value already computed from it.
+
+The deferred expression sees variables in scope where the `defer` statement
+is declared and reads them when it runs. For example, `var s = 1; defer print(s); s = 2`
+prints `2`.
+
+A deferred expression must have type `()` and must not leave itself:
+`return`, `?`, and `break`/`continue` to a loop outside it are compile
+errors. Deferred code is compiled into every exit of its block, so a function with many
+defers and exits may exceed a compile-time limit (§15.3).
+
+An error (§10.3) or `exit` aborts the run without running defers.
+A cancelled task (§11.2) runs its pending defers, innermost first;
+cancelling it again has no effect. Deferred code may suspend.
 
 ### 7.2 `use`
 
-A **resource** is a value whose type implements the prelude trait `Close`
-(§12.14), such as an open file, a connection or an HTTP body. `use` binds one
-and closes it when the enclosing block exits:
+A **resource** is a value whose type implements the prelude trait `Close` (§12.14).
+Files and network connections are both resources. To automatically close a resource
+when it leaves scope, bind it with `use`:
 
 ```sand
 fn first_line(path: str) -> Result<str?> {
     use f = fs.open(path)?
-    f.read_line()                       // f is closed after this, on every path
+    f.read_line() // f closes after this
 }
 ```
 
-- `use name = e` (or `use name: T = e`) binds `e` immutably like `let` and
-  closes it as `defer Close.close(name)` would (§7.1): on every exit, last
-  declared first, interleaved with the block's defers. `use _ = e` keeps the
-  value only to close it (`use _ = lock.acquire()`).
-- The type of `e` must implement `Close` (a compile error otherwise); a
-  `Result` of one needs `?` first. The trait's method is called even if the
-  type also has an inherent `close`.
-- A `use` binding is a name or `_`, not a pattern, and is local to its block;
-  at a module's top level it is closed when the top-level code finishes. In a
-  session (§17.6), a top-level `use` binds a session variable, as `let` does:
-  later inputs may read it, and no input closes it (it is closed like a
-  resource that no `use` closes, below).
-- A copy of the value kept beyond the block (stored, returned, captured by a
-  task) refers to a closed resource, whose operations fail with kind `"closed"`. The
-  linter reports such escapes (`resource-escapes`, §17.2) and resources
-  never closed (`unclosed-resource`).
+`use name = e` (or `use name: T = e`) binds `e` immutably like `let` and
+closes it as `defer Close.close(name)` would (§7.1): on every exit, last
+declared first, interleaved with the block's defers. `use _ = e` keeps the
+value only to close it (`use _ = lock.acquire()`).
 
-A resource that no `use` closes is still closed at the latest when the
-garbage collector finds it unreachable (§10.8).
+A `use` binding is a name or `_` and is local to its block. If `use` is bound
+at a module's top level it is closed when the top-level code finishes executing.
+In a session (§17.6), a top-level `use` binds a session variable, as `let`.
+Later inputs may read it and it is closed like a resource that is never closed.
 
----
+If a `use` value is copied and referenced beyond the block close, operations fail
+with kind `"closed"`. The linter reports escapes and unclosed resources.
 
-## 8. Patterns
+Even without `use`, an unclosed resource may closed manually, or at latest is closed
+automatically when it is unreferenced during garbage collection (§10.8).
+
+## 8. Pattern Matching
 
 ### 8.1 Syntax
 
@@ -1173,31 +1151,31 @@ p1 | p2               alternatives (must bind the same names with the same types
 ```
 
 A binding pattern `name` that coincides with a payload-less variant of the
-scrutinee's enum type refers to that variant (`Empty` for a `Shape`, §4.3). A
-capitalized name that is not such a variant is a binding, which the linter
-reports as a likely mistyped variant (`variant-like-binding`, §17.2). In a
-struct or variant pattern, positional sub-patterns match fields in declaration
+scrutinee's enum type refers to that variant (`Empty` for a `Shape`, §4.3).
+
+In a struct or variant pattern, positional sub-patterns match fields in declaration
 order, followed by named sub-patterns. The pattern must either match every
 field or end with `..`. Struct patterns match fields directly even if the
 struct declares `init`. A pattern binds each name at most once.
 
+A capitalized name that is not an enum variant is considered a binding. The linter reports
+any capitalized binding as a potential typo. (§17.2).
+
 ### 8.2 Guards
 
-`pattern if cond => body` matches only when `cond` is true. Guards do not count
+`pattern if cond => body` matches only if `cond` is true. Guards do not count
 towards exhaustiveness.
 
 ### 8.3 Exhaustiveness and reachability
 
-A `match` must be exhaustive; otherwise it is a compile error listing a
-missing pattern. Types with infinitely many values (`int`, `str`, lists, ...)
-need a wildcard or binding arm (for lists, `[]` plus `[_, .._]` suffices). An
+A `match` must be exhaustive or else it fails as a compile error.
+
+Types with infinitely many values require a wildcard or binding arm. An
 arm covered by earlier arms is a compile error (`unreachable pattern`). A
 `match`, or refutability check of a `let`, `for` or comprehension pattern,
 whose check exceeds a fixed amount of work (e.g. or-patterns in many tuple
 positions) is rejected with `pattern too complex to check for exhaustiveness`
 (§15.3).
-
----
 
 ## 9. Type checking and inference
 
@@ -1230,8 +1208,6 @@ needed`).
   doubling (`let b = (a, a)`, or similar aliases or generic calls), are
   rejected with `type too large`. §15.3 lists the other compile-time limits.
 
----
-
 ## 10. Runtime semantics
 
 ### 10.1 Values
@@ -1251,34 +1227,35 @@ then the defaults of the remaining fields in declaration order. For assignment
 
 ### 10.3 Errors
 
-A run **fails with an error** when the script cannot go on. The run ends (all
-tasks), or in a session (§16.6, §17.6) the input does, with a runtime error:
-`<kind>: <message>`, the display form of an `Error` (§5.4), and a stack trace
-of `file:line` entries. Tools report it as `error: <kind>: <message>`, leaving
-out a kind of `error`. A run fails with an error from:
+A run fails with an error if execution cannot continue. All tasks in the run end.
+In a REPL session, the input ends with runtime error `<kind>: <message>`, the
+display form of an `Error` (§5.4), and a stack trace of `file:line` entries.
+Tools report it as `error: <kind>: <message>`, leaving out a kind of `error`.
+A run fails with an error from:
 
-- a top-level `?` on `Err(err)` (§6.8) or a top-level `return` of `Err(err)`
-  (§6.9): the error `err`;
-- `fail(message, kind)` (§12.1), whose kind defaults to `"error"`;
-- faults detected while the script runs, with these kinds: `bounds` (an index,
-  slice or byte out of range), `not_found` (a missing map key), `overflow`
-  (integer or duration overflow), `invalid` (division by zero, a negative
-  exponent, an argument out of its domain, a value JSON cannot encode),
-  `limit` (stack overflow, nesting beyond 2,000 levels while printing,
-  comparing or hashing a value, too many tasks), `unwrap` (`unwrap`/`expect`
-  on `None`/`Err`), `assert` (a failed `assert`), `todo` (`todo()`),
-  `cancelled` (waiting on a cancelled task), `deadlock` and `uninitialized`
-  (a global used before initialization), and `permission_denied` (a denied
-  `print`).
+- a top-level `?` or a top-level `return Err(...)`
+- `fail(message, kind)` (§12.1)
+- a fault detected during the run the script
 
-Scripts cannot catch errors, and failing does not run deferred expressions
+  - `bounds` on an out-of-range index, slice or byte
+  - `not_found` on a missing map key
+  - `overflow` on integer or duration overflow
+  - `invalid` on division by zero, a negative exponent, an argument out of its domain, a value JSON cannot encode
+  - `limit` on stack overflow, nesting beyond 2,000 levels while printing, comparing or hashing a value, too many tasks
+  - `unwrap` on `unwrap`/`expect` on `None`/`Err`
+  - `assert` on a failed `assert`
+  - `todo` on `todo()`
+  - `cancelled` if waiting on a cancelled task
+  - `deadlock` and `uninitialized` on a global used before initialization
+  - `permission_denied` on sandbox permission denial
+
+Scripts cannot catch faults, and failing does not run deferred expressions
 (§7.1), except those of the top level for a top-level `?` or `return`; the
 test runner isolates errors per test.
 
-An **internal error** is a bug: an invariant of the engine broke, or a Rust
-panic was caught in the engine or in a host native. It also ends the run, and
-tools report it as `internal error: <message>`; a session in which one happens
-is reset (§16.6).
+An **internal error** is a bug. It occurs if a Sand engine invariant is broken,
+or else if a Rust panic was caught in the engine or in a host native.
+Any internal error ends a run and is reported as `internal error: <message>`.
 
 ### 10.4 Exit
 
@@ -1287,11 +1264,10 @@ code. It does not terminate the host process.
 
 ### 10.5 Functions and closures
 
-Calls are by value (references for reference types). Recursion depth is bounded
-by the `max_call_depth` limit (default 10,000); exceeding it fails with
-`stack overflow`. Tail calls (`return f(x)` or a call in tail position of the
-function body) do not consume stack depth, except while deferred expressions
-(§7.1) are pending, since they run after the call returns.
+Function calls are by value. Recursion depth is bounded by the `max_call_depth` limit,
+with default 10,000. Exceeding recursion depth fails with `stack overflow`. Tail calls
+do not consume stack depth, except while deferred expressions (§7.1) are pending,
+since they run after the call returns.
 
 ### 10.6 Maps and sets
 
@@ -1314,42 +1290,36 @@ system's open-file limit is reached.
 
 ### 10.9 Display and debug forms
 
-`to_str()` (display form; used by `print` and interpolation) and `debug()`
-(debug form; used inside composite values) are:
+Each Sand type can be formatted for display or debug. The display form is created with `.to_str()`.
+The debug form is created with `.debug()`. Examples:
 
-| Value                               | Display                             | Debug                                                                           |
-| ----------------------------------- | ----------------------------------- | ------------------------------------------------------------------------------- |
-| `42`                                | `42`                                | `42`                                                                            |
-| `1.0`, `0.1`, `1e100`, `nan`, `inf` | `1.0`, `0.1`, `1e100`, `nan`, `inf` | same                                                                            |
-| `true`                              | `true`                              | `true`                                                                          |
-| `"hi"`                              | `hi`                                | `"hi"` (escaped with `\"`, `\\`, `\n`, `\r`, `\t`, `\u{..}` for other controls) |
-| `b"a\x00"`                          | `b"a\x00"`                          | same                                                                            |
-| `1500ms`                            | `1.5s`                              | same                                                                            |
-| `()`                                | `()`                                | `()`                                                                            |
-| `[1, 2]`                            | `[1, 2]`                            | same                                                                            |
-| `["a": 1]`                          | `["a": 1]`                          | same                                                                            |
-| `[:]`                               | `[:]`                               | same                                                                            |
-| `Set` of 1, 2                       | `Set([1, 2])`                       | same                                                                            |
-| `(1, "a")`                          | `(1, "a")`                          | same                                                                            |
-| `Some(1)`                           | `Some(1)`                           | same                                                                            |
-| `None`                              | `None`                              | same                                                                            |
-| `Point(x: 1.0)`                     | `Point(x: 1.0)`                     | same                                                                            |
-| `Circle(2.0)`                       | `Circle(2.0)`                       | same                                                                            |
-| `Shape.Rect(w: 1.0, h: 2.0)`        | `Rect(w: 1.0, h: 2.0)`              | same                                                                            |
-| `Error`                             | `<kind>: <message>`                 | `Error(message: "...", kind: "...")`                                            |
-| function                            | `<fn name>`                         | same                                                                            |
-| task / channel                      | `<task>` / `<channel>`              | same                                                                            |
-| `0..3`                              | `0..3`                              | same                                                                            |
-| `time.PlainDate(2024, 2, 29)?`      | `2024-02-29`                        | same                                                                            |
-| other opaque value                  | `<Regex>`                           | same                                                                            |
+| Value                               | Display                             | Debug                                |
+| ----------------------------------- | ----------------------------------- | ------------------------------------ |
+| `42`                                | `42`                                | same                                 |
+| `1.0`, `0.1`, `1e100`, `nan`, `inf` | `1.0`, `0.1`, `1e100`, `nan`, `inf` | same                                 |
+| `true`                              | `true`                              | same                                 |
+| `"hi"`                              | `hi`                                | `"hi"`                               |
+| `b"a\x00"`                          | `b"a\x00"`                          | same                                 |
+| `1500ms`                            | `1.5s`                              | same                                 |
+| `()`                                | `()`                                | same                                 |
+| `[1, 2]`                            | `[1, 2]`                            | same                                 |
+| `["a": 1]`                          | `["a": 1]`                          | same                                 |
+| `[:]`                               | `[:]`                               | same                                 |
+| `Set` of 1, 2                       | `Set([1, 2])`                       | same                                 |
+| `(1, "a")`                          | `(1, "a")`                          | same                                 |
+| `Some(1)`                           | `Some(1)`                           | same                                 |
+| `None`                              | `None`                              | same                                 |
+| `Point(x: 1.0)`                     | `Point(x: 1.0)`                     | same                                 |
+| `Circle(2.0)`                       | `Circle(2.0)`                       | same                                 |
+| `Shape.Rect(w: 1.0, h: 2.0)`        | `Rect(w: 1.0, h: 2.0)`              | same                                 |
+| `Error`                             | `<kind>: <message>`                 | `Error(message: "...", kind: "...")` |
+| function                            | `<fn name>`                         | same                                 |
+| task / channel                      | `<task>` / `<channel>`              | same                                 |
+| `0..3`                              | `0..3`                              | same                                 |
+| `time.PlainDate(2024, 2, 29)?`      | `2024-02-29`                        | same                                 |
+| other opaque value                  | `<Regex>`                           | same                                 |
 
-Composite values print their components in debug form. The debug form of a
-string is a string literal that evaluates to it. Durations display with
-the largest unit among `d`, `h`, `m`, `s`, `ms`, `us`, `ns` that keeps the value
-`>= 1`, using the shortest float representation of the value in that unit:
-`90s` displays as `1.5m`, `36h` as `1.5d`, `1500ms` as `1.5s`, `0ns` as `0s`.
-
-### 10.10 Format specifications
+### 10.10 Interpolation Format Specifications
 
 `\(expr:spec)` with `spec = [[fill]align][sign][0][width][.precision][type]`:
 
@@ -1363,25 +1333,29 @@ the largest unit among `d`, `h`, `m`, `s`, `ms`, `us`, `ns` that keeps the value
 - `type`: `x` / `X` hex, `b` binary, `o` octal (ints only); `e` scientific
   (floats); `?` debug form.
 
-Examples: `"\(3.14159:.2)"` → `3.14`; `"\(42:>5)"` → `   42`; `"\(7:03)"` →
-`007`; `"\(255:x)"` → `ff`; `"\("ab":*^6)"` → `**ab**`; `"\("hi":?)"` → `"hi"`.
+Examples:
 
----
+- `"\(3.14159:.2)"` → `3.14`
+- `"\(42:>5)"` → `   42`
+- `"\(7:03)"` → `007`
+- `"\(255:x)"` → `ff`
+- `"\("ab":*^6)"` → `**ab**`
+- `"\("hi":?)"` → `"hi"`.
 
 ## 11. Concurrency and asynchronous I/O
 
 ### 11.1 Model
 
-An engine runs one task at a time on one OS thread. All I/O is asynchronous:
+Each engine runs one task at a time on one OS thread. All I/O is asynchronous:
 when a task performs I/O it is suspended and other ready tasks run. There is no
 `async`/`await` coloring — any function may suspend. Tasks are scheduled
-cooperatively with preemption at instruction-count boundaries, so a busy loop in
-one task does not starve others.
+cooperatively with preemption at instruction-count boundaries to prevent
+a busy loop in one task from starving others.
 
-When the main module's top-level code finishes, the run ends: unfinished tasks
+When the main module's top-level code finishes, the run ends. Unfinished tasks
 are cancelled, and their pending defers run until they finish or wait for I/O,
-a timer or another task. If every task is blocked and no I/O or timer is pending, the run
-fails with `deadlock: all tasks are blocked`.
+a timer or another task. If every task is blocked and no I/O or timer is pending,
+the run fails with `deadlock: all tasks are blocked`.
 
 ### 11.2 Tasks
 
@@ -1392,14 +1366,14 @@ t.is_done()                       // bool
 t.cancel()                        // cancels if still running
 ```
 
-- `spawn e` creates a task which starts running at the next scheduling point.
+- `spawn e` creates a task that starts at the next scheduling point.
 - `t.wait()` returns the task's result. Waiting on a cancelled task fails
   with `task cancelled`. Waiting on a task more than once returns the same
   value.
 - Cancelling a task stops it at its next suspension point or instruction
-  boundary and drops its pending I/O; it is done at once (waiting on it
-  fails) and then runs its pending deferred expressions (§7.1). A deferred
-  expression interrupted by the cancellation does not resume.
+  boundary and drops its pending I/O. Cancellation is immediate and runs
+  all pending `defer` blocks (§7.1). A deferred expression interrupted by
+  the cancellation does not resume.
 - An error in any task aborts the run (§10.3).
 
 ### 11.3 The `task` module (prelude-visible as `task`)
@@ -1415,8 +1389,8 @@ t.cancel()                        // cancels if still running
 ### 11.4 Channels
 
 `Channel(capacity: int = 0)` creates a `Channel<T>` that holds at most
-`capacity` queued messages. If `capacity` is `0`, the channel is unbounded. A
-negative capacity fails with kind `"invalid"`.
+`capacity` queued messages. If `capacity` is `0`, the channel is unbounded.
+A negative capacity fails as `"invalid"`.
 
 | Method                   | Description                                                                  |
 | ------------------------ | ---------------------------------------------------------------------------- |
@@ -1428,30 +1402,27 @@ negative capacity fails with kind `"invalid"`.
 | `ch.is_closed() -> bool` |                                                                              |
 | `ch.iter() -> Iter<T>`   | lazy iterator receiving messages until the channel is closed and empty       |
 
-### 11.5 Prompts suspend everything
+### 11.5 Prompts suspend execution
 
-While the engine waits for an interactive policy decision (§14.3), no task
-runs and no timers fire for scripts; the decision is applied before execution
-resumes. (The host can still interrupt the run meanwhile, §15.1.)
-
----
+All tasks pause while the engine waits on an interactive policy prompt (§14.3).
+The decision must be applied before execution resumes.
 
 ## 12. The prelude
 
-Always in scope without import.
+Prelude items are always in scope.
 
 ### 12.1 Functions
 
-| Function                                              | Description                               |
-| ----------------------------------------------------- | ----------------------------------------- |
-| `print<T>(x: T)`                                      | write display form + `"\n"` to stdout     |
-| `eprint<T>(x: T)`                                     | write display form + `"\n"` to stderr     |
-| `fail(message: str, kind: str = "error") -> never`    | fail with an error (§10.3)                |
-| `assert(cond: bool, msg: str = "condition is false")` | fail with `msg` (kind `assert`) if false  |
-| `todo() -> never`                                     | fail (kind `todo`): `not yet implemented` |
-| `exit(code: int) -> never`                            | stop the run (§10.4)                      |
-| `help(x)`, `help()`                                   | print documentation (§12.15)              |
-| `members(x) -> [str]`, `members() -> [str]`           | list member names (§12.15)                |
+| Function                                              | Description                            |
+| ----------------------------------------------------- | -------------------------------------- |
+| `print<T>(x: T)`                                      | write display form + `"\n"` to stdout  |
+| `eprint<T>(x: T)`                                     | write display form + `"\n"` to stderr  |
+| `fail(message: str, kind: str = "error") -> never`    | fail with an error (§10.3)             |
+| `assert(cond: bool, msg: str = "condition is false")` | fail with `msg` if false               |
+| `todo() -> never`                                     | fail as `not yet implemented`          |
+| `exit(code: int) -> never`                            | stop the run with an exit code (§10.4) |
+| `help(x)`, `help()`                                   | print documentation (§12.15)           |
+| `members(x) -> [str]`, `members() -> [str]`           | list member names (§12.15)             |
 
 ### 12.2 Universal methods
 
@@ -1614,10 +1585,10 @@ Iter<int>` (§12.13).
 
 ### 12.13 Iterators
 
-The methods of lists, maps and ranges above are **eager**: `xs.map(f)` calls
-`f` on every element at once and builds a new list. **Lazy iterators** do the
-work only when elements are requested, one at a time, so pipelines build no
-intermediate lists, can stop early, and can draw from endless sources:
+Lists, map, and range methods above are eager. For example, `xs.map(f)` calls
+`f` on every element at once and builds a new list. Lazy iterators are different.
+They do work only when elements are requested, one at a time, so pipelines avoid
+building intermediate lists, stop early, and can iterate over endless sources:
 
 ```sand
 let firsts = Iter.count_from(1).map(n => n * n).filter(n => n % 3 == 0).take(3)
@@ -1625,7 +1596,7 @@ print(firsts.to_list())                       // [9, 36, 81]
 for (i, line) in text.lines().iter().enumerate().skip(1) { ... }
 ```
 
-**The trait.** The prelude declares
+The prelude declares an `Iterator` trait:
 
 ```sand
 pub trait Iterator<T> {
@@ -1651,12 +1622,10 @@ print(Countdown(n: 3).iter().map(x => x * 2).to_list())  // [6, 4, 2]
 fn total<I: Iterator<int>>(it: I) -> int { it.iter().sum() }
 ```
 
-**The `Iter<T>` struct** is the prelude's lazy iterator: `pub struct Iter<T>
-{ next: fn() -> T? }`, a function producing the next element, which
-implements `Iterator<T>` (its `iter()` returns the iterator itself). It is
-obtained with `iter()` from lists, maps (`(key, value)` pairs), sets, ranges,
-channels and any `Iterator`, with `chars_iter()` from strings, or from these
-static sources:
+The prelude declares a lazy `Iter<T>` struct that implements `Iterator<T>`.
+It is obtained with `iter()` from lists, maps (`(key, value)` pairs), sets,
+ranges, channels and any `Iterator`, with `chars_iter()` from strings, or from
+static methods:
 
 | Source                                                    | Elements                                                          |
 | --------------------------------------------------------- | ----------------------------------------------------------------- |
@@ -1667,7 +1636,7 @@ static sources:
 | `Iter.count_from(start: int, step: int = 1) -> Iter<int>` | `start`, `start + step`, ... forever                              |
 | `Iter.successors(first: T?, f: fn(T) -> T?)`              | `first`, then `f` of the previous element until `None`            |
 
-**Adapters** return a new `Iter` and do no work until it is consumed:
+Adapters return a new `Iter` and do no work until it is consumed:
 `map<U>(f: fn(T) -> U)`, `filter(f: fn(T) -> bool)`, `filter_map<U>(f: fn(T) ->
 U?)`, `flat_map<U>(f: fn(T) -> Iter<U>)`, `enumerate() -> Iter<(int, T)>`,
 `zip<U>(other: Iter<U>) -> Iter<(T, U)>` (ends with the shorter), `chain(other:
@@ -1676,7 +1645,7 @@ Iter<T>)`, `take(n: int)` (pulls at most `n` elements from its source),
 element, then every `n`-th; fails if `n <= 0`), `inspect(f: fn(T))` (calls `f`
 on each element as it passes).
 
-**Consumers** pull elements: `to_list() -> [T]`, `to_set() -> Set<T>` (`T:
+Consumers pull elements from an iterator: `to_list() -> [T]`, `to_set() -> Set<T>` (`T:
 Hash`), `to_map() -> [K: V]` (for `Iter<(K, V)>`, `K: Hash`; a repeated key
 keeps its last value), `join(sep: str = "") -> str` (for `Iter<str>`),
 `each(f: fn(T))`, `fold<A>(init: A, f: fn(A, T) -> A) -> A`, `reduce(f: fn(T, T)
@@ -1688,33 +1657,38 @@ and `all(f)` (stop at the first decisive element), `find(f) -> T?`,
 T?` (`T: Ord`; the first minimal/maximal), `min_by`/`max_by<K: Ord>(key: fn(T)
 -> K) -> T?`. A `for` loop over an `Iter` is a consumer too.
 
-**Semantics.**
+#### Iterator Semantics
 
-- **Laziness.** Creating an iterator or applying an adapter calls no
-  function; each element is produced when a consumer asks for it, passing
-  through the whole pipeline before the next one is requested. Adapters
-  request only what they need: `Iter.repeat(1).take(3).sum()` terminates.
-- **Single pass.** An iterator is a reference to its state: elements taken
-  by any consumer (or by `next()` on any copy of the iterator, including one
-  wrapped by an adapter) are gone. Consuming an exhausted iterator yields no
-  elements.
-- **Exhaustion.** List, range, map, set, string, and channel iterators
-  return `None` after exhaustion; `Iter.from_fn` iterators call
-  their function on each request. Adapters stop pulling from their source as
-  soon as it returns `None`.
-- **Mutation.** A list iterator behaves like a `for` loop (§6.9), with the
-  length taken when `iter()` is called. Map and set iterators work on a
-  snapshot of the entries taken by `iter()`, unaffected by later changes. A
-  channel iterator receives live, suspending while the channel is empty.
-- **Limits.** Iterators are ordinary Sand code: every element costs at least
-  one unit of fuel (§15.2), so endless iterators are bounded by the
-  instruction, time and memory limits (§15) like any loop.
-- **Cost** _(informative)_. A pipeline written as one expression where it is
-  consumed (`for x in xs.iter().map(f).filter(g) { ... }`,
-  `xs.iter().map(f).sum()`), like an eager method taking a function
-  (`xs.map(f)`), compiles to a single loop costing about as much as a
-  hand-written one. An iterator stored and consumed later costs about one
-  closure call per adapter and element.
+**Laziness.** Creating an iterator or applying an adapter calls no
+function; each element is produced when a consumer asks for it, passing
+through the whole pipeline before the next one is requested. Adapters
+request only what they need: `Iter.repeat(1).take(3).sum()` terminates.
+
+**Single pass.** An iterator is a reference to its state: elements taken
+by any consumer (or by `next()` on any copy of the iterator, including one
+wrapped by an adapter) are gone. Consuming an exhausted iterator yields no
+elements.
+
+**Exhaustion.** List, range, map, set, string, and channel iterators
+return `None` after exhaustion; `Iter.from_fn` iterators call
+their function on each request. Adapters stop pulling from their source as
+soon as it returns `None`.
+
+**Mutation.** A list iterator behaves like a `for` loop (§6.9), with the
+length taken when `iter()` is called. Map and set iterators work on a
+snapshot of the entries taken by `iter()`, unaffected by later changes. A
+channel iterator receives live, suspending while the channel is empty.
+
+**Limits.** Iterators are ordinary Sand code: every element costs at least
+one unit of fuel (§15.2), so endless iterators are bounded by the
+instruction, time and memory limits (§15) like any loop.
+
+**Cost.** A pipeline written as one expression where it is
+consumed (`for x in xs.iter().map(f).filter(g) { ... }`,
+`xs.iter().map(f).sum()`), like an eager method taking a function
+(`xs.map(f)`), compiles to a single loop with similar performance as a
+hand-written one. An iterator that is stored and consumed later costs
+about one closure call per adapter and element.
 
 ### 12.14 `Close`
 
@@ -1735,39 +1709,32 @@ resource again does nothing; its other operations fail with kind
 
 ### 12.15 `help` and `members`
 
-The checker evaluates calls of `help` and `members`, whose argument may
-be what no other function takes:
+The checker evaluates calls of `help` and `members` to give the caller interactive help:
 
-- a module, imported or not (`help(json)`);
-- a type, trait or type parameter (`help(str)`, `help([int])`,
-  `help(json.Json)`, `help(Close)`, `help(T)`);
-- a function, method, trait method, field, variant or variable
-  (`help(print)`, `help(str.split)`, `help(xs.map)`, `help(p.x)`,
-  `help(Some)`, `help(math.pi)`, `help(xs)`);
-- a string literal that identifies any of those targets (`help("json.Json.get")`);
-  its first segment may be written as a type (`"List.map"`, `"[T].map"`,
-  `"Set<T>.add"`, `"int?.unwrap"`);
-- any other expression, which stands for its type and is not evaluated
-  (`help(f())`, `help([1, 2])`).
+- a module, whether imported or not: `help(json)`
+- a type, trait or type parameter: `help(json.Json)`
+- a function, method, trait method, field, variant or variable: `help(json.Json.get)`
+- a string literal that identifies any of those targets: `help("json.Json.get")`
+- a non-evaluated expression: `help([1, 2])`
 
 `help(x)` prints the documentation of `x` to standard output, as `print`
-would: its declaration and doc comment (for a variable, its declared or
-inferred type), and for a module its items, for a type its variants,
-fields, methods and the traits it implements, for a trait its methods and
-implementing types, for any other expression its type and that type's
-documentation. Lists of items show the first sentence of each
-doc comment. `help()` prints an overview of the prelude and the modules.
+would. It contains `x`'s declaration and doc comment, and for a module its items,
+for a type its variants, fields, methods and the traits it implements, for a trait
+its methods and implementing types, for any other expression its type and that type's
+documentation.
 
-`members(x)` returns the names that may follow `x.`, sorted: a module's
-public items, or the variants, fields and methods (including those of
-visible trait impls, `to_str` and `debug`) of a type or of an
+Calling `help` on a list of items shows the first sentence of each doc comment.
+
+`help()` prints an overview of the prelude and the modules.
+
+`members(x)` returns the list names in `x.`, sorted: a module's
+public items, or the variants, fields and methods of a type or of an
 expression's type. `members()` returns the names in scope, excluding the
-prelude's.
+prelude.
 
-Neither can be used as a function value. Defining `help` or `members`
-shadows them as usual.
+Neither `help` nor `members` can be used as a function value.
 
----
+A script may define an item named `help` or `members`, shadowing the built-in functions.
 
 ## 13. Standard library
 
@@ -2366,8 +2333,6 @@ https 443, ws 80, wss 443, ftp 21).
 forms; returns lower-case hyphenated), `is_valid(s: str) -> bool`,
 `version(s: str) -> int?`.
 
----
-
 ## 14. Sandbox and policy
 
 ### 14.1 Principles
@@ -2672,8 +2637,6 @@ hostname rule also overrides the IP address rule during stage 2 (§14.6).
 `deny` rule line for a promptable `Capability`, such as `allow read /data/a.txt`
 or `deny http tls GET example.com:443/a`.
 
----
-
 ## 15. Resource limits
 
 ### 15.1 Limits
@@ -2820,8 +2783,6 @@ next: P<[T]>? }` cannot be described.
   several hundred bytes per source byte, bounded by `max_source_bytes`,
   which hosts compiling untrusted code under a small memory limit should
   lower accordingly.
-
----
 
 ## 16. Embedding API (Rust)
 
@@ -3187,8 +3148,6 @@ automatically resets itself, appends `" (the session was reset)"` from
 to `true` until the next call while preserving remembered `"always"` prompt
 decisions.
 
----
-
 ## 17. Tooling
 
 All subcommands exit with code 2, after a message on standard error, for usage
@@ -3410,8 +3369,8 @@ between inputs.
   the error says so.
 - `test` blocks are checked but not run when entered.
 
-Lines are read until the input is complete: while brackets, a string or a
-block comment are open, or the last token cannot end a statement (a binary
+Lines are read until the input is complete: while brackets or a string
+are open, or the last token cannot end a statement (a binary
 operator, `=`, `,`, `.`, `:`, `=>`, `->`, `else`, ...), or the last line is
 a doc comment, the REPL prompts with `...` for more. A command line is
 always complete. Ctrl-C interrupts the input being run (the session
@@ -3454,8 +3413,6 @@ Commands (on a line of their own):
 | `:test`       | run the `test` blocks entered so far, against the current state (the last block of each name; effects persist), and print a report as `sand test` does |
 | `:reset`      | forget all inputs and start a fresh session ("always" answers are kept)                                                                                |
 | `:quit`, `:q` | end the session (exit code 0)                                                                                                                          |
-
----
 
 ## 18. Diagnostics
 
