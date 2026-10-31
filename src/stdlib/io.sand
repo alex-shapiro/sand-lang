@@ -1,9 +1,9 @@
 //! Traits for reading and writing byte streams, and standard stream handles.
 //!
-//! Reading from `stdin` requires the `Stdin` capability. If no input source is
+//! Reading from `stdin` requires the `stdin` capability. If no input source is
 //! configured, `stdin` reads return end-of-file immediately.
 //!
-//! Writing to `stdout` or `stderr` requires the `Stdout` or `Stderr` capability
+//! Writing to `stdout` or `stderr` requires the `stdout` or `stderr` capability
 //! and counts toward an engine's `max_output_bytes` limit.
 //!
 //! In the CLI, `stdout` uses a 64 KiB buffer that flushes when full, on
