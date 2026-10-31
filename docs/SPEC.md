@@ -986,8 +986,7 @@ mutation inside the lambda is visible outside and vice versa.
 
 ### 6.11 String interpolation
 
-`"\(a) + \(b) = \(a + b)"` builds a string from the display forms (§10.9) of the
-embedded expressions, which may have any type. Lexical rules: §2.5.
+`"\(a) + \(b) = \(a + b)"` builds a string from the display forms (§10.9) of the embedded expressions.
 
 ### 6.12 `spawn`
 
@@ -996,9 +995,10 @@ embedded expressions, which may have any type. Lexical rules: §2.5.
 
 ### 6.13 Macros
 
-A macro call is written `name!(argument)`, always with parentheses. The only
-macro is `json!`, which builds a `json.Json` value (§13.7) from JSON syntax
-whose values can be Sand expressions:
+A macro call is written `name!(argument)`, always with parentheses.
+
+The only macro today is `json!`, which builds a `json.Json` value (§13.7) from
+JSON literals and Sand expressions:
 
 ```sand
 let body = json!({
@@ -1008,7 +1008,7 @@ let body = json!({
 })
 ```
 
-The argument is a **data value**, one of:
+The argument is one of:
 
 - an object, `{k: v, ...}` or `[k: v, ...]`, where each key `k` is an
   expression of type `str` and each value `v` is a data value. `{}` and `[:]`
@@ -1041,17 +1041,20 @@ defer conn.close()            // run when the enclosing block exits (§7.1)
 use f = fs.open(path)?        // close `f` when the enclosing block exits (§7.2)
 ```
 
-- Rebinding a name with `let` in the same block shadows it.
-- Only `var` variables, `var` fields, list elements and map entries can be
-  assigned. Assigning a `let` binding or non-`var` field is a compile error.
-- `let ... else` requires the `else` block to have type `never`.
-- An expression statement whose value has type `Result<_, _>` and is unused
-  is reported by the linter (`unused-result`).
+Rebinding a name with `let` in the same block shadows it.
+
+Only `var` variables, `var` fields, list elements and map entries can be
+assigned. Assigning a `let` binding or non-`var` field is a compile error.
+
+`let ... else` requires the `else` block to have type `never`.
+
+An expression statement whose value has type `Result<_, _>` and is unused
+is reported by the linter (`unused-result`).
 
 ### 7.1 `defer`
 
 `defer e` (usually `defer { ... }` or `defer x.close()`) schedules `e` to run
-when the **enclosing block** exits, however it exits:
+when the enclosing block exits, however it exits:
 
 ```sand
 fn copy(src: str, host: str, port: int) -> Result<()> {
@@ -1064,35 +1067,38 @@ fn copy(src: str, host: str, port: int) -> Result<()> {
 }
 ```
 
-- **When.** The deferred expressions of a block run when control leaves the
-  block: by falling off its end (after its value is computed), by `break` or
-  `continue` (labeled or not) to a loop outside the block, by `return`, by
-  `?` propagating an error or `None`, or through the diverging `else` of
-  `let ... else`. A `defer` statement that was not reached does not run; a
-  `defer` in a loop body runs at the end of each iteration that reached it.
-  The blocks of function bodies, lambdas, `spawn` expressions, `test` blocks
-  and the top level of a module are blocks too: top-level defers run when the
-  module's top-level code finishes (or when a top-level `?` or `return`
-  stops the program).
-- **Order.** Defers run in reverse order of declaration (last first); when an
-  exit leaves several blocks, the innermost block's defers run first.
-- **Values.** A block's value, a `break` value and a `return` value are
-  computed first, then the defers run, then control leaves: `return f()`
-  calls `f()` before the defers (so it is not a tail call), and a defer that
-  assigns a variable does not change a value already computed from it.
-- **Variables.** The deferred expression sees the variables in scope at the
-  `defer` statement and reads them when it runs (not when it is declared):
-  `var s = 1; defer print(s); s = 2` prints `2`.
-- **Restrictions.** The deferred expression must have type `()` (write
-  `defer { let _ = f() }` to discard a value), and must not leave itself:
-  `return`, `?`, and `break`/`continue` to a loop outside it are compile
-  errors (loops, lambdas and `let ... else` inside it are fine). Deferred
-  code is compiled into every exit of its block, so a function with very many
-  defers and exits can exceed a compile-time limit (§15.3).
-- **Errors and cancellation.** An error (§10.3) or `exit` aborts the run
-  without running defers. A cancelled task (§11.2) runs its pending defers,
-  innermost first; cancelling it again has no effect. Deferred code may
-  suspend like any code.
+Deferred expressions in a block run when control leaves the block: by falling
+off its end (after its value is computed), by `break` or `continue` to a loop
+outside the block, by `return`, by `?` propagating an error or `None`, or through
+the diverging `else` of `let ... else`. A `defer` statement that was not reached
+does not run; a `defer` in a loop body runs at the end of each iteration that reached it.
+
+The blocks of function bodies, lambdas, `spawn` expressions, `test` blocks
+and the top level of a module are blocks too.
+
+Top-level defers run when the module's top-level code finishes, or when a top-level
+`?` or `return` stops the program.
+
+Defers run in reverse order of declaration (last first); when an
+exit leaves several blocks, the innermost block's defers run first.
+
+A block's value, a `break` value and a `return` value are
+computed first, then the defers run, then control leaves: `return f()`
+calls `f()` before the defers, and a defer that assigns a variable does
+not change a value already computed from it.
+
+The deferred expression sees variables in scope where the `defer` statement
+is declared and reads them when it runs. For example, `var s = 1; defer print(s); s = 2`
+prints `2`.
+
+A deferred expression must have type `()` and must not leave itself:
+`return`, `?`, and `break`/`continue` to a loop outside it are compile
+errors. Deferred code is compiled into every exit of its block, so a function with many
+defers and exits may exceed a compile-time limit (§15.3).
+
+An error (§10.3) or `exit` aborts the run without running defers.
+A cancelled task (§11.2) runs its pending defers, innermost first;
+cancelling it again has no effect. Deferred code may suspend.
 
 ### 7.2 `use`
 
