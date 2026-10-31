@@ -20,7 +20,7 @@ help(base64.encode)
 --- stdout
 fn base64.encode(data: bytes) -> str
 
-Encodes `data` using the standard Base64 alphabet (`+`, `/`) with `=` padding.
+Encodes data using the standard Base64 alphabet with `=` padding.
 
 === modules list their items with the first sentence of their docs
 help(uuid)
@@ -328,10 +328,8 @@ Functions:
              `false`.
     todo     Aborts execution with kind `"todo"` to mark unimplemented code.
     exit     Terminates the program immediately with exit status `code`.
-    help     Prints documentation for `x`, which may be a module, type, trait,
-             function, method, or string path.
-    members  Returns the sorted member names accessible after `x.`, or the names
-             in scope if called as `members()`.
+    help     Prints documentation for any item `x`.
+    members  Returns the sorted member names of `x`.
 
 Types:
     bool, int, float, str, bytes, duration, Range, List<T>, Map<K, V>, Set<T>,
@@ -341,16 +339,16 @@ Traits:
     Close, Eq, Ord, Hash, Encode, Decode, Num, Iterator<T>
 
 Modules (help(name) describes one):
-    base64      Base64 encoding and decoding (RFC 4648) with standard and
-                URL-safe alphabets.
+    base64      Base64 encoding and decoding with standard and URL-safe
+                alphabets.
     crypto      Cryptographic digests, HMAC authentication, and constant-time
                 comparison.
     env         Process environment variables and command-line arguments.
     fs          File system operations on files, directories, and paths.
     http        HTTP/1.1 client and server.
-    io          Byte streams (`Reader` and `Writer`) and the standard input,
-                output, and error handles.
-    json        JSON (RFC 8259) parsing, serialization, and typed conversion.
+    io          Traits for reading and writing byte streams, and standard stream
+                handles.
+    json        JSON encoding and decoding (RFC 8259).
     log         Structured leveled logging.
     math        Mathematical constants and functions on `float` and `int`.
     net         TCP listeners and client connections, including TLS.

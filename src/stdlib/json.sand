@@ -127,20 +127,20 @@ pub native fn parse(text: str) -> Result<Json>
 /// levels.
 pub native fn encode<T: Encode>(value: T, indent: int = 0) -> str
 
-/// Parses `text` and decodes it into a value of type `T`.
+/// Decodes JSON `text` into a value of type `T`.
 ///
 /// Unknown object fields are ignored, and duplicate keys overwrite earlier
-/// values. A `float` target accepts any JSON number, and an `int` target
-/// accepts a JSON integer or an integral float within `±2^53`. If a struct
-/// field is omitted from a JSON object, `decode` uses the field's declared
-/// default, or `None` if the field is an `Option` without a default. Constant
-/// defaults are filled inline during parsing, and non-constant default
+/// values.
+///
+/// If a struct field is omitted from a JSON object, `decode` uses the field's
+/// declared default, or `None` if the field is an `Option` without a default.
+/// Constant defaults are filled inline during parsing, and non-constant default
 /// expressions are evaluated in post-order after parsing succeeds.
 ///
 /// Fails with kind `"parse"` on invalid JSON syntax, missing required fields,
 /// or type mismatches, including the JSON path such as `$.items[2].price` in
-/// the error message. Fails with kind `"invalid"` if a target map key type is
-/// not supported by `encode`.
+/// the error message. Fails with kind `"invalid"` if a target map key type does
+/// not implement `Encode`.
 pub fn decode<reflect T: Decode>(text: str) -> Result<T> {
     let decoded: Decoded<T> = decode_raw(text)
     match decoded {
