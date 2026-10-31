@@ -164,7 +164,8 @@ impl TypeParams {
         Ok(Self { params, canonical_self })
     }
 
-    fn substitute(&self, krate: &Path, ty: &Type) -> Type {
+    /// Replaces `Self` and each type parameter in `ty` with `Param<N>`.
+    fn replace_self(&self, krate: &Path, ty: &Type) -> Type {
         struct Subst<'a>(&'a TypeParams, &'a Path);
         impl VisitMut for Subst<'_> {
             fn visit_type_mut(&mut self, t: &mut Type) {
@@ -330,7 +331,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
         let mut snames = Vec::new();
         for (k, f) in v.fields.iter().enumerate() {
             let (fname, fty) = (f.ident.as_ref(), &f.ty);
-            let canon = type_params.substitute(krate, fty);
+            let canonical = type_params.replace_self(krate, fty);
             let sname = match fname {
                 Some(n) => {
                     let lit = parse_variant_field_name(f, n)?;
@@ -343,7 +344,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
                 }
                 None => quote!(::std::option::Option::None),
             };
-            infos.push(quote! { #krate::native::VariantField { name: #sname, ty: <#canon as #krate::native::SandType>::sand_type } });
+            infos.push(quote! { #krate::native::VariantField { name: #sname, ty: <#canonical as #krate::native::SandType>::sand_type } });
             let bind = format_ident!("f{k}");
             let get = quote! { #krate::native::field_from_value::<#fty>(vm, #krate::native::variant_field(vm, v, #k)?, conv)? };
             match fname {
@@ -517,14 +518,14 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
         names.push(name.value());
         checks.push(assert_field_name(krate, &name, true));
         let (fty, doc) = (&f.ty, doc_expr(&f.attrs));
-        let canon = type_params.substitute(krate, fty);
+        let canonical = type_params.replace_self(krate, fty);
         let default = match default {
             None => quote!(::std::option::Option::None),
             Some(value) => {
-                let value = value.map_or_else(|| quote!(<#canon as ::std::default::Default>::default()), |e| quote!(#e));
+                let value = value.map_or_else(|| quote!(<#canonical as ::std::default::Default>::default()), |e| quote!(#e));
                 quote_spanned! {fty.span()=>
                     ::std::option::Option::Some(|| {
-                        let value: #canon = ::std::convert::Into::into(#value);
+                        let value: #canonical = ::std::convert::Into::into(#value);
                         #krate::native::IntoValue::to_const(&value)
                     })
                 }
@@ -536,7 +537,7 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
                 doc: #doc,
                 public: #public,
                 var: #var,
-                ty: <#canon as #krate::native::SandType>::sand_type,
+                ty: <#canonical as #krate::native::SandType>::sand_type,
                 default: #default,
             }
         });
