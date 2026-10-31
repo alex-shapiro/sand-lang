@@ -2136,8 +2136,13 @@ are constructed during decoding; non-constant defaults (such as `id: str = uuid.
 evaluated after the entire input is parsed, inner structs before outer structs
 and fields in declaration order. Any other missing field or type mismatch fails
 with kind `"parse"` and the JSON path of the error (such as `$.items[2].name:
-expected str`, with type names truncated at 256 bytes with `…`). Parsing is
-limited to a nesting depth of 512.
+expected str`, with type names truncated at 256 bytes with `…`).
+
+`parse`, `decode`, `encode`, and `to_json` limit array and object nesting to
+512 levels. If a document exceeds this limit, `parse` and `decode` fail with
+kind `"parse"`. If a value exceeds this limit, `encode` and `to_json` abort
+with kind `"limit"`. `to_json` reuses existing `Json` values without traversing
+them, so its result can exceed 512 levels.
 
 ### 13.8 `log`
 
@@ -2952,9 +2957,11 @@ implement `NamedType`, `SandType`, `FromValue`, and `IntoValue`. Every derived
 type requires `#[sand(module = "<module>")]` and accepts `#[sand(name = "<Name>")]`
 to override its Sand name, `#[sand(private)]` to keep the type private to its
 module, and `#[sand(crate = <path>)]` to specify a renamed `sandlang`
-dependency. Rust doc comments, including `#[doc = include_str!("...")]`, become
-Sand documentation. Compilation fails if a type, variant, or field name is a
-Sand keyword or is not a valid Sand identifier.
+dependency. `SandEnum` and `SandStruct` also accept
+`#[sand(manual_conversion)]` to omit the derived `FromValue` and `IntoValue`
+implementations. The macros copy Rust doc comments, including
+`#[doc = include_str!("...")]`, into Sand documentation, and reject type,
+variant, or field names that are Sand keywords or invalid Sand identifiers.
 
 | Derive       | Sand type                                                                  |
 | ------------ | -------------------------------------------------------------------------- |
@@ -2984,10 +2991,10 @@ nesting levels.
 Recursive types can reference themselves through `Vec`, map, or `Box` fields.
 Because the engine copies each reachable struct and enum value during
 conversion and charges fuel and memory for each copy, shared references in a
-Sand value produce independent Rust copies. Conversion aborts with kind
-`"limit"` if the nesting of structs and enum payloads exceeds 256 levels, such
-as in a cyclic value. Module Sand source can define methods on any bound type
-with `extend`.
+Sand value produce independent Rust copies. The engine aborts conversion with
+kind `"limit"` if struct and enum payload nesting exceeds 256 levels, such as
+in a cyclic value, or if a `json.Json` value exceeds 512 nested arrays and
+objects. Module Sand source can define methods on any bound type with `extend`.
 
 The Rust return type of a registered function determines whether the function
 returns a Sand `Result` or aborts the run on failure:

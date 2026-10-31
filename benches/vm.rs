@@ -92,6 +92,12 @@ const BENCHES: &[Bench] = &[
         ops: 0,
     },
     Bench {
+        name: "json decode and to_json 20k structs",
+        source: "import json\nstruct Item {\n    id: int\n    name: str\n    tags: [int]\n    meta: [str: float]\n}\nlet items = [Item(id: i, name: \"item \\(i)\", tags: [1, 2, i], meta: [\"a\": 1.5, \"b\": i.to_float()]) for i in 0..20000]\nlet back: [Item] = json.decode(json.encode(items)).unwrap()\nprint(json.to_json(back) == json.to_json(items))",
+        expected: "true\n",
+        ops: 0,
+    },
+    Bench {
         name: "game of life 64x64 x 100",
         source: "let w = 64\nlet h = 64\nvar g = [[(r * 7 + c * 13) % 5 == 0 for c in 0..w] for r in 0..h]\nfor _ in 0..100 {\n    g = [[{\n        var n = 0\n        for dr in -1..=1 { for dc in -1..=1 { if (dr != 0 or dc != 0) and g[(r + dr) % h][(c + dc) % w] { n += 1 } } }\n        n == 3 or (n == 2 and g[r][c])\n    } for c in 0..w] for r in 0..h]\n}\nprint(g.len())",
         expected: "64\n",

@@ -1,5 +1,6 @@
 use super::{int, int_lit, str_lit};
 use proptest::prelude::*;
+use proptest::test_runner::TestCaseError;
 use sandlang::json::Json;
 use sandlang::native::{Num, Param, Val, traits};
 use sandlang::vm::{Ctl, Vm};
@@ -148,20 +149,91 @@ fn fig_module(seen: Arc<Mutex<Vec<Fig>>>, made: Fig) -> NativeModule {
     m
 }
 
-fn json() -> impl Strategy<Value = Json> {
-    let leaf = prop_oneof![
+fn json_leaf() -> impl Strategy<Value = Json> {
+    prop_oneof![
         Just(Json::Null),
         any::<bool>().prop_map(Json::Bool),
         int().prop_map(Json::Int),
         float().prop_map(Json::Float),
         text().prop_map(Json::Str),
-    ];
-    leaf.prop_recursive(5, 48, 5, |inner| {
+    ]
+}
+
+fn json() -> impl Strategy<Value = Json> {
+    json_leaf().prop_recursive(5, 48, 5, |inner| {
         prop_oneof![
             prop::collection::vec(inner.clone(), 0..5).prop_map(Json::Arr),
             prop::collection::vec((text(), inner), 0..5).prop_map(|kvs| Json::Obj(kvs.into_iter().collect())),
         ]
     })
+}
+
+fn json_lit(j: &Json) -> String {
+    match j {
+        Json::Null => "json.Json.Null".into(),
+        Json::Bool(b) => format!("json.Json.Bool({b})"),
+        Json::Int(i) => format!("json.Json.Int({})", int_lit(*i)),
+        Json::Float(f) => format!("json.Json.Float({})", float_lit(*f)),
+        Json::Str(s) => format!("json.Json.Str({})", str_lit(s)),
+        Json::Arr(items) => format!("json.Json.Arr([{}])", items.iter().map(json_lit).collect::<Vec<_>>().join(", ")),
+        Json::Obj(fields) if fields.is_empty() => "json.Json.Obj([:])".into(),
+        Json::Obj(fields) => {
+            let entries: Vec<String> = fields.iter().map(|(k, v)| format!("{}: {}", str_lit(k), json_lit(v))).collect();
+            format!("json.Json.Obj([{}])", entries.join(", "))
+        }
+    }
+}
+
+fn json_depth(j: &Json) -> usize {
+    match j {
+        Json::Arr(items) => 1 + items.iter().map(json_depth).max().unwrap_or(0),
+        Json::Obj(fields) => 1 + fields.values().map(json_depth).max().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+#[derive(Clone, Debug)]
+struct JsonLayer {
+    is_object: bool,
+    key: String,
+    before: Option<Json>,
+    after: Option<Json>,
+}
+
+impl JsonLayer {
+    fn entries<T>(&self, inner: T, sibling: impl Fn(&Json) -> T) -> Vec<(String, T)> {
+        let before = self.before.as_ref().map(|j| (format!("{}<", self.key), sibling(j)));
+        let after = self.after.as_ref().map(|j| (format!("{}>", self.key), sibling(j)));
+        before.into_iter().chain([(self.key.clone(), inner)]).chain(after).collect()
+    }
+
+    fn wrap(&self, inner: Json) -> Json {
+        let entries = self.entries(inner, Json::clone);
+        match self.is_object {
+            true => Json::Obj(entries.into_iter().collect()),
+            false => Json::Arr(entries.into_iter().map(|(_, j)| j).collect()),
+        }
+    }
+
+    fn wrap_stmt(&self) -> String {
+        let entries = self.entries("j".to_string(), json_lit);
+        match self.is_object {
+            true => {
+                let entries: Vec<String> = entries.iter().map(|(k, v)| format!("{}: {v}", str_lit(k))).collect();
+                format!("j = json.Json.Obj([{}])", entries.join(", "))
+            }
+            false => format!("j = json.Json.Arr([{}])", entries.into_iter().map(|(_, v)| v).collect::<Vec<_>>().join(", ")),
+        }
+    }
+}
+
+fn json_layer() -> impl Strategy<Value = JsonLayer> {
+    (any::<bool>(), text(), prop::option::of(json_leaf()), prop::option::of(json_leaf()))
+        .prop_map(|(is_object, key, before, after)| JsonLayer { is_object, key, before, after })
+}
+
+fn json_layers() -> impl Strategy<Value = Vec<JsonLayer>> {
+    prop_oneof![prop::collection::vec(json_layer(), 0..8), prop::collection::vec(json_layer(), 500..520)]
 }
 
 fn sum_module() -> NativeModule {
@@ -309,6 +381,48 @@ proptest! {
         prop_assert!(r.is_ok(), "{r:?}\n{src}");
         prop_assert_eq!(out, "true\ntrue\n");
         prop_assert_eq!(seen.lock().unwrap().clone(), vec![value.clone(), value]);
+    }
+
+    #[test]
+    fn round_trip_deep_json_values_on_small_stack(
+        bottom in json(),
+        layers in json_layers(),
+        from_rust in any::<bool>(),
+        gc_stress in any::<bool>(),
+    ) {
+        let value = layers.iter().fold(bottom.clone(), |j, l| l.wrap(j));
+        let build = match from_rust {
+            true => "var j = doc.make()".to_string(),
+            false => {
+                let wraps: Vec<String> = layers.iter().map(JsonLayer::wrap_stmt).collect();
+                format!("var j = {}\n{}", json_lit(&bottom), wraps.join("\n"))
+            }
+        };
+        let src = format!("import doc\nimport json\n{build}\nprint(doc.echo(j) == j)");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (s, made, script) = (seen.clone(), value.clone(), src.clone());
+        let engine = move || {
+            let mut m = NativeModule::new("doc");
+            m.function("echo", move |j: Json| {
+                s.lock().unwrap().push(j.clone());
+                j
+            });
+            m.function("make", move || made.clone());
+            run(Config::new().module(m).gc_stress(gc_stress), &script)
+        };
+        let (r, out) = std::thread::Builder::new().stack_size(512 << 10).spawn(engine).unwrap().join().unwrap();
+        if json_depth(&value) <= 512 {
+            prop_assert!(r.is_ok(), "{r:?}\n{src}");
+            prop_assert_eq!(out, "true\n");
+            prop_assert_eq!(seen.lock().unwrap().clone(), vec![value]);
+        } else {
+            let message = match r {
+                Err(Error::Runtime { message, .. }) => message,
+                r => return Err(TestCaseError::fail(format!("expected a runtime error, got {r:?}"))),
+            };
+            prop_assert_eq!(message, "limit: value too deeply nested to convert");
+            prop_assert!(seen.lock().unwrap().is_empty());
+        }
     }
 
     #[test]

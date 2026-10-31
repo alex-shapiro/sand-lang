@@ -112,6 +112,63 @@ print(json.parse(deep).unwrap_err().message)
 --- stdout
 nesting too deep at line 1, column 513
 
+=== encode at max nesting depth
+import json
+var a = json.Json.Arr([])
+var o = json.Json.Obj([:])
+for _ in 0..511 {
+    a = json.Json.Arr([a])
+    o = json.Json.Arr([o])
+}
+print(json.parse(json.encode(a))? == a)
+print(json.parse(json.encode(o))? == o)
+print(json.to_json(a) == a)
+--- stdout
+true
+true
+true
+
+=== encode beyond max nesting depth
+import json
+var o = json.Json.Obj([:])
+for _ in 0..512 {
+    o = json.Json.Arr([o])
+}
+print(json.encode(o))
+--- fail
+value too deeply nested to encode as JSON
+
+=== to_json at max nesting depth
+import json
+enum T {
+    Leaf(x: int)
+    Wrap([T])
+}
+var t = T.Leaf(x: 1)
+for _ in 0..170 {
+    t = T.Wrap([t])
+}
+let text = json.encode(t)
+print(json.encode(json.to_json(t)) == text)
+print(json.parse(text)? == json.to_json(t))
+--- stdout
+true
+true
+
+=== to_json beyond max nesting depth
+import json
+enum T {
+    Leaf(x: int)
+    Wrap([T])
+}
+var t = T.Leaf(x: 1)
+for _ in 0..170 {
+    t = T.Wrap([t])
+}
+print(json.to_json([t]))
+--- fail
+value too deeply nested to convert to JSON
+
 === numbers
 import json
 print(json.encode(json.parse("[0, -1, 1e3, 1.5e-2, 123456789012, 2.0]")?))

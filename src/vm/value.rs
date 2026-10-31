@@ -421,16 +421,10 @@ pub fn int_hash(i: i64) -> u64 {
     h.finish()
 }
 
-/// The index of a map or set: the slots of its entries by key.
-///
-/// While every key is a non-negative int below a bound proportional to the
-/// number of keys, the index is a table by key, which needs no hashing;
-/// otherwise it is a [`KeyTable`]. A dense index becomes hashed when a key
-/// does not fit; a hashed one may become dense again where it would grow
-/// (see [`KeyIndex::densify`]).
+/// Entry slot index for a map or set.
 #[derive(Clone, Debug)]
 pub enum KeyIndex {
-    /// `slots[k]` is one more than the slot of key `k`, or 0.
+    /// Direct lookup table where `slots[k]` stores `slot + 1`, or `0` if empty.
     Dense {
         slots: Vec<u32>,
         count: usize,
@@ -444,13 +438,23 @@ impl Default for KeyIndex {
     }
 }
 
-/// Whether an int key `k` may be in a dense index of `count` keys.
 #[inline]
 fn dense_fits(k: i64, count: usize) -> bool {
     0 <= k && (k as u64) < 8 * count as u64 + 64
 }
 
 impl KeyIndex {
+    /// Returns an empty dense index if all `keys` fit in a dense table for
+    /// `count` entries, or a preallocated hash index.
+    pub fn for_keys(count: usize, mut keys: impl Iterator<Item = Value>) -> KeyIndex {
+        if keys.all(|k| matches!(k, Value::Int(i) if dense_fits(i, count))) {
+            return KeyIndex::default();
+        }
+        let mut t = KeyTable::default();
+        t.reserve(count);
+        KeyIndex::Hashed(t)
+    }
+
     /// The slot of int key `k` (`eq(slot)` tells whether it holds `k`).
     #[inline]
     pub fn find_int(&self, k: i64, eq: impl FnMut(usize) -> bool) -> Option<usize> {
@@ -1656,6 +1660,19 @@ impl Obj {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn for_keys_selects_dense_or_preallocated_hashed_index() {
+        let strs = (0..100).map(Value::Obj);
+        let KeyIndex::Hashed(t) = KeyIndex::for_keys(100, strs) else { panic!("string keys need a hashed index") };
+        assert!(t.capacity() >= 100, "{}", t.capacity());
+        let KeyIndex::Hashed(t) = KeyIndex::for_keys(3, [0, 1, 1 << 40].map(Value::Int).into_iter()) else {
+            panic!("sparse int keys need a hashed index")
+        };
+        assert!(t.capacity() >= 3, "{}", t.capacity());
+        assert!(matches!(KeyIndex::for_keys(3, [2, 0, 1].map(Value::Int).into_iter()), KeyIndex::Dense { .. }));
+        assert!(matches!(KeyIndex::for_keys(0, std::iter::empty()), KeyIndex::Dense { .. }));
+    }
 
     #[test]
     fn deep_descriptions_drop_on_a_small_stack() {

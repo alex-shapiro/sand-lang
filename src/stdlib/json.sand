@@ -78,8 +78,8 @@ extend Json {
         }
     }
 
-    /// Traverses a dot-separated path of object keys and array indices (such as
-    /// `"items.0.name"`). Returns `Some(self)` if `p` is empty.
+    /// Traverses a dot-separated path of object keys and array indices, such as
+    /// `"items.0.name"`. Returns itself if the path is empty.
     pub fn path(self, p: str) -> Json? {
         if p.is_empty() {
             return Some(self)
@@ -95,15 +95,16 @@ extend Json {
     }
 }
 
-/// Parses `text` as a `Json` value. Fails with kind `"parse"` on invalid syntax
-/// or if array/object nesting exceeds 512 levels.
+/// Parses `text` as a `Json` value. Fails with kind `"parse"` if syntax is invalid
+/// or if nesting exceeds 512 levels.
 pub native fn parse(text: str) -> Result<Json>
 
-/// Serializes `value` as JSON text (compact if `indent == 0`, or pretty-printed
-/// with `indent` spaces per level). Finite floats include a decimal point or
-/// exponent (`2.0`), and `NaN` or infinite floats are serialized as `null`.
-/// Aborts with kind `"invalid"` if a map key is not a `str`, `int`, `duration`,
-/// `bool`, payload-less variant, or value type.
+/// Serializes `value` as JSON text. Emits compact output if `indent == 0`, or
+/// pretty-prints with `indent` spaces per level. Finite floats include a
+/// decimal point or exponent. `NaN` or infinite floats are serialized as
+/// `null`. Aborts with kind `"invalid"` if a map key is not a `str`, `int`,
+/// `duration`, `bool`, unit enum variant, or value type, or with kind `"limit"`
+/// if array or object nesting exceeds 512 levels.
 pub native fn encode<T: Encode>(value: T, indent: int = 0) -> str
 
 /// Parses `text` and decodes it into a value of type `T`.
@@ -132,5 +133,7 @@ native fn decode_raw<reflect T: Decode>(text: str) -> Decoded<T>
 
 /// Converts `value` into a `Json` value using the same representation as
 /// `encode`. Aborts with kind `"invalid"` if `value` contains a map key type
-/// that `encode` does not support.
+/// that `encode` does not support, or with kind `"limit"` if array or object
+/// nesting exceeds 512 levels. Also reuses existing `Json` values without
+/// traversing them.
 pub native fn to_json<T: Encode>(value: T) -> Json

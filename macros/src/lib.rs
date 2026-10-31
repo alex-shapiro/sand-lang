@@ -1,15 +1,14 @@
-//! Derive macros that bind Rust types to Sand types in a `NativeModule`.
+//! Derive macros that bind Rust types to Sand types.
 //!
-//! Each derive macro requires `#[sand(module = "<module>")]` on the type and
-//! accepts these optional type attributes:
-//! - `#[sand(name = "<Name>")]`: sets the Sand type name (defaults to the Rust
-//!   identifier).
-//! - `#[sand(private)]`: makes the type private to its module.
-//! - `#[sand(crate = <path>)]`: sets the path to the `sandlang` crate (defaults
-//!   to `::sandlang`).
+//! Each type requires a `#[sand(module = "<module>")]` attribute and accepts
+//! optional type attributes:
 //!
-//! The macros copy Rust doc comments (including `#[doc = include_str!("...")]`)
-//! into the Sand documentation.
+//! - `#[sand(name = "<Name>")]` overrides the Sand type name.
+//! - `#[sand(private)]` makes the type private.
+//! - `#[sand(crate = <path>)]` overrides the `::sandlang` crate path.
+//! - `#[sand(manual_conversion)]` omits `FromValue` and `IntoValue` implementations.
+//!
+//! Rust doc comments, including `#[doc = include_str!("...")]`, are copied into Sand docs.
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as Tokens};
@@ -22,45 +21,51 @@ use syn::{
     parse_macro_input, parse_quote,
 };
 
-/// Derives `NamedType`, `EnumType`, `SandType`, `FromValue`, and `IntoValue`
-/// for an enum.
+/// Declare a sandlang enum.
 ///
-/// The macro binds unit variants to variants without payloads, tuple variants
-/// to positional payloads, and struct variants to named payloads. Use
-/// `#[sand(name = "<name>")]` on a struct variant field to override its Sand
-/// field name. Each payload type must implement `IntoValue` and owned
-/// `FromValue`. Rust type parameters define Sand type parameters.
+/// Implements `NamedType`, `EnumType`, `SandType`, `FromValue`, and `IntoValue`.
+/// Supports unit, tuple, and struct variants, and type parameters. Each payload
+/// type must implement `IntoValue` and owned `FromValue`.
+///
+/// Optional attributes:
+///
+/// - `#[sand(name = "<name>")]` on a struct variant field overrides its Sand field name.
 #[proc_macro_derive(SandEnum, attributes(sand))]
 pub fn derive_sand_enum(input: TokenStream) -> TokenStream {
     expand(input, sand_enum)
 }
 
-/// Derives `NamedType`, `ObjectType`, `SandType`, `FromValue` (for `&T`), and
-/// `IntoValue` for an opaque host object type that implements `NativeObject`.
-#[proc_macro_derive(SandObject, attributes(sand))]
-pub fn derive_sand_object(input: TokenStream) -> TokenStream {
-    expand(input, sand_object)
-}
-
-/// Derives `NamedType`, `StructType`, `SandType`, `FromValue`, and `IntoValue`
-/// for a struct with named fields.
+/// Declare a sandlang struct.
 ///
-/// Each field type must implement `IntoValue` and owned `FromValue`. Rust type
-/// parameters define Sand type parameters. Optional field attributes:
-/// - `#[sand(name = "<name>")]`: sets the Sand field name (defaults to the
-///   Rust identifier).
-/// - `#[sand(private)]`: makes the field private to its module.
-/// - `#[sand(var)]`: makes the field mutable (`var`) in Sand.
-/// - `#[sand(default)]` or `#[sand(default = <expr>)]`: sets the Sand default
-///   value to `Default::default()` or `Into::into(<expr>)`. The default value
-///   must convert to a `Constant` via `IntoValue::to_const`.
+/// Implements `NamedType`, `StructType`, `SandType`, `FromValue`, and `IntoValue`.
+/// Each field type must implement `IntoValue` and owned `FromValue`.
+/// Rust type parameters define Sand type parameters.
+///
+/// Optional field attributes:
+///
+/// - `#[sand(name = "<name>")]`: overrides the Sand field name.
+/// - `#[sand(private)]`: makes the field private.
+/// - `#[sand(var)]`: makes the field mutable.
+/// - `#[sand(default)]` or `#[sand(default = <expr>)]`: sets a default value from the `Default` trait or `Into::into(<expr>)`.
+///   `IntoValue::to_const` must return `Some` for the default value.
 #[proc_macro_derive(SandStruct, attributes(sand))]
 pub fn derive_sand_struct(input: TokenStream) -> TokenStream {
     expand(input, sand_struct)
 }
 
-/// Derives `NamedType`, `SandType`, `FromValue`, and `IntoValue` for a type
-/// that implements `ValueType`.
+/// Declare an sandlang opaque native type.
+///
+/// Implements `NamedType`, `ObjectType`, `SandType`, `FromValue`, and `IntoValue`
+/// The type must implement the `NativeObject` marker trait.
+#[proc_macro_derive(SandObject, attributes(sand))]
+pub fn derive_sand_object(input: TokenStream) -> TokenStream {
+    expand(input, sand_object)
+}
+
+/// Declare a sandlang value type.
+///
+/// Implements `NamedType`, `SandType`, `FromValue`, and `IntoValue`.
+/// The type must implement the `ValueType` marker trait.
 #[proc_macro_derive(SandValue, attributes(sand))]
 pub fn derive_sand_value(input: TokenStream) -> TokenStream {
     expand(input, sand_value)
@@ -77,6 +82,7 @@ struct TypeAttrs {
     public: bool,
     krate: Path,
     doc: Tokens,
+    manual_conversion: bool,
 }
 
 fn parse_type_attrs(input: &DeriveInput, derive: &str) -> syn::Result<TypeAttrs> {
@@ -84,6 +90,7 @@ fn parse_type_attrs(input: &DeriveInput, derive: &str) -> syn::Result<TypeAttrs>
     let mut module = None;
     let mut name = LitStr::new(&ty.unraw().to_string(), ty.span());
     let mut public = true;
+    let mut manual_conversion = false;
     let mut krate: Path = parse_quote!(::sandlang);
     for attr in input.attrs.iter().filter(|a| a.path().is_ident("sand")) {
         attr.parse_nested_meta(|meta| {
@@ -95,6 +102,10 @@ fn parse_type_attrs(input: &DeriveInput, derive: &str) -> syn::Result<TypeAttrs>
                 public = false;
             } else if meta.path.is_ident("crate") {
                 krate = meta.value()?.parse()?;
+            } else if meta.path.is_ident("manual_conversion") && matches!(derive, "SandEnum" | "SandStruct") {
+                manual_conversion = true;
+            } else if matches!(derive, "SandEnum" | "SandStruct") {
+                return Err(meta.error("expected `module`, `name`, `private`, `crate` or `manual_conversion`"));
             } else {
                 return Err(meta.error("expected `module`, `name`, `private` or `crate`"));
             }
@@ -104,7 +115,7 @@ fn parse_type_attrs(input: &DeriveInput, derive: &str) -> syn::Result<TypeAttrs>
     let Some(module) = module else {
         return Err(Error::new(Span::call_site(), format!("`{derive}` requires `#[sand(module = \"...\")]`")));
     };
-    Ok(TypeAttrs { module, name, public, krate, doc: doc_expr(&input.attrs) })
+    Ok(TypeAttrs { module, name, public, krate, doc: doc_expr(&input.attrs), manual_conversion })
 }
 
 struct TypeParams {
@@ -153,9 +164,8 @@ impl TypeParams {
         Ok(Self { params, canonical_self })
     }
 
-    /// Replaces `Self` and each type parameter in `ty` with `Param<N>` so the
-    /// resulting type describes the field for all monomorphizations.
-    fn substitute(&self, krate: &Path, ty: &Type) -> Type {
+    /// Replaces `Self` and each type parameter in `ty` with `Param<N>`.
+    fn replace_self(&self, krate: &Path, ty: &Type) -> Type {
         struct Subst<'a>(&'a TypeParams, &'a Path);
         impl VisitMut for Subst<'_> {
             fn visit_type_mut(&mut self, t: &mut Type) {
@@ -226,7 +236,7 @@ fn reject_member_attrs(data: &Data) -> syn::Result<()> {
 }
 
 fn expand_named_type(input: &DeriveInput, a: &TypeAttrs, type_params: &TypeParams, binding: Tokens) -> Tokens {
-    let TypeAttrs { module, name, public, krate, doc } = a;
+    let TypeAttrs { module, name, public, krate, doc, .. } = a;
     let ty = &input.ident;
     let check = assert_type_name(krate, "type", &name.value(), name.span());
     let (imp, tyg, wh) = type_params.split_for_impl(input, |_| quote!(#krate::native::SandType));
@@ -321,7 +331,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
         let mut snames = Vec::new();
         for (k, f) in v.fields.iter().enumerate() {
             let (fname, fty) = (f.ident.as_ref(), &f.ty);
-            let canon = type_params.substitute(krate, fty);
+            let canonical = type_params.replace_self(krate, fty);
             let sname = match fname {
                 Some(n) => {
                     let lit = parse_variant_field_name(f, n)?;
@@ -334,7 +344,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
                 }
                 None => quote!(::std::option::Option::None),
             };
-            infos.push(quote! { #krate::native::VariantField { name: #sname, ty: <#canon as #krate::native::SandType>::sand_type } });
+            infos.push(quote! { #krate::native::VariantField { name: #sname, ty: <#canonical as #krate::native::SandType>::sand_type } });
             let bind = format_ident!("f{k}");
             let get = quote! { #krate::native::field_from_value::<#fty>(vm, #krate::native::variant_field(vm, v, #k)?, conv)? };
             match fname {
@@ -375,7 +385,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
     let named = expand_named_type(input, &attrs, &type_params, quote! { #krate::native::Binding::of_enum() });
     let sand_type = expand_sand_type(input, krate, &type_params);
     let (imp, tyg, wh, wh_from, wh_into) = split_conversion_generics(input, krate, &type_params);
-    Ok(quote! {
+    let reflection = quote! {
         #named
         #sand_type
         #(#checks)*
@@ -387,6 +397,12 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
                 }
             }
         }
+    };
+    if attrs.manual_conversion {
+        return Ok(reflection);
+    }
+    Ok(quote! {
+        #reflection
         impl #imp #krate::native::FromValue for #ty #tyg #wh_from {
             type Item<'a> = Self;
             #[allow(unused_variables)]
@@ -502,14 +518,14 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
         names.push(name.value());
         checks.push(assert_field_name(krate, &name, true));
         let (fty, doc) = (&f.ty, doc_expr(&f.attrs));
-        let canon = type_params.substitute(krate, fty);
+        let canonical = type_params.replace_self(krate, fty);
         let default = match default {
             None => quote!(::std::option::Option::None),
             Some(value) => {
-                let value = value.map_or_else(|| quote!(<#canon as ::std::default::Default>::default()), |e| quote!(#e));
+                let value = value.map_or_else(|| quote!(<#canonical as ::std::default::Default>::default()), |e| quote!(#e));
                 quote_spanned! {fty.span()=>
                     ::std::option::Option::Some(|| {
-                        let value: #canon = ::std::convert::Into::into(#value);
+                        let value: #canonical = ::std::convert::Into::into(#value);
                         #krate::native::IntoValue::to_const(&value)
                     })
                 }
@@ -521,7 +537,7 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
                 doc: #doc,
                 public: #public,
                 var: #var,
-                ty: <#canon as #krate::native::SandType>::sand_type,
+                ty: <#canonical as #krate::native::SandType>::sand_type,
                 default: #default,
             }
         });
@@ -532,13 +548,19 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
     let named = expand_named_type(input, &attrs, &type_params, quote! { #krate::native::Binding::of_struct() });
     let sand_type = expand_sand_type(input, krate, &type_params);
     let (imp, tyg, wh, wh_from, wh_into) = split_conversion_generics(input, krate, &type_params);
-    Ok(quote! {
+    let reflection = quote! {
         #named
         #sand_type
         #(#checks)*
         impl #imp #krate::native::StructType for #ty #tyg #wh {
             const FIELDS: &'static [#krate::native::StructField] = &[#(#infos),*];
         }
+    };
+    if attrs.manual_conversion {
+        return Ok(reflection);
+    }
+    Ok(quote! {
+        #reflection
         impl #imp #krate::native::FromValue for #ty #tyg #wh_from {
             type Item<'a> = Self;
             #[allow(unused_variables)]
@@ -577,8 +599,6 @@ fn sand_value(input: &DeriveInput) -> syn::Result<Tokens> {
     })
 }
 
-/// Builds a compile-time `&'static str` expression from `#[doc = ...]`
-/// attributes, preserving non-literal expressions such as `include_str!(...)`.
 fn doc_expr(attrs: &[Attribute]) -> Tokens {
     let mut parts = Vec::new();
     for a in attrs {
@@ -704,7 +724,7 @@ mod tests {
 
     #[test]
     fn invalid_derives_are_rejected() {
-        let cases: [(Derive, &str, &str); 13] = [
+        let cases: [(Derive, &str, &str); 14] = [
             (sand_struct, "#[sand(module = \"m\")] struct S(i64);", "`SandStruct` requires named fields"),
             (sand_struct, "#[sand(module = \"m\")] enum S { A }", "`SandStruct` can only be derived for structs"),
             (sand_struct, "#[sand(module = \"m\")] struct S<'a> { x: &'a str }", "lifetime or const parameters"),
@@ -725,11 +745,31 @@ mod tests {
                 "#[sand(module = \"m\")] enum E { A { #[sand(name = \"y\")] x: i64, y: i64 } }",
                 "the Sand payload name `y` is used twice",
             ),
-            (sand_enum, "#[sand(module = \"m\", public)] enum E { A }", "expected `module`, `name`, `private` or `crate`"),
+            (
+                sand_enum,
+                "#[sand(module = \"m\", public)] enum E { A }",
+                "expected `module`, `name`, `private`, `crate` or `manual_conversion`",
+            ),
+            (sand_object, "#[sand(module = \"m\", manual_conversion)] struct O;", "expected `module`, `name`, `private` or `crate`"),
         ];
         for (f, src, msg) in cases {
             let out = expand(f, src);
             assert!(out.starts_with("error: ") && out.contains(msg), "{src}: {out}");
+        }
+    }
+
+    #[test]
+    fn manual_conversion_omits_conversion_impls() {
+        let cases: [(Derive, &str, &str); 2] =
+            [(sand_enum, "enum E { A(i64) }", "EnumType for E"), (sand_struct, "struct S { x: i64 }", "StructType for S")];
+        for (f, item, reflection) in cases {
+            let derived = expand(f, &format!("#[sand(module = \"m\")] {item}"));
+            let manual = expand(f, &format!("#[sand(module = \"m\", manual_conversion)] {item}"));
+            for out in [&derived, &manual] {
+                assert!(out.contains("NamedType for") && out.contains("SandType for") && out.contains(reflection), "{out}");
+            }
+            assert!(derived.contains("FromValue for") && derived.contains("IntoValue for"), "{derived}");
+            assert!(!manual.contains("FromValue for") && !manual.contains("IntoValue for"), "{manual}");
         }
     }
 }
