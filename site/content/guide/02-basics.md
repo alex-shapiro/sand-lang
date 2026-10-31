@@ -150,7 +150,7 @@ print("\(255:x)")
 print("\("tea":?)")
 ```
 
-See [specification §10.10](/spec/#1010-format-specifications) for the full format grammar.
+See [specification §10.10](/spec/#1010-interpolation-format-specifications) for the full format grammar.
 
 ### Multi-line and raw strings
 

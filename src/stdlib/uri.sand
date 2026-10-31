@@ -18,10 +18,10 @@ extend Uri {
     }
 
     /// Resolves a relative or absolute URI `reference` against `self` as the
-    /// base URI (RFC 3986 §5.2).
+    /// base URI according to RFC 3986 §5.2.
     pub native fn join(self, reference: str) -> Result<Uri>
 
-    /// Decodes `self.query` into `(key, value)` pairs (see `parse_query`).
+    /// Decodes `self.query` into `(key, value)` pairs using `parse_query`.
     pub fn query_pairs(self) -> [(str, str)] {
         match self.query {
             Some(q) => parse_query(q)
@@ -29,7 +29,7 @@ extend Uri {
         }
     }
 
-    /// Formats the authority component (`userinfo@host:port`), or returns
+    /// Formats the authority component as `userinfo@host:port`, or returns
     /// `None` if `self.host` is `None`.
     pub fn authority(self) -> str? {
         let host = self.host?
@@ -43,8 +43,9 @@ extend Uri {
         Some(s)
     }
 
-    /// Returns the default port for known schemes (`80` for `http`/`ws`, `443`
-    /// for `https`/`wss`, `21` for `ftp`), or `None` for other schemes.
+    /// Returns the default port for known schemes (`80` for `http` and `ws`,
+    /// `443` for `https` and `wss`, `21` for `ftp`), or `None` for other
+    /// schemes.
     pub fn default_port(self) -> int? {
         match self.scheme {
             "http" | "ws" => Some(80)
@@ -55,7 +56,7 @@ extend Uri {
     }
 }
 
-/// Parses an absolute URI string (with a scheme) into a `Uri`. Fails with kind
+/// Parses an absolute URI string with a scheme into a `Uri`. Fails with kind
 /// `"parse"` on invalid syntax, characters, or port numbers.
 pub native fn parse(text: str) -> Result<Uri>
 
@@ -66,7 +67,7 @@ pub native fn encode_component(s: str) -> str
 /// Percent-encodes all bytes in `s` except RFC 3986 unreserved characters and `/`.
 pub native fn encode_path(s: str) -> str
 
-/// Decodes `%XX` percent-escapes in `s` (`+` is left unchanged). Fails with
+/// Decodes `%XX` percent-escapes in `s`, leaving `+` unchanged. Fails with
 /// kind `"parse"` on malformed escapes or invalid UTF-8.
 pub native fn decode_component(s: str) -> Result<str>
 

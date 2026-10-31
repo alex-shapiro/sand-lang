@@ -1,24 +1,51 @@
 //! HTTP/1.1 client and server.
 //!
-//! Outgoing requests require the `Net(host:port)` capability (checked on every
-//! redirect hop), and `serve` requires `NetListen(ip:port)`. `https` URLs use TLS
-//! if the engine is built with the `tls` feature. Buffered response bodies
-//! larger than `max_http_body` fail with kind `"limit"`; use `open` to stream
-//! larger bodies incrementally.
+//! Outgoing requests require `Http` and `Net(host:port)` capabilities, checked
+//! on every redirect hop, as well as `NetAddr` on the resolved socket address.
+//! `serve` requires `NetListen(ip:port)`. `https` URLs use TLS if the engine is
+//! built with the `tls` feature. Buffered response bodies larger than
+//! `max_http_body` fail with kind `"limit"`; use `open` to stream larger
+//! response bodies incrementally.
+//!
+//! When a response body is read to completion and the connection permits
+//! reuse, the client returns the connection to a per-engine pool for up to 20
+//! seconds. The pool retains at most 16 idle connections in total (up to one
+//! quarter of `max_open_resources`) and at most 4 per origin; each pooled
+//! connection counts toward `max_open_resources` and `max_memory`, and the
+//! engine evicts the oldest idle connection when a new slot or memory is
+//! needed. Reusing a pooled connection re-checks `Http`, `Net`, and `NetAddr`
+//! against the peer address. If a reused connection closes before any response
+//! bytes arrive, `GET`, `HEAD`, `PUT`, `DELETE`, `OPTIONS`, and `TRACE`
+//! requests are automatically retried once on a new connection.
 
 import io
 import json
 import net
 
-/// Starts an HTTP/1.1 server listening on `ip` and `port`. If `port` is `0`,
-/// the operating system assigns an ephemeral port.
+/// Starts an HTTP/1.1 server listening on `ip` and `port`.
+///
+/// Requires `NetListen(ip:port)`. If `port` is `0`, the operating system
+/// assigns an ephemeral port, which can be queried with `Server.addr`.
 pub native fn serve(ip: str, port: int) -> Result<Server>
 
 extend Server {
-    /// Waits for and returns the next incoming HTTP request. Request headers
-    /// are read concurrently across connections, and the request body is
-    /// streamed on demand. Connections that do not send a complete request
-    /// header within 30 seconds receive `408 Request Timeout`.
+    /// Waits for and returns the next incoming HTTP request.
+    ///
+    /// `accept` reads request headers concurrently across up to half of
+    /// `max_open_resources` connections, using an 8 KiB read buffer per
+    /// connection counted against `max_memory`. A connection that does not send
+    /// a complete request header within 30 seconds receives `408 Request
+    /// Timeout`; a malformed header or a header larger than 64 KiB receives
+    /// `400 Bad Request`; a connection evicted because the server is at
+    /// capacity receives `503 Service Unavailable`.
+    ///
+    /// If the request includes `Expect: 100-continue`, reading from
+    /// `Request.body` sends `HTTP/1.1 100 Continue` before waiting for body
+    /// bytes, and each body read times out after 30 seconds. After `respond` or
+    /// `Reply.finish` completes, the connection is kept alive for up to 30
+    /// seconds if the request permits connection reuse and the request body was
+    /// fully consumed. For custom protocols or connection upgrades such as
+    /// `101 Switching Protocols`, read and write `Request.conn` directly.
     pub native fn accept(self) -> Result<Request>
 
     /// Returns the bound local address.
@@ -32,6 +59,10 @@ impl Close for Server {
 extend Request {
     /// Sends a complete HTTP response with `status`, `body`, and `headers`, and
     /// closes the request.
+    ///
+    /// Automatically sets `Content-Length` if `headers` does not specify
+    /// `Content-Length` or `Transfer-Encoding`, and omits the response body for
+    /// `HEAD` requests and `1xx`, `204`, and `304` statuses.
     pub fn respond(self, status: int, body: bytes, headers: [(str, str)] = []) -> Result<()> {
         let sent = write_response(
             self.conn,
@@ -47,7 +78,10 @@ extend Request {
     }
 
     /// Begins a streaming HTTP response with `status` and `headers`, returning
-    /// a `Reply` writer. Close the `Reply` or call `finish` to complete the
+    /// a `Reply` writer.
+    ///
+    /// Uses `Content-Length` if provided in `headers`, or chunked transfer
+    /// encoding otherwise. Close the `Reply` or call `finish` to complete the
     /// response body.
     pub fn respond_stream(self, status: int, headers: [(str, str)] = []) -> Result<Reply> {
         Ok(
@@ -58,27 +92,31 @@ extend Request {
         )
     }
 
-    /// Reads and returns the remaining request body as bytes.
+    /// Reads and returns the remaining request body as bytes, failing with kind
+    /// `"limit"` if it exceeds `max_http_body`.
     pub fn bytes(self) -> Result<bytes> {
         self.body.read_all()
     }
 
-    /// Reads and decodes the remaining request body as UTF-8 text.
+    /// Reads and decodes the remaining request body as UTF-8 text, failing with
+    /// kind `"limit"` if it exceeds `max_http_body`.
     pub fn text(self) -> Result<str> {
         self.body.read_text()
     }
 
-    /// Reads and parses the remaining request body as JSON.
+    /// Reads and parses the remaining request body as JSON, failing with kind
+    /// `"limit"` if it exceeds `max_http_body`.
     pub fn json(self) -> Result<json.Json> {
         json.parse(self.text()?)
     }
 
-    /// Returns the first value for header `name` (case-insensitive).
+    /// Returns the first value for header `name`, matched case-insensitively.
     pub fn header(self, name: str) -> str? {
         find_header(self.headers, name)
     }
 
-    /// Returns all values for header `name` (case-insensitive) in receipt order.
+    /// Returns all values for header `name`, matched case-insensitively, in
+    /// receipt order.
     pub fn header_values(self, name: str) -> [str] {
         header_values(self.headers, name)
     }
@@ -98,8 +136,8 @@ pub struct Reply {
     conn: net.Conn
     body: Outgoing
 
-    /// Completes the response body, or fails if fewer bytes were written than
-    /// declared by `Content-Length`.
+    /// Completes the response body, or fails with kind `"invalid"` if fewer
+    /// bytes were written than declared by `Content-Length`.
     pub fn finish(self) -> Result<()> {
         write_body(self.conn, self.body, b"", true)
     }
@@ -119,7 +157,10 @@ impl Close for Reply {
 }
 
 /// Starts a streaming HTTP request whose body is written incrementally via the
-/// returned `Upload`. Redirects are not followed.
+/// returned `Upload`.
+///
+/// Uses `Content-Length` if provided in `headers`, or chunked transfer encoding
+/// otherwise. Redirects are not followed.
 ///
 /// ```
 /// use src = fs.open("backup.tar")?
@@ -136,8 +177,8 @@ pub native fn upload(
 
 extend Upload {
     /// Finishes the request body and waits for the response header, returning a
-    /// `Stream` for reading the response body. Fails if fewer bytes were
-    /// written than declared by `Content-Length`.
+    /// `Stream` for reading the response body. Fails with kind `"invalid"` if
+    /// fewer bytes were written than declared by `Content-Length`.
     pub fn finish(self) -> Result<Stream> {
         write_body(self.conn, self.body, b"", true)?
         read_response(self)

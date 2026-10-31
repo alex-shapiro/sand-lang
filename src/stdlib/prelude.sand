@@ -188,10 +188,18 @@ pub enum Result<T, E> {
 
 extend<T> Task<T> {
     /// Suspends the calling task until `self` completes and returns its result.
+    ///
+    /// Calling `wait` again on a completed task returns the same result
+    /// immediately. If `self` was canceled, `wait` aborts the calling task with
+    /// kind `"cancelled"`.
     pub native fn wait(self) -> T
-    /// Returns `true` if `self` has completed or been cancelled.
+    /// Returns `true` if `self` has completed or been canceled.
     pub native fn is_done(self) -> bool
     /// Cancels `self` if it is still running.
+    ///
+    /// A canceled task stops at its next suspension point or instruction
+    /// boundary, drops pending I/O operations, and executes pending `defer`
+    /// blocks before terminating.
     pub native fn cancel(self)
 }
 
@@ -225,7 +233,7 @@ extend<T> Channel<T> {
     }
 }
 
-/// A resource handle (such as an open file or network socket) that can be
+/// A resource handle, such as an open file or network socket, that can be
 /// closed deterministically with `use`:
 ///
 /// ```
@@ -265,7 +273,7 @@ pub native fn eprint<T>(x: T)
 /// Aborts execution immediately with an uncaught runtime error.
 pub native fn fail(message: str, kind: str = "error") -> never
 
-/// Aborts execution with `message` (kind `"assert"`) if `cond` is `false`.
+/// Aborts execution with `message` and kind `"assert"` if `cond` is `false`.
 pub fn assert(cond: bool, message: str = "condition is false") {
     if not cond {
         fail(message, kind: "assert")
@@ -280,12 +288,10 @@ pub fn todo() -> never {
 /// Terminates the program immediately with exit status `code`.
 pub native fn exit(code: int) -> never
 
-/// Prints documentation for `x` (a module, type, trait, function, method, or
-/// string path).
+/// Prints documentation for any item `x`.
 pub native fn help<T>(x: T)
 
-/// Returns the sorted member names accessible after `x.`, or the names in scope
-/// if called as `members()`.
+/// Returns the sorted member names of `x`.
 pub native fn members<T>(x: T) -> [str]
 
 /// Compares values for equality with `==` and `!=`. The compiler derives `Eq`
@@ -375,26 +381,28 @@ extend int {
         self % 2 != 0
     }
 
-    /// Converts `self` to the nearest `float` (exact up to `±2^53`).
+    /// Converts `self` to the nearest `float`. Integers up to `±2^53` convert
+    /// without loss of precision.
     pub native fn to_float(self) -> float
-    /// Formats `self` in base `radix` (`2..=36`).
+    /// Formats `self` in base `radix`. Aborts with kind `"invalid"` if `radix`
+    /// is outside `2..=36`.
     pub native fn to_str_radix(self, radix: int) -> str
     /// Converts a Unicode scalar value to a single-character `str`, or returns
     /// `None` if `self` is not a valid scalar value.
     pub native fn to_char(self) -> str?
 
-    /// Returns the maximum 64-bit signed integer (`2^63 - 1`).
+    /// Returns the maximum 64-bit signed integer, `2^63 - 1`.
     pub fn max_value() -> int {
         9223372036854775807
     }
 
-    /// Returns the minimum 64-bit signed integer (`-2^63`).
+    /// Returns the minimum 64-bit signed integer, `-2^63`.
     pub fn min_value() -> int {
         -9223372036854775808
     }
 }
 
-/// IEEE-754 double-precision (64-bit) floating-point numbers.
+/// IEEE-754 double-precision 64-bit floating-point numbers.
 extend float {
     /// Returns the absolute value of `self`.
     pub native fn abs(self) -> float
@@ -406,22 +414,24 @@ extend float {
     pub native fn round(self) -> float
     /// Rounds `self` toward zero to an integer value.
     pub native fn trunc(self) -> float
-    /// Returns the square root of `self` (`NaN` if `self < 0.0`).
+    /// Returns the square root of `self`, or `NaN` if `self < 0.0`.
     pub native fn sqrt(self) -> float
     /// Returns `self` raised to the power `e`.
     pub native fn pow(self, e: float) -> float
-    /// Returns the smaller of `self` and `other`, ignoring `NaN`.
+    /// Returns the smaller of `self` and `other`, ignoring `NaN` if the other
+    /// argument is a number.
     pub native fn min(self, other: float) -> float
-    /// Returns the larger of `self` and `other`, ignoring `NaN`.
+    /// Returns the larger of `self` and `other`, ignoring `NaN` if the other
+    /// argument is a number.
     pub native fn max(self, other: float) -> float
     /// Returns `true` if `self` is `NaN`.
     pub native fn is_nan(self) -> bool
-    /// Returns `true` if `self` is finite (neither infinite nor `NaN`).
+    /// Returns `true` if `self` is neither infinite nor `NaN`.
     pub native fn is_finite(self) -> bool
     /// Returns `true` if `self` is positive or negative infinity.
     pub native fn is_infinite(self) -> bool
-    /// Truncates `self` toward zero to an `int`, or aborts if `self` is `NaN`
-    /// or out of the 64-bit integer range.
+    /// Truncates `self` toward zero to an `int`, or aborts with kind
+    /// `"overflow"` if `self` is `NaN` or outside the 64-bit integer range.
     pub native fn to_int(self) -> int
     /// Formats `self` with `digits` digits after the decimal point.
     pub native fn to_str_fixed(self, digits: int) -> str
@@ -458,8 +468,12 @@ extend str {
     /// Returns the byte offset of the last occurrence of `sub`, or `None` if absent.
     pub native fn rfind(self, sub: str) -> int?
     /// Replaces all non-overlapping occurrences of `pattern` with `replacement`.
+    /// Returns `self` unchanged if `pattern` is empty.
     pub native fn replace(self, pattern: str, replacement: str) -> str
     /// Splits `self` around each occurrence of non-empty delimiter `sep`.
+    ///
+    /// Calling `"".split(",")` returns `[""]`. Aborts with kind `"invalid"` if
+    /// `sep` is empty.
     pub native fn split(self, sep: str) -> [str]
     /// Splits `self` on the first occurrence of `sep` into `(before, after)`,
     /// or returns `None` if `sep` is absent.
@@ -485,17 +499,18 @@ extend str {
     pub native fn to_upper(self) -> str
     /// Converts `self` to lowercase using Unicode case mapping.
     pub native fn to_lower(self) -> str
-    /// Repeats `self` `n` times, or aborts if `n < 0`.
+    /// Repeats `self` `n` times, or aborts with kind `"invalid"` if `n < 0`.
     pub native fn repeat(self, n: int) -> str
     /// Pads `self` on the left with `fill` to at least `width` characters.
     pub native fn pad_start(self, width: int, fill: str = " ") -> str
     /// Pads `self` on the right with `fill` to at least `width` characters.
     pub native fn pad_end(self, width: int, fill: str = " ") -> str
     /// Parses `self` as a signed integer in base `radix` (`2..=36`), or returns
-    /// `None` on invalid input.
+    /// `None` on invalid input. Parsing is strict and does not trim whitespace.
     pub native fn parse_int(self, radix: int = 10) -> int?
-    /// Parses `self` as a `float` (including `"inf"`, `"-inf"`, and `"nan"`),
-    /// or returns `None` on invalid input.
+    /// Parses `self` as a `float`, including `"inf"`, `"-inf"`, and `"nan"`,
+    /// or returns `None` on invalid input. Parsing is strict and does not trim
+    /// whitespace.
     pub native fn parse_float(self) -> float?
     /// Returns `true` if `self` is non-empty and all characters are ASCII digits.
     pub native fn is_digit(self) -> bool
@@ -512,7 +527,8 @@ extend str {
     /// Returns the single-character string starting at UTF-8 byte offset `i`,
     /// or `None` if `i` is not a character boundary.
     pub native fn char_at(self, i: int) -> str?
-    /// Returns the Unicode scalar value of a single-character string.
+    /// Returns the Unicode scalar value of a single-character string, or aborts
+    /// with kind `"invalid"` if `self` does not contain a single character.
     pub native fn ord(self) -> int
     /// Returns `self` with its Unicode scalar values in reverse order.
     pub native fn reversed(self) -> str
@@ -532,25 +548,29 @@ extend bytes {
     pub native fn len(self) -> int
     /// Returns `true` if `self` has length `0`.
     pub native fn is_empty(self) -> bool
-    /// Returns the byte at index `i` (`0..=255`), or `None` if `i` is out of bounds.
+    /// Returns the byte at index `i` in `0..=255`, or `None` if `i` is out of bounds.
     pub native fn get(self, i: int) -> int?
     /// Returns the bytes of `self` as a list of integers in `0..=255`.
     pub native fn to_list(self) -> [int]
     /// Decodes `self` as UTF-8 text, or fails with kind `"invalid"` if `self`
     /// is not valid UTF-8.
+    ///
+    /// This method shadows the universal `to_str()` method; use `debug()` to
+    /// format a `bytes` literal representation.
     pub native fn to_str(self) -> Result<str, Error>
     /// Decodes `self` as UTF-8 text, replacing invalid sequences with `U+FFFD`.
     pub native fn to_str_lossy(self) -> str
-    /// Encodes `self` as lowercase hexadecimal text (two hex digits per byte).
+    /// Encodes `self` as lowercase hexadecimal text with two hex digits per byte.
     pub native fn to_hex(self) -> str
     /// Returns `true` if `needle` occurs as a contiguous subsequence of `self`.
     pub native fn contains(self, needle: bytes) -> bool
     /// Returns the start index of the first occurrence of `needle`, or `None` if absent.
     pub native fn find(self, needle: bytes) -> int?
-    /// Constructs a `bytes` value from a list of integers in `0..=255`.
+    /// Constructs a `bytes` value from a list of integers in `0..=255`, or
+    /// aborts with kind `"bounds"` if any element is outside `0..=255`.
     pub native fn from_list(items: [int]) -> bytes
-    /// Decodes a hexadecimal string (two hex digits per byte, case-insensitive)
-    /// into `bytes`, or returns `None` on invalid input.
+    /// Decodes a case-insensitive hexadecimal string into `bytes`, or returns
+    /// `None` if `text` does not consist of an even number of hex digits.
     pub native fn from_hex(text: str) -> bytes?
 }
 
@@ -576,8 +596,9 @@ extend duration {
     pub native fn from_secs(s: float) -> duration
 }
 
-/// Growable list (`[1, 2, 3]`). `[T]` is shorthand for `List<T>`. Lists are
-/// mutable reference types.
+/// Growable list, written `[1, 2, 3]`. `[T]` is shorthand for `List<T>`. Lists
+/// are mutable reference types; methods that take a function iterate over the
+/// initial length of `self` and ignore elements appended during iteration.
 extend<T> [T] {
     /// Returns the number of elements in the list.
     pub native fn len(self) -> int
@@ -587,11 +608,11 @@ extend<T> [T] {
     pub native fn push(self, x: T)
     /// Removes and returns the last element, or `None` if the list is empty.
     pub native fn pop(self) -> T?
-    /// Inserts `x` at index `i` (`0..=len()`), shifting subsequent elements to
-    /// the right.
+    /// Inserts `x` at index `i` in `0..=len()`, shifting subsequent elements to
+    /// the right. Aborts with kind `"bounds"` if `i` is out of range.
     pub native fn insert(self, i: int, x: T)
     /// Removes and returns the element at index `i`, shifting subsequent
-    /// elements to the left.
+    /// elements to the left. Aborts with kind `"bounds"` if `i` is out of range.
     pub native fn remove(self, i: int) -> T
     /// Appends all elements of `items` to the list.
     pub native fn extend(self, items: [T])
@@ -611,22 +632,24 @@ extend<T> [T] {
     pub native fn reverse(self)
     /// Returns a new list with the elements in reverse order.
     pub native fn reversed(self) -> [T]
-    /// Sorts the list in place in ascending order (stable).
+    /// Sorts the list in place in ascending order using a stable sort.
     pub native fn sort(self) where T: Ord
-    /// Returns a new list sorted in ascending order (stable).
+    /// Returns a new list sorted in ascending order using a stable sort.
     pub native fn sorted(self) -> [T] where T: Ord
     /// Returns a shallow copy of the list.
     pub native fn copy(self) -> [T]
-    /// Swaps the elements at indices `i` and `j`.
+    /// Swaps the elements at indices `i` and `j`. Aborts with kind `"bounds"`
+    /// if either index is out of range.
     pub native fn swap(self, i: int, j: int)
-    /// Returns up to the first `n` elements in a new list.
+    /// Returns up to the first `n` elements in a new list, clamping `n` to `0..=len()`.
     pub native fn take(self, n: int) -> [T]
-    /// Returns the elements after the first `n` elements in a new list.
+    /// Returns the elements after the first `n` elements in a new list, clamping `n` to `0..=len()`.
     pub native fn skip(self, n: int) -> [T]
-    /// Splits the list into non-overlapping chunks of up to `n` elements
-    /// (`n > 0`).
+    /// Splits the list into non-overlapping chunks of up to `n` elements.
+    /// Aborts with kind `"invalid"` if `n <= 0`.
     pub native fn chunks(self, n: int) -> [[T]]
-    /// Returns overlapping sliding windows of `n` consecutive elements (`n > 0`).
+    /// Returns overlapping sliding windows of `n` consecutive elements. Aborts
+    /// with kind `"invalid"` if `n <= 0`.
     pub native fn windows(self, n: int) -> [[T]]
     /// Returns `(index, element)` pairs starting from `0`.
     pub native fn enumerate(self) -> [(int, T)]
@@ -652,10 +675,10 @@ extend<T> [T] {
 
     native fn iter_next(self) -> fn() -> T?
 
-    /// Returns the sum of all elements (`T.zero()` if empty).
+    /// Returns the sum of all elements, or `T.zero()` if the list is empty.
     pub native fn sum(self) -> T where T: Num
 
-    /// Returns the product of all elements (`T.one()` if empty).
+    /// Returns the product of all elements, or `T.one()` if the list is empty.
     pub native fn product(self) -> T where T: Num
 
     /// Applies `f` to each element and returns the results in a new list.
@@ -881,12 +904,12 @@ extend<T> [T] {
         Some(best)
     }
 
-    /// Sorts the list in place by `key(element)` (stable).
+    /// Sorts the list in place by `key(element)` using a stable sort.
     pub fn sort_by<K: Ord>(self, key: fn(T) -> K) {
         self.sort_by_keys(self.map(key))
     }
 
-    /// Returns a new list sorted by `key(element)` (stable).
+    /// Returns a new list sorted by `key(element)` using a stable sort.
     pub fn sorted_by<K: Ord>(self, key: fn(T) -> K) -> [T] {
         let out = self.copy()
         out.sort_by_keys(out.map(key))
@@ -899,9 +922,9 @@ extend [str] {
     pub native fn join(self, sep: str = "") -> str
 }
 
-/// Insertion-ordered hash map (`["a": 1]`, or `[:]` if empty). `[K: V]` is
-/// shorthand for `Map<K, V>`. Maps are mutable reference types, and keys must
-/// implement `Hash`.
+/// Insertion-ordered hash map, written `["a": 1]` or `[:]` if empty. `[K: V]`
+/// is shorthand for `Map<K, V>`. Maps are mutable reference types, and keys
+/// must implement `Hash`.
 extend<K: Hash, V> [K: V] {
     /// Returns the number of key-value entries in the map.
     pub native fn len(self) -> int
@@ -1003,12 +1026,17 @@ extend<T: Hash> Set<T> {
 }
 
 /// Half-open (`a..b`) or inclusive (`a..=b`) integer ranges.
+///
+/// Range methods operate directly on the bounds and allocate a list only if the
+/// return type is `[int]`.
 extend Range {
     /// Returns the inclusive start bound.
     pub native fn start(self) -> int
-    /// Returns the exclusive end bound, or aborts on `int` overflow.
+    /// Returns the exclusive end bound, or aborts with kind `"overflow"` if the
+    /// exclusive end exceeds `int.max_value()`.
     pub native fn end(self) -> int
-    /// Returns the number of integers in the range, or aborts on `int` overflow.
+    /// Returns the number of integers in the range, or aborts with kind
+    /// `"overflow"` if the count exceeds `int.max_value()`.
     pub native fn len(self) -> int
     /// Returns `true` if the range contains zero integers.
     pub native fn is_empty(self) -> bool
@@ -1022,13 +1050,18 @@ extend Range {
     pub native fn min(self) -> int?
     /// Returns the largest integer in the range, or `None` if empty.
     pub native fn max(self) -> int?
-    /// Returns the sum of the integers in the range (`0` if empty).
+    /// Returns the exact sum of the integers in the range in `O(1)` time, or
+    /// `0` if empty. Aborts with kind `"overflow"` if the sum exceeds `int`
+    /// bounds.
     pub native fn sum(self) -> int
-    /// Returns the product of the integers in the range (`1` if empty).
+    /// Returns the exact product of the integers in the range in `O(1)` time,
+    /// or `1` if empty. Aborts with kind `"overflow"` if the product exceeds
+    /// `int` bounds.
     pub native fn product(self) -> int
     /// Collects the integers in the range into a list.
     pub native fn to_list(self) -> [int]
-    /// Returns every `step`-th integer starting from `start()` (`step > 0`).
+    /// Returns every `step`-th integer starting from `start()`. Aborts with
+    /// kind `"invalid"` if `step <= 0`.
     pub native fn step_by(self, step: int) -> [int]
     /// Returns the integers in the range in descending order.
     pub native fn reversed(self) -> [int]
@@ -1269,10 +1302,20 @@ pub trait Iterator<T> {
     }
 }
 
-/// A single-pass lazy iterator backed by a `next` closure. Adapters (`map`,
-/// `filter`, `take`) construct new `Iter<T>` values without advancing the
-/// source, and consumers (`to_list`, `fold`, `sum`, or `for` loops) pull
-/// elements on demand.
+/// A single-pass lazy iterator backed by a `next` closure.
+///
+/// Adapters such as `map`, `filter`, and `take` return a new `Iter<T>` without
+/// advancing the source, and consumers such as `to_list`, `fold`, `sum`, or
+/// `for` loops pull elements one at a time.
+///
+/// Copying an `Iter<T>` shares the underlying `next` closure, so advancing one
+/// handle advances all copies. Built-in sources (`list.iter()`, `map.iter()`,
+/// `set.iter()`, `range.iter()`, `str.chars_iter()`, `channel.iter()`,
+/// `Iter.once`, `Iter.successors`, `take`, `take_while`) continue to return
+/// `None` once exhausted. `list.iter()` reads live indices and observes
+/// subsequent `push` or `pop` calls, `map.iter()` and `set.iter()` iterate over
+/// a snapshot taken when `iter()` is called, and `channel.iter()` calls
+/// `recv()` on each step.
 pub struct Iter<T> {
     /// Closure that produces the next element or `None` once exhausted.
     pub next: fn() -> T?
@@ -1491,7 +1534,8 @@ pub struct Iter<T> {
         Iter(next: step)
     }
 
-    /// Yields the first element and every `step`-th element thereafter (`step > 0`).
+    /// Yields the first element and every `step`-th element thereafter. Aborts
+    /// with kind `"invalid"` if `step <= 0`.
     pub fn step_by(self, step: int) -> Iter<T> {
         if step <= 0 {
             fail("step must be positive, found \(step)", kind: "invalid")
@@ -1567,7 +1611,7 @@ pub struct Iter<T> {
         Some(acc)
     }
 
-    /// Returns the sum of the remaining elements (`T.zero()` if empty).
+    /// Returns the sum of the remaining elements, or `T.zero()` if empty.
     pub fn sum(self) -> T where T: Num {
         var acc = T.zero()
         for x in self {
@@ -1576,7 +1620,7 @@ pub struct Iter<T> {
         acc
     }
 
-    /// Returns the product of the remaining elements (`T.one()` if empty).
+    /// Returns the product of the remaining elements, or `T.one()` if empty.
     pub fn product(self) -> T where T: Num {
         var acc = T.one()
         for x in self {
@@ -1653,7 +1697,7 @@ pub struct Iter<T> {
         last
     }
 
-    /// Consumes `n` elements and returns the `n`-th remaining element (0-based).
+    /// Consumes `n` elements and returns the 0-based `n`-th remaining element.
     pub fn nth(self, n: int) -> T? {
         if n < 0 {
             return None
@@ -1749,8 +1793,8 @@ extend Iter<str> {
 }
 
 extend<K: Hash, V> Iter<(K, V)> {
-    /// Collects all remaining `(key, value)` pairs into a map (later pairs
-    /// overwrite earlier ones for duplicate keys).
+    /// Collects all remaining `(key, value)` pairs into a map, where later
+    /// pairs overwrite earlier ones for duplicate keys.
     pub fn to_map(self) -> [K: V] {
         let out: [K: V] = [:]
         for (k, v) in self {

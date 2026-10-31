@@ -1,20 +1,20 @@
-//! Base64 encoding and decoding (RFC 4648) with standard and URL-safe alphabets.
+//! Base64 encoding and decoding with standard and URL-safe alphabets.
 
-/// Encodes `data` using the standard Base64 alphabet (`+`, `/`) with `=` padding.
+/// Encodes data using the standard Base64 alphabet with `=` padding.
 pub native fn encode(data: bytes) -> str
 
-/// Decodes standard Base64 text. Requires `=` padding; returns an `Err` with
-/// kind `"parse"` on invalid characters, invalid length, or nonzero trailing bits.
+/// Decodes standard Base64 text. Requires `=` padding.
+/// Returns an `Err` with kind `"parse"` on invalid characters, invalid length, or nonzero trailing bits.
 pub native fn decode(text: str) -> Result<bytes>
 
-/// Encodes `data` using the URL-safe Base64 alphabet (`-`, `_`) without padding.
+/// Encodes data using the URL-safe Base64 alphabet without padding.
 pub native fn encode_url(data: bytes) -> str
 
-/// Decodes URL-safe Base64 text with optional `=` padding. Returns an `Err`
-/// with kind `"parse"` on invalid input.
+/// Decodes URL-safe Base64 text with optional `=` padding.
+/// Returns an `Err` with kind `"parse"` on invalid input.
 pub native fn decode_url(text: str) -> Result<bytes>
 
-/// Encodes the UTF-8 bytes of `text` using the standard Base64 alphabet.
+/// Encodes the UTF-8 bytes of text using the standard Base64 alphabet.
 pub fn encode_str(text: str) -> str {
     encode(text.bytes())
 }

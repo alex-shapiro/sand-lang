@@ -20,7 +20,7 @@
 //! `%Z` zone abbreviation, `%Q` IANA zone name, `%s` Unix seconds, and `%%`
 //! literal `%`.
 
-/// A value (`Span` or `duration`) that can be converted into a `Span`.
+/// A `Span` or `duration` value that can be converted into a `Span`.
 pub trait ToSpan {
     /// Converts `self` into a `Span`.
     fn to_span(self) -> Span
@@ -706,20 +706,25 @@ extend Span {
         relative_to: ZonedDateTime? = None,
     ) -> Span
     /// Returns the total length of `self` expressed as a floating-point
-    /// multiple of `unit`.
+    /// multiple of `unit`. Requires `relative_to` if `self` or `unit` uses
+    /// years or months.
     pub native fn total(self, unit: Unit, relative_to: ZonedDateTime? = None) -> float
-    /// Compares the total length of `self` and `other`, returning `-1`, `0`, or `1`.
+    /// Compares the total length of `self` and `other`, returning `-1`, `0`, or
+    /// `1`. Requires `relative_to` if either span contains nonzero years or
+    /// months.
     pub native fn compare(self, other: Span, relative_to: ZonedDateTime? = None) -> int
-    /// Converts `self` to an exact `duration`.
+    /// Converts `self` to an exact `duration`. Requires `relative_to` if `self`
+    /// contains nonzero years or months.
     pub native fn to_duration(self, relative_to: ZonedDateTime? = None) -> duration
 }
 
 extend TimeZone {
-    /// Looks up a time zone by IANA identifier (case-insensitive), `"UTC"`,
-    /// or a whole-minute UTC offset within `±23:59` (`"+00:00"` returns
-    /// `UTC`). Fails with kind `"not_found"` if `name` is unknown.
+    /// Looks up a time zone by case-insensitive IANA identifier, `"UTC"`, or a
+    /// whole-minute UTC offset within `±23:59`, where `"+00:00"` returns `UTC`.
+    /// Fails with kind `"not_found"` if `name` is unknown.
     pub native fn init(name: str) -> Result<TimeZone>
 
-    /// Returns the canonical time zone identifier (`America/New_York`, `UTC`, or `+05:30`).
+    /// Returns the canonical time zone identifier, such as `"America/New_York"`,
+    /// `"UTC"`, or `"+05:30"`.
     pub native fn id(self) -> str
 }

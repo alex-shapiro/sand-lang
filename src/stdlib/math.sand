@@ -24,11 +24,11 @@ pub native fn log2(x: float) -> float
 pub native fn log10(x: float) -> float
 /// Returns the logarithm of `x` in `base`.
 pub native fn log(x: float, base: float) -> float
-/// Returns the sine of `x` (in radians).
+/// Returns the sine of `x` in radians.
 pub native fn sin(x: float) -> float
-/// Returns the cosine of `x` (in radians).
+/// Returns the cosine of `x` in radians.
 pub native fn cos(x: float) -> float
-/// Returns the tangent of `x` (in radians).
+/// Returns the tangent of `x` in radians.
 pub native fn tan(x: float) -> float
 /// Returns the arcsine of `x` in radians.
 pub native fn asin(x: float) -> float
@@ -36,7 +36,7 @@ pub native fn asin(x: float) -> float
 pub native fn acos(x: float) -> float
 /// Returns the arctangent of `x` in radians.
 pub native fn atan(x: float) -> float
-/// Returns the four-quadrant arctangent of `(y, x)` in radians (`-pi..=pi`).
+/// Returns the four-quadrant arctangent of `(y, x)` in radians in `-pi..=pi`.
 pub native fn atan2(y: float, x: float) -> float
 /// Returns the hyperbolic sine of `x`.
 pub native fn sinh(x: float) -> float
@@ -51,8 +51,8 @@ pub native fn to_radians(degrees: float) -> float
 /// Converts `radians` to degrees.
 pub native fn to_degrees(radians: float) -> float
 
-/// Returns `true` if `a` and `b` are within relative tolerance `rel_tol`
-/// (scaled by the larger magnitude) or absolute tolerance `abs_tol`. Equal
+/// Returns `true` if `a` and `b` are within relative tolerance `rel_tol`,
+/// scaled by the larger magnitude, or absolute tolerance `abs_tol`. Equal
 /// infinities return `true`, and `NaN` always returns `false`.
 pub fn is_close(a: float, b: float, rel_tol: float = 1e-9, abs_tol: float = 0.0) -> bool {
     if a == b {
@@ -65,11 +65,16 @@ pub fn is_close(a: float, b: float, rel_tol: float = 1e-9, abs_tol: float = 0.0)
     diff <= rel_tol * a.abs().max(b.abs()) or diff <= abs_tol
 }
 
-/// Returns the non-negative greatest common divisor of `a` and `b` (`gcd(0, 0) == 0`).
+/// Returns the non-negative greatest common divisor of `a` and `b`, where
+/// `gcd(0, 0) == 0`. Aborts with kind `"overflow"` if the result is
+/// `2^63`.
 pub native fn gcd(a: int, b: int) -> int
 
-/// Returns the non-negative least common multiple of `a` and `b` (`0` if either input is `0`).
+/// Returns the non-negative least common multiple of `a` and `b`, or `0` if
+/// either input is `0`. Aborts with kind `"overflow"` if the result exceeds
+/// `int.max_value()`.
 pub native fn lcm(a: int, b: int) -> int
 
-/// Returns the integer square root `floor(sqrt(n))`, or aborts if `n < 0`.
+/// Returns the integer square root `floor(sqrt(n))`, or aborts with kind
+/// `"invalid"` if `n < 0`.
 pub native fn isqrt(n: int) -> int

@@ -211,7 +211,7 @@ impl Prepared {
 #[derive(crate::SandStruct)]
 #[sand(module = "http", name = "Stream")]
 pub(crate) struct ResponseStream {
-    /// HTTP status code (such as `200` or `404`).
+    /// HTTP status code, such as `200` or `404`.
     pub status: i64,
     /// Response headers in receipt order, with lowercase names.
     pub headers: Vec<(String, String)>,

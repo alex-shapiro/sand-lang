@@ -1,6 +1,7 @@
-//! Task coordination and timers (always in scope as `task`).
+//! Task coordination and timers, always in scope as `task`.
 
 /// Suspends the calling task for duration `d`.
+/// A zero or negative duration returns immediately.
 pub native fn sleep(d: duration)
 
 /// Yields execution of the calling task so other ready tasks can run.
@@ -12,7 +13,8 @@ pub fn all<T>(tasks: [Task<T>]) -> [T] {
 }
 
 /// Waits for the first task in `tasks` to complete, cancels the remaining
-/// tasks, and returns the winning result.
+/// tasks, and returns the winning result. Aborts with kind `"invalid"` if
+/// `tasks` is empty.
 pub native fn race<T>(tasks: [Task<T>]) -> T
 
 /// Runs `f` in a spawned task and returns `Some(result)` if it completes within

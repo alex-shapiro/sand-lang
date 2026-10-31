@@ -15,7 +15,7 @@ mediated through a host-defined policy with authorization rules and resource lim
 5. [Types](#5-types)
 6. [Expressions](#6-expressions)
 7. [Statements](#7-statements)
-8. [Patterns](#8-patterns)
+8. [Pattern Matching](#8-pattern-matching)
 9. [Type checking and inference](#9-type-checking-and-inference)
 10. [Runtime semantics](#10-runtime-semantics)
 11. [Concurrency and asynchronous I/O](#11-concurrency-and-asynchronous-io)
@@ -51,7 +51,7 @@ extension `.sand`. Non-ASCII characters may appear only in comments and string l
 //! documentation comment for the enclosing module (only before the first item)
 ```
 
-`help` displays doc comments (§12.15). A doc comment on an `extend` block
+`help` displays doc comments (§12.4). A doc comment on an `extend` block
 documents a built-in type. A `///` comment must appear on its own line before
 the item it documents; a `///` comment after code on the same line is a regular
 line comment. The lexer strips trailing whitespace from doc comment lines. A
@@ -440,7 +440,7 @@ test "addition is commutative" {
 
 A test block name is a string literal without interpolation. Test blocks are ignored
 during normal runs and executed by the test runner (§17.4). Inside a test block, the `test`
-module (§13.14) and its public items are imported automatically, at lower
+module and its public items are imported automatically, at lower
 precedence than module definitions and the prelude. Within a test, `?` returns `None`
 and `Err` as test failures (§6.8).
 
@@ -679,7 +679,7 @@ pub struct Error { pub message: str, pub kind: str = "error" }
 `"timeout"`, `"parse"`, `"invalid"`, `"http"`, `"closed"`, `"limit"`.
 
 The prelude also defines the lazy iterator struct `Iter<T>` and the trait
-`Iterator<T>` (§12.13).
+`Iterator<T>` (§12.3).
 
 Standard library and host modules define additional nominal types. An _opaque_ type binds a
 registered Rust type (§16.3); it does not have fields, and only its `init`
@@ -928,7 +928,7 @@ statement.
 `loop` evaluates to the value given to `break` (or `()` if `break` has no
 value). `while` and `for` evaluate to `()`; `break` in them takes no value.
 
-`for` iterates over any value whose type implements the `Iterator<T>` trait (§12.13),
+`for` iterates over any value whose type implements the `Iterator<T>` trait (§12.3),
 calling `next()` before each iteration until it returns `None`. A for loop binding
 may be a pattern: `for (k, v) in map`.
 
@@ -997,7 +997,7 @@ mutation inside the lambda is visible outside and vice versa.
 
 A macro call is written `name!(argument)`, always with parentheses.
 
-The only macro today is `json!`, which builds a `json.Json` value (§13.7) from
+The only macro today is `json!`, which builds a `json.Json` value from
 JSON literals and Sand expressions:
 
 ```sand
@@ -1102,7 +1102,7 @@ cancelling it again has no effect. Deferred code may suspend.
 
 ### 7.2 `use`
 
-A **resource** is a value whose type implements the prelude trait `Close` (§12.14).
+A **resource** is a value whose type implements the prelude trait `Close` (§12.3).
 Files and network connections are both resources. To automatically close a resource
 when it leaves scope, bind it with `use`:
 
@@ -1376,31 +1376,25 @@ t.cancel()                        // cancels if still running
   the cancellation does not resume.
 - An error in any task aborts the run (§10.3).
 
-### 11.3 The `task` module (prelude-visible as `task`)
+### 11.3 The `task` module
 
-| Function                                           | Description                                                        |
-| -------------------------------------------------- | ------------------------------------------------------------------ |
-| `task.sleep(d: duration)`                          | suspend for `d`                                                    |
-| `task.yield_now()`                                 | let other tasks run                                                |
-| `task.all<T>(ts: [Task<T>]) -> [T]`                | wait for all, results in order                                     |
-| `task.race<T>(ts: [Task<T>]) -> T`                 | wait for the first to finish; cancel the rest; fails on empty list |
-| `task.timeout<T>(d: duration, f: fn() -> T) -> T?` | run `f` in a task; `None` (and cancel) if not done within `d`      |
+The `task` module is always in scope without an `import` declaration. It
+provides `task.sleep`, `task.yield_now`, `task.all`, `task.race`, and
+`task.timeout` for coordinating tasks and timers.
 
 ### 11.4 Channels
 
-`Channel(capacity: int = 0)` creates a `Channel<T>` that holds at most
-`capacity` queued messages. If `capacity` is `0`, the channel is unbounded.
-A negative capacity fails as `"invalid"`.
+`Channel(capacity: int = 0)` creates a FIFO message queue of type `Channel<T>`
+for communicating between tasks. If `capacity` is `0`, the channel is
+unbounded; if `capacity` is positive, `send` suspends the calling task while
+the channel holds `capacity` queued messages; if `capacity` is negative,
+`Channel` aborts with kind `"invalid"`.
 
-| Method                   | Description                                                                  |
-| ------------------------ | ---------------------------------------------------------------------------- |
-| `ch.send(v: T) -> bool`  | enqueue; suspends while a bounded channel is full; returns `false` if closed |
-| `ch.recv() -> T?`        | dequeue; suspends while empty; `None` once closed and empty                  |
-| `ch.try_recv() -> T?`    | dequeue without suspending                                                   |
-| `ch.close()`             | close; pending and future `recv` drain then get `None`                       |
-| `ch.len() -> int`        | number of queued messages                                                    |
-| `ch.is_closed() -> bool` |                                                                              |
-| `ch.iter() -> Iter<T>`   | lazy iterator receiving messages until the channel is closed and empty       |
+`recv` suspends the calling task while the channel is empty and returns `None`
+once the channel is closed and drained, whereas `try_recv` returns `None`
+immediately if no message is queued. Closing a channel wakes any blocked tasks
+so that subsequent `send` calls return `false` and receivers drain remaining
+messages before receiving `None`.
 
 ### 11.5 Prompts suspend execution
 
@@ -1409,929 +1403,87 @@ The decision must be applied before execution resumes.
 
 ## 12. The prelude
 
-Prelude items are always in scope.
+Prelude types, traits, functions, and the `task` module are in scope in every
+module without an `import` declaration. The built-in types and traits declared
+in the prelude are specified in §5; their methods are documented in the
+standard library reference and via `help()` (§12.4).
 
-### 12.1 Functions
+### 12.1 Built-in functions
 
 | Function                                              | Description                            |
 | ----------------------------------------------------- | -------------------------------------- |
 | `print<T>(x: T)`                                      | write display form + `"\n"` to stdout  |
 | `eprint<T>(x: T)`                                     | write display form + `"\n"` to stderr  |
-| `fail(message: str, kind: str = "error") -> never`    | fail with an error (§10.3)             |
-| `assert(cond: bool, msg: str = "condition is false")` | fail with `msg` if false               |
-| `todo() -> never`                                     | fail as `not yet implemented`          |
+| `fail(message: str, kind: str = "error") -> never`    | abort execution with an error (§10.3)  |
+| `assert(cond: bool, msg: str = "condition is false")` | abort with kind `"assert"` if `false`  |
+| `todo() -> never`                                     | abort with kind `"todo"`               |
 | `exit(code: int) -> never`                            | stop the run with an exit code (§10.4) |
-| `help(x)`, `help()`                                   | print documentation (§12.15)           |
-| `members(x) -> [str]`, `members() -> [str]`           | list member names (§12.15)             |
+| `help(x)`, `help()`                                   | print documentation (§12.4)            |
+| `members(x) -> [str]`, `members() -> [str]`           | list member names (§12.4)              |
 
 ### 12.2 Universal methods
 
-Every value has `to_str() -> str` and `debug() -> str`.
+Every value supports `.to_str() -> str` (display form, §10.9) and
+`.debug() -> str` (debug form, §10.9), unless shadowed by an inherent or trait
+method (§9) such as `bytes.to_str() -> Result<str, Error>`.
 
-### 12.3 `int`
+### 12.3 Built-in protocol traits
 
-`abs`, `pow(e: int) -> int`, `min(o)`, `max(o)`, `clamp(lo, hi)`, `to_float`,
-`to_str_radix(radix: int) -> str` (2..36), `sign() -> int`, `is_even`, `is_odd`,
-`to_char() -> str?` (Unicode scalar to one-char string). Static:
-`int.max_value() -> int`, `int.min_value() -> int`. Parsing: `str.parse_int`
-(§12.5).
-
-### 12.4 `float`
-
-`abs`, `floor`, `ceil`, `round` (half away from zero), `trunc`, `sqrt`, `pow(e:
-float)`, `min`, `max`, `clamp`, `is_nan`, `is_finite`, `is_infinite`,
-`to_int() -> int` (truncates; fails on NaN or out of range), `to_str_fixed(digits:
-int) -> str`. `min` and `max` ignore a NaN argument. Parsing: `str.parse_float`
-(§12.5).
-
-### 12.5 `str`
-
-| Method                                                                             | Description                                                                           |
-| ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| `len() -> int`                                                                     | byte length                                                                           |
-| `is_empty() -> bool`                                                               |                                                                                       |
-| `chars() -> [str]`                                                                 | Unicode scalars                                                                       |
-| `char_count() -> int`                                                              | number of scalars                                                                     |
-| `codepoints() -> [int]`                                                            | scalar values                                                                         |
-| `bytes() -> bytes`                                                                 | UTF-8 encoding                                                                        |
-| `contains(sub: str) -> bool`                                                       |                                                                                       |
-| `starts_with(p: str)`, `ends_with(s: str)`                                         |                                                                                       |
-| `find(sub: str) -> int?`, `rfind(sub: str) -> int?`                                | byte offset                                                                           |
-| `replace(from: str, to: str) -> str`                                               | all occurrences; an empty `from` returns the string unchanged                         |
-| `split(sep: str) -> [str]`                                                         | `"".split(",") == [""]`; empty `sep` fails                                            |
-| `split_once(sep: str) -> (str, str)?`                                              |                                                                                       |
-| `split_whitespace() -> [str]`                                                      |                                                                                       |
-| `lines() -> [str]`                                                                 | splits on `\n`, strips a trailing `\r` from each line, no final empty line            |
-| `trim()`, `trim_start()`, `trim_end()`                                             | whitespace                                                                            |
-| `strip_prefix(p: str) -> str?`, `strip_suffix(s: str) -> str?`                     |                                                                                       |
-| `to_upper()`, `to_lower()`                                                         | Unicode-aware                                                                         |
-| `repeat(n: int) -> str`                                                            |                                                                                       |
-| `pad_start(width: int, fill: str = " ")`, `pad_end(...)`                           | pad to `width` characters                                                             |
-| `parse_int(radix: int = 10) -> int?`, `parse_float() -> float?`                    | strict (no whitespace); radix 2..36; floats also `inf`, `-inf`, `nan`                 |
-| `is_digit()`, `is_alpha()`, `is_alnum()`, `is_space()`, `is_upper()`, `is_lower()` | true if non-empty and all chars satisfy (ASCII classes for digit; Unicode for others) |
-| `char_at(i: int) -> str?`                                                          | the scalar starting at byte offset `i`                                                |
-| `ord() -> int`                                                                     | scalar value of a one-char string (fails otherwise)                                   |
-| `reversed() -> str`                                                                | by scalars                                                                            |
-| `chars_iter() -> Iter<str>`                                                        | lazy iterator over the scalars (§12.13)                                               |
-
-### 12.6 `bytes`
-
-`len`, `is_empty`, `get(i) -> int?`, `to_list() -> [int]`, `to_str() -> Result<str>`
-(strict UTF-8; this shadows the universal `to_str`, use `debug()` for display),
-`to_str_lossy() -> str`, `to_hex() -> str`, `contains(b: bytes)`, `find(b: bytes)
--> int?`, slicing. Static: `bytes.from_list(xs: [int]) -> bytes` (fails if any
-element outside `0..=255`), `bytes.from_hex(s: str) -> bytes?`.
-
-### 12.7 `duration`
-
-`nanos() -> int`, `micros() -> int`, `millis() -> int`, `secs() -> float`,
-`abs()`. Static: `duration.from_nanos(n: int)`, `duration.from_millis(n: int)`,
-`duration.from_secs(s: float)`.
-
-### 12.8 `[T]`
-
-| Method                                                                          | Description                             |
-| ------------------------------------------------------------------------------- | --------------------------------------- |
-| `len()`, `is_empty()`                                                           |                                         |
-| `push(x: T)`, `pop() -> T?`                                                     | at the end                              |
-| `insert(i: int, x: T)`, `remove(i: int) -> T`                                   | fail if out of range                    |
-| `extend(xs: [T])`, `clear()`                                                    |                                         |
-| `get(i: int) -> T?`, `first() -> T?`, `last() -> T?`                            |                                         |
-| `contains(x: T) -> bool`, `index_of(x: T) -> int?`                              | `T: Eq`                                 |
-| `reverse()` (in place), `reversed() -> [T]`                                     |                                         |
-| `sort()`, `sorted() -> [T]`                                                     | `T: Ord`, stable                        |
-| `sort_by<K: Ord>(key: fn(T) -> K)`, `sorted_by<K: Ord>(key: fn(T) -> K) -> [T]` | stable                                  |
-| `map<U>(f: fn(T) -> U) -> [U]`                                                  |                                         |
-| `filter(f: fn(T) -> bool) -> [T]`                                               |                                         |
-| `filter_map<U>(f: fn(T) -> U?) -> [U]`                                          |                                         |
-| `flat_map<U>(f: fn(T) -> [U]) -> [U]`                                           |                                         |
-| `each(f: fn(T))`                                                                |                                         |
-| `fold<A>(init: A, f: fn(A, T) -> A) -> A`                                       |                                         |
-| `reduce(f: fn(T, T) -> T) -> T?`                                                |                                         |
-| `any(f: fn(T) -> bool)`, `all(f: fn(T) -> bool)`                                |                                         |
-| `find(f: fn(T) -> bool) -> T?`, `find_index(f: fn(T) -> bool) -> int?`          |                                         |
-| `count(f: fn(T) -> bool) -> int`                                                |                                         |
-| `sum() -> T`, `product() -> T`                                                  | `T: Num`; empty: `T.zero()` / `T.one()` |
-| `min() -> T?`, `max() -> T?`                                                    | `T: Ord`                                |
-| `min_by<K: Ord>(key: fn(T) -> K) -> T?`, `max_by<K: Ord>(...)`                  | first minimal / first maximal           |
-| `enumerate() -> [(int, T)]`                                                     |                                         |
-| `zip<U>(other: [U]) -> [(T, U)]`                                                | truncates to the shorter                |
-| `take(n: int)`, `skip(n: int)`                                                  | clamp to length                         |
-| `take_while(f)`, `skip_while(f)`                                                |                                         |
-| `chunks(n: int) -> [[T]]`, `windows(n: int) -> [[T]]`                           | `n > 0`                                 |
-| `dedup() -> [T]`                                                                | remove consecutive duplicates           |
-| `unique() -> [T]`                                                               | first occurrences, `T: Hash`            |
-| `group_by<K: Hash>(key: fn(T) -> K) -> [K: [T]]`                                |                                         |
-| `partition(f: fn(T) -> bool) -> ([T], [T])`                                     |                                         |
-| `copy() -> [T]`                                                                 | shallow copy                            |
-| `swap(i: int, j: int)`                                                          |                                         |
-| `join(sep: str = "") -> str`                                                    | `T = str` only                          |
-| `to_set() -> Set<T>`                                                            | `T: Hash`                               |
-| `iter() -> Iter<T>`                                                             | lazy iterator (§12.13)                  |
-
-Methods that take a function iterate over the initial list length in the same
-way as a `for` loop (§6.9). Elements appended by the function during iteration
-are excluded.
-
-### 12.9 `[K: V]`
-
-`len`, `is_empty`, `get(k) -> V?`, `get_or(k, default: V) -> V`,
-`contains(k) -> bool`, `insert(k, v) -> V?` (returns old value), `remove(k) -> V?`,
-`keys() -> [K]`, `values() -> [V]`, `entries() -> [(K, V)]`, `clear()`,
-`copy()`, `map_values<W>(f: fn(V) -> W) -> [K: W]`, `filter(f: fn(K, V) -> bool)
--> [K: V]`, `extend(other: [K: V])`, `get_or_insert(k, default: V) -> V` (inserts
-when absent and returns the stored value), `iter() -> Iter<(K, V)>` (§12.13).
-
-### 12.10 `Set<T>`
-
-`Set(items: [T] = [])` creates a set of the distinct elements of `items`.
-`len`, `is_empty`, `add(x) -> bool` (true if newly added), `remove(x) -> bool`,
-`contains(x)`, `to_list() -> [T]`, `union(o)`, `intersection(o)`,
-`difference(o)`, `is_subset(o)`, `copy()`, `clear()`, `iter() -> Iter<T>`
-(§12.13).
-
-### 12.11 `Option<T>` and `Result<T, E>`
-
-Option: `is_some`, `is_none`, `unwrap() -> T` (fails with `unwrap: unwrap on None`),
-`expect(msg: str) -> T`, `unwrap_or(d: T) -> T`, `map<U>(f) -> U?`,
-`and_then<U>(f: fn(T) -> U?) -> U?`, `or_else(f: fn() -> T?) -> T?`,
-`ok_or<E>(e: E) -> Result<T, E>`, `filter(f: fn(T) -> bool) -> T?`.
-
-Result: `is_ok`, `is_err`, `unwrap() -> T` (fails with `unwrap: unwrap on Err: <err>`),
-`expect(msg: str) -> T`, `unwrap_or(d: T) -> T`, `unwrap_err() -> E`,
-`map<U>(f) -> Result<U, E>`, `map_err<F>(f: fn(E) -> F) -> Result<T, F>`,
-`and_then<U>(f: fn(T) -> Result<U, E>) -> Result<U, E>`, `ok() -> T?`,
-`err() -> E?`.
-
-### 12.12 `Range`
-
-Range methods allocate a list only if the return type is `[int]`.
-
-- `start() -> int`, `end() -> int` (exclusive end bound), `len() -> int`,
-  `is_empty() -> bool`, `contains(i: int) -> bool`. `end` and `len` fail with
-  `overflow` if the result exceeds `int::MAX`.
-- `first() -> int?`, `last() -> int?`, `min() -> int?`, `max() -> int?`:
-  return `None` if the range is empty.
-- `sum() -> int`, `product() -> int`: compute the exact result (`0` or `1` if
-  empty) in `O(1)` time, or fail with `overflow` if the result is out of
-  `int` bounds.
-- Function-taking methods (§12.8) for `int` elements: `map`, `filter`,
-  `filter_map`, `flat_map`, `each`, `fold`, `reduce`, `any`, `all`, `find`,
-  `find_index` (0-based offset from `start`), `count`, `take_while`,
-  `skip_while`, `partition`, `group_by`, `min_by`, `max_by`.
-- `to_list() -> [int]`, `reversed() -> [int]`, `step_by(n: int) -> [int]`
-  (every `n`-th integer from the start; fails if `n <= 0`), `iter() ->
-Iter<int>` (§12.13).
-
-### 12.13 Iterators
-
-Lists, map, and range methods above are eager. For example, `xs.map(f)` calls
-`f` on every element at once and builds a new list. Lazy iterators are different.
-They do work only when elements are requested, one at a time, so pipelines avoid
-building intermediate lists, stop early, and can iterate over endless sources:
-
-```sand
-let firsts = Iter.count_from(1).map(n => n * n).filter(n => n % 3 == 0).take(3)
-print(firsts.to_list())                       // [9, 36, 81]
-for (i, line) in text.lines().iter().enumerate().skip(1) { ... }
-```
-
-The prelude declares an `Iterator` trait:
+The prelude declares two traits that integrate with language control flow and
+resource management:
 
 ```sand
 pub trait Iterator<T> {
-    fn next(self) -> T?                 // the next element; None once exhausted
-    fn iter(self) -> Iter<T> { ... }    // a lazy Iter over the remaining elements
+    fn next(self) -> T?
+    fn iter(self) -> Iter<T> { Iter(next: () => self.next()) }
 }
-```
 
-`for` loops and comprehensions iterate over any value whose type implements
-`Iterator<T>` (§6.9). User types implement it like any trait (§4.9):
-
-```sand
-struct Countdown { var n: int }
-impl Iterator<int> for Countdown {
-    fn next(self) -> int? {
-        if self.n <= 0 { return None }
-        self.n -= 1
-        Some(self.n + 1)
-    }
-}
-for x in Countdown(n: 3) { print(x) }          // 3, 2, 1
-print(Countdown(n: 3).iter().map(x => x * 2).to_list())  // [6, 4, 2]
-fn total<I: Iterator<int>>(it: I) -> int { it.iter().sum() }
-```
-
-The prelude declares a lazy `Iter<T>` struct that implements `Iterator<T>`.
-It is obtained with `iter()` from lists, maps (`(key, value)` pairs), sets,
-ranges, channels and any `Iterator`, with `chars_iter()` from strings, or from
-static methods:
-
-| Source                                                    | Elements                                                          |
-| --------------------------------------------------------- | ----------------------------------------------------------------- |
-| `Iter.from_fn(f: fn() -> T?)`                             | the results of `f` until it returns `None` (also `Iter(next: f)`) |
-| `Iter.empty()`                                            | none                                                              |
-| `Iter.once(x: T)`                                         | `x`                                                               |
-| `Iter.repeat(x: T)`                                       | `x` forever                                                       |
-| `Iter.count_from(start: int, step: int = 1) -> Iter<int>` | `start`, `start + step`, ... forever                              |
-| `Iter.successors(first: T?, f: fn(T) -> T?)`              | `first`, then `f` of the previous element until `None`            |
-
-Adapters return a new `Iter` and do no work until it is consumed:
-`map<U>(f: fn(T) -> U)`, `filter(f: fn(T) -> bool)`, `filter_map<U>(f: fn(T) ->
-U?)`, `flat_map<U>(f: fn(T) -> Iter<U>)`, `enumerate() -> Iter<(int, T)>`,
-`zip<U>(other: Iter<U>) -> Iter<(T, U)>` (ends with the shorter), `chain(other:
-Iter<T>)`, `take(n: int)` (pulls at most `n` elements from its source),
-`skip(n: int)`, `take_while(f)`, `skip_while(f)`, `step_by(n: int)` (the first
-element, then every `n`-th; fails if `n <= 0`), `inspect(f: fn(T))` (calls `f`
-on each element as it passes).
-
-Consumers pull elements from an iterator: `to_list() -> [T]`, `to_set() -> Set<T>` (`T:
-Hash`), `to_map() -> [K: V]` (for `Iter<(K, V)>`, `K: Hash`; a repeated key
-keeps its last value), `join(sep: str = "") -> str` (for `Iter<str>`),
-`each(f: fn(T))`, `fold<A>(init: A, f: fn(A, T) -> A) -> A`, `reduce(f: fn(T, T)
--> T) -> T?`, `sum() -> T` and `product() -> T` (`T: Num`; `T.zero()` /
-`T.one()` when empty), `count() -> int` (the number of remaining elements), `any(f)`
-and `all(f)` (stop at the first decisive element), `find(f) -> T?`,
-`find_index(f) -> int?`, `first() -> T?` (the next element), `last() -> T?`,
-`nth(n: int) -> T?` (the element `n` positions on, from 0), `min()`/`max() ->
-T?` (`T: Ord`; the first minimal/maximal), `min_by`/`max_by<K: Ord>(key: fn(T)
--> K) -> T?`. A `for` loop over an `Iter` is a consumer too.
-
-#### Iterator Semantics
-
-**Laziness.** Creating an iterator or applying an adapter calls no
-function; each element is produced when a consumer asks for it, passing
-through the whole pipeline before the next one is requested. Adapters
-request only what they need: `Iter.repeat(1).take(3).sum()` terminates.
-
-**Single pass.** An iterator is a reference to its state: elements taken
-by any consumer (or by `next()` on any copy of the iterator, including one
-wrapped by an adapter) are gone. Consuming an exhausted iterator yields no
-elements.
-
-**Exhaustion.** List, range, map, set, string, and channel iterators
-return `None` after exhaustion; `Iter.from_fn` iterators call
-their function on each request. Adapters stop pulling from their source as
-soon as it returns `None`.
-
-**Mutation.** A list iterator behaves like a `for` loop (§6.9), with the
-length taken when `iter()` is called. Map and set iterators work on a
-snapshot of the entries taken by `iter()`, unaffected by later changes. A
-channel iterator receives live, suspending while the channel is empty.
-
-**Limits.** Iterators are ordinary Sand code: every element costs at least
-one unit of fuel (§15.2), so endless iterators are bounded by the
-instruction, time and memory limits (§15) like any loop.
-
-**Cost.** A pipeline written as one expression where it is
-consumed (`for x in xs.iter().map(f).filter(g) { ... }`,
-`xs.iter().map(f).sum()`), like an eager method taking a function
-(`xs.map(f)`), compiles to a single loop with similar performance as a
-hand-written one. An iterator that is stored and consumed later costs
-about one closure call per adapter and element.
-
-### 12.14 `Close`
-
-```sand
 pub trait Close {
     fn close(self)
 }
-impl<T: Close> Close for T?        // closes the value, if any
-impl<T: Close> Close for [T]       // closes the elements, last first
 ```
 
-Resources (§7.2) implement `Close`: `fs.File`, `net.Conn`, `net.Listener`,
-`http.Body`, `http.Stream`, `http.Upload`, `http.Reply`, `http.Server` and
-`http.Request`. Closing a
-resource again does nothing; its other operations fail with kind
-`"closed"` once it is closed. A struct holding a resource should implement
-`Close` by closing it (lint `resource-field`, §17.2).
+- **`Iterator<T>` and `Iter<T>`:** `for` loops and comprehensions (§6.9) accept
+  any value whose type implements `Iterator<T>`, calling `next()` before each
+  step until it returns `None`. `Iter<T>` is a single-pass lazy iterator struct
+  whose `next: fn() -> T?` closure produces elements on demand. When an
+  `Iter<T>` pipeline is written as a single expression at the point where it is
+  consumed (such as `for x in xs.iter().map(f).filter(g)` or
+  `xs.iter().map(f).sum()`), the compiler fuses the pipeline into a single
+  loop without intermediate closure allocations.
+- **`Close`:** `use` bindings (§7.2) accept any value whose type implements
+  `Close` and invoke `Close.close` when the enclosing block exits. The prelude
+  implements `Close` for `T?` and `[T]` where `T: Close`. Closing an already
+  closed resource is a no-op, and subsequent operations on a closed resource
+  fail with kind `"closed"`.
 
-### 12.15 `help` and `members`
+### 12.4 `help` and `members`
 
-The checker evaluates calls of `help` and `members` to give the caller interactive help:
+The type checker resolves `help` and `members` at compile time to provide
+interactive documentation and introspection:
 
 - a module, whether imported or not: `help(json)`
-- a type, trait or type parameter: `help(json.Json)`
-- a function, method, trait method, field, variant or variable: `help(json.Json.get)`
+- a type, trait, or type parameter: `help(json.Json)`
+- a function, method, trait method, field, variant, or variable: `help(json.Json.get)`
 - a string literal that identifies any of those targets: `help("json.Json.get")`
-- a non-evaluated expression: `help([1, 2])`
+- any other expression, which is type-checked but not evaluated: `help([1, 2])`
 
-`help(x)` prints the documentation of `x` to standard output, as `print`
-would. It contains `x`'s declaration and doc comment, and for a module its items,
-for a type its variants, fields, methods and the traits it implements, for a trait
-its methods and implementing types, for any other expression its type and that type's
-documentation.
+`help(x)` writes the declaration, doc comment, and member summary of `x` to
+standard output using the same `Stdout` capability and output limit rules as
+`print`. `help()` prints an overview of the prelude and all registered modules.
 
-Calling `help` on a list of items shows the first sentence of each doc comment.
+`members(x)` returns the sorted list of member names accessible after `x.`: a
+module's public items, or the variants, fields, and methods of a type or
+expression. `members()` returns the sorted names in scope in the current
+module, excluding prelude items.
 
-`help()` prints an overview of the prelude and the modules.
-
-`members(x)` returns the list names in `x.`, sorted: a module's
-public items, or the variants, fields and methods of a type or of an
-expression's type. `members()` returns the names in scope, excluding the
-prelude.
-
-Neither `help` nor `members` can be used as a function value.
-
-A script may define an item named `help` or `members`, shadowing the built-in functions.
+Neither `help` nor `members` can be used as a first-class function value. A
+module may declare its own `help` or `members` binding, shadowing the built-in
+intrinsic.
 
 ## 13. Standard library
 
-Each module is imported with `import <name>`. I/O functions return `Result`
-values with the `Error` kinds of §5.4 and are subject to the policy (§14);
-unless stated otherwise, a denial is `Err(Error(..., kind: "permission_denied"))`.
-
-### 13.1 `base64`
-
-`encode(data: bytes) -> str`, `decode(text: str) -> Result<bytes>` (standard
-alphabet, padding required), `encode_url(data: bytes) -> str`,
-`decode_url(text: str) -> Result<bytes>` (URL-safe alphabet, no padding;
-padding accepted on decode), `encode_str(text: str) -> str`.
-
-### 13.2 `crypto`
-
-`sha256(data: bytes) -> bytes`, `sha1(data: bytes) -> bytes`,
-`hmac_sha256(key: bytes, data: bytes) -> bytes`, `md5(data: bytes) -> bytes`,
-`constant_time_eq(a: bytes, b: bytes) -> bool`.
-
-### 13.3 `fs`
-
-Paths are strings. Relative paths are resolved against the engine's working
-directory (set by the host; default: the module root).
-
-| Function                                                                         | Capability                        |
-| -------------------------------------------------------------------------------- | --------------------------------- |
-| `read_text(path) -> Result<str>`                                                 | `FsRead`                          |
-| `read_bytes(path) -> Result<bytes>`                                              | `FsRead`                          |
-| `write_text(path, text: str) -> Result<()>`                                      | `FsWrite`                         |
-| `write_bytes(path, data: bytes) -> Result<()>`                                   | `FsWrite`                         |
-| `exists(path) -> Result<bool>`                                                   | `FsRead`                          |
-| `is_file(path)`, `is_dir(path) -> Result<bool>`                                  | `FsRead`                          |
-| `list_dir(path) -> Result<[str]>` (sorted names)                                 | `FsRead`                          |
-| `create_dir(path, recursive: bool = false) -> Result<()>`                        | `FsWrite`                         |
-| `remove_file(path)`, `remove_dir(path, recursive: bool = false)`                 | `FsWrite` (entry)                 |
-| `rename(from, to) -> Result<()>`                                                 | `FsWrite` on both (entries)       |
-| `copy(from, to) -> Result<()>`                                                   | `FsRead` on from, `FsWrite` on to |
-| `metadata(path) -> Result<Metadata>`                                             | `FsRead`                          |
-| `open(path, mode: Mode = Mode.Read) -> Result<File>`                             | by mode, below                    |
-| `join(parts: [str]) -> str`, `basename(p)`, `dirname(p)`, `extension(p) -> str?` | none                              |
-
-`struct Metadata { pub size: int, pub is_file: bool, pub is_dir: bool, pub modified: time.Instant? }`.
-
-`/` is a separator on every platform (on Windows `\` is too). `join` inserts
-the platform's separator, and a part that is an absolute path replaces the
-parts before it; `basename`, `dirname` and `extension` are lexical. A path
-longer than 4096 bytes or containing NUL fails with kind `"invalid"` before
-anything else is done. Capabilities and prompts report absolute, normalized paths (§14.1).
-Permission errors report the path (`permission denied: read data/x.txt`),
-revealing neither symlink targets nor the on-disk names of inaccessible entries.
-
-Reading, writing and copying accept regular files only (kind `"invalid"`
-otherwise, e.g. for directories and FIFOs). `copy` copies the contents
-only: the new file gets default permissions, never the source's execute or
-setuid bits. `create_dir(path, recursive: true)` checks `FsWrite` for every
-directory it creates, and creates none that existed when it checked.
-
-Symbolic links (§14.1):
-
-- Most functions follow symlinks: the policy is checked for the resolved
-  location (the link's target), which the operation then accesses
-  **without following any symlink**, in the directory the resolution
-  reached, even if that directory is moved or replaced by a symlink
-  meanwhile. If a symlink replaces the final entry between the check and
-  the operation, or the path leads through a dangling symlink (one whose
-  target, or a directory after it, did not exist when the path was
-  resolved), the operation fails with kind `"permission_denied"`; `exists`,
-  `is_file` and `is_dir` return `false` instead.
-- `remove_file`, `remove_dir` and `rename` act on the entry itself: a final
-  symlink is removed or renamed, never its target, and the capability
-  ("entry") is checked for the link's own path (its directory resolved).
-- `rename` fails with `"permission_denied"` if a deny rule decides an entry
-  of the tree it moves or replaces, at either the entry's old path or its
-  new one. `remove_dir(path, recursive: true)` makes the same check before
-  removing anything, and also checks each entry before removing it.
-
-On Windows, a junction counts as a symlink, and names that Win32 would
-alter or treat specially (ending in `.` or a space, containing `:`, or a
-reserved device name such as `CON` or `nul.txt`) fail with kind `"invalid"`.
-
-A hard link to an outside file, placed in an allowed directory by someone
-else, is the same file and may be accessed; the engine cannot in general
-tell it from an ordinary file. Do not allow access to directories that
-untrusted parties can write hard links into.
-
-**Open files.** `open` opens a regular file for incremental reading and
-writing, returning a `File` (a resource, §7.2):
-
-```sand
-pub enum Mode { Read, Write, Append, CreateNew, ReadWrite }
-use f = fs.open("data.csv")?
-while let Some(line) = f.read_line()? { ... }
-```
-
-| Mode        | Opens                                                                 | Capability          |
-| ----------- | --------------------------------------------------------------------- | ------------------- |
-| `Read`      | an existing file, for reading                                         | `FsRead`            |
-| `Write`     | for writing from the start, creating the file or truncating it        | `FsWrite`           |
-| `Append`    | for writing at the end (every write), creating the file if needed     | `FsWrite`           |
-| `CreateNew` | a new file for writing; kind `"already_exists"` if something is there | `FsWrite`           |
-| `ReadWrite` | an existing file, for reading and writing in place                    | `FsRead`, `FsWrite` |
-
-The policy is checked **once**, at `open`. The `File` then stays the file
-that was checked: renaming or removing its path, or putting a symlink in
-its place, does not affect it (a removed file stays readable and writable
-until closed, and in a memory file system counts against its capacity until
-then). It counts against `max_open_resources` until closed or collected.
-
-`File` implements `io.Reader`, `io.Writer` (§13.5) and `Close`. Reads and
-writes move its position (`Append` writes go to the end); reads are
-buffered (16 KiB, counted against `max_memory`), writes are not. `read(max)`
-returns at most 1 MiB; `read_line` fails with kind `"limit"` (dropping what
-it read) if the line does not fit in memory, and `read_all`, before
-reading, if the rest of the file does not. Methods: `seek(pos: int)` (from
-the start; past the end is allowed, and writing there fills the gap with
-zeros), `position() -> Result<int>`, `metadata() -> Result<Metadata>`,
-`set_len(len: int)` (truncates or zero-extends; not in `Read` mode),
-`sync() -> Result<()>` (waits until written data is durable), `path() ->
-str` (as given to `open`). Reading a file not opened for reading, or
-writing one not opened for writing, fails with kind `"invalid"`; any
-operation on a closed file with kind `"closed"`.
-
-**Memory file systems.** An engine may give scripts a memory file system
-instead of the host's (§16.4; always without the `os` feature). Paths are
-absolute from its root `/` (the default working directory and module root)
-and normalized lexically. It has no symlinks, hard links or permissions,
-names are case sensitive everywhere, and a write that would exceed its
-capacity fails with kind `"limit"`. Operations complete at once rather than
-off the VM thread.
-
-### 13.4 `http`
-
-`http` and `net` (§13.10) need operating-system access: without the `os`
-feature (§16.4) they do not exist, and importing them is a compile error
-saying so.
-
-Headers are lists of `(name, value)` pairs, in order; a header sent several
-times (such as `Set-Cookie`) occurs several times. Names of received
-headers are lower-cased.
-
-```sand
-pub struct Response { pub status: int, pub headers: [(str, str)], pub body: bytes, pub url: str }
-pub fn get(url: str, headers: [(str, str)] = [], timeout: duration = 30s) -> Result<Response>
-pub fn request(method: str, url: str, headers: [(str, str)] = [], body: bytes = b"",
-               timeout: duration = 30s, follow_redirects: bool = true) -> Result<Response>
-pub fn post(url: str, body: bytes, headers: [(str, str)] = [], timeout: duration = 30s) -> Result<Response>
-pub fn post_json<T>(url: str, value: T, headers: [(str, str)] = [], timeout: duration = 30s) -> Result<Response>
-pub fn put_json<T>(url: str, value: T, headers: [(str, str)] = [], timeout: duration = 30s) -> Result<Response>
-pub fn patch_json<T>(url: str, value: T, headers: [(str, str)] = [], timeout: duration = 30s) -> Result<Response>
-pub fn request_json<T>(method: str, url: str, value: T, headers: [(str, str)] = [], timeout: duration = 30s,
-                       follow_redirects: bool = true) -> Result<Response>
-pub fn open(method: str, url: str, headers: [(str, str)] = [], body: bytes = b"",
-            timeout: duration = 30s, follow_redirects: bool = true) -> Result<Stream>
-pub struct Stream { pub status: int, pub headers: [(str, str)], pub body: Body, pub url: str }
-pub fn upload(method: str, url: str, headers: [(str, str)] = [], timeout: duration = 30s) -> Result<Upload>
-upload.finish() -> Result<Stream>
-```
-
-`get`, `post` and `request` read the whole response. `post_json`, `put_json`,
-`patch_json` and `request_json` send `json.encode(value)` as the body, with
-`Content-Type: application/json` unless `headers` set a content type. Response
-methods: `text() -> Result<str>`, `json() -> Result<json.Json>`, `ok() -> bool`
-(200..=299), `header(name: str) -> str?` (case-insensitive; the first value),
-`header_values(name: str) -> [str]`. HTTP/1.1 over TCP; `https` uses TLS with
-the `tls` feature (default). Up to 10 redirects (301, 302, 303, 307, 308)
-are followed. Bodies may be delimited by `Content-Length`, chunked encoding or
-connection close; one larger than `max_http_body` fails with kind `"limit"`.
-Non-2xx statuses are **not** errors. At every hop, `timeout` bounds connecting
-and receiving the head (then each wait for body data), and the capabilities
-`Net(host:port)`, then `NetAddr` for the resolved addresses (§14.6), are
-checked.
-
-`open` returns once the response's head has arrived. Its `body`, an
-`http.Body` (an `io.Reader`), is read as it arrives, so a body larger than
-memory can be processed a chunk at a time (`io.copy(resp.body, file)`);
-`max_http_body` applies only to its `read_all` and `read_text`. `Stream`
-has `ok`, `header` and `header_values`, and implements `Close` (closing its
-body). A body holds its connection, counted against `max_open_resources`,
-until it is read to its end, closed (closing the connection), or collected.
-
-Once a response's body is read to its end, its connection is kept for the
-next request to the same origin, unless either side sent `Connection:
-close`. Up to 16 idle connections are kept, 4 per origin, for up to 20
-seconds; they count against `max_open_resources` and `max_memory`. A server
-may close an idle connection just as a request is sent on it. If that happens before any
-of the response arrives, a `GET`, `HEAD`, `PUT`, `DELETE`, `OPTIONS` or
-`TRACE` request is sent again on a new connection; other requests fail.
-
-`upload` connects and returns an `Upload`, an `io.Writer` for the request's
-body: chunked, or exactly as long as a `content-length` in `headers` (a
-write past it, or a `finish` short of it, fails with kind `"invalid"`).
-`finish` ends the body and waits for the response's head; the response's
-body is read from the upload's connection, which closing the `Upload`
-closes. `timeout` bounds connecting and waiting for the head. Redirects are
-not followed.
-
-Server:
-
-```sand
-pub fn serve(ip: str, port: int) -> Result<Server>      // capability NetListen(ip:port)
-server.accept() -> Result<Request>
-server.addr() -> net.SocketAddr
-pub struct Request { pub method: str, pub path: str, pub query: str, pub headers: [(str, str)], pub body: Body, pub conn: net.Conn }
-request.respond(status: int, body: bytes, headers: [(str, str)] = []) -> Result<()>
-request.respond_stream(status: int, headers: [(str, str)] = []) -> Result<Reply>
-reply.finish() -> Result<()>
-request.bytes() -> Result<bytes>
-request.text() -> Result<str>
-request.json() -> Result<json.Json>
-request.header(name: str) -> str?                 // case-insensitive; the first value
-request.header_values(name: str) -> [str]
-```
-
-`Server` and `Request` implement `Close` (`Server.close` stops accepting
-and closes the connections being read; `Request.close` closes the
-request's body and connection). `accept` returns a request once its head
-has arrived; `path` and `query` are the parts of the target before and after `?`. The
-handler reads the body (`request.body`, or `bytes`, `text`, `json`, which
-read the rest of it, at most `max_http_body` bytes), each wait bounded by
-30 seconds. A client that sent `Expect: 100-continue` is answered `100
-Continue` when the handler starts reading the body.
-
-`conn` is the client connection from which `request.body` reads. A handler can
-use `conn` directly between body reads (reading from `conn` consumes bytes
-after the bytes already read by `body`), and closing `conn` or `request` ends
-the body. `respond` writes a response with a `content-length` header (omitting
-the body for `HEAD` requests and bodyless status codes) to `conn`, and then
-closes `request`. `respond_stream` returns a `Reply` (`io.Writer`) that frames
-the response body in the same way as `Upload` (or terminates the body by
-closing the connection for HTTP/1.0 clients without `content-length`); the
-server sends the response head on the first write or `finish`, and closing the
-`Reply` finishes the response. A script can also write raw HTTP framing
-directly to `conn` and close it.
-
-After `respond` or `finish`, the server reads the client's next request
-from the connection (and `conn` is closed) if the client allows it
-(HTTP/1.1 without `Connection: close`, or HTTP/1.0 with `Connection:
-keep-alive`) and the handler read the request's body to its end before
-responding. Otherwise the response says `Connection: close` and the
-connection is closed.
-
-While `accept` waits, it reads the heads of requests concurrently from
-the connections it accepts and those waiting for their next request,
-returning the first that is complete; reading continues with the next
-`accept`. A `Server` (opaque) counts against `max_open_resources` like a
-listener, as does each connection being read, which on acceptance takes a
-slot and an 8 KiB read buffer (counted against `max_memory`); while no
-slot is free, connections wait in the listener's backlog. At most half of
-`max_open_resources` connections are read at once: beyond that, the
-earliest is answered `408 Request Timeout` and closed. A connection is
-also answered and closed with `408` if its head is not complete within 30
-seconds of acceptance (or of its first byte), `400 Bad Request` if the
-head is malformed, and `503 Service Unavailable` if its buffer does not
-fit in memory. A connection waiting for its next request is closed
-without an answer if none of it arrives within 30 seconds, if newer
-connections take its place, or if the run reaches `max_open_resources` or
-`max_memory`.
-
-On the web (§16.5), `http` is a client over the browser's `fetch` with the
-same `Response`, `Stream`, `get`, `post`, `request` and `open`, and no
-`upload` or `serve`. `Net(host, port)` is decided for the host as written before
-anything is sent; the browser resolves names, so `NetAddr` is not checked.
-A response is readable only if its site allows it (CORS), with the headers
-it exposes. The browser sets some request headers itself and sends no
-cookies. A redirect fails with kind `"http"`, since the browser hides its
-target from the policy. `timeout` covers the whole exchange, and every body
-is read whole, so `max_http_body` also applies to `open`.
-
-### 13.5 `io`
-
-Files (§13.3), connections (§13.10), HTTP bodies (§13.4) and the standard
-streams implement two traits:
-
-```sand
-pub trait Reader {
-    fn read(self, max: int = 65536) -> Result<bytes>  // at most max bytes, waiting until some are available; empty at the end
-    fn read_line(self) -> Result<str?>                // without its \n or \r\n; None at the end; kind "invalid" if not UTF-8
-    fn read_all(self) -> Result<bytes>                // the rest
-    fn read_text(self) -> Result<str>                 // the rest as UTF-8 (kind "invalid" otherwise)
-    fn lines(self) -> Iter<Result<str>>               // the remaining lines, read lazily; an error ends them
-}
-pub trait Writer {
-    fn write(self, data: bytes) -> Result<()>         // all of data
-    fn write_str(self, text: str) -> Result<()>       // all of text, as UTF-8
-    fn flush(self) -> Result<()>                      // what the writer buffers, if anything
-}
-pub fn copy<R: Reader, W: Writer>(src: R, dst: W) -> Result<int>   // the bytes copied, a chunk at a time
-pub let stdin: Stdin                                  // a Reader
-pub let stdout: Stdout                                // a Writer
-pub let stderr: Stderr                                // a Writer
-```
-
-`read` may return fewer bytes than are left. `read_text`, `lines`,
-`write_str` and `flush` have default implementations; user types may
-implement the traits.
-
-Reading `stdin` needs the capability `Stdin`; writing `stdout` and `stderr`
-needs `Stdout` and `Stderr`, allowed unless the policy denies them. A
-denied write fails with kind `"permission_denied"` (`print` and `eprint`,
-§12.1, fail). The output limit applies (§15.1).
-
-The CLI buffers standard output like C's stdio (by line on a terminal, in
-blocks otherwise). It flushes it on `io.stdout.flush()`, before writing to
-standard error, and when every task is waiting. At the end of the run,
-before a permission prompt and, on a terminal, before reading standard
-input, it also waits until the output is written. Standard error is not
-buffered. A separate thread writes both streams. When the destination does
-not accept data (a full pipe), a script continues until 1 MiB of output is
-pending, then waits; the run's limits and interrupts apply while it waits.
-
-### 13.6 `env`
-
-`get(name: str) -> str?` (capability `Env(name)`; a denial yields `None`),
-`args() -> [str]` (arguments the host passed to the script; no capability),
-`vars() -> [str: str]` (sorted by name; capability `Env("*")`; a denial yields an empty map).
-
-### 13.7 `json`
-
-```sand
-pub enum Json { Null, Bool(bool), Int(int), Float(float), Str(str), Arr([Json]), Obj([str: Json]) }
-pub native fn parse(text: str) -> Result<Json>
-pub native fn encode<T: Encode>(value: T, indent: int = 0) -> str
-pub fn decode<reflect T: Decode>(text: str) -> Result<T>
-pub native fn to_json<T: Encode>(value: T) -> Json
-```
-
-`parse` reads a number written without a fraction or exponent that fits in an
-`int` as an `Int`, exactly; any other number (`1.0`, `1e3`, `-0`, or an
-integer beyond the `int` range) as a `Float`. `Int(1)` and `Float(1.0)` are
-not equal.
-
-`Json` methods: `get(key: str) -> Json?`, `at(i: int) -> Json?`,
-`as_str() -> str?`, `as_float() -> float?` (either number), `as_int() -> int?`
-(an `Int`, or an integral `Float` within ±2^53), `as_bool() -> bool?`, `as_list() -> [Json]?`,
-`as_map() -> [str: Json]?`, `is_null() -> bool`, `path(p: str) -> Json?`
-(dot-separated keys and indices: `"items.0.name"`).
-
-`encode` emits compact JSON for `indent == 0`, otherwise pretty-prints with
-`indent` spaces. Object keys keep insertion order. Integers encode exactly.
-Floats encode with a fraction or an exponent (`2.0`, `1e20`), so that they
-parse back as floats; non-finite floats encode as `null`.
-
-`encode` and `to_json` convert values structurally: `int` → number (`Int`),
-`float` → number (`Float`), `str` → string, `bool`, `()` → `null`,
-lists/sets/tuples → arrays, maps → objects, structs → objects keyed by field
-name, `None` → `null`, `Some(x)` → `x`; other enums: a unit variant →
-`"Variant"`, otherwise `{"Variant": [payload...]}` (or an object for named
-payloads); `bytes` → base64 string; `duration` → nanoseconds; `a..b` →
-`{"start": a, "end": b}` and `a..=b` → `{"start": a, "end": b, "inclusive":
-true}`; value types (§5.4) → their text form (`"2024-02-29"`); `Json` → itself.
-Map keys are formatted as JSON object keys: `str` as itself, `int`, `duration`,
-and `bool` as their text representation, a unit enum variant as its variant
-name, and a value type as its text form. Any other map key type aborts with
-kind `"invalid"`.
-
-`json!` (§6.13) builds a `Json` from JSON syntax with embedded Sand values.
-
-`decode<T>` is the inverse of `encode<T>`. Decoding a non-empty map with an
-unsupported key type fails with kind `"invalid"`. If a JSON object omits a
-struct field, `decode` uses the field's declared default, or `None` if the
-field is an `Option` without a default. Constant defaults (constructed from
-literals, `int` ranges, tuples, lists, maps, `Set([...])`, enum variants, and
-structs constructed field by field, up to 65,536 nodes and 64 nesting levels)
-are constructed during decoding; non-constant defaults (such as `id: str = uuid.v4()`) are
-evaluated after the entire input is parsed, inner structs before outer structs
-and fields in declaration order. Any other missing field or type mismatch fails
-with kind `"parse"` and the JSON path of the error (such as `$.items[2].name:
-expected str`, with type names truncated at 256 bytes with `…`).
-
-`parse`, `decode`, `encode`, and `to_json` limit array and object nesting to
-512 levels. If a document exceeds this limit, `parse` and `decode` fail with
-kind `"parse"`. If a value exceeds this limit, `encode` and `to_json` abort
-with kind `"limit"`. `to_json` reuses existing `Json` values without traversing
-them, so its result can exceed 512 levels.
-
-### 13.8 `log`
-
-```sand
-pub enum Level { Debug, Info, Warn, Error }
-```
-
-`debug`, `info`, `warn`, and `error` emit structured log records with signature
-`(msg: str, fields: [str: str] = [:])`. `set_level(level: Level)` sets the
-minimum active script log level (default `Level.Info`, unless configured by the
-host; see §16). `disable()` disables script logging until the next `set_level`
-call.
-
-The engine drops records below the active script or host sink level, and counts
-emitted records against `max_output_bytes`. If the host configures a log sink
-(§16), the engine passes each enabled record to the sink. Otherwise, if the
-policy allows `Stderr`, the engine writes `LEVEL message key=value ...` to
-standard error, quoting empty messages, messages with control characters, and
-empty keys or values or those containing whitespace, control characters, `"`, or
-`=`.
-
-### 13.9 `math`
-
-Constants (`pub let` values): `pi`, `e`, `tau`. Functions on
-`float`: `cbrt`, `exp`, `ln`, `log2`, `log10`, `log(x, base)`, `sin`,
-`cos`, `tan`, `asin`, `acos`, `atan`, `atan2(y, x)`, `sinh`, `cosh`, `tanh`,
-`hypot(x, y)`, `to_radians`, `to_degrees`,
-`is_close(a, b, rel_tol: float = 1e-9, abs_tol: float = 0.0) -> bool`.
-Integer helpers: `gcd(a: int, b: int) -> int`, `lcm`, `isqrt(n: int) -> int`.
-Rounding, `abs`, `min`, `max`, `clamp`, `sqrt` and `pow` are methods of
-`float` and `int` (§12.3, §12.4).
-
-### 13.10 `net`
-
-```sand
-pub native fn listen(ip: str, port: int) -> Result<Listener>      // NetListen(ip:port)
-pub native fn connect(host: str, port: int, timeout: duration = 30s) -> Result<Conn>      // Net(host, port)
-pub native fn connect_tls(host: str, port: int, timeout: duration = 30s) -> Result<Conn>  // Net(host, port); feature tls
-pub native fn split_host_port(text: str) -> Result<(str, int)>
-listener.accept() -> Result<Conn>
-listener.addr() -> SocketAddr
-conn.peer_addr() -> SocketAddr
-addr.ip() -> str
-addr.port() -> int
-```
-
-`host` must be a hostname or unbracketed IP address (`"::1"`), `ip` must be an
-IP address, and `port` must be in `0..=65535`; otherwise the call fails with
-kind `"invalid"`. If `port` is `0`, `listen` and `http.serve` bind an ephemeral
-port. An IPv6 listener accepts only IPv6 connections, and an IPv4-mapped IPv6
-address (`::ffff:127.0.0.1`) is bound as IPv4. `split_host_port` parses
-`"host:port"` or `"[ipv6]:port"`, or fails with kind `"parse"`. `SocketAddr` is
-a value type (§5.4) formatted as `127.0.0.1:8080` or `[::1]:8080`.
-
-`Listener` implements `Close`; `Conn` implements `io.Reader`, `io.Writer`
-(§13.5) and `Close`. A connection's `read` returns at most what its 8 KiB
-buffer holds; once the peer has finished sending, `read` keeps returning
-empty bytes, `read_line` `None`, and `read_all` what was left. Closing a
-listener or connection makes its pending and later operations fail with
-kind `"closed"`. Different tasks may read and write the same connection.
-Connections are made only to resolved addresses the policy allows (§14.6).
-
-Listeners, connections and the sockets of operations in progress
-(connections being established, pending `accept` calls, HTTP requests in
-flight) count against `max_open_resources` until closed or collected; at
-the limit (after a collection, §10.8), such operations fail with kind
-`"limit"`.
-
-`connect_tls`'s `timeout` bounds connecting and the TLS handshake together
-(kind `"timeout"`). The server certificate is verified for `host` against
-the bundled web PKI roots plus any the host added
-(`Config::tls_root_certificates`, §16). Verification and handshake failures
-are errors (kind `"invalid"` for certificate problems) that scripts can handle; the
-same holds for `https` requests.
-
-### 13.11 `random`
-
-Engine-local PRNG (xoshiro256\*\*), seeded from host entropy unless the host
-sets a seed. `int(lo: int, hi: int) -> int` (uniform in `lo..hi`; fails if
-empty), `float() -> float` (`[0, 1)`), `bool() -> bool`,
-`choice<T>(xs: [T]) -> T?`, `shuffle<T>(xs: [T])`, `sample<T>(xs: [T], k: int)
--> [T]`, `bytes(n: int) -> bytes`, `seed(s: int)`. `Rng(seed: int)` creates a
-generator independent of the engine's, with the same methods except `seed`.
-
-### 13.12 `regex`
-
-```sand
-regex.Regex(pattern: str) -> Result<Regex>
-regex.is_match(pattern, text) -> Result<bool>      // convenience
-r.is_match(text) -> bool
-r.find(text) -> Match?
-r.find_all(text) -> [Match]
-r.captures(text) -> Captures?
-r.captures_all(text) -> [Captures]
-r.replace(text, rep: str) -> str        // first; $1, ${name} expand
-r.replace_all(text, rep: str) -> str
-r.split(text) -> [str]
-r.pattern() -> str
-pub struct Match { pub text: str, pub start: int, pub end: int }
-pub struct Captures { text: str, ... }
-Captures: get(i: int) -> Match?, name(n: str) -> Match?, len() -> int, text(i: int) -> str?
-```
-
-`Captures` stores the searched text and the start and end byte offsets of each
-capture group (`-1` if a group did not match), and its methods slice the
-matched text.
-Syntax is that of the Rust `regex` crate (linear-time, no backreferences);
-patterns with backslashes are best written as raw strings (`r"\d{4}"`),
-since `\d` is an invalid escape in an ordinary string; braces need no care
-(`"[0-9]{4}"`, §2.5). Each compiled
-automaton is limited to a few MiB (larger patterns, such as `\w{150}`, fail
-with kind `"limit"`). A compiled regex counts against `max_memory` with its
-automata and its search cache, which grows with use up to a few MiB.
-
-### 13.13 `statistics`
-
-On `[float]`: `mean`, `median`, `variance` (sample), `stdev` (sample),
-`pvariance`, `pstdev`, `min`, `max`, `sum`, `mode -> float?` (most common, first
-on ties), `quantile(xs, q: float) -> float?` (linear interpolation, `0 <= q <=
-1`), `correlation(xs, ys) -> float?`, `linear_regression(xs, ys) -> (float,
-float)?` (slope, intercept). All except `sum` return `float?` and are `None` for
-empty input (variance/stdev need at least two values). Also `mean_int([int])
--> float?`.
-
-### 13.14 `test`
-
-`assert_eq<T: Eq>(actual: T, expected: T, msg: str = "")`, `assert_ne`,
-`assert_true(c: bool, msg: str = "")`, `assert_false`,
-`assert_close(a: float, b: float, tol: float = 1e-9)`,
-`assert_err<T, E>(r: Result<T, E>)`, `assert_ok`, `fail(msg: str) -> never`,
-`property<T>(name: str, gen: fn(random.Rng) -> T, prop: fn(T) -> bool,
-cases: int = 100, seed: int = 20240611)` (runs `prop` on `cases` values
-`gen` produces from a `random.Rng` seeded with `seed`; on failure fails
-with the failing input's debug form). The fixed default seed makes property
-tests reproducible; pass another `seed` to explore other inputs. `assert_eq`
-fails with `assertion failed: left == right\n  left: <debug>\n right: <debug>`.
-
-### 13.15 `time`
-
-Dates, times, and time zones modeled on the JavaScript Temporal API. Uses the
-ISO 8601 calendar (years -9999 to 9999), nanosecond precision, and a bundled
-IANA time zone database.
-
-| Type             | Meaning                                  | Text form                                     |
-| ---------------- | ---------------------------------------- | --------------------------------------------- |
-| `Instant`        | exact point in time                      | `2024-03-10T07:30:00Z`                        |
-| `ZonedDateTime`  | instant in a time zone                   | `2024-03-10T03:30:00-04:00[America/New_York]` |
-| `PlainDateTime`  | calendar date and wall-clock time        | `2024-03-10T03:30:00`                         |
-| `PlainDate`      | calendar date                            | `2024-03-10`                                  |
-| `PlainTime`      | wall-clock time                          | `03:30:00`                                    |
-| `PlainYearMonth` | year and month                           | `2024-03`                                     |
-| `PlainMonthDay`  | month and day                            | `03-10`                                       |
-| `Span`           | signed calendar and clock units          | `P1M2DT3H`                                    |
-| `TimeZone`       | IANA zone, `UTC`, or fixed minute offset | `America/New_York`                            |
-
-All nine types are value types (§5.4). `Span` and `TimeZone` implement `Hash`;
-the other types implement `Ord + Hash` in chronological order (`ZonedDateTime`
-is ordered by instant, then by zone ID). In a `Span`, sub-second units are
-normalized into seconds (`1500ms` becomes `1s` and `500ms`). Two `Span` values
-are equal if all ten unit fields are equal (`P1D != PT24H`). Two `TimeZone`
-values are equal if their canonical IDs are equal (`Etc/UTC != UTC`). Each type
-is formatted, JSON-encoded, and JSON-decoded in its ISO 8601 / RFC 9557 text
-form. `T.parse(text)` parses this text form (or a `strftime` pattern if
-`format` is supplied) and returns an error of kind `"parse"` on invalid input.
-
-Constructors:
-
-- `PlainDate(year, month, day)`, `PlainTime(hour, minute = 0, second = 0, millisecond = 0, microsecond = 0, nanosecond = 0)`, `PlainDateTime(year, month, day, hour = 0, ...)`, `PlainYearMonth(year, month)`, and `PlainMonthDay(month, day)` validate their components and return `Result<T>` (error kind `"invalid"`).
-- `Span(years = 0, months = 0, weeks = 0, days = 0, hours = 0, ..., nanoseconds = 0)` fails with kind `"invalid"` if units have mixed signs.
-- `TimeZone(name) -> Result<TimeZone>` accepts an IANA name (case-insensitive), `UTC`, or a whole-minute offset within `±23:59` (`+00:00` returns `UTC`), and returns an error of kind `"not_found"` otherwise.
-- `Instant.from_epoch_seconds`, `from_epoch_millis`, `from_epoch_nanos`; constants `UTC` and `MIDNIGHT`.
-
-Clocks:
-
-- `now() -> Instant` returns the current wall-clock time.
-- `local_zone() -> TimeZone` returns the configured host time zone (§16) if the policy permits `TimeZone`, or `UTC` if denied.
-- `now_zoned(zone = local_zone()) -> ZonedDateTime` and `today(zone = local_zone()) -> PlainDate`.
-- `Stopwatch()` starts a monotonic timer; `sw.elapsed() -> duration` returns the elapsed time.
-
-Methods:
-
-- Accessors: `year`, `month`, `day`, `day_of_week` (1 = Monday .. 7 = Sunday), `day_of_year`, `week_of_year`, `year_of_week` (ISO 8601 week calendar), `days_in_month`, `days_in_year`, `in_leap_year`, `hour`, `minute`, `second`, `millisecond`, `microsecond`, `nanosecond` on applicable types; `offset() -> duration`, `time_zone() -> TimeZone`, and `hours_in_day() -> float` on `ZonedDateTime`; `epoch_seconds`, `epoch_millis` (floored), and `epoch_nanos` on `Instant` and `ZonedDateTime`; `id() -> str` on `TimeZone`.
-- `with(...)` replaces specified components and clamps values that exceed their upper bound (e.g. April 31 becomes April 30). Fails with kind `"invalid"` if `month < 1`, `day < 1`, or `year` is outside `-9999..=9999`. On `ZonedDateTime`, `with` preserves the offset if it remains valid for the new wall-clock time; otherwise gaps and folds are resolved using `disambiguation: Disambiguation`.
-- `add(amount)` and `subtract(amount)`: `Instant` accepts `duration`; `ZonedDateTime` accepts `Span` only (so `1d`, which is 24 hours, is not confused with a calendar day); plain types accept `Span` or `duration` via `ToSpan`. Calendar units advance the date and clamp the day to the end of the month, then clock units advance exact time. `PlainDate` truncates sub-day units to whole days, `PlainTime` wraps around midnight and ignores day and larger units, and `PlainYearMonth` rejects units smaller than a month.
-- `until(other, ...)` and `since(other, ...)` compute the difference from `largest: Unit` down to `smallest: Unit`, rounded to a multiple of `increment` using `mode: RoundingMode` (default `Trunc`). `Instant` and `PlainTime` return `duration`; other types return `Span`.
-- `round(smallest, increment = 1, mode = RoundingMode.HalfExpand)` rounds to a multiple of `increment` in unit `smallest`.
-- Conversions: `to_instant`, `to_zoned_datetime(zone)` (takes `disambiguation: Disambiguation = Compatible` on `PlainDateTime`; uses midnight on `PlainDate`), `to_plain_datetime`, `to_plain_date`, `to_plain_time`, `to_plain_year_month`, `to_plain_month_day`, `PlainYearMonth.to_plain_date(day)`, `PlainMonthDay.to_plain_date(year)`, `with_time_zone(zone)`, `with_plain_time(time)`, `start_of_day()`, `next_transition()`, and `previous_transition()`.
-- `format(pattern: str) -> str` formats a value with `strftime` directives (`Instant` is formatted in UTC).
-- `Span` methods: unit accessors (`years()` .. `nanoseconds()`), `sign()`, `is_zero()`, `negated()`, `abs()`, `with(...)`, `add`, `subtract`, `round(smallest, largest, increment, mode)`, `total(unit) -> float`, `compare(other) -> int`, and `to_duration()`. The last six methods accept `relative_to: ZonedDateTime?`; if `relative_to` is `None`, days are 24 hours, weeks are 7 days, and spans with nonzero years or months fail with kind `"invalid"`.
-
-Results outside years `-9999..=9999`, `epoch_nanos` outside years `1677..=2262`, and durations outside the 64-bit nanosecond range fail with kind `"overflow"`. Invalid options fail with kind `"invalid"`. Use `task.sleep(d)` to sleep.
-
-### 13.16 `task`
-
-See §11.3.
-
-### 13.17 `uri`
-
-```sand
-pub struct Uri {
-    pub scheme: str, pub userinfo: str?, pub host: str?, pub port: int?,
-    pub path: str, pub query: str?, pub fragment: str?
-}
-pub native fn parse(text: str) -> Result<Uri>          // RFC 3986
-pub native fn encode_component(s: str) -> str          // percent-encodes all but unreserved
-pub native fn encode_path(s: str) -> str               // also keeps "/"
-pub native fn decode_component(s: str) -> Result<str>
-pub native fn parse_query(q: str) -> [(str, str)]      // '+' decodes to space
-pub fn build_query(pairs: [(str, str)]) -> str
-```
-
-`Uri` methods: `to_str()` (recomposition), `join(reference: str) ->
-Result<Uri>` (RFC 3986 §5.2 resolution), `query_pairs() -> [(str, str)]`,
-`authority() -> str?`, `default_port() -> int?` (from the scheme: http 80,
-https 443, ws 80, wss 443, ftp 21).
-
-### 13.18 `uuid`
-
-`v4() -> str`, `v7() -> str` (time-ordered), `nil() -> str`,
-`parse(s: str) -> Result<str>` (accepts hyphenated, simple, braced and `urn:uuid:`
-forms; returns lower-case hyphenated), `is_valid(s: str) -> bool`,
-`version(s: str) -> int?`.
+Standard library documentation is available in the standard library reference and through `help(<module>)` (§12.4).
 
 ## 14. Sandbox and policy
 
@@ -2339,15 +1491,15 @@ forms; returns lower-case hyphenated), `is_valid(s: str) -> bool`,
 
 - Scripts have no access to the outside world except through standard library
   and host native functions.
-- Every such access is described by a **capability request** and checked by the
-  engine's policy **before** the effect occurs.
+- Every such access is described by a capability request and checked by the
+  engine's policy before the effect occurs.
 - The VM has no FFI, does not spawn processes, does not use IPC, shared memory
   or `mmap`, and never executes generated machine code.
 - Paths are normalized lexically (`.`/`..` resolved). The longest existing
   prefix is then resolved like `realpath` (symlinks followed; `..` in a link
   target is the parent of the link directory). The engine checks the result so
   `..` and symlinks cannot escape an allowed directory. A symlink whose target
-  cannot be resolved is not followed (§13.3). Memory file system paths (§16.4)
+  cannot be resolved is not followed. Memory file system paths (§16.4)
   are only normalized lexically.
 
 On the host, a path is resolved by walking recursively from root to subpaths
@@ -2476,7 +1628,7 @@ default-ignorable code point removal. For example, `data/ſecrets`, precomposed
 
 On case-insensitive file systems, the engine resolves existing paths to their
 on-disk names; for example, `data/SECRETS` is resolved to `data/secrets`. For
-directory entry operations (§13.3), `RulePolicy::check_entry` evaluates the
+directory entry operations (`fs.remove_file`, `fs.remove_dir`, and `fs.rename`), `RulePolicy::check_entry` evaluates the
 on-disk name without following a symlink in the final path component. If the
 operating system cannot read the on-disk name directly, such as for a symlink
 outside macOS, a device node, or an unopenable file, the engine scans the
@@ -2651,7 +1803,7 @@ Configurable per engine:
 | `max_wall_time`      | unlimited  | run fails: `time limit exceeded` (covers compiling and running, from the start of compilation, excluding waits for prompt answers)                             |
 | `max_call_depth`     | 10,000     | fails: `limit: stack overflow`                                                                                                                                 |
 | `max_tasks`          | 10,000     | `spawn` fails: `limit: task limit exceeded`                                                                                                                    |
-| `max_open_resources` | 1,024      | opening files, connect/listen/accept and HTTP requests fail with kind `"limit"` (after a collection, §10.8; pending operations' sockets count, §13.10)         |
+| `max_open_resources` | 1,024      | opening files, connect/listen/accept and HTTP requests fail with kind `"limit"` (after a collection, §10.8; pending operations' sockets count)                 |
 | `max_output_bytes`   | unlimited  | writes fail: `output limit exceeded`                                                                                                                           |
 | `max_http_body`      | 64 MiB     | HTTP read fails with kind `"limit"`                                                                                                                            |
 | `max_source_bytes`   | 16 MiB     | compile error: `source too large` (the main file and all imported scripts together; the standard library is not counted)                                       |
@@ -2857,7 +2009,7 @@ with feature `os`, and `Config::stdin_feed` configure standard input. With
 `StdinFeed::end` terminates a single read, and `StdinFeed::wanted` is resolved
 if a script is waiting for input and all other tasks are blocked.
 
-The host can intercept and filter structured log records (§13.8) instead of
+The host can intercept and filter structured log records instead of
 writing them to standard error. `Config::log_sink` routes records to a
 `LogSink` as `LogRecord { level, message, fields, location }` on the polling
 thread, using `LogSink::enabled` to filter records by level before allocation.
@@ -2866,9 +2018,8 @@ thread, using `LogSink::enabled` to filter records by level before allocation.
 
 Command-line arguments, environment variables, and random number generation can
 be fixed per engine. `Config::args` and `Config::env` replace the process
-arguments and environment variables exposed by `env` (§13.6), and
-`Config::seed` seeds the pseudorandom number generator used by `random`
-(§13.11) and `uuid` (§13.18).
+arguments and environment variables exposed by `env`, and `Config::seed` seeds
+the pseudorandom number generator used by `random` and `uuid`.
 
 Custom clock and time zone providers decouple script execution from the system
 clock. `Config::clock` supplies a `platform::Clock` that drives wall time,

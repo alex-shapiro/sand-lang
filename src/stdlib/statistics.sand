@@ -1,7 +1,4 @@
 //! Descriptive statistics and linear regression on numeric lists.
-//!
-//! Functions return `None` for empty inputs (`variance` and `stdev` require at
-//! least two elements), except `sum`, which returns `0.0`.
 
 /// Returns the arithmetic mean of `xs`, or `None` if `xs` is empty.
 pub native fn mean(xs: [float]) -> float?
@@ -9,22 +6,22 @@ pub native fn mean(xs: [float]) -> float?
 /// Returns the arithmetic mean of integer list `xs`, or `None` if `xs` is empty.
 pub native fn mean_int(xs: [int]) -> float?
 
-/// Returns the median of `xs` (averaging the two middle values for even
-/// lengths), or `None` if `xs` is empty.
+/// Returns the median of `xs`, averaging the two middle values for even
+/// lengths, or `None` if `xs` is empty.
 pub native fn median(xs: [float]) -> float?
 
-/// Returns the most frequent value in `xs` (breaking ties by first appearance),
+/// Returns the most frequent value in `xs`, breaking ties by first appearance,
 /// or `None` if `xs` is empty.
 pub native fn mode(xs: [float]) -> float?
 
-/// Returns the sample variance of `xs` (divided by `n - 1`), or `None` if
+/// Returns the sample variance of `xs` divided by `n - 1`, or `None` if
 /// `xs.len() < 2`.
 pub native fn variance(xs: [float]) -> float?
 
 /// Returns the sample standard deviation of `xs`, or `None` if `xs.len() < 2`.
 pub native fn stdev(xs: [float]) -> float?
 
-/// Returns the population variance of `xs` (divided by `n`), or `None` if `xs`
+/// Returns the population variance of `xs` divided by `n`, or `None` if `xs`
 /// is empty.
 pub native fn pvariance(xs: [float]) -> float?
 
@@ -37,10 +34,10 @@ pub native fn min(xs: [float]) -> float?
 /// Returns the maximum value in `xs`, or `None` if `xs` is empty.
 pub native fn max(xs: [float]) -> float?
 
-/// Returns the compensated sum of `xs` (`0.0` if `xs` is empty).
+/// Returns the compensated sum of `xs`, or `0.0` if `xs` is empty.
 pub native fn sum(xs: [float]) -> float
 
-/// Returns the `q`-quantile (`0.0 <= q <= 1.0`) of `xs` using linear
+/// Returns the `q`-quantile of `xs` for `0.0 <= q <= 1.0` using linear
 /// interpolation between adjacent ranks, or `None` if `xs` is empty or `q` is
 /// out of range.
 pub native fn quantile(xs: [float], q: float) -> float?

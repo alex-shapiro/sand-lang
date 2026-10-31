@@ -1,5 +1,13 @@
-//! Byte streams (`Reader` and `Writer`) and the standard input, output, and
-//! error handles.
+//! Traits for reading and writing byte streams, and standard stream handles.
+//!
+//! Reading from `stdin` requires the `stdin` capability. If no input source is
+//! configured, `stdin` reads return end-of-file immediately.
+//!
+//! Writing to `stdout` or `stderr` requires the `stdout` or `stderr` capability
+//! and counts toward an engine's `max_output_bytes` limit.
+//!
+//! In the CLI, `stdout` uses a 64 KiB buffer that flushes when full, on
+//! `io.stdout.flush()`, or when execution finishes.
 //!
 //! ```
 //! use f = fs.open("notes.txt")?
@@ -8,10 +16,10 @@
 //! }
 //! ```
 
-/// A readable byte stream, such as a file, socket, HTTP body, or standard input.
+/// A byte stream reader.
 pub trait Reader {
     /// Reads up to `max` bytes, suspending until data is available or the
-    /// stream reaches end-of-file (which returns `b""`).
+    /// stream reaches end-of-file, which returns `b""`.
     fn read(self, max: int = 65536) -> Result<bytes>
 
     /// Reads the next line with any trailing `\n` or `\r\n` stripped, or
@@ -51,7 +59,7 @@ pub trait Reader {
     }
 }
 
-/// A writable byte stream, such as a file, socket, or standard output.
+/// A byte stream writer.
 pub trait Writer {
     /// Writes all bytes in `data` to the stream.
     fn write(self, data: bytes) -> Result<()>
@@ -67,8 +75,7 @@ pub trait Writer {
     }
 }
 
-/// Copies all remaining bytes from `src` to `dst` in chunks and returns the
-/// total number of bytes copied.
+/// Copies all remaining bytes in chunks and returns the total number of bytes copied.
 pub fn copy<R: Reader, W: Writer>(src: R, dst: W) -> Result<int> {
     var total = 0
     loop {
@@ -99,13 +106,13 @@ impl Writer for Stderr {
     native fn flush(self) -> Result<()>
 }
 
-/// Standard input stream handle.
+/// Returns a handle to the standard input input stream.
 pub let stdin: Stdin = new_stdin()
 
-/// Standard output stream handle (also written by `print`).
+/// Returns a handle to the standard output stream.
 pub let stdout: Stdout = new_stdout()
 
-/// Standard error stream handle (also written by `eprint`).
+/// Returns a handle to the standard error stream.
 pub let stderr: Stderr = new_stderr()
 
 native fn new_stdin() -> Stdin
