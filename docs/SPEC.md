@@ -440,7 +440,7 @@ test "addition is commutative" {
 
 A test block name is a string literal without interpolation. Test blocks are ignored
 during normal runs and executed by the test runner (§17.4). Inside a test block, the `test`
-module (§13) and its public items are imported automatically, at lower
+module and its public items are imported automatically, at lower
 precedence than module definitions and the prelude. Within a test, `?` returns `None`
 and `Err` as test failures (§6.8).
 
@@ -997,7 +997,7 @@ mutation inside the lambda is visible outside and vice versa.
 
 A macro call is written `name!(argument)`, always with parentheses.
 
-The only macro today is `json!`, which builds a `json.Json` value (§13) from
+The only macro today is `json!`, which builds a `json.Json` value from
 JSON literals and Sand expressions:
 
 ```sand
