@@ -37,7 +37,7 @@ pub fn assert_false(cond: bool, msg: str = "") {
 }
 
 /// Fails the test if `a` and `b` differ by more than `tol`, scaled by the
-/// larger magnitude when it exceeds `1.0`.
+/// larger magnitude if it exceeds `1.0`.
 pub fn assert_close(a: float, b: float, tol: float = 1e-9) {
     let scale = 1.0.max(a.abs()).max(b.abs())
     if not (a == b or (a - b).abs() <= tol * scale) {

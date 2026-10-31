@@ -1,7 +1,7 @@
 //! Task coordination and timers, always in scope as `task`.
 
-/// Suspends the calling task for duration `d`. A zero or negative duration
-/// returns immediately.
+/// Suspends the calling task for duration `d`.
+/// A zero or negative duration returns immediately.
 pub native fn sleep(d: duration)
 
 /// Yields execution of the calling task so other ready tasks can run.

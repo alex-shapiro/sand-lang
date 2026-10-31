@@ -288,12 +288,10 @@ pub fn todo() -> never {
 /// Terminates the program immediately with exit status `code`.
 pub native fn exit(code: int) -> never
 
-/// Prints documentation for `x`, which may be a module, type, trait, function,
-/// method, or string path.
+/// Prints documentation for any item `x`.
 pub native fn help<T>(x: T)
 
-/// Returns the sorted member names accessible after `x.`, or the names in scope
-/// if called as `members()`.
+/// Returns the sorted member names of `x`.
 pub native fn members<T>(x: T) -> [str]
 
 /// Compares values for equality with `==` and `!=`. The compiler derives `Eq`
