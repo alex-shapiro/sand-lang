@@ -3,7 +3,7 @@
 //! of each frame, so that temporaries and out-of-scope locals do not keep
 //! values alive.
 
-use super::bytecode::{NO_REG, Op, Piece, Program, Proto, Reg};
+use super::bytecode::{NO_REG, Op, Piece, Program, Proto, Reg, Scope};
 use super::value::Value;
 
 /// How an instruction uses a run of registers.
@@ -360,6 +360,9 @@ pub struct Liveness {
     /// `words` bits per block: the `globals` live on entry.
     live: Vec<u64>,
     words: usize,
+    /// For each range of `Proto::scopes` that `in_scope` splits, at its
+    /// middle index: the latest end of the scopes in the range.
+    reach: Vec<u32>,
 }
 
 impl Liveness {
@@ -403,11 +406,16 @@ impl Liveness {
         let globals: Vec<Reg> = (0..nregs).filter(|&r| global[r]).map(|r| r as Reg).collect();
         let words = globals.len().div_ceil(64);
         let nblocks = starts.len();
-        let size = nblocks * size_of::<u32>() + globals.len() * size_of::<Reg>() + nblocks.saturating_mul(words) * size_of::<u64>();
+        let size = nblocks * size_of::<u32>()
+            + globals.len() * size_of::<Reg>()
+            + nblocks.saturating_mul(words) * size_of::<u64>()
+            + proto.scopes.len() * size_of::<u32>();
         if size > MAX_BYTES_PER_CODE_BYTE * n * size_of::<Op>() {
             return None;
         }
-        let mut lv = Liveness { live: vec![0; nblocks * words], starts, globals, words };
+        let mut reach = vec![0; proto.scopes.len()];
+        fill_reach(&proto.scopes, &mut reach);
+        let mut lv = Liveness { live: vec![0; nblocks * words], starts, globals, words, reach };
         let mut preds = vec![Vec::new(); nblocks];
         for b in 0..nblocks {
             let (start, end) = lv.bounds(b, n);
@@ -453,7 +461,10 @@ impl Liveness {
     /// Heap memory of the table, in bytes.
     #[cfg(test)]
     pub fn bytes(&self) -> usize {
-        self.starts.capacity() * size_of::<u32>() + self.globals.capacity() * size_of::<Reg>() + self.live.capacity() * size_of::<u64>()
+        self.starts.capacity() * size_of::<u32>()
+            + self.globals.capacity() * size_of::<Reg>()
+            + self.live.capacity() * size_of::<u64>()
+            + self.reach.capacity() * size_of::<u32>()
     }
 
     /// Writes to `out` (one bit per register of `proto`) the registers live
@@ -461,11 +472,30 @@ impl Liveness {
     /// bindings in scope (`Proto::scopes`).
     pub fn live_at(&self, prog: &Program, proto: &Proto, pos: usize, out: &mut [u64]) {
         self.scan(prog, proto, self.block(pos), pos, out);
-        for sc in proto.scopes.iter().filter(|sc| (sc.start as usize..sc.end as usize).contains(&pos)) {
-            if let Some(w) = out.get_mut(sc.reg as usize / 64) {
-                *w |= 1 << (sc.reg % 64);
+        self.in_scope(&proto.scopes, 0, pos, &mut |r| {
+            if let Some(w) = out.get_mut(r as usize / 64) {
+                *w |= 1 << (r % 64);
             }
+        });
+    }
+
+    /// Calls `f` with the register of each scope in `scopes`, which starts
+    /// at index `at` of `Proto::scopes`, that contains instruction `pos`.
+    /// Skips the ranges whose scopes all end at or before `pos`.
+    fn in_scope(&self, scopes: &[Scope], at: usize, pos: usize, f: &mut impl FnMut(Reg)) {
+        let mid = scopes.len() / 2;
+        if scopes.is_empty() || self.reach[at + mid] as usize <= pos {
+            return;
         }
+        self.in_scope(&scopes[..mid], at, pos, f);
+        let sc = scopes[mid];
+        if sc.start as usize > pos {
+            return;
+        }
+        if pos < sc.end as usize {
+            f(sc.reg);
+        }
+        self.in_scope(&scopes[mid + 1..], at + mid + 1, pos, f);
     }
 
     /// The block of instruction `at`.
@@ -543,6 +573,17 @@ impl Liveness {
             }
         }
     }
+}
+
+/// Fills `reach` for `scopes` (see `Liveness::reach`) and returns the latest
+/// end of them.
+fn fill_reach(scopes: &[Scope], reach: &mut [u32]) -> u32 {
+    let mid = scopes.len() / 2;
+    let Some(sc) = scopes.get(mid) else { return 0 };
+    let (left, right) = reach.split_at_mut(mid);
+    let end = sc.end.max(fill_reach(&scopes[..mid], left)).max(fill_reach(&scopes[mid + 1..], &mut right[1..]));
+    right[0] = end;
+    end
 }
 
 fn or(out: &mut [u64], row: &[u64]) {
@@ -739,6 +780,44 @@ mod tests {
         assert!(proto.nregs > 2000);
         let lv = proto.liveness.as_ref().unwrap();
         assert!(lv.bytes() < 2 * proto.code.len() * size_of::<Op>(), "{} bytes for {} instructions", lv.bytes(), proto.code.len());
+    }
+
+    /// Finding the scopes that contain a position takes about the same time
+    /// with 100,000 ended scopes as with 100: collections do it for each frame.
+    #[test]
+    fn scope_lookups_skip_ended_scopes() {
+        let base = compile("print(1)").unwrap();
+        let time = |n: u32| {
+            let mut prog = (*base).clone();
+            let scopes = (0..n).map(|i| Scope { reg: 0, start: 2 * i, end: 2 * i + 1 }).collect();
+            let code = vec![Op::Nop; 2 * n as usize + 1];
+            let lines = vec![0; code.len()];
+            let mut proto = Proto {
+                name: "f".into(),
+                file: 0,
+                nparams: 0,
+                nregs: 1,
+                code,
+                lines,
+                captures: vec![],
+                cleanups: vec![],
+                scopes,
+                liveness: None,
+                sites: vec![],
+                inlined: vec![],
+            };
+            proto.liveness = Liveness::new(&prog, &proto);
+            prog.protos.push(proto);
+            let proto = prog.protos.last().unwrap();
+            let (lv, mut row) = (proto.liveness.as_ref().unwrap(), vec![0]);
+            let start = std::time::Instant::now();
+            for _ in 0..2_000 {
+                lv.live_at(&prog, proto, 2 * n as usize, &mut row);
+            }
+            start.elapsed()
+        };
+        let (few, many) = (time(100), time(100_000));
+        assert!(many < 20 * few, "{few:?} with 100 scopes, {many:?} with 100,000");
     }
 
     /// Tables that grow with the code length times the number of registers

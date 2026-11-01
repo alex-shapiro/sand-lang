@@ -966,13 +966,14 @@ impl<'a> Compiler<'a> {
         tables.push(f.cleanups.iter().flat_map(|&(start, end, pad)| [start, end, f.pads[pad].0]).collect());
         tables.push(f.scopes.iter().flat_map(|&(_, start, end)| [start, end]).collect());
         let (code, lines) = assemble(f.code, f.lines, &f.far, &mut tables);
-        let scopes = f
+        let mut scopes: Vec<Scope> = f
             .scopes
             .iter()
             .zip(tables.pop().unwrap().chunks(2))
             .filter(|(_, c)| c[0] < c[1])
             .map(|(&(reg, ..), c)| Scope { reg, start: c[0] as u32, end: c[1] as u32 })
             .collect();
+        scopes.sort_by_key(|sc| sc.start);
         let cleanups =
             tables.pop().unwrap().chunks(3).map(|c| Cleanup { start: c[0] as u32, end: c[1] as u32, pad: c[2] as u32 }).collect();
         for ((idx, _), targets) in f.switches.iter().zip(tables) {

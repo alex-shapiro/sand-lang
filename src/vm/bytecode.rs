@@ -1144,8 +1144,8 @@ pub struct Proto {
     /// with the cleanup pad that runs it when the task is cancelled.
     pub cleanups: Vec<Cleanup>,
     /// The code ranges in which parameters and locals bound by `let` hold
-    /// their values. A frame keeps these values alive until its code leaves
-    /// the range, even if it never reads them again.
+    /// their values, by start. A frame keeps these values alive until its
+    /// code leaves the range, even if it never reads them again.
     pub scopes: Vec<Scope>,
     /// The registers that frames may still read, which the compiler solves
     /// after it emits every proto. `None` if the table would be too large:
