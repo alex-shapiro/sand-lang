@@ -903,6 +903,7 @@ impl<'a> Compiler<'a> {
 
     fn alloc(&mut self, f: &mut FnState<'a>) -> Reg {
         let r = f.next_reg;
+        debug_assert!(!f.bound.iter().flatten().any(|&(b, _)| u32::from(b) == r), "register {r} holds a binding in scope");
         f.next_reg += 1;
         if f.next_reg > f.max_reg {
             f.max_reg = f.next_reg;
@@ -1838,7 +1839,7 @@ impl<'a> Compiler<'a> {
                             done[i] = true;
                         }
                         // `..base`
-                        None => self.compile_let(f, pat, init, else_.as_deref()),
+                        None => self.let_value(f, pat, init, else_.as_deref()),
                     }
                 }
                 for (i, x) in fields.iter().enumerate() {
@@ -3611,15 +3612,17 @@ impl<'a> Compiler<'a> {
                 }
             };
             entries.push(entry);
-            if let Some(g) = &arm.guard {
-                fails.extend(self.cond_jump(f, g));
-            }
-            match dst {
-                Some(dst) => {
-                    self.in_scope_of(f, &arm.pat, |s, f| s.expr_to(f, &arm.body, dst));
-                    ends.push(self.emit_jump(f));
+            self.in_scope_of(f, &arm.pat, |s, f| {
+                if let Some(g) = &arm.guard {
+                    fails.extend(s.cond_jump(f, g));
                 }
-                None => self.in_scope_of(f, &arm.pat, |s, f| s.ret_expr(f, &arm.body)),
+                match dst {
+                    Some(dst) => s.expr_to(f, &arm.body, dst),
+                    None => s.ret_expr(f, &arm.body),
+                }
+            });
+            if dst.is_some() {
+                ends.push(self.emit_jump(f));
             }
             if i + 1 < arms.len() {
                 self.patch_list(f, fails);

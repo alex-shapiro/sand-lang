@@ -1284,8 +1284,9 @@ scalar values as one-character strings. Comparison is by bytes.
 Unreachable heap values are reclaimed by a tracing collector, observable only
 through memory limits and the closing of unreachable resources (files,
 sockets, HTTP bodies). A parameter or binding keeps its value reachable until
-its scope ends. A temporary value of an expression becomes unreachable after
-its last use. So that dropped, unclosed resources never make an
+its scope ends or its function makes a tail call (§10.5). After the last use
+of a temporary value of an expression, the collector can reclaim it. So that
+dropped, unclosed resources never make an
 operation fail, collections also run after every 64 resources opened and
 before an operation would fail because the open-resource limit (§15.1) or the
 system's open-file limit is reached.

@@ -2684,6 +2684,11 @@ fn dead_temporaries_and_out_of_scope_locals_do_not_count_against_the_memory_limi
             "6000001\n".repeat(3),
         ),
         (
+            "struct update from a call, then calls",
+            "struct P { a: int, b: int }\nfn mk() -> P {\n    for _ in 0..1 {}\n    P(a: 1, b: 2)\n}\nfn big() -> int {\n    for _ in 0..1 {}\n    var d = 1\n    let s = \"x\".repeat(N)\n    s.len()\n}\nfn run() {\n    for _ in 0..1 {}\n    let q = P(a: 3, ..mk())\n    let n = big()\n    print(n)\n    print(\"y\".repeat(N).len())\n    print(q.a)\n}\nrun()",
+            "12000000\n12000000\n3\n".into(),
+        ),
+        (
             "tasks",
             "fn work(c: str) -> int {\n    var n = 0\n    for _ in 0..2 { n += c.repeat(6_000_000).len() }\n    n\n}\n\
              let t = spawn work(\"a\")\nlet u = spawn work(\"b\")\nprint(t.wait() + u.wait())",
@@ -3117,16 +3122,36 @@ print(net.listen("127.0.0.1", 0).is_ok())
     r.unwrap();
     assert_eq!(out, "limit\ntrue\n");
     // Bindings keep their resources open until they go out of scope, even
-    // if the code never reads them again.
+    // if the code never reads them again. A tail call ends the scopes of its
+    // function. The loops keep the functions from being inlined.
     let src = r#"
 import net
-fn hold(a: net.Listener) -> bool { net.listen("127.0.0.1", 0).is_ok() }
+fn opens() -> bool {
+    for _ in 0..1 {}
+    net.listen("127.0.0.1", 0).is_ok()
+}
+fn inlined(a: net.Listener) -> bool { net.listen("127.0.0.1", 0).is_ok() }
+fn param(a: net.Listener) -> bool {
+    for _ in 0..1 {}
+    let r = opens()
+    r
+}
+fn tail(a: net.Listener) -> bool {
+    for _ in 0..1 {}
+    opens()
+}
 let b = net.listen("127.0.0.1", 0)?
-print(hold(net.listen("127.0.0.1", 0)?))
+print(inlined(net.listen("127.0.0.1", 0)?))
+print(param(net.listen("127.0.0.1", 0)?))
+match net.listen("127.0.0.1", 0) {
+    Ok(l) if opens() => print("guard: closed"),
+    _ => print("guard: open"),
+}
+print(tail(net.listen("127.0.0.1", 0)?))
 "#;
     let (r, out, _) = run_src(config.policy(sandlang::RulePolicy::allow_all()), src);
     r.unwrap();
-    assert_eq!(out, "false\n");
+    assert_eq!(out, "false\nfalse\nguard: open\ntrue\n");
 }
 
 #[test]

@@ -199,6 +199,14 @@ Visible defects that rarely block users.
       last collection cleared them. Each collection clears the dead registers
       of every frame, which adds about 5 ns per frame: 20% of the pause with
       9,000 recursive frames.
+- [ ] ❓ _Memory._ Give liveness tables to long scripts whose bindings stay live to
+      their end. Such a table grows with the code length times the number of
+      bindings, so the compiler gives no table to a proto whose table takes
+      more than 8 bytes per byte of code, and its frames keep dead
+      temporaries (1,500 `let`s read at the end of a script are enough). A
+      binding is live in its scope (`Proto::scopes`). Find out whether the
+      table can leave out the registers in binding scopes, and prove it
+      with the per-instruction reference test in `src/vm/liveness.rs`.
 
 ## Items without significant user impact
 
