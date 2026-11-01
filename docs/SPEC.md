@@ -1126,8 +1126,8 @@ Later inputs may read it and it is closed like a resource that is never closed.
 If a `use` value is copied and referenced beyond the block close, operations fail
 with kind `"closed"`. The linter reports escapes and unclosed resources.
 
-Even without `use`, an unclosed resource may closed manually, or at latest is closed
-automatically when it is unreferenced during garbage collection (§10.8).
+Without `use`, code can close a resource manually. Otherwise, the garbage
+collector closes the resource after it becomes unreachable (§10.8).
 
 ## 8. Pattern Matching
 
@@ -1283,7 +1283,9 @@ scalar values as one-character strings. Comparison is by bytes.
 
 Unreachable heap values are reclaimed by a tracing collector, observable only
 through memory limits and the closing of unreachable resources (files,
-sockets, HTTP bodies). So that dropped, unclosed resources never make an
+sockets, HTTP bodies). A parameter or binding keeps its value reachable until
+its scope ends. A temporary value of an expression becomes unreachable after
+its last use. So that dropped, unclosed resources never make an
 operation fail, collections also run after every 64 resources opened and
 before an operation would fail because the open-resource limit (§15.1) or the
 system's open-file limit is reached.

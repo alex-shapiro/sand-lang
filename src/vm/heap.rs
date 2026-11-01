@@ -127,7 +127,8 @@ pub struct Heap {
     tables: usize,
     /// Peak length of `objs` since its capacity last shrank.
     arena_top: usize,
-    /// Memory of the fibers (value stacks, frames, waiter and race lists),
+    /// Memory of the fibers (value stacks, frames, waiter and race lists)
+    /// and of the liveness tables that collections read their stacks with,
     /// counted against `limit` with the heap: incremented as they grow and
     /// recomputed by every collection.
     pub fiber_bytes: usize,
@@ -591,6 +592,14 @@ impl Heap {
     /// Allocate the bytes immediately after this check, or use [`Scratch`](super::meter::Scratch) to track a growing buffer.
     pub fn check_memory(&self, extra: usize) -> Result<(), crate::vm::Ctl> {
         if self.would_exceed(extra) { Err(crate::vm::Ctl::limit(LimitKind::Memory)) } else { Ok(()) }
+    }
+
+    /// The bytes left under the memory limit.
+    pub fn room(&self) -> usize {
+        match self.limit {
+            Some(l) => l.saturating_sub(self.used().saturating_add(self.io_memory.reserved())),
+            None => usize::MAX,
+        }
     }
 
     pub fn over_limit(&self) -> bool {

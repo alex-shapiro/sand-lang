@@ -1116,6 +1116,10 @@ impl Op {
                 | Op::Unwind
                 | Op::TailCallDirect { .. }
                 | Op::Internal { .. }
+                | Op::TryTop { .. }
+                | Op::SwitchVariant { .. }
+                | Op::SwitchInt { .. }
+                | Op::SwitchChar { .. }
         )
     }
 }
@@ -1139,6 +1143,10 @@ pub struct Proto {
     /// Sorted, disjoint code ranges inside which deferred code is pending,
     /// with the cleanup pad that runs it when the task is cancelled.
     pub cleanups: Vec<Cleanup>,
+    /// The code ranges in which parameters and locals bound by `let` hold
+    /// their values. A frame keeps these values alive until its code leaves
+    /// the range, even if it never reads them again.
+    pub scopes: Vec<Scope>,
     /// For each instruction, the inlined call it belongs to: 0 for none, `i`
     /// for `inlined[i - 1]`. Empty if nothing was inlined. The instruction's
     /// line (`lines`) is then in the inlined function's file.
@@ -1155,6 +1163,15 @@ pub struct InlineSite {
     /// 0 for the proto itself).
     pub line: u32,
     pub parent: u16,
+}
+
+/// A register that holds a binding's value from instruction `start` to
+/// `end` (exclusive).
+#[derive(Clone, Copy, Debug)]
+pub struct Scope {
+    pub reg: Reg,
+    pub start: u32,
+    pub end: u32,
 }
 
 #[derive(Clone, Copy, Debug)]

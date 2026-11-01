@@ -1,4 +1,0 @@
-fn count(c: str) -> int { c.repeat(12_000_000).len() }
-
-print(count("x"))
-print(count("y"))

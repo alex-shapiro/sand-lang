@@ -41,8 +41,6 @@ The host cannot rely on engine limits, stability, or control.
       trailing free slots after a full sweep, and incremental sweeps prepend
       freed slots to the free list in descending index order so that new
       allocations reuse high-index slots first.
-- [ ] 🔴 [052](triage/052-dead-temporaries-rooted/summary.md) _Performance._ Clear dead temporaries before native calls so that inlined allocations
-      do not stay rooted in caller frame registers during garbage collection.
 - [ ] ❓ _Embedding._ Convert derived `SandEnum` and `SandStruct` values iteratively with an
       explicit stack. The derived `FromValue` and `IntoValue` implementations
       recurse once per nesting level, so deep values can overflow a small host
@@ -173,6 +171,10 @@ Visible defects that rarely block users.
       `fs.Kind` enum.
 - [ ] 🔴 [065](triage/065-import-position/summary.md) _Language._ Reject `import` statements after non-import items or statements, as
       specified in §3.1.
+- [ ] ❓ _Performance._ Skip the liveness check for frames that did not run since the
+      last collection cleared them. Each collection clears the dead registers
+      of every frame, which adds about 5 ns per frame: 20% of the pause with
+      9,000 recursive frames.
 
 ## Items without significant user impact
 

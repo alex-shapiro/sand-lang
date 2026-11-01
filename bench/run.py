@@ -357,7 +357,7 @@ def prepare(b: Bench, w: Workload):
     if w.name in ("search_index_search", "search_index_add", "search_index_stats"):
         # These need each implementation's own index of the corpus.
         sdir = b.tmp / "search"
-        for impl in w.impls:
+        for impl in (i for i in w.impls if i in b.exe):
             if not (sdir / f"{impl}.base.json").exists():
                 s = step(
                     EXAMPLES / "search_index.sand",

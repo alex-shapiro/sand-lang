@@ -1,3 +1,0 @@
-for _ in 0..3 {
-    print("x".repeat(12_000_000).len())
-}

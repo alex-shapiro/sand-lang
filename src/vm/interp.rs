@@ -1696,7 +1696,7 @@ impl Vm {
             // Native functions check memory and open-resource limits against
             // counts that include uncollected garbage. Run a full collection
             // and retry once.
-            self.collect_all_garbage(Some(fiber));
+            self.collect_all_garbage_in_call(fiber);
             self.collected = true;
             r = Self::invoke_native(self, natives, n, &fiber.stack[start..start + argc]);
             self.collected = false;

@@ -602,6 +602,25 @@ impl HPat {
         }
     }
 
+    /// Calls `f` with each local the pattern binds, once.
+    pub fn for_each_bind(&self, f: &mut impl FnMut(LocalId)) {
+        match &self.kind {
+            HPatKind::Bind(l) => f(*l),
+            // Every alternative binds the same locals.
+            HPatKind::Or(ps) => ps.iter().take(1).for_each(|p| p.for_each_bind(f)),
+            HPatKind::Tuple(ps) | HPatKind::Variant { args: ps, .. } => ps.iter().for_each(|p| p.for_each_bind(f)),
+            HPatKind::Struct { fields } => fields.iter().for_each(|(_, p)| p.for_each_bind(f)),
+            HPatKind::List { before, rest, after } => {
+                before.iter().for_each(|p| p.for_each_bind(f));
+                if let Some(Some(l)) = rest {
+                    f(*l);
+                }
+                after.iter().for_each(|p| p.for_each_bind(f));
+            }
+            HPatKind::Wildcard | HPatKind::Int(_) | HPatKind::Str(_) | HPatKind::Bool(_) | HPatKind::Unit | HPatKind::Range(..) => {}
+        }
+    }
+
     pub fn for_each_subpattern(&mut self, f: &mut impl FnMut(&mut HPat)) {
         match &mut self.kind {
             HPatKind::Tuple(ps) | HPatKind::Or(ps) | HPatKind::Variant { args: ps, .. } => ps.iter_mut().for_each(f),

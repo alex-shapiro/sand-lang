@@ -7,6 +7,7 @@ pub mod heap;
 mod interp;
 pub mod iomem;
 mod iter;
+mod liveness;
 pub mod meter;
 pub mod sched;
 pub mod value;
@@ -567,6 +568,7 @@ pub struct Vm {
     pub(crate) retry_stress: bool,
     /// Struct nesting depth during conversion to Sand (see [`struct_into_value`](crate::native::struct_into_value)).
     pub(crate) struct_depth: usize,
+    liveness: liveness::LivenessCache,
 }
 
 pub const SLICE_FUEL: i64 = 20_000;
@@ -579,6 +581,20 @@ impl Fiber {
             Some(fr) => (fr.base as usize + prog.protos[fr.proto as usize].nregs as usize).min(self.stack.len()),
             None => 0,
         }
+    }
+
+    /// Whether the top frame stopped in its call instruction, waiting for
+    /// the call's result or woken to fail in it.
+    fn waits_in_call(&self) -> bool {
+        self.state == FiberState::Waiting || self.pending_error.is_some()
+    }
+
+    /// The instruction at which frame `i` stopped. Frames below the top one
+    /// stopped in the call before their `ip`; so did the top one if
+    /// `top_in_call`. Otherwise the top frame continues at its `ip`.
+    fn stop_pos(&self, i: usize, top_in_call: bool) -> usize {
+        let ip = self.frames[i].ip as usize;
+        if i + 1 < self.frames.len() || top_in_call { ip.saturating_sub(1) } else { ip }
     }
 
     /// Grows the stack (geometrically) to at least `need` slots, counting
@@ -661,6 +677,7 @@ impl Vm {
             broken: false,
             retry_stress: false,
             struct_depth: 0,
+            liveness: Default::default(),
         };
         vm.load_program();
         vm
@@ -1447,8 +1464,7 @@ impl Vm {
         for (w, g) in std::mem::take(&mut f.waiters) {
             self.deliver_error(w, g, "cancelled: task cancelled");
         }
-        // A fiber waiting in a call, or woken to fail in it, stopped before the call completed.
-        let in_call = f.state == FiberState::Waiting || f.pending_error.is_some();
+        let in_call = f.waits_in_call();
         if self.unwind_to_pad(&mut f, in_call) {
             f.pending_error = None;
             f.state = FiberState::Ready;
@@ -1465,12 +1481,10 @@ impl Vm {
     /// has any. Frames below the top stopped in a call; so did the top one
     /// if `in_call`.
     pub(crate) fn unwind_to_pad(&self, f: &mut Fiber, in_call: bool) -> bool {
-        let n = f.frames.len();
-        for i in (0..n).rev() {
-            let fr = &mut f.frames[i];
-            let pos = if i + 1 < n || in_call { (fr.ip as usize).saturating_sub(1) } else { fr.ip as usize };
-            if let Some(pad) = self.prog.protos[fr.proto as usize].cleanup_at(pos) {
-                fr.ip = pad as u32;
+        for i in (0..f.frames.len()).rev() {
+            let pos = f.stop_pos(i, in_call);
+            if let Some(pad) = self.prog.protos[f.frames[i].proto as usize].cleanup_at(pos) {
+                f.frames[i].ip = pad as u32;
                 f.frames.truncate(i + 1);
                 return true;
             }
@@ -1505,7 +1519,7 @@ impl Vm {
     // Garbage collection
 
     pub fn collect_garbage(&mut self, current: Option<&mut Fiber>) {
-        self.collect_garbage_with(current, false);
+        self.collect_garbage_with(current, false, false);
     }
 
     /// A major collection, freeing all unreachable objects; used before
@@ -1513,25 +1527,48 @@ impl Vm {
     /// Also closes idle `http` connections, which hold resource slots and
     /// buffers.
     pub fn collect_all_garbage(&mut self, current: Option<&mut Fiber>) {
+        self.collect_all_garbage_with(current, false);
+    }
+
+    /// [`Vm::collect_all_garbage`] for the fiber `current` whose top frame
+    /// is in a call to a native, which reads the arguments again.
+    pub(crate) fn collect_all_garbage_in_call(&mut self, current: &mut Fiber) {
+        self.collect_all_garbage_with(Some(current), true);
+    }
+
+    fn collect_all_garbage_with(&mut self, current: Option<&mut Fiber>, in_call: bool) {
         #[cfg(feature = "os")]
         self.host.http_pool.clear();
-        self.collect_garbage_with(current, true);
+        self.collect_garbage_with(current, true, in_call);
     }
 
     /// GC roots: globals, constants, pinned values and the fibers' live stack
-    /// windows, closures, tasks and race lists. Clears dead slots of stacks so
-    /// that they never hold handles to objects freed later. Shrinks stacks left
-    /// large by deep recursion and recounts `heap.fiber_bytes`.
-    fn gc_roots(&mut self, current: Option<&mut Fiber>) -> Vec<Value> {
+    /// windows, closures, tasks and race lists. Clears the registers that
+    /// frames never read again (see [`liveness`]) and the slots above the
+    /// stacks' windows, so that stacks keep no dead values alive and never
+    /// hold handles to objects freed later. Shrinks stacks left large by deep
+    /// recursion and recounts `heap.fiber_bytes`. `current_in_call` tells
+    /// whether the top frame of `current` is in a call.
+    fn gc_roots(&mut self, current: Option<&mut Fiber>, current_in_call: bool) -> Vec<Value> {
         let mut roots: Vec<Value> = Vec::with_capacity(1024);
         roots.extend(self.globals.iter().copied());
         roots.extend(self.consts.iter().copied());
         roots.extend(self.pinned.iter().copied());
         roots.extend(self.ascii_strs.iter().copied());
         let prog = &self.prog;
+        let liveness = &mut self.liveness;
+        let mut room = self.heap.room();
+        // Testing aid: under stress, a read of a cleared register fails.
+        let dead = if self.heap.stress || self.retry_stress { Value::Uninit } else { Value::Unit };
         let mut fiber_bytes = 0;
-        let mut add_fiber = |f: &mut Fiber, roots: &mut Vec<Value>| {
+        let mut add_fiber = |f: &mut Fiber, in_call: bool, roots: &mut Vec<Value>| {
             let top = f.live_top(prog);
+            for i in 0..f.frames.len() {
+                let fr = f.frames[i];
+                let start = (fr.base as usize).min(top);
+                let end = f.frames.get(i + 1).map_or(top, |next| (next.base as usize).clamp(start, top));
+                liveness.clear_dead(prog, fr.proto, f.stop_pos(i, in_call), &mut f.stack[start..end], dead, &mut room);
+            }
             roots.extend(f.stack[..top].iter().copied());
             if f.stack.len() > 2 * top + 4096 {
                 f.stack.truncate((top + top / 2).max(INITIAL_STACK_SLOTS));
@@ -1544,35 +1581,37 @@ impl Vm {
             fiber_bytes += f.footprint();
         };
         for f in self.fibers.iter_mut().flatten() {
-            add_fiber(f, &mut roots);
+            let in_call = f.waits_in_call();
+            add_fiber(f, in_call, &mut roots);
         }
         if let Some(f) = current {
-            add_fiber(f, &mut roots);
+            add_fiber(f, current_in_call, &mut roots);
         }
         fiber_bytes += self.spare_fibers.iter().map(|f| f.footprint()).sum::<usize>();
+        fiber_bytes += self.liveness.bytes();
         self.heap.fiber_bytes = fiber_bytes;
         roots
     }
 
-    fn collect_garbage_with(&mut self, mut current: Option<&mut Fiber>, force_major: bool) {
+    fn collect_garbage_with(&mut self, mut current: Option<&mut Fiber>, force_major: bool, in_call: bool) {
         let start = crate::platform::Instant::now();
         let mut full = force_major;
         if force_major {
             self.free_spare_fibers();
         } else if self.heap.cycle_active() {
             if self.heap.minor_due() {
-                let roots = self.gc_roots(current.as_deref_mut());
+                let roots = self.gc_roots(current.as_deref_mut(), in_call);
                 self.heap.collect(roots, false);
                 self.heap.stats.record(start.elapsed(), false);
             }
             let step = crate::platform::Instant::now();
             if self.heap.cycle_step() {
-                let roots = self.gc_roots(current.as_deref_mut());
+                let roots = self.gc_roots(current.as_deref_mut(), in_call);
                 self.heap.finish_marking(roots);
             }
             self.heap.stats.record_step(step.elapsed());
         } else {
-            let roots = self.gc_roots(current.as_deref_mut());
+            let roots = self.gc_roots(current.as_deref_mut(), in_call);
             // Major collection if the old generation is large enough; minor otherwise.
             let major = self.heap.wants_major() || (self.heap.stress && self.heap.stats.collections.is_multiple_of(8));
             if !major {
@@ -1592,7 +1631,7 @@ impl Vm {
         }
         if full {
             let start = crate::platform::Instant::now();
-            let roots = self.gc_roots(current);
+            let roots = self.gc_roots(current, in_call);
             self.heap.collect(roots, true);
             if self.heap.over_limit() {
                 self.free_spare_fibers();

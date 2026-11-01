@@ -2644,6 +2644,64 @@ fn memory_limit() {
     assert!(matches!(r, Err(Error::Limit(LimitKind::Memory))), "{r:?}");
 }
 
+/// Each program needs two 12 MB values at once only if a value stays in a
+/// register after the program stops reading it and its binding goes out of
+/// scope.
+#[test]
+fn dead_temporaries_and_out_of_scope_locals_do_not_count_against_the_memory_limit() {
+    const N: &str = "12_000_000";
+    let programs = [
+        ("temporary in a loop", "for _ in 0..3 {\n    print(\"x\".repeat(N).len())\n}", "12000000\n".repeat(3)),
+        (
+            "temporaries of inlined calls",
+            "fn count(c: str) -> int { c.repeat(N).len() }\nprint(count(\"x\"))\nprint(count(\"y\"))",
+            "12000000\n".repeat(2),
+        ),
+        ("temporaries of one expression", "print(\"x\".repeat(N).len() + \"y\".repeat(N).len())", "24000000\n".into()),
+        (
+            "local of a block that ended",
+            "if true {\n    let a = \"x\".repeat(N)\n    print(a.len())\n}\nlet b = \"y\".repeat(N)\nprint(b.len())",
+            "12000000\n".repeat(2),
+        ),
+        (
+            "temporary of a caller frame",
+            "fn f(d: int) -> int {\n    if d == 0 { \"y\".repeat(N).len() } else { f(d - 1) }\n}\nprint(\"x\".repeat(N).len() + f(3))",
+            "24000000\n".into(),
+        ),
+        (
+            "result of a script call in a loop",
+            "fn big(d: int) -> str {\n    if d == 0 { \"y\".repeat(N) } else { big(d - 1) }\n}\nfor _ in 0..3 {\n    print(big(2).len())\n}",
+            "12000000\n".repeat(3),
+        ),
+        (
+            "loop local built by instructions",
+            "var total = 0\nfor i in 0..3 {\n    let xs = [i; 500_000]\n    total += xs.len()\n}\nprint(total)",
+            "1500000\n".into(),
+        ),
+        (
+            "interpolation in a loop",
+            "let s = \"x\".repeat(3_000_000)\nfor i in 0..3 {\n    print(\"\\(s)\\(s)\\(i)\".len())\n}",
+            "6000001\n".repeat(3),
+        ),
+        (
+            "tasks",
+            "fn work(c: str) -> int {\n    var n = 0\n    for _ in 0..2 { n += c.repeat(6_000_000).len() }\n    n\n}\n\
+             let t = spawn work(\"a\")\nlet u = spawn work(\"b\")\nprint(t.wait() + u.wait())",
+            "24000000\n".into(),
+        ),
+    ];
+    type Mode = (&'static str, fn(Config) -> Config);
+    let modes: [Mode; 3] = [("plain", |c| c), ("GC stress", |c| c.gc_stress(true)), ("retry stress", |c| c.retry_stress(true))];
+    for (name, src, want) in &programs {
+        for (mode, with) in modes {
+            let config = with(Config::new().limits(Limits { max_memory: Some(20 << 20), ..Limits::default() }));
+            let (r, out, _) = run_src(config, &src.replace('N', N));
+            assert!(r.is_ok(), "{name} ({mode}): {r:?}");
+            assert_eq!(out, *want, "{name} ({mode})");
+        }
+    }
+}
+
 #[test]
 fn a_native_runs_once_when_its_result_needs_a_collection() {
     let pops = Arc::new(AtomicUsize::new(0));
@@ -3032,9 +3090,20 @@ print(c.unwrap_err().kind)
 a.close()
 print(net.listen("127.0.0.1", 0).is_ok())
 "#;
-    let (r, out, _) = run_src(config.policy(sandlang::RulePolicy::allow_all()), src);
+    let (r, out, _) = run_src(config.clone().policy(sandlang::RulePolicy::allow_all()), src);
     r.unwrap();
     assert_eq!(out, "limit\ntrue\n");
+    // Bindings keep their resources open until they go out of scope, even
+    // if the code never reads them again.
+    let src = r#"
+import net
+fn hold(a: net.Listener) -> bool { net.listen("127.0.0.1", 0).is_ok() }
+let b = net.listen("127.0.0.1", 0)?
+print(hold(net.listen("127.0.0.1", 0)?))
+"#;
+    let (r, out, _) = run_src(config.policy(sandlang::RulePolicy::allow_all()), src);
+    r.unwrap();
+    assert_eq!(out, "false\n");
 }
 
 #[test]

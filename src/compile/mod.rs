@@ -139,6 +139,12 @@ struct FnState<'h> {
     pending_from: usize,
     /// Code ranges with a pending defer: (start, end, pad).
     cleanups: Vec<(usize, usize, usize)>,
+    /// The parameters and the locals bound by `let` in each enclosing block
+    /// (innermost last), with the instruction where each binding starts.
+    bound: Vec<Vec<(Reg, usize)>>,
+    /// The code ranges in which bindings hold their values (`Proto::scopes`):
+    /// (register, start, end).
+    scopes: Vec<(Reg, usize, usize)>,
     /// Instructions emitted for copies of deferred code (see `MAX_DEFER_OPS`).
     defer_ops: usize,
     /// The register `discard` gives to an expression whose value is unused:
@@ -172,6 +178,38 @@ impl FnState<'_> {
     fn set_reg(&mut self, l: LocalId, r: Reg) {
         self.reg_log.push((l, self.local_reg[l as usize]));
         self.local_reg[l as usize] = r;
+    }
+
+    /// Enters a block: its deferred code and bindings.
+    fn enter_block(&mut self) {
+        self.defers.push(Vec::new());
+        self.bound.push(Vec::new());
+    }
+
+    /// Leaves a block, ending the scopes of its bindings.
+    fn leave_block(&mut self) {
+        self.defers.pop();
+        self.end_scopes();
+    }
+
+    /// Ends the scopes of the innermost block's bindings here.
+    fn end_scopes(&mut self) {
+        let here = self.code.len();
+        for (r, start) in self.bound.pop().unwrap_or_default() {
+            if start < here {
+                self.scopes.push((r, start, here));
+            }
+        }
+    }
+
+    /// Starts the scopes of the locals that `p` binds here.
+    fn bind_scope(&mut self, p: &HPat) {
+        let here = self.code.len();
+        p.for_each_bind(&mut |l| {
+            if let Some(r) = self.reg(l) {
+                self.bound.last_mut().unwrap().push((r, here));
+            }
+        });
     }
 
     /// Undoes the declarations since `reg_log` had length `mark`.
@@ -239,6 +277,7 @@ struct Finished {
     code: Vec<Op>,
     lines: Vec<u32>,
     cleanups: Vec<Cleanup>,
+    scopes: Vec<Scope>,
     sites: Vec<u16>,
     inlined: Vec<InlineSite>,
 }
@@ -458,6 +497,7 @@ impl<'a> Compiler<'a> {
                     lines: vec![],
                     captures: vec![],
                     cleanups: Vec::new(),
+                    scopes: Vec::new(),
                     sites: Vec::new(),
                     inlined: Vec::new(),
                 });
@@ -488,6 +528,7 @@ impl<'a> Compiler<'a> {
             lines: vec![0; n],
             captures: vec![],
             cleanups: Vec::new(),
+            scopes: Vec::new(),
             sites: Vec::new(),
             inlined: Vec::new(),
         });
@@ -800,6 +841,8 @@ impl<'a> Compiler<'a> {
             pending: None,
             pending_from: 0,
             cleanups: Vec::new(),
+            bound: vec![Vec::new()],
+            scopes: Vec::new(),
             defer_ops: 0,
             void: None,
             facts: Rc::new(local_facts(&body.body, &body.locals, self.budget)),
@@ -812,6 +855,7 @@ impl<'a> Compiler<'a> {
         for &p in &body.params {
             let r = self.alloc(&mut f);
             f.set_reg(p, r);
+            f.bound[0].push((r, 0));
         }
         match (self.order.init_pos(fid), &body.body.kind) {
             (Some(pos), HKind::Block(items)) if !items.is_empty() && self.field_construction(&f, items).is_none() => {
@@ -820,7 +864,7 @@ impl<'a> Compiler<'a> {
             _ => self.ret_expr(&mut f, &body.body),
         }
         let nregs = f.max_reg.max(1) as u16;
-        let Finished { code, lines, cleanups, sites, inlined } = self.finish(f);
+        let Finished { code, lines, cleanups, scopes, sites, inlined } = self.finish(f);
         self.prog.protos[proto_idx as usize] = Proto {
             name: fi.runtime_name(&self.cp.types, &self.cp.syms),
             file: body.span.file,
@@ -830,6 +874,7 @@ impl<'a> Compiler<'a> {
             lines,
             captures: vec![],
             cleanups,
+            scopes,
             sites,
             inlined,
         };
@@ -901,10 +946,21 @@ impl<'a> Compiler<'a> {
     /// emitted, assembled (`assemble`), and its jump tables completed.
     fn finish(&mut self, mut f: FnState<'a>) -> Finished {
         self.set_pending(&mut f, None);
+        while !f.bound.is_empty() {
+            f.end_scopes();
+        }
         self.emit_stubs(&mut f);
         let mut tables: Vec<Vec<usize>> = f.switches.iter().map(|s| s.1.clone()).collect();
         tables.push(f.cleanups.iter().flat_map(|&(start, end, pad)| [start, end, f.pads[pad].0]).collect());
+        tables.push(f.scopes.iter().flat_map(|&(_, start, end)| [start, end]).collect());
         let (code, lines) = assemble(f.code, f.lines, &f.far, &mut tables);
+        let scopes = f
+            .scopes
+            .iter()
+            .zip(tables.pop().unwrap().chunks(2))
+            .filter(|(_, c)| c[0] < c[1])
+            .map(|(&(reg, ..), c)| Scope { reg, start: c[0] as u32, end: c[1] as u32 })
+            .collect();
         let cleanups =
             tables.pop().unwrap().chunks(3).map(|c| Cleanup { start: c[0] as u32, end: c[1] as u32, pad: c[2] as u32 }).collect();
         for ((idx, _), targets) in f.switches.iter().zip(tables) {
@@ -915,7 +971,7 @@ impl<'a> Compiler<'a> {
         }
         let sites = if f.sites.is_empty() { Vec::new() } else { lines.iter().map(|&l| (l >> LINE_BITS) as u16).collect() };
         let lines = lines.into_iter().map(|l| l & LINE_MASK).collect();
-        Finished { code, lines, cleanups, sites, inlined: f.sites }
+        Finished { code, lines, cleanups, scopes, sites, inlined: f.sites }
     }
 
     /// Compiles `body`, the body of function `func` inlined at the call `e`,
@@ -1192,14 +1248,14 @@ impl<'a> Compiler<'a> {
             HKind::Unit | HKind::Local(_) | HKind::Bool(_) | HKind::Int(_) => return,
             HKind::Block(items) => {
                 let (mark, pending) = (f.next_reg, f.pending);
-                f.defers.push(Vec::new());
+                f.enter_block();
                 for it in items {
                     self.discard(f, it);
                 }
                 if !e.ty.is_never() {
                     self.emit_scope_defers(f);
                 }
-                f.defers.pop();
+                f.leave_block();
                 self.set_pending(f, pending);
                 f.next_reg = mark;
                 return;
@@ -1241,7 +1297,7 @@ impl<'a> Compiler<'a> {
     /// each statement is compiled at its own time.
     fn ret_block(&mut self, f: &mut FnState<'a>, items: &'a [HExpr], init: Option<usize>) {
         let (mark, pending) = (f.next_reg, f.pending);
-        f.defers.push(Vec::new());
+        f.enter_block();
         for (j, it) in items.iter().enumerate() {
             if let Some(pos) = init {
                 f.time = init_order::at(pos, j);
@@ -1252,7 +1308,7 @@ impl<'a> Compiler<'a> {
                 self.ret_expr(f, it);
             }
         }
-        f.defers.pop();
+        f.leave_block();
         self.set_pending(f, pending);
         f.next_reg = mark;
     }
@@ -1319,7 +1375,7 @@ impl<'a> Compiler<'a> {
                 let v = self.scrutinee(f, value);
                 let mut fails = Vec::new();
                 self.match_scrut(f, pat, &v, &mut fails);
-                self.ret_expr(f, then);
+                self.in_scope_of(f, pat, |s, f| s.ret_expr(f, then));
                 self.patch_list(f, fails);
                 self.ret_expr(f, els);
                 f.next_reg = mark;
@@ -1538,13 +1594,13 @@ impl<'a> Compiler<'a> {
     /// The condition `{ items }` (see `cond_block`): its statements, then a
     /// branch on its last expression taken when it is `when`.
     fn block_jump(&mut self, f: &mut FnState<'a>, items: &'a [HExpr], when: bool) -> Vec<usize> {
-        f.defers.push(Vec::new());
+        f.enter_block();
         for it in &items[..items.len() - 1] {
             self.discard(f, it);
         }
         let last = items.last().unwrap();
         let j = if when { self.cond_jump_true(f, last) } else { self.cond_jump(f, last) };
-        f.defers.pop();
+        f.leave_block();
         j
     }
 
@@ -1789,7 +1845,7 @@ impl<'a> Compiler<'a> {
                     self.unit_to(f, dst);
                 } else {
                     let pending = f.pending;
-                    f.defers.push(Vec::new());
+                    f.enter_block();
                     for it in &items[..items.len() - 1] {
                         self.discard(f, it);
                     }
@@ -1806,7 +1862,7 @@ impl<'a> Compiler<'a> {
                     } else {
                         self.expr_to(f, last, dst);
                     }
-                    f.defers.pop();
+                    f.leave_block();
                     self.set_pending(f, pending);
                 }
                 f.next_reg = mark;
@@ -1852,7 +1908,7 @@ impl<'a> Compiler<'a> {
                 let v = self.scrutinee(f, value);
                 let mut fails = Vec::new();
                 self.match_scrut(f, pat, &v, &mut fails);
-                self.expr_to(f, then, dst);
+                self.in_scope_of(f, pat, |s, f| s.expr_to(f, then, dst));
                 if else_.is_none() && f.void == Some(dst) {
                     // A statement: nothing to do when the pattern fails.
                     self.patch_list(f, fails);
@@ -1926,7 +1982,7 @@ impl<'a> Compiler<'a> {
                         let mut fails = Vec::new();
                         self.match_pattern(f, sub, t, &mut fails);
                         f.loops.push(LoopCx { defer_depth: f.defers.len(), ..Default::default() });
-                        self.discard(f, body);
+                        self.in_scope_of(f, pat, |s, f| s.discard(f, body));
                         let cx = f.loops.pop().unwrap();
                         self.patch_list(f, cx.continues);
                         self.patch_here(f, entry);
@@ -1946,7 +2002,7 @@ impl<'a> Compiler<'a> {
                         self.match_pattern(f, pat, v, &mut fails);
                         f.next_reg = vmark;
                         f.loops.push(LoopCx { defer_depth: f.defers.len(), ..Default::default() });
-                        self.discard(f, body);
+                        self.in_scope_of(f, pat, |s, f| s.discard(f, body));
                         self.emit_loop_back(f, top);
                         let cx = f.loops.pop().unwrap();
                         self.patch_list(f, fails);
@@ -1984,7 +2040,7 @@ impl<'a> Compiler<'a> {
                         self.patch_list(f, fails);
                     }
                     f.loops.push(LoopCx { defer_depth: f.defers.len(), ..Default::default() });
-                    self.discard(f, body);
+                    self.in_scope_of(f, pat, |s, f| s.discard(f, body));
                     let cx = f.loops.pop().unwrap();
                     self.patch_list(f, cx.continues);
                     self.patch_here(f, entry);
@@ -2817,7 +2873,7 @@ impl<'a> Compiler<'a> {
             self.patch_list(f, fails);
         }
         f.loops.push(LoopCx { defer_depth: f.defers.len(), ..Default::default() });
-        self.discard(f, body);
+        self.in_scope_of(f, pat, |s, f| s.discard(f, body));
         let cx = f.loops.pop().unwrap();
         self.patch_list(f, cx.continues);
         let back = self.emit(f, step.op(var, base, true));
@@ -2859,6 +2915,7 @@ impl<'a> Compiler<'a> {
             code,
             captures: vec![],
             cleanups: Vec::new(),
+            scopes: Vec::new(),
             sites: Vec::new(),
             inlined: Vec::new(),
         });
@@ -3207,27 +3264,21 @@ impl<'a> Compiler<'a> {
     // ------------------------------------------------------------------
     // Patterns
 
+    /// Compiles `body` with the locals that `pat` binds in scope.
+    fn in_scope_of<R>(&mut self, f: &mut FnState<'a>, pat: &HPat, body: impl FnOnce(&mut Self, &mut FnState<'a>) -> R) -> R {
+        f.bound.push(Vec::new());
+        f.bind_scope(pat);
+        let r = body(self, f);
+        f.end_scopes();
+        r
+    }
+
     fn declare_pattern_locals(&mut self, f: &mut FnState<'a>, p: &'a HPat) {
-        match &p.kind {
-            HPatKind::Bind(l) => {
-                if f.reg(*l).is_none() {
-                    self.declare_local(f, *l);
-                }
+        p.for_each_bind(&mut |l| {
+            if f.reg(l).is_none() {
+                self.declare_local(f, l);
             }
-            HPatKind::Tuple(ps) | HPatKind::Or(ps) => ps.iter().for_each(|x| self.declare_pattern_locals(f, x)),
-            HPatKind::Variant { args, .. } => args.iter().for_each(|x| self.declare_pattern_locals(f, x)),
-            HPatKind::Struct { fields } => fields.iter().for_each(|(_, x)| self.declare_pattern_locals(f, x)),
-            HPatKind::List { before, rest, after } => {
-                before.iter().for_each(|x| self.declare_pattern_locals(f, x));
-                if let Some(Some(l)) = rest
-                    && f.reg(*l).is_none()
-                {
-                    self.declare_local(f, *l);
-                }
-                after.iter().for_each(|x| self.declare_pattern_locals(f, x));
-            }
-            _ => {}
-        }
+        });
     }
 
     /// Tests `v` against `p`, binding locals; jumps to `fails` on mismatch.
@@ -3553,10 +3604,10 @@ impl<'a> Compiler<'a> {
             }
             match dst {
                 Some(dst) => {
-                    self.expr_to(f, &arm.body, dst);
+                    self.in_scope_of(f, &arm.pat, |s, f| s.expr_to(f, &arm.body, dst));
                     ends.push(self.emit_jump(f));
                 }
-                None => self.ret_expr(f, &arm.body),
+                None => self.in_scope_of(f, &arm.pat, |s, f| s.ret_expr(f, &arm.body)),
             }
             if i + 1 < arms.len() {
                 self.patch_list(f, fails);
@@ -3604,6 +3655,12 @@ impl<'a> Compiler<'a> {
     }
 
     fn compile_let(&mut self, f: &mut FnState<'a>, pat: &'a HPat, init: &'a HExpr, else_: Option<&'a HExpr>) {
+        self.let_value(f, pat, init, else_);
+        f.bind_scope(pat);
+    }
+
+    /// Declares the locals of `let pat = init` and gives them their values.
+    fn let_value(&mut self, f: &mut FnState<'a>, pat: &'a HPat, init: &'a HExpr, else_: Option<&'a HExpr>) {
         if let HPatKind::Bind(l) = pat.kind
             && else_.is_none()
         {
@@ -3683,6 +3740,8 @@ impl<'a> Compiler<'a> {
             pending: None,
             pending_from: 0,
             cleanups: Vec::new(),
+            bound: vec![Vec::new()],
+            scopes: Vec::new(),
             defer_ops: 0,
             void: None,
             facts: f.facts.clone(),
@@ -3693,15 +3752,18 @@ impl<'a> Compiler<'a> {
             sites: Vec::new(),
         };
         // The parameters, then the captures (see `Proto::captures`).
-        for &l in lam.params.iter().chain(free) {
+        for (i, &l) in lam.params.iter().chain(free).enumerate() {
             let r = self.alloc(&mut sub);
             sub.set_reg(l, r);
+            if i < lam.params.len() {
+                sub.bound[0].push((r, 0));
+            }
         }
         self.ret_expr(&mut sub, &lam.body);
         f.too_big |= sub.too_big;
         let p = self.prog.protos.len() as u32;
         let nregs = sub.max_reg.max(1) as u16;
-        let Finished { code, lines, cleanups, sites, inlined } = self.finish(sub);
+        let Finished { code, lines, cleanups, scopes, sites, inlined } = self.finish(sub);
         self.prog.protos.push(Proto {
             name: lam.name.clone(),
             file: f.file,
@@ -3711,6 +3773,7 @@ impl<'a> Compiler<'a> {
             lines,
             captures,
             cleanups,
+            scopes,
             sites,
             inlined,
         });
@@ -4322,6 +4385,7 @@ impl DescCode<'_> {
             code,
             captures: vec![NO_REG; captures],
             cleanups: Vec::new(),
+            scopes: Vec::new(),
             sites: Vec::new(),
             inlined: Vec::new(),
         });

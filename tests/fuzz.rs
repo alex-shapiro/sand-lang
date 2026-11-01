@@ -270,6 +270,33 @@ fn mutated_programs_never_panic() {
     }
 }
 
+/// Runs `src` with and without GC stress and asserts that both runs print and
+/// return the same, unless one of them exceeds a limit. Under stress, every
+/// safe point collects garbage and clears the registers that liveness
+/// analysis finds dead to a value that fails when read.
+fn same_under_gc_stress(src: &str) {
+    let run = |stress: bool| {
+        let out = MemorySink::new();
+        let mut engine = Engine::new(limited_config().stdout(out.clone()).seed(7).gc_stress(stress)).unwrap();
+        let r = rt().block_on(engine.run_source("fuzz.sand", src));
+        (matches!(r, Err(Error::Limit(_))), format!("{r:?}"), out.contents())
+    };
+    let (plain, stressed) = (run(false), run(true));
+    if !plain.0 && !stressed.0 {
+        assert_eq!(plain, stressed, "GC stress changes the run of:\n-----\n{src}\n-----");
+    }
+}
+
+#[test]
+fn mutated_programs_behave_the_same_under_gc_stress() {
+    let corpus = corpus();
+    let mut rng = Rng(5);
+    for _ in 0..iters(300) {
+        let base = rng.pick(&corpus).clone();
+        same_under_gc_stress(&mutate(&mut rng, &base));
+    }
+}
+
 #[test]
 fn unmutated_corpus_runs_under_limits() {
     // Every corpus program terminates (successfully or not) under tight limits.
