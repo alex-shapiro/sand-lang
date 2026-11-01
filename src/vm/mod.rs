@@ -7,7 +7,7 @@ pub mod heap;
 mod interp;
 pub mod iomem;
 mod iter;
-mod liveness;
+pub(crate) mod liveness;
 pub mod meter;
 pub mod sched;
 pub mod value;
@@ -1557,7 +1557,6 @@ impl Vm {
         roots.extend(self.ascii_strs.iter().copied());
         let prog = &self.prog;
         let liveness = &mut self.liveness;
-        let mut room = self.heap.room();
         // Testing aid: under stress, a read of a cleared register fails.
         let dead = if self.heap.stress || self.retry_stress { Value::Uninit } else { Value::Unit };
         let mut fiber_bytes = 0;
@@ -1567,7 +1566,7 @@ impl Vm {
                 let fr = f.frames[i];
                 let start = (fr.base as usize).min(top);
                 let end = f.frames.get(i + 1).map_or(top, |next| (next.base as usize).clamp(start, top));
-                liveness.clear_dead(prog, fr.proto, f.stop_pos(i, in_call), &mut f.stack[start..end], dead, &mut room);
+                liveness.clear_dead(prog, fr.proto, f.stop_pos(i, in_call), &mut f.stack[start..end], dead);
             }
             roots.extend(f.stack[..top].iter().copied());
             if f.stack.len() > 2 * top + 4096 {
@@ -1588,7 +1587,6 @@ impl Vm {
             add_fiber(f, current_in_call, &mut roots);
         }
         fiber_bytes += self.spare_fibers.iter().map(|f| f.footprint()).sum::<usize>();
-        fiber_bytes += self.liveness.bytes();
         self.heap.fiber_bytes = fiber_bytes;
         roots
     }

@@ -1147,6 +1147,10 @@ pub struct Proto {
     /// their values. A frame keeps these values alive until its code leaves
     /// the range, even if it never reads them again.
     pub scopes: Vec<Scope>,
+    /// The registers that frames may still read, which the compiler solves
+    /// after it emits every proto. `None` if the table would be too large:
+    /// frames then keep all registers.
+    pub liveness: Option<super::liveness::Liveness>,
     /// For each instruction, the inlined call it belongs to: 0 for none, `i`
     /// for `inlined[i - 1]`. Empty if nothing was inlined. The instruction's
     /// line (`lines`) is then in the inlined function's file.

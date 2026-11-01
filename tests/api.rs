@@ -2702,6 +2702,29 @@ fn dead_temporaries_and_out_of_scope_locals_do_not_count_against_the_memory_limi
     }
 }
 
+/// A temporary that fits under the memory limit once also fits in each
+/// iteration of a loop, even if it leaves almost no memory free: the first
+/// collection that sees the loop's frame must clear the dead temporary.
+#[test]
+fn the_largest_temporary_that_fits_once_fits_in_every_iteration() {
+    let run = |n: usize, times: usize| {
+        let src = format!(
+            "fn total(n: int, k: int) -> int {{\n    var t = 0\n    for _ in 0..k {{ t += \"x\".repeat(n).len() }}\n    t\n}}\nprint(total({n}, {times}))"
+        );
+        let config = Config::new().limits(Limits { max_memory: Some(4 << 20), ..Limits::default() });
+        let (r, out, _) = run_src(config, &src);
+        (r, out)
+    };
+    let (mut fits, mut fails) = (1, 4 << 20);
+    while fails - fits > 1 {
+        let mid = (fits + fails) / 2;
+        if run(mid, 1).0.is_ok() { fits = mid } else { fails = mid }
+    }
+    let (r, out) = run(fits, 3);
+    assert!(r.is_ok(), "{fits} bytes: {r:?}");
+    assert_eq!(out, format!("{}\n", 3 * fits));
+}
+
 #[test]
 fn a_native_runs_once_when_its_result_needs_a_collection() {
     let pops = Arc::new(AtomicUsize::new(0));

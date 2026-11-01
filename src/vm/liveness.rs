@@ -336,15 +336,21 @@ fn successors(prog: &Program, code: &[Op], at: usize, mut f: impl FnMut(usize)) 
     }
 }
 
-/// Liveness tables are not built for protos whose table would take more
-/// bytes than this. Their frames keep all registers.
-const MAX_BYTES: usize = 8 << 20;
+/// A table takes at most this many bytes per byte of code. A larger table
+/// would grow with the product of the code length and the number of
+/// registers, so its proto gets none and its frames keep all registers.
+const MAX_BYTES_PER_CODE_BYTE: usize = 8;
+
+/// The solver gives up after it scans this many times the instructions and
+/// table words of a proto. Then the proto's frames keep all registers.
+const MAX_SCANS: usize = 32;
 
 /// Blocks are split after this many instructions, which bounds the
 /// instructions a collection scans for each frame.
 const MAX_BLOCK: usize = 64;
 
 /// The live registers of a proto on entry to each of its basic blocks.
+#[derive(Clone, Debug)]
 pub struct Liveness {
     /// The first instruction of each block, ascending.
     starts: Vec<u32>,
@@ -357,9 +363,11 @@ pub struct Liveness {
 }
 
 impl Liveness {
-    /// Solves liveness for `proto`, or returns the size of its table in
-    /// bytes if that is more than `max_bytes`.
-    pub fn new(prog: &Program, proto: &Proto, max_bytes: usize) -> Result<Liveness, usize> {
+    /// Solves liveness for `proto`, or returns `None` if its table would
+    /// break the size or time limits (`MAX_BYTES_PER_CODE_BYTE`,
+    /// `MAX_SCANS`). Reads the other protos of `prog` for the parameter
+    /// counts of calls, so every proto that `proto` calls must be complete.
+    pub fn new(prog: &Program, proto: &Proto) -> Option<Liveness> {
         let code = &proto.code;
         let n = code.len();
         let mut leader: Vec<bool> = (0..=n).map(|at| at % MAX_BLOCK == 0).collect();
@@ -394,12 +402,11 @@ impl Liveness {
         }
         let globals: Vec<Reg> = (0..nregs).filter(|&r| global[r]).map(|r| r as Reg).collect();
         let words = globals.len().div_ceil(64);
-        let size =
-            starts.len() * size_of::<u32>() + globals.len() * size_of::<Reg>() + starts.len().saturating_mul(words) * size_of::<u64>();
-        if size > max_bytes {
-            return Err(size);
-        }
         let nblocks = starts.len();
+        let size = nblocks * size_of::<u32>() + globals.len() * size_of::<Reg>() + nblocks.saturating_mul(words) * size_of::<u64>();
+        if size > MAX_BYTES_PER_CODE_BYTE * n * size_of::<Op>() {
+            return None;
+        }
         let mut lv = Liveness { live: vec![0; nblocks * words], starts, globals, words };
         let mut preds = vec![Vec::new(); nblocks];
         for b in 0..nblocks {
@@ -419,10 +426,13 @@ impl Liveness {
         let mut work: Vec<u32> = (0..nblocks as u32).collect();
         let mut queued = vec![true; nblocks];
         let (mut out, mut row) = (vec![0; nregs.div_ceil(64)], vec![0; words]);
+        let mut budget = MAX_SCANS * (n + nblocks * words);
         while let Some(b) = work.pop() {
             let b = b as usize;
             queued[b] = false;
-            lv.scan(prog, proto, b, lv.starts[b] as usize, &mut out);
+            let (start, end) = lv.bounds(b, n);
+            budget = budget.checked_sub(end - start + words)?;
+            lv.scan(prog, proto, b, start, &mut out);
             for (i, &g) in lv.globals.iter().enumerate() {
                 let bit = (out[g as usize / 64] >> (g % 64)) & 1;
                 row[i / 64] = row[i / 64] & !(1 << (i % 64)) | bit << (i % 64);
@@ -437,10 +447,11 @@ impl Liveness {
                 }
             }
         }
-        Ok(lv)
+        Some(lv)
     }
 
     /// Heap memory of the table, in bytes.
+    #[cfg(test)]
     pub fn bytes(&self) -> usize {
         self.starts.capacity() * size_of::<u32>() + self.globals.capacity() * size_of::<Reg>() + self.live.capacity() * size_of::<u64>()
     }
@@ -540,51 +551,23 @@ fn or(out: &mut [u64], row: &[u64]) {
     }
 }
 
-/// The liveness tables of the protos whose frames collections have seen.
+/// The live registers of the last frame that a collection cleared: of
+/// proto `last.0` stopped at `last.1`. Recursive calls stop many frames at
+/// one place.
 #[derive(Default)]
 pub struct LivenessCache {
-    /// By proto: `None` if not solved yet, `Some(None)` if too large.
-    tables: Vec<Option<Option<Liveness>>>,
-    bytes: usize,
-    /// The live registers of the last frame cleared: of proto `last.0`
-    /// stopped at `last.1`. Recursive calls stop many frames at one place.
     row: Vec<u64>,
     last: Option<(u32, usize)>,
 }
 
 impl LivenessCache {
-    /// Heap memory of the tables, in bytes.
-    pub fn bytes(&self) -> usize {
-        self.bytes + self.tables.capacity() * size_of::<Option<Option<Liveness>>>() + self.row.capacity() * size_of::<u64>()
-    }
-
     /// Clears the registers of `regs`, the start of the register window of
     /// a frame of proto `p` stopped at instruction `pos`, to `dead` if the
-    /// frame never reads them again. Solves the proto's liveness first if
-    /// needed, unless its table would take more than `room` bytes, which
-    /// the table's size is then taken from.
+    /// frame never reads them again.
     #[inline]
-    pub fn clear_dead(&mut self, prog: &Program, p: u32, pos: usize, regs: &mut [Value], dead: Value, room: &mut usize) {
+    pub fn clear_dead(&mut self, prog: &Program, p: u32, pos: usize, regs: &mut [Value], dead: Value) {
         let Some(proto) = prog.protos.get(p as usize) else { return };
-        if pos >= proto.code.len() {
-            return;
-        }
-        let i = p as usize;
-        if self.tables.len() <= i {
-            self.tables.resize_with(i + 1, || None);
-        }
-        if self.tables[i].is_none() {
-            match Liveness::new(prog, proto, MAX_BYTES.min(*room)) {
-                Ok(lv) => {
-                    *room = room.saturating_sub(lv.bytes());
-                    self.bytes += lv.bytes();
-                    self.tables[i] = Some(Some(lv));
-                }
-                Err(size) if size > MAX_BYTES => self.tables[i] = Some(None),
-                Err(_) => return,
-            }
-        }
-        let Some(Some(lv)) = &self.tables[i] else { return };
+        let Some(lv) = proto.liveness.as_ref().filter(|_| pos < proto.code.len()) else { return };
         if self.last != Some((p, pos)) {
             self.row.resize((proto.nregs as usize).div_ceil(64), 0);
             lv.live_at(prog, proto, pos, &mut self.row);
@@ -694,7 +677,7 @@ mod tests {
     fn liveness_matches_a_per_instruction_solution() {
         for prog in corpus() {
             for proto in &prog.protos {
-                let lv = Liveness::new(&prog, proto, MAX_BYTES).unwrap();
+                let lv = proto.liveness.as_ref().unwrap_or_else(|| panic!("{} has no liveness table", proto.name));
                 let mut row = vec![0; (proto.nregs as usize).div_ceil(64)];
                 for (pos, mut want) in reference(&prog, proto).into_iter().enumerate() {
                     for sc in proto.scopes.iter().filter(|sc| (sc.start as usize..sc.end as usize).contains(&pos)) {
@@ -714,7 +697,7 @@ mod tests {
     fn frames_read_only_their_own_initialized_registers() {
         for prog in corpus() {
             for proto in &prog.protos {
-                let lv = Liveness::new(&prog, proto, MAX_BYTES).unwrap();
+                let lv = proto.liveness.as_ref().unwrap();
                 let mut row = vec![0; (proto.nregs as usize).div_ceil(64)];
                 if proto.code.is_empty() {
                     continue;
@@ -754,25 +737,32 @@ mod tests {
         let prog = compile(&src).unwrap();
         let proto = prog.protos.iter().max_by_key(|p| p.code.len()).unwrap();
         assert!(proto.nregs > 2000);
-        let lv = Liveness::new(&prog, proto, MAX_BYTES).unwrap();
+        let lv = proto.liveness.as_ref().unwrap();
         assert!(lv.bytes() < 2 * proto.code.len() * size_of::<Op>(), "{} bytes for {} instructions", lv.bytes(), proto.code.len());
     }
 
-    /// Without room for its table, a frame keeps all its registers; with
-    /// room, the dead ones are cleared and the table's size is taken from it.
+    /// Tables that grow with the code length times the number of registers
+    /// are not kept: such a long script whose locals are all read at its end
+    /// keeps all registers. A function with a table clears its dead ones.
     #[test]
-    fn frames_keep_their_registers_without_room_for_a_table() {
-        let prog = compile("fn f(a: str) -> int {\n    let b = a.repeat(2)\n    b.len()\n}\nprint(f(\"x\"))").unwrap();
-        let p = prog.protos.iter().position(|p| p.name == "f").unwrap();
-        let proto = &prog.protos[p];
-        let pos = proto.code.len() - 1;
-        let regs = || vec![Value::Int(1); proto.nregs as usize];
+    fn frames_without_a_table_keep_all_registers() {
+        let mut src = String::from("fn f(a: str) -> int {\n    let b = a.repeat(2)\n    b.len()\n}\nprint(f(\"x\"))\nlet c = true\n");
+        for i in 0..1500 {
+            src += &format!("let x{i} = if c {{ \"a{i}\" }} else {{ \"b{i}\" }}\n");
+        }
+        for i in 0..1500 {
+            src += &format!("print(x{i}.len())\n");
+        }
+        let prog = compile(&src).unwrap();
         let mut cache = LivenessCache::default();
-        let (mut kept, mut room) = (regs(), 0);
-        cache.clear_dead(&prog, p as u32, pos, &mut kept, Value::Unit, &mut room);
-        assert_eq!(kept, regs());
-        let (mut cleared, mut room) = (regs(), usize::MAX);
-        cache.clear_dead(&prog, p as u32, pos, &mut cleared, Value::Unit, &mut room);
-        assert!(cleared.contains(&Value::Unit) && room < usize::MAX, "{cleared:?}");
+        let mut clear = |name: &str| {
+            let p = prog.protos.iter().position(|p| p.name == name).unwrap();
+            let proto = &prog.protos[p];
+            let mut regs = vec![Value::Int(1); proto.nregs as usize];
+            cache.clear_dead(&prog, p as u32, proto.code.len() - 1, &mut regs, Value::Unit);
+            (proto.liveness.is_some(), regs.contains(&Value::Unit))
+        };
+        assert_eq!(clear("<main>"), (false, false));
+        assert_eq!(clear("f"), (true, true));
     }
 }

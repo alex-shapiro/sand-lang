@@ -17,6 +17,7 @@ use crate::engine::NativeDecls;
 use crate::hir::*;
 use crate::types::{FnId, Ty, TypeArena, TypeDefId, TypeId};
 use crate::vm::bytecode::*;
+use crate::vm::liveness::Liveness;
 use crate::vm::value::FxHashMap;
 use init_order::{InitOrder, Time};
 use std::collections::{HashMap, HashSet};
@@ -364,6 +365,7 @@ impl ProgramMark {
 pub(crate) fn compile_more(mut input: CompileInput, prog: &mut Program, inc: &mut Incremental, inits: &[FnId]) -> Result<u32, Vec<Diag>> {
     let cp = input.checked;
     let first = inc.fn_protos.len();
+    let first_proto = prog.protos.len();
     if cfg!(debug_assertions)
         && let Err(m) = crate::check::verify(cp, cp.bodies.from(first as FnId))
     {
@@ -406,7 +408,13 @@ pub(crate) fn compile_more(mut input: CompileInput, prog: &mut Program, inc: &mu
     inc.ctor_wrappers = c.ctor_wrappers;
     inc.dict_consts = c.dict_consts;
     inc.descs = c.descs;
-    if c.errors.is_empty() { Ok(entry) } else { Err(c.errors) }
+    if !c.errors.is_empty() {
+        return Err(c.errors);
+    }
+    for i in first_proto..prog.protos.len() {
+        prog.protos[i].liveness = Liveness::new(prog, &prog.protos[i]);
+    }
+    Ok(entry)
 }
 
 impl<'a> Compiler<'a> {
@@ -498,6 +506,7 @@ impl<'a> Compiler<'a> {
                     captures: vec![],
                     cleanups: Vec::new(),
                     scopes: Vec::new(),
+                    liveness: None,
                     sites: Vec::new(),
                     inlined: Vec::new(),
                 });
@@ -529,6 +538,7 @@ impl<'a> Compiler<'a> {
             captures: vec![],
             cleanups: Vec::new(),
             scopes: Vec::new(),
+            liveness: None,
             sites: Vec::new(),
             inlined: Vec::new(),
         });
@@ -875,6 +885,7 @@ impl<'a> Compiler<'a> {
             captures: vec![],
             cleanups,
             scopes,
+            liveness: None,
             sites,
             inlined,
         };
@@ -2916,6 +2927,7 @@ impl<'a> Compiler<'a> {
             captures: vec![],
             cleanups: Vec::new(),
             scopes: Vec::new(),
+            liveness: None,
             sites: Vec::new(),
             inlined: Vec::new(),
         });
@@ -3774,6 +3786,7 @@ impl<'a> Compiler<'a> {
             captures,
             cleanups,
             scopes,
+            liveness: None,
             sites,
             inlined,
         });
@@ -4386,6 +4399,7 @@ impl DescCode<'_> {
             captures: vec![NO_REG; captures],
             cleanups: Vec::new(),
             scopes: Vec::new(),
+            liveness: None,
             sites: Vec::new(),
             inlined: Vec::new(),
         });
