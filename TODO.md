@@ -112,6 +112,30 @@ Common scripts fail, require workarounds, or produce misleading diagnostics.
       - Include the origin of an inferred bound in diagnostic messages if a
         caller does not satisfy it.
 
+- [ ] ❓ _Language._ Close resources bound with `let` at the end of their scope, and remove
+      `use`. Close a resource that a function creates on every exit of its
+      scope if every use of it is a read or a call to a function that keeps
+      nothing. A function keeps a parameter if it returns it, stores it in a
+      value, global, or channel, captures it in a closure that escapes, or
+      passes it to `spawn` or to a call that keeps it. Calls through function
+      values, trait dictionaries, and host natives keep their arguments.
+      Leave every other resource to the garbage collector, as now. Decide
+      whether `let _ = e` keeps `e` until the end of its scope.
+
+      - Build a separate analysis that treats every case it cannot prove as
+        an escape. The resource lints are optimistic and cannot serve.
+      - Add a stress mode that marks a resource instead of closing it at the
+        end of its scope and fails on any later use. Run the spec suite and
+        the fuzz targets in this mode, and require the same results as a
+        normal run.
+- [ ] ❓ _Memory._ Measure whether freeing values at the end of their scope lowers peak
+      memory and the number of collections enough to justify it. The heap
+      counts garbage until a collection finds it, so it grows to about twice
+      the live bytes before a major collection. Freeing a value that the
+      analysis of the item above proves local subtracts its bytes at once.
+      Record peak `Heap::used` in `GcStats`, then count the bytes in
+      `bench/` that the analysis could free early.
+
 ## Tier 4: polish
 
 Visible defects that rarely block users.
