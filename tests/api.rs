@@ -3535,3 +3535,54 @@ fn rust_bound_field_types_meet_the_requirements_of_their_constructors() {
     let errors = engine_errors(Config::new().module(m));
     assert_eq!(errors, ["field `rows` of `Seen`: [int] does not implement `Hash` (required for the elements of Set<[int]>)"]);
 }
+
+// ---------------------------------------------------------------------------
+// Host context and run statistics
+// ---------------------------------------------------------------------------
+
+#[test]
+fn native_functions_read_the_host_context() {
+    struct Caller(String);
+    let mut m = NativeModule::new("host");
+    m.vm_function("caller", |vm: &mut Vm| -> String { vm.context::<Caller>().map(|c| c.0.clone()).unwrap_or_default() });
+    let base = Config::new().module(m);
+    for name in ["alice", "bob"] {
+        let config = base.clone().context(Arc::new(Caller(name.into())));
+        let (r, out, _) = run_src(config, "import host\nprint(host.caller())");
+        r.unwrap();
+        assert_eq!(out, format!("{name}\n"));
+    }
+    let (r, out, _) = run_src(base, "import host\nprint(host.caller())");
+    r.unwrap();
+    assert_eq!(out, "\n");
+}
+
+#[test]
+fn run_stats_report_fuel_memory_and_output() {
+    let (mut engine, _, _) = engine_with(Config::new());
+    rt().block_on(engine.run_source("main.sand", "var s = 0\nfor i in 0..1000 { s += i }\nprint(s)")).unwrap();
+    let small = engine.run_stats();
+    assert!(small.fuel >= 1000, "{small:?}");
+    assert_eq!(small.output_bytes, 7);
+    rt().block_on(engine.run_source("main.sand", "let xs = []\nfor i in 0..100000 { xs.push([i]) }\nprint(xs.len())")).unwrap();
+    let big = engine.run_stats();
+    assert!(big.peak_memory > 1 << 20 && big.peak_memory > small.peak_memory, "{small:?} {big:?}");
+    let limited = Config::new().limits(Limits { max_instructions: Some(5000), ..Limits::default() });
+    let (mut engine, _, _) = engine_with(limited);
+    let r = rt().block_on(engine.run_source("main.sand", "while true {}"));
+    assert!(matches!(r, Err(Error::Limit(LimitKind::Instructions))));
+    assert!(engine.run_stats().fuel >= 5000);
+}
+
+#[test]
+fn run_stats_fuel_is_deterministic() {
+    let src = "import json\nlet xs = [for i in 0..500 { [\"k\": i] }]\nlet t = json.encode(xs)\nprint(t.len())";
+    let fuel: Vec<u64> = (0..3)
+        .map(|_| {
+            let (mut engine, _, _) = engine_with(Config::new());
+            rt().block_on(engine.run_source("main.sand", src)).unwrap();
+            engine.run_stats().fuel
+        })
+        .collect();
+    assert!(fuel.iter().all(|f| *f == fuel[0]), "{fuel:?}");
+}

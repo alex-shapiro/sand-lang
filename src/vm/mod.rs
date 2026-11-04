@@ -508,6 +508,8 @@ pub struct Host {
     #[cfg(feature = "os")]
     pub(crate) network: Arc<dyn crate::network::Network>,
     pub(crate) time_zone: Option<jiff::tz::TimeZone>,
+    /// Host data set with [`crate::Config::context`].
+    pub(crate) context: Option<Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 pub struct Vm {
@@ -624,6 +626,12 @@ impl Fiber {
 }
 
 impl Vm {
+    /// The host data that [`crate::Config::context`] attached to the run, if
+    /// it has type `T`.
+    pub fn context<T: Send + Sync + 'static>(&self) -> Option<Arc<T>> {
+        self.host.context.clone()?.downcast::<T>().ok()
+    }
+
     pub fn new(prog: Arc<Program>, natives: Arc<Vec<NativeEntry>>, host: Host) -> Vm {
         let heap = Heap::new(host.limits.max_memory, host.limits.max_open_resources);
         let consts = Vec::with_capacity(prog.consts.len());

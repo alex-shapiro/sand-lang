@@ -139,6 +139,8 @@ pub struct Heap {
     pub stress: bool,
     /// Testing aid: causes the next limit check to fail (see `Config::retry_stress`).
     pub(crate) fail_next_check: std::cell::Cell<bool>,
+    /// The most memory seen in use by a memory check (see [`Heap::peak`]).
+    peak: std::cell::Cell<usize>,
     /// Disables memory-limit checks during post-effect result conversion (see [`Vm::unchecked`](crate::vm::Vm::unchecked)).
     pub(crate) unchecked: bool,
     /// Buffers of pending I/O, counted against `limit` with the heap.
@@ -371,6 +373,7 @@ impl Heap {
             young_resources: 0,
             stress: false,
             fail_next_check: std::cell::Cell::new(false),
+            peak: std::cell::Cell::new(0),
             unchecked: false,
             io_memory: IoMemory::new(limit, max_resources),
             worklist: Vec::new(),
@@ -571,6 +574,7 @@ impl Heap {
     /// Whether `extra` more bytes would exceed the memory limit (which also
     /// covers buffers reserved by pending I/O).
     pub fn would_exceed(&self, extra: usize) -> bool {
+        self.note_peak();
         if self.fail_next_check.get() && !self.unchecked {
             self.fail_next_check.set(false);
             return true;
@@ -595,6 +599,23 @@ impl Heap {
 
     pub fn over_limit(&self) -> bool {
         matches!(self.limit, Some(l) if self.used().saturating_add(self.io_memory.reserved()) > l)
+    }
+
+    /// Records the memory in use, with pending I/O, if it is the most so far.
+    #[inline]
+    pub fn note_peak(&self) {
+        let now = self.used().saturating_add(self.io_memory.reserved());
+        if now > self.peak.get() {
+            self.peak.set(now);
+        }
+    }
+
+    /// The most memory in use, as `max_memory` counts it, at any memory
+    /// check of the run. The heap checks memory before it grows and at each
+    /// collection, so the peak is exact to within one allocation between
+    /// checks.
+    pub fn peak(&self) -> usize {
+        self.peak.get()
     }
 
     /// Memory used by heap objects, fibers, retained arena slots, and collector
@@ -1259,6 +1280,7 @@ impl Heap {
     /// objects only) or, if `major`, a full one. Unreachable native resources
     /// are dropped, which closes them.
     pub fn collect(&mut self, roots: impl IntoIterator<Item = Value>, major: bool) {
+        self.note_peak();
         if major {
             self.drop_spares();
             self.abandon_cycle();

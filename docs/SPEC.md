@@ -1985,6 +1985,13 @@ returns an `Error`:
 | `Error::Io(message)`                 | The entry script file could not be read.                             |
 | `Error::Internal { message, trace }` | An internal invariant failed or a host callback panicked (§10.3).    |
 
+After each run, `Engine::run_stats` reports the resources that the run used,
+including runs that failed or exceeded a limit: `fuel` (in the units of
+`max_instructions`), `peak_memory` (the most memory in use at any memory
+check, as `max_memory` counts it), `output_bytes`, and garbage collector
+statistics. Fuel charges are deterministic (§15.2), so a host can bill or
+replay runs by fuel.
+
 If `sandlang` is compiled with the default `panic = "unwind"` setting, the
 engine catches Rust panics inside library native functions, host callbacks, I/O
 operations, and permission prompters and converts them into `Error::Internal`
@@ -2123,6 +2130,11 @@ kind: kind))` in Sand, whereas `?` converts a `Ctl` into a `HostError` that
   or an exit code.
 - `Result<Later<T, E>, E>` suspends the calling task on a future and maps to
   the same Sand return type as `Result<T, E>`.
+
+`Config::context(data)` attaches host data to every run of an engine, and a
+`vm_function` reads it with `Vm::context::<T>()`. The context does not change
+the compiled host modules, so engines that serve different callers can share
+one module registry and still give each caller its own state.
 
 To check a sandbox capability inside a `vm_function`, call
 `Vm::require(&capability)` (§14), which returns an error of kind

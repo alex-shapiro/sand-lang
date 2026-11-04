@@ -177,6 +177,18 @@ pub struct Outcome {
     pub exit_code: i32,
 }
 
+/// Resources that the most recent run of an engine used.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RunStats {
+    /// Fuel units spent, as `max_instructions` counts them (SPEC §15.2).
+    pub fuel: u64,
+    /// The most memory in use at a memory check, as `max_memory` counts it.
+    pub peak_memory: usize,
+    /// Bytes written to standard output and standard error.
+    pub output_bytes: u64,
+    pub gc: GcStats,
+}
+
 /// An in-memory output sink, e.g. to capture a script's standard output.
 #[derive(Clone, Default)]
 pub struct MemorySink(Arc<Mutex<Vec<u8>>>);
@@ -255,6 +267,7 @@ pub struct Config {
     #[cfg(feature = "os")]
     pub(crate) network: Option<Arc<dyn crate::network::Network>>,
     pub(crate) time_zone: Option<crate::time::TimeZone>,
+    context: Option<Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 /// HTTP request destination.
@@ -308,7 +321,18 @@ impl Config {
             #[cfg(feature = "os")]
             network: None,
             time_zone: None,
+            context: None,
         }
+    }
+
+    /// Attaches host data to each run of the engine. Native functions
+    /// registered with [`NativeModule::vm_function`] read it with
+    /// [`Vm::context`](crate::vm::Vm::context). Setting the context does not
+    /// recompile host modules, so a host can share one set of compiled
+    /// modules across engines that serve different callers.
+    pub fn context(mut self, data: Arc<dyn std::any::Any + Send + Sync>) -> Self {
+        self.context = Some(data);
+        self
     }
 
     /// Sets the clock and timer provider for the engine.
@@ -765,6 +789,7 @@ pub struct Engine {
     /// (SPEC 14.3): shared by import checks and every run (and VM).
     always: Always,
     gc_stats: GcStats,
+    stats: RunStats,
     /// The module root of source text, and its normal form (see
     /// [`Engine::source_root`]).
     root: OnceLock<(PathBuf, PathBuf)>,
@@ -821,6 +846,7 @@ impl Engine {
             shared: Arc::new(IoShared::default()),
             always: Arc::default(),
             gc_stats: GcStats::default(),
+            stats: RunStats::default(),
             root: OnceLock::new(),
             spare: Mutex::default(),
         })
@@ -862,6 +888,12 @@ impl Engine {
         self.gc_stats
     }
 
+    /// Resources used by the most recent run, including runs that failed or
+    /// exceeded a limit. Compilation is not included.
+    pub fn run_stats(&self) -> RunStats {
+        self.stats
+    }
+
     /// Type checks source text as [`Engine::check_source`] does, and lints
     /// it. Compile errors are an [`Error::Compile`]; a lint that runs out of
     /// budget or time is an [`Error::Io`].
@@ -895,6 +927,7 @@ impl Engine {
             shared: Arc::new(IoShared::default()),
             always: self.always.clone(),
             gc_stats: GcStats::default(),
+            stats: RunStats::default(),
             root: OnceLock::new(),
             spare: Mutex::default(),
             origin: self.origin,
@@ -1102,6 +1135,7 @@ impl Engine {
             #[cfg(feature = "os")]
             network: c.network.clone().unwrap_or_else(|| Arc::new(crate::network::OsNetwork)),
             time_zone: c.time_zone.as_ref().map(|z| z.zone().clone()),
+            context: c.context.clone(),
         };
         let mut vm = Vm::new(prog, self.registry.natives.clone(), host);
         vm.io = IoTable::with_shared(self.shared.clone());
@@ -1131,6 +1165,8 @@ impl Engine {
         let r = end_run(&mut vm, r).await;
         let _ = self.config.stdout.flush();
         self.gc_stats = vm.heap.stats;
+        vm.heap.note_peak();
+        self.stats = RunStats { fuel: vm.meter.used(), peak_memory: vm.heap.peak(), output_bytes: vm.host.output_bytes, gc: vm.heap.stats };
         if self.config.exit_after_run {
             std::mem::forget(vm);
         } else {
