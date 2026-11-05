@@ -14,6 +14,7 @@ use crate::stdlib;
 use crate::types::{FnId, ModId};
 use crate::vm::bytecode::Program;
 use crate::vm::heap::GcStats;
+use crate::vm::journal::JournalStop;
 use crate::vm::sched::{IoShared, IoTable, RunEnd};
 use crate::vm::{Always, Host, HostFn, NativeEntry, OutputSink, Rng, SharedSink, StdinSource, TraceEntry, Trap, Vm, entropy_seed};
 use std::borrow::Cow;
@@ -108,14 +109,32 @@ pub enum Error {
         seq: u64,
         message: String,
     },
-    /// The journaled run stopped because every task waits for a timer or a
-    /// parked host call; run it again with the same journal to resume it,
-    /// at `wake_at` if it is known (SPEC §16.7).
-    Suspended {
-        wake_at: Option<crate::platform::SystemTime>,
-    },
     /// The journal failed to flush (SPEC §16.7).
-    Journal(String),
+    Journal(crate::journal::JournalError),
+    /// A host function ended the run with [`Ctl::abort`](crate::vm::Ctl::abort).
+    Aborted(HostAbort),
+}
+
+/// The payload with which a host function ended a run
+/// ([`Ctl::abort`](crate::vm::Ctl::abort)).
+#[derive(Clone)]
+pub struct HostAbort(Arc<dyn std::any::Any + Send + Sync>);
+
+impl HostAbort {
+    pub(crate) fn new(payload: impl std::any::Any + Send + Sync) -> HostAbort {
+        HostAbort(Arc::new(payload))
+    }
+
+    /// The payload, if it has type `T`.
+    pub fn downcast_ref<T: std::any::Any>(&self) -> Option<&T> {
+        self.0.downcast_ref::<T>()
+    }
+}
+
+impl fmt::Debug for HostAbort {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("HostAbort")
+    }
 }
 
 impl Error {
@@ -150,12 +169,8 @@ impl fmt::Display for Error {
             Error::Interrupted => write!(f, "interrupted"),
             Error::Io(m) => write!(f, "{m}"),
             Error::Diverged { seq, message } => write!(f, "the run diverged from its journal at entry {seq}: {message}"),
-            Error::Suspended { wake_at: Some(t) } => {
-                let at = t.duration_since(crate::platform::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-                write!(f, "the run is suspended until {at} ms after the Unix epoch")
-            }
-            Error::Suspended { wake_at: None } => write!(f, "the run is suspended until the host resumes it"),
-            Error::Journal(m) => write!(f, "the journal failed: {m}"),
+            Error::Journal(e) => write!(f, "the journal failed: {e}"),
+            Error::Aborted(_) => write!(f, "the host ended the run"),
         }
     }
 }
@@ -172,14 +187,13 @@ fn write_trace(f: &mut fmt::Formatter<'_>, trace: &[TraceFrame]) -> fmt::Result 
 impl Error {
     /// The exit status of the `sand` tools for the error: 1 for a runtime
     /// error, 2 for compile and I/O errors, 3 for a limit, 70 for an internal
-    /// error, 75 for a suspended run, 74 for other journal errors, 130 if
+    /// error or a run that the host ended, 74 for journal errors, 130 if
     /// interrupted.
     pub fn exit_code(&self) -> i32 {
         match self {
             Error::Runtime { .. } => 1,
-            Error::Internal { .. } => 70,
+            Error::Internal { .. } | Error::Aborted(_) => 70,
             Error::Diverged { .. } | Error::Journal(_) => 74,
-            Error::Suspended { .. } => 75,
             Error::Compile(_) | Error::Io(_) => 2,
             Error::Limit(_) => 3,
             Error::Interrupted => 130,
@@ -196,9 +210,26 @@ impl Error {
     }
 }
 
+/// How a run that did not fail ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Outcome {
-    pub exit_code: i32,
+pub enum Outcome {
+    /// The run ended with this exit code: 0, or the code that the script
+    /// passed to `exit`.
+    Exited(i32),
+    /// The engine suspended the journaled run because every task waits
+    /// (SPEC §16.7). To resume it, the host runs the program again with the
+    /// same journal.
+    Suspended(crate::journal::Suspension),
+}
+
+impl Outcome {
+    /// The exit code of a run that ended, or `None` for a suspended run.
+    pub fn exit_code(self) -> Option<i32> {
+        match self {
+            Outcome::Exited(c) => Some(c),
+            Outcome::Suspended(_) => None,
+        }
+    }
 }
 
 /// A compiled program, ready to run on engines that share its host modules (see
@@ -1262,7 +1293,7 @@ impl Engine {
                 let r = vm.run_main(prog.entry).await;
                 let r = end_run(&mut vm, r).await;
                 match r {
-                    Err(Trap::Journal(_)) | Err(Trap::Interrupted) => r,
+                    Err(Trap::Journal(_) | Trap::Interrupted | Trap::Abort(_)) => r,
                     r => match vm.flush_journal().await {
                         Ok(()) => r,
                         Err(t) => Err(t),
@@ -1282,14 +1313,10 @@ impl Engine {
             self.recycle(prog, compiled.snapshot);
         }
         match r {
-            Ok(RunEnd::Finished(_)) => Ok(crate::Outcome { exit_code: 0 }),
-            Ok(RunEnd::Exit(c)) => Ok(crate::Outcome { exit_code: c }),
-            Err(Trap::Exit(c)) => Ok(crate::Outcome { exit_code: c }),
-            Err(Trap::Error { message, trace }) => Err(Error::Runtime { message, trace }),
-            Err(Trap::Internal { message, trace }) => Err(Error::Internal { message, trace }),
-            Err(Trap::Limit(k)) => Err(Error::Limit(k)),
-            Err(Trap::Interrupted) => Err(Error::Interrupted),
-            Err(Trap::Journal(s)) => Err(journal_error(s)),
+            Ok(RunEnd::Finished(_)) => Ok(Outcome::Exited(0)),
+            Ok(RunEnd::Exit(c)) | Err(Trap::Exit(c)) => Ok(Outcome::Exited(c)),
+            Err(Trap::Journal(JournalStop::Suspended(s))) => Ok(Outcome::Suspended(s)),
+            Err(t) => Err(trap_error(t)),
         }
     }
 
@@ -1715,20 +1742,25 @@ fn trap_message(t: Trap) -> String {
     match t {
         Trap::Error { message, .. } => message,
         Trap::Internal { message, .. } => format!("internal error: {message}"),
-        Trap::Limit(k) => k.to_string(),
-        Trap::Interrupted => "interrupted".into(),
         Trap::Exit(c) => format!("exited with code {c}"),
-        Trap::Journal(s) => journal_error(s).to_string(),
+        t => trap_error(t).to_string(),
     }
 }
 
-/// The error of a run that its journal stopped.
-pub(crate) fn journal_error(s: crate::vm::journal::JournalStop) -> Error {
-    use crate::vm::journal::JournalStop;
-    match s {
-        JournalStop::Diverged { seq, message } => Error::Diverged { seq, message },
-        JournalStop::Suspended(s) => Error::Suspended { wake_at: s.wake_at },
-        JournalStop::Failed(m) => Error::Journal(m),
+/// The error of a run that `t` ended, other than an exit.
+pub(crate) fn trap_error(t: Trap) -> Error {
+    match t {
+        Trap::Error { message, trace } => Error::Runtime { message, trace },
+        Trap::Internal { message, trace } => Error::Internal { message, trace },
+        Trap::Limit(k) => Error::Limit(k),
+        Trap::Interrupted => Error::Interrupted,
+        Trap::Abort(a) => Error::Aborted(a),
+        Trap::Journal(JournalStop::Diverged { seq, message }) => Error::Diverged { seq, message },
+        Trap::Journal(JournalStop::Failed(e)) => Error::Journal(e),
+        Trap::Journal(JournalStop::Suspended(_)) => {
+            Error::Internal { message: "the run suspended outside a journaled run".into(), trace: Vec::new() }
+        }
+        Trap::Exit(c) => Error::Internal { message: format!("an exit with code {c} where none is possible"), trace: Vec::new() },
     }
 }
 

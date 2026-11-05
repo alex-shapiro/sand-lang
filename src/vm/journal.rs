@@ -26,23 +26,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// Why a journaled run stops before it ends.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum JournalStop {
     /// The run does something other than what the journal records.
     Diverged { seq: u64, message: String },
     /// Every task waits for a timer or a parked host call (SPEC §16.7).
     Suspended(Suspension),
     /// The journal failed to flush.
-    Failed(String),
+    Failed(crate::journal::JournalError),
 }
 
-/// A run that the engine suspended because every task waits.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Suspension {
-    /// When the first timer or parked call is due, or `None` if only parked
-    /// calls wait, until the host resumes the run.
-    pub wake_at: Option<SystemTime>,
-}
+pub(crate) use crate::journal::Suspension;
 
 /// What replay holds for the next journaled operation.
 pub(crate) enum ReplayState {

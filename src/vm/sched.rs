@@ -1,7 +1,7 @@
 //! The task scheduler: runs fibers round-robin and drives pending I/O.
 
 use super::interp::Exit;
-use super::journal::{JournalOp, JournalStop, Suspension};
+use super::journal::{JournalOp, JournalStop, OpKind, Suspension};
 use super::*;
 use crate::LimitKind;
 use crate::native::Park;
@@ -61,6 +61,8 @@ struct IoOp {
     /// Whether the run may be suspended while the operation waits
     /// (journaled timers and parked host calls).
     park: Park,
+    /// Whether the operation is a journaled host call.
+    call: bool,
 }
 
 /// The pending I/O operations of a VM, in slots (an operation's id is its
@@ -81,7 +83,7 @@ impl IoTable {
 
     /// Adds the operation `fut` of task `fid` (waiting as `wgen`), polling
     /// it once: returns its id, or its result if it is done already.
-    pub fn add(&mut self, fid: u32, wgen: u64, mut fut: BoxFuture, park: Park) -> Result<u64, Finisher> {
+    pub fn add(&mut self, fid: u32, wgen: u64, mut fut: BoxFuture, park: Park, call: bool) -> Result<u64, Finisher> {
         let slot = match self.free.pop() {
             Some(s) => s,
             None => {
@@ -95,7 +97,7 @@ impl IoTable {
             self.free.push(slot);
             return Err(fin);
         }
-        self.ops[slot as usize] = Some(IoOp { fid, wgen, fut, park });
+        self.ops[slot as usize] = Some(IoOp { fid, wgen, fut, park, call });
         self.pending += 1;
         Ok(u64::from(slot))
     }
@@ -111,6 +113,11 @@ impl IoTable {
 
     pub fn is_empty(&self) -> bool {
         self.pending == 0
+    }
+
+    /// Whether a host call that parked waits.
+    fn parked_call(&self) -> bool {
+        self.ops.iter().flatten().any(|op| op.call && op.park != Park::Never)
     }
 
     /// How the run may be suspended while every pending operation waits:
@@ -322,6 +329,7 @@ impl Vm {
             CtlKind::Interrupted => Trap::Interrupted,
             CtlKind::Exit(c) => Trap::Exit(c),
             CtlKind::Journal(s) => Trap::Journal(s),
+            CtlKind::Abort(a) => Trap::Abort(a),
             other => {
                 self.broken = true;
                 Trap::Internal { message: format!("unexpected {other:?} from an I/O operation"), trace }
@@ -348,7 +356,7 @@ impl Vm {
         }
         match r {
             None => Err(Trap::Interrupted),
-            Some(Err(message)) => Err(Trap::Journal(JournalStop::Failed(message))),
+            Some(Err(e)) => Err(Trap::Journal(JournalStop::Failed(e))),
             Some(Ok(())) => Ok(()),
         }
     }
@@ -358,7 +366,7 @@ impl Vm {
         let g = self.next_gen();
         f.wgen = g;
         f.state = FiberState::Waiting;
-        let effectful = op.effectful;
+        let (effectful, call) = (op.effectful, op.kind == OpKind::Call);
         self.fibers[fid as usize] = Some(f);
         let started = match self.begin_op(fid, g, op) {
             Ok(s) => s,
@@ -368,7 +376,7 @@ impl Vm {
         if effectful && self.must_flush() {
             self.flush_journal().await?;
         }
-        let added = self.io.add(fid, g, fut, park);
+        let added = self.io.add(fid, g, fut, park, call);
         if let Some(f) = self.fibers[fid as usize].as_mut() {
             f.io = added.as_ref().ok().copied();
         }
@@ -440,8 +448,8 @@ impl Vm {
         match self.io.park() {
             Park::Never => None,
             Park::Until(t) if t.duration_since(j.wall(&*self.host.clock)).unwrap_or_default() <= after => None,
-            Park::Until(t) => Some(Suspension { wake_at: Some(t) }),
-            Park::UntilResumed => Some(Suspension { wake_at: None }),
+            Park::Until(t) => Some(Suspension { wake_at: Some(t), parked: self.io.parked_call() }),
+            Park::UntilResumed => Some(Suspension { wake_at: None, parked: self.io.parked_call() }),
         }
     }
 
@@ -587,7 +595,7 @@ impl Vm {
                         let g = self.next_gen();
                         f.wgen = g;
                         f.state = FiberState::Waiting;
-                        let added = self.io.add(fid, g, fut, Park::Never);
+                        let added = self.io.add(fid, g, fut, Park::Never, false);
                         f.io = added.as_ref().ok().copied();
                         self.fibers[fid as usize] = Some(f);
                         if let Err(fin) = added {

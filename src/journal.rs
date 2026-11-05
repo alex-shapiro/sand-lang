@@ -434,7 +434,63 @@ pub(crate) fn time_of(nanos: i128) -> SystemTime {
 }
 
 /// The future that [`Journal::flush`] returns.
-pub type FlushFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
+pub type FlushFuture = Pin<Box<dyn Future<Output = Result<(), JournalError>> + Send>>;
+
+/// Why a [`Journal`] failed to flush: the host's error, which the run's
+/// [`Error::Journal`](crate::Error::Journal) gives back to the host.
+#[derive(Clone)]
+pub struct JournalError(Arc<dyn std::error::Error + Send + Sync>);
+
+impl JournalError {
+    pub fn new(e: impl std::error::Error + Send + Sync + 'static) -> JournalError {
+        JournalError(Arc::new(e))
+    }
+
+    /// An error with only a message.
+    pub fn message(m: impl Into<String>) -> JournalError {
+        JournalError::new(Message(m.into()))
+    }
+
+    /// The host's error, if it has type `T`.
+    pub fn downcast_ref<T: std::error::Error + 'static>(&self) -> Option<&T> {
+        self.0.downcast_ref::<T>()
+    }
+}
+
+impl std::fmt::Display for JournalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::fmt::Debug for JournalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "JournalError({})", self.0)
+    }
+}
+
+#[derive(Debug)]
+struct Message(String);
+
+impl std::fmt::Display for Message {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Message {}
+
+/// A journaled run that the engine suspended because every task waits
+/// ([`Outcome::Suspended`](crate::Outcome::Suspended)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Suspension {
+    /// When the first timer or parked host call is due, or `None` if only
+    /// host calls parked until the host resumes the run wait.
+    pub wake_at: Option<SystemTime>,
+    /// Whether a host call that parked waits, so that the host may resume
+    /// the run before `wake_at`, when the call's condition occurs.
+    pub parked: bool,
+}
 
 /// The storage of a run's journal, supplied by the host.
 ///
@@ -452,8 +508,9 @@ pub trait Journal: Send + Sync {
     fn record(&self, entry: Entry);
 
     /// Makes all recorded entries durable. The engine does not start the
-    /// effect that it flushes for until the future completes. An error ends
-    /// the run with [`Error::Journal`](crate::Error::Journal).
+    /// effect that it flushes for until the future completes, and does not
+    /// count the wait against the wall-time limit. An error ends the run
+    /// with [`Error::Journal`](crate::Error::Journal), which holds it.
     fn flush(&self) -> FlushFuture;
 }
 

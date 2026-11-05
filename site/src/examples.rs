@@ -73,8 +73,8 @@ pub fn check_sand(runtime: &tokio::runtime::Runtime, source: &str, mode: Mode, f
             let result = runtime.block_on(engine.run_source("main.sand", &program));
             let output = sink.contents();
             match (mode, result) {
-                (Mode::Run, Ok(o)) if o.exit_code == 0 => example((!output.is_empty()).then_some(Shown::Output(output))),
-                (Mode::Run, Ok(o)) => Err(format!("exited with code {}:\n{output}", o.exit_code)),
+                (Mode::Run, Ok(o)) if o.exit_code() == Some(0) => example((!output.is_empty()).then_some(Shown::Output(output))),
+                (Mode::Run, Ok(o)) => Err(format!("exited with code {:?}:\n{output}", o.exit_code())),
                 (Mode::Run, Err(e)) => Err(format!("{output}{}", e.render())),
                 (_, Err(e @ Error::Runtime { .. })) => {
                     let error = e.render();

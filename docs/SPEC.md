@@ -1973,8 +1973,9 @@ resolve imported modules from the engine's file system under its policy, except
 that the compiler denies any import that requires an interactive permission
 prompt.
 
-A completed run returns `Outcome { exit_code: i32 }`, and a failed operation
-returns an `Error`:
+A run that does not fail returns an `Outcome`: `Outcome::Exited(code)` when it
+ends, or `Outcome::Suspended(suspension)` when the engine suspends a journaled
+run (§16.7). A failed operation returns an `Error`:
 
 | Variant                              | Meaning                                                              |
 | ------------------------------------ | -------------------------------------------------------------------- |
@@ -1985,8 +1986,8 @@ returns an `Error`:
 | `Error::Io(message)`                 | The entry script file could not be read.                             |
 | `Error::Internal { message, trace }` | An internal invariant failed or a host callback panicked (§10.3).    |
 | `Error::Diverged { seq, message }`   | The run does not do what its journal records at entry `seq` (§16.7). |
-| `Error::Suspended { wake_at }`       | The engine suspended a journaled run (§16.7).                        |
-| `Error::Journal(message)`            | The journal failed to make its entries durable (§16.7).              |
+| `Error::Journal(error)`              | The journal failed to make its entries durable (§16.7).              |
+| `Error::Aborted(payload)`            | A host function ended the run with `Ctl::abort` (§16.7).             |
 
 `Engine::compile_file` compiles a file and its imports without running it, and
 `Engine::run_program` runs the result. Any engine whose configuration is a clone of the
@@ -2431,8 +2432,10 @@ The time that the engine waits for `Journal::flush` does not count against
 journaled run that would wait for a long time. The engine suspends the run when
 every task waits, every pending operation is a timer or a parked host call, and
 no pending operation is due within `threshold` of the current time. The run
-then fails with `Error::Suspended { wake_at }`. `wake_at` is the time when the
-first operation is due, or `None` if only parked host calls without a time wait.
+then returns `Outcome::Suspended(Suspension { wake_at, parked })`. `wake_at` is
+the time when the first operation is due, or `None` if only parked host calls
+without a time wait. `parked` tells whether a parked host call waits, so that
+the host may resume the run earlier, when the call's condition occurs.
 The engine does not run deferred code (§7.1) when it suspends a run, because
 the tasks continue when the run resumes. To resume the run, the host runs the
 program again with the same journal, at `wake_at` or when the condition of a
@@ -2471,6 +2474,16 @@ the call; a resumed run that calls the function again gets the same number.
 The request filter gets the sequence number of the `Start` entry of a
 journaled HTTP request in `RequestTarget::journal_seq`, in record and in
 replay alike.
+
+**Ending a run from the host.** A host function can end the run with
+`Ctl::abort(payload)` when a condition of the host makes it stop, such as the
+loss of the host's right to execute the run or an outage of its storage. The
+run fails with `Error::Aborted`, from which `HostAbort::downcast_ref` gets the
+payload back. The engine does not journal the call that aborts and does not
+flush the journal, so a resumed run calls the function again. Likewise,
+`Error::Journal` holds the error of a failed `Journal::flush` as a
+`JournalError`, from which `JournalError::downcast_ref` gets the host's typed
+error back.
 
 **Restrictions.** A journaled run:
 

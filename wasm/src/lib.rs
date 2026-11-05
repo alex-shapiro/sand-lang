@@ -217,7 +217,7 @@ impl Engine {
             let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
             *slot.borrow_mut() = Some(engine);
             let (exit_code, error) = match outcome {
-                Ok(o) => (o.exit_code, JsValue::UNDEFINED),
+                Ok(o) => (o.exit_code().unwrap_or(0), JsValue::UNDEFINED),
                 Err(e) => (e.exit_code(), error_info(&e)),
             };
             Ok(object(&[
@@ -645,7 +645,7 @@ fn error_info(e: &Error) -> JsValue {
         Error::Limit(_) => ("limit", Array::new().into(), Array::new().into()),
         Error::Interrupted => ("interrupted", Array::new().into(), Array::new().into()),
         Error::Io(_) => ("io", Array::new().into(), Array::new().into()),
-        Error::Diverged { .. } | Error::Suspended { .. } | Error::Journal(_) => ("journal", Array::new().into(), Array::new().into()),
+        Error::Diverged { .. } | Error::Journal(_) | Error::Aborted(_) => ("journal", Array::new().into(), Array::new().into()),
     };
     let message = match e {
         Error::Compile(_) => e.render(),

@@ -93,6 +93,8 @@ pub enum CtlKind {
     Collect,
     /// The run stops for its journal (divergence, suspension, a failed flush).
     Journal(journal::JournalStop),
+    /// A host function ends the run (see [`Ctl::abort`]).
+    Abort(crate::HostAbort),
     /// Suspend the task on a journaled operation.
     Journaled(Box<journal::JournalOp>),
     /// Flush the journal, then call the native again (before an effect).
@@ -122,6 +124,16 @@ impl Ctl {
     #[cold]
     pub fn interrupted() -> Ctl {
         Ctl(Box::new(CtlKind::Interrupted))
+    }
+
+    /// Ends the run at once with [`Error::Aborted`](crate::Error::Aborted),
+    /// which gives `payload` back to the host. The engine does not run
+    /// deferred code, and does not journal the call that aborts, so a
+    /// resumed journaled run calls it again. Use it for conditions of the
+    /// host that the script must not see, such as the loss of the host's
+    /// right to run the run.
+    pub fn abort(payload: impl std::any::Any + Send + Sync) -> Ctl {
+        Ctl(Box::new(CtlKind::Abort(crate::HostAbort::new(payload))))
     }
 
     /// `exit(code)`.
@@ -182,6 +194,7 @@ impl std::fmt::Debug for CtlKind {
             CtlKind::Interrupted => write!(f, "Interrupted"),
             CtlKind::Collect => write!(f, "Collect"),
             CtlKind::Journal(s) => write!(f, "Journal({s:?})"),
+            CtlKind::Abort(_) => write!(f, "Abort"),
             CtlKind::Journaled(op) => write!(f, "Journaled({})", op.label),
             CtlKind::Flush => write!(f, "Flush"),
         }
@@ -321,6 +334,8 @@ pub enum Trap {
     Exit(i32),
     /// The journal stopped the run.
     Journal(journal::JournalStop),
+    /// A host function ended the run.
+    Abort(crate::HostAbort),
 }
 
 impl Trap {
@@ -330,6 +345,7 @@ impl Trap {
             CtlKind::Limit(k) => Trap::Limit(k),
             CtlKind::Interrupted => Trap::Interrupted,
             CtlKind::Journal(s) => Trap::Journal(s),
+            CtlKind::Abort(a) => Trap::Abort(a),
             CtlKind::RuntimeError(message) => Trap::Error { message, trace: vec![] },
             CtlKind::Internal(message) => Trap::Internal { message, trace: vec![] },
             other => Trap::Internal { message: format!("unexpected {other:?}"), trace: vec![] },

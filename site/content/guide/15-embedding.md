@@ -19,7 +19,7 @@ async fn run(source: &str) -> Result<Outcome, Error> {
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     match run(r#"print("hello from Sand")"#).await {
-        Ok(outcome) => println!("exit code {}", outcome.exit_code),
+        Ok(outcome) => println!("exit code {:?}", outcome.exit_code()),
         Err(err) => eprint!("{}", err.render()),
     }
 }

@@ -35,8 +35,8 @@ pub mod vm;
 
 pub use diag::{Diagnostic, Severity};
 pub use engine::{
-    CompiledProgram, Config, Engine, Error, InterruptHandle, LimitKind, Limits, MemorySink, Outcome, RequestFilter, RequestTarget,
-    RunStats, TestReport, TestResult, TraceFrame,
+    CompiledProgram, Config, Engine, Error, HostAbort, InterruptHandle, LimitKind, Limits, MemorySink, Outcome, RequestFilter,
+    RequestTarget, RunStats, TestReport, TestResult, TraceFrame,
 };
 pub use feed::StdinFeed;
 pub use files::MemFs;

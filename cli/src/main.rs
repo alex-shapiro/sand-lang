@@ -437,7 +437,7 @@ fn cmd_run(args: &[String]) -> Result<u8, String> {
         eprintln!("{:#?}", engine.gc_stats());
     }
     match r {
-        Ok(o) => Ok(exit_status(o.exit_code)),
+        Ok(o) => Ok(exit_status(o.exit_code().unwrap_or(0))),
         Err(e) => Ok(report_error(&e)),
     }
 }

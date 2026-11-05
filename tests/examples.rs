@@ -487,7 +487,7 @@ fn s3_client_against_mock_server() {
     assert_eq!(ok(&o), "not found: s3://bucket/notes/one.txt\n");
 
     let o = run(&["cat", "bucket", "missing"]);
-    assert_eq!(o.result.as_ref().unwrap().exit_code, 1);
+    assert_eq!(o.result.as_ref().unwrap().exit_code(), Some(1));
     assert!(o.stderr.contains("NoSuchKey: The specified key does not exist."), "{}", o.stderr);
 
     // Every request was signed, and the signed host matches what was sent.
@@ -521,6 +521,6 @@ fn s3_cli_requires_credentials_permission() {
         _ => Decision::Allow,
     };
     let o = run_example("s3/cli.sand", &["ls", "b"], Config::new().custom_policy(policy));
-    assert_eq!(o.result.as_ref().unwrap().exit_code, 1);
+    assert_eq!(o.result.as_ref().unwrap().exit_code(), Some(1));
     assert!(o.stderr.contains("AWS_ACCESS_KEY_ID is not set"), "{}", o.stderr);
 }

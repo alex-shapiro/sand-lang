@@ -315,8 +315,8 @@ fn run_case(case: &Case, mode: Mode, backend: Backend) -> Result<(), String> {
     } else if let Some(code) = case.sections.iter().find_map(|(h, _)| h.strip_prefix("exit ")) {
         let code: i32 = code.trim().parse().unwrap();
         match &result {
-            Ok(o) if o.exit_code == code => {}
-            Ok(o) => return Err(format!("expected exit {code}, got {}", o.exit_code)),
+            Ok(o) if o.exit_code() == Some(code) => {}
+            Ok(o) => return Err(format!("expected exit {code}, got {:?}", o.exit_code())),
             Err(e) => {
                 return Err(format!("expected exit {code}, got error: {e}\nstdout:\n{stdout}"));
             }

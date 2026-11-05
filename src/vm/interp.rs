@@ -517,6 +517,7 @@ impl Vm {
             CtlKind::Limit(k) => self.limit_trap(fiber, ip, k),
             CtlKind::Interrupted => Trap::Interrupted,
             CtlKind::Journal(s) => Trap::Journal(s),
+            CtlKind::Abort(a) => Trap::Abort(a),
             other => self.internal_trap(fiber, ip, format!("unexpected {other:?}")),
         }
     }
@@ -1770,6 +1771,7 @@ impl Vm {
                 Ok(Some(Exit::Flush))
             }
             CtlKind::Journal(s) => Err(Trap::Journal(s)),
+            CtlKind::Abort(a) => Err(Trap::Abort(a)),
             CtlKind::Yield | CtlKind::Blocked => unreachable!("handled above"),
             CtlKind::Collect => Err(self.internal_trap(fiber, ip, "a native asked for a collection twice".into())),
         }

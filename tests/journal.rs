@@ -1,7 +1,7 @@
 //! Durable execution: record a run in a journal, replay it, and resume it
 //! from any prefix of the journal (SPEC §16.7).
 
-use sandlang::journal::{Entry, EntryKind, HttpOutcome, Journal, MemoryJournal, OpKind, operations};
+use sandlang::journal::{Entry, EntryKind, HttpOutcome, Journal, MemoryJournal, OpKind, Suspension, operations};
 use sandlang::native::{Later, Park};
 use sandlang::network::{Listener, Network, NetworkFuture, Stream};
 use sandlang::platform::{Clock, ClockFuture, Instant, SystemClock, SystemTime, UNIX_EPOCH};
@@ -625,7 +625,11 @@ print("after \(time.now().since(start) >= 2h)")
     let journal = MemoryJournal::new();
     let first = world.run(src, &journal);
     let wake = UNIX_EPOCH + Duration::from_secs(BASE_SECS) + Duration::from_secs(7200);
-    assert!(matches!(first.result, Err(Error::Suspended { wake_at: Some(t) }) if t == wake), "{:?}", first.result);
+    assert!(
+        matches!(first.result, Ok(Outcome::Suspended(Suspension { wake_at: Some(t), parked: false })) if t == wake),
+        "{:?}",
+        first.result
+    );
     assert_eq!(
         first.stdout,
         "before
@@ -636,7 +640,7 @@ print("after \(time.now().since(start) >= 2h)")
     // Resuming early suspends again at the same point.
     clock.advance(Duration::from_secs(3600));
     let early = world.run(src, &journal);
-    assert!(matches!(early.result, Err(Error::Suspended { wake_at: Some(t) }) if t == wake), "{:?}", early.result);
+    assert!(matches!(early.result, Ok(Outcome::Suspended(Suspension { wake_at: Some(t), .. })) if t == wake), "{:?}", early.result);
     clock.advance(Duration::from_secs(3601));
     let done = world.run(src, &journal);
     assert!(done.result.is_ok(), "{:?}", done.result);
@@ -667,7 +671,7 @@ print("got \(payload)")
 "#;
     let journal = MemoryJournal::new();
     let first = world.run(src, &journal);
-    assert!(matches!(first.result, Err(Error::Suspended { wake_at: None })), "{:?}", first.result);
+    assert!(matches!(first.result, Ok(Outcome::Suspended(Suspension { wake_at: None, parked: true }))), "{:?}", first.result);
     assert_eq!(first.stdout, "waiting\n");
     world.log.signals.lock().unwrap().insert("approve".into(), "yes".into());
     let resumed = world.run(src, &journal);
@@ -794,14 +798,14 @@ fn a_journal_that_fails_to_flush_ends_the_run() {
             self.0.record(entry)
         }
         fn flush(&self) -> sandlang::journal::FlushFuture {
-            Box::pin(std::future::ready(Err("disk full".to_string())))
+            Box::pin(std::future::ready(Err(sandlang::journal::JournalError::message("disk full"))))
         }
     }
     let world = World::frozen(Some(1));
     let config = world.base.clone().journal(Arc::new(Failing(MemoryJournal::new())));
     let mut engine = Engine::new(config).unwrap();
     let r = rt().block_on(engine.run_source("main.sand", "import http\nprint(http.get(\"http://svc.test/x\")?.status)"));
-    assert!(matches!(&r, Err(Error::Journal(m)) if m == "disk full"), "{r:?}");
+    assert!(matches!(&r, Err(Error::Journal(e)) if e.to_string() == "disk full"), "{r:?}");
     assert_eq!(world.net.requests(), 0, "the request waits for the flush");
 }
 
@@ -866,7 +870,7 @@ print("\(a) \(b >= a)")
     };
     let log = Arc::new(HostLog::default());
     let (r, _) = run(ManualClock::new(), log.clone());
-    assert!(matches!(r, Err(Error::Suspended { wake_at: None })), "{r:?}");
+    assert!(matches!(r, Ok(Outcome::Suspended(Suspension { wake_at: None, .. }))), "{r:?}");
     // The resumed run's process started later: its monotonic clock reads less.
     log.signals.lock().unwrap().insert("go".into(), "now".into());
     let (r, out) = run(ManualClock::new(), log);
@@ -920,7 +924,7 @@ pub fn wait(name: str, timeout: duration) -> Result<str?> {
     };
     let due = UNIX_EPOCH + Duration::from_secs(BASE_SECS + 86_400);
     let (r, _) = run();
-    assert!(matches!(r, Err(Error::Suspended { wake_at: Some(t) }) if t == due), "{r:?}");
+    assert!(matches!(r, Ok(Outcome::Suspended(Suspension { wake_at: Some(t), .. })) if t == due), "{r:?}");
     clock.advance(Duration::from_secs(86_400));
     let (r, out) = run();
     assert!(r.is_ok(), "{r:?}");
@@ -999,11 +1003,11 @@ print("\(b.since(a) >= 10s) \(c.since(b) >= 0s)")
     let first = ManualClock::new();
     let (r, _) = run(first.clone(), log.clone());
     let wake = UNIX_EPOCH + Duration::from_secs(BASE_SECS + 10);
-    assert!(matches!(r, Err(Error::Suspended { wake_at: Some(t) }) if t == wake), "{r:?}");
+    assert!(matches!(r, Ok(Outcome::Suspended(Suspension { wake_at: Some(t), .. })) if t == wake), "{r:?}");
     // The next host's clock is a minute behind the first one's.
     first.advance(Duration::from_secs(10));
     let (r, _) = run(first, log.clone());
-    assert!(matches!(r, Err(Error::Suspended { wake_at: None })), "{r:?}");
+    assert!(matches!(r, Ok(Outcome::Suspended(Suspension { wake_at: None, .. }))), "{r:?}");
     log.signals.lock().unwrap().insert("go".into(), "now".into());
     let (r, out) = run(ManualClock::new(), log);
     assert!(r.is_ok(), "{r:?}");
@@ -1073,7 +1077,7 @@ fn effects_have_the_same_journal_seq_in_every_execution() {
         rt().block_on(Engine::new(config).unwrap().run_source("main.sand", src))
     };
     let r = run();
-    assert!(matches!(r, Err(Error::Suspended { wake_at: None })), "{r:?}");
+    assert!(matches!(r, Ok(Outcome::Suspended(Suspension { wake_at: None, .. }))), "{r:?}");
     let first = seqs.lock().unwrap().clone();
     assert_eq!(first.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["a", "parked"]);
     let entries = journal.entries();
@@ -1178,4 +1182,76 @@ fn an_asynchronous_host_function_that_is_not_journaled_runs_again_in_replay() {
     assert!(r.is_ok(), "{r:?}");
     assert_eq!(again, out);
     assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn a_host_abort_ends_the_run_with_its_payload_and_is_not_journaled() {
+    #[derive(Debug, PartialEq)]
+    struct Outage(u32);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut m = NativeModule::new("store");
+    let c = calls.clone();
+    m.vm_function("read", move |_: &mut Vm, key: String| -> Result<Later<String, HostError>, HostError> {
+        let first = c.fetch_add(1, Ordering::SeqCst) == 0;
+        Ok(Later::new(async move {
+            move |_: &mut Vm| {
+                if first {
+                    return Err(sandlang::vm::Ctl::abort(Outage(7)).into());
+                }
+                Ok::<_, HostError>(format!("value of {key}"))
+            }
+        }))
+    })
+    .journaled();
+    let base = Config::new().policy(RulePolicy::allow_all()).module(m).seed(1);
+    let journal = MemoryJournal::new();
+    let run = || {
+        let out = MemorySink::new();
+        let config = base.clone().stdout(out.clone()).journal(Arc::new(journal.clone()));
+        let r = rt().block_on(Engine::new(config).unwrap().run_source("main.sand", "import store\nprint(store.read(\"k\")?)"));
+        (r, out.contents())
+    };
+    let (r, _) = run();
+    match &r {
+        Err(Error::Aborted(a)) => assert_eq!(a.downcast_ref::<Outage>(), Some(&Outage(7))),
+        other => panic!("expected an abort, got {other:?}"),
+    }
+    assert!(journal.entries().iter().all(|e| e.kind != EntryKind::Done), "{:?}", journal.entries());
+    // The resumed run calls the function again.
+    let (r, out) = run();
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!(out, "value of k\n");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn a_flush_error_reaches_the_host_with_its_type() {
+    #[derive(Debug)]
+    struct Fenced;
+    impl std::fmt::Display for Fenced {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("another node owns the run")
+        }
+    }
+    impl std::error::Error for Fenced {}
+    struct Lost(MemoryJournal);
+    impl Journal for Lost {
+        fn replay(&self) -> Vec<Entry> {
+            self.0.replay()
+        }
+        fn record(&self, entry: Entry) {
+            self.0.record(entry)
+        }
+        fn flush(&self) -> sandlang::journal::FlushFuture {
+            Box::pin(std::future::ready(Err(sandlang::journal::JournalError::new(Fenced))))
+        }
+    }
+    let world = World::frozen(Some(1));
+    let config = world.base.clone().journal(Arc::new(Lost(MemoryJournal::new())));
+    let r =
+        rt().block_on(Engine::new(config).unwrap().run_source("main.sand", "import http\nprint(http.get(\"http://svc.test/x\")?.status)"));
+    match &r {
+        Err(Error::Journal(e)) => assert!(e.downcast_ref::<Fenced>().is_some(), "{e:?}"),
+        other => panic!("expected a journal error, got {other:?}"),
+    }
 }

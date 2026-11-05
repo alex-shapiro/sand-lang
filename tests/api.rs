@@ -58,10 +58,10 @@ fn engine_and_run_future_are_send() {
 #[test]
 fn run_source_and_exit_code() {
     let (r, out, _) = run_src(Config::new(), "print(\"hi\")\nexit(4)");
-    assert_eq!(r.unwrap().exit_code, 4);
+    assert_eq!(r.unwrap().exit_code(), Some(4));
     assert_eq!(out, "hi\n");
     let (r, _, _) = run_src(Config::new(), "let x = 1");
-    assert_eq!(r.unwrap().exit_code, 0);
+    assert_eq!(r.unwrap().exit_code(), Some(0));
 }
 
 #[test]
@@ -2018,7 +2018,7 @@ fn host_functions_take_and_return_durations_and_never() {
     m.function("forever", || SignedDuration::MAX);
     m.vm_function("halt", |_: &mut Vm, code: i64| -> Result<Never, Ctl> { Err(Ctl::exit(code as i32)) });
     let (r, out, _) = run_src(Config::new().module(m.clone()), "import clock\nprint(clock.double(1500ms))\nlet n: int = clock.halt(3)");
-    assert_eq!((r.unwrap().exit_code, out.as_str()), (3, "3s\n"));
+    assert_eq!((r.unwrap().exit_code(), out.as_str()), (Some(3), "3s\n"));
     let (r, _, _) = run_src(Config::new().module(m), "import clock\nprint(clock.forever())");
     assert!(matches!(&r, Err(Error::Runtime { message, .. }) if message.contains("the duration is out of range")), "{r:?}");
 }
