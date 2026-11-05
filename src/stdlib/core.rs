@@ -2,7 +2,7 @@
 
 use crate::check::ModKind;
 use crate::native::traits;
-use crate::native::{self, Channel, HostError, Later, NativeModule, Never, Num, Param, Task, Val};
+use crate::native::{self, Channel, HostError, NativeModule, Never, Num, Param, Task, Val};
 use crate::vm::compare::{
     find_key, hash_key, set_slot, try_sort_by, try_sort_numbers, try_sort_packed, values_cmp_metered, values_eq_metered,
 };
@@ -147,15 +147,8 @@ pub(crate) fn prelude() -> NativeModule {
 pub(crate) fn task() -> NativeModule {
     let mut m = NativeModule::std("task", ModKind::Std, include_str!("task.sand"));
     m.vm_function("sleep", |vm: &mut Vm, d: SignedDuration| {
-        let d = nanos(d).max(0) as u64;
-        if vm.journaling() {
-            return Err(crate::vm::journal::sleep(vm, std::time::Duration::from_nanos(d)));
-        }
-        let sleep = vm.host.clock.sleep(std::time::Duration::from_nanos(d));
-        Ok::<_, Ctl>(Later::new(async move {
-            sleep.await;
-            |_: &mut Vm| Ok::<_, Ctl>(())
-        }))
+        let d = std::time::Duration::from_nanos(nanos(d).max(0) as u64);
+        Err::<(), _>(crate::vm::journal::sleep(vm, d))
     });
     m.vm_function("yield_now", |vm: &mut Vm| Err::<(), _>(vm.yield_now()));
     // `BlockOn::Race` charges for the tasks and checks the memory limit.

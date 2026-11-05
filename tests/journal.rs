@@ -303,6 +303,15 @@ impl World {
         World::new(Arc::new(SystemClock), true, None)
     }
 
+    /// Runs `src` without a journal.
+    fn run_plain(&self, src: &str) -> Run {
+        let out = MemorySink::new();
+        let config = self.base.clone().stdout(out.clone()).stderr(out.clone());
+        let mut engine = Engine::new(config).unwrap();
+        let result = rt().block_on(engine.run_source("main.sand", src));
+        Run { result, stdout: out.contents(), fuel: engine.run_stats().fuel }
+    }
+
     fn run(&self, src: &str, journal: &MemoryJournal) -> Run {
         let out = MemorySink::new();
         *self.log.journal.lock().unwrap() = Some(journal.clone());
@@ -516,6 +525,18 @@ fn replay_reproduces_the_recorded_run() {
             assert_eq!(world.net.requests(), requests, "program {i}: replay sends no requests");
             assert_eq!(world.log.calls.load(Ordering::SeqCst), calls, "program {i}: replay calls no journaled host function");
         }
+    }
+}
+
+#[test]
+fn plain_and_journaled_runs_behave_alike() {
+    for (i, src) in PROGRAMS.iter().enumerate() {
+        let world = World::frozen(Some(5));
+        let plain = world.run_plain(src);
+        let journaled = world.run(src, &MemoryJournal::new());
+        assert!(plain.result.is_ok(), "program {i}: {:?}", plain.result);
+        assert_eq!(journaled.stdout, plain.stdout, "program {i}");
+        assert_eq!(format!("{:?}", journaled.result), format!("{:?}", plain.result), "program {i}");
     }
 }
 
