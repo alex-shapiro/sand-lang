@@ -898,3 +898,40 @@ pub fn wait(name: str, timeout: duration) -> Result<str?> {
     assert_eq!(out, "Ok(None)\n");
     assert_eq!(log.waits.load(Ordering::SeqCst), 2);
 }
+
+#[test]
+fn a_changed_instant_argument_of_a_journaled_call_diverges() {
+    // A `time.Instant` has no journal encoding; the call's identity still covers it.
+    let mut m = NativeModule::new("deadline");
+    m.function("seconds_until", |t: sandlang::jiff::Timestamp| -> i64 { t.as_second() }).journaled();
+    let base = Config::new().policy(RulePolicy::allow_all()).module(m).seed(1);
+    let run = |src: &str, journal: &MemoryJournal| {
+        let out = MemorySink::new();
+        let config = base.clone().stdout(out.clone()).journal(Arc::new(journal.clone()));
+        let r = rt().block_on(Engine::new(config).unwrap().run_source("main.sand", src));
+        (r, out.contents())
+    };
+    let src = |s: i64| format!("import deadline\nimport time\nprint(deadline.seconds_until(time.Instant.from_epoch_seconds({s})))");
+    let journal = MemoryJournal::new();
+    let (r, out) = run(&src(100), &journal);
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!(out, "100\n");
+    let (r, out) = run(&src(100), &MemoryJournal::with_entries(journal.entries()));
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!(out, "100\n");
+    let (r, _) = run(&src(200), &MemoryJournal::with_entries(journal.entries()));
+    assert!(matches!(&r, Err(Error::Diverged { message, .. }) if message.contains("deadline.seconds_until")), "{r:?}");
+    // An asynchronous call whose arguments changed says so.
+    let mut m = NativeModule::new("later");
+    m.async_function("echo", |t: sandlang::jiff::Timestamp| async move { Ok::<_, String>(t.as_second()) }).journaled();
+    let base = Config::new().policy(RulePolicy::allow_all()).module(m).seed(1);
+    let run = |src: &str, journal: &MemoryJournal| {
+        let config = base.clone().stdout(MemorySink::new()).journal(Arc::new(journal.clone()));
+        rt().block_on(Engine::new(config).unwrap().run_source("main.sand", src))
+    };
+    let src = |s: i64| format!("import later\nimport time\nprint(later.echo(time.Instant.from_epoch_seconds({s}))?)");
+    let journal = MemoryJournal::new();
+    assert!(run(&src(1), &journal).is_ok());
+    let r = run(&src(2), &MemoryJournal::with_entries(journal.entries()));
+    assert!(matches!(&r, Err(Error::Diverged { message, .. }) if message.contains("with other arguments")), "{r:?}");
+}

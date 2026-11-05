@@ -708,13 +708,17 @@ fn max_value_bytes(vm: &Vm) -> usize {
 }
 
 /// The identity of a call of native `name` with `args`: their encoding
-/// where they have one.
+/// where they have one, and otherwise their debug form, so that a value of
+/// a bound value type such as `time.Instant` still takes part.
 pub(crate) fn call_identity(vm: &Vm, name: &str, args: &[Value]) -> u64 {
     let mut id = Identity::default().add(name.as_bytes());
     for &a in args {
         id = match encode_value(vm, a, 1 << 20) {
             Ok(bytes) => id.add(&bytes),
-            Err(_) => id.add(b"?"),
+            Err(_) => match crate::vm::display::to_debug_metered(&vm.prog, &vm.heap, &crate::vm::meter::Unmetered, a) {
+                Ok(text) => id.add(b"?").add(text.as_bytes()),
+                Err(_) => id.add(b"?"),
+            },
         };
     }
     id.finish()
@@ -1004,7 +1008,11 @@ impl Vm {
                 let Some((kind, identity, pre_fuel, has_wake)) = parsed else { return Err(malformed()) };
                 let wake = if has_wake == 1 { Some(time_of(r.i128().ok_or_else(malformed)?)) } else { None };
                 if kind != op.kind as u8 || identity != op.identity {
-                    let msg = format!("the run starts {} `{label}` where the journal records {}", op.kind.name(), e.describe());
+                    let msg = if kind == op.kind as u8 && e.describe().ends_with(&format!("`{label}`")) {
+                        format!("the run starts {} `{label}` with other arguments than the journal records", op.kind.name())
+                    } else {
+                        format!("the run starts {} `{label}` where the journal records {}", op.kind.name(), e.describe())
+                    };
                     return Err(stop(JournalStop::Diverged { seq: e.seq, message: msg }));
                 }
                 if matches!(op.work, OpWork::Replayed) {

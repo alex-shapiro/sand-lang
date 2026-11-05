@@ -2426,7 +2426,9 @@ again.
 
 **Host functions.** `NativeModule::journaled` makes the most recently
 registered function journaled. The engine records its result, and replay
-returns the recorded result without a call. `NativeModule::effectful` also
+returns the recorded result without a call. The identity of a call is the
+function's name and its arguments: their journal encoding, or for a value
+without one, such as a `time.Instant`, its debug form. `NativeModule::effectful` also
 journals the function, and the engine calls it only when the journal is
 durable. The result of a journaled function must be plain data: no functions,
 tasks, channels, or values of bound object or value types. An asynchronous
