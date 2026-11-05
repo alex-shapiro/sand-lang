@@ -31,9 +31,29 @@ pub enum JournalStop {
     /// The run does something other than what the journal records.
     Diverged { seq: u64, message: String },
     /// Every task waits for a timer or a parked host call (SPEC §16.7).
-    Suspended(Option<SystemTime>),
+    Suspended(Suspension),
     /// The journal failed to flush.
     Failed(String),
+}
+
+/// A run that the engine suspended because every task waits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Suspension {
+    /// When the first timer or parked call is due, or `None` if only parked
+    /// calls wait, until the host resumes the run.
+    pub wake_at: Option<SystemTime>,
+}
+
+/// What replay holds for the next journaled operation.
+pub(crate) enum ReplayState {
+    /// The next entry is not the start of an operation, or replay is over.
+    NoStart,
+    /// The journal records the operation's start and end: replay delivers
+    /// the recorded end without a host call.
+    Ended,
+    /// The journal records only the operation's start: the host function
+    /// runs again.
+    Started,
 }
 
 /// The work of a journaled operation.
@@ -53,9 +73,7 @@ pub(crate) enum OpWork {
 
 pub(crate) type BuildFn = Box<dyn FnOnce(&mut Vm, &[u8]) -> NResult + Send>;
 
-/// Until when a journaled run may be suspended while an operation waits:
-/// `None` if it may not be, `Some(None)` until the host resumes it.
-pub(crate) type Park = Option<Option<SystemTime>>;
+pub(crate) use crate::native::Park;
 
 /// An asynchronous operation that a native asks the scheduler to start
 /// under the journal.
@@ -66,8 +84,8 @@ pub struct JournalOp {
     /// Whether the operation has effects outside the run: the journal is
     /// flushed before it starts.
     pub(crate) effectful: bool,
-    /// The run can be suspended while the operation waits, until this time
-    /// (`Some(None)`: until the host resumes it).
+    /// Whether the run can be suspended while the operation waits. A
+    /// timer's comes from its wake time.
     pub(crate) park: Park,
     /// Fuel that the native spent before it asked for the operation, if
     /// replay does not call the native (journaled host calls).
@@ -91,7 +109,7 @@ pub(crate) fn timer(d: Duration) -> Ctl {
         identity,
         label,
         effectful: false,
-        park: Some(None),
+        park: Park::UntilResumed,
         pre_fuel: 0,
         work: OpWork::Timer(d),
     })
@@ -115,32 +133,29 @@ pub(crate) fn journaled_call(vm: &mut Vm, inner: &super::HostFn, name: &str, eff
     let op = |work: OpWork, pre_fuel: u64, park: Park| {
         Ctl::journaled(JournalOp { kind: OpKind::Call, identity, label: name.to_string(), effectful, park, pre_fuel, work })
     };
-    match vm.next_op_replayed() {
-        Some(true) => return Err(op(OpWork::Replayed, 0, None)),
-        Some(false) => {
+    match vm.replay_state() {
+        ReplayState::Ended => return Err(op(OpWork::Replayed, 0, Park::Never)),
+        ReplayState::Started => {
             // The journal records the start of the call, not its end: call
             // it again, and deliver even a result it returns at once as the
             // completion of the recorded operation.
             let start = vm.call_start();
             let r = inner(vm);
-            if vm.retried(&r, start) {
+            if is_retry(&r) {
                 return r;
             }
             let pre_fuel = vm.meter.used().saturating_sub(start);
-            let work = match r {
-                Err(c) if matches!(c.kind(), CtlKind::Async(_)) => match c.into_kind() {
-                    CtlKind::Async(fut) => OpWork::Value(fut),
-                    _ => unreachable!("matched above"),
-                },
+            let (work, park) = match r.map_err(Ctl::into_kind) {
+                Err(CtlKind::Async(fut, park)) => (OpWork::Value(fut), park),
                 r => {
-                    let (payload, _) = outcome_payload(vm, r, name)?;
-                    OpWork::Value(Box::pin(std::future::ready(Box::new(move |vm: &mut Vm| payload_outcome(vm, &payload)) as Finisher)))
+                    let (payload, _) = outcome_payload(vm, r.map_err(Ctl::from), name)?;
+                    let ready = Box::new(move |vm: &mut Vm| payload_outcome(vm, &payload)) as Finisher;
+                    (OpWork::Value(Box::pin(std::future::ready(ready))), Park::Never)
                 }
             };
-            let park = vm.op_park.take();
             return Err(op(work, pre_fuel, park));
         }
-        None => {}
+        ReplayState::NoStart => {}
     }
     if vm.replaying() {
         return vm.journaled_result(identity, name, inner);
@@ -149,15 +164,13 @@ pub(crate) fn journaled_call(vm: &mut Vm, inner: &super::HostFn, name: &str, eff
         return Err(Ctl::from(CtlKind::Flush));
     }
     let start = vm.call_start();
-    let r = inner(vm);
-    if matches!(&r, Err(c) if matches!(c.kind(), CtlKind::Async(_))) {
-        let Err(c) = r else { unreachable!("matched above") };
-        let CtlKind::Async(fut) = c.into_kind() else { unreachable!("matched above") };
-        let pre_fuel = vm.meter.used().saturating_sub(start);
-        let park = vm.op_park.take();
-        return Err(op(OpWork::Value(fut), pre_fuel, park));
+    match inner(vm).map_err(Ctl::into_kind) {
+        Err(CtlKind::Async(fut, park)) => {
+            let pre_fuel = vm.meter.used().saturating_sub(start);
+            Err(op(OpWork::Value(fut), pre_fuel, park))
+        }
+        r => vm.record_result(identity, name, start, r.map_err(Ctl::from)),
     }
-    vm.record_result(identity, name, start, r)
 }
 
 /// How replay builds the result of an operation from its `Done` entry.
@@ -201,9 +214,6 @@ pub(crate) struct JournalState {
     /// The budget of the buffers of live operations, apart from the heap's,
     /// so that the heap's memory checks are the same in replay.
     pub live_memory: Arc<IoMemory>,
-    /// The fuel used when a journaled call that is retried after a
-    /// collection first started.
-    pub call_start: Option<u64>,
     /// A divergence found where it could not be reported.
     pending: Option<JournalStop>,
 }
@@ -309,7 +319,6 @@ pub(crate) fn start(
         wall_floor: crate::platform::UNIX_EPOCH,
         suspend_after,
         live_memory: IoMemory::new(limits.max_memory, limits.max_open_resources),
-        call_start: None,
         pending: None,
     })
 }
@@ -731,6 +740,12 @@ fn payload_outcome(vm: &mut Vm, payload: &[u8]) -> NResult {
     }
 }
 
+/// Whether `r` asks for the call to run again after a collection: the
+/// journal records only the call that completes.
+fn is_retry(r: &NResult) -> bool {
+    matches!(r, Err(c) if matches!(c.kind(), CtlKind::Collect | CtlKind::Limit(crate::LimitKind::Memory)))
+}
+
 fn stop(s: JournalStop) -> Ctl {
     Ctl::from(CtlKind::Journal(s))
 }
@@ -864,27 +879,13 @@ impl Vm {
     /// The fuel used when the current journaled call started: now, or when
     /// it first started if this is its retry after a collection.
     fn call_start(&self) -> u64 {
-        let saved = self.journal_state().and_then(|mut j| j.call_start.take());
-        match saved {
-            Some(s) if self.collected => s,
-            _ => self.meter.used(),
-        }
-    }
-
-    /// Whether `r` asks for the call to run again after a collection; then
-    /// keeps `start` for the retry.
-    fn retried(&self, r: &NResult, start: u64) -> bool {
-        let retry = matches!(r, Err(c) if matches!(c.kind(), CtlKind::Collect | CtlKind::Limit(crate::LimitKind::Memory)));
-        if retry && let Some(mut j) = self.journal_state() {
-            j.call_start = Some(start);
-        }
-        retry
+        self.collected_at.unwrap_or_else(|| self.meter.used())
     }
 
     /// Records the result `r` of a synchronous call that started at fuel
     /// `start`, and returns it.
     fn record_result(&mut self, identity: u64, label: &str, start: u64, r: NResult) -> NResult {
-        if self.retried(&r, start) {
+        if is_retry(&r) {
             return r;
         }
         let fuel = self.meter.used().saturating_sub(start);
@@ -898,14 +899,15 @@ impl Vm {
         }
     }
 
-    /// The next journaled operation to start, if replay holds its
-    /// completion: replay does not make journaled host calls for it.
-    pub(crate) fn next_op_replayed(&self) -> Option<bool> {
-        let j = self.journal.as_ref()?.borrow();
-        if !matches!(j.peek()?, EntryData::Start(_)) {
-            return None;
+    /// What replay holds for the next journaled operation.
+    pub(crate) fn replay_state(&self) -> ReplayState {
+        let Some(j) = &self.journal else { return ReplayState::NoStart };
+        let j = j.borrow();
+        match j.peek() {
+            Some(EntryData::Start(_)) if j.done.contains_key(&j.ops) => ReplayState::Ended,
+            Some(EntryData::Start(_)) => ReplayState::Started,
+            _ => ReplayState::NoStart,
         }
-        Some(j.done.contains_key(&j.ops))
     }
 
     /// Whether entries recorded since the last flush must be made durable
@@ -1015,8 +1017,8 @@ impl Vm {
             return Ok(None);
         }
         let label = op.label;
-        let park = match op.work {
-            OpWork::Timer(_) => Some(wake),
+        let park = match (&op.work, wake) {
+            (OpWork::Timer(_), Some(t)) => Park::Until(t),
             _ => op.park,
         };
         let fut: BoxFuture = match op.work {

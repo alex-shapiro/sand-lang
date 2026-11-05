@@ -2,7 +2,7 @@
 //! from any prefix of the journal (SPEC §16.7).
 
 use sandlang::journal::{Entry, EntryKind, HttpOutcome, Journal, MemoryJournal, OpKind, operations};
-use sandlang::native::Later;
+use sandlang::native::{Later, Park};
 use sandlang::network::{Listener, Network, NetworkFuture, Stream};
 use sandlang::platform::{Clock, ClockFuture, Instant, SystemClock, SystemTime, UNIX_EPOCH};
 use sandlang::vm::Vm;
@@ -261,7 +261,7 @@ fn host_module(log: Arc<HostLog>) -> NativeModule {
             std::future::pending::<()>().await;
             |_: &mut Vm| Ok::<_, HostError>(None)
         })
-        .parked(None))
+        .parked(Park::UntilResumed))
     })
     .journaled();
     m
@@ -896,7 +896,7 @@ fn a_parked_call_with_a_deadline_suspends_until_the_deadline() {
                 std::future::pending::<()>().await;
                 |_: &mut Vm| Ok::<_, HostError>(None)
             })
-            .parked(Some(due)))
+            .parked(Park::Until(due)))
         },
     )
     .journaled();
@@ -1047,7 +1047,7 @@ fn effects_have_the_same_journal_seq_in_every_execution() {
                 std::future::pending::<()>().await;
                 |_: &mut Vm| Ok::<_, HostError>(0)
             })
-            .parked(None));
+            .parked(Park::UntilResumed));
         }
         Ok(Later::ready(Ok(1)))
     })
@@ -1089,4 +1089,36 @@ fn effects_have_the_same_journal_seq_in_every_execution() {
     let _ = run();
     assert_eq!(seqs.lock().unwrap()[2..], first[1..]);
     assert_eq!(filtered.lock().unwrap()[1..], requests[..]);
+}
+
+#[test]
+fn a_journaled_call_that_runs_again_after_a_collection_replays_its_fuel() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut m = NativeModule::new("mem");
+    let c = calls.clone();
+    m.vm_function("grow", move |vm: &mut Vm, n: i64| -> Result<i64, sandlang::vm::Ctl> {
+        c.fetch_add(1, Ordering::SeqCst);
+        vm.charge(50)?;
+        vm.check_memory(n as usize)?;
+        Ok(n)
+    })
+    .journaled();
+    let base = Config::new().policy(RulePolicy::allow_all()).module(m).seed(1).retry_stress(true);
+    let src = "import mem\nvar total = 0\nfor i in 0..3 {\n    total += mem.grow(i * 10)\n}\nprint(total)";
+    let run = |journal: &MemoryJournal| {
+        let out = MemorySink::new();
+        let config = base.clone().stdout(out.clone()).journal(Arc::new(journal.clone()));
+        let mut engine = Engine::new(config).unwrap();
+        let r = rt().block_on(engine.run_source("main.sand", src));
+        (r, out.contents(), engine.run_stats().fuel)
+    };
+    let journal = MemoryJournal::new();
+    let (r, out, fuel) = run(&journal);
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!(out, "30\n");
+    assert_eq!(calls.load(Ordering::SeqCst), 6, "each call runs again after the forced collection");
+    let (r, again, replayed_fuel) = run(&MemoryJournal::with_entries(journal.entries()));
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!((again, replayed_fuel), (out, fuel), "replay charges the fuel of both attempts");
+    assert_eq!(calls.load(Ordering::SeqCst), 6);
 }

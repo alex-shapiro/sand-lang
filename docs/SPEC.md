@@ -2450,9 +2450,10 @@ durable. The result of a journaled function must be plain data: no functions,
 tasks, channels, or values of bound object or value types. An asynchronous
 host function that is not journaled is still recorded as an operation, but
 replay calls it and drops its future without a poll; such a function must not
-have effects outside its future. `Later::parked(until)` lets the engine
-suspend a run while the future of a call waits. When the run resumes, the
-engine calls the function again. For example, a host function `wait_until(name,
+have effects outside its future. `Later::parked(park)` lets the engine
+suspend a run while the future of a call waits: with `Park::Until(t)` until
+time `t`, and with `Park::UntilResumed` until the host resumes the run. When
+the run resumes, the engine calls the function again. For example, a host function `wait_until(name,
 deadline)` can return the payload of a signal if it has one, `None` after the
 deadline, and otherwise a parked future. A Sand wrapper `wait(name, timeout)`
 calls it with `time.now().add(timeout)`, which the journal records, so the

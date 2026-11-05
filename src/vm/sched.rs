@@ -1,10 +1,11 @@
 //! The task scheduler: runs fibers round-robin and drives pending I/O.
 
 use super::interp::Exit;
-use super::journal::{Identity, JournalOp, JournalStop, OpKind, OpWork, Park};
+use super::journal::{Identity, JournalOp, JournalStop, OpKind, OpWork, Suspension};
 use super::*;
 use crate::LimitKind;
-use crate::platform::{ClockFuture, Instant, SystemTime};
+use crate::native::Park;
+use crate::platform::{ClockFuture, Instant};
 use std::sync::atomic::Ordering;
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
@@ -57,8 +58,8 @@ struct IoOp {
     fid: u32,
     wgen: u64,
     fut: BoxFuture,
-    /// Until when the run may be suspended while the operation waits, if it
-    /// may be (journaled timers and parked host calls).
+    /// Whether the run may be suspended while the operation waits
+    /// (journaled timers and parked host calls).
     park: Park,
 }
 
@@ -112,16 +113,19 @@ impl IoTable {
         self.pending == 0
     }
 
-    /// If every pending operation may be suspended, the earliest time until
-    /// which one may be (`None`: until the host resumes the run).
-    fn parked_until(&self) -> Park {
-        let mut until: Option<SystemTime> = None;
+    /// How the run may be suspended while every pending operation waits:
+    /// until the earliest time that one of them gives, if any.
+    fn park(&self) -> Park {
+        let mut park = Park::UntilResumed;
         for op in self.ops.iter().flatten() {
-            if let Some(t) = op.park? {
-                until = Some(until.map_or(t, |u| u.min(t)));
-            }
+            park = match (park, op.park) {
+                (_, Park::Never) => return Park::Never,
+                (Park::Until(a), Park::Until(b)) => Park::Until(a.min(b)),
+                (Park::Until(t), _) | (_, Park::Until(t)) => Park::Until(t),
+                _ => Park::UntilResumed,
+            };
         }
-        Some(until)
+        park
     }
 
     /// Cancels every pending operation.
@@ -385,10 +389,16 @@ impl Vm {
     /// library operation is local (its outcome follows from the journaled
     /// inputs, as a read of a received HTTP body does) and completes before
     /// anything else runs, so that the schedule does not depend on when.
-    async fn start_async(&mut self, fid: u32, mut f: Box<Fiber>, fut: BoxFuture, timer: &RunTimer) -> Result<(), Trap> {
-        let park = self.op_park.take();
-        let n = self.async_native as usize;
-        if let Some(entry) = self.natives.get(n).filter(|e| matches!(e.f, HostFn::Shared(_))) {
+    async fn start_async(
+        &mut self,
+        fid: u32,
+        mut f: Box<Fiber>,
+        fut: BoxFuture,
+        park: Park,
+        native: u32,
+        timer: &RunTimer,
+    ) -> Result<(), Trap> {
+        if let Some(entry) = self.natives.get(native as usize).filter(|e| matches!(e.f, HostFn::Shared(_))) {
             let label = entry.name.to_string();
             let identity = Identity::default().add(label.as_bytes()).finish();
             let op = JournalOp { kind: OpKind::Call, identity, label, effectful: true, park, pre_fuel: 0, work: OpWork::Value(fut) };
@@ -432,19 +442,20 @@ impl Vm {
         Ok(any)
     }
 
-    /// When a journaled run must be suspended now that nothing can run: if
-    /// every pending operation may be, and the earliest one is due later
-    /// than the configured threshold. Returns until when.
-    fn suspension(&self) -> Option<Option<SystemTime>> {
+    /// Whether a journaled run must be suspended now that nothing can run:
+    /// if every pending operation may be, and none is due within the
+    /// configured threshold.
+    fn suspension(&self) -> Option<Suspension> {
         let j = self.journal.as_ref()?.borrow();
         let after = j.suspend_after?;
         if j.replaying() || !j.held.is_empty() {
             return None;
         }
-        let until = self.io.parked_until()?;
-        match until {
-            Some(t) if t.duration_since(j.wall(&*self.host.clock)).unwrap_or_default() <= after => None,
-            _ => Some(until),
+        match self.io.park() {
+            Park::Never => None,
+            Park::Until(t) if t.duration_since(j.wall(&*self.host.clock)).unwrap_or_default() <= after => None,
+            Park::Until(t) => Some(Suspension { wake_at: Some(t) }),
+            Park::UntilResumed => Some(Suspension { wake_at: None }),
         }
     }
 
@@ -583,14 +594,16 @@ impl Vm {
                         f.state = FiberState::Waiting;
                         self.fibers[fid as usize] = Some(f);
                     }
-                    Exit::Async(fut) if self.journal.is_some() => self.start_async(fid, f, fut, &timer).await?,
+                    Exit::Async { fut, park, native } if self.journal.is_some() => {
+                        self.start_async(fid, f, fut, park, native, &timer).await?
+                    }
                     Exit::Journaled(op) => self.start_op(fid, f, *op, &timer).await?,
                     Exit::Flush => return Err(Trap::Internal { message: "a journal flush outside a call".into(), trace: vec![] }),
-                    Exit::Async(fut) => {
+                    Exit::Async { fut, .. } => {
                         let g = self.next_gen();
                         f.wgen = g;
                         f.state = FiberState::Waiting;
-                        let added = self.io.add(fid, g, fut, None);
+                        let added = self.io.add(fid, g, fut, Park::Never);
                         f.io = added.as_ref().ok().copied();
                         self.fibers[fid as usize] = Some(f);
                         if let Err(fin) = added {
@@ -708,10 +721,10 @@ impl Vm {
                 return Ok(Stop::Idle);
             }
             if main.is_some()
-                && let Some(until) = self.suspension()
+                && let Some(s) = self.suspension()
             {
                 self.flush_journal().await?;
-                return Err(Trap::Journal(JournalStop::Suspended(until)));
+                return Err(Trap::Journal(JournalStop::Suspended(s)));
             }
             timer.read();
             let blocked = self.host.stdin_feed.as_ref().map(|f| f.blocked());

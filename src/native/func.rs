@@ -56,7 +56,21 @@ pub trait AsyncHostFunction<Marker>: Send + Sync + 'static {
 /// Return `Result<Later<T, E>, E>` from the function: if `E` is [`Ctl`], the
 /// Sand return type is `T`; if `E` is [`HostError`], the Sand return type is
 /// `Result<T, Error>`.
-pub struct Later<T, E>(Wait, Option<Option<crate::platform::SystemTime>>, PhantomData<fn() -> (T, E)>);
+pub struct Later<T, E>(Wait, Park, PhantomData<fn() -> (T, E)>);
+
+/// Whether the engine may suspend a journaled run while a host call waits
+/// (see [`Later::parked`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Park {
+    /// The engine waits for the call: the default.
+    Never,
+    /// The engine may suspend the run until the host resumes it, for
+    /// example when a signal that the call waits for arrives.
+    UntilResumed,
+    /// The engine may suspend the run until this time, when the host
+    /// resumes it, or earlier if the host resumes it earlier.
+    Until(crate::platform::SystemTime),
+}
 
 enum Wait {
     Ready(Finisher),
@@ -107,36 +121,30 @@ impl<T: IntoValue + Send + 'static, E: NativeError> Later<T, E> {
             let finish = fut.await;
             Box::new(move |vm: &mut Vm| E::finish(finish(vm), vm)) as Finisher
         };
-        Later(Wait::Future(Box::pin(fut)), None, PhantomData)
+        Later(Wait::Future(Box::pin(fut)), Park::Never, PhantomData)
     }
 
     /// Completes immediately with `r` without suspending the calling task.
     pub fn ready(r: Result<T, E>) -> Later<T, E> {
-        Later(Wait::Ready(Box::new(move |vm: &mut Vm| E::finish(r, vm))), None, PhantomData)
+        Later(Wait::Ready(Box::new(move |vm: &mut Vm| E::finish(r, vm))), Park::Never, PhantomData)
     }
 }
 
 impl<T, E> Later<T, E> {
-    /// Lets a journaled run be suspended while the future is pending
-    /// (SPEC §16.7): if every task waits, and no operation is due before
-    /// `until` plus the configured threshold, the run ends with
-    /// [`Error::Suspended`](crate::Error::Suspended). With `until` `None`,
-    /// the run waits until the host resumes it. The resumed run calls the
-    /// function again. Without a journal, the future runs as usual.
-    pub fn parked(mut self, until: Option<crate::platform::SystemTime>) -> Self {
-        self.1 = Some(until);
+    /// Lets the engine suspend a journaled run while the future is pending
+    /// (SPEC §16.7): if every task waits, and no operation is due within
+    /// the configured threshold, the run ends with
+    /// [`Error::Suspended`](crate::Error::Suspended). The resumed run calls
+    /// the function again. Without a journal, the future runs as usual.
+    pub fn parked(mut self, park: Park) -> Self {
+        self.1 = park;
         self
     }
 
     pub(crate) fn finish(self, vm: &mut Vm) -> NResult {
         match self.0 {
             Wait::Ready(f) => f(vm),
-            Wait::Future(fut) => {
-                if vm.journaling() {
-                    vm.op_park = self.1;
-                }
-                Err(Ctl::suspend(fut))
-            }
+            Wait::Future(fut) => Err(Ctl::from(crate::vm::CtlKind::Async(fut, self.1))),
         }
     }
 }

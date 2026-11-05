@@ -59,7 +59,12 @@ pub enum Exit {
     Preempt,
     /// Waiting on a scheduler event (already registered).
     Blocked,
-    Async(BoxFuture),
+    /// The fiber waits for the future of native `native`.
+    Async {
+        fut: BoxFuture,
+        park: crate::native::Park,
+        native: u32,
+    },
     /// A journaled asynchronous operation.
     Journaled(Box<super::journal::JournalOp>),
     /// The journal must be flushed before the call (retried) has an effect.
@@ -1695,6 +1700,7 @@ impl Vm {
         let frame = fiber.frames.last_mut().unwrap();
         frame.ip = ip as u32;
         self.caller_site = (frame.proto, frame.ip);
+        let fuel_at_call = self.meter.used();
         let mut r = Self::invoke_native(self, natives, n, &fiber.stack[start..start + argc]);
         self.heap.fail_next_check.set(false);
         if r.is_memory_limit() || matches!(&r, Err(c) if matches!(c.kind(), CtlKind::Collect)) {
@@ -1702,9 +1708,9 @@ impl Vm {
             // counts that include uncollected garbage. Run a full collection
             // and retry once.
             self.collect_all_garbage(Some(fiber));
-            self.collected = true;
+            self.collected_at = Some(fuel_at_call);
             r = Self::invoke_native(self, natives, n, &fiber.stack[start..start + argc]);
-            self.collected = false;
+            self.collected_at = None;
         }
         if !matches!(&r, Err(c) if matches!(c.kind(), CtlKind::NeedPermission(_))) {
             self.forget_once_answers();
@@ -1755,10 +1761,9 @@ impl Vm {
                 fiber.frames.last_mut().unwrap().ip = (ip - 1) as u32;
                 Ok(Some(Exit::Prompt(cap)))
             }
-            CtlKind::Async(fut) => {
+            CtlKind::Async(fut, park) => {
                 fiber.result_slot = slot;
-                self.async_native = n;
-                Ok(Some(Exit::Async(fut)))
+                Ok(Some(Exit::Async { fut, park, native: n }))
             }
             CtlKind::Journaled(op) => {
                 fiber.result_slot = slot;

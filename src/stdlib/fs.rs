@@ -605,7 +605,7 @@ fn fits(vm: &Vm, bytes: usize) -> Result<bool, Ctl> {
     if !vm.heap.would_exceed(bytes) {
         return Ok(true);
     }
-    if !vm.collected {
+    if !vm.collected() {
         return Err(CtlKind::Collect.into());
     }
     Ok(false)
@@ -842,7 +842,7 @@ fn open(vm: &mut Vm, path: Val<String>, mode: OpenMode) -> FsResult<FileObj> {
     let file = match vm.offload(move |_| fs.open(t, mode))? {
         Ok(f) => f,
         // Closing unreachable files may make room.
-        Err(e) if too_many_open_files(&e) && !vm.collected => return Err(Ctl::from(CtlKind::Collect).into()),
+        Err(e) if too_many_open_files(&e) && !vm.collected() => return Err(Ctl::from(CtlKind::Collect).into()),
         Err(e) => return Err(HostError::new(io_kind(&e), format!("{shown}: {e}"))),
     };
     Ok(FileObj { open: Some(OpenState { file: Some(file), _slot: slot, buf: Vec::new(), at: 0, counted: 0 }), shown, mode })

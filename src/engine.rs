@@ -1726,7 +1726,7 @@ pub(crate) fn journal_error(s: crate::vm::journal::JournalStop) -> Error {
     use crate::vm::journal::JournalStop;
     match s {
         JournalStop::Diverged { seq, message } => Error::Diverged { seq, message },
-        JournalStop::Suspended(wake_at) => Error::Suspended { wake_at },
+        JournalStop::Suspended(s) => Error::Suspended { wake_at: s.wake_at },
         JournalStop::Failed(m) => Error::Journal(m),
     }
 }

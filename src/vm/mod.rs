@@ -75,8 +75,11 @@ pub enum CtlKind {
     Exit(i32),
     /// Ask the user; the call is retried afterwards.
     NeedPermission(Capability),
-    /// Suspend the task until the future completes.
-    Async(BoxFuture),
+    /// Suspend the task until the future completes. In a journaled run, the
+    /// engine may suspend the run while it waits, as the [`Park`] says.
+    ///
+    /// [`Park`]: crate::native::Park
+    Async(BoxFuture, crate::native::Park),
     /// The task waits for the scheduler event that [`Vm::block`]
     /// registered; the call returns what wakes it.
     Blocked,
@@ -128,7 +131,7 @@ impl Ctl {
 
     /// Suspend the task until `fut` completes.
     pub fn suspend(fut: BoxFuture) -> Ctl {
-        Ctl(Box::new(CtlKind::Async(fut)))
+        Ctl(Box::new(CtlKind::Async(fut, crate::native::Park::Never)))
     }
 
     /// Ask the user for `cap`.
@@ -173,7 +176,7 @@ impl std::fmt::Debug for CtlKind {
             CtlKind::Limit(k) => write!(f, "Limit({k:?})"),
             CtlKind::Exit(c) => write!(f, "Exit({c})"),
             CtlKind::NeedPermission(c) => write!(f, "NeedPermission({c})"),
-            CtlKind::Async(_) => write!(f, "Async"),
+            CtlKind::Async(..) => write!(f, "Async"),
             CtlKind::Blocked => write!(f, "Blocked"),
             CtlKind::Yield => write!(f, "Yield"),
             CtlKind::Interrupted => write!(f, "Interrupted"),
@@ -556,8 +559,8 @@ pub struct Vm {
     /// retried after a garbage collection (see `interp::limit_trap`).
     pub(crate) gc_retry: bool,
     /// Set while a native that asked for a collection (`CtlKind::Collect`)
-    /// is called again after it.
-    pub(crate) collected: bool,
+    /// is called again after it: the fuel used when its first call started.
+    pub(crate) collected_at: Option<u64>,
     /// Function and instruction pointer of the active native call.
     caller_site: (u32, u32),
     pub cancel_current: bool,
@@ -588,11 +591,6 @@ pub struct Vm {
     pub(crate) struct_depth: usize,
     /// The run's journal, if it has one (SPEC §16.7).
     pub(crate) journal: Option<Box<std::cell::RefCell<journal::JournalState>>>,
-    /// The native whose call suspended the running task last.
-    pub(crate) async_native: u32,
-    /// Until when the run may be suspended while the operation that a
-    /// native returns waits (see [`crate::native::Later::parked`]).
-    pub(crate) op_park: journal::Park,
     /// The sequence number of the entry that records the journaled host
     /// call in progress (see [`Vm::journal_seq`]).
     pub(crate) call_seq: Option<u64>,
@@ -672,6 +670,11 @@ impl Vm {
         self.call_seq
     }
 
+    /// Whether the native in progress runs again after a collection.
+    pub(crate) fn collected(&self) -> bool {
+        self.collected_at.is_some()
+    }
+
     pub fn new(prog: Arc<Program>, natives: Arc<Vec<NativeEntry>>, host: Host) -> Vm {
         let heap = Heap::new(host.limits.max_memory, host.limits.max_open_resources);
         let consts = Vec::with_capacity(prog.consts.len());
@@ -696,7 +699,7 @@ impl Vm {
             meter,
             deadline: None,
             gc_retry: false,
-            collected: false,
+            collected_at: None,
             caller_site: (0, 0),
             cancel_current: false,
             ending: false,
@@ -710,8 +713,6 @@ impl Vm {
             retry_stress: false,
             struct_depth: 0,
             journal: None,
-            async_native: 0,
-            op_park: None,
             call_seq: None,
         };
         vm.load_program();
@@ -935,7 +936,7 @@ impl Vm {
     /// If [`Config::retry_stress`](crate::Config::retry_stress) is enabled and
     /// this call is not a retry, forces the next memory or resource check to fail.
     pub(crate) fn arm_retry_stress(&self) {
-        self.heap.fail_next_check.set(self.retry_stress && !self.collected);
+        self.heap.fail_next_check.set(self.retry_stress && !self.collected());
     }
 
     /// Returns a memory-limit error if `extra` additional heap bytes exceed the
@@ -985,7 +986,7 @@ impl Vm {
         }
         match r.ensure(bytes) {
             Ok(()) => Ok(Some(r)),
-            Err(_) if !self.collected => Err(CtlKind::Collect.into()),
+            Err(_) if !self.collected() => Err(CtlKind::Collect.into()),
             Err(_) => Ok(None),
         }
     }
@@ -1000,7 +1001,7 @@ impl Vm {
         }
         match iomem::ResourceSlot::try_new(&self.heap.io_memory) {
             Some(slot) => Ok(slot),
-            None if !self.collected => Err(Ctl::from(CtlKind::Collect).into()),
+            None if !self.collected() => Err(Ctl::from(CtlKind::Collect).into()),
             None => Err(HostError::new("limit", format!("too many open resources (limit {})", self.heap.io_memory.max_resources()))),
         }
     }
@@ -1012,7 +1013,7 @@ impl Vm {
         self.heap.io_memory.publish_heap(self.heap.used());
         match slot.reserve_buffers(buffers) {
             Ok(()) => Ok(slot),
-            Err(_) if !self.collected => Err(Ctl::from(CtlKind::Collect).into()),
+            Err(_) if !self.collected() => Err(Ctl::from(CtlKind::Collect).into()),
             Err(e) => Err(HostError::new("limit", format!("cannot open {what}: its buffers ({buffers} bytes) do not fit: {e}"))),
         }
     }

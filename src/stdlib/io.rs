@@ -173,7 +173,15 @@ fn journaled_read<R: IntoValue + Send + 'static>(
     });
     let identity = Identity::default().add(&code.to_le_bytes()).finish();
     let work = OpWork::Bytes { fut: Box::pin(fut), build };
-    Ctl::journaled(JournalOp { kind: OpKind::Stdin, identity, label, effectful: false, park: None, pre_fuel: 0, work })
+    Ctl::journaled(JournalOp {
+        kind: OpKind::Stdin,
+        identity,
+        label,
+        effectful: false,
+        park: crate::native::Park::Never,
+        pre_fuel: 0,
+        work,
+    })
 }
 
 fn input_line(vm: &mut Vm, line: Option<Vec<u8>>) -> Result<Option<String>, HostError> {

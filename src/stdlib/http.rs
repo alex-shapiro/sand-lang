@@ -764,7 +764,7 @@ fn send_journaled(
         crate::native::IntoValue::into_value(r, vm)
     });
     let work = OpWork::Bytes { fut: Box::pin(fut), build };
-    let op = JournalOp { kind: OpKind::Http, identity, label, effectful: true, park: None, pre_fuel: 0, work };
+    let op = JournalOp { kind: OpKind::Http, identity, label, effectful: true, park: crate::native::Park::Never, pre_fuel: 0, work };
     Err(crate::vm::Ctl::journaled(op).into())
 }
 
