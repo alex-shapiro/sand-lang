@@ -1,7 +1,7 @@
 //! Durable execution: record a run in a journal, replay it, and resume it
 //! from any prefix of the journal (SPEC §16.7).
 
-use sandlang::journal::{Entry, EntryKind, Journal, MemoryJournal};
+use sandlang::journal::{Entry, EntryKind, HttpOutcome, Journal, MemoryJournal, OpKind, operations};
 use sandlang::native::Later;
 use sandlang::network::{Listener, Network, NetworkFuture, Stream};
 use sandlang::platform::{Clock, ClockFuture, Instant, SystemClock, SystemTime, UNIX_EPOCH};
@@ -749,9 +749,38 @@ fn entries_round_trip_through_bytes() {
     world.run(CONCURRENT, &journal);
     for e in journal.entries() {
         assert_eq!(Entry::from_bytes(&e.to_bytes()), Some(e.clone()));
-        assert!(!e.describe().is_empty());
+        assert!(e.decode().is_some(), "{e:?}");
+        assert!(!e.describe().starts_with("a malformed"), "{e:?}");
     }
     assert_eq!(Entry::from_bytes(&[1, 2]), None);
+    let bad = Entry { seq: 0, kind: EntryKind::Start, data: vec![9] };
+    assert_eq!(bad.decode(), None);
+    assert_eq!(bad.describe(), "a malformed start entry");
+}
+
+#[test]
+fn operations_pair_starts_with_their_ends() {
+    let world = World::frozen(Some(4));
+    let journal = MemoryJournal::new();
+    let src = "import http\nprint(http.get(\"http://svc.test/a\")?.status)\nprint(http.get(\"http://svc.test/missing\")?.status)";
+    let r = world.run(src, &journal);
+    assert!(r.result.is_ok(), "{:?}", r.result);
+    let ops = operations(&journal.entries()).unwrap();
+    let labels: Vec<&str> = ops.iter().map(|o| o.start.label.as_str()).collect();
+    assert_eq!(labels, ["GET http://svc.test/a", "GET http://svc.test/missing"]);
+    let statuses: Vec<i64> = ops
+        .iter()
+        .map(|o| match o.http() {
+            Some(HttpOutcome::Response { status, .. }) => status,
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(statuses, [200, 404]);
+    assert!(ops.iter().all(|o| o.start.kind == OpKind::Http && !o.cancelled()));
+    let mut entries = journal.entries();
+    let done = entries.iter().position(|e| e.kind == EntryKind::Done).unwrap();
+    entries.push(Entry { seq: entries.len() as u64, ..entries[done].clone() });
+    assert!(operations(&entries).unwrap_err().contains("a second time"));
 }
 
 #[test]

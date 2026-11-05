@@ -15,8 +15,9 @@ use super::bytecode::Program;
 use super::iomem::IoMemory;
 use super::value::{MapObj, Obj, SetObj, Value};
 use super::{BoxFuture, Ctl, CtlKind, Finisher, NResult, Vm};
-use crate::journal::{Entry, EntryKind, Journal};
-use crate::platform::{Instant, SystemTime, UNIX_EPOCH};
+pub(crate) use crate::journal::OpKind;
+use crate::journal::{CallResult, Entry, EntryData, EntryKind, Journal, OpDone, OpEnd, OpStart};
+use crate::platform::{Instant, SystemTime};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::Future;
@@ -33,30 +34,6 @@ pub enum JournalStop {
     Suspended(Option<SystemTime>),
     /// The journal failed to flush.
     Failed(String),
-}
-
-/// What an asynchronous operation is, as its `Start` entry records it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum OpKind {
-    Timer = 1,
-    Http = 2,
-    Stdin = 3,
-    Call = 4,
-}
-
-impl OpKind {
-    fn from_code(c: u8) -> Option<OpKind> {
-        [OpKind::Timer, OpKind::Http, OpKind::Stdin, OpKind::Call].into_iter().find(|k| *k as u8 == c)
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            OpKind::Timer => "timer",
-            OpKind::Http => "http",
-            OpKind::Stdin => "stdin",
-            OpKind::Call => "call",
-        }
-    }
 }
 
 /// The work of a journaled operation.
@@ -187,7 +164,7 @@ pub(crate) enum ReplayBuild {
 /// The journal state of a run.
 pub(crate) struct JournalState {
     sink: Arc<dyn Journal>,
-    replay: Vec<Entry>,
+    replay: Vec<EntryData>,
     pos: usize,
     seq: u64,
     pub unflushed: bool,
@@ -234,7 +211,7 @@ impl JournalState {
         }
     }
 
-    fn peek(&self) -> Option<&Entry> {
+    fn peek(&self) -> Option<&EntryData> {
         self.replay.get(self.pos)
     }
 
@@ -244,10 +221,10 @@ impl JournalState {
 
     /// The next replayed entry, which must be of `kind` (`what` describes
     /// the input for the error), or `None` if replay is over.
-    fn take(&mut self, kind: EntryKind, what: &dyn Fn() -> String) -> Result<Option<Entry>, JournalStop> {
+    fn take(&mut self, kind: EntryKind, what: &dyn Fn() -> String) -> Result<Option<EntryData>, JournalStop> {
         self.take_pending()?;
         let Some(e) = self.peek() else { return Ok(None) };
-        if e.kind != kind {
+        if e.kind() != kind {
             let msg = format!("the run reads {} where the journal records {}", what(), e.describe());
             return Err(self.diverged(msg));
         }
@@ -256,17 +233,16 @@ impl JournalState {
         Ok(Some(e))
     }
 
-    fn record_done(&mut self, op: u64, fuel: u64, cancelled: bool, payload: &[u8]) {
-        let mut w = Writer::default();
-        w.u64(op).u64(self.steps).u64(fuel).u8(u8::from(cancelled)).0.extend_from_slice(payload);
-        self.record(EntryKind::Done, w.0);
+    fn record_done(&mut self, op: u64, fuel: u64, end: OpEnd) {
+        let step = self.steps;
+        self.record(EntryData::Done(OpDone { op, step, fuel, end }));
     }
 
-    fn record(&mut self, kind: EntryKind, data: Vec<u8>) {
+    fn record(&mut self, data: EntryData) {
         let seq = self.seq;
         self.seq += 1;
         self.unflushed = true;
-        self.sink.record(Entry { seq, kind, data });
+        self.sink.record(Entry { seq, kind: data.kind(), data: data.encode() });
     }
 
     pub fn flush(&mut self) -> Option<crate::journal::FlushFuture> {
@@ -285,17 +261,20 @@ pub(crate) fn start(
     suspend_after: Option<Duration>,
     limits: &crate::Limits,
 ) -> Result<JournalState, JournalStop> {
-    let replay = sink.replay();
     let mut done = HashMap::new();
-    for (i, e) in replay.iter().enumerate() {
-        if e.seq != i as u64 {
-            return Err(JournalStop::Diverged { seq: i as u64, message: format!("entry {i} has sequence number {}", e.seq) });
+    let mut replay = Vec::new();
+    for (i, e) in sink.replay().into_iter().enumerate() {
+        let seq = i as u64;
+        if e.seq != seq {
+            return Err(JournalStop::Diverged { seq, message: format!("entry {i} has sequence number {}", e.seq) });
         }
-        if e.kind == EntryKind::Done {
-            let op =
-                Reader::new(&e.data).u64().ok_or_else(|| JournalStop::Diverged { seq: i as u64, message: "malformed entry".into() })?;
-            done.insert(op, i);
+        let data = e
+            .decode()
+            .ok_or_else(|| JournalStop::Diverged { seq, message: format!("entry {i} is a malformed {} entry", e.kind.name()) })?;
+        if let EntryData::Done(d) = &data {
+            done.insert(d.op, i);
         }
+        replay.push(data);
     }
     Ok(JournalState {
         seq: replay.len() as u64,
@@ -349,6 +328,11 @@ impl Writer {
     pub fn str(&mut self, s: &str) -> &mut Self {
         self.bytes(s.as_bytes())
     }
+    /// Appends `b` without a length: the rest of the data.
+    pub fn raw(&mut self, b: &[u8]) -> &mut Self {
+        self.0.extend_from_slice(b);
+        self
+    }
 }
 
 /// Reads the fields a [`Writer`] wrote; `None` at a malformed field.
@@ -388,6 +372,9 @@ impl<'a> Reader<'a> {
     pub fn rest(&mut self) -> &'a [u8] {
         std::mem::take(&mut self.0)
     }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 /// A stable 64-bit hash (FNV-1a) of the identity of an input.
@@ -411,50 +398,6 @@ impl Identity {
     }
     pub fn finish(self) -> u64 {
         self.0
-    }
-}
-
-fn nanos_of(t: SystemTime) -> i128 {
-    match t.duration_since(UNIX_EPOCH) {
-        Ok(d) => d.as_nanos() as i128,
-        Err(e) => -(e.duration().as_nanos() as i128),
-    }
-}
-
-fn time_of(nanos: i128) -> SystemTime {
-    let d = Duration::from_nanos(nanos.unsigned_abs().min(u64::MAX as u128) as u64);
-    if nanos >= 0 { UNIX_EPOCH + d } else { UNIX_EPOCH - d }
-}
-
-/// Describes a journal entry for messages.
-pub(crate) fn describe(e: &Entry) -> String {
-    let mut r = Reader::new(&e.data);
-    match e.kind {
-        EntryKind::Start => {
-            let parsed = (|| Some((OpKind::from_code(r.u8()?)?, r.u64()?, r.u64()?, r.u8()?)))();
-            match parsed {
-                Some((kind, _, _, wake)) => {
-                    if wake == 1 {
-                        let _ = r.i128();
-                    }
-                    format!("the start of {} `{}`", kind.name(), r.str().unwrap_or("?"))
-                }
-                None => "a malformed start entry".into(),
-            }
-        }
-        EntryKind::Done => match (r.u64(), r.u64(), r.u64(), r.u8()) {
-            (Some(op), Some(_), Some(_), Some(1)) => format!("the cancellation of operation {op}"),
-            (Some(op), Some(step), Some(_), Some(_)) => format!("the completion of operation {op} after step {step}"),
-            _ => "a malformed completion entry".into(),
-        },
-        EntryKind::Result => match (r.u64(), r.str()) {
-            (Some(_), Some(label)) => format!("the result of `{label}`"),
-            _ => "a malformed result entry".into(),
-        },
-        EntryKind::Seed => "the random seed".into(),
-        EntryKind::Wall => "a wall-clock reading".into(),
-        EntryKind::Monotonic => "a monotonic clock reading".into(),
-        EntryKind::Fuel => "a fuel charge by time".into(),
     }
 }
 
@@ -782,17 +725,15 @@ impl Vm {
     /// journal, or records it, unless the configuration fixes it.
     pub(crate) fn attach_journal(&mut self, mut j: JournalState, seeded: bool) -> Result<(), JournalStop> {
         if !seeded {
-            match j.take(EntryKind::Seed, &|| "the random seed".into())? {
-                Some(e) => {
-                    let seed = Reader::new(&e.data).u64().ok_or_else(|| j.diverged("malformed seed entry".into()))?;
-                    self.host.rng = super::Rng::new(seed);
-                }
-                None => {
+            let seed = match j.take(EntryKind::Seed, &|| "the random seed".into())? {
+                Some(EntryData::Seed(seed)) => seed,
+                _ => {
                     let seed = crate::platform::entropy();
-                    self.host.rng = super::Rng::new(seed);
-                    j.record(EntryKind::Seed, seed.to_le_bytes().to_vec());
+                    j.record(EntryData::Seed(seed));
+                    seed
                 }
-            }
+            };
+            self.host.rng = super::Rng::new(seed);
         }
         self.journal = Some(Box::new(RefCell::new(j)));
         Ok(())
@@ -802,12 +743,11 @@ impl Vm {
     pub fn wall_time(&self) -> Result<SystemTime, Ctl> {
         let Some(j) = &self.journal else { return Ok(self.host.clock.wall()) };
         let mut j = j.borrow_mut();
-        if let Some(e) = j.take(EntryKind::Wall, &|| "the wall clock".into()).map_err(stop)? {
-            let nanos = Reader::new(&e.data).i128().ok_or_else(malformed)?;
-            return Ok(time_of(nanos));
+        if let Some(EntryData::Wall(t)) = j.take(EntryKind::Wall, &|| "the wall clock".into()).map_err(stop)? {
+            return Ok(t);
         }
         let t = self.host.clock.wall();
-        j.record(EntryKind::Wall, nanos_of(t).to_le_bytes().to_vec());
+        j.record(EntryData::Wall(t));
         Ok(t)
     }
 
@@ -816,9 +756,7 @@ impl Vm {
     pub fn monotonic(&self) -> Result<Instant, Ctl> {
         let Some(j) = &self.journal else { return Ok(self.host.clock.now()) };
         let mut j = j.borrow_mut();
-        if let Some(e) = j.take(EntryKind::Monotonic, &|| "the monotonic clock".into()).map_err(stop)? {
-            let nanos = Reader::new(&e.data).u64().ok_or_else(malformed)?;
-            let d = Duration::from_nanos(nanos);
+        if let Some(EntryData::Monotonic(d)) = j.take(EntryKind::Monotonic, &|| "the monotonic clock".into()).map_err(stop)? {
             j.mono_last = j.mono_last.max(d);
             return Ok(j.origin + d);
         }
@@ -826,7 +764,7 @@ impl Vm {
         let last = j.mono_last;
         let skew = *j.mono_skew.get_or_insert(last.saturating_sub(raw));
         let d = raw + skew;
-        j.record(EntryKind::Monotonic, (d.as_nanos().min(u64::MAX as u128) as u64).to_le_bytes().to_vec());
+        j.record(EntryData::Monotonic(d));
         Ok(j.origin + d)
     }
 
@@ -837,9 +775,7 @@ impl Vm {
         let mut j = j.borrow_mut();
         let at = self.meter.used();
         if j.replaying() {
-            let Some(e) = j.peek().filter(|e| e.kind == EntryKind::Fuel) else { return Ok(0) };
-            let mut r = Reader::new(&e.data);
-            let (rec_at, extra) = (r.u64().ok_or_else(malformed)?, r.u64().ok_or_else(malformed)?);
+            let Some(&EntryData::Fuel { at: rec_at, extra }) = j.peek() else { return Ok(0) };
             if rec_at > at {
                 return Ok(0);
             }
@@ -851,9 +787,7 @@ impl Vm {
         }
         let extra = live();
         if extra > 0 {
-            let mut w = Writer::default();
-            w.u64(at).u64(extra);
-            j.record(EntryKind::Fuel, w.0);
+            j.record(EntryData::Fuel { at, extra });
         }
         Ok(extra)
     }
@@ -877,15 +811,20 @@ impl Vm {
     /// Consumes the recorded result of a synchronous call in replay.
     fn replay_result(&mut self, identity: u64, label: &str) -> Result<Option<NResult>, Ctl> {
         let Some(j) = &self.journal else { return Ok(None) };
-        let replayed = j.borrow_mut().take(EntryKind::Result, &|| format!("the result of `{label}`")).map_err(stop)?;
-        let Some(e) = replayed else { return Ok(None) };
-        let mut r = Reader::new(&e.data);
-        let (id, rec_label, fuel) = (r.u64().ok_or_else(malformed)?, r.str().ok_or_else(malformed)?, r.u64().ok_or_else(malformed)?);
+        let mut j = j.borrow_mut();
+        let seq = j.pos as u64;
+        let replayed = j.take(EntryKind::Result, &|| format!("the result of `{label}`")).map_err(stop)?;
+        drop(j);
+        let Some(EntryData::Result(CallResult { identity: id, label: rec_label, fuel, outcome })) = replayed else { return Ok(None) };
         if id != identity {
-            let msg = format!("the run calls `{label}` where the journal records a call of `{rec_label}` with other arguments");
-            return Err(stop(JournalStop::Diverged { seq: e.seq, message: msg }));
+            let msg = if rec_label == label {
+                format!("the run calls `{label}` with other arguments than the journal records")
+            } else {
+                format!("the run calls `{label}` where the journal records a call of `{rec_label}`")
+            };
+            return Err(stop(JournalStop::Diverged { seq, message: msg }));
         }
-        let v = payload_outcome(self, r.rest());
+        let v = payload_outcome(self, &outcome);
         self.charge(fuel)?;
         Ok(Some(v))
     }
@@ -919,9 +858,7 @@ impl Vm {
         let fuel = self.meter.used().saturating_sub(start);
         let (payload, value) = outcome_payload(self, r, label)?;
         if let Some(mut j) = self.journal_state() {
-            let mut w = Writer::default();
-            w.u64(identity).str(label).u64(fuel).0.extend_from_slice(&payload);
-            j.record(EntryKind::Result, w.0);
+            j.record(EntryData::Result(CallResult { identity, label: label.to_string(), fuel, outcome: payload.clone() }));
         }
         match value {
             Some(bytes) => decode_value(self, &bytes),
@@ -933,8 +870,7 @@ impl Vm {
     /// completion: replay does not make journaled host calls for it.
     pub(crate) fn next_op_replayed(&self) -> Option<bool> {
         let j = self.journal.as_ref()?.borrow();
-        let next = j.peek()?;
-        if next.kind != EntryKind::Start {
+        if !matches!(j.peek()?, EntryData::Start(_)) {
             return None;
         }
         Some(j.done.contains_key(&j.ops))
@@ -952,7 +888,7 @@ impl Vm {
     /// Records the completion of operation `op` with `payload` and `fuel`.
     fn record_done(&self, op: u64, fuel: u64, payload: &[u8]) {
         if let Some(j) = &self.journal {
-            j.borrow_mut().record_done(op, fuel, false, payload);
+            j.borrow_mut().record_done(op, fuel, OpEnd::Completed(payload.to_vec()));
         }
     }
 
@@ -964,7 +900,7 @@ impl Vm {
         let Some(j) = &self.journal else { return };
         let mut j = j.borrow_mut();
         if !j.replaying() {
-            j.record_done(op, 0, true, &[]);
+            j.record_done(op, 0, OpEnd::Cancelled);
             return;
         }
         if j.replayed.remove(&op).is_none() {
@@ -972,21 +908,16 @@ impl Vm {
             // record its start's end, so the cancellation lies beyond it.
             return;
         }
-        let next = j.peek().and_then(|e| {
-            let mut r = Reader::new(&e.data);
-            let (o, _, _, cancelled) = (r.u64()?, r.u64()?, r.u64()?, r.u8()?);
-            (e.kind == EntryKind::Done && o == op && cancelled == 1).then_some(())
-        });
-        match next {
-            Some(()) => j.pos += 1,
-            None if j.pending.is_none() => {
+        match j.peek() {
+            Some(EntryData::Done(OpDone { op: o, end: OpEnd::Cancelled, .. })) if *o == op => j.pos += 1,
+            _ if j.pending.is_none() => {
                 let msg = format!(
                     "the run cancels operation {op} where the journal records {}",
                     j.peek().map_or("nothing".into(), |e| e.describe())
                 );
                 j.pending = Some(j.diverged(msg));
             }
-            None => {}
+            _ => {}
         }
     }
 
@@ -1000,39 +931,40 @@ impl Vm {
         let mut j = j.borrow_mut();
         let id = j.ops;
         let label = op.label.clone();
+        let seq = j.pos as u64;
         let replayed = j.take(EntryKind::Start, &|| format!("the start of {} `{label}`", op.kind.name())).map_err(stop)?;
         let wake = match &replayed {
-            Some(e) => {
-                let mut r = Reader::new(&e.data);
-                let parsed = (|| Some((r.u8()?, r.u64()?, r.u64()?, r.u8()?)))();
-                let Some((kind, identity, pre_fuel, has_wake)) = parsed else { return Err(malformed()) };
-                let wake = if has_wake == 1 { Some(time_of(r.i128().ok_or_else(malformed)?)) } else { None };
-                if kind != op.kind as u8 || identity != op.identity {
-                    let msg = if kind == op.kind as u8 && e.describe().ends_with(&format!("`{label}`")) {
+            Some(EntryData::Start(s)) => {
+                if s.kind != op.kind || s.identity != op.identity {
+                    let msg = if s.kind == op.kind && s.label == label {
                         format!("the run starts {} `{label}` with other arguments than the journal records", op.kind.name())
                     } else {
-                        format!("the run starts {} `{label}` where the journal records {}", op.kind.name(), e.describe())
+                        format!(
+                            "the run starts {} `{label}` where the journal records the start of {} `{}`",
+                            op.kind.name(),
+                            s.kind.name(),
+                            s.label
+                        )
                     };
-                    return Err(stop(JournalStop::Diverged { seq: e.seq, message: msg }));
+                    return Err(stop(JournalStop::Diverged { seq, message: msg }));
                 }
                 if matches!(op.work, OpWork::Replayed) {
-                    self.meter.charge(pre_fuel)?;
+                    self.meter.charge(s.pre_fuel)?;
                 }
-                wake
+                s.wake
             }
-            None => {
+            _ => {
                 let wake = match op.work {
                     OpWork::Timer(d) => Some(self.host.clock.wall() + d),
                     _ => None,
                 };
-                let mut w = Writer::default();
-                w.u8(op.kind as u8).u64(op.identity).u64(op.pre_fuel);
-                match wake {
-                    Some(t) => w.u8(1).i128(nanos_of(t)),
-                    None => w.u8(0),
-                };
-                w.str(&label);
-                j.record(EntryKind::Start, w.0);
+                j.record(EntryData::Start(OpStart {
+                    kind: op.kind,
+                    identity: op.identity,
+                    pre_fuel: op.pre_fuel,
+                    wake,
+                    label: label.clone(),
+                }));
                 wake
             }
         };
@@ -1101,14 +1033,13 @@ impl Vm {
         let Some(j) = &self.journal else { return Ok(None) };
         let mut j = j.borrow_mut();
         j.take_pending().map_err(stop)?;
-        let Some(e) = j.peek().filter(|e| e.kind == EntryKind::Done) else { return Ok(None) };
-        let mut r = Reader::new(&e.data);
-        let (op, step, fuel, cancelled) =
-            (r.u64().ok_or_else(malformed)?, r.u64().ok_or_else(malformed)?, r.u64().ok_or_else(malformed)?, r.u8().ok_or_else(malformed)?);
-        if cancelled == 1 {
+        let Some(EntryData::Done(OpDone { op, step, fuel, end })) = j.peek() else { return Ok(None) };
+        let (op, step, fuel) = (*op, *step, *fuel);
+        let OpEnd::Completed(payload) = end else {
             // Consumed where the run cancels the operation.
             return Ok(None);
-        }
+        };
+        let payload = payload.clone();
         if step > j.steps {
             return Ok(None);
         }
@@ -1116,7 +1047,6 @@ impl Vm {
             let msg = format!("the journal records the completion of operation {op} after step {step}, and the run is at step {}", j.steps);
             return Err(stop(j.diverged(msg)));
         }
-        let payload = r.rest().to_vec();
         let Some((fid, wgen, build)) = j.replayed.remove(&op) else {
             let msg = format!("the journal records the completion of operation {op}, which the run has not started");
             return Err(stop(j.diverged(msg)));

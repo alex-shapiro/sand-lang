@@ -772,34 +772,20 @@ type Reply = (i64, Vec<(String, String)>, Vec<u8>);
 
 /// The journal's encoding of the outcome of a request.
 fn encode_reply(r: Result<Reply, IoFailure>) -> Vec<u8> {
-    let mut w = crate::vm::journal::Writer::default();
+    use crate::journal::HttpOutcome;
     match r {
-        Ok((status, headers, body)) => {
-            w.u8(0).i64(status).u64(headers.len() as u64);
-            for (k, v) in &headers {
-                w.str(k).str(v);
-            }
-            w.bytes(&body);
-        }
-        Err(e) => {
-            w.u8(1).str(e.kind).str(&e.message);
-        }
+        Ok((status, headers, body)) => HttpOutcome::Response { status, headers, body },
+        Err(e) => HttpOutcome::Failed { kind: e.kind.to_string(), message: e.message },
     }
-    w.0
+    .encode()
 }
 
 fn decode_reply(data: &[u8]) -> Option<Result<Reply, HostError>> {
-    let mut r = crate::vm::journal::Reader::new(data);
-    if r.u8()? == 1 {
-        return Some(Err(HostError::new(r.str()?, r.str()?)));
-    }
-    let status = r.i64()?;
-    let n = r.u64()?;
-    let mut headers = Vec::new();
-    for _ in 0..n {
-        headers.push((r.str()?.to_string(), r.str()?.to_string()));
-    }
-    Some(Ok((status, headers, r.bytes()?.to_vec())))
+    use crate::journal::HttpOutcome;
+    Some(match HttpOutcome::decode(data)? {
+        HttpOutcome::Response { status, headers, body } => Ok((status, headers, body)),
+        HttpOutcome::Failed { kind, message } => Err(HostError::new(kind, message)),
+    })
 }
 
 /// A request's head, with a `Connection: close` header if `close`.

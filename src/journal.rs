@@ -10,9 +10,12 @@
 //! instead of performing their effects, reaches the same state, and continues
 //! live after the last entry. SPEC §16.7 gives the full contract.
 
+use crate::platform::{SystemTime, UNIX_EPOCH};
+use crate::vm::journal::{Reader, Writer};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// One recorded input of a run.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -94,11 +97,340 @@ impl Entry {
         Some(Entry { seq: u64::from_le_bytes(*seq), kind: EntryKind::from_code(kind)?, data: data.to_vec() })
     }
 
-    /// A short description of the entry for messages, such as
-    /// `start of http GET http://example.com/`.
-    pub fn describe(&self) -> String {
-        crate::vm::journal::describe(self)
+    /// Decodes the data of the entry, or returns `None` if it is malformed.
+    pub fn decode(&self) -> Option<EntryData> {
+        EntryData::decode(self.kind, &self.data)
     }
+
+    /// A short description of the entry for messages, such as
+    /// `the start of http `GET http://example.com/``.
+    pub fn describe(&self) -> String {
+        match self.decode() {
+            Some(d) => d.describe(),
+            None => format!("a malformed {} entry", self.kind.name()),
+        }
+    }
+}
+
+/// The decoded data of an [`Entry`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EntryData {
+    /// The seed of the random number generator.
+    Seed(u64),
+    /// A reading of the wall clock.
+    Wall(SystemTime),
+    /// A reading of the monotonic clock: the time since the run started.
+    Monotonic(Duration),
+    /// A charge of `extra` fuel by elapsed time, when the run had used `at`
+    /// fuel.
+    Fuel {
+        at: u64,
+        extra: u64,
+    },
+    Start(OpStart),
+    Done(OpDone),
+    Result(CallResult),
+}
+
+/// What an asynchronous operation is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum OpKind {
+    /// `task.sleep` and the functions that use it.
+    Timer,
+    /// An HTTP request, recorded as a whole message.
+    Http,
+    /// A read of standard input.
+    Stdin,
+    /// A call of an asynchronous host function.
+    Call,
+}
+
+impl OpKind {
+    const ALL: [OpKind; 4] = [OpKind::Timer, OpKind::Http, OpKind::Stdin, OpKind::Call];
+
+    fn code(self) -> u8 {
+        OpKind::ALL.iter().position(|&k| k == self).unwrap_or(0) as u8 + 1
+    }
+
+    fn from_code(c: u8) -> Option<OpKind> {
+        OpKind::ALL.get(usize::from(c).checked_sub(1)?).copied()
+    }
+
+    /// The name of the kind in lowercase, such as `"http"`.
+    pub fn name(self) -> &'static str {
+        match self {
+            OpKind::Timer => "timer",
+            OpKind::Http => "http",
+            OpKind::Stdin => "stdin",
+            OpKind::Call => "call",
+        }
+    }
+}
+
+/// The start of an asynchronous operation ([`EntryKind::Start`]). The
+/// operation's id is the number of operations that the run started before
+/// it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct OpStart {
+    pub kind: OpKind,
+    /// A hash of what the operation does, such as an HTTP request's method,
+    /// URL, headers and body.
+    pub identity: u64,
+    /// Fuel that the native spent before it started the operation.
+    pub pre_fuel: u64,
+    /// When a timer expires.
+    pub wake: Option<SystemTime>,
+    /// A description, such as `GET http://example.com/` or `sleep 5s`.
+    pub label: String,
+}
+
+/// The end of an asynchronous operation ([`EntryKind::Done`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct OpDone {
+    /// The id of the operation.
+    pub op: u64,
+    /// The scheduling step after which the engine delivered the result.
+    pub step: u64,
+    /// Fuel that building the result spent.
+    pub fuel: u64,
+    pub end: OpEnd,
+}
+
+/// How an asynchronous operation ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OpEnd {
+    /// The operation completed with this result, in an encoding that
+    /// depends on the kind of operation (see [`Operation::http`]).
+    Completed(Vec<u8>),
+    /// The task that waited for the operation was cancelled.
+    Cancelled,
+}
+
+/// The result of a synchronous journaled call ([`EntryKind::Result`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CallResult {
+    /// A hash of the call: the function and its arguments.
+    pub identity: u64,
+    /// The name of the function or the input.
+    pub label: String,
+    /// Fuel that the call spent.
+    pub fuel: u64,
+    /// The result, in the engine's encoding of values.
+    pub outcome: Vec<u8>,
+}
+
+impl EntryData {
+    pub(crate) fn kind(&self) -> EntryKind {
+        match self {
+            EntryData::Seed(_) => EntryKind::Seed,
+            EntryData::Wall(_) => EntryKind::Wall,
+            EntryData::Monotonic(_) => EntryKind::Monotonic,
+            EntryData::Fuel { .. } => EntryKind::Fuel,
+            EntryData::Start(_) => EntryKind::Start,
+            EntryData::Done(_) => EntryKind::Done,
+            EntryData::Result(_) => EntryKind::Result,
+        }
+    }
+
+    /// The bytes of an [`Entry`] of kind [`EntryData::kind`].
+    pub(crate) fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::default();
+        match self {
+            EntryData::Seed(s) => {
+                w.u64(*s);
+            }
+            EntryData::Wall(t) => {
+                w.i128(nanos_of(*t));
+            }
+            EntryData::Monotonic(d) => {
+                w.u64(d.as_nanos().min(u64::MAX as u128) as u64);
+            }
+            EntryData::Fuel { at, extra } => {
+                w.u64(*at).u64(*extra);
+            }
+            EntryData::Start(s) => {
+                w.u8(s.kind.code()).u64(s.identity).u64(s.pre_fuel);
+                match s.wake {
+                    Some(t) => w.u8(1).i128(nanos_of(t)),
+                    None => w.u8(0),
+                };
+                w.str(&s.label);
+            }
+            EntryData::Done(d) => {
+                w.u64(d.op).u64(d.step).u64(d.fuel);
+                match &d.end {
+                    OpEnd::Completed(payload) => w.u8(0).raw(payload),
+                    OpEnd::Cancelled => w.u8(1),
+                };
+            }
+            EntryData::Result(r) => {
+                w.u64(r.identity).str(&r.label).u64(r.fuel).raw(&r.outcome);
+            }
+        }
+        w.0
+    }
+
+    fn decode(kind: EntryKind, data: &[u8]) -> Option<EntryData> {
+        let mut r = Reader::new(data);
+        let d = match kind {
+            EntryKind::Seed => EntryData::Seed(r.u64()?),
+            EntryKind::Wall => EntryData::Wall(time_of(r.i128()?)),
+            EntryKind::Monotonic => EntryData::Monotonic(Duration::from_nanos(r.u64()?)),
+            EntryKind::Fuel => EntryData::Fuel { at: r.u64()?, extra: r.u64()? },
+            EntryKind::Start => {
+                let (kind, identity, pre_fuel) = (OpKind::from_code(r.u8()?)?, r.u64()?, r.u64()?);
+                let wake = match r.u8()? {
+                    0 => None,
+                    1 => Some(time_of(r.i128()?)),
+                    _ => return None,
+                };
+                EntryData::Start(OpStart { kind, identity, pre_fuel, wake, label: r.str()?.to_string() })
+            }
+            EntryKind::Done => {
+                let (op, step, fuel) = (r.u64()?, r.u64()?, r.u64()?);
+                let end = match r.u8()? {
+                    0 => OpEnd::Completed(r.rest().to_vec()),
+                    1 => OpEnd::Cancelled,
+                    _ => return None,
+                };
+                EntryData::Done(OpDone { op, step, fuel, end })
+            }
+            EntryKind::Result => {
+                let (identity, label, fuel) = (r.u64()?, r.str()?.to_string(), r.u64()?);
+                EntryData::Result(CallResult { identity, label, fuel, outcome: r.rest().to_vec() })
+            }
+        };
+        r.is_empty().then_some(d)
+    }
+
+    /// A short description for messages.
+    pub fn describe(&self) -> String {
+        match self {
+            EntryData::Start(s) => format!("the start of {} `{}`", s.kind.name(), s.label),
+            EntryData::Done(OpDone { op, end: OpEnd::Cancelled, .. }) => format!("the cancellation of operation {op}"),
+            EntryData::Done(OpDone { op, step, .. }) => format!("the completion of operation {op} after step {step}"),
+            EntryData::Result(r) => format!("the result of `{}`", r.label),
+            EntryData::Seed(_) => "the random seed".into(),
+            EntryData::Wall(_) => "a wall-clock reading".into(),
+            EntryData::Monotonic(_) => "a monotonic clock reading".into(),
+            EntryData::Fuel { .. } => "a fuel charge by time".into(),
+        }
+    }
+}
+
+/// An asynchronous operation of a journal: its start and, if the journal
+/// records it, its end.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Operation {
+    /// The id of the operation: the number of operations that the run
+    /// started before it.
+    pub id: u64,
+    /// The sequence number of the operation's `Start` entry.
+    pub seq: u64,
+    pub start: OpStart,
+    pub done: Option<OpDone>,
+}
+
+impl Operation {
+    /// The outcome of an HTTP request that completed.
+    pub fn http(&self) -> Option<HttpOutcome> {
+        match (&self.start.kind, &self.done) {
+            (OpKind::Http, Some(OpDone { end: OpEnd::Completed(payload), .. })) => HttpOutcome::decode(payload),
+            _ => None,
+        }
+    }
+
+    /// Whether the task that waited for the operation was cancelled.
+    pub fn cancelled(&self) -> bool {
+        matches!(&self.done, Some(OpDone { end: OpEnd::Cancelled, .. }))
+    }
+}
+
+/// The asynchronous operations that `entries` record, by id. Fails with a
+/// message if an entry does not decode or an operation ends twice or before
+/// it starts.
+pub fn operations(entries: &[Entry]) -> Result<Vec<Operation>, String> {
+    let mut out: Vec<Operation> = Vec::new();
+    for e in entries {
+        if !matches!(e.kind, EntryKind::Start | EntryKind::Done) {
+            continue;
+        }
+        match e.decode() {
+            Some(EntryData::Start(start)) => out.push(Operation { id: out.len() as u64, seq: e.seq, start, done: None }),
+            Some(EntryData::Done(done)) => {
+                let op = done.op;
+                let slot = out.get_mut(op as usize).ok_or_else(|| format!("entry {} ends operation {op}, which has not started", e.seq))?;
+                if slot.done.is_some() {
+                    return Err(format!("entry {} ends operation {op} a second time", e.seq));
+                }
+                slot.done = Some(done);
+            }
+            _ => return Err(format!("entry {} is malformed", e.seq)),
+        }
+    }
+    Ok(out)
+}
+
+/// The outcome of a journaled HTTP request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HttpOutcome {
+    /// The response, with its whole body.
+    Response { status: i64, headers: Vec<(String, String)>, body: Vec<u8> },
+    /// The request failed with an error of `kind`.
+    Failed { kind: String, message: String },
+}
+
+impl HttpOutcome {
+    pub(crate) fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::default();
+        match self {
+            HttpOutcome::Response { status, headers, body } => {
+                w.u8(0).i64(*status).u64(headers.len() as u64);
+                for (k, v) in headers {
+                    w.str(k).str(v);
+                }
+                w.bytes(body);
+            }
+            HttpOutcome::Failed { kind, message } => {
+                w.u8(1).str(kind).str(message);
+            }
+        }
+        w.0
+    }
+
+    pub(crate) fn decode(data: &[u8]) -> Option<HttpOutcome> {
+        let mut r = Reader::new(data);
+        let out = match r.u8()? {
+            0 => {
+                let status = r.i64()?;
+                let n = r.u64()?;
+                let mut headers = Vec::new();
+                for _ in 0..n {
+                    headers.push((r.str()?.to_string(), r.str()?.to_string()));
+                }
+                HttpOutcome::Response { status, headers, body: r.bytes()?.to_vec() }
+            }
+            1 => HttpOutcome::Failed { kind: r.str()?.to_string(), message: r.str()?.to_string() },
+            _ => return None,
+        };
+        r.is_empty().then_some(out)
+    }
+}
+
+pub(crate) fn nanos_of(t: SystemTime) -> i128 {
+    match t.duration_since(UNIX_EPOCH) {
+        Ok(d) => d.as_nanos() as i128,
+        Err(e) => -(e.duration().as_nanos() as i128),
+    }
+}
+
+pub(crate) fn time_of(nanos: i128) -> SystemTime {
+    let d = Duration::from_nanos(nanos.unsigned_abs().min(u64::MAX as u128) as u64);
+    if nanos >= 0 { UNIX_EPOCH + d } else { UNIX_EPOCH - d }
 }
 
 /// The future that [`Journal::flush`] returns.

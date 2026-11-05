@@ -2345,8 +2345,12 @@ executions. It calls `Journal::record` for each new entry and
 `Journal::flush` to make the entries durable. An `Entry` has a sequence number
 `seq`, counted from 0, an `EntryKind`, and `data` in an encoding that the
 engine defines for each version of `sandlang`. `Entry::to_bytes` and
-`Entry::from_bytes` convert an entry to bytes and back, and `Entry::describe`
-describes it. `MemoryJournal` keeps the entries in memory.
+`Entry::from_bytes` convert an entry to bytes and back. `Entry::decode` gives
+the decoded data as an `EntryData`, and `Entry::describe` describes the entry.
+`journal::operations` pairs the `Start` and `Done` entries of each
+asynchronous operation, and `Operation::http` decodes the outcome of an HTTP
+request. Hosts use these functions to inspect a journal; only the engine
+writes entries. `MemoryJournal` keeps the entries in memory.
 
 **What the journal records.** The engine records these inputs, in the order
 the run reads them:
