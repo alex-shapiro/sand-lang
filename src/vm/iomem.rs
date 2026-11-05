@@ -231,6 +231,41 @@ impl Drop for ResourceSlot {
     }
 }
 
+/// The buffers and the open-resource slot of a live operation, from the
+/// budget that the run's journal chooses ([`Vm::claim`](crate::vm::Vm::claim)).
+pub enum Claim {
+    /// Claimed from the heap's budget when the native started the
+    /// operation, where a collection can make room: a run without a journal.
+    Held { slot: Option<ResourceSlot>, res: Reservation },
+    /// Claimed from the journal's budget of live operations when the
+    /// operation starts: a journaled run. A failure is the outcome of the
+    /// operation, which the journal records, so that the heap's checks are
+    /// the same in replay.
+    Deferred { mem: Arc<IoMemory>, buffers: Option<usize>, bytes: usize },
+}
+
+impl Claim {
+    /// The slot (if the native asked for one) and a reservation of the
+    /// bytes. Fails with a message if they do not fit.
+    pub fn take(self) -> Result<(Option<ResourceSlot>, Reservation), String> {
+        let (mem, buffers, bytes) = match self {
+            Claim::Held { slot, res } => return Ok((slot, res)),
+            Claim::Deferred { mem, buffers, bytes } => (mem, buffers, bytes),
+        };
+        let slot = match buffers {
+            None => None,
+            Some(buffers) => {
+                let mut slot = ResourceSlot::try_new(&mem).ok_or_else(|| format!("too many open resources (limit {})", mem.max_resources()))?;
+                slot.reserve_buffers(buffers).map_err(|e| format!("cannot open a connection: its buffers ({buffers} bytes) do not fit: {e}"))?;
+                Some(slot)
+            }
+        };
+        let mut res = Reservation::new(&mem);
+        res.ensure(bytes).map_err(|e| format!("cannot buffer {bytes} bytes: {e}"))?;
+        Ok((slot, res))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

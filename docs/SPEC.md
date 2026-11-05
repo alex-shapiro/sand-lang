@@ -2365,7 +2365,7 @@ the run reads them:
 | `Fuel`      | a fuel charge by elapsed time (regex work, §15.2)                                                                     |
 | `Start`     | the start of an asynchronous operation: its kind, its identity, and the wake time of a timer                          |
 | `Done`      | the end of an asynchronous operation: the scheduling step at which the engine delivered it, and its result; or its cancellation |
-| `Result`    | the result of a synchronous journaled call: a journaled host function, or a read of the process environment           |
+| `Result`    | the result of a synchronous input: a journaled host function, a read of the process environment, or a line of standard input that is available at once |
 
 The asynchronous operations are timers (`task.sleep` and the functions that
 use it), HTTP requests, reads of standard input from `Config::stdin_feed` or

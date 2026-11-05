@@ -1056,11 +1056,92 @@ impl Vm {
         Ok(extra)
     }
 
+    /// Runs `f`, a synchronous input of the run described by `describe`
+    /// (its identity and label), and records its result; in replay, returns
+    /// the recorded result without running `f`. Without a journal, returns
+    /// what `f` returns. The value must be plain data (see
+    /// [`encode_value`]).
+    pub(crate) fn input(&mut self, describe: impl FnOnce(&Vm) -> Result<(u64, String), Ctl>, f: impl FnOnce(&mut Vm) -> NResult) -> NResult {
+        if self.journal.is_none() {
+            return f(self);
+        }
+        let (identity, label) = describe(self)?;
+        self.journaled_result(identity, &label, f)
+    }
+
+    /// Reads `f`, an input of bytes that can be unavailable yet (`f`
+    /// returns `None`, and the caller waits for it), described by
+    /// `describe`. The journal records only an input that `f` returns:
+    /// replay returns it if the journal records it next, and otherwise
+    /// returns `None` without running `f`. Without a journal, returns what
+    /// `f` returns.
+    pub(crate) fn ready_input(
+        &mut self,
+        describe: impl FnOnce(&Vm) -> Result<(u64, String), Ctl>,
+        f: impl FnOnce(&mut Vm) -> Option<Option<Vec<u8>>>,
+    ) -> Result<Option<Option<Vec<u8>>>, Ctl> {
+        if self.journal.is_none() {
+            return Ok(f(self));
+        }
+        let (identity, label) = describe(self)?;
+        if self.replaying() {
+            let recorded = match self.journal_state().as_deref_mut().and_then(|j| match j.peek() {
+                Some(EntryData::Result(r)) if r.identity == identity => {
+                    let r = r.clone();
+                    j.pos += 1;
+                    Some(r)
+                }
+                _ => None,
+            }) {
+                Some(r) => r,
+                None => return Ok(None),
+            };
+            self.charge(recorded.fuel)?;
+            let mut r = Reader::new(&recorded.outcome);
+            let data = match (r.u8(), r.u8()) {
+                (Some(0), Some(tag::BYTES)) => Some(r.bytes().ok_or_else(malformed)?.to_vec()),
+                (Some(0), Some(tag::UNIT)) => None,
+                _ => return Err(malformed()),
+            };
+            return Ok(Some(data));
+        }
+        let start = self.meter.used();
+        let Some(data) = f(self) else { return Ok(None) };
+        let fuel = self.meter.used().saturating_sub(start);
+        let mut w = Writer::default();
+        match &data {
+            Some(b) => w.u8(0).u8(tag::BYTES).bytes(b),
+            None => w.u8(0).u8(tag::UNIT),
+        };
+        if let Some(mut j) = self.journal_state() {
+            j.record(EntryData::Result(CallResult { identity, label, fuel, outcome: w.0 }));
+        }
+        Ok(Some(data))
+    }
+
+    /// The buffers (`bytes`) and, with `slot: Some((buffers, what))`, an
+    /// open-resource slot with `buffers` bytes of fixed buffers for `what`,
+    /// of a live operation that the calling native starts. Without a
+    /// journal, claims them now from the heap's budget, and asks for a
+    /// collection if they do not fit. With one, they come from the
+    /// journal's budget of live operations when the operation starts.
+    pub(crate) fn claim(&mut self, slot: Option<(usize, &str)>, bytes: usize) -> Result<super::iomem::Claim, crate::native::HostError> {
+        if let Some(j) = &self.journal {
+            return Ok(super::iomem::Claim::Deferred { mem: j.borrow().live_memory.clone(), buffers: slot.map(|s| s.0), bytes });
+        }
+        let res = if bytes == 0 { self.io_reservation() } else { self.reserve_io(bytes)? };
+        let slot = match slot {
+            Some((buffers, what)) => Some(self.resource_slot_with(buffers, what)?),
+            None => None,
+        };
+        Ok(super::iomem::Claim::Held { slot, res })
+    }
+
     /// Runs `f`, a synchronous input of the run identified by `identity`
     /// and described by `label`, and records its result; in replay, returns
     /// the recorded result without running `f`. The value must be plain
     /// data (see [`encode_value`]).
-    pub(crate) fn journaled_result(&mut self, identity: u64, label: &str, f: impl FnOnce(&mut Vm) -> NResult) -> NResult {
+    fn journaled_result(&mut self, identity: u64, label: &str, f: impl FnOnce(&mut Vm) -> NResult) -> NResult {
         if let Some(r) = self.replay_result(identity, label)? {
             return r;
         }

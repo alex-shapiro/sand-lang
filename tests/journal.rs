@@ -837,19 +837,29 @@ fn fed_input_and_the_process_environment_are_journaled() {
 import io
 import env
 print(io.stdin.read_line()?)
+print(io.stdin.read_all()?.len())
 print(env.get("PATH").is_some())
 print(env.vars().len() > 0)
 "#;
-    let feed = sandlang::StdinFeed::new();
-    feed.send("hello\n");
+    let fed = || {
+        let feed = sandlang::StdinFeed::new();
+        feed.send("hello\nrest");
+        feed.end();
+        feed
+    };
+    let plain = MemorySink::new();
+    let r = rt().block_on(Engine::new(base.clone().stdout(plain.clone()).stdin_feed(&fed())).unwrap().run_source("main.sand", src));
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!(plain.contents(), "Some(\"hello\")\n4\ntrue\ntrue\n");
     let journal = MemoryJournal::new();
     let out = MemorySink::new();
-    let config = base.clone().stdout(out.clone()).stdin_feed(&feed).durable(Durable::new(Arc::new(journal.clone())));
+    let config = base.clone().stdout(out.clone()).stdin_feed(&fed()).durable(Durable::new(Arc::new(journal.clone())));
     let r = rt().block_on(Engine::new(config).unwrap().run_source("main.sand", src));
     assert!(r.is_ok(), "{r:?}");
-    assert_eq!(out.contents(), "Some(\"hello\")\ntrue\ntrue\n");
+    assert_eq!(out.contents(), plain.contents());
+    // A line that is available is a synchronous input; a read that waits is an operation.
     let kinds: Vec<EntryKind> = journal.entries().iter().map(|e| e.kind).collect();
-    assert_eq!(kinds, [EntryKind::Start, EntryKind::Done, EntryKind::Result, EntryKind::Result]);
+    assert_eq!(kinds, [EntryKind::Result, EntryKind::Start, EntryKind::Done, EntryKind::Result, EntryKind::Result]);
     // Replay does not read the feed, which has nothing now.
     let empty = sandlang::StdinFeed::new();
     empty.end();

@@ -6,6 +6,7 @@ use crate::native::{HostError, IntoValue, Later, NativeModule, NativeObject, Obj
 use crate::policy::Capability;
 use crate::vm::iomem::Reservation;
 use crate::vm::value::{Obj, Value, to_usize_saturating, u64_to_usize_saturating};
+use crate::vm::journal::{Begun, BuildFn, Identity, OpKind, OpSpec, Outcome, Park, Reader, Whole, Writer};
 use crate::vm::{Ctl, StdinSource, Vm};
 use std::collections::BTreeMap;
 use tokio::io::AsyncBufRead;
@@ -108,57 +109,34 @@ fn read_stdin<R: IntoValue + Send + 'static>(
     vm.flush_before_input()?;
     // Input that the host sends as the run goes is an input of the run's
     // journal; input fixed by the configuration is not.
-    let journaled = vm.journaling() && !vm.host.stdin.try_lock().is_ok_and(|s| matches!(*s, StdinSource::None | StdinSource::Bytes(_)));
-    if journaled {
-        return Err(journaled_read(vm, what, done).into());
-    }
-    if what == Read::Line
-        && let Some(data) = buffered_line(vm)
-    {
-        return Ok(Later::ready(done(vm, data)));
-    }
-    let stdin = vm.host.stdin.clone();
-    // The input is buffered outside the heap until it is complete.
-    let mut res = match what {
-        Read::Upto(max) => vm.reserve_io(max.min(STDIN_CHUNK))?,
-        _ => vm.io_reservation(),
-    };
-    let read = async move {
-        let data = read_input(&stdin, what, &mut res).await.map_err(|e| IoFailure::new(e.kind, format!("stdin: {}", e.message)))?;
-        Ok((data, res))
-    };
-    stream::suspend(read, move |vm, (data, res)| {
-        drop(res);
-        done(vm, data)
-    })
-}
-
-/// A read of standard input as a journaled operation, whose outcome the
-/// journal records. Its buffers count against the journal's budget of live
-/// operations.
-fn journaled_read<R: IntoValue + Send + 'static>(
-    vm: &mut Vm,
-    what: Read,
-    done: fn(&mut Vm, Option<Vec<u8>>) -> Result<R, HostError>,
-) -> Ctl {
-    use crate::vm::journal::{Begun, BuildFn, Identity, OpKind, OpSpec, Outcome, Park, Reader, Whole, Writer};
-    let stdin = vm.host.stdin.clone();
-    let Some(live) = vm.journal_state().map(|j| j.live_memory.clone()) else { return Ctl::internal("a journaled read without a journal") };
+    let external = !vm.host.stdin.try_lock().is_ok_and(|s| matches!(*s, StdinSource::None | StdinSource::Bytes(_)));
     let (code, label) = match what {
         Read::Line => (0, "read_line".to_string()),
         Read::All => (1, "read_all".to_string()),
         Read::Upto(n) => (2 + n as u64, format!("read {n}")),
     };
-    let fut = async move {
-        let mut res = Reservation::new(&live);
-        let mut w = Writer::default();
-        match read_input(&stdin, what, &mut res).await {
-            Ok(Some(data)) => w.u8(0).u8(1).bytes(&data),
-            Ok(None) => w.u8(0).u8(0),
-            Err(e) => w.u8(1).str(e.kind).str(&format!("stdin: {}", e.message)),
-        };
-        Box::new(Whole(w.0)) as Box<dyn Outcome>
+    let identity = Identity::default().add(&code.to_le_bytes()).finish();
+    let describe = |_: &Vm| Ok((identity, label.clone()));
+    if what == Read::Line {
+        let line = if external { vm.ready_input(describe, |vm: &mut Vm| buffered_line(vm))? } else { buffered_line(vm) };
+        if let Some(data) = line {
+            return Ok(Later::ready(done(vm, data)));
+        }
+    }
+    let stdin = vm.host.stdin.clone();
+    // The input is buffered outside the heap until it is complete.
+    let claim = vm.claim(None, if let Read::Upto(max) = what { max.min(STDIN_CHUNK) } else { 0 })?;
+    let read = async move {
+        let (_, mut res) = claim.take().map_err(|e| IoFailure::new("limit", e))?;
+        let data = read_input(&stdin, what, &mut res).await.map_err(|e| IoFailure::new(e.kind, format!("stdin: {}", e.message)))?;
+        Ok((data, res))
     };
+    if !external {
+        return stream::suspend(read, move |vm, (data, res)| {
+            drop(res);
+            done(vm, data)
+        });
+    }
     let build: BuildFn = Box::new(move |vm: &mut Vm, payload: &[u8]| -> crate::vm::NResult {
         let mut r = Reader::new(payload);
         let malformed = || Ctl::internal("a journaled read of standard input is malformed");
@@ -171,13 +149,23 @@ fn journaled_read<R: IntoValue + Send + 'static>(
         };
         outcome.into_value(vm)
     });
-    let identity = Identity::default().add(&code.to_le_bytes()).finish();
     let spec = OpSpec { kind: OpKind::Stdin, effectful: false, park: Park::Never, pre_fuel: 0, timer: None };
-    match vm.begin_op(spec, |_| Ok((identity, label))) {
-        Err(c) => c,
-        Ok(Begun::Replayed(r)) => r.wait(build),
-        Ok(Begun::Live(l)) => l.run(fut, build),
+    Err(match vm.begin_op(spec, describe)? {
+        Begun::Replayed(r) => r.wait(build),
+        Begun::Live(live) => live.run(
+            async move {
+                let mut w = Writer::default();
+                match read.await {
+                    Ok((Some(data), _)) => w.u8(0).u8(1).bytes(&data),
+                    Ok((None, _)) => w.u8(0).u8(0),
+                    Err(e) => w.u8(1).str(e.kind).str(&e.message),
+                };
+                Box::new(Whole(w.0)) as Box<dyn Outcome>
+            },
+            build,
+        ),
     }
+    .into())
 }
 
 fn input_line(vm: &mut Vm, line: Option<Vec<u8>>) -> Result<Option<String>, HostError> {
@@ -289,11 +277,10 @@ pub(crate) fn env_module() -> NativeModule {
 /// configuration fixes it. A journaled run records what the process
 /// environment gives.
 fn process_input(vm: &mut Vm, label: &str, lookup: impl FnOnce(&mut Vm) -> crate::vm::NResult) -> crate::vm::NResult {
-    if vm.journaling() && vm.host.env.is_none() {
-        let identity = crate::vm::journal::Identity::default().add(label.as_bytes()).finish();
-        return vm.journaled_result(identity, label, lookup);
+    if vm.host.env.is_some() {
+        return lookup(vm);
     }
-    lookup(vm)
+    vm.input(|_| Ok((Identity::default().add(label.as_bytes()).finish(), label.to_string())), lookup)
 }
 
 /// The process's environment variable `name`.
