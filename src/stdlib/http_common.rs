@@ -200,7 +200,8 @@ impl Prepared {
     pub fn apply_filter(&mut self, vm: &Vm) -> Result<(), HostError> {
         let Some(filter) = &vm.host.request_filter else { return Ok(()) };
         let url = &self.url;
-        let target = crate::engine::RequestTarget { scheme: url.scheme.clone(), host: url.host.clone(), port: url.port };
+        let journal_seq = vm.journal_state().map(|j| j.position());
+        let target = crate::engine::RequestTarget { scheme: url.scheme.clone(), host: url.host.clone(), port: url.port, journal_seq };
         filter(&target, &mut self.headers).map_err(|reason| HostError::new("permission_denied", reason))
     }
 }

@@ -593,6 +593,9 @@ pub struct Vm {
     /// Until when the run may be suspended while the operation that a
     /// native returns waits (see [`crate::native::Later::parked`]).
     pub(crate) op_park: journal::Park,
+    /// The sequence number of the entry that records the journaled host
+    /// call in progress (see [`Vm::journal_seq`]).
+    pub(crate) call_seq: Option<u64>,
 }
 
 pub const SLICE_FUEL: i64 = 20_000;
@@ -656,6 +659,19 @@ impl Vm {
         self.host.context.clone()?.downcast::<T>().ok()
     }
 
+    /// Inside a call of a function that [`NativeModule::journaled`] or
+    /// [`NativeModule::effectful`] registered, in a journaled run: the
+    /// sequence number of the journal entry that records the call. It is the
+    /// same in every execution of the run, also when a resumed run calls the
+    /// function again, so a host can use it as the identity of the call's
+    /// effect (SPEC §16.7). `None` elsewhere.
+    ///
+    /// [`NativeModule::journaled`]: crate::NativeModule::journaled
+    /// [`NativeModule::effectful`]: crate::NativeModule::effectful
+    pub fn journal_seq(&self) -> Option<u64> {
+        self.call_seq
+    }
+
     pub fn new(prog: Arc<Program>, natives: Arc<Vec<NativeEntry>>, host: Host) -> Vm {
         let heap = Heap::new(host.limits.max_memory, host.limits.max_open_resources);
         let consts = Vec::with_capacity(prog.consts.len());
@@ -696,6 +712,7 @@ impl Vm {
             journal: None,
             async_native: 0,
             op_park: None,
+            call_seq: None,
         };
         vm.load_program();
         vm

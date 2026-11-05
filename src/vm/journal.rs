@@ -102,9 +102,15 @@ pub(crate) fn timer(d: Duration) -> Ctl {
 /// calling it. An effectful function is called only once the journal is
 /// durable.
 pub(crate) fn journaled_call(vm: &mut Vm, inner: &super::HostFn, name: &str, effectful: bool, args: &[Value]) -> NResult {
-    if !vm.journaling() {
-        return inner.call(vm, args);
-    }
+    let Some(seq) = vm.journal_state().map(|j| j.position()) else { return inner.call(vm, args) };
+    // A journaled call reads no other input before its own entry, so the
+    // entry it records or replays is the next one.
+    let inner = |vm: &mut Vm| {
+        let outer = vm.call_seq.replace(seq);
+        let r = inner.call(vm, args);
+        vm.call_seq = outer;
+        r
+    };
     let identity = call_identity(vm, name, args);
     let op = |work: OpWork, pre_fuel: u64, park: Park| {
         Ctl::journaled(JournalOp { kind: OpKind::Call, identity, label: name.to_string(), effectful, park, pre_fuel, work })
@@ -116,7 +122,7 @@ pub(crate) fn journaled_call(vm: &mut Vm, inner: &super::HostFn, name: &str, eff
             // it again, and deliver even a result it returns at once as the
             // completion of the recorded operation.
             let start = vm.call_start();
-            let r = inner.call(vm, args);
+            let r = inner(vm);
             if vm.retried(&r, start) {
                 return r;
             }
@@ -137,13 +143,13 @@ pub(crate) fn journaled_call(vm: &mut Vm, inner: &super::HostFn, name: &str, eff
         None => {}
     }
     if vm.replaying() {
-        return vm.journaled_result(identity, name, |vm| inner.call(vm, args));
+        return vm.journaled_result(identity, name, inner);
     }
     if effectful && vm.must_flush() {
         return Err(Ctl::from(CtlKind::Flush));
     }
     let start = vm.call_start();
-    let r = inner.call(vm, args);
+    let r = inner(vm);
     if matches!(&r, Err(c) if matches!(c.kind(), CtlKind::Async(_))) {
         let Err(c) = r else { unreachable!("matched above") };
         let CtlKind::Async(fut) = c.into_kind() else { unreachable!("matched above") };
@@ -205,6 +211,11 @@ pub(crate) struct JournalState {
 impl JournalState {
     pub fn replaying(&self) -> bool {
         self.pos < self.replay.len()
+    }
+
+    /// The sequence number of the entry that the run reads or records next.
+    pub fn position(&self) -> u64 {
+        if self.replaying() { self.pos as u64 } else { self.seq }
     }
 
     /// The divergence that a cancellation found, if any.

@@ -1034,3 +1034,59 @@ fn time_spent_in_flushes_does_not_count_against_the_wall_time_limit() {
     let r = rt().block_on(Engine::new(config).unwrap().run_source("main.sand", src));
     assert!(r.is_ok(), "{r:?}");
 }
+
+#[test]
+fn effects_have_the_same_journal_seq_in_every_execution() {
+    let seqs: Arc<Mutex<Vec<(String, Option<u64>)>>> = Arc::default();
+    let mut m = NativeModule::new("fx");
+    let s = seqs.clone();
+    m.vm_function("send", move |vm: &mut Vm, name: String| -> Result<Later<i64, HostError>, HostError> {
+        s.lock().unwrap().push((name.clone(), vm.journal_seq()));
+        if name == "parked" {
+            return Ok(Later::new(async move {
+                std::future::pending::<()>().await;
+                |_: &mut Vm| Ok::<_, HostError>(0)
+            })
+            .parked(None));
+        }
+        Ok(Later::ready(Ok(1)))
+    })
+    .effectful();
+    let filtered: Arc<Mutex<Vec<Option<u64>>>> = Arc::default();
+    let f = filtered.clone();
+    let net = FakeNet::new(false);
+    let base = Config::new()
+        .policy(RulePolicy::allow_all())
+        .clock(Arc::new(FrozenClock(Instant::now())))
+        .network(Arc::new(net))
+        .module(m)
+        .seed(1)
+        .suspend_after(Duration::ZERO)
+        .request_filter(move |t: &sandlang::RequestTarget, _: &mut Vec<(String, String)>| {
+            f.lock().unwrap().push(t.journal_seq);
+            Ok(())
+        });
+    let src = "import fx\nimport http\nprint(fx.send(\"a\")?)\nprint(http.get(\"http://svc.test/x\")?.status)\nprint(fx.send(\"parked\")?)";
+    let journal = MemoryJournal::new();
+    let run = || {
+        let config = base.clone().stdout(MemorySink::new()).journal(Arc::new(journal.clone()));
+        rt().block_on(Engine::new(config).unwrap().run_source("main.sand", src))
+    };
+    let r = run();
+    assert!(matches!(r, Err(Error::Suspended { wake_at: None })), "{r:?}");
+    let first = seqs.lock().unwrap().clone();
+    assert_eq!(first.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["a", "parked"]);
+    let entries = journal.entries();
+    for (_, seq) in &first {
+        let seq = seq.expect("a journaled call has a journal_seq") as usize;
+        assert!(matches!(entries[seq].kind, EntryKind::Result | EntryKind::Start), "{:?}", entries[seq]);
+    }
+    let requests = filtered.lock().unwrap().clone();
+    let http = operations(&entries).unwrap().into_iter().find(|o| o.start.kind == OpKind::Http).unwrap();
+    assert_eq!(requests, [Some(http.seq)]);
+    // The resumed run replays the first call and the request, and calls the parked function
+    // again: it gets the same number, and so does the filter.
+    let _ = run();
+    assert_eq!(seqs.lock().unwrap()[2..], first[1..]);
+    assert_eq!(filtered.lock().unwrap()[1..], requests[..]);
+}

@@ -319,6 +319,11 @@ pub struct RequestTarget {
     /// The lowercased host name or an IP address.
     pub host: String,
     pub port: u16,
+    /// In a journaled run, the sequence number of the journal entry that
+    /// records the start of the request. It is the same in every execution
+    /// of the run, so a filter can derive an idempotency key from it
+    /// (SPEC §16.7).
+    pub journal_seq: Option<u64>,
 }
 
 /// Rewrites outgoing HTTP request headers or rejects the request with a reason.

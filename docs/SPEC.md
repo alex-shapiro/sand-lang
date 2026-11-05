@@ -2458,6 +2458,15 @@ deadline, and otherwise a parked future. A Sand wrapper `wait(name, timeout)`
 calls it with `time.now().add(timeout)`, which the journal records, so the
 deadline is the same in each execution.
 
+**Identities of effects.** Effects occur at least once, so a host that
+deduplicates them needs an identity for each effect that is the same in every
+execution. In a call of a journaled or effectful host function,
+`Vm::journal_seq` gives the sequence number of the journal entry that records
+the call; a resumed run that calls the function again gets the same number.
+The request filter gets the sequence number of the `Start` entry of a
+journaled HTTP request in `RequestTarget::journal_seq`, in record and in
+replay alike.
+
 **Restrictions.** A journaled run:
 
 - never prompts for permissions (§14.3) and ignores "always" answers of
