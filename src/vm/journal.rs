@@ -279,9 +279,6 @@ pub(crate) fn sleep(vm: &mut Vm, d: Duration) -> Ctl {
 /// calling it. An effectful function is called only once the journal is
 /// durable.
 pub(crate) fn journaled_call(vm: &mut Vm, inner: &super::HostFn, name: &Arc<str>, effectful: bool, args: &[Value]) -> NResult {
-    if !vm.journaling() {
-        return inner.call(vm, args);
-    }
     // A journaled call reads no other input before its own entry, so the
     // entry it records or replays is the next one.
     let seq = vm.journal_state().map(|j| j.position());
