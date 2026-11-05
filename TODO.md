@@ -68,6 +68,15 @@ The host cannot rely on engine limits, stability, or control.
 
 Common scripts fail, require workarounds, or produce misleading diagnostics.
 
+- [ ] ❓ _Stdlib._ Let `http.post` and `http.request` take a `str` body as well as `bytes`.
+      Most callers send text and must write `.bytes()` (found by Sahara).
+- [ ] ❓ _Language._ Let an argument of type `T` pass to a parameter of type `T?`. Hosts that
+      want an optional `duration` parameter must use a sentinel or make it required (found by
+      Sahara's `wait_signal`).
+- [ ] ❓ _Embedding._ `json.decode` called in one module cannot build a struct of another
+      module that has private fields. Hosts that decode input for a script's entry point need
+      the script's input types to have public fields (found by Sahara).
+
 - [ ] 🔴 [058](triage/058-enum-variant-inference/summary.md) _Language._ Infer the enum type of a variant expression from the expected type, as
       pattern matching does.
 - [ ] 🔴 [064](triage/064-default-params-fn-values/summary.md) _Language._ Preserve default parameter values in function types so that calls through
@@ -220,6 +229,10 @@ Visible defects that rarely block users.
       WebAssembly binary size and execution speed.
 
 ### Embedding
+
+- [ ] ❓ Add an API that runs an already compiled program in a new engine, so hosts that run
+      the same program many times compile it once (found by Sahara).
+- [ ] ❓ `Session::type_of` prints `Result<T, Error>` instead of the `Result<T>` alias.
 
 - [ ] ⚪ Pass `Num<N>` evidence to native `impl` methods by extracting the `Num`
       dictionary from the `impl` dictionary.
