@@ -960,6 +960,11 @@ pub struct PackedType {
 }
 
 impl PackedType {
+    /// The name of the Sand type.
+    pub(crate) fn name(&self) -> &'static str {
+        self.name
+    }
+
     pub(crate) fn is_same_type(&self, other: &PackedType) -> bool {
         std::ptr::eq(self, other) || (self.type_id)() == (other.type_id)()
     }

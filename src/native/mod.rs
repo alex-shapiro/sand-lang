@@ -901,13 +901,20 @@ impl NativeModule {
     /// Makes the most recently registered function journaled (SPEC §16.7):
     /// in a run with a journal, the engine records the function's result,
     /// and replay returns the recorded result without calling the function.
-    /// The result must be plain data: no functions, tasks, channels, or
-    /// values of bound object or value types.
+    /// A function that is not journaled is local: replay calls it again, so
+    /// it must give the same result in every execution.
+    ///
+    /// The journal encodes the arguments, which identify the call, and the
+    /// result. Both must be plain data: no functions, tasks, channels,
+    /// generic parameters, or values of bound object types. Values of bound
+    /// value types, such as `time.Instant`, can be arguments but not results.
     ///
     /// # Panics
     ///
     /// Panics if this module has not registered any function yet, or if the
-    /// function is journaled already.
+    /// function is journaled already. [`Engine::new`](crate::Engine::new)
+    /// panics if a journaled function takes or returns a value that the
+    /// journal cannot encode.
     pub fn journaled(&mut self) -> &mut Self {
         self.make_journaled(false, "journaled")
     }
@@ -923,6 +930,27 @@ impl NativeModule {
     /// Panics under the same conditions as [`NativeModule::journaled`].
     pub fn effectful(&mut self) -> &mut Self {
         self.make_journaled(true, "effectful")
+    }
+
+    /// Panics if a journaled function of this module takes or returns a
+    /// value that the journal cannot encode. `types` are the bound types of
+    /// all modules of the engine.
+    pub(crate) fn check_journaled(&self, types: &[BoundType]) {
+        for f in self.functions.iter().filter(|f| f.journaled) {
+            let key = format!("{}.{}", self.name, f.name);
+            for (i, p) in f.sig.params.iter().enumerate() {
+                if let Err(t) = journal_type(p, types, true) {
+                    panic!(
+                        "journaled function `{key}` takes a value of type `{}` as parameter {}, which the journal cannot encode",
+                        t.render(&self.name),
+                        i + 1
+                    );
+                }
+            }
+            if let Err(t) = journal_type(&f.sig.ret, types, false) {
+                panic!("journaled function `{key}` returns a value of type `{}`, which the journal cannot encode", t.render(&self.name));
+            }
+        }
     }
 
     fn make_journaled(&mut self, effectful: bool, method: &str) -> &mut Self {
@@ -1021,5 +1049,25 @@ impl NativeModule {
             r.add_native(format!("{}.{}", self.name, f.name), f.f.clone(), f.sig.clone(), f.names.clone(), f.doc.clone());
         }
         r.source(self.name.clone(), self.kind, self.source.clone());
+    }
+}
+
+/// Checks that the journal can encode values of type `t`: plain data, and
+/// for a parameter (`param`) also values of bound value types, which take
+/// part in a call's identity through their text. Returns the first type
+/// that it cannot encode.
+fn journal_type<'t>(t: &'t Type, types: &[BoundType], param: bool) -> Result<(), &'t Type> {
+    let all = |ts: &'t [Type]| ts.iter().try_for_each(|t| journal_type(t, types, param));
+    match t {
+        Type::Int | Type::Float | Type::Bool | Type::Str | Type::Bytes | Type::Duration | Type::Unit | Type::Never | Type::Range => Ok(()),
+        Type::List(x) | Type::Set(x) => journal_type(x, types, param),
+        Type::Map(k, v) => journal_type(k, types, param).and_then(|()| journal_type(v, types, param)),
+        Type::Tuple(ts) => all(ts),
+        Type::Named(n) => match types.iter().find(|b| b.module == n.module && b.name == n.name).map(|b| &b.kind) {
+            Some(BoundKind::Object(_) | BoundKind::Builtin(_)) => Err(t),
+            Some(BoundKind::Value(_)) if !param => Err(t),
+            _ => all(&n.args),
+        },
+        Type::Fn(..) | Type::Param(..) | Type::Reflect(_) | Type::Num(_) => Err(t),
     }
 }

@@ -1,7 +1,7 @@
 //! The task scheduler: runs fibers round-robin and drives pending I/O.
 
 use super::interp::Exit;
-use super::journal::{Identity, JournalOp, JournalStop, OpKind, OpWork, Suspension};
+use super::journal::{JournalOp, JournalStop, Suspension};
 use super::*;
 use crate::LimitKind;
 use crate::native::Park;
@@ -384,26 +384,12 @@ impl Vm {
         Ok(())
     }
 
-    /// Handles an operation that a native suspended a task on in a
-    /// journaled run: a host call becomes a journaled operation; a standard
-    /// library operation is local (its outcome follows from the journaled
-    /// inputs, as a read of a received HTTP body does) and completes before
-    /// anything else runs, so that the schedule does not depend on when.
-    async fn start_async(
-        &mut self,
-        fid: u32,
-        mut f: Box<Fiber>,
-        fut: BoxFuture,
-        park: Park,
-        native: u32,
-        timer: &RunTimer,
-    ) -> Result<(), Trap> {
-        if let Some(entry) = self.natives.get(native as usize).filter(|e| matches!(e.f, HostFn::Shared(_))) {
-            let label = entry.name.to_string();
-            let identity = Identity::default().add(label.as_bytes()).finish();
-            let op = JournalOp { kind: OpKind::Call, identity, label, effectful: true, park, pre_fuel: 0, work: OpWork::Value(fut) };
-            return self.start_op(fid, f, op, timer).await;
-        }
+    /// Handles an operation that a native that is not journaled suspended
+    /// a task on in a journaled run. The operation is local: its outcome
+    /// follows from the journaled inputs, as a read of a received HTTP body
+    /// does, and replay runs it again. It completes before anything else
+    /// runs, so that the schedule does not depend on when.
+    async fn start_async(&mut self, fid: u32, mut f: Box<Fiber>, fut: BoxFuture, timer: &RunTimer) -> Result<(), Trap> {
         let g = self.next_gen();
         f.wgen = g;
         f.state = FiberState::Waiting;
@@ -594,12 +580,10 @@ impl Vm {
                         f.state = FiberState::Waiting;
                         self.fibers[fid as usize] = Some(f);
                     }
-                    Exit::Async { fut, park, native } if self.journal.is_some() => {
-                        self.start_async(fid, f, fut, park, native, &timer).await?
-                    }
+                    Exit::Async(fut) if self.journal.is_some() => self.start_async(fid, f, fut, &timer).await?,
                     Exit::Journaled(op) => self.start_op(fid, f, *op, &timer).await?,
                     Exit::Flush => return Err(Trap::Internal { message: "a journal flush outside a call".into(), trace: vec![] }),
-                    Exit::Async { fut, .. } => {
+                    Exit::Async(fut) => {
                         let g = self.next_gen();
                         f.wgen = g;
                         f.state = FiberState::Waiting;

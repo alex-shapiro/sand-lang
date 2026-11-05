@@ -59,12 +59,7 @@ pub enum Exit {
     Preempt,
     /// Waiting on a scheduler event (already registered).
     Blocked,
-    /// The fiber waits for the future of native `native`.
-    Async {
-        fut: BoxFuture,
-        park: crate::native::Park,
-        native: u32,
-    },
+    Async(BoxFuture),
     /// A journaled asynchronous operation.
     Journaled(Box<super::journal::JournalOp>),
     /// The journal must be flushed before the call (retried) has an effect.
@@ -1761,9 +1756,10 @@ impl Vm {
                 fiber.frames.last_mut().unwrap().ip = (ip - 1) as u32;
                 Ok(Some(Exit::Prompt(cap)))
             }
-            CtlKind::Async(fut, park) => {
+            // Only journaled calls can park.
+            CtlKind::Async(fut, _) => {
                 fiber.result_slot = slot;
-                Ok(Some(Exit::Async { fut, park, native: n }))
+                Ok(Some(Exit::Async(fut)))
             }
             CtlKind::Journaled(op) => {
                 fiber.result_slot = slot;

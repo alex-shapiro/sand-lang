@@ -135,7 +135,8 @@ impl<T, E> Later<T, E> {
     /// (SPEC §16.7): if every task waits, and no operation is due within
     /// the configured threshold, the run ends with
     /// [`Error::Suspended`](crate::Error::Suspended). The resumed run calls
-    /// the function again. Without a journal, the future runs as usual.
+    /// the function again. Only the futures of journaled functions park;
+    /// without a journal, the future runs as usual.
     pub fn parked(mut self, park: Park) -> Self {
         self.1 = park;
         self

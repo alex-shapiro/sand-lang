@@ -129,7 +129,7 @@ pub(crate) fn journaled_call(vm: &mut Vm, inner: &super::HostFn, name: &str, eff
         vm.call_seq = outer;
         r
     };
-    let identity = call_identity(vm, name, args);
+    let identity = call_identity(vm, name, args)?;
     let op = |work: OpWork, pre_fuel: u64, park: Park| {
         Ctl::journaled(JournalOp { kind: OpKind::Call, identity, label: name.to_string(), effectful, park, pre_fuel, work })
     };
@@ -460,6 +460,8 @@ mod tag {
     pub const STRUCT: u8 = 11;
     pub const VARIANT: u8 = 12;
     pub const RANGE: u8 = 13;
+    /// A value of a bound value type, in a call identity only.
+    pub const VALUE: u8 = 14;
 }
 
 fn struct_name(prog: &Program, id: u32) -> Option<String> {
@@ -477,11 +479,22 @@ fn variant_name(prog: &Program, id: u32) -> Option<String> {
 /// opaque objects), in at most `max` bytes.
 pub(crate) fn encode_value(vm: &Vm, v: Value, max: usize) -> Result<Vec<u8>, String> {
     let mut w = Writer::default();
-    encode_into(vm, v, &mut w, 0, max)?;
+    encode_into(vm, v, &mut w, 0, Encoding { max, values: false })?;
     Ok(w.0)
 }
 
-fn encode_into(vm: &Vm, v: Value, w: &mut Writer, depth: usize, max: usize) -> Result<(), String> {
+/// How [`encode_into`] encodes.
+#[derive(Clone, Copy)]
+struct Encoding {
+    /// The most bytes.
+    max: usize,
+    /// Whether values of bound value types are encoded as their type and
+    /// text, which identifies them but does not decode.
+    values: bool,
+}
+
+fn encode_into(vm: &Vm, v: Value, w: &mut Writer, depth: usize, enc: Encoding) -> Result<(), String> {
+    let max = enc.max;
     if depth > MAX_DEPTH {
         return Err(format!("it nests deeper than {MAX_DEPTH} levels"));
     }
@@ -490,7 +503,7 @@ fn encode_into(vm: &Vm, v: Value, w: &mut Writer, depth: usize, max: usize) -> R
     }
     let variant = |w: &mut Writer, id: u32, fields: &[Value]| -> Result<(), String> {
         w.u8(tag::VARIANT).u64(u64::from(id)).str(&variant_name(&vm.prog, id).unwrap_or_default()).u64(fields.len() as u64);
-        fields.iter().try_for_each(|&f| encode_into(vm, f, w, depth + 1, max))
+        fields.iter().try_for_each(|&f| encode_into(vm, f, w, depth + 1, enc))
     };
     match v {
         Value::Unit => {
@@ -523,37 +536,45 @@ fn encode_into(vm: &Vm, v: Value, w: &mut Writer, depth: usize, max: usize) -> R
             Obj::List(items) => {
                 w.u8(tag::LIST).u64(items.len() as u64);
                 for &x in items {
-                    encode_into(vm, x, w, depth + 1, max)?;
+                    encode_into(vm, x, w, depth + 1, enc)?;
                 }
             }
             Obj::Tuple(items) => {
                 w.u8(tag::TUPLE).u64(items.len() as u64);
                 for &x in items.iter() {
-                    encode_into(vm, x, w, depth + 1, max)?;
+                    encode_into(vm, x, w, depth + 1, enc)?;
                 }
             }
             Obj::Map(m) => {
                 w.u8(tag::MAP).u64(m.live as u64);
                 for &(k, x) in m.entries.iter().flatten() {
-                    encode_into(vm, k, w, depth + 1, max)?;
-                    encode_into(vm, x, w, depth + 1, max)?;
+                    encode_into(vm, k, w, depth + 1, enc)?;
+                    encode_into(vm, x, w, depth + 1, enc)?;
                 }
             }
             Obj::Set(s) => {
                 w.u8(tag::SET).u64(s.live as u64);
                 for &k in s.entries.iter().flatten() {
-                    encode_into(vm, k, w, depth + 1, max)?;
+                    encode_into(vm, k, w, depth + 1, enc)?;
                 }
             }
             Obj::Struct(id, fields) => {
                 w.u8(tag::STRUCT).u64(u64::from(*id)).str(&struct_name(&vm.prog, *id).unwrap_or_default()).u64(fields.len() as u64);
                 for &x in fields.iter() {
-                    encode_into(vm, x, w, depth + 1, max)?;
+                    encode_into(vm, x, w, depth + 1, enc)?;
                 }
             }
             Obj::Variant(id, fields) => variant(w, *id, fields)?,
             Obj::Range(a, b, inclusive) => {
                 w.u8(tag::RANGE).i64(*a).i64(*b).u8(u8::from(*inclusive));
+            }
+            Obj::Value(x) if enc.values => {
+                let mut text = String::new();
+                x.write_text(&mut text);
+                w.u8(tag::VALUE).str(x.type_name()).str(&text);
+            }
+            Obj::Packed(t, bits) if enc.values => {
+                w.u8(tag::VALUE).str(t.name()).u64(bits[0]).u64(bits[1]);
             }
             other => return Err(format!("it holds a value of kind {}", other.kind_name())),
         },
@@ -689,21 +710,19 @@ fn max_value_bytes(vm: &Vm) -> usize {
     vm.host.limits.max_memory.unwrap_or(1 << 30)
 }
 
-/// The identity of a call of native `name` with `args`: their encoding
-/// where they have one, and otherwise their debug form, so that a value of
-/// a bound value type such as `time.Instant` still takes part.
-pub(crate) fn call_identity(vm: &Vm, name: &str, args: &[Value]) -> u64 {
+/// The identity of a call of native `name` with `args`: their encoding.
+/// Registration checks that the journal can encode the types of the
+/// arguments; a call fails if an argument holds a value that it cannot
+/// encode all the same, such as a function in a field of a struct.
+pub(crate) fn call_identity(vm: &Vm, name: &str, args: &[Value]) -> Result<u64, Ctl> {
     let mut id = Identity::default().add(name.as_bytes());
     for &a in args {
-        id = match encode_value(vm, a, 1 << 20) {
-            Ok(bytes) => id.add(&bytes),
-            Err(_) => match crate::vm::display::to_debug_metered(&vm.prog, &vm.heap, &crate::vm::meter::Unmetered, a) {
-                Ok(text) => id.add(b"?").add(text.as_bytes()),
-                Err(_) => id.add(b"?"),
-            },
-        };
+        let mut w = Writer::default();
+        encode_into(vm, a, &mut w, 0, Encoding { max: 1 << 20, values: true })
+            .map_err(|why| Ctl::fail("unsupported", format!("cannot journal the arguments of `{name}`: {why}")))?;
+        id = id.add(&w.0);
     }
-    id.finish()
+    Ok(id.finish())
 }
 
 /// Records a call's outcome `r` as the payload of an entry: a status byte,

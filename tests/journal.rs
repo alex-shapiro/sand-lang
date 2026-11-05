@@ -1122,3 +1122,60 @@ fn a_journaled_call_that_runs_again_after_a_collection_replays_its_fuel() {
     assert_eq!((again, replayed_fuel), (out, fuel), "replay charges the fuel of both attempts");
     assert_eq!(calls.load(Ordering::SeqCst), 6);
 }
+
+/// A handle that the journal cannot encode.
+#[derive(sandlang::SandObject)]
+#[sand(module = "handles")]
+struct Handle(u32);
+
+impl sandlang::native::NativeObject for Handle {}
+
+#[test]
+fn journaled_functions_must_take_and_return_plain_data() {
+    let engine_panic = |m: NativeModule| {
+        let config = Config::new().module(m);
+        let e = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Engine::new(config))).err().expect("Engine::new panics");
+        e.downcast_ref::<String>().cloned().unwrap_or_default()
+    };
+    let mut m = NativeModule::new("handles");
+    m.bind::<Handle>();
+    m.function("open", || Handle(1));
+    m.function("read", |h: &Handle| i64::from(h.0)).journaled();
+    let msg = engine_panic(m);
+    assert!(msg.contains("`handles.read` takes a value of type `Handle` as parameter 1"), "{msg}");
+    let mut m = NativeModule::new("clock");
+    m.function("now", || sandlang::jiff::Timestamp::UNIX_EPOCH).journaled();
+    let msg = engine_panic(m);
+    assert!(msg.contains("`clock.now` returns a value of type `time.Instant`"), "{msg}");
+    // Plain data and bound value types as arguments are fine.
+    let mut m = NativeModule::new("fine");
+    m.function("seconds", |t: sandlang::jiff::Timestamp, tags: Vec<String>| -> (i64, Vec<String>) { (t.as_second(), tags) }).journaled();
+    assert!(Engine::new(Config::new().module(m)).is_ok());
+}
+
+#[test]
+fn an_asynchronous_host_function_that_is_not_journaled_runs_again_in_replay() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut m = NativeModule::new("local");
+    let c = calls.clone();
+    m.async_function("double", move |n: i64| {
+        c.fetch_add(1, Ordering::SeqCst);
+        async move { Ok::<_, String>(n * 2) }
+    });
+    let base = Config::new().policy(RulePolicy::allow_all()).module(m).seed(1);
+    let run = |journal: &MemoryJournal| {
+        let out = MemorySink::new();
+        let config = base.clone().stdout(out.clone()).journal(Arc::new(journal.clone()));
+        let r = rt().block_on(Engine::new(config).unwrap().run_source("main.sand", "import local\nprint(local.double(21)?)"));
+        (r, out.contents())
+    };
+    let journal = MemoryJournal::new();
+    let (r, out) = run(&journal);
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!(out, "42\n");
+    assert!(journal.entries().is_empty(), "{:?}", journal.entries());
+    let (r, again) = run(&MemoryJournal::with_entries(journal.entries()));
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!(again, out);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}

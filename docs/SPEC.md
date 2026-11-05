@@ -2443,14 +2443,18 @@ again.
 **Host functions.** `NativeModule::journaled` makes the most recently
 registered function journaled. The engine records its result, and replay
 returns the recorded result without a call. The identity of a call is the
-function's name and its arguments: their journal encoding, or for a value
-without one, such as a `time.Instant`, its debug form. `NativeModule::effectful` also
-journals the function, and the engine calls it only when the journal is
-durable. The result of a journaled function must be plain data: no functions,
-tasks, channels, or values of bound object or value types. An asynchronous
-host function that is not journaled is still recorded as an operation, but
-replay calls it and drops its future without a poll; such a function must not
-have effects outside its future. `Later::parked(park)` lets the engine
+function's name and the journal encoding of its arguments; a value of a bound
+value type, such as a `time.Instant`, takes part through its type and text.
+`NativeModule::effectful` also journals the function, and the engine calls it
+only when the journal is durable. The arguments and the result of a journaled
+function must be plain data: no functions, tasks, channels, generic
+parameters, or values of bound object types, and no values of bound value
+types in the result. `Engine::new` panics if the signature of a journaled
+function does not meet this rule. A host function that is not journaled is
+local: replay calls it again, so it must give the same result in each
+execution and have no effects outside the run. In a journaled run, the engine
+waits for the future of a local asynchronous function before it runs other
+tasks, so that the schedule does not depend on when the future completes. `Later::parked(park)` lets the engine
 suspend a run while the future of a call waits: with `Park::Until(t)` until
 time `t`, and with `Park::UntilResumed` until the host resumes the run. When
 the run resumes, the engine calls the function again. For example, a host function `wait_until(name,
