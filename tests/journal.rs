@@ -964,3 +964,73 @@ fn a_changed_instant_argument_of_a_journaled_call_diverges() {
     let r = run(&src(2), &MemoryJournal::with_entries(journal.entries()));
     assert!(matches!(&r, Err(Error::Diverged { message, .. }) if message.contains("with other arguments")), "{r:?}");
 }
+
+#[test]
+fn wall_time_does_not_go_back_on_a_host_whose_clock_is_behind() {
+    let src = r#"
+import time
+import host
+let a = time.now()
+task.sleep(10s)
+host.tick()
+let b = time.now()
+host.wait_signal("go")
+let c = time.now()
+print("\(b.since(a) >= 10s) \(c.since(b) >= 0s)")
+"#;
+    let journal = MemoryJournal::new();
+    let run = |clock: Arc<ManualClock>, log: Arc<HostLog>| {
+        let mut m = host_module(log);
+        let c = clock.clone();
+        m.function("tick", move || c.advance(Duration::from_secs(50))).journaled();
+        let out = MemorySink::new();
+        let config = Config::new()
+            .policy(RulePolicy::allow_all())
+            .clock(clock.clone())
+            .module(m)
+            .seed(1)
+            .suspend_after(Duration::ZERO)
+            .stdout(out.clone())
+            .journal(Arc::new(journal.clone()));
+        let r = rt().block_on(Engine::new(config).unwrap().run_source("main.sand", src));
+        (r, out.contents())
+    };
+    let log = Arc::new(HostLog::default());
+    let first = ManualClock::new();
+    let (r, _) = run(first.clone(), log.clone());
+    let wake = UNIX_EPOCH + Duration::from_secs(BASE_SECS + 10);
+    assert!(matches!(r, Err(Error::Suspended { wake_at: Some(t) }) if t == wake), "{r:?}");
+    // The next host's clock is a minute behind the first one's.
+    first.advance(Duration::from_secs(10));
+    let (r, _) = run(first, log.clone());
+    assert!(matches!(r, Err(Error::Suspended { wake_at: None })), "{r:?}");
+    log.signals.lock().unwrap().insert("go".into(), "now".into());
+    let (r, out) = run(ManualClock::new(), log);
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!(out, "true true\n");
+}
+
+#[test]
+fn time_spent_in_flushes_does_not_count_against_the_wall_time_limit() {
+    struct Slow(MemoryJournal, Arc<ManualClock>);
+    impl Journal for Slow {
+        fn replay(&self) -> Vec<Entry> {
+            self.0.replay()
+        }
+        fn record(&self, entry: Entry) {
+            self.0.record(entry)
+        }
+        fn flush(&self) -> sandlang::journal::FlushFuture {
+            self.1.advance(Duration::from_secs(2));
+            self.0.flush()
+        }
+    }
+    let clock = ManualClock::new();
+    let world = World::new(clock.clone(), false, Some(1));
+    let limits = sandlang::Limits { max_wall_time: Some(Duration::from_secs(1)), ..sandlang::Limits::default() };
+    let journal = Slow(MemoryJournal::new(), clock);
+    let config = world.base.clone().limits(limits).stdout(MemorySink::new()).journal(Arc::new(journal));
+    let src = "import http\nfor i in 0..3 {\n    print(http.get(\"http://svc.test/\\(i)\")?.status)\n}";
+    let r = rt().block_on(Engine::new(config).unwrap().run_source("main.sand", src));
+    assert!(r.is_ok(), "{r:?}");
+}

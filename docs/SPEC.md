@@ -2412,8 +2412,20 @@ with `Error::Diverged { seq, message }`. `seq` is the sequence number of the
 entry, and `message` describes what the run does and what the journal records.
 Replay does not send HTTP requests, read input, or call journaled host
 functions. When replay has used the last entry, the run continues live and
-records new entries after it. A live monotonic clock reading after replay is
-never earlier than the last replayed one.
+records new entries after it.
+
+**Time across executions.** Each execution reads the clock of its own host,
+and the clocks of two hosts can differ. A live monotonic clock reading after
+replay is never earlier than the last replayed one. The wall clock of a
+journaled run never goes back: it is the host's wall clock or, if that is
+earlier, the latest time that the run has seen, which is its latest
+wall-clock reading or the wake time of its latest completed timer. The engine
+uses this time for `time.now()` and UUIDv7 timestamps, for the wake times of
+new timers, and to decide when to suspend the run. Thus a completed
+`task.sleep(d)` is at least `d` in the past also on a host whose clock is
+behind, and a resumed run records the same times as a run that did not stop.
+The time that the engine waits for `Journal::flush` does not count against
+`max_wall_time`, so a slow journal does not use up the run's time limit.
 
 **Suspension.** With `Config::suspend_after(threshold)`, the engine suspends a
 journaled run that would wait for a long time. The engine suspends the run when

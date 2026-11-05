@@ -156,7 +156,8 @@ pub(crate) fn journaled_call(vm: &mut Vm, inner: &super::HostFn, name: &str, eff
 
 /// How replay builds the result of an operation from its `Done` entry.
 pub(crate) enum ReplayBuild {
-    Unit,
+    /// A timer that expires at the time, if the journal records one.
+    Timer(Option<SystemTime>),
     Bytes(BuildFn),
     Value,
 }
@@ -187,6 +188,9 @@ pub(crate) struct JournalState {
     /// What live monotonic readings add to keep time moving forward from
     /// the replayed ones (set at the first live reading).
     mono_skew: Option<Duration>,
+    /// The latest wall-clock time that the run has seen: its latest
+    /// reading, or the wake time of its latest completed timer.
+    wall_floor: SystemTime,
     pub suspend_after: Option<Duration>,
     /// The budget of the buffers of live operations, apart from the heap's,
     /// so that the heap's memory checks are the same in replay.
@@ -255,6 +259,7 @@ impl JournalState {
 }
 
 /// Creates the journal state of a run that replays `sink`'s entries.
+/// `origin` is the monotonic clock reading when the run starts.
 pub(crate) fn start(
     sink: Arc<dyn Journal>,
     origin: Instant,
@@ -290,11 +295,25 @@ pub(crate) fn start(
         origin,
         mono_last: Duration::ZERO,
         mono_skew: None,
+        wall_floor: crate::platform::UNIX_EPOCH,
         suspend_after,
         live_memory: IoMemory::new(limits.max_memory, limits.max_open_resources),
         call_start: None,
         pending: None,
     })
+}
+
+impl JournalState {
+    /// The live wall-clock time of the run: `clock`'s time, or the latest
+    /// time that the run has seen if the clock is behind it.
+    pub fn wall(&self, clock: &dyn crate::platform::Clock) -> SystemTime {
+        clock.wall().max(self.wall_floor)
+    }
+
+    /// Notes that the run has seen wall-clock time `t`.
+    fn saw_wall(&mut self, t: SystemTime) {
+        self.wall_floor = self.wall_floor.max(t);
+    }
 }
 
 // ----------------------------------------------------------------------
@@ -744,9 +763,11 @@ impl Vm {
         let Some(j) = &self.journal else { return Ok(self.host.clock.wall()) };
         let mut j = j.borrow_mut();
         if let Some(EntryData::Wall(t)) = j.take(EntryKind::Wall, &|| "the wall clock".into()).map_err(stop)? {
+            j.saw_wall(t);
             return Ok(t);
         }
-        let t = self.host.clock.wall();
+        let t = j.wall(&*self.host.clock);
+        j.saw_wall(t);
         j.record(EntryData::Wall(t));
         Ok(t)
     }
@@ -955,7 +976,7 @@ impl Vm {
             }
             _ => {
                 let wake = match op.work {
-                    OpWork::Timer(d) => Some(self.host.clock.wall() + d),
+                    OpWork::Timer(d) => Some(j.wall(&*self.host.clock) + d),
                     _ => None,
                 };
                 j.record(EntryData::Start(OpStart {
@@ -975,7 +996,7 @@ impl Vm {
         let in_replay = replayed.is_some();
         if in_replay && j.done.contains_key(&id) {
             let build = match op.work {
-                OpWork::Timer(_) => ReplayBuild::Unit,
+                OpWork::Timer(_) => ReplayBuild::Timer(wake),
                 OpWork::Bytes { build, .. } => ReplayBuild::Bytes(build),
                 OpWork::Value(_) | OpWork::Replayed => ReplayBuild::Value,
             };
@@ -990,13 +1011,16 @@ impl Vm {
         let fut: BoxFuture = match op.work {
             OpWork::Timer(d) => {
                 let sleep = match (in_replay, wake) {
-                    (true, Some(t)) => self.host.clock.sleep(t.duration_since(self.host.clock.wall()).unwrap_or_default()),
+                    (true, Some(t)) => self.host.clock.sleep(t.duration_since(j.wall(&*self.host.clock)).unwrap_or_default()),
                     _ => self.host.clock.sleep(d),
                 };
                 Box::pin(async move {
                     sleep.await;
                     Box::new(move |vm: &mut Vm| {
                         vm.record_done(id, 0, &[]);
+                        if let (Some(t), Some(mut j)) = (wake, vm.journal_state()) {
+                            j.saw_wall(t);
+                        }
                         Ok(Value::Unit)
                     }) as Finisher
                 })
@@ -1053,7 +1077,12 @@ impl Vm {
         };
         j.pos += 1;
         let fin: Finisher = match build {
-            ReplayBuild::Unit => Box::new(|_: &mut Vm| Ok(Value::Unit)),
+            ReplayBuild::Timer(wake) => Box::new(move |vm: &mut Vm| {
+                if let (Some(t), Some(mut j)) = (wake, vm.journal_state()) {
+                    j.saw_wall(t);
+                }
+                Ok(Value::Unit)
+            }),
             ReplayBuild::Bytes(build) => Box::new(move |vm: &mut Vm| build(vm, &payload)),
             ReplayBuild::Value => Box::new(move |vm: &mut Vm| {
                 let v = payload_outcome(vm, &payload);

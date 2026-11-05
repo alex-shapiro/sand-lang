@@ -325,8 +325,10 @@ impl Vm {
         }
     }
 
-    /// Waits for the journal to make its entries durable.
+    /// Waits for the journal to make its entries durable. The wait does not
+    /// count against the wall-time limit.
     pub(crate) async fn flush_journal(&mut self) -> Result<(), Trap> {
+        let started = self.host.clock.now();
         let Some(mut fut) = self.journal_state().and_then(|mut j| j.flush()) else { return Ok(()) };
         let (interrupt, shared) = (self.host.interrupt.clone(), self.io.shared.clone());
         let r = std::future::poll_fn(|cx| {
@@ -337,6 +339,9 @@ impl Vm {
             fut.as_mut().poll(cx).map(Some)
         })
         .await;
+        if let Some(d) = &mut self.deadline {
+            *d += self.host.clock.now().saturating_duration_since(started);
+        }
         match r {
             None => Err(Trap::Interrupted),
             Some(Err(message)) => Err(Trap::Journal(JournalStop::Failed(message))),
@@ -438,7 +443,7 @@ impl Vm {
         }
         let until = self.io.parked_until()?;
         match until {
-            Some(t) if t.duration_since(self.host.clock.wall()).unwrap_or_default() <= after => None,
+            Some(t) if t.duration_since(j.wall(&*self.host.clock)).unwrap_or_default() <= after => None,
             _ => Some(until),
         }
     }
