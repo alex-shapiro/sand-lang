@@ -149,7 +149,7 @@ pub(crate) fn task() -> NativeModule {
     m.vm_function("sleep", |vm: &mut Vm, d: SignedDuration| {
         let d = nanos(d).max(0) as u64;
         if vm.journaling() {
-            return Err(crate::vm::journal::timer(std::time::Duration::from_nanos(d)));
+            return Err(crate::vm::journal::sleep(vm, std::time::Duration::from_nanos(d)));
         }
         let sleep = vm.host.clock.sleep(std::time::Duration::from_nanos(d));
         Ok::<_, Ctl>(Later::new(async move {

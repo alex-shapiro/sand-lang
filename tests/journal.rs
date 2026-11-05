@@ -1257,3 +1257,64 @@ fn a_flush_error_reaches_the_host_with_its_type() {
         other => panic!("expected a journal error, got {other:?}"),
     }
 }
+
+/// A host module whose `wait_gate` waits, in a local operation, until
+/// another task calls `open_gate`.
+fn gate_module() -> NativeModule {
+    let (tx, _) = tokio::sync::watch::channel(false);
+    let tx = Arc::new(tx);
+    let mut m = NativeModule::new("gate");
+    let t = tx.clone();
+    m.async_function("wait_gate", move || {
+        let mut rx = t.subscribe();
+        async move {
+            let _ = rx.wait_for(|open| *open).await;
+            Ok::<_, String>(7i64)
+        }
+    });
+    m.function("open_gate", move || {
+        tx.send_replace(true);
+    });
+    m
+}
+
+#[test]
+fn local_operations_wait_without_blocking_other_tasks() {
+    let src = r#"
+import gate
+let waiter = spawn {
+    let n = gate.wait_gate().unwrap_or(0)
+    print("opened \(n)")
+    n
+}
+task.yield_now()
+print("opening")
+gate.open_gate()
+print(waiter.wait())
+"#;
+    let run = |journal: Option<&MemoryJournal>| {
+        let out = MemorySink::new();
+        let mut config = Config::new().policy(RulePolicy::allow_all()).module(gate_module()).seed(1).stdout(out.clone());
+        if let Some(j) = journal {
+            config = config.durable(Durable::new(Arc::new(j.clone())));
+        }
+        let mut engine = Engine::new(config).unwrap();
+        let r = rt().block_on(engine.run_source("main.sand", src));
+        Run { result: r, stdout: out.contents(), fuel: engine.run_stats().fuel }
+    };
+    let plain = run(None);
+    assert!(plain.result.is_ok(), "{:?}", plain.result);
+    assert_eq!(plain.stdout, "opening\nopened 7\n7\n");
+    let journal = MemoryJournal::new();
+    let recorded = run(Some(&journal));
+    assert!(recorded.same_as(&plain), "{plain:?}\n{recorded:?}");
+    let entries = journal.entries();
+    let ops = operations(&entries).unwrap();
+    assert!(ops.len() == 1 && ops[0].start.kind == OpKind::Local && ops[0].done.is_some(), "{ops:?}");
+    for k in 0..=entries.len() {
+        let prefix = MemoryJournal::with_entries(entries[..k].to_vec());
+        let resumed = run(Some(&prefix));
+        assert!(resumed.same_as(&plain), "prefix {k}:\n{plain:?}\n{resumed:?}");
+        assert_eq!(prefix.entries(), entries, "prefix {k}");
+    }
+}

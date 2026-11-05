@@ -1,7 +1,7 @@
 //! The task scheduler: runs fibers round-robin and drives pending I/O.
 
 use super::interp::Exit;
-use super::journal::{JournalOp, JournalStop, OpKind, Suspension};
+use super::journal::{Due, JournalStop, Suspension, Wait, WaitWork};
 use super::*;
 use crate::LimitKind;
 use crate::native::Park;
@@ -293,6 +293,7 @@ impl Vm {
             if !wait_is_live(&self.fibers, (fid, wgen)) {
                 continue;
             }
+            self.local_done(fid);
             // A Rust panic in the finisher (a bug) becomes an internal error.
             let r = match crate::unwind::catch(|| self.unchecked(fin)) {
                 Ok(r) => r,
@@ -361,72 +362,67 @@ impl Vm {
         }
     }
 
-    /// Starts journaled operation `op` of fiber `fid` (`f`), which waits for it.
-    async fn start_op(&mut self, fid: u32, mut f: Box<Fiber>, op: JournalOp, timer: &RunTimer) -> Result<(), Trap> {
+    /// Delivers the completions in `done`, or holds them while replay is not
+    /// over (see [`Vm::hold_in_replay`]).
+    fn complete(&mut self, done: Vec<(u32, u64, Finisher)>, timer: &RunTimer) -> Result<(), Trap> {
+        let now = self.hold_in_replay(done);
+        self.apply_completions(now, timer)
+    }
+
+    /// Lets fiber `fid` (`f`) wait for `wait`.
+    async fn start_wait(&mut self, fid: u32, mut f: Box<Fiber>, wait: Wait, timer: &RunTimer) -> Result<(), Trap> {
         let g = self.next_gen();
         f.wgen = g;
         f.state = FiberState::Waiting;
-        let (effectful, call) = (op.effectful, op.kind == OpKind::Call);
+        f.jop = wait.op;
         self.fibers[fid as usize] = Some(f);
-        let started = match self.begin_op(fid, g, op) {
-            Ok(s) => s,
-            Err(c) => return Err(self.op_trap(fid, c)),
+        let (fut, effectful) = match wait.work {
+            WaitWork::Replay(build) => {
+                if let (Some(op), Some(mut j)) = (wait.op, self.journal_state()) {
+                    j.replayed.insert(op, (fid, g, super::journal::Replaying::Recorded(build)));
+                }
+                return Ok(());
+            }
+            WaitWork::Run { fut, effectful } => (fut, effectful),
         };
-        let Some((fut, park)) = started else { return Ok(()) };
         if effectful && self.must_flush() {
             self.flush_journal().await?;
         }
-        let added = self.io.add(fid, g, fut, park, call);
-        if let Some(f) = self.fibers[fid as usize].as_mut() {
-            f.io = added.as_ref().ok().copied();
-        }
-        if let Err(fin) = added {
-            if self.replaying() {
-                if let Some(mut j) = self.journal_state() {
-                    j.held.push((fid, g, fin));
+        let added = self.io.add(fid, g, fut, wait.park, wait.call);
+        match added {
+            Ok(io) => {
+                if let Some(f) = self.fibers[fid as usize].as_mut() {
+                    f.io = Some(io);
                 }
-            } else {
-                self.apply_completions(vec![(fid, g, fin)], timer)?;
+                if wait.op.is_none() {
+                    self.local_pending(fid, g).map_err(|c| self.op_trap(fid, c))?;
+                }
+                Ok(())
             }
-        }
-        Ok(())
-    }
-
-    /// Handles an operation that a native that is not journaled suspended
-    /// a task on in a journaled run. The operation is local: its outcome
-    /// follows from the journaled inputs, as a read of a received HTTP body
-    /// does, and replay runs it again. It completes before anything else
-    /// runs, so that the schedule does not depend on when.
-    async fn start_async(&mut self, fid: u32, mut f: Box<Fiber>, fut: BoxFuture, timer: &RunTimer) -> Result<(), Trap> {
-        let g = self.next_gen();
-        f.wgen = g;
-        f.state = FiberState::Waiting;
-        self.fibers[fid as usize] = Some(f);
-        let (interrupt, shared) = (self.host.interrupt.clone(), self.io.shared.clone());
-        let mut fut = fut;
-        let fin = std::future::poll_fn(|cx| {
-            shared.set_waker(cx.waker());
-            if interrupt.load(Ordering::Relaxed) {
-                return Poll::Ready(None);
-            }
-            fut.as_mut().poll(cx).map(Some)
-        })
-        .await;
-        match fin {
-            Some(fin) => self.apply_completions(vec![(fid, g, fin)], timer),
-            None => Err(Trap::Interrupted),
+            Err(fin) => self.complete(vec![(fid, g, fin)], timer),
         }
     }
 
     /// Delivers the completions that replay holds for this point, and once
-    /// replay is over, those held back while it was not. Returns whether it
-    /// delivered any.
-    fn journal_checkpoint(&mut self, timer: &RunTimer) -> Result<bool, Trap> {
+    /// replay is over, those held back while it was not. Waits for a local
+    /// operation that completes at this point. Returns whether it delivered
+    /// any.
+    async fn journal_checkpoint(&mut self, timer: &RunTimer) -> Result<bool, Trap> {
         let mut any = false;
         // One at a time: delivering one can cancel the task of another.
-        while let Some(due) = self.next_due().map_err(Trap::from_ctl)? {
-            any = true;
-            self.apply_completions(vec![due], timer)?;
+        loop {
+            match self.next_due().map_err(Trap::from_ctl)? {
+                Due::Nothing => break,
+                Due::Ready(fid, wgen, fin) => {
+                    any = true;
+                    self.apply_completions(vec![(fid, wgen, fin)], timer)?;
+                }
+                Due::Waiting => {
+                    let done = self.wait_for_io(timer).await;
+                    self.complete(done, timer)?;
+                    self.check_limits(timer)?;
+                }
+            }
         }
         if !self.replaying() {
             let held = self.journal_state().map(|mut j| std::mem::take(&mut j.held)).unwrap_or_default();
@@ -434,6 +430,32 @@ impl Vm {
             self.apply_completions(held, timer)?;
         }
         Ok(any)
+    }
+
+    /// Waits until an I/O operation completes, the host interrupts the
+    /// run, or the wall-time limit is reached. Returns the completions.
+    async fn wait_for_io(&mut self, timer: &RunTimer) -> Vec<(u32, u64, Finisher)> {
+        let blocked = self.host.stdin_feed.as_ref().map(|f| f.blocked());
+        let mut sleep = self.deadline.map(|d| timer.sleep(d.saturating_duration_since(timer.now())));
+        let interrupt = self.host.interrupt.clone();
+        let done = std::future::poll_fn(|cx| {
+            let done = self.io.poll_ready(Some(cx.waker()));
+            if !done.is_empty() {
+                return Poll::Ready(done);
+            }
+            if interrupt.load(Ordering::Relaxed) {
+                return Poll::Ready(vec![]);
+            }
+            if let Some(s) = sleep.as_mut()
+                && s.as_mut().poll(cx).is_ready()
+            {
+                return Poll::Ready(vec![]);
+            }
+            Poll::Pending
+        })
+        .await;
+        drop(blocked);
+        done
     }
 
     /// Whether a journaled run must be suspended now that nothing can run:
@@ -509,9 +531,7 @@ impl Vm {
                 // Deadlines let long natives check the time limits mid-call.
                 let mut fuel = self.meter.start_slice(timer.cpu_deadline(self.host.limits.max_cpu_time), self.deadline);
                 let slice = fuel;
-                if let Some(j) = &self.journal {
-                    j.borrow_mut().steps += 1;
-                }
+                self.count_step();
                 let r = loop {
                     // A Rust panic in the interpreter or a native (a bug) ends
                     // the run as an internal error instead of unwinding into the
@@ -588,20 +608,8 @@ impl Vm {
                         f.state = FiberState::Waiting;
                         self.fibers[fid as usize] = Some(f);
                     }
-                    Exit::Async(fut) if self.journal.is_some() => self.start_async(fid, f, fut, &timer).await?,
-                    Exit::Journaled(op) => self.start_op(fid, f, *op, &timer).await?,
+                    Exit::Wait(w) => self.start_wait(fid, f, *w, &timer).await?,
                     Exit::Flush => return Err(Trap::Internal { message: "a journal flush outside a call".into(), trace: vec![] }),
-                    Exit::Async(fut) => {
-                        let g = self.next_gen();
-                        f.wgen = g;
-                        f.state = FiberState::Waiting;
-                        let added = self.io.add(fid, g, fut, Park::Never, false);
-                        f.io = added.as_ref().ok().copied();
-                        self.fibers[fid as usize] = Some(f);
-                        if let Err(fin) = added {
-                            self.apply_completions(vec![(fid, g, fin)], &timer)?;
-                        }
-                    }
                     Exit::Prompt(cap) => {
                         f.state = FiberState::Ready;
                         self.fibers[fid as usize] = Some(f);
@@ -660,15 +668,10 @@ impl Vm {
                     }
                 }
                 self.check_limits(&timer)?;
-                if self.journal.is_some() {
-                    self.journal_checkpoint(&timer)?;
-                }
+                self.journal_checkpoint(&timer).await?;
                 if timer.now.saturating_duration_since(timer.last_yield) > YIELD_EVERY {
-                    // Replay delivers completions where the journal says.
-                    if !self.replaying() {
-                        let done = self.io.poll_ready(None);
-                        self.apply_completions(done, &timer)?;
-                    }
+                    let done = self.io.poll_ready(None);
+                    self.complete(done, &timer)?;
                     // On the web a computing engine keeps the thread (yielding
                     // does not reach the event loop), so output reaches the
                     // host only when flushed: flush it as it runs.
@@ -681,19 +684,17 @@ impl Vm {
                 }
             }
             self.flush_stdout();
-            if self.journal.is_some() {
-                if self.journal_checkpoint(&timer)? {
-                    self.check_limits(&timer)?;
-                    continue;
+            if self.journal_checkpoint(&timer).await? {
+                self.check_limits(&timer)?;
+                continue;
+            }
+            if self.replaying() {
+                if self.ending || main.is_none() {
+                    return Ok(Stop::Idle);
                 }
-                if self.replaying() {
-                    if self.ending || main.is_none() {
-                        return Ok(Stop::Idle);
-                    }
-                    return Err(self
-                        .blocked_in_replay()
-                        .map_or_else(|| Trap::Internal { message: "replay stalled".into(), trace: vec![] }, Trap::Journal));
-                }
+                return Err(self
+                    .blocked_in_replay()
+                    .map_or_else(|| Trap::Internal { message: "replay stalled".into(), trace: vec![] }, Trap::Journal));
             }
             if self.io.is_empty() {
                 let Some(main) = main else { return Ok(Stop::Idle) };
@@ -719,26 +720,7 @@ impl Vm {
                 return Err(Trap::Journal(JournalStop::Suspended(s)));
             }
             timer.read();
-            let blocked = self.host.stdin_feed.as_ref().map(|f| f.blocked());
-            let mut sleep = self.deadline.map(|d| timer.sleep(d.saturating_duration_since(timer.now())));
-            let interrupt = self.host.interrupt.clone();
-            let done = std::future::poll_fn(|cx| {
-                let done = self.io.poll_ready(Some(cx.waker()));
-                if !done.is_empty() {
-                    return Poll::Ready(done);
-                }
-                if interrupt.load(Ordering::Relaxed) {
-                    return Poll::Ready(vec![]);
-                }
-                if let Some(s) = sleep.as_mut()
-                    && s.as_mut().poll(cx).is_ready()
-                {
-                    return Poll::Ready(vec![]);
-                }
-                Poll::Pending
-            })
-            .await;
-            drop(blocked);
+            let done = self.wait_for_io(&timer).await;
             timer.resume();
             timer.last_yield = timer.now;
             self.apply_completions(done, &timer)?;

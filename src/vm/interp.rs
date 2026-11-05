@@ -59,9 +59,8 @@ pub enum Exit {
     Preempt,
     /// Waiting on a scheduler event (already registered).
     Blocked,
-    Async(BoxFuture),
-    /// A journaled asynchronous operation.
-    Journaled(Box<super::journal::JournalOp>),
+    /// Waiting for an asynchronous operation.
+    Wait(Box<super::journal::Wait>),
     /// The journal must be flushed before the call (retried) has an effect.
     Flush,
     Prompt(Capability),
@@ -1760,11 +1759,11 @@ impl Vm {
             // Only journaled calls can park.
             CtlKind::Async(fut, _) => {
                 fiber.result_slot = slot;
-                Ok(Some(Exit::Async(fut)))
+                Ok(Some(Exit::Wait(Box::new(super::journal::Wait::local(fut)))))
             }
-            CtlKind::Journaled(op) => {
+            CtlKind::Wait(w) => {
                 fiber.result_slot = slot;
-                Ok(Some(Exit::Journaled(op)))
+                Ok(Some(Exit::Wait(w)))
             }
             CtlKind::Flush => {
                 fiber.frames.last_mut().unwrap().ip = (ip - 1) as u32;

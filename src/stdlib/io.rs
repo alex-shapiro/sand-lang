@@ -141,7 +141,7 @@ fn journaled_read<R: IntoValue + Send + 'static>(
     what: Read,
     done: fn(&mut Vm, Option<Vec<u8>>) -> Result<R, HostError>,
 ) -> Ctl {
-    use crate::vm::journal::{Identity, JournalOp, OpKind, OpWork, Reader, Writer};
+    use crate::vm::journal::{Begun, BuildFn, Identity, OpKind, OpSpec, Outcome, Park, Reader, Whole, Writer};
     let stdin = vm.host.stdin.clone();
     let Some(live) = vm.journal_state().map(|j| j.live_memory.clone()) else { return Ctl::internal("a journaled read without a journal") };
     let (code, label) = match what {
@@ -157,9 +157,9 @@ fn journaled_read<R: IntoValue + Send + 'static>(
             Ok(None) => w.u8(0).u8(0),
             Err(e) => w.u8(1).str(e.kind).str(&format!("stdin: {}", e.message)),
         };
-        w.0
+        Box::new(Whole(w.0)) as Box<dyn Outcome>
     };
-    let build = Box::new(move |vm: &mut Vm, payload: &[u8]| -> crate::vm::NResult {
+    let build: BuildFn = Box::new(move |vm: &mut Vm, payload: &[u8]| -> crate::vm::NResult {
         let mut r = Reader::new(payload);
         let malformed = || Ctl::internal("a journaled read of standard input is malformed");
         let outcome = match r.u8().ok_or_else(malformed)? {
@@ -172,16 +172,12 @@ fn journaled_read<R: IntoValue + Send + 'static>(
         outcome.into_value(vm)
     });
     let identity = Identity::default().add(&code.to_le_bytes()).finish();
-    let work = OpWork::Bytes { fut: Box::pin(fut), build };
-    Ctl::journaled(JournalOp {
-        kind: OpKind::Stdin,
-        identity,
-        label,
-        effectful: false,
-        park: crate::native::Park::Never,
-        pre_fuel: 0,
-        work,
-    })
+    let spec = OpSpec { kind: OpKind::Stdin, effectful: false, park: Park::Never, pre_fuel: 0, timer: None };
+    match vm.begin_op(spec, |_| Ok((identity, label))) {
+        Err(c) => c,
+        Ok(Begun::Replayed(r)) => r.wait(build),
+        Ok(Begun::Live(l)) => l.run(fut, build),
+    }
 }
 
 fn input_line(vm: &mut Vm, line: Option<Vec<u8>>) -> Result<Option<String>, HostError> {

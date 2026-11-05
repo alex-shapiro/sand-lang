@@ -50,85 +50,261 @@ pub(crate) enum ReplayState {
     Started,
 }
 
-/// The work of a journaled operation.
-pub(crate) enum OpWork {
-    /// A timer that expires after the duration.
-    Timer(Duration),
-    /// A future that yields the operation's outcome as bytes, which the
-    /// journal records, and the function that turns those bytes into the
-    /// result. The function runs in record and in replay alike.
-    Bytes { fut: Pin<Box<dyn Future<Output = Vec<u8>> + Send>>, build: BuildFn },
-    /// A host operation: the journal records the value its finisher returns.
-    Value(BoxFuture),
-    /// A journaled host call that replay does not make (its `Done` entry
-    /// holds the result).
-    Replayed,
-}
-
+/// Builds the result of a recorded operation from the journal's encoding of
+/// its outcome. It runs in record and in replay alike.
 pub(crate) type BuildFn = Box<dyn FnOnce(&mut Vm, &[u8]) -> NResult + Send>;
+
+/// The journal's encoding of an outcome, made on the VM thread.
+pub(crate) type EncodeFn = Box<dyn FnOnce(&mut Vm) -> Result<Vec<u8>, Ctl> + Send>;
 
 pub(crate) use crate::native::Park;
 
-/// An asynchronous operation that a native asks the scheduler to start
-/// under the journal.
-pub struct JournalOp {
-    pub(crate) kind: OpKind,
-    pub(crate) identity: u64,
-    pub(crate) label: String,
-    /// Whether the operation has effects outside the run: the journal is
-    /// flushed before it starts.
-    pub(crate) effectful: bool,
-    /// Whether the run can be suspended while the operation waits. A
-    /// timer's comes from its wake time.
-    pub(crate) park: Park,
-    /// Fuel that the native spent before it asked for the operation, if
-    /// replay does not call the native (journaled host calls).
-    pub(crate) pre_fuel: u64,
-    pub(crate) work: OpWork,
+/// The outcome of a live operation whose result the journal records.
+pub(crate) trait Outcome: Send + 'static {
+    /// The result as the outcome arrives, in a run without a journal (an
+    /// HTTP body streams). `build` makes the result from the journal's
+    /// encoding of an outcome.
+    fn deliver(self: Box<Self>, vm: &mut Vm, build: BuildFn) -> NResult;
+
+    /// Waits for the whole outcome, which a journaled run records as one
+    /// entry before the program gets it (an HTTP body is read to its end).
+    fn settle(self: Box<Self>) -> Pin<Box<dyn Future<Output = EncodeFn> + Send>>;
 }
 
-impl Ctl {
-    /// Starts a journaled asynchronous operation (the run has a journal).
-    pub(crate) fn journaled(op: JournalOp) -> Ctl {
-        Ctl::from(CtlKind::Journaled(Box::new(op)))
+/// An outcome that arrives whole: the journal's encoding of it, from which
+/// the build function makes the result in every run.
+pub(crate) struct Whole(pub Vec<u8>);
+
+impl Outcome for Whole {
+    fn deliver(self: Box<Self>, vm: &mut Vm, build: BuildFn) -> NResult {
+        build(vm, &self.0)
+    }
+
+    fn settle(self: Box<Self>) -> Pin<Box<dyn Future<Output = EncodeFn> + Send>> {
+        let payload = self.0;
+        Box::pin(std::future::ready(Box::new(move |_: &mut Vm| Ok(payload)) as EncodeFn))
     }
 }
 
-/// A journaled timer that expires after `d` (`task.sleep`).
-pub(crate) fn timer(d: Duration) -> Ctl {
-    let identity = Identity::default().add(&d.as_nanos().to_le_bytes()).finish();
-    let label = format!("sleep {}", crate::vm::display::fmt_duration(d.as_nanos().min(i64::MAX as u128) as i64));
-    Ctl::journaled(JournalOp {
-        kind: OpKind::Timer,
-        identity,
-        label,
-        effectful: false,
-        park: Park::UntilResumed,
-        pre_fuel: 0,
-        work: OpWork::Timer(d),
-    })
+/// What a task waits for ([`CtlKind::Wait`]).
+pub struct Wait {
+    /// The id of the operation in the run's journal, for an operation whose
+    /// outcome the journal records. `None` for a local operation, and in a
+    /// run without a journal.
+    pub(crate) op: Option<u64>,
+    pub(crate) park: Park,
+    /// Whether the operation is a call of a host function.
+    pub(crate) call: bool,
+    pub(crate) work: WaitWork,
+}
+
+pub(crate) enum WaitWork {
+    /// The future runs, and its finisher gives the result. The journal is
+    /// flushed before it starts if it is `effectful`.
+    Run { fut: BoxFuture, effectful: bool },
+    /// Replay delivers the recorded outcome at its step, through the build
+    /// function.
+    Replay(BuildFn),
+}
+
+impl Wait {
+    /// A wait for local operation `fut`: replay runs it again.
+    pub(crate) fn local(fut: BoxFuture) -> Wait {
+        Wait { op: None, park: Park::Never, call: false, work: WaitWork::Run { fut, effectful: false } }
+    }
+}
+
+impl Ctl {
+    /// Suspends the task on `wait`.
+    pub(crate) fn wait(wait: Wait) -> Ctl {
+        Ctl::from(CtlKind::Wait(Box::new(wait)))
+    }
+}
+
+/// The description of an operation whose outcome the journal records.
+pub(crate) struct OpSpec {
+    pub kind: OpKind,
+    /// Whether the operation has effects outside the run: the journal is
+    /// flushed before it starts.
+    pub effectful: bool,
+    /// Whether the run can be suspended while the operation waits. A
+    /// timer's comes from its wake time.
+    pub park: Park,
+    /// Fuel that the native spent before it started the operation.
+    pub pre_fuel: u64,
+    /// How long a timer waits.
+    pub timer: Option<Duration>,
+}
+
+/// An operation that [`Vm::begin_op`] started.
+pub(crate) enum Begun {
+    /// The journal holds the outcome: replay delivers it.
+    Replayed(Replayed),
+    /// The operation runs.
+    Live(Live),
+}
+
+/// An operation whose recorded outcome replay delivers.
+pub(crate) struct Replayed {
+    op: u64,
+    call: bool,
+    /// The fuel that the native spent before the operation started, as the
+    /// journal records it.
+    pub pre_fuel: u64,
+    /// When a timer expires.
+    pub wake: Option<SystemTime>,
+}
+
+impl Replayed {
+    /// The wait for the recorded outcome, which `build` turns into the result.
+    pub fn wait(self, build: BuildFn) -> Ctl {
+        Ctl::wait(Wait { op: Some(self.op), park: Park::Never, call: self.call, work: WaitWork::Replay(build) })
+    }
+}
+
+/// An operation that runs.
+pub(crate) struct Live {
+    /// The id of the operation in the run's journal, if it has one.
+    op: Option<u64>,
+    /// When a timer expires.
+    pub wake: Option<SystemTime>,
+    park: Park,
+    call: bool,
+    effectful: bool,
+}
+
+impl Live {
+    /// The wait for `fut`. Without a journal, the program gets the outcome
+    /// as it arrives. With one, the engine waits for the whole outcome,
+    /// records it, and gives the program what `build` makes of it, as
+    /// replay does.
+    pub fn run(self, fut: impl Future<Output = Box<dyn Outcome>> + Send + 'static, build: BuildFn) -> Ctl {
+        let fut: BoxFuture = match self.op {
+            None => Box::pin(async move {
+                let outcome = fut.await;
+                Box::new(move |vm: &mut Vm| outcome.deliver(vm, build)) as Finisher
+            }),
+            Some(id) => Box::pin(async move {
+                let encode = fut.await.settle().await;
+                Box::new(move |vm: &mut Vm| {
+                    let start = vm.meter.used();
+                    let payload = encode(vm)?;
+                    let fuel = vm.meter.used().saturating_sub(start);
+                    vm.record_done(id, fuel, &payload);
+                    build(vm, &payload)
+                }) as Finisher
+            }),
+        };
+        Ctl::wait(Wait { op: self.op, park: self.park, call: self.call, work: WaitWork::Run { fut, effectful: self.effectful } })
+    }
+}
+
+/// The outcome of a host call: its finisher, or the encoding of a result
+/// that the call returned at once.
+struct CallOutcome {
+    fin: Finisher,
+    label: Arc<str>,
+}
+
+impl Outcome for CallOutcome {
+    fn deliver(self: Box<Self>, vm: &mut Vm, _: BuildFn) -> NResult {
+        (self.fin)(vm)
+    }
+
+    fn settle(self: Box<Self>) -> Pin<Box<dyn Future<Output = EncodeFn> + Send>> {
+        let CallOutcome { fin, label } = *self;
+        Box::pin(std::future::ready(Box::new(move |vm: &mut Vm| {
+            let r = fin(vm);
+            outcome_payload(vm, r, &label).map(|(payload, _)| payload)
+        }) as EncodeFn))
+    }
+}
+
+/// The outcome of a timer.
+struct Expired;
+
+impl Outcome for Expired {
+    fn deliver(self: Box<Self>, _: &mut Vm, _: BuildFn) -> NResult {
+        Ok(Value::Unit)
+    }
+
+    fn settle(self: Box<Self>) -> Pin<Box<dyn Future<Output = EncodeFn> + Send>> {
+        Box::pin(std::future::ready(Box::new(|_: &mut Vm| Ok(Vec::new())) as EncodeFn))
+    }
+}
+
+/// A timer that expires after `d` (`task.sleep`). In a journaled run, the
+/// journal records its wake time, and replay delivers its expiry without
+/// waiting.
+pub(crate) fn sleep(vm: &mut Vm, d: Duration) -> Ctl {
+    let spec = OpSpec { kind: OpKind::Timer, effectful: false, park: Park::UntilResumed, pre_fuel: 0, timer: Some(d) };
+    let describe = |_: &Vm| {
+        let identity = Identity::default().add(&d.as_nanos().to_le_bytes()).finish();
+        Ok((identity, format!("sleep {}", crate::vm::display::fmt_duration(d.as_nanos().min(i64::MAX as u128) as i64))))
+    };
+    let expired = |wake: Option<SystemTime>| -> BuildFn {
+        Box::new(move |vm: &mut Vm, _: &[u8]| {
+            if let (Some(t), Some(mut j)) = (wake, vm.journal_state()) {
+                j.saw_wall(t);
+            }
+            Ok(Value::Unit)
+        })
+    };
+    match vm.begin_op(spec, describe) {
+        Err(c) => c,
+        Ok(Begun::Replayed(r)) => {
+            let build = expired(r.wake);
+            r.wait(build)
+        }
+        Ok(Begun::Live(live)) => {
+            let wait = match live.wake {
+                Some(t) => vm.journal_state().map_or(d, |j| t.duration_since(j.wall(&*vm.host.clock)).unwrap_or_default()),
+                None => d,
+            };
+            let sleep = vm.host.clock.sleep(wait);
+            let build = expired(live.wake);
+            live.run(
+                async move {
+                    sleep.await;
+                    Box::new(Expired) as Box<dyn Outcome>
+                },
+                build,
+            )
+        }
+    }
 }
 
 /// Calls host function `name` (`inner`), registered as journaled, with
 /// `args` (SPEC §16.7). In replay, returns its recorded result without
 /// calling it. An effectful function is called only once the journal is
 /// durable.
-pub(crate) fn journaled_call(vm: &mut Vm, inner: &super::HostFn, name: &str, effectful: bool, args: &[Value]) -> NResult {
-    let Some(seq) = vm.journal_state().map(|j| j.position()) else { return inner.call(vm, args) };
+pub(crate) fn journaled_call(vm: &mut Vm, inner: &super::HostFn, name: &Arc<str>, effectful: bool, args: &[Value]) -> NResult {
+    if !vm.journaling() {
+        return inner.call(vm, args);
+    }
     // A journaled call reads no other input before its own entry, so the
     // entry it records or replays is the next one.
+    let seq = vm.journal_state().map(|j| j.position());
     let inner = |vm: &mut Vm| {
-        let outer = vm.call_seq.replace(seq);
+        let outer = std::mem::replace(&mut vm.call_seq, seq);
         let r = inner.call(vm, args);
         vm.call_seq = outer;
         r
     };
-    let identity = call_identity(vm, name, args)?;
-    let op = |work: OpWork, pre_fuel: u64, park: Park| {
-        Ctl::journaled(JournalOp { kind: OpKind::Call, identity, label: name.to_string(), effectful, park, pre_fuel, work })
+    let describe = |vm: &Vm| Ok((call_identity(vm, name, args)?, name.to_string()));
+    let spec = |pre_fuel: u64, park: Park| OpSpec { kind: OpKind::Call, effectful, park, pre_fuel, timer: None };
+    let run = |live: Live, fin: BoxFuture| {
+        let label = name.clone();
+        live.run(async move { Box::new(CallOutcome { fin: fin.await, label }) as Box<dyn Outcome> }, Box::new(payload_outcome))
     };
     match vm.replay_state() {
-        ReplayState::Ended => return Err(op(OpWork::Replayed, 0, Park::Never)),
+        ReplayState::Ended => {
+            let Begun::Replayed(r) = vm.begin_op(spec(0, Park::Never), describe)? else {
+                return Err(Ctl::internal("a replayed call has no recorded completion"));
+            };
+            vm.meter.charge(r.pre_fuel)?;
+            return Err(r.wait(Box::new(payload_outcome)));
+        }
         ReplayState::Started => {
             // The journal records the start of the call, not its end: call
             // it again, and deliver even a result it returns at once as the
@@ -139,19 +315,23 @@ pub(crate) fn journaled_call(vm: &mut Vm, inner: &super::HostFn, name: &str, eff
                 return r;
             }
             let pre_fuel = vm.meter.used().saturating_sub(start);
-            let (work, park) = match r.map_err(Ctl::into_kind) {
-                Err(CtlKind::Async(fut, park)) => (OpWork::Value(fut), park),
+            let (fin, park): (BoxFuture, Park) = match r.map_err(Ctl::into_kind) {
+                Err(CtlKind::Async(fut, park)) => (fut, park),
                 r => {
                     let (payload, _) = outcome_payload(vm, r.map_err(Ctl::from), name)?;
-                    let ready = Box::new(move |vm: &mut Vm| payload_outcome(vm, &payload)) as Finisher;
-                    (OpWork::Value(Box::pin(std::future::ready(ready))), Park::Never)
+                    let ready: Finisher = Box::new(move |vm: &mut Vm| payload_outcome(vm, &payload));
+                    (Box::pin(std::future::ready(ready)), Park::Never)
                 }
             };
-            return Err(op(work, pre_fuel, park));
+            let Begun::Live(live) = vm.begin_op(spec(pre_fuel, park), describe)? else {
+                return Err(Ctl::internal("a started call has a recorded completion"));
+            };
+            return Err(run(live, fin));
         }
         ReplayState::NoStart => {}
     }
     if vm.replaying() {
+        let identity = call_identity(vm, name, args)?;
         return vm.journaled_result(identity, name, inner);
     }
     if effectful && vm.must_flush() {
@@ -161,18 +341,34 @@ pub(crate) fn journaled_call(vm: &mut Vm, inner: &super::HostFn, name: &str, eff
     match inner(vm).map_err(Ctl::into_kind) {
         Err(CtlKind::Async(fut, park)) => {
             let pre_fuel = vm.meter.used().saturating_sub(start);
-            Err(op(OpWork::Value(fut), pre_fuel, park))
+            let Begun::Live(live) = vm.begin_op(spec(pre_fuel, park), describe)? else {
+                return Err(Ctl::internal("a live call has a recorded completion"));
+            };
+            Err(run(live, fut))
         }
-        r => vm.record_result(identity, name, start, r.map_err(Ctl::from)),
+        r => vm.record_result(name, start, r.map_err(Ctl::from), describe),
     }
 }
 
-/// How replay builds the result of an operation from its `Done` entry.
-pub(crate) enum ReplayBuild {
-    /// A timer that expires at the time, if the journal records one.
-    Timer(Option<SystemTime>),
-    Bytes(BuildFn),
-    Value,
+/// An operation whose `Done` entry replay delivers at its step.
+pub(crate) enum Replaying {
+    /// The journal records the outcome, which the build function turns into
+    /// the result.
+    Recorded(BuildFn),
+    /// A local operation, whose future runs again: its finisher, once the
+    /// future completes.
+    Local(Option<Finisher>),
+}
+
+/// What replay delivers next ([`Vm::next_due`]).
+pub(crate) enum Due {
+    /// Nothing at this step.
+    Nothing,
+    /// The completion of an operation.
+    Ready(u32, u64, Finisher),
+    /// A local operation completes at this step, and its future has not
+    /// completed yet.
+    Waiting,
 }
 
 /// The journal state of a run.
@@ -189,8 +385,11 @@ pub(crate) struct JournalState {
     /// The operations whose `Done` entry is in `replay`, by id.
     done: HashMap<u64, usize>,
     /// Operations waiting for their recorded `Done` entry, by id: the wait
-    /// (fiber, generation) and how to build the result.
-    pub replayed: HashMap<u64, (u32, u64, ReplayBuild)>,
+    /// (fiber, generation) and how to deliver the result.
+    pub replayed: HashMap<u64, (u32, u64, Replaying)>,
+    /// Live local operations: the journal records their `Done` entry when
+    /// they complete.
+    local: std::collections::HashSet<u64>,
     /// Completions of operations that run live while replay is not over:
     /// they are delivered when it is.
     pub held: Vec<(u32, u64, Finisher)>,
@@ -306,6 +505,7 @@ pub(crate) fn start(
         steps: 0,
         done,
         replayed: HashMap::new(),
+        local: Default::default(),
         held: Vec::new(),
         origin,
         mono_last: Duration::ZERO,
@@ -779,6 +979,13 @@ impl Vm {
         self.journal.as_ref().is_some_and(|j| j.borrow().replaying())
     }
 
+    /// Counts a scheduling step: a slice that a task runs.
+    pub(crate) fn count_step(&self) {
+        if let Some(j) = &self.journal {
+            j.borrow_mut().steps += 1;
+        }
+    }
+
     /// Attaches the journal state `j`. Takes the random seed from the
     /// journal, or records it, unless the configuration fixes it.
     pub(crate) fn attach_journal(&mut self, mut j: JournalState, seeded: bool) -> Result<(), JournalStop> {
@@ -857,15 +1064,12 @@ impl Vm {
     /// the recorded result without running `f`. The value must be plain
     /// data (see [`encode_value`]).
     pub(crate) fn journaled_result(&mut self, identity: u64, label: &str, f: impl FnOnce(&mut Vm) -> NResult) -> NResult {
-        if self.journal.is_none() {
-            return f(self);
-        }
         if let Some(r) = self.replay_result(identity, label)? {
             return r;
         }
         let start = self.call_start();
         let r = f(self);
-        self.record_result(identity, label, start, r)
+        self.record_result(label, start, r, |_| Ok((identity, label.to_string())))
     }
 
     /// Consumes the recorded result of a synchronous call in replay.
@@ -896,15 +1100,16 @@ impl Vm {
     }
 
     /// Records the result `r` of a synchronous call that started at fuel
-    /// `start`, and returns it.
-    fn record_result(&mut self, identity: u64, label: &str, start: u64, r: NResult) -> NResult {
-        if is_retry(&r) {
+    /// `start`, and returns it. Without a journal, returns `r`.
+    fn record_result(&mut self, label: &str, start: u64, r: NResult, describe: impl FnOnce(&Vm) -> Result<(u64, String), Ctl>) -> NResult {
+        if self.journal.is_none() || is_retry(&r) {
             return r;
         }
         let fuel = self.meter.used().saturating_sub(start);
         let (payload, value) = outcome_payload(self, r, label)?;
+        let (identity, label) = describe(self)?;
         if let Some(mut j) = self.journal_state() {
-            j.record(EntryData::Result(CallResult { identity, label: label.to_string(), fuel, outcome: payload.clone() }));
+            j.record(EntryData::Result(CallResult { identity, label, fuel, outcome: payload.clone() }));
         }
         match value {
             Some(bytes) => decode_value(self, &bytes),
@@ -946,6 +1151,7 @@ impl Vm {
     pub(crate) fn cancel_op(&self, op: u64) {
         let Some(j) = &self.journal else { return };
         let mut j = j.borrow_mut();
+        j.local.remove(&op);
         if !j.replaying() {
             j.record_done(op, 0, OpEnd::Cancelled);
             return;
@@ -968,155 +1174,172 @@ impl Vm {
         }
     }
 
-    /// Starts the bookkeeping of journaled operation `op` for the fiber
-    /// waiting as `(fid, wgen)`: consumes its `Start` entry in replay, or
-    /// records one. Returns the future to run live and until when the run
-    /// may be suspended while it waits, or `None` if replay holds the
-    /// completion.
-    pub(crate) fn begin_op(&mut self, fid: u32, wgen: u64, op: JournalOp) -> Result<Option<(BoxFuture, Park)>, Ctl> {
-        let Some(j) = &self.journal else { return Err(Ctl::internal("a journaled operation without a journal")) };
+    /// Starts operation `spec`, an input of the run whose outcome the
+    /// journal records, for the calling native. `describe` gives the
+    /// operation's identity and label, which only a journaled run reads.
+    /// Consumes the operation's `Start` entry in replay, or records one.
+    /// Without a journal, the operation runs.
+    pub(crate) fn begin_op(&mut self, spec: OpSpec, describe: impl FnOnce(&Vm) -> Result<(u64, String), Ctl>) -> Result<Begun, Ctl> {
+        let call = spec.kind == OpKind::Call;
+        let live = |op, wake| {
+            let park = match wake {
+                Some(t) => Park::Until(t),
+                None => spec.park,
+            };
+            Begun::Live(Live { op, wake, park, call, effectful: spec.effectful })
+        };
+        if self.journal.is_none() {
+            return Ok(live(None, None));
+        }
+        let (identity, label) = describe(self)?;
+        let Some(j) = &self.journal else { return Err(Ctl::internal("the journal vanished")) };
         let mut j = j.borrow_mut();
         let id = j.ops;
-        let label = op.label.clone();
-        let seq = j.pos as u64;
-        let replayed = j.take(EntryKind::Start, &|| format!("the start of {} `{label}`", op.kind.name())).map_err(stop)?;
+        let seq = j.position();
+        let kind = spec.kind;
+        let replayed = j.take(EntryKind::Start, &|| format!("the start of {} `{label}`", kind.name())).map_err(stop)?;
         let wake = match &replayed {
             Some(EntryData::Start(s)) => {
-                if s.kind != op.kind || s.identity != op.identity {
-                    let msg = if s.kind == op.kind && s.label == label {
-                        format!("the run starts {} `{label}` with other arguments than the journal records", op.kind.name())
+                if s.kind != kind || s.identity != identity {
+                    let msg = if s.kind == kind && s.label == label {
+                        format!("the run starts {} `{label}` with other arguments than the journal records", kind.name())
                     } else {
-                        format!(
-                            "the run starts {} `{label}` where the journal records the start of {} `{}`",
-                            op.kind.name(),
-                            s.kind.name(),
-                            s.label
-                        )
+                        format!("the run starts {} `{label}` where the journal records the start of {} `{}`", kind.name(), s.kind.name(), s.label)
                     };
                     return Err(stop(JournalStop::Diverged { seq, message: msg }));
                 }
-                if matches!(op.work, OpWork::Replayed) {
-                    self.meter.charge(s.pre_fuel)?;
+                if j.done.contains_key(&id) {
+                    j.ops += 1;
+                    return Ok(Begun::Replayed(Replayed { op: id, call, pre_fuel: s.pre_fuel, wake: s.wake }));
                 }
                 s.wake
             }
             _ => {
-                let wake = match op.work {
-                    OpWork::Timer(d) => Some(j.wall(&*self.host.clock) + d),
-                    _ => None,
-                };
-                j.record(EntryData::Start(OpStart {
-                    kind: op.kind,
-                    identity: op.identity,
-                    pre_fuel: op.pre_fuel,
-                    wake,
-                    label: label.clone(),
-                }));
+                let wake = spec.timer.map(|d| j.wall(&*self.host.clock) + d);
+                j.record(EntryData::Start(OpStart { kind, identity, pre_fuel: spec.pre_fuel, wake, label }));
                 wake
             }
         };
         j.ops += 1;
+        Ok(live(Some(id), wake))
+    }
+
+    /// Notes that the local operation that fiber `fid` waits for, as wait
+    /// generation `wgen`, did not complete at once. The journal records
+    /// its start and, when it completes, the step at which the engine
+    /// delivers it. Replay consumes the start, runs the future again, and
+    /// delivers its result after the recorded step, so that tasks
+    /// interleave as they did.
+    pub(crate) fn local_pending(&mut self, fid: u32, wgen: u64) -> Result<(), Ctl> {
+        let Some(j) = &self.journal else { return Ok(()) };
+        let mut j = j.borrow_mut();
+        let id = j.ops;
+        let seq = j.pos as u64;
+        let what = || format!("the start of {}", OpKind::Local.name());
+        let replayed = match j.take(EntryKind::Start, &what).map_err(stop)? {
+            Some(EntryData::Start(s)) if s.kind == OpKind::Local => true,
+            Some(EntryData::Start(s)) => {
+                let message = format!("the run waits for a local operation where the journal records the start of {} `{}`", s.kind.name(), s.label);
+                return Err(stop(JournalStop::Diverged { seq, message }));
+            }
+            _ => {
+                let start = OpStart { kind: OpKind::Local, identity: 0, pre_fuel: 0, wake: None, label: "wait".to_string() };
+                j.record(EntryData::Start(start));
+                false
+            }
+        };
+        j.ops += 1;
+        if replayed && j.done.contains_key(&id) {
+            j.replayed.insert(id, (fid, wgen, Replaying::Local(None)));
+        } else {
+            j.local.insert(id);
+        }
+        drop(j);
         if let Some(Some(f)) = self.fibers.get_mut(fid as usize) {
             f.jop = Some(id);
         }
-        let in_replay = replayed.is_some();
-        if in_replay && j.done.contains_key(&id) {
-            let build = match op.work {
-                OpWork::Timer(_) => ReplayBuild::Timer(wake),
-                OpWork::Bytes { build, .. } => ReplayBuild::Bytes(build),
-                OpWork::Value(_) | OpWork::Replayed => ReplayBuild::Value,
-            };
-            j.replayed.insert(id, (fid, wgen, build));
-            return Ok(None);
+        Ok(())
+    }
+
+    /// Records the `Done` entry of the local operation that fiber `fid`
+    /// waits for, if it is live, before the engine delivers its result.
+    pub(crate) fn local_done(&mut self, fid: u32) {
+        let Some(j) = &self.journal else { return };
+        let Some(Some(f)) = self.fibers.get(fid as usize) else { return };
+        let Some(op) = f.jop else { return };
+        let mut j = j.borrow_mut();
+        if j.local.remove(&op) {
+            j.record_done(op, 0, OpEnd::Completed(Vec::new()));
         }
-        let label = op.label;
-        let park = match (&op.work, wake) {
-            (OpWork::Timer(_), Some(t)) => Park::Until(t),
-            _ => op.park,
-        };
-        let fut: BoxFuture = match op.work {
-            OpWork::Timer(d) => {
-                let sleep = match (in_replay, wake) {
-                    (true, Some(t)) => self.host.clock.sleep(t.duration_since(j.wall(&*self.host.clock)).unwrap_or_default()),
-                    _ => self.host.clock.sleep(d),
-                };
-                Box::pin(async move {
-                    sleep.await;
-                    Box::new(move |vm: &mut Vm| {
-                        vm.record_done(id, 0, &[]);
-                        if let (Some(t), Some(mut j)) = (wake, vm.journal_state()) {
-                            j.saw_wall(t);
-                        }
-                        Ok(Value::Unit)
-                    }) as Finisher
-                })
+    }
+
+    /// The completions in `done` to deliver now. Replay delivers each
+    /// recorded completion at its step, and holds the completions of
+    /// operations that run live until it is over.
+    pub(crate) fn hold_in_replay(&mut self, done: Vec<(u32, u64, Finisher)>) -> Vec<(u32, u64, Finisher)> {
+        let Some(j) = &self.journal else { return done };
+        let mut j = j.borrow_mut();
+        if !j.replaying() {
+            return done;
+        }
+        let mut now = Vec::new();
+        for (fid, wgen, fin) in done {
+            let op = match self.fibers.get(fid as usize) {
+                Some(Some(f)) if f.wgen == wgen => f.jop,
+                _ => None,
+            };
+            match op.and_then(|op| j.replayed.get_mut(&op)) {
+                Some((_, _, Replaying::Local(slot @ None))) => *slot = Some(fin),
+                _ if op.is_none() => now.push((fid, wgen, fin)),
+                _ => j.held.push((fid, wgen, fin)),
             }
-            OpWork::Bytes { fut, build } => Box::pin(async move {
-                let payload = fut.await;
-                Box::new(move |vm: &mut Vm| {
-                    vm.record_done(id, 0, &payload);
-                    build(vm, &payload)
-                }) as Finisher
-            }),
-            OpWork::Value(fut) => Box::pin(async move {
-                let fin = fut.await;
-                Box::new(move |vm: &mut Vm| {
-                    let start = vm.meter.used();
-                    let r = fin(vm);
-                    let fuel = vm.meter.used().saturating_sub(start);
-                    let (payload, value) = outcome_payload(vm, r, &label)?;
-                    vm.record_done(id, fuel, &payload);
-                    match value {
-                        Some(bytes) => decode_value(vm, &bytes),
-                        None => payload_outcome(vm, &payload),
-                    }
-                }) as Finisher
-            }),
-            OpWork::Replayed => return Err(Ctl::internal("a replayed call has no recorded completion")),
-        };
-        Ok(Some((fut, park)))
+        }
+        now
     }
 
     /// The next completion that replay delivers now: one recorded after the
     /// current step. Fails if one recorded after an earlier step is pending.
-    pub(crate) fn next_due(&mut self) -> Result<Option<(u32, u64, Finisher)>, Ctl> {
-        let Some(j) = &self.journal else { return Ok(None) };
+    pub(crate) fn next_due(&mut self) -> Result<Due, Ctl> {
+        let Some(j) = &self.journal else { return Ok(Due::Nothing) };
         let mut j = j.borrow_mut();
         j.take_pending().map_err(stop)?;
-        let Some(EntryData::Done(OpDone { op, step, fuel, end })) = j.peek() else { return Ok(None) };
+        let Some(EntryData::Done(OpDone { op, step, fuel, end })) = j.peek() else { return Ok(Due::Nothing) };
         let (op, step, fuel) = (*op, *step, *fuel);
         let OpEnd::Completed(payload) = end else {
             // Consumed where the run cancels the operation.
-            return Ok(None);
+            return Ok(Due::Nothing);
         };
         let payload = payload.clone();
         if step > j.steps {
-            return Ok(None);
+            return Ok(Due::Nothing);
         }
         if step < j.steps {
             let msg = format!("the journal records the completion of operation {op} after step {step}, and the run is at step {}", j.steps);
             return Err(stop(j.diverged(msg)));
         }
-        let Some((fid, wgen, build)) = j.replayed.remove(&op) else {
-            let msg = format!("the journal records the completion of operation {op}, which the run has not started");
-            return Err(stop(j.diverged(msg)));
-        };
-        j.pos += 1;
-        let fin: Finisher = match build {
-            ReplayBuild::Timer(wake) => Box::new(move |vm: &mut Vm| {
-                if let (Some(t), Some(mut j)) = (wake, vm.journal_state()) {
-                    j.saw_wall(t);
-                }
-                Ok(Value::Unit)
-            }),
-            ReplayBuild::Bytes(build) => Box::new(move |vm: &mut Vm| build(vm, &payload)),
-            ReplayBuild::Value => Box::new(move |vm: &mut Vm| {
-                let v = payload_outcome(vm, &payload);
-                vm.charge(fuel)?;
-                v
-            }),
-        };
-        Ok(Some((fid, wgen, fin)))
+        match j.replayed.remove(&op) {
+            None => {
+                let msg = format!("the journal records the completion of operation {op}, which the run has not started");
+                Err(stop(j.diverged(msg)))
+            }
+            Some((fid, wgen, Replaying::Local(None))) => {
+                j.replayed.insert(op, (fid, wgen, Replaying::Local(None)));
+                Ok(Due::Waiting)
+            }
+            Some((fid, wgen, Replaying::Local(Some(fin)))) => {
+                j.pos += 1;
+                Ok(Due::Ready(fid, wgen, fin))
+            }
+            Some((fid, wgen, Replaying::Recorded(build))) => {
+                j.pos += 1;
+                let fin = Box::new(move |vm: &mut Vm| {
+                    let v = build(vm, &payload);
+                    vm.charge(fuel)?;
+                    v
+                });
+                Ok(Due::Ready(fid, wgen, fin))
+            }
+        }
     }
 
     /// The divergence error for a run that can do nothing more while

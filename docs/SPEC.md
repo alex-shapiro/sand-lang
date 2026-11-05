@@ -2369,7 +2369,13 @@ the run reads them:
 
 The asynchronous operations are timers (`task.sleep` and the functions that
 use it), HTTP requests, reads of standard input from `Config::stdin_feed` or
-`Config::inherit_stdin`, and calls of asynchronous host functions. The engine
+`Config::inherit_stdin`, calls of asynchronous journaled host functions, and
+local operations. A local operation is an operation whose result follows from
+the recorded inputs, such as a read of a file or a call of an asynchronous
+host function that is not journaled. Replay runs it again, so the journal
+records only when the engine delivered its result: if the operation does not
+complete at once, the journal records its start and its end, with the step
+but without the result. The engine
 records an HTTP request as a whole message: the identity of a request is a
 hash of its method, URL, headers and body, as the script made them, and its
 result is the response with its whole body, or the error. The engine records
@@ -2380,7 +2386,9 @@ handshakes. Other reads of an HTTP body read the recorded body.
 which it delivers the result of an asynchronous operation to the waiting task.
 The engine counts the slices that it runs (§15.2), and a `Done` entry holds this
 count, the step. Replay delivers each result after the same step, so concurrent
-tasks interleave as they did. Fuel counts are the same in replay, and
+tasks interleave as they did. A journaled run therefore has the same
+concurrency as a run without a journal: a task that waits for an operation
+does not stop other tasks. Fuel counts are the same in replay, and
 `Engine::run_stats` reports the same `fuel`.
 
 **What the host keeps the same.** The engine does not record what the host
@@ -2456,9 +2464,7 @@ parameters, or values of bound object types, and no values of bound value
 types in the result. `Engine::new` panics if the signature of a journaled
 function does not meet this rule. A host function that is not journaled is
 local: replay calls it again, so it must give the same result in each
-execution and have no effects outside the run. In a journaled run, the engine
-waits for the future of a local asynchronous function before it runs other
-tasks, so that the schedule does not depend on when the future completes. `Later::parked(park)` lets the engine
+execution and have no effects outside the run. `Later::parked(park)` lets the engine
 suspend a run while the future of a call waits: with `Park::Until(t)` until
 time `t`, and with `Park::UntilResumed` until the host resumes the run. When
 the run resumes, the engine calls the function again. For example, a host function `wait_until(name,

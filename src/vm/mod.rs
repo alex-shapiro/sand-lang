@@ -75,8 +75,9 @@ pub enum CtlKind {
     Exit(i32),
     /// Ask the user; the call is retried afterwards.
     NeedPermission(Capability),
-    /// Suspend the task until the future completes. In a journaled run, the
-    /// engine may suspend the run while it waits, as the [`Park`] says.
+    /// Suspend the task until the future completes. In a call of a
+    /// journaled function, the engine may suspend the run while it waits,
+    /// as the [`Park`] says.
     ///
     /// [`Park`]: crate::native::Park
     Async(BoxFuture, crate::native::Park),
@@ -95,8 +96,9 @@ pub enum CtlKind {
     Journal(journal::JournalStop),
     /// A host function ends the run (see [`Ctl::abort`]).
     Abort(crate::HostAbort),
-    /// Suspend the task on a journaled operation.
-    Journaled(Box<journal::JournalOp>),
+    /// Suspend the task on an operation that the journal records (see
+    /// [`Vm::begin_op`]).
+    Wait(Box<journal::Wait>),
     /// Flush the journal, then call the native again (before an effect).
     Flush,
 }
@@ -195,7 +197,7 @@ impl std::fmt::Debug for CtlKind {
             CtlKind::Collect => write!(f, "Collect"),
             CtlKind::Journal(s) => write!(f, "Journal({s:?})"),
             CtlKind::Abort(_) => write!(f, "Abort"),
-            CtlKind::Journaled(op) => write!(f, "Journaled({})", op.label),
+            CtlKind::Wait(_) => write!(f, "Wait"),
             CtlKind::Flush => write!(f, "Flush"),
         }
     }

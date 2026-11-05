@@ -702,7 +702,7 @@ fn send_journaled(
     body: Val<Vec<u8>>,
     timeout: SignedDuration,
 ) -> Suspended<ResponseStream> {
-    use crate::vm::journal::{Identity, JournalOp, OpKind, OpWork};
+    use crate::vm::journal::{Begun, BuildFn, Identity, OpKind, OpSpec, Outcome, Park, Whole};
     let mut req = prepare_request(vm, method, url, headers)?;
     req.check_policy(vm)?;
     let body = body.bytes(&vm.heap).to_vec();
@@ -753,9 +753,9 @@ fn send_journaled(
                 None => Err(IoFailure::new("timeout", format!("reading the response from {text} timed out"))),
             }
         };
-        encode_reply(outcome.await)
+        Box::new(Whole(encode_reply(outcome.await))) as Box<dyn Outcome>
     };
-    let build = Box::new(move |vm: &mut Vm, payload: &[u8]| -> crate::vm::NResult {
+    let build: BuildFn = Box::new(move |vm: &mut Vm, payload: &[u8]| -> crate::vm::NResult {
         let r = match decode_reply(payload) {
             Some(Ok((status, headers, data))) => Ok(response(vm, url_text, status, headers, BodyReader::memory(data, max_body))?),
             Some(Err(e)) => Err(e),
@@ -763,9 +763,12 @@ fn send_journaled(
         };
         crate::native::IntoValue::into_value(r, vm)
     });
-    let work = OpWork::Bytes { fut: Box::pin(fut), build };
-    let op = JournalOp { kind: OpKind::Http, identity, label, effectful: true, park: crate::native::Park::Never, pre_fuel: 0, work };
-    Err(crate::vm::Ctl::journaled(op).into())
+    let spec = OpSpec { kind: OpKind::Http, effectful: true, park: Park::Never, pre_fuel: 0, timer: None };
+    Err(match vm.begin_op(spec, |_| Ok((identity, label)))? {
+        Begun::Replayed(r) => r.wait(build),
+        Begun::Live(l) => l.run(fut, build),
+    }
+    .into())
 }
 
 type Reply = (i64, Vec<(String, String)>, Vec<u8>);

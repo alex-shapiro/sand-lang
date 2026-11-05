@@ -143,10 +143,14 @@ pub enum OpKind {
     Stdin,
     /// A call of an asynchronous host function.
     Call,
+    /// A local operation, such as a read of a file or a call of a host
+    /// function that is not journaled: replay runs it again. Only the
+    /// point in the schedule where the engine delivered it is recorded.
+    Local,
 }
 
 impl OpKind {
-    const ALL: [OpKind; 4] = [OpKind::Timer, OpKind::Http, OpKind::Stdin, OpKind::Call];
+    const ALL: [OpKind; 5] = [OpKind::Timer, OpKind::Http, OpKind::Stdin, OpKind::Call, OpKind::Local];
 
     fn code(self) -> u8 {
         OpKind::ALL.iter().position(|&k| k == self).unwrap_or(0) as u8 + 1
@@ -163,6 +167,7 @@ impl OpKind {
             OpKind::Http => "http",
             OpKind::Stdin => "stdin",
             OpKind::Call => "call",
+            OpKind::Local => "local",
         }
     }
 }
