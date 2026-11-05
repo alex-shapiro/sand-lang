@@ -230,8 +230,6 @@ Visible defects that rarely block users.
 
 ### Embedding
 
-- [ ] ❓ Add an API that runs an already compiled program in a new engine, so hosts that run
-      the same program many times compile it once (found by Sahara).
 - [ ] ❓ `Session::type_of` prints `Result<T, Error>` instead of the `Result<T>` alias.
 
 - [ ] ⚪ Pass `Num<N>` evidence to native `impl` methods by extracting the `Num`

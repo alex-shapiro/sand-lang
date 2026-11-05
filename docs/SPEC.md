@@ -1985,6 +1985,12 @@ returns an `Error`:
 | `Error::Io(message)`                 | The entry script file could not be read.                             |
 | `Error::Internal { message, trace }` | An internal invariant failed or a host callback panicked (§10.3).    |
 
+`Engine::compile_file` compiles a file and its imports without running it, and
+`Engine::run_program` runs the result. Any engine whose configuration is a clone of the
+compiling engine's configuration, without further `Config::module` calls, can run the program,
+so a host that runs the same code many times compiles it once. Each run starts with fresh
+globals, and its limits count from the start of the run.
+
 After each run, `Engine::run_stats` reports the resources that the run used,
 including runs that failed or exceeded a limit: `fuel` (in the units of
 `max_instructions`), `peak_memory` (the most memory in use at any memory

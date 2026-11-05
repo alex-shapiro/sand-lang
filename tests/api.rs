@@ -3586,3 +3586,41 @@ fn run_stats_fuel_is_deterministic() {
         .collect();
     assert!(fuel.iter().all(|f| *f == fuel[0]), "{fuel:?}");
 }
+
+#[test]
+fn compiled_programs_run_on_many_engines() {
+    struct Caller(String);
+    let mut m = NativeModule::new("host");
+    m.vm_function("caller", |vm: &mut Vm| -> String { vm.context::<Caller>().map(|c| c.0.clone()).unwrap_or_default() });
+    let fs = sandlang::MemFs::new();
+    fs.write("/app/main.sand", "import host\nimport \"./util.sand\"\nvar n = 0\nn += 1\nprint(\"\\(host.caller()) \\(util.twice(n))\")")
+        .unwrap();
+    fs.write("/app/util.sand", "pub fn twice(x: int) -> int { x * 2 }").unwrap();
+    let base = Config::new().module(m).memory_fs(fs.clone()).policy(sandlang::RulePolicy::standard().allow_import("/app"));
+    let mut compiler = Engine::new(base.clone()).unwrap();
+    let program = rt().block_on(compiler.compile_file("/app/main.sand")).unwrap();
+    // The source can change after compilation: the program keeps the code it was compiled from.
+    fs.write("/app/util.sand", "pub fn twice(x: int) -> int { 0 }").unwrap();
+    for name in ["ada", "bob", "cy"] {
+        let (mut engine, out, _) = engine_with(base.clone().context(Arc::new(Caller(name.into()))));
+        rt().block_on(engine.run_program(&program)).unwrap();
+        // Each run starts with fresh globals.
+        assert_eq!(out.contents(), format!("{name} 2\n"));
+        assert!(engine.run_stats().fuel > 0);
+    }
+    let mut other = Engine::new(Config::new()).unwrap();
+    assert!(matches!(rt().block_on(other.run_program(&program)), Err(Error::Internal { .. })));
+}
+
+#[test]
+fn compiled_programs_keep_limits_per_run() {
+    let fs = sandlang::MemFs::new();
+    fs.write("/main.sand", "while true {}").unwrap();
+    let base = Config::new().memory_fs(fs).limits(Limits { max_instructions: Some(10_000), ..Limits::default() });
+    let mut engine = Engine::new(base.clone()).unwrap();
+    let program = rt().block_on(engine.compile_file("/main.sand")).unwrap();
+    for _ in 0..2 {
+        let mut e = Engine::new(base.clone()).unwrap();
+        assert!(matches!(rt().block_on(e.run_program(&program)), Err(Error::Limit(LimitKind::Instructions))));
+    }
+}

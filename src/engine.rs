@@ -177,6 +177,21 @@ pub struct Outcome {
     pub exit_code: i32,
 }
 
+/// A compiled program, ready to run on engines that share its host modules (see
+/// [`Engine::compile_file`]).
+#[derive(Clone)]
+pub struct CompiledProgram {
+    program: Arc<Program>,
+    registry: Arc<Registry>,
+    cwd: PathBuf,
+}
+
+impl fmt::Debug for CompiledProgram {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CompiledProgram").field("cwd", &self.cwd).finish_non_exhaustive()
+    }
+}
+
 /// Resources that the most recent run of an engine used.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RunStats {
@@ -1029,6 +1044,36 @@ impl Engine {
         let compiled = self.compile(&name, &source, &root, Some(path)).await?;
         let cwd = self.config.cwd.clone().unwrap_or(root);
         self.execute(compiled, cwd).await
+    }
+
+    /// Compiles a file and its imports without running it. The returned program runs with
+    /// [`Engine::run_program`] on this engine or on any engine whose configuration is a clone of
+    /// this engine's configuration without further [`Config::module`] calls, so a host that runs
+    /// the same code many times compiles it once.
+    ///
+    /// Import checks happen during compilation, under this engine's policy and file system.
+    pub async fn compile_file(&mut self, path: impl AsRef<Path>) -> Result<CompiledProgram, Error> {
+        crate::unwind::guard(self.compile_file_inner(path.as_ref())).await
+    }
+
+    async fn compile_file_inner(&mut self, path: &Path) -> Result<CompiledProgram, Error> {
+        let (name, source, root) = self.read_main(path)?;
+        let compiled = self.compile(&name, &source, &root, Some(path)).await?;
+        let cwd = self.config.cwd.clone().unwrap_or(root);
+        Ok(CompiledProgram { program: compiled.program, registry: self.registry.clone(), cwd })
+    }
+
+    /// Runs a program from [`Engine::compile_file`]. The wall-time limit counts from the start
+    /// of the run. Fails with [`Error::Internal`] if the program was compiled with other host
+    /// modules.
+    pub async fn run_program(&mut self, program: &CompiledProgram) -> Result<crate::Outcome, Error> {
+        if !Arc::ptr_eq(&program.registry, &self.registry) {
+            return Err(Error::Internal { message: "the program was compiled with other host modules".into(), trace: Vec::new() });
+        }
+        self.clear_interrupt();
+        let compiled = Compiled { program: program.program.clone(), lints: None, deadline: self.deadline(), snapshot: None };
+        let cwd = program.cwd.clone();
+        crate::unwind::guard(self.execute(compiled, cwd)).await
     }
 
     pub async fn run_tests(&mut self, path: impl AsRef<Path>) -> Result<TestReport, Error> {
