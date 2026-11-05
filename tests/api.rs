@@ -2984,7 +2984,7 @@ print(few[5000])
     let (mut engine, out, _) = engine_with(Config::new());
     rt().block_on(engine.run_source("main.sand", &src)).unwrap();
     assert_eq!(out.contents(), format!("{}\nfront\nfew5\n", xs + 6 * 4 + tail));
-    let stats = engine.gc_stats();
+    let stats = engine.run_stats().gc;
     assert!(stats.collections - stats.majors >= 3, "{stats:?}");
 }
 
@@ -2996,7 +2996,7 @@ fn gc_stats_report_minor_and_major_collections() {
     let (mut engine, out, _) = engine_with(Config::new());
     rt().block_on(engine.run_source("main.sand", src)).unwrap();
     assert_eq!(out.contents(), "4300000\n");
-    let stats = engine.gc_stats();
+    let stats = engine.run_stats().gc;
     assert!(stats.collections > stats.majors, "{stats:?}");
     assert!(stats.majors >= 1, "{stats:?}");
 }

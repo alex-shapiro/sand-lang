@@ -1,7 +1,7 @@
 //! Durable execution: record a run in a journal, replay it, and resume it
 //! from any prefix of the journal (SPEC §16.7).
 
-use sandlang::journal::{Entry, EntryKind, HttpOutcome, Journal, MemoryJournal, OpKind, Suspension, operations};
+use sandlang::journal::{Durable, Entry, EntryKind, HttpOutcome, Journal, MemoryJournal, OpKind, Suspension, operations};
 use sandlang::native::{Later, Park};
 use sandlang::network::{Listener, Network, NetworkFuture, Stream};
 use sandlang::platform::{Clock, ClockFuture, Instant, SystemClock, SystemTime, UNIX_EPOCH};
@@ -286,8 +286,7 @@ impl World {
             .clock(clock)
             .network(Arc::new(net.clone()))
             .module(host_module(log.clone()))
-            .env(vec![("MODE".into(), "test".into())])
-            .suspend_after(Duration::from_secs(60));
+            .env(vec![("MODE".into(), "test".into())]);
         if let Some(s) = seed {
             base = base.seed(s);
         }
@@ -307,7 +306,8 @@ impl World {
     fn run(&self, src: &str, journal: &MemoryJournal) -> Run {
         let out = MemorySink::new();
         *self.log.journal.lock().unwrap() = Some(journal.clone());
-        let config = self.base.clone().stdout(out.clone()).stderr(out.clone()).journal(Arc::new(journal.clone()));
+        let durable = Durable::new(Arc::new(journal.clone())).suspend_after(Duration::from_secs(60));
+        let config = self.base.clone().stdout(out.clone()).stderr(out.clone()).durable(durable);
         let mut engine = Engine::new(config).unwrap();
         let result = rt().block_on(engine.run_source("main.sand", src));
         Run { result, stdout: out.contents(), fuel: engine.run_stats().fuel }
@@ -802,7 +802,7 @@ fn a_journal_that_fails_to_flush_ends_the_run() {
         }
     }
     let world = World::frozen(Some(1));
-    let config = world.base.clone().journal(Arc::new(Failing(MemoryJournal::new())));
+    let config = world.base.clone().durable(Durable::new(Arc::new(Failing(MemoryJournal::new()))));
     let mut engine = Engine::new(config).unwrap();
     let r = rt().block_on(engine.run_source("main.sand", "import http\nprint(http.get(\"http://svc.test/x\")?.status)"));
     assert!(matches!(&r, Err(Error::Journal(e)) if e.to_string() == "disk full"), "{r:?}");
@@ -823,7 +823,7 @@ print(env.vars().len() > 0)
     feed.send("hello\n");
     let journal = MemoryJournal::new();
     let out = MemorySink::new();
-    let config = base.clone().stdout(out.clone()).stdin_feed(&feed).journal(Arc::new(journal.clone()));
+    let config = base.clone().stdout(out.clone()).stdin_feed(&feed).durable(Durable::new(Arc::new(journal.clone())));
     let r = rt().block_on(Engine::new(config).unwrap().run_source("main.sand", src));
     assert!(r.is_ok(), "{r:?}");
     assert_eq!(out.contents(), "Some(\"hello\")\ntrue\ntrue\n");
@@ -833,7 +833,11 @@ print(env.vars().len() > 0)
     let empty = sandlang::StdinFeed::new();
     empty.end();
     let again = MemorySink::new();
-    let config = base.clone().stdout(again.clone()).stdin_feed(&empty).journal(Arc::new(MemoryJournal::with_entries(journal.entries())));
+    let config = base
+        .clone()
+        .stdout(again.clone())
+        .stdin_feed(&empty)
+        .durable(Durable::new(Arc::new(MemoryJournal::with_entries(journal.entries()))));
     let r = rt().block_on(Engine::new(config).unwrap().run_source("main.sand", src));
     assert!(r.is_ok(), "{r:?}");
     assert_eq!(again.contents(), out.contents());
@@ -862,9 +866,8 @@ print("\(a) \(b >= a)")
             .clock(clock)
             .module(m)
             .seed(1)
-            .suspend_after(Duration::from_secs(60))
             .stdout(out.clone())
-            .journal(Arc::new(journal.clone()));
+            .durable(Durable::new(Arc::new(journal.clone())).suspend_after(Duration::from_secs(60)));
         let r = rt().block_on(Engine::new(config).unwrap().run_source("main.sand", src));
         (r, out.contents())
     };
@@ -915,10 +918,11 @@ pub fn wait(name: str, timeout: duration) -> Result<str?> {
     );
     let src = "import signals\nprint(signals.wait(\"go\", 1d))";
     let journal = MemoryJournal::new();
-    let base = Config::new().policy(RulePolicy::allow_all()).clock(clock.clone()).module(m).seed(1).suspend_after(Duration::from_secs(60));
+    let base = Config::new().policy(RulePolicy::allow_all()).clock(clock.clone()).module(m).seed(1);
     let run = || {
         let out = MemorySink::new();
-        let config = base.clone().stdout(out.clone()).journal(Arc::new(journal.clone()));
+        let config =
+            base.clone().stdout(out.clone()).durable(Durable::new(Arc::new(journal.clone())).suspend_after(Duration::from_secs(60)));
         let r = rt().block_on(Engine::new(config).unwrap().run_source("main.sand", src));
         (r, out.contents())
     };
@@ -940,7 +944,7 @@ fn a_changed_instant_argument_of_a_journaled_call_diverges() {
     let base = Config::new().policy(RulePolicy::allow_all()).module(m).seed(1);
     let run = |src: &str, journal: &MemoryJournal| {
         let out = MemorySink::new();
-        let config = base.clone().stdout(out.clone()).journal(Arc::new(journal.clone()));
+        let config = base.clone().stdout(out.clone()).durable(Durable::new(Arc::new(journal.clone())));
         let r = rt().block_on(Engine::new(config).unwrap().run_source("main.sand", src));
         (r, out.contents())
     };
@@ -959,7 +963,7 @@ fn a_changed_instant_argument_of_a_journaled_call_diverges() {
     m.async_function("echo", |t: sandlang::jiff::Timestamp| async move { Ok::<_, String>(t.as_second()) }).journaled();
     let base = Config::new().policy(RulePolicy::allow_all()).module(m).seed(1);
     let run = |src: &str, journal: &MemoryJournal| {
-        let config = base.clone().stdout(MemorySink::new()).journal(Arc::new(journal.clone()));
+        let config = base.clone().stdout(MemorySink::new()).durable(Durable::new(Arc::new(journal.clone())));
         rt().block_on(Engine::new(config).unwrap().run_source("main.sand", src))
     };
     let src = |s: i64| format!("import later\nimport time\nprint(later.echo(time.Instant.from_epoch_seconds({s}))?)");
@@ -993,9 +997,8 @@ print("\(b.since(a) >= 10s) \(c.since(b) >= 0s)")
             .clock(clock.clone())
             .module(m)
             .seed(1)
-            .suspend_after(Duration::ZERO)
             .stdout(out.clone())
-            .journal(Arc::new(journal.clone()));
+            .durable(Durable::new(Arc::new(journal.clone())).suspend_after(Duration::ZERO));
         let r = rt().block_on(Engine::new(config).unwrap().run_source("main.sand", src));
         (r, out.contents())
     };
@@ -1033,7 +1036,7 @@ fn time_spent_in_flushes_does_not_count_against_the_wall_time_limit() {
     let world = World::new(clock.clone(), false, Some(1));
     let limits = sandlang::Limits { max_wall_time: Some(Duration::from_secs(1)), ..sandlang::Limits::default() };
     let journal = Slow(MemoryJournal::new(), clock);
-    let config = world.base.clone().limits(limits).stdout(MemorySink::new()).journal(Arc::new(journal));
+    let config = world.base.clone().limits(limits).stdout(MemorySink::new()).durable(Durable::new(Arc::new(journal)));
     let src = "import http\nfor i in 0..3 {\n    print(http.get(\"http://svc.test/\\(i)\")?.status)\n}";
     let r = rt().block_on(Engine::new(config).unwrap().run_source("main.sand", src));
     assert!(r.is_ok(), "{r:?}");
@@ -1065,7 +1068,6 @@ fn effects_have_the_same_journal_seq_in_every_execution() {
         .network(Arc::new(net))
         .module(m)
         .seed(1)
-        .suspend_after(Duration::ZERO)
         .request_filter(move |t: &sandlang::RequestTarget, _: &mut Vec<(String, String)>| {
             f.lock().unwrap().push(t.journal_seq);
             Ok(())
@@ -1073,7 +1075,7 @@ fn effects_have_the_same_journal_seq_in_every_execution() {
     let src = "import fx\nimport http\nprint(fx.send(\"a\")?)\nprint(http.get(\"http://svc.test/x\")?.status)\nprint(fx.send(\"parked\")?)";
     let journal = MemoryJournal::new();
     let run = || {
-        let config = base.clone().stdout(MemorySink::new()).journal(Arc::new(journal.clone()));
+        let config = base.clone().stdout(MemorySink::new()).durable(Durable::new(Arc::new(journal.clone())).suspend_after(Duration::ZERO));
         rt().block_on(Engine::new(config).unwrap().run_source("main.sand", src))
     };
     let r = run();
@@ -1111,7 +1113,7 @@ fn a_journaled_call_that_runs_again_after_a_collection_replays_its_fuel() {
     let src = "import mem\nvar total = 0\nfor i in 0..3 {\n    total += mem.grow(i * 10)\n}\nprint(total)";
     let run = |journal: &MemoryJournal| {
         let out = MemorySink::new();
-        let config = base.clone().stdout(out.clone()).journal(Arc::new(journal.clone()));
+        let config = base.clone().stdout(out.clone()).durable(Durable::new(Arc::new(journal.clone())));
         let mut engine = Engine::new(config).unwrap();
         let r = rt().block_on(engine.run_source("main.sand", src));
         (r, out.contents(), engine.run_stats().fuel)
@@ -1169,7 +1171,7 @@ fn an_asynchronous_host_function_that_is_not_journaled_runs_again_in_replay() {
     let base = Config::new().policy(RulePolicy::allow_all()).module(m).seed(1);
     let run = |journal: &MemoryJournal| {
         let out = MemorySink::new();
-        let config = base.clone().stdout(out.clone()).journal(Arc::new(journal.clone()));
+        let config = base.clone().stdout(out.clone()).durable(Durable::new(Arc::new(journal.clone())));
         let r = rt().block_on(Engine::new(config).unwrap().run_source("main.sand", "import local\nprint(local.double(21)?)"));
         (r, out.contents())
     };
@@ -1207,7 +1209,7 @@ fn a_host_abort_ends_the_run_with_its_payload_and_is_not_journaled() {
     let journal = MemoryJournal::new();
     let run = || {
         let out = MemorySink::new();
-        let config = base.clone().stdout(out.clone()).journal(Arc::new(journal.clone()));
+        let config = base.clone().stdout(out.clone()).durable(Durable::new(Arc::new(journal.clone())));
         let r = rt().block_on(Engine::new(config).unwrap().run_source("main.sand", "import store\nprint(store.read(\"k\")?)"));
         (r, out.contents())
     };
@@ -1247,7 +1249,7 @@ fn a_flush_error_reaches_the_host_with_its_type() {
         }
     }
     let world = World::frozen(Some(1));
-    let config = world.base.clone().journal(Arc::new(Lost(MemoryJournal::new())));
+    let config = world.base.clone().durable(Durable::new(Arc::new(Lost(MemoryJournal::new()))));
     let r =
         rt().block_on(Engine::new(config).unwrap().run_source("main.sand", "import http\nprint(http.get(\"http://svc.test/x\")?.status)"));
     match &r {

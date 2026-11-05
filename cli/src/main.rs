@@ -434,7 +434,7 @@ fn cmd_run(args: &[String]) -> Result<u8, String> {
     let rt = runtime()?;
     let r = rt.block_on(engine.run_file(&file));
     if std::env::var_os("SAND_GC_STATS").is_some() {
-        eprintln!("{:#?}", engine.gc_stats());
+        eprintln!("{:#?}", engine.run_stats().gc);
     }
     match r {
         Ok(o) => Ok(exit_status(o.exit_code().unwrap_or(0))),

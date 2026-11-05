@@ -2323,8 +2323,9 @@ decisions.
 
 ### 16.7 Durable execution
 
-A journal makes a run durable. With `Config::journal`, the engine records each
-nondeterministic input of a run in a host-supplied `Journal`. If an execution
+A journal makes a run durable. With `Config::durable(Durable::new(journal))`,
+the engine records each nondeterministic input of a run in a host-supplied
+`Journal`. If an execution
 stops before the run ends, because the host crashes or because the engine
 suspends the run, the host runs the same program again with the same journal.
 The engine then replays the recorded inputs instead of performing their
@@ -2332,10 +2333,10 @@ effects, gets to the same state, and continues live after the last entry.
 Programs need no special syntax.
 
 ```rust
-use sandlang::journal::{Journal, MemoryJournal};
+use sandlang::journal::{Durable, Journal, MemoryJournal};
 
 let journal = MemoryJournal::new();
-let config = Config::new().journal(Arc::new(journal.clone()));
+let config = Config::new().durable(Durable::new(Arc::new(journal.clone())));
 Engine::new(config.clone())?.run_program(&program).await;  // records
 Engine::new(config)?.run_program(&program).await;          // replays, then continues live
 ```
@@ -2428,7 +2429,7 @@ behind, and a resumed run records the same times as a run that did not stop.
 The time that the engine waits for `Journal::flush` does not count against
 `max_wall_time`, so a slow journal does not use up the run's time limit.
 
-**Suspension.** With `Config::suspend_after(threshold)`, the engine suspends a
+**Suspension.** With `Durable::suspend_after(threshold)`, the engine suspends a
 journaled run that would wait for a long time. The engine suspends the run when
 every task waits, every pending operation is a timer or a parked host call, and
 no pending operation is due within `threshold` of the current time. The run

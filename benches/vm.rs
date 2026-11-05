@@ -171,7 +171,7 @@ fn run_once(src: &str) -> (Duration, String, GcStats) {
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let start = Instant::now();
     rt.block_on(engine.run_source("bench.sand", src)).unwrap();
-    (start.elapsed(), out.contents(), engine.gc_stats())
+    (start.elapsed(), out.contents(), engine.run_stats().gc)
 }
 
 fn ms(d: Duration) -> f64 {

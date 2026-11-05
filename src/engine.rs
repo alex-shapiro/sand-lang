@@ -338,8 +338,7 @@ pub struct Config {
     pub(crate) network: Option<Arc<dyn crate::network::Network>>,
     pub(crate) time_zone: Option<crate::time::TimeZone>,
     context: Option<Arc<dyn std::any::Any + Send + Sync>>,
-    journal: Option<Arc<dyn crate::journal::Journal>>,
-    suspend_after: Option<Duration>,
+    durable: Option<crate::journal::Durable>,
 }
 
 /// HTTP request destination.
@@ -399,25 +398,16 @@ impl Config {
             network: None,
             time_zone: None,
             context: None,
-            journal: None,
-            suspend_after: None,
+            durable: None,
         }
     }
 
-    /// Records the nondeterministic inputs of each run in `journal`, and
-    /// replays the entries it already holds (SPEC §16.7). A journaled run
-    /// never prompts for permissions and disables `net` sockets and HTTP
-    /// servers.
-    pub fn journal(mut self, journal: Arc<dyn crate::journal::Journal>) -> Self {
-        self.journal = Some(journal);
-        self
-    }
-
-    /// Suspends a journaled run when every task waits for a timer or a
-    /// parked host call that is due more than `threshold` from now, instead
-    /// of waiting: the run fails with [`Error::Suspended`] (SPEC §16.7).
-    pub fn suspend_after(mut self, threshold: Duration) -> Self {
-        self.suspend_after = Some(threshold);
+    /// Makes each run durable (SPEC §16.7): the engine records the
+    /// nondeterministic inputs of the run in the journal of `durable`, and
+    /// replays the entries that it already holds. A journaled run never
+    /// prompts for permissions and disables `net` sockets and HTTP servers.
+    pub fn durable(mut self, durable: crate::journal::Durable) -> Self {
+        self.durable = Some(durable);
         self
     }
 
@@ -885,7 +875,6 @@ pub struct Engine {
     /// "Always" prompt answers, remembered for the lifetime of the engine
     /// (SPEC 14.3): shared by import checks and every run (and VM).
     always: Always,
-    gc_stats: GcStats,
     stats: RunStats,
     /// The module root of source text, and its normal form (see
     /// [`Engine::source_root`]).
@@ -942,7 +931,6 @@ impl Engine {
             interrupt: Arc::new(AtomicBool::new(false)),
             shared: Arc::new(IoShared::default()),
             always: Arc::default(),
-            gc_stats: GcStats::default(),
             stats: RunStats::default(),
             root: OnceLock::new(),
             spare: Mutex::default(),
@@ -978,11 +966,6 @@ impl Engine {
             .collect();
         mods.sort_by_key(|&(kind, name, _)| (kind, name));
         Ok(mods.into_iter().map(|(kind, _, m)| checker.module_doc(m, kind)).collect())
-    }
-
-    /// Garbage collector statistics of the most recent run.
-    pub fn gc_stats(&self) -> GcStats {
-        self.gc_stats
     }
 
     /// Resources used by the most recent run, including runs that failed or
@@ -1023,7 +1006,6 @@ impl Engine {
             interrupt: Arc::new(AtomicBool::new(false)),
             shared: Arc::new(IoShared::default()),
             always: self.always.clone(),
-            gc_stats: GcStats::default(),
             stats: RunStats::default(),
             root: OnceLock::new(),
             spare: Mutex::default(),
@@ -1303,7 +1285,6 @@ impl Engine {
             Err(t) => Err(t),
         };
         let _ = self.config.stdout.flush();
-        self.gc_stats = vm.heap.stats;
         vm.heap.note_peak();
         self.stats = RunStats { fuel: vm.meter.used(), peak_memory: vm.heap.peak(), output_bytes: vm.host.output_bytes, gc: vm.heap.stats };
         if self.config.exit_after_run {
@@ -1324,10 +1305,10 @@ impl Engine {
     /// journaled run never prompts and ignores "always" answers of earlier
     /// runs, since replay cannot repeat a prompt's answer.
     fn attach_journal(&self, vm: &mut Vm) -> Result<(), Trap> {
-        let Some(journal) = &self.config.journal else { return Ok(()) };
+        let Some(durable) = &self.config.durable else { return Ok(()) };
         vm.host.prompter = None;
         vm.host.always = Always::default();
-        let state = crate::vm::journal::start(journal.clone(), self.config.clock.now(), self.config.suspend_after, &self.config.limits)
+        let state = crate::vm::journal::start(durable.journal.clone(), self.config.clock.now(), durable.suspend_after, &self.config.limits)
             .map_err(Trap::Journal)?;
         vm.attach_journal(state, self.config.seed.is_some()).map_err(Trap::Journal)
     }

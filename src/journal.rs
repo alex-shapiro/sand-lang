@@ -1,6 +1,6 @@
 //! Durable execution: the journal of the nondeterministic inputs of a run.
 //!
-//! A host sets a [`Journal`] with [`Config::journal`](crate::Config::journal).
+//! A host makes runs durable with [`Config::durable`](crate::Config::durable).
 //! The engine then records, in order, every input that can differ between two
 //! executions of the same program: clock readings, the random seed, the
 //! completion of each asynchronous operation and the point in the schedule
@@ -431,6 +431,32 @@ pub(crate) fn nanos_of(t: SystemTime) -> i128 {
 pub(crate) fn time_of(nanos: i128) -> SystemTime {
     let d = Duration::from_nanos(nanos.unsigned_abs().min(u64::MAX as u128) as u64);
     if nanos >= 0 { UNIX_EPOCH + d } else { UNIX_EPOCH - d }
+}
+
+/// The durable execution of an engine's runs ([`Config::durable`](crate::Config::durable)).
+#[derive(Clone)]
+pub struct Durable {
+    /// Where the engine records the inputs of each run, and the entries that
+    /// it replays.
+    pub journal: Arc<dyn Journal>,
+    /// Suspends a run when every task waits for a timer or a parked host
+    /// call that is due more than this much later, instead of waiting: the
+    /// run returns [`Outcome::Suspended`](crate::Outcome::Suspended). `None`
+    /// waits for every operation.
+    pub suspend_after: Option<Duration>,
+}
+
+impl Durable {
+    /// Durable execution with `journal`, without suspension.
+    pub fn new(journal: Arc<dyn Journal>) -> Durable {
+        Durable { journal, suspend_after: None }
+    }
+
+    /// Sets [`Durable::suspend_after`].
+    pub fn suspend_after(mut self, threshold: Duration) -> Durable {
+        self.suspend_after = Some(threshold);
+        self
+    }
 }
 
 /// The future that [`Journal::flush`] returns.
