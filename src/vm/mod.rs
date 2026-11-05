@@ -7,6 +7,7 @@ pub mod heap;
 mod interp;
 pub mod iomem;
 mod iter;
+pub mod journal;
 pub mod meter;
 pub mod sched;
 pub mod value;
@@ -87,6 +88,12 @@ pub enum CtlKind {
     /// open-resource slot, I/O buffer space) may be held by garbage. See
     /// [`Vm::resource_slot`].
     Collect,
+    /// The run stops for its journal (divergence, suspension, a failed flush).
+    Journal(journal::JournalStop),
+    /// Suspend the task on a journaled operation.
+    Journaled(Box<journal::JournalOp>),
+    /// Flush the journal, then call the native again (before an effect).
+    Flush,
 }
 
 impl Ctl {
@@ -171,6 +178,9 @@ impl std::fmt::Debug for CtlKind {
             CtlKind::Yield => write!(f, "Yield"),
             CtlKind::Interrupted => write!(f, "Interrupted"),
             CtlKind::Collect => write!(f, "Collect"),
+            CtlKind::Journal(s) => write!(f, "Journal({s:?})"),
+            CtlKind::Journaled(op) => write!(f, "Journaled({})", op.label),
+            CtlKind::Flush => write!(f, "Flush"),
         }
     }
 }
@@ -277,6 +287,8 @@ pub struct Fiber {
     pub waiters_prune_at: usize,
     /// Pending IO operation id, if waiting on IO.
     pub io: Option<u64>,
+    /// The journaled operation the fiber waits for (see [`journal`]).
+    pub jop: Option<u64>,
     /// An error (`kind: message`) to raise when the fiber resumes.
     pub pending_error: Option<String>,
 }
@@ -304,6 +316,8 @@ pub enum Trap {
     Limit(LimitKind),
     Interrupted,
     Exit(i32),
+    /// The journal stopped the run.
+    Journal(journal::JournalStop),
 }
 
 impl Trap {
@@ -312,6 +326,9 @@ impl Trap {
         match c.into_kind() {
             CtlKind::Limit(k) => Trap::Limit(k),
             CtlKind::Interrupted => Trap::Interrupted,
+            CtlKind::Journal(s) => Trap::Journal(s),
+            CtlKind::RuntimeError(message) => Trap::Error { message, trace: vec![] },
+            CtlKind::Internal(message) => Trap::Internal { message, trace: vec![] },
             other => Trap::Internal { message: format!("unexpected {other:?}"), trace: vec![] },
         }
     }
@@ -569,6 +586,13 @@ pub struct Vm {
     pub(crate) retry_stress: bool,
     /// Struct nesting depth during conversion to Sand (see [`struct_into_value`](crate::native::struct_into_value)).
     pub(crate) struct_depth: usize,
+    /// The run's journal, if it has one (SPEC §16.7).
+    pub(crate) journal: Option<Box<std::cell::RefCell<journal::JournalState>>>,
+    /// The native whose call suspended the running task last.
+    pub(crate) async_native: u32,
+    /// Until when the run may be suspended while the operation that a
+    /// native returns waits (see [`crate::native::Later::parked`]).
+    pub(crate) op_park: journal::Park,
 }
 
 pub const SLICE_FUEL: i64 = 20_000;
@@ -669,6 +693,9 @@ impl Vm {
             broken: false,
             retry_stress: false,
             struct_depth: 0,
+            journal: None,
+            async_native: 0,
+            op_park: None,
         };
         vm.load_program();
         vm
@@ -1295,6 +1322,7 @@ impl Vm {
                     waiters: vec![],
                     waiters_prune_at: MIN_PRUNE,
                     io: None,
+                    jop: None,
                     pending_error: None,
                 });
                 self.heap.fiber_bytes += fiber.footprint();
@@ -1342,6 +1370,7 @@ impl Vm {
         f.waiters.clear();
         f.waiters_prune_at = MIN_PRUNE;
         f.io = None;
+        f.jop = None;
         f.pending_error = None;
         self.spare_fibers.push(f);
     }
@@ -1383,6 +1412,7 @@ impl Vm {
         }
         f.state = FiberState::Ready;
         f.io = None;
+        f.jop = None;
         let race = std::mem::take(&mut f.race);
         self.ready.push_back(fid);
         for t in race {
@@ -1439,6 +1469,9 @@ impl Vm {
         if let Some(mut f) = self.fibers.get_mut(fid as usize).and_then(|f| f.take()) {
             if let Some(io) = f.io.take() {
                 self.io.cancel(io);
+            }
+            if let Some(op) = f.jop.take() {
+                self.cancel_op(op);
             }
             let queued = f.state == FiberState::Ready;
             self.end_cancelled(fid, f);

@@ -1,9 +1,10 @@
 //! The task scheduler: runs fibers round-robin and drives pending I/O.
 
 use super::interp::Exit;
+use super::journal::{Identity, JournalOp, JournalStop, OpKind, OpWork, Park};
 use super::*;
 use crate::LimitKind;
-use crate::platform::{ClockFuture, Instant};
+use crate::platform::{ClockFuture, Instant, SystemTime};
 use std::sync::atomic::Ordering;
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
@@ -56,6 +57,9 @@ struct IoOp {
     fid: u32,
     wgen: u64,
     fut: BoxFuture,
+    /// Until when the run may be suspended while the operation waits, if it
+    /// may be (journaled timers and parked host calls).
+    park: Park,
 }
 
 /// The pending I/O operations of a VM, in slots (an operation's id is its
@@ -76,7 +80,7 @@ impl IoTable {
 
     /// Adds the operation `fut` of task `fid` (waiting as `wgen`), polling
     /// it once: returns its id, or its result if it is done already.
-    pub fn add(&mut self, fid: u32, wgen: u64, mut fut: BoxFuture) -> Result<u64, Finisher> {
+    pub fn add(&mut self, fid: u32, wgen: u64, mut fut: BoxFuture, park: Park) -> Result<u64, Finisher> {
         let slot = match self.free.pop() {
             Some(s) => s,
             None => {
@@ -90,7 +94,7 @@ impl IoTable {
             self.free.push(slot);
             return Err(fin);
         }
-        self.ops[slot as usize] = Some(IoOp { fid, wgen, fut });
+        self.ops[slot as usize] = Some(IoOp { fid, wgen, fut, park });
         self.pending += 1;
         Ok(u64::from(slot))
     }
@@ -106,6 +110,18 @@ impl IoTable {
 
     pub fn is_empty(&self) -> bool {
         self.pending == 0
+    }
+
+    /// If every pending operation may be suspended, the earliest time until
+    /// which one may be (`None`: until the host resumes the run).
+    fn parked_until(&self) -> Park {
+        let mut until: Option<SystemTime> = None;
+        for op in self.ops.iter().flatten() {
+            if let Some(t) = op.park? {
+                until = Some(until.map_or(t, |u| u.min(t)));
+            }
+        }
+        Some(until)
     }
 
     /// Cancels every pending operation.
@@ -280,29 +296,151 @@ impl Vm {
                     self.deliver(fid, wgen, v);
                     self.enforce_limit(None).map_err(Trap::Limit)?;
                 }
-                Err(c) => {
-                    let trace = match &self.fibers[fid as usize] {
-                        Some(f) => self.trace_of(f, None),
-                        None => vec![],
-                    };
-                    return Err(match c.into_kind() {
-                        CtlKind::RuntimeError(message) => Trap::Error { message, trace },
-                        CtlKind::Internal(message) => {
-                            self.broken = true;
-                            Trap::Internal { message, trace }
-                        }
-                        CtlKind::Limit(k) => Trap::Limit(k),
-                        CtlKind::Interrupted => Trap::Interrupted,
-                        CtlKind::Exit(c) => Trap::Exit(c),
-                        other => {
-                            self.broken = true;
-                            Trap::Internal { message: format!("unexpected {other:?} from an I/O operation"), trace }
-                        }
-                    });
-                }
+                Err(c) => return Err(self.op_trap(fid, c)),
             }
         }
         Ok(())
+    }
+
+    /// The trap for the failure `c` of an I/O operation of fiber `fid`.
+    fn op_trap(&mut self, fid: u32, c: Ctl) -> Trap {
+        let trace = match self.fibers.get(fid as usize) {
+            Some(Some(f)) => self.trace_of(f, None),
+            _ => vec![],
+        };
+        match c.into_kind() {
+            CtlKind::RuntimeError(message) => Trap::Error { message, trace },
+            CtlKind::Internal(message) => {
+                self.broken = true;
+                Trap::Internal { message, trace }
+            }
+            CtlKind::Limit(k) => Trap::Limit(k),
+            CtlKind::Interrupted => Trap::Interrupted,
+            CtlKind::Exit(c) => Trap::Exit(c),
+            CtlKind::Journal(s) => Trap::Journal(s),
+            other => {
+                self.broken = true;
+                Trap::Internal { message: format!("unexpected {other:?} from an I/O operation"), trace }
+            }
+        }
+    }
+
+    /// Waits for the journal to make its entries durable.
+    pub(crate) async fn flush_journal(&mut self) -> Result<(), Trap> {
+        let Some(mut fut) = self.journal_state().and_then(|mut j| j.flush()) else { return Ok(()) };
+        let (interrupt, shared) = (self.host.interrupt.clone(), self.io.shared.clone());
+        let r = std::future::poll_fn(|cx| {
+            shared.set_waker(cx.waker());
+            if interrupt.load(Ordering::Relaxed) {
+                return Poll::Ready(None);
+            }
+            fut.as_mut().poll(cx).map(Some)
+        })
+        .await;
+        match r {
+            None => Err(Trap::Interrupted),
+            Some(Err(message)) => Err(Trap::Journal(JournalStop::Failed(message))),
+            Some(Ok(())) => Ok(()),
+        }
+    }
+
+    /// Starts journaled operation `op` of fiber `fid` (`f`), which waits for it.
+    async fn start_op(&mut self, fid: u32, mut f: Box<Fiber>, op: JournalOp, timer: &RunTimer) -> Result<(), Trap> {
+        let g = self.next_gen();
+        f.wgen = g;
+        f.state = FiberState::Waiting;
+        let effectful = op.effectful;
+        self.fibers[fid as usize] = Some(f);
+        let started = match self.begin_op(fid, g, op) {
+            Ok(s) => s,
+            Err(c) => return Err(self.op_trap(fid, c)),
+        };
+        let Some((fut, park)) = started else { return Ok(()) };
+        if effectful && self.must_flush() {
+            self.flush_journal().await?;
+        }
+        let added = self.io.add(fid, g, fut, park);
+        if let Some(f) = self.fibers[fid as usize].as_mut() {
+            f.io = added.as_ref().ok().copied();
+        }
+        if let Err(fin) = added {
+            if self.replaying() {
+                if let Some(mut j) = self.journal_state() {
+                    j.held.push((fid, g, fin));
+                }
+            } else {
+                self.apply_completions(vec![(fid, g, fin)], timer)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Handles an operation that a native suspended a task on in a
+    /// journaled run: a host call becomes a journaled operation; a standard
+    /// library operation is local (its outcome follows from the journaled
+    /// inputs, as a read of a received HTTP body does) and completes before
+    /// anything else runs, so that the schedule does not depend on when.
+    async fn start_async(&mut self, fid: u32, mut f: Box<Fiber>, fut: BoxFuture, timer: &RunTimer) -> Result<(), Trap> {
+        let park = self.op_park.take();
+        let n = self.async_native as usize;
+        if let Some(entry) = self.natives.get(n).filter(|e| matches!(e.f, HostFn::Shared(_))) {
+            let label = entry.name.to_string();
+            let identity = Identity::default().add(label.as_bytes()).finish();
+            let op = JournalOp { kind: OpKind::Call, identity, label, effectful: true, park, pre_fuel: 0, work: OpWork::Value(fut) };
+            return self.start_op(fid, f, op, timer).await;
+        }
+        let g = self.next_gen();
+        f.wgen = g;
+        f.state = FiberState::Waiting;
+        self.fibers[fid as usize] = Some(f);
+        let (interrupt, shared) = (self.host.interrupt.clone(), self.io.shared.clone());
+        let mut fut = fut;
+        let fin = std::future::poll_fn(|cx| {
+            shared.set_waker(cx.waker());
+            if interrupt.load(Ordering::Relaxed) {
+                return Poll::Ready(None);
+            }
+            fut.as_mut().poll(cx).map(Some)
+        })
+        .await;
+        match fin {
+            Some(fin) => self.apply_completions(vec![(fid, g, fin)], timer),
+            None => Err(Trap::Interrupted),
+        }
+    }
+
+    /// Delivers the completions that replay holds for this point, and once
+    /// replay is over, those held back while it was not. Returns whether it
+    /// delivered any.
+    fn journal_checkpoint(&mut self, timer: &RunTimer) -> Result<bool, Trap> {
+        let mut any = false;
+        // One at a time: delivering one can cancel the task of another.
+        while let Some(due) = self.next_due().map_err(Trap::from_ctl)? {
+            any = true;
+            self.apply_completions(vec![due], timer)?;
+        }
+        if !self.replaying() {
+            let held = self.journal_state().map(|mut j| std::mem::take(&mut j.held)).unwrap_or_default();
+            any |= !held.is_empty();
+            self.apply_completions(held, timer)?;
+        }
+        Ok(any)
+    }
+
+    /// When a journaled run must be suspended now that nothing can run: if
+    /// every pending operation may be, and the earliest one is due later
+    /// than the configured threshold. Returns until when.
+    fn suspension(&self) -> Option<Option<SystemTime>> {
+        let j = self.journal.as_ref()?.borrow();
+        let after = j.suspend_after?;
+        if j.replaying() || !j.held.is_empty() {
+            return None;
+        }
+        let until = self.io.parked_until()?;
+        match until {
+            Some(t) if t.duration_since(self.host.clock.wall()).unwrap_or_default() <= after => None,
+            _ => Some(until),
+        }
     }
 
     /// Runs `proto` (a zero-argument function) as the main task until it
@@ -361,15 +499,34 @@ impl Vm {
                 // Deadlines let long natives check the time limits mid-call.
                 let mut fuel = self.meter.start_slice(timer.cpu_deadline(self.host.limits.max_cpu_time), self.deadline);
                 let slice = fuel;
-                // A Rust panic in the interpreter or a native (a bug) ends
-                // the run as an internal error instead of unwinding into the
-                // host; caught per slice, which costs nothing per native call.
-                let r = match crate::unwind::catch(|| self.interp(&mut f, &mut fuel)) {
-                    Ok(r) => r,
-                    Err(msg) => {
-                        self.broken = true;
-                        Err(Trap::Internal { message: msg, trace: self.trace_of(&f, None) })
+                if let Some(j) = &self.journal {
+                    j.borrow_mut().steps += 1;
+                }
+                let r = loop {
+                    // A Rust panic in the interpreter or a native (a bug) ends
+                    // the run as an internal error instead of unwinding into the
+                    // host; caught per slice, which costs nothing per native call.
+                    let r = match crate::unwind::catch(|| self.interp(&mut f, &mut fuel)) {
+                        Ok(r) => r,
+                        Err(msg) => {
+                            self.broken = true;
+                            Err(Trap::Internal { message: msg, trace: self.trace_of(&f, None) })
+                        }
+                    };
+                    if !matches!(r, Ok(Exit::Flush)) {
+                        break r;
                     }
+                    // The call that asked for the flush continues the slice,
+                    // as it does in replay, where it does not ask.
+                    self.meter.sync(fuel);
+                    self.fibers[fid as usize] = Some(f);
+                    self.current = u32::MAX;
+                    self.flush_journal().await?;
+                    let Some(again) = self.fibers[fid as usize].take() else {
+                        return Err(Trap::Internal { message: "a task vanished during a journal flush".into(), trace: vec![] });
+                    };
+                    f = again;
+                    self.current = fid;
                 };
                 self.meter.sync(fuel);
                 timer.ran(self.meter.spent());
@@ -421,11 +578,14 @@ impl Vm {
                         f.state = FiberState::Waiting;
                         self.fibers[fid as usize] = Some(f);
                     }
+                    Exit::Async(fut) if self.journal.is_some() => self.start_async(fid, f, fut, &timer).await?,
+                    Exit::Journaled(op) => self.start_op(fid, f, *op, &timer).await?,
+                    Exit::Flush => return Err(Trap::Internal { message: "a journal flush outside a call".into(), trace: vec![] }),
                     Exit::Async(fut) => {
                         let g = self.next_gen();
                         f.wgen = g;
                         f.state = FiberState::Waiting;
-                        let added = self.io.add(fid, g, fut);
+                        let added = self.io.add(fid, g, fut, None);
                         f.io = added.as_ref().ok().copied();
                         self.fibers[fid as usize] = Some(f);
                         if let Err(fin) = added {
@@ -490,9 +650,15 @@ impl Vm {
                     }
                 }
                 self.check_limits(&timer)?;
+                if self.journal.is_some() {
+                    self.journal_checkpoint(&timer)?;
+                }
                 if timer.now.saturating_duration_since(timer.last_yield) > YIELD_EVERY {
-                    let done = self.io.poll_ready(None);
-                    self.apply_completions(done, &timer)?;
+                    // Replay delivers completions where the journal says.
+                    if !self.replaying() {
+                        let done = self.io.poll_ready(None);
+                        self.apply_completions(done, &timer)?;
+                    }
                     // On the web a computing engine keeps the thread (yielding
                     // does not reach the event loop), so output reaches the
                     // host only when flushed: flush it as it runs.
@@ -505,6 +671,20 @@ impl Vm {
                 }
             }
             self.flush_stdout();
+            if self.journal.is_some() {
+                if self.journal_checkpoint(&timer)? {
+                    self.check_limits(&timer)?;
+                    continue;
+                }
+                if self.replaying() {
+                    if self.ending || main.is_none() {
+                        return Ok(Stop::Idle);
+                    }
+                    return Err(self
+                        .blocked_in_replay()
+                        .map_or_else(|| Trap::Internal { message: "replay stalled".into(), trace: vec![] }, Trap::Journal));
+                }
+            }
             if self.io.is_empty() {
                 let Some(main) = main else { return Ok(Stop::Idle) };
                 let trace = match self.fibers.get(main as usize) {
@@ -521,6 +701,12 @@ impl Vm {
             }
             if self.ending {
                 return Ok(Stop::Idle);
+            }
+            if main.is_some()
+                && let Some(until) = self.suspension()
+            {
+                self.flush_journal().await?;
+                return Err(Trap::Journal(JournalStop::Suspended(until)));
             }
             timer.read();
             let blocked = self.host.stdin_feed.as_ref().map(|f| f.blocked());

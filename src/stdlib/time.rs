@@ -788,7 +788,7 @@ struct Stopwatch(Monotonic);
 impl NativeObject for Stopwatch {}
 
 fn now(vm: &Vm) -> Result<Timestamp, Ctl> {
-    let nanos = match vm.host.clock.wall().duration_since(UNIX_EPOCH) {
+    let nanos = match vm.wall_time()?.duration_since(UNIX_EPOCH) {
         Ok(d) => i128::try_from(d.as_nanos()),
         Err(e) => i128::try_from(e.duration().as_nanos()).map(|n| -n),
     };
@@ -893,12 +893,12 @@ fn register_module(m: &mut NativeModule) {
     });
     m.vm_function("now", |vm: &mut Vm| now(vm));
     m.vm_function("Stopwatch.init", |vm: &mut Vm| {
-        let start = vm.host.clock.now();
+        let start = vm.monotonic()?;
         vm.new_object(Stopwatch(start))
     });
     m.vm_function("Stopwatch.elapsed", |vm: &mut Vm, watch: Val<Stopwatch>| -> Result<_, Ctl> {
         let start = watch.get(&vm.heap)?.0;
-        let elapsed = vm.host.clock.now().saturating_duration_since(start);
+        let elapsed = vm.monotonic()?.saturating_duration_since(start);
         Ok(SignedDuration::from_nanos(i64::try_from(elapsed.as_nanos()).unwrap_or(i64::MAX)))
     });
     m.function("midnight", Time::midnight);

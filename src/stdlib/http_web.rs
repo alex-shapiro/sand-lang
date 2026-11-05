@@ -52,6 +52,9 @@ fn send(
     body: Val<Vec<u8>>,
     timeout: SignedDuration,
 ) -> Suspended<ResponseStream> {
+    if vm.journaling() {
+        return Err(crate::native::HostError::new("unsupported", "HTTP requests are not available in a journaled run on the web"));
+    }
     let mut req = prepare_request(vm, method, url, headers)?;
     // The request body is held, and the response buffered, outside the heap.
     let res = vm.reserve_io(body.bytes(&vm.heap).len())?;

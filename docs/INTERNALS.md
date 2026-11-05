@@ -36,6 +36,11 @@ access, and host targets:
 - `src/engine.rs`, `src/modules.rs`: `Engine`, `Config`, and module loading.
 - `src/native/`, `src/stdlib/`: the `NativeModule` API and the standard
   library.
+- `src/journal.rs`, `src/vm/journal.rs`: the journal of durable runs, which
+  records and replays the nondeterministic inputs of a run (SPEC §16.7).
+  Natives must read the clock through `Vm::wall_time` and `Vm::monotonic`,
+  and charge fuel by elapsed time through `Vm::time_fuel`, so that replay
+  gives the same values.
 - `src/policy/`, `src/files/`, `src/platform.rs`: capability policies,
   sandboxed file systems, and OS platform abstractions.
 - `cli/`, `wasm/`, `site/`: the `sand` CLI, WebAssembly bindings, and website.

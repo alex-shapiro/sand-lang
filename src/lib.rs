@@ -17,6 +17,7 @@ mod feed;
 mod files;
 pub mod fmt;
 pub mod hir;
+pub mod journal;
 pub mod lint;
 mod modules;
 pub mod native;

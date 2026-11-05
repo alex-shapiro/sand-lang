@@ -603,6 +603,9 @@ fn send(
     body: Val<Vec<u8>>,
     timeout: SignedDuration,
 ) -> Suspended<ResponseStream> {
+    if vm.journaling() {
+        return send_journaled(vm, method, url, headers, body, timeout);
+    }
     let mut req = prepare_request(vm, method, url, headers)?;
     // The request is held outside the heap while it is sent.
     let mut res = vm.reserve_io(body.bytes(&vm.heap).len())?;
@@ -685,6 +688,120 @@ fn send(
     )
 }
 
+/// `send` in a journaled run: an operation that the journal records whole
+/// (the response with its body, or the error), so that replay sends nothing
+/// and returns the recorded response. Its identity is the request as the
+/// script made it, before the host's request filter. The connection is not
+/// pooled, and its buffers count against the journal's budget of live
+/// operations.
+fn send_journaled(
+    vm: &mut Vm,
+    method: Val<String>,
+    url: Val<String>,
+    headers: Val<Vec<(String, String)>>,
+    body: Val<Vec<u8>>,
+    timeout: SignedDuration,
+) -> Suspended<ResponseStream> {
+    use crate::vm::journal::{Identity, JournalOp, OpKind, OpWork};
+    let mut req = prepare_request(vm, method, url, headers)?;
+    req.check_policy(vm)?;
+    let body = body.bytes(&vm.heap).to_vec();
+    vm.charge_bytes(body.len())?;
+    let mut identity = Identity::default().add(req.method.as_bytes()).add(req.text.as_bytes());
+    for (k, v) in &req.headers {
+        identity = identity.add(k.as_bytes()).add(v.as_bytes());
+    }
+    let identity = identity.add(&body).finish();
+    let label = format!("{} {}", req.method, req.text);
+    req.apply_filter(vm)?;
+    let sized = !body.is_empty() || ["POST", "PUT", "PATCH"].iter().any(|m| req.method.eq_ignore_ascii_case(m));
+    let delimit = if sized { Delimit::Length(body.len() as u64) } else { Delimit::None };
+    let mut request = request_head(&req.method, &req.url, &req.headers, delimit, true).into_bytes();
+    request.extend_from_slice(&body);
+    let Prepared { method, text, url, .. } = req;
+    let timeout = stream::timeout(timeout);
+    let head_only = method.eq_ignore_ascii_case("HEAD");
+    let max_body = vm.host.limits.max_http_body;
+    let (policy, network, tls, clock) = (vm.host.policy.clone(), vm.host.network.clone(), vm.host.tls.clone(), vm.host.clock.clone());
+    let live = match vm.journal_state() {
+        Some(j) => j.live_memory.clone(),
+        None => return Err(HostError::from(crate::vm::Ctl::internal("a journaled request without a journal"))),
+    };
+    let url_text = text.clone();
+    let fut = async move {
+        let outcome = async {
+            let slot = ResourceSlot::try_new(&live).ok_or_else(|| IoFailure::new("limit", "too many open resources"))?;
+            let mut res = Reservation::new(&live);
+            res.ensure(request.len())?;
+            let run = async {
+                let conn = connect(&policy, &*network, &tls, &method, &url, slot).await?;
+                exchange(conn, &request, head_only, &mut res).await.map_err(|(e, _)| e)
+            };
+            let (conn, head) = match crate::platform::timeout(&*clock, timeout, run).await {
+                Some(r) => r?,
+                None => return Err(IoFailure::new("timeout", format!("request to {text} timed out"))),
+            };
+            let ResponseHead { status, headers, framing, .. } = head;
+            if framing == Framing::Done {
+                return Ok((status, headers, Vec::new()));
+            }
+            let source = Source::Owned { conn: Some(conn), reuse: None };
+            let framed = Framed { source, framing, timeout, clock: clock.clone(), continue_first: false };
+            let mut reader = BodyReader::new(Box::new(framed), max_body, None);
+            match crate::platform::timeout(&*clock, timeout, reader.read_all(&mut res)).await {
+                Some(data) => Ok((status, headers, data?)),
+                None => Err(IoFailure::new("timeout", format!("reading the response from {text} timed out"))),
+            }
+        };
+        encode_reply(outcome.await)
+    };
+    let build = Box::new(move |vm: &mut Vm, payload: &[u8]| -> crate::vm::NResult {
+        let r = match decode_reply(payload) {
+            Some(Ok((status, headers, data))) => Ok(response(vm, url_text, status, headers, BodyReader::memory(data, max_body))?),
+            Some(Err(e)) => Err(e),
+            None => return Err(crate::vm::Ctl::internal("a journaled HTTP response is malformed")),
+        };
+        crate::native::IntoValue::into_value(r, vm)
+    });
+    let work = OpWork::Bytes { fut: Box::pin(fut), build };
+    let op = JournalOp { kind: OpKind::Http, identity, label, effectful: true, park: None, pre_fuel: 0, work };
+    Err(crate::vm::Ctl::journaled(op).into())
+}
+
+type Reply = (i64, Vec<(String, String)>, Vec<u8>);
+
+/// The journal's encoding of the outcome of a request.
+fn encode_reply(r: Result<Reply, IoFailure>) -> Vec<u8> {
+    let mut w = crate::vm::journal::Writer::default();
+    match r {
+        Ok((status, headers, body)) => {
+            w.u8(0).i64(status).u64(headers.len() as u64);
+            for (k, v) in &headers {
+                w.str(k).str(v);
+            }
+            w.bytes(&body);
+        }
+        Err(e) => {
+            w.u8(1).str(e.kind).str(&e.message);
+        }
+    }
+    w.0
+}
+
+fn decode_reply(data: &[u8]) -> Option<Result<Reply, HostError>> {
+    let mut r = crate::vm::journal::Reader::new(data);
+    if r.u8()? == 1 {
+        return Some(Err(HostError::new(r.str()?, r.str()?)));
+    }
+    let status = r.i64()?;
+    let n = r.u64()?;
+    let mut headers = Vec::new();
+    for _ in 0..n {
+        headers.push((r.str()?.to_string(), r.str()?.to_string()));
+    }
+    Some(Ok((status, headers, r.bytes()?.to_vec())))
+}
+
 /// A request's head, with a `Connection: close` header if `close`.
 fn request_head(method: &str, url: &Url, headers: &[(String, String)], body: Delimit, close: bool) -> String {
     let has = |name: &str| headers.iter().any(|(k, _)| k.eq_ignore_ascii_case(name));
@@ -753,6 +870,7 @@ fn upload(
     headers: Val<Vec<(String, String)>>,
     timeout: SignedDuration,
 ) -> Suspended<Upload> {
+    net::refuse_in_journal(vm, "streaming HTTP requests")?;
     let mut req = prepare_request(vm, method, url, headers)?;
     let length = given_length(&req.headers).map_err(|e| HostError::new("invalid", e))?;
     req.check_policy(vm)?;

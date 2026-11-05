@@ -13,7 +13,7 @@ pub(crate) fn module() -> NativeModule {
         Ok(format_uuid(&b))
     });
     m.vm_function("unix_millis", |vm: &mut Vm| -> Result<_, Ctl> {
-        let ms = vm.host.clock.wall().duration_since(crate::platform::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+        let ms = vm.wall_time()?.duration_since(crate::platform::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
         Ok(ms.min(i64::MAX as u128) as i64)
     });
     // Starts each millisecond's counter at a random value in the lower half

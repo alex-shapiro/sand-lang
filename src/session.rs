@@ -597,6 +597,7 @@ fn conclude(vm: &mut Vm, r: Result<RunEnd, Trap>, exit_code: &mut Option<i32>) -
         Err(Trap::Internal { message, trace }) => Error::Internal { message, trace },
         Err(Trap::Limit(k)) => Error::Limit(k),
         Err(Trap::Interrupted) => Error::Interrupted,
+        Err(Trap::Journal(s)) => crate::engine::journal_error(s),
     };
     vm.abandon_tasks();
     if matches!(e, Error::Limit(_)) {

@@ -60,6 +60,10 @@ pub enum Exit {
     /// Waiting on a scheduler event (already registered).
     Blocked,
     Async(BoxFuture),
+    /// A journaled asynchronous operation.
+    Journaled(Box<super::journal::JournalOp>),
+    /// The journal must be flushed before the call (retried) has an effect.
+    Flush,
     Prompt(Capability),
     /// `exit(code)` or a top-level `?` failure.
     Terminate(i32),
@@ -512,6 +516,7 @@ impl Vm {
             CtlKind::Internal(m) => self.internal_trap(fiber, ip, m),
             CtlKind::Limit(k) => self.limit_trap(fiber, ip, k),
             CtlKind::Interrupted => Trap::Interrupted,
+            CtlKind::Journal(s) => Trap::Journal(s),
             other => self.internal_trap(fiber, ip, format!("unexpected {other:?}")),
         }
     }
@@ -1752,8 +1757,18 @@ impl Vm {
             }
             CtlKind::Async(fut) => {
                 fiber.result_slot = slot;
+                self.async_native = n;
                 Ok(Some(Exit::Async(fut)))
             }
+            CtlKind::Journaled(op) => {
+                fiber.result_slot = slot;
+                Ok(Some(Exit::Journaled(op)))
+            }
+            CtlKind::Flush => {
+                fiber.frames.last_mut().unwrap().ip = (ip - 1) as u32;
+                Ok(Some(Exit::Flush))
+            }
+            CtlKind::Journal(s) => Err(Trap::Journal(s)),
             CtlKind::Yield | CtlKind::Blocked => unreachable!("handled above"),
             CtlKind::Collect => Err(self.internal_trap(fiber, ip, "a native asked for a collection twice".into())),
         }

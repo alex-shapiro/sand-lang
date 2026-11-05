@@ -645,6 +645,7 @@ fn error_info(e: &Error) -> JsValue {
         Error::Limit(_) => ("limit", Array::new().into(), Array::new().into()),
         Error::Interrupted => ("interrupted", Array::new().into(), Array::new().into()),
         Error::Io(_) => ("io", Array::new().into(), Array::new().into()),
+        Error::Diverged { .. } | Error::Suspended { .. } | Error::Journal(_) => ("journal", Array::new().into(), Array::new().into()),
     };
     let message = match e {
         Error::Compile(_) => e.render(),

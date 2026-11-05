@@ -294,17 +294,29 @@ pub(crate) struct BodyReader {
     /// Memory reserved for the stream's buffers (a memory body's data),
     /// released with it.
     _held: Option<Reservation>,
+    /// The bytes of a memory body that the `Body` object's heap size counts.
+    counted: usize,
 }
 
 impl BodyReader {
     pub fn new(stream: Box<dyn BodyStream>, max_all: usize, held: Option<Reservation>) -> BodyReader {
-        BodyReader { stream: Some(stream), complete: false, max_all, _held: held }
+        BodyReader { stream: Some(stream), complete: false, max_all, _held: held, counted: 0 }
     }
 
     /// An empty body.
     #[cfg_attr(not(feature = "os"), allow(dead_code))]
     pub fn empty(max_all: usize) -> BodyReader {
         BodyReader::new(Box::new(MemoryBody::new(Vec::new())), max_all, None)
+    }
+
+    /// A body received whole, whose bytes the heap counts as part of the
+    /// `Body` object (a journaled response, built alike in record and replay).
+    #[cfg_attr(not(feature = "os"), allow(dead_code))]
+    pub fn memory(data: Vec<u8>, max_all: usize) -> BodyReader {
+        let len = data.len();
+        let mut r = BodyReader::new(Box::new(MemoryBody::new(data)), max_all, None);
+        r.counted = len;
+        r
     }
 
     /// Ends the body: the stream (and its connection) is released.
@@ -394,7 +406,7 @@ impl BodyReader {
     }
 
     /// The rest of the body (at most `max_all` bytes).
-    async fn read_all(&mut self, res: &mut Reservation) -> Result<Vec<u8>, IoFailure> {
+    pub(super) async fn read_all(&mut self, res: &mut Reservation) -> Result<Vec<u8>, IoFailure> {
         let mut data = Vec::new();
         loop {
             let n = self.fill().await?;
@@ -421,12 +433,15 @@ pub(crate) struct Body {
     reader: Option<Arc<tokio::sync::Mutex<BodyReader>>>,
     closed: tokio::sync::watch::Sender<bool>,
     owns_conn: bool,
+    /// The bytes of a memory body that the heap counts (see [`BodyReader::memory`]).
+    counted: usize,
 }
 
 impl Body {
     pub fn new(reader: BodyReader) -> Body {
         let owns_conn = reader.stream.as_ref().is_some_and(|s| s.owns_conn());
-        Body { reader: Some(Arc::new(tokio::sync::Mutex::new(reader))), closed: tokio::sync::watch::Sender::new(false), owns_conn }
+        let counted = reader.counted;
+        Body { reader: Some(Arc::new(tokio::sync::Mutex::new(reader))), closed: tokio::sync::watch::Sender::new(false), owns_conn, counted }
     }
 
     /// Whether the body has been read to its end (false while a read is
@@ -439,6 +454,10 @@ impl Body {
 }
 
 impl NativeObject for Body {
+    fn size(&self) -> usize {
+        64 + self.counted
+    }
+
     fn is_resource(&self) -> bool {
         self.owns_conn && self.reader.is_some()
     }

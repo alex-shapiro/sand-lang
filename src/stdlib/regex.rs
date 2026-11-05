@@ -82,9 +82,13 @@ impl Scan {
         let mut extra = 0;
         if self.unclocked >= CLOCK_EVERY || units >= u64::from(CLOCK_EVERY) {
             self.unclocked = 0;
-            let elapsed = vm.host.clock.now().saturating_duration_since(self.start);
-            let floor = u64::try_from(elapsed.as_nanos() / FLOOR_NANOS).unwrap_or(u64::MAX);
-            extra = floor.saturating_sub(self.charged);
+            let (start, charged) = (self.start, self.charged);
+            // A journaled run replays the charge, which depends on the speed of execution.
+            extra = vm.time_fuel(|| {
+                let elapsed = vm.host.clock.now().saturating_duration_since(start);
+                let floor = u64::try_from(elapsed.as_nanos() / FLOOR_NANOS).unwrap_or(u64::MAX);
+                floor.saturating_sub(charged)
+            })?;
             self.charged = self.charged.saturating_add(extra);
         }
         vm.charge(units.saturating_add(extra))

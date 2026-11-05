@@ -106,6 +106,12 @@ fn read_stdin<R: IntoValue + Send + 'static>(
     }
     // A prompt written before reading must be visible (on a terminal).
     vm.flush_before_input()?;
+    // Input that the host sends as the run goes is an input of the run's
+    // journal; input fixed by the configuration is not.
+    let journaled = vm.journaling() && !vm.host.stdin.try_lock().is_ok_and(|s| matches!(*s, StdinSource::None | StdinSource::Bytes(_)));
+    if journaled {
+        return Err(journaled_read(vm, what, done).into());
+    }
     if what == Read::Line
         && let Some(data) = buffered_line(vm)
     {
@@ -125,6 +131,49 @@ fn read_stdin<R: IntoValue + Send + 'static>(
         drop(res);
         done(vm, data)
     })
+}
+
+/// A read of standard input as a journaled operation, whose outcome the
+/// journal records. Its buffers count against the journal's budget of live
+/// operations.
+fn journaled_read<R: IntoValue + Send + 'static>(
+    vm: &mut Vm,
+    what: Read,
+    done: fn(&mut Vm, Option<Vec<u8>>) -> Result<R, HostError>,
+) -> Ctl {
+    use crate::vm::journal::{Identity, JournalOp, OpKind, OpWork, Reader, Writer};
+    let stdin = vm.host.stdin.clone();
+    let Some(live) = vm.journal_state().map(|j| j.live_memory.clone()) else { return Ctl::internal("a journaled read without a journal") };
+    let (code, label) = match what {
+        Read::Line => (0, "read_line".to_string()),
+        Read::All => (1, "read_all".to_string()),
+        Read::Upto(n) => (2 + n as u64, format!("read {n}")),
+    };
+    let fut = async move {
+        let mut res = Reservation::new(&live);
+        let mut w = Writer::default();
+        match read_input(&stdin, what, &mut res).await {
+            Ok(Some(data)) => w.u8(0).u8(1).bytes(&data),
+            Ok(None) => w.u8(0).u8(0),
+            Err(e) => w.u8(1).str(e.kind).str(&format!("stdin: {}", e.message)),
+        };
+        w.0
+    };
+    let build = Box::new(move |vm: &mut Vm, payload: &[u8]| -> crate::vm::NResult {
+        let mut r = Reader::new(payload);
+        let malformed = || Ctl::internal("a journaled read of standard input is malformed");
+        let outcome = match r.u8().ok_or_else(malformed)? {
+            0 => match r.u8().ok_or_else(malformed)? {
+                1 => done(vm, Some(r.bytes().ok_or_else(malformed)?.to_vec())),
+                _ => done(vm, None),
+            },
+            _ => Err(HostError::new(r.str().ok_or_else(malformed)?, r.str().ok_or_else(malformed)?)),
+        };
+        outcome.into_value(vm)
+    });
+    let identity = Identity::default().add(&code.to_le_bytes()).finish();
+    let work = OpWork::Bytes { fut: Box::pin(fut), build };
+    Ctl::journaled(JournalOp { kind: OpKind::Stdin, identity, label, effectful: false, park: None, pre_fuel: 0, work })
 }
 
 fn input_line(vm: &mut Vm, line: Option<Vec<u8>>) -> Result<Option<String>, HostError> {
@@ -206,35 +255,69 @@ async fn read_from<R: AsyncBufRead + Unpin>(r: &mut R, what: Read, res: &mut Res
 
 pub(crate) fn env_module() -> NativeModule {
     let mut m = NativeModule::std("env", ModKind::Std, include_str!("env.sand"));
-    m.vm_function("get", |vm: &mut Vm, name: Val<String>| -> Result<Option<String>, Ctl> {
+    m.vm_function("get", |vm: &mut Vm, name: Val<String>| -> Result<Val<Option<String>>, Ctl> {
         let name = name.str(&vm.heap).to_string();
         if !vm.permit(&Capability::Env(name.clone()))? {
-            return Ok(None);
+            return Ok(Val::from_raw(vm.none()));
         }
-        Ok(match &vm.host.env {
-            Some(vars) => vars.iter().find(|(k, _)| *k == name).map(|(_, v)| v.clone()),
-            // `std::env::var` may panic on such names.
-            #[cfg(feature = "os")]
-            None if name.is_empty() || name.contains(['=', '\0']) => None,
-            #[cfg(feature = "os")]
-            None => std::env::var(&name).ok(),
-            // No process environment without operating-system access.
-            #[cfg(not(feature = "os"))]
-            None => None,
-        })
+        let label = format!("env.get {name}");
+        let lookup = move |vm: &mut Vm| match &vm.host.env {
+            Some(vars) => vars.iter().find(|(k, _)| *k == name).map(|(_, v)| v.clone()).into_value(vm),
+            None => process_var(&name).into_value(vm),
+        };
+        Ok(Val::from_raw(process_input(vm, &label, lookup)?))
     });
     m.vm_function("args", |vm: &mut Vm| vm.host.args.clone());
-    m.vm_function("vars", |vm: &mut Vm| -> Result<BTreeMap<String, String>, Ctl> {
+    m.vm_function("vars", |vm: &mut Vm| -> Result<Val<BTreeMap<String, String>>, Ctl> {
         if !vm.permit(&Capability::Env("*".into()))? {
-            return Ok(BTreeMap::new());
+            return Ok(Val::from_raw(BTreeMap::<String, String>::new().into_value(vm)?));
         }
-        Ok(match &vm.host.env {
-            Some(vars) => vars.iter().cloned().collect(),
-            #[cfg(not(feature = "os"))]
-            None => BTreeMap::new(),
-            #[cfg(feature = "os")]
-            None => std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))).collect(),
-        })
+        let lookup = |vm: &mut Vm| match &vm.host.env {
+            Some(vars) => vars.iter().cloned().collect::<BTreeMap<_, _>>().into_value(vm),
+            None => process_vars().into_value(vm),
+        };
+        Ok(Val::from_raw(process_input(vm, "env.vars", lookup)?))
     });
     m
+}
+
+/// Runs `lookup`, which reads the process environment unless the
+/// configuration fixes it. A journaled run records what the process
+/// environment gives.
+fn process_input(vm: &mut Vm, label: &str, lookup: impl FnOnce(&mut Vm) -> crate::vm::NResult) -> crate::vm::NResult {
+    if vm.journaling() && vm.host.env.is_none() {
+        let identity = crate::vm::journal::Identity::default().add(label.as_bytes()).finish();
+        return vm.journaled_result(identity, label, lookup);
+    }
+    lookup(vm)
+}
+
+/// The process's environment variable `name`.
+fn process_var(name: &str) -> Option<String> {
+    #[cfg(feature = "os")]
+    {
+        // `std::env::var` may panic on such names.
+        if name.is_empty() || name.contains(['=', '\0']) {
+            return None;
+        }
+        std::env::var(name).ok()
+    }
+    // No process environment without operating-system access.
+    #[cfg(not(feature = "os"))]
+    {
+        let _ = name;
+        None
+    }
+}
+
+/// The process's environment variables.
+fn process_vars() -> BTreeMap<String, String> {
+    #[cfg(feature = "os")]
+    {
+        std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))).collect()
+    }
+    #[cfg(not(feature = "os"))]
+    {
+        BTreeMap::new()
+    }
 }

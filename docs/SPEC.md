@@ -1984,6 +1984,9 @@ returns an `Error`:
 | `Error::Interrupted`                 | The host cancelled execution through an `InterruptHandle`.           |
 | `Error::Io(message)`                 | The entry script file could not be read.                             |
 | `Error::Internal { message, trace }` | An internal invariant failed or a host callback panicked (§10.3).    |
+| `Error::Diverged { seq, message }`   | The run does not do what its journal records at entry `seq` (§16.7). |
+| `Error::Suspended { wake_at }`       | The engine suspended a journaled run (§16.7).                        |
+| `Error::Journal(message)`            | The journal failed to make its entries durable (§16.7).              |
 
 `Engine::compile_file` compiles a file and its imports without running it, and
 `Engine::run_program` runs the result. Any engine whose configuration is a clone of the
@@ -2316,6 +2319,147 @@ automatically resets itself, appends `" (the session was reset)"` from
 `sandlang::session::RESET_NOTE` to the error message, and sets `was_reset()`
 to `true` until the next call while preserving remembered `"always"` prompt
 decisions.
+
+### 16.7 Durable execution
+
+A journal makes a run durable. With `Config::journal`, the engine records each
+nondeterministic input of a run in a host-supplied `Journal`. If an execution
+stops before the run ends, because the host crashes or because the engine
+suspends the run, the host runs the same program again with the same journal.
+The engine then replays the recorded inputs instead of performing their
+effects, gets to the same state, and continues live after the last entry.
+Programs need no special syntax.
+
+```rust
+use sandlang::journal::{Journal, MemoryJournal};
+
+let journal = MemoryJournal::new();
+let config = Config::new().journal(Arc::new(journal.clone()));
+Engine::new(config.clone())?.run_program(&program).await;  // records
+Engine::new(config)?.run_program(&program).await;          // replays, then continues live
+```
+
+The `sandlang::journal` module defines the interface. The engine calls
+`Journal::replay` once when a run starts, to get the entries of earlier
+executions. It calls `Journal::record` for each new entry and
+`Journal::flush` to make the entries durable. An `Entry` has a sequence number
+`seq`, counted from 0, an `EntryKind`, and `data` in an encoding that the
+engine defines for each version of `sandlang`. `Entry::to_bytes` and
+`Entry::from_bytes` convert an entry to bytes and back, and `Entry::describe`
+describes it. `MemoryJournal` keeps the entries in memory.
+
+**What the journal records.** The engine records these inputs, in the order
+the run reads them:
+
+| Kind        | Input                                                                                                                 |
+| ----------- | --------------------------------------------------------------------------------------------------------------------- |
+| `Seed`      | the seed of `random` and `uuid`, if `Config::seed` does not set it                                                    |
+| `Wall`      | a reading of the wall clock: `time.now`, UUIDv7 timestamps                                                            |
+| `Monotonic` | a reading of the monotonic clock: `time.Stopwatch`                                                                    |
+| `Fuel`      | a fuel charge by elapsed time (regex work, §15.2)                                                                     |
+| `Start`     | the start of an asynchronous operation: its kind, its identity, and the wake time of a timer                          |
+| `Done`      | the end of an asynchronous operation: the scheduling step at which the engine delivered it, and its result; or its cancellation |
+| `Result`    | the result of a synchronous journaled call: a journaled host function, or a read of the process environment           |
+
+The asynchronous operations are timers (`task.sleep` and the functions that
+use it), HTTP requests, reads of standard input from `Config::stdin_feed` or
+`Config::inherit_stdin`, and calls of asynchronous host functions. The engine
+records an HTTP request as a whole message: the identity of a request is a
+hash of its method, URL, headers and body, as the script made them, and its
+result is the response with its whole body, or the error. The engine records
+the message above TLS, so replay does not depend on the randomness of TLS
+handshakes. Other reads of an HTTP body read the recorded body.
+
+**The schedule.** The scheduler is deterministic, except for the point at
+which it delivers the result of an asynchronous operation to the waiting task.
+The engine counts the slices that it runs (§15.2), and a `Done` entry holds this
+count, the step. Replay delivers each result after the same step, so concurrent
+tasks interleave as they did. Fuel counts are the same in replay, and
+`Engine::run_stats` reports the same `fuel`.
+
+**What the host keeps the same.** The engine does not record what the host
+fixes. For a run to replay, each execution must have:
+
+- the same compiled program and host modules;
+- the same configuration, apart from limits, the clock, the network, output
+  sinks, and the journal (limits apply to each execution);
+- the same contents of the file system when the execution starts (the engine
+  does not record file system operations; use a `MemFs` that the host resets,
+  and note that `MemFs` timestamps come from the `MemFs` clock);
+- synchronous host functions that are not journaled, and request filters, that
+  give the same results.
+
+**Output commit.** The engine flushes the journal before each effect outside
+the run, so that every input that the effect can depend on is durable. It
+waits for `Journal::flush` to complete before it sends an HTTP request, before
+it calls an effectful host function, and again before the future of an
+asynchronous effectful host function starts. It also flushes before it
+suspends a run and when a run ends. Other entries only go to
+`Journal::record`. An effect that started before an execution stopped, and
+whose `Done` entry is not durable, occurs again when the run continues. Thus
+effects occur at least once; give requests idempotency keys where this
+matters. Each execution writes the output of the run from its start, so a
+host keeps the output of the last execution.
+
+**Replay and divergence.** Replay checks each entry against what the run does.
+If the kind of the next entry is not the kind of input that the run reads, or
+the identity of an operation or call is not the recorded one, the run fails
+with `Error::Diverged { seq, message }`. `seq` is the sequence number of the
+entry, and `message` describes what the run does and what the journal records.
+Replay does not send HTTP requests, read input, or call journaled host
+functions. When replay has used the last entry, the run continues live and
+records new entries after it. A live monotonic clock reading after replay is
+never earlier than the last replayed one.
+
+**Suspension.** With `Config::suspend_after(threshold)`, the engine suspends a
+journaled run that would wait for a long time. The engine suspends the run when
+every task waits, every pending operation is a timer or a parked host call, and
+no pending operation is due within `threshold` of the current time. The run
+then fails with `Error::Suspended { wake_at }`. `wake_at` is the time when the
+first operation is due, or `None` if only parked host calls without a time wait.
+The engine does not run deferred code (§7.1) when it suspends a run, because
+the tasks continue when the run resumes. To resume the run, the host runs the
+program again with the same journal, at `wake_at` or when the condition of a
+parked call occurs. In replay, a timer that has no `Done` entry expires at its
+recorded wake time. If the host resumes the run too early, the run suspends
+again.
+
+**Host functions.** `NativeModule::journaled` makes the most recently
+registered function journaled. The engine records its result, and replay
+returns the recorded result without a call. `NativeModule::effectful` also
+journals the function, and the engine calls it only when the journal is
+durable. The result of a journaled function must be plain data: no functions,
+tasks, channels, or values of bound object or value types. An asynchronous
+host function that is not journaled is still recorded as an operation, but
+replay calls it and drops its future without a poll; such a function must not
+have effects outside its future. `Later::parked(until)` lets the engine
+suspend a run while the future of a call waits. When the run resumes, the
+engine calls the function again. For example, a host function `wait_until(name,
+deadline)` can return the payload of a signal if it has one, `None` after the
+deadline, and otherwise a parked future. A Sand wrapper `wait(name, timeout)`
+calls it with `time.now().add(timeout)`, which the journal records, so the
+deadline is the same in each execution.
+
+**Restrictions.** A journaled run:
+
+- never prompts for permissions (§14.3) and ignores "always" answers of
+  earlier runs, so the engine denies capabilities that would need a prompt;
+- does not have `net` connections, listeners, HTTP servers, or streaming HTTP
+  requests (`http.upload`): they fail with kind `"unsupported"`, because the
+  engine cannot replay a raw stream;
+- does not have HTTP on the web (§16.5);
+- counts the buffers of live operations against a budget of `max_memory`
+  apart from the heap's, so that the heap's memory checks are the same in
+  replay.
+
+The engine journals runs of `run_source`, `run_file` and `run_program`.
+Sessions and `run_tests` ignore the journal. Two effects can make a replay
+differ from the recorded execution without a divergence error. First, the
+garbage collector can run at different points, which a script observes only
+through `max_open_resources` and through a memory limit error close to
+`max_memory`. Second, the hash seed of each process differs, and the fuel of
+a map or set lookup can differ by the cost of one key comparison if two keys
+have equal 32-bit hash tags.
 
 ## 17. Tooling
 

@@ -757,6 +757,7 @@ struct FnDef {
     f: HostFn,
     names: Option<Arc<[String]>>,
     doc: Option<Arc<str>>,
+    journaled: bool,
 }
 
 /// A module of Rust functions and types that scripts can import with
@@ -821,7 +822,7 @@ impl NativeModule {
         assert!(valid, "function name `{name}` is not `name` or `Type.name`");
         assert!(!self.functions.iter().any(|d| d.name == name), "function `{name}` is registered twice in module `{}`", self.name);
         let f = if self.kind == ModKind::Host { HostFn::Shared(f.into()) } else { HostFn::Static(Box::leak(f)) };
-        self.functions.push(FnDef { name: name.to_string(), sig, f, names: None, doc: None });
+        self.functions.push(FnDef { name: name.to_string(), sig, f, names: None, doc: None, journaled: false });
         self
     }
 
@@ -894,6 +895,45 @@ impl NativeModule {
     /// Panics if this module has not registered any function yet.
     pub fn doc(&mut self, text: &str) -> &mut Self {
         self.last("doc").doc = Some(text.into());
+        self
+    }
+
+    /// Makes the most recently registered function journaled (SPEC §16.7):
+    /// in a run with a journal, the engine records the function's result,
+    /// and replay returns the recorded result without calling the function.
+    /// The result must be plain data: no functions, tasks, channels, or
+    /// values of bound object or value types.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this module has not registered any function yet, or if the
+    /// function is journaled already.
+    pub fn journaled(&mut self) -> &mut Self {
+        self.make_journaled(false, "journaled")
+    }
+
+    /// Makes the most recently registered function journaled, like
+    /// [`NativeModule::journaled`], and marks it as having effects outside
+    /// the run: the engine calls it only once the journal is durable
+    /// ([`Journal::flush`](crate::journal::Journal::flush)). An asynchronous
+    /// function must start its effect in its future, not when called.
+    ///
+    /// # Panics
+    ///
+    /// Panics under the same conditions as [`NativeModule::journaled`].
+    pub fn effectful(&mut self) -> &mut Self {
+        self.make_journaled(true, "effectful")
+    }
+
+    fn make_journaled(&mut self, effectful: bool, method: &str) -> &mut Self {
+        let module = self.name.clone();
+        let f = self.last(method);
+        assert!(!f.journaled, "function `{}` is journaled already", f.name);
+        f.journaled = true;
+        let inner = f.f.clone();
+        let key: Arc<str> = format!("{module}.{}", f.name).into();
+        let wrapped = move |vm: &mut Vm, args: &[Value]| crate::vm::journal::journaled_call(vm, &inner, &key, effectful, args);
+        f.f = HostFn::Shared(Arc::new(wrapped));
         self
     }
 

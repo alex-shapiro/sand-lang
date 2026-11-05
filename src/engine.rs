@@ -102,6 +102,20 @@ pub enum Error {
     Limit(LimitKind),
     Interrupted,
     Io(String),
+    /// The run does something other than what its journal records at entry
+    /// `seq` (SPEC §16.7).
+    Diverged {
+        seq: u64,
+        message: String,
+    },
+    /// The journaled run stopped because every task waits for a timer or a
+    /// parked host call; run it again with the same journal to resume it,
+    /// at `wake_at` if it is known (SPEC §16.7).
+    Suspended {
+        wake_at: Option<crate::platform::SystemTime>,
+    },
+    /// The journal failed to flush (SPEC §16.7).
+    Journal(String),
 }
 
 impl Error {
@@ -135,6 +149,13 @@ impl fmt::Display for Error {
             Error::Limit(k) => write!(f, "{k}"),
             Error::Interrupted => write!(f, "interrupted"),
             Error::Io(m) => write!(f, "{m}"),
+            Error::Diverged { seq, message } => write!(f, "the run diverged from its journal at entry {seq}: {message}"),
+            Error::Suspended { wake_at: Some(t) } => {
+                let at = t.duration_since(crate::platform::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+                write!(f, "the run is suspended until {at} ms after the Unix epoch")
+            }
+            Error::Suspended { wake_at: None } => write!(f, "the run is suspended until the host resumes it"),
+            Error::Journal(m) => write!(f, "the journal failed: {m}"),
         }
     }
 }
@@ -151,11 +172,14 @@ fn write_trace(f: &mut fmt::Formatter<'_>, trace: &[TraceFrame]) -> fmt::Result 
 impl Error {
     /// The exit status of the `sand` tools for the error: 1 for a runtime
     /// error, 2 for compile and I/O errors, 3 for a limit, 70 for an internal
-    /// error, 130 if interrupted.
+    /// error, 75 for a suspended run, 74 for other journal errors, 130 if
+    /// interrupted.
     pub fn exit_code(&self) -> i32 {
         match self {
             Error::Runtime { .. } => 1,
             Error::Internal { .. } => 70,
+            Error::Diverged { .. } | Error::Journal(_) => 74,
+            Error::Suspended { .. } => 75,
             Error::Compile(_) | Error::Io(_) => 2,
             Error::Limit(_) => 3,
             Error::Interrupted => 130,
@@ -283,6 +307,8 @@ pub struct Config {
     pub(crate) network: Option<Arc<dyn crate::network::Network>>,
     pub(crate) time_zone: Option<crate::time::TimeZone>,
     context: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    journal: Option<Arc<dyn crate::journal::Journal>>,
+    suspend_after: Option<Duration>,
 }
 
 /// HTTP request destination.
@@ -337,7 +363,26 @@ impl Config {
             network: None,
             time_zone: None,
             context: None,
+            journal: None,
+            suspend_after: None,
         }
+    }
+
+    /// Records the nondeterministic inputs of each run in `journal`, and
+    /// replays the entries it already holds (SPEC §16.7). A journaled run
+    /// never prompts for permissions and disables `net` sockets and HTTP
+    /// servers.
+    pub fn journal(mut self, journal: Arc<dyn crate::journal::Journal>) -> Self {
+        self.journal = Some(journal);
+        self
+    }
+
+    /// Suspends a journaled run when every task waits for a timer or a
+    /// parked host call that is due more than `threshold` from now, instead
+    /// of waiting: the run fails with [`Error::Suspended`] (SPEC §16.7).
+    pub fn suspend_after(mut self, threshold: Duration) -> Self {
+        self.suspend_after = Some(threshold);
+        self
     }
 
     /// Attaches host data to each run of the engine. Native functions
@@ -1206,8 +1251,20 @@ impl Engine {
         }
         let mut vm = self.new_vm(prog.clone(), cwd, false);
         vm.deadline = compiled.deadline;
-        let r = vm.run_main(prog.entry).await;
-        let r = end_run(&mut vm, r).await;
+        let r = match self.attach_journal(&mut vm) {
+            Ok(()) => {
+                let r = vm.run_main(prog.entry).await;
+                let r = end_run(&mut vm, r).await;
+                match r {
+                    Err(Trap::Journal(_)) | Err(Trap::Interrupted) => r,
+                    r => match vm.flush_journal().await {
+                        Ok(()) => r,
+                        Err(t) => Err(t),
+                    },
+                }
+            }
+            Err(t) => Err(t),
+        };
         let _ = self.config.stdout.flush();
         self.gc_stats = vm.heap.stats;
         vm.heap.note_peak();
@@ -1226,7 +1283,20 @@ impl Engine {
             Err(Trap::Internal { message, trace }) => Err(Error::Internal { message, trace }),
             Err(Trap::Limit(k)) => Err(Error::Limit(k)),
             Err(Trap::Interrupted) => Err(Error::Interrupted),
+            Err(Trap::Journal(s)) => Err(journal_error(s)),
         }
+    }
+
+    /// Attaches the configured journal to `vm`, the VM of a run. A
+    /// journaled run never prompts and ignores "always" answers of earlier
+    /// runs, since replay cannot repeat a prompt's answer.
+    fn attach_journal(&self, vm: &mut Vm) -> Result<(), Trap> {
+        let Some(journal) = &self.config.journal else { return Ok(()) };
+        vm.host.prompter = None;
+        vm.host.always = Always::default();
+        let state = crate::vm::journal::start(journal.clone(), self.config.clock.now(), self.config.suspend_after, &self.config.limits)
+            .map_err(Trap::Journal)?;
+        vm.attach_journal(state, self.config.seed.is_some()).map_err(Trap::Journal)
     }
 
     // ------------------------------------------------------------------
@@ -1642,6 +1712,17 @@ fn trap_message(t: Trap) -> String {
         Trap::Limit(k) => k.to_string(),
         Trap::Interrupted => "interrupted".into(),
         Trap::Exit(c) => format!("exited with code {c}"),
+        Trap::Journal(s) => journal_error(s).to_string(),
+    }
+}
+
+/// The error of a run that its journal stopped.
+pub(crate) fn journal_error(s: crate::vm::journal::JournalStop) -> Error {
+    use crate::vm::journal::JournalStop;
+    match s {
+        JournalStop::Diverged { seq, message } => Error::Diverged { seq, message },
+        JournalStop::Suspended(wake_at) => Error::Suspended { wake_at },
+        JournalStop::Failed(m) => Error::Journal(m),
     }
 }
 
