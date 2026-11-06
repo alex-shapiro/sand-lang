@@ -28,54 +28,68 @@ pub struct Entry {
     pub data: Vec<u8>,
 }
 
-/// What an [`Entry`] records.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum EntryKind {
-    /// The seed of the random number generator, if `Config::seed` does not set it.
-    Seed,
-    /// A reading of the wall clock (`time.now`, UUIDv7 timestamps).
-    Wall,
-    /// A reading of the monotonic clock (`time.Stopwatch`).
-    Monotonic,
-    /// Fuel that a charge by elapsed time added (regex work).
-    Fuel,
-    /// The start of an asynchronous operation: its kind, its identity, and a
-    /// timer's wake time.
-    Start,
-    /// The completion of an asynchronous operation: the scheduling step at
-    /// which the engine delivered it, and its result.
-    Done,
-    /// The result of a synchronous journaled call, such as a host function
-    /// registered as [`Journaled`](crate::native::func::Journaled) or an
-    /// environment variable read from the process.
-    Result,
+/// Declares a field-less enum with a one-byte code and a lowercase name for
+/// each variant. Each variant must have a code, and the compiler rejects a
+/// duplicate code.
+macro_rules! coded_enum {
+    (
+        $(#[$meta:meta])*
+        pub enum $name:ident {
+            $($(#[$vmeta:meta])* $variant:ident = $code:literal, $text:literal;)*
+        }
+    ) => {
+        $(#[$meta])*
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        #[repr(u8)]
+        pub enum $name {
+            $($(#[$vmeta])* $variant = $code,)*
+        }
+
+        impl $name {
+            /// A one-byte code for the kind.
+            pub fn code(self) -> u8 {
+                self as u8
+            }
+
+            /// The kind with code `code`, if any.
+            pub fn from_code(code: u8) -> Option<$name> {
+                match code {
+                    $($code => Some($name::$variant),)*
+                    _ => None,
+                }
+            }
+
+            /// The name of the kind in lowercase.
+            pub fn name(self) -> &'static str {
+                match self {
+                    $($name::$variant => $text,)*
+                }
+            }
+        }
+    };
 }
 
-impl EntryKind {
-    const ALL: [EntryKind; 7] =
-        [EntryKind::Seed, EntryKind::Wall, EntryKind::Monotonic, EntryKind::Fuel, EntryKind::Start, EntryKind::Done, EntryKind::Result];
-
-    /// A one-byte code for the kind.
-    pub fn code(self) -> u8 {
-        EntryKind::ALL.iter().position(|&k| k == self).unwrap_or(0) as u8
-    }
-
-    /// The kind with code `code`, if any.
-    pub fn from_code(code: u8) -> Option<EntryKind> {
-        EntryKind::ALL.get(usize::from(code)).copied()
-    }
-
-    /// The name of the kind in lowercase, such as `"start"`.
-    pub fn name(self) -> &'static str {
-        match self {
-            EntryKind::Seed => "seed",
-            EntryKind::Wall => "wall",
-            EntryKind::Monotonic => "monotonic",
-            EntryKind::Fuel => "fuel",
-            EntryKind::Start => "start",
-            EntryKind::Done => "done",
-            EntryKind::Result => "result",
-        }
+coded_enum! {
+    /// What an [`Entry`] records.
+    pub enum EntryKind {
+        /// The seed of the random number generator, if `Config::seed` does not set it.
+        Seed = 0, "seed";
+        /// A reading of the wall clock (`time.now`, UUIDv7 timestamps).
+        Wall = 1, "wall";
+        /// A reading of the monotonic clock (`time.Stopwatch`).
+        Monotonic = 2, "monotonic";
+        /// Fuel that a charge by elapsed time added (regex work).
+        Fuel = 3, "fuel";
+        /// The start of an asynchronous operation: its kind, its identity, and a
+        /// timer's wake time.
+        Start = 4, "start";
+        /// The completion of an asynchronous operation: the scheduling step at
+        /// which the engine delivered it, and its result.
+        Done = 5, "done";
+        /// The result of a synchronous journaled call, such as a host function
+        /// registered as [`Journaled`](crate::native::func::Journaled) or an
+        /// environment variable read from the process.
+        Result = 6, "result";
     }
 }
 
@@ -134,43 +148,21 @@ pub enum EntryData {
     Result(CallResult),
 }
 
-/// What an asynchronous operation is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum OpKind {
-    /// `task.sleep` and the functions that use it.
-    Timer,
-    /// An HTTP request, recorded as a whole message.
-    Http,
-    /// A read of standard input.
-    Stdin,
-    /// A call of an asynchronous host function.
-    Call,
-    /// A local operation, such as a read of a file or a call of a host
-    /// function that is not journaled: replay runs it again. Only the
-    /// point in the schedule where the engine delivered it is recorded.
-    Local,
-}
-
-impl OpKind {
-    const ALL: [OpKind; 5] = [OpKind::Timer, OpKind::Http, OpKind::Stdin, OpKind::Call, OpKind::Local];
-
-    fn code(self) -> u8 {
-        OpKind::ALL.iter().position(|&k| k == self).unwrap_or(0) as u8 + 1
-    }
-
-    fn from_code(c: u8) -> Option<OpKind> {
-        OpKind::ALL.get(usize::from(c).checked_sub(1)?).copied()
-    }
-
-    /// The name of the kind in lowercase, such as `"http"`.
-    pub fn name(self) -> &'static str {
-        match self {
-            OpKind::Timer => "timer",
-            OpKind::Http => "http",
-            OpKind::Stdin => "stdin",
-            OpKind::Call => "call",
-            OpKind::Local => "local",
-        }
+coded_enum! {
+    /// What an asynchronous operation is.
+    pub enum OpKind {
+        /// `task.sleep` and the functions that use it.
+        Timer = 0, "timer";
+        /// An HTTP request, recorded as a whole message.
+        Http = 1, "http";
+        /// A read of standard input.
+        Stdin = 2, "stdin";
+        /// A call of an asynchronous host function.
+        Call = 3, "call";
+        /// A local operation, such as a read of a file or a call of a host
+        /// function that is not journaled: replay runs it again. Only the
+        /// point in the schedule where the engine delivered it is recorded.
+        Local = 4, "local";
     }
 }
 
