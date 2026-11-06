@@ -506,6 +506,13 @@ pub trait Journal: Send + Sync {
     /// effect that it flushes for until the future completes, and does not
     /// count the wait against the wall-time limit. An error ends the run
     /// with [`Error::Aborted`](crate::engine::Error::Aborted), which holds it.
+    ///
+    /// An implementation can make the entries durable in parts. If a part
+    /// fails, the durable entries are a valid journal: any prefix of the
+    /// recorded entries is one. The engine starts an effect only after the
+    /// flush before it completes, so no effect depends on an entry after the
+    /// prefix. Replay runs an operation live if the journal records no end
+    /// for it, so an operation that the prefix cuts runs again.
     fn flush(&self) -> FlushFuture;
 }
 
