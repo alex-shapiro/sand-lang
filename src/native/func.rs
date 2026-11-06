@@ -47,7 +47,8 @@ pub trait VmFunction<Marker>: Send + Sync + 'static {
 /// outlive the initial call.
 pub trait AsyncHostFunction<Marker>: Send + Sync + 'static {
     fn signature() -> Signature;
-    fn into_host(self) -> Box<NativeFn>;
+    /// The native function, whose calls suspend with `wait`.
+    fn into_host(self, wait: WaitKind) -> Box<NativeFn>;
 }
 
 /// Deferred result returned by a [`VmFunction`] that may suspend the calling
@@ -218,17 +219,17 @@ macro_rules! fn_impls {
             fn signature() -> Signature {
                 Signature { params: vec![$($a::sand_type()),*], ret: R::sand_type() }
             }
-            fn into_host(self) -> Box<NativeFn> {
+            fn into_host(self, wait: WaitKind) -> Box<NativeFn> {
                 Box::new(move |vm: &mut Vm, args: &[Value]| -> NResult {
                     let &[$($a),*] = strip_dict_args(args, $n) else { return Err(too_few_args()) };
                     let mut conv = Conversion::new();
                     $(let $a = $a::from_value(vm, $a, &mut conv)?;)*
                     let fut = self($($a),*);
-                    Later::<R, Ctl>::new(async move {
+                    let finish = async move {
                         let r = fut.await;
                         move |_: &mut Vm| Ok(r)
-                    })
-                    .finish(vm)
+                    };
+                    Later::<R, Ctl>::waiting(finish, wait).finish(vm)
                 })
             }
         }
