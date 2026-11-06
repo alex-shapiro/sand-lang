@@ -1060,13 +1060,15 @@ fn a_read_takes_one_answer() {
 }
 
 #[test]
-fn reads_that_wait_have_sequential_ids() {
+fn each_read_that_waits_has_a_newer_id() {
     let ids = std::sync::Mutex::new(Vec::new());
     answered("[io.stdin.read_line()?, io.stdin.read_line()?, io.stdin.read_line()?]", |f, read| {
-        ids.lock().unwrap().push(read.get());
+        ids.lock().unwrap().push(read);
         assert!(f.answer(read, "x"));
     });
-    assert_eq!(*ids.lock().unwrap(), [1, 2, 3]);
+    let ids = ids.into_inner().unwrap();
+    assert_eq!(ids.len(), 3);
+    assert!(ids.is_sorted_by(|a, b| a < b));
 }
 
 #[test]

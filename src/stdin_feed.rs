@@ -20,7 +20,8 @@ pub struct StdinFeed {
     channel: Arc<StdinChannel>,
 }
 
-/// Unique identifier for a single standard input read operation.
+/// Unique identifier for a single standard input read operation. A read
+/// that starts later has a greater identifier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StdinReadId(NonZeroU64);
 
@@ -64,13 +65,6 @@ struct QueuedInput {
 impl QueuedInput {
     fn is_for_read(&self, read: Option<StdinReadId>) -> bool {
         self.target.is_none() || self.target == read
-    }
-}
-
-impl StdinReadId {
-    /// Returns the 1-based number of this read among the reads that can wait.
-    pub fn get(self) -> u64 {
-        self.0.get()
     }
 }
 
