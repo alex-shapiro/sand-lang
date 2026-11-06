@@ -1,15 +1,17 @@
 //! Host patterns, URL patterns, and IP address classification.
 
-use super::path::{Seg, Tok};
+use super::path::{Seg, Tok, wild_tokens};
 use crate::vm::value::FxHashMap;
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
+/// A host pattern of a `net` rule, such as `api.example.com:443`, `*.example.com`, or
+/// `10.0.0.0/8`. Parse one with [`str::parse`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct NetPattern {
-    pub kind: HostKind,
-    pub port: Option<u16>,
+pub struct NetPattern {
+    pub(crate) kind: HostKind,
+    pub(crate) port: Option<u16>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -18,16 +20,6 @@ pub(crate) enum HostKind {
     Suffix(String),
     Host(String),
     Ip(IpAddr, u8),
-}
-
-/// Validates a host pattern for [`super::RulePolicy::allow_net`].
-pub fn check_net_pattern(pattern: &str) -> Result<(), String> {
-    NetPattern::parse(pattern).map(drop)
-}
-
-/// Returns `true` if `pattern` is valid for [`super::RulePolicy::allow_listen`].
-pub fn is_valid_listen_pattern(pattern: &str) -> bool {
-    ListenPattern::parse(pattern).is_some()
 }
 
 #[cfg(feature = "os")]
@@ -39,6 +31,14 @@ fn canonical_hostname(name: &str) -> Option<String> {
     let name = name.strip_suffix('.').unwrap_or(name);
     let label_ok = |l: &str| (1..=63).contains(&l.len()) && l.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b));
     (name.len() <= 253 && name.split('.').all(label_ok)).then(|| name.to_ascii_lowercase())
+}
+
+impl std::str::FromStr for NetPattern {
+    type Err = String;
+
+    fn from_str(pattern: &str) -> Result<NetPattern, String> {
+        NetPattern::from_tokens(&wild_tokens(pattern))
+    }
 }
 
 impl NetPattern {
@@ -547,8 +547,10 @@ pub(crate) fn parse_port(text: &str) -> Option<u16> {
     if text.bytes().all(|b| b.is_ascii_digit()) { text.parse().ok() } else { None }
 }
 
+/// An address pattern of a `listen` rule: `ip:port`, `[ipv6]:port`, `ip`, `localhost`,
+/// `*:port`, or `*`. Parse one with [`str::parse`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct ListenPattern {
+pub struct ListenPattern {
     host: ListenHost,
     port: Option<u16>,
 }
@@ -575,8 +577,18 @@ impl std::fmt::Display for ListenPattern {
     }
 }
 
+impl std::str::FromStr for ListenPattern {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<ListenPattern, String> {
+        ListenPattern::parse(text).ok_or_else(|| format!("invalid listen pattern `{text}`: expected ip:port, ip, localhost, *:port, or *"))
+    }
+}
+
 impl ListenPattern {
-    pub(crate) fn parse(text: &str) -> Option<ListenPattern> {
+    pub(crate) const ANY: ListenPattern = ListenPattern { host: ListenHost::Any, port: None };
+
+    fn parse(text: &str) -> Option<ListenPattern> {
         let (host, port) = split_port(text)?;
         let host = match host {
             "*" => ListenHost::Any,
@@ -601,10 +613,20 @@ impl ListenPattern {
     }
 }
 
+/// A URL pattern of an `http` rule: a host pattern and an optional path pattern without a
+/// scheme, such as `api.example.com/v1/**`. Parse one with [`str::parse`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct UrlPattern {
-    pub host: NetPattern,
-    pub path: Vec<Seg>,
+pub struct UrlPattern {
+    pub(crate) host: NetPattern,
+    pub(crate) path: Vec<Seg>,
+}
+
+impl std::str::FromStr for UrlPattern {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<UrlPattern, String> {
+        UrlPattern::parse(&wild_tokens(text))
+    }
 }
 
 fn scheme_removal_hint(scheme: &str, hosts: &str) -> String {
@@ -751,7 +773,7 @@ mod tests {
     use proptest::prelude::*;
 
     fn url(text: &str) -> Result<UrlPattern, String> {
-        UrlPattern::parse(&text.chars().map(|c| (c, c == '*')).collect::<Vec<_>>())
+        UrlPattern::parse(&wild_tokens(text))
     }
 
     #[test]

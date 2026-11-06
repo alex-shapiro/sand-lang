@@ -13,6 +13,11 @@ use std::path::{Component, Path};
 /// A character in a pattern and whether it is an unquoted `*` wildcard.
 pub(crate) type Tok = (char, bool);
 
+/// Tokenizes `text` as an unquoted policy word, in which every `*` is a wildcard.
+pub(crate) fn wild_tokens(text: &str) -> Vec<Tok> {
+    text.chars().map(|c| (c, c == '*')).collect()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Seg {
     Lit(Box<str>),
@@ -417,7 +422,7 @@ mod tests {
     use super::*;
 
     fn pattern(s: &str) -> Vec<Seg> {
-        s.split('/').map(|seg| Seg::parse(&seg.chars().map(|c| (c, c == '*')).collect::<Vec<_>>()).unwrap()).collect()
+        s.split('/').map(|seg| Seg::parse(&wild_tokens(seg)).unwrap()).collect()
     }
 
     fn matches(t: &Trie<&'static str>, path: &str) -> Vec<(&'static str, usize)> {

@@ -2256,8 +2256,36 @@ fn rule_policy_deny_overrides_allow() {
 }
 
 #[test]
+fn typed_rule_builders_make_the_rules_of_the_policy_file_syntax() {
+    use sandlang::policy::file::PolicyFile;
+    use sandlang::policy::rules::{NamePattern, RulePolicy, Transports};
+    let built = RulePolicy::new()
+        .allow_net(Transports::PLAINTEXT, "localhost:8080".parse().unwrap())
+        .deny_net(Transports::all(), "10.0.0.0/8".parse().unwrap())
+        .allow_http(Transports::TLS, "api.example.com/v1/**".parse().unwrap())
+        .prompt_http(Transports::all(), "*.example.org/admin".parse().unwrap())
+        .deny_listen("localhost:22".parse().unwrap())
+        .allow_env("AWS_*".parse().unwrap())
+        .allow_env(NamePattern::exact("A*B"));
+    let text = "allow net plaintext localhost:8080\ndeny net 10.0.0.0/8\nallow http api.example.com/v1\nprompt http *.example.org/admin\ndeny listen localhost:22\nallow env AWS_*\nallow env \"A*B\"\n";
+    assert_eq!(built.to_string(), text);
+    assert_eq!(PolicyFile::parse(text, std::path::Path::new("/"), None).unwrap().rules.to_string(), text);
+    let net = |s: &str| s.parse::<sandlang::policy::net::NetPattern>().unwrap_err();
+    assert_eq!(
+        net("host:99999"),
+        "invalid host pattern `host:99999`: expected a host, host:port, *.domain, *, an IP address, or a CIDR range"
+    );
+    assert!(net("https://example.com").starts_with("net rules require host patterns, not URLs"));
+    let url = "https://api.example.com".parse::<sandlang::policy::net::UrlPattern>().unwrap_err();
+    assert!(url.starts_with("URL patterns must not include a scheme"), "{url}");
+}
+
+#[test]
 fn rule_policy_network_hosts() {
-    let p = sandlang::policy::rules::RulePolicy::standard().allow_net("example.com").allow_net("*.example.org").allow_net("localhost:8080");
+    let p = sandlang::policy::rules::RulePolicy::standard()
+        .allow_net(sandlang::policy::rules::Transports::TLS, "example.com".parse().unwrap())
+        .allow_net(sandlang::policy::rules::Transports::TLS, "*.example.org".parse().unwrap())
+        .allow_net(sandlang::policy::rules::Transports::TLS, "localhost:8080".parse().unwrap());
     let check = |host: &str, port: u16| p.check(&Capability::Net { host: host.into(), port, tls: true });
     assert_eq!(check("example.com", 443), Decision::Allow);
     assert_eq!(check("example.com", 80), Decision::Allow);
@@ -2274,8 +2302,11 @@ fn rule_policy_network_hosts() {
 
 #[test]
 fn rule_policy_env_and_listen() {
-    let p =
-        sandlang::policy::rules::RulePolicy::standard().allow_env("HOME").allow_listen("127.0.0.1:*").allow_listen("[::1]:0").allow_stdin();
+    let p = sandlang::policy::rules::RulePolicy::standard()
+        .allow_env("HOME".parse().unwrap())
+        .allow_listen("127.0.0.1:*".parse().unwrap())
+        .allow_listen("[::1]:0".parse().unwrap())
+        .allow_stdin();
     assert_eq!(p.check(&Capability::Env("HOME".into())), Decision::Allow);
     assert_eq!(p.check(&Capability::Env("SECRET".into())), Decision::Prompt);
     let listen = |ip: &str, port| Capability::NetListen(std::net::SocketAddr::new(ip.parse().unwrap(), port));
@@ -2288,10 +2319,10 @@ fn rule_policy_env_and_listen() {
     assert_eq!(p.check(&Capability::Stdin), Decision::Allow);
 
     let p = sandlang::policy::rules::RulePolicy::standard()
-        .allow_listen("LocalHost")
-        .allow_listen("[::]:80")
-        .allow_listen("*:8080")
-        .deny_listen("localhost:22");
+        .allow_listen("LocalHost".parse().unwrap())
+        .allow_listen("[::]:80".parse().unwrap())
+        .allow_listen("*:8080".parse().unwrap())
+        .deny_listen("localhost:22".parse().unwrap());
     assert_eq!(p.check(&listen("127.0.0.2", 3000)), Decision::Allow);
     assert_eq!(p.check(&listen("::1", 3000)), Decision::Allow);
     assert_eq!(p.check(&listen("127.0.0.1", 22)), Decision::Deny);
@@ -2311,7 +2342,7 @@ fn rule_policy_env_and_listen() {
         "example.com:80",
         "127.0.0.1:65536",
     ] {
-        assert!(!sandlang::policy::net::is_valid_listen_pattern(invalid), "{invalid}");
+        assert!(invalid.parse::<sandlang::policy::net::ListenPattern>().is_err(), "{invalid}");
     }
 }
 

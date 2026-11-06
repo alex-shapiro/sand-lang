@@ -1184,7 +1184,7 @@ mod tests {
                 if rules[..i].iter().any(|r| r.decision == rule.decision && r.kind == rule.kind) {
                     continue;
                 }
-                let deny = crate::policy::rules::RulePolicy::new().deny_net(&format!("tls plaintext {}", url.host));
+                let deny = crate::policy::rules::RulePolicy::new().deny_net(Transports::all(), url.host.clone());
                 let found = dests.iter().find(|(host, port)| {
                     [true, false].into_iter().filter(|&tls| transports.contains(Transports::of(tls))).any(|tls| {
                         let cap = Capability::Net { host: host.clone(), port: *port, tls };

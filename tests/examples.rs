@@ -5,7 +5,7 @@ mod common;
 use common::{HttpResponse, TempDir, http_server, rt};
 use parking_lot::Mutex;
 use sandlang::engine::{Config, Engine, Error, MemorySink};
-use sandlang::policy::rules::RulePolicy;
+use sandlang::policy::rules::{RulePolicy, Transports};
 use sandlang::policy::{Capability, Decision};
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
@@ -279,7 +279,7 @@ fn http_client_fetches_and_parses_a_page() {
         _ => HttpResponse::new(404, "not found"),
     });
     let base = format!("http://{}", server.addr);
-    let policy = RulePolicy::standard().allow_net(&format!("plaintext {}", server.addr));
+    let policy = RulePolicy::standard().allow_net(Transports::PLAINTEXT, format!("{}", server.addr).parse().unwrap());
     let o = run_example(
         "http_fetch.sand",
         &[&format!("{base}/old"), &format!("{base}/missing"), &format!("{base}/data.json")],
@@ -305,7 +305,7 @@ fn http_client_is_sandboxed() {
 fn tcp_chat_server() {
     let out = MemorySink::new();
     let err = MemorySink::new();
-    let policy = RulePolicy::standard().allow_listen("127.0.0.1:0");
+    let policy = RulePolicy::standard().allow_listen("127.0.0.1:0".parse().unwrap());
     let config = Config::new().policy(policy).stdout(out.clone()).stderr(err.clone()).args(vec!["0".into()]);
     let mut engine = Engine::new(config).unwrap();
     let interrupt = engine.interrupt_handle();
@@ -450,14 +450,14 @@ fn s3_client_against_mock_server() {
         ];
         let policy = RulePolicy::standard()
             .allow_import(example("s3"))
-            .allow_net(&format!("plaintext {}", server.addr))
+            .allow_net(Transports::PLAINTEXT, format!("{}", server.addr).parse().unwrap())
             .allow_read(dir.path())
             .allow_write(dir.path())
-            .allow_env("AWS_ACCESS_KEY_ID")
-            .allow_env("AWS_SECRET_ACCESS_KEY")
-            .allow_env("AWS_SESSION_TOKEN")
-            .allow_env("AWS_REGION")
-            .allow_env("S3_ENDPOINT");
+            .allow_env("AWS_ACCESS_KEY_ID".parse().unwrap())
+            .allow_env("AWS_SECRET_ACCESS_KEY".parse().unwrap())
+            .allow_env("AWS_SESSION_TOKEN".parse().unwrap())
+            .allow_env("AWS_REGION".parse().unwrap())
+            .allow_env("S3_ENDPOINT".parse().unwrap());
         run_example("s3/cli.sand", args, Config::new().cwd(dir.path()).env(env).policy(policy))
     };
 
