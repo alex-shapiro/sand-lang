@@ -284,18 +284,40 @@ fn expand_sand_type(input: &DeriveInput, krate: &Path, type_params: &TypeParams)
 }
 
 /// Implements `JournalData` and `JournalArg` for a struct or enum whose
-/// fields (`fields`) implement them. A field whose type contains the type
-/// itself adds no bound: the bound would make the trait solver recurse.
+/// fields (`fields`) implement them. In the bound of a field, `Never`, which
+/// implements both traits, stands for each use of the type itself (by its
+/// bare name or as `Self`): a bound on the type itself would make the trait
+/// solver recurse. Thus a field `Vec<(Node, Val<File>)>` of `Node` keeps the
+/// bound `Vec<(Never, Val<File>)>`, which fails if `File` is a bound object.
 fn expand_journal_impls(input: &DeriveInput, krate: &Path, type_params: &TypeParams, fields: &[&Type]) -> Tokens {
-    fn mentions(tokens: Tokens, ty: &Ident) -> bool {
-        tokens.into_iter().any(|t| match t {
-            proc_macro2::TokenTree::Ident(i) => i == *ty || i == "Self",
-            proc_macro2::TokenTree::Group(g) => mentions(g.stream(), ty),
-            _ => false,
-        })
+    struct ItselfAsNever<'a> {
+        ty: &'a Ident,
+        never: Type,
+    }
+    impl VisitMut for ItselfAsNever<'_> {
+        fn visit_type_mut(&mut self, t: &mut Type) {
+            if let Type::Path(p) = t
+                && p.qself.is_none()
+                && p.path.leading_colon.is_none()
+                && p.path.segments.len() == 1
+                && (p.path.segments[0].ident == *self.ty || p.path.segments[0].ident == "Self")
+            {
+                *t = self.never.clone();
+                return;
+            }
+            syn::visit_mut::visit_type_mut(self, t);
+        }
     }
     let ty = &input.ident;
-    let fields: Vec<&Type> = fields.iter().copied().filter(|f| !mentions(quote!(#f), ty)).collect();
+    let mut itself = ItselfAsNever { ty, never: syn::parse_quote!(#krate::native::ty::Never) };
+    let fields: Vec<Type> = fields
+        .iter()
+        .map(|&f| {
+            let mut f = f.clone();
+            itself.visit_type_mut(&mut f);
+            f
+        })
+        .collect();
     let journal_impl = |t: Tokens| {
         let (imp, tyg, wh) = type_params.split_for_impl(input, |_| t.clone());
         let wh = match (wh.is_empty(), fields.is_empty()) {
@@ -689,13 +711,23 @@ mod tests {
     }
 
     #[test]
-    fn journal_impls_bound_each_field_that_does_not_contain_the_type() {
-        let out = expand(sand_enum, "#[sand(module = \"m\")] enum J { A(Vec<J>), B { x: Box<Self> }, C(String, T) }");
-        for t in [":: sandlang :: native :: JournalData", ":: sandlang :: native :: JournalArg"] {
-            assert!(out.contains(&format!("impl {t} for J where for < '__sand > String : {t} , for < '__sand > T : {t} {{ }}")), "{out}");
+    fn journal_impls_bound_each_field_with_never_for_the_type() {
+        let out = expand(
+            sand_enum,
+            "#[sand(module = \"m\")] enum J { A(Vec<(J, Val<File>)>), B { x: Box<Self> }, C(String, other::J) }",
+        );
+        let never = ":: sandlang :: native :: ty :: Never";
+        for t in [":: sandlang :: native :: ty :: JournalData", ":: sandlang :: native :: ty :: JournalArg"] {
+            let bounds = [
+                format!("for < '__sand > Vec < ({never} , Val < File >) > : {t}"),
+                format!("for < '__sand > Box < {never} > : {t}"),
+                format!("for < '__sand > String : {t}"),
+                format!("for < '__sand > other :: J : {t}"),
+            ];
+            assert!(out.contains(&format!("impl {t} for J where {} {{ }}", bounds.join(" , "))), "{out}");
         }
         let out = expand(sand_struct, "#[sand(module = \"m\")] struct S<T> { x: Vec<T> }");
-        let t = ":: sandlang :: native :: JournalData";
+        let t = ":: sandlang :: native :: ty :: JournalData";
         assert!(
             out.contains(&format!("impl < T > {t} for S < T > where T : 'static + {t} , for < '__sand > Vec < T > : {t} {{ }}")),
             "{out}"
@@ -733,7 +765,7 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("let value : i64 = :: std :: convert :: Into :: into (2) ;"), "{out}");
-        assert!(out.contains(":: sandlang :: native :: IntoValue :: to_const (& value)"), "{out}");
+        assert!(out.contains(":: sandlang :: native :: convert :: IntoValue :: to_const (& value)"), "{out}");
         assert_eq!(out.matches("default : :: std :: option :: Option :: None").count(), 1, "{out}");
     }
 
@@ -742,10 +774,10 @@ mod tests {
         let out = expand(sand_struct, "#[sand(module = \"m\")] struct Pair<A, B> { a: A, b: Vec<B>, c: Option<(A, B)> }");
         assert!(out.contains("const PARAMS : & 'static [& 'static str] = & [\"A\" , \"B\"]"), "{out}");
         assert!(out.contains("enum Instance { } :: std :: any :: TypeId :: of :: < Instance > ()"), "{out}");
-        assert!(out.contains("ty : < :: sandlang :: native :: Param < 0u8 > as :: sandlang :: native :: SandType > :: sand_type"), "{out}");
-        assert!(out.contains("ty : < Vec < :: sandlang :: native :: Param < 1u8 > > as"), "{out}");
-        assert!(out.contains("Option < (:: sandlang :: native :: Param < 0u8 > , :: sandlang :: native :: Param < 1u8 >) >"), "{out}");
-        assert!(out.contains("A : 'static + for < 'a > :: sandlang :: native :: FromValue < Item < 'a > = A >"), "{out}");
+        assert!(out.contains("ty : < :: sandlang :: native :: ty :: Param < 0u8 > as :: sandlang :: native :: ty :: SandType > :: sand_type"), "{out}");
+        assert!(out.contains("ty : < Vec < :: sandlang :: native :: ty :: Param < 1u8 > > as"), "{out}");
+        assert!(out.contains("Option < (:: sandlang :: native :: ty :: Param < 0u8 > , :: sandlang :: native :: ty :: Param < 1u8 >) >"), "{out}");
+        assert!(out.contains("A : 'static + for < 'a > :: sandlang :: native :: convert :: FromValue < Item < 'a > = A >"), "{out}");
         let out = expand(sand_enum, "#[sand(module = \"m\")] enum E<T> { A(T), B(other::T) }");
         assert!(out.contains("ty : < other :: T as"), "{out}");
     }

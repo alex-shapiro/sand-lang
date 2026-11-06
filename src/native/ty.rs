@@ -475,7 +475,37 @@ impl SandType for Range {
 /// [`Effectful`] registers must return a `JournalData` type.
 ///
 /// [`SandStruct`](crate::SandStruct) and [`SandEnum`](crate::SandEnum)
-/// implement it for a type whose fields are `JournalData`.
+/// implement it for a type whose fields are `JournalData`. A field can
+/// hold the type itself:
+///
+/// ```
+/// # use sandlang::native::ty::JournalData;
+/// #[derive(sandlang::SandStruct)]
+/// #[sand(module = "trees")]
+/// struct Node {
+///     children: Vec<(Node, String)>,
+/// }
+/// fn journal<T: JournalData>() {}
+/// journal::<Node>();
+/// ```
+///
+/// The other parts of such a field must be `JournalData` too:
+///
+/// ```compile_fail
+/// # use sandlang::native::ty::{JournalData, Val};
+/// #[derive(sandlang::SandObject)]
+/// #[sand(module = "trees")]
+/// struct File;
+/// impl sandlang::native::NativeObject for File {}
+///
+/// #[derive(sandlang::SandStruct)]
+/// #[sand(module = "trees")]
+/// struct Node {
+///     children: Vec<(Node, Val<File>)>,
+/// }
+/// fn journal<T: JournalData>() {}
+/// journal::<Node>();
+/// ```
 ///
 /// [`Journaled`]: super::func::Journaled
 /// [`Effectful`]: super::func::Effectful
