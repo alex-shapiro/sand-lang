@@ -5,7 +5,6 @@ mod func;
 mod ty;
 
 pub use crate::types::traits;
-pub use crate::vm::WaitKind;
 pub use convert::{Conversion, FromValue, HostError, IntoHostError, IntoValue, value_from, value_into};
 pub use func::{AsyncHostFunction, HostFunction, Later, NativeError, Signature, VmFunction};
 pub use ty::{Channel, Named, Never, Num, Param, Range, Reflect, SandType, Task, Type, Val};

@@ -3428,8 +3428,8 @@ fn host_modules_can_define_resources() {
 #[test]
 fn host_errors_are_err_values_and_aborts_end_the_run() {
     use sandlang::HostError;
-    use sandlang::native::{Later, WaitKind};
     use sandlang::vm::{Ctl, Vm};
+    use sandlang::{WaitKind, native::Later};
     let mut m = NativeModule::new("errs");
     m.function("now", || -> Result<i64, HostError> { Err(HostError::new("invalid", "bad input")) });
     m.function("later", || -> Result<Later<i64, HostError>, HostError> {

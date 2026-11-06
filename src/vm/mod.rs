@@ -129,8 +129,8 @@ impl Ctl {
     }
 
     /// Suspend the task until `fut` completes.
-    pub(crate) fn suspend(fut: BoxFuture, wait: WaitKind) -> Ctl {
-        Ctl(Box::new(CtlKind::Async(fut, wait)))
+    pub(crate) fn suspend(fut: BoxFuture, wait_kind: WaitKind) -> Ctl {
+        Ctl(Box::new(CtlKind::Async(fut, wait_kind)))
     }
 
     /// Ask the user for `cap`.
@@ -175,7 +175,7 @@ impl std::fmt::Debug for CtlKind {
             CtlKind::Limit(k) => write!(f, "Limit({k:?})"),
             CtlKind::Exit(c) => write!(f, "Exit({c})"),
             CtlKind::NeedPermission(c) => write!(f, "NeedPermission({c})"),
-            CtlKind::Async(_, wait) => write!(f, "Async({wait:?})"),
+            CtlKind::Async(_, wait_kind) => write!(f, "Async({wait_kind:?})"),
             CtlKind::Blocked => write!(f, "Blocked"),
             CtlKind::Yield => write!(f, "Yield"),
             CtlKind::Interrupted => write!(f, "Interrupted"),
@@ -334,7 +334,7 @@ pub(crate) enum StdinSource {
     #[cfg(feature = "os")]
     Inherit {
         reader: tokio::io::BufReader<tokio::io::Stdin>,
-        wait: WaitKind,
+        wait_kind: WaitKind,
     },
     /// Input the host sends ([`crate::StdinFeed`]).
     Host(crate::stdin_feed::StdinFeedReader),
@@ -344,18 +344,18 @@ pub(crate) enum StdinSource {
 pub(crate) struct VmStdin {
     source: Arc<tokio::sync::Mutex<StdinSource>>,
     idle_signal: Option<crate::stdin_feed::StdinIdleSignal>,
-    wait: WaitKind,
+    wait_kind: WaitKind,
 }
 
 impl VmStdin {
     pub(crate) fn new(source: StdinSource) -> VmStdin {
-        let (idle_signal, wait) = match &source {
+        let (idle_signal, wait_kind) = match &source {
             StdinSource::Host(reader) => (Some(reader.idle_signal()), WaitKind::User),
             #[cfg(feature = "os")]
-            StdinSource::Inherit { wait, .. } => (None, *wait),
+            StdinSource::Inherit { wait_kind, .. } => (None, *wait_kind),
             _ => (None, WaitKind::Io),
         };
-        VmStdin { source: Arc::new(tokio::sync::Mutex::new(source)), idle_signal, wait }
+        VmStdin { source: Arc::new(tokio::sync::Mutex::new(source)), idle_signal, wait_kind }
     }
 
     pub(crate) fn source(&self) -> &Arc<tokio::sync::Mutex<StdinSource>> {
@@ -368,8 +368,8 @@ impl VmStdin {
     }
 
     /// What a read of this input waits for.
-    pub(crate) fn wait(&self) -> WaitKind {
-        self.wait
+    pub(crate) fn wait_kind(&self) -> WaitKind {
+        self.wait_kind
     }
 }
 

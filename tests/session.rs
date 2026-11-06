@@ -6,7 +6,8 @@
 mod common;
 
 use common::{TempDir, rt};
-use sandlang::native::{Later, WaitKind};
+use sandlang::WaitKind;
+use sandlang::native::Later;
 use sandlang::platform::{Clock, ClockFuture, Instant, SystemTime, UNIX_EPOCH};
 use sandlang::session::RESET_NOTE;
 use sandlang::vm::{Ctl, Vm};

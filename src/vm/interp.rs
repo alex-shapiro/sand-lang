@@ -1750,9 +1750,9 @@ impl Vm {
                 fiber.frames.last_mut().unwrap().ip = (ip - 1) as u32;
                 Ok(Some(Exit::Prompt(cap)))
             }
-            CtlKind::Async(fut, wait) => {
+            CtlKind::Async(fut, wait_kind) => {
                 fiber.result_slot = slot;
-                Ok(Some(Exit::Async(fut, wait)))
+                Ok(Some(Exit::Async(fut, wait_kind)))
             }
             CtlKind::Yield | CtlKind::Blocked => unreachable!("handled above"),
             CtlKind::Collect => Err(self.internal_trap(fiber, ip, "a native asked for a collection twice".into())),

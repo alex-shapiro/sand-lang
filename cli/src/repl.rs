@@ -67,13 +67,13 @@ pub(crate) fn cmd_repl(args: &[String]) -> Result<u8, String> {
     let config =
         opts.config.stdout(ReplSink { screen: screen.clone(), stderr: false }).stderr(ReplSink { screen: screen.clone(), stderr: true });
     let mut session = Engine::new(config).map_err(|e| e.render())?.session();
-    let feed = Some(session.stdin_feed());
+    let stdin_feed = Some(session.stdin_feed());
     let reader = if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         Reader::Editor(EditorReader::new(screen.clone()))
     } else {
         Reader::Plain(LineReader::new())
     };
-    let mut io = Io { reader, feed, ended: false };
+    let mut io = Io { reader, stdin_feed, ended: false };
     outln!("sand {} — help() for documentation, :help for the REPL's commands, :quit to exit", env!("CARGO_PKG_VERSION"));
     Ok(rt.block_on(repl(&mut session, &screen, &mut io)))
 }
@@ -81,7 +81,7 @@ pub(crate) fn cmd_repl(args: &[String]) -> Result<u8, String> {
 /// The REPL's standard input: its reader, and the scripts' feed of it.
 struct Io {
     reader: Reader,
-    feed: Option<StdinFeed>,
+    stdin_feed: Option<StdinFeed>,
     /// Whether the reader reached the end of a piped input (which is final).
     ended: bool,
 }
@@ -195,7 +195,7 @@ async fn foreground<T>(handle: sandlang::InterruptHandle, io: &mut Io, fut: impl
     let mut reading = false;
     loop {
         let wanted = async {
-            match &io.feed {
+            match &io.stdin_feed {
                 Some(feed) if !reading => feed.wait_until_input_needed().await,
                 _ => std::future::pending().await,
             }
@@ -205,14 +205,14 @@ async fn foreground<T>(handle: sandlang::InterruptHandle, io: &mut Io, fut: impl
             Ok(()) = tokio::signal::ctrl_c() => handle.interrupt(),
             () = wanted => {
                 if io.ended {
-                    io.feed.as_ref().expect("wanted").end();
+                    io.stdin_feed.as_ref().expect("wanted").end();
                 } else {
                     reading = true;
                 }
             }
             got = io.reader.script_line(), if reading => {
                 reading = false;
-                let feed = io.feed.as_ref().expect("wanted");
+                let feed = io.stdin_feed.as_ref().expect("wanted");
                 match got {
                     Got::Line(line) => feed.send(line),
                     Got::End => {

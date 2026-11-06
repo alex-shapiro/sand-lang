@@ -221,7 +221,7 @@ enum StdinConfig {
     Bytes(Vec<u8>),
     #[cfg(feature = "os")]
     Inherit {
-        wait: WaitKind,
+        wait_kind: WaitKind,
     },
 }
 
@@ -389,13 +389,13 @@ impl Config {
         self.stdin = StdinConfig::Bytes(data);
         self
     }
-    /// Uses the standard input of the process. `wait` tells what a read
+    /// Uses the standard input of the process. `wait_kind` tells what a read
     /// waits for: if a user types the input, for example at a terminal, use
     /// [`WaitKind::User`], so that the wait does not count toward
     /// `max_wall_time` while no task can run.
     #[cfg(feature = "os")]
-    pub fn inherit_stdin(mut self, wait: WaitKind) -> Self {
-        self.stdin = StdinConfig::Inherit { wait };
+    pub fn inherit_stdin(mut self, wait_kind: WaitKind) -> Self {
+        self.stdin = StdinConfig::Inherit { wait_kind };
         self
     }
     /// Scripts, their imports and the main file of [`Engine::run_file`] use
@@ -1065,8 +1065,8 @@ impl Engine {
             (StdinConfig::None, None) => StdinSource::None,
             (StdinConfig::Bytes(b), None) => StdinSource::Bytes(std::io::Cursor::new(b.clone())),
             #[cfg(feature = "os")]
-            (StdinConfig::Inherit { wait }, None) => {
-                StdinSource::Inherit { reader: tokio::io::BufReader::new(tokio::io::stdin()), wait: *wait }
+            (StdinConfig::Inherit { wait_kind }, None) => {
+                StdinSource::Inherit { reader: tokio::io::BufReader::new(tokio::io::stdin()), wait_kind: *wait_kind }
             }
         };
         let (stdout, stderr): (SharedSink, SharedSink) =

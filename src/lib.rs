@@ -49,6 +49,7 @@ pub use stdin_feed::{StdinFeed, StdinRequest};
 pub use stdio::flush_stdio;
 pub use stdlib::log::{LogLevel, LogRecord, LogSink};
 pub use vm::OutputSink;
+pub use vm::WaitKind;
 pub use vm::heap::GcStats;
 pub use vm::value::{Packing, Value, ValueType};
 

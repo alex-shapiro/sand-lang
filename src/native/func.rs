@@ -100,13 +100,13 @@ impl<T: IntoValue + Send + 'static, E: NativeError> Later<T, E> {
     /// Suspends the calling task until `fut` is resolved, and then executes the
     /// returned closure on the VM thread to produce the Sand result.
     ///
-    /// `wait` tells what `fut` waits for. If `fut` waits for a user action,
+    /// `wait_kind` tells what `fut` waits for. If `fut` waits for a user action,
     /// use [`WaitKind::User`], so that the wait does not count toward the
     /// wall-time limit while the engine has nothing else to run.
     ///
     /// Do not capture [`Value`]s in `fut`; the garbage collector does not trace
     /// pending futures while a task is suspended.
-    pub fn new<F>(wait: WaitKind, fut: impl Future<Output = F> + Send + 'static) -> Later<T, E>
+    pub fn new<F>(wait_kind: WaitKind, fut: impl Future<Output = F> + Send + 'static) -> Later<T, E>
     where
         F: FnOnce(&mut Vm) -> Result<T, E> + Send + 'static,
     {
@@ -114,7 +114,7 @@ impl<T: IntoValue + Send + 'static, E: NativeError> Later<T, E> {
             let finish = fut.await;
             Box::new(move |vm: &mut Vm| E::finish(finish(vm), vm)) as Finisher
         };
-        Later(Completion::After(Box::pin(fut), wait), PhantomData)
+        Later(Completion::After(Box::pin(fut), wait_kind), PhantomData)
     }
 
     /// Completes immediately with `r` without suspending the calling task.
@@ -127,7 +127,7 @@ impl<T, E> Later<T, E> {
     pub(crate) fn finish(self, vm: &mut Vm) -> NResult {
         match self.0 {
             Completion::Now(f) => f(vm),
-            Completion::After(fut, wait) => Err(Ctl::suspend(fut, wait)),
+            Completion::After(fut, wait_kind) => Err(Ctl::suspend(fut, wait_kind)),
         }
     }
 }

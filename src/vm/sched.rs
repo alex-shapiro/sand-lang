@@ -433,11 +433,11 @@ impl Vm {
                         f.state = FiberState::Waiting;
                         self.fibers[fid as usize] = Some(f);
                     }
-                    Exit::Async(fut, wait) => {
+                    Exit::Async(fut, wait_kind) => {
                         let g = self.next_gen();
                         f.wgen = g;
                         f.state = FiberState::Waiting;
-                        let added = self.io.add(fid, g, fut, wait);
+                        let added = self.io.add(fid, g, fut, wait_kind);
                         f.io = added.as_ref().ok().copied();
                         self.fibers[fid as usize] = Some(f);
                         if let Err(fin) = added {
