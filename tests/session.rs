@@ -1060,6 +1060,16 @@ fn a_read_takes_one_answer() {
 }
 
 #[test]
+fn reads_that_wait_have_sequential_ids() {
+    let ids = std::sync::Mutex::new(Vec::new());
+    answered("[io.stdin.read_line()?, io.stdin.read_line()?, io.stdin.read_line()?]", |f, read| {
+        ids.lock().unwrap().push(read.get());
+        assert!(f.answer(read, "x"));
+    });
+    assert_eq!(*ids.lock().unwrap(), [1, 2, 3]);
+}
+
+#[test]
 fn answer_fails_after_read_ends() {
     let feed = StdinFeed::new();
     let mut r = Repl::with(Config::new().policy(RulePolicy::allow_all()).stdin_feed(&feed));

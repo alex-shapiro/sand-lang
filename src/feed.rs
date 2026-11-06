@@ -231,19 +231,25 @@ impl FedReader {
         FedReader { shared: feed.shared(), buf: Vec::new(), buf_target: None, at: 0, ended: false }
     }
 
-    /// Starts a new read operation, resetting EOF state and discarding any
-    /// leftover targeted buffer from the previous read.
+    /// Starts a read that can wait for input, and gives it the next
+    /// [`ReadId`].
     pub(crate) fn begin(&mut self) -> ReadOp {
-        self.ended = false;
+        self.reset();
         let mut state = self.shared.lock();
         state.read_count += 1;
         let read_id = ReadId(NonZeroU64::new(state.read_count).expect("read count overflow"));
         state.active_read = Some(read_id);
         drop(state);
+        ReadOp(self.shared.clone(), read_id)
+    }
+
+    /// Prepares a read that does not wait: an end of input or an answer from
+    /// an earlier read is over.
+    pub(crate) fn reset(&mut self) {
+        self.ended = false;
         if self.buf_target.is_some() {
             self.at = self.buf.len();
         }
-        ReadOp(self.shared.clone(), read_id)
     }
 
     /// Returns buffered bytes available without waiting and whether the
