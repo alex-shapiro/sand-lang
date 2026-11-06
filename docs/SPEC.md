@@ -2016,8 +2016,9 @@ models:
   that can wait receives a unique `ReadId`. `StdinFeed::awaited` returns the
   `ReadId` of the waiting read even if other tasks are running.
   `StdinFeed::awaited_changed` waits until that value changes.
-  `StdinFeed::answer(read, data)` supplies `data`, a newline, and an
-  end-of-input marker to `read` so that any read operation completes.
+  `StdinFeed::answer(read, data)` supplies `data`, a newline if `data` does not
+  end with one, and an end-of-input marker to `read` so that any read operation
+  completes.
   `StdinFeed::dismiss(read)` supplies only an end-of-input marker, which causes
   `read_line` to return `None`. Each read accepts at most one response; both
   methods return `false` if `read` is not waiting for input. Any unread bytes

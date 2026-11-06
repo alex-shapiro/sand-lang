@@ -74,10 +74,10 @@ impl StdinFeed {
         self.shared.push(Chunk { target: None, data: None });
     }
 
-    /// Submits `data`, a newline, and an end-of-input marker as the response to
-    /// `read`. This completes any type of read operation, and the engine
-    /// discards any unread bytes when `read` finishes. Returns `false` if
-    /// `read` is not waiting for input.
+    /// Submits `data`, a newline if `data` does not end with one, and an
+    /// end-of-input marker as the response to `read`. This completes any type
+    /// of read operation, and the engine discards any unread bytes when `read`
+    /// finishes. Returns `false` if `read` is not waiting for input.
     pub fn answer(&self, read: ReadId, data: impl Into<Vec<u8>>) -> bool {
         let mut data = data.into();
         if !data.ends_with(b"\n") {
