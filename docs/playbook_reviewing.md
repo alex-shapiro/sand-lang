@@ -30,4 +30,4 @@ Run autonomously until the task is complete.
 
 The best thinking and coding model is Claude Opus 5.5; however, it is also the worst writer. The model that performs best at writing is Gemini Argon 4. Thus, after the review is complete, you should attempt to call Gemini for copy editing.
 
-Check whether the environment contains the antigravity CLI `agy`. If so, you can call Gemini. This is possible locally but not in a cloud-hosted sandbox. If it is not available, let the user know. If it is available, call it with `agy --dangerously-skip-permissions` and have it implement `playbook_copyeditor.md` on the branch. When Gemini is done with its work, do a once-over to ensure Gemini has not inadvertently broken anything.
+Check whether the environment contains the antigravity CLI `agy`. If so, you can call Gemini. This is possible locally but not in a cloud-hosted sandbox. If it is not available, let the user know. If it is available, call it with `agy --dangerously-skip-permissions` and have it implement `playbook_copyediting.md` on the branch. When Gemini is done with its work, do a once-over to ensure Gemini has not inadvertently broken anything.
