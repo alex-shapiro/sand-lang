@@ -29,17 +29,19 @@ impl From<IoFailure> for HostError {
 
 pub(crate) type Suspended<T> = Result<Later<T, HostError>, HostError>;
 
-/// Suspends the calling task on `fut` and runs `ok` when `fut` succeeds.
+/// Suspends the calling task on `fut`, which waits for `wait_kind`, and runs
+/// `ok` when `fut` succeeds.
 pub(crate) fn suspend<T: Send + 'static, R: IntoValue + Send + 'static>(
+    wait_kind: WaitKind,
     fut: impl Future<Output = Result<T, IoFailure>> + Send + 'static,
     ok: impl FnOnce(&mut Vm, T) -> Result<R, HostError> + Send + 'static,
 ) -> Suspended<R> {
-    Ok(Later::new(WaitKind::Io, settle(fut, ok)))
+    Ok(Later::new(wait_kind, settle(fut, ok)))
 }
 
 /// Awaits `fut` and returns a closure that runs `ok` with the result on the VM
 /// thread.
-pub(crate) async fn settle<T, R>(
+async fn settle<T, R>(
     fut: impl Future<Output = Result<T, IoFailure>>,
     ok: impl FnOnce(&mut Vm, T) -> Result<R, HostError>,
 ) -> impl FnOnce(&mut Vm) -> Result<R, HostError> {

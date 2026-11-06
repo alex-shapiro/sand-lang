@@ -15,6 +15,7 @@ use crate::network::{Network, Stream};
 use crate::platform::{Clock, Instant};
 use crate::policy::Policy;
 use crate::vm::Vm;
+use crate::vm::WaitKind;
 use crate::vm::iomem::{Reservation, ResourceSlot};
 use jiff::SignedDuration;
 use std::pin::Pin;
@@ -647,6 +648,7 @@ fn send(
     let (tls, clock) = (vm.host.tls.clone(), vm.host.clock.clone());
     let body_clock = clock.clone();
     suspend(
+        WaitKind::Io,
         async move {
             let mut head_res = res.sibling();
             let run = async {
@@ -777,6 +779,7 @@ fn upload(
         Ok(net::Conn::new(Box::new(r), Box::new(w), peer.into()))
     };
     suspend(
+        WaitKind::Io,
         async move {
             match crate::platform::timeout(&*clock, timeout, open).await {
                 Some(r) => r.map(|c| (c, slot)),
@@ -860,6 +863,7 @@ fn read_response(vm: &mut Vm, upload: Upload) -> Suspended<ResponseStream> {
         head
     };
     suspend(
+        WaitKind::Io,
         h.closed.clone().guard(async move {
             match crate::platform::timeout(&*clock, timeout, read).await {
                 Some(r) => r,

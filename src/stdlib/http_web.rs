@@ -14,6 +14,7 @@ use super::stream::{self, IoFailure, Suspended, suspend};
 use crate::check::ModKind;
 use crate::native::{NativeModule, Val};
 use crate::vm::Vm;
+use crate::vm::WaitKind;
 use crate::vm::iomem::Reservation;
 use jiff::SignedDuration;
 use js_sys::{Array, Function, Object, Promise, Reflect, Uint8Array};
@@ -74,7 +75,7 @@ fn send(
         let _abort = AbortOnDrop(id);
         done.await.unwrap_or_else(|_| Err(IoFailure::new("io", "the request was abandoned")))
     };
-    suspend(received, move |vm, (status, headers, body, res)| {
+    suspend(WaitKind::Io, received, move |vm, (status, headers, body, res)| {
         // The browser read the body: it stays reserved while it is read.
         Ok(response(vm, text, status, headers, BodyReader::new(Box::new(MemoryBody::new(body)), max_body, Some(res)))?)
     })

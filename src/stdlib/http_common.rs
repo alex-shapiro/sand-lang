@@ -3,6 +3,7 @@
 use super::stream::{self, IoFailure, Suspended, bytes_read, line_read};
 use super::uri;
 use crate::native::{HostError, IntoValue, NativeModule, NativeObject, Val};
+use crate::vm::WaitKind;
 use crate::vm::iomem::Reservation;
 use crate::vm::value::to_usize_saturating;
 use crate::vm::{Ctl, Vm};
@@ -495,7 +496,7 @@ fn read_body<R: IntoValue + Send + 'static>(
         };
         Ok((data, res))
     };
-    stream::suspend(op, move |vm, (data, res)| {
+    stream::suspend(WaitKind::Io, op, move |vm, (data, res)| {
         drop(res);
         done(vm, data)
     })
