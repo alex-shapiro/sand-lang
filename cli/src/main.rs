@@ -223,9 +223,10 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
     let mut config = Config::new()
         .policy(policy.clone())
         .limits(limits)
-        .inherit_stdin()
         .gc_stress(std::env::var_os("SAND_GC_STRESS").is_some())
         .dump_bytecode(std::env::var_os("SAND_DUMP_BYTECODE").is_some());
+    // A user types at a terminal, so a read waits for the user; a pipe does not.
+    config = if std::io::IsTerminal::is_terminal(&std::io::stdin()) { config.inherit_stdin_from_user() } else { config.inherit_stdin() };
     if !files_only {
         config = config.args(script_args.clone());
     }

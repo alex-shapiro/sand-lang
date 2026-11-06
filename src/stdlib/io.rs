@@ -150,7 +150,7 @@ fn buffered_line(vm: &Vm) -> Option<Option<Vec<u8>>> {
             (&c.get_ref()[at..], true)
         }
         #[cfg(feature = "os")]
-        StdinSource::Inherit(r) => (r.buffer(), false),
+        StdinSource::Inherit { reader: r, .. } => (r.buffer(), false),
         StdinSource::Fed(r) => r.available(),
     };
     let take = match buf.iter().position(|&b| b == b'\n') {
@@ -168,7 +168,7 @@ fn buffered_line(vm: &Vm) -> Option<Option<Vec<u8>>> {
     match &mut *source {
         StdinSource::Bytes(c) => c.set_position(c.position() + take as u64),
         #[cfg(feature = "os")]
-        StdinSource::Inherit(r) => std::pin::Pin::new(r).consume(take),
+        StdinSource::Inherit { reader: r, .. } => std::pin::Pin::new(r).consume(take),
         StdinSource::Fed(r) => std::pin::Pin::new(r).consume(take),
         StdinSource::None => {}
     }
@@ -184,7 +184,7 @@ async fn read_input(stdin: &Mutex<StdinSource>, what: Read, res: &mut Reservatio
         StdinSource::None => Ok((what != Read::Line).then(Vec::new)),
         StdinSource::Bytes(c) => read_from(c, what, res).await,
         #[cfg(feature = "os")]
-        StdinSource::Inherit(r) => read_from(r, what, res).await,
+        StdinSource::Inherit { reader: r, .. } => read_from(r, what, res).await,
         StdinSource::Fed(r) => {
             let _op = r.begin_read();
             read_from(r, what, res).await
