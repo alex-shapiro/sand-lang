@@ -1,7 +1,7 @@
 //! Linter for policy files.
 
-use super::file::PolicyError;
 use super::file::parse;
+use super::file::{HttpMethod, PolicyError};
 use super::net::{HostKind, NetPattern, ProbeTargets, domains_above, enclosing_ranges, is_localhost};
 use super::path::{self, Pattern, Seg, name_counts};
 use super::rules::{
@@ -149,7 +149,7 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
 
 enum Scope<'a> {
     Files(u8),
-    Http { host: &'a NetPattern, transports: Transports, methods: Option<&'a [String]>, connections: &'static [Connection] },
+    Http { host: &'a NetPattern, transports: Transports, methods: Option<&'a [HttpMethod]>, connections: &'static [Connection] },
 }
 
 #[derive(Clone, Copy)]
@@ -249,7 +249,7 @@ impl<'a> PathRule<'a> {
             Scope::Files(mask) => [READ, WRITE, IMPORT].into_iter().filter(|&op| mask & op != 0).map(Op::File).collect(),
             Scope::Http { methods, connections, .. } => {
                 let methods: Vec<Op> = match methods {
-                    Some(methods) => methods.iter().map(|m| Op::Method(Some(m))).collect(),
+                    Some(methods) => methods.iter().map(|m| Op::Method(Some(m.as_str()))).collect(),
                     None => vec![Op::Method(None)],
                 };
                 methods.into_iter().chain(connections.iter().map(|&c| Op::Connect(c))).collect()

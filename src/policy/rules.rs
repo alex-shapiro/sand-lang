@@ -1,5 +1,6 @@
 //! Rule-based capability policies.
 
+use super::file::HttpMethod;
 use super::net::{Dest, HostIndex, HostKind, ListenPattern, NetPattern, UrlPattern, internal_ranges, parse_ip, url_segments};
 use super::path::{Glob, Seg, Tok, Trie, path_segments, wild_tokens};
 use super::{Capability, Decision, PathSpace, fold_name, lexical, normalize_path};
@@ -144,7 +145,7 @@ pub(crate) fn uses_tls(cap: &Capability) -> bool {
 pub(crate) enum RuleKind {
     Files(Access, PathPattern),
     Net(NetPattern, Transports),
-    Http(Option<Vec<String>>, UrlPattern, Transports),
+    Http(Option<Vec<HttpMethod>>, UrlPattern, Transports),
     Listen(ListenPattern),
     Env(NameKind),
     Stdin,
@@ -176,7 +177,7 @@ impl RuleKind {
 
 #[derive(Clone, Copy)]
 pub(crate) struct HttpMatch<'a> {
-    pub methods: Option<&'a [String]>,
+    pub methods: Option<&'a [HttpMethod]>,
     pub transports: Transports,
     pub host: &'a NetPattern,
     pub path: &'a [Seg],
@@ -253,6 +254,10 @@ impl fmt::Debug for RulePolicy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RulePolicy").field("rules", &self.rules.len()).finish()
     }
+}
+
+fn http_rule(transports: Transports, methods: &[HttpMethod], url: UrlPattern) -> RuleKind {
+    RuleKind::Http((!methods.is_empty()).then(|| methods.to_vec()), url, transports)
 }
 
 fn custom(name: &str, detail: Option<&str>) -> RuleKind {
@@ -382,20 +387,20 @@ impl RulePolicy {
     pub fn prompt_net(self, transports: Transports, host: NetPattern) -> Self {
         self.push(Decision::Prompt, RuleKind::Net(host, transports))
     }
-    /// Allows HTTP requests of all methods over `transports` to URLs that match `url`. To
-    /// limit a rule to some methods, parse it from a policy file with [`PolicyFile::parse`].
-    ///
-    /// [`PolicyFile::parse`]: super::file::PolicyFile::parse
-    pub fn allow_http(self, transports: Transports, url: UrlPattern) -> Self {
-        self.push(Decision::Allow, RuleKind::Http(None, url, transports))
+    /// Allows HTTP requests with one of `methods` over `transports` to URLs that match `url`.
+    /// An empty `methods` allows all methods.
+    pub fn allow_http(self, transports: Transports, methods: &[HttpMethod], url: UrlPattern) -> Self {
+        self.push(Decision::Allow, http_rule(transports, methods, url))
     }
-    /// Denies HTTP requests of all methods over `transports` to URLs that match `url`.
-    pub fn deny_http(self, transports: Transports, url: UrlPattern) -> Self {
-        self.push(Decision::Deny, RuleKind::Http(None, url, transports))
+    /// Denies HTTP requests with one of `methods` over `transports` to URLs that match `url`.
+    /// An empty `methods` denies all methods.
+    pub fn deny_http(self, transports: Transports, methods: &[HttpMethod], url: UrlPattern) -> Self {
+        self.push(Decision::Deny, http_rule(transports, methods, url))
     }
-    /// Prompts before HTTP requests of all methods over `transports` to URLs that match `url`.
-    pub fn prompt_http(self, transports: Transports, url: UrlPattern) -> Self {
-        self.push(Decision::Prompt, RuleKind::Http(None, url, transports))
+    /// Prompts before HTTP requests with one of `methods` over `transports` to URLs that match
+    /// `url`. An empty `methods` prompts for all methods.
+    pub fn prompt_http(self, transports: Transports, methods: &[HttpMethod], url: UrlPattern) -> Self {
+        self.push(Decision::Prompt, http_rule(transports, methods, url))
     }
     /// Denies connections to `localhost` and to every address for which
     /// [`super::net::is_private_address`] returns `true`. No other rule can allow them: not a
@@ -827,8 +832,8 @@ pub(crate) fn matches_address_form(decision: Decision, is_alternate_ip: bool) ->
     !is_alternate_ip || decision != Decision::Allow
 }
 
-pub(crate) fn method_matches(methods: Option<&[String]>, method: &str) -> bool {
-    methods.is_none_or(|m| m.iter().any(|m| m == method))
+pub(crate) fn method_matches(methods: Option<&[HttpMethod]>, method: &str) -> bool {
+    methods.is_none_or(|m| m.iter().any(|m| m.as_str() == method))
 }
 
 pub(crate) fn file_segments(prefix: &Path, rest: &[Seg]) -> Vec<Seg> {
@@ -1053,7 +1058,7 @@ struct HttpGroup {
 struct HttpEntry {
     rule: u32,
     decision: Decision,
-    methods: Option<Vec<String>>,
+    methods: Option<Vec<HttpMethod>>,
     transports: Transports,
     rank: Rank,
 }
@@ -1078,7 +1083,7 @@ impl Index {
                     index.groups.push(HttpGroup::default());
                     index.groups.len() as u32 - 1
                 });
-                let methods = http.methods.map(<[String]>::to_vec);
+                let methods = http.methods.map(<[HttpMethod]>::to_vec);
                 let entry = HttpEntry { rule: rule_id, decision, methods, transports: http.transports, rank };
                 let group = &mut index.groups[group as usize];
                 if rule.exact() {

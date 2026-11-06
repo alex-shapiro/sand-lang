@@ -2281,17 +2281,19 @@ fn rule_policy_deny_overrides_allow() {
 
 #[test]
 fn typed_rule_builders_make_the_rules_of_the_policy_file_syntax() {
-    use sandlang::policy::file::PolicyFile;
+    use sandlang::policy::file::{HttpMethod, PolicyFile};
     use sandlang::policy::rules::{NamePattern, RulePolicy, Transports};
+    let methods: Vec<HttpMethod> = ["get", "M-SEARCH"].iter().map(|m| m.parse().unwrap()).collect();
     let built = RulePolicy::new()
         .allow_net(Transports::Plaintext, "localhost:8080".parse().unwrap())
         .deny_net(Transports::Both, "10.0.0.0/8".parse().unwrap())
-        .allow_http(Transports::Tls, "api.example.com/v1/**".parse().unwrap())
-        .prompt_http(Transports::Both, "*.example.org/admin".parse().unwrap())
+        .allow_http(Transports::Tls, &[], "api.example.com/v1/**".parse().unwrap())
+        .prompt_http(Transports::Both, &[], "*.example.org/admin".parse().unwrap())
+        .deny_http(Transports::Plaintext, &methods, "api.example.com/v2".parse().unwrap())
         .deny_listen("localhost:22".parse().unwrap())
         .allow_env("AWS_*".parse().unwrap())
         .allow_env(NamePattern::exact("A*B"));
-    let text = "allow net plaintext localhost:8080\ndeny net 10.0.0.0/8\nallow http api.example.com/v1\nprompt http *.example.org/admin\ndeny listen localhost:22\nallow env AWS_*\nallow env \"A*B\"\n";
+    let text = "allow net plaintext localhost:8080\ndeny net 10.0.0.0/8\nallow http api.example.com/v1\nprompt http *.example.org/admin\ndeny http plaintext GET M-SEARCH api.example.com/v2\ndeny listen localhost:22\nallow env AWS_*\nallow env \"A*B\"\n";
     assert_eq!(built.to_string(), text);
     assert_eq!(PolicyFile::parse(text, std::path::Path::new("/"), None).unwrap().rules.to_string(), text);
     let net = |s: &str| s.parse::<sandlang::policy::net::NetPattern>().unwrap_err();
@@ -2302,6 +2304,9 @@ fn typed_rule_builders_make_the_rules_of_the_policy_file_syntax() {
     assert!(net("https://example.com").starts_with("net rules require host patterns, not URLs"));
     let url = "https://api.example.com".parse::<sandlang::policy::net::UrlPattern>().unwrap_err();
     assert!(url.starts_with("URL patterns must not include a scheme"), "{url}");
+    for word in ["TLS", "HTTP", "get-x", ""] {
+        assert!(word.parse::<HttpMethod>().is_err(), "{word}");
+    }
 }
 
 #[test]

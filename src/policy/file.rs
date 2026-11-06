@@ -414,7 +414,38 @@ fn is_name(s: &str) -> bool {
 
 const KNOWN_METHODS: [&str; 9] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE", "CONNECT"];
 
-pub(crate) fn is_method(word: &str) -> bool {
+/// The HTTP request method of an `http` rule, such as `GET` or `M-SEARCH`. Parse one
+/// with [`str::parse`]: a known method in any case, or an uppercase token of letters,
+/// digits, `-`, and `_`. A transport keyword such as `TLS` is not a method.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct HttpMethod(String);
+
+impl HttpMethod {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for HttpMethod {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::str::FromStr for HttpMethod {
+    type Err = String;
+
+    fn from_str(word: &str) -> Result<HttpMethod, String> {
+        if transport(word).is_some() || invalid_transport_hint(word).is_some() || !is_method(word) {
+            return Err(format!(
+                "`{word}` is not an HTTP method: expected a method such as `GET`, or an uppercase token such as `M-SEARCH`"
+            ));
+        }
+        Ok(HttpMethod(word.to_ascii_uppercase()))
+    }
+}
+
+fn is_method(word: &str) -> bool {
     KNOWN_METHODS.iter().any(|m| m.eq_ignore_ascii_case(word))
         || (word.bytes().any(|b| b.is_ascii_uppercase())
             && word.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-' || b == b'_'))
@@ -591,7 +622,7 @@ impl Context<'_> {
             }
             return Ok(());
         }
-        let mut methods: Option<Vec<String>> = None;
+        let mut methods: Option<Vec<HttpMethod>> = None;
         let mut transports: Option<Transports> = None;
         let mut urls = 0;
         for item in rest_args {
@@ -630,11 +661,11 @@ impl Context<'_> {
                         urls += 1;
                         RuleKind::Net(NetPattern::from_tokens(&word.tokens()).map_err(|m| (item.column, m))?, transports)
                     }
-                    "http" if bare.as_deref().is_some_and(is_method) => {
+                    "http" if let Some(method) = bare.as_deref().and_then(|b| b.parse::<HttpMethod>().ok()) => {
                         if urls > 0 {
                             return Err((item.column, "put HTTP methods before the URL patterns".into()));
                         }
-                        methods.get_or_insert_with(Vec::new).push(word.text().to_ascii_uppercase());
+                        methods.get_or_insert_with(Vec::new).push(method);
                         continue;
                     }
                     "http" => {
@@ -784,8 +815,8 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
                 "http" => transport_words(Transports::Plaintext, decision),
                 _ => return None,
             };
-            let method = method.to_ascii_uppercase();
-            if alt.is_some() || !is_method(&method) || transport(&method).is_some() || invalid_transport_hint(&method).is_some() {
+            let method: HttpMethod = method.to_ascii_uppercase().parse().ok()?;
+            if alt.is_some() {
                 return None;
             }
             // Always include the port so a numeric first path segment after an IP address is not parsed as a CIDR prefix length.
