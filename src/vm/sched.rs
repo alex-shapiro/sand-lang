@@ -68,7 +68,6 @@ pub struct IoTable {
     wakers: Vec<Waker>,
     free: Vec<u32>,
     pending: usize,
-    user_waits: usize,
     pub shared: Arc<IoShared>,
 }
 
@@ -93,16 +92,17 @@ impl IoTable {
             self.free.push(slot);
             return Err(fin);
         }
-        let op = IoOp { fid, wgen, fut, wait };
-        self.acquire(&op);
-        self.ops[slot as usize] = Some(op);
+        self.ops[slot as usize] = Some(IoOp { fid, wgen, fut, wait });
+        self.pending += 1;
         Ok(u64::from(slot))
     }
 
     pub fn cancel(&mut self, id: u64) {
-        if let Some(op) = self.ops.get_mut(id as usize).and_then(Option::take) {
+        if let Some(op) = self.ops.get_mut(id as usize)
+            && op.take().is_some()
+        {
             self.free.push(id as u32);
-            self.release(&op);
+            self.pending -= 1;
         }
     }
 
@@ -112,7 +112,7 @@ impl IoTable {
 
     /// Returns `true` if any pending operation is waiting for the user.
     pub fn awaits_user(&self) -> bool {
-        self.user_waits > 0
+        self.ops.iter().flatten().any(|op| op.wait == WaitKind::User)
     }
 
     /// Cancels every pending operation.
@@ -120,16 +120,6 @@ impl IoTable {
         for id in 0..self.ops.len() {
             self.cancel(id as u64);
         }
-    }
-
-    fn acquire(&mut self, op: &IoOp) {
-        self.pending += 1;
-        self.user_waits += usize::from(op.wait == WaitKind::User);
-    }
-
-    fn release(&mut self, op: &IoOp) {
-        self.pending -= 1;
-        self.user_waits -= usize::from(op.wait == WaitKind::User);
     }
 
     /// Polls the operations that were woken. Returns those completed.
@@ -142,10 +132,10 @@ impl IoTable {
         for slot in slots {
             let Some(Some(op)) = self.ops.get_mut(slot as usize) else { continue };
             if let Poll::Ready(fin) = op.fut.as_mut().poll(&mut Context::from_waker(&self.wakers[slot as usize])) {
-                let op = self.ops[slot as usize].take().expect("polled");
+                let IoOp { fid, wgen, .. } = self.ops[slot as usize].take().expect("polled");
                 self.free.push(slot);
-                self.release(&op);
-                done.push((op.fid, op.wgen, fin));
+                self.pending -= 1;
+                done.push((fid, wgen, fin));
             }
         }
         done
