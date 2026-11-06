@@ -564,11 +564,15 @@ impl Vm {
                 self.heap.io_memory.publish_heap(self.heap.used());
                 self.current = u32::MAX;
                 let exit = match r {
-                    Ok(e) => {
-                        gc_retried = None;
-                        e
-                    }
-                    Err(Trap::Limit(LimitKind::Memory)) if std::mem::take(&mut self.gc_retry) => {
+                    Ok(e) => e,
+                    Err(Trap::Exit(c)) => return Ok(Stop::Exit(c)),
+                    Err(t) => return Err(t),
+                };
+                if !matches!(exit, Exit::Collect) {
+                    gc_retried = None;
+                }
+                match exit {
+                    Exit::Collect => {
                         // Memory checks count garbage that has not been
                         // collected yet, so collect and run the failed
                         // instruction again. If the retry itself failed, report
@@ -588,10 +592,6 @@ impl Vm {
                         self.ready.push_front(fid);
                         continue;
                     }
-                    Err(Trap::Exit(c)) => return Ok(Stop::Exit(c)),
-                    Err(t) => return Err(t),
-                };
-                match exit {
                     Exit::Done(v) => {
                         self.fibers[fid as usize] = Some(f);
                         if Some(fid) == main {
