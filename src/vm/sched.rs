@@ -92,9 +92,9 @@ impl IoTable {
             self.free.push(slot);
             return Err(fin);
         }
-        self.ops[slot as usize] = Some(IoOp { fid, wgen, fut, wait });
-        self.pending += 1;
-        self.user_waits += usize::from(wait == WaitKind::User);
+        let op = IoOp { fid, wgen, fut, wait };
+        self.acquire(&op);
+        self.ops[slot as usize] = Some(op);
         Ok(u64::from(slot))
     }
 
@@ -123,6 +123,11 @@ impl IoTable {
         }
         self.pending = 0;
         self.user_waits = 0;
+    }
+
+    fn acquire(&mut self, op: &IoOp) {
+        self.pending += 1;
+        self.user_waits += usize::from(op.wait == WaitKind::User);
     }
 
     fn release(&mut self, op: &IoOp) {
@@ -246,6 +251,14 @@ impl Drop for RunTimer {
 }
 
 impl Vm {
+    /// Moves the wall-time deadline later by the time since `since`, so that
+    /// the time does not count toward the limit.
+    fn exclude_wall_time(&mut self, since: Instant, timer: &RunTimer) {
+        if let Some(deadline) = &mut self.deadline {
+            *deadline += timer.now().saturating_duration_since(since);
+        }
+    }
+
     fn check_limits(&self, timer: &RunTimer) -> Result<(), Trap> {
         if self.host.interrupt.load(Ordering::Relaxed) {
             return Err(Trap::Interrupted);
@@ -475,10 +488,7 @@ impl Vm {
                             }
                             None => PromptAnswer::DenyOnce,
                         };
-                        // Time spent waiting for the answer does not count.
-                        if let Some(d) = &mut self.deadline {
-                            *d += timer.now().saturating_duration_since(asked);
-                        }
+                        self.exclude_wall_time(asked, &timer);
                         timer.resume();
                         self.apply_answer(cap, answer);
                     }
@@ -556,8 +566,8 @@ impl Vm {
             })
             .await;
             drop(blocked);
-            if let (Some(start), Some(deadline)) = (pause_start, &mut self.deadline) {
-                *deadline += timer.now().saturating_duration_since(start);
+            if let Some(start) = pause_start {
+                self.exclude_wall_time(start, &timer);
             }
             timer.resume();
             timer.last_yield = timer.now;
