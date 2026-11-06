@@ -276,6 +276,27 @@ fn deny_private_net_denies_every_private_address() {
     assert_eq!(p.check(&net("app.localhost", 443)), Decision::Deny);
 }
 
+/// No rule overrides a denial from `deny_private_net`: not a fallback rule that allows the
+/// host name, and not a more specific rule in the same tier.
+#[test]
+fn no_rule_allows_what_deny_private_net_denies() {
+    let get =
+        |host: &str| Capability::Http { method: "GET".into(), scheme: "https".into(), host: host.into(), port: 443, path: "/".into() };
+    let private: SocketAddr = "10.0.0.1:443".parse().unwrap();
+    let p = RulePolicy::new().deny_private_net().with_defaults(RulePolicy::new().allow_http("db.example.com"));
+    assert_eq!(p.check(&get("db.example.com")), Decision::Allow);
+    assert_eq!(p.check_resolved(&get("db.example.com"), private), Decision::Deny);
+    assert_eq!(p.check_resolved(&get("db.example.com"), "93.184.216.34:443".parse().unwrap()), Decision::Allow);
+    let p = RulePolicy::new().with_defaults(RulePolicy::new().deny_private_net()).allow_http("db.example.com");
+    assert_eq!(p.check_resolved(&get("db.example.com"), private), Decision::Deny);
+    let p = RulePolicy::new().allow_net("10.0.0.5:5432").allow_http("localhost").deny_private_net();
+    assert_eq!(p.check(&net("10.0.0.5", 5432)), Decision::Deny);
+    assert_eq!(p.check(&get("localhost")), Decision::Deny);
+    // An ordinary address rule still yields to a more specific host rule.
+    let p = RulePolicy::new().deny_net("10.0.0.0/8").with_defaults(RulePolicy::new().allow_http("db.example.com"));
+    assert_eq!(p.check_resolved(&get("db.example.com"), private), Decision::Allow);
+}
+
 #[test]
 fn http_address_rules_apply_to_resolved_addresses() {
     let get = |method: &str, host: &str, path: &str| Capability::Http {

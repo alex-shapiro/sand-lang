@@ -160,13 +160,33 @@ pub(crate) struct Rule {
     pub decision: Decision,
     pub kind: RuleKind,
     pub origin: Option<Origin>,
-    /// Rule tier, where `0` is for primary rules and higher values are for fallback rules added via [`RulePolicy::with_defaults`].
-    pub tier: u32,
+    pub tier: Tier,
+}
+
+/// The group of a rule. Of the rules that match a request, a rule of a lower tier decides
+/// before the specificity of the rules counts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Tier {
+    /// A `deny` rule from [`RulePolicy::deny_private_net`]. It decides every request and every
+    /// resolved address that it matches, whatever the other rules are.
+    Absolute,
+    /// `0` for primary rules, and higher values for fallback rules added via [`RulePolicy::with_defaults`].
+    Ranked(u32),
+}
+
+impl Tier {
+    /// This tier, `by` ranks lower. An absolute tier stays absolute.
+    fn lowered(self, by: u32) -> Tier {
+        match self {
+            Tier::Absolute => Tier::Absolute,
+            Tier::Ranked(t) => Tier::Ranked(t + by),
+        }
+    }
 }
 
 impl Rule {
     pub(crate) fn new(decision: Decision, kind: RuleKind) -> Rule {
-        Rule { decision, kind, origin: None, tier: 0 }
+        Rule { decision, kind, origin: None, tier: Tier::Ranked(0) }
     }
 
     /// Returns `true` if the rule matches only exact, case-sensitive names and canonical IP representations.
@@ -248,9 +268,16 @@ impl RulePolicy {
     }
 
     /// Appends `defaults` as fallback rules that apply only if the rules in `self` do not match a request.
+    /// In [`RulePolicy::check_resolved`], a host rule and an address rule compare by host
+    /// specificity across tiers, so an exact host rule in `defaults` outranks an address range
+    /// rule in `self`. Rules from [`RulePolicy::deny_private_net`] keep their effect in either tier.
     pub fn with_defaults(mut self, defaults: RulePolicy) -> RulePolicy {
-        let below = self.rules.iter().map(|r| r.tier).max().unwrap_or(0) + 1;
-        self.rules.extend(defaults.rules.into_iter().map(|r| Rule { tier: r.tier + below, ..r }));
+        let lowest = self.rules.iter().filter_map(|r| match r.tier {
+            Tier::Ranked(t) => Some(t),
+            Tier::Absolute => None,
+        });
+        let below = lowest.max().unwrap_or(0) + 1;
+        self.rules.extend(defaults.rules.into_iter().map(|r| Rule { tier: r.tier.lowered(below), ..r }));
         self.changed()
     }
 
@@ -359,11 +386,14 @@ impl RulePolicy {
         self.parsed("prompt", "http", rule)
     }
     /// Denies connections to `localhost` and to every address for which
-    /// [`super::net::is_private_address`] returns `true`.
+    /// [`super::net::is_private_address`] returns `true`. No other rule can allow them: not a
+    /// more specific rule, and not a rule that allows the host name that resolves to the address.
     pub fn deny_private_net(self) -> Self {
         let localhost = NetPattern { kind: HostKind::Host("localhost".into()), port: None };
         let patterns = std::iter::once(localhost).chain(internal_ranges().iter().cloned());
-        patterns.fold(self, |p, pattern| p.push(Decision::Deny, RuleKind::Net(pattern, Transports::all())))
+        patterns.fold(self, |p, pattern| {
+            p.push_rule(Rule { tier: Tier::Absolute, ..Rule::new(Decision::Deny, RuleKind::Net(pattern, Transports::all())) })
+        })
     }
     /// Allows binding a listener matching `pattern`, which may be `ip:port`,
     /// `[ipv6]:port`, `ip`, `localhost`, `*:port`, or `*`.
@@ -532,6 +562,9 @@ impl RulePolicy {
     /// wildcard domain patterns such as `*.domain` and `*` rank below all IP
     /// and CIDR rules. If the winning IP rule is a `deny` or `prompt` rule,
     /// this method returns [`Decision::Deny`].
+    ///
+    /// A rule from [`RulePolicy::deny_private_net`] denies every address that it
+    /// matches, whatever the rule that matched `request`.
     pub fn check_resolved(&self, request: &Capability, addr: std::net::SocketAddr) -> Decision {
         if self.resolved_verdict(request, addr).is_ok() { Decision::Allow } else { Decision::Deny }
     }
@@ -564,7 +597,9 @@ impl RulePolicy {
 
     fn resolve(&self, decider: Option<(Decision, usize)>, address: Option<(Decision, usize)>) -> Result<(), Option<usize>> {
         let Some((decision, rule)) = address else { return Ok(()) };
-        if let Some((d, decider)) = decider.filter(|&(d, _)| d != Decision::Deny) {
+        if self.rules[rule].tier != Tier::Absolute
+            && let Some((d, decider)) = decider.filter(|&(d, _)| d != Decision::Deny)
+        {
             // Compare by host specificity across all tiers so a wildcard domain rule cannot bypass a default IP deny rule.
             let key = |i: usize, d: Decision| resolution_key(&self.rules[i].kind, d);
             if key(decider, d) > key(rule, decision) {
@@ -863,7 +898,7 @@ pub(crate) fn precedence(spec: Spec, decision: Decision, rule: usize) -> Precede
 struct Best<'a> {
     exclude: &'a [usize],
     rules: &'a [Rule],
-    best: Option<((std::cmp::Reverse<u32>, Precedence), Decision)>,
+    best: Option<((std::cmp::Reverse<Tier>, Precedence), Decision)>,
 }
 
 impl<'a> Best<'a> {

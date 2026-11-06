@@ -510,7 +510,7 @@ pub(crate) fn verb(decision: Decision) -> &'static str {
 }
 
 fn file_rule(decision: Decision, kind: RuleKind, origin: Origin) -> Rule {
-    Rule { decision, kind, origin: Some(origin), tier: 0 }
+    Rule { origin: Some(origin), ..Rule::new(decision, kind) }
 }
 
 impl Context<'_> {

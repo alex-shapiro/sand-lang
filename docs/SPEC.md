@@ -1580,7 +1580,9 @@ combine user rules with host defaults (§17.5). Existing default rules on
 `defaults` remain in the fallback tier. During stage-2 resolved-address checks
 (§14.6), the policy compares the stage-1 allowing rule against IP address rules
 by host specificity alone, so a user domain wildcard cannot bypass a default IP
-deny rule.
+deny rule. A fallback rule with an exact hostname outranks a primary IP range rule
+in that check. To deny an address range that no rule can allow, use
+`RulePolicy::deny_private_net` (§14.6).
 
 Specificity depends on the capability category:
 
@@ -1677,6 +1679,9 @@ hostname rule such as `allow net db.internal` outranks the `/8` prefix and
 permits connecting to `10.0.0.5` via `db.internal`.
 `sandlang::policy::net::is_private_address` reports whether an IP address belongs to
 a private, loopback, link-local, or other non-public range.
+`RulePolicy::deny_private_net` denies `localhost` and each of these ranges in both
+stages, and no other rule can override these denials: not a more specific rule,
+not a rule in another tier, and not a hostname rule in stage 2.
 
 ### 14.7 Policy files
 
