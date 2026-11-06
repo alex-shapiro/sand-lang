@@ -12,7 +12,7 @@ use crate::native::func::Signature;
 use crate::native::ty::Type;
 use crate::native::{BoundType, NativeDecl, NativeModule};
 use crate::platform::{Clock, Instant, SystemClock};
-use crate::policy::rules::RulePolicy;
+use crate::policy::rules::{PathPattern, RulePolicy};
 use crate::policy::{Capability, CustomPolicy, Decision, Policy, PromptAnswer, Prompter};
 use crate::session::Session;
 use crate::stdlib;
@@ -1621,11 +1621,13 @@ impl Engine {
         let Policy::Rules(rules) = &self.config.policy else { return format!("the policy requires a prompt, and {why}") };
         match rules.verdict(&Capability::Import(path.to_path_buf()), self.config.fs.space(), &[]) {
             Some((_, rule)) => format!("{} requires a prompt, and {why}", rules.describe_rule(rule)),
-            None => {
-                let dir = path.parent().unwrap_or(path);
-                let rule = RulePolicy::new().allow_import(dir).to_string();
-                format!("unmatched import requires a prompt, and {why}; add `{}` to allow it", rule.trim_end())
-            }
+            None => match PathPattern::literal(path.parent().unwrap_or(path)) {
+                Ok(dir) => {
+                    let rule = RulePolicy::new().allow_import(dir).to_string();
+                    format!("unmatched import requires a prompt, and {why}; add `{}` to allow it", rule.trim_end())
+                }
+                Err(_) => format!("unmatched import requires a prompt, and {why}"),
+            },
         }
     }
 

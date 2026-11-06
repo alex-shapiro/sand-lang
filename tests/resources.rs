@@ -6,7 +6,7 @@ mod common;
 
 use common::{HttpResponse, TempDir, http_server, rt, run_with};
 use sandlang::engine::{Config, Engine, Limits, MemorySink};
-use sandlang::policy::rules::RulePolicy;
+use sandlang::policy::rules::{PathPattern, RulePolicy};
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
@@ -106,7 +106,9 @@ fn opening_files_is_checked_for_each_mode() {
     let dir = TempDir::new("open-modes");
     dir.write("ro/a.txt", "read only");
     dir.write("rw/b.txt", "writable");
-    let policy = RulePolicy::standard().allow_read(dir.path().join("ro")).allow_write(dir.path().join("rw"));
+    let policy = RulePolicy::standard()
+        .allow_read(PathPattern::literal(dir.path().join("ro")).unwrap())
+        .allow_write(PathPattern::literal(dir.path().join("rw")).unwrap());
     let src = r#"
 import fs
 let modes = [fs.Mode.Read, fs.Mode.Write, fs.Mode.Append, fs.Mode.ReadWrite]
@@ -139,9 +141,9 @@ fn open_files_stay_the_files_the_policy_checked() {
     dir.write("secret/data.txt", "secret data\n");
     dir.write("sync/.keep", "");
     let policy = RulePolicy::standard()
-        .allow_write(dir.path().join("allowed"))
-        .allow_write(dir.path().join("sync"))
-        .allow_read(dir.path().join("swapped"));
+        .allow_write(PathPattern::literal(dir.path().join("allowed")).unwrap())
+        .allow_write(PathPattern::literal(dir.path().join("sync")).unwrap())
+        .allow_read(PathPattern::literal(dir.path().join("swapped")).unwrap());
     let root = dir.path().to_path_buf();
     let src = r#"
 import fs

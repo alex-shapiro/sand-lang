@@ -7,7 +7,7 @@ use common::{HttpResponse, TempDir, http_server, run_with};
 use sandlang::engine::Limits;
 use sandlang::policy::file::PolicyFile;
 use sandlang::policy::net::{NetPattern, is_private_address};
-use sandlang::policy::rules::{NamePattern, RulePolicy, Transports};
+use sandlang::policy::rules::{NamePattern, PathPattern, RulePolicy, Transports};
 use sandlang::policy::{Capability, Decision, PromptAnswer};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
@@ -473,7 +473,10 @@ fn rules_of_equal_specificity() {
         .prompt_net(Transports::Both, "b.com".parse().unwrap());
     assert_eq!(p.check(&net("a.com", 80)), Decision::Deny);
     assert_eq!(p.check(&net("b.com", 80)), Decision::Allow);
-    let p = RulePolicy::new().prompt_write("/out").allow_read("/out").deny_read("/out/secret");
+    let p = RulePolicy::new()
+        .prompt_write("/out".parse().unwrap())
+        .allow_read("/out".parse().unwrap())
+        .deny_read("/out/secret".parse().unwrap());
     assert_eq!(p.check(&Capability::FsWrite("/out/x".into())), Decision::Prompt);
     assert_eq!(p.check(&Capability::FsRead("/out/x".into())), Decision::Allow);
     assert_eq!(p.check(&Capability::FsRead("/out/secret".into())), Decision::Deny);
@@ -490,19 +493,23 @@ fn rules_of_equal_specificity() {
 #[test]
 fn default_rules_apply_only_to_unmatched_requests() {
     let write = |path: &str| Capability::FsWrite(path.into());
-    let p = RulePolicy::new().prompt_write("/").with_defaults(RulePolicy::allow_all());
+    let p = RulePolicy::new().prompt_write("/".parse().unwrap()).with_defaults(RulePolicy::allow_all());
     assert_eq!(p.check_normalized(&write("/tmp/x")), Decision::Prompt);
     assert_eq!(p.check_normalized(&Capability::FsRead("/tmp/x".into())), Decision::Allow);
     let import = Capability::Import("/x/a.sand".into());
-    let p = RulePolicy::new().prompt_read("/").with_defaults(RulePolicy::standard().allow_import("/"));
+    let p = RulePolicy::new().prompt_read("/".parse().unwrap()).with_defaults(RulePolicy::standard().allow_import("/".parse().unwrap()));
     assert_eq!(p.check_normalized(&import), Decision::Prompt);
-    assert_eq!(RulePolicy::standard().allow_import("/").check_normalized(&import), Decision::Allow);
+    assert_eq!(RulePolicy::standard().allow_import("/".parse().unwrap()).check_normalized(&import), Decision::Allow);
     let get = Capability::Http { method: "GET".into(), scheme: "https".into(), host: "a.com".into(), port: 443, path: "/".into() };
     let p = RulePolicy::new().prompt_http(Transports::Both, &[], "*".parse().unwrap()).with_defaults(RulePolicy::allow_all());
     assert_eq!(p.check(&get), Decision::Prompt);
-    let defaults = RulePolicy::standard().allow_stdin().allow_net(Transports::Tls, "*".parse().unwrap()).allow_read("/data");
-    let p =
-        RulePolicy::new().prompt_stdin().deny_net(Transports::Both, "*".parse().unwrap()).prompt_read("/data/x").with_defaults(defaults);
+    let defaults =
+        RulePolicy::standard().allow_stdin().allow_net(Transports::Tls, "*".parse().unwrap()).allow_read("/data".parse().unwrap());
+    let p = RulePolicy::new()
+        .prompt_stdin()
+        .deny_net(Transports::Both, "*".parse().unwrap())
+        .prompt_read("/data/x".parse().unwrap())
+        .with_defaults(defaults);
     assert_eq!(p.check(&Capability::Stdin), Decision::Prompt);
     assert_eq!(p.check(&net("example.com", 443)), Decision::Deny);
     assert_eq!(p.check(&plain("example.com", 80)), Decision::Deny);
@@ -528,12 +535,12 @@ fn default_rules_apply_only_to_unmatched_requests() {
     assert_eq!(p.check_resolved(&plain("evil.example", 80), metadata), Decision::Deny);
     let p = RulePolicy::new().allow_net(Transports::Both, "meta.internal".parse().unwrap()).with_defaults(floor());
     assert_eq!(p.check_resolved(&plain("meta.internal", 80), metadata), Decision::Allow);
-    let host = RulePolicy::new().prompt_write("/").with_defaults(RulePolicy::allow_all());
+    let host = RulePolicy::new().prompt_write("/".parse().unwrap()).with_defaults(RulePolicy::allow_all());
     let write = Capability::FsWrite("/tmp/x".into());
     assert_eq!(host.check_normalized(&write), Decision::Prompt);
     assert_eq!(RulePolicy::standard().with_defaults(host.clone()).check_normalized(&write), Decision::Prompt);
     assert_eq!(RulePolicy::new().extend(host.clone()).check_normalized(&write), Decision::Prompt);
-    assert_eq!(host.to_string(), RulePolicy::new().prompt_write("/").extend(RulePolicy::allow_all()).to_string());
+    assert_eq!(host.to_string(), RulePolicy::new().prompt_write("/".parse().unwrap()).extend(RulePolicy::allow_all()).to_string());
 }
 
 #[test]
@@ -901,7 +908,7 @@ fn entry_checks_do_not_resolve_a_final_symlink() {
     std::fs::create_dir_all(dir.path().join("allowed")).unwrap();
     std::os::unix::fs::symlink(dir.path().join("outside/target.txt"), dir.path().join("allowed/link")).unwrap();
     let link = Capability::FsWrite(dir.path().join("allowed/link"));
-    let p = RulePolicy::standard().allow_write(dir.path().join("allowed"));
+    let p = RulePolicy::standard().allow_write(PathPattern::literal(dir.path().join("allowed")).unwrap());
     assert_eq!(p.check(&link), Decision::Prompt);
     assert_eq!(p.check_entry(&link), Decision::Allow);
     // Symlinks in the directories leading to the entry are still resolved.
@@ -914,7 +921,10 @@ fn entry_checks_do_not_resolve_a_final_symlink() {
 fn denies_under_finds_deny_rules_inside_a_tree() {
     let dir = TempDir::new("denies-under");
     let d = dir.path();
-    let p = RulePolicy::standard().allow_write(d).deny_read(d.join("a/b/secret")).deny_write(d.join("c/locked"));
+    let p = RulePolicy::standard()
+        .allow_write(PathPattern::literal(d).unwrap())
+        .deny_read(PathPattern::literal(d.join("a/b/secret")).unwrap())
+        .deny_write(PathPattern::literal(d.join("c/locked")).unwrap());
     assert!(p.denies_under(d));
     assert!(p.denies_under(&d.join("a")));
     assert!(p.denies_under(&d.join("a/b/secret")));
@@ -948,7 +958,7 @@ print(fs.metadata("allowed/dangling").unwrap_err().kind)
 fs.remove_file("allowed/dangling")?
 print(fs.list_dir("allowed")?)
 "#;
-    let r = run_with(src, rules(&dir, RulePolicy::standard().allow_write(dir.path().join("allowed"))));
+    let r = run_with(src, rules(&dir, RulePolicy::standard().allow_write(PathPattern::literal(dir.path().join("allowed")).unwrap())));
     assert_eq!(
         r.ok_stdout(),
         "permission_denied\npermission_denied\ntrue\npermission_denied\npermission_denied\npermission_denied\nOk(false)\npermission_denied\n[\"dangling_dir\", \"real.txt\"]\n"
@@ -978,7 +988,7 @@ fs.remove_file("allowed/renamed.txt")?
 fs.remove_dir("allowed/tree", recursive: true)?
 print(fs.list_dir("allowed")?)
 "#;
-    let r = run_with(src, rules(&dir, RulePolicy::standard().allow_write(dir.path().join("allowed"))));
+    let r = run_with(src, rules(&dir, RulePolicy::standard().allow_write(PathPattern::literal(dir.path().join("allowed")).unwrap())));
     assert_eq!(r.ok_stdout(), "permission_denied\npermission_denied\npermission_denied\n[]\n");
     assert_eq!(std::fs::read_to_string(dir.path().join("outside/target.txt")).unwrap(), "target");
     assert!(dir.path().join("outside/dir/keep.txt").exists());
@@ -1029,7 +1039,10 @@ fn renaming_or_removing_trees_respects_deny_rules_inside() {
     dir.write("data/b/inner/n.txt", "n");
     dir.write("data/c/x.txt", "x");
     let data = dir.path().join("data");
-    let policy = RulePolicy::standard().allow_write(&data).deny_read(data.join("a/secret")).deny_write(data.join("locked/inner"));
+    let policy = RulePolicy::standard()
+        .allow_write(PathPattern::literal(&data).unwrap())
+        .deny_read(PathPattern::literal(data.join("a/secret")).unwrap())
+        .deny_write(PathPattern::literal(data.join("locked/inner")).unwrap());
     let src = r#"
 import fs
 print(fs.read_text("data/a/secret/key.txt").unwrap_err().kind)
@@ -1089,7 +1102,7 @@ print(fs.write_text("pipe", "x").unwrap_err().kind)
 print(fs.read_bytes("sub").unwrap_err().kind)
 print(fs.metadata("pipe")?.is_file)
 "#;
-    let r = run_with(src, rules(&dir, RulePolicy::standard().allow_write(dir.path())));
+    let r = run_with(src, rules(&dir, RulePolicy::standard().allow_write(PathPattern::literal(dir.path()).unwrap())));
     // Opening a FIFO without a reader for writing fails at once (ENXIO).
     assert_eq!(r.ok_stdout(), "invalid\nio\ninvalid\nfalse\n");
 }
@@ -1111,7 +1124,7 @@ fs.rename("allowed/link", "allowed/moved")?
 fs.remove_file("allowed/moved")?
 print(fs.list_dir("allowed")?)
 "#;
-    let r = run_with(src, rules(&dir, RulePolicy::standard().allow_write(dir.path().join("allowed"))));
+    let r = run_with(src, rules(&dir, RulePolicy::standard().allow_write(PathPattern::literal(dir.path().join("allowed")).unwrap())));
     assert_eq!(r.ok_stdout(), "permission_denied\npermission_denied\npermission_denied\n[\"real.txt\"]\n");
     assert_eq!(std::fs::read_to_string(target.join("keep.txt")).unwrap(), "keep");
     assert!(!target.join("new.txt").exists());
@@ -1165,7 +1178,7 @@ print("secret reads: \(secret)")
 print(public > 0)
 "#;
     let cwd = dir.path().join("allowed");
-    let policy = RulePolicy::standard().allow_write(&cwd);
+    let policy = RulePolicy::standard().allow_write(PathPattern::literal(&cwd).unwrap());
     let r = run_with(src, move |c| c.policy(policy).cwd(cwd));
     assert_eq!(r.ok_stdout(), "secret reads: 0\ntrue\n");
 }
@@ -1261,7 +1274,7 @@ print(seen.get("SECRET") ?? 0)
 print(seen.get("listed") ?? 0)
 print((seen.get("public") ?? 0) > 0)
 "#;
-    let policy = RulePolicy::standard().allow_write(&allowed);
+    let policy = RulePolicy::standard().allow_write(PathPattern::literal(&allowed).unwrap());
     let cwd = allowed.clone();
     let r = run_with(src, move |c| c.policy(policy).cwd(cwd));
     let rounds = racer.finish();
@@ -1302,7 +1315,7 @@ for i in 0..3000 {
 }
 print("done")
 "#;
-    let policy = RulePolicy::standard().allow_write(&allowed);
+    let policy = RulePolicy::standard().allow_write(PathPattern::literal(&allowed).unwrap());
     let cwd = allowed.clone();
     let r = run_with(src, move |c| c.policy(policy).cwd(cwd));
     racer.finish();
@@ -1346,7 +1359,7 @@ print(fs.read_text("a/b/parent/b/file.txt")?)
 print(fs.read_text("a/sneaky/allowed/a/b/file.txt")?)
 print(fs.list_dir("a/b/parent")?)
 "#;
-    let policy = RulePolicy::standard().allow_write(&allowed);
+    let policy = RulePolicy::standard().allow_write(PathPattern::literal(&allowed).unwrap());
     let cwd = allowed.clone();
     let r = run_with(src, move |c| c.policy(policy).cwd(cwd));
     assert_eq!(r.ok_stdout(), format!("{}false\npublic\npublic\n[\"b\", \"sneaky\"]\n", "permission_denied\n".repeat(8)));
@@ -1376,7 +1389,9 @@ fn case_variants_cannot_bypass_the_policy() {
     dir.write("data/public.txt", "public");
     let data = dir.path().join("data");
     symlink(data.join("Private"), data.join("link")).unwrap();
-    let policy = RulePolicy::standard().allow_write(&data).deny_read(data.join("Private"));
+    let policy = RulePolicy::standard()
+        .allow_write(PathPattern::literal(&data).unwrap())
+        .deny_read(PathPattern::literal(data.join("Private")).unwrap());
     let src = r#"
 import fs
 for p in ["data/Private/key.txt", "data/private/key.txt", "data/PRIVATE/KEY.TXT", "data/pRiVaTe/Key.Txt", "data/LINK/key.txt"] {
@@ -1417,7 +1432,7 @@ print(fs.read_text("data/README.txt")?)
     // An allow rule for one file; prompts for the rest show stored names.
     let asked = Arc::new(Mutex::new(Vec::new()));
     let log = asked.clone();
-    let policy = RulePolicy::standard().allow_read(data.join("Readme.TXT"));
+    let policy = RulePolicy::standard().allow_read(PathPattern::literal(data.join("Readme.TXT")).unwrap());
     let src = r#"
 import fs
 print(fs.read_text("data/README.txt")?)
@@ -1467,7 +1482,7 @@ fs.rename("\(p)/f.txt", "\(p)/g.txt")?
 fs.remove_dir("directory-number-0-" + "x".repeat(40), recursive: true)?
 print(fs.list_dir(".")?)
 "#;
-    let policy = RulePolicy::standard().allow_write(&allowed);
+    let policy = RulePolicy::standard().allow_write(PathPattern::literal(&allowed).unwrap());
     let cwd = allowed.clone();
     let r = run_with(src, move |c| c.policy(policy).cwd(cwd));
     assert_eq!(r.ok_stdout(), "true\ndeep\n[\"f.txt\"]\npermission_denied\npermission_denied\npermission_denied\n[]\n");
@@ -1492,7 +1507,9 @@ fn names_that_are_not_utf8() {
     std::fs::create_dir_all(odd.join("work")).unwrap();
     std::fs::write(odd.join("work/notes.txt"), "notes").unwrap();
     symlink(OsStr::from_bytes(b"../caf\xe9"), odd.join("work/up")).unwrap();
-    let policy = RulePolicy::standard().allow_write(&odd).deny_read(odd.join("key.txt"));
+    let policy = RulePolicy::standard()
+        .allow_write(PathPattern::literal(&odd).unwrap())
+        .deny_read(PathPattern::literal(odd.join("key.txt")).unwrap());
     let src = r#"
 import fs
 print(fs.read_text("notes.txt")?)
@@ -1528,7 +1545,7 @@ print(fs.is_file("dangling")?)
 fs.rename("dangling", "renamed")?
 print(fs.list_dir(".")?)
 "#;
-    let policy = RulePolicy::standard().allow_write(&allowed);
+    let policy = RulePolicy::standard().allow_write(PathPattern::literal(&allowed).unwrap());
     let cwd = allowed.clone();
     let r = run_with(src, move |c| c.policy(policy).cwd(cwd));
     assert_eq!(r.ok_stdout(), "permission_denied\npermission_denied\npermission_denied\nfalse\n[\"dangling_dir\", \"renamed\", \"sub\"]\n");
@@ -1755,7 +1772,9 @@ fn oversized_files_and_input_fail_before_being_read() {
 fn deny_rules_ignore_case() {
     let dir = TempDir::new("deny-case");
     let d = dir.path();
-    let p = RulePolicy::standard().allow_write(d).deny_read(d.join("future/secret"));
+    let p = RulePolicy::standard()
+        .allow_write(PathPattern::literal(d).unwrap())
+        .deny_read(PathPattern::literal(d.join("future/secret")).unwrap());
     assert_eq!(p.check(&Capability::FsRead(d.join("future/Secret/x"))), Decision::Deny);
     assert_eq!(p.check(&Capability::FsWrite(d.join("FUTURE/secret/x"))), Decision::Deny);
     assert_eq!(p.check(&Capability::FsWrite(d.join("future/other"))), Decision::Allow);
@@ -1767,10 +1786,10 @@ fn deny_rules_match_unicode_equivalent_names() {
     let dir = TempDir::new("deny-unicode");
     let d = dir.path();
     let p = RulePolicy::standard()
-        .allow_write(d)
-        .deny_read(d.join("future/secrets"))
-        .deny_write(d.join("café.json"))
-        .deny_write(d.join("λόγος"));
+        .allow_write(PathPattern::literal(d).unwrap())
+        .deny_read(PathPattern::literal(d.join("future/secrets")).unwrap())
+        .deny_write(PathPattern::literal(d.join("café.json")).unwrap())
+        .deny_write(PathPattern::literal(d.join("λόγος")).unwrap());
     for denied in ["future/ſecrets/x", "FUTURE/SECRETS", "cafe\u{301}.json", "CAFÉ.JSON", "λόγοσ", "future/se\u{200b}crets"] {
         assert_eq!(p.check(&Capability::FsWrite(d.join(denied))), Decision::Deny, "{denied}");
         assert_eq!(p.check_entry(&Capability::FsWrite(d.join(denied))), Decision::Deny, "{denied}");
@@ -1790,12 +1809,12 @@ fn unicode_equivalents_cannot_bypass_deny_rules_on_apfs() {
     let data = dir.path().join("data");
     let policy = || {
         RulePolicy::standard()
-            .allow_write(&data)
-            .deny_read(data.join("secrets"))
-            .deny_write(data.join("config.json"))
-            .deny_write(data.join("future"))
-            .deny_write(data.join("future.json"))
-            .deny_write(data.join("café.txt"))
+            .allow_write(PathPattern::literal(&data).unwrap())
+            .deny_read(PathPattern::literal(data.join("secrets")).unwrap())
+            .deny_write(PathPattern::literal(data.join("config.json")).unwrap())
+            .deny_write(PathPattern::literal(data.join("future")).unwrap())
+            .deny_write(PathPattern::literal(data.join("future.json")).unwrap())
+            .deny_write(PathPattern::literal(data.join("café.txt")).unwrap())
     };
     let src = r#"
 import fs
@@ -1843,7 +1862,7 @@ fn symlink_entries_are_resolved_to_on_disk_names() {
     }
     // The policy resolves its rules' paths when it first decides, here
     // before `Later` exists.
-    let p = RulePolicy::standard().allow_write(data.join("Later"));
+    let p = RulePolicy::standard().allow_write(PathPattern::literal(data.join("Later")).unwrap());
     assert_eq!(p.check_entry(&Capability::FsWrite(data.join("Later"))), Decision::Allow);
     symlink(dir.path().join("outside/target.txt"), data.join("Later")).unwrap();
     assert_eq!(p.check_entry(&Capability::FsWrite(data.join("LATER"))), Decision::Allow);
@@ -1887,7 +1906,7 @@ fn denial_messages_use_the_requested_path() {
     dir.write("data/private/key.txt", "key");
     #[cfg(unix)]
     std::os::unix::fs::symlink(dir.path().join("data/private"), dir.path().join("data/link")).unwrap();
-    let policy = RulePolicy::standard().allow_read(dir.path().join("data/public"));
+    let policy = RulePolicy::standard().allow_read(PathPattern::literal(dir.path().join("data/public")).unwrap());
     let src = r#"
 import fs
 print(fs.read_text("data/../data/private/key.txt").unwrap_err().message)
@@ -1919,7 +1938,7 @@ print(fs.read_text("a/".repeat(200) + "b").unwrap_err().kind)
 print(fs.exists("x\u{0}y").unwrap_err().kind)
 "#;
     let start = Instant::now();
-    let r = run_with(src, rules(&dir, RulePolicy::standard().allow_write(dir.path())));
+    let r = run_with(src, rules(&dir, RulePolicy::standard().allow_write(PathPattern::literal(dir.path()).unwrap())));
     assert_eq!(r.ok_stdout(), "invalid\ninvalid\nnot_found\ninvalid\n");
     assert!(start.elapsed() < Duration::from_secs(5), "{:?}", start.elapsed());
 }
@@ -1934,7 +1953,8 @@ import fs
 print(fs.create_dir("out/data/x", recursive: true).unwrap_err().kind)
 print(fs.exists("out")?)
 "#;
-    let policy = RulePolicy::standard().allow_write(&allowed).allow_read(dir.path());
+    let policy =
+        RulePolicy::standard().allow_write(PathPattern::literal(&allowed).unwrap()).allow_read(PathPattern::literal(dir.path()).unwrap());
     let r = run_with(src, rules(&dir, policy.clone()));
     assert_eq!(r.ok_stdout(), "permission_denied\nfalse\n");
     std::fs::create_dir(dir.path().join("out")).unwrap();
@@ -1952,7 +1972,7 @@ fn copies_do_not_keep_permission_bits() {
     std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o4755)).unwrap();
     let r = run_with(
         "import fs\nfs.copy(\"tool.sh\", \"copy.sh\")?\nprint(fs.read_text(\"copy.sh\")?)",
-        rules(&dir, RulePolicy::standard().allow_write(dir.path())),
+        rules(&dir, RulePolicy::standard().allow_write(PathPattern::literal(dir.path()).unwrap())),
     );
     assert_eq!(r.ok_stdout(), "#!/bin/sh\n\n");
     let mode = std::fs::metadata(dir.path().join("copy.sh")).unwrap().permissions().mode();
@@ -2010,7 +2030,16 @@ fn a_policy_file_over_the_standard_rules_keeps_its_prompt_rules() {
 }
 
 #[test]
-#[should_panic(expected = "empty path in file rule")]
-fn file_builders_reject_an_empty_path() {
-    let _ = RulePolicy::new().allow_read("");
+fn path_patterns_reject_empty_and_relative_paths() {
+    for text in ["", "data", "./data", "../data", "~/data"] {
+        assert!(text.parse::<PathPattern>().is_err(), "{text:?}");
+        assert!(PathPattern::literal(text).is_err(), "{text:?}");
+    }
+    let err = "./data".parse::<PathPattern>().unwrap_err();
+    assert_eq!(err, "cannot resolve the relative path `./data` without a base directory: write an absolute path");
+    let p = RulePolicy::new().allow_read("/data/**/*.txt".parse().unwrap()).deny_read(PathPattern::literal("/data/*.txt").unwrap());
+    assert_eq!(p.to_string(), "allow read /data/**/*.txt\ndeny read \"/data/*.txt\"\n");
+    assert_eq!(p.check(&Capability::FsRead("/data/a/b.txt".into())), Decision::Allow);
+    assert_eq!(p.check(&Capability::FsRead("/data/*.txt".into())), Decision::Deny);
+    assert_eq!(p.check(&Capability::FsRead("/data/b.md".into())), Decision::Prompt);
 }

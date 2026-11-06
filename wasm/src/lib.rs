@@ -185,7 +185,9 @@ impl Engine {
         let mut config = Config::new()
             .interrupt(interrupt.clone())
             .limits(policy.apply_limits(sandlang::engine::Limits::default()))
-            .policy(policy.rules.with_defaults(sandlang::policy::rules::RulePolicy::standard().allow_import("/")))
+            .policy(policy.rules.with_defaults(
+                sandlang::policy::rules::RulePolicy::standard().allow_import(sandlang::policy::rules::PathPattern::everything()),
+            ))
             .memory_fs(fs.clone())
             .cwd(&cwd)
             .env(string_entries(&options, "env")?)

@@ -31,7 +31,10 @@ fn files() -> MemFs {
 #[test]
 fn rules_evaluate_memory_paths() {
     let fs = files();
-    let rules = RulePolicy::standard().allow_read("/data").deny_read("/data/secret").allow_write("/out");
+    let rules = RulePolicy::standard()
+        .allow_read("/data".parse().unwrap())
+        .deny_read("/data/secret".parse().unwrap())
+        .allow_write("/out".parse().unwrap());
     let src = r#"import fs
 print(fs.read_text("/data/in.txt"))
 print(fs.read_text("data/../data/in.txt").is_ok())
@@ -57,7 +60,7 @@ print(fs.remove_dir("/data", recursive: true).unwrap_err().kind)
 fn moving_a_tree_with_protected_paths_is_denied() {
     let fs = files();
     // Writing anywhere is allowed, except under the secret directory.
-    let rules = RulePolicy::standard().allow_write("/").deny_write("/data/secret");
+    let rules = RulePolicy::standard().allow_write("/".parse().unwrap()).deny_write("/data/secret".parse().unwrap());
     let src = r#"import fs
 print(fs.rename("/data", "/elsewhere").unwrap_err().kind)
 print(fs.remove_dir("/data", recursive: true).unwrap_err().kind)
@@ -70,7 +73,10 @@ print(fs.rename("/data/in.txt", "/out/in.txt").is_ok())
     // A tree without a protected entry can be moved and removed.
     fs.write("/data/secret/id.key", "k").unwrap();
     fs.write("/out/sub/a.txt", "a").unwrap();
-    let rules = RulePolicy::standard().allow_write("/").deny_read("/data/secret/id.key").deny_read("/out/sub/missing.key");
+    let rules = RulePolicy::standard()
+        .allow_write("/".parse().unwrap())
+        .deny_read("/data/secret/id.key".parse().unwrap())
+        .deny_read("/out/sub/missing.key".parse().unwrap());
     let src = r#"import fs
 print(fs.rename("/data", "/elsewhere").unwrap_err().kind)
 fs.rename("/out", "/out2")?
@@ -119,7 +125,7 @@ fn imports_and_main_files_come_from_the_memory_file_system() {
     fs.write("/app/lib/util.sand", "import \"helper\"\npub fn twice(x: int) -> int { helper.add(x, x) }\n").unwrap();
     fs.write("/app/lib/helper.sand", "pub fn add(a: int, b: int) -> int { a + b }\n").unwrap();
     let out = MemorySink::new();
-    let policy = RulePolicy::standard().allow_import("/");
+    let policy = RulePolicy::standard().allow_import("/".parse().unwrap());
     let mut engine = Engine::new(Config::new().policy(policy).memory_fs(fs.clone()).stdout(out.clone()));
     rt().block_on(engine.run_file("/app/main.sand")).unwrap();
     assert_eq!(out.contents(), "42\n");
@@ -132,7 +138,7 @@ fn imports_and_main_files_come_from_the_memory_file_system() {
         other => panic!("{other:?}"),
     }
     // `allow import` restricts them further.
-    let rules = RulePolicy::standard().allow_import("/app/lib");
+    let rules = RulePolicy::standard().allow_import("/app/lib".parse().unwrap());
     let mut engine = Engine::new(Config::new().policy(rules).memory_fs(fs.clone()).stdout(MemorySink::new()));
     rt().block_on(engine.run_file("/app/main.sand")).unwrap();
     fs.write("/app/other.sand", "pub fn f() -> int { 1 }\n").unwrap();
@@ -197,7 +203,7 @@ fn engines_can_share_a_file_system() {
 fn checks_and_lints_see_the_memory_file_system() {
     let fs = MemFs::new();
     fs.write("/lib.sand", "pub fn f() -> int { 1 }\n").unwrap();
-    let engine = Engine::new(Config::new().policy(RulePolicy::standard().allow_import("/")).memory_fs(fs));
+    let engine = Engine::new(Config::new().policy(RulePolicy::standard().allow_import("/".parse().unwrap())).memory_fs(fs));
     engine.check_source("main.sand", "import \"lib\"\nprint(lib.f())").unwrap();
     match engine.check_source("main.sand", "import \"missing\"") {
         Err(Error::Compile(d)) => assert!(d[0].message.contains("cannot load module `missing`"), "{d:?}"),
@@ -212,7 +218,7 @@ fn checks_and_lints_see_the_memory_file_system() {
 fn rules_match_memory_paths_as_written() {
     let fs = MemFs::new();
     fs.write("/tmp/x.txt", "x").unwrap();
-    let rules = RulePolicy::standard().allow_read("/tmp");
+    let rules = RulePolicy::standard().allow_read("/tmp".parse().unwrap());
     let (r, out) = run(Config::new().policy(rules).memory_fs(fs), "import fs\nprint(fs.read_text(\"/tmp/x.txt\").is_ok())");
     r.unwrap();
     assert_eq!(out, "true\n");
@@ -253,7 +259,12 @@ fn imports_obey_read_deny_rules_and_load_only_scripts() {
     fs.write("/data/secret/conf.sand", "pub let TOKEN = \"TOPSECRET\"\n").unwrap();
     fs.write("/data/key.txt", "SECRET\n").unwrap();
     fs.write("/data/ok.sand", "pub let X = 1\n").unwrap();
-    let rules = || RulePolicy::standard().allow_import("/").allow_read("/data").deny_read("/data/secret");
+    let rules = || {
+        RulePolicy::standard()
+            .allow_import("/".parse().unwrap())
+            .allow_read("/data".parse().unwrap())
+            .deny_read("/data/secret".parse().unwrap())
+    };
     let config = || Config::new().policy(rules()).memory_fs(fs.clone());
     let (r, out) = run(config(), "import \"data/ok\"\nprint(ok.X)");
     r.unwrap();
@@ -283,7 +294,11 @@ fn waiting_for_prompt_answers_is_not_run_time() {
         PromptAnswer::AllowOnce
     };
     let limits = sandlang::engine::Limits { max_wall_time: Some(std::time::Duration::from_millis(200)), ..Default::default() };
-    let config = Config::new().policy(RulePolicy::standard().allow_import("/nowhere")).prompter(slow_yes).limits(limits).memory_fs(fs);
+    let config = Config::new()
+        .policy(RulePolicy::standard().allow_import("/nowhere".parse().unwrap()))
+        .prompter(slow_yes)
+        .limits(limits)
+        .memory_fs(fs);
     let src = "import \"lib\"\nimport fs\nlet n = fs.read_text(\"/a.txt\").unwrap().parse_int().unwrap()\nprint(lib.twice(n))\nprint(fs.read_text(\"/a.txt\").is_ok())";
     let (r, out) = run(config, src);
     r.unwrap();

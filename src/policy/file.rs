@@ -701,53 +701,62 @@ impl Context<'_> {
     }
 
     fn path(&self, text: &[Tok], bare: bool) -> Result<PathPattern, String> {
-        let flat: String = text.iter().map(|t| t.0).collect();
-        let sep = |c: char| c == '/' || (cfg!(windows) && c == '\\');
-        let unanchored = || {
-            invalid_capability_hint(&flat).filter(|_| bare).unwrap_or_else(|| {
-                format!(
-                    "path `{flat}` is not anchored: write `./{flat}` for `{}`, `~/...`, an absolute path, or `**/{flat}` for that name anywhere",
-                    self.base.join(&flat).display()
-                )
-            })
-        };
-        let starts = |s: &str| flat.starts_with(s) && flat[s.len()..].chars().next().is_none_or(sep);
-        let anywhere = text.len() >= 2 && text[..2].iter().all(|t| t.0 == '*' && t.1) && text.get(2).is_none_or(|t| sep(t.0));
-        let (mut prefix, rest): (PathBuf, &[Tok]) = if anywhere {
-            (PathBuf::new(), text)
-        } else if starts("~") {
-            let home = self.home.ok_or("cannot resolve `~` without a home directory")?;
-            (home.to_path_buf(), &text[1..])
-        } else if starts(".") || starts("..") {
-            (self.base.to_path_buf(), text)
-        } else if flat.starts_with('/') || (cfg!(windows) && Path::new(&flat).is_absolute()) {
-            let root = Path::new(&flat)
-                .components()
-                .take_while(|c| matches!(c, std::path::Component::Prefix(_) | std::path::Component::RootDir))
-                .collect::<PathBuf>();
-            let skip = root.as_os_str().to_string_lossy().chars().count().min(text.len());
-            (root, &text[skip..])
-        } else {
-            return Err(unanchored());
-        };
-        let mut segs: Vec<Seg> = Vec::new();
-        for seg in rest.split(|t| sep(t.0) && !t.1).filter(|s| !s.is_empty()) {
-            let parsed = Seg::parse(seg)?;
-            match (&parsed, segs.is_empty()) {
-                (Seg::Lit(s), _) if &**s == "." => {}
-                (Seg::Lit(s), true) if &**s == ".." => {
-                    prefix.pop();
-                }
-                (Seg::Lit(s), false) if &**s == ".." => return Err("`..` cannot follow a wildcard".into()),
-                (Seg::Lit(s), true) => prefix.push(&**s),
-                _ => segs.push(parsed),
-            }
-        }
-        while segs.last() == Some(&Seg::GlobStar) {
-            segs.pop();
-        }
-        Ok(PathPattern { prefix, rest: segs })
+        parse_path(text, bare, Some(self.base), self.home)
     }
+}
+
+/// Parses a path pattern. A path that starts with `./` or `../` needs `base`, and a path that
+/// starts with `~` needs `home`.
+pub(crate) fn parse_path(text: &[Tok], bare: bool, base: Option<&Path>, home: Option<&Path>) -> Result<PathPattern, String> {
+    let flat: String = text.iter().map(|t| t.0).collect();
+    let sep = |c: char| c == '/' || (cfg!(windows) && c == '\\');
+    let unanchored = || {
+        invalid_capability_hint(&flat).filter(|_| bare).unwrap_or_else(|| match base {
+            Some(base) => format!(
+                "path `{flat}` is not anchored: write `./{flat}` for `{}`, `~/...`, an absolute path, or `**/{flat}` for that name anywhere",
+                base.join(&flat).display()
+            ),
+            None => format!("path `{flat}` is not anchored: write an absolute path, or `**/{flat}` for that name anywhere"),
+        })
+    };
+    let starts = |s: &str| flat.starts_with(s) && flat[s.len()..].chars().next().is_none_or(sep);
+    let anywhere = text.len() >= 2 && text[..2].iter().all(|t| t.0 == '*' && t.1) && text.get(2).is_none_or(|t| sep(t.0));
+    let (mut prefix, rest): (PathBuf, &[Tok]) = if anywhere {
+        (PathBuf::new(), text)
+    } else if starts("~") {
+        let home = home.ok_or("cannot resolve `~` without a home directory")?;
+        (home.to_path_buf(), &text[1..])
+    } else if starts(".") || starts("..") {
+        let base =
+            base.ok_or_else(|| format!("cannot resolve the relative path `{flat}` without a base directory: write an absolute path"))?;
+        (base.to_path_buf(), text)
+    } else if flat.starts_with('/') || (cfg!(windows) && Path::new(&flat).is_absolute()) {
+        let root = Path::new(&flat)
+            .components()
+            .take_while(|c| matches!(c, std::path::Component::Prefix(_) | std::path::Component::RootDir))
+            .collect::<PathBuf>();
+        let skip = root.as_os_str().to_string_lossy().chars().count().min(text.len());
+        (root, &text[skip..])
+    } else {
+        return Err(unanchored());
+    };
+    let mut segs: Vec<Seg> = Vec::new();
+    for seg in rest.split(|t| sep(t.0) && !t.1).filter(|s| !s.is_empty()) {
+        let parsed = Seg::parse(seg)?;
+        match (&parsed, segs.is_empty()) {
+            (Seg::Lit(s), _) if &**s == "." => {}
+            (Seg::Lit(s), true) if &**s == ".." => {
+                prefix.pop();
+            }
+            (Seg::Lit(s), false) if &**s == ".." => return Err("`..` cannot follow a wildcard".into()),
+            (Seg::Lit(s), true) => prefix.push(&**s),
+            _ => segs.push(parsed),
+        }
+    }
+    while segs.last() == Some(&Seg::GlobStar) {
+        segs.pop();
+    }
+    Ok(PathPattern { prefix, rest: segs })
 }
 
 fn parse_custom_pattern(word: &Word) -> Result<Option<String>, String> {
