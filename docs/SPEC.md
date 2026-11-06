@@ -2002,10 +2002,13 @@ standard streams and provides an empty standard input.
 
 The host can capture standard output and standard error or feed standard input
 into a running script. `Config::stdout` and `Config::stderr` redirect script
-output to an `OutputSink`, while `Config::stdin_bytes`, `Config::inherit_stdin`
-with feature `os`, and `Config::stdin_feed` configure standard input.
+output to an `OutputSink`, while `Config::stdin_bytes` and
+`Config::inherit_stdin` with feature `os` configure standard input.
 
-A `StdinFeed` supplies standard input while a script runs. It supports two host
+`Session::stdin_feed` returns the session's own `StdinFeed`, which supplies
+standard input while a script runs. From the first call on, the session reads
+the feed instead of the standard input of its `Config`. Each session has its
+own feed, and no other session or engine reads it. A feed supports two host
 models:
 
 - Terminal hosts wait for `StdinFeed::wanted` and send user input with
@@ -2015,8 +2018,7 @@ models:
   reaches it.
 - Interactive applications display an input prompt while a read waits. Each read
   that can wait receives a unique `StdinReadId`. `StdinFeed::awaited` returns the
-  `StdinReadId` of the waiting read even if other tasks are running. If more than
-  one read waits, for example in two sessions, it returns the oldest.
+  `StdinReadId` of the waiting read even if other tasks are running.
   `StdinFeed::awaited_changed` waits until that value changes.
   `StdinFeed::answer(read, data)` supplies `data`, a newline if `data` does not
   end with one, and an end-of-input marker to `read` so that any read operation
@@ -2236,7 +2238,7 @@ system:
   is not set. If `sandlang` is built without `os`, the engine cannot access the
   operating system regardless of the configured policy: `net` and `http` are
   unavailable, the environment is empty unless set via `Config::env`, standard
-  input comes only from `Config::stdin_bytes` or `Config::stdin_feed`, scripts
+  input comes only from `Config::stdin_bytes` or `Session::stdin_feed`, scripts
   use an in-memory file system, and the crate compiles for
   `wasm32-unknown-unknown` (§16.5).
 - `tls`, enabled by default and implying `os`: enables TLS support for `https`

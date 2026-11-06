@@ -64,13 +64,10 @@ pub(crate) fn cmd_repl(args: &[String]) -> Result<u8, String> {
     }
     let rt = runtime()?;
     let screen = Screen::default();
-    let mut config =
+    let config =
         opts.config.stdout(ReplSink { screen: screen.clone(), stderr: false }).stderr(ReplSink { screen: screen.clone(), stderr: true });
-    let feed = Some(StdinFeed::new());
-    if let Some(feed) = &feed {
-        config = config.stdin_feed(feed);
-    }
     let mut session = Engine::new(config).map_err(|e| e.render())?.session();
+    let feed = Some(session.stdin_feed());
     let reader = if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         Reader::Editor(EditorReader::new(screen.clone()))
     } else {

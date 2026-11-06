@@ -223,7 +223,6 @@ enum StdinConfig {
     Inherit {
         wait: WaitKind,
     },
-    Host(crate::StdinFeed),
 }
 
 /// Engine configuration (builder style).
@@ -397,11 +396,6 @@ impl Config {
     #[cfg(feature = "os")]
     pub fn inherit_stdin(mut self, wait: WaitKind) -> Self {
         self.stdin = StdinConfig::Inherit { wait };
-        self
-    }
-    /// Scripts read the input the host sends through `feed`.
-    pub fn stdin_feed(mut self, feed: &crate::StdinFeed) -> Self {
-        self.stdin = StdinConfig::Host(feed.clone());
         self
     }
     /// Scripts, their imports and the main file of [`Engine::run_file`] use
@@ -1018,7 +1012,7 @@ impl Engine {
         let mut deadline = compiled.deadline;
         let mut report = TestReport::default();
         for (tname, proto) in prog.tests.clone() {
-            let mut vm = self.new_vm(prog.clone(), cwd.clone(), true);
+            let mut vm = self.new_vm(prog.clone(), cwd.clone(), true, None);
             vm.deadline = deadline;
             let init = vm.run_main(prog.entry).await;
             let result = match init {
@@ -1062,14 +1056,18 @@ impl Engine {
         Ok((name, source, root))
     }
 
-    pub(crate) fn new_vm(&self, prog: Arc<Program>, cwd: PathBuf, quiet: bool) -> Vm {
+    /// A VM for `prog`. It reads `stdin_feed` if given, and otherwise the
+    /// standard input of the config.
+    pub(crate) fn new_vm(&self, prog: Arc<Program>, cwd: PathBuf, quiet: bool, stdin_feed: Option<&crate::StdinFeed>) -> Vm {
         let c = &self.config;
-        let stdin = match &c.stdin {
-            StdinConfig::None => StdinSource::None,
-            StdinConfig::Bytes(b) => StdinSource::Bytes(std::io::Cursor::new(b.clone())),
+        let stdin = match (&c.stdin, stdin_feed) {
+            (_, Some(feed)) => StdinSource::Host(feed.reader()),
+            (StdinConfig::None, None) => StdinSource::None,
+            (StdinConfig::Bytes(b), None) => StdinSource::Bytes(std::io::Cursor::new(b.clone())),
             #[cfg(feature = "os")]
-            StdinConfig::Inherit { wait } => StdinSource::Inherit { reader: tokio::io::BufReader::new(tokio::io::stdin()), wait: *wait },
-            StdinConfig::Host(feed) => StdinSource::Host(crate::stdin_feed::StdinFeedReader::new(feed)),
+            (StdinConfig::Inherit { wait }, None) => {
+                StdinSource::Inherit { reader: tokio::io::BufReader::new(tokio::io::stdin()), wait: *wait }
+            }
         };
         let (stdout, stderr): (SharedSink, SharedSink) =
             if quiet { (Arc::new(NullSink), Arc::new(NullSink)) } else { (c.stdout.clone(), c.stderr.clone()) };
@@ -1127,7 +1125,7 @@ impl Engine {
                 }
             }
         }
-        let mut vm = self.new_vm(prog.clone(), cwd, false);
+        let mut vm = self.new_vm(prog.clone(), cwd, false, None);
         vm.deadline = compiled.deadline;
         let r = vm.run_main(prog.entry).await;
         let r = end_run(&mut vm, r).await;

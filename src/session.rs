@@ -77,6 +77,8 @@ pub struct Session {
     was_reset: bool,
     /// The wall-time limit of each input (see [`Session::set_wall_time`]).
     wall_time: Option<std::time::Duration>,
+    /// The session's own standard input (see [`Session::stdin_feed`]).
+    stdin_feed: Option<crate::StdinFeed>,
 }
 
 /// The suffix of the error message of a call that reset the session.
@@ -111,7 +113,7 @@ impl Session {
         let cwd = config.cwd.clone().unwrap_or_else(|| root.clone());
         let root = fs.resolve(&fs.absolute(&root));
         let wall_time = config.limits.max_wall_time;
-        Session { engine, root, cwd, state: None, inputs: 0, exit_code: None, was_reset: false, wall_time }
+        Session { engine, root, cwd, state: None, inputs: 0, exit_code: None, was_reset: false, wall_time, stdin_feed: None }
     }
 
     /// Checks, compiles and runs one input. Returns the debug form of its
@@ -255,6 +257,23 @@ impl Session {
     /// The code passed to `exit` by the last input, if it called `exit`.
     pub fn exit_code(&self) -> Option<i32> {
         self.exit_code
+    }
+
+    /// Returns the session's own standard input, which the host supplies.
+    /// From the first call on, the session's scripts read what the host sends
+    /// through this feed, instead of the standard input of the engine's
+    /// [`crate::Config`]. Each session has its own feed, and no other session
+    /// or engine reads it.
+    pub fn stdin_feed(&mut self) -> crate::StdinFeed {
+        if let Some(feed) = &self.stdin_feed {
+            return feed.clone();
+        }
+        let feed = crate::StdinFeed::new();
+        if let Some(st) = &mut self.state {
+            st.vm.host.stdin = crate::vm::VmStdin::new(crate::vm::StdinSource::Host(feed.reader()));
+        }
+        self.stdin_feed = Some(feed.clone());
+        feed
     }
 
     /// Forgets all inputs: the next input starts a fresh session. "Always"
@@ -427,7 +446,7 @@ impl Session {
         // The standard library's program; its entry initializes the prelude and `task`.
         let prog = snapshot.program.clone();
         let pending = Some(prog.entry);
-        let vm = self.engine.new_vm(Arc::new(prog), self.cwd.clone(), false);
+        let vm = self.engine.new_vm(Arc::new(prog), self.cwd.clone(), false, self.stdin_feed.as_ref());
         let compiler = snapshot.compiler.clone();
         Ok(State { snapshot, graph, checker, compiler, vm, pending, loading: None, running: false, deferred_prompt: None })
     }

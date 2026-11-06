@@ -9,13 +9,13 @@ use std::task::{Context, Poll, Waker};
 use tokio::io::{AsyncBufRead, AsyncRead, ReadBuf};
 use tokio::sync::Notify;
 
-/// A channel that supplies standard input from the host to scripts
-/// ([`crate::Config::stdin_feed`]). A terminal host can await
+/// A channel that supplies standard input from the host to the scripts of
+/// one session ([`crate::Session::stdin_feed`]). A terminal host can await
 /// [`StdinFeed::wanted`] and forward input with [`StdinFeed::send`]. A GUI
 /// host can monitor [`StdinFeed::awaited_changed`] and submit an answer to
 /// each read with [`StdinFeed::answer`] or [`StdinFeed::dismiss`]. Clones
 /// share the same underlying stream.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct StdinFeed {
     channel: Arc<StdinChannel>,
 }
@@ -25,28 +25,20 @@ pub struct StdinFeed {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StdinReadId(NonZeroU64);
 
-/// The state that the host's [`StdinFeed`] handles share with the engine's
-/// readers.
+/// The state that the host's [`StdinFeed`] handles share with the session's
+/// reader.
 #[derive(Default)]
 pub(crate) struct StdinChannel {
     state: Mutex<StdinChannelState>,
     changed: Notify,
 }
 
-/// The input queue of a [`StdinChannel`] and the state of each reader.
+/// The input queue of a [`StdinChannel`] and the state of its reader.
 #[derive(Default)]
 struct StdinChannelState {
     queue: VecDeque<QueuedInput>,
-    readers: Vec<StdinReaderState>,
-    readers_created: u64,
     reads_started: u64,
-}
-
-/// The state of one [`StdinFeedReader`]. Each engine run or session that reads
-/// the feed has its own reader.
-struct StdinReaderState {
-    reader_key: u64,
-    /// Whether the engine of this reader has nothing to run.
+    /// Whether the engine of the reader has nothing to run.
     engine_idle: bool,
     /// The read under way, after it first waits for input.
     waiting_read: Option<WaitingRead>,
@@ -59,12 +51,6 @@ struct WaitingRead {
     /// read takes queued input until it waits again.
     waiting: bool,
     waker: Option<Waker>,
-}
-
-impl StdinReaderState {
-    fn read_id(&self) -> Option<StdinReadId> {
-        self.waiting_read.as_ref().map(|r| r.id)
-    }
 }
 
 struct QueuedInput {
@@ -81,8 +67,13 @@ impl QueuedInput {
 }
 
 impl StdinFeed {
-    pub fn new() -> StdinFeed {
-        StdinFeed::default()
+    pub(crate) fn new() -> StdinFeed {
+        StdinFeed { channel: Arc::default() }
+    }
+
+    /// The session's reader of this feed.
+    pub(crate) fn reader(&self) -> StdinFeedReader {
+        StdinFeedReader { channel: self.channel.clone(), buf: Vec::new(), buf_target: None, at: 0, ended: false }
     }
 
     /// Appends `data` to the input stream. Sent data stays in the queue across
@@ -131,8 +122,7 @@ impl StdinFeed {
     }
 
     /// Returns the [`StdinReadId`] of the active read if it is waiting for input,
-    /// even if other tasks are running. If more than one read waits, returns
-    /// the oldest.
+    /// even if other tasks are running.
     pub fn awaited(&self) -> Option<StdinReadId> {
         self.channel.lock().awaited()
     }
@@ -162,26 +152,17 @@ impl StdinFeed {
 
 impl StdinChannelState {
     fn wanted(&self) -> bool {
-        self.waiting_readers().any(|r| r.engine_idle)
+        self.engine_idle && self.awaited().is_some()
     }
 
+    /// The read that waits for input that is not in the queue.
     fn awaited(&self) -> Option<StdinReadId> {
-        self.waiting_readers().filter_map(StdinReaderState::read_id).min()
+        let read = self.waiting_read.as_ref().filter(|r| r.waiting)?;
+        (!self.queue.iter().any(|input| input.is_for_read(Some(read.id)))).then_some(read.id)
     }
 
-    fn is_waiting(&self, read: StdinReadId) -> bool {
-        self.waiting_readers().any(|r| r.read_id() == Some(read))
-    }
-
-    /// The readers whose read waits for input that is not in the queue.
-    fn waiting_readers(&self) -> impl Iterator<Item = &StdinReaderState> {
-        self.readers.iter().filter(|r| {
-            r.waiting_read.as_ref().is_some_and(|read| read.waiting && !self.queue.iter().any(|c| c.is_for_read(Some(read.id))))
-        })
-    }
-
-    fn reader_state(&mut self, reader_key: u64) -> Option<&mut StdinReaderState> {
-        self.readers.iter_mut().find(|r| r.reader_key == reader_key)
+    fn read_id(&self) -> Option<StdinReadId> {
+        self.waiting_read.as_ref().map(|r| r.id)
     }
 }
 
@@ -198,7 +179,7 @@ impl StdinChannel {
 
     fn answer_read(&self, read: StdinReadId, data: Option<Vec<u8>>) -> bool {
         let mut state = self.lock();
-        if !state.is_waiting(read) {
+        if state.awaited() != Some(read) {
             return false;
         }
         if let Some(data) = data {
@@ -210,9 +191,11 @@ impl StdinChannel {
     }
 
     fn notify(&self, mut state: MutexGuard<'_, StdinChannelState>) {
-        let wakers: Vec<Waker> = state.readers.iter_mut().filter_map(|r| r.waiting_read.as_mut()?.waker.take()).collect();
+        let waker = state.waiting_read.as_mut().and_then(|r| r.waker.take());
         drop(state);
-        wakers.into_iter().for_each(Waker::wake);
+        if let Some(waker) = waker {
+            waker.wake();
+        }
         self.changed.notify_waiters();
     }
 
@@ -220,40 +203,30 @@ impl StdinChannel {
         f(&mut self.lock());
         self.changed.notify_waiters();
     }
-
-    fn update_reader_state(&self, reader_key: u64, f: impl FnOnce(&mut StdinReaderState)) {
-        self.update(|state| {
-            if let Some(reader) = state.reader_state(reader_key) {
-                f(reader);
-            }
-        });
-    }
 }
 
 /// The engine's link to its [`StdinFeedReader`], which tells the feed when the
 /// engine has nothing to run.
 pub(crate) struct StdinIdleSignal {
     channel: Arc<StdinChannel>,
-    reader_key: u64,
 }
 
 impl StdinIdleSignal {
     /// Marks the engine as idle until the returned guard is dropped.
     pub(crate) fn idle(&self) -> StdinIdleGuard {
-        self.channel.update_reader_state(self.reader_key, |r| r.engine_idle = true);
-        StdinIdleGuard { channel: self.channel.clone(), reader_key: self.reader_key }
+        self.channel.update(|state| state.engine_idle = true);
+        StdinIdleGuard { channel: self.channel.clone() }
     }
 }
 
 /// Guard that marks the engine as idle while held.
 pub(crate) struct StdinIdleGuard {
     channel: Arc<StdinChannel>,
-    reader_key: u64,
 }
 
 impl Drop for StdinIdleGuard {
     fn drop(&mut self) {
-        self.channel.update_reader_state(self.reader_key, |r| r.engine_idle = false);
+        self.channel.update(|state| state.engine_idle = false);
     }
 }
 
@@ -261,25 +234,20 @@ impl Drop for StdinIdleGuard {
 /// read and discards the input queued for it.
 pub(crate) struct StdinReadGuard {
     channel: Arc<StdinChannel>,
-    reader_key: u64,
 }
 
 impl Drop for StdinReadGuard {
     fn drop(&mut self) {
-        let reader_key = self.reader_key;
         self.channel.update(|state| {
-            let Some(read) = state.reader_state(reader_key).and_then(|r| r.waiting_read.take()) else { return };
+            let Some(read) = state.waiting_read.take() else { return };
             state.queue.retain(|input| input.target != Some(read.id));
         });
     }
 }
 
-const READER_REGISTERED: &str = "a StdinFeedReader is registered until it is dropped";
-
-/// The engine's reader of a [`StdinFeed`].
+/// The session's reader of its [`StdinFeed`].
 pub(crate) struct StdinFeedReader {
     channel: Arc<StdinChannel>,
-    reader_key: u64,
     buf: Vec<u8>,
     buf_target: Option<StdinReadId>,
     at: usize,
@@ -287,18 +255,8 @@ pub(crate) struct StdinFeedReader {
 }
 
 impl StdinFeedReader {
-    pub(crate) fn new(feed: &StdinFeed) -> StdinFeedReader {
-        let channel = feed.channel.clone();
-        let mut state = channel.lock();
-        state.readers_created += 1;
-        let reader_key = state.readers_created;
-        state.readers.push(StdinReaderState { reader_key, engine_idle: false, waiting_read: None });
-        drop(state);
-        StdinFeedReader { channel, reader_key, buf: Vec::new(), buf_target: None, at: 0, ended: false }
-    }
-
     pub(crate) fn idle_signal(&self) -> StdinIdleSignal {
-        StdinIdleSignal { channel: self.channel.clone(), reader_key: self.reader_key }
+        StdinIdleSignal { channel: self.channel.clone() }
     }
 
     /// Starts a read. The read gets a [`StdinReadId`] the first time it waits
@@ -309,7 +267,7 @@ impl StdinFeedReader {
         if self.buf_target.is_some() {
             self.at = self.buf.len();
         }
-        StdinReadGuard { channel: self.channel.clone(), reader_key: self.reader_key }
+        StdinReadGuard { channel: self.channel.clone() }
     }
 
     /// Returns buffered bytes available without waiting and whether the
@@ -317,10 +275,10 @@ impl StdinFeedReader {
     pub(crate) fn available(&mut self) -> (&[u8], bool) {
         if self.at == self.buf.len() && !self.ended {
             let mut state = self.channel.lock();
-            let read = state.reader_state(self.reader_key).expect(READER_REGISTERED).read_id();
-            let next = state.queue.iter().position(|c| c.is_for_read(read));
+            let read = state.read_id();
+            let next = state.queue.iter().position(|input| input.is_for_read(read));
             if let Some(input) = next.and_then(|i| state.queue.remove(i)) {
-                if let Some(read) = &mut state.reader_state(self.reader_key).expect(READER_REGISTERED).waiting_read {
+                if let Some(read) = &mut state.waiting_read {
                     read.waiting = false;
                 }
                 self.buf_target = input.target;
@@ -331,13 +289,6 @@ impl StdinFeedReader {
             }
         }
         (&self.buf[self.at..], self.ended)
-    }
-}
-
-impl Drop for StdinFeedReader {
-    fn drop(&mut self) {
-        let reader_key = self.reader_key;
-        self.channel.update(|state| state.readers.retain(|r| r.reader_key != reader_key));
     }
 }
 
@@ -360,14 +311,13 @@ impl AsyncBufRead for StdinFeedReader {
                 return Poll::Ready(Ok(&this.buf[this.at..]));
             }
             let mut state = this.channel.lock();
-            let read = state.reader_state(this.reader_key).expect(READER_REGISTERED).read_id();
-            if !state.queue.iter().any(|c| c.is_for_read(read)) {
+            let read = state.read_id();
+            if !state.queue.iter().any(|input| input.is_for_read(read)) {
                 let id = read.unwrap_or_else(|| {
                     state.reads_started += 1;
                     StdinReadId(NonZeroU64::new(state.reads_started).expect("read count overflow"))
                 });
-                let reader = state.reader_state(this.reader_key).expect(READER_REGISTERED);
-                let read = reader.waiting_read.get_or_insert(WaitingRead { id, waiting: true, waker: None });
+                let read = state.waiting_read.get_or_insert(WaitingRead { id, waiting: true, waker: None });
                 read.waiting = true;
                 read.waker = Some(cx.waker().clone());
                 drop(state);

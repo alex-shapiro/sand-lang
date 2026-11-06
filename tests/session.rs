@@ -935,8 +935,8 @@ fn types_of_generic_functions() {
 
 #[test]
 fn scripts_read_the_input_the_host_feeds() {
-    let feed = StdinFeed::new();
-    let mut r = Repl::with(Config::new().policy(sandlang::RulePolicy::allow_all()).stdin_feed(&feed));
+    let mut r = Repl::with(Config::new().policy(sandlang::RulePolicy::allow_all()));
+    let feed = r.session.stdin_feed();
     r.ok("import io");
     // Data sent ahead is kept until read.
     feed.send("early\npart");
@@ -970,8 +970,8 @@ fn scripts_read_the_input_the_host_feeds() {
 
 #[test]
 fn read_is_awaited_while_other_tasks_run() {
-    let feed = StdinFeed::new();
-    let mut r = Repl::with(Config::new().policy(RulePolicy::allow_all()).stdin_feed(&feed));
+    let mut r = Repl::with(Config::new().policy(RulePolicy::allow_all()));
+    let feed = r.session.stdin_feed();
     r.ok("import io");
     let src = "let t = spawn io.stdin.read_line()\nvar n = 0\nwhile not t.is_done() { n += 1 }\nt.wait()?";
     let Repl { session, rt, .. } = &mut r;
@@ -990,8 +990,8 @@ fn read_is_awaited_while_other_tasks_run() {
 
 #[test]
 fn answer_targets_specific_read() {
-    let feed = StdinFeed::new();
-    let mut r = Repl::with(Config::new().policy(RulePolicy::allow_all()).stdin_feed(&feed));
+    let mut r = Repl::with(Config::new().policy(RulePolicy::allow_all()));
+    let feed = r.session.stdin_feed();
     r.ok("import io");
     let src = "let a = io.stdin.read_line()?\nlet b = io.stdin.read_line()?\n[a, b]";
     let Repl { session, rt, .. } = &mut r;
@@ -1017,8 +1017,8 @@ fn answer_targets_specific_read() {
 
 /// Evaluates `src` and responds to each awaited stdin read with `respond`.
 fn answered(src: &str, respond: impl Fn(&StdinFeed, StdinReadId)) -> String {
-    let feed = StdinFeed::new();
-    let mut r = Repl::with(Config::new().policy(RulePolicy::allow_all()).stdin_feed(&feed));
+    let mut r = Repl::with(Config::new().policy(RulePolicy::allow_all()));
+    let feed = r.session.stdin_feed();
     r.ok("import io");
     let Repl { session, rt, .. } = &mut r;
     let value = rt.block_on(async {
@@ -1072,32 +1072,43 @@ fn each_read_that_waits_has_a_newer_id() {
 }
 
 #[test]
-fn two_sessions_wait_on_one_feed() {
-    let feed = StdinFeed::new();
-    let engine = Engine::new(Config::new().policy(RulePolicy::allow_all()).stdin_feed(&feed)).unwrap();
+fn each_session_reads_its_own_feed() {
+    let engine = Engine::new(Config::new().policy(RulePolicy::allow_all())).unwrap();
     let (mut first, mut second) = (engine.session(), engine.session());
+    let (first_feed, second_feed) = (first.stdin_feed(), second.stdin_feed());
     let values = rt().block_on(async {
         let host = async {
-            let older = feed.awaited_changed(None).await.unwrap();
-            assert!(feed.answer(older, "a"));
-            let newer = feed.awaited_changed(Some(older)).await.unwrap();
-            assert!(older < newer);
-            assert!(feed.answer(newer, "b"));
+            let read = second_feed.awaited_changed(None).await.unwrap();
+            assert!(second_feed.answer(read, "b"));
+            let read = first_feed.awaited_changed(None).await.unwrap();
+            assert!(first_feed.answer(read, "a"));
         };
         let reads = async { tokio::join!(first.eval("import io\nio.stdin.read_line()?"), second.eval("import io\nio.stdin.read_line()?")) };
         let (values, ()) =
             tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(reads, host) }).await.expect("both reads complete");
         values
     });
-    let mut values = [values.0.unwrap().unwrap(), values.1.unwrap().unwrap()];
-    values.sort();
-    assert_eq!(values, ["Some(\"a\")", "Some(\"b\")"]);
+    assert_eq!(values.0.unwrap().as_deref(), Some("Some(\"a\")"));
+    assert_eq!(values.1.unwrap().as_deref(), Some("Some(\"b\")"));
+}
+
+#[test]
+fn a_session_reads_its_feed_after_it_starts_and_after_a_reset() {
+    let mut r = Repl::with(Config::new().policy(RulePolicy::allow_all()).stdin_bytes(b"config\n".to_vec()));
+    r.ok("import io");
+    let feed = r.session.stdin_feed();
+    feed.send("first\n");
+    assert_eq!(r.value("io.stdin.read_line()?"), "Some(\"first\")");
+    r.session.reset();
+    r.ok("import io");
+    feed.send("second\n");
+    assert_eq!(r.value("io.stdin.read_line()?"), "Some(\"second\")");
 }
 
 #[test]
 fn answer_fails_after_read_ends() {
-    let feed = StdinFeed::new();
-    let mut r = Repl::with(Config::new().policy(RulePolicy::allow_all()).stdin_feed(&feed));
+    let mut r = Repl::with(Config::new().policy(RulePolicy::allow_all()));
+    let feed = r.session.stdin_feed();
     r.ok("import io");
     let Repl { session, rt, .. } = &mut r;
     let read_id = rt.block_on(async {
@@ -1115,9 +1126,9 @@ fn answer_fails_after_read_ends() {
 
 #[test]
 fn stdin_wait_pauses_wall_time_limit() {
-    let feed = StdinFeed::new();
     let limits = Limits { max_wall_time: Some(Duration::from_millis(100)), ..Limits::default() };
-    let mut r = Repl::paused(Config::new().policy(RulePolicy::allow_all()).limits(limits).stdin_feed(&feed));
+    let mut r = Repl::paused(Config::new().policy(RulePolicy::allow_all()).limits(limits));
+    let feed = r.session.stdin_feed();
     r.ok("import io");
     let Repl { session, rt, .. } = &mut r;
     let (value, ()) = rt.block_on(async {
@@ -1134,9 +1145,9 @@ fn stdin_wait_pauses_wall_time_limit() {
 
 #[test]
 fn a_cancelled_read_no_longer_pauses_wall_time_limit() {
-    let feed = StdinFeed::new();
     let limits = Limits { max_wall_time: Some(Duration::from_millis(100)), ..Limits::default() };
-    let mut r = Repl::paused(Config::new().policy(RulePolicy::allow_all()).limits(limits).stdin_feed(&feed));
+    let mut r = Repl::paused(Config::new().policy(RulePolicy::allow_all()).limits(limits));
+    r.session.stdin_feed();
     r.ok("import io");
     r.ok("let read = task.timeout(50ms, () => io.stdin.read_line())");
     assert_eq!(r.value("read"), "None");
@@ -1145,9 +1156,9 @@ fn a_cancelled_read_no_longer_pauses_wall_time_limit() {
 
 #[test]
 fn background_timer_does_not_interrupt_or_time_out_awaited_read() {
-    let feed = StdinFeed::new();
     let limits = Limits { max_wall_time: Some(Duration::from_millis(100)), ..Limits::default() };
-    let mut r = Repl::paused(Config::new().policy(RulePolicy::allow_all()).limits(limits).stdin_feed(&feed));
+    let mut r = Repl::paused(Config::new().policy(RulePolicy::allow_all()).limits(limits));
+    let feed = r.session.stdin_feed();
     r.ok("import io");
     r.ok("var ticks = 0\nlet spinner = spawn { while true { task.sleep(50ms)\nticks += 1 } }");
     let Repl { session, rt, .. } = &mut r;
