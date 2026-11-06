@@ -12,7 +12,7 @@ pub mod meter;
 pub mod sched;
 pub mod value;
 
-use crate::native::HostError;
+use crate::native::{Call, HostError};
 use crate::policy::{Capability, Decision, Policy, PromptAnswer, Prompter};
 use crate::{LimitKind, Limits};
 use bytecode::*;
@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex};
 use value::*;
 
 pub type NResult = Result<Value, Ctl>;
-pub type NativeFn = dyn Fn(&mut Vm, &[Value]) -> NResult + Send + Sync;
+pub type NativeFn = dyn Fn(&mut Vm, Call, &[Value]) -> NResult + Send + Sync;
 
 #[derive(Clone)]
 pub enum HostFn {
@@ -37,10 +37,10 @@ pub enum HostFn {
 
 impl HostFn {
     #[inline(always)]
-    pub fn call(&self, vm: &mut Vm, args: &[Value]) -> NResult {
+    pub fn call(&self, vm: &mut Vm, call: Call, args: &[Value]) -> NResult {
         match self {
-            HostFn::Static(f) => f(vm, args),
-            HostFn::Shared(f) => f(vm, args),
+            HostFn::Static(f) => f(vm, call, args),
+            HostFn::Shared(f) => f(vm, call, args),
         }
     }
 }
@@ -573,12 +573,6 @@ pub struct Vm {
     /// When the run exceeds the wall-time limit (moved on by the time
     /// spent waiting for prompt answers).
     pub(crate) deadline: Option<crate::platform::Instant>,
-    /// Set while a native that asked for a collection (`CtlKind::Collect`)
-    /// is called again after it, so that its limit checks fail instead of
-    /// asking again.
-    pub(crate) collected: bool,
-    /// Function and instruction pointer of the active native call.
-    caller_site: (u32, u32),
     pub cancel_current: bool,
     /// Set while the tasks left at the end of a run unwind (`end_tasks`):
     /// `drive` stops instead of waiting for I/O.
@@ -607,9 +601,6 @@ pub struct Vm {
     pub(crate) struct_depth: usize,
     /// The run's journal, if it has one (SPEC §16.7).
     pub(crate) journal: Option<Box<std::cell::RefCell<journal::JournalState>>>,
-    /// The sequence number of the entry that records the journaled host
-    /// call in progress (see [`Vm::journal_seq`]).
-    pub(crate) call_seq: Option<u64>,
 }
 
 pub const SLICE_FUEL: i64 = 20_000;
@@ -673,24 +664,6 @@ impl Vm {
         self.host.context.clone()?.downcast::<T>().ok()
     }
 
-    /// Inside a call of a function registered as [`Journaled`] or
-    /// [`Effectful`], in a journaled run: the sequence number of the journal
-    /// entry that records the call. It is the same in every execution of the
-    /// run, also when a resumed run calls the function again, so a host can
-    /// use it as the identity of the call's effect (SPEC §16.7). `None`
-    /// elsewhere.
-    ///
-    /// [`Journaled`]: crate::native::Journaled
-    /// [`Effectful`]: crate::native::Effectful
-    pub fn journal_seq(&self) -> Option<u64> {
-        self.call_seq
-    }
-
-    /// Whether the native in progress runs again after a collection.
-    pub(crate) fn collected(&self) -> bool {
-        self.collected
-    }
-
     pub fn new(prog: Arc<Program>, natives: Arc<Vec<NativeEntry>>, host: Host) -> Vm {
         let heap = Heap::new(host.limits.max_memory, host.limits.max_open_resources);
         let consts = Vec::with_capacity(prog.consts.len());
@@ -714,8 +687,6 @@ impl Vm {
             gen_counter: 1,
             meter,
             deadline: None,
-            collected: false,
-            caller_site: (0, 0),
             cancel_current: false,
             ending: false,
             pinned: Vec::new(),
@@ -728,7 +699,6 @@ impl Vm {
             retry_stress: false,
             struct_depth: 0,
             journal: None,
-            call_seq: None,
         };
         vm.load_program();
         vm
@@ -949,9 +919,9 @@ impl Vm {
     }
 
     /// If [`Config::retry_stress`](crate::Config::retry_stress) is enabled and
-    /// this call is not a retry, forces the next memory or resource check to fail.
-    pub(crate) fn arm_retry_stress(&self) {
-        self.heap.fail_next_check.set(self.retry_stress && !self.collected());
+    /// `call` is not a retry, forces the next memory or resource check to fail.
+    pub(crate) fn arm_retry_stress(&self, call: Call) {
+        self.heap.fail_next_check.set(self.retry_stress && !call.retry);
     }
 
     /// Returns a memory-limit error if `extra` additional heap bytes exceed the
@@ -988,20 +958,21 @@ impl Vm {
     /// Reserves `bytes` of off-heap I/O memory before a side effect. Triggers a
     /// garbage collection and retry if the limit is reached, then fails with
     /// kind `"limit"` if `bytes` still do not fit.
-    pub fn reserve_io(&mut self, bytes: usize) -> Result<iomem::Reservation, HostError> {
-        self.try_reserve_io(bytes)?.ok_or_else(|| HostError::new("limit", format!("cannot buffer {bytes} bytes: {}", iomem::MemoryLimit)))
+    pub fn reserve_io(&mut self, call: Call, bytes: usize) -> Result<iomem::Reservation, HostError> {
+        self.try_reserve_io(call, bytes)?
+            .ok_or_else(|| HostError::new("limit", format!("cannot buffer {bytes} bytes: {}", iomem::MemoryLimit)))
     }
 
     /// Reserves `bytes` of off-heap I/O memory, or returns `Ok(None)` if `bytes`
     /// do not fit after garbage collection.
-    pub fn try_reserve_io(&mut self, bytes: usize) -> Result<Option<iomem::Reservation>, Ctl> {
+    pub fn try_reserve_io(&mut self, call: Call, bytes: usize) -> Result<Option<iomem::Reservation>, Ctl> {
         let mut r = self.io_reservation();
         if self.heap.fail_next_check.replace(false) {
             return Err(CtlKind::Collect.into());
         }
         match r.ensure(bytes) {
             Ok(()) => Ok(Some(r)),
-            Err(_) if !self.collected() => Err(CtlKind::Collect.into()),
+            Err(_) if !call.retry => Err(CtlKind::Collect.into()),
             Err(_) => Ok(None),
         }
     }
@@ -1010,25 +981,25 @@ impl Vm {
     /// before a side effect. Triggers a garbage collection and retry if the
     /// limit is reached, then fails with kind `"limit"` if the limit is still
     /// reached.
-    pub fn resource_slot(&mut self) -> Result<iomem::ResourceSlot, HostError> {
+    pub fn resource_slot(&mut self, call: Call) -> Result<iomem::ResourceSlot, HostError> {
         if self.heap.fail_next_check.replace(false) {
             return Err(Ctl::from(CtlKind::Collect).into());
         }
         match iomem::ResourceSlot::try_new(&self.heap.io_memory) {
             Some(slot) => Ok(slot),
-            None if !self.collected() => Err(Ctl::from(CtlKind::Collect).into()),
+            None if !call.retry => Err(Ctl::from(CtlKind::Collect).into()),
             None => Err(HostError::new("limit", format!("too many open resources (limit {})", self.heap.io_memory.max_resources()))),
         }
     }
 
     /// Acquires an open-resource slot and reserves `buffers` bytes for `what`
     /// (such as `"a connection"`).
-    pub fn resource_slot_with(&mut self, buffers: usize, what: &str) -> Result<iomem::ResourceSlot, HostError> {
-        let mut slot = self.resource_slot()?;
+    pub fn resource_slot_with(&mut self, call: Call, buffers: usize, what: &str) -> Result<iomem::ResourceSlot, HostError> {
+        let mut slot = self.resource_slot(call)?;
         self.heap.io_memory.publish_heap(self.heap.used());
         match slot.reserve_buffers(buffers) {
             Ok(()) => Ok(slot),
-            Err(_) if !self.collected() => Err(Ctl::from(CtlKind::Collect).into()),
+            Err(_) if !call.retry => Err(Ctl::from(CtlKind::Collect).into()),
             Err(e) => Err(HostError::new("limit", format!("cannot open {what}: its buffers ({buffers} bytes) do not fit: {e}"))),
         }
     }
@@ -1685,10 +1656,10 @@ impl Vm {
         out
     }
 
-    /// Returns the innermost script frame that called the active native function.
-    pub(crate) fn native_caller(&self) -> Option<TraceEntry> {
+    /// Returns the innermost script frame that makes `call`.
+    pub(crate) fn native_caller(&self, call: Call) -> Option<TraceEntry> {
         let mut out = Vec::new();
-        self.trace_frame(self.caller_site.0, self.caller_site.1, &mut out);
+        self.trace_frame(call.site.0, call.site.1, &mut out);
         out.into_iter().next()
     }
 

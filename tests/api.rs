@@ -1684,12 +1684,12 @@ fn rust_field_defaults_can_be_any_constant() {
 
 #[test]
 fn natives_take_num_evidence() {
-    use sandlang::native::{Num, Param, Val, traits};
+    use sandlang::native::{Call, Num, Param, Val, traits};
     use sandlang::vm::{Ctl, Vm};
     let module = |decl: &str| {
         let mut m = NativeModule::new("nums");
-        m.vm_function("total", |vm: &mut Vm, num: Num<0>, xs: Val<Vec<Param<0, traits::Num>>>| -> Result<Param<0>, Ctl> {
-            let mut acc = num.zero(vm)?.raw();
+        m.vm_function("total", |vm: &mut Vm, call: Call, num: Num<0>, xs: Val<Vec<Param<0, traits::Num>>>| -> Result<Param<0>, Ctl> {
+            let mut acc = num.zero(vm, call)?.raw();
             for &x in xs.items(&vm.heap) {
                 acc = match (acc, x) {
                     (sandlang::Value::Int(a), sandlang::Value::Int(b)) => sandlang::Value::Int(a + b),
@@ -1699,7 +1699,7 @@ fn natives_take_num_evidence() {
             }
             Ok(Param::from_raw(acc))
         });
-        m.vm_function("unit", |vm: &mut Vm, num: Num<1>, _: Param<0>, _: Param<1>| num.one(vm));
+        m.vm_function("unit", |vm: &mut Vm, call: Call, num: Num<1>, _: Param<0>, _: Param<1>| num.one(vm, call));
         m.source(decl);
         m
     };
@@ -1758,7 +1758,7 @@ print(none.product())
     assert_eq!(errors, ["native function `first` must declare `T: Num`, as its Rust function requires `T: Num`"]);
 
     let mut m = NativeModule::new("nums");
-    m.vm_function("List.go", |vm: &mut Vm, num: Num<0>, _: Val<Vec<Param<0, traits::Num>>>| num.one(vm));
+    m.vm_function("List.go", |vm: &mut Vm, call: Call, num: Num<0>, _: Val<Vec<Param<0, traits::Num>>>| num.one(vm, call));
     m.source("pub trait Go { fn go(self) -> int }\nimpl<T: Num> Go for [T] { native fn go(self) -> T }");
     let errors = engine_errors(Config::new().module(m));
     assert!(errors.iter().any(|e| e == "the Rust function of a native impl method cannot take `Num` evidence"), "{errors:?}");
@@ -3383,7 +3383,7 @@ fn a_symlinked_main_file_imports_from_its_own_directory() {
 
 #[test]
 fn host_modules_can_define_resources() {
-    use sandlang::native::{NativeObject, Val};
+    use sandlang::native::{Call, NativeObject, Val};
     use sandlang::vm::iomem::ResourceSlot;
     use sandlang::vm::{Ctl, Vm};
 
@@ -3405,8 +3405,8 @@ fn host_modules_can_define_resources() {
     m.bind::<Conn>();
     m.source("impl Close for Conn {\n    native fn close(self)\n}");
     let c = closed.clone();
-    m.vm_function("connect", move |vm: &mut Vm| -> Result<Conn, sandlang::HostError> {
-        let slot = vm.resource_slot()?;
+    m.vm_function("connect", move |vm: &mut Vm, call: Call| -> Result<Conn, sandlang::HostError> {
+        let slot = vm.resource_slot(call)?;
         Ok(Conn { slot: Some(slot), closed: c.clone() })
     });
     m.vm_function("Conn.close", |vm: &mut Vm, conn: Val<Conn>| -> Result<(), Ctl> {

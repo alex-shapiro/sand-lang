@@ -2,7 +2,7 @@ use super::{int, int_lit, str_lit};
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
 use sandlang::json::Json;
-use sandlang::native::{Num, Param, Val, traits};
+use sandlang::native::{Call, Num, Param, Val, traits};
 use sandlang::vm::{Ctl, Vm};
 use sandlang::{Config, Engine, Error, MemorySink, NativeModule, Value};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -238,8 +238,8 @@ fn json_layers() -> impl Strategy<Value = Vec<JsonLayer>> {
 
 fn sum_module() -> NativeModule {
     let mut m = NativeModule::new("nums");
-    m.vm_function("total", |vm: &mut Vm, num: Num<0>, xs: Val<Vec<Param<0, traits::Num>>>| -> Result<Param<0>, Ctl> {
-        let mut acc = num.zero(vm)?.raw();
+    m.vm_function("total", |vm: &mut Vm, call: Call, num: Num<0>, xs: Val<Vec<Param<0, traits::Num>>>| -> Result<Param<0>, Ctl> {
+        let mut acc = num.zero(vm, call)?.raw();
         for &x in xs.items(&vm.heap) {
             acc = match (acc, x) {
                 (Value::Int(a), Value::Int(b)) => Value::Int(a.wrapping_add(b)),

@@ -1698,9 +1698,9 @@ impl Vm {
     ) -> Result<Option<Exit>, Trap> {
         let frame = fiber.frames.last_mut().unwrap();
         frame.ip = ip as u32;
-        self.caller_site = (frame.proto, frame.ip);
+        let mut call = Call { site: (frame.proto, frame.ip), retry: false, seq: None };
         let fuel_at_call = self.meter.fuel();
-        let mut r = Self::invoke_native(self, natives, n, &fiber.stack[start..start + argc]);
+        let mut r = Self::invoke_native(self, natives, n, call, &fiber.stack[start..start + argc]);
         self.heap.fail_next_check.set(false);
         if r.is_memory_limit() || matches!(&r, Err(c) if matches!(c.kind(), CtlKind::Collect)) {
             // Native functions check memory and open-resource limits against
@@ -1709,9 +1709,8 @@ impl Vm {
             // depend on when the collector runs.
             self.collect_all_garbage(Some(fiber));
             self.meter.refund_to(fuel_at_call);
-            self.collected = true;
-            r = Self::invoke_native(self, natives, n, &fiber.stack[start..start + argc]);
-            self.collected = false;
+            call.retry = true;
+            r = Self::invoke_native(self, natives, n, call, &fiber.stack[start..start + argc]);
         }
         if !matches!(&r, Err(c) if matches!(c.kind(), CtlKind::NeedPermission(_))) {
             self.forget_once_answers();
@@ -1941,9 +1940,9 @@ impl Vm {
     /// Calls native `n`. A Rust panic in it is caught by the scheduler
     /// around the whole slice (`crate::unwind`).
     #[inline(always)]
-    fn invoke_native(&mut self, natives: &[NativeEntry], n: u32, args: &[Value]) -> NResult {
+    fn invoke_native(&mut self, natives: &[NativeEntry], n: u32, call: Call, args: &[Value]) -> NResult {
         let entry = &natives[n as usize];
-        entry.f.call(self, args)
+        entry.f.call(self, call, args)
     }
 
     /// Waits for `on` (a native's result): its value if it is there

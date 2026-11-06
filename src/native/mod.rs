@@ -6,11 +6,16 @@ mod ty;
 
 pub use crate::types::traits;
 pub use convert::{Conversion, FromValue, HostError, IntoHostError, IntoValue, value_from, value_into};
-pub use func::{AsyncHostFunction, Effectful, HostFunction, JournalArgs, Journaled, Later, NativeError, Park, Signature, VmFunction};
+pub use func::{
+    AsyncHostFunction, Call, CallParam, Effectful, HostFunction, JournalArgs, Journaled, JournaledCall, Later, LocalCallParam, NativeError,
+    Park, Signature, VmFunction,
+};
 pub use ty::{Channel, JournalArg, JournalData, Named, Never, Num, Param, Range, Reflect, SandType, Task, Type, Val};
 
 #[doc(hidden)]
 pub use convert::mismatch;
+#[doc(hidden)]
+pub use func::WithCall;
 
 use crate::check::ModKind;
 use crate::engine::Registry;
@@ -594,24 +599,26 @@ impl<const N: u8> Reflect<N> {
 pub(crate) const NUM_METHODS: [&str; 2] = ["zero", "one"];
 
 impl<const N: u8> Num<N> {
-    /// Returns the additive identity (`0` or `0.0`) for type parameter `N`.
-    pub fn zero(self, vm: &mut Vm) -> Result<Param<N>, Ctl> {
-        self.call_method(vm, 0)
+    /// Returns the additive identity (`0` or `0.0`) for type parameter `N`,
+    /// as part of `call`.
+    pub fn zero(self, vm: &mut Vm, call: Call) -> Result<Param<N>, Ctl> {
+        self.call_method(vm, call, 0)
     }
 
-    /// Returns the multiplicative identity (`1` or `1.0`) for type parameter `N`.
-    pub fn one(self, vm: &mut Vm) -> Result<Param<N>, Ctl> {
-        self.call_method(vm, 1)
+    /// Returns the multiplicative identity (`1` or `1.0`) for type parameter
+    /// `N`, as part of `call`.
+    pub fn one(self, vm: &mut Vm, call: Call) -> Result<Param<N>, Ctl> {
+        self.call_method(vm, call, 1)
     }
 
-    fn call_method(self, vm: &mut Vm, slot: usize) -> Result<Param<N>, Ctl> {
+    fn call_method(self, vm: &mut Vm, call: Call, slot: usize) -> Result<Param<N>, Ctl> {
         let f = match vm.heap.get(self.raw()) {
             Obj::Tuple(slots) => slots.get(slot).map(|&f| vm.heap.get(f)),
             _ => None,
         };
         let Some(&Obj::NativeFn(n)) = f else { return Err(Ctl::internal("a native function expected `Num` evidence")) };
         let f = vm.natives[n as usize].f.clone();
-        f.call(vm, &[]).map(Param::from_raw)
+        f.call(vm, call, &[]).map(Param::from_raw)
     }
 }
 
@@ -841,8 +848,10 @@ impl NativeModule {
     }
 
     /// Registers a synchronous function `f` that receives `&mut Vm` as its
-    /// first parameter. Heap values that the function does not copy must be
-    /// taken as [`Val`] handles.
+    /// first parameter, and then the [`Call`] if it takes one. Heap values
+    /// that the function does not copy must be taken as [`Val`] handles.
+    /// Only a function in [`Journaled`] or [`Effectful`] can take a
+    /// [`JournaledCall`] instead of the `Call`.
     ///
     /// Because the VM re-runs `f` from the start after a permission prompt
     /// ([`Vm::require`]) or after a garbage collection triggered by a memory or
@@ -853,7 +862,7 @@ impl NativeModule {
     /// # Panics
     ///
     /// Panics under the same conditions as [`NativeModule::function`].
-    pub fn vm_function<M, F: VmFunction<M>>(&mut self, name: &str, f: F) -> &mut Self {
+    pub fn vm_function<M, F: VmFunction<M, CallParam: LocalCallParam>>(&mut self, name: &str, f: F) -> &mut Self {
         self.add(name, F::signature(), |key| f.into_host(key))
     }
 

@@ -43,16 +43,20 @@ pub trait HostFunction<Marker>: Send + Sync + 'static {
 
 /// Synchronous function registered with [`NativeModule::vm_function`](super::NativeModule::vm_function).
 ///
-/// Receives `&mut Vm` as its first argument; remaining arguments must be owned
+/// Receives `&mut Vm` as its first argument, then optionally the [`Call`] or
+/// the [`JournaledCall`] in progress. Remaining arguments must be owned
 /// [`FromValue`] types or [`Val`](super::Val) handles.
 #[diagnostic::on_unimplemented(
     note = "a function wrapped in `Journaled` or `Effectful` must take `JournalArg` types and return a `JournalData` type"
 )]
 pub trait VmFunction<Marker>: Send + Sync + 'static {
-    /// The Rust parameter types after `&mut Vm`, as a tuple.
+    /// The Rust parameter types after `&mut Vm` and the call parameter, as a tuple.
     type Args;
     /// The Rust return type.
     type Ret;
+    /// The type of the call parameter after `&mut Vm`: [`Call`],
+    /// [`JournaledCall`], or `()` if the function has no call parameter.
+    type CallParam: CallParam;
     fn signature() -> Signature;
     /// Converts the function for registration under `key` (`module.name`).
     fn into_host(self, key: &Arc<str>) -> Box<NativeFn>;
@@ -74,6 +78,87 @@ pub trait AsyncHostFunction<Marker>: Send + Sync + 'static {
     /// Converts the function for registration under `key` (`module.name`).
     fn into_host(self, key: &Arc<str>) -> Box<NativeFn>;
 }
+
+/// One call of a native function, as the engine makes it. A
+/// [`VmFunction`] gets it when it takes a `Call` parameter after `&mut Vm`,
+/// and gives it to the [`Vm`] operations that need it, such as
+/// [`Vm::reserve_io`] and [`Vm::resource_slot`].
+#[derive(Clone, Copy, Debug)]
+pub struct Call {
+    /// The function and instruction pointer of the script frame that calls
+    /// the native.
+    pub(crate) site: (u32, u32),
+    /// Whether the engine calls the native again after the collection that
+    /// a limit check of the first attempt asked for. A limit check that
+    /// fails in this attempt is final.
+    pub(crate) retry: bool,
+    /// The sequence number of the journal entry that records the call, for
+    /// a journaled call in a journaled run (see [`JournaledCall::seq`]).
+    pub(crate) seq: Option<u64>,
+}
+
+/// The [`Call`] of a function registered as [`Journaled`] or [`Effectful`].
+/// Only a function in one of these wrappers can take it:
+///
+/// ```compile_fail
+/// # use sandlang::native::JournaledCall;
+/// # use sandlang::vm::Vm;
+/// let mut m = sandlang::NativeModule::new("ids");
+/// m.vm_function("next", |_: &mut Vm, call: JournaledCall| call.seq().unwrap_or(0) as i64);
+/// ```
+#[derive(Clone, Copy, Debug)]
+pub struct JournaledCall(Call);
+
+impl JournaledCall {
+    /// In a journaled run, the sequence number of the journal entry that
+    /// records the call. It is the same in every execution of the run, also
+    /// when a resumed run calls the function again, so a host can use it as
+    /// the identity of the call's effect (SPEC §16.7). `None` in a run
+    /// without a journal.
+    pub fn seq(self) -> Option<u64> {
+        self.0.seq
+    }
+
+    /// The call, for the [`Vm`] operations that need it.
+    pub fn call(self) -> Call {
+        self.0
+    }
+}
+
+/// The type of the call parameter of a [`VmFunction`].
+pub trait CallParam: Copy + sealed::Sealed {
+    #[doc(hidden)]
+    fn from_call(call: Call) -> Self;
+}
+
+impl CallParam for () {
+    fn from_call(_: Call) {}
+}
+
+impl CallParam for Call {
+    fn from_call(call: Call) -> Call {
+        call
+    }
+}
+
+impl CallParam for JournaledCall {
+    fn from_call(call: Call) -> JournaledCall {
+        JournaledCall(call)
+    }
+}
+
+/// A call parameter that a function outside [`Journaled`] and
+/// [`Effectful`] can take.
+#[diagnostic::on_unimplemented(message = "a function that takes `JournaledCall` must be wrapped in `Journaled` or `Effectful`")]
+pub trait LocalCallParam: CallParam {}
+
+impl LocalCallParam for () {}
+impl LocalCallParam for Call {}
+
+/// Marks the [`VmFunction`] implementation for functions that take a call
+/// parameter of type `C`.
+#[doc(hidden)]
+pub struct WithCall<C>(PhantomData<C>);
 
 /// A tuple of [`JournalArg`] types: the parameters of a journaled function.
 pub trait JournalArgs {}
@@ -182,6 +267,7 @@ macro_rules! journaled_impls {
         {
             type Args = F::Args;
             type Ret = F::Ret;
+            type CallParam = ();
             fn signature() -> Signature {
                 F::signature()
             }
@@ -213,7 +299,7 @@ journaled_impls!(Journaled: false, Effectful: true);
 fn journaled(inner: Box<NativeFn>, key: &Arc<str>, effectful: bool) -> Box<NativeFn> {
     let inner = HostFn::Shared(inner.into());
     let key = key.clone();
-    Box::new(move |vm: &mut Vm, args: &[Value]| crate::vm::journal::journaled_call(vm, &inner, &key, effectful, args))
+    Box::new(move |vm: &mut Vm, call: Call, args: &[Value]| crate::vm::journal::journaled_call(vm, call, &inner, &key, effectful, args))
 }
 
 /// Deferred result returned by a [`VmFunction`] that may suspend the calling
@@ -253,6 +339,9 @@ mod sealed {
     pub trait Sealed {}
     impl Sealed for crate::vm::Ctl {}
     impl Sealed for super::HostError {}
+    impl Sealed for () {}
+    impl Sealed for super::Call {}
+    impl Sealed for super::JournaledCall {}
 }
 
 impl NativeError for Ctl {
@@ -351,7 +440,7 @@ macro_rules! fn_impls {
                 fn call<R, $($a,)*>(f: &impl Fn($($a),*) -> R, $($a: $a,)*) -> R {
                     f($($a),*)
                 }
-                Box::new(move |vm: &mut Vm, args: &[Value]| -> NResult {
+                Box::new(move |vm: &mut Vm, _: Call, args: &[Value]| -> NResult {
                     let r = {
                         let &[$($a),*] = strip_dict_args(args, $n) else { return Err(too_few_args()) };
                         let mut conv = Conversion::new();
@@ -372,16 +461,36 @@ macro_rules! fn_impls {
         {
             type Args = ($($a,)*);
             type Ret = R;
+            type CallParam = ();
+            fn signature() -> Signature {
+                Signature { params: vec![$($a::sand_type()),*], ret: R::sand_type() }
+            }
+            fn into_host(self, key: &Arc<str>) -> Box<NativeFn> {
+                VmFunction::<(WithCall<()>, $($a,)*)>::into_host(move |vm: &mut Vm, _: (), $($a: $a),*| self(vm, $($a),*), key)
+            }
+        }
+
+        #[allow(non_snake_case, unused_variables, unused_mut, clippy::unused_unit, clippy::too_many_arguments)]
+        impl<F, R, P, $($a,)*> VmFunction<(WithCall<P>, $($a,)*)> for F
+        where
+            F: Fn(&mut Vm, P, $($a),*) -> R + Send + Sync + 'static,
+            R: IntoValue,
+            P: CallParam,
+            $($a: for<'a> FromValue<Item<'a> = $a> + 'static,)*
+        {
+            type Args = ($($a,)*);
+            type Ret = R;
+            type CallParam = P;
             fn signature() -> Signature {
                 Signature { params: vec![$($a::sand_type()),*], ret: R::sand_type() }
             }
             fn into_host(self, _: &Arc<str>) -> Box<NativeFn> {
-                Box::new(move |vm: &mut Vm, args: &[Value]| -> NResult {
+                Box::new(move |vm: &mut Vm, call: Call, args: &[Value]| -> NResult {
                     let &[$($a),*] = strip_dict_args(args, $n) else { return Err(too_few_args()) };
                     let mut conv = Conversion::new();
                     $(let $a = $a::from_value(vm, $a, &mut conv)?;)*
-                    vm.arm_retry_stress();
-                    let r = self(vm, $($a),*);
+                    vm.arm_retry_stress(call);
+                    let r = self(vm, P::from_call(call), $($a),*);
                     vm.unchecked(|vm| r.into_value(vm))
                 })
             }
@@ -401,7 +510,7 @@ macro_rules! fn_impls {
                 Signature { params: vec![$($a::sand_type()),*], ret: R::sand_type() }
             }
             fn into_host(self, _: &Arc<str>) -> Box<NativeFn> {
-                Box::new(move |vm: &mut Vm, args: &[Value]| -> NResult {
+                Box::new(move |vm: &mut Vm, _: Call, args: &[Value]| -> NResult {
                     let &[$($a),*] = strip_dict_args(args, $n) else { return Err(too_few_args()) };
                     let mut conv = Conversion::new();
                     $(let $a = $a::from_value(vm, $a, &mut conv)?;)*

@@ -2,11 +2,11 @@
 
 use super::stream::{self, IoFailure, Suspended, bytes_read, line_read, read_line, read_to_end_reserved, read_upto, strip_eol};
 use crate::check::ModKind;
-use crate::native::{HostError, IntoValue, Later, NativeModule, NativeObject, ObjectType, Val};
+use crate::native::{Call, HostError, IntoValue, Later, NativeModule, NativeObject, ObjectType, Val};
 use crate::policy::Capability;
 use crate::vm::iomem::Reservation;
-use crate::vm::value::{Obj, Value, to_usize_saturating, u64_to_usize_saturating};
 use crate::vm::journal::{Begun, BuildFn, Identity, OpKind, OpSpec, Outcome, Park, Reader, Whole, Writer};
+use crate::vm::value::{Obj, Value, to_usize_saturating, u64_to_usize_saturating};
 use crate::vm::{Ctl, StdinSource, Vm};
 use std::collections::BTreeMap;
 use tokio::io::AsyncBufRead;
@@ -20,14 +20,14 @@ pub(crate) fn module() -> NativeModule {
     m.vm_function("new_stdin", |vm: &mut Vm| vm.new_object(Stdin));
     m.vm_function("new_stdout", |vm: &mut Vm| vm.new_object(Stdout));
     m.vm_function("new_stderr", |vm: &mut Vm| vm.new_object(Stderr));
-    m.vm_function("Stdin.read", |vm: &mut Vm, _: Val<Stdin>, max: i64| {
+    m.vm_function("Stdin.read", |vm: &mut Vm, call: Call, _: Val<Stdin>, max: i64| {
         if max <= 0 {
             return Err(HostError::new("invalid", "read: max must be positive"));
         }
-        read_stdin(vm, Read::Upto(to_usize_saturating(max)), bytes_read)
+        read_stdin(vm, call, Read::Upto(to_usize_saturating(max)), bytes_read)
     });
-    m.vm_function("Stdin.read_line", |vm: &mut Vm, _: Val<Stdin>| read_stdin(vm, Read::Line, input_line));
-    m.vm_function("Stdin.read_all", |vm: &mut Vm, _: Val<Stdin>| read_stdin(vm, Read::All, bytes_read));
+    m.vm_function("Stdin.read_line", |vm: &mut Vm, call: Call, _: Val<Stdin>| read_stdin(vm, call, Read::Line, input_line));
+    m.vm_function("Stdin.read_all", |vm: &mut Vm, call: Call, _: Val<Stdin>| read_stdin(vm, call, Read::All, bytes_read));
     output::<Stdout>(&mut m);
     output::<Stderr>(&mut m);
     m
@@ -99,6 +99,7 @@ enum Read {
 
 fn read_stdin<R: IntoValue + Send + 'static>(
     vm: &mut Vm,
+    call: Call,
     what: Read,
     done: fn(&mut Vm, Option<Vec<u8>>) -> Result<R, HostError>,
 ) -> Suspended<R> {
@@ -125,7 +126,7 @@ fn read_stdin<R: IntoValue + Send + 'static>(
     }
     let stdin = vm.host.stdin.clone();
     // The input is buffered outside the heap until it is complete.
-    let claim = vm.claim(None, if let Read::Upto(max) = what { max.min(STDIN_CHUNK) } else { 0 })?;
+    let claim = vm.claim(call, None, if let Read::Upto(max) = what { max.min(STDIN_CHUNK) } else { 0 })?;
     let read = async move {
         let (_, mut res) = claim.take().map_err(|e| IoFailure::new("limit", e))?;
         let data = read_input(&stdin, what, &mut res).await.map_err(|e| IoFailure::new(e.kind, format!("stdin: {}", e.message)))?;

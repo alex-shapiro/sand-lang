@@ -17,6 +17,7 @@ use super::value::{MapObj, Obj, SetObj, Value};
 use super::{BoxFuture, Ctl, CtlKind, Finisher, NResult, Vm};
 pub(crate) use crate::journal::OpKind;
 use crate::journal::{CallResult, Entry, EntryData, EntryKind, Journal, OpDone, OpEnd, OpStart};
+use crate::native::Call;
 use crate::platform::{Instant, SystemTime};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -280,16 +281,11 @@ pub(crate) fn sleep(vm: &mut Vm, d: Duration) -> Ctl {
 /// `args` (SPEC §16.7). In replay, returns its recorded result without
 /// calling it. An effectful function is called only once the journal is
 /// durable.
-pub(crate) fn journaled_call(vm: &mut Vm, inner: &super::HostFn, name: &Arc<str>, effectful: bool, args: &[Value]) -> NResult {
+pub(crate) fn journaled_call(vm: &mut Vm, call: Call, inner: &super::HostFn, name: &Arc<str>, effectful: bool, args: &[Value]) -> NResult {
     // A journaled call reads no other input before its own entry, so the
     // entry it records or replays is the next one.
-    let seq = vm.journal_state().map(|j| j.position());
-    let inner = |vm: &mut Vm| {
-        let outer = std::mem::replace(&mut vm.call_seq, seq);
-        let r = inner.call(vm, args);
-        vm.call_seq = outer;
-        r
-    };
+    let call = Call { seq: vm.journal_state().map(|j| j.position()), ..call };
+    let inner = |vm: &mut Vm| inner.call(vm, call, args);
     let describe = |vm: &Vm| Ok((call_identity(vm, name, args)?, name.to_string()));
     let spec = |pre_fuel: u64, park: Park| OpSpec { kind: OpKind::Call, effectful, park, pre_fuel, timer: None };
     let run = |live: Live, fin: BoxFuture| {
@@ -1132,13 +1128,18 @@ impl Vm {
     /// journal, claims them now from the heap's budget, and asks for a
     /// collection if they do not fit. With one, they come from the
     /// journal's budget of live operations when the operation starts.
-    pub(crate) fn claim(&mut self, slot: Option<(usize, &str)>, bytes: usize) -> Result<super::iomem::Claim, crate::native::HostError> {
+    pub(crate) fn claim(
+        &mut self,
+        call: Call,
+        slot: Option<(usize, &str)>,
+        bytes: usize,
+    ) -> Result<super::iomem::Claim, crate::native::HostError> {
         if let Some(j) = &self.journal {
             return Ok(super::iomem::Claim::Deferred { mem: j.borrow().live_memory.clone(), buffers: slot.map(|s| s.0), bytes });
         }
-        let res = if bytes == 0 { self.io_reservation() } else { self.reserve_io(bytes)? };
+        let res = if bytes == 0 { self.io_reservation() } else { self.reserve_io(call, bytes)? };
         let slot = match slot {
-            Some((buffers, what)) => Some(self.resource_slot_with(buffers, what)?),
+            Some((buffers, what)) => Some(self.resource_slot_with(call, buffers, what)?),
             None => None,
         };
         Ok(super::iomem::Claim::Held { slot, res })

@@ -2,7 +2,7 @@
 //! from any prefix of the journal (SPEC §16.7).
 
 use sandlang::journal::{Durable, Entry, EntryKind, HttpOutcome, Journal, MemoryJournal, OpKind, Suspension, operations};
-use sandlang::native::{Effectful, Journaled, Later, Park};
+use sandlang::native::{Effectful, Journaled, JournaledCall, Later, Park};
 use sandlang::network::{Listener, Network, NetworkFuture, Stream};
 use sandlang::platform::{Clock, ClockFuture, Instant, SystemClock, SystemTime, UNIX_EPOCH};
 use sandlang::vm::Vm;
@@ -1082,14 +1082,14 @@ fn time_spent_in_flushes_does_not_count_against_the_wall_time_limit() {
 }
 
 #[test]
-fn effects_have_the_same_journal_seq_in_every_execution() {
+fn effects_have_the_same_sequence_number_in_every_execution() {
     let seqs: Arc<Mutex<Vec<(String, Option<u64>)>>> = Arc::default();
     let mut m = NativeModule::new("fx");
     let s = seqs.clone();
     m.vm_function(
         "send",
-        Effectful(move |vm: &mut Vm, name: String| -> Result<Later<i64, HostError>, HostError> {
-            s.lock().unwrap().push((name.clone(), vm.journal_seq()));
+        Effectful(move |_: &mut Vm, call: JournaledCall, name: String| -> Result<Later<i64, HostError>, HostError> {
+            s.lock().unwrap().push((name.clone(), call.seq()));
             if name == "parked" {
                 return Ok(Later::new(async move {
                     std::future::pending::<()>().await;
@@ -1125,7 +1125,7 @@ fn effects_have_the_same_journal_seq_in_every_execution() {
     assert_eq!(first.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["a", "parked"]);
     let entries = journal.entries();
     for (_, seq) in &first {
-        let seq = seq.expect("a journaled call has a journal_seq") as usize;
+        let seq = seq.expect("a journaled call has a sequence number") as usize;
         assert!(matches!(entries[seq].kind, EntryKind::Result | EntryKind::Start), "{:?}", entries[seq]);
     }
     let requests = filtered.lock().unwrap().clone();

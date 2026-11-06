@@ -7,7 +7,7 @@ use super::http_common::*;
 use super::net::{self, Detached};
 use super::stream::IoFailure;
 use super::stream::{self, Suspended};
-use crate::native::{HostError, NativeModule, NativeObject, Val};
+use crate::native::{Call, HostError, NativeModule, NativeObject, Val};
 use crate::network::{Listener, NetworkFuture, Stream};
 use crate::vm::iomem::{IoMemory, Reservation, ResourceSlot};
 use crate::vm::{Ctl, Vm};
@@ -167,11 +167,11 @@ impl NativeObject for Server {
     }
 }
 
-fn serve(vm: &mut Vm, ip: Val<String>, port: i64) -> Suspended<Server> {
+fn serve(vm: &mut Vm, call: Call, ip: Val<String>, port: i64) -> Suspended<Server> {
     vm.refuse_unrecordable("HTTP servers")?;
     let shared = Arc::default();
     vm.host.http_pool.watch(&shared);
-    net::listen_with(vm, ip, port, move |socket| Server::new(socket, shared))
+    net::listen_with(vm, call, ip, port, move |socket| Server::new(socket, shared))
 }
 
 /// Tells the oldest readings beyond the newest `cap` to give up.
@@ -520,6 +520,7 @@ fn has_body(status: i64) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn write_response(
     vm: &mut Vm,
+    call: Call,
     conn: Val<net::Conn>,
     exchange: Val<Exchange>,
     request_body: Val<Body>,
@@ -536,7 +537,7 @@ fn write_response(
     let sent = if has_body && include_body { body.bytes(&vm.heap) } else { &[] };
     let len = head.len().saturating_add(sent.len());
     vm.charge_bytes(len)?;
-    let res = vm.reserve_io(len)?;
+    let res = vm.reserve_io(call, len)?;
     let sent = if has_body && include_body { body.bytes(&vm.heap) } else { &[] };
     let mut data = head.into_bytes();
     data.extend_from_slice(sent);

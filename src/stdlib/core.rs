@@ -2,7 +2,7 @@
 
 use crate::check::ModKind;
 use crate::native::traits;
-use crate::native::{self, Channel, HostError, NativeModule, Never, Num, Param, Task, Val};
+use crate::native::{self, Call, Channel, HostError, NativeModule, Never, Num, Param, Task, Val};
 use crate::vm::compare::{
     find_key, hash_key, set_slot, try_sort_by, try_sort_numbers, try_sort_packed, values_cmp_metered, values_eq_metered,
 };
@@ -815,17 +815,19 @@ fn lists(m: &mut NativeModule) {
         let set = set_of(vm, xs.items(&vm.heap))?;
         Ok(new_set(vm, set))
     });
-    fn fold_num(vm: &mut Vm, num: Num<0>, xs: List<Param<0, traits::Num>>, product: bool) -> Result<Param<0>, Ctl> {
+    fn fold_num(vm: &mut Vm, call: Call, num: Num<0>, xs: List<Param<0, traits::Num>>, product: bool) -> Result<Param<0>, Ctl> {
         produce(vm, list_len(vm, xs), 0)?;
-        let mut acc = if product { num.one(vm)? } else { num.zero(vm)? }.raw();
+        let mut acc = if product { num.one(vm, call)? } else { num.zero(vm, call)? }.raw();
         let items = xs.items(&vm.heap).to_vec();
         for x in items {
             acc = vm.arith(if product { 2 } else { 0 }, acc, x)?;
         }
         Ok(Param::from_raw(acc))
     }
-    m.vm_function("List.sum", |vm: &mut Vm, num: Num<0>, xs: List<Param<0, traits::Num>>| fold_num(vm, num, xs, false));
-    m.vm_function("List.product", |vm: &mut Vm, num: Num<0>, xs: List<Param<0, traits::Num>>| fold_num(vm, num, xs, true));
+    m.vm_function("List.sum", |vm: &mut Vm, call: Call, num: Num<0>, xs: List<Param<0, traits::Num>>| fold_num(vm, call, num, xs, false));
+    m.vm_function("List.product", |vm: &mut Vm, call: Call, num: Num<0>, xs: List<Param<0, traits::Num>>| {
+        fold_num(vm, call, num, xs, true)
+    });
     fn extreme(vm: &mut Vm, xs: List<Param<0, traits::Ord>>, want: Ordering) -> Result<Option<Param<0>>, Ctl> {
         let items = xs.items(&vm.heap);
         let mut best: Option<Value> = None;

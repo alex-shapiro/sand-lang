@@ -2082,7 +2082,7 @@ standard library module.
 | Method                       | Registered item                                                                     |
 | ---------------------------- | ----------------------------------------------------------------------------------- |
 | `function(name, f)`          | synchronous function that can borrow `&str`, `&[u8]`, and `&T` arguments            |
-| `vm_function(name, f)`       | synchronous function that takes `&mut Vm` and owned arguments                       |
+| `vm_function(name, f)`       | synchronous function that takes `&mut Vm`, optionally a `Call`, and owned arguments |
 | `async_function(name, f)`    | asynchronous function that takes owned arguments and suspends only the calling task |
 | `bind::<T>()`                | Rust type `T` with a derived `NamedType`                                            |
 | `params(names)`, `doc(text)` | parameter names and documentation for the most recently registered function         |
@@ -2158,7 +2158,10 @@ To check a sandbox capability inside a `vm_function`, call
 re-runs a `vm_function` from the start after a permission prompt or after a
 garbage collection triggered by `Vm::check_memory`, `Vm::reserve_io`, or
 `Vm::resource_slot`, the function must check capabilities and limits before
-performing any side effects. `Config::retry_stress` tests this requirement by
+performing any side effects. `Vm::reserve_io` and `Vm::resource_slot` take the
+`Call` that the function gets as a parameter after `&mut Vm`: in the second
+attempt of the call, a limit that is still reached is an error, not a request
+for a collection. `Config::retry_stress` tests this requirement by
 failing the first memory or resource check in each `vm_function` call.
 Return-value conversion does not fail on the memory limit; instead, the engine
 collects garbage and checks the memory limit after the call completes.
@@ -2488,9 +2491,11 @@ deadline is the same in each execution.
 
 **Identities of effects.** Effects occur at least once, so a host that
 deduplicates them needs an identity for each effect that is the same in every
-execution. In a call of a journaled or effectful host function,
-`Vm::journal_seq` gives the sequence number of the journal entry that records
-the call; a resumed run that calls the function again gets the same number.
+execution. A journaled or effectful host function
+can take a `JournaledCall` parameter after `&mut Vm`, whose `seq()` gives the
+sequence number of the journal entry that records the call; a resumed run that
+calls the function again gets the same number. The compiler refuses a
+`JournaledCall` parameter of a function that is not journaled.
 The engine calls the request filter only for a request that it sends, not
 for a request that replay returns, and gives it the sequence number of the
 `Start` entry of the request in `RequestTarget::journal_seq`. A resumed run

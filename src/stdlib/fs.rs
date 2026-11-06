@@ -12,7 +12,7 @@
 use super::io_kind;
 use crate::check::ModKind;
 use crate::files::{EntryKind, Fs, Mode, OpenMode, OpenedFile, Target, is_unchecked_symlink, too_many_open_files, unchecked_symlink};
-use crate::native::{HostError, IntoValue, NativeModule, NativeObject, Val};
+use crate::native::{Call, HostError, IntoValue, NativeModule, NativeObject, Val};
 use crate::policy::{Capability, Decision, MAX_PATH_BYTES, Policy};
 use crate::vm::iomem::{Reservation, ResourceSlot};
 use crate::vm::meter::{Allowance, Stopped};
@@ -81,14 +81,14 @@ pub(crate) fn module() -> NativeModule {
             },
         )
     });
-    m.vm_function("write_text", |vm: &mut Vm, path: Val<String>, text: Val<String>| {
-        let res = vm.reserve_io(text.str(&vm.heap).len())?;
+    m.vm_function("write_text", |vm: &mut Vm, call: Call, path: Val<String>, text: Val<String>| {
+        let res = vm.reserve_io(call, text.str(&vm.heap).len())?;
         vm.charge_bytes(text.str(&vm.heap).len())?;
         let data = text.str(&vm.heap).as_bytes().to_vec();
         write(vm, path, data, res)
     });
-    m.vm_function("write_bytes", |vm: &mut Vm, path: Val<String>, data: Val<Vec<u8>>| {
-        let res = vm.reserve_io(data.bytes(&vm.heap).len())?;
+    m.vm_function("write_bytes", |vm: &mut Vm, call: Call, path: Val<String>, data: Val<Vec<u8>>| {
+        let res = vm.reserve_io(call, data.bytes(&vm.heap).len())?;
         vm.charge_bytes(data.bytes(&vm.heap).len())?;
         let data = data.bytes(&vm.heap).to_vec();
         write(vm, path, data, res)
@@ -536,7 +536,7 @@ impl OpenState {
 
     /// Makes room for `FILE_BUFFER` more bytes after the unread ones; `Ok(Err)`
     /// if the buffer's growth does not fit in memory even after a collection.
-    fn make_room(&mut self, vm: &Vm) -> Result<io::Result<()>, Ctl> {
+    fn make_room(&mut self, vm: &Vm, call: Call) -> Result<io::Result<()>, Ctl> {
         if self.at > 0 {
             self.buf.drain(..self.at);
             self.at = 0;
@@ -545,7 +545,7 @@ impl OpenState {
         if need > self.buf.capacity() {
             let cap = need.max(self.buf.capacity().saturating_mul(2));
             // Growth earlier in the same operation is not counted yet.
-            if !fits(vm, cap.saturating_sub(self.counted))? {
+            if !fits(vm, call, cap.saturating_sub(self.counted))? {
                 return Ok(Err(too_large()));
             }
             self.buf.reserve_exact(cap - self.buf.len());
@@ -601,11 +601,11 @@ fn unbuffer(f: &mut OpenedFile, unread: u64) -> io::Result<()> {
 
 /// Whether `bytes` more fit in the memory limit, asking for a collection
 /// first if they do not.
-fn fits(vm: &Vm, bytes: usize) -> Result<bool, Ctl> {
+fn fits(vm: &Vm, call: Call, bytes: usize) -> Result<bool, Ctl> {
     if !vm.heap.would_exceed(bytes) {
         return Ok(true);
     }
-    if !vm.collected() {
+    if !call.retry {
         return Err(CtlKind::Collect.into());
     }
     Ok(false)
@@ -669,7 +669,7 @@ fn with_file<R: IntoValue>(
 fn register_file(m: &mut NativeModule) {
     m.bind::<OpenMode>();
     m.vm_function("open", open);
-    m.vm_function("File.read", |vm: &mut Vm, file: Val<FileObj>, max: i64| -> FsResult<Vec<u8>> {
+    m.vm_function("File.read", |vm: &mut Vm, call: Call, file: Val<FileObj>, max: i64| -> FsResult<Vec<u8>> {
         if max <= 0 {
             return Err(HostError::new("invalid", "read: max must be positive"));
         }
@@ -686,7 +686,7 @@ fn register_file(m: &mut NativeModule) {
                 };
                 // A file that grows meanwhile is read on by the next call.
                 let n = max.min(MAX_READ).min(left.max(1));
-                if !fits(vm, n)? {
+                if !fits(vm, call, n)? {
                     return Ok(Err(too_large()));
                 }
                 let (mut data, r) = st.io(vm, move |f| {
@@ -700,7 +700,7 @@ fn register_file(m: &mut NativeModule) {
                 }));
             }
             if st.unread() == 0 {
-                if let Err(e) = st.make_room(vm)? {
+                if let Err(e) = st.make_room(vm, call)? {
                     return Ok(Err(e));
                 }
                 if let Err(e) = st.fill(vm)? {
@@ -714,7 +714,7 @@ fn register_file(m: &mut NativeModule) {
             Ok(Ok(data))
         })
     });
-    m.vm_function("File.read_line", |vm: &mut Vm, file: Val<FileObj>| -> FsResult<Option<String>> {
+    m.vm_function("File.read_line", |vm: &mut Vm, call: Call, file: Val<FileObj>| -> FsResult<Option<String>> {
         with_file(vm, file, Needs::Read, |vm, st| {
             vm.charge(1)?;
             // The line stays in the buffer until it is complete, so that
@@ -729,7 +729,7 @@ fn register_file(m: &mut NativeModule) {
                 }
                 vm.charge_bytes(unread.len() - scanned)?;
                 scanned = unread.len();
-                if let Err(e) = st.make_room(vm)? {
+                if let Err(e) = st.make_room(vm, call)? {
                     // The line does not fit: what was read of it is dropped
                     // (as for connections), giving the memory back.
                     st.buf = Vec::new();
@@ -757,16 +757,18 @@ fn register_file(m: &mut NativeModule) {
             Ok(Ok(Some(text)))
         })
     });
-    m.vm_function("File.read_all", |vm: &mut Vm, file: Val<FileObj>| read_rest(vm, file, |_, data| Ok(Ok(data))));
-    m.vm_function("File.read_text", |vm: &mut Vm, file: Val<FileObj>| {
-        read_rest(vm, file, |vm, data| {
+    m.vm_function("File.read_all", |vm: &mut Vm, call: Call, file: Val<FileObj>| read_rest(vm, call, file, |_, data| Ok(Ok(data))));
+    m.vm_function("File.read_text", |vm: &mut Vm, call: Call, file: Val<FileObj>| {
+        read_rest(vm, call, file, |vm, data| {
             vm.charge_slow_bytes(data.len())?;
             Ok(String::from_utf8(data).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "file is not valid UTF-8")))
         })
     });
-    m.vm_function("File.write", |vm: &mut Vm, file: Val<FileObj>, data: Val<Vec<u8>>| write_file(vm, file, move |vm| data.bytes(&vm.heap)));
-    m.vm_function("File.write_str", |vm: &mut Vm, file: Val<FileObj>, text: Val<String>| {
-        write_file(vm, file, move |vm| text.str(&vm.heap).as_bytes())
+    m.vm_function("File.write", |vm: &mut Vm, call: Call, file: Val<FileObj>, data: Val<Vec<u8>>| {
+        write_file(vm, call, file, move |vm| data.bytes(&vm.heap))
+    });
+    m.vm_function("File.write_str", |vm: &mut Vm, call: Call, file: Val<FileObj>, text: Val<String>| {
+        write_file(vm, call, file, move |vm| text.str(&vm.heap).as_bytes())
     });
     m.vm_function("File.close", |vm: &mut Vm, file: Val<FileObj>| -> Result<_, Ctl> {
         let f = file.get_mut(&mut vm.heap)?;
@@ -829,32 +831,32 @@ fn register_file(m: &mut NativeModule) {
     m.vm_function("File.path", |vm: &mut Vm, file: Val<FileObj>| -> Result<String, Ctl> { Ok(file.get(&vm.heap)?.shown.clone()) });
 }
 
-fn open(vm: &mut Vm, path: Val<String>, mode: OpenMode) -> FsResult<FileObj> {
+fn open(vm: &mut Vm, call: Call, path: Val<String>, mode: OpenMode) -> FsResult<FileObj> {
     let (shown, mut t) = target(vm, path, Mode::Follow)?;
     for (needed, access) in [(mode.reads(), Access::Read), (mode.writes(), Access::Write)] {
         if needed {
             check(vm, &mut t, access, &shown)?;
         }
     }
-    let slot = vm.resource_slot()?;
+    let slot = vm.resource_slot(call)?;
     vm.charge(SYSCALL_FUEL)?;
     let fs = vm.host.fs.clone();
     let file = match vm.offload(move |_| fs.open(t, mode))? {
         Ok(f) => f,
         // Closing unreachable files may make room.
-        Err(e) if too_many_open_files(&e) && !vm.collected() => return Err(Ctl::from(CtlKind::Collect).into()),
+        Err(e) if too_many_open_files(&e) && !call.retry => return Err(Ctl::from(CtlKind::Collect).into()),
         Err(e) => return Err(HostError::new(io_kind(&e), format!("{shown}: {e}"))),
     };
     Ok(FileObj { open: Some(OpenState { file: Some(file), _slot: slot, buf: Vec::new(), at: 0, counted: 0 }), shown, mode })
 }
 
-fn write_file(vm: &mut Vm, file: Val<FileObj>, data: impl Fn(&Vm) -> &[u8]) -> FsResult<()> {
+fn write_file(vm: &mut Vm, call: Call, file: Val<FileObj>, data: impl Fn(&Vm) -> &[u8]) -> FsResult<()> {
     with_file(vm, file, Needs::Write, move |vm, st| {
         let len = data(vm).len();
         vm.charge(SYSCALL_FUEL)?;
         vm.charge_bytes(len)?;
         // Reserve memory for the copy of the data that the worker writes.
-        let Some(res) = vm.try_reserve_io(len)? else { return Ok(Err(too_large())) };
+        let Some(res) = vm.try_reserve_io(call, len)? else { return Ok(Err(too_large())) };
         let bytes = data(vm).to_vec();
         let unread = st.take_unread();
         let r = st.io(vm, move |f| {
@@ -871,6 +873,7 @@ fn write_file(vm: &mut Vm, file: Val<FileObj>, data: impl Fn(&Vm) -> &[u8]) -> F
 
 fn read_rest<R: IntoValue>(
     vm: &mut Vm,
+    call: Call,
     file: Val<FileObj>,
     finish: impl FnOnce(&mut Vm, Vec<u8>) -> Result<io::Result<R>, Ctl>,
 ) -> FsResult<R> {
@@ -882,7 +885,7 @@ fn read_rest<R: IntoValue>(
         };
         let size = usize::try_from(size).unwrap_or(usize::MAX).saturating_add(st.unread());
         let too_large = || io::Error::new(io::ErrorKind::OutOfMemory, "the rest of the file does not fit in the memory limit");
-        let Some(mut res) = vm.try_reserve_io(size)? else { return Ok(Err(too_large())) };
+        let Some(mut res) = vm.try_reserve_io(call, size)? else { return Ok(Err(too_large())) };
         let mut data = Vec::new();
         if let Err(e) = res.reserve_buf(&mut data, size.min(64 << 20)) {
             return Ok(Err(e.into()));

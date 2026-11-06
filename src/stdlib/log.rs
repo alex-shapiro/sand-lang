@@ -1,7 +1,7 @@
 //! The `log` module.
 
 use crate::check::ModKind;
-use crate::native::{NativeModule, Val};
+use crate::native::{Call, NativeModule, Val};
 use crate::vm::display::escape_str_debug;
 use crate::vm::{Ctl, Vm};
 use std::borrow::Cow;
@@ -108,10 +108,10 @@ type Fields = Val<HashMap<String, String>>;
 
 pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("log", ModKind::Std, include_str!("log.sand"));
-    m.vm_function("debug", |vm: &mut Vm, msg: Val<String>, fields: Fields| emit_record(vm, LogLevel::Debug, msg, fields));
-    m.vm_function("info", |vm: &mut Vm, msg: Val<String>, fields: Fields| emit_record(vm, LogLevel::Info, msg, fields));
-    m.vm_function("warn", |vm: &mut Vm, msg: Val<String>, fields: Fields| emit_record(vm, LogLevel::Warn, msg, fields));
-    m.vm_function("error", |vm: &mut Vm, msg: Val<String>, fields: Fields| emit_record(vm, LogLevel::Error, msg, fields));
+    m.vm_function("debug", |vm: &mut Vm, call: Call, msg: Val<String>, fields: Fields| emit_record(vm, call, LogLevel::Debug, msg, fields));
+    m.vm_function("info", |vm: &mut Vm, call: Call, msg: Val<String>, fields: Fields| emit_record(vm, call, LogLevel::Info, msg, fields));
+    m.vm_function("warn", |vm: &mut Vm, call: Call, msg: Val<String>, fields: Fields| emit_record(vm, call, LogLevel::Warn, msg, fields));
+    m.vm_function("error", |vm: &mut Vm, call: Call, msg: Val<String>, fields: Fields| emit_record(vm, call, LogLevel::Error, msg, fields));
     m.bind::<LogLevel>();
     m.vm_function("set_level", |vm: &mut Vm, level: LogLevel| -> Result<_, Ctl> {
         vm.host.log_level = Some(level);
@@ -124,7 +124,7 @@ pub(crate) fn module() -> NativeModule {
     m
 }
 
-fn emit_record(vm: &mut Vm, level: LogLevel, msg: Val<String>, fields: Fields) -> Result<(), Ctl> {
+fn emit_record(vm: &mut Vm, call: Call, level: LogLevel, msg: Val<String>, fields: Fields) -> Result<(), Ctl> {
     if vm.host.log_level.is_none_or(|l| level < l) {
         return Ok(());
     }
@@ -144,7 +144,7 @@ fn emit_record(vm: &mut Vm, level: LogLevel, msg: Val<String>, fields: Fields) -
         level,
         message: msg.str(&vm.heap).to_string(),
         fields: fields.map(|&(k, v)| (vm.str(k).to_string(), vm.str(v).to_string())).collect(),
-        location: vm.native_caller(),
+        location: vm.native_caller(call),
     };
     match sink {
         Some(sink) => {

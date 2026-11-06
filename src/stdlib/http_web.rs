@@ -13,16 +13,16 @@ use super::http_common::{BodyReader, MemoryBody, Prepared, ResponseStream, prepa
 use super::stream::{self, IoFailure, Suspended};
 use crate::check::ModKind;
 use crate::journal::HttpOutcome;
-use crate::native::{HostError, IntoValue, NativeModule, Val};
+use crate::native::{Call, HostError, IntoValue, NativeModule, Val};
 use crate::vm::Vm;
-use crate::vm::journal::{Begun, BuildFn, EncodeFn, OpKind, OpSpec, Outcome, Park};
-use std::future::Future;
-use std::pin::Pin;
 use crate::vm::iomem::Reservation;
+use crate::vm::journal::{Begun, BuildFn, EncodeFn, OpKind, OpSpec, Outcome, Park};
 use jiff::SignedDuration;
 use js_sys::{Array, Function, Object, Promise, Reflect, Uint8Array};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::rc::Rc;
 use std::time::Duration;
 use wasm_bindgen::closure::Closure;
@@ -53,6 +53,7 @@ type Received = (i64, Vec<(String, String)>, Vec<u8>, Reservation);
 /// browser reads the body before the program gets the response.
 fn send(
     vm: &mut Vm,
+    call: Call,
     method: Val<String>,
     url: Val<String>,
     headers: Val<Vec<(String, String)>>,
@@ -71,7 +72,7 @@ fn send(
         Begun::Live(live) => live,
     };
     // The request body is held, and the response buffered, outside the heap.
-    let claim = vm.claim(None, body.len())?;
+    let claim = vm.claim(call, None, body.len())?;
     let target = req.target(live.seq);
     let filter = vm.host.request_filter.clone();
     let Prepared { method, text, url, mut headers } = req;

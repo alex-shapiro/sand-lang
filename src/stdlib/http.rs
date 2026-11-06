@@ -10,17 +10,17 @@ use super::http_common::*;
 use super::net::{self, ConnHandle, Resource, TlsSettings};
 use super::stream::{self, IoFailure, Suspended, read_line_bytes, strip_eol, suspend};
 use crate::check::ModKind;
-use crate::native::{HostError, Later, NativeModule, NativeObject, Val};
+use crate::journal::HttpOutcome;
+use crate::native::IntoValue;
+use crate::native::{Call, HostError, Later, NativeModule, NativeObject, Val};
 use crate::network::{Network, Stream};
 use crate::platform::{Clock, Instant};
 use crate::policy::Policy;
-use crate::journal::HttpOutcome;
-use crate::native::IntoValue;
 use crate::vm::Vm;
 use crate::vm::iomem::{Reservation, ResourceSlot};
 use crate::vm::journal::{Begun, BuildFn, EncodeFn, OpKind, OpSpec, Outcome, Park};
-use std::future::Future;
 use jiff::SignedDuration;
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
 use std::task::{Context, Waker};
@@ -609,6 +609,7 @@ const IDEMPOTENT: &[&str] = &["GET", "HEAD", "OPTIONS", "TRACE", "PUT", "DELETE"
 /// pool of connections.
 fn send(
     vm: &mut Vm,
+    call: Call,
     method: Val<String>,
     url: Val<String>,
     headers: Val<Vec<(String, String)>>,
@@ -629,7 +630,7 @@ fn send(
     let pool = vm.host.http_pool.clone();
     let idle = pool.take(&req.url.origin(), &vm.host.policy, &req.url.capability(&req.method));
     let buffers = if req.url.scheme == "https" { net::CONN_BUFFER + net::TLS_BUFFERS } else { net::CONN_BUFFER };
-    let claim = vm.claim(idle.is_none().then_some((buffers, "a connection")), body.len())?;
+    let claim = vm.claim(call, idle.is_none().then_some((buffers, "a connection")), body.len())?;
     let target = req.target(live.seq);
     let filter = vm.host.request_filter.clone();
     let Prepared { method, text, url, mut headers } = req;
@@ -832,6 +833,7 @@ struct Upload {
 /// The connection is not reused.
 fn upload(
     vm: &mut Vm,
+    call: Call,
     method: Val<String>,
     url: Val<String>,
     headers: Val<Vec<(String, String)>>,
@@ -842,7 +844,7 @@ fn upload(
     let length = given_length(&req.headers).map_err(|e| HostError::new("invalid", e))?;
     req.check_policy(vm)?;
     let buffers = if req.url.scheme == "https" { net::CONN_BUFFER + net::TLS_BUFFERS } else { net::CONN_BUFFER };
-    let slot = vm.resource_slot_with(buffers, "a connection")?;
+    let slot = vm.resource_slot_with(call, buffers, "a connection")?;
     req.apply_filter(vm)?;
     let Prepared { method, text, url, headers } = req;
     let delimit = length.map_or(Delimit::Chunked, Delimit::Length);
@@ -879,7 +881,7 @@ fn upload(
 
 /// `write_body(conn, body, data, last)`: writes `data` to the body (an
 /// `Outgoing` on `conn`), then, if `last`, ends it.
-fn write_body(vm: &mut Vm, conn: Val<net::Conn>, body: Val<Outgoing>, data: Val<Vec<u8>>, last: bool) -> Suspended<()> {
+fn write_body(vm: &mut Vm, call: Call, conn: Val<net::Conn>, body: Val<Outgoing>, data: Val<Vec<u8>>, last: bool) -> Suspended<()> {
     let n = data.bytes(&vm.heap).len();
     let out = body.get(&vm.heap)?;
     if out.finished {
@@ -896,7 +898,7 @@ fn write_body(vm: &mut Vm, conn: Val<net::Conn>, body: Val<Outgoing>, data: Val<
     }
     let len = out.head.as_ref().map_or(0, Vec::len) + if sent { n + 32 } else { 0 };
     vm.charge_bytes(len)?;
-    let res = vm.reserve_io(len)?;
+    let res = vm.reserve_io(call, len)?;
     let out = body.get_mut(&mut vm.heap)?;
     out.left = left.flatten();
     out.finished = last;
