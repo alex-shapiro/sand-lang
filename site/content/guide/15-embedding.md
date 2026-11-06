@@ -65,7 +65,7 @@ print("sorted \(words.len()) words")
 "#;
 
 let config = Config::new()
-    .policy(RulePolicy::standard().allow_read("/data").allow_write("/out"))
+    .policy(RulePolicy::standard().allow_read("/data".parse()?).allow_write("/out".parse()?))
     .limits(Limits {
         max_memory: Some(64 << 20),
         max_wall_time: Some(Duration::from_secs(5)),
@@ -82,7 +82,7 @@ let report = files.read("/out/report.txt")?;
 # }
 ```
 
-- **Policy.** `RulePolicy` provides `allow_`, `deny_`, and `prompt_` builder methods for each capability kind, such as `allow_read`, `deny_net`, and `prompt_write`. The `net`, `http`, `listen`, and `env` methods take typed patterns: `NetPattern`, `UrlPattern`, `ListenPattern`, and `NamePattern`. Each pattern type parses the policy file syntax with `str::parse` and returns an error for an invalid pattern. `NamePattern::exact` makes a pattern from a variable name, without wildcards. The `net` and `http` methods also take the `Transports` to control: `Tls`, `Plaintext`, or `Both`. The `http` methods take a list of `HttpMethod` values, and an empty list controls all methods. For example, `allow_http(Transports::Plaintext, &["GET".parse()?], "localhost:8080/api/**".parse()?)`. `RulePolicy::default()` is empty, `RulePolicy::standard()` allows `stdout` and `stderr`, and `RulePolicy::allow_all()` allows all capabilities for trusted scripts. `user_rules.with_defaults(host_rules)` appends fallback rules that apply only if a request does not match any rule in `user_rules`. `Config::custom_policy` replaces rule evaluation with a host-defined `CustomPolicy`.
+- **Policy.** `RulePolicy` provides `allow_`, `deny_`, and `prompt_` builder methods for each capability kind, such as `allow_read`, `deny_net`, and `prompt_write`. The builder methods take typed patterns: `PathPattern` for files, `NetPattern`, `UrlPattern`, `ListenPattern`, and `NamePattern`. Each pattern type parses the policy file syntax with `str::parse` and returns an error for an invalid pattern. A `PathPattern` must be absolute, or start with `**`, because a builder has no base directory for a relative path. `PathPattern::literal` makes a pattern from a host path, and `NamePattern::exact` makes a pattern from a variable name, without wildcards. The `net` and `http` methods also take the `Transports` to control: `Tls`, `Plaintext`, or `Both`. The `http` methods take a list of `HttpMethod` values, and an empty list controls all methods. For example, `allow_http(Transports::Plaintext, &["GET".parse()?], "localhost:8080/api/**".parse()?)`. `RulePolicy::default()` is empty, `RulePolicy::standard()` allows `stdout` and `stderr`, and `RulePolicy::allow_all()` allows all capabilities for trusted scripts. `user_rules.with_defaults(host_rules)` appends fallback rules that apply only if a request does not match any rule in `user_rules`. `Config::custom_policy` replaces rule evaluation with a host-defined `CustomPolicy`.
 - **Limits.** `Limits` configures every resource bound described in [Sandbox and policies](/guide/sandbox/).
 - **Virtual file system.** `Config::memory_fs` replaces host disk access with an in-memory `MemFs`. Clones of a `MemFs` share the same underlying storage so the host can populate input files before a run and read output files afterward.
 - **Streams.** `Config::stdout` and `Config::stderr` redirect script output to a `MemorySink` or custom sink. `Config::stdin_bytes` supplies fixed input bytes. `Config::stdin_feed` and `Config::stdin_io_feed` return a `StdinFeed` that the host uses to send input while the script runs.

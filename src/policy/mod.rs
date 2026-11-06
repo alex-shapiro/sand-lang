@@ -443,9 +443,9 @@ mod tests {
             return;
         }
         let p = RulePolicy::new()
-            .allow_read(base.join("Dir/File.txt"))
-            .allow_read(base.join("Dir/Sub"))
-            .deny_read(base.join("Dir/Sub/Secret.txt"));
+            .allow_read(rules::PathPattern::literal(base.join("Dir/File.txt")).unwrap())
+            .allow_read(rules::PathPattern::literal(base.join("Dir/Sub")).unwrap())
+            .deny_read(rules::PathPattern::literal(base.join("Dir/Sub/Secret.txt")).unwrap());
         for (given, want) in [
             ("dir/file.txt", Decision::Allow),
             ("DIR/FILE.TXT", Decision::Allow),

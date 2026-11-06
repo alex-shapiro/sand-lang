@@ -2281,7 +2281,7 @@ platforms.
 let fs = MemFs::new();
 fs.write("/data/in.txt", "input")?;
 let config = Config::new().memory_fs(fs.clone()).policy(
-    RulePolicy::standard().allow_read("/data").allow_write("/out"));
+    RulePolicy::standard().allow_read("/data".parse()?).allow_write("/out".parse()?));
 // ... run a script; then:
 let report = fs.read("/out/report.txt")?;
 ```

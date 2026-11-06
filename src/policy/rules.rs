@@ -36,14 +36,37 @@ impl Access {
     }
 }
 
+/// A path pattern of a file rule, such as `/data`, `/srv/**/*.log`, or `**/.env`. A rule
+/// for a path also applies to every path under it. Parse one with [`str::parse`], which
+/// rejects a relative path, or make one that matches a path literally with
+/// [`PathPattern::literal`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct PathPattern {
-    pub prefix: PathBuf,
-    pub rest: Vec<Seg>,
+pub struct PathPattern {
+    pub(crate) prefix: PathBuf,
+    pub(crate) rest: Vec<Seg>,
+}
+
+impl std::str::FromStr for PathPattern {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<PathPattern, String> {
+        super::file::parse_path(&wild_tokens(text), true, None, None)
+    }
 }
 
 impl PathPattern {
-    pub(crate) fn everything() -> PathPattern {
+    /// A pattern for `path` and every path under it. A `*` in `path` matches only itself.
+    /// Returns an error if `path` is relative.
+    pub fn literal(path: impl AsRef<Path>) -> Result<PathPattern, String> {
+        let path = path.as_ref();
+        if !path.has_root() && !path.is_absolute() {
+            return Err(format!("path `{}` is not anchored: write an absolute path", path.display()));
+        }
+        Ok(PathPattern { prefix: path.to_path_buf(), rest: vec![] })
+    }
+
+    /// The pattern `**`, which matches every path.
+    pub fn everything() -> PathPattern {
         PathPattern { prefix: PathBuf::new(), rest: vec![] }
     }
 
@@ -244,10 +267,6 @@ fn custom(name: &str, detail: Option<&str>) -> RuleKind {
     RuleKind::Custom((name != "*").then(|| name.to_string()), detail.filter(|&d| d != "*").map(String::from))
 }
 
-/// File rule builder methods such as [`RulePolicy::allow_read`] and
-/// [`RulePolicy::deny_read`] take literal path prefixes without wildcards.
-/// They panic if the path is empty. Use [`super::file::PolicyFile`] to parse
-/// wildcard patterns.
 impl RulePolicy {
     /// Creates an empty policy that returns [`Decision::Prompt`] for every request.
     pub fn new() -> RulePolicy {
@@ -313,41 +332,37 @@ impl RulePolicy {
         rules.into_iter().fold(self, RulePolicy::push_rule)
     }
 
-    fn files_rule(self, decision: Decision, access: Access, p: &Path) -> Self {
-        assert!(!p.as_os_str().is_empty(), "empty path in file rule: use `**` in a policy file to match all paths");
-        self.push(decision, RuleKind::Files(access, PathPattern { prefix: p.to_path_buf(), rest: vec![] }))
+    /// Allows reading paths that match `p`.
+    pub fn allow_read(self, p: PathPattern) -> Self {
+        self.push(Decision::Allow, RuleKind::Files(Access::Read, p))
     }
-
-    pub fn allow_read(self, p: impl AsRef<Path>) -> Self {
-        self.files_rule(Decision::Allow, Access::Read, p.as_ref())
+    /// Denies reading, writing, and importing paths that match `p`.
+    pub fn deny_read(self, p: PathPattern) -> Self {
+        self.push(Decision::Deny, RuleKind::Files(Access::Read, p))
     }
-    /// Denies reading, writing, and importing under `p`.
-    pub fn deny_read(self, p: impl AsRef<Path>) -> Self {
-        self.files_rule(Decision::Deny, Access::Read, p.as_ref())
+    /// Prompts before reading, writing, or importing paths that match `p`.
+    pub fn prompt_read(self, p: PathPattern) -> Self {
+        self.push(Decision::Prompt, RuleKind::Files(Access::Read, p))
     }
-    /// Prompts before reading, writing, or importing under `p`.
-    pub fn prompt_read(self, p: impl AsRef<Path>) -> Self {
-        self.files_rule(Decision::Prompt, Access::Read, p.as_ref())
+    /// Allows reading and writing paths that match `p`.
+    pub fn allow_write(self, p: PathPattern) -> Self {
+        self.push(Decision::Allow, RuleKind::Files(Access::Write, p))
     }
-    /// Allows reading and writing under `p`.
-    pub fn allow_write(self, p: impl AsRef<Path>) -> Self {
-        self.files_rule(Decision::Allow, Access::Write, p.as_ref())
+    pub fn deny_write(self, p: PathPattern) -> Self {
+        self.push(Decision::Deny, RuleKind::Files(Access::Write, p))
     }
-    pub fn deny_write(self, p: impl AsRef<Path>) -> Self {
-        self.files_rule(Decision::Deny, Access::Write, p.as_ref())
+    pub fn prompt_write(self, p: PathPattern) -> Self {
+        self.push(Decision::Prompt, RuleKind::Files(Access::Write, p))
     }
-    pub fn prompt_write(self, p: impl AsRef<Path>) -> Self {
-        self.files_rule(Decision::Prompt, Access::Write, p.as_ref())
+    /// Allows importing script modules that match `p`.
+    pub fn allow_import(self, p: PathPattern) -> Self {
+        self.push(Decision::Allow, RuleKind::Files(Access::Import, p))
     }
-    /// Allows importing script modules under `p`.
-    pub fn allow_import(self, p: impl AsRef<Path>) -> Self {
-        self.files_rule(Decision::Allow, Access::Import, p.as_ref())
+    pub fn deny_import(self, p: PathPattern) -> Self {
+        self.push(Decision::Deny, RuleKind::Files(Access::Import, p))
     }
-    pub fn deny_import(self, p: impl AsRef<Path>) -> Self {
-        self.files_rule(Decision::Deny, Access::Import, p.as_ref())
-    }
-    pub fn prompt_import(self, p: impl AsRef<Path>) -> Self {
-        self.files_rule(Decision::Prompt, Access::Import, p.as_ref())
+    pub fn prompt_import(self, p: PathPattern) -> Self {
+        self.push(Decision::Prompt, RuleKind::Files(Access::Import, p))
     }
     /// Allows connections over `transports` to hosts that match `host`.
     pub fn allow_net(self, transports: Transports, host: NetPattern) -> Self {

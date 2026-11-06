@@ -176,7 +176,9 @@ impl HostConfig {
         let key =
             Rc::new(HookKey(hooks::register(Hooks { on_output: function(hooks, "onOutput")?, on_prompt: function(hooks, "onPrompt")? })));
         let mut config = Config::new()
-            .policy(policy.rules.with_defaults(sandlang::policy::rules::RulePolicy::standard().allow_import("/")))
+            .policy(policy.rules.with_defaults(
+                sandlang::policy::rules::RulePolicy::standard().allow_import(sandlang::policy::rules::PathPattern::everything()),
+            ))
             .limits(policy.limits.clone())
             .memory_fs(fs.clone())
             .cwd(&cwd)
