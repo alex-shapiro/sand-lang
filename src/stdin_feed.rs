@@ -101,7 +101,8 @@ impl StdinFeed {
     }
 
     /// Submits an end-of-input marker to `read` so that `read_line` returns
-    /// `None`. Returns `false` if `read` is not waiting for input.
+    /// `None` if `read` has no data yet. Returns `false` if `read` is not
+    /// waiting for input.
     pub fn dismiss(&self, read: StdinReadId) -> bool {
         self.channel.answer_read(read, None)
     }

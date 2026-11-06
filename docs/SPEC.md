@@ -2021,7 +2021,7 @@ models:
   end with one, and an end-of-input marker to `read` so that any read operation
   completes.
   `StdinFeed::dismiss(read)` supplies only an end-of-input marker, which causes
-  `read_line` to return `None`. Each read accepts at most one response; both
+  `read_line` to return `None` if the read has no data yet. Each read accepts at most one response; both
   methods return `false` if `read` is not waiting for input. Any unread bytes
   from the response are discarded when `read` finishes.
 
@@ -2146,7 +2146,9 @@ kind: kind))` in Sand, whereas `?` converts a `Ctl` into a `HostError` that
 - `Result<Later<T, E>, E>` suspends the calling task on a future and maps to
   the same Sand return type as `Result<T, E>`. Use `Later::for_user` instead
   of `Later::new` if the future waits for a user action, so that idle wait time
-  does not count toward `max_wall_time` (§16.2).
+  does not count toward `max_wall_time` (§16.2). A function registered with
+  `async_function` waits for I/O, so its wait always counts toward
+  `max_wall_time`.
 
 To check a sandbox capability inside a `vm_function`, call
 `Vm::require(&capability)` (§14), which returns an error of kind
