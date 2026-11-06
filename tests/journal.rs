@@ -1453,3 +1453,37 @@ fn replay_reports_a_cancellation_that_the_journal_does_not_record_where_it_occur
         "{r:?}"
     );
 }
+
+#[test]
+fn a_resumed_call_that_runs_again_after_a_collection_consumes_its_start_once() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut m = NativeModule::new("mem");
+    let c = calls.clone();
+    m.vm_function(
+        "fetch",
+        Journaled(move |vm: &mut Vm, n: i64| -> Result<Later<i64, sandlang::vm::Ctl>, sandlang::vm::Ctl> {
+            c.fetch_add(1, Ordering::SeqCst);
+            vm.check_memory(n as usize)?;
+            Ok(Later::new(async move { move |_: &mut Vm| Ok::<_, sandlang::vm::Ctl>(n) }))
+        }),
+    );
+    let base = Config::new().policy(RulePolicy::allow_all()).host_modules(HostModules::new([m]).unwrap()).seed(1).retry_stress(true);
+    let src = "import mem\nprint(mem.fetch(10) + mem.fetch(20))";
+    let run = |journal: &MemoryJournal| {
+        let out = MemorySink::new();
+        let config = base.clone().stdout(out.clone()).durable(Durable::new(Arc::new(journal.clone())));
+        let r = rt().block_on(Engine::new(config).run_source("main.sand", src));
+        (r, out.contents())
+    };
+    let journal = MemoryJournal::new();
+    let (r, out) = run(&journal);
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!(out, "30\n");
+    let entries = journal.entries();
+    let second = entries.iter().rposition(|e| e.kind == EntryKind::Start).unwrap();
+    let before = calls.load(Ordering::SeqCst);
+    let (r, resumed) = run(&MemoryJournal::with_entries(entries[..=second].to_vec()));
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!(resumed, out);
+    assert_eq!(calls.load(Ordering::SeqCst) - before, 2, "the resumed call runs again after the forced collection");
+}

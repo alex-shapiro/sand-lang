@@ -34,18 +34,6 @@ pub enum JournalStop {
     Suspended(Suspension),
 }
 
-/// What replay holds for the next journaled operation.
-pub(crate) enum ReplayState {
-    /// The next entry is not the start of an operation, or replay is over.
-    NoStart,
-    /// The journal records the operation's start and end: replay delivers
-    /// the recorded end without a host call.
-    Ended,
-    /// The journal records only the operation's start: the host function
-    /// runs again.
-    Started,
-}
-
 /// Builds the result of a recorded operation from the journal's encoding of
 /// its outcome. It runs in record and in replay alike.
 pub(crate) type BuildFn = Box<dyn FnOnce(&mut Vm, &[u8]) -> NResult + Send>;
@@ -128,6 +116,61 @@ pub(crate) struct OpSpec {
     pub pre_fuel: u64,
     /// How long a timer waits.
     pub timer: Option<Duration>,
+}
+
+/// What the journal holds for the next operation ([`Vm::take_start`]).
+pub(crate) enum StartEntry {
+    /// The journal records the operation's start and end: replay delivers
+    /// the recorded end.
+    Replayed(Replayed),
+    /// The journal records only the operation's start: the operation runs
+    /// again.
+    Rerun(Rerun),
+    /// The journal does not hold the operation: it runs, and a journaled
+    /// run records its start.
+    Fresh(Fresh),
+    /// Replay holds `next`, an entry other than a start, at `seq`.
+    /// `identity` and `label` describe the operation.
+    Other { identity: u64, label: String, seq: u64, next: String },
+}
+
+/// An operation whose recorded start replay consumes when the operation
+/// runs again ([`Rerun::start`]).
+pub(crate) struct Rerun {
+    op: u64,
+    seq: u64,
+    wake: Option<SystemTime>,
+}
+
+impl Rerun {
+    /// Consumes the recorded start: the operation runs.
+    pub fn start(self, vm: &Vm, spec: OpSpec) -> Live {
+        if let Some(mut j) = vm.journal_state() {
+            j.pos += 1;
+            j.ops += 1;
+        }
+        let park = self.wake.map_or(spec.park, Park::Until);
+        Live { op: Some(self.op), seq: Some(self.seq), wake: self.wake, park, call: spec.kind == OpKind::Call, effectful: spec.effectful }
+    }
+}
+
+/// A new operation, with its identity and label in a journaled run.
+pub(crate) struct Fresh(Option<(u64, String)>);
+
+impl Fresh {
+    /// Records the operation's start in a journaled run: the operation runs.
+    pub fn start(self, vm: &Vm, spec: OpSpec) -> Live {
+        let call = spec.kind == OpKind::Call;
+        let (Some((identity, label)), Some(mut j)) = (self.0, vm.journal_state()) else {
+            return Live { op: None, seq: None, wake: None, park: spec.park, call, effectful: spec.effectful };
+        };
+        let (op, seq) = (j.ops, j.position());
+        let wake = spec.timer.map(|d| j.wall(&*vm.host.clock) + d);
+        j.record(EntryData::Start(OpStart { kind: spec.kind, identity, pre_fuel: spec.pre_fuel, wake, label }));
+        j.ops += 1;
+        let park = wake.map_or(spec.park, Park::Until);
+        Live { op: Some(op), seq: Some(seq), wake, park, call, effectful: spec.effectful }
+    }
 }
 
 /// An operation that [`Vm::begin_op`] started.
@@ -275,25 +318,22 @@ pub(crate) fn sleep(vm: &mut Vm, d: Duration) -> Ctl {
 /// calling it. An effectful function is called only once the journal is
 /// durable.
 pub(crate) fn journaled_call(vm: &mut Vm, call: Call, inner: &super::HostFn, name: &Arc<str>, effectful: bool, args: &[Value]) -> NResult {
-    // A journaled call reads no other input before its own entry, so the
-    // entry it records or replays is the next one.
+    // A journaled function reads no journal input (it has no `Call`), so
+    // the entry that the call records or replays is the next one.
     let call = Call { seq: vm.journal_state().map(|j| j.position()), ..call };
     let inner = |vm: &mut Vm| inner.call(vm, call, args);
-    let describe = |vm: &Vm| Ok((call_identity(vm, name, args)?, name.to_string()));
     let spec = |pre_fuel: u64, park: Park| OpSpec { kind: OpKind::Call, effectful, park, pre_fuel, timer: None };
     let run = |live: Live, fin: BoxFuture| {
         let label = name.clone();
         live.run(async move { Box::new(CallOutcome { fin: fin.await, label }) as Box<dyn Outcome> }, Box::new(payload_outcome))
     };
-    match vm.replay_state() {
-        ReplayState::Ended => {
-            let Begun::Replayed(r) = vm.begin_op(spec(0, Park::Never), describe)? else {
-                return Err(Ctl::internal("a replayed call has no recorded completion"));
-            };
+    match vm.take_start(OpKind::Call, |vm| Ok((call_identity(vm, name, args)?, name.to_string())))? {
+        StartEntry::Replayed(r) => {
             vm.meter.charge(r.pre_fuel)?;
-            return Err(r.wait(Box::new(payload_outcome)));
+            Err(r.wait(Box::new(payload_outcome)))
         }
-        ReplayState::Started => {
+        StartEntry::Other { identity, .. } => vm.journaled_result(identity, name, inner),
+        StartEntry::Rerun(rerun) => {
             // The journal records the start of the call, not its end: call
             // it again, and deliver even a result it returns at once as the
             // completion of the recorded operation.
@@ -311,30 +351,21 @@ pub(crate) fn journaled_call(vm: &mut Vm, call: Call, inner: &super::HostFn, nam
                     (Box::pin(std::future::ready(ready)), Park::Never)
                 }
             };
-            let Begun::Live(live) = vm.begin_op(spec(pre_fuel, park), describe)? else {
-                return Err(Ctl::internal("a started call has a recorded completion"));
-            };
-            return Err(run(live, fin));
+            Err(run(rerun.start(vm, spec(pre_fuel, park)), fin))
         }
-        ReplayState::NoStart => {}
-    }
-    if vm.replaying() {
-        let identity = call_identity(vm, name, args)?;
-        return vm.journaled_result(identity, name, inner);
-    }
-    if effectful && vm.must_flush() {
-        return Err(Ctl::from(CtlKind::Flush));
-    }
-    let start = vm.meter.used();
-    match inner(vm).map_err(Ctl::into_kind) {
-        Err(CtlKind::Async(fut, park)) => {
-            let pre_fuel = vm.meter.used().saturating_sub(start);
-            let Begun::Live(live) = vm.begin_op(spec(pre_fuel, park), describe)? else {
-                return Err(Ctl::internal("a live call has a recorded completion"));
-            };
-            Err(run(live, fut))
+        StartEntry::Fresh(fresh) => {
+            if effectful && vm.must_flush() {
+                return Err(Ctl::from(CtlKind::Flush));
+            }
+            let start = vm.meter.used();
+            match inner(vm).map_err(Ctl::into_kind) {
+                Err(CtlKind::Async(fut, park)) => {
+                    let pre_fuel = vm.meter.used().saturating_sub(start);
+                    Err(run(fresh.start(vm, spec(pre_fuel, park)), fut))
+                }
+                r => vm.record_result(name, start, r.map_err(Ctl::from), fresh.0),
+            }
         }
-        r => vm.record_result(name, start, r.map_err(Ctl::from), describe),
     }
 }
 
@@ -1143,7 +1174,7 @@ impl Vm {
         }
         let start = self.meter.used();
         let r = f(self);
-        self.record_result(label, start, r, |_| Ok((identity, label.to_string())))
+        self.record_result(label, start, r, Some((identity, label.to_string())))
     }
 
     /// Consumes the recorded result of a synchronous call in replay.
@@ -1168,31 +1199,21 @@ impl Vm {
     }
 
     /// Records the result `r` of a synchronous call that started at fuel
-    /// `start`, and returns it. Without a journal, returns `r`.
-    fn record_result(&mut self, label: &str, start: u64, r: NResult, describe: impl FnOnce(&Vm) -> Result<(u64, String), Ctl>) -> NResult {
-        if self.journal.is_none() || is_retry(&r) {
+    /// `start`, with the call's identity and label in a journaled run, and
+    /// returns it. Without them, returns `r`.
+    fn record_result(&mut self, name: &str, start: u64, r: NResult, described: Option<(u64, String)>) -> NResult {
+        let Some((identity, label)) = described else { return r };
+        if is_retry(&r) {
             return r;
         }
         let fuel = self.meter.used().saturating_sub(start);
-        let (payload, value) = outcome_payload(self, r, label)?;
-        let (identity, label) = describe(self)?;
+        let (payload, value) = outcome_payload(self, r, name)?;
         if let Some(mut j) = self.journal_state() {
             j.record(EntryData::Result(CallResult { identity, label, fuel, outcome: payload.clone() }));
         }
         match value {
             Some(bytes) => decode_value(self, &bytes),
             None => payload_outcome(self, &payload),
-        }
-    }
-
-    /// What replay holds for the next journaled operation.
-    pub(crate) fn replay_state(&self) -> ReplayState {
-        let Some(j) = &self.journal else { return ReplayState::NoStart };
-        let j = j.borrow();
-        match j.peek() {
-            Some(EntryData::Start(_)) if j.done.contains_key(&j.ops) => ReplayState::Ended,
-            Some(EntryData::Start(_)) => ReplayState::Started,
-            _ => ReplayState::NoStart,
         }
     }
 
@@ -1241,59 +1262,52 @@ impl Vm {
         }
     }
 
+    /// What the journal holds for the next operation, of `kind`. `describe`
+    /// gives the operation's identity and label, which only a journaled run
+    /// reads. Consumes the operation's `Start` entry if the journal also
+    /// records its end; otherwise consumes nothing.
+    pub(crate) fn take_start(&self, kind: OpKind, describe: impl FnOnce(&Vm) -> Result<(u64, String), Ctl>) -> Result<StartEntry, Ctl> {
+        let Some(journal) = &self.journal else { return Ok(StartEntry::Fresh(Fresh(None))) };
+        let (identity, label) = describe(self)?;
+        let mut j = journal.borrow_mut();
+        let s = match j.peek() {
+            None => return Ok(StartEntry::Fresh(Fresh(Some((identity, label))))),
+            Some(EntryData::Start(s)) => s,
+            Some(e) => return Ok(StartEntry::Other { identity, label, seq: j.pos as u64, next: e.describe() }),
+        };
+        let (op, seq) = (j.ops, j.pos as u64);
+        if s.kind != kind || s.identity != identity {
+            let message = if s.kind == kind && s.label == label {
+                format!("the run starts {} `{label}` with other arguments than the journal records", kind.name())
+            } else {
+                format!("the run starts {} `{label}` where the journal records the start of {} `{}`", kind.name(), s.kind.name(), s.label)
+            };
+            return Err(Ctl::from(JournalStop::Diverged { seq, message }));
+        }
+        let (pre_fuel, wake) = (s.pre_fuel, s.wake);
+        if !j.done.contains_key(&op) {
+            return Ok(StartEntry::Rerun(Rerun { op, seq, wake }));
+        }
+        j.pos += 1;
+        j.ops += 1;
+        Ok(StartEntry::Replayed(Replayed { op, call: kind == OpKind::Call, pre_fuel, wake }))
+    }
+
     /// Starts operation `spec`, an input of the run whose outcome the
     /// journal records, for the calling native. `describe` gives the
     /// operation's identity and label, which only a journaled run reads.
     /// Consumes the operation's `Start` entry in replay, or records one.
     /// Without a journal, the operation runs.
     pub(crate) fn begin_op(&mut self, spec: OpSpec, describe: impl FnOnce(&Vm) -> Result<(u64, String), Ctl>) -> Result<Begun, Ctl> {
-        let call = spec.kind == OpKind::Call;
-        let live = |op, seq, wake| {
-            let park = match wake {
-                Some(t) => Park::Until(t),
-                None => spec.park,
-            };
-            Begun::Live(Live { op, seq, wake, park, call, effectful: spec.effectful })
-        };
-        if self.journal.is_none() {
-            return Ok(live(None, None, None));
+        match self.take_start(spec.kind, describe)? {
+            StartEntry::Replayed(r) => Ok(Begun::Replayed(r)),
+            StartEntry::Rerun(r) => Ok(Begun::Live(r.start(self, spec))),
+            StartEntry::Fresh(f) => Ok(Begun::Live(f.start(self, spec))),
+            StartEntry::Other { label, seq, next, .. } => {
+                let message = format!("the run reads the start of {} `{label}` where the journal records {next}", spec.kind.name());
+                Err(Ctl::from(JournalStop::Diverged { seq, message }))
+            }
         }
-        let (identity, label) = describe(self)?;
-        let Some(j) = &self.journal else { return Err(Ctl::internal("the journal vanished")) };
-        let mut j = j.borrow_mut();
-        let id = j.ops;
-        let seq = j.position();
-        let kind = spec.kind;
-        let replayed = j.take(EntryKind::Start, &|| format!("the start of {} `{label}`", kind.name()))?;
-        let wake = match &replayed {
-            Some(EntryData::Start(s)) => {
-                if s.kind != kind || s.identity != identity {
-                    let msg = if s.kind == kind && s.label == label {
-                        format!("the run starts {} `{label}` with other arguments than the journal records", kind.name())
-                    } else {
-                        format!(
-                            "the run starts {} `{label}` where the journal records the start of {} `{}`",
-                            kind.name(),
-                            s.kind.name(),
-                            s.label
-                        )
-                    };
-                    return Err(Ctl::from(JournalStop::Diverged { seq, message: msg }));
-                }
-                if j.done.contains_key(&id) {
-                    j.ops += 1;
-                    return Ok(Begun::Replayed(Replayed { op: id, call, pre_fuel: s.pre_fuel, wake: s.wake }));
-                }
-                s.wake
-            }
-            _ => {
-                let wake = spec.timer.map(|d| j.wall(&*self.host.clock) + d);
-                j.record(EntryData::Start(OpStart { kind, identity, pre_fuel: spec.pre_fuel, wake, label }));
-                wake
-            }
-        };
-        j.ops += 1;
-        Ok(live(Some(id), Some(seq), wake))
     }
 
     /// Notes that the local operation that fiber `fid` waits for, as wait
