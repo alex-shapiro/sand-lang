@@ -4,6 +4,7 @@ use super::interp::Exit;
 use super::*;
 use crate::LimitKind;
 use crate::platform::{ClockFuture, Instant};
+use crate::stdin_feed::StdinIdleSignal;
 use std::sync::atomic::Ordering;
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
@@ -545,7 +546,7 @@ impl Vm {
                 return Ok(Stop::Idle);
             }
             timer.read();
-            let blocked = self.host.stdin_feed.as_ref().map(|f| f.blocked());
+            let idle = self.host.stdin_idle.as_ref().map(StdinIdleSignal::idle);
             let pause_start = self.io.awaits_user().then_some(timer.now);
             let mut sleep = self.deadline.filter(|_| pause_start.is_none()).map(|d| timer.sleep(d.saturating_duration_since(timer.now())));
             let interrupt = self.host.interrupt.clone();
@@ -565,7 +566,7 @@ impl Vm {
                 Poll::Pending
             })
             .await;
-            drop(blocked);
+            drop(idle);
             if let Some(start) = pause_start {
                 self.exclude_wall_time(start, &timer);
             }

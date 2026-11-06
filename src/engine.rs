@@ -1059,7 +1059,7 @@ impl Engine {
 
     pub(crate) fn new_vm(&self, prog: Arc<Program>, cwd: PathBuf, quiet: bool) -> Vm {
         let c = &self.config;
-        let (stdin, stdin_feed, stdin_wait) = match &c.stdin {
+        let (stdin, stdin_idle, stdin_wait) = match &c.stdin {
             StdinConfig::None => (StdinSource::None, None, WaitKind::Io),
             StdinConfig::Bytes(b) => (StdinSource::Bytes(std::io::Cursor::new(b.clone())), None, WaitKind::Io),
             #[cfg(feature = "os")]
@@ -1068,9 +1068,9 @@ impl Engine {
                 (StdinSource::Inherit(tokio::io::BufReader::new(tokio::io::stdin())), None, wait)
             }
             StdinConfig::Feed(feed) => {
-                let reader = crate::feed::FedReader::new(feed);
-                let link = reader.link();
-                (StdinSource::Fed(reader), Some(link), WaitKind::User)
+                let reader = crate::stdin_feed::StdinFeedReader::new(feed);
+                let idle = reader.idle_signal();
+                (StdinSource::Fed(reader), Some(idle), WaitKind::User)
             }
         };
         let (stdout, stderr): (SharedSink, SharedSink) =
@@ -1084,7 +1084,7 @@ impl Engine {
             stdout,
             stderr,
             stdin: Arc::new(tokio::sync::Mutex::new(stdin)),
-            stdin_feed,
+            stdin_idle,
             stdin_wait,
             output_bytes: 0,
             limits: c.limits.clone(),

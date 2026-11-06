@@ -11,8 +11,8 @@ use sandlang::platform::{Clock, ClockFuture, Instant, SystemTime, UNIX_EPOCH};
 use sandlang::session::RESET_NOTE;
 use sandlang::vm::{Ctl, Vm};
 use sandlang::{
-    Capability, Config, Decision, Engine, Error, LimitKind, Limits, MemorySink, NativeModule, PromptAnswer, ReadId, RulePolicy, Session,
-    StdinFeed,
+    Capability, Config, Decision, Engine, Error, LimitKind, Limits, MemorySink, NativeModule, PromptAnswer, RulePolicy, Session, StdinFeed,
+    StdinReadId,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -1016,7 +1016,7 @@ fn answer_targets_specific_read() {
 }
 
 /// Evaluates `src` and responds to each awaited stdin read with `respond`.
-fn answered(src: &str, respond: impl Fn(&StdinFeed, ReadId)) -> String {
+fn answered(src: &str, respond: impl Fn(&StdinFeed, StdinReadId)) -> String {
     let feed = StdinFeed::new();
     let mut r = Repl::with(Config::new().policy(RulePolicy::allow_all()).stdin_feed(&feed));
     r.ok("import io");

@@ -13,7 +13,6 @@ pub mod diag;
 mod doc_examples;
 pub mod docs;
 pub mod engine;
-mod feed;
 mod files;
 pub mod fmt;
 pub mod hir;
@@ -25,6 +24,7 @@ pub mod network;
 pub mod platform;
 pub mod policy;
 pub mod session;
+mod stdin_feed;
 mod stdio;
 mod stdlib;
 pub mod syntax;
@@ -37,7 +37,6 @@ pub use engine::{
     Config, Engine, Error, InterruptHandle, LimitKind, Limits, MemorySink, Outcome, RequestFilter, RequestTarget, TestReport, TestResult,
     TraceFrame,
 };
-pub use feed::{ReadId, StdinFeed};
 pub use files::MemFs;
 pub use native::{
     Conversion, EnumType, EnumVariant, FromValue, HostError, IntoHostError, IntoValue, NamedType, NativeModule, NativeObject, ObjectType,
@@ -46,6 +45,7 @@ pub use native::{
 pub use policy::{Capability, CustomPolicy, Decision, PromptAnswer, Prompter, RulePolicy};
 pub use sandlang_macros::{SandEnum, SandObject, SandStruct, SandValue};
 pub use session::Session;
+pub use stdin_feed::{StdinFeed, StdinReadId};
 pub use stdio::flush_stdio;
 pub use stdlib::log::{LogLevel, LogRecord, LogSink};
 pub use vm::OutputSink;

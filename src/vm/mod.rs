@@ -334,7 +334,7 @@ pub enum StdinSource {
     #[cfg(feature = "os")]
     Inherit(tokio::io::BufReader<tokio::io::Stdin>),
     /// Input the host sends ([`crate::StdinFeed`]).
-    Fed(crate::feed::FedReader),
+    Fed(crate::stdin_feed::StdinFeedReader),
 }
 
 /// Output sink for standard streams and logs. `write` must not block for
@@ -484,8 +484,8 @@ pub struct Host {
     pub stdout: SharedSink,
     pub stderr: SharedSink,
     pub stdin: Arc<tokio::sync::Mutex<StdinSource>>,
-    /// The feed of a [`StdinSource::Fed`], told when the VM waits.
-    pub(crate) stdin_feed: Option<crate::feed::FeedLink>,
+    /// Tells the feed of a [`StdinSource::Fed`] when the VM has nothing to run.
+    pub(crate) stdin_idle: Option<crate::stdin_feed::StdinIdleSignal>,
     /// Wait category for standard input reads.
     pub(crate) stdin_wait: WaitKind,
     pub output_bytes: u64,

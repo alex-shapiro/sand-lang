@@ -141,7 +141,7 @@ const STDIN_CHUNK: usize = 64 << 10;
 fn buffered_line(vm: &Vm) -> Option<Option<Vec<u8>>> {
     let mut source = vm.host.stdin.try_lock().ok()?;
     if let StdinSource::Fed(r) = &mut *source {
-        r.reset();
+        r.reset_for_read();
     }
     let (buf, at_end) = match &mut *source {
         StdinSource::None => return Some(None),
@@ -186,7 +186,7 @@ async fn read_input(stdin: &Mutex<StdinSource>, what: Read, res: &mut Reservatio
         #[cfg(feature = "os")]
         StdinSource::Inherit(r) => read_from(r, what, res).await,
         StdinSource::Fed(r) => {
-            let _op = r.begin();
+            let _op = r.begin_read();
             read_from(r, what, res).await
         }
     }

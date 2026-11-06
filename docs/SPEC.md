@@ -2013,8 +2013,8 @@ models:
   it. `StdinFeed::end` queues an end-of-input marker for the next read that
   reaches it.
 - Interactive applications display an input prompt while a read waits. Each read
-  that can wait receives a unique `ReadId`. `StdinFeed::awaited` returns the
-  `ReadId` of the waiting read even if other tasks are running. If more than
+  that can wait receives a unique `StdinReadId`. `StdinFeed::awaited` returns the
+  `StdinReadId` of the waiting read even if other tasks are running. If more than
   one read waits, for example in two sessions, it returns the oldest.
   `StdinFeed::awaited_changed` waits until that value changes.
   `StdinFeed::answer(read, data)` supplies `data`, a newline if `data` does not
