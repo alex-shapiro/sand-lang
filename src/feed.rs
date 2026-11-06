@@ -48,7 +48,7 @@ struct Chunk {
 }
 
 impl ReadId {
-    /// Returns the 1-based sequential number of this read.
+    /// Returns the 1-based number of this read among the reads that can wait.
     pub fn get(self) -> u64 {
         self.0.get()
     }
@@ -59,8 +59,8 @@ impl StdinFeed {
         StdinFeed::default()
     }
 
-    /// Appends `data` to the input stream. Buffered bytes remain queued across
-    /// reads until consumed.
+    /// Appends `data` to the input stream. Sent data stays in the queue across
+    /// reads until a script reads it.
     pub fn send(&self, data: impl Into<Vec<u8>>) {
         let data = data.into();
         if !data.is_empty() {

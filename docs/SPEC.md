@@ -2014,9 +2014,9 @@ of hosts:
   and no other task can run. Sent data stays queued across reads until scripts
   read it. `StdinFeed::end` adds an end of input to the queue, and the read
   that reaches it gets the end of input.
-- An app with its own input field shows the field while a read waits. Each read
-  has a new `ReadId`. `StdinFeed::awaited` returns the `ReadId` of the read
-  that waits for input, also while other tasks run, and
+- An app with its own input field shows the field while a read waits. Each
+  read that can wait has a new `ReadId`. `StdinFeed::awaited` returns the
+  `ReadId` of the read that waits for input, also while other tasks run, and
   `StdinFeed::awaited_changed` waits until that value changes.
   `StdinFeed::answer(read, data)` submits `data` to that read only, as a user
   who types `data` and presses Return: the read gets `data`, a line end, and

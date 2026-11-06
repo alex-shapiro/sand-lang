@@ -1059,22 +1059,15 @@ impl Engine {
 
     pub(crate) fn new_vm(&self, prog: Arc<Program>, cwd: PathBuf, quiet: bool) -> Vm {
         let c = &self.config;
-        let stdin = match &c.stdin {
-            StdinConfig::None => StdinSource::None,
-            StdinConfig::Bytes(b) => StdinSource::Bytes(std::io::Cursor::new(b.clone())),
+        let (stdin, stdin_feed, stdin_wait) = match &c.stdin {
+            StdinConfig::None => (StdinSource::None, None, WaitKind::Io),
+            StdinConfig::Bytes(b) => (StdinSource::Bytes(std::io::Cursor::new(b.clone())), None, WaitKind::Io),
             #[cfg(feature = "os")]
-            StdinConfig::Inherit => StdinSource::Inherit(tokio::io::BufReader::new(tokio::io::stdin())),
-            StdinConfig::Feed(feed) => StdinSource::Fed(crate::feed::FedReader::new(feed)),
-        };
-        let stdin_feed = match &c.stdin {
-            StdinConfig::Feed(feed) => Some(feed.shared()),
-            _ => None,
-        };
-        let stdin_wait = match &c.stdin {
-            StdinConfig::Feed(_) => WaitKind::User,
-            #[cfg(feature = "os")]
-            StdinConfig::Inherit if std::io::IsTerminal::is_terminal(&std::io::stdin()) => WaitKind::User,
-            _ => WaitKind::Io,
+            StdinConfig::Inherit => {
+                let wait = if std::io::IsTerminal::is_terminal(&std::io::stdin()) { WaitKind::User } else { WaitKind::Io };
+                (StdinSource::Inherit(tokio::io::BufReader::new(tokio::io::stdin())), None, wait)
+            }
+            StdinConfig::Feed(feed) => (StdinSource::Fed(crate::feed::FedReader::new(feed)), Some(feed.shared()), WaitKind::User),
         };
         let (stdout, stderr): (SharedSink, SharedSink) =
             if quiet { (Arc::new(NullSink), Arc::new(NullSink)) } else { (c.stdout.clone(), c.stderr.clone()) };
