@@ -6,8 +6,8 @@ mod ty;
 
 pub use crate::types::traits;
 pub use convert::{Conversion, FromValue, HostError, IntoHostError, IntoValue, value_from, value_into};
-pub use func::{AsyncHostFunction, HostFunction, Later, NativeError, Park, Signature, VmFunction};
-pub use ty::{Channel, Named, Never, Num, Param, Range, Reflect, SandType, Task, Type, Val};
+pub use func::{AsyncHostFunction, Effectful, HostFunction, JournalArgs, Journaled, Later, NativeError, Park, Signature, VmFunction};
+pub use ty::{Channel, JournalArg, JournalData, Named, Never, Num, Param, Range, Reflect, SandType, Task, Type, Val};
 
 #[doc(hidden)]
 pub use convert::mismatch;
@@ -757,7 +757,6 @@ struct FnDef {
     f: HostFn,
     names: Option<Arc<[String]>>,
     doc: Option<Arc<str>>,
-    journaled: bool,
 }
 
 /// A module of Rust functions and types that scripts can import with
@@ -816,27 +815,29 @@ impl NativeModule {
         &self.name
     }
 
-    fn add(&mut self, name: &str, sig: Signature, f: Box<NativeFn>) -> &mut Self {
+    fn add(&mut self, name: &str, sig: Signature, into_host: impl FnOnce(&Arc<str>) -> Box<NativeFn>) -> &mut Self {
         let parts: Vec<&str> = name.split('.').collect();
         let valid = parts.len() <= 2 && parts.iter().all(|p| is_ident(p)) && parts.last() != Some(&"self");
         assert!(valid, "function name `{name}` is not `name` or `Type.name`");
         assert!(!self.functions.iter().any(|d| d.name == name), "function `{name}` is registered twice in module `{}`", self.name);
+        let f = into_host(&format!("{}.{name}", self.name).into());
         let f = if self.kind == ModKind::Host { HostFn::Shared(f.into()) } else { HostFn::Static(Box::leak(f)) };
-        self.functions.push(FnDef { name: name.to_string(), sig, f, names: None, doc: None, journaled: false });
+        self.functions.push(FnDef { name: name.to_string(), sig, f, names: None, doc: None });
         self
     }
 
     /// Registers a synchronous function `f` under `name` (or `"Type.method"`
     /// for a method on a type in this module). Parameters of type `&str`,
     /// `&[u8]`, and `&T` (for an [`ObjectType`] `T`) borrow directly from the
-    /// VM heap without copying.
+    /// VM heap without copying. Wrap `f` in [`Journaled`] or [`Effectful`]
+    /// to journal its calls.
     ///
     /// # Panics
     ///
     /// Panics if `name` is not of the form `name` or `Type.name`, or if `name`
     /// is already registered in this module.
     pub fn function<M, F: HostFunction<M>>(&mut self, name: &str, f: F) -> &mut Self {
-        self.add(name, F::signature(), f.into_host())
+        self.add(name, F::signature(), |key| f.into_host(key))
     }
 
     /// Registers a synchronous function `f` that receives `&mut Vm` as its
@@ -853,7 +854,7 @@ impl NativeModule {
     ///
     /// Panics under the same conditions as [`NativeModule::function`].
     pub fn vm_function<M, F: VmFunction<M>>(&mut self, name: &str, f: F) -> &mut Self {
-        self.add(name, F::signature(), f.into_host())
+        self.add(name, F::signature(), |key| f.into_host(key))
     }
 
     /// Registers an asynchronous function `f` that suspends the calling Sand
@@ -863,7 +864,7 @@ impl NativeModule {
     ///
     /// Panics under the same conditions as [`NativeModule::function`].
     pub fn async_function<M, F: AsyncHostFunction<M>>(&mut self, name: &str, f: F) -> &mut Self {
-        self.add(name, F::signature(), f.into_host())
+        self.add(name, F::signature(), |key| f.into_host(key))
     }
 
     /// Sets the parameter names (excluding `self`) for the most recently
@@ -895,73 +896,6 @@ impl NativeModule {
     /// Panics if this module has not registered any function yet.
     pub fn doc(&mut self, text: &str) -> &mut Self {
         self.last("doc").doc = Some(text.into());
-        self
-    }
-
-    /// Makes the most recently registered function journaled (SPEC §16.7):
-    /// in a run with a journal, the engine records the function's result,
-    /// and replay returns the recorded result without calling the function.
-    /// A function that is not journaled is local: replay calls it again, so
-    /// it must give the same result in every execution.
-    ///
-    /// The journal encodes the arguments, which identify the call, and the
-    /// result. Both must be plain data: no functions, tasks, channels,
-    /// generic parameters, or values of bound object types. Values of bound
-    /// value types, such as `time.Instant`, can be arguments but not results.
-    ///
-    /// # Panics
-    ///
-    /// Panics if this module has not registered any function yet, or if the
-    /// function is journaled already. [`Engine::new`](crate::Engine::new)
-    /// panics if a journaled function takes or returns a value that the
-    /// journal cannot encode.
-    pub fn journaled(&mut self) -> &mut Self {
-        self.make_journaled(false, "journaled")
-    }
-
-    /// Makes the most recently registered function journaled, like
-    /// [`NativeModule::journaled`], and marks it as having effects outside
-    /// the run: the engine calls it only once the journal is durable
-    /// ([`Journal::flush`](crate::journal::Journal::flush)). An asynchronous
-    /// function must start its effect in its future, not when called.
-    ///
-    /// # Panics
-    ///
-    /// Panics under the same conditions as [`NativeModule::journaled`].
-    pub fn effectful(&mut self) -> &mut Self {
-        self.make_journaled(true, "effectful")
-    }
-
-    /// Panics if a journaled function of this module takes or returns a
-    /// value that the journal cannot encode. `types` are the bound types of
-    /// all modules of the engine.
-    pub(crate) fn check_journaled(&self, types: &[BoundType]) {
-        for f in self.functions.iter().filter(|f| f.journaled) {
-            let key = format!("{}.{}", self.name, f.name);
-            for (i, p) in f.sig.params.iter().enumerate() {
-                if let Err(t) = journal_type(p, types, true) {
-                    panic!(
-                        "journaled function `{key}` takes a value of type `{}` as parameter {}, which the journal cannot encode",
-                        t.render(&self.name),
-                        i + 1
-                    );
-                }
-            }
-            if let Err(t) = journal_type(&f.sig.ret, types, false) {
-                panic!("journaled function `{key}` returns a value of type `{}`, which the journal cannot encode", t.render(&self.name));
-            }
-        }
-    }
-
-    fn make_journaled(&mut self, effectful: bool, method: &str) -> &mut Self {
-        let module = self.name.clone();
-        let f = self.last(method);
-        assert!(!f.journaled, "function `{}` is journaled already", f.name);
-        f.journaled = true;
-        let inner = f.f.clone();
-        let key: Arc<str> = format!("{module}.{}", f.name).into();
-        let wrapped = move |vm: &mut Vm, args: &[Value]| crate::vm::journal::journaled_call(vm, &inner, &key, effectful, args);
-        f.f = HostFn::Shared(Arc::new(wrapped));
         self
     }
 
@@ -1049,25 +983,5 @@ impl NativeModule {
             r.add_native(format!("{}.{}", self.name, f.name), f.f.clone(), f.sig.clone(), f.names.clone(), f.doc.clone());
         }
         r.source(self.name.clone(), self.kind, self.source.clone());
-    }
-}
-
-/// Checks that the journal can encode values of type `t`: plain data, and
-/// for a parameter (`param`) also values of bound value types, which take
-/// part in a call's identity through their text. Returns the first type
-/// that it cannot encode.
-fn journal_type<'t>(t: &'t Type, types: &[BoundType], param: bool) -> Result<(), &'t Type> {
-    let all = |ts: &'t [Type]| ts.iter().try_for_each(|t| journal_type(t, types, param));
-    match t {
-        Type::Int | Type::Float | Type::Bool | Type::Str | Type::Bytes | Type::Duration | Type::Unit | Type::Never | Type::Range => Ok(()),
-        Type::List(x) | Type::Set(x) => journal_type(x, types, param),
-        Type::Map(k, v) => journal_type(k, types, param).and_then(|()| journal_type(v, types, param)),
-        Type::Tuple(ts) => all(ts),
-        Type::Named(n) => match types.iter().find(|b| b.module == n.module && b.name == n.name).map(|b| &b.kind) {
-            Some(BoundKind::Object(_) | BoundKind::Builtin(_)) => Err(t),
-            Some(BoundKind::Value(_)) if !param => Err(t),
-            _ => all(&n.args),
-        },
-        Type::Fn(..) | Type::Param(..) | Type::Reflect(_) | Type::Num(_) => Err(t),
     }
 }

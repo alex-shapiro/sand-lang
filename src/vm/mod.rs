@@ -675,15 +675,15 @@ impl Vm {
         self.host.context.clone()?.downcast::<T>().ok()
     }
 
-    /// Inside a call of a function that [`NativeModule::journaled`] or
-    /// [`NativeModule::effectful`] registered, in a journaled run: the
-    /// sequence number of the journal entry that records the call. It is the
-    /// same in every execution of the run, also when a resumed run calls the
-    /// function again, so a host can use it as the identity of the call's
-    /// effect (SPEC §16.7). `None` elsewhere.
+    /// Inside a call of a function registered as [`Journaled`] or
+    /// [`Effectful`], in a journaled run: the sequence number of the journal
+    /// entry that records the call. It is the same in every execution of the
+    /// run, also when a resumed run calls the function again, so a host can
+    /// use it as the identity of the call's effect (SPEC §16.7). `None`
+    /// elsewhere.
     ///
-    /// [`NativeModule::journaled`]: crate::NativeModule::journaled
-    /// [`NativeModule::effectful`]: crate::NativeModule::effectful
+    /// [`Journaled`]: crate::native::Journaled
+    /// [`Effectful`]: crate::native::Effectful
     pub fn journal_seq(&self) -> Option<u64> {
         self.call_seq
     }

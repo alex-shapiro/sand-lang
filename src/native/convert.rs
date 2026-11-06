@@ -588,6 +588,7 @@ macro_rules! __value_type_impls {
                 $crate::native::Type::bound::<Self>(::std::vec::Vec::new())
             }
         }
+        impl $crate::native::JournalArg for $t {}
         impl $crate::native::FromValue for $t {
             type Item<'a> = Self;
             fn from_value(

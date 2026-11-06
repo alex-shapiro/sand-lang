@@ -2458,17 +2458,18 @@ parked call occurs. In replay, a timer that has no `Done` entry expires at its
 recorded wake time. If the host resumes the run too early, the run suspends
 again.
 
-**Host functions.** `NativeModule::journaled` makes the most recently
-registered function journaled. The engine records its result, and replay
+**Host functions.** A host function that is registered wrapped in
+`native::Journaled` is journaled. The engine records its result, and replay
 returns the recorded result without a call. The identity of a call is the
 function's name and the journal encoding of its arguments; a value of a bound
 value type, such as a `time.Instant`, takes part through its type and text.
-`NativeModule::effectful` also journals the function, and the engine calls it
-only when the journal is durable. The arguments and the result of a journaled
-function must be plain data: no functions, tasks, channels, generic
+A function wrapped in `native::Effectful` is also journaled, and the engine
+calls it only when the journal is durable. The arguments and the result of a
+journaled function must be plain data: no functions, tasks, channels, generic
 parameters, or values of bound object types, and no values of bound value
-types in the result. `Engine::new` panics if the signature of a journaled
-function does not meet this rule. A host function that is not journaled is
+types in the result. The Rust compiler enforces this rule: the parameter
+types must implement `native::JournalArg` and the return type must implement
+`native::JournalData`. A host function that is not journaled is
 local: replay calls it again, so it must give the same result in each
 execution and have no effects outside the run. `Later::parked(park)` lets the engine
 suspend a run while the future of a call waits: with `Park::Until(t)` until

@@ -46,8 +46,8 @@ pub enum EntryKind {
     /// which the engine delivered it, and its result.
     Done,
     /// The result of a synchronous journaled call, such as a host function
-    /// marked with [`NativeModule::journaled`](crate::NativeModule::journaled)
-    /// or an environment variable read from the process.
+    /// registered as [`Journaled`](crate::native::Journaled) or an
+    /// environment variable read from the process.
     Result,
 }
 

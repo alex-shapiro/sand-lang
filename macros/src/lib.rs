@@ -23,7 +23,8 @@ use syn::{
 
 /// Declare a sandlang enum.
 ///
-/// Implements `NamedType`, `EnumType`, `SandType`, `FromValue`, and `IntoValue`.
+/// Implements `NamedType`, `EnumType`, `SandType`, `FromValue`, and `IntoValue`,
+/// and `JournalData` and `JournalArg` for payload types that implement them.
 /// Supports unit, tuple, and struct variants, and type parameters. Each payload
 /// type must implement `IntoValue` and owned `FromValue`.
 ///
@@ -37,7 +38,8 @@ pub fn derive_sand_enum(input: TokenStream) -> TokenStream {
 
 /// Declare a sandlang struct.
 ///
-/// Implements `NamedType`, `StructType`, `SandType`, `FromValue`, and `IntoValue`.
+/// Implements `NamedType`, `StructType`, `SandType`, `FromValue`, and `IntoValue`,
+/// and `JournalData` and `JournalArg` for field types that implement them.
 /// Each field type must implement `IntoValue` and owned `FromValue`.
 /// Rust type parameters define Sand type parameters.
 ///
@@ -64,7 +66,7 @@ pub fn derive_sand_object(input: TokenStream) -> TokenStream {
 
 /// Declare a sandlang value type.
 ///
-/// Implements `NamedType`, `SandType`, `FromValue`, and `IntoValue`.
+/// Implements `NamedType`, `SandType`, `JournalArg`, `FromValue`, and `IntoValue`.
 /// The type must implement the `ValueType` marker trait.
 #[proc_macro_derive(SandValue, attributes(sand))]
 pub fn derive_sand_value(input: TokenStream) -> TokenStream {
@@ -281,6 +283,33 @@ fn expand_sand_type(input: &DeriveInput, krate: &Path, type_params: &TypeParams)
     }
 }
 
+/// Implements `JournalData` and `JournalArg` for a struct or enum whose
+/// fields (`fields`) implement them. A field whose type contains the type
+/// itself adds no bound: the bound would make the trait solver recurse.
+fn expand_journal_impls(input: &DeriveInput, krate: &Path, type_params: &TypeParams, fields: &[&Type]) -> Tokens {
+    fn mentions(tokens: Tokens, ty: &Ident) -> bool {
+        tokens.into_iter().any(|t| match t {
+            proc_macro2::TokenTree::Ident(i) => i == *ty || i == "Self",
+            proc_macro2::TokenTree::Group(g) => mentions(g.stream(), ty),
+            _ => false,
+        })
+    }
+    let ty = &input.ident;
+    let fields: Vec<&Type> = fields.iter().copied().filter(|f| !mentions(quote!(#f), ty)).collect();
+    let journal_impl = |t: Tokens| {
+        let (imp, tyg, wh) = type_params.split_for_impl(input, |_| t.clone());
+        let wh = match (wh.is_empty(), fields.is_empty()) {
+            (_, true) => wh,
+            (true, false) => quote!(where #(for<'__sand> #fields: #t),*),
+            (false, false) => quote!(#wh, #(for<'__sand> #fields: #t),*),
+        };
+        quote!(impl #imp #t for #ty #tyg #wh {})
+    };
+    let data = journal_impl(quote!(#krate::native::JournalData));
+    let arg = journal_impl(quote!(#krate::native::JournalArg));
+    quote!(#data #arg)
+}
+
 fn split_conversion_generics(input: &DeriveInput, krate: &Path, type_params: &TypeParams) -> (Tokens, Tokens, Tokens, Tokens, Tokens) {
     let (imp, tyg, wh) = type_params.split_for_impl(input, |_| quote!(#krate::native::SandType));
     let (_, _, from) = type_params.split_for_impl(input, |p| quote!(for<'a> #krate::native::FromValue<Item<'a> = #p>));
@@ -320,6 +349,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
     let mut writes = Vec::new();
     let mut consts = Vec::new();
     let mut checks = Vec::new();
+    let mut field_types = Vec::new();
     for (i, v) in data.variants.iter().enumerate() {
         let (ident, vname, vdoc) = (&v.ident, v.ident.unraw().to_string(), doc_expr(&v.attrs));
         checks.push(assert_type_name(krate, "variant", &vname, ident.span()));
@@ -331,6 +361,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
         let mut snames = Vec::new();
         for (k, f) in v.fields.iter().enumerate() {
             let (fname, fty) = (f.ident.as_ref(), &f.ty);
+            field_types.push(fty);
             let canonical = type_params.replace_self(krate, fty);
             let sname = match fname {
                 Some(n) => {
@@ -384,10 +415,12 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
     }
     let named = expand_named_type(input, &attrs, &type_params, quote! { #krate::native::Binding::of_enum() });
     let sand_type = expand_sand_type(input, krate, &type_params);
+    let journal = expand_journal_impls(input, krate, &type_params, &field_types);
     let (imp, tyg, wh, wh_from, wh_into) = split_conversion_generics(input, krate, &type_params);
     let reflection = quote! {
         #named
         #sand_type
+        #journal
         #(#checks)*
         impl #imp #krate::native::EnumType for #ty #tyg #wh {
             const VARIANTS: &'static [#krate::native::EnumVariant] = &[#(#variants),*];
@@ -547,10 +580,13 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
     }
     let named = expand_named_type(input, &attrs, &type_params, quote! { #krate::native::Binding::of_struct() });
     let sand_type = expand_sand_type(input, krate, &type_params);
+    let field_types: Vec<&Type> = fields.iter().map(|f| &f.ty).collect();
+    let journal = expand_journal_impls(input, krate, &type_params, &field_types);
     let (imp, tyg, wh, wh_from, wh_into) = split_conversion_generics(input, krate, &type_params);
     let reflection = quote! {
         #named
         #sand_type
+        #journal
         #(#checks)*
         impl #imp #krate::native::StructType for #ty #tyg #wh {
             const FIELDS: &'static [#krate::native::StructField] = &[#(#infos),*];
@@ -646,6 +682,20 @@ mod tests {
             assert!(out.contains(":: renamed :: native"), "{out}");
             assert!(!out.contains("sandlang"), "{out}");
         }
+    }
+
+    #[test]
+    fn journal_impls_bound_each_field_that_does_not_contain_the_type() {
+        let out = expand(sand_enum, "#[sand(module = \"m\")] enum J { A(Vec<J>), B { x: Box<Self> }, C(String, T) }");
+        for t in [":: sandlang :: native :: JournalData", ":: sandlang :: native :: JournalArg"] {
+            assert!(out.contains(&format!("impl {t} for J where for < '__sand > String : {t} , for < '__sand > T : {t} {{ }}")), "{out}");
+        }
+        let out = expand(sand_struct, "#[sand(module = \"m\")] struct S<T> { x: Vec<T> }");
+        let t = ":: sandlang :: native :: JournalData";
+        assert!(
+            out.contains(&format!("impl < T > {t} for S < T > where T : 'static + {t} , for < '__sand > Vec < T > : {t} {{ }}")),
+            "{out}"
+        );
     }
 
     #[test]

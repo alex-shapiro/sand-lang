@@ -2,7 +2,7 @@
 //! from any prefix of the journal (SPEC §16.7).
 
 use sandlang::journal::{Durable, Entry, EntryKind, HttpOutcome, Journal, MemoryJournal, OpKind, Suspension, operations};
-use sandlang::native::{Later, Park};
+use sandlang::native::{Effectful, Journaled, Later, Park};
 use sandlang::network::{Listener, Network, NetworkFuture, Stream};
 use sandlang::platform::{Clock, ClockFuture, Instant, SystemClock, SystemTime, UNIX_EPOCH};
 use sandlang::vm::Vm;
@@ -234,36 +234,42 @@ impl HostLog {
 fn host_module(log: Arc<HostLog>) -> NativeModule {
     let mut m = NativeModule::new("host");
     let l = log.clone();
-    m.function("next_id", move |prefix: String| -> String {
-        l.calls.fetch_add(1, Ordering::SeqCst);
-        format!("{prefix}-id")
-    })
-    .journaled();
-    let l = log.clone();
-    m.async_function("charge", move |cents: i64| {
-        let l = l.clone();
-        async move {
-            if !l.durable() {
-                l.early.fetch_add(1, Ordering::SeqCst);
-            }
+    m.function(
+        "next_id",
+        Journaled(move |prefix: String| -> String {
             l.calls.fetch_add(1, Ordering::SeqCst);
-            Ok::<_, String>((cents * 2, vec![cents % 2 == 0, true]))
-        }
-    })
-    .effectful();
+            format!("{prefix}-id")
+        }),
+    );
     let l = log.clone();
-    m.vm_function("wait_signal", move |_: &mut Vm, name: String| -> Result<Later<Option<String>, HostError>, HostError> {
-        l.waits.fetch_add(1, Ordering::SeqCst);
-        if let Some(p) = l.signals.lock().unwrap().remove(&name) {
-            return Ok(Later::ready(Ok(Some(p))));
-        }
-        Ok(Later::new(async move {
-            std::future::pending::<()>().await;
-            |_: &mut Vm| Ok::<_, HostError>(None)
-        })
-        .parked(Park::UntilResumed))
-    })
-    .journaled();
+    m.async_function(
+        "charge",
+        Effectful(move |cents: i64| {
+            let l = l.clone();
+            async move {
+                if !l.durable() {
+                    l.early.fetch_add(1, Ordering::SeqCst);
+                }
+                l.calls.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, String>((cents * 2, vec![cents % 2 == 0, true]))
+            }
+        }),
+    );
+    let l = log.clone();
+    m.vm_function(
+        "wait_signal",
+        Journaled(move |_: &mut Vm, name: String| -> Result<Later<Option<String>, HostError>, HostError> {
+            l.waits.fetch_add(1, Ordering::SeqCst);
+            if let Some(p) = l.signals.lock().unwrap().remove(&name) {
+                return Ok(Later::ready(Ok(Some(p))));
+            }
+            Ok(Later::new(async move {
+                std::future::pending::<()>().await;
+                |_: &mut Vm| Ok::<_, HostError>(None)
+            })
+            .parked(Park::UntilResumed))
+        }),
+    );
     m
 }
 
@@ -890,7 +896,7 @@ print("\(a) \(b >= a)")
     let run = |clock: Arc<ManualClock>, log: Arc<HostLog>| {
         let mut m = host_module(log);
         let c = clock.clone();
-        m.function("tick", move || c.advance(Duration::from_secs(50))).journaled();
+        m.function("tick", Journaled(move || c.advance(Duration::from_secs(50))));
         let out = MemorySink::new();
         let config = Config::new()
             .policy(RulePolicy::allow_all())
@@ -921,23 +927,24 @@ fn a_parked_call_with_a_deadline_suspends_until_the_deadline() {
     let c = clock.clone();
     m.vm_function(
         "wait_until",
-        move |_: &mut Vm, name: String, deadline: sandlang::jiff::Timestamp| -> Result<Later<Option<String>, HostError>, HostError> {
-            l.waits.fetch_add(1, Ordering::SeqCst);
-            if let Some(p) = l.signals.lock().unwrap().remove(&name) {
-                return Ok(Later::ready(Ok(Some(p))));
-            }
-            let due = UNIX_EPOCH + Duration::from_nanos(deadline.as_nanosecond() as u64);
-            if c.wall() >= due {
-                return Ok(Later::ready(Ok(None)));
-            }
-            Ok(Later::new(async move {
-                std::future::pending::<()>().await;
-                |_: &mut Vm| Ok::<_, HostError>(None)
-            })
-            .parked(Park::Until(due)))
-        },
-    )
-    .journaled();
+        Journaled(
+            move |_: &mut Vm, name: String, deadline: sandlang::jiff::Timestamp| -> Result<Later<Option<String>, HostError>, HostError> {
+                l.waits.fetch_add(1, Ordering::SeqCst);
+                if let Some(p) = l.signals.lock().unwrap().remove(&name) {
+                    return Ok(Later::ready(Ok(Some(p))));
+                }
+                let due = UNIX_EPOCH + Duration::from_nanos(deadline.as_nanosecond() as u64);
+                if c.wall() >= due {
+                    return Ok(Later::ready(Ok(None)));
+                }
+                Ok(Later::new(async move {
+                    std::future::pending::<()>().await;
+                    |_: &mut Vm| Ok::<_, HostError>(None)
+                })
+                .parked(Park::Until(due)))
+            },
+        ),
+    );
     m.source(
         r#"
 import time
@@ -971,7 +978,7 @@ pub fn wait(name: str, timeout: duration) -> Result<str?> {
 fn a_changed_instant_argument_of_a_journaled_call_diverges() {
     // A `time.Instant` has no journal encoding; the call's identity still covers it.
     let mut m = NativeModule::new("deadline");
-    m.function("seconds_until", |t: sandlang::jiff::Timestamp| -> i64 { t.as_second() }).journaled();
+    m.function("seconds_until", Journaled(|t: sandlang::jiff::Timestamp| -> i64 { t.as_second() }));
     let base = Config::new().policy(RulePolicy::allow_all()).module(m).seed(1);
     let run = |src: &str, journal: &MemoryJournal| {
         let out = MemorySink::new();
@@ -991,7 +998,7 @@ fn a_changed_instant_argument_of_a_journaled_call_diverges() {
     assert!(matches!(&r, Err(Error::Diverged { message, .. }) if message.contains("deadline.seconds_until")), "{r:?}");
     // An asynchronous call whose arguments changed says so.
     let mut m = NativeModule::new("later");
-    m.async_function("echo", |t: sandlang::jiff::Timestamp| async move { Ok::<_, String>(t.as_second()) }).journaled();
+    m.async_function("echo", Journaled(|t: sandlang::jiff::Timestamp| async move { Ok::<_, String>(t.as_second()) }));
     let base = Config::new().policy(RulePolicy::allow_all()).module(m).seed(1);
     let run = |src: &str, journal: &MemoryJournal| {
         let config = base.clone().stdout(MemorySink::new()).durable(Durable::new(Arc::new(journal.clone())));
@@ -1021,7 +1028,7 @@ print("\(b.since(a) >= 10s) \(c.since(b) >= 0s)")
     let run = |clock: Arc<ManualClock>, log: Arc<HostLog>| {
         let mut m = host_module(log);
         let c = clock.clone();
-        m.function("tick", move || c.advance(Duration::from_secs(50))).journaled();
+        m.function("tick", Journaled(move || c.advance(Duration::from_secs(50))));
         let out = MemorySink::new();
         let config = Config::new()
             .policy(RulePolicy::allow_all())
@@ -1078,18 +1085,20 @@ fn effects_have_the_same_journal_seq_in_every_execution() {
     let seqs: Arc<Mutex<Vec<(String, Option<u64>)>>> = Arc::default();
     let mut m = NativeModule::new("fx");
     let s = seqs.clone();
-    m.vm_function("send", move |vm: &mut Vm, name: String| -> Result<Later<i64, HostError>, HostError> {
-        s.lock().unwrap().push((name.clone(), vm.journal_seq()));
-        if name == "parked" {
-            return Ok(Later::new(async move {
-                std::future::pending::<()>().await;
-                |_: &mut Vm| Ok::<_, HostError>(0)
-            })
-            .parked(Park::UntilResumed));
-        }
-        Ok(Later::ready(Ok(1)))
-    })
-    .effectful();
+    m.vm_function(
+        "send",
+        Effectful(move |vm: &mut Vm, name: String| -> Result<Later<i64, HostError>, HostError> {
+            s.lock().unwrap().push((name.clone(), vm.journal_seq()));
+            if name == "parked" {
+                return Ok(Later::new(async move {
+                    std::future::pending::<()>().await;
+                    |_: &mut Vm| Ok::<_, HostError>(0)
+                })
+                .parked(Park::UntilResumed));
+            }
+            Ok(Later::ready(Ok(1)))
+        }),
+    );
     let filtered: Arc<Mutex<Vec<Option<u64>>>> = Arc::default();
     let f = filtered.clone();
     let net = FakeNet::new(false);
@@ -1133,13 +1142,15 @@ fn a_journaled_call_that_runs_again_after_a_collection_replays_its_fuel() {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut m = NativeModule::new("mem");
     let c = calls.clone();
-    m.vm_function("grow", move |vm: &mut Vm, n: i64| -> Result<i64, sandlang::vm::Ctl> {
-        c.fetch_add(1, Ordering::SeqCst);
-        vm.charge(50)?;
-        vm.check_memory(n as usize)?;
-        Ok(n)
-    })
-    .journaled();
+    m.vm_function(
+        "grow",
+        Journaled(move |vm: &mut Vm, n: i64| -> Result<i64, sandlang::vm::Ctl> {
+            c.fetch_add(1, Ordering::SeqCst);
+            vm.charge(50)?;
+            vm.check_memory(n as usize)?;
+            Ok(n)
+        }),
+    );
     let base = Config::new().policy(RulePolicy::allow_all()).module(m).seed(1).retry_stress(true);
     let src = "import mem\nvar total = 0\nfor i in 0..3 {\n    total += mem.grow(i * 10)\n}\nprint(total)";
     let run = |journal: &MemoryJournal| {
@@ -1158,36 +1169,6 @@ fn a_journaled_call_that_runs_again_after_a_collection_replays_its_fuel() {
     assert!(r.is_ok(), "{r:?}");
     assert_eq!((again, replayed_fuel), (out, fuel), "replay charges the fuel of both attempts");
     assert_eq!(calls.load(Ordering::SeqCst), 6);
-}
-
-/// A handle that the journal cannot encode.
-#[derive(sandlang::SandObject)]
-#[sand(module = "handles")]
-struct Handle(u32);
-
-impl sandlang::native::NativeObject for Handle {}
-
-#[test]
-fn journaled_functions_must_take_and_return_plain_data() {
-    let engine_panic = |m: NativeModule| {
-        let config = Config::new().module(m);
-        let e = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Engine::new(config))).err().expect("Engine::new panics");
-        e.downcast_ref::<String>().cloned().unwrap_or_default()
-    };
-    let mut m = NativeModule::new("handles");
-    m.bind::<Handle>();
-    m.function("open", || Handle(1));
-    m.function("read", |h: &Handle| i64::from(h.0)).journaled();
-    let msg = engine_panic(m);
-    assert!(msg.contains("`handles.read` takes a value of type `Handle` as parameter 1"), "{msg}");
-    let mut m = NativeModule::new("clock");
-    m.function("now", || sandlang::jiff::Timestamp::UNIX_EPOCH).journaled();
-    let msg = engine_panic(m);
-    assert!(msg.contains("`clock.now` returns a value of type `time.Instant`"), "{msg}");
-    // Plain data and bound value types as arguments are fine.
-    let mut m = NativeModule::new("fine");
-    m.function("seconds", |t: sandlang::jiff::Timestamp, tags: Vec<String>| -> (i64, Vec<String>) { (t.as_second(), tags) }).journaled();
-    assert!(Engine::new(Config::new().module(m)).is_ok());
 }
 
 #[test]
@@ -1224,18 +1205,20 @@ fn a_host_abort_ends_the_run_with_its_payload_and_is_not_journaled() {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut m = NativeModule::new("store");
     let c = calls.clone();
-    m.vm_function("read", move |_: &mut Vm, key: String| -> Result<Later<String, HostError>, HostError> {
-        let first = c.fetch_add(1, Ordering::SeqCst) == 0;
-        Ok(Later::new(async move {
-            move |_: &mut Vm| {
-                if first {
-                    return Err(sandlang::vm::Ctl::abort(Outage(7)).into());
+    m.vm_function(
+        "read",
+        Journaled(move |_: &mut Vm, key: String| -> Result<Later<String, HostError>, HostError> {
+            let first = c.fetch_add(1, Ordering::SeqCst) == 0;
+            Ok(Later::new(async move {
+                move |_: &mut Vm| {
+                    if first {
+                        return Err(sandlang::vm::Ctl::abort(Outage(7)).into());
+                    }
+                    Ok::<_, HostError>(format!("value of {key}"))
                 }
-                Ok::<_, HostError>(format!("value of {key}"))
-            }
-        }))
-    })
-    .journaled();
+            }))
+        }),
+    );
     let base = Config::new().policy(RulePolicy::allow_all()).module(m).seed(1);
     let journal = MemoryJournal::new();
     let run = || {

@@ -740,7 +740,6 @@ impl Registry {
             m.register_types(&mut r);
         }
         for m in &config.modules {
-            m.check_journaled(&r.decls.types);
             m.register(&mut r);
         }
         r.base = Some(std);

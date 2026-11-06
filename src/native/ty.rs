@@ -462,3 +462,76 @@ impl SandType for Range {
         Type::Range
     }
 }
+
+/// A [`SandType`] whose values the journal can record (SPEC §16.7): plain
+/// data, with no functions, tasks, channels, generic parameters, or values of
+/// bound object or value types. A function that [`Journaled`] or
+/// [`Effectful`] registers must return a `JournalData` type.
+///
+/// [`SandStruct`](crate::SandStruct) and [`SandEnum`](crate::SandEnum)
+/// implement it for a type whose fields are `JournalData`.
+///
+/// [`Journaled`]: super::Journaled
+/// [`Effectful`]: super::Effectful
+#[diagnostic::on_unimplemented(
+    message = "the journal cannot record a value of type `{Self}`",
+    label = "a journaled function cannot return this type",
+    note = "a journaled function returns plain data: no functions, tasks, channels, generic parameters, or values of bound object or value types"
+)]
+pub trait JournalData: SandType {}
+
+/// A [`SandType`] whose values can identify a call of a journaled function
+/// (SPEC §16.7): [`JournalData`], and values of bound value types, such as a
+/// `time.Instant`, which take part through their text. A function that
+/// [`Journaled`] or [`Effectful`] registers must take `JournalArg` types.
+///
+/// [`SandValue`](crate::SandValue) implements it.
+///
+/// [`Journaled`]: super::Journaled
+/// [`Effectful`]: super::Effectful
+#[diagnostic::on_unimplemented(
+    message = "a value of type `{Self}` cannot identify a journaled call",
+    label = "a journaled function cannot take this type",
+    note = "a journaled function takes plain data or values of bound value types: no functions, tasks, channels, generic parameters, or values of bound object types"
+)]
+pub trait JournalArg: SandType {}
+
+macro_rules! journal_data {
+    ($([$($g:tt)*] $t:ty: $($arg:ident),*;)*) => {$(
+        impl<$($g)*> JournalData for $t where $($arg: JournalData),* {}
+        impl<$($g)*> JournalArg for $t where $($arg: JournalArg),* {}
+    )*};
+}
+
+journal_data! {
+    [] i64:;
+    [] f64:;
+    [] bool:;
+    [] String:;
+    [] &str:;
+    [] Vec<u8>:;
+    [] &[u8]:;
+    [] ():;
+    [] Never:;
+    [] jiff::SignedDuration:;
+    [] Range:;
+    [T] Vec<T>: T;
+    [T] Box<T>: T;
+    [T] Option<T>: T;
+    [T: ?Sized] Val<T>: T;
+    [K, V] HashMap<K, V>: K, V;
+    [K, V] BTreeMap<K, V>: K, V;
+    [K, V] indexmap::IndexMap<K, V>: K, V;
+    [T] HashSet<T>: T;
+    [T] BTreeSet<T>: T;
+    [T, E: crate::native::IntoHostError] Result<T, E>: T;
+    [T, E: crate::native::NativeError] Result<crate::native::Later<T, E>, E>: T;
+    [T] Result<T, crate::vm::Ctl>: T;
+    [A, B] (A, B): A, B;
+    [A, B, C] (A, B, C): A, B, C;
+    [A, B, C, D] (A, B, C, D): A, B, C, D;
+    [A, B, C, D, E] (A, B, C, D, E): A, B, C, D, E;
+    [A, B, C, D, E, F] (A, B, C, D, E, F): A, B, C, D, E, F;
+    [A, B, C, D, E, F, G] (A, B, C, D, E, F, G): A, B, C, D, E, F, G;
+    [A, B, C, D, E, F, G, H] (A, B, C, D, E, F, G, H): A, B, C, D, E, F, G, H;
+}

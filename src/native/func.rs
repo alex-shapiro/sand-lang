@@ -1,11 +1,12 @@
 //! Traits and types for registering Rust functions in a [`NativeModule`](super::NativeModule).
 
 use super::convert::{Conversion, FromValue, HostError, IntoValue};
-use super::ty::Type;
+use super::ty::{JournalArg, JournalData, Type};
 use crate::vm::value::Value;
-use crate::vm::{BoxFuture, Ctl, Finisher, NResult, NativeFn, Vm};
+use crate::vm::{BoxFuture, Ctl, Finisher, HostFn, NResult, NativeFn, Vm};
 use std::future::Future;
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 /// Sand parameter and return types derived from a Rust function signature.
 #[derive(Clone, Debug)]
@@ -27,27 +28,192 @@ impl Signature {
 ///
 /// Parameters implement [`FromValue`] (borrowing `&str`, `&[u8]`, and `&T`
 /// directly from the VM heap), and the return type implements [`IntoValue`].
+#[diagnostic::on_unimplemented(
+    note = "a function wrapped in `Journaled` or `Effectful` must take `JournalArg` types and return a `JournalData` type"
+)]
 pub trait HostFunction<Marker>: Send + Sync + 'static {
+    /// The Rust parameter types, as a tuple.
+    type Args;
+    /// The Rust return type.
+    type Ret;
     fn signature() -> Signature;
-    fn into_host(self) -> Box<NativeFn>;
+    /// Converts the function for registration under `key` (`module.name`).
+    fn into_host(self, key: &Arc<str>) -> Box<NativeFn>;
 }
 
 /// Synchronous function registered with [`NativeModule::vm_function`](super::NativeModule::vm_function).
 ///
 /// Receives `&mut Vm` as its first argument; remaining arguments must be owned
 /// [`FromValue`] types or [`Val`](super::Val) handles.
+#[diagnostic::on_unimplemented(
+    note = "a function wrapped in `Journaled` or `Effectful` must take `JournalArg` types and return a `JournalData` type"
+)]
 pub trait VmFunction<Marker>: Send + Sync + 'static {
+    /// The Rust parameter types after `&mut Vm`, as a tuple.
+    type Args;
+    /// The Rust return type.
+    type Ret;
     fn signature() -> Signature;
-    fn into_host(self) -> Box<NativeFn>;
+    /// Converts the function for registration under `key` (`module.name`).
+    fn into_host(self, key: &Arc<str>) -> Box<NativeFn>;
 }
 
 /// Asynchronous function registered with [`NativeModule::async_function`](super::NativeModule::async_function).
 ///
 /// Arguments must be owned [`FromValue`] types so the returned future can
 /// outlive the initial call.
+#[diagnostic::on_unimplemented(
+    note = "a function wrapped in `Journaled` or `Effectful` must take `JournalArg` types and return a `JournalData` type"
+)]
 pub trait AsyncHostFunction<Marker>: Send + Sync + 'static {
+    /// The Rust parameter types, as a tuple.
+    type Args;
+    /// The output type of the future.
+    type Ret;
     fn signature() -> Signature;
-    fn into_host(self) -> Box<NativeFn>;
+    /// Converts the function for registration under `key` (`module.name`).
+    fn into_host(self, key: &Arc<str>) -> Box<NativeFn>;
+}
+
+/// A tuple of [`JournalArg`] types: the parameters of a journaled function.
+pub trait JournalArgs {}
+
+/// Registers host function `F` as journaled (SPEC §16.7): in a run with a
+/// journal, the engine records the function's result, and replay returns
+/// the recorded result without a call. Wrap the function in it when you
+/// register it with [`NativeModule::function`](super::NativeModule::function),
+/// [`NativeModule::vm_function`](super::NativeModule::vm_function), or
+/// [`NativeModule::async_function`](super::NativeModule::async_function).
+/// A function that is not journaled is local: replay calls it again, so it
+/// must give the same result in every execution.
+///
+/// The journal encodes the arguments, which identify the call, and the
+/// result. Thus the parameters must be [`JournalArg`] types and the result
+/// a [`JournalData`] type:
+///
+/// ```
+/// use sandlang::native::Journaled;
+/// let mut m = sandlang::NativeModule::new("ids");
+/// m.function("next", Journaled(|prefix: String| format!("{prefix}-1")));
+/// ```
+///
+/// A function that returns a bound object does not compile:
+///
+/// ```compile_fail
+/// # use sandlang::native::Journaled;
+/// #[derive(sandlang::SandObject)]
+/// #[sand(module = "files")]
+/// struct File;
+/// impl sandlang::NativeObject for File {}
+///
+/// let mut m = sandlang::NativeModule::new("files");
+/// m.bind::<File>();
+/// m.function("open", Journaled(|| File));
+/// ```
+///
+/// A function that returns a value of a bound value type does not compile:
+///
+/// ```compile_fail
+/// # use sandlang::native::Journaled;
+/// let mut m = sandlang::NativeModule::new("clock");
+/// m.function("now", Journaled(|| sandlang::jiff::Timestamp::UNIX_EPOCH));
+/// ```
+///
+/// A function that takes a bound object does not compile:
+///
+/// ```compile_fail
+/// # use sandlang::native::Journaled;
+/// #[derive(sandlang::SandObject)]
+/// #[sand(module = "files")]
+/// struct File(u32);
+/// impl sandlang::NativeObject for File {}
+///
+/// let mut m = sandlang::NativeModule::new("files");
+/// m.bind::<File>();
+/// m.function("read", Journaled(|f: &File| i64::from(f.0)));
+/// ```
+///
+/// A function that takes a function does not compile:
+///
+/// ```compile_fail
+/// # use sandlang::native::{Journaled, Val};
+/// # use sandlang::vm::Vm;
+/// let mut m = sandlang::NativeModule::new("calls");
+/// m.vm_function("apply", Journaled(|_: &mut Vm, f: Val<fn() -> i64>| 0i64));
+/// ```
+#[derive(Clone, Copy, Debug)]
+pub struct Journaled<F>(pub F);
+
+/// Registers host function `F` as journaled, like [`Journaled`], and as
+/// having effects outside the run: the engine calls it only once the
+/// journal is durable ([`Journal::flush`](crate::journal::Journal::flush)).
+/// An asynchronous function must start its effect in its future, not when
+/// called.
+///
+/// ```compile_fail
+/// # use sandlang::native::Effectful;
+/// let mut m = sandlang::NativeModule::new("clock");
+/// m.function("now", Effectful(|| sandlang::jiff::Timestamp::UNIX_EPOCH));
+/// ```
+#[derive(Clone, Copy, Debug)]
+pub struct Effectful<F>(pub F);
+
+macro_rules! journaled_impls {
+    ($($wrapper:ident: $effectful:literal),*) => {$(
+        impl<M, F: HostFunction<M>> HostFunction<M> for $wrapper<F>
+        where
+            F::Args: JournalArgs,
+            F::Ret: JournalData,
+        {
+            type Args = F::Args;
+            type Ret = F::Ret;
+            fn signature() -> Signature {
+                F::signature()
+            }
+            fn into_host(self, key: &Arc<str>) -> Box<NativeFn> {
+                journaled(self.0.into_host(key), key, $effectful)
+            }
+        }
+
+        impl<M, F: VmFunction<M>> VmFunction<M> for $wrapper<F>
+        where
+            F::Args: JournalArgs,
+            F::Ret: JournalData,
+        {
+            type Args = F::Args;
+            type Ret = F::Ret;
+            fn signature() -> Signature {
+                F::signature()
+            }
+            fn into_host(self, key: &Arc<str>) -> Box<NativeFn> {
+                journaled(self.0.into_host(key), key, $effectful)
+            }
+        }
+
+        impl<M, F: AsyncHostFunction<M>> AsyncHostFunction<M> for $wrapper<F>
+        where
+            F::Args: JournalArgs,
+            F::Ret: JournalData,
+        {
+            type Args = F::Args;
+            type Ret = F::Ret;
+            fn signature() -> Signature {
+                F::signature()
+            }
+            fn into_host(self, key: &Arc<str>) -> Box<NativeFn> {
+                journaled(self.0.into_host(key), key, $effectful)
+            }
+        }
+    )*};
+}
+journaled_impls!(Journaled: false, Effectful: true);
+
+/// Wraps `inner`, registered under `key`, so that its calls go through the
+/// journal.
+fn journaled(inner: Box<NativeFn>, key: &Arc<str>, effectful: bool) -> Box<NativeFn> {
+    let inner = HostFn::Shared(inner.into());
+    let key = key.clone();
+    Box::new(move |vm: &mut Vm, args: &[Value]| crate::vm::journal::journaled_call(vm, &inner, &key, effectful, args))
 }
 
 /// Deferred result returned by a [`VmFunction`] that may suspend the calling
@@ -167,6 +333,8 @@ macro_rules! fn_impls {
         fn_impls!(@impl [$($a),*] <[&str]>::len(&[$(stringify!($a)),*]));
     };
     (@impl [$($a:ident),*] $n:expr) => {
+        impl<$($a: JournalArg),*> JournalArgs for ($($a,)*) {}
+
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::unused_unit, clippy::too_many_arguments)]
         impl<F, R, $($a,)*> HostFunction<($($a,)*)> for F
         where
@@ -174,10 +342,12 @@ macro_rules! fn_impls {
             R: IntoValue,
             $($a: FromValue + 'static,)*
         {
+            type Args = ($($a,)*);
+            type Ret = R;
             fn signature() -> Signature {
                 Signature { params: vec![$($a::sand_type()),*], ret: R::sand_type() }
             }
-            fn into_host(self) -> Box<NativeFn> {
+            fn into_host(self, _: &Arc<str>) -> Box<NativeFn> {
                 fn call<R, $($a,)*>(f: &impl Fn($($a),*) -> R, $($a: $a,)*) -> R {
                     f($($a),*)
                 }
@@ -200,10 +370,12 @@ macro_rules! fn_impls {
             R: IntoValue,
             $($a: for<'a> FromValue<Item<'a> = $a> + 'static,)*
         {
+            type Args = ($($a,)*);
+            type Ret = R;
             fn signature() -> Signature {
                 Signature { params: vec![$($a::sand_type()),*], ret: R::sand_type() }
             }
-            fn into_host(self) -> Box<NativeFn> {
+            fn into_host(self, _: &Arc<str>) -> Box<NativeFn> {
                 Box::new(move |vm: &mut Vm, args: &[Value]| -> NResult {
                     let &[$($a),*] = strip_dict_args(args, $n) else { return Err(too_few_args()) };
                     let mut conv = Conversion::new();
@@ -223,10 +395,12 @@ macro_rules! fn_impls {
             R: IntoValue + Send + 'static,
             $($a: for<'a> FromValue<Item<'a> = $a> + 'static,)*
         {
+            type Args = ($($a,)*);
+            type Ret = R;
             fn signature() -> Signature {
                 Signature { params: vec![$($a::sand_type()),*], ret: R::sand_type() }
             }
-            fn into_host(self) -> Box<NativeFn> {
+            fn into_host(self, _: &Arc<str>) -> Box<NativeFn> {
                 Box::new(move |vm: &mut Vm, args: &[Value]| -> NResult {
                     let &[$($a),*] = strip_dict_args(args, $n) else { return Err(too_few_args()) };
                     let mut conv = Conversion::new();
