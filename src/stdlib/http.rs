@@ -14,8 +14,12 @@ use crate::native::{HostError, Later, NativeModule, NativeObject, Val};
 use crate::network::{Network, Stream};
 use crate::platform::{Clock, Instant};
 use crate::policy::Policy;
+use crate::journal::HttpOutcome;
+use crate::native::IntoValue;
 use crate::vm::Vm;
 use crate::vm::iomem::{Reservation, ResourceSlot};
+use crate::vm::journal::{Begun, BuildFn, EncodeFn, OpKind, OpSpec, Outcome, Park};
+use std::future::Future;
 use jiff::SignedDuration;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
@@ -595,6 +599,14 @@ async fn read_response_head<R: AsyncBufRead + Unpin>(
 /// responding (RFC 9110 §9.2.2).
 const IDEMPOTENT: &[&str] = &["GET", "HEAD", "OPTIONS", "TRACE", "PUT", "DELETE"];
 
+/// `send(method, url, headers, body, timeout)`: one HTTP exchange, an
+/// operation whose outcome the journal records whole (SPEC §16.7). Its
+/// identity is the request as the script made it, before the host's
+/// request filter. Without a journal, the program gets the response once
+/// its head arrives, and reads the body as it arrives. With one, the engine
+/// reads the body to its end, records the response, and then gives the
+/// program the recorded response; replay sends nothing. Both use the run's
+/// pool of connections.
 fn send(
     vm: &mut Vm,
     method: Val<String>,
@@ -603,57 +615,59 @@ fn send(
     body: Val<Vec<u8>>,
     timeout: SignedDuration,
 ) -> Suspended<ResponseStream> {
-    if vm.journaling() {
-        return send_journaled(vm, method, url, headers, body, timeout);
-    }
-    let mut req = prepare_request(vm, method, url, headers)?;
-    // The request is held outside the heap while it is sent.
-    let mut res = vm.reserve_io(body.bytes(&vm.heap).len())?;
+    let req = prepare_request(vm, method, url, headers)?;
     req.check_policy(vm)?;
+    let body = body.bytes(&vm.heap).to_vec();
+    vm.charge_bytes(body.len())?;
+    let max_body = vm.host.limits.max_http_body;
+    let build = recorded_response(req.text.clone(), max_body);
+    let spec = OpSpec { kind: OpKind::Http, effectful: true, park: Park::Never, pre_fuel: 0, timer: None };
+    let live = match vm.begin_op(spec, |_| Ok(req.describe(&body)))? {
+        Begun::Replayed(r) => return Err(r.wait(build).into()),
+        Begun::Live(live) => live,
+    };
     let pool = vm.host.http_pool.clone();
     let idle = pool.take(&req.url.origin(), &vm.host.policy, &req.url.capability(&req.method));
-    let slot = match idle {
-        Some(_) => None,
-        None => {
-            let buffers = if req.url.scheme == "https" { net::CONN_BUFFER + net::TLS_BUFFERS } else { net::CONN_BUFFER };
-            Some(vm.resource_slot_with(buffers, "a connection")?)
-        }
-    };
-    let built = (|| {
-        req.apply_filter(vm)?;
-        let body = body.bytes(&vm.heap);
-        vm.charge_bytes(body.len())?;
-        let close = connection_has(&req.headers, "close");
-        let sized = !body.is_empty() || ["POST", "PUT", "PATCH"].iter().any(|m| req.method.eq_ignore_ascii_case(m));
-        let delimit = if sized { Delimit::Length(body.len() as u64) } else { Delimit::None };
-        let mut request = request_head(&req.method, &req.url, &req.headers, delimit, close).into_bytes();
-        request.extend_from_slice(body);
-        res.ensure(request.len()).map_err(|e| HostError::new("limit", format!("cannot buffer the request: {e}")))?;
-        Ok::<_, HostError>((request, close))
-    })();
-    let (request, close) = match built {
-        Ok(built) => built,
-        Err(e) => {
-            if let Some(conn) = idle {
-                pool.put(conn);
-            }
-            return Err(e);
-        }
-    };
-    let Prepared { method, text, url, .. } = req;
-    let url_text = text.clone();
+    let buffers = if req.url.scheme == "https" { net::CONN_BUFFER + net::TLS_BUFFERS } else { net::CONN_BUFFER };
+    let claim = vm.claim(idle.is_none().then_some((buffers, "a connection")), body.len())?;
+    let target = req.target(live.seq);
+    let filter = vm.host.request_filter.clone();
+    let Prepared { method, text, url, mut headers } = req;
     let timeout = stream::timeout(timeout);
     let head_only = method.eq_ignore_ascii_case("HEAD");
     let replayable = IDEMPOTENT.iter().any(|m| method.eq_ignore_ascii_case(m));
-    let max_body = vm.host.limits.max_http_body;
     let (policy, network) = (vm.host.policy.clone(), vm.host.network.clone());
     let (tls, clock) = (vm.host.tls.clone(), vm.host.clock.clone());
-    let body_clock = clock.clone();
-    suspend(
-        async move {
+    let exchanged = async move {
+        let run = async {
+            // The request as the host's filter leaves it, in a buffer that
+            // the claim covers.
+            let built = (|| {
+                let (slot, mut res) = claim.take().map_err(|e| IoFailure::new("limit", e))?;
+                if let Some(filter) = &filter {
+                    filter(&target, &mut headers).map_err(|reason| IoFailure::new("permission_denied", reason))?;
+                }
+                let close = connection_has(&headers, "close");
+                let sized = !body.is_empty() || ["POST", "PUT", "PATCH"].iter().any(|m| method.eq_ignore_ascii_case(m));
+                let delimit = if sized { Delimit::Length(body.len() as u64) } else { Delimit::None };
+                let mut request = request_head(&method, &url, &headers, delimit, close).into_bytes();
+                request.extend_from_slice(&body);
+                res.ensure(request.len()).map_err(|e| IoFailure::new("limit", format!("cannot buffer the request: {e}")))?;
+                Ok((slot, res, request, close))
+            })();
+            let (slot, res, request, close) = match built {
+                Ok(built) => built,
+                Err(e) => {
+                    if let Some(conn) = idle {
+                        pool.put(conn);
+                    }
+                    return Err(e);
+                }
+            };
+            drop(body);
             let mut head_res = res.sibling();
-            let run = async {
-                let mut slot = slot;
+            let mut slot = slot;
+            let sent = async {
                 if let Some(conn) = idle {
                     match exchange(conn, &request, head_only, &mut head_res).await {
                         Ok(r) => return Ok(r),
@@ -661,134 +675,98 @@ fn send(
                         Err((e, _)) => return Err(e),
                     }
                 }
-                let conn = connect(&policy, &*network, &tls, &method, &url, slot.expect("a slot for a new connection")).await?;
+                let slot = slot.ok_or_else(|| IoFailure::new("io", "the pooled connection closed"))?;
+                let conn = connect(&policy, &*network, &tls, &method, &url, slot).await?;
                 exchange(conn, &request, head_only, &mut head_res).await.map_err(|(e, _)| e)
             };
-            let r = match crate::platform::timeout(&*clock, timeout, run).await {
+            let (conn, head) = match crate::platform::timeout(&*clock, timeout, sent).await {
                 Some(r) => r?,
                 None => return Err(IoFailure::new("timeout", format!("request to {text} timed out"))),
             };
             drop(res);
-            Ok((r, head_res))
-        },
-        move |vm, ((conn, head), head_res): ((ClientConn, ResponseHead), Reservation)| {
-            drop(head_res);
-            let ResponseHead { status, headers, framing, persists } = head;
-            let reuse = (persists && !close).then(|| Arc::downgrade(&pool));
-            let source = Source::Owned { conn: Some(conn), reuse };
-            let mut framed = Framed { source, framing, timeout, clock: body_clock, continue_first: false };
-            let reader = if framing == Framing::Done {
-                framed.end(true);
-                BodyReader::empty(max_body)
-            } else {
-                BodyReader::new(Box::new(framed), max_body, None)
-            };
-            Ok(response(vm, url_text, status, headers, reader)?)
-        },
-    )
-}
-
-/// `send` in a journaled run: an operation that the journal records whole
-/// (the response with its body, or the error), so that replay sends nothing
-/// and returns the recorded response. Its identity is the request as the
-/// script made it, before the host's request filter. The connection is not
-/// pooled, and its buffers count against the journal's budget of live
-/// operations.
-fn send_journaled(
-    vm: &mut Vm,
-    method: Val<String>,
-    url: Val<String>,
-    headers: Val<Vec<(String, String)>>,
-    body: Val<Vec<u8>>,
-    timeout: SignedDuration,
-) -> Suspended<ResponseStream> {
-    use crate::vm::journal::{Begun, BuildFn, Identity, OpKind, OpSpec, Outcome, Park, Whole};
-    let mut req = prepare_request(vm, method, url, headers)?;
-    req.check_policy(vm)?;
-    let body = body.bytes(&vm.heap).to_vec();
-    vm.charge_bytes(body.len())?;
-    let mut identity = Identity::default().add(req.method.as_bytes()).add(req.text.as_bytes());
-    for (k, v) in &req.headers {
-        identity = identity.add(k.as_bytes()).add(v.as_bytes());
-    }
-    let identity = identity.add(&body).finish();
-    let label = format!("{} {}", req.method, req.text);
-    req.apply_filter(vm)?;
-    let sized = !body.is_empty() || ["POST", "PUT", "PATCH"].iter().any(|m| req.method.eq_ignore_ascii_case(m));
-    let delimit = if sized { Delimit::Length(body.len() as u64) } else { Delimit::None };
-    let mut request = request_head(&req.method, &req.url, &req.headers, delimit, true).into_bytes();
-    request.extend_from_slice(&body);
-    let Prepared { method, text, url, .. } = req;
-    let timeout = stream::timeout(timeout);
-    let head_only = method.eq_ignore_ascii_case("HEAD");
-    let max_body = vm.host.limits.max_http_body;
-    let (policy, network, tls, clock) = (vm.host.policy.clone(), vm.host.network.clone(), vm.host.tls.clone(), vm.host.clock.clone());
-    let live = match vm.journal_state() {
-        Some(j) => j.live_memory.clone(),
-        None => return Err(HostError::from(crate::vm::Ctl::internal("a journaled request without a journal"))),
-    };
-    let url_text = text.clone();
-    let fut = async move {
-        let outcome = async {
-            let slot = ResourceSlot::try_new(&live).ok_or_else(|| IoFailure::new("limit", "too many open resources"))?;
-            let mut res = Reservation::new(&live);
-            res.ensure(request.len())?;
-            let run = async {
-                let conn = connect(&policy, &*network, &tls, &method, &url, slot).await?;
-                exchange(conn, &request, head_only, &mut res).await.map_err(|(e, _)| e)
-            };
-            let (conn, head) = match crate::platform::timeout(&*clock, timeout, run).await {
-                Some(r) => r?,
-                None => return Err(IoFailure::new("timeout", format!("request to {text} timed out"))),
-            };
-            let ResponseHead { status, headers, framing, .. } = head;
-            if framing == Framing::Done {
-                return Ok((status, headers, Vec::new()));
-            }
-            let source = Source::Owned { conn: Some(conn), reuse: None };
-            let framed = Framed { source, framing, timeout, clock: clock.clone(), continue_first: false };
-            let mut reader = BodyReader::new(Box::new(framed), max_body, None);
-            match crate::platform::timeout(&*clock, timeout, reader.read_all(&mut res)).await {
-                Some(data) => Ok((status, headers, data?)),
-                None => Err(IoFailure::new("timeout", format!("reading the response from {text} timed out"))),
-            }
+            Ok(Exchanged { conn, head, close, head_res })
         };
-        Box::new(Whole(encode_reply(outcome.await))) as Box<dyn Outcome>
+        let result = run.await;
+        Box::new(Exchange { result, body: BodyFrom { pool, timeout, clock, max_body, url: text } }) as Box<dyn Outcome>
     };
-    let build: BuildFn = Box::new(move |vm: &mut Vm, payload: &[u8]| -> crate::vm::NResult {
-        let r = match decode_reply(payload) {
-            Some(Ok((status, headers, data))) => Ok(response(vm, url_text, status, headers, BodyReader::memory(data, max_body))?),
-            Some(Err(e)) => Err(e),
-            None => return Err(crate::vm::Ctl::internal("a journaled HTTP response is malformed")),
+    Err(live.run(exchanged, build).into())
+}
+
+/// A response whose head arrived: its connection, which carries the body.
+struct Exchanged {
+    conn: ClientConn,
+    head: ResponseHead,
+    /// Whether the request asked to close the connection.
+    close: bool,
+    /// The memory of the head, and of a body read whole.
+    head_res: Reservation,
+}
+
+/// The outcome of [`send`].
+struct Exchange {
+    result: Result<Exchanged, IoFailure>,
+    body: BodyFrom,
+}
+
+/// Where the body of a response comes from, and how it is read.
+struct BodyFrom {
+    pool: Arc<Pool>,
+    timeout: Duration,
+    clock: Arc<dyn Clock>,
+    max_body: usize,
+    url: String,
+}
+
+impl BodyFrom {
+    /// The status, the headers, and the reader of the body as it arrives
+    /// on `conn`, which goes back to the pool at the body's end.
+    fn read(&self, conn: ClientConn, head: ResponseHead, close: bool) -> (i64, Vec<(String, String)>, BodyReader) {
+        let ResponseHead { status, headers, framing, persists } = head;
+        let reuse = (persists && !close).then(|| Arc::downgrade(&self.pool));
+        let source = Source::Owned { conn: Some(conn), reuse };
+        let mut framed = Framed { source, framing, timeout: self.timeout, clock: self.clock.clone(), continue_first: false };
+        let reader = if framing == Framing::Done {
+            framed.end(true);
+            BodyReader::empty(self.max_body)
+        } else {
+            BodyReader::new(Box::new(framed), self.max_body, None)
         };
-        crate::native::IntoValue::into_value(r, vm)
-    });
-    let spec = OpSpec { kind: OpKind::Http, effectful: true, park: Park::Never, pre_fuel: 0, timer: None };
-    Err(match vm.begin_op(spec, |_| Ok((identity, label)))? {
-        Begun::Replayed(r) => r.wait(build),
-        Begun::Live(l) => l.run(fut, build),
+        (status, headers, reader)
     }
-    .into())
 }
 
-type Reply = (i64, Vec<(String, String)>, Vec<u8>);
-
-/// The journal's encoding of the outcome of a request.
-fn encode_reply(r: Result<Reply, IoFailure>) -> Vec<u8> {
-    use crate::journal::HttpOutcome;
-    match r {
-        Ok((status, headers, body)) => HttpOutcome::Response { status, headers, body },
-        Err(e) => HttpOutcome::Failed { kind: e.kind.to_string(), message: e.message },
+impl Outcome for Exchange {
+    fn deliver(self: Box<Self>, vm: &mut Vm, _: BuildFn) -> crate::vm::NResult {
+        let Exchange { result, body } = *self;
+        let r = match result {
+            Ok(Exchanged { conn, head, close, head_res }) => {
+                drop(head_res);
+                let (status, headers, reader) = body.read(conn, head, close);
+                response(vm, body.url, status, headers, reader).map_err(HostError::from)
+            }
+            Err(e) => Err(HostError::from(e)),
+        };
+        r.into_value(vm)
     }
-    .encode()
-}
 
-fn decode_reply(data: &[u8]) -> Option<Result<Reply, HostError>> {
-    use crate::journal::HttpOutcome;
-    Some(match HttpOutcome::decode(data)? {
-        HttpOutcome::Response { status, headers, body } => Ok((status, headers, body)),
-        HttpOutcome::Failed { kind, message } => Err(HostError::new(kind, message)),
-    })
+    fn settle(self: Box<Self>) -> Pin<Box<dyn Future<Output = EncodeFn> + Send>> {
+        let Exchange { result, body } = *self;
+        Box::pin(async move {
+            let outcome = match result {
+                Ok(Exchanged { conn, head, close, mut head_res }) => {
+                    let (status, headers, mut reader) = body.read(conn, head, close);
+                    match crate::platform::timeout(&*body.clock, body.timeout, reader.read_all(&mut head_res)).await {
+                        Some(Ok(data)) => HttpOutcome::Response { status, headers, body: data },
+                        Some(Err(e)) => HttpOutcome::Failed { kind: e.kind.to_string(), message: e.message },
+                        None => HttpOutcome::Failed { kind: "timeout".into(), message: format!("reading the response from {} timed out", body.url) },
+                    }
+                }
+                Err(e) => HttpOutcome::Failed { kind: e.kind.to_string(), message: e.message },
+            };
+            let payload = outcome.encode();
+            Box::new(move |_: &mut Vm| Ok(payload)) as EncodeFn
+        })
+    }
 }
 
 /// A request's head, with a `Connection: close` header if `close`.
@@ -859,7 +837,7 @@ fn upload(
     headers: Val<Vec<(String, String)>>,
     timeout: SignedDuration,
 ) -> Suspended<Upload> {
-    net::refuse_in_journal(vm, "streaming HTTP requests")?;
+    vm.refuse_unrecordable("streaming HTTP requests")?;
     let mut req = prepare_request(vm, method, url, headers)?;
     let length = given_length(&req.headers).map_err(|e| HostError::new("invalid", e))?;
     req.check_policy(vm)?;

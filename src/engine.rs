@@ -351,8 +351,8 @@ pub struct RequestTarget {
     pub port: u16,
     /// In a journaled run, the sequence number of the journal entry that
     /// records the start of the request. It is the same in every execution
-    /// of the run, so a filter can derive an idempotency key from it
-    /// (SPEC §16.7).
+    /// that sends the request, so a filter can derive an idempotency key
+    /// from it (SPEC §16.7).
     pub journal_seq: Option<u64>,
 }
 
@@ -435,7 +435,9 @@ impl Config {
         self
     }
 
-    /// Filters the headers of every HTTP request.
+    /// Filters the headers of every HTTP request that the engine sends. In
+    /// a journaled run, replay sends no request and does not call the
+    /// filter.
     pub fn request_filter(
         mut self,
         filter: impl Fn(&RequestTarget, &mut Vec<(String, String)>) -> Result<(), String> + Send + Sync + 'static,

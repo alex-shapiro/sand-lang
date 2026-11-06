@@ -1122,10 +1122,10 @@ fn effects_have_the_same_journal_seq_in_every_execution() {
     let http = operations(&entries).unwrap().into_iter().find(|o| o.start.kind == OpKind::Http).unwrap();
     assert_eq!(requests, [Some(http.seq)]);
     // The resumed run replays the first call and the request, and calls the parked function
-    // again: it gets the same number, and so does the filter.
+    // again: it gets the same number. The filter sees only requests that are sent.
     let _ = run();
     assert_eq!(seqs.lock().unwrap()[2..], first[1..]);
-    assert_eq!(filtered.lock().unwrap()[1..], requests[..]);
+    assert_eq!(filtered.lock().unwrap()[..], requests[..]);
 }
 
 #[test]

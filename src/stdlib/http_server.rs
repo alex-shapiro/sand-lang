@@ -168,7 +168,7 @@ impl NativeObject for Server {
 }
 
 fn serve(vm: &mut Vm, ip: Val<String>, port: i64) -> Suspended<Server> {
-    net::refuse_in_journal(vm, "HTTP servers")?;
+    vm.refuse_unrecordable("HTTP servers")?;
     let shared = Arc::default();
     vm.host.http_pool.watch(&shared);
     net::listen_with(vm, ip, port, move |socket| Server::new(socket, shared))

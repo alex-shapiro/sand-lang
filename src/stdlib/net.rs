@@ -164,7 +164,7 @@ pub(crate) fn listen_with<T: Resource>(
     port: i64,
     open: impl FnOnce(Box<dyn network::Listener>) -> std::io::Result<T> + Send + 'static,
 ) -> Suspended<T> {
-    refuse_in_journal(vm, "listeners")?;
+    vm.refuse_unrecordable("listeners")?;
     let ip = ip.str(&vm.heap);
     let Ok(ip) = ip.parse::<IpAddr>().map(|ip| ip.to_canonical()) else {
         let msg = format!("invalid IP address {:?} (expected an address such as 127.0.0.1 or ::1)", super::truncate(ip, 200));
@@ -448,14 +448,8 @@ pub(crate) async fn connect_checked(
     Ok(network.connect(&addrs).await?)
 }
 
-/// Fails with kind `"unsupported"` in a journaled run, which cannot replay
-/// `what` (SPEC §16.7).
-pub(super) fn refuse_in_journal(vm: &Vm, what: &str) -> Result<(), HostError> {
-    if vm.journaling() { Err(HostError::new("unsupported", format!("{what} are not available in a journaled run"))) } else { Ok(()) }
-}
-
 fn connect(vm: &mut Vm, host: Val<String>, port: i64, timeout: SignedDuration) -> Suspended<Conn> {
-    refuse_in_journal(vm, "network connections")?;
+    vm.refuse_unrecordable("network connections")?;
     let (host, port) = check_endpoint(vm, host, port)?;
     let request = Capability::Net { host: host.clone(), port, tls: false };
     vm.require(&request)?;
@@ -473,7 +467,7 @@ fn connect(vm: &mut Vm, host: Val<String>, port: i64, timeout: SignedDuration) -
 }
 
 fn connect_tls(vm: &mut Vm, host: Val<String>, port: i64, timeout: SignedDuration) -> Suspended<Conn> {
-    refuse_in_journal(vm, "network connections")?;
+    vm.refuse_unrecordable("network connections")?;
     if !cfg!(feature = "tls") {
         return Err(HostError::new("invalid", "TLS support is not enabled in this build"));
     }

@@ -3,7 +3,9 @@
 use super::stream::{self, IoFailure, Suspended, bytes_read, line_read};
 use super::uri;
 use crate::native::{HostError, IntoValue, NativeModule, NativeObject, Val};
+use crate::journal::HttpOutcome;
 use crate::vm::iomem::Reservation;
+use crate::vm::journal::{BuildFn, Identity};
 use crate::vm::value::to_usize_saturating;
 use crate::vm::{Ctl, Vm};
 use std::future::Future;
@@ -194,16 +196,49 @@ impl Prepared {
         Ok(())
     }
 
-    /// Runs the host request filter, which can rewrite headers or reject the
-    /// request. Call this after all checks that can retry the native call so
-    /// the host observes the filter once per request.
+    /// The identity and the label of the request with `body` in the
+    /// journal: a hash of its method, URL, headers and body as the script
+    /// made them, before the host's request filter.
+    pub fn describe(&self, body: &[u8]) -> (u64, String) {
+        let mut identity = Identity::default().add(self.method.as_bytes()).add(self.text.as_bytes());
+        for (k, v) in &self.headers {
+            identity = identity.add(k.as_bytes()).add(v.as_bytes());
+        }
+        (identity.add(body).finish(), format!("{} {}", self.method, self.text))
+    }
+
+    /// What the host request filter gets for this request: `journal_seq`
+    /// is the sequence number of the `Start` entry of the request in a
+    /// journaled run.
+    pub fn target(&self, journal_seq: Option<u64>) -> crate::engine::RequestTarget {
+        let url = &self.url;
+        crate::engine::RequestTarget { scheme: url.scheme.clone(), host: url.host.clone(), port: url.port, journal_seq }
+    }
+
+    /// Runs the host request filter, which can rewrite headers or reject a
+    /// request that is not journaled. Call this after all checks that can
+    /// retry the native call so the host observes the filter once per
+    /// request.
+    #[cfg(feature = "os")]
     pub fn apply_filter(&mut self, vm: &Vm) -> Result<(), HostError> {
         let Some(filter) = &vm.host.request_filter else { return Ok(()) };
-        let url = &self.url;
-        let journal_seq = vm.journal_state().map(|j| j.position());
-        let target = crate::engine::RequestTarget { scheme: url.scheme.clone(), host: url.host.clone(), port: url.port, journal_seq };
-        filter(&target, &mut self.headers).map_err(|reason| HostError::new("permission_denied", reason))
+        filter(&self.target(None), &mut self.headers).map_err(|reason| HostError::new("permission_denied", reason))
     }
+}
+
+/// Builds the response from `url`, or the error, that the journal's
+/// encoding of the outcome of a request holds ([`HttpOutcome`]).
+pub(crate) fn recorded_response(url: String, max_body: usize) -> BuildFn {
+    Box::new(move |vm: &mut Vm, payload: &[u8]| -> crate::vm::NResult {
+        let r = match HttpOutcome::decode(payload) {
+            Some(HttpOutcome::Response { status, headers, body }) => {
+                response(vm, url, status, headers, BodyReader::memory(body, max_body)).map_err(HostError::from)
+            }
+            Some(HttpOutcome::Failed { kind, message }) => Err(HostError::new(kind, message)),
+            None => return Err(Ctl::internal("a journaled HTTP response is malformed")),
+        };
+        r.into_value(vm)
+    })
 }
 
 /// An HTTP response with a streaming `Body`, returned by `open`. The underlying
@@ -312,7 +347,6 @@ impl BodyReader {
 
     /// A body received whole, whose bytes the heap counts as part of the
     /// `Body` object (a journaled response, built alike in record and replay).
-    #[cfg_attr(not(feature = "os"), allow(dead_code))]
     pub fn memory(data: Vec<u8>, max_all: usize) -> BodyReader {
         let len = data.len();
         let mut r = BodyReader::new(Box::new(MemoryBody::new(data)), max_all, None);

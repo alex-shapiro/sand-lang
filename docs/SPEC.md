@@ -2380,7 +2380,13 @@ records an HTTP request as a whole message: the identity of a request is a
 hash of its method, URL, headers and body, as the script made them, and its
 result is the response with its whole body, or the error. The engine records
 the message above TLS, so replay does not depend on the randomness of TLS
-handshakes. Other reads of an HTTP body read the recorded body.
+handshakes. An HTTP exchange is one step of the run: the engine reads the
+whole body, within `max_http_body`, records the response, and then gives the
+program the recorded response, whose body it reads from memory. Without a
+journal, the program gets the response when its head arrives and reads the
+body as it arrives. Runs with and without a journal use the run's pool of
+connections. If an execution stops before the engine records the response,
+the resumed run sends the request again.
 
 **The schedule.** The scheduler is deterministic, except for the point at
 which it delivers the result of an asynchronous operation to the waiting task.
@@ -2478,9 +2484,11 @@ deduplicates them needs an identity for each effect that is the same in every
 execution. In a call of a journaled or effectful host function,
 `Vm::journal_seq` gives the sequence number of the journal entry that records
 the call; a resumed run that calls the function again gets the same number.
-The request filter gets the sequence number of the `Start` entry of a
-journaled HTTP request in `RequestTarget::journal_seq`, in record and in
-replay alike.
+The engine calls the request filter only for a request that it sends, not
+for a request that replay returns, and gives it the sequence number of the
+`Start` entry of the request in `RequestTarget::journal_seq`. A resumed run
+that sends the request again gives the same number. The journal records a
+request that the filter refuses as a failed request.
 
 **Ending a run from the host.** A host function can end the run with
 `Ctl::abort(payload)` when a condition of the host makes it stop, such as the
@@ -2499,7 +2507,6 @@ error back.
 - does not have `net` connections, listeners, HTTP servers, or streaming HTTP
   requests (`http.upload`): they fail with kind `"unsupported"`, because the
   engine cannot replay a raw stream;
-- does not have HTTP on the web (§16.5);
 - counts the buffers of live operations against a budget of `max_memory`
   apart from the heap's, so that the heap's memory checks are the same in
   replay.

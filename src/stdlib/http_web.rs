@@ -9,11 +9,15 @@
 //! local JavaScript event loop and sends its result back over a channel.
 //! Dropping the receiver aborts the in-flight request.
 
-use super::http_common::{BodyReader, MemoryBody, Prepared, ResponseStream, prepare_request, response};
-use super::stream::{self, IoFailure, Suspended, suspend};
+use super::http_common::{BodyReader, MemoryBody, Prepared, ResponseStream, prepare_request, recorded_response, response};
+use super::stream::{self, IoFailure, Suspended};
 use crate::check::ModKind;
-use crate::native::{NativeModule, Val};
+use crate::journal::HttpOutcome;
+use crate::native::{HostError, IntoValue, NativeModule, Val};
 use crate::vm::Vm;
+use crate::vm::journal::{Begun, BuildFn, EncodeFn, OpKind, OpSpec, Outcome, Park};
+use std::future::Future;
+use std::pin::Pin;
 use crate::vm::iomem::Reservation;
 use jiff::SignedDuration;
 use js_sys::{Array, Function, Object, Promise, Reflect, Uint8Array};
@@ -44,6 +48,9 @@ struct Request {
 
 type Received = (i64, Vec<(String, String)>, Vec<u8>, Reservation);
 
+/// `send(method, url, headers, body, timeout)`: one HTTP exchange, an
+/// operation whose outcome the journal records whole (SPEC §16.7). The
+/// browser reads the body before the program gets the response.
 fn send(
     vm: &mut Vm,
     method: Val<String>,
@@ -52,35 +59,73 @@ fn send(
     body: Val<Vec<u8>>,
     timeout: SignedDuration,
 ) -> Suspended<ResponseStream> {
-    if vm.journaling() {
-        return Err(crate::native::HostError::new("unsupported", "HTTP requests are not available in a journaled run on the web"));
-    }
-    let mut req = prepare_request(vm, method, url, headers)?;
-    // The request body is held, and the response buffered, outside the heap.
-    let res = vm.reserve_io(body.bytes(&vm.heap).len())?;
+    let req = prepare_request(vm, method, url, headers)?;
     req.check_policy(vm)?;
-    req.apply_filter(vm)?;
-    let Prepared { method, text, url, headers } = req;
     let body = body.bytes(&vm.heap).to_vec();
     vm.charge_bytes(body.len())?;
-    let request = Request {
-        method,
-        url: format!("{}{}", url.origin(), url.target),
-        headers,
-        body,
-        timeout: stream::timeout(timeout),
-        max_body: vm.host.limits.max_http_body,
+    let max_body = vm.host.limits.max_http_body;
+    let build = recorded_response(req.text.clone(), max_body);
+    let spec = OpSpec { kind: OpKind::Http, effectful: true, park: Park::Never, pre_fuel: 0, timer: None };
+    let live = match vm.begin_op(spec, |_| Ok(req.describe(&body)))? {
+        Begun::Replayed(r) => return Err(r.wait(build).into()),
+        Begun::Live(live) => live,
     };
-    let max_body = request.max_body;
-    let (id, done) = start(request, res);
-    let received = async move {
-        let _abort = AbortOnDrop(id);
-        done.await.unwrap_or_else(|_| Err(IoFailure::new("io", "the request was abandoned")))
+    // The request body is held, and the response buffered, outside the heap.
+    let claim = vm.claim(None, body.len())?;
+    let target = req.target(live.seq);
+    let filter = vm.host.request_filter.clone();
+    let Prepared { method, text, url, mut headers } = req;
+    let timeout = stream::timeout(timeout);
+    let fetched = async move {
+        let started = claim.take().map_err(|e| IoFailure::new("limit", e)).and_then(|(_, res)| {
+            if let Some(filter) = &filter {
+                filter(&target, &mut headers).map_err(|reason| IoFailure::new("permission_denied", reason))?;
+            }
+            Ok(res)
+        });
+        let result = match started {
+            Ok(res) => {
+                let request = Request { method, url: format!("{}{}", url.origin(), url.target), headers, body, timeout, max_body };
+                let (id, done) = start(request, res);
+                let _abort = AbortOnDrop(id);
+                done.await.unwrap_or_else(|_| Err(IoFailure::new("io", "the request was abandoned")))
+            }
+            Err(e) => Err(e),
+        };
+        Box::new(Fetched { result, url: text, max_body }) as Box<dyn Outcome>
     };
-    suspend(received, move |vm, (status, headers, body, res)| {
-        // The browser read the body: it stays reserved while it is read.
-        Ok(response(vm, text, status, headers, BodyReader::new(Box::new(MemoryBody::new(body)), max_body, Some(res)))?)
-    })
+    Err(live.run(fetched, build).into())
+}
+
+/// The outcome of [`send`]: the response, with the body that the browser
+/// read.
+struct Fetched {
+    result: Result<Received, IoFailure>,
+    url: String,
+    max_body: usize,
+}
+
+impl Outcome for Fetched {
+    fn deliver(self: Box<Self>, vm: &mut Vm, _: BuildFn) -> crate::vm::NResult {
+        let r = match self.result {
+            // The body stays reserved while it is read.
+            Ok((status, headers, body, res)) => {
+                let reader = BodyReader::new(Box::new(MemoryBody::new(body)), self.max_body, Some(res));
+                response(vm, self.url, status, headers, reader).map_err(HostError::from)
+            }
+            Err(e) => Err(HostError::from(e)),
+        };
+        r.into_value(vm)
+    }
+
+    fn settle(self: Box<Self>) -> Pin<Box<dyn Future<Output = EncodeFn> + Send>> {
+        let outcome = match self.result {
+            Ok((status, headers, body, _)) => HttpOutcome::Response { status, headers, body },
+            Err(e) => HttpOutcome::Failed { kind: e.kind.to_string(), message: e.message },
+        };
+        let payload = outcome.encode();
+        Box::pin(std::future::ready(Box::new(move |_: &mut Vm| Ok(payload)) as EncodeFn))
+    }
 }
 
 thread_local! {

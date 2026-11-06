@@ -1132,3 +1132,35 @@ print(http.get("{base}/c", headers: [("X-Refuse", "yes")]).unwrap_err().kind)
         assert_eq!(seen[0].host, "127.0.0.1");
     }
 }
+
+#[test]
+fn journaled_http_requests_reuse_connections_and_replay_sends_nothing() {
+    use sandlang::journal::{Durable, MemoryJournal};
+    use std::sync::atomic::Ordering;
+    let server = http_server(|req| match req.path() {
+        "/moved" => HttpResponse::new(302, "see /").header("location", "/"),
+        _ => HttpResponse::new(200, format!("{} {}", req.method, String::from_utf8_lossy(&req.body))),
+    });
+    let base = format!("http://{}", server.addr);
+    let src = format!(
+        r#"
+import http
+print(http.get("{base}/")?.text()?)
+print(http.post("{base}/", b"data")?.text()?)
+print(http.request("HEAD", "{base}/")?.status)
+print(http.get("{base}/moved")?.text()?)
+"#
+    );
+    let journal = MemoryJournal::new();
+    let run = |journal: &MemoryJournal| {
+        let journal = journal.clone();
+        run_with(&src, move |c| c.policy(RulePolicy::allow_all()).seed(1).durable(Durable::new(std::sync::Arc::new(journal))))
+    };
+    let expected = "GET \nPOST data\n200\nGET \n";
+    assert_eq!(run(&journal).ok_stdout(), expected);
+    assert_eq!(server.connections.load(Ordering::SeqCst), 1, "the journaled requests share one connection");
+    let sent = server.requests.lock().unwrap().len();
+    assert_eq!(sent, 5);
+    assert_eq!(run(&MemoryJournal::with_entries(journal.entries())).ok_stdout(), expected);
+    assert_eq!(server.requests.lock().unwrap().len(), sent, "replay sends no request");
+}

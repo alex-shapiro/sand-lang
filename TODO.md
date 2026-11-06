@@ -67,7 +67,6 @@ The host cannot rely on engine limits, stability, or control.
 - [ ] ❓ _Journal._ Record the plaintext reads and writes of `net` connections, listeners,
       and HTTP servers, so that a journaled run can use them. Now they fail with kind
       `"unsupported"` (SPEC §16.7).
-- [ ] ❓ _Journal._ Record HTTP requests on the web, where a journaled run cannot make them.
 - [ ] ❓ _Journal._ Give each journaled run its own hash seed, so that the fuel of map and
       set lookups does not depend on the process. Now two keys with equal 32-bit hash tags
       can add the fuel of one key comparison.

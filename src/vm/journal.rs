@@ -166,6 +166,8 @@ impl Replayed {
 pub(crate) struct Live {
     /// The id of the operation in the run's journal, if it has one.
     op: Option<u64>,
+    /// The sequence number of the operation's `Start` entry.
+    pub seq: Option<u64>,
     /// When a timer expires.
     pub wake: Option<SystemTime>,
     park: Park,
@@ -403,7 +405,7 @@ pub(crate) struct JournalState {
     pub suspend_after: Option<Duration>,
     /// The budget of the buffers of live operations, apart from the heap's,
     /// so that the heap's memory checks are the same in replay.
-    pub live_memory: Arc<IoMemory>,
+    live_memory: Arc<IoMemory>,
     /// A divergence found where it could not be reported.
     pending: Option<JournalStop>,
 }
@@ -961,10 +963,15 @@ fn stop(s: JournalStop) -> Ctl {
 }
 
 impl Vm {
-    /// Whether the run has a journal (SPEC §16.7).
-    #[inline]
-    pub fn journaling(&self) -> bool {
-        self.journal.is_some()
+    /// Fails with kind `"unsupported"` in a journaled run: the journal
+    /// cannot record `what`, a raw stream such as a `net` connection, as
+    /// whole messages (SPEC §16.7).
+    #[cfg(feature = "os")]
+    pub(crate) fn refuse_unrecordable(&self, what: &str) -> Result<(), crate::native::HostError> {
+        match self.journal {
+            Some(_) => Err(crate::native::HostError::new("unsupported", format!("{what} are not available in a journaled run"))),
+            None => Ok(()),
+        }
     }
 
     pub(crate) fn journal_state(&self) -> Option<std::cell::RefMut<'_, JournalState>> {
@@ -1259,15 +1266,15 @@ impl Vm {
     /// Without a journal, the operation runs.
     pub(crate) fn begin_op(&mut self, spec: OpSpec, describe: impl FnOnce(&Vm) -> Result<(u64, String), Ctl>) -> Result<Begun, Ctl> {
         let call = spec.kind == OpKind::Call;
-        let live = |op, wake| {
+        let live = |op, seq, wake| {
             let park = match wake {
                 Some(t) => Park::Until(t),
                 None => spec.park,
             };
-            Begun::Live(Live { op, wake, park, call, effectful: spec.effectful })
+            Begun::Live(Live { op, seq, wake, park, call, effectful: spec.effectful })
         };
         if self.journal.is_none() {
-            return Ok(live(None, None));
+            return Ok(live(None, None, None));
         }
         let (identity, label) = describe(self)?;
         let Some(j) = &self.journal else { return Err(Ctl::internal("the journal vanished")) };
@@ -1299,7 +1306,7 @@ impl Vm {
             }
         };
         j.ops += 1;
-        Ok(live(Some(id), wake))
+        Ok(live(Some(id), Some(seq), wake))
     }
 
     /// Notes that the local operation that fiber `fid` waits for, as wait
