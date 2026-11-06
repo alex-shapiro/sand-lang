@@ -3,7 +3,9 @@
 mod common;
 
 use common::{HttpResponse, TempDir, http_server, rt};
-use sandlang::{Capability, Config, Decision, Engine, Error, MemorySink, RulePolicy};
+use sandlang::engine::{Config, Engine, Error, MemorySink};
+use sandlang::policy::rules::RulePolicy;
+use sandlang::policy::{Capability, Decision};
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -15,7 +17,7 @@ fn example(rel: &str) -> PathBuf {
 }
 
 struct Output {
-    result: Result<sandlang::Outcome, Error>,
+    result: Result<sandlang::engine::Outcome, Error>,
     stdout: String,
     stderr: String,
 }

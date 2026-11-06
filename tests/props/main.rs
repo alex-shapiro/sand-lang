@@ -13,7 +13,7 @@ mod values;
 
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
-use sandlang::{Config, Engine, Error, MemorySink};
+use sandlang::engine::{Config, Engine, Error, MemorySink};
 use std::sync::LazyLock;
 
 static BOUNDARY: LazyLock<Vec<i64>> = LazyLock::new(|| {
@@ -82,7 +82,7 @@ enum Mode {
 fn run_in(src: &str, mode: Mode) -> Run {
     let out = MemorySink::new();
     let config = Config::new()
-        .policy(sandlang::RulePolicy::standard())
+        .policy(sandlang::policy::rules::RulePolicy::standard())
         .stdout(out.clone())
         .stderr(MemorySink::new())
         .optimize(!matches!(mode, Mode::Unoptimized))

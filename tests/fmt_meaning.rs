@@ -96,7 +96,7 @@ fn line_comments_after_any_token_are_kept() {
     let mut failures = Vec::new();
     let mut checked = 0;
     for (name, src) in &sources {
-        let parsed = sandlang::syntax::parse_module(src, 0);
+        let parsed = sandlang::syntax::parser::parse_module(src, 0);
         if !parsed.errors.is_empty() {
             continue;
         }

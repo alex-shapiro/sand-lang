@@ -3,8 +3,8 @@
 mod common;
 
 use common::run_with;
+use sandlang::engine::{Error, LimitKind, Limits};
 use sandlang::platform::{Clock, ClockFuture, Instant, SystemTime, UNIX_EPOCH};
-use sandlang::{Error, LimitKind, Limits};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -89,13 +89,17 @@ fn wall_time_limit_is_measured_by_host_clock() {
 #[test]
 fn memfs_timestamps_are_sourced_from_host_clock() {
     let clock = ManualClock::new();
-    let fs = sandlang::MemFs::with_capacity_and_clock(1 << 20, clock.clone());
+    let fs = sandlang::files::mem::MemFs::with_capacity_and_clock(1 << 20, clock.clone());
     fs.write("/run/.keep", "").unwrap();
     let src = "import fs\nfs.write_text(\"/run/notes.txt\", \"hi\")?\nprint(fs.metadata(\"/run/notes.txt\")?.modified.unwrap())";
-    let out = sandlang::MemorySink::new();
-    let config =
-        sandlang::Config::new().policy(sandlang::RulePolicy::allow_all()).memory_fs(fs).cwd("/run").clock(clock).stdout(out.clone());
-    let mut engine = sandlang::Engine::new(config).unwrap();
+    let out = sandlang::engine::MemorySink::new();
+    let config = sandlang::engine::Config::new()
+        .policy(sandlang::policy::rules::RulePolicy::allow_all())
+        .memory_fs(fs)
+        .cwd("/run")
+        .clock(clock)
+        .stdout(out.clone());
+    let mut engine = sandlang::engine::Engine::new(config).unwrap();
     common::rt().block_on(engine.run_source("main.sand", src)).unwrap();
     assert_eq!(out.contents(), "2027-01-15T08:00:00Z\n");
 }

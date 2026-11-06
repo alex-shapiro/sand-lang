@@ -14,8 +14,10 @@ use reedline::{
     PromptHistorySearch, Reedline, ReedlineEvent, ReedlineRawEvent, Signal, StyledText, ValidationResult, Validator,
     default_emacs_keybindings,
 };
+use sandlang::engine::{Engine, Error};
+use sandlang::feed::StdinFeed;
+use sandlang::session::Session;
 use sandlang::syntax::highlight::{Highlight, highlight};
-use sandlang::{Engine, Error, Session, StdinFeed};
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::io::{BufRead, IsTerminal, Write};
@@ -193,7 +195,7 @@ async fn eval(session: &mut Session, io: &mut Io, input: &str) {
 }
 
 /// Awaits `fut` and interrupts the session if Ctrl-C is pressed.
-async fn foreground<T>(handle: sandlang::InterruptHandle, io: &mut Io, fut: impl std::future::Future<Output = T>) -> T {
+async fn foreground<T>(handle: sandlang::engine::InterruptHandle, io: &mut Io, fut: impl std::future::Future<Output = T>) -> T {
     let mut fut = std::pin::pin!(fut);
     let mut reading = false;
     loop {
@@ -380,7 +382,7 @@ struct ReplSink {
     stderr: bool,
 }
 
-impl sandlang::OutputSink for ReplSink {
+impl sandlang::vm::OutputSink for ReplSink {
     fn write(&self, data: &[u8]) -> std::io::Result<()> {
         self.screen.write(self.stderr, data)
     }

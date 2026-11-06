@@ -6,29 +6,28 @@ mod docs;
 mod expr;
 mod fuse;
 pub(crate) mod help;
-mod pat;
+pub mod pat;
 pub mod persist;
 mod resources;
-mod traits;
+pub mod traits;
 mod unify;
-mod verify;
+pub(crate) mod verify;
 
 use crate::diag::{Diag, FileId, SourceFile, Span};
 use crate::engine::NativeDecls;
 use crate::hir::*;
-use crate::native::{BoundKind, Constant, EnumVariant, NativeDecl, RustVariant, Signature, StructField, Type};
+use crate::native::func::Signature;
+use crate::native::ty::Type;
+use crate::native::{BoundKind, Constant, EnumVariant, NativeDecl, RustVariant, StructField};
 use crate::syntax::ast::{self, ItemKind, TypeExpr, TypeExprKind};
 use crate::types::*;
 use crate::vm::value::{FxBuild, FxHashMap};
 use budget::{CompileBudget, MAX_TYPE_SIZE};
 use persist::{PMap, PVec};
+use traits::{ImplDef, TraitDef};
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-
-pub use pat::Witness;
-pub use traits::{ImplDef, TraitDef, TraitMethod};
-pub(crate) use verify::verify;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModKind {
@@ -3258,14 +3257,14 @@ pub fn ctor_of(t: Ty) -> Option<Ctor> {
 
 /// Default expressions that can be inlined at call sites (no names to resolve).
 fn is_closed_const(e: &ast::Expr) -> bool {
-    use ast::ExprKind as K;
+    use ast::ExprKind;
     match &e.kind {
-        K::Unit | K::Bool(_) | K::Int(_) | K::Float(_) | K::Duration(_) | K::Bytes(_) => true,
-        K::Str(segs) => segs.iter().all(|s| matches!(s, ast::StrSeg::Text(_))),
-        K::List(xs) => xs.is_empty(),
-        K::Map(xs) => xs.is_empty(),
-        K::Unary(ast::UnOp::Neg, inner) => {
-            matches!(inner.kind, K::Int(_) | K::Float(_) | K::Duration(_))
+        ExprKind::Unit | ExprKind::Bool(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Duration(_) | ExprKind::Bytes(_) => true,
+        ExprKind::Str(segs) => segs.iter().all(|s| matches!(s, ast::StrSeg::Text(_))),
+        ExprKind::List(xs) => xs.is_empty(),
+        ExprKind::Map(xs) => xs.is_empty(),
+        ExprKind::Unary(ast::UnOp::Neg, inner) => {
+            matches!(inner.kind, ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Duration(_))
         }
         _ => false,
     }
@@ -3315,40 +3314,45 @@ pub(crate) fn names_used_in_functions(m: &ast::Module) -> HashSet<String, FxBuil
         }
     }
     fn expr(e: &ast::Expr, out: &mut HashSet<String, FxBuild>) {
-        use ast::ExprKind as K;
+        use ast::ExprKind;
         match &e.kind {
-            K::Ident(id) => {
+            ExprKind::Ident(id) => {
                 out.insert(id.name.clone());
             }
-            K::Str(segs) => {
+            ExprKind::Str(segs) => {
                 for s in segs {
                     if let ast::StrSeg::Expr(x, _) = s {
                         expr(x, out);
                     }
                 }
             }
-            K::List(xs) | K::Tuple(xs) => xs.iter().for_each(|x| expr(x, out)),
-            K::Repeat(a, b) | K::Coalesce(a, b) | K::Index(a, b) | K::Binary(_, a, b) => {
+            ExprKind::List(xs) | ExprKind::Tuple(xs) => xs.iter().for_each(|x| expr(x, out)),
+            ExprKind::Repeat(a, b) | ExprKind::Coalesce(a, b) | ExprKind::Index(a, b) | ExprKind::Binary(_, a, b) => {
                 expr(a, out);
                 expr(b, out);
             }
-            K::Map(kvs) => {
+            ExprKind::Map(kvs) => {
                 for (k, v) in kvs {
                     expr(k, out);
                     expr(v, out);
                 }
             }
-            K::ListComp(x, cs) => {
+            ExprKind::ListComp(x, cs) => {
                 expr(x, out);
                 clauses(cs, out);
             }
-            K::MapComp(k, v, cs) => {
+            ExprKind::MapComp(k, v, cs) => {
                 expr(k, out);
                 expr(v, out);
                 clauses(cs, out);
             }
-            K::Unary(_, x) | K::Paren(x) | K::Try(x) | K::Spawn(x) | K::Field(x, _) | K::TupleField(x, _, _) => expr(x, out),
-            K::Range { start, end, .. } => {
+            ExprKind::Unary(_, x)
+            | ExprKind::Paren(x)
+            | ExprKind::Try(x)
+            | ExprKind::Spawn(x)
+            | ExprKind::Field(x, _)
+            | ExprKind::TupleField(x, _, _) => expr(x, out),
+            ExprKind::Range { start, end, .. } => {
                 if let Some(x) = start {
                     expr(x, out);
                 }
@@ -3356,22 +3360,22 @@ pub(crate) fn names_used_in_functions(m: &ast::Module) -> HashSet<String, FxBuil
                     expr(x, out);
                 }
             }
-            K::Call { callee, args } => {
+            ExprKind::Call { callee, args } => {
                 expr(callee, out);
                 args.iter().for_each(|a| expr(&a.value, out));
             }
-            K::MethodCall { receiver, args, .. } => {
+            ExprKind::MethodCall { receiver, args, .. } => {
                 expr(receiver, out);
                 args.iter().for_each(|a| expr(&a.value, out));
             }
-            K::If { cond: c, then, else_ } => {
+            ExprKind::If { cond: c, then, else_ } => {
                 cond(c, out);
                 block(then, out);
                 if let Some(x) = else_ {
                     expr(x, out);
                 }
             }
-            K::Match { scrutinee, arms, .. } => {
+            ExprKind::Match { scrutinee, arms, .. } => {
                 expr(scrutinee, out);
                 for a in arms {
                     if let Some(g) = &a.guard {
@@ -3380,17 +3384,17 @@ pub(crate) fn names_used_in_functions(m: &ast::Module) -> HashSet<String, FxBuil
                     expr(&a.body, out);
                 }
             }
-            K::Block(b) | K::Loop { body: b, .. } => block(b, out),
-            K::While { cond: c, body, .. } => {
+            ExprKind::Block(b) | ExprKind::Loop { body: b, .. } => block(b, out),
+            ExprKind::While { cond: c, body, .. } => {
                 cond(c, out);
                 block(body, out);
             }
-            K::For { iter, body, .. } => {
+            ExprKind::For { iter, body, .. } => {
                 expr(iter, out);
                 block(body, out);
             }
-            K::Lambda { body, .. } => expr(body, out),
-            K::Return(Some(x)) | K::Break { value: Some(x), .. } => expr(x, out),
+            ExprKind::Lambda { body, .. } => expr(body, out),
+            ExprKind::Return(Some(x)) | ExprKind::Break { value: Some(x), .. } => expr(x, out),
             _ => {}
         }
     }

@@ -15,9 +15,8 @@ use super::bytecode::Program;
 use super::iomem::IoMemory;
 use super::value::{MapObj, Obj, SetObj, Value};
 use super::{BoxFuture, Ctl, CtlKind, Finisher, NResult, Vm};
-pub(crate) use crate::journal::OpKind;
-use crate::journal::{CallResult, Entry, EntryData, EntryKind, Journal, OpDone, OpEnd, OpStart};
-use crate::native::Call;
+use crate::journal::{CallResult, Entry, EntryData, EntryKind, Journal, OpDone, OpEnd, OpKind, OpStart, Suspension};
+use crate::native::func::{Call, Park};
 use crate::platform::{Instant, SystemTime};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -34,8 +33,6 @@ pub enum JournalStop {
     /// Every task waits for a timer or a parked host call (SPEC §16.7).
     Suspended(Suspension),
 }
-
-pub(crate) use crate::journal::Suspension;
 
 /// What replay holds for the next journaled operation.
 pub(crate) enum ReplayState {
@@ -55,8 +52,6 @@ pub(crate) type BuildFn = Box<dyn FnOnce(&mut Vm, &[u8]) -> NResult + Send>;
 
 /// The journal's encoding of an outcome, made on the VM thread.
 pub(crate) type EncodeFn = Box<dyn FnOnce(&mut Vm) -> Result<Vec<u8>, Ctl> + Send>;
-
-pub(crate) use crate::native::Park;
 
 /// The outcome of a live operation whose result the journal records.
 pub(crate) trait Outcome: Send + 'static {
@@ -471,7 +466,7 @@ pub(crate) fn start(
     sink: Arc<dyn Journal>,
     origin: Instant,
     suspend_after: Option<Duration>,
-    limits: &crate::Limits,
+    limits: &crate::engine::Limits,
 ) -> Result<JournalState, JournalStop> {
     let mut done = HashMap::new();
     let mut replay = Vec::new();
@@ -949,7 +944,7 @@ fn payload_outcome(vm: &mut Vm, payload: &[u8]) -> NResult {
 /// Whether `r` asks for the call to run again after a collection: the
 /// journal records only the call that completes.
 fn is_retry(r: &NResult) -> bool {
-    matches!(r, Err(c) if matches!(c.kind(), CtlKind::Collect | CtlKind::Limit(crate::LimitKind::Memory)))
+    matches!(r, Err(c) if matches!(c.kind(), CtlKind::Collect | CtlKind::Limit(crate::engine::LimitKind::Memory)))
 }
 
 fn stop(s: JournalStop) -> Ctl {
@@ -961,9 +956,9 @@ impl Vm {
     /// cannot record `what`, a raw stream such as a `net` connection, as
     /// whole messages (SPEC §16.7).
     #[cfg(feature = "os")]
-    pub(crate) fn refuse_unrecordable(&self, what: &str) -> Result<(), crate::native::HostError> {
+    pub(crate) fn refuse_unrecordable(&self, what: &str) -> Result<(), crate::native::convert::HostError> {
         match self.journal {
-            Some(_) => Err(crate::native::HostError::new("unsupported", format!("{what} are not available in a journaled run"))),
+            Some(_) => Err(crate::native::convert::HostError::new("unsupported", format!("{what} are not available in a journaled run"))),
             None => Ok(()),
         }
     }
@@ -1135,7 +1130,7 @@ impl Vm {
         call: Call,
         slot: Option<(usize, &str)>,
         bytes: usize,
-    ) -> Result<super::iomem::Claim, crate::native::HostError> {
+    ) -> Result<super::iomem::Claim, crate::native::convert::HostError> {
         if let Some(j) = &self.journal {
             return Ok(super::iomem::Claim::Deferred { mem: j.borrow().live_memory.clone(), buffers: slot.map(|s| s.0), bytes });
         }

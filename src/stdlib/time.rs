@@ -1,8 +1,13 @@
-//! Implementation of the `time` standard library module.
+//! The `time` standard library module, and the Rust types of its values.
+//! `Instant`, `PlainDateTime`, `PlainDate`, and `PlainTime` are
+//! [`jiff::Timestamp`], [`jiff::civil::DateTime`], [`jiff::civil::Date`], and
+//! [`jiff::civil::Time`].
 
 use crate::check::ModKind;
-use crate::native::{Binding, HostError, IntoValue, NamedType, NativeModule, NativeObject, Val};
-use crate::platform::{Instant as Monotonic, UNIX_EPOCH};
+use crate::native::convert::{HostError, IntoValue};
+use crate::native::ty::Val;
+use crate::native::{Binding, NamedType, NativeModule, NativeObject};
+use crate::platform::{Instant, UNIX_EPOCH};
 use crate::policy::Capability;
 use crate::vm::value::{Packing, ValueType};
 use crate::vm::{Ctl, Vm};
@@ -783,7 +788,7 @@ fn require_relative_to(spans: &[jiff::Span], largest: Option<Unit>, rel: &Option
 /// A monotonic timer for measuring elapsed time.
 #[derive(crate::SandObject)]
 #[sand(module = "time")]
-struct Stopwatch(Monotonic);
+struct Stopwatch(Instant);
 
 impl NativeObject for Stopwatch {}
 

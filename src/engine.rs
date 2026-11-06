@@ -4,11 +4,15 @@ use crate::check::ModKind;
 use crate::check::budget::{CompileBudget, Stop};
 use crate::compile::{CompileInput, compile_more};
 use crate::diag::{Diag, Diagnostic, FileId, Span};
-use crate::files::{Fs, MemFs};
+use crate::files::Fs;
+use crate::files::mem::MemFs;
 use crate::modules::{ImportRef, ModuleGraph, Snapshot, Target, budget_error, native_info};
-use crate::native::{BoundType, NativeDecl, NativeModule, Signature, Type};
+use crate::native::func::Signature;
+use crate::native::ty::Type;
+use crate::native::{BoundType, NativeDecl, NativeModule};
 use crate::platform::{Clock, Instant, SystemClock};
-use crate::policy::{Capability, CustomPolicy, Decision, Policy, PromptAnswer, Prompter, RulePolicy};
+use crate::policy::rules::RulePolicy;
+use crate::policy::{Capability, CustomPolicy, Decision, Policy, PromptAnswer, Prompter};
 use crate::session::Session;
 use crate::stdlib;
 use crate::types::{FnId, ModId};
@@ -400,7 +404,7 @@ enum StdinConfig {
     Bytes(Vec<u8>),
     #[cfg(feature = "os")]
     Inherit,
-    Feed(crate::StdinFeed),
+    Feed(crate::feed::StdinFeed),
 }
 
 /// Engine configuration (builder style).
@@ -414,8 +418,8 @@ pub struct Config {
     registry: Arc<OnceLock<Arc<Registry>>>,
     pub(crate) stdout: SharedSink,
     pub(crate) stderr: SharedSink,
-    log_sink: Option<Arc<dyn crate::LogSink>>,
-    log_level: Option<crate::LogLevel>,
+    log_sink: Option<Arc<dyn crate::stdlib::log::LogSink>>,
+    log_level: Option<crate::stdlib::log::LogLevel>,
     stdin: StdinConfig,
     pub(crate) cwd: Option<PathBuf>,
     pub(crate) module_root: Option<PathBuf>,
@@ -429,13 +433,13 @@ pub struct Config {
     pub(crate) dump_bytecode: bool,
     pub(crate) exit_after_run: bool,
     #[cfg(feature = "os")]
-    pub(crate) tls: crate::stdlib::TlsSettings,
+    pub(crate) tls: crate::stdlib::net::TlsSettings,
     pub(crate) fs: Fs,
     pub(crate) request_filter: Option<RequestFilter>,
     pub(crate) clock: Arc<dyn Clock>,
     #[cfg(feature = "os")]
     pub(crate) network: Option<Arc<dyn crate::network::Network>>,
-    pub(crate) time_zone: Option<crate::time::TimeZone>,
+    pub(crate) time_zone: Option<crate::stdlib::time::TimeZone>,
     context: Option<Arc<dyn std::any::Any + Send + Sync>>,
     durable: Option<crate::journal::Durable>,
 }
@@ -475,7 +479,7 @@ impl Config {
             stdout: Arc::new(crate::stdio::StdoutSink::default()),
             stderr: Arc::new(crate::stdio::StderrSink::default()),
             log_sink: None,
-            log_level: Some(crate::LogLevel::Info),
+            log_level: Some(crate::stdlib::log::LogLevel::Info),
             stdin: StdinConfig::None,
             cwd: None,
             module_root: None,
@@ -583,13 +587,13 @@ impl Config {
     }
     /// Routes `log` records to `sink` instead of standard error. Records count
     /// against `max_output_bytes`, but do not require [`Capability::Stderr`].
-    pub fn log_sink(mut self, sink: impl crate::LogSink + 'static) -> Self {
+    pub fn log_sink(mut self, sink: impl crate::stdlib::log::LogSink + 'static) -> Self {
         self.log_sink = Some(Arc::new(sink));
         self
     }
-    /// Sets the initial minimum script log level (default [`LogLevel::Info`](crate::LogLevel::Info)),
+    /// Sets the initial minimum script log level (default [`LogLevel::Info`](crate::stdlib::log::LogLevel::Info)),
     /// or disables script logging if `level` is `None`.
-    pub fn log_level(mut self, level: impl Into<Option<crate::LogLevel>>) -> Self {
+    pub fn log_level(mut self, level: impl Into<Option<crate::stdlib::log::LogLevel>>) -> Self {
         self.log_level = level.into();
         self
     }
@@ -604,7 +608,7 @@ impl Config {
         self
     }
     /// Scripts read the input the host sends through `feed`.
-    pub fn stdin_feed(mut self, feed: &crate::StdinFeed) -> Self {
+    pub fn stdin_feed(mut self, feed: &crate::feed::StdinFeed) -> Self {
         self.stdin = StdinConfig::Feed(feed.clone());
         self
     }
@@ -643,7 +647,7 @@ impl Config {
     }
     /// Sets the time zone returned by `time.local_zone()` if the policy allows
     /// [`Capability::TimeZone`]. Defaults to `UTC`.
-    pub fn time_zone(mut self, zone: crate::time::TimeZone) -> Self {
+    pub fn time_zone(mut self, zone: crate::stdlib::time::TimeZone) -> Self {
         self.time_zone = Some(zone);
         self
     }
@@ -1406,7 +1410,7 @@ impl Engine {
             #[cfg(feature = "os")]
             tls: c.tls.clone(),
             #[cfg(feature = "os")]
-            http_pool: crate::stdlib::HttpPool::new(c.limits.max_open_resources, c.clock.clone()),
+            http_pool: crate::stdlib::http::Pool::new(c.limits.max_open_resources, c.clock.clone()),
             fs: c.fs.clone(),
             request_filter: c.request_filter.clone(),
             regex_cache: Vec::new(),
@@ -1882,7 +1886,7 @@ const MAX_DISCOVERY_ERRORS: usize = 100;
 enum Called {
     Returned(Value),
     Exited(i32),
-    BadArgument { index: usize, error: stdlib::Error },
+    BadArgument { index: usize, error: stdlib::core::Error },
 }
 
 /// Runs the module initializers of `vm`'s program, decodes `args` for the parameters of
@@ -1905,7 +1909,7 @@ async fn call_decoded(vm: &mut Vm, function: &Function, args: &[&str]) -> Result
     let first = vm.pinned.len();
     for (index, ((_, desc), arg)) in function.signature().params.iter().zip(args).enumerate() {
         let text = vm.new_str(*arg);
-        match stdlib::json::decode(vm, desc, crate::native::Val::from_raw(text)).map_err(Trap::from_ctl)? {
+        match stdlib::json::decode(vm, desc, crate::native::ty::Val::from_raw(text)).map_err(Trap::from_ctl)? {
             stdlib::json::Decoding::Done(v) => vm.pinned.push(v),
             stdlib::json::Decoding::Pending(v, fills) => {
                 vm.pinned.extend([v, fills]);

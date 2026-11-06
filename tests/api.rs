@@ -5,13 +5,14 @@
 mod common;
 
 use common::{TempDir, rt, run_with};
-use sandlang::jiff::civil::Date;
-use sandlang::time::TimeZone;
+use jiff::civil::Date;
+use sandlang::engine::{Config, Engine, Error, LimitKind, Limits, MemorySink, Outcome};
+use sandlang::native::NativeModule;
+use sandlang::policy::{Capability, Decision, PromptAnswer};
+use sandlang::stdlib::log::{LogLevel, LogRecord, LogSink};
+use sandlang::stdlib::time::TimeZone;
 use sandlang::vm::Vm;
-use sandlang::{
-    Capability, Config, Decision, Engine, Error, LimitKind, Limits, LogLevel, LogRecord, LogSink, MemorySink, NativeModule, Outcome,
-    PromptAnswer, ValueType,
-};
+use sandlang::vm::value::ValueType;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -24,7 +25,7 @@ fn engine_with(config: Config) -> (Engine, MemorySink, MemorySink) {
     (engine, out, err)
 }
 
-fn run_src(config: Config, src: &str) -> (Result<sandlang::Outcome, Error>, String, String) {
+fn run_src(config: Config, src: &str) -> (Result<sandlang::engine::Outcome, Error>, String, String) {
     let (out, err) = (MemorySink::new(), MemorySink::new());
     let mut engine = match Engine::new(config.stdout(out.clone()).stderr(err.clone())) {
         Ok(engine) => engine,
@@ -218,7 +219,7 @@ fn engine_can_run_multiple_sources_independently() {
 #[test]
 fn script_args_and_env_are_virtual() {
     let config = Config::new()
-        .policy(sandlang::RulePolicy::allow_all())
+        .policy(sandlang::policy::rules::RulePolicy::allow_all())
         .args(vec!["a".into(), "b".into()])
         .env(vec![("ONLY".into(), "this".into())]);
     let (r, out, _) = run_src(config, "import env\nprint(env.args())\nprint(env.get(\"ONLY\"))\nprint(env.get(\"PATH\"))");
@@ -319,9 +320,9 @@ fn bank_module() -> NativeModule {
     m.function("cents", Money);
     m.function("sum", |xs: Vec<Money>| Money(xs.iter().map(|m| m.0).sum()));
     m.function("cell", |a: i64, b: i64| Cell(a, b));
-    m.function("due", |d: Date, days: i64| d.checked_add(sandlang::jiff::Span::new().days(days)).unwrap_or(d)).params(&["start", "days"]);
-    m.function("opened", || sandlang::jiff::Timestamp::UNIX_EPOCH);
-    m.function("zone_of", |z: sandlang::time::ZonedDateTime| z.zoned().time_zone().iana_name().map(String::from));
+    m.function("due", |d: Date, days: i64| d.checked_add(jiff::Span::new().days(days)).unwrap_or(d)).params(&["start", "days"]);
+    m.function("opened", || jiff::Timestamp::UNIX_EPOCH);
+    m.function("zone_of", |z: sandlang::stdlib::time::ZonedDateTime| z.zoned().time_zone().iana_name().map(String::from));
     m
 }
 
@@ -492,7 +493,7 @@ fn host_enums_take_their_docs_from_rust() {
 
 #[test]
 fn host_functions_take_and_return_enums_of_standard_modules() {
-    use sandlang::time::Unit;
+    use sandlang::stdlib::time::enums::Unit;
     let mut m = NativeModule::new("units");
     m.function("smaller", |u: Unit| -> Option<Unit> {
         let all = [Unit::Year, Unit::Month, Unit::Week, Unit::Day, Unit::Hour];
@@ -660,13 +661,13 @@ fn local_time_zone_needs_the_capability() {
     let (r, out, _) = run_src(tokyo(), src);
     r.unwrap();
     assert_eq!(out, "UTC\n", "denied by default");
-    let (r, out, _) = run_src(tokyo().policy(sandlang::RulePolicy::standard().allow_timezone()), src);
+    let (r, out, _) = run_src(tokyo().policy(sandlang::policy::rules::RulePolicy::standard().allow_timezone()), src);
     r.unwrap();
     assert_eq!(out, "Asia/Tokyo\n");
-    let (r, out, _) = run_src(Config::new().policy(sandlang::RulePolicy::allow_all()), src);
+    let (r, out, _) = run_src(Config::new().policy(sandlang::policy::rules::RulePolicy::allow_all()), src);
     r.unwrap();
     assert_eq!(out, "UTC\n", "no zone configured");
-    let deny = sandlang::RulePolicy::standard().allow_timezone().deny_timezone();
+    let deny = sandlang::policy::rules::RulePolicy::standard().allow_timezone().deny_timezone();
     let (r, out, _) = run_src(tokyo().policy(deny), src);
     r.unwrap();
     assert_eq!(out, "UTC\n", "deny wins a tie");
@@ -691,12 +692,12 @@ fn native_module_conversions() {
     m.function("somes", |xs: Vec<Option<i64>>| -> i64 { xs.iter().flatten().sum() });
     m.function("words", |text: &str, sep: &str| -> Vec<String> { text.split(sep).map(String::from).collect() });
     m.function("first", |b: &[u8]| -> Option<i64> { b.first().map(|&x| x as i64) });
-    m.function("lookup", |key: &str| -> Result<i64, sandlang::HostError> {
-        key.parse().map_err(|_| sandlang::HostError::new("not_found", format!("no key {key}")))
+    m.function("lookup", |key: &str| -> Result<i64, sandlang::native::convert::HostError> {
+        key.parse().map_err(|_| sandlang::native::convert::HostError::new("not_found", format!("no key {key}")))
     })
     .params(&["key"]);
     m.function("many", |n: i64| -> Vec<String> { (0..n).map(|i| "x".repeat(1000) + &i.to_string()).collect() });
-    m.vm_function("write", |vm: &mut Vm, path: String, data: Vec<u8>| -> Result<i64, sandlang::HostError> {
+    m.vm_function("write", |vm: &mut Vm, path: String, data: Vec<u8>| -> Result<i64, sandlang::native::convert::HostError> {
         vm.require(&Capability::Custom { name: "write".into(), detail: format!("{path} {}", data.len()) })?;
         Ok((path.len() + data.len()) as i64)
     });
@@ -1089,9 +1090,10 @@ fn struct_fields_must_use_registered_public_types() {
 #[test]
 #[should_panic(expected = "field `fn` of `Keyword` is not an identifier, or is a keyword")]
 fn struct_fields_must_be_sand_identifiers() {
-    use sandlang::native::{Binding, Type};
+    use sandlang::native::Binding;
+    use sandlang::native::ty::Type;
     struct Keyword;
-    impl sandlang::NamedType for Keyword {
+    impl sandlang::native::NamedType for Keyword {
         const MODULE: &'static str = "lab";
         const NAME: &'static str = "Keyword";
         const DOC: &'static str = "";
@@ -1100,18 +1102,18 @@ fn struct_fields_must_be_sand_identifiers() {
             Binding::of_struct()
         }
     }
-    impl sandlang::SandType for Keyword {
+    impl sandlang::native::ty::SandType for Keyword {
         fn sand_type() -> Type {
             Type::bound::<Self>(Vec::new())
         }
     }
-    impl sandlang::StructType for Keyword {
-        const FIELDS: &'static [sandlang::StructField] = &[sandlang::StructField {
+    impl sandlang::native::StructType for Keyword {
+        const FIELDS: &'static [sandlang::native::StructField] = &[sandlang::native::StructField {
             name: "fn",
             doc: "",
             public: true,
             var: false,
-            ty: <i64 as sandlang::SandType>::sand_type,
+            ty: <i64 as sandlang::native::ty::SandType>::sand_type,
             default: None,
         }];
     }
@@ -1292,9 +1294,10 @@ fn enums_with_payloads_convert_to_a_bounded_depth() {
 #[test]
 #[should_panic(expected = "field `type` of `Shape.Named` is not an identifier, or is a keyword")]
 fn enum_payload_fields_must_be_sand_identifiers() {
-    use sandlang::native::{Binding, EnumVariant, Type, VariantField};
+    use sandlang::native::ty::Type;
+    use sandlang::native::{Binding, EnumVariant, VariantField};
     struct Shape;
-    impl sandlang::NamedType for Shape {
+    impl sandlang::native::NamedType for Shape {
         const MODULE: &'static str = "lab";
         const NAME: &'static str = "Shape";
         const DOC: &'static str = "";
@@ -1303,16 +1306,16 @@ fn enum_payload_fields_must_be_sand_identifiers() {
             Binding::of_enum()
         }
     }
-    impl sandlang::SandType for Shape {
+    impl sandlang::native::ty::SandType for Shape {
         fn sand_type() -> Type {
             Type::bound::<Self>(Vec::new())
         }
     }
-    impl sandlang::EnumType for Shape {
+    impl sandlang::native::EnumType for Shape {
         const VARIANTS: &'static [EnumVariant] = &[EnumVariant {
             name: "Named",
             doc: "",
-            fields: &[VariantField { name: Some("type"), ty: <i64 as sandlang::SandType>::sand_type }],
+            fields: &[VariantField { name: Some("type"), ty: <i64 as sandlang::native::ty::SandType>::sand_type }],
         }];
         fn index(&self) -> usize {
             0
@@ -1342,7 +1345,7 @@ enum Either<L, R> {
 }
 
 fn boxes_module() -> NativeModule {
-    use sandlang::native::{Param, Val};
+    use sandlang::native::ty::{Param, Val};
     let mut m = NativeModule::new("boxes");
     m.bind::<Labeled<()>>().bind::<Either<(), ()>>();
     m.function("count", |n: i64| Labeled { label: "count".into(), value: n, history: (0..n).collect() });
@@ -1477,7 +1480,7 @@ fn generic_host_types_bind_once_for_every_instance() {
 
 #[test]
 fn generic_host_types_refer_to_their_own_type_as_self() {
-    use sandlang::native::Param;
+    use sandlang::native::ty::Param;
     #[derive(Clone, Debug, PartialEq, sandlang::SandEnum)]
     #[sand(module = "trees")]
     enum Tree<T> {
@@ -1517,8 +1520,8 @@ struct Settings {
     verbose: bool,
     #[sand(default = "info")]
     level: String,
-    #[sand(default = sandlang::jiff::SignedDuration::from_secs(30))]
-    timeout: sandlang::jiff::SignedDuration,
+    #[sand(default = jiff::SignedDuration::from_secs(30))]
+    timeout: jiff::SignedDuration,
     #[sand(default)]
     tags: HashMap<String, String>,
     #[sand(default)]
@@ -1556,8 +1559,8 @@ help(conf.Settings)
     assert_eq!(out, format!("{s}\n1\nb\"\"\n{d}\n{help}"));
 }
 
-fn default_doc() -> sandlang::json::Json {
-    use sandlang::json::Json;
+fn default_doc() -> sandlang::stdlib::json::Json {
+    use sandlang::stdlib::json::Json;
     Json::Obj(
         [("on".to_string(), Json::Arr(vec![Json::Bool(true), Json::Int(-1), Json::Float(0.5), Json::Str("x".into()), Json::Null]))]
             .into_iter()
@@ -1569,7 +1572,7 @@ fn default_doc() -> sandlang::json::Json {
 #[sand(module = "conf")]
 struct Doc {
     #[sand(default = default_doc())]
-    body: sandlang::json::Json,
+    body: sandlang::stdlib::json::Json,
 }
 
 #[test]
@@ -1589,8 +1592,8 @@ fn rust_field_defaults_must_be_sand_constants() {
     #[derive(sandlang::SandStruct)]
     #[sand(module = "lab")]
     struct Bad {
-        #[sand(default = sandlang::jiff::Timestamp::UNIX_EPOCH)]
-        at: sandlang::jiff::Timestamp,
+        #[sand(default = jiff::Timestamp::UNIX_EPOCH)]
+        at: jiff::Timestamp,
     }
     NativeModule::new("lab").bind::<Bad>();
 }
@@ -1684,7 +1687,9 @@ fn rust_field_defaults_can_be_any_constant() {
 
 #[test]
 fn natives_take_num_evidence() {
-    use sandlang::native::{Call, Num, Param, Val, traits};
+    use sandlang::native::func::Call;
+    use sandlang::native::ty::{Num, Param, Val};
+    use sandlang::types::traits;
     use sandlang::vm::{Ctl, Vm};
     let module = |decl: &str| {
         let mut m = NativeModule::new("nums");
@@ -1692,8 +1697,10 @@ fn natives_take_num_evidence() {
             let mut acc = num.zero(vm, call)?.raw();
             for &x in xs.items(&vm.heap) {
                 acc = match (acc, x) {
-                    (sandlang::Value::Int(a), sandlang::Value::Int(b)) => sandlang::Value::Int(a + b),
-                    (sandlang::Value::Float(a), sandlang::Value::Float(b)) => sandlang::Value::Float(a + b),
+                    (sandlang::vm::value::Value::Int(a), sandlang::vm::value::Value::Int(b)) => sandlang::vm::value::Value::Int(a + b),
+                    (sandlang::vm::value::Value::Float(a), sandlang::vm::value::Value::Float(b)) => {
+                        sandlang::vm::value::Value::Float(a + b)
+                    }
                     _ => return Err(Ctl::internal("not a number")),
                 };
             }
@@ -1766,7 +1773,8 @@ print(none.product())
 
 #[test]
 fn natives_can_require_encode() {
-    use sandlang::native::{Param, traits};
+    use sandlang::native::ty::Param;
+    use sandlang::types::traits;
     let module = |decl: &str| {
         let mut m = NativeModule::new("store");
         m.function("keep", |x: Param<0, traits::Encode>| x);
@@ -1822,14 +1830,14 @@ fn json_rejects_unrepresentable_types_at_compile_time() {
 
 #[test]
 fn host_functions_take_and_return_json_values() {
-    use sandlang::json::Json;
+    use sandlang::stdlib::json::Json;
     let mut m = NativeModule::new("doc");
     m.function("keys", |j: Json| match j {
         Json::Obj(fields) => fields.keys().cloned().collect(),
         _ => Vec::new(),
     });
     m.function("make", || {
-        let mut fields = sandlang::indexmap::IndexMap::new();
+        let mut fields = indexmap::IndexMap::new();
         fields.insert("z".to_string(), Json::Int(1));
         fields.insert("a".to_string(), Json::Arr(vec![Json::Null, Json::Bool(true), Json::Float(1.5), Json::Str("s".into())]));
         Json::Obj(fields)
@@ -1852,7 +1860,7 @@ print(doc.keys(json.Json.Null))
 
 #[test]
 fn convert_deep_json_values_on_small_stack() {
-    use sandlang::json::Json;
+    use sandlang::stdlib::json::Json;
     fn nest(n: usize) -> Json {
         (0..n).fold(Json::Str("leaf".into()), |j, i| match i % 2 {
             0 => Json::Arr(vec![Json::Int(i as i64), j, Json::Null]),
@@ -1914,7 +1922,8 @@ fn help_lists_rust_bound_items_in_registration_order() {
 
 #[test]
 fn native_declarations_must_require_the_traits_of_their_rust_functions() {
-    use sandlang::native::{Param, traits};
+    use sandlang::native::ty::Param;
+    use sandlang::types::traits;
     let module = |decl: &str| {
         let mut m = NativeModule::new("dedupe");
         m.function("uniq", |xs: Vec<Param<0, traits::Hash>>| xs);
@@ -1950,7 +1959,7 @@ fn native_declarations_must_require_the_traits_of_their_rust_functions() {
 
 #[test]
 fn generic_natives_take_type_parameters() {
-    use sandlang::native::{Param, Reflect, Val};
+    use sandlang::native::ty::{Param, Reflect, Val};
     use sandlang::vm::{Ctl, Vm};
     let module = |src: &str| {
         let mut m = NativeModule::new("gen");
@@ -1997,7 +2006,7 @@ fn generic_natives_take_type_parameters() {
 
 #[test]
 fn reflecting_natives_take_type_descriptions() {
-    use sandlang::native::{Param, Reflect};
+    use sandlang::native::ty::{Param, Reflect};
     use sandlang::vm::Ctl;
     use sandlang::vm::Vm;
     let mut m = NativeModule::new("desc");
@@ -2010,8 +2019,8 @@ fn reflecting_natives_take_type_descriptions() {
 
 #[test]
 fn host_functions_take_and_return_durations_and_never() {
-    use sandlang::jiff::SignedDuration;
-    use sandlang::native::Never;
+    use jiff::SignedDuration;
+    use sandlang::native::ty::Never;
     use sandlang::vm::{Ctl, Vm};
     let mut m = NativeModule::new("clock");
     m.function("double", |d: SignedDuration| d * 2);
@@ -2034,7 +2043,7 @@ fn public_fields_of_public_host_types_use_public_types() {
 #[test]
 fn native_module_custom_capability() {
     let mut m = NativeModule::new("door");
-    m.vm_function("open", |vm: &mut Vm, name: String| -> Result<String, sandlang::HostError> {
+    m.vm_function("open", |vm: &mut Vm, name: String| -> Result<String, sandlang::native::convert::HostError> {
         vm.require(&Capability::Custom { name: "door".into(), detail: name.clone() })?;
         Ok(format!("opened {name}"))
     });
@@ -2054,7 +2063,7 @@ fn native_module_capability_prompts() {
     let opened = Arc::new(AtomicUsize::new(0));
     let o = opened.clone();
     let mut m = NativeModule::new("door");
-    m.vm_function("open", move |vm: &mut Vm, name: String| -> Result<String, sandlang::HostError> {
+    m.vm_function("open", move |vm: &mut Vm, name: String| -> Result<String, sandlang::native::convert::HostError> {
         vm.require(&Capability::Custom { name: "door".into(), detail: name.clone() })?;
         o.fetch_add(1, Ordering::SeqCst);
         Ok(format!("opened {name}"))
@@ -2082,7 +2091,7 @@ fn native_module_capability_prompts() {
 fn deny_all_blocks_io_but_allows_output() {
     let dir = TempDir::new("deny");
     dir.write("secret.txt", "s3cret");
-    let config = Config::new().policy(sandlang::RulePolicy::standard()).cwd(dir.path());
+    let config = Config::new().policy(sandlang::policy::rules::RulePolicy::standard()).cwd(dir.path());
     let src = r#"
 import fs
 import env
@@ -2170,7 +2179,7 @@ fn log_sinks_select_levels() {
 #[test]
 fn hosts_set_the_starting_log_level() {
     let src = "import log\nlog.debug(\"d\")\nlog.set_level(log.Level.Info)\nlog.debug(\"hidden\")";
-    let (r, _, err) = run_src(Config::new().policy(sandlang::RulePolicy::allow_all()).log_level(LogLevel::Debug), src);
+    let (r, _, err) = run_src(Config::new().policy(sandlang::policy::rules::RulePolicy::allow_all()).log_level(LogLevel::Debug), src);
     r.unwrap();
     assert_eq!(err, "DEBUG d\n");
 }
@@ -2198,7 +2207,7 @@ fn log_records_count_against_the_output_limit() {
 
 #[test]
 fn stdin_requires_permission() {
-    let config = Config::new().policy(sandlang::RulePolicy::standard()).stdin_bytes(b"line\n".to_vec());
+    let config = Config::new().policy(sandlang::policy::rules::RulePolicy::standard()).stdin_bytes(b"line\n".to_vec());
     let (r, out, _) = run_src(config, "import io\nprint(io.stdin.read_line().unwrap_err().kind)");
     r.unwrap();
     assert_eq!(out, "permission_denied\n");
@@ -2214,7 +2223,8 @@ fn rule_policy_confines_paths() {
     #[cfg(unix)]
     std::os::unix::fs::symlink(dir.path().join("private/b.txt"), dir.path().join("public/link.txt")).unwrap();
 
-    let policy = sandlang::RulePolicy::standard().allow_read(dir.path().join("public")).allow_write(dir.path().join("public/sub"));
+    let policy =
+        sandlang::policy::rules::RulePolicy::standard().allow_read(dir.path().join("public")).allow_write(dir.path().join("public/sub"));
     let config = Config::new().policy(policy).cwd(dir.path());
     let src = r#"
 import fs
@@ -2245,7 +2255,8 @@ fn rule_policy_deny_overrides_allow() {
     let dir = TempDir::new("denyover");
     dir.write("data/ok.txt", "ok");
     dir.write("data/secret/key.txt", "key");
-    let policy = sandlang::RulePolicy::standard().allow_read(dir.path().join("data")).deny_read(dir.path().join("data/secret"));
+    let policy =
+        sandlang::policy::rules::RulePolicy::standard().allow_read(dir.path().join("data")).deny_read(dir.path().join("data/secret"));
     let config = Config::new().policy(policy).cwd(dir.path());
     let (r, out, _) =
         run_src(config, "import fs\nprint(fs.read_text(\"data/ok.txt\").is_ok())\nprint(fs.read_text(\"data/secret/key.txt\").is_ok())");
@@ -2255,7 +2266,7 @@ fn rule_policy_deny_overrides_allow() {
 
 #[test]
 fn rule_policy_network_hosts() {
-    let p = sandlang::RulePolicy::standard().allow_net("example.com").allow_net("*.example.org").allow_net("localhost:8080");
+    let p = sandlang::policy::rules::RulePolicy::standard().allow_net("example.com").allow_net("*.example.org").allow_net("localhost:8080");
     let check = |host: &str, port: u16| p.check(&Capability::Net { host: host.into(), port, tls: true });
     assert_eq!(check("example.com", 443), Decision::Allow);
     assert_eq!(check("example.com", 80), Decision::Allow);
@@ -2265,14 +2276,15 @@ fn rule_policy_network_hosts() {
     assert_eq!(check("example.org", 443), Decision::Prompt);
     assert_eq!(check("localhost", 8080), Decision::Allow);
     assert_eq!(check("localhost", 8081), Decision::Prompt);
-    let prompting = sandlang::RulePolicy::standard();
+    let prompting = sandlang::policy::rules::RulePolicy::standard();
     assert_eq!(prompting.check(&Capability::Env("X".into())), Decision::Prompt);
     assert_eq!(prompting.check(&Capability::Stdout), Decision::Allow);
 }
 
 #[test]
 fn rule_policy_env_and_listen() {
-    let p = sandlang::RulePolicy::standard().allow_env("HOME").allow_listen("127.0.0.1:*").allow_listen("[::1]:0").allow_stdin();
+    let p =
+        sandlang::policy::rules::RulePolicy::standard().allow_env("HOME").allow_listen("127.0.0.1:*").allow_listen("[::1]:0").allow_stdin();
     assert_eq!(p.check(&Capability::Env("HOME".into())), Decision::Allow);
     assert_eq!(p.check(&Capability::Env("SECRET".into())), Decision::Prompt);
     let listen = |ip: &str, port| Capability::NetListen(std::net::SocketAddr::new(ip.parse().unwrap(), port));
@@ -2284,7 +2296,7 @@ fn rule_policy_env_and_listen() {
     assert_eq!(listen("::1", 0).to_string(), "listen on an ephemeral port at ::1");
     assert_eq!(p.check(&Capability::Stdin), Decision::Allow);
 
-    let p = sandlang::RulePolicy::standard()
+    let p = sandlang::policy::rules::RulePolicy::standard()
         .allow_listen("LocalHost")
         .allow_listen("[::]:80")
         .allow_listen("*:8080")
@@ -2308,7 +2320,7 @@ fn rule_policy_env_and_listen() {
         "example.com:80",
         "127.0.0.1:65536",
     ] {
-        assert!(!sandlang::policy::is_valid_listen_pattern(invalid), "{invalid}");
+        assert!(!sandlang::policy::net::is_valid_listen_pattern(invalid), "{invalid}");
     }
 }
 
@@ -2344,10 +2356,10 @@ fn unallowed_import_reports_the_missing_rule() {
         ),
         other => panic!("{other:?}"),
     }
-    let mut engine = Engine::new(Config::new().policy(sandlang::RulePolicy::standard().allow_import(&lib))).unwrap();
+    let mut engine = Engine::new(Config::new().policy(sandlang::policy::rules::RulePolicy::standard().allow_import(&lib))).unwrap();
     rt().block_on(engine.run_file(&main)).unwrap();
     let util = lib.join("util.sand");
-    let policy = sandlang::RulePolicy::standard().allow_import(&lib).prompt_import(&util);
+    let policy = sandlang::policy::rules::RulePolicy::standard().allow_import(&lib).prompt_import(&util);
     let mut engine = Engine::new(Config::new().policy(policy)).unwrap();
     match rt().block_on(engine.run_file(&main)) {
         Err(Error::Compile(d)) => assert_eq!(
@@ -2377,7 +2389,7 @@ fn prompt_answers() {
     let answers = Arc::new(Mutex::new(vec![PromptAnswer::AllowOnce, PromptAnswer::DenyOnce, PromptAnswer::AllowAlways]));
     let asked2 = asked.clone();
     let answers2 = answers.clone();
-    let config = Config::new().policy(sandlang::RulePolicy::standard()).cwd(dir.path()).prompter(move |cap: Capability| {
+    let config = Config::new().policy(sandlang::policy::rules::RulePolicy::standard()).cwd(dir.path()).prompter(move |cap: Capability| {
         asked2.lock().unwrap().push(cap.to_string());
         let answer = answers2.lock().unwrap().remove(0);
         async move { answer }
@@ -2399,7 +2411,7 @@ print(fs.read_text("a.txt").is_ok())
 
 #[test]
 fn prompt_without_prompter_denies() {
-    let config = Config::new().policy(sandlang::RulePolicy::standard());
+    let config = Config::new().policy(sandlang::policy::rules::RulePolicy::standard());
     let (r, out, _) = run_src(config, "import env\nprint(env.get(\"X\"))");
     r.unwrap();
     assert_eq!(out, "None\n");
@@ -2415,7 +2427,7 @@ fn prompts_suspend_all_execution() {
         t.fetch_add(1, Ordering::SeqCst);
     });
     let (t2, s2) = (ticks.clone(), stable.clone());
-    let config = Config::new().module(m).policy(sandlang::RulePolicy::standard()).prompter(move |_cap: Capability| {
+    let config = Config::new().module(m).policy(sandlang::policy::rules::RulePolicy::standard()).prompter(move |_cap: Capability| {
         let (t, s) = (t2.clone(), s2.clone());
         async move {
             let before = t.load(Ordering::SeqCst);
@@ -2460,7 +2472,7 @@ impl ScriptedPrompter {
     fn asked(&self) -> Vec<Capability> {
         std::mem::take(&mut *self.asked.lock().unwrap())
     }
-    fn config(&self, policy: impl sandlang::CustomPolicy + 'static) -> Config {
+    fn config(&self, policy: impl sandlang::policy::CustomPolicy + 'static) -> Config {
         self.base().custom_policy(policy)
     }
     fn base(&self) -> Config {
@@ -2474,7 +2486,7 @@ impl ScriptedPrompter {
     }
 }
 
-fn prompt_for_imports() -> impl sandlang::CustomPolicy {
+fn prompt_for_imports() -> impl sandlang::policy::CustomPolicy {
     |cap: &Capability| if matches!(cap, Capability::Import(_)) { Decision::Prompt } else { Decision::Allow }
 }
 
@@ -2482,7 +2494,7 @@ fn import_cap(dir: &TempDir, rel: &str) -> Capability {
     Capability::Import(sandlang::policy::normalize_path(&rel.split('/').fold(dir.path().to_path_buf(), |p, part| p.join(part))))
 }
 
-fn assert_import_denied(r: Result<sandlang::Outcome, Error>, import: &str) {
+fn assert_import_denied(r: Result<sandlang::engine::Outcome, Error>, import: &str) {
     match r {
         Err(Error::Compile(d)) => {
             assert!(d.iter().any(|d| d.message.starts_with(&format!("cannot import `{import}`: permission denied"))), "{d:?}")
@@ -2603,7 +2615,8 @@ fn runtime_always_answers_last_for_the_engine() {
     dir.write("a.txt", "A");
     let prompter = ScriptedPrompter::new(&[PromptAnswer::AllowAlways, PromptAnswer::DenyAlways]);
     let out = MemorySink::new();
-    let mut engine = Engine::new(prompter.base().policy(sandlang::RulePolicy::standard()).cwd(dir.path()).stdout(out.clone())).unwrap();
+    let mut engine =
+        Engine::new(prompter.base().policy(sandlang::policy::rules::RulePolicy::standard()).cwd(dir.path()).stdout(out.clone())).unwrap();
     let src = "import fs\nimport env\nprint(fs.read_text(\"a.txt\").is_ok())\nprint(env.get(\"SAND_TEST_UNSET_VAR\"))";
     rt().block_on(engine.run_source("main.sand", src)).unwrap();
     assert_eq!(prompter.asked().len(), 2);
@@ -3032,7 +3045,7 @@ print(c.unwrap_err().kind)
 a.close()
 print(net.listen("127.0.0.1", 0).is_ok())
 "#;
-    let (r, out, _) = run_src(config.policy(sandlang::RulePolicy::allow_all()), src);
+    let (r, out, _) = run_src(config.policy(sandlang::policy::rules::RulePolicy::allow_all()), src);
     r.unwrap();
     assert_eq!(out, "limit\ntrue\n");
 }
@@ -3064,7 +3077,7 @@ fn interrupt_from_another_thread() {
 fn interrupt_stops_a_run_waiting_for_a_prompt() {
     let (asked_tx, asked_rx) = std::sync::mpsc::channel();
     let asked_tx = Mutex::new(asked_tx);
-    let config = Config::new().policy(sandlang::RulePolicy::standard()).prompter(move |_cap: Capability| {
+    let config = Config::new().policy(sandlang::policy::rules::RulePolicy::standard()).prompter(move |_cap: Capability| {
         let _ = asked_tx.lock().unwrap().send(());
         std::future::pending::<PromptAnswer>()
     });
@@ -3298,7 +3311,7 @@ fn rust_panics_in_natives_do_not_unwind_into_the_host() {
 #[test]
 fn rust_panics_in_host_code_become_internal_errors() {
     // A prompter is host code that runs inside the engine's future.
-    let config = Config::new().policy(sandlang::RulePolicy::standard()).prompter(|_cap: Capability| async {
+    let config = Config::new().policy(sandlang::policy::rules::RulePolicy::standard()).prompter(|_cap: Capability| async {
         panic!("prompter bug");
         #[allow(unreachable_code)]
         PromptAnswer::DenyOnce
@@ -3343,7 +3356,7 @@ fn once_answers_apply_only_to_the_call_that_asked() {
     let answers =
         Arc::new(Mutex::new(vec![PromptAnswer::AllowOnce, PromptAnswer::AllowOnce, PromptAnswer::DenyOnce, PromptAnswer::DenyOnce]));
     let (asked2, answers2) = (asked.clone(), answers.clone());
-    let config = Config::new().policy(sandlang::RulePolicy::standard()).cwd(dir.path()).prompter(move |cap: Capability| {
+    let config = Config::new().policy(sandlang::policy::rules::RulePolicy::standard()).cwd(dir.path()).prompter(move |cap: Capability| {
         asked2.lock().unwrap().push(cap.to_string());
         let answer = answers2.lock().unwrap().remove(0);
         async move { answer }
@@ -3376,14 +3389,16 @@ fn a_symlinked_main_file_imports_from_its_own_directory() {
     std::fs::create_dir_all(dir.path().join("bin")).unwrap();
     std::os::unix::fs::symlink(dir.path().join("proj/main.sand"), dir.path().join("bin/tool.sand")).unwrap();
     let out = MemorySink::new();
-    let mut engine = Engine::new(Config::new().policy(sandlang::RulePolicy::allow_all()).stdout(out.clone())).unwrap();
+    let mut engine = Engine::new(Config::new().policy(sandlang::policy::rules::RulePolicy::allow_all()).stdout(out.clone())).unwrap();
     rt().block_on(engine.run_file(dir.path().join("bin/tool.sand"))).unwrap();
     assert_eq!(out.contents(), "hello from lib\n");
 }
 
 #[test]
 fn host_modules_can_define_resources() {
-    use sandlang::native::{Call, NativeObject, Val};
+    use sandlang::native::NativeObject;
+    use sandlang::native::func::Call;
+    use sandlang::native::ty::Val;
     use sandlang::vm::iomem::ResourceSlot;
     use sandlang::vm::{Ctl, Vm};
 
@@ -3405,7 +3420,7 @@ fn host_modules_can_define_resources() {
     m.bind::<Conn>();
     m.source("impl Close for Conn {\n    native fn close(self)\n}");
     let c = closed.clone();
-    m.vm_function("connect", move |vm: &mut Vm, call: Call| -> Result<Conn, sandlang::HostError> {
+    m.vm_function("connect", move |vm: &mut Vm, call: Call| -> Result<Conn, sandlang::native::convert::HostError> {
         let slot = vm.resource_slot(call)?;
         Ok(Conn { slot: Some(slot), closed: c.clone() })
     });
@@ -3427,8 +3442,8 @@ fn host_modules_can_define_resources() {
 
 #[test]
 fn host_errors_are_err_values_and_aborts_end_the_run() {
-    use sandlang::HostError;
-    use sandlang::native::Later;
+    use sandlang::native::convert::HostError;
+    use sandlang::native::func::Later;
     use sandlang::vm::{Ctl, Vm};
     let mut m = NativeModule::new("errs");
     m.function("now", || -> Result<i64, HostError> { Err(HostError::new("invalid", "bad input")) });
@@ -3592,11 +3607,11 @@ fn compiled_programs_run_on_many_engines() {
     struct Caller(String);
     let mut m = NativeModule::new("host");
     m.vm_function("caller", |vm: &mut Vm| -> String { vm.context::<Caller>().map(|c| c.0.clone()).unwrap_or_default() });
-    let fs = sandlang::MemFs::new();
+    let fs = sandlang::files::mem::MemFs::new();
     fs.write("/app/main.sand", "import host\nimport \"./util.sand\"\nvar n = 0\nn += 1\nprint(\"\\(host.caller()) \\(util.twice(n))\")")
         .unwrap();
     fs.write("/app/util.sand", "pub fn twice(x: int) -> int { x * 2 }").unwrap();
-    let base = Config::new().module(m).memory_fs(fs.clone()).policy(sandlang::RulePolicy::standard().allow_import("/app"));
+    let base = Config::new().module(m).memory_fs(fs.clone()).policy(sandlang::policy::rules::RulePolicy::standard().allow_import("/app"));
     let mut compiler = Engine::new(base.clone()).unwrap();
     let program = rt().block_on(compiler.compile_file("/app/main.sand")).unwrap();
     // The source can change after compilation: the program keeps the code it was compiled from.
@@ -3613,8 +3628,8 @@ fn compiled_programs_run_on_many_engines() {
 }
 
 /// Compiles `src` as `/main.sand` and returns its function `name`.
-fn function_of(config: Config, src: &str, name: &str) -> Option<sandlang::Function> {
-    let fs = sandlang::MemFs::new();
+fn function_of(config: Config, src: &str, name: &str) -> Option<sandlang::engine::Function> {
+    let fs = sandlang::files::mem::MemFs::new();
     fs.write("/main.sand", src).unwrap();
     let mut engine = Engine::new(config.memory_fs(fs)).unwrap();
     rt().block_on(engine.compile_file("/main.sand")).unwrap().function(name)
@@ -3679,7 +3694,7 @@ fn hosts_call_functions_of_the_main_module() {
     assert_eq!(rt().block_on(engine_with(base.clone()).0.call(&nothing, &[])).unwrap(), Outcome::Returned(Ok("null".into())));
     let either = function_of(base.clone(), ORDER, "either").unwrap();
     assert_eq!(either.signature().to_string(), "fn either() -> Result<int, str>");
-    assert!(matches!(&either.signature().returns, sandlang::Returns::Result { err, .. } if !err.is_error()));
+    assert!(matches!(&either.signature().returns, sandlang::engine::Returns::Result { err, .. } if !err.is_error()));
     assert_eq!(rt().block_on(engine_with(base.clone()).0.call(&either, &[])).unwrap(), Outcome::Returned(Err(r#""no""#.into())));
     assert!(function_of(base.clone(), ORDER, "pick").is_none(), "generic functions cannot be called");
     assert!(function_of(base.clone(), ORDER, "Order").is_none());
@@ -3695,7 +3710,7 @@ fn hosts_call_functions_of_the_main_module() {
 
 #[test]
 fn compiled_programs_keep_limits_per_run() {
-    let fs = sandlang::MemFs::new();
+    let fs = sandlang::files::mem::MemFs::new();
     fs.write("/main.sand", "while true {}").unwrap();
     let base = Config::new().memory_fs(fs).limits(Limits { max_instructions: Some(10_000), ..Limits::default() });
     let mut engine = Engine::new(base.clone()).unwrap();

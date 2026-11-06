@@ -2,12 +2,13 @@
 
 use super::{int, int_lit, str_lit};
 use proptest::prelude::*;
-use sandlang::{Config, Engine, Error, LimitKind, Limits, MemorySink, NativeModule};
+use sandlang::engine::{Config, Engine, Error, LimitKind, Limits, MemorySink};
+use sandlang::native::NativeModule;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-fn run(config: Config, src: &str) -> (Result<sandlang::Outcome, Error>, String) {
+fn run(config: Config, src: &str) -> (Result<sandlang::engine::Outcome, Error>, String) {
     let out = MemorySink::new();
     let mut engine = Engine::new(config.stdout(out.clone())).unwrap();
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -160,7 +161,7 @@ const SHAPES: [(&str, &str, &str); 5] = [
     ("dag.Pair(children: None)", "dag.Pair(children: Some((a, a)))", "pair"),
 ];
 
-fn shared_dag(shape: usize, levels: u32, limits: Limits) -> Result<sandlang::Outcome, Error> {
+fn shared_dag(shape: usize, levels: u32, limits: Limits) -> Result<sandlang::engine::Outcome, Error> {
     let mut m = NativeModule::new("dag");
     m.bind::<Fan>().bind::<HashFan>().bind::<TreeFan>().bind::<Bin>().bind::<Pair>();
     m.function("fan", |_: Fan| 0);

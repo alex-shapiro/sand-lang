@@ -1,10 +1,11 @@
 //! The task scheduler: runs fibers round-robin and drives pending I/O.
 
 use super::interp::Exit;
-use super::journal::{Due, JournalStop, Suspension, Wait, WaitWork};
+use super::journal::{Due, JournalStop, Wait, WaitWork};
 use super::*;
-use crate::LimitKind;
-use crate::native::Park;
+use crate::engine::LimitKind;
+use crate::journal::Suspension;
+use crate::native::func::Park;
 use crate::platform::{ClockFuture, Instant};
 use std::sync::atomic::Ordering;
 use std::task::{Context, Poll, Wake, Waker};

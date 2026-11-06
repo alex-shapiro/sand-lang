@@ -331,7 +331,7 @@ pub(crate) fn compile_more(mut input: CompileInput, prog: &mut Program, inc: &mu
     let cp = input.checked;
     let first = inc.fn_protos.len();
     if cfg!(debug_assertions)
-        && let Err(m) = crate::check::verify(cp, cp.bodies.from(first as FnId))
+        && let Err(m) = crate::check::verify::verify(cp, cp.bodies.from(first as FnId))
     {
         panic!("the checked program fails verification: {m}");
     }
@@ -4423,8 +4423,8 @@ impl reflect::DescSink for DescCode<'_> {
 
 #[cfg(test)]
 mod tests {
+    use crate::engine::{Config, Engine};
     use crate::vm::bytecode::{Op, Program};
-    use crate::{Config, Engine};
     use std::sync::Arc;
 
     fn compile(src: &str) -> Arc<Program> {
@@ -4448,7 +4448,7 @@ mod tests {
     }
 
     fn run(src: &str) -> String {
-        let out = crate::MemorySink::new();
+        let out = crate::engine::MemorySink::new();
         let mut engine = Engine::new(Config::new().stdout(out.clone())).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
         if let Err(e) = rt.block_on(engine.run_source("main.sand", src)) {
@@ -4557,7 +4557,7 @@ mod tests {
     #[test]
     fn rollback_removes_enum_bindings_from_reverted_compile() {
         let mut prog = (*compile("import log\nlog.info(\"x\")")).clone();
-        let level = std::any::TypeId::of::<crate::LogLevel>();
+        let level = std::any::TypeId::of::<crate::stdlib::log::LogLevel>();
         assert!(prog.enum_types.contains_key(&level));
         let mark = super::ProgramMark::of(&prog);
         let first_new = prog.variants.len() as u32;

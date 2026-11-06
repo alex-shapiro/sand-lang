@@ -7,9 +7,13 @@
 
 use super::stream::{self, IoFailure, Suspended, line_read, read_line, read_to_end_reserved, read_upto, suspend};
 use crate::check::ModKind;
-use crate::native::{Call, HostError, IntoValue, NativeModule, NativeObject, Val};
+use crate::native::convert::{HostError, IntoValue};
+use crate::native::func::Call;
+use crate::native::ty::Val;
+use crate::native::{NativeModule, NativeObject};
 use crate::network::{self, Network, Stream};
-use crate::policy::{Capability, Policy, format_host_port, is_localhost, is_valid_host, parse_ip, parse_port, split_port};
+use crate::policy::net::{format_host_port, is_localhost, is_valid_host, parse_ip, parse_port, split_port};
+use crate::policy::{Capability, Policy};
 use crate::vm::iomem::{Reservation, ResourceSlot};
 use crate::vm::value::{ValueType, to_usize_saturating};
 use crate::vm::{Ctl, Vm};
@@ -610,7 +614,8 @@ impl TlsSettings {
 
 #[cfg(feature = "tls")]
 pub(crate) mod tls {
-    use super::{IoFailure, TlsSettings};
+    use super::IoFailure;
+    use super::TlsSettings;
     use crate::network::Stream;
     use rustls::pki_types::{CertificateDer, ServerName};
     use std::sync::{Arc, OnceLock};
@@ -656,7 +661,8 @@ pub(crate) mod tls {
 
 #[cfg(not(feature = "tls"))]
 pub(crate) mod tls {
-    use super::{IoFailure, TlsSettings};
+    use super::IoFailure;
+    use super::TlsSettings;
     use crate::network::Stream;
 
     /// TLS is unavailable without the `tls` feature.

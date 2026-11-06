@@ -1,6 +1,6 @@
 //! Durable execution: the journal of the nondeterministic inputs of a run.
 //!
-//! A host makes runs durable with [`Config::durable`](crate::Config::durable).
+//! A host makes runs durable with [`Config::durable`](crate::engine::Config::durable).
 //! The engine then records, in order, every input that can differ between two
 //! executions of the same program: clock readings, the random seed, the
 //! completion of each asynchronous operation and the point in the schedule
@@ -46,7 +46,7 @@ pub enum EntryKind {
     /// which the engine delivered it, and its result.
     Done,
     /// The result of a synchronous journaled call, such as a host function
-    /// registered as [`Journaled`](crate::native::Journaled) or an
+    /// registered as [`Journaled`](crate::native::func::Journaled) or an
     /// environment variable read from the process.
     Result,
 }
@@ -438,7 +438,7 @@ pub(crate) fn time_of(nanos: i128) -> SystemTime {
     if nanos >= 0 { UNIX_EPOCH + d } else { UNIX_EPOCH - d }
 }
 
-/// The durable execution of an engine's runs ([`Config::durable`](crate::Config::durable)).
+/// The durable execution of an engine's runs ([`Config::durable`](crate::engine::Config::durable)).
 #[derive(Clone)]
 pub struct Durable {
     /// Where the engine records the inputs of each run, and the entries that
@@ -446,7 +446,7 @@ pub struct Durable {
     pub journal: Arc<dyn Journal>,
     /// Suspends a run when every task waits for a timer or a parked host
     /// call that is due more than this much later, instead of waiting: the
-    /// run returns [`Outcome::Suspended`](crate::Outcome::Suspended). `None`
+    /// run returns [`Outcome::Suspended`](crate::engine::Outcome::Suspended). `None`
     /// waits for every operation.
     pub suspend_after: Option<Duration>,
 }
@@ -465,10 +465,10 @@ impl Durable {
 }
 
 /// The future that [`Journal::flush`] returns.
-pub type FlushFuture = Pin<Box<dyn Future<Output = Result<(), crate::HostAbort>> + Send>>;
+pub type FlushFuture = Pin<Box<dyn Future<Output = Result<(), crate::engine::HostAbort>> + Send>>;
 
 /// A journaled run that the engine suspended because every task waits
-/// ([`Outcome::Suspended`](crate::Outcome::Suspended)).
+/// ([`Outcome::Suspended`](crate::engine::Outcome::Suspended)).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Suspension {
     /// When the first timer or parked host call is due, or `None` if only
@@ -497,7 +497,7 @@ pub trait Journal: Send + Sync {
     /// Makes all recorded entries durable. The engine does not start the
     /// effect that it flushes for until the future completes, and does not
     /// count the wait against the wall-time limit. An error ends the run
-    /// with [`Error::Aborted`](crate::Error::Aborted), which holds it.
+    /// with [`Error::Aborted`](crate::engine::Error::Aborted), which holds it.
     fn flush(&self) -> FlushFuture;
 }
 

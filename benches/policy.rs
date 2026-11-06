@@ -6,8 +6,9 @@
 //! accumulate; `BENCH_RULES`, default 100000), wildcard path rules, and
 //! http rules for many hosts.
 
-use sandlang::policy::{PolicyFile, normalize_path};
-use sandlang::{Capability, Decision};
+use sandlang::policy::file::PolicyFile;
+use sandlang::policy::normalize_path;
+use sandlang::policy::{Capability, Decision};
 use std::fmt::Write;
 use std::time::{Duration, Instant};
 
@@ -57,10 +58,10 @@ fn main() {
     let lines = text.lines().count();
     println!("{lines} rules: parse {}, build {}, check {}", ms(parse), ms(build), us(per_check));
     let start = Instant::now();
-    let warnings = sandlang::policy::lint_policy(&text, &base, None).unwrap();
+    let warnings = sandlang::policy::lint::lint_policy(&text, &base, None).unwrap();
     println!("lint: {} ({} warnings)", ms(start.elapsed()), warnings.len());
     let start = Instant::now();
-    assert_eq!(sandlang::policy::format_policy(&text).unwrap(), text);
+    assert_eq!(sandlang::policy::format::format_policy(&text).unwrap(), text);
     println!("format: {}", ms(start.elapsed()));
 }
 

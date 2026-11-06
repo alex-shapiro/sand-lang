@@ -1,13 +1,13 @@
 //! Sandboxed file system abstraction over the host OS (`Fs::Host`, behind the
 //! `os` feature) and an in-memory file system ([`MemFs`]).
 //!
-//! Perform all script file and module-loading I/O through [`Fs`] on a worker
+//! Perform all script file and module-loading I/O through `Fs` on a worker
 //! thread (`Vm::offload`). Do not call path-based `std::fs` or `tokio::fs`
 //! functions on script paths.
 
 #[cfg(feature = "os")]
 mod host;
-mod mem;
+pub mod mem;
 #[cfg(all(feature = "os", unix))]
 mod unix;
 #[cfg(all(feature = "os", windows))]
@@ -18,11 +18,9 @@ mod windows;
 #[cfg(all(feature = "os", not(any(unix, windows))))]
 compile_error!("the `os` feature needs Unix or Windows (files are opened without following symlinks)");
 
-pub use mem::MemFs;
-pub(crate) use mem::normalize as memory_path;
-
 use crate::policy::PathSpace;
 use crate::vm::iomem::Reservation;
+use mem::MemFs;
 use std::ffi::OsStr;
 use std::io;
 use std::path::{Path, PathBuf};

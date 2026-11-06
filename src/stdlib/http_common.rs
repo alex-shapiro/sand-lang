@@ -3,7 +3,10 @@
 use super::stream::{self, IoFailure, Suspended, bytes_read, line_read};
 use super::uri;
 use crate::journal::HttpOutcome;
-use crate::native::{Call, HostError, IntoValue, NativeModule, NativeObject, Val};
+use crate::native::convert::{HostError, IntoValue};
+use crate::native::func::Call;
+use crate::native::ty::Val;
+use crate::native::{NativeModule, NativeObject};
 use crate::vm::iomem::Reservation;
 use crate::vm::journal::{BuildFn, Identity};
 use crate::vm::value::to_usize_saturating;

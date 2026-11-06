@@ -1,5 +1,6 @@
 //! Linter for policy files.
 
+use super::file::PolicyError;
 use super::file::parse;
 use super::net::{HostKind, NetPattern, ProbeTargets, domains_above, enclosing_ranges, is_localhost};
 use super::path::{self, Pattern, Seg, name_counts};
@@ -7,7 +8,7 @@ use super::rules::{
     Connection, IMPORT, Precedence, READ, Rank, Rule, RuleKind, Transports, WRITE, fold_segments, method_matches, precedence,
     resolution_key,
 };
-use super::{Capability, Decision, PathSpace, PolicyError};
+use super::{Capability, Decision, PathSpace};
 use crate::lint::LintWarning;
 use crate::vm::value::{FxBuild, FxHashMap};
 use std::hash::BuildHasher;
@@ -196,7 +197,7 @@ impl<'a> PathRule<'a> {
     fn new(index: usize, rule: &'a Rule) -> Option<PathRule<'a>> {
         let (scope, raw, rank) = match &rule.kind {
             RuleKind::Files(access, pattern) => {
-                let raw = pattern.segments(crate::files::memory_path);
+                let raw = pattern.segments(crate::files::mem::normalize);
                 let rank = Rank::file(&raw);
                 (Scope::Files(access.mask(rule.decision)), raw, rank)
             }
@@ -535,7 +536,7 @@ fn cannot_override_between(i: &PathRule, j: &PathRule, k: &PathRule) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::PolicyFile;
+    use crate::policy::file::PolicyFile;
     use proptest::prelude::*;
 
     fn lint(text: &str) -> Vec<String> {
@@ -1183,7 +1184,7 @@ mod tests {
                 if rules[..i].iter().any(|r| r.decision == rule.decision && r.kind == rule.kind) {
                     continue;
                 }
-                let deny = crate::policy::RulePolicy::new().deny_net(&format!("tls plaintext {}", url.host));
+                let deny = crate::policy::rules::RulePolicy::new().deny_net(&format!("tls plaintext {}", url.host));
                 let found = dests.iter().find(|(host, port)| {
                     [true, false].into_iter().filter(|&tls| transports.contains(Transports::of(tls))).any(|tls| {
                         let cap = Capability::Net { host: host.clone(), port: *port, tls };
@@ -1237,7 +1238,7 @@ mod tests {
             );
             let (text, line) = if narrow_first { (format!("{narrow}\n{broad}"), 1) } else { (format!("{broad}\n{narrow}"), 2) };
             let warnings = lint_policy(&text, Path::new("/base"), None).unwrap();
-            let kind = |rule: &str| super::super::PolicyFile::parse(rule, Path::new("/base"), None).unwrap().rules.rules()[0].kind.clone();
+            let kind = |rule: &str| super::super::file::PolicyFile::parse(rule, Path::new("/base"), None).unwrap().rules.rules()[0].kind.clone();
             let line = if kind(&narrow) == kind(&broad) { 2 } else { line };
             prop_assert!(warnings.iter().any(|w| w.line == line && w.code == "redundant-rule"), "{}: {:?}", text, warnings);
         }

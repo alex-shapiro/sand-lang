@@ -3,7 +3,8 @@
 mod common;
 
 use common::{HttpResponse, http_server, run_with};
-use sandlang::{Config, Engine, Error, Limits, MemorySink, RulePolicy};
+use sandlang::engine::{Config, Engine, Error, Limits, MemorySink};
+use sandlang::policy::rules::RulePolicy;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::time::{Duration, Instant};
 
@@ -539,7 +540,7 @@ fn tls_handshakes_time_out() {
 
 /// Runs a server script that prints `ready ADDR` first; returns the address
 /// and the run's thread.
-fn start_server_script(src: &'static str, limits: Limits) -> (String, std::thread::JoinHandle<Result<sandlang::Outcome, Error>>) {
+fn start_server_script(src: &'static str, limits: Limits) -> (String, std::thread::JoinHandle<Result<sandlang::engine::Outcome, Error>>) {
     let out = MemorySink::new();
     let config = Config::new().policy(RulePolicy::allow_all()).limits(limits).stdout(out.clone());
     let mut engine = Engine::new(config).unwrap();

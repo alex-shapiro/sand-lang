@@ -2,7 +2,8 @@
 //! `net`, and `http` modules.
 
 use super::io_kind;
-use crate::native::{HostError, IntoValue, Later};
+use crate::native::convert::{HostError, IntoValue};
+use crate::native::func::Later;
 use crate::vm::iomem::{MemoryLimit, Reservation};
 use crate::vm::{Ctl, Vm};
 use std::future::Future;

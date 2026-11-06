@@ -212,7 +212,7 @@ fn custom(name: &str, detail: Option<&str>) -> RuleKind {
 
 /// File rule builder methods such as [`RulePolicy::allow_read`] and
 /// [`RulePolicy::deny_read`] take literal path prefixes without wildcards and
-/// panic if the path is empty. To parse wildcard patterns, use [`super::PolicyFile`].
+/// panic if the path is empty. To parse wildcard patterns, use [`super::file::PolicyFile`].
 impl RulePolicy {
     /// Creates an empty policy that returns [`Decision::Prompt`] for every request.
     pub fn new() -> RulePolicy {
@@ -284,7 +284,7 @@ impl RulePolicy {
     }
 
     fn parsed(self, verb: &str, kind: &str, rest: &str) -> Self {
-        let file = super::PolicyFile::parse(&format!("{verb} {kind} {rest}"), Path::new("/"), None)
+        let file = super::file::PolicyFile::parse(&format!("{verb} {kind} {rest}"), Path::new("/"), None)
             .unwrap_or_else(|e| panic!("invalid {kind} rule {rest:?}: {}", e[0].message));
         let parsed = file.rules.rules.into_iter().map(|r| Rule::new(r.decision, r.kind));
         parsed.fold(self, RulePolicy::push_rule)
@@ -327,7 +327,7 @@ impl RulePolicy {
     ///
     /// # Panics
     ///
-    /// Panics if `rule` is invalid. Use [`super::check_net_pattern`] to
+    /// Panics if `rule` is invalid. Use [`super::net::check_net_pattern`] to
     /// validate a host pattern beforehand.
     pub fn allow_net(self, rule: &str) -> Self {
         self.parsed("allow", "net", rule)
@@ -359,7 +359,7 @@ impl RulePolicy {
         self.parsed("prompt", "http", rule)
     }
     /// Denies connections to `localhost` and to every address for which
-    /// [`super::is_private_address`] returns `true`.
+    /// [`super::net::is_private_address`] returns `true`.
     pub fn deny_private_net(self) -> Self {
         let localhost = NetPattern { kind: HostKind::Host("localhost".into()), port: None };
         let patterns = std::iter::once(localhost).chain(internal_ranges().iter().cloned());
@@ -510,7 +510,7 @@ impl RulePolicy {
         let _ = mode;
         let normal = match space {
             PathSpace::Host => lexical(p),
-            PathSpace::Memory => crate::files::memory_path(p),
+            PathSpace::Memory => crate::files::mem::normalize(p),
         };
         self.check_normalized_in(&with(normal), space)
     }
@@ -775,7 +775,7 @@ pub(crate) fn entry_path(p: &Path, space: PathSpace) -> PathBuf {
         PathSpace::Host => crate::files::Fs::Host.target(&lexical(p), Mode::Entry).path,
         #[cfg(not(feature = "os"))]
         PathSpace::Host => lexical(p),
-        PathSpace::Memory => crate::files::memory_path(p),
+        PathSpace::Memory => crate::files::mem::normalize(p),
     }
 }
 
@@ -908,7 +908,7 @@ impl FileIndex {
             let RuleKind::Files(access, pattern) = &rule.kind else { continue };
             let segs = pattern.segments(|prefix| match space {
                 PathSpace::Host => resolver.normalize(prefix),
-                PathSpace::Memory => crate::files::memory_path(prefix),
+                PathSpace::Memory => crate::files::mem::normalize(prefix),
             });
             let mask = access.mask(rule.decision);
             let entry = FileEntry { rule: i as u32, decision: rule.decision, mask, rank: Rank::file(&segs) };
@@ -1137,7 +1137,7 @@ mod props {
         ) {
             let verbs = ["allow", "deny", "prompt"];
             let text = |rules: &[(usize, &str)]| rules.iter().map(|(v, n)| format!("{} env {n}\n", verbs[*v])).collect::<String>();
-            let parse = |text: &str| super::super::PolicyFile::parse(text, Path::new("/"), None).unwrap().rules;
+            let parse = |text: &str| super::super::file::PolicyFile::parse(text, Path::new("/"), None).unwrap().rules;
             let policy = parse(&text(&rules)).with_defaults(parse(&text(&defaults)));
             let listing = policy.check(&Capability::Env("*".into()));
             for name in ["HOME", "AWS_KEY", "AB", "A", "ABX_KEY", "AXB", "*", "X", "B", "XBX"] {

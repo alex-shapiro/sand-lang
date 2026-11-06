@@ -1,5 +1,5 @@
 //! Structured documentation for the prelude, standard library modules, and
-//! host modules (see [`Engine::docs`](crate::Engine::docs)).
+//! host modules (see [`Engine::docs`](crate::engine::Engine::docs)).
 
 /// Documentation for a module.
 #[derive(Clone, Debug, PartialEq, Eq)]

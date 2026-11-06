@@ -178,7 +178,7 @@ fn load_registered(
         return false;
     }
     let file = sm.add(format!("<{name}>"), src.text.as_ref());
-    let res = crate::syntax::parse_module(&src.text, file);
+    let res = crate::syntax::parser::parse_module(&src.text, file);
     errors.extend(res.errors);
     let mut imports = Vec::new();
     path.push(name.to_string());
@@ -493,7 +493,7 @@ impl ModuleGraph {
         let mut parsed = Vec::new();
         for &mi in order {
             let m = &self.modules[mi];
-            let res = crate::syntax::parse_module(self.sm.text(m.file), m.file);
+            let res = crate::syntax::parser::parse_module(self.sm.text(m.file), m.file);
             errors.extend(res.errors);
             let mut imports = HashMap::new();
             for (item, r) in import_refs(&res.module) {
@@ -528,7 +528,7 @@ pub(crate) fn budget_error(stop: Stop, sm: &SourceMap, main_file: u32) -> Error 
             Span::new(main_file, 0, 0),
             "program too complex to compile: exceeded the compile budget (max_compile_fuel)",
         ))]),
-        Stop::Time => Error::Limit(crate::LimitKind::WallTime),
+        Stop::Time => Error::Limit(crate::engine::LimitKind::WallTime),
         Stop::Interrupted => Error::Interrupted,
     }
 }

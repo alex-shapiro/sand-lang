@@ -40,7 +40,7 @@
 
 use super::Ctl;
 use super::heap::Heap;
-use crate::LimitKind;
+use crate::engine::LimitKind;
 use crate::platform::{Clock, Deadline, Instant};
 use std::cell::Cell;
 use std::sync::Arc;

@@ -12,9 +12,11 @@ macro_rules! outln {
 
 mod repl;
 
-use sandlang::policy::{PolicyFile, parse_duration, parse_size};
-use sandlang::time::TimeZone;
-use sandlang::{Capability, Config, Engine, Error, PromptAnswer, RulePolicy};
+use sandlang::engine::{Config, Engine, Error};
+use sandlang::policy::file::{PolicyFile, parse_duration, parse_size};
+use sandlang::policy::rules::RulePolicy;
+use sandlang::policy::{Capability, PromptAnswer};
+use sandlang::stdlib::time::TimeZone;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -111,7 +113,7 @@ fn main() -> ExitCode {
         other => Err(format!("unknown command `{other}`\n\n{USAGE}")),
     };
     // A run that hit a limit may have left unflushed output. Write it before exiting.
-    sandlang::flush_stdio();
+    sandlang::stdio::flush_stdio();
     match result {
         Ok(_) if STDOUT.load(Ordering::Relaxed) == FAILED => ExitCode::from(2),
         Ok(code) => ExitCode::from(code.clamp(0, 255)),
@@ -268,7 +270,7 @@ fn is_policy(file: &str) -> bool {
     Path::new(file).extension().is_some_and(|e| e == "policy")
 }
 
-fn report_policy_errors(file: &str, errors: &[sandlang::policy::PolicyError]) -> u8 {
+fn report_policy_errors(file: &str, errors: &[sandlang::policy::file::PolicyError]) -> u8 {
     for e in errors {
         eprintln!("{file}:{e}");
     }
@@ -402,9 +404,11 @@ fn ask(cap: Capability, terminal: bool, policy: &RulePolicy) -> PromptAnswer {
 
 /// Denies `cap` for the rest of the run and prints the `--allow` flag that grants it.
 fn deny_without_prompt(cap: &Capability, policy: &RulePolicy) -> PromptAnswer {
-    let hint = sandlang::policy::rule_for(cap, true)
+    let hint = sandlang::policy::file::rule_for(cap, true)
         .and_then(|rule| Some((PolicyFile::parse(&rule, Path::new("/"), None).ok()?.rules, rule)))
-        .filter(|(rule, text)| sanitize(text) == *text && rule.clone().extend(policy.clone()).check(cap) == sandlang::Decision::Allow)
+        .filter(|(rule, text)| {
+            sanitize(text) == *text && rule.clone().extend(policy.clone()).check(cap) == sandlang::policy::Decision::Allow
+        })
         .map(|(_, rule)| format!("; pass --allow='{}' to allow it", rule.trim_start_matches("allow ").replace('\'', r"'\''")));
     eprintln!("sand: denied: {}", sanitize(&format!("{cap}{}", hint.unwrap_or_default())));
     PromptAnswer::DenyAlways
@@ -499,7 +503,7 @@ fn cmd_lint(args: &[String]) -> Result<u8, String> {
     for f in files {
         let warnings = if is_policy(f) {
             let text = std::fs::read_to_string(f).map_err(|e| format!("cannot read {f}: {e}"))?;
-            match sandlang::policy::lint_policy(&text, &policy_base(Path::new(f)), std::env::home_dir().as_deref()) {
+            match sandlang::policy::lint::lint_policy(&text, &policy_base(Path::new(f)), std::env::home_dir().as_deref()) {
                 Ok(ws) => Ok(ws),
                 Err(errors) => return Ok(report_policy_errors(f, &errors)),
             }
@@ -535,7 +539,7 @@ fn cmd_fmt(args: &[String]) -> Result<u8, String> {
     for f in files {
         let src = std::fs::read_to_string(f).map_err(|e| format!("cannot read {f}: {e}"))?;
         let formatted = if is_policy(f) {
-            match sandlang::policy::format_policy(&src) {
+            match sandlang::policy::format::format_policy(&src) {
                 Ok(out) => Ok(out),
                 Err(errors) => {
                     code = report_policy_errors(f, &errors);

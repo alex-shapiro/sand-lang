@@ -2,7 +2,8 @@
 //! RustCrypto crates, charged as they go.
 
 use crate::check::ModKind;
-use crate::native::{NativeModule, Val};
+use crate::native::NativeModule;
+use crate::native::ty::Val;
 use crate::vm::meter::{Budget, SLOW_BYTES_PER_UNIT};
 use crate::vm::{Ctl, Vm};
 use hmac::{KeyInit, Mac};

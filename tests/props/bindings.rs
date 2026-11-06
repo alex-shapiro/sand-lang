@@ -1,14 +1,18 @@
 use super::{int, int_lit, str_lit};
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
-use sandlang::json::Json;
-use sandlang::native::{Call, Num, Param, Val, traits};
+use sandlang::engine::{Config, Engine, Error, MemorySink};
+use sandlang::native::NativeModule;
+use sandlang::native::func::Call;
+use sandlang::native::ty::{Num, Param, Val};
+use sandlang::stdlib::json::Json;
+use sandlang::types::traits;
+use sandlang::vm::value::Value;
 use sandlang::vm::{Ctl, Vm};
-use sandlang::{Config, Engine, Error, MemorySink, NativeModule, Value};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::{Arc, Mutex};
 
-fn run(config: Config, src: &str) -> (Result<sandlang::Outcome, Error>, String) {
+fn run(config: Config, src: &str) -> (Result<sandlang::engine::Outcome, Error>, String) {
     let out = MemorySink::new();
     let mut engine = Engine::new(config.stdout(out.clone())).unwrap();
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -90,8 +94,8 @@ struct Defaults {
     xs: Vec<String>,
     #[sand(default)]
     opt: Option<Fig>,
-    #[sand(default = sandlang::jiff::SignedDuration::from_millis(1500))]
-    d: sandlang::jiff::SignedDuration,
+    #[sand(default = jiff::SignedDuration::from_millis(1500))]
+    d: jiff::SignedDuration,
     #[sand(default = Fig::Empty)]
     shape: Fig,
     #[sand(default = b"\x00z".to_vec())]
@@ -123,7 +127,7 @@ impl Default for Defaults {
             s: "d\"q".into(),
             xs: Vec::new(),
             opt: None,
-            d: sandlang::jiff::SignedDuration::from_millis(1500),
+            d: jiff::SignedDuration::from_millis(1500),
             shape: Fig::Empty,
             raw: b"\x00z".to_vec(),
             some: Some(4),
@@ -305,7 +309,7 @@ proptest! {
 
     #[test]
     fn rust_field_defaults_fill_omitted_fields(given in prop::collection::vec(any::<bool>(), 17), n in int(), s in text()) {
-        let full = Defaults { n, x: -1.25, b: false, s: s.clone(), xs: vec![s.clone()], opt: Some(Fig::Num(n)), d: sandlang::jiff::SignedDuration::from_secs(3), shape: Fig::Num(n), raw: vec![1, 2, 255], some: None, some_fig: Some(Fig::Num(n)), figs: vec![Fig::Num(n)], pair: (n, s.clone()), holder: Holder { a: n, bs: Vec::new(), pair: None, extra: Vec::new() }, map: BTreeMap::from([(s.clone(), Fig::Num(n))]), tags: BTreeSet::from([s.clone()]), ids: HashSet::from([n]) };
+        let full = Defaults { n, x: -1.25, b: false, s: s.clone(), xs: vec![s.clone()], opt: Some(Fig::Num(n)), d: jiff::SignedDuration::from_secs(3), shape: Fig::Num(n), raw: vec![1, 2, 255], some: None, some_fig: Some(Fig::Num(n)), figs: vec![Fig::Num(n)], pair: (n, s.clone()), holder: Holder { a: n, bs: Vec::new(), pair: None, extra: Vec::new() }, map: BTreeMap::from([(s.clone(), Fig::Num(n))]), tags: BTreeSet::from([s.clone()]), ids: HashSet::from([n]) };
         let lits = [
             ("n", int_lit(n), format!("{n}")),
             ("x", "(-1.25)".to_string(), "-1.25".to_string()),

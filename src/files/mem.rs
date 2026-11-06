@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 const NODE_OVERHEAD: usize = 64;
 
 /// An in-memory file system that scripts see instead of the host's, in
-/// engines configured with [`Config::memory_fs`](crate::Config::memory_fs)
+/// engines configured with [`Config::memory_fs`](crate::engine::Config::memory_fs)
 /// and in every engine built without the `os` feature.
 ///
 /// A `MemFs` is a handle: clones share the same files, so the host can
@@ -27,7 +27,7 @@ const NODE_OVERHEAD: usize = 64;
 /// writes beyond it fail with an error of kind `limit`.
 ///
 /// ```
-/// use sandlang::MemFs;
+/// use sandlang::files::mem::MemFs;
 /// let fs = MemFs::new();
 /// fs.write("/data/hello.txt", "hi").unwrap();
 /// assert_eq!(fs.read("/data/hello.txt").unwrap(), b"hi");

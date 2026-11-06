@@ -840,10 +840,10 @@ impl ChannelObj {
 ///
 /// Derive [`NamedType`](crate::native::NamedType) and the conversions with
 /// [`#[derive(SandValue)]`](crate::SandValue), implement this trait, and
-/// register the type with [`NativeModule::bind`](crate::NativeModule::bind):
+/// register the type with [`NativeModule::bind`](crate::native::NativeModule::bind):
 ///
 /// ```
-/// use sandlang::ValueType;
+/// use sandlang::vm::value::ValueType;
 ///
 /// /// An amount of money in cents (such as `12.50`).
 /// #[derive(Clone, PartialEq, Eq, Hash, sandlang::SandValue)]
@@ -874,8 +874,8 @@ impl ChannelObj {
 /// or formatting, so these operations must execute in constant time.
 pub trait ValueType:
     crate::native::NamedType
-    + crate::native::IntoValue
-    + for<'a> crate::native::FromValue<Item<'a> = Self>
+    + crate::native::convert::IntoValue
+    + for<'a> crate::native::convert::FromValue<Item<'a> = Self>
     + Clone
     + Eq
     + Hash
@@ -1154,14 +1154,14 @@ pub enum TypeDesc {
         def: u32,
         name: String,
         fields: Vec<FieldDesc>,
-        /// [`NamedType::rust_type`](crate::NamedType::rust_type) for a Rust-bound struct.
+        /// [`NamedType::rust_type`](crate::native::NamedType::rust_type) for a Rust-bound struct.
         rust: Option<std::any::TypeId>,
     },
     Enum {
         id: u32,
         name: String,
         variants: Vec<VariantDesc>,
-        /// [`NamedType::rust_type`](crate::NamedType::rust_type) for a Rust-bound enum.
+        /// [`NamedType::rust_type`](crate::native::NamedType::rust_type) for a Rust-bound enum.
         rust: Option<std::any::TypeId>,
     },
     Value {
@@ -1179,7 +1179,7 @@ pub enum TypeDesc {
 impl TypeDesc {
     /// Whether the type is the prelude's `Error`.
     pub fn is_error(&self) -> bool {
-        matches!(self, TypeDesc::Struct { rust: Some(t), .. } if *t == std::any::TypeId::of::<crate::stdlib::Error>())
+        matches!(self, TypeDesc::Struct { rust: Some(t), .. } if *t == std::any::TypeId::of::<crate::stdlib::core::Error>())
     }
 
     /// Whether `json.encode` and `json.decode` accept the type: false if a part of it is a

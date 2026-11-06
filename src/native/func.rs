@@ -101,9 +101,9 @@ pub struct Call {
 /// Only a function in one of these wrappers can take it:
 ///
 /// ```compile_fail
-/// # use sandlang::native::JournaledCall;
+/// # use sandlang::native::func::JournaledCall;
 /// # use sandlang::vm::Vm;
-/// let mut m = sandlang::NativeModule::new("ids");
+/// let mut m = sandlang::native::NativeModule::new("ids");
 /// m.vm_function("next", |_: &mut Vm, call: JournaledCall| call.seq().unwrap_or(0) as i64);
 /// ```
 #[derive(Clone, Copy, Debug)]
@@ -177,21 +177,21 @@ pub trait JournalArgs {}
 /// a [`JournalData`] type:
 ///
 /// ```
-/// use sandlang::native::Journaled;
-/// let mut m = sandlang::NativeModule::new("ids");
+/// use sandlang::native::func::Journaled;
+/// let mut m = sandlang::native::NativeModule::new("ids");
 /// m.function("next", Journaled(|prefix: String| format!("{prefix}-1")));
 /// ```
 ///
 /// A function that returns a bound object does not compile:
 ///
 /// ```compile_fail
-/// # use sandlang::native::Journaled;
+/// # use sandlang::native::func::Journaled;
 /// #[derive(sandlang::SandObject)]
 /// #[sand(module = "files")]
 /// struct File;
-/// impl sandlang::NativeObject for File {}
+/// impl sandlang::native::NativeObject for File {}
 ///
-/// let mut m = sandlang::NativeModule::new("files");
+/// let mut m = sandlang::native::NativeModule::new("files");
 /// m.bind::<File>();
 /// m.function("open", Journaled(|| File));
 /// ```
@@ -199,21 +199,21 @@ pub trait JournalArgs {}
 /// A function that returns a value of a bound value type does not compile:
 ///
 /// ```compile_fail
-/// # use sandlang::native::Journaled;
-/// let mut m = sandlang::NativeModule::new("clock");
-/// m.function("now", Journaled(|| sandlang::jiff::Timestamp::UNIX_EPOCH));
+/// # use sandlang::native::func::Journaled;
+/// let mut m = sandlang::native::NativeModule::new("clock");
+/// m.function("now", Journaled(|| jiff::Timestamp::UNIX_EPOCH));
 /// ```
 ///
 /// A function that takes a bound object does not compile:
 ///
 /// ```compile_fail
-/// # use sandlang::native::Journaled;
+/// # use sandlang::native::func::Journaled;
 /// #[derive(sandlang::SandObject)]
 /// #[sand(module = "files")]
 /// struct File(u32);
-/// impl sandlang::NativeObject for File {}
+/// impl sandlang::native::NativeObject for File {}
 ///
-/// let mut m = sandlang::NativeModule::new("files");
+/// let mut m = sandlang::native::NativeModule::new("files");
 /// m.bind::<File>();
 /// m.function("read", Journaled(|f: &File| i64::from(f.0)));
 /// ```
@@ -221,9 +221,10 @@ pub trait JournalArgs {}
 /// A function that takes a function does not compile:
 ///
 /// ```compile_fail
-/// # use sandlang::native::{Journaled, Val};
+/// # use sandlang::native::func::Journaled;
+/// # use sandlang::native::ty::Val;
 /// # use sandlang::vm::Vm;
-/// let mut m = sandlang::NativeModule::new("calls");
+/// let mut m = sandlang::native::NativeModule::new("calls");
 /// m.vm_function("apply", Journaled(|_: &mut Vm, f: Val<fn() -> i64>| 0i64));
 /// ```
 #[derive(Clone, Copy, Debug)]
@@ -236,9 +237,9 @@ pub struct Journaled<F>(pub F);
 /// called.
 ///
 /// ```compile_fail
-/// # use sandlang::native::Effectful;
-/// let mut m = sandlang::NativeModule::new("clock");
-/// m.function("now", Effectful(|| sandlang::jiff::Timestamp::UNIX_EPOCH));
+/// # use sandlang::native::func::Effectful;
+/// let mut m = sandlang::native::NativeModule::new("clock");
+/// m.function("now", Effectful(|| jiff::Timestamp::UNIX_EPOCH));
 /// ```
 #[derive(Clone, Copy, Debug)]
 pub struct Effectful<F>(pub F);
@@ -389,7 +390,7 @@ impl<T, E> Later<T, E> {
     /// Lets the engine suspend a journaled run while the future is pending
     /// (SPEC §16.7): if every task waits, and no operation is due within
     /// the configured threshold, the run ends with
-    /// [`Error::Suspended`](crate::Error::Suspended). The resumed run calls
+    /// [`Error::Suspended`](crate::engine::Error::Suspended). The resumed run calls
     /// the function again. Only the futures of journaled functions park;
     /// without a journal, the future runs as usual.
     pub fn parked(mut self, park: Park) -> Self {

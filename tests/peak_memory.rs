@@ -10,7 +10,7 @@
 
 mod common;
 
-use sandlang::{Config, Engine, Error, LimitKind, Limits, MemorySink};
+use sandlang::engine::{Config, Engine, Error, LimitKind, Limits, MemorySink};
 use std::process::Command;
 
 const LIMIT: usize = 128 << 20;

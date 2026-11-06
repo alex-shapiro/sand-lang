@@ -1,7 +1,9 @@
 //! The `base64` module.
 
 use crate::check::ModKind;
-use crate::native::{HostError, NativeModule, Val};
+use crate::native::NativeModule;
+use crate::native::convert::HostError;
+use crate::native::ty::Val;
 use crate::vm::{Ctl, Vm};
 
 const STANDARD: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

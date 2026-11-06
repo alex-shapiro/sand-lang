@@ -7,8 +7,8 @@ mod common;
 
 use common::{TempDir, rt};
 use sandlang::check::budget::CompileBudget;
+use sandlang::engine::{Config, Engine, Error, LimitKind, Limits, MemorySink};
 use sandlang::platform::{Deadline, SystemClock};
-use sandlang::{Config, Engine, Error, LimitKind, Limits, MemorySink};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
@@ -326,7 +326,7 @@ fn source_size_limit_covers_imports() {
     let main = dir.write("main.sand", "import \"a\"\nimport \"b\"\nprint(a.f() + b.f())\n");
     let config = |max: usize| {
         Config::new()
-            .policy(sandlang::RulePolicy::allow_all())
+            .policy(sandlang::policy::rules::RulePolicy::allow_all())
             .cwd(dir.path())
             .stdout(MemorySink::new())
             .limits(Limits { max_source_bytes: max, ..Limits::default() })
@@ -350,7 +350,8 @@ fn run_files(files: &[(&str, &str)], main: &str) -> Result<String, Error> {
     }
     let main = dir.write("main.sand", main);
     let out = MemorySink::new();
-    let mut engine = Engine::new(Config::new().policy(sandlang::RulePolicy::allow_all()).cwd(dir.path()).stdout(out.clone())).unwrap();
+    let mut engine =
+        Engine::new(Config::new().policy(sandlang::policy::rules::RulePolicy::allow_all()).cwd(dir.path()).stdout(out.clone())).unwrap();
     rt().block_on(engine.run_file(&main))?;
     Ok(out.contents())
 }
@@ -497,7 +498,7 @@ fn rust_field_defaults_are_built_once() {
         #[sand(default = vec![0; (1 << 16) - 1])]
         table: Vec<i64>,
     }
-    let mut m = sandlang::NativeModule::new("lab");
+    let mut m = sandlang::native::NativeModule::new("lab");
     m.bind::<Big>();
     let src = format!("import lab\nlet xs = [{}]\nprint(xs.len())\n", vec!["lab.Big()"; 3000].join(", "));
     let (r, took) = check(limits(|l| l.max_compile_fuel = Some(2_000_000)).module(m), &src);

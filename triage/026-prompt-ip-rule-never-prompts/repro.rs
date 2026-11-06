@@ -1,4 +1,6 @@
-use sandlang::{Capability, Config, Engine, MemorySink, PromptAnswer, RulePolicy};
+use sandlang::engine::{Config, Engine, MemorySink};
+use sandlang::policy::{Capability, PromptAnswer};
+use sandlang::policy::rules::RulePolicy;
 
 fn main() {
     let policy = RulePolicy::standard().allow_http("plaintext GET *").prompt_net("127.0.0.0/8 ::1");

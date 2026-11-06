@@ -1,5 +1,6 @@
-use sandlang::policy::PolicyFile;
-use sandlang::{Config, Engine, MemorySink, RulePolicy};
+use sandlang::policy::file::PolicyFile;
+use sandlang::engine::{Config, Engine, MemorySink};
+use sandlang::policy::rules::RulePolicy;
 use std::path::Path;
 
 fn main() {

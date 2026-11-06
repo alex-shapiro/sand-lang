@@ -2,10 +2,15 @@
 
 use super::stream::{self, IoFailure, Suspended, bytes_read, line_read, read_line, read_to_end_reserved, read_upto, strip_eol};
 use crate::check::ModKind;
-use crate::native::{Call, HostError, IntoValue, Later, NativeModule, NativeObject, ObjectType, Val};
+use crate::journal::OpKind;
+use crate::native::convert::{HostError, IntoValue};
+use crate::native::func::Park;
+use crate::native::func::{Call, Later};
+use crate::native::ty::Val;
+use crate::native::{NativeModule, NativeObject, ObjectType};
 use crate::policy::Capability;
 use crate::vm::iomem::Reservation;
-use crate::vm::journal::{Begun, BuildFn, Identity, OpKind, OpSpec, Outcome, Park, Reader, Whole, Writer};
+use crate::vm::journal::{Begun, BuildFn, Identity, OpSpec, Outcome, Reader, Whole, Writer};
 use crate::vm::value::{Obj, Value, to_usize_saturating, u64_to_usize_saturating};
 use crate::vm::{Ctl, StdinSource, Vm};
 use std::collections::BTreeMap;

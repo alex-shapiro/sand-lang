@@ -12,9 +12,10 @@ pub mod meter;
 pub mod sched;
 pub mod value;
 
-use crate::native::{Call, HostError};
+use crate::engine::{LimitKind, Limits};
+use crate::native::convert::HostError;
+use crate::native::func::Call;
 use crate::policy::{Capability, Decision, Policy, PromptAnswer, Prompter};
-use crate::{LimitKind, Limits};
 use bytecode::*;
 use heap::{Heap, Staging};
 use meter::Meter;
@@ -79,8 +80,8 @@ pub enum CtlKind {
     /// journaled function, the engine may suspend the run while it waits,
     /// as the [`Park`] says.
     ///
-    /// [`Park`]: crate::native::Park
-    Async(BoxFuture, crate::native::Park),
+    /// [`Park`]: crate::native::func::Park
+    Async(BoxFuture, crate::native::func::Park),
     /// The task waits for the scheduler event that [`Vm::block`]
     /// registered with generation `wait`; the call returns what wakes it.
     /// When it wakes, the engine cancels the tasks of `race` (`task.race`).
@@ -99,7 +100,7 @@ pub enum CtlKind {
     /// The run stops for its journal (divergence or suspension).
     Journal(journal::JournalStop),
     /// A host function ends the run (see [`Ctl::abort`]).
-    Abort(crate::HostAbort),
+    Abort(crate::engine::HostAbort),
     /// Suspend the task on an operation that the journal records (see
     /// [`Vm::begin_op`]).
     Wait(Box<journal::Wait>),
@@ -135,14 +136,14 @@ impl Ctl {
         Ctl(Box::new(CtlKind::Interrupted))
     }
 
-    /// Ends the run at once with [`Error::Aborted`](crate::Error::Aborted),
+    /// Ends the run at once with [`Error::Aborted`](crate::engine::Error::Aborted),
     /// which gives `reason` back to the host. The engine does not run
     /// deferred code, and does not journal the call that aborts, so a
     /// resumed journaled run calls it again. Use it for conditions of the
     /// host that the script must not see, such as the loss of the host's
     /// right to run the run.
     pub fn abort(reason: impl std::error::Error + Send + Sync + 'static) -> Ctl {
-        Ctl(Box::new(CtlKind::Abort(crate::HostAbort::new(reason))))
+        Ctl(Box::new(CtlKind::Abort(crate::engine::HostAbort::new(reason))))
     }
 
     /// `exit(code)`.
@@ -152,7 +153,7 @@ impl Ctl {
 
     /// Suspend the task until `fut` completes.
     pub fn suspend(fut: BoxFuture) -> Ctl {
-        Ctl(Box::new(CtlKind::Async(fut, crate::native::Park::Never)))
+        Ctl(Box::new(CtlKind::Async(fut, crate::native::func::Park::Never)))
     }
 
     /// Ask the user for `cap`.
@@ -353,7 +354,7 @@ pub enum Trap {
     /// The journal stopped the run.
     Journal(journal::JournalStop),
     /// A host function ended the run.
-    Abort(crate::HostAbort),
+    Abort(crate::engine::HostAbort),
 }
 
 impl Trap {
@@ -378,7 +379,7 @@ pub enum StdinSource {
     /// The host process's standard input.
     #[cfg(feature = "os")]
     Inherit(tokio::io::BufReader<tokio::io::Stdin>),
-    /// Input the host sends ([`crate::StdinFeed`]).
+    /// Input the host sends ([`crate::feed::StdinFeed`]).
     Fed(crate::feed::FedReader),
 }
 
@@ -538,20 +539,20 @@ pub struct Host {
     pub env: Option<Vec<(String, String)>>,
     pub rng: Rng,
     /// Minimum active script log level, or `None` if logging is disabled.
-    pub log_level: Option<crate::LogLevel>,
-    pub(crate) log_sink: Option<Arc<dyn crate::LogSink>>,
+    pub log_level: Option<crate::stdlib::log::LogLevel>,
+    pub(crate) log_sink: Option<Arc<dyn crate::stdlib::log::LogSink>>,
     pub interrupt: Arc<AtomicBool>,
     /// Cached decisions for stdout (index 0) and stderr (1).
     pub stream_decisions: [Option<bool>; 2],
     #[cfg(feature = "os")]
-    pub(crate) tls: crate::stdlib::TlsSettings,
+    pub(crate) tls: crate::stdlib::net::TlsSettings,
     /// The run's idle `http` connections.
     #[cfg(feature = "os")]
-    pub(crate) http_pool: Arc<crate::stdlib::HttpPool>,
+    pub(crate) http_pool: Arc<crate::stdlib::http::Pool>,
     pub(crate) regex_cache: Vec<(u64, u32)>,
     /// The file system of the `fs` module.
     pub(crate) fs: crate::files::Fs,
-    /// Rewrites or refuses outgoing HTTP requests (see [`crate::Config::request_filter`]).
+    /// Rewrites or refuses outgoing HTTP requests (see [`crate::engine::Config::request_filter`]).
     #[cfg_attr(not(any(feature = "os", web)), expect(dead_code, reason = "HTTP client is disabled in this build"))]
     pub(crate) request_filter: Option<crate::engine::RequestFilter>,
     /// Clock and timer provider for the engine.
@@ -562,7 +563,7 @@ pub struct Host {
     #[cfg(feature = "os")]
     pub(crate) network: Arc<dyn crate::network::Network>,
     pub(crate) time_zone: Option<jiff::tz::TimeZone>,
-    /// Host data set with [`crate::Config::context`].
+    /// Host data set with [`crate::engine::Config::context`].
     pub(crate) context: Option<Arc<dyn std::any::Any + Send + Sync>>,
 }
 
@@ -670,7 +671,7 @@ impl Fiber {
 }
 
 impl Vm {
-    /// The host data that [`crate::Config::context`] attached to the run, if
+    /// The host data that [`crate::engine::Config::context`] attached to the run, if
     /// it has type `T`.
     pub fn context<T: Send + Sync + 'static>(&self) -> Option<Arc<T>> {
         self.host.context.clone()?.downcast::<T>().ok()
@@ -926,7 +927,7 @@ impl Vm {
         display::to_debug_metered(&self.prog, &self.heap, &self.meter, v)
     }
 
-    /// If [`Config::retry_stress`](crate::Config::retry_stress) is enabled and
+    /// If [`Config::retry_stress`](crate::engine::Config::retry_stress) is enabled and
     /// `call` is not a retry, forces the next memory or resource check to fail.
     pub(crate) fn arm_retry_stress(&self, call: Call) {
         self.heap.fail_next_check.set(self.retry_stress && !call.retry);
@@ -1319,7 +1320,7 @@ impl Vm {
                 }
                 let stack = nregs.max(INITIAL_STACK_SLOTS);
                 if self.heap.would_exceed(stack * std::mem::size_of::<Value>()) {
-                    return Err(Ctl::limit(crate::LimitKind::Memory));
+                    return Err(Ctl::limit(crate::engine::LimitKind::Memory));
                 }
                 let mut frames = Vec::with_capacity(8);
                 frames.push(frame);

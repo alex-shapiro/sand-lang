@@ -1,12 +1,15 @@
 //! Durable execution: record a run in a journal, replay it, and resume it
 //! from any prefix of the journal (SPEC §16.7).
 
+use sandlang::engine::{Config, Engine, Error, MemorySink, Outcome};
 use sandlang::journal::{Durable, Entry, EntryKind, HttpOutcome, Journal, MemoryJournal, OpKind, Suspension, operations};
-use sandlang::native::{Effectful, Journaled, JournaledCall, Later, Park};
+use sandlang::native::NativeModule;
+use sandlang::native::convert::HostError;
+use sandlang::native::func::{Effectful, Journaled, JournaledCall, Later, Park};
 use sandlang::network::{Listener, Network, NetworkFuture, Stream};
 use sandlang::platform::{Clock, ClockFuture, Instant, SystemClock, SystemTime, UNIX_EPOCH};
+use sandlang::policy::rules::RulePolicy;
 use sandlang::vm::Vm;
-use sandlang::{Config, Engine, Error, HostError, MemorySink, NativeModule, Outcome, RulePolicy};
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
@@ -827,7 +830,7 @@ print(env.get("PATH").is_some())
 print(env.vars().len() > 0)
 "#;
     let fed = || {
-        let feed = sandlang::StdinFeed::new();
+        let feed = sandlang::feed::StdinFeed::new();
         feed.send("hello\nrest");
         feed.end();
         feed
@@ -846,7 +849,7 @@ print(env.vars().len() > 0)
     let kinds: Vec<EntryKind> = journal.entries().iter().map(|e| e.kind).collect();
     assert_eq!(kinds, [EntryKind::Result, EntryKind::Start, EntryKind::Done, EntryKind::Result, EntryKind::Result]);
     // Replay does not read the feed, which has nothing now.
-    let empty = sandlang::StdinFeed::new();
+    let empty = sandlang::feed::StdinFeed::new();
     empty.end();
     let again = MemorySink::new();
     let config = base
@@ -906,23 +909,21 @@ fn a_parked_call_with_a_deadline_suspends_until_the_deadline() {
     let c = clock.clone();
     m.vm_function(
         "wait_until",
-        Journaled(
-            move |_: &mut Vm, name: String, deadline: sandlang::jiff::Timestamp| -> Result<Later<Option<String>, HostError>, HostError> {
-                l.waits.fetch_add(1, Ordering::SeqCst);
-                if let Some(p) = l.signals.lock().unwrap().remove(&name) {
-                    return Ok(Later::ready(Ok(Some(p))));
-                }
-                let due = UNIX_EPOCH + Duration::from_nanos(deadline.as_nanosecond() as u64);
-                if c.wall() >= due {
-                    return Ok(Later::ready(Ok(None)));
-                }
-                Ok(Later::new(async move {
-                    std::future::pending::<()>().await;
-                    |_: &mut Vm| Ok::<_, HostError>(None)
-                })
-                .parked(Park::Until(due)))
-            },
-        ),
+        Journaled(move |_: &mut Vm, name: String, deadline: jiff::Timestamp| -> Result<Later<Option<String>, HostError>, HostError> {
+            l.waits.fetch_add(1, Ordering::SeqCst);
+            if let Some(p) = l.signals.lock().unwrap().remove(&name) {
+                return Ok(Later::ready(Ok(Some(p))));
+            }
+            let due = UNIX_EPOCH + Duration::from_nanos(deadline.as_nanosecond() as u64);
+            if c.wall() >= due {
+                return Ok(Later::ready(Ok(None)));
+            }
+            Ok(Later::new(async move {
+                std::future::pending::<()>().await;
+                |_: &mut Vm| Ok::<_, HostError>(None)
+            })
+            .parked(Park::Until(due)))
+        }),
     );
     m.source(
         r#"
@@ -957,7 +958,7 @@ pub fn wait(name: str, timeout: duration) -> Result<str?> {
 fn a_changed_instant_argument_of_a_journaled_call_diverges() {
     // A `time.Instant` has no journal encoding; the call's identity still covers it.
     let mut m = NativeModule::new("deadline");
-    m.function("seconds_until", Journaled(|t: sandlang::jiff::Timestamp| -> i64 { t.as_second() }));
+    m.function("seconds_until", Journaled(|t: jiff::Timestamp| -> i64 { t.as_second() }));
     let base = Config::new().policy(RulePolicy::allow_all()).module(m).seed(1);
     let run = |src: &str, journal: &MemoryJournal| {
         let out = MemorySink::new();
@@ -977,7 +978,7 @@ fn a_changed_instant_argument_of_a_journaled_call_diverges() {
     assert!(matches!(&r, Err(Error::Diverged { message, .. }) if message.contains("deadline.seconds_until")), "{r:?}");
     // An asynchronous call whose arguments changed says so.
     let mut m = NativeModule::new("later");
-    m.async_function("echo", Journaled(|t: sandlang::jiff::Timestamp| async move { Ok::<_, String>(t.as_second()) }));
+    m.async_function("echo", Journaled(|t: jiff::Timestamp| async move { Ok::<_, String>(t.as_second()) }));
     let base = Config::new().policy(RulePolicy::allow_all()).module(m).seed(1);
     let run = |src: &str, journal: &MemoryJournal| {
         let config = base.clone().stdout(MemorySink::new()).durable(Durable::new(Arc::new(journal.clone())));
@@ -1038,7 +1039,7 @@ print("\(b.since(a) >= 10s) \(c.since(b) >= 0s)")
 /// with the same journal.
 #[test]
 fn a_suspended_call_resumes_and_returns() {
-    let fs = sandlang::MemFs::new();
+    let fs = sandlang::files::mem::MemFs::new();
     fs.write("/main.sand", "import task\nfn main(n: int) -> int {\n    print(\"start\")\n    task.sleep(10s)\n    n * 2\n}").unwrap();
     let base = Config::new().memory_fs(fs).seed(1);
     let program = rt().block_on(Engine::new(base.clone()).unwrap().compile_file("/main.sand")).unwrap();
@@ -1077,7 +1078,7 @@ fn time_spent_in_flushes_does_not_count_against_the_wall_time_limit() {
     }
     let clock = ManualClock::new();
     let world = World::new(clock.clone(), false, Some(1));
-    let limits = sandlang::Limits { max_wall_time: Some(Duration::from_secs(1)), ..sandlang::Limits::default() };
+    let limits = sandlang::engine::Limits { max_wall_time: Some(Duration::from_secs(1)), ..sandlang::engine::Limits::default() };
     let journal = Slow(MemoryJournal::new(), clock);
     let config = world.base.clone().limits(limits).stdout(MemorySink::new()).durable(Durable::new(Arc::new(journal)));
     let src = "import http\nfor i in 0..3 {\n    print(http.get(\"http://svc.test/\\(i)\")?.status)\n}";
@@ -1113,7 +1114,7 @@ fn effects_have_the_same_sequence_number_in_every_execution() {
         .network(Arc::new(net))
         .module(m)
         .seed(1)
-        .request_filter(move |t: &sandlang::RequestTarget, _: &mut Vec<(String, String)>| {
+        .request_filter(move |t: &sandlang::engine::RequestTarget, _: &mut Vec<(String, String)>| {
             f.lock().unwrap().push(t.journal_seq);
             Ok(())
         });
@@ -1289,7 +1290,7 @@ fn a_journal_that_fails_to_flush_aborts_the_run_with_its_error() {
             self.0.record(entry)
         }
         fn flush(&self) -> sandlang::journal::FlushFuture {
-            Box::pin(std::future::ready(Err(sandlang::HostAbort::new(Fenced))))
+            Box::pin(std::future::ready(Err(sandlang::engine::HostAbort::new(Fenced))))
         }
     }
     let world = World::frozen(Some(1));

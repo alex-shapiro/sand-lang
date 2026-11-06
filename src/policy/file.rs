@@ -13,9 +13,10 @@
 
 use super::net::{HostKind, ListenPattern, NetPattern, QUOTED_STAR_IN_HOST, UrlPattern, format_host_port, url_segments};
 use super::path::{Seg, Tok};
+use super::rules::RulePolicy;
 use super::rules::{Access, NamePattern, Origin, PathPattern, Rule, RuleKind, Transports};
-use super::{Capability, Decision, RulePolicy};
-use crate::Limits;
+use super::{Capability, Decision};
+use crate::engine::Limits;
 use crate::vm::value::FxHashMap;
 use std::borrow::Cow;
 use std::fmt;
@@ -793,7 +794,7 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
             let mut url = format_host_port(host, *port);
             for name in &names {
                 url.push('/');
-                url.push_str(&crate::stdlib::uri_encode(name, b"!$&'()+;=:@-._~"));
+                url.push_str(&crate::stdlib::uri::encode(name, b"!$&'()+;=:@-._~"));
             }
             UrlPattern::parse(&url.chars().map(|c| (c, false)).collect::<Vec<_>>()).ok()?;
             format!("http {transport_word}{method} {url}")
@@ -853,7 +854,7 @@ impl fmt::Display for Rule {
                     write!(f, "/{}", if ip.is_ipv6() { 128 } else { 32 })?;
                 }
                 for seg in &url.path {
-                    write!(f, "/{}", render_seg(seg, |s, _| crate::stdlib::uri_encode(s, b"!$&'()+;=:@-._~")))?;
+                    write!(f, "/{}", render_seg(seg, |s, _| crate::stdlib::uri::encode(s, b"!$&'()+;=:@-._~")))?;
                 }
                 Ok(())
             }

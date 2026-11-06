@@ -9,7 +9,7 @@ use tokio::io::{AsyncBufRead, AsyncRead, ReadBuf};
 use tokio::sync::Notify;
 
 /// Standard input that the host sends to scripts
-/// ([`crate::Config::stdin_feed`]). A front end that reads the process's
+/// ([`crate::engine::Config::stdin_feed`]). A front end that reads the process's
 /// standard input (such as a REPL) waits for [`StdinFeed::wanted`], reads
 /// what the user types, and passes it on with [`StdinFeed::send`]. Clones
 /// share the same input; data is kept until scripts read it.

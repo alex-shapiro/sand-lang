@@ -1,7 +1,9 @@
 //! The `log` module.
 
 use crate::check::ModKind;
-use crate::native::{Call, NativeModule, Val};
+use crate::native::NativeModule;
+use crate::native::func::Call;
+use crate::native::ty::Val;
 use crate::vm::display::escape_str_debug;
 use crate::vm::{Ctl, Vm};
 use std::borrow::Cow;
@@ -44,7 +46,7 @@ pub struct LogRecord {
     /// Key-value fields in insertion order.
     pub fields: Vec<(String, String)>,
     /// Source location of the `log` call.
-    pub location: Option<crate::TraceFrame>,
+    pub location: Option<crate::engine::TraceFrame>,
 }
 
 /// Formats the record as `LEVEL message key=value ...`, quoting empty messages,
@@ -73,7 +75,7 @@ fn quote_if(s: &str, quote: bool) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
-/// Consumer for records emitted by the `log` module (see [`crate::Config::log_sink`]).
+/// Consumer for records emitted by the `log` module (see [`crate::engine::Config::log_sink`]).
 ///
 /// The engine invokes [`LogSink::log`] synchronously on the thread executing the
 /// script. Any `Fn(&LogRecord) + Send + Sync` implements `LogSink` for all

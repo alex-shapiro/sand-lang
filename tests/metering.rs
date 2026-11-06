@@ -8,8 +8,9 @@
 mod common;
 
 use common::{rt, run_with};
+use sandlang::engine::{Config, Engine, Error, LimitKind, Limits, MemorySink, Outcome};
+use sandlang::native::NativeModule;
 use sandlang::vm::{Ctl, Vm};
-use sandlang::{Config, Engine, Error, LimitKind, Limits, MemorySink, NativeModule, Outcome};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -510,7 +511,7 @@ fn race_lists_are_charged_and_counted() {
 /// `probe.receivers(ch)` and `probe.waiters(task)`: the lengths of the wait
 /// lists of a channel and of a running task.
 fn probe() -> NativeModule {
-    use sandlang::native::{Channel, Task, Val};
+    use sandlang::native::ty::{Channel, Task, Val};
     use sandlang::vm::value::Obj;
     let mut m = NativeModule::new("probe");
     m.vm_function("receivers", |vm: &mut Vm, ch: Val<Channel<i64>>| match vm.heap.get(ch.raw()) {

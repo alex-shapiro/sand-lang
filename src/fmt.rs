@@ -15,7 +15,7 @@ use crate::check::budget::{CompileBudget, Stop, tool_fuel};
 use crate::diag::{SourceFile, Span};
 use crate::syntax::ast::*;
 use crate::syntax::lexer::{Comment, CommentKind, Tok, Token};
-use crate::syntax::parse_module;
+use crate::syntax::parser::parse_module;
 use std::sync::Arc;
 
 /// Maximum line width.

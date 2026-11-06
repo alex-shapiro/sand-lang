@@ -1,21 +1,8 @@
 //! Native module registration and Rust-to-Sand type bindings.
 
-mod convert;
-mod func;
-mod ty;
-
-pub use crate::types::traits;
-pub use convert::{Conversion, FromValue, HostError, IntoHostError, IntoValue, value_from, value_into};
-pub use func::{
-    AsyncHostFunction, Call, CallParam, Effectful, HostFunction, JournalArgs, Journaled, JournaledCall, Later, LocalCallParam, NativeError,
-    Park, Signature, VmFunction,
-};
-pub use ty::{Channel, JournalArg, JournalData, Named, Never, Num, Param, Range, Reflect, SandType, Task, Type, Val};
-
-#[doc(hidden)]
-pub use convert::mismatch;
-#[doc(hidden)]
-pub use func::WithCall;
+pub mod convert;
+pub mod func;
+pub mod ty;
 
 use crate::check::ModKind;
 use crate::engine::Registry;
@@ -24,10 +11,13 @@ use crate::types::{ConstVal, MAX_CONST_DEPTH, MAX_CONST_PARTS, ValueTypeInfo};
 use crate::vm::heap::Heap;
 use crate::vm::value::{ChannelObj, MapObj, Obj, SetObj, TaskObj, TypeDesc, Value, ValueType};
 use crate::vm::{Ctl, HostFn, NativeFn, Vm};
+use convert::{Conversion, FromValue, mismatch};
+use func::{AsyncHostFunction, Call, HostFunction, LocalCallParam, Signature, VmFunction};
 use std::any::{Any, TypeId};
 use std::borrow::Cow;
 use std::marker::PhantomData;
 use std::sync::Arc;
+use ty::{Channel, Num, Param, Range, Reflect, SandType, Task, Type, Val};
 
 /// A Rust type bound to a nominal Sand type in a [`NativeModule`].
 ///
@@ -202,7 +192,7 @@ pub struct StructField {
     pub default: Option<fn() -> Option<Constant>>,
 }
 
-/// Compile-time Sand constant produced by [`IntoValue::to_const`].
+/// Compile-time Sand constant produced by [`IntoValue::to_const`](convert::IntoValue::to_const).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Constant(pub(crate) ConstVal<RustVariant, TypeId>);
 
@@ -450,7 +440,7 @@ pub fn variant_into_value<T: EnumType, const N: usize>(
 /// #[sand(module = "geo")]
 /// struct Point { x: f64 }
 /// struct Fake;
-/// impl sandlang::NamedType for Fake {
+/// impl sandlang::native::NamedType for Fake {
 ///     const MODULE: &'static str = "geo";
 ///     const NAME: &'static str = "Fake";
 ///     const DOC: &'static str = "";
@@ -776,7 +766,7 @@ struct FnDef {
 /// default). Registering a function as `"Type.name"` defines a method on
 /// `Type`; the method takes `self` if its first parameter has type `Type`. Use
 /// `native fn` declarations in [`NativeModule::source`] to specify default
-/// parameter values or generic type parameters. [`Engine::new`](crate::Engine::new)
+/// parameter values or generic type parameters. [`Engine::new`](crate::engine::Engine::new)
 /// verifies all declarations against the registered Rust signatures.
 ///
 /// Registered functions must check permissions ([`Vm::require`]), reserve
@@ -784,7 +774,7 @@ struct FnDef {
 /// because the VM re-invokes the function from the start after a permission
 /// prompt or a garbage collection triggered by a memory or resource limit. Do
 /// not panic on script input; the engine catches panics and aborts the run with
-/// [`Error::Internal`](crate::Error::Internal).
+/// [`Error::Internal`](crate::engine::Error::Internal).
 #[derive(Clone)]
 pub struct NativeModule {
     name: String,
@@ -836,8 +826,8 @@ impl NativeModule {
     /// Registers a synchronous function `f` under `name` (or `"Type.method"`
     /// for a method on a type in this module). Parameters of type `&str`,
     /// `&[u8]`, and `&T` (for an [`ObjectType`] `T`) borrow directly from the
-    /// VM heap without copying. Wrap `f` in [`Journaled`] or [`Effectful`]
-    /// to journal its calls.
+    /// VM heap without copying. Wrap `f` in [`Journaled`](func::Journaled) or
+    /// [`Effectful`](func::Effectful) to journal its calls.
     ///
     /// # Panics
     ///
@@ -850,8 +840,9 @@ impl NativeModule {
     /// Registers a synchronous function `f` that receives `&mut Vm` as its
     /// first parameter, and then the [`Call`] if it takes one. Heap values
     /// that the function does not copy must be taken as [`Val`] handles.
-    /// Only a function in [`Journaled`] or [`Effectful`] can take a
-    /// [`JournaledCall`] instead of the `Call`.
+    /// Only a function in [`Journaled`](func::Journaled) or
+    /// [`Effectful`](func::Effectful) can take a
+    /// [`JournaledCall`](func::JournaledCall) instead of the `Call`.
     ///
     /// Because the VM re-runs `f` from the start after a permission prompt
     /// ([`Vm::require`]) or after a garbage collection triggered by a memory or

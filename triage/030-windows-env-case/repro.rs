@@ -1,4 +1,5 @@
-use sandlang::{Capability, RulePolicy};
+use sandlang::policy::Capability;
+use sandlang::policy::rules::RulePolicy;
 
 fn main() {
     let policy = RulePolicy::new().allow_env("*").deny_env("AWS_SECRET_ACCESS_KEY");

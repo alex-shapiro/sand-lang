@@ -376,7 +376,7 @@ impl<T: IntoValue, E: IntoHostError> IntoValue for Result<T, E> {
             }
             Err(e) => match *e.into_host_error().0 {
                 HostErrorKind::Error { kind, message } => {
-                    let e = crate::stdlib::Error { kind, message }.into_value(vm)?;
+                    let e = crate::stdlib::core::Error { kind, message }.into_value(vm)?;
                     Ok(vm.err(e))
                 }
                 HostErrorKind::Abort(c) => Err(c),
@@ -535,8 +535,8 @@ impl<T: IntoValue> IntoValue for BTreeSet<T> {
 macro_rules! tuple_impls {
     ($len:literal: $($n:ident $i:tt),+) => {
         impl<$($n: SandType),+> SandType for ($($n,)+) {
-            fn sand_type() -> crate::native::Type {
-                crate::native::Type::Tuple(vec![$($n::sand_type()),+])
+            fn sand_type() -> crate::native::ty::Type {
+                crate::native::ty::Type::Tuple(vec![$($n::sand_type()),+])
             }
         }
         impl<$($n: FromValue),+> FromValue for ($($n,)+) {
@@ -583,25 +583,25 @@ tuple_impls!(8: A 0, B 1, C 2, D 3, E 4, F 5, G 6, H 7);
 #[macro_export]
 macro_rules! __value_type_impls {
     ($t:ty) => {
-        impl $crate::native::SandType for $t {
-            fn sand_type() -> $crate::native::Type {
-                $crate::native::Type::bound::<Self>(::std::vec::Vec::new())
+        impl $crate::native::ty::SandType for $t {
+            fn sand_type() -> $crate::native::ty::Type {
+                $crate::native::ty::Type::bound::<Self>(::std::vec::Vec::new())
             }
         }
-        impl $crate::native::JournalArg for $t {}
-        impl $crate::native::FromValue for $t {
+        impl $crate::native::ty::JournalArg for $t {}
+        impl $crate::native::convert::FromValue for $t {
             type Item<'a> = Self;
             fn from_value(
                 vm: &$crate::vm::Vm,
-                v: $crate::Value,
-                _: &mut $crate::native::Conversion,
+                v: $crate::vm::value::Value,
+                _: &mut $crate::native::convert::Conversion,
             ) -> ::std::result::Result<Self, $crate::vm::Ctl> {
-                $crate::native::value_from(vm, v)
+                $crate::native::convert::value_from(vm, v)
             }
         }
-        impl $crate::native::IntoValue for $t {
-            fn into_value(self, vm: &mut $crate::vm::Vm) -> ::std::result::Result<$crate::Value, $crate::vm::Ctl> {
-                $crate::native::value_into(self, vm)
+        impl $crate::native::convert::IntoValue for $t {
+            fn into_value(self, vm: &mut $crate::vm::Vm) -> ::std::result::Result<$crate::vm::value::Value, $crate::vm::Ctl> {
+                $crate::native::convert::value_into(self, vm)
             }
         }
     };

@@ -13,10 +13,15 @@ use super::http_common::{BodyReader, MemoryBody, Prepared, ResponseStream, prepa
 use super::stream::{self, IoFailure, Suspended};
 use crate::check::ModKind;
 use crate::journal::HttpOutcome;
-use crate::native::{Call, HostError, IntoValue, NativeModule, Val};
+use crate::journal::OpKind;
+use crate::native::NativeModule;
+use crate::native::convert::{HostError, IntoValue};
+use crate::native::func::Call;
+use crate::native::func::Park;
+use crate::native::ty::Val;
 use crate::vm::Vm;
 use crate::vm::iomem::Reservation;
-use crate::vm::journal::{Begun, BuildFn, EncodeFn, OpKind, OpSpec, Outcome, Park};
+use crate::vm::journal::{Begun, BuildFn, EncodeFn, OpSpec, Outcome};
 use jiff::SignedDuration;
 use js_sys::{Array, Function, Object, Promise, Reflect, Uint8Array};
 use std::cell::{Cell, RefCell};

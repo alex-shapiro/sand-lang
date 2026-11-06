@@ -1,14 +1,14 @@
-//! JSON encoding and decoding.
+//! The `json` standard library module, and [`Json`], the Rust type of its
+//! values.
 
 use super::base64;
 use crate::check::ModKind;
-use crate::native::traits;
-use crate::native::{
-    Constant, Conversion, EnumType, FromValue, HostError, IntoValue, NamedType, NativeModule, Param, Reflect, Val, mismatch, variant_const,
-    variant_index,
-};
+use crate::native::convert::{Conversion, FromValue, HostError, IntoValue, mismatch};
+use crate::native::ty::{Param, Reflect, Val};
+use crate::native::{Constant, EnumType, NamedType, NativeModule, variant_const, variant_index};
 use crate::syntax::lexer::is_ident;
 use crate::types::ConstVal;
+use crate::types::traits;
 use crate::vm::bytecode::Program;
 use crate::vm::compare::{hash_key, str_hash};
 use crate::vm::heap::{Heap, Staging};
@@ -160,7 +160,7 @@ pub(crate) enum Decoding {
     Done(Value),
     /// The value and a list of functions to call, in order, to fill in its computed defaults.
     Pending(Value, Value),
-    Failed(super::Error),
+    Failed(super::core::Error),
 }
 
 /// Decodes JSON `text` into a value of the type `desc`, as `json.decode` does.
@@ -203,7 +203,7 @@ pub(crate) fn decode(vm: &mut Vm, desc: &TypeDesc, text: Val<String>) -> Result<
             }
         }
     }
-    let fail = |kind: &str, message| Ok(Decoding::Failed(super::Error { kind: kind.into(), message }));
+    let fail = |kind: &str, message| Ok(Decoding::Failed(super::core::Error { kind: kind.into(), message }));
     match r {
         Ok(d) => Ok(d),
         Err(Error::Parse(msg)) => fail("parse", msg),
@@ -217,7 +217,7 @@ pub(crate) fn decode(vm: &mut Vm, desc: &TypeDesc, text: Val<String>) -> Result<
 enum Decoded<T> {
     Done(T),
     Pending(T, Val<Vec<fn()>>),
-    Failed(super::Error),
+    Failed(super::core::Error),
 }
 
 enum Error {
@@ -1506,7 +1506,7 @@ impl Encoder<'_> {
 
     fn string(&mut self, s: &str) -> Result<(), Ctl> {
         if s.len() > 1024 && self.heap.would_exceed(self.out.len().saturating_add(escaped_len(s))) {
-            return Err(Ctl::limit(crate::LimitKind::Memory));
+            return Err(Ctl::limit(crate::engine::LimitKind::Memory));
         }
         write_str(&mut self.out, s);
         Ok(())
@@ -1584,7 +1584,7 @@ impl Encoder<'_> {
                 Obj::StrBuf(s) => self.string(s)?,
                 Obj::Bytes(b) => {
                     if heap.would_exceed(self.out.len().saturating_add(b.len() / 3 * 4 + 4)) {
-                        return Err(Ctl::limit(crate::LimitKind::Memory));
+                        return Err(Ctl::limit(crate::engine::LimitKind::Memory));
                     }
                     self.meter.charge_slow_bytes(b.len())?;
                     self.out.push('"');

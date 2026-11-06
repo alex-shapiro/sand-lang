@@ -65,7 +65,7 @@ impl Type {
     }
 
     pub fn error() -> Type {
-        <crate::stdlib::Error as SandType>::sand_type()
+        <crate::stdlib::core::Error as SandType>::sand_type()
     }
 
     pub(crate) fn visit(&self, f: &mut impl FnMut(&Type)) {
@@ -220,13 +220,13 @@ impl<T: SandType> SandType for Option<T> {
     }
 }
 
-impl<T: SandType, E: crate::native::IntoHostError> SandType for Result<T, E> {
+impl<T: SandType, E: crate::native::convert::IntoHostError> SandType for Result<T, E> {
     fn sand_type() -> Type {
         Type::result(T::sand_type(), Type::error())
     }
 }
 
-impl<T: SandType, E: crate::native::NativeError> SandType for Result<crate::native::Later<T, E>, E> {
+impl<T: SandType, E: crate::native::func::NativeError> SandType for Result<crate::native::func::Later<T, E>, E> {
     fn sand_type() -> Type {
         E::result_type(T::sand_type())
     }
@@ -471,8 +471,8 @@ impl SandType for Range {
 /// [`SandStruct`](crate::SandStruct) and [`SandEnum`](crate::SandEnum)
 /// implement it for a type whose fields are `JournalData`.
 ///
-/// [`Journaled`]: super::Journaled
-/// [`Effectful`]: super::Effectful
+/// [`Journaled`]: super::func::Journaled
+/// [`Effectful`]: super::func::Effectful
 #[diagnostic::on_unimplemented(
     message = "the journal cannot record a value of type `{Self}`",
     label = "a journaled function cannot return this type",
@@ -487,8 +487,8 @@ pub trait JournalData: SandType {}
 ///
 /// [`SandValue`](crate::SandValue) implements it.
 ///
-/// [`Journaled`]: super::Journaled
-/// [`Effectful`]: super::Effectful
+/// [`Journaled`]: super::func::Journaled
+/// [`Effectful`]: super::func::Effectful
 #[diagnostic::on_unimplemented(
     message = "a value of type `{Self}` cannot identify a journaled call",
     label = "a journaled function cannot take this type",
@@ -524,8 +524,8 @@ journal_data! {
     [K, V] indexmap::IndexMap<K, V>: K, V;
     [T] HashSet<T>: T;
     [T] BTreeSet<T>: T;
-    [T, E: crate::native::IntoHostError] Result<T, E>: T;
-    [T, E: crate::native::NativeError] Result<crate::native::Later<T, E>, E>: T;
+    [T, E: crate::native::convert::IntoHostError] Result<T, E>: T;
+    [T, E: crate::native::func::NativeError] Result<crate::native::func::Later<T, E>, E>: T;
     [T] Result<T, crate::vm::Ctl>: T;
     [A, B] (A, B): A, B;
     [A, B, C] (A, B, C): A, B, C;

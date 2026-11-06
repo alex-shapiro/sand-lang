@@ -1,7 +1,7 @@
 //! Shared helpers for the acceptance test suite.
 #![allow(dead_code)]
 
-use sandlang::{Config, Engine, Error, MemorySink, Outcome};
+use sandlang::engine::{Config, Engine, Error, MemorySink, Outcome};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -80,7 +80,7 @@ pub fn run(source: &str) -> RunResult {
 pub fn run_with(source: &str, f: impl FnOnce(Config) -> Config) -> RunResult {
     let out = MemorySink::new();
     let err = MemorySink::new();
-    let config = Config::new().policy(sandlang::RulePolicy::allow_all()).stdout(out.clone()).stderr(err.clone());
+    let config = Config::new().policy(sandlang::policy::rules::RulePolicy::allow_all()).stdout(out.clone()).stderr(err.clone());
     #[cfg(feature = "os")]
     let (_dir, main, config) = {
         let dir = TempDir::new("run");
@@ -90,7 +90,7 @@ pub fn run_with(source: &str, f: impl FnOnce(Config) -> Config) -> RunResult {
     };
     #[cfg(not(feature = "os"))]
     let (main, config) = {
-        let fs = sandlang::MemFs::new();
+        let fs = sandlang::files::mem::MemFs::new();
         fs.write("/run/main.sand", source).unwrap();
         (PathBuf::from("/run/main.sand"), config.memory_fs(fs).cwd("/run"))
     };

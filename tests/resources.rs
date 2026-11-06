@@ -5,7 +5,8 @@
 mod common;
 
 use common::{HttpResponse, TempDir, http_server, rt, run_with};
-use sandlang::{Config, Engine, Limits, MemorySink, RulePolicy};
+use sandlang::engine::{Config, Engine, Limits, MemorySink};
+use sandlang::policy::rules::RulePolicy;
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
@@ -383,20 +384,20 @@ fn removing_a_tree_checks_each_entry() {
     let log = asked.clone();
     let base = root.clone();
     struct Unscanned<F>(F);
-    impl<F: Fn(&sandlang::Capability) -> sandlang::Decision + Send + Sync> sandlang::CustomPolicy for Unscanned<F> {
-        fn check(&self, cap: &sandlang::Capability) -> sandlang::Decision {
+    impl<F: Fn(&sandlang::policy::Capability) -> sandlang::policy::Decision + Send + Sync> sandlang::policy::CustomPolicy for Unscanned<F> {
+        fn check(&self, cap: &sandlang::policy::Capability) -> sandlang::policy::Decision {
             (self.0)(cap)
         }
         fn denies_under(&self, _: &std::path::Path) -> bool {
             false
         }
     }
-    let policy = Unscanned(move |cap: &sandlang::Capability| match cap {
-        sandlang::Capability::FsWrite(p) | sandlang::Capability::FsRead(p) => {
+    let policy = Unscanned(move |cap: &sandlang::policy::Capability| match cap {
+        sandlang::policy::Capability::FsWrite(p) | sandlang::policy::Capability::FsRead(p) => {
             log.lock().unwrap().push(p.strip_prefix(&base).unwrap_or(p).display().to_string());
-            if p.ends_with("keep.txt") { sandlang::Decision::Deny } else { sandlang::Decision::Allow }
+            if p.ends_with("keep.txt") { sandlang::policy::Decision::Deny } else { sandlang::policy::Decision::Allow }
         }
-        _ => sandlang::Decision::Allow,
+        _ => sandlang::policy::Decision::Allow,
     });
     let src = r#"
 import fs
@@ -477,7 +478,7 @@ print(f.read(1048576)?)
 fn server_script(
     src: &'static str,
     limits: Limits,
-) -> (String, std::thread::JoinHandle<Result<sandlang::Outcome, sandlang::Error>>, MemorySink) {
+) -> (String, std::thread::JoinHandle<Result<sandlang::engine::Outcome, sandlang::engine::Error>>, MemorySink) {
     let out = MemorySink::new();
     let mut engine = Engine::new(Config::new().policy(RulePolicy::allow_all()).limits(limits).stdout(out.clone())).unwrap();
     let handle = std::thread::spawn(move || rt().block_on(engine.run_source("server.sand", src)));
