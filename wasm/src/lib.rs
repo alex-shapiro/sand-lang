@@ -95,7 +95,7 @@ export interface Diagnostic {
 }
 
 export interface SandError {
-  kind: "compile" | "runtime" | "internal" | "limit" | "interrupted" | "io";
+  kind: "compile" | "runtime" | "internal" | "limit" | "interrupted" | "io" | "argument" | "diverged" | "aborted";
   message: string;
   /** How `sand run` exits for it: 1 runtime error, 2 compile error, 3 limit, 70 internal error, 130 interrupted. */
   exitCode: number;
@@ -180,8 +180,8 @@ impl Engine {
         let key =
             Rc::new(HookKey(hooks::register(Hooks { on_output: function(&hooks, "onOutput")?, on_prompt: function(&hooks, "onPrompt")? })));
         let mut config = Config::new()
-            .policy(policy.rules.with_defaults(sandlang::RulePolicy::standard().allow_import("/")))
             .limits(policy.apply_limits(sandlang::Limits::default()))
+            .policy(policy.rules.with_defaults(sandlang::RulePolicy::standard().allow_import("/")))
             .memory_fs(fs.clone())
             .cwd(&cwd)
             .env(string_entries(&options, "env")?)
@@ -646,7 +646,7 @@ fn error_info(e: &Error) -> JsValue {
         Error::Interrupted => ("interrupted", Array::new().into(), Array::new().into()),
         Error::Io(_) => ("io", Array::new().into(), Array::new().into()),
         Error::Argument { .. } => ("argument", Array::new().into(), Array::new().into()),
-        Error::Diverged { .. } => ("journal", Array::new().into(), Array::new().into()),
+        Error::Diverged { .. } => ("diverged", Array::new().into(), Array::new().into()),
         Error::Aborted(_) => ("aborted", Array::new().into(), Array::new().into()),
     };
     let message = match e {
