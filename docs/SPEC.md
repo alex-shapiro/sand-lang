@@ -1685,8 +1685,12 @@ resource limits in a line-oriented text format. Pass a policy file to the CLI
 with `sand run --policy=FILE` (§17.5), or parse it in Rust with
 `sandlang::policy::PolicyFile::parse(text, base, home)` to obtain
 `PolicyFile::rules` and `PolicyFile::limits`. A parsed `PolicyFile` contains
-only the rules written in the file; a host can append default rules with
-`file.rules.with_defaults(RulePolicy::standard())`.
+only the rules and limits written in the file. A host can append default rules
+with `file.rules.with_defaults(RulePolicy::standard())`, and apply the `limit`
+directives to its own default limits with `file.apply_limits(defaults)`.
+`PolicyFile::limits` and `PolicyFile::rule_sources` give the line and column of
+each `limit` directive and rule, so a host that accepts only some capabilities
+or limit values can reject a file at the position of the directive.
 
 Each line in a policy file is an independent statement. `#` starts a comment
 that extends to the end of the line. Spaces or commas separate words. Double

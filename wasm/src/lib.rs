@@ -181,7 +181,7 @@ impl Engine {
             Rc::new(HookKey(hooks::register(Hooks { on_output: function(&hooks, "onOutput")?, on_prompt: function(&hooks, "onPrompt")? })));
         let mut config = Config::new()
             .policy(policy.rules.with_defaults(sandlang::RulePolicy::standard().allow_import("/")))
-            .limits(policy.limits.clone())
+            .limits(policy.apply_limits(sandlang::Limits::default()))
             .memory_fs(fs.clone())
             .cwd(&cwd)
             .env(string_entries(&options, "env")?)

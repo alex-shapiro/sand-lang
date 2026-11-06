@@ -91,18 +91,21 @@ To load a `.policy` file from disk, parse it with `sandlang::policy::PolicyFile`
 
 ```rust no_run
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
-# use sandlang::{Config, RulePolicy};
+# use sandlang::{Config, Limits, RulePolicy};
 use sandlang::policy::PolicyFile;
 use std::path::Path;
 
 let text = std::fs::read_to_string("app.policy")?;
 let file = PolicyFile::parse(&text, Path::new("."), None).expect("a valid policy file");
-let config = Config::new().policy(file.rules.with_defaults(RulePolicy::standard())).limits(file.limits);
+let limits = file.apply_limits(Limits::default());
+let config = Config::new().policy(file.rules.with_defaults(RulePolicy::standard())).limits(limits);
 # Ok(())
 # }
 ```
 
 The second argument is the base directory for `./` paths, and the third argument is the optional home directory for `~/` paths. Appending `RulePolicy::standard()` via `with_defaults` allows `stdout` and `stderr` unless overridden by a rule in the policy file, such as `prompt stdout` or `deny stdout`.
+
+`apply_limits` applies the `limit` directives of the file to the limits that you give it. `PolicyFile::limits` and `PolicyFile::rule_sources` give the position of each directive and rule, so an application can reject a capability or a limit value that it does not support, at its line and column.
 
 To handle `prompt` decisions, pass an async callback to `Config::prompter` that accepts a `Capability` and returns a `PromptAnswer`. If a prompter is not configured, the engine denies `prompt` decisions.
 

@@ -154,8 +154,8 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
     };
     let home = std::env::home_dir();
     let cwd = std::env::current_dir().map_err(|e| format!("cannot read the current directory: {e}"))?;
-    let (mut rules, mut limits) = match policy_file {
-        Some(f) => (f.rules, f.limits),
+    let (mut limits, mut rules) = match policy_file {
+        Some(f) => (f.apply_limits(Default::default()), f.rules),
         None => Default::default(),
     };
     let mut allow_all = false;

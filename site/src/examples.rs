@@ -109,7 +109,13 @@ fn engine(files: &[(String, String)]) -> (Engine, MemorySink) {
         fs.write(format!("/{name}"), text).expect("module fits in memory");
     }
     let policy = check_policy(POLICY).expect("default policy is valid");
-    let config = Config::new().memory_fs(fs).policy(policy.rules).limits(policy.limits).seed(42).stdout(sink.clone()).stderr(sink.clone());
+    let config = Config::new()
+        .memory_fs(fs)
+        .limits(policy.apply_limits(sandlang::Limits::default()))
+        .policy(policy.rules)
+        .seed(42)
+        .stdout(sink.clone())
+        .stderr(sink.clone());
     (Engine::new(config).unwrap(), sink)
 }
 

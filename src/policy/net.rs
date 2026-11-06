@@ -20,26 +20,9 @@ pub(crate) enum HostKind {
     Ip(IpAddr, u8),
 }
 
-/// A host pattern of a `net` or `http` rule: a host name, `*.domain`, `*`,
-/// an IP address, or a CIDR range, with an optional port such as
-/// `api.example.com:8443` or `[::1]:80`.
-///
-/// [`str::parse`] reads the same grammar as a policy file, without quotes.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct HostPattern(pub(crate) NetPattern);
-
-impl std::str::FromStr for HostPattern {
-    type Err = String;
-
-    fn from_str(pattern: &str) -> Result<HostPattern, String> {
-        NetPattern::parse(pattern).map(HostPattern)
-    }
-}
-
-impl std::fmt::Display for HostPattern {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
-    }
+/// Validates a host pattern for [`super::RulePolicy::allow_net`].
+pub fn check_net_pattern(pattern: &str) -> Result<(), String> {
+    NetPattern::parse(pattern).map(drop)
 }
 
 /// Returns `true` if `pattern` is valid for [`super::RulePolicy::allow_listen`].

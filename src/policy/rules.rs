@@ -1,6 +1,6 @@
 //! Rule-based capability policies.
 
-use super::net::{Dest, HostIndex, HostKind, HostPattern, ListenPattern, NetPattern, UrlPattern, internal_ranges, parse_ip, url_segments};
+use super::net::{Dest, HostIndex, HostKind, ListenPattern, NetPattern, UrlPattern, internal_ranges, parse_ip, url_segments};
 use super::path::{Glob, Seg, Tok, Trie, path_segments};
 use super::{Capability, Decision, PathSpace, fold_name, lexical, normalize_path};
 use crate::files::Mode;
@@ -327,8 +327,8 @@ impl RulePolicy {
     ///
     /// # Panics
     ///
-    /// Panics if `rule` is invalid. To build a rule from a host pattern that
-    /// can fail to parse, use [`HostPattern`] and [`RulePolicy::allow_http_host`].
+    /// Panics if `rule` is invalid. Use [`super::check_net_pattern`] to
+    /// validate a host pattern beforehand.
     pub fn allow_net(self, rule: &str) -> Self {
         self.parsed("allow", "net", rule)
     }
@@ -357,12 +357,6 @@ impl RulePolicy {
     /// Adds a `prompt http` rule, defaulting to both `tls` and `plaintext`; see [`RulePolicy::allow_http`].
     pub fn prompt_http(self, rule: &str) -> Self {
         self.parsed("prompt", "http", rule)
-    }
-    /// Allows HTTP requests to every path on the hosts that `host` matches,
-    /// over TLS if `tls` is `true` and over plaintext if it is `false`.
-    pub fn allow_http_host(self, host: &HostPattern, tls: bool) -> Self {
-        let url = UrlPattern { host: host.0.clone(), path: vec![] };
-        self.push(Decision::Allow, RuleKind::Http(None, url, Transports::of(tls)))
     }
     /// Denies connections to `localhost` and to every address for which
     /// [`super::is_private_address`] returns `true`.
