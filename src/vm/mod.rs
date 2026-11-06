@@ -330,11 +330,11 @@ impl Trap {
 pub enum StdinSource {
     None,
     Bytes(std::io::Cursor<Vec<u8>>),
-    /// The standard input of the process, which a user types if `from_user`.
+    /// The standard input of the process, whose reads wait for `wait`.
     #[cfg(feature = "os")]
     Inherit {
         reader: tokio::io::BufReader<tokio::io::Stdin>,
-        from_user: bool,
+        wait: WaitKind,
     },
     /// Input the host sends ([`crate::StdinFeed`]).
     Host(crate::stdin_feed::StdinFeedReader),
@@ -352,7 +352,7 @@ impl VmStdin {
         let (idle_signal, wait) = match &source {
             StdinSource::Host(reader) => (Some(reader.idle_signal()), WaitKind::User),
             #[cfg(feature = "os")]
-            StdinSource::Inherit { from_user: true, .. } => (None, WaitKind::User),
+            StdinSource::Inherit { wait, .. } => (None, *wait),
             _ => (None, WaitKind::Io),
         };
         VmStdin { source: Arc::new(tokio::sync::Mutex::new(source)), idle_signal, wait }
@@ -367,8 +367,7 @@ impl VmStdin {
         self.idle_signal.as_ref()
     }
 
-    /// What a read of this input waits for: the user for a feed or for input
-    /// inherited from a user.
+    /// What a read of this input waits for.
     pub(crate) fn wait(&self) -> WaitKind {
         self.wait
     }

@@ -12,6 +12,7 @@ macro_rules! outln {
 
 mod repl;
 
+use sandlang::native::WaitKind;
 use sandlang::policy::{PolicyFile, parse_duration, parse_size};
 use sandlang::time::TimeZone;
 use sandlang::{Capability, Config, Engine, Error, PromptAnswer, RulePolicy};
@@ -226,7 +227,8 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
         .gc_stress(std::env::var_os("SAND_GC_STRESS").is_some())
         .dump_bytecode(std::env::var_os("SAND_DUMP_BYTECODE").is_some());
     // A user types at a terminal, so a read waits for the user; a pipe does not.
-    config = if std::io::IsTerminal::is_terminal(&std::io::stdin()) { config.inherit_stdin_from_user() } else { config.inherit_stdin() };
+    let wait = if std::io::IsTerminal::is_terminal(&std::io::stdin()) { WaitKind::User } else { WaitKind::Io };
+    config = config.inherit_stdin(wait);
     if !files_only {
         config = config.args(script_args.clone());
     }

@@ -2029,7 +2029,7 @@ models:
 Time spent waiting for user input while all other tasks are idle does not count
 toward `max_wall_time`. Time spent running other tasks still counts. User input
 waits include reads from a `StdinFeed`, reads of a standard input inherited
-with `Config::inherit_stdin_from_user`, and host functions that return a
+with `Config::inherit_stdin(WaitKind::User)`, and host functions that return a
 `Later` with `WaitKind::User` (§16.3). The `sand` command inherits its standard input from
 the user only if it is a terminal. A read from a `StdinFeed` always waits for the user,
 because the host sees each waiting read through `wanted` and `awaited` and can

@@ -15,7 +15,9 @@ use crate::types::{FnId, ModId};
 use crate::vm::bytecode::Program;
 use crate::vm::heap::GcStats;
 use crate::vm::sched::{IoShared, IoTable, RunEnd};
-use crate::vm::{Always, Host, HostFn, NativeEntry, OutputSink, Rng, SharedSink, StdinSource, TraceEntry, Trap, Vm, VmStdin, entropy_seed};
+use crate::vm::{
+    Always, Host, HostFn, NativeEntry, OutputSink, Rng, SharedSink, StdinSource, TraceEntry, Trap, Vm, VmStdin, WaitKind, entropy_seed,
+};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -219,7 +221,7 @@ enum StdinConfig {
     Bytes(Vec<u8>),
     #[cfg(feature = "os")]
     Inherit {
-        from_user: bool,
+        wait: WaitKind,
     },
     Host(crate::StdinFeed),
 }
@@ -388,19 +390,13 @@ impl Config {
         self.stdin = StdinConfig::Bytes(data);
         self
     }
-    /// Uses the standard input of the process. A read waits for I/O, so the
-    /// wait counts toward `max_wall_time`.
+    /// Uses the standard input of the process. `wait` tells what a read
+    /// waits for: if a user types the input, for example at a terminal, use
+    /// [`WaitKind::User`], so that the wait does not count toward
+    /// `max_wall_time` while no task can run.
     #[cfg(feature = "os")]
-    pub fn inherit_stdin(mut self) -> Self {
-        self.stdin = StdinConfig::Inherit { from_user: false };
-        self
-    }
-    /// Uses the standard input of the process, which a user types, for
-    /// example at a terminal. A read waits for the user, so the wait does not
-    /// count toward `max_wall_time` while no task can run.
-    #[cfg(feature = "os")]
-    pub fn inherit_stdin_from_user(mut self) -> Self {
-        self.stdin = StdinConfig::Inherit { from_user: true };
+    pub fn inherit_stdin(mut self, wait: WaitKind) -> Self {
+        self.stdin = StdinConfig::Inherit { wait };
         self
     }
     /// Scripts read the input the host sends through `feed`.
@@ -1072,9 +1068,7 @@ impl Engine {
             StdinConfig::None => StdinSource::None,
             StdinConfig::Bytes(b) => StdinSource::Bytes(std::io::Cursor::new(b.clone())),
             #[cfg(feature = "os")]
-            StdinConfig::Inherit { from_user } => {
-                StdinSource::Inherit { reader: tokio::io::BufReader::new(tokio::io::stdin()), from_user: *from_user }
-            }
+            StdinConfig::Inherit { wait } => StdinSource::Inherit { reader: tokio::io::BufReader::new(tokio::io::stdin()), wait: *wait },
             StdinConfig::Host(feed) => StdinSource::Host(crate::stdin_feed::StdinFeedReader::new(feed)),
         };
         let (stdout, stderr): (SharedSink, SharedSink) =
