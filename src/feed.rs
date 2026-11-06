@@ -12,8 +12,9 @@ use tokio::sync::Notify;
 /// A channel that supplies standard input from the host to scripts
 /// ([`crate::Config::stdin_feed`]). A terminal host can await
 /// [`StdinFeed::wanted`] and forward input with [`StdinFeed::send`]. A GUI
-/// host can monitor [`StdinFeed::awaited_changed`] and reply to individual
-/// reads with [`StdinFeed::answer`]. Clones share the same underlying stream.
+/// host can monitor [`StdinFeed::awaited_changed`] and submit an answer to
+/// each read with [`StdinFeed::answer`] or [`StdinFeed::dismiss`]. Clones
+/// share the same underlying stream.
 #[derive(Clone, Default)]
 pub struct StdinFeed {
     shared: Arc<Shared>,
@@ -73,20 +74,23 @@ impl StdinFeed {
         self.shared.push(Chunk { target: None, data: None });
     }
 
-    /// Sends `data` exclusively to `read_id`, or returns `false` if that read
-    /// is no longer active. Any bytes from `data` that remain unread when the
-    /// read completes are discarded.
-    pub fn answer(&self, read_id: ReadId, data: impl Into<Vec<u8>>) -> bool {
-        let data = data.into();
-        let mut state = self.shared.lock();
-        if state.active_read != Some(read_id) {
-            return false;
+    /// Submits `data` as the answer to `read`, as a user who types `data` and
+    /// presses Return. The read gets `data`, a line end if `data` does not end
+    /// with one, and then an end of input, so a read of any kind completes.
+    /// The engine discards the part of the answer that the read does not use.
+    /// Returns `false` if `read` does not wait for input.
+    pub fn answer(&self, read: ReadId, data: impl Into<Vec<u8>>) -> bool {
+        let mut data = data.into();
+        if !data.ends_with(b"\n") {
+            data.push(b'\n');
         }
-        if !data.is_empty() {
-            state.chunks.push_back(Chunk { target: Some(read_id), data: Some(data) });
-            self.shared.notify(state);
-        }
-        true
+        self.shared.submit(read, Some(data))
+    }
+
+    /// Gives `read` an end of input, so `read_line` returns `None`. Returns
+    /// `false` if `read` does not wait for input.
+    pub fn dismiss(&self, read: ReadId) -> bool {
+        self.shared.submit(read, None)
     }
 
     /// Returns `true` if a read is waiting for input and all other engine
@@ -152,6 +156,19 @@ impl Shared {
         let mut state = self.lock();
         state.chunks.push_back(chunk);
         self.notify(state);
+    }
+
+    fn submit(&self, read: ReadId, data: Option<Vec<u8>>) -> bool {
+        let mut state = self.lock();
+        if state.awaited() != Some(read) {
+            return false;
+        }
+        if let Some(data) = data {
+            state.chunks.push_back(Chunk { target: Some(read), data: Some(data) });
+        }
+        state.chunks.push_back(Chunk { target: Some(read), data: None });
+        self.notify(state);
+        true
     }
 
     fn notify(&self, mut state: MutexGuard<'_, State>) {

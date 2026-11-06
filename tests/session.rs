@@ -11,7 +11,8 @@ use sandlang::platform::{Clock, ClockFuture, Instant, SystemTime, UNIX_EPOCH};
 use sandlang::session::RESET_NOTE;
 use sandlang::vm::{Ctl, Vm};
 use sandlang::{
-    Capability, Config, Decision, Engine, Error, LimitKind, Limits, MemorySink, NativeModule, PromptAnswer, RulePolicy, Session, StdinFeed,
+    Capability, Config, Decision, Engine, Error, LimitKind, Limits, MemorySink, NativeModule, PromptAnswer, ReadId, RulePolicy, Session,
+    StdinFeed,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -1012,6 +1013,50 @@ fn answer_targets_specific_read() {
         tokio::join!(session.eval(src), answer)
     });
     assert_eq!(value.unwrap().as_deref(), Some("[Some(\"x\"), Some(\"y\")]"));
+}
+
+/// Evaluates `src` and answers each stdin read it awaits with `respond`.
+fn answered(src: &str, respond: impl Fn(&StdinFeed, ReadId)) -> String {
+    let feed = StdinFeed::new();
+    let mut r = Repl::with(Config::new().policy(RulePolicy::allow_all()).stdin_feed(&feed));
+    r.ok("import io");
+    let Repl { session, rt, .. } = &mut r;
+    let value = rt.block_on(async {
+        let eval = session.eval(src);
+        let mut eval = std::pin::pin!(eval);
+        let mut awaited = None;
+        loop {
+            tokio::select! {
+                value = &mut eval => break value,
+                read = feed.awaited_changed(awaited) => {
+                    awaited = read;
+                    if let Some(read) = read {
+                        respond(&feed, read);
+                    }
+                }
+            }
+        }
+    });
+    value.unwrap().unwrap()
+}
+
+#[test]
+fn an_answer_completes_a_read_of_any_kind() {
+    assert_eq!(answered("io.stdin.read_line()?", |f, read| assert!(f.answer(read, "abc"))), "Some(\"abc\")");
+    assert_eq!(answered("io.stdin.read_line()?", |f, read| assert!(f.answer(read, ""))), "Some(\"\")");
+    assert_eq!(answered("io.stdin.read_all()?.len()", |f, read| assert!(f.answer(read, "abc"))), "4");
+    assert_eq!(answered("io.stdin.read_all()?.len()", |f, read| assert!(f.answer(read, "a\nb\n"))), "4");
+    assert_eq!(answered("io.stdin.read_line()?", |f, read| assert!(f.dismiss(read))), "None");
+}
+
+#[test]
+fn a_read_takes_one_answer() {
+    let respond = |f: &StdinFeed, read| {
+        assert!(f.answer(read, "first"));
+        assert!(!f.answer(read, "second"));
+        assert!(!f.dismiss(read));
+    };
+    assert_eq!(answered("[io.stdin.read_line()?, io.stdin.read_line()?]", respond), "[Some(\"first\"), Some(\"first\")]");
 }
 
 #[test]

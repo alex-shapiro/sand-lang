@@ -2012,14 +2012,19 @@ of hosts:
 - A terminal host waits for `StdinFeed::wanted` and then sends what the user
   types with `StdinFeed::send`. `wanted` completes when a read waits for input
   and no other task can run. Sent data stays queued across reads until scripts
-  read it, and `StdinFeed::end` gives the next read an end of input.
+  read it. `StdinFeed::end` adds an end of input to the queue, and the read
+  that reaches it gets the end of input.
 - An app with its own input field shows the field while a read waits. Each read
   has a new `ReadId`. `StdinFeed::awaited` returns the `ReadId` of the read
   that waits for input, also while other tasks run, and
   `StdinFeed::awaited_changed` waits until that value changes.
-  `StdinFeed::answer(read, data)` gives `data` to that read only, and returns
-  false if the read has ended. When the read ends, the engine discards the
-  part of `data` that the read did not use.
+  `StdinFeed::answer(read, data)` submits `data` to that read only, as a user
+  who types `data` and presses Return: the read gets `data`, a line end, and
+  an end of input, so a read of any kind completes. `StdinFeed::dismiss(read)`
+  gives the read only an end of input, so `read_line` returns `None`. Each
+  read takes one answer; both functions return false if the read does not
+  wait for input. The engine discards the part of an answer that the read does
+  not use.
 
 A read of standard input waits for the user. A host native waits for the user
 if it returns `Later::for_user` (§16.3). While a task waits for the user and no
