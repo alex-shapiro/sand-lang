@@ -484,6 +484,8 @@ pub struct Host {
     pub stdin: Arc<tokio::sync::Mutex<StdinSource>>,
     /// The feed of a [`StdinSource::Fed`], told when the VM waits.
     pub(crate) stdin_feed: Option<Arc<crate::feed::Shared>>,
+    /// Whether a read of `stdin` waits for the user.
+    pub(crate) stdin_wait: WaitKind,
     pub output_bytes: u64,
     pub limits: Limits,
     pub cwd: PathBuf,

@@ -15,7 +15,9 @@ use crate::types::{FnId, ModId};
 use crate::vm::bytecode::Program;
 use crate::vm::heap::GcStats;
 use crate::vm::sched::{IoShared, IoTable, RunEnd};
-use crate::vm::{Always, Host, HostFn, NativeEntry, OutputSink, Rng, SharedSink, StdinSource, TraceEntry, Trap, Vm, entropy_seed};
+use crate::vm::{
+    Always, Host, HostFn, NativeEntry, OutputSink, Rng, SharedSink, StdinSource, TraceEntry, Trap, Vm, WaitKind, entropy_seed,
+};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -1068,6 +1070,12 @@ impl Engine {
             StdinConfig::Feed(feed) => Some(feed.shared()),
             _ => None,
         };
+        let stdin_wait = match &c.stdin {
+            StdinConfig::Feed(_) => WaitKind::User,
+            #[cfg(feature = "os")]
+            StdinConfig::Inherit if std::io::IsTerminal::is_terminal(&std::io::stdin()) => WaitKind::User,
+            _ => WaitKind::Io,
+        };
         let (stdout, stderr): (SharedSink, SharedSink) =
             if quiet { (Arc::new(NullSink), Arc::new(NullSink)) } else { (c.stdout.clone(), c.stderr.clone()) };
         let host = Host {
@@ -1080,6 +1088,7 @@ impl Engine {
             stderr,
             stdin: Arc::new(tokio::sync::Mutex::new(stdin)),
             stdin_feed,
+            stdin_wait,
             output_bytes: 0,
             limits: c.limits.clone(),
             cwd,

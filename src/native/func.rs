@@ -103,7 +103,7 @@ impl<T: IntoValue + Send + 'static, E: NativeError> Later<T, E> {
     where
         F: FnOnce(&mut Vm) -> Result<T, E> + Send + 'static,
     {
-        Later::pending(fut, WaitKind::Io)
+        Later::waiting(fut, WaitKind::Io)
     }
 
     /// Like [`Later::new`], for a future that completes when the user acts
@@ -114,10 +114,10 @@ impl<T: IntoValue + Send + 'static, E: NativeError> Later<T, E> {
     where
         F: FnOnce(&mut Vm) -> Result<T, E> + Send + 'static,
     {
-        Later::pending(fut, WaitKind::User)
+        Later::waiting(fut, WaitKind::User)
     }
 
-    fn pending<F>(fut: impl Future<Output = F> + Send + 'static, wait: WaitKind) -> Later<T, E>
+    pub(crate) fn waiting<F>(fut: impl Future<Output = F> + Send + 'static, wait: WaitKind) -> Later<T, E>
     where
         F: FnOnce(&mut Vm) -> Result<T, E> + Send + 'static,
     {
@@ -225,11 +225,11 @@ macro_rules! fn_impls {
                     let mut conv = Conversion::new();
                     $(let $a = $a::from_value(vm, $a, &mut conv)?;)*
                     let fut = self($($a),*);
-                    let fut = async move {
+                    Later::<R, Ctl>::new(async move {
                         let r = fut.await;
-                        Box::new(move |vm: &mut Vm| r.into_value(vm)) as Finisher
-                    };
-                    Err(Ctl::suspend(Box::pin(fut), WaitKind::Io))
+                        move |_: &mut Vm| Ok(r)
+                    })
+                    .finish(vm)
                 })
             }
         }

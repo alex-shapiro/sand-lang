@@ -2026,8 +2026,10 @@ of hosts:
   wait for input. The engine discards the part of an answer that the read does
   not use.
 
-A read of standard input waits for the user. A host native waits for the user
-if it returns `Later::for_user` (§16.3). While a task waits for the user and no
+A read of standard input from a `StdinFeed` waits for the user. So does a read
+of an inherited standard input that is a terminal; a read of a pipe or a file
+does not. A host native waits for the user if it returns `Later::for_user`
+(§16.3). While a task waits for the user and no
 task can run, the time does not count toward `max_wall_time`. The time that
 the engine runs other tasks counts.
 

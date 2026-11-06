@@ -121,10 +121,11 @@ fn read_stdin<R: IntoValue + Send + 'static>(
         let data = read_input(&stdin, what, &mut res).await.map_err(|e| IoFailure::new(e.kind, format!("stdin: {}", e.message)))?;
         Ok((data, res))
     };
-    stream::suspend_for_user(read, move |vm, (data, res)| {
+    let finish = stream::settle(read, move |vm, (data, res)| {
         drop(res);
         done(vm, data)
-    })
+    });
+    Ok(Later::waiting(finish, vm.host.stdin_wait))
 }
 
 fn input_line(vm: &mut Vm, line: Option<Vec<u8>>) -> Result<Option<String>, HostError> {
