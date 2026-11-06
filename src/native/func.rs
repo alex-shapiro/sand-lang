@@ -390,7 +390,7 @@ impl<T, E> Later<T, E> {
     /// Lets the engine suspend a journaled run while the future is pending
     /// (SPEC §16.7): if every task waits, and no operation is due within
     /// the configured threshold, the run ends with
-    /// [`Error::Suspended`](crate::engine::Error::Suspended). The resumed run calls
+    /// [`Outcome::Suspended`](crate::engine::Outcome::Suspended). The resumed run calls
     /// the function again. Only the futures of journaled functions park;
     /// without a journal, the future runs as usual.
     pub fn parked(mut self, park: Park) -> Self {

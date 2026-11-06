@@ -675,7 +675,7 @@ pub enum Op {
         src: Reg,
     },
     /// `base` = list, `base+1` = index, `base+2` = length snapshot.
-    /// If index < min(len, current length): elem = list[index], index += 1;
+    /// If index < min(len, current length): elem = `list[index]`, index += 1;
     /// otherwise jump.
     ForList {
         elem: Reg,

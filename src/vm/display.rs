@@ -104,7 +104,8 @@ enum Work<'p> {
 /// Output beyond this size fails even without a memory limit.
 const MAX_OUTPUT: usize = 1 << 30;
 
-/// [`render`], charging `budget` one unit per value plus the bytes written,
+/// Writes the display form of `v` (or its debug form if `debug`) to `out`,
+/// charging `budget` one unit per value plus the bytes written,
 /// and checking the output and work stack against the memory limit as they
 /// grow. Scratch space grows with the nesting depth, not the size of the value.
 pub fn render_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Value, debug: bool, out: &mut String) -> Result<(), Ctl> {
@@ -344,7 +345,7 @@ pub fn to_debug_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Va
     Ok(s)
 }
 
-/// [`format_value`], charging `budget` and checking large precisions and
+/// Formats `v` as `spec` says, charging `budget` and checking large precisions and
 /// widths against the memory limit before allocating.
 pub fn format_value_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Value, spec: &FormatSpec) -> Result<String, Ctl> {
     let numeric = matches!(v, Value::Int(_) | Value::Float(_));

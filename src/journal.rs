@@ -103,7 +103,7 @@ impl Entry {
     }
 
     /// A short description of the entry for messages, such as
-    /// `the start of http `GET http://example.com/``.
+    /// ``the start of http `GET http://example.com/` ``.
     pub fn describe(&self) -> String {
         match self.decode() {
             Some(d) => d.describe(),
