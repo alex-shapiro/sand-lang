@@ -73,6 +73,13 @@ pub enum WaitKind {
     User,
 }
 
+/// A suspended native call: the future that completes it, and what the
+/// future waits for.
+pub struct Suspension {
+    pub future: BoxFuture,
+    pub wait_kind: WaitKind,
+}
+
 /// What a [`Ctl`] is.
 pub enum CtlKind {
     /// Uncaught runtime error (`kind: message`) that terminates the run (see [`Ctl::fail`]).
@@ -84,7 +91,7 @@ pub enum CtlKind {
     /// Ask the user; the call is retried afterwards.
     NeedPermission(Capability),
     /// Suspend the task until the future completes.
-    Async(BoxFuture, WaitKind),
+    Async(Suspension),
     /// The task waits for the scheduler event that [`Vm::block`]
     /// registered; the call returns what wakes it.
     Blocked,
@@ -128,9 +135,9 @@ impl Ctl {
         Ctl(Box::new(CtlKind::Exit(code)))
     }
 
-    /// Suspend the task until `fut` completes.
-    pub(crate) fn suspend(fut: BoxFuture, wait_kind: WaitKind) -> Ctl {
-        Ctl(Box::new(CtlKind::Async(fut, wait_kind)))
+    /// Suspend the task until the future of `suspension` completes.
+    pub(crate) fn suspend(suspension: Suspension) -> Ctl {
+        Ctl(Box::new(CtlKind::Async(suspension)))
     }
 
     /// Ask the user for `cap`.
@@ -175,7 +182,7 @@ impl std::fmt::Debug for CtlKind {
             CtlKind::Limit(k) => write!(f, "Limit({k:?})"),
             CtlKind::Exit(c) => write!(f, "Exit({c})"),
             CtlKind::NeedPermission(c) => write!(f, "NeedPermission({c})"),
-            CtlKind::Async(_, wait_kind) => write!(f, "Async({wait_kind:?})"),
+            CtlKind::Async(s) => write!(f, "Async({:?})", s.wait_kind),
             CtlKind::Blocked => write!(f, "Blocked"),
             CtlKind::Yield => write!(f, "Yield"),
             CtlKind::Interrupted => write!(f, "Interrupted"),

@@ -3,7 +3,7 @@
 use super::convert::{Conversion, FromValue, HostError, IntoValue};
 use super::ty::Type;
 use crate::vm::value::Value;
-use crate::vm::{BoxFuture, Ctl, Finisher, NResult, NativeFn, Vm, WaitKind};
+use crate::vm::{Ctl, Finisher, NResult, NativeFn, Suspension, Vm, WaitKind};
 use std::future::Future;
 use std::marker::PhantomData;
 
@@ -63,7 +63,7 @@ enum Completion {
     /// Now, without suspending the calling task.
     Now(Finisher),
     /// After the future completes.
-    After(BoxFuture, WaitKind),
+    After(Suspension),
 }
 
 /// Error type for a [`Later`] result ([`Ctl`] or [`HostError`]).
@@ -114,7 +114,7 @@ impl<T: IntoValue + Send + 'static, E: NativeError> Later<T, E> {
             let finish = fut.await;
             Box::new(move |vm: &mut Vm| E::finish(finish(vm), vm)) as Finisher
         };
-        Later(Completion::After(Box::pin(fut), wait_kind), PhantomData)
+        Later(Completion::After(Suspension { future: Box::pin(fut), wait_kind }), PhantomData)
     }
 
     /// Completes immediately with `r` without suspending the calling task.
@@ -127,7 +127,7 @@ impl<T, E> Later<T, E> {
     pub(crate) fn finish(self, vm: &mut Vm) -> NResult {
         match self.0 {
             Completion::Now(f) => f(vm),
-            Completion::After(fut, wait_kind) => Err(Ctl::suspend(fut, wait_kind)),
+            Completion::After(suspension) => Err(Ctl::suspend(suspension)),
         }
     }
 }

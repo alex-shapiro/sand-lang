@@ -56,8 +56,7 @@ impl Wake for SlotWaker {
 struct IoOp {
     fid: u32,
     wgen: u64,
-    fut: BoxFuture,
-    wait_kind: WaitKind,
+    suspension: Suspension,
 }
 
 /// The pending I/O operations of a VM, in slots (an operation's id is its
@@ -76,9 +75,10 @@ impl IoTable {
         IoTable { shared, ..IoTable::default() }
     }
 
-    /// Polls `fut` once and registers it for task `fid` if still pending.
-    /// Returns the slot ID, or the finisher if ready immediately.
-    pub fn add(&mut self, fid: u32, wgen: u64, mut fut: BoxFuture, wait_kind: WaitKind) -> Result<u64, Finisher> {
+    /// Polls the future of `suspension` once and registers it for task `fid`
+    /// if still pending. Returns the slot ID, or the finisher if ready
+    /// immediately.
+    pub fn add(&mut self, fid: u32, wgen: u64, mut suspension: Suspension) -> Result<u64, Finisher> {
         let slot = match self.free.pop() {
             Some(s) => s,
             None => {
@@ -88,11 +88,11 @@ impl IoTable {
                 s
             }
         };
-        if let Poll::Ready(fin) = fut.as_mut().poll(&mut Context::from_waker(&self.wakers[slot as usize])) {
+        if let Poll::Ready(fin) = suspension.future.as_mut().poll(&mut Context::from_waker(&self.wakers[slot as usize])) {
             self.free.push(slot);
             return Err(fin);
         }
-        self.ops[slot as usize] = Some(IoOp { fid, wgen, fut, wait_kind });
+        self.ops[slot as usize] = Some(IoOp { fid, wgen, suspension });
         self.pending += 1;
         Ok(u64::from(slot))
     }
@@ -112,7 +112,7 @@ impl IoTable {
 
     /// Returns `true` if any pending operation is waiting for the user.
     pub fn awaits_user(&self) -> bool {
-        self.ops.iter().flatten().any(|op| op.wait_kind == WaitKind::User)
+        self.ops.iter().flatten().any(|op| op.suspension.wait_kind == WaitKind::User)
     }
 
     /// Cancels every pending operation.
@@ -131,7 +131,7 @@ impl IoTable {
         let mut done = Vec::new();
         for slot in slots {
             let Some(Some(op)) = self.ops.get_mut(slot as usize) else { continue };
-            if let Poll::Ready(fin) = op.fut.as_mut().poll(&mut Context::from_waker(&self.wakers[slot as usize])) {
+            if let Poll::Ready(fin) = op.suspension.future.as_mut().poll(&mut Context::from_waker(&self.wakers[slot as usize])) {
                 let IoOp { fid, wgen, .. } = self.ops[slot as usize].take().expect("polled");
                 self.free.push(slot);
                 self.pending -= 1;
@@ -433,11 +433,11 @@ impl Vm {
                         f.state = FiberState::Waiting;
                         self.fibers[fid as usize] = Some(f);
                     }
-                    Exit::Async(fut, wait_kind) => {
+                    Exit::Async(suspension) => {
                         let g = self.next_gen();
                         f.wgen = g;
                         f.state = FiberState::Waiting;
-                        let added = self.io.add(fid, g, fut, wait_kind);
+                        let added = self.io.add(fid, g, suspension);
                         f.io = added.as_ref().ok().copied();
                         self.fibers[fid as usize] = Some(f);
                         if let Err(fin) = added {
