@@ -33,6 +33,7 @@ A few non-exhaustive examples of idiosyncratic LLM-ish tells:
 - "spells" and "spelling"
 - "carry" and "carries"
 - "refuse" and "refusal"
+- "survive"
 - "names" as a verb
 - "no <noun>"
 - "<noun> resolves". No! The correct form is "<noun> is resolved". Passive objects are acted upon; they do not act.
