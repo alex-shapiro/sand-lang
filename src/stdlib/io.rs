@@ -140,9 +140,10 @@ const STDIN_CHUNK: usize = 64 << 10;
 /// read must wait, another is under way, or the line does not fit in memory.
 fn buffered_line(vm: &Vm) -> Option<Option<Vec<u8>>> {
     let mut source = vm.host.stdin.source().try_lock().ok()?;
-    if let StdinSource::Fed(r) = &mut *source {
-        r.reset_for_read();
-    }
+    let _read = match &mut *source {
+        StdinSource::Fed(r) => Some(r.begin_read()),
+        _ => None,
+    };
     let (buf, at_end) = match &mut *source {
         StdinSource::None => return Some(None),
         StdinSource::Bytes(c) => {
