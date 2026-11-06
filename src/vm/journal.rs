@@ -397,8 +397,6 @@ pub(crate) struct JournalState {
     /// The budget of the buffers of live operations, apart from the heap's,
     /// so that the heap's memory checks are the same in replay.
     live_memory: Arc<IoMemory>,
-    /// A divergence found where it could not be reported.
-    pending: Option<JournalStop>,
 }
 
 impl JournalState {
@@ -409,14 +407,6 @@ impl JournalState {
     /// The sequence number of the entry that the run reads or records next.
     pub fn position(&self) -> u64 {
         if self.replaying() { self.pos as u64 } else { self.len }
-    }
-
-    /// The divergence that a cancellation found, if any.
-    pub fn take_pending(&mut self) -> Result<(), JournalStop> {
-        match self.pending.take() {
-            Some(s) => Err(s),
-            None => Ok(()),
-        }
     }
 
     fn peek(&self) -> Option<&EntryData> {
@@ -430,7 +420,6 @@ impl JournalState {
     /// The next replayed entry, which must be of `kind` (`what` describes
     /// the input for the error), or `None` if replay is over.
     fn take(&mut self, kind: EntryKind, what: &dyn Fn() -> String) -> Result<Option<EntryData>, JournalStop> {
-        self.take_pending()?;
         let Some(e) = self.peek() else { return Ok(None) };
         if e.kind() != kind {
             let msg = format!("the run reads {} where the journal records {}", what(), e.describe());
@@ -499,7 +488,6 @@ pub(crate) fn start(
         wall_floor: crate::platform::UNIX_EPOCH,
         suspend_after,
         live_memory: IoMemory::new(limits.max_memory, limits.max_open_resources),
-        pending: None,
     })
 }
 
@@ -945,8 +933,10 @@ fn is_retry(r: &NResult) -> bool {
     matches!(r, Err(c) if matches!(c.kind(), CtlKind::Collect | CtlKind::Limit(crate::engine::LimitKind::Memory)))
 }
 
-fn stop(s: JournalStop) -> Ctl {
-    Ctl::from(CtlKind::Journal(s))
+impl From<JournalStop> for Ctl {
+    fn from(s: JournalStop) -> Ctl {
+        Ctl::from(CtlKind::Journal(s))
+    }
 }
 
 impl Vm {
@@ -1001,7 +991,7 @@ impl Vm {
     pub fn wall_time(&self, _: Call) -> Result<SystemTime, Ctl> {
         let Some(j) = &self.journal else { return Ok(self.host.clock.wall()) };
         let mut j = j.borrow_mut();
-        if let Some(EntryData::Wall(t)) = j.take(EntryKind::Wall, &|| "the wall clock".into()).map_err(stop)? {
+        if let Some(EntryData::Wall(t)) = j.take(EntryKind::Wall, &|| "the wall clock".into())? {
             j.saw_wall(t);
             return Ok(t);
         }
@@ -1017,7 +1007,7 @@ impl Vm {
     pub fn monotonic(&self, _: Call) -> Result<Instant, Ctl> {
         let Some(j) = &self.journal else { return Ok(self.host.clock.now()) };
         let mut j = j.borrow_mut();
-        if let Some(EntryData::Monotonic(d)) = j.take(EntryKind::Monotonic, &|| "the monotonic clock".into()).map_err(stop)? {
+        if let Some(EntryData::Monotonic(d)) = j.take(EntryKind::Monotonic, &|| "the monotonic clock".into())? {
             j.mono_last = j.mono_last.max(d);
             return Ok(j.origin + d);
         }
@@ -1041,7 +1031,7 @@ impl Vm {
                 return Ok(0);
             }
             if rec_at < at {
-                return Err(stop(j.diverged(format!("the journal records a fuel charge at {rec_at} units, and the run is at {at}"))));
+                return Err(Ctl::from(j.diverged(format!("the journal records a fuel charge at {rec_at} units, and the run is at {at}"))));
             }
             j.pos += 1;
             return Ok(extra);
@@ -1161,7 +1151,7 @@ impl Vm {
         let Some(j) = &self.journal else { return Ok(None) };
         let mut j = j.borrow_mut();
         let seq = j.pos as u64;
-        let replayed = j.take(EntryKind::Result, &|| format!("the result of `{label}`")).map_err(stop)?;
+        let replayed = j.take(EntryKind::Result, &|| format!("the result of `{label}`"))?;
         drop(j);
         let Some(EntryData::Result(CallResult { identity: id, label: rec_label, fuel, outcome })) = replayed else { return Ok(None) };
         if id != identity {
@@ -1170,7 +1160,7 @@ impl Vm {
             } else {
                 format!("the run calls `{label}` where the journal records a call of `{rec_label}`")
             };
-            return Err(stop(JournalStop::Diverged { seq, message: msg }));
+            return Err(Ctl::from(JournalStop::Diverged { seq, message: msg }));
         }
         let v = payload_outcome(self, &outcome);
         self.charge(fuel)?;
@@ -1225,30 +1215,29 @@ impl Vm {
     /// Notes that the task waiting for journaled operation `op` was
     /// cancelled: the operation never completes. Records that, so that a
     /// resumed run does not start the operation again; replay consumes the
-    /// record.
-    pub(crate) fn cancel_op(&self, op: u64) {
-        let Some(j) = &self.journal else { return };
+    /// record, and fails if the journal records something else next.
+    pub(crate) fn cancel_op(&self, op: u64) -> Result<(), JournalStop> {
+        let Some(j) = &self.journal else { return Ok(()) };
         let mut j = j.borrow_mut();
         j.local.remove(&op);
         if !j.replaying() {
             j.record_done(op, 0, OpEnd::Cancelled);
-            return;
+            return Ok(());
         }
         if j.replayed.remove(&op).is_none() {
             // A live operation that replay started: the journal does not
             // record its start's end, so the cancellation lies beyond it.
-            return;
+            return Ok(());
         }
         match j.peek() {
-            Some(EntryData::Done(OpDone { op: o, end: OpEnd::Cancelled, .. })) if *o == op => j.pos += 1,
-            _ if j.pending.is_none() => {
-                let msg = format!(
-                    "the run cancels operation {op} where the journal records {}",
-                    j.peek().map_or("nothing".into(), |e| e.describe())
-                );
-                j.pending = Some(j.diverged(msg));
+            Some(EntryData::Done(OpDone { op: o, end: OpEnd::Cancelled, .. })) if *o == op => {
+                j.pos += 1;
+                Ok(())
             }
-            _ => {}
+            next => {
+                let msg = format!("the run cancels operation {op} where the journal records {}", next.map_or("nothing".into(), |e| e.describe()));
+                Err(j.diverged(msg))
+            }
         }
     }
 
@@ -1275,7 +1264,7 @@ impl Vm {
         let id = j.ops;
         let seq = j.position();
         let kind = spec.kind;
-        let replayed = j.take(EntryKind::Start, &|| format!("the start of {} `{label}`", kind.name())).map_err(stop)?;
+        let replayed = j.take(EntryKind::Start, &|| format!("the start of {} `{label}`", kind.name()))?;
         let wake = match &replayed {
             Some(EntryData::Start(s)) => {
                 if s.kind != kind || s.identity != identity {
@@ -1289,7 +1278,7 @@ impl Vm {
                             s.label
                         )
                     };
-                    return Err(stop(JournalStop::Diverged { seq, message: msg }));
+                    return Err(Ctl::from(JournalStop::Diverged { seq, message: msg }));
                 }
                 if j.done.contains_key(&id) {
                     j.ops += 1;
@@ -1319,12 +1308,12 @@ impl Vm {
         let id = j.ops;
         let seq = j.pos as u64;
         let what = || format!("the start of {}", OpKind::Local.name());
-        let replayed = match j.take(EntryKind::Start, &what).map_err(stop)? {
+        let replayed = match j.take(EntryKind::Start, &what)? {
             Some(EntryData::Start(s)) if s.kind == OpKind::Local => true,
             Some(EntryData::Start(s)) => {
                 let message =
                     format!("the run waits for a local operation where the journal records the start of {} `{}`", s.kind.name(), s.label);
-                return Err(stop(JournalStop::Diverged { seq, message }));
+                return Err(Ctl::from(JournalStop::Diverged { seq, message }));
             }
             _ => {
                 let start = OpStart { kind: OpKind::Local, identity: 0, pre_fuel: 0, wake: None, label: "wait".to_string() };
@@ -1386,7 +1375,6 @@ impl Vm {
     pub(crate) fn next_due(&mut self) -> Result<Due, Ctl> {
         let Some(j) = &self.journal else { return Ok(Due::Nothing) };
         let mut j = j.borrow_mut();
-        j.take_pending().map_err(stop)?;
         let Some(EntryData::Done(OpDone { op, step, fuel, end })) = j.peek() else { return Ok(Due::Nothing) };
         let (op, step, fuel) = (*op, *step, *fuel);
         let OpEnd::Completed(payload) = end else {
@@ -1399,12 +1387,12 @@ impl Vm {
         }
         if step < j.steps {
             let msg = format!("the journal records the completion of operation {op} after step {step}, and the run is at step {}", j.steps);
-            return Err(stop(j.diverged(msg)));
+            return Err(Ctl::from(j.diverged(msg)));
         }
         match j.replayed.remove(&op) {
             None => {
                 let msg = format!("the journal records the completion of operation {op}, which the run has not started");
-                Err(stop(j.diverged(msg)))
+                Err(Ctl::from(j.diverged(msg)))
             }
             Some((fid, wgen, Replaying::Local(None))) => {
                 j.replayed.insert(op, (fid, wgen, Replaying::Local(None)));
@@ -1429,10 +1417,7 @@ impl Vm {
     /// The divergence error for a run that can do nothing more while
     /// replay holds more entries.
     pub(crate) fn blocked_in_replay(&self) -> Option<JournalStop> {
-        let mut j = self.journal.as_ref()?.borrow_mut();
-        if let Err(s) = j.take_pending() {
-            return Some(s);
-        }
+        let j = self.journal.as_ref()?.borrow();
         let e = j.peek()?;
         Some(j.diverged(format!("every task is blocked, and the journal records {} next", e.describe())))
     }

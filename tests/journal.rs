@@ -1433,3 +1433,23 @@ fn a_journaled_function_that_reads_the_clock_replays_with_the_same_sequence_numb
     assert_eq!(resumed, "1\n103\n1\n");
     assert_eq!(seqs.lock().unwrap()[2..], [Some(later)]);
 }
+
+#[test]
+fn replay_reports_a_cancellation_that_the_journal_does_not_record_where_it_occurs() {
+    let world = World::new(Arc::new(FrozenClock(Instant::now())), false, Some(1));
+    let src = |end: &str| format!("import time\nlet sleeper = spawn {{\n    task.sleep(1h)\n}}\ntask.yield_now()\nsleeper.cancel()\n{end}");
+    let journal = MemoryJournal::new();
+    let recorded = world.run(&src("print(time.now().epoch_seconds() > 0)"), &journal);
+    assert!(recorded.result.is_ok(), "{:?}", recorded.result);
+    let mut entries = journal.entries();
+    let cancelled = entries.iter().position(|e| e.kind == EntryKind::Done).expect("the journal records the cancellation");
+    // The journal records the cancellation after the clock reading that follows it.
+    entries.swap(cancelled, cancelled + 1);
+    assert_eq!(entries[cancelled].kind, EntryKind::Wall);
+    // The run reads nothing after the cancellation, so only the cancellation can report it.
+    let r = world.run(&src("print(1)"), &MemoryJournal::with_entries(entries)).result;
+    assert!(
+        matches!(&r, Err(Error::Diverged { seq, message }) if *seq == cancelled as u64 && message.contains("cancels operation")),
+        "{r:?}"
+    );
+}

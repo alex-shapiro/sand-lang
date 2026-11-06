@@ -306,7 +306,7 @@ impl Vm {
             };
             match r {
                 Ok(v) => {
-                    self.deliver(fid, wgen, v);
+                    self.deliver(fid, wgen, v).map_err(Trap::Journal)?;
                     self.enforce_limit(None).map_err(Trap::Limit)?;
                 }
                 Err(c) => return Err(self.op_trap(fid, c)),
@@ -608,7 +608,7 @@ impl Vm {
                         if Some(fid) == main {
                             return Ok(Stop::Main(v));
                         }
-                        self.finish_task(fid, v);
+                        self.finish_task(fid, v).map_err(Trap::Journal)?;
                     }
                     Exit::Preempt | Exit::YieldNow => {
                         f.state = FiberState::Ready;

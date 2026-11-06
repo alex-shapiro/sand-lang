@@ -18,6 +18,7 @@ use crate::native::func::Call;
 use crate::policy::{Capability, Decision, Policy, PromptAnswer, Prompter};
 use bytecode::*;
 use heap::{Heap, Staging};
+use journal::JournalStop;
 use meter::Meter;
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
@@ -98,7 +99,7 @@ pub enum CtlKind {
     /// [`Vm::resource_slot`].
     Collect,
     /// The run stops for its journal (divergence or suspension).
-    Journal(journal::JournalStop),
+    Journal(JournalStop),
     /// A host function ends the run (see [`Ctl::abort`]).
     Abort(crate::engine::HostAbort),
     /// Suspend the task on an operation that the journal records (see
@@ -352,7 +353,7 @@ pub enum Trap {
     Interrupted,
     Exit(i32),
     /// The journal stopped the run.
-    Journal(journal::JournalStop),
+    Journal(JournalStop),
     /// A host function ended the run.
     Abort(crate::engine::HostAbort),
 }
@@ -1414,11 +1415,13 @@ impl Vm {
         Ok(task)
     }
 
-    /// Delivers a value to a waiting fiber (if the wait is still current).
-    pub fn deliver(&mut self, fid: u32, wgen: u64, v: Value) -> bool {
-        let Some(Some(f)) = self.fibers.get_mut(fid as usize) else { return false };
+    /// Delivers a value to a waiting fiber, if the wait is still current,
+    /// and cancels the other tasks that the fiber races. Returns whether
+    /// the wait was current, or the divergence that a cancellation found.
+    pub fn deliver(&mut self, fid: u32, wgen: u64, v: Value) -> Result<bool, JournalStop> {
+        let Some(Some(f)) = self.fibers.get_mut(fid as usize) else { return Ok(false) };
         if f.state != FiberState::Waiting || f.wgen != wgen {
-            return false;
+            return Ok(false);
         }
         let slot = f.result_slot;
         if slot < f.stack.len() {
@@ -1429,10 +1432,8 @@ impl Vm {
         f.jop = None;
         let race = std::mem::take(&mut f.race);
         self.ready.push_back(fid);
-        for t in race {
-            self.cancel_waiting_task(t);
-        }
-        true
+        race.into_iter().try_for_each(|t| self.cancel_waiting_task(t))?;
+        Ok(true)
     }
 
     /// Wakes a waiting fiber with an error, `kind: message`.
@@ -1448,8 +1449,8 @@ impl Vm {
     }
 
     /// Marks a task finished and wakes its waiters.
-    pub fn finish_task(&mut self, fid: u32, result: Value) {
-        let Some(f) = self.fibers[fid as usize].take() else { return };
+    pub fn finish_task(&mut self, fid: u32, result: Value) -> Result<(), JournalStop> {
+        let Some(f) = self.fibers[fid as usize].take() else { return Ok(()) };
         let task = f.task;
         if let Obj::Task(t) = self.heap.get_mut(task) {
             t.state = TaskState::Done;
@@ -1457,10 +1458,9 @@ impl Vm {
         }
         self.free_fibers.push(fid);
         self.live_tasks = self.live_tasks.saturating_sub(1);
-        for &(w, g) in &f.waiters {
-            self.deliver(w, g, result);
-        }
+        let woken = f.waiters.iter().try_for_each(|&(w, g)| self.deliver(w, g, result).map(drop));
         self.recycle_fiber(f);
+        woken
     }
 
     /// Cancels `task` (no-op if it has finished) for a native of the
@@ -1474,36 +1474,34 @@ impl Vm {
             t.state = TaskState::Cancelled;
             return Err(Ctl::from(CtlKind::Cancelled));
         }
-        self.cancel_waiting_task(task);
-        Ok(())
+        self.cancel_waiting_task(task).map_err(Ctl::from)
     }
 
     /// Cancels `task` (no-op if it has finished), which is not the running
-    /// task.
-    fn cancel_waiting_task(&mut self, task: Value) {
+    /// task. Fails if replay finds that the journal does not record the
+    /// cancellation of the operation that the task waits for.
+    fn cancel_waiting_task(&mut self, task: Value) -> Result<(), JournalStop> {
         let (fid, state) = match self.heap.get(task) {
             Obj::Task(t) => (t.fiber, t.state),
-            _ => return,
+            _ => return Ok(()),
         };
         if state != TaskState::Running {
-            return;
+            return Ok(());
         }
         if let Obj::Task(t) = self.heap.get_mut(task) {
             t.state = TaskState::Cancelled;
         }
-        if let Some(mut f) = self.fibers.get_mut(fid as usize).and_then(|f| f.take()) {
-            if let Some(io) = f.io.take() {
-                self.io.cancel(io);
-            }
-            if let Some(op) = f.jop.take() {
-                self.cancel_op(op);
-            }
-            let queued = f.state == FiberState::Ready;
-            self.end_cancelled(fid, f);
-            if !queued && self.fibers[fid as usize].is_some() {
-                self.ready.push_back(fid);
-            }
+        let Some(mut f) = self.fibers.get_mut(fid as usize).and_then(|f| f.take()) else { return Ok(()) };
+        if let Some(io) = f.io.take() {
+            self.io.cancel(io);
         }
+        let cancelled = f.jop.take().map_or(Ok(()), |op| self.cancel_op(op));
+        let queued = f.state == FiberState::Ready;
+        self.end_cancelled(fid, f);
+        if !queued && self.fibers[fid as usize].is_some() {
+            self.ready.push_back(fid);
+        }
+        cancelled
     }
 
     /// Ends the fiber of a cancelled task: wakes its waiters with an error,
@@ -1550,9 +1548,7 @@ impl Vm {
     pub async fn end_tasks(&mut self) -> Result<Option<i32>, Trap> {
         self.release_main();
         let tasks: Vec<Value> = self.fibers.iter().flatten().map(|f| f.task).collect();
-        for t in tasks {
-            self.cancel_waiting_task(t);
-        }
+        tasks.into_iter().try_for_each(|t| self.cancel_waiting_task(t)).map_err(Trap::Journal)?;
         if self.ready.is_empty() {
             return Ok(None);
         }

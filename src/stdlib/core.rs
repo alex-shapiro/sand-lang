@@ -113,7 +113,7 @@ pub(crate) fn prelude() -> NativeModule {
     m.vm_function("Channel.try_recv", |vm: &mut Vm, c: Val<Channel<Param<0>>>| -> Result<Option<Param<0>>, Ctl> {
         let Some((v, woken)) = c.channel_mut(&mut vm.heap)?.take() else { return Ok(None) };
         if let Some((sf, sg)) = woken {
-            vm.deliver(sf, sg, Value::Bool(true));
+            vm.deliver(sf, sg, Value::Bool(true))?;
         }
         Ok(Some(Param::from_raw(v)))
     });
@@ -124,10 +124,10 @@ pub(crate) fn prelude() -> NativeModule {
         let senders: Vec<(u32, u64, Value)> = c.senders.drain(..).collect();
         for (f, g) in receivers {
             let none = vm.none();
-            vm.deliver(f, g, none);
+            vm.deliver(f, g, none)?;
         }
         for (f, g, _) in senders {
-            vm.deliver(f, g, Value::Bool(false));
+            vm.deliver(f, g, Value::Bool(false))?;
         }
         Ok(())
     });

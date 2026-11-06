@@ -2009,7 +2009,7 @@ impl Vm {
                     let some = self.some(v);
                     if let Some((sf, sg)) = woken {
                         // If the sender went away, its value stays queued.
-                        self.deliver(sf, sg, Value::Bool(true));
+                        self.deliver(sf, sg, Value::Bool(true))?;
                     }
                     return Ok(Blocking::Ready(some));
                 }
@@ -2037,7 +2037,7 @@ impl Vm {
                 while let Some((rf, rg)) = c.receivers.pop_front() {
                     if wait_is_live(&self.fibers, (rf, rg)) {
                         let some = self.some(v);
-                        self.deliver(rf, rg, some);
+                        self.deliver(rf, rg, some)?;
                         return Ok(Blocking::Ready(Value::Bool(true)));
                     }
                 }
