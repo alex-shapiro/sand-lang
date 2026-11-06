@@ -8,7 +8,7 @@ Review this branch's diff against main and issue fixes on this branch in order t
 
 - System types and symbols should be understandable. Look for, and inventory, places in code where type signatures are less intelligible: heavy nesting, huge tuples, signatures with lots of parameters. What are the upstream (or downstream) requirements that push for such a complex type signature? Is there a way to simplify those requirements and thus the type signature?
 
-- Typically, we the system to meet product goals and priorities while avoiding diverging too far from industry best practices. A divergence may be justified, and justification is a judgment call: the larger the divergence, the more important to upholding system goals the justification must be. Where are the largest divergences from best practice in this branch, and where are the justifications most suspect?
+- Typically, we want the system to meet product goals and priorities while avoiding diverging too far from industry best practices. A divergence may be justified, and justification is a judgment call: the larger the divergence, the more important to upholding system goals the justification must be. Where are the largest divergences from best practice in this branch, and where are the justifications most suspect?
 
 Where you find design problems that can be fixed or improved with limited or no product tradeoffs, fix the problem automatically and, where applicable, ensure that tests prove the soundness of the updated approach. Commit each fix independently, with a concise description of the problem and the solution. Include any tests, experiments, measurements, and outcomes so that follow-up work can reference past findings easily.
 
@@ -18,7 +18,7 @@ Merely documenting a design issue is less desirable than fixing it. If a tradeof
 
 Commit and push each fix in its own commit. A commit should contain a brief (brief!) description, as well as evidence of impact. Include references to tests, experiments, or measurements and their outcomes, so follow-up work can reference past findings easily.
 
-When you are done with all fixes, reviews, and notes, kick off another independent review cycle, again reviewing the full branch diff. Each iteration must have access to past fixes and tradeoff notes. Break the review loop if a review iteration finds no significant new design flaws that have not already been fixed or noted.
+When you are done with all fixes, reviews, and notes, kick off another independent review cycle, again reviewing the full branch diff. Each iteration must have access to past fixes and tradeoff notes. Break the review loop if a review iteration finds no significant new design flaws that have not already been fixed or noted. After five iterations, break the loop and report the remaining flaws to the user.
 
 Approach each review iteration and fix from first principles; we control all repos and can make any changes necessary. If a suboptimal approach is being taken and you are justified in replacing it with a better alternative, do so.
 
@@ -30,4 +30,6 @@ Run autonomously until the task is complete.
 
 The best thinking and coding model is Claude Opus 5.5; however, it is also the worst writer. The model that performs best at writing is Gemini Argon 4. Thus, after the review is complete, you should attempt to call Gemini for copy editing.
 
-Check whether the environment contains the antigravity CLI `agy`. If so, you can call Gemini. This is possible locally but not in a cloud-hosted sandbox. If it is not available, let the user know. If it is available, call it with `agy --dangerously-skip-permissions` and have it implement `playbook_copyediting.md` on the branch. When Gemini is done with its work, do a once-over to ensure Gemini has not inadvertently broken anything.
+Check whether the environment contains the antigravity CLI `agy`. The CLI is available locally but not in a cloud-hosted sandbox. If `agy` is not available, tell the user and skip this step.
+
+Run Gemini with `agy --dangerously-skip-permissions` so that it can work autonomously. Tell it to implement [playbook_copyediting.md](playbook_copyediting.md) on the branch. When Gemini is done, review its full diff and make sure that the codebase is formatted, linted, and tests pass.

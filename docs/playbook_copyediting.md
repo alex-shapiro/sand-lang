@@ -9,7 +9,7 @@ Your job is to audit, and maybe replace, every piece of writing changed in this 
 - avoids nonstandard formats like LaTeX
 - avoids LLMish patterns
 
-In case of any deviation, replace the whole piece of writing to ensure it compiles with AST-STE100 and the other guidelines above. Replace LaTeX with either a code block or regular text, as appropriate.
+In case of any deviation, replace the whole piece of writing to ensure it complies with AST-STE100 and the other guidelines above. Replace LaTeX with either a code block or regular text, as appropriate.
 
 Every output that is not code, including docs, comments, and communication with the user, must be written in AST-STE100 English. Convey key ideas in leading sentences to ensure they are easy to find.
 
@@ -21,9 +21,9 @@ After the rewrite, all pieces of writing must comply with AST-STE100 guidelines.
 
 ## Completion
 
-Run in a loop, optionally with sub-agents. Each loop iteration must perform the full task above across the whole branch. Commit after each loop iteration, with a message that future iterations can use . Loop break condition: at the end of each iteration, determine whether more than 5% of the branch's writing changed. If ≤5%, break.
+Run in a loop, optionally with sub-agents. Each loop iteration must perform the full task above across the whole branch. Commit after each loop iteration, with a message that future iterations can use. Loop break condition: at the end of each iteration, determine whether more than 5% of the branch's writing changed. If ≤5%, or after five iterations, break.
 
-After the loop is complete, make sure that the codebase is formatted, linted, and tests pass. Then check whether a PR exists. If not, create one. If one already exists, rewrite its title + description to match the format of previous commits on main. Write AST-STE100 and focus on conveying concepts concisely rather than listing facts.
+After the loop is complete, make sure that the codebase is formatted, linted, and tests pass. Then check whether a PR exists. If not, create one. If one already exists, rewrite its title and description to match the format of previous commits on main. Write in AST-STE100 English and focus on conveying concepts concisely rather than listing facts.
 
 ## LLMish Examples
 
@@ -41,7 +41,7 @@ A few non-exhaustive examples of idiosyncratic LLM-ish tells:
 - Use of "one" instead of "a"
 - Vague shorthand
 - Colloquialisms
-- Unecessary parenthetical clauses
+- Unnecessary parenthetical clauses
 - Britishisms; this is an American codebase
 - Description of what isn't rather than description of what is
 - Long runs of facts and symbols

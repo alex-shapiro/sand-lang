@@ -20,7 +20,7 @@ Think through all possible ways to attack the problem. If there are multiple pla
 
 Ensure all claims are backed by solid evidence. Where useful, use property, fuzz, load, or other testing techniques. Make changes to testing infra as appropriate.
 
-Before presenting work, list every place an existing interface or planning document limited your design, and remove each one. If you catch anything that should be fixed but is out of scope for the current task, add it to TODO.md so we can steadily improve quality over time.
+Existing interfaces and planning docs are descriptive, not prescriptive. Before presenting work, list and remove every limit they placed on your design. If you catch anything that should be fixed but is out of scope for the current task, add it to TODO.md so we can steadily improve quality over time.
 
 Approach the full task, and all subtasks, from first principles. If you see that an existing approach limits the quality ceiling of the task, even in another repo, prefer to replace the subpar approach with the better alternative. If you do rip-and-replace, verify that the replacement is superior with rigorous testing.
 
@@ -32,8 +32,10 @@ All feature development must take place in a branch. Where appropriate, split su
 
 The best thinking and coding model is Claude Opus 5.5; however, it is also the worst writer. The model that performs best at writing is Gemini Argon 4. Thus, after all work is done, you should attempt to call Gemini for copy editing.
 
-Check whether the environment contains the antigravity CLI `agy`. If so, you can call Gemini. This is possible locally but not in a cloud-hosted sandbox. If it is not available, let the user know. If it is available, call it with `agy --dangerously-skip-permissions` and have it implement `playbook_copyediting.md` on the branch. When Gemini is done with its work, do a once-over to ensure Gemini has not inadvertently broken anything.
+Check whether the environment contains the antigravity CLI `agy`. The CLI is available locally but not in a cloud-hosted sandbox. If `agy` is not available, tell the user and skip this step.
+
+Run Gemini with `agy --dangerously-skip-permissions` so that it can work autonomously. Tell it to implement [playbook_copyediting.md](playbook_copyediting.md) on the branch. When Gemini is done, review its full diff and make sure that the codebase is formatted, linted, and tests pass.
 
 ## Upon Completion
 
-When the task is complete, begin [reviews](playbook_reviews.md).
+When the task is complete, begin [reviews](playbook_reviewing.md).

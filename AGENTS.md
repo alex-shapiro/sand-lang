@@ -1,8 +1,8 @@
 SandLang is a sandboxed bytecode interpreter with the following requirements:
 
 - implemented in 100% safe Rust
-- fully sandboxed for all system resources
-- hard limits on per-engine memory, CPU, etc.
+- fully sandboxed for I/O and other system resource access
+- user-set hard limits on per-engine memory, CPU, etc.
 - no sandbox escape mechanisms: no IPC, subprocesses, mmap, etc.
 - single threaded engine
 - multiple engines may be safely embedded in a single Rust crate and run in the same process without issue
@@ -30,7 +30,7 @@ Approach each task from first principles. This is a greenfield codebase with no 
 
 The standard library must be documented with module docs. Its canonical user-visible docs are in sandlang.com's stdlib reference. It does not need to be documented in SPEC.md. Doc comments should explain an API for the benefit of the caller. Code comments should be used only to explain unintuitive code.
 
-A symbol's doc comment, and especially its first line, must reflect the symbol's purpose. For example, if a type represents a HTTP route, the type's doc comment should be its HTTP route because its purpose is to serve that route. Avoid using a doc comment to elaborate on implementation details that the caller does not care about. If such implementation details are actually necessary because of non-obvious code, flag it to the user.
+A symbol's doc comment, and especially its first line, must reflect the symbol's purpose. For example, if a type represents an HTTP route, the type's doc comment should be its HTTP route because its purpose is to serve that route. Avoid using a doc comment to elaborate on implementation details that the caller does not care about. If such implementation details are actually necessary because of non-obvious code, flag it to the user.
 
 Before writing a code comment, ask yourself whether the comment is reflective of poorly written code. Is it an expression of code that is so intrinsically complex that the extra writing is the only way to make the code understandable? Typically, there is a better way to make the code or interface understandable. Exceptions to this rule tend to be interfaces that _do_ have inherent complexity, like a regex library or policy file format.
 
