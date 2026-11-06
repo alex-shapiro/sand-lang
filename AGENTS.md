@@ -28,15 +28,20 @@ Approach each task from first principles. This is a greenfield codebase with no 
 
 ## Symbol Names
 
-Symbol names must be idiomatic and just specific enough that a reader can understand it without requiring surrounding context. A few non-exhaustive examples:
+Symbol names must be idiomatic and just specific enough that a reader can
 
-| bad    | good                |
-| ------ | ------------------- |
-| ReadId | StdinReadId         |
-| Who    | DocOwner            |
-| wanted | has_waiting_readers |
-| to     | target              |
-| until  | wait_until          |
+- understand it without requiring surrounding context
+- distinguish it from other symbols with similar names but different uses
+- connect it to its related symbols (example: a getter and its return type are related)
+
+| bad                  | good                      |
+| -------------------- | ------------------------- |
+| ReadId               | StdinReadId               |
+| Who                  | DocOwner                  |
+| wanted               | has_waiting_readers       |
+| to                   | target                    |
+| until(...) -> Future | wait_until(...) -> Future |
+| wait() -> WaitKind   | wait_kind() -> WaitKind   |
 
 ## Doc and Comment Guidelines
 
