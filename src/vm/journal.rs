@@ -364,7 +364,9 @@ pub(crate) struct JournalState {
     sink: Arc<dyn Journal>,
     replay: Vec<EntryData>,
     pos: usize,
-    seq: u64,
+    /// The number of entries in the journal: the sequence number of the
+    /// next recorded entry.
+    len: u64,
     pub unflushed: bool,
     /// Journaled operations started so far (the id of the next one).
     ops: u64,
@@ -406,7 +408,7 @@ impl JournalState {
 
     /// The sequence number of the entry that the run reads or records next.
     pub fn position(&self) -> u64 {
-        if self.replaying() { self.pos as u64 } else { self.seq }
+        if self.replaying() { self.pos as u64 } else { self.len }
     }
 
     /// The divergence that a cancellation found, if any.
@@ -445,10 +447,9 @@ impl JournalState {
     }
 
     fn record(&mut self, data: EntryData) {
-        let seq = self.seq;
-        self.seq += 1;
+        self.len += 1;
         self.unflushed = true;
-        self.sink.record(Entry { seq, kind: data.kind(), data: data.encode() });
+        self.sink.record(Entry { kind: data.kind(), data: data.encode() });
     }
 
     pub fn flush(&mut self) -> Option<crate::journal::FlushFuture> {
@@ -472,9 +473,6 @@ pub(crate) fn start(
     let mut replay = Vec::new();
     for (i, e) in sink.replay().into_iter().enumerate() {
         let seq = i as u64;
-        if e.seq != seq {
-            return Err(JournalStop::Diverged { seq, message: format!("entry {i} has sequence number {}", e.seq) });
-        }
         let data = e
             .decode()
             .ok_or_else(|| JournalStop::Diverged { seq, message: format!("entry {i} is a malformed {} entry", e.kind.name()) })?;
@@ -484,7 +482,7 @@ pub(crate) fn start(
         replay.push(data);
     }
     Ok(JournalState {
-        seq: replay.len() as u64,
+        len: replay.len() as u64,
         sink,
         replay,
         pos: 0,

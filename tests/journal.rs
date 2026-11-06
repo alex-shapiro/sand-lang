@@ -784,11 +784,13 @@ fn entries_round_trip_through_bytes() {
     world.run(CONCURRENT, &journal);
     for e in journal.entries() {
         assert_eq!(Entry::from_bytes(&e.to_bytes()), Some(e.clone()));
+        assert_eq!(e.byte_len(), e.to_bytes().len());
         assert!(e.decode().is_some(), "{e:?}");
         assert!(!e.describe().starts_with("a malformed"), "{e:?}");
     }
-    assert_eq!(Entry::from_bytes(&[1, 2]), None);
-    let bad = Entry { seq: 0, kind: EntryKind::Start, data: vec![9] };
+    assert_eq!(Entry::from_bytes(&[]), None);
+    assert_eq!(Entry::from_bytes(&[200, 2]), None);
+    let bad = Entry { kind: EntryKind::Start, data: vec![9] };
     assert_eq!(bad.decode(), None);
     assert_eq!(bad.describe(), "a malformed start entry");
 }
@@ -814,7 +816,7 @@ fn operations_pair_starts_with_their_ends() {
     assert!(ops.iter().all(|o| o.start.kind == OpKind::Http && !o.cancelled()));
     let mut entries = journal.entries();
     let done = entries.iter().position(|e| e.kind == EntryKind::Done).unwrap();
-    entries.push(Entry { seq: entries.len() as u64, ..entries[done].clone() });
+    entries.push(entries[done].clone());
     assert!(operations(&entries).unwrap_err().contains("a second time"));
 }
 

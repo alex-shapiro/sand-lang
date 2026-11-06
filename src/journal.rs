@@ -18,10 +18,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// One recorded input of a run.
+///
+/// The sequence number of an entry is its position in the journal, from 0.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
-    /// The position of the entry in the journal, from 0.
-    pub seq: u64,
     pub kind: EntryKind,
     /// The engine's encoding of the input. It is stable for one version of
     /// `sandlang`.
@@ -80,21 +80,23 @@ impl EntryKind {
 }
 
 impl Entry {
-    /// Encodes the entry as bytes: the sequence number (8 bytes, little
-    /// endian), the kind code (1 byte), then the data.
+    /// Encodes the entry as bytes: the kind code (1 byte), then the data.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(9 + self.data.len());
-        out.extend_from_slice(&self.seq.to_le_bytes());
+        let mut out = Vec::with_capacity(self.byte_len());
         out.push(self.kind.code());
         out.extend_from_slice(&self.data);
         out
     }
 
+    /// The length of [`Entry::to_bytes`].
+    pub fn byte_len(&self) -> usize {
+        1 + self.data.len()
+    }
+
     /// Decodes an entry that [`Entry::to_bytes`] encoded.
     pub fn from_bytes(bytes: &[u8]) -> Option<Entry> {
-        let (seq, rest) = bytes.split_first_chunk::<8>()?;
-        let (&kind, data) = rest.split_first()?;
-        Some(Entry { seq: u64::from_le_bytes(*seq), kind: EntryKind::from_code(kind)?, data: data.to_vec() })
+        let (&kind, data) = bytes.split_first()?;
+        Some(Entry { kind: EntryKind::from_code(kind)?, data: data.to_vec() })
     }
 
     /// Decodes the data of the entry, or returns `None` if it is malformed.
@@ -360,21 +362,21 @@ impl Operation {
 /// it starts.
 pub fn operations(entries: &[Entry]) -> Result<Vec<Operation>, String> {
     let mut out: Vec<Operation> = Vec::new();
-    for e in entries {
+    for (seq, e) in entries.iter().enumerate() {
         if !matches!(e.kind, EntryKind::Start | EntryKind::Done) {
             continue;
         }
         match e.decode() {
-            Some(EntryData::Start(start)) => out.push(Operation { id: out.len() as u64, seq: e.seq, start, done: None }),
+            Some(EntryData::Start(start)) => out.push(Operation { id: out.len() as u64, seq: seq as u64, start, done: None }),
             Some(EntryData::Done(done)) => {
                 let op = done.op;
-                let slot = out.get_mut(op as usize).ok_or_else(|| format!("entry {} ends operation {op}, which has not started", e.seq))?;
+                let slot = out.get_mut(op as usize).ok_or_else(|| format!("entry {seq} ends operation {op}, which has not started"))?;
                 if slot.done.is_some() {
-                    return Err(format!("entry {} ends operation {op} a second time", e.seq));
+                    return Err(format!("entry {seq} ends operation {op} a second time"));
                 }
                 slot.done = Some(done);
             }
-            _ => return Err(format!("entry {} is malformed", e.seq)),
+            _ => return Err(format!("entry {seq} is malformed")),
         }
     }
     Ok(out)
@@ -490,8 +492,10 @@ pub trait Journal: Send + Sync {
     /// order. The engine replays them and records new entries after them.
     fn replay(&self) -> Vec<Entry>;
 
-    /// Records a new entry. The entry needs to be durable only once a later
-    /// [`Journal::flush`] completes, so an implementation can buffer it.
+    /// Records the next entry, after all entries that [`Journal::replay`]
+    /// returned and that this execution recorded. The entry needs to be
+    /// durable only once a later [`Journal::flush`] completes, so an
+    /// implementation can buffer it.
     fn record(&self, entry: Entry);
 
     /// Makes all recorded entries durable. The engine does not start the
