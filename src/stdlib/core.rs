@@ -94,10 +94,7 @@ pub(crate) fn prelude() -> NativeModule {
     m.vm_function("Task.is_done", |vm: &mut Vm, t: Val<Task<Param<0>>>| -> Result<bool, Ctl> {
         Ok(t.task(&vm.heap)?.state != TaskState::Running)
     });
-    m.vm_function("Task.cancel", |vm: &mut Vm, t: Val<Task<Param<0>>>| -> Result<_, Ctl> {
-        vm.cancel_task(t.raw());
-        Ok(())
-    });
+    m.vm_function("Task.cancel", |vm: &mut Vm, t: Val<Task<Param<0>>>| vm.cancel_task(t.raw()));
     m.vm_function("Channel.init", |vm: &mut Vm, cap: i64| -> Result<Val<Channel<Param<0>>>, Ctl> {
         if cap < 0 {
             return fail("invalid", "channel capacity must not be negative");

@@ -100,6 +100,39 @@ print(t.wait())
 --- fail
 task cancelled
 
+=== a task that cancels itself stops at the call
+let ch: Channel<Task<()>> = Channel()
+let t = spawn {
+    let me = ch.recv().unwrap()
+    print("before")
+    me.cancel()
+    print("after")
+}
+ch.send(t)
+task.sleep(10ms)
+print(t.is_done())
+--- stdout
+before
+true
+
+=== a task that races itself and a finished task stops at the race
+let ch = Channel()
+let done = spawn print("done")
+let t = spawn {
+    let me = ch.recv().unwrap()
+    task.sleep(5ms)
+    print("racing")
+    task.race([me, done])
+    print("after")
+}
+ch.send(t)
+task.sleep(20ms)
+print(t.is_done())
+--- stdout
+done
+racing
+true
+
 === channels
 let ch = Channel()
 let producer = spawn {
