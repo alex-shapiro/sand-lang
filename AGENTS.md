@@ -20,7 +20,7 @@ SandLang is a sandboxed bytecode interpreter with the following requirements:
 - Follow docs/playbook_reviewing.md for a system or code review request.
 - Follow docs/playbook_copyediting.md for a copy editing request.
 
-If playbook instructions conflict with this doc, follow this doc and communicate the conflict to the user.
+If playbook instructions conflict with this doc, follow the playbook and communicate the conflict to the user.
 
 ## Be Bold
 

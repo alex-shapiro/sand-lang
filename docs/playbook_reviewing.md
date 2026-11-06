@@ -22,7 +22,7 @@ When you are done with all fixes, reviews, and notes, kick off another independe
 
 Approach each review iteration and fix from first principles; we control all repos and can make any changes necessary. If a suboptimal approach is being taken and you are justified in replacing it with a better alternative, do so.
 
-Use sub-agents as necessary, especially to keep reviewers independent from fixers. If you use sub-agents, ensure that each sub-agent has sufficient context across restarts. Context: in the past, sub-agents have been killed and restarted with half context, resulting in suboptimal design and implementation.
+Use sub-agents as necessary, especially to keep reviewers independent from fixers. If you use a sub-agent, ensure that it has sufficient context across restarts. Context: in the past, sub-agents have been killed and restarted with half context, resulting in suboptimal design and implementation.
 
 Run autonomously until the task is complete.
 
@@ -32,4 +32,6 @@ The best thinking and coding model is Claude Opus 5.5; however, it is also the w
 
 Check whether the environment contains the antigravity CLI `agy`. The CLI is available locally but not in a cloud-hosted sandbox. If `agy` is not available, tell the user and skip this step.
 
-Run Gemini with `agy --dangerously-skip-permissions` so that it can work autonomously. Tell it to implement [playbook_copyediting.md](playbook_copyediting.md) on the branch. When Gemini is done, review its full diff and make sure that the codebase is formatted, linted, and tests pass.
+Run Gemini with `agy --dangerously-skip-permissions` so that it can work autonomously. The prompt must be a one-liner, telling it to run the [copyediting playbook](playbook_copyediting.md) on the branch. Do not include any other framing, limits, or instructions in the prompt.
+
+When Gemini is done, review its full diff and make sure that the codebase is formatted, linted, and tests pass. DO NOT EDIT ITS COPY CHANGES except to correct factual errors. If you have to edit copy in order to correct a factual error, re-run Gemini afterward.
