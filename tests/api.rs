@@ -6,9 +6,10 @@ mod common;
 
 use common::{TempDir, rt, run_with};
 use jiff::civil::Date;
-use sandlang::engine::{Config, Engine, Error, HostModules, LimitKind, Limits, MemorySink, Outcome};
+use sandlang::engine::{Config, Engine, Error, HostModules, LimitKind, Limits, MemorySink, Outcome, Returned};
 use sandlang::native::NativeModule;
 use sandlang::policy::{Capability, Decision, PromptAnswer};
+use sandlang::stdlib::json::Json;
 use sandlang::stdlib::log::{LogLevel, LogRecord, LogSink};
 use sandlang::stdlib::time::TimeZone;
 use sandlang::vm::Vm;
@@ -3702,12 +3703,17 @@ fn hosts_call_functions_of_the_main_module() {
     // The module initializers run before the call, and computed defaults are filled in.
     assert_eq!(
         call(&mut engine, &[r#"{"id": "a1", "cents": 100}"#, "5"]).unwrap(),
-        Outcome::Returned(Ok(r#"{"id":"a1","total":106,"note":"n2"}"#.into()))
+        Outcome::Returned(Returned::Value(Json::Obj(
+            [("id", Json::Str("a1".into())), ("total", Json::Int(106)), ("note", Json::Str("n2".into()))]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect()
+        )))
     );
     assert_eq!(out.contents(), "charging a1\n");
     assert_eq!(
         call(&mut engine, &[r#"{"id": "a1", "cents": -1}"#, "0"]).unwrap(),
-        Outcome::Returned(Err(r#"{"message":"negative total","kind":"invalid"}"#.into()))
+        Outcome::Returned(Returned::Failed(sandlang::stdlib::core::Error { message: "negative total".into(), kind: "invalid".into() }))
     );
     let bad = call(&mut engine, &[r#"{"id": 3}"#, "0"]);
     assert!(matches!(&bad, Err(Error::Argument { index: 0, kind, .. }) if kind == "parse"), "{bad:?}");
@@ -3715,14 +3721,20 @@ fn hosts_call_functions_of_the_main_module() {
 
     let twice = function_of(base.clone(), ORDER, "twice").unwrap();
     assert_eq!(twice.signature().to_string(), "fn twice(x: int) -> int");
-    assert_eq!(rt().block_on(engine_with(base.clone()).0.call(&twice, &["21"])).unwrap(), Outcome::Returned(Ok("42".into())));
+    assert_eq!(
+        rt().block_on(engine_with(base.clone()).0.call(&twice, &["21"])).unwrap(),
+        Outcome::Returned(Returned::Value(Json::Int(42)))
+    );
     let nothing = function_of(base.clone(), ORDER, "nothing").unwrap();
     assert_eq!(nothing.signature().to_string(), "fn nothing()");
-    assert_eq!(rt().block_on(engine_with(base.clone()).0.call(&nothing, &[])).unwrap(), Outcome::Returned(Ok("null".into())));
+    assert_eq!(rt().block_on(engine_with(base.clone()).0.call(&nothing, &[])).unwrap(), Outcome::Returned(Returned::Value(Json::Null)));
     let either = function_of(base.clone(), ORDER, "either").unwrap();
     assert_eq!(either.signature().to_string(), "fn either() -> Result<int, str>");
     assert!(matches!(&either.signature().returns, sandlang::engine::Returns::Result { err, .. } if !err.is_error()));
-    assert_eq!(rt().block_on(engine_with(base.clone()).0.call(&either, &[])).unwrap(), Outcome::Returned(Err(r#""no""#.into())));
+    assert_eq!(
+        rt().block_on(engine_with(base.clone()).0.call(&either, &[])).unwrap(),
+        Outcome::Returned(Returned::Err(Json::Str("no".into())))
+    );
     assert!(function_of(base.clone(), ORDER, "pick").is_none(), "generic functions cannot be called");
     assert!(function_of(base.clone(), ORDER, "Order").is_none());
 

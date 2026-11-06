@@ -2014,15 +2014,16 @@ type descriptors, and shows as the function's declaration, such as
 `fn main(order: Order) -> Result<Receipt>`. `Engine::call(function, args)` runs the module
 initializers, then calls the function. Each argument is JSON text, which the engine decodes to
 the type of its parameter as `json.decode` does. An argument that does not decode fails the
-call with `Error::Argument`. A call that does not fail returns an
-`Outcome<Result<String, String>>`:
+call with `Error::Argument`. A call that does not fail returns an `Outcome<Returned>`. A
+returned value converts to `stdlib::json::Json` as `json.encode` encodes it:
 
-| Variant                          | Meaning                                                                       |
-| -------------------------------- | ----------------------------------------------------------------------------- |
-| `Outcome::Returned(Ok(json))`    | The function returned a value, or `Ok(value)`, encoded as `json.encode` does. |
-| `Outcome::Returned(Err(json))`   | The function returned `Err(e)`, and `json` is `e`.                            |
-| `Outcome::Exited(code)`          | The run called `exit`.                                                        |
-| `Outcome::Suspended(suspension)` | The engine suspended the journaled run (§16.7).                               |
+| Variant                                      | Meaning                                                                                         |
+| -------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `Outcome::Returned(Returned::Value(json))`   | The function returned a value, or `Ok(value)`.                                                  |
+| `Outcome::Returned(Returned::Failed(error))` | The function returns `Result<T>` and returned `Err(error)`. `error` is a `stdlib::core::Error`. |
+| `Outcome::Returned(Returned::Err(json))`     | The function returns `Result<T, E>` with an `E` other than `Error`, and `json` is the `Err`.   |
+| `Outcome::Exited(code)`                      | The run called `exit`.                                                                          |
+| `Outcome::Suspended(suspension)`             | The engine suspended the journaled run (§16.7).                                                 |
 
 After each run, `Engine::run_stats` reports the resources that the run used,
 including runs that failed or exceeded a limit: `fuel` (in the units of

@@ -1,7 +1,7 @@
 //! Durable execution: record a run in a journal, replay it, and resume it
 //! from any prefix of the journal (SPEC §16.7).
 
-use sandlang::engine::{Config, Engine, Error, HostModules, MemorySink, Outcome};
+use sandlang::engine::{Config, Engine, Error, HostModules, MemorySink, Outcome, Returned};
 use sandlang::journal::{Durable, Entry, EntryKind, HttpOutcome, Journal, MemoryJournal, OpKind, Suspension, operations};
 use sandlang::native::NativeModule;
 use sandlang::native::convert::HostError;
@@ -1060,7 +1060,7 @@ fn a_suspended_call_resumes_and_returns() {
     assert_eq!(out, "start\n");
     clock.advance(Duration::from_secs(10));
     let (r, _) = call();
-    assert_eq!(r.unwrap(), Outcome::Returned(Ok("42".into())));
+    assert_eq!(r.unwrap(), Outcome::Returned(Returned::Value(sandlang::stdlib::json::Json::Int(42))));
 }
 
 #[test]

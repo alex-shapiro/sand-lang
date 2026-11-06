@@ -7,6 +7,7 @@ use crate::diag::{Diag, Diagnostic, FileId, Span};
 use crate::files::Fs;
 use crate::files::mem::MemFs;
 use crate::modules::{ImportRef, ModuleGraph, Snapshot, Target, budget_error, native_info};
+use crate::native::convert::{Conversion, FromValue};
 use crate::native::func::Signature;
 use crate::native::ty::Type;
 use crate::native::{BoundType, NativeDecl, NativeModule};
@@ -247,12 +248,10 @@ impl Error {
 
 /// How a run that did not fail ended. A script ([`Engine::run_program`]) has an
 /// `Outcome` with no return value; a call ([`Engine::call`]) has an
-/// `Outcome<Result<String, String>>`.
+/// `Outcome<Returned>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome<R = std::convert::Infallible> {
-    /// The called function returned. The value is JSON text, encoded as `json.encode` does:
-    /// `Ok` holds the value, or the payload of `Ok` for a function that returns a `Result`,
-    /// and `Err` holds the payload of `Err`.
+    /// The called function returned.
     Returned(R),
     /// The run ended with this exit code: 0 when a script ends, or the code
     /// that the run passed to `exit`.
@@ -261,6 +260,21 @@ pub enum Outcome<R = std::convert::Infallible> {
     /// (SPEC §16.7). To resume it, the host starts the run again with the
     /// same journal, and for a call, the same arguments.
     Suspended(crate::journal::Suspension),
+}
+
+/// What a function that [`Engine::call`] called returned. A value converts to [`Json`] as
+/// `json.encode` encodes it.
+///
+/// [`Json`]: stdlib::json::Json
+#[derive(Debug, Clone, PartialEq)]
+pub enum Returned {
+    /// The value, or the payload of `Ok` for a function that returns a `Result`.
+    Value(stdlib::json::Json),
+    /// The payload of `Err` for a function that returns `Result<T>`, whose error type is `Error`.
+    Failed(stdlib::core::Error),
+    /// The payload of `Err` for a function that returns `Result<T, E>` with an error type `E`
+    /// other than `Error`.
+    Err(stdlib::json::Json),
 }
 
 impl<R> Outcome<R> {
@@ -1277,7 +1291,7 @@ impl Engine {
     /// [`Error::Argument`]. A journaled run replays the same call, so the host gives the same
     /// arguments to each execution of the run. Fails with [`Error::Internal`] if the number of
     /// arguments is not the number of parameters.
-    pub async fn call(&mut self, function: &Function, args: &[&str]) -> Result<Outcome<Result<String, String>>, Error> {
+    pub async fn call(&mut self, function: &Function, args: &[&str]) -> Result<Outcome<Returned>, Error> {
         let sig = function.signature();
         if args.len() != sig.params.len() {
             let message = format!("`{}` takes {} arguments, and the call gives {}", sig.name, sig.params.len(), args.len());
@@ -1294,18 +1308,19 @@ impl Engine {
         cwd: PathBuf,
         function: &Function,
         args: &[&str],
-    ) -> Result<Outcome<Result<String, String>>, Error> {
+    ) -> Result<Outcome<Returned>, Error> {
         let sig = function.signature();
         let r = self
             .execute(compiled, cwd, async |vm: &mut Vm| match call_function(vm, function, args).await? {
                 Called::Returned(v) => {
                     vm.pinned.push(v);
-                    let ended = vm.end_tasks().await;
+                    let r = match vm.end_tasks().await {
+                        Ok(Some(c)) => Ok(Ok(Outcome::Exited(c))),
+                        Ok(None) => returned(vm, v, &sig.returns).map(|r| Ok(Outcome::Returned(r))).map_err(Trap::from_ctl),
+                        Err(t) => Err(t),
+                    };
                     vm.pinned.pop();
-                    match ended? {
-                        Some(c) => Ok(Ok(Outcome::Exited(c))),
-                        None => returned(vm, v, &sig.returns).map(|r| Ok(Outcome::Returned(r))).map_err(Trap::from_ctl),
-                    }
+                    r
                 }
                 Called::Exited(c) => Ok(Ok(Outcome::Exited(c))),
                 Called::BadArgument { index, error } => Ok(Err(Error::Argument { index, kind: error.kind, message: error.message })),
@@ -1959,14 +1974,14 @@ async fn call_decoded(vm: &mut Vm, function: &Function, args: &[&str]) -> Result
     }
 }
 
-/// The JSON text of `v`, the value that a function that returns `returns` returned: `Err` for
-/// the payload of an `Err`, else `Ok`.
-fn returned(vm: &Vm, v: Value, returns: &Returns) -> Result<Result<String, String>, crate::vm::Ctl> {
+/// `v`, the value that a function that returns `returns` returned.
+fn returned(vm: &Vm, v: Value, returns: &Returns) -> Result<Returned, crate::vm::Ctl> {
     match returns {
-        Returns::Value(_) => Ok(Ok(stdlib::json::encode(vm, v, 0)?)),
-        Returns::Result { .. } => match vm.as_result(v) {
-            Ok(v) => Ok(Ok(stdlib::json::encode(vm, v, 0)?)),
-            Err(e) => Ok(Err(stdlib::json::encode(vm, e, 0)?)),
+        Returns::Value(_) => Ok(Returned::Value(stdlib::json::to_json(vm, v)?)),
+        Returns::Result { err, .. } => match vm.as_result(v) {
+            Ok(v) => Ok(Returned::Value(stdlib::json::to_json(vm, v)?)),
+            Err(e) if err.is_error() => Ok(Returned::Failed(stdlib::core::Error::from_value(vm, e, &mut Conversion::new())?)),
+            Err(e) => Ok(Returned::Err(stdlib::json::to_json(vm, e)?)),
         },
     }
 }

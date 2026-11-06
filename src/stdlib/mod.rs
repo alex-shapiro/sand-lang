@@ -4,7 +4,7 @@
 //! pure-Sand helpers) and `name.rs` (the natives, registered by name).
 
 mod base64;
-pub(crate) mod core;
+pub mod core;
 mod crypto;
 mod fs;
 #[cfg(feature = "os")]

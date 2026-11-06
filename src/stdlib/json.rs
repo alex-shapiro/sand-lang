@@ -139,6 +139,19 @@ pub(crate) fn module() -> NativeModule {
     m
 }
 
+/// `value` as a Rust [`Json`], as `json.encode` encodes it. Unlike `json.to_json`, it works
+/// also in a program that does not load the json module.
+pub(crate) fn to_json(vm: &Vm, value: Value) -> Result<Json, Ctl> {
+    let text = encode(vm, value, 0)?;
+    let mut p = Parser::new(&text);
+    let r = p.rust_json(&vm.meter).and_then(|j| p.finish().map(|()| j));
+    match r {
+        Ok(j) => Ok(j),
+        Err(Error::Ctl(c)) => Err(c),
+        Err(Error::Parse(m) | Error::Invalid(m)) => internal(format!("json.encode wrote text that does not parse: {m}")),
+    }
+}
+
 /// Encodes `value` as JSON text, as `json.encode` does.
 pub(crate) fn encode(vm: &Vm, value: Value, indent: usize) -> Result<String, Ctl> {
     let mut e = Encoder {
@@ -901,6 +914,43 @@ impl<'a> Parser<'a> {
                 })?;
                 let map = b.map(m);
                 b.st.new_variant(ids.obj, &[map])
+            }
+            _ => return Err(self.unexpected()),
+        })
+    }
+
+    /// Parses a JSON value into a Rust [`Json`].
+    fn rust_json(&mut self, meter: &Meter) -> PResult<Json> {
+        self.ws();
+        self.charge(meter)?;
+        Ok(match self.peek() {
+            Some(b'n') => self.literal(b"null").map(|()| Json::Null)?,
+            Some(b't') => self.literal(b"true").map(|()| Json::Bool(true))?,
+            Some(b'f') => self.literal(b"false").map(|()| Json::Bool(false))?,
+            Some(b'"') => Json::Str(self.string(true)?.into_owned()),
+            Some(b'-' | b'0'..=b'9') => {
+                let n = self.number()?;
+                match n.value() {
+                    Value::Int(i) => Json::Int(i),
+                    _ => Json::Float(n.float()),
+                }
+            }
+            Some(b'[') => {
+                let mut items = Vec::new();
+                self.array(|p, _| {
+                    items.push(p.rust_json(meter)?);
+                    Ok(())
+                })?;
+                Json::Arr(items)
+            }
+            Some(b'{') => {
+                let mut fields = indexmap::IndexMap::new();
+                self.object(true, |p, key| {
+                    let v = p.rust_json(meter)?;
+                    fields.insert(key.into_owned(), v);
+                    Ok(())
+                })?;
+                Json::Obj(fields)
             }
             _ => return Err(self.unexpected()),
         })
