@@ -345,28 +345,54 @@ impl fmt::Debug for CompiledProgram {
 }
 
 impl CompiledProgram {
-    /// The function `name` of the main module, public or private, if a host can call it with
-    /// [`Engine::call`]: a top-level function without type parameters.
-    pub fn function(&self, name: &str) -> Option<Function> {
-        let index = self.program.functions.iter().position(|(_, s)| s.name == name)?;
-        Some(Function { program: self.clone(), index })
+    /// The function `name` of the main module, public or private, for [`Engine::call`]. A host
+    /// can call a top-level function without type parameters whose types the engine can
+    /// describe. For any other name, fails with the reason.
+    pub fn function(&self, name: &str) -> Result<Function, FunctionError> {
+        match self.program.functions.iter().find(|(n, _)| n == name) {
+            Some((_, Ok((proto, signature)))) => Ok(Function { program: self.clone(), proto: *proto, signature: signature.clone() }),
+            Some((_, Err(e))) => Err(e.clone()),
+            None => Err(FunctionError::NotFound),
+        }
     }
 }
+
+/// Why [`CompiledProgram::function`] gives no function.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FunctionError {
+    /// The main module has no top-level function of this name.
+    NotFound,
+    /// The function has type parameters.
+    Generic,
+    /// The type of parameter `param`, or the return type if `param` is `None`, is too large to
+    /// describe.
+    TypeTooLarge { param: Option<String> },
+}
+
+impl fmt::Display for FunctionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FunctionError::NotFound => f.write_str("the main module has no top-level function of this name"),
+            FunctionError::Generic => f.write_str("the function has type parameters"),
+            FunctionError::TypeTooLarge { param: Some(p) } => write!(f, "the type of parameter `{p}` is too large to describe"),
+            FunctionError::TypeTooLarge { param: None } => f.write_str("the return type is too large to describe"),
+        }
+    }
+}
+
+impl std::error::Error for FunctionError {}
 
 /// A function of a compiled program's main module (see [`CompiledProgram::function`]).
 #[derive(Clone, Debug)]
 pub struct Function {
     program: CompiledProgram,
-    index: usize,
+    proto: u32,
+    signature: FunctionSignature,
 }
 
 impl Function {
     pub fn signature(&self) -> &FunctionSignature {
-        &self.program.program.functions[self.index].1
-    }
-
-    fn proto(&self) -> u32 {
-        self.program.program.functions[self.index].0
+        &self.signature
     }
 }
 
@@ -1967,7 +1993,7 @@ async fn call_decoded(vm: &mut Vm, function: &Function, args: &[&str]) -> Result
         }
     }
     let args = vm.pinned[first..].to_vec();
-    let closure = vm.heap.alloc(Obj::Closure(function.proto(), Box::new([])));
+    let closure = vm.heap.alloc(Obj::Closure(function.proto, Box::new([])));
     match vm.run_call(closure, &args).await? {
         RunEnd::Finished(v) => Ok(Called::Returned(v)),
         RunEnd::Exit(c) => Ok(Called::Exited(c)),

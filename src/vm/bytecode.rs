@@ -1250,6 +1250,10 @@ pub struct RtIds {
     pub err: u32,
 }
 
+/// A top-level function of the main module: its proto and signature, or the reason that a host
+/// cannot call it.
+pub type MainFunction = Result<(u32, crate::engine::FunctionSignature), crate::engine::FunctionError>;
+
 /// A compiled program, shared by `Arc`. It is immutable once built, except
 /// that a REPL session appends to it between inputs (never renumbering).
 #[derive(Clone, Debug, Default)]
@@ -1271,8 +1275,8 @@ pub struct Program {
     pub ids: RtIds,
     pub entry: u32,
     pub tests: Vec<(String, u32)>,
-    /// The functions of the main module that a host can call, and their protos.
-    pub functions: Vec<(u32, crate::engine::FunctionSignature)>,
+    /// The top-level functions of the main module by name.
+    pub functions: Vec<(String, MainFunction)>,
     pub files: Vec<String>,
     /// The names of the natives, by id.
     pub native_names: Arc<[String]>,

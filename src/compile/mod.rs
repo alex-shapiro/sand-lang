@@ -11,9 +11,9 @@ mod reflect;
 
 use crate::check::budget::CompileBudget;
 use crate::check::persist::{PMap, PVec};
-use crate::check::{CheckedProgram, FnKind};
+use crate::check::{CheckedProgram, FnInfo, FnKind};
 use crate::diag::{Diag, SourceMap, Span};
-use crate::engine::NativeDecls;
+use crate::engine::{FunctionError, FunctionSignature, NativeDecls, Returns};
 use crate::hir::*;
 use crate::types::{FnId, Ty, TypeArena, TypeDefId, TypeId};
 use crate::vm::bytecode::*;
@@ -508,35 +508,50 @@ impl<'a> Compiler<'a> {
         entry
     }
 
-    /// The top-level functions without type parameters of module `main`, among the functions
-    /// numbered from `first`, with their signatures. Leaves out a function whose parameter or
-    /// return type is too large to describe.
-    fn main_functions(&mut self, main: crate::types::ModId, first: usize) -> Vec<(u32, crate::engine::FunctionSignature)> {
+    /// The top-level functions of module `main`, among the functions numbered from `first`: by
+    /// name, each with its proto and signature, or the reason that a host cannot call it.
+    fn main_functions(&mut self, main: crate::types::ModId, first: usize) -> Vec<(String, MainFunction)> {
         use crate::check::{DeclPath, FnDeclRef};
-        use crate::engine::{FunctionSignature, Returns};
         let cp = self.cp;
         let mut out = Vec::new();
         for (i, f) in cp.fns.iter_from(first).enumerate().map(|(k, f)| (first + k, f)) {
             let top_level = matches!(f.decl, Some(FnDeclRef::Fn(d)) if d.method == DeclPath::NOT_METHOD);
-            if f.module != main || !matches!(f.kind, FnKind::Script) || !top_level || !f.generics.is_empty() {
+            if f.module != main || !matches!(f.kind, FnKind::Script) || !top_level {
                 continue;
             }
             let Some(proto) = self.fn_protos[i] else { continue };
-            let mut sink = DescCode { cp, prog: &mut *self.prog, fn_protos: &self.fn_protos };
-            let mut describe = |t| self.descs.describe(cp, &mut self.arena, t, &mut sink);
-            let params: Option<Vec<_>> = f.params.iter().map(|p| Some((cp.name(p.name).to_string(), describe(p.ty)?))).collect();
-            let returns = match cp.arena.get(f.ret) {
-                Ty::Named(d, args) if d == cp.wk.result => {
-                    let (ok, err) = (cp.arena.elem(args, 0), cp.arena.elem(args, 1));
-                    describe(ok).zip(describe(err)).map(|(ok, err)| Returns::Result { ok, err })
-                }
-                _ => describe(f.ret).map(Returns::Value),
-            };
-            if let (Some(params), Some(returns)) = (params, returns) {
-                out.push((proto, FunctionSignature { name: cp.name(f.name).to_string(), params, returns }));
-            }
+            let name = cp.name(f.name).to_string();
+            let function = if f.generics.is_empty() { self.main_function(f, proto) } else { Err(FunctionError::Generic) };
+            out.push((name, function));
         }
         out
+    }
+
+    /// The proto and signature of `f`, a top-level function of module `main` without type parameters.
+    fn main_function(&mut self, f: &FnInfo, proto: u32) -> MainFunction {
+        let cp = self.cp;
+        let mut sink = DescCode { cp, prog: &mut *self.prog, fn_protos: &self.fn_protos };
+        let mut describe = |t, param: Option<&str>| {
+            self.descs
+                .describe(cp, &mut self.arena, t, &mut sink)
+                .ok_or_else(|| FunctionError::TypeTooLarge { param: param.map(String::from) })
+        };
+        let params = f
+            .params
+            .iter()
+            .map(|p| {
+                let name = cp.name(p.name);
+                Ok((name.to_string(), describe(p.ty, Some(name))?))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let returns = match cp.arena.get(f.ret) {
+            Ty::Named(d, args) if d == cp.wk.result => {
+                let (ok, err) = (cp.arena.elem(args, 0), cp.arena.elem(args, 1));
+                Returns::Result { ok: describe(ok, None)?, err: describe(err, None)? }
+            }
+            _ => Returns::Value(describe(f.ret, None)?),
+        };
+        Ok((proto, FunctionSignature { name: cp.name(f.name).to_string(), params, returns }))
     }
 }
 

@@ -6,7 +6,7 @@ mod common;
 
 use common::{TempDir, rt, run_with};
 use jiff::civil::Date;
-use sandlang::engine::{Config, Engine, Error, HostModules, LimitKind, Limits, MemorySink, Outcome, Returned};
+use sandlang::engine::{Config, Engine, Error, FunctionError, HostModules, LimitKind, Limits, MemorySink, Outcome, Returned};
 use sandlang::native::NativeModule;
 use sandlang::policy::{Capability, Decision, PromptAnswer};
 use sandlang::stdlib::json::Json;
@@ -3656,7 +3656,7 @@ fn compiled_programs_run_on_many_engines() {
 }
 
 /// Compiles `src` as `/main.sand` and returns its function `name`.
-fn function_of(config: Config, src: &str, name: &str) -> Option<sandlang::engine::Function> {
+fn function_of(config: Config, src: &str, name: &str) -> Result<sandlang::engine::Function, FunctionError> {
     let fs = sandlang::files::mem::MemFs::new();
     fs.write("/main.sand", src).unwrap();
     let mut engine = Engine::new(config.memory_fs(fs));
@@ -3735,8 +3735,13 @@ fn hosts_call_functions_of_the_main_module() {
         rt().block_on(engine_with(base.clone()).0.call(&either, &[])).unwrap(),
         Outcome::Returned(Returned::Err(Json::Str("no".into())))
     );
-    assert!(function_of(base.clone(), ORDER, "pick").is_none(), "generic functions cannot be called");
-    assert!(function_of(base.clone(), ORDER, "Order").is_none());
+    assert_eq!(function_of(base.clone(), ORDER, "pick").err(), Some(FunctionError::Generic));
+    assert_eq!(function_of(base.clone(), ORDER, "Order").err(), Some(FunctionError::NotFound));
+    assert_eq!(function_of(base.clone(), ORDER, "missing").err(), Some(FunctionError::NotFound));
+    let deep = "struct P<T> {\n    v: T\n    next: P<[T]>?\n}\nfn into(p: P<int>) -> int { 0 }\nfn out() -> P<int>? { None }\n";
+    let too_large = |param: Option<&str>| Some(FunctionError::TypeTooLarge { param: param.map(String::from) });
+    assert_eq!(function_of(base.clone(), deep, "into").err(), too_large(Some("p")));
+    assert_eq!(function_of(base.clone(), deep, "out").err(), too_large(None));
 
     let failing = function_of(base.clone(), "fn main() -> int {\n    let xs: [int] = []\n    xs[3]\n}", "main").unwrap();
     match rt().block_on(engine_with(base.clone()).0.call(&failing, &[])) {

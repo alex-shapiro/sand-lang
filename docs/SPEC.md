@@ -2011,8 +2011,10 @@ A host can also call a function of the program's main module and get its value.
 `CompiledProgram::function(name)` returns a top-level function without type parameters,
 public or private. Its `signature()` gives the type of each parameter and the return type as
 type descriptors, and shows as the function's declaration, such as
-`fn main(order: Order) -> Result<Receipt>`. `Engine::call(function, args)` runs the module
-initializers, then calls the function. Each argument is JSON text, which the engine decodes to
+`fn main(order: Order) -> Result<Receipt>`. For another name, `function` fails with a
+`FunctionError` that gives the reason: `NotFound`, `Generic`, or `TypeTooLarge { param }` for a
+parameter or return type that is too large to describe. `Engine::call(function, args)` runs the
+module initializers, then calls the function. Each argument is JSON text, which the engine decodes to
 the type of its parameter as `json.decode` does. An argument that does not decode fails the
 call with `Error::Argument`. A call that does not fail returns an `Outcome<Returned>`. A
 returned value converts to `stdlib::json::Json` as `json.encode` encodes it:
