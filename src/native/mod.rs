@@ -242,14 +242,15 @@ pub fn struct_from_value<T: StructType>(
 }
 
 #[doc(hidden)]
-pub fn struct_into_value<T: StructType>(vm: &mut Vm, write: impl FnOnce(&mut Vm) -> Result<Box<[Value]>, Ctl>) -> Result<Value, Ctl> {
+pub fn struct_into_value<T: StructType>(
+    vm: &mut Vm,
+    depth: convert::Depth,
+    write: impl FnOnce(&mut Vm, convert::Depth) -> Result<Box<[Value]>, Ctl>,
+) -> Result<Value, Ctl> {
     let Some(&def) = vm.prog.struct_types.get(&T::rust_type()) else {
         return Err(Ctl::internal(format!("struct {}.{} is not loaded", T::MODULE, T::NAME)));
     };
-    vm.struct_depth = convert::enter_struct(vm.struct_depth)?;
-    let fields = write(vm);
-    vm.struct_depth -= 1;
-    let fields = fields?;
+    let fields = write(vm, depth.enter()?)?;
     if fields.len() != T::FIELDS.len() {
         return Err(Ctl::internal(format!("struct {}.{} takes {} fields, not {}", T::MODULE, T::NAME, T::FIELDS.len(), fields.len())));
     }
@@ -305,8 +306,9 @@ pub fn variant_field(vm: &Vm, v: Value, i: usize) -> Result<Value, Ctl> {
 #[doc(hidden)]
 pub fn variant_into_value<T: EnumType, const N: usize>(
     vm: &mut Vm,
+    depth: convert::Depth,
     index: usize,
-    write: impl FnOnce(&mut Vm) -> Result<[Value; N], Ctl>,
+    write: impl FnOnce(&mut Vm, convert::Depth) -> Result<[Value; N], Ctl>,
 ) -> Result<Value, Ctl> {
     let Some(&first) = vm.prog.enum_types.get(&T::rust_type()) else {
         return Err(Ctl::internal(format!("enum {}.{} is not loaded", T::MODULE, T::NAME)));
@@ -315,10 +317,7 @@ pub fn variant_into_value<T: EnumType, const N: usize>(
     if N == 0 {
         return Ok(Value::Tag(id));
     }
-    vm.struct_depth = convert::enter_struct(vm.struct_depth)?;
-    let fields = write(vm);
-    vm.struct_depth -= 1;
-    let fields = fields?;
+    let fields = write(vm, depth.enter()?)?;
     if let [p] = fields.as_slice()
         && let Some(v) = Value::variant1(id, *p)
     {

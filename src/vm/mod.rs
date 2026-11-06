@@ -615,8 +615,6 @@ pub struct Vm {
     pub(crate) broken: bool,
     /// Testing aid: causes the first memory or resource check in each `vm_function` call to fail (see `Config::retry_stress`).
     pub(crate) retry_stress: bool,
-    /// Struct nesting depth during conversion to Sand (see [`struct_into_value`](crate::native::struct_into_value)).
-    pub(crate) struct_depth: usize,
     /// The run's journal, if it has one (SPEC §16.7).
     pub(crate) journal: Option<Box<std::cell::RefCell<journal::JournalState>>>,
 }
@@ -712,7 +710,6 @@ impl Vm {
             ascii_strs: Vec::new(),
             broken: false,
             retry_stress: false,
-            struct_depth: 0,
             journal: None,
         };
         vm.load_program();

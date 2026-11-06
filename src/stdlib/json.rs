@@ -3,7 +3,7 @@
 
 use super::base64;
 use crate::check::ModKind;
-use crate::native::convert::{Conversion, FromValue, HostError, IntoValue, mismatch};
+use crate::native::convert::{Conversion, Depth, FromValue, HostError, IntoValue, mismatch};
 use crate::native::ty::{Param, Reflect, Val};
 use crate::native::{Constant, EnumType, NamedType, NativeModule, variant_const, variant_index};
 use crate::syntax::lexer::is_ident;
@@ -410,7 +410,7 @@ impl FromValue for Json {
 }
 
 impl IntoValue for Json {
-    fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl> {
+    fn into_value_at(self, vm: &mut Vm, _: Depth) -> Result<Value, Ctl> {
         let ids = JsonIds::of(&vm.prog)?;
         let meter = &vm.meter;
         vm.heap.staged(|heap, st| walk(&mut Writer { b: Builder::new(heap, st, meter), ids }, self))
