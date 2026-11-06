@@ -117,13 +117,9 @@ impl IoTable {
 
     /// Cancels every pending operation.
     pub fn clear(&mut self) {
-        for (slot, op) in self.ops.iter_mut().enumerate() {
-            if op.take().is_some() {
-                self.free.push(slot as u32);
-            }
+        for id in 0..self.ops.len() {
+            self.cancel(id as u64);
         }
-        self.pending = 0;
-        self.user_waits = 0;
     }
 
     fn acquire(&mut self, op: &IoOp) {
