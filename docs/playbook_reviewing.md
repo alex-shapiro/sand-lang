@@ -12,17 +12,31 @@ Review this branch's diff against main and issue fixes on this branch in order t
 
 Where you find design problems that can be fixed or improved with limited or no product tradeoffs, fix the problem automatically and, where applicable, ensure that tests prove the soundness of the updated approach. Commit each fix independently, with a concise description of the problem and the solution. Include any tests, experiments, measurements, and outcomes so that follow-up work can reference past findings easily.
 
-Where you find design problems where the best solution requires a significant product trade-off, write down the problem, potential solutions, and tradeoffs concisely in a standalone, short (short!), readable section of a docs/TRADEOFFS.md file. This doc will allow follow-up work to reference past findings.
+If you find a design problem where the best solution requires a significant product trade-off, write down the problem, potential solutions, and tradeoffs concisely in a standalone, short (short!), readable section of a docs/TRADEOFFS.md file. This doc will allow follow-up work to reference branch-specific, unresolved tradeoffs. After a tradeoff is resolved, remove it from the doc and write the decision and its reason in a commit message. A future reviewer can read the commit message to understand the tradeoff decision.
 
-Merely documenting a design issue is less desirable than fixing it. If a tradeoff is weak or nonexistent, prefer to fix a design issue than to note it. But if you find that there is a significant tradeoff that would force changes to the nature of the product, it is better to note it than to commando-fix it prior to my input. Breaking backwards compatibility is ok; a tradeoff must be a _real_ product or systemic tradeoff.
+Merely documenting a design issue is less desirable than fixing it. If a tradeoff is weak or nonexistent, prefer to fix a design issue than to note it. But if you find that there is a significant tradeoff that would force changes to the nature of the product, it is better to note it in TRADEOFFS.md than to commando-fix it prior to my input. Breaking backwards compatibility is ok; a tradeoff must be a _real_ product or systemic tradeoff.
 
 Commit and push each fix in its own commit. A commit should contain a brief (brief!) description, as well as evidence of impact. Include references to tests, experiments, or measurements and their outcomes, so follow-up work can reference past findings easily.
 
-When you are done with all fixes, reviews, and notes, kick off another independent review cycle, again reviewing the full branch diff. Each iteration must have access to past fixes and tradeoff notes. Break the review loop if a review iteration finds no significant new design flaws that have not already been fixed or noted. After five iterations, break the loop and report the remaining flaws to the user.
+When you are done with all fixes, reviews, and notes, kick off another independent review cycle, again reviewing the full branch diff. Each iteration must have access to past fixes and tradeoff notes. Break the review loop if a review iteration finds no significant new design flaws that have not already been fixed or noted. If the loop continues past five iterations, break the loop and report remaining flaws to the user.
+
+At the end of the review, report unresolved tradeoffs to the user. Move each unresolved tradeoff to TODO.md and delete TRADEOFFS.md.
 
 Approach each review iteration and fix from first principles; we control all repos and can make any changes necessary. If a suboptimal approach is being taken and you are justified in replacing it with a better alternative, do so.
 
 Use sub-agents as necessary, especially to keep reviewers independent from fixers. If you use a sub-agent, ensure that it has sufficient context across restarts. Context: in the past, sub-agents have been killed and restarted with half context, resulting in suboptimal design and implementation.
+
+Start each reviewer sub-agent with the exact prompt:
+
+```
+Run the audit portion of a review iteration, following `docs/playbook_reviewing.md`.
+Review the full diff in this branch, up to its most recent commit, against origin/main.
+Read AGENTS.md and, if it exists, docs/TRADEOFFS.md.
+
+Do not edit files, commit, or push. For each finding, give file:line, the
+problem, a proposed fix, and whether the fix requires a real product tradeoff.
+Rank findings from most to least significant, and label each as "significant" or "minor".
+```
 
 Run autonomously until the task is complete.
 
@@ -32,6 +46,12 @@ The best thinking and coding model is Claude Opus 5.5; however, it is also the w
 
 Check whether the environment contains the antigravity CLI `agy`. The CLI is available locally but not in a cloud-hosted sandbox. If `agy` is not available, tell the user and skip this step.
 
-Run Gemini with `agy --dangerously-skip-permissions` so that it can work autonomously. The prompt must be a one-liner, telling it to run the [copyediting playbook](playbook_copyediting.md) on the branch. Do not include any other framing, limits, or instructions in the prompt.
+Run Gemini with the exact following command:
 
-When Gemini is done, review its full diff and make sure that the codebase is formatted, linted, and tests pass. DO NOT EDIT ITS COPY CHANGES except to correct factual errors. If you have to edit copy in order to correct a factual error, re-run Gemini afterward.
+```
+agy --dangerously-skip-permissions -p "Run docs/playbook_copyediting.md on this branch."
+```
+
+When Gemini is done, review its full diff and make sure that the codebase is formatted, linted, and tests pass. DO NOT EDIT ITS COPY CHANGES except to correct factual errors. If you have to edit copy in order to correct a factual error, re-run the Gemini command afterward.
+
+If format, lint, or tests fail because of Gemini's changes, make the smallest edit that makes them pass, and treat it as a factual fix. Re-run Gemini at most two times. If errors remain after that, tell the user. When checks pass, commit anything uncommitted and push any unpushed commits.
