@@ -26,6 +26,16 @@ If playbook instructions conflict with this doc, follow the playbook and communi
 
 Approach each task from first principles. This is a greenfield codebase with no legacy code to maintain. You own the whole codebase and can make any change, anywhere.
 
+## Symbol Names
+
+Symbol names should be just specific enough that a reader can get the gist without requiring surrounding context. A few non-exhaustive examples:
+
+| bad             | good                         |
+| --------------- | ---------------------------- |
+| ReadId          | StdinReadId                  |
+| Who             | DocOwner                     |
+| Channel::wanted | Channel::has_waiting_readers |
+
 ## Doc and Comment Guidelines
 
 The standard library must be documented with module docs. Its canonical user-visible docs are in sandlang.com's stdlib reference. It does not need to be documented in SPEC.md. Doc comments should explain an API for the benefit of the caller. Code comments should be used only to explain unintuitive code.
