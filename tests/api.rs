@@ -9,7 +9,7 @@ use sandlang::jiff::civil::Date;
 use sandlang::time::TimeZone;
 use sandlang::vm::Vm;
 use sandlang::{
-    CallOutcome, Capability, Config, Decision, Engine, Error, LimitKind, Limits, LogLevel, LogRecord, LogSink, MemorySink, NativeModule,
+    Capability, Config, Decision, Engine, Error, LimitKind, Limits, LogLevel, LogRecord, LogSink, MemorySink, NativeModule, Outcome,
     PromptAnswer, ValueType,
 };
 use std::collections::HashMap;
@@ -3660,27 +3660,27 @@ fn hosts_call_functions_of_the_main_module() {
     // The module initializers run before the call, and computed defaults are filled in.
     assert_eq!(
         call(&mut engine, &[r#"{"id": "a1", "cents": 100}"#, "5"]).unwrap(),
-        CallOutcome::Returned(r#"{"id":"a1","total":106,"note":"n2"}"#.into())
+        Outcome::Returned(Ok(r#"{"id":"a1","total":106,"note":"n2"}"#.into()))
     );
     assert_eq!(out.contents(), "charging a1\n");
     assert_eq!(
         call(&mut engine, &[r#"{"id": "a1", "cents": -1}"#, "0"]).unwrap(),
-        CallOutcome::Failed(r#"{"message":"negative total","kind":"invalid"}"#.into())
+        Outcome::Returned(Err(r#"{"message":"negative total","kind":"invalid"}"#.into()))
     );
-    let bad = call(&mut engine, &[r#"{"id": 3}"#, "0"]).unwrap();
-    assert!(matches!(&bad, CallOutcome::BadArgument { index: 0, kind, .. } if kind == "parse"), "{bad:?}");
+    let bad = call(&mut engine, &[r#"{"id": 3}"#, "0"]);
+    assert!(matches!(&bad, Err(Error::Argument { index: 0, kind, .. }) if kind == "parse"), "{bad:?}");
     assert!(matches!(call(&mut engine, &["0"]), Err(Error::Internal { .. })));
 
     let twice = function_of(base.clone(), ORDER, "twice").unwrap();
     assert_eq!(twice.signature().to_string(), "fn twice(x: int) -> int");
-    assert_eq!(rt().block_on(engine_with(base.clone()).0.call(&twice, &["21"])).unwrap(), CallOutcome::Returned("42".into()));
+    assert_eq!(rt().block_on(engine_with(base.clone()).0.call(&twice, &["21"])).unwrap(), Outcome::Returned(Ok("42".into())));
     let nothing = function_of(base.clone(), ORDER, "nothing").unwrap();
     assert_eq!(nothing.signature().to_string(), "fn nothing()");
-    assert_eq!(rt().block_on(engine_with(base.clone()).0.call(&nothing, &[])).unwrap(), CallOutcome::Returned("null".into()));
+    assert_eq!(rt().block_on(engine_with(base.clone()).0.call(&nothing, &[])).unwrap(), Outcome::Returned(Ok("null".into())));
     let either = function_of(base.clone(), ORDER, "either").unwrap();
     assert_eq!(either.signature().to_string(), "fn either() -> Result<int, str>");
     assert!(matches!(&either.signature().returns, sandlang::Returns::Result { err, .. } if !err.is_error()));
-    assert_eq!(rt().block_on(engine_with(base.clone()).0.call(&either, &[])).unwrap(), CallOutcome::Failed(r#""no""#.into()));
+    assert_eq!(rt().block_on(engine_with(base.clone()).0.call(&either, &[])).unwrap(), Outcome::Returned(Err(r#""no""#.into())));
     assert!(function_of(base.clone(), ORDER, "pick").is_none(), "generic functions cannot be called");
     assert!(function_of(base.clone(), ORDER, "Order").is_none());
 
@@ -3690,7 +3690,7 @@ fn hosts_call_functions_of_the_main_module() {
         r => panic!("{r:?}"),
     }
     let exits = function_of(base.clone(), "fn main() -> int {\n    exit(4)\n}", "main").unwrap();
-    assert_eq!(rt().block_on(engine_with(base).0.call(&exits, &[])).unwrap(), CallOutcome::Exited(4));
+    assert_eq!(rt().block_on(engine_with(base).0.call(&exits, &[])).unwrap(), Outcome::Exited(4));
 }
 
 #[test]

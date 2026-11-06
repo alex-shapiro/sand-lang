@@ -96,7 +96,7 @@ pub enum CtlKind {
     /// open-resource slot, I/O buffer space) may be held by garbage. See
     /// [`Vm::resource_slot`].
     Collect,
-    /// The run stops for its journal (divergence, suspension, a failed flush).
+    /// The run stops for its journal (divergence or suspension).
     Journal(journal::JournalStop),
     /// A host function ends the run (see [`Ctl::abort`]).
     Abort(crate::HostAbort),
@@ -136,13 +136,13 @@ impl Ctl {
     }
 
     /// Ends the run at once with [`Error::Aborted`](crate::Error::Aborted),
-    /// which gives `payload` back to the host. The engine does not run
+    /// which gives `reason` back to the host. The engine does not run
     /// deferred code, and does not journal the call that aborts, so a
     /// resumed journaled run calls it again. Use it for conditions of the
     /// host that the script must not see, such as the loss of the host's
     /// right to run the run.
-    pub fn abort(payload: impl std::any::Any + Send + Sync) -> Ctl {
-        Ctl(Box::new(CtlKind::Abort(crate::HostAbort::new(payload))))
+    pub fn abort(reason: impl std::error::Error + Send + Sync + 'static) -> Ctl {
+        Ctl(Box::new(CtlKind::Abort(crate::HostAbort::new(reason))))
     }
 
     /// `exit(code)`.
@@ -203,7 +203,7 @@ impl std::fmt::Debug for CtlKind {
             CtlKind::Interrupted => write!(f, "Interrupted"),
             CtlKind::Collect => write!(f, "Collect"),
             CtlKind::Journal(s) => write!(f, "Journal({s:?})"),
-            CtlKind::Abort(_) => write!(f, "Abort"),
+            CtlKind::Abort(a) => write!(f, "Abort({a})"),
             CtlKind::Wait(_) => write!(f, "Wait"),
             CtlKind::Flush => write!(f, "Flush"),
             CtlKind::Cancelled => write!(f, "Cancelled"),

@@ -1,7 +1,7 @@
 //! The embedding API: `Engine`, `Config`, errors and module loading.
 
 use crate::check::ModKind;
-use crate::check::budget::CompileBudget;
+use crate::check::budget::{CompileBudget, Stop};
 use crate::compile::{CompileInput, compile_more};
 use crate::diag::{Diag, Diagnostic, FileId, Span};
 use crate::files::{Fs, MemFs};
@@ -88,6 +88,7 @@ impl fmt::Display for LimitKind {
 
 pub type TraceFrame = TraceEntry;
 
+/// Why an operation of an [`Engine`] failed.
 #[derive(Debug, Clone)]
 pub enum Error {
     Compile(Vec<Diagnostic>),
@@ -104,39 +105,68 @@ pub enum Error {
     Limit(LimitKind),
     Interrupted,
     Io(String),
+    /// Argument `index` of [`Engine::call`] does not decode to the type of its parameter.
+    /// `kind` and `message` are those of the error of `json.decode`.
+    Argument {
+        index: usize,
+        kind: String,
+        message: String,
+    },
     /// The run does something other than what its journal records at entry
     /// `seq` (SPEC §16.7).
     Diverged {
         seq: u64,
         message: String,
     },
-    /// The journal failed to flush (SPEC §16.7).
-    Journal(crate::journal::JournalError),
-    /// A host function ended the run with [`Ctl::abort`](crate::vm::Ctl::abort).
+    /// The host ended the run: a host function called
+    /// [`Ctl::abort`](crate::vm::Ctl::abort), or [`Journal::flush`](crate::journal::Journal::flush)
+    /// failed.
     Aborted(HostAbort),
 }
 
-/// The payload with which a host function ended a run
-/// ([`Ctl::abort`](crate::vm::Ctl::abort)).
+/// Why the host ended a run ([`Error::Aborted`]): the host's own error, which the host gets
+/// back with [`HostAbort::downcast_ref`].
 #[derive(Clone)]
-pub struct HostAbort(Arc<dyn std::any::Any + Send + Sync>);
+pub struct HostAbort(Arc<dyn std::error::Error + Send + Sync>);
 
 impl HostAbort {
-    pub(crate) fn new(payload: impl std::any::Any + Send + Sync) -> HostAbort {
-        HostAbort(Arc::new(payload))
+    pub fn new(e: impl std::error::Error + Send + Sync + 'static) -> HostAbort {
+        HostAbort(Arc::new(e))
     }
 
-    /// The payload, if it has type `T`.
-    pub fn downcast_ref<T: std::any::Any>(&self) -> Option<&T> {
+    /// A reason with only a message.
+    pub fn message(m: impl Into<String>) -> HostAbort {
+        HostAbort::new(Message(m.into()))
+    }
+
+    /// The host's error, if it has type `T`.
+    pub fn downcast_ref<T: std::error::Error + 'static>(&self) -> Option<&T> {
         self.0.downcast_ref::<T>()
+    }
+}
+
+impl fmt::Display for HostAbort {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
     }
 }
 
 impl fmt::Debug for HostAbort {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("HostAbort")
+        write!(f, "HostAbort({})", self.0)
     }
 }
+
+#[derive(Debug)]
+struct Message(String);
+
+impl fmt::Display for Message {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Message {}
 
 impl Error {
     fn compiler_bug(message: &str) -> Error {
@@ -169,9 +199,9 @@ impl fmt::Display for Error {
             Error::Limit(k) => write!(f, "{k}"),
             Error::Interrupted => write!(f, "interrupted"),
             Error::Io(m) => write!(f, "{m}"),
+            Error::Argument { index, kind, message } => write!(f, "argument {index} is not valid: {kind}: {message}"),
             Error::Diverged { seq, message } => write!(f, "the run diverged from its journal at entry {seq}: {message}"),
-            Error::Journal(e) => write!(f, "the journal failed: {e}"),
-            Error::Aborted(_) => write!(f, "the host ended the run"),
+            Error::Aborted(e) => write!(f, "the host ended the run: {e}"),
         }
     }
 }
@@ -187,15 +217,15 @@ fn write_trace(f: &mut fmt::Formatter<'_>, trace: &[TraceFrame]) -> fmt::Result 
 
 impl Error {
     /// The exit status of the `sand` tools for the error: 1 for a runtime
-    /// error, 2 for compile and I/O errors, 3 for a limit, 70 for an internal
-    /// error or a run that the host ended, 74 for journal errors, 130 if
-    /// interrupted.
+    /// error, 2 for compile, I/O and argument errors, 3 for a limit, 70 for an
+    /// internal error or a run that the host ended, 74 for a divergence from
+    /// the journal, 130 if interrupted.
     pub fn exit_code(&self) -> i32 {
         match self {
             Error::Runtime { .. } => 1,
             Error::Internal { .. } | Error::Aborted(_) => 70,
-            Error::Diverged { .. } | Error::Journal(_) => 74,
-            Error::Compile(_) | Error::Io(_) => 2,
+            Error::Diverged { .. } => 74,
+            Error::Compile(_) | Error::Io(_) | Error::Argument { .. } => 2,
             Error::Limit(_) => 3,
             Error::Interrupted => 130,
         }
@@ -211,24 +241,30 @@ impl Error {
     }
 }
 
-/// How a run that did not fail ended.
+/// How a run that did not fail ended. A script ([`Engine::run_program`]) has an
+/// `Outcome` with no return value; a call ([`Engine::call`]) has an
+/// `Outcome<Result<String, String>>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Outcome {
-    /// The run ended with this exit code: 0, or the code that the script
-    /// passed to `exit`.
+pub enum Outcome<R = std::convert::Infallible> {
+    /// The called function returned. The value is JSON text, encoded as `json.encode` does:
+    /// `Ok` holds the value, or the payload of `Ok` for a function that returns a `Result`,
+    /// and `Err` holds the payload of `Err`.
+    Returned(R),
+    /// The run ended with this exit code: 0 when a script ends, or the code
+    /// that the run passed to `exit`.
     Exited(i32),
     /// The engine suspended the journaled run because every task waits
-    /// (SPEC §16.7). To resume it, the host runs the program again with the
-    /// same journal.
+    /// (SPEC §16.7). To resume it, the host starts the run again with the
+    /// same journal, and for a call, the same arguments.
     Suspended(crate::journal::Suspension),
 }
 
-impl Outcome {
-    /// The exit code of a run that ended, or `None` for a suspended run.
-    pub fn exit_code(self) -> Option<i32> {
+impl<R> Outcome<R> {
+    /// The exit code of a run that called `exit` or of a script that ended.
+    pub fn exit_code(&self) -> Option<i32> {
         match self {
-            Outcome::Exited(c) => Some(c),
-            Outcome::Suspended(_) => None,
+            Outcome::Exited(c) => Some(*c),
+            Outcome::Returned(_) | Outcome::Suspended(_) => None,
         }
     }
 }
@@ -308,24 +344,6 @@ impl fmt::Display for FunctionSignature {
             Returns::Result { ok, err } => write!(f, " -> Result<{ok}, {err}>"),
         }
     }
-}
-
-/// How a call with [`Engine::call`] ended, if it did not fail.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CallOutcome {
-    /// The function returned this value as JSON text, encoded as `json.encode` does. For a
-    /// function that returns a `Result`, the value is the payload of `Ok`.
-    Returned(String),
-    /// The function returned `Err(e)`. This is `e` as JSON text.
-    Failed(String),
-    /// Argument `index` does not decode to the type of its parameter. `kind` and `message`
-    /// are those of the error of `json.decode`.
-    BadArgument { index: usize, kind: String, message: String },
-    /// The run called `exit` with this code.
-    Exited(i32),
-    /// The engine suspended the journaled run because every task waits (SPEC §16.7). To
-    /// resume it, the host calls the function again with the same arguments and journal.
-    Suspended(crate::journal::Suspension),
 }
 
 /// Resources that the most recent run of an engine used.
@@ -1057,8 +1075,8 @@ impl Engine {
     }
 
     /// Type checks source text as [`Engine::check_source`] does, and lints
-    /// it. Compile errors are an [`Error::Compile`]; a lint that runs out of
-    /// budget or time is an [`Error::Io`].
+    /// it. Compile errors, and a lint that runs out of budget, are an
+    /// [`Error::Compile`].
     pub fn lint_source(&self, name: &str, source: &str) -> Result<Vec<crate::lint::LintWarning>, Error> {
         let c = self.compile_now(name, source, &self.source_root().1, None, true)?;
         self.recycle(c.program, c.snapshot);
@@ -1171,21 +1189,21 @@ impl Engine {
         })
     }
 
-    pub async fn run_source(&mut self, name: &str, source: &str) -> Result<crate::Outcome, Error> {
+    pub async fn run_source(&mut self, name: &str, source: &str) -> Result<Outcome, Error> {
         crate::unwind::guard(self.run_source_inner(name, source)).await
     }
 
-    async fn run_source_inner(&mut self, name: &str, source: &str) -> Result<crate::Outcome, Error> {
+    async fn run_source_inner(&mut self, name: &str, source: &str) -> Result<Outcome, Error> {
         let (root, normal) = self.source_root().clone();
         let compiled = self.compile(name, source, &normal, None).await?;
         self.run_script(compiled, root).await
     }
 
-    pub async fn run_file(&mut self, path: impl AsRef<Path>) -> Result<crate::Outcome, Error> {
+    pub async fn run_file(&mut self, path: impl AsRef<Path>) -> Result<Outcome, Error> {
         crate::unwind::guard(self.run_file_inner(path.as_ref())).await
     }
 
-    async fn run_file_inner(&mut self, path: &Path) -> Result<crate::Outcome, Error> {
+    async fn run_file_inner(&mut self, path: &Path) -> Result<Outcome, Error> {
         let (name, source, root) = self.read_main(path)?;
         let compiled = self.compile(&name, &source, &root, Some(path)).await?;
         let cwd = self.config.cwd.clone().unwrap_or(root);
@@ -1212,7 +1230,7 @@ impl Engine {
     /// Runs a program from [`Engine::compile_file`]. The wall-time limit counts from the start
     /// of the run. Fails with [`Error::Internal`] if the program was compiled with other host
     /// modules.
-    pub async fn run_program(&mut self, program: &CompiledProgram) -> Result<crate::Outcome, Error> {
+    pub async fn run_program(&mut self, program: &CompiledProgram) -> Result<Outcome, Error> {
         let compiled = self.start_program(program)?;
         crate::unwind::guard(self.run_script(compiled, program.cwd.clone())).await
     }
@@ -1221,11 +1239,11 @@ impl Engine {
     /// after the module initializers instead of ending, and returns what it returns.
     ///
     /// Each argument is JSON text, which the engine decodes to the type of its parameter as
-    /// `json.decode` does. The engine encodes the value that the function returns as
-    /// `json.encode` does. A journaled run replays the same call, so the host gives the same
+    /// `json.decode` does; an argument that does not decode fails the call with
+    /// [`Error::Argument`]. A journaled run replays the same call, so the host gives the same
     /// arguments to each execution of the run. Fails with [`Error::Internal`] if the number of
     /// arguments is not the number of parameters.
-    pub async fn call(&mut self, function: &Function, args: &[&str]) -> Result<CallOutcome, Error> {
+    pub async fn call(&mut self, function: &Function, args: &[&str]) -> Result<Outcome<Result<String, String>>, Error> {
         let sig = function.signature();
         if args.len() != sig.params.len() {
             let message = format!("`{}` takes {} arguments, and the call gives {}", sig.name, sig.params.len(), args.len());
@@ -1236,32 +1254,33 @@ impl Engine {
         crate::unwind::guard(self.call_compiled(compiled, cwd, function, args)).await
     }
 
-    async fn call_compiled(&mut self, compiled: Compiled, cwd: PathBuf, function: &Function, args: &[&str]) -> Result<CallOutcome, Error> {
+    async fn call_compiled(
+        &mut self,
+        compiled: Compiled,
+        cwd: PathBuf,
+        function: &Function,
+        args: &[&str],
+    ) -> Result<Outcome<Result<String, String>>, Error> {
         let sig = function.signature();
         let r = self
-            .execute(compiled, cwd, async |vm: &mut Vm| {
-                let r = call_function(vm, function, args).await;
-                match r {
-                    Ok(Called::Returned(v)) => {
-                        vm.pinned.push(v);
-                        let ended = vm.end_tasks().await;
-                        vm.pinned.pop();
-                        match ended? {
-                            Some(c) => Ok(CallOutcome::Exited(c)),
-                            None => returned(vm, v, &sig.returns).map_err(Trap::from_ctl),
-                        }
+            .execute(compiled, cwd, async |vm: &mut Vm| match call_function(vm, function, args).await? {
+                Called::Returned(v) => {
+                    vm.pinned.push(v);
+                    let ended = vm.end_tasks().await;
+                    vm.pinned.pop();
+                    match ended? {
+                        Some(c) => Ok(Ok(Outcome::Exited(c))),
+                        None => returned(vm, v, &sig.returns).map(|r| Ok(Outcome::Returned(r))).map_err(Trap::from_ctl),
                     }
-                    Ok(Called::Exited(c)) | Err(Trap::Exit(c)) => Ok(CallOutcome::Exited(c)),
-                    Ok(Called::BadArgument { index, error }) => {
-                        Ok(CallOutcome::BadArgument { index, kind: error.kind, message: error.message })
-                    }
-                    Err(t) => Err(t),
                 }
+                Called::Exited(c) => Ok(Ok(Outcome::Exited(c))),
+                Called::BadArgument { index, error } => Ok(Err(Error::Argument { index, kind: error.kind, message: error.message })),
             })
             .await;
         match r {
-            Ok(o) => Ok(o),
-            Err(Trap::Journal(JournalStop::Suspended(s))) => Ok(CallOutcome::Suspended(s)),
+            Ok(r) => r,
+            Err(Trap::Exit(c)) => Ok(Outcome::Exited(c)),
+            Err(Trap::Journal(JournalStop::Suspended(s))) => Ok(Outcome::Suspended(s)),
             Err(t) => Err(trap_error(t)),
         }
     }
@@ -1276,7 +1295,7 @@ impl Engine {
     }
 
     /// Runs `compiled` as a script: its module initializers, then the tasks that are left.
-    async fn run_script(&mut self, compiled: Compiled, cwd: PathBuf) -> Result<crate::Outcome, Error> {
+    async fn run_script(&mut self, compiled: Compiled, cwd: PathBuf) -> Result<Outcome, Error> {
         let entry = compiled.program.entry;
         let r = self
             .execute(compiled, cwd, async |vm: &mut Vm| {
@@ -1859,7 +1878,6 @@ pub(crate) struct Discovery<'a> {
 /// Module discovery stops after this many errors (they are all reported).
 const MAX_DISCOVERY_ERRORS: usize = 100;
 
-/// Ends a run whose main task finished (`Vm::end_tasks`).
 /// How [`call_function`] ended.
 enum Called {
     Returned(Value),
@@ -1910,13 +1928,14 @@ async fn call_decoded(vm: &mut Vm, function: &Function, args: &[&str]) -> Result
     }
 }
 
-/// The outcome of a call whose function returned `v`, for a function that returns `returns`.
-fn returned(vm: &Vm, v: Value, returns: &Returns) -> Result<CallOutcome, crate::vm::Ctl> {
+/// The JSON text of `v`, the value that a function that returns `returns` returned: `Err` for
+/// the payload of an `Err`, else `Ok`.
+fn returned(vm: &Vm, v: Value, returns: &Returns) -> Result<Result<String, String>, crate::vm::Ctl> {
     match returns {
-        Returns::Value(_) => Ok(CallOutcome::Returned(stdlib::json::encode(vm, v, 0)?)),
+        Returns::Value(_) => Ok(Ok(stdlib::json::encode(vm, v, 0)?)),
         Returns::Result { .. } => match vm.as_result(v) {
-            Ok(v) => Ok(CallOutcome::Returned(stdlib::json::encode(vm, v, 0)?)),
-            Err(e) => Ok(CallOutcome::Failed(stdlib::json::encode(vm, e, 0)?)),
+            Ok(v) => Ok(Ok(stdlib::json::encode(vm, v, 0)?)),
+            Err(e) => Ok(Err(stdlib::json::encode(vm, e, 0)?)),
         },
     }
 }
@@ -1946,7 +1965,6 @@ pub(crate) fn trap_error(t: Trap) -> Error {
         Trap::Interrupted => Error::Interrupted,
         Trap::Abort(a) => Error::Aborted(a),
         Trap::Journal(JournalStop::Diverged { seq, message }) => Error::Diverged { seq, message },
-        Trap::Journal(JournalStop::Failed(e)) => Error::Journal(e),
         Trap::Journal(JournalStop::Suspended(_)) => {
             Error::Internal { message: "the run suspended outside a journaled run".into(), trace: Vec::new() }
         }
@@ -1992,7 +2010,12 @@ fn compile_program(
     let host = g.has_natives(&order);
     let cp = checker.take_checked();
     let lints = match modules.iter().find(|m| m.file == main_file).filter(|_| lint) {
-        Some(main) => Some(crate::lint::lint_module(main, &main.source, &cp, budget)?),
+        Some(main) => Some(crate::lint::lint_module(main, &main.source, &cp, budget).map_err(|stop| match stop {
+            Stop::Fuel => Error::Compile(vec![
+                sm.resolve(&Diag::error(Span::new(main_file, 0, 0), "source too complex to lint: exceeded the lint budget")),
+            ]),
+            stop => budget_error(stop, sm, main_file),
+        })?),
         None => None,
     };
     let native_info = if host { native_info(&cp, registry) } else { crate::modules::NativeInfo::default() };

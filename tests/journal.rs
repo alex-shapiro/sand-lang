@@ -6,7 +6,7 @@ use sandlang::native::{Effectful, Journaled, JournaledCall, Later, Park};
 use sandlang::network::{Listener, Network, NetworkFuture, Stream};
 use sandlang::platform::{Clock, ClockFuture, Instant, SystemClock, SystemTime, UNIX_EPOCH};
 use sandlang::vm::Vm;
-use sandlang::{CallOutcome, Config, Engine, Error, HostError, MemorySink, NativeModule, Outcome, RulePolicy};
+use sandlang::{Config, Engine, Error, HostError, MemorySink, NativeModule, Outcome, RulePolicy};
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
@@ -816,28 +816,6 @@ fn operations_pair_starts_with_their_ends() {
 }
 
 #[test]
-fn a_journal_that_fails_to_flush_ends_the_run() {
-    struct Failing(MemoryJournal);
-    impl Journal for Failing {
-        fn replay(&self) -> Vec<Entry> {
-            self.0.replay()
-        }
-        fn record(&self, entry: Entry) {
-            self.0.record(entry)
-        }
-        fn flush(&self) -> sandlang::journal::FlushFuture {
-            Box::pin(std::future::ready(Err(sandlang::journal::JournalError::message("disk full"))))
-        }
-    }
-    let world = World::frozen(Some(1));
-    let config = world.base.clone().durable(Durable::new(Arc::new(Failing(MemoryJournal::new()))));
-    let mut engine = Engine::new(config).unwrap();
-    let r = rt().block_on(engine.run_source("main.sand", "import http\nprint(http.get(\"http://svc.test/x\")?.status)"));
-    assert!(matches!(&r, Err(Error::Journal(e)) if e.to_string() == "disk full"), "{r:?}");
-    assert_eq!(world.net.requests(), 0, "the request waits for the flush");
-}
-
-#[test]
 fn fed_input_and_the_process_environment_are_journaled() {
     let base = Config::new().policy(RulePolicy::allow_all()).clock(Arc::new(FrozenClock(Instant::now()))).seed(2);
     let src = r#"
@@ -1075,11 +1053,11 @@ fn a_suspended_call_resumes_and_returns() {
     };
     let (r, out) = call();
     let wake = UNIX_EPOCH + Duration::from_secs(BASE_SECS + 10);
-    assert!(matches!(r, Ok(CallOutcome::Suspended(Suspension { wake_at: Some(t), .. })) if t == wake), "{r:?}");
+    assert!(matches!(r, Ok(Outcome::Suspended(Suspension { wake_at: Some(t), .. })) if t == wake), "{r:?}");
     assert_eq!(out, "start\n");
     clock.advance(Duration::from_secs(10));
     let (r, _) = call();
-    assert_eq!(r.unwrap(), CallOutcome::Returned("42".into()));
+    assert_eq!(r.unwrap(), Outcome::Returned(Ok("42".into())));
 }
 
 #[test]
@@ -1248,6 +1226,12 @@ fn an_asynchronous_host_function_that_is_not_journaled_runs_again_in_replay() {
 fn a_host_abort_ends_the_run_with_its_payload_and_is_not_journaled() {
     #[derive(Debug, PartialEq)]
     struct Outage(u32);
+    impl std::fmt::Display for Outage {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "outage {}", self.0)
+        }
+    }
+    impl std::error::Error for Outage {}
     let calls = Arc::new(AtomicUsize::new(0));
     let mut m = NativeModule::new("store");
     let c = calls.clone();
@@ -1287,7 +1271,7 @@ fn a_host_abort_ends_the_run_with_its_payload_and_is_not_journaled() {
 }
 
 #[test]
-fn a_flush_error_reaches_the_host_with_its_type() {
+fn a_journal_that_fails_to_flush_aborts_the_run_with_its_error() {
     #[derive(Debug)]
     struct Fenced;
     impl std::fmt::Display for Fenced {
@@ -1305,7 +1289,7 @@ fn a_flush_error_reaches_the_host_with_its_type() {
             self.0.record(entry)
         }
         fn flush(&self) -> sandlang::journal::FlushFuture {
-            Box::pin(std::future::ready(Err(sandlang::journal::JournalError::new(Fenced))))
+            Box::pin(std::future::ready(Err(sandlang::HostAbort::new(Fenced))))
         }
     }
     let world = World::frozen(Some(1));
@@ -1313,9 +1297,10 @@ fn a_flush_error_reaches_the_host_with_its_type() {
     let r =
         rt().block_on(Engine::new(config).unwrap().run_source("main.sand", "import http\nprint(http.get(\"http://svc.test/x\")?.status)"));
     match &r {
-        Err(Error::Journal(e)) => assert!(e.downcast_ref::<Fenced>().is_some(), "{e:?}"),
-        other => panic!("expected a journal error, got {other:?}"),
+        Err(Error::Aborted(e)) => assert!(e.downcast_ref::<Fenced>().is_some(), "{e:?}"),
+        other => panic!("expected an abort, got {other:?}"),
     }
+    assert_eq!(world.net.requests(), 0, "the request waits for the flush");
 }
 
 /// A host module whose `wait_gate` waits, in a local operation, until

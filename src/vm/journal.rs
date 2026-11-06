@@ -33,8 +33,6 @@ pub enum JournalStop {
     Diverged { seq: u64, message: String },
     /// Every task waits for a timer or a parked host call (SPEC §16.7).
     Suspended(Suspension),
-    /// The journal failed to flush.
-    Failed(crate::journal::JournalError),
 }
 
 pub(crate) use crate::journal::Suspension;

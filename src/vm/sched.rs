@@ -357,7 +357,7 @@ impl Vm {
         }
         match r {
             None => Err(Trap::Interrupted),
-            Some(Err(e)) => Err(Trap::Journal(JournalStop::Failed(e))),
+            Some(Err(e)) => Err(Trap::Abort(e)),
             Some(Ok(())) => Ok(()),
         }
     }

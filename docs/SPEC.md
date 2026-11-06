@@ -1983,17 +1983,17 @@ A run that does not fail returns an `Outcome`: `Outcome::Exited(code)` when it
 ends, or `Outcome::Suspended(suspension)` when the engine suspends a journaled
 run (§16.7). A failed operation returns an `Error`:
 
-| Variant                              | Meaning                                                              |
-| ------------------------------------ | -------------------------------------------------------------------- |
-| `Error::Compile(diagnostics)`        | Syntax or static type errors occurred during compilation (§18).      |
-| `Error::Runtime { message, trace }`  | Execution failed with an uncaught runtime error (§10.3).             |
-| `Error::Limit(kind)`                 | Execution or compilation exceeded a configured resource limit (§15). |
-| `Error::Interrupted`                 | The host cancelled execution through an `InterruptHandle`.           |
-| `Error::Io(message)`                 | The entry script file could not be read.                             |
-| `Error::Internal { message, trace }` | An internal invariant failed or a host callback panicked (§10.3).    |
-| `Error::Diverged { seq, message }`   | The run does not do what its journal records at entry `seq` (§16.7). |
-| `Error::Journal(error)`              | The journal failed to make its entries durable (§16.7).              |
-| `Error::Aborted(payload)`            | A host function ended the run with `Ctl::abort` (§16.7).             |
+| Variant                               | Meaning                                                                     |
+| ------------------------------------- | --------------------------------------------------------------------------- |
+| `Error::Compile(diagnostics)`         | Syntax or static type errors occurred during compilation (§18).             |
+| `Error::Runtime { message, trace }`   | Execution failed with an uncaught runtime error (§10.3).                    |
+| `Error::Limit(kind)`                  | Execution or compilation exceeded a configured resource limit (§15).        |
+| `Error::Interrupted`                  | The host cancelled execution through an `InterruptHandle`.                  |
+| `Error::Io(message)`                  | The entry script file could not be read.                                    |
+| `Error::Argument { index, kind, .. }` | An argument of `Engine::call` does not decode to its parameter's type.      |
+| `Error::Internal { message, trace }`  | An internal invariant failed or a host callback panicked (§10.3).           |
+| `Error::Diverged { seq, message }`    | The run does not do what its journal records at entry `seq` (§16.7).        |
+| `Error::Aborted(reason)`              | The host ended the run: `Ctl::abort`, or a failed `Journal::flush` (§16.7). |
 
 `Engine::compile_file` compiles a file and its imports without running it, and
 `Engine::run_program` runs the result. Any engine whose configuration is a clone of the
@@ -2007,16 +2007,16 @@ public or private. Its `signature()` gives the type of each parameter and the re
 type descriptors, and shows as the function's declaration, such as
 `fn main(order: Order) -> Result<Receipt>`. `Engine::call(function, args)` runs the module
 initializers, then calls the function. Each argument is JSON text, which the engine decodes to
-the type of its parameter as `json.decode` does. A call that does not fail returns a
-`CallOutcome`:
+the type of its parameter as `json.decode` does. An argument that does not decode fails the
+call with `Error::Argument`. A call that does not fail returns an
+`Outcome<Result<String, String>>`:
 
-| Variant                                  | Meaning                                                                       |
-| ---------------------------------------- | ----------------------------------------------------------------------------- |
-| `CallOutcome::Returned(json)`            | The function returned a value, or `Ok(value)`, encoded as `json.encode` does. |
-| `CallOutcome::Failed(json)`              | The function returned `Err(e)`, and `json` is `e`.                            |
-| `CallOutcome::BadArgument { index, .. }` | An argument does not decode to the type of its parameter.                     |
-| `CallOutcome::Exited(code)`              | The run called `exit`.                                                        |
-| `CallOutcome::Suspended(suspension)`     | The engine suspended the journaled run (§16.7).                               |
+| Variant                          | Meaning                                                                       |
+| -------------------------------- | ----------------------------------------------------------------------------- |
+| `Outcome::Returned(Ok(json))`    | The function returned a value, or `Ok(value)`, encoded as `json.encode` does. |
+| `Outcome::Returned(Err(json))`   | The function returned `Err(e)`, and `json` is `e`.                            |
+| `Outcome::Exited(code)`          | The run called `exit`.                                                        |
+| `Outcome::Suspended(suspension)` | The engine suspended the journaled run (§16.7).                               |
 
 After each run, `Engine::run_stats` reports the resources that the run used,
 including runs that failed or exceeded a limit: `fuel` (in the units of
@@ -2520,14 +2520,13 @@ that sends the request again gives the same number. The journal records a
 request that the filter refuses as a failed request.
 
 **Ending a run from the host.** A host function can end the run with
-`Ctl::abort(payload)` when a condition of the host makes it stop, such as the
-loss of the host's right to execute the run or an outage of its storage. The
-run fails with `Error::Aborted`, from which `HostAbort::downcast_ref` gets the
-payload back. The engine does not journal the call that aborts and does not
-flush the journal, so a resumed run calls the function again. Likewise,
-`Error::Journal` holds the error of a failed `Journal::flush` as a
-`JournalError`, from which `JournalError::downcast_ref` gets the host's typed
-error back.
+`Ctl::abort(reason)` when a condition of the host makes it stop, such as the
+loss of the host's right to execute the run or an outage of its storage.
+`reason` is a Rust error of the host. The run fails with `Error::Aborted`,
+from which `HostAbort::downcast_ref` gets the reason back. The engine does not
+journal the call that aborts and does not flush the journal, so a resumed run
+calls the function again. A `Journal::flush` that fails ends the run in the
+same way: its error is the reason of the `Error::Aborted`.
 
 **Restrictions.** A journaled run:
 

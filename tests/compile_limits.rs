@@ -278,8 +278,8 @@ fn the_linter_is_bounded() {
     let engine = Engine::new(Config::new()).unwrap();
     let lint = |src: &str| engine.lint_source("main.sand", src).map_err(|e| e.to_string());
     let start = Instant::now();
-    let e = lint(&nested(120)).unwrap_err();
-    assert!(e.contains("source too complex to lint"), "{e}");
+    let e = engine.lint_source("main.sand", &nested(120)).unwrap_err();
+    assert!(matches!(e, Error::Compile(_)) && e.to_string().contains("source too complex to lint"), "{e}");
     assert!(start.elapsed() < FAST, "took {:?}", start.elapsed());
     assert_eq!(lint(&nested(20)).unwrap(), vec![]);
     let e = lint(&slow_program()).unwrap_err();
