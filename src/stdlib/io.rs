@@ -140,17 +140,11 @@ const STDIN_CHUNK: usize = 64 << 10;
 fn buffered_line(vm: &Vm) -> Option<Option<Vec<u8>>> {
     let mut source = vm.host.stdin.source().try_lock().ok()?;
     match &mut *source {
-        StdinSource::None => Some(None),
+        StdinSource::None => None,
         StdinSource::Bytes(c) => {
             let at = u64_to_usize_saturating(c.position()).min(c.get_ref().len());
             let line = BufferedLine::find(vm, &c.get_ref()[at..], true)?;
             c.set_position(c.position() + line.len as u64);
-            Some(line.text)
-        }
-        #[cfg(feature = "os")]
-        StdinSource::Inherit { reader: r, .. } => {
-            let line = BufferedLine::find(vm, r.buffer(), false)?;
-            std::pin::Pin::new(r).consume(line.len);
             Some(line.text)
         }
         StdinSource::Host(r) => {
@@ -198,10 +192,8 @@ impl BufferedLine {
 async fn read_input(stdin: &Mutex<StdinSource>, what: Read, res: &mut Reservation) -> Result<Option<Vec<u8>>, IoFailure> {
     let mut source = stdin.lock().await;
     match &mut *source {
-        StdinSource::None => Ok((what != Read::Line).then(Vec::new)),
+        StdinSource::None => Err(IoFailure::new("io", "the engine has no standard input")),
         StdinSource::Bytes(c) => read_from(c, what, res).await,
-        #[cfg(feature = "os")]
-        StdinSource::Inherit { reader: r, .. } => read_from(r, what, res).await,
         StdinSource::Host(r) => read_from(&mut r.begin_read(), what, res).await,
     }
 }

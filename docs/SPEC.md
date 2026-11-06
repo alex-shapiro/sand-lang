@@ -1998,17 +1998,19 @@ deterministic. By default, `Config::new()` uses `RulePolicy::standard()`, which
 allows only `Stdout` and `Stderr`, without a prompter. As a result, the engine
 denies all other capability requests, including script imports unless a rule
 such as `allow import ./lib` permits them. It writes output to the process
-standard streams and provides an empty standard input.
+standard streams and provides no standard input: a read of standard input
+fails with kind `"io"`.
 
 The host can capture standard output and standard error or feed standard input
 into a running script. `Config::stdout` and `Config::stderr` redirect script
-output to an `OutputSink`, while `Config::stdin_bytes` and
-`Config::inherit_stdin` with feature `os` configure standard input.
+output to an `OutputSink`. `Config::stdin_bytes` gives scripts fixed input,
+and `Config::stdin_feed` gives them input that the host sends while they run.
 
-`Session::stdin_feed` returns an isolated `StdinFeed` that supplies standard
-input to the session's scripts. After the first call, the session reads from
-this feed instead of the standard input configured on `Config`. A `StdinFeed`
-supports two host models:
+`Config::stdin_feed` creates a new `StdinFeed` and returns it with the
+config. The engine that the host creates from the config reads that feed, and
+so do the engine's sessions. A host that runs scripts with its process's
+standard input, as the `sand` command does, forwards that input to the feed. A
+`StdinFeed` supports two host models:
 
 - Terminal hosts wait for `StdinFeed::wait_until_input_needed` and send user
   input with `StdinFeed::send`. `wait_until_input_needed` is resolved if a read
@@ -2036,8 +2038,6 @@ wait. User waits include:
 - reads from a `StdinFeed` (the host observes each waiting read through
   `wait_until_input_needed` and `wait_for_request`, and can prompt for or
   dismiss it)
-- reads from standard input configured with `Config::inherit_stdin(WaitKind::User)`
-  (the `sand` CLI uses `WaitKind::User` if standard input is a terminal)
 - host functions that return a `Later` with `WaitKind::User` (§16.3)
 
 The host can intercept and filter structured log records instead of
@@ -2208,9 +2208,8 @@ A function registered as `"Type.init"` constructs `Type` (§4.2).
 Generic functions and functions with default parameter values must be declared
 explicitly with `native fn` in `NativeModule::source`.
 
-`Engine::new` compiles and validates all registered host modules once per
-`Config`, sharing the compiled modules across cloned configurations, and
-returns `Error::Compile` if:
+`Engine::new` compiles and validates all registered host modules and returns
+`Error::Compile` if:
 
 - the module's Sand source contains a syntax or type error;
 - a `native fn` declaration in Sand source does not match the Rust function's
@@ -2232,12 +2231,10 @@ Two Cargo features control whether an engine can access the host operating
 system:
 
 - `os`, enabled by default: enables access to the host file system, network
-  sockets in `net` and `http`, process standard input via
-  `Config::inherit_stdin`, and process environment variables if `Config::env`
-  is not set. If `sandlang` is built without `os`, the engine cannot access the
+  sockets in `net` and `http`, and process environment variables if
+  `Config::env` is not set. If `sandlang` is built without `os`, the engine cannot access the
   operating system regardless of the configured policy: `net` and `http` are
-  unavailable, the environment is empty unless set via `Config::env`, standard
-  input comes only from `Config::stdin_bytes` or `Session::stdin_feed`, scripts
+  unavailable, the environment is empty unless set via `Config::env`, scripts
   use an in-memory file system, and the crate compiles for
   `wasm32-unknown-unknown` (§16.5).
 - `tls`, enabled by default and implying `os`: enables TLS support for `https`

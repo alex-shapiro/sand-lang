@@ -627,16 +627,6 @@ fn natives_declared_with_other_enums_do_not_check() {
 }
 
 #[test]
-fn clones_of_a_config_report_its_errors() {
-    let mut m = NativeModule::new("bank");
-    m.function("zero", || Money(0));
-    let config = Config::new().module(m);
-    let errors = engine_errors(config.clone());
-    assert_eq!(errors.len(), 1);
-    assert_eq!(engine_errors(config), errors);
-}
-
-#[test]
 fn enums_in_signatures_must_be_registered() {
     let mut m = NativeModule::new("shapes");
     m.function("square", || Shape::Square);
@@ -2755,11 +2745,11 @@ fn wall_time_limit() {
 
 #[test]
 fn cpu_time_limit_excludes_waiting() {
-    let config = Config::new().limits(Limits { max_cpu_time: Some(Duration::from_millis(200)), ..Limits::default() });
-    let (r, out, _) = run_src(config.clone(), "task.sleep(300ms)\nprint(\"slept\")");
+    let config = || Config::new().limits(Limits { max_cpu_time: Some(Duration::from_millis(200)), ..Limits::default() });
+    let (r, out, _) = run_src(config(), "task.sleep(300ms)\nprint(\"slept\")");
     r.unwrap();
     assert_eq!(out, "slept\n");
-    let (r, _, _) = run_src(config, "var i = 0\nwhile true { i += 1 }");
+    let (r, _, _) = run_src(config(), "var i = 0\nwhile true { i += 1 }");
     assert!(matches!(r, Err(Error::Limit(LimitKind::CpuTime))), "{r:?}");
 }
 

@@ -67,7 +67,7 @@ pub(crate) fn cmd_repl(args: &[String]) -> Result<u8, String> {
     let config =
         opts.config.stdout(ReplSink { screen: screen.clone(), stderr: false }).stderr(ReplSink { screen: screen.clone(), stderr: true });
     let mut session = Engine::new(config).map_err(|e| e.render())?.session();
-    let stdin_feed = Some(session.stdin_feed());
+    let stdin_feed = Some(opts.stdin_feed);
     let reader = if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         Reader::Editor(EditorReader::new(screen.clone()))
     } else {

@@ -9,8 +9,8 @@ use std::task::{Context, Poll, Waker};
 use tokio::io::{AsyncBufRead, AsyncRead, ReadBuf};
 use tokio::sync::Notify;
 
-/// A channel that supplies standard input from the host to a session's scripts
-/// ([`crate::Session::stdin_feed`]). Terminal hosts wait for
+/// A channel that supplies standard input from the host to scripts
+/// ([`crate::Config::stdin_feed`]). Terminal hosts wait for
 /// [`StdinFeed::wait_until_input_needed`] and forward input with
 /// [`StdinFeed::send`]. Interactive applications wait for
 /// [`StdinFeed::wait_for_request`] and respond to each [`StdinRequest`]. Clones

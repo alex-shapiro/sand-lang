@@ -14,7 +14,7 @@ mod repl;
 
 use sandlang::policy::{PolicyFile, parse_duration, parse_size};
 use sandlang::time::TimeZone;
-use sandlang::{Capability, Config, Engine, Error, PromptAnswer, RulePolicy, WaitKind};
+use sandlang::{Capability, Config, Engine, Error, PromptAnswer, RulePolicy, StdinFeed};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -128,6 +128,8 @@ fn runtime() -> Result<tokio::runtime::Runtime, String> {
 
 struct RunOptions {
     config: Config,
+    /// The scripts' standard input, which the CLI fills from its own.
+    stdin_feed: StdinFeed,
     file: Option<PathBuf>,
     script_args: Vec<String>,
 }
@@ -220,14 +222,12 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
         }
     }
     let policy = rules.with_defaults(default_rules(allow_all));
-    let mut config = Config::new()
+    let config = Config::new()
         .policy(policy.clone())
         .limits(limits)
         .gc_stress(std::env::var_os("SAND_GC_STRESS").is_some())
         .dump_bytecode(std::env::var_os("SAND_DUMP_BYTECODE").is_some());
-    // Terminal reads wait for user input. Pipe reads wait for I/O.
-    let wait_kind = if std::io::IsTerminal::is_terminal(&std::io::stdin()) { WaitKind::User } else { WaitKind::Io };
-    config = config.inherit_stdin(wait_kind);
+    let (mut config, stdin_feed) = config.stdin_feed();
     if !files_only {
         config = config.args(script_args.clone());
     }
@@ -238,7 +238,7 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
     if let Some(zone) = TimeZone::system() {
         config = config.time_zone(zone);
     }
-    Ok(RunOptions { config, file, script_args })
+    Ok(RunOptions { config, stdin_feed, file, script_args })
 }
 
 const TAKES_VALUE: &[&str] = &[
@@ -434,13 +434,45 @@ fn cmd_run(args: &[String]) -> Result<u8, String> {
     let file = opts.file.ok_or("missing FILE to run")?;
     let mut engine = Engine::new(opts.config.exit_after_run(true)).map_err(|e| e.render())?;
     let rt = runtime()?;
-    let r = rt.block_on(engine.run_file(&file));
+    let r = rt.block_on(with_stdin_forwarded(&opts.stdin_feed, engine.run_file(&file)));
     if std::env::var_os("SAND_GC_STATS").is_some() {
         eprintln!("{:#?}", engine.gc_stats());
     }
     match r {
         Ok(o) => Ok(exit_status(o.exit_code)),
         Err(e) => Ok(report_error(&e)),
+    }
+}
+
+/// Awaits `run` while it forwards the process's standard input to `feed`.
+async fn with_stdin_forwarded<T>(feed: &StdinFeed, run: impl Future<Output = T>) -> T {
+    tokio::select! {
+        biased;
+        result = run => result,
+        never = forward_stdin(feed) => never,
+    }
+}
+
+/// Sends the process's standard input to `feed`. It reads the process input
+/// only while a script read waits, so that a script that does not read does
+/// not take input from the terminal. After the process input ends, every
+/// later read gets an end of input.
+async fn forward_stdin(feed: &StdinFeed) -> ! {
+    use tokio::io::AsyncBufReadExt;
+    let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
+    loop {
+        feed.wait_for_request().await;
+        match stdin.fill_buf().await {
+            Ok(data) if !data.is_empty() => {
+                let len = data.len();
+                feed.send(data.to_vec());
+                stdin.consume(len);
+            }
+            _ => break,
+        }
+    }
+    loop {
+        feed.wait_for_request().await.dismiss();
     }
 }
 
@@ -597,8 +629,9 @@ fn cmd_test(args: &[String]) -> Result<u8, String> {
     let rt = runtime()?;
     let mut failed = 0;
     for f in &files {
-        let mut engine = Engine::new(opts.config.clone()).map_err(|e| e.render())?;
-        match rt.block_on(engine.run_tests(f)) {
+        let opts = parse_run_options(args, true)?;
+        let mut engine = Engine::new(opts.config).map_err(|e| e.render())?;
+        match rt.block_on(with_stdin_forwarded(&opts.stdin_feed, engine.run_tests(f))) {
             Ok(report) => {
                 out!("{}", report.render());
                 failed += report.failed();

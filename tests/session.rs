@@ -936,8 +936,8 @@ fn types_of_generic_functions() {
 
 #[test]
 fn scripts_read_the_input_the_host_feeds() {
-    let mut r = Repl::with(Config::new().policy(sandlang::RulePolicy::allow_all()));
-    let feed = r.session.stdin_feed();
+    let (config, feed) = Config::new().policy(sandlang::RulePolicy::allow_all()).stdin_feed();
+    let mut r = Repl::with(config);
     r.ok("import io");
     // Data sent ahead is kept until read.
     feed.send("early\npart");
@@ -971,8 +971,8 @@ fn scripts_read_the_input_the_host_feeds() {
 
 #[test]
 fn read_is_awaited_while_other_tasks_run() {
-    let mut r = Repl::with(Config::new().policy(RulePolicy::allow_all()));
-    let feed = r.session.stdin_feed();
+    let (config, feed) = Config::new().policy(RulePolicy::allow_all()).stdin_feed();
+    let mut r = Repl::with(config);
     r.ok("import io");
     let src = "let t = spawn io.stdin.read_line()\nvar n = 0\nwhile not t.is_done() { n += 1 }\nt.wait()?";
     let Repl { session, rt, .. } = &mut r;
@@ -990,8 +990,8 @@ fn read_is_awaited_while_other_tasks_run() {
 
 #[test]
 fn answer_targets_specific_read() {
-    let mut r = Repl::with(Config::new().policy(RulePolicy::allow_all()));
-    let feed = r.session.stdin_feed();
+    let (config, feed) = Config::new().policy(RulePolicy::allow_all()).stdin_feed();
+    let mut r = Repl::with(config);
     r.ok("import io");
     let src = "let a = io.stdin.read_line()?\nlet b = io.stdin.read_line()?\n[a, b]";
     let Repl { session, rt, .. } = &mut r;
@@ -1012,8 +1012,8 @@ fn answer_targets_specific_read() {
 
 /// Evaluates `src` and responds to each awaited stdin read with `respond`.
 fn answered(src: &str, respond: impl Fn(&StdinRequest)) -> String {
-    let mut r = Repl::with(Config::new().policy(RulePolicy::allow_all()));
-    let feed = r.session.stdin_feed();
+    let (config, feed) = Config::new().policy(RulePolicy::allow_all()).stdin_feed();
+    let mut r = Repl::with(config);
     r.ok("import io");
     let Repl { session, rt, .. } = &mut r;
     let value = rt.block_on(async {
@@ -1061,10 +1061,11 @@ fn each_read_that_waits_is_a_new_request() {
 }
 
 #[test]
-fn each_session_reads_its_own_feed() {
-    let engine = Engine::new(Config::new().policy(RulePolicy::allow_all())).unwrap();
-    let (mut first, mut second) = (engine.session(), engine.session());
-    let (first_feed, second_feed) = (first.stdin_feed(), second.stdin_feed());
+fn each_engine_reads_its_own_feed() {
+    let (first_config, first_feed) = Config::new().policy(RulePolicy::allow_all()).stdin_feed();
+    let (second_config, second_feed) = Config::new().policy(RulePolicy::allow_all()).stdin_feed();
+    let mut first = Engine::new(first_config).unwrap().session();
+    let mut second = Engine::new(second_config).unwrap().session();
     let values = rt().block_on(async {
         let host = async {
             assert!(second_feed.wait_for_request().await.answer("b"));
@@ -1080,10 +1081,10 @@ fn each_session_reads_its_own_feed() {
 }
 
 #[test]
-fn a_session_reads_its_feed_after_it_starts_and_after_a_reset() {
-    let mut r = Repl::with(Config::new().policy(RulePolicy::allow_all()).stdin_bytes(b"config\n".to_vec()));
+fn a_session_reads_its_feed_after_a_reset() {
+    let (config, feed) = Config::new().policy(RulePolicy::allow_all()).stdin_feed();
+    let mut r = Repl::with(config);
     r.ok("import io");
-    let feed = r.session.stdin_feed();
     feed.send("first\n");
     assert_eq!(r.value("io.stdin.read_line()?"), "Some(\"first\")");
     r.session.reset();
@@ -1093,9 +1094,26 @@ fn a_session_reads_its_feed_after_it_starts_and_after_a_reset() {
 }
 
 #[test]
-fn answer_fails_after_read_ends() {
+fn an_engine_run_reads_the_engine_feed() {
+    let out = MemorySink::new();
+    let (config, feed) = Config::new().policy(RulePolicy::allow_all()).stdout(out.clone()).stdin_feed();
+    let mut engine = Engine::new(config).unwrap();
+    feed.send("hello\n");
+    rt().block_on(engine.run_source("main.sand", "import io\nprint(io.stdin.read_line()?)")).unwrap();
+    assert_eq!(out.contents(), "Some(\"hello\")\n");
+}
+
+#[test]
+fn a_read_without_standard_input_fails() {
     let mut r = Repl::with(Config::new().policy(RulePolicy::allow_all()));
-    let feed = r.session.stdin_feed();
+    r.ok("import io");
+    assert_eq!(r.value("io.stdin.read_line()"), "Err(Error(message: \"stdin: the engine has no standard input\", kind: \"io\"))");
+}
+
+#[test]
+fn answer_fails_after_read_ends() {
+    let (config, feed) = Config::new().policy(RulePolicy::allow_all()).stdin_feed();
+    let mut r = Repl::with(config);
     r.ok("import io");
     let Repl { session, rt, .. } = &mut r;
     let request = rt.block_on(async {
@@ -1115,8 +1133,8 @@ fn answer_fails_after_read_ends() {
 #[test]
 fn stdin_wait_pauses_wall_time_limit() {
     let limits = Limits { max_wall_time: Some(Duration::from_millis(100)), ..Limits::default() };
-    let mut r = Repl::paused(Config::new().policy(RulePolicy::allow_all()).limits(limits));
-    let feed = r.session.stdin_feed();
+    let (config, feed) = Config::new().policy(RulePolicy::allow_all()).limits(limits).stdin_feed();
+    let mut r = Repl::paused(config);
     r.ok("import io");
     let Repl { session, rt, .. } = &mut r;
     let (value, ()) = rt.block_on(async {
@@ -1134,8 +1152,7 @@ fn stdin_wait_pauses_wall_time_limit() {
 #[test]
 fn a_cancelled_read_no_longer_pauses_wall_time_limit() {
     let limits = Limits { max_wall_time: Some(Duration::from_millis(100)), ..Limits::default() };
-    let mut r = Repl::paused(Config::new().policy(RulePolicy::allow_all()).limits(limits));
-    r.session.stdin_feed();
+    let mut r = Repl::paused(Config::new().policy(RulePolicy::allow_all()).limits(limits).stdin_feed().0);
     r.ok("import io");
     r.ok("let read = task.timeout(50ms, () => io.stdin.read_line())");
     assert_eq!(r.value("read"), "None");
@@ -1145,8 +1162,8 @@ fn a_cancelled_read_no_longer_pauses_wall_time_limit() {
 #[test]
 fn background_timer_does_not_interrupt_or_time_out_awaited_read() {
     let limits = Limits { max_wall_time: Some(Duration::from_millis(100)), ..Limits::default() };
-    let mut r = Repl::paused(Config::new().policy(RulePolicy::allow_all()).limits(limits));
-    let feed = r.session.stdin_feed();
+    let (config, feed) = Config::new().policy(RulePolicy::allow_all()).limits(limits).stdin_feed();
+    let mut r = Repl::paused(config);
     r.ok("import io");
     r.ok("var ticks = 0\nlet spinner = spawn { while true { task.sleep(50ms)\nticks += 1 } }");
     let Repl { session, rt, .. } = &mut r;

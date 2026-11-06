@@ -336,12 +336,6 @@ impl Trap {
 pub(crate) enum StdinSource {
     None,
     Bytes(std::io::Cursor<Vec<u8>>),
-    /// The process standard input, whose reads suspend with `wait_kind`.
-    #[cfg(feature = "os")]
-    Inherit {
-        reader: tokio::io::BufReader<tokio::io::Stdin>,
-        wait_kind: WaitKind,
-    },
     /// Host-supplied input ([`crate::StdinFeed`]).
     Host(crate::stdin_feed::StdinFeedReader),
 }
@@ -357,9 +351,7 @@ impl VmStdin {
     pub(crate) fn new(source: StdinSource) -> VmStdin {
         let (idle_signal, wait_kind) = match &source {
             StdinSource::Host(reader) => (Some(reader.idle_signal()), WaitKind::User),
-            #[cfg(feature = "os")]
-            StdinSource::Inherit { wait_kind, .. } => (None, *wait_kind),
-            _ => (None, WaitKind::Io),
+            StdinSource::None | StdinSource::Bytes(_) => (None, WaitKind::Io),
         };
         VmStdin { source: Arc::new(tokio::sync::Mutex::new(source)), idle_signal, wait_kind }
     }

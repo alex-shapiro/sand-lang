@@ -217,21 +217,16 @@ impl OutputSink for NullSink {
 enum StdinConfig {
     None,
     Bytes(Vec<u8>),
-    #[cfg(feature = "os")]
-    Inherit {
-        wait_kind: crate::WaitKind,
-    },
+    /// Input that the host sends through the feed.
+    Host(crate::StdinFeed),
 }
 
 /// Engine configuration (builder style).
-#[derive(Clone)]
 pub struct Config {
     pub(crate) policy: Policy,
     pub(crate) prompter: Option<Arc<dyn Prompter>>,
     pub(crate) limits: Limits,
     pub(crate) modules: Vec<NativeModule>,
-    /// Shared module registry for engines created from clones of this `Config`.
-    registry: Arc<OnceLock<Arc<Registry>>>,
     pub(crate) stdout: SharedSink,
     pub(crate) stderr: SharedSink,
     log_sink: Option<Arc<dyn crate::LogSink>>,
@@ -284,7 +279,6 @@ impl Config {
             prompter: None,
             limits: Limits::default(),
             modules: Vec::new(),
-            registry: Arc::default(),
             stdout: Arc::new(crate::stdio::StdoutSink::default()),
             stderr: Arc::new(crate::stdio::StderrSink::default()),
             log_sink: None,
@@ -360,7 +354,6 @@ impl Config {
     pub fn module(mut self, m: NativeModule) -> Self {
         assert!(!self.modules.iter().any(|x| x.name() == m.name()), "host module `{}` is added twice", m.name());
         self.modules.push(m);
-        self.registry = Arc::default();
         self
     }
     pub fn stdout(mut self, s: impl OutputSink + 'static) -> Self {
@@ -387,14 +380,11 @@ impl Config {
         self.stdin = StdinConfig::Bytes(data);
         self
     }
-    /// Uses the process standard input. `wait_kind` specifies what a read
-    /// waits for. Pass [`crate::WaitKind::User`] if a user types the input (for
-    /// example, at a terminal) so that idle wait time does not count toward
-    /// `max_wall_time`.
-    #[cfg(feature = "os")]
-    pub fn inherit_stdin(mut self, wait_kind: crate::WaitKind) -> Self {
-        self.stdin = StdinConfig::Inherit { wait_kind };
-        self
+    /// Read stdin from a host-controlled feed.
+    pub fn stdin_feed(mut self) -> (Self, crate::StdinFeed) {
+        let feed = crate::StdinFeed::new();
+        self.stdin = StdinConfig::Host(feed.clone());
+        (self, feed)
     }
     /// Scripts, their imports and the main file of [`Engine::run_file`] use
     /// `fs` instead of the host's file system, with [`Config::cwd`] and
@@ -460,7 +450,6 @@ impl Config {
     #[doc(hidden)]
     pub fn optimize(mut self, on: bool) -> Self {
         self.optimize = on;
-        self.registry = Arc::default();
         self
     }
     /// Debugging aid: print the bytecode of the program's own functions to
@@ -805,9 +794,8 @@ pub(crate) fn on_compile_stack<R: Send + 'static>(f: impl FnOnce() -> Result<R, 
 impl Engine {
     /// Creates an engine with `config`, checking any registered host modules.
     ///
-    /// Clones of a `Config` share the compiled host-module registry until [`Config::module`] is called.
     pub fn new(config: Config) -> Result<Engine, Error> {
-        let registry = config.registry.get_or_init(|| Registry::for_config(&config)).clone();
+        let registry = Registry::for_config(&config);
         if registry.base.is_some() {
             registry.snapshot()?;
         }
@@ -1010,7 +998,7 @@ impl Engine {
         let mut deadline = compiled.deadline;
         let mut report = TestReport::default();
         for (tname, proto) in prog.tests.clone() {
-            let mut vm = self.new_vm(prog.clone(), cwd.clone(), true, None);
+            let mut vm = self.new_vm(prog.clone(), cwd.clone(), true);
             vm.deadline = deadline;
             let init = vm.run_main(prog.entry).await;
             let result = match init {
@@ -1054,18 +1042,12 @@ impl Engine {
         Ok((name, source, root))
     }
 
-    /// Creates a VM for `prog`. The VM reads from `stdin_feed` if provided, or
-    /// else from the standard input configured on `self.config`.
-    pub(crate) fn new_vm(&self, prog: Arc<Program>, cwd: PathBuf, quiet: bool, stdin_feed: Option<&crate::StdinFeed>) -> Vm {
+    pub(crate) fn new_vm(&self, prog: Arc<Program>, cwd: PathBuf, quiet: bool) -> Vm {
         let c = &self.config;
-        let stdin = match (&c.stdin, stdin_feed) {
-            (_, Some(feed)) => StdinSource::Host(feed.reader()),
-            (StdinConfig::None, None) => StdinSource::None,
-            (StdinConfig::Bytes(b), None) => StdinSource::Bytes(std::io::Cursor::new(b.clone())),
-            #[cfg(feature = "os")]
-            (StdinConfig::Inherit { wait_kind }, None) => {
-                StdinSource::Inherit { reader: tokio::io::BufReader::new(tokio::io::stdin()), wait_kind: *wait_kind }
-            }
+        let stdin = match &c.stdin {
+            StdinConfig::None => StdinSource::None,
+            StdinConfig::Bytes(b) => StdinSource::Bytes(std::io::Cursor::new(b.clone())),
+            StdinConfig::Host(feed) => StdinSource::Host(feed.reader()),
         };
         let (stdout, stderr): (SharedSink, SharedSink) =
             if quiet { (Arc::new(NullSink), Arc::new(NullSink)) } else { (c.stdout.clone(), c.stderr.clone()) };
@@ -1123,7 +1105,7 @@ impl Engine {
                 }
             }
         }
-        let mut vm = self.new_vm(prog.clone(), cwd, false, None);
+        let mut vm = self.new_vm(prog.clone(), cwd, false);
         vm.deadline = compiled.deadline;
         let r = vm.run_main(prog.entry).await;
         let r = end_run(&mut vm, r).await;
@@ -1652,15 +1634,6 @@ mod registry_tests {
         assert_eq!(slow.len(), script(false).len());
     }
 
-    #[test]
-    fn engines_of_one_config_share_its_registry() {
-        let config = Config::new().module(NativeModule::new("a"));
-        let (one, two) = (Engine::new(config.clone()).unwrap(), Engine::new(config.clone()).unwrap());
-        assert!(Arc::ptr_eq(&one.registry, &two.registry));
-        let three = Engine::new(config.module(NativeModule::new("b"))).unwrap();
-        assert!(!Arc::ptr_eq(&one.registry, &three.registry));
-    }
-
     /// `STD_MODULES` (the names host modules cannot take) lists the standard modules.
     #[test]
     fn std_module_names_are_listed() {
@@ -1717,12 +1690,12 @@ mod offload_tests {
     fn hung_io_is_abandoned_at_limits_and_interrupts() {
         let (release, progress) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicUsize::new(0)));
         let limits = Limits { max_wall_time: Some(Duration::from_millis(100)), ..Limits::default() };
-        let config = Config::new().module(hang_module(release.clone(), progress.clone())).limits(limits);
-        let mut engine = Engine::new(config.clone()).unwrap();
+        let config = || Config::new().module(hang_module(release.clone(), progress.clone()));
+        let mut engine = Engine::new(config().limits(limits)).unwrap();
         let r = rt().block_on(engine.run_source("main.sand", "import hung\nhung.hang()"));
         assert!(matches!(r, Err(Error::Limit(LimitKind::WallTime))), "{r:?}");
 
-        let mut engine = Engine::new(config.limits(Limits::default())).unwrap();
+        let mut engine = Engine::new(config()).unwrap();
         let handle = engine.interrupt_handle();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(50));
