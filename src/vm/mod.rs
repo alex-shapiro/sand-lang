@@ -64,10 +64,13 @@ const _: () = assert!(std::mem::size_of::<Ctl>() == std::mem::size_of::<usize>()
 const _: () = assert!(std::mem::size_of::<Result<Value, Ctl>>() == 16);
 const _: () = assert!(std::mem::size_of::<Result<Option<Value>, Ctl>>() == 16);
 
-/// Category of asynchronous wait for a suspended task.
+/// What a suspended task waits for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WaitKind {
+    /// I/O or a timer. The time counts toward the wall-time limit.
     Io,
+    /// An action of the user. While the engine has nothing else to run, the
+    /// time does not count toward the wall-time limit.
     User,
 }
 
