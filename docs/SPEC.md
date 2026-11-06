@@ -2030,7 +2030,9 @@ Time spent waiting for user input while all other tasks are idle does not count
 toward `max_wall_time`. Time spent running other tasks still counts. User input
 waits include reads from a `StdinFeed`, reads from an inherited terminal
 standard input (excluding pipes and files), and host functions that return
-`Later::for_user` (§16.3).
+`Later::for_user` (§16.3). A read from a `StdinFeed` always waits for the user,
+because the host sees each waiting read through `wanted` and `awaited` and can
+show it or dismiss it.
 
 The host can intercept and filter structured log records instead of
 writing them to standard error. `Config::log_sink` routes records to a
