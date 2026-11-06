@@ -194,6 +194,12 @@ impl Meter {
         self.base.get().saturating_add(self.spent())
     }
 
+    /// Gives back the fuel charged in this slice since [`Meter::fuel`]
+    /// returned `mark`.
+    pub(crate) fn refund_to(&self, mark: i64) {
+        self.fuel.set(mark);
+    }
+
     /// Counts the fuel used from zero again (a new input of a REPL session).
     pub(crate) fn reset(&self) {
         self.base.set(0);

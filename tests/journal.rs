@@ -1167,8 +1167,27 @@ fn a_journaled_call_that_runs_again_after_a_collection_replays_its_fuel() {
     assert_eq!(calls.load(Ordering::SeqCst), 6, "each call runs again after the forced collection");
     let (r, again, replayed_fuel) = run(&MemoryJournal::with_entries(journal.entries()));
     assert!(r.is_ok(), "{r:?}");
-    assert_eq!((again, replayed_fuel), (out, fuel), "replay charges the fuel of both attempts");
+    assert_eq!((again, replayed_fuel), (out, fuel), "replay charges the fuel of the attempt that completes");
     assert_eq!(calls.load(Ordering::SeqCst), 6);
+}
+
+#[test]
+fn a_native_that_runs_again_after_a_collection_costs_the_fuel_of_one_call() {
+    let mut m = NativeModule::new("mem");
+    m.vm_function("grow", |vm: &mut Vm, n: i64| -> Result<i64, sandlang::vm::Ctl> {
+        vm.charge(50)?;
+        vm.check_memory(n as usize)?;
+        Ok(n)
+    });
+    let src = "import mem\nvar total = 0\nfor i in 0..3 {\n    total += mem.grow(i * 10)\n}\nprint(total)";
+    let fuel = |stress: bool| {
+        let config = Config::new().policy(RulePolicy::allow_all()).module(m.clone()).retry_stress(stress).stdout(MemorySink::new());
+        let mut engine = Engine::new(config).unwrap();
+        let r = rt().block_on(engine.run_source("main.sand", src));
+        assert!(r.is_ok(), "{r:?}");
+        engine.run_stats().fuel
+    };
+    assert_eq!(fuel(true), fuel(false));
 }
 
 #[test]

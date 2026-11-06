@@ -308,7 +308,7 @@ pub(crate) fn journaled_call(vm: &mut Vm, inner: &super::HostFn, name: &Arc<str>
             // The journal records the start of the call, not its end: call
             // it again, and deliver even a result it returns at once as the
             // completion of the recorded operation.
-            let start = vm.call_start();
+            let start = vm.meter.used();
             let r = inner(vm);
             if is_retry(&r) {
                 return r;
@@ -336,7 +336,7 @@ pub(crate) fn journaled_call(vm: &mut Vm, inner: &super::HostFn, name: &Arc<str>
     if effectful && vm.must_flush() {
         return Err(Ctl::from(CtlKind::Flush));
     }
-    let start = vm.call_start();
+    let start = vm.meter.used();
     match inner(vm).map_err(Ctl::into_kind) {
         Err(CtlKind::Async(fut, park)) => {
             let pre_fuel = vm.meter.used().saturating_sub(start);
@@ -1152,7 +1152,7 @@ impl Vm {
         if let Some(r) = self.replay_result(identity, label)? {
             return r;
         }
-        let start = self.call_start();
+        let start = self.meter.used();
         let r = f(self);
         self.record_result(label, start, r, |_| Ok((identity, label.to_string())))
     }
@@ -1176,12 +1176,6 @@ impl Vm {
         let v = payload_outcome(self, &outcome);
         self.charge(fuel)?;
         Ok(Some(v))
-    }
-
-    /// The fuel used when the current journaled call started: now, or when
-    /// it first started if this is its retry after a collection.
-    fn call_start(&self) -> u64 {
-        self.collected_at.unwrap_or_else(|| self.meter.used())
     }
 
     /// Records the result `r` of a synchronous call that started at fuel

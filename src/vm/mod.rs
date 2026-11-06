@@ -577,8 +577,9 @@ pub struct Vm {
     /// retried after a garbage collection (see `interp::limit_trap`).
     pub(crate) gc_retry: bool,
     /// Set while a native that asked for a collection (`CtlKind::Collect`)
-    /// is called again after it: the fuel used when its first call started.
-    pub(crate) collected_at: Option<u64>,
+    /// is called again after it, so that its limit checks fail instead of
+    /// asking again.
+    pub(crate) collected: bool,
     /// Function and instruction pointer of the active native call.
     caller_site: (u32, u32),
     pub cancel_current: bool,
@@ -690,7 +691,7 @@ impl Vm {
 
     /// Whether the native in progress runs again after a collection.
     pub(crate) fn collected(&self) -> bool {
-        self.collected_at.is_some()
+        self.collected
     }
 
     pub fn new(prog: Arc<Program>, natives: Arc<Vec<NativeEntry>>, host: Host) -> Vm {
@@ -717,7 +718,7 @@ impl Vm {
             meter,
             deadline: None,
             gc_retry: false,
-            collected_at: None,
+            collected: false,
             caller_site: (0, 0),
             cancel_current: false,
             ending: false,

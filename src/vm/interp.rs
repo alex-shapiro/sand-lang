@@ -1695,17 +1695,19 @@ impl Vm {
         let frame = fiber.frames.last_mut().unwrap();
         frame.ip = ip as u32;
         self.caller_site = (frame.proto, frame.ip);
-        let fuel_at_call = self.meter.used();
+        let fuel_at_call = self.meter.fuel();
         let mut r = Self::invoke_native(self, natives, n, &fiber.stack[start..start + argc]);
         self.heap.fail_next_check.set(false);
         if r.is_memory_limit() || matches!(&r, Err(c) if matches!(c.kind(), CtlKind::Collect)) {
             // Native functions check memory and open-resource limits against
             // counts that include uncollected garbage. Run a full collection
-            // and retry once.
+            // and retry once. Only the retry costs fuel, so fuel does not
+            // depend on when the collector runs.
             self.collect_all_garbage(Some(fiber));
-            self.collected_at = Some(fuel_at_call);
+            self.meter.refund_to(fuel_at_call);
+            self.collected = true;
             r = Self::invoke_native(self, natives, n, &fiber.stack[start..start + argc]);
-            self.collected_at = None;
+            self.collected = false;
         }
         if !matches!(&r, Err(c) if matches!(c.kind(), CtlKind::NeedPermission(_))) {
             self.forget_once_answers();

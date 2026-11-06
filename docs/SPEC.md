@@ -1881,7 +1881,9 @@ when iterating. Ordinary searches take a few to a hundred nanoseconds per
 unit of their deterministic charge, so only work that charge underestimates
 by an order of magnitude or more is charged by time. All other fuel charges
 are deterministic across runs; time-based regex charges depend on execution
-speed.
+speed. A library function that the engine runs again after a garbage
+collection (§16.3) costs only the fuel of the call that completes, so fuel
+does not depend on when the collector runs.
 
 Fuel counts against `max_instructions`. Once a scheduling slice's fuel is
 spent, long operations check the instruction budget, the CPU and
