@@ -1908,8 +1908,9 @@ Checking a program happens before it runs, so it is bounded separately:
   `max_compile_fuel` is exhausted, compilation fails with `program too complex
 to compile`. `None` means unlimited.
 - **Time and interrupts.** Compilation stops with `time limit exceeded` once
-  `max_wall_time` has elapsed since it started (the run that follows has
-  what is left), and with an interrupt error when the host interrupts the
+  `max_wall_time` has elapsed since it started, excluding waits for
+  permission prompts (the run that follows has what is left), and with an
+  interrupt error when the host interrupts the
   engine. The standard library is compiled once per process (or per engine
   with host modules), outside any program's budget.
 - **Local limits**, reported at the offending construct: nesting of
