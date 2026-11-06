@@ -49,7 +49,7 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
     let probe_targets = ProbeTargets::new(rules.iter().filter_map(|r| r.kind.http_match().map(|http| http.host)));
     let mut bypasses: FxHashMap<(NetPattern, NetPattern, bool), Option<(String, String)>> = FxHashMap::default();
     let mut bypass = |reach: NetPattern, denied: &NetPattern, transports: Transports| {
-        [true, false].into_iter().filter(|&tls| transports.contains(Transports::of(tls))).find_map(|tls| {
+        [true, false].into_iter().filter(|&tls| transports.carry(tls)).find_map(|tls| {
             let found = bypasses.entry((reach.clone(), denied.clone(), tls)).or_insert_with_key(|(reach, denied, tls)| {
                 let (host, port) = probe_targets.dest(reach, denied)?;
                 let cap = Capability::Net { host, port, tls: *tls };
@@ -1184,9 +1184,9 @@ mod tests {
                 if rules[..i].iter().any(|r| r.decision == rule.decision && r.kind == rule.kind) {
                     continue;
                 }
-                let deny = crate::policy::rules::RulePolicy::new().deny_net(Transports::all(), url.host.clone());
+                let deny = crate::policy::rules::RulePolicy::new().deny_net(Transports::Both, url.host.clone());
                 let found = dests.iter().find(|(host, port)| {
-                    [true, false].into_iter().filter(|&tls| transports.contains(Transports::of(tls))).any(|tls| {
+                    [true, false].into_iter().filter(|&tls| transports.carry(tls)).any(|tls| {
                         let cap = Capability::Net { host: host.clone(), port: *port, tls };
                         deny.verdict(&cap, PathSpace::Memory, &[]).is_some()
                             && policy.check_normalized_in(&cap, PathSpace::Memory) == crate::policy::Decision::Allow

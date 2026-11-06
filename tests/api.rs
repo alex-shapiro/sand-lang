@@ -2260,10 +2260,10 @@ fn typed_rule_builders_make_the_rules_of_the_policy_file_syntax() {
     use sandlang::policy::file::PolicyFile;
     use sandlang::policy::rules::{NamePattern, RulePolicy, Transports};
     let built = RulePolicy::new()
-        .allow_net(Transports::PLAINTEXT, "localhost:8080".parse().unwrap())
-        .deny_net(Transports::all(), "10.0.0.0/8".parse().unwrap())
-        .allow_http(Transports::TLS, "api.example.com/v1/**".parse().unwrap())
-        .prompt_http(Transports::all(), "*.example.org/admin".parse().unwrap())
+        .allow_net(Transports::Plaintext, "localhost:8080".parse().unwrap())
+        .deny_net(Transports::Both, "10.0.0.0/8".parse().unwrap())
+        .allow_http(Transports::Tls, "api.example.com/v1/**".parse().unwrap())
+        .prompt_http(Transports::Both, "*.example.org/admin".parse().unwrap())
         .deny_listen("localhost:22".parse().unwrap())
         .allow_env("AWS_*".parse().unwrap())
         .allow_env(NamePattern::exact("A*B"));
@@ -2283,9 +2283,9 @@ fn typed_rule_builders_make_the_rules_of_the_policy_file_syntax() {
 #[test]
 fn rule_policy_network_hosts() {
     let p = sandlang::policy::rules::RulePolicy::standard()
-        .allow_net(sandlang::policy::rules::Transports::TLS, "example.com".parse().unwrap())
-        .allow_net(sandlang::policy::rules::Transports::TLS, "*.example.org".parse().unwrap())
-        .allow_net(sandlang::policy::rules::Transports::TLS, "localhost:8080".parse().unwrap());
+        .allow_net(sandlang::policy::rules::Transports::Tls, "example.com".parse().unwrap())
+        .allow_net(sandlang::policy::rules::Transports::Tls, "*.example.org".parse().unwrap())
+        .allow_net(sandlang::policy::rules::Transports::Tls, "localhost:8080".parse().unwrap());
     let check = |host: &str, port: u16| p.check(&Capability::Net { host: host.into(), port, tls: true });
     assert_eq!(check("example.com", 443), Decision::Allow);
     assert_eq!(check("example.com", 80), Decision::Allow);

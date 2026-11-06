@@ -181,16 +181,16 @@ fn https_requests_need_tls_rules() {
     let server = https_server(|_| HttpResponse::new(200, "ok"));
     let port = server.addr.port();
     let src = format!("import http\nprint(http.get(\"https://localhost:{port}/\")?.text()?)");
-    let allowed = RulePolicy::standard().allow_net(Transports::TLS, format!("localhost:{port}").parse().unwrap());
+    let allowed = RulePolicy::standard().allow_net(Transports::Tls, format!("localhost:{port}").parse().unwrap());
     let r = run_with(&src, |c| trusting(c).policy(allowed));
     assert_eq!(r.ok_stdout(), "ok\n");
-    let plaintext = RulePolicy::standard().allow_net(Transports::PLAINTEXT, "*".parse().unwrap());
+    let plaintext = RulePolicy::standard().allow_net(Transports::Plaintext, "*".parse().unwrap());
     let r = run_with(&src, |c| trusting(c).policy(plaintext));
     assert!(r.failure().contains(&format!("permission denied: GET https://localhost:{port}/")), "{}", r.failure());
     let src = format!(
         "import net\nprint(net.connect_tls(\"localhost\", {port}).is_ok())\nprint(net.connect(\"localhost\", {port}).unwrap_err().message)"
     );
-    let r = run_with(&src, |c| trusting(c).policy(RulePolicy::standard().allow_net(Transports::TLS, "localhost".parse().unwrap())));
+    let r = run_with(&src, |c| trusting(c).policy(RulePolicy::standard().allow_net(Transports::Tls, "localhost".parse().unwrap())));
     assert_eq!(r.ok_stdout(), format!("true\npermission denied: connect to localhost:{port} (plaintext)\n"));
 }
 
