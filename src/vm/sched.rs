@@ -386,6 +386,10 @@ impl Vm {
             }
             WaitWork::Run { fut, effectful } => (fut, effectful),
         };
+        // The journal holds the operation's `Start` entry. Making it durable
+        // with the inputs before it gives the effect the same sequence
+        // number in a resumed run, whatever completions that run delivers
+        // first.
         if effectful && self.must_flush() {
             self.flush_journal().await?;
         }
@@ -543,31 +547,15 @@ impl Vm {
                 let mut fuel = self.meter.start_slice(timer.cpu_deadline(self.host.limits.max_cpu_time), self.deadline);
                 let slice = fuel;
                 self.count_step();
-                let r = loop {
-                    // A Rust panic in the interpreter or a native (a bug) ends
-                    // the run as an internal error instead of unwinding into the
-                    // host; caught per slice, which costs nothing per native call.
-                    let r = match crate::unwind::catch(|| self.interp(&mut f, &mut fuel)) {
-                        Ok(r) => r,
-                        Err(msg) => {
-                            self.broken = true;
-                            Err(Trap::Internal { message: msg, trace: self.trace_of(&f, None) })
-                        }
-                    };
-                    if !matches!(r, Ok(Exit::Flush)) {
-                        break r;
+                // A Rust panic in the interpreter or a native (a bug) ends
+                // the run as an internal error instead of unwinding into the
+                // host; caught per slice, which costs nothing per native call.
+                let r = match crate::unwind::catch(|| self.interp(&mut f, &mut fuel)) {
+                    Ok(r) => r,
+                    Err(msg) => {
+                        self.broken = true;
+                        Err(Trap::Internal { message: msg, trace: self.trace_of(&f, None) })
                     }
-                    // The call that asked for the flush continues the slice,
-                    // as it does in replay, where it does not ask.
-                    self.meter.sync(fuel);
-                    self.fibers[fid as usize] = Some(f);
-                    self.current = u32::MAX;
-                    self.flush_journal().await?;
-                    let Some(again) = self.fibers[fid as usize].take() else {
-                        return Err(Trap::Internal { message: "a task vanished during a journal flush".into(), trace: vec![] });
-                    };
-                    f = again;
-                    self.current = fid;
                 };
                 self.meter.sync(fuel);
                 timer.ran(self.meter.spent());
@@ -620,7 +608,6 @@ impl Vm {
                         self.fibers[fid as usize] = Some(f);
                     }
                     Exit::Wait(w) => self.start_wait(fid, f, *w, &timer).await?,
-                    Exit::Flush => return Err(Trap::Internal { message: "a journal flush outside a call".into(), trace: vec![] }),
                     Exit::Prompt(cap) => {
                         f.state = FiberState::Ready;
                         self.fibers[fid as usize] = Some(f);

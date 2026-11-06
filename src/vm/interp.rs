@@ -61,8 +61,6 @@ pub enum Exit {
     Blocked,
     /// Waiting for an asynchronous operation.
     Wait(Box<super::journal::Wait>),
-    /// The journal must be flushed before the call (retried) has an effect.
-    Flush,
     Prompt(Capability),
     /// `exit(code)` or a top-level `?` failure.
     Terminate(i32),
@@ -1764,10 +1762,6 @@ impl Vm {
             CtlKind::Wait(w) => {
                 fiber.result_slot = slot;
                 Ok(Some(Exit::Wait(w)))
-            }
-            CtlKind::Flush => {
-                fiber.frames.last_mut().unwrap().ip = (ip - 1) as u32;
-                Ok(Some(Exit::Flush))
             }
             CtlKind::Journal(s) => Err(Trap::Journal(s)),
             CtlKind::Abort(a) => Err(Trap::Abort(a)),

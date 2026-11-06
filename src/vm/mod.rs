@@ -105,8 +105,6 @@ pub enum CtlKind {
     /// Suspend the task on an operation that the journal records (see
     /// [`Vm::begin_op`]).
     Wait(Box<journal::Wait>),
-    /// Flush the journal, then call the native again (before an effect).
-    Flush,
     /// The native cancelled the task that runs it (see [`Vm::cancel_task`]):
     /// the engine ends the task.
     Cancelled,
@@ -207,7 +205,6 @@ impl std::fmt::Debug for CtlKind {
             CtlKind::Journal(s) => write!(f, "Journal({s:?})"),
             CtlKind::Abort(a) => write!(f, "Abort({a})"),
             CtlKind::Wait(_) => write!(f, "Wait"),
-            CtlKind::Flush => write!(f, "Flush"),
             CtlKind::Cancelled => write!(f, "Cancelled"),
         }
     }

@@ -735,7 +735,7 @@ print("\(a) \(c == 2 * n) \(flags)")
     assert!(first.result.is_ok(), "{:?}", first.result);
     assert_eq!(world.log.calls.load(Ordering::SeqCst), 2);
     assert_eq!(world.log.early.load(Ordering::SeqCst), 0, "the effect starts after a flush");
-    assert!(journal.flushes() >= 2, "a flush before the effect and one at the end");
+    assert_eq!(journal.flushes(), 2, "one flush before the effect and one at the end");
     for _ in 0..3 {
         let again = world.run(src, &MemoryJournal::with_entries(journal.entries()));
         assert!(

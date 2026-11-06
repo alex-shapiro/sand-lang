@@ -249,40 +249,55 @@ pub trait JournalArgs {}
 pub struct Journaled<F>(pub F);
 
 /// Registers host function `F` as journaled, like [`Journaled`], and as
-/// having effects outside the run: the engine calls it only once the
-/// journal is durable ([`Journal::flush`](crate::journal::Journal::flush)).
-/// An asynchronous function must start its effect in its future, not when
-/// called.
+/// having effects outside the run. The function starts its effect in the
+/// future of the [`Later`] that it returns, or is asynchronous. The engine
+/// records the call's start, and starts the future only once the journal
+/// is durable ([`Journal::flush`](crate::journal::Journal::flush)). Thus a
+/// resumed run that calls the function again gives it the same
+/// [`JournaledCall::seq`]. A [`Later::ready`] result has no effect.
+///
+/// A function that returns its result at once does not compile:
 ///
 /// ```compile_fail
 /// # use sandlang::native::func::Effectful;
-/// let mut m = sandlang::native::NativeModule::new("clock");
-/// m.function("now", Effectful(|| jiff::Timestamp::UNIX_EPOCH));
+/// # use sandlang::vm::Vm;
+/// let mut m = sandlang::native::NativeModule::new("payments");
+/// m.vm_function("charge", Effectful(|_: &mut Vm, cents: i64| cents));
 /// ```
 #[derive(Clone, Copy, Debug)]
 pub struct Effectful<F>(pub F);
 
-macro_rules! journaled_impls {
-    ($($wrapper:ident: $effectful:literal),*) => {$(
-        impl<M, F: HostFunction<M>> HostFunction<M> for $wrapper<F>
-        where
-            F::Args: JournalArgs,
-            F::Ret: JournalData,
-        {
-            type Args = F::Args;
-            type Ret = F::Ret;
-            fn signature() -> Signature {
-                F::signature()
-            }
-            fn into_host(self, key: &Arc<str>) -> Box<NativeFn> {
-                journaled(self.0.into_host(key), key, $effectful)
-            }
-        }
+/// The result of a [`VmFunction`] whose effect starts in a future: the
+/// return type of a function in [`Effectful`].
+#[diagnostic::on_unimplemented(
+    message = "a function wrapped in `Effectful` must return `Result<Later<T, E>, E>`",
+    note = "start the effect in the future of the `Later`"
+)]
+pub trait Deferred {}
 
+impl<T, E> Deferred for Result<Later<T, E>, E> {}
+
+impl<M, F: HostFunction<M>> HostFunction<M> for Journaled<F>
+where
+    F::Args: JournalArgs,
+    F::Ret: JournalData,
+{
+    type Args = F::Args;
+    type Ret = F::Ret;
+    fn signature() -> Signature {
+        F::signature()
+    }
+    fn into_host(self, key: &Arc<str>) -> Box<NativeFn> {
+        journaled(self.0.into_host(key), key, false)
+    }
+}
+
+macro_rules! journaled_impls {
+    ($($wrapper:ident: $effectful:literal $(, $ret:path)?);*) => {$(
         impl<M, F: VmFunction<M, CallParam: JournaledCallParam>> VmFunction<M> for $wrapper<F>
         where
             F::Args: JournalArgs,
-            F::Ret: JournalData,
+            F::Ret: JournalData $(+ $ret)?,
         {
             type Args = F::Args;
             type Ret = F::Ret;
@@ -311,7 +326,7 @@ macro_rules! journaled_impls {
         }
     )*};
 }
-journaled_impls!(Journaled: false, Effectful: true);
+journaled_impls!(Journaled: false; Effectful: true, Deferred);
 
 /// Wraps `inner`, registered under `key`, so that its calls go through the
 /// journal.

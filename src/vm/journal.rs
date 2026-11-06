@@ -315,8 +315,8 @@ pub(crate) fn sleep(vm: &mut Vm, d: Duration) -> Ctl {
 
 /// Calls host function `name` (`inner`), registered as journaled, with
 /// `args` (SPEC §16.7). In replay, returns its recorded result without
-/// calling it. An effectful function is called only once the journal is
-/// durable.
+/// calling it. The future of an effectful function starts only once the
+/// journal, with the call's `Start` entry, is durable.
 pub(crate) fn journaled_call(vm: &mut Vm, call: Call, inner: &super::HostFn, name: &Arc<str>, effectful: bool, args: &[Value]) -> NResult {
     // A journaled function reads no journal input (it has no `Call`), so
     // the entry that the call records or replays is the next one.
@@ -354,9 +354,6 @@ pub(crate) fn journaled_call(vm: &mut Vm, call: Call, inner: &super::HostFn, nam
             Err(run(rerun.start(vm, spec(pre_fuel, park)), fin))
         }
         StartEntry::Fresh(fresh) => {
-            if effectful && vm.must_flush() {
-                return Err(Ctl::from(CtlKind::Flush));
-            }
             let start = vm.meter.used();
             match inner(vm).map_err(Ctl::into_kind) {
                 Err(CtlKind::Async(fut, park)) => {
@@ -1256,7 +1253,8 @@ impl Vm {
                 Ok(())
             }
             next => {
-                let msg = format!("the run cancels operation {op} where the journal records {}", next.map_or("nothing".into(), |e| e.describe()));
+                let msg =
+                    format!("the run cancels operation {op} where the journal records {}", next.map_or("nothing".into(), |e| e.describe()));
                 Err(j.diverged(msg))
             }
         }

@@ -2449,10 +2449,11 @@ fixes. For a run to replay, each execution must have:
 
 **Output commit.** The engine flushes the journal before each effect outside
 the run, so that every input that the effect can depend on is durable. It
-waits for `Journal::flush` to complete before it sends an HTTP request, before
-it calls an effectful host function, and again before the future of an
-asynchronous effectful host function starts. It also flushes before it
-suspends a run and when a run ends. Other entries only go to
+records the `Start` entry of an HTTP request or of a call of an effectful
+host function, and then waits for `Journal::flush` to complete before it
+sends the request or starts the future of the call. Thus a resumed run finds
+the `Start` entry, and the effect has the same sequence number in every
+execution. It also flushes before it suspends a run and when a run ends. Other entries only go to
 `Journal::record`. An effect that started before an execution stopped, and
 whose `Done` entry is not durable, occurs again when the run continues. Thus
 effects occur at least once; give requests idempotency keys where this
@@ -2501,8 +2502,11 @@ again.
 returns the recorded result without a call. The identity of a call is the
 function's name and the journal encoding of its arguments; a value of a bound
 value type, such as a `time.Instant`, takes part through its type and text.
-A function wrapped in `native::Effectful` is also journaled, and the engine
-calls it only when the journal is durable. The arguments and the result of a
+A function wrapped in `native::Effectful` is also journaled, and has effects
+outside the run. It is asynchronous, or returns a `Later` and starts its
+effect in the future of the `Later`; the Rust compiler refuses a function that
+returns its result at once. The engine records the start of the call and
+starts the future only when the journal is durable. The arguments and the result of a
 journaled function must be plain data: no functions, tasks, channels, generic
 parameters, or values of bound object types, and no values of bound value
 types in the result. The Rust compiler enforces this rule: the parameter

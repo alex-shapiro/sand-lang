@@ -826,8 +826,8 @@ impl NativeModule {
     /// Registers a synchronous function `f` under `name` (or `"Type.method"`
     /// for a method on a type in this module). Parameters of type `&str`,
     /// `&[u8]`, and `&T` (for an [`ObjectType`] `T`) borrow directly from the
-    /// VM heap without copying. Wrap `f` in [`Journaled`](func::Journaled) or
-    /// [`Effectful`](func::Effectful) to journal its calls.
+    /// VM heap without copying. Wrap `f` in [`Journaled`](func::Journaled) to
+    /// journal its calls.
     ///
     /// # Panics
     ///
