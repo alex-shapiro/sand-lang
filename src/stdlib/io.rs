@@ -4,7 +4,6 @@ use super::stream::{self, IoFailure, Suspended, bytes_read, line_read, read_line
 use crate::check::ModKind;
 use crate::journal::OpKind;
 use crate::native::convert::{HostError, IntoValue};
-use crate::native::func::Park;
 use crate::native::func::{Call, Later};
 use crate::native::ty::Val;
 use crate::native::{NativeModule, NativeObject, ObjectType};
@@ -155,7 +154,7 @@ fn read_stdin<R: IntoValue + Send + 'static>(
         };
         outcome.into_value(vm)
     });
-    let spec = OpSpec { kind: OpKind::Stdin, effectful: false, park: Park::Never, host_wait: None, pre_fuel: 0, timer: None };
+    let spec = OpSpec { kind: OpKind::Stdin, effectful: false, park: None, host_wait: None, pre_fuel: 0, timer: None };
     Err(match vm.begin_op(spec, describe)? {
         Begun::Replayed(r) => r.wait(build),
         Begun::Live(live) => live.run(

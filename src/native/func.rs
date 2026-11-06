@@ -85,7 +85,9 @@ impl<T: SandType, E: NativeError> VmReturn for Result<Parked<T, E>, E> {
     type Parking = Parks;
     fn into_result(self, vm: &mut Vm) -> NResult {
         match self {
-            Ok(Parked { later: Later(Wait::Future(fut), _), park, tag }) => Err(Ctl::from(crate::vm::CtlKind::Parked(fut, park, tag))),
+            Ok(Parked { later: Later(Wait::Future(fut), _), park: Some((park, tag)) }) => {
+                Err(Ctl::from(crate::vm::CtlKind::Parked(fut, park, tag)))
+            }
             Ok(Parked { later, .. }) => later.finish(vm),
             Err(e) => E::finish(Err::<(), E>(e), vm),
         }
@@ -390,12 +392,10 @@ fn journaled(inner: Box<NativeFn>, key: &Arc<str>, effectful: bool) -> Box<Nativ
 /// `Result<T, Error>`.
 pub struct Later<T, E>(Wait, PhantomData<fn() -> (T, E)>);
 
-/// Whether the engine may suspend a journaled run while a host call waits
+/// How long the engine may suspend a journaled run while a host call waits
 /// (see [`Later::parked`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Park {
-    /// The engine waits for the call: the default.
-    Never,
     /// The engine may suspend the run until the host resumes it, for
     /// example when a signal that the call waits for arrives.
     UntilResumed,
@@ -487,7 +487,7 @@ impl<T, E> Later<T, E> {
     /// });
     /// ```
     pub fn parked(self, park: Park, tag: impl Into<String>) -> Parked<T, E> {
-        Parked { later: self, park, tag: tag.into() }
+        Parked { later: self, park: Some((park, tag.into())) }
     }
 
     pub(crate) fn finish(self, vm: &mut Vm) -> NResult {
@@ -503,15 +503,16 @@ impl<T, E> Later<T, E> {
 /// [`Journaled`] or [`Effectful`], as for a `Later`.
 pub struct Parked<T, E> {
     later: Later<T, E>,
-    park: Park,
-    tag: String,
+    /// How long the run may be suspended, and the tag of the call. `None`
+    /// for a `Later` that does not park.
+    park: Option<(Park, String)>,
 }
 
 /// A `Later` that does not park, for a journaled function that parks only
 /// sometimes.
 impl<T, E> From<Later<T, E>> for Parked<T, E> {
     fn from(later: Later<T, E>) -> Parked<T, E> {
-        Parked { later, park: Park::Never, tag: String::new() }
+        Parked { later, park: None }
     }
 }
 

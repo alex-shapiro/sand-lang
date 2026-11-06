@@ -59,9 +59,9 @@ struct IoOp {
     fid: u32,
     wgen: u64,
     fut: BoxFuture,
-    /// Whether the run may be suspended while the operation waits
-    /// (journaled timers and parked host calls).
-    park: Park,
+    /// How long the run may be suspended while the operation waits, if it
+    /// may (journaled timers and parked host calls).
+    park: Option<Park>,
     /// What the operation waits for, if it is a parked host call.
     host_wait: Option<HostWait>,
 }
@@ -89,7 +89,7 @@ impl IoTable {
         fid: u32,
         wgen: u64,
         mut fut: BoxFuture,
-        park: Park,
+        park: Option<Park>,
         host_wait: Option<HostWait>,
     ) -> Result<u64, Finisher> {
         let slot = match self.free.pop() {
@@ -128,19 +128,17 @@ impl IoTable {
         self.ops.iter().flatten().filter_map(|op| op.host_wait.as_ref()?.parked(op.park)).collect()
     }
 
-    /// How the run may be suspended while every pending operation waits:
-    /// until the earliest time that one of them gives, if any.
-    fn park(&self) -> Park {
-        let mut park = Park::UntilResumed;
-        for op in self.ops.iter().flatten() {
-            park = match (park, op.park) {
-                (_, Park::Never) => return Park::Never,
+    /// How long the run may be suspended while every pending operation
+    /// waits: until the earliest time that one of them gives, if any. `None`
+    /// if one of them does not let the run be suspended.
+    fn park(&self) -> Option<Park> {
+        self.ops.iter().flatten().try_fold(Park::UntilResumed, |park, op| {
+            Some(match (park, op.park?) {
                 (Park::Until(a), Park::Until(b)) => Park::Until(a.min(b)),
                 (Park::Until(t), _) | (_, Park::Until(t)) => Park::Until(t),
                 _ => Park::UntilResumed,
-            };
-        }
-        park
+            })
+        })
     }
 
     /// Cancels every pending operation.
@@ -479,8 +477,7 @@ impl Vm {
         if j.replaying() || !j.held.is_empty() {
             return None;
         }
-        match self.io.park() {
-            Park::Never => None,
+        match self.io.park()? {
             Park::Until(t) if t.duration_since(j.wall(&*self.host.clock)).unwrap_or_default() <= after => None,
             Park::Until(t) => Some(Suspension { wake_at: Some(t), parked: self.io.parked_calls() }),
             Park::UntilResumed => Some(Suspension { wake_at: None, parked: self.io.parked_calls() }),
