@@ -488,8 +488,12 @@ pub struct Suspension {
 /// externally visible effect, before it suspends the run, and when the run
 /// ends.
 pub trait Journal: Send + Sync {
-    /// Returns the entries that earlier executions of the run recorded, in
+    /// Returns all entries that earlier executions of the run recorded, in
     /// order. The engine replays them and records new entries after them.
+    ///
+    /// Replay needs every entry before the run starts: when the run starts
+    /// an operation, the engine replays the operation only if a later entry
+    /// records its end, and runs it live otherwise.
     fn replay(&self) -> Vec<Entry>;
 
     /// Records the next entry, after all entries that [`Journal::replay`]

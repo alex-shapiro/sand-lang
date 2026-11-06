@@ -2370,8 +2370,10 @@ Engine::new(config)?.run_program(&program).await;          // replays, then cont
 ```
 
 The `sandlang::journal` module defines the interface. The engine calls
-`Journal::replay` once when a run starts, to get the entries of earlier
-executions. The engine calls `Journal::record` for each new entry and
+`Journal::replay` once when a run starts, to get all entries of earlier
+executions. Replay needs every entry before the run starts: when the run
+starts an operation, the engine replays it only if a later entry records its
+end. The engine calls `Journal::record` for each new entry and
 `Journal::flush` to make the entries durable. An `Entry` has an `EntryKind`
 and `data` in an encoding that the engine defines for each version of
 `sandlang`. The sequence number of an entry is its position in the journal,
