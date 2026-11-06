@@ -6,7 +6,7 @@ use sandlang::native::{Effectful, Journaled, JournaledCall, Later, Park};
 use sandlang::network::{Listener, Network, NetworkFuture, Stream};
 use sandlang::platform::{Clock, ClockFuture, Instant, SystemClock, SystemTime, UNIX_EPOCH};
 use sandlang::vm::Vm;
-use sandlang::{Config, Engine, Error, HostError, MemorySink, NativeModule, Outcome, RulePolicy};
+use sandlang::{CallOutcome, Config, Engine, Error, HostError, MemorySink, NativeModule, Outcome, RulePolicy};
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
@@ -1054,6 +1054,32 @@ print("\(b.since(a) >= 10s) \(c.since(b) >= 0s)")
     let (r, out) = run(ManualClock::new(), log);
     assert!(r.is_ok(), "{r:?}");
     assert_eq!(out, "true true\n");
+}
+
+/// A durable call that suspends returns its value when the host calls the function again
+/// with the same journal.
+#[test]
+fn a_suspended_call_resumes_and_returns() {
+    let fs = sandlang::MemFs::new();
+    fs.write("/main.sand", "import task\nfn main(n: int) -> int {\n    print(\"start\")\n    task.sleep(10s)\n    n * 2\n}").unwrap();
+    let base = Config::new().memory_fs(fs).seed(1);
+    let program = rt().block_on(Engine::new(base.clone()).unwrap().compile_file("/main.sand")).unwrap();
+    let main = program.function("main").unwrap();
+    let journal = MemoryJournal::new();
+    let clock = ManualClock::new();
+    let call = || {
+        let out = MemorySink::new();
+        let durable = Durable::new(Arc::new(journal.clone())).suspend_after(Duration::ZERO);
+        let config = base.clone().clock(clock.clone()).stdout(out.clone()).durable(durable);
+        (rt().block_on(Engine::new(config).unwrap().call(&main, &["21"])), out.contents())
+    };
+    let (r, out) = call();
+    let wake = UNIX_EPOCH + Duration::from_secs(BASE_SECS + 10);
+    assert!(matches!(r, Ok(CallOutcome::Suspended(Suspension { wake_at: Some(t), .. })) if t == wake), "{r:?}");
+    assert_eq!(out, "start\n");
+    clock.advance(Duration::from_secs(10));
+    let (r, _) = call();
+    assert_eq!(r.unwrap(), CallOutcome::Returned("42".into()));
 }
 
 #[test]

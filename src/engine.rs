@@ -16,6 +16,7 @@ use crate::vm::bytecode::Program;
 use crate::vm::heap::GcStats;
 use crate::vm::journal::JournalStop;
 use crate::vm::sched::{IoShared, IoTable, RunEnd};
+use crate::vm::value::{Obj, TypeDesc, Value};
 use crate::vm::{Always, Host, HostFn, NativeEntry, OutputSink, Rng, SharedSink, StdinSource, TraceEntry, Trap, Vm, entropy_seed};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
@@ -245,6 +246,86 @@ impl fmt::Debug for CompiledProgram {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CompiledProgram").field("cwd", &self.cwd).finish_non_exhaustive()
     }
+}
+
+impl CompiledProgram {
+    /// The function `name` of the main module, public or private, if a host can call it with
+    /// [`Engine::call`]: a top-level function without type parameters.
+    pub fn function(&self, name: &str) -> Option<Function> {
+        let index = self.program.functions.iter().position(|(_, s)| s.name == name)?;
+        Some(Function { program: self.clone(), index })
+    }
+}
+
+/// A function of a compiled program's main module (see [`CompiledProgram::function`]).
+#[derive(Clone, Debug)]
+pub struct Function {
+    program: CompiledProgram,
+    index: usize,
+}
+
+impl Function {
+    pub fn signature(&self) -> &FunctionSignature {
+        &self.program.program.functions[self.index].1
+    }
+
+    fn proto(&self) -> u32 {
+        self.program.program.functions[self.index].0
+    }
+}
+
+/// The name, parameters and return type of a function. It shows as the function's
+/// declaration, such as `fn main(order: Order) -> Result<Receipt>`.
+#[derive(Clone, Debug)]
+pub struct FunctionSignature {
+    pub name: String,
+    /// The name and type of each parameter.
+    pub params: Vec<(String, Arc<TypeDesc>)>,
+    pub returns: Returns,
+}
+
+/// The return type of a function.
+#[derive(Clone, Debug)]
+pub enum Returns {
+    /// A type other than `Result`.
+    Value(Arc<TypeDesc>),
+    /// `Result<ok, err>`.
+    Result { ok: Arc<TypeDesc>, err: Arc<TypeDesc> },
+}
+
+impl fmt::Display for FunctionSignature {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "fn {}(", self.name)?;
+        for (i, (name, ty)) in self.params.iter().enumerate() {
+            let sep = if i > 0 { ", " } else { "" };
+            write!(f, "{sep}{name}: {ty}")?;
+        }
+        f.write_str(")")?;
+        match &self.returns {
+            Returns::Value(t) if matches!(**t, TypeDesc::Unit) => Ok(()),
+            Returns::Value(t) => write!(f, " -> {t}"),
+            Returns::Result { ok, err } if err.is_error() => write!(f, " -> Result<{ok}>"),
+            Returns::Result { ok, err } => write!(f, " -> Result<{ok}, {err}>"),
+        }
+    }
+}
+
+/// How a call with [`Engine::call`] ended, if it did not fail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallOutcome {
+    /// The function returned this value as JSON text, encoded as `json.encode` does. For a
+    /// function that returns a `Result`, the value is the payload of `Ok`.
+    Returned(String),
+    /// The function returned `Err(e)`. This is `e` as JSON text.
+    Failed(String),
+    /// Argument `index` does not decode to the type of its parameter. `kind` and `message`
+    /// are those of the error of `json.decode`.
+    BadArgument { index: usize, kind: String, message: String },
+    /// The run called `exit` with this code.
+    Exited(i32),
+    /// The engine suspended the journaled run because every task waits (SPEC §16.7). To
+    /// resume it, the host calls the function again with the same arguments and journal.
+    Suspended(crate::journal::Suspension),
 }
 
 /// Resources that the most recent run of an engine used.
@@ -1097,7 +1178,7 @@ impl Engine {
     async fn run_source_inner(&mut self, name: &str, source: &str) -> Result<crate::Outcome, Error> {
         let (root, normal) = self.source_root().clone();
         let compiled = self.compile(name, source, &normal, None).await?;
-        self.execute(compiled, root).await
+        self.run_script(compiled, root).await
     }
 
     pub async fn run_file(&mut self, path: impl AsRef<Path>) -> Result<crate::Outcome, Error> {
@@ -1108,7 +1189,7 @@ impl Engine {
         let (name, source, root) = self.read_main(path)?;
         let compiled = self.compile(&name, &source, &root, Some(path)).await?;
         let cwd = self.config.cwd.clone().unwrap_or(root);
-        self.execute(compiled, cwd).await
+        self.run_script(compiled, cwd).await
     }
 
     /// Compiles a file and its imports without running it. The returned program runs with
@@ -1132,13 +1213,83 @@ impl Engine {
     /// of the run. Fails with [`Error::Internal`] if the program was compiled with other host
     /// modules.
     pub async fn run_program(&mut self, program: &CompiledProgram) -> Result<crate::Outcome, Error> {
+        let compiled = self.start_program(program)?;
+        crate::unwind::guard(self.run_script(compiled, program.cwd.clone())).await
+    }
+
+    /// Runs the program of `function` as [`Engine::run_program`] does, but calls `function`
+    /// after the module initializers instead of ending, and returns what it returns.
+    ///
+    /// Each argument is JSON text, which the engine decodes to the type of its parameter as
+    /// `json.decode` does. The engine encodes the value that the function returns as
+    /// `json.encode` does. A journaled run replays the same call, so the host gives the same
+    /// arguments to each execution of the run. Fails with [`Error::Internal`] if the number of
+    /// arguments is not the number of parameters.
+    pub async fn call(&mut self, function: &Function, args: &[&str]) -> Result<CallOutcome, Error> {
+        let sig = function.signature();
+        if args.len() != sig.params.len() {
+            let message = format!("`{}` takes {} arguments, and the call gives {}", sig.name, sig.params.len(), args.len());
+            return Err(Error::Internal { message, trace: Vec::new() });
+        }
+        let compiled = self.start_program(&function.program)?;
+        let cwd = function.program.cwd.clone();
+        crate::unwind::guard(self.call_compiled(compiled, cwd, function, args)).await
+    }
+
+    async fn call_compiled(&mut self, compiled: Compiled, cwd: PathBuf, function: &Function, args: &[&str]) -> Result<CallOutcome, Error> {
+        let sig = function.signature();
+        let r = self
+            .execute(compiled, cwd, async |vm: &mut Vm| {
+                let r = call_function(vm, function, args).await;
+                match r {
+                    Ok(Called::Returned(v)) => {
+                        vm.pinned.push(v);
+                        let ended = vm.end_tasks().await;
+                        vm.pinned.pop();
+                        match ended? {
+                            Some(c) => Ok(CallOutcome::Exited(c)),
+                            None => returned(vm, v, &sig.returns).map_err(Trap::from_ctl),
+                        }
+                    }
+                    Ok(Called::Exited(c)) | Err(Trap::Exit(c)) => Ok(CallOutcome::Exited(c)),
+                    Ok(Called::BadArgument { index, error }) => {
+                        Ok(CallOutcome::BadArgument { index, kind: error.kind, message: error.message })
+                    }
+                    Err(t) => Err(t),
+                }
+            })
+            .await;
+        match r {
+            Ok(o) => Ok(o),
+            Err(Trap::Journal(JournalStop::Suspended(s))) => Ok(CallOutcome::Suspended(s)),
+            Err(t) => Err(trap_error(t)),
+        }
+    }
+
+    /// Prepares a run of `program` on this engine.
+    fn start_program(&self, program: &CompiledProgram) -> Result<Compiled, Error> {
         if !Arc::ptr_eq(&program.registry, &self.registry) {
             return Err(Error::Internal { message: "the program was compiled with other host modules".into(), trace: Vec::new() });
         }
         self.clear_interrupt();
-        let compiled = Compiled { program: program.program.clone(), lints: None, deadline: self.deadline(), snapshot: None };
-        let cwd = program.cwd.clone();
-        crate::unwind::guard(self.execute(compiled, cwd)).await
+        Ok(Compiled { program: program.program.clone(), lints: None, deadline: self.deadline(), snapshot: None })
+    }
+
+    /// Runs `compiled` as a script: its module initializers, then the tasks that are left.
+    async fn run_script(&mut self, compiled: Compiled, cwd: PathBuf) -> Result<crate::Outcome, Error> {
+        let entry = compiled.program.entry;
+        let r = self
+            .execute(compiled, cwd, async |vm: &mut Vm| {
+                let r = vm.run_main(entry).await;
+                end_run(vm, r).await
+            })
+            .await;
+        match r {
+            Ok(RunEnd::Finished(_)) => Ok(Outcome::Exited(0)),
+            Ok(RunEnd::Exit(c)) | Err(Trap::Exit(c)) => Ok(Outcome::Exited(c)),
+            Err(Trap::Journal(JournalStop::Suspended(s))) => Ok(Outcome::Suspended(s)),
+            Err(t) => Err(trap_error(t)),
+        }
     }
 
     pub async fn run_tests(&mut self, path: impl AsRef<Path>) -> Result<TestReport, Error> {
@@ -1257,7 +1408,9 @@ impl Engine {
         vm
     }
 
-    async fn execute(&mut self, compiled: Compiled, cwd: PathBuf) -> Result<crate::Outcome, Error> {
+    /// Runs `run` on a new VM of `compiled`, with the configured journal, and records the
+    /// run's statistics.
+    async fn execute<T>(&mut self, compiled: Compiled, cwd: PathBuf, run: impl AsyncFnOnce(&mut Vm) -> Result<T, Trap>) -> Result<T, Trap> {
         let prog = compiled.program;
         if self.config.dump_bytecode {
             for (i, p) in prog.protos.iter().enumerate() {
@@ -1273,8 +1426,7 @@ impl Engine {
         vm.deadline = compiled.deadline;
         let r = match self.attach_journal(&mut vm) {
             Ok(()) => {
-                let r = vm.run_main(prog.entry).await;
-                let r = end_run(&mut vm, r).await;
+                let r = run(&mut vm).await;
                 match r {
                     Err(Trap::Journal(_) | Trap::Interrupted | Trap::Abort(_)) => r,
                     r => match vm.flush_journal().await {
@@ -1294,12 +1446,7 @@ impl Engine {
             drop(vm);
             self.recycle(prog, compiled.snapshot);
         }
-        match r {
-            Ok(RunEnd::Finished(_)) => Ok(Outcome::Exited(0)),
-            Ok(RunEnd::Exit(c)) | Err(Trap::Exit(c)) => Ok(Outcome::Exited(c)),
-            Err(Trap::Journal(JournalStop::Suspended(s))) => Ok(Outcome::Suspended(s)),
-            Err(t) => Err(trap_error(t)),
-        }
+        r
     }
 
     /// Attaches the configured journal to `vm`, the VM of a run. A
@@ -1713,6 +1860,67 @@ pub(crate) struct Discovery<'a> {
 const MAX_DISCOVERY_ERRORS: usize = 100;
 
 /// Ends a run whose main task finished (`Vm::end_tasks`).
+/// How [`call_function`] ended.
+enum Called {
+    Returned(Value),
+    Exited(i32),
+    BadArgument { index: usize, error: stdlib::Error },
+}
+
+/// Runs the module initializers of `vm`'s program, decodes `args` for the parameters of
+/// `function`, and calls it. The tasks that the run started are left as they are.
+async fn call_function(vm: &mut Vm, function: &Function, args: &[&str]) -> Result<Called, Trap> {
+    let entry = vm.prog.entry;
+    if let RunEnd::Exit(c) = vm.run_main(entry).await? {
+        return Ok(Called::Exited(c));
+    }
+    vm.release_main();
+    let pinned = vm.pinned.len();
+    let r = call_decoded(vm, function, args).await;
+    vm.pinned.truncate(pinned);
+    r
+}
+
+/// Decodes `args` and calls `function` with them. Keeps each argument in `vm.pinned`, so
+/// that it lives while the functions that fill in its computed defaults run.
+async fn call_decoded(vm: &mut Vm, function: &Function, args: &[&str]) -> Result<Called, Trap> {
+    let first = vm.pinned.len();
+    for (index, ((_, desc), arg)) in function.signature().params.iter().zip(args).enumerate() {
+        let text = vm.new_str(*arg);
+        match stdlib::json::decode(vm, desc, crate::native::Val::from_raw(text)).map_err(Trap::from_ctl)? {
+            stdlib::json::Decoding::Done(v) => vm.pinned.push(v),
+            stdlib::json::Decoding::Pending(v, fills) => {
+                vm.pinned.extend([v, fills]);
+                for fill in vm.heap.list(fills).to_vec() {
+                    if let RunEnd::Exit(c) = vm.run_call(fill, &[]).await? {
+                        return Ok(Called::Exited(c));
+                    }
+                    vm.release_main();
+                }
+                vm.pinned.pop();
+            }
+            stdlib::json::Decoding::Failed(error) => return Ok(Called::BadArgument { index, error }),
+        }
+    }
+    let args = vm.pinned[first..].to_vec();
+    let closure = vm.heap.alloc(Obj::Closure(function.proto(), Box::new([])));
+    match vm.run_call(closure, &args).await? {
+        RunEnd::Finished(v) => Ok(Called::Returned(v)),
+        RunEnd::Exit(c) => Ok(Called::Exited(c)),
+    }
+}
+
+/// The outcome of a call whose function returned `v`, for a function that returns `returns`.
+fn returned(vm: &Vm, v: Value, returns: &Returns) -> Result<CallOutcome, crate::vm::Ctl> {
+    match returns {
+        Returns::Value(_) => Ok(CallOutcome::Returned(stdlib::json::encode(vm, v, 0)?)),
+        Returns::Result { .. } => match vm.as_result(v) {
+            Ok(v) => Ok(CallOutcome::Returned(stdlib::json::encode(vm, v, 0)?)),
+            Err(e) => Ok(CallOutcome::Failed(stdlib::json::encode(vm, e, 0)?)),
+        },
+    }
+}
+
 async fn end_run(vm: &mut Vm, r: Result<RunEnd, Trap>) -> Result<RunEnd, Trap> {
     match r {
         Ok(RunEnd::Finished(v)) => Ok(vm.end_tasks().await?.map_or(RunEnd::Finished(v), RunEnd::Exit)),
@@ -1789,7 +1997,8 @@ fn compile_program(
     };
     let native_info = if host { native_info(&cp, registry) } else { crate::modules::NativeInfo::default() };
     let mut program = spare.unwrap_or_else(|| snap.program.clone());
-    let input = CompileInput { checked: &cp, sm, natives: &registry.decls, native_info, budget, initialized: None, optimize };
+    let main = Some(cp.main_module);
+    let input = CompileInput { checked: &cp, sm, natives: &registry.decls, native_info, budget, initialized: None, optimize, main };
     let entry = compile_more(input, &mut program, &mut snap.compiler.clone(), &inits);
     if let Some(stop) = budget.stopped() {
         return Err(budget_error(stop, sm, main_file));

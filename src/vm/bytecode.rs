@@ -1271,6 +1271,8 @@ pub struct Program {
     pub ids: RtIds,
     pub entry: u32,
     pub tests: Vec<(String, u32)>,
+    /// The functions of the main module that a host can call, and their protos.
+    pub functions: Vec<(u32, crate::engine::FunctionSignature)>,
     pub files: Vec<String>,
     /// The names of the natives, by id.
     pub native_names: Arc<[String]>,

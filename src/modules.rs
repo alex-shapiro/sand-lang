@@ -134,6 +134,7 @@ impl Snapshot {
             budget: &budget,
             initialized: None,
             optimize: registry.optimize,
+            main: None,
         };
         let inits: Vec<FnId> = ["prelude", "task"].iter().filter_map(|n| mods[by_name[*n] as usize].init).collect();
         program.entry = compile_more(input, &mut program, &mut compiler, &inits).map_err(|ds| resolve(&sm, &ds))?;

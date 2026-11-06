@@ -45,6 +45,8 @@ pub struct CompileInput<'a> {
     /// initialized (see `init_order`).
     pub initialized: Option<Vec<bool>>,
     pub optimize: bool,
+    /// The main module, whose functions a host can call (`Program::functions`).
+    pub main: Option<crate::types::ModId>,
 }
 
 struct Compiler<'a> {
@@ -274,6 +276,7 @@ pub(crate) struct ProgramMark {
     desc_templates: usize,
     switches: usize,
     tests: usize,
+    functions: usize,
     nglobals: usize,
     files: usize,
     ids: RtIds,
@@ -290,6 +293,7 @@ impl ProgramMark {
             desc_templates: p.desc_templates.len(),
             switches: p.switches.len(),
             tests: p.tests.len(),
+            functions: p.functions.len(),
             nglobals: p.nglobals,
             files: p.files.len(),
             ids: p.ids,
@@ -308,6 +312,7 @@ impl ProgramMark {
         p.desc_templates.truncate(self.desc_templates);
         p.switches.truncate(self.switches);
         p.tests.truncate(self.tests);
+        p.functions.truncate(self.functions);
         p.nglobals = self.nglobals;
         p.global_names.truncate(self.nglobals);
         p.files.truncate(self.files);
@@ -497,7 +502,41 @@ impl<'a> Compiler<'a> {
             }
         }
         *ntests = cp.tests.len();
+        if let Some(main) = input.main {
+            self.prog.functions = self.main_functions(main, first);
+        }
         entry
+    }
+
+    /// The top-level functions without type parameters of module `main`, among the functions
+    /// numbered from `first`, with their signatures. Leaves out a function whose parameter or
+    /// return type is too large to describe.
+    fn main_functions(&mut self, main: crate::types::ModId, first: usize) -> Vec<(u32, crate::engine::FunctionSignature)> {
+        use crate::check::{DeclPath, FnDeclRef};
+        use crate::engine::{FunctionSignature, Returns};
+        let cp = self.cp;
+        let mut out = Vec::new();
+        for (i, f) in cp.fns.iter_from(first).enumerate().map(|(k, f)| (first + k, f)) {
+            let top_level = matches!(f.decl, Some(FnDeclRef::Fn(d)) if d.method == DeclPath::NOT_METHOD);
+            if f.module != main || !matches!(f.kind, FnKind::Script) || !top_level || !f.generics.is_empty() {
+                continue;
+            }
+            let Some(proto) = self.fn_protos[i] else { continue };
+            let mut sink = DescCode { cp, prog: &mut *self.prog, fn_protos: &self.fn_protos };
+            let mut describe = |t| self.descs.describe(cp, &mut self.arena, t, &mut sink);
+            let params: Option<Vec<_>> = f.params.iter().map(|p| Some((cp.name(p.name).to_string(), describe(p.ty)?))).collect();
+            let returns = match cp.arena.get(f.ret) {
+                Ty::Named(d, args) if d == cp.wk.result => {
+                    let (ok, err) = (cp.arena.elem(args, 0), cp.arena.elem(args, 1));
+                    describe(ok).zip(describe(err)).map(|(ok, err)| Returns::Result { ok, err })
+                }
+                _ => describe(f.ret).map(Returns::Value),
+            };
+            if let (Some(params), Some(returns)) = (params, returns) {
+                out.push((proto, FunctionSignature { name: cp.name(f.name).to_string(), params, returns }));
+            }
+        }
+        out
     }
 }
 

@@ -2001,6 +2001,23 @@ compiling engine's configuration, without further `Config::module` calls, can ru
 so a host that runs the same code many times compiles it once. Each run starts with fresh
 globals, and its limits count from the start of the run.
 
+A host can also call a function of the program's main module and get its value.
+`CompiledProgram::function(name)` returns a top-level function without type parameters,
+public or private. Its `signature()` gives the type of each parameter and the return type as
+type descriptors, and shows as the function's declaration, such as
+`fn main(order: Order) -> Result<Receipt>`. `Engine::call(function, args)` runs the module
+initializers, then calls the function. Each argument is JSON text, which the engine decodes to
+the type of its parameter as `json.decode` does. A call that does not fail returns a
+`CallOutcome`:
+
+| Variant                                  | Meaning                                                                       |
+| ---------------------------------------- | ----------------------------------------------------------------------------- |
+| `CallOutcome::Returned(json)`            | The function returned a value, or `Ok(value)`, encoded as `json.encode` does. |
+| `CallOutcome::Failed(json)`              | The function returned `Err(e)`, and `json` is `e`.                            |
+| `CallOutcome::BadArgument { index, .. }` | An argument does not decode to the type of its parameter.                     |
+| `CallOutcome::Exited(code)`              | The run called `exit`.                                                        |
+| `CallOutcome::Suspended(suspension)`     | The engine suspended the journaled run (§16.7).                               |
+
 After each run, `Engine::run_stats` reports the resources that the run used,
 including runs that failed or exceeded a limit: `fuel` (in the units of
 `max_instructions`), `peak_memory` (the most memory in use at any memory
@@ -2523,7 +2540,8 @@ error back.
   apart from the heap's, so that the heap's memory checks are the same in
   replay.
 
-The engine journals runs of `run_source`, `run_file` and `run_program`.
+The engine journals runs of `run_source`, `run_file`, `run_program` and `call`. To
+resume a suspended call, the host calls the same function with the same arguments.
 Sessions and `run_tests` ignore the journal. Two effects can make a replay
 differ from the recorded execution without a divergence error. First, the
 garbage collector can run at different points, which a script observes only

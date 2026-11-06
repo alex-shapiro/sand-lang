@@ -64,10 +64,15 @@ struct JsonIds {
 
 impl JsonIds {
     fn of(prog: &Program) -> Result<JsonIds, Ctl> {
-        match prog.enum_types.get(&Json::rust_type()) {
-            Some(&first) => Ok(JsonIds::at(first)),
+        match JsonIds::find(prog) {
+            Some(ids) => Ok(ids),
             None => internal("the json module is not loaded"),
         }
+    }
+
+    /// The ids of a program that loads the json module.
+    fn find(prog: &Program) -> Option<JsonIds> {
+        prog.enum_types.get(&Json::rust_type()).map(|&first| JsonIds::at(first))
     }
 
     fn at(first: u32) -> JsonIds {
@@ -109,70 +114,17 @@ pub(crate) fn module() -> NativeModule {
         into_result(r)
     });
     m.vm_function("encode", |vm: &mut Vm, value: Param<0, traits::Encode>, indent: i64| -> Result<Val<String>, Ctl> {
-        let ids = JsonIds::of(&vm.prog)?;
-        let indent = indent.clamp(0, 1 << 16) as usize;
-        let mut e = Encoder {
-            prog: &vm.prog,
-            heap: &vm.heap,
-            meter: &vm.meter,
-            ids,
-            indent,
-            out: String::new(),
-            charged: 0,
-            scratch: Scratch::new(),
-        };
-        e.value(value.raw(), 0)?;
-        let out = e.out;
+        let out = encode(vm, value.raw(), indent.clamp(0, 1 << 16) as usize)?;
         Ok(Val::from_raw(vm.new_str(out)))
     });
     m.bind::<Decoded<()>>();
     m.vm_function("decode_raw", |vm: &mut Vm, ty: Reflect<0>, text: Val<String>| -> Result<Decoded<Param<0>>, Ctl> {
         let desc = ty.desc(&vm.heap)?.clone();
-        let ids = vm.prog.ids;
-        let meter = &vm.meter;
-        let (r, fills) = vm.heap.staged(|heap, st| {
-            let mut d = Decoder {
-                p: Parser::new(text.str(heap)),
-                b: Builder::new(heap, st, meter),
-                ids,
-                path: Vec::new(),
-                stack: Vec::new(),
-                slots: Vec::new(),
-                indexes: FxHashMap::default(),
-                fills: Vec::new(),
-                thunks: Vec::new(),
-            };
-            let r = d.decode(&desc).and_then(|v| d.p.finish().map(|()| v));
-            let charged = d.p.charge(meter);
-            let r = charged.map_err(Error::Ctl).and(r).map(|v| match d.thunks.is_empty() {
-                true => Decoded::Done(Param::from_raw(v)),
-                false => Decoded::Pending(Param::from_raw(v), Val::from_raw(d.b.list(std::mem::take(&mut d.thunks)))),
-            });
-            (r, d.fills)
-        });
-        if r.is_ok() {
-            for fill in fills {
-                match fill {
-                    Fill::Set(set, items) => {
-                        for x in items {
-                            vm.set_add(set, x)?;
-                        }
-                    }
-                    Fill::Map(map, entries) => {
-                        for (k, v) in entries {
-                            vm.map_insert(map, k, v)?;
-                        }
-                    }
-                }
-            }
-        }
-        let fail = |kind: &str, message| Ok(Decoded::Failed(super::Error { kind: kind.into(), message }));
-        match r {
-            Ok(d) => Ok(d),
-            Err(Error::Parse(msg)) => fail("parse", msg),
-            Err(Error::Invalid(msg)) => fail("invalid", msg),
-            Err(Error::Ctl(c)) => Err(c),
-        }
+        Ok(match decode(vm, &desc, text)? {
+            Decoding::Done(v) => Decoded::Done(Param::from_raw(v)),
+            Decoding::Pending(v, fills) => Decoded::Pending(Param::from_raw(v), Val::from_raw(fills)),
+            Decoding::Failed(e) => Decoded::Failed(e),
+        })
     });
     m.vm_function("to_json", |vm: &mut Vm, value: Param<0, traits::Encode>| -> Result<Val<Json>, Ctl> {
         let ids = JsonIds::of(&vm.prog)?;
@@ -185,6 +137,79 @@ pub(crate) fn module() -> NativeModule {
         Ok(Val::from_raw(v))
     });
     m
+}
+
+/// Encodes `value` as JSON text, as `json.encode` does.
+pub(crate) fn encode(vm: &Vm, value: Value, indent: usize) -> Result<String, Ctl> {
+    let mut e = Encoder {
+        prog: &vm.prog,
+        heap: &vm.heap,
+        meter: &vm.meter,
+        ids: JsonIds::find(&vm.prog),
+        indent,
+        out: String::new(),
+        charged: 0,
+        scratch: Scratch::new(),
+    };
+    e.value(value, 0)?;
+    Ok(e.out)
+}
+
+/// The result of [`decode`].
+pub(crate) enum Decoding {
+    Done(Value),
+    /// The value and a list of functions to call, in order, to fill in its computed defaults.
+    Pending(Value, Value),
+    Failed(super::Error),
+}
+
+/// Decodes JSON `text` into a value of the type `desc`, as `json.decode` does.
+pub(crate) fn decode(vm: &mut Vm, desc: &TypeDesc, text: Val<String>) -> Result<Decoding, Ctl> {
+    let ids = vm.prog.ids;
+    let meter = &vm.meter;
+    let (r, fills) = vm.heap.staged(|heap, st| {
+        let mut d = Decoder {
+            p: Parser::new(text.str(heap)),
+            b: Builder::new(heap, st, meter),
+            ids,
+            path: Vec::new(),
+            stack: Vec::new(),
+            slots: Vec::new(),
+            indexes: FxHashMap::default(),
+            fills: Vec::new(),
+            thunks: Vec::new(),
+        };
+        let r = d.decode(desc).and_then(|v| d.p.finish().map(|()| v));
+        let charged = d.p.charge(meter);
+        let r = charged.map_err(Error::Ctl).and(r).map(|v| match d.thunks.is_empty() {
+            true => Decoding::Done(v),
+            false => Decoding::Pending(v, d.b.list(std::mem::take(&mut d.thunks))),
+        });
+        (r, d.fills)
+    });
+    if r.is_ok() {
+        for fill in fills {
+            match fill {
+                Fill::Set(set, items) => {
+                    for x in items {
+                        vm.set_add(set, x)?;
+                    }
+                }
+                Fill::Map(map, entries) => {
+                    for (k, v) in entries {
+                        vm.map_insert(map, k, v)?;
+                    }
+                }
+            }
+        }
+    }
+    let fail = |kind: &str, message| Ok(Decoding::Failed(super::Error { kind: kind.into(), message }));
+    match r {
+        Ok(d) => Ok(d),
+        Err(Error::Parse(msg)) => fail("parse", msg),
+        Err(Error::Invalid(msg)) => fail("invalid", msg),
+        Err(Error::Ctl(c)) => Err(c),
+    }
 }
 
 #[derive(crate::SandEnum)]
@@ -1453,7 +1478,8 @@ struct Encoder<'v> {
     prog: &'v Program,
     heap: &'v Heap,
     meter: &'v Meter,
-    ids: JsonIds,
+    /// `None` if the program does not load the json module, so that no value is a `Json`.
+    ids: Option<JsonIds>,
     indent: usize,
     out: String,
     charged: usize,
@@ -1551,7 +1577,7 @@ impl Encoder<'_> {
             }
             Value::Float(f) => write_float(&mut self.out, f),
             Value::Pair(a, b) => self.array(2, [Value::Int(a as i64), Value::Int(b)].into_iter(), level)?,
-            Value::Tag(id) if id == prog.ids.none || id == self.ids.null => self.out.push_str("null"),
+            Value::Tag(id) if id == prog.ids.none || self.ids.is_some_and(|j| id == j.null) => self.out.push_str("null"),
             Value::Tag(id) => self.string(&prog.variants[id as usize].name)?,
             Value::Obj(_) => match heap.get(v) {
                 Obj::Str(s) => self.string(s)?,
@@ -1606,7 +1632,7 @@ impl Encoder<'_> {
 
     fn variant(&mut self, id: u32, fields: &[Value], level: usize) -> Result<(), Ctl> {
         let Some(rt) = self.prog.variants.get(id as usize) else { return internal("json.encode: unknown variant ID") };
-        if self.ids.has(id) {
+        if self.ids.is_some_and(|j| j.has(id)) {
             return self.value(fields.first().copied().unwrap_or(Value::Unit), level);
         }
         if level >= MAX_DEPTH {

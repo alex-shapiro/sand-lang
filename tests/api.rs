@@ -9,8 +9,8 @@ use sandlang::jiff::civil::Date;
 use sandlang::time::TimeZone;
 use sandlang::vm::Vm;
 use sandlang::{
-    Capability, Config, Decision, Engine, Error, LimitKind, Limits, LogLevel, LogRecord, LogSink, MemorySink, NativeModule, PromptAnswer,
-    ValueType,
+    CallOutcome, Capability, Config, Decision, Engine, Error, LimitKind, Limits, LogLevel, LogRecord, LogSink, MemorySink, NativeModule,
+    PromptAnswer, ValueType,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -3610,6 +3610,87 @@ fn compiled_programs_run_on_many_engines() {
     }
     let mut other = Engine::new(Config::new()).unwrap();
     assert!(matches!(rt().block_on(other.run_program(&program)), Err(Error::Internal { .. })));
+}
+
+/// Compiles `src` as `/main.sand` and returns its function `name`.
+fn function_of(config: Config, src: &str, name: &str) -> Option<sandlang::Function> {
+    let fs = sandlang::MemFs::new();
+    fs.write("/main.sand", src).unwrap();
+    let mut engine = Engine::new(config.memory_fs(fs)).unwrap();
+    rt().block_on(engine.compile_file("/main.sand")).unwrap().function(name)
+}
+
+const ORDER: &str = r#"
+struct Order {
+    id: str
+    cents: int
+    note: str = "n\(1 + 1)"
+}
+
+struct Receipt {
+    id: str
+    total: int
+    note: str
+}
+
+var calls = 0
+calls += 1
+
+fn charge(order: Order, fee: int) -> Result<Receipt> {
+    print("charging \(order.id)")
+    if order.cents < 0 {
+        return Err(Error("negative total", kind: "invalid"))
+    }
+    Ok(Receipt(order.id, order.cents + fee + calls, order.note))
+}
+
+pub fn twice(x: int) -> int { x * 2 }
+pub fn nothing() {}
+pub fn pick<T>(x: T) -> T { x }
+pub fn either() -> Result<int, str> { Err("no") }
+"#;
+
+#[test]
+fn hosts_call_functions_of_the_main_module() {
+    let base = Config::new();
+    let charge = function_of(base.clone(), ORDER, "charge").expect("private functions can be called");
+    assert_eq!(charge.signature().to_string(), "fn charge(order: Order, fee: int) -> Result<Receipt>");
+    let (mut engine, out, _) = engine_with(base.clone());
+    let call = |engine: &mut Engine, args: &[&str]| rt().block_on(engine.call(&charge, args));
+    // The module initializers run before the call, and computed defaults are filled in.
+    assert_eq!(
+        call(&mut engine, &[r#"{"id": "a1", "cents": 100}"#, "5"]).unwrap(),
+        CallOutcome::Returned(r#"{"id":"a1","total":106,"note":"n2"}"#.into())
+    );
+    assert_eq!(out.contents(), "charging a1\n");
+    assert_eq!(
+        call(&mut engine, &[r#"{"id": "a1", "cents": -1}"#, "0"]).unwrap(),
+        CallOutcome::Failed(r#"{"message":"negative total","kind":"invalid"}"#.into())
+    );
+    let bad = call(&mut engine, &[r#"{"id": 3}"#, "0"]).unwrap();
+    assert!(matches!(&bad, CallOutcome::BadArgument { index: 0, kind, .. } if kind == "parse"), "{bad:?}");
+    assert!(matches!(call(&mut engine, &["0"]), Err(Error::Internal { .. })));
+
+    let twice = function_of(base.clone(), ORDER, "twice").unwrap();
+    assert_eq!(twice.signature().to_string(), "fn twice(x: int) -> int");
+    assert_eq!(rt().block_on(engine_with(base.clone()).0.call(&twice, &["21"])).unwrap(), CallOutcome::Returned("42".into()));
+    let nothing = function_of(base.clone(), ORDER, "nothing").unwrap();
+    assert_eq!(nothing.signature().to_string(), "fn nothing()");
+    assert_eq!(rt().block_on(engine_with(base.clone()).0.call(&nothing, &[])).unwrap(), CallOutcome::Returned("null".into()));
+    let either = function_of(base.clone(), ORDER, "either").unwrap();
+    assert_eq!(either.signature().to_string(), "fn either() -> Result<int, str>");
+    assert!(matches!(&either.signature().returns, sandlang::Returns::Result { err, .. } if !err.is_error()));
+    assert_eq!(rt().block_on(engine_with(base.clone()).0.call(&either, &[])).unwrap(), CallOutcome::Failed(r#""no""#.into()));
+    assert!(function_of(base.clone(), ORDER, "pick").is_none(), "generic functions cannot be called");
+    assert!(function_of(base.clone(), ORDER, "Order").is_none());
+
+    let failing = function_of(base.clone(), "fn main() -> int {\n    let xs: [int] = []\n    xs[3]\n}", "main").unwrap();
+    match rt().block_on(engine_with(base.clone()).0.call(&failing, &[])) {
+        Err(Error::Runtime { trace, .. }) => assert_eq!(trace[0].line, 3, "{trace:?}"),
+        r => panic!("{r:?}"),
+    }
+    let exits = function_of(base.clone(), "fn main() -> int {\n    exit(4)\n}", "main").unwrap();
+    assert_eq!(rt().block_on(engine_with(base).0.call(&exits, &[])).unwrap(), CallOutcome::Exited(4));
 }
 
 #[test]

@@ -480,7 +480,15 @@ impl Vm {
     /// tasks are left as they are). The wall-time limit is `self.deadline`.
     /// Buffered standard output is flushed at the end.
     pub async fn run_main(&mut self, proto: u32) -> Result<RunEnd, Trap> {
-        let r = match self.start_main(proto) {
+        let closure = self.heap.alloc(Obj::Closure(proto, Box::new([])));
+        self.run_call(closure, &[]).await
+    }
+
+    /// Like [`Vm::run_main`], with `closure` called with `args` as the main
+    /// task. A closure with captures takes no arguments: its captures fill
+    /// the first registers.
+    pub(crate) async fn run_call(&mut self, closure: Value, args: &[Value]) -> Result<RunEnd, Trap> {
+        let r = match self.start_main(closure, args) {
             Ok(fid) => match self.drive(Some(fid)).await {
                 Ok(Stop::Exit(c)) => Ok(RunEnd::Exit(c)),
                 Ok(Stop::Main(v)) => Ok(RunEnd::Finished(v)),
@@ -497,13 +505,15 @@ impl Vm {
         }
     }
 
-    fn start_main(&mut self, proto: u32) -> Result<u32, Trap> {
-        let closure = self.heap.alloc(Obj::Closure(proto, Box::new([])));
+    fn start_main(&mut self, closure: Value, args: &[Value]) -> Result<u32, Trap> {
         let task = self.heap.alloc(Obj::Task(Box::new(TaskObj { fiber: 0, state: TaskState::Running, result: Value::Unit })));
         let fid = self.spawn_fiber(closure, task).map_err(|c| match c.as_limit() {
             Some(k) => Trap::Limit(k),
             None => Trap::Internal { message: "cannot start main task".into(), trace: vec![] },
         })?;
+        if let Some(f) = self.fibers[fid as usize].as_mut() {
+            f.stack[..args.len()].copy_from_slice(args);
+        }
         if let Obj::Task(t) = self.heap.get_mut(task) {
             t.fiber = fid;
         }

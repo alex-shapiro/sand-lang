@@ -658,7 +658,16 @@ impl CellJob {
         let registry = &*self.registry;
         let native_info = if self.natives { native_info(&cp, registry) } else { NativeInfo::default() };
         let initialized = Some(std::mem::take(&mut self.initialized));
-        let input = CompileInput { checked: &cp, sm, natives: &registry.decls, native_info, budget, initialized, optimize: self.optimize };
+        let input = CompileInput {
+            checked: &cp,
+            sm,
+            natives: &registry.decls,
+            native_info,
+            budget,
+            initialized,
+            optimize: self.optimize,
+            main: None,
+        };
         let entry = compile_more(input, Arc::make_mut(&mut self.prog), &mut self.compiler, &inits);
         if let Some(stop) = budget.stopped() {
             return Err(budget_error(stop, sm, self.file));

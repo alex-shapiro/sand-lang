@@ -118,7 +118,14 @@ impl DescCache {
         Some(k)
     }
 
-    fn describe(&mut self, cp: &CheckedProgram, arena: &mut TypeArena, t: TypeId, sink: &mut dyn DescSink) -> Option<Arc<TypeDesc>> {
+    /// Returns the descriptor of `t`, or `None` if the descriptor exceeds the size budget.
+    pub(crate) fn describe(
+        &mut self,
+        cp: &CheckedProgram,
+        arena: &mut TypeArena,
+        t: TypeId,
+        sink: &mut dyn DescSink,
+    ) -> Option<Arc<TypeDesc>> {
         let budget = MAX_DESC_NODES.min(MAX_TOTAL_DESC_NODES.saturating_sub(self.total));
         let mut b = Builder {
             cp,

@@ -1177,6 +1177,33 @@ pub enum TypeDesc {
 }
 
 impl TypeDesc {
+    /// Whether the type is the prelude's `Error`.
+    pub fn is_error(&self) -> bool {
+        matches!(self, TypeDesc::Struct { rust: Some(t), .. } if *t == std::any::TypeId::of::<crate::stdlib::Error>())
+    }
+
+    /// Whether `json.encode` and `json.decode` accept the type: false if a part of it is a
+    /// function, a task, a channel, or a native object.
+    pub fn is_json_codable(&self) -> bool {
+        let mut seen = std::collections::HashSet::new();
+        let mut todo = vec![self];
+        while let Some(d) = todo.pop() {
+            if !seen.insert(d as *const TypeDesc) {
+                continue;
+            }
+            match d {
+                TypeDesc::Unsupported(_) | TypeDesc::Param(_) => return false,
+                TypeDesc::List(e) | TypeDesc::Set(e, _) | TypeDesc::Option(e) => todo.push(e),
+                TypeDesc::Map(k, v) => todo.extend([&**k, &**v]),
+                TypeDesc::Tuple(ts) => todo.extend(ts.iter().map(|t| &**t)),
+                TypeDesc::Struct { fields, .. } => todo.extend(fields.iter().map(|(_, t, _)| &**t)),
+                TypeDesc::Enum { variants, .. } => todo.extend(variants.iter().flat_map(|(_, _, ts, _)| ts.iter().map(|t| &**t))),
+                _ => {}
+            }
+        }
+        true
+    }
+
     /// Formats the Sand type name for `self`, using `recur` to resolve
     /// [`TypeDesc::Recur`] IDs. Names longer than [`MAX_TYPE_NAME_LEN`] bytes
     /// are truncated with `…`.
@@ -1511,6 +1538,14 @@ impl std::fmt::Debug for TypeDesc {
             TypeDesc::Unsupported(name) => write!(f, "Unsupported({name})"),
             TypeDesc::Param(p) => write!(f, "Param({p})"),
         }
+    }
+}
+
+/// The type's name in Sand syntax, such as `[str: int?]`.
+impl std::fmt::Display for TypeDesc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // A name contains no `Recur`: only the fields of a struct or enum refer to it.
+        f.write_str(&self.format(&|_| "_".into()))
     }
 }
 
