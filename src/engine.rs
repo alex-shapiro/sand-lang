@@ -15,9 +15,7 @@ use crate::types::{FnId, ModId};
 use crate::vm::bytecode::Program;
 use crate::vm::heap::GcStats;
 use crate::vm::sched::{IoShared, IoTable, RunEnd};
-use crate::vm::{
-    Always, Host, HostFn, NativeEntry, OutputSink, Rng, SharedSink, StdinSource, TraceEntry, Trap, Vm, WaitKind, entropy_seed,
-};
+use crate::vm::{Always, Host, HostFn, NativeEntry, OutputSink, Rng, SharedSink, StdinSource, TraceEntry, Trap, Vm, VmStdin, entropy_seed};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -1059,19 +1057,12 @@ impl Engine {
 
     pub(crate) fn new_vm(&self, prog: Arc<Program>, cwd: PathBuf, quiet: bool) -> Vm {
         let c = &self.config;
-        let (stdin, stdin_idle, stdin_wait) = match &c.stdin {
-            StdinConfig::None => (StdinSource::None, None, WaitKind::Io),
-            StdinConfig::Bytes(b) => (StdinSource::Bytes(std::io::Cursor::new(b.clone())), None, WaitKind::Io),
+        let stdin = match &c.stdin {
+            StdinConfig::None => StdinSource::None,
+            StdinConfig::Bytes(b) => StdinSource::Bytes(std::io::Cursor::new(b.clone())),
             #[cfg(feature = "os")]
-            StdinConfig::Inherit => {
-                let wait = if std::io::IsTerminal::is_terminal(&std::io::stdin()) { WaitKind::User } else { WaitKind::Io };
-                (StdinSource::Inherit(tokio::io::BufReader::new(tokio::io::stdin())), None, wait)
-            }
-            StdinConfig::Feed(feed) => {
-                let reader = crate::stdin_feed::StdinFeedReader::new(feed);
-                let idle = reader.idle_signal();
-                (StdinSource::Fed(reader), Some(idle), WaitKind::User)
-            }
+            StdinConfig::Inherit => StdinSource::Inherit(tokio::io::BufReader::new(tokio::io::stdin())),
+            StdinConfig::Feed(feed) => StdinSource::Fed(crate::stdin_feed::StdinFeedReader::new(feed)),
         };
         let (stdout, stderr): (SharedSink, SharedSink) =
             if quiet { (Arc::new(NullSink), Arc::new(NullSink)) } else { (c.stdout.clone(), c.stderr.clone()) };
@@ -1083,9 +1074,7 @@ impl Engine {
             always: self.always.clone(),
             stdout,
             stderr,
-            stdin: Arc::new(tokio::sync::Mutex::new(stdin)),
-            stdin_idle,
-            stdin_wait,
+            stdin: VmStdin::new(stdin),
             output_bytes: 0,
             limits: c.limits.clone(),
             cwd,

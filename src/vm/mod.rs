@@ -337,6 +337,39 @@ pub enum StdinSource {
     Fed(crate::stdin_feed::StdinFeedReader),
 }
 
+/// The standard input of a VM, with what a read of it waits for.
+pub(crate) struct VmStdin {
+    source: Arc<tokio::sync::Mutex<StdinSource>>,
+    idle_signal: Option<crate::stdin_feed::StdinIdleSignal>,
+    wait: WaitKind,
+}
+
+impl VmStdin {
+    pub(crate) fn new(source: StdinSource) -> VmStdin {
+        let (idle_signal, wait) = match &source {
+            StdinSource::Fed(reader) => (Some(reader.idle_signal()), WaitKind::User),
+            #[cfg(feature = "os")]
+            StdinSource::Inherit(_) if std::io::IsTerminal::is_terminal(&std::io::stdin()) => (None, WaitKind::User),
+            _ => (None, WaitKind::Io),
+        };
+        VmStdin { source: Arc::new(tokio::sync::Mutex::new(source)), idle_signal, wait }
+    }
+
+    pub(crate) fn source(&self) -> &Arc<tokio::sync::Mutex<StdinSource>> {
+        &self.source
+    }
+
+    /// Tells the feed of a [`StdinSource::Fed`] when the VM has nothing to run.
+    pub(crate) fn idle_signal(&self) -> Option<&crate::stdin_feed::StdinIdleSignal> {
+        self.idle_signal.as_ref()
+    }
+
+    /// What a read of this input waits for: the user for a feed or a terminal.
+    pub(crate) fn wait(&self) -> WaitKind {
+        self.wait
+    }
+}
+
 /// Output sink for standard streams and logs. `write` must not block for
 /// long, because an engine cannot interrupt it. A sink whose destination
 /// can block should buffer the data and report the size of the buffer as
@@ -483,11 +516,7 @@ pub struct Host {
     pub always: Always,
     pub stdout: SharedSink,
     pub stderr: SharedSink,
-    pub stdin: Arc<tokio::sync::Mutex<StdinSource>>,
-    /// Tells the feed of a [`StdinSource::Fed`] when the VM has nothing to run.
-    pub(crate) stdin_idle: Option<crate::stdin_feed::StdinIdleSignal>,
-    /// Wait category for standard input reads.
-    pub(crate) stdin_wait: WaitKind,
+    pub(crate) stdin: VmStdin,
     pub output_bytes: u64,
     pub limits: Limits,
     pub cwd: PathBuf,

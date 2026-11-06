@@ -111,7 +111,7 @@ fn read_stdin<R: IntoValue + Send + 'static>(
     {
         return Ok(Later::ready(done(vm, data)));
     }
-    let stdin = vm.host.stdin.clone();
+    let stdin = vm.host.stdin.source().clone();
     // The input is buffered outside the heap until it is complete.
     let mut res = match what {
         Read::Upto(max) => vm.reserve_io(max.min(STDIN_CHUNK))?,
@@ -125,7 +125,7 @@ fn read_stdin<R: IntoValue + Send + 'static>(
         drop(res);
         done(vm, data)
     });
-    Ok(Later::waiting(finish, vm.host.stdin_wait))
+    Ok(Later::waiting(finish, vm.host.stdin.wait()))
 }
 
 fn input_line(vm: &mut Vm, line: Option<Vec<u8>>) -> Result<Option<String>, HostError> {
@@ -139,7 +139,7 @@ const STDIN_CHUNK: usize = 64 << 10;
 /// the end), if it is in a buffer already; `None`, consuming nothing, if the
 /// read must wait, another is under way, or the line does not fit in memory.
 fn buffered_line(vm: &Vm) -> Option<Option<Vec<u8>>> {
-    let mut source = vm.host.stdin.try_lock().ok()?;
+    let mut source = vm.host.stdin.source().try_lock().ok()?;
     if let StdinSource::Fed(r) = &mut *source {
         r.reset_for_read();
     }
