@@ -99,7 +99,7 @@ fn memfs_timestamps_are_sourced_from_host_clock() {
         .cwd("/run")
         .clock(clock)
         .stdout(out.clone());
-    let mut engine = sandlang::engine::Engine::new(config).unwrap();
+    let mut engine = sandlang::engine::Engine::new(config);
     common::rt().block_on(engine.run_source("main.sand", src)).unwrap();
     assert_eq!(out.contents(), "2027-01-15T08:00:00Z\n");
 }

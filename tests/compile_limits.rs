@@ -7,7 +7,7 @@ mod common;
 
 use common::{TempDir, rt};
 use sandlang::check::budget::CompileBudget;
-use sandlang::engine::{Config, Engine, Error, LimitKind, Limits, MemorySink};
+use sandlang::engine::{Config, Engine, Error, HostModules, LimitKind, Limits, MemorySink};
 use sandlang::platform::{Deadline, SystemClock};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 const FAST: Duration = Duration::from_secs(10);
 
 fn check(config: Config, src: &str) -> (Result<(), Error>, Duration) {
-    let engine = Engine::new(config.stdout(MemorySink::new())).unwrap();
+    let engine = Engine::new(config.stdout(MemorySink::new()));
     let start = Instant::now();
     let r = engine.check_source("main.sand", src);
     (r, start.elapsed())
@@ -176,7 +176,7 @@ fn deeply_nested_string_interpolation() {
     // Moderate nesting still works.
     let src = "let x = 1\nprint(\"a\\(\"b\\(\"c\\(x)\")\")\")\n";
     let out = MemorySink::new();
-    let mut engine = Engine::new(Config::new().stdout(out.clone())).unwrap();
+    let mut engine = Engine::new(Config::new().stdout(out.clone()));
     rt().block_on(engine.run_source("main.sand", src)).unwrap();
     assert_eq!(out.contents(), "abc1\n");
 }
@@ -275,7 +275,7 @@ fn the_linter_is_bounded() {
         }
         src
     };
-    let engine = Engine::new(Config::new()).unwrap();
+    let engine = Engine::new(Config::new());
     let lint = |src: &str| engine.lint_source("main.sand", src).map_err(|e| e.to_string());
     let start = Instant::now();
     let e = engine.lint_source("main.sand", &nested(120)).unwrap_err();
@@ -303,7 +303,7 @@ fn wall_time_and_interrupts_stop_compilation() {
     assert!(matches!(r, Err(Error::Limit(LimitKind::WallTime))), "{r:?}");
     assert!(took < FAST, "took {took:?}");
 
-    let mut engine = Engine::new(unlimited().stdout(MemorySink::new())).unwrap();
+    let mut engine = Engine::new(unlimited().stdout(MemorySink::new()));
     let handle = engine.interrupt_handle();
     let t = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(100));
@@ -332,12 +332,12 @@ fn source_size_limit_covers_imports() {
             .limits(Limits { max_source_bytes: max, ..Limits::default() })
     };
     // Each file fits, but not all of them together.
-    let mut engine = Engine::new(config(400)).unwrap();
+    let mut engine = Engine::new(config(400));
     match rt().block_on(engine.run_file(&main)) {
         Err(Error::Compile(ds)) => assert!(ds.iter().any(|d| d.message.contains("source too large")), "{ds:?}"),
         other => panic!("{other:?}"),
     }
-    let mut engine = Engine::new(config(1000)).unwrap();
+    let mut engine = Engine::new(config(1000));
     rt().block_on(engine.run_file(&main)).unwrap();
 }
 
@@ -351,7 +351,7 @@ fn run_files(files: &[(&str, &str)], main: &str) -> Result<String, Error> {
     let main = dir.write("main.sand", main);
     let out = MemorySink::new();
     let mut engine =
-        Engine::new(Config::new().policy(sandlang::policy::rules::RulePolicy::allow_all()).cwd(dir.path()).stdout(out.clone())).unwrap();
+        Engine::new(Config::new().policy(sandlang::policy::rules::RulePolicy::allow_all()).cwd(dir.path()).stdout(out.clone()));
     rt().block_on(engine.run_file(&main))?;
     Ok(out.contents())
 }
@@ -485,7 +485,7 @@ fn constant_field_defaults_are_bounded() {
     }
     deep += "struct S300 { v: int = 1 }\nlet s: S0 = json.decode(\"{}\")?\nprint(s == S0())\n";
     let out = MemorySink::new();
-    let mut engine = Engine::new(Config::new().stdout(out.clone())).unwrap();
+    let mut engine = Engine::new(Config::new().stdout(out.clone()));
     rt().block_on(engine.run_source("main.sand", &deep)).unwrap();
     assert_eq!(out.contents(), "true\n");
 }
@@ -501,7 +501,7 @@ fn rust_field_defaults_are_built_once() {
     let mut m = sandlang::native::NativeModule::new("lab");
     m.bind::<Big>();
     let src = format!("import lab\nlet xs = [{}]\nprint(xs.len())\n", vec!["lab.Big()"; 3000].join(", "));
-    let (r, took) = check(limits(|l| l.max_compile_fuel = Some(2_000_000)).module(m), &src);
+    let (r, took) = check(limits(|l| l.max_compile_fuel = Some(2_000_000)).host_modules(HostModules::new([m]).unwrap()), &src);
     r.unwrap();
     assert!(took < FAST, "took {took:?}");
 }

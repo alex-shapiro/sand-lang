@@ -38,7 +38,7 @@ use std::task::Poll;
 /// ```no_run
 /// # async fn demo() -> Result<(), sandlang::engine::Error> {
 /// use sandlang::engine::{Config, Engine};
-/// let mut session = Engine::new(Config::new())?.session();
+/// let mut session = Engine::new(Config::new()).session();
 /// session.eval("var count = 0\nfn bump() -> int { count += 1\n count }").await?;
 /// assert_eq!(session.eval("bump()").await?, Some("1".to_string()));
 /// assert_eq!(session.eval("bump() + 10").await?, Some("12".to_string()));
@@ -427,7 +427,7 @@ impl Session {
         // The standard library's program; its entry initializes the prelude and `task`.
         let prog = snapshot.program.clone();
         let pending = Some(prog.entry);
-        let vm = self.engine.new_vm(Arc::new(prog), self.cwd.clone(), false);
+        let vm = self.engine.new_vm(Arc::new(prog), self.engine.registry().natives.clone(), self.cwd.clone(), false);
         let compiler = snapshot.compiler.clone();
         Ok(State { snapshot, graph, checker, compiler, vm, pending, loading: None, running: false, deferred_prompt: None })
     }

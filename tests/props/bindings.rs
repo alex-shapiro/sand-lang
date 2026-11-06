@@ -1,7 +1,7 @@
 use super::{int, int_lit, str_lit};
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
-use sandlang::engine::{Config, Engine, Error, MemorySink};
+use sandlang::engine::{Config, Engine, Error, HostModules, MemorySink};
 use sandlang::native::NativeModule;
 use sandlang::native::func::Call;
 use sandlang::native::ty::{Num, Param, Val};
@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 
 fn run(config: Config, src: &str) -> (Result<sandlang::engine::Outcome, Error>, String) {
     let out = MemorySink::new();
-    let mut engine = Engine::new(config.stdout(out.clone())).unwrap();
+    let mut engine = Engine::new(config.stdout(out.clone()));
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let r = rt.block_on(engine.run_source("main.sand", src));
     (r, out.contents())
@@ -269,7 +269,7 @@ proptest! {
              print(fig.echo(fig.Fig.Wrap(f)) == fig.Fig.Wrap(f))",
             fig_lit(&value)
         );
-        let (r, out) = run(Config::new().module(m).gc_stress(gc_stress), &src);
+        let (r, out) = run(Config::new().host_modules(HostModules::new([m]).unwrap()).gc_stress(gc_stress), &src);
         prop_assert!(r.is_ok(), "{r:?}\n{src}");
         prop_assert_eq!(out, "true\ntrue\ntrue\ntrue\n", "{}", src);
         let wrapped = Fig::Wrap(Box::new(value.clone()));
@@ -301,7 +301,7 @@ proptest! {
              let g: fig.Holder<fig.Fig, int> = fig.make_fig()\nprint(g == fig.Holder(a: {}, bs: [{}], pair: None))",
             int_lit(a), bs_lit.join(", "), fig_lit(&f), int_lit(a)
         );
-        let (r, out) = run(Config::new().module(m), &src);
+        let (r, out) = run(Config::new().host_modules(HostModules::new([m]).unwrap()), &src);
         prop_assert!(r.is_ok(), "{r:?}\n{src}");
         prop_assert_eq!(out, "true\ntrue\n", "{}", src);
         prop_assert_eq!(seen.lock().unwrap().clone(), vec![first]);
@@ -364,7 +364,7 @@ proptest! {
             fields.join(", "),
             str_lit(&format!("{{{}}}", keys.join(", ")))
         );
-        let (r, _) = run(Config::new().module(m), &src);
+        let (r, _) = run(Config::new().host_modules(HostModules::new([m]).unwrap()), &src);
         prop_assert!(r.is_ok(), "{r:?}\n{src}");
         prop_assert_eq!(seen.lock().unwrap().clone(), vec![expected.clone(), expected]);
     }
@@ -381,7 +381,7 @@ proptest! {
             "import doc\nimport json\nlet j = doc.make()\nlet back = json.parse(json.encode(j, indent: {indent}))?\nprint(back == j)\n\
              print(json.to_json(j) == j)\ndoc.keep(back)\nlet d: json.Json = json.decode(json.encode(j))?\ndoc.keep(d)"
         );
-        let (r, out) = run(Config::new().module(m), &src);
+        let (r, out) = run(Config::new().host_modules(HostModules::new([m]).unwrap()), &src);
         prop_assert!(r.is_ok(), "{r:?}\n{src}");
         prop_assert_eq!(out, "true\ntrue\n");
         prop_assert_eq!(seen.lock().unwrap().clone(), vec![value.clone(), value]);
@@ -412,7 +412,7 @@ proptest! {
                 j
             });
             m.function("make", move || made.clone());
-            run(Config::new().module(m).gc_stress(gc_stress), &script)
+            run(Config::new().host_modules(HostModules::new([m]).unwrap()).gc_stress(gc_stress), &script)
         };
         let (r, out) = std::thread::Builder::new().stack_size(512 << 10).spawn(engine).unwrap().join().unwrap();
         if json_depth(&value) <= 512 {
@@ -440,7 +440,7 @@ proptest! {
             int_lits.join(", "),
             float_lits.join(", ")
         );
-        let (r, out) = run(Config::new().module(sum_module()), &src);
+        let (r, out) = run(Config::new().host_modules(HostModules::new([sum_module()]).unwrap()), &src);
         prop_assert!(r.is_ok(), "{r:?}\n{src}");
         let si: i64 = ints.iter().sum();
         let sf = floats.iter().fold(0.0, |a, b| a + b);

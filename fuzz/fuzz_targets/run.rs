@@ -19,7 +19,7 @@ fuzz_target!(|data: &[u8]| {
             max_call_depth: 256,
             ..Limits::default()
         });
-    let mut engine = Engine::new(config).unwrap();
+    let mut engine = Engine::new(config);
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     if let Err(e @ Error::Internal { .. }) = rt.block_on(engine.run_source("fuzz.sand", src)) {
         panic!("{e}");

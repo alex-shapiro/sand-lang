@@ -51,7 +51,7 @@ fn limited_config() -> Config {
 /// engine does not return an internal error.
 fn exercise(src: &str) {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let mut engine = Engine::new(limited_config()).unwrap();
+        let mut engine = Engine::new(limited_config());
         rt().block_on(engine.run_source("fuzz.sand", src))
     }));
     match result {
@@ -63,7 +63,7 @@ fn exercise(src: &str) {
 
 fn check_only(src: &str) {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let engine = Engine::new(Config::new()).unwrap();
+        let engine = Engine::new(Config::new());
         let _ = engine.check_source("fuzz.sand", src);
         let _ = sandlang::fmt::format_source(src);
         let _ = engine.lint_source("fuzz.sand", src);
@@ -371,7 +371,7 @@ fn random_json_and_uri_inputs() {
         lits.join(", ")
     );
     let out = MemorySink::new();
-    let mut engine = Engine::new(Config::new().stdout(out.clone())).unwrap();
+    let mut engine = Engine::new(Config::new().stdout(out.clone()));
     let r = rt().block_on(engine.run_source("fuzz.sand", &src));
     assert!(r.is_ok(), "{r:?}");
     assert_eq!(out.contents(), "true\n");

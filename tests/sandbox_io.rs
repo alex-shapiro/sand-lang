@@ -1523,7 +1523,7 @@ print("still running")
     let out = sandlang::engine::MemorySink::new();
     let limits = Limits { max_memory: Some(8 << 20), max_wall_time: Some(Duration::from_secs(20)), ..Limits::default() };
     let config = sandlang::engine::Config::new().policy(RulePolicy::allow_all()).limits(limits).stdout(out.clone());
-    let mut engine = sandlang::engine::Engine::new(config).unwrap();
+    let mut engine = sandlang::engine::Engine::new(config);
     let handle = std::thread::spawn(move || common::rt().block_on(engine.run_source("server.sand", src)));
     let start = Instant::now();
     let (http_addr, raw_addr) = loop {

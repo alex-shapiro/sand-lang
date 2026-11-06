@@ -2,7 +2,7 @@
 
 use super::{int, int_lit, str_lit};
 use proptest::prelude::*;
-use sandlang::engine::{Config, Engine, Error, LimitKind, Limits, MemorySink};
+use sandlang::engine::{Config, Engine, Error, HostModules, LimitKind, Limits, MemorySink};
 use sandlang::native::NativeModule;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 fn run(config: Config, src: &str) -> (Result<sandlang::engine::Outcome, Error>, String) {
     let out = MemorySink::new();
-    let mut engine = Engine::new(config.stdout(out.clone())).unwrap();
+    let mut engine = Engine::new(config.stdout(out.clone()));
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let r = rt.block_on(engine.run_source("main.sand", src));
     (r, out.contents())
@@ -171,7 +171,7 @@ fn shared_dag(shape: usize, levels: u32, limits: Limits) -> Result<sandlang::eng
     m.function("pair", |_: Pair| 0);
     let (leaf, node, call) = SHAPES[shape];
     let src = format!("import dag\nvar a = {leaf}\nfor _ in 0..{} {{\n    a = {node}\n}}\nprint(dag.{call}(a))", levels - 1);
-    run(Config::new().module(m).limits(limits), &src).0
+    run(Config::new().host_modules(HostModules::new([m]).unwrap()).limits(limits), &src).0
 }
 
 proptest! {
@@ -199,7 +199,7 @@ proptest! {
              let b = conv.bump(o)\nprint(b.count)\nprint(b.inner.n)\nb.count = 0\nprint(b.count)",
             outer_lit(&value)
         );
-        let (r, out) = run(Config::new().module(m).gc_stress(gc_stress), &src);
+        let (r, out) = run(Config::new().host_modules(HostModules::new([m]).unwrap()).gc_stress(gc_stress), &src);
         prop_assert!(r.is_ok(), "{r:?}\n{src}");
         let bumped = format!("{}\n{}\n", value.count.wrapping_add(1), value.inner.n.wrapping_mul(2));
         prop_assert_eq!(out, format!("true\ntrue\ntrue\n{bumped}0\n"), "{}", src);
@@ -221,7 +221,7 @@ proptest! {
              print(tree.echo(deep) == deep)",
             tree_lit(&value)
         );
-        let (r, out) = run(Config::new().module(m).gc_stress(gc_stress), &src);
+        let (r, out) = run(Config::new().host_modules(HostModules::new([m]).unwrap()).gc_stress(gc_stress), &src);
         if depth(&value) + spine <= 256 {
             prop_assert!(r.is_ok(), "{r:?}\n{src}");
             prop_assert_eq!(out, "true\ntrue\n");
@@ -255,7 +255,7 @@ proptest! {
             format!("var l: chain.Link? = None\nfor n in [{}] {{\n    l = Some(chain.Link(n: n, next: l))\n}}\nl", backwards.join(", "))
         };
         let src = format!("import chain\nlet l = {{\n{build}\n}}?\nprint(chain.echo(l) == l)");
-        let (r, out) = run(Config::new().module(m).gc_stress(gc_stress), &src);
+        let (r, out) = run(Config::new().host_modules(HostModules::new([m]).unwrap()).gc_stress(gc_stress), &src);
         if ns.len() <= 256 {
             prop_assert!(r.is_ok(), "{r:?}\n{src}");
             prop_assert_eq!(out, "true\n");
@@ -300,7 +300,7 @@ proptest! {
             "import conv\nlet m: [int: str] = [:]\n{inserts}print(conv.hash_map(m))\nprint(conv.btree_map(m))\n\
              let s = m.keys().to_set()\nprint(conv.hash_set(s).to_list())\nprint(conv.btree_set(s).to_list())"
         );
-        let (r, out) = run(Config::new().module(m), &src);
+        let (r, out) = run(Config::new().host_modules(HostModules::new([m]).unwrap()), &src);
         prop_assert!(r.is_ok(), "{r:?}\n{src}");
         let keys = format!("[{}]", map.keys().map(|k| k.to_string()).collect::<Vec<_>>().join(", "));
         prop_assert_eq!(out, format!("{0}\n{0}\n{keys}\n{keys}\n", map_text(&map)));
@@ -323,7 +323,7 @@ proptest! {
              for _ in 0..{calls} {{\n    n += q.pop().len()\n}}\nprint(n / {})",
             size.max(1)
         );
-        let (r, out) = run(Config::new().module(m).limits(limits), &src);
+        let (r, out) = run(Config::new().host_modules(HostModules::new([m]).unwrap()).limits(limits), &src);
         let count = count.load(Ordering::SeqCst);
         match r {
             Ok(_) => {

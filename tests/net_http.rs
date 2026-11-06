@@ -284,7 +284,7 @@ for _ in 0..2 {
     req.respond(201, body.bytes(), headers: [("x-reply", "1")])?
 }
 "#;
-    let mut engine = Engine::new(Config::new().policy(RulePolicy::allow_all()).stdout(out.clone())).unwrap();
+    let mut engine = Engine::new(Config::new().policy(RulePolicy::allow_all()).stdout(out.clone()));
     let handle = std::thread::spawn(move || common::rt().block_on(engine.run_source("server.sand", src)));
     let start = Instant::now();
     let addr = loop {
@@ -543,7 +543,7 @@ fn tls_handshakes_time_out() {
 fn start_server_script(src: &'static str, limits: Limits) -> (String, std::thread::JoinHandle<Result<sandlang::engine::Outcome, Error>>) {
     let out = MemorySink::new();
     let config = Config::new().policy(RulePolicy::allow_all()).limits(limits).stdout(out.clone());
-    let mut engine = Engine::new(config).unwrap();
+    let mut engine = Engine::new(config);
     let handle = std::thread::spawn(move || common::rt().block_on(engine.run_source("server.sand", src)));
     let start = Instant::now();
     let addr = loop {
@@ -1081,7 +1081,7 @@ serving.cancel()
     let out = MemorySink::new();
     let limits = Limits { max_open_resources: 3, max_wall_time: Some(Duration::from_secs(20)), ..Limits::default() };
     let config = Config::new().policy(RulePolicy::allow_all()).limits(limits).stdout(out.clone()).cwd(dir.path());
-    let mut engine = Engine::new(config).unwrap();
+    let mut engine = Engine::new(config);
     let handle = std::thread::spawn(move || common::rt().block_on(engine.run_source("server.sand", src)));
     let start = Instant::now();
     let addr = loop {

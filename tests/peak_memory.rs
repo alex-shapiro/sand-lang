@@ -62,7 +62,7 @@ const TEST: &str = "peak_memory_stays_near_the_memory_limit";
 fn run_case(name: &str) {
     let (_, src) = PROGRAMS.iter().find(|(n, _)| *n == name).unwrap();
     let limits = Limits { max_memory: Some(LIMIT), ..Default::default() };
-    let mut engine = Engine::new(Config::new().limits(limits).stdout(MemorySink::new())).unwrap();
+    let mut engine = Engine::new(Config::new().limits(limits).stdout(MemorySink::new()));
     let r = common::rt().block_on(engine.run_source("main.sand", src));
     if name == "empty" {
         r.unwrap();

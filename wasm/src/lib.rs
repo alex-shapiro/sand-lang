@@ -201,7 +201,7 @@ impl Engine {
             let zone = sandlang::stdlib::time::TimeZone::get(&name).ok_or_else(|| error(&format!("unknown timeZone {name:?}")))?;
             config = config.time_zone(zone);
         }
-        let engine = sandlang::engine::Engine::new(config).map_err(|e| error(&e.render()))?;
+        let engine = sandlang::engine::Engine::new(config);
         let interrupt = engine.interrupt_handle();
         Ok(Engine { engine: Rc::new(RefCell::new(Some(engine))), fs, interrupt, hooks: key })
     }

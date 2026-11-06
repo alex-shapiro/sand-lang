@@ -6,7 +6,7 @@
 mod common;
 
 use common::{TempDir, rt};
-use sandlang::engine::{Config, Engine, Error, LimitKind, Limits, MemorySink};
+use sandlang::engine::{Config, Engine, Error, HostModules, LimitKind, Limits, MemorySink};
 use sandlang::feed::StdinFeed;
 use sandlang::native::NativeModule;
 use sandlang::policy::{Capability, Decision, PromptAnswer};
@@ -31,7 +31,7 @@ impl Repl {
     fn with(config: Config) -> Repl {
         let out = MemorySink::new();
         let err = MemorySink::new();
-        let engine = Engine::new(config.stdout(out.clone()).stderr(err.clone())).unwrap();
+        let engine = Engine::new(config.stdout(out.clone()).stderr(err.clone()));
         Repl { session: engine.session(), out, err, rt: rt() }
     }
 
@@ -629,7 +629,7 @@ fn output_goes_to_the_configured_sinks() {
 #[test]
 fn session_future_is_send() {
     fn assert_send<T: Send>(_: &T) {}
-    let mut s = Engine::new(Config::new()).unwrap().session();
+    let mut s = Engine::new(Config::new()).session();
     assert_send(&s);
     let fut = s.eval("1");
     assert_send(&fut);
@@ -687,7 +687,7 @@ fn assert_reset(r: &Repl, message: &str, panic: &str) {
 
 #[test]
 fn internal_panics_reset_the_session() {
-    let mut r = Repl::with(Config::new().module(buggy_module()));
+    let mut r = Repl::with(Config::new().host_modules(HostModules::new([buggy_module()]).unwrap()));
     r.ok("import bug\nlet x = 1");
     assert_eq!(r.value("bug.crash(0) + x"), "1");
     assert!(!r.session.was_reset());
@@ -714,7 +714,7 @@ fn internal_panics_reset_the_session() {
 
 #[test]
 fn internal_panics_in_background_tasks_reset_the_session() {
-    let mut r = Repl::with(Config::new().module(buggy_module()));
+    let mut r = Repl::with(Config::new().host_modules(HostModules::new([buggy_module()]).unwrap()));
     r.ok("import bug\nlet t = spawn { task.sleep(20ms)\nbug.crash(1) }");
     let mut errors = Vec::new();
     let got = r.rt.block_on(r.session.run_tasks_until(async { tokio::time::sleep(Duration::from_millis(300)).await }, |e| errors.push(e)));
@@ -949,7 +949,7 @@ fn redefined_types_are_told_apart_in_messages() {
 
 #[test]
 fn inputs_can_be_named() {
-    let mut session = Engine::new(Config::new()).unwrap().session();
+    let mut session = Engine::new(Config::new()).session();
     match rt().block_on(session.eval_as("main.sand", "let a = 1\nlet b: int = \"no\"")) {
         Err(Error::Compile(d)) => assert_eq!((d[0].file.as_str(), d[0].line), ("main.sand", 2)),
         other => panic!("{other:?}"),

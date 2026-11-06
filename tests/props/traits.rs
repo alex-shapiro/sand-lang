@@ -153,7 +153,7 @@ fn ty() -> impl Strategy<Value = Ty> {
 /// error messages.
 fn outcome(src: &str) -> Result<String, Vec<String>> {
     let out = MemorySink::new();
-    let mut engine = Engine::new(Config::new().policy(sandlang::policy::rules::RulePolicy::standard()).stdout(out.clone())).unwrap();
+    let mut engine = Engine::new(Config::new().policy(sandlang::policy::rules::RulePolicy::standard()).stdout(out.clone()));
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     match rt.block_on(engine.run_source("main.sand", src)) {
         Ok(_) => Ok(out.contents()),

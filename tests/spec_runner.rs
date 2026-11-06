@@ -217,7 +217,7 @@ fn run_case(case: &Case, mode: Mode, backend: Backend) -> Result<(), String> {
 
     if let Some(expected) = get("lint") {
         dir.write("main.sand", &case.source);
-        let engine = Engine::new(dir.configure(Config::new().policy(sandlang::policy::rules::RulePolicy::allow_all()))).unwrap();
+        let engine = Engine::new(dir.configure(Config::new().policy(sandlang::policy::rules::RulePolicy::allow_all())));
         let warnings = engine.lint_source("main.sand", &case.source).map_err(|e| format!("lint failed: {e}"))?;
         let mut got: Vec<String> = warnings.iter().map(|w| format!("{}: {}", w.line, w.code)).collect();
         got.sort();
@@ -247,7 +247,7 @@ fn run_case(case: &Case, mode: Mode, backend: Backend) -> Result<(), String> {
             env.lines().filter_map(|l| l.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect();
         config = config.env(vars.into_iter().collect());
     }
-    let mut engine = Engine::new(config).unwrap();
+    let mut engine = Engine::new(config);
     let runtime = rt();
 
     if let Some(expected) = get("test") {

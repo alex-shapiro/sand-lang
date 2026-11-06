@@ -1953,7 +1953,7 @@ multiple engines concurrently across threads or asynchronous tasks, or
 interleaved on a single thread in WebAssembly (§16.5).
 
 ```rust
-use sandlang::engine::{Config, Engine, Limits};
+use sandlang::engine::{Config, Engine, HostModules, Limits};
 use sandlang::native::NativeModule;
 use sandlang::policy::rules::RulePolicy;
 
@@ -1964,15 +1964,14 @@ module.async_function("lookup", |key: String| async move { Ok::<_, String>(key.l
 let config = Config::new()
     .policy(RulePolicy::standard())
     .limits(Limits { max_memory: Some(64 << 20), ..Limits::default() })
-    .module(module);
-let mut engine = Engine::new(config)?;
+    .host_modules(HostModules::new([module])?);
+let mut engine = Engine::new(config);
 let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 4.0))"#).await?;
 ```
 
 ### 16.1 Execution and errors
 
-`Engine::new` validates registered host modules (§16.3) and constructs an
-`Engine`. `Engine::run_source` and `Engine::run_file` compile and execute a
+`Engine::new` constructs an `Engine` from a `Config`. `Engine::run_source` and `Engine::run_file` compile and execute a
 script inside
 the returned future on the thread that polls it. `Engine::run_tests` compiles a
 module and executes its `test` blocks (§4.8). For static analysis without
@@ -1998,10 +1997,10 @@ run (§16.7). A failed operation returns an `Error`:
 | `Error::Aborted(reason)`              | The host ended the run: `Ctl::abort`, or a failed `Journal::flush` (§16.7). |
 
 `Engine::compile_file` compiles a file and its imports without running it, and
-`Engine::run_program` runs the result. Any engine whose configuration is a clone of the
-compiling engine's configuration, without further `Config::module` calls, can run the program,
-so a host that runs the same code many times compiles it once. Each run starts with fresh
-globals, and its limits count from the start of the run.
+`Engine::run_program` runs the result on any engine. The program holds the host modules that
+it was compiled against and runs with them, so a host that runs the same code many times
+compiles it once. Each run starts with fresh globals, and its limits count from the start of
+the run.
 
 A host can also call a function of the program's main module and get its value.
 `CompiledProgram::function(name)` returns a top-level function without type parameters,
@@ -2091,10 +2090,12 @@ interactive `Prompter` (§14).
 ### 16.3 Native modules
 
 `NativeModule` exposes Rust functions and types to Sand scripts as an
-importable module registered with `Config::module`. The engine infers the Sand
+importable module. `HostModules::new(modules)` checks and compiles native modules once, and
+`Config::host_modules` makes them importable. Engines of all configurations that hold clones
+of one `HostModules` share its compiled modules. The engine infers the Sand
 signature of each registered function from its Rust parameter and return types,
 and charges fuel and memory when converting arguments and return values.
-`NativeModule` and `Config::module` panic if a module, type, or function name
+`NativeModule` and `HostModules::new` panic if a module, type, or function name
 is invalid or already registered, or if a host module uses the name of a
 standard library module.
 
@@ -2169,7 +2170,7 @@ kind: kind))` in Sand, whereas `?` converts a `Ctl` into a `HostError` that
 `Config::context(data)` attaches host data to every run of an engine, and a
 `vm_function` reads it with `Vm::context::<T>()`. The context does not change
 the compiled host modules, so engines that serve different callers can share
-one module registry and still give each caller its own state.
+one `HostModules` and still give each caller its own state.
 
 To check a sandbox capability inside a `vm_function`, call
 `Vm::require(&capability)` (§14), which returns an error of kind
@@ -2224,9 +2225,7 @@ A function registered as `"Type.init"` constructs `Type` (§4.2).
 Generic functions and functions with default parameter values must be declared
 explicitly with `native fn` in `NativeModule::source`.
 
-`Engine::new` compiles and validates all registered host modules once per
-`Config`, sharing the compiled modules across cloned configurations, and
-returns `Error::Compile` if:
+`HostModules::new` returns `Error::Compile` if:
 
 - the module's Sand source contains a syntax or type error;
 - a `native fn` declaration in Sand source does not match the Rust function's
@@ -2310,7 +2309,7 @@ configuration, and shares the engine's remembered `"always"` prompt decisions
 (§14.3). `Session` implements the evaluation semantics of `sand repl` (§17.6):
 
 ```rust
-let mut session = Engine::new(config)?.session();
+let mut session = Engine::new(config).session();
 session.eval("var hits = 0\nfn hit() -> int { hits += 1\n hits }").await?;   // Ok(None)
 assert_eq!(session.eval("hit() + hit()").await?, Some("3".to_string()));
 ```
@@ -2365,8 +2364,8 @@ use sandlang::journal::{Durable, Journal, MemoryJournal};
 
 let journal = MemoryJournal::new();
 let config = Config::new().durable(Durable::new(Arc::new(journal.clone())));
-Engine::new(config.clone())?.run_program(&program).await;  // records
-Engine::new(config)?.run_program(&program).await;          // replays, then continues live
+Engine::new(config.clone()).run_program(&program).await;  // records
+Engine::new(config).run_program(&program).await;          // replays, then continues live
 ```
 
 The `sandlang::journal` module defines the interface. The engine calls

@@ -8,7 +8,7 @@
 mod common;
 
 use common::{rt, run_with};
-use sandlang::engine::{Config, Engine, Error, LimitKind, Limits, MemorySink, Outcome};
+use sandlang::engine::{Config, Engine, Error, HostModules, LimitKind, Limits, MemorySink, Outcome};
 use sandlang::native::NativeModule;
 use sandlang::vm::{Ctl, Vm};
 use std::sync::mpsc;
@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 fn run(config: Config, src: &str) -> (Result<Outcome, Error>, String) {
     let out = MemorySink::new();
-    let mut engine = Engine::new(config.stdout(out.clone())).unwrap();
+    let mut engine = Engine::new(config.stdout(out.clone()));
     let r = rt().block_on(engine.run_source("main.sand", src));
     (r, out.contents())
 }
@@ -260,7 +260,7 @@ fn signal() -> (NativeModule, mpsc::Receiver<()>) {
 fn interrupt_after_ready(src: &str, delay: Duration) -> (Result<Outcome, Error>, String, Duration) {
     let (m, rx) = signal();
     let out = MemorySink::new();
-    let mut engine = Engine::new(Config::new().module(m).stdout(out.clone())).unwrap();
+    let mut engine = Engine::new(Config::new().host_modules(HostModules::new([m]).unwrap()).stdout(out.clone()));
     let handle = engine.interrupt_handle();
     let t = std::thread::spawn(move || {
         rx.recv().unwrap();
@@ -316,15 +316,15 @@ fn host_natives_can_charge_and_be_stopped() {
             std::hint::black_box(n);
         }
     });
-    let config = limits(|l| l.max_instructions = Some(5_000_000)).module(m.clone());
+    let config = limits(|l| l.max_instructions = Some(5_000_000)).host_modules(HostModules::new([m.clone()]).unwrap());
     expect_stop(config, "import busy\nprint(busy.spin())", is_limit(LimitKind::Instructions), Duration::from_secs(10));
-    let config = limits(|l| l.max_cpu_time = Some(Duration::from_millis(50))).module(m);
+    let config = limits(|l| l.max_cpu_time = Some(Duration::from_millis(50))).host_modules(HostModules::new([m]).unwrap());
     expect_stop(config, "import busy\nprint(busy.spin())", is_limit(LimitKind::CpuTime), Duration::from_secs(10));
 
     // Typed host functions are charged for converting their arguments.
     let mut m = NativeModule::new("host");
     m.function("total", |xs: Vec<i64>| -> i64 { xs.iter().sum() });
-    let config = limits(|l| l.max_instructions = Some(1_000_000)).module(m);
+    let config = limits(|l| l.max_instructions = Some(1_000_000)).host_modules(HostModules::new([m]).unwrap());
     let src = "import host\nlet xs = [1, 2, 3]\nvar t = 0\nfor i in 0..1000000 { t += host.total(xs) }\nprint(t)";
     let (r, _) = run(config, src);
     assert!(matches!(r, Err(Error::Limit(LimitKind::Instructions))), "{r:?}");
@@ -346,7 +346,7 @@ fn natives_stop_exactly_at_the_instruction_limit() {
     let max = 100_000;
     let spin_after = |iterations: u64| {
         granted.store(0, Ordering::Relaxed);
-        let config = limits(|l| l.max_instructions = Some(max)).module(m.clone());
+        let config = limits(|l| l.max_instructions = Some(max)).host_modules(HostModules::new([m.clone()]).unwrap());
         let src = format!("import busy\nvar t = 0\nfor i in 0..{iterations} {{ t += i }}\nprint(busy.spin() + t)");
         let (r, _) = run(config, &src);
         assert!(matches!(r, Err(Error::Limit(LimitKind::Instructions))), "{r:?}");
@@ -533,7 +533,7 @@ fn cancelled_waits_do_not_accumulate() {
     let src = "import probe\nlet ch: Channel<int> = Channel()\nlet long = spawn { task.sleep(60s) }\n\
                for i in 0..100000 {\n    let a = spawn { ch.recv() }\n    let b = spawn { long.wait() }\n    task.yield_now()\n    a.cancel()\n    b.cancel()\n}\n\
                print((probe.receivers(ch) < 100, probe.waiters(long) < 100))\nlong.cancel()";
-    let (r, out) = run(mem_limit(16).module(probe()), src);
+    let (r, out) = run(mem_limit(16).host_modules(HostModules::new([probe()]).unwrap()), src);
     r.unwrap();
     assert_eq!(out, "(true, true)\n");
     let src = "let ch: Channel<int> = Channel()\nvar ts = []\nfor i in 0..100 {\n    let c = spawn { ch.recv() }\n    task.yield_now()\n    c.cancel()\n    ts.push(spawn { ch.recv() })\n}\nfor i in 0..100 { ch.send(i) }\nvar n = 0\nfor t in ts { n += t.wait().unwrap() }\nprint(n)";
@@ -674,7 +674,7 @@ fn host_function_arguments_count_against_the_memory_limit() {
     let mut m = NativeModule::new("host");
     m.function("total", |xs: Vec<String>| -> i64 { xs.iter().map(|x| x.len() as i64).sum() });
     m.function("total_bytes", |xs: Vec<Vec<u8>>| -> i64 { xs.iter().map(|x| x.len() as i64).sum() });
-    let config = || limits(|l| l.max_memory = Some(64 << 20)).module(m.clone());
+    let config = || limits(|l| l.max_memory = Some(64 << 20)).host_modules(HostModules::new([m.clone()]).unwrap());
     for src in [
         "import host\nlet s = \"x\".repeat(10000000)\nprint(host.total((0..100).map(_ => s)))",
         "import host\nlet b = \"x\".repeat(10000000).bytes()\nprint(host.total_bytes((0..100).map(_ => b)))",
