@@ -265,14 +265,14 @@ A generic Rust function accepts values of its `N`-th type parameter as `Param<N,
 
 ## Interactive sessions
 
-`Engine::session` creates a stateful `Session` that evaluates inputs incrementally, preserving bindings across calls:
+`Session::new` creates a stateful `Session` that evaluates inputs incrementally, preserving bindings across calls:
 
 ```rust
 # #[tokio::main(flavor = "current_thread")]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-# use sandlang::{Config, Engine};
+# use sandlang::{Config, Session};
 # let config = Config::new();
-let mut session = Engine::new(config)?.session();
+let mut session = Session::new(config)?;
 session.eval("var hits = 0\nfn hit() -> int {\n    hits += 1\n    hits\n}").await?;
 assert_eq!(session.eval("hit() + hit()").await?, Some("3".to_string()));
 # Ok(())

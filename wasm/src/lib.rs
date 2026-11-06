@@ -146,6 +146,55 @@ impl Drop for HookKey {
     }
 }
 
+/// The configuration of an engine or a session, made from the options and
+/// hooks that JavaScript passes.
+struct HostConfig {
+    config: Config,
+    fs: MemFs,
+    hooks: Rc<HookKey>,
+}
+
+impl HostConfig {
+    /// Throws an `Error` for invalid options; for an invalid policy, its
+    /// `policyErrors` property lists `{line, column, message}`.
+    fn new(options: &JsValue, hooks: &JsValue) -> Result<HostConfig, JsValue> {
+        check_keys(options, OPTION_KEYS, "engine option")?;
+        check_keys(hooks, &["onOutput", "onPrompt"], "engine hook")?;
+        let cwd = string_option(options, "cwd")?.unwrap_or_else(|| "/".into());
+        let policy = string_option(options, "policy")?.unwrap_or_default();
+        let policy = PolicyFile::parse(&policy, Path::new(&cwd), None).map_err(policy_error)?;
+        let fs = match number_option(options, "fileSystemCapacity")? {
+            Some(c) if c >= 0.0 => MemFs::with_capacity(c as usize),
+            Some(_) => return Err(error("invalid fileSystemCapacity")),
+            None => MemFs::new(),
+        };
+        write_files(&fs, options)?;
+        let key =
+            Rc::new(HookKey(hooks::register(Hooks { on_output: function(hooks, "onOutput")?, on_prompt: function(hooks, "onPrompt")? })));
+        let mut config = Config::new()
+            .policy(policy.rules.with_defaults(sandlang::RulePolicy::standard().allow_import("/")))
+            .limits(policy.limits.clone())
+            .memory_fs(fs.clone())
+            .cwd(&cwd)
+            .env(string_entries(options, "env")?)
+            .args(string_list(options, "args")?)
+            .stdout(JsOutput::new(key.0, "stdout"))
+            .stderr(JsOutput::new(key.0, "stderr"));
+        config = config.prompter(JsPrompter { id: key.0 });
+        if let Some(stdin) = string_option(options, "stdin")? {
+            config = config.stdin_bytes(stdin.into_bytes());
+        }
+        if let Some(seed) = number_option(options, "seed")? {
+            config = config.seed(seed as u64);
+        }
+        if let Some(name) = string_option(options, "timeZone")? {
+            let zone = sandlang::time::TimeZone::get(&name).ok_or_else(|| error(&format!("unknown timeZone {name:?}")))?;
+            config = config.time_zone(zone);
+        }
+        Ok(HostConfig { config, fs, hooks: key })
+    }
+}
+
 /// A Sand engine: runs scripts against its in-memory file system under its
 /// policy and limits.
 #[wasm_bindgen]
@@ -154,7 +203,8 @@ pub struct Engine {
     engine: Rc<RefCell<Option<sandlang::Engine>>>,
     fs: MemFs,
     interrupt: sandlang::InterruptHandle,
-    hooks: Rc<HookKey>,
+    /// Keeps the engine's hooks registered until the engine is freed.
+    _hooks: Rc<HookKey>,
 }
 
 #[wasm_bindgen]
@@ -166,42 +216,10 @@ impl Engine {
         #[wasm_bindgen(unchecked_param_type = "EngineOptions")] options: JsValue,
         #[wasm_bindgen(unchecked_param_type = "EngineHooks")] hooks: JsValue,
     ) -> Result<Engine, JsValue> {
-        check_keys(&options, OPTION_KEYS, "engine option")?;
-        check_keys(&hooks, &["onOutput", "onPrompt"], "engine hook")?;
-        let cwd = string_option(&options, "cwd")?.unwrap_or_else(|| "/".into());
-        let policy = string_option(&options, "policy")?.unwrap_or_default();
-        let policy = PolicyFile::parse(&policy, Path::new(&cwd), None).map_err(policy_error)?;
-        let fs = match number_option(&options, "fileSystemCapacity")? {
-            Some(c) if c >= 0.0 => MemFs::with_capacity(c as usize),
-            Some(_) => return Err(error("invalid fileSystemCapacity")),
-            None => MemFs::new(),
-        };
-        write_files(&fs, &options)?;
-        let key =
-            Rc::new(HookKey(hooks::register(Hooks { on_output: function(&hooks, "onOutput")?, on_prompt: function(&hooks, "onPrompt")? })));
-        let mut config = Config::new()
-            .policy(policy.rules.with_defaults(sandlang::RulePolicy::standard().allow_import("/")))
-            .limits(policy.limits.clone())
-            .memory_fs(fs.clone())
-            .cwd(&cwd)
-            .env(string_entries(&options, "env")?)
-            .args(string_list(&options, "args")?)
-            .stdout(JsOutput::new(key.0, "stdout"))
-            .stderr(JsOutput::new(key.0, "stderr"));
-        config = config.prompter(JsPrompter { id: key.0 });
-        if let Some(stdin) = string_option(&options, "stdin")? {
-            config = config.stdin_bytes(stdin.into_bytes());
-        }
-        if let Some(seed) = number_option(&options, "seed")? {
-            config = config.seed(seed as u64);
-        }
-        if let Some(name) = string_option(&options, "timeZone")? {
-            let zone = sandlang::time::TimeZone::get(&name).ok_or_else(|| error(&format!("unknown timeZone {name:?}")))?;
-            config = config.time_zone(zone);
-        }
+        let HostConfig { config, fs, hooks } = HostConfig::new(&options, &hooks)?;
         let engine = sandlang::Engine::new(config).map_err(|e| error(&e.render()))?;
         let interrupt = engine.interrupt_handle();
-        Ok(Engine { engine: Rc::new(RefCell::new(Some(engine))), fs, interrupt, hooks: key })
+        Ok(Engine { engine: Rc::new(RefCell::new(Some(engine))), fs, interrupt, _hooks: hooks })
     }
 
     /// Executes a script with an optional name for diagnostics.
@@ -262,38 +280,41 @@ impl Engine {
         self.interrupt.interrupt();
     }
 
-    /// A session: inputs run one at a time, each in the context of the
-    /// previous ones (like `sand repl`), with this engine's configuration.
-    pub fn session(&self) -> Result<Session, JsValue> {
-        let engine = self.engine.borrow();
-        let engine = engine.as_ref().ok_or_else(|| error("the engine is running"))?;
-        let session = engine.session();
-        let interrupt = session.interrupt_handle();
-        Ok(Session { session: Rc::new(RefCell::new(Some(session))), interrupt, hooks: self.hooks.clone(), stop_tasks: Rc::default() })
+    /// The engine's in-memory file system.
+    #[wasm_bindgen(getter, js_name = fileSystem)]
+    pub fn file_system(&self) -> FileSystem {
+        FileSystem(self.fs.clone())
     }
+}
 
+/// The in-memory file system of an engine or a session.
+#[wasm_bindgen]
+pub struct FileSystem(MemFs);
+
+#[wasm_bindgen]
+impl FileSystem {
     /// Every file of the file system, by path.
     #[wasm_bindgen(unchecked_return_type = "FileEntry[]")]
     pub fn files(&self) -> JsValue {
-        file_entries(self.fs.files())
+        file_entries(self.0.files())
     }
 
     /// A number that grows whenever a file is written or moved (by a
     /// script or the host), for `changedFiles`.
     pub fn generation(&self) -> f64 {
-        self.fs.generation() as f64
+        self.0.generation() as f64
     }
 
     /// The files written or moved since the file system was at `generation`.
     #[wasm_bindgen(js_name = changedFiles, unchecked_return_type = "FileEntry[]")]
     pub fn changed_files(&self, generation: f64) -> JsValue {
-        file_entries(self.fs.changed_files(generation as u64))
+        file_entries(self.0.changed_files(generation as u64))
     }
 
     /// The contents of a file, or `undefined` if there is none.
     #[wasm_bindgen(js_name = readFile)]
     pub fn read_file(&self, path: &str) -> Option<Vec<u8>> {
-        self.fs.read(path).ok()
+        self.0.read(path).ok()
     }
 
     /// Writes a file (text or bytes), creating its directories.
@@ -304,19 +325,21 @@ impl Engine {
         #[wasm_bindgen(unchecked_param_type = "string | Uint8Array")] data: JsValue,
     ) -> Result<(), JsValue> {
         let bytes = file_bytes(&data).ok_or_else(|| error("file contents must be a string or a Uint8Array"))?;
-        self.fs.write(path, bytes).map_err(|e| error(&format!("{path}: {e}")))
+        self.0.write(path, bytes).map_err(|e| error(&format!("{path}: {e}")))
     }
 
     /// Removes a file, or a directory with its contents.
     pub fn remove(&self, path: &str) -> Result<(), JsValue> {
-        self.fs.remove(path).map_err(|e| error(&format!("{path}: {e}")))
+        self.0.remove(path).map_err(|e| error(&format!("{path}: {e}")))
     }
 }
 
-/// An interactive session (see [`Engine::session`]).
+/// An interactive session: inputs run one at a time, each in the context of
+/// the previous ones (like `sand repl`).
 #[wasm_bindgen]
 pub struct Session {
     session: Rc<RefCell<Option<sandlang::Session>>>,
+    fs: MemFs,
     interrupt: sandlang::InterruptHandle,
     hooks: Rc<HookKey>,
     /// Ends the `runTasks` in progress.
@@ -325,6 +348,24 @@ pub struct Session {
 
 #[wasm_bindgen]
 impl Session {
+    /// Creates a session with the same options and hooks as an `Engine`.
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        #[wasm_bindgen(unchecked_param_type = "EngineOptions")] options: JsValue,
+        #[wasm_bindgen(unchecked_param_type = "EngineHooks")] hooks: JsValue,
+    ) -> Result<Session, JsValue> {
+        let HostConfig { config, fs, hooks } = HostConfig::new(&options, &hooks)?;
+        let session = sandlang::Session::new(config).map_err(|e| error(&e.render()))?;
+        let interrupt = session.interrupt_handle();
+        Ok(Session { session: Rc::new(RefCell::new(Some(session))), fs, interrupt, hooks, stop_tasks: Rc::default() })
+    }
+
+    /// The session's in-memory file system.
+    #[wasm_bindgen(getter, js_name = fileSystem)]
+    pub fn file_system(&self) -> FileSystem {
+        FileSystem(self.fs.clone())
+    }
+
     /// Runs one input: statements, expressions or declarations, named
     /// `name` in messages if given (e.g. `main.sand` for a whole program
     /// that later inputs continue), else `<input N>`. Resolves to an

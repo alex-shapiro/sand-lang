@@ -9,7 +9,6 @@ use crate::modules::{ImportRef, ModuleGraph, Snapshot, Target, budget_error, nat
 use crate::native::{BoundType, NativeDecl, NativeModule, Signature, Type};
 use crate::platform::{Clock, Instant, SystemClock};
 use crate::policy::{Capability, CustomPolicy, Decision, Policy, PromptAnswer, Prompter, RulePolicy};
-use crate::session::Session;
 use crate::stdlib;
 use crate::types::{FnId, ModId};
 use crate::vm::bytecode::Program;
@@ -745,7 +744,7 @@ impl Registry {
 }
 
 pub struct Engine {
-    config: Arc<Config>,
+    config: Config,
     registry: Arc<Registry>,
     interrupt: Arc<AtomicBool>,
     shared: Arc<IoShared>,
@@ -802,7 +801,7 @@ impl Engine {
         let origin = config.clock.now();
         Ok(Engine {
             origin,
-            config: Arc::new(config),
+            config,
             registry,
             interrupt: Arc::new(AtomicBool::new(false)),
             shared: Arc::new(IoShared::default()),
@@ -868,24 +867,6 @@ impl Engine {
 
     pub fn interrupt_handle(&self) -> InterruptHandle {
         InterruptHandle { flag: self.interrupt.clone(), shared: self.shared.clone() }
-    }
-
-    /// Starts an interactive session ([`Session`]) with this engine's
-    /// configuration. The session shares the engine's "always" answers to
-    /// permission prompts, but not its interrupt handle: use
-    /// [`Session::interrupt_handle`].
-    pub fn session(&self) -> Session {
-        Session::new(Engine {
-            config: self.config.clone(),
-            registry: self.registry.clone(),
-            interrupt: Arc::new(AtomicBool::new(false)),
-            shared: Arc::new(IoShared::default()),
-            always: self.always.clone(),
-            gc_stats: GcStats::default(),
-            root: OnceLock::new(),
-            spare: Mutex::default(),
-            origin: self.origin,
-        })
     }
 
     pub(crate) fn config(&self) -> &Config {

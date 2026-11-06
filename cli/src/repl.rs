@@ -15,7 +15,7 @@ use reedline::{
     default_emacs_keybindings,
 };
 use sandlang::syntax::highlight::{Highlight, highlight};
-use sandlang::{Engine, Error, Session, StdinFeed};
+use sandlang::{Error, Session, StdinFeed};
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::io::{BufRead, IsTerminal, Write};
@@ -66,7 +66,7 @@ pub(crate) fn cmd_repl(args: &[String]) -> Result<u8, String> {
     let screen = Screen::default();
     let config =
         opts.config.stdout(ReplSink { screen: screen.clone(), stderr: false }).stderr(ReplSink { screen: screen.clone(), stderr: true });
-    let mut session = Engine::new(config).map_err(|e| e.render())?.session();
+    let mut session = Session::new(config).map_err(|e| e.render())?;
     let stdin_feed = Some(opts.stdin_feed);
     let reader = if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         Reader::Editor(EditorReader::new(screen.clone()))

@@ -2285,13 +2285,13 @@ configured. The library provides `run`, `check`, `lint`, `format`, and
 
 ### 16.6 Sessions
 
-`Engine::session()` creates a stateful `Session` that implements `Send`,
-returns `Send` futures, evaluates inputs incrementally under the engine's
-configuration, and shares the engine's remembered `"always"` prompt decisions
-(§14.3). `Session` implements the evaluation semantics of `sand repl` (§17.6):
+`Session::new(config)` creates a stateful `Session` that implements `Send`,
+returns `Send` futures, and evaluates inputs incrementally under `config`,
+which it owns. `Session` implements the evaluation semantics of `sand repl`
+(§17.6):
 
 ```rust
-let mut session = Engine::new(config)?.session();
+let mut session = Session::new(config)?;
 session.eval("var hits = 0\nfn hit() -> int { hits += 1\n hits }").await?;   // Ok(None)
 assert_eq!(session.eval("hit() + hit()").await?, Some("3".to_string()));
 ```

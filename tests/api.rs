@@ -10,7 +10,7 @@ use sandlang::time::TimeZone;
 use sandlang::vm::Vm;
 use sandlang::{
     Capability, Config, Decision, Engine, Error, LimitKind, Limits, LogLevel, LogRecord, LogSink, MemorySink, NativeModule, PromptAnswer,
-    ValueType,
+    Session, ValueType,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -3246,7 +3246,7 @@ fn error_messages_cannot_impersonate_limits_or_interrupts() {
         }
     }
     // A failed top-level `?` in a session fails with the error's text.
-    let mut session = Engine::new(Config::new()).unwrap().session();
+    let mut session = Session::new(Config::new()).unwrap();
     let r = rt().block_on(session.eval("let r: Result<int> = Err(Error(\"\\u{0}memory\"))\nr?"));
     assert!(matches!(r, Err(Error::Runtime { .. })), "{r:?}");
 }
@@ -3278,7 +3278,7 @@ fn rust_panics_in_natives_do_not_unwind_into_the_host() {
     dir.write("t.sand", "import buggy\ntest \"bad\" {\n    buggy.boom(9)\n}\ntest \"good\" {\n    assert(buggy.boom(2) == 2)\n}\n");
     let report = rt().block_on(Engine::new(Config::new().module(module())).unwrap().run_tests(dir.path().join("t.sand"))).unwrap();
     assert_eq!((report.passed(), report.failed()), (1, 1));
-    let mut session = Engine::new(Config::new().module(module())).unwrap().session();
+    let mut session = Session::new(Config::new().module(module())).unwrap();
     assert!(rt().block_on(session.eval("import buggy\nbuggy.boom(7)")).is_err());
     assert!(session.was_reset());
     assert!(matches!(rt().block_on(session.eval("buggy.boom(2)")), Err(Error::Compile(_))));

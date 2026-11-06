@@ -34,8 +34,8 @@ impl Repl {
     fn with(config: Config) -> Repl {
         let out = MemorySink::new();
         let err = MemorySink::new();
-        let engine = Engine::new(config.stdout(out.clone()).stderr(err.clone())).unwrap();
-        Repl { session: engine.session(), out, err, rt: rt() }
+        let session = Session::new(config.stdout(out.clone()).stderr(err.clone())).unwrap();
+        Repl { session, out, err, rt: rt() }
     }
 
     fn paused(config: Config) -> Repl {
@@ -637,7 +637,7 @@ fn output_goes_to_the_configured_sinks() {
 #[test]
 fn session_future_is_send() {
     fn assert_send<T: Send>(_: &T) {}
-    let mut s = Engine::new(Config::new()).unwrap().session();
+    let mut s = Session::new(Config::new()).unwrap();
     assert_send(&s);
     let fut = s.eval("1");
     assert_send(&fut);
@@ -1064,8 +1064,8 @@ fn each_read_that_waits_is_a_new_request() {
 fn each_engine_reads_its_own_feed() {
     let (first_config, first_feed) = Config::new().policy(RulePolicy::allow_all()).stdin_feed();
     let (second_config, second_feed) = Config::new().policy(RulePolicy::allow_all()).stdin_feed();
-    let mut first = Engine::new(first_config).unwrap().session();
-    let mut second = Engine::new(second_config).unwrap().session();
+    let mut first = Session::new(first_config).unwrap();
+    let mut second = Session::new(second_config).unwrap();
     let values = rt().block_on(async {
         let host = async {
             assert!(second_feed.wait_for_request().await.answer("b"));
@@ -1221,7 +1221,7 @@ fn redefined_types_are_told_apart_in_messages() {
 
 #[test]
 fn inputs_can_be_named() {
-    let mut session = Engine::new(Config::new()).unwrap().session();
+    let mut session = Session::new(Config::new()).unwrap();
     match rt().block_on(session.eval_as("main.sand", "let a = 1\nlet b: int = \"no\"")) {
         Err(Error::Compile(d)) => assert_eq!((d[0].file.as_str(), d[0].line), ("main.sand", 2)),
         other => panic!("{other:?}"),

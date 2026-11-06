@@ -12,7 +12,7 @@ use crate::check::budget::CompileBudget;
 use crate::check::{Checker, ModKind, ParsedModule};
 use crate::compile::{CompileInput, Incremental, ProgramMark, compile_more};
 use crate::diag::{Diag, FileId, Span};
-use crate::engine::{Discovery, Engine, Error, InterruptHandle, Registry, TestReport, TestResult, on_compile_stack};
+use crate::engine::{Config, Discovery, Engine, Error, InterruptHandle, Registry, TestReport, TestResult, on_compile_stack};
 use crate::modules::{GraphMark, ModuleGraph, NativeInfo, Snapshot, budget_error, native_info};
 use crate::platform::Instant;
 use crate::policy::{Capability, PromptAnswer};
@@ -32,13 +32,13 @@ use std::task::Poll;
 /// An interactive session: a sequence of inputs (statements, expressions and
 /// declarations, like the contents of a module) checked and run one at a
 /// time, each in the context of the previous ones. Created by
-/// [`Engine::session`]; uses the engine's configuration (policy, prompter,
-/// limits, streams and modules).
+/// [`Session::new`] with a configuration (policy, prompter, limits, streams
+/// and modules) that the session owns.
 ///
 /// ```no_run
 /// # async fn demo() -> Result<(), sandlang::Error> {
-/// use sandlang::{Config, Engine};
-/// let mut session = Engine::new(Config::new())?.session();
+/// use sandlang::{Config, Session};
+/// let mut session = Session::new(Config::new())?;
 /// session.eval("var count = 0\nfn bump() -> int { count += 1\n count }").await?;
 /// assert_eq!(session.eval("bump()").await?, Some("1".to_string()));
 /// assert_eq!(session.eval("bump() + 10").await?, Some("12".to_string()));
@@ -104,14 +104,17 @@ struct State {
 const SESSION_MODULE: &str = "repl";
 
 impl Session {
-    pub(crate) fn new(engine: Engine) -> Session {
+    /// Creates a session with `config`, checking any registered host modules
+    /// as [`Engine::new`] does.
+    pub fn new(config: Config) -> Result<Session, Error> {
+        let engine = Engine::new(config)?;
         let config = engine.config();
         let fs = &config.fs;
         let root = config.module_root.clone().or_else(|| config.cwd.clone()).unwrap_or_else(|| fs.default_dir());
         let cwd = config.cwd.clone().unwrap_or_else(|| root.clone());
         let root = fs.resolve(&fs.absolute(&root));
         let wall_time = config.limits.max_wall_time;
-        Session { engine, root, cwd, state: None, inputs: 0, exit_code: None, was_reset: false, wall_time }
+        Ok(Session { engine, root, cwd, state: None, inputs: 0, exit_code: None, was_reset: false, wall_time })
     }
 
     /// Checks, compiles and runs one input. Returns the debug form of its

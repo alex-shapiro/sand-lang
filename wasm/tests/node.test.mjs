@@ -84,9 +84,9 @@ print(fs.list_dir("/data"))`;
   const { result, stdout, engine } = await run(source, options);
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(stdout, 'Ok("input")\nfalse\ntrue\nfalse\nOk(["in.txt", "secret.txt"])\n');
-  assert.equal(new TextDecoder().decode(engine.readFile("/out/result.txt")), "written");
-  assert.equal(new TextDecoder().decode(engine.readFile("/data/in.txt")), "input");
-  const paths = engine.files().map((f) => f.path);
+  assert.equal(new TextDecoder().decode(engine.fileSystem.readFile("/out/result.txt")), "written");
+  assert.equal(new TextDecoder().decode(engine.fileSystem.readFile("/data/in.txt")), "input");
+  const paths = engine.fileSystem.files().map((f) => f.path);
   assert.deepEqual(paths, ["/data/in.txt", "/data/secret.txt", "/out/.keep", "/out/result.txt"]);
 });
 
@@ -280,25 +280,24 @@ test("check, lint and format", () => {
 
 test("files changed since a generation", async () => {
   const engine = new sand.Engine({ policy: "allow write /", files: { "/a.txt": "a", "/b.txt": "b" } }, {});
-  const start = engine.generation();
-  assert.deepEqual(engine.changedFiles(start), []);
+  const start = engine.fileSystem.generation();
+  assert.deepEqual(engine.fileSystem.changedFiles(start), []);
   const result = await engine.run('import fs\nfs.write_text("/b.txt", "B")?\nfs.write_text("/d.txt", "D")?');
   assert.equal(result.ok, true, JSON.stringify(result));
-  const changed = engine.changedFiles(start).map(({ path, data }) => [path, new TextDecoder().decode(data)]);
+  const changed = engine.fileSystem.changedFiles(start).map(({ path, data }) => [path, new TextDecoder().decode(data)]);
   assert.deepEqual(changed, [["/b.txt", "B"], ["/d.txt", "D"]]);
 });
 
 test("errors include their exit code", async () => {
   const { result } = await run('fail("boom")');
   assert.deepEqual([result.exitCode, result.error.exitCode, result.error.kind], [1, 1, "runtime"]);
-  const session = new sand.Engine({}, {}).session();
+  const session = new sand.Session({}, {});
   assert.equal((await session.eval("nope")).error.exitCode, 2);
 });
 
 test("sessions keep state between inputs", async () => {
   const out = [];
-  const engine = new sand.Engine({}, { onOutput: (_, t) => out.push(t) });
-  const session = engine.session();
+  const session = new sand.Session({}, { onOutput: (_, t) => out.push(t) });
   assert.deepEqual(await session.eval("var count = 0\nfn bump() -> int { count += 1\n count }"), {});
   assert.deepEqual(await session.eval("bump()"), { value: "1" });
   assert.deepEqual(await session.eval("bump() + 10"), { value: "12" });
@@ -420,8 +419,7 @@ test("http requests are prompted for and denied without a rule", async () => {
 
 test("sessions continue a program, and run its tasks between inputs", async () => {
   let out = "";
-  const engine = new sand.Engine({}, { onOutput: (_, t) => (out += t) });
-  const session = engine.session();
+  const session = new sand.Session({}, { onOutput: (_, t) => (out += t) });
   const program = "var ticks = 0\nlet ticker = spawn {\n    for i in 0..3 {\n        task.sleep(10ms)\n        ticks += 1\n        print(\"tick \\(ticks)\")\n    }\n}\nprint(\"started\")";
   assert.deepEqual(await session.eval(program, "main.sand"), {});
   assert.equal(out, "started\n");
