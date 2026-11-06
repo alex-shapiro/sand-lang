@@ -36,12 +36,12 @@ fn net_addr(host: &str, addr: &str) -> Capability {
 #[test]
 fn net_patterns_match_ip_literals_and_ranges() {
     let p = RulePolicy::new()
-        .allow_net(Transports::TLS, "10.0.0.0/8".parse().unwrap())
-        .allow_net(Transports::TLS, "192.168.1.5:8080".parse().unwrap())
-        .allow_net(Transports::TLS, "[::1]:9000".parse().unwrap())
-        .allow_net(Transports::TLS, "fd00::/8".parse().unwrap())
-        .allow_net(Transports::TLS, "example.com:443".parse().unwrap())
-        .deny_net(Transports::all(), "10.9.0.0/16".parse().unwrap());
+        .allow_net(Transports::Tls, "10.0.0.0/8".parse().unwrap())
+        .allow_net(Transports::Tls, "192.168.1.5:8080".parse().unwrap())
+        .allow_net(Transports::Tls, "[::1]:9000".parse().unwrap())
+        .allow_net(Transports::Tls, "fd00::/8".parse().unwrap())
+        .allow_net(Transports::Tls, "example.com:443".parse().unwrap())
+        .deny_net(Transports::Both, "10.9.0.0/16".parse().unwrap());
     assert_eq!(p.check(&net("10.1.2.3", 80)), Decision::Allow);
     assert_eq!(p.check(&net("10.9.2.3", 80)), Decision::Deny);
     assert_eq!(p.check(&net("11.0.0.1", 80)), Decision::Prompt, "unmatched");
@@ -66,10 +66,10 @@ fn net_patterns_match_ip_literals_and_ranges() {
 #[test]
 fn deny_ranges_match_alternate_ip_representations() {
     let p = RulePolicy::new()
-        .allow_net(Transports::TLS, "*".parse().unwrap())
-        .deny_net(Transports::all(), "127.0.0.0/8".parse().unwrap())
-        .deny_net(Transports::all(), "10.0.0.0/8".parse().unwrap())
-        .deny_net(Transports::all(), "[::1]".parse().unwrap());
+        .allow_net(Transports::Tls, "*".parse().unwrap())
+        .deny_net(Transports::Both, "127.0.0.0/8".parse().unwrap())
+        .deny_net(Transports::Both, "10.0.0.0/8".parse().unwrap())
+        .deny_net(Transports::Both, "[::1]".parse().unwrap());
     for host in [
         "0.0.0.0",
         "::",
@@ -90,43 +90,43 @@ fn deny_ranges_match_alternate_ip_representations() {
         assert_eq!(p.check(&net(host, 8080)), Decision::Allow, "{host}");
     }
     for (deny, hosts) in [("0.0.0.0", ["::", "[::]", "64:ff9b::"]), ("[::]", ["0.0.0.0", "::ffff:0.0.0.0", "64:ff9b::"])] {
-        let p = RulePolicy::new().allow_net(Transports::TLS, "*".parse().unwrap()).deny_net(Transports::all(), deny.parse().unwrap());
+        let p = RulePolicy::new().allow_net(Transports::Tls, "*".parse().unwrap()).deny_net(Transports::Both, deny.parse().unwrap());
         let p = p
-            .allow_net(Transports::TLS, "0.0.0.0".parse().unwrap())
-            .allow_net(Transports::TLS, "[::]".parse().unwrap())
-            .allow_net(Transports::TLS, "[64:ff9b::]".parse().unwrap());
+            .allow_net(Transports::Tls, "0.0.0.0".parse().unwrap())
+            .allow_net(Transports::Tls, "[::]".parse().unwrap())
+            .allow_net(Transports::Tls, "[64:ff9b::]".parse().unwrap());
         for host in hosts {
             assert_eq!(p.check(&net(host, 80)), Decision::Deny, "deny {deny}: {host}");
         }
     }
     // An allow rule does not apply to other representations of its address.
-    let p = RulePolicy::new().allow_net(Transports::TLS, "127.0.0.1".parse().unwrap());
+    let p = RulePolicy::new().allow_net(Transports::Tls, "127.0.0.1".parse().unwrap());
     assert_eq!(p.check(&net("0.0.0.0", 80)), Decision::Prompt);
 }
 
 #[test]
 fn net_pattern_edge_cases() {
     let p = RulePolicy::new()
-        .allow_net(Transports::TLS, "*.example.com".parse().unwrap())
-        .allow_net(Transports::TLS, "[fc00::]/7".parse().unwrap())
-        .allow_net(Transports::TLS, "[2001:db8::/32]:443".parse().unwrap())
-        .allow_net(Transports::TLS, "::ffff:10.0.0.0/104".parse().unwrap())
-        .deny_net(Transports::all(), "evil.com".parse().unwrap())
-        .deny_net(Transports::all(), "*.bad.org".parse().unwrap());
+        .allow_net(Transports::Tls, "*.example.com".parse().unwrap())
+        .allow_net(Transports::Tls, "[fc00::]/7".parse().unwrap())
+        .allow_net(Transports::Tls, "[2001:db8::/32]:443".parse().unwrap())
+        .allow_net(Transports::Tls, "::ffff:10.0.0.0/104".parse().unwrap())
+        .deny_net(Transports::Both, "evil.com".parse().unwrap())
+        .deny_net(Transports::Both, "*.bad.org".parse().unwrap());
     assert_eq!(p.check(&net("ab\u{e9}xample.com", 80)), Decision::Prompt);
     assert_eq!(p.check(&net("\u{e9}.example.com", 80)), Decision::Allow);
     assert_eq!(p.check(&net("api.example.com.", 80)), Decision::Allow);
     assert_eq!(
         RulePolicy::new()
-            .allow_net(Transports::TLS, "*".parse().unwrap())
-            .deny_net(Transports::all(), "evil.com".parse().unwrap())
+            .allow_net(Transports::Tls, "*".parse().unwrap())
+            .deny_net(Transports::Both, "evil.com".parse().unwrap())
             .check(&net("EVIL.com.", 80)),
         Decision::Deny
     );
     assert_eq!(
         RulePolicy::new()
-            .allow_net(Transports::TLS, "*".parse().unwrap())
-            .deny_net(Transports::all(), "*.bad.org".parse().unwrap())
+            .allow_net(Transports::Tls, "*".parse().unwrap())
+            .deny_net(Transports::Both, "*.bad.org".parse().unwrap())
             .check(&net("x.bad.org.", 80)),
         Decision::Deny
     );
@@ -228,7 +228,7 @@ fn private_address_classification() {
 
 #[test]
 fn wildcards_reach_every_destination() {
-    let p = RulePolicy::new().allow_net(Transports::TLS, "*".parse().unwrap());
+    let p = RulePolicy::new().allow_net(Transports::Tls, "*".parse().unwrap());
     for host in ["example.com", "127.0.0.1", "::ffff:127.0.0.1", "10.1.2.3", "169.254.169.254", "localhost", "app.localhost"] {
         assert_eq!(p.check(&net(host, 80)), Decision::Allow, "{host}");
         assert_eq!(p.check(&plain(host, 80)), Decision::Prompt, "{host} without TLS");
@@ -242,24 +242,24 @@ fn wildcards_reach_every_destination() {
 #[test]
 fn localhost_rules_restrict_the_names_under_localhost() {
     let p = RulePolicy::new()
-        .allow_net(Transports::PLAINTEXT, "*".parse().unwrap())
-        .deny_net(Transports::PLAINTEXT, "localhost".parse().unwrap())
-        .allow_net(Transports::TLS, "localhost:8080".parse().unwrap());
+        .allow_net(Transports::Plaintext, "*".parse().unwrap())
+        .deny_net(Transports::Plaintext, "localhost".parse().unwrap())
+        .allow_net(Transports::Tls, "localhost:8080".parse().unwrap());
     for host in ["localhost", "app.localhost", "A.B.LocalHost."] {
         assert_eq!(p.check(&plain(host, 5432)), Decision::Deny, "{host}");
     }
     assert_eq!(p.check(&net("localhost", 8080)), Decision::Allow);
     assert_eq!(p.check(&net("app.localhost", 8080)), Decision::Prompt, "an allow rule matches only its exact name");
     assert_eq!(p.check(&plain("localhost.example", 5432)), Decision::Allow);
-    let p = RulePolicy::new().allow_net(Transports::TLS, "*".parse().unwrap()).prompt_net(Transports::all(), "localhost".parse().unwrap());
+    let p = RulePolicy::new().allow_net(Transports::Tls, "*".parse().unwrap()).prompt_net(Transports::Both, "localhost".parse().unwrap());
     assert_eq!(p.check(&net("x.localhost", 443)), Decision::Prompt);
     let p = RulePolicy::new()
-        .allow_net(Transports::TLS, "app.localhost".parse().unwrap())
-        .deny_net(Transports::all(), "localhost".parse().unwrap());
+        .allow_net(Transports::Tls, "app.localhost".parse().unwrap())
+        .deny_net(Transports::Both, "localhost".parse().unwrap());
     assert_eq!(p.check(&net("app.localhost", 443)), Decision::Deny);
     let p = RulePolicy::new()
-        .allow_http(Transports::TLS, "app.localhost/api".parse().unwrap())
-        .deny_http(Transports::all(), "localhost/api/admin".parse().unwrap());
+        .allow_http(Transports::Tls, "app.localhost/api".parse().unwrap())
+        .deny_http(Transports::Both, "localhost/api/admin".parse().unwrap());
     let get = |host: &str, path: &str| Capability::Http {
         method: "GET".into(),
         scheme: "https".into(),
@@ -277,8 +277,8 @@ fn names_under_localhost_cannot_reach_a_denied_localhost() {
     let r = run_with(src, |c| {
         c.policy(
             RulePolicy::standard()
-                .allow_net(Transports::PLAINTEXT, "*".parse().unwrap())
-                .deny_net(Transports::PLAINTEXT, "localhost".parse().unwrap()),
+                .allow_net(Transports::Plaintext, "*".parse().unwrap())
+                .deny_net(Transports::Plaintext, "localhost".parse().unwrap()),
         )
     });
     assert_eq!(r.ok_stdout(), "permission_denied\npermission denied: connect to app.localhost:5432 (plaintext)\n");
@@ -287,7 +287,7 @@ fn names_under_localhost_cannot_reach_a_denied_localhost() {
 #[test]
 fn transports_filter_raw_connections_and_resolved_addresses() {
     let p =
-        RulePolicy::new().allow_net(Transports::all(), "*".parse().unwrap()).deny_net(Transports::PLAINTEXT, "10.0.0.0/8".parse().unwrap());
+        RulePolicy::new().allow_net(Transports::Both, "*".parse().unwrap()).deny_net(Transports::Plaintext, "10.0.0.0/8".parse().unwrap());
     let resolved =
         |tls: bool, addr: &str| p.check_resolved(&Capability::Net { host: "db.internal".into(), port: 5432, tls }, addr.parse().unwrap());
     assert_eq!(resolved(true, "10.0.0.5:5432"), Decision::Allow);
@@ -299,7 +299,7 @@ fn transports_filter_raw_connections_and_resolved_addresses() {
 
 #[test]
 fn deny_private_net_denies_every_private_address() {
-    let p = RulePolicy::new().allow_http(Transports::TLS, "*.example.com".parse().unwrap()).deny_private_net();
+    let p = RulePolicy::new().allow_http(Transports::Tls, "*.example.com".parse().unwrap()).deny_private_net();
     let get = Capability::Http { method: "GET".into(), scheme: "https".into(), host: "a.example.com".into(), port: 443, path: "/".into() };
     for addr in
         ["10.1.2.3:443", "127.0.0.1:443", "169.254.169.254:443", "192.0.2.1:443", "[::1]:443", "[fd00::1]:443", "[::ffff:10.0.0.1]:443"]
@@ -322,24 +322,24 @@ fn no_rule_allows_what_deny_private_net_denies() {
     let private: SocketAddr = "10.0.0.1:443".parse().unwrap();
     let p = RulePolicy::new()
         .deny_private_net()
-        .with_defaults(RulePolicy::new().allow_http(Transports::TLS, "db.example.com".parse().unwrap()));
+        .with_defaults(RulePolicy::new().allow_http(Transports::Tls, "db.example.com".parse().unwrap()));
     assert_eq!(p.check(&get("db.example.com")), Decision::Allow);
     assert_eq!(p.check_resolved(&get("db.example.com"), private), Decision::Deny);
     assert_eq!(p.check_resolved(&get("db.example.com"), "93.184.216.34:443".parse().unwrap()), Decision::Allow);
     let p = RulePolicy::new()
         .with_defaults(RulePolicy::new().deny_private_net())
-        .allow_http(Transports::TLS, "db.example.com".parse().unwrap());
+        .allow_http(Transports::Tls, "db.example.com".parse().unwrap());
     assert_eq!(p.check_resolved(&get("db.example.com"), private), Decision::Deny);
     let p = RulePolicy::new()
-        .allow_net(Transports::TLS, "10.0.0.5:5432".parse().unwrap())
-        .allow_http(Transports::TLS, "localhost".parse().unwrap())
+        .allow_net(Transports::Tls, "10.0.0.5:5432".parse().unwrap())
+        .allow_http(Transports::Tls, "localhost".parse().unwrap())
         .deny_private_net();
     assert_eq!(p.check(&net("10.0.0.5", 5432)), Decision::Deny);
     assert_eq!(p.check(&get("localhost")), Decision::Deny);
     // An ordinary address rule still yields to a more specific host rule.
     let p = RulePolicy::new()
-        .deny_net(Transports::all(), "10.0.0.0/8".parse().unwrap())
-        .with_defaults(RulePolicy::new().allow_http(Transports::TLS, "db.example.com".parse().unwrap()));
+        .deny_net(Transports::Both, "10.0.0.0/8".parse().unwrap())
+        .with_defaults(RulePolicy::new().allow_http(Transports::Tls, "db.example.com".parse().unwrap()));
     assert_eq!(p.check_resolved(&get("db.example.com"), private), Decision::Allow);
 }
 
@@ -354,8 +354,8 @@ fn http_address_rules_apply_to_resolved_addresses() {
     };
     let metadata: SocketAddr = "169.254.169.254:80".parse().unwrap();
     let p = RulePolicy::new()
-        .allow_http(Transports::PLAINTEXT, "*".parse().unwrap())
-        .deny_http(Transports::all(), "169.254.169.254".parse().unwrap());
+        .allow_http(Transports::Plaintext, "*".parse().unwrap())
+        .deny_http(Transports::Both, "169.254.169.254".parse().unwrap());
     assert_eq!(p.check_resolved(&get("GET", "metadata.evil.example", "/latest"), metadata), Decision::Deny);
     assert_eq!(p.check_resolved(&get("GET", "metadata.evil.example", "/latest"), "8.8.8.8:80".parse().unwrap()), Decision::Allow);
     let p = policy_text("allow http plaintext *\ndeny http 10.0.0.5/admin\nprompt http POST 10.0.0.5");
@@ -367,17 +367,16 @@ fn http_address_rules_apply_to_resolved_addresses() {
     assert_eq!(p.check_resolved(&get("POST", "app.example", "/public"), at), Decision::Deny);
     assert_eq!(p.check_resolved(&plain("app.example", 80), at), Decision::Allow);
     let p = RulePolicy::new()
-        .allow_http(Transports::PLAINTEXT, "db.internal".parse().unwrap())
-        .deny_net(Transports::all(), "10.0.0.0/8".parse().unwrap());
+        .allow_http(Transports::Plaintext, "db.internal".parse().unwrap())
+        .deny_net(Transports::Both, "10.0.0.0/8".parse().unwrap());
     assert_eq!(p.check_resolved(&get("GET", "db.internal", "/"), at), Decision::Allow);
     assert_eq!(p.check_resolved(&get("GET", "other.internal", "/"), at), Decision::Deny);
     let p = RulePolicy::new()
-        .allow_http(Transports::PLAINTEXT, "db.internal".parse().unwrap())
-        .deny_http(Transports::all(), "10.0.0.5".parse().unwrap());
+        .allow_http(Transports::Plaintext, "db.internal".parse().unwrap())
+        .deny_http(Transports::Both, "10.0.0.5".parse().unwrap());
     assert_eq!(p.check_resolved(&get("GET", "db.internal", "/"), at), Decision::Deny);
-    let p = RulePolicy::new()
-        .allow_http(Transports::PLAINTEXT, "*".parse().unwrap())
-        .deny_http(Transports::all(), "127.0.0.1".parse().unwrap());
+    let p =
+        RulePolicy::new().allow_http(Transports::Plaintext, "*".parse().unwrap()).deny_http(Transports::Both, "127.0.0.1".parse().unwrap());
     assert_eq!(p.check_resolved(&get("GET", "evil.example", "/"), "[::ffff:127.0.0.1]:80".parse().unwrap()), Decision::Deny);
     assert_eq!(p.check_resolved(&get("GET", "evil.example", "/"), "0.0.0.0:80".parse().unwrap()), Decision::Deny);
 }
@@ -385,9 +384,9 @@ fn http_address_rules_apply_to_resolved_addresses() {
 #[test]
 fn encoded_path_separators_are_checked_at_resolved_addresses() {
     let p = RulePolicy::new()
-        .allow_http(Transports::all(), "*".parse().unwrap())
-        .allow_http(Transports::PLAINTEXT, "api.example.com/*.txt".parse().unwrap())
-        .deny_net(Transports::all(), "10.0.0.0/8".parse().unwrap());
+        .allow_http(Transports::Both, "*".parse().unwrap())
+        .allow_http(Transports::Plaintext, "api.example.com/*.txt".parse().unwrap())
+        .deny_net(Transports::Both, "10.0.0.0/8".parse().unwrap());
     let get = |path: &str| Capability::Http {
         method: "GET".into(),
         scheme: "http".into(),
@@ -404,10 +403,10 @@ fn encoded_path_separators_are_checked_at_resolved_addresses() {
 #[test]
 fn explicit_host_rules_outrank_cidr_prefixes_at_resolved_addresses() {
     let p = RulePolicy::new()
-        .allow_net(Transports::TLS, "db.internal".parse().unwrap())
-        .allow_net(Transports::TLS, "*.corp.example".parse().unwrap())
-        .deny_net(Transports::all(), "10.0.0.0/8".parse().unwrap())
-        .deny_net(Transports::all(), "10.0.0.6".parse().unwrap());
+        .allow_net(Transports::Tls, "db.internal".parse().unwrap())
+        .allow_net(Transports::Tls, "*.corp.example".parse().unwrap())
+        .deny_net(Transports::Both, "10.0.0.0/8".parse().unwrap())
+        .deny_net(Transports::Both, "10.0.0.6".parse().unwrap());
     assert_eq!(p.check(&net_addr("db.internal", "10.0.0.5:5432")), Decision::Allow);
     assert_eq!(p.check(&net_addr("db.internal", "10.0.0.6:5432")), Decision::Deny);
     assert_eq!(p.check(&net_addr("db.corp.example", "10.0.0.5:5432")), Decision::Deny);
@@ -416,18 +415,18 @@ fn explicit_host_rules_outrank_cidr_prefixes_at_resolved_addresses() {
     for (allow, deny) in
         [("example.com", "169.254.169.254"), ("example.com:443", "169.254.169.254"), ("example.com", "169.254.169.254:443")]
     {
-        let p = RulePolicy::new().allow_net(Transports::TLS, allow.parse().unwrap()).deny_net(Transports::all(), deny.parse().unwrap());
+        let p = RulePolicy::new().allow_net(Transports::Tls, allow.parse().unwrap()).deny_net(Transports::Both, deny.parse().unwrap());
         assert_eq!(p.check_resolved(&net("example.com", 443), metadata), Decision::Deny, "allow net {allow}, deny net {deny}");
     }
     let p = RulePolicy::new()
-        .allow_net(Transports::TLS, "*.localhost".parse().unwrap())
-        .deny_net(Transports::all(), "127.0.0.0/8".parse().unwrap());
+        .allow_net(Transports::Tls, "*.localhost".parse().unwrap())
+        .deny_net(Transports::Both, "127.0.0.0/8".parse().unwrap());
     assert_eq!(p.check(&net_addr("app.localhost", "127.0.0.1:3000")), Decision::Allow);
     assert_eq!(p.check(&net_addr("example.com", "127.0.0.1:3000")), Decision::Deny);
     let p = RulePolicy::new()
-        .prompt_net(Transports::all(), "db.internal".parse().unwrap())
-        .allow_net(Transports::TLS, "*".parse().unwrap())
-        .prompt_net(Transports::all(), "93.184.0.0/16".parse().unwrap());
+        .prompt_net(Transports::Both, "db.internal".parse().unwrap())
+        .allow_net(Transports::Tls, "*".parse().unwrap())
+        .prompt_net(Transports::Both, "93.184.0.0/16".parse().unwrap());
     assert_eq!(p.check(&net("db.internal", 5432)), Decision::Prompt);
     assert_eq!(p.check(&net_addr("db.internal", "93.184.0.5:5432")), Decision::Allow);
     assert_eq!(p.check(&net_addr("example.com", "93.184.215.14:443")), Decision::Deny);
@@ -448,10 +447,10 @@ fn explicit_host_rules_outrank_cidr_prefixes_at_resolved_addresses() {
 #[test]
 fn rules_of_equal_specificity() {
     let p = RulePolicy::new()
-        .allow_net(Transports::TLS, "a.com".parse().unwrap())
-        .deny_net(Transports::all(), "a.com".parse().unwrap())
-        .allow_net(Transports::TLS, "b.com".parse().unwrap())
-        .prompt_net(Transports::all(), "b.com".parse().unwrap());
+        .allow_net(Transports::Tls, "a.com".parse().unwrap())
+        .deny_net(Transports::Both, "a.com".parse().unwrap())
+        .allow_net(Transports::Tls, "b.com".parse().unwrap())
+        .prompt_net(Transports::Both, "b.com".parse().unwrap());
     assert_eq!(p.check(&net("a.com", 80)), Decision::Deny);
     assert_eq!(p.check(&net("b.com", 80)), Decision::Allow);
     let p = RulePolicy::new().prompt_write("/out").allow_read("/out").deny_read("/out/secret");
@@ -459,12 +458,12 @@ fn rules_of_equal_specificity() {
     assert_eq!(p.check(&Capability::FsRead("/out/x".into())), Decision::Allow);
     assert_eq!(p.check(&Capability::FsRead("/out/secret".into())), Decision::Deny);
     let p = RulePolicy::new()
-        .deny_net(Transports::all(), "legacy.example".parse().unwrap())
-        .allow_net(Transports::PLAINTEXT, "legacy.example".parse().unwrap());
+        .deny_net(Transports::Both, "legacy.example".parse().unwrap())
+        .allow_net(Transports::Plaintext, "legacy.example".parse().unwrap());
     assert_eq!((p.check(&net("legacy.example", 80)), p.check(&plain("legacy.example", 80))), (Decision::Deny, Decision::Deny));
     let p = RulePolicy::new()
-        .deny_net(Transports::TLS, "legacy.example".parse().unwrap())
-        .allow_net(Transports::PLAINTEXT, "legacy.example".parse().unwrap());
+        .deny_net(Transports::Tls, "legacy.example".parse().unwrap())
+        .allow_net(Transports::Plaintext, "legacy.example".parse().unwrap());
     assert_eq!((p.check(&net("legacy.example", 80)), p.check(&plain("legacy.example", 80))), (Decision::Deny, Decision::Allow));
 }
 
@@ -479,15 +478,15 @@ fn default_rules_apply_only_to_unmatched_requests() {
     assert_eq!(p.check_normalized(&import), Decision::Prompt);
     assert_eq!(RulePolicy::standard().allow_import("/").check_normalized(&import), Decision::Allow);
     let get = Capability::Http { method: "GET".into(), scheme: "https".into(), host: "a.com".into(), port: 443, path: "/".into() };
-    let p = RulePolicy::new().prompt_http(Transports::all(), "*".parse().unwrap()).with_defaults(RulePolicy::allow_all());
+    let p = RulePolicy::new().prompt_http(Transports::Both, "*".parse().unwrap()).with_defaults(RulePolicy::allow_all());
     assert_eq!(p.check(&get), Decision::Prompt);
-    let defaults = RulePolicy::standard().allow_stdin().allow_net(Transports::TLS, "*".parse().unwrap()).allow_read("/data");
+    let defaults = RulePolicy::standard().allow_stdin().allow_net(Transports::Tls, "*".parse().unwrap()).allow_read("/data");
     let p =
-        RulePolicy::new().prompt_stdin().deny_net(Transports::all(), "*".parse().unwrap()).prompt_read("/data/x").with_defaults(defaults);
+        RulePolicy::new().prompt_stdin().deny_net(Transports::Both, "*".parse().unwrap()).prompt_read("/data/x").with_defaults(defaults);
     assert_eq!(p.check(&Capability::Stdin), Decision::Prompt);
     assert_eq!(p.check(&net("example.com", 443)), Decision::Deny);
     assert_eq!(p.check(&plain("example.com", 80)), Decision::Deny);
-    let tls_only = RulePolicy::new().with_defaults(RulePolicy::new().allow_net(Transports::TLS, "*".parse().unwrap()));
+    let tls_only = RulePolicy::new().with_defaults(RulePolicy::new().allow_net(Transports::Tls, "*".parse().unwrap()));
     assert_eq!(tls_only.check(&plain("example.com", 80)), Decision::Prompt);
     assert_eq!(p.check_normalized(&Capability::FsRead("/data/x/y".into())), Decision::Prompt);
     assert_eq!(p.check_normalized(&Capability::FsRead("/data/z".into())), Decision::Allow);
@@ -502,12 +501,12 @@ fn default_rules_apply_only_to_unmatched_requests() {
     let p = RulePolicy::new().prompt_env("SECRET".parse().unwrap()).with_defaults(RulePolicy::allow_all());
     assert_eq!(p.check(&all), Decision::Prompt);
     let metadata: SocketAddr = "169.254.169.254:80".parse().unwrap();
-    let floor = || RulePolicy::new().deny_net(Transports::all(), "169.254.0.0/16".parse().unwrap());
-    let p = RulePolicy::new().allow_net(Transports::all(), "*.example.com".parse().unwrap()).with_defaults(floor());
+    let floor = || RulePolicy::new().deny_net(Transports::Both, "169.254.0.0/16".parse().unwrap());
+    let p = RulePolicy::new().allow_net(Transports::Both, "*.example.com".parse().unwrap()).with_defaults(floor());
     assert_eq!(p.check_resolved(&plain("evil.example.com", 80), metadata), Decision::Deny);
-    let p = RulePolicy::new().allow_net(Transports::all(), "*".parse().unwrap()).with_defaults(floor());
+    let p = RulePolicy::new().allow_net(Transports::Both, "*".parse().unwrap()).with_defaults(floor());
     assert_eq!(p.check_resolved(&plain("evil.example", 80), metadata), Decision::Deny);
-    let p = RulePolicy::new().allow_net(Transports::all(), "meta.internal".parse().unwrap()).with_defaults(floor());
+    let p = RulePolicy::new().allow_net(Transports::Both, "meta.internal".parse().unwrap()).with_defaults(floor());
     assert_eq!(p.check_resolved(&plain("meta.internal", 80), metadata), Decision::Allow);
     let host = RulePolicy::new().prompt_write("/").with_defaults(RulePolicy::allow_all());
     let write = Capability::FsWrite("/tmp/x".into());
@@ -631,9 +630,9 @@ print(net.connect("127.1", {port}).unwrap_err().kind)
 "#
     );
     let policy = RulePolicy::standard()
-        .allow_net(Transports::all(), "*".parse().unwrap())
-        .deny_net(Transports::all(), "127.0.0.0/8".parse().unwrap())
-        .deny_net(Transports::all(), "[::1]".parse().unwrap());
+        .allow_net(Transports::Both, "*".parse().unwrap())
+        .deny_net(Transports::Both, "127.0.0.0/8".parse().unwrap())
+        .deny_net(Transports::Both, "[::1]".parse().unwrap());
     let r = run_with(&src, |c| c.policy(policy));
     let rule = "the rule `deny net 127.0.0.0/8`";
     assert_eq!(
@@ -668,12 +667,12 @@ print(net.connect("127.0.0.1", {port}).is_ok())
     );
     // `127.1` is allowed by name only through `*`; its address by the explicit IP rule.
     let policy = RulePolicy::standard()
-        .allow_net(Transports::all(), "*".parse().unwrap())
-        .deny_net(Transports::all(), "127.0.0.0/8".parse().unwrap())
-        .deny_net(Transports::all(), "[::1]".parse().unwrap())
-        .allow_net(Transports::PLAINTEXT, format!("127.0.0.1:{port}").parse().unwrap())
-        .allow_net(Transports::PLAINTEXT, "localhost".parse().unwrap())
-        .allow_net(Transports::PLAINTEXT, "*.localhost".parse().unwrap());
+        .allow_net(Transports::Both, "*".parse().unwrap())
+        .deny_net(Transports::Both, "127.0.0.0/8".parse().unwrap())
+        .deny_net(Transports::Both, "[::1]".parse().unwrap())
+        .allow_net(Transports::Plaintext, format!("127.0.0.1:{port}").parse().unwrap())
+        .allow_net(Transports::Plaintext, "localhost".parse().unwrap())
+        .allow_net(Transports::Plaintext, "*.localhost".parse().unwrap());
     let r = run_with(&src, |c| c.policy(policy));
     assert_eq!(r.ok_stdout(), "Ok(\"hi\")\nOk(\"hi\")\nOk(\"hi\")\nOk(\"hi\")\ntrue\n");
 }
@@ -691,10 +690,10 @@ fn redirects_to_denied_addresses_are_denied() {
     });
     // The origin is allowed explicitly; the redirect targets only by the wildcard.
     let policy = RulePolicy::standard()
-        .allow_net(Transports::all(), "*".parse().unwrap())
-        .deny_net(Transports::all(), "127.0.0.0/8".parse().unwrap())
-        .deny_net(Transports::all(), "[::1]".parse().unwrap())
-        .allow_net(Transports::PLAINTEXT, format!("{}", origin.addr).parse().unwrap());
+        .allow_net(Transports::Both, "*".parse().unwrap())
+        .deny_net(Transports::Both, "127.0.0.0/8".parse().unwrap())
+        .deny_net(Transports::Both, "[::1]".parse().unwrap())
+        .allow_net(Transports::Plaintext, format!("{}", origin.addr).parse().unwrap());
     let src = format!(
         "import http\nprint(http.get(\"http://{0}/name\").unwrap_err().kind)\nprint(http.get(\"http://{0}/local\").unwrap_err().kind)",
         origin.addr
@@ -728,7 +727,7 @@ fn prompt_answers_do_not_override_address_rules() {
         .to_string()
     };
     assert_eq!(run(RulePolicy::standard()), "Ok(\"hi\")\nOk(\"hi\")\n");
-    let out = run(RulePolicy::standard().deny_net(Transports::PLAINTEXT, "127.0.0.0/8".parse().unwrap()));
+    let out = run(RulePolicy::standard().deny_net(Transports::Plaintext, "127.0.0.0/8".parse().unwrap()));
     let lines: Vec<&str> = out.lines().collect();
     // `localhost` is also resolved to `::1`, which the server does not listen on.
     assert!(lines[0].starts_with("Err("), "{out}");
@@ -786,8 +785,8 @@ fn pooled_connections_are_reused_only_at_addresses_allowed_for_the_request() {
     let network = Arc::new(KeepAliveNetwork { addrs: vec![addr], connected: connected.clone() });
     let policy = RulePolicy::standard()
         .extend(policy_text("allow http plaintext GET api.example.com/a"))
-        .allow_http(Transports::PLAINTEXT, "*".parse().unwrap())
-        .deny_net(Transports::PLAINTEXT, "10.0.0.0/8".parse().unwrap());
+        .allow_http(Transports::Plaintext, "*".parse().unwrap())
+        .deny_net(Transports::Plaintext, "10.0.0.0/8".parse().unwrap());
     let src = r#"
 import http
 print(http.get("http://api.example.com/a")?.text()?)
@@ -843,9 +842,9 @@ fn custom_policies_see_the_transport_of_resolved_addresses() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let rules = RulePolicy::standard()
-        .allow_net(Transports::PLAINTEXT, "*".parse().unwrap())
-        .deny_net(Transports::PLAINTEXT, "127.0.0.0/8".parse().unwrap())
-        .deny_net(Transports::PLAINTEXT, "::1".parse().unwrap());
+        .allow_net(Transports::Plaintext, "*".parse().unwrap())
+        .deny_net(Transports::Plaintext, "127.0.0.0/8".parse().unwrap())
+        .deny_net(Transports::Plaintext, "::1".parse().unwrap());
     let src = format!("import net\nprint(net.connect(\"localhost\", {port}).map_err(e => e.message))");
     let r = run_with(&src, |c| c.custom_policy(move |cap: &Capability| rules.check(cap)));
     assert_eq!(

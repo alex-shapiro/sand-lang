@@ -95,24 +95,40 @@ impl NameKind {
     }
 }
 
-bitflags::bitflags! {
-    /// The transports that a `net` or `http` rule controls.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-    pub struct Transports: u8 {
-        const TLS = 1;
-        const PLAINTEXT = 2;
-    }
+/// The transports that a `net` or `http` rule controls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Transports {
+    Tls,
+    Plaintext,
+    Both,
 }
 
 impl Transports {
     pub(crate) fn of(tls: bool) -> Transports {
-        if tls { Transports::TLS } else { Transports::PLAINTEXT }
+        if tls { Transports::Tls } else { Transports::Plaintext }
     }
 
-    /// Default transport mask if a rule omits transport keywords: `TLS` for
-    /// `Allow`, and `TLS | PLAINTEXT` for `Deny` or `Prompt`.
+    /// The transports of a rule without transport keywords: `Tls` for `Allow`, and `Both`
+    /// for `Deny` or `Prompt`.
     pub(crate) fn default_for(decision: Decision) -> Transports {
-        if decision == Decision::Allow { Transports::TLS } else { Transports::all() }
+        if decision == Decision::Allow { Transports::Tls } else { Transports::Both }
+    }
+
+    /// Returns `true` if a connection with or without TLS, as `tls` gives, uses one of these transports.
+    pub(crate) fn carry(self, tls: bool) -> bool {
+        self.contains(Transports::of(tls))
+    }
+
+    pub(crate) fn contains(self, other: Transports) -> bool {
+        self == Transports::Both || self == other
+    }
+
+    pub(crate) fn intersects(self, other: Transports) -> bool {
+        self == Transports::Both || other == Transports::Both || self == other
+    }
+
+    pub(crate) fn union(self, other: Transports) -> Transports {
+        if self == other { self } else { Transports::Both }
     }
 }
 
@@ -262,7 +278,7 @@ impl RulePolicy {
         let rules = [
             RuleKind::Files(Access::Any, PathPattern::everything()),
             RuleKind::Files(Access::Import, PathPattern::everything()),
-            RuleKind::Net(NetPattern { kind: HostKind::Any, port: None }, Transports::all()),
+            RuleKind::Net(NetPattern { kind: HostKind::Any, port: None }, Transports::Both),
             RuleKind::Listen(ListenPattern::ANY),
             RuleKind::Env(NameKind::Any),
             RuleKind::Stdin,
@@ -388,7 +404,7 @@ impl RulePolicy {
         let localhost = NetPattern { kind: HostKind::Host("localhost".into()), port: None };
         let patterns = std::iter::once(localhost).chain(internal_ranges().iter().cloned());
         patterns.fold(self, |p, pattern| {
-            p.push_rule(Rule { tier: Tier::Absolute, ..Rule::new(Decision::Deny, RuleKind::Net(pattern, Transports::all())) })
+            p.push_rule(Rule { tier: Tier::Absolute, ..Rule::new(Decision::Deny, RuleKind::Net(pattern, Transports::Both)) })
         })
     }
     /// Allows binding a listener to an address that matches `pattern`.
@@ -563,10 +579,10 @@ impl RulePolicy {
                 self.resolve(decider, address)
             });
         }
-        let transport = Transports::of(uses_tls(request));
+        let tls = uses_tls(request);
         let mut best = Best::new(self, &[]);
         index.resolved.find_ip(ip, addr.port(), |is_alt, e| {
-            if matches_address_form(e.decision, is_alt) && e.transports.contains(transport) {
+            if matches_address_form(e.decision, is_alt) && e.transports.carry(tls) {
                 best.offer(e.rank.spec(0), e.decision, e.rule);
             }
         });
@@ -700,9 +716,8 @@ impl RulePolicy {
     }
 
     fn net_verdict(&self, dest: &Dest, tls: bool, best: &mut Best<'_>) {
-        let transport = Transports::of(tls);
         self.non_file_index().named.find(dest, |is_alt, e| {
-            if matches_address_form(e.decision, is_alt) && e.transports.contains(transport) {
+            if matches_address_form(e.decision, is_alt) && e.transports.carry(tls) {
                 best.offer(e.rank.spec(0), e.decision, e.rule);
             }
         });
@@ -732,9 +747,8 @@ impl RulePolicy {
         let mut folded_names = None;
         find(&mut |is_alt, &group| {
             let group = &index.groups[group as usize];
-            let transport = Transports::of(tls);
             let mut offer = |e: &HttpEntry, depth: usize| {
-                if method_matches(e.methods.as_deref(), &method) && e.transports.contains(transport) {
+                if method_matches(e.methods.as_deref(), &method) && e.transports.carry(tls) {
                     best.offer(e.rank.spec(depth), e.decision, e.rule);
                 }
             };

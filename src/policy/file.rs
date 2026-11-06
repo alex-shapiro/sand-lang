@@ -282,9 +282,9 @@ fn quote(s: &str) -> String {
 
 pub(crate) fn transport(word: &str) -> Option<Transports> {
     if word.eq_ignore_ascii_case("tls") {
-        Some(Transports::TLS)
+        Some(Transports::Tls)
     } else if word.eq_ignore_ascii_case("plaintext") {
-        Some(Transports::PLAINTEXT)
+        Some(Transports::Plaintext)
     } else {
         None
     }
@@ -592,7 +592,7 @@ impl Context<'_> {
             return Ok(());
         }
         let mut methods: Option<Vec<String>> = None;
-        let mut transports = Transports::empty();
+        let mut transports: Option<Transports> = None;
         let mut urls = 0;
         for item in rest_args {
             for word in &self.expand(item)? {
@@ -605,7 +605,7 @@ impl Context<'_> {
                             let hosts = if kind == "http" { "URL patterns" } else { "hosts" };
                             return Err((item.column, format!("put `tls` and `plaintext` before the {hosts}")));
                         }
-                        transports |= t;
+                        transports = Some(transports.map_or(t, |all| all.union(t)));
                         continue;
                     }
                     if urls == 0
@@ -614,7 +614,7 @@ impl Context<'_> {
                         return Err((item.column, hint));
                     }
                 }
-                let transports = if transports.is_empty() { Transports::default_for(decision) } else { transports };
+                let transports = transports.unwrap_or(Transports::default_for(decision));
                 let origin = Origin { line, column: item.column, text: word.render() };
                 let kind = match kind {
                     "files" | "read" | "write" | "import" => {
@@ -780,8 +780,8 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
         Capability::Http { method, scheme, host, port, path } => {
             let (names, alt) = url_segments(path);
             let transport_word = match scheme.as_str() {
-                "https" => transport_words(Transports::TLS, decision),
-                "http" => transport_words(Transports::PLAINTEXT, decision),
+                "https" => transport_words(Transports::Tls, decision),
+                "http" => transport_words(Transports::Plaintext, decision),
                 _ => return None,
             };
             let method = method.to_ascii_uppercase();
@@ -894,13 +894,12 @@ fn is_numeric_prefix(seg: &Seg) -> bool {
 
 fn transport_words(transports: Transports, decision: Decision) -> &'static str {
     if transports == Transports::default_for(decision) {
-        ""
-    } else if transports == Transports::TLS {
-        "tls "
-    } else if transports == Transports::PLAINTEXT {
-        "plaintext "
-    } else {
-        "tls plaintext "
+        return "";
+    }
+    match transports {
+        Transports::Tls => "tls ",
+        Transports::Plaintext => "plaintext ",
+        Transports::Both => "tls plaintext ",
     }
 }
 

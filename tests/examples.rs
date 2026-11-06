@@ -277,7 +277,7 @@ fn http_client_fetches_and_parses_a_page() {
         _ => HttpResponse::new(404, "not found"),
     });
     let base = format!("http://{}", server.addr);
-    let policy = RulePolicy::standard().allow_net(Transports::PLAINTEXT, format!("{}", server.addr).parse().unwrap());
+    let policy = RulePolicy::standard().allow_net(Transports::Plaintext, format!("{}", server.addr).parse().unwrap());
     let o = run_example(
         "http_fetch.sand",
         &[&format!("{base}/old"), &format!("{base}/missing"), &format!("{base}/data.json")],
@@ -448,7 +448,7 @@ fn s3_client_against_mock_server() {
         ];
         let policy = RulePolicy::standard()
             .allow_import(example("s3"))
-            .allow_net(Transports::PLAINTEXT, format!("{}", server.addr).parse().unwrap())
+            .allow_net(Transports::Plaintext, format!("{}", server.addr).parse().unwrap())
             .allow_read(dir.path())
             .allow_write(dir.path())
             .allow_env("AWS_ACCESS_KEY_ID".parse().unwrap())
