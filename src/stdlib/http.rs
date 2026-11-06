@@ -759,7 +759,10 @@ impl Outcome for Exchange {
                     match crate::platform::timeout(&*body.clock, body.timeout, reader.read_all(&mut head_res)).await {
                         Some(Ok(data)) => HttpOutcome::Response { status, headers, body: data },
                         Some(Err(e)) => HttpOutcome::Failed { kind: e.kind.to_string(), message: e.message },
-                        None => HttpOutcome::Failed { kind: "timeout".into(), message: format!("reading the response from {} timed out", body.url) },
+                        None => HttpOutcome::Failed {
+                            kind: "timeout".into(),
+                            message: format!("reading the response from {} timed out", body.url),
+                        },
                     }
                 }
                 Err(e) => HttpOutcome::Failed { kind: e.kind.to_string(), message: e.message },

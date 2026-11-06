@@ -255,8 +255,10 @@ impl Claim {
         let slot = match buffers {
             None => None,
             Some(buffers) => {
-                let mut slot = ResourceSlot::try_new(&mem).ok_or_else(|| format!("too many open resources (limit {})", mem.max_resources()))?;
-                slot.reserve_buffers(buffers).map_err(|e| format!("cannot open a connection: its buffers ({buffers} bytes) do not fit: {e}"))?;
+                let mut slot =
+                    ResourceSlot::try_new(&mem).ok_or_else(|| format!("too many open resources (limit {})", mem.max_resources()))?;
+                slot.reserve_buffers(buffers)
+                    .map_err(|e| format!("cannot open a connection: its buffers ({buffers} bytes) do not fit: {e}"))?;
                 Some(slot)
             }
         };

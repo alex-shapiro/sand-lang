@@ -1062,7 +1062,11 @@ impl Vm {
     /// the recorded result without running `f`. Without a journal, returns
     /// what `f` returns. The value must be plain data (see
     /// [`encode_value`]).
-    pub(crate) fn input(&mut self, describe: impl FnOnce(&Vm) -> Result<(u64, String), Ctl>, f: impl FnOnce(&mut Vm) -> NResult) -> NResult {
+    pub(crate) fn input(
+        &mut self,
+        describe: impl FnOnce(&Vm) -> Result<(u64, String), Ctl>,
+        f: impl FnOnce(&mut Vm) -> NResult,
+    ) -> NResult {
         if self.journal.is_none() {
             return f(self);
         }
@@ -1282,7 +1286,12 @@ impl Vm {
                     let msg = if s.kind == kind && s.label == label {
                         format!("the run starts {} `{label}` with other arguments than the journal records", kind.name())
                     } else {
-                        format!("the run starts {} `{label}` where the journal records the start of {} `{}`", kind.name(), s.kind.name(), s.label)
+                        format!(
+                            "the run starts {} `{label}` where the journal records the start of {} `{}`",
+                            kind.name(),
+                            s.kind.name(),
+                            s.label
+                        )
                     };
                     return Err(stop(JournalStop::Diverged { seq, message: msg }));
                 }
@@ -1317,7 +1326,8 @@ impl Vm {
         let replayed = match j.take(EntryKind::Start, &what).map_err(stop)? {
             Some(EntryData::Start(s)) if s.kind == OpKind::Local => true,
             Some(EntryData::Start(s)) => {
-                let message = format!("the run waits for a local operation where the journal records the start of {} `{}`", s.kind.name(), s.label);
+                let message =
+                    format!("the run waits for a local operation where the journal records the start of {} `{}`", s.kind.name(), s.label);
                 return Err(stop(JournalStop::Diverged { seq, message }));
             }
             _ => {
