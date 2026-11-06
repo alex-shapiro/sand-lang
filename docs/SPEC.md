@@ -1795,19 +1795,17 @@ or `deny http tls GET example.com:443/a`.
 
 Configurable per engine:
 
-| Limit                | Default    | Effect when exceeded                                                                                                                                           |
-| -------------------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `max_memory`         | 512 MiB    | run fails: `memory limit exceeded` (I/O whose buffers do not fit fails with kind `"limit"`)                                                                    |
-| `max_instructions`   | unlimited  | run fails: `instruction limit exceeded` (counted in fuel units, §15.2)                                                                                         |
-| `max_cpu_time`       | unlimited  | run fails: `cpu time limit exceeded` (the engine thread's CPU time executing, excluding waits and prompts; without a thread CPU clock, elapsed time executing) |
-| `max_wall_time`      | unlimited  | run fails: `time limit exceeded` (elapsed time for compilation and execution, excluding waits for permission prompts and for the user, §16.2)                  |
-| `max_call_depth`     | 10,000     | fails: `limit: stack overflow`                                                                                                                                 |
-| `max_tasks`          | 10,000     | `spawn` fails: `limit: task limit exceeded`                                                                                                                    |
-| `max_open_resources` | 1,024      | opening files, connect/listen/accept and HTTP requests fail with kind `"limit"` (after a collection, §10.8; pending operations' sockets count)                 |
-| `max_output_bytes`   | unlimited  | writes fail: `output limit exceeded`                                                                                                                           |
-| `max_http_body`      | 64 MiB     | HTTP read fails with kind `"limit"`                                                                                                                            |
-| `max_source_bytes`   | 16 MiB     | compile error: `source too large` (the main file and all imported scripts together; the standard library is not counted)                                       |
-| `max_compile_fuel`   | 10,000,000 | compile error: `program too complex to compile` (§15.3)                                                                                                        |
+- `max_memory` (default: 512 MiB): if exceeded, the run fails with `memory limit exceeded`. I/O operations whose buffers do not fit fail with kind `"limit"`.
+- `max_instructions` (default: unlimited): if exceeded, the run fails with `instruction limit exceeded`. Instructions are counted in fuel units (§15.2).
+- `max_cpu_time` (default: unlimited): if exceeded, the run fails with `cpu time limit exceeded`. This limit measures the CPU execution time of the engine thread, excluding I/O waits and permission prompts. On platforms without a thread CPU clock, it measures elapsed execution time.
+- `max_wall_time` (default: unlimited): if exceeded, the run fails with `time limit exceeded`. This limit measures elapsed time across compilation and execution, excluding waits for permission prompts and user actions (§16.2).
+- `max_call_depth` (default: 10,000): if exceeded, execution fails with `limit: stack overflow`.
+- `max_tasks` (default: 10,000): if exceeded, `spawn` fails with `limit: task limit exceeded`.
+- `max_open_resources` (default: 1,024): if exceeded after garbage collection (§10.8), opening a file, connecting, listening, accepting a connection, or sending an HTTP request fails with kind `"limit"`. Sockets held by pending operations count toward this limit.
+- `max_output_bytes` (default: unlimited): if exceeded, writes fail with `output limit exceeded`.
+- `max_http_body` (default: 64 MiB): if exceeded, HTTP reads fail with kind `"limit"`.
+- `max_source_bytes` (default: 16 MiB): if exceeded across the main file and all imported scripts, compilation fails with `source too large`. The standard library does not count toward this limit.
+- `max_compile_fuel` (default: 10,000,000): if exceeded, compilation fails with `program too complex to compile` (§15.3).
 
 Memory is the engine's accounting, enforced after garbage collection, of
 live heap objects (with their buffers and map and set indexes), freed heap
@@ -2006,32 +2004,30 @@ into a running script. `Config::stdout` and `Config::stderr` redirect script
 output to an `OutputSink`, while `Config::stdin_bytes`, `Config::inherit_stdin`
 with feature `os`, and `Config::stdin_feed` configure standard input.
 
-A `StdinFeed` supplies standard input while a script runs. It serves two kinds
-of hosts:
+A `StdinFeed` supplies standard input while a script runs. It supports two host
+models:
 
-- A terminal host waits for `StdinFeed::wanted` and then sends what the user
-  types with `StdinFeed::send`. `wanted` completes when a read waits for input
-  and no other task can run. Sent data stays queued across reads until scripts
-  read it. `StdinFeed::end` adds an end of input to the queue, and the read
-  that reaches it gets the end of input.
-- An app with its own input field shows the field while a read waits. Each
-  read that can wait has a new `ReadId`. `StdinFeed::awaited` returns the
-  `ReadId` of the read that waits for input, also while other tasks run, and
+- Terminal hosts wait for `StdinFeed::wanted` and send user input with
+  `StdinFeed::send`. `wanted` is resolved if a read waits for input and all
+  other tasks are idle. Queued data persists across reads until a script consumes
+  it. `StdinFeed::end` queues an end-of-input marker for the next read that
+  reaches it.
+- Interactive applications display an input prompt while a read waits. Each read
+  that can wait receives a unique `ReadId`. `StdinFeed::awaited` returns the
+  `ReadId` of the waiting read even if other tasks are running.
   `StdinFeed::awaited_changed` waits until that value changes.
-  `StdinFeed::answer(read, data)` submits `data` to that read only, as a user
-  who types `data` and presses Return: the read gets `data`, a line end, and
-  an end of input, so a read of any kind completes. `StdinFeed::dismiss(read)`
-  gives the read only an end of input, so `read_line` returns `None`. Each
-  read takes one answer; both functions return false if the read does not
-  wait for input. The engine discards the part of an answer that the read does
-  not use.
+  `StdinFeed::answer(read, data)` supplies `data`, a newline, and an
+  end-of-input marker to `read` so that any read operation completes.
+  `StdinFeed::dismiss(read)` supplies only an end-of-input marker, which causes
+  `read_line` to return `None`. Each read accepts at most one response; both
+  methods return `false` if `read` is not waiting for input. Any unread bytes
+  from the response are discarded when `read` finishes.
 
-A read of standard input from a `StdinFeed` waits for the user. So does a read
-of an inherited standard input that is a terminal; a read of a pipe or a file
-does not. A host native waits for the user if it returns `Later::for_user`
-(§16.3). While a task waits for the user and no
-task can run, the time does not count toward `max_wall_time`. The time that
-the engine runs other tasks counts.
+Time spent waiting for user input while all other tasks are idle does not count
+toward `max_wall_time`. Time spent running other tasks still counts. User input
+waits include reads from a `StdinFeed`, reads from an inherited terminal
+standard input (excluding pipes and files), and host functions that return
+`Later::for_user` (§16.3).
 
 The host can intercept and filter structured log records instead of
 writing them to standard error. `Config::log_sink` routes records to a
@@ -2147,8 +2143,8 @@ kind: kind))` in Sand, whereas `?` converts a `Ctl` into a `HostError` that
   or an exit code.
 - `Result<Later<T, E>, E>` suspends the calling task on a future and maps to
   the same Sand return type as `Result<T, E>`. Use `Later::for_user` instead
-  of `Later::new` for a future that completes when the user acts, so that the
-  wait does not count toward `max_wall_time` (§16.2).
+  of `Later::new` if the future waits for a user action, so that idle wait time
+  does not count toward `max_wall_time` (§16.2).
 
 To check a sandbox capability inside a `vm_function`, call
 `Vm::require(&capability)` (§14), which returns an error of kind

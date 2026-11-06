@@ -1015,7 +1015,7 @@ fn answer_targets_specific_read() {
     assert_eq!(value.unwrap().as_deref(), Some("[Some(\"x\"), Some(\"y\")]"));
 }
 
-/// Evaluates `src` and answers each stdin read it awaits with `respond`.
+/// Evaluates `src` and responds to each awaited stdin read with `respond`.
 fn answered(src: &str, respond: impl Fn(&StdinFeed, ReadId)) -> String {
     let feed = StdinFeed::new();
     let mut r = Repl::with(Config::new().policy(RulePolicy::allow_all()).stdin_feed(&feed));

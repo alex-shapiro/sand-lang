@@ -60,10 +60,11 @@ The host cannot rely on engine limits, stability, or control.
 - [ ] 🔴 [040](triage/040-live-policy-needs-custom-policy/summary.md) _Policy._ Support shared, dynamically updatable `RulePolicy` instances and remove
       `CustomPolicy` after host applications migrate to rule policies.
 - [ ] ❓ _Embedding._ Give each engine that reads a `StdinFeed` its own read
-      state. The feed keeps one active read, one waiting flag, and one idle
-      flag, so when two engines share a feed through a cloned `Config` and
-      read at the same time, one read's end clears the other's state:
-      `awaited` returns `None` and `answer` returns false while a read waits.
+      state. `StdinFeed` keeps only one active read, one waiting flag, and one
+      idle flag. If two engines share a feed through a cloned `Config` and read
+      at the same time, ending one read clears the state of the other. As a
+      result, `awaited` returns `None` and `answer` returns `false` while the
+      second read is still waiting.
 - [ ] 🔴 [015](triage/015-web-stop-busy-engine/summary.md) _Web._ Stopping a busy engine in the browser terminates its worker because
       `Engine::interrupt` only reaches an engine that is waiting. With
       cross-origin isolation, store the interrupt flag in a

@@ -251,8 +251,8 @@ impl Drop for RunTimer {
 }
 
 impl Vm {
-    /// Moves the wall-time deadline later by the time since `since`, so that
-    /// the time does not count toward the limit.
+    /// Advances the wall-time deadline by the time elapsed since `since` so
+    /// that the wait does not count toward the limit.
     fn exclude_wall_time(&mut self, since: Instant, timer: &RunTimer) {
         if let Some(deadline) = &mut self.deadline {
             *deadline += timer.now().saturating_duration_since(since);

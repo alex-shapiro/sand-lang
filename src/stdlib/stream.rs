@@ -37,8 +37,8 @@ pub(crate) fn suspend<T: Send + 'static, R: IntoValue + Send + 'static>(
     Ok(Later::new(settle(fut, ok)))
 }
 
-/// Waits for `fut`, and returns the closure that runs `ok` with its result
-/// on the VM thread.
+/// Awaits `fut` and returns a closure that runs `ok` with the result on the VM
+/// thread.
 pub(crate) async fn settle<T, R>(
     fut: impl Future<Output = Result<T, IoFailure>>,
     ok: impl FnOnce(&mut Vm, T) -> Result<R, HostError>,

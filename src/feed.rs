@@ -74,11 +74,10 @@ impl StdinFeed {
         self.shared.push(Chunk { target: None, data: None });
     }
 
-    /// Submits `data` as the answer to `read`, as a user who types `data` and
-    /// presses Return. The read gets `data`, a line end if `data` does not end
-    /// with one, and then an end of input, so a read of any kind completes.
-    /// The engine discards the part of the answer that the read does not use.
-    /// Returns `false` if `read` does not wait for input.
+    /// Submits `data`, a newline, and an end-of-input marker as the response to
+    /// `read`. This completes any type of read operation, and the engine
+    /// discards any unread bytes when `read` finishes. Returns `false` if
+    /// `read` is not waiting for input.
     pub fn answer(&self, read: ReadId, data: impl Into<Vec<u8>>) -> bool {
         let mut data = data.into();
         if !data.ends_with(b"\n") {
@@ -87,8 +86,8 @@ impl StdinFeed {
         self.shared.submit(read, Some(data))
     }
 
-    /// Gives `read` an end of input, so `read_line` returns `None`. Returns
-    /// `false` if `read` does not wait for input.
+    /// Submits an end-of-input marker to `read` so that `read_line` returns
+    /// `None`. Returns `false` if `read` is not waiting for input.
     pub fn dismiss(&self, read: ReadId) -> bool {
         self.shared.submit(read, None)
     }
@@ -99,7 +98,7 @@ impl StdinFeed {
         self.shared.lock().wanted()
     }
 
-    /// Waits until [`StdinFeed::is_wanted`] becomes `true`.
+    /// Waits until [`StdinFeed::is_wanted`] is `true`.
     pub async fn wanted(&self) {
         self.wait_until(|state| state.wanted().then_some(())).await;
     }
@@ -231,7 +230,7 @@ impl FedReader {
         FedReader { shared: feed.shared(), buf: Vec::new(), buf_target: None, at: 0, ended: false }
     }
 
-    /// Starts a read that can wait for input, and gives it the next
+    /// Starts a read that can wait for input and assigns it the next
     /// [`ReadId`].
     pub(crate) fn begin(&mut self) -> ReadOp {
         self.reset();
@@ -243,8 +242,8 @@ impl FedReader {
         ReadOp(self.shared.clone(), read_id)
     }
 
-    /// Prepares a read that does not wait: an end of input or an answer from
-    /// an earlier read is over.
+    /// Clears EOF state and discards any remaining targeted bytes from a
+    /// previous read.
     pub(crate) fn reset(&mut self) {
         self.ended = false;
         if self.buf_target.is_some() {

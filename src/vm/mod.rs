@@ -64,13 +64,12 @@ const _: () = assert!(std::mem::size_of::<Ctl>() == std::mem::size_of::<usize>()
 const _: () = assert!(std::mem::size_of::<Result<Value, Ctl>>() == 16);
 const _: () = assert!(std::mem::size_of::<Result<Option<Value>, Ctl>>() == 16);
 
-/// What a suspended task waits for.
+/// Cause of a task suspension.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WaitKind {
-    /// I/O or a timer. The time counts toward the wall-time limit.
+    /// I/O operation or timer. Elapsed time counts toward the wall-time limit.
     Io,
-    /// An action of the user. While the engine has nothing else to run, the
-    /// time does not count toward the wall-time limit.
+    /// User action. Idle wait time does not count toward the wall-time limit.
     User,
 }
 
@@ -487,7 +486,7 @@ pub struct Host {
     pub stdin: Arc<tokio::sync::Mutex<StdinSource>>,
     /// The feed of a [`StdinSource::Fed`], told when the VM waits.
     pub(crate) stdin_feed: Option<Arc<crate::feed::Shared>>,
-    /// Whether a read of `stdin` waits for the user.
+    /// Wait category for standard input reads.
     pub(crate) stdin_wait: WaitKind,
     pub output_bytes: u64,
     pub limits: Limits,

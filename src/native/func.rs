@@ -106,10 +106,9 @@ impl<T: IntoValue + Send + 'static, E: NativeError> Later<T, E> {
         Later::waiting(fut, WaitKind::Io)
     }
 
-    /// Like [`Later::new`], for a future that completes when the user acts
-    /// (types a line, taps a control). While the engine has nothing else to
-    /// run, the time that it waits for the user does not count toward the
-    /// wall-time limit.
+    /// Suspends the calling task until `fut` is resolved for a user action, and
+    /// then runs the returned closure on the VM thread. Idle wait time does not
+    /// count toward the wall-time limit.
     pub fn for_user<F>(fut: impl Future<Output = F> + Send + 'static) -> Later<T, E>
     where
         F: FnOnce(&mut Vm) -> Result<T, E> + Send + 'static,
