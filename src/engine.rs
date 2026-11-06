@@ -15,9 +15,7 @@ use crate::types::{FnId, ModId};
 use crate::vm::bytecode::Program;
 use crate::vm::heap::GcStats;
 use crate::vm::sched::{IoShared, IoTable, RunEnd};
-use crate::vm::{
-    Always, Host, HostFn, NativeEntry, OutputSink, Rng, SharedSink, StdinSource, TraceEntry, Trap, Vm, VmStdin, WaitKind, entropy_seed,
-};
+use crate::vm::{Always, Host, HostFn, NativeEntry, OutputSink, Rng, SharedSink, StdinSource, TraceEntry, Trap, Vm, VmStdin, entropy_seed};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -221,7 +219,7 @@ enum StdinConfig {
     Bytes(Vec<u8>),
     #[cfg(feature = "os")]
     Inherit {
-        wait_kind: WaitKind,
+        wait_kind: crate::WaitKind,
     },
 }
 
@@ -391,10 +389,10 @@ impl Config {
     }
     /// Uses the standard input of the process. `wait_kind` tells what a read
     /// waits for: if a user types the input, for example at a terminal, use
-    /// [`WaitKind::User`], so that the wait does not count toward
+    /// [`crate::WaitKind::User`], so that the wait does not count toward
     /// `max_wall_time` while no task can run.
     #[cfg(feature = "os")]
-    pub fn inherit_stdin(mut self, wait_kind: WaitKind) -> Self {
+    pub fn inherit_stdin(mut self, wait_kind: crate::WaitKind) -> Self {
         self.stdin = StdinConfig::Inherit { wait_kind };
         self
     }
