@@ -781,6 +781,9 @@ fn encode_into(vm: &Vm, v: Value, w: &mut Writer, depth: usize, enc: Encoding) -
 
 /// Decodes a value that [`encode_value`] encoded, allocating it on the heap
 /// (memory checks are off: the caller checks the limit after rooting it).
+/// Decoding costs no fuel: the call charged for converting its result, live
+/// or as the recorded fuel in replay, so a journaled run uses the fuel of a
+/// run without a journal.
 pub(crate) fn decode_value(vm: &mut Vm, data: &[u8]) -> NResult {
     let mut r = Reader::new(data);
     let mut types = None;
@@ -844,18 +847,15 @@ fn decode_from(vm: &mut Vm, r: &mut Reader<'_>, depth: usize, types: &mut Option
         tag::DUR => Value::Dur(r.i64().ok_or_else(malformed)?),
         tag::STR => {
             let s = r.str().ok_or_else(malformed)?;
-            vm.charge_bytes(s.len())?;
             vm.short_str(s)
         }
         tag::BYTES => {
             let b = r.bytes().ok_or_else(malformed)?;
-            vm.charge_bytes(b.len())?;
             vm.heap.new_bytes(b.to_vec())
         }
         tag::LIST => {
             let n = count(r)?;
             let xs = items(vm, r, n, types)?;
-            vm.charge(n as u64)?;
             vm.heap.new_list(xs)
         }
         tag::TUPLE => {

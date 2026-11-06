@@ -543,6 +543,7 @@ fn plain_and_journaled_runs_behave_alike() {
         assert!(plain.result.is_ok(), "program {i}: {:?}", plain.result);
         assert_eq!(journaled.stdout, plain.stdout, "program {i}");
         assert_eq!(format!("{:?}", journaled.result), format!("{:?}", plain.result), "program {i}");
+        assert_eq!(journaled.fuel, plain.fuel, "program {i}");
     }
 }
 
