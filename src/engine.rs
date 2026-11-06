@@ -1067,7 +1067,11 @@ impl Engine {
                 let wait = if std::io::IsTerminal::is_terminal(&std::io::stdin()) { WaitKind::User } else { WaitKind::Io };
                 (StdinSource::Inherit(tokio::io::BufReader::new(tokio::io::stdin())), None, wait)
             }
-            StdinConfig::Feed(feed) => (StdinSource::Fed(crate::feed::FedReader::new(feed)), Some(feed.shared()), WaitKind::User),
+            StdinConfig::Feed(feed) => {
+                let reader = crate::feed::FedReader::new(feed);
+                let link = reader.link();
+                (StdinSource::Fed(reader), Some(link), WaitKind::User)
+            }
         };
         let (stdout, stderr): (SharedSink, SharedSink) =
             if quiet { (Arc::new(NullSink), Arc::new(NullSink)) } else { (c.stdout.clone(), c.stderr.clone()) };

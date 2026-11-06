@@ -1070,6 +1070,29 @@ fn reads_that_wait_have_sequential_ids() {
 }
 
 #[test]
+fn two_sessions_wait_on_one_feed() {
+    let feed = StdinFeed::new();
+    let engine = Engine::new(Config::new().policy(RulePolicy::allow_all()).stdin_feed(&feed)).unwrap();
+    let (mut first, mut second) = (engine.session(), engine.session());
+    let values = rt().block_on(async {
+        let host = async {
+            let older = feed.awaited_changed(None).await.unwrap();
+            assert!(feed.answer(older, "a"));
+            let newer = feed.awaited_changed(Some(older)).await.unwrap();
+            assert!(older < newer);
+            assert!(feed.answer(newer, "b"));
+        };
+        let reads = async { tokio::join!(first.eval("import io\nio.stdin.read_line()?"), second.eval("import io\nio.stdin.read_line()?")) };
+        let (values, ()) =
+            tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(reads, host) }).await.expect("both reads complete");
+        values
+    });
+    let mut values = [values.0.unwrap().unwrap(), values.1.unwrap().unwrap()];
+    values.sort();
+    assert_eq!(values, ["Some(\"a\")", "Some(\"b\")"]);
+}
+
+#[test]
 fn answer_fails_after_read_ends() {
     let feed = StdinFeed::new();
     let mut r = Repl::with(Config::new().policy(RulePolicy::allow_all()).stdin_feed(&feed));

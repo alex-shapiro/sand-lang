@@ -485,7 +485,7 @@ pub struct Host {
     pub stderr: SharedSink,
     pub stdin: Arc<tokio::sync::Mutex<StdinSource>>,
     /// The feed of a [`StdinSource::Fed`], told when the VM waits.
-    pub(crate) stdin_feed: Option<Arc<crate::feed::Shared>>,
+    pub(crate) stdin_feed: Option<crate::feed::FeedLink>,
     /// Wait category for standard input reads.
     pub(crate) stdin_wait: WaitKind,
     pub output_bytes: u64,
