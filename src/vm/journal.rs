@@ -274,7 +274,7 @@ impl Outcome for CallOutcome {
         let CallOutcome { fin, label } = *self;
         Box::pin(std::future::ready(Box::new(move |vm: &mut Vm| {
             let r = fin(vm);
-            outcome_payload(vm, r, &label).map(|(payload, _)| payload)
+            outcome_payload(vm, r, &label).map(|outcome| outcome.to_payload())
         }) as EncodeFn))
     }
 }
@@ -296,7 +296,8 @@ impl Outcome for Expired {
 /// journal records its wake time, and replay delivers its expiry without
 /// waiting.
 pub(crate) fn sleep(vm: &mut Vm, d: Duration) -> Ctl {
-    let spec = OpSpec { kind: OpKind::Timer, effectful: false, park: Some(Park::UntilResumed), host_wait: None, pre_fuel: 0, timer: Some(d) };
+    let spec =
+        OpSpec { kind: OpKind::Timer, effectful: false, park: Some(Park::UntilResumed), host_wait: None, pre_fuel: 0, timer: Some(d) };
     let describe = |_: &Vm| {
         let identity = Identity::default().add(&d.as_nanos().to_le_bytes()).finish();
         Ok((identity, format!("sleep {}", crate::vm::display::fmt_duration(d.as_nanos().min(i64::MAX as u128) as i64))))
@@ -373,7 +374,7 @@ pub(crate) fn journaled_call(vm: &mut Vm, call: Call, inner: &super::HostFn, nam
             let (fin, parking) = match waiting(r, name) {
                 Ok(w) => w,
                 Err(r) => {
-                    let (payload, _) = outcome_payload(vm, r, name)?;
+                    let payload = outcome_payload(vm, r, name)?.to_payload();
                     let ready: Finisher = Box::new(move |vm: &mut Vm| payload_outcome(vm, &payload));
                     (Box::pin(std::future::ready(ready)) as BoxFuture, (None, None))
                 }
@@ -651,6 +652,114 @@ impl<'a> Reader<'a> {
     }
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+}
+
+/// A type with one encoding in the payloads of journal entries.
+pub(crate) trait Payload: Sized {
+    fn encode(&self, w: &mut Writer);
+
+    /// Reads a value that [`Payload::encode`] wrote; `None` if it is
+    /// malformed.
+    fn decode(r: &mut Reader<'_>) -> Option<Self>;
+
+    /// The value as a whole payload.
+    fn to_payload(&self) -> Vec<u8> {
+        let mut w = Writer::default();
+        self.encode(&mut w);
+        w.0
+    }
+
+    /// The value that a whole payload holds; `None` if it is malformed.
+    fn from_payload(data: &[u8]) -> Option<Self> {
+        let mut r = Reader::new(data);
+        let v = Self::decode(&mut r)?;
+        r.is_empty().then_some(v)
+    }
+}
+
+impl Payload for Vec<u8> {
+    fn encode(&self, w: &mut Writer) {
+        w.bytes(self);
+    }
+    fn decode(r: &mut Reader<'_>) -> Option<Self> {
+        r.bytes().map(<[u8]>::to_vec)
+    }
+}
+
+impl Payload for String {
+    fn encode(&self, w: &mut Writer) {
+        w.str(self);
+    }
+    fn decode(r: &mut Reader<'_>) -> Option<Self> {
+        r.str().map(str::to_string)
+    }
+}
+
+impl<T: Payload> Payload for Option<T> {
+    fn encode(&self, w: &mut Writer) {
+        match self {
+            None => {
+                w.u8(0);
+            }
+            Some(x) => {
+                w.u8(1);
+                x.encode(w);
+            }
+        }
+    }
+    fn decode(r: &mut Reader<'_>) -> Option<Self> {
+        match r.u8()? {
+            0 => Some(None),
+            1 => Some(Some(T::decode(r)?)),
+            _ => None,
+        }
+    }
+}
+
+impl<T: Payload, E: Payload> Payload for Result<T, E> {
+    fn encode(&self, w: &mut Writer) {
+        match self {
+            Ok(x) => {
+                w.u8(0);
+                x.encode(w);
+            }
+            Err(e) => {
+                w.u8(1);
+                e.encode(w);
+            }
+        }
+    }
+    fn decode(r: &mut Reader<'_>) -> Option<Self> {
+        match r.u8()? {
+            0 => Some(Ok(T::decode(r)?)),
+            1 => Some(Err(E::decode(r)?)),
+            _ => None,
+        }
+    }
+}
+
+impl Payload for crate::stdlib::core::Error {
+    fn encode(&self, w: &mut Writer) {
+        w.str(&self.kind).str(&self.message);
+    }
+    fn decode(r: &mut Reader<'_>) -> Option<Self> {
+        Some(crate::stdlib::core::Error { kind: String::decode(r)?, message: String::decode(r)? })
+    }
+}
+
+/// An input that can be unavailable yet ([`Vm::ready_input`]).
+pub(crate) enum Ready {
+    /// The input is not available: the caller waits for it.
+    Pending,
+    /// The input is at its end.
+    End,
+    Data(Vec<u8>),
+}
+
+impl From<Option<Vec<u8>>> for Ready {
+    fn from(data: Option<Vec<u8>>) -> Ready {
+        data.map_or(Ready::End, Ready::Data)
     }
 }
 
@@ -963,38 +1072,49 @@ pub(crate) fn call_identity(vm: &Vm, name: &str, args: &[Value]) -> Result<u64, 
     Ok(id.finish())
 }
 
-/// Records a call's outcome `r` as the payload of an entry: a status byte,
-/// then the value's encoding or the error message. Returns the value to
-/// use, decoded from the encoding so that record and replay allocate alike.
-fn outcome_payload(vm: &mut Vm, r: NResult, label: &str) -> Result<(Vec<u8>, Option<Vec<u8>>), Ctl> {
+/// A Sand value in the journal encoding of values ([`encode_value`]).
+struct Encoded(Vec<u8>);
+
+impl Payload for Encoded {
+    fn encode(&self, w: &mut Writer) {
+        self.0.encode(w);
+    }
+    fn decode(r: &mut Reader<'_>) -> Option<Self> {
+        Vec::decode(r).map(Encoded)
+    }
+}
+
+/// The outcome of a call as the journal records it: the value that it
+/// returned, or the message of the runtime error that it raised.
+type CallPayload = Result<Encoded, String>;
+
+/// The payload that records a call's outcome `r`.
+fn outcome_payload(vm: &mut Vm, r: NResult, label: &str) -> Result<CallPayload, Ctl> {
     match r {
         Ok(v) => match encode_value(vm, v, max_value_bytes(vm)) {
-            Ok(bytes) => {
-                let mut w = Writer::default();
-                w.u8(0).0.extend_from_slice(&bytes);
-                Ok((w.0, Some(bytes)))
-            }
+            Ok(bytes) => Ok(Ok(Encoded(bytes))),
             Err(why) => Err(Ctl::fail("unsupported", format!("cannot journal the result of `{label}`: {why}"))),
         },
         Err(c) => match c.into_kind() {
-            CtlKind::RuntimeError(m) => {
-                let mut w = Writer::default();
-                w.u8(1).str(&m);
-                Ok((w.0, None))
-            }
+            CtlKind::RuntimeError(m) => Ok(Err(m)),
             other => Err(Ctl::from(other)),
         },
     }
 }
 
-/// The result that an outcome payload holds.
-fn payload_outcome(vm: &mut Vm, payload: &[u8]) -> NResult {
-    let mut r = Reader::new(payload);
-    match r.u8() {
-        Some(0) => decode_value(vm, r.rest()),
-        Some(1) => Err(Ctl::from(CtlKind::RuntimeError(r.str().ok_or_else(malformed)?.to_string()))),
-        _ => Err(malformed()),
+/// The result of a call that `outcome` records. The value is decoded
+/// from its encoding also in a live run, so that record and replay
+/// allocate alike.
+fn call_outcome(vm: &mut Vm, outcome: &CallPayload) -> NResult {
+    match outcome {
+        Ok(Encoded(bytes)) => decode_value(vm, bytes),
+        Err(m) => Err(Ctl::from(CtlKind::RuntimeError(m.clone()))),
     }
+}
+
+/// The result of a call that the bytes of a [`CallPayload`] record.
+fn payload_outcome(vm: &mut Vm, payload: &[u8]) -> NResult {
+    call_outcome(vm, &CallPayload::from_payload(payload).ok_or_else(malformed)?)
 }
 
 /// Whether `r` asks for the call to run again after a collection: the
@@ -1130,17 +1250,16 @@ impl Vm {
         self.journaled_result(identity, &label, f)
     }
 
-    /// Reads `f`, an input of bytes that can be unavailable yet (`f`
-    /// returns `None`, and the caller waits for it), described by
-    /// `describe`. The journal records only an input that `f` returns:
+    /// Reads `f`, an input of bytes that can be unavailable yet, described
+    /// by `describe`. The journal records only an input that is available:
     /// replay returns it if the journal records it next, and otherwise
-    /// returns `None` without running `f`. Without a journal, returns what
-    /// `f` returns.
+    /// returns [`Ready::Pending`] without running `f`. Without a journal,
+    /// returns what `f` returns.
     pub(crate) fn ready_input(
         &mut self,
         describe: impl FnOnce(&Vm) -> Result<(u64, String), Ctl>,
-        f: impl FnOnce(&mut Vm) -> Option<Option<Vec<u8>>>,
-    ) -> Result<Option<Option<Vec<u8>>>, Ctl> {
+        f: impl FnOnce(&mut Vm) -> Ready,
+    ) -> Result<Ready, Ctl> {
         if self.journal.is_none() {
             return Ok(f(self));
         }
@@ -1155,29 +1274,22 @@ impl Vm {
                 _ => None,
             }) {
                 Some(r) => r,
-                None => return Ok(None),
+                None => return Ok(Ready::Pending),
             };
             self.charge(recorded.fuel)?;
-            let mut r = Reader::new(&recorded.outcome);
-            let data = match (r.u8(), r.u8()) {
-                (Some(0), Some(tag::BYTES)) => Some(r.bytes().ok_or_else(malformed)?.to_vec()),
-                (Some(0), Some(tag::UNIT)) => None,
-                _ => return Err(malformed()),
-            };
-            return Ok(Some(data));
+            return Option::<Vec<u8>>::from_payload(&recorded.outcome).map(Ready::from).ok_or_else(malformed);
         }
         let start = self.meter.used();
-        let Some(data) = f(self) else { return Ok(None) };
-        let fuel = self.meter.used().saturating_sub(start);
-        let mut w = Writer::default();
-        match &data {
-            Some(b) => w.u8(0).u8(tag::BYTES).bytes(b),
-            None => w.u8(0).u8(tag::UNIT),
+        let data = match f(self) {
+            Ready::Pending => return Ok(Ready::Pending),
+            Ready::End => None,
+            Ready::Data(b) => Some(b),
         };
+        let fuel = self.meter.used().saturating_sub(start);
         if let Some(mut j) = self.journal_state() {
-            j.record(EntryData::Result(CallResult { identity, label, fuel, outcome: w.0 }));
+            j.record(EntryData::Result(CallResult { identity, label, fuel, outcome: data.to_payload() }));
         }
-        Ok(Some(data))
+        Ok(Ready::from(data))
     }
 
     /// The buffers (`bytes`) and, with `slot: Some((buffers, what))`, an
@@ -1246,14 +1358,11 @@ impl Vm {
             return r;
         }
         let fuel = self.meter.used().saturating_sub(start);
-        let (payload, value) = outcome_payload(self, r, name)?;
+        let outcome = outcome_payload(self, r, name)?;
         if let Some(mut j) = self.journal_state() {
-            j.record(EntryData::Result(CallResult { identity, label, fuel, outcome: payload.clone() }));
+            j.record(EntryData::Result(CallResult { identity, label, fuel, outcome: outcome.to_payload() }));
         }
-        match value {
-            Some(bytes) => decode_value(self, &bytes),
-            None => payload_outcome(self, &payload),
-        }
+        call_outcome(self, &outcome)
     }
 
     /// Whether entries recorded since the last flush must be made durable
@@ -1474,5 +1583,40 @@ impl Vm {
         let j = self.journal.as_ref()?.borrow();
         let e = j.peek()?;
         Some(j.diverged(format!("every task is blocked, and the journal records {} next", e.describe())))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Payload, Ready};
+    use crate::journal::{HttpOutcome, HttpResponse};
+    use crate::stdlib::core::Error;
+
+    fn round_trip<P: Payload + PartialEq + std::fmt::Debug>(p: P) {
+        let bytes = p.to_payload();
+        assert_eq!(P::from_payload(&bytes), Some(p));
+        let mut longer = bytes.clone();
+        longer.push(0);
+        assert_eq!(P::from_payload(&longer), None, "a payload with trailing bytes is malformed");
+        assert_eq!(P::from_payload(&bytes[..bytes.len() - 1]), None, "a cut payload is malformed");
+    }
+
+    #[test]
+    fn payloads_of_results_share_one_encoding() {
+        let failed = || Error { kind: "timeout".into(), message: "late".into() };
+        round_trip::<Result<Option<Vec<u8>>, Error>>(Ok(Some(b"line".to_vec())));
+        round_trip::<Result<Option<Vec<u8>>, Error>>(Ok(None));
+        round_trip::<Result<Option<Vec<u8>>, Error>>(Err(failed()));
+        round_trip::<HttpOutcome>(Ok(HttpResponse { status: 200, headers: vec![("a".into(), "b".into())], body: b"hi".to_vec() }));
+        round_trip::<HttpOutcome>(Err(failed()));
+        let stdin_err = Result::<Option<Vec<u8>>, Error>::Err(failed()).to_payload();
+        let http_err = HttpOutcome::Err(failed()).to_payload();
+        assert_eq!(stdin_err, http_err);
+    }
+
+    #[test]
+    fn a_ready_input_records_end_and_data() {
+        assert!(matches!(Ready::from(None), Ready::End));
+        assert!(matches!(Ready::from(Some(vec![1])), Ready::Data(d) if d == [1]));
     }
 }

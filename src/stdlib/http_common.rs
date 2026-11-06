@@ -2,13 +2,13 @@
 
 use super::stream::{self, IoFailure, Suspended, bytes_read, line_read};
 use super::uri;
-use crate::journal::HttpOutcome;
+use crate::journal::{HttpOutcome, HttpResponse};
 use crate::native::convert::{HostError, IntoValue};
 use crate::native::func::Call;
 use crate::native::ty::Val;
 use crate::native::{NativeModule, NativeObject};
 use crate::vm::iomem::Reservation;
-use crate::vm::journal::{BuildFn, Identity};
+use crate::vm::journal::{BuildFn, Identity, Payload};
 use crate::vm::value::to_usize_saturating;
 use crate::vm::{Ctl, Vm};
 use std::future::Future;
@@ -233,11 +233,11 @@ impl Prepared {
 /// encoding of the outcome of a request holds ([`HttpOutcome`]).
 pub(crate) fn recorded_response(url: String, max_body: usize) -> BuildFn {
     Box::new(move |vm: &mut Vm, payload: &[u8]| -> crate::vm::NResult {
-        let r = match HttpOutcome::decode(payload) {
-            Some(HttpOutcome::Response { status, headers, body }) => {
+        let r = match HttpOutcome::from_payload(payload) {
+            Some(Ok(HttpResponse { status, headers, body })) => {
                 response(vm, url, status, headers, BodyReader::memory(body, max_body)).map_err(HostError::from)
             }
-            Some(HttpOutcome::Failed { kind, message }) => Err(HostError::new(kind, message)),
+            Some(Err(e)) => Err(HostError::from(e)),
             None => return Err(Ctl::internal("a journaled HTTP response is malformed")),
         };
         r.into_value(vm)

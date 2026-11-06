@@ -2393,7 +2393,8 @@ counted from 0; the entry does not store it. `Entry::to_bytes` and
 the decoded data as an `EntryData`, and `Entry::describe` describes the entry.
 `journal::operations` pairs the `Start` and `Done` entries of each
 asynchronous operation, and `Operation::http` decodes the outcome of an HTTP
-request. Hosts use these functions to inspect a journal; only the engine
+request as an `HttpOutcome`: `Ok(HttpResponse { status, headers, body })`, or
+`Err` with the Sand `Error` of the request. Hosts use these functions to inspect a journal; only the engine
 writes entries. `MemoryJournal` keeps the entries in memory.
 
 **What the journal records.** The engine records these inputs, in the order

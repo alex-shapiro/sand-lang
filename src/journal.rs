@@ -11,7 +11,8 @@
 //! live after the last entry. SPEC §16.7 gives the full contract.
 
 use crate::platform::{SystemTime, UNIX_EPOCH};
-use crate::vm::journal::{Reader, Writer};
+use crate::stdlib::core::Error;
+use crate::vm::journal::{Payload, Reader, Writer};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -217,7 +218,8 @@ pub struct CallResult {
     pub label: String,
     /// Fuel that the call spent.
     pub fuel: u64,
-    /// The result, in the engine's encoding of values.
+    /// The result, in an encoding that the engine defines for each kind
+    /// of input.
     pub outcome: Vec<u8>,
 }
 
@@ -338,7 +340,7 @@ impl Operation {
     /// The outcome of an HTTP request that completed.
     pub fn http(&self) -> Option<HttpOutcome> {
         match (&self.start.kind, &self.done) {
-            (OpKind::Http, Some(OpDone { end: OpEnd::Completed(payload), .. })) => HttpOutcome::decode(payload),
+            (OpKind::Http, Some(OpDone { end: OpEnd::Completed(payload), .. })) => HttpOutcome::from_payload(payload),
             _ => None,
         }
     }
@@ -374,49 +376,35 @@ pub fn operations(entries: &[Entry]) -> Result<Vec<Operation>, String> {
     Ok(out)
 }
 
-/// The outcome of a journaled HTTP request.
+/// The outcome of a journaled HTTP request: the response, or the error
+/// of the request.
+pub type HttpOutcome = Result<HttpResponse, Error>;
+
+/// The response to a journaled HTTP request, with its whole body.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum HttpOutcome {
-    /// The response, with its whole body.
-    Response { status: i64, headers: Vec<(String, String)>, body: Vec<u8> },
-    /// The request failed with an error of `kind`.
-    Failed { kind: String, message: String },
+pub struct HttpResponse {
+    pub status: i64,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
 }
 
-impl HttpOutcome {
-    pub(crate) fn encode(&self) -> Vec<u8> {
-        let mut w = Writer::default();
-        match self {
-            HttpOutcome::Response { status, headers, body } => {
-                w.u8(0).i64(*status).u64(headers.len() as u64);
-                for (k, v) in headers {
-                    w.str(k).str(v);
-                }
-                w.bytes(body);
-            }
-            HttpOutcome::Failed { kind, message } => {
-                w.u8(1).str(kind).str(message);
-            }
+impl Payload for HttpResponse {
+    fn encode(&self, w: &mut Writer) {
+        w.i64(self.status).u64(self.headers.len() as u64);
+        for (k, v) in &self.headers {
+            w.str(k).str(v);
         }
-        w.0
+        w.bytes(&self.body);
     }
 
-    pub(crate) fn decode(data: &[u8]) -> Option<HttpOutcome> {
-        let mut r = Reader::new(data);
-        let out = match r.u8()? {
-            0 => {
-                let status = r.i64()?;
-                let n = r.u64()?;
-                let mut headers = Vec::new();
-                for _ in 0..n {
-                    headers.push((r.str()?.to_string(), r.str()?.to_string()));
-                }
-                HttpOutcome::Response { status, headers, body: r.bytes()?.to_vec() }
-            }
-            1 => HttpOutcome::Failed { kind: r.str()?.to_string(), message: r.str()?.to_string() },
-            _ => return None,
-        };
-        r.is_empty().then_some(out)
+    fn decode(r: &mut Reader<'_>) -> Option<HttpResponse> {
+        let status = r.i64()?;
+        let n = r.u64()?;
+        let mut headers = Vec::new();
+        for _ in 0..n {
+            headers.push((r.str()?.to_string(), r.str()?.to_string()));
+        }
+        Some(HttpResponse { status, headers, body: r.bytes()?.to_vec() })
     }
 }
 

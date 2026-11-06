@@ -10,8 +10,8 @@ use super::http_common::*;
 use super::net::{self, ConnHandle, Resource, TlsSettings};
 use super::stream::{self, IoFailure, Suspended, read_line_bytes, strip_eol, suspend};
 use crate::check::ModKind;
-use crate::journal::HttpOutcome;
 use crate::journal::OpKind;
+use crate::journal::{HttpOutcome, HttpResponse};
 use crate::native::convert::HostError;
 use crate::native::convert::IntoValue;
 use crate::native::func::{Call, Later};
@@ -20,9 +20,10 @@ use crate::native::{NativeModule, NativeObject};
 use crate::network::{Network, Stream};
 use crate::platform::{Clock, Instant};
 use crate::policy::Policy;
+use crate::stdlib::core::Error;
 use crate::vm::Vm;
 use crate::vm::iomem::{Reservation, ResourceSlot};
-use crate::vm::journal::{Begun, BuildFn, EncodeFn, OpSpec, Outcome};
+use crate::vm::journal::{Begun, BuildFn, EncodeFn, OpSpec, Outcome, Payload};
 use jiff::SignedDuration;
 use std::future::Future;
 use std::pin::Pin;
@@ -757,21 +758,18 @@ impl Outcome for Exchange {
     fn settle(self: Box<Self>) -> Pin<Box<dyn Future<Output = EncodeFn> + Send>> {
         let Exchange { result, body } = *self;
         Box::pin(async move {
-            let outcome = match result {
+            let outcome: HttpOutcome = match result {
                 Ok(Exchanged { conn, head, close, mut head_res }) => {
                     let (status, headers, mut reader) = body.read(conn, head, close);
                     match crate::platform::timeout(&*body.clock, body.timeout, reader.read_all(&mut head_res)).await {
-                        Some(Ok(data)) => HttpOutcome::Response { status, headers, body: data },
-                        Some(Err(e)) => HttpOutcome::Failed { kind: e.kind.to_string(), message: e.message },
-                        None => HttpOutcome::Failed {
-                            kind: "timeout".into(),
-                            message: format!("reading the response from {} timed out", body.url),
-                        },
+                        Some(Ok(data)) => Ok(HttpResponse { status, headers, body: data }),
+                        Some(Err(e)) => Err(Error::from(e)),
+                        None => Err(Error { kind: "timeout".into(), message: format!("reading the response from {} timed out", body.url) }),
                     }
                 }
-                Err(e) => HttpOutcome::Failed { kind: e.kind.to_string(), message: e.message },
+                Err(e) => Err(Error::from(e)),
             };
-            let payload = outcome.encode();
+            let payload = outcome.to_payload();
             Box::new(move |_: &mut Vm| Ok(payload)) as EncodeFn
         })
     }

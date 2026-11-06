@@ -2,7 +2,7 @@
 //! from any prefix of the journal (SPEC §16.7).
 
 use sandlang::engine::{Config, Engine, Error, HostModules, MemorySink, Outcome, Returned};
-use sandlang::journal::{Durable, Entry, EntryKind, HttpOutcome, Journal, MemoryJournal, OpKind, ParkedCall, Suspension, operations};
+use sandlang::journal::{Durable, Entry, EntryKind, HttpResponse, Journal, MemoryJournal, OpKind, ParkedCall, Suspension, operations};
 use sandlang::native::NativeModule;
 use sandlang::native::convert::HostError;
 use sandlang::native::func::{Effectful, Journaled, JournaledCall, Later, Park, Parked};
@@ -827,7 +827,7 @@ fn operations_pair_starts_with_their_ends() {
     let statuses: Vec<i64> = ops
         .iter()
         .map(|o| match o.http() {
-            Some(HttpOutcome::Response { status, .. }) => status,
+            Some(Ok(HttpResponse { status, .. })) => status,
             other => panic!("{other:?}"),
         })
         .collect();

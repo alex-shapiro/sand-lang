@@ -22,6 +22,12 @@ impl IoFailure {
     }
 }
 
+impl From<IoFailure> for crate::stdlib::core::Error {
+    fn from(e: IoFailure) -> crate::stdlib::core::Error {
+        crate::stdlib::core::Error { kind: e.kind.into(), message: e.message }
+    }
+}
+
 impl From<IoFailure> for HostError {
     fn from(e: IoFailure) -> HostError {
         HostError::new(e.kind, e.message)

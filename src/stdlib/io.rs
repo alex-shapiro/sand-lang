@@ -8,8 +8,9 @@ use crate::native::func::{Call, Later};
 use crate::native::ty::Val;
 use crate::native::{NativeModule, NativeObject, ObjectType};
 use crate::policy::Capability;
+use crate::stdlib::core::Error;
 use crate::vm::iomem::Reservation;
-use crate::vm::journal::{Begun, BuildFn, Identity, OpSpec, Outcome, Reader, Whole, Writer};
+use crate::vm::journal::{Begun, BuildFn, Identity, OpSpec, Outcome, Payload, Ready, Whole};
 use crate::vm::value::{Obj, Value, to_usize_saturating, u64_to_usize_saturating};
 use crate::vm::{Ctl, StdinSource, Vm};
 use std::collections::BTreeMap;
@@ -124,8 +125,10 @@ fn read_stdin<R: IntoValue + Send + 'static>(
     let describe = |_: &Vm| Ok((identity, label.clone()));
     if what == Read::Line {
         let line = if external { vm.ready_input(describe, |vm: &mut Vm| buffered_line(vm))? } else { buffered_line(vm) };
-        if let Some(data) = line {
-            return Ok(Later::ready(done(vm, data)));
+        match line {
+            Ready::Pending => {}
+            Ready::End => return Ok(Later::ready(done(vm, None))),
+            Ready::Data(data) => return Ok(Later::ready(done(vm, Some(data)))),
         }
     }
     let stdin = vm.host.stdin.clone();
@@ -143,29 +146,16 @@ fn read_stdin<R: IntoValue + Send + 'static>(
         });
     }
     let build: BuildFn = Box::new(move |vm: &mut Vm, payload: &[u8]| -> crate::vm::NResult {
-        let mut r = Reader::new(payload);
-        let malformed = || Ctl::internal("a journaled read of standard input is malformed");
-        let outcome = match r.u8().ok_or_else(malformed)? {
-            0 => match r.u8().ok_or_else(malformed)? {
-                1 => done(vm, Some(r.bytes().ok_or_else(malformed)?.to_vec())),
-                _ => done(vm, None),
-            },
-            _ => Err(HostError::new(r.str().ok_or_else(malformed)?, r.str().ok_or_else(malformed)?)),
-        };
-        outcome.into_value(vm)
+        let read = StdinRead::from_payload(payload).ok_or_else(|| Ctl::internal("a journaled read of standard input is malformed"))?;
+        read.map_err(HostError::from).and_then(|data| done(vm, data)).into_value(vm)
     });
     let spec = OpSpec { kind: OpKind::Stdin, effectful: false, park: None, host_wait: None, pre_fuel: 0, timer: None };
     Err(match vm.begin_op(spec, describe)? {
         Begun::Replayed(r) => r.wait(build),
         Begun::Live(live) => live.run(
             async move {
-                let mut w = Writer::default();
-                match read.await {
-                    Ok((Some(data), _)) => w.u8(0).u8(1).bytes(&data),
-                    Ok((None, _)) => w.u8(0).u8(0),
-                    Err(e) => w.u8(1).str(e.kind).str(&e.message),
-                };
-                Box::new(Whole(w.0)) as Box<dyn Outcome>
+                let read: StdinRead = read.await.map(|(data, _)| data).map_err(Error::from);
+                Box::new(Whole(read.to_payload())) as Box<dyn Outcome>
             },
             build,
         ),
@@ -177,20 +167,24 @@ fn input_line(vm: &mut Vm, line: Option<Vec<u8>>) -> Result<Option<String>, Host
     line_read(vm, line, "stdin: input is not valid UTF-8")
 }
 
+/// The outcome of a read of standard input as the journal records it:
+/// the data, `None` for a line at the end of the input, or the error.
+type StdinRead = Result<Option<Vec<u8>>, Error>;
+
 /// The most `read` returns at once from standard input.
 const STDIN_CHUNK: usize = 64 << 10;
 
-/// The next line of standard input without its terminator (`Some(None)` at
-/// the end), if it is in a buffer already; `None`, consuming nothing, if the
+/// The next line of standard input without its terminator, if it is in a
+/// buffer already. Gives [`Ready::Pending`], and consumes nothing, if the
 /// read must wait, another is under way, or the line does not fit in memory.
-fn buffered_line(vm: &Vm) -> Option<Option<Vec<u8>>> {
-    let mut source = vm.host.stdin.try_lock().ok()?;
+fn buffered_line(vm: &Vm) -> Ready {
+    let Ok(mut source) = vm.host.stdin.try_lock() else { return Ready::Pending };
     let _op = match &mut *source {
         StdinSource::Fed(r) => Some(r.begin()),
         _ => None,
     };
     let (buf, at_end) = match &mut *source {
-        StdinSource::None => return Some(None),
+        StdinSource::None => return Ready::End,
         StdinSource::Bytes(c) => {
             let at = u64_to_usize_saturating(c.position()).min(c.get_ref().len());
             (&c.get_ref()[at..], true)
@@ -202,13 +196,13 @@ fn buffered_line(vm: &Vm) -> Option<Option<Vec<u8>>> {
     let take = match buf.iter().position(|&b| b == b'\n') {
         Some(nl) => nl + 1,
         None if at_end => buf.len(),
-        None => return None,
+        None => return Ready::Pending,
     };
     if take == 0 {
-        return Some(None);
+        return Ready::End;
     }
     if vm.heap.would_exceed(take) {
-        return None;
+        return Ready::Pending;
     }
     let mut data = buf[..take].to_vec();
     match &mut *source {
@@ -219,7 +213,7 @@ fn buffered_line(vm: &Vm) -> Option<Option<Vec<u8>>> {
         StdinSource::None => {}
     }
     strip_eol(&mut data);
-    Some(Some(data))
+    Ready::Data(data)
 }
 
 /// Reads `what` from standard input: `None` only for a line at the end of

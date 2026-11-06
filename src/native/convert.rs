@@ -107,6 +107,12 @@ impl From<Ctl> for HostError {
     }
 }
 
+impl From<crate::stdlib::core::Error> for HostError {
+    fn from(e: crate::stdlib::core::Error) -> HostError {
+        HostError::new(e.kind, e.message)
+    }
+}
+
 impl From<std::io::Error> for HostError {
     fn from(e: std::io::Error) -> HostError {
         HostError::new(crate::stdlib::io_kind(&e), e.to_string())

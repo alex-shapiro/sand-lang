@@ -12,15 +12,16 @@
 use super::http_common::{BodyReader, MemoryBody, Prepared, ResponseStream, prepare_request, recorded_response, response};
 use super::stream::{self, IoFailure, Suspended};
 use crate::check::ModKind;
-use crate::journal::HttpOutcome;
 use crate::journal::OpKind;
+use crate::journal::{HttpOutcome, HttpResponse};
 use crate::native::NativeModule;
 use crate::native::convert::{HostError, IntoValue};
 use crate::native::func::Call;
 use crate::native::ty::Val;
+use crate::stdlib::core::Error;
 use crate::vm::Vm;
 use crate::vm::iomem::Reservation;
-use crate::vm::journal::{Begun, BuildFn, EncodeFn, OpSpec, Outcome};
+use crate::vm::journal::{Begun, BuildFn, EncodeFn, OpSpec, Outcome, Payload};
 use jiff::SignedDuration;
 use js_sys::{Array, Function, Object, Promise, Reflect, Uint8Array};
 use std::cell::{Cell, RefCell};
@@ -124,11 +125,11 @@ impl Outcome for Fetched {
     }
 
     fn settle(self: Box<Self>) -> Pin<Box<dyn Future<Output = EncodeFn> + Send>> {
-        let outcome = match self.result {
-            Ok((status, headers, body, _)) => HttpOutcome::Response { status, headers, body },
-            Err(e) => HttpOutcome::Failed { kind: e.kind.to_string(), message: e.message },
+        let outcome: HttpOutcome = match self.result {
+            Ok((status, headers, body, _)) => Ok(HttpResponse { status, headers, body }),
+            Err(e) => Err(Error::from(e)),
         };
-        let payload = outcome.encode();
+        let payload = outcome.to_payload();
         Box::pin(std::future::ready(Box::new(move |_: &mut Vm| Ok(payload)) as EncodeFn))
     }
 }
