@@ -41,8 +41,9 @@ pub(crate) const OS_MODULES: &[&str] = &["http", "net"];
 pub(crate) const OS_MODULES: &[&str] = &["net"];
 
 /// The names of the standard modules (and of the prelude), which host
-/// modules cannot take.
-pub(crate) const STD_MODULES: &[&str] = &[
+/// modules cannot take. An embedder uses this list to keep its own module
+/// names (for example, library names) from shadowing a standard module.
+pub const STD_MODULES: &[&str] = &[
     "prelude",
     "base64",
     "crypto",
