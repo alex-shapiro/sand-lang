@@ -12,7 +12,7 @@ use crate::check::budget::CompileBudget;
 use crate::check::{Checker, ModKind, ParsedModule};
 use crate::compile::{CompileInput, Incremental, ProgramMark, compile_more};
 use crate::diag::{Diag, FileId, Span};
-use crate::engine::{Discovery, Engine, Error, InterruptHandle, Registry, TestReport, TestResult, on_compile_stack};
+use crate::engine::{Discovery, Engine, Error, Registry, TestReport, TestResult, on_compile_stack};
 use crate::modules::{GraphMark, ModuleGraph, NativeInfo, Snapshot, budget_error, native_info};
 use crate::platform::Instant;
 use crate::policy::{Capability, PromptAnswer};
@@ -369,12 +369,6 @@ impl Session {
         self.reset();
         self.was_reset = true;
         r
-    }
-
-    /// A handle that interrupts the input being run, from any thread. The
-    /// input fails with [`Error::Interrupted`]; the session remains usable.
-    pub fn interrupt_handle(&self) -> InterruptHandle {
-        self.engine.interrupt_handle()
     }
 
     /// Whether `source` is a complete input, as far as the lexer can tell: a

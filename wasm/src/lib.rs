@@ -181,7 +181,9 @@ impl Engine {
         write_files(&fs, &options)?;
         let key =
             Rc::new(HookKey(hooks::register(Hooks { on_output: function(&hooks, "onOutput")?, on_prompt: function(&hooks, "onPrompt")? })));
+        let interrupt = sandlang::engine::InterruptHandle::new();
         let mut config = Config::new()
+            .interrupt(interrupt.clone())
             .limits(policy.apply_limits(sandlang::engine::Limits::default()))
             .policy(policy.rules.with_defaults(sandlang::policy::rules::RulePolicy::standard().allow_import("/")))
             .memory_fs(fs.clone())
@@ -202,7 +204,6 @@ impl Engine {
             config = config.time_zone(zone);
         }
         let engine = sandlang::engine::Engine::new(config);
-        let interrupt = engine.interrupt_handle();
         Ok(Engine { engine: Rc::new(RefCell::new(Some(engine))), fs, interrupt, hooks: key })
     }
 
@@ -270,8 +271,12 @@ impl Engine {
         let engine = self.engine.borrow();
         let engine = engine.as_ref().ok_or_else(|| error("the engine is running"))?;
         let session = engine.session();
-        let interrupt = session.interrupt_handle();
-        Ok(Session { session: Rc::new(RefCell::new(Some(session))), interrupt, hooks: self.hooks.clone(), stop_tasks: Rc::default() })
+        Ok(Session {
+            session: Rc::new(RefCell::new(Some(session))),
+            interrupt: self.interrupt.clone(),
+            hooks: self.hooks.clone(),
+            stop_tasks: Rc::default(),
+        })
     }
 
     /// Every file of the file system, by path.
@@ -405,7 +410,8 @@ impl Session {
         Ok(())
     }
 
-    /// Stops the running input (see [`Engine::interrupt`]).
+    /// Stops the running input, and the run of the engine that made the
+    /// session (see [`Engine::interrupt`]).
     pub fn interrupt(&self) {
         self.interrupt.interrupt();
     }

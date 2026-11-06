@@ -6,7 +6,7 @@
 mod common;
 
 use common::{TempDir, rt};
-use sandlang::engine::{Config, Engine, Error, HostModules, LimitKind, Limits, MemorySink};
+use sandlang::engine::{Config, Engine, Error, HostModules, InterruptHandle, LimitKind, Limits, MemorySink};
 use sandlang::feed::StdinFeed;
 use sandlang::native::NativeModule;
 use sandlang::policy::{Capability, Decision, PromptAnswer};
@@ -473,9 +473,9 @@ fn limits_apply_per_input_and_memory_to_the_heap() {
 
 #[test]
 fn interrupting_an_input() {
-    let mut r = Repl::new();
+    let handle = InterruptHandle::new();
+    let mut r = Repl::with(Config::new().interrupt(handle.clone()));
     r.ok("var steps = 0");
-    let handle = r.session.interrupt_handle();
     let t = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(200));
         handle.interrupt();

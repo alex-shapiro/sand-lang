@@ -1852,7 +1852,11 @@ persistent heap. Limit violations are reported to the host as distinct
 error variants and cannot be intercepted by scripts. The host may also
 interrupt an engine from another thread with an `InterruptHandle`, which
 stops compilation, bytecode, long-running library functions, and waits for
-I/O or prompt answers.
+I/O or prompt answers. The host makes the handle before the engine
+(`InterruptHandle::new()`) and gives it to the engine's configuration
+(`Config::interrupt`). The handle stops each engine made from that
+configuration, and the sessions of those engines. An engine forgets an
+interrupt that comes before its next compilation or run.
 
 ### 15.2 Fuel
 
@@ -2344,9 +2348,9 @@ limit, or interruption, the session cancels all running tasks, passes the error
 to `on_error`, and continues waiting for `until`. `cancel_tasks()` cancels
 remaining background tasks without running their `defer` blocks.
 
-`Session::set_wall_time` overrides `max_wall_time` for subsequent inputs, and
-`session.interrupt_handle()` cancels the active session call; the parent
-engine's interrupt handle does not affect sessions. Dropping an `eval` future
+`Session::set_wall_time` overrides `max_wall_time` for subsequent inputs. The
+interrupt handle of the parent engine's configuration (§15.1) cancels the
+active session call. Dropping an `eval` future
 before completion cancels the input in the same way as an interrupt, and leaves
 the session state unchanged if the input was still loading imports. `reset()`
 clears all session bindings and state. If an internal error (§10.3) occurs

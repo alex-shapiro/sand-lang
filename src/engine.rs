@@ -29,7 +29,7 @@ use std::fmt;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 /// Per-engine resource limits.
@@ -522,6 +522,7 @@ pub struct Config {
     pub(crate) time_zone: Option<crate::stdlib::time::TimeZone>,
     context: Option<Arc<dyn std::any::Any + Send + Sync>>,
     durable: Option<crate::journal::Durable>,
+    interrupt: InterruptHandle,
 }
 
 /// HTTP request destination.
@@ -581,7 +582,23 @@ impl Config {
             time_zone: None,
             context: None,
             durable: None,
+            interrupt: InterruptHandle::new(),
         }
+    }
+
+    /// Lets `handle` stop the engines made from this configuration, and
+    /// their sessions. Without this call, nothing can interrupt them.
+    pub fn interrupt(mut self, handle: InterruptHandle) -> Self {
+        self.interrupt = handle;
+        self
+    }
+
+    /// A new engine's interrupt flag and I/O waker, which the interrupt
+    /// handle of this configuration reaches.
+    fn attach_interrupt(&self) -> (Arc<AtomicBool>, Arc<IoShared>) {
+        let (flag, io) = (Arc::new(AtomicBool::new(false)), Arc::new(IoShared::default()));
+        self.interrupt.attach(&flag, &io);
+        (flag, io)
     }
 
     /// Makes each run durable (SPEC §16.7): the engine records the
@@ -777,17 +794,41 @@ impl Config {
     }
 }
 
-/// Stops a running engine from another thread.
-#[derive(Clone)]
+/// Stops, from any thread, the engines and sessions made from the
+/// configurations that hold this handle (see [`Config::interrupt`]).
+#[derive(Clone, Default)]
 pub struct InterruptHandle {
-    flag: Arc<AtomicBool>,
-    shared: Arc<IoShared>,
+    engines: Arc<Mutex<Vec<Attached>>>,
+}
+
+/// The interrupt flag and the I/O waker of one engine that an
+/// [`InterruptHandle`] stops.
+struct Attached {
+    flag: Weak<AtomicBool>,
+    io: Weak<IoShared>,
 }
 
 impl InterruptHandle {
+    pub fn new() -> InterruptHandle {
+        InterruptHandle::default()
+    }
+
+    /// Stops the compilation or run in progress in each engine and session
+    /// of this handle. The run fails with [`Error::Interrupted`]. An engine
+    /// forgets an interrupt that comes before its next compilation or run.
     pub fn interrupt(&self) {
-        self.flag.store(true, Ordering::SeqCst);
-        self.shared.wake();
+        for e in self.engines.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+            if let (Some(flag), Some(io)) = (e.flag.upgrade(), e.io.upgrade()) {
+                flag.store(true, Ordering::SeqCst);
+                io.wake();
+            }
+        }
+    }
+
+    fn attach(&self, flag: &Arc<AtomicBool>, io: &Arc<IoShared>) {
+        let mut engines = self.engines.lock().unwrap_or_else(|e| e.into_inner());
+        engines.retain(|e| e.flag.strong_count() > 0);
+        engines.push(Attached { flag: Arc::downgrade(flag), io: Arc::downgrade(io) });
     }
 }
 
@@ -1097,11 +1138,12 @@ impl Engine {
     /// Creates an engine with `config`.
     pub fn new(config: Config) -> Engine {
         let origin = config.clock.now();
+        let (interrupt, shared) = config.attach_interrupt();
         Engine {
             origin,
             config: Arc::new(config),
-            interrupt: Arc::new(AtomicBool::new(false)),
-            shared: Arc::new(IoShared::default()),
+            interrupt,
+            shared,
             always: Arc::default(),
             stats: RunStats::default(),
             root: OnceLock::new(),
@@ -1163,19 +1205,15 @@ impl Engine {
         Ok(c.lints.unwrap_or_default())
     }
 
-    pub fn interrupt_handle(&self) -> InterruptHandle {
-        InterruptHandle { flag: self.interrupt.clone(), shared: self.shared.clone() }
-    }
-
     /// Starts an interactive session ([`Session`]) with this engine's
     /// configuration. The session shares the engine's "always" answers to
-    /// permission prompts, but not its interrupt handle: use
-    /// [`Session::interrupt_handle`].
+    /// permission prompts and its [`InterruptHandle`].
     pub fn session(&self) -> Session {
+        let (interrupt, shared) = self.config.attach_interrupt();
         Session::new(Engine {
             config: self.config.clone(),
-            interrupt: Arc::new(AtomicBool::new(false)),
-            shared: Arc::new(IoShared::default()),
+            interrupt,
+            shared,
             always: self.always.clone(),
             stats: RunStats::default(),
             root: OnceLock::new(),
@@ -2211,8 +2249,8 @@ mod offload_tests {
         let r = rt().block_on(engine.run_source("main.sand", "import hung\nhung.hang()"));
         assert!(matches!(r, Err(Error::Limit(LimitKind::WallTime))), "{r:?}");
 
-        let mut engine = Engine::new(config.limits(Limits::default()));
-        let handle = engine.interrupt_handle();
+        let handle = InterruptHandle::new();
+        let mut engine = Engine::new(config.limits(Limits::default()).interrupt(handle.clone()));
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(50));
             handle.interrupt();

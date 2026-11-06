@@ -8,7 +8,7 @@
 mod common;
 
 use common::{rt, run_with};
-use sandlang::engine::{Config, Engine, Error, HostModules, LimitKind, Limits, MemorySink, Outcome};
+use sandlang::engine::{Config, Engine, Error, HostModules, InterruptHandle, LimitKind, Limits, MemorySink, Outcome};
 use sandlang::native::NativeModule;
 use sandlang::vm::{Ctl, Vm};
 use std::sync::mpsc;
@@ -260,8 +260,9 @@ fn signal() -> (NativeModule, mpsc::Receiver<()>) {
 fn interrupt_after_ready(src: &str, delay: Duration) -> (Result<Outcome, Error>, String, Duration) {
     let (m, rx) = signal();
     let out = MemorySink::new();
-    let mut engine = Engine::new(Config::new().host_modules(HostModules::new([m]).unwrap()).stdout(out.clone()));
-    let handle = engine.interrupt_handle();
+    let handle = InterruptHandle::new();
+    let config = Config::new().host_modules(HostModules::new([m]).unwrap()).stdout(out.clone()).interrupt(handle.clone());
+    let mut engine = Engine::new(config);
     let t = std::thread::spawn(move || {
         rx.recv().unwrap();
         std::thread::sleep(delay);

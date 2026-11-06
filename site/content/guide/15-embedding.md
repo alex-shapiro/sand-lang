@@ -304,16 +304,16 @@ assert_eq!(session.eval("hit() + hit()").await?, Some("3".to_string()));
 
 ## Interrupts
 
-`Engine::interrupt_handle` returns a thread-safe `InterruptHandle` that cancels an in-progress compilation, VM execution, or I/O wait from another thread:
+An `InterruptHandle` cancels an in-progress compilation, VM execution, or I/O wait from another thread. Make the handle first, and give it to the configuration of the engine with `Config::interrupt`:
 
 ```rust
 # #[tokio::main(flavor = "current_thread")]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-use sandlang::engine::{Config, Engine, Error};
+use sandlang::engine::{Config, Engine, Error, InterruptHandle};
 use std::time::Duration;
 
-let mut engine = Engine::new(Config::new());
-let handle = engine.interrupt_handle();
+let handle = InterruptHandle::new();
+let mut engine = Engine::new(Config::new().interrupt(handle.clone()));
 std::thread::spawn(move || {
     std::thread::sleep(Duration::from_secs(1));
     handle.interrupt();
@@ -324,7 +324,7 @@ assert!(matches!(result, Err(Error::Interrupted)));
 # }
 ```
 
-To cancel an individual `Session::eval` call, use `session.interrupt_handle()`.
+The handle also cancels the `Session::eval` call in progress in each session of the engine. An engine forgets an interrupt that comes before its next compilation or run.
 
 ## Multiple engines
 
