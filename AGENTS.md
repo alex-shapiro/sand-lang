@@ -1,23 +1,23 @@
 SandLang is a sandboxed bytecode interpreter with the following requirements:
 
 - implemented in 100% safe Rust
-- fully sandboxed (imports, fs, network, std streams, env, etc)
-- no IPC, subprocesses, mmap, etc (all compute must stay in-process and in the sandbox)
-- the user may set hard limits on per-engine memory, CPU, etc.
+- fully sandboxed for all system resources
+- hard limits on per-engine memory, CPU, etc.
+- no sandbox escape mechanisms: no IPC, subprocesses, mmap, etc.
 - single threaded engine
 - multiple engines may be safely embedded in a single Rust crate and run in the same process without issue
 - maximum performance with no JIT
 - type checking, linting, and formatting built in
 - syntax that encourages elegant, correct code
-- script module imports
+- modules and imports
 - native Rust modules with type interop
 - extensible standard library written in Rust
-- runs on every major platform: iOS, macOS, Windows, Linux, Android, and Web
+- runs on every major platform: iOS, macOS, Windows, Linux, Android, Web
 
 ## Playbooks
 
 - Follow docs/playbook_feature.md for any feature request.
-- Follow docs/playbook_reviews.md for any review request.
+- Follow docs/playbook_reviewing.md for any review request.
 - Follow docs/playbook_copyediting.md for any copy editing request.
 
 If playbook instructions conflict with this or any other doc, follow the playbook and communicate the conflict to the user.
