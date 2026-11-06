@@ -125,7 +125,7 @@ fn read_stdin<R: IntoValue + Send + 'static>(
         drop(res);
         done(vm, data)
     });
-    Ok(Later::waiting(finish, vm.host.stdin.wait()))
+    Ok(Later::new(vm.host.stdin.wait(), finish))
 }
 
 fn input_line(vm: &mut Vm, line: Option<Vec<u8>>) -> Result<Option<String>, HostError> {

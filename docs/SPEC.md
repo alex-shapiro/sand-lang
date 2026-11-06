@@ -2029,8 +2029,8 @@ models:
 Time spent waiting for user input while all other tasks are idle does not count
 toward `max_wall_time`. Time spent running other tasks still counts. User input
 waits include reads from a `StdinFeed`, reads of a standard input inherited
-with `Config::inherit_stdin_from_user`, and host functions that return
-`Later::for_user` (§16.3). The `sand` command inherits its standard input from
+with `Config::inherit_stdin_from_user`, and host functions that return a
+`Later` with `WaitKind::User` (§16.3). The `sand` command inherits its standard input from
 the user only if it is a terminal. A read from a `StdinFeed` always waits for the user,
 because the host sees each waiting read through `wanted` and `awaited` and can
 show it or dismiss it.
@@ -2082,14 +2082,13 @@ and charges fuel and memory when converting arguments and return values.
 is invalid or already registered, or if a host module uses the name of a
 standard library module.
 
-| Method                             | Registered item                                                                     |
-| ---------------------------------- | ----------------------------------------------------------------------------------- |
-| `function(name, f)`                | synchronous function that can borrow `&str`, `&[u8]`, and `&T` arguments            |
-| `vm_function(name, f)`             | synchronous function that takes `&mut Vm` and owned arguments                       |
-| `async_function(name, f)`          | asynchronous function that takes owned arguments and suspends only the calling task |
-| `async_function_for_user(name, f)` | `async_function` whose future waits for a user action                               |
-| `bind::<T>()`                      | Rust type `T` with a derived `NamedType`                                            |
-| `params(names)`, `doc(text)`       | parameter names and documentation for the most recently registered function         |
+| Method                       | Registered item                                                                     |
+| ---------------------------- | ----------------------------------------------------------------------------------- |
+| `function(name, f)`          | synchronous function that can borrow `&str`, `&[u8]`, and `&T` arguments            |
+| `vm_function(name, f)`       | synchronous function that takes `&mut Vm` and owned arguments                       |
+| `async_function(name, f)`    | asynchronous function that takes owned arguments and suspends only the calling task |
+| `bind::<T>()`                | Rust type `T` with a derived `NamedType`                                            |
+| `params(names)`, `doc(text)` | parameter names and documentation for the most recently registered function         |
 
 Four derive macros bind a Rust type to a Sand type in a native module and
 implement `NamedType`, `SandType`, `FromValue`, and `IntoValue`. Every derived
@@ -2149,11 +2148,11 @@ kind: kind))` in Sand, whereas `?` converts a `Ctl` into a `HostError` that
   aborts the run with a runtime error via `Ctl::fail`, a resource limit error,
   or an exit code.
 - `Result<Later<T, E>, E>` suspends the calling task on a future and maps to
-  the same Sand return type as `Result<T, E>`. Use `Later::for_user` instead
-  of `Later::new` if the future waits for a user action, so that idle wait time
-  does not count toward `max_wall_time` (§16.2). For the same reason, register
-  an asynchronous function whose future waits for a user action with
-  `async_function_for_user` instead of `async_function`.
+  the same Sand return type as `Result<T, E>`. `Later::new(wait, fut)` takes
+  the `WaitKind` of `fut`: if `fut` waits for a user action, use
+  `WaitKind::User`, so that idle wait time does not count toward
+  `max_wall_time` (§16.2). A function registered with `async_function` waits
+  for I/O.
 
 To check a sandbox capability inside a `vm_function`, call
 `Vm::require(&capability)` (§14), which returns an error of kind

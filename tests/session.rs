@@ -6,7 +6,7 @@
 mod common;
 
 use common::{TempDir, rt};
-use sandlang::native::Later;
+use sandlang::native::{Later, WaitKind};
 use sandlang::platform::{Clock, ClockFuture, Instant, SystemTime, UNIX_EPOCH};
 use sandlang::session::RESET_NOTE;
 use sandlang::vm::{Ctl, Vm};
@@ -1173,9 +1173,8 @@ fn waits_module() -> NativeModule {
         |_: &mut Vm| Ok(())
     }
     let mut m = NativeModule::new("waits");
-    m.vm_function("user", |_: &mut Vm| Ok::<_, Ctl>(Later::for_user(wait())));
-    m.vm_function("io", |_: &mut Vm| Ok::<_, Ctl>(Later::new(wait())));
-    m.async_function_for_user("async_user", || tokio::time::sleep(Duration::from_secs(10)));
+    m.vm_function("user", |_: &mut Vm| Ok::<_, Ctl>(Later::new(WaitKind::User, wait())));
+    m.vm_function("io", |_: &mut Vm| Ok::<_, Ctl>(Later::new(WaitKind::Io, wait())));
     m.async_function("async_io", || tokio::time::sleep(Duration::from_secs(10)));
     m
 }
@@ -1186,7 +1185,6 @@ fn host_user_wait_pauses_wall_time_limit() {
     let mut r = Repl::paused(Config::new().module(waits_module()).limits(limits));
     r.ok("import waits");
     r.ok("waits.user()");
-    r.ok("waits.async_user()");
     assert!(matches!(r.eval("waits.io()"), Err(Error::Limit(LimitKind::WallTime))));
     assert!(matches!(r.eval("waits.async_io()"), Err(Error::Limit(LimitKind::WallTime))));
 }

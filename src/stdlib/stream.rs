@@ -4,7 +4,7 @@
 use super::io_kind;
 use crate::native::{HostError, IntoValue, Later};
 use crate::vm::iomem::{MemoryLimit, Reservation};
-use crate::vm::{Ctl, Vm};
+use crate::vm::{Ctl, Vm, WaitKind};
 use std::future::Future;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt};
 
@@ -34,7 +34,7 @@ pub(crate) fn suspend<T: Send + 'static, R: IntoValue + Send + 'static>(
     fut: impl Future<Output = Result<T, IoFailure>> + Send + 'static,
     ok: impl FnOnce(&mut Vm, T) -> Result<R, HostError> + Send + 'static,
 ) -> Suspended<R> {
-    Ok(Later::new(settle(fut, ok)))
+    Ok(Later::new(WaitKind::Io, settle(fut, ok)))
 }
 
 /// Awaits `fut` and returns a closure that runs `ok` with the result on the VM

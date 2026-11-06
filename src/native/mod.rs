@@ -5,6 +5,7 @@ mod func;
 mod ty;
 
 pub use crate::types::traits;
+pub use crate::vm::WaitKind;
 pub use convert::{Conversion, FromValue, HostError, IntoHostError, IntoValue, value_from, value_into};
 pub use func::{AsyncHostFunction, HostFunction, Later, NativeError, Signature, VmFunction};
 pub use ty::{Channel, Named, Never, Num, Param, Range, Reflect, SandType, Task, Type, Val};
@@ -18,7 +19,7 @@ use crate::syntax::lexer::{is_ident, is_keyword};
 use crate::types::{ConstVal, MAX_CONST_DEPTH, MAX_CONST_PARTS, ValueTypeInfo};
 use crate::vm::heap::Heap;
 use crate::vm::value::{ChannelObj, MapObj, Obj, SetObj, TaskObj, TypeDesc, Value, ValueType};
-use crate::vm::{Ctl, HostFn, NativeFn, Vm, WaitKind};
+use crate::vm::{Ctl, HostFn, NativeFn, Vm};
 use std::any::{Any, TypeId};
 use std::borrow::Cow;
 use std::marker::PhantomData;
@@ -862,19 +863,7 @@ impl NativeModule {
     ///
     /// Panics under the same conditions as [`NativeModule::function`].
     pub fn async_function<M, F: AsyncHostFunction<M>>(&mut self, name: &str, f: F) -> &mut Self {
-        self.add(name, F::signature(), f.into_host(WaitKind::Io))
-    }
-
-    /// Registers an asynchronous function `f` whose future completes when the
-    /// user acts, for example when the user approves a request. While the
-    /// engine has nothing else to run, the wait does not count toward the
-    /// wall-time limit.
-    ///
-    /// # Panics
-    ///
-    /// Panics under the same conditions as [`NativeModule::function`].
-    pub fn async_function_for_user<M, F: AsyncHostFunction<M>>(&mut self, name: &str, f: F) -> &mut Self {
-        self.add(name, F::signature(), f.into_host(WaitKind::User))
+        self.add(name, F::signature(), f.into_host())
     }
 
     /// Sets the parameter names (excluding `self`) for the most recently

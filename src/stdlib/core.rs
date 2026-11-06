@@ -8,7 +8,7 @@ use crate::vm::compare::{
 };
 use crate::vm::heap::Heap;
 use crate::vm::value::*;
-use crate::vm::{BlockOn, Ctl, NResult, Vm, fail, internal};
+use crate::vm::{BlockOn, Ctl, NResult, Vm, WaitKind, fail, internal};
 use jiff::SignedDuration;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -149,7 +149,7 @@ pub(crate) fn task() -> NativeModule {
     m.vm_function("sleep", |vm: &mut Vm, d: SignedDuration| {
         let d = nanos(d).max(0) as u64;
         let sleep = vm.host.clock.sleep(std::time::Duration::from_nanos(d));
-        Ok::<_, Ctl>(Later::new(async move {
+        Ok::<_, Ctl>(Later::new(WaitKind::Io, async move {
             sleep.await;
             |_: &mut Vm| Ok::<_, Ctl>(())
         }))

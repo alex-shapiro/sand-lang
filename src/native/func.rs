@@ -47,8 +47,7 @@ pub trait VmFunction<Marker>: Send + Sync + 'static {
 /// outlive the initial call.
 pub trait AsyncHostFunction<Marker>: Send + Sync + 'static {
     fn signature() -> Signature;
-    /// The native function, whose calls suspend with `wait`.
-    fn into_host(self, wait: WaitKind) -> Box<NativeFn>;
+    fn into_host(self) -> Box<NativeFn>;
 }
 
 /// Deferred result returned by a [`VmFunction`] that may suspend the calling
@@ -57,11 +56,14 @@ pub trait AsyncHostFunction<Marker>: Send + Sync + 'static {
 /// Return `Result<Later<T, E>, E>` from the function: if `E` is [`Ctl`], the
 /// Sand return type is `T`; if `E` is [`HostError`], the Sand return type is
 /// `Result<T, Error>`.
-pub struct Later<T, E>(Pending, PhantomData<fn() -> (T, E)>);
+pub struct Later<T, E>(Completion, PhantomData<fn() -> (T, E)>);
 
-enum Pending {
-    Ready(Finisher),
-    Future(BoxFuture, WaitKind),
+/// When a [`Later`] produces its Sand result.
+enum Completion {
+    /// Now, without suspending the calling task.
+    Now(Finisher),
+    /// After the future completes.
+    After(BoxFuture, WaitKind),
 }
 
 /// Error type for a [`Later`] result ([`Ctl`] or [`HostError`]).
@@ -98,26 +100,13 @@ impl<T: IntoValue + Send + 'static, E: NativeError> Later<T, E> {
     /// Suspends the calling task until `fut` is resolved, and then executes the
     /// returned closure on the VM thread to produce the Sand result.
     ///
+    /// `wait` tells what `fut` waits for. If `fut` waits for a user action,
+    /// use [`WaitKind::User`], so that the wait does not count toward the
+    /// wall-time limit while the engine has nothing else to run.
+    ///
     /// Do not capture [`Value`]s in `fut`; the garbage collector does not trace
     /// pending futures while a task is suspended.
-    pub fn new<F>(fut: impl Future<Output = F> + Send + 'static) -> Later<T, E>
-    where
-        F: FnOnce(&mut Vm) -> Result<T, E> + Send + 'static,
-    {
-        Later::waiting(fut, WaitKind::Io)
-    }
-
-    /// Suspends the calling task until `fut` is resolved for a user action, and
-    /// then runs the returned closure on the VM thread. Idle wait time does not
-    /// count toward the wall-time limit.
-    pub fn for_user<F>(fut: impl Future<Output = F> + Send + 'static) -> Later<T, E>
-    where
-        F: FnOnce(&mut Vm) -> Result<T, E> + Send + 'static,
-    {
-        Later::waiting(fut, WaitKind::User)
-    }
-
-    pub(crate) fn waiting<F>(fut: impl Future<Output = F> + Send + 'static, wait: WaitKind) -> Later<T, E>
+    pub fn new<F>(wait: WaitKind, fut: impl Future<Output = F> + Send + 'static) -> Later<T, E>
     where
         F: FnOnce(&mut Vm) -> Result<T, E> + Send + 'static,
     {
@@ -125,20 +114,20 @@ impl<T: IntoValue + Send + 'static, E: NativeError> Later<T, E> {
             let finish = fut.await;
             Box::new(move |vm: &mut Vm| E::finish(finish(vm), vm)) as Finisher
         };
-        Later(Pending::Future(Box::pin(fut), wait), PhantomData)
+        Later(Completion::After(Box::pin(fut), wait), PhantomData)
     }
 
     /// Completes immediately with `r` without suspending the calling task.
     pub fn ready(r: Result<T, E>) -> Later<T, E> {
-        Later(Pending::Ready(Box::new(move |vm: &mut Vm| E::finish(r, vm))), PhantomData)
+        Later(Completion::Now(Box::new(move |vm: &mut Vm| E::finish(r, vm))), PhantomData)
     }
 }
 
 impl<T, E> Later<T, E> {
     pub(crate) fn finish(self, vm: &mut Vm) -> NResult {
         match self.0 {
-            Pending::Ready(f) => f(vm),
-            Pending::Future(fut, wait) => Err(Ctl::suspend(fut, wait)),
+            Completion::Now(f) => f(vm),
+            Completion::After(fut, wait) => Err(Ctl::suspend(fut, wait)),
         }
     }
 }
@@ -219,7 +208,7 @@ macro_rules! fn_impls {
             fn signature() -> Signature {
                 Signature { params: vec![$($a::sand_type()),*], ret: R::sand_type() }
             }
-            fn into_host(self, wait: WaitKind) -> Box<NativeFn> {
+            fn into_host(self) -> Box<NativeFn> {
                 Box::new(move |vm: &mut Vm, args: &[Value]| -> NResult {
                     let &[$($a),*] = strip_dict_args(args, $n) else { return Err(too_few_args()) };
                     let mut conv = Conversion::new();
@@ -229,7 +218,7 @@ macro_rules! fn_impls {
                         let r = fut.await;
                         move |_: &mut Vm| Ok(r)
                     };
-                    Later::<R, Ctl>::waiting(finish, wait).finish(vm)
+                    Later::<R, Ctl>::new(WaitKind::Io, finish).finish(vm)
                 })
             }
         }
