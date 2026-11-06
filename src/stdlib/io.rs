@@ -140,41 +140,57 @@ const STDIN_CHUNK: usize = 64 << 10;
 /// read must wait, another is under way, or the line does not fit in memory.
 fn buffered_line(vm: &Vm) -> Option<Option<Vec<u8>>> {
     let mut source = vm.host.stdin.source().try_lock().ok()?;
-    let _read = match &mut *source {
-        StdinSource::Host(r) => Some(r.begin_read()),
-        _ => None,
-    };
-    let (buf, at_end) = match &mut *source {
-        StdinSource::None => return Some(None),
+    match &mut *source {
+        StdinSource::None => Some(None),
         StdinSource::Bytes(c) => {
             let at = u64_to_usize_saturating(c.position()).min(c.get_ref().len());
-            (&c.get_ref()[at..], true)
+            let line = BufferedLine::find(vm, &c.get_ref()[at..], true)?;
+            c.set_position(c.position() + line.len as u64);
+            Some(line.text)
         }
         #[cfg(feature = "os")]
-        StdinSource::Inherit { reader: r, .. } => (r.buffer(), false),
-        StdinSource::Host(r) => r.available(),
-    };
-    let take = match buf.iter().position(|&b| b == b'\n') {
-        Some(nl) => nl + 1,
-        None if at_end => buf.len(),
-        None => return None,
-    };
-    if take == 0 {
-        return Some(None);
+        StdinSource::Inherit { reader: r, .. } => {
+            let line = BufferedLine::find(vm, r.buffer(), false)?;
+            std::pin::Pin::new(r).consume(line.len);
+            Some(line.text)
+        }
+        StdinSource::Host(r) => {
+            let mut read = r.begin_read();
+            let (buf, at_end) = read.available();
+            let line = BufferedLine::find(vm, buf, at_end)?;
+            std::pin::Pin::new(&mut read).consume(line.len);
+            Some(line.text)
+        }
     }
-    if vm.heap.would_exceed(take) {
-        return None;
+}
+
+/// A line at the start of a read buffer.
+struct BufferedLine {
+    /// The bytes that the line takes in the buffer, with its terminator.
+    len: usize,
+    /// The line without its terminator, or `None` at the end of the input.
+    text: Option<Vec<u8>>,
+}
+
+impl BufferedLine {
+    /// The line at the start of `buf`, which ends the input if `at_end`.
+    /// Returns `None` if the line is not complete or does not fit in memory.
+    fn find(vm: &Vm, buf: &[u8], at_end: bool) -> Option<BufferedLine> {
+        let len = match buf.iter().position(|&b| b == b'\n') {
+            Some(nl) => nl + 1,
+            None if at_end => buf.len(),
+            None => return None,
+        };
+        if len == 0 {
+            return Some(BufferedLine { len, text: None });
+        }
+        if vm.heap.would_exceed(len) {
+            return None;
+        }
+        let mut text = buf[..len].to_vec();
+        strip_eol(&mut text);
+        Some(BufferedLine { len, text: Some(text) })
     }
-    let mut data = buf[..take].to_vec();
-    match &mut *source {
-        StdinSource::Bytes(c) => c.set_position(c.position() + take as u64),
-        #[cfg(feature = "os")]
-        StdinSource::Inherit { reader: r, .. } => std::pin::Pin::new(r).consume(take),
-        StdinSource::Host(r) => std::pin::Pin::new(r).consume(take),
-        StdinSource::None => {}
-    }
-    strip_eol(&mut data);
-    Some(Some(data))
 }
 
 /// Reads `what` from standard input: `None` only for a line at the end of
@@ -186,10 +202,7 @@ async fn read_input(stdin: &Mutex<StdinSource>, what: Read, res: &mut Reservatio
         StdinSource::Bytes(c) => read_from(c, what, res).await,
         #[cfg(feature = "os")]
         StdinSource::Inherit { reader: r, .. } => read_from(r, what, res).await,
-        StdinSource::Host(r) => {
-            let _op = r.begin_read();
-            read_from(r, what, res).await
-        }
+        StdinSource::Host(r) => read_from(&mut r.begin_read(), what, res).await,
     }
 }
 

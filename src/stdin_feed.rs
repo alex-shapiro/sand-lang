@@ -258,22 +258,8 @@ impl Drop for StdinIdleGuard {
     }
 }
 
-/// Guard for an active [`StdinFeedReader`] read. Dropping the guard ends the
-/// read and discards the input queued for it.
-pub(crate) struct StdinReadGuard {
-    channel: Arc<StdinChannel>,
-}
-
-impl Drop for StdinReadGuard {
-    fn drop(&mut self) {
-        self.channel.update(|state| {
-            let Some(read) = state.waiting_read.take() else { return };
-            state.queue.retain(|input| input.target != Some(read.id));
-        });
-    }
-}
-
-/// The session's reader of its [`StdinFeed`].
+/// The session's reader of its [`StdinFeed`]. Read it through
+/// [`StdinFeedReader::begin_read`].
 pub(crate) struct StdinFeedReader {
     channel: Arc<StdinChannel>,
     buf: Vec<u8>,
@@ -290,37 +276,55 @@ impl StdinFeedReader {
     /// Starts a read. The read gets a [`StdinReadId`] the first time it waits
     /// for input. An end of input or an answer from an earlier read does not
     /// reach it.
-    pub(crate) fn begin_read(&mut self) -> StdinReadGuard {
+    pub(crate) fn begin_read(&mut self) -> ActiveStdinRead<'_> {
         self.ended = false;
         if self.buf_target.is_some() {
             self.at = self.buf.len();
         }
-        StdinReadGuard { channel: self.channel.clone() }
+        ActiveStdinRead { reader: self }
     }
+}
 
+/// A read of a [`StdinFeedReader`] under way. Dropping it ends the read and
+/// discards the input queued for it.
+pub(crate) struct ActiveStdinRead<'a> {
+    reader: &'a mut StdinFeedReader,
+}
+
+impl ActiveStdinRead<'_> {
     /// Returns buffered bytes available without waiting and whether the
     /// current read has reached EOF.
     pub(crate) fn available(&mut self) -> (&[u8], bool) {
-        if self.at == self.buf.len() && !self.ended {
-            let mut state = self.channel.lock();
+        let r = &mut *self.reader;
+        if r.at == r.buf.len() && !r.ended {
+            let mut state = r.channel.lock();
             let read = state.read_id();
             let next = state.queue.iter().position(|input| input.is_for_read(read));
             if let Some(input) = next.and_then(|i| state.queue.remove(i)) {
                 if let Some(read) = &mut state.waiting_read {
                     read.waiting = false;
                 }
-                self.buf_target = input.target;
+                r.buf_target = input.target;
                 match input.data {
-                    Some(data) => (self.buf, self.at) = (data, 0),
-                    None => self.ended = true,
+                    Some(data) => (r.buf, r.at) = (data, 0),
+                    None => r.ended = true,
                 }
             }
         }
-        (&self.buf[self.at..], self.ended)
+        (&r.buf[r.at..], r.ended)
     }
 }
 
-impl AsyncRead for StdinFeedReader {
+impl Drop for ActiveStdinRead<'_> {
+    fn drop(&mut self) {
+        self.reader.channel.update(|state| {
+            let Some(read) = state.waiting_read.take() else { return };
+            state.queue.retain(|input| input.target != Some(read.id));
+        });
+    }
+}
+
+impl AsyncRead for ActiveStdinRead<'_> {
     fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, out: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
         let data = std::task::ready!(self.as_mut().poll_fill_buf(cx))?;
         let n = data.len().min(out.remaining());
@@ -330,15 +334,16 @@ impl AsyncRead for StdinFeedReader {
     }
 }
 
-impl AsyncBufRead for StdinFeedReader {
+impl AsyncBufRead for ActiveStdinRead<'_> {
     fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
         let this = self.get_mut();
         loop {
             let (data, ended) = this.available();
             if !data.is_empty() || ended {
-                return Poll::Ready(Ok(&this.buf[this.at..]));
+                let r = &*this.reader;
+                return Poll::Ready(Ok(&r.buf[r.at..]));
             }
-            let mut state = this.channel.lock();
+            let mut state = this.reader.channel.lock();
             let read = state.read_id();
             if !state.queue.iter().any(|input| input.is_for_read(read)) {
                 let id = read.unwrap_or_else(|| {
@@ -349,13 +354,14 @@ impl AsyncBufRead for StdinFeedReader {
                 read.waiting = true;
                 read.waker = Some(cx.waker().clone());
                 drop(state);
-                this.channel.changed.notify_waiters();
+                this.reader.channel.changed.notify_waiters();
                 return Poll::Pending;
             }
         }
     }
 
-    fn consume(mut self: Pin<&mut Self>, n: usize) {
-        self.at = (self.at + n).min(self.buf.len());
+    fn consume(self: Pin<&mut Self>, n: usize) {
+        let r = &mut *self.get_mut().reader;
+        r.at = (r.at + n).min(r.buf.len());
     }
 }
