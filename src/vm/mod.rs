@@ -327,7 +327,7 @@ impl Trap {
 }
 
 /// Standard input source for an engine.
-pub enum StdinSource {
+pub(crate) enum StdinSource {
     None,
     Bytes(std::io::Cursor<Vec<u8>>),
     /// The standard input of the process, whose reads wait for `wait`.

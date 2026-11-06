@@ -277,7 +277,7 @@ impl Drop for StdinReadGuard {
 const READER_REGISTERED: &str = "a StdinFeedReader is registered until it is dropped";
 
 /// The engine's reader of a [`StdinFeed`].
-pub struct StdinFeedReader {
+pub(crate) struct StdinFeedReader {
     channel: Arc<StdinChannel>,
     reader_key: u64,
     buf: Vec<u8>,

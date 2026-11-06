@@ -2027,7 +2027,10 @@ models:
   from the response are discarded when `read` finishes.
 
 Time spent waiting for user input while all other tasks are idle does not count
-toward `max_wall_time`. Time spent running other tasks still counts. User input
+toward `max_wall_time`. Time spent running other tasks still counts. While a
+task waits for the user, the time that other tasks wait for timers or the
+network also does not count, so a script can run past `max_wall_time`; only
+`max_cpu_time` then limits it. User input
 waits include reads from a `StdinFeed`, reads of a standard input inherited
 with `Config::inherit_stdin(WaitKind::User)`, and host functions that return a
 `Later` with `WaitKind::User` (§16.3). The `sand` command inherits its standard input from
