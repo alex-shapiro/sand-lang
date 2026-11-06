@@ -1,7 +1,7 @@
 //! Policy file formatter.
 
 use super::file::PolicyError;
-use super::file::{Line, is_method, lex, transport};
+use super::file::{HttpMethod, Line, lex, transport};
 
 /// Formats a policy file into canonical whitespace, quoting, keyword case,
 /// and aligned trailing comments. Returns an error only if a quoted string is
@@ -54,7 +54,7 @@ fn format_line_words(line: &Line) -> String {
         if i >= 2 && keywords {
             match w.bare() {
                 Some(t) if transport(&t).is_some() => text = t.to_ascii_lowercase(),
-                Some(m) if http && is_method(&m) => text = m.to_ascii_uppercase(),
+                Some(m) if http && m.parse::<HttpMethod>().is_ok() => text = m.to_ascii_uppercase(),
                 _ => keywords = false,
             }
         }

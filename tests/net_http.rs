@@ -4,10 +4,8 @@ mod common;
 
 use common::{HttpResponse, http_server, run_with};
 use sandlang::engine::{Config, Engine, Error, Limits, MemorySink};
-use sandlang::policy::file::PolicyFile;
 use sandlang::policy::rules::{RulePolicy, Transports};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 fn run_net(src: &str) -> String {
@@ -160,10 +158,13 @@ fn http_rules_filter_methods_and_routes() {
         path => HttpResponse::new(200, format!("{} {path}", req.method)),
     });
     let addr = server.addr;
-    let rules = format!(
-        "allow http plaintext GET {addr}/api/** {addr}/old\nallow http plaintext POST {addr}/api/items\ndeny http plaintext {addr}/api/admin"
-    );
-    let policy = RulePolicy::standard().extend(PolicyFile::parse(&rules, Path::new("/"), None).unwrap().rules);
+    let url = |path: &str| format!("{addr}{path}").parse().unwrap();
+    let (get, post) = (["GET".parse().unwrap()], ["POST".parse().unwrap()]);
+    let policy = RulePolicy::standard()
+        .allow_http(Transports::Plaintext, &get, url("/api/**"))
+        .allow_http(Transports::Plaintext, &get, url("/old"))
+        .allow_http(Transports::Plaintext, &post, url("/api/items"))
+        .deny_http(Transports::Plaintext, &[], url("/api/admin"));
     let src = format!(
         r#"
 import http

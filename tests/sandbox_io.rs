@@ -258,9 +258,11 @@ fn localhost_rules_restrict_the_names_under_localhost() {
         .allow_net(Transports::Tls, "app.localhost".parse().unwrap())
         .deny_net(Transports::Both, "localhost".parse().unwrap());
     assert_eq!(p.check(&net("app.localhost", 443)), Decision::Deny);
-    let p = RulePolicy::new()
-        .allow_http(Transports::Tls, "app.localhost/api".parse().unwrap())
-        .deny_http(Transports::Both, "localhost/api/admin".parse().unwrap());
+    let p = RulePolicy::new().allow_http(Transports::Tls, &[], "app.localhost/api".parse().unwrap()).deny_http(
+        Transports::Both,
+        &[],
+        "localhost/api/admin".parse().unwrap(),
+    );
     let get = |host: &str, path: &str| Capability::Http {
         method: "GET".into(),
         scheme: "https".into(),
@@ -308,12 +310,17 @@ fn http_address_rules_apply_to_resolved_addresses() {
         path: path.into(),
     };
     let metadata: SocketAddr = "169.254.169.254:80".parse().unwrap();
-    let p = RulePolicy::new()
-        .allow_http(Transports::Plaintext, "*".parse().unwrap())
-        .deny_http(Transports::Both, "169.254.169.254".parse().unwrap());
+    let p = RulePolicy::new().allow_http(Transports::Plaintext, &[], "*".parse().unwrap()).deny_http(
+        Transports::Both,
+        &[],
+        "169.254.169.254".parse().unwrap(),
+    );
     assert_eq!(p.check_resolved(&get("GET", "metadata.evil.example", "/latest"), metadata), Decision::Deny);
     assert_eq!(p.check_resolved(&get("GET", "metadata.evil.example", "/latest"), "8.8.8.8:80".parse().unwrap()), Decision::Allow);
-    let p = policy_text("allow http plaintext *\ndeny http 10.0.0.5/admin\nprompt http POST 10.0.0.5");
+    let p = RulePolicy::new()
+        .allow_http(Transports::Plaintext, &[], "*".parse().unwrap())
+        .deny_http(Transports::Both, &[], "10.0.0.5/admin".parse().unwrap())
+        .prompt_http(Transports::Both, &["POST".parse().unwrap()], "10.0.0.5".parse().unwrap());
     let at = "10.0.0.5:80".parse().unwrap();
     assert_eq!(p.check_resolved(&get("GET", "app.example", "/admin/users"), at), Decision::Deny);
     assert_eq!(p.check_resolved(&get("GET", "app.example", "/%61dmin"), at), Decision::Deny);
@@ -322,16 +329,21 @@ fn http_address_rules_apply_to_resolved_addresses() {
     assert_eq!(p.check_resolved(&get("POST", "app.example", "/public"), at), Decision::Deny);
     assert_eq!(p.check_resolved(&plain("app.example", 80), at), Decision::Allow);
     let p = RulePolicy::new()
-        .allow_http(Transports::Plaintext, "db.internal".parse().unwrap())
+        .allow_http(Transports::Plaintext, &[], "db.internal".parse().unwrap())
         .deny_net(Transports::Both, "10.0.0.0/8".parse().unwrap());
     assert_eq!(p.check_resolved(&get("GET", "db.internal", "/"), at), Decision::Allow);
     assert_eq!(p.check_resolved(&get("GET", "other.internal", "/"), at), Decision::Deny);
-    let p = RulePolicy::new()
-        .allow_http(Transports::Plaintext, "db.internal".parse().unwrap())
-        .deny_http(Transports::Both, "10.0.0.5".parse().unwrap());
+    let p = RulePolicy::new().allow_http(Transports::Plaintext, &[], "db.internal".parse().unwrap()).deny_http(
+        Transports::Both,
+        &[],
+        "10.0.0.5".parse().unwrap(),
+    );
     assert_eq!(p.check_resolved(&get("GET", "db.internal", "/"), at), Decision::Deny);
-    let p =
-        RulePolicy::new().allow_http(Transports::Plaintext, "*".parse().unwrap()).deny_http(Transports::Both, "127.0.0.1".parse().unwrap());
+    let p = RulePolicy::new().allow_http(Transports::Plaintext, &[], "*".parse().unwrap()).deny_http(
+        Transports::Both,
+        &[],
+        "127.0.0.1".parse().unwrap(),
+    );
     assert_eq!(p.check_resolved(&get("GET", "evil.example", "/"), "[::ffff:127.0.0.1]:80".parse().unwrap()), Decision::Deny);
     assert_eq!(p.check_resolved(&get("GET", "evil.example", "/"), "0.0.0.0:80".parse().unwrap()), Decision::Deny);
 }
@@ -339,8 +351,8 @@ fn http_address_rules_apply_to_resolved_addresses() {
 #[test]
 fn encoded_path_separators_are_checked_at_resolved_addresses() {
     let p = RulePolicy::new()
-        .allow_http(Transports::Both, "*".parse().unwrap())
-        .allow_http(Transports::Plaintext, "api.example.com/*.txt".parse().unwrap())
+        .allow_http(Transports::Both, &[], "*".parse().unwrap())
+        .allow_http(Transports::Plaintext, &[], "api.example.com/*.txt".parse().unwrap())
         .deny_net(Transports::Both, "10.0.0.0/8".parse().unwrap());
     let get = |path: &str| Capability::Http {
         method: "GET".into(),
@@ -385,7 +397,9 @@ fn explicit_host_rules_outrank_cidr_prefixes_at_resolved_addresses() {
     assert_eq!(p.check(&net("db.internal", 5432)), Decision::Prompt);
     assert_eq!(p.check(&net_addr("db.internal", "93.184.0.5:5432")), Decision::Allow);
     assert_eq!(p.check(&net_addr("example.com", "93.184.215.14:443")), Decision::Deny);
-    let p = policy_text("allow http GET db.internal/api\ndeny net 10.0.0.0/8");
+    let p = RulePolicy::new()
+        .allow_http(Transports::Tls, &["GET".parse().unwrap()], "db.internal/api".parse().unwrap())
+        .deny_net(Transports::Both, "10.0.0.0/8".parse().unwrap());
     let get = |path: &str| Capability::Http {
         method: "GET".into(),
         scheme: "https".into(),
@@ -433,7 +447,7 @@ fn default_rules_apply_only_to_unmatched_requests() {
     assert_eq!(p.check_normalized(&import), Decision::Prompt);
     assert_eq!(RulePolicy::standard().allow_import("/").check_normalized(&import), Decision::Allow);
     let get = Capability::Http { method: "GET".into(), scheme: "https".into(), host: "a.com".into(), port: 443, path: "/".into() };
-    let p = RulePolicy::new().prompt_http(Transports::Both, "*".parse().unwrap()).with_defaults(RulePolicy::allow_all());
+    let p = RulePolicy::new().prompt_http(Transports::Both, &[], "*".parse().unwrap()).with_defaults(RulePolicy::allow_all());
     assert_eq!(p.check(&get), Decision::Prompt);
     let defaults = RulePolicy::standard().allow_stdin().allow_net(Transports::Tls, "*".parse().unwrap()).allow_read("/data");
     let p =
@@ -739,8 +753,8 @@ fn pooled_connections_are_reused_only_at_addresses_allowed_for_the_request() {
     let connected = Arc::new(Mutex::new(Vec::new()));
     let network = Arc::new(KeepAliveNetwork { addrs: vec![addr], connected: connected.clone() });
     let policy = RulePolicy::standard()
-        .extend(policy_text("allow http plaintext GET api.example.com/a"))
-        .allow_http(Transports::Plaintext, "*".parse().unwrap())
+        .allow_http(Transports::Plaintext, &["GET".parse().unwrap()], "api.example.com/a".parse().unwrap())
+        .allow_http(Transports::Plaintext, &[], "*".parse().unwrap())
         .deny_net(Transports::Plaintext, "10.0.0.0/8".parse().unwrap());
     let src = r#"
 import http
