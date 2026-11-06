@@ -3,6 +3,7 @@
 use crate::check::ModKind;
 use crate::native::NativeModule;
 use crate::native::convert::HostError;
+use crate::native::func::Call;
 use crate::vm::{Ctl, Vm};
 
 pub(crate) fn module() -> NativeModule {
@@ -13,8 +14,8 @@ pub(crate) fn module() -> NativeModule {
         b[8] = (b[8] & 0x3f) | 0x80;
         Ok(format_uuid(&b))
     });
-    m.vm_function("unix_millis", |vm: &mut Vm| -> Result<_, Ctl> {
-        let ms = vm.wall_time()?.duration_since(crate::platform::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    m.vm_function("unix_millis", |vm: &mut Vm, call: Call| -> Result<_, Ctl> {
+        let ms = vm.wall_time(call)?.duration_since(crate::platform::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
         Ok(ms.min(i64::MAX as u128) as i64)
     });
     // Starts each millisecond's counter at a random value in the lower half

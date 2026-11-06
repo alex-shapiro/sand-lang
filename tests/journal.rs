@@ -1373,3 +1373,63 @@ print(waiter.wait())
         assert_eq!(prefix.entries(), entries, "prefix {k}");
     }
 }
+
+#[test]
+fn a_journaled_function_that_reads_the_clock_replays_with_the_same_sequence_numbers() {
+    // A journaled function cannot read the run's journaled clock (it gets no `Call`), so it reads
+    // the host's clock, in its body and in its finisher. The journal records what it returns.
+    let clock = ManualClock::new();
+    let seqs: Arc<Mutex<Vec<Option<u64>>>> = Arc::default();
+    let secs = |vm: &Vm| vm.host.clock.wall().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64 - BASE_SECS as i64;
+    let mut m = NativeModule::new("clocked");
+    let (s, c) = (seqs.clone(), clock.clone());
+    m.vm_function(
+        "stamp",
+        Journaled(move |vm: &mut Vm, call: JournaledCall| -> i64 {
+            s.lock().unwrap().push(call.seq());
+            c.advance(Duration::from_secs(1));
+            secs(vm)
+        }),
+    );
+    let (s, c) = (seqs.clone(), clock.clone());
+    m.vm_function(
+        "later",
+        Journaled(move |_: &mut Vm, call: JournaledCall| -> Result<Later<i64, HostError>, HostError> {
+            s.lock().unwrap().push(call.seq());
+            let c = c.clone();
+            Ok(Later::new(async move {
+                move |vm: &mut Vm| {
+                    c.advance(Duration::from_secs(1));
+                    Ok::<_, HostError>(secs(vm))
+                }
+            }))
+        }),
+    );
+    let src = "import clocked\nimport time\nlet a = time.now().epoch_seconds()\nprint(clocked.stamp())\nlet b = time.now().epoch_seconds()\nprint(clocked.later()?)\nprint(b - a)";
+    let base = Config::new().policy(RulePolicy::allow_all()).clock(clock.clone()).host_modules(HostModules::new([m]).unwrap()).seed(1);
+    let run = |journal: &MemoryJournal| {
+        let out = MemorySink::new();
+        let config = base.clone().stdout(out.clone()).durable(Durable::new(Arc::new(journal.clone())));
+        let r = rt().block_on(Engine::new(config).run_source("main.sand", src));
+        (r, out.contents())
+    };
+    let journal = MemoryJournal::new();
+    let (r, out) = run(&journal);
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!(out, "1\n2\n1\n");
+    let entries = journal.entries();
+    let first = seqs.lock().unwrap().clone();
+    let [Some(stamp), Some(later)] = first[..] else { panic!("{first:?}") };
+    assert_eq!((entries[stamp as usize].kind, entries[later as usize].kind), (EntryKind::Result, EntryKind::Start));
+    // Replay returns the recorded results without a call, also when the host's clock moved.
+    clock.advance(Duration::from_secs(100));
+    let (r, again) = run(&MemoryJournal::with_entries(entries.clone()));
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!(again, out);
+    assert_eq!(seqs.lock().unwrap().len(), 2);
+    // A run resumed after the start of `later` calls it again with the same sequence number.
+    let (r, resumed) = run(&MemoryJournal::with_entries(entries[..=later as usize].to_vec()));
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!(resumed, "1\n103\n1\n");
+    assert_eq!(seqs.lock().unwrap()[2..], [Some(later)]);
+}

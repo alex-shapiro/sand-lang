@@ -995,8 +995,10 @@ impl Vm {
         Ok(())
     }
 
-    /// The wall-clock time, as the script observes it: journaled.
-    pub fn wall_time(&self) -> Result<SystemTime, Ctl> {
+    /// The wall-clock time, as the script observes it: journaled. It takes
+    /// the [`Call`] of the reading function, which only a local function
+    /// has: replay does not call a journaled function.
+    pub fn wall_time(&self, _: Call) -> Result<SystemTime, Ctl> {
         let Some(j) = &self.journal else { return Ok(self.host.clock.wall()) };
         let mut j = j.borrow_mut();
         if let Some(EntryData::Wall(t)) = j.take(EntryKind::Wall, &|| "the wall clock".into()).map_err(stop)? {
@@ -1010,8 +1012,9 @@ impl Vm {
     }
 
     /// The monotonic time, as the script observes it: journaled. Readings
-    /// after replay continue from the last replayed one.
-    pub fn monotonic(&self) -> Result<Instant, Ctl> {
+    /// after replay continue from the last replayed one. It
+    /// takes the [`Call`] of the reading function, as [`Vm::wall_time`] does.
+    pub fn monotonic(&self, _: Call) -> Result<Instant, Ctl> {
         let Some(j) = &self.journal else { return Ok(self.host.clock.now()) };
         let mut j = j.borrow_mut();
         if let Some(EntryData::Monotonic(d)) = j.take(EntryKind::Monotonic, &|| "the monotonic clock".into()).map_err(stop)? {

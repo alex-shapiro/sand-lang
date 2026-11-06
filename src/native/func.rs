@@ -98,7 +98,9 @@ pub struct Call {
 }
 
 /// The [`Call`] of a function registered as [`Journaled`] or [`Effectful`].
-/// Only a function in one of these wrappers can take it:
+/// It gives no [`Call`], so the function cannot read journal inputs such as
+/// [`Vm::wall_time`]: replay does not call the function, and thus would not
+/// read them. Only a function in one of these wrappers can take it:
 ///
 /// ```compile_fail
 /// # use sandlang::native::func::JournaledCall;
@@ -117,11 +119,6 @@ impl JournaledCall {
     /// without a journal.
     pub fn seq(self) -> Option<u64> {
         self.0.seq
-    }
-
-    /// The call, for the [`Vm`] operations that need it.
-    pub fn call(self) -> Call {
-        self.0
     }
 }
 
@@ -154,6 +151,14 @@ pub trait LocalCallParam: CallParam {}
 
 impl LocalCallParam for () {}
 impl LocalCallParam for Call {}
+
+/// A call parameter that a function in [`Journaled`] or [`Effectful`] can
+/// take. A [`Call`] is not one: it lets a function read journal inputs.
+#[diagnostic::on_unimplemented(message = "a function wrapped in `Journaled` or `Effectful` must take `JournaledCall`, not `Call`")]
+pub trait JournaledCallParam: CallParam {}
+
+impl JournaledCallParam for () {}
+impl JournaledCallParam for JournaledCall {}
 
 /// Marks the [`VmFunction`] implementation for functions that take a call
 /// parameter of type `C`.
@@ -218,6 +223,19 @@ pub trait JournalArgs {}
 /// m.function("read", Journaled(|f: &File| i64::from(f.0)));
 /// ```
 ///
+/// A function that takes a [`Call`] does not compile. The function would
+/// be able to read journal inputs, such as [`Vm::wall_time`], which replay
+/// does not read because it does not call the function:
+///
+/// ```compile_fail,E0277
+/// # use sandlang::native::func::{Call, Journaled};
+/// # use sandlang::vm::{Ctl, Vm};
+/// let mut m = sandlang::native::NativeModule::new("clock");
+/// m.vm_function("now", Journaled(|vm: &mut Vm, call: Call| -> Result<i64, Ctl> {
+///     Ok(vm.wall_time(call)?.duration_since(sandlang::platform::UNIX_EPOCH).unwrap_or_default().as_secs() as i64)
+/// }));
+/// ```
+///
 /// A function that takes a function does not compile:
 ///
 /// ```compile_fail
@@ -261,7 +279,7 @@ macro_rules! journaled_impls {
             }
         }
 
-        impl<M, F: VmFunction<M>> VmFunction<M> for $wrapper<F>
+        impl<M, F: VmFunction<M, CallParam: JournaledCallParam>> VmFunction<M> for $wrapper<F>
         where
             F::Args: JournalArgs,
             F::Ret: JournalData,

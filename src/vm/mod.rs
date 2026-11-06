@@ -537,7 +537,8 @@ pub struct Host {
     pub cwd: PathBuf,
     pub args: Vec<String>,
     pub env: Option<Vec<(String, String)>>,
-    pub rng: Rng,
+    /// The journal records only the seed, so only local natives draw from it.
+    pub(crate) rng: Rng,
     /// Minimum active script log level, or `None` if logging is disabled.
     pub log_level: Option<crate::stdlib::log::LogLevel>,
     pub(crate) log_sink: Option<Arc<dyn crate::stdlib::log::LogSink>>,

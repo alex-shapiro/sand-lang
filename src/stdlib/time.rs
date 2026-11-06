@@ -5,6 +5,7 @@
 
 use crate::check::ModKind;
 use crate::native::convert::{HostError, IntoValue};
+use crate::native::func::Call;
 use crate::native::ty::Val;
 use crate::native::{Binding, NamedType, NativeModule, NativeObject};
 use crate::platform::{Instant, UNIX_EPOCH};
@@ -792,8 +793,8 @@ struct Stopwatch(Instant);
 
 impl NativeObject for Stopwatch {}
 
-fn now(vm: &Vm) -> Result<Timestamp, Ctl> {
-    let nanos = match vm.wall_time()?.duration_since(UNIX_EPOCH) {
+fn now(vm: &Vm, call: Call) -> Result<Timestamp, Ctl> {
+    let nanos = match vm.wall_time(call)?.duration_since(UNIX_EPOCH) {
         Ok(d) => i128::try_from(d.as_nanos()),
         Err(e) => i128::try_from(e.duration().as_nanos()).map(|n| -n),
     };
@@ -896,14 +897,14 @@ fn register_module(m: &mut NativeModule) {
         };
         Ok(TimeZone(tz))
     });
-    m.vm_function("now", |vm: &mut Vm| now(vm));
-    m.vm_function("Stopwatch.init", |vm: &mut Vm| {
-        let start = vm.monotonic()?;
+    m.vm_function("now", |vm: &mut Vm, call: Call| now(vm, call));
+    m.vm_function("Stopwatch.init", |vm: &mut Vm, call: Call| {
+        let start = vm.monotonic(call)?;
         vm.new_object(Stopwatch(start))
     });
-    m.vm_function("Stopwatch.elapsed", |vm: &mut Vm, watch: Val<Stopwatch>| -> Result<_, Ctl> {
+    m.vm_function("Stopwatch.elapsed", |vm: &mut Vm, call: Call, watch: Val<Stopwatch>| -> Result<_, Ctl> {
         let start = watch.get(&vm.heap)?.0;
-        let elapsed = vm.monotonic()?.saturating_duration_since(start);
+        let elapsed = vm.monotonic(call)?.saturating_duration_since(start);
         Ok(SignedDuration::from_nanos(i64::try_from(elapsed.as_nanos()).unwrap_or(i64::MAX)))
     });
     m.function("midnight", Time::midnight);

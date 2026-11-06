@@ -2499,7 +2499,11 @@ journaled function must be plain data: no functions, tasks, channels, generic
 parameters, or values of bound object types, and no values of bound value
 types in the result. The Rust compiler enforces this rule: the parameter
 types must implement `native::JournalArg` and the return type must implement
-`native::JournalData`. A host function that is not journaled is
+`native::JournalData`. A journaled function does not read journal inputs,
+because replay does not call it: it cannot take a `Call` parameter, which
+`Vm::wall_time` and `Vm::monotonic` need, and it cannot get the run's random
+number generator. A clock reading that it makes through the host's clock is
+part of the result, which the journal records. A host function that is not journaled is
 local: replay calls it again, so it must give the same result in each
 execution and have no effects outside the run. `Later::parked(park)` lets the engine
 suspend a run while the future of a call waits: with `Park::Until(t)` until
