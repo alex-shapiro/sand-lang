@@ -20,9 +20,26 @@ pub(crate) enum HostKind {
     Ip(IpAddr, u8),
 }
 
-/// Validates a host pattern for [`super::RulePolicy::allow_net`].
-pub fn check_net_pattern(pattern: &str) -> Result<(), String> {
-    NetPattern::parse(pattern).map(drop)
+/// A host pattern of a `net` or `http` rule: a host name, `*.domain`, `*`,
+/// an IP address, or a CIDR range, with an optional port such as
+/// `api.example.com:8443` or `[::1]:80`.
+///
+/// [`str::parse`] reads the same grammar as a policy file, without quotes.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct HostPattern(pub(crate) NetPattern);
+
+impl std::str::FromStr for HostPattern {
+    type Err = String;
+
+    fn from_str(pattern: &str) -> Result<HostPattern, String> {
+        NetPattern::parse(pattern).map(HostPattern)
+    }
+}
+
+impl std::fmt::Display for HostPattern {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
 }
 
 /// Returns `true` if `pattern` is valid for [`super::RulePolicy::allow_listen`].
@@ -502,7 +519,7 @@ const INTERNAL_RANGES: [&str; 24] = [
     "ff00::/8",        // multicast
 ];
 
-fn internal_ranges() -> &'static [NetPattern] {
+pub(crate) fn internal_ranges() -> &'static [NetPattern] {
     static PATTERNS: std::sync::LazyLock<Vec<NetPattern>> =
         std::sync::LazyLock::new(|| INTERNAL_RANGES.iter().map(|p| NetPattern::parse(p).expect("a valid range")).collect());
     &PATTERNS

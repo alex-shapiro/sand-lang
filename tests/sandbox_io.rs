@@ -108,7 +108,7 @@ fn net_pattern_edge_cases() {
     assert_eq!(p.check(&net("2001:db8::5", 443)), Decision::Allow);
     assert_eq!(p.check(&net("2001:db8::5", 80)), Decision::Prompt);
     assert_eq!(p.check(&net("10.2.3.4", 80)), Decision::Allow);
-    use sandlang::policy::check_net_pattern;
+    use sandlang::policy::HostPattern;
     for ok in [
         "*",
         "*:443",
@@ -124,7 +124,7 @@ fn net_pattern_edge_cases() {
         "[fc00::/7]:443",
         "fc00::/7",
     ] {
-        assert_eq!(check_net_pattern(ok), Ok(()), "{ok}");
+        assert!(ok.parse::<HostPattern>().is_ok(), "{ok}");
     }
     for bad in [
         "",
@@ -145,7 +145,7 @@ fn net_pattern_edge_cases() {
         "10.0.0.1/8",
         "[fc00::1]/7",
     ] {
-        assert!(check_net_pattern(bad).is_err(), "{bad}");
+        assert!(bad.parse::<HostPattern>().is_err(), "{bad}");
     }
 }
 
@@ -256,6 +256,47 @@ fn transports_filter_raw_connections_and_resolved_addresses() {
     assert_eq!(resolved(false, "8.8.8.8:5432"), Decision::Allow);
     assert_eq!(p.check(&plain("10.0.0.5", 5432)), Decision::Deny);
     assert_eq!(p.check(&net("10.0.0.5", 5432)), Decision::Allow);
+}
+
+#[test]
+fn typed_http_host_rules_match_their_text_rules() {
+    use sandlang::policy::HostPattern;
+    let get = |scheme: &str, host: &str, port: u16| Capability::Http {
+        method: "GET".into(),
+        scheme: scheme.into(),
+        host: host.into(),
+        port,
+        path: "/v1/x".into(),
+    };
+    let requests = [
+        get("https", "api.example.com", 443),
+        get("http", "api.example.com", 80),
+        get("https", "a.b.example.com", 8443),
+        get("https", "example.com", 8443),
+        get("https", "2001:db8::1", 443),
+    ];
+    for (pattern, tls) in [("api.example.com", true), ("api.example.com", false), ("*.example.com:8443", true), ("[2001:db8::1]:443", true)] {
+        let host: HostPattern = pattern.parse().unwrap();
+        let typed = RulePolicy::new().allow_http_host(&host, tls);
+        let text = RulePolicy::new().allow_http(&format!("{} {pattern}", if tls { "tls" } else { "plaintext" }));
+        for r in &requests {
+            assert_eq!(typed.check(r), text.check(r), "{pattern} {r}");
+        }
+    }
+}
+
+#[test]
+fn deny_private_net_denies_every_private_address() {
+    let p = RulePolicy::new().allow_http_host(&"*.example.com".parse().unwrap(), true).deny_private_net();
+    let get = Capability::Http { method: "GET".into(), scheme: "https".into(), host: "a.example.com".into(), port: 443, path: "/".into() };
+    for addr in ["10.1.2.3:443", "127.0.0.1:443", "169.254.169.254:443", "192.0.2.1:443", "[::1]:443", "[fd00::1]:443", "[::ffff:10.0.0.1]:443"] {
+        let addr: SocketAddr = addr.parse().unwrap();
+        assert!(is_private_address(addr.ip()), "{addr}");
+        assert_eq!(p.check_resolved(&get, addr), Decision::Deny, "{addr}");
+    }
+    assert_eq!(p.check_resolved(&get, "93.184.216.34:443".parse().unwrap()), Decision::Allow);
+    assert_eq!(p.check(&net("localhost", 443)), Decision::Deny);
+    assert_eq!(p.check(&net("app.localhost", 443)), Decision::Deny);
 }
 
 #[test]
