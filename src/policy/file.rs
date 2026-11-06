@@ -11,10 +11,10 @@
 //! limit memory 64M
 //! ```
 
-use super::net::{HostKind, ListenPattern, NetPattern, QUOTED_STAR_IN_HOST, UrlPattern, format_host_port, url_segments};
-use super::path::{Seg, Tok};
+use super::net::{HostKind, NetPattern, QUOTED_STAR_IN_HOST, UrlPattern, format_host_port, url_segments};
+use super::path::{Seg, Tok, wild_tokens};
 use super::rules::RulePolicy;
-use super::rules::{Access, NamePattern, Origin, PathPattern, Rule, RuleKind, Transports};
+use super::rules::{Access, NameKind, Origin, PathPattern, Rule, RuleKind, Transports};
 use super::{Capability, Decision};
 use crate::engine::Limits;
 use crate::vm::value::FxHashMap;
@@ -219,7 +219,7 @@ impl Word {
         let mut out = Vec::new();
         for p in &self.parts {
             match p {
-                Part::Raw(s) => out.extend(s.chars().map(|c| (c, c == '*'))),
+                Part::Raw(s) => out.extend(wild_tokens(s)),
                 Part::Quoted(s) => out.extend(s.chars().map(|c| (c, false))),
                 Part::Ref(_) => {}
             }
@@ -644,10 +644,8 @@ impl Context<'_> {
                     "listen" if word.tokens().iter().any(|&(c, wild)| c == '*' && !wild) => {
                         return Err((item.column, QUOTED_STAR_IN_HOST.into()));
                     }
-                    "listen" => RuleKind::Listen(ListenPattern::parse(&word.text()).ok_or_else(|| {
-                        (item.column, format!("invalid listen pattern `{}`: expected ip:port, ip, localhost, *:port, or *", word.text()))
-                    })?),
-                    _ => RuleKind::Env(NamePattern::from_tokens(&word.tokens()).map_err(|m| (item.column, m))?),
+                    "listen" => RuleKind::Listen(word.text().parse().map_err(|m| (item.column, m))?),
+                    _ => RuleKind::Env(NameKind::from_tokens(&word.tokens()).map_err(|m| (item.column, m))?),
                 };
                 rules.push(file_rule(decision, kind, origin));
             }
@@ -859,9 +857,9 @@ impl fmt::Display for Rule {
                 Ok(())
             }
             RuleKind::Listen(pattern) => write!(f, "listen {pattern}"),
-            RuleKind::Env(NamePattern::Exact(name)) => write!(f, "env {}", quote_part(name, true)),
-            RuleKind::Env(NamePattern::Glob(g)) => write!(f, "env {}", render_seg(&Seg::Glob(g.clone()), quote_part)),
-            RuleKind::Env(NamePattern::Any) => write!(f, "env *"),
+            RuleKind::Env(NameKind::Exact(name)) => write!(f, "env {}", quote_part(name, true)),
+            RuleKind::Env(NameKind::Glob(g)) => write!(f, "env {}", render_seg(&Seg::Glob(g.clone()), quote_part)),
+            RuleKind::Env(NameKind::Any) => write!(f, "env *"),
             RuleKind::Stdin => write!(f, "stdin"),
             RuleKind::Stdout => write!(f, "stdout"),
             RuleKind::Stderr => write!(f, "stderr"),

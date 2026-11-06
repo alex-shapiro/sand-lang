@@ -4,8 +4,10 @@ mod common;
 
 use common::{HttpResponse, http_server, run_with};
 use sandlang::engine::{Config, Engine, Error, Limits, MemorySink};
-use sandlang::policy::rules::RulePolicy;
+use sandlang::policy::file::PolicyFile;
+use sandlang::policy::rules::{RulePolicy, Transports};
 use std::io::{BufRead, BufReader, Read, Write};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 fn run_net(src: &str) -> String {
@@ -144,7 +146,7 @@ fn http_redirects_are_checked_against_policy() {
     let target = http_server(|_| HttpResponse::new(200, "secret"));
     let target_addr = target.addr;
     let origin = http_server(move |_| HttpResponse::new(302, "").header("location", &format!("http://{target_addr}/x")));
-    let policy = RulePolicy::standard().allow_net(&origin.addr.to_string());
+    let policy = RulePolicy::standard().allow_net(Transports::TLS, origin.addr.to_string().parse().unwrap());
     let src = format!("import http\nprint(http.get(\"http://{}/\").unwrap_err().kind)", origin.addr);
     let r = run_with(&src, |c| c.policy(policy));
     assert_eq!(r.ok_stdout(), "permission_denied\n");
@@ -158,10 +160,10 @@ fn http_rules_filter_methods_and_routes() {
         path => HttpResponse::new(200, format!("{} {path}", req.method)),
     });
     let addr = server.addr;
-    let policy = RulePolicy::standard()
-        .allow_http(&format!("plaintext GET {addr}/api/** {addr}/old"))
-        .allow_http(&format!("plaintext POST {addr}/api/items"))
-        .deny_http(&format!("plaintext {addr}/api/admin"));
+    let rules = format!(
+        "allow http plaintext GET {addr}/api/** {addr}/old\nallow http plaintext POST {addr}/api/items\ndeny http plaintext {addr}/api/admin"
+    );
+    let policy = RulePolicy::standard().extend(PolicyFile::parse(&rules, Path::new("/"), None).unwrap().rules);
     let src = format!(
         r#"
 import http
@@ -440,7 +442,7 @@ print(accepts.map(t => t.wait().is_ok()))
 fn net_permissions() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    let policy = RulePolicy::standard().allow_net("localhost");
+    let policy = RulePolicy::standard().allow_net(Transports::TLS, "localhost".parse().unwrap());
     let src = format!(
         "import net\nprint(net.connect(\"127.0.0.1\", {}).unwrap_err().kind)\nprint(net.listen(\"127.0.0.1\", 0).unwrap_err().kind)",
         addr.port()

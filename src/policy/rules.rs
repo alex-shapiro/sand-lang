@@ -1,7 +1,7 @@
 //! Rule-based capability policies.
 
 use super::net::{Dest, HostIndex, HostKind, ListenPattern, NetPattern, UrlPattern, internal_ranges, parse_ip, url_segments};
-use super::path::{Glob, Seg, Tok, Trie, path_segments};
+use super::path::{Glob, Seg, Tok, Trie, path_segments, wild_tokens};
 use super::{Capability, Decision, PathSpace, fold_name, lexical, normalize_path};
 use crate::files::Mode;
 use crate::vm::value::FxHashMap;
@@ -54,34 +54,51 @@ impl PathPattern {
     }
 }
 
+/// A name pattern of an `env` rule: an exact name, a `*` glob pattern such as `AWS_*`, or
+/// `*` for all variables. Parse one with [`str::parse`], or make one that matches a name
+/// literally with [`NamePattern::exact`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum NamePattern {
+pub struct NamePattern(NameKind);
+
+impl NamePattern {
+    /// A pattern that matches only `name`. A `*` in `name` matches only itself.
+    pub fn exact(name: impl Into<String>) -> NamePattern {
+        NamePattern(NameKind::Exact(name.into()))
+    }
+}
+
+impl std::str::FromStr for NamePattern {
+    type Err = String;
+
+    fn from_str(name: &str) -> Result<NamePattern, String> {
+        NameKind::from_tokens(&wild_tokens(name)).map(NamePattern)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum NameKind {
     Exact(String),
     Glob(Glob),
     Any,
 }
 
-impl NamePattern {
-    pub(crate) fn parse(name: &str) -> NamePattern {
-        NamePattern::from_tokens(&name.chars().map(|c| (c, c == '*')).collect::<Vec<_>>())
-            .unwrap_or_else(|e| panic!("invalid name pattern {name:?}: {e}"))
-    }
-
-    pub(crate) fn from_tokens(text: &[Tok]) -> Result<NamePattern, String> {
+impl NameKind {
+    pub(crate) fn from_tokens(text: &[Tok]) -> Result<NameKind, String> {
         if text.windows(2).any(|w| w[0].1 && w[1].1) {
             return Err("cannot use `**` in an environment variable pattern: use `*` to match any characters, e.g. `AWS_*`".into());
         }
         Ok(match Seg::parse(text)? {
-            Seg::Lit(s) => NamePattern::Exact(s.into()),
-            Seg::Glob(g) => NamePattern::Glob(g),
-            Seg::Star | Seg::GlobStar => NamePattern::Any,
+            Seg::Lit(s) => NameKind::Exact(s.into()),
+            Seg::Glob(g) => NameKind::Glob(g),
+            Seg::Star | Seg::GlobStar => NameKind::Any,
         })
     }
 }
 
 bitflags::bitflags! {
+    /// The transports that a `net` or `http` rule controls.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-    pub(crate) struct Transports: u8 {
+    pub struct Transports: u8 {
         const TLS = 1;
         const PLAINTEXT = 2;
     }
@@ -113,7 +130,7 @@ pub(crate) enum RuleKind {
     Net(NetPattern, Transports),
     Http(Option<Vec<String>>, UrlPattern, Transports),
     Listen(ListenPattern),
-    Env(NamePattern),
+    Env(NameKind),
     Stdin,
     Stdout,
     Stderr,
@@ -222,10 +239,6 @@ impl fmt::Debug for RulePolicy {
     }
 }
 
-fn listen_pattern(pattern: &str) -> ListenPattern {
-    ListenPattern::parse(pattern).unwrap_or_else(|| panic!("invalid listen pattern {pattern:?}"))
-}
-
 fn custom(name: &str, detail: Option<&str>) -> RuleKind {
     RuleKind::Custom((name != "*").then(|| name.to_string()), detail.filter(|&d| d != "*").map(String::from))
 }
@@ -250,8 +263,8 @@ impl RulePolicy {
             RuleKind::Files(Access::Any, PathPattern::everything()),
             RuleKind::Files(Access::Import, PathPattern::everything()),
             RuleKind::Net(NetPattern { kind: HostKind::Any, port: None }, Transports::all()),
-            RuleKind::Listen(listen_pattern("*")),
-            RuleKind::Env(NamePattern::Any),
+            RuleKind::Listen(ListenPattern::ANY),
+            RuleKind::Env(NameKind::Any),
             RuleKind::Stdin,
             RuleKind::Stdout,
             RuleKind::Stderr,
@@ -310,13 +323,6 @@ impl RulePolicy {
         self.push(decision, RuleKind::Files(access, PathPattern { prefix: p.to_path_buf(), rest: vec![] }))
     }
 
-    fn parsed(self, verb: &str, kind: &str, rest: &str) -> Self {
-        let file = super::file::PolicyFile::parse(&format!("{verb} {kind} {rest}"), Path::new("/"), None)
-            .unwrap_or_else(|e| panic!("invalid {kind} rule {rest:?}: {}", e[0].message));
-        let parsed = file.rules.rules.into_iter().map(|r| Rule::new(r.decision, r.kind));
-        parsed.fold(self, RulePolicy::push_rule)
-    }
-
     pub fn allow_read(self, p: impl AsRef<Path>) -> Self {
         self.files_rule(Decision::Allow, Access::Read, p.as_ref())
     }
@@ -348,42 +354,32 @@ impl RulePolicy {
     pub fn prompt_import(self, p: impl AsRef<Path>) -> Self {
         self.files_rule(Decision::Prompt, Access::Import, p.as_ref())
     }
-    /// Adds an `allow net` rule with optional transport keywords `tls` and
-    /// `plaintext` followed by host patterns such as `"api.example.com:443"`
-    /// or `"plaintext localhost:8080"`. Defaults to `tls`.
+    /// Allows connections over `transports` to hosts that match `host`.
+    pub fn allow_net(self, transports: Transports, host: NetPattern) -> Self {
+        self.push(Decision::Allow, RuleKind::Net(host, transports))
+    }
+    /// Denies connections over `transports` to hosts that match `host`.
+    pub fn deny_net(self, transports: Transports, host: NetPattern) -> Self {
+        self.push(Decision::Deny, RuleKind::Net(host, transports))
+    }
+    /// Prompts before connections over `transports` to hosts that match `host`.
+    pub fn prompt_net(self, transports: Transports, host: NetPattern) -> Self {
+        self.push(Decision::Prompt, RuleKind::Net(host, transports))
+    }
+    /// Allows HTTP requests of all methods over `transports` to URLs that match `url`. To
+    /// limit a rule to some methods, parse it from a policy file with [`PolicyFile::parse`].
     ///
-    /// # Panics
-    ///
-    /// Panics if `rule` is invalid. Use [`super::net::check_net_pattern`] to
-    /// validate a host pattern beforehand.
-    pub fn allow_net(self, rule: &str) -> Self {
-        self.parsed("allow", "net", rule)
+    /// [`PolicyFile::parse`]: super::file::PolicyFile::parse
+    pub fn allow_http(self, transports: Transports, url: UrlPattern) -> Self {
+        self.push(Decision::Allow, RuleKind::Http(None, url, transports))
     }
-    /// Adds a `deny net` rule, defaulting to both `tls` and `plaintext`; see [`RulePolicy::allow_net`].
-    pub fn deny_net(self, rule: &str) -> Self {
-        self.parsed("deny", "net", rule)
+    /// Denies HTTP requests of all methods over `transports` to URLs that match `url`.
+    pub fn deny_http(self, transports: Transports, url: UrlPattern) -> Self {
+        self.push(Decision::Deny, RuleKind::Http(None, url, transports))
     }
-    /// Adds a `prompt net` rule, defaulting to both `tls` and `plaintext`; see [`RulePolicy::allow_net`].
-    pub fn prompt_net(self, rule: &str) -> Self {
-        self.parsed("prompt", "net", rule)
-    }
-    /// Adds an `allow http` rule with optional transport keywords `tls` and
-    /// `plaintext`, optional HTTP methods, and URL patterns such as
-    /// `"GET POST api.example.com/v1/**"`. Defaults to `tls`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `rule` is invalid.
-    pub fn allow_http(self, rule: &str) -> Self {
-        self.parsed("allow", "http", rule)
-    }
-    /// Adds a `deny http` rule, defaulting to both `tls` and `plaintext`; see [`RulePolicy::allow_http`].
-    pub fn deny_http(self, rule: &str) -> Self {
-        self.parsed("deny", "http", rule)
-    }
-    /// Adds a `prompt http` rule, defaulting to both `tls` and `plaintext`; see [`RulePolicy::allow_http`].
-    pub fn prompt_http(self, rule: &str) -> Self {
-        self.parsed("prompt", "http", rule)
+    /// Prompts before HTTP requests of all methods over `transports` to URLs that match `url`.
+    pub fn prompt_http(self, transports: Transports, url: UrlPattern) -> Self {
+        self.push(Decision::Prompt, RuleKind::Http(None, url, transports))
     }
     /// Denies connections to `localhost` and to every address for which
     /// [`super::net::is_private_address`] returns `true`. No other rule can allow them: not a
@@ -395,47 +391,29 @@ impl RulePolicy {
             p.push_rule(Rule { tier: Tier::Absolute, ..Rule::new(Decision::Deny, RuleKind::Net(pattern, Transports::all())) })
         })
     }
-    /// Allows binding a listener matching `pattern`, which may be `ip:port`,
-    /// `[ipv6]:port`, `ip`, `localhost`, `*:port`, or `*`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `pattern` is invalid.
-    pub fn allow_listen(self, pattern: &str) -> Self {
-        self.push(Decision::Allow, RuleKind::Listen(listen_pattern(pattern)))
+    /// Allows binding a listener to an address that matches `pattern`.
+    pub fn allow_listen(self, pattern: ListenPattern) -> Self {
+        self.push(Decision::Allow, RuleKind::Listen(pattern))
     }
-    /// Denies binding a listener matching `pattern`; see [`RulePolicy::allow_listen`].
-    ///
-    /// # Panics
-    ///
-    /// Panics if `pattern` is invalid.
-    pub fn deny_listen(self, pattern: &str) -> Self {
-        self.push(Decision::Deny, RuleKind::Listen(listen_pattern(pattern)))
+    /// Denies binding a listener to an address that matches `pattern`.
+    pub fn deny_listen(self, pattern: ListenPattern) -> Self {
+        self.push(Decision::Deny, RuleKind::Listen(pattern))
     }
-    /// Prompts before binding a listener matching `pattern`; see [`RulePolicy::allow_listen`].
-    ///
-    /// # Panics
-    ///
-    /// Panics if `pattern` is invalid.
-    pub fn prompt_listen(self, pattern: &str) -> Self {
-        self.push(Decision::Prompt, RuleKind::Listen(listen_pattern(pattern)))
+    /// Prompts before binding a listener to an address that matches `pattern`.
+    pub fn prompt_listen(self, pattern: ListenPattern) -> Self {
+        self.push(Decision::Prompt, RuleKind::Listen(pattern))
     }
-    /// Allows reading environment variables matching an exact name, a `*`
-    /// glob pattern such as `AWS_*`, or `*` for all variables.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `name` contains `**`.
-    pub fn allow_env(self, name: &str) -> Self {
-        self.push(Decision::Allow, RuleKind::Env(NamePattern::parse(name)))
+    /// Allows reading environment variables whose names match `name`.
+    pub fn allow_env(self, name: NamePattern) -> Self {
+        self.push(Decision::Allow, RuleKind::Env(name.0))
     }
-    /// Denies reading matching environment variables; see [`RulePolicy::allow_env`].
-    pub fn deny_env(self, name: &str) -> Self {
-        self.push(Decision::Deny, RuleKind::Env(NamePattern::parse(name)))
+    /// Denies reading environment variables whose names match `name`.
+    pub fn deny_env(self, name: NamePattern) -> Self {
+        self.push(Decision::Deny, RuleKind::Env(name.0))
     }
-    /// Prompts before reading matching environment variables; see [`RulePolicy::allow_env`].
-    pub fn prompt_env(self, name: &str) -> Self {
-        self.push(Decision::Prompt, RuleKind::Env(NamePattern::parse(name)))
+    /// Prompts before reading environment variables whose names match `name`.
+    pub fn prompt_env(self, name: NamePattern) -> Self {
+        self.push(Decision::Prompt, RuleKind::Env(name.0))
     }
     pub fn allow_stdin(self) -> Self {
         self.push(Decision::Allow, RuleKind::Stdin)
@@ -657,12 +635,12 @@ impl RulePolicy {
             }
             Capability::Env(name) if name == "*" => {
                 // Evaluate `Env("*")` against a representative sample for each rule and an unmatched character so the result equals the strictest decision for any variable.
-                let pieces = || index.env.iter().flat_map(|(p, ..)| if let NamePattern::Glob(g) = p { g.pieces() } else { &[] });
+                let pieces = || index.env.iter().flat_map(|(p, ..)| if let NameKind::Glob(g) = p { g.pieces() } else { &[] });
                 let used: std::collections::HashSet<char> =
                     index.env_names.keys().map(|n| &**n).chain(pieces().map(|p| &**p)).flat_map(str::chars).collect();
                 let unused = (0..=u32::from(char::MAX)).filter_map(char::from_u32).find(|c| !used.contains(c)).unwrap_or('\0');
                 let samples = index.env_names.keys().cloned().chain(index.env.iter().map(|(p, ..)| match p {
-                    NamePattern::Glob(g) => g.pieces().join(&*unused.to_string()),
+                    NameKind::Glob(g) => g.pieces().join(&*unused.to_string()),
                     _ => unused.to_string(),
                 }));
                 let verdicts = samples.chain([unused.to_string()]).map(|n| self.env_verdict(&n, exclude));
@@ -696,8 +674,8 @@ impl RulePolicy {
         }
         for &(ref pattern, d, rule) in &index.env {
             let spec = match pattern {
-                NamePattern::Glob(g) if g.matches(name) => [1, g.pieces().iter().map(|p| p.len() as u32).sum(), 0, 0],
-                NamePattern::Any => [0; 4],
+                NameKind::Glob(g) if g.matches(name) => [1, g.pieces().iter().map(|p| p.len() as u32).sum(), 0, 0],
+                NameKind::Any => [0; 4],
                 _ => continue,
             };
             best.offer(spec, d, rule);
@@ -1037,7 +1015,7 @@ struct Index {
     groups: Vec<HttpGroup>,
     listen: Vec<(ListenPattern, Decision, u32)>,
     env_names: FxHashMap<String, Vec<(Decision, u32)>>,
-    env: Vec<(NamePattern, Decision, u32)>,
+    env: Vec<(NameKind, Decision, u32)>,
     unit: Vec<(Capability, Decision, u32)>,
     custom: FxHashMap<String, Vec<(Option<String>, Decision, u32)>>,
     any_custom: Vec<(Option<String>, Decision, u32)>,
@@ -1098,7 +1076,7 @@ impl Index {
             match &rule.kind {
                 RuleKind::Files(..) | RuleKind::Net(..) | RuleKind::Http(..) => {}
                 RuleKind::Listen(p) => index.listen.push((p.clone(), decision, rule_id)),
-                RuleKind::Env(NamePattern::Exact(n)) => index.env_names.entry(n.clone()).or_default().push((decision, rule_id)),
+                RuleKind::Env(NameKind::Exact(n)) => index.env_names.entry(n.clone()).or_default().push((decision, rule_id)),
                 RuleKind::Env(p) => index.env.push((p.clone(), decision, rule_id)),
                 RuleKind::Stdin => index.unit.push((Capability::Stdin, decision, rule_id)),
                 RuleKind::Stdout => index.unit.push((Capability::Stdout, decision, rule_id)),
