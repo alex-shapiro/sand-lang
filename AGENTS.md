@@ -28,13 +28,15 @@ Approach each task from first principles. This is a greenfield codebase with no 
 
 ## Symbol Names
 
-Symbol names should be just specific enough that a reader can get the gist without requiring surrounding context. A few non-exhaustive examples:
+Symbol names must be idiomatic and just specific enough that a reader can understand it without requiring surrounding context. A few non-exhaustive examples:
 
-| bad             | good                         |
-| --------------- | ---------------------------- |
-| ReadId          | StdinReadId                  |
-| Who             | DocOwner                     |
-| Channel::wanted | Channel::has_waiting_readers |
+| bad    | good                |
+| ------ | ------------------- |
+| ReadId | StdinReadId         |
+| Who    | DocOwner            |
+| wanted | has_waiting_readers |
+| to     | target              |
+| until  | wait_until          |
 
 ## Doc and Comment Guidelines
 
