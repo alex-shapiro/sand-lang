@@ -1108,6 +1108,17 @@ fn stdin_wait_pauses_wall_time_limit() {
 }
 
 #[test]
+fn a_cancelled_read_no_longer_pauses_wall_time_limit() {
+    let feed = StdinFeed::new();
+    let limits = Limits { max_wall_time: Some(Duration::from_millis(100)), ..Limits::default() };
+    let mut r = Repl::paused(Config::new().policy(RulePolicy::allow_all()).limits(limits).stdin_feed(&feed));
+    r.ok("import io");
+    r.ok("let read = task.timeout(50ms, () => io.stdin.read_line())");
+    assert_eq!(r.value("read"), "None");
+    assert!(matches!(r.eval("task.timeout(50ms, () => io.stdin.read_line())\ntask.sleep(200ms)"), Err(Error::Limit(LimitKind::WallTime))));
+}
+
+#[test]
 fn background_timer_does_not_interrupt_or_time_out_awaited_read() {
     let feed = StdinFeed::new();
     let limits = Limits { max_wall_time: Some(Duration::from_millis(100)), ..Limits::default() };
