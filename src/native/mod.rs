@@ -12,7 +12,7 @@ use crate::vm::heap::Heap;
 use crate::vm::value::{ChannelObj, MapObj, Obj, SetObj, TaskObj, TypeDesc, Value, ValueType};
 use crate::vm::{Ctl, HostFn, NativeFn, Vm};
 use convert::{Conversion, FromValue, mismatch};
-use func::{AsyncHostFunction, Call, HostFunction, LocalCallParam, Signature, VmFunction};
+use func::{AsyncHostFunction, Call, HostFunction, LocalCallParam, LocalParking, Signature, VmFunction};
 use std::any::{Any, TypeId};
 use std::borrow::Cow;
 use std::marker::PhantomData;
@@ -842,7 +842,8 @@ impl NativeModule {
     /// that the function does not copy must be taken as [`Val`] handles.
     /// Only a function in [`Journaled`](func::Journaled) or
     /// [`Effectful`](func::Effectful) can take a
-    /// [`JournaledCall`](func::JournaledCall) instead of the `Call`.
+    /// [`JournaledCall`](func::JournaledCall) instead of the `Call`, or
+    /// return a [`Parked`](func::Parked) result.
     ///
     /// Because the VM re-runs `f` from the start after a permission prompt
     /// ([`Vm::require`]) or after a garbage collection triggered by a memory or
@@ -853,7 +854,7 @@ impl NativeModule {
     /// # Panics
     ///
     /// Panics under the same conditions as [`NativeModule::function`].
-    pub fn vm_function<M, F: VmFunction<M, CallParam: LocalCallParam>>(&mut self, name: &str, f: F) -> &mut Self {
+    pub fn vm_function<M, F: VmFunction<M, CallParam: LocalCallParam, Parking: LocalParking>>(&mut self, name: &str, f: F) -> &mut Self {
         self.add(name, F::signature(), |key| f.into_host(key))
     }
 

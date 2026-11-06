@@ -15,7 +15,7 @@ use super::bytecode::Program;
 use super::iomem::IoMemory;
 use super::value::{MapObj, Obj, SetObj, Value};
 use super::{BoxFuture, Ctl, CtlKind, Finisher, NResult, Vm};
-use crate::journal::{CallResult, Entry, EntryData, EntryKind, Journal, OpDone, OpEnd, OpKind, OpStart, Suspension};
+use crate::journal::{CallResult, Entry, EntryData, EntryKind, Journal, OpDone, OpEnd, OpKind, OpStart, ParkedCall, Suspension};
 use crate::native::func::{Call, Park};
 use crate::platform::{Instant, SystemTime};
 use std::cell::RefCell;
@@ -75,9 +75,28 @@ pub struct Wait {
     /// run without a journal.
     pub(crate) op: Option<u64>,
     pub(crate) park: Park,
-    /// Whether the operation is a call of a host function.
-    pub(crate) call: bool,
+    /// What a parked host call waits for.
+    pub(crate) host_wait: Option<HostWait>,
     pub(crate) work: WaitWork,
+}
+
+/// What a parked host call waits for: the function and the tag that it
+/// gave ([`ParkedCall`]).
+pub(crate) struct HostWait {
+    pub function: Arc<str>,
+    pub tag: String,
+}
+
+impl HostWait {
+    /// The call as a suspension lists it, if it parked with `park`.
+    pub fn parked(&self, park: Park) -> Option<ParkedCall> {
+        let wake_at = match park {
+            Park::Never => return None,
+            Park::UntilResumed => None,
+            Park::Until(t) => Some(t),
+        };
+        Some(ParkedCall { function: self.function.to_string(), tag: self.tag.clone(), wake_at })
+    }
 }
 
 pub(crate) enum WaitWork {
@@ -92,7 +111,7 @@ pub(crate) enum WaitWork {
 impl Wait {
     /// A wait for local operation `fut`: replay runs it again.
     pub(crate) fn local(fut: BoxFuture) -> Wait {
-        Wait { op: None, park: Park::Never, call: false, work: WaitWork::Run { fut, effectful: false } }
+        Wait { op: None, park: Park::Never, host_wait: None, work: WaitWork::Run { fut, effectful: false } }
     }
 }
 
@@ -112,6 +131,8 @@ pub(crate) struct OpSpec {
     /// Whether the run can be suspended while the operation waits. A
     /// timer's comes from its wake time.
     pub park: Park,
+    /// What the operation waits for, for a host call that parks.
+    pub host_wait: Option<HostWait>,
     /// Fuel that the native spent before it started the operation.
     pub pre_fuel: u64,
     /// How long a timer waits.
@@ -150,7 +171,7 @@ impl Rerun {
             j.ops += 1;
         }
         let park = self.wake.map_or(spec.park, Park::Until);
-        Live { op: Some(self.op), seq: Some(self.seq), wake: self.wake, park, call: spec.kind == OpKind::Call, effectful: spec.effectful }
+        Live { op: Some(self.op), seq: Some(self.seq), wake: self.wake, park, host_wait: spec.host_wait, effectful: spec.effectful }
     }
 }
 
@@ -160,16 +181,15 @@ pub(crate) struct Fresh(Option<(u64, String)>);
 impl Fresh {
     /// Records the operation's start in a journaled run: the operation runs.
     pub fn start(self, vm: &Vm, spec: OpSpec) -> Live {
-        let call = spec.kind == OpKind::Call;
         let (Some((identity, label)), Some(mut j)) = (self.0, vm.journal_state()) else {
-            return Live { op: None, seq: None, wake: None, park: spec.park, call, effectful: spec.effectful };
+            return Live { op: None, seq: None, wake: None, park: spec.park, host_wait: spec.host_wait, effectful: spec.effectful };
         };
         let (op, seq) = (j.ops, j.position());
         let wake = spec.timer.map(|d| j.wall(&*vm.host.clock) + d);
         j.record(EntryData::Start(OpStart { kind: spec.kind, identity, pre_fuel: spec.pre_fuel, wake, label }));
         j.ops += 1;
         let park = wake.map_or(spec.park, Park::Until);
-        Live { op: Some(op), seq: Some(seq), wake, park, call, effectful: spec.effectful }
+        Live { op: Some(op), seq: Some(seq), wake, park, host_wait: spec.host_wait, effectful: spec.effectful }
     }
 }
 
@@ -184,7 +204,6 @@ pub(crate) enum Begun {
 /// An operation whose recorded outcome replay delivers.
 pub(crate) struct Replayed {
     op: u64,
-    call: bool,
     /// The fuel that the native spent before the operation started, as the
     /// journal records it.
     pub pre_fuel: u64,
@@ -195,7 +214,7 @@ pub(crate) struct Replayed {
 impl Replayed {
     /// The wait for the recorded outcome, which `build` turns into the result.
     pub fn wait(self, build: BuildFn) -> Ctl {
-        Ctl::wait(Wait { op: Some(self.op), park: Park::Never, call: self.call, work: WaitWork::Replay(build) })
+        Ctl::wait(Wait { op: Some(self.op), park: Park::Never, host_wait: None, work: WaitWork::Replay(build) })
     }
 }
 
@@ -208,7 +227,7 @@ pub(crate) struct Live {
     /// When a timer expires.
     pub wake: Option<SystemTime>,
     park: Park,
-    call: bool,
+    host_wait: Option<HostWait>,
     effectful: bool,
 }
 
@@ -234,7 +253,7 @@ impl Live {
                 }) as Finisher
             }),
         };
-        Ctl::wait(Wait { op: self.op, park: self.park, call: self.call, work: WaitWork::Run { fut, effectful: self.effectful } })
+        Ctl::wait(Wait { op: self.op, park: self.park, host_wait: self.host_wait, work: WaitWork::Run { fut, effectful: self.effectful } })
     }
 }
 
@@ -276,7 +295,7 @@ impl Outcome for Expired {
 /// journal records its wake time, and replay delivers its expiry without
 /// waiting.
 pub(crate) fn sleep(vm: &mut Vm, d: Duration) -> Ctl {
-    let spec = OpSpec { kind: OpKind::Timer, effectful: false, park: Park::UntilResumed, pre_fuel: 0, timer: Some(d) };
+    let spec = OpSpec { kind: OpKind::Timer, effectful: false, park: Park::UntilResumed, host_wait: None, pre_fuel: 0, timer: Some(d) };
     let describe = |_: &Vm| {
         let identity = Identity::default().add(&d.as_nanos().to_le_bytes()).finish();
         Ok((identity, format!("sleep {}", crate::vm::display::fmt_duration(d.as_nanos().min(i64::MAX as u128) as i64))))
@@ -322,7 +341,14 @@ pub(crate) fn journaled_call(vm: &mut Vm, call: Call, inner: &super::HostFn, nam
     // the entry that the call records or replays is the next one.
     let call = Call { seq: vm.journal_state().map(|j| j.position()), ..call };
     let inner = |vm: &mut Vm| inner.call(vm, call, args);
-    let spec = |pre_fuel: u64, park: Park| OpSpec { kind: OpKind::Call, effectful, park, pre_fuel, timer: None };
+    let spec = |pre_fuel: u64, (park, host_wait): (Park, Option<HostWait>)| OpSpec {
+        kind: OpKind::Call,
+        effectful,
+        park,
+        host_wait,
+        pre_fuel,
+        timer: None,
+    };
     let run = |live: Live, fin: BoxFuture| {
         let label = name.clone();
         live.run(async move { Box::new(CallOutcome { fin: fin.await, label }) as Box<dyn Outcome> }, Box::new(payload_outcome))
@@ -343,26 +369,37 @@ pub(crate) fn journaled_call(vm: &mut Vm, call: Call, inner: &super::HostFn, nam
                 return r;
             }
             let pre_fuel = vm.meter.used().saturating_sub(start);
-            let (fin, park): (BoxFuture, Park) = match r.map_err(Ctl::into_kind) {
-                Err(CtlKind::Async(fut, park)) => (fut, park),
-                r => {
-                    let (payload, _) = outcome_payload(vm, r.map_err(Ctl::from), name)?;
+            let (fin, parking) = match waiting(r, name) {
+                Ok(w) => w,
+                Err(r) => {
+                    let (payload, _) = outcome_payload(vm, r, name)?;
                     let ready: Finisher = Box::new(move |vm: &mut Vm| payload_outcome(vm, &payload));
-                    (Box::pin(std::future::ready(ready)), Park::Never)
+                    (Box::pin(std::future::ready(ready)) as BoxFuture, (Park::Never, None))
                 }
             };
-            Err(run(rerun.start(vm, spec(pre_fuel, park)), fin))
+            Err(run(rerun.start(vm, spec(pre_fuel, parking)), fin))
         }
         StartEntry::Fresh(fresh) => {
             let start = vm.meter.used();
-            match inner(vm).map_err(Ctl::into_kind) {
-                Err(CtlKind::Async(fut, park)) => {
+            match waiting(inner(vm), name) {
+                Ok((fut, parking)) => {
                     let pre_fuel = vm.meter.used().saturating_sub(start);
-                    Err(run(fresh.start(vm, spec(pre_fuel, park)), fut))
+                    Err(run(fresh.start(vm, spec(pre_fuel, parking)), fut))
                 }
-                r => vm.record_result(name, start, r.map_err(Ctl::from), fresh.0),
+                Err(r) => vm.record_result(name, start, r, fresh.0),
             }
         }
+    }
+}
+
+/// The future that the result `r` of a call of host function `name` asks
+/// the task to wait for, and how the call parks. Gives back any other
+/// result.
+fn waiting(r: NResult, name: &Arc<str>) -> Result<(BoxFuture, (Park, Option<HostWait>)), NResult> {
+    match r.map_err(Ctl::into_kind) {
+        Err(CtlKind::Async(fut)) => Ok((fut, (Park::Never, None))),
+        Err(CtlKind::Parked(fut, park, tag)) => Ok((fut, (park, Some(HostWait { function: name.clone(), tag })))),
+        r => Err(r.map_err(Ctl::from)),
     }
 }
 
@@ -1288,7 +1325,7 @@ impl Vm {
         }
         j.pos += 1;
         j.ops += 1;
-        Ok(StartEntry::Replayed(Replayed { op, call: kind == OpKind::Call, pre_fuel, wake }))
+        Ok(StartEntry::Replayed(Replayed { op, pre_fuel, wake }))
     }
 
     /// Starts operation `spec`, an input of the run whose outcome the

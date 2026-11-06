@@ -471,14 +471,27 @@ pub type FlushFuture = Pin<Box<dyn Future<Output = Result<(), crate::engine::Hos
 
 /// A journaled run that the engine suspended because every task waits
 /// ([`Outcome::Suspended`](crate::engine::Outcome::Suspended)).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Suspension {
     /// When the first timer or parked host call is due, or `None` if only
     /// host calls parked until the host resumes the run wait.
     pub wake_at: Option<SystemTime>,
-    /// Whether a host call that parked waits, so that the host may resume
-    /// the run before `wake_at`, when the call's condition occurs.
-    pub parked: bool,
+    /// The host calls that parked and wait. The host may resume the run
+    /// before `wake_at`, when the condition of one of them occurs.
+    pub parked: Vec<ParkedCall>,
+}
+
+/// A host call that waits in a suspended run
+/// ([`Later::parked`](crate::native::func::Later::parked)).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParkedCall {
+    /// The host function, as `module.name`.
+    pub function: String,
+    /// The tag that the function gave to [`Later::parked`](crate::native::func::Later::parked).
+    pub tag: String,
+    /// When the call is due, or `None` if it waits until the host resumes
+    /// the run.
+    pub wake_at: Option<SystemTime>,
 }
 
 /// The storage of a run's journal, supplied by the host.

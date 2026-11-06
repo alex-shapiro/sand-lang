@@ -232,6 +232,12 @@ impl<T: SandType, E: crate::native::func::NativeError> SandType for Result<crate
     }
 }
 
+impl<T: SandType, E: crate::native::func::NativeError> SandType for Result<crate::native::func::Parked<T, E>, E> {
+    fn sand_type() -> Type {
+        E::result_type(T::sand_type())
+    }
+}
+
 impl<T: SandType> SandType for Result<T, crate::vm::Ctl> {
     fn sand_type() -> Type {
         T::sand_type()
@@ -526,6 +532,7 @@ journal_data! {
     [T] BTreeSet<T>: T;
     [T, E: crate::native::convert::IntoHostError] Result<T, E>: T;
     [T, E: crate::native::func::NativeError] Result<crate::native::func::Later<T, E>, E>: T;
+    [T, E: crate::native::func::NativeError] Result<crate::native::func::Parked<T, E>, E>: T;
     [T] Result<T, crate::vm::Ctl>: T;
     [A, B] (A, B): A, B;
     [A, B, C] (A, B, C): A, B, C;

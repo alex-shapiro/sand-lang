@@ -249,7 +249,7 @@ impl Error {
 /// How a run that did not fail ended. A script ([`Engine::run_program`]) has an
 /// `Outcome` with no return value; a call ([`Engine::call`]) has an
 /// `Outcome<Returned>`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome<R = std::convert::Infallible> {
     /// The called function returned.
     Returned(R),

@@ -155,7 +155,7 @@ fn read_stdin<R: IntoValue + Send + 'static>(
         };
         outcome.into_value(vm)
     });
-    let spec = OpSpec { kind: OpKind::Stdin, effectful: false, park: Park::Never, pre_fuel: 0, timer: None };
+    let spec = OpSpec { kind: OpKind::Stdin, effectful: false, park: Park::Never, host_wait: None, pre_fuel: 0, timer: None };
     Err(match vm.begin_op(spec, describe)? {
         Begun::Replayed(r) => r.wait(build),
         Begun::Live(live) => live.run(

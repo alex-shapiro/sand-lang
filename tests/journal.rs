@@ -2,10 +2,10 @@
 //! from any prefix of the journal (SPEC §16.7).
 
 use sandlang::engine::{Config, Engine, Error, HostModules, MemorySink, Outcome, Returned};
-use sandlang::journal::{Durable, Entry, EntryKind, HttpOutcome, Journal, MemoryJournal, OpKind, Suspension, operations};
+use sandlang::journal::{Durable, Entry, EntryKind, HttpOutcome, Journal, MemoryJournal, OpKind, ParkedCall, Suspension, operations};
 use sandlang::native::NativeModule;
 use sandlang::native::convert::HostError;
-use sandlang::native::func::{Effectful, Journaled, JournaledCall, Later, Park};
+use sandlang::native::func::{Effectful, Journaled, JournaledCall, Later, Park, Parked};
 use sandlang::network::{Listener, Network, NetworkFuture, Stream};
 use sandlang::platform::{Clock, ClockFuture, Instant, SystemClock, SystemTime, UNIX_EPOCH};
 use sandlang::policy::rules::RulePolicy;
@@ -261,16 +261,16 @@ fn host_module(log: Arc<HostLog>) -> NativeModule {
     let l = log.clone();
     m.vm_function(
         "wait_signal",
-        Journaled(move |_: &mut Vm, name: String| -> Result<Later<Option<String>, HostError>, HostError> {
+        Journaled(move |_: &mut Vm, name: String| -> Result<Parked<Option<String>, HostError>, HostError> {
             l.waits.fetch_add(1, Ordering::SeqCst);
             if let Some(p) = l.signals.lock().unwrap().remove(&name) {
-                return Ok(Later::ready(Ok(Some(p))));
+                return Ok(Later::ready(Ok(Some(p))).into());
             }
             Ok(Later::new(async move {
                 std::future::pending::<()>().await;
                 |_: &mut Vm| Ok::<_, HostError>(None)
             })
-            .parked(Park::UntilResumed))
+            .parked(Park::UntilResumed, name))
         }),
     );
     m
@@ -657,7 +657,7 @@ print("after \(time.now().since(start) >= 2h)")
     let first = world.run(src, &journal);
     let wake = UNIX_EPOCH + Duration::from_secs(BASE_SECS) + Duration::from_secs(7200);
     assert!(
-        matches!(first.result, Ok(Outcome::Suspended(Suspension { wake_at: Some(t), parked: false })) if t == wake),
+        matches!(&first.result, Ok(Outcome::Suspended(Suspension { wake_at: Some(t), parked })) if *t == wake && parked.is_empty()),
         "{:?}",
         first.result
     );
@@ -702,7 +702,8 @@ print("got \(payload)")
 "#;
     let journal = MemoryJournal::new();
     let first = world.run(src, &journal);
-    assert!(matches!(first.result, Ok(Outcome::Suspended(Suspension { wake_at: None, parked: true }))), "{:?}", first.result);
+    let parked = vec![ParkedCall { function: "host.wait_signal".into(), tag: "approve".into(), wake_at: None }];
+    assert_eq!(first.result.as_ref().ok(), Some(&Outcome::Suspended(Suspension { wake_at: None, parked })), "{:?}", first.result);
     assert_eq!(first.stdout, "waiting\n");
     world.log.signals.lock().unwrap().insert("approve".into(), "yes".into());
     let resumed = world.run(src, &journal);
@@ -717,6 +718,24 @@ print("got \(payload)")
 {replayed:?}"
     );
     assert_eq!(world.log.waits.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn a_suspension_lists_the_parked_calls_that_wait() {
+    let world = World::frozen(Some(9));
+    let src = r#"
+import host
+import task
+let a = spawn host.wait_signal("a")
+let b = spawn host.wait_signal("b")
+task.yield_now()
+a.cancel()
+print(b.wait())
+"#;
+    let first = world.run(src, &MemoryJournal::new());
+    let parked = vec![ParkedCall { function: "host.wait_signal".into(), tag: "b".into(), wake_at: None }];
+    assert_eq!(first.result.as_ref().ok(), Some(&Outcome::Suspended(Suspension { wake_at: None, parked })), "{:?}", first.result);
+    assert_eq!(world.log.waits.load(Ordering::SeqCst), 2, "both calls parked before the cancellation");
 }
 
 #[test]
@@ -911,20 +930,20 @@ fn a_parked_call_with_a_deadline_suspends_until_the_deadline() {
     let c = clock.clone();
     m.vm_function(
         "wait_until",
-        Journaled(move |_: &mut Vm, name: String, deadline: jiff::Timestamp| -> Result<Later<Option<String>, HostError>, HostError> {
+        Journaled(move |_: &mut Vm, name: String, deadline: jiff::Timestamp| -> Result<Parked<Option<String>, HostError>, HostError> {
             l.waits.fetch_add(1, Ordering::SeqCst);
             if let Some(p) = l.signals.lock().unwrap().remove(&name) {
-                return Ok(Later::ready(Ok(Some(p))));
+                return Ok(Later::ready(Ok(Some(p))).into());
             }
             let due = UNIX_EPOCH + Duration::from_nanos(deadline.as_nanosecond() as u64);
             if c.wall() >= due {
-                return Ok(Later::ready(Ok(None)));
+                return Ok(Later::ready(Ok(None)).into());
             }
             Ok(Later::new(async move {
                 std::future::pending::<()>().await;
                 |_: &mut Vm| Ok::<_, HostError>(None)
             })
-            .parked(Park::Until(due)))
+            .parked(Park::Until(due), name))
         }),
     );
     m.source(
@@ -1095,16 +1114,16 @@ fn effects_have_the_same_sequence_number_in_every_execution() {
     let s = seqs.clone();
     m.vm_function(
         "send",
-        Effectful(move |_: &mut Vm, call: JournaledCall, name: String| -> Result<Later<i64, HostError>, HostError> {
+        Effectful(move |_: &mut Vm, call: JournaledCall, name: String| -> Result<Parked<i64, HostError>, HostError> {
             s.lock().unwrap().push((name.clone(), call.seq()));
             if name == "parked" {
                 return Ok(Later::new(async move {
                     std::future::pending::<()>().await;
                     |_: &mut Vm| Ok::<_, HostError>(0)
                 })
-                .parked(Park::UntilResumed));
+                .parked(Park::UntilResumed, name));
             }
-            Ok(Later::ready(Ok(1)))
+            Ok(Later::ready(Ok(1)).into())
         }),
     );
     let filtered: Arc<Mutex<Vec<Option<u64>>>> = Arc::default();

@@ -1754,11 +1754,11 @@ impl Vm {
                 fiber.frames.last_mut().unwrap().ip = (ip - 1) as u32;
                 Ok(Some(Exit::Prompt(cap)))
             }
-            // Only journaled calls can park.
-            CtlKind::Async(fut, _) => {
+            CtlKind::Async(fut) => {
                 fiber.result_slot = slot;
                 Ok(Some(Exit::Wait(Box::new(super::journal::Wait::local(fut)))))
             }
+            CtlKind::Parked(..) => Err(self.internal_trap(fiber, ip, "a host function that is not journaled parked".into())),
             CtlKind::Wait(w) => {
                 fiber.result_slot = slot;
                 Ok(Some(Exit::Wait(w)))

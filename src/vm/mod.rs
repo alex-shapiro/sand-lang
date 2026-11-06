@@ -77,12 +77,17 @@ pub enum CtlKind {
     Exit(i32),
     /// Ask the user; the call is retried afterwards.
     NeedPermission(Capability),
-    /// Suspend the task until the future completes. In a call of a
-    /// journaled function, the engine may suspend the run while it waits,
-    /// as the [`Park`] says.
+    /// Suspend the task until the future completes.
+    Async(BoxFuture),
+    /// Suspend the task until the future of a journaled call completes. The
+    /// engine may suspend the run while it waits, as the [`Park`] says. The
+    /// tag goes to [`ParkedCall::tag`]. Only a journaled function can ask
+    /// for this ([`Parked`]).
     ///
     /// [`Park`]: crate::native::func::Park
-    Async(BoxFuture, crate::native::func::Park),
+    /// [`Parked`]: crate::native::func::Parked
+    /// [`ParkedCall::tag`]: crate::journal::ParkedCall::tag
+    Parked(BoxFuture, crate::native::func::Park, String),
     /// The task waits for the scheduler event that [`Vm::block`]
     /// registered with generation `wait`; the call returns what wakes it.
     /// When it wakes, the engine cancels the tasks of `race` (`task.race`).
@@ -152,7 +157,7 @@ impl Ctl {
 
     /// Suspend the task until `fut` completes.
     pub fn suspend(fut: BoxFuture) -> Ctl {
-        Ctl(Box::new(CtlKind::Async(fut, crate::native::func::Park::Never)))
+        Ctl(Box::new(CtlKind::Async(fut)))
     }
 
     /// Ask the user for `cap`.
@@ -198,6 +203,7 @@ impl std::fmt::Debug for CtlKind {
             CtlKind::Exit(c) => write!(f, "Exit({c})"),
             CtlKind::NeedPermission(c) => write!(f, "NeedPermission({c})"),
             CtlKind::Async(..) => write!(f, "Async"),
+            CtlKind::Parked(..) => write!(f, "Parked"),
             CtlKind::Blocked { .. } => write!(f, "Blocked"),
             CtlKind::Yield => write!(f, "Yield"),
             CtlKind::Interrupted => write!(f, "Interrupted"),

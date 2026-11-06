@@ -71,7 +71,7 @@ fn send(
     vm.charge_bytes(body.len())?;
     let max_body = vm.host.limits.max_http_body;
     let build = recorded_response(req.text.clone(), max_body);
-    let spec = OpSpec { kind: OpKind::Http, effectful: true, park: Park::Never, pre_fuel: 0, timer: None };
+    let spec = OpSpec { kind: OpKind::Http, effectful: true, park: Park::Never, host_wait: None, pre_fuel: 0, timer: None };
     let live = match vm.begin_op(spec, |_| Ok(req.describe(&body)))? {
         Begun::Replayed(r) => return Err(r.wait(build).into()),
         Begun::Live(live) => live,

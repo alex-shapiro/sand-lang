@@ -1,7 +1,7 @@
 //! Traits and types for registering Rust functions in a [`NativeModule`](super::NativeModule).
 
 use super::convert::{Conversion, FromValue, HostError, IntoValue};
-use super::ty::{JournalArg, JournalData, Type};
+use super::ty::{JournalArg, JournalData, SandType, Type};
 use crate::vm::value::Value;
 use crate::vm::{BoxFuture, Ctl, Finisher, HostFn, NResult, NativeFn, Vm};
 use std::future::Future;
@@ -57,10 +57,53 @@ pub trait VmFunction<Marker>: Send + Sync + 'static {
     /// The type of the call parameter after `&mut Vm`: [`Call`],
     /// [`JournaledCall`], or `()` if the function has no call parameter.
     type CallParam: CallParam;
+    /// [`Parks`] if the function returns a [`Parked`] result, and
+    /// [`NoPark`] otherwise.
+    type Parking;
     fn signature() -> Signature;
     /// Converts the function for registration under `key` (`module.name`).
     fn into_host(self, key: &Arc<str>) -> Box<NativeFn>;
 }
+
+/// The return type of a [`VmFunction`]: an [`IntoValue`] type, or the
+/// [`Parked`] result of a journaled function.
+pub trait VmReturn: SandType {
+    /// [`Parks`] for a [`Parked`] result, and [`NoPark`] otherwise.
+    type Parking;
+    #[doc(hidden)]
+    fn into_result(self, vm: &mut Vm) -> NResult;
+}
+
+impl<R: IntoValue> VmReturn for R {
+    type Parking = NoPark;
+    fn into_result(self, vm: &mut Vm) -> NResult {
+        self.into_value(vm)
+    }
+}
+
+impl<T: SandType, E: NativeError> VmReturn for Result<Parked<T, E>, E> {
+    type Parking = Parks;
+    fn into_result(self, vm: &mut Vm) -> NResult {
+        match self {
+            Ok(Parked { later: Later(Wait::Future(fut), _), park, tag }) => Err(Ctl::from(crate::vm::CtlKind::Parked(fut, park, tag))),
+            Ok(Parked { later, .. }) => later.finish(vm),
+            Err(e) => E::finish(Err::<(), E>(e), vm),
+        }
+    }
+}
+
+/// Marks a [`VmFunction`] that returns a [`Parked`] result.
+pub struct Parks;
+
+/// Marks a [`VmFunction`] that does not return a [`Parked`] result.
+pub struct NoPark;
+
+/// The [`VmFunction::Parking`] of a function outside [`Journaled`] and
+/// [`Effectful`]: only a journaled call can park.
+#[diagnostic::on_unimplemented(message = "a function that returns `Parked` must be wrapped in `Journaled` or `Effectful`")]
+pub trait LocalParking {}
+
+impl LocalParking for NoPark {}
 
 /// Asynchronous function registered with [`NativeModule::async_function`](super::NativeModule::async_function).
 ///
@@ -270,12 +313,14 @@ pub struct Effectful<F>(pub F);
 /// The result of a [`VmFunction`] whose effect starts in a future: the
 /// return type of a function in [`Effectful`].
 #[diagnostic::on_unimplemented(
-    message = "a function wrapped in `Effectful` must return `Result<Later<T, E>, E>`",
+    message = "a function wrapped in `Effectful` must return `Result<Later<T, E>, E>` or `Result<Parked<T, E>, E>`",
     note = "start the effect in the future of the `Later`"
 )]
 pub trait Deferred {}
 
 impl<T, E> Deferred for Result<Later<T, E>, E> {}
+
+impl<T, E> Deferred for Result<Parked<T, E>, E> {}
 
 impl<M, F: HostFunction<M>> HostFunction<M> for Journaled<F>
 where
@@ -302,6 +347,7 @@ macro_rules! journaled_impls {
             type Args = F::Args;
             type Ret = F::Ret;
             type CallParam = ();
+            type Parking = NoPark;
             fn signature() -> Signature {
                 F::signature()
             }
@@ -342,7 +388,7 @@ fn journaled(inner: Box<NativeFn>, key: &Arc<str>, effectful: bool) -> Box<Nativ
 /// Return `Result<Later<T, E>, E>` from the function: if `E` is [`Ctl`], the
 /// Sand return type is `T`; if `E` is [`HostError`], the Sand return type is
 /// `Result<T, Error>`.
-pub struct Later<T, E>(Wait, Park, PhantomData<fn() -> (T, E)>);
+pub struct Later<T, E>(Wait, PhantomData<fn() -> (T, E)>);
 
 /// Whether the engine may suspend a journaled run while a host call waits
 /// (see [`Later::parked`]).
@@ -410,12 +456,12 @@ impl<T: IntoValue + Send + 'static, E: NativeError> Later<T, E> {
             let finish = fut.await;
             Box::new(move |vm: &mut Vm| E::finish(finish(vm), vm)) as Finisher
         };
-        Later(Wait::Future(Box::pin(fut)), Park::Never, PhantomData)
+        Later(Wait::Future(Box::pin(fut)), PhantomData)
     }
 
     /// Completes immediately with `r` without suspending the calling task.
     pub fn ready(r: Result<T, E>) -> Later<T, E> {
-        Later(Wait::Ready(Box::new(move |vm: &mut Vm| E::finish(r, vm))), Park::Never, PhantomData)
+        Later(Wait::Ready(Box::new(move |vm: &mut Vm| E::finish(r, vm))), PhantomData)
     }
 }
 
@@ -423,19 +469,49 @@ impl<T, E> Later<T, E> {
     /// Lets the engine suspend a journaled run while the future is pending
     /// (SPEC §16.7): if every task waits, and no operation is due within
     /// the configured threshold, the run ends with
-    /// [`Outcome::Suspended`](crate::engine::Outcome::Suspended). The resumed run calls
-    /// the function again. Only the futures of journaled functions park;
-    /// without a journal, the future runs as usual.
-    pub fn parked(mut self, park: Park) -> Self {
-        self.1 = park;
-        self
+    /// [`Outcome::Suspended`](crate::engine::Outcome::Suspended), whose
+    /// [`Suspension::parked`](crate::journal::Suspension::parked) lists the
+    /// call with `tag`. The resumed run calls the function again. Without
+    /// a journal, the future runs as usual.
+    ///
+    /// Only a function in [`Journaled`] or [`Effectful`] can return the
+    /// result. A function that is not journaled does not compile:
+    ///
+    /// ```compile_fail
+    /// # use sandlang::native::convert::HostError;
+    /// # use sandlang::native::func::{Later, Park, Parked};
+    /// # use sandlang::vm::Vm;
+    /// let mut m = sandlang::native::NativeModule::new("signals");
+    /// m.vm_function("wait", |_: &mut Vm| -> Result<Parked<i64, HostError>, HostError> {
+    ///     Ok(Later::new(async { |_: &mut Vm| Ok::<_, HostError>(1) }).parked(Park::UntilResumed, "go"))
+    /// });
+    /// ```
+    pub fn parked(self, park: Park, tag: impl Into<String>) -> Parked<T, E> {
+        Parked { later: self, park, tag: tag.into() }
     }
 
     pub(crate) fn finish(self, vm: &mut Vm) -> NResult {
         match self.0 {
             Wait::Ready(f) => f(vm),
-            Wait::Future(fut) => Err(Ctl::from(crate::vm::CtlKind::Async(fut, self.1))),
+            Wait::Future(fut) => Err(Ctl::suspend(fut)),
         }
+    }
+}
+
+/// A [`Later`] whose pending future lets the engine suspend a journaled run
+/// ([`Later::parked`]). Return `Result<Parked<T, E>, E>` from a function in
+/// [`Journaled`] or [`Effectful`], as for a `Later`.
+pub struct Parked<T, E> {
+    later: Later<T, E>,
+    park: Park,
+    tag: String,
+}
+
+/// A `Later` that does not park, for a journaled function that parks only
+/// sometimes.
+impl<T, E> From<Later<T, E>> for Parked<T, E> {
+    fn from(later: Later<T, E>) -> Parked<T, E> {
+        Parked { later, park: Park::Never, tag: String::new() }
     }
 }
 
@@ -490,12 +566,13 @@ macro_rules! fn_impls {
         impl<F, R, $($a,)*> VmFunction<(Vm, $($a,)*)> for F
         where
             F: Fn(&mut Vm, $($a),*) -> R + Send + Sync + 'static,
-            R: IntoValue,
+            R: VmReturn,
             $($a: for<'a> FromValue<Item<'a> = $a> + 'static,)*
         {
             type Args = ($($a,)*);
             type Ret = R;
             type CallParam = ();
+            type Parking = R::Parking;
             fn signature() -> Signature {
                 Signature { params: vec![$($a::sand_type()),*], ret: R::sand_type() }
             }
@@ -508,13 +585,14 @@ macro_rules! fn_impls {
         impl<F, R, P, $($a,)*> VmFunction<(WithCall<P>, $($a,)*)> for F
         where
             F: Fn(&mut Vm, P, $($a),*) -> R + Send + Sync + 'static,
-            R: IntoValue,
+            R: VmReturn,
             P: CallParam,
             $($a: for<'a> FromValue<Item<'a> = $a> + 'static,)*
         {
             type Args = ($($a,)*);
             type Ret = R;
             type CallParam = P;
+            type Parking = R::Parking;
             fn signature() -> Signature {
                 Signature { params: vec![$($a::sand_type()),*], ret: R::sand_type() }
             }
@@ -525,7 +603,7 @@ macro_rules! fn_impls {
                     $(let $a = $a::from_value(vm, $a, &mut conv)?;)*
                     vm.arm_retry_stress(call);
                     let r = self(vm, P::from_call(call), $($a),*);
-                    vm.unchecked(|vm| r.into_value(vm))
+                    vm.unchecked(|vm| r.into_result(vm))
                 })
             }
         }

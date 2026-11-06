@@ -2488,8 +2488,10 @@ every task waits, every pending operation is a timer or a parked host call, and
 no pending operation is due within `threshold` of the current time. The run
 then returns `Outcome::Suspended(Suspension { wake_at, parked })`. `wake_at` is
 the time when the first operation is due, or `None` if only parked host calls
-without a time wait. `parked` tells whether a parked host call waits, so that
-the host may resume the run earlier, when the call's condition occurs.
+without a time wait. `parked` lists the parked host calls that wait, each as a
+`ParkedCall` with the function, the tag that the call gave, and its due
+time, so that the host may resume the run earlier, when the condition of a
+call occurs. A call whose task was cancelled does not wait.
 The engine does not run deferred code (§7.1) when it suspends a run, because
 the tasks continue when the run resumes. To resume the run, the host runs the
 program again with the same journal, at `wake_at` or when the condition of a
@@ -2517,9 +2519,11 @@ because replay does not call it: it cannot take a `Call` parameter, which
 number generator. A clock reading that it makes through the host's clock is
 part of the result, which the journal records. A host function that is not journaled is
 local: replay calls it again, so it must give the same result in each
-execution and have no effects outside the run. `Later::parked(park)` lets the engine
+execution and have no effects outside the run. `Later::parked(park, tag)` lets the engine
 suspend a run while the future of a call waits: with `Park::Until(t)` until
-time `t`, and with `Park::UntilResumed` until the host resumes the run. When
+time `t`, and with `Park::UntilResumed` until the host resumes the run. It
+gives a `Parked` result, which only a journaled function can return: the Rust
+compiler refuses it from a function that is not journaled. When
 the run resumes, the engine calls the function again. For example, a host function `wait_until(name,
 deadline)` can return the payload of a signal if it has one, `None` after the
 deadline, and otherwise a parked future. A Sand wrapper `wait(name, timeout)`
