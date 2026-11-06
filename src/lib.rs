@@ -45,7 +45,7 @@ pub use native::{
 pub use policy::{Capability, CustomPolicy, Decision, PromptAnswer, Prompter, RulePolicy};
 pub use sandlang_macros::{SandEnum, SandObject, SandStruct, SandValue};
 pub use session::Session;
-pub use stdin_feed::{StdinFeed, StdinReadId};
+pub use stdin_feed::{StdinFeed, StdinRequest};
 pub use stdio::flush_stdio;
 pub use stdlib::log::{LogLevel, LogRecord, LogSink};
 pub use vm::OutputSink;

@@ -196,7 +196,7 @@ async fn foreground<T>(handle: sandlang::InterruptHandle, io: &mut Io, fut: impl
     loop {
         let wanted = async {
             match &io.feed {
-                Some(feed) if !reading => feed.wanted().await,
+                Some(feed) if !reading => feed.wait_until_input_needed().await,
                 _ => std::future::pending().await,
             }
         };

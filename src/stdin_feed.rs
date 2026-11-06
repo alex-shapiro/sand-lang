@@ -10,20 +10,29 @@ use tokio::io::{AsyncBufRead, AsyncRead, ReadBuf};
 use tokio::sync::Notify;
 
 /// A channel that supplies standard input from the host to the scripts of
-/// one session ([`crate::Session::stdin_feed`]). A terminal host can await
-/// [`StdinFeed::wanted`] and forward input with [`StdinFeed::send`]. A GUI
-/// host can monitor [`StdinFeed::awaited_changed`] and submit an answer to
-/// each read with [`StdinFeed::answer`] or [`StdinFeed::dismiss`]. Clones
+/// one session ([`crate::Session::stdin_feed`]). A terminal host waits for
+/// [`StdinFeed::wait_until_input_needed`] and forwards input with
+/// [`StdinFeed::send`]. An app with its own input field waits for
+/// [`StdinFeed::wait_for_request`] and answers each [`StdinRequest`]. Clones
 /// share the same underlying stream.
 #[derive(Clone)]
 pub struct StdinFeed {
     channel: Arc<StdinChannel>,
 }
 
-/// Unique identifier for a single standard input read operation. A read
-/// that starts later has a greater identifier.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct StdinReadId(NonZeroU64);
+/// A read of standard input that waits for the host to answer it. Answer it
+/// with [`StdinRequest::answer`] or [`StdinRequest::dismiss`]. Two requests
+/// are equal if they are for the same read.
+#[derive(Clone)]
+pub struct StdinRequest {
+    channel: Arc<StdinChannel>,
+    read: StdinReadId,
+}
+
+/// Identifier of one read of standard input, given the first time the read
+/// waits for input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StdinReadId(NonZeroU64);
 
 /// The state that the host's [`StdinFeed`] handles share with the session's
 /// reader.
@@ -91,72 +100,79 @@ impl StdinFeed {
         self.channel.push(QueuedInput { target: None, data: None });
     }
 
+    /// Returns `true` if a read is waiting for input and all other engine
+    /// tasks are idle.
+    pub fn needs_input(&self) -> bool {
+        self.channel.lock().needs_input()
+    }
+
+    /// Waits until [`StdinFeed::needs_input`] is `true`.
+    pub async fn wait_until_input_needed(&self) {
+        self.channel.wait_until(|state| state.needs_input().then_some(())).await;
+    }
+
+    /// Waits until a read waits for input, also while other tasks run, and
+    /// returns the request for it.
+    pub async fn wait_for_request(&self) -> StdinRequest {
+        let read = self.channel.wait_until(StdinChannelState::waiting_read_id).await;
+        StdinRequest { channel: self.channel.clone(), read }
+    }
+}
+
+impl StdinRequest {
     /// Submits `data`, a newline if `data` does not end with one, and an
-    /// end-of-input marker as the response to `read`. This completes any type
-    /// of read operation, and the engine discards any unread bytes when `read`
-    /// finishes. Returns `false` if `read` is not waiting for input.
-    pub fn answer(&self, read: StdinReadId, data: impl Into<Vec<u8>>) -> bool {
+    /// end-of-input marker as the response to the read. This completes any
+    /// type of read operation, and the engine discards any unread bytes when
+    /// the read finishes. Returns `false` if the read is closed.
+    pub fn answer(&self, data: impl Into<Vec<u8>>) -> bool {
         let mut data = data.into();
         if !data.ends_with(b"\n") {
             data.push(b'\n');
         }
-        self.channel.answer_read(read, Some(data))
+        self.channel.answer_read(self.read, Some(data))
     }
 
-    /// Submits an end-of-input marker to `read` so that `read_line` returns
-    /// `None` if `read` has no data yet. Returns `false` if `read` is not
-    /// waiting for input.
-    pub fn dismiss(&self, read: StdinReadId) -> bool {
-        self.channel.answer_read(read, None)
+    /// Submits an end-of-input marker to the read so that `read_line` returns
+    /// `None` if the read has no data yet. Returns `false` if the read is
+    /// closed.
+    pub fn dismiss(&self) -> bool {
+        self.channel.answer_read(self.read, None)
     }
 
-    /// Returns `true` if a read is waiting for input and all other engine
-    /// tasks are idle.
-    pub fn is_wanted(&self) -> bool {
-        self.channel.lock().wanted()
+    /// Returns `true` if the read still waits for an answer.
+    pub fn is_open(&self) -> bool {
+        self.channel.lock().waiting_read_id() == Some(self.read)
     }
 
-    /// Waits until [`StdinFeed::is_wanted`] is `true`.
-    pub async fn wanted(&self) {
-        self.wait_until(|state| state.wanted().then_some(())).await;
+    /// Waits until the read no longer waits for an answer: it got input, or
+    /// it ended.
+    pub async fn wait_until_closed(&self) {
+        let read = self.read;
+        self.channel.wait_until(|state| (state.waiting_read_id() != Some(read)).then_some(())).await;
     }
+}
 
-    /// Returns the [`StdinReadId`] of the active read if it is waiting for input,
-    /// even if other tasks are running.
-    pub fn awaited(&self) -> Option<StdinReadId> {
-        self.channel.lock().awaited()
+impl PartialEq for StdinRequest {
+    fn eq(&self, other: &StdinRequest) -> bool {
+        Arc::ptr_eq(&self.channel, &other.channel) && self.read == other.read
     }
+}
 
-    /// Waits until [`StdinFeed::awaited`] differs from `from` and returns the
-    /// new value.
-    pub async fn awaited_changed(&self, from: Option<StdinReadId>) -> Option<StdinReadId> {
-        self.wait_until(|state| {
-            let awaited = state.awaited();
-            (awaited != from).then_some(awaited)
-        })
-        .await
-    }
+impl Eq for StdinRequest {}
 
-    async fn wait_until<T>(&self, predicate: impl Fn(&StdinChannelState) -> Option<T>) -> T {
-        loop {
-            let changed = self.channel.changed.notified();
-            let mut changed = std::pin::pin!(changed);
-            changed.as_mut().enable();
-            if let Some(value) = predicate(&self.channel.lock()) {
-                return value;
-            }
-            changed.await;
-        }
+impl std::fmt::Debug for StdinRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("StdinRequest").field(&self.read.0).finish()
     }
 }
 
 impl StdinChannelState {
-    fn wanted(&self) -> bool {
-        self.engine_idle && self.awaited().is_some()
+    fn needs_input(&self) -> bool {
+        self.engine_idle && self.waiting_read_id().is_some()
     }
 
     /// The read that waits for input that is not in the queue.
-    fn awaited(&self) -> Option<StdinReadId> {
+    fn waiting_read_id(&self) -> Option<StdinReadId> {
         let read = self.waiting_read.as_ref().filter(|r| r.waiting)?;
         (!self.queue.iter().any(|input| input.is_for_read(Some(read.id)))).then_some(read.id)
     }
@@ -179,7 +195,7 @@ impl StdinChannel {
 
     fn answer_read(&self, read: StdinReadId, data: Option<Vec<u8>>) -> bool {
         let mut state = self.lock();
-        if state.awaited() != Some(read) {
+        if state.waiting_read_id() != Some(read) {
             return false;
         }
         if let Some(data) = data {
@@ -188,6 +204,18 @@ impl StdinChannel {
         state.queue.push_back(QueuedInput { target: Some(read), data: None });
         self.notify(state);
         true
+    }
+
+    async fn wait_until<T>(&self, predicate: impl Fn(&StdinChannelState) -> Option<T>) -> T {
+        loop {
+            let changed = self.changed.notified();
+            let mut changed = std::pin::pin!(changed);
+            changed.as_mut().enable();
+            if let Some(value) = predicate(&self.lock()) {
+                return value;
+            }
+            changed.await;
+        }
     }
 
     fn notify(&self, mut state: MutexGuard<'_, StdinChannelState>) {

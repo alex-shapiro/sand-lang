@@ -11,8 +11,8 @@ use sandlang::platform::{Clock, ClockFuture, Instant, SystemTime, UNIX_EPOCH};
 use sandlang::session::RESET_NOTE;
 use sandlang::vm::{Ctl, Vm};
 use sandlang::{
-    Capability, Config, Decision, Engine, Error, LimitKind, Limits, MemorySink, NativeModule, PromptAnswer, RulePolicy, Session, StdinFeed,
-    StdinReadId,
+    Capability, Config, Decision, Engine, Error, LimitKind, Limits, MemorySink, NativeModule, PromptAnswer, RulePolicy, Session,
+    StdinRequest,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -941,12 +941,12 @@ fn scripts_read_the_input_the_host_feeds() {
     // Data sent ahead is kept until read.
     feed.send("early\npart");
     assert_eq!(r.value("io.stdin.read_line()?"), "Some(\"early\")");
-    assert!(!feed.is_wanted());
+    assert!(!feed.needs_input());
     // A read that waits, with nothing else to run, asks for input.
     let Repl { session, rt, .. } = &mut r;
     let (value, ()) = rt.block_on(async {
         let answer = async {
-            feed.wanted().await;
+            feed.wait_until_input_needed().await;
             feed.send("ial\n");
         };
         tokio::join!(session.eval("io.stdin.read_line()?"), answer)
@@ -959,13 +959,13 @@ fn scripts_read_the_input_the_host_feeds() {
     assert_eq!(r.value("io.stdin.read_line()?"), "Some(\"again\")");
     // A task's read waits between inputs, until the host sends a line.
     r.ok("let t = spawn io.stdin.read_line()");
-    let got = r.rt.block_on(r.session.run_tasks_until(feed.wanted(), |e| panic!("{e}")));
+    let got = r.rt.block_on(r.session.run_tasks_until(feed.wait_until_input_needed(), |e| panic!("{e}")));
     assert_eq!(got, Some(()));
     assert!(r.idle(50).is_empty());
     assert_eq!(r.value("t.is_done()"), "false");
     feed.send("late\n");
     assert_eq!(r.value("t.wait()?"), "Some(\"late\")");
-    assert!(!feed.is_wanted());
+    assert!(!feed.needs_input());
 }
 
 #[test]
@@ -977,15 +977,14 @@ fn read_is_awaited_while_other_tasks_run() {
     let Repl { session, rt, .. } = &mut r;
     let (value, ()) = rt.block_on(async {
         let answer = async {
-            let read_id = feed.awaited_changed(None).await.unwrap();
-            assert!(!feed.is_wanted());
-            assert!(feed.answer(read_id, "move\n"));
-            assert_eq!(feed.awaited(), None);
+            let request = feed.wait_for_request().await;
+            assert!(!feed.needs_input());
+            assert!(request.answer("move\n"));
+            assert!(!request.is_open());
         };
         tokio::join!(session.eval(src), answer)
     });
     assert_eq!(value.unwrap().as_deref(), Some("Some(\"move\")"));
-    assert_eq!(feed.awaited(), None);
 }
 
 #[test]
@@ -997,18 +996,13 @@ fn answer_targets_specific_read() {
     let Repl { session, rt, .. } = &mut r;
     let (value, ()) = rt.block_on(async {
         let answer = async {
-            let first = feed.awaited_changed(None).await.unwrap();
-            assert!(feed.answer(first, "x\nleft over\n"));
-            let mut awaited = Some(first);
-            let second = loop {
-                awaited = feed.awaited_changed(awaited).await;
-                if let Some(read_id) = awaited {
-                    break read_id;
-                }
-            };
+            let first = feed.wait_for_request().await;
+            assert!(first.answer("x\nleft over\n"));
+            first.wait_until_closed().await;
+            let second = feed.wait_for_request().await;
             assert_ne!(first, second);
-            assert!(!feed.answer(first, "late\n"));
-            assert!(feed.answer(second, "y\n"));
+            assert!(!first.answer("late\n"));
+            assert!(second.answer("y\n"));
         };
         tokio::join!(session.eval(src), answer)
     });
@@ -1016,7 +1010,7 @@ fn answer_targets_specific_read() {
 }
 
 /// Evaluates `src` and responds to each awaited stdin read with `respond`.
-fn answered(src: &str, respond: impl Fn(&StdinFeed, StdinReadId)) -> String {
+fn answered(src: &str, respond: impl Fn(&StdinRequest)) -> String {
     let mut r = Repl::with(Config::new().policy(RulePolicy::allow_all()));
     let feed = r.session.stdin_feed();
     r.ok("import io");
@@ -1024,16 +1018,10 @@ fn answered(src: &str, respond: impl Fn(&StdinFeed, StdinReadId)) -> String {
     let value = rt.block_on(async {
         let eval = session.eval(src);
         let mut eval = std::pin::pin!(eval);
-        let mut awaited = None;
         loop {
             tokio::select! {
                 value = &mut eval => break value,
-                read = feed.awaited_changed(awaited) => {
-                    awaited = read;
-                    if let Some(read) = read {
-                        respond(&feed, read);
-                    }
-                }
+                request = feed.wait_for_request() => respond(&request),
             }
         }
     });
@@ -1042,33 +1030,33 @@ fn answered(src: &str, respond: impl Fn(&StdinFeed, StdinReadId)) -> String {
 
 #[test]
 fn an_answer_completes_a_read_of_any_kind() {
-    assert_eq!(answered("io.stdin.read_line()?", |f, read| assert!(f.answer(read, "abc"))), "Some(\"abc\")");
-    assert_eq!(answered("io.stdin.read_line()?", |f, read| assert!(f.answer(read, ""))), "Some(\"\")");
-    assert_eq!(answered("io.stdin.read_all()?.len()", |f, read| assert!(f.answer(read, "abc"))), "4");
-    assert_eq!(answered("io.stdin.read_all()?.len()", |f, read| assert!(f.answer(read, "a\nb\n"))), "4");
-    assert_eq!(answered("io.stdin.read_line()?", |f, read| assert!(f.dismiss(read))), "None");
+    assert_eq!(answered("io.stdin.read_line()?", |request| assert!(request.answer("abc"))), "Some(\"abc\")");
+    assert_eq!(answered("io.stdin.read_line()?", |request| assert!(request.answer(""))), "Some(\"\")");
+    assert_eq!(answered("io.stdin.read_all()?.len()", |request| assert!(request.answer("abc"))), "4");
+    assert_eq!(answered("io.stdin.read_all()?.len()", |request| assert!(request.answer("a\nb\n"))), "4");
+    assert_eq!(answered("io.stdin.read_line()?", |request| assert!(request.dismiss())), "None");
 }
 
 #[test]
 fn a_read_takes_one_answer() {
-    let respond = |f: &StdinFeed, read| {
-        assert!(f.answer(read, "first"));
-        assert!(!f.answer(read, "second"));
-        assert!(!f.dismiss(read));
+    let respond = |request: &StdinRequest| {
+        assert!(request.answer("first"));
+        assert!(!request.answer("second"));
+        assert!(!request.dismiss());
     };
     assert_eq!(answered("[io.stdin.read_line()?, io.stdin.read_line()?]", respond), "[Some(\"first\"), Some(\"first\")]");
 }
 
 #[test]
-fn each_read_that_waits_has_a_newer_id() {
-    let ids = std::sync::Mutex::new(Vec::new());
-    answered("[io.stdin.read_line()?, io.stdin.read_line()?, io.stdin.read_line()?]", |f, read| {
-        ids.lock().unwrap().push(read);
-        assert!(f.answer(read, "x"));
+fn each_read_that_waits_is_a_new_request() {
+    let requests = std::sync::Mutex::new(Vec::new());
+    answered("[io.stdin.read_line()?, io.stdin.read_line()?, io.stdin.read_line()?]", |request| {
+        requests.lock().unwrap().push(request.clone());
+        assert!(request.answer("x"));
     });
-    let ids = ids.into_inner().unwrap();
-    assert_eq!(ids.len(), 3);
-    assert!(ids.is_sorted_by(|a, b| a < b));
+    let requests = requests.into_inner().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[0] != requests[1] && requests[1] != requests[2] && requests[0] != requests[2]);
 }
 
 #[test]
@@ -1078,10 +1066,8 @@ fn each_session_reads_its_own_feed() {
     let (first_feed, second_feed) = (first.stdin_feed(), second.stdin_feed());
     let values = rt().block_on(async {
         let host = async {
-            let read = second_feed.awaited_changed(None).await.unwrap();
-            assert!(second_feed.answer(read, "b"));
-            let read = first_feed.awaited_changed(None).await.unwrap();
-            assert!(first_feed.answer(read, "a"));
+            assert!(second_feed.wait_for_request().await.answer("b"));
+            assert!(first_feed.wait_for_request().await.answer("a"));
         };
         let reads = async { tokio::join!(first.eval("import io\nio.stdin.read_line()?"), second.eval("import io\nio.stdin.read_line()?")) };
         let (values, ()) =
@@ -1111,15 +1097,16 @@ fn answer_fails_after_read_ends() {
     let feed = r.session.stdin_feed();
     r.ok("import io");
     let Repl { session, rt, .. } = &mut r;
-    let read_id = rt.block_on(async {
+    let request = rt.block_on(async {
         tokio::select! {
             biased;
             _ = session.eval("io.stdin.read_line()?") => panic!("read completed without input"),
-            read_id = feed.awaited_changed(None) => read_id.unwrap(),
+            request = feed.wait_for_request() => request,
         }
     });
     session.cancel_tasks();
-    assert!(!feed.answer(read_id, "stale\n"));
+    assert!(!request.is_open());
+    assert!(!request.answer("stale\n"));
     feed.send("fresh\n");
     assert_eq!(r.value("io.stdin.read_line()?"), "Some(\"fresh\")");
 }
@@ -1133,7 +1120,7 @@ fn stdin_wait_pauses_wall_time_limit() {
     let Repl { session, rt, .. } = &mut r;
     let (value, ()) = rt.block_on(async {
         let answer = async {
-            feed.wanted().await;
+            feed.wait_until_input_needed().await;
             tokio::time::sleep(Duration::from_secs(60)).await;
             feed.send("late\n");
         };
@@ -1164,17 +1151,16 @@ fn background_timer_does_not_interrupt_or_time_out_awaited_read() {
     let Repl { session, rt, .. } = &mut r;
     let (value, ()) = rt.block_on(async {
         let player = async {
-            let read_id = feed.awaited_changed(None).await.unwrap();
+            let request = feed.wait_for_request().await;
             tokio::select! {
-                _ = feed.awaited_changed(Some(read_id)) => panic!("read stopped waiting"),
+                () = request.wait_until_closed() => panic!("read stopped waiting"),
                 () = tokio::time::sleep(Duration::from_secs(10)) => {}
             }
-            assert!(feed.answer(read_id, "move\n"));
+            assert!(request.answer("move\n"));
         };
         tokio::join!(session.eval("io.stdin.read_line()?"), player)
     });
     assert_eq!(value.unwrap().as_deref(), Some("Some(\"move\")"));
-    assert_eq!(feed.awaited(), None);
     assert!(r.value("ticks").parse::<u32>().unwrap() >= 100);
 }
 
