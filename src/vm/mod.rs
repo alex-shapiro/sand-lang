@@ -330,14 +330,14 @@ impl Trap {
 pub enum StdinSource {
     None,
     Bytes(std::io::Cursor<Vec<u8>>),
-    /// The host process's standard input, which a user types if `from_user`.
+    /// The standard input of the process, which a user types if `from_user`.
     #[cfg(feature = "os")]
     Inherit {
         reader: tokio::io::BufReader<tokio::io::Stdin>,
         from_user: bool,
     },
     /// Input the host sends ([`crate::StdinFeed`]).
-    Fed(crate::stdin_feed::StdinFeedReader),
+    Host(crate::stdin_feed::StdinFeedReader),
 }
 
 /// The standard input of a VM, with what a read of it waits for.
@@ -350,7 +350,7 @@ pub(crate) struct VmStdin {
 impl VmStdin {
     pub(crate) fn new(source: StdinSource) -> VmStdin {
         let (idle_signal, wait) = match &source {
-            StdinSource::Fed(reader) => (Some(reader.idle_signal()), WaitKind::User),
+            StdinSource::Host(reader) => (Some(reader.idle_signal()), WaitKind::User),
             #[cfg(feature = "os")]
             StdinSource::Inherit { from_user: true, .. } => (None, WaitKind::User),
             _ => (None, WaitKind::Io),
@@ -362,7 +362,7 @@ impl VmStdin {
         &self.source
     }
 
-    /// Tells the feed of a [`StdinSource::Fed`] when the VM has nothing to run.
+    /// Tells the feed of a [`StdinSource::Host`] when the VM has nothing to run.
     pub(crate) fn idle_signal(&self) -> Option<&crate::stdin_feed::StdinIdleSignal> {
         self.idle_signal.as_ref()
     }

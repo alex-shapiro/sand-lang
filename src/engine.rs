@@ -221,7 +221,7 @@ enum StdinConfig {
     Inherit {
         from_user: bool,
     },
-    Feed(crate::StdinFeed),
+    Host(crate::StdinFeed),
 }
 
 /// Engine configuration (builder style).
@@ -388,14 +388,14 @@ impl Config {
         self.stdin = StdinConfig::Bytes(data);
         self
     }
-    /// Uses the host process's standard input. A read waits for I/O, so the
+    /// Uses the standard input of the process. A read waits for I/O, so the
     /// wait counts toward `max_wall_time`.
     #[cfg(feature = "os")]
     pub fn inherit_stdin(mut self) -> Self {
         self.stdin = StdinConfig::Inherit { from_user: false };
         self
     }
-    /// Uses the host process's standard input, which a user types, for
+    /// Uses the standard input of the process, which a user types, for
     /// example at a terminal. A read waits for the user, so the wait does not
     /// count toward `max_wall_time` while no task can run.
     #[cfg(feature = "os")]
@@ -405,7 +405,7 @@ impl Config {
     }
     /// Scripts read the input the host sends through `feed`.
     pub fn stdin_feed(mut self, feed: &crate::StdinFeed) -> Self {
-        self.stdin = StdinConfig::Feed(feed.clone());
+        self.stdin = StdinConfig::Host(feed.clone());
         self
     }
     /// Scripts, their imports and the main file of [`Engine::run_file`] use
@@ -1075,7 +1075,7 @@ impl Engine {
             StdinConfig::Inherit { from_user } => {
                 StdinSource::Inherit { reader: tokio::io::BufReader::new(tokio::io::stdin()), from_user: *from_user }
             }
-            StdinConfig::Feed(feed) => StdinSource::Fed(crate::stdin_feed::StdinFeedReader::new(feed)),
+            StdinConfig::Host(feed) => StdinSource::Host(crate::stdin_feed::StdinFeedReader::new(feed)),
         };
         let (stdout, stderr): (SharedSink, SharedSink) =
             if quiet { (Arc::new(NullSink), Arc::new(NullSink)) } else { (c.stdout.clone(), c.stderr.clone()) };
