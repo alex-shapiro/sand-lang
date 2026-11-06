@@ -57,7 +57,7 @@ struct IoOp {
     fid: u32,
     wgen: u64,
     fut: BoxFuture,
-    wait: WaitKind,
+    wait_kind: WaitKind,
 }
 
 /// The pending I/O operations of a VM, in slots (an operation's id is its
@@ -78,7 +78,7 @@ impl IoTable {
 
     /// Polls `fut` once and registers it for task `fid` if still pending.
     /// Returns the slot ID, or the finisher if ready immediately.
-    pub fn add(&mut self, fid: u32, wgen: u64, mut fut: BoxFuture, wait: WaitKind) -> Result<u64, Finisher> {
+    pub fn add(&mut self, fid: u32, wgen: u64, mut fut: BoxFuture, wait_kind: WaitKind) -> Result<u64, Finisher> {
         let slot = match self.free.pop() {
             Some(s) => s,
             None => {
@@ -92,7 +92,7 @@ impl IoTable {
             self.free.push(slot);
             return Err(fin);
         }
-        self.ops[slot as usize] = Some(IoOp { fid, wgen, fut, wait });
+        self.ops[slot as usize] = Some(IoOp { fid, wgen, fut, wait_kind });
         self.pending += 1;
         Ok(u64::from(slot))
     }
@@ -112,7 +112,7 @@ impl IoTable {
 
     /// Returns `true` if any pending operation is waiting for the user.
     pub fn awaits_user(&self) -> bool {
-        self.ops.iter().flatten().any(|op| op.wait == WaitKind::User)
+        self.ops.iter().flatten().any(|op| op.wait_kind == WaitKind::User)
     }
 
     /// Cancels every pending operation.
