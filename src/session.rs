@@ -259,11 +259,9 @@ impl Session {
         self.exit_code
     }
 
-    /// Returns the session's own standard input, which the host supplies.
-    /// From the first call on, the session's scripts read what the host sends
-    /// through this feed, instead of the standard input of the engine's
-    /// [`crate::Config`]. Each session has its own feed, and no other session
-    /// or engine reads it.
+    /// Returns the session's isolated [`crate::StdinFeed`]. After the first
+    /// call, the session's scripts read from this feed instead of the standard
+    /// input configured on [`crate::Config`].
     pub fn stdin_feed(&mut self) -> crate::StdinFeed {
         if let Some(feed) = &self.stdin_feed {
             return feed.clone();

@@ -221,11 +221,11 @@ Visible defects that rarely block users.
 
 ### Embedding
 
-- [ ] ❓ Move the wall-time deadline later in one way. During compilation,
-      module discovery adds up prompt time in a `prompted` total and checks
-      `deadline + prompted`; during a run, `Vm::exclude_wall_time` moves the
-      deadline. A single deadline type that both paths move would remove the
-      second way.
+- [ ] ❓ Advance the wall-time deadline through a single mechanism. During
+      compilation, module discovery adds prompt wait time to a `prompted` total
+      and checks `deadline + prompted`. During execution,
+      `Vm::exclude_wall_time` shifts the deadline directly. A single deadline
+      type could handle both compilation and execution.
 - [ ] ⚪ Pass `Num<N>` evidence to native `impl` methods by extracting the `Num`
       dictionary from the `impl` dictionary.
 - [ ] ⚪ Unify the terminology for Rust types attached via `NativeModule::bind`

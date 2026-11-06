@@ -1907,12 +1907,12 @@ Checking a program happens before it runs, so it is bounded separately:
   (a `match` with 1,000 arms on an enum about a million). When
   `max_compile_fuel` is exhausted, compilation fails with `program too complex
 to compile`. `None` means unlimited.
-- **Time and interrupts.** Compilation stops with `time limit exceeded` once
-  `max_wall_time` has elapsed since it started, excluding waits for
-  permission prompts (the run that follows has what is left), and with an
-  interrupt error when the host interrupts the
-  engine. The standard library is compiled once per process (or per engine
-  with host modules), outside any program's budget.
+- **Time and interrupts.** Compilation fails with `time limit exceeded` if
+  `max_wall_time` elapses, excluding waits for permission prompts. The run that
+  follows uses the remaining time budget. Compilation fails with an interrupt
+  error if the host interrupts the engine. The standard library is compiled once
+  per process, or once per engine if host modules are registered, outside any
+  program's budget.
 - **Local limits**, reported at the offending construct: nesting of
   expressions, types, patterns and blocks to 256 levels (`nesting too
 deep`); strings nested inside string interpolations to 32 levels
@@ -2005,40 +2005,40 @@ into a running script. `Config::stdout` and `Config::stderr` redirect script
 output to an `OutputSink`, while `Config::stdin_bytes` and
 `Config::inherit_stdin` with feature `os` configure standard input.
 
-`Session::stdin_feed` returns the session's own `StdinFeed`, which supplies
-standard input while a script runs. From the first call on, the session reads
-the feed instead of the standard input of its `Config`. Each session has its
-own feed, and no other session or engine reads it. A feed supports two host
-models:
+`Session::stdin_feed` returns an isolated `StdinFeed` that supplies standard
+input to the session's scripts. After the first call, the session reads from
+this feed instead of the standard input configured on `Config`. A `StdinFeed`
+supports two host models:
 
 - Terminal hosts wait for `StdinFeed::wait_until_input_needed` and send user
   input with `StdinFeed::send`. `wait_until_input_needed` is resolved if a read
-  waits for input and all other tasks are idle. Queued data persists across reads until a script consumes
-  it. `StdinFeed::end` queues an end-of-input marker for the next read that
-  reaches it.
+  waits for input and all other tasks are idle. Queued data persists across
+  reads until a script consumes it. `StdinFeed::end` queues an end-of-input
+  marker for the next read that reaches it.
 - Interactive applications display an input prompt while a read waits.
-  `StdinFeed::wait_for_request` waits until a read waits for input, even if
-  other tasks are running, and returns a `StdinRequest` for that read.
-  `StdinRequest::wait_until_closed` waits until the read no longer waits.
-  `StdinRequest::answer(data)` supplies `data`, a newline if `data` does not
-  end with one, and an end-of-input marker to the read so that any read
-  operation completes. `StdinRequest::dismiss()` supplies only an end-of-input
-  marker, which causes `read_line` to return `None` if the read has no data
-  yet. Each read accepts at most one response; both methods return `false` if
-  the read is closed. Any unread bytes from the response are discarded when
-  the read finishes.
+  `StdinFeed::wait_for_request` waits until a read needs input, even if other
+  tasks are running, and returns a `StdinRequest` for that read.
+  `StdinRequest::wait_until_closed` waits until the read finishes or stops
+  waiting. `StdinRequest::answer(data)` supplies `data`, a trailing newline if
+  `data` lacks one, and an end-of-input marker so that any read operation
+  completes. `StdinRequest::dismiss()` supplies only an end-of-input marker,
+  which causes `read_line` to return `None` if the read has no buffered data.
+  Each read accepts at most one response; both methods return `false` if the
+  read is already closed. When the read finishes, the engine discards any
+  unread bytes from the response.
 
-Time spent waiting for user input while all other tasks are idle does not count
-toward `max_wall_time`. Time spent running other tasks still counts. While a
-task waits for the user, the time that other tasks wait for timers or the
-network also does not count, so a script can run past `max_wall_time`; only
-`max_cpu_time` then limits it. User input
-waits include reads from a `StdinFeed`, reads of a standard input inherited
-with `Config::inherit_stdin(WaitKind::User)`, and host functions that return a
-`Later` with `WaitKind::User` (§16.3). The `sand` command inherits its standard
-input from the user only if it is a terminal. A read from a `StdinFeed` always
-waits for the user, because the host sees each waiting read through
-`wait_until_input_needed` and `wait_for_request` and can show it or dismiss it.
+Idle time spent waiting for user input does not count toward `max_wall_time`.
+Time spent running other tasks still counts. If one task waits for the user,
+elapsed time while other tasks wait for timers or network I/O also does not
+count toward `max_wall_time`; only `max_cpu_time` bounds the run during that
+wait. User waits include:
+
+- reads from a `StdinFeed` (the host observes each waiting read through
+  `wait_until_input_needed` and `wait_for_request`, and can prompt for or
+  dismiss it)
+- reads from standard input configured with `Config::inherit_stdin(WaitKind::User)`
+  (the `sand` CLI uses `WaitKind::User` if standard input is a terminal)
+- host functions that return a `Later` with `WaitKind::User` (§16.3)
 
 The host can intercept and filter structured log records instead of
 writing them to standard error. `Config::log_sink` routes records to a
@@ -2153,11 +2153,10 @@ kind: kind))` in Sand, whereas `?` converts a `Ctl` into a `HostError` that
   aborts the run with a runtime error via `Ctl::fail`, a resource limit error,
   or an exit code.
 - `Result<Later<T, E>, E>` suspends the calling task on a future and maps to
-  the same Sand return type as `Result<T, E>`. `Later::new(wait, fut)` takes
-  the `WaitKind` of `fut`: if `fut` waits for a user action, use
-  `WaitKind::User`, so that idle wait time does not count toward
-  `max_wall_time` (§16.2). A function registered with `async_function` waits
-  for I/O.
+  the same Sand return type as `Result<T, E>`. `Later::new(wait_kind, fut)`
+  specifies the `WaitKind` of `fut`. Use `WaitKind::User` if `fut` waits for a
+  user action so that idle wait time does not count toward `max_wall_time`
+  (§16.2). Functions registered with `async_function` use `WaitKind::Io`.
 
 To check a sandbox capability inside a `vm_function`, call
 `Vm::require(&capability)` (§14), which returns an error of kind

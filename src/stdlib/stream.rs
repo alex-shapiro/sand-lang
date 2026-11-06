@@ -29,8 +29,8 @@ impl From<IoFailure> for HostError {
 
 pub(crate) type Suspended<T> = Result<Later<T, HostError>, HostError>;
 
-/// Suspends the calling task on `fut`, which waits for `wait_kind`, and runs
-/// `ok` when `fut` succeeds.
+/// Suspends the calling task on `fut` with `wait_kind`, and runs `ok` when
+/// `fut` succeeds.
 pub(crate) fn suspend<T: Send + 'static, R: IntoValue + Send + 'static>(
     wait_kind: WaitKind,
     fut: impl Future<Output = Result<T, IoFailure>> + Send + 'static,

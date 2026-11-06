@@ -387,10 +387,10 @@ impl Config {
         self.stdin = StdinConfig::Bytes(data);
         self
     }
-    /// Uses the standard input of the process. `wait_kind` tells what a read
-    /// waits for: if a user types the input, for example at a terminal, use
-    /// [`crate::WaitKind::User`], so that the wait does not count toward
-    /// `max_wall_time` while no task can run.
+    /// Uses the process standard input. `wait_kind` specifies what a read
+    /// waits for. Pass [`crate::WaitKind::User`] if a user types the input (for
+    /// example, at a terminal) so that idle wait time does not count toward
+    /// `max_wall_time`.
     #[cfg(feature = "os")]
     pub fn inherit_stdin(mut self, wait_kind: crate::WaitKind) -> Self {
         self.stdin = StdinConfig::Inherit { wait_kind };
@@ -1054,8 +1054,8 @@ impl Engine {
         Ok((name, source, root))
     }
 
-    /// A VM for `prog`. It reads `stdin_feed` if given, and otherwise the
-    /// standard input of the config.
+    /// Creates a VM for `prog`. The VM reads from `stdin_feed` if provided, or
+    /// else from the standard input configured on `self.config`.
     pub(crate) fn new_vm(&self, prog: Arc<Program>, cwd: PathBuf, quiet: bool, stdin_feed: Option<&crate::StdinFeed>) -> Vm {
         let c = &self.config;
         let stdin = match (&c.stdin, stdin_feed) {

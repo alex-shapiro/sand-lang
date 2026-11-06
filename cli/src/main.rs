@@ -225,7 +225,7 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
         .limits(limits)
         .gc_stress(std::env::var_os("SAND_GC_STRESS").is_some())
         .dump_bytecode(std::env::var_os("SAND_DUMP_BYTECODE").is_some());
-    // A user types at a terminal, so a read waits for the user; a pipe does not.
+    // Terminal reads wait for user input. Pipe reads wait for I/O.
     let wait_kind = if std::io::IsTerminal::is_terminal(&std::io::stdin()) { WaitKind::User } else { WaitKind::Io };
     config = config.inherit_stdin(wait_kind);
     if !files_only {

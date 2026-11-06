@@ -78,19 +78,19 @@ pub(crate) fn cmd_repl(args: &[String]) -> Result<u8, String> {
     Ok(rt.block_on(repl(&mut session, &screen, &mut io)))
 }
 
-/// The REPL's standard input: its reader, and the scripts' feed of it.
+/// Standard input for the REPL and its scripts.
 struct Io {
     reader: Reader,
     stdin_feed: Option<StdinFeed>,
-    /// Whether the reader reached the end of a piped input (which is final).
+    /// True if piped input has reached EOF.
     ended: bool,
 }
 
-/// What the REPL's reader read: a line, Ctrl-C, or the end of the input.
+/// An event from the REPL input reader.
 enum InputEvent {
-    /// A line with its terminator (from the line editor: a whole input).
+    /// A line with its trailing newline, or a complete input from the line editor.
     Line(String),
-    /// Ctrl-C; `discarded` if it discarded text being edited.
+    /// A Ctrl-C signal. `discarded` is true if the editor cleared non-empty text.
     Interrupt { discarded: bool },
     /// End of input (Ctrl-D).
     End,
@@ -397,7 +397,7 @@ enum Reader {
 }
 
 impl Reader {
-    /// The next line or input, after showing `prompt`. Cancel-safe.
+    /// Reads the next line or editor input after showing `prompt`. Cancel-safe.
     async fn next(&mut self, screen: &Screen, prompt: &'static str) -> InputEvent {
         match self {
             Reader::Plain(lines) => {
@@ -411,7 +411,7 @@ impl Reader {
         }
     }
 
-    /// A line for a script's read of standard input.
+    /// Reads a line for a script's standard input.
     async fn script_line(&mut self) -> InputEvent {
         match self {
             Reader::Plain(lines) => match lines.next().await {
@@ -552,8 +552,8 @@ impl EditorReader {
         EditorReader { requests, screen }
     }
 
-    /// The next input (after `prompt`). Cancel-safe. Meanwhile, output held
-    /// for the editor is passed on as it takes it.
+    /// Reads the next input after `prompt` while flushing queued output to the
+    /// editor. Cancel-safe.
     async fn next(&mut self, prompt: &'static str) -> InputEvent {
         if self.requests.pending == Some(EditorRequest::ScriptLine) {
             let mut out = std::io::stdout().lock();
@@ -568,7 +568,7 @@ impl EditorReader {
         }
     }
 
-    /// A line for a script (see [`Reader::script_line`]).
+    /// Reads a line for a script (see [`Reader::script_line`]).
     async fn script_line(&mut self) -> InputEvent {
         self.requests.ask(EditorRequest::ScriptLine).await.unwrap_or(InputEvent::End)
     }

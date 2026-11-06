@@ -943,7 +943,7 @@ fn scripts_read_the_input_the_host_feeds() {
     feed.send("early\npart");
     assert_eq!(r.value("io.stdin.read_line()?"), "Some(\"early\")");
     assert!(!feed.needs_input());
-    // A read that waits, with nothing else to run, asks for input.
+    // A waiting read requests input when all other tasks are idle.
     let Repl { session, rt, .. } = &mut r;
     let (value, ()) = rt.block_on(async {
         let answer = async {

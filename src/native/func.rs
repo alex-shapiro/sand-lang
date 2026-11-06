@@ -58,11 +58,11 @@ pub trait AsyncHostFunction<Marker>: Send + Sync + 'static {
 /// `Result<T, Error>`.
 pub struct Later<T, E>(Completion, PhantomData<fn() -> (T, E)>);
 
-/// When a [`Later`] produces its Sand result.
+/// How a [`Later`] completes.
 enum Completion {
-    /// Now, without suspending the calling task.
+    /// Completes immediately without suspending the calling task.
     Now(Finisher),
-    /// After the future completes.
+    /// Suspends the calling task until the future is resolved.
     After(Suspension),
 }
 
@@ -100,9 +100,9 @@ impl<T: IntoValue + Send + 'static, E: NativeError> Later<T, E> {
     /// Suspends the calling task until `fut` is resolved, and then executes the
     /// returned closure on the VM thread to produce the Sand result.
     ///
-    /// `wait_kind` tells what `fut` waits for. If `fut` waits for a user action,
-    /// use [`WaitKind::User`], so that the wait does not count toward the
-    /// wall-time limit while the engine has nothing else to run.
+    /// `wait_kind` specifies what `fut` waits for. Pass [`WaitKind::User`] if
+    /// `fut` waits for a user action so that idle wait time does not count
+    /// toward `max_wall_time`.
     ///
     /// Do not capture [`Value`]s in `fut`; the garbage collector does not trace
     /// pending futures while a task is suspended.

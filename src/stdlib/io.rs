@@ -165,15 +165,16 @@ fn buffered_line(vm: &Vm) -> Option<Option<Vec<u8>>> {
 
 /// A line at the start of a read buffer.
 struct BufferedLine {
-    /// The bytes that the line takes in the buffer, with its terminator.
+    /// Byte length of the line in the buffer, including its newline terminator.
     len: usize,
-    /// The line without its terminator, or `None` at the end of the input.
+    /// The line without its newline terminator, or `None` at EOF.
     text: Option<Vec<u8>>,
 }
 
 impl BufferedLine {
-    /// The line at the start of `buf`, which ends the input if `at_end`.
-    /// Returns `None` if the line is not complete or does not fit in memory.
+    /// Extracts the first line from `buf`, where `at_end` indicates whether
+    /// `buf` reaches EOF. Returns `None` if the line is incomplete or exceeds
+    /// the memory limit.
     fn find(vm: &Vm, buf: &[u8], at_end: bool) -> Option<BufferedLine> {
         let len = match buf.iter().position(|&b| b == b'\n') {
             Some(nl) => nl + 1,

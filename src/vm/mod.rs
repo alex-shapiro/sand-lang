@@ -73,8 +73,7 @@ pub enum WaitKind {
     User,
 }
 
-/// A suspended native call: the future that completes it, and what the
-/// future waits for.
+/// A suspended native call: the pending future and its [`WaitKind`].
 pub struct Suspension {
     pub future: BoxFuture,
     pub wait_kind: WaitKind,
@@ -337,17 +336,17 @@ impl Trap {
 pub(crate) enum StdinSource {
     None,
     Bytes(std::io::Cursor<Vec<u8>>),
-    /// The standard input of the process, whose reads wait for `wait`.
+    /// The process standard input, whose reads suspend with `wait_kind`.
     #[cfg(feature = "os")]
     Inherit {
         reader: tokio::io::BufReader<tokio::io::Stdin>,
         wait_kind: WaitKind,
     },
-    /// Input the host sends ([`crate::StdinFeed`]).
+    /// Host-supplied input ([`crate::StdinFeed`]).
     Host(crate::stdin_feed::StdinFeedReader),
 }
 
-/// The standard input of a VM, with what a read of it waits for.
+/// Standard input for a VM and its [`WaitKind`].
 pub(crate) struct VmStdin {
     source: Arc<tokio::sync::Mutex<StdinSource>>,
     idle_signal: Option<crate::stdin_feed::StdinIdleSignal>,
@@ -369,12 +368,12 @@ impl VmStdin {
         &self.source
     }
 
-    /// Tells the feed of a [`StdinSource::Host`] when the VM has nothing to run.
+    /// Returns the idle signal for [`StdinSource::Host`], if configured.
     pub(crate) fn idle_signal(&self) -> Option<&crate::stdin_feed::StdinIdleSignal> {
         self.idle_signal.as_ref()
     }
 
-    /// What a read of this input waits for.
+    /// Returns the [`WaitKind`] for reads from this input.
     pub(crate) fn wait_kind(&self) -> WaitKind {
         self.wait_kind
     }

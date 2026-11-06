@@ -9,32 +9,32 @@ use std::task::{Context, Poll, Waker};
 use tokio::io::{AsyncBufRead, AsyncRead, ReadBuf};
 use tokio::sync::Notify;
 
-/// A channel that supplies standard input from the host to the scripts of
-/// one session ([`crate::Session::stdin_feed`]). A terminal host waits for
-/// [`StdinFeed::wait_until_input_needed`] and forwards input with
-/// [`StdinFeed::send`]. An app with its own input field waits for
-/// [`StdinFeed::wait_for_request`] and answers each [`StdinRequest`]. Clones
+/// A channel that supplies standard input from the host to a session's scripts
+/// ([`crate::Session::stdin_feed`]). Terminal hosts wait for
+/// [`StdinFeed::wait_until_input_needed`] and forward input with
+/// [`StdinFeed::send`]. Interactive applications wait for
+/// [`StdinFeed::wait_for_request`] and respond to each [`StdinRequest`]. Clones
 /// share the same underlying stream.
 #[derive(Clone)]
 pub struct StdinFeed {
     channel: Arc<StdinChannel>,
 }
 
-/// A read of standard input that waits for the host to answer it. Answer it
-/// with [`StdinRequest::answer`] or [`StdinRequest::dismiss`]. Two requests
-/// are equal if they are for the same read.
+/// A pending standard input read waiting for a host response. Respond to the
+/// read with [`StdinRequest::answer`] or [`StdinRequest::dismiss`]. Two
+/// requests are equal if they refer to the same read operation.
 #[derive(Clone)]
 pub struct StdinRequest {
     channel: Arc<StdinChannel>,
     read: StdinReadId,
 }
 
-/// Identifier of one read of standard input, given the first time the read
-/// waits for input.
+/// Identifier of a standard input read, assigned the first time the read waits
+/// for input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct StdinReadId(NonZeroU64);
 
-/// The state that the host's [`StdinFeed`] handles share with the session's
+/// State shared between the host's [`StdinFeed`] handles and the session's
 /// reader.
 #[derive(Default)]
 pub(crate) struct StdinChannel {
@@ -42,22 +42,22 @@ pub(crate) struct StdinChannel {
     changed: Notify,
 }
 
-/// The input queue of a [`StdinChannel`] and the state of its reader.
+/// Input queue and reader state for a [`StdinChannel`].
 #[derive(Default)]
 struct StdinChannelState {
     queue: VecDeque<QueuedInput>,
     reads_started: u64,
-    /// Whether the engine of the reader has nothing to run.
+    /// True if the engine has no runnable tasks or ready I/O.
     engine_idle: bool,
-    /// The read under way, after it first waits for input.
+    /// The active read operation, once it has waited for input.
     waiting_read: Option<WaitingRead>,
 }
 
-/// A read that has waited for input.
+/// A read operation that has waited for input.
 struct WaitingRead {
     id: StdinReadId,
-    /// Whether the read waits for input now. It is false from the time a
-    /// read takes queued input until it waits again.
+    /// True if the read is currently waiting for input. Set to `false` when the
+    /// read consumes queued input, and back to `true` if it waits again.
     waiting: bool,
     waker: Option<Waker>,
 }
@@ -80,13 +80,13 @@ impl StdinFeed {
         StdinFeed { channel: Arc::default() }
     }
 
-    /// The session's reader of this feed.
+    /// Creates the session's reader for this feed.
     pub(crate) fn reader(&self) -> StdinFeedReader {
         StdinFeedReader { channel: self.channel.clone(), buf: Vec::new(), buf_target: None, at: 0, ended: false }
     }
 
-    /// Appends `data` to the input stream. Sent data stays in the queue across
-    /// reads until a script reads it.
+    /// Appends `data` to the input stream. Queued data persists across reads
+    /// until a script consumes it.
     pub fn send(&self, data: impl Into<Vec<u8>>) {
         let data = data.into();
         if !data.is_empty() {
@@ -95,7 +95,7 @@ impl StdinFeed {
     }
 
     /// Enqueues an end-of-input marker for the next read that reaches it.
-    /// Subsequent reads wait for new input.
+    /// Later reads wait for new input.
     pub fn end(&self) {
         self.channel.push(QueuedInput { target: None, data: None });
     }
@@ -111,8 +111,8 @@ impl StdinFeed {
         self.channel.wait_until(|state| state.needs_input().then_some(())).await;
     }
 
-    /// Waits until a read waits for input, also while other tasks run, and
-    /// returns the request for it.
+    /// Waits until a read needs input, even if other tasks are running, and
+    /// returns its [`StdinRequest`].
     pub async fn wait_for_request(&self) -> StdinRequest {
         let read = self.channel.wait_until(StdinChannelState::waiting_read_id).await;
         StdinRequest { channel: self.channel.clone(), read }
@@ -120,10 +120,10 @@ impl StdinFeed {
 }
 
 impl StdinRequest {
-    /// Submits `data`, a newline if `data` does not end with one, and an
+    /// Submits `data`, a trailing newline if `data` lacks one, and an
     /// end-of-input marker as the response to the read. This completes any
-    /// type of read operation, and the engine discards any unread bytes when
-    /// the read finishes. Returns `false` if the read is closed.
+    /// read operation. When the read finishes, the engine discards any unread
+    /// bytes from the response. Returns `false` if the read is already closed.
     pub fn answer(&self, data: impl Into<Vec<u8>>) -> bool {
         let mut data = data.into();
         if !data.ends_with(b"\n") {
@@ -133,19 +133,18 @@ impl StdinRequest {
     }
 
     /// Submits an end-of-input marker to the read so that `read_line` returns
-    /// `None` if the read has no data yet. Returns `false` if the read is
-    /// closed.
+    /// `None` if the read has no buffered data. Returns `false` if the read is
+    /// already closed.
     pub fn dismiss(&self) -> bool {
         self.channel.answer_read(self.read, None)
     }
 
-    /// Returns `true` if the read still waits for an answer.
+    /// Returns `true` if the read is still waiting for a response.
     pub fn is_open(&self) -> bool {
         self.channel.lock().waiting_read_id() == Some(self.read)
     }
 
-    /// Waits until the read no longer waits for an answer: it got input, or
-    /// it ended.
+    /// Waits until the read receives input or ends.
     pub async fn wait_until_closed(&self) {
         let read = self.read;
         self.channel.wait_until(|state| (state.waiting_read_id() != Some(read)).then_some(())).await;
@@ -171,7 +170,7 @@ impl StdinChannelState {
         self.engine_idle && self.waiting_read_id().is_some()
     }
 
-    /// The read that waits for input that is not in the queue.
+    /// Returns the ID of the read waiting for unqueued input, if any.
     fn waiting_read_id(&self) -> Option<StdinReadId> {
         let read = self.waiting_read.as_ref().filter(|r| r.waiting)?;
         (!self.queue.iter().any(|input| input.is_for_read(Some(read.id)))).then_some(read.id)
@@ -233,8 +232,7 @@ impl StdinChannel {
     }
 }
 
-/// The engine's link to its [`StdinFeedReader`], which tells the feed when the
-/// engine has nothing to run.
+/// Notifies the [`StdinChannel`] when the engine is idle.
 pub(crate) struct StdinIdleSignal {
     channel: Arc<StdinChannel>,
 }
@@ -258,8 +256,8 @@ impl Drop for StdinIdleGuard {
     }
 }
 
-/// The session's reader of its [`StdinFeed`]. Read it through
-/// [`StdinFeedReader::begin_read`].
+/// The session's reader for a [`StdinFeed`]. Call [`StdinFeedReader::begin_read`]
+/// to start a read operation.
 pub(crate) struct StdinFeedReader {
     channel: Arc<StdinChannel>,
     buf: Vec<u8>,
@@ -273,9 +271,9 @@ impl StdinFeedReader {
         StdinIdleSignal { channel: self.channel.clone() }
     }
 
-    /// Starts a read. The read gets a [`StdinReadId`] the first time it waits
-    /// for input. An end of input or an answer from an earlier read does not
-    /// reach it.
+    /// Starts a read operation. The read receives a [`StdinReadId`] the first
+    /// time it waits for input. It ignores any EOF or targeted response from
+    /// an earlier read.
     pub(crate) fn begin_read(&mut self) -> ActiveStdinRead<'_> {
         self.ended = false;
         if self.buf_target.is_some() {
@@ -285,8 +283,8 @@ impl StdinFeedReader {
     }
 }
 
-/// A read of a [`StdinFeedReader`] under way. Dropping it ends the read and
-/// discards the input queued for it.
+/// An active read operation on a [`StdinFeedReader`]. Dropping this guard ends
+/// the read and discards any unread input targeted at it.
 pub(crate) struct ActiveStdinRead<'a> {
     reader: &'a mut StdinFeedReader,
 }
