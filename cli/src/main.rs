@@ -227,7 +227,9 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
         .limits(limits)
         .gc_stress(std::env::var_os("SAND_GC_STRESS").is_some())
         .dump_bytecode(std::env::var_os("SAND_DUMP_BYTECODE").is_some());
-    let (mut config, stdin_feed) = config.stdin_feed();
+    // A person types at a terminal; a pipe or a file comes from a program.
+    let (mut config, stdin_feed) =
+        if std::io::IsTerminal::is_terminal(&std::io::stdin()) { config.stdin_feed() } else { config.stdin_io_feed() };
     if !files_only {
         config = config.args(script_args.clone());
     }

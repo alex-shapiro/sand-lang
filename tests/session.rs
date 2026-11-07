@@ -1155,6 +1155,24 @@ fn answer_fails_after_read_ends() {
 }
 
 #[test]
+fn io_feed_wait_counts_toward_wall_time_limit() {
+    let limits = Limits { max_wall_time: Some(Duration::from_millis(100)), ..Limits::default() };
+    let (config, feed) = Config::new().policy(RulePolicy::allow_all()).limits(limits).stdin_io_feed();
+    let mut r = Repl::paused(config);
+    r.ok("import io");
+    let Repl { session, rt, .. } = &mut r;
+    let (value, ()) = rt.block_on(async {
+        let send = async {
+            feed.wait_until_input_needed().await;
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            feed.send("late\n");
+        };
+        tokio::join!(session.eval("io.stdin.read_line()?"), send)
+    });
+    assert!(matches!(value, Err(Error::Limit(LimitKind::WallTime))), "{value:?}");
+}
+
+#[test]
 fn stdin_wait_pauses_wall_time_limit() {
     let limits = Limits { max_wall_time: Some(Duration::from_millis(100)), ..Limits::default() };
     let (config, feed) = Config::new().policy(RulePolicy::allow_all()).limits(limits).stdin_feed();

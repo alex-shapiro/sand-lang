@@ -64,12 +64,13 @@ const _: () = assert!(std::mem::size_of::<Ctl>() == std::mem::size_of::<usize>()
 const _: () = assert!(std::mem::size_of::<Result<Value, Ctl>>() == 16);
 const _: () = assert!(std::mem::size_of::<Result<Option<Value>, Ctl>>() == 16);
 
-/// Cause of a task suspension.
+/// Cause of task suspension, for purposes of counting
+/// or ignoring idle time against the wall-time limit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WaitKind {
-    /// I/O operation or timer. Elapsed time counts toward the wall-time limit.
+    /// I/O operation or timer, counted.
     Io,
-    /// User action. Idle wait time does not count toward the wall-time limit.
+    /// User action, not counted.
     User,
 }
 
@@ -350,7 +351,7 @@ pub(crate) struct VmStdin {
 impl VmStdin {
     pub(crate) fn new(source: StdinSource) -> VmStdin {
         let (idle_signal, wait_kind) = match &source {
-            StdinSource::Host(reader) => (Some(reader.idle_signal()), WaitKind::User),
+            StdinSource::Host(reader) => (Some(reader.idle_signal()), reader.wait_kind()),
             StdinSource::None | StdinSource::Bytes(_) => (None, WaitKind::Io),
         };
         VmStdin { source: Arc::new(tokio::sync::Mutex::new(source)), idle_signal, wait_kind }

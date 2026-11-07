@@ -380,11 +380,22 @@ impl Config {
         self
     }
     /// Read stdin from a host-controlled feed.
-    pub fn stdin_feed(mut self) -> (Self, crate::StdinFeed) {
-        let feed = crate::StdinFeed::new();
+    pub fn stdin_feed(self) -> (Self, crate::StdinFeed) {
+        self.stdin_host_feed(crate::WaitKind::User)
+    }
+
+    /// Read stdin from a host-controlled feed of non-user input.
+    /// The time that a read waits counts toward `max_wall_time`.
+    pub fn stdin_io_feed(self) -> (Self, crate::StdinFeed) {
+        self.stdin_host_feed(crate::WaitKind::Io)
+    }
+
+    fn stdin_host_feed(mut self, wait_kind: crate::WaitKind) -> (Self, crate::StdinFeed) {
+        let feed = crate::StdinFeed::new(wait_kind);
         self.stdin = StdinConfig::Host(feed.clone());
         (self, feed)
     }
+
     /// Scripts, their imports and the main file of [`Engine::run_file`] use
     /// `fs` instead of the host's file system, with [`Config::cwd`] and
     /// [`Config::module_root`] as paths in `fs` (by default its root).

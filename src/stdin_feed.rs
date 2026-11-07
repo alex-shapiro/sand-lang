@@ -1,5 +1,6 @@
 //! Host-supplied standard input stream ([`StdinFeed`]).
 
+use crate::vm::WaitKind;
 use std::collections::VecDeque;
 use std::io;
 use std::num::NonZeroU64;
@@ -36,10 +37,10 @@ struct StdinReadId(NonZeroU64);
 
 /// State shared between the host's [`StdinFeed`] handles and the session's
 /// reader.
-#[derive(Default)]
 pub(crate) struct StdinChannel {
     state: Mutex<StdinChannelState>,
     changed: Notify,
+    wait_kind: WaitKind,
 }
 
 /// Input queue and reader state for a [`StdinChannel`].
@@ -78,8 +79,8 @@ impl QueuedInput {
 }
 
 impl StdinFeed {
-    pub(crate) fn new() -> StdinFeed {
-        StdinFeed { channel: Arc::default() }
+    pub(crate) fn new(wait_kind: WaitKind) -> StdinFeed {
+        StdinFeed { channel: Arc::new(StdinChannel { state: Mutex::default(), changed: Notify::new(), wait_kind }) }
     }
 
     /// Creates the session's reader for this feed.
@@ -272,6 +273,10 @@ pub(crate) struct StdinFeedReader {
 impl StdinFeedReader {
     pub(crate) fn idle_signal(&self) -> StdinIdleSignal {
         StdinIdleSignal { channel: self.channel.clone() }
+    }
+
+    pub(crate) fn wait_kind(&self) -> WaitKind {
+        self.channel.wait_kind
     }
 
     /// Starts a read operation. The read receives a [`StdinReadId`] the first

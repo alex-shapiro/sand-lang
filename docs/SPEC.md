@@ -2032,13 +2032,19 @@ standard input, as the `sand` command does, forwards that input to the feed. A
 Idle time spent waiting for user input does not count toward `max_wall_time`.
 Time spent running other tasks still counts. If one task waits for the user,
 elapsed time while other tasks wait for timers or network I/O also does not
-count toward `max_wall_time`; only `max_cpu_time` bounds the run during that
-wait. User waits include:
+count toward `max_wall_time`; the CPU time, instruction, memory, and output
+limits still bound the run during that wait. User waits include:
 
-- reads from a `StdinFeed` (the host observes each waiting read through
-  `wait_until_input_needed` and `wait_for_request`, and can prompt for or
-  dismiss it)
+- reads from a `StdinFeed` made by `Config::stdin_feed` (the host observes each
+  waiting read through `wait_until_input_needed` and `wait_for_request`, and
+  can prompt for or dismiss it)
 - host functions that return a `Later` with `WaitKind::User` (§16.3)
+
+`Config::stdin_io_feed` makes a feed for input that comes from a program, such
+as a pipe, and not from a person. A read of that feed waits for I/O, so the
+wait counts toward `max_wall_time`. The `sand` command uses
+`Config::stdin_feed` if its standard input is a terminal, and
+`Config::stdin_io_feed` otherwise.
 
 The host can intercept and filter structured log records instead of
 writing them to standard error. `Config::log_sink` routes records to a
