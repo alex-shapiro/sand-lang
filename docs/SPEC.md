@@ -1658,6 +1658,11 @@ The engine checks every outgoing network connection from `net.connect`,
    `"permission_denied"` and reports the denied address and matching rule.
    `NetAddr` never prompts.
 
+In the WebAssembly build (§16.5), the browser resolves host names, so the
+engine checks only stage 1. Rules for IP addresses and CIDR prefixes then apply
+only to IP literals, and `deny_private_net` does not block a host name that
+resolves to a private address.
+
 In stage 2, `RulePolicy::check_resolved` compares the host specificity of the
 rule that allowed stage 1 against all IP address rules that match the resolved
 address and transport, including `net` rules and `http` rules that match the

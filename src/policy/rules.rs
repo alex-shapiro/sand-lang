@@ -516,6 +516,9 @@ impl RulePolicy {
     ///
     /// A more specific rule overrides these rules, such as `allow net localhost:8080` or
     /// `allow net 10.0.0.5`. A rule of equal specificity, such as `allow net localhost`, does not.
+    ///
+    /// In the WebAssembly build, the browser resolves host names, so these rules block only IP
+    /// literals and `localhost` names.
     pub fn deny_private_net(self) -> Self {
         let localhost = NetPattern { kind: HostKind::Host("localhost".into()), port: None };
         let hosts = std::iter::once(localhost).chain(private_ranges().iter().cloned());
