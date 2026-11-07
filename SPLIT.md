@@ -53,16 +53,12 @@ This makes the builder methods infallible. The builders also reject relative
 file paths to close issue 033. This changeset replaces the `bitflags` set
 `Transports` with an enum. It also removes the `bitflags` dependency.
 
-New types in `policy`:
+Public types, by module:
 
-- `NetPattern`
-- `UrlPattern`
-- `PathPattern`
-- `NamePattern`
-- `Methods`
-- `CustomName`
-- `AbsolutePath`
-- `PatternError`
+- `policy::rules`: `PathPattern`, `AbsolutePath`, `NamePattern`, `Transports`,
+  `HttpMethod`, `Methods`, and `CustomMatch`
+- `policy::net`: `NetPattern`, `UrlPattern`, and `ListenPattern`
+- `policy`: `PatternError`
 
 Source commits: `464b03a`, `c5ca2d7`, `b111b33`, `335ae8b`, `89186fa`, `265e762`.
 
