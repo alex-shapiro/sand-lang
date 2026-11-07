@@ -2547,7 +2547,9 @@ execution. A journaled or effectful host function
 can take a `JournaledCall` parameter after `&mut Vm`, whose `seq()` gives the
 sequence number of the journal entry that records the call; a resumed run that
 calls the function again gets the same number. The compiler refuses a
-`JournaledCall` parameter of a function that is not journaled.
+`JournaledCall` parameter of a function that is not journaled. Like a `Call`,
+a `JournaledCall` borrows the native invocation that it comes from, so a host
+cannot keep one and give the same number to the effect of a later call.
 The engine calls the request filter only for a request that it sends, not
 for a request that replay returns, and gives it the sequence number of the
 `Start` entry of the request in `RequestTarget::journal_seq`. A resumed run

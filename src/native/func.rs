@@ -211,12 +211,25 @@ pub struct Call<'a> {
 /// let mut m = sandlang::native::NativeModule::new("ids");
 /// m.vm_function("next", |_: &mut Vm, call: JournaledCall| call.seq().unwrap_or(0) as i64);
 /// ```
+///
+/// Like a [`Call`], a `JournaledCall` lives only as long as the native
+/// invocation. A function cannot keep one and give its sequence number to
+/// the effect of a later call:
+///
+/// ```compile_fail,E0521
+/// # use sandlang::native::func::{Journaled, JournaledCall};
+/// # use sandlang::vm::Vm;
+/// static KEPT: std::sync::Mutex<Option<JournaledCall<'static>>> = std::sync::Mutex::new(None);
+/// let mut m = sandlang::native::NativeModule::new("ids");
+/// m.vm_function("keep", Journaled(|_: &mut Vm, call: JournaledCall| *KEPT.lock().unwrap() = Some(call)));
+/// ```
 #[derive(Clone, Copy, Debug)]
-pub struct JournaledCall {
+pub struct JournaledCall<'a> {
     seq: Option<u64>,
+    invocation: PhantomData<&'a mut ()>,
 }
 
-impl JournaledCall {
+impl JournaledCall<'_> {
     /// In a journaled run, the sequence number of the journal entry that
     /// records the call. It is the same in every execution of the run, also
     /// when a resumed run calls the function again, so a host can use it as
@@ -233,21 +246,11 @@ pub trait CallParam: sealed::Sealed {}
 
 impl CallParam for () {}
 impl CallParam for Call<'static> {}
-impl CallParam for JournaledCall {}
+impl CallParam for JournaledCall<'static> {}
 
-/// A call parameter that does not borrow the [`Call`] it comes from.
-#[doc(hidden)]
-pub trait OwnedCallParam: CallParam + Copy + 'static {
-    fn from_call(call: Call<'_>) -> Self;
-}
-
-impl OwnedCallParam for () {
-    fn from_call(_: Call<'_>) {}
-}
-
-impl OwnedCallParam for JournaledCall {
-    fn from_call(call: Call<'_>) -> JournaledCall {
-        JournaledCall { seq: call.seq }
+impl<'a> JournaledCall<'a> {
+    fn of(call: Call<'a>) -> JournaledCall<'a> {
+        JournaledCall { seq: call.seq, invocation: PhantomData }
     }
 }
 
@@ -265,7 +268,7 @@ impl LocalCallParam for Call<'static> {}
 pub trait JournaledCallParam: CallParam {}
 
 impl JournaledCallParam for () {}
-impl JournaledCallParam for JournaledCall {}
+impl JournaledCallParam for JournaledCall<'static> {}
 
 /// Marks the [`VmFunction`] implementation for functions that take a call
 /// parameter of type `C`.
@@ -485,7 +488,7 @@ mod sealed {
     impl Sealed for super::HostError {}
     impl Sealed for () {}
     impl Sealed for super::Call<'static> {}
-    impl Sealed for super::JournaledCall {}
+    impl Sealed for super::JournaledCall<'static> {}
 }
 
 impl NativeError for Ctl {
@@ -642,37 +645,36 @@ macro_rules! fn_impls {
                 Signature { params: vec![$($a::sand_type()),*], ret: R::sand_type() }
             }
             fn into_host(self, key: &Arc<str>) -> Box<NativeFn> {
-                VmFunction::<(WithCall<()>, $($a,)*)>::into_host(move |vm: &mut Vm, _: (), $($a: $a),*| self(vm, $($a),*), key)
+                VmFunction::<(WithCall<Call<'static>>, $($a,)*)>::into_host(move |vm: &mut Vm, _: Call<'_>, $($a: $a),*| self(vm, $($a),*), key)
             }
             fn into_journaled(self, key: &Arc<str>) -> Box<JournaledFn> {
-                VmFunction::<(WithCall<()>, $($a,)*)>::into_journaled(move |vm: &mut Vm, _: (), $($a: $a),*| self(vm, $($a),*), key)
+                VmFunction::<(WithCall<Call<'static>>, $($a,)*)>::into_journaled(move |vm: &mut Vm, _: Call<'_>, $($a: $a),*| self(vm, $($a),*), key)
             }
         }
 
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::unused_unit, clippy::too_many_arguments)]
-        impl<F, R, P, $($a,)*> VmFunction<(WithCall<P>, $($a,)*)> for F
+        impl<F, R, $($a,)*> VmFunction<(WithCall<JournaledCall<'static>>, $($a,)*)> for F
         where
-            F: Fn(&mut Vm, P, $($a),*) -> R + Send + Sync + 'static,
+            F: for<'c> Fn(&mut Vm, JournaledCall<'c>, $($a),*) -> R + Send + Sync + 'static,
             R: VmReturn,
-            P: OwnedCallParam,
             $($a: for<'a> FromValue<Item<'a> = $a> + 'static,)*
         {
             type Args = ($($a,)*);
             type Ret = R;
-            type CallParam = P;
+            type CallParam = JournaledCall<'static>;
             type Parking = R::Parking;
             fn signature() -> Signature {
                 Signature { params: vec![$($a::sand_type()),*], ret: R::sand_type() }
             }
             fn into_host(self, key: &Arc<str>) -> Box<NativeFn> {
                 VmFunction::<(WithCall<Call<'static>>, $($a,)*)>::into_host(
-                    move |vm: &mut Vm, call: Call<'_>, $($a: $a),*| self(vm, P::from_call(call), $($a),*),
+                    move |vm: &mut Vm, call: Call<'_>, $($a: $a),*| self(vm, JournaledCall::of(call), $($a),*),
                     key,
                 )
             }
             fn into_journaled(self, key: &Arc<str>) -> Box<JournaledFn> {
                 VmFunction::<(WithCall<Call<'static>>, $($a,)*)>::into_journaled(
-                    move |vm: &mut Vm, call: Call<'_>, $($a: $a),*| self(vm, P::from_call(call), $($a),*),
+                    move |vm: &mut Vm, call: Call<'_>, $($a: $a),*| self(vm, JournaledCall::of(call), $($a),*),
                     key,
                 )
             }
