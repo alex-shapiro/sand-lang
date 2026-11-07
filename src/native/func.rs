@@ -86,16 +86,6 @@ pub enum Answer {
     Parked(BoxFuture, Park, String),
 }
 
-impl Answer {
-    /// The result outside the journal: a parked call is then a plain wait.
-    pub(crate) fn into_result(self) -> NResult {
-        match self {
-            Answer::Value(v) => Ok(v),
-            Answer::Parked(fut, ..) => Err(Ctl::suspend(fut)),
-        }
-    }
-}
-
 /// A body that cannot park, as the body of a journaled function.
 fn answering(f: Box<NativeFn>) -> Box<JournaledFn> {
     Box::new(move |vm: &mut Vm, call: Call<'_>, args: &[Value]| f(vm, call, args).map(Answer::Value))

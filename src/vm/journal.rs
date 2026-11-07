@@ -169,9 +169,37 @@ pub(crate) enum StartEntry {
     Fresh(Fresh),
     /// The run has no journal: the operation runs.
     Unjournaled,
-    /// Replay holds `next`, an entry other than a start, at `seq`.
-    /// `identity` and `label` describe the operation.
-    Other { identity: u64, label: String, seq: u64, next: String },
+    /// Replay holds the recorded result of a synchronous call, and
+    /// consumed it. `identity` and `label` describe the operation.
+    Recorded { identity: u64, label: String, result: Recorded },
+    /// Replay holds `next`, an entry other than a start or a result, at
+    /// `seq`. `label` describes the operation.
+    Other { label: String, seq: u64, next: String },
+}
+
+/// The recorded result of a synchronous call, at entry `seq`.
+pub(crate) struct Recorded {
+    seq: u64,
+    result: CallResult,
+}
+
+impl Recorded {
+    /// The recorded result, if the call that `identity` and `label`
+    /// describe is the recorded one. Charges the fuel that the call spent.
+    fn deliver(self, vm: &mut Vm, identity: u64, label: &str) -> NResult {
+        let Recorded { seq, result: CallResult { identity: id, label: rec_label, fuel, outcome } } = self;
+        if id != identity {
+            let message = if rec_label == label {
+                format!("the run calls `{label}` with other arguments than the journal records")
+            } else {
+                format!("the run calls `{label}` where the journal records a call of `{rec_label}`")
+            };
+            return Err(Ctl::diverged(Divergence { seq, message }));
+        }
+        let v = payload_outcome(vm, &outcome);
+        vm.charge(fuel)?;
+        v
+    }
 }
 
 /// An operation whose recorded start replay consumes when the operation
@@ -377,7 +405,11 @@ pub(crate) fn journaled_call(vm: &mut Vm, call: Call, inner: &JournaledFn, name:
             vm.meter.charge(r.pre_fuel)?;
             Err(r.wait(Box::new(payload_outcome)))
         }
-        StartEntry::Other { identity, .. } => vm.journaled_result(identity, name, |vm| inner(vm).and_then(Answer::into_result)),
+        StartEntry::Recorded { identity, label, result } => result.deliver(vm, identity, &label),
+        StartEntry::Other { label, seq, next } => {
+            let message = format!("the run reads the result of `{label}` where the journal records {next}");
+            Err(Ctl::diverged(Divergence { seq, message }))
+        }
         StartEntry::Rerun(rerun) => {
             // The journal records the start of the call, not its end: call
             // it again, and deliver even a result it returns at once as the
@@ -1331,18 +1363,8 @@ impl Vm {
         let seq = j.pos as u64;
         let replayed = j.take(EntryKind::Result, &|| format!("the result of `{label}`")).map_err(Ctl::diverged)?;
         drop(j);
-        let Some(EntryData::Result(CallResult { identity: id, label: rec_label, fuel, outcome })) = replayed else { return Ok(None) };
-        if id != identity {
-            let msg = if rec_label == label {
-                format!("the run calls `{label}` with other arguments than the journal records")
-            } else {
-                format!("the run calls `{label}` where the journal records a call of `{rec_label}`")
-            };
-            return Err(Ctl::diverged(Divergence { seq, message: msg }));
-        }
-        let v = payload_outcome(self, &outcome);
-        self.charge(fuel)?;
-        Ok(Some(v))
+        let Some(EntryData::Result(result)) = replayed else { return Ok(None) };
+        Ok(Some(Recorded { seq, result }.deliver(self, identity, label)))
     }
 
     /// Records the result `r` of a synchronous call that started at fuel
@@ -1416,7 +1438,12 @@ impl Vm {
         let s = match j.peek() {
             None => return Ok(StartEntry::Fresh(Fresh { identity, label })),
             Some(EntryData::Start(s)) => s,
-            Some(e) => return Ok(StartEntry::Other { identity, label, seq: j.pos as u64, next: e.describe() }),
+            Some(EntryData::Result(r)) => {
+                let result = Recorded { seq: j.pos as u64, result: r.clone() };
+                j.pos += 1;
+                return Ok(StartEntry::Recorded { identity, label, result });
+            }
+            Some(e) => return Ok(StartEntry::Other { label, seq: j.pos as u64, next: e.describe() }),
         };
         let (op, seq) = (j.ops, j.pos as u64);
         if s.kind != kind || s.identity != identity {
@@ -1447,7 +1474,12 @@ impl Vm {
             StartEntry::Rerun(r) => Ok(Begun::Live(r.start(self, spec))),
             StartEntry::Fresh(f) => Ok(Begun::Live(f.start(self, spec))),
             StartEntry::Unjournaled => Ok(Begun::Live(Live::unjournaled(spec))),
-            StartEntry::Other { label, seq, next, .. } => {
+            StartEntry::Recorded { label, result: Recorded { seq, result }, .. } => {
+                let next = EntryData::Result(result).describe();
+                let message = format!("the run reads the start of {} `{label}` where the journal records {next}", spec.kind.name());
+                Err(Ctl::diverged(Divergence { seq, message }))
+            }
+            StartEntry::Other { label, seq, next } => {
                 let message = format!("the run reads the start of {} `{label}` where the journal records {next}", spec.kind.name());
                 Err(Ctl::diverged(Divergence { seq, message }))
             }
