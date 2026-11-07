@@ -20,7 +20,7 @@ use crate::syntax::ast::{ItemKind, StmtKind};
 use crate::types::{FnId, ModId, TypeId};
 use crate::unwind::CatchUnwind;
 use crate::vm::bytecode::Program;
-use crate::vm::sched::{RunEnd, Stop};
+use crate::vm::sched::{RunEnd, Stop, Until};
 use crate::vm::value::Value;
 use crate::vm::{Trap, Vm};
 use std::collections::HashMap;
@@ -557,7 +557,7 @@ impl Session {
         vm.host.output_bytes = 0;
         // Waiting for input may take any time.
         vm.deadline = None;
-        let r = vm.drive(None).await;
+        let r = vm.drive(Until::Idle).await;
         let r = r.and_then(|stop| vm.drain_output().map(|()| stop).map_err(|c| vm.trap_of(c, |_| vec![])));
         let r = match r {
             Ok(Stop::Prompt(cap)) => {

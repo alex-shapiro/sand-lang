@@ -191,6 +191,18 @@ pub(crate) enum Stop {
     Suspended(Suspension),
 }
 
+/// What [`Vm::drive`] runs the tasks for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Until {
+    /// Until the main task, the fiber with this id, finishes.
+    Main(u32),
+    /// Until nothing can run, waiting for pending I/O.
+    Idle,
+    /// Until nothing can run without waiting for I/O: the tasks left at the
+    /// end of a run unwind ([`Vm::end_tasks`]).
+    EndTasks,
+}
+
 /// Execution timer tracking elapsed CPU and clock time.
 struct RunTimer {
     clock: Arc<dyn crate::platform::Clock>,
@@ -477,7 +489,7 @@ impl Vm {
     /// the first registers.
     pub(crate) async fn run_call(&mut self, closure: Value, args: &[Value]) -> Result<RunEnd, Trap> {
         let r = match self.start_main(closure, args) {
-            Ok(fid) => match self.drive(Some(fid)).await {
+            Ok(fid) => match self.drive(Until::Main(fid)).await {
                 Ok(Stop::Exit(c)) => Ok(RunEnd::Exit(c)),
                 Ok(Stop::Main(v)) => Ok(RunEnd::Finished(v)),
                 Ok(Stop::Suspended(s)) => Ok(RunEnd::Suspended(s)),
@@ -511,11 +523,15 @@ impl Vm {
         Ok(fid)
     }
 
-    /// Runs the ready tasks and pending I/O until the main task (fiber
-    /// `main`) finishes or, without one, until nothing can run or a task
-    /// needs a permission prompt ([`Stop::Prompt`]). The future may be
-    /// dropped where it waits: every task is then in the scheduler's tables.
-    pub(crate) async fn drive(&mut self, main: Option<u32>) -> Result<Stop, Trap> {
+    /// Runs the ready tasks and pending I/O as `until` says. Without a main
+    /// task, also stops when a task needs a permission prompt
+    /// ([`Stop::Prompt`]). The future may be dropped where it waits: every
+    /// task is then in the scheduler's tables.
+    pub(crate) async fn drive(&mut self, until: Until) -> Result<Stop, Trap> {
+        let main = match until {
+            Until::Main(fid) => Some(fid),
+            Until::Idle | Until::EndTasks => None,
+        };
         let mut timer = RunTimer::start(self.host.clock.clone());
         // Where an instruction was retried after a memory limit error.
         let mut gc_retried: Option<(u32, usize, u32)> = None;
@@ -670,7 +686,7 @@ impl Vm {
                 continue;
             }
             if self.replaying() {
-                if self.ending || main.is_none() {
+                if main.is_none() {
                     return Ok(Stop::Idle);
                 }
                 return Err(self
@@ -691,7 +707,7 @@ impl Vm {
                 self.check_limits(&timer)?;
                 continue;
             }
-            if self.ending {
+            if until == Until::EndTasks {
                 return Ok(Stop::Idle);
             }
             if main.is_some()

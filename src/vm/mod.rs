@@ -633,9 +633,6 @@ pub struct Vm {
     /// When the run exceeds the wall-time limit (moved on by the time
     /// spent waiting for prompt answers).
     pub(crate) deadline: Option<crate::platform::Instant>,
-    /// Set while the tasks left at the end of a run unwind (`end_tasks`):
-    /// `drive` stops instead of waiting for I/O.
-    pub(crate) ending: bool,
     /// Extra GC roots (e.g. values held by the test runner).
     pub pinned: Vec<Value>,
     /// The box of the last `Blocked` or `Yield` consumed (see `Vm::signal`).
@@ -741,7 +738,6 @@ impl Vm {
             gen_counter: 1,
             meter,
             deadline: None,
-            ending: false,
             pinned: Vec::new(),
             spare_ctl: None,
             last_slot: std::cell::Cell::new((u32::MAX, 0)),
@@ -1590,9 +1586,7 @@ impl Vm {
         if self.ready.is_empty() {
             return Ok(None);
         }
-        self.ending = true;
-        let r = self.drive(None).await;
-        self.ending = false;
+        let r = self.drive(sched::Until::EndTasks).await;
         let r = r.and_then(|stop| self.drain_output().map(|()| stop).map_err(|c| self.trap_of(c, |_| vec![])));
         match r {
             Ok(sched::Stop::Exit(c)) => Ok(Some(c)),
