@@ -55,7 +55,7 @@ fn format_line_words(line: &Line) -> String {
         if i >= 2 && keywords {
             match w.bare() {
                 Some(t) if transport(&t).is_some() => text = t.to_ascii_lowercase(),
-                Some(m) if http && m.parse::<HttpMethod>().is_ok() => text = m.to_ascii_uppercase(),
+                Some(m) if http && let Ok(method) = m.parse::<HttpMethod>() => text = method.as_str().into(),
                 _ => keywords = false,
             }
         }
