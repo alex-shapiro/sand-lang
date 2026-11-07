@@ -78,3 +78,10 @@ test("the welcome example's session continues", async () => {
   assert.deepEqual(await session.eval("planets.len()"), { value: "5" });
   assert.deepEqual(await session.eval("size(planets[4])"), { value: "Many(146)" });
 });
+
+test("an empty Input tab gives stdin reads end of input", async () => {
+  const sandbox = { files: { [MAIN]: "" }, policy: "allow stdin", stdin: "" };
+  const session = new sand.Session(engineOptions(sandbox), {});
+  assert.deepEqual(await session.eval("import io\nio.stdin.read_line()"), { value: "Ok(None)" });
+  session.free();
+});

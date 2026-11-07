@@ -32,9 +32,7 @@ export function engineOptions(sandbox) {
   for (const [name, text] of Object.entries(sandbox.files ?? {})) {
     if (name !== program(sandbox)) files[filePath(name)] = text;
   }
-  const options = { policy: sandbox.policy ?? "", files, env: parseEnv(sandbox.env) };
-  if (sandbox.stdin) options.stdin = sandbox.stdin;
-  return options;
+  return { policy: sandbox.policy ?? "", files, env: parseEnv(sandbox.env), stdin: sandbox.stdin ?? "" };
 }
 
 /** Encodes `sandboxes` as a base64url-encoded raw-deflate JSON string. */
