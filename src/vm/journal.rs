@@ -221,7 +221,7 @@ impl Rerun {
             j.ops += 1;
         }
         let parking = wake.map_or(spec.parking, Parking::Timer);
-        Live { journal: Some(LiveOp { journal, op, seq, wake }), parking, effects: spec.effects }
+        Live { journal: Some(LiveOp { op, seq, wake }), parking, effects: spec.effects }
     }
 }
 
@@ -245,7 +245,7 @@ impl Fresh {
             (op, seq, wake)
         };
         let parking = wake.map_or(spec.parking, Parking::Timer);
-        Live { journal: Some(LiveOp { journal, op, seq, wake }), parking, effects: spec.effects }
+        Live { journal: Some(LiveOp { op, seq, wake }), parking, effects: spec.effects }
     }
 }
 
@@ -259,7 +259,6 @@ pub(crate) enum Begun {
 
 /// An operation whose recorded outcome replay delivers.
 pub(crate) struct Replayed {
-    pub journal: JournalHandle,
     op: u64,
     /// The fuel that the native spent before the operation started, as the
     /// journal records it.
@@ -284,8 +283,11 @@ pub(crate) struct Live {
 }
 
 /// A live operation of a journaled run.
+///
+/// Neither it nor the closures that complete it hold the journal state:
+/// those closures run with the VM, which owns the state, so a run that ends
+/// with them pending frees the state with the VM.
 pub(crate) struct LiveOp {
-    pub journal: JournalHandle,
     /// The id of the operation in the journal.
     op: u64,
     /// The sequence number of the operation's `Start` entry.
@@ -317,19 +319,26 @@ impl Live {
                 let outcome = fut.await;
                 Box::new(move |fx: &mut AfterEffect<'_>| outcome.deliver(fx, build)) as Finisher
             }),
-            Some(LiveOp { journal, op, .. }) => Box::pin(async move {
+            Some(LiveOp { op, .. }) => Box::pin(async move {
                 let encode = fut.await.settle().await;
                 Box::new(move |fx: &mut AfterEffect<'_>| {
                     let start = fx.meter.used();
                     let payload = encode(fx)?;
                     let fuel = fx.meter.used().saturating_sub(start);
-                    journal.state().record_done(op, fuel, OpEnd::Completed(payload.to_vec()));
+                    fx.journal_state().ok_or_else(no_journal)?.record_done(op, fuel, OpEnd::Completed(payload.to_vec()));
                     build(fx, &payload)
                 }) as Finisher
             }),
         };
         Ctl::wait(Wait { op, parking: self.parking, work: WaitWork::Run { fut, effects: self.effects } })
     }
+}
+
+/// The failure of a closure of a journaled operation that runs in a VM
+/// without a journal. The VM keeps its journal from the start of the run,
+/// and only a journaled run starts journaled operations.
+fn no_journal() -> Fail {
+    Fail::internal("a journaled operation completes in a run without a journal")
 }
 
 /// The outcome of a host call: its finisher, or the encoding of a result
@@ -376,10 +385,10 @@ pub(crate) fn sleep(vm: &mut Vm, d: Duration) -> Ctl {
         Ok((identity, format!("sleep {}", crate::vm::display::fmt_duration(d.as_nanos().min(i64::MAX as u128) as i64))))
     };
     // The expiry of a journaled timer: the run has seen its wake time.
-    let expired = |wake: Option<(SystemTime, JournalHandle)>| -> BuildFn {
-        Box::new(move |_: &mut AfterEffect<'_>, _: &[u8]| {
-            if let Some((t, journal)) = wake {
-                journal.state().saw_wall(t);
+    let expired = |wake: Option<SystemTime>| -> BuildFn {
+        Box::new(move |fx: &mut AfterEffect<'_>, _: &[u8]| {
+            if let Some(t) = wake {
+                fx.journal_state().ok_or_else(no_journal)?.saw_wall(t);
             }
             Ok(Value::Unit)
         })
@@ -387,14 +396,14 @@ pub(crate) fn sleep(vm: &mut Vm, d: Duration) -> Ctl {
     match vm.begin_op(spec, describe) {
         Err(f) => f.into(),
         Ok(Begun::Replayed(r)) => {
-            let build = expired(r.wake.map(|t| (t, r.journal.clone())));
+            let build = expired(r.wake);
             r.wait(build)
         }
         Ok(Begun::Live(live)) => {
-            let wake = live.journal.as_ref().and_then(|j| Some((j.wake?, j.journal.clone())));
-            let wait = match &wake {
-                Some((t, journal)) => t.duration_since(journal.state().wall(&*vm.host.clock)).unwrap_or_default(),
-                None => d,
+            let wake = live.journal.as_ref().and_then(|j| j.wake);
+            let wait = match (wake, vm.journal_state()) {
+                (Some(t), Some(j)) => t.duration_since(j.wall(&*vm.host.clock)).unwrap_or_default(),
+                _ => d,
             };
             let sleep = vm.host.clock.sleep(wait);
             let build = expired(wake);
@@ -1510,7 +1519,7 @@ impl Vm {
         }
         j.pos += 1;
         j.ops += 1;
-        Ok(StartEntry::Replayed(Replayed { journal: journal.clone(), op, pre_fuel, wake }))
+        Ok(StartEntry::Replayed(Replayed { op, pre_fuel, wake }))
     }
 
     /// Starts operation `spec`, an input of the run whose outcome the

@@ -1537,3 +1537,49 @@ fn a_resumed_call_that_runs_again_after_a_collection_consumes_its_start_once() {
     assert_eq!(resumed, out);
     assert_eq!(calls.load(Ordering::SeqCst) - before, 2, "the resumed call runs again after the forced collection");
 }
+
+/// A sink that says when the engine has let go of it.
+struct Tracked {
+    inner: MemoryJournal,
+    gone: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Drop for Tracked {
+    fn drop(&mut self) {
+        self.gone.store(true, Ordering::SeqCst);
+    }
+}
+
+impl Journal for Tracked {
+    fn record(&self, entry: Entry) {
+        self.inner.record(entry)
+    }
+
+    fn flush(&self) -> sandlang::journal::FlushFuture {
+        self.inner.flush()
+    }
+}
+
+#[test]
+fn a_run_that_ends_in_replay_releases_its_journal() {
+    // The first run suspends in the long sleep after both requests. Resumed
+    // past the wake time, the timer completes live while replay still holds
+    // the requests, and the changed program diverges at the second one.
+    let clock = ManualClock::new();
+    let world = World::new(clock.clone(), false, Some(1));
+    let journal = MemoryJournal::new();
+    let src = "import http\nlet t = spawn { task.sleep(2h)\n 1 }\nprint(http.get(\"http://svc.test/a\")?.status)\nprint(http.get(\"http://svc.test/c\")?.status)\nprint(t.wait())";
+    let first = world.run(src, &journal);
+    assert!(matches!(first.result, Ok(Outcome::Suspended(_))), "{:?}", first.result);
+    clock.advance(Duration::from_secs(7201));
+    let changed = src.replace("svc.test/c", "svc.test/b");
+    let gone = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let sink = Tracked { inner: MemoryJournal::with_entries(journal.entries()), gone: gone.clone() };
+    let out = MemorySink::new();
+    let durable = Durable::new(Arc::new(sink), journal.entries()).suspend_after(Duration::from_secs(60));
+    let mut engine = Engine::new(world.base.clone());
+    let result = rt().block_on(engine.run_source("main.sand", &changed, world.values(&out).durable(durable)));
+    assert!(matches!(result, Err(Error::Diverged { .. })), "{result:?}");
+    drop(engine);
+    assert!(gone.load(Ordering::SeqCst), "the journal outlives its run");
+}
