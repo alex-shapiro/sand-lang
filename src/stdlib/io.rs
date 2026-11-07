@@ -142,30 +142,21 @@ const STDIN_CHUNK: usize = 64 << 10;
 fn buffered_line(vm: &Vm) -> Option<Option<Vec<u8>>> {
     let mut read = vm.host.stdin.as_ref()?.try_begin_read()?;
     let (buf, at_end) = read.available();
-    let (len, line) = first_line(vm, buf, at_end)?;
-    std::pin::Pin::new(&mut read).consume(len);
-    Some(line)
-}
-
-/// The first line of `buf`: its length with its terminator, and its text
-/// without it (`None` at the end of input). `at_end` is true if the input
-/// ends after `buf`. Returns `None` if the line is incomplete or does not fit
-/// in memory.
-fn first_line(vm: &Vm, buf: &[u8], at_end: bool) -> Option<(usize, Option<Vec<u8>>)> {
     let len = match buf.iter().position(|&b| b == b'\n') {
         Some(nl) => nl + 1,
         None if at_end => buf.len(),
         None => return None,
     };
     if len == 0 {
-        return Some((0, None));
+        return Some(None);
     }
     if vm.heap.would_exceed(len) {
         return None;
     }
-    let mut text = buf[..len].to_vec();
-    strip_eol(&mut text);
-    Some((len, Some(text)))
+    let mut line = buf[..len].to_vec();
+    std::pin::Pin::new(&mut read).consume(len);
+    strip_eol(&mut line);
+    Some(Some(line))
 }
 
 /// Reads `what` from standard input: `None` only for a line at the end of
