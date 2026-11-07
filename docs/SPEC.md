@@ -2010,6 +2010,8 @@ and `Config::stdin_feed` gives them input that the host sends while they run.
 config. The engine or session that the host creates from the config reads
 that feed. A host that runs scripts with its process's
 standard input, as the `sand` command does, forwards that input to the feed.
+If the `sand` command cannot read its standard input, it writes the error to
+standard error and ends the stream, so the script gets an end of input.
 
 A host learns that a script wants input from `StdinFeed::wait_for_request`. It
 waits until a read needs input, even if other tasks are running, and returns a

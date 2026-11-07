@@ -18,3 +18,18 @@ exist only to keep this difference.
    input.
 2. Keep the current behavior. Fixed input acts like a file that each run opens
    again. A feed acts like a stream, which a run cannot replay.
+
+## A process stdin error looks like an end of input
+
+**Problem.** If `sand run` or `sand test` cannot read its standard input,
+`forward_stdin` (`cli/src/main.rs`) writes the error to stderr and ends the
+feed. The script gets `None` or a short `read_all`, and it cannot tell cut-off
+input from complete input. On main, the script got an `Err` with a kind.
+
+**Options.**
+
+1. Add back `StdinFeed::fail(io::Error)`: after the queued bytes, every read
+   fails with the error. Cost: one more feed method and an error state, about
+   25 lines with its CLI test. The deletion pass removed it to shrink the API.
+2. Keep the current behavior. Such errors are rare (for example, stdin is a
+   directory), and the user sees the message on stderr.
