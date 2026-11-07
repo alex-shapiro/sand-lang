@@ -380,8 +380,8 @@ impl Config {
         self
     }
     /// Gives scripts standard input that a person sends through the returned
-    /// [`StdinFeed`](crate::StdinFeed). The time that a read waits does not
-    /// count toward `max_wall_time`.
+    /// [`StdinFeed`](crate::StdinFeed). While a read waits, idle time of the
+    /// engine does not count toward `max_wall_time`.
     pub fn stdin_feed(self) -> (Self, crate::StdinFeed) {
         self.stdin_host_feed(crate::WaitKind::User)
     }
