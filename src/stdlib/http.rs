@@ -23,7 +23,8 @@ use crate::policy::Policy;
 use crate::stdlib::core::Error;
 use crate::vm::iomem::{Reservation, ResourceSlot};
 use crate::vm::journal::{Begun, BuildFn, Effects, EncodeFn, OpSpec, Outcome, Parking, Payload};
-use crate::vm::{AfterEffect, Vm};
+use crate::vm::value::Value;
+use crate::vm::{AfterEffect, Fail, Vm};
 use jiff::SignedDuration;
 use std::future::Future;
 use std::pin::Pin;
@@ -742,7 +743,7 @@ impl BodyFrom {
 }
 
 impl Outcome for Exchange {
-    fn deliver(self: Box<Self>, fx: &mut AfterEffect<'_>, _: BuildFn) -> crate::vm::NResult {
+    fn deliver(self: Box<Self>, fx: &mut AfterEffect<'_>, _: BuildFn) -> Result<Value, Fail> {
         let Exchange { result, body } = *self;
         let r = match result {
             Ok(Exchanged { conn, head, close, head_res }) => {
@@ -750,7 +751,7 @@ impl Outcome for Exchange {
                 let (status, headers, reader) = body.read(conn, head, close);
                 Ok(response(fx, body.url, status, headers, reader))
             }
-            Err(e) => Err(HostError::from(e)),
+            Err(e) => Err(HostError::<Fail>::from(e)),
         };
         r.into_value(fx)
     }

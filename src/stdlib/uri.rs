@@ -4,7 +4,7 @@ use crate::check::ModKind;
 use crate::native::NativeModule;
 use crate::native::convert::HostError;
 use crate::native::ty::Val;
-use crate::vm::{Ctl, Vm};
+use crate::vm::{Fail, Vm};
 
 /// A parsed RFC 3986 URI. `host` is `Some` if the URI includes an authority
 /// component (`//...`). IPv6 host literals omit the enclosing brackets.
@@ -69,7 +69,7 @@ pub(crate) fn module() -> NativeModule {
         vm.charge_slow_bytes(s.len())?;
         decode_component(s).map_err(|msg| HostError::new("parse", msg))
     });
-    m.vm_function("parse_query", |vm: &mut Vm, q: Val<String>| -> Result<Vec<(String, String)>, Ctl> {
+    m.vm_function("parse_query", |vm: &mut Vm, q: Val<String>| -> Result<Vec<(String, String)>, Fail> {
         let q = q.str(&vm.heap);
         vm.check_memory(q.len().saturating_mul(4))?;
         vm.charge_slow_bytes(q.len())?;
@@ -298,7 +298,7 @@ pub(crate) fn remove_dot_segments(path: &str) -> String {
     out
 }
 
-fn encode_native(vm: &mut Vm, s: Val<String>, keep: &[u8]) -> Result<String, Ctl> {
+fn encode_native(vm: &mut Vm, s: Val<String>, keep: &[u8]) -> Result<String, Fail> {
     let s = s.str(&vm.heap);
     vm.check_memory(s.len().saturating_mul(3))?;
     vm.charge_slow_bytes(s.len())?;

@@ -21,7 +21,8 @@ use crate::native::ty::Val;
 use crate::stdlib::core::Error;
 use crate::vm::iomem::Reservation;
 use crate::vm::journal::{Begun, BuildFn, Effects, EncodeFn, OpSpec, Outcome, Parking, Payload};
-use crate::vm::{AfterEffect, Vm};
+use crate::vm::value::Value;
+use crate::vm::{AfterEffect, Fail, Vm};
 use jiff::SignedDuration;
 use js_sys::{Array, Function, Object, Promise, Reflect, Uint8Array};
 use std::cell::{Cell, RefCell};
@@ -112,14 +113,14 @@ struct Fetched {
 }
 
 impl Outcome for Fetched {
-    fn deliver(self: Box<Self>, fx: &mut AfterEffect<'_>, _: BuildFn) -> crate::vm::NResult {
+    fn deliver(self: Box<Self>, fx: &mut AfterEffect<'_>, _: BuildFn) -> Result<Value, Fail> {
         let r = match self.result {
             // The body stays reserved while it is read.
             Ok((status, headers, body, res)) => {
                 let reader = BodyReader::new(Box::new(MemoryBody::new(body)), self.max_body, Some(res));
                 Ok(response(fx, self.url, status, headers, reader))
             }
-            Err(e) => Err(HostError::from(e)),
+            Err(e) => Err(HostError::<Fail>::from(e)),
         };
         r.into_value(fx)
     }

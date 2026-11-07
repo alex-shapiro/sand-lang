@@ -8,7 +8,7 @@ use sandlang::native::ty::{Num, Param, Val};
 use sandlang::stdlib::json::Json;
 use sandlang::types::traits;
 use sandlang::vm::value::Value;
-use sandlang::vm::{Ctl, Vm};
+use sandlang::vm::{Ctl, Fail, Vm};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::{Arc, Mutex};
 
@@ -248,7 +248,7 @@ fn sum_module() -> NativeModule {
             acc = match (acc, x) {
                 (Value::Int(a), Value::Int(b)) => Value::Int(a.wrapping_add(b)),
                 (Value::Float(a), Value::Float(b)) => Value::Float(a + b),
-                _ => return Err(Ctl::internal("not a number")),
+                _ => return Err(Fail::internal("not a number").into()),
             };
         }
         Ok(Param::from_raw(acc))

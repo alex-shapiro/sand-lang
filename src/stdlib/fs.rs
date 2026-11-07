@@ -20,7 +20,7 @@ use crate::policy::{Capability, Decision, MAX_PATH_BYTES, Policy};
 use crate::vm::iomem::{Reservation, ResourceSlot};
 use crate::vm::meter::{Allowance, Stopped};
 use crate::vm::value::to_usize_saturating;
-use crate::vm::{Ctl, Permits, Request, Vm};
+use crate::vm::{Ctl, Fail, Permits, Request, Vm};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -239,7 +239,7 @@ fn target(vm: &mut Vm, p: Val<String>, mode: Mode) -> Result<(String, Target), H
 
 /// Charges for the symlinks followed and the entries scanned resolving `t`
 /// (beyond the names of the path itself, charged before).
-fn charge_work(vm: &Vm, t: &Target) -> Result<(), Ctl> {
+fn charge_work(vm: &Vm, t: &Target) -> Result<(), Fail> {
     let w = t.work();
     vm.charge(4 * (w.steps.saturating_sub(t.path.components().count()) + w.scanned) as u64)?;
     vm.charge_bytes(w.bytes.saturating_add(w.scanned_bytes).saturating_mul(4))
@@ -516,7 +516,7 @@ impl Drop for FileObj {
 impl OpenState {
     /// Runs `op` on the file on a worker thread (see `Vm::offload`).
     fn io<T: Send + 'static>(&mut self, vm: &Vm, op: impl FnOnce(&mut OpenedFile) -> T + Send + 'static) -> Result<T, Ctl> {
-        let mut file = self.file.take().ok_or_else(|| Ctl::internal("a file without its file"))?;
+        let mut file = self.file.take().ok_or_else(|| Fail::internal("a file without its file"))?;
         let (file, t) = vm.offload(move |_| {
             let t = op(&mut file);
             (file, t)
@@ -896,7 +896,7 @@ fn read_rest<R: IntoValue>(
         data.extend_from_slice(&st.buf[st.at..]);
         st.take_unread();
         st.shrink();
-        let mut file = st.file.take().ok_or_else(|| Ctl::internal("a file without its file"))?;
+        let mut file = st.file.take().ok_or_else(|| Fail::internal("a file without its file"))?;
         let (file, read) = vm.offload(move |allowance| {
             let r = read_to_end(&mut file, &mut data, &mut res, allowance);
             (file, r.map(|r| r.map(|()| (data, res))))

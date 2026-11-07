@@ -238,7 +238,19 @@ impl<T: SandType, E: crate::native::func::NativeError> SandType for Result<crate
     }
 }
 
+impl<T: SandType> SandType for Result<T, crate::native::convert::HostError> {
+    fn sand_type() -> Type {
+        Type::result(T::sand_type(), Type::error())
+    }
+}
+
 impl<T: SandType> SandType for Result<T, crate::vm::Ctl> {
+    fn sand_type() -> Type {
+        T::sand_type()
+    }
+}
+
+impl<T: SandType> SandType for Result<T, crate::vm::Fail> {
     fn sand_type() -> Type {
         T::sand_type()
     }
@@ -563,7 +575,7 @@ journal_data! {
     [T, E: crate::native::convert::IntoHostError] Result<T, E>: T;
     [T, E: crate::native::func::NativeError] Result<crate::native::func::Later<T, E>, E>: T;
     [T, E: crate::native::func::NativeError] Result<crate::native::func::Parked<T, E>, E>: T;
-    [T] Result<T, crate::vm::Ctl>: T;
+    [T] Result<T, crate::vm::Fail>: T;
     [A, B] (A, B): A, B;
     [A, B, C] (A, B, C): A, B, C;
     [A, B, C, D] (A, B, C, D): A, B, C, D;

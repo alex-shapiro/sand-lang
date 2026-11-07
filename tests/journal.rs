@@ -12,7 +12,7 @@ use sandlang::native::func::{Effectful, Journaled, JournaledCall, Later, Park, P
 use sandlang::network::{Listener, Network, NetworkFuture, Stream};
 use sandlang::platform::{Clock, ClockFuture, Instant, SystemClock, SystemTime, UNIX_EPOCH};
 use sandlang::policy::rules::RulePolicy;
-use sandlang::vm::{AfterEffect, Vm};
+use sandlang::vm::{AfterEffect, Fail, Vm};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::io;
@@ -265,14 +265,14 @@ fn host_module(log: Arc<HostLog>) -> NativeModule {
     let l = log.clone();
     m.vm_function(
         "wait_signal",
-        Journaled(move |_: &mut Vm, name: String| -> Result<Parked<Option<String>, HostError>, HostError> {
+        Journaled(move |_: &mut Vm, name: String| -> Result<Parked<Option<String>, HostError<Fail>>, HostError<Fail>> {
             l.waits.fetch_add(1, Ordering::SeqCst);
             if let Some(p) = l.signals.lock().unwrap().remove(&name) {
                 return Ok(Later::ready(Ok(Some(p))).into());
             }
             Ok(Later::new(async move {
                 std::future::pending::<()>().await;
-                |_: &mut AfterEffect| Ok::<_, HostError>(None)
+                |_: &mut AfterEffect| Ok::<_, HostError<Fail>>(None)
             })
             .parked(Park::UntilResumed, name))
         }),
@@ -954,21 +954,26 @@ fn a_parked_call_with_a_deadline_suspends_until_the_deadline() {
     let c = clock.clone();
     m.vm_function(
         "wait_until",
-        Journaled(move |_: &mut Vm, name: String, deadline: jiff::Timestamp| -> Result<Parked<Option<String>, HostError>, HostError> {
-            l.waits.fetch_add(1, Ordering::SeqCst);
-            if let Some(p) = l.signals.lock().unwrap().remove(&name) {
-                return Ok(Later::ready(Ok(Some(p))).into());
-            }
-            let due = UNIX_EPOCH + Duration::from_nanos(deadline.as_nanosecond() as u64);
-            if c.wall() >= due {
-                return Ok(Later::ready(Ok(None)).into());
-            }
-            Ok(Later::new(async move {
-                std::future::pending::<()>().await;
-                |_: &mut AfterEffect| Ok::<_, HostError>(None)
-            })
-            .parked(Park::Until(due), name))
-        }),
+        Journaled(
+            move |_: &mut Vm,
+                  name: String,
+                  deadline: jiff::Timestamp|
+                  -> Result<Parked<Option<String>, HostError<Fail>>, HostError<Fail>> {
+                l.waits.fetch_add(1, Ordering::SeqCst);
+                if let Some(p) = l.signals.lock().unwrap().remove(&name) {
+                    return Ok(Later::ready(Ok(Some(p))).into());
+                }
+                let due = UNIX_EPOCH + Duration::from_nanos(deadline.as_nanosecond() as u64);
+                if c.wall() >= due {
+                    return Ok(Later::ready(Ok(None)).into());
+                }
+                Ok(Later::new(async move {
+                    std::future::pending::<()>().await;
+                    |_: &mut AfterEffect| Ok::<_, HostError<Fail>>(None)
+                })
+                .parked(Park::Until(due), name))
+            },
+        ),
     );
     m.source(
         r#"
@@ -1139,12 +1144,12 @@ fn effects_have_the_same_sequence_number_in_every_execution() {
     let s = seqs.clone();
     m.vm_function(
         "send",
-        Effectful(move |_: &mut Vm, call: JournaledCall, name: String| -> Result<Parked<i64, HostError>, HostError> {
+        Effectful(move |_: &mut Vm, call: JournaledCall, name: String| -> Result<Parked<i64, HostError<Fail>>, HostError<Fail>> {
             s.lock().unwrap().push((name.clone(), call.seq()));
             if name == "parked" {
                 return Ok(Later::new(async move {
                     std::future::pending::<()>().await;
-                    |_: &mut AfterEffect| Ok::<_, HostError>(0)
+                    |_: &mut AfterEffect| Ok::<_, HostError<Fail>>(0)
                 })
                 .parked(Park::UntilResumed, name));
             }
@@ -1199,7 +1204,7 @@ fn a_journaled_call_that_runs_again_after_a_collection_replays_its_fuel() {
     let c = calls.clone();
     m.vm_function(
         "grow",
-        Journaled(move |vm: &mut Vm, n: i64| -> Result<i64, sandlang::vm::Ctl> {
+        Journaled(move |vm: &mut Vm, n: i64| -> Result<i64, Fail> {
             c.fetch_add(1, Ordering::SeqCst);
             vm.charge(50)?;
             vm.check_memory(n as usize)?;
@@ -1289,14 +1294,14 @@ fn a_host_abort_ends_the_run_with_its_payload_and_is_not_journaled() {
     let c = calls.clone();
     m.vm_function(
         "read",
-        Journaled(move |_: &mut Vm, key: String| -> Result<Later<String, HostError>, HostError> {
+        Journaled(move |_: &mut Vm, key: String| -> Result<Later<String, HostError<Fail>>, HostError<Fail>> {
             let first = c.fetch_add(1, Ordering::SeqCst) == 0;
             Ok(Later::new(async move {
                 move |_: &mut AfterEffect| {
                     if first {
-                        return Err(sandlang::vm::Ctl::abort(Outage(7)).into());
+                        return Err(sandlang::vm::Fail::abort(Outage(7)).into());
                     }
-                    Ok::<_, HostError>(format!("value of {key}"))
+                    Ok::<_, HostError<Fail>>(format!("value of {key}"))
                 }
             }))
         }),
@@ -1437,13 +1442,13 @@ fn a_journaled_function_that_reads_the_clock_replays_with_the_same_sequence_numb
     let (s, c) = (seqs.clone(), clock.clone());
     m.vm_function(
         "later",
-        Journaled(move |_: &mut Vm, call: JournaledCall| -> Result<Later<i64, HostError>, HostError> {
+        Journaled(move |_: &mut Vm, call: JournaledCall| -> Result<Later<i64, HostError<Fail>>, HostError<Fail>> {
             s.lock().unwrap().push(call.seq());
             let c = c.clone();
             Ok(Later::new(async move {
                 move |fx: &mut AfterEffect| {
                     c.advance(Duration::from_secs(1));
-                    Ok::<_, HostError>(secs(fx))
+                    Ok::<_, HostError<Fail>>(secs(fx))
                 }
             }))
         }),
@@ -1505,10 +1510,10 @@ fn a_resumed_call_that_runs_again_after_a_collection_consumes_its_start_once() {
     let c = calls.clone();
     m.vm_function(
         "fetch",
-        Journaled(move |vm: &mut Vm, n: i64| -> Result<Later<i64, sandlang::vm::Ctl>, sandlang::vm::Ctl> {
+        Journaled(move |vm: &mut Vm, n: i64| -> Result<Later<i64, Fail>, Fail> {
             c.fetch_add(1, Ordering::SeqCst);
             vm.check_memory(n as usize)?;
-            Ok(Later::new(async move { move |_: &mut AfterEffect| Ok::<_, sandlang::vm::Ctl>(n) }))
+            Ok(Later::new(async move { move |_: &mut AfterEffect| Ok::<_, Fail>(n) }))
         }),
     );
     let base = Config::new().policy(RulePolicy::allow_all()).host_modules(HostModules::new([m]).unwrap()).retry_stress(true);

@@ -13,8 +13,8 @@
 //!   references (`Cell` fields allow charging while [`Heap`] is borrowed).
 //! * After a slice is exhausted, [`Meter`] checks the interrupt flag,
 //!   instruction budget, and CPU and wall-clock deadlines every
-//!   [`CHECK_INTERVAL`] units and returns `Ctl::interrupted()` or
-//!   `Ctl::limit(kind)` if a limit is exceeded.
+//!   [`CHECK_INTERVAL`] units and returns `Fail::interrupted()` or
+//!   `Fail::limit(kind)` if a limit is exceeded.
 //!
 //! # Cost model
 //!
@@ -38,7 +38,7 @@
 //! charge fuel as output or traversal steps are produced rather than by the
 //! input's heap size.
 
-use super::Ctl;
+use super::Fail;
 use super::heap::Heap;
 use crate::engine::LimitKind;
 use crate::platform::{Clock, Deadline, Instant};
@@ -91,10 +91,10 @@ pub const fn loop_fuel(off: i32) -> i64 {
 /// Something that can be charged for work: the engine's [`Meter`], or
 /// [`Unmetered`] for callers outside an engine run.
 pub trait Budget {
-    fn charge(&self, units: u64) -> Result<(), Ctl>;
+    fn charge(&self, units: u64) -> Result<(), Fail>;
 
     #[inline]
-    fn charge_bytes(&self, n: usize) -> Result<(), Ctl> {
+    fn charge_bytes(&self, n: usize) -> Result<(), Fail> {
         self.charge((n / BYTES_PER_UNIT) as u64)
     }
 }
@@ -104,7 +104,7 @@ pub struct Unmetered;
 
 impl Budget for Unmetered {
     #[inline(always)]
-    fn charge(&self, _: u64) -> Result<(), Ctl> {
+    fn charge(&self, _: u64) -> Result<(), Fail> {
         Ok(())
     }
 }
@@ -208,7 +208,7 @@ impl Meter {
 
     /// Charges `units` of fuel. Cheap; checks limits only at checkpoints.
     #[inline]
-    pub fn charge(&self, units: u64) -> Result<(), Ctl> {
+    pub fn charge(&self, units: u64) -> Result<(), Fail> {
         let f = self.fuel.get().saturating_sub(units.min(i64::MAX as u64) as i64);
         self.fuel.set(f);
         if f < self.check_at.get() { self.checkpoint() } else { Ok(()) }
@@ -216,19 +216,19 @@ impl Meter {
 
     /// Charges for `n` bytes of memcpy-like work.
     #[inline]
-    pub fn charge_bytes(&self, n: usize) -> Result<(), Ctl> {
+    pub fn charge_bytes(&self, n: usize) -> Result<(), Fail> {
         self.charge((n / BYTES_PER_UNIT) as u64)
     }
 
     /// Charges for `n` bytes of byte-at-a-time work.
     #[inline]
-    pub fn charge_slow_bytes(&self, n: usize) -> Result<(), Ctl> {
+    pub fn charge_slow_bytes(&self, n: usize) -> Result<(), Fail> {
         self.charge((n / SLOW_BYTES_PER_UNIT) as u64)
     }
 
     #[cold]
     #[inline(never)]
-    fn checkpoint(&self) -> Result<(), Ctl> {
+    fn checkpoint(&self) -> Result<(), Fail> {
         // `fuel` falls below `limit_at` exactly when the fuel used exceeds
         // the instruction budget: the next check is no later than that.
         let limit_at = match self.max_instructions {
@@ -242,20 +242,20 @@ impl Meter {
 
     /// Checks the interrupt flag, the instruction budget and the time
     /// limits now.
-    pub fn check(&self) -> Result<(), Ctl> {
+    pub fn check(&self) -> Result<(), Fail> {
         if self.interrupt.load(Ordering::Relaxed) {
-            return Err(Ctl::interrupted());
+            return Err(Fail::interrupted());
         }
         if let Some(max) = self.max_instructions
             && self.used() > max
         {
-            return Err(Ctl::limit(LimitKind::Instructions));
+            return Err(Fail::limit(LimitKind::Instructions));
         }
         if self.cpu_deadline.get().is_some_and(|d| self.clock.cpu_time() >= d) {
-            return Err(Ctl::limit(LimitKind::CpuTime));
+            return Err(Fail::limit(LimitKind::CpuTime));
         }
         if self.wall_deadline.get().is_some_and(|d| self.clock.now() >= d) {
-            return Err(Ctl::limit(LimitKind::WallTime));
+            return Err(Fail::limit(LimitKind::WallTime));
         }
         Ok(())
     }
@@ -263,7 +263,7 @@ impl Meter {
 
 impl Budget for Meter {
     #[inline]
-    fn charge(&self, units: u64) -> Result<(), Ctl> {
+    fn charge(&self, units: u64) -> Result<(), Fail> {
         Meter::charge(self, units)
     }
 }
@@ -357,7 +357,7 @@ impl Scratch {
     /// Fails with a memory limit error if `len` bytes of scratch space would
     /// exceed the limit (checked only when `len` has grown enough).
     #[inline]
-    pub fn check(&mut self, heap: &Heap, len: usize) -> Result<(), Ctl> {
+    pub fn check(&mut self, heap: &Heap, len: usize) -> Result<(), Fail> {
         if len < self.next && !heap.fail_next_check.get() {
             return Ok(());
         }
@@ -371,7 +371,13 @@ pub(crate) trait MemoryLimit {
     fn is_memory_limit(&self) -> bool;
 }
 
-impl<T> MemoryLimit for Result<T, Ctl> {
+impl<T> MemoryLimit for Result<T, Fail> {
+    fn is_memory_limit(&self) -> bool {
+        matches!(self, Err(c) if c.as_limit() == Some(LimitKind::Memory))
+    }
+}
+
+impl<T> MemoryLimit for Result<T, super::Ctl> {
     fn is_memory_limit(&self) -> bool {
         matches!(self, Err(c) if c.as_limit() == Some(LimitKind::Memory))
     }
@@ -379,7 +385,7 @@ impl<T> MemoryLimit for Result<T, Ctl> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{CtlKind, End, SLICE_FUEL};
+    use super::super::{End, SLICE_FUEL};
     use super::*;
 
     fn system() -> Arc<dyn Clock> {
@@ -431,7 +437,7 @@ mod tests {
         m.start_slice(None, None);
         flag.store(true, Ordering::SeqCst);
         assert!(m.charge(5).is_ok(), "no check while fuel is left");
-        assert!(matches!(m.charge(SLICE_FUEL as u64).map_err(Ctl::into_kind), Err(CtlKind::End(End::Interrupted))));
+        assert!(matches!(m.charge(SLICE_FUEL as u64).map_err(Fail::into_end), Err(End::Interrupted)));
     }
 
     #[test]

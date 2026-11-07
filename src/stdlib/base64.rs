@@ -4,7 +4,7 @@ use crate::check::ModKind;
 use crate::native::NativeModule;
 use crate::native::convert::HostError;
 use crate::native::ty::Val;
-use crate::vm::{Ctl, Vm};
+use crate::vm::{Fail, Vm};
 
 const STANDARD: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 const URL_SAFE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -18,7 +18,7 @@ pub(crate) fn module() -> NativeModule {
     m
 }
 
-fn encode_native(vm: &mut Vm, data: Val<Vec<u8>>, url: bool) -> Result<String, Ctl> {
+fn encode_native(vm: &mut Vm, data: Val<Vec<u8>>, url: bool) -> Result<String, Fail> {
     let data = data.bytes(&vm.heap);
     vm.check_memory(data.len() / 3 * 4 + 4)?;
     vm.charge_slow_bytes(data.len())?;

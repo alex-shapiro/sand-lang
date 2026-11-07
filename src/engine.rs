@@ -23,7 +23,9 @@ use crate::vm::heap::GcStats;
 use crate::vm::journal::Divergence;
 use crate::vm::sched::{IoShared, IoTable, RunEnd, Suspends};
 use crate::vm::value::{Obj, TypeDesc, Value};
-use crate::vm::{Always, Ending, Host, HostFn, NativeEntry, OutputSink, Rng, SharedSink, StdinSource, TraceEntry, Trap, Vm, entropy_seed};
+use crate::vm::{
+    Always, Ending, Fail, Host, HostFn, NativeEntry, OutputSink, Rng, SharedSink, StdinSource, TraceEntry, Trap, Vm, entropy_seed,
+};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
@@ -125,7 +127,7 @@ pub enum Error {
         message: String,
     },
     /// The host ended the run: a host function called
-    /// [`Ctl::abort`](crate::vm::Ctl::abort), or [`Journal::flush`](crate::journal::Journal::flush)
+    /// [`Fail::abort`](crate::vm::Fail::abort), or [`Journal::flush`](crate::journal::Journal::flush)
     /// failed.
     Aborted(HostAbort),
 }
@@ -1657,7 +1659,7 @@ impl<C: Send + Sync + 'static> Engine<C> {
                             Ok(Some(c)) => Ok(Ok(Outcome::Exited(c))),
                             Ok(None) => match returned(vm, v, &sig.returns) {
                                 Ok(r) => Ok(Ok(Outcome::Returned(r))),
-                                Err(c) => match vm.ending_of(c, |_| vec![]) {
+                                Err(c) => match vm.ending(c.into_end(), |_| vec![]) {
                                     Ending::Exit(code) => Ok(Ok(Outcome::Exited(code))),
                                     Ending::Trap(t) => Err(t),
                                 },
@@ -2318,7 +2320,7 @@ async fn call_decoded<S: Suspends, P>(vm: &mut Vm, function: &Function<P>, args:
         let text = vm.new_str(*arg);
         let decoded = match stdlib::json::decode(vm, desc, crate::native::ty::Val::from_raw(text)) {
             Ok(d) => d,
-            Err(c) => match vm.ending_of(c, |_| vec![]) {
+            Err(c) => match vm.ending(c.into_end(), |_| vec![]) {
                 Ending::Exit(code) => return Ok(Called::Exited(code)),
                 Ending::Trap(t) => return Err(t),
             },
@@ -2350,7 +2352,7 @@ async fn call_decoded<S: Suspends, P>(vm: &mut Vm, function: &Function<P>, args:
 }
 
 /// `v`, the value that a function that returns `returns` returned.
-fn returned(vm: &Vm, v: Value, returns: &Returns) -> Result<Returned, crate::vm::Ctl> {
+fn returned(vm: &Vm, v: Value, returns: &Returns) -> Result<Returned, Fail> {
     match returns {
         Returns::Value(_) => Ok(Returned::Value(stdlib::json::to_json(vm, v)?)),
         Returns::Result { err, .. } => match vm.as_result(v) {

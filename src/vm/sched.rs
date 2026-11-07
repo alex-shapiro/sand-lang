@@ -392,7 +392,7 @@ impl Vm {
                 Ok(r) => r,
                 Err(msg) => {
                     self.broken = true;
-                    Err(Ctl::internal(msg))
+                    Err(Fail::internal(msg))
                 }
             };
             match r {
@@ -407,8 +407,8 @@ impl Vm {
     }
 
     /// How the failure `c` of an I/O operation of fiber `fid` ends the run.
-    fn op_ending(&mut self, fid: u32, c: Ctl) -> Ending {
-        self.ending_of(c, |vm| match vm.fibers.get(fid as usize) {
+    fn op_ending(&mut self, fid: u32, f: Fail) -> Ending {
+        self.ending(f.into_end(), |vm| match vm.fibers.get(fid as usize) {
             Some(Some(f)) => vm.trace_of(f, None),
             _ => vec![],
         })
@@ -491,7 +491,7 @@ impl Vm {
         let mut any = false;
         // One at a time: delivering one can cancel the task of another.
         loop {
-            match self.next_due().map_err(|c| self.ending_of(c, |_| vec![]))? {
+            match self.next_due().map_err(|c| self.ending(c.into_end(), |_| vec![]))? {
                 Due::Nothing => break,
                 Due::Ready(fid, wgen, fin) => {
                     any = true;
@@ -573,7 +573,7 @@ impl Vm {
         };
         let drained = self.drain_output();
         match drained {
-            Err(c) if r.is_ok() => self.ending_of(c, |_| vec![]).into_run_end(),
+            Err(c) if r.is_ok() => self.ending(c.into_end(), |_| vec![]).into_run_end(),
             _ => r,
         }
     }
@@ -690,7 +690,7 @@ impl Vm {
                             Err(cap) => cap,
                         };
                         // Write the script's output before showing the prompt.
-                        self.drain_output().map_err(|c| self.ending_of(c, |_| vec![]))?;
+                        self.drain_output().map_err(|c| self.ending(c.into_end(), |_| vec![]))?;
                         timer.read();
                         let asked = timer.now;
                         let answer = match self.host.prompter.clone() {

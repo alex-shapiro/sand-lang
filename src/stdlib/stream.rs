@@ -5,7 +5,7 @@ use super::io_kind;
 use crate::native::convert::{HostError, IntoValue};
 use crate::native::func::Later;
 use crate::vm::iomem::{MemoryLimit, Reservation};
-use crate::vm::{AfterEffect, Ctl, Vm};
+use crate::vm::{AfterEffect, Fail, Vm};
 use std::future::Future;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt};
 
@@ -28,18 +28,21 @@ impl From<IoFailure> for crate::stdlib::core::Error {
     }
 }
 
-impl From<IoFailure> for HostError {
-    fn from(e: IoFailure) -> HostError {
+impl<C> From<IoFailure> for HostError<C> {
+    fn from(e: IoFailure) -> HostError<C> {
         HostError::new(e.kind, e.message)
     }
 }
 
 pub(crate) type Suspended<T> = Result<Later<T, HostError>, HostError>;
 
+/// What a read gives the program once its bytes arrive (`None` at the end).
+pub(crate) type ReadDone<R> = fn(&Vm, Option<Vec<u8>>) -> Result<R, HostError<Fail>>;
+
 /// Suspends the calling task on `fut` and runs `ok` when `fut` succeeds.
 pub(crate) fn suspend<T: Send + 'static, R: IntoValue + Send + 'static>(
     fut: impl Future<Output = Result<T, IoFailure>> + Send + 'static,
-    ok: impl FnOnce(&mut AfterEffect<'_>, T) -> Result<R, HostError> + Send + 'static,
+    ok: impl FnOnce(&mut AfterEffect<'_>, T) -> Result<R, HostError<Fail>> + Send + 'static,
 ) -> Suspended<R> {
     Ok(Later::new(async move {
         let r = fut.await;
@@ -59,16 +62,16 @@ impl From<std::io::Error> for IoFailure {
     }
 }
 
-pub(crate) fn utf8(vm: &Vm, data: Vec<u8>) -> Result<Option<String>, Ctl> {
+pub(crate) fn utf8(vm: &Vm, data: Vec<u8>) -> Result<Option<String>, Fail> {
     vm.charge_slow_bytes(data.len())?;
     Ok(String::from_utf8(data).ok())
 }
 
-pub(crate) fn bytes_read(_: &Vm, data: Option<Vec<u8>>) -> Result<Vec<u8>, HostError> {
+pub(crate) fn bytes_read(_: &Vm, data: Option<Vec<u8>>) -> Result<Vec<u8>, HostError<Fail>> {
     Ok(data.unwrap_or_default())
 }
 
-pub(crate) fn line_read(vm: &Vm, line: Option<Vec<u8>>, message: &str) -> Result<Option<String>, HostError> {
+pub(crate) fn line_read(vm: &Vm, line: Option<Vec<u8>>, message: &str) -> Result<Option<String>, HostError<Fail>> {
     let Some(line) = line else { return Ok(None) };
     utf8(vm, line)?.map(Some).ok_or_else(|| HostError::new("invalid", message))
 }

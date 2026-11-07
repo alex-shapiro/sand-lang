@@ -44,7 +44,7 @@ impl Vm {
     }
 
     /// The iterator of map `c` (its (key, value) entries) or set `c`.
-    pub fn container_iter(&mut self, c: Value) -> Result<Value, Ctl> {
+    pub fn container_iter(&mut self, c: Value) -> Result<Value, Fail> {
         let Value::Obj(h) = c else { return Err(internal("not a map or set")) };
         let (src, slots, live, pins) = match self.heap.get(c) {
             Obj::Map(m) => (IterSrc::Map { map: h, slot: 0 }, m.entries.len(), m.live, &m.pins),
@@ -86,7 +86,7 @@ impl Vm {
     /// place to a copy of its entries, so that they go on with the entries
     /// they started with. On error nothing has changed.
     #[inline]
-    pub(crate) fn unpin(&mut self, c: Value) -> Result<(), Ctl> {
+    pub(crate) fn unpin(&mut self, c: Value) -> Result<(), Fail> {
         let pinned = match self.heap.get(c) {
             Obj::Map(m) => !m.pins.its.is_empty(),
             Obj::Set(s) => !s.pins.its.is_empty(),
@@ -97,7 +97,7 @@ impl Vm {
 
     #[cold]
     #[inline(never)]
-    fn detach_iters(&mut self, c: Value) -> Result<(), Ctl> {
+    fn detach_iters(&mut self, c: Value) -> Result<(), Fail> {
         let Value::Obj(h) = c else { return Ok(()) };
         let (pins, slots, bytes) = match self.heap.get(c) {
             Obj::Map(m) => (&m.pins, m.entries.len(), m.entries.len() * MAP_ENTRY_SIZE),

@@ -12,7 +12,7 @@ use crate::native::{NativeModule, NativeObject};
 use crate::platform::Instant;
 use crate::vm::meter::{SLOW_BYTES_PER_UNIT, Scratch};
 use crate::vm::value::Value;
-use crate::vm::{Ctl, Vm};
+use crate::vm::{Fail, Vm};
 use regex_automata::meta::{self, Cache};
 use regex_automata::util::captures::Captures as Groups;
 use regex_automata::util::interpolate;
@@ -78,7 +78,7 @@ impl Scan {
     }
 
     /// Charges `units`, plus whatever the time floor requires.
-    fn charge(&mut self, vm: &Vm, units: u64) -> Result<(), Ctl> {
+    fn charge(&mut self, vm: &Vm, units: u64) -> Result<(), Fail> {
         self.charged = self.charged.saturating_add(units);
         self.unclocked += 1;
         let mut extra = 0;
@@ -97,12 +97,12 @@ impl Scan {
     }
 
     /// Charges for one search through `text`, before it runs.
-    fn search(&mut self, vm: &Vm, text: &str) -> Result<(), Ctl> {
+    fn search(&mut self, vm: &Vm, text: &str) -> Result<(), Fail> {
         self.charge(vm, (text.len() / SLOW_BYTES_PER_UNIT) as u64)
     }
 
     /// A match ending at `end` was found; `collected` bytes are held so far.
-    fn step(&mut self, vm: &Vm, end: usize, collected: usize) -> Result<(), Ctl> {
+    fn step(&mut self, vm: &Vm, end: usize, collected: usize) -> Result<(), Fail> {
         let searched = end.saturating_sub(self.searched);
         self.searched = self.searched.max(end);
         self.charge(vm, 1 + (searched / SLOW_BYTES_PER_UNIT) as u64)?;
@@ -110,7 +110,7 @@ impl Scan {
     }
 
     /// Applies the time floor to the work done since the last charge.
-    fn finish(&mut self, vm: &Vm) -> Result<(), Ctl> {
+    fn finish(&mut self, vm: &Vm) -> Result<(), Fail> {
         self.unclocked = CLOCK_EVERY;
         self.charge(vm, 0)
     }
@@ -190,7 +190,7 @@ fn cached_regex(vm: &Vm, pattern: &str, (hash, slot): (u64, usize)) -> Option<Va
 
 /// Runs `search` with the regex `re` and its cache, then accounts for the
 /// cache's growth.
-fn with_regex<T>(vm: &mut Vm, re: Val<RegexObj>, search: impl FnOnce(&Vm, &RegexObj, &mut Cache) -> Result<T, Ctl>) -> Result<T, Ctl> {
+fn with_regex<T>(vm: &mut Vm, re: Val<RegexObj>, search: impl FnOnce(&Vm, &RegexObj, &mut Cache) -> Result<T, Fail>) -> Result<T, Fail> {
     let (result, (before, after)) = {
         let obj = re.get(&vm.heap)?;
         let result = search(vm, obj, &mut obj.cache.borrow_mut());
@@ -210,7 +210,7 @@ fn each_match(
     text: &str,
     scan: &mut Scan,
     mut found: impl FnMut(regex_automata::Match) -> usize,
-) -> Result<(), Ctl> {
+) -> Result<(), Fail> {
     let mut it = Searcher::new(Input::new(text));
     let mut collected = 0;
     while let Some(m) = it.advance(|input| Ok(obj.re.search_with(cache, input))) {
@@ -228,8 +228,8 @@ fn each_captures(
     cache: &mut Cache,
     text: &str,
     scan: &mut Scan,
-    mut found: impl FnMut(&Groups) -> Result<usize, Ctl>,
-) -> Result<(), Ctl> {
+    mut found: impl FnMut(&Groups) -> Result<usize, Fail>,
+) -> Result<(), Fail> {
     let mut it = Searcher::new(Input::new(text));
     let mut caps = obj.re.create_captures();
     let mut collected = 0;
@@ -308,7 +308,7 @@ fn expansion_len(caps: &Groups, rep: &str, literal: &mut String) -> usize {
 
 /// Replaces the first (or every) match, checking the memory limit as the
 /// output grows.
-fn replace(vm: &mut Vm, re: Val<RegexObj>, text: Val<String>, rep: Val<String>, all: bool) -> Result<String, Ctl> {
+fn replace(vm: &mut Vm, re: Val<RegexObj>, text: Val<String>, rep: Val<String>, all: bool) -> Result<String, Fail> {
     with_regex(vm, re, |vm, obj, cache| {
         let (text, rep) = (text.str(&vm.heap), rep.str(&vm.heap));
         let mut scan = Scan::new(vm);
@@ -424,7 +424,7 @@ pub(crate) fn module() -> NativeModule {
             Ok(found)
         })
     });
-    m.vm_function("Regex.find", |vm: &mut Vm, re: Val<RegexObj>, text: Val<String>| -> Result<Option<Match>, Ctl> {
+    m.vm_function("Regex.find", |vm: &mut Vm, re: Val<RegexObj>, text: Val<String>| -> Result<Option<Match>, Fail> {
         let found = with_regex(vm, re, |vm, obj, cache| {
             let t = text.str(&vm.heap);
             let mut scan = Scan::new(vm);
@@ -436,7 +436,7 @@ pub(crate) fn module() -> NativeModule {
         })?;
         Ok(found.map(|span| Match::new(vm, text, span)))
     });
-    m.vm_function("Regex.find_all", |vm: &mut Vm, re: Val<RegexObj>, text: Val<String>| -> Result<Vec<Match>, Ctl> {
+    m.vm_function("Regex.find_all", |vm: &mut Vm, re: Val<RegexObj>, text: Val<String>| -> Result<Vec<Match>, Fail> {
         let spans = with_regex(vm, re, |vm, obj, cache| {
             let t = text.str(&vm.heap);
             let (mut spans, mut cost, mut scan) = (Vec::new(), 0, Scan::new(vm));
@@ -450,7 +450,7 @@ pub(crate) fn module() -> NativeModule {
         })?;
         Ok(spans.into_iter().map(|span| Match::new(vm, text, span)).collect())
     });
-    m.vm_function("Regex.captures", |vm: &mut Vm, re: Val<RegexObj>, text: Val<String>| -> Result<Option<Captures>, Ctl> {
+    m.vm_function("Regex.captures", |vm: &mut Vm, re: Val<RegexObj>, text: Val<String>| -> Result<Option<Captures>, Fail> {
         with_regex(vm, re, |vm, obj, cache| {
             let t = text.str(&vm.heap);
             let mut scan = Scan::new(vm);
@@ -462,7 +462,7 @@ pub(crate) fn module() -> NativeModule {
             Ok(caps.is_match().then(|| Captures { text, spans: spans(&caps), regex: re }))
         })
     });
-    m.vm_function("Regex.captures_all", |vm: &mut Vm, re: Val<RegexObj>, text: Val<String>| -> Result<Vec<Captures>, Ctl> {
+    m.vm_function("Regex.captures_all", |vm: &mut Vm, re: Val<RegexObj>, text: Val<String>| -> Result<Vec<Captures>, Fail> {
         with_regex(vm, re, |vm, obj, cache| {
             let t = text.str(&vm.heap);
             let (mut all, mut cost, mut scan) = (Vec::new(), 0, Scan::new(vm));
@@ -475,7 +475,7 @@ pub(crate) fn module() -> NativeModule {
             Ok(all)
         })
     });
-    m.vm_function("Regex.group_index", |vm: &mut Vm, re: Val<RegexObj>, name: Val<String>| -> Result<Option<i64>, Ctl> {
+    m.vm_function("Regex.group_index", |vm: &mut Vm, re: Val<RegexObj>, name: Val<String>| -> Result<Option<i64>, Fail> {
         let index = re.get(&vm.heap)?.re.group_info().to_index(PatternID::ZERO, name.str(&vm.heap));
         Ok(index.map(|i| i as i64))
     });
@@ -483,7 +483,7 @@ pub(crate) fn module() -> NativeModule {
     m.vm_function("Regex.replace_all", |vm: &mut Vm, re: Val<RegexObj>, text: Val<String>, rep: Val<String>| {
         replace(vm, re, text, rep, true)
     });
-    m.vm_function("Regex.split", |vm: &mut Vm, re: Val<RegexObj>, text: Val<String>| -> Result<Val<Vec<String>>, Ctl> {
+    m.vm_function("Regex.split", |vm: &mut Vm, re: Val<RegexObj>, text: Val<String>| -> Result<Val<Vec<String>>, Fail> {
         let (spans, cost) = with_regex(vm, re, |vm, obj, cache| {
             let text = text.str(&vm.heap);
             let (mut spans, mut cost, mut scan) = (Vec::new(), 0, Scan::new(vm));

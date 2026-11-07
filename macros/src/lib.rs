@@ -469,7 +469,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
                 vm: &#krate::vm::Vm,
                 v: #krate::vm::value::Value,
                 conv: &mut #krate::native::convert::Conversion,
-            ) -> ::std::result::Result<Self, #krate::vm::Ctl> {
+            ) -> ::std::result::Result<Self, #krate::vm::Fail> {
                 #krate::native::enum_from_value::<Self>(vm, v, conv, |index, conv| {
                     ::std::result::Result::Ok(match index {
                         #(#reads,)*
@@ -483,7 +483,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
                 self,
                 fx: &mut #krate::vm::AfterEffect<'_>,
                 depth: #krate::native::convert::Depth,
-            ) -> ::std::result::Result<#krate::vm::value::Value, #krate::vm::Ctl> {
+            ) -> ::std::result::Result<#krate::vm::value::Value, #krate::vm::Fail> {
                 match self {
                     #(#writes),*
                 }
@@ -523,7 +523,7 @@ fn sand_object(input: &DeriveInput) -> syn::Result<Tokens> {
                 vm: &'a #krate::vm::Vm,
                 v: #krate::vm::value::Value,
                 _: &mut #krate::native::convert::Conversion,
-            ) -> ::std::result::Result<&'a #ty, #krate::vm::Ctl> {
+            ) -> ::std::result::Result<&'a #ty, #krate::vm::Fail> {
                 #krate::native::ty::Val::<#ty>::from_raw(v).get(&vm.heap)
             }
         }
@@ -532,7 +532,7 @@ fn sand_object(input: &DeriveInput) -> syn::Result<Tokens> {
                 self,
                 fx: &mut #krate::vm::AfterEffect<'_>,
                 _: #krate::native::convert::Depth,
-            ) -> ::std::result::Result<#krate::vm::value::Value, #krate::vm::Ctl> {
+            ) -> ::std::result::Result<#krate::vm::value::Value, #krate::vm::Fail> {
                 ::std::result::Result::Ok(fx.new_object(self).raw())
             }
         }
@@ -638,7 +638,7 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
                 vm: &#krate::vm::Vm,
                 v: #krate::vm::value::Value,
                 conv: &mut #krate::native::convert::Conversion,
-            ) -> ::std::result::Result<Self, #krate::vm::Ctl> {
+            ) -> ::std::result::Result<Self, #krate::vm::Fail> {
                 #krate::native::struct_from_value(vm, v, conv, |fields, conv| ::std::result::Result::Ok(#ty { #(#reads),* }))
             }
         }
@@ -647,7 +647,7 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
                 self,
                 fx: &mut #krate::vm::AfterEffect<'_>,
                 depth: #krate::native::convert::Depth,
-            ) -> ::std::result::Result<#krate::vm::value::Value, #krate::vm::Ctl> {
+            ) -> ::std::result::Result<#krate::vm::value::Value, #krate::vm::Fail> {
                 #krate::native::struct_into_value::<Self>(fx, depth, move |fx, depth| {
                     ::std::result::Result::Ok(::std::boxed::Box::new([#(#writes),*]))
                 })

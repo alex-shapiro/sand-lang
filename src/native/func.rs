@@ -1,10 +1,10 @@
 //! Traits and types for registering Rust functions in a [`NativeModule`](super::NativeModule).
 
-use super::convert::{Conversion, FromValue, HostError, IntoValue};
+use super::convert::{Conversion, Depth, FromValue, HostError, IntoValue};
 use super::ty::{JournalArg, JournalData, SandType, Type};
 use crate::vm::journal::Effects;
 use crate::vm::value::Value;
-use crate::vm::{AfterEffect, BoxFuture, Ctl, Finisher, NResult, NativeFn, Vm};
+use crate::vm::{AfterEffect, BoxFuture, Ctl, Fail, Finisher, NResult, NativeFn, Vm};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -28,18 +28,24 @@ impl Signature {
 /// Synchronous function registered with [`NativeModule::function`](super::NativeModule::function).
 ///
 /// Parameters implement [`FromValue`] (borrowing `&str`, `&[u8]`, and `&T`
-/// directly from the VM heap), and the return type implements [`IntoValue`].
+/// directly from the VM heap), and the return type implements [`VmReturn`].
 #[diagnostic::on_unimplemented(
-    note = "a function wrapped in `Journaled` or `Effectful` must take `JournalArg` types and return a `JournalData` type"
+    note = "a function wrapped in `Journaled` or `Effectful` must take `JournalArg` types and return a `JournalData` type that fails only with `Fail`"
 )]
 pub trait HostFunction<Marker>: Send + Sync + 'static {
     /// The Rust parameter types, as a tuple.
     type Args;
     /// The Rust return type.
-    type Ret;
+    type Ret: VmReturn;
     fn signature() -> Signature;
     /// Converts the function for registration under `key` (`module.name`).
     fn into_host(self, key: &Arc<str>) -> Box<NativeFn>;
+    /// Converts the function into the body of a journaled function
+    /// ([`Journaled`] or [`Effectful`]) registered under `key`.
+    #[doc(hidden)]
+    fn into_journaled(self, key: &Arc<str>) -> Box<JournaledFn>
+    where
+        Self::Ret: VmReturn<Control = Fail>;
 }
 
 /// Synchronous function registered with [`NativeModule::vm_function`](super::NativeModule::vm_function).
@@ -48,13 +54,13 @@ pub trait HostFunction<Marker>: Send + Sync + 'static {
 /// the [`JournaledCall`] in progress. Remaining arguments must be owned
 /// [`FromValue`] types or [`Val`](super::Val) handles.
 #[diagnostic::on_unimplemented(
-    note = "a function wrapped in `Journaled` or `Effectful` must take `JournalArg` types and return a `JournalData` type"
+    note = "a function wrapped in `Journaled` or `Effectful` must take `JournalArg` types and return a `JournalData` type that fails only with `Fail`"
 )]
 pub trait VmFunction<Marker>: Send + Sync + 'static {
     /// The Rust parameter types after `&mut Vm` and the call parameter, as a tuple.
     type Args;
     /// The Rust return type.
-    type Ret;
+    type Ret: VmReturn;
     /// The type of the call parameter after `&mut Vm`: [`Call`],
     /// [`JournaledCall`], or `()` if the function has no call parameter.
     type CallParam: CallParam;
@@ -67,65 +73,105 @@ pub trait VmFunction<Marker>: Send + Sync + 'static {
     /// Converts the function into the body of a journaled function
     /// ([`Journaled`] or [`Effectful`]) registered under `key`.
     #[doc(hidden)]
-    fn into_journaled(self, key: &Arc<str>) -> Box<JournaledFn>;
+    fn into_journaled(self, key: &Arc<str>) -> Box<JournaledFn>
+    where
+        Self::Ret: VmReturn<Control = Fail>;
 }
 
-/// The body of a journaled function, which can park
-/// ([`VmFunction::into_journaled`]).
+/// The body of a journaled function ([`VmFunction::into_journaled`]). It
+/// can only fail: a request to the scheduler, such as a yield, would let
+/// the call end without a journal entry, so that replay diverges.
 #[doc(hidden)]
-pub type JournaledFn = dyn for<'c> Fn(&mut Vm, Call<'c>, &[Value]) -> Result<Answer, Ctl> + Send + Sync;
+pub type JournaledFn = dyn for<'c> Fn(&mut Vm, Call<'c>, &[Value]) -> Result<Answer, Fail> + Send + Sync;
 
-/// What the body of a journaled function gives back when it does not fail
-/// or wait.
+/// What a native function gives back when it does not fail.
 #[doc(hidden)]
 pub enum Answer {
     Value(Value),
+    /// The call waits for the future.
+    Async(BoxFuture),
     /// The call waits for the future, and the engine may suspend the run
     /// while it waits, as the [`Park`] says. The tag goes to
     /// [`ParkedCall::tag`](crate::journal::ParkedCall::tag).
     Parked(BoxFuture, Park, String),
 }
 
-/// A body that cannot park, as the body of a journaled function.
-fn answering(f: Box<NativeFn>) -> Box<JournaledFn> {
-    Box::new(move |vm: &mut Vm, call: Call<'_>, args: &[Value]| f(vm, call, args).map(Answer::Value))
+impl Answer {
+    /// The result outside the journal. A parked call is then a plain wait:
+    /// only a run with a journal suspends.
+    pub(crate) fn into_result(self) -> NResult {
+        match self {
+            Answer::Value(v) => Ok(v),
+            Answer::Async(fut) | Answer::Parked(fut, ..) => Err(Ctl::suspend(fut)),
+        }
+    }
 }
 
-/// The return type of a [`VmFunction`]: an [`IntoValue`] type, or the
-/// [`Parked`] result of a journaled function.
+/// The return type of a native function: an [`IntoValue`] type, a
+/// `Result` whose error can end the call with a [`Ctl`], or the deferred
+/// result of a [`Later`] or [`Parked`].
 pub trait VmReturn: SandType {
     /// [`Parks`] for a [`Parked`] result, and [`NoPark`] otherwise.
     type Parking;
-    /// The result outside the journal. A parked call is then a plain wait:
-    /// only a run with a journal suspends.
+    /// What the function ends the call with when it does not give a result:
+    /// [`Ctl`] if it can make a request to the scheduler, and [`Fail`] if it
+    /// can only fail. Only a function that can only fail can be journaled.
+    type Control: Into<Ctl> + From<Fail>;
+    /// The answer of the call, converted after the call's effect.
     #[doc(hidden)]
-    fn into_result(self, fx: &mut AfterEffect<'_>) -> NResult;
-    #[doc(hidden)]
-    fn into_answer(self, fx: &mut AfterEffect<'_>) -> Result<Answer, Ctl>;
+    fn answer(self, vm: &mut Vm) -> Result<Answer, Self::Control>;
 }
 
 impl<R: IntoValue> VmReturn for R {
     type Parking = NoPark;
-    fn into_result(self, fx: &mut AfterEffect<'_>) -> NResult {
-        self.into_value(fx)
+    type Control = Fail;
+    fn answer(self, vm: &mut Vm) -> Result<Answer, Fail> {
+        self.into_value(&mut AfterEffect::new(vm)).map(Answer::Value)
     }
-    fn into_answer(self, fx: &mut AfterEffect<'_>) -> Result<Answer, Ctl> {
-        self.into_value(fx).map(Answer::Value)
+}
+
+impl<T: IntoValue> VmReturn for Result<T, Ctl> {
+    type Parking = NoPark;
+    type Control = Ctl;
+    fn answer(self, vm: &mut Vm) -> Result<Answer, Ctl> {
+        Ok(Answer::Value(self?.into_value(&mut AfterEffect::new(vm))?))
+    }
+}
+
+impl<T: IntoValue> VmReturn for Result<T, HostError> {
+    type Parking = NoPark;
+    type Control = Ctl;
+    fn answer(self, vm: &mut Vm) -> Result<Answer, Ctl> {
+        match self {
+            Ok(x) => {
+                let fx = &mut AfterEffect::new(vm);
+                let v = x.into_value(fx)?;
+                Ok(Answer::Value(fx.ok(v)))
+            }
+            Err(e) => e.answer(vm),
+        }
+    }
+}
+
+impl<T: SandType, E: NativeError> VmReturn for Result<Later<T, E>, E> {
+    type Parking = NoPark;
+    type Control = E::Control;
+    fn answer(self, vm: &mut Vm) -> Result<Answer, E::Control> {
+        match self {
+            Ok(later) => Ok(later.answer(vm)?),
+            Err(e) => e.answer(vm),
+        }
     }
 }
 
 impl<T: SandType, E: NativeError> VmReturn for Result<Parked<T, E>, E> {
     type Parking = Parks;
-    fn into_result(self, fx: &mut AfterEffect<'_>) -> NResult {
-        match self {
-            Ok(Parked { later, .. }) => later.finish(fx),
-            Err(e) => E::finish(Err::<(), E>(e), fx),
-        }
-    }
-    fn into_answer(self, fx: &mut AfterEffect<'_>) -> Result<Answer, Ctl> {
+    type Control = E::Control;
+    fn answer(self, vm: &mut Vm) -> Result<Answer, E::Control> {
         match self {
             Ok(Parked { later: Later(Wait::Future(fut), _), park: Some((park, tag)) }) => Ok(Answer::Parked(fut, park, tag)),
-            r => r.into_result(fx).map(Answer::Value),
+            Ok(Parked { later, .. }) => Ok(later.answer(vm)?),
+            Err(e) => e.answer(vm),
         }
     }
 }
@@ -158,6 +204,10 @@ pub trait AsyncHostFunction<Marker>: Send + Sync + 'static {
     fn signature() -> Signature;
     /// Converts the function for registration under `key` (`module.name`).
     fn into_host(self, key: &Arc<str>) -> Box<NativeFn>;
+    /// Converts the function into the body of a journaled function
+    /// ([`Journaled`] or [`Effectful`]) registered under `key`.
+    #[doc(hidden)]
+    fn into_journaled(self, key: &Arc<str>) -> Box<JournaledFn>;
 }
 
 /// One call of a native function, as the engine makes it. A
@@ -336,6 +386,31 @@ pub trait JournalArgs {}
 /// }));
 /// ```
 ///
+/// A function that can make a request to the scheduler does not compile: a
+/// journaled function can only fail ([`VmReturn::Control`]). A yield, for
+/// example, would end the call without a journal entry, and replay would then
+/// find the entry of a later input where it expects the call's result:
+///
+/// ```compile_fail,E0277
+/// # use sandlang::native::func::Journaled;
+/// # use sandlang::vm::{Ctl, Vm};
+/// let mut m = sandlang::native::NativeModule::new("ids");
+/// m.vm_function("next", Journaled(|vm: &mut Vm| -> Result<i64, Ctl> { Err(vm.yield_now()) }));
+/// ```
+///
+/// The function fails with a [`Fail`] or a `HostError<Fail>` in its place:
+///
+/// ```
+/// # use sandlang::native::convert::HostError;
+/// # use sandlang::native::func::Journaled;
+/// # use sandlang::vm::{Fail, Vm};
+/// let mut m = sandlang::native::NativeModule::new("ids");
+/// m.vm_function("next", Journaled(|vm: &mut Vm| -> Result<i64, Fail> { vm.charge(1).map(|()| 1) }));
+/// m.vm_function("parse", Journaled(|_: &mut Vm, s: String| -> Result<i64, HostError<Fail>> {
+///     s.parse().map_err(|_| HostError::new("invalid", "not a number"))
+/// }));
+/// ```
+///
 /// A function that takes a function does not compile:
 ///
 /// ```compile_fail
@@ -382,7 +457,7 @@ impl<T, E> Deferred for Result<Parked<T, E>, E> {}
 impl<M, F: HostFunction<M>> HostFunction<M> for Journaled<F>
 where
     F::Args: JournalArgs,
-    F::Ret: JournalData,
+    F::Ret: JournalData + VmReturn<Control = Fail>,
 {
     type Args = F::Args;
     type Ret = F::Ret;
@@ -390,7 +465,10 @@ where
         F::signature()
     }
     fn into_host(self, key: &Arc<str>) -> Box<NativeFn> {
-        journaled(answering(self.0.into_host(key)), key, Effects::Pure)
+        journaled(self.0.into_journaled(key), key, Effects::Pure)
+    }
+    fn into_journaled(self, key: &Arc<str>) -> Box<JournaledFn> {
+        self.0.into_journaled(key)
     }
 }
 
@@ -399,7 +477,7 @@ macro_rules! journaled_impls {
         impl<M, F: VmFunction<M, CallParam: JournaledCallParam>> VmFunction<M> for $wrapper<F>
         where
             F::Args: JournalArgs,
-            F::Ret: JournalData $(+ $ret)?,
+            F::Ret: JournalData + VmReturn<Control = Fail> $(+ $ret)?,
         {
             type Args = F::Args;
             type Ret = F::Ret;
@@ -412,7 +490,7 @@ macro_rules! journaled_impls {
                 journaled(self.0.into_journaled(key), key, $effects)
             }
             fn into_journaled(self, key: &Arc<str>) -> Box<JournaledFn> {
-                answering(self.into_host(key))
+                self.0.into_journaled(key)
             }
         }
 
@@ -427,7 +505,10 @@ macro_rules! journaled_impls {
                 F::signature()
             }
             fn into_host(self, key: &Arc<str>) -> Box<NativeFn> {
-                journaled(answering(self.0.into_host(key)), key, $effects)
+                journaled(self.0.into_journaled(key), key, $effects)
+            }
+            fn into_journaled(self, key: &Arc<str>) -> Box<JournaledFn> {
+                self.0.into_journaled(key)
             }
         }
     )*};
@@ -441,12 +522,86 @@ fn journaled(inner: Box<JournaledFn>, key: &Arc<str>, effects: Effects) -> Box<N
     Box::new(move |vm: &mut Vm, call: Call<'_>, args: &[Value]| crate::vm::journal::journaled_call(vm, call, &*inner, &key, effects, args))
 }
 
+/// Error type for a [`Later`] result: [`Ctl`] or [`HostError`] for a
+/// function that can make a request to the scheduler, and [`Fail`] or
+/// `HostError<Fail>` for one that can only fail, such as a journaled one.
+pub trait NativeError: Send + Sized + 'static + sealed::Sealed {
+    /// The error of the closure that finishes the call: this error without
+    /// its requests, since the closure runs after the effect.
+    type Finish: Send + 'static;
+    /// What the error ends the call with ([`VmReturn::Control`]).
+    type Control: Into<Ctl> + From<Fail>;
+    fn result_type(t: Type) -> Type;
+    /// The Sand result of the finished call.
+    #[doc(hidden)]
+    fn finish<T: IntoValue>(r: Result<T, Self::Finish>, fx: &mut AfterEffect<'_>) -> Result<Value, Fail>;
+    /// The answer of a call that gives the error before it waits.
+    #[doc(hidden)]
+    fn answer(self, vm: &mut Vm) -> Result<Answer, Self::Control>;
+}
+
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for crate::vm::Ctl {}
+    impl Sealed for crate::vm::Fail {}
+    impl<C> Sealed for super::HostError<C> {}
+    impl Sealed for () {}
+    impl Sealed for super::Call<'static> {}
+    impl Sealed for super::JournaledCall<'static> {}
+}
+
+impl NativeError for Ctl {
+    type Finish = Fail;
+    type Control = Ctl;
+    fn result_type(t: Type) -> Type {
+        t
+    }
+    fn finish<T: IntoValue>(r: Result<T, Fail>, fx: &mut AfterEffect<'_>) -> Result<Value, Fail> {
+        r.into_value(fx)
+    }
+    fn answer(self, _: &mut Vm) -> Result<Answer, Ctl> {
+        Err(self)
+    }
+}
+
+impl NativeError for Fail {
+    type Finish = Fail;
+    type Control = Fail;
+    fn result_type(t: Type) -> Type {
+        t
+    }
+    fn finish<T: IntoValue>(r: Result<T, Fail>, fx: &mut AfterEffect<'_>) -> Result<Value, Fail> {
+        r.into_value(fx)
+    }
+    fn answer(self, _: &mut Vm) -> Result<Answer, Fail> {
+        Err(self)
+    }
+}
+
+impl<C: Send + 'static> NativeError for HostError<C>
+where
+    C: Into<Ctl> + From<Fail>,
+{
+    type Finish = HostError<Fail>;
+    type Control = C;
+    fn result_type(t: Type) -> Type {
+        Type::result(t, Type::error())
+    }
+    fn finish<T: IntoValue>(r: Result<T, HostError<Fail>>, fx: &mut AfterEffect<'_>) -> Result<Value, Fail> {
+        r.into_value(fx)
+    }
+    fn answer(self, vm: &mut Vm) -> Result<Answer, C> {
+        self.into_sand(&mut AfterEffect::new(vm), Depth::default())?.map(Answer::Value)
+    }
+}
+
 /// Deferred result returned by a [`VmFunction`] that may suspend the calling
 /// Sand task on a future.
 ///
-/// Return `Result<Later<T, E>, E>` from the function: if `E` is [`Ctl`], the
-/// Sand return type is `T`; if `E` is [`HostError`], the Sand return type is
-/// `Result<T, Error>`.
+/// Return `Result<Later<T, E>, E>` from the function: if `E` is [`Ctl`] or
+/// [`Fail`], the Sand return type is `T`; if `E` is a [`HostError`], the Sand
+/// return type is `Result<T, Error>`. The closure that finishes the call
+/// returns `Result<T, E::Finish>` ([`NativeError::Finish`]).
 pub struct Later<T, E>(Wait, PhantomData<fn() -> (T, E)>);
 
 /// How long the engine may suspend a journaled run while a host call waits
@@ -466,50 +621,25 @@ enum Wait {
     Future(BoxFuture),
 }
 
-/// Error type for a [`Later`] result ([`Ctl`] or [`HostError`]).
-pub trait NativeError: Send + Sized + 'static + sealed::Sealed {
-    fn result_type(t: Type) -> Type;
-    fn finish<T: IntoValue>(r: Result<T, Self>, fx: &mut AfterEffect<'_>) -> NResult;
-}
-
-mod sealed {
-    pub trait Sealed {}
-    impl Sealed for crate::vm::Ctl {}
-    impl Sealed for super::HostError {}
-    impl Sealed for () {}
-    impl Sealed for super::Call<'static> {}
-    impl Sealed for super::JournaledCall<'static> {}
-}
-
-impl NativeError for Ctl {
-    fn result_type(t: Type) -> Type {
-        t
-    }
-    fn finish<T: IntoValue>(r: Result<T, Ctl>, fx: &mut AfterEffect<'_>) -> NResult {
-        r.into_value(fx)
-    }
-}
-
-impl NativeError for HostError {
-    fn result_type(t: Type) -> Type {
-        Type::result(t, Type::error())
-    }
-    fn finish<T: IntoValue>(r: Result<T, HostError>, fx: &mut AfterEffect<'_>) -> NResult {
-        r.into_value(fx)
-    }
-}
-
 impl<T: IntoValue + Send + 'static, E: NativeError> Later<T, E> {
     /// Suspends the calling task until `fut` is resolved, and then executes the
     /// returned closure on the VM thread to produce the Sand result. The
     /// closure runs after the effect, so it sees the VM as an
-    /// [`AfterEffect`].
+    /// [`AfterEffect`], and it can only fail: its error is `E::Finish`. A
+    /// closure that asks for a permission does not compile:
+    ///
+    /// ```compile_fail,E0271
+    /// # use sandlang::native::func::Later;
+    /// # use sandlang::policy::Capability;
+    /// # use sandlang::vm::{AfterEffect, Ctl};
+    /// let _: Later<i64, Ctl> = Later::new(async { |_: &mut AfterEffect| -> Result<i64, Ctl> { Err(Ctl::need_permission(Capability::Stdin)) } });
+    /// ```
     ///
     /// Do not capture [`Value`]s in `fut`; the garbage collector does not trace
     /// pending futures while a task is suspended.
     pub fn new<F>(fut: impl Future<Output = F> + Send + 'static) -> Later<T, E>
     where
-        F: FnOnce(&mut AfterEffect<'_>) -> Result<T, E> + Send + 'static,
+        F: FnOnce(&mut AfterEffect<'_>) -> Result<T, E::Finish> + Send + 'static,
     {
         let fut = async move {
             let finish = fut.await;
@@ -519,7 +649,7 @@ impl<T: IntoValue + Send + 'static, E: NativeError> Later<T, E> {
     }
 
     /// Completes immediately with `r` without suspending the calling task.
-    pub fn ready(r: Result<T, E>) -> Later<T, E> {
+    pub fn ready(r: Result<T, E::Finish>) -> Later<T, E> {
         Later(Wait::Ready(Box::new(move |fx: &mut AfterEffect<'_>| E::finish(r, fx))), PhantomData)
     }
 }
@@ -539,20 +669,22 @@ impl<T, E> Later<T, E> {
     /// ```compile_fail
     /// # use sandlang::native::convert::HostError;
     /// # use sandlang::native::func::{Later, Park, Parked};
-    /// # use sandlang::vm::{AfterEffect, Vm};
+    /// # use sandlang::vm::{AfterEffect, Fail, Vm};
     /// let mut m = sandlang::native::NativeModule::new("signals");
-    /// m.vm_function("wait", |_: &mut Vm| -> Result<Parked<i64, HostError>, HostError> {
-    ///     Ok(Later::new(async { |_: &mut AfterEffect| Ok::<_, HostError>(1) }).parked(Park::UntilResumed, "go"))
+    /// m.vm_function("wait", |_: &mut Vm| -> Result<Parked<i64, HostError<Fail>>, HostError<Fail>> {
+    ///     Ok(Later::new(async { |_: &mut AfterEffect| Ok::<_, HostError<Fail>>(1) }).parked(Park::UntilResumed, "go"))
     /// });
     /// ```
     pub fn parked(self, park: Park, tag: impl Into<String>) -> Parked<T, E> {
         Parked { later: self, park: Some((park, tag.into())) }
     }
 
-    pub(crate) fn finish(self, fx: &mut AfterEffect<'_>) -> NResult {
+    /// The answer of the call: its result if it is ready, or else a wait for
+    /// the future.
+    fn answer(self, vm: &mut Vm) -> Result<Answer, Fail> {
         match self.0 {
-            Wait::Ready(f) => f(fx),
-            Wait::Future(fut) => Err(Ctl::suspend(fut)),
+            Wait::Ready(f) => f(&mut AfterEffect::new(vm)).map(Answer::Value),
+            Wait::Future(fut) => Ok(Answer::Async(fut)),
         }
     }
 }
@@ -582,9 +714,15 @@ fn strip_dict_args(args: &[Value], n: usize) -> &[Value] {
     args.get(args.len().wrapping_sub(n)..).unwrap_or_default()
 }
 
+/// Converts the arguments of a [`HostFunction`] and calls it.
+trait Answers<Marker> {
+    type Ret: VmReturn;
+    fn answer(&self, vm: &mut Vm, args: &[Value]) -> Result<Answer, <Self::Ret as VmReturn>::Control>;
+}
+
 #[cold]
-fn too_few_args() -> Ctl {
-    Ctl::internal("native function called with too few arguments")
+fn too_few_args() -> Fail {
+    Fail::internal("native function called with too few arguments")
 }
 
 macro_rules! fn_impls {
@@ -598,7 +736,7 @@ macro_rules! fn_impls {
         impl<F, R, $($a,)*> HostFunction<($($a,)*)> for F
         where
             F: Fn($($a),*) -> R + for<'a> Fn($($a::Item<'a>),*) -> R + Send + Sync + 'static,
-            R: IntoValue,
+            R: VmReturn<Parking = NoPark>,
             $($a: FromValue + 'static,)*
         {
             type Args = ($($a,)*);
@@ -607,18 +745,37 @@ macro_rules! fn_impls {
                 Signature { params: vec![$($a::sand_type()),*], ret: R::sand_type() }
             }
             fn into_host(self, _: &Arc<str>) -> Box<NativeFn> {
+                Box::new(move |vm: &mut Vm, _: Call<'_>, args: &[Value]| -> NResult {
+                    Answers::<($($a,)*)>::answer(&self, vm, args).map_err(Into::<Ctl>::into)?.into_result()
+                })
+            }
+            fn into_journaled(self, _: &Arc<str>) -> Box<JournaledFn>
+            where
+                R: VmReturn<Control = Fail>,
+            {
+                Box::new(move |vm: &mut Vm, _: Call<'_>, args: &[Value]| -> Result<Answer, Fail> { Answers::<($($a,)*)>::answer(&self, vm, args) })
+            }
+        }
+
+        #[allow(non_snake_case, unused_variables, unused_mut, clippy::unused_unit, clippy::too_many_arguments)]
+        impl<F, R, $($a,)*> Answers<($($a,)*)> for F
+        where
+            F: Fn($($a),*) -> R + for<'a> Fn($($a::Item<'a>),*) -> R + Send + Sync + 'static,
+            R: VmReturn<Parking = NoPark>,
+            $($a: FromValue + 'static,)*
+        {
+            type Ret = R;
+            fn answer(&self, vm: &mut Vm, args: &[Value]) -> Result<Answer, R::Control> {
                 fn call<R, $($a,)*>(f: &impl Fn($($a),*) -> R, $($a: $a,)*) -> R {
                     f($($a),*)
                 }
-                Box::new(move |vm: &mut Vm, _: Call<'_>, args: &[Value]| -> NResult {
-                    let r = {
-                        let &[$($a),*] = strip_dict_args(args, $n) else { return Err(too_few_args()) };
-                        let mut conv = Conversion::new();
-                        $(let $a = $a::from_value(vm, $a, &mut conv)?;)*
-                        call(&self, $($a),*)
-                    };
-                    r.into_value(&mut AfterEffect::new(vm))
-                })
+                let r = {
+                    let &[$($a),*] = strip_dict_args(args, $n) else { return Err(too_few_args().into()) };
+                    let mut conv = Conversion::new();
+                    $(let $a = $a::from_value(vm, $a, &mut conv)?;)*
+                    call(self, $($a),*)
+                };
+                r.answer(vm)
             }
         }
 
@@ -639,7 +796,10 @@ macro_rules! fn_impls {
             fn into_host(self, key: &Arc<str>) -> Box<NativeFn> {
                 VmFunction::<(WithCall<Call<'static>>, $($a,)*)>::into_host(move |vm: &mut Vm, _: Call<'_>, $($a: $a),*| self(vm, $($a),*), key)
             }
-            fn into_journaled(self, key: &Arc<str>) -> Box<JournaledFn> {
+            fn into_journaled(self, key: &Arc<str>) -> Box<JournaledFn>
+            where
+                R: VmReturn<Control = Fail>,
+            {
                 VmFunction::<(WithCall<Call<'static>>, $($a,)*)>::into_journaled(move |vm: &mut Vm, _: Call<'_>, $($a: $a),*| self(vm, $($a),*), key)
             }
         }
@@ -664,7 +824,10 @@ macro_rules! fn_impls {
                     key,
                 )
             }
-            fn into_journaled(self, key: &Arc<str>) -> Box<JournaledFn> {
+            fn into_journaled(self, key: &Arc<str>) -> Box<JournaledFn>
+            where
+                R: VmReturn<Control = Fail>,
+            {
                 VmFunction::<(WithCall<Call<'static>>, $($a,)*)>::into_journaled(
                     move |vm: &mut Vm, call: Call<'_>, $($a: $a),*| self(vm, JournaledCall::of(call), $($a),*),
                     key,
@@ -688,22 +851,23 @@ macro_rules! fn_impls {
             }
             fn into_host(self, _: &Arc<str>) -> Box<NativeFn> {
                 Box::new(move |vm: &mut Vm, call: Call<'_>, args: &[Value]| -> NResult {
-                    let &[$($a),*] = strip_dict_args(args, $n) else { return Err(too_few_args()) };
+                    let &[$($a),*] = strip_dict_args(args, $n) else { return Err(too_few_args().into()) };
                     let mut conv = Conversion::new();
                     $(let $a = $a::from_value(vm, $a, &mut conv)?;)*
                     vm.arm_retry_stress(call);
-                    let r = self(vm, call, $($a),*);
-                    r.into_result(&mut AfterEffect::new(vm))
+                    self(vm, call, $($a),*).answer(vm).map_err(Into::<Ctl>::into)?.into_result()
                 })
             }
-            fn into_journaled(self, _: &Arc<str>) -> Box<JournaledFn> {
-                Box::new(move |vm: &mut Vm, call: Call<'_>, args: &[Value]| -> Result<Answer, Ctl> {
+            fn into_journaled(self, _: &Arc<str>) -> Box<JournaledFn>
+            where
+                R: VmReturn<Control = Fail>,
+            {
+                Box::new(move |vm: &mut Vm, call: Call<'_>, args: &[Value]| -> Result<Answer, Fail> {
                     let &[$($a),*] = strip_dict_args(args, $n) else { return Err(too_few_args()) };
                     let mut conv = Conversion::new();
                     $(let $a = $a::from_value(vm, $a, &mut conv)?;)*
                     vm.arm_retry_stress(call);
-                    let r = self(vm, call, $($a),*);
-                    r.into_answer(&mut AfterEffect::new(vm))
+                    self(vm, call, $($a),*).answer(vm)
                 })
             }
         }
@@ -721,13 +885,17 @@ macro_rules! fn_impls {
             fn signature() -> Signature {
                 Signature { params: vec![$($a::sand_type()),*], ret: R::sand_type() }
             }
-            fn into_host(self, _: &Arc<str>) -> Box<NativeFn> {
-                Box::new(move |vm: &mut Vm, _: Call<'_>, args: &[Value]| -> NResult {
+            fn into_host(self, key: &Arc<str>) -> Box<NativeFn> {
+                let body = AsyncHostFunction::into_journaled(self, key);
+                Box::new(move |vm: &mut Vm, call: Call<'_>, args: &[Value]| -> NResult { body(vm, call, args)?.into_result() })
+            }
+            fn into_journaled(self, _: &Arc<str>) -> Box<JournaledFn> {
+                Box::new(move |vm: &mut Vm, _: Call<'_>, args: &[Value]| -> Result<Answer, Fail> {
                     let &[$($a),*] = strip_dict_args(args, $n) else { return Err(too_few_args()) };
                     let mut conv = Conversion::new();
                     $(let $a = $a::from_value(vm, $a, &mut conv)?;)*
                     let fut = self($($a),*);
-                    Err(Ctl::suspend(Box::pin(async move {
+                    Ok(Answer::Async(Box::pin(async move {
                         let r = fut.await;
                         Box::new(move |fx: &mut AfterEffect<'_>| r.into_value(fx)) as Finisher
                     })))

@@ -1705,7 +1705,7 @@ fn natives_take_num_evidence() {
     use sandlang::native::func::Call;
     use sandlang::native::ty::{Num, Param, Val};
     use sandlang::types::traits;
-    use sandlang::vm::{Ctl, Vm};
+    use sandlang::vm::{Ctl, Fail, Vm};
     let module = |decl: &str| {
         let mut m = NativeModule::new("nums");
         m.vm_function("total", |vm: &mut Vm, call: Call, num: Num<0>, xs: Val<Vec<Param<0, traits::Num>>>| -> Result<Param<0>, Ctl> {
@@ -1716,7 +1716,7 @@ fn natives_take_num_evidence() {
                     (sandlang::vm::value::Value::Float(a), sandlang::vm::value::Value::Float(b)) => {
                         sandlang::vm::value::Value::Float(a + b)
                     }
-                    _ => return Err(Ctl::internal("not a number")),
+                    _ => return Err(Fail::internal("not a number").into()),
                 };
             }
             Ok(Param::from_raw(acc))
@@ -2046,11 +2046,11 @@ fn reflecting_natives_take_type_descriptions() {
 fn host_functions_take_and_return_durations_and_never() {
     use jiff::SignedDuration;
     use sandlang::native::ty::Never;
-    use sandlang::vm::{Ctl, Vm};
+    use sandlang::vm::{Fail, Vm};
     let mut m = NativeModule::new("clock");
     m.function("double", |d: SignedDuration| d * 2);
     m.function("forever", || SignedDuration::MAX);
-    m.vm_function("halt", |_: &mut Vm, code: i64| -> Result<Never, Ctl> { Err(Ctl::exit(code as i32)) });
+    m.vm_function("halt", |_: &mut Vm, code: i64| -> Result<Never, Fail> { Err(Fail::exit(code as i32)) });
     let (r, out, _) = run_src(
         Config::new().host_modules(HostModules::new([m.clone()]).unwrap()),
         "import clock\nprint(clock.double(1500ms))\nlet n: int = clock.halt(3)",
@@ -3331,7 +3331,7 @@ fn run_tests_api() {
 #[test]
 fn an_exit_from_a_finisher_ends_a_test_like_a_script_exit() {
     let mut m = NativeModule::new("quit");
-    m.async_function("now", |code: i64| async move { Err::<(), sandlang::vm::Ctl>(sandlang::vm::Ctl::exit(code as i32)) });
+    m.async_function("now", |code: i64| async move { Err::<(), sandlang::vm::Fail>(sandlang::vm::Fail::exit(code as i32)) });
     let dir = TempDir::new("exit-tests");
     let main = dir.write("t.sand", "import quit\ntest \"zero\" { quit.now(0) }\ntest \"one\" { quit.now(1) }\ntest \"plain\" { exit(0) }");
     let mut engine = Engine::new(Config::new().host_modules(HostModules::new([m]).unwrap()));
@@ -3586,13 +3586,13 @@ fn host_modules_can_define_resources() {
 fn host_errors_are_err_values_and_aborts_end_the_run() {
     use sandlang::native::convert::HostError;
     use sandlang::native::func::Later;
-    use sandlang::vm::{AfterEffect, Ctl};
+    use sandlang::vm::{AfterEffect, Fail};
     let mut m = NativeModule::new("errs");
     m.function("now", || -> Result<i64, HostError> { Err(HostError::new("invalid", "bad input")) });
     m.function("later", || -> Result<Later<i64, HostError>, HostError> {
         Ok(Later::new(async { |_: &mut AfterEffect| Err(HostError::new("io", "broken pipe")) }))
     });
-    m.function("abort", || -> Result<i64, HostError> { Err(Ctl::fail("invalid", "no result").into()) });
+    m.function("abort", || -> Result<i64, HostError> { Err(Fail::new("invalid", "no result").into()) });
     let run = |src: &str| run_src(Config::new().host_modules(HostModules::new([m.clone()]).unwrap()), &format!("import errs\n{src}"));
     let (r, out, _) = run("print(errs.now())\nprint(errs.later())");
     r.unwrap();

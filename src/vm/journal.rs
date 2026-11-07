@@ -14,7 +14,7 @@
 use super::bytecode::Program;
 use super::iomem::IoMemory;
 use super::value::{MapObj, Obj, SetObj, Value};
-use super::{AfterEffect, BoxFuture, Ctl, CtlKind, End, Finisher, NResult, Request, Vm};
+use super::{AfterEffect, BoxFuture, Ctl, End, Fail, Finisher, NResult, Request, Vm};
 use crate::journal::{CallResult, Durable, Entry, EntryData, EntryKind, Journal, OpDone, OpEnd, OpKind, OpStart, ParkedCall};
 use crate::native::func::{Answer, Call, JournaledFn, Park};
 use crate::platform::{Instant, SystemTime};
@@ -35,18 +35,18 @@ pub struct Divergence {
 
 /// Builds the result of a recorded operation from the journal's encoding of
 /// its outcome. It runs in record and in replay alike, after the effect.
-pub(crate) type BuildFn = Box<dyn FnOnce(&mut AfterEffect<'_>, &[u8]) -> NResult + Send>;
+pub(crate) type BuildFn = Box<dyn FnOnce(&mut AfterEffect<'_>, &[u8]) -> Result<Value, Fail> + Send>;
 
 /// The journal's encoding of an outcome, made on the VM thread after the
 /// effect.
-pub(crate) type EncodeFn = Box<dyn FnOnce(&mut AfterEffect<'_>) -> Result<Vec<u8>, Ctl> + Send>;
+pub(crate) type EncodeFn = Box<dyn FnOnce(&mut AfterEffect<'_>) -> Result<Vec<u8>, Fail> + Send>;
 
 /// The outcome of a live operation whose result the journal records.
 pub(crate) trait Outcome: Send + 'static {
     /// The result as the outcome arrives, in a run without a journal (an
     /// HTTP body streams). `build` makes the result from the journal's
     /// encoding of an outcome.
-    fn deliver(self: Box<Self>, fx: &mut AfterEffect<'_>, build: BuildFn) -> NResult;
+    fn deliver(self: Box<Self>, fx: &mut AfterEffect<'_>, build: BuildFn) -> Result<Value, Fail>;
 
     /// Waits for the whole outcome, which a journaled run records as one
     /// entry before the program gets it (an HTTP body is read to its end).
@@ -58,7 +58,7 @@ pub(crate) trait Outcome: Send + 'static {
 pub(crate) struct Whole(pub Vec<u8>);
 
 impl Outcome for Whole {
-    fn deliver(self: Box<Self>, fx: &mut AfterEffect<'_>, build: BuildFn) -> NResult {
+    fn deliver(self: Box<Self>, fx: &mut AfterEffect<'_>, build: BuildFn) -> Result<Value, Fail> {
         build(fx, &self.0)
     }
 
@@ -186,7 +186,7 @@ pub(crate) struct Recorded {
 impl Recorded {
     /// The recorded result, if the call that `identity` and `label`
     /// describe is the recorded one. Charges the fuel that the call spent.
-    fn deliver(self, vm: &mut Vm, identity: u64, label: &str) -> NResult {
+    fn deliver(self, vm: &mut Vm, identity: u64, label: &str) -> Result<Value, Fail> {
         let Recorded { seq, result: CallResult { identity: id, label: rec_label, fuel, outcome } } = self;
         if id != identity {
             let message = if rec_label == label {
@@ -194,7 +194,7 @@ impl Recorded {
             } else {
                 format!("the run calls `{label}` where the journal records a call of `{rec_label}`")
             };
-            return Err(Ctl::diverged(Divergence { seq, message }));
+            return Err(Fail::diverged(Divergence { seq, message }));
         }
         let v = payload_outcome(&mut AfterEffect::new(vm), &outcome);
         vm.charge(fuel)?;
@@ -340,7 +340,7 @@ struct CallOutcome {
 }
 
 impl Outcome for CallOutcome {
-    fn deliver(self: Box<Self>, fx: &mut AfterEffect<'_>, _: BuildFn) -> NResult {
+    fn deliver(self: Box<Self>, fx: &mut AfterEffect<'_>, _: BuildFn) -> Result<Value, Fail> {
         (self.fin)(fx)
     }
 
@@ -357,7 +357,7 @@ impl Outcome for CallOutcome {
 struct Expired;
 
 impl Outcome for Expired {
-    fn deliver(self: Box<Self>, _: &mut AfterEffect<'_>, _: BuildFn) -> NResult {
+    fn deliver(self: Box<Self>, _: &mut AfterEffect<'_>, _: BuildFn) -> Result<Value, Fail> {
         Ok(Value::Unit)
     }
 
@@ -385,7 +385,7 @@ pub(crate) fn sleep(vm: &mut Vm, d: Duration) -> Ctl {
         })
     };
     match vm.begin_op(spec, describe) {
-        Err(c) => c,
+        Err(f) => f.into(),
         Ok(Begun::Replayed(r)) => {
             let build = expired(r.wake.map(|t| (t, r.journal.clone())));
             r.wait(build)
@@ -428,10 +428,10 @@ pub(crate) fn journaled_call(vm: &mut Vm, call: Call, inner: &JournaledFn, name:
             vm.meter.charge(r.pre_fuel)?;
             Err(r.wait(Box::new(payload_outcome)))
         }
-        StartEntry::Recorded { identity, label, result } => result.deliver(vm, identity, &label),
+        StartEntry::Recorded { identity, label, result } => Ok(result.deliver(vm, identity, &label)?),
         StartEntry::Other { label, seq, next } => {
             let message = format!("the run reads the result of `{label}` where the journal records {next}");
-            Err(Ctl::diverged(Divergence { seq, message }))
+            Err(Fail::diverged(Divergence { seq, message }).into())
         }
         StartEntry::Rerun(rerun) => {
             // The journal records the start of the call, not its end: call
@@ -439,7 +439,7 @@ pub(crate) fn journaled_call(vm: &mut Vm, call: Call, inner: &JournaledFn, name:
             // completion of the recorded operation.
             let start = vm.meter.used();
             let r = match inner(vm) {
-                Err(c) if is_retry(&c) => return Err(c),
+                Err(f) if is_retry(&f) => return Err(f.into()),
                 r => r,
             };
             let pre_fuel = vm.meter.used().saturating_sub(start);
@@ -460,12 +460,12 @@ pub(crate) fn journaled_call(vm: &mut Vm, call: Call, inner: &JournaledFn, name:
                     let pre_fuel = vm.meter.used().saturating_sub(start);
                     Err(run(fresh.start(vm, spec(pre_fuel, parking)), fut))
                 }
-                Err(r) => vm.record_result(name, start, r, fresh.identity, fresh.label),
+                Err(r) => Ok(vm.record_result(name, start, r, fresh.identity, fresh.label)?),
             }
         }
         StartEntry::Unjournaled => match waiting(inner(vm), name) {
             Ok((fut, parking)) => Err(run(Live::unjournaled(spec(0, parking)), fut)),
-            Err(r) => r,
+            Err(r) => Ok(r?),
         },
     }
 }
@@ -473,12 +473,12 @@ pub(crate) fn journaled_call(vm: &mut Vm, call: Call, inner: &JournaledFn, name:
 /// The future that the answer `r` of a call of host function `name` asks
 /// the task to wait for, and how the call parks. Gives back any other
 /// result.
-fn waiting(r: Result<Answer, Ctl>, name: &Arc<str>) -> Result<(BoxFuture, Parking), NResult> {
-    match r.map_err(Ctl::into_kind) {
+fn waiting(r: Result<Answer, Fail>, name: &Arc<str>) -> Result<(BoxFuture, Parking), Result<Value, Fail>> {
+    match r {
         Ok(Answer::Value(v)) => Err(Ok(v)),
+        Ok(Answer::Async(fut)) => Ok((fut, Parking::Never)),
         Ok(Answer::Parked(fut, park, tag)) => Ok((fut, Parking::Host { park, function: name.clone(), tag })),
-        Err(CtlKind::Request(Request::Async(fut))) => Ok((fut, Parking::Never)),
-        Err(kind) => Err(Err(Ctl::new(kind))),
+        Err(f) => Err(Err(f)),
     }
 }
 
@@ -1020,20 +1020,20 @@ fn encode_into(vm: &Vm, v: Value, w: &mut Writer, depth: usize, enc: Encoding) -
 /// Decoding costs no fuel: the call charged for converting its result, live
 /// or as the recorded fuel in replay, so a journaled run uses the fuel of a
 /// run without a journal.
-pub(crate) fn decode_value(fx: &mut AfterEffect<'_>, data: &[u8]) -> NResult {
+pub(crate) fn decode_value(fx: &mut AfterEffect<'_>, data: &[u8]) -> Result<Value, Fail> {
     let mut r = Reader::new(data);
     let mut types = None;
     decode_from(fx, &mut r, 0, &mut types)
 }
 
-fn malformed() -> Ctl {
-    Ctl::internal("a journaled value is malformed")
+fn malformed() -> Fail {
+    Fail::internal("a journaled value is malformed")
 }
 
 /// The runtime id of struct (`is_variant` false) or variant `id`, named
 /// `name`: `id` itself if it still has that name, or else the id that has
 /// it in this program.
-fn resolve(vm: &Vm, id: u64, name: &str, is_variant: bool, types: &mut Option<HashMap<(bool, String), u32>>) -> Result<u32, Ctl> {
+fn resolve(vm: &Vm, id: u64, name: &str, is_variant: bool, types: &mut Option<HashMap<(bool, String), u32>>) -> Result<u32, Fail> {
     let prog = &vm.prog;
     let named = |i: u32| if is_variant { variant_name(prog, i) } else { struct_name(prog, i) };
     if let Ok(i) = u32::try_from(id)
@@ -1058,14 +1058,19 @@ fn resolve(vm: &Vm, id: u64, name: &str, is_variant: bool, types: &mut Option<Ha
     table
         .get(&(is_variant, name.to_string()))
         .copied()
-        .ok_or_else(|| Ctl::internal(format!("the journal holds a value of type `{name}`, which this program does not define")))
+        .ok_or_else(|| Fail::internal(format!("the journal holds a value of type `{name}`, which this program does not define")))
 }
 
-fn decode_from(fx: &mut AfterEffect<'_>, r: &mut Reader<'_>, depth: usize, types: &mut Option<HashMap<(bool, String), u32>>) -> NResult {
+fn decode_from(
+    fx: &mut AfterEffect<'_>,
+    r: &mut Reader<'_>,
+    depth: usize,
+    types: &mut Option<HashMap<(bool, String), u32>>,
+) -> Result<Value, Fail> {
     if depth > MAX_DEPTH {
         return Err(malformed());
     }
-    let count = |r: &mut Reader<'_>| -> Result<usize, Ctl> {
+    let count = |r: &mut Reader<'_>| -> Result<usize, Fail> {
         let n = usize::try_from(r.u64().ok_or_else(malformed)?).map_err(|_| malformed())?;
         // Each item takes at least one byte.
         if n > r.0.len() { Err(malformed()) } else { Ok(n) }
@@ -1075,7 +1080,7 @@ fn decode_from(fx: &mut AfterEffect<'_>, r: &mut Reader<'_>, depth: usize, types
                  r: &mut Reader<'_>,
                  n: usize,
                  types: &mut Option<HashMap<(bool, String), u32>>|
-     -> Result<Vec<Value>, Ctl> { (0..n).map(|_| decode_from(fx, r, depth + 1, types)).collect() };
+     -> Result<Vec<Value>, Fail> { (0..n).map(|_| decode_from(fx, r, depth + 1, types)).collect() };
     let t = Tag::from_code(r.u8().ok_or_else(malformed)?).ok_or_else(malformed)?;
     Ok(match t {
         Tag::Unit => Value::Unit,
@@ -1145,12 +1150,12 @@ fn max_value_bytes(vm: &Vm) -> usize {
 /// Registration checks that the journal can encode the types of the
 /// arguments; a call fails if an argument holds a value that it cannot
 /// encode all the same, such as a function in a field of a struct.
-pub(crate) fn call_identity(vm: &Vm, name: &str, args: &[Value]) -> Result<u64, Ctl> {
+pub(crate) fn call_identity(vm: &Vm, name: &str, args: &[Value]) -> Result<u64, Fail> {
     let mut id = Identity::default().add(name.as_bytes());
     for &a in args {
         let mut w = Writer::default();
         encode_into(vm, a, &mut w, 0, Encoding { max: 1 << 20, values: true })
-            .map_err(|why| Ctl::fail("unsupported", format!("cannot journal the arguments of `{name}`: {why}")))?;
+            .map_err(|why| Fail::new("unsupported", format!("cannot journal the arguments of `{name}`: {why}")))?;
         id = id.add(&w.0);
     }
     Ok(id.finish())
@@ -1173,15 +1178,15 @@ impl Payload for Encoded {
 type CallPayload = Result<Encoded, String>;
 
 /// The payload that records a call's outcome `r`.
-fn outcome_payload(vm: &Vm, r: NResult, label: &str) -> Result<CallPayload, Ctl> {
+fn outcome_payload(vm: &Vm, r: Result<Value, Fail>, label: &str) -> Result<CallPayload, Fail> {
     match r {
         Ok(v) => match encode_value(vm, v, max_value_bytes(vm)) {
             Ok(bytes) => Ok(Ok(Encoded(bytes))),
-            Err(why) => Err(Ctl::fail("unsupported", format!("cannot journal the result of `{label}`: {why}"))),
+            Err(why) => Err(Fail::new("unsupported", format!("cannot journal the result of `{label}`: {why}"))),
         },
-        Err(c) => match c.into_kind() {
-            CtlKind::End(End::RuntimeError(m)) => Ok(Err(m)),
-            other => Err(Ctl::new(other)),
+        Err(f) => match f.into_end() {
+            End::RuntimeError(m) => Ok(Err(m)),
+            other => Err(Fail::end(other)),
         },
     }
 }
@@ -1189,22 +1194,22 @@ fn outcome_payload(vm: &Vm, r: NResult, label: &str) -> Result<CallPayload, Ctl>
 /// The result of a call that `outcome` records. The value is decoded
 /// from its encoding also in a live run, so that record and replay
 /// allocate alike.
-fn call_outcome(fx: &mut AfterEffect<'_>, outcome: &CallPayload) -> NResult {
+fn call_outcome(fx: &mut AfterEffect<'_>, outcome: &CallPayload) -> Result<Value, Fail> {
     match outcome {
         Ok(Encoded(bytes)) => decode_value(fx, bytes),
-        Err(m) => Err(Ctl::end(End::RuntimeError(m.clone()))),
+        Err(m) => Err(Fail::end(End::RuntimeError(m.clone()))),
     }
 }
 
 /// The result of a call that the bytes of a [`CallPayload`] record.
-fn payload_outcome(fx: &mut AfterEffect<'_>, payload: &[u8]) -> NResult {
+fn payload_outcome(fx: &mut AfterEffect<'_>, payload: &[u8]) -> Result<Value, Fail> {
     call_outcome(fx, &CallPayload::from_payload(payload).ok_or_else(malformed)?)
 }
 
 /// Whether `r` asks for the call to run again after a collection: the
 /// journal records only the call that completes.
-fn is_retry(c: &Ctl) -> bool {
-    matches!(c.kind(), CtlKind::Request(Request::Collect) | CtlKind::End(End::Limit(crate::engine::LimitKind::Memory)))
+fn is_retry(f: &Fail) -> bool {
+    f.as_limit() == Some(crate::engine::LimitKind::Memory)
 }
 
 impl Vm {
@@ -1256,10 +1261,10 @@ impl Vm {
     /// The wall-clock time, as the script observes it: journaled. It takes
     /// the [`Call`] of the reading function, which only a local function
     /// has: replay does not call a journaled function.
-    pub fn wall_time(&self, _: Call) -> Result<SystemTime, Ctl> {
+    pub fn wall_time(&self, _: Call) -> Result<SystemTime, Fail> {
         let Some(j) = &self.journal else { return Ok(self.host.clock.wall()) };
         let mut j = j.state();
-        if let Some(EntryData::Wall(t)) = j.take(EntryKind::Wall, &|| "the wall clock".into()).map_err(Ctl::diverged)? {
+        if let Some(EntryData::Wall(t)) = j.take(EntryKind::Wall, &|| "the wall clock".into()).map_err(Fail::diverged)? {
             j.saw_wall(t);
             return Ok(t);
         }
@@ -1272,10 +1277,10 @@ impl Vm {
     /// The monotonic time, as the script observes it: journaled. Readings
     /// after replay continue from the last replayed one. It
     /// takes the [`Call`] of the reading function, as [`Vm::wall_time`] does.
-    pub fn monotonic(&self, _: Call) -> Result<Instant, Ctl> {
+    pub fn monotonic(&self, _: Call) -> Result<Instant, Fail> {
         let Some(j) = &self.journal else { return Ok(self.host.clock.now()) };
         let mut j = j.state();
-        if let Some(EntryData::Monotonic(d)) = j.take(EntryKind::Monotonic, &|| "the monotonic clock".into()).map_err(Ctl::diverged)? {
+        if let Some(EntryData::Monotonic(d)) = j.take(EntryKind::Monotonic, &|| "the monotonic clock".into()).map_err(Fail::diverged)? {
             j.mono_last = j.mono_last.max(d);
             return Ok(j.origin + d);
         }
@@ -1289,7 +1294,7 @@ impl Vm {
 
     /// Fuel to add for a charge by elapsed time at this point: the recorded
     /// amount in replay, or else `live()`, recorded if it is not zero.
-    pub(crate) fn time_fuel(&self, live: impl FnOnce() -> u64) -> Result<u64, Ctl> {
+    pub(crate) fn time_fuel(&self, live: impl FnOnce() -> u64) -> Result<u64, Fail> {
         let Some(j) = &self.journal else { return Ok(live()) };
         let mut j = j.state();
         let at = self.meter.used();
@@ -1299,7 +1304,7 @@ impl Vm {
                 return Ok(0);
             }
             if rec_at < at {
-                return Err(Ctl::diverged(
+                return Err(Fail::diverged(
                     j.diverged(format!("the journal records a fuel charge at {rec_at} units, and the run is at {at}")),
                 ));
             }
@@ -1320,9 +1325,9 @@ impl Vm {
     /// [`encode_value`]).
     pub(crate) fn input(
         &mut self,
-        describe: impl FnOnce(&Vm) -> Result<(u64, String), Ctl>,
-        f: impl FnOnce(&mut Vm) -> NResult,
-    ) -> NResult {
+        describe: impl FnOnce(&Vm) -> Result<(u64, String), Fail>,
+        f: impl FnOnce(&mut Vm) -> Result<Value, Fail>,
+    ) -> Result<Value, Fail> {
         if self.journal.is_none() {
             return f(self);
         }
@@ -1337,9 +1342,9 @@ impl Vm {
     /// returns what `f` returns.
     pub(crate) fn ready_input(
         &mut self,
-        describe: impl FnOnce(&Vm) -> Result<(u64, String), Ctl>,
+        describe: impl FnOnce(&Vm) -> Result<(u64, String), Fail>,
         f: impl FnOnce(&mut Vm) -> Ready,
-    ) -> Result<Ready, Ctl> {
+    ) -> Result<Ready, Fail> {
         if self.journal.is_none() {
             return Ok(f(self));
         }
@@ -1399,7 +1404,7 @@ impl Vm {
     /// and described by `label`, and records its result; in replay, returns
     /// the recorded result without running `f`. The value must be plain
     /// data (see [`encode_value`]).
-    fn journaled_result(&mut self, identity: u64, label: &str, f: impl FnOnce(&mut Vm) -> NResult) -> NResult {
+    fn journaled_result(&mut self, identity: u64, label: &str, f: impl FnOnce(&mut Vm) -> Result<Value, Fail>) -> Result<Value, Fail> {
         if let Some(r) = self.replay_result(identity, label)? {
             return r;
         }
@@ -1409,11 +1414,11 @@ impl Vm {
     }
 
     /// Consumes the recorded result of a synchronous call in replay.
-    fn replay_result(&mut self, identity: u64, label: &str) -> Result<Option<NResult>, Ctl> {
+    fn replay_result(&mut self, identity: u64, label: &str) -> Result<Option<Result<Value, Fail>>, Fail> {
         let Some(j) = &self.journal else { return Ok(None) };
         let mut j = j.state();
         let seq = j.pos as u64;
-        let replayed = j.take(EntryKind::Result, &|| format!("the result of `{label}`")).map_err(Ctl::diverged)?;
+        let replayed = j.take(EntryKind::Result, &|| format!("the result of `{label}`")).map_err(Fail::diverged)?;
         drop(j);
         let Some(EntryData::Result(result)) = replayed else { return Ok(None) };
         Ok(Some(Recorded { seq, result }.deliver(self, identity, label)))
@@ -1421,7 +1426,7 @@ impl Vm {
 
     /// Records the result `r` of a synchronous call that started at fuel
     /// `start`, with the call's `identity` and `label`, and returns it.
-    fn record_result(&mut self, name: &str, start: u64, r: NResult, identity: u64, label: String) -> NResult {
+    fn record_result(&mut self, name: &str, start: u64, r: Result<Value, Fail>, identity: u64, label: String) -> Result<Value, Fail> {
         if matches!(&r, Err(c) if is_retry(c)) {
             return r;
         }
@@ -1476,7 +1481,7 @@ impl Vm {
     /// gives the operation's identity and label, which only a journaled run
     /// reads. Consumes the operation's `Start` entry if the journal also
     /// records its end; otherwise consumes nothing.
-    pub(crate) fn take_start(&self, kind: OpKind, describe: impl FnOnce(&Vm) -> Result<(u64, String), Ctl>) -> Result<StartEntry, Ctl> {
+    pub(crate) fn take_start(&self, kind: OpKind, describe: impl FnOnce(&Vm) -> Result<(u64, String), Fail>) -> Result<StartEntry, Fail> {
         let Some(journal) = &self.journal else { return Ok(StartEntry::Unjournaled) };
         let (identity, label) = describe(self)?;
         let mut j = journal.state();
@@ -1497,7 +1502,7 @@ impl Vm {
             } else {
                 format!("the run starts {} `{label}` where the journal records the start of {} `{}`", kind.name(), s.kind.name(), s.label)
             };
-            return Err(Ctl::diverged(Divergence { seq, message }));
+            return Err(Fail::diverged(Divergence { seq, message }));
         }
         let (pre_fuel, wake) = (s.pre_fuel, s.wake);
         if !j.done.contains_key(&op) {
@@ -1513,7 +1518,7 @@ impl Vm {
     /// operation's identity and label, which only a journaled run reads.
     /// Consumes the operation's `Start` entry in replay, or records one.
     /// Without a journal, the operation runs.
-    pub(crate) fn begin_op(&mut self, spec: OpSpec, describe: impl FnOnce(&Vm) -> Result<(u64, String), Ctl>) -> Result<Begun, Ctl> {
+    pub(crate) fn begin_op(&mut self, spec: OpSpec, describe: impl FnOnce(&Vm) -> Result<(u64, String), Fail>) -> Result<Begun, Fail> {
         match self.take_start(spec.kind, describe)? {
             StartEntry::Replayed(r) => Ok(Begun::Replayed(r)),
             StartEntry::Rerun(r) => Ok(Begun::Live(r.start(spec))),
@@ -1522,11 +1527,11 @@ impl Vm {
             StartEntry::Recorded { label, result: Recorded { seq, result }, .. } => {
                 let next = EntryData::Result(result).describe();
                 let message = format!("the run reads the start of {} `{label}` where the journal records {next}", spec.kind.name());
-                Err(Ctl::diverged(Divergence { seq, message }))
+                Err(Fail::diverged(Divergence { seq, message }))
             }
             StartEntry::Other { label, seq, next } => {
                 let message = format!("the run reads the start of {} `{label}` where the journal records {next}", spec.kind.name());
-                Err(Ctl::diverged(Divergence { seq, message }))
+                Err(Fail::diverged(Divergence { seq, message }))
             }
         }
     }
@@ -1537,18 +1542,18 @@ impl Vm {
     /// delivers it. Replay consumes the start, runs the future again, and
     /// delivers its result after the recorded step, so that tasks
     /// interleave as they did.
-    pub(crate) fn local_pending(&mut self, fid: u32, wgen: u64) -> Result<(), Ctl> {
+    pub(crate) fn local_pending(&mut self, fid: u32, wgen: u64) -> Result<(), Fail> {
         let Some(j) = &self.journal else { return Ok(()) };
         let mut j = j.state();
         let id = j.ops;
         let seq = j.pos as u64;
         let what = || format!("the start of {}", OpKind::Local.name());
-        let replayed = match j.take(EntryKind::Start, &what).map_err(Ctl::diverged)? {
+        let replayed = match j.take(EntryKind::Start, &what).map_err(Fail::diverged)? {
             Some(EntryData::Start(s)) if s.kind == OpKind::Local => true,
             Some(EntryData::Start(s)) => {
                 let message =
                     format!("the run waits for a local operation where the journal records the start of {} `{}`", s.kind.name(), s.label);
-                return Err(Ctl::diverged(Divergence { seq, message }));
+                return Err(Fail::diverged(Divergence { seq, message }));
             }
             _ => {
                 let start = OpStart { kind: OpKind::Local, identity: 0, pre_fuel: 0, wake: None, label: "wait".to_string() };
@@ -1607,7 +1612,7 @@ impl Vm {
 
     /// The next completion that replay delivers now: one recorded after the
     /// current step. Fails if one recorded after an earlier step is pending.
-    pub(crate) fn next_due(&mut self) -> Result<Due, Ctl> {
+    pub(crate) fn next_due(&mut self) -> Result<Due, Fail> {
         let Some(j) = &self.journal else { return Ok(Due::Nothing) };
         let mut j = j.state();
         let Some(EntryData::Done(OpDone { op, step, fuel, end })) = j.peek() else { return Ok(Due::Nothing) };
@@ -1622,12 +1627,12 @@ impl Vm {
         }
         if step < j.steps {
             let msg = format!("the journal records the completion of operation {op} after step {step}, and the run is at step {}", j.steps);
-            return Err(Ctl::diverged(j.diverged(msg)));
+            return Err(Fail::diverged(j.diverged(msg)));
         }
         match j.replayed.remove(&op) {
             None => {
                 let msg = format!("the journal records the completion of operation {op}, which the run has not started");
-                Err(Ctl::diverged(j.diverged(msg)))
+                Err(Fail::diverged(j.diverged(msg)))
             }
             Some((fid, wgen, Replaying::Local(None))) => {
                 j.replayed.insert(op, (fid, wgen, Replaying::Local(None)));

@@ -7,7 +7,7 @@ use super::bytecode::Program;
 use super::heap::Heap;
 use super::meter::{Budget, Unmetered};
 use super::value::*;
-use super::{Ctl, without_trait};
+use super::{Fail, without_trait};
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::hash::Hasher;
@@ -30,9 +30,9 @@ impl Seen {
     }
 
     /// Records `pair`; false if it was recorded already.
-    fn insert(&mut self, heap: &Heap, pair: (u32, u32)) -> Result<bool, Ctl> {
+    fn insert(&mut self, heap: &Heap, pair: (u32, u32)) -> Result<bool, Fail> {
         if self.pairs.len() == self.pairs.capacity() && heap.would_exceed(self.pairs.capacity().max(4).saturating_mul(3 * 12)) {
-            return Err(Ctl::limit(crate::engine::LimitKind::Memory));
+            return Err(Fail::limit(crate::engine::LimitKind::Memory));
         }
         Ok(self.pairs.insert(pair))
     }
@@ -111,7 +111,7 @@ impl Small {
         (self.nodes <= SMALL_NODES).then_some(())
     }
 
-    fn charge(&self, budget: &impl Budget) -> Result<(), Ctl> {
+    fn charge(&self, budget: &impl Budget) -> Result<(), Fail> {
         budget.charge(self.nodes as u64)?;
         budget.charge_bytes(self.bytes)
     }
@@ -248,7 +248,7 @@ enum EqWork {
 }
 
 /// [`values_eq`], charging `budget` for the work.
-pub fn values_eq_metered(heap: &Heap, budget: &impl Budget, a: Value, b: Value) -> Result<bool, Ctl> {
+pub fn values_eq_metered(heap: &Heap, budget: &impl Budget, a: Value, b: Value) -> Result<bool, Fail> {
     match (a, b) {
         (Value::Float(x), Value::Float(y)) => return Ok(x == y),
         (Value::Obj(x), Value::Obj(y)) if x == y => return Ok(true),
@@ -381,13 +381,13 @@ pub fn values_eq_metered(heap: &Heap, budget: &impl Budget, a: Value, b: Value) 
     Ok(true)
 }
 
-fn map_lookup_value(heap: &Heap, budget: &impl Budget, m: &MapObj, k: Value) -> Result<Option<Value>, Ctl> {
+fn map_lookup_value(heap: &Heap, budget: &impl Budget, m: &MapObj, k: Value) -> Result<Option<Value>, Fail> {
     Ok(map_slot(heap, budget, m, k)?.and_then(|s| m.entries[s].map(|(_, v)| v)))
 }
 
 /// The slot of key `k` in map `m`.
 #[inline]
-pub fn map_slot(heap: &Heap, budget: &impl Budget, m: &MapObj, k: Value) -> Result<Option<usize>, Ctl> {
+pub fn map_slot(heap: &Heap, budget: &impl Budget, m: &MapObj, k: Value) -> Result<Option<usize>, Fail> {
     if m.live == 0 {
         return Ok(None);
     }
@@ -433,7 +433,7 @@ pub fn find_entry<T>(
     k: Value,
     entries: &[Option<T>],
     key: impl Fn(&T) -> Value,
-) -> Result<Option<usize>, Ctl> {
+) -> Result<Option<usize>, Fail> {
     match k {
         Value::Int(i) => Ok(table.find_int(i, |s| matches!(entries[s].as_ref().map(&key), Some(Value::Int(x)) if x == i))),
         _ => find_key(heap, budget, table, hash, k, |s| entries[s].as_ref().map(&key)),
@@ -441,7 +441,7 @@ pub fn find_entry<T>(
 }
 
 /// The slot of the tuple key whose elements are `items` in map `m`.
-pub fn map_slot_tuple(heap: &Heap, budget: &impl Budget, m: &MapObj, items: &[Value]) -> Result<Option<usize>, Ctl> {
+pub fn map_slot_tuple(heap: &Heap, budget: &impl Budget, m: &MapObj, items: &[Value]) -> Result<Option<usize>, Fail> {
     if let [a, b] = *items
         && let Some(k) = Value::tuple2(a, b)
     {
@@ -479,7 +479,7 @@ pub fn map_slot_tuple(heap: &Heap, budget: &impl Budget, m: &MapObj, items: &[Va
 
 /// The slot of element `k` in set `s`.
 #[inline]
-pub fn set_slot(heap: &Heap, budget: &impl Budget, s: &SetObj, k: Value) -> Result<Option<usize>, Ctl> {
+pub fn set_slot(heap: &Heap, budget: &impl Budget, s: &SetObj, k: Value) -> Result<Option<usize>, Fail> {
     if s.live == 0 {
         return Ok(None);
     }
@@ -492,7 +492,7 @@ pub fn set_slot(heap: &Heap, budget: &impl Budget, s: &SetObj, k: Value) -> Resu
     find_key(heap, budget, &s.index, hash, k, |i| s.entries[i])
 }
 
-fn set_lookup(heap: &Heap, budget: &impl Budget, s: &SetObj, k: Value) -> Result<Option<usize>, Ctl> {
+fn set_lookup(heap: &Heap, budget: &impl Budget, s: &SetObj, k: Value) -> Result<Option<usize>, Fail> {
     set_slot(heap, budget, s, k)
 }
 
@@ -506,7 +506,7 @@ pub fn find_key(
     hash: u64,
     k: Value,
     key_at: impl Fn(usize) -> Option<Value>,
-) -> Result<Option<usize>, Ctl> {
+) -> Result<Option<usize>, Fail> {
     let mut failed = None;
     let slot = table.find(k, hash, |i| match key_at(i) {
         Some(x) => match keys_eq(heap, budget, x, k) {
@@ -526,7 +526,7 @@ pub fn find_key(
 
 /// Equality of two keys (of a `Hash` type).
 #[inline]
-pub fn keys_eq(heap: &Heap, budget: &impl Budget, a: Value, b: Value) -> Result<bool, Ctl> {
+pub fn keys_eq(heap: &Heap, budget: &impl Budget, a: Value, b: Value) -> Result<bool, Fail> {
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => Ok(x == y),
         (Value::Obj(x), Value::Obj(y)) if x == y => Ok(true),
@@ -550,7 +550,7 @@ pub fn keys_eq(heap: &Heap, budget: &impl Budget, a: Value, b: Value) -> Result<
 /// substructure are hashed in time linear in their heap size. Returns an
 /// internal error if `v` has a type that does not implement `Hash`.
 #[inline]
-pub fn hash_key(heap: &Heap, budget: &impl Budget, v: Value) -> Result<u64, Ctl> {
+pub fn hash_key(heap: &Heap, budget: &impl Budget, v: Value) -> Result<u64, Fail> {
     // Fast paths, inlined: the common scalar and string keys.
     match v {
         Value::Int(i) => Ok(int_hash(i)),
@@ -568,7 +568,7 @@ pub fn hash_key(heap: &Heap, budget: &impl Budget, v: Value) -> Result<u64, Ctl>
 
 /// [`hash_key`] for keys that are not ints or strings.
 #[inline(never)]
-fn hash_composite(heap: &Heap, budget: &impl Budget, v: Value) -> Result<u64, Ctl> {
+fn hash_composite(heap: &Heap, budget: &impl Budget, v: Value) -> Result<u64, Fail> {
     let mut w = Small::default();
     match hash_small(heap, v, SMALL_DEPTH, &mut w) {
         Some(h) => {
@@ -580,7 +580,7 @@ fn hash_composite(heap: &Heap, budget: &impl Budget, v: Value) -> Result<u64, Ct
 }
 
 /// [`hash_key`] of any key, memoizing the hashes of large ones.
-fn hash_tree(heap: &Heap, budget: &impl Budget, v: Value) -> Result<u64, Ctl> {
+fn hash_tree(heap: &Heap, budget: &impl Budget, v: Value) -> Result<u64, Fail> {
     let mut stack = HashStack::default();
     let mut memo: Option<FxHashMap<u32, u64>> = None;
     let mut nodes = 0usize;
@@ -622,7 +622,7 @@ fn hash_tree(heap: &Heap, budget: &impl Budget, v: Value) -> Result<u64, Ctl> {
                         // Inline variants have no handle of their own, so only heap containers are memoized.
                         if let (Some(memo), Value::Obj(handle)) = (&mut memo, c) {
                             if memo.len() == memo.capacity() && heap.would_exceed(memo.len().max(4) * 2 * 24) {
-                                return Err(Ctl::limit(crate::engine::LimitKind::Memory));
+                                return Err(Fail::limit(crate::engine::LimitKind::Memory));
                             }
                             memo.insert(handle, h);
                         }
@@ -667,7 +667,7 @@ fn bytes_hash(b: &[u8]) -> u64 {
 /// Computes the hash of `v` if `v` is a scalar or leaf object, or returns
 /// `Ok(None)` if `v` is a composite container (tuple, struct, or payload variant).
 #[inline]
-fn leaf_hash(heap: &Heap, budget: &impl Budget, v: Value) -> Result<Option<u64>, Ctl> {
+fn leaf_hash(heap: &Heap, budget: &impl Budget, v: Value) -> Result<Option<u64>, Fail> {
     let mut h = FxHasher::default();
     match v {
         Value::Unit | Value::Uninit => h.write_u8(0),
@@ -778,7 +778,7 @@ impl HashStack {
 }
 
 /// Starts hashing container `v`.
-fn push_container(heap: &Heap, stack: &mut HashStack, v: Value) -> Result<(), Ctl> {
+fn push_container(heap: &Heap, stack: &mut HashStack, v: Value) -> Result<(), Fail> {
     let frame = HashFrame { v, i: 0, h: container_hasher(heap, v) };
     if stack.big.is_empty() && stack.n < stack.small.len() {
         stack.small[stack.n] = Some(frame);
@@ -786,10 +786,10 @@ fn push_container(heap: &Heap, stack: &mut HashStack, v: Value) -> Result<(), Ct
         return Ok(());
     }
     if stack.len() >= MAX_DEPTH {
-        return Err(Ctl::fail("limit", "value too deeply nested to hash"));
+        return Err(Fail::new("limit", "value too deeply nested to hash"));
     }
     if stack.big.len() == stack.big.capacity() && heap.would_exceed(stack.len().max(4) * 2 * std::mem::size_of::<HashFrame>()) {
-        return Err(Ctl::limit(crate::engine::LimitKind::Memory));
+        return Err(Fail::limit(crate::engine::LimitKind::Memory));
     }
     if stack.big.is_empty() {
         stack.big.extend(stack.small[..stack.n].iter().flatten());
@@ -832,7 +832,7 @@ enum CmpWork {
 
 /// [`values_cmp`], charging `budget` for the work. Comparisons are
 /// lexicographic and stop at the first difference.
-pub fn values_cmp_metered(prog: &Program, heap: &Heap, budget: &impl Budget, a: Value, b: Value) -> Result<Ordering, Ctl> {
+pub fn values_cmp_metered(prog: &Program, heap: &Heap, budget: &impl Budget, a: Value, b: Value) -> Result<Ordering, Fail> {
     // Fast paths for the common element types of sorted lists.
     match (a, b) {
         (Value::Int(x), Value::Int(y)) | (Value::Dur(x), Value::Dur(y)) => {
@@ -943,20 +943,20 @@ pub fn values_cmp_metered(prog: &Program, heap: &Heap, budget: &impl Budget, a: 
                                 (Obj::Range(a1, b1, _), Obj::Range(a2, b2, _)) => (a1, b1).cmp(&(a2, b2)),
                                 (x, y) if let (Some(p), Some(q)) = (x.value(), y.value()) => match p.value_cmp(q) {
                                     Some(o) => o,
-                                    None => return Err(Ctl::internal(format!("{} values are not ordered", p.type_name()))),
+                                    None => return Err(Fail::internal(format!("{} values are not ordered", p.type_name()))),
                                 },
                                 (x, y) if std::mem::discriminant(x) == std::mem::discriminant(y) => {
                                     return Err(without_trait(x.kind_name(), "compared with `<`", "Ord"));
                                 }
-                                _ => return Err(Ctl::internal("values of different types are compared with `<`")),
+                                _ => return Err(Fail::internal("values of different types are compared with `<`")),
                             }
                         }
                     }
                 } else {
-                    return Err(Ctl::internal("values of different types are compared with `<`"));
+                    return Err(Fail::internal("values of different types are compared with `<`"));
                 }
             }
-            _ => return Err(Ctl::internal("values of different types are compared with `<`")),
+            _ => return Err(Fail::internal("values of different types are compared with `<`")),
         };
         if ord != Ordering::Equal {
             return Ok(ord);
@@ -981,7 +981,7 @@ pub fn values_le(prog: &Program, heap: &Heap, a: Value, b: Value) -> bool {
 }
 
 /// [`values_lt`], charging `budget`.
-pub fn values_lt_metered(prog: &Program, heap: &Heap, budget: &impl Budget, a: Value, b: Value) -> Result<bool, Ctl> {
+pub fn values_lt_metered(prog: &Program, heap: &Heap, budget: &impl Budget, a: Value, b: Value) -> Result<bool, Fail> {
     Ok(match (a, b) {
         (Value::Float(x), Value::Float(y)) => x < y,
         _ => values_cmp_metered(prog, heap, budget, a, b)? == Ordering::Less,
@@ -989,7 +989,7 @@ pub fn values_lt_metered(prog: &Program, heap: &Heap, budget: &impl Budget, a: V
 }
 
 /// [`values_le`], charging `budget`.
-pub fn values_le_metered(prog: &Program, heap: &Heap, budget: &impl Budget, a: Value, b: Value) -> Result<bool, Ctl> {
+pub fn values_le_metered(prog: &Program, heap: &Heap, budget: &impl Budget, a: Value, b: Value) -> Result<bool, Fail> {
     Ok(match (a, b) {
         (Value::Float(x), Value::Float(y)) => x <= y,
         _ => values_cmp_metered(prog, heap, budget, a, b)? != Ordering::Greater,
@@ -998,7 +998,7 @@ pub fn values_le_metered(prog: &Program, heap: &Heap, budget: &impl Budget, a: V
 
 /// If all elements in `v` have the same packed value type with `ordered_bits`,
 /// sorts `v` by its packed bits. Returns `None` otherwise.
-pub fn try_sort_packed(v: &mut [Value], heap: &Heap, budget: &impl Budget) -> Option<Result<(), Ctl>> {
+pub fn try_sort_packed(v: &mut [Value], heap: &Heap, budget: &impl Budget) -> Option<Result<(), Fail>> {
     let packed = |x: &Value| match x {
         Value::Obj(h) => match heap.obj(*h) {
             Obj::Packed(t, bits) => Some((*t, *bits)),
@@ -1019,7 +1019,7 @@ pub fn try_sort_packed(v: &mut [Value], heap: &Heap, budget: &impl Budget) -> Op
 /// charged to `budget` before each bounded step (sorting one chunk, or one
 /// merge pass), so limits are checked in between. On error `v` holds a
 /// permutation of its elements.
-pub fn try_sort_numbers(v: &mut [Value], budget: &impl Budget) -> Option<Result<(), Ctl>> {
+pub fn try_sort_numbers(v: &mut [Value], budget: &impl Budget) -> Option<Result<(), Fail>> {
     match v.first()? {
         Value::Int(_) if v.iter().all(|x| matches!(x, Value::Int(_))) => {
             Some(sort_keys(v, budget, |x| x.as_int(), Value::Int, |a: &i64, b: &i64| a.cmp(b)))
@@ -1040,7 +1040,7 @@ fn sort_keys<K: Copy>(
     key: impl Fn(Value) -> K,
     value: fn(K) -> Value,
     cmp: fn(&K, &K) -> Ordering,
-) -> Result<(), Ctl> {
+) -> Result<(), Fail> {
     const CHUNK: usize = 1 << 15;
     let n = v.len();
     let mut keys: Vec<K> = v.iter().map(|x| key(*x)).collect();
@@ -1097,7 +1097,7 @@ fn sort_keys<K: Copy>(
 /// and an inconsistent comparator cannot make it panic. Uses `v.len()`
 /// elements of scratch space; on error `v` holds a permutation of its
 /// elements.
-pub fn try_sort_by<T: Copy>(v: &mut [T], mut cmp: impl FnMut(&T, &T) -> Result<Ordering, Ctl>) -> Result<(), Ctl> {
+pub fn try_sort_by<T: Copy>(v: &mut [T], mut cmp: impl FnMut(&T, &T) -> Result<Ordering, Fail>) -> Result<(), Fail> {
     const RUN: usize = 16;
     let n = v.len();
     // Already sorted, or strictly descending (reversing keeps it stable).
@@ -1159,7 +1159,7 @@ pub fn try_sort_by<T: Copy>(v: &mut [T], mut cmp: impl FnMut(&T, &T) -> Result<O
     result
 }
 
-fn merge<T: Copy>(a: &[T], b: &[T], out: &mut [T], cmp: &mut impl FnMut(&T, &T) -> Result<Ordering, Ctl>) -> Result<(), Ctl> {
+fn merge<T: Copy>(a: &[T], b: &[T], out: &mut [T], cmp: &mut impl FnMut(&T, &T) -> Result<Ordering, Fail>) -> Result<(), Fail> {
     // Already in order (common for nearly sorted input).
     if a.is_empty() || b.is_empty() || cmp(&b[0], &a[a.len() - 1])? != Ordering::Less {
         out[..a.len()].copy_from_slice(a);
@@ -1187,7 +1187,7 @@ fn merge<T: Copy>(a: &[T], b: &[T], out: &mut [T], cmp: &mut impl FnMut(&T, &T) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vm::{CtlKind, End};
+    use crate::vm::{End, Fail};
 
     #[test]
     fn try_sort_is_a_stable_sort() {
@@ -1212,9 +1212,9 @@ mod tests {
         let mut calls = 0;
         let r = try_sort_by(&mut v, |a, b| {
             calls += 1;
-            if calls > 3000 { Err(Ctl::interrupted()) } else { Ok(a.cmp(b)) }
+            if calls > 3000 { Err(Fail::interrupted()) } else { Ok(a.cmp(b)) }
         });
-        assert!(matches!(r.map_err(Ctl::into_kind), Err(CtlKind::End(End::Interrupted))));
+        assert!(matches!(r.map_err(Fail::into_end), Err(End::Interrupted)));
         assert!(calls <= 3001);
         let mut sorted = v.clone();
         sorted.sort();
@@ -1254,7 +1254,7 @@ mod tests {
         let nested = heap.alloc(Obj::Tuple(vec![Value::Int(1), tuple].into()));
         for (v, what) in [(Value::Float(1.5), "a float"), (list, "a list"), (tuple, "a list"), (nested, "a list")] {
             let e = hash_key(&heap, &Unmetered, v).unwrap_err();
-            assert!(matches!(e.kind(), CtlKind::End(End::Internal(m)) if m.starts_with(what)), "{:?}", e.kind());
+            assert!(matches!(e.kind(), End::Internal(m) if m.starts_with(what)), "{:?}", e.kind());
         }
         let ok = heap.alloc(Obj::Tuple(vec![one, Value::Bool(true), Value::Unit].into()));
         assert!(hash_key(&heap, &Unmetered, ok).is_ok());
@@ -1270,7 +1270,7 @@ mod tests {
         let (t1, t2) = (in_tuple(&mut heap, m1), in_tuple(&mut heap, m2));
         for (a, b, what) in [(m1, m2, "a map is compared"), (t1, t2, "a map is compared"), (m1, s, "values of different types")] {
             let e = values_cmp_metered(&prog, &heap, &Unmetered, a, b).unwrap_err();
-            assert!(matches!(e.kind(), CtlKind::End(End::Internal(m)) if m.starts_with(what)), "{:?}", e.kind());
+            assert!(matches!(e.kind(), End::Internal(m) if m.starts_with(what)), "{:?}", e.kind());
         }
         let (x, y) = (in_tuple(&mut heap, s), in_tuple(&mut heap, Value::Bool(true)));
         assert!(values_cmp_metered(&prog, &heap, &Unmetered, x, x).is_ok());

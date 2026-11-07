@@ -550,7 +550,7 @@ impl<C: Send + Sync + 'static> Session<C> {
             None => Ok(None),
             Some(Ok(s)) => Ok(Some(s)),
             Some(Err(c)) => {
-                let r = vm.ending_of(c, |_| vec![]).into_run_end();
+                let r = vm.ending(c.into_end(), |_| vec![]).into_run_end();
                 conclude(vm, r, exit_code).map(|_| None)
             }
         }
@@ -569,7 +569,7 @@ impl<C: Send + Sync + 'static> Session<C> {
         // Waiting for input may take any time.
         vm.deadline = None;
         let r = match vm.drive(Idle).await {
-            Ok(stop) => vm.drain_output().map(|()| stop).map_err(|c| vm.ending_of(c, |_| vec![])),
+            Ok(stop) => vm.drain_output().map(|()| stop).map_err(|c| vm.ending(c.into_end(), |_| vec![])),
             Err(t) => Err(Ending::Trap(t)),
         };
         let r = match r {

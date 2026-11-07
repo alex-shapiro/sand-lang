@@ -11,7 +11,7 @@ use crate::native::{Binding, NamedType, NativeModule, NativeObject};
 use crate::platform::{Instant, UNIX_EPOCH};
 use crate::policy::Capability;
 use crate::vm::value::{Packing, ValueType};
-use crate::vm::{Ctl, Vm};
+use crate::vm::{Ctl, Fail, Vm};
 use jiff::civil::{Date, DateDifference, DateTime, DateTimeDifference, DateTimeRound, Time, TimeRound};
 use jiff::fmt::strtime::{self, BrokenDownTime};
 use jiff::fmt::temporal::{DateTimeParser, DateTimePrinter};
@@ -646,20 +646,20 @@ pub mod enums {
     }
 }
 
-fn rounding_options(smallest: enums::Unit, increment: i64, mode: enums::RoundingMode) -> Result<(Unit, i64, RoundMode), Ctl> {
+fn rounding_options(smallest: enums::Unit, increment: i64, mode: enums::RoundingMode) -> Result<(Unit, i64, RoundMode), Fail> {
     Ok((smallest.into(), parse_increment(increment)?, mode.into()))
 }
 
-fn parse_increment(increment: i64) -> Result<i64, Ctl> {
+fn parse_increment(increment: i64) -> Result<i64, Fail> {
     match increment {
         i @ 1..=1_000_000_000 => Ok(i),
-        i => Err(Ctl::fail("invalid", format!("the rounding increment must be from 1 to 1000000000, not {i}"))),
+        i => Err(Fail::new("invalid", format!("the rounding increment must be from 1 to 1000000000, not {i}"))),
     }
 }
 
-fn check_clock_unit(smallest: Unit, what: &str) -> Result<(), Ctl> {
+fn check_clock_unit(smallest: Unit, what: &str) -> Result<(), Fail> {
     if smallest > Unit::Hour {
-        return Err(Ctl::fail("invalid", format!("{what} can only be rounded to hours or smaller units")));
+        return Err(Fail::new("invalid", format!("{what} can only be rounded to hours or smaller units")));
     }
     Ok(())
 }
@@ -669,16 +669,16 @@ fn difference_options(
     smallest: enums::Unit,
     increment: i64,
     mode: enums::RoundingMode,
-) -> Result<DifferenceOptions, Ctl> {
+) -> Result<DifferenceOptions, Fail> {
     let (smallest, increment, mode) = rounding_options(smallest, increment, mode)?;
     Ok((Unit::from(largest).max(smallest), smallest, increment, mode))
 }
 
-fn jiff_error(e: jiff::Error) -> Ctl {
+fn jiff_error(e: jiff::Error) -> Fail {
     if e.is_range() {
-        Ctl::fail("overflow", "the result is outside the supported range (years -9999 to 9999)")
+        Fail::new("overflow", "the result is outside the supported range (years -9999 to 9999)")
     } else {
-        Ctl::fail("invalid", e)
+        Fail::new("invalid", e)
     }
 }
 
@@ -696,20 +696,20 @@ fn exact_time([h, m, s, ms, us, ns]: [i64; 6]) -> Option<Time> {
     Time::new(in_range(h, 0..=23)?, in_range(m, 0..=59)?, in_range(s, 0..=59)?, nanos).ok()
 }
 
-fn constrain_date(year: i64, month: i64, day: i64) -> Result<Date, Ctl> {
+fn constrain_date(year: i64, month: i64, day: i64) -> Result<Date, Fail> {
     if month < 1 || day < 1 {
-        return Err(Ctl::fail("invalid", format!("month and day must be positive: {month}, {day}")));
+        return Err(Fail::new("invalid", format!("month and day must be positive: {month}, {day}")));
     }
     let Some(first) = exact_date(year, month.min(12), 1) else {
-        return Err(Ctl::fail("invalid", format!("year out of range: {year}")));
+        return Err(Fail::new("invalid", format!("year out of range: {year}")));
     };
     let day = day.min(first.days_in_month().into());
-    exact_date(year, month.min(12), day).ok_or_else(|| Ctl::internal("a clamped date is invalid"))
+    exact_date(year, month.min(12), day).ok_or_else(|| Fail::internal("a clamped date is invalid"))
 }
 
-fn constrain_time([h, m, s, ms, us, ns]: [i64; 6]) -> Result<Time, Ctl> {
+fn constrain_time([h, m, s, ms, us, ns]: [i64; 6]) -> Result<Time, Fail> {
     let parts = [h.clamp(0, 23), m.clamp(0, 59), s.clamp(0, 59), ms.clamp(0, 999), us.clamp(0, 999), ns.clamp(0, 999)];
-    exact_time(parts).ok_or_else(|| Ctl::internal("a clamped time is invalid"))
+    exact_time(parts).ok_or_else(|| Fail::internal("a clamped time is invalid"))
 }
 
 fn span_relative_to(rel: &Option<ZonedDateTime>) -> SpanRelativeTo<'_> {
@@ -742,12 +742,12 @@ fn parse<T: ValueType>(vm: &mut Vm, text: Val<String>) -> Result<T, HostError> {
     x.map_err(|e| HostError::new("parse", e))
 }
 
-fn format(vm: &mut Vm, format: Val<String>, t: impl Into<BrokenDownTime>) -> Result<String, Ctl> {
+fn format(vm: &mut Vm, format: Val<String>, t: impl Into<BrokenDownTime>) -> Result<String, Fail> {
     let format = format.str(&vm.heap);
     // Bound output size before formatting.
     vm.check_memory(format.len().saturating_mul(64))?;
     vm.charge_slow_bytes(format.len())?;
-    strtime::format(format, t).map_err(|e| Ctl::fail("invalid", e))
+    strtime::format(format, t).map_err(|e| Fail::new("invalid", e))
 }
 
 /// Returns the first transition that changes the UTC offset (ignoring abbreviation-only transitions).
@@ -755,7 +755,7 @@ fn find_offset_transition<'t>(
     vm: &Vm,
     tz: &tz::TimeZone,
     transitions: impl Iterator<Item = TimeZoneTransition<'t>>,
-) -> Result<Option<Timestamp>, Ctl> {
+) -> Result<Option<Timestamp>, Fail> {
     for t in transitions {
         vm.charge(1)?;
         let before = t.timestamp().checked_sub(SignedDuration::from_secs(1)).map(|b| tz.to_offset(b));
@@ -778,10 +778,10 @@ fn positive_epoch_round_mode(mode: RoundMode) -> RoundMode {
     }
 }
 
-fn require_relative_to(spans: &[jiff::Span], largest: Option<Unit>, rel: &Option<ZonedDateTime>) -> Result<(), Ctl> {
+fn require_relative_to(spans: &[jiff::Span], largest: Option<Unit>, rel: &Option<ZonedDateTime>) -> Result<(), Fail> {
     let calendar = spans.iter().any(|s| s.get_years() != 0 || s.get_months() != 0) || matches!(largest, Some(Unit::Year | Unit::Month));
     if calendar && rel.is_none() {
-        return Err(Ctl::fail("invalid", "a span with years or months needs `relative_to`"));
+        return Err(Fail::new("invalid", "a span with years or months needs `relative_to`"));
     }
     Ok(())
 }
@@ -793,17 +793,17 @@ struct Stopwatch(Instant);
 
 impl NativeObject for Stopwatch {}
 
-fn now(vm: &Vm, call: Call) -> Result<Timestamp, Ctl> {
+fn now(vm: &Vm, call: Call) -> Result<Timestamp, Fail> {
     let nanos = match vm.wall_time(call)?.duration_since(UNIX_EPOCH) {
         Ok(d) => i128::try_from(d.as_nanos()),
         Err(e) => i128::try_from(e.duration().as_nanos()).map(|n| -n),
     };
-    nanos.ok().and_then(|n| Timestamp::from_nanosecond(n).ok()).ok_or_else(|| Ctl::internal("the system clock is out of range"))
+    nanos.ok().and_then(|n| Timestamp::from_nanosecond(n).ok()).ok_or_else(|| Fail::internal("the system clock is out of range"))
 }
 
-fn epoch_div(t: Timestamp, unit: i128) -> Result<i64, Ctl> {
+fn epoch_div(t: Timestamp, unit: i128) -> Result<i64, Fail> {
     i64::try_from(t.as_nanosecond().div_euclid(unit))
-        .map_err(|_| Ctl::fail("overflow", "the time is too far from 1970 for nanoseconds in an int"))
+        .map_err(|_| Fail::new("overflow", "the time is too far from 1970 for nanoseconds in an int"))
 }
 
 type Part<P, R> = (&'static str, fn(P) -> R);
@@ -883,7 +883,7 @@ pub(crate) fn module() -> NativeModule {
 
 fn register_module(m: &mut NativeModule) {
     m.function("utc", || TimeZone(tz::TimeZone::UTC));
-    m.vm_function("TimeZone.init", |vm: &mut Vm, name: Val<String>| {
+    m.vm_function("TimeZone.init", |vm: &mut Vm, name: Val<String>| -> Result<_, HostError> {
         let name = name.str(&vm.heap);
         vm.charge_bytes(name.len())?;
         vm.charge(64)?;
@@ -902,7 +902,7 @@ fn register_module(m: &mut NativeModule) {
         let start = vm.monotonic(call)?;
         vm.new_object(Stopwatch(start))
     });
-    m.vm_function("Stopwatch.elapsed", |vm: &mut Vm, call: Call, watch: Val<Stopwatch>| -> Result<_, Ctl> {
+    m.vm_function("Stopwatch.elapsed", |vm: &mut Vm, call: Call, watch: Val<Stopwatch>| -> Result<_, Fail> {
         let start = watch.get(&vm.heap)?.0;
         let elapsed = vm.monotonic(call)?.saturating_duration_since(start);
         Ok(SignedDuration::from_nanos(i64::try_from(elapsed.as_nanos()).unwrap_or(i64::MAX)))
@@ -910,34 +910,37 @@ fn register_module(m: &mut NativeModule) {
     m.function("midnight", Time::midnight);
     m.function("duration_span", |d: SignedDuration| jiff::Span::try_from(d).and_then(Span::new).map_err(jiff_error));
 
-    m.function("PlainDate.init", |y: i64, m: i64, d: i64| {
+    m.function("PlainDate.init", |y: i64, m: i64, d: i64| -> Result<_, HostError> {
         let date = exact_date(y, m, d).ok_or_else(|| format!("no such date: {y:04}-{m:02}-{d:02}"));
         date.map_err(|e| HostError::new("invalid", e))
     });
-    m.function("PlainTime.init", |h: i64, m: i64, s: i64, ms: i64, us: i64, ns: i64| {
+    m.function("PlainTime.init", |h: i64, m: i64, s: i64, ms: i64, us: i64, ns: i64| -> Result<_, HostError> {
         let t = exact_time([h, m, s, ms, us, ns]).ok_or_else(|| format!("no such time: {h:02}:{m:02}:{s:02}"));
         t.map_err(|e| HostError::new("invalid", e))
     });
-    m.function("PlainDateTime.init", |y: i64, m: i64, d: i64, h: i64, mi: i64, s: i64, ms: i64, us: i64, ns: i64| {
-        let dt = match (exact_date(y, m, d), exact_time([h, mi, s, ms, us, ns])) {
-            (Some(date), Some(time)) => Ok(date.to_datetime(time)),
-            (None, _) => Err(format!("no such date: {y:04}-{m:02}-{d:02}")),
-            (_, None) => Err(format!("no such time: {h:02}:{mi:02}:{s:02}")),
-        };
-        dt.map_err(|e| HostError::new("invalid", e))
-    });
-    m.function("PlainYearMonth.init", |y: i64, m: i64| {
+    m.function(
+        "PlainDateTime.init",
+        |y: i64, m: i64, d: i64, h: i64, mi: i64, s: i64, ms: i64, us: i64, ns: i64| -> Result<_, HostError> {
+            let dt = match (exact_date(y, m, d), exact_time([h, mi, s, ms, us, ns])) {
+                (Some(date), Some(time)) => Ok(date.to_datetime(time)),
+                (None, _) => Err(format!("no such date: {y:04}-{m:02}-{d:02}")),
+                (_, None) => Err(format!("no such time: {h:02}:{mi:02}:{s:02}")),
+            };
+            dt.map_err(|e| HostError::new("invalid", e))
+        },
+    );
+    m.function("PlainYearMonth.init", |y: i64, m: i64| -> Result<_, HostError> {
         let ym = exact_date(y, m, 1).map(PlainYearMonth).ok_or_else(|| format!("no such month: {y:04}-{m:02}"));
         ym.map_err(|e| HostError::new("invalid", e))
     });
-    m.function("PlainMonthDay.init", |m: i64, d: i64| {
+    m.function("PlainMonthDay.init", |m: i64, d: i64| -> Result<_, HostError> {
         let md = exact_date(MONTH_DAY_YEAR.into(), m, d).map(PlainMonthDay).ok_or_else(|| format!("no such day: {m:02}-{d:02}"));
         md.map_err(|e| HostError::new("invalid", e))
     });
     m.function("Span.init", |y: i64, mo: i64, w: i64, d: i64, h: i64, mi: i64, s: i64, ms: i64, us: i64, ns: i64| {
         let units = [y, mo, w, d, h, mi, s, ms, us, ns];
         if units.iter().any(|&u| u > 0) && units.iter().any(|&u| u < 0) {
-            return Err(Ctl::fail("invalid", "the units of a span must not have different signs"));
+            return Err(Fail::new("invalid", "the units of a span must not have different signs"));
         }
         build_span(units).and_then(Span::new).map_err(jiff_error)
     });
@@ -996,7 +999,7 @@ fn register_instant(m: &mut NativeModule) {
 }
 
 fn register_zoned(m: &mut NativeModule) {
-    m.vm_function("ZonedDateTime.parse", |vm: &mut Vm, text: Val<String>, format: Val<String>| {
+    m.vm_function("ZonedDateTime.parse", |vm: &mut Vm, text: Val<String>, format: Val<String>| -> Result<ZonedDateTime, HostError> {
         let (text, format) = (text.str(&vm.heap), format.str(&vm.heap));
         vm.charge_bytes(text.len() + format.len())?;
         let z = if format.is_empty() {
@@ -1012,7 +1015,7 @@ fn register_zoned(m: &mut NativeModule) {
         };
         z.map_err(|e| HostError::new("parse", e))
     });
-    m.function("ZonedDateTime.hours_in_day", |z: ZonedDateTime| -> Result<_, Ctl> {
+    m.function("ZonedDateTime.hours_in_day", |z: ZonedDateTime| -> Result<_, Fail> {
         let z = z.0;
         let start = z.start_of_day().map_err(jiff_error)?;
         let end = z.date().tomorrow().and_then(|d| d.to_zoned(z.time_zone().clone())).map_err(jiff_error)?;
@@ -1041,7 +1044,7 @@ fn register_zoned(m: &mut NativeModule) {
         z.map(ZonedDateTime).map_err(jiff_error)
     });
     m.function("ZonedDateTime.start_of_day", |z: ZonedDateTime| z.0.start_of_day().map(ZonedDateTime).map_err(jiff_error));
-    fn transition(vm: &mut Vm, z: ZonedDateTime, next: bool) -> Result<Option<ZonedDateTime>, Ctl> {
+    fn transition(vm: &mut Vm, z: ZonedDateTime, next: bool) -> Result<Option<ZonedDateTime>, Fail> {
         let tz = z.0.time_zone();
         let t = if next {
             find_offset_transition(vm, tz, tz.following(z.0.timestamp()))?
@@ -1063,7 +1066,7 @@ fn register_datetime(m: &mut NativeModule) {
     });
     m.function(
         "PlainDateTime.with",
-        |_: DateTime, y: i64, m: i64, d: i64, h: i64, mi: i64, s: i64, ms: i64, us: i64, ns: i64| -> Result<_, Ctl> {
+        |_: DateTime, y: i64, m: i64, d: i64, h: i64, mi: i64, s: i64, ms: i64, us: i64, ns: i64| -> Result<_, Fail> {
             Ok(constrain_date(y, m, d)?.to_datetime(constrain_time([h, mi, s, ms, us, ns])?))
         },
     );
@@ -1092,7 +1095,7 @@ fn register_date(m: &mut NativeModule) {
     m.function("PlainDate.to_zoned_datetime", |d: Date, zone: TimeZone| d.to_zoned(zone.0).map(ZonedDateTime).map_err(jiff_error));
     m.function("PlainDate.to_plain_year_month", |d: Date| PlainYearMonth(d.first_of_month()));
     m.function("PlainDate.to_plain_month_day", |d: Date| {
-        PlainMonthDay::new(d.month(), d.day()).ok_or_else(|| Ctl::internal("no month-day"))
+        PlainMonthDay::new(d.month(), d.day()).ok_or_else(|| Fail::internal("no month-day"))
     });
     m.vm_function("PlainDate.format", |vm: &mut Vm, d: Date, pattern: Val<String>| format(vm, pattern, d));
 }
@@ -1114,20 +1117,20 @@ fn register_time(m: &mut NativeModule) {
 
 fn register_year_month(m: &mut NativeModule) {
     m.vm_function("PlainYearMonth.parse", parse::<PlainYearMonth>);
-    m.function("PlainYearMonth.with", |_: PlainYearMonth, y: i64, m: i64| -> Result<_, Ctl> {
+    m.function("PlainYearMonth.with", |_: PlainYearMonth, y: i64, m: i64| -> Result<_, Fail> {
         Ok(PlainYearMonth(constrain_date(y, m, 1)?))
     });
     m.function("PlainYearMonth.add_span", |ym: PlainYearMonth, s: Span| {
         let s = s.0;
         if span_units(&s)[2..].iter().any(|&u| u != 0) {
-            return Err(Ctl::fail("invalid", format!("a PlainYearMonth can only add years and months, not {s}")));
+            return Err(Fail::new("invalid", format!("a PlainYearMonth can only add years and months, not {s}")));
         }
         ym.0.checked_add(s).map(PlainYearMonth).map_err(jiff_error)
     });
     m.function("PlainYearMonth.until", |ym: PlainYearMonth, other: PlainYearMonth, largest: enums::Unit| {
         let largest = Unit::from(largest);
         if !matches!(largest, Unit::Year | Unit::Month) {
-            return Err(Ctl::fail("invalid", "the largest unit between months must be years or months"));
+            return Err(Fail::new("invalid", "the largest unit between months must be years or months"));
         }
         let s = ym.0.until(DateDifference::new(other.0).largest(largest).smallest(Unit::Month));
         s.and_then(Span::new).map_err(jiff_error)
@@ -1135,7 +1138,7 @@ fn register_year_month(m: &mut NativeModule) {
     m.function("PlainYearMonth.to_plain_date", |ym: PlainYearMonth, day: i64| constrain_date(ym.0.year().into(), ym.0.month().into(), day));
 
     m.vm_function("PlainMonthDay.parse", parse::<PlainMonthDay>);
-    m.function("PlainMonthDay.with", |_: PlainMonthDay, m: i64, d: i64| -> Result<_, Ctl> {
+    m.function("PlainMonthDay.with", |_: PlainMonthDay, m: i64, d: i64| -> Result<_, Fail> {
         Ok(PlainMonthDay(constrain_date(MONTH_DAY_YEAR.into(), m, d)?))
     });
     m.function("PlainMonthDay.to_plain_date", |md: PlainMonthDay, year: i64| constrain_date(year, md.month().into(), md.day().into()));
@@ -1176,7 +1179,7 @@ fn register_span(m: &mut NativeModule) {
         require_relative_to(&[s.0], Some(unit), &rel)?;
         s.0.total((unit, span_relative_to(&rel))).map_err(jiff_error)
     });
-    m.function("Span.compare", |s: Span, other: Span, rel: Option<ZonedDateTime>| -> Result<_, Ctl> {
+    m.function("Span.compare", |s: Span, other: Span, rel: Option<ZonedDateTime>| -> Result<_, Fail> {
         if span_units(&s.0) == span_units(&other.0) {
             return Ok(0);
         }

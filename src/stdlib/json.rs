@@ -16,7 +16,7 @@ use crate::vm::meter::{BYTES_PER_UNIT, Meter, SLOW_BYTES_PER_UNIT, Scratch};
 use crate::vm::value::{
     FieldDefault, FieldDesc, FxHashMap, KeyIndex, KeyTable, MAP_ENTRY_SIZE, MapObj, Obj, TypeDesc, Value, ValueRef, VariantDesc, slot_fits,
 };
-use crate::vm::{AfterEffect, Ctl, NResult, Vm, fail, internal, without_trait};
+use crate::vm::{AfterEffect, Fail, Vm, fail, internal, without_trait};
 use hashbrown::HashTable;
 use std::borrow::Cow;
 use std::fmt::Write;
@@ -64,7 +64,7 @@ struct JsonIds {
 }
 
 impl JsonIds {
-    fn of(prog: &Program) -> Result<JsonIds, Ctl> {
+    fn of(prog: &Program) -> Result<JsonIds, Fail> {
         match JsonIds::find(prog) {
             Some(ids) => Ok(ids),
             None => internal("the json module is not loaded"),
@@ -114,12 +114,12 @@ pub(crate) fn module() -> NativeModule {
         });
         into_result(r)
     });
-    m.vm_function("encode", |vm: &mut Vm, value: Param<0, traits::Encode>, indent: i64| -> Result<Val<String>, Ctl> {
+    m.vm_function("encode", |vm: &mut Vm, value: Param<0, traits::Encode>, indent: i64| -> Result<Val<String>, Fail> {
         let out = encode(vm, value.raw(), indent.clamp(0, 1 << 16) as usize)?;
         Ok(Val::from_raw(vm.new_str(out)))
     });
     m.bind::<Decoded<()>>();
-    m.vm_function("decode_raw", |vm: &mut Vm, ty: Reflect<0>, text: Val<String>| -> Result<Decoded<Param<0>>, Ctl> {
+    m.vm_function("decode_raw", |vm: &mut Vm, ty: Reflect<0>, text: Val<String>| -> Result<Decoded<Param<0>>, Fail> {
         let desc = ty.desc(&vm.heap)?.clone();
         Ok(match decode(vm, &desc, text)? {
             Decoding::Done(v) => Decoded::Done(Param::from_raw(v)),
@@ -127,7 +127,7 @@ pub(crate) fn module() -> NativeModule {
             Decoding::Failed(e) => Decoded::Failed(e),
         })
     });
-    m.vm_function("to_json", |vm: &mut Vm, value: Param<0, traits::Encode>| -> Result<Val<Json>, Ctl> {
+    m.vm_function("to_json", |vm: &mut Vm, value: Param<0, traits::Encode>| -> Result<Val<Json>, Fail> {
         let ids = JsonIds::of(&vm.prog)?;
         let (prog, meter) = (&vm.prog, &vm.meter);
         let v = vm.heap.staged(|heap, st| {
@@ -142,19 +142,19 @@ pub(crate) fn module() -> NativeModule {
 
 /// `value` as a Rust [`Json`], as `json.encode` encodes it. Unlike `json.to_json`, it works
 /// also in a program that does not load the json module.
-pub(crate) fn to_json(vm: &Vm, value: Value) -> Result<Json, Ctl> {
+pub(crate) fn to_json(vm: &Vm, value: Value) -> Result<Json, Fail> {
     let text = encode(vm, value, 0)?;
     let mut p = Parser::new(&text);
     let r = p.rust_json(&vm.meter).and_then(|j| p.finish().map(|()| j));
     match r {
         Ok(j) => Ok(j),
-        Err(Error::Ctl(c)) => Err(c),
+        Err(Error::Fail(c)) => Err(c),
         Err(Error::Parse(m) | Error::Invalid(m)) => internal(format!("json.encode wrote text that does not parse: {m}")),
     }
 }
 
 /// Encodes `value` as JSON text, as `json.encode` does.
-pub(crate) fn encode(vm: &Vm, value: Value, indent: usize) -> Result<String, Ctl> {
+pub(crate) fn encode(vm: &Vm, value: Value, indent: usize) -> Result<String, Fail> {
     let mut e = Encoder {
         prog: &vm.prog,
         heap: &vm.heap,
@@ -178,7 +178,7 @@ pub(crate) enum Decoding {
 }
 
 /// Decodes JSON `text` into a value of the type `desc`, as `json.decode` does.
-pub(crate) fn decode(vm: &mut Vm, desc: &TypeDesc, text: Val<String>) -> Result<Decoding, Ctl> {
+pub(crate) fn decode(vm: &mut Vm, desc: &TypeDesc, text: Val<String>) -> Result<Decoding, Fail> {
     let ids = vm.prog.ids;
     let meter = &vm.meter;
     let (r, fills) = vm.heap.staged(|heap, st| {
@@ -195,7 +195,7 @@ pub(crate) fn decode(vm: &mut Vm, desc: &TypeDesc, text: Val<String>) -> Result<
         };
         let r = d.decode(desc).and_then(|v| d.p.finish().map(|()| v));
         let charged = d.p.charge(meter);
-        let r = charged.map_err(Error::Ctl).and(r).map(|v| match d.thunks.is_empty() {
+        let r = charged.map_err(Error::Fail).and(r).map(|v| match d.thunks.is_empty() {
             true => Decoding::Done(v),
             false => Decoding::Pending(v, d.b.list(std::mem::take(&mut d.thunks))),
         });
@@ -222,7 +222,7 @@ pub(crate) fn decode(vm: &mut Vm, desc: &TypeDesc, text: Val<String>) -> Result<
         Ok(d) => Ok(d),
         Err(Error::Parse(msg)) => fail("parse", msg),
         Err(Error::Invalid(msg)) => fail("invalid", msg),
-        Err(Error::Ctl(c)) => Err(c),
+        Err(Error::Fail(c)) => Err(c),
     }
 }
 
@@ -237,12 +237,12 @@ enum Decoded<T> {
 enum Error {
     Parse(String),
     Invalid(String),
-    Ctl(Ctl),
+    Fail(Fail),
 }
 
-impl From<Ctl> for Error {
-    fn from(c: Ctl) -> Self {
-        Error::Ctl(c)
+impl From<Fail> for Error {
+    fn from(c: Fail) -> Self {
+        Error::Fail(c)
     }
 }
 
@@ -253,7 +253,7 @@ fn into_result<T>(r: PResult<Value>) -> Result<Val<T>, HostError> {
         Ok(v) => Ok(Val::from_raw(v)),
         Err(Error::Parse(msg)) => Err(HostError::new("parse", msg)),
         Err(Error::Invalid(msg)) => Err(HostError::new("invalid", msg)),
-        Err(Error::Ctl(c)) => Err(c.into()),
+        Err(Error::Fail(c)) => Err(c.into()),
     }
 }
 
@@ -293,16 +293,16 @@ impl<'a, 's, 'h, B: MemoryCheck> Builder<'a, 's, 'h, B> {
 
     /// Checks that `extra` more bytes, beside those pending, fit in the
     /// memory limit, if `B` counts against it.
-    fn check_memory(&self, extra: usize) -> Result<(), Ctl> {
+    fn check_memory(&self, extra: usize) -> Result<(), Fail> {
         if B::CHECKS { self.st.check_memory(self.pending.saturating_add(extra)) } else { Ok(()) }
     }
 
-    fn reserve(&self) -> Result<(), Ctl> {
+    fn reserve(&self) -> Result<(), Fail> {
         self.check_memory(NODE_BYTES)
     }
 
     /// Checks list buffer growth against the memory limit so that lists of inline values cannot grow unchecked.
-    fn push(&mut self, items: &mut Vec<Value>, v: Value) -> Result<(), Ctl> {
+    fn push(&mut self, items: &mut Vec<Value>, v: Value) -> Result<(), Fail> {
         if items.len() == items.capacity() {
             let more = items.capacity().max(4);
             self.check_memory(NODE_BYTES.saturating_add(more.saturating_mul(2 * std::mem::size_of::<Value>())))?;
@@ -319,7 +319,7 @@ impl<'a, 's, 'h, B: MemoryCheck> Builder<'a, 's, 'h, B> {
         self.st.new_list(items)
     }
 
-    fn hash(&self, text: &str) -> Result<u64, Ctl> {
+    fn hash(&self, text: &str) -> Result<u64, Fail> {
         self.meter.charge_bytes(text.len())?;
         Ok(str_hash(text))
     }
@@ -341,7 +341,7 @@ impl<'a, 's, 'h, B: MemoryCheck> Builder<'a, 's, 'h, B> {
         MapBuilder { base: self.entries.len(), index: None }
     }
 
-    fn put(&mut self, m: &mut MapBuilder, hash: u64, text: Option<Cow<'a, str>>, key: Value, value: Value) -> Result<(), Ctl> {
+    fn put(&mut self, m: &mut MapBuilder, hash: u64, text: Option<Cow<'a, str>>, key: Value, value: Value) -> Result<(), Fail> {
         let segment = &self.entries[m.base..];
         let same = |e: &Entry| {
             e.hash == hash
@@ -387,7 +387,7 @@ impl<'a, 's, 'h, B: MemoryCheck> Builder<'a, 's, 'h, B> {
 
     /// Appends a unique key and value to `m`. Do not call with duplicate keys
     /// or mix with [`Builder::put`] on the same [`MapBuilder`].
-    fn append(&mut self, m: &MapBuilder, hash: u64, key: Value, value: Value) -> Result<(), Ctl> {
+    fn append(&mut self, m: &MapBuilder, hash: u64, key: Value, value: Value) -> Result<(), Fail> {
         if !slot_fits(self.entries.len() - m.base) {
             return fail("limit", "map too large");
         }
@@ -414,13 +414,13 @@ const ENTRY_PENDING: usize = std::mem::size_of::<Entry>() + MAP_ENTRY_SIZE;
 
 impl FromValue for Json {
     type Item<'a> = Json;
-    fn from_value(vm: &Vm, v: Value, conv: &mut Conversion) -> Result<Json, Ctl> {
+    fn from_value(vm: &Vm, v: Value, conv: &mut Conversion) -> Result<Json, Fail> {
         walk(&mut Reader { vm, ids: JsonIds::of(&vm.prog)?, conv }, v)
     }
 }
 
 impl IntoValue for Json {
-    fn into_value_at(self, fx: &mut AfterEffect<'_>, _: Depth) -> Result<Value, Ctl> {
+    fn into_value_at(self, fx: &mut AfterEffect<'_>, _: Depth) -> Result<Value, Fail> {
         let ids = JsonIds::of(&fx.prog)?;
         let (heap, meter) = fx.heap_and_meter();
         heap.staged(|heap, st| walk(&mut Writer { b: Builder::new(heap, st, meter), ids }, self))
@@ -445,13 +445,13 @@ trait Walk {
     type Frame;
     type Out;
 
-    fn open(&mut self, node: Self::Node, stack: &mut Vec<Self::Frame>) -> Result<Option<Self::Out>, Ctl>;
-    fn next(&mut self, frame: &mut Self::Frame) -> Result<Option<Self::Node>, Ctl>;
-    fn put(&mut self, frame: &mut Self::Frame, child: Self::Out) -> Result<(), Ctl>;
+    fn open(&mut self, node: Self::Node, stack: &mut Vec<Self::Frame>) -> Result<Option<Self::Out>, Fail>;
+    fn next(&mut self, frame: &mut Self::Frame) -> Result<Option<Self::Node>, Fail>;
+    fn put(&mut self, frame: &mut Self::Frame, child: Self::Out) -> Result<(), Fail>;
     fn close(&mut self, frame: Self::Frame) -> Self::Out;
 }
 
-fn walk<W: Walk>(w: &mut W, root: W::Node) -> Result<W::Out, Ctl> {
+fn walk<W: Walk>(w: &mut W, root: W::Node) -> Result<W::Out, Fail> {
     let mut stack = Vec::new();
     if let Some(out) = w.open(root, &mut stack)? {
         return Ok(out);
@@ -490,7 +490,7 @@ enum ReadFrame<'h> {
 const OBJ_ENTRY_BYTES: usize = std::mem::size_of::<(u64, String, Json)>() + std::mem::size_of::<usize>();
 
 impl<'h> Reader<'h, '_> {
-    fn string(&mut self, v: Value) -> Result<String, Ctl> {
+    fn string(&mut self, v: Value) -> Result<String, Fail> {
         let s = match self.vm.heap.get(v) {
             Obj::Str(s) => &**s,
             Obj::StrBuf(s) => s.as_str(),
@@ -507,7 +507,7 @@ impl<'h> Walk for Reader<'h, '_> {
     type Frame = ReadFrame<'h>;
     type Out = Json;
 
-    fn open(&mut self, v: Value, stack: &mut Vec<ReadFrame<'h>>) -> Result<Option<Json>, Ctl> {
+    fn open(&mut self, v: Value, stack: &mut Vec<ReadFrame<'h>>) -> Result<Option<Json>, Fail> {
         let (vm, ids) = (self.vm, self.ids);
         vm.charge(1)?;
         let id = vm.heap.variant_id(v);
@@ -539,7 +539,7 @@ impl<'h> Walk for Reader<'h, '_> {
         }))
     }
 
-    fn next(&mut self, frame: &mut ReadFrame<'h>) -> Result<Option<Value>, Ctl> {
+    fn next(&mut self, frame: &mut ReadFrame<'h>) -> Result<Option<Value>, Fail> {
         Ok(match frame {
             ReadFrame::Arr(_, items) => items.next().copied(),
             ReadFrame::Obj(_, entries, key) => match entries.find_map(|e| *e) {
@@ -552,7 +552,7 @@ impl<'h> Walk for Reader<'h, '_> {
         })
     }
 
-    fn put(&mut self, frame: &mut ReadFrame<'h>, child: Json) -> Result<(), Ctl> {
+    fn put(&mut self, frame: &mut ReadFrame<'h>, child: Json) -> Result<(), Fail> {
         match frame {
             ReadFrame::Arr(items, _) => items.push(child),
             ReadFrame::Obj(fields, _, key) => {
@@ -585,7 +585,7 @@ impl Walk for Writer<'_, '_, '_> {
     type Frame = WriteFrame;
     type Out = Value;
 
-    fn open(&mut self, j: Json, stack: &mut Vec<WriteFrame>) -> Result<Option<Value>, Ctl> {
+    fn open(&mut self, j: Json, stack: &mut Vec<WriteFrame>) -> Result<Option<Value>, Fail> {
         let (b, ids) = (&mut self.b, self.ids);
         b.reserve()?;
         b.meter.charge(1)?;
@@ -610,7 +610,7 @@ impl Walk for Writer<'_, '_, '_> {
         }))
     }
 
-    fn next(&mut self, frame: &mut WriteFrame) -> Result<Option<Json>, Ctl> {
+    fn next(&mut self, frame: &mut WriteFrame) -> Result<Option<Json>, Fail> {
         Ok(match frame {
             WriteFrame::Arr(items, _) => items.next(),
             WriteFrame::Obj(entries, _, key, hash) => match entries.next() {
@@ -624,7 +624,7 @@ impl Walk for Writer<'_, '_, '_> {
         })
     }
 
-    fn put(&mut self, frame: &mut WriteFrame, child: Value) -> Result<(), Ctl> {
+    fn put(&mut self, frame: &mut WriteFrame, child: Value) -> Result<(), Fail> {
         match frame {
             WriteFrame::Arr(_, out) => self.b.push(out, child),
             WriteFrame::Obj(_, m, key, hash) => {
@@ -688,7 +688,7 @@ impl<'a> Parser<'a> {
         Parser { src, b: src.as_bytes(), pos: 0, depth: 0, charged: 0 }
     }
 
-    fn charge(&mut self, meter: &Meter) -> Result<(), Ctl> {
+    fn charge(&mut self, meter: &Meter) -> Result<(), Fail> {
         let consumed = self.pos.saturating_sub(self.charged);
         self.charged = self.pos;
         meter.charge(1 + (consumed / SLOW_BYTES_PER_UNIT) as u64)
@@ -1060,7 +1060,7 @@ impl<'a> Source<'a> for Decoder<'a, '_, '_, '_> {
 
 const LOOKUPS_PER_UNIT: usize = 16;
 
-fn lookup<T>(meter: &Meter, items: &[T], pred: impl Fn(&T) -> bool) -> Result<Option<usize>, Ctl> {
+fn lookup<T>(meter: &Meter, items: &[T], pred: impl Fn(&T) -> bool) -> Result<Option<usize>, Fail> {
     meter.charge(1 + (items.len() / LOOKUPS_PER_UNIT) as u64)?;
     Ok(items.iter().position(pred))
 }
@@ -1263,7 +1263,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                 });
                 match found {
                     Some(&d) => self.decode(d),
-                    None => Err(Error::Ctl(Ctl::internal("json.decode: unresolved recursive type"))),
+                    None => Err(Error::Fail(Fail::internal("json.decode: unresolved recursive type"))),
                 }
             }
             TypeDesc::Value { name, parse } => {
@@ -1276,7 +1276,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
             }
             TypeDesc::Range => self.decode_range(),
             TypeDesc::Unsupported(name) => Err(self.unsupported(&format!("values of type {name}"))),
-            TypeDesc::Param(_) => Err(Error::Ctl(Ctl::internal("json.decode: uninstantiated type parameter"))),
+            TypeDesc::Param(_) => Err(Error::Fail(Fail::internal("json.decode: uninstantiated type parameter"))),
         }
     }
 
@@ -1411,7 +1411,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
         Ok(self.b.st.alloc(Obj::Range(start, end, inclusive)))
     }
 
-    fn field_index(&mut self, id: u32, fields: &'d [FieldDesc], key: &str, guess: usize) -> Result<Option<usize>, Ctl> {
+    fn field_index(&mut self, id: u32, fields: &'d [FieldDesc], key: &str, guess: usize) -> Result<Option<usize>, Fail> {
         if fields.get(guess).is_some_and(|f| f.0 == key) {
             return Ok(Some(guess));
         }
@@ -1452,7 +1452,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
             TypeDesc::Value { parse, .. } => {
                 self.b.meter.charge_bytes(key.len())?;
                 let v = parse(&key).map_err(|msg| self.fail(&format!("invalid map key `{quoted}`: {msg}")))?;
-                let Some(x) = v.value() else { return Err(Error::Ctl(Ctl::internal("json.decode: not a value"))) };
+                let Some(x) = v.value() else { return Err(Error::Fail(Fail::internal("json.decode: not a value"))) };
                 let (hash, text) = (x.value_hash(), x.text());
                 return Ok((self.b.st.alloc(v), hash, Some(Cow::Owned(text))));
             }
@@ -1546,14 +1546,14 @@ struct Encoder<'v> {
 }
 
 impl Encoder<'_> {
-    fn step(&mut self) -> Result<(), Ctl> {
+    fn step(&mut self) -> Result<(), Fail> {
         let written = self.out.len() - self.charged;
         self.charged = self.out.len();
         self.meter.charge(1 + (written / BYTES_PER_UNIT) as u64)?;
         self.scratch.check(self.heap, self.out.capacity())
     }
 
-    fn newline(&mut self, level: usize) -> Result<(), Ctl> {
+    fn newline(&mut self, level: usize) -> Result<(), Fail> {
         if self.indent > 0 {
             let n = self.indent.saturating_mul(level);
             self.scratch.check(self.heap, self.out.len().saturating_add(n))?;
@@ -1563,15 +1563,15 @@ impl Encoder<'_> {
         Ok(())
     }
 
-    fn string(&mut self, s: &str) -> Result<(), Ctl> {
+    fn string(&mut self, s: &str) -> Result<(), Fail> {
         if s.len() > 1024 && self.heap.would_exceed(self.out.len().saturating_add(escaped_len(s))) {
-            return Err(Ctl::limit(crate::engine::LimitKind::Memory));
+            return Err(Fail::limit(crate::engine::LimitKind::Memory));
         }
         write_str(&mut self.out, s);
         Ok(())
     }
 
-    fn array(&mut self, len: usize, items: impl Iterator<Item = Value>, level: usize) -> Result<(), Ctl> {
+    fn array(&mut self, len: usize, items: impl Iterator<Item = Value>, level: usize) -> Result<(), Fail> {
         if level >= MAX_DEPTH {
             return fail("limit", "value too deeply nested to encode as JSON");
         }
@@ -1597,8 +1597,8 @@ impl Encoder<'_> {
         len: usize,
         entries: impl Iterator<Item = T>,
         level: usize,
-        mut entry: impl FnMut(&mut Self, T) -> Result<Value, Ctl>,
-    ) -> Result<(), Ctl> {
+        mut entry: impl FnMut(&mut Self, T) -> Result<Value, Fail>,
+    ) -> Result<(), Fail> {
         if level >= MAX_DEPTH {
             return fail("limit", "value too deeply nested to encode as JSON");
         }
@@ -1621,7 +1621,7 @@ impl Encoder<'_> {
         Ok(())
     }
 
-    fn value(&mut self, mut v: Value, level: usize) -> Result<(), Ctl> {
+    fn value(&mut self, mut v: Value, level: usize) -> Result<(), Fail> {
         self.step()?;
         let (prog, heap) = (self.prog, self.heap);
         while heap.variant_id(v) == prog.ids.some {
@@ -1643,7 +1643,7 @@ impl Encoder<'_> {
                 Obj::StrBuf(s) => self.string(s)?,
                 Obj::Bytes(b) => {
                     if heap.would_exceed(self.out.len().saturating_add(b.len() / 3 * 4 + 4)) {
-                        return Err(Ctl::limit(crate::engine::LimitKind::Memory));
+                        return Err(Fail::limit(crate::engine::LimitKind::Memory));
                     }
                     self.meter.charge_slow_bytes(b.len())?;
                     self.out.push('"');
@@ -1689,7 +1689,7 @@ impl Encoder<'_> {
         Ok(())
     }
 
-    fn variant(&mut self, id: u32, fields: &[Value], level: usize) -> Result<(), Ctl> {
+    fn variant(&mut self, id: u32, fields: &[Value], level: usize) -> Result<(), Fail> {
         let Some(rt) = self.prog.variants.get(id as usize) else { return internal("json.encode: unknown variant ID") };
         if self.ids.is_some_and(|j| j.has(id)) {
             return self.value(fields.first().copied().unwrap_or(Value::Unit), level);
@@ -1728,7 +1728,7 @@ fn json_number(st: &mut Staging, ids: &JsonIds, n: Value) -> Value {
     st.new_variant(id, &[n])
 }
 
-fn format_map_key<'v>(prog: &'v Program, heap: &'v Heap, k: Value) -> Result<Cow<'v, str>, Ctl> {
+fn format_map_key<'v>(prog: &'v Program, heap: &'v Heap, k: Value) -> Result<Cow<'v, str>, Fail> {
     let bad = || fail("invalid", "a JSON object key must be a string, int, duration, bool, payload-less variant, or value type");
     Ok(match k {
         Value::Int(i) | Value::Dur(i) => Cow::Owned(i.to_string()),
@@ -1793,7 +1793,7 @@ struct Converter<'a, 's, 'h> {
 }
 
 impl<'a> Converter<'a, '_, '_> {
-    fn convert(&mut self, mut v: Value, depth: usize) -> NResult {
+    fn convert(&mut self, mut v: Value, depth: usize) -> Result<Value, Fail> {
         let (prog, heap, ids) = (self.prog, self.heap, self.ids);
         self.b.reserve()?;
         self.b.meter.charge(1)?;
@@ -1906,12 +1906,12 @@ impl<'a> Converter<'a, '_, '_> {
         })
     }
 
-    fn put(&mut self, m: &mut MapBuilder, key: Value, text: Cow<'a, str>, value: Value) -> Result<(), Ctl> {
+    fn put(&mut self, m: &mut MapBuilder, key: Value, text: Cow<'a, str>, value: Value) -> Result<(), Fail> {
         let hash = self.b.hash(&text)?;
         self.b.put(m, hash, Some(text), key, value)
     }
 
-    fn check_depth(&self, depth: usize) -> Result<(), Ctl> {
+    fn check_depth(&self, depth: usize) -> Result<(), Fail> {
         if depth >= MAX_DEPTH { fail("limit", "value too deeply nested to convert to JSON") } else { Ok(()) }
     }
 
@@ -1920,7 +1920,7 @@ impl<'a> Converter<'a, '_, '_> {
         *self.names.entry(id).or_insert_with(|| self.b.st.new_str(prog.variants[id as usize].name.as_str()))
     }
 
-    fn array(&mut self, items: impl Iterator<Item = Value>, depth: usize) -> NResult {
+    fn array(&mut self, items: impl Iterator<Item = Value>, depth: usize) -> Result<Value, Fail> {
         self.check_depth(depth)?;
         let mut out = Vec::new();
         for x in items {
@@ -1931,7 +1931,7 @@ impl<'a> Converter<'a, '_, '_> {
         Ok(self.b.st.new_variant(self.ids.arr, &[list]))
     }
 
-    fn variant(&mut self, id: u32, fields: &[Value], depth: usize) -> NResult {
+    fn variant(&mut self, id: u32, fields: &[Value], depth: usize) -> Result<Value, Fail> {
         let (prog, ids) = (self.prog, self.ids);
         let Some(rt) = prog.variants.get(id as usize) else { return internal("json.encode: unknown variant ID") };
         self.check_depth(depth)?;

@@ -4,24 +4,24 @@ use crate::check::ModKind;
 use crate::native::NativeModule;
 use crate::native::convert::HostError;
 use crate::native::func::Call;
-use crate::vm::{Ctl, Vm};
+use crate::vm::{Fail, Vm};
 
 pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("uuid", ModKind::Std, include_str!("uuid.sand"));
-    m.vm_function("v4", |vm: &mut Vm| -> Result<_, Ctl> {
+    m.vm_function("v4", |vm: &mut Vm| -> Result<_, Fail> {
         let mut b = random_bytes(vm);
         b[6] = (b[6] & 0x0f) | 0x40;
         b[8] = (b[8] & 0x3f) | 0x80;
         Ok(format_uuid(&b))
     });
-    m.vm_function("unix_millis", |vm: &mut Vm, call: Call| -> Result<_, Ctl> {
+    m.vm_function("unix_millis", |vm: &mut Vm, call: Call| -> Result<_, Fail> {
         let ms = vm.wall_time(call)?.duration_since(crate::platform::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
         Ok(ms.min(i64::MAX as u128) as i64)
     });
     // Starts each millisecond's counter at a random value in the lower half
     // of its range, leaving room for increments.
     m.vm_function("random_counter", |vm: &mut Vm| vm.host.rng.below(0x800) as i64);
-    m.vm_function("v7_from", |vm: &mut Vm, millis: i64, counter: i64| -> Result<_, Ctl> {
+    m.vm_function("v7_from", |vm: &mut Vm, millis: i64, counter: i64| -> Result<_, Fail> {
         let millis = (millis as u64) & 0xffff_ffff_ffff;
         let counter = (counter as u64) & 0xfff;
         let mut b = random_bytes(vm);
@@ -31,9 +31,11 @@ pub(crate) fn module() -> NativeModule {
         b[8] = (b[8] & 0x3f) | 0x80;
         Ok(format_uuid(&b))
     });
-    m.function("parse", |s: &str| match parse(s) {
-        Some(b) => Ok(format_uuid(&b)),
-        None => Err(HostError::new("parse", format!("invalid UUID: {:?}", super::truncate(s, 64)))),
+    m.function("parse", |s: &str| -> Result<String, HostError> {
+        match parse(s) {
+            Some(b) => Ok(format_uuid(&b)),
+            None => Err(HostError::new("parse", format!("invalid UUID: {:?}", super::truncate(s, 64)))),
+        }
     });
     m
 }

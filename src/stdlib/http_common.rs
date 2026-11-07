@@ -9,8 +9,8 @@ use crate::native::ty::Val;
 use crate::native::{NativeModule, NativeObject};
 use crate::vm::iomem::Reservation;
 use crate::vm::journal::{BuildFn, Identity, Payload};
-use crate::vm::value::to_usize_saturating;
-use crate::vm::{AfterEffect, Ctl, Vm};
+use crate::vm::value::{Value, to_usize_saturating};
+use crate::vm::{AfterEffect, Ctl, Fail, Vm};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -151,7 +151,7 @@ pub(crate) fn header_pairs(vm: &Vm, list: Val<Vec<(String, String)>>) -> Result<
     let mut pairs = Vec::with_capacity(items.len());
     let mut size = 0usize;
     for &item in items {
-        let [k, v] = vm.heap.fields(item) else { return Err(Ctl::internal("a header is not a pair").into()) };
+        let [k, v] = vm.heap.fields(item) else { return Err(Fail::internal("a header is not a pair").into()) };
         let (k, v) = (vm.str(*k), vm.str(*v));
         size = size.saturating_add(k.len() + v.len() + 64);
         vm.charge_bytes(k.len() + v.len())?;
@@ -232,11 +232,11 @@ impl Prepared {
 /// Builds the response from `url`, or the error, that the journal's
 /// encoding of the outcome of a request holds ([`HttpOutcome`]).
 pub(crate) fn recorded_response(url: String, max_body: usize) -> BuildFn {
-    Box::new(move |fx: &mut AfterEffect<'_>, payload: &[u8]| -> crate::vm::NResult {
+    Box::new(move |fx: &mut AfterEffect<'_>, payload: &[u8]| -> Result<Value, Fail> {
         let r = match HttpOutcome::from_payload(payload) {
             Some(Ok(HttpResponse { status, headers, body })) => Ok(response(fx, url, status, headers, BodyReader::memory(body, max_body))),
-            Some(Err(e)) => Err(HostError::from(e)),
-            None => return Err(Ctl::internal("a journaled HTTP response is malformed")),
+            Some(Err(e)) => Err(HostError::<Fail>::from(e)),
+            None => return Err(Fail::internal("a journaled HTTP response is malformed")),
         };
         r.into_value(fx)
     })
@@ -512,7 +512,7 @@ fn read_body<R: IntoValue + Send + 'static>(
     call: Call,
     body: Val<Body>,
     what: BodyRead,
-    done: fn(&Vm, Option<Vec<u8>>) -> Result<R, HostError>,
+    done: stream::ReadDone<R>,
 ) -> Suspended<R> {
     let body = body.get(&vm.heap)?;
     let Some(reader) = body.reader.clone() else { return Err(HostError::new("closed", "body closed")) };

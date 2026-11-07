@@ -2017,7 +2017,7 @@ run without a journal for a host that runs both kinds. A failed operation return
 | `Error::Argument { index, error }`    | An argument of `Engine::call` does not decode to its parameter's type.      |
 | `Error::Internal { message, trace }`  | An internal invariant failed or a host callback panicked (§10.3).           |
 | `Error::Diverged { seq, message }`    | The run does not do what its journal records at entry `seq` (§16.7).        |
-| `Error::Aborted(reason)`              | The host ended the run: `Ctl::abort`, or a failed `Journal::flush` (§16.7). |
+| `Error::Aborted(reason)`              | The host ended the run: `Fail::abort`, or a failed `Journal::flush` (§16.7). |
 
 `Engine::compile_file` compiles a file and its imports without running it, and
 `Engine::run_program` runs the result on any engine. The program holds the host modules that
@@ -2189,14 +2189,17 @@ kind: kind))` in Sand, whereas `?` converts a `Ctl` into a `HostError` that
   with the corresponding standard error kind.
 - `Result<T, std::io::Error>`, `Result<T, String>`, and `Result<T, &str>` also
   map to `Result<T, Error>`; string errors use the kind `"error"`.
-- `Result<T, Ctl>` maps to the Sand return type `T`. Returning `Err(ctl)`
-  aborts the run with a runtime error via `Ctl::fail`, a resource limit error,
-  or an exit code.
+- `Result<T, Ctl>` and `Result<T, Fail>` map to the Sand return type `T`.
+  Returning `Err(fail)` ends the run with a runtime error (`Fail::new`), a
+  resource limit error, an exit code or an abort. A `Ctl` is a `Fail` or a
+  request to the scheduler, such as a prompt for a permission.
 - `Result<Later<T, E>, E>` suspends the calling task on a future and maps to
   the same Sand return type as `Result<T, E>`. When the future completes, its
   closure gives the result. The closure runs after the effect, so it gets an
   `AfterEffect`, a view of the VM whose allocations do not check the memory
-  limit.
+  limit, and it can only fail: it returns `Result<T, Fail>` for `E = Ctl`
+  and `Result<T, HostError<Fail>>` for `E = HostError`. A `HostError<Fail>`
+  holds a Sand `Error` or a `Fail`, and no request.
 
 A host module can read host data of each run, its context. A module made with
 `NativeModule::<C>::with_context(name)` registers such functions with
@@ -2551,7 +2554,10 @@ journaled function must be plain data: no functions, tasks, channels, generic
 parameters, or values of bound object types, and no values of bound value
 types in the result. The Rust compiler enforces this rule: the parameter
 types must implement `native::ty::JournalArg` and the return type must implement
-`native::ty::JournalData`. A journaled function does not read journal inputs,
+`native::ty::JournalData`. A journaled function can only fail: its errors are
+`Fail` or `HostError<Fail>`, not `Ctl` or `HostError`. A request to the
+scheduler, such as a yield, would end the call without a journal entry, so
+that replay finds another entry where the run expects the call's result. A journaled function does not read journal inputs,
 because replay does not call it: it cannot take a `Call` parameter, which
 `Vm::wall_time` and `Vm::monotonic` need, and it cannot get the run's random
 number generator. A `Call` borrows the native invocation that it comes from, so
@@ -2585,7 +2591,7 @@ that sends the request again gives the same number. The journal records a
 request that the filter refuses as a failed request.
 
 **Ending a run from the host.** A host function can end the run with
-`Ctl::abort(reason)` when a condition of the host makes it stop, such as the
+`Fail::abort(reason)` when a condition of the host makes it stop, such as the
 loss of the host's right to execute the run or an outage of its storage.
 `reason` is a Rust error of the host. The run fails with `Error::Aborted`,
 from which `HostAbort::downcast_ref` gets the reason back. The engine does not

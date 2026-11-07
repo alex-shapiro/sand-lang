@@ -2,7 +2,7 @@
 
 use crate::check::ModKind;
 use crate::native::NativeModule;
-use crate::vm::{Ctl, fail};
+use crate::vm::{Fail, fail};
 
 pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("math", ModKind::Std, include_str!("math.sand"));
@@ -42,7 +42,7 @@ pub(crate) fn module() -> NativeModule {
         let l = (x.unsigned_abs() / gcd(x, y)).checked_mul(y.unsigned_abs());
         int_result(l.unwrap_or(u64::MAX))
     });
-    m.function("isqrt", |n: i64| {
+    m.function("isqrt", |n: i64| -> Result<i64, Fail> {
         if n < 0 {
             return fail("invalid", format!("isqrt of negative number {n}"));
         }
@@ -60,7 +60,7 @@ fn gcd(a: i64, b: i64) -> u64 {
 }
 
 /// Converts a non-negative result to `int`, failing if it does not fit.
-fn int_result(v: u64) -> Result<i64, Ctl> {
+fn int_result(v: u64) -> Result<i64, Fail> {
     match i64::try_from(v) {
         Ok(i) => Ok(i),
         Err(_) => fail("overflow", "integer overflow"),
