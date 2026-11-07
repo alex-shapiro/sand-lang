@@ -1107,9 +1107,12 @@ fn time_spent_in_flushes_does_not_count_against_the_wall_time_limit() {
     assert!(r.is_ok(), "{r:?}");
 }
 
+/// The name and journal sequence number of each effect, in call order.
+type EffectSeqs = Arc<Mutex<Vec<(String, Option<u64>)>>>;
+
 #[test]
 fn effects_have_the_same_sequence_number_in_every_execution() {
-    let seqs: Arc<Mutex<Vec<(String, Option<u64>)>>> = Arc::default();
+    let seqs: EffectSeqs = Arc::default();
     let mut m = NativeModule::new("fx");
     let s = seqs.clone();
     m.vm_function(
