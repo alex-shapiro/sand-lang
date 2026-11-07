@@ -18,7 +18,7 @@ use crate::types::{FnId, ModId};
 use crate::vm::bytecode::Program;
 use crate::vm::heap::GcStats;
 use crate::vm::sched::{IoShared, IoTable, RunEnd};
-use crate::vm::{Always, Host, HostFn, NativeEntry, OutputSink, Rng, SharedSink, TraceEntry, Trap, Vm, entropy_seed};
+use crate::vm::{Always, Host, HostFn, NativeEntry, OutputSink, Rng, SharedSink, TraceFrame, Trap, Vm, entropy_seed};
 use parking_lot::Mutex;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
@@ -87,8 +87,6 @@ impl fmt::Display for LimitKind {
         })
     }
 }
-
-pub type TraceFrame = TraceEntry;
 
 #[derive(Debug, Clone)]
 pub enum Error {

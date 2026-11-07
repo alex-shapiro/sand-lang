@@ -300,7 +300,7 @@ pub struct Fiber {
 
 /// One frame of a runtime error's stack trace.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TraceEntry {
+pub struct TraceFrame {
     pub function: String,
     pub file: String,
     pub line: usize,
@@ -311,12 +311,12 @@ pub enum Trap {
     /// The script failed with an error, `kind: message`.
     Error {
         message: String,
-        trace: Vec<TraceEntry>,
+        trace: Vec<TraceFrame>,
     },
     /// An invariant of the engine broke.
     Internal {
         message: String,
-        trace: Vec<TraceEntry>,
+        trace: Vec<TraceFrame>,
     },
     Limit(LimitKind),
     Interrupted,
@@ -1604,7 +1604,7 @@ impl Vm {
         }
     }
 
-    pub fn trace_of(&self, fiber: &Fiber, ip: Option<u32>) -> Vec<TraceEntry> {
+    pub fn trace_of(&self, fiber: &Fiber, ip: Option<u32>) -> Vec<TraceFrame> {
         let mut out = Vec::new();
         let n = fiber.frames.len();
         for (i, fr) in fiber.frames.iter().enumerate().rev() {
@@ -1615,7 +1615,7 @@ impl Vm {
     }
 
     /// Returns the innermost script frame that called the active native function.
-    pub(crate) fn native_caller(&self) -> Option<TraceEntry> {
+    pub(crate) fn native_caller(&self) -> Option<TraceFrame> {
         let mut out = Vec::new();
         self.trace_frame(self.caller_site.0, self.caller_site.1, &mut out);
         out.into_iter().next()
@@ -1623,7 +1623,7 @@ impl Vm {
 
     /// Appends the stack trace entries for `proto` at instruction `at` to `out`,
     /// from innermost inlined call to outermost.
-    fn trace_frame(&self, proto: u32, at: u32, out: &mut Vec<TraceEntry>) {
+    fn trace_frame(&self, proto: u32, at: u32, out: &mut Vec<TraceFrame>) {
         let proto = &self.prog.protos[proto as usize];
         if proto.name == "<entry>" || proto.name == FILL_PROTO {
             return;
@@ -1632,7 +1632,7 @@ impl Vm {
         let mut line = proto.lines.get(idx).copied().unwrap_or(0) as usize;
         let mut site = proto.sites.get(idx).copied().unwrap_or(0);
         while let Some(s) = (site as usize).checked_sub(1).and_then(|i| proto.inlined.get(i)) {
-            out.push(TraceEntry {
+            out.push(TraceFrame {
                 function: s.name.clone(),
                 file: self.prog.files.get(s.file as usize).cloned().unwrap_or_default(),
                 line,
@@ -1645,6 +1645,6 @@ impl Vm {
         } else {
             proto.name.clone()
         };
-        out.push(TraceEntry { function: name, file: self.prog.files.get(proto.file as usize).cloned().unwrap_or_default(), line });
+        out.push(TraceFrame { function: name, file: self.prog.files.get(proto.file as usize).cloned().unwrap_or_default(), line });
     }
 }

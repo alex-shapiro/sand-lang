@@ -678,7 +678,7 @@ fn write_files(fs: &MemFs, options: &JsValue) -> Result<(), JsValue> {
 }
 
 /// The frames of a trace, innermost first.
-fn frames(trace: &[sandlang::engine::TraceFrame]) -> JsValue {
+fn frames(trace: &[sandlang::vm::TraceFrame]) -> JsValue {
     array(trace, |t| object(&[("function", t.function.as_str().into()), ("file", t.file.as_str().into()), ("line", t.line.into())]))
 }
 

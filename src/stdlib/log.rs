@@ -45,7 +45,7 @@ pub struct LogRecord {
     /// Key-value fields in insertion order.
     pub fields: Vec<(String, String)>,
     /// Source location of the `log` call.
-    pub location: Option<crate::engine::TraceFrame>,
+    pub location: Option<crate::vm::TraceFrame>,
 }
 
 /// Formats the record as `LEVEL message key=value ...`, quoting empty messages,
