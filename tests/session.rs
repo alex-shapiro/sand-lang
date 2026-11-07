@@ -1071,6 +1071,28 @@ fn each_read_that_waits_is_a_new_request() {
 }
 
 #[test]
+fn a_request_that_closes_stays_closed() {
+    let (config, feed) = Config::new().policy(RulePolicy::allow_all()).stdin_feed();
+    let mut r = Repl::with(config);
+    r.ok("import io");
+    let Repl { session, rt, .. } = &mut r;
+    let (value, ()) = rt.block_on(async {
+        let answer = async {
+            let first = feed.wait_for_request().await;
+            feed.send("ab");
+            first.wait_until_closed().await;
+            let second = feed.wait_for_request().await;
+            assert_ne!(first, second);
+            assert!(!first.is_open());
+            assert!(!first.answer("late"));
+            assert!(second.answer("c"));
+        };
+        tokio::join!(session.eval("io.stdin.read_line()?"), answer)
+    });
+    assert_eq!(value.unwrap().as_deref(), Some("Some(\"abc\")"));
+}
+
+#[test]
 fn each_engine_reads_its_own_feed() {
     let (first_config, first_feed) = Config::new().policy(RulePolicy::allow_all()).stdin_feed();
     let (second_config, second_feed) = Config::new().policy(RulePolicy::allow_all()).stdin_feed();

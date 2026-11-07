@@ -2013,8 +2013,10 @@ standard input, as the `sand` command does, forwards that input to the feed.
 
 A host learns that a script wants input from `StdinFeed::wait_for_request`. It
 waits until a read needs input, even if other tasks are running, and returns a
-`StdinRequest` for that read. `StdinRequest::wait_until_closed` waits until the
-read gets input or ends. `StdinRequest::wait_until_nothing_else_runs` waits
+`StdinRequest` for that wait. `StdinRequest::wait_until_closed` waits until the
+read gets input or ends. A request that closes stays closed: if a read takes
+part of a line from `StdinFeed::send` and waits again, the new wait is a new
+request. `StdinRequest::wait_until_nothing_else_runs` waits
 until no other task of the script can run while the read waits; a host that
 shares a terminal with the script, such as `sand repl`, waits for this before
 it takes a line from the terminal.

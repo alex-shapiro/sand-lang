@@ -20,19 +20,20 @@ pub struct StdinFeed {
     channel: Arc<StdinChannel>,
 }
 
-/// A pending standard input read waiting for a host response. Respond to the
-/// read with [`StdinRequest::answer`] or [`StdinRequest::dismiss`]. Two
-/// requests are equal if they refer to the same read operation.
+/// A wait of a standard input read for host input. Respond to the wait with
+/// [`StdinRequest::answer`] or [`StdinRequest::dismiss`]. Two requests are
+/// equal if they refer to the same wait. A request that closes stays closed:
+/// if the read takes part of a line and waits again, the new wait is a new
+/// request.
 #[derive(Clone)]
 pub struct StdinRequest {
     channel: Arc<StdinChannel>,
-    read: StdinReadId,
+    wait: StdinWaitId,
 }
 
-/// Identifier of a standard input read, assigned the first time the read waits
-/// for input.
+/// Identifier of one wait of a standard input read for input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct StdinReadId(NonZeroU64);
+struct StdinWaitId(NonZeroU64);
 
 /// State shared between the host's [`StdinFeed`] handles and the session's
 /// reader.
@@ -46,7 +47,7 @@ pub(crate) struct StdinChannel {
 #[derive(Default)]
 struct StdinChannelState {
     queue: VecDeque<QueuedInput>,
-    reads_waited: u64,
+    waits_started: u64,
     /// True if the engine has no runnable tasks or ready I/O.
     engine_idle: bool,
     /// The active read operation, once it has waited for input.
@@ -55,16 +56,17 @@ struct StdinChannelState {
 
 /// A read operation that has waited for input.
 struct CurrentRead {
-    id: StdinReadId,
-    /// True if the read is currently waiting for input. Set to `false` when the
-    /// read consumes queued input, and back to `true` if it waits again.
+    /// The read's latest wait.
+    wait: StdinWaitId,
+    /// True while the latest wait is open. Set to `false` when the read
+    /// consumes queued input.
     needs_input: bool,
     waker: Option<Waker>,
 }
 
 struct QueuedInput {
-    /// Target read, or `None` for any read.
-    target: Option<StdinReadId>,
+    /// Target wait, or `None` for any read.
+    target: Option<StdinWaitId>,
     /// Input bytes, or `None` for EOF.
     data: Option<Vec<u8>>,
     /// The offset in `data` of the first byte that no read has used.
@@ -72,8 +74,8 @@ struct QueuedInput {
 }
 
 impl QueuedInput {
-    fn is_for_read(&self, read: Option<StdinReadId>) -> bool {
-        self.target.is_none() || self.target == read
+    fn is_for_wait(&self, wait: Option<StdinWaitId>) -> bool {
+        self.target.is_none() || self.target == wait
     }
 }
 
@@ -105,8 +107,8 @@ impl StdinFeed {
     /// Waits until a read needs input, even if other tasks are running, and
     /// returns its [`StdinRequest`].
     pub async fn wait_for_request(&self) -> StdinRequest {
-        let read = self.channel.wait_until(StdinChannelState::waiting_read_id).await;
-        StdinRequest { channel: self.channel.clone(), read }
+        let wait = self.channel.wait_until(StdinChannelState::open_wait).await;
+        StdinRequest { channel: self.channel.clone(), wait }
     }
 }
 
@@ -120,42 +122,42 @@ impl StdinRequest {
         if !data.ends_with(b"\n") {
             data.push(b'\n');
         }
-        self.channel.answer_read(self.read, Some(data))
+        self.channel.answer_wait(self.wait, Some(data))
     }
 
     /// Submits an end-of-input marker to the read so that `read_line` returns
     /// `None` if the read has no buffered data. Returns `false` if the read is
     /// already closed.
     pub fn dismiss(&self) -> bool {
-        self.channel.answer_read(self.read, None)
+        self.channel.answer_wait(self.wait, None)
     }
 
     /// Returns `true` if the read is still waiting for a response.
     pub fn is_open(&self) -> bool {
-        self.channel.lock().waiting_read_id() == Some(self.read)
+        self.channel.lock().open_wait() == Some(self.wait)
     }
 
     /// Waits until the read receives input or ends.
     pub async fn wait_until_closed(&self) {
-        let read = self.read;
-        self.channel.wait_until(|state| (state.waiting_read_id() != Some(read)).then_some(())).await;
+        let wait = self.wait;
+        self.channel.wait_until(|state| (state.open_wait() != Some(wait)).then_some(())).await;
     }
 
     /// Returns `true` if the read is still waiting and no other task of the
     /// script can run.
     pub fn nothing_else_runs(&self) -> bool {
         let state = self.channel.lock();
-        state.engine_idle && state.waiting_read_id() == Some(self.read)
+        state.engine_idle && state.open_wait() == Some(self.wait)
     }
 
     /// Waits until no other task of the script can run while the read waits,
     /// as a host needs that shares a terminal with the script. Returns `false`
     /// if the read closes first.
     pub async fn wait_until_nothing_else_runs(&self) -> bool {
-        let read = self.read;
+        let wait = self.wait;
         self.channel
-            .wait_until(|state| match state.waiting_read_id() {
-                Some(id) if id == read => state.engine_idle.then_some(true),
+            .wait_until(|state| match state.open_wait() {
+                Some(open) if open == wait => state.engine_idle.then_some(true),
                 _ => Some(false),
             })
             .await
@@ -164,7 +166,7 @@ impl StdinRequest {
 
 impl PartialEq for StdinRequest {
     fn eq(&self, other: &StdinRequest) -> bool {
-        Arc::ptr_eq(&self.channel, &other.channel) && self.read == other.read
+        Arc::ptr_eq(&self.channel, &other.channel) && self.wait == other.wait
     }
 }
 
@@ -172,19 +174,19 @@ impl Eq for StdinRequest {}
 
 impl std::fmt::Debug for StdinRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("StdinRequest").field(&self.read.0).finish()
+        f.debug_tuple("StdinRequest").field(&self.wait.0).finish()
     }
 }
 
 impl StdinChannelState {
-    /// Returns the ID of the read waiting for unqueued input, if any.
-    fn waiting_read_id(&self) -> Option<StdinReadId> {
+    /// Returns the open wait that no queued input can end, if any.
+    fn open_wait(&self) -> Option<StdinWaitId> {
         let read = self.current_read.as_ref().filter(|r| r.needs_input)?;
-        (!self.queue.iter().any(|input| input.is_for_read(Some(read.id)))).then_some(read.id)
+        (!self.queue.iter().any(|input| input.is_for_wait(Some(read.wait)))).then_some(read.wait)
     }
 
-    fn current_read_id(&self) -> Option<StdinReadId> {
-        self.current_read.as_ref().map(|r| r.id)
+    fn current_wait(&self) -> Option<StdinWaitId> {
+        self.current_read.as_ref().map(|r| r.wait)
     }
 }
 
@@ -199,15 +201,15 @@ impl StdinChannel {
         self.notify(state);
     }
 
-    fn answer_read(&self, read: StdinReadId, data: Option<Vec<u8>>) -> bool {
+    fn answer_wait(&self, wait: StdinWaitId, data: Option<Vec<u8>>) -> bool {
         let mut state = self.lock();
-        if state.waiting_read_id() != Some(read) {
+        if state.open_wait() != Some(wait) {
             return false;
         }
         if let Some(data) = data {
-            state.queue.push_back(QueuedInput { target: Some(read), data: Some(data), start: 0 });
+            state.queue.push_back(QueuedInput { target: Some(wait), data: Some(data), start: 0 });
         }
-        state.queue.push_back(QueuedInput { target: Some(read), data: None, start: 0 });
+        state.queue.push_back(QueuedInput { target: Some(wait), data: None, start: 0 });
         self.notify(state);
         true
     }
@@ -269,7 +271,7 @@ pub(crate) struct StdinFeedReader {
     channel: Arc<StdinChannel>,
     /// Input taken from the feed during a read. It is empty between reads.
     buf: Vec<u8>,
-    buf_target: Option<StdinReadId>,
+    buf_target: Option<StdinWaitId>,
     at: usize,
     ended: bool,
 }
@@ -283,9 +285,9 @@ impl StdinFeedReader {
         self.channel.wait_kind
     }
 
-    /// Starts a read operation. The read receives a [`StdinReadId`] the first
-    /// time it waits for input. It ignores any EOF or targeted response from
-    /// an earlier read.
+    /// Starts a read operation. Each time the read waits for input, the wait
+    /// receives a new [`StdinWaitId`]. The read ignores any EOF or targeted
+    /// response from an earlier read.
     pub(crate) fn begin_read(&mut self) -> ActiveStdinRead<'_> {
         self.ended = false;
         ActiveStdinRead { reader: self }
@@ -306,8 +308,8 @@ impl ActiveStdinRead<'_> {
         let r = &mut *self.reader;
         if r.at == r.buf.len() && !r.ended {
             let mut state = r.channel.lock();
-            let read = state.current_read_id();
-            let next = state.queue.iter().position(|input| input.is_for_read(read));
+            let wait = state.current_wait();
+            let next = state.queue.iter().position(|input| input.is_for_wait(wait));
             if let Some(input) = next.and_then(|i| state.queue.remove(i)) {
                 if let Some(read) = &mut state.current_read {
                     read.needs_input = false;
@@ -332,7 +334,7 @@ impl Drop for ActiveStdinRead<'_> {
                 state.queue.push_front(QueuedInput { target: None, data: Some(unread), start });
             }
             let Some(read) = state.current_read.take() else { return };
-            state.queue.retain(|input| input.target != Some(read.id));
+            state.queue.retain(|input| input.target != Some(read.wait));
         });
     }
 }
@@ -357,15 +359,17 @@ impl AsyncBufRead for ActiveStdinRead<'_> {
                 return Poll::Ready(Ok(&r.buf[r.at..]));
             }
             let mut state = this.reader.channel.lock();
-            let read = state.current_read_id();
-            if !state.queue.iter().any(|input| input.is_for_read(read)) {
-                let id = read.unwrap_or_else(|| {
-                    state.reads_waited += 1;
-                    StdinReadId(NonZeroU64::new(state.reads_waited).expect("read count overflow"))
-                });
-                let read = state.current_read.get_or_insert(CurrentRead { id, needs_input: true, waker: None });
-                read.needs_input = true;
-                read.waker = Some(cx.waker().clone());
+            let wait = state.current_wait();
+            if !state.queue.iter().any(|input| input.is_for_wait(wait)) {
+                let waker = Some(cx.waker().clone());
+                match &mut state.current_read {
+                    Some(read) if read.needs_input => read.waker = waker,
+                    _ => {
+                        state.waits_started += 1;
+                        let wait = StdinWaitId(NonZeroU64::new(state.waits_started).expect("wait count overflow"));
+                        state.current_read = Some(CurrentRead { wait, needs_input: true, waker });
+                    }
+                }
                 drop(state);
                 this.reader.channel.changed.notify_waiters();
                 return Poll::Pending;
