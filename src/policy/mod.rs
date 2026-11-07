@@ -263,8 +263,8 @@ pub(crate) enum PathSpace {
     Memory,
 }
 
-/// Why the text of a policy pattern, such as a [`rules::PathPattern`] or a
-/// [`net::NetPattern`], does not parse.
+/// Why the text of a rule builder argument, such as a [`rules::PathPattern`], a
+/// [`net::NetPattern`], or a [`rules::HttpMethod`], does not parse.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PatternError(pub(crate) String);
 

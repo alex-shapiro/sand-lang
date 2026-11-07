@@ -170,8 +170,11 @@ impl NameKind {
 /// The transports that a `net` or `http` rule controls.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Transports {
+    /// Connections that use TLS.
     Tls,
+    /// Connections that do not use TLS.
     Plaintext,
+    /// Connections that use TLS and connections that do not.
     Both,
 }
 
@@ -495,9 +498,11 @@ impl RulePolicy {
     pub fn allow_write(self, p: PathPattern) -> Self {
         self.push(Decision::Allow, RuleKind::Files(Access::Write, p))
     }
+    /// Denies writing paths that match `p`.
     pub fn deny_write(self, p: PathPattern) -> Self {
         self.push(Decision::Deny, RuleKind::Files(Access::Write, p))
     }
+    /// Prompts before writing paths that match `p`.
     pub fn prompt_write(self, p: PathPattern) -> Self {
         self.push(Decision::Prompt, RuleKind::Files(Access::Write, p))
     }
@@ -505,9 +510,11 @@ impl RulePolicy {
     pub fn allow_import(self, p: PathPattern) -> Self {
         self.push(Decision::Allow, RuleKind::Files(Access::Import, p))
     }
+    /// Denies importing script modules that match `p`.
     pub fn deny_import(self, p: PathPattern) -> Self {
         self.push(Decision::Deny, RuleKind::Files(Access::Import, p))
     }
+    /// Prompts before importing script modules that match `p`.
     pub fn prompt_import(self, p: PathPattern) -> Self {
         self.push(Decision::Prompt, RuleKind::Files(Access::Import, p))
     }
