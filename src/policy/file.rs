@@ -504,7 +504,10 @@ impl Context<'_> {
                             "import" => Access::Import,
                             _ => Access::Any,
                         };
-                        RuleKind::Files(access, self.path(&word.tokens(), bare.is_some()).map_err(|m| (item.column, m))?)
+                        RuleKind::Files(
+                            access,
+                            parse_path(&word.tokens(), bare.is_some(), Some(self.base), self.home).map_err(|m| (item.column, m))?,
+                        )
                     }
                     "net" => {
                         urls += 1;
@@ -551,10 +554,6 @@ impl Context<'_> {
             return Ok(vec![word.clone()]);
         }
         word.expand(&self.sets, &mut self.used).map_err(|m| (word.column, m))
-    }
-
-    fn path(&self, text: &[Tok], bare: bool) -> Result<PathPattern, String> {
-        parse_path(text, bare, Some(self.base), self.home)
     }
 }
 
@@ -669,7 +668,7 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
         Capability::Net { host, port, tls } => {
             let pattern = format_host_port(host, *port);
             NetPattern::parse(&pattern).ok()?;
-            format!("net {}{pattern}", transport_words(Transports::of(*tls), decision))
+            format!("net {}{pattern}", transport_words(if *tls { Transports::Tls } else { Transports::Plaintext }, decision))
         }
         Capability::Http { method, scheme, host, port, path } => {
             let (names, alt) = url_segments(path);

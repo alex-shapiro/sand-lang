@@ -10,9 +10,7 @@ use std::borrow::Cow;
 use std::hash::{Hash, Hasher};
 use std::path::{Component, Path};
 
-/// Returns `true` if a file rule can anchor a pattern at `path`. A path that starts with `/`
-/// is absolute on every platform. On Windows, a path that starts with `\`, such as `\data`
-/// or `\\server\share`, and a drive path such as `C:\data` are also absolute.
+/// Returns `true` if a file rule can anchor a pattern at `path`, as [`super::rules::AbsolutePath::new`] describes.
 pub(crate) const fn is_absolute(path: &[u8]) -> bool {
     match path {
         [b'/', ..] => true,

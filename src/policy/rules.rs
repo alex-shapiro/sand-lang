@@ -55,23 +55,6 @@ impl AbsolutePath {
         assert!(super::path::is_absolute(path.as_bytes()), "the path is not absolute");
         AbsolutePath(path)
     }
-
-    /// The path as text.
-    pub const fn as_str(self) -> &'static str {
-        self.0
-    }
-}
-
-impl fmt::Display for AbsolutePath {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.0)
-    }
-}
-
-impl AsRef<Path> for AbsolutePath {
-    fn as_ref(&self) -> &Path {
-        Path::new(self.0)
-    }
 }
 
 impl From<AbsolutePath> for PathPattern {
@@ -179,10 +162,6 @@ pub enum Transports {
 }
 
 impl Transports {
-    pub(crate) fn of(tls: bool) -> Transports {
-        if tls { Transports::Tls } else { Transports::Plaintext }
-    }
-
     /// The transports of a rule without transport keywords: `Tls` for `Allow`, and `Both`
     /// for `Deny` or `Prompt`.
     pub(crate) fn default_for(decision: Decision) -> Transports {
@@ -272,10 +251,6 @@ impl Methods {
     /// The listed methods, or `None` for every method.
     pub(crate) fn listed(&self) -> Option<&[HttpMethod]> {
         self.0.as_deref()
-    }
-
-    pub(crate) fn is_all(&self) -> bool {
-        self.0.is_none()
     }
 
     /// Returns `true` if `method`, in uppercase, is one of these methods.
@@ -976,7 +951,7 @@ impl Rank {
     }
 
     pub(crate) fn http(http: &HttpMatch) -> Rank {
-        Rank { host: http.host.rank(), weight: http.path.iter().map(Seg::weight).sum(), methods: !http.methods.is_all() }
+        Rank { host: http.host.rank(), weight: http.path.iter().map(Seg::weight).sum(), methods: http.methods.listed().is_some() }
     }
 
     pub(crate) fn spec(self, depth: usize) -> Spec {

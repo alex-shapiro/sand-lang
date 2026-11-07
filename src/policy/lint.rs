@@ -260,7 +260,7 @@ impl<'a> PathRule<'a> {
         match (&self.scope, op) {
             (Scope::Files(mask), Op::File(op)) => mask & op != 0,
             (Scope::Http { methods, .. }, Op::Method(Some(m))) => methods.matches(m),
-            (Scope::Http { methods, .. }, Op::Method(None)) => methods.is_all(),
+            (Scope::Http { methods, .. }, Op::Method(None)) => methods.listed().is_none(),
             (_, Op::Connect(_)) => self.matches_op(op),
             _ => false,
         }
