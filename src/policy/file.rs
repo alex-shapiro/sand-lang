@@ -37,7 +37,7 @@ pub struct PolicyFile {
 /// An `allow`, `deny`, or `prompt` directive in a policy file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RuleDirective {
-    /// The 1-based line number of the directive.
+    /// The 1-based line of the directive.
     pub line: usize,
     /// The 1-based column of the capability keyword or first path.
     pub column: usize,
@@ -51,11 +51,11 @@ pub struct RuleDirective {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RuleCapability {
     /// A bare path rule such as `allow ./data`. An `allow` rule allows reads
-    /// and writes. A `deny` or `prompt` rule applies to reads, writes, and
-    /// imports.
+    /// and writes. A `deny` or `prompt` rule denies or prompts for reads,
+    /// writes, and imports.
     Files,
-    /// A `read` rule. A `deny` or `prompt` rule also applies to writes and
-    /// imports.
+    /// A `read` rule. A `deny` or `prompt` rule also denies or prompts for
+    /// writes and imports.
     Read,
     /// A `write` rule. An `allow` rule also allows reads.
     Write,
@@ -74,7 +74,7 @@ pub enum RuleCapability {
 /// A `limit` directive in a policy file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LimitDirective {
-    /// The 1-based line number of the directive.
+    /// The 1-based line of the directive.
     pub line: usize,
     /// The 1-based column of the limit name.
     pub column: usize,
