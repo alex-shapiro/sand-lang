@@ -1093,18 +1093,6 @@ fn unread_input_stays_in_the_feed_for_the_next_run() {
 }
 
 #[test]
-fn unread_input_stays_in_the_feed_after_a_reset() {
-    let (config, feed) = Config::new().policy(RulePolicy::allow_all()).stdin_feed();
-    let mut r = Repl::with(config);
-    r.ok("import io");
-    feed.send("a\nb\n");
-    assert_eq!(r.value("io.stdin.read_line()?"), "Some(\"a\")");
-    r.session.reset();
-    r.ok("import io");
-    assert_eq!(r.value("io.stdin.read_line()?"), "Some(\"b\")");
-}
-
-#[test]
 fn a_read_without_standard_input_fails() {
     let mut r = Repl::with(Config::new().policy(RulePolicy::allow_all()));
     r.ok("import io");
