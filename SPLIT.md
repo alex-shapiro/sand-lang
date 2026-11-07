@@ -115,13 +115,12 @@ belongs to the journal changesets.
 Hosts can look up and call functions exported by the main script module:
 
 - `CompiledProgram::function` returns a `Function` or a `FunctionError`.
-- `Function::bind` checks the argument count and returns a `BoundCall` or an
-  `ArityError`.
-- `Engine::call` accepts JSON arguments and returns a typed `Returned` value.
+- `Function::bind` returns a `BoundCall` or an `ArityError`.
+- `Engine::call` runs a bound call with JSON arguments and returns `Returned`.
 - Export `stdlib::core::Error`.
 
-This changeset requires changeset 5 and returns `Outcome` without the
-`Suspended` variant.
+This changeset requires changeset 5. `Outcome` omits the `Suspended` variant
+until changeset 12.
 
 Source commits: `4ebd15b`, `03076c5`, `f43460f`, `29e1f37`, and the
 corresponding part of `a31c9fb`.
@@ -132,10 +131,10 @@ Pass state between the VM and native functions through explicit parameters and
 return types instead of `Vm` fields. This updates the native module API in four
 steps:
 
-- **9a. Control-flow types.** Replace `Ctl` with `Fail`, `End`, `Request`,
-  `Exit::Collect`, `Ending`, `Until`, and `HostError<C>`. This also fixes a bug
-  where a test failed if a finisher called `exit(0)`. Source commits: `fc27559`,
-  `fb9367e`, `5bdac47`, `61bfe31`, `d84df4d`, `c690c03`, `906ac91`, `4792919`.
+- **9a. Control-flow types.** Replace `Ctl` with explicit control-flow, exit,
+  and host-error types. This also fixes a bug where a test failed if a finisher
+  called `exit(0)`. Source commits: `fc27559`, `fb9367e`, `5bdac47`, `61bfe31`,
+  `d84df4d`, `c690c03`, `906ac91`, `4792919`.
 - **9b. Native call context.** Pass `Call<'a>` to native functions. Source
   commits: `33beccd`, `e4ed4cb`.
 - **9c. Post-effect heap view.** Replace `Heap::unchecked` with `AfterEffect`.
@@ -205,7 +204,7 @@ Source commits: `d4a4ac0`, `16da2fb`, `12895c8`, `483ac31`, `e541a7a`,
 
 ## Merge conflicts with `main`
 
-Commit `eeee3b6` on `main` streams standard input from the host and pauses
+Commit `eeee3b6` on `main` streams standard input from the host. It also pauses
 `max_wall_time` during user waits. Reconcile `eeee3b6` with these changes:
 
 - `483ac31` in changeset 13, which modifies standard input scheduling
