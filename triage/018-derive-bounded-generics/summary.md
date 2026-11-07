@@ -4,7 +4,7 @@
 uses a bounded generic type such as `Sorted<T>` where `Sorted<T: Ord>`, or
 `Self` inside a bounded generic type such as `Vec<Self>` in `Tree<K: Ord>`. The
 derive macro substitutes `sandlang::native::ty::Param<N>` for each type parameter
-to describe field types, and `Param<N>` does not implement Rust traits such as
+to describe field types. `Param<N>` does not implement Rust traits such as
 `Ord`.
 
 Building `repro.rs` or `repro_self.rs` fails with:

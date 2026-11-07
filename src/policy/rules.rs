@@ -211,8 +211,9 @@ fn custom(name: &str, detail: Option<&str>) -> RuleKind {
 }
 
 /// File rule builder methods such as [`RulePolicy::allow_read`] and
-/// [`RulePolicy::deny_read`] take literal path prefixes without wildcards and
-/// panic if the path is empty. To parse wildcard patterns, use [`super::file::PolicyFile`].
+/// [`RulePolicy::deny_read`] take literal path prefixes without wildcards.
+/// They panic if the path is empty. Use [`super::file::PolicyFile`] to parse
+/// wildcard patterns.
 impl RulePolicy {
     /// Creates an empty policy that returns [`Decision::Prompt`] for every request.
     pub fn new() -> RulePolicy {

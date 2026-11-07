@@ -298,7 +298,7 @@ pub struct Fiber {
     pub pending_error: Option<String>,
 }
 
-/// One frame of a runtime error's stack trace.
+/// A stack trace frame from a runtime error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraceFrame {
     pub function: String,
@@ -502,7 +502,7 @@ pub struct Host {
     pub(crate) regex_cache: Vec<(u64, u32)>,
     /// The file system of the `fs` module.
     pub(crate) fs: crate::files::Fs,
-    /// Rewrites or refuses outgoing HTTP requests (see [`crate::engine::Config::request_filter`]).
+    /// Rewrites or blocks outgoing HTTP requests. See [`crate::engine::Config::request_filter`].
     #[cfg_attr(not(any(feature = "os", web)), expect(dead_code, reason = "HTTP client is disabled in this build"))]
     pub(crate) request_filter: Option<crate::engine::RequestFilter>,
     /// Clock and timer provider for the engine.

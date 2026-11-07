@@ -128,7 +128,7 @@ where
     }
 }
 
-/// Host-defined policy callback; see [`crate::engine::Config::custom_policy`].
+/// Host-defined policy callback for [`crate::engine::Config::custom_policy`].
 pub trait CustomPolicy: Send + Sync {
     /// Evaluates `cap`. File paths in `cap` are normalized with [`normalize_path`].
     fn check(&self, cap: &Capability) -> Decision;

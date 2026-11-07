@@ -371,8 +371,8 @@ impl Config {
         self.log_sink = Some(Arc::new(sink));
         self
     }
-    /// Sets the initial minimum script log level (default [`LogLevel::Info`]),
-    /// or disables script logging if `level` is `None`.
+    /// Sets the initial minimum script log level, or disables script logging
+    /// if `level` is `None`. Defaults to [`LogLevel::Info`].
     pub fn log_level(mut self, level: impl Into<Option<LogLevel>>) -> Self {
         self.log_level = level.into();
         self

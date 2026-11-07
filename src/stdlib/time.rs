@@ -1,10 +1,15 @@
-//! The `time` module, and the Rust types of its values.
+//! The `time` module and the Rust types for its values.
 //!
-//! `time.Instant`, `time.PlainDateTime`, `time.PlainDate`, and `time.PlainTime`
-//! are [`jiff::Timestamp`], [`jiff::civil::DateTime`], [`jiff::civil::Date`],
-//! and [`jiff::civil::Time`]. A `duration` is a [`jiff::SignedDuration`]. The
-//! other `time` types are the types of this module, and its enums are in
-//! [`enums`].
+//! This module defines [`ZonedDateTime`], [`TimeZone`], [`Span`],
+//! [`PlainYearMonth`], and [`PlainMonthDay`]. The [`enums`] submodule defines
+//! the `time` enums. The remaining time and duration types map to [`jiff`]
+//! types:
+//!
+//! - `time.Instant` is [`jiff::Timestamp`].
+//! - `time.PlainDateTime` is [`jiff::civil::DateTime`].
+//! - `time.PlainDate` is [`jiff::civil::Date`].
+//! - `time.PlainTime` is [`jiff::civil::Time`].
+//! - `duration` is [`jiff::SignedDuration`].
 
 use crate::check::ModKind;
 use crate::native::convert::{HostError, IntoValue};

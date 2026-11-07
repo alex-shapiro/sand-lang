@@ -1672,9 +1672,9 @@ directly and treats `Prompt` as `Allow`.
 
 This two-stage check prevents DNS rebinding against denied IP ranges. For
 example, under `allow net plaintext *` and `deny net 10.0.0.0/8`, a request to
-`http://evil.example/` fails if DNS returns `10.0.0.5`, whereas an explicit
-hostname rule such as `allow net db.internal` outranks the `/8` prefix and
-permits connecting to `10.0.0.5` via `db.internal`.
+`http://evil.example/` fails if DNS returns `10.0.0.5`. An explicit hostname
+rule such as `allow net db.internal` outranks the `/8` prefix and permits
+connecting to `10.0.0.5` through `db.internal`.
 `sandlang::policy::net::is_private_address` reports whether an IP address belongs to
 a private, loopback, link-local, or other non-public range.
 
@@ -1682,11 +1682,11 @@ a private, loopback, link-local, or other non-public range.
 
 A policy file uses the `.policy` extension and declares authorization rules and
 resource limits in a line-oriented text format. Pass a policy file to the CLI
-with `sand run --policy=FILE` (§17.5), or parse it in Rust with
+with `sand run --policy=FILE`, as described in §17.5. In Rust, call
 `sandlang::policy::file::PolicyFile::parse(text, base, home)` to obtain
 `PolicyFile::rules` and `PolicyFile::limits`. A parsed `PolicyFile` contains
-only the rules written in the file; a host can append default rules with
-`file.rules.with_defaults(RulePolicy::standard())`.
+only the rules from the file. Call
+`file.rules.with_defaults(RulePolicy::standard())` to append default rules.
 
 Each line in a policy file is an independent statement. `#` starts a comment
 that extends to the end of the line. Spaces or commas separate words. Double
@@ -1767,23 +1767,29 @@ Unspecified limits retain their default values. The parser rejects any policy
 file that contains a syntax or validation error and reports the 1-based line and
 column on `PolicyError`.
 
-`sand fmt`, `sand lint`, and `sand check` (§17) support `.policy` files. The
-formatter normalizes whitespace, quotes special characters, preserves explicit
-quotes, lowercases transports, uppercases HTTP methods, aligns trailing comments
-on consecutive lines, and collapses multiple blank lines.
-`sandlang::policy::lint::lint_policy` checks a policy file for the following warnings
-by comparing file paths lexically without resolving symlinks:
+`sand fmt`, `sand lint`, and `sand check` in §17 support `.policy` files.
+`sandlang::policy::format::format_policy` formats a policy file:
 
-| Lint                   | Description                                                                                                  |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `redundant-rule`       | broader rules or an earlier identical rule already produce the same decision                                 |
-| `overridden-rule`      | higher-precedence rules produce another decision for all matching requests                                   |
-| `bypassable-http-deny` | a `net` rule permits raw TCP connections to a destination that a `deny http` or `prompt http` rule restricts |
-| `unused-set`           | a `let` set is not used in any rule                                                                          |
+- Normalizes whitespace and collapses consecutive blank lines.
+- Quotes special characters and preserves explicit quotes.
+- Converts transports to lowercase and HTTP methods to uppercase.
+- Aligns trailing comments on consecutive lines.
 
-An `allow` rule for an exact hostname is not flagged as `redundant-rule` under a
-domain wildcard if an IP address rule ranks between them, because the exact
-hostname rule also overrides the IP address rule during stage 2 (§14.6).
+`sandlang::policy::lint::lint_policy` compares file paths lexically and checks a
+policy file for four warnings:
+
+- `redundant-rule`: broader rules or an earlier identical rule already produce
+  the same decision.
+- `overridden-rule`: higher-precedence rules produce another decision for all
+  matching requests.
+- `bypassable-http-deny`: a `net` rule permits raw TCP connections to a
+  destination that a `deny http` or `prompt http` rule restricts.
+- `unused-set`: a `let` set is unused.
+
+If an IP address rule ranks between a domain wildcard and an exact hostname
+`allow` rule, the exact hostname rule overrides the IP address rule during stage
+2 in §14.6. The linter therefore keeps the exact hostname rule without a
+`redundant-rule` warning.
 
 `sandlang::policy::file::rule_for(capability, allow)` formats a persistent `allow` or
 `deny` rule line for a promptable `Capability`, such as `allow read /data/a.txt`
@@ -2176,25 +2182,26 @@ failing the first memory or resource check in each `vm_function` call.
 Return-value conversion does not fail on the memory limit; instead, the engine
 collects garbage and checks the memory limit after the call completes.
 
-| Rust type                                           | Sand type                                              |
-| --------------------------------------------------- | ------------------------------------------------------ |
-| `i64`, `f64`, `bool`, `()`, `jiff::SignedDuration`  | `int`, `float`, `bool`, `()`, `duration`               |
-| `String`, `&str`; `Vec<u8>`, `&[u8]`                | `str`; `bytes`                                         |
-| `Vec<T>`, `Option<T>`, tuples of 2 to 8 elements    | `[T]`, `T?`, tuples                                    |
-| `Box<T>`                                            | `T`                                                    |
-| `HashMap<K, V>`, `BTreeMap<K, V>`, `IndexMap<K, V>` | `[K: V]`                                               |
-| `HashSet<T>`, `BTreeSet<T>`                         | `Set<T>`                                               |
-| `Result<T, E>`                                      | `Result<T, Error>` or `T`, depending on `E`            |
-| `Never`                                             | `never`                                                |
-| `jiff::Timestamp`                                   | `time.Instant`                                         |
-| `jiff::civil::DateTime`                             | `time.PlainDateTime`                                   |
-| `jiff::civil::Date`                                 | `time.PlainDate`                                       |
-| `jiff::civil::Time`                                 | `time.PlainTime`                                       |
-| `sandlang::stdlib::json::Json`                      | `json.Json`                                            |
-| bound type `T`                                      | `T`, or `&T` for a borrowed object parameter           |
-| `Val<T>`                                            | `T`, passed as an uncopied heap handle                 |
-| `Param<N, B>`, `Reflect<N>`                         | `N`-th type parameter and its runtime type description |
-| `Num<N>`                                            | `Num` evidence of the `N`-th type parameter            |
+| Rust type                                           | Sand type                                  |
+| --------------------------------------------------- | ------------------------------------------ |
+| `i64`, `f64`, `bool`, `()`, `jiff::SignedDuration`  | `int`, `float`, `bool`, `()`, `duration`   |
+| `String`, `&str`; `Vec<u8>`, `&[u8]`                | `str`; `bytes`                             |
+| `Vec<T>`, `Option<T>`, tuples of 2 to 8 elements    | `[T]`, `T?`, tuples                        |
+| `Box<T>`                                            | `T`                                        |
+| `HashMap<K, V>`, `BTreeMap<K, V>`, `IndexMap<K, V>` | `[K: V]`                                   |
+| `HashSet<T>`, `BTreeSet<T>`                         | `Set<T>`                                   |
+| `Result<T, E>`                                      | `Result<T, Error>` or `T`, based on `E`    |
+| `Never`                                             | `never`                                    |
+| `jiff::Timestamp`                                   | `time.Instant`                             |
+| `jiff::civil::DateTime`                             | `time.PlainDateTime`                       |
+| `jiff::civil::Date`                                 | `time.PlainDate`                           |
+| `jiff::civil::Time`                                 | `time.PlainTime`                           |
+| `sandlang::stdlib::json::Json`                      | `json.Json`                                |
+| bound type `T`                                      | `T`, or `&T` for a borrowed object         |
+| `Val<T>`                                            | `T`, passed as an uncopied heap handle     |
+| `Param<N, B>`                                       | `N`-th type parameter                      |
+| `Reflect<N>`                                        | runtime type description of `Param<N, B>`  |
+| `Num<N>`                                            | `Num` evidence of the `N`-th type parameter |
 
 `Param<N, B>` specifies the built-in traits `B` required on the `N`-th type
 parameter: `traits::Eq`, `traits::Ord`, `traits::Hash`, `traits::Num`,

@@ -1,5 +1,6 @@
-//! The Sand standard library. An embedder uses the Rust types of three of its
-//! modules: [`json::Json`], the log sink of [`log`], and the values of [`time`].
+//! The Sand standard library.
+//!
+//! Host code can use the Rust types in [`json`], [`log`], and [`time`].
 
 mod base64;
 pub(crate) mod core;

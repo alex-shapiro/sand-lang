@@ -165,7 +165,7 @@ Sand infers the Sand function signature from the Rust parameter and return types
 | `&T` (argument) or `T` (result) with `#[derive(SandObject)]` | opaque type `T`              |
 | `ValueType` `T` with `#[derive(SandValue)]`                  | opaque value type `T`        |
 
-`IndexMap` comes from the `indexmap` crate (version 2). The `jiff` types come from the `jiff` crate (version 0.2). To name these types, add these crates to the dependencies of your crate. The Rust types of the other `time` values are in `sandlang::stdlib::time`.
+Add `indexmap` 2 or `jiff` 0.2 to `Cargo.toml` to use `IndexMap` or the `jiff` types directly. `sandlang::stdlib::time` defines the remaining `time` types.
 
 The engine automatically exports registered functions that are not declared in `NativeModule::source` as `pub`, with default parameter names `arg1`, `arg2`, ... unless overridden by `params`. Registering a function as `"Type.name"` defines a method on `Type`; the method takes `self` if its first parameter has type `Type` (such as `Counter.add` below). Generic functions must be declared with `native fn` in `NativeModule::source`.
 

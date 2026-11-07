@@ -35,11 +35,11 @@ access, and host targets:
 
 - `src/engine.rs`, `src/modules.rs`: `Engine`, `Config`, and module loading.
 - `src/native/`, `src/stdlib/`: the `NativeModule` API and the standard
-  library. Each standard module `name` has two files: `name.sand` holds the
-  public declarations, their docs, and helpers written in Sand, and `name.rs`
-  holds the natives, which it registers by name.
+  library. Each standard module `name` has two files. `name.sand` defines the
+  public declarations, documentation, and Sand helpers. `name.rs` registers the
+  native functions by name.
 - `src/policy/`, `src/files/`, `src/platform.rs`: capability policies,
-  sandboxed file systems, and OS platform abstractions. Do all file and module
-  I/O for scripts through `Fs` on a worker thread (`Vm::offload`). Do not call
-  the path-based functions of `std::fs` or `tokio::fs` on script paths.
+  sandboxed file systems, and OS platform abstractions. Run all script file and
+  module I/O through `Fs` on a worker thread with `Vm::offload` instead of
+  `std::fs` or `tokio::fs`.
 - `cli/`, `wasm/`, `site/`: the `sand` CLI, WebAssembly bindings, and website.

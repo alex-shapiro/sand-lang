@@ -31,7 +31,7 @@ use std::task::Poll;
 
 /// An interactive session that compiles and runs inputs incrementally.
 ///
-/// Each input can contain statements, expressions, and declarations, and
+/// Each input can contain statements, expressions, and declarations. It
 /// executes in the context of earlier inputs.
 ///
 /// ```no_run
@@ -45,25 +45,23 @@ use std::task::Poll;
 /// # Ok(()) }
 /// ```
 ///
-/// * Every input runs exactly once. Top-level `let`/`var` bindings become
-///   globals that later inputs can read (and, for `var`, assign); later
-///   definitions of a name shadow earlier ones for later inputs, while
-///   functions and values created earlier keep referring to the definitions
-///   they were checked against.
-/// * An input that fails to compile has no effect. An input that fails with an
-///   error (or exceeds a limit, is interrupted or calls `exit`) keeps its declarations
-///   and the effects that happened before the failure, including global
-///   assignments; its remaining globals stay uninitialized. All tasks are
-///   then cancelled.
-/// * Tasks spawned by an input keep running, alongside later inputs, and
-///   between inputs while the front end calls [`Session::run_tasks_until`].
-/// * The instruction, CPU time, wall time and output limits apply to each
-///   input separately; the memory limit applies to the session's heap.
-/// * After an internal error (a bug in the engine or in a host native,
-///   including a caught Rust panic), the VM may be inconsistent, so the
-///   session is reset (as by [`Session::reset`]): the call fails with
-///   [`Error::Internal`], whose message ends with [`RESET_NOTE`], and
-///   [`Session::was_reset`] returns true.
+/// * Every input runs once. Top-level `let` and `var` bindings become globals
+///   that later inputs can read. Later inputs can also assign to `var` globals.
+///   Redefining a name shadows the earlier binding for subsequent inputs.
+///   Earlier functions and values continue to use the definitions from their
+///   own compilation.
+/// * An input that fails to compile leaves the session unchanged. If an input
+///   fails at runtime, exceeds a limit, receives an interrupt, or calls `exit`,
+///   the session keeps its declarations and completed side effects. Unreached
+///   globals remain uninitialized, and the session cancels all running tasks.
+/// * Tasks spawned by an input continue to run during later inputs and during
+///   calls to [`Session::run_tasks_until`].
+/// * The instruction, CPU time, wall time, and output limits apply to each
+///   input separately. The memory limit applies to the shared session heap.
+/// * An internal error or caught Rust panic leaves the VM in an inconsistent
+///   state. The session resets itself, returns [`Error::Internal`] with
+///   [`RESET_NOTE`] appended to the message, and sets [`Session::was_reset`] to
+///   `true`.
 pub struct Session {
     /// Shares the configuration, natives and "always" answers of the engine
     /// that created the session, with its own interrupt flag.
@@ -275,23 +273,22 @@ impl Session {
         self.was_reset
     }
 
-    /// Runs the tasks that earlier inputs left running until `until`
-    /// completes, and returns its output. A front end calls it with a future
-    /// that resolves to the next input, so that tasks run between inputs.
+    /// Runs background tasks from earlier inputs until `until` completes, and
+    /// returns the output of `until`. Pass a future that reads the next user
+    /// input so background tasks continue to run between inputs.
     ///
-    /// Instruction, CPU time and output limits apply to each call as to
-    /// an input; the wall-time limit does not apply (waiting for input may
-    /// take any time). Permission prompts wait until `until` has completed,
-    /// so that they do not compete with the front end for its input; no
-    /// script code runs while one waits. A front end that reads the
-    /// process's standard input should pass it on through a
-    /// [`crate::stdin_feed::StdinFeed`].
+    /// The instruction, CPU time, and output limits apply to this call just
+    /// like an input. The wall-time limit is disabled while waiting for input.
+    /// Permission prompts wait until `until` completes so they do not compete
+    /// with the front end for terminal input. While a task waits for a
+    /// permission prompt, all script execution pauses. Forward process standard
+    /// input through [`crate::stdin_feed::StdinFeed`].
     ///
-    /// If a task fails with an error, exceeds a limit or is interrupted, every task is
-    /// cancelled (as after a failed input), the error is passed to `on_error`
-    /// right away, and the call goes on waiting for `until`. If a task calls
-    /// `exit`, the call returns `None` at once ([`Session::exit_code`] has the
-    /// code) and drops `until`.
+    /// If a task fails with an error, exceeds a limit, or receives an
+    /// interrupt, the session cancels all tasks and passes the error to
+    /// `on_error`. The call then continues to await `until`. If a task calls
+    /// `exit`, this method records the code in [`Session::exit_code`], drops
+    /// `until`, and returns `None`.
     pub async fn run_tasks_until<F: Future>(&mut self, until: F, mut on_error: impl FnMut(Error)) -> Option<F::Output> {
         self.was_reset = false;
         let mut until = std::pin::pin!(until);

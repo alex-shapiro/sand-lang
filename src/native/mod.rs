@@ -758,20 +758,20 @@ struct FnDef {
 /// `import <name>`.
 ///
 /// The engine infers the Sand signature of each registered function from its
-/// Rust parameter and return types. Functions that are not declared in
-/// [`NativeModule::source`] are exported as `pub native fn` with the parameter
-/// names configured by [`NativeModule::params`] (or `arg1`, `arg2`, ... by
-/// default). Registering a function as `"Type.name"` defines a method on
-/// `Type`; the method takes `self` if its first parameter has type `Type`. Use
-/// `native fn` declarations in [`NativeModule::source`] to specify default
-/// parameter values or generic type parameters. [`Engine::new`](crate::engine::Engine::new)
-/// verifies all declarations against the registered Rust signatures.
+/// Rust parameter and return types. It exports functions that are absent from
+/// [`NativeModule::source`] as `pub native fn`. [`NativeModule::params`] sets
+/// their parameter names, which default to `arg1`, `arg2`, and so on.
+/// Registering a function as `"Type.name"` defines a method on `Type`. The
+/// method takes `self` if its first parameter has type `Type`. Use `native fn`
+/// declarations in [`NativeModule::source`] to specify default parameter
+/// values or generic type parameters. [`Engine::new`](crate::engine::Engine::new)
+/// checks all declarations against the registered Rust signatures.
 ///
-/// Registered functions must check permissions ([`Vm::require`]), reserve
-/// memory, and acquire resource slots before performing any side effect,
-/// because the VM re-invokes the function from the start after a permission
-/// prompt or a garbage collection triggered by a memory or resource limit. Do
-/// not panic on script input; the engine catches panics and aborts the run with
+/// The VM re-runs a registered function from the start after a permission
+/// prompt or after a garbage collection triggered by a memory or resource
+/// limit. Check permissions with [`Vm::require`], reserve memory, and acquire
+/// resource slots before performing any side effect. Avoid panicking on script
+/// input. The engine catches panics and aborts the run with
 /// [`Error::Internal`](crate::engine::Error::Internal).
 #[derive(Clone)]
 pub struct NativeModule {

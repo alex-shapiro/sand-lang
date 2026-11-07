@@ -1,11 +1,11 @@
-//! Sand: a sandboxed, statically typed scripting language with a fast
+//! Sand is a sandboxed, statically typed scripting language with a
 //! register-based bytecode VM.
 //!
-//! See `docs/SPEC.md` for the language specification.
+//! Configure and run the interpreter with [`engine::Config`] and
+//! [`engine::Engine`]. Register host functions and types with
+//! [`native::NativeModule`]. Import each item from the module that defines it.
 //!
-//! An embedder starts with [`engine::Config`] and [`engine::Engine`], and
-//! registers Rust functions with [`native::NativeModule`]. Each item has one
-//! path: the path of the module that defines it.
+//! See `docs/SPEC.md` for the language specification.
 #![forbid(unsafe_code)]
 
 extern crate self as sandlang;

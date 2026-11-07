@@ -838,14 +838,14 @@ impl ChannelObj {
 
 /// A Rust type that implements an immutable Sand value type.
 ///
-/// Derive [`NamedType`](crate::native::NamedType) and the conversions with
-/// [`#[derive(SandValue)]`](crate::SandValue), implement this trait, and
+/// Derive [`NamedType`](crate::native::NamedType) and the value conversions
+/// with [`#[derive(SandValue)]`](crate::SandValue). Implement `ValueType`, and
 /// register the type with [`NativeModule::bind`](crate::native::NativeModule::bind):
 ///
 /// ```
 /// use sandlang::vm::value::ValueType;
 ///
-/// /// An amount of money in cents (such as `12.50`).
+/// /// An amount of money in cents, such as `12.50`.
 /// #[derive(Clone, PartialEq, Eq, Hash, sandlang::SandValue)]
 /// #[sand(module = "bank")]
 /// pub struct Money(u64);
@@ -867,11 +867,11 @@ impl ChannelObj {
 /// }
 /// ```
 ///
-/// The runtime compares, hashes, and formats values with `Eq`, `Hash`, and
-/// `Display`, and encodes and decodes them in JSON as strings. Equal values
-/// must produce identical `Display` output, and [`Self::parse`] must parse that
-/// output into an equal value. The runtime does not meter comparison, hashing,
-/// or formatting, so these operations must execute in constant time.
+/// The runtime uses `Eq`, `Hash`, and `Display` to compare, hash, and format
+/// values. It encodes and decodes values in JSON as strings. Equal values must
+/// produce identical `Display` output. [`Self::parse`] must parse that output
+/// into an equal value. Execute `Eq`, `Hash`, and `Display` in constant time,
+/// because the runtime treats these operations as constant-cost.
 pub trait ValueType:
     crate::native::NamedType
     + crate::native::convert::IntoValue

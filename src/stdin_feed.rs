@@ -13,10 +13,10 @@ use tokio::sync::Notify;
 /// A handle that streams standard input from the host to scripts.
 ///
 /// Create a `StdinFeed` with [`crate::engine::Config::stdin_feed`] or
-/// [`crate::engine::Config::stdin_io_feed`]. The host awaits
-/// [`StdinFeed::wait_for_request`] and then either streams bytes with
-/// [`StdinFeed::send`] or answers a single request with
-/// [`StdinRequest::answer`]. Clones share the same underlying stream.
+/// [`crate::engine::Config::stdin_io_feed`]. Await
+/// [`StdinFeed::wait_for_request`] to receive a read request. Stream bytes with
+/// [`StdinFeed::send`], or answer a single request with
+/// [`StdinRequest::answer`]. Clones share the same stream.
 #[derive(Clone)]
 pub struct StdinFeed {
     channel: Arc<StdinChannel>,

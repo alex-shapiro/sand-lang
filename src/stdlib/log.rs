@@ -1,5 +1,4 @@
-//! The `log` module, and the [`LogSink`] that receives the records that
-//! scripts log.
+//! The `log` module and the [`LogSink`] trait for script log records.
 
 use crate::check::ModKind;
 use crate::native::NativeModule;
@@ -75,11 +74,11 @@ fn quote_if(s: &str, quote: bool) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
-/// Consumer for records emitted by the `log` module (see [`crate::engine::Config::log_sink`]).
+/// Consumer for records emitted by the `log` module.
 ///
-/// The engine invokes [`LogSink::log`] synchronously on the thread executing the
-/// script. Any `Fn(&LogRecord) + Send + Sync` implements `LogSink` for all
-/// levels.
+/// Register a sink with [`crate::engine::Config::log_sink`]. The engine calls
+/// [`LogSink::log`] synchronously on the thread that runs the script. Any
+/// `Fn(&LogRecord) + Send + Sync` implements `LogSink` for all levels.
 pub trait LogSink: Send + Sync {
     /// Returns true if the sink accepts records at `level`. The engine skips
     /// constructing [`LogRecord`] values for disabled levels.

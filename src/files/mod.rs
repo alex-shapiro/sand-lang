@@ -1,5 +1,5 @@
-//! File systems that an engine gives to scripts: the host file system (with
-//! the `os` feature) or an in-memory file system, [`MemFs`].
+//! Sandboxed file systems for scripts. An engine uses the host file system
+//! if the `os` feature is enabled, or an in-memory [`MemFs`].
 
 #[cfg(feature = "os")]
 mod host;
