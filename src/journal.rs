@@ -115,10 +115,6 @@ impl From<EntryData> for Entry {
 }
 
 impl Entry {
-    pub(crate) fn into_data(self) -> EntryData {
-        self.0
-    }
-
     pub fn kind(&self) -> EntryKind {
         self.0.kind()
     }
@@ -467,9 +463,15 @@ pub(crate) fn time_of(nanos: i128) -> SystemTime {
 /// The durable execution of an engine's runs ([`Config::durable`](crate::engine::Config::durable)).
 #[derive(Clone)]
 pub struct Durable {
-    /// Where the engine records the inputs of each run, and the entries that
-    /// it replays.
+    /// Where the engine records the inputs of each run.
     pub journal: Arc<dyn Journal>,
+    /// The entries that earlier executions of the run recorded, in order.
+    /// The engine replays them and records new entries after them.
+    ///
+    /// Replay needs every entry before the run starts: when the run starts
+    /// an operation, the engine replays the operation only if a later entry
+    /// records its end, and runs it live otherwise.
+    pub replay: Arc<[Entry]>,
     /// Suspends a run when every task waits for a timer or a parked host
     /// call that is due more than this much later, instead of waiting: the
     /// run returns [`Outcome::Suspended`](crate::engine::Outcome::Suspended). `None`
@@ -478,9 +480,10 @@ pub struct Durable {
 }
 
 impl Durable {
-    /// Durable execution with `journal`, without suspension.
-    pub fn new(journal: Arc<dyn Journal>) -> Durable {
-        Durable { journal, suspend_after: None }
+    /// Durable execution that replays `replay` and records in `journal`,
+    /// without suspension.
+    pub fn new(journal: Arc<dyn Journal>, replay: Vec<Entry>) -> Durable {
+        Durable { journal, replay: replay.into(), suspend_after: None }
     }
 
     /// Sets [`Durable::suspend_after`].
@@ -520,21 +523,12 @@ pub struct ParkedCall {
 
 /// The storage of a run's journal, supplied by the host.
 ///
-/// The engine calls [`Journal::replay`] once when a run starts,
-/// [`Journal::record`] for each new entry, and [`Journal::flush`] before each
-/// externally visible effect, before it suspends the run, and when the run
-/// ends.
+/// The engine calls [`Journal::record`] for each new entry, and
+/// [`Journal::flush`] before each externally visible effect, before it
+/// suspends the run, and when the run ends.
 pub trait Journal: Send + Sync {
-    /// Returns all entries that earlier executions of the run recorded, in
-    /// order. The engine replays them and records new entries after them.
-    ///
-    /// Replay needs every entry before the run starts: when the run starts
-    /// an operation, the engine replays the operation only if a later entry
-    /// records its end, and runs it live otherwise.
-    fn replay(&self) -> Vec<Entry>;
-
-    /// Records the next entry, after all entries that [`Journal::replay`]
-    /// returned and that this execution recorded. The entry needs to be
+    /// Records the next entry, after the entries of [`Durable::replay`] and
+    /// those that this execution recorded. The entry needs to be
     /// durable only once a later [`Journal::flush`] completes, so an
     /// implementation can buffer it.
     fn record(&self, entry: Entry);
@@ -573,7 +567,7 @@ impl MemoryJournal {
         MemoryJournal::default()
     }
 
-    /// A journal that holds `entries`, all durable: the next run replays them.
+    /// A journal that holds `entries`, all durable, and records after them.
     pub fn with_entries(entries: Vec<Entry>) -> MemoryJournal {
         let durable = entries.len();
         MemoryJournal(Arc::new(Mutex::new(MemoryState { entries, durable, flushes: 0 })))
@@ -601,10 +595,6 @@ impl MemoryJournal {
 }
 
 impl Journal for MemoryJournal {
-    fn replay(&self) -> Vec<Entry> {
-        self.entries()
-    }
-
     fn record(&self, entry: Entry) {
         self.state().entries.push(entry);
     }

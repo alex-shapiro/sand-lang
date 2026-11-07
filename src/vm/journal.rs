@@ -15,7 +15,7 @@ use super::bytecode::Program;
 use super::iomem::IoMemory;
 use super::value::{MapObj, Obj, SetObj, Value};
 use super::{BoxFuture, Ctl, CtlKind, End, Finisher, NResult, Request, Vm};
-use crate::journal::{CallResult, Entry, EntryData, EntryKind, Journal, OpDone, OpEnd, OpKind, OpStart, ParkedCall};
+use crate::journal::{CallResult, Durable, Entry, EntryData, EntryKind, Journal, OpDone, OpEnd, OpKind, OpStart, ParkedCall};
 use crate::native::func::{Call, Park};
 use crate::platform::{Instant, SystemTime};
 use std::cell::RefCell;
@@ -449,7 +449,7 @@ pub(crate) enum Due {
 /// The journal state of a run.
 pub(crate) struct JournalState {
     sink: Arc<dyn Journal>,
-    replay: Vec<EntryData>,
+    replay: Arc<[Entry]>,
     pos: usize,
     /// The number of entries in the journal: the sequence number of the
     /// next recorded entry.
@@ -497,7 +497,7 @@ impl JournalState {
     }
 
     fn peek(&self) -> Option<&EntryData> {
-        self.replay.get(self.pos)
+        self.replay.get(self.pos).map(Entry::data)
     }
 
     fn diverged(&self, message: String) -> Divergence {
@@ -537,27 +537,19 @@ impl JournalState {
     }
 }
 
-/// Creates the journal state of a run that replays `sink`'s entries.
+/// Creates the journal state of a durable run.
 /// `origin` is the monotonic clock reading when the run starts.
-pub(crate) fn start(
-    sink: Arc<dyn Journal>,
-    origin: Instant,
-    suspend_after: Option<Duration>,
-    limits: &crate::engine::Limits,
-) -> JournalState {
+pub(crate) fn start(durable: &Durable, origin: Instant, limits: &crate::engine::Limits) -> JournalState {
     let mut done = HashMap::new();
-    let mut replay = Vec::new();
-    for (i, e) in sink.replay().into_iter().enumerate() {
-        let data = e.into_data();
-        if let EntryData::Done(d) = &data {
+    for (i, e) in durable.replay.iter().enumerate() {
+        if let EntryData::Done(d) = e.data() {
             done.insert(d.op, i);
         }
-        replay.push(data);
     }
     JournalState {
-        len: replay.len() as u64,
-        sink,
-        replay,
+        len: durable.replay.len() as u64,
+        sink: durable.journal.clone(),
+        replay: durable.replay.clone(),
         pos: 0,
         unflushed: false,
         ops: 0,
@@ -570,7 +562,7 @@ pub(crate) fn start(
         mono_last: Duration::ZERO,
         mono_skew: None,
         wall_floor: crate::platform::UNIX_EPOCH,
-        suspend_after,
+        suspend_after: durable.suspend_after,
         live_memory: IoMemory::new(limits.max_memory, limits.max_open_resources),
     }
 }

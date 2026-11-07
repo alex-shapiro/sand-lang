@@ -1157,8 +1157,8 @@ print(http.get("{base}/moved")?.text()?)
     );
     let journal = MemoryJournal::new();
     let run = |journal: &MemoryJournal| {
-        let journal = journal.clone();
-        run_with(&src, move |c| c.policy(RulePolicy::allow_all()).seed(1).durable(Durable::new(std::sync::Arc::new(journal))))
+        let durable = Durable::new(std::sync::Arc::new(journal.clone()), journal.entries());
+        run_with(&src, move |c| c.policy(RulePolicy::allow_all()).seed(1).durable(durable))
     };
     let expected = "GET \nPOST data\n200\nGET \n";
     assert_eq!(run(&journal).ok_stdout(), expected);

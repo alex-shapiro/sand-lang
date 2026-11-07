@@ -2364,11 +2364,12 @@ decisions.
 
 ### 16.7 Durable execution
 
-A journal makes a run durable. With `Config::durable(Durable::new(journal))`,
+A journal makes a run durable. With `Config::durable(Durable::new(journal, replay))`,
 the engine records each nondeterministic input of a run in a host-supplied
 `Journal`. If an execution
 stops before the run ends, because the host crashes or because the engine
-suspends the run, the host runs the same program again with the same journal.
+suspends the run, the host runs the same program again with the entries that
+the journal holds as `replay`.
 The engine then replays the recorded inputs instead of performing their
 effects, gets to the same state, and continues live after the last entry.
 Programs need no special syntax.
@@ -2377,16 +2378,16 @@ Programs need no special syntax.
 use sandlang::journal::{Durable, Journal, MemoryJournal};
 
 let journal = MemoryJournal::new();
-let config = Config::new().durable(Durable::new(Arc::new(journal.clone())));
-Engine::new(config.clone()).run_program(&program).await;  // records
-Engine::new(config).run_program(&program).await;          // replays, then continues live
+let durable = |j: &MemoryJournal| Durable::new(Arc::new(j.clone()), j.durable());
+Engine::new(Config::new().durable(durable(&journal))).run_program(&program).await;  // records
+Engine::new(Config::new().durable(durable(&journal))).run_program(&program).await;  // replays, then continues live
 ```
 
-The `sandlang::journal` module defines the interface. The engine calls
-`Journal::replay` once when a run starts, to get all entries of earlier
-executions. Replay needs every entry before the run starts: when the run
-starts an operation, the engine replays it only if a later entry records its
-end. The engine calls `Journal::record` for each new entry and
+The `sandlang::journal` module defines the interface. `Durable::replay` holds
+all entries of earlier executions, so replay has every entry before the run
+starts: when the run starts an operation, the engine replays it only if a
+later entry records its end. The engine calls `Journal::record` for each new
+entry and
 `Journal::flush` to make the entries durable. An `Entry` holds its
 `EntryData`; `Entry::kind` gives its `EntryKind`, `Entry::data` its data, and
 `Entry::describe` describes it. The sequence number of an entry is its
