@@ -14,7 +14,7 @@ mod repl;
 
 use sandlang::policy::{PolicyFile, parse_duration, parse_size};
 use sandlang::time::TimeZone;
-use sandlang::{Capability, Config, Engine, Error, PromptAnswer, RulePolicy};
+use sandlang::{Capability, Config, Engine, Error, PromptAnswer, RulePolicy, StdinFeed};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -128,11 +128,12 @@ fn runtime() -> Result<tokio::runtime::Runtime, String> {
 
 struct RunOptions {
     config: Config,
+    stdin_feed: StdinFeed,
     file: Option<PathBuf>,
     script_args: Vec<String>,
 }
 
-/// Parses run options into an engine configuration.
+/// Parses the options of `sand run` and `sand repl`.
 fn run_options(args: &[String]) -> Result<RunOptions, String> {
     parse_run_options(args, false)
 }
@@ -220,12 +221,14 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
         }
     }
     let policy = rules.with_defaults(default_rules(allow_all));
-    let mut config = Config::new()
+    let config = Config::new()
         .policy(policy.clone())
         .limits(limits)
-        .inherit_stdin()
         .gc_stress(std::env::var_os("SAND_GC_STRESS").is_some())
         .dump_bytecode(std::env::var_os("SAND_DUMP_BYTECODE").is_some());
+    // Only terminal input pauses the wall-time limit while a read waits.
+    let (mut config, stdin_feed) =
+        if std::io::IsTerminal::is_terminal(&std::io::stdin()) { config.stdin_feed() } else { config.stdin_io_feed() };
     if !files_only {
         config = config.args(script_args.clone());
     }
@@ -236,7 +239,7 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
     if let Some(zone) = TimeZone::system() {
         config = config.time_zone(zone);
     }
-    Ok(RunOptions { config, file, script_args })
+    Ok(RunOptions { config, stdin_feed, file, script_args })
 }
 
 const TAKES_VALUE: &[&str] = &[
@@ -432,13 +435,49 @@ fn cmd_run(args: &[String]) -> Result<u8, String> {
     let file = opts.file.ok_or("missing FILE to run")?;
     let mut engine = Engine::new(opts.config.exit_after_run(true)).map_err(|e| e.render())?;
     let rt = runtime()?;
-    let r = rt.block_on(engine.run_file(&file));
+    let r = rt.block_on(with_stdin_forwarded(&opts.stdin_feed, engine.run_file(&file)));
+    // Drop the runtime without waiting for a blocked stdin read thread.
+    rt.shutdown_background();
     if std::env::var_os("SAND_GC_STATS").is_some() {
         eprintln!("{:#?}", engine.gc_stats());
     }
     match r {
         Ok(o) => Ok(exit_status(o.exit_code)),
         Err(e) => Ok(report_error(&e)),
+    }
+}
+
+/// Runs `run` while forwarding process standard input to `feed`.
+async fn with_stdin_forwarded<T>(feed: &StdinFeed, run: impl Future<Output = T>) -> T {
+    let mut run = std::pin::pin!(run);
+    tokio::select! {
+        biased;
+        result = &mut run => return result,
+        () = forward_stdin(feed) => {}
+    }
+    run.await
+}
+
+/// Forwards process standard input to `feed` until end-of-file or an I/O error.
+/// Reads from process standard input only after a script requests input.
+async fn forward_stdin(feed: &StdinFeed) {
+    use tokio::io::AsyncBufReadExt;
+    // A 256 KiB buffer reduces the number of waits on large inputs.
+    let mut stdin = tokio::io::BufReader::with_capacity(256 << 10, tokio::io::stdin());
+    loop {
+        feed.wait_for_request().await;
+        match stdin.fill_buf().await {
+            Ok([]) => return feed.end(),
+            Ok(data) => {
+                let len = data.len();
+                feed.send(data.to_vec());
+                stdin.consume(len);
+            }
+            Err(e) => {
+                eprintln!("sand: cannot read standard input: {e}");
+                return feed.end();
+            }
+        }
     }
 }
 
@@ -593,18 +632,22 @@ fn cmd_test(args: &[String]) -> Result<u8, String> {
         return Err("missing FILE".into());
     }
     let rt = runtime()?;
-    let mut failed = 0;
-    for f in &files {
-        let mut engine = Engine::new(opts.config.clone()).map_err(|e| e.render())?;
-        match rt.block_on(engine.run_tests(f)) {
-            Ok(report) => {
-                out!("{}", report.render());
-                failed += report.failed();
-            }
-            Err(e) => return Ok(report_error(&e)),
+    let mut engine = Engine::new(opts.config).map_err(|e| e.render())?;
+    let run = async {
+        let mut failed = 0;
+        for f in &files {
+            let report = engine.run_tests(f).await?;
+            out!("{}", report.render());
+            failed += report.failed();
         }
+        Ok(failed)
+    };
+    let r = rt.block_on(with_stdin_forwarded(&opts.stdin_feed, run));
+    rt.shutdown_background();
+    match r {
+        Ok(failed) => Ok(if failed > 0 { 1 } else { 0 }),
+        Err(e) => Ok(report_error(&e)),
     }
-    Ok(if failed > 0 { 1 } else { 0 })
 }
 
 #[cfg(test)]

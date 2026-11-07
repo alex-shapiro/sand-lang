@@ -954,6 +954,33 @@ fn invalid_network_patterns_are_explained() {
     assert!(out.stderr.contains("invalid host pattern `a..b`"), "{}", out.stderr);
 }
 
+/// `sand run` exits if it reaches `--max-time` while a read of process
+/// standard input is blocked.
+#[test]
+fn open_stdin_pipe_exits_at_time_limit() {
+    let dir = script("stdin-open", "import io\nio.stdin.read_line()");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sand"))
+        .args(["run", "main.sand", "--no-prompt", "--max-time=200ms"])
+        .current_dir(dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("cannot start sand");
+    let start = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status.code();
+        }
+        if start.elapsed() > std::time::Duration::from_secs(20) {
+            child.kill().unwrap();
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert_eq!(status, Some(3));
+}
+
 #[test]
 fn a_blocked_stdout_does_not_outlast_the_time_limit() {
     let dir = script("blocked", "while true { print(\"x\".repeat(1000)) }");

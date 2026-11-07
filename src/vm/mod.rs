@@ -64,6 +64,22 @@ const _: () = assert!(std::mem::size_of::<Ctl>() == std::mem::size_of::<usize>()
 const _: () = assert!(std::mem::size_of::<Result<Value, Ctl>>() == 16);
 const _: () = assert!(std::mem::size_of::<Result<Option<Value>, Ctl>>() == 16);
 
+/// Classification of a task wait. Determines whether idle wait time counts
+/// toward `max_wall_time`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaitKind {
+    /// I/O or timer wait. Idle time counts toward `max_wall_time`.
+    Io,
+    /// User-action wait. Idle time does not count toward `max_wall_time`.
+    User,
+}
+
+/// A suspended native call: the pending future and its [`WaitKind`].
+pub struct Suspension {
+    pub(crate) future: BoxFuture,
+    pub(crate) wait_kind: WaitKind,
+}
+
 /// What a [`Ctl`] is.
 pub enum CtlKind {
     /// Uncaught runtime error (`kind: message`) that terminates the run (see [`Ctl::fail`]).
@@ -75,7 +91,7 @@ pub enum CtlKind {
     /// Ask the user; the call is retried afterwards.
     NeedPermission(Capability),
     /// Suspend the task until the future completes.
-    Async(BoxFuture),
+    Async(Suspension),
     /// The task waits for the scheduler event that [`Vm::block`]
     /// registered; the call returns what wakes it.
     Blocked,
@@ -119,9 +135,9 @@ impl Ctl {
         Ctl(Box::new(CtlKind::Exit(code)))
     }
 
-    /// Suspend the task until `fut` completes.
-    pub fn suspend(fut: BoxFuture) -> Ctl {
-        Ctl(Box::new(CtlKind::Async(fut)))
+    /// Suspends the calling task on `suspension`.
+    pub(crate) fn suspend(suspension: Suspension) -> Ctl {
+        Ctl(Box::new(CtlKind::Async(suspension)))
     }
 
     /// Ask the user for `cap`.
@@ -166,7 +182,7 @@ impl std::fmt::Debug for CtlKind {
             CtlKind::Limit(k) => write!(f, "Limit({k:?})"),
             CtlKind::Exit(c) => write!(f, "Exit({c})"),
             CtlKind::NeedPermission(c) => write!(f, "NeedPermission({c})"),
-            CtlKind::Async(_) => write!(f, "Async"),
+            CtlKind::Async(s) => write!(f, "Async({:?})", s.wait_kind),
             CtlKind::Blocked => write!(f, "Blocked"),
             CtlKind::Yield => write!(f, "Yield"),
             CtlKind::Interrupted => write!(f, "Interrupted"),
@@ -317,17 +333,6 @@ impl Trap {
     }
 }
 
-/// Standard input source for an engine.
-pub enum StdinSource {
-    None,
-    Bytes(std::io::Cursor<Vec<u8>>),
-    /// The host process's standard input.
-    #[cfg(feature = "os")]
-    Inherit(tokio::io::BufReader<tokio::io::Stdin>),
-    /// Input the host sends ([`crate::StdinFeed`]).
-    Fed(crate::feed::FedReader),
-}
-
 /// Output sink for standard streams and logs. `write` must not block for
 /// long, because an engine cannot interrupt it. A sink whose destination
 /// can block should buffer the data and report the size of the buffer as
@@ -474,9 +479,8 @@ pub struct Host {
     pub always: Always,
     pub stdout: SharedSink,
     pub stderr: SharedSink,
-    pub stdin: Arc<tokio::sync::Mutex<StdinSource>>,
-    /// The feed of a [`StdinSource::Fed`], told when the VM waits.
-    pub(crate) stdin_feed: Option<Arc<crate::feed::Shared>>,
+    /// `None` if standard input is not configured.
+    pub(crate) stdin: Option<Arc<crate::stdin_feed::StdinChannel>>,
     pub output_bytes: u64,
     pub limits: Limits,
     pub cwd: PathBuf,

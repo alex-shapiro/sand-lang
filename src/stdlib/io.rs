@@ -4,12 +4,12 @@ use super::stream::{self, IoFailure, Suspended, bytes_read, line_read, read_line
 use crate::check::ModKind;
 use crate::native::{HostError, IntoValue, Later, NativeModule, NativeObject, ObjectType, Val};
 use crate::policy::Capability;
+use crate::stdin_feed::StdinChannel;
 use crate::vm::iomem::Reservation;
-use crate::vm::value::{Obj, Value, to_usize_saturating, u64_to_usize_saturating};
-use crate::vm::{Ctl, StdinSource, Vm};
+use crate::vm::value::{Obj, Value, to_usize_saturating};
+use crate::vm::{Ctl, Vm, WaitKind};
 use std::collections::BTreeMap;
 use tokio::io::AsyncBufRead;
-use tokio::sync::Mutex;
 
 pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("io", ModKind::Std, include_str!("io.sand"));
@@ -118,10 +118,12 @@ fn read_stdin<R: IntoValue + Send + 'static>(
         _ => vm.io_reservation(),
     };
     let read = async move {
-        let data = read_input(&stdin, what, &mut res).await.map_err(|e| IoFailure::new(e.kind, format!("stdin: {}", e.message)))?;
+        let data =
+            read_input(stdin.as_deref(), what, &mut res).await.map_err(|e| IoFailure::new(e.kind, format!("stdin: {}", e.message)))?;
         Ok((data, res))
     };
-    stream::suspend(read, move |vm, (data, res)| {
+    let wait_kind = vm.host.stdin.as_ref().map_or(WaitKind::Io, |channel| channel.wait_kind);
+    stream::suspend(wait_kind, read, move |vm, (data, res)| {
         drop(res);
         done(vm, data)
     })
@@ -134,62 +136,36 @@ fn input_line(vm: &mut Vm, line: Option<Vec<u8>>) -> Result<Option<String>, Host
 /// The most `read` returns at once from standard input.
 const STDIN_CHUNK: usize = 64 << 10;
 
-/// The next line of standard input without its terminator (`Some(None)` at
-/// the end), if it is in a buffer already; `None`, consuming nothing, if the
-/// read must wait, another is under way, or the line does not fit in memory.
+/// Takes a buffered line from standard input without waiting.
+///
+/// Returns `Some(Some(line))` without the trailing `\n` or `\r\n`,
+/// `Some(None)` at end-of-file, or `None` if a complete line is not buffered,
+/// another read is active, or the line exceeds the memory limit.
 fn buffered_line(vm: &Vm) -> Option<Option<Vec<u8>>> {
-    let mut source = vm.host.stdin.try_lock().ok()?;
-    let _op = match &mut *source {
-        StdinSource::Fed(r) => Some(r.begin()),
-        _ => None,
-    };
-    let (buf, at_end) = match &mut *source {
-        StdinSource::None => return Some(None),
-        StdinSource::Bytes(c) => {
-            let at = u64_to_usize_saturating(c.position()).min(c.get_ref().len());
-            (&c.get_ref()[at..], true)
-        }
-        #[cfg(feature = "os")]
-        StdinSource::Inherit(r) => (r.buffer(), false),
-        StdinSource::Fed(r) => r.available(),
-    };
-    let take = match buf.iter().position(|&b| b == b'\n') {
+    let mut read = vm.host.stdin.as_ref()?.try_begin_read()?;
+    let (buf, at_end) = read.available();
+    let len = match buf.iter().position(|&b| b == b'\n') {
         Some(nl) => nl + 1,
         None if at_end => buf.len(),
         None => return None,
     };
-    if take == 0 {
+    if len == 0 {
         return Some(None);
     }
-    if vm.heap.would_exceed(take) {
+    if vm.heap.would_exceed(len) {
         return None;
     }
-    let mut data = buf[..take].to_vec();
-    match &mut *source {
-        StdinSource::Bytes(c) => c.set_position(c.position() + take as u64),
-        #[cfg(feature = "os")]
-        StdinSource::Inherit(r) => std::pin::Pin::new(r).consume(take),
-        StdinSource::Fed(r) => std::pin::Pin::new(r).consume(take),
-        StdinSource::None => {}
-    }
-    strip_eol(&mut data);
-    Some(Some(data))
+    let mut line = buf[..len].to_vec();
+    std::pin::Pin::new(&mut read).consume(len);
+    strip_eol(&mut line);
+    Some(Some(line))
 }
 
-/// Reads `what` from standard input: `None` only for a line at the end of
-/// the input.
-async fn read_input(stdin: &Mutex<StdinSource>, what: Read, res: &mut Reservation) -> Result<Option<Vec<u8>>, IoFailure> {
-    let mut source = stdin.lock().await;
-    match &mut *source {
-        StdinSource::None => Ok((what != Read::Line).then(Vec::new)),
-        StdinSource::Bytes(c) => read_from(c, what, res).await,
-        #[cfg(feature = "os")]
-        StdinSource::Inherit(r) => read_from(r, what, res).await,
-        StdinSource::Fed(r) => {
-            let _op = r.begin();
-            read_from(r, what, res).await
-        }
-    }
+/// Reads `what` from `stdin`, returning `Ok(None)` if `Read::Line` reaches
+/// end-of-file.
+async fn read_input(stdin: Option<&StdinChannel>, what: Read, res: &mut Reservation) -> Result<Option<Vec<u8>>, IoFailure> {
+    let stdin = stdin.ok_or_else(|| IoFailure::new("io", "the engine has no standard input"))?;
+    read_from(&mut stdin.begin_read().await, what, res).await
 }
 
 async fn read_from<R: AsyncBufRead + Unpin>(r: &mut R, what: Read, res: &mut Reservation) -> Result<Option<Vec<u8>>, IoFailure> {

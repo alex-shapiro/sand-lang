@@ -10,6 +10,7 @@ use crate::check::ModKind;
 use crate::native::{HostError, IntoValue, NativeModule, NativeObject, Val};
 use crate::network::{self, Network, Stream};
 use crate::policy::{Capability, Policy, format_host_port, is_localhost, is_valid_host, parse_ip, parse_port, split_port};
+use crate::vm::WaitKind;
 use crate::vm::iomem::{Reservation, ResourceSlot};
 use crate::vm::value::{ValueType, to_usize_saturating};
 use crate::vm::{Ctl, Vm};
@@ -67,7 +68,7 @@ pub(crate) trait Resource: crate::native::ObjectType + IntoValue {
 /// counted by `slot` from the start (a socket being connected or accepted
 /// is open already).
 fn suspend_resource<T: Resource>(slot: ResourceSlot, fut: impl Future<Output = Result<T, IoFailure>> + Send + 'static) -> Suspended<T> {
-    suspend(fut, move |_, mut obj: T| {
+    suspend(WaitKind::Io, fut, move |_, mut obj: T| {
         obj.attach(slot);
         Ok(obj)
     })
@@ -503,6 +504,7 @@ fn conn_read(vm: &mut Vm, c: Val<Conn>, max: i64) -> Suspended<Vec<u8>> {
     // The buffer is counted against the memory limit while the read is pending.
     let res = vm.reserve_io(max)?;
     suspend(
+        WaitKind::Io,
         h.closed.guard(async move {
             let data = read_upto(&mut *h.reader.lock().await, max).await?;
             Ok((data, res))
@@ -519,6 +521,7 @@ fn conn_read_line(vm: &mut Vm, c: Val<Conn>) -> Suspended<Option<String>> {
     // The line may grow until it exhausts the memory limit.
     let mut res = vm.io_reservation();
     suspend(
+        WaitKind::Io,
         h.closed.guard(async move {
             let line = read_line(&mut *h.reader.lock().await, &mut res).await?;
             Ok((line, res))
@@ -536,6 +539,7 @@ fn conn_read_all(vm: &mut Vm, c: Val<Conn>) -> Suspended<Vec<u8>> {
     let h = conn_handle(vm, c)?;
     let mut res = vm.io_reservation();
     suspend(
+        WaitKind::Io,
         h.closed.guard(async move {
             let mut reader = h.reader.lock().await;
             let mut data = Vec::new();
@@ -563,6 +567,7 @@ fn conn_write(vm: &mut Vm, c: Val<Conn>, bytes: impl Fn(&Vm) -> &[u8]) -> Suspen
 pub(crate) fn write_bytes(vm: &mut Vm, c: Val<Conn>, data: Vec<u8>, res: Reservation) -> Suspended<()> {
     let h = conn_handle(vm, c)?;
     suspend(
+        WaitKind::Io,
         h.closed.guard(async move {
             let mut writer = h.writer.lock().await;
             writer.write_all(&data).await?;

@@ -3,7 +3,7 @@
 use super::convert::{Conversion, FromValue, HostError, IntoValue};
 use super::ty::Type;
 use crate::vm::value::Value;
-use crate::vm::{BoxFuture, Ctl, Finisher, NResult, NativeFn, Vm};
+use crate::vm::{Ctl, Finisher, NResult, NativeFn, Suspension, Vm, WaitKind};
 use std::future::Future;
 use std::marker::PhantomData;
 
@@ -56,11 +56,14 @@ pub trait AsyncHostFunction<Marker>: Send + Sync + 'static {
 /// Return `Result<Later<T, E>, E>` from the function: if `E` is [`Ctl`], the
 /// Sand return type is `T`; if `E` is [`HostError`], the Sand return type is
 /// `Result<T, Error>`.
-pub struct Later<T, E>(Wait, PhantomData<fn() -> (T, E)>);
+pub struct Later<T, E>(Completion, PhantomData<fn() -> (T, E)>);
 
-enum Wait {
-    Ready(Finisher),
-    Future(BoxFuture),
+/// Execution mode of a [`Later`] value.
+enum Completion {
+    /// Runs the finisher immediately without suspending the calling task.
+    Now(Finisher),
+    /// Suspends the calling task until the future is resolved.
+    After(Suspension),
 }
 
 /// Error type for a [`Later`] result ([`Ctl`] or [`HostError`]).
@@ -97,9 +100,13 @@ impl<T: IntoValue + Send + 'static, E: NativeError> Later<T, E> {
     /// Suspends the calling task until `fut` is resolved, and then executes the
     /// returned closure on the VM thread to produce the Sand result.
     ///
+    /// `wait_kind` classifies the wait. Pass [`WaitKind::User`] if the task
+    /// waits for a user action so that idle wait time does not count toward
+    /// `max_wall_time`.
+    ///
     /// Do not capture [`Value`]s in `fut`; the garbage collector does not trace
     /// pending futures while a task is suspended.
-    pub fn new<F>(fut: impl Future<Output = F> + Send + 'static) -> Later<T, E>
+    pub fn new<F>(wait_kind: WaitKind, fut: impl Future<Output = F> + Send + 'static) -> Later<T, E>
     where
         F: FnOnce(&mut Vm) -> Result<T, E> + Send + 'static,
     {
@@ -107,20 +114,20 @@ impl<T: IntoValue + Send + 'static, E: NativeError> Later<T, E> {
             let finish = fut.await;
             Box::new(move |vm: &mut Vm| E::finish(finish(vm), vm)) as Finisher
         };
-        Later(Wait::Future(Box::pin(fut)), PhantomData)
+        Later(Completion::After(Suspension { future: Box::pin(fut), wait_kind }), PhantomData)
     }
 
     /// Completes immediately with `r` without suspending the calling task.
     pub fn ready(r: Result<T, E>) -> Later<T, E> {
-        Later(Wait::Ready(Box::new(move |vm: &mut Vm| E::finish(r, vm))), PhantomData)
+        Later(Completion::Now(Box::new(move |vm: &mut Vm| E::finish(r, vm))), PhantomData)
     }
 }
 
 impl<T, E> Later<T, E> {
     pub(crate) fn finish(self, vm: &mut Vm) -> NResult {
         match self.0 {
-            Wait::Ready(f) => f(vm),
-            Wait::Future(fut) => Err(Ctl::suspend(fut)),
+            Completion::Now(f) => f(vm),
+            Completion::After(suspension) => Err(Ctl::suspend(suspension)),
         }
     }
 }
@@ -207,10 +214,11 @@ macro_rules! fn_impls {
                     let mut conv = Conversion::new();
                     $(let $a = $a::from_value(vm, $a, &mut conv)?;)*
                     let fut = self($($a),*);
-                    Err(Ctl::suspend(Box::pin(async move {
+                    let finish = async move {
                         let r = fut.await;
-                        Box::new(move |vm: &mut Vm| r.into_value(vm)) as Finisher
-                    })))
+                        move |_: &mut Vm| Ok(r)
+                    };
+                    Later::<R, Ctl>::new(WaitKind::Io, finish).finish(vm)
                 })
             }
         }

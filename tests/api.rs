@@ -10,7 +10,7 @@ use sandlang::time::TimeZone;
 use sandlang::vm::Vm;
 use sandlang::{
     Capability, Config, Decision, Engine, Error, LimitKind, Limits, LogLevel, LogRecord, LogSink, MemorySink, NativeModule, PromptAnswer,
-    ValueType,
+    Session, ValueType,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -624,16 +624,6 @@ fn natives_declared_with_other_enums_do_not_check() {
     m.function("sides_of", |s: Shape| s as i64);
     let errors = engine_errors(Config::new().module(m));
     assert!(errors[0].contains("is declared `fn(Color) -> int`, but its Rust function is `fn(Shape) -> int`"), "{errors:?}");
-}
-
-#[test]
-fn clones_of_a_config_report_its_errors() {
-    let mut m = NativeModule::new("bank");
-    m.function("zero", || Money(0));
-    let config = Config::new().module(m);
-    let errors = engine_errors(config.clone());
-    assert_eq!(errors.len(), 1);
-    assert_eq!(engine_errors(config), errors);
 }
 
 #[test]
@@ -2755,11 +2745,11 @@ fn wall_time_limit() {
 
 #[test]
 fn cpu_time_limit_excludes_waiting() {
-    let config = Config::new().limits(Limits { max_cpu_time: Some(Duration::from_millis(200)), ..Limits::default() });
-    let (r, out, _) = run_src(config.clone(), "task.sleep(300ms)\nprint(\"slept\")");
+    let config = || Config::new().limits(Limits { max_cpu_time: Some(Duration::from_millis(200)), ..Limits::default() });
+    let (r, out, _) = run_src(config(), "task.sleep(300ms)\nprint(\"slept\")");
     r.unwrap();
     assert_eq!(out, "slept\n");
-    let (r, _, _) = run_src(config, "var i = 0\nwhile true { i += 1 }");
+    let (r, _, _) = run_src(config(), "var i = 0\nwhile true { i += 1 }");
     assert!(matches!(r, Err(Error::Limit(LimitKind::CpuTime))), "{r:?}");
 }
 
@@ -3256,7 +3246,7 @@ fn error_messages_cannot_impersonate_limits_or_interrupts() {
         }
     }
     // A failed top-level `?` in a session fails with the error's text.
-    let mut session = Engine::new(Config::new()).unwrap().session();
+    let mut session = Session::new(Config::new()).unwrap();
     let r = rt().block_on(session.eval("let r: Result<int> = Err(Error(\"\\u{0}memory\"))\nr?"));
     assert!(matches!(r, Err(Error::Runtime { .. })), "{r:?}");
 }
@@ -3288,7 +3278,7 @@ fn rust_panics_in_natives_do_not_unwind_into_the_host() {
     dir.write("t.sand", "import buggy\ntest \"bad\" {\n    buggy.boom(9)\n}\ntest \"good\" {\n    assert(buggy.boom(2) == 2)\n}\n");
     let report = rt().block_on(Engine::new(Config::new().module(module())).unwrap().run_tests(dir.path().join("t.sand"))).unwrap();
     assert_eq!((report.passed(), report.failed()), (1, 1));
-    let mut session = Engine::new(Config::new().module(module())).unwrap().session();
+    let mut session = Session::new(Config::new().module(module())).unwrap();
     assert!(rt().block_on(session.eval("import buggy\nbuggy.boom(7)")).is_err());
     assert!(session.was_reset());
     assert!(matches!(rt().block_on(session.eval("buggy.boom(2)")), Err(Error::Compile(_))));
@@ -3428,12 +3418,12 @@ fn host_modules_can_define_resources() {
 #[test]
 fn host_errors_are_err_values_and_aborts_end_the_run() {
     use sandlang::HostError;
-    use sandlang::native::Later;
     use sandlang::vm::{Ctl, Vm};
+    use sandlang::{WaitKind, native::Later};
     let mut m = NativeModule::new("errs");
     m.function("now", || -> Result<i64, HostError> { Err(HostError::new("invalid", "bad input")) });
     m.function("later", || -> Result<Later<i64, HostError>, HostError> {
-        Ok(Later::new(async { |_: &mut Vm| Err(HostError::new("io", "broken pipe")) }))
+        Ok(Later::new(WaitKind::Io, async { |_: &mut Vm| Err(HostError::new("io", "broken pipe")) }))
     });
     m.function("abort", || -> Result<i64, HostError> { Err(Ctl::fail("invalid", "no result").into()) });
     let run = |src: &str| run_src(Config::new().module(m.clone()), &format!("import errs\n{src}"));

@@ -21,7 +21,7 @@ After the rewrite, all pieces of writing must comply with AST-STE100 guidelines.
 
 ## Completion
 
-Run in a loop, optionally with sub-agents. Each loop iteration must perform the full task above across the whole branch. Commit after each loop iteration, with a message that future iterations can use. Loop break condition: at the end of each iteration, determine whether more than 5% of the branch's writing changed. If ≤5%, or after five iterations, break.
+Run in a loop, optionally with sub-agents. Each loop iteration must perform the full task above across the whole branch. Commit and push after each loop iteration, with a message that future iterations can use. Loop break condition: at the end of each iteration, determine whether more than 5% of the branch's writing changed. If ≤5%, or after five iterations, break.
 
 After the loop is complete, make sure that the codebase is formatted, linted, and tests pass. Then check whether a PR exists. If not, create one. If one already exists, rewrite its title and description to match the format of previous commits on main. Write in AST-STE100 English and focus on conveying concepts concisely rather than listing facts.
 

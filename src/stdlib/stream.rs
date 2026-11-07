@@ -4,7 +4,7 @@
 use super::io_kind;
 use crate::native::{HostError, IntoValue, Later};
 use crate::vm::iomem::{MemoryLimit, Reservation};
-use crate::vm::{Ctl, Vm};
+use crate::vm::{Ctl, Vm, WaitKind};
 use std::future::Future;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt};
 
@@ -29,12 +29,14 @@ impl From<IoFailure> for HostError {
 
 pub(crate) type Suspended<T> = Result<Later<T, HostError>, HostError>;
 
-/// Suspends the calling task on `fut` and runs `ok` when `fut` succeeds.
+/// Suspends the calling task on `fut` with `wait_kind`. If `fut` returns `Ok`,
+/// runs `ok` on the VM thread to produce the Sand result.
 pub(crate) fn suspend<T: Send + 'static, R: IntoValue + Send + 'static>(
+    wait_kind: WaitKind,
     fut: impl Future<Output = Result<T, IoFailure>> + Send + 'static,
     ok: impl FnOnce(&mut Vm, T) -> Result<R, HostError> + Send + 'static,
 ) -> Suspended<R> {
-    Ok(Later::new(async move {
+    Ok(Later::new(wait_kind, async move {
         let r = fut.await;
         move |vm: &mut Vm| ok(vm, r?)
     }))

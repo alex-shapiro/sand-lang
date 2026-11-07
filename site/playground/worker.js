@@ -1,6 +1,6 @@
 // Web Worker that executes Sand engines and interactive sessions off the main thread.
 
-import { initSync, Engine, format, formatPolicy, isTimeZone, lintPolicy } from "./pkg/sandlang_wasm.js";
+import { initSync, Engine, Session, format, formatPolicy, isTimeZone, lintPolicy } from "./pkg/sandlang_wasm.js";
 import { engineOptions, program } from "./sandbox.js";
 
 const pendingPrompts = new Map();
@@ -59,12 +59,13 @@ const hooks = {
     }),
 };
 
-function engineFor(sandbox, engineHooks = {}) {
+// Constructs `Kind` with the options and hooks for `sandbox`.
+function create(Kind, sandbox, engineHooks = {}) {
   const options = engineOptions(sandbox);
   const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   if (isTimeZone(zone)) options.timeZone = zone;
   try {
-    return { engine: new Engine(options, engineHooks) };
+    return { created: new Kind(options, engineHooks) };
   } catch (e) {
     if (e?.policyErrors) return { policyErrors: e.policyErrors };
     throw e;
@@ -73,11 +74,11 @@ function engineFor(sandbox, engineHooks = {}) {
 
 async function endSession() {
   if (!current) return;
-  const { engine, session } = current;
+  const { session, files } = current;
   await pauseTasks();
   current = null;
+  files.free();
   session.free();
-  engine.free();
 }
 
 async function pauseTasks() {
@@ -98,18 +99,18 @@ function resumeTasks() {
 
 async function run(id, sandbox) {
   await endSession();
-  const { engine, policyErrors } = engineFor(sandbox, hooks);
-  if (!engine) {
+  const { created: session, policyErrors } = create(Session, sandbox, hooks);
+  if (!session) {
     const message = "The policy has errors:\n" + policyErrors.map((e) => `  line ${e.line}: ${e.message}`).join("\n");
     const result = { ok: false, exitCode: 2, error: { kind: "policy", message, diagnostics: [], trace: [] } };
     self.postMessage({ type: "done", id, result, written: [], policyErrors });
     return;
   }
-  const session = engine.session();
-  current = { engine, session, sandbox, tasks: null, start: engine.generation() };
+  const files = session.fileSystem;
+  current = { session, files, sandbox, tasks: null, start: files.generation() };
   const evaluated = await session.eval(sandbox.files[program(sandbox)] ?? "", program(sandbox));
   const result = asRunResult(evaluated);
-  const written = engine.changedFiles(current.start);
+  const written = files.changedFiles(current.start);
   self.postMessage({ type: "done", id, result, written }, written.map((f) => f.data.buffer));
   if (evaluated.exitCode === undefined) resumeTasks();
 }
@@ -121,7 +122,7 @@ async function input(id, source) {
   }
   await pauseTasks();
   const result = await current.session.eval(source);
-  const written = current.engine.changedFiles(current.start);
+  const written = current.files.changedFiles(current.start);
   self.postMessage({ type: "evaluated", id, result, written }, written.map((f) => f.data.buffer));
   if (result.exitCode === undefined) resumeTasks();
 }
@@ -135,7 +136,7 @@ function asRunResult(evaluated) {
 }
 
 function check(id, sandbox) {
-  const { engine, policyErrors } = engineFor(sandbox);
+  const { created: engine, policyErrors } = create(Engine, sandbox);
   if (!engine) {
     self.postMessage({ type: "checked", id, policyErrors });
     return;
@@ -151,7 +152,7 @@ function check(id, sandbox) {
 }
 
 function lint(id, sandbox) {
-  const { engine, policyErrors } = engineFor(sandbox);
+  const { created: engine, policyErrors } = create(Engine, sandbox);
   if (!engine) {
     self.postMessage({ type: "linted", id, lint: [], error: `The policy has errors (line ${policyErrors[0].line}: ${policyErrors[0].message})` });
     return;

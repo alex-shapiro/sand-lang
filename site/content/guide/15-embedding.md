@@ -83,7 +83,7 @@ let report = files.read("/out/report.txt")?;
 - **Policy.** `RulePolicy` provides `allow_`, `deny_`, and `prompt_` builder methods for each capability kind, such as `allow_read`, `deny_net`, and `prompt_write`. `allow_net` and `allow_http` accept policy rule arguments such as `"plaintext localhost:8080"`. `RulePolicy::default()` is empty, `RulePolicy::standard()` allows `stdout` and `stderr`, and `RulePolicy::allow_all()` allows all capabilities for trusted scripts. `user_rules.with_defaults(host_rules)` appends fallback rules that apply only if a request does not match any rule in `user_rules`. `Config::custom_policy` replaces rule evaluation with a host-defined `CustomPolicy`.
 - **Limits.** `Limits` configures every resource bound described in [Sandbox and policies](/guide/sandbox/).
 - **Virtual file system.** `Config::memory_fs` replaces host disk access with an in-memory `MemFs`. Clones of a `MemFs` share the same underlying storage so the host can populate input files before a run and read output files afterward.
-- **Streams.** `Config::stdout` and `Config::stderr` redirect script output to a `MemorySink` or custom sink. `Config::stdin_bytes` supplies fixed input bytes.
+- **Streams.** `Config::stdout` and `Config::stderr` redirect script output to a `MemorySink` or custom sink. `Config::stdin_bytes` supplies fixed input bytes. `Config::stdin_feed` and `Config::stdin_io_feed` return a `StdinFeed` that the host uses to send input while the script runs.
 - **Logging.** `Config::log_sink` routes `log` records to a host `LogSink` as a `LogRecord` containing the level, message, fields, and caller location. `LogSink::enabled` filters levels before record construction, and `Config::log_level` sets the initial script log level. Emitted records count against the output limit.
 - **Environment.** `Config::args` and `Config::env` set the command-line arguments and environment map exposed to the script. If `Config::env` is not set, `env.get` reads the host process environment subject to the policy.
 
@@ -265,14 +265,14 @@ A generic Rust function accepts values of its `N`-th type parameter as `Param<N,
 
 ## Interactive sessions
 
-`Engine::session` creates a stateful `Session` that evaluates inputs incrementally, preserving bindings across calls:
+`Session::new` creates a stateful `Session` that evaluates inputs incrementally, preserving bindings across calls:
 
 ```rust
 # #[tokio::main(flavor = "current_thread")]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-# use sandlang::{Config, Engine};
+# use sandlang::{Config, Session};
 # let config = Config::new();
-let mut session = Engine::new(config)?.session();
+let mut session = Session::new(config)?;
 session.eval("var hits = 0\nfn hit() -> int {\n    hits += 1\n    hits\n}").await?;
 assert_eq!(session.eval("hit() + hit()").await?, Some("3".to_string()));
 # Ok(())

@@ -9,6 +9,7 @@ use super::stream::IoFailure;
 use super::stream::{self, Suspended};
 use crate::native::{HostError, NativeModule, NativeObject, Val};
 use crate::network::{Listener, NetworkFuture, Stream};
+use crate::vm::WaitKind;
 use crate::vm::iomem::{IoMemory, Reservation, ResourceSlot};
 use crate::vm::{Ctl, Vm};
 use std::future::Future;
@@ -273,7 +274,7 @@ fn accept_request(vm: &mut Vm, server: Val<Server>) -> Suspended<Request> {
     };
     let max_body = vm.host.limits.max_http_body;
     let clock = vm.host.clock.clone();
-    stream::suspend(closed.guard(serve), move |vm, received: Received| {
+    stream::suspend(WaitKind::Io, closed.guard(serve), move |vm, received: Received| {
         let Received { head: (method, path, query, headers), framing, expects_continue, persists, http10, conn, res } = received;
         drop(res);
         let conn = conn.into_conn();
@@ -471,6 +472,7 @@ pub(super) fn end_response(vm: &mut Vm, c: Val<net::Conn>, data: Vec<u8>, res: R
     let conn = net::detach(vm, c)?;
     let mem = vm.heap.io_memory.clone();
     stream::suspend(
+        WaitKind::Io,
         async move {
             let written = async {
                 let mut w = conn.writer.lock().await;

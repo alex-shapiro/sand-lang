@@ -40,18 +40,20 @@ for (const example of examples) {
     let stderr = "";
     let prompts = 0;
     requested.length = 0;
-    const engine = new sand.Engine(engineOptions(example), {
+    const hooks = {
       onOutput: (stream, text) => (stream === "stdout" ? (stdout += text) : (stderr += text)),
       onPrompt: () => {
         prompts += 1;
         return example.expect.answer ?? "deny";
       },
-    });
+    };
+    const engine = new sand.Engine(engineOptions(example), hooks);
     const source = example.files[MAIN];
     const check = engine.check(source);
     assert.equal(check.ok, true, `${example.id} does not type check: ${JSON.stringify(check.diagnostics)}`);
     assert.deepEqual(engine.lint(source), [], `${example.id} has lint warnings`);
-    const session = engine.session();
+    engine.free();
+    const session = new sand.Session(engineOptions(example), hooks);
     const result = await session.eval(source, MAIN);
     const e = example.expect;
     const context = `${example.id}: ${JSON.stringify(result)}\n--- stdout\n${stdout}--- stderr\n${stderr}`;
@@ -60,21 +62,26 @@ for (const example of examples) {
     for (const text of [e.stdout ?? []].flat()) assert.ok(stdout.includes(text), `missing ${JSON.stringify(text)}\n${context}`);
     if (e.prompts !== undefined) assert.equal(prompts, e.prompts, context);
     for (const written of e.writes ?? []) {
-      assert.ok(engine.readFile(written), `${example.id} did not write ${written}`);
+      assert.ok(session.fileSystem.readFile(written), `${example.id} did not write ${written}`);
     }
     for (const url of requested) assert.ok(url in answers, `${example.id} requested ${url}`);
     if (e.ok) assert.equal(stderr, "", context);
     session.free();
-    engine.free();
   });
 }
 
 test("the welcome example's session continues", async () => {
   const welcome = examples.find((e) => e.id === "welcome");
   let stdout = "";
-  const engine = new sand.Engine(engineOptions(welcome), { onOutput: (_, t) => (stdout += t) });
-  const session = engine.session();
+  const session = new sand.Session(engineOptions(welcome), { onOutput: (_, t) => (stdout += t) });
   assert.equal((await session.eval(welcome.files[MAIN], MAIN)).error, undefined);
   assert.deepEqual(await session.eval("planets.len()"), { value: "5" });
   assert.deepEqual(await session.eval("size(planets[4])"), { value: "Many(146)" });
+});
+
+test("an empty Input tab gives stdin reads end of input", async () => {
+  const sandbox = { files: { [MAIN]: "" }, policy: "allow stdin", stdin: "" };
+  const session = new sand.Session(engineOptions(sandbox), {});
+  assert.deepEqual(await session.eval("import io\nio.stdin.read_line()"), { value: "Ok(None)" });
+  session.free();
 });

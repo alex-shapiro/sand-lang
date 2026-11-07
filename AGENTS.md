@@ -20,11 +20,28 @@ SandLang is a sandboxed bytecode interpreter with the following requirements:
 - Follow docs/playbook_reviewing.md for a system or code review request.
 - Follow docs/playbook_copyediting.md for a copy editing request.
 
-If playbook instructions conflict with this doc, follow this doc and communicate the conflict to the user.
+If playbook instructions conflict with this doc, follow the playbook and communicate the conflict to the user.
 
 ## Be Bold
 
 Approach each task from first principles. This is a greenfield codebase with no legacy code to maintain. You own the whole codebase and can make any change, anywhere.
+
+## Symbol Names
+
+Symbol names must be idiomatic and just specific enough that a reader can
+
+- understand it without requiring surrounding context
+- distinguish it from other symbols with similar names but different uses
+- connect it to its related symbols (example: a getter and its return type are related)
+
+| bad                  | good                      |
+| -------------------- | ------------------------- |
+| ReadId               | StdinReadId               |
+| Who                  | DocOwner                  |
+| wanted               | has_waiting_readers       |
+| to                   | target                    |
+| until(...) -> Future | wait_until(...) -> Future |
+| wait() -> WaitKind   | wait_kind() -> WaitKind   |
 
 ## Doc and Comment Guidelines
 
@@ -43,6 +60,14 @@ Every output that is not code, including docs, comments, and communication with 
 Remove all redundancies and overly verbose phrases you find while reading.
 
 Never write with middle voice. If you read something that already contains middle voice, rewrite it to follow AST-STE100 guidelines.
+
+Communication Anti-patterns that Claude, in particular, must avoid:
+
+- Writing carefully, for self-protection, instead of clearly. This leads to legalese, jargon, hedges, and qualifiers.
+- Swinging between too little context and unnecessary padding in answers.
+- Failing to provide context when the user needs to make a decision.
+- Adding questions and irrelevant options when the user asks a simple question.
+- Fixating on a narrow interpretation and ignoring a larger truth.
 
 ### Teaching
 

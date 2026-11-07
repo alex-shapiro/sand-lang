@@ -1795,19 +1795,17 @@ or `deny http tls GET example.com:443/a`.
 
 Configurable per engine:
 
-| Limit                | Default    | Effect when exceeded                                                                                                                                           |
-| -------------------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `max_memory`         | 512 MiB    | run fails: `memory limit exceeded` (I/O whose buffers do not fit fails with kind `"limit"`)                                                                    |
-| `max_instructions`   | unlimited  | run fails: `instruction limit exceeded` (counted in fuel units, §15.2)                                                                                         |
-| `max_cpu_time`       | unlimited  | run fails: `cpu time limit exceeded` (the engine thread's CPU time executing, excluding waits and prompts; without a thread CPU clock, elapsed time executing) |
-| `max_wall_time`      | unlimited  | run fails: `time limit exceeded` (covers compiling and running, from the start of compilation, excluding waits for prompt answers)                             |
-| `max_call_depth`     | 10,000     | fails: `limit: stack overflow`                                                                                                                                 |
-| `max_tasks`          | 10,000     | `spawn` fails: `limit: task limit exceeded`                                                                                                                    |
-| `max_open_resources` | 1,024      | opening files, connect/listen/accept and HTTP requests fail with kind `"limit"` (after a collection, §10.8; pending operations' sockets count)                 |
-| `max_output_bytes`   | unlimited  | writes fail: `output limit exceeded`                                                                                                                           |
-| `max_http_body`      | 64 MiB     | HTTP read fails with kind `"limit"`                                                                                                                            |
-| `max_source_bytes`   | 16 MiB     | compile error: `source too large` (the main file and all imported scripts together; the standard library is not counted)                                       |
-| `max_compile_fuel`   | 10,000,000 | compile error: `program too complex to compile` (§15.3)                                                                                                        |
+- `max_memory` (default: 512 MiB): if exceeded, the run fails with `memory limit exceeded`. I/O operations whose buffers do not fit fail with kind `"limit"`.
+- `max_instructions` (default: unlimited): if exceeded, the run fails with `instruction limit exceeded`. Instructions are counted in fuel units (§15.2).
+- `max_cpu_time` (default: unlimited): if exceeded, the run fails with `cpu time limit exceeded`. This limit measures the CPU execution time of the engine thread, excluding I/O waits and permission prompts. On platforms without a thread CPU clock, it measures elapsed execution time.
+- `max_wall_time` (default: unlimited): if exceeded, the run fails with `time limit exceeded`. This limit measures elapsed time across compilation and execution, excluding waits for permission prompts and user actions (§16.2).
+- `max_call_depth` (default: 10,000): if exceeded, execution fails with `limit: stack overflow`.
+- `max_tasks` (default: 10,000): if exceeded, `spawn` fails with `limit: task limit exceeded`.
+- `max_open_resources` (default: 1,024): if exceeded after garbage collection (§10.8), opening a file, connecting, listening, accepting a connection, or sending an HTTP request fails with kind `"limit"`. Sockets held by pending operations count toward this limit.
+- `max_output_bytes` (default: unlimited): if exceeded, writes fail with `output limit exceeded`.
+- `max_http_body` (default: 64 MiB): if exceeded, HTTP reads fail with kind `"limit"`.
+- `max_source_bytes` (default: 16 MiB): if exceeded across the main file and all imported scripts, compilation fails with `source too large`. The standard library does not count toward this limit.
+- `max_compile_fuel` (default: 10,000,000): if exceeded, compilation fails with `program too complex to compile` (§15.3).
 
 Memory is the engine's accounting, enforced after garbage collection, of
 live heap objects (with their buffers and map and set indexes), freed heap
@@ -1909,11 +1907,12 @@ Checking a program happens before it runs, so it is bounded separately:
   (a `match` with 1,000 arms on an enum about a million). When
   `max_compile_fuel` is exhausted, compilation fails with `program too complex
 to compile`. `None` means unlimited.
-- **Time and interrupts.** Compilation stops with `time limit exceeded` once
-  `max_wall_time` has elapsed since it started (the run that follows has
-  what is left), and with an interrupt error when the host interrupts the
-  engine. The standard library is compiled once per process (or per engine
-  with host modules), outside any program's budget.
+- **Time and interrupts.** Compilation fails with `time limit exceeded` if
+  `max_wall_time` elapses, excluding waits for permission prompts. The run that
+  follows uses the remaining time budget. Compilation fails with an interrupt
+  error if the host interrupts the engine. The standard library is compiled once
+  per process, or once per engine if host modules are registered, outside any
+  program's budget.
 - **Local limits**, reported at the offending construct: nesting of
   expressions, types, patterns and blocks to 256 levels (`nesting too
 deep`); strings nested inside string interpolations to 32 levels
@@ -1999,15 +1998,52 @@ deterministic. By default, `Config::new()` uses `RulePolicy::standard()`, which
 allows only `Stdout` and `Stderr`, without a prompter. As a result, the engine
 denies all other capability requests, including script imports unless a rule
 such as `allow import ./lib` permits them. It writes output to the process
-standard streams and provides an empty standard input.
+standard streams and leaves standard input unconfigured. Reading from
+unconfigured standard input fails with kind `"io"`.
 
-The host can capture standard output and standard error or feed standard input
-into a running script. `Config::stdout` and `Config::stderr` redirect script
-output to an `OutputSink`, while `Config::stdin_bytes`, `Config::inherit_stdin`
-with feature `os`, and `Config::stdin_feed` configure standard input. With
-`StdinFeed`, scripts read chunks pushed via `StdinFeed::send`, where
-`StdinFeed::end` terminates a single read, and `StdinFeed::wanted` is resolved
-if a script is waiting for input and all other tasks are blocked.
+The host can capture standard output and standard error or supply standard input
+to a running script. `Config::stdout` and `Config::stderr` redirect script
+output to an `OutputSink`. `Config::stdin_bytes` supplies fixed input bytes.
+`Config::stdin_feed` and `Config::stdin_io_feed` create a `StdinFeed` and return
+it with the updated `Config`. A host that exposes process standard input
+forwards that input to the `StdinFeed`, as `sand run` does (§17.5).
+
+`StdinFeed::wait_for_request` waits until a standard input read needs bytes,
+even if other tasks are runnable, and returns a `StdinRequest` for that wait. If
+a read consumes a partial line from `StdinFeed::send` and waits again, the
+engine issues a new `StdinRequest`. `StdinRequest::wait_until_closed` waits
+until the request is answered or dismissed, the stream supplies bytes or is
+closed, or the read is cancelled.
+`StdinRequest::wait_until_nothing_else_runs` waits until all other tasks are
+idle while the request remains open. A host that shares a terminal with the
+script, such as `sand repl`, awaits this method before reading a line from the
+terminal.
+
+The host can supply input to a `StdinFeed` as a stream or as per-request
+answers:
+
+- **Streamed input.** `StdinFeed::send` appends bytes to the stream. Unread
+  bytes remain buffered for subsequent reads. `StdinFeed::end` closes the stream
+  so that reads return end-of-file after consuming all buffered bytes.
+- **Per-request answers.** `StdinRequest::answer(data)` supplies `data`, appends
+  a newline if `data` does not end with one, and terminates the read. The engine
+  discards any bytes of `data` that the read does not consume.
+  `StdinRequest::dismiss()` terminates the read without supplying bytes, so
+  `read_line` returns `None` if it has not buffered any bytes. Each request
+  accepts a single response. Both methods return `false` if the request is
+  already closed.
+
+Idle time spent waiting for user input does not count toward `max_wall_time`.
+Time spent executing other tasks still counts. While a task waits for the user,
+idle time spent waiting for timers or network I/O in other tasks is also
+excluded from `max_wall_time`. The CPU time, instruction, memory, and output
+limits remain enforced during the wait. User waits include:
+
+- reads from a `StdinFeed` created by `Config::stdin_feed`
+- host functions that return a `Later` with `WaitKind::User` (§16.3)
+
+`Config::stdin_io_feed` creates a `StdinFeed` for programmatic input, such as a
+pipe. Reads from that feed use `WaitKind::Io` and count toward `max_wall_time`.
 
 The host can intercept and filter structured log records instead of
 writing them to standard error. `Config::log_sink` routes records to a
@@ -2122,7 +2158,10 @@ kind: kind))` in Sand, whereas `?` converts a `Ctl` into a `HostError` that
   aborts the run with a runtime error via `Ctl::fail`, a resource limit error,
   or an exit code.
 - `Result<Later<T, E>, E>` suspends the calling task on a future and maps to
-  the same Sand return type as `Result<T, E>`.
+  the same Sand return type as `Result<T, E>`. `Later::new(wait_kind, fut)`
+  specifies the `WaitKind` of `fut`. Use `WaitKind::User` if the task waits for
+  a user action so that idle wait time does not count toward `max_wall_time`
+  (§16.2). Functions registered with `async_function` use `WaitKind::Io`.
 
 To check a sandbox capability inside a `vm_function`, call
 `Vm::require(&capability)` (§14), which returns an error of kind
@@ -2174,9 +2213,8 @@ A function registered as `"Type.init"` constructs `Type` (§4.2).
 Generic functions and functions with default parameter values must be declared
 explicitly with `native fn` in `NativeModule::source`.
 
-`Engine::new` compiles and validates all registered host modules once per
-`Config`, sharing the compiled modules across cloned configurations, and
-returns `Error::Compile` if:
+`Engine::new` compiles and validates all registered host modules and returns
+`Error::Compile` if:
 
 - the module's Sand source contains a syntax or type error;
 - a `native fn` declaration in Sand source does not match the Rust function's
@@ -2198,12 +2236,10 @@ Two Cargo features control whether an engine can access the host operating
 system:
 
 - `os`, enabled by default: enables access to the host file system, network
-  sockets in `net` and `http`, process standard input via
-  `Config::inherit_stdin`, and process environment variables if `Config::env`
-  is not set. If `sandlang` is built without `os`, the engine cannot access the
+  sockets in `net` and `http`, and process environment variables if
+  `Config::env` is not set. If `sandlang` is built without `os`, the engine cannot access the
   operating system regardless of the configured policy: `net` and `http` are
-  unavailable, the environment is empty unless set via `Config::env`, standard
-  input comes only from `Config::stdin_bytes` or `Config::stdin_feed`, scripts
+  unavailable, the environment is empty unless set via `Config::env`, scripts
   use an in-memory file system, and the crate compiles for
   `wasm32-unknown-unknown` (§16.5).
 - `tls`, enabled by default and implying `os`: enables TLS support for `https`
@@ -2254,13 +2290,13 @@ configured. The library provides `run`, `check`, `lint`, `format`, and
 
 ### 16.6 Sessions
 
-`Engine::session()` creates a stateful `Session` that implements `Send`,
-returns `Send` futures, evaluates inputs incrementally under the engine's
-configuration, and shares the engine's remembered `"always"` prompt decisions
-(§14.3). `Session` implements the evaluation semantics of `sand repl` (§17.6):
+`Session::new(config)` creates a stateful `Session` that implements `Send`,
+returns `Send` futures, and evaluates inputs incrementally under `config`,
+which it owns. `Session` implements the evaluation semantics of `sand repl`
+(§17.6):
 
 ```rust
-let mut session = Engine::new(config)?.session();
+let mut session = Session::new(config)?;
 session.eval("var hits = 0\nfn hit() -> int { hits += 1\n hits }").await?;   // Ok(None)
 assert_eq!(session.eval("hit() + hit()").await?, Some("3".to_string()));
 ```
@@ -2423,7 +2459,8 @@ test passes if it completes without an error. Output: one line per test
 code 1 if any test failed, 2 for compile errors. `sand test` accepts the policy
 and limit options of `sand run` (§17.5) and prompts for any capability request
 that the configured rules do not match. A test that exceeds a resource limit
-fails with that limit's message.
+fails with that limit's message. A `sand test` invocation runs all test files on a single engine, sharing the
+standard input stream and `"always"` prompt decisions across files.
 
 ### 17.5 `sand run FILE [-- ARGS...]`
 
@@ -2457,6 +2494,13 @@ script in `env.args()`. Exit codes: the script's exit code, clamped to 255 if
 outside `0..=255`, `1` for an uncaught runtime error or `?` failure, `2` for a
 compile or usage error, and `3` for a resource limit error. If the policy
 allows `TimeZone`, `time.local_zone()` returns the host system time zone.
+
+`sand run` forwards process standard input to the script on demand. Terminal
+standard input uses `Config::stdin_feed`, so idle time during a read wait does
+not count toward `--max-time`. Non-terminal standard input uses
+`Config::stdin_io_feed`, so read waits count toward `--max-time`. If reading
+process standard input fails, `sand` writes the error to standard error and
+closes the input stream.
 
 Interactive prompts read and write directly on the controlling terminal
 —`/dev/tty` on Unix or the console on Windows—rather than the standard streams.
