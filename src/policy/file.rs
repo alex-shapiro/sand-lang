@@ -477,7 +477,7 @@ impl Context<'_> {
             }
             return Ok(());
         }
-        let mut methods = Methods::all();
+        let mut methods: Vec<HttpMethod> = Vec::new();
         let mut transports: Option<Transports> = None;
         let mut urls = 0;
         for item in rest_args {
@@ -520,12 +520,16 @@ impl Context<'_> {
                         if urls > 0 {
                             return Err((item.column, "put HTTP methods before the URL patterns".into()));
                         }
-                        methods = methods.and(method);
+                        methods.push(method);
                         continue;
                     }
                     "http" => {
                         urls += 1;
-                        RuleKind::Http(methods.clone(), UrlPattern::parse(&word.tokens()).map_err(|m| (item.column, m))?, transports)
+                        let methods = match methods.split_first() {
+                            Some((first, rest)) => Methods::only(first.clone(), rest.iter().cloned()),
+                            None => Methods::all(),
+                        };
+                        RuleKind::Http(methods, UrlPattern::parse(&word.tokens()).map_err(|m| (item.column, m))?, transports)
                     }
                     "listen" if word.tokens().iter().any(|&(c, wild)| c == '*' && !wild) => {
                         return Err((item.column, QUOTED_STAR_IN_HOST.into()));
@@ -538,7 +542,7 @@ impl Context<'_> {
         }
         if kind == "http" && urls == 0 {
             let last = rest_args.last().unwrap_or(first_arg);
-            let after = if methods.listed().is_some() { "methods" } else { "transports" };
+            let after = if methods.is_empty() { "transports" } else { "methods" };
             return Err((last.column, format!("`{verb_text} http` requires a URL pattern after {after}, e.g. `api.example.com/v1`")));
         }
         if kind == "net" && urls == 0 {

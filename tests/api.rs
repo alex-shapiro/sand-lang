@@ -2263,7 +2263,7 @@ fn typed_rule_builders_make_the_rules_of_the_policy_file_syntax() {
     use sandlang::policy::file::PolicyFile;
     use sandlang::policy::rules::HttpMethod;
     use sandlang::policy::rules::{Methods, NamePattern, RulePolicy, Transports};
-    let methods = Methods::only("get".parse().unwrap(), ["M-SEARCH".parse().unwrap()]);
+    let methods = Methods::only("get".parse().unwrap(), ["M-SEARCH".parse().unwrap(), "GET".parse().unwrap()]);
     let built = RulePolicy::new()
         .allow_read("/data".parse().unwrap())
         .deny_read("/data/**/.env".parse().unwrap())
@@ -2279,6 +2279,8 @@ fn typed_rule_builders_make_the_rules_of_the_policy_file_syntax() {
     let text = "allow read /data\ndeny read /data/**/.env\nallow write \"/out/*\"\nallow net plaintext localhost:8080\ndeny net 10.0.0.0/8\nallow http api.example.com/v1\nprompt http *.example.org/admin\ndeny http plaintext GET M-SEARCH api.example.com/v2\ndeny listen localhost:22\nallow env AWS_*\nallow env \"A*B\"\n";
     assert_eq!(built.to_string(), text);
     assert_eq!(PolicyFile::parse(text, std::path::Path::new("/"), None).unwrap().rules.to_string(), text);
+    let repeated = PolicyFile::parse("deny http get GET a.example", std::path::Path::new("/"), None).unwrap();
+    assert_eq!(repeated.rules.to_string(), "deny http GET a.example\n");
     let net = |s: &str| s.parse::<sandlang::policy::net::NetPattern>().unwrap_err().to_string();
     assert_eq!(
         net("host:99999"),

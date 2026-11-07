@@ -245,15 +245,14 @@ impl Methods {
         Methods(None)
     }
 
-    /// Only `first` and the methods of `rest`.
+    /// Only `first` and the methods of `rest`, each once.
     pub fn only(first: HttpMethod, rest: impl IntoIterator<Item = HttpMethod>) -> Methods {
-        Methods(Some(std::iter::once(first).chain(rest).collect()))
-    }
-
-    /// These methods and `method`: only `method` if these are all methods.
-    pub(crate) fn and(self, method: HttpMethod) -> Methods {
-        let mut list = self.0.unwrap_or_default();
-        list.push(method);
+        let mut list = vec![first];
+        for method in rest {
+            if !list.contains(&method) {
+                list.push(method);
+            }
+        }
         Methods(Some(list))
     }
 
