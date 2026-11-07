@@ -130,7 +130,7 @@ impl StdinRequest {
     }
 
     /// Waits until the request is answered, dismissed, satisfied by streamed
-    /// bytes, or cancelled.
+    /// bytes or the end of the stream, or cancelled.
     pub async fn wait_until_closed(&self) {
         self.channel.wait_until(|state| (state.open_wait_id != Some(self.wait_id)).then_some(())).await;
     }
