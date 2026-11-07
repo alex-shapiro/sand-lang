@@ -2285,17 +2285,17 @@ fn rule_policy_deny_overrides_allow() {
 #[test]
 fn typed_rule_builders_make_the_rules_of_the_policy_file_syntax() {
     use sandlang::policy::file::{HttpMethod, PolicyFile};
-    use sandlang::policy::rules::{NamePattern, RulePolicy, Transports};
-    let methods: Vec<HttpMethod> = ["get", "M-SEARCH"].iter().map(|m| m.parse().unwrap()).collect();
+    use sandlang::policy::rules::{Methods, NamePattern, RulePolicy, Transports};
+    let methods = Methods::only("get".parse().unwrap(), ["M-SEARCH".parse().unwrap()]);
     let built = RulePolicy::new()
         .allow_read("/data".parse().unwrap())
         .deny_read("/data/**/.env".parse().unwrap())
         .allow_write(PathPattern::literal("/out/*").unwrap())
         .allow_net(Transports::Plaintext, "localhost:8080".parse().unwrap())
         .deny_net(Transports::Both, "10.0.0.0/8".parse().unwrap())
-        .allow_http(Transports::Tls, &[], "api.example.com/v1/**".parse().unwrap())
-        .prompt_http(Transports::Both, &[], "*.example.org/admin".parse().unwrap())
-        .deny_http(Transports::Plaintext, &methods, "api.example.com/v2".parse().unwrap())
+        .allow_http(Transports::Tls, Methods::all(), "api.example.com/v1/**".parse().unwrap())
+        .prompt_http(Transports::Both, Methods::all(), "*.example.org/admin".parse().unwrap())
+        .deny_http(Transports::Plaintext, methods, "api.example.com/v2".parse().unwrap())
         .deny_listen("localhost:22".parse().unwrap())
         .allow_env("AWS_*".parse().unwrap())
         .allow_env(NamePattern::exact("A*B"));

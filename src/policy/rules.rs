@@ -156,6 +156,43 @@ impl Transports {
     }
 }
 
+/// The HTTP methods that an `http` rule controls: every method, or a list of at least one.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Methods(Option<Vec<HttpMethod>>);
+
+impl Methods {
+    /// Every method.
+    pub fn all() -> Methods {
+        Methods(None)
+    }
+
+    /// Only `first` and the methods of `rest`.
+    pub fn only(first: HttpMethod, rest: impl IntoIterator<Item = HttpMethod>) -> Methods {
+        Methods(Some(std::iter::once(first).chain(rest).collect()))
+    }
+
+    /// These methods and `method`: only `method` if these are all methods.
+    pub(crate) fn and(self, method: HttpMethod) -> Methods {
+        let mut list = self.0.unwrap_or_default();
+        list.push(method);
+        Methods(Some(list))
+    }
+
+    /// The listed methods, or `None` for every method.
+    pub(crate) fn listed(&self) -> Option<&[HttpMethod]> {
+        self.0.as_deref()
+    }
+}
+
+/// The capability names that a `custom` rule controls.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum CustomName {
+    /// Every name.
+    Any,
+    /// Only this name. A `*` in it matches only itself.
+    Named(String),
+}
+
 pub(crate) fn uses_tls(cap: &Capability) -> bool {
     match cap {
         Capability::Net { tls, .. } => *tls,
@@ -168,21 +205,22 @@ pub(crate) fn uses_tls(cap: &Capability) -> bool {
 pub(crate) enum RuleKind {
     Files(Access, PathPattern),
     Net(NetPattern, Transports),
-    Http(Option<Vec<HttpMethod>>, UrlPattern, Transports),
+    Http(Methods, UrlPattern, Transports),
     Listen(ListenPattern),
     Env(NameKind),
     Stdin,
     Stdout,
     Stderr,
     TimeZone,
-    Custom(Option<String>, Option<String>),
+    /// A custom capability rule: the names, and the detail, or `None` for any detail.
+    Custom(CustomName, Option<String>),
 }
 
 impl RuleKind {
     pub(crate) fn http_match(&self) -> Option<HttpMatch<'_>> {
         match self {
             RuleKind::Http(methods, url, transports) => {
-                Some(HttpMatch { methods: methods.as_deref(), transports: *transports, host: &url.host, path: &url.path })
+                Some(HttpMatch { methods: methods.listed(), transports: *transports, host: &url.host, path: &url.path })
             }
             RuleKind::Net(host, transports) => Some(HttpMatch { methods: None, transports: *transports, host, path: &[] }),
             _ => None,
@@ -279,14 +317,6 @@ impl fmt::Debug for RulePolicy {
     }
 }
 
-fn http_rule(transports: Transports, methods: &[HttpMethod], url: UrlPattern) -> RuleKind {
-    RuleKind::Http((!methods.is_empty()).then(|| methods.to_vec()), url, transports)
-}
-
-fn custom(name: &str, detail: Option<&str>) -> RuleKind {
-    RuleKind::Custom((name != "*").then(|| name.to_string()), detail.filter(|&d| d != "*").map(String::from))
-}
-
 impl RulePolicy {
     /// Creates an empty policy that returns [`Decision::Prompt`] for every request.
     pub fn new() -> RulePolicy {
@@ -310,7 +340,7 @@ impl RulePolicy {
             RuleKind::Stdout,
             RuleKind::Stderr,
             RuleKind::TimeZone,
-            RuleKind::Custom(None, None),
+            RuleKind::Custom(CustomName::Any, None),
         ];
         rules.into_iter().fold(RulePolicy::new(), |p, kind| p.push(Decision::Allow, kind))
     }
@@ -404,19 +434,17 @@ impl RulePolicy {
         self.push(Decision::Prompt, RuleKind::Net(host, transports))
     }
     /// Allows HTTP requests with one of `methods` over `transports` to URLs that match `url`.
-    /// An empty `methods` allows all methods.
-    pub fn allow_http(self, transports: Transports, methods: &[HttpMethod], url: UrlPattern) -> Self {
-        self.push(Decision::Allow, http_rule(transports, methods, url))
+    pub fn allow_http(self, transports: Transports, methods: Methods, url: UrlPattern) -> Self {
+        self.push(Decision::Allow, RuleKind::Http(methods, url, transports))
     }
     /// Denies HTTP requests with one of `methods` over `transports` to URLs that match `url`.
-    /// An empty `methods` denies all methods.
-    pub fn deny_http(self, transports: Transports, methods: &[HttpMethod], url: UrlPattern) -> Self {
-        self.push(Decision::Deny, http_rule(transports, methods, url))
+    pub fn deny_http(self, transports: Transports, methods: Methods, url: UrlPattern) -> Self {
+        self.push(Decision::Deny, RuleKind::Http(methods, url, transports))
     }
     /// Prompts before HTTP requests with one of `methods` over `transports` to URLs that match
-    /// `url`. An empty `methods` prompts for all methods.
-    pub fn prompt_http(self, transports: Transports, methods: &[HttpMethod], url: UrlPattern) -> Self {
-        self.push(Decision::Prompt, http_rule(transports, methods, url))
+    /// `url`.
+    pub fn prompt_http(self, transports: Transports, methods: Methods, url: UrlPattern) -> Self {
+        self.push(Decision::Prompt, RuleKind::Http(methods, url, transports))
     }
     /// Denies connections to `localhost` and to every address for which
     /// [`super::net::is_private_address`] returns `true`. No other rule can allow them: not a
@@ -488,16 +516,20 @@ impl RulePolicy {
     pub fn prompt_timezone(self) -> Self {
         self.push(Decision::Prompt, RuleKind::TimeZone)
     }
-    /// Allows a custom capability. `"*"` for `name` matches any capability
-    /// name, and `None` or `Some("*")` for `detail` matches any detail.
-    pub fn allow_custom(self, name: &str, detail: Option<&str>) -> Self {
-        self.push(Decision::Allow, custom(name, detail))
+    /// Allows the custom capabilities of `name` with `detail`, or with any detail if `detail`
+    /// is `None`. A `*` in `detail` matches only itself.
+    pub fn allow_custom(self, name: CustomName, detail: Option<&str>) -> Self {
+        self.push(Decision::Allow, RuleKind::Custom(name, detail.map(String::from)))
     }
-    pub fn deny_custom(self, name: &str, detail: Option<&str>) -> Self {
-        self.push(Decision::Deny, custom(name, detail))
+    /// Denies the custom capabilities of `name` with `detail`, or with any detail if `detail`
+    /// is `None`.
+    pub fn deny_custom(self, name: CustomName, detail: Option<&str>) -> Self {
+        self.push(Decision::Deny, RuleKind::Custom(name, detail.map(String::from)))
     }
-    pub fn prompt_custom(self, name: &str, detail: Option<&str>) -> Self {
-        self.push(Decision::Prompt, custom(name, detail))
+    /// Prompts before the custom capabilities of `name` with `detail`, or with any detail if
+    /// `detail` is `None`.
+    pub fn prompt_custom(self, name: CustomName, detail: Option<&str>) -> Self {
+        self.push(Decision::Prompt, RuleKind::Custom(name, detail.map(String::from)))
     }
 
     /// Evaluates `cap`, normalizing file paths with [`super::normalize_path`].
@@ -1117,8 +1149,10 @@ impl Index {
                 RuleKind::Stdout => index.unit.push((Capability::Stdout, decision, rule_id)),
                 RuleKind::Stderr => index.unit.push((Capability::Stderr, decision, rule_id)),
                 RuleKind::TimeZone => index.unit.push((Capability::TimeZone, decision, rule_id)),
-                RuleKind::Custom(Some(n), d) => index.custom.entry(n.clone()).or_default().push((d.clone(), decision, rule_id)),
-                RuleKind::Custom(None, d) => index.any_custom.push((d.clone(), decision, rule_id)),
+                RuleKind::Custom(CustomName::Named(n), d) => {
+                    index.custom.entry(n.clone()).or_default().push((d.clone(), decision, rule_id))
+                }
+                RuleKind::Custom(CustomName::Any, d) => index.any_custom.push((d.clone(), decision, rule_id)),
             }
         }
         index

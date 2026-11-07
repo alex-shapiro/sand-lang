@@ -4,7 +4,7 @@ mod common;
 
 use common::{HttpResponse, http_server, run_with};
 use sandlang::engine::{Config, Engine, Error, Limits, MemorySink};
-use sandlang::policy::rules::{RulePolicy, Transports};
+use sandlang::policy::rules::{Methods, RulePolicy, Transports};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::time::{Duration, Instant};
 
@@ -159,12 +159,12 @@ fn http_rules_filter_methods_and_routes() {
     });
     let addr = server.addr;
     let url = |path: &str| format!("{addr}{path}").parse().unwrap();
-    let (get, post) = (["GET".parse().unwrap()], ["POST".parse().unwrap()]);
+    let only = |m: &str| Methods::only(m.parse().unwrap(), []);
     let policy = RulePolicy::standard()
-        .allow_http(Transports::Plaintext, &get, url("/api/**"))
-        .allow_http(Transports::Plaintext, &get, url("/old"))
-        .allow_http(Transports::Plaintext, &post, url("/api/items"))
-        .deny_http(Transports::Plaintext, &[], url("/api/admin"));
+        .allow_http(Transports::Plaintext, only("GET"), url("/api/**"))
+        .allow_http(Transports::Plaintext, only("GET"), url("/old"))
+        .allow_http(Transports::Plaintext, only("POST"), url("/api/items"))
+        .deny_http(Transports::Plaintext, Methods::all(), url("/api/admin"));
     let src = format!(
         r#"
 import http
