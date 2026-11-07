@@ -341,7 +341,8 @@ pub(crate) enum StdinSource {
     Host(crate::stdin_feed::StdinFeedReader),
 }
 
-/// Standard input for a VM and its [`WaitKind`].
+/// Standard input for a VM and its [`WaitKind`]. Clones share the source.
+#[derive(Clone)]
 pub(crate) struct VmStdin {
     source: Arc<tokio::sync::Mutex<StdinSource>>,
     idle_signal: Option<crate::stdin_feed::StdinIdleSignal>,

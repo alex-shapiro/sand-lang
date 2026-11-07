@@ -212,12 +212,12 @@ impl OutputSink for NullSink {
     }
 }
 
-#[derive(Clone)]
 enum StdinConfig {
     None,
     Bytes(Vec<u8>),
-    /// Input that the host sends through the feed.
-    Host(crate::StdinFeed),
+    /// The reader of the feed that the host sends input through. Every VM of
+    /// the engine shares it.
+    Host(VmStdin),
 }
 
 /// Engine configuration (builder style).
@@ -394,8 +394,8 @@ impl Config {
     }
 
     fn stdin_host_feed(mut self, wait_kind: crate::WaitKind) -> (Self, crate::StdinFeed) {
-        let feed = crate::StdinFeed::new(wait_kind);
-        self.stdin = StdinConfig::Host(feed.clone());
+        let (feed, reader) = crate::StdinFeed::new(wait_kind);
+        self.stdin = StdinConfig::Host(VmStdin::new(StdinSource::Host(reader)));
         (self, feed)
     }
 
@@ -1039,9 +1039,9 @@ impl Engine {
     pub(crate) fn new_vm(&self, prog: Arc<Program>, cwd: PathBuf, quiet: bool) -> Vm {
         let c = &self.config;
         let stdin = match &c.stdin {
-            StdinConfig::None => StdinSource::None,
-            StdinConfig::Bytes(b) => StdinSource::Bytes(std::io::Cursor::new(b.clone())),
-            StdinConfig::Host(feed) => StdinSource::Host(feed.reader()),
+            StdinConfig::None => VmStdin::new(StdinSource::None),
+            StdinConfig::Bytes(b) => VmStdin::new(StdinSource::Bytes(std::io::Cursor::new(b.clone()))),
+            StdinConfig::Host(stdin) => stdin.clone(),
         };
         let (stdout, stderr): (SharedSink, SharedSink) =
             if quiet { (Arc::new(NullSink), Arc::new(NullSink)) } else { (c.stdout.clone(), c.stderr.clone()) };
@@ -1053,7 +1053,7 @@ impl Engine {
             always: self.always.clone(),
             stdout,
             stderr,
-            stdin: VmStdin::new(stdin),
+            stdin,
             output_bytes: 0,
             limits: c.limits.clone(),
             cwd,

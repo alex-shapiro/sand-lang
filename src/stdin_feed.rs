@@ -89,13 +89,11 @@ impl QueuedInput {
 }
 
 impl StdinFeed {
-    pub(crate) fn new(wait_kind: WaitKind) -> StdinFeed {
-        StdinFeed { channel: Arc::new(StdinChannel { state: Mutex::default(), changed: Notify::new(), wait_kind }) }
-    }
-
-    /// Creates the session's reader for this feed.
-    pub(crate) fn reader(&self) -> StdinFeedReader {
-        StdinFeedReader { channel: self.channel.clone(), buf: Vec::new(), buf_target: None, at: 0, ended: false }
+    /// Creates a feed and its only reader.
+    pub(crate) fn new(wait_kind: WaitKind) -> (StdinFeed, StdinFeedReader) {
+        let channel = Arc::new(StdinChannel { state: Mutex::default(), changed: Notify::new(), wait_kind });
+        let reader = StdinFeedReader { channel: channel.clone(), buf: Vec::new(), buf_target: None, at: 0, ended: false };
+        (StdinFeed { channel }, reader)
     }
 
     /// Appends `data` to the input stream. Queued data persists across reads
@@ -261,6 +259,7 @@ impl StdinChannel {
 }
 
 /// Notifies the [`StdinChannel`] when the engine is idle.
+#[derive(Clone)]
 pub(crate) struct StdinIdleSignal {
     channel: Arc<StdinChannel>,
 }
@@ -284,7 +283,7 @@ impl Drop for StdinIdleGuard {
     }
 }
 
-/// The session's reader for a [`StdinFeed`]. Call [`StdinFeedReader::begin_read`]
+/// The only reader of a [`StdinFeed`]. Call [`StdinFeedReader::begin_read`]
 /// to start a read operation.
 pub(crate) struct StdinFeedReader {
     channel: Arc<StdinChannel>,
