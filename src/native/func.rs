@@ -86,7 +86,7 @@ impl<T: SandType, E: NativeError> VmReturn for Result<Parked<T, E>, E> {
     fn into_result(self, vm: &mut Vm) -> NResult {
         match self {
             Ok(Parked { later: Later(Wait::Future(fut), _), park: Some((park, tag)) }) => {
-                Err(Ctl::from(crate::vm::CtlKind::Parked(fut, park, tag)))
+                Err(Ctl::request(crate::vm::Request::Parked(fut, park, tag)))
             }
             Ok(Parked { later, .. }) => later.finish(vm),
             Err(e) => E::finish(Err::<(), E>(e), vm),

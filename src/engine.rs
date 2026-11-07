@@ -19,7 +19,7 @@ use crate::stdlib;
 use crate::types::{FnId, ModId};
 use crate::vm::bytecode::Program;
 use crate::vm::heap::GcStats;
-use crate::vm::journal::JournalStop;
+use crate::vm::journal::Divergence;
 use crate::vm::sched::{IoShared, IoTable, RunEnd};
 use crate::vm::value::{Obj, TypeDesc, Value};
 use crate::vm::{Always, Host, HostFn, NativeEntry, OutputSink, Rng, SharedSink, StdinSource, TraceEntry, Trap, Vm, entropy_seed};
@@ -1380,20 +1380,20 @@ impl Engine {
                     vm.pinned.push(v);
                     let r = match vm.end_tasks().await {
                         Ok(Some(c)) => Ok(Ok(Outcome::Exited(c))),
-                        Ok(None) => returned(vm, v, &sig.returns).map(|r| Ok(Outcome::Returned(r))).map_err(Trap::from_ctl),
+                        Ok(None) => returned(vm, v, &sig.returns).map(|r| Ok(Outcome::Returned(r))).map_err(|c| vm.trap_of(c, |_| vec![])),
                         Err(t) => Err(t),
                     };
                     vm.pinned.pop();
                     r
                 }
                 Called::Exited(c) => Ok(Ok(Outcome::Exited(c))),
+                Called::Suspended(s) => Ok(Ok(Outcome::Suspended(s))),
                 Called::BadArgument { index, error } => Ok(Err(Error::Argument { index, kind: error.kind, message: error.message })),
             })
             .await;
         match r {
             Ok(r) => r,
             Err(Trap::Exit(c)) => Ok(Outcome::Exited(c)),
-            Err(Trap::Journal(JournalStop::Suspended(s))) => Ok(Outcome::Suspended(s)),
             Err(t) => Err(trap_error(t)),
         }
     }
@@ -1417,7 +1417,7 @@ impl Engine {
         match r {
             Ok(RunEnd::Finished(_)) => Ok(Outcome::Exited(0)),
             Ok(RunEnd::Exit(c)) | Err(Trap::Exit(c)) => Ok(Outcome::Exited(c)),
-            Err(Trap::Journal(JournalStop::Suspended(s))) => Ok(Outcome::Suspended(s)),
+            Ok(RunEnd::Suspended(s)) => Ok(Outcome::Suspended(s)),
             Err(t) => Err(trap_error(t)),
         }
     }
@@ -1443,10 +1443,12 @@ impl Engine {
                     match end_run(&mut vm, r).await {
                         Ok(RunEnd::Finished(_)) | Ok(RunEnd::Exit(0)) => Ok(()),
                         Ok(RunEnd::Exit(c)) => Err(format!("exited with code {c}")),
+                        Ok(RunEnd::Suspended(_)) => unreachable!("a test runs without a journal"),
                         Err(t) => Err(trap_message(t)),
                     }
                 }
                 Ok(RunEnd::Exit(c)) => Err(format!("module exited with code {c}")),
+                Ok(RunEnd::Suspended(_)) => unreachable!("a test runs without a journal"),
                 Err(t) => Err(trap_message(t)),
             };
             deadline = vm.deadline;
@@ -1557,7 +1559,7 @@ impl Engine {
             Ok(()) => {
                 let r = run(&mut vm).await;
                 match r {
-                    Err(Trap::Journal(_) | Trap::Interrupted | Trap::Abort(_)) => r,
+                    Err(Trap::Diverged(_) | Trap::Interrupted | Trap::Abort(_)) => r,
                     r => match vm.flush_journal().await {
                         Ok(()) => r,
                         Err(t) => Err(t),
@@ -1586,8 +1588,8 @@ impl Engine {
         vm.host.prompter = None;
         vm.host.always = Always::default();
         let state = crate::vm::journal::start(durable.journal.clone(), self.config.clock.now(), durable.suspend_after, &self.config.limits)
-            .map_err(Trap::Journal)?;
-        vm.attach_journal(state, self.config.seed.is_some()).map_err(Trap::Journal)
+            .map_err(Trap::Diverged)?;
+        vm.attach_journal(state, self.config.seed.is_some()).map_err(Trap::Diverged)
     }
 
     // ------------------------------------------------------------------
@@ -1994,6 +1996,7 @@ const MAX_DISCOVERY_ERRORS: usize = 100;
 enum Called {
     Returned(Value),
     Exited(i32),
+    Suspended(crate::journal::Suspension),
     BadArgument { index: usize, error: stdlib::core::Error },
 }
 
@@ -2001,8 +2004,10 @@ enum Called {
 /// `function`, and calls it. The tasks that the run started are left as they are.
 async fn call_function(vm: &mut Vm, function: &Function, args: &[&str]) -> Result<Called, Trap> {
     let entry = vm.prog.entry;
-    if let RunEnd::Exit(c) = vm.run_main(entry).await? {
-        return Ok(Called::Exited(c));
+    match vm.run_main(entry).await? {
+        RunEnd::Finished(_) => {}
+        RunEnd::Exit(c) => return Ok(Called::Exited(c)),
+        RunEnd::Suspended(s) => return Ok(Called::Suspended(s)),
     }
     vm.release_main();
     let pinned = vm.pinned.len();
@@ -2017,13 +2022,15 @@ async fn call_decoded(vm: &mut Vm, function: &Function, args: &[&str]) -> Result
     let first = vm.pinned.len();
     for (index, ((_, desc), arg)) in function.signature().params.iter().zip(args).enumerate() {
         let text = vm.new_str(*arg);
-        match stdlib::json::decode(vm, desc, crate::native::ty::Val::from_raw(text)).map_err(Trap::from_ctl)? {
+        match stdlib::json::decode(vm, desc, crate::native::ty::Val::from_raw(text)).map_err(|c| vm.trap_of(c, |_| vec![]))? {
             stdlib::json::Decoding::Done(v) => vm.pinned.push(v),
             stdlib::json::Decoding::Pending(v, fills) => {
                 vm.pinned.extend([v, fills]);
                 for fill in vm.heap.list(fills).to_vec() {
-                    if let RunEnd::Exit(c) = vm.run_call(fill, &[]).await? {
-                        return Ok(Called::Exited(c));
+                    match vm.run_call(fill, &[]).await? {
+                        RunEnd::Finished(_) => {}
+                        RunEnd::Exit(c) => return Ok(Called::Exited(c)),
+                        RunEnd::Suspended(s) => return Ok(Called::Suspended(s)),
                     }
                     vm.release_main();
                 }
@@ -2037,6 +2044,7 @@ async fn call_decoded(vm: &mut Vm, function: &Function, args: &[&str]) -> Result
     match vm.run_call(closure, &args).await? {
         RunEnd::Finished(v) => Ok(Called::Returned(v)),
         RunEnd::Exit(c) => Ok(Called::Exited(c)),
+        RunEnd::Suspended(s) => Ok(Called::Suspended(s)),
     }
 }
 
@@ -2076,10 +2084,7 @@ pub(crate) fn trap_error(t: Trap) -> Error {
         Trap::Limit(k) => Error::Limit(k),
         Trap::Interrupted => Error::Interrupted,
         Trap::Abort(a) => Error::Aborted(a),
-        Trap::Journal(JournalStop::Diverged { seq, message }) => Error::Diverged { seq, message },
-        Trap::Journal(JournalStop::Suspended(_)) => {
-            Error::Internal { message: "the run suspended outside a journaled run".into(), trace: Vec::new() }
-        }
+        Trap::Diverged(Divergence { seq, message }) => Error::Diverged { seq, message },
         Trap::Exit(c) => Error::Internal { message: format!("an exit with code {c} where none is possible"), trace: Vec::new() },
     }
 }

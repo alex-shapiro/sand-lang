@@ -22,7 +22,7 @@ use crate::unwind::CatchUnwind;
 use crate::vm::bytecode::Program;
 use crate::vm::sched::{RunEnd, Stop};
 use crate::vm::value::Value;
-use crate::vm::{CtlKind, Trap, Vm};
+use crate::vm::{Trap, Vm};
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
@@ -541,11 +541,7 @@ impl Session {
         match shown {
             None => Ok(None),
             Some(Ok(s)) => Ok(Some(s)),
-            Some(Err(c)) => match c.into_kind() {
-                CtlKind::Limit(k) => Err(Error::Limit(k)),
-                CtlKind::RuntimeError(message) => Err(Error::Runtime { message, trace: vec![] }),
-                other => Err(Error::Internal { message: format!("cannot show the value: {other:?}"), trace: vec![] }),
-            },
+            Some(Err(c)) => Err(crate::engine::trap_error(vm.trap_of(c, |_| vec![]))),
         }
     }
 
@@ -562,13 +558,14 @@ impl Session {
         // Waiting for input may take any time.
         vm.deadline = None;
         let r = vm.drive(None).await;
-        let r = r.and_then(|stop| vm.drain_output().map(|()| stop).map_err(Trap::from_ctl));
+        let r = r.and_then(|stop| vm.drain_output().map(|()| stop).map_err(|c| vm.trap_of(c, |_| vec![])));
         let r = match r {
             Ok(Stop::Prompt(cap)) => {
                 st.deferred_prompt = Some(cap);
                 return Ok(false);
             }
             Ok(Stop::Idle | Stop::Main(_)) => return Ok(false),
+            Ok(Stop::Suspended(_)) => unreachable!("only a run with a main task suspends"),
             Ok(Stop::Exit(c)) => Ok(RunEnd::Exit(c)),
             Err(t) => Err(t),
         };
@@ -582,6 +579,7 @@ impl Session {
 fn conclude(vm: &mut Vm, r: Result<RunEnd, Trap>, exit_code: &mut Option<i32>) -> Result<Option<Value>, Error> {
     let e = match r {
         Ok(RunEnd::Finished(v)) => return Ok(Some(v)),
+        Ok(RunEnd::Suspended(_)) => unreachable!("a session runs without a journal"),
         Ok(RunEnd::Exit(c)) | Err(Trap::Exit(c)) => {
             *exit_code = Some(c);
             vm.abandon_tasks();

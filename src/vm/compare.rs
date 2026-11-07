@@ -1187,7 +1187,7 @@ fn merge<T: Copy>(a: &[T], b: &[T], out: &mut [T], cmp: &mut impl FnMut(&T, &T) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vm::CtlKind;
+    use crate::vm::{CtlKind, End};
 
     #[test]
     fn try_sort_is_a_stable_sort() {
@@ -1214,7 +1214,7 @@ mod tests {
             calls += 1;
             if calls > 3000 { Err(Ctl::interrupted()) } else { Ok(a.cmp(b)) }
         });
-        assert!(matches!(r.map_err(Ctl::into_kind), Err(CtlKind::Interrupted)));
+        assert!(matches!(r.map_err(Ctl::into_kind), Err(CtlKind::End(End::Interrupted))));
         assert!(calls <= 3001);
         let mut sorted = v.clone();
         sorted.sort();
@@ -1254,7 +1254,7 @@ mod tests {
         let nested = heap.alloc(Obj::Tuple(vec![Value::Int(1), tuple].into()));
         for (v, what) in [(Value::Float(1.5), "a float"), (list, "a list"), (tuple, "a list"), (nested, "a list")] {
             let e = hash_key(&heap, &Unmetered, v).unwrap_err();
-            assert!(matches!(e.kind(), CtlKind::Internal(m) if m.starts_with(what)), "{:?}", e.kind());
+            assert!(matches!(e.kind(), CtlKind::End(End::Internal(m)) if m.starts_with(what)), "{:?}", e.kind());
         }
         let ok = heap.alloc(Obj::Tuple(vec![one, Value::Bool(true), Value::Unit].into()));
         assert!(hash_key(&heap, &Unmetered, ok).is_ok());
@@ -1270,7 +1270,7 @@ mod tests {
         let (t1, t2) = (in_tuple(&mut heap, m1), in_tuple(&mut heap, m2));
         for (a, b, what) in [(m1, m2, "a map is compared"), (t1, t2, "a map is compared"), (m1, s, "values of different types")] {
             let e = values_cmp_metered(&prog, &heap, &Unmetered, a, b).unwrap_err();
-            assert!(matches!(e.kind(), CtlKind::Internal(m) if m.starts_with(what)), "{:?}", e.kind());
+            assert!(matches!(e.kind(), CtlKind::End(End::Internal(m)) if m.starts_with(what)), "{:?}", e.kind());
         }
         let (x, y) = (in_tuple(&mut heap, s), in_tuple(&mut heap, Value::Bool(true)));
         assert!(values_cmp_metered(&prog, &heap, &Unmetered, x, x).is_ok());

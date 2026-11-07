@@ -379,7 +379,7 @@ impl<T> MemoryLimit for Result<T, Ctl> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{CtlKind, SLICE_FUEL};
+    use super::super::{CtlKind, End, SLICE_FUEL};
     use super::*;
 
     fn system() -> Arc<dyn Clock> {
@@ -395,7 +395,7 @@ mod tests {
         // Overspending the slice triggers a check: the budget is not exceeded.
         assert!(m.charge(SLICE_FUEL as u64).is_ok());
         assert_eq!(m.used(), SLICE_FUEL as u64 + 50);
-        assert!(matches!(m.charge(100_000).map_err(Ctl::into_kind), Err(CtlKind::Limit(LimitKind::Instructions))));
+        assert_eq!(m.charge(100_000).err().and_then(|c| c.as_limit()), Some(LimitKind::Instructions));
     }
 
     #[test]
@@ -407,7 +407,7 @@ mod tests {
         m.sync(700);
         assert_eq!(m.used(), 300);
         assert!(m.charge(700).is_ok(), "1000 units used");
-        assert!(matches!(m.charge(1).map_err(Ctl::into_kind), Err(CtlKind::Limit(LimitKind::Instructions))));
+        assert_eq!(m.charge(1).err().and_then(|c| c.as_limit()), Some(LimitKind::Instructions));
         assert_eq!(m.resync(), -1);
         // Past the end of a slice, checks stay no later than the limit.
         let m = Meter::new(Some(1_000_000), Arc::new(AtomicBool::new(false)), system());
@@ -415,7 +415,7 @@ mod tests {
         assert!(m.charge(SLICE_FUEL as u64 + 1).is_ok());
         assert_eq!(m.check_at.get(), -1 - CHECK_INTERVAL);
         assert!(m.charge(1_000_000 - SLICE_FUEL as u64 - 1).is_ok(), "1,000,000 units used");
-        assert!(matches!(m.charge(1).map_err(Ctl::into_kind), Err(CtlKind::Limit(LimitKind::Instructions))));
+        assert_eq!(m.charge(1).err().and_then(|c| c.as_limit()), Some(LimitKind::Instructions));
         // Charges between slices count too.
         let m = Meter::new(Some(100), Arc::new(AtomicBool::new(false)), system());
         assert!(m.charge(60).is_ok());
@@ -431,15 +431,15 @@ mod tests {
         m.start_slice(None, None);
         flag.store(true, Ordering::SeqCst);
         assert!(m.charge(5).is_ok(), "no check while fuel is left");
-        assert!(matches!(m.charge(SLICE_FUEL as u64).map_err(Ctl::into_kind), Err(CtlKind::Interrupted)));
+        assert!(matches!(m.charge(SLICE_FUEL as u64).map_err(Ctl::into_kind), Err(CtlKind::End(End::Interrupted))));
     }
 
     #[test]
     fn deadlines() {
         let m = Meter::new(None, Arc::new(AtomicBool::new(false)), system());
         m.start_slice(Some(system().cpu_time()), None);
-        assert!(matches!(m.charge(SLICE_FUEL as u64 + 1).map_err(Ctl::into_kind), Err(CtlKind::Limit(LimitKind::CpuTime))));
+        assert_eq!(m.charge(SLICE_FUEL as u64 + 1).err().and_then(|c| c.as_limit()), Some(LimitKind::CpuTime));
         m.start_slice(None, Some(Instant::now()));
-        assert!(matches!(m.charge(SLICE_FUEL as u64 + 1).map_err(Ctl::into_kind), Err(CtlKind::Limit(LimitKind::WallTime))));
+        assert_eq!(m.charge(SLICE_FUEL as u64 + 1).err().and_then(|c| c.as_limit()), Some(LimitKind::WallTime));
     }
 }

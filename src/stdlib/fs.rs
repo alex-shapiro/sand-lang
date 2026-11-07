@@ -20,7 +20,7 @@ use crate::policy::{Capability, Decision, MAX_PATH_BYTES, Policy};
 use crate::vm::iomem::{Reservation, ResourceSlot};
 use crate::vm::meter::{Allowance, Stopped};
 use crate::vm::value::to_usize_saturating;
-use crate::vm::{Ctl, CtlKind, Permits, Vm};
+use crate::vm::{Ctl, Permits, Request, Vm};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -609,7 +609,7 @@ fn fits(vm: &Vm, call: Call, bytes: usize) -> Result<bool, Ctl> {
         return Ok(true);
     }
     if !call.retry {
-        return Err(CtlKind::Collect.into());
+        return Err(Ctl::request(Request::Collect));
     }
     Ok(false)
 }
@@ -847,7 +847,7 @@ fn open(vm: &mut Vm, call: Call, path: Val<String>, mode: OpenMode) -> FsResult<
     let file = match vm.offload(move |_| fs.open(t, mode))? {
         Ok(f) => f,
         // Closing unreachable files may make room.
-        Err(e) if too_many_open_files(&e) && !call.retry => return Err(Ctl::from(CtlKind::Collect).into()),
+        Err(e) if too_many_open_files(&e) && !call.retry => return Err(Ctl::request(Request::Collect).into()),
         Err(e) => return Err(HostError::new(io_kind(&e), format!("{shown}: {e}"))),
     };
     Ok(FileObj { open: Some(OpenState { file: Some(file), _slot: slot, buf: Vec::new(), at: 0, counted: 0 }), shown, mode })

@@ -62,8 +62,6 @@ pub enum Exit {
     /// Waiting for an asynchronous operation.
     Wait(Box<super::journal::Wait>),
     Prompt(Capability),
-    /// `exit(code)` or a top-level `?` failure.
-    Terminate(i32),
     /// `task.yield_now()`.
     YieldNow,
     /// The running task was cancelled.
@@ -496,30 +494,24 @@ impl Vm {
     #[cold]
     #[inline(never)]
     fn error_trap(&mut self, fiber: &mut Fiber, ip: usize, msg: String) -> Trap {
-        Trap::Error { message: msg, trace: self.trace_of(fiber, Some(ip as u32)) }
+        self.trap(End::RuntimeError(msg), |vm| vm.trace_of(fiber, Some(ip as u32)))
     }
 
     /// The trap for an internal error, which marks the engine broken.
     #[cold]
     #[inline(never)]
     fn internal_trap(&mut self, fiber: &mut Fiber, ip: usize, msg: String) -> Trap {
-        self.broken = true;
-        Trap::Internal { message: msg, trace: self.trace_of(fiber, Some(ip as u32)) }
+        self.trap(End::Internal(msg), |vm| vm.trace_of(fiber, Some(ip as u32)))
     }
 
     /// How the interpreter exits after a failed metered operation.
     #[cold]
     #[inline(never)]
     fn ctl_exit(&mut self, fiber: &mut Fiber, ip: usize, c: Ctl) -> Result<Exit, Trap> {
-        Err(match c.into_kind() {
-            CtlKind::RuntimeError(m) => self.error_trap(fiber, ip, m),
-            CtlKind::Internal(m) => self.internal_trap(fiber, ip, m),
-            CtlKind::Limit(k) => return self.limit_exit(fiber, ip, k),
-            CtlKind::Interrupted => Trap::Interrupted,
-            CtlKind::Journal(s) => Trap::Journal(s),
-            CtlKind::Abort(a) => Trap::Abort(a),
-            other => self.internal_trap(fiber, ip, format!("unexpected {other:?}")),
-        })
+        if let Some(k) = c.as_limit() {
+            return self.limit_exit(fiber, ip, k);
+        }
+        Err(self.trap_of(c, |vm| vm.trace_of(fiber, Some(ip as u32))))
     }
 
     /// A limit hit by the instruction before `ip`. Memory checks count
@@ -1700,7 +1692,7 @@ impl Vm {
         let fuel_at_call = self.meter.fuel();
         let mut r = Self::invoke_native(self, natives, n, call, &fiber.stack[start..start + argc]);
         self.heap.fail_next_check.set(false);
-        if r.is_memory_limit() || matches!(&r, Err(c) if matches!(c.kind(), CtlKind::Collect)) {
+        if r.is_memory_limit() || matches!(&r, Err(c) if matches!(c.kind(), CtlKind::Request(Request::Collect))) {
             // Native functions check memory and open-resource limits against
             // counts that include uncollected garbage. Run a full collection
             // and retry once. Only the retry costs fuel, so fuel does not
@@ -1710,7 +1702,7 @@ impl Vm {
             call.retry = true;
             r = Self::invoke_native(self, natives, n, call, &fiber.stack[start..start + argc]);
         }
-        if !matches!(&r, Err(c) if matches!(c.kind(), CtlKind::NeedPermission(_))) {
+        if !matches!(&r, Err(c) if matches!(c.kind(), CtlKind::Request(Request::NeedPermission(_)))) {
             self.forget_once_answers();
         }
         let mut r = match r {
@@ -1727,12 +1719,12 @@ impl Vm {
             Err(c) => c,
         };
         match &mut *r.0 {
-            CtlKind::Yield => {
+            CtlKind::Request(Request::Yield) => {
                 self.recycle(r);
                 fiber.stack[slot] = Value::Unit;
                 return Ok(Some(Exit::YieldNow));
             }
-            CtlKind::Blocked { wait, race } => {
+            CtlKind::Request(Request::Blocked { wait, race }) => {
                 fiber.result_slot = slot;
                 fiber.wgen = *wait;
                 fiber.race = std::mem::take(race);
@@ -1741,32 +1733,29 @@ impl Vm {
             }
             _ => {}
         }
-        match r.into_kind() {
-            CtlKind::RuntimeError(m) => Err(self.error_trap(fiber, ip, m)),
-            CtlKind::Internal(m) => Err(self.internal_trap(fiber, ip, m)),
-            // Already retried after a collection.
-            CtlKind::Limit(k) => Err(Trap::Limit(k)),
-            CtlKind::Interrupted => Err(Trap::Interrupted),
-            CtlKind::Exit(c) => Ok(Some(Exit::Terminate(c))),
-            CtlKind::Cancelled => Ok(Some(Exit::Cancelled)),
-            CtlKind::NeedPermission(cap) => {
+        let request = match r.into_kind() {
+            // A limit here is final: the call already ran again after a collection.
+            CtlKind::End(end) => return Err(self.trap(end, |vm| vm.trace_of(fiber, Some(ip as u32)))),
+            CtlKind::Request(request) => request,
+        };
+        match request {
+            Request::Cancelled => Ok(Some(Exit::Cancelled)),
+            Request::NeedPermission(cap) => {
                 // Retry the call instruction after the prompt.
                 fiber.frames.last_mut().unwrap().ip = (ip - 1) as u32;
                 Ok(Some(Exit::Prompt(cap)))
             }
-            CtlKind::Async(fut) => {
+            Request::Async(fut) => {
                 fiber.result_slot = slot;
                 Ok(Some(Exit::Wait(Box::new(super::journal::Wait::local(fut)))))
             }
-            CtlKind::Parked(..) => Err(self.internal_trap(fiber, ip, "a host function that is not journaled parked".into())),
-            CtlKind::Wait(w) => {
+            Request::Parked(..) => unreachable!("only a journaled call parks, and the journal turns it into a wait"),
+            Request::Wait(w) => {
                 fiber.result_slot = slot;
                 Ok(Some(Exit::Wait(w)))
             }
-            CtlKind::Journal(s) => Err(Trap::Journal(s)),
-            CtlKind::Abort(a) => Err(Trap::Abort(a)),
-            CtlKind::Yield | CtlKind::Blocked { .. } => unreachable!("handled above"),
-            CtlKind::Collect => Err(self.internal_trap(fiber, ip, "a native asked for a collection twice".into())),
+            Request::Yield | Request::Blocked { .. } => unreachable!("handled above"),
+            Request::Collect => Err(self.internal_trap(fiber, ip, "a native asked for a collection twice".into())),
         }
     }
 
@@ -1940,7 +1929,7 @@ impl Vm {
         let wait = self.next_gen();
         match self.block_on(self.current, wait, on)? {
             Blocking::Ready(v) => Ok(v),
-            Blocking::Waits { race } => Err(self.signal(CtlKind::Blocked { wait, race })),
+            Blocking::Waits { race } => Err(self.signal(Request::Blocked { wait, race })),
         }
     }
 

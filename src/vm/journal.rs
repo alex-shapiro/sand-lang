@@ -14,8 +14,8 @@
 use super::bytecode::Program;
 use super::iomem::IoMemory;
 use super::value::{MapObj, Obj, SetObj, Value};
-use super::{BoxFuture, Ctl, CtlKind, Finisher, NResult, Vm};
-use crate::journal::{CallResult, Entry, EntryData, EntryKind, Journal, OpDone, OpEnd, OpKind, OpStart, ParkedCall, Suspension};
+use super::{BoxFuture, Ctl, CtlKind, End, Finisher, NResult, Request, Vm};
+use crate::journal::{CallResult, Entry, EntryData, EntryKind, Journal, OpDone, OpEnd, OpKind, OpStart, ParkedCall};
 use crate::native::func::{Call, Park};
 use crate::platform::{Instant, SystemTime};
 use std::cell::RefCell;
@@ -25,13 +25,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Why a journaled run stops before it ends.
+/// How a journaled run does something other than what its journal
+/// records: at entry `seq`, as `message` says.
 #[derive(Debug, Clone)]
-pub enum JournalStop {
-    /// The run does something other than what the journal records.
-    Diverged { seq: u64, message: String },
-    /// Every task waits for a timer or a parked host call (SPEC §16.7).
-    Suspended(Suspension),
+pub struct Divergence {
+    pub(crate) seq: u64,
+    pub(crate) message: String,
 }
 
 /// Builds the result of a recorded operation from the journal's encoding of
@@ -68,7 +67,7 @@ impl Outcome for Whole {
     }
 }
 
-/// What a task waits for ([`CtlKind::Wait`]).
+/// What a task waits for ([`Request::Wait`]).
 pub struct Wait {
     /// The id of the operation in the run's journal, for an operation whose
     /// outcome the journal records. `None` for a local operation, and in a
@@ -119,7 +118,7 @@ impl Wait {
 impl Ctl {
     /// Suspends the task on `wait`.
     pub(crate) fn wait(wait: Wait) -> Ctl {
-        Ctl::from(CtlKind::Wait(Box::new(wait)))
+        Ctl::request(Request::Wait(Box::new(wait)))
     }
 }
 
@@ -397,9 +396,9 @@ type Parking = (Option<Park>, Option<HostWait>);
 /// result.
 fn waiting(r: NResult, name: &Arc<str>) -> Result<(BoxFuture, Parking), NResult> {
     match r.map_err(Ctl::into_kind) {
-        Err(CtlKind::Async(fut)) => Ok((fut, (None, None))),
-        Err(CtlKind::Parked(fut, park, tag)) => Ok((fut, (Some(park), Some(HostWait { function: name.clone(), tag })))),
-        r => Err(r.map_err(Ctl::from)),
+        Err(CtlKind::Request(Request::Async(fut))) => Ok((fut, (None, None))),
+        Err(CtlKind::Request(Request::Parked(fut, park, tag))) => Ok((fut, (Some(park), Some(HostWait { function: name.clone(), tag })))),
+        r => Err(r.map_err(Ctl::new)),
     }
 }
 
@@ -478,13 +477,13 @@ impl JournalState {
         self.replay.get(self.pos)
     }
 
-    fn diverged(&self, message: String) -> JournalStop {
-        JournalStop::Diverged { seq: self.pos as u64, message }
+    fn diverged(&self, message: String) -> Divergence {
+        Divergence { seq: self.pos as u64, message }
     }
 
     /// The next replayed entry, which must be of `kind` (`what` describes
     /// the input for the error), or `None` if replay is over.
-    fn take(&mut self, kind: EntryKind, what: &dyn Fn() -> String) -> Result<Option<EntryData>, JournalStop> {
+    fn take(&mut self, kind: EntryKind, what: &dyn Fn() -> String) -> Result<Option<EntryData>, Divergence> {
         let Some(e) = self.peek() else { return Ok(None) };
         if e.kind() != kind {
             let msg = format!("the run reads {} where the journal records {}", what(), e.describe());
@@ -522,14 +521,12 @@ pub(crate) fn start(
     origin: Instant,
     suspend_after: Option<Duration>,
     limits: &crate::engine::Limits,
-) -> Result<JournalState, JournalStop> {
+) -> Result<JournalState, Divergence> {
     let mut done = HashMap::new();
     let mut replay = Vec::new();
     for (i, e) in sink.replay().into_iter().enumerate() {
         let seq = i as u64;
-        let data = e
-            .decode()
-            .ok_or_else(|| JournalStop::Diverged { seq, message: format!("entry {i} is a malformed {} entry", e.kind.name()) })?;
+        let data = e.decode().ok_or_else(|| Divergence { seq, message: format!("entry {i} is a malformed {} entry", e.kind.name()) })?;
         if let EntryData::Done(d) = &data {
             done.insert(d.op, i);
         }
@@ -1090,8 +1087,8 @@ fn outcome_payload(vm: &mut Vm, r: NResult, label: &str) -> Result<CallPayload, 
             Err(why) => Err(Ctl::fail("unsupported", format!("cannot journal the result of `{label}`: {why}"))),
         },
         Err(c) => match c.into_kind() {
-            CtlKind::RuntimeError(m) => Ok(Err(m)),
-            other => Err(Ctl::from(other)),
+            CtlKind::End(End::RuntimeError(m)) => Ok(Err(m)),
+            other => Err(Ctl::new(other)),
         },
     }
 }
@@ -1102,7 +1099,7 @@ fn outcome_payload(vm: &mut Vm, r: NResult, label: &str) -> Result<CallPayload, 
 fn call_outcome(vm: &mut Vm, outcome: &CallPayload) -> NResult {
     match outcome {
         Ok(Encoded(bytes)) => decode_value(vm, bytes),
-        Err(m) => Err(Ctl::from(CtlKind::RuntimeError(m.clone()))),
+        Err(m) => Err(Ctl::end(End::RuntimeError(m.clone()))),
     }
 }
 
@@ -1114,13 +1111,7 @@ fn payload_outcome(vm: &mut Vm, payload: &[u8]) -> NResult {
 /// Whether `r` asks for the call to run again after a collection: the
 /// journal records only the call that completes.
 fn is_retry(r: &NResult) -> bool {
-    matches!(r, Err(c) if matches!(c.kind(), CtlKind::Collect | CtlKind::Limit(crate::engine::LimitKind::Memory)))
-}
-
-impl From<JournalStop> for Ctl {
-    fn from(s: JournalStop) -> Ctl {
-        Ctl::from(CtlKind::Journal(s))
-    }
+    matches!(r, Err(c) if matches!(c.kind(), CtlKind::Request(Request::Collect) | CtlKind::End(End::Limit(crate::engine::LimitKind::Memory))))
 }
 
 impl Vm {
@@ -1153,7 +1144,7 @@ impl Vm {
 
     /// Attaches the journal state `j`. Takes the random seed from the
     /// journal, or records it, unless the configuration fixes it.
-    pub(crate) fn attach_journal(&mut self, mut j: JournalState, seeded: bool) -> Result<(), JournalStop> {
+    pub(crate) fn attach_journal(&mut self, mut j: JournalState, seeded: bool) -> Result<(), Divergence> {
         if !seeded {
             let seed = match j.take(EntryKind::Seed, &|| "the random seed".into())? {
                 Some(EntryData::Seed(seed)) => seed,
@@ -1336,7 +1327,7 @@ impl Vm {
             } else {
                 format!("the run calls `{label}` where the journal records a call of `{rec_label}`")
             };
-            return Err(Ctl::from(JournalStop::Diverged { seq, message: msg }));
+            return Err(Ctl::from(Divergence { seq, message: msg }));
         }
         let v = payload_outcome(self, &outcome);
         self.charge(fuel)?;
@@ -1379,7 +1370,7 @@ impl Vm {
     /// cancelled: the operation never completes. Records that, so that a
     /// resumed run does not start the operation again; replay consumes the
     /// record, and fails if the journal records something else next.
-    pub(crate) fn cancel_op(&self, op: u64) -> Result<(), JournalStop> {
+    pub(crate) fn cancel_op(&self, op: u64) -> Result<(), Divergence> {
         let Some(j) = &self.journal else { return Ok(()) };
         let mut j = j.borrow_mut();
         j.local.remove(&op);
@@ -1425,7 +1416,7 @@ impl Vm {
             } else {
                 format!("the run starts {} `{label}` where the journal records the start of {} `{}`", kind.name(), s.kind.name(), s.label)
             };
-            return Err(Ctl::from(JournalStop::Diverged { seq, message }));
+            return Err(Ctl::from(Divergence { seq, message }));
         }
         let (pre_fuel, wake) = (s.pre_fuel, s.wake);
         if !j.done.contains_key(&op) {
@@ -1448,7 +1439,7 @@ impl Vm {
             StartEntry::Fresh(f) => Ok(Begun::Live(f.start(self, spec))),
             StartEntry::Other { label, seq, next, .. } => {
                 let message = format!("the run reads the start of {} `{label}` where the journal records {next}", spec.kind.name());
-                Err(Ctl::from(JournalStop::Diverged { seq, message }))
+                Err(Ctl::from(Divergence { seq, message }))
             }
         }
     }
@@ -1470,7 +1461,7 @@ impl Vm {
             Some(EntryData::Start(s)) => {
                 let message =
                     format!("the run waits for a local operation where the journal records the start of {} `{}`", s.kind.name(), s.label);
-                return Err(Ctl::from(JournalStop::Diverged { seq, message }));
+                return Err(Ctl::from(Divergence { seq, message }));
             }
             _ => {
                 let start = OpStart { kind: OpKind::Local, identity: 0, pre_fuel: 0, wake: None, label: "wait".to_string() };
@@ -1573,7 +1564,7 @@ impl Vm {
 
     /// The divergence error for a run that can do nothing more while
     /// replay holds more entries.
-    pub(crate) fn blocked_in_replay(&self) -> Option<JournalStop> {
+    pub(crate) fn blocked_in_replay(&self) -> Option<Divergence> {
         let j = self.journal.as_ref()?.borrow();
         let e = j.peek()?;
         Some(j.diverged(format!("every task is blocked, and the journal records {} next", e.describe())))

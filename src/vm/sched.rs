@@ -1,7 +1,7 @@
 //! The task scheduler: runs fibers round-robin and drives pending I/O.
 
 use super::interp::Exit;
-use super::journal::{Due, HostWait, JournalStop, Wait, WaitWork};
+use super::journal::{Due, HostWait, Wait, WaitWork};
 use super::*;
 use crate::engine::LimitKind;
 use crate::journal::{ParkedCall, Suspension};
@@ -182,6 +182,8 @@ const YIELD_EVERY: Duration = Duration::from_millis(2);
 pub enum RunEnd {
     Finished(Value),
     Exit(i32),
+    /// The journaled run suspended ([`Stop::Suspended`]).
+    Suspended(Suspension),
 }
 
 /// Why [`Vm::drive`] returned.
@@ -194,6 +196,10 @@ pub(crate) enum Stop {
     Idle,
     /// Suspended state awaiting permission prompt.
     Prompt(Capability),
+    /// Every task waits for a timer or a parked host call, and the journal
+    /// lets the run suspend (SPEC §16.7). Only a run with a main task
+    /// suspends.
+    Suspended(Suspension),
 }
 
 /// Execution timer tracking elapsed CPU and clock time.
@@ -311,7 +317,7 @@ impl Vm {
             };
             match r {
                 Ok(v) => {
-                    self.deliver(fid, wgen, v).map_err(Trap::Journal)?;
+                    self.deliver(fid, wgen, v).map_err(Trap::Diverged)?;
                     self.enforce_limit(None).map_err(Trap::Limit)?;
                 }
                 Err(c) => return Err(self.op_trap(fid, c)),
@@ -322,26 +328,10 @@ impl Vm {
 
     /// The trap for the failure `c` of an I/O operation of fiber `fid`.
     fn op_trap(&mut self, fid: u32, c: Ctl) -> Trap {
-        let trace = match self.fibers.get(fid as usize) {
-            Some(Some(f)) => self.trace_of(f, None),
+        self.trap_of(c, |vm| match vm.fibers.get(fid as usize) {
+            Some(Some(f)) => vm.trace_of(f, None),
             _ => vec![],
-        };
-        match c.into_kind() {
-            CtlKind::RuntimeError(message) => Trap::Error { message, trace },
-            CtlKind::Internal(message) => {
-                self.broken = true;
-                Trap::Internal { message, trace }
-            }
-            CtlKind::Limit(k) => Trap::Limit(k),
-            CtlKind::Interrupted => Trap::Interrupted,
-            CtlKind::Exit(c) => Trap::Exit(c),
-            CtlKind::Journal(s) => Trap::Journal(s),
-            CtlKind::Abort(a) => Trap::Abort(a),
-            other => {
-                self.broken = true;
-                Trap::Internal { message: format!("unexpected {other:?} from an I/O operation"), trace }
-            }
-        }
+        })
     }
 
     /// Waits for the journal to make its entries durable. The wait does not
@@ -421,7 +411,7 @@ impl Vm {
         let mut any = false;
         // One at a time: delivering one can cancel the task of another.
         loop {
-            match self.next_due().map_err(Trap::from_ctl)? {
+            match self.next_due().map_err(|c| self.trap_of(c, |_| vec![]))? {
                 Due::Nothing => break,
                 Due::Ready(fid, wgen, fin) => {
                     any = true;
@@ -501,6 +491,7 @@ impl Vm {
             Ok(fid) => match self.drive(Some(fid)).await {
                 Ok(Stop::Exit(c)) => Ok(RunEnd::Exit(c)),
                 Ok(Stop::Main(v)) => Ok(RunEnd::Finished(v)),
+                Ok(Stop::Suspended(s)) => Ok(RunEnd::Suspended(s)),
                 // Only runs without a main task stop this way.
                 Ok(Stop::Idle | Stop::Prompt(_)) => Ok(RunEnd::Finished(Value::Unit)),
                 Err(t) => Err(t),
@@ -509,7 +500,7 @@ impl Vm {
         };
         let drained = self.drain_output();
         match drained {
-            Err(c) if r.is_ok() => Err(Trap::from_ctl(c)),
+            Err(c) if r.is_ok() => Err(self.trap_of(c, |_| vec![])),
             _ => r,
         }
     }
@@ -600,7 +591,7 @@ impl Vm {
                         if Some(fid) == main {
                             return Ok(Stop::Main(v));
                         }
-                        self.finish_task(fid, v).map_err(Trap::Journal)?;
+                        self.finish_task(fid, v).map_err(Trap::Diverged)?;
                     }
                     Exit::Preempt | Exit::YieldNow => {
                         f.state = FiberState::Ready;
@@ -620,7 +611,7 @@ impl Vm {
                             return Ok(Stop::Prompt(cap));
                         }
                         // Write the script's output before showing the prompt.
-                        self.drain_output().map_err(Trap::from_ctl)?;
+                        self.drain_output().map_err(|c| self.trap_of(c, |_| vec![]))?;
                         timer.read();
                         let asked = timer.now;
                         let answer = match self.host.prompter.clone() {
@@ -650,7 +641,6 @@ impl Vm {
                         timer.resume();
                         self.apply_answer(cap, answer);
                     }
-                    Exit::Terminate(c) => return Ok(Stop::Exit(c)),
                     Exit::Cancelled => {
                         // The task cancelled itself.
                         self.end_cancelled(fid, f);
@@ -696,7 +686,7 @@ impl Vm {
                 }
                 return Err(self
                     .blocked_in_replay()
-                    .map_or_else(|| Trap::Internal { message: "replay stalled".into(), trace: vec![] }, Trap::Journal));
+                    .map_or_else(|| Trap::Internal { message: "replay stalled".into(), trace: vec![] }, Trap::Diverged));
             }
             if self.io.is_empty() {
                 let Some(main) = main else { return Ok(Stop::Idle) };
@@ -718,8 +708,7 @@ impl Vm {
             if main.is_some()
                 && let Some(s) = self.suspension()
             {
-                self.flush_journal().await?;
-                return Err(Trap::Journal(JournalStop::Suspended(s)));
+                return Ok(Stop::Suspended(s));
             }
             timer.read();
             let done = self.wait_for_io(&timer).await;

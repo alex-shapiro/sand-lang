@@ -18,7 +18,7 @@ use crate::native::func::Call;
 use crate::policy::{Capability, Decision, Policy, PromptAnswer, Prompter};
 use bytecode::*;
 use heap::{Heap, Staging};
-use journal::JournalStop;
+use journal::Divergence;
 use meter::Meter;
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
@@ -61,20 +61,52 @@ pub struct NativeEntry {
 /// One pointer, so that `Result<Value, Ctl>` is 16 bytes like a `Value`
 /// (see `interp`). [`Vm::block`] and
 /// [`Vm::yield_now`] reuse a spare box instead of allocating.
+///
+/// A host makes a `Ctl` only with the public constructors, such as
+/// [`Ctl::fail`] and [`Ctl::abort`]. Thus only the engine parks a call,
+/// suspends a run, or reports a divergence from the journal. This does not
+/// compile:
+///
+/// ```compile_fail
+/// let _: sandlang::vm::Ctl = sandlang::vm::CtlKind::Yield.into();
+/// ```
+///
+/// Nor does this:
+///
+/// ```compile_fail
+/// let _ = sandlang::vm::Ctl::from(sandlang::vm::journal::Divergence { seq: 0, message: String::new() });
+/// ```
 pub struct Ctl(Box<CtlKind>);
 
 const _: () = assert!(std::mem::size_of::<Ctl>() == std::mem::size_of::<usize>());
 const _: () = assert!(std::mem::size_of::<Result<Value, Ctl>>() == 16);
 const _: () = assert!(std::mem::size_of::<Result<Option<Value>, Ctl>>() == 16);
 
-/// What a [`Ctl`] is.
-pub enum CtlKind {
+/// What a [`Ctl`] is: the end of the run, or a request to the code that
+/// called the native.
+pub(crate) enum CtlKind {
+    End(End),
+    Request(Request),
+}
+
+/// Why a run ends early. [`Vm::trap`] gives the [`Trap`] of each.
+pub(crate) enum End {
     /// Uncaught runtime error (`kind: message`) that terminates the run (see [`Ctl::fail`]).
     RuntimeError(String),
     /// An invariant of the engine broke: a bug, which ends a session.
     Internal(String),
     Limit(LimitKind),
+    /// The host interrupted the engine (see `Meter::check`).
+    Interrupted,
     Exit(i32),
+    /// The run does something other than what its journal records.
+    Diverged(Divergence),
+    /// A host function ends the run (see [`Ctl::abort`]).
+    Abort(crate::engine::HostAbort),
+}
+
+/// What a native asks of the code that called it.
+pub(crate) enum Request {
     /// Ask the user; the call is retried afterwards.
     NeedPermission(Capability),
     /// Suspend the task until the future completes.
@@ -82,7 +114,7 @@ pub enum CtlKind {
     /// Suspend the task until the future of a journaled call completes. The
     /// engine may suspend the run while it waits, as the [`Park`] says. The
     /// tag goes to [`ParkedCall::tag`]. Only a journaled function can ask
-    /// for this ([`Parked`]).
+    /// for this ([`Parked`]), and the journal turns it into a [`Request::Wait`].
     ///
     /// [`Park`]: crate::native::func::Park
     /// [`Parked`]: crate::native::func::Parked
@@ -91,22 +123,13 @@ pub enum CtlKind {
     /// The task waits for the scheduler event that [`Vm::block`]
     /// registered with generation `wait`; the call returns what wakes it.
     /// When it wakes, the engine cancels the tasks of `race` (`task.race`).
-    Blocked {
-        wait: u64,
-        race: Vec<Value>,
-    },
+    Blocked { wait: u64, race: Vec<Value> },
     /// Let other tasks run; the call returns `()`.
     Yield,
-    /// The host interrupted the engine (see `Meter::check`).
-    Interrupted,
     /// Collect garbage and call the native again (once): what it needs (an
     /// open-resource slot, I/O buffer space) may be held by garbage. See
     /// [`Vm::resource_slot`].
     Collect,
-    /// The run stops for its journal (divergence or suspension).
-    Journal(JournalStop),
-    /// A host function ends the run (see [`Ctl::abort`]).
-    Abort(crate::engine::HostAbort),
     /// Suspend the task on an operation that the journal records (see
     /// [`Vm::begin_op`]).
     Wait(Box<journal::Wait>),
@@ -119,25 +142,25 @@ impl Ctl {
     /// Aborts execution with an uncatchable runtime error of `kind`. For recoverable `Result` errors, return [`HostError`] instead.
     #[cold]
     pub fn fail(kind: &str, msg: impl std::fmt::Display) -> Ctl {
-        Ctl(Box::new(CtlKind::RuntimeError(format!("{kind}: {msg}"))))
+        Ctl::end(End::RuntimeError(format!("{kind}: {msg}")))
     }
 
     /// An internal error: an invariant of the engine broke.
     #[cold]
     pub fn internal(msg: impl Into<String>) -> Ctl {
-        Ctl(Box::new(CtlKind::Internal(msg.into())))
+        Ctl::end(End::Internal(msg.into()))
     }
 
     /// A limit was exceeded.
     #[cold]
     pub fn limit(k: LimitKind) -> Ctl {
-        Ctl(Box::new(CtlKind::Limit(k)))
+        Ctl::end(End::Limit(k))
     }
 
     /// The host interrupted the engine.
     #[cold]
     pub fn interrupted() -> Ctl {
-        Ctl(Box::new(CtlKind::Interrupted))
+        Ctl::end(End::Interrupted)
     }
 
     /// Ends the run at once with [`Error::Aborted`](crate::engine::Error::Aborted),
@@ -147,44 +170,58 @@ impl Ctl {
     /// host that the script must not see, such as the loss of the host's
     /// right to run the run.
     pub fn abort(reason: impl std::error::Error + Send + Sync + 'static) -> Ctl {
-        Ctl(Box::new(CtlKind::Abort(crate::engine::HostAbort::new(reason))))
+        Ctl::end(End::Abort(crate::engine::HostAbort::new(reason)))
     }
 
     /// `exit(code)`.
     pub fn exit(code: i32) -> Ctl {
-        Ctl(Box::new(CtlKind::Exit(code)))
+        Ctl::end(End::Exit(code))
     }
 
     /// Suspend the task until `fut` completes.
     pub fn suspend(fut: BoxFuture) -> Ctl {
-        Ctl(Box::new(CtlKind::Async(fut)))
+        Ctl::request(Request::Async(fut))
     }
 
     /// Ask the user for `cap`.
     pub fn need_permission(cap: Capability) -> Ctl {
-        Ctl(Box::new(CtlKind::NeedPermission(cap)))
+        Ctl::request(Request::NeedPermission(cap))
     }
 
-    pub fn kind(&self) -> &CtlKind {
+    fn new(kind: CtlKind) -> Ctl {
+        Ctl(Box::new(kind))
+    }
+
+    pub(crate) fn end(end: End) -> Ctl {
+        Ctl::new(CtlKind::End(end))
+    }
+
+    pub(crate) fn request(request: Request) -> Ctl {
+        Ctl::new(CtlKind::Request(request))
+    }
+
+    pub(crate) fn kind(&self) -> &CtlKind {
         &self.0
     }
 
-    pub fn into_kind(self) -> CtlKind {
+    pub(crate) fn into_kind(self) -> CtlKind {
         *self.0
     }
 
     /// The limit, if this is one.
     pub fn as_limit(&self) -> Option<LimitKind> {
         match *self.0 {
-            CtlKind::Limit(k) => Some(k),
+            CtlKind::End(End::Limit(k)) => Some(k),
             _ => None,
         }
     }
 }
 
-impl From<CtlKind> for Ctl {
-    fn from(k: CtlKind) -> Ctl {
-        Ctl(Box::new(k))
+/// `Divergence` is private to the crate, so only the engine can make a
+/// [`Ctl`] that reports a divergence.
+impl From<Divergence> for Ctl {
+    fn from(d: Divergence) -> Ctl {
+        Ctl::end(End::Diverged(d))
     }
 }
 
@@ -197,21 +234,37 @@ impl std::fmt::Debug for Ctl {
 impl std::fmt::Debug for CtlKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CtlKind::RuntimeError(m) => write!(f, "RuntimeError({m})"),
-            CtlKind::Internal(m) => write!(f, "Internal({m})"),
-            CtlKind::Limit(k) => write!(f, "Limit({k:?})"),
-            CtlKind::Exit(c) => write!(f, "Exit({c})"),
-            CtlKind::NeedPermission(c) => write!(f, "NeedPermission({c})"),
-            CtlKind::Async(..) => write!(f, "Async"),
-            CtlKind::Parked(..) => write!(f, "Parked"),
-            CtlKind::Blocked { .. } => write!(f, "Blocked"),
-            CtlKind::Yield => write!(f, "Yield"),
-            CtlKind::Interrupted => write!(f, "Interrupted"),
-            CtlKind::Collect => write!(f, "Collect"),
-            CtlKind::Journal(s) => write!(f, "Journal({s:?})"),
-            CtlKind::Abort(a) => write!(f, "Abort({a})"),
-            CtlKind::Wait(_) => write!(f, "Wait"),
-            CtlKind::Cancelled => write!(f, "Cancelled"),
+            CtlKind::End(e) => e.fmt(f),
+            CtlKind::Request(r) => r.fmt(f),
+        }
+    }
+}
+
+impl std::fmt::Debug for End {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            End::RuntimeError(m) => write!(f, "RuntimeError({m})"),
+            End::Internal(m) => write!(f, "Internal({m})"),
+            End::Limit(k) => write!(f, "Limit({k:?})"),
+            End::Interrupted => write!(f, "Interrupted"),
+            End::Exit(c) => write!(f, "Exit({c})"),
+            End::Diverged(d) => write!(f, "Diverged({d:?})"),
+            End::Abort(a) => write!(f, "Abort({a})"),
+        }
+    }
+}
+
+impl std::fmt::Debug for Request {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Request::NeedPermission(c) => write!(f, "NeedPermission({c})"),
+            Request::Async(..) => write!(f, "Async"),
+            Request::Parked(..) => write!(f, "Parked"),
+            Request::Blocked { .. } => write!(f, "Blocked"),
+            Request::Yield => write!(f, "Yield"),
+            Request::Collect => write!(f, "Collect"),
+            Request::Wait(_) => write!(f, "Wait"),
+            Request::Cancelled => write!(f, "Cancelled"),
         }
     }
 }
@@ -219,7 +272,7 @@ impl std::fmt::Debug for CtlKind {
 impl From<&str> for Ctl {
     /// An error whose message `msg` is `kind: message`.
     fn from(msg: &str) -> Ctl {
-        Ctl(Box::new(CtlKind::RuntimeError(msg.to_string())))
+        Ctl::end(End::RuntimeError(msg.to_string()))
     }
 }
 
@@ -355,25 +408,10 @@ pub enum Trap {
     Limit(LimitKind),
     Interrupted,
     Exit(i32),
-    /// The journal stopped the run.
-    Journal(JournalStop),
+    /// The run does something other than what its journal records.
+    Diverged(Divergence),
     /// A host function ended the run.
     Abort(crate::engine::HostAbort),
-}
-
-impl Trap {
-    /// The trap for an error from the meter: a limit or an interrupt.
-    pub(crate) fn from_ctl(c: Ctl) -> Trap {
-        match c.into_kind() {
-            CtlKind::Limit(k) => Trap::Limit(k),
-            CtlKind::Interrupted => Trap::Interrupted,
-            CtlKind::Journal(s) => Trap::Journal(s),
-            CtlKind::Abort(a) => Trap::Abort(a),
-            CtlKind::RuntimeError(message) => Trap::Error { message, trace: vec![] },
-            CtlKind::Internal(message) => Trap::Internal { message, trace: vec![] },
-            other => Trap::Internal { message: format!("unexpected {other:?}"), trace: vec![] },
-        }
-    }
 }
 
 /// Standard input source for an engine.
@@ -788,14 +826,14 @@ impl Vm {
     /// `kind` (`Blocked` or `Yield`) as a [`Ctl`], in the box of the last
     /// one consumed.
     #[inline]
-    fn signal(&mut self, kind: CtlKind) -> Ctl {
+    fn signal(&mut self, request: Request) -> Ctl {
         match self.spare_ctl.take() {
             Some(mut b) => {
                 // `recycle` keeps only a `Yield`: nothing to drop.
-                std::mem::forget(std::mem::replace(&mut *b, kind));
+                std::mem::forget(std::mem::replace(&mut *b, CtlKind::Request(request)));
                 Ctl(b)
             }
-            None => Ctl::from(kind),
+            None => Ctl::request(request),
         }
     }
 
@@ -803,14 +841,14 @@ impl Vm {
     #[inline]
     pub(crate) fn recycle(&mut self, mut c: Ctl) {
         if self.spare_ctl.is_none() {
-            *c.0 = CtlKind::Yield;
+            *c.0 = CtlKind::Request(Request::Yield);
             self.spare_ctl = Some(c.0);
         }
     }
 
     /// Lets other tasks run (a native's result); the call returns `()`.
     pub fn yield_now(&mut self) -> Ctl {
-        self.signal(CtlKind::Yield)
+        self.signal(Request::Yield)
     }
 
     pub fn next_gen(&mut self) -> u64 {
@@ -979,11 +1017,11 @@ impl Vm {
     pub fn try_reserve_io(&mut self, call: Call, bytes: usize) -> Result<Option<iomem::Reservation>, Ctl> {
         let mut r = self.io_reservation();
         if self.heap.fail_next_check.replace(false) {
-            return Err(CtlKind::Collect.into());
+            return Err(Ctl::request(Request::Collect));
         }
         match r.ensure(bytes) {
             Ok(()) => Ok(Some(r)),
-            Err(_) if !call.retry => Err(CtlKind::Collect.into()),
+            Err(_) if !call.retry => Err(Ctl::request(Request::Collect)),
             Err(_) => Ok(None),
         }
     }
@@ -994,11 +1032,11 @@ impl Vm {
     /// reached.
     pub fn resource_slot(&mut self, call: Call) -> Result<iomem::ResourceSlot, HostError> {
         if self.heap.fail_next_check.replace(false) {
-            return Err(Ctl::from(CtlKind::Collect).into());
+            return Err(Ctl::request(Request::Collect).into());
         }
         match iomem::ResourceSlot::try_new(&self.heap.io_memory) {
             Some(slot) => Ok(slot),
-            None if !call.retry => Err(Ctl::from(CtlKind::Collect).into()),
+            None if !call.retry => Err(Ctl::request(Request::Collect).into()),
             None => Err(HostError::new("limit", format!("too many open resources (limit {})", self.heap.io_memory.max_resources()))),
         }
     }
@@ -1010,7 +1048,7 @@ impl Vm {
         self.heap.io_memory.publish_heap(self.heap.used());
         match slot.reserve_buffers(buffers) {
             Ok(()) => Ok(slot),
-            Err(_) if !call.retry => Err(Ctl::from(CtlKind::Collect).into()),
+            Err(_) if !call.retry => Err(Ctl::request(Request::Collect).into()),
             Err(e) => Err(HostError::new("limit", format!("cannot open {what}: its buffers ({buffers} bytes) do not fit: {e}"))),
         }
     }
@@ -1418,7 +1456,7 @@ impl Vm {
     /// Delivers a value to a waiting fiber, if the wait is still current,
     /// and cancels the other tasks that the fiber races. Returns whether
     /// the wait was current, or the divergence that a cancellation found.
-    pub fn deliver(&mut self, fid: u32, wgen: u64, v: Value) -> Result<bool, JournalStop> {
+    pub(crate) fn deliver(&mut self, fid: u32, wgen: u64, v: Value) -> Result<bool, Divergence> {
         let Some(Some(f)) = self.fibers.get_mut(fid as usize) else { return Ok(false) };
         if f.state != FiberState::Waiting || f.wgen != wgen {
             return Ok(false);
@@ -1449,7 +1487,7 @@ impl Vm {
     }
 
     /// Marks a task finished and wakes its waiters.
-    pub fn finish_task(&mut self, fid: u32, result: Value) -> Result<(), JournalStop> {
+    pub(crate) fn finish_task(&mut self, fid: u32, result: Value) -> Result<(), Divergence> {
         let Some(f) = self.fibers[fid as usize].take() else { return Ok(()) };
         let task = f.task;
         if let Obj::Task(t) = self.heap.get_mut(task) {
@@ -1472,15 +1510,15 @@ impl Vm {
             && t.fiber == self.current
         {
             t.state = TaskState::Cancelled;
-            return Err(Ctl::from(CtlKind::Cancelled));
+            return Err(Ctl::request(Request::Cancelled));
         }
-        self.cancel_waiting_task(task).map_err(Ctl::from)
+        Ok(self.cancel_waiting_task(task)?)
     }
 
     /// Cancels `task` (no-op if it has finished), which is not the running
     /// task. Fails if replay finds that the journal does not record the
     /// cancellation of the operation that the task waits for.
-    fn cancel_waiting_task(&mut self, task: Value) -> Result<(), JournalStop> {
+    fn cancel_waiting_task(&mut self, task: Value) -> Result<(), Divergence> {
         let (fid, state) = match self.heap.get(task) {
             Obj::Task(t) => (t.fiber, t.state),
             _ => return Ok(()),
@@ -1548,14 +1586,14 @@ impl Vm {
     pub async fn end_tasks(&mut self) -> Result<Option<i32>, Trap> {
         self.release_main();
         let tasks: Vec<Value> = self.fibers.iter().flatten().map(|f| f.task).collect();
-        tasks.into_iter().try_for_each(|t| self.cancel_waiting_task(t)).map_err(Trap::Journal)?;
+        tasks.into_iter().try_for_each(|t| self.cancel_waiting_task(t)).map_err(Trap::Diverged)?;
         if self.ready.is_empty() {
             return Ok(None);
         }
         self.ending = true;
         let r = self.drive(None).await;
         self.ending = false;
-        let r = r.and_then(|stop| self.drain_output().map(|()| stop).map_err(Trap::from_ctl));
+        let r = r.and_then(|stop| self.drain_output().map(|()| stop).map_err(|c| self.trap_of(c, |_| vec![])));
         match r {
             Ok(sched::Stop::Exit(c)) => Ok(Some(c)),
             Ok(_) => Ok(None),
@@ -1660,6 +1698,33 @@ impl Vm {
                 self.free_spare_fibers();
             }
             self.heap.stats.record(start.elapsed(), true);
+        }
+    }
+
+    /// The trap that `end` stops the run with. `trace` gives the stack
+    /// trace of an error. An internal error marks the engine broken.
+    pub(crate) fn trap(&mut self, end: End, trace: impl FnOnce(&Vm) -> Vec<TraceEntry>) -> Trap {
+        match end {
+            End::RuntimeError(message) => Trap::Error { message, trace: trace(self) },
+            End::Internal(message) => {
+                self.broken = true;
+                Trap::Internal { message, trace: trace(self) }
+            }
+            End::Limit(k) => Trap::Limit(k),
+            End::Interrupted => Trap::Interrupted,
+            End::Exit(c) => Trap::Exit(c),
+            End::Diverged(d) => Trap::Diverged(d),
+            End::Abort(a) => Trap::Abort(a),
+        }
+    }
+
+    /// The trap for `c` from code that can make no request, such as a
+    /// metered operation or the finisher of an I/O operation: a request is
+    /// an internal error.
+    pub(crate) fn trap_of(&mut self, c: Ctl, trace: impl FnOnce(&Vm) -> Vec<TraceEntry>) -> Trap {
+        match c.into_kind() {
+            CtlKind::End(end) => self.trap(end, trace),
+            CtlKind::Request(r) => self.trap(End::Internal(format!("unexpected request {r:?}")), trace),
         }
     }
 
