@@ -42,10 +42,10 @@ impl Access {
 pub struct AbsolutePath(&'static str);
 
 impl AbsolutePath {
-    /// Validates that `path` is absolute at compile time or runtime.
+    /// Validates that `path` is absolute.
     ///
-    /// A path that starts with `/` is absolute on all platforms. On Windows, paths that
-    /// start with `\` or a drive prefix such as `C:\` are also absolute. Panics if `path`
+    /// A path that starts with `/` is absolute on all platforms. On Windows, a path that
+    /// starts with `\` or a drive prefix such as `C:\` is also absolute. Panics if `path`
     /// is relative.
     ///
     /// ```compile_fail
@@ -98,7 +98,7 @@ impl PathPattern {
         PathPattern { prefix: lexical(path), rest: vec![] }
     }
 
-    /// Returns a pattern that matches every path (`**`).
+    /// Returns a pattern that matches every path.
     pub fn everything() -> PathPattern {
         PathPattern { prefix: PathBuf::new(), rest: vec![] }
     }
@@ -165,8 +165,7 @@ pub enum Transports {
 }
 
 impl Transports {
-    /// Returns the default transports for a rule without transport keywords: `Tls` for
-    /// `Allow`, and `Both` for `Deny` or `Prompt`.
+    /// Returns the default transports for a rule without transport keywords.
     pub(crate) fn default_for(decision: Decision) -> Transports {
         if decision == Decision::Allow { Transports::Tls } else { Transports::Both }
     }
@@ -241,7 +240,7 @@ impl Methods {
         Methods(None)
     }
 
-    /// Matches only `first` and the methods in `rest`, deduplicated in order.
+    /// Matches only `first` and the methods in `rest`.
     pub fn only(first: HttpMethod, rest: impl IntoIterator<Item = HttpMethod>) -> Methods {
         let mut list = vec![first];
         for method in rest {
@@ -252,7 +251,7 @@ impl Methods {
         Methods(Some(list))
     }
 
-    /// Returns the explicit method list, or `None` if all methods match.
+    /// Returns the specific methods to match, or `None` if `self` matches every method.
     pub(crate) fn listed(&self) -> Option<&[HttpMethod]> {
         self.0.as_deref()
     }
@@ -303,7 +302,6 @@ pub(crate) enum RuleKind {
     Stdout,
     Stderr,
     TimeZone,
-    /// A custom capability rule for a name and detail pattern.
     Custom(CustomMatch, CustomMatch),
 }
 
@@ -453,41 +451,41 @@ impl RulePolicy {
         rules.into_iter().fold(self, RulePolicy::push_rule)
     }
 
-    /// Allows reading paths that match `p`.
-    pub fn allow_read(self, p: PathPattern) -> Self {
-        self.push(Decision::Allow, RuleKind::Files(Access::Read, p))
+    /// Allows reading paths that match `path`.
+    pub fn allow_read(self, path: PathPattern) -> Self {
+        self.push(Decision::Allow, RuleKind::Files(Access::Read, path))
     }
-    /// Denies reading, writing, and importing paths that match `p`.
-    pub fn deny_read(self, p: PathPattern) -> Self {
-        self.push(Decision::Deny, RuleKind::Files(Access::Read, p))
+    /// Denies reading, writing, and importing paths that match `path`.
+    pub fn deny_read(self, path: PathPattern) -> Self {
+        self.push(Decision::Deny, RuleKind::Files(Access::Read, path))
     }
-    /// Prompts before reading, writing, or importing paths that match `p`.
-    pub fn prompt_read(self, p: PathPattern) -> Self {
-        self.push(Decision::Prompt, RuleKind::Files(Access::Read, p))
+    /// Prompts before reading, writing, or importing paths that match `path`.
+    pub fn prompt_read(self, path: PathPattern) -> Self {
+        self.push(Decision::Prompt, RuleKind::Files(Access::Read, path))
     }
-    /// Allows reading and writing paths that match `p`.
-    pub fn allow_write(self, p: PathPattern) -> Self {
-        self.push(Decision::Allow, RuleKind::Files(Access::Write, p))
+    /// Allows reading and writing paths that match `path`.
+    pub fn allow_write(self, path: PathPattern) -> Self {
+        self.push(Decision::Allow, RuleKind::Files(Access::Write, path))
     }
-    /// Denies writing paths that match `p`.
-    pub fn deny_write(self, p: PathPattern) -> Self {
-        self.push(Decision::Deny, RuleKind::Files(Access::Write, p))
+    /// Denies writing paths that match `path`.
+    pub fn deny_write(self, path: PathPattern) -> Self {
+        self.push(Decision::Deny, RuleKind::Files(Access::Write, path))
     }
-    /// Prompts before writing paths that match `p`.
-    pub fn prompt_write(self, p: PathPattern) -> Self {
-        self.push(Decision::Prompt, RuleKind::Files(Access::Write, p))
+    /// Prompts before writing paths that match `path`.
+    pub fn prompt_write(self, path: PathPattern) -> Self {
+        self.push(Decision::Prompt, RuleKind::Files(Access::Write, path))
     }
-    /// Allows importing script modules that match `p`.
-    pub fn allow_import(self, p: PathPattern) -> Self {
-        self.push(Decision::Allow, RuleKind::Files(Access::Import, p))
+    /// Allows importing script modules that match `path`.
+    pub fn allow_import(self, path: PathPattern) -> Self {
+        self.push(Decision::Allow, RuleKind::Files(Access::Import, path))
     }
-    /// Denies importing script modules that match `p`.
-    pub fn deny_import(self, p: PathPattern) -> Self {
-        self.push(Decision::Deny, RuleKind::Files(Access::Import, p))
+    /// Denies importing script modules that match `path`.
+    pub fn deny_import(self, path: PathPattern) -> Self {
+        self.push(Decision::Deny, RuleKind::Files(Access::Import, path))
     }
-    /// Prompts before importing script modules that match `p`.
-    pub fn prompt_import(self, p: PathPattern) -> Self {
-        self.push(Decision::Prompt, RuleKind::Files(Access::Import, p))
+    /// Prompts before importing script modules that match `path`.
+    pub fn prompt_import(self, path: PathPattern) -> Self {
+        self.push(Decision::Prompt, RuleKind::Files(Access::Import, path))
     }
     /// Allows connections over `transports` to hosts that match `host`.
     pub fn allow_net(self, transports: Transports, host: NetPattern) -> Self {
@@ -501,15 +499,15 @@ impl RulePolicy {
     pub fn prompt_net(self, transports: Transports, host: NetPattern) -> Self {
         self.push(Decision::Prompt, RuleKind::Net(host, transports))
     }
-    /// Allows HTTP requests matching `methods` and `url` over `transports`.
+    /// Allows HTTP requests that match `methods` and `url` over `transports`.
     pub fn allow_http(self, transports: Transports, methods: Methods, url: UrlPattern) -> Self {
         self.push(Decision::Allow, RuleKind::Http(methods, url, transports))
     }
-    /// Denies HTTP requests matching `methods` and `url` over `transports`.
+    /// Denies HTTP requests that match `methods` and `url` over `transports`.
     pub fn deny_http(self, transports: Transports, methods: Methods, url: UrlPattern) -> Self {
         self.push(Decision::Deny, RuleKind::Http(methods, url, transports))
     }
-    /// Prompts before HTTP requests matching `methods` and `url` over `transports`.
+    /// Prompts before HTTP requests that match `methods` and `url` over `transports`.
     pub fn prompt_http(self, transports: Transports, methods: Methods, url: UrlPattern) -> Self {
         self.push(Decision::Prompt, RuleKind::Http(methods, url, transports))
     }
@@ -573,15 +571,15 @@ impl RulePolicy {
     pub fn prompt_timezone(self) -> Self {
         self.push(Decision::Prompt, RuleKind::TimeZone)
     }
-    /// Allows custom capabilities matching `name` and `detail`.
+    /// Allows custom capabilities that match `name` and `detail`.
     pub fn allow_custom(self, name: CustomMatch, detail: CustomMatch) -> Self {
         self.push(Decision::Allow, RuleKind::Custom(name, detail))
     }
-    /// Denies custom capabilities matching `name` and `detail`.
+    /// Denies custom capabilities that match `name` and `detail`.
     pub fn deny_custom(self, name: CustomMatch, detail: CustomMatch) -> Self {
         self.push(Decision::Deny, RuleKind::Custom(name, detail))
     }
-    /// Prompts before custom capabilities matching `name` and `detail`.
+    /// Prompts before custom capabilities that match `name` and `detail`.
     pub fn prompt_custom(self, name: CustomMatch, detail: CustomMatch) -> Self {
         self.push(Decision::Prompt, RuleKind::Custom(name, detail))
     }

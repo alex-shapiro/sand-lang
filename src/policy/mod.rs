@@ -263,7 +263,7 @@ pub(crate) enum PathSpace {
     Memory,
 }
 
-/// An error in the text of a rule builder argument, such as a pattern or an HTTP method.
+/// An error in a policy pattern or [`rules::HttpMethod`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PatternError(pub(crate) String);
 

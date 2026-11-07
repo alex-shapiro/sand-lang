@@ -1690,9 +1690,9 @@ only the rules from the file. Call
 
 Each line in a policy file is an independent statement. `#` starts a comment
 that extends to the end of the line. Spaces or commas separate words. Double
-quotes `"..."` make every character literal, including `*` and spaces. Quoted
-text accepts the escapes `\"`, `\\`, `\n`, and `\r`. A word can combine quoted
-and unquoted segments, as in `"/my data"/**`.
+quotes `"..."` treat `*` and spaces as literal characters. Use `\"`, `\\`, `\n`,
+and `\r` to escape characters in quotes. A word can combine quoted and unquoted
+segments, as in `"/my data"/**`.
 
 ```policy
 # Read the system and the project; keep secrets out.

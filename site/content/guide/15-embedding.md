@@ -82,14 +82,14 @@ let report = files.read("/out/report.txt")?;
 # }
 ```
 
-- **Policy.** `RulePolicy` has `allow_`, `deny_`, and `prompt_` builder methods for each capability kind, such as `allow_read`, `deny_net`, and `prompt_write`. Each builder method takes typed arguments. Pattern types parse policy file syntax with `str::parse`. Invalid syntax returns a `PatternError`:
-  - `PathPattern` is the path of a file rule. It must be absolute or start with `**`. `PathPattern::literal` matches a host path literally. In a `const`, `AbsolutePath::new` validates a path at compile time, as in `const SRV: AbsolutePath = AbsolutePath::new("/srv");`. Convert an `AbsolutePath` with `PathPattern::from`.
+- **Policy.** `RulePolicy` has `allow_`, `deny_`, and `prompt_` builder methods for each capability kind. Each builder method takes typed arguments. Parse a pattern or `HttpMethod` with `str::parse`. `str::parse` returns a `PatternError` if the text is invalid:
+  - `PathPattern` is the path of a file rule. It must be absolute or start with `**`. `PathPattern::literal` matches a host path literally. Use `AbsolutePath::new` in a `const` to validate a path at compile time. Convert an `AbsolutePath` with `PathPattern::from`.
   - `NetPattern` is the host of a `net` rule.
   - `UrlPattern` is the URL of an `http` rule.
   - `ListenPattern` is the address of a `listen` rule.
   - `NamePattern` is the variable name of an `env` rule. `NamePattern::exact` matches a literal variable name.
   - `Transports` selects `Tls`, `Plaintext`, or `Both` for a `net` or `http` rule.
-  - `Methods` selects the HTTP methods for an `http` rule. `Methods::all()` matches every method. `Methods::only(first, rest)` matches specific `HttpMethod` values such as `HttpMethod::GET`.
+  - `Methods` selects the HTTP methods for an `http` rule. `Methods::all()` matches every method. `Methods::only(first, rest)` matches specific `HttpMethod` values.
   - `CustomMatch` selects `Any` or `Exact(text)` for the name and detail of a `custom` rule.
 - **Default rules.** `RulePolicy::default()` is empty. `RulePolicy::standard()` allows `stdout` and `stderr`. `RulePolicy::allow_all()` allows all capabilities for trusted scripts. `user_rules.with_defaults(host_rules)` adds fallback rules for requests that do not match `user_rules`. `Config::custom_policy` replaces rule evaluation with a host-defined `CustomPolicy`.
 - **Limits.** `Limits` configures every resource bound described in [Sandbox and policies](/guide/sandbox/).

@@ -1847,7 +1847,7 @@ fn a_policy_file_over_the_standard_rules_keeps_its_prompt_rules() {
 
 #[cfg(windows)]
 #[test]
-fn absolute_paths_accept_windows_drive_and_unc_paths() {
+fn windows_drive_and_unc_paths_are_absolute() {
     const DRIVE: AbsolutePath = AbsolutePath::new("C:\\data");
     const UNC: AbsolutePath = AbsolutePath::new("\\\\server\\share");
     assert_eq!(PathPattern::from(DRIVE), PathPattern::literal("C:\\data").unwrap());

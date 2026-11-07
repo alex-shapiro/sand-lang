@@ -10,7 +10,9 @@ use std::borrow::Cow;
 use std::hash::{Hash, Hasher};
 use std::path::{Component, Path};
 
-/// Returns `true` if a file rule accepts `path` as absolute, as [`super::rules::AbsolutePath::new`] describes.
+/// Returns `true` if `path` is an absolute path for a file rule.
+///
+/// See [`super::rules::AbsolutePath::new`].
 pub(crate) const fn is_absolute(path: &[u8]) -> bool {
     match path {
         [b'/', ..] => true,
