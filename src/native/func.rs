@@ -4,7 +4,7 @@ use super::convert::{Conversion, FromValue, HostError, IntoValue};
 use super::ty::{JournalArg, JournalData, SandType, Type};
 use crate::vm::journal::Effects;
 use crate::vm::value::Value;
-use crate::vm::{BoxFuture, Ctl, Finisher, HostFn, NResult, NativeFn, Vm};
+use crate::vm::{BoxFuture, Ctl, Finisher, NResult, NativeFn, Vm};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -64,6 +64,41 @@ pub trait VmFunction<Marker>: Send + Sync + 'static {
     fn signature() -> Signature;
     /// Converts the function for registration under `key` (`module.name`).
     fn into_host(self, key: &Arc<str>) -> Box<NativeFn>;
+    /// Converts the function into the body of a journaled function
+    /// ([`Journaled`] or [`Effectful`]) registered under `key`.
+    #[doc(hidden)]
+    fn into_journaled(self, key: &Arc<str>) -> Box<JournaledFn>;
+}
+
+/// The body of a journaled function, which can park
+/// ([`VmFunction::into_journaled`]).
+#[doc(hidden)]
+pub type JournaledFn = dyn for<'c> Fn(&mut Vm, Call<'c>, &[Value]) -> Result<Answer, Ctl> + Send + Sync;
+
+/// What the body of a journaled function gives back when it does not fail
+/// or wait.
+#[doc(hidden)]
+pub enum Answer {
+    Value(Value),
+    /// The call waits for the future, and the engine may suspend the run
+    /// while it waits, as the [`Park`] says. The tag goes to
+    /// [`ParkedCall::tag`](crate::journal::ParkedCall::tag).
+    Parked(BoxFuture, Park, String),
+}
+
+impl Answer {
+    /// The result outside the journal: a parked call is then a plain wait.
+    pub(crate) fn into_result(self) -> NResult {
+        match self {
+            Answer::Value(v) => Ok(v),
+            Answer::Parked(fut, ..) => Err(Ctl::suspend(fut)),
+        }
+    }
+}
+
+/// A body that cannot park, as the body of a journaled function.
+fn answering(f: Box<NativeFn>) -> Box<JournaledFn> {
+    Box::new(move |vm: &mut Vm, call: Call<'_>, args: &[Value]| f(vm, call, args).map(Answer::Value))
 }
 
 /// The return type of a [`VmFunction`]: an [`IntoValue`] type, or the
@@ -71,8 +106,12 @@ pub trait VmFunction<Marker>: Send + Sync + 'static {
 pub trait VmReturn: SandType {
     /// [`Parks`] for a [`Parked`] result, and [`NoPark`] otherwise.
     type Parking;
+    /// The result outside the journal. A parked call is then a plain wait:
+    /// only a run with a journal suspends.
     #[doc(hidden)]
     fn into_result(self, vm: &mut Vm) -> NResult;
+    #[doc(hidden)]
+    fn into_answer(self, vm: &mut Vm) -> Result<Answer, Ctl>;
 }
 
 impl<R: IntoValue> VmReturn for R {
@@ -80,17 +119,23 @@ impl<R: IntoValue> VmReturn for R {
     fn into_result(self, vm: &mut Vm) -> NResult {
         self.into_value(vm)
     }
+    fn into_answer(self, vm: &mut Vm) -> Result<Answer, Ctl> {
+        self.into_value(vm).map(Answer::Value)
+    }
 }
 
 impl<T: SandType, E: NativeError> VmReturn for Result<Parked<T, E>, E> {
     type Parking = Parks;
     fn into_result(self, vm: &mut Vm) -> NResult {
         match self {
-            Ok(Parked { later: Later(Wait::Future(fut), _), park: Some((park, tag)) }) => {
-                Err(Ctl::request(crate::vm::Request::Parked(fut, park, tag)))
-            }
             Ok(Parked { later, .. }) => later.finish(vm),
             Err(e) => E::finish(Err::<(), E>(e), vm),
+        }
+    }
+    fn into_answer(self, vm: &mut Vm) -> Result<Answer, Ctl> {
+        match self {
+            Ok(Parked { later: Later(Wait::Future(fut), _), park: Some((park, tag)) }) => Ok(Answer::Parked(fut, park, tag)),
+            r => r.into_result(vm).map(Answer::Value),
         }
     }
 }
@@ -352,7 +397,7 @@ where
         F::signature()
     }
     fn into_host(self, key: &Arc<str>) -> Box<NativeFn> {
-        journaled(self.0.into_host(key), key, Effects::Pure)
+        journaled(answering(self.0.into_host(key)), key, Effects::Pure)
     }
 }
 
@@ -371,7 +416,10 @@ macro_rules! journaled_impls {
                 F::signature()
             }
             fn into_host(self, key: &Arc<str>) -> Box<NativeFn> {
-                journaled(self.0.into_host(key), key, $effects)
+                journaled(self.0.into_journaled(key), key, $effects)
+            }
+            fn into_journaled(self, key: &Arc<str>) -> Box<JournaledFn> {
+                answering(self.into_host(key))
             }
         }
 
@@ -386,7 +434,7 @@ macro_rules! journaled_impls {
                 F::signature()
             }
             fn into_host(self, key: &Arc<str>) -> Box<NativeFn> {
-                journaled(self.0.into_host(key), key, $effects)
+                journaled(answering(self.0.into_host(key)), key, $effects)
             }
         }
     )*};
@@ -395,10 +443,9 @@ journaled_impls!(Journaled: Effects::Pure; Effectful: Effects::External, Deferre
 
 /// Wraps `inner`, registered under `key`, so that its calls go through the
 /// journal.
-fn journaled(inner: Box<NativeFn>, key: &Arc<str>, effects: Effects) -> Box<NativeFn> {
-    let inner = HostFn::Shared(inner.into());
+fn journaled(inner: Box<JournaledFn>, key: &Arc<str>, effects: Effects) -> Box<NativeFn> {
     let key = key.clone();
-    Box::new(move |vm: &mut Vm, call: Call<'_>, args: &[Value]| crate::vm::journal::journaled_call(vm, call, &inner, &key, effects, args))
+    Box::new(move |vm: &mut Vm, call: Call<'_>, args: &[Value]| crate::vm::journal::journaled_call(vm, call, &*inner, &key, effects, args))
 }
 
 /// Deferred result returned by a [`VmFunction`] that may suspend the calling
@@ -597,6 +644,9 @@ macro_rules! fn_impls {
             fn into_host(self, key: &Arc<str>) -> Box<NativeFn> {
                 VmFunction::<(WithCall<()>, $($a,)*)>::into_host(move |vm: &mut Vm, _: (), $($a: $a),*| self(vm, $($a),*), key)
             }
+            fn into_journaled(self, key: &Arc<str>) -> Box<JournaledFn> {
+                VmFunction::<(WithCall<()>, $($a,)*)>::into_journaled(move |vm: &mut Vm, _: (), $($a: $a),*| self(vm, $($a),*), key)
+            }
         }
 
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::unused_unit, clippy::too_many_arguments)]
@@ -616,6 +666,12 @@ macro_rules! fn_impls {
             }
             fn into_host(self, key: &Arc<str>) -> Box<NativeFn> {
                 VmFunction::<(WithCall<Call<'static>>, $($a,)*)>::into_host(
+                    move |vm: &mut Vm, call: Call<'_>, $($a: $a),*| self(vm, P::from_call(call), $($a),*),
+                    key,
+                )
+            }
+            fn into_journaled(self, key: &Arc<str>) -> Box<JournaledFn> {
+                VmFunction::<(WithCall<Call<'static>>, $($a,)*)>::into_journaled(
                     move |vm: &mut Vm, call: Call<'_>, $($a: $a),*| self(vm, P::from_call(call), $($a),*),
                     key,
                 )
@@ -644,6 +700,16 @@ macro_rules! fn_impls {
                     vm.arm_retry_stress(call);
                     let r = self(vm, call, $($a),*);
                     vm.unchecked(|vm| r.into_result(vm))
+                })
+            }
+            fn into_journaled(self, _: &Arc<str>) -> Box<JournaledFn> {
+                Box::new(move |vm: &mut Vm, call: Call<'_>, args: &[Value]| -> Result<Answer, Ctl> {
+                    let &[$($a),*] = strip_dict_args(args, $n) else { return Err(too_few_args()) };
+                    let mut conv = Conversion::new();
+                    $(let $a = $a::from_value(vm, $a, &mut conv)?;)*
+                    vm.arm_retry_stress(call);
+                    let r = self(vm, call, $($a),*);
+                    vm.unchecked(|vm| r.into_answer(vm))
                 })
             }
         }

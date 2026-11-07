@@ -111,15 +111,6 @@ pub(crate) enum Request {
     NeedPermission(Capability),
     /// Suspend the task until the future completes.
     Async(BoxFuture),
-    /// Suspend the task until the future of a journaled call completes. The
-    /// engine may suspend the run while it waits, as the [`Park`] says. The
-    /// tag goes to [`ParkedCall::tag`]. Only a journaled function can ask
-    /// for this ([`Parked`]), and the journal turns it into a [`Request::Wait`].
-    ///
-    /// [`Park`]: crate::native::func::Park
-    /// [`Parked`]: crate::native::func::Parked
-    /// [`ParkedCall::tag`]: crate::journal::ParkedCall::tag
-    Parked(BoxFuture, crate::native::func::Park, String),
     /// The task waits for the scheduler event that [`Vm::block`]
     /// registered with generation `wait`; the call returns what wakes it.
     /// When it wakes, the engine cancels the tasks of `race` (`task.race`).
@@ -259,7 +250,6 @@ impl std::fmt::Debug for Request {
         match self {
             Request::NeedPermission(c) => write!(f, "NeedPermission({c})"),
             Request::Async(..) => write!(f, "Async"),
-            Request::Parked(..) => write!(f, "Parked"),
             Request::Blocked { .. } => write!(f, "Blocked"),
             Request::Yield => write!(f, "Yield"),
             Request::Collect => write!(f, "Collect"),

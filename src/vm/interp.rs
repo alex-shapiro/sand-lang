@@ -1749,7 +1749,6 @@ impl Vm {
                 fiber.result_slot = slot;
                 Ok(Some(Exit::Wait(Box::new(super::journal::Wait::local(fut)))))
             }
-            Request::Parked(..) => unreachable!("only a journaled call parks, and the journal turns it into a wait"),
             Request::Wait(w) => {
                 fiber.result_slot = slot;
                 Ok(Some(Exit::Wait(w)))

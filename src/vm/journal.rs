@@ -16,7 +16,7 @@ use super::iomem::IoMemory;
 use super::value::{MapObj, Obj, SetObj, Value};
 use super::{BoxFuture, Ctl, CtlKind, End, Finisher, NResult, Request, Vm};
 use crate::journal::{CallResult, Durable, Entry, EntryData, EntryKind, Journal, OpDone, OpEnd, OpKind, OpStart, ParkedCall};
-use crate::native::func::{Call, Park};
+use crate::native::func::{Answer, Call, JournaledFn, Park};
 use crate::platform::{Instant, SystemTime};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -361,11 +361,11 @@ pub(crate) fn sleep(vm: &mut Vm, d: Duration) -> Ctl {
 /// `args` (SPEC §16.7). In replay, returns its recorded result without
 /// calling it. The future of an effectful function starts only once the
 /// journal, with the call's `Start` entry, is durable.
-pub(crate) fn journaled_call(vm: &mut Vm, call: Call, inner: &super::HostFn, name: &Arc<str>, effects: Effects, args: &[Value]) -> NResult {
+pub(crate) fn journaled_call(vm: &mut Vm, call: Call, inner: &JournaledFn, name: &Arc<str>, effects: Effects, args: &[Value]) -> NResult {
     // A journaled function reads no journal input (it has no `Call`), so
     // the entry that the call records or replays is the next one.
     let call = Call { seq: vm.journal_state().map(|j| j.position()), ..call };
-    let inner = |vm: &mut Vm| inner.call(vm, call, args);
+    let inner = |vm: &mut Vm| inner(vm, call, args);
     let spec = |pre_fuel: u64, parking: Parking| OpSpec { kind: OpKind::Call, effects, parking, pre_fuel, timer: None };
     let run = |live: Live, fin: BoxFuture| {
         let label = name.clone();
@@ -376,16 +376,16 @@ pub(crate) fn journaled_call(vm: &mut Vm, call: Call, inner: &super::HostFn, nam
             vm.meter.charge(r.pre_fuel)?;
             Err(r.wait(Box::new(payload_outcome)))
         }
-        StartEntry::Other { identity, .. } => vm.journaled_result(identity, name, inner),
+        StartEntry::Other { identity, .. } => vm.journaled_result(identity, name, |vm| inner(vm).and_then(Answer::into_result)),
         StartEntry::Rerun(rerun) => {
             // The journal records the start of the call, not its end: call
             // it again, and deliver even a result it returns at once as the
             // completion of the recorded operation.
             let start = vm.meter.used();
-            let r = inner(vm);
-            if is_retry(&r) {
-                return r;
-            }
+            let r = match inner(vm) {
+                Err(c) if is_retry(&c) => return Err(c),
+                r => r,
+            };
             let pre_fuel = vm.meter.used().saturating_sub(start);
             let (fin, parking) = match waiting(r, name) {
                 Ok(w) => w,
@@ -414,14 +414,15 @@ pub(crate) fn journaled_call(vm: &mut Vm, call: Call, inner: &super::HostFn, nam
     }
 }
 
-/// The future that the result `r` of a call of host function `name` asks
+/// The future that the answer `r` of a call of host function `name` asks
 /// the task to wait for, and how the call parks. Gives back any other
 /// result.
-fn waiting(r: NResult, name: &Arc<str>) -> Result<(BoxFuture, Parking), NResult> {
+fn waiting(r: Result<Answer, Ctl>, name: &Arc<str>) -> Result<(BoxFuture, Parking), NResult> {
     match r.map_err(Ctl::into_kind) {
+        Ok(Answer::Value(v)) => Err(Ok(v)),
+        Ok(Answer::Parked(fut, park, tag)) => Ok((fut, Parking::Host { park, function: name.clone(), tag })),
         Err(CtlKind::Request(Request::Async(fut))) => Ok((fut, Parking::Never)),
-        Err(CtlKind::Request(Request::Parked(fut, park, tag))) => Ok((fut, Parking::Host { park, function: name.clone(), tag })),
-        r => Err(r.map_err(Ctl::new)),
+        Err(kind) => Err(Err(Ctl::new(kind))),
     }
 }
 
@@ -1119,8 +1120,8 @@ fn payload_outcome(vm: &mut Vm, payload: &[u8]) -> NResult {
 
 /// Whether `r` asks for the call to run again after a collection: the
 /// journal records only the call that completes.
-fn is_retry(r: &NResult) -> bool {
-    matches!(r, Err(c) if matches!(c.kind(), CtlKind::Request(Request::Collect) | CtlKind::End(End::Limit(crate::engine::LimitKind::Memory))))
+fn is_retry(c: &Ctl) -> bool {
+    matches!(c.kind(), CtlKind::Request(Request::Collect) | CtlKind::End(End::Limit(crate::engine::LimitKind::Memory)))
 }
 
 impl Vm {
@@ -1346,7 +1347,7 @@ impl Vm {
     /// Records the result `r` of a synchronous call that started at fuel
     /// `start`, with the call's `identity` and `label`, and returns it.
     fn record_result(&mut self, name: &str, start: u64, r: NResult, identity: u64, label: String) -> NResult {
-        if is_retry(&r) {
+        if matches!(&r, Err(c) if is_retry(c)) {
             return r;
         }
         let fuel = self.meter.used().saturating_sub(start);
