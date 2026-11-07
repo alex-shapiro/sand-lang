@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex};
 use value::*;
 
 pub type NResult = Result<Value, Ctl>;
-pub type NativeFn = dyn Fn(&mut Vm, Call, &[Value]) -> NResult + Send + Sync;
+pub type NativeFn = dyn for<'c> Fn(&mut Vm, Call<'c>, &[Value]) -> NResult + Send + Sync;
 
 #[derive(Clone)]
 pub enum HostFn {

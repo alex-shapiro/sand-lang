@@ -1688,7 +1688,7 @@ impl Vm {
     ) -> Result<Option<Exit>, Trap> {
         let frame = fiber.frames.last_mut().unwrap();
         frame.ip = ip as u32;
-        let mut call = Call { site: (frame.proto, frame.ip), retry: false, seq: None };
+        let mut call = Call { site: (frame.proto, frame.ip), retry: false, seq: None, invocation: std::marker::PhantomData };
         let fuel_at_call = self.meter.fuel();
         let mut r = Self::invoke_native(self, natives, n, call, &fiber.stack[start..start + argc]);
         self.heap.fail_next_check.set(false);

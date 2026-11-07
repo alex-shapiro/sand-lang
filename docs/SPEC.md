@@ -2526,7 +2526,8 @@ types must implement `native::ty::JournalArg` and the return type must implement
 `native::ty::JournalData`. A journaled function does not read journal inputs,
 because replay does not call it: it cannot take a `Call` parameter, which
 `Vm::wall_time` and `Vm::monotonic` need, and it cannot get the run's random
-number generator. A clock reading that it makes through the host's clock is
+number generator. A `Call` borrows the native invocation that it comes from, so
+a host cannot keep one from a local call for a later journaled one. A clock reading that it makes through the host's clock is
 part of the result, which the journal records. A host function that is not journaled is
 local: replay calls it again, so it must give the same result in each
 execution and have no effects outside the run. `Later::parked(park, tag)` lets the engine

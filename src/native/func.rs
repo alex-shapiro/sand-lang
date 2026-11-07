@@ -129,8 +129,19 @@ pub trait AsyncHostFunction<Marker>: Send + Sync + 'static {
 /// [`VmFunction`] gets it when it takes a `Call` parameter after `&mut Vm`,
 /// and gives it to the [`Vm`] operations that need it, such as
 /// [`Vm::reserve_io`] and [`Vm::resource_slot`].
+///
+/// A `Call` lives only as long as the native invocation, so a function
+/// cannot keep one for a later call:
+///
+/// ```compile_fail,E0521
+/// # use sandlang::native::func::Call;
+/// # use sandlang::vm::Vm;
+/// static KEPT: std::sync::Mutex<Option<Call<'static>>> = std::sync::Mutex::new(None);
+/// let mut m = sandlang::native::NativeModule::new("m");
+/// m.vm_function("keep", |_: &mut Vm, call: Call| *KEPT.lock().unwrap() = Some(call));
+/// ```
 #[derive(Clone, Copy, Debug)]
-pub struct Call {
+pub struct Call<'a> {
     /// The function and instruction pointer of the script frame that calls
     /// the native.
     pub(crate) site: (u32, u32),
@@ -141,6 +152,7 @@ pub struct Call {
     /// The sequence number of the journal entry that records the call, for
     /// a journaled call in a journaled run (see [`JournaledCall::seq`]).
     pub(crate) seq: Option<u64>,
+    pub(crate) invocation: PhantomData<&'a mut ()>,
 }
 
 /// The [`Call`] of a function registered as [`Journaled`] or [`Effectful`].
@@ -155,7 +167,9 @@ pub struct Call {
 /// m.vm_function("next", |_: &mut Vm, call: JournaledCall| call.seq().unwrap_or(0) as i64);
 /// ```
 #[derive(Clone, Copy, Debug)]
-pub struct JournaledCall(Call);
+pub struct JournaledCall {
+    seq: Option<u64>,
+}
 
 impl JournaledCall {
     /// In a journaled run, the sequence number of the journal entry that
@@ -164,29 +178,31 @@ impl JournaledCall {
     /// the identity of the call's effect (SPEC §16.7). `None` in a run
     /// without a journal.
     pub fn seq(self) -> Option<u64> {
-        self.0.seq
+        self.seq
     }
 }
 
-/// The type of the call parameter of a [`VmFunction`].
-pub trait CallParam: Copy + sealed::Sealed {
-    #[doc(hidden)]
-    fn from_call(call: Call) -> Self;
+/// The type of the call parameter of a [`VmFunction`]: `()`, [`Call`], or
+/// [`JournaledCall`].
+pub trait CallParam: sealed::Sealed {}
+
+impl CallParam for () {}
+impl CallParam for Call<'static> {}
+impl CallParam for JournaledCall {}
+
+/// A call parameter that does not borrow the [`Call`] it comes from.
+#[doc(hidden)]
+pub trait OwnedCallParam: CallParam + Copy + 'static {
+    fn from_call(call: Call<'_>) -> Self;
 }
 
-impl CallParam for () {
-    fn from_call(_: Call) {}
+impl OwnedCallParam for () {
+    fn from_call(_: Call<'_>) {}
 }
 
-impl CallParam for Call {
-    fn from_call(call: Call) -> Call {
-        call
-    }
-}
-
-impl CallParam for JournaledCall {
-    fn from_call(call: Call) -> JournaledCall {
-        JournaledCall(call)
+impl OwnedCallParam for JournaledCall {
+    fn from_call(call: Call<'_>) -> JournaledCall {
+        JournaledCall { seq: call.seq }
     }
 }
 
@@ -196,7 +212,7 @@ impl CallParam for JournaledCall {
 pub trait LocalCallParam: CallParam {}
 
 impl LocalCallParam for () {}
-impl LocalCallParam for Call {}
+impl LocalCallParam for Call<'static> {}
 
 /// A call parameter that a function in [`Journaled`] or [`Effectful`] can
 /// take. A [`Call`] is not one: it lets a function read journal inputs.
@@ -382,7 +398,7 @@ journaled_impls!(Journaled: Effects::Pure; Effectful: Effects::External, Deferre
 fn journaled(inner: Box<NativeFn>, key: &Arc<str>, effects: Effects) -> Box<NativeFn> {
     let inner = HostFn::Shared(inner.into());
     let key = key.clone();
-    Box::new(move |vm: &mut Vm, call: Call, args: &[Value]| crate::vm::journal::journaled_call(vm, call, &inner, &key, effects, args))
+    Box::new(move |vm: &mut Vm, call: Call<'_>, args: &[Value]| crate::vm::journal::journaled_call(vm, call, &inner, &key, effects, args))
 }
 
 /// Deferred result returned by a [`VmFunction`] that may suspend the calling
@@ -421,7 +437,7 @@ mod sealed {
     impl Sealed for crate::vm::Ctl {}
     impl Sealed for super::HostError {}
     impl Sealed for () {}
-    impl Sealed for super::Call {}
+    impl Sealed for super::Call<'static> {}
     impl Sealed for super::JournaledCall {}
 }
 
@@ -552,7 +568,7 @@ macro_rules! fn_impls {
                 fn call<R, $($a,)*>(f: &impl Fn($($a),*) -> R, $($a: $a,)*) -> R {
                     f($($a),*)
                 }
-                Box::new(move |vm: &mut Vm, _: Call, args: &[Value]| -> NResult {
+                Box::new(move |vm: &mut Vm, _: Call<'_>, args: &[Value]| -> NResult {
                     let r = {
                         let &[$($a),*] = strip_dict_args(args, $n) else { return Err(too_few_args()) };
                         let mut conv = Conversion::new();
@@ -588,7 +604,7 @@ macro_rules! fn_impls {
         where
             F: Fn(&mut Vm, P, $($a),*) -> R + Send + Sync + 'static,
             R: VmReturn,
-            P: CallParam,
+            P: OwnedCallParam,
             $($a: for<'a> FromValue<Item<'a> = $a> + 'static,)*
         {
             type Args = ($($a,)*);
@@ -598,13 +614,35 @@ macro_rules! fn_impls {
             fn signature() -> Signature {
                 Signature { params: vec![$($a::sand_type()),*], ret: R::sand_type() }
             }
+            fn into_host(self, key: &Arc<str>) -> Box<NativeFn> {
+                VmFunction::<(WithCall<Call<'static>>, $($a,)*)>::into_host(
+                    move |vm: &mut Vm, call: Call<'_>, $($a: $a),*| self(vm, P::from_call(call), $($a),*),
+                    key,
+                )
+            }
+        }
+
+        #[allow(non_snake_case, unused_variables, unused_mut, clippy::unused_unit, clippy::too_many_arguments)]
+        impl<F, R, $($a,)*> VmFunction<(WithCall<Call<'static>>, $($a,)*)> for F
+        where
+            F: for<'c> Fn(&mut Vm, Call<'c>, $($a),*) -> R + Send + Sync + 'static,
+            R: VmReturn,
+            $($a: for<'a> FromValue<Item<'a> = $a> + 'static,)*
+        {
+            type Args = ($($a,)*);
+            type Ret = R;
+            type CallParam = Call<'static>;
+            type Parking = R::Parking;
+            fn signature() -> Signature {
+                Signature { params: vec![$($a::sand_type()),*], ret: R::sand_type() }
+            }
             fn into_host(self, _: &Arc<str>) -> Box<NativeFn> {
-                Box::new(move |vm: &mut Vm, call: Call, args: &[Value]| -> NResult {
+                Box::new(move |vm: &mut Vm, call: Call<'_>, args: &[Value]| -> NResult {
                     let &[$($a),*] = strip_dict_args(args, $n) else { return Err(too_few_args()) };
                     let mut conv = Conversion::new();
                     $(let $a = $a::from_value(vm, $a, &mut conv)?;)*
                     vm.arm_retry_stress(call);
-                    let r = self(vm, P::from_call(call), $($a),*);
+                    let r = self(vm, call, $($a),*);
                     vm.unchecked(|vm| r.into_result(vm))
                 })
             }
@@ -624,7 +662,7 @@ macro_rules! fn_impls {
                 Signature { params: vec![$($a::sand_type()),*], ret: R::sand_type() }
             }
             fn into_host(self, _: &Arc<str>) -> Box<NativeFn> {
-                Box::new(move |vm: &mut Vm, _: Call, args: &[Value]| -> NResult {
+                Box::new(move |vm: &mut Vm, _: Call<'_>, args: &[Value]| -> NResult {
                     let &[$($a),*] = strip_dict_args(args, $n) else { return Err(too_few_args()) };
                     let mut conv = Conversion::new();
                     $(let $a = $a::from_value(vm, $a, &mut conv)?;)*
