@@ -221,6 +221,12 @@ Visible defects that rarely block users.
 
 ### Embedding
 
+- [ ] ❓ Decide whether fixed stdin persists across the VMs of one engine, as a
+      feed does. Now `Engine::new_vm` makes a new channel for
+      `Config::stdin_bytes`, so fixed input starts again after
+      `Session::reset` and in each test of `run_tests`. One shared channel
+      would remove `StdinConfig`, but each test would no longer get the same
+      fixed input.
 - [ ] ❓ Advance the wall-time deadline through a single mechanism. During
       compilation, module discovery adds prompt wait time to a `prompted` total
       and checks `deadline + prompted`. During execution,
@@ -247,6 +253,11 @@ Visible defects that rarely block users.
 
 ### Tooling
 
+- [ ] ❓ Decide whether a script sees a process stdin error in `sand run` and
+      `sand test`. Now `forward_stdin` writes the error to stderr and ends the
+      feed, so the script cannot tell cut-off input from complete input. Adding
+      back `StdinFeed::fail(io::Error)` would make every later read fail with
+      the error, for about 25 lines with its CLI test.
 - [ ] ⚪ Fix broken intra-doc links to private items and run `cargo doc` with
       `-D warnings` in CI.
 - [ ] ⚪ Index opposing rules in the policy linter to avoid quadratic comparisons
