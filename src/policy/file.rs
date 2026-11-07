@@ -13,7 +13,9 @@
 
 use super::net::{HostKind, NetPattern, QUOTED_STAR_IN_HOST, UrlPattern, format_host_port, url_segments};
 use super::path::{Seg, Tok, unquoted_tokens};
-use super::rules::{Access, CustomMatch, HttpMethod, Methods, NameKind, NamePattern, Origin, PathPattern, Rule, RuleKind, Transports};
+use super::rules::{
+    Access, CustomMatch, HttpMethod, Methods, NameKind, NamePattern, Origin, PathPattern, Rule, RuleKind, Tier, Transports,
+};
 use super::{Capability, Decision, PatternError, RulePolicy};
 use crate::engine::Limits;
 use crate::vm::value::FxHashMap;
@@ -530,7 +532,7 @@ pub(crate) fn verb(decision: Decision) -> &'static str {
 }
 
 fn file_rule(decision: Decision, kind: RuleKind, origin: Origin) -> Rule {
-    Rule { decision, kind, origin: Some(origin), tier: 0 }
+    Rule { decision, kind, origin: Some(origin), tier: Tier::PRIMARY }
 }
 
 impl Context<'_> {

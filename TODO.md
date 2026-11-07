@@ -57,6 +57,11 @@ The host cannot rely on engine limits, stability, or control.
 - [ ] 🔴 [027](triage/027-netaddr-missing-request-context/summary.md) _Policy._ Include the originating HTTP method and URL on `Capability::NetAddr` so
       that `CustomPolicy` and `RulePolicy::check` evaluate resolved addresses
       with full request context.
+- [ ] ❓ _Policy._ Keep rule tiers in the `.policy` text from `RulePolicy`'s
+      `Display`. If the host parses this text again, every rule goes into the
+      primary tier: fallback rules from `with_defaults` lose their lower
+      precedence, and denials from `deny_private_net` lose their absolute
+      precedence.
 - [ ] 🔴 [040](triage/040-live-policy-needs-custom-policy/summary.md) _Policy._ Support shared, dynamically updatable `RulePolicy` instances and remove
       `CustomPolicy` after host applications migrate to rule policies.
 - [ ] 🔴 [015](triage/015-web-stop-busy-engine/summary.md) _Web._ Stopping a busy engine in the browser terminates its worker because

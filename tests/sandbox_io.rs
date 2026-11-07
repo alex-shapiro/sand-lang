@@ -537,6 +537,52 @@ print(net.connect("127.0.0.1", {port}).is_ok())
     assert_eq!(r.ok_stdout(), "Ok(\"hi\")\nOk(\"hi\")\nOk(\"hi\")\nOk(\"hi\")\ntrue\n");
 }
 
+/// The rules of `explicitly_allowed_hosts_reach_denied_ranges` reach no private address if
+/// the host also calls `deny_private_net`, even as a fallback.
+// Relies on the resolver accepting `127.1` for 127.0.0.1 (glibc, macOS).
+#[cfg(unix)]
+#[test]
+fn deny_private_net_blocks_explicitly_allowed_hosts() {
+    let server = http_server(|_| HttpResponse::new(200, "hi"));
+    let port = server.addr.port();
+    let src = format!(
+        r#"
+import http
+import net
+for host in ["127.0.0.1", "localhost", "app.localhost", "127.1"] {{
+    print(http.get("http://\(host):{port}/").unwrap_err().message)
+}}
+print(net.connect("127.0.0.1", {port}).unwrap_err().kind)
+"#
+    );
+    let allows = parse_rules(&format!("allow net tls plaintext *\nallow net plaintext 127.0.0.1:{port} localhost *.localhost"));
+    let policy = RulePolicy::standard().extend(allows).with_defaults(RulePolicy::new().deny_private_net());
+    let r = run_with(&src, |c| c.policy(policy));
+    assert_eq!(
+        r.ok_stdout(),
+        format!(
+            "permission denied: GET http://127.0.0.1:{port}/\n\
+             permission denied: GET http://localhost:{port}/\n\
+             permission denied: GET http://app.localhost:{port}/\n\
+             permission denied: connect to 127.1:{port}: address 127.0.0.1 is not allowed by the rule `deny net 127.0.0.0/8`\n\
+             permission_denied\n"
+        )
+    );
+    assert!(server.requests.lock().is_empty());
+}
+
+/// An ordinary address deny keeps its specificity comparison: an exact host name in a
+/// fallback tier outranks it in a resolved-address check.
+#[test]
+fn ordinary_address_denials_yield_to_exact_host_rules() {
+    let get = Capability::Http { method: "GET".into(), scheme: "https".into(), host: "db.example.com".into(), port: 443, path: "/".into() };
+    let private: SocketAddr = "10.0.0.1:443".parse().unwrap();
+    let p = parse_rules("deny net 10.0.0.0/8").with_defaults(parse_rules("allow http db.example.com"));
+    assert_eq!(p.check_resolved(&get, private), Decision::Allow);
+    let p = p.deny_private_net();
+    assert_eq!(p.check_resolved(&get, private), Decision::Deny);
+}
+
 // Relies on the resolver accepting `127.1` for 127.0.0.1 (glibc, macOS).
 #[cfg(unix)]
 #[test]
