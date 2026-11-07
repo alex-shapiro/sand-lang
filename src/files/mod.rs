@@ -1,5 +1,6 @@
 //! Sandboxed file systems for scripts. An engine uses the host file system
-//! if the `os` feature is enabled, or an in-memory [`MemFs`].
+//! or an in-memory [`MemFs`]. Without the `os` feature, it always uses a
+//! `MemFs`.
 
 #[cfg(feature = "os")]
 mod host;

@@ -58,9 +58,9 @@ use std::task::Poll;
 ///   calls to [`Session::run_tasks_until`].
 /// * The instruction, CPU time, wall time, and output limits apply to each
 ///   input separately. The memory limit applies to the shared session heap.
-/// * An internal error or caught Rust panic leaves the VM in an inconsistent
-///   state. The session resets itself and sets [`Session::was_reset`] to
-///   `true`. The call returns [`Error::Internal`] with [`RESET_NOTE`] appended
+/// * An internal error or caught Rust panic can leave the VM in an
+///   inconsistent state. The session resets itself, and [`Session::was_reset`]
+///   returns `true`. The call returns [`Error::Internal`] with [`RESET_NOTE`] appended
 ///   to the message.
 pub struct Session {
     /// Shares the configuration, natives and "always" answers of the engine
@@ -278,7 +278,7 @@ impl Session {
     /// input so background tasks continue to run between inputs.
     ///
     /// The instruction, CPU time, and output limits apply to this call just
-    /// like an input. The wall-time limit is disabled while waiting for input.
+    /// like an input. The wall-time limit does not apply to this call.
     /// Permission prompts wait until `until` completes so they do not compete
     /// with the front end for terminal input. While a task waits for a
     /// permission prompt, all script execution pauses. Forward process standard

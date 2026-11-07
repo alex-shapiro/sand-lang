@@ -69,8 +69,8 @@ Source commits: `464b03a`, `c5ca2d7`, `b111b33`, `335ae8b`, `89186fa`, `265e762`
 ### 3. Rule and limit positions in policy
 
 `PolicyFile::rule_sources` records the source span of each rule.
-`PolicyFile::limits` and `apply_limits` store only the limits specified in the
-policy file.
+`PolicyFile::limits` holds limits specified in the policy file.
+`apply_limits` applies them to the limits of the caller.
 
 Source commit: `d4a2e5c`. Skip `HostPattern` from `d859942`, because `d4a2e5c`
 removes it.
@@ -131,8 +131,8 @@ Pass state between the VM and native functions through explicit parameters and
 return types instead of `Vm` fields. This updates the native module API in four
 steps:
 
-- **9a. Control-flow types.** Replace `Ctl` with explicit control-flow, exit,
-  and host-error types. This also fixes a bug where a test failed if a finisher
+- **9a. Control-flow types.** Split `Fail` and engine-only requests out of
+  `Ctl`, and add typed exits and `HostError<C>`. This also fixes a bug where a test failed if a finisher
   called `exit(0)`. Source commits: `fc27559`, `fb9367e`, `5bdac47`, `61bfe31`,
   `d84df4d`, `c690c03`, `906ac91`, `4792919`.
 - **9b. Native call context.** Pass `Call<'a>` to native functions. Source
@@ -189,8 +189,8 @@ Implement the execution journal as a single changeset across these areas:
 ### 13. Unified scheduler path
 
 Route timers, journaled host calls, standard input, and HTTP through a single
-scheduler path in all runs. `http.send` uses a single implementation across
-targets. The web HTTP client also runs the request filter.
+scheduler path in all runs. `http.send` uses a single implementation in runs
+with and without a journal. The web HTTP client also runs the request filter.
 
 Source commits: `d4a4ac0`, `16da2fb`, `12895c8`, `483ac31`, `e541a7a`,
 `3bf577b`.
@@ -199,8 +199,8 @@ Source commits: `d4a4ac0`, `16da2fb`, `12895c8`, `483ac31`, `e541a7a`,
 
 - Formatting, lint, and build fixes: `52a3fff`, `d39a7ff`, `61e9587`, `f5ef1da`,
   `90282ca`, `87342a7`. Fold each fix into the changeset that needs it.
-- Triage entries from Sahara: `bdad37d`. Include the two journal triage entries
-  in changeset 12.
+- TODO entries from Sahara: `bdad37d`. Include the two journal TODO entries in
+  changeset 12.
 
 ## Merge conflicts with `main`
 
