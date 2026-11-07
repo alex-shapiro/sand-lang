@@ -302,7 +302,7 @@ A generic Rust function accepts values of its `N`-th type parameter as `Param<N,
 ```rust
 # #[tokio::main(flavor = "current_thread")]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-# use sandlang::engine::{Config, Limits};
+# use sandlang::engine::Config;
 # use sandlang::session::Session;
 # let config = Config::new();
 let mut session = Session::new(config)?;
