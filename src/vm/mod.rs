@@ -1275,7 +1275,7 @@ impl Vm {
                 }
                 let stack = nregs.max(INITIAL_STACK_SLOTS);
                 if self.heap.would_exceed(stack * std::mem::size_of::<Value>()) {
-                    return Err(Ctl::limit(crate::engine::LimitKind::Memory));
+                    return Err(Ctl::limit(LimitKind::Memory));
                 }
                 let mut frames = Vec::with_capacity(8);
                 frames.push(frame);
