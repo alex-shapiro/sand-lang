@@ -4,7 +4,7 @@ use crate::check::ModKind;
 use crate::native::convert::{HostError, IntoValue};
 use crate::native::ty::Val;
 use crate::native::{Binding, NamedType, NativeModule, NativeObject};
-use crate::platform::{Instant, UNIX_EPOCH};
+use crate::platform::{Instant as Monotonic, UNIX_EPOCH};
 use crate::policy::Capability;
 use crate::vm::value::{Packing, ValueType};
 use crate::vm::{Ctl, Vm};
@@ -785,7 +785,7 @@ fn require_relative_to(spans: &[jiff::Span], largest: Option<Unit>, rel: &Option
 /// A monotonic timer for measuring elapsed time.
 #[derive(crate::SandObject)]
 #[sand(module = "time")]
-struct Stopwatch(Instant);
+struct Stopwatch(Monotonic);
 
 impl NativeObject for Stopwatch {}
 
