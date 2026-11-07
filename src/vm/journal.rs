@@ -147,9 +147,11 @@ pub(crate) enum StartEntry {
     /// The journal records only the operation's start: the operation runs
     /// again.
     Rerun(Rerun),
-    /// The journal does not hold the operation: it runs, and a journaled
-    /// run records its start.
+    /// The journal does not hold the operation: it runs, and the journal
+    /// records its start.
     Fresh(Fresh),
+    /// The run has no journal: the operation runs.
+    Unjournaled,
     /// Replay holds `next`, an entry other than a start, at `seq`.
     /// `identity` and `label` describe the operation.
     Other { identity: u64, label: String, seq: u64, next: String },
@@ -175,15 +177,17 @@ impl Rerun {
     }
 }
 
-/// A new operation, with its identity and label in a journaled run.
-pub(crate) struct Fresh(Option<(u64, String)>);
+/// A new operation of a journaled run, with its identity and label.
+pub(crate) struct Fresh {
+    identity: u64,
+    label: String,
+}
 
 impl Fresh {
-    /// Records the operation's start in a journaled run: the operation runs.
+    /// Records the operation's start: the operation runs.
     pub fn start(self, vm: &Vm, spec: OpSpec) -> Live {
-        let (Some((identity, label)), Some(mut j)) = (self.0, vm.journal_state()) else {
-            return Live { op: None, seq: None, wake: None, park: spec.park, host_wait: spec.host_wait, effectful: spec.effectful };
-        };
+        let Fresh { identity, label } = self;
+        let mut j = vm.journal_state().expect("only a journaled run has a fresh operation");
         let (op, seq) = (j.ops, j.position());
         let wake = spec.timer.map(|d| j.wall(&*vm.host.clock) + d);
         j.record(EntryData::Start(OpStart { kind: spec.kind, identity, pre_fuel: spec.pre_fuel, wake, label }));
@@ -233,6 +237,11 @@ pub(crate) struct Live {
 }
 
 impl Live {
+    /// An operation of a run without a journal.
+    fn unjournaled(spec: OpSpec) -> Live {
+        Live { op: None, seq: None, wake: None, park: spec.park, host_wait: spec.host_wait, effectful: spec.effectful }
+    }
+
     /// The wait for `fut`. Without a journal, the program gets the outcome
     /// as it arrives. With one, the engine waits for the whole outcome,
     /// records it, and gives the program what `build` makes of it, as
@@ -381,9 +390,13 @@ pub(crate) fn journaled_call(vm: &mut Vm, call: Call, inner: &super::HostFn, nam
                     let pre_fuel = vm.meter.used().saturating_sub(start);
                     Err(run(fresh.start(vm, spec(pre_fuel, parking)), fut))
                 }
-                Err(r) => vm.record_result(name, start, r, fresh.0),
+                Err(r) => vm.record_result(name, start, r, fresh.identity, fresh.label),
             }
         }
+        StartEntry::Unjournaled => match waiting(inner(vm), name) {
+            Ok((fut, parking)) => Err(run(Live::unjournaled(spec(0, parking)), fut)),
+            Err(r) => r,
+        },
     }
 }
 
@@ -1310,7 +1323,7 @@ impl Vm {
         }
         let start = self.meter.used();
         let r = f(self);
-        self.record_result(label, start, r, Some((identity, label.to_string())))
+        self.record_result(label, start, r, identity, label.to_string())
     }
 
     /// Consumes the recorded result of a synchronous call in replay.
@@ -1335,10 +1348,8 @@ impl Vm {
     }
 
     /// Records the result `r` of a synchronous call that started at fuel
-    /// `start`, with the call's identity and label in a journaled run, and
-    /// returns it. Without them, returns `r`.
-    fn record_result(&mut self, name: &str, start: u64, r: NResult, described: Option<(u64, String)>) -> NResult {
-        let Some((identity, label)) = described else { return r };
+    /// `start`, with the call's `identity` and `label`, and returns it.
+    fn record_result(&mut self, name: &str, start: u64, r: NResult, identity: u64, label: String) -> NResult {
         if is_retry(&r) {
             return r;
         }
@@ -1401,11 +1412,11 @@ impl Vm {
     /// reads. Consumes the operation's `Start` entry if the journal also
     /// records its end; otherwise consumes nothing.
     pub(crate) fn take_start(&self, kind: OpKind, describe: impl FnOnce(&Vm) -> Result<(u64, String), Ctl>) -> Result<StartEntry, Ctl> {
-        let Some(journal) = &self.journal else { return Ok(StartEntry::Fresh(Fresh(None))) };
+        let Some(journal) = &self.journal else { return Ok(StartEntry::Unjournaled) };
         let (identity, label) = describe(self)?;
         let mut j = journal.borrow_mut();
         let s = match j.peek() {
-            None => return Ok(StartEntry::Fresh(Fresh(Some((identity, label))))),
+            None => return Ok(StartEntry::Fresh(Fresh { identity, label })),
             Some(EntryData::Start(s)) => s,
             Some(e) => return Ok(StartEntry::Other { identity, label, seq: j.pos as u64, next: e.describe() }),
         };
@@ -1437,6 +1448,7 @@ impl Vm {
             StartEntry::Replayed(r) => Ok(Begun::Replayed(r)),
             StartEntry::Rerun(r) => Ok(Begun::Live(r.start(self, spec))),
             StartEntry::Fresh(f) => Ok(Begun::Live(f.start(self, spec))),
+            StartEntry::Unjournaled => Ok(Begun::Live(Live::unjournaled(spec))),
             StartEntry::Other { label, seq, next, .. } => {
                 let message = format!("the run reads the start of {} `{label}` where the journal records {next}", spec.kind.name());
                 Err(Ctl::from(Divergence { seq, message }))
