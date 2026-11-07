@@ -64,17 +64,25 @@ pub struct NativeEntry {
 ///
 /// A host makes a `Ctl` only with the public constructors, such as
 /// [`Ctl::fail`] and [`Ctl::abort`]. Thus only the engine parks a call,
-/// suspends a run, or reports a divergence from the journal. This does not
-/// compile:
+/// suspends a run, or reports a divergence from the journal. The kinds of
+/// a `Ctl` are private to the crate:
 ///
-/// ```compile_fail
-/// let _: sandlang::vm::Ctl = sandlang::vm::CtlKind::Yield.into();
+/// ```compile_fail,E0603
+/// let _ = sandlang::vm::CtlKind::Request;
 /// ```
 ///
-/// Nor does this:
+/// So is the constructor of a request:
 ///
-/// ```compile_fail
-/// let _ = sandlang::vm::Ctl::from(sandlang::vm::journal::Divergence { seq: 0, message: String::new() });
+/// ```compile_fail,E0624
+/// let _ = sandlang::vm::Ctl::request(todo!());
+/// ```
+///
+/// And the constructor of a divergence:
+///
+/// ```compile_fail,E0624
+/// # fn f(d: sandlang::vm::journal::Divergence) {
+/// let _ = sandlang::vm::Ctl::diverged(d);
+/// # }
 /// ```
 pub struct Ctl(Box<CtlKind>);
 
@@ -191,6 +199,11 @@ impl Ctl {
         Ctl::new(CtlKind::Request(request))
     }
 
+    /// The run does something other than what its journal records.
+    pub(crate) fn diverged(d: Divergence) -> Ctl {
+        Ctl::end(End::Diverged(d))
+    }
+
     pub(crate) fn kind(&self) -> &CtlKind {
         &self.0
     }
@@ -208,13 +221,6 @@ impl Ctl {
     }
 }
 
-/// `Divergence` is private to the crate, so only the engine can make a
-/// [`Ctl`] that reports a divergence.
-impl From<Divergence> for Ctl {
-    fn from(d: Divergence) -> Ctl {
-        Ctl::end(End::Diverged(d))
-    }
-}
 
 impl std::fmt::Debug for Ctl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1499,7 +1505,7 @@ impl Vm {
             t.state = TaskState::Cancelled;
             return Err(Ctl::request(Request::Cancelled));
         }
-        Ok(self.cancel_waiting_task(task)?)
+        self.cancel_waiting_task(task).map_err(Ctl::diverged)
     }
 
     /// Cancels `task` (no-op if it has finished), which is not the running

@@ -26,7 +26,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// How a journaled run does something other than what its journal
-/// records: at entry `seq`, as `message` says.
+/// records: at entry `seq`, as `message` says. Its fields are private to
+/// the crate.
 #[derive(Debug, Clone)]
 pub struct Divergence {
     pub(crate) seq: u64,
@@ -1176,7 +1177,7 @@ impl Vm {
     pub fn wall_time(&self, _: Call) -> Result<SystemTime, Ctl> {
         let Some(j) = &self.journal else { return Ok(self.host.clock.wall()) };
         let mut j = j.borrow_mut();
-        if let Some(EntryData::Wall(t)) = j.take(EntryKind::Wall, &|| "the wall clock".into())? {
+        if let Some(EntryData::Wall(t)) = j.take(EntryKind::Wall, &|| "the wall clock".into()).map_err(Ctl::diverged)? {
             j.saw_wall(t);
             return Ok(t);
         }
@@ -1192,7 +1193,7 @@ impl Vm {
     pub fn monotonic(&self, _: Call) -> Result<Instant, Ctl> {
         let Some(j) = &self.journal else { return Ok(self.host.clock.now()) };
         let mut j = j.borrow_mut();
-        if let Some(EntryData::Monotonic(d)) = j.take(EntryKind::Monotonic, &|| "the monotonic clock".into())? {
+        if let Some(EntryData::Monotonic(d)) = j.take(EntryKind::Monotonic, &|| "the monotonic clock".into()).map_err(Ctl::diverged)? {
             j.mono_last = j.mono_last.max(d);
             return Ok(j.origin + d);
         }
@@ -1216,7 +1217,7 @@ impl Vm {
                 return Ok(0);
             }
             if rec_at < at {
-                return Err(Ctl::from(j.diverged(format!("the journal records a fuel charge at {rec_at} units, and the run is at {at}"))));
+                return Err(Ctl::diverged(j.diverged(format!("the journal records a fuel charge at {rec_at} units, and the run is at {at}"))));
             }
             j.pos += 1;
             return Ok(extra);
@@ -1328,7 +1329,7 @@ impl Vm {
         let Some(j) = &self.journal else { return Ok(None) };
         let mut j = j.borrow_mut();
         let seq = j.pos as u64;
-        let replayed = j.take(EntryKind::Result, &|| format!("the result of `{label}`"))?;
+        let replayed = j.take(EntryKind::Result, &|| format!("the result of `{label}`")).map_err(Ctl::diverged)?;
         drop(j);
         let Some(EntryData::Result(CallResult { identity: id, label: rec_label, fuel, outcome })) = replayed else { return Ok(None) };
         if id != identity {
@@ -1337,7 +1338,7 @@ impl Vm {
             } else {
                 format!("the run calls `{label}` where the journal records a call of `{rec_label}`")
             };
-            return Err(Ctl::from(Divergence { seq, message: msg }));
+            return Err(Ctl::diverged(Divergence { seq, message: msg }));
         }
         let v = payload_outcome(self, &outcome);
         self.charge(fuel)?;
@@ -1424,7 +1425,7 @@ impl Vm {
             } else {
                 format!("the run starts {} `{label}` where the journal records the start of {} `{}`", kind.name(), s.kind.name(), s.label)
             };
-            return Err(Ctl::from(Divergence { seq, message }));
+            return Err(Ctl::diverged(Divergence { seq, message }));
         }
         let (pre_fuel, wake) = (s.pre_fuel, s.wake);
         if !j.done.contains_key(&op) {
@@ -1448,7 +1449,7 @@ impl Vm {
             StartEntry::Unjournaled => Ok(Begun::Live(Live::unjournaled(spec))),
             StartEntry::Other { label, seq, next, .. } => {
                 let message = format!("the run reads the start of {} `{label}` where the journal records {next}", spec.kind.name());
-                Err(Ctl::from(Divergence { seq, message }))
+                Err(Ctl::diverged(Divergence { seq, message }))
             }
         }
     }
@@ -1465,12 +1466,12 @@ impl Vm {
         let id = j.ops;
         let seq = j.pos as u64;
         let what = || format!("the start of {}", OpKind::Local.name());
-        let replayed = match j.take(EntryKind::Start, &what)? {
+        let replayed = match j.take(EntryKind::Start, &what).map_err(Ctl::diverged)? {
             Some(EntryData::Start(s)) if s.kind == OpKind::Local => true,
             Some(EntryData::Start(s)) => {
                 let message =
                     format!("the run waits for a local operation where the journal records the start of {} `{}`", s.kind.name(), s.label);
-                return Err(Ctl::from(Divergence { seq, message }));
+                return Err(Ctl::diverged(Divergence { seq, message }));
             }
             _ => {
                 let start = OpStart { kind: OpKind::Local, identity: 0, pre_fuel: 0, wake: None, label: "wait".to_string() };
@@ -1544,12 +1545,12 @@ impl Vm {
         }
         if step < j.steps {
             let msg = format!("the journal records the completion of operation {op} after step {step}, and the run is at step {}", j.steps);
-            return Err(Ctl::from(j.diverged(msg)));
+            return Err(Ctl::diverged(j.diverged(msg)));
         }
         match j.replayed.remove(&op) {
             None => {
                 let msg = format!("the journal records the completion of operation {op}, which the run has not started");
-                Err(Ctl::from(j.diverged(msg)))
+                Err(Ctl::diverged(j.diverged(msg)))
             }
             Some((fid, wgen, Replaying::Local(None))) => {
                 j.replayed.insert(op, (fid, wgen, Replaying::Local(None)));
