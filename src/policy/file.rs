@@ -526,7 +526,7 @@ impl Context<'_> {
                             Some((first, rest)) => Methods::only(first.clone(), rest.iter().cloned()),
                             None => Methods::all(),
                         };
-                        RuleKind::Http(methods, UrlPattern::parse(&word.tokens()).map_err(|m| (item.column, m))?, transports)
+                        RuleKind::Http(methods, UrlPattern::from_tokens(&word.tokens()).map_err(|m| (item.column, m))?, transports)
                     }
                     "listen" if word.tokens().iter().any(|&(c, wild)| c == '*' && !wild) => {
                         return Err((item.column, QUOTED_STAR_IN_HOST.into()));
@@ -667,7 +667,7 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
         Capability::Import(p) => format!("import {}", path(p)?),
         Capability::Net { host, port, tls } => {
             let pattern = format_host_port(host, *port);
-            NetPattern::parse(&pattern).ok()?;
+            NetPattern::parse_host_port(&pattern).ok()?;
             format!("net {}{pattern}", transport_words(if *tls { Transports::Tls } else { Transports::Plaintext }, decision))
         }
         Capability::Http { method, scheme, host, port, path } => {
@@ -687,7 +687,7 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
                 url.push('/');
                 url.push_str(&crate::stdlib::uri::encode(name, b"!$&'()+;=:@-._~"));
             }
-            UrlPattern::parse(&url.chars().map(|c| (c, false)).collect::<Vec<_>>()).ok()?;
+            UrlPattern::from_tokens(&url.chars().map(|c| (c, false)).collect::<Vec<_>>()).ok()?;
             format!("http {transport_word}{method} {url}")
         }
         Capability::NetListen(addr) => format!("listen {}", quote_part(&addr.to_string(), true)),
