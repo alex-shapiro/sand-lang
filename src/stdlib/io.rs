@@ -4,9 +4,10 @@ use super::stream::{self, IoFailure, Suspended, bytes_read, line_read, read_line
 use crate::check::ModKind;
 use crate::native::{HostError, IntoValue, Later, NativeModule, NativeObject, ObjectType, Val};
 use crate::policy::Capability;
+use crate::stdin_feed::StdinChannel;
 use crate::vm::iomem::Reservation;
-use crate::vm::value::{Obj, Value, to_usize_saturating, u64_to_usize_saturating};
-use crate::vm::{Ctl, Vm, VmStdin};
+use crate::vm::value::{Obj, Value, to_usize_saturating};
+use crate::vm::{Ctl, Vm, WaitKind};
 use std::collections::BTreeMap;
 use tokio::io::AsyncBufRead;
 
@@ -117,10 +118,12 @@ fn read_stdin<R: IntoValue + Send + 'static>(
         _ => vm.io_reservation(),
     };
     let read = async move {
-        let data = read_input(&stdin, what, &mut res).await.map_err(|e| IoFailure::new(e.kind, format!("stdin: {}", e.message)))?;
+        let data =
+            read_input(stdin.as_deref(), what, &mut res).await.map_err(|e| IoFailure::new(e.kind, format!("stdin: {}", e.message)))?;
         Ok((data, res))
     };
-    stream::suspend(vm.host.stdin.wait_kind(), read, move |vm, (data, res)| {
+    let wait_kind = vm.host.stdin.as_ref().map_or(WaitKind::Io, |channel| channel.wait_kind);
+    stream::suspend(wait_kind, read, move |vm, (data, res)| {
         drop(res);
         done(vm, data)
     })
@@ -137,24 +140,11 @@ const STDIN_CHUNK: usize = 64 << 10;
 /// the end), if it is in a buffer already; `None`, consuming nothing, if the
 /// read must wait, another is under way, or the line does not fit in memory.
 fn buffered_line(vm: &Vm) -> Option<Option<Vec<u8>>> {
-    match &vm.host.stdin {
-        VmStdin::None => None,
-        VmStdin::Bytes(c) => {
-            let mut cursor = c.try_lock().ok()?;
-            let c = &mut *cursor;
-            let at = u64_to_usize_saturating(c.position()).min(c.get_ref().len());
-            let (len, line) = first_line(vm, &c.get_ref()[at..], true)?;
-            c.set_position(c.position() + len as u64);
-            Some(line)
-        }
-        VmStdin::Host(channel) => {
-            let mut read = channel.try_begin_read()?;
-            let (buf, at_end) = read.available();
-            let (len, line) = first_line(vm, buf, at_end)?;
-            std::pin::Pin::new(&mut read).consume(len);
-            Some(line)
-        }
-    }
+    let mut read = vm.host.stdin.as_ref()?.try_begin_read()?;
+    let (buf, at_end) = read.available();
+    let (len, line) = first_line(vm, buf, at_end)?;
+    std::pin::Pin::new(&mut read).consume(len);
+    Some(line)
 }
 
 /// The first line of `buf`: its length with its terminator, and its text
@@ -180,12 +170,9 @@ fn first_line(vm: &Vm, buf: &[u8], at_end: bool) -> Option<(usize, Option<Vec<u8
 
 /// Reads `what` from standard input: `None` only for a line at the end of
 /// the input.
-async fn read_input(stdin: &VmStdin, what: Read, res: &mut Reservation) -> Result<Option<Vec<u8>>, IoFailure> {
-    match stdin {
-        VmStdin::None => Err(IoFailure::new("io", "the engine has no standard input")),
-        VmStdin::Bytes(c) => read_from(&mut *c.lock().await, what, res).await,
-        VmStdin::Host(channel) => read_from(&mut channel.begin_read().await, what, res).await,
-    }
+async fn read_input(stdin: Option<&StdinChannel>, what: Read, res: &mut Reservation) -> Result<Option<Vec<u8>>, IoFailure> {
+    let stdin = stdin.ok_or_else(|| IoFailure::new("io", "the engine has no standard input"))?;
+    read_from(&mut stdin.begin_read().await, what, res).await
 }
 
 async fn read_from<R: AsyncBufRead + Unpin>(r: &mut R, what: Read, res: &mut Reservation) -> Result<Option<Vec<u8>>, IoFailure> {

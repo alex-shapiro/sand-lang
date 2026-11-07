@@ -14,7 +14,7 @@ use crate::types::{FnId, ModId};
 use crate::vm::bytecode::Program;
 use crate::vm::heap::GcStats;
 use crate::vm::sched::{IoShared, IoTable, RunEnd};
-use crate::vm::{Always, Host, HostFn, NativeEntry, OutputSink, Rng, SharedSink, TraceEntry, Trap, Vm, VmStdin, entropy_seed};
+use crate::vm::{Always, Host, HostFn, NativeEntry, OutputSink, Rng, SharedSink, TraceEntry, Trap, Vm, entropy_seed};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -1039,9 +1039,9 @@ impl Engine {
     pub(crate) fn new_vm(&self, prog: Arc<Program>, cwd: PathBuf, quiet: bool) -> Vm {
         let c = &self.config;
         let stdin = match &c.stdin {
-            StdinConfig::None => VmStdin::None,
-            StdinConfig::Bytes(b) => VmStdin::Bytes(Arc::new(tokio::sync::Mutex::new(std::io::Cursor::new(b.clone())))),
-            StdinConfig::Host(channel) => VmStdin::Host(channel.clone()),
+            StdinConfig::None => None,
+            StdinConfig::Bytes(b) => Some(crate::stdin_feed::StdinChannel::with_input(b.clone())),
+            StdinConfig::Host(channel) => Some(channel.clone()),
         };
         let (stdout, stderr): (SharedSink, SharedSink) =
             if quiet { (Arc::new(NullSink), Arc::new(NullSink)) } else { (c.stdout.clone(), c.stderr.clone()) };

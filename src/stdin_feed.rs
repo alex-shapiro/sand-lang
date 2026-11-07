@@ -29,7 +29,8 @@ pub struct StdinRequest {
     wait: u64,
 }
 
-/// State shared between the host's [`StdinFeed`] handles and the engine.
+/// The standard input of an engine: a stream that the host sends through a
+/// [`StdinFeed`], or fixed input.
 pub(crate) struct StdinChannel {
     state: Mutex<StdinChannelState>,
     changed: Notify,
@@ -59,7 +60,7 @@ struct StdinChannelState {
 impl StdinFeed {
     /// Creates a feed and the channel that the engine reads it through.
     pub(crate) fn new(wait_kind: WaitKind) -> (StdinFeed, Arc<StdinChannel>) {
-        let channel = Arc::new(StdinChannel { state: Mutex::default(), changed: Notify::new(), read_lock: Default::default(), wait_kind });
+        let channel = StdinChannel::new(wait_kind, StdinChannelState::default());
         (StdinFeed { channel: channel.clone() }, channel)
     }
 
@@ -138,6 +139,15 @@ impl StdinRequest {
 }
 
 impl StdinChannel {
+    fn new(wait_kind: WaitKind, state: StdinChannelState) -> Arc<StdinChannel> {
+        Arc::new(StdinChannel { state: Mutex::new(state), changed: Notify::new(), read_lock: Default::default(), wait_kind })
+    }
+
+    /// Creates a channel whose stream holds `input` and has ended.
+    pub(crate) fn with_input(input: Vec<u8>) -> Arc<StdinChannel> {
+        StdinChannel::new(WaitKind::Io, StdinChannelState { sent: VecDeque::from([(input, 0)]), stream_ended: true, ..Default::default() })
+    }
+
     fn lock(&self) -> MutexGuard<'_, StdinChannelState> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }

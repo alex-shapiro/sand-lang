@@ -333,33 +333,6 @@ impl Trap {
     }
 }
 
-/// Standard input for a VM. Clones share the input.
-#[derive(Clone)]
-pub(crate) enum VmStdin {
-    None,
-    Bytes(Arc<tokio::sync::Mutex<std::io::Cursor<Vec<u8>>>>),
-    /// Host-supplied input ([`crate::StdinFeed`]).
-    Host(Arc<crate::stdin_feed::StdinChannel>),
-}
-
-impl VmStdin {
-    /// Returns the [`WaitKind`] for reads from this input.
-    pub(crate) fn wait_kind(&self) -> WaitKind {
-        match self {
-            VmStdin::None | VmStdin::Bytes(_) => WaitKind::Io,
-            VmStdin::Host(channel) => channel.wait_kind,
-        }
-    }
-
-    /// Marks the engine as idle for a host feed until the guard is dropped.
-    pub(crate) fn idle(&self) -> Option<crate::stdin_feed::StdinIdleGuard> {
-        match self {
-            VmStdin::None | VmStdin::Bytes(_) => None,
-            VmStdin::Host(channel) => Some(crate::stdin_feed::StdinIdleGuard::new(channel.clone())),
-        }
-    }
-}
-
 /// Output sink for standard streams and logs. `write` must not block for
 /// long, because an engine cannot interrupt it. A sink whose destination
 /// can block should buffer the data and report the size of the buffer as
@@ -506,7 +479,8 @@ pub struct Host {
     pub always: Always,
     pub stdout: SharedSink,
     pub stderr: SharedSink,
-    pub(crate) stdin: VmStdin,
+    /// `None` if the engine has no standard input.
+    pub(crate) stdin: Option<Arc<crate::stdin_feed::StdinChannel>>,
     pub output_bytes: u64,
     pub limits: Limits,
     pub cwd: PathBuf,

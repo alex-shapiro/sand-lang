@@ -531,7 +531,7 @@ impl Vm {
                 return Ok(Stop::Idle);
             }
             timer.read();
-            let idle = self.host.stdin.idle();
+            let idle = self.host.stdin.clone().map(crate::stdin_feed::StdinIdleGuard::new);
             let pause_start = self.io.awaits_user().then_some(timer.now);
             let mut sleep = self.deadline.filter(|_| pause_start.is_none()).map(|d| timer.sleep(d.saturating_duration_since(timer.now())));
             let interrupt = self.host.interrupt.clone();
