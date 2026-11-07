@@ -4,11 +4,12 @@
 
 mod common;
 
-use common::{TempDir, rt, run_with};
+use common::{TempDir, literal_path, rt, run_with};
 use jiff::civil::Date;
 use parking_lot::Mutex;
 use sandlang::engine::{Config, Engine, Error, LimitKind, Limits, MemorySink};
 use sandlang::native::NativeModule;
+use sandlang::policy::rules::PathPattern;
 use sandlang::policy::{Capability, Decision, PromptAnswer};
 use sandlang::session::Session;
 use sandlang::stdlib::log::{LogLevel, LogRecord, LogSink};
@@ -2214,8 +2215,9 @@ fn rule_policy_confines_paths() {
     #[cfg(unix)]
     std::os::unix::fs::symlink(dir.path().join("private/b.txt"), dir.path().join("public/link.txt")).unwrap();
 
-    let policy =
-        sandlang::policy::rules::RulePolicy::standard().allow_read(dir.path().join("public")).allow_write(dir.path().join("public/sub"));
+    let policy = sandlang::policy::rules::RulePolicy::standard()
+        .allow_read(literal_path(dir.path().join("public")))
+        .allow_write(literal_path(dir.path().join("public/sub")));
     let config = Config::new().policy(policy).cwd(dir.path());
     let src = r#"
 import fs
@@ -2246,8 +2248,9 @@ fn rule_policy_deny_overrides_allow() {
     let dir = TempDir::new("denyover");
     dir.write("data/ok.txt", "ok");
     dir.write("data/secret/key.txt", "key");
-    let policy =
-        sandlang::policy::rules::RulePolicy::standard().allow_read(dir.path().join("data")).deny_read(dir.path().join("data/secret"));
+    let policy = sandlang::policy::rules::RulePolicy::standard()
+        .allow_read(literal_path(dir.path().join("data")))
+        .deny_read(literal_path(dir.path().join("data/secret")));
     let config = Config::new().policy(policy).cwd(dir.path());
     let (r, out, _) =
         run_src(config, "import fs\nprint(fs.read_text(\"data/ok.txt\").is_ok())\nprint(fs.read_text(\"data/secret/key.txt\").is_ok())");
@@ -2256,8 +2259,40 @@ fn rule_policy_deny_overrides_allow() {
 }
 
 #[test]
+fn typed_rule_builders_round_trip_through_policy_text() {
+    use sandlang::policy::file::PolicyFile;
+    use sandlang::policy::rules::{HttpMethod, Methods, NamePattern, RulePolicy, Transports};
+    let methods = Methods::only("get".parse().unwrap(), ["M-SEARCH".parse().unwrap(), "GET".parse().unwrap()]);
+    let built = RulePolicy::new()
+        .allow_read("/data".parse().unwrap())
+        .deny_read("/data/**/.env".parse().unwrap())
+        .allow_write(PathPattern::literal("/out/*").unwrap())
+        .allow_net(Transports::Plaintext, "localhost:8080".parse().unwrap())
+        .deny_net(Transports::Both, "10.0.0.0/8".parse().unwrap())
+        .allow_http(Transports::Tls, Methods::all(), "api.example.com/v1/**".parse().unwrap())
+        .prompt_http(Transports::Both, Methods::all(), "*.example.org/admin".parse().unwrap())
+        .deny_http(Transports::Plaintext, methods, "api.example.com/v2".parse().unwrap())
+        .deny_listen("localhost:22".parse().unwrap())
+        .allow_env("AWS_*".parse().unwrap())
+        .allow_env(NamePattern::exact("A*B"));
+    let text = "allow read /data\ndeny read /data/**/.env\nallow write \"/out/*\"\nallow net plaintext localhost:8080\ndeny net 10.0.0.0/8\nallow http api.example.com/v1\nprompt http *.example.org/admin\ndeny http plaintext GET M-SEARCH api.example.com/v2\ndeny listen localhost:22\nallow env AWS_*\nallow env \"A*B\"\n";
+    assert_eq!(built.to_string(), text);
+    assert_eq!(PolicyFile::parse(text, std::path::Path::new("/"), None).unwrap().rules.to_string(), text);
+    let repeated = PolicyFile::parse("deny http get GET a.example", std::path::Path::new("/"), None).unwrap();
+    assert_eq!(repeated.rules.to_string(), "deny http GET a.example\n");
+    assert_eq!("get".parse::<HttpMethod>().unwrap(), HttpMethod::GET);
+    assert_eq!("M-SEARCH".parse::<HttpMethod>().unwrap().as_str(), "M-SEARCH");
+    for word in ["TLS", "HTTP", "get-x", ""] {
+        assert!(word.parse::<HttpMethod>().is_err(), "{word}");
+    }
+}
+
+#[test]
 fn rule_policy_network_hosts() {
-    let p = sandlang::policy::rules::RulePolicy::standard().allow_net("example.com").allow_net("*.example.org").allow_net("localhost:8080");
+    let p = sandlang::policy::rules::RulePolicy::standard()
+        .allow_net(sandlang::policy::rules::Transports::Tls, "example.com".parse().unwrap())
+        .allow_net(sandlang::policy::rules::Transports::Tls, "*.example.org".parse().unwrap())
+        .allow_net(sandlang::policy::rules::Transports::Tls, "localhost:8080".parse().unwrap());
     let check = |host: &str, port: u16| p.check(&Capability::Net { host: host.into(), port, tls: true });
     assert_eq!(check("example.com", 443), Decision::Allow);
     assert_eq!(check("example.com", 80), Decision::Allow);
@@ -2274,8 +2309,11 @@ fn rule_policy_network_hosts() {
 
 #[test]
 fn rule_policy_env_and_listen() {
-    let p =
-        sandlang::policy::rules::RulePolicy::standard().allow_env("HOME").allow_listen("127.0.0.1:*").allow_listen("[::1]:0").allow_stdin();
+    let p = sandlang::policy::rules::RulePolicy::standard()
+        .allow_env("HOME".parse().unwrap())
+        .allow_listen("127.0.0.1:*".parse().unwrap())
+        .allow_listen("[::1]:0".parse().unwrap())
+        .allow_stdin();
     assert_eq!(p.check(&Capability::Env("HOME".into())), Decision::Allow);
     assert_eq!(p.check(&Capability::Env("SECRET".into())), Decision::Prompt);
     let listen = |ip: &str, port| Capability::NetListen(std::net::SocketAddr::new(ip.parse().unwrap(), port));
@@ -2288,10 +2326,10 @@ fn rule_policy_env_and_listen() {
     assert_eq!(p.check(&Capability::Stdin), Decision::Allow);
 
     let p = sandlang::policy::rules::RulePolicy::standard()
-        .allow_listen("LocalHost")
-        .allow_listen("[::]:80")
-        .allow_listen("*:8080")
-        .deny_listen("localhost:22");
+        .allow_listen("LocalHost".parse().unwrap())
+        .allow_listen("[::]:80".parse().unwrap())
+        .allow_listen("*:8080".parse().unwrap())
+        .deny_listen("localhost:22".parse().unwrap());
     assert_eq!(p.check(&listen("127.0.0.2", 3000)), Decision::Allow);
     assert_eq!(p.check(&listen("::1", 3000)), Decision::Allow);
     assert_eq!(p.check(&listen("127.0.0.1", 22)), Decision::Deny);
@@ -2311,7 +2349,7 @@ fn rule_policy_env_and_listen() {
         "example.com:80",
         "127.0.0.1:65536",
     ] {
-        assert!(!sandlang::policy::net::is_valid_listen_pattern(invalid), "{invalid}");
+        assert!(invalid.parse::<sandlang::policy::net::ListenPattern>().is_err(), "{invalid}");
     }
 }
 
@@ -2347,10 +2385,11 @@ fn unallowed_import_reports_the_missing_rule() {
         ),
         other => panic!("{other:?}"),
     }
-    let mut engine = Engine::new(Config::new().policy(sandlang::policy::rules::RulePolicy::standard().allow_import(&lib))).unwrap();
+    let mut engine =
+        Engine::new(Config::new().policy(sandlang::policy::rules::RulePolicy::standard().allow_import(literal_path(&lib)))).unwrap();
     rt().block_on(engine.run_file(&main)).unwrap();
     let util = lib.join("util.sand");
-    let policy = sandlang::policy::rules::RulePolicy::standard().allow_import(&lib).prompt_import(&util);
+    let policy = sandlang::policy::rules::RulePolicy::standard().allow_import(literal_path(&lib)).prompt_import(literal_path(&util));
     let mut engine = Engine::new(Config::new().policy(policy)).unwrap();
     match rt().block_on(engine.run_file(&main)) {
         Err(Error::Compile(d)) => assert_eq!(

@@ -1,8 +1,9 @@
 //! Rule-based capability policies.
 
+use super::file;
 use super::net::{Dest, HostIndex, HostKind, ListenPattern, NetPattern, UrlPattern, parse_ip, url_segments};
-use super::path::{Glob, Seg, Tok, Trie, path_segments};
-use super::{Capability, Decision, PathSpace, fold_name, lexical, normalize_path};
+use super::path::{Glob, Seg, Tok, Trie, path_segments, unquoted_tokens};
+use super::{Capability, Decision, PathSpace, PatternError, fold_name, lexical, normalize_path};
 use crate::files::Mode;
 use crate::vm::value::FxHashMap;
 use std::borrow::Cow;
@@ -35,14 +36,70 @@ impl Access {
     }
 }
 
+/// A static absolute path for a file rule. Convert it to a literal [`PathPattern`] with
+/// [`From`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct AbsolutePath(&'static str);
+
+impl AbsolutePath {
+    /// Validates that `path` is absolute.
+    ///
+    /// A path that starts with `/` is absolute on all platforms. On Windows, a path that
+    /// starts with `\` or a drive prefix such as `C:\` is also absolute. Panics if `path`
+    /// is relative.
+    ///
+    /// ```compile_fail
+    /// use sandlang::policy::rules::AbsolutePath;
+    /// const DATA: AbsolutePath = AbsolutePath::new("data");
+    /// ```
+    pub const fn new(path: &'static str) -> AbsolutePath {
+        assert!(super::path::is_absolute(path.as_bytes()), "the path is not absolute");
+        AbsolutePath(path)
+    }
+}
+
+impl From<AbsolutePath> for PathPattern {
+    fn from(path: AbsolutePath) -> PathPattern {
+        PathPattern::from_absolute(Path::new(path.0))
+    }
+}
+
+/// A path pattern for a file rule, such as `/data`, `/srv/**/*.log`, or `**/.env`.
+///
+/// A rule for a path also applies to every path under it. Parse a wildcard pattern with
+/// [`str::parse`]. Build a literal pattern with [`PathPattern::literal`] or
+/// [`AbsolutePath`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct PathPattern {
-    pub prefix: PathBuf,
-    pub rest: Vec<Seg>,
+pub struct PathPattern {
+    pub(crate) prefix: PathBuf,
+    pub(crate) rest: Vec<Seg>,
+}
+
+impl std::str::FromStr for PathPattern {
+    type Err = PatternError;
+
+    fn from_str(text: &str) -> Result<PathPattern, PatternError> {
+        super::file::parse_path(&unquoted_tokens(text), false, None, None).map_err(PatternError)
+    }
 }
 
 impl PathPattern {
-    pub(crate) fn everything() -> PathPattern {
+    /// Creates a pattern that matches `path` and its descendants literally. Returns an
+    /// error if `path` is relative.
+    pub fn literal(path: impl AsRef<Path>) -> Result<PathPattern, PatternError> {
+        let path = path.as_ref();
+        if !super::path::is_absolute(path.as_os_str().as_encoded_bytes()) {
+            return Err(PatternError(format!("path `{}` is not anchored: write an absolute path", path.display())));
+        }
+        Ok(PathPattern::from_absolute(path))
+    }
+
+    fn from_absolute(path: &Path) -> PathPattern {
+        PathPattern { prefix: lexical(path), rest: vec![] }
+    }
+
+    /// Returns a pattern that matches every path.
+    pub fn everything() -> PathPattern {
         PathPattern { prefix: PathBuf::new(), rest: vec![] }
     }
 
@@ -54,48 +111,175 @@ impl PathPattern {
     }
 }
 
+/// An environment variable name pattern for an `env` rule, such as `HOME`, `AWS_*`, or `*`.
+///
+/// Parse a wildcard pattern with [`str::parse`]. Build a literal pattern with
+/// [`NamePattern::exact`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum NamePattern {
+pub struct NamePattern(pub(crate) NameKind);
+
+impl NamePattern {
+    /// Creates a pattern that matches `name` literally.
+    pub fn exact(name: impl Into<String>) -> NamePattern {
+        NamePattern(NameKind::Exact(name.into()))
+    }
+}
+
+impl std::str::FromStr for NamePattern {
+    type Err = PatternError;
+
+    fn from_str(name: &str) -> Result<NamePattern, PatternError> {
+        NameKind::from_tokens(&unquoted_tokens(name)).map(NamePattern).map_err(PatternError)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum NameKind {
     Exact(String),
     Glob(Glob),
     Any,
 }
 
-impl NamePattern {
-    pub(crate) fn parse(name: &str) -> NamePattern {
-        NamePattern::from_tokens(&name.chars().map(|c| (c, c == '*')).collect::<Vec<_>>())
-            .unwrap_or_else(|e| panic!("invalid name pattern {name:?}: {e}"))
-    }
-
-    pub(crate) fn from_tokens(text: &[Tok]) -> Result<NamePattern, String> {
+impl NameKind {
+    pub(crate) fn from_tokens(text: &[Tok]) -> Result<NameKind, String> {
         if text.windows(2).any(|w| w[0].1 && w[1].1) {
             return Err("cannot use `**` in an environment variable pattern: use `*` to match any characters, e.g. `AWS_*`".into());
         }
         Ok(match Seg::parse(text)? {
-            Seg::Lit(s) => NamePattern::Exact(s.into()),
-            Seg::Glob(g) => NamePattern::Glob(g),
-            Seg::Star | Seg::GlobStar => NamePattern::Any,
+            Seg::Lit(s) => NameKind::Exact(s.into()),
+            Seg::Glob(g) => NameKind::Glob(g),
+            Seg::Star | Seg::GlobStar => NameKind::Any,
         })
     }
 }
 
-bitflags::bitflags! {
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-    pub(crate) struct Transports: u8 {
-        const TLS = 1;
-        const PLAINTEXT = 2;
-    }
+/// The transports that a `net` or `http` rule controls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Transports {
+    /// Encrypted TLS connections.
+    Tls,
+    /// Unencrypted connections.
+    Plaintext,
+    /// Both TLS and plaintext connections.
+    Both,
 }
 
 impl Transports {
-    pub(crate) fn of(tls: bool) -> Transports {
-        if tls { Transports::TLS } else { Transports::PLAINTEXT }
+    /// Returns the default transports for a rule without transport keywords.
+    pub(crate) fn default_for(decision: Decision) -> Transports {
+        if decision == Decision::Allow { Transports::Tls } else { Transports::Both }
     }
 
-    /// Default transport mask if a rule omits transport keywords: `TLS` for
-    /// `Allow`, and `TLS | PLAINTEXT` for `Deny` or `Prompt`.
-    pub(crate) fn default_for(decision: Decision) -> Transports {
-        if decision == Decision::Allow { Transports::TLS } else { Transports::all() }
+    /// Returns `true` if `self` includes the transport indicated by `tls`.
+    pub(crate) fn controls(self, tls: bool) -> bool {
+        match self {
+            Transports::Tls => tls,
+            Transports::Plaintext => !tls,
+            Transports::Both => true,
+        }
+    }
+}
+
+/// An HTTP request method for an `http` rule, such as `GET` or `M-SEARCH`.
+///
+/// [`str::parse`] accepts standard methods in any case. It also accepts custom uppercase
+/// tokens made of ASCII letters, digits, `-`, and `_`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct HttpMethod(Cow<'static, str>);
+
+impl HttpMethod {
+    pub const GET: HttpMethod = HttpMethod(Cow::Borrowed("GET"));
+    pub const HEAD: HttpMethod = HttpMethod(Cow::Borrowed("HEAD"));
+    pub const POST: HttpMethod = HttpMethod(Cow::Borrowed("POST"));
+    pub const PUT: HttpMethod = HttpMethod(Cow::Borrowed("PUT"));
+    pub const PATCH: HttpMethod = HttpMethod(Cow::Borrowed("PATCH"));
+    pub const DELETE: HttpMethod = HttpMethod(Cow::Borrowed("DELETE"));
+    pub const OPTIONS: HttpMethod = HttpMethod(Cow::Borrowed("OPTIONS"));
+    pub const TRACE: HttpMethod = HttpMethod(Cow::Borrowed("TRACE"));
+    pub const CONNECT: HttpMethod = HttpMethod(Cow::Borrowed("CONNECT"));
+
+    /// Standard HTTP methods that [`str::parse`] accepts in any case.
+    const KNOWN: [HttpMethod; 9] =
+        [Self::GET, Self::HEAD, Self::POST, Self::PUT, Self::PATCH, Self::DELETE, Self::OPTIONS, Self::TRACE, Self::CONNECT];
+
+    /// Returns the method name in uppercase, such as `"GET"`.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for HttpMethod {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::str::FromStr for HttpMethod {
+    type Err = PatternError;
+
+    fn from_str(word: &str) -> Result<HttpMethod, PatternError> {
+        let known = HttpMethod::KNOWN.into_iter().find(|m| m.as_str().eq_ignore_ascii_case(word));
+        let token = word.bytes().any(|b| b.is_ascii_uppercase())
+            && word.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-' || b == b'_');
+        if file::transport(word).is_some() || file::invalid_transport_hint(word).is_some() || (known.is_none() && !token) {
+            return Err(PatternError(format!(
+                "`{word}` is not an HTTP method: expected a method such as `GET`, or an uppercase token such as `M-SEARCH`"
+            )));
+        }
+        Ok(known.unwrap_or_else(|| HttpMethod(Cow::Owned(word.into()))))
+    }
+}
+
+/// The HTTP methods that an `http` rule matches.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Methods(Option<Vec<HttpMethod>>);
+
+impl Methods {
+    /// Matches every HTTP method.
+    pub fn all() -> Methods {
+        Methods(None)
+    }
+
+    /// Matches only `first` and the methods in `rest`.
+    pub fn only(first: HttpMethod, rest: impl IntoIterator<Item = HttpMethod>) -> Methods {
+        let mut list = vec![first];
+        for method in rest {
+            if !list.contains(&method) {
+                list.push(method);
+            }
+        }
+        Methods(Some(list))
+    }
+
+    /// Returns the specific methods to match, or `None` if `self` matches every method.
+    pub(crate) fn listed(&self) -> Option<&[HttpMethod]> {
+        self.0.as_deref()
+    }
+
+    /// Returns `true` if `self` matches the uppercase method name `method`.
+    pub(crate) fn matches(&self, method: &str) -> bool {
+        self.0.as_ref().is_none_or(|list| list.iter().any(|m| m.as_str() == method))
+    }
+}
+
+/// Matches all HTTP methods for a `net` rule.
+static ALL_METHODS: Methods = Methods(None);
+
+/// A name or detail pattern for a custom capability rule.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum CustomMatch {
+    /// Matches any name or detail.
+    Any,
+    /// Matches this exact string literally.
+    Exact(String),
+}
+
+impl CustomMatch {
+    pub(crate) fn matches(&self, text: &str) -> bool {
+        match self {
+            CustomMatch::Any => true,
+            CustomMatch::Exact(exact) => exact == text,
+        }
     }
 }
 
@@ -111,23 +295,23 @@ pub(crate) fn uses_tls(cap: &Capability) -> bool {
 pub(crate) enum RuleKind {
     Files(Access, PathPattern),
     Net(NetPattern, Transports),
-    Http(Option<Vec<String>>, UrlPattern, Transports),
+    Http(Methods, UrlPattern, Transports),
     Listen(ListenPattern),
     Env(NamePattern),
     Stdin,
     Stdout,
     Stderr,
     TimeZone,
-    Custom(Option<String>, Option<String>),
+    Custom(CustomMatch, CustomMatch),
 }
 
 impl RuleKind {
     pub(crate) fn http_match(&self) -> Option<HttpMatch<'_>> {
         match self {
             RuleKind::Http(methods, url, transports) => {
-                Some(HttpMatch { methods: methods.as_deref(), transports: *transports, host: &url.host, path: &url.path })
+                Some(HttpMatch { methods, transports: *transports, host: &url.host, path: &url.path })
             }
-            RuleKind::Net(host, transports) => Some(HttpMatch { methods: None, transports: *transports, host, path: &[] }),
+            RuleKind::Net(host, transports) => Some(HttpMatch { methods: &ALL_METHODS, transports: *transports, host, path: &[] }),
             _ => None,
         }
     }
@@ -143,7 +327,7 @@ impl RuleKind {
 
 #[derive(Clone, Copy)]
 pub(crate) struct HttpMatch<'a> {
-    pub methods: Option<&'a [String]>,
+    pub methods: &'a Methods,
     pub transports: Transports,
     pub host: &'a NetPattern,
     pub path: &'a [Seg],
@@ -202,18 +386,6 @@ impl fmt::Debug for RulePolicy {
     }
 }
 
-fn listen_pattern(pattern: &str) -> ListenPattern {
-    ListenPattern::parse(pattern).unwrap_or_else(|| panic!("invalid listen pattern {pattern:?}"))
-}
-
-fn custom(name: &str, detail: Option<&str>) -> RuleKind {
-    RuleKind::Custom((name != "*").then(|| name.to_string()), detail.filter(|&d| d != "*").map(String::from))
-}
-
-/// File rule builder methods such as [`RulePolicy::allow_read`] and
-/// [`RulePolicy::deny_read`] take literal path prefixes without wildcards.
-/// They panic if the path is empty. Use [`super::file::PolicyFile`] to parse
-/// wildcard patterns.
 impl RulePolicy {
     /// Creates an empty policy that returns [`Decision::Prompt`] for every request.
     pub fn new() -> RulePolicy {
@@ -230,14 +402,14 @@ impl RulePolicy {
         let rules = [
             RuleKind::Files(Access::Any, PathPattern::everything()),
             RuleKind::Files(Access::Import, PathPattern::everything()),
-            RuleKind::Net(NetPattern { kind: HostKind::Any, port: None }, Transports::all()),
-            RuleKind::Listen(listen_pattern("*")),
-            RuleKind::Env(NamePattern::Any),
+            RuleKind::Net(NetPattern { kind: HostKind::Any, port: None }, Transports::Both),
+            RuleKind::Listen(ListenPattern::ANY),
+            RuleKind::Env(NamePattern(NameKind::Any)),
             RuleKind::Stdin,
             RuleKind::Stdout,
             RuleKind::Stderr,
             RuleKind::TimeZone,
-            RuleKind::Custom(None, None),
+            RuleKind::Custom(CustomMatch::Any, CustomMatch::Any),
         ];
         rules.into_iter().fold(RulePolicy::new(), |p, kind| p.push(Decision::Allow, kind))
     }
@@ -279,127 +451,89 @@ impl RulePolicy {
         rules.into_iter().fold(self, RulePolicy::push_rule)
     }
 
-    fn files_rule(self, decision: Decision, access: Access, p: &Path) -> Self {
-        assert!(!p.as_os_str().is_empty(), "empty path in file rule: use `**` in a policy file to match all paths");
-        self.push(decision, RuleKind::Files(access, PathPattern { prefix: p.to_path_buf(), rest: vec![] }))
+    /// Allows reading paths that match `path`.
+    pub fn allow_read(self, path: PathPattern) -> Self {
+        self.push(Decision::Allow, RuleKind::Files(Access::Read, path))
     }
-
-    fn parsed(self, verb: &str, kind: &str, rest: &str) -> Self {
-        let file = super::file::PolicyFile::parse(&format!("{verb} {kind} {rest}"), Path::new("/"), None)
-            .unwrap_or_else(|e| panic!("invalid {kind} rule {rest:?}: {}", e[0].message));
-        let parsed = file.rules.rules.into_iter().map(|r| Rule::new(r.decision, r.kind));
-        parsed.fold(self, RulePolicy::push_rule)
+    /// Denies reading, writing, and importing paths that match `path`.
+    pub fn deny_read(self, path: PathPattern) -> Self {
+        self.push(Decision::Deny, RuleKind::Files(Access::Read, path))
     }
-
-    pub fn allow_read(self, p: impl AsRef<Path>) -> Self {
-        self.files_rule(Decision::Allow, Access::Read, p.as_ref())
+    /// Prompts before reading, writing, or importing paths that match `path`.
+    pub fn prompt_read(self, path: PathPattern) -> Self {
+        self.push(Decision::Prompt, RuleKind::Files(Access::Read, path))
     }
-    /// Denies reading, writing, and importing under `p`.
-    pub fn deny_read(self, p: impl AsRef<Path>) -> Self {
-        self.files_rule(Decision::Deny, Access::Read, p.as_ref())
+    /// Allows reading and writing paths that match `path`.
+    pub fn allow_write(self, path: PathPattern) -> Self {
+        self.push(Decision::Allow, RuleKind::Files(Access::Write, path))
     }
-    /// Prompts before reading, writing, or importing under `p`.
-    pub fn prompt_read(self, p: impl AsRef<Path>) -> Self {
-        self.files_rule(Decision::Prompt, Access::Read, p.as_ref())
+    /// Denies writing paths that match `path`.
+    pub fn deny_write(self, path: PathPattern) -> Self {
+        self.push(Decision::Deny, RuleKind::Files(Access::Write, path))
     }
-    /// Allows reading and writing under `p`.
-    pub fn allow_write(self, p: impl AsRef<Path>) -> Self {
-        self.files_rule(Decision::Allow, Access::Write, p.as_ref())
+    /// Prompts before writing paths that match `path`.
+    pub fn prompt_write(self, path: PathPattern) -> Self {
+        self.push(Decision::Prompt, RuleKind::Files(Access::Write, path))
     }
-    pub fn deny_write(self, p: impl AsRef<Path>) -> Self {
-        self.files_rule(Decision::Deny, Access::Write, p.as_ref())
+    /// Allows importing script modules that match `path`.
+    pub fn allow_import(self, path: PathPattern) -> Self {
+        self.push(Decision::Allow, RuleKind::Files(Access::Import, path))
     }
-    pub fn prompt_write(self, p: impl AsRef<Path>) -> Self {
-        self.files_rule(Decision::Prompt, Access::Write, p.as_ref())
+    /// Denies importing script modules that match `path`.
+    pub fn deny_import(self, path: PathPattern) -> Self {
+        self.push(Decision::Deny, RuleKind::Files(Access::Import, path))
     }
-    /// Allows importing script modules under `p`.
-    pub fn allow_import(self, p: impl AsRef<Path>) -> Self {
-        self.files_rule(Decision::Allow, Access::Import, p.as_ref())
+    /// Prompts before importing script modules that match `path`.
+    pub fn prompt_import(self, path: PathPattern) -> Self {
+        self.push(Decision::Prompt, RuleKind::Files(Access::Import, path))
     }
-    pub fn deny_import(self, p: impl AsRef<Path>) -> Self {
-        self.files_rule(Decision::Deny, Access::Import, p.as_ref())
+    /// Allows connections over `transports` to hosts that match `host`.
+    pub fn allow_net(self, transports: Transports, host: NetPattern) -> Self {
+        self.push(Decision::Allow, RuleKind::Net(host, transports))
     }
-    pub fn prompt_import(self, p: impl AsRef<Path>) -> Self {
-        self.files_rule(Decision::Prompt, Access::Import, p.as_ref())
+    /// Denies connections over `transports` to hosts that match `host`.
+    pub fn deny_net(self, transports: Transports, host: NetPattern) -> Self {
+        self.push(Decision::Deny, RuleKind::Net(host, transports))
     }
-    /// Adds an `allow net` rule with optional transport keywords `tls` and
-    /// `plaintext` followed by host patterns such as `"api.example.com:443"`
-    /// or `"plaintext localhost:8080"`. Defaults to `tls`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `rule` is invalid. Use [`super::net::check_net_pattern`] to
-    /// validate a host pattern beforehand.
-    pub fn allow_net(self, rule: &str) -> Self {
-        self.parsed("allow", "net", rule)
+    /// Prompts before connections over `transports` to hosts that match `host`.
+    pub fn prompt_net(self, transports: Transports, host: NetPattern) -> Self {
+        self.push(Decision::Prompt, RuleKind::Net(host, transports))
     }
-    /// Adds a `deny net` rule, defaulting to both `tls` and `plaintext`; see [`RulePolicy::allow_net`].
-    pub fn deny_net(self, rule: &str) -> Self {
-        self.parsed("deny", "net", rule)
+    /// Allows HTTP requests that match `methods` and `url` over `transports`.
+    pub fn allow_http(self, transports: Transports, methods: Methods, url: UrlPattern) -> Self {
+        self.push(Decision::Allow, RuleKind::Http(methods, url, transports))
     }
-    /// Adds a `prompt net` rule, defaulting to both `tls` and `plaintext`; see [`RulePolicy::allow_net`].
-    pub fn prompt_net(self, rule: &str) -> Self {
-        self.parsed("prompt", "net", rule)
+    /// Denies HTTP requests that match `methods` and `url` over `transports`.
+    pub fn deny_http(self, transports: Transports, methods: Methods, url: UrlPattern) -> Self {
+        self.push(Decision::Deny, RuleKind::Http(methods, url, transports))
     }
-    /// Adds an `allow http` rule with optional transport keywords `tls` and
-    /// `plaintext`, optional HTTP methods, and URL patterns such as
-    /// `"GET POST api.example.com/v1/**"`. Defaults to `tls`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `rule` is invalid.
-    pub fn allow_http(self, rule: &str) -> Self {
-        self.parsed("allow", "http", rule)
+    /// Prompts before HTTP requests that match `methods` and `url` over `transports`.
+    pub fn prompt_http(self, transports: Transports, methods: Methods, url: UrlPattern) -> Self {
+        self.push(Decision::Prompt, RuleKind::Http(methods, url, transports))
     }
-    /// Adds a `deny http` rule, defaulting to both `tls` and `plaintext`; see [`RulePolicy::allow_http`].
-    pub fn deny_http(self, rule: &str) -> Self {
-        self.parsed("deny", "http", rule)
+    /// Allows binding a listener to an address that matches `pattern`.
+    pub fn allow_listen(self, pattern: ListenPattern) -> Self {
+        self.push(Decision::Allow, RuleKind::Listen(pattern))
     }
-    /// Adds a `prompt http` rule, defaulting to both `tls` and `plaintext`; see [`RulePolicy::allow_http`].
-    pub fn prompt_http(self, rule: &str) -> Self {
-        self.parsed("prompt", "http", rule)
+    /// Denies binding a listener to an address that matches `pattern`.
+    pub fn deny_listen(self, pattern: ListenPattern) -> Self {
+        self.push(Decision::Deny, RuleKind::Listen(pattern))
     }
-    /// Allows binding a listener matching `pattern`, which may be `ip:port`,
-    /// `[ipv6]:port`, `ip`, `localhost`, `*:port`, or `*`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `pattern` is invalid.
-    pub fn allow_listen(self, pattern: &str) -> Self {
-        self.push(Decision::Allow, RuleKind::Listen(listen_pattern(pattern)))
+    /// Prompts before binding a listener to an address that matches `pattern`.
+    pub fn prompt_listen(self, pattern: ListenPattern) -> Self {
+        self.push(Decision::Prompt, RuleKind::Listen(pattern))
     }
-    /// Denies binding a listener matching `pattern`; see [`RulePolicy::allow_listen`].
-    ///
-    /// # Panics
-    ///
-    /// Panics if `pattern` is invalid.
-    pub fn deny_listen(self, pattern: &str) -> Self {
-        self.push(Decision::Deny, RuleKind::Listen(listen_pattern(pattern)))
+    /// Allows reading environment variables whose names match `name`.
+    pub fn allow_env(self, name: NamePattern) -> Self {
+        self.push(Decision::Allow, RuleKind::Env(name))
     }
-    /// Prompts before binding a listener matching `pattern`; see [`RulePolicy::allow_listen`].
-    ///
-    /// # Panics
-    ///
-    /// Panics if `pattern` is invalid.
-    pub fn prompt_listen(self, pattern: &str) -> Self {
-        self.push(Decision::Prompt, RuleKind::Listen(listen_pattern(pattern)))
+    /// Denies reading environment variables whose names match `name`.
+    pub fn deny_env(self, name: NamePattern) -> Self {
+        self.push(Decision::Deny, RuleKind::Env(name))
     }
-    /// Allows reading environment variables matching an exact name, a `*`
-    /// glob pattern such as `AWS_*`, or `*` for all variables.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `name` contains `**`.
-    pub fn allow_env(self, name: &str) -> Self {
-        self.push(Decision::Allow, RuleKind::Env(NamePattern::parse(name)))
-    }
-    /// Denies reading matching environment variables; see [`RulePolicy::allow_env`].
-    pub fn deny_env(self, name: &str) -> Self {
-        self.push(Decision::Deny, RuleKind::Env(NamePattern::parse(name)))
-    }
-    /// Prompts before reading matching environment variables; see [`RulePolicy::allow_env`].
-    pub fn prompt_env(self, name: &str) -> Self {
-        self.push(Decision::Prompt, RuleKind::Env(NamePattern::parse(name)))
+    /// Prompts before reading environment variables whose names match `name`.
+    pub fn prompt_env(self, name: NamePattern) -> Self {
+        self.push(Decision::Prompt, RuleKind::Env(name))
     }
     pub fn allow_stdin(self) -> Self {
         self.push(Decision::Allow, RuleKind::Stdin)
@@ -437,16 +571,17 @@ impl RulePolicy {
     pub fn prompt_timezone(self) -> Self {
         self.push(Decision::Prompt, RuleKind::TimeZone)
     }
-    /// Allows a custom capability. `"*"` for `name` matches any capability
-    /// name, and `None` or `Some("*")` for `detail` matches any detail.
-    pub fn allow_custom(self, name: &str, detail: Option<&str>) -> Self {
-        self.push(Decision::Allow, custom(name, detail))
+    /// Allows custom capabilities that match `name` and `detail`.
+    pub fn allow_custom(self, name: CustomMatch, detail: CustomMatch) -> Self {
+        self.push(Decision::Allow, RuleKind::Custom(name, detail))
     }
-    pub fn deny_custom(self, name: &str, detail: Option<&str>) -> Self {
-        self.push(Decision::Deny, custom(name, detail))
+    /// Denies custom capabilities that match `name` and `detail`.
+    pub fn deny_custom(self, name: CustomMatch, detail: CustomMatch) -> Self {
+        self.push(Decision::Deny, RuleKind::Custom(name, detail))
     }
-    pub fn prompt_custom(self, name: &str, detail: Option<&str>) -> Self {
-        self.push(Decision::Prompt, custom(name, detail))
+    /// Prompts before custom capabilities that match `name` and `detail`.
+    pub fn prompt_custom(self, name: CustomMatch, detail: CustomMatch) -> Self {
+        self.push(Decision::Prompt, RuleKind::Custom(name, detail))
     }
 
     /// Evaluates `cap`, normalizing file paths with [`super::normalize_path`].
@@ -546,10 +681,10 @@ impl RulePolicy {
                 self.resolve(decider, address)
             });
         }
-        let transport = Transports::of(uses_tls(request));
+        let tls = uses_tls(request);
         let mut best = Best::new(self, &[]);
         index.resolved.find_ip(ip, addr.port(), |is_alt, e| {
-            if matches_address_form(e.decision, is_alt) && e.transports.contains(transport) {
+            if matches_address_form(e.decision, is_alt) && e.transports.controls(tls) {
                 best.offer(e.rank.spec(0), e.decision, e.rule);
             }
         });
@@ -616,12 +751,12 @@ impl RulePolicy {
             }
             Capability::Env(name) if name == "*" => {
                 // Evaluate `Env("*")` against a representative sample for each rule and an unmatched character so the result equals the strictest decision for any variable.
-                let pieces = || index.env.iter().flat_map(|(p, ..)| if let NamePattern::Glob(g) = p { g.pieces() } else { &[] });
+                let pieces = || index.env.iter().flat_map(|(p, ..)| if let NameKind::Glob(g) = p { g.pieces() } else { &[] });
                 let used: std::collections::HashSet<char> =
                     index.env_names.keys().map(|n| &**n).chain(pieces().map(|p| &**p)).flat_map(str::chars).collect();
                 let unused = (0..=u32::from(char::MAX)).filter_map(char::from_u32).find(|c| !used.contains(c)).unwrap_or('\0');
                 let samples = index.env_names.keys().cloned().chain(index.env.iter().map(|(p, ..)| match p {
-                    NamePattern::Glob(g) => g.pieces().join(&*unused.to_string()),
+                    NameKind::Glob(g) => g.pieces().join(&*unused.to_string()),
                     _ => unused.to_string(),
                 }));
                 let verdicts = samples.chain([unused.to_string()]).map(|n| self.env_verdict(&n, exclude));
@@ -638,8 +773,9 @@ impl RulePolicy {
             Capability::Custom { name, detail } => {
                 let named = index.custom.get(name.as_str()).into_iter().flatten().map(|e| (true, e));
                 for (named, &(ref detail_pattern, d, rule)) in named.chain(index.any_custom.iter().map(|e| (false, e))) {
-                    if detail_pattern.as_ref().is_none_or(|p| p == detail) {
-                        best.offer([2 * named as u32 + detail_pattern.is_some() as u32, 0, 0, 0], d, rule);
+                    if detail_pattern.matches(detail) {
+                        let exact_detail = matches!(detail_pattern, CustomMatch::Exact(_));
+                        best.offer([2 * named as u32 + exact_detail as u32, 0, 0, 0], d, rule);
                     }
                 }
             }
@@ -655,8 +791,8 @@ impl RulePolicy {
         }
         for &(ref pattern, d, rule) in &index.env {
             let spec = match pattern {
-                NamePattern::Glob(g) if g.matches(name) => [1, g.pieces().iter().map(|p| p.len() as u32).sum(), 0, 0],
-                NamePattern::Any => [0; 4],
+                NameKind::Glob(g) if g.matches(name) => [1, g.pieces().iter().map(|p| p.len() as u32).sum(), 0, 0],
+                NameKind::Any => [0; 4],
                 _ => continue,
             };
             best.offer(spec, d, rule);
@@ -681,9 +817,8 @@ impl RulePolicy {
     }
 
     fn net_verdict(&self, dest: &Dest, tls: bool, best: &mut Best<'_>) {
-        let transport = Transports::of(tls);
         self.non_file_index().named.find(dest, |is_alt, e| {
-            if matches_address_form(e.decision, is_alt) && e.transports.contains(transport) {
+            if matches_address_form(e.decision, is_alt) && e.transports.controls(tls) {
                 best.offer(e.rank.spec(0), e.decision, e.rule);
             }
         });
@@ -713,9 +848,8 @@ impl RulePolicy {
         let mut folded_names = None;
         find(&mut |is_alt, &group| {
             let group = &index.groups[group as usize];
-            let transport = Transports::of(tls);
             let mut offer = |e: &HttpEntry, depth: usize| {
-                if method_matches(e.methods.as_deref(), &method) && e.transports.contains(transport) {
+                if e.methods.matches(&method) && e.transports.controls(tls) {
                     best.offer(e.rank.spec(depth), e.decision, e.rule);
                 }
             };
@@ -794,10 +928,6 @@ pub(crate) fn matches_address_form(decision: Decision, is_alternate_ip: bool) ->
     !is_alternate_ip || decision != Decision::Allow
 }
 
-pub(crate) fn method_matches(methods: Option<&[String]>, method: &str) -> bool {
-    methods.is_none_or(|m| m.iter().any(|m| m == method))
-}
-
 pub(crate) fn file_segments(prefix: &Path, rest: &[Seg]) -> Vec<Seg> {
     path_segments(prefix).iter().map(|s| Seg::Lit((**s).into())).chain(rest.iter().cloned()).collect()
 }
@@ -821,7 +951,7 @@ impl Rank {
     }
 
     pub(crate) fn http(http: &HttpMatch) -> Rank {
-        Rank { host: http.host.rank(), weight: http.path.iter().map(Seg::weight).sum(), methods: http.methods.is_some() }
+        Rank { host: http.host.rank(), weight: http.path.iter().map(Seg::weight).sum(), methods: http.methods.listed().is_some() }
     }
 
     pub(crate) fn spec(self, depth: usize) -> Spec {
@@ -996,10 +1126,10 @@ struct Index {
     groups: Vec<HttpGroup>,
     listen: Vec<(ListenPattern, Decision, u32)>,
     env_names: FxHashMap<String, Vec<(Decision, u32)>>,
-    env: Vec<(NamePattern, Decision, u32)>,
+    env: Vec<(NameKind, Decision, u32)>,
     unit: Vec<(Capability, Decision, u32)>,
-    custom: FxHashMap<String, Vec<(Option<String>, Decision, u32)>>,
-    any_custom: Vec<(Option<String>, Decision, u32)>,
+    custom: FxHashMap<String, Vec<(CustomMatch, Decision, u32)>>,
+    any_custom: Vec<(CustomMatch, Decision, u32)>,
 }
 
 #[derive(Debug)]
@@ -1020,7 +1150,7 @@ struct HttpGroup {
 struct HttpEntry {
     rule: u32,
     decision: Decision,
-    methods: Option<Vec<String>>,
+    methods: Methods,
     transports: Transports,
     rank: Rank,
 }
@@ -1045,8 +1175,7 @@ impl Index {
                     index.groups.push(HttpGroup::default());
                     index.groups.len() as u32 - 1
                 });
-                let methods = http.methods.map(<[String]>::to_vec);
-                let entry = HttpEntry { rule: rule_id, decision, methods, transports: http.transports, rank };
+                let entry = HttpEntry { rule: rule_id, decision, methods: http.methods.clone(), transports: http.transports, rank };
                 let group = &mut index.groups[group as usize];
                 if rule.exact() {
                     group.allow.insert(http.path, entry, 1);
@@ -1057,14 +1186,16 @@ impl Index {
             match &rule.kind {
                 RuleKind::Files(..) | RuleKind::Net(..) | RuleKind::Http(..) => {}
                 RuleKind::Listen(p) => index.listen.push((p.clone(), decision, rule_id)),
-                RuleKind::Env(NamePattern::Exact(n)) => index.env_names.entry(n.clone()).or_default().push((decision, rule_id)),
-                RuleKind::Env(p) => index.env.push((p.clone(), decision, rule_id)),
+                RuleKind::Env(NamePattern(NameKind::Exact(n))) => index.env_names.entry(n.clone()).or_default().push((decision, rule_id)),
+                RuleKind::Env(NamePattern(p)) => index.env.push((p.clone(), decision, rule_id)),
                 RuleKind::Stdin => index.unit.push((Capability::Stdin, decision, rule_id)),
                 RuleKind::Stdout => index.unit.push((Capability::Stdout, decision, rule_id)),
                 RuleKind::Stderr => index.unit.push((Capability::Stderr, decision, rule_id)),
                 RuleKind::TimeZone => index.unit.push((Capability::TimeZone, decision, rule_id)),
-                RuleKind::Custom(Some(n), d) => index.custom.entry(n.clone()).or_default().push((d.clone(), decision, rule_id)),
-                RuleKind::Custom(None, d) => index.any_custom.push((d.clone(), decision, rule_id)),
+                RuleKind::Custom(CustomMatch::Exact(n), d) => {
+                    index.custom.entry(n.clone()).or_default().push((d.clone(), decision, rule_id))
+                }
+                RuleKind::Custom(CustomMatch::Any, d) => index.any_custom.push((d.clone(), decision, rule_id)),
             }
         }
         index

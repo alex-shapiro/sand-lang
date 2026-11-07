@@ -1690,8 +1690,8 @@ only the rules from the file. Call
 
 Each line in a policy file is an independent statement. `#` starts a comment
 that extends to the end of the line. Spaces or commas separate words. Double
-quotes `"..."` support `\"` and `\\` escapes and quote literal characters so
-that `*` is not treated as a wildcard. A word can combine quoted and unquoted
+quotes `"..."` treat `*` and spaces as literal characters. Use `\"`, `\\`, `\n`,
+and `\r` to escape characters in quotes. A word can combine quoted and unquoted
 segments, as in `"/my data"/**`.
 
 ```policy
@@ -2281,7 +2281,7 @@ platforms.
 let fs = MemFs::new();
 fs.write("/data/in.txt", "input")?;
 let config = Config::new().memory_fs(fs.clone()).policy(
-    RulePolicy::standard().allow_read("/data").allow_write("/out"));
+    RulePolicy::standard().allow_read("/data".parse()?).allow_write("/out".parse()?));
 // ... run a script; then:
 let report = fs.read("/out/report.txt")?;
 ```

@@ -5,8 +5,7 @@ use super::file::parse;
 use super::net::{HostKind, NetPattern, ProbeTargets, domains_above, enclosing_ranges, is_localhost};
 use super::path::{self, Pattern, Seg, name_counts};
 use super::rules::{
-    Connection, IMPORT, Precedence, READ, Rank, Rule, RuleKind, Transports, WRITE, fold_segments, method_matches, precedence,
-    resolution_key,
+    Connection, IMPORT, Methods, Precedence, READ, Rank, Rule, RuleKind, Transports, WRITE, fold_segments, precedence, resolution_key,
 };
 use super::{Capability, Decision, PathSpace};
 use crate::lint::LintWarning;
@@ -49,7 +48,7 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
     let probe_targets = ProbeTargets::new(rules.iter().filter_map(|r| r.kind.http_match().map(|http| http.host)));
     let mut bypasses: FxHashMap<(NetPattern, NetPattern, bool), Option<(String, String)>> = FxHashMap::default();
     let mut bypass = |reach: NetPattern, denied: &NetPattern, transports: Transports| {
-        [true, false].into_iter().filter(|&tls| transports.contains(Transports::of(tls))).find_map(|tls| {
+        [true, false].into_iter().filter(|&tls| transports.controls(tls)).find_map(|tls| {
             let found = bypasses.entry((reach.clone(), denied.clone(), tls)).or_insert_with_key(|(reach, denied, tls)| {
                 let (host, port) = probe_targets.dest(reach, denied)?;
                 let cap = Capability::Net { host, port, tls: *tls };
@@ -149,7 +148,7 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
 
 enum Scope<'a> {
     Files(u8),
-    Http { host: &'a NetPattern, transports: Transports, methods: Option<&'a [String]>, connections: &'static [Connection] },
+    Http { host: &'a NetPattern, transports: Transports, methods: &'a Methods, connections: &'static [Connection] },
 }
 
 #[derive(Clone, Copy)]
@@ -248,8 +247,8 @@ impl<'a> PathRule<'a> {
         match self.scope {
             Scope::Files(mask) => [READ, WRITE, IMPORT].into_iter().filter(|&op| mask & op != 0).map(Op::File).collect(),
             Scope::Http { methods, connections, .. } => {
-                let methods: Vec<Op> = match methods {
-                    Some(methods) => methods.iter().map(|m| Op::Method(Some(m))).collect(),
+                let methods: Vec<Op> = match methods.listed() {
+                    Some(methods) => methods.iter().map(|m| Op::Method(Some(m.as_str()))).collect(),
                     None => vec![Op::Method(None)],
                 };
                 methods.into_iter().chain(connections.iter().map(|&c| Op::Connect(c))).collect()
@@ -260,8 +259,8 @@ impl<'a> PathRule<'a> {
     fn matches_all_ops(&self, op: Op) -> bool {
         match (&self.scope, op) {
             (Scope::Files(mask), Op::File(op)) => mask & op != 0,
-            (Scope::Http { methods, .. }, Op::Method(Some(m))) => method_matches(*methods, m),
-            (Scope::Http { methods, .. }, Op::Method(None)) => methods.is_none(),
+            (Scope::Http { methods, .. }, Op::Method(Some(m))) => methods.matches(m),
+            (Scope::Http { methods, .. }, Op::Method(None)) => methods.listed().is_none(),
             (_, Op::Connect(_)) => self.matches_op(op),
             _ => false,
         }
@@ -270,7 +269,7 @@ impl<'a> PathRule<'a> {
     fn matches_op(&self, op: Op) -> bool {
         match (&self.scope, op) {
             (Scope::Files(mask), Op::File(op)) => mask & op != 0,
-            (Scope::Http { methods, .. }, Op::Method(m)) => m.is_none_or(|m| method_matches(*methods, m)),
+            (Scope::Http { methods, .. }, Op::Method(m)) => m.is_none_or(|m| methods.matches(m)),
             (Scope::Http { connections, .. }, Op::Connect(c)) => connections.contains(&c),
             _ => false,
         }
@@ -305,7 +304,9 @@ impl<'a> PathRule<'a> {
     fn scope_covers(&self, other: &PathRule) -> bool {
         match (&self.scope, &other.scope) {
             (Scope::Files(_), Scope::Files(_)) => true,
-            (Scope::Http { host: a, transports: s, .. }, Scope::Http { host: b, transports: t, .. }) => a.covers(b) && s.contains(*t),
+            (Scope::Http { host: a, transports: s, .. }, Scope::Http { host: b, transports: t, .. }) => {
+                a.covers(b) && transports_cover(*s, *t)
+            }
             _ => false,
         }
     }
@@ -314,7 +315,7 @@ impl<'a> PathRule<'a> {
         let scopes = match (&self.scope, &other.scope) {
             (Scope::Files(_), Scope::Files(_)) => true,
             (Scope::Http { host: a, transports: s, .. }, Scope::Http { host: b, transports: t, .. }) => {
-                a.overlaps(b, self.exact(), other.exact()) && s.intersects(*t)
+                a.overlaps(b, self.exact(), other.exact()) && transports_overlap(*s, *t)
             }
             _ => false,
         };
@@ -438,7 +439,7 @@ impl<'a> PathRules<'a> {
                 let k = &self.rules[at];
                 let Some(kr) = k.address_resolution else { return true };
                 let ports_differ = r.port.is_some() && kr.port.is_some() && r.port != kr.port;
-                excluded(k.index) || k.index == i.index || ports_differ || !r.transports.intersects(kr.transports)
+                excluded(k.index) || k.index == i.index || ports_differ || !transports_overlap(r.transports, kr.transports)
             })
         })
     }
@@ -513,6 +514,16 @@ impl<'a> PathRules<'a> {
             .filter(|j| self.opposing_rules(i, j.rank.host).all(|k| !k.matches_op(op) || cannot_override_between(i, j, k)))
             .max_by_key(|j| (j.counts.0, j.rank()))
     }
+}
+
+/// Returns `true` if `a` includes every transport in `b`.
+fn transports_cover(a: Transports, b: Transports) -> bool {
+    a == b || a == Transports::Both
+}
+
+/// Returns `true` if `a` and `b` have a transport in common.
+fn transports_overlap(a: Transports, b: Transports) -> bool {
+    a == b || a == Transports::Both || b == Transports::Both
 }
 
 fn cannot_override_between(i: &PathRule, j: &PathRule, k: &PathRule) -> bool {
@@ -775,6 +786,10 @@ mod tests {
         assert_eq!(
             lint("allow http tls plaintext api.example.com\nallow http plaintext api.example.com/x"),
             ["2:22: warning[redundant-rule]: `api.example.com` on line 1 already allows this"]
+        );
+        assert_eq!(
+            lint("allow http tls a.example\ndeny http plaintext a.example/x\nallow http tls a.example/x/y"),
+            ["3:16: warning[redundant-rule]: `a.example` on line 1 already allows this"]
         );
         assert_eq!(lint("allow http api.example.com:8080\nallow http api.example.com:443/x"), none);
         assert_eq!(lint("allow http a.com/Admin\nallow http a.com/admin/x"), none);
@@ -1184,9 +1199,9 @@ mod tests {
                 if rules[..i].iter().any(|r| r.decision == rule.decision && r.kind == rule.kind) {
                     continue;
                 }
-                let deny = crate::policy::rules::RulePolicy::new().deny_net(&format!("tls plaintext {}", url.host));
+                let deny = crate::policy::rules::RulePolicy::new().deny_net(Transports::Both, url.host.clone());
                 let found = dests.iter().find(|(host, port)| {
-                    [true, false].into_iter().filter(|&tls| transports.contains(Transports::of(tls))).any(|tls| {
+                    [true, false].into_iter().filter(|&tls| transports.controls(tls)).any(|tls| {
                         let cap = Capability::Net { host: host.clone(), port: *port, tls };
                         deny.verdict(&cap, PathSpace::Memory, &[]).is_some()
                             && policy.check_normalized_in(&cap, PathSpace::Memory) == crate::policy::Decision::Allow

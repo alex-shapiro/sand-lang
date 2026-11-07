@@ -2,10 +2,10 @@
 
 mod common;
 
-use common::{HttpResponse, TempDir, http_server, rt};
+use common::{HttpResponse, TempDir, http_server, literal_path, rt};
 use parking_lot::Mutex;
 use sandlang::engine::{Config, Engine, Error, MemorySink};
-use sandlang::policy::rules::RulePolicy;
+use sandlang::policy::rules::{RulePolicy, Transports};
 use sandlang::policy::{Capability, Decision};
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
@@ -67,7 +67,7 @@ fn examples_type_check_lint_and_are_formatted() {
     for rel in ALL_EXAMPLES {
         let path = example(rel);
         let source = std::fs::read_to_string(&path).unwrap();
-        let warnings = Engine::new(Config::new().policy(RulePolicy::standard().allow_import(example(""))))
+        let warnings = Engine::new(Config::new().policy(RulePolicy::standard().allow_import(literal_path(example("")))))
             .unwrap()
             .lint_file(&path)
             .unwrap_or_else(|e| panic!("{rel}: {e}"));
@@ -134,7 +134,7 @@ fn template_engine() {
         "data.json",
         r#"{"title": "Team", "users": [{"name": "ann lee", "admin": true}, {"name": "bob"}], "count": 2, "tags": ["x", "y"]}"#,
     );
-    let policy = RulePolicy::standard().allow_read(dir.path());
+    let policy = RulePolicy::standard().allow_read(literal_path(dir.path()));
     let o = run_example("template.sand", &[tmpl.to_str().unwrap(), data.to_str().unwrap()], Config::new().policy(policy));
     assert_eq!(ok(&o), "<h1>TEAM</h1>\n\n<ul>\n  <li>1. Ann Lee (admin),</li>\n  <li>2. Bob</li>\n</ul>\nmany\nn/a x, y 2\n&lt;b&gt;\n");
 }
@@ -147,7 +147,7 @@ fn template_engine_reports_errors() {
     let o = run_example(
         "template.sand",
         &[tmpl.to_str().unwrap(), data.to_str().unwrap()],
-        Config::new().policy(RulePolicy::standard().allow_read(dir.path())),
+        Config::new().policy(RulePolicy::standard().allow_read(literal_path(dir.path()))),
     );
     assert!(o.failure().contains("unexpected end of template"), "{}", o.failure());
 }
@@ -186,7 +186,11 @@ fn persisted_inverted_index() {
     dir.write("docs/b.txt", "A quick brown dog outpaces a quick red fox");
     dir.write("docs/sub/c.md", "Lorem ipsum dolor sit amet");
     dir.write("docs/d.log", "fox fox fox");
-    let config = || Config::new().cwd(dir.path()).policy(RulePolicy::standard().allow_read(dir.path()).allow_write(dir.path()));
+    let config = || {
+        Config::new()
+            .cwd(dir.path())
+            .policy(RulePolicy::standard().allow_read(literal_path(dir.path())).allow_write(literal_path(dir.path())))
+    };
     let o = run_example("search_index.sand", &["index", "idx.json", "docs"], config());
     assert_eq!(ok(&o), "indexed 3 documents, 14 terms\n");
     assert!(dir.path().join("idx.json").exists());
@@ -212,7 +216,7 @@ fn persisted_inverted_index() {
     let o = run_example(
         "search_index.sand",
         &["index", "idx.json", "docs"],
-        Config::new().cwd(dir.path()).policy(RulePolicy::standard().allow_read(dir.path())),
+        Config::new().cwd(dir.path()).policy(RulePolicy::standard().allow_read(literal_path(dir.path()))),
     );
     assert!(o.failure().contains("permission_denied"), "{}", o.failure());
 }
@@ -227,7 +231,11 @@ fn examples_are_unchanged_under_stress() {
     let data = dir.write("data.json", r#"{"users": [{"name": "ann lee", "admin": true}, {"name": "bob"}]}"#);
     let (tmpl, data) = (tmpl.to_str().unwrap().to_string(), data.to_str().unwrap().to_string());
     let stdin = |s: &str| Config::new().policy(RulePolicy::standard().allow_stdin()).stdin_bytes(s.as_bytes().to_vec());
-    let files = || Config::new().cwd(dir.path()).policy(RulePolicy::standard().allow_read(dir.path()).allow_write(dir.path()));
+    let files = || {
+        Config::new()
+            .cwd(dir.path())
+            .policy(RulePolicy::standard().allow_read(literal_path(dir.path())).allow_write(literal_path(dir.path())))
+    };
     type MakeConfig<'a> = Box<dyn Fn() -> Config + 'a>;
     let runs: Vec<(&str, Vec<&str>, MakeConfig)> = vec![
         ("life.sand", vec!["8"], Box::new(Config::new)),
@@ -279,7 +287,7 @@ fn http_client_fetches_and_parses_a_page() {
         _ => HttpResponse::new(404, "not found"),
     });
     let base = format!("http://{}", server.addr);
-    let policy = RulePolicy::standard().allow_net(&format!("plaintext {}", server.addr));
+    let policy = RulePolicy::standard().allow_net(Transports::Plaintext, format!("{}", server.addr).parse().unwrap());
     let o = run_example(
         "http_fetch.sand",
         &[&format!("{base}/old"), &format!("{base}/missing"), &format!("{base}/data.json")],
@@ -305,7 +313,7 @@ fn http_client_is_sandboxed() {
 fn tcp_chat_server() {
     let out = MemorySink::new();
     let err = MemorySink::new();
-    let policy = RulePolicy::standard().allow_listen("127.0.0.1:0");
+    let policy = RulePolicy::standard().allow_listen("127.0.0.1:0".parse().unwrap());
     let config = Config::new().policy(policy).stdout(out.clone()).stderr(err.clone()).args(vec!["0".into()]);
     let mut engine = Engine::new(config).unwrap();
     let interrupt = engine.interrupt_handle();
@@ -449,15 +457,15 @@ fn s3_client_against_mock_server() {
             ("S3_ENDPOINT".to_string(), endpoint.clone()),
         ];
         let policy = RulePolicy::standard()
-            .allow_import(example("s3"))
-            .allow_net(&format!("plaintext {}", server.addr))
-            .allow_read(dir.path())
-            .allow_write(dir.path())
-            .allow_env("AWS_ACCESS_KEY_ID")
-            .allow_env("AWS_SECRET_ACCESS_KEY")
-            .allow_env("AWS_SESSION_TOKEN")
-            .allow_env("AWS_REGION")
-            .allow_env("S3_ENDPOINT");
+            .allow_import(literal_path(example("s3")))
+            .allow_net(Transports::Plaintext, format!("{}", server.addr).parse().unwrap())
+            .allow_read(literal_path(dir.path()))
+            .allow_write(literal_path(dir.path()))
+            .allow_env("AWS_ACCESS_KEY_ID".parse().unwrap())
+            .allow_env("AWS_SECRET_ACCESS_KEY".parse().unwrap())
+            .allow_env("AWS_SESSION_TOKEN".parse().unwrap())
+            .allow_env("AWS_REGION".parse().unwrap())
+            .allow_env("S3_ENDPOINT".parse().unwrap());
         run_example("s3/cli.sand", args, Config::new().cwd(dir.path()).env(env).policy(policy))
     };
 

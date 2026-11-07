@@ -11,10 +11,10 @@
 //! limit memory 64M
 //! ```
 
-use super::net::{HostKind, ListenPattern, NetPattern, QUOTED_STAR_IN_HOST, UrlPattern, format_host_port, url_segments};
-use super::path::{Seg, Tok};
-use super::rules::{Access, NamePattern, Origin, PathPattern, Rule, RuleKind, Transports};
-use super::{Capability, Decision, RulePolicy};
+use super::net::{HostKind, NetPattern, QUOTED_STAR_IN_HOST, UrlPattern, format_host_port, url_segments};
+use super::path::{Seg, Tok, unquoted_tokens};
+use super::rules::{Access, CustomMatch, HttpMethod, Methods, NameKind, NamePattern, Origin, PathPattern, Rule, RuleKind, Transports};
+use super::{Capability, Decision, PatternError, RulePolicy};
 use crate::engine::Limits;
 use crate::vm::value::FxHashMap;
 use std::borrow::Cow;
@@ -108,7 +108,7 @@ impl Word {
         let mut out = Vec::new();
         for p in &self.parts {
             match p {
-                Part::Raw(s) => out.extend(s.chars().map(|c| (c, c == '*'))),
+                Part::Raw(s) => out.extend(unquoted_tokens(s)),
                 Part::Quoted(s) => out.extend(s.chars().map(|c| (c, false))),
                 Part::Ref(_) => {}
             }
@@ -166,20 +166,20 @@ fn quote_part(s: &str, first: bool) -> String {
 }
 
 fn quote(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "\\r"))
 }
 
 pub(crate) fn transport(word: &str) -> Option<Transports> {
     if word.eq_ignore_ascii_case("tls") {
-        Some(Transports::TLS)
+        Some(Transports::Tls)
     } else if word.eq_ignore_ascii_case("plaintext") {
-        Some(Transports::PLAINTEXT)
+        Some(Transports::Plaintext)
     } else {
         None
     }
 }
 
-fn invalid_transport_hint(word: &str) -> Option<String> {
+pub(crate) fn invalid_transport_hint(word: &str) -> Option<String> {
     let lower = word.to_ascii_lowercase();
     let advice = match lower.as_str() {
         "http" => "write `plaintext` for unencrypted connections such as `http://`",
@@ -219,7 +219,7 @@ fn invalid_capability_hint(word: &str) -> Option<String> {
 }
 
 fn is_keyword(word: &str) -> bool {
-    transport(word).is_some() || invalid_transport_hint(word).is_some() || is_method(word)
+    transport(word).is_some() || invalid_transport_hint(word).is_some() || word.parse::<HttpMethod>().is_ok()
 }
 
 pub(crate) fn lex(text: &str) -> (Vec<Line>, Vec<PolicyError>) {
@@ -266,7 +266,9 @@ fn lex_line(line: &str) -> Result<Line, (usize, String)> {
                             }
                             Some((j, '\\')) => match chars.next() {
                                 Some((_, e @ ('"' | '\\'))) => text.push(e),
-                                _ => return Err((column(i + 1 + j), "invalid escape in quotes: use \\\" or \\\\".into())),
+                                Some((_, 'n')) => text.push('\n'),
+                                Some((_, 'r')) => text.push('\r'),
+                                _ => return Err((column(i + 1 + j), "invalid escape in quotes: use \\\", \\\\, \\n, or \\r".into())),
                             },
                             Some((_, c)) => text.push(c),
                             None => return Err((column(i), "unterminated quotes".into())),
@@ -299,14 +301,6 @@ fn lex_line(line: &str) -> Result<Line, (usize, String)> {
 fn is_name(s: &str) -> bool {
     let mut chars = s.chars();
     chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-}
-
-const KNOWN_METHODS: [&str; 9] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE", "CONNECT"];
-
-pub(crate) fn is_method(word: &str) -> bool {
-    KNOWN_METHODS.iter().any(|m| m.eq_ignore_ascii_case(word))
-        || (word.bytes().any(|b| b.is_ascii_uppercase())
-            && word.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-' || b == b'_'))
 }
 
 const CAPABILITIES: &str = "read, write, import, net, http, listen, env, stdin, stdout, stderr, timezone, or custom";
@@ -462,7 +456,7 @@ impl Context<'_> {
                 Some(d) => {
                     self.expand(d)?.into_iter().map(|w| parse_custom_pattern(&w).map_err(|m| (d.column, m))).collect::<Result<_, _>>()?
                 }
-                None => vec![None],
+                None => vec![CustomMatch::Any],
             };
             let names = self.expand(name)?;
             if names.len().saturating_mul(details.len()) > MAX_EXPANSION {
@@ -477,8 +471,8 @@ impl Context<'_> {
             }
             return Ok(());
         }
-        let mut methods: Option<Vec<String>> = None;
-        let mut transports = Transports::empty();
+        let mut methods: Vec<HttpMethod> = Vec::new();
+        let mut transports: Option<Transports> = None;
         let mut urls = 0;
         for item in rest_args {
             for word in &self.expand(item)? {
@@ -491,7 +485,7 @@ impl Context<'_> {
                             let hosts = if kind == "http" { "URL patterns" } else { "hosts" };
                             return Err((item.column, format!("put `tls` and `plaintext` before the {hosts}")));
                         }
-                        transports |= t;
+                        transports = Some(if transports.is_none_or(|seen| seen == t) { t } else { Transports::Both });
                         continue;
                     }
                     if urls == 0
@@ -500,7 +494,7 @@ impl Context<'_> {
                         return Err((item.column, hint));
                     }
                 }
-                let transports = if transports.is_empty() { Transports::default_for(decision) } else { transports };
+                let transports = transports.unwrap_or(Transports::default_for(decision));
                 let origin = Origin { line, column: item.column, text: word.render() };
                 let kind = match kind {
                     "files" | "read" | "write" | "import" => {
@@ -510,37 +504,42 @@ impl Context<'_> {
                             "import" => Access::Import,
                             _ => Access::Any,
                         };
-                        RuleKind::Files(access, self.path(&word.tokens(), bare.is_some()).map_err(|m| (item.column, m))?)
+                        RuleKind::Files(
+                            access,
+                            parse_path(&word.tokens(), bare.is_some(), Some(self.base), self.home).map_err(|m| (item.column, m))?,
+                        )
                     }
                     "net" => {
                         urls += 1;
                         RuleKind::Net(NetPattern::from_tokens(&word.tokens()).map_err(|m| (item.column, m))?, transports)
                     }
-                    "http" if bare.as_deref().is_some_and(is_method) => {
+                    "http" if let Some(method) = bare.as_deref().and_then(|b| b.parse::<HttpMethod>().ok()) => {
                         if urls > 0 {
                             return Err((item.column, "put HTTP methods before the URL patterns".into()));
                         }
-                        methods.get_or_insert_with(Vec::new).push(word.text().to_ascii_uppercase());
+                        methods.push(method);
                         continue;
                     }
                     "http" => {
                         urls += 1;
-                        RuleKind::Http(methods.clone(), UrlPattern::parse(&word.tokens()).map_err(|m| (item.column, m))?, transports)
+                        let methods = match methods.split_first() {
+                            Some((first, rest)) => Methods::only(first.clone(), rest.iter().cloned()),
+                            None => Methods::all(),
+                        };
+                        RuleKind::Http(methods, UrlPattern::from_tokens(&word.tokens()).map_err(|m| (item.column, m))?, transports)
                     }
                     "listen" if word.tokens().iter().any(|&(c, wild)| c == '*' && !wild) => {
                         return Err((item.column, QUOTED_STAR_IN_HOST.into()));
                     }
-                    "listen" => RuleKind::Listen(ListenPattern::parse(&word.text()).ok_or_else(|| {
-                        (item.column, format!("invalid listen pattern `{}`: expected ip:port, ip, localhost, *:port, or *", word.text()))
-                    })?),
-                    _ => RuleKind::Env(NamePattern::from_tokens(&word.tokens()).map_err(|m| (item.column, m))?),
+                    "listen" => RuleKind::Listen(word.text().parse().map_err(|m: PatternError| (item.column, m.0))?),
+                    _ => RuleKind::Env(NamePattern(NameKind::from_tokens(&word.tokens()).map_err(|m| (item.column, m))?)),
                 };
                 rules.push(file_rule(decision, kind, origin));
             }
         }
         if kind == "http" && urls == 0 {
             let last = rest_args.last().unwrap_or(first_arg);
-            let after = if methods.is_some() { "methods" } else { "transports" };
+            let after = if methods.is_empty() { "transports" } else { "methods" };
             return Err((last.column, format!("`{verb_text} http` requires a URL pattern after {after}, e.g. `api.example.com/v1`")));
         }
         if kind == "net" && urls == 0 {
@@ -556,66 +555,71 @@ impl Context<'_> {
         }
         word.expand(&self.sets, &mut self.used).map_err(|m| (word.column, m))
     }
-
-    fn path(&self, text: &[Tok], bare: bool) -> Result<PathPattern, String> {
-        let flat: String = text.iter().map(|t| t.0).collect();
-        let sep = |c: char| c == '/' || (cfg!(windows) && c == '\\');
-        let unanchored = || {
-            invalid_capability_hint(&flat).filter(|_| bare).unwrap_or_else(|| {
-                format!(
-                    "path `{flat}` is not anchored: write `./{flat}` for `{}`, `~/...`, an absolute path, or `**/{flat}` for that name anywhere",
-                    self.base.join(&flat).display()
-                )
-            })
-        };
-        let starts = |s: &str| flat.starts_with(s) && flat[s.len()..].chars().next().is_none_or(sep);
-        let anywhere = text.len() >= 2 && text[..2].iter().all(|t| t.0 == '*' && t.1) && text.get(2).is_none_or(|t| sep(t.0));
-        let (mut prefix, rest): (PathBuf, &[Tok]) = if anywhere {
-            (PathBuf::new(), text)
-        } else if starts("~") {
-            let home = self.home.ok_or("cannot resolve `~` without a home directory")?;
-            (home.to_path_buf(), &text[1..])
-        } else if starts(".") || starts("..") {
-            (self.base.to_path_buf(), text)
-        } else if flat.starts_with('/') || (cfg!(windows) && Path::new(&flat).is_absolute()) {
-            let root = Path::new(&flat)
-                .components()
-                .take_while(|c| matches!(c, std::path::Component::Prefix(_) | std::path::Component::RootDir))
-                .collect::<PathBuf>();
-            let skip = root.as_os_str().to_string_lossy().chars().count().min(text.len());
-            (root, &text[skip..])
-        } else {
-            return Err(unanchored());
-        };
-        let mut segs: Vec<Seg> = Vec::new();
-        for seg in rest.split(|t| sep(t.0) && !t.1).filter(|s| !s.is_empty()) {
-            let parsed = Seg::parse(seg)?;
-            match (&parsed, segs.is_empty()) {
-                (Seg::Lit(s), _) if &**s == "." => {}
-                (Seg::Lit(s), true) if &**s == ".." => {
-                    prefix.pop();
-                }
-                (Seg::Lit(s), false) if &**s == ".." => return Err("`..` cannot follow a wildcard".into()),
-                (Seg::Lit(s), true) => prefix.push(&**s),
-                _ => segs.push(parsed),
-            }
-        }
-        while segs.last() == Some(&Seg::GlobStar) {
-            segs.pop();
-        }
-        Ok(PathPattern { prefix, rest: segs })
-    }
 }
 
-fn parse_custom_pattern(word: &Word) -> Result<Option<String>, String> {
+/// Parses a tokenized path pattern. Uses `base` to resolve `./` and `../` paths. Uses
+/// `home` to resolve `~` paths.
+pub(crate) fn parse_path(text: &[Tok], bare: bool, base: Option<&Path>, home: Option<&Path>) -> Result<PathPattern, String> {
+    let flat: String = text.iter().map(|t| t.0).collect();
+    let sep = |c: char| c == '/' || (cfg!(windows) && c == '\\');
+    let unanchored = || {
+        invalid_capability_hint(&flat).filter(|_| bare).unwrap_or_else(|| match base {
+            Some(base) => format!(
+                "path `{flat}` is not anchored: write `./{flat}` for `{}`, `~/...`, an absolute path, or `**/{flat}` for that name anywhere",
+                base.join(&flat).display()
+            ),
+            None => format!("path `{flat}` is not anchored: write an absolute path, or `**/{flat}` for that name anywhere"),
+        })
+    };
+    let starts = |s: &str| flat.starts_with(s) && flat[s.len()..].chars().next().is_none_or(sep);
+    let anywhere = text.len() >= 2 && text[..2].iter().all(|t| t.0 == '*' && t.1) && text.get(2).is_none_or(|t| sep(t.0));
+    let (mut prefix, rest): (PathBuf, &[Tok]) = if anywhere {
+        (PathBuf::new(), text)
+    } else if starts("~") {
+        let home = home.ok_or("cannot resolve `~` without a home directory")?;
+        (home.to_path_buf(), &text[1..])
+    } else if starts(".") || starts("..") {
+        let base =
+            base.ok_or_else(|| format!("cannot resolve the relative path `{flat}` without a base directory: write an absolute path"))?;
+        (base.to_path_buf(), text)
+    } else if super::path::is_absolute(flat.as_bytes()) {
+        let root = Path::new(&flat)
+            .components()
+            .take_while(|c| matches!(c, std::path::Component::Prefix(_) | std::path::Component::RootDir))
+            .collect::<PathBuf>();
+        let skip = root.as_os_str().to_string_lossy().chars().count().min(text.len());
+        (root, &text[skip..])
+    } else {
+        return Err(unanchored());
+    };
+    let mut segs: Vec<Seg> = Vec::new();
+    for seg in rest.split(|t| sep(t.0) && !t.1).filter(|s| !s.is_empty()) {
+        let parsed = Seg::parse(seg)?;
+        match (&parsed, segs.is_empty()) {
+            (Seg::Lit(s), _) if &**s == "." => {}
+            (Seg::Lit(s), true) if &**s == ".." => {
+                prefix.pop();
+            }
+            (Seg::Lit(s), false) if &**s == ".." => return Err("`..` cannot follow a wildcard".into()),
+            (Seg::Lit(s), true) => prefix.push(&**s),
+            _ => segs.push(parsed),
+        }
+    }
+    while segs.last() == Some(&Seg::GlobStar) {
+        segs.pop();
+    }
+    Ok(PathPattern { prefix, rest: segs })
+}
+
+fn parse_custom_pattern(word: &Word) -> Result<CustomMatch, String> {
     let tokens = word.tokens();
     match tokens.as_slice() {
-        [('*', true)] => Ok(None),
+        [('*', true)] => Ok(CustomMatch::Any),
         t if t.iter().any(|t| t.1) => Err(format!(
             "custom names and details must be exact or `*`: quote literal asterisks as `\"{}\"`",
             word.text().replace('"', "\\\"")
         )),
-        t => Ok(Some(t.iter().map(|t| t.0).collect())),
+        t => Ok(CustomMatch::Exact(t.iter().map(|t| t.0).collect())),
     }
 }
 
@@ -663,18 +667,18 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
         Capability::Import(p) => format!("import {}", path(p)?),
         Capability::Net { host, port, tls } => {
             let pattern = format_host_port(host, *port);
-            NetPattern::parse(&pattern).ok()?;
-            format!("net {}{pattern}", transport_words(Transports::of(*tls), decision))
+            NetPattern::parse_host_port(&pattern).ok()?;
+            format!("net {}{pattern}", transport_words(if *tls { Transports::Tls } else { Transports::Plaintext }, decision))
         }
         Capability::Http { method, scheme, host, port, path } => {
             let (names, alt) = url_segments(path);
             let transport_word = match scheme.as_str() {
-                "https" => transport_words(Transports::TLS, decision),
-                "http" => transport_words(Transports::PLAINTEXT, decision),
+                "https" => transport_words(Transports::Tls, decision),
+                "http" => transport_words(Transports::Plaintext, decision),
                 _ => return None,
             };
-            let method = method.to_ascii_uppercase();
-            if alt.is_some() || !is_method(&method) || transport(&method).is_some() || invalid_transport_hint(&method).is_some() {
+            let method: HttpMethod = method.to_ascii_uppercase().parse().ok()?;
+            if alt.is_some() {
                 return None;
             }
             // Always include the port so a numeric first path segment after an IP address is not parsed as a CIDR prefix length.
@@ -683,7 +687,7 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
                 url.push('/');
                 url.push_str(&crate::stdlib::uri::encode(name, b"!$&'()+;=:@-._~"));
             }
-            UrlPattern::parse(&url.chars().map(|c| (c, false)).collect::<Vec<_>>()).ok()?;
+            UrlPattern::from_tokens(&url.chars().map(|c| (c, false)).collect::<Vec<_>>()).ok()?;
             format!("http {transport_word}{method} {url}")
         }
         Capability::NetListen(addr) => format!("listen {}", quote_part(&addr.to_string(), true)),
@@ -696,7 +700,7 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
         Capability::Custom { name, detail } => format!("custom {} {}", quote_part(name, true), quote_part(detail, true)),
         Capability::NetAddr { .. } => return None,
     };
-    (!rule.contains(['\n', '\r'])).then(|| format!("{} {rule}", verb(decision)))
+    Some(format!("{} {rule}", verb(decision)))
 }
 
 impl fmt::Display for Rule {
@@ -727,7 +731,7 @@ impl fmt::Display for Rule {
             RuleKind::Net(pattern, transports) => write!(f, "net {}{}", transport_words(*transports, self.decision), host_text(pattern)),
             RuleKind::Http(methods, url, transports) => {
                 write!(f, "http {}", transport_words(*transports, self.decision))?;
-                for m in methods.iter().flatten() {
+                for m in methods.listed().into_iter().flatten() {
                     write!(f, "{m} ")?;
                 }
                 match (&url.host.kind, url.host.port) {
@@ -746,18 +750,21 @@ impl fmt::Display for Rule {
                 Ok(())
             }
             RuleKind::Listen(pattern) => write!(f, "listen {pattern}"),
-            RuleKind::Env(NamePattern::Exact(name)) => write!(f, "env {}", quote_part(name, true)),
-            RuleKind::Env(NamePattern::Glob(g)) => write!(f, "env {}", render_seg(&Seg::Glob(g.clone()), quote_part)),
-            RuleKind::Env(NamePattern::Any) => write!(f, "env *"),
+            RuleKind::Env(NamePattern(NameKind::Exact(name))) => write!(f, "env {}", quote_part(name, true)),
+            RuleKind::Env(NamePattern(NameKind::Glob(g))) => write!(f, "env {}", render_seg(&Seg::Glob(g.clone()), quote_part)),
+            RuleKind::Env(NamePattern(NameKind::Any)) => write!(f, "env *"),
             RuleKind::Stdin => write!(f, "stdin"),
             RuleKind::Stdout => write!(f, "stdout"),
             RuleKind::Stderr => write!(f, "stderr"),
             RuleKind::TimeZone => write!(f, "timezone"),
             RuleKind::Custom(name, detail) => {
-                write!(f, "custom {}", name.as_deref().map_or_else(|| "*".to_string(), |n| quote_part(n, true)))?;
+                match name {
+                    CustomMatch::Any => write!(f, "custom *")?,
+                    CustomMatch::Exact(n) => write!(f, "custom {}", quote_part(n, true))?,
+                }
                 match detail {
-                    Some(detail) => write!(f, " {}", quote_part(detail, true)),
-                    None => Ok(()),
+                    CustomMatch::Exact(detail) => write!(f, " {}", quote_part(detail, true)),
+                    CustomMatch::Any => Ok(()),
                 }
             }
         }
@@ -783,13 +790,12 @@ fn is_numeric_prefix(seg: &Seg) -> bool {
 
 fn transport_words(transports: Transports, decision: Decision) -> &'static str {
     if transports == Transports::default_for(decision) {
-        ""
-    } else if transports == Transports::TLS {
-        "tls "
-    } else if transports == Transports::PLAINTEXT {
-        "plaintext "
-    } else {
-        "tls plaintext "
+        return "";
+    }
+    match transports {
+        Transports::Tls => "tls ",
+        Transports::Plaintext => "plaintext ",
+        Transports::Both => "tls plaintext ",
     }
 }
 
@@ -1441,8 +1447,17 @@ allow http GET a.com tls"
         assert_eq!(rule_for(&plain, true).unwrap(), "allow net plaintext localhost:5432");
         assert_eq!(rule_for(&Capability::Stdout, true).as_deref(), Some("allow stdout"));
         assert_eq!(rule_for(&Capability::Stderr, false).as_deref(), Some("deny stderr"));
-        assert_eq!(rule_for(&Capability::FsRead(PathBuf::from("/tmp/a\nb")), true), None);
-        assert_eq!(rule_for(&Capability::Env("A\rB".into()), true), None);
+        let line_breaks = [
+            Capability::FsRead(PathBuf::from("/tmp/a\nb")),
+            Capability::Env("A\rB".into()),
+            Capability::Custom { name: "db\n".into(), detail: "\\\"\r".into() },
+        ];
+        assert_eq!(rule_for(&line_breaks[0], true).unwrap(), "allow read \"/tmp/a\\nb\"");
+        assert_eq!(rule_for(&line_breaks[1], true).unwrap(), "allow env \"A\\rB\"");
+        assert_eq!(rule_for(&line_breaks[2], true).unwrap(), "allow custom \"db\\n\" \"\\\\\\\"\\r\"");
+        for cap in line_breaks {
+            assert_eq!(decide(&parse(&rule_for(&cap, true).unwrap()), cap), Allow);
+        }
         let p = parse(&rule_for(caps.last().unwrap(), true).unwrap());
         assert_eq!(decide(&p, Capability::NetListen("[::1]:22".parse().unwrap())), Prompt);
         let request = |method: &str| Capability::Http {

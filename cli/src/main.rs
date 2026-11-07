@@ -14,7 +14,7 @@ mod repl;
 
 use sandlang::engine::{Config, Engine, Error};
 use sandlang::policy::file::{PolicyFile, parse_duration, parse_size};
-use sandlang::policy::rules::RulePolicy;
+use sandlang::policy::rules::{PathPattern, RulePolicy};
 use sandlang::policy::{Capability, PromptAnswer};
 use sandlang::stdin_feed::StdinFeed;
 use sandlang::stdlib::time::TimeZone;
@@ -298,7 +298,7 @@ fn default_rules(all: bool) -> RulePolicy {
 }
 
 fn allow_all_imports_policy() -> RulePolicy {
-    RulePolicy::new().extend(PolicyFile::parse("allow import **", Path::new("/"), None).expect("a valid rule").rules)
+    RulePolicy::new().allow_import(PathPattern::everything())
 }
 
 fn unknown_option(flag: &str) -> String {

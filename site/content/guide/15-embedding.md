@@ -65,7 +65,7 @@ print("sorted \(words.len()) words")
 "#;
 
 let config = Config::new()
-    .policy(RulePolicy::standard().allow_read("/data").allow_write("/out"))
+    .policy(RulePolicy::standard().allow_read("/data".parse()?).allow_write("/out".parse()?))
     .limits(Limits {
         max_memory: Some(64 << 20),
         max_wall_time: Some(Duration::from_secs(5)),
@@ -82,7 +82,16 @@ let report = files.read("/out/report.txt")?;
 # }
 ```
 
-- **Policy.** `RulePolicy` provides `allow_`, `deny_`, and `prompt_` builder methods for each capability kind, such as `allow_read`, `deny_net`, and `prompt_write`. `allow_net` and `allow_http` accept policy rule arguments such as `"plaintext localhost:8080"`. `RulePolicy::default()` is empty, `RulePolicy::standard()` allows `stdout` and `stderr`, and `RulePolicy::allow_all()` allows all capabilities for trusted scripts. `user_rules.with_defaults(host_rules)` appends fallback rules that apply only if a request does not match any rule in `user_rules`. `Config::custom_policy` replaces rule evaluation with a host-defined `CustomPolicy`.
+- **Policy.** `RulePolicy` has `allow_`, `deny_`, and `prompt_` builder methods for each capability kind. Each builder method takes typed arguments. Parse a pattern or `HttpMethod` with `str::parse`. `str::parse` returns a `PatternError` if the text is invalid:
+  - `PathPattern` is the path of a file rule. It must be absolute or start with `**`. `PathPattern::literal` matches a host path literally. Use `AbsolutePath::new` in a `const` to validate a path at compile time. Convert an `AbsolutePath` with `PathPattern::from`.
+  - `NetPattern` is the host of a `net` rule.
+  - `UrlPattern` is the URL of an `http` rule.
+  - `ListenPattern` is the address of a `listen` rule.
+  - `NamePattern` is the variable name of an `env` rule. `NamePattern::exact` matches a literal variable name.
+  - `Transports` selects `Tls`, `Plaintext`, or `Both` for a `net` or `http` rule.
+  - `Methods` selects the HTTP methods for an `http` rule. `Methods::all()` matches every method. `Methods::only(first, rest)` matches specific `HttpMethod` values.
+  - `CustomMatch` selects `Any` or `Exact(text)` for the name and detail of a `custom` rule.
+- **Default rules.** `RulePolicy::default()` is empty. `RulePolicy::standard()` allows `stdout` and `stderr`. `RulePolicy::allow_all()` allows all capabilities for trusted scripts. `user_rules.with_defaults(host_rules)` adds fallback rules for requests that do not match `user_rules`. `Config::custom_policy` replaces rule evaluation with a host-defined `CustomPolicy`.
 - **Limits.** `Limits` configures every resource bound described in [Sandbox and policies](/guide/sandbox/).
 - **Virtual file system.** `Config::memory_fs` replaces host disk access with an in-memory `MemFs`. Clones of a `MemFs` share the same underlying storage so the host can populate input files before a run and read output files afterward.
 - **Streams.** `Config::stdout` and `Config::stderr` redirect script output to a `MemorySink` or custom sink. `Config::stdin_bytes` supplies fixed input bytes. `Config::stdin_feed` and `Config::stdin_io_feed` return a `StdinFeed` that the host uses to send input while the script runs.
@@ -255,7 +264,7 @@ use sandlang::engine::{Config, Engine};
 use sandlang::native::NativeModule;
 use sandlang::native::convert::HostError;
 use sandlang::policy::Capability;
-use sandlang::policy::rules::RulePolicy;
+use sandlang::policy::rules::{CustomMatch, RulePolicy};
 use sandlang::vm::Vm;
 
 let mut door = NativeModule::new("door");
@@ -263,7 +272,7 @@ door.vm_function("open", |vm: &mut Vm, name: String| -> Result<String, HostError
     vm.require(&Capability::Custom { name: "door".into(), detail: name.clone() })?;
     Ok(format!("opened {name}"))
 });
-let policy = RulePolicy::standard().allow_custom("door", Some("front"));
+let policy = RulePolicy::standard().allow_custom(CustomMatch::Exact("door".into()), CustomMatch::Exact("front".into()));
 let mut engine = Engine::new(Config::new().module(door).policy(policy))?;
 engine.run_source("main.sand", "import door\nprint(door.open(\"front\"))\nprint(door.open(\"back\"))").await?;
 # Ok(())

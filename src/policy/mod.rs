@@ -263,6 +263,18 @@ pub(crate) enum PathSpace {
     Memory,
 }
 
+/// An error in a policy pattern or [`rules::HttpMethod`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PatternError(pub(crate) String);
+
+impl fmt::Display for PatternError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for PatternError {}
+
 /// Maximum script-supplied path length in bytes before normalization.
 pub const MAX_PATH_BYTES: usize = 4096;
 
@@ -443,9 +455,9 @@ mod tests {
             return;
         }
         let p = RulePolicy::new()
-            .allow_read(base.join("Dir/File.txt"))
-            .allow_read(base.join("Dir/Sub"))
-            .deny_read(base.join("Dir/Sub/Secret.txt"));
+            .allow_read(rules::PathPattern::literal(base.join("Dir/File.txt")).unwrap())
+            .allow_read(rules::PathPattern::literal(base.join("Dir/Sub")).unwrap())
+            .deny_read(rules::PathPattern::literal(base.join("Dir/Sub/Secret.txt")).unwrap());
         for (given, want) in [
             ("dir/file.txt", Decision::Allow),
             ("DIR/FILE.TXT", Decision::Allow),

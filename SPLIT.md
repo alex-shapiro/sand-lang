@@ -14,25 +14,23 @@ journal. The sections below group these commits into self-contained changesets.
 - Use the source commits as a reference. Let the compiler identify every call
   site that needs an update.
 - Exclude changes that belong to other changesets.
-- Update the status table below after you merge a changeset.
+- Update the status list below after you merge a changeset.
 
 ## Status
 
-| #   | Changeset                               | Status                          | Branch         |
-| --- | --------------------------------------- | ------------------------------- | -------------- |
-| 1   | Module path cleanup                     | In review                       | `module-paths` |
-| 2   | Typed policy builders                   | Not started                     |                |
-| 3   | Rule and limit positions in policy      | Not started                     |                |
-| 4   | `deny_private_net` and absolute rules   | Not started                     |                |
-| 5   | Precompiled host modules                | Not started                     |                |
-| 6   | `InterruptHandle::new`                  | Not started                     |                |
-| 7   | Linter budget and interrupt errors      | Not started                     |                |
-| 8   | Host calls to main-module functions     | Not started, requires 5         |                |
-| 9   | Explicit VM control flow and call state | Not started                     |                |
-| 10  | Fuel accounting for retried host calls  | Not started                     |                |
-| 11  | Per-run arguments with `Run<D, C>`      | Not started                     |                |
-| 12  | The journal                             | Not started, requires 9, 11, 13 |                |
-| 13  | Unified scheduler path                  | Not started                     |                |
+1. Module path cleanup: merged in #26 from `module-paths`
+2. Typed policy builders: in review on `typed-policy-builders`
+3. Rule and limit positions in policy: not started
+4. `deny_private_net` and absolute rules: not started
+5. Precompiled host modules: not started
+6. `InterruptHandle::new`: not started
+7. Linter budget and interrupt errors: not started
+8. Host calls to main-module functions: not started; requires 5
+9. Explicit VM control flow and call state: not started
+10. Fuel accounting for retried host calls: not started
+11. Per-run arguments with `Run<D, C>`: not started
+12. The journal: not started; requires 9, 11, and 13
+13. Unified scheduler path: not started
 
 ## Independent changesets
 
@@ -48,21 +46,24 @@ Source commits: `2c21305`, `003daed`, and the two documentation link fixes from
 
 ### 2. Typed policy builders
 
-`RulePolicy` builder methods accept parsed pattern types instead of raw strings.
-This makes the builder methods infallible. The builders also reject relative
-file paths to close issue 033. This changeset replaces the `bitflags` set
-`Transports` with an enum. It also removes the `bitflags` dependency.
+`RulePolicy` builder methods take typed arguments instead of raw strings.
+`PathPattern` rejects relative file paths to close issue 033. This changeset
+replaces the `bitflags` set `Transports` with an enum. It removes the `bitflags`
+dependency.
 
-New types in `policy`:
+Public types:
 
-- `NetPattern`
-- `UrlPattern`
-- `PathPattern`
-- `NamePattern`
-- `Methods`
-- `CustomName`
-- `AbsolutePath`
-- `PatternError`
+- `policy::PatternError`
+- `policy::net::ListenPattern`
+- `policy::net::NetPattern`
+- `policy::net::UrlPattern`
+- `policy::rules::AbsolutePath`
+- `policy::rules::CustomMatch`
+- `policy::rules::HttpMethod`
+- `policy::rules::Methods`
+- `policy::rules::NamePattern`
+- `policy::rules::PathPattern`
+- `policy::rules::Transports`
 
 Source commits: `464b03a`, `c5ca2d7`, `b111b33`, `335ae8b`, `89186fa`, `265e762`.
 

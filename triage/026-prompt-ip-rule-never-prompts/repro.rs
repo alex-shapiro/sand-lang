@@ -1,9 +1,12 @@
-use sandlang::policy::{Capability, PromptAnswer};
 use sandlang::engine::{Config, Engine, MemorySink};
-use sandlang::policy::rules::RulePolicy;
+use sandlang::policy::rules::{HttpMethod, Methods, RulePolicy, Transports};
+use sandlang::policy::{Capability, PromptAnswer};
 
 fn main() {
-    let policy = RulePolicy::standard().allow_http("plaintext GET *").prompt_net("127.0.0.0/8 ::1");
+    let policy = RulePolicy::standard()
+        .allow_http(Transports::Plaintext, Methods::only(HttpMethod::GET, []), "*".parse().unwrap())
+        .prompt_net(Transports::Both, "127.0.0.0/8".parse().unwrap())
+        .prompt_net(Transports::Both, "::1".parse().unwrap());
     let prompter = |cap: Capability| async move {
         println!("  PROMPT: {cap}  -> answering y");
         PromptAnswer::AllowOnce

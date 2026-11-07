@@ -69,6 +69,18 @@ pub fn rt() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
 }
 
+/// Creates a literal [`sandlang::policy::rules::PathPattern`] for `path`. Panics if `path`
+/// is relative.
+pub fn literal_path(path: impl AsRef<Path>) -> sandlang::policy::rules::PathPattern {
+    sandlang::policy::rules::PathPattern::literal(path).unwrap()
+}
+
+/// Parses policy file `text` into a [`sandlang::policy::rules::RulePolicy`] with `/` as
+/// the base directory.
+pub fn parse_rules(text: &str) -> sandlang::policy::rules::RulePolicy {
+    sandlang::policy::file::PolicyFile::parse(text, Path::new("/"), None).unwrap().rules
+}
+
 /// Runs `source` as `main.sand` in a fresh temp dir with an allow-all policy.
 pub fn run(source: &str) -> RunResult {
     run_with(source, |c| c)

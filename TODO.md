@@ -143,8 +143,6 @@ Visible defects that rarely block users.
       `stdout`, `stderr`, `timezone`, `custom`, and `listen` rules, `allow net *.localhost`
       rules overridden by `deny net localhost`, and quoted wildcard
       literals such as `deny env "AWS_*"`.
-- [ ] 🔴 [033](triage/033-relative-builder-paths/summary.md) _Policy._ Resolve or reject relative paths in `RulePolicy` file builder methods so
-      that `Display` always emits valid, parseable policy syntax.
 - [ ] 🔴 [034](triage/034-always-answer-exact-capability/summary.md) _Policy._ Store "always" prompt answers as `RulePolicy` rules rather than exact
       `Capability` values so that an "always" grant for `write /x/o.txt` also
       permits `read /x/o.txt`.

@@ -1,15 +1,19 @@
 //! Host patterns, URL patterns, and IP address classification.
 
-use super::path::{Seg, Tok};
+use super::PatternError;
+use super::path::{Seg, Tok, unquoted_tokens};
 use crate::vm::value::FxHashMap;
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
+/// A host or IP pattern for a `net` rule, with an optional port.
+///
+/// Parse a pattern with [`str::parse`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct NetPattern {
-    pub kind: HostKind,
-    pub port: Option<u16>,
+pub struct NetPattern {
+    pub(crate) kind: HostKind,
+    pub(crate) port: Option<u16>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -18,16 +22,6 @@ pub(crate) enum HostKind {
     Suffix(String),
     Host(String),
     Ip(IpAddr, u8),
-}
-
-/// Validates a host pattern for [`super::RulePolicy::allow_net`].
-pub fn check_net_pattern(pattern: &str) -> Result<(), String> {
-    NetPattern::parse(pattern).map(drop)
-}
-
-/// Returns `true` if `pattern` is valid for [`super::RulePolicy::allow_listen`].
-pub fn is_valid_listen_pattern(pattern: &str) -> bool {
-    ListenPattern::parse(pattern).is_some()
 }
 
 #[cfg(feature = "os")]
@@ -41,8 +35,16 @@ fn canonical_hostname(name: &str) -> Option<String> {
     (name.len() <= 253 && name.split('.').all(label_ok)).then(|| name.to_ascii_lowercase())
 }
 
+impl std::str::FromStr for NetPattern {
+    type Err = PatternError;
+
+    fn from_str(pattern: &str) -> Result<NetPattern, PatternError> {
+        NetPattern::from_tokens(&unquoted_tokens(pattern)).map_err(PatternError)
+    }
+}
+
 impl NetPattern {
-    pub(crate) fn parse(pattern: &str) -> Result<NetPattern, String> {
+    pub(crate) fn parse_host_port(pattern: &str) -> Result<NetPattern, String> {
         let invalid =
             || format!("invalid host pattern `{pattern}`: expected a host, host:port, *.domain, *, an IP address, or a CIDR range");
         let parsed = NetPattern::parse_unmasked(pattern).ok_or_else(invalid)?;
@@ -64,7 +66,7 @@ impl NetPattern {
         if let Some((scheme, _)) = flat.split_once("://") {
             return Err(format!("net rules require host patterns, not URLs: {}", scheme_removal_hint(scheme, "hosts")));
         }
-        NetPattern::parse(&flat)
+        NetPattern::parse_host_port(&flat)
     }
 
     fn parse_unmasked(pattern: &str) -> Option<NetPattern> {
@@ -504,7 +506,7 @@ const INTERNAL_RANGES: [&str; 24] = [
 
 fn internal_ranges() -> &'static [NetPattern] {
     static PATTERNS: std::sync::LazyLock<Vec<NetPattern>> =
-        std::sync::LazyLock::new(|| INTERNAL_RANGES.iter().map(|p| NetPattern::parse(p).expect("a valid range")).collect());
+        std::sync::LazyLock::new(|| INTERNAL_RANGES.iter().map(|p| NetPattern::parse_host_port(p).expect("a valid range")).collect());
     &PATTERNS
 }
 
@@ -547,8 +549,12 @@ pub(crate) fn parse_port(text: &str) -> Option<u16> {
     if text.bytes().all(|b| b.is_ascii_digit()) { text.parse().ok() } else { None }
 }
 
+/// A bind address pattern for a `listen` rule.
+///
+/// A pattern is an IP address, `localhost`, or `*`, with an optional `:port`. Parse a
+/// pattern with [`str::parse`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct ListenPattern {
+pub struct ListenPattern {
     host: ListenHost,
     port: Option<u16>,
 }
@@ -575,8 +581,19 @@ impl std::fmt::Display for ListenPattern {
     }
 }
 
+impl std::str::FromStr for ListenPattern {
+    type Err = PatternError;
+
+    fn from_str(text: &str) -> Result<ListenPattern, PatternError> {
+        ListenPattern::parse(text)
+            .ok_or_else(|| PatternError(format!("invalid listen pattern `{text}`: expected ip:port, ip, localhost, *:port, or *")))
+    }
+}
+
 impl ListenPattern {
-    pub(crate) fn parse(text: &str) -> Option<ListenPattern> {
+    pub(crate) const ANY: ListenPattern = ListenPattern { host: ListenHost::Any, port: None };
+
+    fn parse(text: &str) -> Option<ListenPattern> {
         let (host, port) = split_port(text)?;
         let host = match host {
             "*" => ListenHost::Any,
@@ -601,10 +618,21 @@ impl ListenPattern {
     }
 }
 
+/// A host and path pattern for an `http` rule, such as `api.example.com/v1/**`.
+///
+/// Parse a pattern with [`str::parse`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct UrlPattern {
-    pub host: NetPattern,
-    pub path: Vec<Seg>,
+pub struct UrlPattern {
+    pub(crate) host: NetPattern,
+    pub(crate) path: Vec<Seg>,
+}
+
+impl std::str::FromStr for UrlPattern {
+    type Err = PatternError;
+
+    fn from_str(text: &str) -> Result<UrlPattern, PatternError> {
+        UrlPattern::from_tokens(&unquoted_tokens(text)).map_err(PatternError)
+    }
 }
 
 fn scheme_removal_hint(scheme: &str, hosts: &str) -> String {
@@ -618,7 +646,7 @@ fn scheme_removal_hint(scheme: &str, hosts: &str) -> String {
 pub(crate) const QUOTED_STAR_IN_HOST: &str = "a quoted `*` is not a wildcard, and an address or port cannot contain `*`: remove the quotes";
 
 impl UrlPattern {
-    pub(crate) fn parse(text: &[Tok]) -> Result<UrlPattern, String> {
+    pub(crate) fn from_tokens(text: &[Tok]) -> Result<UrlPattern, String> {
         let flat: String = text.iter().map(|t| t.0).collect();
         if let Some(i) = flat.find("://").filter(|&i| !flat[..i].contains('/')) {
             return Err(format!("URL patterns must not include a scheme: {}", scheme_removal_hint(&flat[..i], "URL patterns")));
@@ -632,7 +660,7 @@ impl UrlPattern {
         // length so CIDR ranges in `http` rules produce a clear diagnostic.
         let head = text(&rest[..end]);
         let mut address = None;
-        if let Ok(NetPattern { kind: HostKind::Ip(ip, len), port: None }) = NetPattern::parse(&head)
+        if let Ok(NetPattern { kind: HostKind::Ip(ip, len), port: None }) = NetPattern::parse_host_port(&head)
             && len == full_len(ip)
             && end < rest.len()
         {
@@ -661,7 +689,7 @@ impl UrlPattern {
             }
             return Err(message);
         }
-        let host = NetPattern::parse(&authority)?;
+        let host = NetPattern::parse_host_port(&authority)?;
         let mut path = Vec::new();
         for seg in rest.get(end + 1..).unwrap_or_default().split(|t| t.0 == '/' && !t.1) {
             if seg.is_empty() {
@@ -751,7 +779,7 @@ mod tests {
     use proptest::prelude::*;
 
     fn url(text: &str) -> Result<UrlPattern, String> {
-        UrlPattern::parse(&text.chars().map(|c| (c, c == '*')).collect::<Vec<_>>())
+        UrlPattern::from_tokens(&unquoted_tokens(text))
     }
 
     #[test]
@@ -762,7 +790,7 @@ mod tests {
         for name in ["localhost.com", "notlocalhost", "local", "app.localhost.com", "xlocalhost", ""] {
             assert!(!is_localhost(name), "{name}");
         }
-        let rank = |p: &str| NetPattern::parse(p).unwrap().rank();
+        let rank = |p: &str| NetPattern::parse_host_port(p).unwrap().rank();
         assert!(rank("*.localhost") > rank("[::]/127") && rank("*.localhost") > rank("10.0.0.0/31"));
         assert!(rank("*.a.localhost") > rank("*.localhost") && rank("*.a.localhost") < rank("a.localhost"));
         assert!(rank("*.example.com") < rank("10.0.0.0/8"));
@@ -811,7 +839,7 @@ mod tests {
             .iter()
             .chain(&["64:ff9b::/96", "2002::/16", "::ffff:0:0/96", "::ffff:0:0:0/96"])
             .flat_map(|r| {
-                let NetPattern { kind: HostKind::Ip(ip, len), .. } = NetPattern::parse(r).unwrap() else { unreachable!() };
+                let NetPattern { kind: HostKind::Ip(ip, len), .. } = NetPattern::parse_host_port(r).unwrap() else { unreachable!() };
                 let host = |offset: i128| -> IpAddr {
                     match ip {
                         IpAddr::V4(v4) => Ipv4Addr::from((u32::from(v4) as i128 + offset) as u32).into(),
@@ -874,7 +902,7 @@ mod tests {
                 prop_assert!(error.starts_with("URL patterns must not include a scheme"), "{}", error);
                 return Ok(());
             }
-            let bare_address = !host.contains('/') && matches!(NetPattern::parse(host), Ok(NetPattern { kind: HostKind::Ip(ip, len), port: None }) if len == full_len(ip));
+            let bare_address = !host.contains('/') && matches!(NetPattern::parse_host_port(host), Ok(NetPattern { kind: HostKind::Ip(ip, len), port: None }) if len == full_len(ip));
             let first = path.split('/').nth(1).map(|n| n.split(':').next().unwrap_or(n));
             let max = if host.contains(':') { 128 } else { 32 };
             let (host, path) = match first.and_then(|n| n.parse::<u8>().ok()) {
@@ -891,7 +919,7 @@ mod tests {
                 prop_assert!(error.starts_with(&format!("`{host}` is a CIDR range, and `http` rules accept only single IP addresses")), "{}", error);
                 return Ok(());
             }
-            match NetPattern::parse(&host) {
+            match NetPattern::parse_host_port(&host) {
                 Ok(expected) => {
                     let parsed = parsed.unwrap();
                     prop_assert_eq!(&parsed.host, &expected);
