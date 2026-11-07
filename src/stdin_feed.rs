@@ -1,4 +1,4 @@
-//! Host-supplied standard input stream ([`StdinFeed`]).
+//! Host-supplied standard input stream.
 
 use crate::vm::WaitKind;
 use std::collections::VecDeque;
@@ -9,98 +9,101 @@ use std::task::{Context, Poll, Waker};
 use tokio::io::{AsyncBufRead, AsyncRead, ReadBuf};
 use tokio::sync::Notify;
 
-/// A channel that supplies standard input from the host to scripts
-/// ([`crate::Config::stdin_feed`]). Hosts wait for
-/// [`StdinFeed::wait_for_request`], and stream input with [`StdinFeed::send`]
-/// or answer one read with [`StdinRequest::answer`]. Clones share the same
-/// underlying stream.
+/// A handle that streams standard input from the host to scripts.
+///
+/// Create a `StdinFeed` with [`crate::Config::stdin_feed`] or
+/// [`crate::Config::stdin_io_feed`]. The host awaits
+/// [`StdinFeed::wait_for_request`] and then either streams bytes with
+/// [`StdinFeed::send`] or answers a single request with
+/// [`StdinRequest::answer`]. Clones share the same underlying stream.
 #[derive(Clone)]
 pub struct StdinFeed {
     channel: Arc<StdinChannel>,
 }
 
-/// A standard input read that waits for host input. Respond to it with
-/// [`StdinRequest::answer`] or [`StdinRequest::dismiss`]. Each wait gets its
-/// own request: if the read takes part of a line and waits again, the engine
-/// makes a new request.
+/// A handle to a single wait for standard input.
+///
+/// Respond to the request with [`StdinRequest::answer`] or
+/// [`StdinRequest::dismiss`]. If a read consumes a partial line from
+/// [`StdinFeed::send`] and waits again, the engine issues a new `StdinRequest`.
 #[derive(Clone)]
 pub struct StdinRequest {
     channel: Arc<StdinChannel>,
-    wait: u64,
+    wait_id: u64,
 }
 
-/// The standard input of an engine: a stream that the host sends through a
-/// [`StdinFeed`], or fixed input.
+/// Shared standard input channel for an engine.
 pub(crate) struct StdinChannel {
     state: Mutex<StdinChannelState>,
     changed: Notify,
-    /// Held by the read in progress, so that reads of the engine's VMs take
-    /// turns.
+    /// Serializes concurrent standard input reads across tasks and VMs.
     read_lock: tokio::sync::Mutex<()>,
     pub(crate) wait_kind: WaitKind,
 }
 
 #[derive(Default)]
 struct StdinChannelState {
-    /// Chunks from [`StdinFeed::send`] that no read has used, each with the
-    /// offset of its first unused byte.
-    sent: VecDeque<(Vec<u8>, usize)>,
-    /// True after [`StdinFeed::end`].
+    /// Buffered chunks from [`StdinFeed::send`], paired with the index of the
+    /// first unread byte.
+    queued_chunks: VecDeque<(Vec<u8>, usize)>,
+    /// True after [`StdinFeed::end`] is called.
     stream_ended: bool,
-    /// The answer to the open wait, until the read takes it.
+    /// Response from [`StdinRequest::answer`] or [`StdinRequest::dismiss`] for
+    /// the active wait.
     answer: Option<Vec<u8>>,
-    /// The number of the wait that is open, if a read waits for input.
-    open_wait: Option<u64>,
+    /// Identifier of the active wait while a read awaits host input.
+    open_wait_id: Option<u64>,
     waits_started: u64,
-    /// True if the engine has no runnable tasks or ready I/O.
+    /// True while all other tasks and I/O operations in the engine are idle.
     engine_idle: bool,
     read_waker: Option<Waker>,
 }
 
 impl StdinChannelState {
-    /// True if a read can take input or an end of input without a wait.
+    /// Returns `true` if buffered bytes, an answer, or end-of-file is ready.
     fn has_input(&self) -> bool {
-        self.answer.is_some() || !self.sent.is_empty() || self.stream_ended
+        self.answer.is_some() || !self.queued_chunks.is_empty() || self.stream_ended
     }
 }
 
 impl StdinFeed {
-    /// Creates a feed and the channel that the engine reads it through.
+    /// Creates a feed and its underlying channel.
     pub(crate) fn new(wait_kind: WaitKind) -> (StdinFeed, Arc<StdinChannel>) {
         let channel = StdinChannel::new(wait_kind, StdinChannelState::default());
         (StdinFeed { channel: channel.clone() }, channel)
     }
 
-    /// Appends `data` to the input stream. Queued data persists across reads
-    /// until a script consumes it. Has no effect after the stream ends.
+    /// Appends `data` to the input stream. Buffered bytes remain queued across
+    /// reads until a script consumes them. Calls after [`StdinFeed::end`] are
+    /// ignored.
     pub fn send(&self, data: impl Into<Vec<u8>>) {
         let data = data.into();
         self.channel.change(|state| {
             if !data.is_empty() && !state.stream_ended {
-                state.sent.push_back((data, 0));
+                state.queued_chunks.push_back((data, 0));
             }
         });
     }
 
-    /// Ends the input stream. Reads take the input that is already queued,
-    /// and then every read gets an end of input without a wait.
+    /// Closes the input stream. Subsequent reads consume any buffered bytes
+    /// and then return end-of-file immediately.
     pub fn end(&self) {
         self.channel.change(|state| state.stream_ended = true);
     }
 
-    /// Waits until a read needs input, even if other tasks are running, and
-    /// returns its [`StdinRequest`].
+    /// Waits until a standard input read needs host input, even if other tasks
+    /// are runnable, and returns the [`StdinRequest`] for that wait.
     pub async fn wait_for_request(&self) -> StdinRequest {
-        let wait = self.channel.wait_until(|state| state.open_wait).await;
-        StdinRequest { channel: self.channel.clone(), wait }
+        let wait_id = self.channel.wait_until(|state| state.open_wait_id).await;
+        StdinRequest { channel: self.channel.clone(), wait_id }
     }
 }
 
 impl StdinRequest {
-    /// Gives the read `data`, a trailing newline if `data` lacks one, and an
-    /// end of input, so that a read of any kind completes. When the read
-    /// finishes, the engine discards the part of `data` that it did not use.
-    /// Returns `false` if the request is already closed.
+    /// Supplies `data` to the waiting read, appends a newline if `data` does
+    /// not end with one, and terminates the read. The engine discards any
+    /// bytes of `data` that the read does not consume. Returns `false` if the
+    /// request is already closed.
     pub fn answer(&self, data: impl Into<Vec<u8>>) -> bool {
         let mut data = data.into();
         if !data.ends_with(b"\n") {
@@ -109,9 +112,9 @@ impl StdinRequest {
         self.respond(data)
     }
 
-    /// Gives the read only an end of input, so that `read_line` returns `None`
-    /// if the read has no data yet. Returns `false` if the request is already
-    /// closed.
+    /// Terminates the waiting read without supplying bytes. `read_line`
+    /// returns `None` if it has not buffered any bytes. Returns `false` if the
+    /// request is already closed.
     pub fn dismiss(&self) -> bool {
         self.respond(Vec::new())
     }
@@ -119,24 +122,26 @@ impl StdinRequest {
     fn respond(&self, answer: Vec<u8>) -> bool {
         let mut answered = false;
         self.channel.change(|state| {
-            if state.open_wait == Some(self.wait) {
+            if state.open_wait_id == Some(self.wait_id) {
                 (state.answer, answered) = (Some(answer), true);
             }
         });
         answered
     }
 
-    /// Waits until the read receives input or ends.
+    /// Waits until the request is answered, dismissed, satisfied by streamed
+    /// bytes, or cancelled.
     pub async fn wait_until_closed(&self) {
-        self.channel.wait_until(|state| (state.open_wait != Some(self.wait)).then_some(())).await;
+        self.channel.wait_until(|state| (state.open_wait_id != Some(self.wait_id)).then_some(())).await;
     }
 
-    /// Waits until no other task of the script can run while the read waits.
-    /// A host that shares a terminal with the script waits for this before it
-    /// reads the terminal. Returns `false` if the request closes first.
+    /// Waits until all other tasks in the script are idle while this request
+    /// remains open. A host that shares a terminal with the script awaits this
+    /// method before reading from the terminal. Returns `false` if the request
+    /// is closed first.
     pub async fn wait_until_nothing_else_runs(&self) -> bool {
         self.channel
-            .wait_until(|state| if state.open_wait == Some(self.wait) { state.engine_idle.then_some(true) } else { Some(false) })
+            .wait_until(|state| if state.open_wait_id == Some(self.wait_id) { state.engine_idle.then_some(true) } else { Some(false) })
             .await
     }
 }
@@ -146,22 +151,25 @@ impl StdinChannel {
         Arc::new(StdinChannel { state: Mutex::new(state), changed: Notify::new(), read_lock: Default::default(), wait_kind })
     }
 
-    /// Creates a channel whose stream holds `input` and has ended.
+    /// Creates a closed channel preloaded with `input`.
     pub(crate) fn with_input(input: Vec<u8>) -> Arc<StdinChannel> {
-        StdinChannel::new(WaitKind::Io, StdinChannelState { sent: VecDeque::from([(input, 0)]), stream_ended: true, ..Default::default() })
+        StdinChannel::new(
+            WaitKind::Io,
+            StdinChannelState { queued_chunks: VecDeque::from([(input, 0)]), stream_ended: true, ..Default::default() },
+        )
     }
 
     fn lock(&self) -> MutexGuard<'_, StdinChannelState> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Applies `f` to the state, closes the open wait if a read can now go
-    /// on, and wakes the read and every host waiter.
+    /// Updates the channel state with `f`, clears the active wait if input is
+    /// ready, and wakes waiting tasks.
     fn change(&self, f: impl FnOnce(&mut StdinChannelState)) {
         let mut state = self.lock();
         f(&mut state);
         if state.has_input() {
-            state.open_wait = None;
+            state.open_wait_id = None;
         }
         let waker = state.read_waker.take();
         drop(state);
@@ -184,7 +192,7 @@ impl StdinChannel {
     }
 }
 
-/// Marks the engine as idle for a [`StdinChannel`] until it is dropped.
+/// Marks the engine as idle on a [`StdinChannel`] until dropped.
 pub(crate) struct StdinIdleGuard {
     channel: Arc<StdinChannel>,
 }
@@ -203,28 +211,30 @@ impl Drop for StdinIdleGuard {
 }
 
 impl StdinChannel {
-    /// Starts a read operation when the read in progress ends.
+    /// Acquires the read lock and begins a standard input read.
     pub(crate) async fn begin_read(&self) -> ActiveStdinRead<'_> {
         ActiveStdinRead::new(self, self.read_lock.lock().await)
     }
 
-    /// Starts a read operation, or returns `None` if another is in progress.
+    /// Begins a standard input read if the read lock is free.
     pub(crate) fn try_begin_read(&self) -> Option<ActiveStdinRead<'_>> {
         Some(ActiveStdinRead::new(self, self.read_lock.try_lock().ok()?))
     }
 }
 
-/// An active read operation on a [`StdinChannel`]. Dropping this guard ends
-/// the read, discards an unused answer, and puts other unused input back at
-/// the front of the feed.
+/// Guard for an in-progress read on a [`StdinChannel`].
+///
+/// Dropping this guard finishes the read, discards any unconsumed answer
+/// bytes, and returns unconsumed stream bytes to the front of the queue.
 pub(crate) struct ActiveStdinRead<'a> {
     channel: &'a StdinChannel,
     _turn: tokio::sync::MutexGuard<'a, ()>,
-    /// Input that the read took from the feed, and the offset of its first
-    /// unused byte.
+    /// Current chunk taken from the channel, with the index of its first
+    /// unread byte in `at`.
     buf: Vec<u8>,
     at: usize,
-    /// True if `buf` holds an answer, which ends the read when it is used up.
+    /// True if `buf` came from [`StdinRequest::answer`] or
+    /// [`StdinRequest::dismiss`].
     answered: bool,
     ended: bool,
 }
@@ -244,7 +254,7 @@ impl<'a> ActiveStdinRead<'a> {
             } else if let Some(answer) = state.answer.take() {
                 (self.ended, self.answered) = (answer.is_empty(), true);
                 (self.buf, self.at) = (answer, 0);
-            } else if let Some((data, at)) = state.sent.pop_front() {
+            } else if let Some((data, at)) = state.queued_chunks.pop_front() {
                 (self.buf, self.at) = (data, at);
             } else {
                 self.ended = state.stream_ended;
@@ -259,9 +269,9 @@ impl Drop for ActiveStdinRead<'_> {
         let (unused, at, answered) = (std::mem::take(&mut self.buf), self.at, self.answered);
         self.channel.change(|state| {
             if !answered && at < unused.len() {
-                state.sent.push_front((unused, at));
+                state.queued_chunks.push_front((unused, at));
             }
-            (state.answer, state.open_wait) = (None, None);
+            (state.answer, state.open_wait_id) = (None, None);
         });
     }
 }
@@ -286,9 +296,9 @@ impl AsyncBufRead for ActiveStdinRead<'_> {
             }
             let mut state = this.channel.lock();
             if !state.has_input() {
-                if state.open_wait.is_none() {
+                if state.open_wait_id.is_none() {
                     state.waits_started += 1;
-                    state.open_wait = Some(state.waits_started);
+                    state.open_wait_id = Some(state.waits_started);
                 }
                 state.read_waker = Some(cx.waker().clone());
                 drop(state);

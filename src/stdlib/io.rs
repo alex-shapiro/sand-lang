@@ -136,9 +136,11 @@ fn input_line(vm: &mut Vm, line: Option<Vec<u8>>) -> Result<Option<String>, Host
 /// The most `read` returns at once from standard input.
 const STDIN_CHUNK: usize = 64 << 10;
 
-/// The next line of standard input without its terminator (`Some(None)` at
-/// the end), if it is in a buffer already; `None`, consuming nothing, if the
-/// read must wait, another is under way, or the line does not fit in memory.
+/// Takes a buffered line from standard input without waiting.
+///
+/// Returns `Some(Some(line))` without the trailing `\n` or `\r\n`,
+/// `Some(None)` at end-of-file, or `None` if a complete line is not buffered,
+/// another read is active, or the line exceeds the memory limit.
 fn buffered_line(vm: &Vm) -> Option<Option<Vec<u8>>> {
     let mut read = vm.host.stdin.as_ref()?.try_begin_read()?;
     let (buf, at_end) = read.available();
@@ -159,8 +161,8 @@ fn buffered_line(vm: &Vm) -> Option<Option<Vec<u8>>> {
     Some(Some(line))
 }
 
-/// Reads `what` from standard input: `None` only for a line at the end of
-/// the input.
+/// Reads `what` from `stdin`, returning `Ok(None)` if `Read::Line` reaches
+/// end-of-file.
 async fn read_input(stdin: Option<&StdinChannel>, what: Read, res: &mut Reservation) -> Result<Option<Vec<u8>>, IoFailure> {
     let stdin = stdin.ok_or_else(|| IoFailure::new("io", "the engine has no standard input"))?;
     read_from(&mut stdin.begin_read().await, what, res).await

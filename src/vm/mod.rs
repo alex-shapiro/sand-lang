@@ -64,13 +64,13 @@ const _: () = assert!(std::mem::size_of::<Ctl>() == std::mem::size_of::<usize>()
 const _: () = assert!(std::mem::size_of::<Result<Value, Ctl>>() == 16);
 const _: () = assert!(std::mem::size_of::<Result<Option<Value>, Ctl>>() == 16);
 
-/// What a suspended task waits for. It decides whether idle time counts
+/// Classification of a task wait. Determines whether idle wait time counts
 /// toward `max_wall_time`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WaitKind {
-    /// An I/O operation or a timer. Idle time counts.
+    /// I/O or timer wait. Idle time counts toward `max_wall_time`.
     Io,
-    /// A user action. Idle time does not count.
+    /// User-action wait. Idle time does not count toward `max_wall_time`.
     User,
 }
 
@@ -135,7 +135,7 @@ impl Ctl {
         Ctl(Box::new(CtlKind::Exit(code)))
     }
 
-    /// Suspend the task until the future of `suspension` completes.
+    /// Suspends the calling task on `suspension`.
     pub(crate) fn suspend(suspension: Suspension) -> Ctl {
         Ctl(Box::new(CtlKind::Async(suspension)))
     }
@@ -479,7 +479,7 @@ pub struct Host {
     pub always: Always,
     pub stdout: SharedSink,
     pub stderr: SharedSink,
-    /// `None` if the engine has no standard input.
+    /// `None` if standard input is not configured.
     pub(crate) stdin: Option<Arc<crate::stdin_feed::StdinChannel>>,
     pub output_bytes: u64,
     pub limits: Limits,

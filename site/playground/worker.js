@@ -59,7 +59,7 @@ const hooks = {
     }),
 };
 
-// Creates an `Engine` or a `Session` (`Kind`) for `sandbox`.
+// Constructs `Kind` with the options and hooks for `sandbox`.
 function create(Kind, sandbox, engineHooks = {}) {
   const options = engineOptions(sandbox);
   const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;

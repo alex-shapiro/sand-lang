@@ -1,7 +1,7 @@
 //! Traits for reading and writing byte streams, and standard stream handles.
 //!
-//! Reading from `stdin` requires the `stdin` capability. If the engine has no
-//! standard input, a `stdin` read fails with kind `"io"`.
+//! Reading from `stdin` requires the `stdin` capability. If standard input is
+//! not configured, reading from `stdin` fails with kind `"io"`.
 //!
 //! Writing to `stdout` or `stderr` requires the `stdout` or `stderr` capability
 //! and counts toward an engine's `max_output_bytes` limit.

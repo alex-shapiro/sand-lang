@@ -221,17 +221,16 @@ Visible defects that rarely block users.
 
 ### Embedding
 
-- [ ] ❓ Decide whether fixed stdin persists across the VMs of one engine, as a
-      feed does. Now `Engine::new_vm` makes a new channel for
-      `Config::stdin_bytes`, so fixed input starts again after
-      `Session::reset` and in each test of `run_tests`. One shared channel
-      would remove `StdinConfig`, but each test would no longer get the same
-      fixed input.
-- [ ] ❓ Advance the wall-time deadline through a single mechanism. During
-      compilation, module discovery adds prompt wait time to a `prompted` total
-      and checks `deadline + prompted`. During execution,
-      `Vm::exclude_wall_time` shifts the deadline directly. A single deadline
-      type could handle both compilation and execution.
+- [ ] ❓ Decide whether `Config::stdin_bytes` should share its channel across
+      every VM of an engine, as `StdinFeed` does. `Engine::new_vm` creates a
+      fresh channel for `Config::stdin_bytes`, so `Session::reset` and each
+      test in `run_tests` receive the full input again. Sharing a channel
+      across VMs would remove `StdinConfig`, but earlier tests could consume
+      input before later tests run.
+- [ ] ❓ Advance the wall-time deadline through a single type during
+      compilation and execution. During compilation, module discovery adds
+      prompt wait time to a `prompted` total and checks `deadline + prompted`.
+      During execution, `Vm::exclude_wall_time` shifts `deadline` directly.
 - [ ] ⚪ Pass `Num<N>` evidence to native `impl` methods by extracting the `Num`
       dictionary from the `impl` dictionary.
 - [ ] ⚪ Unify the terminology for Rust types attached via `NativeModule::bind`
@@ -253,11 +252,11 @@ Visible defects that rarely block users.
 
 ### Tooling
 
-- [ ] ❓ Decide whether a script sees a process stdin error in `sand run` and
-      `sand test`. Now `forward_stdin` writes the error to stderr and ends the
-      feed, so the script cannot tell cut-off input from complete input. Adding
-      back `StdinFeed::fail(io::Error)` would make every later read fail with
-      the error, for about 25 lines with its CLI test.
+- [ ] ❓ Decide whether `sand run` and `sand test` should surface process stdin
+      errors to the running script. `forward_stdin` writes the error to stderr
+      and closes the feed, so the script receives end-of-file instead of an I/O
+      error. A `StdinFeed::fail(io::Error)` method could fail subsequent reads
+      with that error.
 - [ ] ⚪ Fix broken intra-doc links to private items and run `cargo doc` with
       `-D warnings` in CI.
 - [ ] ⚪ Index opposing rules in the policy linter to avoid quadratic comparisons

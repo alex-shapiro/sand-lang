@@ -29,11 +29,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::task::Poll;
 
-/// An interactive session: a sequence of inputs (statements, expressions and
-/// declarations, like the contents of a module) checked and run one at a
-/// time, each in the context of the previous ones. Created by
-/// [`Session::new`] with a configuration (policy, prompter, limits, streams
-/// and modules) that the session owns.
+/// An interactive session that compiles and runs inputs incrementally.
+///
+/// Each input can contain statements, expressions, and declarations, and
+/// executes in the context of earlier inputs.
 ///
 /// ```no_run
 /// # async fn demo() -> Result<(), sandlang::Error> {
@@ -104,8 +103,8 @@ struct State {
 const SESSION_MODULE: &str = "repl";
 
 impl Session {
-    /// Creates a session with `config`, checking any registered host modules
-    /// as [`Engine::new`] does.
+    /// Creates a session with `config` and validates any registered host
+    /// modules.
     pub fn new(config: Config) -> Result<Session, Error> {
         let engine = Engine::new(config)?;
         let config = engine.config();

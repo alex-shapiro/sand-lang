@@ -46,7 +46,7 @@ export interface EngineOptions {
   env?: Record<string, string>;
   /** Arguments (`env.args()`). */
   args?: string[];
-  /** Standard input (as the policy allows). Without it, a read of standard input fails with kind `"io"`. */
+  /** Standard input bytes. If omitted, reading from standard input fails with kind `"io"`. */
   stdin?: string;
   /** Seeds the random number generator, for reproducible runs. */
   seed?: number;
@@ -146,8 +146,7 @@ impl Drop for HookKey {
     }
 }
 
-/// The configuration of an engine or a session, made from the options and
-/// hooks that JavaScript passes.
+/// Configuration and shared state built from JavaScript options and hooks.
 struct HostConfig {
     config: Config,
     fs: MemFs,
@@ -155,8 +154,11 @@ struct HostConfig {
 }
 
 impl HostConfig {
-    /// Throws an `Error` for invalid options; for an invalid policy, its
-    /// `policyErrors` property lists `{line, column, message}`.
+    /// Builds a [`HostConfig`] from JavaScript `options` and `hooks`.
+    ///
+    /// Returns a JavaScript `Error` if an option or policy rule is invalid.
+    /// Policy errors include a `policyErrors` array of `{line, column, message}`
+    /// objects.
     fn new(options: &JsValue, hooks: &JsValue) -> Result<HostConfig, JsValue> {
         check_keys(options, OPTION_KEYS, "engine option")?;
         check_keys(hooks, &["onOutput", "onPrompt"], "engine hook")?;
@@ -209,8 +211,10 @@ pub struct Engine {
 
 #[wasm_bindgen]
 impl Engine {
-    /// Creates an engine. Throws an `Error` for invalid options; for an
-    /// invalid policy, its `policyErrors` property lists `{line, column, message}`.
+    /// Creates an engine from `options` and `hooks`.
+    ///
+    /// Throws an `Error` if an option or policy rule is invalid. Policy errors
+    /// include a `policyErrors` array of `{line, column, message}` objects.
     #[wasm_bindgen(constructor)]
     pub fn new(
         #[wasm_bindgen(unchecked_param_type = "EngineOptions")] options: JsValue,
@@ -280,44 +284,44 @@ impl Engine {
         self.interrupt.interrupt();
     }
 
-    /// The engine's in-memory file system.
+    /// Returns the engine's in-memory file system.
     #[wasm_bindgen(getter, js_name = fileSystem)]
     pub fn file_system(&self) -> FileSystem {
         FileSystem(self.fs.clone())
     }
 }
 
-/// The in-memory file system of an engine or a session.
+/// In-memory file system of an [`Engine`] or [`Session`].
 #[wasm_bindgen]
 pub struct FileSystem(MemFs);
 
 #[wasm_bindgen]
 impl FileSystem {
-    /// Every file of the file system, by path.
+    /// Returns all files in the file system, sorted by path.
     #[wasm_bindgen(unchecked_return_type = "FileEntry[]")]
     pub fn files(&self) -> JsValue {
         file_entries(self.0.files())
     }
 
-    /// A number that grows whenever a file is written or moved (by a
-    /// script or the host), for `changedFiles`.
+    /// Returns a counter that increments whenever a file is written or moved.
     pub fn generation(&self) -> f64 {
         self.0.generation() as f64
     }
 
-    /// The files written or moved since the file system was at `generation`.
+    /// Returns all files written or moved since `generation`.
     #[wasm_bindgen(js_name = changedFiles, unchecked_return_type = "FileEntry[]")]
     pub fn changed_files(&self, generation: f64) -> JsValue {
         file_entries(self.0.changed_files(generation as u64))
     }
 
-    /// The contents of a file, or `undefined` if there is none.
+    /// Returns the contents of `path`, or `undefined` if the file does not
+    /// exist.
     #[wasm_bindgen(js_name = readFile)]
     pub fn read_file(&self, path: &str) -> Option<Vec<u8>> {
         self.0.read(path).ok()
     }
 
-    /// Writes a file (text or bytes), creating its directories.
+    /// Writes text or bytes to `path`, creating parent directories as needed.
     #[wasm_bindgen(js_name = writeFile)]
     pub fn write_file(
         &self,
@@ -328,14 +332,13 @@ impl FileSystem {
         self.0.write(path, bytes).map_err(|e| error(&format!("{path}: {e}")))
     }
 
-    /// Removes a file, or a directory with its contents.
+    /// Removes the file or directory tree at `path`.
     pub fn remove(&self, path: &str) -> Result<(), JsValue> {
         self.0.remove(path).map_err(|e| error(&format!("{path}: {e}")))
     }
 }
 
-/// An interactive session: inputs run one at a time, each in the context of
-/// the previous ones (like `sand repl`).
+/// An interactive session that compiles and runs inputs incrementally.
 #[wasm_bindgen]
 pub struct Session {
     session: Rc<RefCell<Option<sandlang::Session>>>,
@@ -360,7 +363,7 @@ impl Session {
         Ok(Session { session: Rc::new(RefCell::new(Some(session))), fs, interrupt, hooks, stop_tasks: Rc::default() })
     }
 
-    /// The session's in-memory file system.
+    /// Returns the session's in-memory file system.
     #[wasm_bindgen(getter, js_name = fileSystem)]
     pub fn file_system(&self) -> FileSystem {
         FileSystem(self.fs.clone())

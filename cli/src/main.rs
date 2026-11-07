@@ -226,7 +226,7 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
         .limits(limits)
         .gc_stress(std::env::var_os("SAND_GC_STRESS").is_some())
         .dump_bytecode(std::env::var_os("SAND_DUMP_BYTECODE").is_some());
-    // A person types at a terminal; a pipe or a file comes from a program.
+    // Only terminal input pauses the wall-time limit while a read waits.
     let (mut config, stdin_feed) =
         if std::io::IsTerminal::is_terminal(&std::io::stdin()) { config.stdin_feed() } else { config.stdin_io_feed() };
     if !files_only {
@@ -436,7 +436,7 @@ fn cmd_run(args: &[String]) -> Result<u8, String> {
     let mut engine = Engine::new(opts.config.exit_after_run(true)).map_err(|e| e.render())?;
     let rt = runtime()?;
     let r = rt.block_on(with_stdin_forwarded(&opts.stdin_feed, engine.run_file(&file)));
-    // A read of the process's standard input cannot be cancelled; do not wait for it.
+    // Drop the runtime without waiting for a blocked stdin read thread.
     rt.shutdown_background();
     if std::env::var_os("SAND_GC_STATS").is_some() {
         eprintln!("{:#?}", engine.gc_stats());
@@ -447,7 +447,7 @@ fn cmd_run(args: &[String]) -> Result<u8, String> {
     }
 }
 
-/// Awaits `run` while it forwards the process's standard input to `feed`.
+/// Runs `run` while forwarding process standard input to `feed`.
 async fn with_stdin_forwarded<T>(feed: &StdinFeed, run: impl Future<Output = T>) -> T {
     let mut run = std::pin::pin!(run);
     tokio::select! {
@@ -458,12 +458,11 @@ async fn with_stdin_forwarded<T>(feed: &StdinFeed, run: impl Future<Output = T>)
     run.await
 }
 
-/// Sends the process's standard input to `feed` until it ends or fails. It
-/// reads the input only while a script read waits, so that a script that does
-/// not read does not take input from the terminal.
+/// Forwards process standard input to `feed` until end-of-file or an I/O error.
+/// Reads from process standard input only after a script requests input.
 async fn forward_stdin(feed: &StdinFeed) {
     use tokio::io::AsyncBufReadExt;
-    // Each fill waits for a script read, so a small buffer makes large inputs slow.
+    // A 256 KiB buffer reduces the number of waits on large inputs.
     let mut stdin = tokio::io::BufReader::with_capacity(256 << 10, tokio::io::stdin());
     loop {
         feed.wait_for_request().await;

@@ -934,12 +934,12 @@ fn types_of_generic_functions() {
     assert_eq!(ty("[]"), "[_]");
 }
 
-/// Waits until a read of `feed` waits while no other task can run.
+/// Waits until a request on `feed` is open and all other tasks are idle.
 async fn input_needed(feed: &StdinFeed) {
     while !feed.wait_for_request().await.wait_until_nothing_else_runs().await {}
 }
 
-/// Whether a read of `feed` waits for input now.
+/// Returns `true` if `feed` has an open request.
 fn has_request(rt: &tokio::runtime::Runtime, feed: &StdinFeed) -> bool {
     rt.block_on(async { tokio::time::timeout(Duration::ZERO, feed.wait_for_request()).await }).is_ok()
 }
@@ -953,7 +953,7 @@ fn scripts_read_the_input_the_host_feeds() {
     feed.send("early\npart");
     assert_eq!(r.value("io.stdin.read_line()?"), "Some(\"early\")");
     assert!(!has_request(&r.rt, &feed));
-    // A waiting read requests input when all other tasks are idle.
+    // `input_needed` resolves once the read waits and all other tasks are idle.
     let Repl { session, rt, .. } = &mut r;
     let (value, ()) = rt.block_on(async {
         let answer = async {
@@ -1036,13 +1036,13 @@ fn an_answer_completes_a_read_of_any_kind() {
     assert_eq!(answered("io.stdin.read_all()?.len()", |request| assert!(request.answer("abc"))), "4");
     assert_eq!(answered("io.stdin.read_all()?.len()", |request| assert!(request.answer("a\nb\n"))), "4");
     assert_eq!(answered("io.stdin.read_line()?", |request| assert!(request.dismiss())), "None");
-    // A read discards the part of its answer that it does not use.
+    // The engine discards any bytes of an answer that the read does not consume.
     let two_reads = "[io.stdin.read_line()?, io.stdin.read_line()?]";
     assert_eq!(answered(two_reads, |request| assert!(request.answer("x\nleft over"))), "[Some(\"x\"), Some(\"x\")]");
 }
 
 #[test]
-fn a_request_that_closes_stays_closed() {
+fn closed_request_rejects_later_responses() {
     let (config, feed) = Config::new().policy(RulePolicy::allow_all()).stdin_feed();
     let mut r = Repl::with(config);
     r.ok("import io");
@@ -1104,7 +1104,8 @@ fn wall_time_limited() -> Config {
     Config::new().policy(RulePolicy::allow_all()).limits(Limits { max_wall_time: Some(Duration::from_millis(100)), ..Limits::default() })
 }
 
-/// Runs a read that gets input after 60 s while a task ticks every 50 ms.
+/// Evaluates `read_line` while a background task ticks every 50 ms, and sends
+/// input after 60 s.
 fn late_input((config, feed): (Config, StdinFeed)) -> (Repl, Result<Option<String>, Error>) {
     let mut r = Repl::paused(config);
     r.ok("import io\nvar ticks = 0\nlet ticker = spawn { while true { task.sleep(50ms)\nticks += 1 } }");

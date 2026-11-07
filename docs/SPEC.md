@@ -1998,57 +1998,51 @@ deterministic. By default, `Config::new()` uses `RulePolicy::standard()`, which
 allows only `Stdout` and `Stderr`, without a prompter. As a result, the engine
 denies all other capability requests, including script imports unless a rule
 such as `allow import ./lib` permits them. It writes output to the process
-standard streams and provides no standard input: a read of standard input
-fails with kind `"io"`.
+standard streams and leaves standard input unconfigured. Reading from
+unconfigured standard input fails with kind `"io"`.
 
-The host can capture standard output and standard error or feed standard input
-into a running script. `Config::stdout` and `Config::stderr` redirect script
-output to an `OutputSink`. `Config::stdin_bytes` gives scripts fixed input,
-and `Config::stdin_feed` gives them input that the host sends while they run.
+The host can capture standard output and standard error or supply standard input
+to a running script. `Config::stdout` and `Config::stderr` redirect script
+output to an `OutputSink`. `Config::stdin_bytes` supplies fixed input bytes.
+`Config::stdin_feed` and `Config::stdin_io_feed` create a `StdinFeed` and return
+it with the updated `Config`. A host that exposes process standard input
+forwards that input to the `StdinFeed`, as `sand run` does (§17.5).
 
-`Config::stdin_feed` creates a new `StdinFeed` and returns it with the
-config. The engine or session that the host creates from the config reads
-that feed. A host that runs scripts with its process's standard input
-forwards that input to the feed, as `sand run` does (§17.5).
+`StdinFeed::wait_for_request` waits until a standard input read needs bytes,
+even if other tasks are runnable, and returns a `StdinRequest` for that wait. If
+a read consumes a partial line from `StdinFeed::send` and waits again, the
+engine issues a new `StdinRequest`. `StdinRequest::wait_until_closed` waits
+until the request receives input or is cancelled.
+`StdinRequest::wait_until_nothing_else_runs` waits until all other tasks are
+idle while the request remains open. A host that shares a terminal with the
+script, such as `sand repl`, awaits this method before reading a line from the
+terminal.
 
-A host learns that a script wants input from `StdinFeed::wait_for_request`. It
-waits until a read needs input, even if other tasks are running, and returns a
-`StdinRequest` for that wait. `StdinRequest::wait_until_closed` waits until the
-read gets input or ends. Each wait gets its own request: if a read takes part
-of a line from `StdinFeed::send` and waits again, the engine makes a new
-request. `StdinRequest::wait_until_nothing_else_runs` waits
-until no other task of the script can run while the read waits; a host that
-shares a terminal with the script, such as `sand repl`, waits for this before
-it takes a line from the terminal.
+The host can supply input to a `StdinFeed` as a stream or as per-request
+answers:
 
-A host gives input in one of two ways:
-
-- As a stream, for a terminal or a pipe. `StdinFeed::send` adds bytes to the
-  input. Bytes that one read does not use stay for the next read.
-  `StdinFeed::end` ends the stream: after the reads take the queued bytes,
-  every read gets an end of input without a wait.
-- As one answer to one read, for an input field in an app.
-  `StdinRequest::answer(data)` gives the read `data`, a trailing newline if
-  `data` lacks one, and an end of input, so that a read of any kind completes.
-  `StdinRequest::dismiss()` gives the read only an end of input, so
-  `read_line` returns `None` if the read has no data yet. Each request accepts
-  at most one answer; both methods return `false` if the request is already
-  closed.
-  When the read finishes, the engine discards the part of the answer that it
-  did not use.
+- **Streamed input.** `StdinFeed::send` appends bytes to the stream. Unread
+  bytes remain buffered for subsequent reads. `StdinFeed::end` closes the stream
+  so that reads return end-of-file after consuming all buffered bytes.
+- **Per-request answers.** `StdinRequest::answer(data)` supplies `data`, appends
+  a newline if `data` does not end with one, and terminates the read. The engine
+  discards any bytes of `data` that the read does not consume.
+  `StdinRequest::dismiss()` terminates the read without supplying bytes, so
+  `read_line` returns `None` if it has not buffered any bytes. Each request
+  accepts a single response. Both methods return `false` if the request is
+  already closed.
 
 Idle time spent waiting for user input does not count toward `max_wall_time`.
-Time spent running other tasks still counts. If one task waits for the user,
-elapsed time while other tasks wait for timers or network I/O also does not
-count toward `max_wall_time`; the CPU time, instruction, memory, and output
-limits still bound the run during that wait. User waits include:
+Time spent executing other tasks still counts. While a task waits for the user,
+idle time spent waiting for timers or network I/O in other tasks is also
+excluded from `max_wall_time`. The CPU time, instruction, memory, and output
+limits remain enforced during the wait. User waits include:
 
-- reads from a `StdinFeed` made by `Config::stdin_feed`
+- reads from a `StdinFeed` created by `Config::stdin_feed`
 - host functions that return a `Later` with `WaitKind::User` (§16.3)
 
-`Config::stdin_io_feed` makes a feed for input that comes from a program, such
-as a pipe, and not from a person. A read of that feed waits for I/O, so the
-wait counts toward `max_wall_time`.
+`Config::stdin_io_feed` creates a `StdinFeed` for programmatic input, such as a
+pipe. Reads from that feed use `WaitKind::Io` and count toward `max_wall_time`.
 
 The host can intercept and filter structured log records instead of
 writing them to standard error. `Config::log_sink` routes records to a
@@ -2464,9 +2458,8 @@ test passes if it completes without an error. Output: one line per test
 code 1 if any test failed, 2 for compile errors. `sand test` accepts the policy
 and limit options of `sand run` (§17.5) and prompts for any capability request
 that the configured rules do not match. A test that exceeds a resource limit
-fails with that limit's message. All files of one `sand test` command run on one
-engine, so they read one standard input stream and share "always" answers to
-prompts.
+fails with that limit's message. A `sand test` invocation runs all test files on a single engine, sharing the
+standard input stream and `"always"` prompt decisions across files.
 
 ### 17.5 `sand run FILE [-- ARGS...]`
 
@@ -2501,12 +2494,12 @@ outside `0..=255`, `1` for an uncaught runtime error or `?` failure, `2` for a
 compile or usage error, and `3` for a resource limit error. If the policy
 allows `TimeZone`, `time.local_zone()` returns the host system time zone.
 
-`sand run` forwards its standard input to the script while a read waits. If
-standard input is a terminal, a person types the input (`Config::stdin_feed`),
-so idle time while a read waits does not count toward `--max-time`. Otherwise,
-a program sends the input (`Config::stdin_io_feed`), and the wait counts. If
-`sand` cannot read its standard input, it writes the error to standard error
-and ends the stream, so the script gets an end of input.
+`sand run` forwards process standard input to the script on demand. Terminal
+standard input uses `Config::stdin_feed`, so idle time during a read wait does
+not count toward `--max-time`. Non-terminal standard input uses
+`Config::stdin_io_feed`, so read waits count toward `--max-time`. If reading
+process standard input fails, `sand` writes the error to standard error and
+closes the input stream.
 
 Interactive prompts read and write directly on the controlling terminal
 —`/dev/tty` on Unix or the console on Windows—rather than the standard streams.

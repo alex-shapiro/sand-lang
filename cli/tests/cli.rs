@@ -954,10 +954,10 @@ fn invalid_network_patterns_are_explained() {
     assert!(out.stderr.contains("invalid host pattern `a..b`"), "{}", out.stderr);
 }
 
-/// A read of the process's standard input cannot be cancelled, so `sand run`
-/// must exit at its time limit without waiting for the read.
+/// `sand run` exits when it reaches `--max-time`, even if a read of process
+/// standard input is still blocked.
 #[test]
-fn an_open_stdin_pipe_does_not_outlast_the_time_limit() {
+fn open_stdin_pipe_exits_at_time_limit() {
     let dir = script("stdin-open", "import io\nio.stdin.read_line()");
     let mut child = Command::new(env!("CARGO_BIN_EXE_sand"))
         .args(["run", "main.sand", "--no-prompt", "--max-time=200ms"])

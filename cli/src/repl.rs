@@ -76,7 +76,7 @@ pub(crate) fn cmd_repl(args: &[String]) -> Result<u8, String> {
     let mut io = Io { reader, stdin_feed };
     outln!("sand {} — help() for documentation, :help for the REPL's commands, :quit to exit", env!("CARGO_PKG_VERSION"));
     let status = rt.block_on(repl(&mut session, &screen, &mut io));
-    // A read of the process's standard input cannot be cancelled; do not wait for it.
+    // Drop the runtime without waiting for a blocked stdin read thread.
     rt.shutdown_background();
     Ok(status)
 }
@@ -193,7 +193,7 @@ async fn eval(session: &mut Session, io: &mut Io, input: &str) {
 /// Awaits `fut` and interrupts the session if Ctrl-C is pressed.
 async fn foreground<T>(handle: sandlang::InterruptHandle, io: &mut Io, fut: impl std::future::Future<Output = T>) -> T {
     let mut fut = std::pin::pin!(fut);
-    let mut reading: Option<StdinRequest> = None;
+    let mut active_request: Option<StdinRequest> = None;
     loop {
         let feed = &io.stdin_feed;
         let input_needed = async {
@@ -207,9 +207,9 @@ async fn foreground<T>(handle: sandlang::InterruptHandle, io: &mut Io, fut: impl
         tokio::select! {
             r = &mut fut => return r,
             Ok(()) = tokio::signal::ctrl_c() => handle.interrupt(),
-            request = input_needed, if reading.is_none() => reading = Some(request),
-            event = io.reader.script_line(), if reading.is_some() => {
-                let request = reading.take().expect("a read waits");
+            request = input_needed, if active_request.is_none() => active_request = Some(request),
+            event = io.reader.script_line(), if active_request.is_some() => {
+                let request = active_request.take().expect("active stdin request");
                 match event {
                     InputEvent::Line(line) => feed.send(line),
                     InputEvent::End if io.reader.ends_for_good() => feed.end(),
@@ -563,7 +563,7 @@ impl EditorReader {
         }
     }
 
-    /// Reads a line for a script (see [`Reader::script_line`]).
+    /// Reads a line for a script's standard input.
     async fn script_line(&mut self) -> InputEvent {
         self.requests.ask(EditorRequest::ScriptLine).await.unwrap_or(InputEvent::End)
     }

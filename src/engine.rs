@@ -215,8 +215,7 @@ impl OutputSink for NullSink {
 enum StdinConfig {
     None,
     Bytes(Vec<u8>),
-    /// The feed that the host sends input through. Every VM of the engine
-    /// reads it.
+    /// Host-supplied input channel shared across every VM of the engine.
     Host(Arc<crate::stdin_feed::StdinChannel>),
 }
 
@@ -379,16 +378,16 @@ impl Config {
         self.stdin = StdinConfig::Bytes(data);
         self
     }
-    /// Gives scripts standard input that a person sends through the returned
-    /// [`StdinFeed`](crate::StdinFeed). While a read waits, idle time of the
-    /// engine does not count toward `max_wall_time`.
+    /// Configures standard input from user actions through the returned
+    /// [`StdinFeed`](crate::StdinFeed). Idle time while a script waits for
+    /// input does not count toward `max_wall_time`.
     pub fn stdin_feed(self) -> (Self, crate::StdinFeed) {
         self.stdin_host_feed(crate::WaitKind::User)
     }
 
-    /// Gives scripts standard input that a program, such as a pipe, sends
-    /// through the returned [`StdinFeed`](crate::StdinFeed). The time that a
-    /// read waits counts toward `max_wall_time`.
+    /// Configures programmatic standard input, such as a pipe, through the
+    /// returned [`StdinFeed`](crate::StdinFeed). Time spent waiting for input
+    /// counts toward `max_wall_time`.
     pub fn stdin_io_feed(self) -> (Self, crate::StdinFeed) {
         self.stdin_host_feed(crate::WaitKind::Io)
     }
