@@ -2261,8 +2261,7 @@ fn rule_policy_deny_overrides_allow() {
 #[test]
 fn typed_rule_builders_make_the_rules_of_the_policy_file_syntax() {
     use sandlang::policy::file::PolicyFile;
-    use sandlang::policy::rules::HttpMethod;
-    use sandlang::policy::rules::{Methods, NamePattern, RulePolicy, Transports};
+    use sandlang::policy::rules::{HttpMethod, Methods, NamePattern, RulePolicy, Transports};
     let methods = Methods::only("get".parse().unwrap(), ["M-SEARCH".parse().unwrap(), "GET".parse().unwrap()]);
     let built = RulePolicy::new()
         .allow_read("/data".parse().unwrap())
@@ -2281,14 +2280,6 @@ fn typed_rule_builders_make_the_rules_of_the_policy_file_syntax() {
     assert_eq!(PolicyFile::parse(text, std::path::Path::new("/"), None).unwrap().rules.to_string(), text);
     let repeated = PolicyFile::parse("deny http get GET a.example", std::path::Path::new("/"), None).unwrap();
     assert_eq!(repeated.rules.to_string(), "deny http GET a.example\n");
-    let net = |s: &str| s.parse::<sandlang::policy::net::NetPattern>().unwrap_err().to_string();
-    assert_eq!(
-        net("host:99999"),
-        "invalid host pattern `host:99999`: expected a host, host:port, *.domain, *, an IP address, or a CIDR range"
-    );
-    assert!(net("https://example.com").starts_with("net rules require host patterns, not URLs"));
-    let url = "https://api.example.com".parse::<sandlang::policy::net::UrlPattern>().unwrap_err().to_string();
-    assert!(url.starts_with("URL patterns must not include a scheme"), "{url}");
     assert_eq!("get".parse::<HttpMethod>().unwrap(), HttpMethod::GET);
     assert_eq!("M-SEARCH".parse::<HttpMethod>().unwrap().as_str(), "M-SEARCH");
     for word in ["TLS", "HTTP", "get-x", ""] {

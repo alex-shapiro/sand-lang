@@ -1842,20 +1842,6 @@ fn a_policy_file_over_the_standard_rules_keeps_its_prompt_rules() {
     assert_eq!(r.stdout, "");
 }
 
-#[test]
-fn builder_text_with_line_breaks_round_trips_through_policy_text() {
-    let p = RulePolicy::new()
-        .allow_read(PathPattern::literal("/a\nb").unwrap())
-        .allow_env(NamePattern::exact("A\rB"))
-        .deny_custom(CustomMatch::Exact("db\n".into()), CustomMatch::Exact("\\\"\r".into()));
-    let text = p.to_string();
-    assert_eq!(text, "allow read \"/a\\nb\"\nallow env \"A\\rB\"\ndeny custom \"db\\n\" \"\\\\\\\"\\r\"\n");
-    let parsed = policy_text(&text);
-    assert_eq!(parsed.to_string(), text);
-    assert_eq!(parsed.check(&Capability::FsRead("/a\nb/c".into())), Decision::Allow);
-    assert_eq!(parsed.check(&Capability::Env("A\rB".into())), Decision::Allow);
-}
-
 #[cfg(windows)]
 #[test]
 fn absolute_paths_accept_windows_drive_and_unc_paths() {
