@@ -1074,7 +1074,7 @@ fn a_suspended_call_resumes_and_returns() {
         let out = MemorySink::new();
         let durable = Durable::new(Arc::new(journal.clone())).suspend_after(Duration::ZERO);
         let config = base.clone().clock(clock.clone()).stdout(out.clone()).durable(durable);
-        (rt().block_on(Engine::new(config).call(&main, &["21"])), out.contents())
+        (rt().block_on(Engine::new(config).call(main.bind(&["21"]).unwrap())), out.contents())
     };
     let (r, out) = call();
     let wake = UNIX_EPOCH + Duration::from_secs(BASE_SECS + 10);

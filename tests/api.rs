@@ -7,7 +7,7 @@ mod common;
 use common::{TempDir, rt, run_with};
 use jiff::civil::Date;
 use sandlang::engine::{
-    Config, Engine, Error, FunctionError, HostModules, InterruptHandle, LimitKind, Limits, MemorySink, Outcome, Returned,
+    ArityError, Config, Engine, Error, FunctionError, HostModules, InterruptHandle, LimitKind, Limits, MemorySink, Outcome, Returned,
 };
 use sandlang::native::NativeModule;
 use sandlang::policy::rules::PathPattern;
@@ -3765,7 +3765,7 @@ fn hosts_call_functions_of_the_main_module() {
     let charge = function_of(base.clone(), ORDER, "charge").expect("private functions can be called");
     assert_eq!(charge.signature().to_string(), "fn charge(order: Order, fee: int) -> Result<Receipt>");
     let (mut engine, out, _) = engine_with(base.clone());
-    let call = |engine: &mut Engine, args: &[&str]| rt().block_on(engine.call(&charge, args));
+    let call = |engine: &mut Engine, args: &[&str]| rt().block_on(engine.call(charge.bind(args).unwrap()));
     // The module initializers run before the call, and computed defaults are filled in.
     assert_eq!(
         call(&mut engine, &[r#"{"id": "a1", "cents": 100}"#, "5"]).unwrap(),
@@ -3782,23 +3782,26 @@ fn hosts_call_functions_of_the_main_module() {
         Outcome::Returned(Returned::Failed(sandlang::stdlib::core::Error { message: "negative total".into(), kind: "invalid".into() }))
     );
     let bad = call(&mut engine, &[r#"{"id": 3}"#, "0"]);
-    assert!(matches!(&bad, Err(Error::Argument { index: 0, kind, .. }) if kind == "parse"), "{bad:?}");
-    assert!(matches!(call(&mut engine, &["0"]), Err(Error::Internal { .. })));
+    assert!(matches!(&bad, Err(Error::Argument { index: 0, error }) if error.kind == "parse"), "{bad:?}");
+    assert_eq!(charge.bind(&["0"]).err(), Some(ArityError { params: 2, args: 1 }));
 
     let twice = function_of(base.clone(), ORDER, "twice").unwrap();
     assert_eq!(twice.signature().to_string(), "fn twice(x: int) -> int");
     assert_eq!(
-        rt().block_on(engine_with(base.clone()).0.call(&twice, &["21"])).unwrap(),
+        rt().block_on(engine_with(base.clone()).0.call(twice.bind(&["21"]).unwrap())).unwrap(),
         Outcome::Returned(Returned::Value(Json::Int(42)))
     );
     let nothing = function_of(base.clone(), ORDER, "nothing").unwrap();
     assert_eq!(nothing.signature().to_string(), "fn nothing()");
-    assert_eq!(rt().block_on(engine_with(base.clone()).0.call(&nothing, &[])).unwrap(), Outcome::Returned(Returned::Value(Json::Null)));
+    assert_eq!(
+        rt().block_on(engine_with(base.clone()).0.call(nothing.bind(&[]).unwrap())).unwrap(),
+        Outcome::Returned(Returned::Value(Json::Null))
+    );
     let either = function_of(base.clone(), ORDER, "either").unwrap();
     assert_eq!(either.signature().to_string(), "fn either() -> Result<int, str>");
     assert!(matches!(&either.signature().returns, sandlang::engine::Returns::Result { err, .. } if !err.is_error()));
     assert_eq!(
-        rt().block_on(engine_with(base.clone()).0.call(&either, &[])).unwrap(),
+        rt().block_on(engine_with(base.clone()).0.call(either.bind(&[]).unwrap())).unwrap(),
         Outcome::Returned(Returned::Err(Json::Str("no".into())))
     );
     assert_eq!(function_of(base.clone(), ORDER, "pick").err(), Some(FunctionError::Generic));
@@ -3810,12 +3813,12 @@ fn hosts_call_functions_of_the_main_module() {
     assert_eq!(function_of(base.clone(), deep, "out").err(), too_large(None));
 
     let failing = function_of(base.clone(), "fn main() -> int {\n    let xs: [int] = []\n    xs[3]\n}", "main").unwrap();
-    match rt().block_on(engine_with(base.clone()).0.call(&failing, &[])) {
+    match rt().block_on(engine_with(base.clone()).0.call(failing.bind(&[]).unwrap())) {
         Err(Error::Runtime { trace, .. }) => assert_eq!(trace[0].line, 3, "{trace:?}"),
         r => panic!("{r:?}"),
     }
     let exits = function_of(base.clone(), "fn main() -> int {\n    exit(4)\n}", "main").unwrap();
-    assert_eq!(rt().block_on(engine_with(base).0.call(&exits, &[])).unwrap(), Outcome::Exited(4));
+    assert_eq!(rt().block_on(engine_with(base).0.call(exits.bind(&[]).unwrap())).unwrap(), Outcome::Exited(4));
 }
 
 #[test]

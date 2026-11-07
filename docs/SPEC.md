@@ -2000,7 +2000,7 @@ run (§16.7). A failed operation returns an `Error`:
 | `Error::Limit(kind)`                  | Execution or compilation exceeded a configured resource limit (§15).        |
 | `Error::Interrupted`                  | The host cancelled execution through an `InterruptHandle`.                  |
 | `Error::Io(message)`                  | The entry script file could not be read.                                    |
-| `Error::Argument { index, kind, .. }` | An argument of `Engine::call` does not decode to its parameter's type.      |
+| `Error::Argument { index, error }`    | An argument of `Engine::call` does not decode to its parameter's type.      |
 | `Error::Internal { message, trace }`  | An internal invariant failed or a host callback panicked (§10.3).           |
 | `Error::Diverged { seq, message }`    | The run does not do what its journal records at entry `seq` (§16.7).        |
 | `Error::Aborted(reason)`              | The host ended the run: `Ctl::abort`, or a failed `Journal::flush` (§16.7). |
@@ -2017,8 +2017,10 @@ public or private. Its `signature()` gives the type of each parameter and the re
 type descriptors, and shows as the function's declaration, such as
 `fn main(order: Order) -> Result<Receipt>`. For another name, `function` fails with a
 `FunctionError` that gives the reason: `NotFound`, `Generic`, or `TypeTooLarge { param }` for a
-parameter or return type that is too large to describe. `Engine::call(function, args)` runs the
-module initializers, then calls the function. Each argument is JSON text, which the engine decodes to
+parameter or return type that is too large to describe. `Function::bind(args)` gives the call
+of the function with `args`, one for each parameter, and fails with an `ArityError` for another
+number of arguments. `Engine::call(call)` runs the module initializers, then calls the function.
+Each argument is JSON text, which the engine decodes to
 the type of its parameter as `json.decode` does. An argument that does not decode fails the
 call with `Error::Argument`. A call that does not fail returns an `Outcome<Returned>`. A
 returned value converts to `stdlib::json::Json` as `json.encode` encodes it:

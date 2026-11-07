@@ -111,11 +111,10 @@ pub enum Error {
     Interrupted,
     Io(String),
     /// Argument `index` of [`Engine::call`] does not decode to the type of its parameter.
-    /// `kind` and `message` are those of the error of `json.decode`.
+    /// `error` is the error of `json.decode`.
     Argument {
         index: usize,
-        kind: String,
-        message: String,
+        error: stdlib::core::Error,
     },
     /// The run does something other than what its journal records at entry
     /// `seq` (SPEC §16.7).
@@ -204,7 +203,7 @@ impl fmt::Display for Error {
             Error::Limit(k) => write!(f, "{k}"),
             Error::Interrupted => write!(f, "interrupted"),
             Error::Io(m) => write!(f, "{m}"),
-            Error::Argument { index, kind, message } => write!(f, "argument {index} is not valid: {kind}: {message}"),
+            Error::Argument { index, error } => write!(f, "argument {index} is not valid: {}: {}", error.kind, error.message),
             Error::Diverged { seq, message } => write!(f, "the run diverged from its journal at entry {seq}: {message}"),
             Error::Aborted(e) => write!(f, "the host ended the run: {e}"),
         }
@@ -394,7 +393,42 @@ impl Function {
     pub fn signature(&self) -> &FunctionSignature {
         &self.signature
     }
+
+    /// The call of the function with `args`, one JSON text for each
+    /// parameter, for [`Engine::call`]. Fails if the number of arguments is
+    /// not the number of parameters.
+    pub fn bind<'a>(&'a self, args: &'a [&'a str]) -> Result<BoundCall<'a>, ArityError> {
+        let params = self.signature.params.len();
+        if args.len() != params {
+            return Err(ArityError { params, args: args.len() });
+        }
+        Ok(BoundCall { function: self, args })
+    }
 }
+
+/// A call of a [`Function`] with one argument for each parameter
+/// ([`Function::bind`]).
+#[derive(Clone, Copy)]
+pub struct BoundCall<'a> {
+    function: &'a Function,
+    args: &'a [&'a str],
+}
+
+/// [`Function::bind`] got `args` arguments for a function with `params`
+/// parameters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ArityError {
+    pub params: usize,
+    pub args: usize,
+}
+
+impl fmt::Display for ArityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "the function takes {} arguments, and the call gives {}", self.params, self.args)
+    }
+}
+
+impl std::error::Error for ArityError {}
 
 /// The name, parameters and return type of a function. It shows as the function's
 /// declaration, such as `fn main(order: Order) -> Result<Receipt>`.
@@ -1347,20 +1381,16 @@ impl Engine {
         crate::unwind::guard(self.run_script(compiled, program.cwd.clone())).await
     }
 
-    /// Runs the program of `function` as [`Engine::run_program`] does, but calls `function`
-    /// after the module initializers instead of ending, and returns what it returns.
+    /// Runs the program of the function of `call` as [`Engine::run_program`] does, but calls
+    /// the function after the module initializers instead of ending, and returns what it
+    /// returns.
     ///
     /// Each argument is JSON text, which the engine decodes to the type of its parameter as
     /// `json.decode` does; an argument that does not decode fails the call with
     /// [`Error::Argument`]. A journaled run replays the same call, so the host gives the same
-    /// arguments to each execution of the run. Fails with [`Error::Internal`] if the number of
-    /// arguments is not the number of parameters.
-    pub async fn call(&mut self, function: &Function, args: &[&str]) -> Result<Outcome<Returned>, Error> {
-        let sig = function.signature();
-        if args.len() != sig.params.len() {
-            let message = format!("`{}` takes {} arguments, and the call gives {}", sig.name, sig.params.len(), args.len());
-            return Err(Error::Internal { message, trace: Vec::new() });
-        }
+    /// arguments to each execution of the run.
+    pub async fn call(&mut self, call: BoundCall<'_>) -> Result<Outcome<Returned>, Error> {
+        let BoundCall { function, args } = call;
         let compiled = self.start_program(&function.program);
         let cwd = function.program.cwd.clone();
         crate::unwind::guard(self.call_compiled(compiled, cwd, function, args)).await
@@ -1388,7 +1418,7 @@ impl Engine {
                 }
                 Called::Exited(c) => Ok(Ok(Outcome::Exited(c))),
                 Called::Suspended(s) => Ok(Ok(Outcome::Suspended(s))),
-                Called::BadArgument { index, error } => Ok(Err(Error::Argument { index, kind: error.kind, message: error.message })),
+                Called::BadArgument { index, error } => Ok(Err(Error::Argument { index, error })),
             })
             .await;
         match r {
