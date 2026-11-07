@@ -149,6 +149,23 @@ impl RuleCapability {
 }
 
 impl Limit {
+    /// Returns the name of the limit in a `limit` directive, such as `"call-depth"`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Limit::Memory(_) => "memory",
+            Limit::Time(_) => "time",
+            Limit::Cpu(_) => "cpu",
+            Limit::Instructions(_) => "instructions",
+            Limit::CompileFuel(_) => "compile-fuel",
+            Limit::Output(_) => "output",
+            Limit::Tasks(_) => "tasks",
+            Limit::CallDepth(_) => "call-depth",
+            Limit::OpenResources(_) => "open-resources",
+            Limit::Source(_) => "source",
+            Limit::HttpBody(_) => "http-body",
+        }
+    }
+
     /// Sets the field of `limits` that this limit controls.
     pub fn apply(self, limits: &mut Limits) {
         match self {
@@ -1097,6 +1114,27 @@ mod tests {
         }
         assert_eq!(RuleCapability::Files.keyword(), None);
         assert_eq!(capability_keywords(), "read, write, import, net, http, listen, env, stdin, stdout, stderr, timezone, or custom");
+    }
+
+    #[test]
+    fn each_limit_name_parses_to_its_limit() {
+        let limits = [
+            (Limit::Memory(Some(1 << 20)), "1M"),
+            (Limit::Time(None), "none"),
+            (Limit::Cpu(Some(Duration::from_secs(2))), "2s"),
+            (Limit::Instructions(Some(1000)), "1_000"),
+            (Limit::CompileFuel(None), "unlimited"),
+            (Limit::Output(Some(1024)), "1K"),
+            (Limit::Tasks(3), "3"),
+            (Limit::CallDepth(200), "200"),
+            (Limit::OpenResources(8), "8"),
+            (Limit::Source(4096), "4096"),
+            (Limit::HttpBody(1 << 10), "1K"),
+        ];
+        for (limit, value) in limits {
+            let p = parse(&format!("limit {} {value}", limit.name()));
+            assert_eq!(p.limit_directives[0].limit, limit, "{}", limit.name());
+        }
     }
 
     #[test]
