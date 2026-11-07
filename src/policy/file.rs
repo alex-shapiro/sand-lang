@@ -13,7 +13,7 @@
 
 use super::net::{HostKind, NetPattern, QUOTED_STAR_IN_HOST, UrlPattern, format_host_port, url_segments};
 use super::path::{Seg, Tok, wild_tokens};
-use super::rules::{Access, CustomMatch, HttpMethod, Methods, NameKind, Origin, PathPattern, Rule, RuleKind, Transports};
+use super::rules::{Access, CustomMatch, HttpMethod, Methods, NameKind, NamePattern, Origin, PathPattern, Rule, RuleKind, Transports};
 use super::{Capability, Decision, PatternError, RulePolicy};
 use crate::engine::Limits;
 use crate::vm::value::FxHashMap;
@@ -535,7 +535,7 @@ impl Context<'_> {
                         return Err((item.column, QUOTED_STAR_IN_HOST.into()));
                     }
                     "listen" => RuleKind::Listen(word.text().parse().map_err(|m: PatternError| (item.column, m.0))?),
-                    _ => RuleKind::Env(NameKind::from_tokens(&word.tokens()).map_err(|m| (item.column, m))?),
+                    _ => RuleKind::Env(NamePattern(NameKind::from_tokens(&word.tokens()).map_err(|m| (item.column, m))?)),
                 };
                 rules.push(file_rule(decision, kind, origin));
             }
@@ -757,9 +757,9 @@ impl fmt::Display for Rule {
                 Ok(())
             }
             RuleKind::Listen(pattern) => write!(f, "listen {pattern}"),
-            RuleKind::Env(NameKind::Exact(name)) => write!(f, "env {}", quote_part(name, true)),
-            RuleKind::Env(NameKind::Glob(g)) => write!(f, "env {}", render_seg(&Seg::Glob(g.clone()), quote_part)),
-            RuleKind::Env(NameKind::Any) => write!(f, "env *"),
+            RuleKind::Env(NamePattern(NameKind::Exact(name))) => write!(f, "env {}", quote_part(name, true)),
+            RuleKind::Env(NamePattern(NameKind::Glob(g))) => write!(f, "env {}", render_seg(&Seg::Glob(g.clone()), quote_part)),
+            RuleKind::Env(NamePattern(NameKind::Any)) => write!(f, "env *"),
             RuleKind::Stdin => write!(f, "stdin"),
             RuleKind::Stdout => write!(f, "stdout"),
             RuleKind::Stderr => write!(f, "stderr"),

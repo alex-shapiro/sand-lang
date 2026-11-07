@@ -136,7 +136,7 @@ impl PathPattern {
 /// `*` for all variables. Parse one with [`str::parse`], or make one that matches a name
 /// literally with [`NamePattern::exact`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct NamePattern(NameKind);
+pub struct NamePattern(pub(crate) NameKind);
 
 impl NamePattern {
     /// A pattern that matches only `name`. A `*` in `name` matches only itself.
@@ -294,7 +294,7 @@ pub(crate) enum RuleKind {
     Net(NetPattern, Transports),
     Http(Methods, UrlPattern, Transports),
     Listen(ListenPattern),
-    Env(NameKind),
+    Env(NamePattern),
     Stdin,
     Stdout,
     Stderr,
@@ -402,7 +402,7 @@ impl RulePolicy {
             RuleKind::Files(Access::Import, PathPattern::everything()),
             RuleKind::Net(NetPattern { kind: HostKind::Any, port: None }, Transports::Both),
             RuleKind::Listen(ListenPattern::ANY),
-            RuleKind::Env(NameKind::Any),
+            RuleKind::Env(NamePattern(NameKind::Any)),
             RuleKind::Stdin,
             RuleKind::Stdout,
             RuleKind::Stderr,
@@ -520,15 +520,15 @@ impl RulePolicy {
     }
     /// Allows reading environment variables whose names match `name`.
     pub fn allow_env(self, name: NamePattern) -> Self {
-        self.push(Decision::Allow, RuleKind::Env(name.0))
+        self.push(Decision::Allow, RuleKind::Env(name))
     }
     /// Denies reading environment variables whose names match `name`.
     pub fn deny_env(self, name: NamePattern) -> Self {
-        self.push(Decision::Deny, RuleKind::Env(name.0))
+        self.push(Decision::Deny, RuleKind::Env(name))
     }
     /// Prompts before reading environment variables whose names match `name`.
     pub fn prompt_env(self, name: NamePattern) -> Self {
-        self.push(Decision::Prompt, RuleKind::Env(name.0))
+        self.push(Decision::Prompt, RuleKind::Env(name))
     }
     pub fn allow_stdin(self) -> Self {
         self.push(Decision::Allow, RuleKind::Stdin)
@@ -1187,8 +1187,8 @@ impl Index {
             match &rule.kind {
                 RuleKind::Files(..) | RuleKind::Net(..) | RuleKind::Http(..) => {}
                 RuleKind::Listen(p) => index.listen.push((p.clone(), decision, rule_id)),
-                RuleKind::Env(NameKind::Exact(n)) => index.env_names.entry(n.clone()).or_default().push((decision, rule_id)),
-                RuleKind::Env(p) => index.env.push((p.clone(), decision, rule_id)),
+                RuleKind::Env(NamePattern(NameKind::Exact(n))) => index.env_names.entry(n.clone()).or_default().push((decision, rule_id)),
+                RuleKind::Env(NamePattern(p)) => index.env.push((p.clone(), decision, rule_id)),
                 RuleKind::Stdin => index.unit.push((Capability::Stdin, decision, rule_id)),
                 RuleKind::Stdout => index.unit.push((Capability::Stdout, decision, rule_id)),
                 RuleKind::Stderr => index.unit.push((Capability::Stderr, decision, rule_id)),
