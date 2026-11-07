@@ -3,11 +3,12 @@
 mod common;
 
 use common::TempDir;
+use parking_lot::Mutex;
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -97,11 +98,11 @@ fn run_on_terminal(dir: &Path, args: &[&str], answers: &[&str]) -> Option<Transc
             if n == 0 {
                 break;
             }
-            sink.lock().unwrap().extend_from_slice(&buf[..n]);
+            sink.lock().extend_from_slice(&buf[..n]);
         }
         let _ = done_tx.send(());
     });
-    let shown = || plain(&output.lock().unwrap());
+    let shown = || plain(&output.lock());
     let start = Instant::now();
     for (i, answer) in answers.iter().enumerate() {
         // Wait for question i + 1.

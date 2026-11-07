@@ -5,6 +5,7 @@
 mod common;
 
 use common::{TempDir, rt, run_with};
+use parking_lot::Mutex;
 use sandlang::jiff::civil::Date;
 use sandlang::time::TimeZone;
 use sandlang::vm::Vm;
@@ -13,8 +14,8 @@ use sandlang::{
     Session, ValueType,
 };
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 fn engine_with(config: Config) -> (Engine, MemorySink, MemorySink) {
@@ -663,14 +664,14 @@ fn local_time_zone_needs_the_capability() {
     let asked = Arc::new(Mutex::new(Vec::new()));
     let seen = asked.clone();
     let prompter = move |cap: Capability| {
-        seen.lock().unwrap().push(cap.to_string());
+        seen.lock().push(cap.to_string());
         std::future::ready(PromptAnswer::AllowOnce)
     };
     let prompting = |cap: &Capability| if *cap == Capability::TimeZone { Decision::Prompt } else { Decision::Allow };
     let (r, out, _) = run_src(tokyo().custom_policy(prompting).prompter(prompter), src);
     r.unwrap();
     assert_eq!(out, "Asia/Tokyo\n");
-    assert_eq!(*asked.lock().unwrap(), ["read the local time zone"]);
+    assert_eq!(*asked.lock(), ["read the local time zone"]);
 }
 
 #[test]
@@ -2107,7 +2108,7 @@ fn log_records_go_to_the_host_sink() {
     let records = Arc::new(Mutex::new(Vec::<LogRecord>::new()));
     let r2 = records.clone();
     let policy = |cap: &Capability| if matches!(cap, Capability::Stderr) { Decision::Deny } else { Decision::Allow };
-    let config = Config::new().custom_policy(policy).log_sink(move |r: &LogRecord| r2.lock().unwrap().push(r.clone()));
+    let config = Config::new().custom_policy(policy).log_sink(move |r: &LogRecord| r2.lock().push(r.clone()));
     let src = r#"
 import log
 fn start(user: str) {
@@ -2124,7 +2125,7 @@ log.error("failed")
     let (r, _, err) = run_src(config, src);
     r.unwrap();
     assert_eq!(err, "");
-    let records = records.lock().unwrap();
+    let records = records.lock();
     let summary: Vec<_> =
         records.iter().map(|r| (r.level, r.message.as_str(), r.location.as_ref().map(|l| (l.function.as_str(), l.line)))).collect();
     assert_eq!(
@@ -2146,7 +2147,7 @@ fn log_sinks_select_levels() {
             level >= LogLevel::Warn
         }
         fn log(&self, record: &LogRecord) {
-            self.0.lock().unwrap().push(record.message.clone());
+            self.0.lock().push(record.message.clone());
         }
     }
     let messages = Arc::new(Mutex::new(Vec::new()));
@@ -2154,7 +2155,7 @@ fn log_sinks_select_levels() {
     let src = "import log\nlog.debug(\"d\")\nlog.info(\"i\")\nlog.warn(\"w\")\nlog.disable()\nlog.error(\"e\")";
     let (r, _, _) = run_src(config, src);
     r.unwrap();
-    assert_eq!(*messages.lock().unwrap(), ["w"]);
+    assert_eq!(*messages.lock(), ["w"]);
 }
 
 #[test]
@@ -2368,8 +2369,8 @@ fn prompt_answers() {
     let asked2 = asked.clone();
     let answers2 = answers.clone();
     let config = Config::new().policy(sandlang::RulePolicy::standard()).cwd(dir.path()).prompter(move |cap: Capability| {
-        asked2.lock().unwrap().push(cap.to_string());
-        let answer = answers2.lock().unwrap().remove(0);
+        asked2.lock().push(cap.to_string());
+        let answer = answers2.lock().remove(0);
         async move { answer }
     });
     let src = r#"
@@ -2382,7 +2383,7 @@ print(fs.read_text("a.txt").is_ok())
     let (r, out, _) = run_src(config, src);
     r.unwrap();
     assert_eq!(out, "true\nfalse\ntrue\ntrue\n");
-    let asked = asked.lock().unwrap();
+    let asked = asked.lock();
     assert_eq!(asked.len(), 3, "{asked:?}");
     assert!(asked[0].contains("read") && asked[0].contains("a.txt"), "{asked:?}");
 }
@@ -2448,7 +2449,7 @@ impl ScriptedPrompter {
         ScriptedPrompter { asked: Arc::default(), answers: Arc::new(Mutex::new(answers.to_vec())) }
     }
     fn asked(&self) -> Vec<Capability> {
-        std::mem::take(&mut *self.asked.lock().unwrap())
+        std::mem::take(&mut *self.asked.lock())
     }
     fn config(&self, policy: impl sandlang::CustomPolicy + 'static) -> Config {
         self.base().custom_policy(policy)
@@ -2456,8 +2457,8 @@ impl ScriptedPrompter {
     fn base(&self) -> Config {
         let p = self.clone();
         Config::new().stdout(MemorySink::new()).prompter(move |cap: Capability| {
-            p.asked.lock().unwrap().push(cap);
-            let mut answers = p.answers.lock().unwrap();
+            p.asked.lock().push(cap);
+            let mut answers = p.answers.lock();
             let answer = if answers.is_empty() { PromptAnswer::DenyOnce } else { answers.remove(0) };
             async move { answer }
         })
@@ -3055,7 +3056,7 @@ fn interrupt_stops_a_run_waiting_for_a_prompt() {
     let (asked_tx, asked_rx) = std::sync::mpsc::channel();
     let asked_tx = Mutex::new(asked_tx);
     let config = Config::new().policy(sandlang::RulePolicy::standard()).prompter(move |_cap: Capability| {
-        let _ = asked_tx.lock().unwrap().send(());
+        let _ = asked_tx.lock().send(());
         std::future::pending::<PromptAnswer>()
     });
     let mut engine = Engine::new(config).unwrap();
@@ -3334,8 +3335,8 @@ fn once_answers_apply_only_to_the_call_that_asked() {
         Arc::new(Mutex::new(vec![PromptAnswer::AllowOnce, PromptAnswer::AllowOnce, PromptAnswer::DenyOnce, PromptAnswer::DenyOnce]));
     let (asked2, answers2) = (asked.clone(), answers.clone());
     let config = Config::new().policy(sandlang::RulePolicy::standard()).cwd(dir.path()).prompter(move |cap: Capability| {
-        asked2.lock().unwrap().push(cap.to_string());
-        let answer = answers2.lock().unwrap().remove(0);
+        asked2.lock().push(cap.to_string());
+        let answer = answers2.lock().remove(0);
         async move { answer }
     });
     // `copy` asks for both capabilities; the first answer stays valid while
@@ -3349,7 +3350,7 @@ print(fs.copy("a.txt", "d.txt").is_ok())
     let (r, out, _) = run_src(config, src);
     r.unwrap();
     assert_eq!(out, "true\nfalse\nfalse\n");
-    let asked = asked.lock().unwrap();
+    let asked = asked.lock();
     assert_eq!(asked.len(), 4, "{asked:?}");
     assert!(asked[0].starts_with("read") && asked[1].starts_with("write") && asked[2].starts_with("write"), "{asked:?}");
     assert!(asked[3].starts_with("read"), "{asked:?}");

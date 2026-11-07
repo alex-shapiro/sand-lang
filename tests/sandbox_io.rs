@@ -4,10 +4,11 @@
 mod common;
 
 use common::{HttpResponse, TempDir, http_server, run_with};
+use parking_lot::Mutex;
 use sandlang::policy::is_private_address;
 use sandlang::{Capability, Decision, Limits, PromptAnswer, RulePolicy};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
@@ -512,7 +513,7 @@ print(net.connect("127.1", {port}).unwrap_err().kind)
              permission_denied\n"
         )
     );
-    assert!(server.requests.lock().unwrap().is_empty());
+    assert!(server.requests.lock().is_empty());
 }
 
 // Relies on the resolver accepting `127.1` for 127.0.0.1 (glibc, macOS).
@@ -562,8 +563,8 @@ fn redirects_to_denied_addresses_are_denied() {
     );
     let r = run_with(&src, |c| c.policy(policy));
     assert_eq!(r.ok_stdout(), "permission_denied\npermission_denied\n");
-    assert_eq!(origin.requests.lock().unwrap().len(), 2);
-    assert!(target.requests.lock().unwrap().is_empty());
+    assert_eq!(origin.requests.lock().len(), 2);
+    assert!(target.requests.lock().is_empty());
 }
 
 // Relies on the resolver accepting `127.1` for 127.0.0.1 (glibc, macOS).
@@ -581,7 +582,7 @@ fn prompt_answers_do_not_override_address_rules() {
         let asked = asked.clone();
         run_with(&src, move |c| {
             c.policy(policy).prompter(move |cap: Capability| {
-                asked.lock().unwrap().push(cap.to_string());
+                asked.lock().push(cap.to_string());
                 async { PromptAnswer::AllowOnce }
             })
         })
@@ -594,8 +595,8 @@ fn prompt_answers_do_not_override_address_rules() {
     // `localhost` is also resolved to `::1`, which the server does not listen on.
     assert!(lines[0].starts_with("Err("), "{out}");
     assert!(lines[1].contains("address 127.0.0.1 is not allowed by the rule `deny net plaintext 127.0.0.0/8`"), "{out}");
-    assert_eq!(prompts.lock().unwrap().len(), 4);
-    assert_eq!(server.requests.lock().unwrap().len(), 2);
+    assert_eq!(prompts.lock().len(), 4);
+    assert_eq!(server.requests.lock().len(), 2);
 }
 
 struct KeepAliveNetwork {
@@ -614,7 +615,7 @@ impl sandlang::network::Network for KeepAliveNetwork {
         addrs: &'a [SocketAddr],
     ) -> sandlang::network::NetworkFuture<'a, (Box<dyn sandlang::network::Stream>, SocketAddr)> {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-        self.connected.lock().unwrap().push(addrs[0]);
+        self.connected.lock().push(addrs[0]);
         let (client, server) = tokio::io::duplex(1 << 16);
         tokio::spawn(async move {
             let mut server = tokio::io::BufReader::new(server);
@@ -658,7 +659,7 @@ print(http.get("http://api.example.com/a").map(r => r.status))
         r.ok_stdout(),
         "ok\nErr(\"permission denied: connect to api.example.com:80: address 10.0.0.5 is not allowed by the rule `deny net plaintext 10.0.0.0/8`\")\nOk(200)\n"
     );
-    assert_eq!(*connected.lock().unwrap(), [addr], "the last request reuses the first connection");
+    assert_eq!(*connected.lock(), [addr], "the last request reuses the first connection");
 }
 
 #[test]
@@ -669,7 +670,7 @@ fn custom_policies_see_resolved_addresses_without_extra_prompts() {
     let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
     let (seen2, prompts2) = (seen.clone(), prompts.clone());
     let policy = move |cap: &Capability| {
-        seen2.lock().unwrap().push(cap.to_string());
+        seen2.lock().push(cap.to_string());
         match cap {
             Capability::NetAddr { addr, .. } if addr.ip().is_ipv6() => Decision::Deny,
             Capability::Stdout | Capability::Stderr => Decision::Allow,
@@ -680,7 +681,7 @@ fn custom_policies_see_resolved_addresses_without_extra_prompts() {
         format!("import net\nprint(net.connect(\"127.0.0.1\", {port}).is_ok())\nprint(net.connect(\"::1\", {port}).unwrap_err().message)");
     let r = run_with(&src, |c| {
         c.custom_policy(policy).prompter(move |cap: Capability| {
-            prompts2.lock().unwrap().push(cap.to_string());
+            prompts2.lock().push(cap.to_string());
             async { PromptAnswer::AllowOnce }
         })
     });
@@ -688,11 +689,8 @@ fn custom_policies_see_resolved_addresses_without_extra_prompts() {
         r.ok_stdout(),
         format!("true\npermission denied: connect to [::1]:{port}: address ::1 is private or internal and is not allowed\n")
     );
-    assert_eq!(
-        *prompts.lock().unwrap(),
-        vec![format!("connect to 127.0.0.1:{port} (plaintext)"), format!("connect to [::1]:{port} (plaintext)")]
-    );
-    let seen = seen.lock().unwrap();
+    assert_eq!(*prompts.lock(), vec![format!("connect to 127.0.0.1:{port} (plaintext)"), format!("connect to [::1]:{port} (plaintext)")]);
+    let seen = seen.lock();
     assert!(seen.contains(&format!("connect to 127.0.0.1:{port} (plaintext)")), "{seen:?}");
     assert!(seen.contains(&format!("connect to [::1]:{port} (plaintext)")), "{seen:?}");
 }
@@ -1265,12 +1263,12 @@ print(fs.is_dir("data/PRIVATE").unwrap_err().kind)
     let cwd = dir.path().to_path_buf();
     let r = run_with(src, move |c| {
         c.policy(policy).cwd(cwd).prompter(move |cap: Capability| {
-            log.lock().unwrap().push(cap);
+            log.lock().push(cap);
             async { PromptAnswer::DenyOnce }
         })
     });
     assert_eq!(r.ok_stdout(), "readme\nreadme\npermission_denied\npermission_denied\n");
-    assert_eq!(*asked.lock().unwrap(), [Capability::FsRead(data.join("public.txt")), Capability::FsRead(data.join("Private"))]);
+    assert_eq!(*asked.lock(), [Capability::FsRead(data.join("public.txt")), Capability::FsRead(data.join("Private"))]);
 }
 
 /// Paths longer than macOS's `PATH_MAX` (1024 bytes), and symlinks deep

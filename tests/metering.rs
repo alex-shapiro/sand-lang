@@ -247,10 +247,10 @@ fn keys_chosen_to_collide_do_not_slow_down_maps() {
 /// interesting part.
 fn signal() -> (NativeModule, mpsc::Receiver<()>) {
     let (tx, rx) = mpsc::channel();
-    let tx = std::sync::Mutex::new(tx);
+    let tx = parking_lot::Mutex::new(tx);
     let mut m = NativeModule::new("signal");
     m.function("ready", move || {
-        let _ = tx.lock().unwrap().send(());
+        let _ = tx.lock().send(());
     });
     (m, rx)
 }

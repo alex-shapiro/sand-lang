@@ -1126,6 +1126,7 @@ name = "sand-cli"
 version = "0.1.0"
 dependencies = [
  "nu-ansi-term",
+ "parking_lot",
  "portable-pty",
  "reedline",
  "sandlang",
@@ -1148,6 +1149,7 @@ dependencies = [
  "junction",
  "md-5",
  "nix 0.29.0",
+ "parking_lot",
  "proptest",
  "regex-automata",
  "rustix",
@@ -1190,6 +1192,7 @@ name = "sandlang-wasm"
 version = "0.1.0"
 dependencies = [
  "js-sys",
+ "parking_lot",
  "sandlang",
  "tokio",
  "wasm-bindgen",

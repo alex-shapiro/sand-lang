@@ -3,9 +3,10 @@
 mod common;
 
 use common::run_with;
+use parking_lot::Mutex;
 use sandlang::platform::{Clock, ClockFuture, Instant, SystemTime, UNIX_EPOCH};
 use sandlang::{Error, LimitKind, Limits};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 struct ManualClock {
@@ -26,7 +27,7 @@ impl ManualClock {
     }
 
     fn elapsed(&self) -> Duration {
-        *self.elapsed.lock().unwrap()
+        *self.elapsed.lock()
     }
 }
 
@@ -40,12 +41,12 @@ impl Clock for ManualClock {
     }
 
     fn cpu_time(&self) -> Duration {
-        Duration::from_nanos(*self.work.lock().unwrap() * 10)
+        Duration::from_nanos(*self.work.lock() * 10)
     }
 
     fn sleep(&self, duration: Duration) -> ClockFuture {
-        self.sleeps.lock().unwrap().push(duration);
-        *self.elapsed.lock().unwrap() += duration;
+        self.sleeps.lock().push(duration);
+        *self.elapsed.lock() += duration;
         Box::pin(std::future::ready(()))
     }
 
@@ -54,8 +55,8 @@ impl Clock for ManualClock {
     }
 
     fn work(&self, fuel: u64) {
-        *self.work.lock().unwrap() += fuel;
-        *self.elapsed.lock().unwrap() += Duration::from_nanos(fuel * 10);
+        *self.work.lock() += fuel;
+        *self.elapsed.lock() += Duration::from_nanos(fuel * 10);
     }
 }
 
@@ -73,7 +74,7 @@ fn sleeps_wait_on_host_timers() {
     let src = "import task\nimport time\nlet start = time.Stopwatch()\ntask.sleep(5s)\nprint(start.elapsed() >= 5s)";
     let r = run_with(src, |c| c.clock(clock.clone()));
     assert_eq!(r.ok_stdout(), "true\n");
-    assert!(clock.sleeps.lock().unwrap().contains(&Duration::from_secs(5)));
+    assert!(clock.sleeps.lock().contains(&Duration::from_secs(5)));
 }
 
 #[test]
@@ -103,9 +104,9 @@ fn memfs_timestamps_are_sourced_from_host_clock() {
 #[cfg(feature = "os")]
 mod network {
     use super::{ManualClock, run_with};
+    use parking_lot::Mutex;
     use sandlang::network::{Listener, Network, NetworkFuture, Stream};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-    use std::sync::Mutex;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -128,7 +129,7 @@ mod network {
         }
 
         fn accept(&self) -> NetworkFuture<'_, (Box<dyn Stream>, SocketAddr)> {
-            let pending = self.pending.lock().unwrap().take();
+            let pending = self.pending.lock().take();
             Box::pin(async move {
                 match pending {
                     Some(s) => Ok((Box::new(s) as Box<dyn Stream>, "10.9.9.9:5555".parse().unwrap())),
@@ -140,7 +141,7 @@ mod network {
 
     impl Network for MemoryNetwork {
         fn resolve<'a>(&'a self, host: &'a str, port: u16) -> NetworkFuture<'a, Vec<SocketAddr>> {
-            self.resolved.lock().unwrap().push(host.to_string());
+            self.resolved.lock().push(host.to_string());
             Box::pin(async move { Ok(vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), port)]) })
         }
 
@@ -154,7 +155,7 @@ mod network {
                 while !head.ends_with(b"\r\n\r\n") && server.read(&mut byte).await.unwrap_or(0) == 1 {
                     head.push(byte[0]);
                 }
-                requests.lock().unwrap().push(String::from_utf8_lossy(&head).into_owned());
+                requests.lock().push(String::from_utf8_lossy(&head).into_owned());
                 if silent {
                     return std::future::pending::<()>().await;
                 }
@@ -167,7 +168,7 @@ mod network {
         }
 
         fn listen(&self, addr: SocketAddr) -> NetworkFuture<'_, Box<dyn Listener>> {
-            self.listened.lock().unwrap().push(addr);
+            self.listened.lock().push(addr);
             let (server, mut client) = tokio::io::duplex(1 << 16);
             Box::pin(async move {
                 client.write_all(b"from memory listener\n").await?;
@@ -182,7 +183,7 @@ mod network {
         let src = "import net\nlet l = net.listen(\"10.1.2.3\", 80)?\nprint(l.addr())\nlet c = l.accept()?\nprint(c.peer_addr())\nprint(c.read_line()?)";
         let r = run_with(src, |c| c.network(network.clone()));
         assert_eq!(r.ok_stdout(), "10.1.2.3:80\n10.9.9.9:5555\nSome(\"from memory listener\")\n");
-        assert_eq!(*network.listened.lock().unwrap(), ["10.1.2.3:80".parse::<SocketAddr>().unwrap()]);
+        assert_eq!(*network.listened.lock(), ["10.1.2.3:80".parse::<SocketAddr>().unwrap()]);
     }
 
     #[test]
@@ -191,8 +192,8 @@ mod network {
         let src = "import http\nprint(http.get(\"http://example.test/page\")?.text()?)";
         let r = run_with(src, |c| c.network(network.clone()));
         assert_eq!(r.ok_stdout(), "from memory\n");
-        assert_eq!(*network.resolved.lock().unwrap(), ["example.test"]);
-        let requests = network.requests.lock().unwrap();
+        assert_eq!(*network.resolved.lock(), ["example.test"]);
+        let requests = network.requests.lock();
         assert!(requests[0].starts_with("GET /page HTTP/1.1\r\n"), "{requests:?}");
     }
 
@@ -202,7 +203,7 @@ mod network {
         let src = "import net\nlet c = net.connect(\"example.test\", 80)?\nc.write_str(\"GET / HTTP/1.1\\r\\n\\r\\n\")?\nprint(c.peer_addr())\nprint(c.read_all()?.len())";
         let r = run_with(src, |c| c.network(network.clone()));
         assert_eq!(r.ok_stdout(), "93.184.216.34:80\n69\n");
-        assert_eq!(*network.resolved.lock().unwrap(), ["example.test"]);
+        assert_eq!(*network.resolved.lock(), ["example.test"]);
     }
 
     #[test]
@@ -214,6 +215,6 @@ mod network {
         let r = run_with(src, |c| c.network(network.clone()).clock(clock.clone()));
         assert_eq!(r.ok_stdout(), "Err(\"timeout\")\n");
         assert!(started.elapsed() < Duration::from_secs(5));
-        assert!(clock.sleeps.lock().unwrap().contains(&Duration::from_secs(30)));
+        assert!(clock.sleeps.lock().contains(&Duration::from_secs(30)));
     }
 }

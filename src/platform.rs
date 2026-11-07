@@ -233,9 +233,10 @@ pub(crate) fn offload<T: Send + 'static>(job: impl FnOnce() -> T + Send + 'stati
 /// Worker thread pool for background tasks.
 #[cfg(not(web))]
 mod pool {
+    use parking_lot::{Condvar, Mutex};
     use std::collections::VecDeque;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Arc, Condvar, Mutex, MutexGuard};
     use std::time::{Duration, Instant};
 
     /// How often a waiting thread checks whether to stop waiting.
@@ -284,10 +285,6 @@ mod pool {
         idle: usize,
     }
 
-    fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-        m.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
     impl Pool {
         pub(crate) const fn new(name: &'static str, stack: Option<usize>) -> Pool {
             Pool {
@@ -306,7 +303,7 @@ mod pool {
             T: Send + 'static,
             F: FnOnce() -> T + Send + 'static,
         {
-            let mut q = lock(&self.state);
+            let mut q = self.state.lock();
             let workers = q.idle + self.spinning.load(Ordering::SeqCst);
             if q.jobs.len() >= workers {
                 drop(q);
@@ -317,13 +314,13 @@ mod pool {
                 if let Err(e) = b.spawn(move || self.work_loop()) {
                     return Err((job, e));
                 }
-                q = lock(&self.state);
+                q = self.state.lock();
             }
             let slot = Arc::new(Slot { state: Mutex::new((None, None)), done: Condvar::new(), ready: AtomicBool::new(false) });
             let theirs = slot.clone();
             q.jobs.push_back(Box::new(move || {
                 let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
-                let mut s = lock(&theirs.state);
+                let mut s = theirs.state.lock();
                 s.0 = Some(r);
                 theirs.ready.store(true, Ordering::Release);
                 let waker = s.1.take();
@@ -341,7 +338,7 @@ mod pool {
         }
 
         fn work_loop(&self) {
-            let mut q = lock(&self.state);
+            let mut q = self.state.lock();
             loop {
                 if let Some(job) = q.jobs.pop_front() {
                     self.queued.store(q.jobs.len(), Ordering::SeqCst);
@@ -349,13 +346,12 @@ mod pool {
                     job();
                     self.spinning.fetch_add(1, Ordering::SeqCst);
                     spin(|| self.queued.load(Ordering::SeqCst) > 0);
-                    q = lock(&self.state);
+                    q = self.state.lock();
                     self.spinning.fetch_sub(1, Ordering::SeqCst);
                     continue;
                 }
                 q.idle += 1;
-                let (guard, waited) = self.work.wait_timeout(q, IDLE).unwrap_or_else(|e| e.into_inner());
-                q = guard;
+                let waited = self.work.wait_for(&mut q, IDLE);
                 q.idle -= 1;
                 if waited.timed_out() && q.jobs.is_empty() {
                     return;
@@ -385,16 +381,16 @@ mod pool {
         #[cfg(feature = "os")]
         pub(crate) fn wait<E>(self, mut check: impl FnMut() -> Result<(), E>) -> Result<Result<T, String>, E> {
             spin(|| self.0.ready.load(Ordering::Acquire));
-            let mut s = lock(&self.0.state);
+            let mut s = self.0.state.lock();
             loop {
                 if let Some(r) = s.0.take() {
                     return Ok(r.map_err(|p| crate::unwind::panic_text(&*p)));
                 }
-                s = self.0.done.wait_timeout(s, POLL).unwrap_or_else(|e| e.into_inner()).0;
+                self.0.done.wait_for(&mut s, POLL);
                 if s.0.is_none() {
                     drop(s);
                     check()?;
-                    s = lock(&self.0.state);
+                    s = self.0.state.lock();
                 }
             }
         }
@@ -402,12 +398,12 @@ mod pool {
         /// Waits for the worker result.
         pub(crate) fn wait_raw(self) -> std::thread::Result<T> {
             spin(|| self.0.ready.load(Ordering::Acquire));
-            let mut s = lock(&self.0.state);
+            let mut s = self.0.state.lock();
             loop {
                 if let Some(r) = s.0.take() {
                     return r;
                 }
-                s = self.0.done.wait(s).unwrap_or_else(|e| e.into_inner());
+                self.0.done.wait(&mut s);
             }
         }
     }
@@ -417,7 +413,7 @@ mod pool {
         type Output = Result<T, String>;
 
         fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
-            let mut s = lock(&self.0.state);
+            let mut s = self.0.state.lock();
             match s.0.take() {
                 Some(r) => std::task::Poll::Ready(r.map_err(|p| crate::unwind::panic_text(&*p))),
                 None => {

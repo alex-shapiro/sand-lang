@@ -148,7 +148,7 @@ impl HttpResponse {
 
 pub struct TestServer {
     pub addr: std::net::SocketAddr,
-    pub requests: std::sync::Arc<std::sync::Mutex<Vec<HttpRequest>>>,
+    pub requests: std::sync::Arc<parking_lot::Mutex<Vec<HttpRequest>>>,
     /// The connections accepted so far.
     pub connections: std::sync::Arc<AtomicUsize>,
 }
@@ -200,7 +200,8 @@ pub fn tls_acceptor() -> TlsAcceptor {
 }
 
 fn serve(handler: Handler, tls: Option<TlsAcceptor>) -> TestServer {
-    use std::sync::{Arc, Mutex};
+    use parking_lot::Mutex;
+    use std::sync::Arc;
     let requests = Arc::new(Mutex::new(Vec::new()));
     let reqs = requests.clone();
     let connections = Arc::new(AtomicUsize::new(0));
@@ -241,7 +242,7 @@ fn serve(handler: Handler, tls: Option<TlsAcceptor>) -> TestServer {
 }
 
 /// Answers the requests arriving on one connection.
-async fn serve_connection<S>(mut sock: S, handler: Handler, reqs: std::sync::Arc<std::sync::Mutex<Vec<HttpRequest>>>)
+async fn serve_connection<S>(mut sock: S, handler: Handler, reqs: std::sync::Arc<parking_lot::Mutex<Vec<HttpRequest>>>)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -306,7 +307,7 @@ where
             buf.drain(..len).collect()
         };
         let req = HttpRequest { method, target, headers, body };
-        reqs.lock().unwrap().push(req.clone());
+        reqs.lock().push(req.clone());
         // Run the handler off the (single-threaded) runtime so slow handlers overlap.
         let resp = {
             let (handler, req) = (handler.clone(), req.clone());

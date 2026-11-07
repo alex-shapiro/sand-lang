@@ -81,7 +81,7 @@ print(http.request("HEAD", "{base}/h")?.body.len())
 "#
     );
     assert_eq!(run_net(&src), "POST /p?x=1 7 [payload]\nPUT /put 3 [abc]\nDELETE /d 0 []\n0\n");
-    let reqs = server.requests.lock().unwrap();
+    let reqs = server.requests.lock();
     assert_eq!(reqs[0].header("content-length"), Some("7"));
 }
 
@@ -147,7 +147,7 @@ fn http_redirects_are_checked_against_policy() {
     let src = format!("import http\nprint(http.get(\"http://{}/\").unwrap_err().kind)", origin.addr);
     let r = run_with(&src, |c| c.policy(policy));
     assert_eq!(r.ok_stdout(), "permission_denied\n");
-    assert!(target.requests.lock().unwrap().is_empty());
+    assert!(target.requests.lock().is_empty());
 }
 
 #[test]
@@ -188,7 +188,7 @@ show(http.get("http://{addr}/old"))
              permission denied: GET http://{addr}/private\npermission denied: GET http://{addr}/private/x\n"
         )
     );
-    let seen: Vec<String> = server.requests.lock().unwrap().iter().map(|r| r.target.clone()).collect();
+    let seen: Vec<String> = server.requests.lock().iter().map(|r| r.target.clone()).collect();
     assert_eq!(seen, ["/api/v1", "/api/items", "/api/v2", "/old"]);
 }
 
@@ -715,7 +715,7 @@ print(up.write_str("late").unwrap_err().kind)
          Err(Error(message: \"the body is 1 bytes shorter than its content-length\", kind: \"invalid\"))\n\
          Ok(\"301 \")\nclosed\n"
     );
-    let reqs = server.requests.lock().unwrap();
+    let reqs = server.requests.lock();
     assert_eq!(reqs.len(), 3, "{reqs:?}");
     assert_eq!(reqs[1].header("content-length"), Some("3"));
 }
@@ -856,7 +856,7 @@ print(http.get("{base}/")?.text()?)
     let before = server.connections.load(std::sync::atomic::Ordering::SeqCst);
     assert_eq!(run_net(&src), "closing\nGET \nGET \nGET \n");
     assert_eq!(server.connections.load(std::sync::atomic::Ordering::SeqCst) - before, 4);
-    let reqs = server.requests.lock().unwrap();
+    let reqs = server.requests.lock();
     assert_eq!(reqs.iter().filter(|r| r.header("connection") == Some("close")).count(), 1);
 }
 
@@ -1111,11 +1111,11 @@ print(http.get("{base}/c", headers: [("X-Refuse", "yes")]).unwrap_err().kind)
 "#
     );
     for stress in [false, true] {
-        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
         let log = seen.clone();
         let r = run_with(&src, move |c| {
             c.retry_stress(stress).request_filter(move |target, headers| {
-                log.lock().unwrap().push(target.clone());
+                log.lock().push(target.clone());
                 if headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("x-refuse")) {
                     return Err("refused by the host".into());
                 }
@@ -1126,7 +1126,7 @@ print(http.get("{base}/c", headers: [("X-Refuse", "yes")]).unwrap_err().kind)
             })
         });
         assert_eq!(r.ok_stdout(), "Bearer real-token\n-\npermission_denied\n");
-        let seen = seen.lock().unwrap();
+        let seen = seen.lock();
         assert_eq!(seen.len(), 3, "retry stress: {stress}");
         assert_eq!(seen[0].scheme, "http");
         assert_eq!(seen[0].host, "127.0.0.1");

@@ -73,8 +73,8 @@ print(resp.body.read_text()?)
     );
     let r = run_with(&src, trusting);
     assert_eq!(r.ok_stdout(), "200\nsecure hello\nSome(\"text/plain\")\ntrue\nsecure hello\nchunked over tls\nchunked over tls\n");
-    assert_eq!(server.requests.lock().unwrap().len(), 5);
-    assert_eq!(server.requests.lock().unwrap()[4].body, b"streamed");
+    assert_eq!(server.requests.lock().len(), 5);
+    assert_eq!(server.requests.lock()[4].body, b"streamed");
     // The requests share a connection; the upload has its own.
     assert_eq!(server.connections.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
@@ -99,7 +99,7 @@ print(c.unwrap_err().message.contains("certificate"))
     // The bundled web PKI roots do not include the test root.
     let r = run_with(&src, |c| c.policy(RulePolicy::allow_all()));
     assert_eq!(r.ok_stdout(), "invalid\ntrue\ntrue\n");
-    assert!(server.requests.lock().unwrap().is_empty());
+    assert!(server.requests.lock().is_empty());
 }
 
 #[test]
@@ -124,7 +124,7 @@ print(net.connect_tls("127.0.0.1", {}).is_err())
     assert!(out.starts_with("invalid\nTLS handshake with 127.0.0.1 failed: "), "{out}");
     assert!(out.contains("not valid for name"), "{out}");
     assert!(out.ends_with("\ntrue\n"), "{out}");
-    assert!(server.requests.lock().unwrap().is_empty());
+    assert!(server.requests.lock().is_empty());
 }
 
 #[test]

@@ -1,10 +1,11 @@
 //! Host-supplied standard input stream.
 
 use crate::vm::WaitKind;
+use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::io;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 use tokio::io::{AsyncBufRead, AsyncRead, ReadBuf};
 use tokio::sync::Notify;
@@ -160,14 +161,10 @@ impl StdinChannel {
         )
     }
 
-    fn lock(&self) -> MutexGuard<'_, StdinChannelState> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
     /// Updates the channel state with `f`, clears the active wait if input is
     /// ready, and wakes waiting tasks.
     fn change(&self, f: impl FnOnce(&mut StdinChannelState)) {
-        let mut state = self.lock();
+        let mut state = self.state.lock();
         f(&mut state);
         if state.has_input() {
             state.open_wait_id = None;
@@ -185,7 +182,7 @@ impl StdinChannel {
             let changed = self.changed.notified();
             let mut changed = std::pin::pin!(changed);
             changed.as_mut().enable();
-            if let Some(value) = predicate(&self.lock()) {
+            if let Some(value) = predicate(&self.state.lock()) {
                 return value;
             }
             changed.await;
@@ -249,7 +246,7 @@ impl<'a> ActiveStdinRead<'a> {
     /// current read has reached EOF.
     pub(crate) fn available(&mut self) -> (&[u8], bool) {
         if self.at == self.buf.len() && !self.ended {
-            let mut state = self.channel.lock();
+            let mut state = self.channel.state.lock();
             if self.answered {
                 self.ended = true;
             } else if let Some(answer) = state.answer.take() {
@@ -295,7 +292,7 @@ impl AsyncBufRead for ActiveStdinRead<'_> {
             if !data.is_empty() || ended {
                 return Poll::Ready(Ok(&this.buf[this.at..]));
             }
-            let mut state = this.channel.lock();
+            let mut state = this.channel.state.lock();
             if !state.has_input() {
                 if state.open_wait_id.is_none() {
                     state.waits_started += 1;

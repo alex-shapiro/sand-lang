@@ -6,10 +6,11 @@
 //! which has no threads, writes happen on the calling thread.
 
 use crate::vm::OutputSink;
+use parking_lot::{Condvar, Mutex};
 use std::collections::VecDeque;
 use std::io::{self, Write};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 /// The bytes a sink buffers before it hands them to the writer.
@@ -40,10 +41,6 @@ struct Queue {
     running: bool,
 }
 
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 fn writer() -> &'static Writer {
     static WRITER: OnceLock<Writer> = OnceLock::new();
     WRITER.get_or_init(Writer::default)
@@ -62,7 +59,7 @@ fn write_out(stream: Stream, data: &[u8]) -> io::Result<()> {
 impl Writer {
     /// Queues `data` and returns its sequence number.
     fn push(&'static self, stream: Stream, data: Vec<u8>) -> u64 {
-        let mut q = lock(&self.state);
+        let mut q = self.state.lock();
         if !q.running {
             #[cfg(not(web))]
             let started = std::thread::Builder::new().name("sand-stdio".into()).spawn(move || self.run()).is_ok();
@@ -88,15 +85,15 @@ impl Writer {
 
     #[cfg(not(web))]
     fn run(&self) {
-        let mut q = lock(&self.state);
+        let mut q = self.state.lock();
         loop {
             let Some((stream, data)) = q.chunks.pop_front() else {
-                q = self.changed.wait(q).unwrap_or_else(|e| e.into_inner());
+                self.changed.wait(&mut q);
                 continue;
             };
             drop(q);
             let r = write_out(stream, &data);
-            q = lock(&self.state);
+            q = self.state.lock();
             if let Err(e) = r {
                 q.errors[stream as usize].get_or_insert(e);
             }
@@ -108,14 +105,14 @@ impl Writer {
 
     /// Waits at most `timeout` for `done` to hold, and returns whether it does.
     fn wait(&self, timeout: Duration, done: impl Fn(&Queue) -> bool) -> bool {
-        let q = lock(&self.state);
-        let (q, _) = self.changed.wait_timeout_while(q, timeout, |q| !done(q)).unwrap_or_else(|e| e.into_inner());
+        let mut q = self.state.lock();
+        self.changed.wait_while_for(&mut q, |q| !done(q), timeout);
         done(&q)
     }
 
     /// The first error writing `stream` since the last call, if any.
     fn take_error(&self, stream: Stream) -> io::Result<()> {
-        lock(&self.state).errors[stream as usize].take().map_or(Ok(()), Err)
+        self.state.lock().errors[stream as usize].take().map_or(Ok(()), Err)
     }
 
     fn wait_backlog(&self, last: u64, max: usize, timeout: Duration) -> bool {
@@ -131,7 +128,7 @@ impl Writer {
 /// output and error has been written. Call it before the process exits.
 pub fn flush_stdio() {
     let w = writer();
-    let last = lock(&w.state).queued;
+    let last = w.state.lock().queued;
     while !w.wait(Duration::from_secs(1), |q| q.written >= last) {}
 }
 
@@ -157,16 +154,10 @@ impl Buffer {
     }
 }
 
-impl StdoutSink {
-    fn buffer(&self) -> MutexGuard<'_, Buffer> {
-        lock(&self.0)
-    }
-}
-
 impl OutputSink for StdoutSink {
     fn write(&self, data: &[u8]) -> io::Result<()> {
         use std::io::IsTerminal;
-        let mut b = self.buffer();
+        let mut b = self.0.lock();
         let tty = *b.tty.get_or_insert_with(|| io::stdout().is_terminal());
         b.data.extend_from_slice(data);
         if b.data.len() >= BUFFER || (tty && data.contains(&b'\n')) {
@@ -176,12 +167,12 @@ impl OutputSink for StdoutSink {
     }
 
     fn flush(&self) -> io::Result<()> {
-        self.buffer().hand_off();
+        self.0.lock().hand_off();
         writer().take_error(Stream::Out)
     }
 
     fn flush_before_input(&self) -> io::Result<()> {
-        let mut b = self.buffer();
+        let mut b = self.0.lock();
         // Like C's stdio, flush only a line-buffered (terminal) stream.
         if b.tty == Some(true) {
             b.hand_off();
@@ -194,14 +185,14 @@ impl OutputSink for StdoutSink {
     }
 
     fn wait_backlog(&self, max: usize, timeout: Duration) -> bool {
-        let last = self.buffer().last;
+        let last = self.0.lock().last;
         writer().wait_backlog(last, max, timeout)
     }
 }
 
 impl Drop for StdoutSink {
     fn drop(&mut self) {
-        self.buffer().hand_off();
+        self.0.lock().hand_off();
     }
 }
 
@@ -213,7 +204,7 @@ pub(crate) struct StderrSink {
 
 impl OutputSink for StderrSink {
     fn write(&self, data: &[u8]) -> io::Result<()> {
-        let mut last = lock(&self.last);
+        let mut last = self.last.lock();
         *last = writer().push(Stream::Err, data.to_vec());
         Ok(())
     }
@@ -227,7 +218,7 @@ impl OutputSink for StderrSink {
     }
 
     fn wait_backlog(&self, max: usize, timeout: Duration) -> bool {
-        let last = *lock(&self.last);
+        let last = *self.last.lock();
         writer().wait_backlog(last, max, timeout)
     }
 }

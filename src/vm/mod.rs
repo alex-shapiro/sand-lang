@@ -17,12 +17,13 @@ use crate::{LimitKind, Limits};
 use bytecode::*;
 use heap::{Heap, Staging};
 use meter::Meter;
+use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
 use value::*;
 
 pub type NResult = Result<Value, Ctl>;
@@ -386,7 +387,7 @@ fn decide(
     if denies_once.contains(cap) {
         return Ok(false);
     }
-    if let Some(&d) = always.lock().unwrap_or_else(|e| e.into_inner()).get(cap) {
+    if let Some(&d) = always.lock().get(cap) {
         return Ok(d);
     }
     match check() {
@@ -1026,9 +1027,7 @@ impl Vm {
     /// Whether prompt answers are remembered (for this call or for good):
     /// they apply to capabilities as the policy saw them when prompting.
     pub(crate) fn has_answers(&self) -> bool {
-        !self.host.grants_once.is_empty()
-            || !self.host.denies_once.is_empty()
-            || !self.host.always.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
+        !self.host.grants_once.is_empty() || !self.host.denies_once.is_empty() || !self.host.always.lock().is_empty()
     }
 
     fn permit_by(&mut self, cap: &Capability, check: impl FnOnce(&Policy, &Capability) -> Decision) -> Result<bool, Ctl> {
@@ -1110,7 +1109,7 @@ impl Vm {
             PromptAnswer::DenyOnce => self.host.denies_once.push(cap),
             PromptAnswer::AllowAlways | PromptAnswer::DenyAlways => {
                 let allow = answer == PromptAnswer::AllowAlways;
-                self.host.always.lock().unwrap_or_else(|e| e.into_inner()).insert(cap, allow);
+                self.host.always.lock().insert(cap, allow);
             }
         }
     }
@@ -1219,7 +1218,7 @@ impl Vm {
                 let cap = if which == 1 { Capability::Stdout } else { Capability::Stderr };
                 let d = self.permit(&cap)?;
                 // Cache static decisions for the hot path.
-                if !self.host.always.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&cap)
+                if !self.host.always.lock().contains_key(&cap)
                     && self.host.grants_once.is_empty()
                     && self.host.denies_once.is_empty()
                     && let Decision::Allow | Decision::Deny = self.host.policy.check(&cap)

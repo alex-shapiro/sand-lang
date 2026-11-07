@@ -3,11 +3,12 @@
 mod common;
 
 use common::{HttpResponse, TempDir, http_server, rt};
+use parking_lot::Mutex;
 use sandlang::{Capability, Config, Decision, Engine, Error, MemorySink, RulePolicy};
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 fn example(rel: &str) -> PathBuf {
@@ -286,7 +287,7 @@ fn http_client_fetches_and_parses_a_page() {
         "{base}/page [200]\ntitle: Test & Page\nheadings:\n  Main Heading\n    Sub\nlinks (3):\n  {base}/about\n  https://other.example/x?y=1\n  {base}/rel/page.html\n{base}/missing: http: {base}/missing returned status 404\n{base}/data.json: invalid: {base}/data.json is not HTML (application/json)\n"
     );
     assert_eq!(ok(&o), expected);
-    let reqs = server.requests.lock().unwrap();
+    let reqs = server.requests.lock();
     assert!(reqs.iter().any(|r| r.header("user-agent") == Some("sand-fetch/0.1")));
 }
 
@@ -295,7 +296,7 @@ fn http_client_is_sandboxed() {
     let server = http_server(|_| HttpResponse::new(200, "<title>x</title>").header("content-type", "text/html"));
     let o = run_example("http_fetch.sand", &[&format!("http://{}/", server.addr)], Config::new().policy(RulePolicy::standard()));
     assert!(ok(&o).contains("permission_denied"), "{}", o.stdout);
-    assert!(server.requests.lock().unwrap().is_empty());
+    assert!(server.requests.lock().is_empty());
 }
 
 #[test]
@@ -391,7 +392,7 @@ fn s3_client_against_mock_server() {
             return HttpResponse::new(400, "<Error><Code>BadRequest</Code><Message>missing headers</Message></Error>");
         }
         let path = percent_decode(req.path().trim_start_matches('/'));
-        let mut store = s.lock().unwrap();
+        let mut store = s.lock();
         match req.method.as_str() {
             "PUT" => {
                 store.insert(path, req.body.clone());
@@ -464,7 +465,7 @@ fn s3_client_against_mock_server() {
         dir.write("tmp.txt", v);
         ok(&run(&["put", "bucket", k, "tmp.txt"]));
     }
-    assert_eq!(store.lock().unwrap().get("bucket/notes/one.txt").unwrap(), b"hello from sand");
+    assert_eq!(store.lock().get("bucket/notes/one.txt").unwrap(), b"hello from sand");
 
     let o = run(&["cat", "bucket", "notes/one.txt"]);
     assert_eq!(ok(&o), "hello from sand");
@@ -491,7 +492,7 @@ fn s3_client_against_mock_server() {
     assert!(o.stderr.contains("NoSuchKey: The specified key does not exist."), "{}", o.stderr);
 
     // Every request was signed, and the signed host matches what was sent.
-    for r in server.requests.lock().unwrap().iter() {
+    for r in server.requests.lock().iter() {
         let auth = r.header("authorization").unwrap();
         assert!(auth.contains("SignedHeaders=") && auth.contains("host"), "{auth}");
         assert_eq!(r.header("host").unwrap(), server.addr.to_string());

@@ -62,7 +62,7 @@ struct ReadState {
     /// Makes the reading give up.
     evict: AtomicBool,
     /// A kept-alive connection, until its next request starts to arrive.
-    waiting: std::sync::Mutex<Option<Detached>>,
+    waiting: parking_lot::Mutex<Option<Detached>>,
 }
 
 impl ReadState {
@@ -72,7 +72,7 @@ impl ReadState {
     }
 
     fn take_waiting(&self) -> Option<Detached> {
-        self.waiting.lock().unwrap_or_else(|e| e.into_inner()).take()
+        self.waiting.lock().take()
     }
 }
 
@@ -82,32 +82,24 @@ pub(super) struct Shared {
     /// Locked by the `Server.accept` call that drives the readings; oldest first.
     reads: tokio::sync::Mutex<Vec<Pending>>,
     /// Readings handed back but not yet in `reads`, and the driving call's waker.
-    returned: std::sync::Mutex<(Vec<Pending>, Option<Waker>)>,
+    returned: parking_lot::Mutex<(Vec<Pending>, Option<Waker>)>,
     /// The states of handed-back readings, for [`Shared::close_idle`].
-    waiting: std::sync::Mutex<Vec<Weak<ReadState>>>,
+    waiting: parking_lot::Mutex<Vec<Weak<ReadState>>>,
 }
 
 impl Shared {
-    fn returned(&self) -> std::sync::MutexGuard<'_, (Vec<Pending>, Option<Waker>)> {
-        self.returned.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    fn waiting(&self) -> std::sync::MutexGuard<'_, Vec<Weak<ReadState>>> {
-        self.waiting.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
     /// Waits for `conn`'s next request.
     fn hand_back(&self, conn: Detached, mem: Arc<IoMemory>) {
         let reader = conn.reader.clone();
-        let state = Arc::new(ReadState { evict: AtomicBool::new(false), waiting: std::sync::Mutex::new(Some(conn)) });
+        let state = Arc::new(ReadState { evict: AtomicBool::new(false), waiting: parking_lot::Mutex::new(Some(conn)) });
         let idle_until = tokio::time::Instant::now() + IDLE_TIMEOUT;
         {
-            let mut waiting = self.waiting();
+            let mut waiting = self.waiting.lock();
             waiting.retain(|s| s.strong_count() > 0);
             waiting.push(Arc::downgrade(&state));
         }
         let reading = Box::pin(read_next(reader, mem, state.clone(), idle_until));
-        let mut returned = self.returned();
+        let mut returned = self.returned.lock();
         returned.0.push(Pending { reading, state });
         if let Some(w) = returned.1.take() {
             w.wake();
@@ -116,12 +108,12 @@ impl Shared {
 
     /// Closes the connections waiting for their next request.
     pub(super) fn close_idle(&self) {
-        for state in self.waiting().drain(..).filter_map(|s| s.upgrade()) {
+        for state in self.waiting.lock().drain(..).filter_map(|s| s.upgrade()) {
             if state.take_waiting().is_some() {
                 state.evict.store(true, Ordering::Relaxed);
             }
         }
-        if let Some(w) = self.returned().1.take() {
+        if let Some(w) = self.returned.lock().1.take() {
             w.wake();
         }
     }
@@ -221,7 +213,7 @@ fn accept_request(vm: &mut Vm, server: Val<Server>) -> Suspended<Request> {
             loop {
                 let mut progress = false;
                 {
-                    let mut returned = shared.returned();
+                    let mut returned = shared.returned.lock();
                     returned.1 = Some(cx.waker().clone());
                     if !returned.0.is_empty() {
                         reads.append(&mut returned.0);

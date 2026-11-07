@@ -9,6 +9,7 @@
 
 use crate::{exit_status, run_options, runtime};
 use nu_ansi_term::{Color, Style};
+use parking_lot::Mutex;
 use reedline::{
     EditCommand, EditMode, Emacs, ExternalPrinter, FileBackedHistory, Highlighter, KeyCode, KeyModifiers, Prompt, PromptEditMode,
     PromptHistorySearch, Reedline, ReedlineEvent, ReedlineRawEvent, Signal, StyledText, ValidationResult, Validator,
@@ -20,8 +21,8 @@ use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 const REPL_HELP: &str = "\
@@ -250,13 +251,9 @@ struct ScreenState {
 }
 
 impl Screen {
-    fn state(&self) -> MutexGuard<'_, ScreenState> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
     /// Prints `prompt` and waits for input (plain reader).
     fn show(&self, prompt: &'static str) {
-        let mut st = self.state();
+        let mut st = self.0.lock();
         let mut out = std::io::stdout().lock();
         let _ = out.write_all(prompt.as_bytes());
         let _ = out.flush();
@@ -266,20 +263,20 @@ impl Screen {
 
     /// Stops waiting for input.
     fn hide(&self) {
-        let mut st = self.state();
+        let mut st = self.0.lock();
         st.prompt = None;
         st.visible = false;
     }
 
     /// The line editor starts reading an input: output goes to `printer`.
     fn start_editing(&self, printer: ExternalPrinter<String>) {
-        self.state().printer = Some(printer);
+        self.0.lock().printer = Some(printer);
     }
 
     /// The line editor has stopped reading: prints the output it did not
     /// print yet (with an unfinished last line), and writes directly again.
     fn stop_editing(&self) {
-        let mut st = self.state();
+        let mut st = self.0.lock();
         let Some(printer) = st.printer.take() else { return };
         let mut out = std::io::stdout().lock();
         while let Some(lines) = printer.get_line() {
@@ -294,7 +291,7 @@ impl Screen {
 
     /// Passes held lines to the editor's printer, as far as it takes them.
     fn flush_backlog(&self) {
-        let mut st = self.state();
+        let mut st = self.0.lock();
         let ScreenState { printer: Some(printer), backlog, .. } = &mut *st else { return };
         while let Some(lines) = backlog.pop_front() {
             if let Err(e) = printer.sender().try_send(lines) {
@@ -308,7 +305,7 @@ impl Screen {
 
     /// Writes script output (`stderr` for standard error).
     fn write(&self, stderr: bool, data: &[u8]) -> std::io::Result<()> {
-        let mut st = self.state();
+        let mut st = self.0.lock();
         if st.printer.is_some() {
             st.partial.extend_from_slice(data);
             let end = match st.partial.iter().rposition(|&b| b == b'\n') {
