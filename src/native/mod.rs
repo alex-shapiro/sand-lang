@@ -1,16 +1,8 @@
 //! Native module registration and Rust-to-Sand type bindings.
 
-mod convert;
-mod func;
-mod ty;
-
-pub use crate::types::traits;
-pub use convert::{Conversion, FromValue, HostError, IntoHostError, IntoValue, value_from, value_into};
-pub use func::{AsyncHostFunction, HostFunction, Later, NativeError, Signature, VmFunction};
-pub use ty::{Channel, Named, Never, Num, Param, Range, Reflect, SandType, Task, Type, Val};
-
-#[doc(hidden)]
-pub use convert::mismatch;
+pub mod convert;
+pub mod func;
+pub mod ty;
 
 use crate::check::ModKind;
 use crate::engine::Registry;
@@ -19,10 +11,13 @@ use crate::types::{ConstVal, MAX_CONST_DEPTH, MAX_CONST_PARTS, ValueTypeInfo};
 use crate::vm::heap::Heap;
 use crate::vm::value::{ChannelObj, MapObj, Obj, SetObj, TaskObj, TypeDesc, Value, ValueType};
 use crate::vm::{Ctl, HostFn, NativeFn, Vm};
+use convert::{Conversion, FromValue, mismatch};
+use func::{AsyncHostFunction, HostFunction, Signature, VmFunction};
 use std::any::{Any, TypeId};
 use std::borrow::Cow;
 use std::marker::PhantomData;
 use std::sync::Arc;
+use ty::{Channel, Num, Param, Range, Reflect, SandType, Task, Type, Val};
 
 /// A Rust type bound to a nominal Sand type in a [`NativeModule`].
 ///
@@ -197,7 +192,7 @@ pub struct StructField {
     pub default: Option<fn() -> Option<Constant>>,
 }
 
-/// Compile-time Sand constant produced by [`IntoValue::to_const`].
+/// Compile-time Sand constant produced by [`IntoValue::to_const`](convert::IntoValue::to_const).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Constant(pub(crate) ConstVal<RustVariant, TypeId>);
 
@@ -445,7 +440,7 @@ pub fn variant_into_value<T: EnumType, const N: usize>(
 /// #[sand(module = "geo")]
 /// struct Point { x: f64 }
 /// struct Fake;
-/// impl sandlang::NamedType for Fake {
+/// impl sandlang::native::NamedType for Fake {
 ///     const MODULE: &'static str = "geo";
 ///     const NAME: &'static str = "Fake";
 ///     const DOC: &'static str = "";
@@ -763,21 +758,21 @@ struct FnDef {
 /// `import <name>`.
 ///
 /// The engine infers the Sand signature of each registered function from its
-/// Rust parameter and return types. Functions that are not declared in
-/// [`NativeModule::source`] are exported as `pub native fn` with the parameter
-/// names configured by [`NativeModule::params`] (or `arg1`, `arg2`, ... by
-/// default). Registering a function as `"Type.name"` defines a method on
-/// `Type`; the method takes `self` if its first parameter has type `Type`. Use
-/// `native fn` declarations in [`NativeModule::source`] to specify default
-/// parameter values or generic type parameters. [`Engine::new`](crate::Engine::new)
-/// verifies all declarations against the registered Rust signatures.
+/// Rust parameter and return types. It exports functions that are absent from
+/// [`NativeModule::source`] as `pub native fn`. [`NativeModule::params`] sets
+/// their parameter names, which default to `arg1`, `arg2`, and so on.
+/// Registering a function as `"Type.name"` defines a method on `Type`. The
+/// method takes `self` if its first parameter has type `Type`. Use `native fn`
+/// declarations in [`NativeModule::source`] to specify default parameter
+/// values or generic type parameters. [`Engine::new`](crate::engine::Engine::new)
+/// checks all declarations against the registered Rust signatures.
 ///
-/// Registered functions must check permissions ([`Vm::require`]), reserve
-/// memory, and acquire resource slots before performing any side effect,
-/// because the VM re-invokes the function from the start after a permission
-/// prompt or a garbage collection triggered by a memory or resource limit. Do
-/// not panic on script input; the engine catches panics and aborts the run with
-/// [`Error::Internal`](crate::Error::Internal).
+/// The VM re-runs a registered function from the start after a permission
+/// prompt or after a garbage collection triggered by a memory or resource
+/// limit. Check permissions with [`Vm::require`], reserve memory, and acquire
+/// resource slots before performing any side effect. Avoid panicking on script
+/// input. The engine catches panics and aborts the run with
+/// [`Error::Internal`](crate::engine::Error::Internal).
 #[derive(Clone)]
 pub struct NativeModule {
     name: String,

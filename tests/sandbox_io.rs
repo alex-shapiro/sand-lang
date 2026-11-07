@@ -5,8 +5,10 @@ mod common;
 
 use common::{HttpResponse, TempDir, http_server, run_with};
 use parking_lot::Mutex;
-use sandlang::policy::is_private_address;
-use sandlang::{Capability, Decision, Limits, PromptAnswer, RulePolicy};
+use sandlang::engine::Limits;
+use sandlang::policy::net::is_private_address;
+use sandlang::policy::rules::RulePolicy;
+use sandlang::policy::{Capability, Decision, PromptAnswer};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -109,7 +111,7 @@ fn net_pattern_edge_cases() {
     assert_eq!(p.check(&net("2001:db8::5", 443)), Decision::Allow);
     assert_eq!(p.check(&net("2001:db8::5", 80)), Decision::Prompt);
     assert_eq!(p.check(&net("10.2.3.4", 80)), Decision::Allow);
-    use sandlang::policy::check_net_pattern;
+    use sandlang::policy::net::check_net_pattern;
     for ok in [
         "*",
         "*:443",
@@ -436,7 +438,7 @@ fn listing_all_variables_gets_the_strictest_decision_of_any_variable() {
     for (p, want) in cases {
         assert_eq!(p.check(&all), want, "{p}");
     }
-    let file = |text: &str| sandlang::policy::PolicyFile::parse(text, std::path::Path::new("/"), None).unwrap().rules;
+    let file = |text: &str| sandlang::policy::file::PolicyFile::parse(text, std::path::Path::new("/"), None).unwrap().rules;
     assert_eq!(file("allow env *\ndeny env \"*\"").check(&all), Decision::Deny);
     assert_eq!(file("allow env \"*\"").check(&all), Decision::Prompt);
     let p = RulePolicy::new().allow_env("*").deny_env("*_KEY").allow_env("\0_KEY");
@@ -480,7 +482,7 @@ fn constructors_start_with_their_rules() {
     }
     // A policy file's text lists the same rules.
     let text = all.to_string();
-    assert_eq!(sandlang::policy::PolicyFile::parse(&text, std::path::Path::new("/"), None).unwrap().rules.to_string(), text);
+    assert_eq!(sandlang::policy::file::PolicyFile::parse(&text, std::path::Path::new("/"), None).unwrap().rules.to_string(), text);
 }
 
 #[cfg(unix)]
@@ -723,7 +725,7 @@ fn capability_display() {
 // File system: symlinks, check-then-use races and subtree deny rules
 // ---------------------------------------------------------------------------
 
-fn rules(dir: &TempDir, policy: RulePolicy) -> impl FnOnce(sandlang::Config) -> sandlang::Config {
+fn rules(dir: &TempDir, policy: RulePolicy) -> impl FnOnce(sandlang::engine::Config) -> sandlang::engine::Config {
     let cwd = dir.path().to_path_buf();
     move |c| c.policy(policy).cwd(cwd)
 }
@@ -757,7 +759,7 @@ fn denies_under_finds_deny_rules_inside_a_tree() {
     assert!(!p.denies_under(&d.join("a/other")));
     assert!(!p.denies_under(&d.join("ab")));
     assert!(!RulePolicy::allow_all().denies_under(d));
-    assert!(sandlang::CustomPolicy::denies_under(&|_: &Capability| Decision::Deny, d));
+    assert!(sandlang::policy::CustomPolicy::denies_under(&|_: &Capability| Decision::Deny, d));
 }
 
 #[cfg(unix)]
@@ -827,7 +829,7 @@ fn deny_patterns_protect_matching_files_and_the_trees_that_hold_them() {
     dir.write("project/Docs/notes.md", "notes");
     dir.write("project/tmp/a/b/c.txt", "c");
     let policy =
-        sandlang::policy::PolicyFile::parse("allow ./project\ndeny ./project/**/.env\ndeny write ./project/*/*.md", dir.path(), None)
+        sandlang::policy::file::PolicyFile::parse("allow ./project\ndeny ./project/**/.env\ndeny write ./project/*/*.md", dir.path(), None)
             .unwrap()
             .rules;
     let policy = RulePolicy::standard().extend(policy);
@@ -1374,7 +1376,7 @@ print(fs.list_dir(".")?)
 // Memory accounting of pending I/O
 // ---------------------------------------------------------------------------
 
-fn limited(bytes: usize) -> impl FnOnce(sandlang::Config) -> sandlang::Config {
+fn limited(bytes: usize) -> impl FnOnce(sandlang::engine::Config) -> sandlang::engine::Config {
     // The wall time limit turns buffers left pending forever into a failure.
     let limits = Limits { max_memory: Some(bytes), max_wall_time: Some(Duration::from_secs(10)), ..Limits::default() };
     move |c| c.policy(RulePolicy::allow_all()).limits(limits)
@@ -1500,10 +1502,10 @@ let line = raw.accept()?.read_line()
 print(line.unwrap_err().kind)
 print("still running")
 "#;
-    let out = sandlang::MemorySink::new();
+    let out = sandlang::engine::MemorySink::new();
     let limits = Limits { max_memory: Some(8 << 20), max_wall_time: Some(Duration::from_secs(20)), ..Limits::default() };
-    let config = sandlang::Config::new().policy(RulePolicy::allow_all()).limits(limits).stdout(out.clone());
-    let mut engine = sandlang::Engine::new(config).unwrap();
+    let config = sandlang::engine::Config::new().policy(RulePolicy::allow_all()).limits(limits).stdout(out.clone());
+    let mut engine = sandlang::engine::Engine::new(config).unwrap();
     let handle = std::thread::spawn(move || common::rt().block_on(engine.run_source("server.sand", src)));
     let start = Instant::now();
     let (http_addr, raw_addr) = loop {
@@ -1798,16 +1800,16 @@ fn copies_do_not_keep_permission_bits() {
 fn path_helpers_are_metered() {
     let src = "import fs\nlet s = \"x\".repeat(1 << 20)\nlet parts = (0..2000).map(_ => s)\nprint(fs.join(parts).len())";
     let r = run_with(src, |c| c.limits(Limits { max_memory: Some(64 << 20), ..Limits::default() }));
-    assert!(matches!(r.result, Err(sandlang::Error::Limit(sandlang::LimitKind::Memory))), "{:?}", r.result);
+    assert!(matches!(r.result, Err(sandlang::engine::Error::Limit(sandlang::engine::LimitKind::Memory))), "{:?}", r.result);
     let src = "import fs\nlet s = \"x/\".repeat(1 << 20)\nvar n = 0\nfor i in 0..100000 { n += fs.basename(s).len() + fs.dirname(s).len() }\nprint(n)";
     let r = run_with(src, |c| c.limits(Limits { max_instructions: Some(5_000_000), ..Limits::default() }));
-    assert!(matches!(r.result, Err(sandlang::Error::Limit(sandlang::LimitKind::Instructions))), "{:?}", r.result);
+    assert!(matches!(r.result, Err(sandlang::engine::Error::Limit(sandlang::engine::LimitKind::Instructions))), "{:?}", r.result);
 }
 
 #[test]
 fn custom_policies_evaluate_entry_operations_separately() {
     struct NoRemoval;
-    impl sandlang::CustomPolicy for NoRemoval {
+    impl sandlang::policy::CustomPolicy for NoRemoval {
         fn check(&self, _: &Capability) -> Decision {
             Decision::Allow
         }
@@ -1837,7 +1839,7 @@ print(fs.read_text("a.txt")?)
 
 #[test]
 fn a_policy_file_over_the_standard_rules_keeps_its_prompt_rules() {
-    let file = sandlang::policy::PolicyFile::parse("prompt stdout\nprompt stderr", std::path::Path::new("/"), None).unwrap();
+    let file = sandlang::policy::file::PolicyFile::parse("prompt stdout\nprompt stderr", std::path::Path::new("/"), None).unwrap();
     let policy = file.rules.with_defaults(RulePolicy::standard());
     assert_eq!((policy.check(&Capability::Stdout), policy.check(&Capability::Stderr)), (Decision::Prompt, Decision::Prompt));
     let r = run_with("print(\"printed\")", |c| c.policy(policy));

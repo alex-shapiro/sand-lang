@@ -5,7 +5,8 @@
 mod common;
 
 use common::{HttpResponse, http_server, https_server, run_with, tls_acceptor, tls_test_root};
-use sandlang::{Config, RulePolicy};
+use sandlang::engine::Config;
+use sandlang::policy::rules::RulePolicy;
 
 /// Allows everything and trusts the test root.
 fn trusting(c: Config) -> Config {

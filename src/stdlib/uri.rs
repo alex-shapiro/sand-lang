@@ -1,7 +1,9 @@
 //! The `uri` module (RFC 3986).
 
 use crate::check::ModKind;
-use crate::native::{HostError, NativeModule, Val};
+use crate::native::NativeModule;
+use crate::native::convert::HostError;
+use crate::native::ty::Val;
 use crate::vm::{Ctl, Vm};
 
 /// A parsed RFC 3986 URI. `host` is `Some` if the URI includes an authority

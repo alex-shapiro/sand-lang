@@ -6,7 +6,9 @@
 //! operation for benchmarks that declare an operation count, and garbage
 //! collector statistics (collections, longest and average pause).
 
-use sandlang::{Config, Engine, GcStats, MemorySink};
+use sandlang::engine::{Config, Engine, MemorySink};
+
+use sandlang::vm::heap::GcStats;
 use std::time::{Duration, Instant};
 
 struct Bench {

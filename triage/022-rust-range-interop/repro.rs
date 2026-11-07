@@ -8,7 +8,7 @@ struct View {
 }
 
 fn main() {
-    let mut module = sandlang::NativeModule::new("editor");
+    let mut module = sandlang::native::NativeModule::new("editor");
     module.bind::<View>();
     module.function("count", |range: RangeInclusive<i64>| range.count() as i64);
 }

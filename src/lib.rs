@@ -1,5 +1,9 @@
-//! Sand: a sandboxed, statically typed scripting language with a fast
+//! Sand is a sandboxed, statically typed scripting language with a
 //! register-based bytecode VM.
+//!
+//! Configure and run the interpreter with [`engine::Config`] and
+//! [`engine::Engine`]. Register host functions and types with
+//! [`native::NativeModule`]. Import each item from the module that defines it.
 //!
 //! See `docs/SPEC.md` for the language specification.
 #![forbid(unsafe_code)]
@@ -13,7 +17,7 @@ pub mod diag;
 mod doc_examples;
 pub mod docs;
 pub mod engine;
-mod files;
+pub mod files;
 pub mod fmt;
 pub mod hir;
 pub mod lint;
@@ -24,47 +28,12 @@ pub mod network;
 pub mod platform;
 pub mod policy;
 pub mod session;
-mod stdin_feed;
-mod stdio;
-mod stdlib;
+pub mod stdin_feed;
+pub mod stdio;
+pub mod stdlib;
 pub mod syntax;
 pub mod types;
 mod unwind;
 pub mod vm;
 
-pub use diag::{Diagnostic, Severity};
-pub use engine::{
-    Config, Engine, Error, InterruptHandle, LimitKind, Limits, MemorySink, Outcome, RequestFilter, RequestTarget, TestReport, TestResult,
-    TraceFrame,
-};
-pub use files::MemFs;
-pub use native::{
-    Conversion, EnumType, EnumVariant, FromValue, HostError, IntoHostError, IntoValue, NamedType, NativeModule, NativeObject, ObjectType,
-    SandType, StructField, StructType,
-};
-pub use policy::{Capability, CustomPolicy, Decision, PromptAnswer, Prompter, RulePolicy};
 pub use sandlang_macros::{SandEnum, SandObject, SandStruct, SandValue};
-pub use session::Session;
-pub use stdin_feed::{StdinFeed, StdinRequest};
-pub use stdio::flush_stdio;
-pub use stdlib::log::{LogLevel, LogRecord, LogSink};
-pub use vm::OutputSink;
-pub use vm::WaitKind;
-pub use vm::heap::GcStats;
-pub use vm::value::{Packing, Value, ValueType};
-
-pub use indexmap;
-pub use jiff;
-
-/// Rust representation of `json.Json` values.
-pub mod json {
-    pub use crate::stdlib::json::Json;
-}
-
-/// Rust types for `time` module values. `Instant`, `PlainDateTime`,
-/// `PlainDate`, and `PlainTime` are [`jiff::Timestamp`],
-/// [`jiff::civil::DateTime`], [`jiff::civil::Date`], and [`jiff::civil::Time`].
-pub mod time {
-    pub use crate::stdlib::time::enums::{Disambiguation, RoundingMode, Unit};
-    pub use crate::stdlib::time::{PlainMonthDay, PlainYearMonth, Span, TimeZone, ZonedDateTime};
-}

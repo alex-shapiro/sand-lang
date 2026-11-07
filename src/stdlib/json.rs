@@ -2,13 +2,12 @@
 
 use super::base64;
 use crate::check::ModKind;
-use crate::native::traits;
-use crate::native::{
-    Constant, Conversion, EnumType, FromValue, HostError, IntoValue, NamedType, NativeModule, Param, Reflect, Val, mismatch, variant_const,
-    variant_index,
-};
+use crate::native::convert::{Conversion, FromValue, HostError, IntoValue, mismatch};
+use crate::native::ty::{Param, Reflect, Val};
+use crate::native::{Constant, EnumType, NamedType, NativeModule, variant_const, variant_index};
 use crate::syntax::lexer::is_ident;
 use crate::types::ConstVal;
+use crate::types::traits;
 use crate::vm::bytecode::Program;
 use crate::vm::compare::{hash_key, str_hash};
 use crate::vm::heap::{Heap, Staging};
@@ -166,7 +165,7 @@ pub(crate) fn module() -> NativeModule {
                 }
             }
         }
-        let fail = |kind: &str, message| Ok(Decoded::Failed(super::Error { kind: kind.into(), message }));
+        let fail = |kind: &str, message| Ok(Decoded::Failed(super::core::Error { kind: kind.into(), message }));
         match r {
             Ok(d) => Ok(d),
             Err(Error::Parse(msg)) => fail("parse", msg),
@@ -192,7 +191,7 @@ pub(crate) fn module() -> NativeModule {
 enum Decoded<T> {
     Done(T),
     Pending(T, Val<Vec<fn()>>),
-    Failed(super::Error),
+    Failed(super::core::Error),
 }
 
 enum Error {
@@ -1480,7 +1479,7 @@ impl Encoder<'_> {
 
     fn string(&mut self, s: &str) -> Result<(), Ctl> {
         if s.len() > 1024 && self.heap.would_exceed(self.out.len().saturating_add(escaped_len(s))) {
-            return Err(Ctl::limit(crate::LimitKind::Memory));
+            return Err(Ctl::limit(crate::engine::LimitKind::Memory));
         }
         write_str(&mut self.out, s);
         Ok(())
@@ -1558,7 +1557,7 @@ impl Encoder<'_> {
                 Obj::StrBuf(s) => self.string(s)?,
                 Obj::Bytes(b) => {
                     if heap.would_exceed(self.out.len().saturating_add(b.len() / 3 * 4 + 4)) {
-                        return Err(Ctl::limit(crate::LimitKind::Memory));
+                        return Err(Ctl::limit(crate::engine::LimitKind::Memory));
                     }
                     self.meter.charge_slow_bytes(b.len())?;
                     self.out.push('"');

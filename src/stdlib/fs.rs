@@ -12,7 +12,9 @@
 use super::io_kind;
 use crate::check::ModKind;
 use crate::files::{EntryKind, Fs, Mode, OpenMode, OpenedFile, Target, is_unchecked_symlink, too_many_open_files, unchecked_symlink};
-use crate::native::{HostError, IntoValue, NativeModule, NativeObject, Val};
+use crate::native::convert::{HostError, IntoValue};
+use crate::native::ty::Val;
+use crate::native::{NativeModule, NativeObject};
 use crate::policy::{Capability, Decision, MAX_PATH_BYTES, Policy};
 use crate::vm::iomem::{Reservation, ResourceSlot};
 use crate::vm::meter::{Allowance, Stopped};

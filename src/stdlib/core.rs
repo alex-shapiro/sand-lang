@@ -1,8 +1,11 @@
 //! Natives for the prelude and the `task` module.
 
 use crate::check::ModKind;
-use crate::native::traits;
-use crate::native::{self, Channel, HostError, Later, NativeModule, Never, Num, Param, Task, Val};
+use crate::native::convert::HostError;
+use crate::native::func::Later;
+use crate::native::ty::{Channel, Never, Num, Param, Task, Val};
+use crate::native::{self, NativeModule};
+use crate::types::traits;
 use crate::vm::compare::{
     find_key, hash_key, set_slot, try_sort_by, try_sort_numbers, try_sort_packed, values_cmp_metered, values_eq_metered,
 };
@@ -25,7 +28,7 @@ type Bytes = Val<Vec<u8>>;
 type List<T = Param<0>> = Val<Vec<T>>;
 type Map = Val<HashMap<Param<0, traits::Hash>, Param<1>>>;
 type Set = Val<HashSet<Param<0, traits::Hash>>>;
-type Range = Val<native::Range>;
+type Range = Val<native::ty::Range>;
 type IterFn<T> = Val<fn() -> Option<T>>;
 
 /// Charges for copying `n` bytes into a new value and checks the memory limit.
@@ -408,7 +411,7 @@ fn strings(m: &mut NativeModule) {
         }
         let t = s.str(&vm.heap);
         let n = to_usize_saturating(n);
-        vm.check_memory(t.len().checked_mul(n).ok_or(Ctl::limit(crate::LimitKind::Memory))?)?;
+        vm.check_memory(t.len().checked_mul(n).ok_or(Ctl::limit(crate::engine::LimitKind::Memory))?)?;
         Ok(t.repeat(n))
     });
     fn pad(vm: &mut Vm, s: Str, width: i64, fill: Str, start: bool) -> Result<Str, Ctl> {
@@ -563,7 +566,7 @@ fn bytes(m: &mut NativeModule) {
     });
 }
 
-fn list_len<T: native::SandType>(vm: &Vm, xs: List<T>) -> usize {
+fn list_len<T: native::ty::SandType>(vm: &Vm, xs: List<T>) -> usize {
     xs.items(&vm.heap).len()
 }
 

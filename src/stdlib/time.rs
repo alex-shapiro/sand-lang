@@ -1,7 +1,20 @@
-//! Implementation of the `time` standard library module.
+//! The `time` module and the Rust types for its values.
+//!
+//! This module defines [`ZonedDateTime`], [`TimeZone`], [`Span`],
+//! [`PlainYearMonth`], and [`PlainMonthDay`]. The [`enums`] submodule defines
+//! the `time` enums. The remaining time and duration types map to [`jiff`]
+//! types:
+//!
+//! - `time.Instant` is [`jiff::Timestamp`].
+//! - `time.PlainDateTime` is [`jiff::civil::DateTime`].
+//! - `time.PlainDate` is [`jiff::civil::Date`].
+//! - `time.PlainTime` is [`jiff::civil::Time`].
+//! - `duration` is [`jiff::SignedDuration`].
 
 use crate::check::ModKind;
-use crate::native::{Binding, HostError, IntoValue, NamedType, NativeModule, NativeObject, Val};
+use crate::native::convert::{HostError, IntoValue};
+use crate::native::ty::Val;
+use crate::native::{Binding, NamedType, NativeModule, NativeObject};
 use crate::platform::{Instant as Monotonic, UNIX_EPOCH};
 use crate::policy::Capability;
 use crate::vm::value::{Packing, ValueType};
@@ -515,6 +528,7 @@ impl Difference for Date {
     }
 }
 
+/// The enums of the `time` module.
 pub mod enums {
     /// A calendar or clock unit, ordered from largest to smallest.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, crate::SandEnum)]

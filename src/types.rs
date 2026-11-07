@@ -525,13 +525,13 @@ macro_rules! builtins {
             }
         }
 
-        /// Type-level markers for built-in trait bounds on native [`Param`](crate::native::Param)
-        /// arguments (for example, `Param<0, traits::Hash>` or
-        /// `Param<0, (traits::Ord, traits::Hash)>`).
+        /// Type-level markers for built-in trait bounds on native
+        /// [`Param`](crate::native::ty::Param) arguments, such as
+        /// `Param<0, traits::Hash>` or `Param<0, (traits::Ord, traits::Hash)>`.
         pub mod traits {
             use super::{Builtin, Builtins};
 
-            /// A set of built-in traits required by a [`Param`](crate::native::Param):
+            /// A set of built-in traits required by a [`Param`](crate::native::ty::Param):
             /// a single trait, `()` for an empty set, or a tuple `(A, B)` for a union.
             pub trait Set {
                 const TRAITS: Builtins;

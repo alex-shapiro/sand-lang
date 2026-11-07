@@ -1,7 +1,8 @@
 //! The `test` module (written in Sand, except `fail`).
 
 use crate::check::ModKind;
-use crate::native::{NativeModule, Never};
+use crate::native::NativeModule;
+use crate::native::ty::Never;
 use crate::vm::Ctl;
 
 pub(crate) fn module() -> NativeModule {

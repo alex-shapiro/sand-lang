@@ -6,15 +6,17 @@
 mod common;
 
 use common::{TempDir, rt};
-use sandlang::WaitKind;
-use sandlang::native::Later;
+use sandlang::engine::{Config, Engine, Error, LimitKind, Limits, MemorySink};
+use sandlang::native::NativeModule;
+use sandlang::native::func::Later;
 use sandlang::platform::{Clock, ClockFuture, Instant, SystemTime, UNIX_EPOCH};
+use sandlang::policy::rules::RulePolicy;
+use sandlang::policy::{Capability, Decision, PromptAnswer};
 use sandlang::session::RESET_NOTE;
+use sandlang::session::Session;
+use sandlang::stdin_feed::{StdinFeed, StdinRequest};
+use sandlang::vm::WaitKind;
 use sandlang::vm::{Ctl, Vm};
-use sandlang::{
-    Capability, Config, Decision, Engine, Error, LimitKind, Limits, MemorySink, NativeModule, PromptAnswer, RulePolicy, Session, StdinFeed,
-    StdinRequest,
-};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -271,7 +273,7 @@ fn iterators_labels_and_defer_across_inputs() {
 fn imports_mid_session() {
     let dir = TempDir::new("session-import");
     dir.write("geo.sand", "pub fn area(w: float, h: float) -> float { w * h }\nprint(\"geo loaded\")\n");
-    let mut r = Repl::with(Config::new().policy(sandlang::RulePolicy::allow_all()).module_root(dir.path()).cwd(dir.path()));
+    let mut r = Repl::with(Config::new().policy(sandlang::policy::rules::RulePolicy::allow_all()).module_root(dir.path()).cwd(dir.path()));
     r.ok("import json");
     assert_eq!(r.value("json.encode(json.parse(\"[1, 2]\")?)"), "\"[1,2]\"");
     r.ok("from math import cbrt");
@@ -299,8 +301,9 @@ fn import_library_module_by_name() {
     dir.write("tools/geo.sand", "import units\npub fn area(w: float, h: float) -> float { units.scale(w * h) }\n");
     dir.write("tools/units.sand", "pub fn scale(x: float) -> float { x * 2.0 }\n");
     let library = dir.path().join("tools");
-    let mut r =
-        Repl::with(Config::new().policy(sandlang::RulePolicy::allow_all()).module_root(dir.path()).cwd(dir.path()).library(&library));
+    let mut r = Repl::with(
+        Config::new().policy(sandlang::policy::rules::RulePolicy::allow_all()).module_root(dir.path()).cwd(dir.path()).library(&library),
+    );
     r.ok("import geo");
     assert_eq!(r.value("geo.area(2.0, 3.0)"), "12.0");
     r.ok("from units import scale");
@@ -330,7 +333,8 @@ fn reload_modified_module_on_import() {
     dir.write("tools/geo.sand", "import units\npub fn area() -> float { units.scale(1.0) }\nprint(\"geo v1\")\n");
     dir.write("tools/units.sand", "pub fn scale(x: float) -> float { x * 2.0 }\n");
     let library = dir.path().join("tools");
-    let mut r = Repl::with(Config::new().policy(sandlang::RulePolicy::allow_all()).module_root(dir.path()).library(&library));
+    let mut r =
+        Repl::with(Config::new().policy(sandlang::policy::rules::RulePolicy::allow_all()).module_root(dir.path()).library(&library));
     r.ok("import geo");
     assert_eq!(r.take_out(), "geo v1\n");
     r.ok("let before = geo.area");
@@ -510,7 +514,7 @@ fn dropping_an_eval_future_leaves_a_usable_session() {
         if n.fetch_add(1, Ordering::SeqCst) == 0 { Box::pin(std::future::pending()) } else { Box::pin(async { PromptAnswer::AllowOnce }) }
     };
     // Imports are prompted for (only those under `elsewhere` would be allowed).
-    let rules = sandlang::RulePolicy::standard().allow_import(dir.path().join("elsewhere"));
+    let rules = sandlang::policy::rules::RulePolicy::standard().allow_import(dir.path().join("elsewhere"));
     let policy = rules;
     let mut r = Repl::with(Config::new().policy(policy).prompter(prompter).module_root(dir.path()).cwd(dir.path()));
     let timeout = |r: &mut Repl, src: &str| {
@@ -595,7 +599,7 @@ fn top_level_use_bindings_persist_across_inputs() {
 fn a_file_bound_with_top_level_use_stays_open_for_later_inputs() {
     let dir = TempDir::new("session-use");
     std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
-    let policy = sandlang::RulePolicy::allow_all();
+    let policy = sandlang::policy::rules::RulePolicy::allow_all();
     let mut r = Repl::with(Config::new().policy(policy).cwd(dir.path()).module_root(dir.path()));
     r.ok("import fs");
     r.ok("use f = fs.open(\"a.txt\")?");
@@ -614,7 +618,7 @@ fn always_answers_persist_and_prompts_happen_once() {
         let _ = cap;
         Box::pin(async { PromptAnswer::AllowAlways })
     };
-    let policy = sandlang::RulePolicy::standard();
+    let policy = sandlang::policy::rules::RulePolicy::standard();
     let mut r = Repl::with(Config::new().policy(policy).prompter(prompter).cwd(dir.path()).module_root(dir.path()));
     r.ok("import fs");
     assert_eq!(r.value("fs.read_text(\"a.txt\")?"), "\"hello\"");
@@ -749,7 +753,7 @@ fn always_answers_survive_a_reset() {
         n.fetch_add(1, Ordering::SeqCst);
         Box::pin(async { PromptAnswer::AllowAlways })
     };
-    let policy = sandlang::RulePolicy::standard();
+    let policy = sandlang::policy::rules::RulePolicy::standard();
     let mut r = Repl::with(Config::new().policy(policy).prompter(prompter).cwd(dir.path()).module_root(dir.path()));
     let msg = r.internal_error("import fs\nlet a = fs.read_text(\"a.txt\")?\nlet b = fs.read_text(\"b.txt\")?");
     assert_reset(&r, &msg, "prompter bug");
@@ -883,7 +887,7 @@ fn prompts_between_inputs_wait_for_the_input() {
         }
         Box::pin(async { PromptAnswer::AllowOnce })
     };
-    let policy = sandlang::RulePolicy::standard();
+    let policy = sandlang::policy::rules::RulePolicy::standard();
     let mut r = Repl::with(Config::new().policy(policy).prompter(prompter).cwd(dir.path()).module_root(dir.path()));
     r.ok("import fs");
     let before = asked.load(Ordering::SeqCst);
@@ -946,7 +950,7 @@ fn has_request(rt: &tokio::runtime::Runtime, feed: &StdinFeed) -> bool {
 
 #[test]
 fn scripts_read_the_input_the_host_feeds() {
-    let (config, feed) = Config::new().policy(sandlang::RulePolicy::allow_all()).stdin_feed();
+    let (config, feed) = Config::new().policy(sandlang::policy::rules::RulePolicy::allow_all()).stdin_feed();
     let mut r = Repl::with(config);
     r.ok("import io");
     // Data sent ahead is kept until read.

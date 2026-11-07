@@ -7,9 +7,12 @@
 
 use super::stream::{self, IoFailure, Suspended, line_read, read_line, read_to_end_reserved, read_upto, suspend};
 use crate::check::ModKind;
-use crate::native::{HostError, IntoValue, NativeModule, NativeObject, Val};
+use crate::native::convert::{HostError, IntoValue};
+use crate::native::ty::Val;
+use crate::native::{NativeModule, NativeObject};
 use crate::network::{self, Network, Stream};
-use crate::policy::{Capability, Policy, format_host_port, is_localhost, is_valid_host, parse_ip, parse_port, split_port};
+use crate::policy::net::{format_host_port, is_localhost, is_valid_host, parse_ip, parse_port, split_port};
+use crate::policy::{Capability, Policy};
 use crate::vm::WaitKind;
 use crate::vm::iomem::{Reservation, ResourceSlot};
 use crate::vm::value::{ValueType, to_usize_saturating};

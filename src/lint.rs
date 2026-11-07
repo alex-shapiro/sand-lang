@@ -1,9 +1,9 @@
 //! The linter: style and correctness warnings on top of the type checker.
 
-use crate::Error;
 use crate::check::budget::{CompileBudget, tool_fuel};
 use crate::check::{CheckedProgram, Ctor, FnInfo, FnKind, ParsedModule};
 use crate::diag::{FileId, SourceFile};
+use crate::engine::Error;
 use crate::hir::{HArg, HKind};
 use crate::syntax::ast::*;
 use crate::syntax::lexer::CommentKind;
@@ -920,7 +920,7 @@ mod tests {
     #[test]
     fn variant_like_bindings_suggest_the_closest_variant() {
         let src = "enum State {\n    Empty\n    Closed\n    Full(int)\n}\nfn f(s: State) -> int {\n    match s {\n        Full(n) => n\n        Closed => 1\n        Emtpy => 0\n    }\n}\nfn g(s: State) -> int {\n    match s {\n        Full(n) => n\n        Rest => 1\n    }\n}\nprint(f(State.Empty) + g(State.Empty))\n";
-        let messages: Vec<String> = crate::Engine::new(crate::Config::new())
+        let messages: Vec<String> = crate::engine::Engine::new(crate::engine::Config::new())
             .unwrap()
             .lint_source("main.sand", src)
             .unwrap()

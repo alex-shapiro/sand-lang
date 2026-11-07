@@ -111,7 +111,7 @@ pub fn render_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Valu
     let mut work = vec![Work::Val(v, 0, debug)];
     let mut scratch = Scratch::new();
     let mut charged = out.len();
-    let error_def = prog.struct_types.get(&<crate::stdlib::Error as crate::NamedType>::rust_type()).copied();
+    let error_def = prog.struct_types.get(&<crate::stdlib::core::Error as crate::native::NamedType>::rust_type()).copied();
     while let Some(w) = work.pop() {
         if out.len() - charged >= BYTES_PER_UNIT {
             budget.charge_bytes(out.len() - charged)?;
@@ -409,7 +409,7 @@ pub fn format_value_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v
 /// Charges for and checks the memory limit before building `n` bytes of output.
 fn reserve(heap: &Heap, budget: &impl Budget, n: usize) -> Result<(), Ctl> {
     if n > MAX_OUTPUT || heap.would_exceed(n) {
-        return Err(Ctl::limit(crate::LimitKind::Memory));
+        return Err(Ctl::limit(crate::engine::LimitKind::Memory));
     }
     budget.charge_bytes(n)
 }

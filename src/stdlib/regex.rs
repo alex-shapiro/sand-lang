@@ -6,7 +6,9 @@
 //! object is re-measured after every search.
 
 use crate::check::ModKind;
-use crate::native::{HostError, NativeModule, NativeObject, Val};
+use crate::native::convert::HostError;
+use crate::native::ty::Val;
+use crate::native::{NativeModule, NativeObject};
 use crate::platform::Instant;
 use crate::vm::meter::{SLOW_BYTES_PER_UNIT, Scratch};
 use crate::vm::value::Value;

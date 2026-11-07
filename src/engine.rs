@@ -4,17 +4,24 @@ use crate::check::ModKind;
 use crate::check::budget::CompileBudget;
 use crate::compile::{CompileInput, compile_more};
 use crate::diag::{Diag, Diagnostic, FileId, Span};
-use crate::files::{Fs, MemFs};
+use crate::files::Fs;
+use crate::files::mem::MemFs;
 use crate::modules::{ImportRef, ModuleGraph, Snapshot, Target, budget_error, native_info};
-use crate::native::{BoundType, NativeDecl, NativeModule, Signature, Type};
+use crate::native::func::Signature;
+use crate::native::ty::Type;
+use crate::native::{BoundType, NativeDecl, NativeModule};
 use crate::platform::{Clock, Instant, SystemClock};
-use crate::policy::{Capability, CustomPolicy, Decision, Policy, PromptAnswer, Prompter, RulePolicy};
+use crate::policy::rules::RulePolicy;
+use crate::policy::{Capability, CustomPolicy, Decision, Policy, PromptAnswer, Prompter};
+use crate::stdin_feed::{StdinChannel, StdinFeed};
 use crate::stdlib;
+use crate::stdlib::log::{LogLevel, LogSink, NullLogSink};
+use crate::stdlib::time::TimeZone;
 use crate::types::{FnId, ModId};
 use crate::vm::bytecode::Program;
 use crate::vm::heap::GcStats;
 use crate::vm::sched::{IoShared, IoTable, RunEnd};
-use crate::vm::{Always, Host, HostFn, NativeEntry, OutputSink, Rng, SharedSink, TraceEntry, Trap, Vm, entropy_seed};
+use crate::vm::{Always, Host, HostFn, NativeEntry, OutputSink, Rng, SharedSink, TraceFrame, Trap, Vm, WaitKind, entropy_seed};
 use parking_lot::Mutex;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
@@ -83,8 +90,6 @@ impl fmt::Display for LimitKind {
         })
     }
 }
-
-pub type TraceFrame = TraceEntry;
 
 #[derive(Debug, Clone)]
 pub enum Error {
@@ -214,7 +219,7 @@ enum StdinConfig {
     None,
     Bytes(Vec<u8>),
     /// Host-supplied input channel shared across every VM of the engine.
-    Host(Arc<crate::stdin_feed::StdinChannel>),
+    Host(Arc<StdinChannel>),
 }
 
 /// Engine configuration (builder style).
@@ -225,8 +230,8 @@ pub struct Config {
     pub(crate) modules: Vec<NativeModule>,
     pub(crate) stdout: SharedSink,
     pub(crate) stderr: SharedSink,
-    log_sink: Option<Arc<dyn crate::LogSink>>,
-    log_level: Option<crate::LogLevel>,
+    log_sink: Option<Arc<dyn LogSink>>,
+    log_level: Option<LogLevel>,
     stdin: StdinConfig,
     pub(crate) cwd: Option<PathBuf>,
     pub(crate) module_root: Option<PathBuf>,
@@ -240,13 +245,13 @@ pub struct Config {
     pub(crate) dump_bytecode: bool,
     pub(crate) exit_after_run: bool,
     #[cfg(feature = "os")]
-    pub(crate) tls: crate::stdlib::TlsSettings,
+    pub(crate) tls: crate::stdlib::net::TlsSettings,
     pub(crate) fs: Fs,
     pub(crate) request_filter: Option<RequestFilter>,
     pub(crate) clock: Arc<dyn Clock>,
     #[cfg(feature = "os")]
     pub(crate) network: Option<Arc<dyn crate::network::Network>>,
-    pub(crate) time_zone: Option<crate::time::TimeZone>,
+    pub(crate) time_zone: Option<TimeZone>,
 }
 
 /// HTTP request destination.
@@ -278,7 +283,7 @@ impl Config {
             stdout: Arc::new(crate::stdio::StdoutSink::default()),
             stderr: Arc::new(crate::stdio::StderrSink::default()),
             log_sink: None,
-            log_level: Some(crate::LogLevel::Info),
+            log_level: Some(LogLevel::Info),
             stdin: StdinConfig::None,
             cwd: None,
             module_root: None,
@@ -362,13 +367,13 @@ impl Config {
     }
     /// Routes `log` records to `sink` instead of standard error. Records count
     /// against `max_output_bytes`, but do not require [`Capability::Stderr`].
-    pub fn log_sink(mut self, sink: impl crate::LogSink + 'static) -> Self {
+    pub fn log_sink(mut self, sink: impl LogSink + 'static) -> Self {
         self.log_sink = Some(Arc::new(sink));
         self
     }
-    /// Sets the initial minimum script log level (default [`LogLevel::Info`](crate::LogLevel::Info)),
-    /// or disables script logging if `level` is `None`.
-    pub fn log_level(mut self, level: impl Into<Option<crate::LogLevel>>) -> Self {
+    /// Sets the initial minimum script log level. Passing `None` disables
+    /// script logging. Defaults to [`LogLevel::Info`].
+    pub fn log_level(mut self, level: impl Into<Option<LogLevel>>) -> Self {
         self.log_level = level.into();
         self
     }
@@ -377,21 +382,21 @@ impl Config {
         self
     }
     /// Configures standard input from user actions through the returned
-    /// [`StdinFeed`](crate::StdinFeed). Idle time while a script waits for
+    /// [`StdinFeed`]. Idle time while a script waits for
     /// input does not count toward `max_wall_time`.
-    pub fn stdin_feed(self) -> (Self, crate::StdinFeed) {
-        self.stdin_host_feed(crate::WaitKind::User)
+    pub fn stdin_feed(self) -> (Self, StdinFeed) {
+        self.stdin_host_feed(WaitKind::User)
     }
 
     /// Configures programmatic standard input, such as a pipe, through the
-    /// returned [`StdinFeed`](crate::StdinFeed). Time spent waiting for input
+    /// returned [`StdinFeed`]. Time spent waiting for input
     /// counts toward `max_wall_time`.
-    pub fn stdin_io_feed(self) -> (Self, crate::StdinFeed) {
-        self.stdin_host_feed(crate::WaitKind::Io)
+    pub fn stdin_io_feed(self) -> (Self, StdinFeed) {
+        self.stdin_host_feed(WaitKind::Io)
     }
 
-    fn stdin_host_feed(mut self, wait_kind: crate::WaitKind) -> (Self, crate::StdinFeed) {
-        let (feed, channel) = crate::StdinFeed::new(wait_kind);
+    fn stdin_host_feed(mut self, wait_kind: WaitKind) -> (Self, StdinFeed) {
+        let (feed, channel) = StdinFeed::new(wait_kind);
         self.stdin = StdinConfig::Host(channel);
         (self, feed)
     }
@@ -431,7 +436,7 @@ impl Config {
     }
     /// Sets the time zone returned by `time.local_zone()` if the policy allows
     /// [`Capability::TimeZone`]. Defaults to `UTC`.
-    pub fn time_zone(mut self, zone: crate::time::TimeZone) -> Self {
+    pub fn time_zone(mut self, zone: TimeZone) -> Self {
         self.time_zone = Some(zone);
         self
     }
@@ -955,21 +960,21 @@ impl Engine {
         })
     }
 
-    pub async fn run_source(&mut self, name: &str, source: &str) -> Result<crate::Outcome, Error> {
+    pub async fn run_source(&mut self, name: &str, source: &str) -> Result<Outcome, Error> {
         crate::unwind::guard(self.run_source_inner(name, source)).await
     }
 
-    async fn run_source_inner(&mut self, name: &str, source: &str) -> Result<crate::Outcome, Error> {
+    async fn run_source_inner(&mut self, name: &str, source: &str) -> Result<Outcome, Error> {
         let (root, normal) = self.source_root().clone();
         let compiled = self.compile(name, source, &normal, None).await?;
         self.execute(compiled, root).await
     }
 
-    pub async fn run_file(&mut self, path: impl AsRef<Path>) -> Result<crate::Outcome, Error> {
+    pub async fn run_file(&mut self, path: impl AsRef<Path>) -> Result<Outcome, Error> {
         crate::unwind::guard(self.run_file_inner(path.as_ref())).await
     }
 
-    async fn run_file_inner(&mut self, path: &Path) -> Result<crate::Outcome, Error> {
+    async fn run_file_inner(&mut self, path: &Path) -> Result<Outcome, Error> {
         let (name, source, root) = self.read_main(path)?;
         let compiled = self.compile(&name, &source, &root, Some(path)).await?;
         let cwd = self.config.cwd.clone().unwrap_or(root);
@@ -1037,7 +1042,7 @@ impl Engine {
         let c = &self.config;
         let stdin = match &c.stdin {
             StdinConfig::None => None,
-            StdinConfig::Bytes(b) => Some(crate::stdin_feed::StdinChannel::with_input(b.clone())),
+            StdinConfig::Bytes(b) => Some(StdinChannel::with_input(b.clone())),
             StdinConfig::Host(channel) => Some(channel.clone()),
         };
         let (stdout, stderr): (SharedSink, SharedSink) =
@@ -1058,13 +1063,13 @@ impl Engine {
             env: c.env.clone(),
             rng: Rng::new(c.seed.unwrap_or_else(entropy_seed)),
             log_level: c.log_level,
-            log_sink: if quiet { Some(Arc::new(crate::stdlib::log::NullLogSink)) } else { c.log_sink.clone() },
+            log_sink: if quiet { Some(Arc::new(NullLogSink)) } else { c.log_sink.clone() },
             interrupt: self.interrupt.clone(),
             stream_decisions: [None; 2],
             #[cfg(feature = "os")]
             tls: c.tls.clone(),
             #[cfg(feature = "os")]
-            http_pool: crate::stdlib::HttpPool::new(c.limits.max_open_resources, c.clock.clone()),
+            http_pool: crate::stdlib::http::Pool::new(c.limits.max_open_resources, c.clock.clone()),
             fs: c.fs.clone(),
             request_filter: c.request_filter.clone(),
             regex_cache: Vec::new(),
@@ -1084,7 +1089,7 @@ impl Engine {
         vm
     }
 
-    async fn execute(&mut self, compiled: Compiled, cwd: PathBuf) -> Result<crate::Outcome, Error> {
+    async fn execute(&mut self, compiled: Compiled, cwd: PathBuf) -> Result<Outcome, Error> {
         let prog = compiled.program;
         if self.config.dump_bytecode {
             for (i, p) in prog.protos.iter().enumerate() {
@@ -1109,9 +1114,9 @@ impl Engine {
             self.recycle(prog, compiled.snapshot);
         }
         match r {
-            Ok(RunEnd::Finished(_)) => Ok(crate::Outcome { exit_code: 0 }),
-            Ok(RunEnd::Exit(c)) => Ok(crate::Outcome { exit_code: c }),
-            Err(Trap::Exit(c)) => Ok(crate::Outcome { exit_code: c }),
+            Ok(RunEnd::Finished(_)) => Ok(Outcome { exit_code: 0 }),
+            Ok(RunEnd::Exit(c)) => Ok(Outcome { exit_code: c }),
+            Err(Trap::Exit(c)) => Ok(Outcome { exit_code: c }),
             Err(Trap::Error { message, trace }) => Err(Error::Runtime { message, trace }),
             Err(Trap::Internal { message, trace }) => Err(Error::Internal { message, trace }),
             Err(Trap::Limit(k)) => Err(Error::Limit(k)),

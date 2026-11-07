@@ -1,7 +1,8 @@
 //! The `random` module.
 
 use crate::check::ModKind;
-use crate::native::{NativeModule, NativeObject, Param, Val};
+use crate::native::ty::{Param, Val};
+use crate::native::{NativeModule, NativeObject};
 use crate::vm::value::{FxHashMap, Value, to_usize_saturating};
 use crate::vm::{Ctl, Rng, Vm, fail};
 

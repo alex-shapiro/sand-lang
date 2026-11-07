@@ -1260,11 +1260,11 @@ pub struct Program {
     pub global_names: Vec<String>,
     pub types: Vec<StructRt>,
     pub variants: Vec<VariantRt>,
-    /// Maps the [`NamedType::rust_type`](crate::NamedType::rust_type) of each
-    /// registered [`EnumType`](crate::EnumType) to the runtime ID of its first
+    /// Maps the [`NamedType::rust_type`](crate::native::NamedType::rust_type) of each
+    /// registered [`EnumType`](crate::native::EnumType) to the runtime ID of its first
     /// variant. Subsequent variants have consecutive IDs.
     pub enum_types: FxHashMap<std::any::TypeId, u32>,
-    /// Maps the [`NamedType::rust_type`](crate::NamedType::rust_type) of each
+    /// Maps the [`NamedType::rust_type`](crate::native::NamedType::rust_type) of each
     /// registered [`StructType`](crate::native::StructType) to its runtime
     /// struct ID.
     pub struct_types: FxHashMap<std::any::TypeId, u32>,

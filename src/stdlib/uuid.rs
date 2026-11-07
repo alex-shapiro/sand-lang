@@ -1,7 +1,8 @@
 //! The `uuid` module.
 
 use crate::check::ModKind;
-use crate::native::{HostError, NativeModule};
+use crate::native::NativeModule;
+use crate::native::convert::HostError;
 use crate::vm::{Ctl, Vm};
 
 pub(crate) fn module() -> NativeModule {

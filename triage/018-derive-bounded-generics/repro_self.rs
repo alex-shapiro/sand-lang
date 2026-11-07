@@ -6,6 +6,6 @@ struct Tree<K: Ord> {
 }
 
 fn main() {
-    let mut module = sandlang::NativeModule::new("coll");
+    let mut module = sandlang::native::NativeModule::new("coll");
     module.bind::<Tree<i64>>();
 }

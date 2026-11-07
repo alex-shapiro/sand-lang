@@ -1,4 +1,6 @@
-use sandlang::{Capability, Config, Engine, MemorySink, RulePolicy};
+use sandlang::policy::Capability;
+use sandlang::engine::{Config, Engine, MemorySink};
+use sandlang::policy::rules::RulePolicy;
 
 const SCRIPT: &str = r#"
 import http

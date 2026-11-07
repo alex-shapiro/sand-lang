@@ -1,7 +1,8 @@
 //! The `statistics` module.
 
 use crate::check::ModKind;
-use crate::native::{NativeModule, Val};
+use crate::native::NativeModule;
+use crate::native::ty::Val;
 use crate::vm::value::FxHashMap;
 use crate::vm::{Ctl, Vm};
 

@@ -39,7 +39,7 @@
 
 use super::iomem::IoMemory;
 use super::value::*;
-use crate::LimitKind;
+use crate::engine::LimitKind;
 use compact_str::CompactString;
 use std::time::Duration;
 

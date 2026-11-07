@@ -13,22 +13,24 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 /// Bytes counted per file or directory besides its name and contents.
 const NODE_OVERHEAD: usize = 64;
 
-/// An in-memory file system that scripts see instead of the host's, in
-/// engines configured with [`Config::memory_fs`](crate::Config::memory_fs)
-/// and in every engine built without the `os` feature.
+/// An in-memory file system for scripts.
 ///
-/// A `MemFs` is a handle: clones share the same files, so the host can
-/// prepare files before a run, read what the script wrote afterwards, and
-/// share one file system between engines. Paths are absolute (relative
-/// paths start at `/`), use `/` as the separator and are UTF-8; there are
-/// no symbolic links. The policy decides access on these paths.
+/// Pass a `MemFs` to [`Config::memory_fs`](crate::engine::Config::memory_fs)
+/// to isolate file access from the host disk. Builds without the `os` feature
+/// always use `MemFs`.
 ///
-/// Contents and a small per-entry overhead are limited by a capacity
-/// ([`MemFs::with_capacity`]), separate from the engines' memory limits;
-/// writes beyond it fail with an error of kind `limit`.
+/// Clones of a `MemFs` share the same files. The host can write input files
+/// before a run, read output files afterward, and share a `MemFs` across
+/// engines. Paths are UTF-8, use `/` as the separator, and resolve relative to
+/// `/`. `MemFs` supports only regular files and directories. The engine policy
+/// controls script access to these paths.
+///
+/// [`MemFs::with_capacity`] limits the total size of file contents and
+/// directory entries, independent of engine memory limits. Writes that exceed
+/// this capacity fail with error kind `"limit"`.
 ///
 /// ```
-/// use sandlang::MemFs;
+/// use sandlang::files::mem::MemFs;
 /// let fs = MemFs::new();
 /// fs.write("/data/hello.txt", "hi").unwrap();
 /// assert_eq!(fs.read("/data/hello.txt").unwrap(), b"hi");

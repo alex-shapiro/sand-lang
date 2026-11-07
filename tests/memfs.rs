@@ -7,11 +7,14 @@ mod common;
 
 use common::rt;
 use parking_lot::Mutex;
-use sandlang::{Capability, Config, Decision, Engine, Error, MemFs, MemorySink, PromptAnswer, RulePolicy};
+use sandlang::engine::{Config, Engine, Error, MemorySink};
+use sandlang::files::mem::MemFs;
+use sandlang::policy::rules::RulePolicy;
+use sandlang::policy::{Capability, Decision, PromptAnswer};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-fn run(config: Config, source: &str) -> (Result<sandlang::Outcome, Error>, String) {
+fn run(config: Config, source: &str) -> (Result<sandlang::engine::Outcome, Error>, String) {
     let out = MemorySink::new();
     let mut engine = Engine::new(config.stdout(out.clone())).unwrap();
     let r = rt().block_on(engine.run_source("main.sand", source));
@@ -280,7 +283,7 @@ fn waiting_for_prompt_answers_is_not_run_time() {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         PromptAnswer::AllowOnce
     };
-    let limits = sandlang::Limits { max_wall_time: Some(std::time::Duration::from_millis(200)), ..Default::default() };
+    let limits = sandlang::engine::Limits { max_wall_time: Some(std::time::Duration::from_millis(200)), ..Default::default() };
     let config = Config::new().policy(RulePolicy::standard().allow_import("/nowhere")).prompter(slow_yes).limits(limits).memory_fs(fs);
     let src = "import \"lib\"\nimport fs\nlet n = fs.read_text(\"/a.txt\").unwrap().parse_int().unwrap()\nprint(lib.twice(n))\nprint(fs.read_text(\"/a.txt\").is_ok())";
     let (r, out) = run(config, src);

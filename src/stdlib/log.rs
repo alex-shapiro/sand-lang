@@ -1,7 +1,8 @@
-//! The `log` module.
+//! The `log` module and the [`LogSink`] trait for script log records.
 
 use crate::check::ModKind;
-use crate::native::{NativeModule, Val};
+use crate::native::NativeModule;
+use crate::native::ty::Val;
 use crate::vm::display::escape_str_debug;
 use crate::vm::{Ctl, Vm};
 use std::borrow::Cow;
@@ -44,7 +45,7 @@ pub struct LogRecord {
     /// Key-value fields in insertion order.
     pub fields: Vec<(String, String)>,
     /// Source location of the `log` call.
-    pub location: Option<crate::TraceFrame>,
+    pub location: Option<crate::vm::TraceFrame>,
 }
 
 /// Formats the record as `LEVEL message key=value ...`, quoting empty messages,
@@ -73,11 +74,11 @@ fn quote_if(s: &str, quote: bool) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
-/// Consumer for records emitted by the `log` module (see [`crate::Config::log_sink`]).
+/// Consumer for records emitted by the `log` module.
 ///
-/// The engine invokes [`LogSink::log`] synchronously on the thread executing the
-/// script. Any `Fn(&LogRecord) + Send + Sync` implements `LogSink` for all
-/// levels.
+/// Register a sink with [`crate::engine::Config::log_sink`]. The engine calls
+/// [`LogSink::log`] synchronously on the thread that runs the script. Any
+/// `Fn(&LogRecord) + Send + Sync` implements `LogSink` for all levels.
 pub trait LogSink: Send + Sync {
     /// Returns true if the sink accepts records at `level`. The engine skips
     /// constructing [`LogRecord`] values for disabled levels.

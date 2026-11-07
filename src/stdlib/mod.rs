@@ -1,14 +1,13 @@
-//! The standard library: Sand declarations plus Rust natives.
+//! The Sand standard library.
 //!
-//! Each module `name` consists of `name.sand` (public declarations, docs and
-//! pure-Sand helpers) and `name.rs` (the natives, registered by name).
+//! Host code can use the Rust types in [`json`], [`log`], and [`time`].
 
 mod base64;
-mod core;
+pub(crate) mod core;
 mod crypto;
 mod fs;
 #[cfg(feature = "os")]
-mod http;
+pub(crate) mod http;
 #[cfg(any(feature = "os", web))]
 mod http_common;
 #[cfg(feature = "os")]
@@ -16,27 +15,21 @@ mod http_server;
 #[cfg(all(web, not(feature = "os")))]
 mod http_web;
 mod io;
-pub(crate) mod json;
-pub(crate) mod log;
+pub mod json;
+pub mod log;
 mod math;
 #[cfg(feature = "os")]
-mod net;
+pub(crate) mod net;
 mod random;
 mod regex;
 mod statistics;
 mod stream;
 mod test;
-pub(crate) mod time;
-mod uri;
+pub mod time;
+pub(crate) mod uri;
 mod uuid;
 
-pub(crate) use self::core::Error;
 use crate::native::NativeModule;
-#[cfg(feature = "os")]
-pub(crate) use http::Pool as HttpPool;
-#[cfg(feature = "os")]
-pub(crate) use net::TlsSettings;
-pub(crate) use uri::encode as uri_encode;
 
 /// Standard modules that need operating-system access: without the `os`
 /// feature they do not exist, and importing them is an error that says why.
