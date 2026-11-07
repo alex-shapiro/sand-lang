@@ -158,6 +158,20 @@ fn run_limit_violations_exit_3() {
 }
 
 #[test]
+fn max_flags_use_policy_limit_syntax() {
+    let spin = "var i = 0\nwhile true { i += 1 }";
+    for args in [&["--max-instructions=10_000"][..], &["--max-instructions", "10_000"], &["--max-memory=none", "--max-instructions=10000"]]
+    {
+        let o = run(spin, args);
+        assert_eq!(o.code, 3, "{args:?}: {o:?}");
+        assert!(o.stderr.contains("instruction limit exceeded"), "{args:?}: {o:?}");
+    }
+    let o = run("print(\"x\".repeat(100))", &["--max-output=10"]);
+    assert_eq!(o.code, 3, "{o:?}");
+    assert!(o.stderr.contains("output limit exceeded"), "{o:?}");
+}
+
+#[test]
 fn run_missing_or_unreadable_file_exits_2() {
     let dir = TempDir::new("missing");
     let o = sand(dir.path(), &["run"]);
@@ -180,8 +194,10 @@ fn bad_flags_and_values_exit_2_with_a_message() {
         ("--max-memory", "--max-memory requires a value"),
         ("--max-time=soon", "invalid duration `soon`"),
         ("--max-cpu=-5s", "invalid duration `-5s`"),
-        ("--max-instructions=many", "invalid --max-instructions value `many`"),
-        ("--max-compile-fuel=lots", "invalid --max-compile-fuel value `lots`"),
+        ("--max-instructions=many", "invalid option `--max-instructions=many`: invalid number `many`"),
+        ("--max-compile-fuel=lots", "invalid option `--max-compile-fuel=lots`: invalid number `lots`"),
+        ("--max-tasks=none", "invalid option `--max-tasks=none`: the `tasks` limit cannot be removed"),
+        ("--max-bogus=1", "invalid option `--max-bogus=1`: unknown limit `bogus`"),
         ("--seed=abc", "invalid --seed value `abc`"),
         ("--seed", "--seed requires a value"),
         ("--allow", "--allow requires a rule, e.g. --allow='net api.example.com'"),

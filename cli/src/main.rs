@@ -12,8 +12,8 @@ macro_rules! outln {
 
 mod repl;
 
-use sandlang::engine::{Config, Engine, Error};
-use sandlang::policy::file::{PolicyFile, parse_duration, parse_size};
+use sandlang::engine::{Config, Engine, Error, Limits};
+use sandlang::policy::file::{Limit, PolicyFile};
 use sandlang::policy::rules::{PathPattern, RulePolicy};
 use sandlang::policy::{Capability, PromptAnswer};
 use sandlang::stdin_feed::StdinFeed;
@@ -80,6 +80,8 @@ RUN, TEST AND REPL OPTIONS:
     --max-cpu=DURATION       CPU time limit
     --max-instructions=N     instruction fuel limit
     --max-compile-fuel=N     type-checking work limit; defaults to 10000000
+    --max-NAME=VALUE         any `limit NAME VALUE` in a policy file, e.g.
+                             --max-output=1M --max-call-depth=200 --max-time=none
     --seed=N                 seed the random number generator
 ";
 
@@ -158,8 +160,8 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
     };
     let home = std::env::home_dir();
     let cwd = std::env::current_dir().map_err(|e| format!("cannot read the current directory: {e}"))?;
-    let (mut rules, mut limits) = match policy_file {
-        Some(f) => (f.rules, f.limits),
+    let (mut limits, mut rules) = match policy_file {
+        Some(f) => (f.apply_limits(Limits::default()), f.rules),
         None => Default::default(),
     };
     let mut allow_all = false;
@@ -182,7 +184,8 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
             Some((f, v)) => (f, Some(v.to_string())),
             None => (a.as_str(), None),
         };
-        if value.is_none() && TAKES_VALUE.contains(&flag) && i < options.len() && !args[i].starts_with("--") {
+        if value.is_none() && (TAKES_VALUE.contains(&flag) || flag.starts_with("--max-")) && i < options.len() && !args[i].starts_with("--")
+        {
             value = Some(args[i].clone());
             i += 1;
         }
@@ -197,16 +200,9 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
             "--allow-all" => allow_all = true,
             "--no-prompt" => prompt = false,
             "--policy" => {}
-            "--max-memory" => limits.max_memory = Some(parse_size(&required(&value)?)?),
-            "--max-time" => limits.max_wall_time = Some(parse_duration(&required(&value)?)?),
-            "--max-cpu" => limits.max_cpu_time = Some(parse_duration(&required(&value)?)?),
-            "--max-instructions" => {
+            f if let Some(name) = f.strip_prefix("--max-") => {
                 let v = required(&value)?;
-                limits.max_instructions = Some(v.trim().parse().map_err(|_| format!("invalid --max-instructions value `{v}`"))?)
-            }
-            "--max-compile-fuel" => {
-                let v = required(&value)?;
-                limits.max_compile_fuel = Some(v.trim().parse().map_err(|_| format!("invalid --max-compile-fuel value `{v}`"))?)
+                Limit::parse(name, &v).map_err(|m| format!("invalid option `{f}={v}`: {m}"))?.apply(&mut limits);
             }
             "--seed" => {
                 let v = required(&value)?;
@@ -245,18 +241,7 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
     Ok(RunOptions { config, stdin_feed, file, script_args })
 }
 
-const TAKES_VALUE: &[&str] = &[
-    "--allow",
-    "--deny",
-    "--prompt",
-    "--policy",
-    "--max-memory",
-    "--max-time",
-    "--max-cpu",
-    "--max-instructions",
-    "--max-compile-fuel",
-    "--seed",
-];
+const TAKES_VALUE: &[&str] = &["--allow", "--deny", "--prompt", "--policy", "--seed"];
 
 fn read_policy(path: &Path) -> Result<PolicyFile, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read policy file {}: {e}", path.display()))?;
@@ -658,7 +643,6 @@ fn cmd_test(args: &[String]) -> Result<u8, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     fn run_prompt(cap: &Capability, input: &str) -> (PromptAnswer, String) {
         let mut out = Vec::new();
@@ -832,12 +816,6 @@ mod tests {
         ] {
             assert!(opts(bad).is_err(), "{bad:?} should be rejected");
         }
-        assert_eq!(parse_size("1K"), Ok(1024));
-        assert_eq!(parse_size("2m"), Ok(2 << 20));
-        assert_eq!(parse_size("1G"), Ok(1 << 30));
-        assert_eq!(parse_duration("1.5s"), Ok(Duration::from_millis(1500)));
-        assert_eq!(parse_duration("250ms"), Ok(Duration::from_millis(250)));
-        assert_eq!(parse_duration("2m"), Ok(Duration::from_secs(120)));
     }
 
     #[test]

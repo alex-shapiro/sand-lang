@@ -165,4 +165,6 @@ sand: time limit exceeded
 
 `--max-time` excludes time spent waiting for a permission prompt or for terminal input.
 
+Each `--max-NAME=VALUE` flag accepts the same names and values as a `limit` directive in a policy file. `--max-output=1M` limits output bytes. `--max-time=none` removes a time limit from a policy file.
+
 In a policy file, set limits with `limit memory 64M`, `limit time 10s`, `limit cpu 2s`, or `limit instructions 1_000_000`. Additional limits bound output bytes, call stack depth, concurrent task count, open file and connection handles, and HTTP body size. Exceeding the call stack depth or task limit aborts the run with exit code 1. Exceeding the open handle or HTTP body limit returns a recoverable `Err` with kind `"limit"`. For the complete list of limits and policy rules, see [§15](/spec/#15-resource-limits) and [§14.7](/spec/#147-policy-files) of the specification.

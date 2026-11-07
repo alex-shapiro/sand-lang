@@ -19,8 +19,8 @@ journal. The sections below group these commits into self-contained changesets.
 ## Status
 
 1. Module path cleanup: merged in #26 from `module-paths`
-2. Typed policy builders: in review on `typed-policy-builders`
-3. Rule and limit positions in policy: not started
+2. Typed policy builders: merged in #27 from `typed-policy-builders`
+3. Rule and limit positions in policy: in review on `policy-positions`
 4. `deny_private_net` and absolute rules: not started
 5. Precompiled host modules: not started
 6. `InterruptHandle::new`: not started
@@ -69,9 +69,10 @@ Source commits: `464b03a`, `c5ca2d7`, `b111b33`, `335ae8b`, `89186fa`, `265e762`
 
 ### 3. Rule and limit positions in policy
 
-`PolicyFile::rule_sources` records the source span of each rule.
-`PolicyFile::limits` holds limits specified in the policy file.
-`apply_limits` applies them to the limits of the caller.
+`PolicyFile::rule_directives` gives the position, decision, and capability of
+each rule line. `PolicyFile::limit_directives` gives the position and value of
+each `limit` directive. `PolicyFile::apply_limits` applies them to the limits of
+the caller.
 
 Source commit: `d4a2e5c`. Skip `HostPattern` from `d859942`, because `d4a2e5c`
 removes it.

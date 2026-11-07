@@ -1,6 +1,6 @@
 //! Verification and execution of `sand` and `policy` code blocks in site Markdown.
 
-use sandlang::engine::{Config, Engine, Error, MemorySink};
+use sandlang::engine::{Config, Engine, Error, Limits, MemorySink};
 use sandlang::files::mem::MemFs;
 use sandlang::policy::file::PolicyFile;
 use std::path::Path;
@@ -110,7 +110,13 @@ fn engine(files: &[(String, String)]) -> (Engine, MemorySink) {
         fs.write(format!("/{name}"), text).expect("module fits in memory");
     }
     let policy = check_policy(POLICY).expect("default policy is valid");
-    let config = Config::new().memory_fs(fs).policy(policy.rules).limits(policy.limits).seed(42).stdout(sink.clone()).stderr(sink.clone());
+    let config = Config::new()
+        .memory_fs(fs)
+        .limits(policy.apply_limits(Limits::default()))
+        .policy(policy.rules)
+        .seed(42)
+        .stdout(sink.clone())
+        .stderr(sink.clone());
     (Engine::new(config).unwrap(), sink)
 }
 
