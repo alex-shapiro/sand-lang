@@ -59,8 +59,7 @@ The host cannot rely on engine limits, stability, or control.
       with full request context.
 - [ ] ❓ _Policy._ Keep rule tiers in the `.policy` text from `RulePolicy`'s
       `Display`. If the host parses this text again, every rule goes into the
-      primary tier: fallback rules from `with_defaults` lose their lower
-      precedence, and denials from `deny_private_net` lose their absolute
+      primary tier, and fallback rules from `with_defaults` lose their lower
       precedence.
 - [ ] 🔴 [040](triage/040-live-policy-needs-custom-policy/summary.md) _Policy._ Support shared, dynamically updatable `RulePolicy` instances and remove
       `CustomPolicy` after host applications migrate to rule policies.

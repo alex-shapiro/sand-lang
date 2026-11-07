@@ -929,18 +929,23 @@ mod tests {
             }
         }
 
-        /// No rule allows an address that `deny_private_net` denies: not an exact rule for the
-        /// address, not a rule for a host name that resolves to it, and not a rule in another tier.
+        /// Under wildcard allow rules, `deny_private_net` denies exactly the private addresses: as IP
+        /// literals, and as addresses that a host name resolves to.
         #[test]
-        fn deny_private_net_overrides_every_allow_rule(
+        fn deny_private_net_denies_exactly_private_addresses(
             v4 in any::<u32>(),
             v6 in any::<u128>(),
             embed in 0..EMBEDDINGS.len(),
             edge in edge_address(),
-            denial_is_default in any::<bool>(),
         ) {
             use crate::policy::rules::{Methods, RulePolicy, Transports};
             use crate::policy::{Capability, Decision};
+            let policy = RulePolicy::new()
+                .allow_net(Transports::Both, "*".parse().unwrap())
+                .allow_http(Transports::Both, Methods::all(), "*".parse().unwrap())
+                .deny_private_net();
+            let net = |host: String| Capability::Net { host, port: 443, tls: true };
+            let http = |host: String| Capability::Http { method: "GET".into(), scheme: "https".into(), host, port: 443, path: "/".into() };
             let (prefix, _, shift) = EMBEDDINGS[embed];
             for ip in [
                 IpAddr::V4(v4.into()),
@@ -949,19 +954,7 @@ mod tests {
                 IpAddr::V6(Ipv4Addr::from(v4).to_ipv6_mapped()),
                 edge,
             ] {
-                let host = |h: &str| h.parse::<NetPattern>().unwrap();
-                let url = |u: &str| u.parse::<UrlPattern>().unwrap();
-                let literal = format_host_port(&ip.to_string(), 443);
-                let allows = RulePolicy::new()
-                    .allow_net(Transports::Both, host(&literal))
-                    .allow_net(Transports::Both, host("db.example.com"))
-                    .allow_http(Transports::Both, Methods::all(), url(&literal))
-                    .allow_http(Transports::Both, Methods::all(), url("db.example.com"));
-                let denial = RulePolicy::new().deny_private_net();
-                let policy = if denial_is_default { allows.with_defaults(denial) } else { denial.with_defaults(allows) };
                 let expected = if is_private_address(ip) { Decision::Deny } else { Decision::Allow };
-                let net = |host: String| Capability::Net { host, port: 443, tls: true };
-                let http = |host: String| Capability::Http { method: "GET".into(), scheme: "https".into(), host, port: 443, path: "/".into() };
                 let addr = std::net::SocketAddr::new(ip, 443);
                 prop_assert_eq!(policy.check(&net(ip.to_string())), expected, "net {}", ip);
                 prop_assert_eq!(policy.check(&http(ip.to_string())), expected, "http {}", ip);

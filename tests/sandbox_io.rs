@@ -537,12 +537,12 @@ print(net.connect("127.0.0.1", {port}).is_ok())
     assert_eq!(r.ok_stdout(), "Ok(\"hi\")\nOk(\"hi\")\nOk(\"hi\")\nOk(\"hi\")\ntrue\n");
 }
 
-/// The rules of `explicitly_allowed_hosts_reach_denied_ranges` reach no private address if
-/// the host also calls `deny_private_net`, even as a fallback.
+/// Under a wildcard allow rule, `deny_private_net` blocks every loopback host, and a more
+/// specific rule makes an exception.
 // Relies on the resolver accepting `127.1` for 127.0.0.1 (glibc, macOS).
 #[cfg(unix)]
 #[test]
-fn deny_private_net_blocks_explicitly_allowed_hosts() {
+fn deny_private_net_blocks_loopback_hosts_except_specific_allows() {
     let server = http_server(|_| HttpResponse::new(200, "hi"));
     let port = server.addr.port();
     let src = format!(
@@ -555,9 +555,8 @@ for host in ["127.0.0.1", "localhost", "app.localhost", "127.1"] {{
 print(net.connect("127.0.0.1", {port}).unwrap_err().kind)
 "#
     );
-    let allows = parse_rules(&format!("allow net tls plaintext *\nallow net plaintext 127.0.0.1:{port} localhost *.localhost"));
-    let policy = RulePolicy::standard().extend(allows).with_defaults(RulePolicy::new().deny_private_net());
-    let r = run_with(&src, |c| c.policy(policy));
+    let wildcard = RulePolicy::standard().allow_net(Transports::Both, "*".parse().unwrap());
+    let r = run_with(&src, |c| c.policy(wildcard.clone().deny_private_net()));
     assert_eq!(
         r.ok_stdout(),
         format!(
@@ -569,18 +568,10 @@ print(net.connect("127.0.0.1", {port}).unwrap_err().kind)
         )
     );
     assert!(server.requests.lock().is_empty());
-}
-
-/// An ordinary address deny keeps its specificity comparison: an exact host name in a
-/// fallback tier outranks it in a resolved-address check.
-#[test]
-fn ordinary_address_denials_yield_to_exact_host_rules() {
-    let get = Capability::Http { method: "GET".into(), scheme: "https".into(), host: "db.example.com".into(), port: 443, path: "/".into() };
-    let private: SocketAddr = "10.0.0.1:443".parse().unwrap();
-    let p = parse_rules("deny net 10.0.0.0/8").with_defaults(parse_rules("allow http db.example.com"));
-    assert_eq!(p.check_resolved(&get, private), Decision::Allow);
-    let p = p.deny_private_net();
-    assert_eq!(p.check_resolved(&get, private), Decision::Deny);
+    let exception = wildcard.deny_private_net().allow_net(Transports::Both, format!("127.0.0.1:{port}").parse().unwrap());
+    let r =
+        run_with(&format!("import http\nprint(http.get(\"http://127.0.0.1:{port}/\").unwrap().text().unwrap())"), |c| c.policy(exception));
+    assert_eq!(r.ok_stdout(), "hi\n");
 }
 
 // Relies on the resolver accepting `127.1` for 127.0.0.1 (glibc, macOS).
