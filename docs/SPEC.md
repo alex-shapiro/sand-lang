@@ -2012,7 +2012,8 @@ forwards that input to the `StdinFeed`, as `sand run` does (§17.5).
 even if other tasks are runnable, and returns a `StdinRequest` for that wait. If
 a read consumes a partial line from `StdinFeed::send` and waits again, the
 engine issues a new `StdinRequest`. `StdinRequest::wait_until_closed` waits
-until the request receives input, the stream ends, or the read is cancelled.
+until the request is answered or dismissed, the stream supplies bytes or is
+closed, or the read is cancelled.
 `StdinRequest::wait_until_nothing_else_runs` waits until all other tasks are
 idle while the request remains open. A host that shares a terminal with the
 script, such as `sand repl`, awaits this method before reading a line from the
