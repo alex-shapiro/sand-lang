@@ -1,5 +1,8 @@
 //! Durable execution: record a run in a journal, replay it, and resume it
 //! from any prefix of the journal (SPEC §16.7).
+//!
+//! Every run here gets a fake `Network`, which exists only with the `os` feature.
+#![cfg(feature = "os")]
 
 use sandlang::engine::{Config, Engine, Error, HostModules, MemorySink, Outcome, Returned};
 use sandlang::journal::{Durable, Entry, EntryKind, HttpResponse, Journal, MemoryJournal, OpKind, ParkedCall, Suspension, operations};

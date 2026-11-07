@@ -224,6 +224,7 @@ pub(crate) struct Live {
     /// The id of the operation in the run's journal, if it has one.
     op: Option<u64>,
     /// The sequence number of the operation's `Start` entry.
+    #[cfg_attr(not(any(feature = "os", web)), expect(dead_code, reason = "only the HTTP modules read it"))]
     pub seq: Option<u64>,
     /// When a timer expires.
     pub wake: Option<SystemTime>,
