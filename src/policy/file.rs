@@ -13,7 +13,7 @@
 
 use super::net::{HostKind, NetPattern, QUOTED_STAR_IN_HOST, UrlPattern, format_host_port, url_segments};
 use super::path::{Seg, Tok, wild_tokens};
-use super::rules::{Access, NameKind, Origin, PathPattern, Rule, RuleKind, Transports};
+use super::rules::{Access, CustomName, Methods, NameKind, Origin, PathPattern, Rule, RuleKind, Transports};
 use super::{Capability, Decision, RulePolicy};
 use crate::engine::Limits;
 use crate::vm::value::FxHashMap;
@@ -500,7 +500,7 @@ impl Context<'_> {
                 return Err((name.column, format!("`{verb_text} custom` expands to more than {MAX_EXPANSION} rules")));
             }
             for word in names {
-                let name_pattern = parse_custom_pattern(&word).map_err(|m| (name.column, m))?;
+                let name_pattern = parse_custom_pattern(&word).map_err(|m| (name.column, m))?.map_or(CustomName::Any, CustomName::Named);
                 for detail in &details {
                     let kind = RuleKind::Custom(name_pattern.clone(), detail.clone());
                     rules.push(file_rule(decision, kind, Origin { line, column: name.column, text: word.render() }));
@@ -508,7 +508,7 @@ impl Context<'_> {
             }
             return Ok(());
         }
-        let mut methods: Option<Vec<HttpMethod>> = None;
+        let mut methods = Methods::all();
         let mut transports: Option<Transports> = None;
         let mut urls = 0;
         for item in rest_args {
@@ -551,7 +551,7 @@ impl Context<'_> {
                         if urls > 0 {
                             return Err((item.column, "put HTTP methods before the URL patterns".into()));
                         }
-                        methods.get_or_insert_with(Vec::new).push(method);
+                        methods = methods.and(method);
                         continue;
                     }
                     "http" => {
@@ -569,7 +569,7 @@ impl Context<'_> {
         }
         if kind == "http" && urls == 0 {
             let last = rest_args.last().unwrap_or(first_arg);
-            let after = if methods.is_some() { "methods" } else { "transports" };
+            let after = if methods.listed().is_some() { "methods" } else { "transports" };
             return Err((last.column, format!("`{verb_text} http` requires a URL pattern after {after}, e.g. `api.example.com/v1`")));
         }
         if kind == "net" && urls == 0 {
@@ -765,7 +765,7 @@ impl fmt::Display for Rule {
             RuleKind::Net(pattern, transports) => write!(f, "net {}{}", transport_words(*transports, self.decision), host_text(pattern)),
             RuleKind::Http(methods, url, transports) => {
                 write!(f, "http {}", transport_words(*transports, self.decision))?;
-                for m in methods.iter().flatten() {
+                for m in methods.listed().into_iter().flatten() {
                     write!(f, "{m} ")?;
                 }
                 match (&url.host.kind, url.host.port) {
@@ -792,7 +792,10 @@ impl fmt::Display for Rule {
             RuleKind::Stderr => write!(f, "stderr"),
             RuleKind::TimeZone => write!(f, "timezone"),
             RuleKind::Custom(name, detail) => {
-                write!(f, "custom {}", name.as_deref().map_or_else(|| "*".to_string(), |n| quote_part(n, true)))?;
+                match name {
+                    CustomName::Any => write!(f, "custom *")?,
+                    CustomName::Named(n) => write!(f, "custom {}", quote_part(n, true))?,
+                }
                 match detail {
                     Some(detail) => write!(f, " {}", quote_part(detail, true)),
                     None => Ok(()),
