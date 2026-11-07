@@ -263,7 +263,6 @@ pub(crate) enum PathSpace {
     Memory,
 }
 
-/// Maximum script-supplied path length in bytes before normalization.
 /// Why the text of a policy pattern, such as a [`rules::PathPattern`] or a
 /// [`net::NetPattern`], does not parse.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -277,6 +276,7 @@ impl fmt::Display for PatternError {
 
 impl std::error::Error for PatternError {}
 
+/// Maximum script-supplied path length in bytes before normalization.
 pub const MAX_PATH_BYTES: usize = 4096;
 
 /// Resolves `.` and `..` components lexically.
