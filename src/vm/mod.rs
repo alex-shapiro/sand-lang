@@ -665,7 +665,7 @@ pub struct Vm {
     /// Testing aid: causes the first memory or resource check in each `vm_function` call to fail (see `Config::retry_stress`).
     pub(crate) retry_stress: bool,
     /// The run's journal, if it has one (SPEC §16.7).
-    pub(crate) journal: Option<Box<std::cell::RefCell<journal::JournalState>>>,
+    pub(crate) journal: Option<journal::JournalHandle>,
 }
 
 pub const SLICE_FUEL: i64 = 20_000;

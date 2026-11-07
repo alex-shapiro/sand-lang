@@ -636,7 +636,7 @@ fn send(
     let idle = pool.take(&req.url.origin(), &vm.host.policy, &req.url.capability(&req.method));
     let buffers = if req.url.scheme == "https" { net::CONN_BUFFER + net::TLS_BUFFERS } else { net::CONN_BUFFER };
     let claim = vm.claim(call, idle.is_none().then_some((buffers, "a connection")), body.len())?;
-    let target = req.target(live.seq);
+    let target = req.target(live.seq());
     let filter = vm.host.request_filter.clone();
     let Prepared { method, text, url, mut headers } = req;
     let timeout = stream::timeout(timeout);

@@ -544,7 +544,7 @@ impl Vm {
     /// if every pending operation may be, and none is due within the
     /// configured threshold.
     fn suspension(&self) -> Option<Suspension> {
-        let j = self.journal.as_ref()?.borrow();
+        let j = self.journal.as_ref()?.state();
         let after = j.suspend_after?;
         if j.replaying() || !j.held.is_empty() {
             return None;

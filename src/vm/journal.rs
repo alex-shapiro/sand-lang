@@ -18,7 +18,6 @@ use super::{BoxFuture, Ctl, CtlKind, End, Finisher, NResult, Request, Vm};
 use crate::journal::{CallResult, Durable, Entry, EntryData, EntryKind, Journal, OpDone, OpEnd, OpKind, OpStart, ParkedCall};
 use crate::native::func::{Answer, Call, JournaledFn, Park};
 use crate::platform::{Instant, SystemTime};
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -205,6 +204,7 @@ impl Recorded {
 /// An operation whose recorded start replay consumes when the operation
 /// runs again ([`Rerun::start`]).
 pub(crate) struct Rerun {
+    journal: JournalHandle,
     op: u64,
     seq: u64,
     wake: Option<SystemTime>,
@@ -212,18 +212,21 @@ pub(crate) struct Rerun {
 
 impl Rerun {
     /// Consumes the recorded start: the operation runs.
-    pub fn start(self, vm: &Vm, spec: OpSpec) -> Live {
-        if let Some(mut j) = vm.journal_state() {
+    pub fn start(self, spec: OpSpec) -> Live {
+        let Rerun { journal, op, seq, wake } = self;
+        {
+            let mut j = journal.state();
             j.pos += 1;
             j.ops += 1;
         }
-        let parking = self.wake.map_or(spec.parking, Parking::Timer);
-        Live { op: Some(self.op), seq: Some(self.seq), wake: self.wake, parking, effects: spec.effects }
+        let parking = wake.map_or(spec.parking, Parking::Timer);
+        Live { journal: Some(LiveOp { journal, op, seq, wake }), parking, effects: spec.effects }
     }
 }
 
 /// A new operation of a journaled run, with its identity and label.
 pub(crate) struct Fresh {
+    journal: JournalHandle,
     identity: u64,
     label: String,
 }
@@ -231,14 +234,17 @@ pub(crate) struct Fresh {
 impl Fresh {
     /// Records the operation's start: the operation runs.
     pub fn start(self, vm: &Vm, spec: OpSpec) -> Live {
-        let Fresh { identity, label } = self;
-        let mut j = vm.journal_state().expect("only a journaled run has a fresh operation");
-        let (op, seq) = (j.ops, j.position());
-        let wake = spec.timer.map(|d| j.wall(&*vm.host.clock) + d);
-        j.record(EntryData::Start(OpStart { kind: spec.kind, identity, pre_fuel: spec.pre_fuel, wake, label }));
-        j.ops += 1;
+        let Fresh { journal, identity, label } = self;
+        let (op, seq, wake) = {
+            let mut j = journal.state();
+            let (op, seq) = (j.ops, j.position());
+            let wake = spec.timer.map(|d| j.wall(&*vm.host.clock) + d);
+            j.record(EntryData::Start(OpStart { kind: spec.kind, identity, pre_fuel: spec.pre_fuel, wake, label }));
+            j.ops += 1;
+            (op, seq, wake)
+        };
         let parking = wake.map_or(spec.parking, Parking::Timer);
-        Live { op: Some(op), seq: Some(seq), wake, parking, effects: spec.effects }
+        Live { journal: Some(LiveOp { journal, op, seq, wake }), parking, effects: spec.effects }
     }
 }
 
@@ -252,6 +258,7 @@ pub(crate) enum Begun {
 
 /// An operation whose recorded outcome replay delivers.
 pub(crate) struct Replayed {
+    pub journal: JournalHandle,
     op: u64,
     /// The fuel that the native spent before the operation started, as the
     /// journal records it.
@@ -269,21 +276,33 @@ impl Replayed {
 
 /// An operation that runs.
 pub(crate) struct Live {
-    /// The id of the operation in the run's journal, if it has one.
-    op: Option<u64>,
-    /// The sequence number of the operation's `Start` entry.
-    #[cfg_attr(not(any(feature = "os", web)), expect(dead_code, reason = "only the HTTP modules read it"))]
-    pub seq: Option<u64>,
-    /// When a timer expires.
-    pub wake: Option<SystemTime>,
+    /// The operation in the run's journal, if the run has one.
+    pub journal: Option<LiveOp>,
     parking: Parking,
     effects: Effects,
+}
+
+/// A live operation of a journaled run.
+pub(crate) struct LiveOp {
+    pub journal: JournalHandle,
+    /// The id of the operation in the journal.
+    op: u64,
+    /// The sequence number of the operation's `Start` entry.
+    seq: u64,
+    /// When a timer expires.
+    pub wake: Option<SystemTime>,
 }
 
 impl Live {
     /// An operation of a run without a journal.
     fn unjournaled(spec: OpSpec) -> Live {
-        Live { op: None, seq: None, wake: None, parking: spec.parking, effects: spec.effects }
+        Live { journal: None, parking: spec.parking, effects: spec.effects }
+    }
+
+    /// The sequence number of the operation's `Start` entry, in a journaled run.
+    #[cfg_attr(not(any(feature = "os", web)), expect(dead_code, reason = "only the HTTP modules read it"))]
+    pub fn seq(&self) -> Option<u64> {
+        self.journal.as_ref().map(|j| j.seq)
     }
 
     /// The wait for `fut`. Without a journal, the program gets the outcome
@@ -291,23 +310,24 @@ impl Live {
     /// records it, and gives the program what `build` makes of it, as
     /// replay does.
     pub fn run(self, fut: impl Future<Output = Box<dyn Outcome>> + Send + 'static, build: BuildFn) -> Ctl {
-        let fut: BoxFuture = match self.op {
+        let op = self.journal.as_ref().map(|j| j.op);
+        let fut: BoxFuture = match self.journal {
             None => Box::pin(async move {
                 let outcome = fut.await;
                 Box::new(move |vm: &mut Vm| outcome.deliver(vm, build)) as Finisher
             }),
-            Some(id) => Box::pin(async move {
+            Some(LiveOp { journal, op, .. }) => Box::pin(async move {
                 let encode = fut.await.settle().await;
                 Box::new(move |vm: &mut Vm| {
                     let start = vm.meter.used();
                     let payload = encode(vm)?;
                     let fuel = vm.meter.used().saturating_sub(start);
-                    vm.record_done(id, fuel, &payload);
+                    journal.state().record_done(op, fuel, OpEnd::Completed(payload.to_vec()));
                     build(vm, &payload)
                 }) as Finisher
             }),
         };
-        Ctl::wait(Wait { op: self.op, parking: self.parking, work: WaitWork::Run { fut, effects: self.effects } })
+        Ctl::wait(Wait { op, parking: self.parking, work: WaitWork::Run { fut, effects: self.effects } })
     }
 }
 
@@ -354,10 +374,11 @@ pub(crate) fn sleep(vm: &mut Vm, d: Duration) -> Ctl {
         let identity = Identity::default().add(&d.as_nanos().to_le_bytes()).finish();
         Ok((identity, format!("sleep {}", crate::vm::display::fmt_duration(d.as_nanos().min(i64::MAX as u128) as i64))))
     };
-    let expired = |wake: Option<SystemTime>| -> BuildFn {
-        Box::new(move |vm: &mut Vm, _: &[u8]| {
-            if let (Some(t), Some(mut j)) = (wake, vm.journal_state()) {
-                j.saw_wall(t);
+    // The expiry of a journaled timer: the run has seen its wake time.
+    let expired = |wake: Option<(SystemTime, JournalHandle)>| -> BuildFn {
+        Box::new(move |_: &mut Vm, _: &[u8]| {
+            if let Some((t, journal)) = wake {
+                journal.state().saw_wall(t);
             }
             Ok(Value::Unit)
         })
@@ -365,16 +386,17 @@ pub(crate) fn sleep(vm: &mut Vm, d: Duration) -> Ctl {
     match vm.begin_op(spec, describe) {
         Err(c) => c,
         Ok(Begun::Replayed(r)) => {
-            let build = expired(r.wake);
+            let build = expired(r.wake.map(|t| (t, r.journal.clone())));
             r.wait(build)
         }
         Ok(Begun::Live(live)) => {
-            let wait = match live.wake {
-                Some(t) => vm.journal_state().map_or(d, |j| t.duration_since(j.wall(&*vm.host.clock)).unwrap_or_default()),
+            let wake = live.journal.as_ref().and_then(|j| Some((j.wake?, j.journal.clone())));
+            let wait = match &wake {
+                Some((t, journal)) => t.duration_since(journal.state().wall(&*vm.host.clock)).unwrap_or_default(),
                 None => d,
             };
             let sleep = vm.host.clock.sleep(wait);
-            let build = expired(live.wake);
+            let build = expired(wake);
             live.run(
                 async move {
                     sleep.await;
@@ -428,7 +450,7 @@ pub(crate) fn journaled_call(vm: &mut Vm, call: Call, inner: &JournaledFn, name:
                     (Box::pin(std::future::ready(ready)) as BoxFuture, Parking::Never)
                 }
             };
-            Err(run(rerun.start(vm, spec(pre_fuel, parking)), fin))
+            Err(run(rerun.start(spec(pre_fuel, parking)), fin))
         }
         StartEntry::Fresh(fresh) => {
             let start = vm.meter.used();
@@ -478,6 +500,28 @@ pub(crate) enum Due {
     /// A local operation completes at this step, and its future has not
     /// completed yet.
     Waiting,
+}
+
+/// The journal state of a run, shared by the VM and by the operations
+/// that the journal records ([`Fresh`], [`Rerun`], [`Replayed`], [`Live`]).
+/// A clone is a handle to the same state.
+#[derive(Clone)]
+pub(crate) struct JournalHandle(Arc<std::sync::Mutex<JournalState>>);
+
+impl JournalHandle {
+    fn new(state: JournalState) -> JournalHandle {
+        JournalHandle(Arc::new(std::sync::Mutex::new(state)))
+    }
+
+    /// The state. Like a `RefCell`, one holder borrows it at a time: the
+    /// engine runs on one thread, so a second borrow is a bug of the engine.
+    pub fn state(&self) -> std::sync::MutexGuard<'_, JournalState> {
+        match self.0.try_lock() {
+            Ok(j) => j,
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => panic!("the journal state is borrowed twice"),
+        }
+    }
 }
 
 /// The journal state of a run.
@@ -1173,19 +1217,19 @@ impl Vm {
         }
     }
 
-    pub(crate) fn journal_state(&self) -> Option<std::cell::RefMut<'_, JournalState>> {
-        self.journal.as_ref().map(|j| j.borrow_mut())
+    pub(crate) fn journal_state(&self) -> Option<std::sync::MutexGuard<'_, JournalState>> {
+        self.journal.as_ref().map(|j| j.state())
     }
 
     /// Whether the run replays journal entries.
     pub(crate) fn replaying(&self) -> bool {
-        self.journal.as_ref().is_some_and(|j| j.borrow().replaying())
+        self.journal.as_ref().is_some_and(|j| j.state().replaying())
     }
 
     /// Counts a scheduling step: a slice that a task runs.
     pub(crate) fn count_step(&self) {
         if let Some(j) = &self.journal {
-            j.borrow_mut().steps += 1;
+            j.state().steps += 1;
         }
     }
 
@@ -1203,7 +1247,7 @@ impl Vm {
             };
             self.host.rng = super::Rng::new(seed);
         }
-        self.journal = Some(Box::new(RefCell::new(j)));
+        self.journal = Some(JournalHandle::new(j));
         Ok(())
     }
 
@@ -1212,7 +1256,7 @@ impl Vm {
     /// has: replay does not call a journaled function.
     pub fn wall_time(&self, _: Call) -> Result<SystemTime, Ctl> {
         let Some(j) = &self.journal else { return Ok(self.host.clock.wall()) };
-        let mut j = j.borrow_mut();
+        let mut j = j.state();
         if let Some(EntryData::Wall(t)) = j.take(EntryKind::Wall, &|| "the wall clock".into()).map_err(Ctl::diverged)? {
             j.saw_wall(t);
             return Ok(t);
@@ -1228,7 +1272,7 @@ impl Vm {
     /// takes the [`Call`] of the reading function, as [`Vm::wall_time`] does.
     pub fn monotonic(&self, _: Call) -> Result<Instant, Ctl> {
         let Some(j) = &self.journal else { return Ok(self.host.clock.now()) };
-        let mut j = j.borrow_mut();
+        let mut j = j.state();
         if let Some(EntryData::Monotonic(d)) = j.take(EntryKind::Monotonic, &|| "the monotonic clock".into()).map_err(Ctl::diverged)? {
             j.mono_last = j.mono_last.max(d);
             return Ok(j.origin + d);
@@ -1245,7 +1289,7 @@ impl Vm {
     /// amount in replay, or else `live()`, recorded if it is not zero.
     pub(crate) fn time_fuel(&self, live: impl FnOnce() -> u64) -> Result<u64, Ctl> {
         let Some(j) = &self.journal else { return Ok(live()) };
-        let mut j = j.borrow_mut();
+        let mut j = j.state();
         let at = self.meter.used();
         if j.replaying() {
             let Some(&EntryData::Fuel { at: rec_at, extra }) = j.peek() else { return Ok(0) };
@@ -1339,7 +1383,7 @@ impl Vm {
         bytes: usize,
     ) -> Result<super::iomem::Claim, crate::native::convert::HostError> {
         if let Some(j) = &self.journal {
-            return Ok(super::iomem::Claim::Deferred { mem: j.borrow().live_memory.clone(), buffers: slot.map(|s| s.0), bytes });
+            return Ok(super::iomem::Claim::Deferred { mem: j.state().live_memory.clone(), buffers: slot.map(|s| s.0), bytes });
         }
         let res = if bytes == 0 { self.io_reservation() } else { self.reserve_io(call, bytes)? };
         let slot = match slot {
@@ -1365,7 +1409,7 @@ impl Vm {
     /// Consumes the recorded result of a synchronous call in replay.
     fn replay_result(&mut self, identity: u64, label: &str) -> Result<Option<NResult>, Ctl> {
         let Some(j) = &self.journal else { return Ok(None) };
-        let mut j = j.borrow_mut();
+        let mut j = j.state();
         let seq = j.pos as u64;
         let replayed = j.take(EntryKind::Result, &|| format!("the result of `{label}`")).map_err(Ctl::diverged)?;
         drop(j);
@@ -1391,16 +1435,9 @@ impl Vm {
     /// before an effect.
     pub(crate) fn must_flush(&self) -> bool {
         self.journal.as_ref().is_some_and(|j| {
-            let j = j.borrow();
+            let j = j.state();
             j.unflushed && !j.replaying()
         })
-    }
-
-    /// Records the completion of operation `op` with `payload` and `fuel`.
-    fn record_done(&self, op: u64, fuel: u64, payload: &[u8]) {
-        if let Some(j) = &self.journal {
-            j.borrow_mut().record_done(op, fuel, OpEnd::Completed(payload.to_vec()));
-        }
     }
 
     /// Notes that the task waiting for journaled operation `op` was
@@ -1409,7 +1446,7 @@ impl Vm {
     /// record, and fails if the journal records something else next.
     pub(crate) fn cancel_op(&self, op: u64) -> Result<(), Divergence> {
         let Some(j) = &self.journal else { return Ok(()) };
-        let mut j = j.borrow_mut();
+        let mut j = j.state();
         j.local.remove(&op);
         if !j.replaying() {
             j.record_done(op, 0, OpEnd::Cancelled);
@@ -1440,9 +1477,9 @@ impl Vm {
     pub(crate) fn take_start(&self, kind: OpKind, describe: impl FnOnce(&Vm) -> Result<(u64, String), Ctl>) -> Result<StartEntry, Ctl> {
         let Some(journal) = &self.journal else { return Ok(StartEntry::Unjournaled) };
         let (identity, label) = describe(self)?;
-        let mut j = journal.borrow_mut();
+        let mut j = journal.state();
         let s = match j.peek() {
-            None => return Ok(StartEntry::Fresh(Fresh { identity, label })),
+            None => return Ok(StartEntry::Fresh(Fresh { journal: journal.clone(), identity, label })),
             Some(EntryData::Start(s)) => s,
             Some(EntryData::Result(r)) => {
                 let result = Recorded { seq: j.pos as u64, result: r.clone() };
@@ -1462,11 +1499,11 @@ impl Vm {
         }
         let (pre_fuel, wake) = (s.pre_fuel, s.wake);
         if !j.done.contains_key(&op) {
-            return Ok(StartEntry::Rerun(Rerun { op, seq, wake }));
+            return Ok(StartEntry::Rerun(Rerun { journal: journal.clone(), op, seq, wake }));
         }
         j.pos += 1;
         j.ops += 1;
-        Ok(StartEntry::Replayed(Replayed { op, pre_fuel, wake }))
+        Ok(StartEntry::Replayed(Replayed { journal: journal.clone(), op, pre_fuel, wake }))
     }
 
     /// Starts operation `spec`, an input of the run whose outcome the
@@ -1477,7 +1514,7 @@ impl Vm {
     pub(crate) fn begin_op(&mut self, spec: OpSpec, describe: impl FnOnce(&Vm) -> Result<(u64, String), Ctl>) -> Result<Begun, Ctl> {
         match self.take_start(spec.kind, describe)? {
             StartEntry::Replayed(r) => Ok(Begun::Replayed(r)),
-            StartEntry::Rerun(r) => Ok(Begun::Live(r.start(self, spec))),
+            StartEntry::Rerun(r) => Ok(Begun::Live(r.start(spec))),
             StartEntry::Fresh(f) => Ok(Begun::Live(f.start(self, spec))),
             StartEntry::Unjournaled => Ok(Begun::Live(Live::unjournaled(spec))),
             StartEntry::Recorded { label, result: Recorded { seq, result }, .. } => {
@@ -1500,7 +1537,7 @@ impl Vm {
     /// interleave as they did.
     pub(crate) fn local_pending(&mut self, fid: u32, wgen: u64) -> Result<(), Ctl> {
         let Some(j) = &self.journal else { return Ok(()) };
-        let mut j = j.borrow_mut();
+        let mut j = j.state();
         let id = j.ops;
         let seq = j.pos as u64;
         let what = || format!("the start of {}", OpKind::Local.name());
@@ -1536,7 +1573,7 @@ impl Vm {
         let Some(j) = &self.journal else { return };
         let Some(Some(f)) = self.fibers.get(fid as usize) else { return };
         let Some(op) = f.jop else { return };
-        let mut j = j.borrow_mut();
+        let mut j = j.state();
         if j.local.remove(&op) {
             j.record_done(op, 0, OpEnd::Completed(Vec::new()));
         }
@@ -1547,7 +1584,7 @@ impl Vm {
     /// operations that run live until it is over.
     pub(crate) fn hold_in_replay(&mut self, done: Vec<(u32, u64, Finisher)>) -> Vec<(u32, u64, Finisher)> {
         let Some(j) = &self.journal else { return done };
-        let mut j = j.borrow_mut();
+        let mut j = j.state();
         if !j.replaying() {
             return done;
         }
@@ -1570,7 +1607,7 @@ impl Vm {
     /// current step. Fails if one recorded after an earlier step is pending.
     pub(crate) fn next_due(&mut self) -> Result<Due, Ctl> {
         let Some(j) = &self.journal else { return Ok(Due::Nothing) };
-        let mut j = j.borrow_mut();
+        let mut j = j.state();
         let Some(EntryData::Done(OpDone { op, step, fuel, end })) = j.peek() else { return Ok(Due::Nothing) };
         let (op, step, fuel) = (*op, *step, *fuel);
         let OpEnd::Completed(payload) = end else {
@@ -1613,7 +1650,7 @@ impl Vm {
     /// The divergence error for a run that can do nothing more while
     /// replay holds more entries.
     pub(crate) fn blocked_in_replay(&self) -> Option<Divergence> {
-        let j = self.journal.as_ref()?.borrow();
+        let j = self.journal.as_ref()?.state();
         let e = j.peek()?;
         Some(j.diverged(format!("every task is blocked, and the journal records {} next", e.describe())))
     }

@@ -78,7 +78,7 @@ fn send(
     };
     // The request body is held, and the response buffered, outside the heap.
     let claim = vm.claim(call, None, body.len())?;
-    let target = req.target(live.seq);
+    let target = req.target(live.seq());
     let filter = vm.host.request_filter.clone();
     let Prepared { method, text, url, mut headers } = req;
     let timeout = stream::timeout(timeout);
