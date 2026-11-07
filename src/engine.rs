@@ -379,13 +379,16 @@ impl Config {
         self.stdin = StdinConfig::Bytes(data);
         self
     }
-    /// Read stdin from a host-controlled feed.
+    /// Gives scripts standard input that a person sends through the returned
+    /// [`StdinFeed`](crate::StdinFeed). The time that a read waits does not
+    /// count toward `max_wall_time`.
     pub fn stdin_feed(self) -> (Self, crate::StdinFeed) {
         self.stdin_host_feed(crate::WaitKind::User)
     }
 
-    /// Read stdin from a host-controlled feed of non-user input.
-    /// The time that a read waits counts toward `max_wall_time`.
+    /// Gives scripts standard input that a program, such as a pipe, sends
+    /// through the returned [`StdinFeed`](crate::StdinFeed). The time that a
+    /// read waits counts toward `max_wall_time`.
     pub fn stdin_io_feed(self) -> (Self, crate::StdinFeed) {
         self.stdin_host_feed(crate::WaitKind::Io)
     }
