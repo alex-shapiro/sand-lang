@@ -976,10 +976,11 @@ impl Vm {
     }
 
     /// Runs `f` with heap memory-limit checks disabled so post-effect result conversion cannot trigger a retry. Call [`Vm::enforce_limit`] after rooting the result.
+    /// A scope nests: it restores the state of the scope around it.
     pub(crate) fn unchecked<R>(&mut self, f: impl FnOnce(&mut Vm) -> R) -> R {
-        self.heap.unchecked = true;
+        let around = std::mem::replace(&mut self.heap.unchecked, true);
         let r = f(self);
-        self.heap.unchecked = false;
+        self.heap.unchecked = around;
         r
     }
 

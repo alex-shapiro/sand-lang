@@ -312,6 +312,7 @@ impl Vm {
                 Ok(r) => r,
                 Err(msg) => {
                     self.broken = true;
+                    // The panic skipped the restore of the scope, and no scope is around it.
                     self.heap.unchecked = false;
                     Err(Ctl::internal(msg))
                 }
