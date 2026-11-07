@@ -343,14 +343,7 @@ pub(crate) fn journaled_call(vm: &mut Vm, call: Call, inner: &super::HostFn, nam
     // the entry that the call records or replays is the next one.
     let call = Call { seq: vm.journal_state().map(|j| j.position()), ..call };
     let inner = |vm: &mut Vm| inner.call(vm, call, args);
-    let spec = |pre_fuel: u64, (park, host_wait): Parking| OpSpec {
-        kind: OpKind::Call,
-        effectful,
-        park,
-        host_wait,
-        pre_fuel,
-        timer: None,
-    };
+    let spec = |pre_fuel: u64, (park, host_wait): Parking| OpSpec { kind: OpKind::Call, effectful, park, host_wait, pre_fuel, timer: None };
     let run = |live: Live, fin: BoxFuture| {
         let label = name.clone();
         live.run(async move { Box::new(CallOutcome { fin: fin.await, label }) as Box<dyn Outcome> }, Box::new(payload_outcome))
