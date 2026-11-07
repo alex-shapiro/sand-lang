@@ -67,6 +67,8 @@ struct QueuedInput {
     target: Option<StdinReadId>,
     /// Input bytes, or `None` for EOF.
     data: Option<Vec<u8>>,
+    /// The offset in `data` of the first byte that no read has used.
+    start: usize,
 }
 
 impl QueuedInput {
@@ -90,14 +92,14 @@ impl StdinFeed {
     pub fn send(&self, data: impl Into<Vec<u8>>) {
         let data = data.into();
         if !data.is_empty() {
-            self.channel.push(QueuedInput { target: None, data: Some(data) });
+            self.channel.push(QueuedInput { target: None, data: Some(data), start: 0 });
         }
     }
 
     /// Enqueues an end-of-input marker for the next read that reaches it.
     /// Later reads wait for new input.
     pub fn end(&self) {
-        self.channel.push(QueuedInput { target: None, data: None });
+        self.channel.push(QueuedInput { target: None, data: None, start: 0 });
     }
 
     /// Returns `true` if a read is waiting for input and all other engine
@@ -198,9 +200,9 @@ impl StdinChannel {
             return false;
         }
         if let Some(data) = data {
-            state.queue.push_back(QueuedInput { target: Some(read), data: Some(data) });
+            state.queue.push_back(QueuedInput { target: Some(read), data: Some(data), start: 0 });
         }
-        state.queue.push_back(QueuedInput { target: Some(read), data: None });
+        state.queue.push_back(QueuedInput { target: Some(read), data: None, start: 0 });
         self.notify(state);
         true
     }
@@ -260,6 +262,7 @@ impl Drop for StdinIdleGuard {
 /// to start a read operation.
 pub(crate) struct StdinFeedReader {
     channel: Arc<StdinChannel>,
+    /// Input taken from the feed during a read. It is empty between reads.
     buf: Vec<u8>,
     buf_target: Option<StdinReadId>,
     at: usize,
@@ -276,15 +279,13 @@ impl StdinFeedReader {
     /// an earlier read.
     pub(crate) fn begin_read(&mut self) -> ActiveStdinRead<'_> {
         self.ended = false;
-        if self.buf_target.is_some() {
-            self.at = self.buf.len();
-        }
         ActiveStdinRead { reader: self }
     }
 }
 
 /// An active read operation on a [`StdinFeedReader`]. Dropping this guard ends
-/// the read and discards any unread input targeted at it.
+/// the read, discards any unread input targeted at it, and puts other unread
+/// input back at the front of the feed.
 pub(crate) struct ActiveStdinRead<'a> {
     reader: &'a mut StdinFeedReader,
 }
@@ -304,7 +305,7 @@ impl ActiveStdinRead<'_> {
                 }
                 r.buf_target = input.target;
                 match input.data {
-                    Some(data) => (r.buf, r.at) = (data, 0),
+                    Some(data) => (r.buf, r.at) = (data, input.start),
                     None => r.ended = true,
                 }
             }
@@ -315,7 +316,12 @@ impl ActiveStdinRead<'_> {
 
 impl Drop for ActiveStdinRead<'_> {
     fn drop(&mut self) {
-        self.reader.channel.update(|state| {
+        let r = &mut *self.reader;
+        let (unread, start, target) = (std::mem::take(&mut r.buf), std::mem::take(&mut r.at), r.buf_target.take());
+        r.channel.update(|state| {
+            if target.is_none() && start < unread.len() {
+                state.queue.push_front(QueuedInput { target: None, data: Some(unread), start });
+            }
             let Some(read) = state.waiting_read.take() else { return };
             state.queue.retain(|input| input.target != Some(read.id));
         });
