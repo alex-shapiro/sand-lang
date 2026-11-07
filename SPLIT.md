@@ -18,21 +18,21 @@ journal. The sections below group these commits into self-contained changesets.
 
 ## Status
 
-| #   | Changeset                               | Status                          | Branch         |
-| --- | --------------------------------------- | ------------------------------- | -------------- |
-| 1   | Module path cleanup                     | In review                       | `module-paths` |
-| 2   | Typed policy builders                   | Not started                     |                |
-| 3   | Rule and limit positions in policy      | Not started                     |                |
-| 4   | `deny_private_net` and absolute rules   | Not started                     |                |
-| 5   | Precompiled host modules                | Not started                     |                |
-| 6   | `InterruptHandle::new`                  | Not started                     |                |
-| 7   | Linter budget and interrupt errors      | Not started                     |                |
-| 8   | Host calls to main-module functions     | Not started, requires 5         |                |
-| 9   | Explicit VM control flow and call state | Not started                     |                |
-| 10  | Fuel accounting for retried host calls  | Not started                     |                |
-| 11  | Per-run arguments with `Run<D, C>`      | Not started                     |                |
-| 12  | The journal                             | Not started, requires 9, 11, 13 |                |
-| 13  | Unified scheduler path                  | Not started                     |                |
+| #   | Changeset                               | Status                          | Branch                  |
+| --- | --------------------------------------- | ------------------------------- | ----------------------- |
+| 1   | Module path cleanup                     | Merged (#26)                    | `module-paths`          |
+| 2   | Typed policy builders                   | In review                       | `typed-policy-builders` |
+| 3   | Rule and limit positions in policy      | Not started                     |                         |
+| 4   | `deny_private_net` and absolute rules   | Not started                     |                         |
+| 5   | Precompiled host modules                | Not started                     |                         |
+| 6   | `InterruptHandle::new`                  | Not started                     |                         |
+| 7   | Linter budget and interrupt errors      | Not started                     |                         |
+| 8   | Host calls to main-module functions     | Not started, requires 5         |                         |
+| 9   | Explicit VM control flow and call state | Not started                     |                         |
+| 10  | Fuel accounting for retried host calls  | Not started                     |                         |
+| 11  | Per-run arguments with `Run<D, C>`      | Not started                     |                         |
+| 12  | The journal                             | Not started, requires 9, 11, 13 |                         |
+| 13  | Unified scheduler path                  | Not started                     |                         |
 
 ## Independent changesets
 
