@@ -446,7 +446,8 @@ fn cmd_run(args: &[String]) -> Result<u8, String> {
     let (config, stdin_feed) = opts.config();
     let mut engine = Engine::new(config.exit_after_run(true)).map_err(|e| e.render())?;
     let rt = runtime()?;
-    let r = rt.block_on(with_stdin_forwarded(&stdin_feed, engine.run_file(&file)));
+    let mut stdin = ProcessStdin::new(tokio::io::stdin());
+    let r = rt.block_on(with_stdin_forwarded(&mut stdin, &stdin_feed, engine.run_file(&file)));
     // A read of the process's standard input cannot be cancelled; do not wait for it.
     rt.shutdown_background();
     if std::env::var_os("SAND_GC_STATS").is_some() {
@@ -458,22 +459,25 @@ fn cmd_run(args: &[String]) -> Result<u8, String> {
     }
 }
 
-/// Awaits `run` while it forwards the process's standard input to `feed`.
-async fn with_stdin_forwarded<T>(feed: &StdinFeed, run: impl Future<Output = T>) -> T {
+/// The process's standard input. Runs that forward it one after another share
+/// one reader, so that the next run gets the result of a read that the
+/// previous run left in progress.
+type ProcessStdin = tokio::io::BufReader<tokio::io::Stdin>;
+
+/// Awaits `run` while it forwards `stdin` to `feed`.
+async fn with_stdin_forwarded<T>(stdin: &mut ProcessStdin, feed: &StdinFeed, run: impl Future<Output = T>) -> T {
     tokio::select! {
         biased;
         result = run => result,
-        never = forward_stdin(feed) => never,
+        never = forward_stdin(stdin, feed) => never,
     }
 }
 
-/// Sends the process's standard input to `feed`. It reads the process input
-/// only while a script read waits, so that a script that does not read does
-/// not take input from the terminal. After the process input ends, every
-/// later read gets an end of input.
-async fn forward_stdin(feed: &StdinFeed) -> ! {
+/// Sends `stdin` to `feed`. It reads `stdin` only while a script read waits,
+/// so that a script that does not read does not take input from the terminal.
+/// After `stdin` ends, every later read gets an end of input.
+async fn forward_stdin(stdin: &mut ProcessStdin, feed: &StdinFeed) -> ! {
     use tokio::io::AsyncBufReadExt;
-    let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
     loop {
         feed.wait_for_request().await;
         match stdin.fill_buf().await {
@@ -641,11 +645,12 @@ fn cmd_test(args: &[String]) -> Result<u8, String> {
         return Err("missing FILE".into());
     }
     let rt = runtime()?;
+    let mut stdin = ProcessStdin::new(tokio::io::stdin());
     let mut failed = 0;
     for f in &files {
         let (config, stdin_feed) = opts.config();
         let mut engine = Engine::new(config).map_err(|e| e.render())?;
-        match rt.block_on(with_stdin_forwarded(&stdin_feed, engine.run_tests(f))) {
+        match rt.block_on(with_stdin_forwarded(&mut stdin, &stdin_feed, engine.run_tests(f))) {
             Ok(report) => {
                 out!("{}", report.render());
                 failed += report.failed();
