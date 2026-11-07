@@ -591,7 +591,7 @@ pub(crate) fn parse_path(text: &[Tok], bare: bool, base: Option<&Path>, home: Op
         let base =
             base.ok_or_else(|| format!("cannot resolve the relative path `{flat}` without a base directory: write an absolute path"))?;
         (base.to_path_buf(), text)
-    } else if flat.starts_with('/') || (cfg!(windows) && Path::new(&flat).is_absolute()) {
+    } else if super::path::is_absolute(flat.as_bytes()) {
         let root = Path::new(&flat)
             .components()
             .take_while(|c| matches!(c, std::path::Component::Prefix(_) | std::path::Component::RootDir))

@@ -44,21 +44,15 @@ pub struct AbsolutePath(&'static str);
 impl AbsolutePath {
     /// The path `path`. Panics if `path` is not absolute; in a `const`, the panic is a
     /// compile error. A path that starts with `/` is absolute on every platform. On
-    /// Windows, a drive path such as `C:\data` and a UNC path such as `\\server\share`
-    /// are also absolute.
+    /// Windows, a path that starts with `\`, such as `\data` or `\\server\share`, and a
+    /// drive path such as `C:\data` are also absolute.
     ///
     /// ```compile_fail
     /// use sandlang::policy::rules::AbsolutePath;
     /// const DATA: AbsolutePath = AbsolutePath::new("data");
     /// ```
     pub const fn new(path: &'static str) -> AbsolutePath {
-        let absolute = match path.as_bytes() {
-            [b'/', ..] => true,
-            [b'\\', b'\\', ..] => cfg!(windows),
-            [drive, b':', b'\\' | b'/', ..] => cfg!(windows) && drive.is_ascii_alphabetic(),
-            _ => false,
-        };
-        assert!(absolute, "the path is not absolute");
+        assert!(super::path::is_absolute(path.as_bytes()), "the path is not absolute");
         AbsolutePath(path)
     }
 
@@ -109,7 +103,7 @@ impl PathPattern {
     /// Returns an error if `path` is relative.
     pub fn literal(path: impl AsRef<Path>) -> Result<PathPattern, PatternError> {
         let path = path.as_ref();
-        if !path.has_root() && !path.is_absolute() {
+        if !super::path::is_absolute(path.as_os_str().as_encoded_bytes()) {
             return Err(PatternError(format!("path `{}` is not anchored: write an absolute path", path.display())));
         }
         Ok(PathPattern::of_absolute(path))

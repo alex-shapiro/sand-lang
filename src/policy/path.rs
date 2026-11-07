@@ -10,6 +10,18 @@ use std::borrow::Cow;
 use std::hash::{Hash, Hasher};
 use std::path::{Component, Path};
 
+/// Returns `true` if a file rule can anchor a pattern at `path`. A path that starts with `/`
+/// is absolute on every platform. On Windows, a path that starts with `\`, such as `\data`
+/// or `\\server\share`, and a drive path such as `C:\data` are also absolute.
+pub(crate) const fn is_absolute(path: &[u8]) -> bool {
+    match path {
+        [b'/', ..] => true,
+        [b'\\', ..] => cfg!(windows),
+        [drive, b':', b'\\' | b'/', ..] => cfg!(windows) && drive.is_ascii_alphabetic(),
+        _ => false,
+    }
+}
+
 /// A character in a pattern and whether it is an unquoted `*` wildcard.
 pub(crate) type Tok = (char, bool);
 

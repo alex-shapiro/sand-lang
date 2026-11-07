@@ -2002,11 +2002,19 @@ fn absolute_paths_accept_windows_drive_and_unc_paths() {
     const UNC: AbsolutePath = AbsolutePath::new("\\\\server\\share");
     assert_eq!(PathPattern::from(DRIVE), PathPattern::literal("C:\\data").unwrap());
     assert_eq!(PathPattern::from(UNC), PathPattern::literal("\\\\server\\share").unwrap());
+    for text in ["\\data", "\\\\server\\share", "C:\\data", "C:/data"] {
+        let pattern = PathPattern::literal(text).unwrap();
+        assert_eq!(pattern, text.parse().unwrap(), "{text:?}");
+        let rules = RulePolicy::new().allow_read(pattern).to_string();
+        assert_eq!(PolicyFile::parse(&rules, std::path::Path::new("/"), None).unwrap().rules.to_string(), rules, "{text:?}");
+    }
+    assert!(PathPattern::literal("C:data").is_err());
 }
 
 #[test]
 fn path_patterns_reject_empty_and_relative_paths() {
-    for text in ["", "data", "./data", "../data", "~/data"] {
+    let relative: &[&str] = if cfg!(windows) { &["C:data"] } else { &["\\data", "C:\\data", "C:/data"] };
+    for &text in ["", "data", "./data", "../data", "~/data"].iter().chain(relative) {
         assert!(text.parse::<PathPattern>().is_err(), "{text:?}");
         assert!(PathPattern::literal(text).is_err(), "{text:?}");
     }
