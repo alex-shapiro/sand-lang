@@ -143,48 +143,39 @@ fn buffered_line(vm: &Vm) -> Option<Option<Vec<u8>>> {
         StdinSource::None => None,
         StdinSource::Bytes(c) => {
             let at = u64_to_usize_saturating(c.position()).min(c.get_ref().len());
-            let line = BufferedLine::find(vm, &c.get_ref()[at..], true)?;
-            c.set_position(c.position() + line.len as u64);
-            Some(line.text)
+            let (len, line) = first_line(vm, &c.get_ref()[at..], true)?;
+            c.set_position(c.position() + len as u64);
+            Some(line)
         }
         StdinSource::Host(r) => {
             let mut read = r.begin_read();
             let (buf, at_end) = read.available();
-            let line = BufferedLine::find(vm, buf, at_end)?;
-            std::pin::Pin::new(&mut read).consume(line.len);
-            Some(line.text)
+            let (len, line) = first_line(vm, buf, at_end)?;
+            std::pin::Pin::new(&mut read).consume(len);
+            Some(line)
         }
     }
 }
 
-/// A line at the start of a read buffer.
-struct BufferedLine {
-    /// Byte length of the line in the buffer, including its newline terminator.
-    len: usize,
-    /// The line without its newline terminator, or `None` at EOF.
-    text: Option<Vec<u8>>,
-}
-
-impl BufferedLine {
-    /// Extracts the first line from `buf`, where `at_end` indicates whether
-    /// `buf` reaches EOF. Returns `None` if the line is incomplete or exceeds
-    /// the memory limit.
-    fn find(vm: &Vm, buf: &[u8], at_end: bool) -> Option<BufferedLine> {
-        let len = match buf.iter().position(|&b| b == b'\n') {
-            Some(nl) => nl + 1,
-            None if at_end => buf.len(),
-            None => return None,
-        };
-        if len == 0 {
-            return Some(BufferedLine { len, text: None });
-        }
-        if vm.heap.would_exceed(len) {
-            return None;
-        }
-        let mut text = buf[..len].to_vec();
-        strip_eol(&mut text);
-        Some(BufferedLine { len, text: Some(text) })
+/// The first line of `buf`: its length with its terminator, and its text
+/// without it (`None` at the end of input). `at_end` is true if the input
+/// ends after `buf`. Returns `None` if the line is incomplete or does not fit
+/// in memory.
+fn first_line(vm: &Vm, buf: &[u8], at_end: bool) -> Option<(usize, Option<Vec<u8>>)> {
+    let len = match buf.iter().position(|&b| b == b'\n') {
+        Some(nl) => nl + 1,
+        None if at_end => buf.len(),
+        None => return None,
+    };
+    if len == 0 {
+        return Some((0, None));
     }
+    if vm.heap.would_exceed(len) {
+        return None;
+    }
+    let mut text = buf[..len].to_vec();
+    strip_eol(&mut text);
+    Some((len, Some(text)))
 }
 
 /// Reads `what` from standard input: `None` only for a line at the end of
