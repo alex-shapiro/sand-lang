@@ -7,7 +7,7 @@ use common::{HttpResponse, TempDir, http_server, run_with};
 use sandlang::engine::Limits;
 use sandlang::policy::file::PolicyFile;
 use sandlang::policy::net::{NetPattern, is_private_address};
-use sandlang::policy::rules::{CustomName, Methods, NamePattern, PathPattern, RulePolicy, Transports};
+use sandlang::policy::rules::{AbsolutePath, CustomName, Methods, NamePattern, PathPattern, RulePolicy, Transports};
 use sandlang::policy::{Capability, Decision, PromptAnswer};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
@@ -604,7 +604,7 @@ fn listing_all_variables_gets_the_strictest_decision_of_any_variable() {
 
 #[test]
 fn env_patterns_reject_double_stars() {
-    let err = "AWS_**".parse::<NamePattern>().unwrap_err();
+    let err = "AWS_**".parse::<NamePattern>().unwrap_err().to_string();
     assert!(err.starts_with("cannot use `**` in an environment variable pattern"), "{err}");
     let p = RulePolicy::new().allow_env(NamePattern::exact("AWS_**"));
     assert_eq!(p.check(&Capability::Env("AWS_**".into())), Decision::Allow);
@@ -2041,7 +2041,9 @@ fn path_patterns_reject_empty_and_relative_paths() {
         assert!(text.parse::<PathPattern>().is_err(), "{text:?}");
         assert!(PathPattern::literal(text).is_err(), "{text:?}");
     }
-    let err = "./data".parse::<PathPattern>().unwrap_err();
+    const DATA: AbsolutePath = AbsolutePath::new("/data/*.txt");
+    assert_eq!(PathPattern::from(DATA), PathPattern::literal("/data/*.txt").unwrap());
+    let err = "./data".parse::<PathPattern>().unwrap_err().to_string();
     assert_eq!(err, "cannot resolve the relative path `./data` without a base directory: write an absolute path");
     let p = RulePolicy::new().allow_read("/data/**/*.txt".parse().unwrap()).deny_read(PathPattern::literal("/data/*.txt").unwrap());
     assert_eq!(p.to_string(), "allow read /data/**/*.txt\ndeny read \"/data/*.txt\"\n");

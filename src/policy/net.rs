@@ -1,5 +1,6 @@
 //! Host patterns, URL patterns, and IP address classification.
 
+use super::PatternError;
 use super::path::{Seg, Tok, wild_tokens};
 use crate::vm::value::FxHashMap;
 use std::borrow::Cow;
@@ -34,10 +35,10 @@ fn canonical_hostname(name: &str) -> Option<String> {
 }
 
 impl std::str::FromStr for NetPattern {
-    type Err = String;
+    type Err = PatternError;
 
-    fn from_str(pattern: &str) -> Result<NetPattern, String> {
-        NetPattern::from_tokens(&wild_tokens(pattern))
+    fn from_str(pattern: &str) -> Result<NetPattern, PatternError> {
+        NetPattern::from_tokens(&wild_tokens(pattern)).map_err(PatternError)
     }
 }
 
@@ -578,10 +579,11 @@ impl std::fmt::Display for ListenPattern {
 }
 
 impl std::str::FromStr for ListenPattern {
-    type Err = String;
+    type Err = PatternError;
 
-    fn from_str(text: &str) -> Result<ListenPattern, String> {
-        ListenPattern::parse(text).ok_or_else(|| format!("invalid listen pattern `{text}`: expected ip:port, ip, localhost, *:port, or *"))
+    fn from_str(text: &str) -> Result<ListenPattern, PatternError> {
+        ListenPattern::parse(text)
+            .ok_or_else(|| PatternError(format!("invalid listen pattern `{text}`: expected ip:port, ip, localhost, *:port, or *")))
     }
 }
 
@@ -622,10 +624,10 @@ pub struct UrlPattern {
 }
 
 impl std::str::FromStr for UrlPattern {
-    type Err = String;
+    type Err = PatternError;
 
-    fn from_str(text: &str) -> Result<UrlPattern, String> {
-        UrlPattern::parse(&wild_tokens(text))
+    fn from_str(text: &str) -> Result<UrlPattern, PatternError> {
+        UrlPattern::parse(&wild_tokens(text)).map_err(PatternError)
     }
 }
 
