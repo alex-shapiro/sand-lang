@@ -219,7 +219,7 @@ fn invalid_capability_hint(word: &str) -> Option<String> {
 }
 
 fn is_keyword(word: &str) -> bool {
-    transport(word).is_some() || invalid_transport_hint(word).is_some() || is_method(word)
+    transport(word).is_some() || invalid_transport_hint(word).is_some() || word.parse::<HttpMethod>().is_ok()
 }
 
 pub(crate) fn lex(text: &str) -> (Vec<Line>, Vec<PolicyError>) {
@@ -301,12 +301,6 @@ fn lex_line(line: &str) -> Result<Line, (usize, String)> {
 fn is_name(s: &str) -> bool {
     let mut chars = s.chars();
     chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-}
-
-pub(crate) fn is_method(word: &str) -> bool {
-    HttpMethod::KNOWN.iter().any(|m| m.as_str().eq_ignore_ascii_case(word))
-        || (word.bytes().any(|b| b.is_ascii_uppercase())
-            && word.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-' || b == b'_'))
 }
 
 const CAPABILITIES: &str = "read, write, import, net, http, listen, env, stdin, stdout, stderr, timezone, or custom";
