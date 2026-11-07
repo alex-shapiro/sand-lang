@@ -3,10 +3,9 @@
 
 mod common;
 
-use common::{HttpResponse, TempDir, http_server, literal, run_with};
+use common::{HttpResponse, TempDir, http_server, literal, policy_text, run_with};
 use parking_lot::Mutex;
 use sandlang::engine::Limits;
-use sandlang::policy::file::PolicyFile;
 use sandlang::policy::net::{NetPattern, is_private_address};
 use sandlang::policy::rules::{AbsolutePath, CustomMatch, HttpMethod, Methods, NamePattern, PathPattern, RulePolicy, Transports};
 use sandlang::policy::{Capability, Decision, PromptAnswer};
@@ -17,10 +16,6 @@ use std::time::{Duration, Instant};
 // ---------------------------------------------------------------------------
 // Network: patterns, transports and resolved addresses
 // ---------------------------------------------------------------------------
-
-fn policy_text(text: &str) -> RulePolicy {
-    PolicyFile::parse(text, std::path::Path::new("/"), None).unwrap().rules
-}
 
 fn net(host: &str, port: u16) -> Capability {
     Capability::Net { host: host.into(), port, tls: true }

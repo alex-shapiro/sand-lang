@@ -74,6 +74,11 @@ pub fn literal(path: impl AsRef<Path>) -> sandlang::policy::rules::PathPattern {
     sandlang::policy::rules::PathPattern::literal(path).unwrap()
 }
 
+/// The rules of the policy file `text`, with relative paths resolved from `/`.
+pub fn policy_text(text: &str) -> sandlang::policy::rules::RulePolicy {
+    sandlang::policy::file::PolicyFile::parse(text, Path::new("/"), None).unwrap().rules
+}
+
 /// Runs `source` as `main.sand` in a fresh temp dir with an allow-all policy.
 pub fn run(source: &str) -> RunResult {
     run_with(source, |c| c)
