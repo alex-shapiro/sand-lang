@@ -172,7 +172,7 @@ const YIELD_EVERY: Duration = Duration::from_millis(2);
 pub enum RunEnd<S> {
     Finished(Value),
     Exit(i32),
-    /// The journaled run suspended ([`Stop::Suspended`]).
+    /// The journaled run suspended.
     Suspended(S),
 }
 
@@ -198,33 +198,90 @@ impl Suspends for std::convert::Infallible {
     }
 }
 
-/// Why [`Vm::drive`] returned. `S` is how the run can suspend.
-pub(crate) enum Stop<S> {
-    /// The main task finished with this value.
-    Main(Value),
-    /// A task called `exit`.
-    Exit(i32),
-    /// Idle state when all tasks are blocked and all I/O is complete.
-    Idle,
-    /// Suspended state awaiting permission prompt.
-    Prompt(Capability),
-    /// Every task waits for a timer or a parked host call, and the journal
-    /// lets the run suspend (SPEC §16.7). Only a run with a main task
-    /// suspends.
-    Suspended(S),
+/// What [`Vm::drive`] runs the tasks for, and how it stops: [`Main`] runs
+/// them until the main task finishes, and [`Idle`] and [`EndTasks`] until
+/// nothing can run. Each has its own stop type, so a caller handles only
+/// the stops that its purpose can produce.
+pub(crate) trait Until {
+    type Stop;
+    /// The stop when a task calls `exit`.
+    fn exit(code: i32) -> Self::Stop;
+    /// The stop when task `fid` finishes with `v`, or `v` back if `fid` is
+    /// not the main task.
+    fn finished(&self, fid: u32, v: Value) -> Result<Self::Stop, Value>;
+    /// The stop when a task needs a permission prompt, or `cap` back if
+    /// the engine prompts at once.
+    fn prompt(&self, cap: Capability) -> Result<Self::Stop, Capability>;
+    /// The stop when nothing can run, or the fiber id of the main task,
+    /// which then waits forever.
+    fn idle(&self) -> Result<Self::Stop, u32>;
+    /// The stop before the engine waits for pending I/O, if any.
+    fn before_wait(&self, vm: &Vm) -> Option<Self::Stop>;
 }
 
-/// What [`Vm::drive`] runs the tasks for.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Until {
-    /// Until the main task, the fiber with this id, finishes.
-    Main(u32),
-    /// Until nothing can run, waiting for pending I/O.
-    Idle,
-    /// Until nothing can run without waiting for I/O: the tasks left at the
-    /// end of a run unwind ([`Vm::end_tasks`]).
-    EndTasks,
+/// Run until the main task, the fiber with this id, finishes. `S` is how
+/// the run can suspend.
+pub(crate) struct Main<S>(pub u32, pub std::marker::PhantomData<S>);
+
+impl<S: Suspends> Until for Main<S> {
+    type Stop = RunEnd<S>;
+    fn exit(code: i32) -> RunEnd<S> {
+        RunEnd::Exit(code)
+    }
+    fn finished(&self, fid: u32, v: Value) -> Result<RunEnd<S>, Value> {
+        if fid == self.0 { Ok(RunEnd::Finished(v)) } else { Err(v) }
+    }
+    fn prompt(&self, cap: Capability) -> Result<RunEnd<S>, Capability> {
+        Err(cap)
+    }
+    fn idle(&self) -> Result<RunEnd<S>, u32> {
+        Err(self.0)
+    }
+    fn before_wait(&self, vm: &Vm) -> Option<RunEnd<S>> {
+        S::now(vm).map(RunEnd::Suspended)
+    }
 }
+
+/// Why a run without a main task stopped.
+pub(crate) enum IdleStop {
+    /// Nothing can run.
+    Idle,
+    /// A task called `exit`.
+    Exit(i32),
+    /// A task waits for a permission prompt.
+    Prompt(Capability),
+}
+
+/// Run until nothing can run, waiting for pending I/O.
+pub(crate) struct Idle;
+
+/// Run until nothing can run without waiting for I/O: the tasks left at
+/// the end of a run unwind ([`Vm::end_tasks`]).
+pub(crate) struct EndTasks;
+
+macro_rules! idle_until {
+    ($($t:ty: $wait:expr),*) => {$(
+        impl Until for $t {
+            type Stop = IdleStop;
+            fn exit(code: i32) -> IdleStop {
+                IdleStop::Exit(code)
+            }
+            fn finished(&self, _: u32, v: Value) -> Result<IdleStop, Value> {
+                Err(v)
+            }
+            fn prompt(&self, cap: Capability) -> Result<IdleStop, Capability> {
+                Ok(IdleStop::Prompt(cap))
+            }
+            fn idle(&self) -> Result<IdleStop, u32> {
+                Ok(IdleStop::Idle)
+            }
+            fn before_wait(&self, _: &Vm) -> Option<IdleStop> {
+                $wait
+            }
+        }
+    )*};
+}
+idle_until!(Idle: None, EndTasks: Some(IdleStop::Idle));
 
 /// Execution timer tracking elapsed CPU and clock time.
 struct RunTimer {
@@ -513,14 +570,7 @@ impl Vm {
     /// the first registers.
     pub(crate) async fn run_call<S: Suspends>(&mut self, closure: Value, args: &[Value]) -> Result<RunEnd<S>, Trap> {
         let r = match self.start_main(closure, args) {
-            Ok(fid) => match self.drive(Until::Main(fid)).await {
-                Ok(Stop::Exit(c)) => Ok(RunEnd::Exit(c)),
-                Ok(Stop::Main(v)) => Ok(RunEnd::Finished(v)),
-                Ok(Stop::Suspended(s)) => Ok(RunEnd::Suspended(s)),
-                // Only runs without a main task stop this way.
-                Ok(Stop::Idle | Stop::Prompt(_)) => Ok(RunEnd::Finished(Value::Unit)),
-                Err(t) => Err(t),
-            },
+            Ok(fid) => self.drive(Main::<S>(fid, std::marker::PhantomData)).await,
             Err(t) => Err(t),
         };
         let drained = self.drain_output();
@@ -549,13 +599,9 @@ impl Vm {
 
     /// Runs the ready tasks and pending I/O as `until` says. Without a main
     /// task, also stops when a task needs a permission prompt
-    /// ([`Stop::Prompt`]). The future may be dropped where it waits: every
-    /// task is then in the scheduler's tables.
-    pub(crate) async fn drive<S: Suspends>(&mut self, until: Until) -> Result<Stop<S>, Trap> {
-        let main = match until {
-            Until::Main(fid) => Some(fid),
-            Until::Idle | Until::EndTasks => None,
-        };
+    /// ([`IdleStop::Prompt`]). The future may be dropped where it waits:
+    /// every task is then in the scheduler's tables.
+    pub(crate) async fn drive<U: Until>(&mut self, until: U) -> Result<U::Stop, Trap> {
         let mut timer = RunTimer::start(self.host.clock.clone());
         // Where an instruction was retried after a memory limit error.
         let mut gc_retried: Option<(u32, usize, u32)> = None;
@@ -588,7 +634,7 @@ impl Vm {
                 self.current = u32::MAX;
                 let exit = match r {
                     Ok(e) => e,
-                    Err(Trap::Exit(c)) => return Ok(Stop::Exit(c)),
+                    Err(Trap::Exit(c)) => return Ok(U::exit(c)),
                     Err(t) => return Err(t),
                 };
                 if !matches!(exit, Exit::Collect) {
@@ -617,10 +663,10 @@ impl Vm {
                     }
                     Exit::Done(v) => {
                         self.fibers[fid as usize] = Some(f);
-                        if Some(fid) == main {
-                            return Ok(Stop::Main(v));
+                        match until.finished(fid, v) {
+                            Ok(stop) => return Ok(stop),
+                            Err(v) => self.finish_task(fid, v).map_err(Trap::Diverged)?,
                         }
-                        self.finish_task(fid, v).map_err(Trap::Diverged)?;
                     }
                     Exit::Preempt | Exit::YieldNow => {
                         f.state = FiberState::Ready;
@@ -636,9 +682,10 @@ impl Vm {
                         f.state = FiberState::Ready;
                         self.fibers[fid as usize] = Some(f);
                         self.ready.push_front(fid);
-                        if main.is_none() {
-                            return Ok(Stop::Prompt(cap));
-                        }
+                        let cap = match until.prompt(cap) {
+                            Ok(stop) => return Ok(stop),
+                            Err(cap) => cap,
+                        };
                         // Write the script's output before showing the prompt.
                         self.drain_output().map_err(|c| self.trap_of(c, |_| vec![]))?;
                         timer.read();
@@ -675,16 +722,16 @@ impl Vm {
                         self.end_cancelled(fid, f);
                         if self.fibers[fid as usize].is_some() {
                             self.ready.push_back(fid);
-                        } else if Some(fid) == main {
-                            return Ok(Stop::Main(Value::Unit));
+                        } else if let Ok(stop) = until.finished(fid, Value::Unit) {
+                            return Ok(stop);
                         }
                     }
                     Exit::Unwound => {
                         self.free_fibers.push(fid);
                         self.live_tasks = self.live_tasks.saturating_sub(1);
                         self.recycle_fiber(f);
-                        if Some(fid) == main {
-                            return Ok(Stop::Main(Value::Unit));
+                        if let Ok(stop) = until.finished(fid, Value::Unit) {
+                            return Ok(stop);
                         }
                     }
                 }
@@ -710,15 +757,18 @@ impl Vm {
                 continue;
             }
             if self.replaying() {
-                if main.is_none() {
-                    return Ok(Stop::Idle);
+                if let Ok(stop) = until.idle() {
+                    return Ok(stop);
                 }
                 return Err(self
                     .blocked_in_replay()
                     .map_or_else(|| Trap::Internal { message: "replay stalled".into(), trace: vec![] }, Trap::Diverged));
             }
             if self.io.is_empty() {
-                let Some(main) = main else { return Ok(Stop::Idle) };
+                let main = match until.idle() {
+                    Ok(stop) => return Ok(stop),
+                    Err(main) => main,
+                };
                 let trace = match self.fibers.get(main as usize) {
                     Some(Some(f)) => self.trace_of(f, None),
                     _ => vec![],
@@ -731,13 +781,8 @@ impl Vm {
                 self.check_limits(&timer)?;
                 continue;
             }
-            if until == Until::EndTasks {
-                return Ok(Stop::Idle);
-            }
-            if main.is_some()
-                && let Some(s) = S::now(self)
-            {
-                return Ok(Stop::Suspended(s));
+            if let Some(stop) = until.before_wait(self) {
+                return Ok(stop);
             }
             timer.read();
             let done = self.wait_for_io(&timer).await;

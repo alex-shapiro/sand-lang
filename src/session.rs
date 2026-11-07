@@ -20,7 +20,7 @@ use crate::syntax::ast::{ItemKind, StmtKind};
 use crate::types::{FnId, ModId, TypeId};
 use crate::unwind::CatchUnwind;
 use crate::vm::bytecode::Program;
-use crate::vm::sched::{RunEnd, Stop, Until};
+use crate::vm::sched::{Idle, IdleStop, RunEnd};
 use crate::vm::value::Value;
 use crate::vm::{Trap, Vm};
 use std::collections::HashMap;
@@ -558,15 +558,15 @@ impl Session {
         vm.host.output_bytes = 0;
         // Waiting for input may take any time.
         vm.deadline = None;
-        let r = vm.drive::<Infallible>(Until::Idle).await;
+        let r = vm.drive(Idle).await;
         let r = r.and_then(|stop| vm.drain_output().map(|()| stop).map_err(|c| vm.trap_of(c, |_| vec![])));
         let r = match r {
-            Ok(Stop::Prompt(cap)) => {
+            Ok(IdleStop::Prompt(cap)) => {
                 st.deferred_prompt = Some(cap);
                 return Ok(false);
             }
-            Ok(Stop::Idle | Stop::Main(_)) => return Ok(false),
-            Ok(Stop::Exit(c)) => Ok(RunEnd::Exit(c)),
+            Ok(IdleStop::Idle) => return Ok(false),
+            Ok(IdleStop::Exit(c)) => Ok(RunEnd::Exit(c)),
             Err(t) => Err(t),
         };
         Ok(conclude(vm, r, exit_code)?.is_none())

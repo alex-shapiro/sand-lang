@@ -1249,7 +1249,9 @@ impl Vm {
                 return Ok(0);
             }
             if rec_at < at {
-                return Err(Ctl::diverged(j.diverged(format!("the journal records a fuel charge at {rec_at} units, and the run is at {at}"))));
+                return Err(Ctl::diverged(
+                    j.diverged(format!("the journal records a fuel charge at {rec_at} units, and the run is at {at}")),
+                ));
             }
             j.pos += 1;
             return Ok(extra);
