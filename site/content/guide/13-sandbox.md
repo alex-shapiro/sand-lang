@@ -163,4 +163,6 @@ sand: time limit exceeded
 | CPU time        | `--max-cpu=DURATION`   | unlimited |
 | instructions    | `--max-instructions=N` | unlimited |
 
+`--max-time` does not count the time that `sand` waits for an answer to a permission prompt, or for a person to type input at a terminal.
+
 In a policy file, set limits with `limit memory 64M`, `limit time 10s`, `limit cpu 2s`, or `limit instructions 1_000_000`. Additional limits bound output bytes, call stack depth, concurrent task count, open file and connection handles, and HTTP body size. Exceeding the call stack depth or task limit aborts the run with exit code 1. Exceeding the open handle or HTTP body limit returns a recoverable `Err` with kind `"limit"`. For the complete list of limits and policy rules, see [§15](/spec/#15-resource-limits) and [§14.7](/spec/#147-policy-files) of the specification.

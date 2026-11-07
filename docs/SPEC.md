@@ -2008,10 +2008,8 @@ and `Config::stdin_feed` gives them input that the host sends while they run.
 
 `Config::stdin_feed` creates a new `StdinFeed` and returns it with the
 config. The engine or session that the host creates from the config reads
-that feed. A host that runs scripts with its process's
-standard input, as the `sand` command does, forwards that input to the feed.
-If the `sand` command cannot read its standard input, it writes the error to
-standard error and ends the stream, so the script gets an end of input.
+that feed. A host that runs scripts with its process's standard input
+forwards that input to the feed, as `sand run` does (§17.5).
 
 A host learns that a script wants input from `StdinFeed::wait_for_request`. It
 waits until a read needs input, even if other tasks are running, and returns a
@@ -2050,9 +2048,7 @@ limits still bound the run during that wait. User waits include:
 
 `Config::stdin_io_feed` makes a feed for input that comes from a program, such
 as a pipe, and not from a person. A read of that feed waits for I/O, so the
-wait counts toward `max_wall_time`. The `sand` command uses
-`Config::stdin_feed` if its standard input is a terminal, and
-`Config::stdin_io_feed` otherwise.
+wait counts toward `max_wall_time`.
 
 The host can intercept and filter structured log records instead of
 writing them to standard error. `Config::log_sink` routes records to a
@@ -2468,7 +2464,9 @@ test passes if it completes without an error. Output: one line per test
 code 1 if any test failed, 2 for compile errors. `sand test` accepts the policy
 and limit options of `sand run` (§17.5) and prompts for any capability request
 that the configured rules do not match. A test that exceeds a resource limit
-fails with that limit's message.
+fails with that limit's message. All files of one `sand test` command run on one
+engine, so they read one standard input stream and share "always" answers to
+prompts.
 
 ### 17.5 `sand run FILE [-- ARGS...]`
 
@@ -2502,6 +2500,13 @@ script in `env.args()`. Exit codes: the script's exit code, clamped to 255 if
 outside `0..=255`, `1` for an uncaught runtime error or `?` failure, `2` for a
 compile or usage error, and `3` for a resource limit error. If the policy
 allows `TimeZone`, `time.local_zone()` returns the host system time zone.
+
+`sand run` forwards its standard input to the script while a read waits. If
+standard input is a terminal, a person types the input (`Config::stdin_feed`),
+so idle time while a read waits does not count toward `--max-time`. Otherwise,
+a program sends the input (`Config::stdin_io_feed`), and the wait counts. If
+`sand` cannot read its standard input, it writes the error to standard error
+and ends the stream, so the script gets an end of input.
 
 Interactive prompts read and write directly on the controlling terminal
 —`/dev/tty` on Unix or the console on Windows—rather than the standard streams.
