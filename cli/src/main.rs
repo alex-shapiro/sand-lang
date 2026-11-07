@@ -13,7 +13,7 @@ macro_rules! outln {
 mod repl;
 
 use sandlang::engine::{Config, Engine, Error, Limits};
-use sandlang::policy::file::PolicyFile;
+use sandlang::policy::file::{Limit, PolicyFile};
 use sandlang::policy::rules::{PathPattern, RulePolicy};
 use sandlang::policy::{Capability, PromptAnswer};
 use sandlang::stdin_feed::StdinFeed;
@@ -200,7 +200,10 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
             "--allow-all" => allow_all = true,
             "--no-prompt" => prompt = false,
             "--policy" => {}
-            f if let Some(name) = f.strip_prefix("--max-") => apply_cli_limit(name, &required(&value)?, &mut limits)?,
+            f if let Some(name) = f.strip_prefix("--max-") => {
+                let v = required(&value)?;
+                Limit::parse(name, &v).map_err(|m| format!("invalid option `{f}={v}`: {m}"))?.apply(&mut limits);
+            }
             "--seed" => {
                 let v = required(&value)?;
                 seed = Some(v.trim().parse::<u64>().map_err(|_| format!("invalid --seed value `{v}`"))?)
@@ -272,22 +275,6 @@ fn parse_cli_rule(verb: &str, text: &str, cwd: &Path, home: Option<&Path>) -> Re
         format!("invalid rule `--{verb}={text}`: {}", messages.join("; "))
     })?;
     Ok(file.rules)
-}
-
-/// Applies `--max-NAME=VALUE` to `limits` as the policy directive `limit NAME VALUE`.
-fn apply_cli_limit(name: &str, value: &str, limits: &mut Limits) -> Result<(), String> {
-    let invalid = |message: &str| format!("invalid option `--max-{name}={value}`: {message}");
-    let file = PolicyFile::parse(&format!("limit {name} {value}"), Path::new("/"), None).map_err(|errors| {
-        let messages: Vec<&str> = errors.iter().map(|e| e.message.as_str()).collect();
-        invalid(&messages.join("; "))
-    })?;
-    match (file.limit_directives.as_slice(), file.rule_directives.as_slice()) {
-        ([directive], []) => {
-            directive.limit.apply(limits);
-            Ok(())
-        }
-        _ => Err(invalid("expected one value")),
-    }
 }
 
 /// Default fallback rules for `sand run`, `sand test`, and `sand repl`.

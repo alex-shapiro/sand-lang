@@ -49,9 +49,14 @@ pub struct RuleDirective {
 /// The capability of a policy rule, named by the keyword after the verb.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RuleCapability {
-    /// A rule for paths without a keyword, such as `allow ./data`.
+    /// A rule for paths without a keyword, such as `allow ./data`. It
+    /// controls reads and writes. A `deny` or `prompt` rule also controls
+    /// imports.
     Files,
+    /// A `read` rule. A `deny` or `prompt` rule also controls writes and
+    /// imports.
     Read,
+    /// A `write` rule. An `allow` rule also allows reads.
     Write,
     Import,
     Net,
@@ -103,6 +108,36 @@ pub enum Limit {
 }
 
 impl Limit {
+    /// Parses the name and value of a `limit NAME VALUE` directive, such as
+    /// `memory` and `64M`.
+    pub fn parse(name: &str, value: &str) -> Result<Limit, String> {
+        let off = matches!(value, "none" | "unlimited");
+        let count = |v: &str| v.replace('_', "").parse::<u64>().map_err(|_| format!("invalid number `{v}`"));
+        let small = |v: &str| count(v).and_then(|n| usize::try_from(n).map_err(|_| format!("`{v}` is too large")));
+        let optional = |parse: &dyn Fn(&str) -> Result<u64, String>| if off { Ok(None) } else { parse(value).map(Some) };
+        Ok(match name {
+            "memory" => Limit::Memory(if off { None } else { Some(parse_size(value)?) }),
+            "time" => Limit::Time(if off { None } else { Some(parse_duration(value)?) }),
+            "cpu" => Limit::Cpu(if off { None } else { Some(parse_duration(value)?) }),
+            "instructions" => Limit::Instructions(optional(&count)?),
+            "compile-fuel" => Limit::CompileFuel(optional(&count)?),
+            "output" => Limit::Output(optional(&parse_size_u64)?),
+            "tasks" if !off => Limit::Tasks(small(value)?),
+            "call-depth" if !off => Limit::CallDepth(small(value)?),
+            "open-resources" if !off => Limit::OpenResources(small(value)?),
+            "source" if !off => Limit::Source(parse_size(value)?),
+            "http-body" if !off => Limit::HttpBody(parse_size(value)?),
+            "tasks" | "call-depth" | "open-resources" | "source" | "http-body" => {
+                return Err(format!("the `{name}` limit cannot be removed"));
+            }
+            other => {
+                return Err(format!(
+                    "unknown limit `{other}`: expected memory, time, cpu, instructions, output, compile-fuel, tasks, call-depth, open-resources, source, or http-body"
+                ));
+            }
+        })
+    }
+
     /// Sets the field of `limits` that this limit controls.
     pub fn apply(self, limits: &mut Limits) {
         match self {
@@ -741,32 +776,7 @@ fn limit(args: &[Word]) -> Result<Limit, String> {
     let (Some(name), Some(value), None) = (args.first().and_then(Word::plain), args.get(1).map(Word::text), args.get(2)) else {
         return Err("expected `limit NAME VALUE`, e.g. `limit memory 64M`".into());
     };
-    let value = value.as_str();
-    let off = matches!(value, "none" | "unlimited");
-    let count = |v: &str| v.replace('_', "").parse::<u64>().map_err(|_| format!("invalid number `{v}`"));
-    let small = |v: &str| count(v).and_then(|n| usize::try_from(n).map_err(|_| format!("`{v}` is too large")));
-    let optional = |parse: &dyn Fn(&str) -> Result<u64, String>| if off { Ok(None) } else { parse(value).map(Some) };
-    Ok(match &*name {
-        "memory" => Limit::Memory(if off { None } else { Some(parse_size(value)?) }),
-        "time" => Limit::Time(if off { None } else { Some(parse_duration(value)?) }),
-        "cpu" => Limit::Cpu(if off { None } else { Some(parse_duration(value)?) }),
-        "instructions" => Limit::Instructions(optional(&count)?),
-        "compile-fuel" => Limit::CompileFuel(optional(&count)?),
-        "output" => Limit::Output(optional(&parse_size_u64)?),
-        "tasks" if !off => Limit::Tasks(small(value)?),
-        "call-depth" if !off => Limit::CallDepth(small(value)?),
-        "open-resources" if !off => Limit::OpenResources(small(value)?),
-        "source" if !off => Limit::Source(parse_size(value)?),
-        "http-body" if !off => Limit::HttpBody(parse_size(value)?),
-        "tasks" | "call-depth" | "open-resources" | "source" | "http-body" => {
-            return Err(format!("the `{name}` limit cannot be removed"));
-        }
-        other => {
-            return Err(format!(
-                "unknown limit `{other}`: expected memory, time, cpu, instructions, output, compile-fuel, tasks, call-depth, open-resources, source, or http-body"
-            ));
-        }
-    })
+    Limit::parse(&name, &value)
 }
 
 /// Formats a policy rule that allows or denies `cap`, or returns `None` if
