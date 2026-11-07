@@ -57,6 +57,13 @@ struct StdinChannelState {
     read_waker: Option<Waker>,
 }
 
+impl StdinChannelState {
+    /// True if a read can take input or an end of input without a wait.
+    fn has_input(&self) -> bool {
+        self.answer.is_some() || !self.sent.is_empty() || self.stream_ended
+    }
+}
+
 impl StdinFeed {
     /// Creates a feed and the channel that the engine reads it through.
     pub(crate) fn new(wait_kind: WaitKind) -> (StdinFeed, Arc<StdinChannel>) {
@@ -71,7 +78,6 @@ impl StdinFeed {
         self.channel.change(|state| {
             if !data.is_empty() && !state.stream_ended {
                 state.sent.push_back((data, 0));
-                state.open_wait = None;
             }
         });
     }
@@ -79,10 +85,7 @@ impl StdinFeed {
     /// Ends the input stream. Reads take the input that is already queued,
     /// and then every read gets an end of input without a wait.
     pub fn end(&self) {
-        self.channel.change(|state| {
-            state.stream_ended = true;
-            state.open_wait = None;
-        });
+        self.channel.change(|state| state.stream_ended = true);
     }
 
     /// Waits until a read needs input, even if other tasks are running, and
@@ -117,7 +120,7 @@ impl StdinRequest {
         let mut answered = false;
         self.channel.change(|state| {
             if state.open_wait == Some(self.wait) {
-                (state.answer, state.open_wait, answered) = (Some(answer), None, true);
+                (state.answer, answered) = (Some(answer), true);
             }
         });
         answered
@@ -152,10 +155,14 @@ impl StdinChannel {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Applies `f` to the state and wakes the read and every host waiter.
+    /// Applies `f` to the state, closes the open wait if a read can now go
+    /// on, and wakes the read and every host waiter.
     fn change(&self, f: impl FnOnce(&mut StdinChannelState)) {
         let mut state = self.lock();
         f(&mut state);
+        if state.has_input() {
+            state.open_wait = None;
+        }
         let waker = state.read_waker.take();
         drop(state);
         if let Some(waker) = waker {
@@ -278,7 +285,7 @@ impl AsyncBufRead for ActiveStdinRead<'_> {
                 return Poll::Ready(Ok(&this.buf[this.at..]));
             }
             let mut state = this.channel.lock();
-            if state.answer.is_none() && state.sent.is_empty() && !state.stream_ended {
+            if !state.has_input() {
                 if state.open_wait.is_none() {
                     state.waits_started += 1;
                     state.open_wait = Some(state.waits_started);

@@ -984,8 +984,9 @@ fn ending_the_stream_ends_every_later_read() {
         let host = async {
             feed.wait_for_request().await;
             feed.send("last\n");
-            feed.wait_for_request().await;
+            let request = feed.wait_for_request().await;
             feed.end();
+            assert!(!request.dismiss());
             feed.send("ignored\n");
         };
         tokio::join!(session.eval("[io.stdin.read_line()?, io.stdin.read_line()?]"), host)
