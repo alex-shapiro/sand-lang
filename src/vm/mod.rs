@@ -76,8 +76,8 @@ pub enum WaitKind {
 
 /// A suspended native call: the pending future and its [`WaitKind`].
 pub struct Suspension {
-    pub future: BoxFuture,
-    pub wait_kind: WaitKind,
+    pub(crate) future: BoxFuture,
+    pub(crate) wait_kind: WaitKind,
 }
 
 /// What a [`Ctl`] is.
