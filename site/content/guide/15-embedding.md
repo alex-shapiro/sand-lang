@@ -83,7 +83,7 @@ let report = files.read("/out/report.txt")?;
 ```
 
 - **Policy.** `RulePolicy` has `allow_`, `deny_`, and `prompt_` builder methods for each capability kind, such as `allow_read`, `deny_net`, and `prompt_write`. Each builder method takes typed patterns, so it cannot fail:
-  - `PathPattern` is the pattern of a file rule. It must be absolute or start with `**`, because a builder has no base directory. `PathPattern::literal` makes a pattern that matches a host path literally. `PathPattern::from(AbsolutePath::new("/srv"))` makes a pattern from a fixed directory in a `const`. A relative `AbsolutePath` is a compile error.
+  - `PathPattern` is the pattern of a file rule. It must be absolute or start with `**`, because a builder has no base directory. `PathPattern::literal` makes a pattern that matches a host path literally. For a fixed directory, write `const SRV: AbsolutePath = AbsolutePath::new("/srv");` and use `PathPattern::from(SRV)`. In a `const`, a relative path is a compile error.
   - `NetPattern` is the host of a `net` rule, `UrlPattern` is the URL of an `http` rule, and `ListenPattern` is the address of a `listen` rule.
   - `NamePattern` is the variable name of an `env` rule. `NamePattern::exact` makes a pattern without wildcards.
   - `Transports` sets the connections that a `net` or `http` rule controls: `Tls`, `Plaintext`, or `Both`.
