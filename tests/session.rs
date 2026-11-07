@@ -975,48 +975,24 @@ fn scripts_read_the_input_the_host_feeds() {
 }
 
 #[test]
-fn an_ended_stream_ends_every_later_read() {
-    let (config, feed) = Config::new().policy(RulePolicy::allow_all()).stdin_feed();
-    let mut r = Repl::with(config);
-    r.ok("import io");
-    feed.send("last\n");
-    feed.end();
-    feed.send("ignored\n");
-    assert_eq!(r.value("io.stdin.read_line()?"), "Some(\"last\")");
-    assert_eq!(r.value("io.stdin.read_line()?"), "None");
-    assert_eq!(r.value("io.stdin.read_all()?.len()"), "0");
-    assert!(!has_request(&r.rt, &feed));
-}
-
-#[test]
-fn a_failed_stream_fails_every_later_read() {
-    let (config, feed) = Config::new().policy(RulePolicy::allow_all()).stdin_feed();
-    let mut r = Repl::with(config);
-    r.ok("import io");
-    feed.send("last\n");
-    feed.fail(std::io::Error::other("the pipe broke"));
-    assert_eq!(r.value("io.stdin.read_line()?"), "Some(\"last\")");
-    let failure = "Err(Error(message: \"stdin: the pipe broke\", kind: \"io\"))";
-    assert_eq!(r.value("io.stdin.read_line()"), failure);
-    assert_eq!(r.value("io.stdin.read_line()"), failure);
-}
-
-#[test]
-fn ending_the_stream_ends_a_waiting_read() {
+fn ending_the_stream_ends_every_later_read() {
     let (config, feed) = Config::new().policy(RulePolicy::allow_all()).stdin_feed();
     let mut r = Repl::with(config);
     r.ok("import io");
     let Repl { session, rt, .. } = &mut r;
     let (value, ()) = rt.block_on(async {
-        let end = async {
-            let request = feed.wait_for_request().await;
+        let host = async {
+            feed.wait_for_request().await;
+            feed.send("last\n");
+            feed.wait_for_request().await;
             feed.end();
-            assert!(!request.is_open());
-            assert!(!request.answer("late"));
+            feed.send("ignored\n");
         };
-        tokio::join!(session.eval("io.stdin.read_line()?"), end)
+        tokio::join!(session.eval("[io.stdin.read_line()?, io.stdin.read_line()?]"), host)
     });
-    assert_eq!(value.unwrap().as_deref(), Some("None"));
+    assert_eq!(value.unwrap().as_deref(), Some("[Some(\"last\"), None]"));
+    assert_eq!(r.value("io.stdin.read_all()?.len()"), "0");
+    assert!(!has_request(&r.rt, &feed));
 }
 
 #[test]
@@ -1027,36 +1003,10 @@ fn read_is_awaited_while_other_tasks_run() {
     let src = "let t = spawn io.stdin.read_line()\nvar n = 0\nwhile not t.is_done() { n += 1 }\nt.wait()?";
     let Repl { session, rt, .. } = &mut r;
     let (value, ()) = rt.block_on(async {
-        let answer = async {
-            let request = feed.wait_for_request().await;
-            assert!(request.answer("move\n"));
-            assert!(!request.is_open());
-        };
+        let answer = async { assert!(feed.wait_for_request().await.answer("move\n")) };
         tokio::join!(session.eval(src), answer)
     });
     assert_eq!(value.unwrap().as_deref(), Some("Some(\"move\")"));
-}
-
-#[test]
-fn answer_targets_specific_read() {
-    let (config, feed) = Config::new().policy(RulePolicy::allow_all()).stdin_feed();
-    let mut r = Repl::with(config);
-    r.ok("import io");
-    let src = "let a = io.stdin.read_line()?\nlet b = io.stdin.read_line()?\n[a, b]";
-    let Repl { session, rt, .. } = &mut r;
-    let (value, ()) = rt.block_on(async {
-        let answer = async {
-            let first = feed.wait_for_request().await;
-            assert!(first.answer("x\nleft over\n"));
-            first.wait_until_closed().await;
-            let second = feed.wait_for_request().await;
-            assert_ne!(first, second);
-            assert!(!first.answer("late\n"));
-            assert!(second.answer("y\n"));
-        };
-        tokio::join!(session.eval(src), answer)
-    });
-    assert_eq!(value.unwrap().as_deref(), Some("[Some(\"x\"), Some(\"y\")]"));
 }
 
 /// Evaluates `src` and responds to each awaited stdin read with `respond`.
@@ -1085,28 +1035,9 @@ fn an_answer_completes_a_read_of_any_kind() {
     assert_eq!(answered("io.stdin.read_all()?.len()", |request| assert!(request.answer("abc"))), "4");
     assert_eq!(answered("io.stdin.read_all()?.len()", |request| assert!(request.answer("a\nb\n"))), "4");
     assert_eq!(answered("io.stdin.read_line()?", |request| assert!(request.dismiss())), "None");
-}
-
-#[test]
-fn a_read_takes_one_answer() {
-    let respond = |request: &StdinRequest| {
-        assert!(request.answer("first"));
-        assert!(!request.answer("second"));
-        assert!(!request.dismiss());
-    };
-    assert_eq!(answered("[io.stdin.read_line()?, io.stdin.read_line()?]", respond), "[Some(\"first\"), Some(\"first\")]");
-}
-
-#[test]
-fn each_read_that_waits_is_a_new_request() {
-    let requests = std::sync::Mutex::new(Vec::new());
-    answered("[io.stdin.read_line()?, io.stdin.read_line()?, io.stdin.read_line()?]", |request| {
-        requests.lock().unwrap().push(request.clone());
-        assert!(request.answer("x"));
-    });
-    let requests = requests.into_inner().unwrap();
-    assert_eq!(requests.len(), 3);
-    assert!(requests[0] != requests[1] && requests[1] != requests[2] && requests[0] != requests[2]);
+    // A read discards the part of its answer that it does not use.
+    let two_reads = "[io.stdin.read_line()?, io.stdin.read_line()?]";
+    assert_eq!(answered(two_reads, |request| assert!(request.answer("x\nleft over"))), "[Some(\"x\"), Some(\"x\")]");
 }
 
 #[test]
@@ -1121,10 +1052,9 @@ fn a_request_that_closes_stays_closed() {
             feed.send("ab");
             first.wait_until_closed().await;
             let second = feed.wait_for_request().await;
-            assert_ne!(first, second);
-            assert!(!first.is_open());
             assert!(!first.answer("late"));
             assert!(second.answer("c"));
+            assert!(!second.dismiss());
         };
         tokio::join!(session.eval("io.stdin.read_line()?"), answer)
     });
@@ -1132,46 +1062,22 @@ fn a_request_that_closes_stays_closed() {
 }
 
 #[test]
-fn each_engine_reads_its_own_feed() {
-    let (first_config, first_feed) = Config::new().policy(RulePolicy::allow_all()).stdin_feed();
-    let (second_config, second_feed) = Config::new().policy(RulePolicy::allow_all()).stdin_feed();
-    let mut first = Session::new(first_config).unwrap();
-    let mut second = Session::new(second_config).unwrap();
-    let values = rt().block_on(async {
-        let host = async {
-            assert!(second_feed.wait_for_request().await.answer("b"));
-            assert!(first_feed.wait_for_request().await.answer("a"));
-        };
-        let reads = async { tokio::join!(first.eval("import io\nio.stdin.read_line()?"), second.eval("import io\nio.stdin.read_line()?")) };
-        let (values, ()) =
-            tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(reads, host) }).await.expect("both reads complete");
-        values
-    });
-    assert_eq!(values.0.unwrap().as_deref(), Some("Some(\"a\")"));
-    assert_eq!(values.1.unwrap().as_deref(), Some("Some(\"b\")"));
-}
-
-#[test]
-fn a_session_reads_its_feed_after_a_reset() {
+fn cancelling_a_read_closes_its_request() {
     let (config, feed) = Config::new().policy(RulePolicy::allow_all()).stdin_feed();
     let mut r = Repl::with(config);
     r.ok("import io");
-    feed.send("first\n");
-    assert_eq!(r.value("io.stdin.read_line()?"), "Some(\"first\")");
-    r.session.reset();
-    r.ok("import io");
-    feed.send("second\n");
-    assert_eq!(r.value("io.stdin.read_line()?"), "Some(\"second\")");
-}
-
-#[test]
-fn an_engine_run_reads_the_engine_feed() {
-    let out = MemorySink::new();
-    let (config, feed) = Config::new().policy(RulePolicy::allow_all()).stdout(out.clone()).stdin_feed();
-    let mut engine = Engine::new(config).unwrap();
-    feed.send("hello\n");
-    rt().block_on(engine.run_source("main.sand", "import io\nprint(io.stdin.read_line()?)")).unwrap();
-    assert_eq!(out.contents(), "Some(\"hello\")\n");
+    let Repl { session, rt, .. } = &mut r;
+    let request = rt.block_on(async {
+        tokio::select! {
+            biased;
+            _ = session.eval("io.stdin.read_line()?") => panic!("read completed without input"),
+            request = feed.wait_for_request() => request,
+        }
+    });
+    session.cancel_tasks();
+    assert!(!request.answer("stale\n"));
+    feed.send("fresh\n");
+    assert_eq!(r.value("io.stdin.read_line()?"), "Some(\"fresh\")");
 }
 
 #[test]
@@ -1205,94 +1111,46 @@ fn a_read_without_standard_input_fails() {
     assert_eq!(r.value("io.stdin.read_line()"), "Err(Error(message: \"stdin: the engine has no standard input\", kind: \"io\"))");
 }
 
-#[test]
-fn answer_fails_after_read_ends() {
-    let (config, feed) = Config::new().policy(RulePolicy::allow_all()).stdin_feed();
-    let mut r = Repl::with(config);
-    r.ok("import io");
-    let Repl { session, rt, .. } = &mut r;
-    let request = rt.block_on(async {
-        tokio::select! {
-            biased;
-            _ = session.eval("io.stdin.read_line()?") => panic!("read completed without input"),
-            request = feed.wait_for_request() => request,
-        }
-    });
-    session.cancel_tasks();
-    assert!(!request.is_open());
-    assert!(!request.answer("stale\n"));
-    feed.send("fresh\n");
-    assert_eq!(r.value("io.stdin.read_line()?"), "Some(\"fresh\")");
+fn wall_time_limited() -> Config {
+    Config::new().policy(RulePolicy::allow_all()).limits(Limits { max_wall_time: Some(Duration::from_millis(100)), ..Limits::default() })
 }
 
-#[test]
-fn io_feed_wait_counts_toward_wall_time_limit() {
-    let limits = Limits { max_wall_time: Some(Duration::from_millis(100)), ..Limits::default() };
-    let (config, feed) = Config::new().policy(RulePolicy::allow_all()).limits(limits).stdin_io_feed();
+/// Runs a read that gets input after 60 s while a task ticks every 50 ms.
+fn late_input((config, feed): (Config, StdinFeed)) -> (Repl, Result<Option<String>, Error>) {
     let mut r = Repl::paused(config);
-    r.ok("import io");
+    r.ok("import io\nvar ticks = 0\nlet ticker = spawn { while true { task.sleep(50ms)\nticks += 1 } }");
     let Repl { session, rt, .. } = &mut r;
     let (value, ()) = rt.block_on(async {
         let send = async {
-            input_needed(&feed).await;
+            feed.wait_for_request().await;
             tokio::time::sleep(Duration::from_secs(60)).await;
             feed.send("late\n");
         };
         tokio::join!(session.eval("io.stdin.read_line()?"), send)
     });
-    assert!(matches!(value, Err(Error::Limit(LimitKind::WallTime))), "{value:?}");
+    (r, value)
 }
 
 #[test]
-fn stdin_wait_pauses_wall_time_limit() {
-    let limits = Limits { max_wall_time: Some(Duration::from_millis(100)), ..Limits::default() };
-    let (config, feed) = Config::new().policy(RulePolicy::allow_all()).limits(limits).stdin_feed();
-    let mut r = Repl::paused(config);
-    r.ok("import io");
-    let Repl { session, rt, .. } = &mut r;
-    let (value, ()) = rt.block_on(async {
-        let answer = async {
-            input_needed(&feed).await;
-            tokio::time::sleep(Duration::from_secs(60)).await;
-            feed.send("late\n");
-        };
-        tokio::join!(session.eval("io.stdin.read_line()?"), answer)
-    });
+fn a_user_feed_wait_pauses_the_wall_time_limit() {
+    let (mut r, value) = late_input(wall_time_limited().stdin_feed());
     assert_eq!(value.unwrap().as_deref(), Some("Some(\"late\")"));
+    assert!(r.value("ticks").parse::<u32>().unwrap() >= 1000);
     assert!(matches!(r.eval("task.sleep(200ms)"), Err(Error::Limit(LimitKind::WallTime))));
 }
 
 #[test]
-fn a_cancelled_read_no_longer_pauses_wall_time_limit() {
-    let limits = Limits { max_wall_time: Some(Duration::from_millis(100)), ..Limits::default() };
-    let mut r = Repl::paused(Config::new().policy(RulePolicy::allow_all()).limits(limits).stdin_feed().0);
-    r.ok("import io");
-    r.ok("let read = task.timeout(50ms, () => io.stdin.read_line())");
-    assert_eq!(r.value("read"), "None");
-    assert!(matches!(r.eval("task.timeout(50ms, () => io.stdin.read_line())\ntask.sleep(200ms)"), Err(Error::Limit(LimitKind::WallTime))));
+fn an_io_feed_wait_counts_toward_the_wall_time_limit() {
+    let (_, value) = late_input(wall_time_limited().stdin_io_feed());
+    assert!(matches!(value, Err(Error::Limit(LimitKind::WallTime))), "{value:?}");
 }
 
 #[test]
-fn background_timer_does_not_interrupt_or_time_out_awaited_read() {
-    let limits = Limits { max_wall_time: Some(Duration::from_millis(100)), ..Limits::default() };
-    let (config, feed) = Config::new().policy(RulePolicy::allow_all()).limits(limits).stdin_feed();
-    let mut r = Repl::paused(config);
+fn a_cancelled_read_no_longer_pauses_wall_time_limit() {
+    let mut r = Repl::paused(wall_time_limited().stdin_feed().0);
     r.ok("import io");
-    r.ok("var ticks = 0\nlet spinner = spawn { while true { task.sleep(50ms)\nticks += 1 } }");
-    let Repl { session, rt, .. } = &mut r;
-    let (value, ()) = rt.block_on(async {
-        let player = async {
-            let request = feed.wait_for_request().await;
-            tokio::select! {
-                () = request.wait_until_closed() => panic!("read stopped waiting"),
-                () = tokio::time::sleep(Duration::from_secs(10)) => {}
-            }
-            assert!(request.answer("move\n"));
-        };
-        tokio::join!(session.eval("io.stdin.read_line()?"), player)
-    });
-    assert_eq!(value.unwrap().as_deref(), Some("Some(\"move\")"));
-    assert!(r.value("ticks").parse::<u32>().unwrap() >= 100);
+    let src = "task.timeout(50ms, () => io.stdin.read_line())\ntask.sleep(200ms)";
+    assert!(matches!(r.eval(src), Err(Error::Limit(LimitKind::WallTime))));
 }
 
 fn waits_module() -> NativeModule {

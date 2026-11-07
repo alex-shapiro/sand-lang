@@ -341,35 +341,31 @@ pub(crate) enum StdinSource {
     Host(crate::stdin_feed::StdinFeedReader),
 }
 
-/// Standard input for a VM and its [`WaitKind`]. Clones share the source.
+/// Standard input for a VM. Clones share the source.
 #[derive(Clone)]
 pub(crate) struct VmStdin {
-    source: Arc<tokio::sync::Mutex<StdinSource>>,
-    idle_signal: Option<crate::stdin_feed::StdinIdleSignal>,
-    wait_kind: WaitKind,
+    pub(crate) source: Arc<tokio::sync::Mutex<StdinSource>>,
+    /// The channel of a [`StdinSource::Host`] source.
+    feed: Option<Arc<crate::stdin_feed::StdinChannel>>,
 }
 
 impl VmStdin {
     pub(crate) fn new(source: StdinSource) -> VmStdin {
-        let (idle_signal, wait_kind) = match &source {
-            StdinSource::Host(reader) => (Some(reader.idle_signal()), reader.wait_kind()),
-            StdinSource::None | StdinSource::Bytes(_) => (None, WaitKind::Io),
+        let feed = match &source {
+            StdinSource::Host(reader) => Some(reader.channel.clone()),
+            StdinSource::None | StdinSource::Bytes(_) => None,
         };
-        VmStdin { source: Arc::new(tokio::sync::Mutex::new(source)), idle_signal, wait_kind }
-    }
-
-    pub(crate) fn source(&self) -> &Arc<tokio::sync::Mutex<StdinSource>> {
-        &self.source
-    }
-
-    /// Returns the idle signal for [`StdinSource::Host`], if configured.
-    pub(crate) fn idle_signal(&self) -> Option<&crate::stdin_feed::StdinIdleSignal> {
-        self.idle_signal.as_ref()
+        VmStdin { source: Arc::new(tokio::sync::Mutex::new(source)), feed }
     }
 
     /// Returns the [`WaitKind`] for reads from this input.
     pub(crate) fn wait_kind(&self) -> WaitKind {
-        self.wait_kind
+        self.feed.as_ref().map_or(WaitKind::Io, |feed| feed.wait_kind)
+    }
+
+    /// Marks the engine as idle for a host feed until the guard is dropped.
+    pub(crate) fn idle(&self) -> Option<crate::stdin_feed::StdinIdleGuard> {
+        self.feed.clone().map(crate::stdin_feed::StdinIdleGuard::new)
     }
 }
 

@@ -111,7 +111,7 @@ fn read_stdin<R: IntoValue + Send + 'static>(
     {
         return Ok(Later::ready(done(vm, data)));
     }
-    let stdin = vm.host.stdin.source().clone();
+    let stdin = vm.host.stdin.source.clone();
     // The input is buffered outside the heap until it is complete.
     let mut res = match what {
         Read::Upto(max) => vm.reserve_io(max.min(STDIN_CHUNK))?,
@@ -136,10 +136,9 @@ const STDIN_CHUNK: usize = 64 << 10;
 
 /// The next line of standard input without its terminator (`Some(None)` at
 /// the end), if it is in a buffer already; `None`, consuming nothing, if the
-/// read must wait or fail, another is under way, or the line does not fit in
-/// memory.
+/// read must wait, another is under way, or the line does not fit in memory.
 fn buffered_line(vm: &Vm) -> Option<Option<Vec<u8>>> {
-    let mut source = vm.host.stdin.source().try_lock().ok()?;
+    let mut source = vm.host.stdin.source.try_lock().ok()?;
     match &mut *source {
         StdinSource::None => None,
         StdinSource::Bytes(c) => {
@@ -150,7 +149,7 @@ fn buffered_line(vm: &Vm) -> Option<Option<Vec<u8>>> {
         }
         StdinSource::Host(r) => {
             let mut read = r.begin_read();
-            let (buf, at_end) = read.available().ok()?;
+            let (buf, at_end) = read.available();
             let line = BufferedLine::find(vm, buf, at_end)?;
             std::pin::Pin::new(&mut read).consume(line.len);
             Some(line.text)

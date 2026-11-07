@@ -2026,14 +2026,14 @@ A host gives input in one of two ways:
 - As a stream, for a terminal or a pipe. `StdinFeed::send` adds bytes to the
   input. Bytes that one read does not use stay for the next read.
   `StdinFeed::end` ends the stream: after the reads take the queued bytes,
-  every read gets an end of input without a wait. `StdinFeed::fail(error)`
-  ends the stream with an error, so every later read fails with `error`.
+  every read gets an end of input without a wait.
 - As one answer to one read, for an input field in an app.
   `StdinRequest::answer(data)` gives the read `data`, a trailing newline if
   `data` lacks one, and an end of input, so that a read of any kind completes.
   `StdinRequest::dismiss()` gives the read only an end of input, so
-  `read_line` returns `None` if the read has no data yet. Each read accepts at
-  most one answer; both methods return `false` if the read is already closed.
+  `read_line` returns `None` if the read has no data yet. Each request accepts
+  at most one answer; both methods return `false` if the request is already
+  closed.
   When the read finishes, the engine discards the part of the answer that it
   did not use.
 

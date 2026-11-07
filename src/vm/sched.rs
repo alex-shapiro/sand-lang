@@ -4,7 +4,6 @@ use super::interp::Exit;
 use super::*;
 use crate::LimitKind;
 use crate::platform::{ClockFuture, Instant};
-use crate::stdin_feed::StdinIdleSignal;
 use std::sync::atomic::Ordering;
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
@@ -532,7 +531,7 @@ impl Vm {
                 return Ok(Stop::Idle);
             }
             timer.read();
-            let idle = self.host.stdin.idle_signal().map(StdinIdleSignal::idle);
+            let idle = self.host.stdin.idle();
             let pause_start = self.io.awaits_user().then_some(timer.now);
             let mut sleep = self.deadline.filter(|_| pause_start.is_none()).map(|d| timer.sleep(d.saturating_duration_since(timer.now())));
             let interrupt = self.host.interrupt.clone();
