@@ -80,7 +80,7 @@ RUN, TEST AND REPL OPTIONS:
     --max-cpu=DURATION       CPU time limit
     --max-instructions=N     instruction fuel limit
     --max-compile-fuel=N     type-checking work limit; defaults to 10000000
-    --max-NAME=VALUE         any `limit NAME VALUE` of a policy file, e.g.
+    --max-NAME=VALUE         any `limit NAME VALUE` in a policy file, e.g.
                              --max-output=1M --max-call-depth=200 --max-time=none
     --seed=N                 seed the random number generator
 ";

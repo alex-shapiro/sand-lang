@@ -70,9 +70,9 @@ Source commits: `464b03a`, `c5ca2d7`, `b111b33`, `335ae8b`, `89186fa`, `265e762`
 ### 3. Rule and limit positions in policy
 
 `PolicyFile::rule_directives` gives the position, decision, and capability of
-each rule line. `PolicyFile::limit_directives` gives the position and typed
-value of each `limit` directive. `PolicyFile::apply_limits` applies them to the
-limits of the caller.
+each rule line. `PolicyFile::limit_directives` gives the position and value of
+each `limit` directive. `PolicyFile::apply_limits` applies them to the limits of
+the caller.
 
 Source commit: `d4a2e5c`. Skip `HostPattern` from `d859942`, because `d4a2e5c`
 removes it.

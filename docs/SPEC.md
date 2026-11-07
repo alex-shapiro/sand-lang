@@ -1682,16 +1682,15 @@ a private, loopback, link-local, or other non-public range.
 
 A policy file uses the `.policy` extension. It declares authorization rules and
 resource limits in a line-oriented text format. Pass a policy file to the CLI
-with `sand run --policy=FILE`, as described in §17.5. In Rust, call
-`sandlang::policy::file::PolicyFile::parse(text, base, home)` to obtain a
-`PolicyFile`. A parsed `PolicyFile` contains only the rules and limits from the
-file. Call `file.rules.with_defaults(RulePolicy::standard())` to append default
-rules. Call `file.apply_limits(defaults)` to apply the `limit` directives to
-default limits. `PolicyFile::rule_directives` gives the line, column, decision,
-and capability of each rule. `PolicyFile::limit_directives` gives the line,
-column, and value of each `limit` directive. A host that supports only some
-capabilities or limit values uses them to reject a file at the position of the
-directive.
+with `sand run --policy=FILE` (§17.5). In Rust, parse a policy file with
+`sandlang::policy::file::PolicyFile::parse(text, base, home)`. A parsed
+`PolicyFile` contains only the rules and limits from the file. Call
+`file.rules.with_defaults(RulePolicy::standard())` to append default rules. Call
+`file.apply_limits(defaults)` to apply the `limit` directives to default limits.
+`PolicyFile::rule_directives` gives the line, column, decision, and capability
+of each rule. `PolicyFile::limit_directives` gives the line, column, and value
+of each `limit` directive. A host can inspect these directives to reject an
+unsupported capability or limit at its position in the file.
 
 Each line in a policy file is an independent statement. `#` starts a comment
 that extends to the end of the line. Spaces or commas separate words. Double
@@ -1768,11 +1767,11 @@ reference other sets.
 - `instructions`, `compile-fuel`, `tasks`, `call-depth`, and `open-resources` accept integer counts such as `1_000_000`.
 - `none` or `unlimited` removes the limit for `memory`, `time`, `cpu`, `instructions`, `compile-fuel`, or `output`.
 
-`apply_limits` applies the `limit` directives in file order, so a later
-directive overrides an earlier directive for the same limit. Limits that the
-file does not set keep the value that the host gives. The parser rejects any
-policy file that contains a syntax or validation error and reports the 1-based
-line and column on `PolicyError`.
+`apply_limits` applies the `limit` directives in file order. A later directive
+overrides an earlier directive for the same limit. Limits that the file does not
+set keep the values from the host. The parser rejects a policy file that
+contains a syntax or validation error. Each `PolicyError` reports a 1-based line
+and column.
 
 `sand fmt`, `sand lint`, and `sand check` in §17 support `.policy` files.
 `sandlang::policy::format::format_policy` formats a policy file:
@@ -2508,11 +2507,10 @@ explicit `--deny` or `--prompt` flags still take precedence; for example,
 `--allow-all --prompt='write **'` prompts before every file write. `--no-prompt`
 disables interactive prompts and denies any request that evaluates to `Prompt`.
 
-Limit options: `--max-NAME=VALUE` sets a limit with the same name and value
-syntax as the policy directive `limit NAME VALUE` (§14.7), for example
-`--max-memory=256M`, `--max-time=10s`, or `--max-instructions=none`.
-`--seed=N` sets the PRNG seed. Options that take a value accept either
-`--opt=VALUE` or `--opt VALUE`.
+`--max-NAME=VALUE` sets a resource limit with the same name and value syntax as
+`limit NAME VALUE` (§14.7), such as `--max-memory=256M`, `--max-time=10s`, or
+`--max-instructions=none`. `--seed=N` sets the PRNG seed. Options that take a
+value accept either `--opt=VALUE` or `--opt VALUE`.
 
 Arguments after `--` and positional arguments after `FILE` are passed to the
 script in `env.args()`. Exit codes: the script's exit code, clamped to 255 if
