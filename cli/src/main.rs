@@ -446,7 +446,7 @@ fn cmd_run(args: &[String]) -> Result<u8, String> {
     let (config, stdin_feed) = opts.config();
     let mut engine = Engine::new(config.exit_after_run(true)).map_err(|e| e.render())?;
     let rt = runtime()?;
-    let mut stdin = ProcessStdin::new(tokio::io::stdin());
+    let mut stdin = process_stdin();
     let r = rt.block_on(with_stdin_forwarded(&mut stdin, &stdin_feed, engine.run_file(&file)));
     // A read of the process's standard input cannot be cancelled; do not wait for it.
     rt.shutdown_background();
@@ -463,6 +463,14 @@ fn cmd_run(args: &[String]) -> Result<u8, String> {
 /// one reader, so that the next run gets the result of a read that the
 /// previous run left in progress.
 type ProcessStdin = tokio::io::BufReader<tokio::io::Stdin>;
+
+fn process_stdin() -> ProcessStdin {
+    tokio::io::BufReader::with_capacity(PROCESS_STDIN_BUFFER, tokio::io::stdin())
+}
+
+/// The buffer size of [`ProcessStdin`]. Each refill of the buffer waits for a
+/// script read, so a small buffer makes large inputs slow.
+const PROCESS_STDIN_BUFFER: usize = 256 << 10;
 
 /// Awaits `run` while it forwards `stdin` to `feed`.
 async fn with_stdin_forwarded<T>(stdin: &mut ProcessStdin, feed: &StdinFeed, run: impl Future<Output = T>) -> T {
@@ -645,7 +653,7 @@ fn cmd_test(args: &[String]) -> Result<u8, String> {
         return Err("missing FILE".into());
     }
     let rt = runtime()?;
-    let mut stdin = ProcessStdin::new(tokio::io::stdin());
+    let mut stdin = process_stdin();
     let mut failed = 0;
     for f in &files {
         let (config, stdin_feed) = opts.config();
