@@ -36,17 +36,10 @@ pub(crate) fn suspend<T: Send + 'static, R: IntoValue + Send + 'static>(
     fut: impl Future<Output = Result<T, IoFailure>> + Send + 'static,
     ok: impl FnOnce(&mut Vm, T) -> Result<R, HostError> + Send + 'static,
 ) -> Suspended<R> {
-    Ok(Later::new(wait_kind, settle(fut, ok)))
-}
-
-/// Awaits `fut` and returns a closure that runs `ok` with the result on the VM
-/// thread.
-async fn settle<T, R>(
-    fut: impl Future<Output = Result<T, IoFailure>>,
-    ok: impl FnOnce(&mut Vm, T) -> Result<R, HostError>,
-) -> impl FnOnce(&mut Vm) -> Result<R, HostError> {
-    let r = fut.await;
-    move |vm: &mut Vm| ok(vm, r?)
+    Ok(Later::new(wait_kind, async move {
+        let r = fut.await;
+        move |vm: &mut Vm| ok(vm, r?)
+    }))
 }
 
 impl From<MemoryLimit> for IoFailure {
