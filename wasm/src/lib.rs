@@ -46,7 +46,7 @@ export interface EngineOptions {
   env?: Record<string, string>;
   /** Arguments (`env.args()`). */
   args?: string[];
-  /** Standard input (as the policy allows). */
+  /** Standard input (as the policy allows). Without it, a read of standard input fails with kind `"io"`. */
   stdin?: string;
   /** Seeds the random number generator, for reproducible runs. */
   seed?: number;

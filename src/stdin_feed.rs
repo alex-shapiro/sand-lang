@@ -156,9 +156,9 @@ impl StdinRequest {
         self.channel.wait_until(|state| (state.open_wait() != Some(wait)).then_some(())).await;
     }
 
-    /// Waits until no other task of the script can run while the read waits,
-    /// as a host needs that shares a terminal with the script. Returns `false`
-    /// if the read closes first.
+    /// Waits until no other task of the script can run while the read waits.
+    /// A host that shares a terminal with the script waits for this before it
+    /// reads the terminal. Returns `false` if the read closes first.
     pub async fn wait_until_nothing_else_runs(&self) -> bool {
         let wait = self.wait;
         self.channel

@@ -1,4 +1,4 @@
-//! Tests of REPL sessions (`Engine::session`): incremental checking and a
+//! Tests of REPL sessions (`Session::new`): incremental checking and a
 //! persistent VM.
 // Helpers of the tests that need the host (feature `os`) are unused without it.
 #![cfg_attr(not(feature = "os"), allow(unused_imports, dead_code))]
