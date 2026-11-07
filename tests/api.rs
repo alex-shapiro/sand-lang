@@ -7,7 +7,8 @@ mod common;
 use common::{TempDir, rt, run_with};
 use jiff::civil::Date;
 use sandlang::engine::{
-    ArityError, Config, Engine, Error, FunctionError, HostModules, InterruptHandle, LimitKind, Limits, MemorySink, Outcome, Returned,
+    ArityError, Config, Engine, Error, FunctionError, HostModules, InterruptHandle, LimitKind, Limits, MemorySink, NoJournal, Outcome,
+    Returned, Run,
 };
 use sandlang::native::NativeModule;
 use sandlang::policy::rules::PathPattern;
@@ -22,17 +23,28 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-fn engine_with(config: Config) -> (Engine, MemorySink, MemorySink) {
-    let out = MemorySink::new();
-    let err = MemorySink::new();
-    let engine = Engine::new(config.stdout(out.clone()).stderr(err.clone()));
-    (engine, out, err)
+fn engine_with<C: Send + Sync + 'static>(config: Config<C>) -> (Engine<C>, MemorySink, MemorySink) {
+    (Engine::new(config), MemorySink::new(), MemorySink::new())
+}
+
+/// The values of a run whose standard output goes to `out` and whose standard error goes to `err`.
+fn to(out: &MemorySink, err: &MemorySink) -> Run {
+    Run::new().stdout(out.clone()).stderr(err.clone())
 }
 
 fn run_src(config: Config, src: &str) -> (Result<sandlang::engine::Outcome, Error>, String, String) {
+    run_src_in(config, |r| r, src)
+}
+
+/// Like [`run_src`], with the values of the run set by `values`.
+fn run_src_in<C: Send + Sync + 'static>(
+    config: Config<C>,
+    values: impl FnOnce(Run) -> Run<NoJournal, C>,
+    src: &str,
+) -> (Result<sandlang::engine::Outcome, Error>, String, String) {
     let (out, err) = (MemorySink::new(), MemorySink::new());
-    let mut engine = Engine::new(config.stdout(out.clone()).stderr(err.clone()));
-    let r = rt().block_on(engine.run_source("main.sand", src));
+    let mut engine = Engine::new(config);
+    let r = rt().block_on(engine.run_source("main.sand", src, values(to(&out, &err))));
     (r, out.contents(), err.contents())
 }
 
@@ -53,7 +65,7 @@ fn engine_and_run_future_are_send() {
     fn assert_send<T: Send>(_: &T) {}
     let mut engine = Engine::new(Config::new());
     assert_send(&engine);
-    let fut = engine.run_source("main.sand", "print(1)");
+    let fut = engine.run_source("main.sand", "print(1)", Run::new());
     assert_send(&fut);
 }
 
@@ -210,10 +222,10 @@ fn init_frames_are_named_after_their_type() {
 
 #[test]
 fn engine_can_run_multiple_sources_independently() {
-    let (mut engine, out, _) = engine_with(Config::new());
+    let (mut engine, out, err) = engine_with(Config::new());
     let rt = rt();
-    rt.block_on(engine.run_source("a.sand", "var x = 1\nprint(x)")).unwrap();
-    rt.block_on(engine.run_source("b.sand", "print(2)")).unwrap();
+    rt.block_on(engine.run_source("a.sand", "var x = 1\nprint(x)", to(&out, &err))).unwrap();
+    rt.block_on(engine.run_source("b.sand", "print(2)", to(&out, &err))).unwrap();
     assert_eq!(out.contents(), "1\n2\n");
 }
 
@@ -2087,8 +2099,13 @@ fn native_module_capability_prompts() {
     let prompter = ScriptedPrompter::new(&[PromptAnswer::AllowOnce, PromptAnswer::DenyOnce]);
     let policy = |cap: &Capability| if matches!(cap, Capability::Custom { .. }) { Decision::Prompt } else { Decision::Allow };
     let out = MemorySink::new();
-    let mut engine = Engine::new(prompter.config(policy).host_modules(HostModules::new([m]).unwrap()).stdout(out.clone()));
-    rt().block_on(engine.run_source("main.sand", "import door\nprint(door.open(\"front\"))\nprint(door.open(\"back\"))")).unwrap();
+    let mut engine = Engine::new(prompter.config(policy).host_modules(HostModules::new([m]).unwrap()));
+    rt().block_on(engine.run_source(
+        "main.sand",
+        "import door\nprint(door.open(\"front\"))\nprint(door.open(\"back\"))",
+        Run::new().stdout(out.clone()),
+    ))
+    .unwrap();
     assert_eq!(
         out.contents(),
         "Ok(\"opened front\")\nErr(Error(message: \"permission denied: door back\", kind: \"permission_denied\"))\n"
@@ -2142,7 +2159,7 @@ fn log_records_go_to_the_host_sink() {
     let records = Arc::new(Mutex::new(Vec::<LogRecord>::new()));
     let r2 = records.clone();
     let policy = |cap: &Capability| if matches!(cap, Capability::Stderr) { Decision::Deny } else { Decision::Allow };
-    let config = Config::new().custom_policy(policy).log_sink(move |r: &LogRecord| r2.lock().unwrap().push(r.clone()));
+    let config = Config::new().custom_policy(policy);
     let src = r#"
 import log
 fn start(user: str) {
@@ -2156,7 +2173,7 @@ log.set_level(log.Level.Error)
 log.warn("hidden")
 log.error("failed")
 "#;
-    let (r, _, err) = run_src(config, src);
+    let (r, _, err) = run_src_in(config, |r| r.log_sink(move |r: &LogRecord| r2.lock().unwrap().push(r.clone())), src);
     r.unwrap();
     assert_eq!(err, "");
     let records = records.lock().unwrap();
@@ -2185,9 +2202,9 @@ fn log_sinks_select_levels() {
         }
     }
     let messages = Arc::new(Mutex::new(Vec::new()));
-    let config = Config::new().log_sink(WarnSink(messages.clone()));
+    let config = Config::new();
     let src = "import log\nlog.debug(\"d\")\nlog.info(\"i\")\nlog.warn(\"w\")\nlog.disable()\nlog.error(\"e\")";
-    let (r, _, _) = run_src(config, src);
+    let (r, _, _) = run_src_in(config, |r| r.log_sink(WarnSink(messages.clone())), src);
     r.unwrap();
     assert_eq!(*messages.lock().unwrap(), ["w"]);
 }
@@ -2212,10 +2229,12 @@ fn log_records_are_dropped_if_stderr_is_denied() {
 fn log_records_count_against_the_output_limit() {
     let count = Arc::new(AtomicUsize::new(0));
     let c2 = count.clone();
-    let config = Config::new()
-        .limits(Limits { max_output_bytes: Some(1000), ..Limits::default() })
-        .log_sink(move |_: &LogRecord| _ = c2.fetch_add(1, Ordering::Relaxed));
-    let (r, _, _) = run_src(config, "import log\nfor i in 0..1000 { log.info(\"record\", fields: [\"i\": \"\\(i)\"]) }");
+    let config = Config::new().limits(Limits { max_output_bytes: Some(1000), ..Limits::default() });
+    let (r, _, _) = run_src_in(
+        config,
+        |r| r.log_sink(move |_: &LogRecord| _ = c2.fetch_add(1, Ordering::Relaxed)),
+        "import log\nfor i in 0..1000 { log.info(\"record\", fields: [\"i\": \"\\(i)\"]) }",
+    );
     assert!(matches!(r, Err(Error::Limit(LimitKind::Output))), "{r:?}");
     let n = count.load(Ordering::Relaxed);
     assert!(n > 50 && n < 125, "{n}");
@@ -2389,7 +2408,7 @@ fn denied_import_is_a_compile_error() {
     let main = dir.write("main.sand", "import \"./lib.sand\"\nprint(lib.X)");
     let policy = |cap: &Capability| if matches!(cap, Capability::Import(_)) { Decision::Deny } else { Decision::Allow };
     let mut engine = Engine::new(Config::new().custom_policy(policy));
-    match rt().block_on(engine.run_file(&main)) {
+    match rt().block_on(engine.run_file(&main, Run::new())) {
         Err(Error::Compile(d)) => assert!(d[0].message.contains("permission denied"), "{d:?}"),
         other => panic!("{other:?}"),
     }
@@ -2403,7 +2422,7 @@ fn unallowed_import_reports_the_missing_rule() {
     let main = dir.write("main.sand", "import \"./lib/util.sand\"\nprint(util.X)");
     let lib = sandlang::policy::normalize_path(&dir.path().join("lib"));
     let mut engine = Engine::new(Config::new());
-    match rt().block_on(engine.run_file(&main)) {
+    match rt().block_on(engine.run_file(&main, Run::new())) {
         Err(Error::Compile(d)) => assert_eq!(
             d[0].message,
             format!(
@@ -2416,13 +2435,13 @@ fn unallowed_import_reports_the_missing_rule() {
     let mut engine = Engine::new(
         Config::new().policy(sandlang::policy::rules::RulePolicy::standard().allow_import(PathPattern::literal(&lib).unwrap())),
     );
-    rt().block_on(engine.run_file(&main)).unwrap();
+    rt().block_on(engine.run_file(&main, Run::new())).unwrap();
     let util = lib.join("util.sand");
     let policy = sandlang::policy::rules::RulePolicy::standard()
         .allow_import(PathPattern::literal(&lib).unwrap())
         .prompt_import(PathPattern::literal(&util).unwrap());
     let mut engine = Engine::new(Config::new().policy(policy));
-    match rt().block_on(engine.run_file(&main)) {
+    match rt().block_on(engine.run_file(&main, Run::new())) {
         Err(Error::Compile(d)) => assert_eq!(
             d[0].message,
             format!(
@@ -2541,7 +2560,7 @@ impl ScriptedPrompter {
     }
     fn base(&self) -> Config {
         let p = self.clone();
-        Config::new().stdout(MemorySink::new()).prompter(move |cap: Capability| {
+        Config::new().prompter(move |cap: Capability| {
             p.asked.lock().unwrap().push(cap);
             let mut answers = p.answers.lock().unwrap();
             let answer = if answers.is_empty() { PromptAnswer::DenyOnce } else { answers.remove(0) };
@@ -2575,9 +2594,9 @@ fn import_prompt_allow_once_asks_on_every_compile() {
     let main = dir.write("main.sand", "import \"./lib.sand\"\nprint(lib.X)");
     let prompter = ScriptedPrompter::new(&[PromptAnswer::AllowOnce, PromptAnswer::AllowOnce]);
     let mut engine = Engine::new(prompter.config(prompt_for_imports()));
-    rt().block_on(engine.run_file(&main)).unwrap();
+    rt().block_on(engine.run_file(&main, Run::new())).unwrap();
     assert_eq!(prompter.asked(), vec![import_cap(&dir, "lib.sand")]);
-    rt().block_on(engine.run_file(&main)).unwrap();
+    rt().block_on(engine.run_file(&main, Run::new())).unwrap();
     assert_eq!(prompter.asked(), vec![import_cap(&dir, "lib.sand")]);
 }
 
@@ -2589,20 +2608,20 @@ fn import_prompt_allow_always_is_remembered_by_the_engine() {
     let main = dir.write("main.sand", "import \"./lib.sand\"\nprint(lib.X)");
     let prompter = ScriptedPrompter::new(&[PromptAnswer::AllowAlways]);
     let mut engine = Engine::new(prompter.config(prompt_for_imports()));
-    rt().block_on(engine.run_file(&main)).unwrap();
+    rt().block_on(engine.run_file(&main, Run::new())).unwrap();
     assert_eq!(prompter.asked(), vec![import_cap(&dir, "lib.sand")]);
     // Not asked again for later compilations by the same engine...
-    rt().block_on(engine.run_file(&main)).unwrap();
+    rt().block_on(engine.run_file(&main, Run::new())).unwrap();
     engine.check_file(&main).unwrap();
     assert_eq!(prompter.asked(), vec![]);
     // ...but a different module is a different request.
     dir.write("other.sand", "pub let Y = 2");
     let main2 = dir.write("main2.sand", "import \"./other.sand\"\nimport \"./lib.sand\"\nprint(other.Y + lib.X)");
-    assert_import_denied(rt().block_on(engine.run_file(&main2)), "./other.sand");
+    assert_import_denied(rt().block_on(engine.run_file(&main2, Run::new())), "./other.sand");
     assert_eq!(prompter.asked(), vec![import_cap(&dir, "other.sand")]);
     // A fresh engine asks again.
     let mut fresh = Engine::new(prompter.config(prompt_for_imports()));
-    assert_import_denied(rt().block_on(fresh.run_file(&main)), "./lib.sand");
+    assert_import_denied(rt().block_on(fresh.run_file(&main, Run::new())), "./lib.sand");
     assert_eq!(prompter.asked(), vec![import_cap(&dir, "lib.sand")]);
 }
 
@@ -2614,12 +2633,12 @@ fn import_prompt_deny_once_and_deny_always() {
     let main = dir.write("main.sand", "import \"./lib.sand\"\nprint(lib.X)");
     let prompter = ScriptedPrompter::new(&[PromptAnswer::DenyOnce, PromptAnswer::DenyAlways, PromptAnswer::AllowAlways]);
     let mut engine = Engine::new(prompter.config(prompt_for_imports()));
-    assert_import_denied(rt().block_on(engine.run_file(&main)), "./lib.sand");
+    assert_import_denied(rt().block_on(engine.run_file(&main, Run::new())), "./lib.sand");
     assert_eq!(prompter.asked().len(), 1);
     // `DenyOnce` is not remembered; `DenyAlways` is.
-    assert_import_denied(rt().block_on(engine.run_file(&main)), "./lib.sand");
+    assert_import_denied(rt().block_on(engine.run_file(&main, Run::new())), "./lib.sand");
     assert_eq!(prompter.asked().len(), 1);
-    assert_import_denied(rt().block_on(engine.run_file(&main)), "./lib.sand");
+    assert_import_denied(rt().block_on(engine.run_file(&main, Run::new())), "./lib.sand");
     assert!(engine.check_file(&main).is_err());
     assert_eq!(prompter.asked(), vec![]);
 }
@@ -2631,11 +2650,11 @@ fn import_prompt_without_prompter_denies() {
     dir.write("lib.sand", "pub let X = 1");
     let main = dir.write("main.sand", "import \"./lib.sand\"\nprint(lib.X)");
     let mut engine = Engine::new(Config::new().custom_policy(prompt_for_imports()));
-    assert_import_denied(rt().block_on(engine.run_file(&main)), "./lib.sand");
+    assert_import_denied(rt().block_on(engine.run_file(&main, Run::new())), "./lib.sand");
     // Standard modules are not script imports and are never prompted for.
     let prompter = ScriptedPrompter::new(&[]);
     let mut engine = Engine::new(prompter.config(prompt_for_imports()));
-    rt().block_on(engine.run_source("main.sand", "import json\nprint(json.encode(json.Json.Null))")).unwrap();
+    rt().block_on(engine.run_source("main.sand", "import json\nprint(json.encode(json.Json.Null))", Run::new())).unwrap();
     assert_eq!(prompter.asked(), vec![]);
 }
 
@@ -2649,8 +2668,8 @@ fn nested_imports_are_prompted_with_resolved_paths() {
     let main = dir.write("main.sand", "import \"lib/a.sand\"\nimport \"./c.sand\"\nprint(a.X + c.Z)");
     let prompter = ScriptedPrompter::new(&[PromptAnswer::AllowOnce; 3]);
     let out = MemorySink::new();
-    let mut engine = Engine::new(prompter.config(prompt_for_imports()).stdout(out.clone()));
-    rt().block_on(engine.run_file(&main)).unwrap();
+    let mut engine = Engine::new(prompter.config(prompt_for_imports()));
+    rt().block_on(engine.run_file(&main, Run::new().stdout(out.clone()))).unwrap();
     assert_eq!(out.contents(), "8\n");
     // Depth-first, each module once (c.sand is shared), with paths resolved
     // relative to the importing module.
@@ -2660,7 +2679,7 @@ fn nested_imports_are_prompted_with_resolved_paths() {
     // after it are not loaded.
     let prompter = ScriptedPrompter::new(&[PromptAnswer::AllowOnce, PromptAnswer::DenyOnce]);
     let mut engine = Engine::new(prompter.config(prompt_for_imports()));
-    match rt().block_on(engine.run_file(&main)) {
+    match rt().block_on(engine.run_file(&main, Run::new().stdout(out.clone()))) {
         Err(Error::Compile(d)) => {
             let denied: Vec<_> = d.iter().filter(|d| d.message.contains("permission denied")).collect();
             assert_eq!(denied.len(), 1, "{d:?}");
@@ -2679,12 +2698,11 @@ fn runtime_always_answers_last_for_the_engine() {
     dir.write("a.txt", "A");
     let prompter = ScriptedPrompter::new(&[PromptAnswer::AllowAlways, PromptAnswer::DenyAlways]);
     let out = MemorySink::new();
-    let mut engine =
-        Engine::new(prompter.base().policy(sandlang::policy::rules::RulePolicy::standard()).cwd(dir.path()).stdout(out.clone()));
+    let mut engine = Engine::new(prompter.base().policy(sandlang::policy::rules::RulePolicy::standard()).cwd(dir.path()));
     let src = "import fs\nimport env\nprint(fs.read_text(\"a.txt\").is_ok())\nprint(env.get(\"SAND_TEST_UNSET_VAR\"))";
-    rt().block_on(engine.run_source("main.sand", src)).unwrap();
+    rt().block_on(engine.run_source("main.sand", src, Run::new().stdout(out.clone()))).unwrap();
     assert_eq!(prompter.asked().len(), 2);
-    rt().block_on(engine.run_source("main.sand", src)).unwrap();
+    rt().block_on(engine.run_source("main.sand", src, Run::new().stdout(out.clone()))).unwrap();
     assert_eq!(prompter.asked(), vec![], "always answers must be remembered across runs of one engine");
     assert_eq!(out.contents(), "true\nNone\ntrue\nNone\n");
 }
@@ -3060,8 +3078,8 @@ print(few[5000])
     let digits = |i: usize| i.to_string().len();
     let xs: usize = (0..N).filter(|i| i % 7 < 6).map(|i| 3 + digits(i)).sum();
     let tail: usize = 5 + 6 * (0..3000).map(|i| 3 + digits(i)).sum::<usize>();
-    let (mut engine, out, _) = engine_with(Config::new());
-    rt().block_on(engine.run_source("main.sand", &src)).unwrap();
+    let (mut engine, out, err) = engine_with(Config::new());
+    rt().block_on(engine.run_source("main.sand", &src, to(&out, &err))).unwrap();
     assert_eq!(out.contents(), format!("{}\nfront\nfew5\n", xs + 6 * 4 + tail));
     let stats = engine.run_stats().gc;
     assert!(stats.collections - stats.majors >= 3, "{stats:?}");
@@ -3072,8 +3090,8 @@ fn gc_stats_report_minor_and_major_collections() {
     // A large live structure plus allocation churn: most collections are
     // minor ones that do not scan the old generation.
     let src = "let live = [[i] for i in 0..300000]\nvar t = 0\nfor i in 0..2000000 { t += [i, i].len() }\nprint(t + live.len())";
-    let (mut engine, out, _) = engine_with(Config::new());
-    rt().block_on(engine.run_source("main.sand", src)).unwrap();
+    let (mut engine, out, err) = engine_with(Config::new());
+    rt().block_on(engine.run_source("main.sand", src, to(&out, &err))).unwrap();
     assert_eq!(out.contents(), "4300000\n");
     let stats = engine.run_stats().gc;
     assert!(stats.collections > stats.majors, "{stats:?}");
@@ -3134,7 +3152,7 @@ fn interrupt_from_another_thread() {
         std::thread::sleep(Duration::from_millis(50));
         handle.interrupt();
     });
-    let r = rt().block_on(engine.run_source("main.sand", "while true {}"));
+    let r = rt().block_on(engine.run_source("main.sand", "while true {}", Run::new()));
     t.join().unwrap();
     assert!(matches!(r, Err(Error::Interrupted)), "{r:?}");
 }
@@ -3146,7 +3164,7 @@ fn an_interrupt_stops_each_engine_of_its_configuration() {
     let runs: Vec<_> = (0..2)
         .map(|_| {
             let mut engine = Engine::new(config.clone());
-            std::thread::spawn(move || rt().block_on(engine.run_source("main.sand", "while true {}")))
+            std::thread::spawn(move || rt().block_on(engine.run_source("main.sand", "while true {}", Run::new())))
         })
         .collect();
     std::thread::sleep(Duration::from_millis(100));
@@ -3169,7 +3187,7 @@ fn interrupt_stops_a_run_waiting_for_a_prompt() {
     let mut engine = Engine::new(config.interrupt(handle.clone()));
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let r = rt().block_on(engine.run_source("main.sand", "import env\nprint(env.get(\"HOME\"))"));
+        let r = rt().block_on(engine.run_source("main.sand", "import env\nprint(env.get(\"HOME\"))", Run::new()));
         let _ = done_tx.send(r);
     });
     asked_rx.recv_timeout(Duration::from_secs(10)).expect("the prompter was not asked");
@@ -3201,8 +3219,8 @@ fn engines_run_concurrently_on_threads() {
         .map(|i| {
             std::thread::spawn(move || {
                 let out = MemorySink::new();
-                let mut engine = Engine::new(Config::new().stdout(out.clone()).seed(i));
-                rt().block_on(engine.run_source("main.sand", FIB)).unwrap();
+                let mut engine = Engine::new(Config::new());
+                rt().block_on(engine.run_source("main.sand", FIB, Run::new().seed(i).stdout(out.clone()))).unwrap();
                 out.contents()
             })
         })
@@ -3220,9 +3238,9 @@ fn engines_run_concurrently_on_a_multithreaded_runtime() {
         for i in 0..16 {
             tasks.push(tokio::spawn(async move {
                 let out = MemorySink::new();
-                let mut engine = Engine::new(Config::new().stdout(out.clone()));
+                let mut engine = Engine::new(Config::new());
                 let src = format!("task.sleep(10ms)\nprint({i} * 2)");
-                engine.run_source("main.sand", &src).await.unwrap();
+                engine.run_source("main.sand", &src, Run::new().stdout(out.clone())).await.unwrap();
                 out.contents()
             }));
         }
@@ -3243,13 +3261,13 @@ fn engines_on_one_thread_interleave() {
                 let busy = tokio::task::spawn_local(async {
                     let mut e =
                         Engine::new(Config::new().limits(Limits { max_wall_time: Some(Duration::from_millis(500)), ..Limits::default() }));
-                    e.run_source("busy.sand", "while true {}").await
+                    e.run_source("busy.sand", "while true {}", Run::new()).await
                 });
                 let quick = tokio::task::spawn_local(async {
                     let out = MemorySink::new();
-                    let mut e = Engine::new(Config::new().stdout(out.clone()));
+                    let mut e = Engine::new(Config::new());
                     let start = Instant::now();
-                    e.run_source("quick.sand", "task.sleep(10ms)\nprint(\"done\")").await.unwrap();
+                    e.run_source("quick.sand", "task.sleep(10ms)\nprint(\"done\")", Run::new().stdout(out.clone())).await.unwrap();
                     (out.contents(), start.elapsed())
                 });
                 let (out, elapsed) = quick.await.unwrap();
@@ -3264,9 +3282,9 @@ fn engines_on_one_thread_interleave() {
 #[test]
 fn seeded_engines_are_deterministic() {
     let src = "import random\nprint([random.int(0, 1000000) for _ in 0..5])";
-    let a = run_src(Config::new().seed(5), src).1;
-    let b = run_src(Config::new().seed(5), src).1;
-    let c = run_src(Config::new().seed(6), src).1;
+    let a = run_src_in(Config::new(), |r| r.seed(5), src).1;
+    let b = run_src_in(Config::new(), |r| r.seed(5), src).1;
+    let c = run_src_in(Config::new(), |r| r.seed(6), src).1;
     assert_eq!(a, b);
     assert_ne!(a, c);
 }
@@ -3281,7 +3299,7 @@ fn run_tests_api() {
     let dir = TempDir::new("tests");
     let main = dir.write("t.sand", "test \"a\" { assert(true) }\ntest \"b\" { assert(false, \"nope\") }");
     let mut engine = Engine::new(Config::new());
-    let report = rt().block_on(engine.run_tests(&main)).unwrap();
+    let report = rt().block_on(engine.run_tests(&main, Run::new())).unwrap();
     assert_eq!(report.passed(), 1);
     assert_eq!(report.failed(), 1);
     assert_eq!(report.results[1].name, "b");
@@ -3298,7 +3316,7 @@ fn an_exit_from_a_finisher_ends_a_test_like_a_script_exit() {
     let dir = TempDir::new("exit-tests");
     let main = dir.write("t.sand", "import quit\ntest \"zero\" { quit.now(0) }\ntest \"one\" { quit.now(1) }\ntest \"plain\" { exit(0) }");
     let mut engine = Engine::new(Config::new().host_modules(HostModules::new([m]).unwrap()));
-    let report = rt().block_on(engine.run_tests(&main)).unwrap();
+    let report = rt().block_on(engine.run_tests(&main, Run::new())).unwrap();
     let results: Vec<_> = report.results.iter().map(|r| (r.name.as_str(), r.passed, r.message.as_deref())).collect();
     assert_eq!(results, [("zero", true, None), ("one", false, Some("exited with code 1")), ("plain", true, None)]);
 }
@@ -3367,7 +3385,7 @@ fn error_messages_cannot_impersonate_limits_or_interrupts() {
         }
     }
     // A failed top-level `?` in a session fails with the error's text.
-    let mut session = Engine::new(Config::new()).session();
+    let mut session = Engine::new(Config::new()).session(Run::new());
     let r = rt().block_on(session.eval("let r: Result<int> = Err(Error(\"\\u{0}memory\"))\nr?"));
     assert!(matches!(r, Err(Error::Runtime { .. })), "{r:?}");
 }
@@ -3401,10 +3419,12 @@ fn rust_panics_in_natives_do_not_unwind_into_the_host() {
     let dir = TempDir::new("panic-tests");
     dir.write("t.sand", "import buggy\ntest \"bad\" {\n    buggy.boom(9)\n}\ntest \"good\" {\n    assert(buggy.boom(2) == 2)\n}\n");
     let report = rt()
-        .block_on(Engine::new(Config::new().host_modules(HostModules::new([module()]).unwrap())).run_tests(dir.path().join("t.sand")))
+        .block_on(
+            Engine::new(Config::new().host_modules(HostModules::new([module()]).unwrap())).run_tests(dir.path().join("t.sand"), Run::new()),
+        )
         .unwrap();
     assert_eq!((report.passed(), report.failed()), (1, 1));
-    let mut session = Engine::new(Config::new().host_modules(HostModules::new([module()]).unwrap())).session();
+    let mut session = Engine::new(Config::new().host_modules(HostModules::new([module()]).unwrap())).session(Run::new());
     assert!(rt().block_on(session.eval("import buggy\nbuggy.boom(7)")).is_err());
     assert!(session.was_reset());
     assert!(matches!(rt().block_on(session.eval("buggy.boom(2)")), Err(Error::Compile(_))));
@@ -3430,7 +3450,7 @@ fn module_discovery_is_bounded() {
     // An import path that is too long is rejected before it is resolved.
     let main = dir.write("main.sand", &format!("import \"{}b\"\nprint(1)", "a/".repeat(400_000)));
     let start = Instant::now();
-    let r = rt().block_on(Engine::new(Config::new()).run_file(&main));
+    let r = rt().block_on(Engine::new(Config::new()).run_file(&main, Run::new()));
     match r {
         Err(Error::Compile(d)) => assert!(d[0].message.contains("too long"), "{d:?}"),
         other => panic!("{other:?}"),
@@ -3439,14 +3459,14 @@ fn module_discovery_is_bounded() {
     // Many failing imports: discovery stops early.
     let src: String = (0..20_000).map(|i| format!("import \"missing{i}\"\n")).collect();
     let main = dir.write("many.sand", &src);
-    let r = rt().block_on(Engine::new(Config::new()).run_file(&main));
+    let r = rt().block_on(Engine::new(Config::new()).run_file(&main, Run::new()));
     match r {
         Err(Error::Compile(d)) => assert!(d.len() <= 100, "{}", d.len()),
         other => panic!("{other:?}"),
     }
     // And it can be interrupted.
     let mut engine = Engine::new(Config::new().limits(Limits { max_wall_time: Some(Duration::ZERO), ..Limits::default() }));
-    let r = rt().block_on(engine.run_file(&main));
+    let r = rt().block_on(engine.run_file(&main, Run::new()));
     assert!(matches!(r, Err(Error::Limit(LimitKind::WallTime))), "{r:?}");
 }
 
@@ -3492,8 +3512,8 @@ fn a_symlinked_main_file_imports_from_its_own_directory() {
     std::fs::create_dir_all(dir.path().join("bin")).unwrap();
     std::os::unix::fs::symlink(dir.path().join("proj/main.sand"), dir.path().join("bin/tool.sand")).unwrap();
     let out = MemorySink::new();
-    let mut engine = Engine::new(Config::new().policy(sandlang::policy::rules::RulePolicy::allow_all()).stdout(out.clone()));
-    rt().block_on(engine.run_file(dir.path().join("bin/tool.sand"))).unwrap();
+    let mut engine = Engine::new(Config::new().policy(sandlang::policy::rules::RulePolicy::allow_all()));
+    rt().block_on(engine.run_file(dir.path().join("bin/tool.sand"), Run::new().stdout(out.clone()))).unwrap();
     assert_eq!(out.contents(), "hello from lib\n");
 }
 
@@ -3661,34 +3681,40 @@ fn rust_bound_field_types_meet_the_requirements_of_their_constructors() {
 
 #[test]
 fn native_functions_read_the_host_context() {
-    struct Caller(String);
-    let mut m = NativeModule::new("host");
-    m.vm_function("caller", |vm: &mut Vm| -> String { vm.context::<Caller>().map(|c| c.0.clone()).unwrap_or_default() });
-    let base = Config::new().host_modules(HostModules::new([m]).unwrap());
+    let mut m = NativeModule::<Caller>::with_context("host");
+    m.context_function("caller", caller);
+    let host = HostModules::new([m]).unwrap();
     for name in ["alice", "bob"] {
-        let config = base.clone().context(Arc::new(Caller(name.into())));
-        let (r, out, _) = run_src(config, "import host\nprint(host.caller())");
+        let config = Config::new().host_modules(host.clone());
+        let (r, out, _) = run_src_in(config, |r| r.context(Arc::new(Caller(name.into()))), "import host\nprint(host.caller())");
         r.unwrap();
         assert_eq!(out, format!("{name}\n"));
     }
-    let (r, out, _) = run_src(base, "import host\nprint(host.caller())");
-    r.unwrap();
-    assert_eq!(out, "\n");
+}
+
+/// The host data of a run in the tests of host contexts.
+struct Caller(String);
+
+/// The `caller` function of a run whose context is `c`.
+fn caller(c: &Arc<Caller>) -> impl Fn(&mut Vm) -> String + Send + Sync + use<> {
+    let c = c.clone();
+    move |_: &mut Vm| c.0.clone()
 }
 
 #[test]
 fn run_stats_report_fuel_memory_and_output() {
-    let (mut engine, _, _) = engine_with(Config::new());
-    rt().block_on(engine.run_source("main.sand", "var s = 0\nfor i in 0..1000 { s += i }\nprint(s)")).unwrap();
+    let (mut engine, _out, err) = engine_with(Config::new());
+    rt().block_on(engine.run_source("main.sand", "var s = 0\nfor i in 0..1000 { s += i }\nprint(s)", to(&_out, &err))).unwrap();
     let small = engine.run_stats();
     assert!(small.fuel >= 1000, "{small:?}");
     assert_eq!(small.output_bytes, 7);
-    rt().block_on(engine.run_source("main.sand", "let xs = []\nfor i in 0..100000 { xs.push([i]) }\nprint(xs.len())")).unwrap();
+    rt().block_on(engine.run_source("main.sand", "let xs = []\nfor i in 0..100000 { xs.push([i]) }\nprint(xs.len())", to(&_out, &err)))
+        .unwrap();
     let big = engine.run_stats();
     assert!(big.peak_memory > 1 << 20 && big.peak_memory > small.peak_memory, "{small:?} {big:?}");
     let limited = Config::new().limits(Limits { max_instructions: Some(5000), ..Limits::default() });
-    let (mut engine, _, _) = engine_with(limited);
-    let r = rt().block_on(engine.run_source("main.sand", "while true {}"));
+    let (mut engine, _out, err) = engine_with(limited);
+    let r = rt().block_on(engine.run_source("main.sand", "while true {}", to(&_out, &err)));
     assert!(matches!(r, Err(Error::Limit(LimitKind::Instructions))));
     assert!(engine.run_stats().fuel >= 5000);
 }
@@ -3698,8 +3724,8 @@ fn run_stats_fuel_is_deterministic() {
     let src = "import json\nlet xs = [for i in 0..500 { [\"k\": i] }]\nlet t = json.encode(xs)\nprint(t.len())";
     let fuel: Vec<u64> = (0..3)
         .map(|_| {
-            let (mut engine, _, _) = engine_with(Config::new());
-            rt().block_on(engine.run_source("main.sand", src)).unwrap();
+            let (mut engine, _out, err) = engine_with(Config::new());
+            rt().block_on(engine.run_source("main.sand", src, to(&_out, &err))).unwrap();
             engine.run_stats().fuel
         })
         .collect();
@@ -3708,9 +3734,8 @@ fn run_stats_fuel_is_deterministic() {
 
 #[test]
 fn compiled_programs_run_on_many_engines() {
-    struct Caller(String);
-    let mut m = NativeModule::new("host");
-    m.vm_function("caller", |vm: &mut Vm| -> String { vm.context::<Caller>().map(|c| c.0.clone()).unwrap_or_default() });
+    let mut m = NativeModule::<Caller>::with_context("host");
+    m.context_function("caller", caller);
     let fs = sandlang::files::mem::MemFs::new();
     fs.write("/app/main.sand", "import host\nimport \"./util.sand\"\nvar n = 0\nn += 1\nprint(\"\\(host.caller()) \\(util.twice(n))\")")
         .unwrap();
@@ -3724,15 +3749,15 @@ fn compiled_programs_run_on_many_engines() {
     // The source can change after compilation: the program keeps the code it was compiled from.
     fs.write("/app/util.sand", "pub fn twice(x: int) -> int { 0 }").unwrap();
     for name in ["ada", "bob", "cy"] {
-        let (mut engine, out, _) = engine_with(base.clone().context(Arc::new(Caller(name.into()))));
-        rt().block_on(engine.run_program(&program)).unwrap();
+        let (mut engine, out, err) = engine_with(base.clone());
+        rt().block_on(engine.run_program(&program, to(&out, &err).context(Arc::new(Caller(name.into()))))).unwrap();
         // Each run starts with fresh globals.
         assert_eq!(out.contents(), format!("{name} 2\n"));
         assert!(engine.run_stats().fuel > 0);
     }
     // The program runs with the host modules it was compiled against, also on an engine without them.
-    let (mut other, out, _) = engine_with(Config::new().context(Arc::new(Caller("dee".into()))));
-    rt().block_on(other.run_program(&program)).unwrap();
+    let (mut other, out, err) = engine_with(Config::new());
+    rt().block_on(other.run_program(&program, to(&out, &err).context(Arc::new(Caller("dee".into()))))).unwrap();
     assert_eq!(out.contents(), "dee 2\n");
 }
 
@@ -3779,8 +3804,8 @@ fn hosts_call_functions_of_the_main_module() {
     let base = Config::new();
     let charge = function_of(base.clone(), ORDER, "charge").expect("private functions can be called");
     assert_eq!(charge.signature().to_string(), "fn charge(order: Order, fee: int) -> Result<Receipt>");
-    let (mut engine, out, _) = engine_with(base.clone());
-    let call = |engine: &mut Engine, args: &[&str]| rt().block_on(engine.call(charge.bind(args).unwrap()));
+    let (mut engine, out, err) = engine_with(base.clone());
+    let call = |engine: &mut Engine, args: &[&str]| rt().block_on(engine.call(charge.bind(args).unwrap(), to(&out, &err)));
     // The module initializers run before the call, and computed defaults are filled in.
     assert_eq!(
         call(&mut engine, &[r#"{"id": "a1", "cents": 100}"#, "5"]).unwrap(),
@@ -3803,20 +3828,20 @@ fn hosts_call_functions_of_the_main_module() {
     let twice = function_of(base.clone(), ORDER, "twice").unwrap();
     assert_eq!(twice.signature().to_string(), "fn twice(x: int) -> int");
     assert_eq!(
-        rt().block_on(engine_with(base.clone()).0.call(twice.bind(&["21"]).unwrap())).unwrap(),
+        rt().block_on(engine_with(base.clone()).0.call(twice.bind(&["21"]).unwrap(), Run::new())).unwrap(),
         Outcome::Returned(Returned::Value(Json::Int(42)))
     );
     let nothing = function_of(base.clone(), ORDER, "nothing").unwrap();
     assert_eq!(nothing.signature().to_string(), "fn nothing()");
     assert_eq!(
-        rt().block_on(engine_with(base.clone()).0.call(nothing.bind(&[]).unwrap())).unwrap(),
+        rt().block_on(engine_with(base.clone()).0.call(nothing.bind(&[]).unwrap(), Run::new())).unwrap(),
         Outcome::Returned(Returned::Value(Json::Null))
     );
     let either = function_of(base.clone(), ORDER, "either").unwrap();
     assert_eq!(either.signature().to_string(), "fn either() -> Result<int, str>");
     assert!(matches!(&either.signature().returns, sandlang::engine::Returns::Result { err, .. } if !err.is_error()));
     assert_eq!(
-        rt().block_on(engine_with(base.clone()).0.call(either.bind(&[]).unwrap())).unwrap(),
+        rt().block_on(engine_with(base.clone()).0.call(either.bind(&[]).unwrap(), Run::new())).unwrap(),
         Outcome::Returned(Returned::Err(Json::Str("no".into())))
     );
     assert_eq!(function_of(base.clone(), ORDER, "pick").err(), Some(FunctionError::Generic));
@@ -3828,12 +3853,12 @@ fn hosts_call_functions_of_the_main_module() {
     assert_eq!(function_of(base.clone(), deep, "out").err(), too_large(None));
 
     let failing = function_of(base.clone(), "fn main() -> int {\n    let xs: [int] = []\n    xs[3]\n}", "main").unwrap();
-    match rt().block_on(engine_with(base.clone()).0.call(failing.bind(&[]).unwrap())) {
+    match rt().block_on(engine_with(base.clone()).0.call(failing.bind(&[]).unwrap(), Run::new())) {
         Err(Error::Runtime { trace, .. }) => assert_eq!(trace[0].line, 3, "{trace:?}"),
         r => panic!("{r:?}"),
     }
     let exits = function_of(base.clone(), "fn main() -> int {\n    exit(4)\n}", "main").unwrap();
-    assert_eq!(rt().block_on(engine_with(base).0.call(exits.bind(&[]).unwrap())).unwrap(), Outcome::Exited(4));
+    assert_eq!(rt().block_on(engine_with(base).0.call(exits.bind(&[]).unwrap(), Run::new())).unwrap(), Outcome::Exited(4));
 }
 
 #[test]
@@ -3845,6 +3870,6 @@ fn compiled_programs_keep_limits_per_run() {
     let program = rt().block_on(engine.compile_file("/main.sand")).unwrap();
     for _ in 0..2 {
         let mut e = Engine::new(base.clone());
-        assert!(matches!(rt().block_on(e.run_program(&program)), Err(Error::Limit(LimitKind::Instructions))));
+        assert!(matches!(rt().block_on(e.run_program(&program, Run::new())), Err(Error::Limit(LimitKind::Instructions))));
     }
 }

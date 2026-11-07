@@ -6,7 +6,7 @@
 mod common;
 
 use common::rt;
-use sandlang::engine::{Config, Engine, Error, MemorySink};
+use sandlang::engine::{Config, Engine, Error, MemorySink, Run};
 use sandlang::files::mem::MemFs;
 use sandlang::policy::rules::RulePolicy;
 use sandlang::policy::{Capability, Decision, PromptAnswer};
@@ -15,8 +15,8 @@ use std::sync::{Arc, Mutex};
 
 fn run(config: Config, source: &str) -> (Result<sandlang::engine::Outcome, Error>, String) {
     let out = MemorySink::new();
-    let mut engine = Engine::new(config.stdout(out.clone()));
-    let r = rt().block_on(engine.run_source("main.sand", source));
+    let mut engine = Engine::new(config);
+    let r = rt().block_on(engine.run_source("main.sand", source, Run::new().stdout(out.clone())));
     (r, out.contents())
 }
 
@@ -126,23 +126,27 @@ fn imports_and_main_files_come_from_the_memory_file_system() {
     fs.write("/app/lib/helper.sand", "pub fn add(a: int, b: int) -> int { a + b }\n").unwrap();
     let out = MemorySink::new();
     let policy = RulePolicy::standard().allow_import("/".parse().unwrap());
-    let mut engine = Engine::new(Config::new().policy(policy).memory_fs(fs.clone()).stdout(out.clone()));
-    rt().block_on(engine.run_file("/app/main.sand")).unwrap();
+    let mut engine = Engine::new(Config::new().policy(policy).memory_fs(fs.clone()));
+    rt().block_on(engine.run_file("/app/main.sand", Run::new().stdout(out.clone()))).unwrap();
     assert_eq!(out.contents(), "42\n");
     engine.check_file("/app/main.sand").unwrap();
     // Imports stay under the module root.
     fs.write("/outside.sand", "pub fn f() -> int { 1 }\n").unwrap();
     fs.write("/app/escape.sand", "import \"../outside\"\nprint(outside.f())\n").unwrap();
-    match rt().block_on(engine.run_file("/app/escape.sand")) {
+    match rt().block_on(engine.run_file("/app/escape.sand", Run::new().stdout(out.clone()))) {
         Err(Error::Compile(d)) => assert!(d[0].message.contains("outside the module root"), "{d:?}"),
         other => panic!("{other:?}"),
     }
     // `allow import` restricts them further.
     let rules = RulePolicy::standard().allow_import("/app/lib".parse().unwrap());
-    let mut engine = Engine::new(Config::new().policy(rules).memory_fs(fs.clone()).stdout(MemorySink::new()));
-    rt().block_on(engine.run_file("/app/main.sand")).unwrap();
+    let mut engine = Engine::new(Config::new().policy(rules).memory_fs(fs.clone()));
+    rt().block_on(engine.run_file("/app/main.sand", Run::new().stdout(out.clone()).stdout(MemorySink::new()))).unwrap();
     fs.write("/app/other.sand", "pub fn f() -> int { 1 }\n").unwrap();
-    match rt().block_on(engine.run_source("main.sand", "import \"other\"\nprint(other.f())")) {
+    match rt().block_on(engine.run_source(
+        "main.sand",
+        "import \"other\"\nprint(other.f())",
+        Run::new().stdout(out.clone()).stdout(MemorySink::new()),
+    )) {
         Err(Error::Compile(d)) => assert!(d[0].message.contains("permission denied"), "{d:?}"),
         other => panic!("{other:?}"),
     }

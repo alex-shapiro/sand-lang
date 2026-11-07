@@ -1,7 +1,8 @@
 //! Shared helpers for the acceptance test suite.
 #![allow(dead_code)]
 
-use sandlang::engine::{Config, Engine, Error, MemorySink, Outcome};
+use sandlang::engine::{Config, Engine, Error, MemorySink, Outcome, Run};
+use sandlang::journal::Durability;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -42,13 +43,13 @@ impl Drop for TempDir {
     }
 }
 
-pub struct RunResult {
-    pub result: Result<Outcome, Error>,
+pub struct RunResult<S = std::convert::Infallible> {
+    pub result: Result<Outcome<std::convert::Infallible, S>, Error>,
     pub stdout: String,
     pub stderr: String,
 }
 
-impl RunResult {
+impl<S: std::fmt::Debug> RunResult<S> {
     pub fn ok_stdout(&self) -> &str {
         if let Err(e) = &self.result {
             panic!("run failed: {e}\nstdout:\n{}\nstderr:\n{}", self.stdout, self.stderr);
@@ -78,9 +79,14 @@ pub fn run(source: &str) -> RunResult {
 /// file of a temporary directory of the host, otherwise of a memory file
 /// system.
 pub fn run_with(source: &str, f: impl FnOnce(Config) -> Config) -> RunResult {
+    run_in(source, f, |r| r)
+}
+
+/// Like [`run_with`], with the values of the run set by `g`.
+pub fn run_in<D: Durability>(source: &str, f: impl FnOnce(Config) -> Config, g: impl FnOnce(Run) -> Run<D>) -> RunResult<D::Suspends> {
     let out = MemorySink::new();
     let err = MemorySink::new();
-    let config = Config::new().policy(sandlang::policy::rules::RulePolicy::allow_all()).stdout(out.clone()).stderr(err.clone());
+    let config = Config::new().policy(sandlang::policy::rules::RulePolicy::allow_all());
     #[cfg(feature = "os")]
     let (_dir, main, config) = {
         let dir = TempDir::new("run");
@@ -95,7 +101,7 @@ pub fn run_with(source: &str, f: impl FnOnce(Config) -> Config) -> RunResult {
         (PathBuf::from("/run/main.sand"), config.memory_fs(fs).cwd("/run"))
     };
     let mut engine = Engine::new(f(config));
-    let result = rt().block_on(engine.run_file(&main));
+    let result = rt().block_on(engine.run_file(&main, g(Run::new().stdout(out.clone()).stderr(err.clone()))));
     RunResult { result, stdout: out.contents(), stderr: err.contents() }
 }
 

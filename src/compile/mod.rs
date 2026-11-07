@@ -4438,7 +4438,7 @@ impl reflect::DescSink for DescCode<'_> {
 
 #[cfg(test)]
 mod tests {
-    use crate::engine::{Config, Engine};
+    use crate::engine::{Config, Engine, Run};
     use crate::vm::bytecode::{Op, Program};
     use std::sync::Arc;
 
@@ -4464,9 +4464,9 @@ mod tests {
 
     fn run(src: &str) -> String {
         let out = crate::engine::MemorySink::new();
-        let mut engine = Engine::new(Config::new().stdout(out.clone()));
+        let mut engine = Engine::new(Config::new());
         let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
-        if let Err(e) = rt.block_on(engine.run_source("main.sand", src)) {
+        if let Err(e) = rt.block_on(engine.run_source("main.sand", src, Run::new().stdout(out.clone()))) {
             panic!("{e}");
         }
         out.contents()

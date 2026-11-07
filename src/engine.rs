@@ -6,7 +6,7 @@ use crate::compile::{CompileInput, compile_more};
 use crate::diag::{Diag, Diagnostic, FileId, Span};
 use crate::files::Fs;
 use crate::files::mem::MemFs;
-use crate::journal::Suspension;
+use crate::journal::Durability;
 use crate::modules::{ImportRef, ModuleGraph, Snapshot, Target, budget_error, native_info};
 use crate::native::convert::{Conversion, FromValue};
 use crate::native::func::Signature;
@@ -249,18 +249,20 @@ impl Error {
 
 /// How a run that did not fail ended. A script ([`Engine::run_program`]) has an
 /// `Outcome` with no return value; a call ([`Engine::call`]) has an
-/// `Outcome<Returned>`.
+/// `Outcome<Returned>`. `S` is how the run can suspend: [`Suspension`] for a
+/// durable run, and [`Infallible`] for a run without a journal, which never
+/// suspends.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Outcome<R = std::convert::Infallible> {
+pub enum Outcome<R = Infallible, S = Infallible> {
     /// The called function returned.
     Returned(R),
     /// The run ended with this exit code: 0 when a script ends, or the code
     /// that the run passed to `exit`.
     Exited(i32),
-    /// The engine suspended the journaled run because every task waits
+    /// The engine suspended the durable run because every task waits
     /// (SPEC §16.7). To resume it, the host starts the run again with the
     /// same journal, and for a call, the same arguments.
-    Suspended(crate::journal::Suspension),
+    Suspended(S),
 }
 
 /// What a function that [`Engine::call`] called returned. A value converts to [`Json`] as
@@ -278,7 +280,7 @@ pub enum Returned {
     Err(stdlib::json::Json),
 }
 
-impl<R> Outcome<R> {
+impl<R, S> Outcome<R, S> {
     /// The exit code of a run that called `exit` or of a script that ended.
     pub fn exit_code(&self) -> Option<i32> {
         match self {
@@ -288,68 +290,112 @@ impl<R> Outcome<R> {
     }
 }
 
+impl<R> Outcome<R> {
+    /// The outcome of a run without a journal, as the outcome type of a run
+    /// that can suspend: a host that runs both kinds handles one type.
+    pub fn suspending<S>(self) -> Outcome<R, S> {
+        match self {
+            Outcome::Returned(r) => Outcome::Returned(r),
+            Outcome::Exited(c) => Outcome::Exited(c),
+        }
+    }
+}
+
 /// A compiled program, ready to run on any engine (see [`Engine::compile_file`]). It holds the
-/// host modules that it was compiled against and runs with their natives.
-#[derive(Clone)]
-pub struct CompiledProgram {
+/// host modules that it was compiled against and runs with their natives, bound to the
+/// context `C` of each run.
+pub struct CompiledProgram<C = ()> {
     program: Arc<Program>,
-    host: HostModules,
+    host: HostModules<C>,
     cwd: PathBuf,
+}
+
+impl<C> Clone for CompiledProgram<C> {
+    fn clone(&self) -> Self {
+        CompiledProgram { program: self.program.clone(), host: self.host.clone(), cwd: self.cwd.clone() }
+    }
 }
 
 /// Host modules, checked and compiled with the standard library (see [`Config::host_modules`]).
 /// A clone is cheap, and every engine whose configuration holds a clone compiles against the
 /// same compiled modules. The default holds only the standard library.
-#[derive(Clone)]
-pub struct HostModules(Arc<Registry>);
+///
+/// `C` is the type of the host data of each run, which the natives of
+/// [`NativeModule::context_function`] get: a run of these modules takes a
+/// context of this type ([`Run::context`]).
+pub struct HostModules<C = ()> {
+    registry: Arc<Registry>,
+    /// The natives that each run binds to its context, by their ids.
+    bound: Arc<[(u32, crate::native::Binder<C>)]>,
+}
 
-impl HostModules {
+impl<C> Clone for HostModules<C> {
+    fn clone(&self) -> Self {
+        HostModules { registry: self.registry.clone(), bound: self.bound.clone() }
+    }
+}
+
+impl<C: Send + Sync + 'static> HostModules<C> {
     /// Checks and compiles `modules`. Fails with [`Error::Compile`] if the Sand source of a
     /// module does not match its natives.
     ///
     /// # Panics
     ///
     /// If two modules have the same name.
-    pub fn new(modules: impl IntoIterator<Item = NativeModule>) -> Result<HostModules, Error> {
+    pub fn new(modules: impl IntoIterator<Item = NativeModule<C>>) -> Result<HostModules<C>, Error> {
         HostModules::compile(&modules.into_iter().collect::<Vec<_>>(), true)
     }
 
     /// Checks and compiles `modules`, with the optimizations of [`Config::optimize`] on or off.
-    pub(crate) fn compile(modules: &[NativeModule], optimize: bool) -> Result<HostModules, Error> {
+    pub(crate) fn compile(modules: &[NativeModule<C>], optimize: bool) -> Result<HostModules<C>, Error> {
         for (i, m) in modules.iter().enumerate() {
             assert!(!modules[..i].iter().any(|x| x.name() == m.name()), "host module `{}` is added twice", m.name());
         }
-        let registry = Registry::for_modules(modules, optimize);
+        let (registry, bound) = Registry::for_modules(modules, optimize);
         if registry.base.is_some() {
             registry.snapshot()?;
         }
-        Ok(HostModules(registry))
+        Ok(HostModules { registry, bound: bound.into() })
     }
 }
 
-impl Default for HostModules {
+impl<C> HostModules<C> {
+    /// The natives of a run whose context is `context`.
+    fn natives(&self, context: &Arc<C>) -> Arc<Vec<NativeEntry>> {
+        if self.bound.is_empty() {
+            return self.registry.natives.clone();
+        }
+        let mut natives = Vec::clone(&self.registry.natives);
+        for (id, bind) in self.bound.iter() {
+            natives[*id as usize].f = bind(context);
+        }
+        Arc::new(natives)
+    }
+}
+
+impl<C> Default for HostModules<C> {
     fn default() -> Self {
-        HostModules(STD.clone())
+        HostModules { registry: STD.clone(), bound: Arc::new([]) }
     }
 }
 
-impl fmt::Debug for HostModules {
+impl<C> fmt::Debug for HostModules<C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HostModules").finish_non_exhaustive()
     }
 }
 
-impl fmt::Debug for CompiledProgram {
+impl<C> fmt::Debug for CompiledProgram<C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CompiledProgram").field("cwd", &self.cwd).finish_non_exhaustive()
     }
 }
 
-impl CompiledProgram {
+impl<C> CompiledProgram<C> {
     /// The function `name` of the main module, public or private, for [`Engine::call`]. A host
     /// can call a top-level function without type parameters whose types the engine can
     /// describe. For any other name, fails with the reason.
-    pub fn function(&self, name: &str) -> Result<Function, FunctionError> {
+    pub fn function(&self, name: &str) -> Result<Function<C>, FunctionError> {
         match self.program.functions.iter().find(|(n, _)| n == name) {
             Some((_, Ok((proto, signature)))) => Ok(Function { program: self.clone(), proto: *proto, signature: signature.clone() }),
             Some((_, Err(e))) => Err(e.clone()),
@@ -384,14 +430,25 @@ impl fmt::Display for FunctionError {
 impl std::error::Error for FunctionError {}
 
 /// A function of a compiled program's main module (see [`CompiledProgram::function`]).
-#[derive(Clone, Debug)]
-pub struct Function {
-    program: CompiledProgram,
+pub struct Function<C = ()> {
+    program: CompiledProgram<C>,
     proto: u32,
     signature: FunctionSignature,
 }
 
-impl Function {
+impl<C> Clone for Function<C> {
+    fn clone(&self) -> Self {
+        Function { program: self.program.clone(), proto: self.proto, signature: self.signature.clone() }
+    }
+}
+
+impl<C> fmt::Debug for Function<C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Function").field("signature", &self.signature).finish_non_exhaustive()
+    }
+}
+
+impl<C> Function<C> {
     pub fn signature(&self) -> &FunctionSignature {
         &self.signature
     }
@@ -399,7 +456,7 @@ impl Function {
     /// The call of the function with `args`, one JSON text for each
     /// parameter, for [`Engine::call`]. Fails if the number of arguments is
     /// not the number of parameters.
-    pub fn bind<'a>(&'a self, args: &'a [&'a str]) -> Result<BoundCall<'a>, ArityError> {
+    pub fn bind<'a>(&'a self, args: &'a [&'a str]) -> Result<BoundCall<'a, C>, ArityError> {
         let params = self.signature.params.len();
         if args.len() != params {
             return Err(ArityError { params, args: args.len() });
@@ -410,11 +467,18 @@ impl Function {
 
 /// A call of a [`Function`] with one argument for each parameter
 /// ([`Function::bind`]).
-#[derive(Clone, Copy)]
-pub struct BoundCall<'a> {
-    function: &'a Function,
+pub struct BoundCall<'a, C = ()> {
+    function: &'a Function<C>,
     args: &'a [&'a str],
 }
+
+impl<C> Clone for BoundCall<'_, C> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<C> Copy for BoundCall<'_, C> {}
 
 /// [`Function::bind`] got `args` arguments for a function with `params`
 /// parameters.
@@ -525,16 +589,13 @@ enum StdinConfig {
     Feed(crate::feed::StdinFeed),
 }
 
-/// Engine configuration (builder style).
-#[derive(Clone)]
-pub struct Config {
+/// Engine configuration (builder style). `C` is the context type of the
+/// host modules ([`Config::host_modules`]).
+pub struct Config<C = ()> {
     pub(crate) policy: Policy,
     pub(crate) prompter: Option<Arc<dyn Prompter>>,
     pub(crate) limits: Limits,
-    host: HostModules,
-    pub(crate) stdout: SharedSink,
-    pub(crate) stderr: SharedSink,
-    log_sink: Option<Arc<dyn crate::stdlib::log::LogSink>>,
+    host: HostModules<C>,
     log_level: Option<crate::stdlib::log::LogLevel>,
     stdin: StdinConfig,
     pub(crate) cwd: Option<PathBuf>,
@@ -542,7 +603,6 @@ pub struct Config {
     pub(crate) library: Option<PathBuf>,
     pub(crate) args: Vec<String>,
     pub(crate) env: Option<Vec<(String, String)>>,
-    pub(crate) seed: Option<u64>,
     pub(crate) gc_stress: bool,
     pub(crate) retry_stress: bool,
     pub(crate) optimize: bool,
@@ -551,14 +611,172 @@ pub struct Config {
     #[cfg(feature = "os")]
     pub(crate) tls: crate::stdlib::net::TlsSettings,
     pub(crate) fs: Fs,
-    pub(crate) request_filter: Option<RequestFilter>,
     pub(crate) clock: Arc<dyn Clock>,
-    #[cfg(feature = "os")]
-    pub(crate) network: Option<Arc<dyn crate::network::Network>>,
     pub(crate) time_zone: Option<crate::stdlib::time::TimeZone>,
-    context: Option<Arc<dyn std::any::Any + Send + Sync>>,
-    durable: Option<crate::journal::Durable>,
     interrupt: InterruptHandle,
+}
+
+/// The values of one run, which the run consumes: its durability `D`
+/// ([`NoJournal`] or [`Durable`](crate::journal::Durable)), its host
+/// context of type `C` ([`Run::context`]), its random seed, its output
+/// sinks, its network and its HTTP request filter.
+///
+/// A durable run's journal belongs to that run only, so a second run on the
+/// same engine cannot replay a stale journal:
+///
+/// ```compile_fail,E0382
+/// # use sandlang::engine::{Engine, Config, Run};
+/// # use sandlang::journal::{Durable, MemoryJournal};
+/// # async fn f(engine: &mut Engine) {
+/// let run = Run::new().durable(Durable::new(std::sync::Arc::new(MemoryJournal::new()), Vec::new()));
+/// engine.run_source("a.sand", "print(1)", run).await;
+/// engine.run_source("a.sand", "print(1)", run).await;
+/// # }
+/// ```
+pub struct Run<D = NoJournal, C = ()> {
+    durability: D,
+    context: Arc<C>,
+    io: RunIo,
+}
+
+/// The output, randomness and network of a run (see [`Run`]).
+#[derive(Clone)]
+pub(crate) struct RunIo {
+    pub seed: Option<u64>,
+    pub stdout: SharedSink,
+    pub stderr: SharedSink,
+    pub log_sink: Option<Arc<dyn crate::stdlib::log::LogSink>>,
+    #[cfg(feature = "os")]
+    pub network: Option<Arc<dyn crate::network::Network>>,
+    pub request_filter: Option<RequestFilter>,
+}
+
+pub use crate::journal::NoJournal;
+
+impl Default for Run {
+    fn default() -> Self {
+        Run::new()
+    }
+}
+
+impl Run {
+    /// A run without a journal, with the context `()`, the process's
+    /// standard output and error, an entropy seed and the host's network.
+    pub fn new() -> Run {
+        Run {
+            durability: NoJournal,
+            context: Arc::new(()),
+            io: RunIo {
+                seed: None,
+                stdout: Arc::new(crate::stdio::StdoutSink::default()),
+                stderr: Arc::new(crate::stdio::StderrSink::default()),
+                log_sink: None,
+                #[cfg(feature = "os")]
+                network: None,
+                request_filter: None,
+            },
+        }
+    }
+}
+
+impl<C> Run<NoJournal, C> {
+    /// Makes the run durable (SPEC §16.7): the engine records the
+    /// nondeterministic inputs of the run in the journal of `durable`, and
+    /// replays the entries that it already holds. A durable run never
+    /// prompts for permissions and disables `net` sockets and HTTP servers,
+    /// and its outcome can be [`Outcome::Suspended`].
+    pub fn durable(self, durable: crate::journal::Durable) -> Run<crate::journal::Durable, C> {
+        Run { durability: durable, context: self.context, io: self.io }
+    }
+}
+
+impl<D, C> Run<D, C> {
+    /// Gives the run the host data `context`, which the natives of
+    /// [`NativeModule::context_function`] get. Its type is the context type
+    /// of the host modules that the run runs with, so a run of modules with
+    /// a context cannot start without one:
+    ///
+    /// ```compile_fail,E0308
+    /// # use sandlang::engine::{Config, Engine, HostModules, Run};
+    /// # use sandlang::native::NativeModule;
+    /// # async fn f() {
+    /// let m = NativeModule::<String>::with_context("host");
+    /// let mut engine = Engine::new(Config::new().host_modules(HostModules::new([m]).unwrap()));
+    /// engine.run_source("main.sand", "print(1)", Run::new()).await;
+    /// # }
+    /// ```
+    pub fn context<H>(self, context: Arc<H>) -> Run<D, H> {
+        Run { durability: self.durability, context, io: self.io }
+    }
+
+    pub fn seed(mut self, s: u64) -> Self {
+        self.io.seed = Some(s);
+        self
+    }
+
+    pub fn stdout(mut self, s: impl OutputSink + 'static) -> Self {
+        self.io.stdout = Arc::new(s);
+        self
+    }
+
+    pub fn stderr(mut self, s: impl OutputSink + 'static) -> Self {
+        self.io.stderr = Arc::new(s);
+        self
+    }
+
+    /// Routes `log` records to `sink` instead of standard error. Records count
+    /// against `max_output_bytes`, but do not require [`Capability::Stderr`].
+    pub fn log_sink(mut self, sink: impl crate::stdlib::log::LogSink + 'static) -> Self {
+        self.io.log_sink = Some(Arc::new(sink));
+        self
+    }
+
+    /// Sets the network provider for host resolution, outgoing TCP
+    /// connections, and TCP listeners.
+    #[cfg(feature = "os")]
+    pub fn network(mut self, network: Arc<dyn crate::network::Network>) -> Self {
+        self.io.network = Some(network);
+        self
+    }
+
+    /// Filters the headers of every HTTP request that the run sends. In a
+    /// durable run, replay sends no request and does not call the filter.
+    pub fn request_filter(
+        mut self,
+        filter: impl Fn(&RequestTarget, &mut Vec<(String, String)>) -> Result<(), String> + Send + Sync + 'static,
+    ) -> Self {
+        self.io.request_filter = Some(Arc::new(filter));
+        self
+    }
+}
+
+impl<C> Clone for Config<C> {
+    fn clone(&self) -> Self {
+        Config {
+            policy: self.policy.clone(),
+            prompter: self.prompter.clone(),
+            limits: self.limits.clone(),
+            host: self.host.clone(),
+            log_level: self.log_level,
+            stdin: self.stdin.clone(),
+            cwd: self.cwd.clone(),
+            module_root: self.module_root.clone(),
+            library: self.library.clone(),
+            args: self.args.clone(),
+            env: self.env.clone(),
+            gc_stress: self.gc_stress,
+            retry_stress: self.retry_stress,
+            optimize: self.optimize,
+            dump_bytecode: self.dump_bytecode,
+            exit_after_run: self.exit_after_run,
+            #[cfg(feature = "os")]
+            tls: self.tls.clone(),
+            fs: self.fs.clone(),
+            clock: self.clock.clone(),
+            time_zone: self.time_zone.clone(),
+            interrupt: self.interrupt.clone(),
+        }
+    }
 }
 
 /// HTTP request destination.
@@ -586,15 +804,14 @@ impl Default for Config {
 }
 
 impl Config {
+    /// The standard configuration, with only the standard library as
+    /// modules.
     pub fn new() -> Config {
         Config {
             policy: Policy::Rules(Arc::new(RulePolicy::standard())),
             prompter: None,
             limits: Limits::default(),
             host: HostModules::default(),
-            stdout: Arc::new(crate::stdio::StdoutSink::default()),
-            stderr: Arc::new(crate::stdio::StderrSink::default()),
-            log_sink: None,
             log_level: Some(crate::stdlib::log::LogLevel::Info),
             stdin: StdinConfig::None,
             cwd: None,
@@ -602,7 +819,6 @@ impl Config {
             library: None,
             args: Vec::new(),
             env: None,
-            seed: None,
             gc_stress: false,
             retry_stress: false,
             optimize: true,
@@ -611,17 +827,14 @@ impl Config {
             #[cfg(feature = "os")]
             tls: Default::default(),
             fs: Fs::default(),
-            request_filter: None,
             clock: Arc::new(SystemClock),
-            #[cfg(feature = "os")]
-            network: None,
             time_zone: None,
-            context: None,
-            durable: None,
             interrupt: InterruptHandle::new(),
         }
     }
+}
 
+impl<C> Config<C> {
     /// Lets `handle` stop the engines made from this configuration, and
     /// their sessions. Without this call, nothing can interrupt them.
     pub fn interrupt(mut self, handle: InterruptHandle) -> Self {
@@ -637,49 +850,12 @@ impl Config {
         (flag, io)
     }
 
-    /// Makes each run durable (SPEC §16.7): the engine records the
-    /// nondeterministic inputs of the run in the journal of `durable`, and
-    /// replays the entries that it already holds. A journaled run never
-    /// prompts for permissions and disables `net` sockets and HTTP servers.
-    pub fn durable(mut self, durable: crate::journal::Durable) -> Self {
-        self.durable = Some(durable);
-        self
-    }
-
-    /// Attaches host data to each run of the engine. Native functions
-    /// registered with [`NativeModule::vm_function`] read it with
-    /// [`Vm::context`](crate::vm::Vm::context). Setting the context does not
-    /// recompile host modules, so a host can share one set of compiled
-    /// modules across engines that serve different callers.
-    pub fn context(mut self, data: Arc<dyn std::any::Any + Send + Sync>) -> Self {
-        self.context = Some(data);
-        self
-    }
-
     /// Sets the clock and timer provider for the engine.
     pub fn clock(mut self, clock: Arc<dyn Clock>) -> Self {
         self.clock = clock;
         self
     }
 
-    /// Sets the network provider for host resolution, outgoing TCP
-    /// connections, and TCP listeners.
-    #[cfg(feature = "os")]
-    pub fn network(mut self, network: Arc<dyn crate::network::Network>) -> Self {
-        self.network = Some(network);
-        self
-    }
-
-    /// Filters the headers of every HTTP request that the engine sends. In
-    /// a journaled run, replay sends no request and does not call the
-    /// filter.
-    pub fn request_filter(
-        mut self,
-        filter: impl Fn(&RequestTarget, &mut Vec<(String, String)>) -> Result<(), String> + Send + Sync + 'static,
-    ) -> Self {
-        self.request_filter = Some(Arc::new(filter));
-        self
-    }
     /// Sets the rule policy, replacing any custom policy. Defaults to [`RulePolicy::standard`].
     pub fn policy(mut self, p: RulePolicy) -> Self {
         self.policy = Policy::Rules(Arc::new(p));
@@ -699,24 +875,57 @@ impl Config {
         self
     }
     /// Sets the host modules that scripts can import. By default, scripts can import only the
-    /// standard library.
-    pub fn host_modules(mut self, host: HostModules) -> Self {
-        self.host = host;
-        self
-    }
-    pub fn stdout(mut self, s: impl OutputSink + 'static) -> Self {
-        self.stdout = Arc::new(s);
-        self
-    }
-    pub fn stderr(mut self, s: impl OutputSink + 'static) -> Self {
-        self.stderr = Arc::new(s);
-        self
-    }
-    /// Routes `log` records to `sink` instead of standard error. Records count
-    /// against `max_output_bytes`, but do not require [`Capability::Stderr`].
-    pub fn log_sink(mut self, sink: impl crate::stdlib::log::LogSink + 'static) -> Self {
-        self.log_sink = Some(Arc::new(sink));
-        self
+    /// standard library. The context type of the modules becomes the context type of the
+    /// engine's runs.
+    pub fn host_modules<H>(self, host: HostModules<H>) -> Config<H> {
+        let Config {
+            policy,
+            prompter,
+            limits,
+            host: _,
+            log_level,
+            stdin,
+            cwd,
+            module_root,
+            library,
+            args,
+            env,
+            gc_stress,
+            retry_stress,
+            optimize,
+            dump_bytecode,
+            exit_after_run,
+            #[cfg(feature = "os")]
+            tls,
+            fs,
+            clock,
+            time_zone,
+            interrupt,
+        } = self;
+        Config {
+            policy,
+            prompter,
+            limits,
+            host,
+            log_level,
+            stdin,
+            cwd,
+            module_root,
+            library,
+            args,
+            env,
+            gc_stress,
+            retry_stress,
+            optimize,
+            dump_bytecode,
+            exit_after_run,
+            #[cfg(feature = "os")]
+            tls,
+            fs,
+            clock,
+            time_zone,
+            interrupt,
+        }
     }
     /// Sets the initial minimum script log level (default [`LogLevel::Info`](crate::stdlib::log::LogLevel::Info)),
     /// or disables script logging if `level` is `None`.
@@ -776,10 +985,6 @@ impl Config {
     /// [`Capability::TimeZone`]. Defaults to `UTC`.
     pub fn time_zone(mut self, zone: crate::stdlib::time::TimeZone) -> Self {
         self.time_zone = Some(zone);
-        self
-    }
-    pub fn seed(mut self, s: u64) -> Self {
-        self.seed = Some(s);
         self
     }
     /// Testing aid: run a garbage collection at every safe point (every
@@ -959,7 +1164,8 @@ static STD: LazyLock<Arc<Registry>> = LazyLock::new(|| {
         m.register_types(&mut r);
     }
     for m in &modules {
-        m.register(&mut r);
+        let bound = m.register(&mut r);
+        debug_assert!(bound.is_empty(), "a standard module has no context");
     }
     Arc::new(r)
 });
@@ -978,10 +1184,15 @@ impl Registry {
         }
     }
 
-    fn for_modules(modules: &[NativeModule], optimize: bool) -> Arc<Registry> {
+    /// The registry of the standard library and `modules`, and the natives
+    /// of `modules` that each run binds to its context.
+    fn for_modules<C: Send + Sync + 'static>(
+        modules: &[NativeModule<C>],
+        optimize: bool,
+    ) -> (Arc<Registry>, Vec<(u32, crate::native::Binder<C>)>) {
         let std = STD.clone();
         if modules.is_empty() {
-            return std;
+            return (std, Vec::new());
         }
         let mut r = Registry {
             natives: std.natives.clone(),
@@ -993,11 +1204,12 @@ impl Registry {
         for m in modules {
             m.register_types(&mut r);
         }
+        let mut bound = Vec::new();
         for m in modules {
-            m.register(&mut r);
+            bound.extend(m.register(&mut r));
         }
         r.base = Some(std);
-        Arc::new(r)
+        (Arc::new(r), bound)
     }
 
     pub fn add_native(&mut self, key: String, f: HostFn, sig: Signature, names: Option<Arc<[String]>>, doc: Option<Arc<str>>) {
@@ -1122,8 +1334,10 @@ impl Registry {
     }
 }
 
-pub struct Engine {
-    config: Arc<Config>,
+/// Compiles and runs programs. `C` is the context type of its host modules,
+/// which every run of the engine takes ([`Run::context`]).
+pub struct Engine<C = ()> {
+    config: Arc<Config<C>>,
     interrupt: Arc<AtomicBool>,
     shared: Arc<IoShared>,
     /// "Always" prompt answers, remembered for the lifetime of the engine
@@ -1143,8 +1357,6 @@ pub struct Engine {
 /// A compiled program.
 pub(crate) struct Compiled {
     pub program: Arc<Program>,
-    /// The natives that `program` calls.
-    pub natives: Arc<Vec<NativeEntry>>,
     /// The main module's lint warnings (if asked for).
     pub lints: Option<Vec<crate::lint::LintWarning>>,
     /// When the run's wall-time limit passes, counted from the start of
@@ -1170,9 +1382,9 @@ pub(crate) fn on_compile_stack<R: Send + 'static>(f: impl FnOnce() -> Result<R, 
     crate::platform::on_deep_stack(f).unwrap_or_else(|p| Err(Error::compiler_bug(&crate::unwind::panic_text(&*p))))
 }
 
-impl Engine {
+impl<C: Send + Sync + 'static> Engine<C> {
     /// Creates an engine with `config`.
-    pub fn new(config: Config) -> Engine {
+    pub fn new(config: Config<C>) -> Engine<C> {
         let origin = config.clock.now();
         let (interrupt, shared) = config.attach_interrupt();
         Engine {
@@ -1242,11 +1454,12 @@ impl Engine {
     }
 
     /// Starts an interactive session ([`Session`]) with this engine's
-    /// configuration. The session shares the engine's "always" answers to
-    /// permission prompts and its [`InterruptHandle`].
-    pub fn session(&self) -> Session {
+    /// configuration, whose inputs run with the values of `run`. The session
+    /// shares the engine's "always" answers to permission prompts and its
+    /// [`InterruptHandle`]. A session has no journal.
+    pub fn session(&self, run: Run<NoJournal, C>) -> Session<C> {
         let (interrupt, shared) = self.config.attach_interrupt();
-        Session::new(Engine {
+        let engine = Engine {
             config: self.config.clone(),
             interrupt,
             shared,
@@ -1255,15 +1468,17 @@ impl Engine {
             root: OnceLock::new(),
             spare: Mutex::default(),
             origin: self.origin,
-        })
+        };
+        let natives = self.config.host.natives(&run.context);
+        Session::new(engine, natives, run.io)
     }
 
-    pub(crate) fn config(&self) -> &Config {
+    pub(crate) fn config(&self) -> &Config<C> {
         &self.config
     }
 
     pub(crate) fn registry(&self) -> &Arc<Registry> {
-        &self.config.host.0
+        &self.config.host.registry
     }
 
     /// Forgets interrupts of earlier runs; interrupts from now on stop the
@@ -1334,23 +1549,41 @@ impl Engine {
         })
     }
 
-    pub async fn run_source(&mut self, name: &str, source: &str) -> Result<Outcome, Error> {
-        crate::unwind::guard(self.run_source_inner(name, source)).await
+    /// Compiles and runs source text as a script, with the values of `run`.
+    pub async fn run_source<D: Durability>(
+        &mut self,
+        name: &str,
+        source: &str,
+        run: Run<D, C>,
+    ) -> Result<Outcome<Infallible, D::Suspends>, Error> {
+        crate::unwind::guard(self.run_source_inner(name, source, run)).await
     }
 
-    async fn run_source_inner(&mut self, name: &str, source: &str) -> Result<Outcome, Error> {
+    async fn run_source_inner<D: Durability>(
+        &mut self,
+        name: &str,
+        source: &str,
+        run: Run<D, C>,
+    ) -> Result<Outcome<Infallible, D::Suspends>, Error> {
         let (root, normal) = self.source_root().clone();
         let compiled = self.compile(name, source, &normal, None).await?;
-        self.run_script(compiled, root).await
+        let host = self.config.host.clone();
+        self.run_script(compiled, root, &host, run).await
     }
 
-    pub async fn run_file(&mut self, path: impl AsRef<Path>) -> Result<Outcome, Error> {
-        crate::unwind::guard(self.run_file_inner(path.as_ref())).await
+    /// Compiles and runs the file at `path` as a script, with the values of `run`.
+    pub async fn run_file<D: Durability>(
+        &mut self,
+        path: impl AsRef<Path>,
+        run: Run<D, C>,
+    ) -> Result<Outcome<Infallible, D::Suspends>, Error> {
+        crate::unwind::guard(self.run_file_inner(path.as_ref(), run)).await
     }
 
-    async fn run_file_inner(&mut self, path: &Path) -> Result<Outcome, Error> {
+    async fn run_file_inner<D: Durability>(&mut self, path: &Path, run: Run<D, C>) -> Result<Outcome<Infallible, D::Suspends>, Error> {
         let (compiled, cwd) = self.compile_main(path).await?;
-        self.run_script(compiled, cwd).await
+        let host = self.config.host.clone();
+        self.run_script(compiled, cwd, &host, run).await
     }
 
     /// Compiles a file and its imports without running it. The returned program runs with
@@ -1358,11 +1591,11 @@ impl Engine {
     /// that runs the same code many times compiles it once.
     ///
     /// Import checks happen during compilation, under this engine's policy and file system.
-    pub async fn compile_file(&mut self, path: impl AsRef<Path>) -> Result<CompiledProgram, Error> {
+    pub async fn compile_file(&mut self, path: impl AsRef<Path>) -> Result<CompiledProgram<C>, Error> {
         crate::unwind::guard(self.compile_file_inner(path.as_ref())).await
     }
 
-    async fn compile_file_inner(&mut self, path: &Path) -> Result<CompiledProgram, Error> {
+    async fn compile_file_inner(&mut self, path: &Path) -> Result<CompiledProgram<C>, Error> {
         let (compiled, cwd) = self.compile_main(path).await?;
         Ok(CompiledProgram { program: compiled.program, host: self.config.host.clone(), cwd })
     }
@@ -1376,11 +1609,15 @@ impl Engine {
     }
 
     /// Runs a program from [`Engine::compile_file`] with the host modules that it was compiled
-    /// against, and with the configuration of this engine otherwise. The wall-time limit counts
-    /// from the start of the run.
-    pub async fn run_program(&mut self, program: &CompiledProgram) -> Result<Outcome, Error> {
+    /// against, with the values of `run`, and with the configuration of this engine otherwise.
+    /// The wall-time limit counts from the start of the run.
+    pub async fn run_program<D: Durability, P: Send + Sync + 'static>(
+        &mut self,
+        program: &CompiledProgram<P>,
+        run: Run<D, P>,
+    ) -> Result<Outcome<Infallible, D::Suspends>, Error> {
         let compiled = self.start_program(program);
-        crate::unwind::guard(self.run_script(compiled, program.cwd.clone())).await
+        crate::unwind::guard(self.run_script(compiled, program.cwd.clone(), &program.host, run)).await
     }
 
     /// Runs the program of the function of `call` as [`Engine::run_program`] does, but calls
@@ -1389,62 +1626,74 @@ impl Engine {
     ///
     /// Each argument is JSON text, which the engine decodes to the type of its parameter as
     /// `json.decode` does; an argument that does not decode fails the call with
-    /// [`Error::Argument`]. A journaled run replays the same call, so the host gives the same
+    /// [`Error::Argument`]. A durable run replays the same call, so the host gives the same
     /// arguments to each execution of the run.
-    pub async fn call(&mut self, call: BoundCall<'_>) -> Result<Outcome<Returned>, Error> {
+    pub async fn call<D: Durability, P: Send + Sync + 'static>(
+        &mut self,
+        call: BoundCall<'_, P>,
+        run: Run<D, P>,
+    ) -> Result<Outcome<Returned, D::Suspends>, Error> {
         let BoundCall { function, args } = call;
         let compiled = self.start_program(&function.program);
         let cwd = function.program.cwd.clone();
-        crate::unwind::guard(self.call_compiled(compiled, cwd, function, args)).await
+        crate::unwind::guard(self.call_compiled(compiled, cwd, function, args, run)).await
     }
 
-    async fn call_compiled(
+    async fn call_compiled<D: Durability, P>(
         &mut self,
         compiled: Compiled,
         cwd: PathBuf,
-        function: &Function,
+        function: &Function<P>,
         args: &[&str],
-    ) -> Result<Outcome<Returned>, Error> {
+        run: Run<D, P>,
+    ) -> Result<Outcome<Returned, D::Suspends>, Error> {
         let sig = function.signature();
         let r = self
-            .execute(compiled, cwd, async |vm: &mut Vm| match call_function(vm, function, args).await? {
-                Called::Returned(v) => {
-                    vm.pinned.push(v);
-                    let r = match vm.end_tasks().await {
-                        Ok(Some(c)) => Ok(Ok(Outcome::Exited(c))),
-                        Ok(None) => match returned(vm, v, &sig.returns) {
-                            Ok(r) => Ok(Ok(Outcome::Returned(r))),
-                            Err(c) => match vm.ending_of(c, |_| vec![]) {
-                                Ending::Exit(code) => Ok(Ok(Outcome::Exited(code))),
-                                Ending::Trap(t) => Err(t),
+            .execute(compiled, cwd, &function.program.host, run, async |vm: &mut Vm| {
+                match call_function::<D::Suspends, P>(vm, function, args).await? {
+                    Called::Returned(v) => {
+                        vm.pinned.push(v);
+                        let r = match vm.end_tasks().await {
+                            Ok(Some(c)) => Ok(Ok(Outcome::Exited(c))),
+                            Ok(None) => match returned(vm, v, &sig.returns) {
+                                Ok(r) => Ok(Ok(Outcome::Returned(r))),
+                                Err(c) => match vm.ending_of(c, |_| vec![]) {
+                                    Ending::Exit(code) => Ok(Ok(Outcome::Exited(code))),
+                                    Ending::Trap(t) => Err(t),
+                                },
                             },
-                        },
-                        Err(t) => Err(t),
-                    };
-                    vm.pinned.pop();
-                    r
+                            Err(t) => Err(t),
+                        };
+                        vm.pinned.pop();
+                        r
+                    }
+                    Called::Exited(c) => Ok(Ok(Outcome::Exited(c))),
+                    Called::Suspended(s) => Ok(Ok(Outcome::Suspended(s))),
+                    Called::BadArgument { index, error } => Ok(Err(Error::Argument { index, error })),
                 }
-                Called::Exited(c) => Ok(Ok(Outcome::Exited(c))),
-                Called::Suspended(s) => Ok(Ok(Outcome::Suspended(s))),
-                Called::BadArgument { index, error } => Ok(Err(Error::Argument { index, error })),
             })
             .await;
         r.unwrap_or_else(|t| Err(trap_error(t)))
     }
 
     /// Prepares a run of `program` on this engine.
-    fn start_program(&self, program: &CompiledProgram) -> Compiled {
+    fn start_program<P>(&self, program: &CompiledProgram<P>) -> Compiled {
         self.clear_interrupt();
-        let natives = program.host.0.natives.clone();
-        Compiled { program: program.program.clone(), natives, lints: None, deadline: self.deadline(), snapshot: None }
+        Compiled { program: program.program.clone(), lints: None, deadline: self.deadline(), snapshot: None }
     }
 
     /// Runs `compiled` as a script: its module initializers, then the tasks that are left.
-    async fn run_script(&mut self, compiled: Compiled, cwd: PathBuf) -> Result<Outcome, Error> {
+    async fn run_script<D: Durability, P>(
+        &mut self,
+        compiled: Compiled,
+        cwd: PathBuf,
+        host: &HostModules<P>,
+        run: Run<D, P>,
+    ) -> Result<Outcome<Infallible, D::Suspends>, Error> {
         let entry = compiled.program.entry;
         let r = self
-            .execute(compiled, cwd, async |vm: &mut Vm| {
-                let r = vm.run_main::<Suspension>(entry).await;
+            .execute(compiled, cwd, host, run, async |vm: &mut Vm| {
+                let r = vm.run_main::<D::Suspends>(entry).await;
                 end_run(vm, r).await
             })
             .await;
@@ -1456,18 +1705,22 @@ impl Engine {
         }
     }
 
-    pub async fn run_tests(&mut self, path: impl AsRef<Path>) -> Result<TestReport, Error> {
-        crate::unwind::guard(self.run_tests_inner(path.as_ref())).await
+    /// Runs the tests of the file at `path`, with the values of `run`. The
+    /// engine discards the output of tests, so the sinks of `run` get
+    /// nothing.
+    pub async fn run_tests(&mut self, path: impl AsRef<Path>, run: Run<NoJournal, C>) -> Result<TestReport, Error> {
+        crate::unwind::guard(self.run_tests_inner(path.as_ref(), run)).await
     }
 
-    async fn run_tests_inner(&mut self, path: &Path) -> Result<TestReport, Error> {
+    async fn run_tests_inner(&mut self, path: &Path, run: Run<NoJournal, C>) -> Result<TestReport, Error> {
         let (compiled, cwd) = self.compile_main(path).await?;
         let prog = compiled.program;
+        let natives = self.config.host.natives(&run.context);
         // The wall-time limit bounds the whole test run.
         let mut deadline = compiled.deadline;
         let mut report = TestReport::default();
         for (tname, proto) in prog.tests.clone() {
-            let mut vm = self.new_vm(prog.clone(), compiled.natives.clone(), cwd.clone(), true);
+            let mut vm = self.new_vm(prog.clone(), natives.clone(), cwd.clone(), &run.io, true);
             vm.deadline = deadline;
             let init = vm.run_main::<Infallible>(prog.entry).await;
             let result = match init {
@@ -1511,8 +1764,9 @@ impl Engine {
         Ok((name, source, root))
     }
 
-    /// A VM that runs `prog`, which calls `natives`.
-    pub(crate) fn new_vm(&self, prog: Arc<Program>, natives: Arc<Vec<NativeEntry>>, cwd: PathBuf, quiet: bool) -> Vm {
+    /// A VM that runs `prog`, which calls `natives`, with the output,
+    /// randomness and network `io`.
+    pub(crate) fn new_vm(&self, prog: Arc<Program>, natives: Arc<Vec<NativeEntry>>, cwd: PathBuf, io: &RunIo, quiet: bool) -> Vm {
         let c = &self.config;
         let stdin = match &c.stdin {
             StdinConfig::None => StdinSource::None,
@@ -1526,7 +1780,7 @@ impl Engine {
             _ => None,
         };
         let (stdout, stderr): (SharedSink, SharedSink) =
-            if quiet { (Arc::new(NullSink), Arc::new(NullSink)) } else { (c.stdout.clone(), c.stderr.clone()) };
+            if quiet { (Arc::new(NullSink), Arc::new(NullSink)) } else { (io.stdout.clone(), io.stderr.clone()) };
         let host = Host {
             policy: c.policy.clone(),
             prompter: c.prompter.clone(),
@@ -1542,9 +1796,9 @@ impl Engine {
             cwd,
             args: c.args.clone(),
             env: c.env.clone(),
-            rng: Rng::new(c.seed.unwrap_or_else(entropy_seed)),
+            rng: Rng::new(io.seed.unwrap_or_else(entropy_seed)),
             log_level: c.log_level,
-            log_sink: if quiet { Some(Arc::new(crate::stdlib::log::NullLogSink)) } else { c.log_sink.clone() },
+            log_sink: if quiet { Some(Arc::new(crate::stdlib::log::NullLogSink)) } else { io.log_sink.clone() },
             interrupt: self.interrupt.clone(),
             stream_decisions: [None; 2],
             #[cfg(feature = "os")]
@@ -1552,14 +1806,13 @@ impl Engine {
             #[cfg(feature = "os")]
             http_pool: crate::stdlib::http::Pool::new(c.limits.max_open_resources, c.clock.clone()),
             fs: c.fs.clone(),
-            request_filter: c.request_filter.clone(),
+            request_filter: io.request_filter.clone(),
             regex_cache: Vec::new(),
             clock: c.clock.clone(),
             origin: self.origin,
             #[cfg(feature = "os")]
-            network: c.network.clone().unwrap_or_else(|| Arc::new(crate::network::OsNetwork)),
+            network: io.network.clone().unwrap_or_else(|| Arc::new(crate::network::OsNetwork)),
             time_zone: c.time_zone.as_ref().map(|z| z.zone().clone()),
-            context: c.context.clone(),
         };
         let mut vm = Vm::new(prog, natives, host);
         vm.io = IoTable::with_shared(self.shared.clone());
@@ -1571,9 +1824,17 @@ impl Engine {
         vm
     }
 
-    /// Runs `run` on a new VM of `compiled`, with the configured journal, and records the
-    /// run's statistics.
-    async fn execute<T>(&mut self, compiled: Compiled, cwd: PathBuf, run: impl AsyncFnOnce(&mut Vm) -> Result<T, Trap>) -> Result<T, Trap> {
+    /// Runs `body` on a new VM of `compiled`, with the natives of `host` and the values of
+    /// `run`, and records the run's statistics.
+    async fn execute<T, D: Durability, P>(
+        &mut self,
+        compiled: Compiled,
+        cwd: PathBuf,
+        host: &HostModules<P>,
+        run: Run<D, P>,
+        body: impl AsyncFnOnce(&mut Vm) -> Result<T, Trap>,
+    ) -> Result<T, Trap> {
+        let Run { durability, context, io } = run;
         let prog = compiled.program;
         if self.config.dump_bytecode {
             for (i, p) in prog.protos.iter().enumerate() {
@@ -1585,11 +1846,11 @@ impl Engine {
                 }
             }
         }
-        let mut vm = self.new_vm(prog.clone(), compiled.natives, cwd, false);
+        let mut vm = self.new_vm(prog.clone(), host.natives(&context), cwd, &io, false);
         vm.deadline = compiled.deadline;
-        let r = match self.attach_journal(&mut vm) {
+        let r = match self.attach_journal(&mut vm, durability, io.seed.is_some()) {
             Ok(()) => {
-                let r = run(&mut vm).await;
+                let r = body(&mut vm).await;
                 match r {
                     Err(Trap::Diverged(_) | Trap::Interrupted | Trap::Abort(_)) => r,
                     r => match vm.flush_journal().await {
@@ -1600,7 +1861,7 @@ impl Engine {
             }
             Err(t) => Err(t),
         };
-        let _ = self.config.stdout.flush();
+        let _ = io.stdout.flush();
         vm.heap.note_peak();
         self.stats = RunStats { fuel: vm.meter.used(), peak_memory: vm.heap.peak(), output_bytes: vm.host.output_bytes, gc: vm.heap.stats };
         if self.config.exit_after_run {
@@ -1612,15 +1873,17 @@ impl Engine {
         r
     }
 
-    /// Attaches the configured journal to `vm`, the VM of a run. A
-    /// journaled run never prompts and ignores "always" answers of earlier
-    /// runs, since replay cannot repeat a prompt's answer.
-    fn attach_journal(&self, vm: &mut Vm) -> Result<(), Trap> {
-        let Some(durable) = &self.config.durable else { return Ok(()) };
+    /// Attaches the journal of `durability` to `vm`, the VM of a run, if it
+    /// has one. A journaled run never prompts and ignores "always" answers of
+    /// earlier runs, since replay cannot repeat a prompt's answer. `seeded`
+    /// says whether the run has a fixed seed.
+    fn attach_journal(&self, vm: &mut Vm, durability: impl Durability, seeded: bool) -> Result<(), Trap> {
+        let Some(crate::vm::journal::Started(state)) = durability.journal(self.config.clock.now(), &self.config.limits) else {
+            return Ok(());
+        };
         vm.host.prompter = None;
         vm.host.always = Always::default();
-        let state = crate::vm::journal::start(durable, self.config.clock.now(), &self.config.limits);
-        vm.attach_journal(state, self.config.seed.is_some()).map_err(Trap::Diverged)
+        vm.attach_journal(state, seeded).map_err(Trap::Diverged)
     }
 
     // ------------------------------------------------------------------
@@ -1738,7 +2001,7 @@ impl Engine {
         let (base, registry, optimize) = (snap.clone(), self.registry().clone(), self.config.optimize);
         let (program, lints) =
             on_compile_stack(move || compile_program(&base, &mut g, &registry, &budget, main_file, options.lint, optimize, spare))?;
-        Ok(Compiled { program, natives: self.registry().natives.clone(), lints, deadline, snapshot: (!natives).then_some(snap) })
+        Ok(Compiled { program, lints, deadline, snapshot: (!natives).then_some(snap) })
     }
 
     /// Runs `job`, file system work for module discovery, on a worker
@@ -2024,16 +2287,16 @@ pub(crate) struct Discovery<'a> {
 const MAX_DISCOVERY_ERRORS: usize = 100;
 
 /// How [`call_function`] ended.
-enum Called {
+enum Called<S> {
     Returned(Value),
     Exited(i32),
-    Suspended(crate::journal::Suspension),
+    Suspended(S),
     BadArgument { index: usize, error: stdlib::core::Error },
 }
 
 /// Runs the module initializers of `vm`'s program, decodes `args` for the parameters of
 /// `function`, and calls it. The tasks that the run started are left as they are.
-async fn call_function(vm: &mut Vm, function: &Function, args: &[&str]) -> Result<Called, Trap> {
+async fn call_function<S: Suspends, P>(vm: &mut Vm, function: &Function<P>, args: &[&str]) -> Result<Called<S>, Trap> {
     let entry = vm.prog.entry;
     match vm.run_main(entry).await? {
         RunEnd::Finished(_) => {}
@@ -2049,7 +2312,7 @@ async fn call_function(vm: &mut Vm, function: &Function, args: &[&str]) -> Resul
 
 /// Decodes `args` and calls `function` with them. Keeps each argument in `vm.pinned`, so
 /// that it lives while the functions that fill in its computed defaults run.
-async fn call_decoded(vm: &mut Vm, function: &Function, args: &[&str]) -> Result<Called, Trap> {
+async fn call_decoded<S: Suspends, P>(vm: &mut Vm, function: &Function<P>, args: &[&str]) -> Result<Called<S>, Trap> {
     let first = vm.pinned.len();
     for (index, ((_, desc), arg)) in function.signature().params.iter().zip(args).enumerate() {
         let text = vm.new_str(*arg);
@@ -2205,7 +2468,7 @@ mod registry_tests {
             let mut m = NativeModule::new("host");
             m.source(src);
             let host = HostModules::compile(&[m], optimize).unwrap();
-            let snap = host.0.snapshot().unwrap();
+            let snap = host.registry.snapshot().unwrap();
             let proto = snap.program.protos.iter().find(|p| p.name == "doubled_total").expect("doubled_total is compiled");
             proto.code.clone()
         };
@@ -2225,9 +2488,9 @@ mod registry_tests {
     fn configs_with_one_host_modules_share_its_registry() {
         let host = HostModules::new([NativeModule::new("a")]).unwrap();
         let one = Engine::new(Config::new().host_modules(host.clone()));
-        let two = Engine::new(Config::new().seed(1).host_modules(host.clone()));
+        let two = Engine::new(Config::new().host_modules(host.clone()));
         assert!(Arc::ptr_eq(one.registry(), two.registry()));
-        assert!(Arc::ptr_eq(one.registry(), &host.0));
+        assert!(Arc::ptr_eq(one.registry(), &host.registry));
     }
 
     /// `STD_MODULES` (the names host modules cannot take) lists the standard modules.
@@ -2289,7 +2552,7 @@ mod offload_tests {
         let host = HostModules::new([hang_module(release.clone(), progress.clone())]).unwrap();
         let config = Config::new().host_modules(host).limits(limits);
         let mut engine = Engine::new(config.clone());
-        let r = rt().block_on(engine.run_source("main.sand", "import hung\nhung.hang()"));
+        let r = rt().block_on(engine.run_source("main.sand", "import hung\nhung.hang()", Run::new()));
         assert!(matches!(r, Err(Error::Limit(LimitKind::WallTime))), "{r:?}");
 
         let handle = InterruptHandle::new();
@@ -2298,7 +2561,7 @@ mod offload_tests {
             std::thread::sleep(Duration::from_millis(50));
             handle.interrupt();
         });
-        let r = rt().block_on(engine.run_source("main.sand", "import hung\nhung.walk()"));
+        let r = rt().block_on(engine.run_source("main.sand", "import hung\nhung.walk()", Run::new()));
         assert!(matches!(r, Err(Error::Interrupted)), "{r:?} after {} steps", progress.load(Ordering::SeqCst));
         // The job on the worker no longer makes progress.
         std::thread::sleep(Duration::from_millis(20));

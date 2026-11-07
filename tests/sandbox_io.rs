@@ -3,8 +3,8 @@
 
 mod common;
 
-use common::{HttpResponse, TempDir, http_server, run_with};
-use sandlang::engine::Limits;
+use common::{HttpResponse, TempDir, http_server, run_in, run_with};
+use sandlang::engine::{Limits, Run};
 use sandlang::policy::file::PolicyFile;
 use sandlang::policy::net::{NetPattern, is_private_address};
 use sandlang::policy::rules::{AbsolutePath, CustomName, Methods, NamePattern, PathPattern, RulePolicy, Transports};
@@ -826,7 +826,7 @@ print(http.get("http://api.example.com/a")?.text()?)
 print(http.post("http://api.example.com/b", b"x").map(r => r.status).map_err(e => e.message))
 print(http.get("http://api.example.com/a").map(r => r.status))
 "#;
-    let r = run_with(src, |c| c.policy(policy).network(network));
+    let r = run_in(src, |c| c.policy(policy), |r| r.network(network));
     assert_eq!(
         r.ok_stdout(),
         "ok\nErr(\"permission denied: connect to api.example.com:80: address 10.0.0.5 is not allowed by the rule `deny net plaintext 10.0.0.0/8`\")\nOk(200)\n"
@@ -1690,9 +1690,10 @@ print("still running")
 "#;
     let out = sandlang::engine::MemorySink::new();
     let limits = Limits { max_memory: Some(8 << 20), max_wall_time: Some(Duration::from_secs(20)), ..Limits::default() };
-    let config = sandlang::engine::Config::new().policy(RulePolicy::allow_all()).limits(limits).stdout(out.clone());
+    let config = sandlang::engine::Config::new().policy(RulePolicy::allow_all()).limits(limits);
     let mut engine = sandlang::engine::Engine::new(config);
-    let handle = std::thread::spawn(move || common::rt().block_on(engine.run_source("server.sand", src)));
+    let run = Run::new().stdout(out.clone());
+    let handle = std::thread::spawn(move || common::rt().block_on(engine.run_source("server.sand", src, run)));
     let start = Instant::now();
     let (http_addr, raw_addr) = loop {
         if let Some(l) = out.contents().lines().next() {

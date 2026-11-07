@@ -66,14 +66,15 @@ pub(crate) fn cmd_repl(args: &[String]) -> Result<u8, String> {
     }
     let rt = runtime()?;
     let screen = Screen::default();
-    let mut config =
-        opts.config.stdout(ReplSink { screen: screen.clone(), stderr: false }).stderr(ReplSink { screen: screen.clone(), stderr: true });
+    let run =
+        opts.run().stdout(ReplSink { screen: screen.clone(), stderr: false }).stderr(ReplSink { screen: screen.clone(), stderr: true });
+    let mut config = opts.config;
     let feed = Some(StdinFeed::new());
     if let Some(feed) = &feed {
         config = config.stdin_feed(feed);
     }
     let interrupt = InterruptHandle::new();
-    let mut session = Engine::new(config.interrupt(interrupt.clone())).session();
+    let mut session = Engine::new(config.interrupt(interrupt.clone())).session(run);
     let reader = if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         Reader::Editor(EditorReader::new(screen.clone()))
     } else {

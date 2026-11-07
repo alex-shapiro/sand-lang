@@ -4,7 +4,7 @@
 //! Every run here gets a fake `Network`, which exists only with the `os` feature.
 #![cfg(feature = "os")]
 
-use sandlang::engine::{Config, Engine, Error, HostModules, MemorySink, Outcome, Returned};
+use sandlang::engine::{Config, Engine, Error, HostModules, MemorySink, Outcome, Returned, Run};
 use sandlang::journal::{Durable, Entry, EntryKind, HttpResponse, Journal, MemoryJournal, OpKind, ParkedCall, Suspension, operations};
 use sandlang::native::NativeModule;
 use sandlang::native::convert::HostError;
@@ -14,6 +14,7 @@ use sandlang::platform::{Clock, ClockFuture, Instant, SystemClock, SystemTime, U
 use sandlang::policy::rules::RulePolicy;
 use sandlang::vm::Vm;
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -287,22 +288,19 @@ struct World {
     base: Config,
     net: FakeNet,
     log: Arc<HostLog>,
+    seed: Option<u64>,
 }
 
 impl World {
     fn new(clock: Arc<dyn Clock>, delay: bool, seed: Option<u64>) -> World {
         let net = FakeNet::new(delay);
         let log = Arc::new(HostLog::default());
-        let mut base = Config::new()
+        let base = Config::new()
             .policy(RulePolicy::allow_all())
             .clock(clock)
-            .network(Arc::new(net.clone()))
             .host_modules(HostModules::new([host_module(log.clone())]).unwrap())
             .env(vec![("MODE".into(), "test".into())]);
-        if let Some(s) = seed {
-            base = base.seed(s);
-        }
-        World { base, net, log }
+        World { base, net, log, seed }
     }
 
     /// A deterministic world: frozen time, immediate network.
@@ -315,35 +313,42 @@ impl World {
         World::new(Arc::new(SystemClock), true, None)
     }
 
-    /// Runs `src` without a journal.
-    fn run_plain(&self, src: &str) -> Run {
-        let out = MemorySink::new();
-        let config = self.base.clone().stdout(out.clone()).stderr(out.clone());
-        let mut engine = Engine::new(config);
-        let result = rt().block_on(engine.run_source("main.sand", src));
-        Run { result, stdout: out.contents(), fuel: engine.run_stats().fuel }
+    /// The values of a run in this world, with its output to `out`.
+    fn values(&self, out: &MemorySink) -> Run {
+        let run = Run::new().network(Arc::new(self.net.clone())).stdout(out.clone()).stderr(out.clone());
+        match self.seed {
+            Some(s) => run.seed(s),
+            None => run,
+        }
     }
 
-    fn run(&self, src: &str, journal: &MemoryJournal) -> Run {
+    /// Runs `src` without a journal.
+    fn run_plain(&self, src: &str) -> Ran {
+        let out = MemorySink::new();
+        let mut engine = Engine::new(self.base.clone());
+        let result = rt().block_on(engine.run_source("main.sand", src, self.values(&out))).map(Outcome::suspending);
+        Ran { result, stdout: out.contents(), fuel: engine.run_stats().fuel }
+    }
+
+    fn run(&self, src: &str, journal: &MemoryJournal) -> Ran {
         let out = MemorySink::new();
         *self.log.journal.lock().unwrap() = Some(journal.clone());
         let durable = Durable::new(Arc::new(journal.clone()), journal.entries()).suspend_after(Duration::from_secs(60));
-        let config = self.base.clone().stdout(out.clone()).stderr(out.clone()).durable(durable);
-        let mut engine = Engine::new(config);
-        let result = rt().block_on(engine.run_source("main.sand", src));
-        Run { result, stdout: out.contents(), fuel: engine.run_stats().fuel }
+        let mut engine = Engine::new(self.base.clone());
+        let result = rt().block_on(engine.run_source("main.sand", src, self.values(&out).durable(durable)));
+        Ran { result, stdout: out.contents(), fuel: engine.run_stats().fuel }
     }
 }
 
 #[derive(Debug)]
-struct Run {
-    result: Result<Outcome, Error>,
+struct Ran {
+    result: Result<Outcome<Infallible, Suspension>, Error>,
     stdout: String,
     fuel: u64,
 }
 
-impl Run {
-    fn same_as(&self, other: &Run) -> bool {
+impl Ran {
+    fn same_as(&self, other: &Ran) -> bool {
         self.stdout == other.stdout && self.fuel == other.fuel && format!("{:?}", self.result) == format!("{:?}", other.result)
     }
 }
@@ -538,6 +543,27 @@ fn replay_reproduces_the_recorded_run() {
             assert_eq!(world.log.calls.load(Ordering::SeqCst), calls, "program {i}: replay calls no journaled host function");
         }
     }
+}
+
+/// Each run of one engine takes its own journal: the second run replays what the first one
+/// recorded, and records nothing again.
+#[test]
+fn one_engine_runs_each_durable_run_with_its_own_journal() {
+    let world = World::frozen(Some(5));
+    let mut engine = Engine::new(world.base.clone());
+    let journal = MemoryJournal::new();
+    let mut outputs = Vec::new();
+    for _ in 0..2 {
+        let out = MemorySink::new();
+        let run = world.values(&out).durable(Durable::new(Arc::new(journal.clone()), journal.entries()));
+        let r = rt().block_on(engine.run_source("main.sand", SEQUENTIAL, run));
+        assert!(r.is_ok(), "{r:?}");
+        outputs.push(out.contents());
+    }
+    assert_eq!(outputs[0], outputs[1]);
+    let recorded = journal.entries();
+    assert_eq!(operations(&recorded).unwrap().len(), 3, "the journal holds the three requests once");
+    assert_eq!(world.net.requests(), 3, "the second run replays the requests");
 }
 
 #[test]
@@ -844,7 +870,7 @@ fn operations_pair_starts_with_their_ends() {
 
 #[test]
 fn fed_input_and_the_process_environment_are_journaled() {
-    let base = Config::new().policy(RulePolicy::allow_all()).clock(Arc::new(FrozenClock(Instant::now()))).seed(2);
+    let base = Config::new().policy(RulePolicy::allow_all()).clock(Arc::new(FrozenClock(Instant::now())));
     let src = r#"
 import io
 import env
@@ -860,13 +886,14 @@ print(env.vars().len() > 0)
         feed
     };
     let plain = MemorySink::new();
-    let r = rt().block_on(Engine::new(base.clone().stdout(plain.clone()).stdin_feed(&fed())).run_source("main.sand", src));
+    let r =
+        rt().block_on(Engine::new(base.clone().stdin_feed(&fed())).run_source("main.sand", src, Run::new().seed(2).stdout(plain.clone())));
     assert!(r.is_ok(), "{r:?}");
     assert_eq!(plain.contents(), "Some(\"hello\")\n4\ntrue\ntrue\n");
     let journal = MemoryJournal::new();
     let out = MemorySink::new();
-    let config = base.clone().stdout(out.clone()).stdin_feed(&fed()).durable(Durable::new(Arc::new(journal.clone()), journal.entries()));
-    let r = rt().block_on(Engine::new(config).run_source("main.sand", src));
+    let run = Run::new().seed(2).stdout(out.clone()).durable(Durable::new(Arc::new(journal.clone()), journal.entries()));
+    let r = rt().block_on(Engine::new(base.clone().stdin_feed(&fed())).run_source("main.sand", src, run));
     assert!(r.is_ok(), "{r:?}");
     assert_eq!(out.contents(), plain.contents());
     // A line that is available is a synchronous input; a read that waits is an operation.
@@ -876,9 +903,8 @@ print(env.vars().len() > 0)
     let empty = sandlang::feed::StdinFeed::new();
     empty.end();
     let again = MemorySink::new();
-    let config =
-        base.clone().stdout(again.clone()).stdin_feed(&empty).durable(Durable::new(Arc::new(MemoryJournal::new()), journal.entries()));
-    let r = rt().block_on(Engine::new(config).run_source("main.sand", src));
+    let run = Run::new().seed(2).stdout(again.clone()).durable(Durable::new(Arc::new(MemoryJournal::new()), journal.entries()));
+    let r = rt().block_on(Engine::new(base.clone().stdin_feed(&empty)).run_source("main.sand", src, run));
     assert!(r.is_ok(), "{r:?}");
     assert_eq!(again.contents(), out.contents());
 }
@@ -901,14 +927,12 @@ print("\(a) \(b >= a)")
         let c = clock.clone();
         m.function("tick", Journaled(move || c.advance(Duration::from_secs(50))));
         let out = MemorySink::new();
-        let config = Config::new()
-            .policy(RulePolicy::allow_all())
-            .clock(clock)
-            .host_modules(HostModules::new([m]).unwrap())
+        let config = Config::new().policy(RulePolicy::allow_all()).clock(clock).host_modules(HostModules::new([m]).unwrap());
+        let run = Run::new()
             .seed(1)
             .stdout(out.clone())
             .durable(Durable::new(Arc::new(journal.clone()), journal.entries()).suspend_after(Duration::from_secs(60)));
-        let r = rt().block_on(Engine::new(config).run_source("main.sand", src));
+        let r = rt().block_on(Engine::new(config).run_source("main.sand", src, run));
         (r, out.contents())
     };
     let log = Arc::new(HostLog::default());
@@ -957,14 +981,14 @@ pub fn wait(name: str, timeout: duration) -> Result<str?> {
     );
     let src = "import signals\nprint(signals.wait(\"go\", 1d))";
     let journal = MemoryJournal::new();
-    let base = Config::new().policy(RulePolicy::allow_all()).clock(clock.clone()).host_modules(HostModules::new([m]).unwrap()).seed(1);
+    let base = Config::new().policy(RulePolicy::allow_all()).clock(clock.clone()).host_modules(HostModules::new([m]).unwrap());
     let run = || {
         let out = MemorySink::new();
-        let config = base
-            .clone()
+        let run = Run::new()
+            .seed(1)
             .stdout(out.clone())
             .durable(Durable::new(Arc::new(journal.clone()), journal.entries()).suspend_after(Duration::from_secs(60)));
-        let r = rt().block_on(Engine::new(config).run_source("main.sand", src));
+        let r = rt().block_on(Engine::new(base.clone()).run_source("main.sand", src, run));
         (r, out.contents())
     };
     let due = UNIX_EPOCH + Duration::from_secs(BASE_SECS + 86_400);
@@ -982,11 +1006,11 @@ fn a_changed_instant_argument_of_a_journaled_call_diverges() {
     // A `time.Instant` has no journal encoding; the call's identity still covers it.
     let mut m = NativeModule::new("deadline");
     m.function("seconds_until", Journaled(|t: jiff::Timestamp| -> i64 { t.as_second() }));
-    let base = Config::new().policy(RulePolicy::allow_all()).host_modules(HostModules::new([m]).unwrap()).seed(1);
+    let base = Config::new().policy(RulePolicy::allow_all()).host_modules(HostModules::new([m]).unwrap());
     let run = |src: &str, journal: &MemoryJournal| {
         let out = MemorySink::new();
-        let config = base.clone().stdout(out.clone()).durable(Durable::new(Arc::new(journal.clone()), journal.entries()));
-        let r = rt().block_on(Engine::new(config).run_source("main.sand", src));
+        let run = Run::new().seed(1).stdout(out.clone()).durable(Durable::new(Arc::new(journal.clone()), journal.entries()));
+        let r = rt().block_on(Engine::new(base.clone()).run_source("main.sand", src, run));
         (r, out.contents())
     };
     let src = |s: i64| format!("import deadline\nimport time\nprint(deadline.seconds_until(time.Instant.from_epoch_seconds({s})))");
@@ -1002,10 +1026,10 @@ fn a_changed_instant_argument_of_a_journaled_call_diverges() {
     // An asynchronous call whose arguments changed says so.
     let mut m = NativeModule::new("later");
     m.async_function("echo", Journaled(|t: jiff::Timestamp| async move { Ok::<_, String>(t.as_second()) }));
-    let base = Config::new().policy(RulePolicy::allow_all()).host_modules(HostModules::new([m]).unwrap()).seed(1);
+    let base = Config::new().policy(RulePolicy::allow_all()).host_modules(HostModules::new([m]).unwrap());
     let run = |src: &str, journal: &MemoryJournal| {
-        let config = base.clone().stdout(MemorySink::new()).durable(Durable::new(Arc::new(journal.clone()), journal.entries()));
-        rt().block_on(Engine::new(config).run_source("main.sand", src))
+        let run = Run::new().seed(1).stdout(MemorySink::new()).durable(Durable::new(Arc::new(journal.clone()), journal.entries()));
+        rt().block_on(Engine::new(base.clone()).run_source("main.sand", src, run))
     };
     let src = |s: i64| format!("import later\nimport time\nprint(later.echo(time.Instant.from_epoch_seconds({s}))?)");
     let journal = MemoryJournal::new();
@@ -1033,14 +1057,12 @@ print("\(b.since(a) >= 10s) \(c.since(b) >= 0s)")
         let c = clock.clone();
         m.function("tick", Journaled(move || c.advance(Duration::from_secs(50))));
         let out = MemorySink::new();
-        let config = Config::new()
-            .policy(RulePolicy::allow_all())
-            .clock(clock.clone())
-            .host_modules(HostModules::new([m]).unwrap())
+        let config = Config::new().policy(RulePolicy::allow_all()).clock(clock.clone()).host_modules(HostModules::new([m]).unwrap());
+        let run = Run::new()
             .seed(1)
             .stdout(out.clone())
             .durable(Durable::new(Arc::new(journal.clone()), journal.entries()).suspend_after(Duration::ZERO));
-        let r = rt().block_on(Engine::new(config).run_source("main.sand", src));
+        let r = rt().block_on(Engine::new(config).run_source("main.sand", src, run));
         (r, out.contents())
     };
     let log = Arc::new(HostLog::default());
@@ -1064,7 +1086,7 @@ print("\(b.since(a) >= 10s) \(c.since(b) >= 0s)")
 fn a_suspended_call_resumes_and_returns() {
     let fs = sandlang::files::mem::MemFs::new();
     fs.write("/main.sand", "import task\nfn main(n: int) -> int {\n    print(\"start\")\n    task.sleep(10s)\n    n * 2\n}").unwrap();
-    let base = Config::new().memory_fs(fs).seed(1);
+    let base = Config::new().memory_fs(fs);
     let program = rt().block_on(Engine::new(base.clone()).compile_file("/main.sand")).unwrap();
     let main = program.function("main").unwrap();
     let journal = MemoryJournal::new();
@@ -1072,8 +1094,8 @@ fn a_suspended_call_resumes_and_returns() {
     let call = || {
         let out = MemorySink::new();
         let durable = Durable::new(Arc::new(journal.clone()), journal.entries()).suspend_after(Duration::ZERO);
-        let config = base.clone().clock(clock.clone()).stdout(out.clone()).durable(durable);
-        (rt().block_on(Engine::new(config).call(main.bind(&["21"]).unwrap())), out.contents())
+        let run = Run::new().seed(1).stdout(out.clone()).durable(durable);
+        (rt().block_on(Engine::new(base.clone().clock(clock.clone())).call(main.bind(&["21"]).unwrap(), run)), out.contents())
     };
     let (r, out) = call();
     let wake = UNIX_EPOCH + Duration::from_secs(BASE_SECS + 10);
@@ -1100,9 +1122,10 @@ fn time_spent_in_flushes_does_not_count_against_the_wall_time_limit() {
     let world = World::new(clock.clone(), false, Some(1));
     let limits = sandlang::engine::Limits { max_wall_time: Some(Duration::from_secs(1)), ..sandlang::engine::Limits::default() };
     let journal = Slow(MemoryJournal::new(), clock);
-    let config = world.base.clone().limits(limits).stdout(MemorySink::new()).durable(Durable::new(Arc::new(journal), Vec::new()));
+    let config = world.base.clone().limits(limits);
+    let run = world.values(&MemorySink::new()).durable(Durable::new(Arc::new(journal), Vec::new()));
     let src = "import http\nfor i in 0..3 {\n    print(http.get(\"http://svc.test/\\(i)\")?.status)\n}";
-    let r = rt().block_on(Engine::new(config).run_source("main.sand", src));
+    let r = rt().block_on(Engine::new(config).run_source("main.sand", src, run));
     assert!(r.is_ok(), "{r:?}");
 }
 
@@ -1134,21 +1157,21 @@ fn effects_have_the_same_sequence_number_in_every_execution() {
     let base = Config::new()
         .policy(RulePolicy::allow_all())
         .clock(Arc::new(FrozenClock(Instant::now())))
-        .network(Arc::new(net))
-        .host_modules(HostModules::new([m]).unwrap())
-        .seed(1)
-        .request_filter(move |t: &sandlang::engine::RequestTarget, _: &mut Vec<(String, String)>| {
-            f.lock().unwrap().push(t.journal_seq);
-            Ok(())
-        });
+        .host_modules(HostModules::new([m]).unwrap());
     let src = "import fx\nimport http\nprint(fx.send(\"a\")?)\nprint(http.get(\"http://svc.test/x\")?.status)\nprint(fx.send(\"parked\")?)";
     let journal = MemoryJournal::new();
     let run = || {
-        let config = base
-            .clone()
+        let f = f.clone();
+        let run = Run::new()
+            .network(Arc::new(net.clone()))
+            .seed(1)
+            .request_filter(move |t: &sandlang::engine::RequestTarget, _: &mut Vec<(String, String)>| {
+                f.lock().unwrap().push(t.journal_seq);
+                Ok(())
+            })
             .stdout(MemorySink::new())
             .durable(Durable::new(Arc::new(journal.clone()), journal.entries()).suspend_after(Duration::ZERO));
-        rt().block_on(Engine::new(config).run_source("main.sand", src))
+        rt().block_on(Engine::new(base.clone()).run_source("main.sand", src, run))
     };
     let r = run();
     assert!(matches!(r, Ok(Outcome::Suspended(Suspension { wake_at: None, .. }))), "{r:?}");
@@ -1183,13 +1206,14 @@ fn a_journaled_call_that_runs_again_after_a_collection_replays_its_fuel() {
             Ok(n)
         }),
     );
-    let base = Config::new().policy(RulePolicy::allow_all()).host_modules(HostModules::new([m]).unwrap()).seed(1).retry_stress(true);
+    let base = Config::new().policy(RulePolicy::allow_all()).host_modules(HostModules::new([m]).unwrap()).retry_stress(true);
     let src = "import mem\nvar total = 0\nfor i in 0..3 {\n    total += mem.grow(i * 10)\n}\nprint(total)";
     let run = |journal: &MemoryJournal| {
         let out = MemorySink::new();
-        let config = base.clone().stdout(out.clone()).durable(Durable::new(Arc::new(journal.clone()), journal.entries()));
+        let config = base.clone();
+        let run = Run::new().seed(1).stdout(out.clone()).durable(Durable::new(Arc::new(journal.clone()), journal.entries()));
         let mut engine = Engine::new(config);
-        let r = rt().block_on(engine.run_source("main.sand", src));
+        let r = rt().block_on(engine.run_source("main.sand", src, run));
         (r, out.contents(), engine.run_stats().fuel)
     };
     let journal = MemoryJournal::new();
@@ -1213,13 +1237,10 @@ fn a_native_that_runs_again_after_a_collection_costs_the_fuel_of_one_call() {
     });
     let src = "import mem\nvar total = 0\nfor i in 0..3 {\n    total += mem.grow(i * 10)\n}\nprint(total)";
     let fuel = |stress: bool| {
-        let config = Config::new()
-            .policy(RulePolicy::allow_all())
-            .host_modules(HostModules::new([m.clone()]).unwrap())
-            .retry_stress(stress)
-            .stdout(MemorySink::new());
+        let config =
+            Config::new().policy(RulePolicy::allow_all()).host_modules(HostModules::new([m.clone()]).unwrap()).retry_stress(stress);
         let mut engine = Engine::new(config);
-        let r = rt().block_on(engine.run_source("main.sand", src));
+        let r = rt().block_on(engine.run_source("main.sand", src, Run::new().stdout(MemorySink::new())));
         assert!(r.is_ok(), "{r:?}");
         engine.run_stats().fuel
     };
@@ -1235,11 +1256,11 @@ fn an_asynchronous_host_function_that_is_not_journaled_runs_again_in_replay() {
         c.fetch_add(1, Ordering::SeqCst);
         async move { Ok::<_, String>(n * 2) }
     });
-    let base = Config::new().policy(RulePolicy::allow_all()).host_modules(HostModules::new([m]).unwrap()).seed(1);
+    let base = Config::new().policy(RulePolicy::allow_all()).host_modules(HostModules::new([m]).unwrap());
     let run = |journal: &MemoryJournal| {
         let out = MemorySink::new();
-        let config = base.clone().stdout(out.clone()).durable(Durable::new(Arc::new(journal.clone()), journal.entries()));
-        let r = rt().block_on(Engine::new(config).run_source("main.sand", "import local\nprint(local.double(21)?)"));
+        let run = Run::new().seed(1).stdout(out.clone()).durable(Durable::new(Arc::new(journal.clone()), journal.entries()));
+        let r = rt().block_on(Engine::new(base.clone()).run_source("main.sand", "import local\nprint(local.double(21)?)", run));
         (r, out.contents())
     };
     let journal = MemoryJournal::new();
@@ -1280,12 +1301,12 @@ fn a_host_abort_ends_the_run_with_its_payload_and_is_not_journaled() {
             }))
         }),
     );
-    let base = Config::new().policy(RulePolicy::allow_all()).host_modules(HostModules::new([m]).unwrap()).seed(1);
+    let base = Config::new().policy(RulePolicy::allow_all()).host_modules(HostModules::new([m]).unwrap());
     let journal = MemoryJournal::new();
     let run = || {
         let out = MemorySink::new();
-        let config = base.clone().stdout(out.clone()).durable(Durable::new(Arc::new(journal.clone()), journal.entries()));
-        let r = rt().block_on(Engine::new(config).run_source("main.sand", "import store\nprint(store.read(\"k\")?)"));
+        let run = Run::new().seed(1).stdout(out.clone()).durable(Durable::new(Arc::new(journal.clone()), journal.entries()));
+        let r = rt().block_on(Engine::new(base.clone()).run_source("main.sand", "import store\nprint(store.read(\"k\")?)", run));
         (r, out.contents())
     };
     let (r, _) = run();
@@ -1321,8 +1342,12 @@ fn a_journal_that_fails_to_flush_aborts_the_run_with_its_error() {
         }
     }
     let world = World::frozen(Some(1));
-    let config = world.base.clone().durable(Durable::new(Arc::new(Lost(MemoryJournal::new())), Vec::new()));
-    let r = rt().block_on(Engine::new(config).run_source("main.sand", "import http\nprint(http.get(\"http://svc.test/x\")?.status)"));
+    let run = world.values(&MemorySink::new()).durable(Durable::new(Arc::new(Lost(MemoryJournal::new())), Vec::new()));
+    let r = rt().block_on(Engine::new(world.base.clone()).run_source(
+        "main.sand",
+        "import http\nprint(http.get(\"http://svc.test/x\")?.status)",
+        run,
+    ));
     match &r {
         Err(Error::Aborted(e)) => assert!(e.downcast_ref::<Fenced>().is_some(), "{e:?}"),
         other => panic!("expected an abort, got {other:?}"),
@@ -1366,17 +1391,14 @@ print(waiter.wait())
 "#;
     let run = |journal: Option<&MemoryJournal>| {
         let out = MemorySink::new();
-        let mut config = Config::new()
-            .policy(RulePolicy::allow_all())
-            .host_modules(HostModules::new([gate_module()]).unwrap())
-            .seed(1)
-            .stdout(out.clone());
-        if let Some(j) = journal {
-            config = config.durable(Durable::new(Arc::new(j.clone()), j.entries()));
-        }
+        let config = Config::new().policy(RulePolicy::allow_all()).host_modules(HostModules::new([gate_module()]).unwrap());
+        let run = Run::new().seed(1).stdout(out.clone());
         let mut engine = Engine::new(config);
-        let r = rt().block_on(engine.run_source("main.sand", src));
-        Run { result: r, stdout: out.contents(), fuel: engine.run_stats().fuel }
+        let r = match journal {
+            Some(j) => rt().block_on(engine.run_source("main.sand", src, run.durable(Durable::new(Arc::new(j.clone()), j.entries())))),
+            None => rt().block_on(engine.run_source("main.sand", src, run)).map(Outcome::suspending),
+        };
+        Ran { result: r, stdout: out.contents(), fuel: engine.run_stats().fuel }
     };
     let plain = run(None);
     assert!(plain.result.is_ok(), "{:?}", plain.result);
@@ -1427,11 +1449,12 @@ fn a_journaled_function_that_reads_the_clock_replays_with_the_same_sequence_numb
         }),
     );
     let src = "import clocked\nimport time\nlet a = time.now().epoch_seconds()\nprint(clocked.stamp())\nlet b = time.now().epoch_seconds()\nprint(clocked.later()?)\nprint(b - a)";
-    let base = Config::new().policy(RulePolicy::allow_all()).clock(clock.clone()).host_modules(HostModules::new([m]).unwrap()).seed(1);
+    let base = Config::new().policy(RulePolicy::allow_all()).clock(clock.clone()).host_modules(HostModules::new([m]).unwrap());
     let run = |journal: &MemoryJournal| {
         let out = MemorySink::new();
-        let config = base.clone().stdout(out.clone()).durable(Durable::new(Arc::new(journal.clone()), journal.entries()));
-        let r = rt().block_on(Engine::new(config).run_source("main.sand", src));
+        let config = base.clone();
+        let run = Run::new().seed(1).stdout(out.clone()).durable(Durable::new(Arc::new(journal.clone()), journal.entries()));
+        let r = rt().block_on(Engine::new(config).run_source("main.sand", src, run));
         (r, out.contents())
     };
     let journal = MemoryJournal::new();
@@ -1488,12 +1511,13 @@ fn a_resumed_call_that_runs_again_after_a_collection_consumes_its_start_once() {
             Ok(Later::new(async move { move |_: &mut Vm| Ok::<_, sandlang::vm::Ctl>(n) }))
         }),
     );
-    let base = Config::new().policy(RulePolicy::allow_all()).host_modules(HostModules::new([m]).unwrap()).seed(1).retry_stress(true);
+    let base = Config::new().policy(RulePolicy::allow_all()).host_modules(HostModules::new([m]).unwrap()).retry_stress(true);
     let src = "import mem\nprint(mem.fetch(10) + mem.fetch(20))";
     let run = |journal: &MemoryJournal| {
         let out = MemorySink::new();
-        let config = base.clone().stdout(out.clone()).durable(Durable::new(Arc::new(journal.clone()), journal.entries()));
-        let r = rt().block_on(Engine::new(config).run_source("main.sand", src));
+        let config = base.clone();
+        let run = Run::new().seed(1).stdout(out.clone()).durable(Durable::new(Arc::new(journal.clone()), journal.entries()));
+        let r = rt().block_on(Engine::new(config).run_source("main.sand", src, run));
         (r, out.contents())
     };
     let journal = MemoryJournal::new();

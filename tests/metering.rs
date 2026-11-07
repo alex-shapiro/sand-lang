@@ -8,7 +8,7 @@
 mod common;
 
 use common::{rt, run_with};
-use sandlang::engine::{Config, Engine, Error, HostModules, InterruptHandle, LimitKind, Limits, MemorySink, Outcome};
+use sandlang::engine::{Config, Engine, Error, HostModules, InterruptHandle, LimitKind, Limits, MemorySink, Outcome, Run};
 use sandlang::native::NativeModule;
 use sandlang::vm::{Ctl, Vm};
 use std::sync::mpsc;
@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 
 fn run(config: Config, src: &str) -> (Result<Outcome, Error>, String) {
     let out = MemorySink::new();
-    let mut engine = Engine::new(config.stdout(out.clone()));
-    let r = rt().block_on(engine.run_source("main.sand", src));
+    let mut engine = Engine::new(config);
+    let r = rt().block_on(engine.run_source("main.sand", src, Run::new().stdout(out.clone())));
     (r, out.contents())
 }
 
@@ -261,7 +261,7 @@ fn interrupt_after_ready(src: &str, delay: Duration) -> (Result<Outcome, Error>,
     let (m, rx) = signal();
     let out = MemorySink::new();
     let handle = InterruptHandle::new();
-    let config = Config::new().host_modules(HostModules::new([m]).unwrap()).stdout(out.clone()).interrupt(handle.clone());
+    let config = Config::new().host_modules(HostModules::new([m]).unwrap()).interrupt(handle.clone());
     let mut engine = Engine::new(config);
     let t = std::thread::spawn(move || {
         rx.recv().unwrap();
@@ -270,7 +270,7 @@ fn interrupt_after_ready(src: &str, delay: Duration) -> (Result<Outcome, Error>,
         handle.interrupt();
         at
     });
-    let r = rt().block_on(engine.run_source("main.sand", src));
+    let r = rt().block_on(engine.run_source("main.sand", src, Run::new().stdout(out.clone())));
     let done = Instant::now();
     let at = t.join().unwrap();
     (r, out.contents(), done.saturating_duration_since(at))

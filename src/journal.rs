@@ -1,6 +1,6 @@
 //! Durable execution: the journal of the nondeterministic inputs of a run.
 //!
-//! A host makes runs durable with [`Config::durable`](crate::engine::Config::durable).
+//! A host makes a run durable with [`Run::durable`](crate::engine::Run::durable).
 //! The engine then records, in order, every input that can differ between two
 //! executions of the same program: clock readings, the random seed, the
 //! completion of each asynchronous operation and the point in the schedule
@@ -85,7 +85,7 @@ macro_rules! coded_enum {
 coded_enum! {
     /// What an [`Entry`] records.
     pub enum EntryKind {
-        /// The seed of the random number generator, if `Config::seed` does not set it.
+        /// The seed of the random number generator, if `Run::seed` does not set it.
         Seed = 0, "seed";
         /// A reading of the wall clock (`time.now`, UUIDv7 timestamps).
         Wall = 1, "wall";
@@ -460,10 +460,45 @@ pub(crate) fn time_of(nanos: i128) -> SystemTime {
     if nanos >= 0 { UNIX_EPOCH + d } else { UNIX_EPOCH - d }
 }
 
-/// The durable execution of an engine's runs ([`Config::durable`](crate::engine::Config::durable)).
-#[derive(Clone)]
+/// How durable a run is: [`NoJournal`] or [`Durable`]. The run
+/// ([`Run`](crate::engine::Run)) consumes it, and its `Suspends` type is the
+/// suspension of the run's [`Outcome`](crate::engine::Outcome).
+pub trait Durability: sealed::Sealed {
+    /// How the run can suspend: [`Suspension`] for a durable run, and
+    /// [`Infallible`](std::convert::Infallible) for a run without a journal.
+    type Suspends: crate::vm::sched::Suspends;
+    /// The journal state of the run, if it has a journal.
+    #[doc(hidden)]
+    fn journal(self, origin: crate::platform::Instant, limits: &crate::engine::Limits) -> Option<crate::vm::journal::Started>;
+}
+
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for super::NoJournal {}
+    impl Sealed for super::Durable {}
+}
+
+/// A run without a journal, which never suspends.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoJournal;
+
+impl Durability for NoJournal {
+    type Suspends = std::convert::Infallible;
+    fn journal(self, _: crate::platform::Instant, _: &crate::engine::Limits) -> Option<crate::vm::journal::Started> {
+        None
+    }
+}
+
+impl Durability for Durable {
+    type Suspends = Suspension;
+    fn journal(self, origin: crate::platform::Instant, limits: &crate::engine::Limits) -> Option<crate::vm::journal::Started> {
+        Some(crate::vm::journal::Started(crate::vm::journal::start(self, origin, limits)))
+    }
+}
+
+/// The durable execution of one run ([`Run::durable`](crate::engine::Run::durable)).
 pub struct Durable {
-    /// Where the engine records the inputs of each run.
+    /// Where the engine records the inputs of the run.
     pub journal: Arc<dyn Journal>,
     /// The entries that earlier executions of the run recorded, in order.
     /// The engine replays them and records new entries after them.

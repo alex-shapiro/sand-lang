@@ -1,7 +1,7 @@
 use super::{int, int_lit, str_lit};
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
-use sandlang::engine::{Config, Engine, Error, HostModules, MemorySink};
+use sandlang::engine::{Config, Engine, Error, HostModules, MemorySink, Run};
 use sandlang::native::NativeModule;
 use sandlang::native::func::Call;
 use sandlang::native::ty::{Num, Param, Val};
@@ -14,9 +14,9 @@ use std::sync::{Arc, Mutex};
 
 fn run(config: Config, src: &str) -> (Result<sandlang::engine::Outcome, Error>, String) {
     let out = MemorySink::new();
-    let mut engine = Engine::new(config.stdout(out.clone()));
+    let mut engine = Engine::new(config);
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    let r = rt.block_on(engine.run_source("main.sand", src));
+    let r = rt.block_on(engine.run_source("main.sand", src, Run::new().stdout(out.clone())));
     (r, out.contents())
 }
 

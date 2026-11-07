@@ -8,7 +8,7 @@
 mod common;
 
 use common::rt;
-use sandlang::engine::{Config, Engine, Error, Limits, MemorySink};
+use sandlang::engine::{Config, Engine, Error, Limits, MemorySink, Run};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::Duration;
 
@@ -36,15 +36,13 @@ fn iters(default: usize) -> usize {
 }
 
 fn limited_config() -> Config {
-    Config::new().policy(sandlang::policy::rules::RulePolicy::standard()).stdout(MemorySink::new()).stderr(MemorySink::new()).limits(
-        Limits {
-            max_instructions: Some(200_000),
-            max_memory: Some(32 << 20),
-            max_wall_time: Some(Duration::from_secs(2)),
-            max_call_depth: 500,
-            ..Limits::default()
-        },
-    )
+    Config::new().policy(sandlang::policy::rules::RulePolicy::standard()).limits(Limits {
+        max_instructions: Some(200_000),
+        max_memory: Some(32 << 20),
+        max_wall_time: Some(Duration::from_secs(2)),
+        max_call_depth: 500,
+        ..Limits::default()
+    })
 }
 
 /// Compiles and runs `src`, asserting that the host does not panic and that the
@@ -52,7 +50,7 @@ fn limited_config() -> Config {
 fn exercise(src: &str) {
     let result = catch_unwind(AssertUnwindSafe(|| {
         let mut engine = Engine::new(limited_config());
-        rt().block_on(engine.run_source("fuzz.sand", src))
+        rt().block_on(engine.run_source("fuzz.sand", src, Run::new().stdout(MemorySink::new()).stderr(MemorySink::new())))
     }));
     match result {
         Err(_) => panic!("host panic on input:\n-----\n{src}\n-----"),
@@ -371,8 +369,8 @@ fn random_json_and_uri_inputs() {
         lits.join(", ")
     );
     let out = MemorySink::new();
-    let mut engine = Engine::new(Config::new().stdout(out.clone()));
-    let r = rt().block_on(engine.run_source("fuzz.sand", &src));
+    let mut engine = Engine::new(Config::new());
+    let r = rt().block_on(engine.run_source("fuzz.sand", &src, Run::new().stdout(out.clone())));
     assert!(r.is_ok(), "{r:?}");
     assert_eq!(out.contents(), "true\n");
 }

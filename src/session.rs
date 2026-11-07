@@ -12,7 +12,7 @@ use crate::check::budget::CompileBudget;
 use crate::check::{Checker, ModKind, ParsedModule};
 use crate::compile::{CompileInput, Incremental, ProgramMark, compile_more};
 use crate::diag::{Diag, FileId, Span};
-use crate::engine::{Discovery, Engine, Error, Registry, TestReport, TestResult, on_compile_stack};
+use crate::engine::{Discovery, Engine, Error, Registry, RunIo, TestReport, TestResult, on_compile_stack};
 use crate::modules::{GraphMark, ModuleGraph, NativeInfo, Snapshot, budget_error, native_info};
 use crate::platform::Instant;
 use crate::policy::{Capability, PromptAnswer};
@@ -22,7 +22,7 @@ use crate::unwind::CatchUnwind;
 use crate::vm::bytecode::Program;
 use crate::vm::sched::{Idle, IdleStop, RunEnd};
 use crate::vm::value::Value;
-use crate::vm::{Ending, Trap, Vm};
+use crate::vm::{Ending, NativeEntry, Trap, Vm};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::future::Future;
@@ -34,12 +34,14 @@ use std::task::Poll;
 /// declarations, like the contents of a module) checked and run one at a
 /// time, each in the context of the previous ones. Created by
 /// [`Engine::session`]; uses the engine's configuration (policy, prompter,
-/// limits, streams and modules).
+/// limits and modules), and the streams, seed, network and context of the
+/// [`Run`](crate::engine::Run) that it was created with. `C` is the context
+/// type of the engine's host modules.
 ///
 /// ```no_run
 /// # async fn demo() -> Result<(), sandlang::engine::Error> {
-/// use sandlang::engine::{Config, Engine};
-/// let mut session = Engine::new(Config::new()).session();
+/// use sandlang::engine::{Config, Engine, Run};
+/// let mut session = Engine::new(Config::new()).session(Run::new());
 /// session.eval("var count = 0\nfn bump() -> int { count += 1\n count }").await?;
 /// assert_eq!(session.eval("bump()").await?, Some("1".to_string()));
 /// assert_eq!(session.eval("bump() + 10").await?, Some("12".to_string()));
@@ -65,10 +67,13 @@ use std::task::Poll;
 ///   session is reset (as by [`Session::reset`]): the call fails with
 ///   [`Error::Internal`], whose message ends with [`RESET_NOTE`], and
 ///   [`Session::was_reset`] returns true.
-pub struct Session {
-    /// Shares the configuration, natives and "always" answers of the engine
-    /// that created the session, with its own interrupt flag.
-    engine: Engine,
+pub struct Session<C = ()> {
+    /// Shares the configuration and "always" answers of the engine that
+    /// created the session, with its own interrupt flag.
+    engine: Engine<C>,
+    /// The natives, bound to the context of the session.
+    natives: Arc<Vec<NativeEntry>>,
+    io: RunIo,
     root: PathBuf,
     cwd: PathBuf,
     state: Option<Box<State>>,
@@ -105,14 +110,24 @@ struct State {
 const SESSION_MODULE: &str = "repl";
 
 impl Session {
-    pub(crate) fn new(engine: Engine) -> Session {
+    /// Whether `source` is a complete input, as far as the lexer can tell: a
+    /// line-based front end keeps reading while it is not (brackets or a
+    /// string or comment left open, a final binary operator or a trailing doc
+    /// comment).
+    pub fn is_complete(source: &str) -> bool {
+        crate::syntax::lexer::is_complete(source)
+    }
+}
+
+impl<C: Send + Sync + 'static> Session<C> {
+    pub(crate) fn new(engine: Engine<C>, natives: Arc<Vec<NativeEntry>>, io: RunIo) -> Session<C> {
         let config = engine.config();
         let fs = &config.fs;
         let root = config.module_root.clone().or_else(|| config.cwd.clone()).unwrap_or_else(|| fs.default_dir());
         let cwd = config.cwd.clone().unwrap_or_else(|| root.clone());
         let root = fs.resolve(&fs.absolute(&root));
         let wall_time = config.limits.max_wall_time;
-        Session { engine, root, cwd, state: None, inputs: 0, exit_code: None, was_reset: false, wall_time }
+        Session { engine, natives, io, root, cwd, state: None, inputs: 0, exit_code: None, was_reset: false, wall_time }
     }
 
     /// Checks, compiles and runs one input. Returns the debug form of its
@@ -372,14 +387,6 @@ impl Session {
         r
     }
 
-    /// Whether `source` is a complete input, as far as the lexer can tell: a
-    /// line-based front end keeps reading while it is not (brackets or a
-    /// string or comment left open, a final binary operator or a trailing doc
-    /// comment).
-    pub fn is_complete(source: &str) -> bool {
-        crate::syntax::lexer::is_complete(source)
-    }
-
     // ------------------------------------------------------------------
 
     /// The session's state, created on first use: the registry's snapshot
@@ -422,7 +429,7 @@ impl Session {
         // The standard library's program; its entry initializes the prelude and `task`.
         let prog = snapshot.program.clone();
         let pending = Some(prog.entry);
-        let vm = self.engine.new_vm(Arc::new(prog), self.engine.registry().natives.clone(), self.cwd.clone(), false);
+        let vm = self.engine.new_vm(Arc::new(prog), self.natives.clone(), self.cwd.clone(), &self.io, false);
         let compiler = snapshot.compiler.clone();
         Ok(State { snapshot, graph, checker, compiler, vm, pending, loading: None, running: false, deferred_prompt: None })
     }

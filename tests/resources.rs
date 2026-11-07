@@ -5,7 +5,7 @@
 mod common;
 
 use common::{HttpResponse, TempDir, http_server, rt, run_with};
-use sandlang::engine::{Config, Engine, Limits, MemorySink};
+use sandlang::engine::{Config, Engine, Limits, MemorySink, Run};
 use sandlang::policy::rules::{PathPattern, RulePolicy};
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
@@ -160,10 +160,11 @@ f.write_str("still the allowed file\n")?
 print(fs.open("swapped/data.txt").unwrap_err().kind)
 "#;
     let out = MemorySink::new();
-    let config = Config::new().policy(policy).cwd(&root).stdout(out.clone());
+    let config = Config::new().policy(policy).cwd(&root);
     let main = dir.write("main.sand", src);
     let mut engine = Engine::new(config);
-    let handle = std::thread::spawn(move || rt().block_on(engine.run_file(&main)));
+    let run = Run::new().stdout(out.clone());
+    let handle = std::thread::spawn(move || rt().block_on(engine.run_file(&main, run)));
     let start = Instant::now();
     while !root.join("sync/ready").exists() {
         assert!(start.elapsed() < Duration::from_secs(10));
@@ -298,8 +299,9 @@ for _ in 0..2 {
 }
 "#;
     let limits = Limits { max_wall_time: Some(Duration::from_secs(20)), ..Limits::default() };
-    let mut engine = Engine::new(Config::new().policy(RulePolicy::allow_all()).limits(limits).stdout(out.clone()));
-    let handle = std::thread::spawn(move || rt().block_on(engine.run_source("server.sand", src)));
+    let mut engine = Engine::new(Config::new().policy(RulePolicy::allow_all()).limits(limits));
+    let run = Run::new().stdout(out.clone());
+    let handle = std::thread::spawn(move || rt().block_on(engine.run_source("server.sand", src, run)));
     let start = Instant::now();
     let addr = loop {
         if let Some(l) = out.contents().lines().next() {
@@ -341,8 +343,9 @@ use req = server.accept()?
 req.respond(200, b"served")?
 "#;
     let limits = Limits { max_open_resources: 20, max_wall_time: Some(Duration::from_secs(20)), ..Limits::default() };
-    let mut engine = Engine::new(Config::new().policy(RulePolicy::allow_all()).limits(limits).stdout(out.clone()));
-    let handle = std::thread::spawn(move || rt().block_on(engine.run_source("server.sand", src)));
+    let mut engine = Engine::new(Config::new().policy(RulePolicy::allow_all()).limits(limits));
+    let run = Run::new().stdout(out.clone());
+    let handle = std::thread::spawn(move || rt().block_on(engine.run_source("server.sand", src, run)));
     let start = Instant::now();
     let addr = loop {
         if let Some(l) = out.contents().lines().next() {
@@ -482,8 +485,9 @@ fn server_script(
     limits: Limits,
 ) -> (String, std::thread::JoinHandle<Result<sandlang::engine::Outcome, sandlang::engine::Error>>, MemorySink) {
     let out = MemorySink::new();
-    let mut engine = Engine::new(Config::new().policy(RulePolicy::allow_all()).limits(limits).stdout(out.clone()));
-    let handle = std::thread::spawn(move || rt().block_on(engine.run_source("server.sand", src)));
+    let mut engine = Engine::new(Config::new().policy(RulePolicy::allow_all()).limits(limits));
+    let run = Run::new().stdout(out.clone());
+    let handle = std::thread::spawn(move || rt().block_on(engine.run_source("server.sand", src, run)));
     let start = Instant::now();
     let addr = loop {
         if let Some(l) = out.contents().lines().next() {

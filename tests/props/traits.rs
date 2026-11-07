@@ -2,7 +2,7 @@
 //! supertrait implication, and supertrait method dispatch.
 
 use proptest::prelude::*;
-use sandlang::engine::{Config, Engine, Error, MemorySink};
+use sandlang::engine::{Config, Engine, Error, MemorySink, Run};
 
 #[derive(Clone, Debug)]
 enum Ty {
@@ -153,9 +153,9 @@ fn ty() -> impl Strategy<Value = Ty> {
 /// error messages.
 fn outcome(src: &str) -> Result<String, Vec<String>> {
     let out = MemorySink::new();
-    let mut engine = Engine::new(Config::new().policy(sandlang::policy::rules::RulePolicy::standard()).stdout(out.clone()));
+    let mut engine = Engine::new(Config::new().policy(sandlang::policy::rules::RulePolicy::standard()));
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    match rt.block_on(engine.run_source("main.sand", src)) {
+    match rt.block_on(engine.run_source("main.sand", src, Run::new().stdout(out.clone()))) {
         Ok(_) => Ok(out.contents()),
         Err(Error::Runtime { message, .. }) => Ok(message),
         Err(Error::Compile(ds)) => Err(ds.into_iter().map(|d| d.message).collect()),

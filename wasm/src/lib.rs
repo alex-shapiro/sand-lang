@@ -27,7 +27,7 @@ mod hooks;
 use hooks::{Hooks, JsOutput, JsPrompter};
 use js_sys::{Array, Object, Reflect};
 use sandlang::diag::{Diagnostic, Severity};
-use sandlang::engine::{Config, Error};
+use sandlang::engine::{Config, Error, Run};
 use sandlang::files::mem::MemFs;
 use sandlang::lint::LintWarning;
 use sandlang::policy::file::{PolicyError, PolicyFile};
@@ -157,6 +157,19 @@ pub struct Engine {
     fs: MemFs,
     interrupt: sandlang::engine::InterruptHandle,
     hooks: Rc<HookKey>,
+    /// The seed of each run, if the options fix one.
+    seed: Option<u64>,
+}
+
+impl Engine {
+    /// The values of a run: output to the hooks, and the seed of the options.
+    fn run_values(&self) -> Run {
+        let run = Run::new().stdout(JsOutput::new(self.hooks.0, "stdout")).stderr(JsOutput::new(self.hooks.0, "stderr"));
+        match self.seed {
+            Some(s) => run.seed(s),
+            None => run,
+        }
+    }
 }
 
 #[wasm_bindgen]
@@ -191,22 +204,18 @@ impl Engine {
             .memory_fs(fs.clone())
             .cwd(&cwd)
             .env(string_entries(&options, "env")?)
-            .args(string_list(&options, "args")?)
-            .stdout(JsOutput::new(key.0, "stdout"))
-            .stderr(JsOutput::new(key.0, "stderr"));
+            .args(string_list(&options, "args")?);
         config = config.prompter(JsPrompter { id: key.0 });
         if let Some(stdin) = string_option(&options, "stdin")? {
             config = config.stdin_bytes(stdin.into_bytes());
         }
-        if let Some(seed) = number_option(&options, "seed")? {
-            config = config.seed(seed as u64);
-        }
+        let seed = number_option(&options, "seed")?.map(|s| s as u64);
         if let Some(name) = string_option(&options, "timeZone")? {
             let zone = sandlang::stdlib::time::TimeZone::get(&name).ok_or_else(|| error(&format!("unknown timeZone {name:?}")))?;
             config = config.time_zone(zone);
         }
         let engine = sandlang::engine::Engine::new(config);
-        Ok(Engine { engine: Rc::new(RefCell::new(Some(engine))), fs, interrupt, hooks: key })
+        Ok(Engine { engine: Rc::new(RefCell::new(Some(engine))), fs, interrupt, hooks: key, seed })
     }
 
     /// Executes a script with an optional name for diagnostics.
@@ -214,11 +223,12 @@ impl Engine {
     #[wasm_bindgen(unchecked_return_type = "Promise<RunResult>")]
     pub fn run(&self, source: String, name: Option<String>) -> js_sys::Promise {
         let slot = self.engine.clone();
+        let run = self.run_values();
         wasm_bindgen_futures::future_to_promise(async move {
             let name = name.unwrap_or_else(|| "main.sand".into());
             let mut engine = take(&slot)?;
             let started = sandlang::platform::Instant::now();
-            let outcome = engine.run_source(&name, &source).await;
+            let outcome = engine.run_source(&name, &source, run).await;
             let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
             *slot.borrow_mut() = Some(engine);
             let (exit_code, error) = match outcome {
@@ -272,7 +282,7 @@ impl Engine {
     pub fn session(&self) -> Result<Session, JsValue> {
         let engine = self.engine.borrow();
         let engine = engine.as_ref().ok_or_else(|| error("the engine is running"))?;
-        let session = engine.session();
+        let session = engine.session(self.run_values());
         Ok(Session {
             session: Rc::new(RefCell::new(Some(session))),
             interrupt: self.interrupt.clone(),

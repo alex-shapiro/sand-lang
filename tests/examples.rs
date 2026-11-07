@@ -3,7 +3,7 @@
 mod common;
 
 use common::{HttpResponse, TempDir, http_server, rt};
-use sandlang::engine::{Config, Engine, Error, InterruptHandle, MemorySink};
+use sandlang::engine::{Config, Engine, Error, InterruptHandle, MemorySink, Run};
 use sandlang::policy::rules::{PathPattern, RulePolicy, Transports};
 use sandlang::policy::{Capability, Decision};
 use std::collections::BTreeMap;
@@ -35,9 +35,9 @@ impl Output {
 fn run_example(rel: &str, args: &[&str], config: Config) -> Output {
     let out = MemorySink::new();
     let err = MemorySink::new();
-    let config = config.stdout(out.clone()).stderr(err.clone()).args(args.iter().map(|s| s.to_string()).collect());
+    let config = config.args(args.iter().map(|s| s.to_string()).collect());
     let mut engine = Engine::new(config);
-    let result = rt().block_on(engine.run_file(example(rel)));
+    let result = rt().block_on(engine.run_file(example(rel), Run::new().stdout(out.clone()).stderr(err.clone())));
     Output { result, stdout: out.contents(), stderr: err.contents() }
 }
 
@@ -317,9 +317,10 @@ fn tcp_chat_server() {
     let err = MemorySink::new();
     let policy = RulePolicy::standard().allow_listen("127.0.0.1:0".parse().unwrap());
     let interrupt = InterruptHandle::new();
-    let config = Config::new().policy(policy).stdout(out.clone()).stderr(err.clone()).args(vec!["0".into()]);
+    let config = Config::new().policy(policy).args(vec!["0".into()]);
     let mut engine = Engine::new(config.interrupt(interrupt.clone()));
-    let server = std::thread::spawn(move || rt().block_on(engine.run_file(example("chat_server.sand"))));
+    let run = Run::new().stderr(err.clone()).stdout(out.clone());
+    let server = std::thread::spawn(move || rt().block_on(engine.run_file(example("chat_server.sand"), run)));
 
     let start = Instant::now();
     let addr = loop {
@@ -385,7 +386,7 @@ fn chat_server_cannot_listen_without_permission() {
 #[test]
 fn s3_signing_tests_pass() {
     let mut engine = Engine::new(Config::new());
-    let report = rt().block_on(engine.run_tests(example("s3/s3.sand"))).unwrap();
+    let report = rt().block_on(engine.run_tests(example("s3/s3.sand"), Run::new())).unwrap();
     assert_eq!(report.failed(), 0, "{}", report.render());
     assert_eq!(report.passed(), 3);
 }

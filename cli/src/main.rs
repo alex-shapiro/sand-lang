@@ -12,7 +12,7 @@ macro_rules! outln {
 
 mod repl;
 
-use sandlang::engine::{Config, Engine, Error};
+use sandlang::engine::{Config, Engine, Error, Run};
 use sandlang::policy::file::{PolicyFile, parse_duration, parse_size};
 use sandlang::policy::rules::RulePolicy;
 use sandlang::policy::{Capability, PromptAnswer};
@@ -130,8 +130,20 @@ fn runtime() -> Result<tokio::runtime::Runtime, String> {
 
 struct RunOptions {
     config: Config,
+    /// The `--seed` of the runs.
+    seed: Option<u64>,
     file: Option<PathBuf>,
     script_args: Vec<String>,
+}
+
+impl RunOptions {
+    /// The values of a run with these options.
+    fn run(&self) -> Run {
+        match self.seed {
+            Some(s) => Run::new().seed(s),
+            None => Run::new(),
+        }
+    }
 }
 
 /// Parses run options into an engine configuration.
@@ -232,13 +244,10 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
         config = config.args(script_args.clone());
     }
     config = config.prompter(prompter(prompt, policy));
-    if let Some(s) = seed {
-        config = config.seed(s);
-    }
     if let Some(zone) = TimeZone::system() {
         config = config.time_zone(zone);
     }
-    Ok(RunOptions { config, file, script_args })
+    Ok(RunOptions { config, seed, file, script_args })
 }
 
 const TAKES_VALUE: &[&str] = &[
@@ -433,10 +442,11 @@ fn report_error(e: &Error) -> u8 {
 
 fn cmd_run(args: &[String]) -> Result<u8, String> {
     let opts = run_options(args)?;
+    let run = opts.run();
     let file = opts.file.ok_or("missing FILE to run")?;
     let mut engine = Engine::new(opts.config.exit_after_run(true));
     let rt = runtime()?;
-    let r = rt.block_on(engine.run_file(&file));
+    let r = rt.block_on(engine.run_file(&file, run));
     if std::env::var_os("SAND_GC_STATS").is_some() {
         eprintln!("{:#?}", engine.run_stats().gc);
     }
@@ -592,7 +602,7 @@ fn fmt_stdin(check: bool) -> Result<u8, String> {
 /// are code like any other: everything is denied unless allowed).
 fn cmd_test(args: &[String]) -> Result<u8, String> {
     let opts = parse_run_options(args, true)?;
-    let files: Vec<PathBuf> = opts.file.into_iter().chain(opts.script_args.iter().map(PathBuf::from)).collect();
+    let files: Vec<PathBuf> = opts.file.iter().cloned().chain(opts.script_args.iter().map(PathBuf::from)).collect();
     if files.is_empty() {
         return Err("missing FILE".into());
     }
@@ -600,7 +610,7 @@ fn cmd_test(args: &[String]) -> Result<u8, String> {
     let mut failed = 0;
     for f in &files {
         let mut engine = Engine::new(opts.config.clone());
-        match rt.block_on(engine.run_tests(f)) {
+        match rt.block_on(engine.run_tests(f, opts.run())) {
             Ok(report) => {
                 out!("{}", report.render());
                 failed += report.failed();

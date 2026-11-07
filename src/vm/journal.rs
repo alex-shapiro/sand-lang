@@ -573,7 +573,11 @@ impl JournalState {
 
 /// Creates the journal state of a durable run.
 /// `origin` is the monotonic clock reading when the run starts.
-pub(crate) fn start(durable: &Durable, origin: Instant, limits: &crate::engine::Limits) -> JournalState {
+/// The journal state of a durable run that starts ([`Durability`](crate::journal::Durability)).
+#[doc(hidden)]
+pub struct Started(pub(crate) JournalState);
+
+pub(crate) fn start(durable: Durable, origin: Instant, limits: &crate::engine::Limits) -> JournalState {
     let mut done = HashMap::new();
     for (i, e) in durable.replay.iter().enumerate() {
         if let EntryData::Done(d) = e.data() {

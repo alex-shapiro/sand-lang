@@ -7,7 +7,7 @@ mod common;
 
 use common::{TempDir, rt};
 use sandlang::check::budget::CompileBudget;
-use sandlang::engine::{Config, Engine, Error, HostModules, InterruptHandle, LimitKind, Limits, MemorySink};
+use sandlang::engine::{Config, Engine, Error, HostModules, InterruptHandle, LimitKind, Limits, MemorySink, Run};
 use sandlang::platform::{Deadline, SystemClock};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 const FAST: Duration = Duration::from_secs(10);
 
 fn check(config: Config, src: &str) -> (Result<(), Error>, Duration) {
-    let engine = Engine::new(config.stdout(MemorySink::new()));
+    let engine = Engine::new(config);
     let start = Instant::now();
     let r = engine.check_source("main.sand", src);
     (r, start.elapsed())
@@ -176,8 +176,8 @@ fn deeply_nested_string_interpolation() {
     // Moderate nesting still works.
     let src = "let x = 1\nprint(\"a\\(\"b\\(\"c\\(x)\")\")\")\n";
     let out = MemorySink::new();
-    let mut engine = Engine::new(Config::new().stdout(out.clone()));
-    rt().block_on(engine.run_source("main.sand", src)).unwrap();
+    let mut engine = Engine::new(Config::new());
+    rt().block_on(engine.run_source("main.sand", src, Run::new().stdout(out.clone()))).unwrap();
     assert_eq!(out.contents(), "abc1\n");
 }
 
@@ -304,13 +304,13 @@ fn wall_time_and_interrupts_stop_compilation() {
     assert!(took < FAST, "took {took:?}");
 
     let handle = InterruptHandle::new();
-    let mut engine = Engine::new(unlimited().stdout(MemorySink::new()).interrupt(handle.clone()));
+    let mut engine = Engine::new(unlimited().interrupt(handle.clone()));
     let t = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(100));
         handle.interrupt();
     });
     let start = Instant::now();
-    let r = rt().block_on(engine.run_source("main.sand", &src));
+    let r = rt().block_on(engine.run_source("main.sand", &src, Run::new().stdout(MemorySink::new())));
     t.join().unwrap();
     assert!(matches!(r, Err(Error::Interrupted)), "{r:?}");
     assert!(start.elapsed() < FAST, "took {:?}", start.elapsed());
@@ -328,17 +328,16 @@ fn source_size_limit_covers_imports() {
         Config::new()
             .policy(sandlang::policy::rules::RulePolicy::allow_all())
             .cwd(dir.path())
-            .stdout(MemorySink::new())
             .limits(Limits { max_source_bytes: max, ..Limits::default() })
     };
     // Each file fits, but not all of them together.
     let mut engine = Engine::new(config(400));
-    match rt().block_on(engine.run_file(&main)) {
+    match rt().block_on(engine.run_file(&main, Run::new().stdout(MemorySink::new()))) {
         Err(Error::Compile(ds)) => assert!(ds.iter().any(|d| d.message.contains("source too large")), "{ds:?}"),
         other => panic!("{other:?}"),
     }
     let mut engine = Engine::new(config(1000));
-    rt().block_on(engine.run_file(&main)).unwrap();
+    rt().block_on(engine.run_file(&main, Run::new().stdout(MemorySink::new()))).unwrap();
 }
 
 /// Runs the script `main` (with the script modules `files` beside it),
@@ -350,9 +349,8 @@ fn run_files(files: &[(&str, &str)], main: &str) -> Result<String, Error> {
     }
     let main = dir.write("main.sand", main);
     let out = MemorySink::new();
-    let mut engine =
-        Engine::new(Config::new().policy(sandlang::policy::rules::RulePolicy::allow_all()).cwd(dir.path()).stdout(out.clone()));
-    rt().block_on(engine.run_file(&main))?;
+    let mut engine = Engine::new(Config::new().policy(sandlang::policy::rules::RulePolicy::allow_all()).cwd(dir.path()));
+    rt().block_on(engine.run_file(&main, Run::new().stdout(out.clone())))?;
     Ok(out.contents())
 }
 
@@ -485,8 +483,8 @@ fn constant_field_defaults_are_bounded() {
     }
     deep += "struct S300 { v: int = 1 }\nlet s: S0 = json.decode(\"{}\")?\nprint(s == S0())\n";
     let out = MemorySink::new();
-    let mut engine = Engine::new(Config::new().stdout(out.clone()));
-    rt().block_on(engine.run_source("main.sand", &deep)).unwrap();
+    let mut engine = Engine::new(Config::new());
+    rt().block_on(engine.run_source("main.sand", &deep, Run::new().stdout(out.clone()))).unwrap();
     assert_eq!(out.contents(), "true\n");
 }
 

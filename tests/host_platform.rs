@@ -3,7 +3,7 @@
 mod common;
 
 use common::run_with;
-use sandlang::engine::{Error, LimitKind, Limits};
+use sandlang::engine::{Error, LimitKind, Limits, Run};
 use sandlang::platform::{Clock, ClockFuture, Instant, SystemTime, UNIX_EPOCH};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -93,20 +93,17 @@ fn memfs_timestamps_are_sourced_from_host_clock() {
     fs.write("/run/.keep", "").unwrap();
     let src = "import fs\nfs.write_text(\"/run/notes.txt\", \"hi\")?\nprint(fs.metadata(\"/run/notes.txt\")?.modified.unwrap())";
     let out = sandlang::engine::MemorySink::new();
-    let config = sandlang::engine::Config::new()
-        .policy(sandlang::policy::rules::RulePolicy::allow_all())
-        .memory_fs(fs)
-        .cwd("/run")
-        .clock(clock)
-        .stdout(out.clone());
+    let config =
+        sandlang::engine::Config::new().policy(sandlang::policy::rules::RulePolicy::allow_all()).memory_fs(fs).cwd("/run").clock(clock);
     let mut engine = sandlang::engine::Engine::new(config);
-    common::rt().block_on(engine.run_source("main.sand", src)).unwrap();
+    common::rt().block_on(engine.run_source("main.sand", src, Run::new().stdout(out.clone()))).unwrap();
     assert_eq!(out.contents(), "2027-01-15T08:00:00Z\n");
 }
 
 #[cfg(feature = "os")]
 mod network {
-    use super::{ManualClock, run_with};
+    use super::ManualClock;
+    use crate::common::run_in;
     use sandlang::network::{Listener, Network, NetworkFuture, Stream};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::Mutex;
@@ -184,7 +181,7 @@ mod network {
     fn listeners_are_opened_through_host_network() {
         let network = std::sync::Arc::new(MemoryNetwork::default());
         let src = "import net\nlet l = net.listen(\"10.1.2.3\", 80)?\nprint(l.addr())\nlet c = l.accept()?\nprint(c.peer_addr())\nprint(c.read_line()?)";
-        let r = run_with(src, |c| c.network(network.clone()));
+        let r = run_in(src, |c| c, |r| r.network(network.clone()));
         assert_eq!(r.ok_stdout(), "10.1.2.3:80\n10.9.9.9:5555\nSome(\"from memory listener\")\n");
         assert_eq!(*network.listened.lock().unwrap(), ["10.1.2.3:80".parse::<SocketAddr>().unwrap()]);
     }
@@ -193,7 +190,7 @@ mod network {
     fn http_requests_are_routed_through_host_network() {
         let network = std::sync::Arc::new(MemoryNetwork::default());
         let src = "import http\nprint(http.get(\"http://example.test/page\")?.text()?)";
-        let r = run_with(src, |c| c.network(network.clone()));
+        let r = run_in(src, |c| c, |r| r.network(network.clone()));
         assert_eq!(r.ok_stdout(), "from memory\n");
         assert_eq!(*network.resolved.lock().unwrap(), ["example.test"]);
         let requests = network.requests.lock().unwrap();
@@ -204,7 +201,7 @@ mod network {
     fn tcp_connections_are_routed_through_host_network() {
         let network = std::sync::Arc::new(MemoryNetwork::default());
         let src = "import net\nlet c = net.connect(\"example.test\", 80)?\nc.write_str(\"GET / HTTP/1.1\\r\\n\\r\\n\")?\nprint(c.peer_addr())\nprint(c.read_all()?.len())";
-        let r = run_with(src, |c| c.network(network.clone()));
+        let r = run_in(src, |c| c, |r| r.network(network.clone()));
         assert_eq!(r.ok_stdout(), "93.184.216.34:80\n69\n");
         assert_eq!(*network.resolved.lock().unwrap(), ["example.test"]);
     }
@@ -215,7 +212,7 @@ mod network {
         let clock = ManualClock::new();
         let src = "import http\nprint(http.get(\"http://example.test/\", timeout: 30s).map_err(e => e.kind))";
         let started = std::time::Instant::now();
-        let r = run_with(src, |c| c.network(network.clone()).clock(clock.clone()));
+        let r = run_in(src, |c| c.clock(clock.clone()), |r| r.network(network.clone()));
         assert_eq!(r.ok_stdout(), "Err(\"timeout\")\n");
         assert!(started.elapsed() < Duration::from_secs(5));
         assert!(clock.sleeps.lock().unwrap().contains(&Duration::from_secs(30)));

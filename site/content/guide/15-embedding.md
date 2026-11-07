@@ -10,10 +10,10 @@ The `sandlang` crate embeds the Sand compiler and VM as a Rust library. Construc
 `Engine::run_source` compiles and executes a script, returning a future that runs on any Tokio runtime with timers enabled:
 
 ```rust
-use sandlang::engine::{Config, Engine, Error, Outcome};
+use sandlang::engine::{Config, Engine, Error, Outcome, Run};
 
 async fn run(source: &str) -> Result<Outcome, Error> {
-    Engine::new(Config::new()).run_source("main.sand", source).await
+    Engine::new(Config::new()).run_source("main.sand", source, Run::new()).await
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -25,7 +25,9 @@ async fn main() {
 }
 ```
 
-The script executes inside the future on the polling thread. The first argument is the source name used in diagnostics and stack traces. Use `Engine::run_file(path)` to load the entry module from disk.
+The script executes inside the future on the polling thread. The first argument is the source name used in diagnostics and stack traces. Use `Engine::run_file(path, run)` to load the entry module from disk.
+
+The last argument is a `Run`: the values of this run only, which the run consumes. It holds the output sinks, the random seed, the network provider, the HTTP request filter, the host context and the journal of a durable run. The `Config` holds what all runs of the engine share, such as the policy, the limits and the file system. `Run::new()` writes to the process's standard output and error and has no journal.
 
 Failed runs return a `sandlang::engine::Error`:
 
@@ -47,7 +49,7 @@ Failed runs return a `sandlang::engine::Error`:
 ```rust
 # #[tokio::main(flavor = "current_thread")]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-use sandlang::engine::{Config, Engine, Limits, MemorySink};
+use sandlang::engine::{Config, Engine, Limits, MemorySink, Run};
 use sandlang::files::mem::MemFs;
 use sandlang::policy::rules::RulePolicy;
 use std::time::Duration;
@@ -71,11 +73,10 @@ let config = Config::new()
         max_wall_time: Some(Duration::from_secs(5)),
         ..Limits::default()
     })
-    .memory_fs(files.clone())
-    .stdout(out.clone());
+    .memory_fs(files.clone());
 
 let mut engine = Engine::new(config);
-engine.run_source("main.sand", script).await?;
+engine.run_source("main.sand", script, Run::new().stdout(out.clone())).await?;
 println!("{}", out.contents());
 let report = files.read("/out/report.txt")?;
 # Ok(())
@@ -85,8 +86,8 @@ let report = files.read("/out/report.txt")?;
 - **Policy.** `RulePolicy` provides `allow_`, `deny_`, and `prompt_` builder methods for each capability kind, such as `allow_read`, `deny_net`, and `prompt_write`. The builder methods take typed patterns: `PathPattern` for files, `NetPattern`, `UrlPattern`, `ListenPattern`, and `NamePattern`. Each pattern type parses the policy file syntax with `str::parse` and returns a `PatternError` for an invalid pattern. A `PathPattern` must be absolute, or start with `**`, because a builder has no base directory for a relative path. `PathPattern::literal` makes a pattern from a host path, `PathPattern::from(AbsolutePath::new("/srv"))` makes one from a fixed directory in a `const`, where a relative path is a compile error, and `NamePattern::exact` makes a pattern from a variable name, without wildcards. The `net` and `http` methods also take the `Transports` to control: `Tls`, `Plaintext`, or `Both`. The `http` methods also take the `Methods` to control: `Methods::all()`, or `Methods::only(first, rest)` with at least one `HttpMethod`. For example, `allow_http(Transports::Plaintext, Methods::only("GET".parse()?, []), "localhost:8080/api/**".parse()?)`. The `custom` methods take a `CustomName`, `Any` or `Named(name)`, and a detail, where `None` controls every detail. `RulePolicy::default()` is empty, `RulePolicy::standard()` allows `stdout` and `stderr`, and `RulePolicy::allow_all()` allows all capabilities for trusted scripts. `user_rules.with_defaults(host_rules)` appends fallback rules that apply only if a request does not match any rule in `user_rules`. `Config::custom_policy` replaces rule evaluation with a host-defined `CustomPolicy`.
 - **Limits.** `Limits` configures every resource bound described in [Sandbox and policies](/guide/sandbox/).
 - **Virtual file system.** `Config::memory_fs` replaces host disk access with an in-memory `MemFs`. Clones of a `MemFs` share the same underlying storage so the host can populate input files before a run and read output files afterward.
-- **Streams.** `Config::stdout` and `Config::stderr` redirect script output to a `MemorySink` or custom sink. `Config::stdin_bytes` supplies fixed input bytes.
-- **Logging.** `Config::log_sink` routes `log` records to a host `LogSink` as a `LogRecord` containing the level, message, fields, and caller location. `LogSink::enabled` filters levels before record construction, and `Config::log_level` sets the initial script log level. Emitted records count against the output limit.
+- **Streams.** `Run::stdout` and `Run::stderr` redirect the output of a run to a `MemorySink` or custom sink. `Config::stdin_bytes` supplies fixed input bytes.
+- **Logging.** `Run::log_sink` routes `log` records to a host `LogSink` as a `LogRecord` containing the level, message, fields, and caller location. `LogSink::enabled` filters levels before record construction, and `Config::log_level` sets the initial script log level. Emitted records count against the output limit.
 - **Environment.** `Config::args` and `Config::env` set the command-line arguments and environment map exposed to the script. If `Config::env` is not set, `env.get` reads the host process environment subject to the policy.
 
 To load a `.policy` file from disk, parse it with `sandlang::policy::file::PolicyFile`:
@@ -255,7 +256,7 @@ To check a sandbox capability inside a native function, register the function wi
 # #[tokio::main(flavor = "current_thread")]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 use sandlang::vm::Vm;
-use sandlang::engine::{Config, Engine, HostModules};
+use sandlang::engine::{Config, Engine, HostModules, Run};
 use sandlang::native::NativeModule;
 use sandlang::native::convert::HostError;
 use sandlang::policy::Capability;
@@ -268,7 +269,7 @@ door.vm_function("open", |vm: &mut Vm, name: String| -> Result<String, HostError
 });
 let policy = RulePolicy::standard().allow_custom(CustomName::Named("door".into()), Some("front"));
 let mut engine = Engine::new(Config::new().host_modules(HostModules::new([door])?).policy(policy));
-engine.run_source("main.sand", "import door\nprint(door.open(\"front\"))\nprint(door.open(\"back\"))").await?;
+engine.run_source("main.sand", "import door\nprint(door.open(\"front\"))\nprint(door.open(\"back\"))", Run::new()).await?;
 # Ok(())
 # }
 ```
@@ -291,9 +292,9 @@ A generic Rust function accepts values of its `N`-th type parameter as `Param<N,
 ```rust
 # #[tokio::main(flavor = "current_thread")]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-# use sandlang::engine::{Config, Engine};
+# use sandlang::engine::{Config, Engine, Run};
 # let config = Config::new();
-let mut session = Engine::new(config).session();
+let mut session = Engine::new(config).session(Run::new());
 session.eval("var hits = 0\nfn hit() -> int {\n    hits += 1\n    hits\n}").await?;
 assert_eq!(session.eval("hit() + hit()").await?, Some("3".to_string()));
 # Ok(())
@@ -309,7 +310,7 @@ An `InterruptHandle` cancels an in-progress compilation, VM execution, or I/O wa
 ```rust
 # #[tokio::main(flavor = "current_thread")]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-use sandlang::engine::{Config, Engine, Error, InterruptHandle};
+use sandlang::engine::{Config, Engine, Error, InterruptHandle, Run};
 use std::time::Duration;
 
 let handle = InterruptHandle::new();
@@ -318,7 +319,7 @@ std::thread::spawn(move || {
     std::thread::sleep(Duration::from_secs(1));
     handle.interrupt();
 });
-let result = engine.run_source("main.sand", "while true {}").await;
+let result = engine.run_source("main.sand", "while true {}", Run::new()).await;
 assert!(matches!(result, Err(Error::Interrupted)));
 # Ok(())
 # }

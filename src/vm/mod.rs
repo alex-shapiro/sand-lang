@@ -611,7 +611,7 @@ pub struct Host {
     pub(crate) regex_cache: Vec<(u64, u32)>,
     /// The file system of the `fs` module.
     pub(crate) fs: crate::files::Fs,
-    /// Rewrites or refuses outgoing HTTP requests (see [`crate::engine::Config::request_filter`]).
+    /// Rewrites or refuses outgoing HTTP requests (see [`crate::engine::Run::request_filter`]).
     #[cfg_attr(not(any(feature = "os", web)), expect(dead_code, reason = "HTTP client is disabled in this build"))]
     pub(crate) request_filter: Option<crate::engine::RequestFilter>,
     /// Clock and timer provider for the engine.
@@ -622,8 +622,6 @@ pub struct Host {
     #[cfg(feature = "os")]
     pub(crate) network: Arc<dyn crate::network::Network>,
     pub(crate) time_zone: Option<jiff::tz::TimeZone>,
-    /// Host data set with [`crate::engine::Config::context`].
-    pub(crate) context: Option<Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 pub struct Vm {
@@ -725,12 +723,6 @@ impl Fiber {
 }
 
 impl Vm {
-    /// The host data that [`crate::engine::Config::context`] attached to the run, if
-    /// it has type `T`.
-    pub fn context<T: Send + Sync + 'static>(&self) -> Option<Arc<T>> {
-        self.host.context.clone()?.downcast::<T>().ok()
-    }
-
     pub fn new(prog: Arc<Program>, natives: Arc<Vec<NativeEntry>>, host: Host) -> Vm {
         let heap = Heap::new(host.limits.max_memory, host.limits.max_open_resources);
         let consts = Vec::with_capacity(prog.consts.len());

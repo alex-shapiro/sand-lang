@@ -1,6 +1,6 @@
 //! Verification and execution of `sand` and `policy` code blocks in site Markdown.
 
-use sandlang::engine::{Config, Engine, Error, MemorySink};
+use sandlang::engine::{Config, Engine, Error, MemorySink, Run};
 use sandlang::files::mem::MemFs;
 use sandlang::policy::file::PolicyFile;
 use std::path::Path;
@@ -71,7 +71,8 @@ pub fn check_sand(runtime: &tokio::runtime::Runtime, source: &str, mode: Mode, f
         },
         Mode::Run | Mode::RuntimeError => {
             let mut engine = engine;
-            let result = runtime.block_on(engine.run_source("main.sand", &program));
+            let result =
+                runtime.block_on(engine.run_source("main.sand", &program, Run::new().seed(42).stdout(sink.clone()).stderr(sink.clone())));
             let output = sink.contents();
             match (mode, result) {
                 (Mode::Run, Ok(o)) if o.exit_code() == Some(0) => example((!output.is_empty()).then_some(Shown::Output(output))),
@@ -110,13 +111,7 @@ fn engine(files: &[(String, String)]) -> (Engine, MemorySink) {
         fs.write(format!("/{name}"), text).expect("module fits in memory");
     }
     let policy = check_policy(POLICY).expect("default policy is valid");
-    let config = Config::new()
-        .memory_fs(fs)
-        .limits(policy.apply_limits(sandlang::engine::Limits::default()))
-        .policy(policy.rules)
-        .seed(42)
-        .stdout(sink.clone())
-        .stderr(sink.clone());
+    let config = Config::new().memory_fs(fs).limits(policy.apply_limits(sandlang::engine::Limits::default())).policy(policy.rules);
     (Engine::new(config), sink)
 }
 

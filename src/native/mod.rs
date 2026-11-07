@@ -746,13 +746,38 @@ pub(crate) struct NativeDecl {
     pub doc: Option<Arc<str>>,
 }
 
-#[derive(Clone)]
-struct FnDef {
+/// Makes the native of a [`NativeModule::context_function`] for the context
+/// of a run.
+pub(crate) type Binder<C> = Arc<dyn Fn(&Arc<C>) -> HostFn + Send + Sync>;
+
+/// The code of a registered function.
+enum Body<C> {
+    Fixed(HostFn),
+    /// A function that each run binds to its context.
+    Bound(Binder<C>),
+}
+
+impl<C> Clone for Body<C> {
+    fn clone(&self) -> Self {
+        match self {
+            Body::Fixed(f) => Body::Fixed(f.clone()),
+            Body::Bound(b) => Body::Bound(b.clone()),
+        }
+    }
+}
+
+struct FnDef<C> {
     name: String,
     sig: Signature,
-    f: HostFn,
+    body: Body<C>,
     names: Option<Arc<[String]>>,
     doc: Option<Arc<str>>,
+}
+
+impl<C> Clone for FnDef<C> {
+    fn clone(&self) -> Self {
+        FnDef { name: self.name.clone(), sig: self.sig.clone(), body: self.body.clone(), names: self.names.clone(), doc: self.doc.clone() }
+    }
 }
 
 /// A module of Rust functions and types that scripts can import with
@@ -774,26 +799,40 @@ struct FnDef {
 /// prompt or a garbage collection triggered by a memory or resource limit. Do
 /// not panic on script input; the engine catches panics and aborts the run with
 /// [`Error::Internal`](crate::engine::Error::Internal).
-#[derive(Clone)]
-pub struct NativeModule {
+///
+/// `C` is the type of the host data of each run (see
+/// [`NativeModule::context_function`]); a module made with
+/// [`NativeModule::new`] has the context `()`.
+pub struct NativeModule<C = ()> {
     name: String,
     kind: ModKind,
     source: String,
-    functions: Vec<FnDef>,
+    functions: Vec<FnDef<C>>,
     types: Vec<BoundType>,
 }
 
+impl<C> Clone for NativeModule<C> {
+    fn clone(&self) -> Self {
+        NativeModule {
+            name: self.name.clone(),
+            kind: self.kind,
+            source: self.source.clone(),
+            functions: self.functions.clone(),
+            types: self.types.clone(),
+        }
+    }
+}
+
 impl NativeModule {
-    /// Creates a host native module imported as `name`.
+    /// Creates a host native module imported as `name`, whose functions get
+    /// no host context.
     ///
     /// # Panics
     ///
     /// Panics if `name` is not a valid identifier or conflicts with the prelude
     /// or a standard library module.
     pub fn new(name: &str) -> NativeModule {
-        assert!(is_name(name), "a host module cannot be named `{name}`: it is not an identifier, or is a keyword");
-        assert!(!crate::stdlib::STD_MODULES.contains(&name), "a host module cannot be named `{name}`: it is the name of a standard module");
-        NativeModule::of_kind(name, ModKind::Host)
+        NativeModule::with_context(name)
     }
 
     pub(crate) fn std(name: &str, kind: ModKind, source: &str) -> NativeModule {
@@ -801,8 +840,23 @@ impl NativeModule {
         m.source(source);
         m
     }
+}
 
-    fn of_kind(name: &str, kind: ModKind) -> NativeModule {
+impl<C: Send + Sync + 'static> NativeModule<C> {
+    /// Creates a host native module imported as `name`, whose functions
+    /// registered with [`NativeModule::context_function`] get the context of
+    /// type `C` of each run.
+    ///
+    /// # Panics
+    ///
+    /// Panics under the same conditions as [`NativeModule::new`].
+    pub fn with_context(name: &str) -> NativeModule<C> {
+        assert!(is_name(name), "a host module cannot be named `{name}`: it is not an identifier, or is a keyword");
+        assert!(!crate::stdlib::STD_MODULES.contains(&name), "a host module cannot be named `{name}`: it is the name of a standard module");
+        NativeModule::of_kind(name, ModKind::Host)
+    }
+
+    fn of_kind(name: &str, kind: ModKind) -> NativeModule<C> {
         NativeModule { name: name.to_string(), kind, source: String::new(), functions: Vec::new(), types: Vec::new() }
     }
 
@@ -812,13 +866,54 @@ impl NativeModule {
     }
 
     fn add(&mut self, name: &str, sig: Signature, into_host: impl FnOnce(&Arc<str>) -> Box<NativeFn>) -> &mut Self {
+        let key = self.key(name);
+        let f = into_host(&key);
+        let f = if self.kind == ModKind::Host { HostFn::Shared(f.into()) } else { HostFn::Static(Box::leak(f)) };
+        self.functions.push(FnDef { name: name.to_string(), sig, body: Body::Fixed(f), names: None, doc: None });
+        self
+    }
+
+    /// The key (`module.name`) of a new function `name`.
+    fn key(&self, name: &str) -> Arc<str> {
         let parts: Vec<&str> = name.split('.').collect();
         let valid = parts.len() <= 2 && parts.iter().all(|p| is_ident(p)) && parts.last() != Some(&"self");
         assert!(valid, "function name `{name}` is not `name` or `Type.name`");
         assert!(!self.functions.iter().any(|d| d.name == name), "function `{name}` is registered twice in module `{}`", self.name);
-        let f = into_host(&format!("{}.{name}", self.name).into());
-        let f = if self.kind == ModKind::Host { HostFn::Shared(f.into()) } else { HostFn::Static(Box::leak(f)) };
-        self.functions.push(FnDef { name: name.to_string(), sig, f, names: None, doc: None });
+        format!("{}.{name}", self.name).into()
+    }
+
+    /// Registers the function that `bind` makes for the context of each
+    /// run, like [`NativeModule::vm_function`]. The engine calls `bind` once
+    /// for each run, when the run starts, with the run's context
+    /// ([`Run::context`](crate::engine::Run::context)), so the function
+    /// reads the host data of the run through its captures:
+    ///
+    /// ```
+    /// use sandlang::native::NativeModule;
+    /// use sandlang::vm::Vm;
+    /// use std::sync::Arc;
+    ///
+    /// struct Caller {
+    ///     name: String,
+    /// }
+    ///
+    /// let mut m = NativeModule::<Caller>::with_context("caller");
+    /// m.context_function("name", |c: &Arc<Caller>| {
+    ///     let c = c.clone();
+    ///     move |_: &mut Vm| c.name.clone()
+    /// });
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics under the same conditions as [`NativeModule::function`].
+    pub fn context_function<M, F>(&mut self, name: &str, bind: impl Fn(&Arc<C>) -> F + Send + Sync + 'static) -> &mut Self
+    where
+        F: VmFunction<M, CallParam: LocalCallParam, Parking: LocalParking>,
+    {
+        let key = self.key(name);
+        let bind: Binder<C> = Arc::new(move |c: &Arc<C>| HostFn::Shared(bind(c).into_host(&key).into()));
+        self.functions.push(FnDef { name: name.to_string(), sig: F::signature(), body: Body::Bound(bind), names: None, doc: None });
         self
     }
 
@@ -899,7 +994,7 @@ impl NativeModule {
         self
     }
 
-    fn last(&mut self, method: &str) -> &mut FnDef {
+    fn last(&mut self, method: &str) -> &mut FnDef<C> {
         match self.functions.last_mut() {
             Some(f) => f,
             None => panic!("`{method}` applies to the function registered last, and no function is registered"),
@@ -978,10 +1073,28 @@ impl NativeModule {
         }
     }
 
-    pub(crate) fn register(&self, r: &mut Registry) {
+    /// Adds the functions and the source of the module to `r`. Returns the
+    /// functions that each run binds to its context, by their ids in `r`:
+    /// until then, their natives fail.
+    pub(crate) fn register(&self, r: &mut Registry) -> Vec<(u32, Binder<C>)> {
+        let mut bound = Vec::new();
         for f in &self.functions {
-            r.add_native(format!("{}.{}", self.name, f.name), f.f.clone(), f.sig.clone(), f.names.clone(), f.doc.clone());
+            let host = match &f.body {
+                Body::Fixed(host) => host.clone(),
+                Body::Bound(bind) => {
+                    bound.push((r.natives.len() as u32, bind.clone()));
+                    HostFn::Static(&unbound)
+                }
+            };
+            r.add_native(format!("{}.{}", self.name, f.name), host, f.sig.clone(), f.names.clone(), f.doc.clone());
         }
         r.source(self.name.clone(), self.kind, self.source.clone());
+        bound
     }
+}
+
+/// The native of a context function in a registry, which runs replace with
+/// the function that they bind (see `HostModules::natives`).
+fn unbound(_: &mut Vm, _: Call<'_>, _: &[Value]) -> crate::vm::NResult {
+    Err(Ctl::internal("a context function runs without the context of its run"))
 }

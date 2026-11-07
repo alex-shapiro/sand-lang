@@ -2,7 +2,7 @@
 
 use super::{int, int_lit, str_lit};
 use proptest::prelude::*;
-use sandlang::engine::{Config, Engine, Error, HostModules, LimitKind, Limits, MemorySink};
+use sandlang::engine::{Config, Engine, Error, HostModules, LimitKind, Limits, MemorySink, Run};
 use sandlang::native::NativeModule;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -10,9 +10,9 @@ use std::sync::{Arc, Mutex};
 
 fn run(config: Config, src: &str) -> (Result<sandlang::engine::Outcome, Error>, String) {
     let out = MemorySink::new();
-    let mut engine = Engine::new(config.stdout(out.clone()));
+    let mut engine = Engine::new(config);
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    let r = rt.block_on(engine.run_source("main.sand", src));
+    let r = rt.block_on(engine.run_source("main.sand", src, Run::new().stdout(out.clone())));
     (r, out.contents())
 }
 

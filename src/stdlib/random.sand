@@ -1,7 +1,7 @@
 //! Non-cryptographic `xoshiro256**` pseudo-random number generation.
 //!
 //! Module-level functions use the engine generator, which is seeded from host
-//! entropy unless overridden by `Config::seed` or `seed`. Call `Rng(seed)` to
+//! entropy unless overridden by `Run::seed` or `seed`. Call `Rng(seed)` to
 //! create an isolated generator.
 
 /// Reseeds the engine generator with `s` for deterministic output.

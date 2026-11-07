@@ -10,7 +10,7 @@
 
 mod common;
 
-use sandlang::engine::{Config, Engine, Error, LimitKind, Limits, MemorySink};
+use sandlang::engine::{Config, Engine, Error, LimitKind, Limits, MemorySink, Run};
 use std::process::Command;
 
 const LIMIT: usize = 128 << 20;
@@ -62,8 +62,8 @@ const TEST: &str = "peak_memory_stays_near_the_memory_limit";
 fn run_case(name: &str) {
     let (_, src) = PROGRAMS.iter().find(|(n, _)| *n == name).unwrap();
     let limits = Limits { max_memory: Some(LIMIT), ..Default::default() };
-    let mut engine = Engine::new(Config::new().limits(limits).stdout(MemorySink::new()));
-    let r = common::rt().block_on(engine.run_source("main.sand", src));
+    let mut engine = Engine::new(Config::new().limits(limits));
+    let r = common::rt().block_on(engine.run_source("main.sand", src, Run::new().stdout(MemorySink::new())));
     if name == "empty" {
         r.unwrap();
     } else {

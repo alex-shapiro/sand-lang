@@ -1962,7 +1962,7 @@ multiple engines concurrently across threads or asynchronous tasks, or
 interleaved on a single thread in WebAssembly (§16.5).
 
 ```rust
-use sandlang::engine::{Config, Engine, HostModules, Limits};
+use sandlang::engine::{Config, Engine, HostModules, Limits, Run};
 use sandlang::native::NativeModule;
 use sandlang::policy::rules::RulePolicy;
 
@@ -1975,14 +1975,24 @@ let config = Config::new()
     .limits(Limits { max_memory: Some(64 << 20), ..Limits::default() })
     .host_modules(HostModules::new([module])?);
 let mut engine = Engine::new(config);
-let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 4.0))"#).await?;
+let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 4.0))"#, Run::new()).await?;
 ```
 
 ### 16.1 Execution and errors
 
 `Engine::new` constructs an `Engine` from a `Config`. `Engine::run_source` and `Engine::run_file` compile and execute a
 script inside
-the returned future on the thread that polls it. `Engine::run_tests` compiles a
+the returned future on the thread that polls it.
+
+The configuration holds what the engine's runs share: the policy, the
+limits, the file system, the clock, the interrupt handle and the host
+modules. Each run takes a `Run`, which holds the values of that run only,
+and consumes it: its durability (§16.7), its host context, its random seed,
+its output sinks (`Run::stdout`, `Run::stderr`, `Run::log_sink`), its
+network provider and its HTTP request filter. `Run::new()` gives a run
+without a journal, with the context `()`, the process's standard streams, an
+entropy seed and the host's network. A run of a durable `Run` can end
+suspended; the outcome of a run without a journal has no suspension. `Engine::run_tests` compiles a
 module and executes its `test` blocks (§4.8). For static analysis without
 execution, `check_source`, `check_file`, `lint_source`, and `lint_file` (§17.2)
 resolve imported modules from the engine's file system under its policy, except
@@ -1990,8 +2000,12 @@ that the compiler denies any import that requires an interactive permission
 prompt.
 
 A run that does not fail returns an `Outcome`: `Outcome::Exited(code)` when it
-ends, or `Outcome::Suspended(suspension)` when the engine suspends a journaled
-run (§16.7). A failed operation returns an `Error`:
+ends, or, for a durable run only, `Outcome::Suspended(suspension)` when the
+engine suspends it (§16.7). The second type parameter of `Outcome` is the
+suspension type of the run's durability: `Suspension` for a durable run and
+`Infallible` for a run without a journal, so that a host without a journal
+has no suspension to handle. `Outcome::suspending` converts the outcome of a
+run without a journal for a host that runs both kinds. A failed operation returns an `Error`:
 
 | Variant                               | Meaning                                                                     |
 | ------------------------------------- | --------------------------------------------------------------------------- |
@@ -2019,7 +2033,7 @@ type descriptors, and shows as the function's declaration, such as
 `FunctionError` that gives the reason: `NotFound`, `Generic`, or `TypeTooLarge { param }` for a
 parameter or return type that is too large to describe. `Function::bind(args)` gives the call
 of the function with `args`, one for each parameter, and fails with an `ArityError` for another
-number of arguments. `Engine::call(call)` runs the module initializers, then calls the function.
+number of arguments. `Engine::call(call, run)` runs the module initializers, then calls the function.
 Each argument is JSON text, which the engine decodes to
 the type of its parameter as `json.decode` does. An argument that does not decode fails the
 call with `Error::Argument`. A call that does not fail returns an `Outcome<Returned>`. A
@@ -2031,7 +2045,7 @@ returned value converts to `stdlib::json::Json` as `json.encode` encodes it:
 | `Outcome::Returned(Returned::Failed(error))` | The function returns `Result<T>` and returned `Err(error)`. `error` is a `stdlib::core::Error`. |
 | `Outcome::Returned(Returned::Err(json))`     | The function returns `Result<T, E>` with an `E` other than `Error`, and `json` is the `Err`.   |
 | `Outcome::Exited(code)`                      | The run called `exit`.                                                                          |
-| `Outcome::Suspended(suspension)`             | The engine suspended the journaled run (§16.7).                                                 |
+| `Outcome::Suspended(suspension)`             | The engine suspended the durable run (§16.7).                                                   |
 
 After each run, `Engine::run_stats` reports the resources that the run used,
 including runs that failed or exceeded a limit: `fuel` (in the units of
@@ -2057,24 +2071,24 @@ such as `allow import ./lib` permits them. It writes output to the process
 standard streams and provides an empty standard input.
 
 The host can capture standard output and standard error or feed standard input
-into a running script. `Config::stdout` and `Config::stderr` redirect script
-output to an `OutputSink`, while `Config::stdin_bytes`, `Config::inherit_stdin`
+into a running script. `Run::stdout` and `Run::stderr` redirect the
+output of a run to an `OutputSink`, while `Config::stdin_bytes`, `Config::inherit_stdin`
 with feature `os`, and `Config::stdin_feed` configure standard input. With
 `StdinFeed`, scripts read chunks pushed via `StdinFeed::send`, where
 `StdinFeed::end` terminates a single read, and `StdinFeed::wanted` is resolved
 if a script is waiting for input and all other tasks are blocked.
 
 The host can intercept and filter structured log records instead of
-writing them to standard error. `Config::log_sink` routes records to a
+writing them to standard error. `Run::log_sink` routes records to a
 `LogSink` as `LogRecord { level, message, fields, location }` on the polling
 thread, using `LogSink::enabled` to filter records by level before allocation.
 `Config::log_level` sets the initial minimum script log level and defaults to
 `LogLevel::Info`, or disables script logging if set to `None`.
 
-Command-line arguments, environment variables, and random number generation can
-be fixed per engine. `Config::args` and `Config::env` replace the process
-arguments and environment variables exposed by `env`, and `Config::seed` seeds
-the pseudorandom number generator used by `random` and `uuid`.
+Command-line arguments and environment variables can be fixed per engine, and
+random number generation per run. `Config::args` and `Config::env` replace the
+process arguments and environment variables exposed by `env`, and `Run::seed`
+seeds the pseudorandom number generator used by `random` and `uuid`.
 
 Custom clock and time zone providers decouple script execution from the system
 clock. `Config::clock` supplies a `platform::Clock` that drives wall time,
@@ -2085,7 +2099,7 @@ sets the `time::TimeZone` returned by `time.local_zone()` if the policy allows
 `Capability::TimeZone`.
 
 A custom `network::Network` provider can intercept all DNS resolution, outgoing
-TCP streams, and TCP listeners in `net` and `http`. If `Config::network` is
+TCP streams, and TCP listeners in `net` and `http`. If `Run::network` is
 set, the engine still checks the network policy before connecting or listening
 and negotiates TLS over the returned stream; `Network::listen` must bind only
 the requested address and must not accept IPv4 connections on an IPv6 listener.
@@ -2181,10 +2195,17 @@ kind: kind))` in Sand, whereas `?` converts a `Ctl` into a `HostError` that
 - `Result<Later<T, E>, E>` suspends the calling task on a future and maps to
   the same Sand return type as `Result<T, E>`.
 
-`Config::context(data)` attaches host data to every run of an engine, and a
-`vm_function` reads it with `Vm::context::<T>()`. The context does not change
-the compiled host modules, so engines that serve different callers can share
-one `HostModules` and still give each caller its own state.
+A host module can read host data of each run, its context. A module made with
+`NativeModule::<C>::with_context(name)` registers such functions with
+`context_function(name, bind)`: when a run starts, the engine calls `bind`
+with the run's context, an `Arc<C>`, and registers the function that `bind`
+returns for that run. The modules are then a `HostModules<C>`, an engine with
+them is an `Engine<C>`, and each of its runs takes a context of type `C`
+(`Run::context`). The compiler checks the type, so a function never reads a
+context of another type, and a run of these modules never starts without
+one. The context does not change the compiled host modules, so runs that
+serve different callers share one `HostModules` and still give each caller
+its own state.
 
 To check a sandbox capability inside a `vm_function`, call
 `Vm::require(&capability)` (§14), which returns an error of kind
@@ -2317,13 +2338,13 @@ configured. The library provides `run`, `check`, `lint`, `format`, and
 
 ### 16.6 Sessions
 
-`Engine::session()` creates a stateful `Session` that implements `Send`,
+`Engine::session(run)` creates a stateful `Session` that implements `Send`,
 returns `Send` futures, evaluates inputs incrementally under the engine's
-configuration, and shares the engine's remembered `"always"` prompt decisions
+configuration and the values of `run`, which has no journal, and shares the engine's remembered `"always"` prompt decisions
 (§14.3). `Session` implements the evaluation semantics of `sand repl` (§17.6):
 
 ```rust
-let mut session = Engine::new(config).session();
+let mut session = Engine::new(config).session(Run::new());
 session.eval("var hits = 0\nfn hit() -> int { hits += 1\n hits }").await?;   // Ok(None)
 assert_eq!(session.eval("hit() + hit()").await?, Some("3".to_string()));
 ```
@@ -2364,9 +2385,10 @@ decisions.
 
 ### 16.7 Durable execution
 
-A journal makes a run durable. With `Config::durable(Durable::new(journal, replay))`,
-the engine records each nondeterministic input of a run in a host-supplied
-`Journal`. If an execution
+A journal makes a run durable. A run of `Run::new().durable(Durable::new(journal, replay))`
+records each nondeterministic input in a host-supplied `Journal`. The
+durability belongs to one run, which consumes it, so a second run on the same
+engine cannot replay entries that a snapshot of an earlier run holds. If an execution
 stops before the run ends, because the host crashes or because the engine
 suspends the run, the host runs the same program again with the entries that
 the journal holds as `replay`.
@@ -2379,8 +2401,9 @@ use sandlang::journal::{Durable, Journal, MemoryJournal};
 
 let journal = MemoryJournal::new();
 let durable = |j: &MemoryJournal| Durable::new(Arc::new(j.clone()), j.durable());
-Engine::new(Config::new().durable(durable(&journal))).run_program(&program).await;  // records
-Engine::new(Config::new().durable(durable(&journal))).run_program(&program).await;  // replays, then continues live
+let mut engine = Engine::new(Config::new());
+engine.run_program(&program, Run::new().durable(durable(&journal))).await;  // records
+engine.run_program(&program, Run::new().durable(durable(&journal))).await;  // replays, then continues live
 ```
 
 The `sandlang::journal` module defines the interface. `Durable::replay` holds
@@ -2407,7 +2430,7 @@ the run reads them:
 
 | Kind        | Input                                                                                                                 |
 | ----------- | --------------------------------------------------------------------------------------------------------------------- |
-| `Seed`      | the seed of `random` and `uuid`, if `Config::seed` does not set it                                                    |
+| `Seed`      | the seed of `random` and `uuid`, if `Run::seed` does not set it                                                    |
 | `Wall`      | a reading of the wall clock: `time.now`, UUIDv7 timestamps                                                            |
 | `Monotonic` | a reading of the monotonic clock: `time.Stopwatch`                                                                    |
 | `Fuel`      | a fuel charge by elapsed time (regex work, §15.2)                                                                     |
@@ -2576,9 +2599,9 @@ same way: its error is the reason of the `Error::Aborted`.
   apart from the heap's, so that the heap's memory checks are the same in
   replay.
 
-The engine journals runs of `run_source`, `run_file`, `run_program` and `call`. To
+Runs of `run_source`, `run_file`, `run_program` and `call` can be durable. To
 resume a suspended call, the host calls the same function with the same arguments.
-Sessions and `run_tests` ignore the journal. Two effects can make a replay
+Sessions and `run_tests` take a `Run` without a journal. Two effects can make a replay
 differ from the recorded execution without a divergence error. First, the
 garbage collector can run at different points, which a script observes only
 through `max_open_resources` and through a memory limit error close to

@@ -2,8 +2,8 @@
 
 mod common;
 
-use common::{HttpResponse, http_server, run_with};
-use sandlang::engine::{Config, Engine, Error, Limits, MemorySink};
+use common::{HttpResponse, http_server, run_in, run_with};
+use sandlang::engine::{Config, Engine, Error, Limits, MemorySink, Run};
 use sandlang::policy::rules::{Methods, RulePolicy, Transports};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::time::{Duration, Instant};
@@ -287,8 +287,9 @@ for _ in 0..2 {
     req.respond(201, body.bytes(), headers: [("x-reply", "1")])?
 }
 "#;
-    let mut engine = Engine::new(Config::new().policy(RulePolicy::allow_all()).stdout(out.clone()));
-    let handle = std::thread::spawn(move || common::rt().block_on(engine.run_source("server.sand", src)));
+    let mut engine = Engine::new(Config::new().policy(RulePolicy::allow_all()));
+    let run = Run::new().stdout(out.clone());
+    let handle = std::thread::spawn(move || common::rt().block_on(engine.run_source("server.sand", src, run)));
     let start = Instant::now();
     let addr = loop {
         if let Some(l) = out.contents().lines().next() {
@@ -545,9 +546,10 @@ fn tls_handshakes_time_out() {
 /// and the run's thread.
 fn start_server_script(src: &'static str, limits: Limits) -> (String, std::thread::JoinHandle<Result<sandlang::engine::Outcome, Error>>) {
     let out = MemorySink::new();
-    let config = Config::new().policy(RulePolicy::allow_all()).limits(limits).stdout(out.clone());
+    let config = Config::new().policy(RulePolicy::allow_all()).limits(limits);
     let mut engine = Engine::new(config);
-    let handle = std::thread::spawn(move || common::rt().block_on(engine.run_source("server.sand", src)));
+    let run = Run::new().stdout(out.clone());
+    let handle = std::thread::spawn(move || common::rt().block_on(engine.run_source("server.sand", src, run)));
     let start = Instant::now();
     let addr = loop {
         if let Some(l) = out.contents().lines().next() {
@@ -1083,9 +1085,10 @@ serving.cancel()
     let dir = common::TempDir::new("waiting");
     let out = MemorySink::new();
     let limits = Limits { max_open_resources: 3, max_wall_time: Some(Duration::from_secs(20)), ..Limits::default() };
-    let config = Config::new().policy(RulePolicy::allow_all()).limits(limits).stdout(out.clone()).cwd(dir.path());
+    let config = Config::new().policy(RulePolicy::allow_all()).limits(limits).cwd(dir.path());
     let mut engine = Engine::new(config);
-    let handle = std::thread::spawn(move || common::rt().block_on(engine.run_source("server.sand", src)));
+    let run = Run::new().stdout(out.clone());
+    let handle = std::thread::spawn(move || common::rt().block_on(engine.run_source("server.sand", src, run)));
     let start = Instant::now();
     let addr = loop {
         if let Some(l) = out.contents().lines().next() {
@@ -1117,18 +1120,17 @@ print(http.get("{base}/c", headers: [("X-Refuse", "yes")]).unwrap_err().kind)
     for stress in [false, true] {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let log = seen.clone();
-        let r = run_with(&src, move |c| {
-            c.retry_stress(stress).request_filter(move |target, headers| {
-                log.lock().unwrap().push(target.clone());
-                if headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("x-refuse")) {
-                    return Err("refused by the host".into());
-                }
-                for (_, value) in headers.iter_mut() {
-                    *value = value.replace("secret-marker", "real-token");
-                }
-                Ok(())
-            })
-        });
+        let filter = move |target: &sandlang::engine::RequestTarget, headers: &mut Vec<(String, String)>| {
+            log.lock().unwrap().push(target.clone());
+            if headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("x-refuse")) {
+                return Err("refused by the host".into());
+            }
+            for (_, value) in headers.iter_mut() {
+                *value = value.replace("secret-marker", "real-token");
+            }
+            Ok(())
+        };
+        let r = run_in(&src, move |c| c.retry_stress(stress), |r| r.request_filter(filter));
         assert_eq!(r.ok_stdout(), "Bearer real-token\n-\npermission_denied\n");
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 3, "retry stress: {stress}");
@@ -1158,7 +1160,7 @@ print(http.get("{base}/moved")?.text()?)
     let journal = MemoryJournal::new();
     let run = |journal: &MemoryJournal| {
         let durable = Durable::new(std::sync::Arc::new(journal.clone()), journal.entries());
-        run_with(&src, move |c| c.policy(RulePolicy::allow_all()).seed(1).durable(durable))
+        run_in(&src, move |c| c.policy(RulePolicy::allow_all()), |r| r.seed(1).durable(durable))
     };
     let expected = "GET \nPOST data\n200\nGET \n";
     assert_eq!(run(&journal).ok_stdout(), expected);

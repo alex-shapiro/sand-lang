@@ -75,7 +75,7 @@ fn quote_if(s: &str, quote: bool) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
-/// Consumer for records emitted by the `log` module (see [`crate::engine::Config::log_sink`]).
+/// Consumer for records emitted by the `log` module (see [`crate::engine::Run::log_sink`]).
 ///
 /// The engine invokes [`LogSink::log`] synchronously on the thread executing the
 /// script. Any `Fn(&LogRecord) + Send + Sync` implements `LogSink` for all

@@ -2,13 +2,13 @@
 
 use super::int;
 use proptest::prelude::*;
-use sandlang::engine::{Config, Engine, Error, MemorySink};
+use sandlang::engine::{Config, Engine, Error, MemorySink, Run};
 
 fn run(src: &str) -> (Result<sandlang::engine::Outcome, Error>, String) {
     let out = MemorySink::new();
-    let mut engine = Engine::new(Config::new().stdout(out.clone()));
+    let mut engine = Engine::new(Config::new());
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    let r = rt.block_on(engine.run_source("main.sand", src));
+    let r = rt.block_on(engine.run_source("main.sand", src, Run::new().stdout(out.clone())));
     (r, out.contents())
 }
 

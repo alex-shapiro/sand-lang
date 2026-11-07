@@ -6,7 +6,7 @@
 //! operation for benchmarks that declare an operation count, and garbage
 //! collector statistics (collections, longest and average pause).
 
-use sandlang::engine::{Config, Engine, MemorySink};
+use sandlang::engine::{Config, Engine, MemorySink, Run};
 use sandlang::vm::heap::GcStats;
 use std::time::{Duration, Instant};
 
@@ -168,10 +168,10 @@ const BENCHES: &[Bench] = &[
 
 fn run_once(src: &str) -> (Duration, String, GcStats) {
     let out = MemorySink::new();
-    let mut engine = Engine::new(Config::new().stdout(out.clone()));
+    let mut engine = Engine::new(Config::new());
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let start = Instant::now();
-    rt.block_on(engine.run_source("bench.sand", src)).unwrap();
+    rt.block_on(engine.run_source("bench.sand", src, Run::new().stdout(out.clone()))).unwrap();
     (start.elapsed(), out.contents(), engine.run_stats().gc)
 }
 

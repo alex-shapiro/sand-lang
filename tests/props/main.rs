@@ -83,13 +83,15 @@ fn run_in(src: &str, mode: Mode) -> Run {
     let out = MemorySink::new();
     let config = Config::new()
         .policy(sandlang::policy::rules::RulePolicy::standard())
-        .stdout(out.clone())
-        .stderr(MemorySink::new())
         .optimize(!matches!(mode, Mode::Unoptimized))
         .gc_stress(matches!(mode, Mode::GcStress));
     let mut engine = Engine::new(config);
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    let failure = match rt.block_on(engine.run_source("main.sand", src)) {
+    let failure = match rt.block_on(engine.run_source(
+        "main.sand",
+        src,
+        sandlang::engine::Run::new().stderr(MemorySink::new()).stdout(out.clone()),
+    )) {
         Ok(_) => None,
         Err(Error::Runtime { message, .. }) => Some(message),
         Err(e) => panic!("{e}\nprogram:\n{src}"),

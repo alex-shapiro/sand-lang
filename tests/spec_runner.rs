@@ -34,7 +34,7 @@
 mod common;
 
 use common::rt;
-use sandlang::engine::{Config, Engine, Error, MemorySink};
+use sandlang::engine::{Config, Engine, Error, MemorySink, Run};
 use sandlang::files::mem::MemFs;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -233,7 +233,7 @@ fn run_case(case: &Case, mode: Mode, backend: Backend) -> Result<(), String> {
     let main = dir.write("main.sand", &case.source);
     let out = MemorySink::new();
     let err = MemorySink::new();
-    let config = Config::new().policy(sandlang::policy::rules::RulePolicy::allow_all()).stdout(out.clone()).stderr(err.clone()).seed(42);
+    let config = Config::new().policy(sandlang::policy::rules::RulePolicy::allow_all());
     let mut config =
         dir.configure(config.gc_stress(mode == Mode::GcStress).retry_stress(mode == Mode::RetryStress).optimize(mode != Mode::Unoptimized));
     if let Some(stdin) = get("stdin") {
@@ -251,7 +251,7 @@ fn run_case(case: &Case, mode: Mode, backend: Backend) -> Result<(), String> {
     let runtime = rt();
 
     if let Some(expected) = get("test") {
-        let report = runtime.block_on(engine.run_tests(&main));
+        let report = runtime.block_on(engine.run_tests(&main, Run::new().seed(42).stderr(err.clone()).stdout(out.clone())));
         let report = match report {
             Ok(r) => r,
             Err(e) => return Err(format!("test run failed: {e}")),
@@ -263,7 +263,7 @@ fn run_case(case: &Case, mode: Mode, backend: Backend) -> Result<(), String> {
         return Ok(());
     }
 
-    let result = runtime.block_on(engine.run_file(&main));
+    let result = runtime.block_on(engine.run_file(&main, Run::new().seed(42).stdout(out.clone()).stderr(err.clone())));
     let stdout = out.contents();
     let stderr = err.contents();
 

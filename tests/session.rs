@@ -6,7 +6,7 @@
 mod common;
 
 use common::{TempDir, rt};
-use sandlang::engine::{Config, Engine, Error, HostModules, InterruptHandle, LimitKind, Limits, MemorySink};
+use sandlang::engine::{Config, Engine, Error, HostModules, InterruptHandle, LimitKind, Limits, MemorySink, Run};
 use sandlang::feed::StdinFeed;
 use sandlang::native::NativeModule;
 use sandlang::policy::rules::PathPattern;
@@ -32,8 +32,8 @@ impl Repl {
     fn with(config: Config) -> Repl {
         let out = MemorySink::new();
         let err = MemorySink::new();
-        let engine = Engine::new(config.stdout(out.clone()).stderr(err.clone()));
-        Repl { session: engine.session(), out, err, rt: rt() }
+        let engine = Engine::new(config);
+        Repl { session: engine.session(Run::new().stderr(err.clone()).stdout(out.clone())), out, err, rt: rt() }
     }
 
     fn eval(&mut self, src: &str) -> Result<Option<String>, Error> {
@@ -630,7 +630,7 @@ fn output_goes_to_the_configured_sinks() {
 #[test]
 fn session_future_is_send() {
     fn assert_send<T: Send>(_: &T) {}
-    let mut s = Engine::new(Config::new()).session();
+    let mut s = Engine::new(Config::new()).session(Run::new());
     assert_send(&s);
     let fut = s.eval("1");
     assert_send(&fut);
@@ -950,7 +950,7 @@ fn redefined_types_are_told_apart_in_messages() {
 
 #[test]
 fn inputs_can_be_named() {
-    let mut session = Engine::new(Config::new()).session();
+    let mut session = Engine::new(Config::new()).session(Run::new());
     match rt().block_on(session.eval_as("main.sand", "let a = 1\nlet b: int = \"no\"")) {
         Err(Error::Compile(d)) => assert_eq!((d[0].file.as_str(), d[0].line), ("main.sand", 2)),
         other => panic!("{other:?}"),
