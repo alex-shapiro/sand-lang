@@ -42,18 +42,27 @@ impl Access {
 pub struct AbsolutePath(&'static str);
 
 impl AbsolutePath {
-    /// The path `path`. Panics if `path` does not start with `/`; in a `const`, the panic
-    /// is a compile error:
+    /// The path `path`. Panics if `path` is not absolute; in a `const`, the panic is a
+    /// compile error. A path that starts with `/` is absolute on every platform. On
+    /// Windows, a drive path such as `C:\data` and a UNC path such as `\\server\share`
+    /// are also absolute.
     ///
     /// ```compile_fail
     /// use sandlang::policy::rules::AbsolutePath;
     /// const DATA: AbsolutePath = AbsolutePath::new("data");
     /// ```
     pub const fn new(path: &'static str) -> AbsolutePath {
-        assert!(!path.is_empty() && path.as_bytes()[0] == b'/', "an absolute path starts with `/`");
+        let absolute = match path.as_bytes() {
+            [b'/', ..] => true,
+            [b'\\', b'\\', ..] => cfg!(windows),
+            [drive, b':', b'\\' | b'/', ..] => cfg!(windows) && drive.is_ascii_alphabetic(),
+            _ => false,
+        };
+        assert!(absolute, "the path is not absolute");
         AbsolutePath(path)
     }
 
+    /// The path as text.
     pub const fn as_str(self) -> &'static str {
         self.0
     }
@@ -73,7 +82,7 @@ impl AsRef<Path> for AbsolutePath {
 
 impl From<AbsolutePath> for PathPattern {
     fn from(path: AbsolutePath) -> PathPattern {
-        PathPattern { prefix: PathBuf::from(path.0), rest: vec![] }
+        PathPattern::of_absolute(Path::new(path.0))
     }
 }
 
@@ -91,7 +100,7 @@ impl std::str::FromStr for PathPattern {
     type Err = PatternError;
 
     fn from_str(text: &str) -> Result<PathPattern, PatternError> {
-        super::file::parse_path(&wild_tokens(text), true, None, None).map_err(PatternError)
+        super::file::parse_path(&wild_tokens(text), false, None, None).map_err(PatternError)
     }
 }
 
@@ -103,7 +112,11 @@ impl PathPattern {
         if !path.has_root() && !path.is_absolute() {
             return Err(PatternError(format!("path `{}` is not anchored: write an absolute path", path.display())));
         }
-        Ok(PathPattern { prefix: path.to_path_buf(), rest: vec![] })
+        Ok(PathPattern::of_absolute(path))
+    }
+
+    fn of_absolute(path: &Path) -> PathPattern {
+        PathPattern { prefix: lexical(path), rest: vec![] }
     }
 
     /// The pattern `**`, which matches every path.

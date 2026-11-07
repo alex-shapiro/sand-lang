@@ -1981,6 +1981,15 @@ fn a_policy_file_over_the_standard_rules_keeps_its_prompt_rules() {
     assert_eq!(r.stdout, "");
 }
 
+#[cfg(windows)]
+#[test]
+fn absolute_paths_accept_windows_drive_and_unc_paths() {
+    const DRIVE: AbsolutePath = AbsolutePath::new("C:\\data");
+    const UNC: AbsolutePath = AbsolutePath::new("\\\\server\\share");
+    assert_eq!(PathPattern::from(DRIVE), PathPattern::literal("C:\\data").unwrap());
+    assert_eq!(PathPattern::from(UNC), PathPattern::literal("\\\\server\\share").unwrap());
+}
+
 #[test]
 fn path_patterns_reject_empty_and_relative_paths() {
     for text in ["", "data", "./data", "../data", "~/data"] {
@@ -1991,6 +2000,10 @@ fn path_patterns_reject_empty_and_relative_paths() {
     assert_eq!(PathPattern::from(DATA), PathPattern::literal("/data/*.txt").unwrap());
     let err = "./data".parse::<PathPattern>().unwrap_err().to_string();
     assert_eq!(err, "cannot resolve the relative path `./data` without a base directory: write an absolute path");
+    let err = "read".parse::<PathPattern>().unwrap_err().to_string();
+    assert_eq!(err, "path `read` is not anchored: write an absolute path, or `**/read` for that name anywhere");
+    assert_eq!(PathPattern::literal("/data/../x/.").unwrap(), "/x".parse().unwrap());
+    assert_eq!(PathPattern::from(AbsolutePath::new("/data/../x")), "/x".parse().unwrap());
     let p = RulePolicy::new().allow_read("/data/**/*.txt".parse().unwrap()).deny_read(PathPattern::literal("/data/*.txt").unwrap());
     assert_eq!(p.to_string(), "allow read /data/**/*.txt\ndeny read \"/data/*.txt\"\n");
     assert_eq!(p.check(&Capability::FsRead("/data/a/b.txt".into())), Decision::Allow);
