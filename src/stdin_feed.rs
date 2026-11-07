@@ -29,10 +29,13 @@ pub struct StdinRequest {
     wait: u64,
 }
 
-/// State shared between the host's [`StdinFeed`] handles and its reader.
+/// State shared between the host's [`StdinFeed`] handles and the engine.
 pub(crate) struct StdinChannel {
     state: Mutex<StdinChannelState>,
     changed: Notify,
+    /// Held by the read in progress, so that reads of the engine's VMs take
+    /// turns.
+    read_lock: tokio::sync::Mutex<()>,
     pub(crate) wait_kind: WaitKind,
 }
 
@@ -54,10 +57,10 @@ struct StdinChannelState {
 }
 
 impl StdinFeed {
-    /// Creates a feed and its only reader.
-    pub(crate) fn new(wait_kind: WaitKind) -> (StdinFeed, StdinFeedReader) {
-        let channel = Arc::new(StdinChannel { state: Mutex::default(), changed: Notify::new(), wait_kind });
-        (StdinFeed { channel: channel.clone() }, StdinFeedReader { channel })
+    /// Creates a feed and the channel that the engine reads it through.
+    pub(crate) fn new(wait_kind: WaitKind) -> (StdinFeed, Arc<StdinChannel>) {
+        let channel = Arc::new(StdinChannel { state: Mutex::default(), changed: Notify::new(), read_lock: Default::default(), wait_kind });
+        (StdinFeed { channel: channel.clone() }, channel)
     }
 
     /// Appends `data` to the input stream. Queued data persists across reads
@@ -182,24 +185,24 @@ impl Drop for StdinIdleGuard {
     }
 }
 
-/// The only reader of a [`StdinFeed`]. Call [`StdinFeedReader::begin_read`]
-/// to start a read operation.
-pub(crate) struct StdinFeedReader {
-    pub(crate) channel: Arc<StdinChannel>,
-}
+impl StdinChannel {
+    /// Starts a read operation when the read in progress ends.
+    pub(crate) async fn begin_read(&self) -> ActiveStdinRead<'_> {
+        ActiveStdinRead::new(self, self.read_lock.lock().await)
+    }
 
-impl StdinFeedReader {
-    /// Starts a read operation.
-    pub(crate) fn begin_read(&mut self) -> ActiveStdinRead<'_> {
-        ActiveStdinRead { channel: &self.channel, buf: Vec::new(), at: 0, answered: false, ended: false }
+    /// Starts a read operation, or returns `None` if another is in progress.
+    pub(crate) fn try_begin_read(&self) -> Option<ActiveStdinRead<'_>> {
+        Some(ActiveStdinRead::new(self, self.read_lock.try_lock().ok()?))
     }
 }
 
-/// An active read operation on a [`StdinFeedReader`]. Dropping this guard ends
+/// An active read operation on a [`StdinChannel`]. Dropping this guard ends
 /// the read, discards an unused answer, and puts other unused input back at
 /// the front of the feed.
 pub(crate) struct ActiveStdinRead<'a> {
     channel: &'a StdinChannel,
+    _turn: tokio::sync::MutexGuard<'a, ()>,
     /// Input that the read took from the feed, and the offset of its first
     /// unused byte.
     buf: Vec<u8>,
@@ -209,7 +212,11 @@ pub(crate) struct ActiveStdinRead<'a> {
     ended: bool,
 }
 
-impl ActiveStdinRead<'_> {
+impl<'a> ActiveStdinRead<'a> {
+    fn new(channel: &'a StdinChannel, turn: tokio::sync::MutexGuard<'a, ()>) -> ActiveStdinRead<'a> {
+        ActiveStdinRead { channel, _turn: turn, buf: Vec::new(), at: 0, answered: false, ended: false }
+    }
+
     /// Returns buffered bytes available without waiting and whether the
     /// current read has reached EOF.
     pub(crate) fn available(&mut self) -> (&[u8], bool) {

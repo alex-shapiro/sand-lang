@@ -333,39 +333,30 @@ impl Trap {
     }
 }
 
-/// Standard input source for an engine.
-pub(crate) enum StdinSource {
-    None,
-    Bytes(std::io::Cursor<Vec<u8>>),
-    /// Host-supplied input ([`crate::StdinFeed`]).
-    Host(crate::stdin_feed::StdinFeedReader),
-}
-
-/// Standard input for a VM. Clones share the source.
+/// Standard input for a VM. Clones share the input.
 #[derive(Clone)]
-pub(crate) struct VmStdin {
-    pub(crate) source: Arc<tokio::sync::Mutex<StdinSource>>,
-    /// The channel of a [`StdinSource::Host`] source.
-    feed: Option<Arc<crate::stdin_feed::StdinChannel>>,
+pub(crate) enum VmStdin {
+    None,
+    Bytes(Arc<tokio::sync::Mutex<std::io::Cursor<Vec<u8>>>>),
+    /// Host-supplied input ([`crate::StdinFeed`]).
+    Host(Arc<crate::stdin_feed::StdinChannel>),
 }
 
 impl VmStdin {
-    pub(crate) fn new(source: StdinSource) -> VmStdin {
-        let feed = match &source {
-            StdinSource::Host(reader) => Some(reader.channel.clone()),
-            StdinSource::None | StdinSource::Bytes(_) => None,
-        };
-        VmStdin { source: Arc::new(tokio::sync::Mutex::new(source)), feed }
-    }
-
     /// Returns the [`WaitKind`] for reads from this input.
     pub(crate) fn wait_kind(&self) -> WaitKind {
-        self.feed.as_ref().map_or(WaitKind::Io, |feed| feed.wait_kind)
+        match self {
+            VmStdin::None | VmStdin::Bytes(_) => WaitKind::Io,
+            VmStdin::Host(channel) => channel.wait_kind,
+        }
     }
 
     /// Marks the engine as idle for a host feed until the guard is dropped.
     pub(crate) fn idle(&self) -> Option<crate::stdin_feed::StdinIdleGuard> {
-        self.feed.clone().map(crate::stdin_feed::StdinIdleGuard::new)
+        match self {
+            VmStdin::None | VmStdin::Bytes(_) => None,
+            VmStdin::Host(channel) => Some(crate::stdin_feed::StdinIdleGuard::new(channel.clone())),
+        }
     }
 }
 

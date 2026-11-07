@@ -6,10 +6,9 @@ use crate::native::{HostError, IntoValue, Later, NativeModule, NativeObject, Obj
 use crate::policy::Capability;
 use crate::vm::iomem::Reservation;
 use crate::vm::value::{Obj, Value, to_usize_saturating, u64_to_usize_saturating};
-use crate::vm::{Ctl, StdinSource, Vm};
+use crate::vm::{Ctl, Vm, VmStdin};
 use std::collections::BTreeMap;
 use tokio::io::AsyncBufRead;
-use tokio::sync::Mutex;
 
 pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("io", ModKind::Std, include_str!("io.sand"));
@@ -111,7 +110,7 @@ fn read_stdin<R: IntoValue + Send + 'static>(
     {
         return Ok(Later::ready(done(vm, data)));
     }
-    let stdin = vm.host.stdin.source.clone();
+    let stdin = vm.host.stdin.clone();
     // The input is buffered outside the heap until it is complete.
     let mut res = match what {
         Read::Upto(max) => vm.reserve_io(max.min(STDIN_CHUNK))?,
@@ -138,17 +137,18 @@ const STDIN_CHUNK: usize = 64 << 10;
 /// the end), if it is in a buffer already; `None`, consuming nothing, if the
 /// read must wait, another is under way, or the line does not fit in memory.
 fn buffered_line(vm: &Vm) -> Option<Option<Vec<u8>>> {
-    let mut source = vm.host.stdin.source.try_lock().ok()?;
-    match &mut *source {
-        StdinSource::None => None,
-        StdinSource::Bytes(c) => {
+    match &vm.host.stdin {
+        VmStdin::None => None,
+        VmStdin::Bytes(c) => {
+            let mut cursor = c.try_lock().ok()?;
+            let c = &mut *cursor;
             let at = u64_to_usize_saturating(c.position()).min(c.get_ref().len());
             let (len, line) = first_line(vm, &c.get_ref()[at..], true)?;
             c.set_position(c.position() + len as u64);
             Some(line)
         }
-        StdinSource::Host(r) => {
-            let mut read = r.begin_read();
+        VmStdin::Host(channel) => {
+            let mut read = channel.try_begin_read()?;
             let (buf, at_end) = read.available();
             let (len, line) = first_line(vm, buf, at_end)?;
             std::pin::Pin::new(&mut read).consume(len);
@@ -180,12 +180,11 @@ fn first_line(vm: &Vm, buf: &[u8], at_end: bool) -> Option<(usize, Option<Vec<u8
 
 /// Reads `what` from standard input: `None` only for a line at the end of
 /// the input.
-async fn read_input(stdin: &Mutex<StdinSource>, what: Read, res: &mut Reservation) -> Result<Option<Vec<u8>>, IoFailure> {
-    let mut source = stdin.lock().await;
-    match &mut *source {
-        StdinSource::None => Err(IoFailure::new("io", "the engine has no standard input")),
-        StdinSource::Bytes(c) => read_from(c, what, res).await,
-        StdinSource::Host(r) => read_from(&mut r.begin_read(), what, res).await,
+async fn read_input(stdin: &VmStdin, what: Read, res: &mut Reservation) -> Result<Option<Vec<u8>>, IoFailure> {
+    match stdin {
+        VmStdin::None => Err(IoFailure::new("io", "the engine has no standard input")),
+        VmStdin::Bytes(c) => read_from(&mut *c.lock().await, what, res).await,
+        VmStdin::Host(channel) => read_from(&mut channel.begin_read().await, what, res).await,
     }
 }
 

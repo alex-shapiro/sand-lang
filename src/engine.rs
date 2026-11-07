@@ -14,7 +14,7 @@ use crate::types::{FnId, ModId};
 use crate::vm::bytecode::Program;
 use crate::vm::heap::GcStats;
 use crate::vm::sched::{IoShared, IoTable, RunEnd};
-use crate::vm::{Always, Host, HostFn, NativeEntry, OutputSink, Rng, SharedSink, StdinSource, TraceEntry, Trap, Vm, VmStdin, entropy_seed};
+use crate::vm::{Always, Host, HostFn, NativeEntry, OutputSink, Rng, SharedSink, TraceEntry, Trap, Vm, VmStdin, entropy_seed};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -215,9 +215,9 @@ impl OutputSink for NullSink {
 enum StdinConfig {
     None,
     Bytes(Vec<u8>),
-    /// The reader of the feed that the host sends input through. Every VM of
-    /// the engine shares it.
-    Host(VmStdin),
+    /// The feed that the host sends input through. Every VM of the engine
+    /// reads it.
+    Host(Arc<crate::stdin_feed::StdinChannel>),
 }
 
 /// Engine configuration (builder style).
@@ -394,8 +394,8 @@ impl Config {
     }
 
     fn stdin_host_feed(mut self, wait_kind: crate::WaitKind) -> (Self, crate::StdinFeed) {
-        let (feed, reader) = crate::StdinFeed::new(wait_kind);
-        self.stdin = StdinConfig::Host(VmStdin::new(StdinSource::Host(reader)));
+        let (feed, channel) = crate::StdinFeed::new(wait_kind);
+        self.stdin = StdinConfig::Host(channel);
         (self, feed)
     }
 
@@ -1039,9 +1039,9 @@ impl Engine {
     pub(crate) fn new_vm(&self, prog: Arc<Program>, cwd: PathBuf, quiet: bool) -> Vm {
         let c = &self.config;
         let stdin = match &c.stdin {
-            StdinConfig::None => VmStdin::new(StdinSource::None),
-            StdinConfig::Bytes(b) => VmStdin::new(StdinSource::Bytes(std::io::Cursor::new(b.clone()))),
-            StdinConfig::Host(stdin) => stdin.clone(),
+            StdinConfig::None => VmStdin::None,
+            StdinConfig::Bytes(b) => VmStdin::Bytes(Arc::new(tokio::sync::Mutex::new(std::io::Cursor::new(b.clone())))),
+            StdinConfig::Host(channel) => VmStdin::Host(channel.clone()),
         };
         let (stdout, stderr): (SharedSink, SharedSink) =
             if quiet { (Arc::new(NullSink), Arc::new(NullSink)) } else { (c.stdout.clone(), c.stderr.clone()) };
