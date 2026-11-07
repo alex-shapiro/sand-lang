@@ -2,7 +2,7 @@ use sandlang::policy::Capability;
 use sandlang::policy::rules::RulePolicy;
 
 fn main() {
-    let policy = RulePolicy::new().allow_env("*").deny_env("AWS_SECRET_ACCESS_KEY");
+    let policy = RulePolicy::new().allow_env("*".parse().unwrap()).deny_env("AWS_SECRET_ACCESS_KEY".parse().unwrap());
     for name in ["AWS_SECRET_ACCESS_KEY", "aws_secret_access_key", "Aws_Secret_Access_Key"] {
         println!("{name}: {:?}", policy.check(&Capability::Env(name.into())));
     }
