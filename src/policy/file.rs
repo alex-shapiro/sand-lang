@@ -27,8 +27,98 @@ use std::time::Duration;
 pub struct PolicyFile {
     /// Policy rules.
     pub rules: RulePolicy,
-    /// Execution limits configured by `limit` directives.
-    pub limits: Limits,
+    /// The `allow`, `deny`, and `prompt` directives, in file order.
+    pub rule_directives: Vec<RuleDirective>,
+    /// The `limit` directives, in file order. Apply them with
+    /// [`PolicyFile::apply_limits`].
+    pub limit_directives: Vec<LimitDirective>,
+}
+
+/// An `allow`, `deny`, or `prompt` directive of a policy file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RuleDirective {
+    /// The 1-based line of the directive.
+    pub line: usize,
+    /// The 1-based column of the capability keyword, or of the first path
+    /// for a rule without a keyword, such as `allow ./data`.
+    pub column: usize,
+    pub decision: Decision,
+    pub capability: RuleCapability,
+}
+
+/// The capability of a policy rule, named by the keyword after the verb.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RuleCapability {
+    /// A rule for paths without a keyword, such as `allow ./data`.
+    Files,
+    Read,
+    Write,
+    Import,
+    Net,
+    Http,
+    Listen,
+    Env,
+    Stdin,
+    Stdout,
+    Stderr,
+    TimeZone,
+    Custom,
+}
+
+/// A `limit` directive of a policy file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LimitDirective {
+    /// The 1-based line of the directive.
+    pub line: usize,
+    /// The 1-based column of the limit name.
+    pub column: usize,
+    pub limit: Limit,
+}
+
+/// A value for one field of [`Limits`]. `None` removes the limit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Limit {
+    /// `limit memory`: sets [`Limits::max_memory`].
+    Memory(Option<usize>),
+    /// `limit time`: sets [`Limits::max_wall_time`].
+    Time(Option<Duration>),
+    /// `limit cpu`: sets [`Limits::max_cpu_time`].
+    Cpu(Option<Duration>),
+    /// `limit instructions`: sets [`Limits::max_instructions`].
+    Instructions(Option<u64>),
+    /// `limit compile-fuel`: sets [`Limits::max_compile_fuel`].
+    CompileFuel(Option<u64>),
+    /// `limit output`: sets [`Limits::max_output_bytes`].
+    Output(Option<u64>),
+    /// `limit tasks`: sets [`Limits::max_tasks`].
+    Tasks(usize),
+    /// `limit call-depth`: sets [`Limits::max_call_depth`].
+    CallDepth(usize),
+    /// `limit open-resources`: sets [`Limits::max_open_resources`].
+    OpenResources(usize),
+    /// `limit source`: sets [`Limits::max_source_bytes`].
+    Source(usize),
+    /// `limit http-body`: sets [`Limits::max_http_body`].
+    HttpBody(usize),
+}
+
+impl Limit {
+    /// Sets the field of `limits` that this limit controls.
+    pub fn apply(self, limits: &mut Limits) {
+        match self {
+            Limit::Memory(v) => limits.max_memory = v,
+            Limit::Time(v) => limits.max_wall_time = v,
+            Limit::Cpu(v) => limits.max_cpu_time = v,
+            Limit::Instructions(v) => limits.max_instructions = v,
+            Limit::CompileFuel(v) => limits.max_compile_fuel = v,
+            Limit::Output(v) => limits.max_output_bytes = v,
+            Limit::Tasks(v) => limits.max_tasks = v,
+            Limit::CallDepth(v) => limits.max_call_depth = v,
+            Limit::OpenResources(v) => limits.max_open_resources = v,
+            Limit::Source(v) => limits.max_source_bytes = v,
+            Limit::HttpBody(v) => limits.max_http_body = v,
+        }
+    }
 }
 
 /// An error in a policy file, with 1-based line and column numbers.
@@ -54,6 +144,13 @@ impl PolicyFile {
     /// is resolved from `home` or rejected if `home` is `None`.
     pub fn parse(text: &str, base: &Path, home: Option<&Path>) -> Result<PolicyFile, Vec<PolicyError>> {
         parse(text, base, home).map(|p| p.file)
+    }
+
+    /// Returns `base` with the `limit` directives of the file applied in
+    /// file order.
+    pub fn apply_limits(&self, mut base: Limits) -> Limits {
+        self.limit_directives.iter().for_each(|d| d.limit.apply(&mut base));
+        base
     }
 }
 
@@ -343,19 +440,24 @@ pub(crate) fn parse(text: &str, base: &Path, home: Option<&Path>) -> Result<Pars
             cx.sets.insert(name_text, (values.to_vec(), i + 1));
         }
     }
-    let mut file = PolicyFile { rules: RulePolicy::new(), limits: Limits::default() };
+    let mut file = PolicyFile { rules: RulePolicy::new(), rule_directives: Vec::new(), limit_directives: Vec::new() };
     let mut rules = Vec::new();
     for (i, line) in lines.iter().enumerate() {
         let Some((first, args)) = line.words.split_first() else { continue };
         let error = |column, message: String| PolicyError { line: i + 1, column, message };
         let result = match first.plain().as_deref() {
             Some("let") => Ok(()),
-            Some(verb @ ("allow" | "deny" | "prompt")) => cx.rule(decision(verb), first, args, i + 1, &mut rules),
+            Some(verb @ ("allow" | "deny" | "prompt")) => {
+                cx.rule(decision(verb), first, args, i + 1, &mut rules).map(|d| file.rule_directives.push(d))
+            }
             Some("default") => Err((
                 first.column,
                 "unknown directive `default`: unmatched requests are prompted or denied; write rules for what to allow or deny".into(),
             )),
-            Some("limit") => limit(&mut file.limits, args).map_err(|m| (args.first().unwrap_or(first).column, m)),
+            Some("limit") => {
+                let column = args.first().unwrap_or(first).column;
+                limit(args).map(|limit| file.limit_directives.push(LimitDirective { line: i + 1, column, limit })).map_err(|m| (column, m))
+            }
             _ => {
                 Err((first.column, format!("unknown directive `{}`: expected `allow`, `deny`, `prompt`, `limit`, or `let`", first.text())))
             }
@@ -401,27 +503,28 @@ impl Context<'_> {
         args: &[Word],
         line: usize,
         rules: &mut Vec<Rule>,
-    ) -> Result<(), (usize, String)> {
+    ) -> Result<RuleDirective, (usize, String)> {
         let verb_text = verb(decision);
         let Some((first_arg, rest_args)) = args.split_first() else {
             let action = if decision == Decision::Prompt { "prompt for" } else { verb_text };
             return Err((verb_word.column, format!("expected what to {action}: a path, or {CAPABILITIES}")));
         };
         let keyword = first_arg.plain().filter(|w| w.bytes().all(|b| b.is_ascii_lowercase() || b == b'-'));
+        let directive = |capability| RuleDirective { line, column: first_arg.column, decision, capability };
         let (kind, rest_args) = match keyword.as_deref() {
             Some(k @ ("read" | "write" | "import" | "net" | "http" | "listen" | "env" | "custom")) => (k, rest_args),
             Some(k @ ("stdin" | "stdout" | "stderr" | "timezone")) => {
                 if let Some(extra) = rest_args.first() {
                     return Err((extra.column, format!("`{verb_text} {k}` does not accept arguments")));
                 }
-                let kind = match k {
-                    "stdin" => RuleKind::Stdin,
-                    "timezone" => RuleKind::TimeZone,
-                    "stdout" => RuleKind::Stdout,
-                    _ => RuleKind::Stderr,
+                let (kind, capability) = match k {
+                    "stdin" => (RuleKind::Stdin, RuleCapability::Stdin),
+                    "timezone" => (RuleKind::TimeZone, RuleCapability::TimeZone),
+                    "stdout" => (RuleKind::Stdout, RuleCapability::Stdout),
+                    _ => (RuleKind::Stderr, RuleCapability::Stderr),
                 };
                 rules.push(file_rule(decision, kind, Origin { line, column: first_arg.column, text: k.to_string() }));
-                return Ok(());
+                return Ok(directive(capability));
             }
             Some("private-net") => {
                 return Err((
@@ -437,6 +540,17 @@ impl Context<'_> {
             }
             None => ("files", args),
         };
+        let directive = directive(match kind {
+            "read" => RuleCapability::Read,
+            "write" => RuleCapability::Write,
+            "import" => RuleCapability::Import,
+            "net" => RuleCapability::Net,
+            "http" => RuleCapability::Http,
+            "listen" => RuleCapability::Listen,
+            "env" => RuleCapability::Env,
+            "custom" => RuleCapability::Custom,
+            _ => RuleCapability::Files,
+        });
         if rest_args.is_empty() {
             let hint = match kind {
                 "custom" => format!("expected `{verb_text} custom NAME [DETAIL]`"),
@@ -469,7 +583,7 @@ impl Context<'_> {
                     rules.push(file_rule(decision, kind, Origin { line, column: name.column, text: word.render() }));
                 }
             }
-            return Ok(());
+            return Ok(directive);
         }
         let mut methods: Vec<HttpMethod> = Vec::new();
         let mut transports: Option<Transports> = None;
@@ -546,7 +660,7 @@ impl Context<'_> {
             let last = rest_args.last().unwrap_or(first_arg);
             return Err((last.column, format!("`{verb_text} net` requires a host pattern after transports, e.g. `localhost:8080`")));
         }
-        Ok(())
+        Ok(directive)
     }
 
     fn expand(&mut self, word: &Word) -> Result<Vec<Word>, (usize, String)> {
@@ -623,7 +737,7 @@ fn parse_custom_pattern(word: &Word) -> Result<CustomMatch, String> {
     }
 }
 
-fn limit(l: &mut Limits, args: &[Word]) -> Result<(), String> {
+fn limit(args: &[Word]) -> Result<Limit, String> {
     let (Some(name), Some(value), None) = (args.first().and_then(Word::plain), args.get(1).map(Word::text), args.get(2)) else {
         return Err("expected `limit NAME VALUE`, e.g. `limit memory 64M`".into());
     };
@@ -631,19 +745,19 @@ fn limit(l: &mut Limits, args: &[Word]) -> Result<(), String> {
     let off = matches!(value, "none" | "unlimited");
     let count = |v: &str| v.replace('_', "").parse::<u64>().map_err(|_| format!("invalid number `{v}`"));
     let small = |v: &str| count(v).and_then(|n| usize::try_from(n).map_err(|_| format!("`{v}` is too large")));
-    let optional = |v: &str, parse: &dyn Fn(&str) -> Result<u64, String>| if off { Ok(None) } else { parse(v).map(Some) };
-    match &*name {
-        "memory" => l.max_memory = if off { None } else { Some(parse_size(value)?) },
-        "time" => l.max_wall_time = if off { None } else { Some(parse_duration(value)?) },
-        "cpu" => l.max_cpu_time = if off { None } else { Some(parse_duration(value)?) },
-        "instructions" => l.max_instructions = optional(value, &count)?,
-        "compile-fuel" => l.max_compile_fuel = optional(value, &count)?,
-        "output" => l.max_output_bytes = if off { None } else { Some(parse_size_u64(value)?) },
-        "tasks" if !off => l.max_tasks = small(value)?,
-        "call-depth" if !off => l.max_call_depth = small(value)?,
-        "open-resources" if !off => l.max_open_resources = small(value)?,
-        "source" if !off => l.max_source_bytes = parse_size(value)?,
-        "http-body" if !off => l.max_http_body = parse_size(value)?,
+    let optional = |parse: &dyn Fn(&str) -> Result<u64, String>| if off { Ok(None) } else { parse(value).map(Some) };
+    Ok(match &*name {
+        "memory" => Limit::Memory(if off { None } else { Some(parse_size(value)?) }),
+        "time" => Limit::Time(if off { None } else { Some(parse_duration(value)?) }),
+        "cpu" => Limit::Cpu(if off { None } else { Some(parse_duration(value)?) }),
+        "instructions" => Limit::Instructions(optional(&count)?),
+        "compile-fuel" => Limit::CompileFuel(optional(&count)?),
+        "output" => Limit::Output(optional(&parse_size_u64)?),
+        "tasks" if !off => Limit::Tasks(small(value)?),
+        "call-depth" if !off => Limit::CallDepth(small(value)?),
+        "open-resources" if !off => Limit::OpenResources(small(value)?),
+        "source" if !off => Limit::Source(parse_size(value)?),
+        "http-body" if !off => Limit::HttpBody(parse_size(value)?),
         "tasks" | "call-depth" | "open-resources" | "source" | "http-body" => {
             return Err(format!("the `{name}` limit cannot be removed"));
         }
@@ -652,8 +766,7 @@ fn limit(l: &mut Limits, args: &[Word]) -> Result<(), String> {
                 "unknown limit `{other}`: expected memory, time, cpu, instructions, output, compile-fuel, tasks, call-depth, open-resources, source, or http-body"
             ));
         }
-    }
-    Ok(())
+    })
 }
 
 /// Formats a policy rule that allows or denies `cap`, or returns `None` if
@@ -912,10 +1025,46 @@ mod tests {
         assert_eq!(decide(&p, Capability::Net { host: "a.example.org".into(), port: 80, tls: false }), Prompt);
         assert_eq!(decide(&p, Capability::Net { host: "localhost".into(), port: 80, tls: true }), Prompt);
         assert_eq!(decide(&p, Capability::Stdout), Prompt);
-        assert_eq!(p.limits.max_memory, Some(64 << 20));
-        assert_eq!(p.limits.max_wall_time, Some(Duration::from_millis(1500)));
-        assert_eq!(p.limits.max_instructions, Some(1_000_000));
-        assert_eq!(p.limits.max_cpu_time, None);
+        let limits = p.apply_limits(Limits { max_cpu_time: Some(Duration::from_secs(1)), ..Limits::default() });
+        assert_eq!(limits.max_memory, Some(64 << 20));
+        assert_eq!(limits.max_wall_time, Some(Duration::from_millis(1500)));
+        assert_eq!(limits.max_instructions, Some(1_000_000));
+        assert_eq!(limits.max_cpu_time, None);
+        assert_eq!(limits.max_tasks, Limits::default().max_tasks);
+        assert_eq!(p.limit_directives[0], LimitDirective { line: 7, column: 7, limit: Limit::Memory(Some(64 << 20)) });
+        assert_eq!(p.limit_directives.len(), 4);
+    }
+
+    #[test]
+    fn later_limit_directives_override_earlier_ones() {
+        let p = parse("limit memory 1M\nlimit memory none\nlimit tasks 3\n");
+        let limits = p.apply_limits(Limits { max_memory: Some(8 << 20), ..Limits::default() });
+        assert_eq!(limits.max_memory, None);
+        assert_eq!(limits.max_tasks, 3);
+    }
+
+    #[test]
+    fn rule_directives_give_each_rule_line_its_capability_and_position() {
+        let p = parse(
+            "allow ./x ./y\n\
+             let h = a.example b.example\n\
+             prompt write /out\n\
+             deny http GET {h} c.example\n\
+             allow stdin\n\
+             limit memory 1M\n\
+             allow custom {h} x\n\
+             deny net tls a.example\n",
+        );
+        let directives: Vec<_> = p.rule_directives.iter().map(|d| (d.line, d.column, d.decision, d.capability)).collect();
+        let expected = [
+            (1, 7, Allow, RuleCapability::Files),
+            (3, 8, Prompt, RuleCapability::Write),
+            (4, 6, Deny, RuleCapability::Http),
+            (5, 7, Allow, RuleCapability::Stdin),
+            (7, 7, Allow, RuleCapability::Custom),
+            (8, 6, Deny, RuleCapability::Net),
+        ];
+        assert_eq!(directives, expected);
     }
 
     #[test]

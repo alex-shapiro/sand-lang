@@ -102,19 +102,24 @@ To load a `.policy` file from disk, parse it with `sandlang::policy::file::Polic
 
 ```rust no_run
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
-# use sandlang::engine::Config;
+# use sandlang::engine::{Config, Limits};
 # use sandlang::policy::rules::RulePolicy;
 use sandlang::policy::file::PolicyFile;
 use std::path::Path;
 
 let text = std::fs::read_to_string("app.policy")?;
 let file = PolicyFile::parse(&text, Path::new("."), None).expect("a valid policy file");
-let config = Config::new().policy(file.rules.with_defaults(RulePolicy::standard())).limits(file.limits);
+let limits = file.apply_limits(Limits::default());
+let config = Config::new().policy(file.rules.with_defaults(RulePolicy::standard())).limits(limits);
 # Ok(())
 # }
 ```
 
 The second argument is the base directory for `./` paths, and the third argument is the optional home directory for `~/` paths. Appending `RulePolicy::standard()` via `with_defaults` allows `stdout` and `stderr` unless overridden by a rule in the policy file, such as `prompt stdout` or `deny stdout`.
+
+`apply_limits` applies the `limit` directives of the file to the limits that you give it. Limits that the file does not set keep your values.
+
+An application can support only some capabilities or limit values. To reject the other directives, read `PolicyFile::rule_directives` and `PolicyFile::limit_directives`. Each directive gives its line and column, so you can report an error at the position of the directive.
 
 To handle `prompt` decisions, pass an async callback to `Config::prompter` that accepts a `Capability` and returns a `PromptAnswer`. If a prompter is not configured, the engine denies `prompt` decisions.
 
@@ -297,7 +302,7 @@ A generic Rust function accepts values of its `N`-th type parameter as `Param<N,
 ```rust
 # #[tokio::main(flavor = "current_thread")]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-# use sandlang::engine::Config;
+# use sandlang::engine::{Config, Limits};
 # use sandlang::session::Session;
 # let config = Config::new();
 let mut session = Session::new(config)?;

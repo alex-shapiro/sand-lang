@@ -1683,10 +1683,14 @@ a private, loopback, link-local, or other non-public range.
 A policy file uses the `.policy` extension. It declares authorization rules and
 resource limits in a line-oriented text format. Pass a policy file to the CLI
 with `sand run --policy=FILE`, as described in §17.5. In Rust, call
-`sandlang::policy::file::PolicyFile::parse(text, base, home)` to obtain
-`PolicyFile::rules` and `PolicyFile::limits`. A parsed `PolicyFile` contains
-only the rules from the file. Call
-`file.rules.with_defaults(RulePolicy::standard())` to append default rules.
+`sandlang::policy::file::PolicyFile::parse(text, base, home)` to obtain a
+`PolicyFile`. A parsed `PolicyFile` contains only the rules and limits from the
+file. Call `file.rules.with_defaults(RulePolicy::standard())` to append default
+rules. Call `file.apply_limits(defaults)` to apply the `limit` directives to
+default limits. `PolicyFile::rule_directives` and
+`PolicyFile::limit_directives` give the line, column, and value of each
+directive. A host that supports only some capabilities or limit values uses
+them to reject a file at the position of the directive.
 
 Each line in a policy file is an independent statement. `#` starts a comment
 that extends to the end of the line. Spaces or commas separate words. Double
@@ -1763,9 +1767,11 @@ reference other sets.
 - `instructions`, `compile-fuel`, `tasks`, `call-depth`, and `open-resources` accept integer counts such as `1_000_000`.
 - `none` removes the limit for `memory`, `time`, `cpu`, `instructions`, `compile-fuel`, or `output`.
 
-Unspecified limits retain their default values. The parser rejects any policy
-file that contains a syntax or validation error and reports the 1-based line and
-column on `PolicyError`.
+`apply_limits` applies the `limit` directives in file order, so a later
+directive overrides an earlier directive for the same limit. Limits that the
+file does not set keep the value that the host gives. The parser rejects any
+policy file that contains a syntax or validation error and reports the 1-based
+line and column on `PolicyError`.
 
 `sand fmt`, `sand lint`, and `sand check` in §17 support `.policy` files.
 `sandlang::policy::format::format_policy` formats a policy file:

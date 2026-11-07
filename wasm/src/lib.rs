@@ -27,7 +27,7 @@ mod hooks;
 use hooks::{Hooks, JsOutput, JsPrompter};
 use js_sys::{Array, Object, Reflect};
 use sandlang::diag::{Diagnostic, Severity};
-use sandlang::engine::{Config, Error};
+use sandlang::engine::{Config, Error, Limits};
 use sandlang::files::mem::MemFs;
 use sandlang::lint::LintWarning;
 use sandlang::policy::file::{PolicyError, PolicyFile};
@@ -176,10 +176,10 @@ impl HostConfig {
         let key =
             Rc::new(HookKey(hooks::register(Hooks { on_output: function(hooks, "onOutput")?, on_prompt: function(hooks, "onPrompt")? })));
         let mut config = Config::new()
+            .limits(policy.apply_limits(Limits::default()))
             .policy(policy.rules.with_defaults(
                 sandlang::policy::rules::RulePolicy::standard().allow_import(sandlang::policy::rules::PathPattern::everything()),
             ))
-            .limits(policy.limits.clone())
             .memory_fs(fs.clone())
             .cwd(&cwd)
             .env(string_entries(options, "env")?)
