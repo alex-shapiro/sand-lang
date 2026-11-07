@@ -254,7 +254,19 @@ impl Methods {
     pub(crate) fn listed(&self) -> Option<&[HttpMethod]> {
         self.0.as_deref()
     }
+
+    pub(crate) fn is_all(&self) -> bool {
+        self.0.is_none()
+    }
+
+    /// Returns `true` if `method`, in uppercase, is one of these methods.
+    pub(crate) fn matches(&self, method: &str) -> bool {
+        self.0.as_ref().is_none_or(|list| list.iter().any(|m| m.as_str() == method))
+    }
 }
+
+/// The methods of a `net` rule, which controls every HTTP request to its hosts.
+static ALL_METHODS: Methods = Methods(None);
 
 /// The names or the details of the custom capabilities that a `custom` rule controls.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -301,9 +313,9 @@ impl RuleKind {
     pub(crate) fn http_match(&self) -> Option<HttpMatch<'_>> {
         match self {
             RuleKind::Http(methods, url, transports) => {
-                Some(HttpMatch { methods: methods.listed(), transports: *transports, host: &url.host, path: &url.path })
+                Some(HttpMatch { methods, transports: *transports, host: &url.host, path: &url.path })
             }
-            RuleKind::Net(host, transports) => Some(HttpMatch { methods: None, transports: *transports, host, path: &[] }),
+            RuleKind::Net(host, transports) => Some(HttpMatch { methods: &ALL_METHODS, transports: *transports, host, path: &[] }),
             _ => None,
         }
     }
@@ -319,7 +331,7 @@ impl RuleKind {
 
 #[derive(Clone, Copy)]
 pub(crate) struct HttpMatch<'a> {
-    pub methods: Option<&'a [HttpMethod]>,
+    pub methods: &'a Methods,
     pub transports: Transports,
     pub host: &'a NetPattern,
     pub path: &'a [Seg],
@@ -839,7 +851,7 @@ impl RulePolicy {
         find(&mut |is_alt, &group| {
             let group = &index.groups[group as usize];
             let mut offer = |e: &HttpEntry, depth: usize| {
-                if method_matches(e.methods.as_deref(), &method) && e.transports.controls(tls) {
+                if e.methods.matches(&method) && e.transports.controls(tls) {
                     best.offer(e.rank.spec(depth), e.decision, e.rule);
                 }
             };
@@ -918,10 +930,6 @@ pub(crate) fn matches_address_form(decision: Decision, is_alternate_ip: bool) ->
     !is_alternate_ip || decision != Decision::Allow
 }
 
-pub(crate) fn method_matches(methods: Option<&[HttpMethod]>, method: &str) -> bool {
-    methods.is_none_or(|m| m.iter().any(|m| m.as_str() == method))
-}
-
 pub(crate) fn file_segments(prefix: &Path, rest: &[Seg]) -> Vec<Seg> {
     path_segments(prefix).iter().map(|s| Seg::Lit((**s).into())).chain(rest.iter().cloned()).collect()
 }
@@ -945,7 +953,7 @@ impl Rank {
     }
 
     pub(crate) fn http(http: &HttpMatch) -> Rank {
-        Rank { host: http.host.rank(), weight: http.path.iter().map(Seg::weight).sum(), methods: http.methods.is_some() }
+        Rank { host: http.host.rank(), weight: http.path.iter().map(Seg::weight).sum(), methods: !http.methods.is_all() }
     }
 
     pub(crate) fn spec(self, depth: usize) -> Spec {
@@ -1144,7 +1152,7 @@ struct HttpGroup {
 struct HttpEntry {
     rule: u32,
     decision: Decision,
-    methods: Option<Vec<HttpMethod>>,
+    methods: Methods,
     transports: Transports,
     rank: Rank,
 }
@@ -1169,8 +1177,7 @@ impl Index {
                     index.groups.push(HttpGroup::default());
                     index.groups.len() as u32 - 1
                 });
-                let methods = http.methods.map(<[HttpMethod]>::to_vec);
-                let entry = HttpEntry { rule: rule_id, decision, methods, transports: http.transports, rank };
+                let entry = HttpEntry { rule: rule_id, decision, methods: http.methods.clone(), transports: http.transports, rank };
                 let group = &mut index.groups[group as usize];
                 if rule.exact() {
                     group.allow.insert(http.path, entry, 1);

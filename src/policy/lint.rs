@@ -5,8 +5,7 @@ use super::file::parse;
 use super::net::{HostKind, NetPattern, ProbeTargets, domains_above, enclosing_ranges, is_localhost};
 use super::path::{self, Pattern, Seg, name_counts};
 use super::rules::{
-    Connection, HttpMethod, IMPORT, Precedence, READ, Rank, Rule, RuleKind, Transports, WRITE, fold_segments, method_matches, precedence,
-    resolution_key,
+    Connection, IMPORT, Methods, Precedence, READ, Rank, Rule, RuleKind, Transports, WRITE, fold_segments, precedence, resolution_key,
 };
 use super::{Capability, Decision, PathSpace};
 use crate::lint::LintWarning;
@@ -149,7 +148,7 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
 
 enum Scope<'a> {
     Files(u8),
-    Http { host: &'a NetPattern, transports: Transports, methods: Option<&'a [HttpMethod]>, connections: &'static [Connection] },
+    Http { host: &'a NetPattern, transports: Transports, methods: &'a Methods, connections: &'static [Connection] },
 }
 
 #[derive(Clone, Copy)]
@@ -248,7 +247,7 @@ impl<'a> PathRule<'a> {
         match self.scope {
             Scope::Files(mask) => [READ, WRITE, IMPORT].into_iter().filter(|&op| mask & op != 0).map(Op::File).collect(),
             Scope::Http { methods, connections, .. } => {
-                let methods: Vec<Op> = match methods {
+                let methods: Vec<Op> = match methods.listed() {
                     Some(methods) => methods.iter().map(|m| Op::Method(Some(m.as_str()))).collect(),
                     None => vec![Op::Method(None)],
                 };
@@ -260,8 +259,8 @@ impl<'a> PathRule<'a> {
     fn matches_all_ops(&self, op: Op) -> bool {
         match (&self.scope, op) {
             (Scope::Files(mask), Op::File(op)) => mask & op != 0,
-            (Scope::Http { methods, .. }, Op::Method(Some(m))) => method_matches(*methods, m),
-            (Scope::Http { methods, .. }, Op::Method(None)) => methods.is_none(),
+            (Scope::Http { methods, .. }, Op::Method(Some(m))) => methods.matches(m),
+            (Scope::Http { methods, .. }, Op::Method(None)) => methods.is_all(),
             (_, Op::Connect(_)) => self.matches_op(op),
             _ => false,
         }
@@ -270,7 +269,7 @@ impl<'a> PathRule<'a> {
     fn matches_op(&self, op: Op) -> bool {
         match (&self.scope, op) {
             (Scope::Files(mask), Op::File(op)) => mask & op != 0,
-            (Scope::Http { methods, .. }, Op::Method(m)) => m.is_none_or(|m| method_matches(*methods, m)),
+            (Scope::Http { methods, .. }, Op::Method(m)) => m.is_none_or(|m| methods.matches(m)),
             (Scope::Http { connections, .. }, Op::Connect(c)) => connections.contains(&c),
             _ => false,
         }
