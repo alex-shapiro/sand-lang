@@ -49,7 +49,7 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
     let probe_targets = ProbeTargets::new(rules.iter().filter_map(|r| r.kind.http_match().map(|http| http.host)));
     let mut bypasses: FxHashMap<(NetPattern, NetPattern, bool), Option<(String, String)>> = FxHashMap::default();
     let mut bypass = |reach: NetPattern, denied: &NetPattern, transports: Transports| {
-        [true, false].into_iter().filter(|&tls| transports.carry(tls)).find_map(|tls| {
+        [true, false].into_iter().filter(|&tls| transports.controls(tls)).find_map(|tls| {
             let found = bypasses.entry((reach.clone(), denied.clone(), tls)).or_insert_with_key(|(reach, denied, tls)| {
                 let (host, port) = probe_targets.dest(reach, denied)?;
                 let cap = Capability::Net { host, port, tls: *tls };
@@ -305,7 +305,9 @@ impl<'a> PathRule<'a> {
     fn scope_covers(&self, other: &PathRule) -> bool {
         match (&self.scope, &other.scope) {
             (Scope::Files(_), Scope::Files(_)) => true,
-            (Scope::Http { host: a, transports: s, .. }, Scope::Http { host: b, transports: t, .. }) => a.covers(b) && s.contains(*t),
+            (Scope::Http { host: a, transports: s, .. }, Scope::Http { host: b, transports: t, .. }) => {
+                a.covers(b) && transports_cover(*s, *t)
+            }
             _ => false,
         }
     }
@@ -314,7 +316,7 @@ impl<'a> PathRule<'a> {
         let scopes = match (&self.scope, &other.scope) {
             (Scope::Files(_), Scope::Files(_)) => true,
             (Scope::Http { host: a, transports: s, .. }, Scope::Http { host: b, transports: t, .. }) => {
-                a.overlaps(b, self.exact(), other.exact()) && s.intersects(*t)
+                a.overlaps(b, self.exact(), other.exact()) && transports_overlap(*s, *t)
             }
             _ => false,
         };
@@ -438,7 +440,7 @@ impl<'a> PathRules<'a> {
                 let k = &self.rules[at];
                 let Some(kr) = k.address_resolution else { return true };
                 let ports_differ = r.port.is_some() && kr.port.is_some() && r.port != kr.port;
-                excluded(k.index) || k.index == i.index || ports_differ || !r.transports.intersects(kr.transports)
+                excluded(k.index) || k.index == i.index || ports_differ || !transports_overlap(r.transports, kr.transports)
             })
         })
     }
@@ -515,6 +517,16 @@ impl<'a> PathRules<'a> {
     }
 }
 
+/// Returns `true` if a rule with transports `a` controls every connection that a rule with transports `b` controls.
+fn transports_cover(a: Transports, b: Transports) -> bool {
+    [true, false].into_iter().all(|tls| !b.controls(tls) || a.controls(tls))
+}
+
+/// Returns `true` if rules with transports `a` and `b` both control some connection.
+fn transports_overlap(a: Transports, b: Transports) -> bool {
+    [true, false].into_iter().any(|tls| a.controls(tls) && b.controls(tls))
+}
+
 fn cannot_override_between(i: &PathRule, j: &PathRule, k: &PathRule) -> bool {
     let k_deepest = match (k.counts.1, i.counts.1.filter(|_| k.rank.host >= i.rank.host)) {
         (Some(a), Some(b)) => Some(a.min(b)),
@@ -541,6 +553,17 @@ mod tests {
 
     fn lint(text: &str) -> Vec<String> {
         lint_policy(text, Path::new("/base"), Some(Path::new("/home/me"))).unwrap().iter().map(|w| w.to_string()).collect()
+    }
+
+    #[test]
+    fn transports_cover_and_overlap_as_sets_of_tls_and_plaintext() {
+        use Transports::{Both, Plaintext, Tls};
+        let all = [Tls, Plaintext, Both];
+        let pairs = all.into_iter().flat_map(|a| all.map(|b| (a, b)));
+        let covering: Vec<_> = pairs.clone().filter(|&(a, b)| transports_cover(a, b)).collect();
+        assert_eq!(covering, [(Tls, Tls), (Plaintext, Plaintext), (Both, Tls), (Both, Plaintext), (Both, Both)]);
+        let disjoint: Vec<_> = pairs.filter(|&(a, b)| !transports_overlap(a, b)).collect();
+        assert_eq!(disjoint, [(Tls, Plaintext), (Plaintext, Tls)]);
     }
 
     #[test]
@@ -1186,7 +1209,7 @@ mod tests {
                 }
                 let deny = crate::policy::rules::RulePolicy::new().deny_net(Transports::Both, url.host.clone());
                 let found = dests.iter().find(|(host, port)| {
-                    [true, false].into_iter().filter(|&tls| transports.carry(tls)).any(|tls| {
+                    [true, false].into_iter().filter(|&tls| transports.controls(tls)).any(|tls| {
                         let cap = Capability::Net { host: host.clone(), port: *port, tls };
                         deny.verdict(&cap, PathSpace::Memory, &[]).is_some()
                             && policy.check_normalized_in(&cap, PathSpace::Memory) == crate::policy::Decision::Allow

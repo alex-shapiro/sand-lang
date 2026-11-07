@@ -522,7 +522,7 @@ impl Context<'_> {
                             let hosts = if kind == "http" { "URL patterns" } else { "hosts" };
                             return Err((item.column, format!("put `tls` and `plaintext` before the {hosts}")));
                         }
-                        transports = Some(transports.map_or(t, |all| all.union(t)));
+                        transports = Some(if transports.is_none_or(|seen| seen == t) { t } else { Transports::Both });
                         continue;
                     }
                     if urls == 0

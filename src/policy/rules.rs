@@ -179,21 +179,14 @@ impl Transports {
         if decision == Decision::Allow { Transports::Tls } else { Transports::Both }
     }
 
-    /// Returns `true` if a connection with or without TLS, as `tls` gives, uses one of these transports.
-    pub(crate) fn carry(self, tls: bool) -> bool {
-        self.contains(Transports::of(tls))
-    }
-
-    pub(crate) fn contains(self, other: Transports) -> bool {
-        self == Transports::Both || self == other
-    }
-
-    pub(crate) fn intersects(self, other: Transports) -> bool {
-        self == Transports::Both || other == Transports::Both || self == other
-    }
-
-    pub(crate) fn union(self, other: Transports) -> Transports {
-        if self == other { self } else { Transports::Both }
+    /// Returns `true` if a rule with these transports controls a connection that uses TLS
+    /// when `tls` is `true`, or plaintext when `tls` is `false`.
+    pub(crate) fn controls(self, tls: bool) -> bool {
+        match self {
+            Transports::Tls => tls,
+            Transports::Plaintext => !tls,
+            Transports::Both => true,
+        }
     }
 }
 
@@ -636,7 +629,7 @@ impl RulePolicy {
         let tls = uses_tls(request);
         let mut best = Best::new(self, &[]);
         index.resolved.find_ip(ip, addr.port(), |is_alt, e| {
-            if matches_address_form(e.decision, is_alt) && e.transports.carry(tls) {
+            if matches_address_form(e.decision, is_alt) && e.transports.controls(tls) {
                 best.offer(e.rank.spec(0), e.decision, e.rule);
             }
         });
@@ -769,7 +762,7 @@ impl RulePolicy {
 
     fn net_verdict(&self, dest: &Dest, tls: bool, best: &mut Best<'_>) {
         self.non_file_index().named.find(dest, |is_alt, e| {
-            if matches_address_form(e.decision, is_alt) && e.transports.carry(tls) {
+            if matches_address_form(e.decision, is_alt) && e.transports.controls(tls) {
                 best.offer(e.rank.spec(0), e.decision, e.rule);
             }
         });
@@ -800,7 +793,7 @@ impl RulePolicy {
         find(&mut |is_alt, &group| {
             let group = &index.groups[group as usize];
             let mut offer = |e: &HttpEntry, depth: usize| {
-                if method_matches(e.methods.as_deref(), &method) && e.transports.carry(tls) {
+                if method_matches(e.methods.as_deref(), &method) && e.transports.controls(tls) {
                     best.offer(e.rank.spec(depth), e.decision, e.rule);
                 }
             };
