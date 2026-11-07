@@ -49,14 +49,10 @@ pub struct RuleDirective {
 /// The capability of a policy rule, named by the keyword after the verb.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RuleCapability {
-    /// A rule for paths without a keyword, such as `allow ./data`. It controls
-    /// reads and writes. A `deny` rule also denies imports.
+    /// A rule for paths without a keyword, such as `allow ./data`.
     Files,
-    /// A `read` rule. A `deny read` rule also denies writes and imports.
     Read,
-    /// A `write` rule. An `allow write` rule also allows reads.
     Write,
-    /// An `import` rule.
     Import,
     Net,
     Http,
@@ -106,66 +102,7 @@ pub enum Limit {
     HttpBody(usize),
 }
 
-impl RuleCapability {
-    /// The capabilities that have a keyword, in the order of error messages.
-    const KEYWORDED: [RuleCapability; 12] = [
-        RuleCapability::Read,
-        RuleCapability::Write,
-        RuleCapability::Import,
-        RuleCapability::Net,
-        RuleCapability::Http,
-        RuleCapability::Listen,
-        RuleCapability::Env,
-        RuleCapability::Stdin,
-        RuleCapability::Stdout,
-        RuleCapability::Stderr,
-        RuleCapability::TimeZone,
-        RuleCapability::Custom,
-    ];
-
-    /// Returns the keyword after the verb, such as `"http"`, or `None` for
-    /// [`RuleCapability::Files`].
-    pub fn keyword(self) -> Option<&'static str> {
-        Some(match self {
-            RuleCapability::Files => return None,
-            RuleCapability::Read => "read",
-            RuleCapability::Write => "write",
-            RuleCapability::Import => "import",
-            RuleCapability::Net => "net",
-            RuleCapability::Http => "http",
-            RuleCapability::Listen => "listen",
-            RuleCapability::Env => "env",
-            RuleCapability::Stdin => "stdin",
-            RuleCapability::Stdout => "stdout",
-            RuleCapability::Stderr => "stderr",
-            RuleCapability::TimeZone => "timezone",
-            RuleCapability::Custom => "custom",
-        })
-    }
-
-    fn from_keyword(word: &str) -> Option<RuleCapability> {
-        RuleCapability::KEYWORDED.into_iter().find(|c| c.keyword() == Some(word))
-    }
-}
-
 impl Limit {
-    /// Returns the name of the limit in a `limit` directive, such as `"call-depth"`.
-    pub fn name(self) -> &'static str {
-        match self {
-            Limit::Memory(_) => "memory",
-            Limit::Time(_) => "time",
-            Limit::Cpu(_) => "cpu",
-            Limit::Instructions(_) => "instructions",
-            Limit::CompileFuel(_) => "compile-fuel",
-            Limit::Output(_) => "output",
-            Limit::Tasks(_) => "tasks",
-            Limit::CallDepth(_) => "call-depth",
-            Limit::OpenResources(_) => "open-resources",
-            Limit::Source(_) => "source",
-            Limit::HttpBody(_) => "http-body",
-        }
-    }
-
     /// Sets the field of `limits` that this limit controls.
     pub fn apply(self, limits: &mut Limits) {
         match self {
@@ -352,9 +289,11 @@ pub(crate) fn invalid_transport_hint(word: &str) -> Option<String> {
     Some(format!("`{word}` is not a transport: {advice}; write `{lower}.` for hostname `{lower}`"))
 }
 
+const KINDS: [&str; 12] = ["read", "write", "import", "net", "http", "listen", "env", "custom", "stdin", "stdout", "stderr", "timezone"];
+
 fn invalid_capability_hint(word: &str) -> Option<String> {
     let lower = word.to_ascii_lowercase();
-    if RuleCapability::from_keyword(&lower).is_some() {
+    if KINDS.contains(&lower.as_str()) {
         return Some(if lower == word {
             format!("`{word}` is a separate capability: put each rule on a separate line or CLI flag")
         } else {
@@ -370,7 +309,7 @@ fn invalid_capability_hint(word: &str) -> Option<String> {
     let (head, rest) = word.split_once([':', '='])?;
     let separator = &word[head.len()..=head.len()];
     let head = head.to_ascii_lowercase();
-    RuleCapability::from_keyword(&head).is_some().then(|| match rest {
+    KINDS.contains(&head.as_str()).then(|| match rest {
         "" => format!("remove `{separator}` after the capability: `{head}`"),
         _ => format!("put a space after the capability: `{head} {rest}`"),
     })
@@ -461,12 +400,7 @@ fn is_name(s: &str) -> bool {
     chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-/// Returns the list of capability keywords for error messages.
-fn capability_keywords() -> String {
-    let keywords: Vec<_> = RuleCapability::KEYWORDED.iter().filter_map(|c| c.keyword()).collect();
-    let (last, rest) = keywords.split_last().expect("keywords exist");
-    format!("{}, or {last}", rest.join(", "))
-}
+const CAPABILITIES: &str = "read, write, import, net, http, listen, env, stdin, stdout, stderr, timezone, or custom";
 
 struct Context<'a> {
     base: &'a Path,
@@ -573,12 +507,25 @@ impl Context<'_> {
         let verb_text = verb(decision);
         let Some((first_arg, rest_args)) = args.split_first() else {
             let action = if decision == Decision::Prompt { "prompt for" } else { verb_text };
-            return Err((verb_word.column, format!("expected what to {action}: a path, or {}", capability_keywords())));
+            return Err((verb_word.column, format!("expected what to {action}: a path, or {CAPABILITIES}")));
         };
         let keyword = first_arg.plain().filter(|w| w.bytes().all(|b| b.is_ascii_lowercase() || b == b'-'));
-        let (capability, rest_args) = match keyword.as_deref() {
-            None => (RuleCapability::Files, args),
-            Some(k) if let Some(capability) = RuleCapability::from_keyword(k) => (capability, rest_args),
+        let directive = |capability| RuleDirective { line, column: first_arg.column, decision, capability };
+        let (kind, rest_args) = match keyword.as_deref() {
+            Some(k @ ("read" | "write" | "import" | "net" | "http" | "listen" | "env" | "custom")) => (k, rest_args),
+            Some(k @ ("stdin" | "stdout" | "stderr" | "timezone")) => {
+                if let Some(extra) = rest_args.first() {
+                    return Err((extra.column, format!("`{verb_text} {k}` does not accept arguments")));
+                }
+                let (kind, capability) = match k {
+                    "stdin" => (RuleKind::Stdin, RuleCapability::Stdin),
+                    "timezone" => (RuleKind::TimeZone, RuleCapability::TimeZone),
+                    "stdout" => (RuleKind::Stdout, RuleCapability::Stdout),
+                    _ => (RuleKind::Stderr, RuleCapability::Stderr),
+                };
+                rules.push(file_rule(decision, kind, Origin { line, column: first_arg.column, text: k.to_string() }));
+                return Ok(directive(capability));
+            }
             Some("private-net") => {
                 return Err((
                     first_arg.column,
@@ -587,38 +534,34 @@ impl Context<'_> {
                 ));
             }
             Some(k) => {
-                let message = invalid_capability_hint(k)
-                    .unwrap_or_else(|| format!("unknown capability `{k}`: expected a path, or {}", capability_keywords()));
+                let message =
+                    invalid_capability_hint(k).unwrap_or_else(|| format!("unknown capability `{k}`: expected a path, or {CAPABILITIES}"));
                 return Err((first_arg.column, message));
             }
+            None => ("files", args),
         };
-        let keyword = capability.keyword().unwrap_or_default();
-        let directive = RuleDirective { line, column: first_arg.column, decision, capability };
-        let unit_kind = match capability {
-            RuleCapability::Stdin => Some(RuleKind::Stdin),
-            RuleCapability::Stdout => Some(RuleKind::Stdout),
-            RuleCapability::Stderr => Some(RuleKind::Stderr),
-            RuleCapability::TimeZone => Some(RuleKind::TimeZone),
-            _ => None,
-        };
-        if let Some(kind) = unit_kind {
-            if let Some(extra) = rest_args.first() {
-                return Err((extra.column, format!("`{verb_text} {keyword}` does not accept arguments")));
-            }
-            rules.push(file_rule(decision, kind, Origin { line, column: first_arg.column, text: keyword.to_string() }));
-            return Ok(directive);
-        }
+        let directive = directive(match kind {
+            "read" => RuleCapability::Read,
+            "write" => RuleCapability::Write,
+            "import" => RuleCapability::Import,
+            "net" => RuleCapability::Net,
+            "http" => RuleCapability::Http,
+            "listen" => RuleCapability::Listen,
+            "env" => RuleCapability::Env,
+            "custom" => RuleCapability::Custom,
+            _ => RuleCapability::Files,
+        });
         if rest_args.is_empty() {
-            let hint = match capability {
-                RuleCapability::Custom => format!("expected `{verb_text} custom NAME [DETAIL]`"),
-                RuleCapability::Http => {
+            let hint = match kind {
+                "custom" => format!("expected `{verb_text} custom NAME [DETAIL]`"),
+                "http" => {
                     format!("expected `{verb_text} http [TRANSPORT...] [METHOD...] URL...`, e.g. `{verb_text} http GET api.example.com/v1`")
                 }
-                _ => format!("`{verb_text} {keyword}` requires arguments"),
+                _ => format!("`{verb_text} {kind}` requires arguments"),
             };
             return Err((first_arg.column, hint));
         }
-        if capability == RuleCapability::Custom {
+        if kind == "custom" {
             let [name, detail @ ..] = rest_args else { unreachable!() };
             if detail.len() > 1 {
                 return Err((detail[1].column, format!("expected `{verb_text} custom NAME [DETAIL]`")));
@@ -648,12 +591,12 @@ impl Context<'_> {
         for item in rest_args {
             for word in &self.expand(item)? {
                 let bare = word.bare();
-                if matches!(capability, RuleCapability::Net | RuleCapability::Http)
+                if matches!(kind, "net" | "http")
                     && let Some(bare) = &bare
                 {
                     if let Some(t) = transport(bare) {
                         if urls > 0 {
-                            let hosts = if capability == RuleCapability::Http { "URL patterns" } else { "hosts" };
+                            let hosts = if kind == "http" { "URL patterns" } else { "hosts" };
                             return Err((item.column, format!("put `tls` and `plaintext` before the {hosts}")));
                         }
                         transports = Some(if transports.is_none_or(|seen| seen == t) { t } else { Transports::Both });
@@ -667,12 +610,12 @@ impl Context<'_> {
                 }
                 let transports = transports.unwrap_or(Transports::default_for(decision));
                 let origin = Origin { line, column: item.column, text: word.render() };
-                let kind = match capability {
-                    RuleCapability::Files | RuleCapability::Read | RuleCapability::Write | RuleCapability::Import => {
-                        let access = match capability {
-                            RuleCapability::Read => Access::Read,
-                            RuleCapability::Write => Access::Write,
-                            RuleCapability::Import => Access::Import,
+                let kind = match kind {
+                    "files" | "read" | "write" | "import" => {
+                        let access = match kind {
+                            "read" => Access::Read,
+                            "write" => Access::Write,
+                            "import" => Access::Import,
                             _ => Access::Any,
                         };
                         RuleKind::Files(
@@ -680,18 +623,18 @@ impl Context<'_> {
                             parse_path(&word.tokens(), bare.is_some(), Some(self.base), self.home).map_err(|m| (item.column, m))?,
                         )
                     }
-                    RuleCapability::Net => {
+                    "net" => {
                         urls += 1;
                         RuleKind::Net(NetPattern::from_tokens(&word.tokens()).map_err(|m| (item.column, m))?, transports)
                     }
-                    RuleCapability::Http if let Some(method) = bare.as_deref().and_then(|b| b.parse::<HttpMethod>().ok()) => {
+                    "http" if let Some(method) = bare.as_deref().and_then(|b| b.parse::<HttpMethod>().ok()) => {
                         if urls > 0 {
                             return Err((item.column, "put HTTP methods before the URL patterns".into()));
                         }
                         methods.push(method);
                         continue;
                     }
-                    RuleCapability::Http => {
+                    "http" => {
                         urls += 1;
                         let methods = match methods.split_first() {
                             Some((first, rest)) => Methods::only(first.clone(), rest.iter().cloned()),
@@ -699,26 +642,21 @@ impl Context<'_> {
                         };
                         RuleKind::Http(methods, UrlPattern::from_tokens(&word.tokens()).map_err(|m| (item.column, m))?, transports)
                     }
-                    RuleCapability::Listen if word.tokens().iter().any(|&(c, wild)| c == '*' && !wild) => {
+                    "listen" if word.tokens().iter().any(|&(c, wild)| c == '*' && !wild) => {
                         return Err((item.column, QUOTED_STAR_IN_HOST.into()));
                     }
-                    RuleCapability::Listen => RuleKind::Listen(word.text().parse().map_err(|m: PatternError| (item.column, m.0))?),
-                    RuleCapability::Env => RuleKind::Env(NamePattern(NameKind::from_tokens(&word.tokens()).map_err(|m| (item.column, m))?)),
-                    RuleCapability::Stdin
-                    | RuleCapability::Stdout
-                    | RuleCapability::Stderr
-                    | RuleCapability::TimeZone
-                    | RuleCapability::Custom => unreachable!("handled before the pattern loop"),
+                    "listen" => RuleKind::Listen(word.text().parse().map_err(|m: PatternError| (item.column, m.0))?),
+                    _ => RuleKind::Env(NamePattern(NameKind::from_tokens(&word.tokens()).map_err(|m| (item.column, m))?)),
                 };
                 rules.push(file_rule(decision, kind, origin));
             }
         }
-        if capability == RuleCapability::Http && urls == 0 {
+        if kind == "http" && urls == 0 {
             let last = rest_args.last().unwrap_or(first_arg);
             let after = if methods.is_empty() { "transports" } else { "methods" };
             return Err((last.column, format!("`{verb_text} http` requires a URL pattern after {after}, e.g. `api.example.com/v1`")));
         }
-        if capability == RuleCapability::Net && urls == 0 {
+        if kind == "net" && urls == 0 {
             let last = rest_args.last().unwrap_or(first_arg);
             return Err((last.column, format!("`{verb_text} net` requires a host pattern after transports, e.g. `localhost:8080`")));
         }
@@ -1095,46 +1033,6 @@ mod tests {
         assert_eq!(limits.max_tasks, Limits::default().max_tasks);
         assert_eq!(p.limit_directives[0], LimitDirective { line: 7, column: 7, limit: Limit::Memory(Some(64 << 20)) });
         assert_eq!(p.limit_directives.len(), 4);
-    }
-
-    #[test]
-    fn each_capability_keyword_parses_to_its_capability() {
-        for capability in RuleCapability::KEYWORDED {
-            let keyword = capability.keyword().unwrap();
-            let argument = match capability {
-                RuleCapability::Read | RuleCapability::Write | RuleCapability::Import => " /x",
-                RuleCapability::Net | RuleCapability::Http => " a.example",
-                RuleCapability::Listen => " localhost:8080",
-                RuleCapability::Env => " HOME",
-                RuleCapability::Custom => " name",
-                _ => "",
-            };
-            let p = parse(&format!("deny {keyword}{argument}"));
-            assert_eq!(p.rule_directives[0].capability, capability, "{keyword}");
-        }
-        assert_eq!(RuleCapability::Files.keyword(), None);
-        assert_eq!(capability_keywords(), "read, write, import, net, http, listen, env, stdin, stdout, stderr, timezone, or custom");
-    }
-
-    #[test]
-    fn each_limit_name_parses_to_its_limit() {
-        let limits = [
-            (Limit::Memory(Some(1 << 20)), "1M"),
-            (Limit::Time(None), "none"),
-            (Limit::Cpu(Some(Duration::from_secs(2))), "2s"),
-            (Limit::Instructions(Some(1000)), "1_000"),
-            (Limit::CompileFuel(None), "unlimited"),
-            (Limit::Output(Some(1024)), "1K"),
-            (Limit::Tasks(3), "3"),
-            (Limit::CallDepth(200), "200"),
-            (Limit::OpenResources(8), "8"),
-            (Limit::Source(4096), "4096"),
-            (Limit::HttpBody(1 << 10), "1K"),
-        ];
-        for (limit, value) in limits {
-            let p = parse(&format!("limit {} {value}", limit.name()));
-            assert_eq!(p.limit_directives[0].limit, limit, "{}", limit.name());
-        }
     }
 
     #[test]
