@@ -197,7 +197,8 @@ impl HttpMethod {
     pub const CONNECT: HttpMethod = HttpMethod(Cow::Borrowed("CONNECT"));
 
     /// The methods that [`str::parse`] accepts in any case.
-    const KNOWN: [&'static str; 9] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE", "CONNECT"];
+    const KNOWN: [HttpMethod; 9] =
+        [Self::GET, Self::HEAD, Self::POST, Self::PUT, Self::PATCH, Self::DELETE, Self::OPTIONS, Self::TRACE, Self::CONNECT];
 
     /// The method in uppercase, such as `GET`.
     pub fn as_str(&self) -> &str {
@@ -215,7 +216,7 @@ impl std::str::FromStr for HttpMethod {
     type Err = PatternError;
 
     fn from_str(word: &str) -> Result<HttpMethod, PatternError> {
-        let known = HttpMethod::KNOWN.into_iter().find(|m| m.eq_ignore_ascii_case(word));
+        let known = HttpMethod::KNOWN.into_iter().find(|m| m.as_str().eq_ignore_ascii_case(word));
         let token = word.bytes().any(|b| b.is_ascii_uppercase())
             && word.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-' || b == b'_');
         if file::transport(word).is_some() || file::invalid_transport_hint(word).is_some() || (known.is_none() && !token) {
@@ -223,7 +224,7 @@ impl std::str::FromStr for HttpMethod {
                 "`{word}` is not an HTTP method: expected a method such as `GET`, or an uppercase token such as `M-SEARCH`"
             )));
         }
-        Ok(HttpMethod(known.map_or_else(|| Cow::Owned(word.into()), Cow::Borrowed)))
+        Ok(known.unwrap_or_else(|| HttpMethod(Cow::Owned(word.into()))))
     }
 }
 
