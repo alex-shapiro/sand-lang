@@ -2507,11 +2507,11 @@ recorded wake time. If the host resumes the run too early, the run suspends
 again.
 
 **Host functions.** A host function that is registered wrapped in
-`native::Journaled` is journaled. The engine records its result, and replay
+`native::func::Journaled` is journaled. The engine records its result, and replay
 returns the recorded result without a call. The identity of a call is the
 function's name and the journal encoding of its arguments; a value of a bound
 value type, such as a `time.Instant`, takes part through its type and text.
-A function wrapped in `native::Effectful` is also journaled, and has effects
+A function wrapped in `native::func::Effectful` is also journaled, and has effects
 outside the run. It is asynchronous, or returns a `Later` and starts its
 effect in the future of the `Later`; the Rust compiler refuses a function that
 returns its result at once. The engine records the start of the call and
@@ -2519,8 +2519,8 @@ starts the future only when the journal is durable. The arguments and the result
 journaled function must be plain data: no functions, tasks, channels, generic
 parameters, or values of bound object types, and no values of bound value
 types in the result. The Rust compiler enforces this rule: the parameter
-types must implement `native::JournalArg` and the return type must implement
-`native::JournalData`. A journaled function does not read journal inputs,
+types must implement `native::ty::JournalArg` and the return type must implement
+`native::ty::JournalData`. A journaled function does not read journal inputs,
 because replay does not call it: it cannot take a `Call` parameter, which
 `Vm::wall_time` and `Vm::monotonic` need, and it cannot get the run's random
 number generator. A clock reading that it makes through the host's clock is
