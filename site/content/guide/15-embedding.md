@@ -83,7 +83,7 @@ let report = files.read("/out/report.txt")?;
 ```
 
 - **Policy.** `RulePolicy` has `allow_`, `deny_`, and `prompt_` builder methods for each capability kind, such as `allow_read`, `deny_net`, and `prompt_write`. Each builder method takes typed arguments. Pattern types parse policy file syntax with `str::parse`. Invalid syntax returns a `PatternError`:
-  - `PathPattern` is the path of a file rule. It must be absolute or start with `**`. `PathPattern::literal` matches a host path literally. `AbsolutePath::new` validates a static path at compile time, as in `const SRV: AbsolutePath = AbsolutePath::new("/srv");`. Convert an `AbsolutePath` with `PathPattern::from`.
+  - `PathPattern` is the path of a file rule. It must be absolute or start with `**`. `PathPattern::literal` matches a host path literally. In a `const`, `AbsolutePath::new` validates a path at compile time, as in `const SRV: AbsolutePath = AbsolutePath::new("/srv");`. Convert an `AbsolutePath` with `PathPattern::from`.
   - `NetPattern` is the host of a `net` rule.
   - `UrlPattern` is the URL of an `http` rule.
   - `ListenPattern` is the address of a `listen` rule.
