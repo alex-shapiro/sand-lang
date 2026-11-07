@@ -15,13 +15,14 @@ use crate::vm::bytecode::Program;
 use crate::vm::heap::GcStats;
 use crate::vm::sched::{IoShared, IoTable, RunEnd};
 use crate::vm::{Always, Host, HostFn, NativeEntry, OutputSink, Rng, SharedSink, TraceEntry, Trap, Vm, entropy_seed};
+use parking_lot::Mutex;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Duration;
 
 /// Per-engine resource limits.
@@ -184,23 +185,20 @@ impl MemorySink {
     pub fn new() -> MemorySink {
         MemorySink::default()
     }
-    fn data(&self) -> std::sync::MutexGuard<'_, Vec<u8>> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
-    }
     pub fn contents(&self) -> String {
-        String::from_utf8_lossy(&self.data()).into_owned()
+        String::from_utf8_lossy(&self.0.lock()).into_owned()
     }
     pub fn bytes(&self) -> Vec<u8> {
-        self.data().clone()
+        self.0.lock().clone()
     }
     pub fn clear(&self) {
-        self.data().clear();
+        self.0.lock().clear();
     }
 }
 
 impl OutputSink for MemorySink {
     fn write(&self, data: &[u8]) -> std::io::Result<()> {
-        self.data().extend_from_slice(data);
+        self.0.lock().extend_from_slice(data);
         Ok(())
     }
 }
@@ -716,7 +714,7 @@ impl Registry {
         let mut key: Vec<String> = names.iter().map(|n| n.to_string()).collect();
         key.sort();
         key.dedup();
-        let mut partial = self.partial.lock().unwrap_or_else(|e| e.into_inner());
+        let mut partial = self.partial.lock();
         if let Some(s) = partial.get(&key) {
             return Ok(s.clone());
         }
@@ -930,7 +928,7 @@ impl Engine {
     fn recycle(&self, prog: Arc<Program>, snapshot: Option<Arc<Snapshot>>) {
         let (Ok(mut prog), Some(snap)) = (Arc::try_unwrap(prog), snapshot) else { return };
         snap.mark.rollback(&mut prog);
-        *self.spare.lock().unwrap_or_else(|e| e.into_inner()) = Some((snap, prog));
+        *self.spare.lock() = Some((snap, prog));
     }
 
     /// Compiles synchronously: without prompts, it never waits.
@@ -1127,7 +1125,7 @@ impl Engine {
     /// Checks `path` against the import policy and prompts if `prompt` is true.
     async fn check_import(&self, path: &Path, prompt: bool) -> Result<bool, &'static str> {
         let cap = Capability::Import(path.to_path_buf());
-        if let Some(&d) = self.always.lock().unwrap_or_else(|e| e.into_inner()).get(&cap) {
+        if let Some(&d) = self.always.lock().get(&cap) {
             return Ok(d);
         }
         match self.config.policy.check_normalized_in(&cap, self.config.fs.space()) {
@@ -1138,7 +1136,7 @@ impl Engine {
                     let answer = p.prompt(cap.clone()).await;
                     let allowed = matches!(answer, PromptAnswer::AllowOnce | PromptAnswer::AllowAlways);
                     if matches!(answer, PromptAnswer::AllowAlways | PromptAnswer::DenyAlways) {
-                        self.always.lock().unwrap_or_else(|e| e.into_inner()).insert(cap, allowed);
+                        self.always.lock().insert(cap, allowed);
                     }
                     Ok(allowed)
                 }
@@ -1226,7 +1224,7 @@ impl Engine {
         // Time spent waiting for prompt answers does not count.
         let deadline = deadline.map(|d| d + prompted);
         let budget = self.compile_budget(deadline);
-        let spare = match self.spare.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        let spare = match self.spare.lock().take() {
             Some((s, p)) if Arc::ptr_eq(&s, &snap) => Some(p),
             _ => None,
         };

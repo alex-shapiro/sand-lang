@@ -3,11 +3,12 @@
 use super::{ENTRY_OVERHEAD, EntryKind, EntryMeta, OpenMode};
 use crate::platform::{Clock, SystemClock};
 use crate::vm::iomem::Reservation;
+use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::io::{self, ErrorKind};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
 
 /// Bytes counted per file or directory besides its name and contents.
 const NODE_OVERHEAD: usize = 64;
@@ -112,15 +113,11 @@ impl FileCell {
         Arc::new(FileCell { content: Mutex::new(Content { data, modified: now(&*shared.clock), generation }), shared: shared.clone() })
     }
 
-    fn lock(&self) -> MutexGuard<'_, Content> {
-        self.content.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
     /// Replaces or extends the contents with `data` at `at` (at the end if
     /// `None`), filling a gap past the end with zeros; returns where the
     /// data ends. The growth must fit in the capacity.
     fn write_at(&self, at: Option<u64>, data: &[u8]) -> io::Result<u64> {
-        let mut c = self.lock();
+        let mut c = self.content.lock();
         let start = match at {
             Some(at) => usize::try_from(at).map_err(|_| error(ErrorKind::QuotaExceeded, "file too large"))?,
             None => c.data.len(),
@@ -138,7 +135,7 @@ impl FileCell {
 
     /// Truncates or extends (with zeros) the contents to `len` bytes.
     fn set_len(&self, len: u64) -> io::Result<()> {
-        let mut c = self.lock();
+        let mut c = self.content.lock();
         let len = usize::try_from(len).map_err(|_| error(ErrorKind::QuotaExceeded, "file too large"))?;
         if len > c.data.len() {
             self.shared.take(len - c.data.len())?;
@@ -156,8 +153,7 @@ impl FileCell {
 
 impl Drop for FileCell {
     fn drop(&mut self) {
-        let len = self.content.get_mut().map_or(0, |c| c.data.len());
-        self.shared.give_back(len);
+        self.shared.give_back(self.content.get_mut().data.len());
     }
 }
 
@@ -221,7 +217,7 @@ impl Node {
     fn meta(&self) -> EntryMeta {
         match self {
             Node::File(f) => {
-                let c = f.lock();
+                let c = f.content.lock();
                 EntryMeta { kind: EntryKind::File, size: c.data.len() as u64, modified: Some(c.modified) }
             }
             Node::Dir(d) => EntryMeta { kind: EntryKind::Dir, size: 0, modified: Some(d.modified) },
@@ -384,7 +380,7 @@ impl Tree {
                 return Ok(());
             }
         };
-        let mut c = cell.lock();
+        let mut c = cell.content.lock();
         if append {
             self.take(data.len())?;
             c.data.extend_from_slice(data);
@@ -517,7 +513,7 @@ impl Tree {
         let mut moved = vec![&mut node];
         while let Some(n) = moved.pop() {
             match n {
-                Node::File(f) => f.lock().generation = generation,
+                Node::File(f) => f.content.lock().generation = generation,
                 Node::Dir(d) => moved.extend(d.entries.values_mut()),
             }
         }
@@ -551,25 +547,21 @@ impl MemFs {
         MemFs { tree: Arc::new(Mutex::new(Tree { root: Dir { entries: BTreeMap::new(), modified }, shared })) }
     }
 
-    fn lock(&self) -> MutexGuard<'_, Tree> {
-        self.tree.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
     /// The capacity in bytes.
     pub fn capacity(&self) -> usize {
-        self.lock().shared.capacity
+        self.tree.lock().shared.capacity
     }
 
     /// The bytes in use (contents, names and per-entry overhead), including
     /// the contents of removed files that scripts still have open.
     pub fn used(&self) -> usize {
-        self.lock().shared.used.load(Ordering::Relaxed)
+        self.tree.lock().shared.used.load(Ordering::Relaxed)
     }
 
     /// Writes a file, creating missing parent directories; replaces an existing file.
     pub fn write(&self, path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Result<()> {
         let parts = parts(path.as_ref())?;
-        let mut t = self.lock();
+        let mut t = self.tree.lock();
         if let Some((_, dirs)) = parts.split_last() {
             t.create_dir_all(dirs)?;
         }
@@ -579,8 +571,8 @@ impl MemFs {
     /// The contents of a file.
     pub fn read(&self, path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
         let parts = parts(path.as_ref())?;
-        match self.lock().root.get(&parts)? {
-            Node::File(f) => Ok(f.lock().data.clone()),
+        match self.tree.lock().root.get(&parts)? {
+            Node::File(f) => Ok(f.content.lock().data.clone()),
             Node::Dir(_) => Err(error(ErrorKind::IsADirectory, "is a directory")),
         }
     }
@@ -588,18 +580,18 @@ impl MemFs {
     /// Creates a directory and any missing directories above it.
     pub fn create_dir_all(&self, path: impl AsRef<Path>) -> io::Result<()> {
         let parts = parts(path.as_ref())?;
-        self.lock().create_dir_all(&parts)
+        self.tree.lock().create_dir_all(&parts)
     }
 
     /// Removes a file, or a directory with everything in it.
     pub fn remove(&self, path: impl AsRef<Path>) -> io::Result<()> {
         let parts = parts(path.as_ref())?;
-        self.lock().remove(&parts, |_| Ok(()))
+        self.tree.lock().remove(&parts, |_| Ok(()))
     }
 
     /// Removes everything; open files keep their contents, still counted, until closed.
     pub fn clear(&self) {
-        let mut t = self.lock();
+        let mut t = self.tree.lock();
         let names: usize = t.root.entries.iter().map(|(name, node)| node.footprint(name)).sum();
         t.root.entries.clear();
         t.give_back(names);
@@ -616,17 +608,17 @@ impl MemFs {
     /// A number that grows whenever a file is written (or moved), for
     /// [`MemFs::changed_files`].
     pub fn generation(&self) -> u64 {
-        self.lock().shared.generation.load(Ordering::Relaxed)
+        self.tree.lock().shared.generation.load(Ordering::Relaxed)
     }
 
     /// The files written (or moved) since the file system was at
     /// `generation`, with their contents, in the order of [`MemFs::files`].
     pub fn changed_files(&self, generation: u64) -> Vec<(PathBuf, Vec<u8>)> {
         let mut out = Vec::new();
-        let t = self.lock();
+        let t = self.tree.lock();
         walk(&t.root, |names, node| {
             if let Node::File(file) = node {
-                let c = file.lock();
+                let c = file.content.lock();
                 if c.generation > generation {
                     out.push((std::iter::once("/").chain(names.iter().copied()).collect(), c.data.clone()));
                 }
@@ -639,11 +631,11 @@ impl MemFs {
     /// [`MemFs::files`], without copying them. `f` must not use this file
     /// system.
     pub fn for_each_file(&self, mut f: impl FnMut(&Path, &[u8])) {
-        let t = self.lock();
+        let t = self.tree.lock();
         walk(&t.root, |names, node| {
             if let Node::File(file) = node {
                 let path: PathBuf = std::iter::once("/").chain(names.iter().copied()).collect();
-                f(&path, &file.lock().data);
+                f(&path, &file.content.lock().data);
             }
         });
     }
@@ -653,10 +645,10 @@ impl MemFs {
 
     pub(crate) fn read_reserved(&self, path: &Path, mut res: Reservation) -> io::Result<(Vec<u8>, Reservation)> {
         let parts = parts(path)?;
-        let t = self.lock();
+        let t = self.tree.lock();
         match t.root.get(&parts) {
             Ok(Node::File(f)) => {
-                let c = f.lock();
+                let c = f.content.lock();
                 res.ensure(c.data.len())?;
                 Ok((c.data.clone(), res))
             }
@@ -669,9 +661,9 @@ impl MemFs {
     /// The contents of a script module, if it has at most `max` bytes.
     pub(crate) fn read_source(&self, path: &Path, max: usize) -> io::Result<Vec<u8>> {
         let parts = parts(path)?;
-        match self.lock().root.get(&parts)? {
+        match self.tree.lock().root.get(&parts)? {
             Node::File(f) => {
-                let c = f.lock();
+                let c = f.content.lock();
                 if c.data.len() > max { Err(error(ErrorKind::InvalidData, "source too large")) } else { Ok(c.data.clone()) }
             }
             Node::Dir(_) => Err(not_regular(path)),
@@ -681,23 +673,23 @@ impl MemFs {
     /// Opens the regular file at `path` for `mode`.
     pub(crate) fn open(&self, path: &Path, mode: OpenMode) -> io::Result<OpenFile> {
         let parts = parts(path)?;
-        let cell = self.lock().open(&parts, mode)?;
+        let cell = self.tree.lock().open(&parts, mode)?;
         Ok(OpenFile { cell, append: mode == OpenMode::Append })
     }
 
     /// The number of entries below `path` (the work of moving it).
     pub(crate) fn entries_below(&self, path: &Path) -> usize {
         let Ok(parts) = parts(path) else { return 0 };
-        self.lock().root.get(&parts).map_or(0, Node::entries_below)
+        self.tree.lock().root.get(&parts).map_or(0, Node::entries_below)
     }
 
     pub(crate) fn write_file(&self, path: &Path, data: &[u8], append: bool) -> io::Result<()> {
-        self.lock().write(&parts(path)?, data, append)
+        self.tree.lock().write(&parts(path)?, data, append)
     }
 
     pub(crate) fn stat(&self, path: &Path) -> io::Result<EntryMeta> {
         let parts = parts(path)?;
-        let t = self.lock();
+        let t = self.tree.lock();
         if parts.is_empty() {
             return Ok(EntryMeta { kind: EntryKind::Dir, size: 0, modified: Some(t.root.modified) });
         }
@@ -707,7 +699,7 @@ impl MemFs {
     /// The names in a directory, in order.
     pub(crate) fn list_dir(&self, path: &Path, res: &mut Reservation) -> io::Result<Vec<String>> {
         let parts = parts(path)?;
-        let t = self.lock();
+        let t = self.tree.lock();
         let dir = t.root.dir(&parts)?;
         let mut names = Vec::with_capacity(dir.entries.len());
         for name in dir.entries.keys() {
@@ -718,22 +710,22 @@ impl MemFs {
     }
 
     pub(crate) fn create_dir(&self, path: &Path) -> io::Result<()> {
-        self.lock().create_dir(&parts(path)?)
+        self.tree.lock().create_dir(&parts(path)?)
     }
 
     pub(crate) fn make_dir_all(&self, path: &Path) -> io::Result<()> {
-        self.lock().create_dir_all(&parts(path)?)
+        self.tree.lock().create_dir_all(&parts(path)?)
     }
 
     pub(crate) fn remove_file(&self, path: &Path) -> io::Result<()> {
-        self.lock().remove(&parts(path)?, |n| match n {
+        self.tree.lock().remove(&parts(path)?, |n| match n {
             Node::File(_) => Ok(()),
             Node::Dir(_) => Err(error(ErrorKind::IsADirectory, "is a directory")),
         })
     }
 
     pub(crate) fn remove_dir(&self, path: &Path) -> io::Result<()> {
-        self.lock().remove(&parts(path)?, |n| match n {
+        self.tree.lock().remove(&parts(path)?, |n| match n {
             Node::Dir(d) if d.entries.is_empty() => Ok(()),
             Node::Dir(_) => Err(error(ErrorKind::DirectoryNotEmpty, "directory not empty")),
             Node::File(_) => Err(error(ErrorKind::NotADirectory, "not a directory")),
@@ -753,7 +745,7 @@ impl MemFs {
     ) -> Result<io::Result<()>, E> {
         let names = |p: &Path, res: &mut Reservation| -> io::Result<Vec<String>> {
             let parts = parts(p)?;
-            let t = self.lock();
+            let t = self.tree.lock();
             match t.root.get(&parts)? {
                 Node::Dir(d) => {
                     res.grow(d.entries.keys().map(|n| n.len() + ENTRY_OVERHEAD).sum())?;
@@ -795,15 +787,15 @@ impl MemFs {
     }
 
     pub(crate) fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
-        self.lock().rename(&parts(from)?, &parts(to)?)
+        self.tree.lock().rename(&parts(from)?, &parts(to)?)
     }
 
     /// Copies the contents of the regular file `from` to `to`.
     pub(crate) fn copy(&self, from: &Path, to: &Path) -> io::Result<()> {
         let (from, to) = (parts(from)?, parts(to)?);
-        let mut t = self.lock();
+        let mut t = self.tree.lock();
         let data = match t.root.get(&from) {
-            Ok(Node::File(f)) => f.lock().data.clone(),
+            Ok(Node::File(f)) => f.content.lock().data.clone(),
             Ok(Node::Dir(_)) => return Err(not_regular(Path::new("source"))),
             Err(_) if from.is_empty() => return Err(not_regular(Path::new("/"))),
             Err(e) => return Err(e),
@@ -813,7 +805,7 @@ impl MemFs {
 
     /// Whether anything is at `path`.
     pub(crate) fn exists(&self, path: &Path) -> bool {
-        parts(path).is_ok_and(|p| p.is_empty() || self.lock().root.get(&p).is_ok())
+        parts(path).is_ok_and(|p| p.is_empty() || self.tree.lock().root.get(&p).is_ok())
     }
 }
 
@@ -828,7 +820,7 @@ pub(crate) struct OpenFile {
 impl OpenFile {
     /// Copies the bytes at `pos` into `buf`; returns how many.
     pub fn read_at(&self, pos: u64, buf: &mut [u8]) -> usize {
-        let c = self.cell.lock();
+        let c = self.cell.content.lock();
         let start = usize::try_from(pos).unwrap_or(usize::MAX).min(c.data.len());
         let n = buf.len().min(c.data.len() - start);
         buf[..n].copy_from_slice(&c.data[start..start + n]);
@@ -839,7 +831,7 @@ impl OpenFile {
     /// ends. Writing nothing changes nothing (also past the end).
     pub fn write_at(&self, pos: u64, data: &[u8]) -> io::Result<u64> {
         if data.is_empty() {
-            return Ok(if self.append { self.cell.lock().data.len() as u64 } else { pos });
+            return Ok(if self.append { self.cell.content.lock().data.len() as u64 } else { pos });
         }
         self.cell.write_at(if self.append { None } else { Some(pos) }, data)
     }
@@ -854,7 +846,7 @@ impl OpenFile {
     }
 
     pub fn meta(&self) -> EntryMeta {
-        let c = self.cell.lock();
+        let c = self.cell.content.lock();
         EntryMeta { kind: EntryKind::File, size: c.data.len() as u64, modified: Some(c.modified) }
     }
 }

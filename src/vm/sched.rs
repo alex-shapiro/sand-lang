@@ -19,14 +19,14 @@ pub struct IoShared {
 impl IoShared {
     /// Wakes the engine task (e.g. after an interrupt).
     pub fn wake(&self) {
-        if let Some(w) = self.waker.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        if let Some(w) = self.waker.lock().as_ref() {
             w.wake_by_ref();
         }
     }
 
     /// Registers the engine task's waker (woken by I/O and interrupts).
     fn set_waker(&self, w: &Waker) {
-        let mut slot = self.waker.lock().unwrap_or_else(|e| e.into_inner());
+        let mut slot = self.waker.lock();
         if !slot.as_ref().is_some_and(|x| x.will_wake(w)) {
             *slot = Some(w.clone());
         }
@@ -45,7 +45,7 @@ impl Wake for SlotWaker {
         self.wake_by_ref();
     }
     fn wake_by_ref(self: &Arc<Self>) {
-        self.shared.ready.lock().unwrap_or_else(|e| e.into_inner()).push(self.slot);
+        self.shared.ready.lock().push(self.slot);
         self.shared.wake();
     }
 }
@@ -126,7 +126,7 @@ impl IoTable {
         if let Some(w) = task_waker {
             self.shared.set_waker(w);
         }
-        let slots = std::mem::take(&mut *self.shared.ready.lock().unwrap_or_else(|e| e.into_inner()));
+        let slots = std::mem::take(&mut *self.shared.ready.lock());
         let mut done = Vec::new();
         for slot in slots {
             let Some(Some(op)) = self.ops.get_mut(slot as usize) else { continue };

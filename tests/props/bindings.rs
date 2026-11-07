@@ -1,4 +1,5 @@
 use super::{int, int_lit, str_lit};
+use parking_lot::Mutex;
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
 use sandlang::json::Json;
@@ -6,7 +7,7 @@ use sandlang::native::{Num, Param, Val, traits};
 use sandlang::vm::{Ctl, Vm};
 use sandlang::{Config, Engine, Error, MemorySink, NativeModule, Value};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 fn run(config: Config, src: &str) -> (Result<sandlang::Outcome, Error>, String) {
     let out = MemorySink::new();
@@ -142,7 +143,7 @@ fn fig_module(seen: Arc<Mutex<Vec<Fig>>>, made: Fig) -> NativeModule {
     let mut m = NativeModule::new("fig");
     m.bind::<Fig>().bind::<Holder<(), ()>>().bind::<Defaults>();
     m.function("echo", move |f: Fig| {
-        seen.lock().unwrap().push(f.clone());
+        seen.lock().push(f.clone());
         f
     });
     m.function("make", move || made.clone());
@@ -269,7 +270,7 @@ proptest! {
         prop_assert!(r.is_ok(), "{r:?}\n{src}");
         prop_assert_eq!(out, "true\ntrue\ntrue\ntrue\n", "{}", src);
         let wrapped = Fig::Wrap(Box::new(value.clone()));
-        prop_assert_eq!(seen.lock().unwrap().clone(), vec![value, wrapped]);
+        prop_assert_eq!(seen.lock().clone(), vec![value, wrapped]);
     }
 
     #[test]
@@ -280,7 +281,7 @@ proptest! {
         let mut m = fig_module(Arc::default(), Fig::Empty);
         let s = seen.clone();
         m.function("echo_text", move |h: Holder<i64, String>| {
-            s.lock().unwrap().push(h.clone());
+            s.lock().push(h.clone());
             h
         });
         let made = second.clone();
@@ -300,7 +301,7 @@ proptest! {
         let (r, out) = run(Config::new().module(m), &src);
         prop_assert!(r.is_ok(), "{r:?}\n{src}");
         prop_assert_eq!(out, "true\ntrue\n", "{}", src);
-        prop_assert_eq!(seen.lock().unwrap().clone(), vec![first]);
+        prop_assert_eq!(seen.lock().clone(), vec![first]);
     }
 
     #[test]
@@ -354,7 +355,7 @@ proptest! {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let mut m = fig_module(Arc::default(), Fig::Empty);
         let sn = seen.clone();
-        m.function("keep", move |d: Defaults| sn.lock().unwrap().push(d));
+        m.function("keep", move |d: Defaults| sn.lock().push(d));
         let src = format!(
             "import fig\nimport json\nfig.keep(fig.Defaults({}))\nlet d: fig.Defaults = json.decode({})?\nfig.keep(d)",
             fields.join(", "),
@@ -362,7 +363,7 @@ proptest! {
         );
         let (r, _) = run(Config::new().module(m), &src);
         prop_assert!(r.is_ok(), "{r:?}\n{src}");
-        prop_assert_eq!(seen.lock().unwrap().clone(), vec![expected.clone(), expected]);
+        prop_assert_eq!(seen.lock().clone(), vec![expected.clone(), expected]);
     }
 
     #[test]
@@ -370,7 +371,7 @@ proptest! {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let mut m = NativeModule::new("doc");
         let s = seen.clone();
-        m.function("keep", move |j: Json| s.lock().unwrap().push(j));
+        m.function("keep", move |j: Json| s.lock().push(j));
         let made = value.clone();
         m.function("make", move || made.clone());
         let src = format!(
@@ -380,7 +381,7 @@ proptest! {
         let (r, out) = run(Config::new().module(m), &src);
         prop_assert!(r.is_ok(), "{r:?}\n{src}");
         prop_assert_eq!(out, "true\ntrue\n");
-        prop_assert_eq!(seen.lock().unwrap().clone(), vec![value.clone(), value]);
+        prop_assert_eq!(seen.lock().clone(), vec![value.clone(), value]);
     }
 
     #[test]
@@ -404,7 +405,7 @@ proptest! {
         let engine = move || {
             let mut m = NativeModule::new("doc");
             m.function("echo", move |j: Json| {
-                s.lock().unwrap().push(j.clone());
+                s.lock().push(j.clone());
                 j
             });
             m.function("make", move || made.clone());
@@ -414,14 +415,14 @@ proptest! {
         if json_depth(&value) <= 512 {
             prop_assert!(r.is_ok(), "{r:?}\n{src}");
             prop_assert_eq!(out, "true\n");
-            prop_assert_eq!(seen.lock().unwrap().clone(), vec![value]);
+            prop_assert_eq!(seen.lock().clone(), vec![value]);
         } else {
             let message = match r {
                 Err(Error::Runtime { message, .. }) => message,
                 r => return Err(TestCaseError::fail(format!("expected a runtime error, got {r:?}"))),
             };
             prop_assert_eq!(message, "limit: value too deeply nested to convert");
-            prop_assert!(seen.lock().unwrap().is_empty());
+            prop_assert!(seen.lock().is_empty());
         }
     }
 

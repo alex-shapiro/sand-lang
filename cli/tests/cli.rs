@@ -711,7 +711,7 @@ fn repl_ctrl_c_interrupts_the_input() {
 struct LiveRepl {
     child: std::process::Child,
     input: Option<std::process::ChildStdin>,
-    streams: [std::sync::Arc<std::sync::Mutex<String>>; 2],
+    streams: [std::sync::Arc<parking_lot::Mutex<String>>; 2],
     readers: Vec<std::thread::JoinHandle<()>>,
 }
 
@@ -726,7 +726,7 @@ impl LiveRepl {
             .spawn()
             .expect("cannot start sand");
         let input = child.stdin.take();
-        let streams: [std::sync::Arc<std::sync::Mutex<String>>; 2] = Default::default();
+        let streams: [std::sync::Arc<parking_lot::Mutex<String>>; 2] = Default::default();
         let sources: [Box<dyn std::io::Read + Send>; 2] = [Box::new(child.stdout.take().unwrap()), Box::new(child.stderr.take().unwrap())];
         let readers = sources
             .into_iter()
@@ -735,7 +735,7 @@ impl LiveRepl {
                 std::thread::spawn(move || {
                     let mut buf = [0u8; 4096];
                     while let Ok(n @ 1..) = source.read(&mut buf) {
-                        collected.lock().unwrap().push_str(&String::from_utf8_lossy(&buf[..n]));
+                        collected.lock().push_str(&String::from_utf8_lossy(&buf[..n]));
                     }
                 })
             })
@@ -750,8 +750,8 @@ impl LiveRepl {
     /// Waits until standard output (0) or error (1) contains `text`.
     fn wait_for(&self, stream: usize, text: &str) {
         let start = std::time::Instant::now();
-        while !self.streams[stream].lock().unwrap().contains(text) {
-            assert!(start.elapsed() < std::time::Duration::from_secs(20), "no {text:?} in {:?}", self.streams[stream].lock().unwrap());
+        while !self.streams[stream].lock().contains(text) {
+            assert!(start.elapsed() < std::time::Duration::from_secs(20), "no {text:?} in {:?}", self.streams[stream].lock());
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
     }
@@ -772,7 +772,7 @@ impl LiveRepl {
         for r in self.readers {
             r.join().unwrap();
         }
-        let [stdout, stderr] = self.streams.map(|s| s.lock().unwrap().clone());
+        let [stdout, stderr] = self.streams.map(|s| s.lock().clone());
         Out { code: status.code().expect("sand was killed by a signal"), stdout, stderr }
     }
 }

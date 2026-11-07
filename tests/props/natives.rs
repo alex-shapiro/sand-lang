@@ -1,11 +1,12 @@
 //! Property tests for native function conversions and single-execution guarantees.
 
 use super::{int, int_lit, str_lit};
+use parking_lot::Mutex;
 use proptest::prelude::*;
 use sandlang::{Config, Engine, Error, LimitKind, Limits, MemorySink, NativeModule};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 
 fn run(config: Config, src: &str) -> (Result<sandlang::Outcome, Error>, String) {
     let out = MemorySink::new();
@@ -183,7 +184,7 @@ proptest! {
         m.bind::<Inner>().bind::<Outer>();
         let s = seen.clone();
         m.function("echo", move |x: Outer| {
-            s.lock().unwrap().push(x.clone());
+            s.lock().push(x.clone());
             x
         });
         let made = value.clone();
@@ -202,7 +203,7 @@ proptest! {
         prop_assert!(r.is_ok(), "{r:?}\n{src}");
         let bumped = format!("{}\n{}\n", value.count.wrapping_add(1), value.inner.n.wrapping_mul(2));
         prop_assert_eq!(out, format!("true\ntrue\ntrue\n{bumped}0\n"), "{}", src);
-        prop_assert_eq!(seen.lock().unwrap().clone(), vec![value]);
+        prop_assert_eq!(seen.lock().clone(), vec![value]);
     }
 
     #[test]
@@ -212,7 +213,7 @@ proptest! {
         m.bind::<Tree>();
         let s = seen.clone();
         m.function("echo", move |x: Tree| {
-            s.lock().unwrap().push(x.clone());
+            s.lock().push(x.clone());
             x
         });
         let src = format!(
@@ -232,7 +233,7 @@ proptest! {
             prop_assert!(message.contains("value too deeply nested to convert"), "{message}");
             prop_assert_eq!(out, "true\n");
         }
-        prop_assert_eq!(&seen.lock().unwrap()[0], &value);
+        prop_assert_eq!(&seen.lock()[0], &value);
     }
 
     #[test]
@@ -242,7 +243,7 @@ proptest! {
         m.bind::<Link>();
         let s = seen.clone();
         m.function("echo", move |x: Link| {
-            s.lock().unwrap().push(x.clone());
+            s.lock().push(x.clone());
             x
         });
         let made = link_of(&ns);
@@ -258,14 +259,14 @@ proptest! {
         if ns.len() <= 256 {
             prop_assert!(r.is_ok(), "{r:?}\n{src}");
             prop_assert_eq!(out, "true\n");
-            prop_assert_eq!(seen.lock().unwrap().clone(), vec![*link_of(&ns).unwrap()]);
+            prop_assert_eq!(seen.lock().clone(), vec![*link_of(&ns).unwrap()]);
         } else {
             let message = match r {
                 Err(Error::Runtime { message, .. }) => message,
                 r => return Err(TestCaseError::fail(format!("expected a runtime error, got {r:?}"))),
             };
             prop_assert!(message.contains("value too deeply nested to convert"), "{message}");
-            prop_assert!(seen.lock().unwrap().is_empty());
+            prop_assert!(seen.lock().is_empty());
         }
     }
 
@@ -288,7 +289,7 @@ proptest! {
         let mut m = NativeModule::new("conv");
         let s = seen.clone();
         m.function("hash_map", move |x: HashMap<i64, String>| {
-            s.lock().unwrap().push(x.clone().into_iter().collect::<BTreeMap<_, _>>());
+            s.lock().push(x.clone().into_iter().collect::<BTreeMap<_, _>>());
             x
         });
         m.function("btree_map", |x: BTreeMap<i64, String>| x);
@@ -303,7 +304,7 @@ proptest! {
         prop_assert!(r.is_ok(), "{r:?}\n{src}");
         let keys = format!("[{}]", map.keys().map(|k| k.to_string()).collect::<Vec<_>>().join(", "));
         prop_assert_eq!(out, format!("{0}\n{0}\n{keys}\n{keys}\n", map_text(&map)));
-        let seen = seen.lock().unwrap().clone();
+        let seen = seen.lock().clone();
         prop_assert_eq!(seen, vec![map]);
     }
 

@@ -61,7 +61,7 @@ pub(crate) struct JsOutput {
     pub id: u32,
     pub stream: &'static str,
     /// Text not delivered yet, and the bytes of an unfinished UTF-8 sequence.
-    pending: std::sync::Mutex<Vec<u8>>,
+    pending: parking_lot::Mutex<Vec<u8>>,
 }
 
 const DELIVERY_BYTES: usize = 8 << 10;
@@ -92,7 +92,7 @@ impl JsOutput {
 
 impl OutputSink for JsOutput {
     fn write(&self, data: &[u8]) -> std::io::Result<()> {
-        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        let mut pending = self.pending.lock();
         pending.extend_from_slice(data);
         if self.stream == "stderr" || pending.len() >= DELIVERY_BYTES {
             self.deliver(&mut pending);
@@ -101,7 +101,7 @@ impl OutputSink for JsOutput {
     }
 
     fn flush(&self) -> std::io::Result<()> {
-        self.deliver(&mut self.pending.lock().unwrap_or_else(|e| e.into_inner()));
+        self.deliver(&mut self.pending.lock());
         Ok(())
     }
 }

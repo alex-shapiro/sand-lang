@@ -379,7 +379,7 @@ fn removing_a_tree_checks_each_entry() {
         dir.write(f, "x");
     }
     let root = std::fs::canonicalize(dir.path()).unwrap();
-    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let asked = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
     let log = asked.clone();
     let base = root.clone();
     struct Unscanned<F>(F);
@@ -393,7 +393,7 @@ fn removing_a_tree_checks_each_entry() {
     }
     let policy = Unscanned(move |cap: &sandlang::Capability| match cap {
         sandlang::Capability::FsWrite(p) | sandlang::Capability::FsRead(p) => {
-            log.lock().unwrap().push(p.strip_prefix(&base).unwrap_or(p).display().to_string());
+            log.lock().push(p.strip_prefix(&base).unwrap_or(p).display().to_string());
             if p.ends_with("keep.txt") { sandlang::Decision::Deny } else { sandlang::Decision::Allow }
         }
         _ => sandlang::Decision::Allow,
@@ -408,7 +408,7 @@ print(e.message)
     let r = run_with(src, move |c| c.custom_policy(policy).cwd(cwd));
     assert_eq!(r.ok_stdout(), "permission_denied\npermission denied: write tree/sub/deep/keep.txt\n");
     assert!(root.join("tree/sub/deep/keep.txt").exists());
-    let asked = asked.lock().unwrap().clone();
+    let asked = asked.lock().clone();
     assert!(asked.contains(&"tree".to_string()), "{asked:?}");
     assert!(asked.contains(&"tree/sub/deep/keep.txt".to_string()), "{asked:?}");
     // Entries are checked before they are removed.

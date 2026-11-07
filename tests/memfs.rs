@@ -6,9 +6,10 @@
 mod common;
 
 use common::rt;
+use parking_lot::Mutex;
 use sandlang::{Capability, Config, Decision, Engine, Error, MemFs, MemorySink, PromptAnswer, RulePolicy};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 fn run(config: Config, source: &str) -> (Result<sandlang::Outcome, Error>, String) {
     let out = MemorySink::new();
@@ -95,14 +96,14 @@ fn removing_a_tree_asks_before_it_removes_anything() {
         let asked = Arc::new(Mutex::new(Vec::new()));
         let log = asked.clone();
         let prompter = move |cap: Capability| {
-            log.lock().unwrap().push(cap);
+            log.lock().push(cap);
             async move { answer }
         };
         let config = Config::new().custom_policy(policy).prompter(prompter).memory_fs(fs.clone());
         let (r, out) = run(config, "import fs\nprint(fs.remove_dir(\"/t\", recursive: true).is_ok())");
         r.unwrap();
         assert_eq!(out, format!("{removed}\n"));
-        assert_eq!(*asked.lock().unwrap(), [prompted]);
+        assert_eq!(*asked.lock(), [prompted]);
         for name in ["a", "b", "c"] {
             assert_eq!(fs.read(format!("/t/{name}.txt")).is_err(), removed, "{name}.txt");
         }
@@ -145,7 +146,7 @@ fn prompts_ask_about_memory_paths() {
     let asked = Arc::new(Mutex::new(Vec::new()));
     let log = asked.clone();
     let prompter = move |cap: Capability| {
-        log.lock().unwrap().push(cap.clone());
+        log.lock().push(cap.clone());
         async move { if cap == Capability::FsRead(PathBuf::from("/data/in.txt")) { PromptAnswer::AllowOnce } else { PromptAnswer::DenyOnce } }
     };
     let config = Config::new().policy(RulePolicy::standard()).prompter(prompter).memory_fs(fs);
@@ -156,7 +157,7 @@ fn prompts_ask_about_memory_paths() {
     r.unwrap();
     assert_eq!(out, "true\nfalse\n");
     assert_eq!(
-        *asked.lock().unwrap(),
+        *asked.lock(),
         [Capability::FsRead(PathBuf::from("/data/in.txt")), Capability::FsRead(PathBuf::from("/data/secret/key.txt"))]
     );
 }

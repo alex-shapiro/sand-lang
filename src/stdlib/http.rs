@@ -446,34 +446,30 @@ impl ClientConn {
 /// the servers' kept-alive connections.
 pub(crate) struct Pool {
     /// Oldest first, with when each became idle.
-    idle: std::sync::Mutex<Vec<(ClientConn, Instant)>>,
+    idle: parking_lot::Mutex<Vec<(ClientConn, Instant)>>,
     max: usize,
-    servers: std::sync::Mutex<Vec<Weak<super::http_server::Shared>>>,
+    servers: parking_lot::Mutex<Vec<Weak<super::http_server::Shared>>>,
     clock: Arc<dyn crate::platform::Clock>,
 }
 
 impl Pool {
     pub fn new(max_open_resources: usize, clock: Arc<dyn crate::platform::Clock>) -> Arc<Pool> {
         let max = (max_open_resources / 4).min(POOL_MAX);
-        Arc::new(Pool { idle: std::sync::Mutex::default(), max, servers: std::sync::Mutex::default(), clock })
+        Arc::new(Pool { idle: parking_lot::Mutex::default(), max, servers: parking_lot::Mutex::default(), clock })
     }
 
     /// Lets [`Pool::clear`] close the idle connections of `server`.
     pub(super) fn watch(&self, server: &Arc<super::http_server::Shared>) {
-        let mut servers = self.servers.lock().unwrap_or_else(|e| e.into_inner());
+        let mut servers = self.servers.lock();
         servers.retain(|s| s.strong_count() > 0);
         servers.push(Arc::downgrade(server));
-    }
-
-    fn idle(&self) -> std::sync::MutexGuard<'_, Vec<(ClientConn, Instant)>> {
-        self.idle.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Takes the most recently used idle connection to `origin` if `policy`
     /// allows `request` to connect to its peer address.
     fn take(&self, origin: &str, policy: &Policy, request: &crate::policy::Capability) -> Option<ClientConn> {
         let now = self.clock.now();
-        let mut idle = self.idle();
+        let mut idle = self.idle.lock();
         idle.retain(|(_, since)| now.saturating_duration_since(*since) < POOL_IDLE);
         let usable = |c: &ClientConn| c.origin == origin && policy.check_resolved(request, c.peer).is_ok();
         while let Some(i) = idle.iter().rposition(|(c, _)| usable(c)) {
@@ -491,7 +487,7 @@ impl Pool {
             net::shutdown_now(conn.stream.get_mut());
             return;
         }
-        let mut idle = self.idle();
+        let mut idle = self.idle.lock();
         if idle.iter().filter(|(c, _)| c.origin == conn.origin).count() >= POOL_PER_ORIGIN {
             let oldest = idle.iter().position(|(c, _)| c.origin == conn.origin).expect("counted");
             idle.remove(oldest);
@@ -505,8 +501,8 @@ impl Pool {
 
     /// Closes every idle connection.
     pub fn clear(&self) {
-        self.idle().clear();
-        let servers = std::mem::take(&mut *self.servers.lock().unwrap_or_else(|e| e.into_inner()));
+        self.idle.lock().clear();
+        let servers = std::mem::take(&mut *self.servers.lock());
         for server in servers.iter().filter_map(Weak::upgrade) {
             server.close_idle();
             self.watch(&server);

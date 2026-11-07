@@ -15,6 +15,7 @@ sandlang = { path = ".." }
 tokio = { version = "1", features = ["rt", "net", "io-util", "time", "signal", "macros"] }
 reedline = { version = "0.51", features = ["external_printer"] }
 nu-ansi-term = "0.50"
+parking_lot = "0.12"
 
 [dev-dependencies]
 portable-pty = "0.9"

@@ -11,10 +11,11 @@
 mod common;
 
 use common::TempDir;
+use parking_lot::Mutex;
 use portable_pty::{Child, CommandBuilder, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -77,13 +78,13 @@ impl Repl {
                 if n == 0 {
                     break;
                 }
-                let mut s = sink.lock().unwrap();
+                let mut s = sink.lock();
                 s.raw.extend_from_slice(&buf[..n]);
                 // Answer new cursor position queries (row 1, column 1 will do).
                 while let Some(at) = s.raw[scanned..].windows(CURSOR_QUERY.len()).position(|w| w == CURSOR_QUERY) {
                     scanned += at + CURSOR_QUERY.len();
                     s.queries += 1;
-                    let mut w = answer.lock().unwrap();
+                    let mut w = answer.lock();
                     let _ = w.write_all(b"\x1b[1;1R");
                     let _ = w.flush();
                 }
@@ -94,11 +95,11 @@ impl Repl {
 
     /// The terminal's output without control sequences and carriage returns.
     fn text(&self) -> String {
-        plain(&self.screen.lock().unwrap().raw)
+        plain(&self.screen.lock().raw)
     }
 
     fn queries(&self) -> usize {
-        self.screen.lock().unwrap().queries
+        self.screen.lock().queries
     }
 
     /// Waits until `done` holds for the output.
@@ -122,7 +123,7 @@ impl Repl {
     }
 
     fn keys(&mut self, keys: &str) {
-        let mut w = self.writer.lock().unwrap();
+        let mut w = self.writer.lock();
         w.write_all(keys.as_bytes()).unwrap();
         w.flush().unwrap();
     }
