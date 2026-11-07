@@ -23,7 +23,7 @@ use crate::vm::heap::GcStats;
 use crate::vm::journal::Divergence;
 use crate::vm::sched::{IoShared, IoTable, RunEnd, Suspends};
 use crate::vm::value::{Obj, TypeDesc, Value};
-use crate::vm::{Always, Host, HostFn, NativeEntry, OutputSink, Rng, SharedSink, StdinSource, TraceEntry, Trap, Vm, entropy_seed};
+use crate::vm::{Always, Ending, Host, HostFn, NativeEntry, OutputSink, Rng, SharedSink, StdinSource, TraceEntry, Trap, Vm, entropy_seed};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
@@ -1412,7 +1412,13 @@ impl Engine {
                     vm.pinned.push(v);
                     let r = match vm.end_tasks().await {
                         Ok(Some(c)) => Ok(Ok(Outcome::Exited(c))),
-                        Ok(None) => returned(vm, v, &sig.returns).map(|r| Ok(Outcome::Returned(r))).map_err(|c| vm.trap_of(c, |_| vec![])),
+                        Ok(None) => match returned(vm, v, &sig.returns) {
+                            Ok(r) => Ok(Ok(Outcome::Returned(r))),
+                            Err(c) => match vm.ending_of(c, |_| vec![]) {
+                                Ending::Exit(code) => Ok(Ok(Outcome::Exited(code))),
+                                Ending::Trap(t) => Err(t),
+                            },
+                        },
                         Err(t) => Err(t),
                     };
                     vm.pinned.pop();
@@ -1423,11 +1429,7 @@ impl Engine {
                 Called::BadArgument { index, error } => Ok(Err(Error::Argument { index, error })),
             })
             .await;
-        match r {
-            Ok(r) => r,
-            Err(Trap::Exit(c)) => Ok(Outcome::Exited(c)),
-            Err(t) => Err(trap_error(t)),
-        }
+        r.unwrap_or_else(|t| Err(trap_error(t)))
     }
 
     /// Prepares a run of `program` on this engine.
@@ -1448,7 +1450,7 @@ impl Engine {
             .await;
         match r {
             Ok(RunEnd::Finished(_)) => Ok(Outcome::Exited(0)),
-            Ok(RunEnd::Exit(c)) | Err(Trap::Exit(c)) => Ok(Outcome::Exited(c)),
+            Ok(RunEnd::Exit(c)) => Ok(Outcome::Exited(c)),
             Ok(RunEnd::Suspended(s)) => Ok(Outcome::Suspended(s)),
             Err(t) => Err(trap_error(t)),
         }
@@ -2051,7 +2053,14 @@ async fn call_decoded(vm: &mut Vm, function: &Function, args: &[&str]) -> Result
     let first = vm.pinned.len();
     for (index, ((_, desc), arg)) in function.signature().params.iter().zip(args).enumerate() {
         let text = vm.new_str(*arg);
-        match stdlib::json::decode(vm, desc, crate::native::ty::Val::from_raw(text)).map_err(|c| vm.trap_of(c, |_| vec![]))? {
+        let decoded = match stdlib::json::decode(vm, desc, crate::native::ty::Val::from_raw(text)) {
+            Ok(d) => d,
+            Err(c) => match vm.ending_of(c, |_| vec![]) {
+                Ending::Exit(code) => return Ok(Called::Exited(code)),
+                Ending::Trap(t) => return Err(t),
+            },
+        };
+        match decoded {
             stdlib::json::Decoding::Done(v) => vm.pinned.push(v),
             stdlib::json::Decoding::Pending(v, fills) => {
                 vm.pinned.extend([v, fills]);
@@ -2100,12 +2109,11 @@ fn trap_message(t: Trap) -> String {
     match t {
         Trap::Error { message, .. } => message,
         Trap::Internal { message, .. } => format!("internal error: {message}"),
-        Trap::Exit(c) => format!("exited with code {c}"),
         t => trap_error(t).to_string(),
     }
 }
 
-/// The error of a run that `t` ended, other than an exit.
+/// The error of a run that `t` ended.
 pub(crate) fn trap_error(t: Trap) -> Error {
     match t {
         Trap::Error { message, trace } => Error::Runtime { message, trace },
@@ -2114,7 +2122,6 @@ pub(crate) fn trap_error(t: Trap) -> Error {
         Trap::Interrupted => Error::Interrupted,
         Trap::Abort(a) => Error::Aborted(a),
         Trap::Diverged(Divergence { seq, message }) => Error::Diverged { seq, message },
-        Trap::Exit(c) => Error::Internal { message: format!("an exit with code {c} where none is possible"), trace: Vec::new() },
     }
 }
 

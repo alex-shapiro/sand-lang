@@ -22,7 +22,7 @@ use crate::unwind::CatchUnwind;
 use crate::vm::bytecode::Program;
 use crate::vm::sched::{Idle, IdleStop, RunEnd};
 use crate::vm::value::Value;
-use crate::vm::{Trap, Vm};
+use crate::vm::{Ending, Trap, Vm};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::future::Future;
@@ -542,7 +542,10 @@ impl Session {
         match shown {
             None => Ok(None),
             Some(Ok(s)) => Ok(Some(s)),
-            Some(Err(c)) => Err(crate::engine::trap_error(vm.trap_of(c, |_| vec![]))),
+            Some(Err(c)) => {
+                let r = vm.ending_of(c, |_| vec![]).into_run_end();
+                conclude(vm, r, exit_code).map(|_| None)
+            }
         }
     }
 
@@ -558,16 +561,18 @@ impl Session {
         vm.host.output_bytes = 0;
         // Waiting for input may take any time.
         vm.deadline = None;
-        let r = vm.drive(Idle).await;
-        let r = r.and_then(|stop| vm.drain_output().map(|()| stop).map_err(|c| vm.trap_of(c, |_| vec![])));
+        let r = match vm.drive(Idle).await {
+            Ok(stop) => vm.drain_output().map(|()| stop).map_err(|c| vm.ending_of(c, |_| vec![])),
+            Err(t) => Err(Ending::Trap(t)),
+        };
         let r = match r {
+            Err(e) => e.into_run_end(),
             Ok(IdleStop::Prompt(cap)) => {
                 st.deferred_prompt = Some(cap);
                 return Ok(false);
             }
             Ok(IdleStop::Idle) => return Ok(false),
             Ok(IdleStop::Exit(c)) => Ok(RunEnd::Exit(c)),
-            Err(t) => Err(t),
         };
         Ok(conclude(vm, r, exit_code)?.is_none())
     }
@@ -579,7 +584,7 @@ impl Session {
 fn conclude(vm: &mut Vm, r: Result<RunEnd<Infallible>, Trap>, exit_code: &mut Option<i32>) -> Result<Option<Value>, Error> {
     let e = match r {
         Ok(RunEnd::Finished(v)) => return Ok(Some(v)),
-        Ok(RunEnd::Exit(c)) | Err(Trap::Exit(c)) => {
+        Ok(RunEnd::Exit(c)) => {
             *exit_code = Some(c);
             vm.abandon_tasks();
             return Ok(None);

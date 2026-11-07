@@ -3288,6 +3288,21 @@ fn run_tests_api() {
     assert_eq!(report.results[1].message.as_deref(), Some("assert: nope"));
 }
 
+/// An `exit` from the finisher of a host call ends a test as an `exit` in the script does: a test
+/// that exits with code 0 passes.
+#[cfg(feature = "os")]
+#[test]
+fn an_exit_from_a_finisher_ends_a_test_like_a_script_exit() {
+    let mut m = NativeModule::new("quit");
+    m.async_function("now", |code: i64| async move { Err::<(), sandlang::vm::Ctl>(sandlang::vm::Ctl::exit(code as i32)) });
+    let dir = TempDir::new("exit-tests");
+    let main = dir.write("t.sand", "import quit\ntest \"zero\" { quit.now(0) }\ntest \"one\" { quit.now(1) }\ntest \"plain\" { exit(0) }");
+    let mut engine = Engine::new(Config::new().host_modules(HostModules::new([m]).unwrap()));
+    let report = rt().block_on(engine.run_tests(&main)).unwrap();
+    let results: Vec<_> = report.results.iter().map(|r| (r.name.as_str(), r.passed, r.message.as_deref())).collect();
+    assert_eq!(results, [("zero", true, None), ("one", false, Some("exited with code 1")), ("plain", true, None)]);
+}
+
 #[cfg(feature = "os")]
 #[test]
 fn run_file_with_imports_and_cwd() {

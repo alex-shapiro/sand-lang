@@ -66,6 +66,8 @@ pub enum Exit {
     YieldNow,
     /// The running task was cancelled.
     Cancelled,
+    /// A task called `exit` with this code.
+    Exited(i32),
     /// A cancelled task ran its pending deferred code.
     Unwound,
     /// The instruction before the frame's instruction pointer hit the
@@ -470,7 +472,7 @@ impl Vm {
             Const::Str(s) => s.clone(),
             _ => "unknown".into(),
         };
-        self.internal_trap(fiber, ip, m)
+        self.internal_trap_at(fiber, ip, m)
     }
 
     /// The trap for an operand of the wrong type (a compiler bug).
@@ -478,7 +480,7 @@ impl Vm {
     #[inline(never)]
     fn operand_trap(&mut self, fiber: &mut Fiber, ip: usize, v: Value, want: &str) -> Trap {
         fiber.frames.last_mut().unwrap().ip = ip as u32;
-        self.internal_trap(fiber, ip, format!("expected {want}, found {v:?}"))
+        self.internal_trap_at(fiber, ip, format!("expected {want}, found {v:?}"))
     }
 
     /// The trap for a `GetField` on a value without that field (a compiler bug).
@@ -487,21 +489,22 @@ impl Vm {
     fn field_trap(&mut self, fiber: &mut Fiber, ip: usize, v: Value, idx: u16) -> Trap {
         fiber.frames.last_mut().unwrap().ip = ip as u32;
         let msg = format!("field {idx} of {v:?} {:?}", self.heap.get(v));
-        self.internal_trap(fiber, ip, msg)
+        self.internal_trap_at(fiber, ip, msg)
     }
 
     /// The trap for an error whose message `msg` is `kind: message`.
     #[cold]
     #[inline(never)]
     fn error_trap(&mut self, fiber: &mut Fiber, ip: usize, msg: String) -> Trap {
-        self.trap(End::RuntimeError(msg), |vm| vm.trace_of(fiber, Some(ip as u32)))
+        Trap::Error { message: msg, trace: self.trace_of(fiber, Some(ip as u32)) }
     }
 
     /// The trap for an internal error, which marks the engine broken.
     #[cold]
     #[inline(never)]
-    fn internal_trap(&mut self, fiber: &mut Fiber, ip: usize, msg: String) -> Trap {
-        self.trap(End::Internal(msg), |vm| vm.trace_of(fiber, Some(ip as u32)))
+    fn internal_trap_at(&mut self, fiber: &mut Fiber, ip: usize, msg: String) -> Trap {
+        let trace = self.trace_of(fiber, Some(ip as u32));
+        Vm::internal_trap(self, msg, trace)
     }
 
     /// How the interpreter exits after a failed metered operation.
@@ -511,7 +514,10 @@ impl Vm {
         if let Some(k) = c.as_limit() {
             return self.limit_exit(fiber, ip, k);
         }
-        Err(self.trap_of(c, |vm| vm.trace_of(fiber, Some(ip as u32))))
+        match self.ending_of(c, |vm| vm.trace_of(fiber, Some(ip as u32))) {
+            Ending::Exit(code) => Ok(Exit::Exited(code)),
+            Ending::Trap(t) => Err(t),
+        }
     }
 
     /// A limit hit by the instruction before `ip`. Memory checks count
@@ -577,7 +583,7 @@ impl Vm {
         macro_rules! internal {
             ($msg:expr) => {{
                 save!();
-                return Err(self.internal_trap(fiber, ip, String::from($msg)));
+                return Err(self.internal_trap_at(fiber, ip, String::from($msg)));
             }};
         }
         macro_rules! fail_ctl {
@@ -1735,7 +1741,12 @@ impl Vm {
         }
         let request = match r.into_kind() {
             // A limit here is final: the call already ran again after a collection.
-            CtlKind::End(end) => return Err(self.trap(end, |vm| vm.trace_of(fiber, Some(ip as u32)))),
+            CtlKind::End(end) => {
+                return match self.ending(end, |vm| vm.trace_of(fiber, Some(ip as u32))) {
+                    Ending::Exit(code) => Ok(Some(Exit::Exited(code))),
+                    Ending::Trap(t) => Err(t),
+                };
+            }
             CtlKind::Request(request) => request,
         };
         match request {
@@ -1754,7 +1765,7 @@ impl Vm {
                 Ok(Some(Exit::Wait(w)))
             }
             Request::Yield | Request::Blocked { .. } => unreachable!("handled above"),
-            Request::Collect => Err(self.internal_trap(fiber, ip, "a native asked for a collection twice".into())),
+            Request::Collect => Err(self.internal_trap_at(fiber, ip, "a native asked for a collection twice".into())),
         }
     }
 

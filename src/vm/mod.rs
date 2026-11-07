@@ -402,11 +402,32 @@ pub enum Trap {
     },
     Limit(LimitKind),
     Interrupted,
-    Exit(i32),
     /// The run does something other than what its journal records.
     Diverged(Divergence),
     /// A host function ended the run.
     Abort(crate::engine::HostAbort),
+}
+
+/// How a [`Ctl`] that ends the run ends it: with `exit`, or with a trap.
+pub(crate) enum Ending {
+    Exit(i32),
+    Trap(Trap),
+}
+
+impl Ending {
+    /// The end of a run that ends this way.
+    pub(crate) fn into_run_end<S>(self) -> Result<sched::RunEnd<S>, Trap> {
+        match self {
+            Ending::Exit(code) => Ok(sched::RunEnd::Exit(code)),
+            Ending::Trap(t) => Err(t),
+        }
+    }
+}
+
+impl From<Trap> for Ending {
+    fn from(t: Trap) -> Ending {
+        Ending::Trap(t)
+    }
 }
 
 /// Standard input source for an engine.
@@ -1582,12 +1603,16 @@ impl Vm {
         if self.ready.is_empty() {
             return Ok(None);
         }
-        let r = self.drive(sched::EndTasks).await;
-        let r = r.and_then(|stop| self.drain_output().map(|()| stop).map_err(|c| self.trap_of(c, |_| vec![])));
-        match r {
-            Ok(sched::IdleStop::Exit(c)) => Ok(Some(c)),
-            Ok(sched::IdleStop::Idle | sched::IdleStop::Prompt(_)) => Ok(None),
-            Err(t) => Err(t),
+        let stop = self.drive(sched::EndTasks).await?;
+        if let Err(c) = self.drain_output() {
+            return match self.ending_of(c, |_| vec![]) {
+                Ending::Exit(code) => Ok(Some(code)),
+                Ending::Trap(t) => Err(t),
+            };
+        }
+        match stop {
+            sched::IdleStop::Exit(c) => Ok(Some(c)),
+            sched::IdleStop::Idle | sched::IdleStop::Prompt(_) => Ok(None),
         }
     }
 
@@ -1691,30 +1716,33 @@ impl Vm {
         }
     }
 
-    /// The trap that `end` stops the run with. `trace` gives the stack
-    /// trace of an error. An internal error marks the engine broken.
-    pub(crate) fn trap(&mut self, end: End, trace: impl FnOnce(&Vm) -> Vec<TraceEntry>) -> Trap {
-        match end {
+    /// How `end` stops the run. `trace` gives the stack trace of an error.
+    /// An internal error marks the engine broken.
+    pub(crate) fn ending(&mut self, end: End, trace: impl FnOnce(&Vm) -> Vec<TraceEntry>) -> Ending {
+        Ending::Trap(match end {
+            End::Exit(c) => return Ending::Exit(c),
             End::RuntimeError(message) => Trap::Error { message, trace: trace(self) },
-            End::Internal(message) => {
-                self.broken = true;
-                Trap::Internal { message, trace: trace(self) }
-            }
+            End::Internal(message) => self.internal_trap(message, trace(self)),
             End::Limit(k) => Trap::Limit(k),
             End::Interrupted => Trap::Interrupted,
-            End::Exit(c) => Trap::Exit(c),
             End::Diverged(d) => Trap::Diverged(d),
             End::Abort(a) => Trap::Abort(a),
-        }
+        })
     }
 
-    /// The trap for `c` from code that can make no request, such as a
+    /// The trap of an internal error, which marks the engine broken.
+    pub(crate) fn internal_trap(&mut self, message: String, trace: Vec<TraceEntry>) -> Trap {
+        self.broken = true;
+        Trap::Internal { message, trace }
+    }
+
+    /// How `c` stops the run, from code that can make no request, such as a
     /// metered operation or the finisher of an I/O operation: a request is
     /// an internal error.
-    pub(crate) fn trap_of(&mut self, c: Ctl, trace: impl FnOnce(&Vm) -> Vec<TraceEntry>) -> Trap {
+    pub(crate) fn ending_of(&mut self, c: Ctl, trace: impl FnOnce(&Vm) -> Vec<TraceEntry>) -> Ending {
         match c.into_kind() {
-            CtlKind::End(end) => self.trap(end, trace),
-            CtlKind::Request(r) => self.trap(End::Internal(format!("unexpected request {r:?}")), trace),
+            CtlKind::End(end) => self.ending(end, trace),
+            CtlKind::Request(r) => Ending::Trap(self.internal_trap(format!("unexpected request {r:?}"), trace(self))),
         }
     }
 

@@ -377,7 +377,7 @@ impl Vm {
 
     /// Runs the finishers of completed I/O operations, which charge the
     /// meter like natives.
-    fn apply_completions(&mut self, done: Vec<(u32, u64, Finisher)>, timer: &RunTimer) -> Result<(), Trap> {
+    fn apply_completions(&mut self, done: Vec<(u32, u64, Finisher)>, timer: &RunTimer) -> Result<(), Ending> {
         if done.is_empty() {
             return Ok(());
         }
@@ -402,15 +402,15 @@ impl Vm {
                     self.deliver(fid, wgen, v).map_err(Trap::Diverged)?;
                     self.enforce_limit(None).map_err(Trap::Limit)?;
                 }
-                Err(c) => return Err(self.op_trap(fid, c)),
+                Err(c) => return Err(self.op_ending(fid, c)),
             }
         }
         Ok(())
     }
 
-    /// The trap for the failure `c` of an I/O operation of fiber `fid`.
-    fn op_trap(&mut self, fid: u32, c: Ctl) -> Trap {
-        self.trap_of(c, |vm| match vm.fibers.get(fid as usize) {
+    /// How the failure `c` of an I/O operation of fiber `fid` ends the run.
+    fn op_ending(&mut self, fid: u32, c: Ctl) -> Ending {
+        self.ending_of(c, |vm| match vm.fibers.get(fid as usize) {
             Some(Some(f)) => vm.trace_of(f, None),
             _ => vec![],
         })
@@ -442,13 +442,13 @@ impl Vm {
 
     /// Delivers the completions in `done`, or holds them while replay is not
     /// over (see [`Vm::hold_in_replay`]).
-    fn complete(&mut self, done: Vec<(u32, u64, Finisher)>, timer: &RunTimer) -> Result<(), Trap> {
+    fn complete(&mut self, done: Vec<(u32, u64, Finisher)>, timer: &RunTimer) -> Result<(), Ending> {
         let now = self.hold_in_replay(done);
         self.apply_completions(now, timer)
     }
 
     /// Lets fiber `fid` (`f`) wait for `wait`.
-    async fn start_wait(&mut self, fid: u32, mut f: Box<Fiber>, wait: Wait, timer: &RunTimer) -> Result<(), Trap> {
+    async fn start_wait(&mut self, fid: u32, mut f: Box<Fiber>, wait: Wait, timer: &RunTimer) -> Result<(), Ending> {
         let g = self.next_gen();
         f.wgen = g;
         f.state = FiberState::Waiting;
@@ -477,7 +477,7 @@ impl Vm {
                     f.io = Some(io);
                 }
                 if wait.op.is_none() {
-                    self.local_pending(fid, g).map_err(|c| self.op_trap(fid, c))?;
+                    self.local_pending(fid, g).map_err(|c| self.op_ending(fid, c))?;
                 }
                 Ok(())
             }
@@ -489,11 +489,11 @@ impl Vm {
     /// replay is over, those held back while it was not. Waits for a local
     /// operation that completes at this point. Returns whether it delivered
     /// any.
-    async fn journal_checkpoint(&mut self, timer: &RunTimer) -> Result<bool, Trap> {
+    async fn journal_checkpoint(&mut self, timer: &RunTimer) -> Result<bool, Ending> {
         let mut any = false;
         // One at a time: delivering one can cancel the task of another.
         loop {
-            match self.next_due().map_err(|c| self.trap_of(c, |_| vec![]))? {
+            match self.next_due().map_err(|c| self.ending_of(c, |_| vec![]))? {
                 Due::Nothing => break,
                 Due::Ready(fid, wgen, fin) => {
                     any = true;
@@ -575,7 +575,7 @@ impl Vm {
         };
         let drained = self.drain_output();
         match drained {
-            Err(c) if r.is_ok() => Err(self.trap_of(c, |_| vec![])),
+            Err(c) if r.is_ok() => self.ending_of(c, |_| vec![]).into_run_end(),
             _ => r,
         }
     }
@@ -602,6 +602,15 @@ impl Vm {
     /// ([`IdleStop::Prompt`]). The future may be dropped where it waits:
     /// every task is then in the scheduler's tables.
     pub(crate) async fn drive<U: Until>(&mut self, until: U) -> Result<U::Stop, Trap> {
+        match self.run_tasks(&until).await {
+            Ok(stop) => Ok(stop),
+            Err(Ending::Exit(code)) => Ok(U::exit(code)),
+            Err(Ending::Trap(t)) => Err(t),
+        }
+    }
+
+    /// The loop of [`Vm::drive`], which ends with a stop or how the run ends.
+    async fn run_tasks<U: Until>(&mut self, until: &U) -> Result<U::Stop, Ending> {
         let mut timer = RunTimer::start(self.host.clock.clone());
         // Where an instruction was retried after a memory limit error.
         let mut gc_retried: Option<(u32, usize, u32)> = None;
@@ -632,11 +641,7 @@ impl Vm {
                 // Pending I/O checks its buffers against the heap's size.
                 self.heap.io_memory.publish_heap(self.heap.used());
                 self.current = u32::MAX;
-                let exit = match r {
-                    Ok(e) => e,
-                    Err(Trap::Exit(c)) => return Ok(U::exit(c)),
-                    Err(t) => return Err(t),
-                };
+                let exit = r?;
                 if !matches!(exit, Exit::Collect) {
                     gc_retried = None;
                 }
@@ -648,11 +653,11 @@ impl Vm {
                         // the limit. A retry is told apart from a later run of
                         // the same instruction by the fuel spent: reaching it
                         // again takes a back edge or a call, which cost fuel.
-                        let Some(&fr) = f.frames.last() else { return Err(Trap::Limit(LimitKind::Memory)) };
+                        let Some(&fr) = f.frames.last() else { return Err(Trap::Limit(LimitKind::Memory).into()) };
                         let at = (fid, f.frames.len(), fr.ip);
                         let op = self.prog.protos[fr.proto as usize].code[fr.ip as usize];
                         if gc_retried == Some(at) && slice - fuel <= super::interp::call_tick(op) {
-                            return Err(Trap::Limit(LimitKind::Memory));
+                            return Err(Trap::Limit(LimitKind::Memory).into());
                         }
                         gc_retried = Some(at);
                         self.collect_all_garbage(Some(&mut f));
@@ -687,7 +692,7 @@ impl Vm {
                             Err(cap) => cap,
                         };
                         // Write the script's output before showing the prompt.
-                        self.drain_output().map_err(|c| self.trap_of(c, |_| vec![]))?;
+                        self.drain_output().map_err(|c| self.ending_of(c, |_| vec![]))?;
                         timer.read();
                         let asked = timer.now;
                         let answer = match self.host.prompter.clone() {
@@ -705,7 +710,7 @@ impl Vm {
                                 .await;
                                 match answer {
                                     Some(a) => a,
-                                    None => return Err(Trap::Interrupted),
+                                    None => return Err(Trap::Interrupted.into()),
                                 }
                             }
                             None => PromptAnswer::DenyOnce,
@@ -726,6 +731,7 @@ impl Vm {
                             return Ok(stop);
                         }
                     }
+                    Exit::Exited(code) => return Ok(U::exit(code)),
                     Exit::Unwound => {
                         self.free_fibers.push(fid);
                         self.live_tasks = self.live_tasks.saturating_sub(1);
@@ -762,7 +768,8 @@ impl Vm {
                 }
                 return Err(self
                     .blocked_in_replay()
-                    .map_or_else(|| Trap::Internal { message: "replay stalled".into(), trace: vec![] }, Trap::Diverged));
+                    .map_or_else(|| Trap::Internal { message: "replay stalled".into(), trace: vec![] }, Trap::Diverged)
+                    .into());
             }
             if self.io.is_empty() {
                 let main = match until.idle() {
@@ -773,7 +780,7 @@ impl Vm {
                     Some(Some(f)) => self.trace_of(f, None),
                     _ => vec![],
                 };
-                return Err(Trap::Error { message: "deadlock: all tasks are blocked".into(), trace });
+                return Err(Trap::Error { message: "deadlock: all tasks are blocked".into(), trace }.into());
             }
             let done = self.io.poll_ready(None);
             if !done.is_empty() {
