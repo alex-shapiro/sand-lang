@@ -1673,7 +1673,7 @@ directly and treats `Prompt` as `Allow`.
 This two-stage check prevents DNS rebinding against denied IP ranges. For
 example, under `allow net plaintext *` and `deny net 10.0.0.0/8`, a request to
 `http://evil.example/` fails if DNS returns `10.0.0.5`. An explicit hostname
-rule such as `allow net db.internal` outranks the `/8` prefix and permits
+rule such as `allow net db.internal` outranks the `/8` prefix. It permits
 connecting to `10.0.0.5` through `db.internal`.
 `sandlang::policy::net::is_private_address` reports whether an IP address belongs to
 a private, loopback, link-local, or other non-public range.
@@ -1775,7 +1775,7 @@ column on `PolicyError`.
 - Converts transports to lowercase and HTTP methods to uppercase.
 - Aligns trailing comments on consecutive lines.
 
-`sandlang::policy::lint::lint_policy` compares file paths lexically and checks a
+`sandlang::policy::lint::lint_policy` compares file paths lexically. It checks a
 policy file for four warnings:
 
 - `redundant-rule`: broader rules or an earlier identical rule already produce

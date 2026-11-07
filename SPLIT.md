@@ -9,9 +9,8 @@ journal. The sections below group these commits into self-contained changesets.
 
 ## How to carve a changeset
 
-- Create each branch from the latest `main`. The source commits depend on
-  journal code and an older `main`, so rewrite each change on `main` instead of
-  cherry-picking.
+- Create each branch from the latest `main`. Rewrite each change on `main`,
+  because the source commits depend on journal code and an older `main`.
 - Use the source commits as a reference. Let the compiler identify every call
   site that needs an update.
 - Exclude changes that belong to other changesets.
@@ -51,8 +50,8 @@ Source commits: `2c21305`, `003daed`, and the two documentation link fixes from
 
 `RulePolicy` builder methods accept parsed pattern types instead of raw strings.
 This makes the builder methods infallible. The builders also reject relative
-file paths, which resolves issue 033. This changeset replaces the `bitflags` set
-`Transports` with an enum and removes the `bitflags` dependency.
+file paths to close issue 033. This changeset replaces the `bitflags` set
+`Transports` with an enum. It also removes the `bitflags` dependency.
 
 New types in `policy`:
 
@@ -87,15 +86,15 @@ Source commits: the `deny_private_net` changes in `d859942`, and `50dae44`.
 ### 5. Precompiled host modules
 
 `HostModules::new` compiles host modules ahead of time. `CompiledProgram`
-includes these compiled host modules so any engine can run the program.
-`Engine::new` becomes infallible. Remove `Config::module`, and add
-`compile_file`, `run_program`, and a public `STD_MODULES` constant.
+includes these compiled host modules so any engine can run the program. This
+makes `Engine::new` infallible. Remove `Config::module`. Add `compile_file`,
+`run_program`, and a public `STD_MODULES` constant.
 
 Source commits: `5fbd07f`, `5bd8966`, `f9a4e60`.
 
 ### 6. `InterruptHandle::new` and `Config::interrupt`
 
-Create an `InterruptHandle` with `InterruptHandle::new` and pass it to
+Create an `InterruptHandle` with `InterruptHandle::new`. Pass the handle to
 `Config::interrupt` before constructing an engine. Remove the interrupt handle
 getters from `Engine` and `Session`.
 
@@ -116,10 +115,10 @@ belongs to the journal changesets.
 Hosts can look up and call functions exported by the main script module:
 
 - `CompiledProgram::function` returns a `Function` or a `FunctionError`.
-- `Function::bind` validates argument count and returns a `BoundCall` or an
+- `Function::bind` checks the argument count and returns a `BoundCall` or an
   `ArityError`.
 - `Engine::call` accepts JSON arguments and returns a typed `Returned` value.
-- `stdlib::core::Error` becomes public.
+- Export `stdlib::core::Error`.
 
 This changeset requires changeset 5 and returns `Outcome` without the
 `Suspended` variant.
@@ -148,7 +147,7 @@ Steps 9b, 9c, and 9d are independent of the journal.
 
 ### 10. Fuel accounting for retried host calls
 
-Charge fuel once when the VM retries a native function after garbage collection.
+Charge fuel once if the VM retries a native function after garbage collection.
 This makes fuel consumption identical whether or not a collection occurs.
 
 Source commit: `925ba18`.
@@ -191,8 +190,8 @@ Implement the execution journal as a single changeset across these areas:
 ### 13. Unified scheduler path
 
 Route timers, journaled host calls, standard input, and HTTP through a single
-scheduler path in all runs. `http.send` shares a single implementation, and the
-web HTTP client runs the request filter.
+scheduler path in all runs. `http.send` uses a single implementation across
+targets. The web HTTP client also runs the request filter.
 
 Source commits: `d4a4ac0`, `16da2fb`, `12895c8`, `483ac31`, `e541a7a`,
 `3bf577b`.

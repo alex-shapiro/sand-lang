@@ -839,8 +839,8 @@ impl ChannelObj {
 /// A Rust type that implements an immutable Sand value type.
 ///
 /// Derive [`NamedType`](crate::native::NamedType) and the value conversions
-/// with [`#[derive(SandValue)]`](crate::SandValue). Implement `ValueType`, and
-/// register the type with [`NativeModule::bind`](crate::native::NativeModule::bind):
+/// with [`#[derive(SandValue)]`](crate::SandValue). Implement `ValueType`.
+/// Register the type with [`NativeModule::bind`](crate::native::NativeModule::bind):
 ///
 /// ```
 /// use sandlang::vm::value::ValueType;

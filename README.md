@@ -65,7 +65,7 @@ sand run script.sand --policy=app.policy
 
 ## Embedding
 
-Embed the Sand interpreter in a Rust application and register native modules:
+Embed the Sand interpreter in a Rust application:
 
 ```rust
 use sandlang::engine::Config;

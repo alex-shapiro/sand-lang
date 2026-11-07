@@ -53,15 +53,15 @@ use std::task::Poll;
 /// * An input that fails to compile leaves the session unchanged. If an input
 ///   fails at runtime, exceeds a limit, receives an interrupt, or calls `exit`,
 ///   the session keeps its declarations and completed side effects. Unreached
-///   globals remain uninitialized, and the session cancels all running tasks.
+///   globals remain uninitialized. The session cancels all running tasks.
 /// * Tasks spawned by an input continue to run during later inputs and during
 ///   calls to [`Session::run_tasks_until`].
 /// * The instruction, CPU time, wall time, and output limits apply to each
 ///   input separately. The memory limit applies to the shared session heap.
 /// * An internal error or caught Rust panic leaves the VM in an inconsistent
-///   state. The session resets itself, returns [`Error::Internal`] with
-///   [`RESET_NOTE`] appended to the message, and sets [`Session::was_reset`] to
-///   `true`.
+///   state. The session resets itself and sets [`Session::was_reset`] to
+///   `true`. The call returns [`Error::Internal`] with [`RESET_NOTE`] appended
+///   to the message.
 pub struct Session {
     /// Shares the configuration, natives and "always" answers of the engine
     /// that created the session, with its own interrupt flag.
@@ -273,8 +273,8 @@ impl Session {
         self.was_reset
     }
 
-    /// Runs background tasks from earlier inputs until `until` completes, and
-    /// returns the output of `until`. Pass a future that reads the next user
+    /// Runs background tasks from earlier inputs until `until` completes.
+    /// Returns the output of `until`. Pass a future that reads the next user
     /// input so background tasks continue to run between inputs.
     ///
     /// The instruction, CPU time, and output limits apply to this call just
@@ -287,8 +287,8 @@ impl Session {
     /// If a task fails with an error, exceeds a limit, or receives an
     /// interrupt, the session cancels all tasks and passes the error to
     /// `on_error`. The call then continues to await `until`. If a task calls
-    /// `exit`, this method records the code in [`Session::exit_code`], drops
-    /// `until`, and returns `None`.
+    /// `exit`, this method records the exit code in [`Session::exit_code`]. It
+    /// then drops `until` and returns `None`.
     pub async fn run_tasks_until<F: Future>(&mut self, until: F, mut on_error: impl FnMut(Error)) -> Option<F::Output> {
         self.was_reset = false;
         let mut until = std::pin::pin!(until);
