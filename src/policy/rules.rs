@@ -3,7 +3,7 @@
 use super::file::HttpMethod;
 use super::net::{Dest, HostIndex, HostKind, ListenPattern, NetPattern, UrlPattern, parse_ip, url_segments};
 use super::path::{Glob, Seg, Tok, Trie, path_segments, wild_tokens};
-use super::{Capability, Decision, PathSpace, fold_name, lexical, normalize_path};
+use super::{Capability, Decision, PathSpace, PatternError, fold_name, lexical, normalize_path};
 use crate::files::Mode;
 use crate::vm::value::FxHashMap;
 use std::borrow::Cow;
@@ -36,10 +36,51 @@ impl Access {
     }
 }
 
+/// An absolute path that a `const` can hold, such as a fixed directory of a host. Its
+/// [`PathPattern`] matches the path literally.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct AbsolutePath(&'static str);
+
+impl AbsolutePath {
+    /// The path `path`. Panics if `path` does not start with `/`; in a `const`, the panic
+    /// is a compile error:
+    ///
+    /// ```compile_fail
+    /// use sandlang::policy::rules::AbsolutePath;
+    /// const DATA: AbsolutePath = AbsolutePath::new("data");
+    /// ```
+    pub const fn new(path: &'static str) -> AbsolutePath {
+        assert!(!path.is_empty() && path.as_bytes()[0] == b'/', "an absolute path starts with `/`");
+        AbsolutePath(path)
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
+impl fmt::Display for AbsolutePath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl AsRef<Path> for AbsolutePath {
+    fn as_ref(&self) -> &Path {
+        Path::new(self.0)
+    }
+}
+
+impl From<AbsolutePath> for PathPattern {
+    fn from(path: AbsolutePath) -> PathPattern {
+        PathPattern { prefix: PathBuf::from(path.0), rest: vec![] }
+    }
+}
+
 /// A path pattern of a file rule, such as `/data`, `/srv/**/*.log`, or `**/.env`. A rule
 /// for a path also applies to every path under it. Parse one with [`str::parse`], which
 /// rejects a relative path, or make one that matches a path literally with
-/// [`PathPattern::literal`].
+/// [`PathPattern::literal`], or from an [`AbsolutePath`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PathPattern {
     pub(crate) prefix: PathBuf,
@@ -47,20 +88,20 @@ pub struct PathPattern {
 }
 
 impl std::str::FromStr for PathPattern {
-    type Err = String;
+    type Err = PatternError;
 
-    fn from_str(text: &str) -> Result<PathPattern, String> {
-        super::file::parse_path(&wild_tokens(text), true, None, None)
+    fn from_str(text: &str) -> Result<PathPattern, PatternError> {
+        super::file::parse_path(&wild_tokens(text), true, None, None).map_err(PatternError)
     }
 }
 
 impl PathPattern {
     /// A pattern for `path` and every path under it. A `*` in `path` matches only itself.
     /// Returns an error if `path` is relative.
-    pub fn literal(path: impl AsRef<Path>) -> Result<PathPattern, String> {
+    pub fn literal(path: impl AsRef<Path>) -> Result<PathPattern, PatternError> {
         let path = path.as_ref();
         if !path.has_root() && !path.is_absolute() {
-            return Err(format!("path `{}` is not anchored: write an absolute path", path.display()));
+            return Err(PatternError(format!("path `{}` is not anchored: write an absolute path", path.display())));
         }
         Ok(PathPattern { prefix: path.to_path_buf(), rest: vec![] })
     }
@@ -92,10 +133,10 @@ impl NamePattern {
 }
 
 impl std::str::FromStr for NamePattern {
-    type Err = String;
+    type Err = PatternError;
 
-    fn from_str(name: &str) -> Result<NamePattern, String> {
-        NameKind::from_tokens(&wild_tokens(name)).map(NamePattern)
+    fn from_str(name: &str) -> Result<NamePattern, PatternError> {
+        NameKind::from_tokens(&wild_tokens(name)).map(NamePattern).map_err(PatternError)
     }
 }
 

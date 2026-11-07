@@ -14,7 +14,7 @@
 use super::net::{HostKind, NetPattern, QUOTED_STAR_IN_HOST, UrlPattern, format_host_port, url_segments};
 use super::path::{Seg, Tok, wild_tokens};
 use super::rules::{Access, CustomName, Methods, NameKind, Origin, PathPattern, Rule, RuleKind, Transports};
-use super::{Capability, Decision, RulePolicy};
+use super::{Capability, Decision, PatternError, RulePolicy};
 use crate::engine::Limits;
 use crate::vm::value::FxHashMap;
 use std::borrow::Cow;
@@ -322,13 +322,13 @@ impl fmt::Display for HttpMethod {
 }
 
 impl std::str::FromStr for HttpMethod {
-    type Err = String;
+    type Err = PatternError;
 
-    fn from_str(word: &str) -> Result<HttpMethod, String> {
+    fn from_str(word: &str) -> Result<HttpMethod, PatternError> {
         if transport(word).is_some() || invalid_transport_hint(word).is_some() || !is_method(word) {
-            return Err(format!(
+            return Err(PatternError(format!(
                 "`{word}` is not an HTTP method: expected a method such as `GET`, or an uppercase token such as `M-SEARCH`"
-            ));
+            )));
         }
         Ok(HttpMethod(word.to_ascii_uppercase()))
     }
@@ -561,7 +561,7 @@ impl Context<'_> {
                     "listen" if word.tokens().iter().any(|&(c, wild)| c == '*' && !wild) => {
                         return Err((item.column, QUOTED_STAR_IN_HOST.into()));
                     }
-                    "listen" => RuleKind::Listen(word.text().parse().map_err(|m| (item.column, m))?),
+                    "listen" => RuleKind::Listen(word.text().parse().map_err(|m: PatternError| (item.column, m.0))?),
                     _ => RuleKind::Env(NameKind::from_tokens(&word.tokens()).map_err(|m| (item.column, m))?),
                 };
                 rules.push(file_rule(decision, kind, origin));

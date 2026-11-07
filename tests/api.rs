@@ -2278,13 +2278,13 @@ fn typed_rule_builders_make_the_rules_of_the_policy_file_syntax() {
     let text = "allow read /data\ndeny read /data/**/.env\nallow write \"/out/*\"\nallow net plaintext localhost:8080\ndeny net 10.0.0.0/8\nallow http api.example.com/v1\nprompt http *.example.org/admin\ndeny http plaintext GET M-SEARCH api.example.com/v2\ndeny listen localhost:22\nallow env AWS_*\nallow env \"A*B\"\n";
     assert_eq!(built.to_string(), text);
     assert_eq!(PolicyFile::parse(text, std::path::Path::new("/"), None).unwrap().rules.to_string(), text);
-    let net = |s: &str| s.parse::<sandlang::policy::net::NetPattern>().unwrap_err();
+    let net = |s: &str| s.parse::<sandlang::policy::net::NetPattern>().unwrap_err().to_string();
     assert_eq!(
         net("host:99999"),
         "invalid host pattern `host:99999`: expected a host, host:port, *.domain, *, an IP address, or a CIDR range"
     );
     assert!(net("https://example.com").starts_with("net rules require host patterns, not URLs"));
-    let url = "https://api.example.com".parse::<sandlang::policy::net::UrlPattern>().unwrap_err();
+    let url = "https://api.example.com".parse::<sandlang::policy::net::UrlPattern>().unwrap_err().to_string();
     assert!(url.starts_with("URL patterns must not include a scheme"), "{url}");
     for word in ["TLS", "HTTP", "get-x", ""] {
         assert!(word.parse::<HttpMethod>().is_err(), "{word}");
