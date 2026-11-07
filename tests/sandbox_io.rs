@@ -548,8 +548,6 @@ fn only_more_specific_rules_override_deny_private_net() {
 
 /// Under a wildcard allow rule, `deny_private_net` blocks every loopback host, and a more
 /// specific rule makes an exception.
-// Relies on the resolver accepting `127.1` for 127.0.0.1 (glibc, macOS).
-#[cfg(unix)]
 #[test]
 fn deny_private_net_blocks_loopback_hosts_except_specific_allows() {
     let server = http_server(|_| HttpResponse::new(200, "hi"));
@@ -558,7 +556,7 @@ fn deny_private_net_blocks_loopback_hosts_except_specific_allows() {
         r#"
 import http
 import net
-for host in ["127.0.0.1", "localhost", "app.localhost", "127.1"] {{
+for host in ["127.0.0.1", "localhost", "app.localhost"] {{
     print(http.get("http://\(host):{port}/").unwrap_err().message)
 }}
 print(net.connect("127.0.0.1", {port}).unwrap_err().kind)
@@ -572,14 +570,13 @@ print(net.connect("127.0.0.1", {port}).unwrap_err().kind)
             "permission denied: GET http://127.0.0.1:{port}/\n\
              permission denied: GET http://localhost:{port}/\n\
              permission denied: GET http://app.localhost:{port}/\n\
-             permission denied: connect to 127.1:{port}: address 127.0.0.1 is not allowed by the rule `deny net 127.0.0.0/8`\n\
              permission_denied\n"
         )
     );
     assert!(server.requests.lock().is_empty());
-    let exception = wildcard.deny_private_net().allow_net(Transports::Both, format!("127.0.0.1:{port}").parse().unwrap());
+    let exception = wildcard.deny_private_net().allow_net(Transports::Both, format!("localhost:{port}").parse().unwrap());
     let r =
-        run_with(&format!("import http\nprint(http.get(\"http://127.0.0.1:{port}/\").unwrap().text().unwrap())"), |c| c.policy(exception));
+        run_with(&format!("import http\nprint(http.get(\"http://localhost:{port}/\").unwrap().text().unwrap())"), |c| c.policy(exception));
     assert_eq!(r.ok_stdout(), "hi\n");
 }
 
