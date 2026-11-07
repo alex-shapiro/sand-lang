@@ -2007,8 +2007,8 @@ output to an `OutputSink`. `Config::stdin_bytes` gives scripts fixed input,
 and `Config::stdin_feed` gives them input that the host sends while they run.
 
 `Config::stdin_feed` creates a new `StdinFeed` and returns it with the
-config. The engine that the host creates from the config reads that feed, and
-so do the engine's sessions. A host that runs scripts with its process's
+config. The engine or session that the host creates from the config reads
+that feed. A host that runs scripts with its process's
 standard input, as the `sand` command does, forwards that input to the feed.
 
 A host learns that a script wants input from `StdinFeed::wait_for_request`. It
