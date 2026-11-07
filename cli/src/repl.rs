@@ -196,11 +196,7 @@ async fn foreground<T>(handle: sandlang::InterruptHandle, io: &mut Io, fut: impl
     let mut reading: Option<StdinRequest> = None;
     loop {
         let feed = &io.stdin_feed;
-        let is_reading = reading.is_some();
         let input_needed = async {
-            if is_reading {
-                return std::future::pending().await;
-            }
             loop {
                 let request = feed.wait_for_request().await;
                 if request.wait_until_nothing_else_runs().await {
@@ -211,8 +207,8 @@ async fn foreground<T>(handle: sandlang::InterruptHandle, io: &mut Io, fut: impl
         tokio::select! {
             r = &mut fut => return r,
             Ok(()) = tokio::signal::ctrl_c() => handle.interrupt(),
-            request = input_needed => reading = Some(request),
-            event = io.reader.script_line(), if is_reading => {
+            request = input_needed, if reading.is_none() => reading = Some(request),
+            event = io.reader.script_line(), if reading.is_some() => {
                 let request = reading.take().expect("a read waits");
                 match event {
                     InputEvent::Line(line) => feed.send(line),
