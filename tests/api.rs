@@ -2289,6 +2289,8 @@ fn typed_rule_builders_make_the_rules_of_the_policy_file_syntax() {
     assert!(net("https://example.com").starts_with("net rules require host patterns, not URLs"));
     let url = "https://api.example.com".parse::<sandlang::policy::net::UrlPattern>().unwrap_err().to_string();
     assert!(url.starts_with("URL patterns must not include a scheme"), "{url}");
+    assert_eq!("get".parse::<HttpMethod>().unwrap(), HttpMethod::GET);
+    assert_eq!("M-SEARCH".parse::<HttpMethod>().unwrap().as_str(), "M-SEARCH");
     for word in ["TLS", "HTTP", "get-x", ""] {
         assert!(word.parse::<HttpMethod>().is_err(), "{word}");
     }

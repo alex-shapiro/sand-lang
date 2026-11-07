@@ -303,10 +303,8 @@ fn is_name(s: &str) -> bool {
     chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-const KNOWN_METHODS: [&str; 9] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE", "CONNECT"];
-
 pub(crate) fn is_method(word: &str) -> bool {
-    KNOWN_METHODS.iter().any(|m| m.eq_ignore_ascii_case(word))
+    HttpMethod::KNOWN.iter().any(|m| m.as_str().eq_ignore_ascii_case(word))
         || (word.bytes().any(|b| b.is_ascii_uppercase())
             && word.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-' || b == b'_'))
 }

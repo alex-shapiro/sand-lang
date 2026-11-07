@@ -8,7 +8,7 @@ use parking_lot::Mutex;
 use sandlang::engine::Limits;
 use sandlang::policy::file::PolicyFile;
 use sandlang::policy::net::{NetPattern, is_private_address};
-use sandlang::policy::rules::{AbsolutePath, CustomMatch, Methods, NamePattern, PathPattern, RulePolicy, Transports};
+use sandlang::policy::rules::{AbsolutePath, CustomMatch, HttpMethod, Methods, NamePattern, PathPattern, RulePolicy, Transports};
 use sandlang::policy::{Capability, Decision, PromptAnswer};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -320,7 +320,7 @@ fn http_address_rules_apply_to_resolved_addresses() {
     let p = RulePolicy::new()
         .allow_http(Transports::Plaintext, Methods::all(), "*".parse().unwrap())
         .deny_http(Transports::Both, Methods::all(), "10.0.0.5/admin".parse().unwrap())
-        .prompt_http(Transports::Both, Methods::only("POST".parse().unwrap(), []), "10.0.0.5".parse().unwrap());
+        .prompt_http(Transports::Both, Methods::only(HttpMethod::POST, []), "10.0.0.5".parse().unwrap());
     let at = "10.0.0.5:80".parse().unwrap();
     assert_eq!(p.check_resolved(&get("GET", "app.example", "/admin/users"), at), Decision::Deny);
     assert_eq!(p.check_resolved(&get("GET", "app.example", "/%61dmin"), at), Decision::Deny);
@@ -398,7 +398,7 @@ fn explicit_host_rules_outrank_cidr_prefixes_at_resolved_addresses() {
     assert_eq!(p.check(&net_addr("db.internal", "93.184.0.5:5432")), Decision::Allow);
     assert_eq!(p.check(&net_addr("example.com", "93.184.215.14:443")), Decision::Deny);
     let p = RulePolicy::new()
-        .allow_http(Transports::Tls, Methods::only("GET".parse().unwrap(), []), "db.internal/api".parse().unwrap())
+        .allow_http(Transports::Tls, Methods::only(HttpMethod::GET, []), "db.internal/api".parse().unwrap())
         .deny_net(Transports::Both, "10.0.0.0/8".parse().unwrap());
     let get = |path: &str| Capability::Http {
         method: "GET".into(),
@@ -766,7 +766,7 @@ fn pooled_connections_are_reused_only_at_addresses_allowed_for_the_request() {
     let connected = Arc::new(Mutex::new(Vec::new()));
     let network = Arc::new(KeepAliveNetwork { addrs: vec![addr], connected: connected.clone() });
     let policy = RulePolicy::standard()
-        .allow_http(Transports::Plaintext, Methods::only("GET".parse().unwrap(), []), "api.example.com/a".parse().unwrap())
+        .allow_http(Transports::Plaintext, Methods::only(HttpMethod::GET, []), "api.example.com/a".parse().unwrap())
         .allow_http(Transports::Plaintext, Methods::all(), "*".parse().unwrap())
         .deny_net(Transports::Plaintext, "10.0.0.0/8".parse().unwrap());
     let src = r#"

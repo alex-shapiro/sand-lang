@@ -87,10 +87,10 @@ let report = files.read("/out/report.txt")?;
   - `NetPattern` is the host of a `net` rule, `UrlPattern` is the URL of an `http` rule, and `ListenPattern` is the address of a `listen` rule.
   - `NamePattern` is the variable name of an `env` rule. `NamePattern::exact` makes a pattern without wildcards.
   - `Transports` sets the connections that a `net` or `http` rule controls: `Tls`, `Plaintext`, or `Both`.
-  - `Methods` sets the HTTP methods that an `http` rule controls: `Methods::all()`, or `Methods::only(first, rest)` with one or more `HttpMethod` values.
+  - `Methods` sets the HTTP methods that an `http` rule controls: `Methods::all()`, or `Methods::only(first, rest)` with one or more `HttpMethod` values, such as `HttpMethod::GET`.
   - `CustomMatch` sets the name and the detail that a `custom` rule controls: `Any`, or `Exact(text)`.
 
-  Each pattern type parses the policy file syntax with `str::parse`. It returns a `PatternError` if the pattern is not valid. For example: `allow_http(Transports::Plaintext, Methods::only("GET".parse()?, []), "localhost:8080/api/**".parse()?)`.
+  Each pattern type parses the policy file syntax with `str::parse`. It returns a `PatternError` if the pattern is not valid. For example: `allow_http(Transports::Plaintext, Methods::only(HttpMethod::GET, []), "localhost:8080/api/**".parse()?)`.
 - **Default rules.** `RulePolicy::default()` is empty. `RulePolicy::standard()` allows `stdout` and `stderr`. `RulePolicy::allow_all()` allows all capabilities for trusted scripts. `user_rules.with_defaults(host_rules)` adds fallback rules, which apply only if a request matches no rule in `user_rules`. `Config::custom_policy` replaces rule evaluation with a host-defined `CustomPolicy`.
 - **Limits.** `Limits` configures every resource bound described in [Sandbox and policies](/guide/sandbox/).
 - **Virtual file system.** `Config::memory_fs` replaces host disk access with an in-memory `MemFs`. Clones of a `MemFs` share the same underlying storage so the host can populate input files before a run and read output files afterward.

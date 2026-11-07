@@ -201,9 +201,32 @@ impl Transports {
 /// with [`str::parse`]: a known method in any case, or an uppercase token of letters,
 /// digits, `-`, and `_`. A transport keyword such as `TLS` is not a method.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct HttpMethod(String);
+pub struct HttpMethod(Cow<'static, str>);
 
 impl HttpMethod {
+    pub const GET: HttpMethod = HttpMethod(Cow::Borrowed("GET"));
+    pub const HEAD: HttpMethod = HttpMethod(Cow::Borrowed("HEAD"));
+    pub const POST: HttpMethod = HttpMethod(Cow::Borrowed("POST"));
+    pub const PUT: HttpMethod = HttpMethod(Cow::Borrowed("PUT"));
+    pub const PATCH: HttpMethod = HttpMethod(Cow::Borrowed("PATCH"));
+    pub const DELETE: HttpMethod = HttpMethod(Cow::Borrowed("DELETE"));
+    pub const OPTIONS: HttpMethod = HttpMethod(Cow::Borrowed("OPTIONS"));
+    pub const TRACE: HttpMethod = HttpMethod(Cow::Borrowed("TRACE"));
+    pub const CONNECT: HttpMethod = HttpMethod(Cow::Borrowed("CONNECT"));
+
+    /// The methods that [`str::parse`] accepts in any case.
+    pub(crate) const KNOWN: [HttpMethod; 9] = [
+        HttpMethod::GET,
+        HttpMethod::HEAD,
+        HttpMethod::POST,
+        HttpMethod::PUT,
+        HttpMethod::PATCH,
+        HttpMethod::DELETE,
+        HttpMethod::OPTIONS,
+        HttpMethod::TRACE,
+        HttpMethod::CONNECT,
+    ];
+
     /// The method in uppercase, such as `GET`.
     pub fn as_str(&self) -> &str {
         &self.0
@@ -225,7 +248,8 @@ impl std::str::FromStr for HttpMethod {
                 "`{word}` is not an HTTP method: expected a method such as `GET`, or an uppercase token such as `M-SEARCH`"
             )));
         }
-        Ok(HttpMethod(word.to_ascii_uppercase()))
+        let known = HttpMethod::KNOWN.into_iter().find(|m| m.as_str().eq_ignore_ascii_case(word));
+        Ok(known.unwrap_or_else(|| HttpMethod(Cow::Owned(word.into()))))
     }
 }
 

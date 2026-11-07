@@ -1,6 +1,6 @@
 use sandlang::policy::Capability;
 use sandlang::engine::{Config, Engine, MemorySink};
-use sandlang::policy::rules::{Methods, RulePolicy, Transports};
+use sandlang::policy::rules::{HttpMethod, Methods, RulePolicy, Transports};
 
 const SCRIPT: &str = r#"
 import http
@@ -12,7 +12,7 @@ match http.get("http://localhost:18931/admin/secret") {
 
 fn rules() -> RulePolicy {
     RulePolicy::standard()
-        .allow_http(Transports::Plaintext, Methods::only("GET".parse().unwrap(), []), "*".parse().unwrap())
+        .allow_http(Transports::Plaintext, Methods::only(HttpMethod::GET, []), "*".parse().unwrap())
         .deny_http(Transports::Both, Methods::all(), "127.0.0.1/admin/**".parse().unwrap())
         .deny_http(Transports::Both, Methods::all(), "[::1]/admin/**".parse().unwrap())
 }
