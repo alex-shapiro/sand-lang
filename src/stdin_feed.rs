@@ -57,8 +57,7 @@ impl StdinFeed {
     /// Creates a feed and its only reader.
     pub(crate) fn new(wait_kind: WaitKind) -> (StdinFeed, StdinFeedReader) {
         let channel = Arc::new(StdinChannel { state: Mutex::default(), changed: Notify::new(), wait_kind });
-        let reader = StdinFeedReader { channel: channel.clone(), buf: Vec::new(), at: 0, answered: false, ended: false };
-        (StdinFeed { channel }, reader)
+        (StdinFeed { channel: channel.clone() }, StdinFeedReader { channel })
     }
 
     /// Appends `data` to the input stream. Queued data persists across reads
@@ -187,20 +186,12 @@ impl Drop for StdinIdleGuard {
 /// to start a read operation.
 pub(crate) struct StdinFeedReader {
     pub(crate) channel: Arc<StdinChannel>,
-    /// Input that the current read took from the feed, and the offset of its
-    /// first unused byte. It is empty between reads.
-    buf: Vec<u8>,
-    at: usize,
-    /// True if `buf` holds an answer, which ends the read when it is used up.
-    answered: bool,
-    ended: bool,
 }
 
 impl StdinFeedReader {
     /// Starts a read operation.
     pub(crate) fn begin_read(&mut self) -> ActiveStdinRead<'_> {
-        (self.answered, self.ended) = (false, false);
-        ActiveStdinRead { reader: self }
+        ActiveStdinRead { channel: &self.channel, buf: Vec::new(), at: 0, answered: false, ended: false }
     }
 }
 
@@ -208,37 +199,41 @@ impl StdinFeedReader {
 /// the read, discards an unused answer, and puts other unused input back at
 /// the front of the feed.
 pub(crate) struct ActiveStdinRead<'a> {
-    reader: &'a mut StdinFeedReader,
+    channel: &'a StdinChannel,
+    /// Input that the read took from the feed, and the offset of its first
+    /// unused byte.
+    buf: Vec<u8>,
+    at: usize,
+    /// True if `buf` holds an answer, which ends the read when it is used up.
+    answered: bool,
+    ended: bool,
 }
 
 impl ActiveStdinRead<'_> {
     /// Returns buffered bytes available without waiting and whether the
     /// current read has reached EOF.
     pub(crate) fn available(&mut self) -> (&[u8], bool) {
-        let r = &mut *self.reader;
-        if r.at == r.buf.len() && !r.ended {
-            let mut state = r.channel.lock();
-            if r.answered {
-                r.ended = true;
+        if self.at == self.buf.len() && !self.ended {
+            let mut state = self.channel.lock();
+            if self.answered {
+                self.ended = true;
             } else if let Some(answer) = state.answer.take() {
-                (r.ended, r.answered) = (answer.is_empty(), true);
-                (r.buf, r.at) = (answer, 0);
+                (self.ended, self.answered) = (answer.is_empty(), true);
+                (self.buf, self.at) = (answer, 0);
             } else if let Some((data, at)) = state.sent.pop_front() {
-                (r.buf, r.at) = (data, at);
+                (self.buf, self.at) = (data, at);
             } else {
-                r.ended = state.stream_ended;
+                self.ended = state.stream_ended;
             }
         }
-        (&r.buf[r.at..], r.ended)
+        (&self.buf[self.at..], self.ended)
     }
 }
 
 impl Drop for ActiveStdinRead<'_> {
     fn drop(&mut self) {
-        let r = &mut *self.reader;
-        let (unused, at) = (std::mem::take(&mut r.buf), std::mem::take(&mut r.at));
-        let answered = r.answered;
-        r.channel.change(|state| {
+        let (unused, at, answered) = (std::mem::take(&mut self.buf), self.at, self.answered);
+        self.channel.change(|state| {
             if !answered && at < unused.len() {
                 state.sent.push_front((unused, at));
             }
@@ -263,10 +258,9 @@ impl AsyncBufRead for ActiveStdinRead<'_> {
         loop {
             let (data, ended) = this.available();
             if !data.is_empty() || ended {
-                let r = &*this.reader;
-                return Poll::Ready(Ok(&r.buf[r.at..]));
+                return Poll::Ready(Ok(&this.buf[this.at..]));
             }
-            let mut state = this.reader.channel.lock();
+            let mut state = this.channel.lock();
             if state.answer.is_none() && state.sent.is_empty() && !state.stream_ended {
                 if state.open_wait.is_none() {
                     state.waits_started += 1;
@@ -274,14 +268,14 @@ impl AsyncBufRead for ActiveStdinRead<'_> {
                 }
                 state.read_waker = Some(cx.waker().clone());
                 drop(state);
-                this.reader.channel.changed.notify_waiters();
+                this.channel.changed.notify_waiters();
                 return Poll::Pending;
             }
         }
     }
 
     fn consume(self: Pin<&mut Self>, n: usize) {
-        let r = &mut *self.get_mut().reader;
-        r.at = (r.at + n).min(r.buf.len());
+        let this = self.get_mut();
+        this.at = (this.at + n).min(this.buf.len());
     }
 }
