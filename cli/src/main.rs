@@ -127,14 +127,41 @@ fn runtime() -> Result<tokio::runtime::Runtime, String> {
 }
 
 struct RunOptions {
-    config: Config,
-    /// The scripts' standard input, which the CLI fills from its own.
-    stdin_feed: StdinFeed,
+    policy: sandlang::RulePolicy,
+    limits: sandlang::Limits,
+    prompt: bool,
+    seed: Option<u64>,
+    script_args_are_args: bool,
     file: Option<PathBuf>,
     script_args: Vec<String>,
 }
 
-/// Parses run options into an engine configuration.
+impl RunOptions {
+    /// An engine configuration for a run, with the scripts' standard input.
+    fn config(&self) -> (Config, StdinFeed) {
+        let config = Config::new()
+            .policy(self.policy.clone())
+            .limits(self.limits.clone())
+            .gc_stress(std::env::var_os("SAND_GC_STRESS").is_some())
+            .dump_bytecode(std::env::var_os("SAND_DUMP_BYTECODE").is_some());
+        // A person types at a terminal; a pipe or a file comes from a program.
+        let (mut config, stdin_feed) =
+            if std::io::IsTerminal::is_terminal(&std::io::stdin()) { config.stdin_feed() } else { config.stdin_io_feed() };
+        if self.script_args_are_args {
+            config = config.args(self.script_args.clone());
+        }
+        config = config.prompter(prompter(self.prompt, self.policy.clone()));
+        if let Some(s) = self.seed {
+            config = config.seed(s);
+        }
+        if let Some(zone) = TimeZone::system() {
+            config = config.time_zone(zone);
+        }
+        (config, stdin_feed)
+    }
+}
+
+/// Parses the options of `sand run` and `sand repl`.
 fn run_options(args: &[String]) -> Result<RunOptions, String> {
     parse_run_options(args, false)
 }
@@ -222,25 +249,7 @@ fn parse_run_options(args: &[String], files_only: bool) -> Result<RunOptions, St
         }
     }
     let policy = rules.with_defaults(default_rules(allow_all));
-    let config = Config::new()
-        .policy(policy.clone())
-        .limits(limits)
-        .gc_stress(std::env::var_os("SAND_GC_STRESS").is_some())
-        .dump_bytecode(std::env::var_os("SAND_DUMP_BYTECODE").is_some());
-    // A person types at a terminal; a pipe or a file comes from a program.
-    let (mut config, stdin_feed) =
-        if std::io::IsTerminal::is_terminal(&std::io::stdin()) { config.stdin_feed() } else { config.stdin_io_feed() };
-    if !files_only {
-        config = config.args(script_args.clone());
-    }
-    config = config.prompter(prompter(prompt, policy));
-    if let Some(s) = seed {
-        config = config.seed(s);
-    }
-    if let Some(zone) = TimeZone::system() {
-        config = config.time_zone(zone);
-    }
-    Ok(RunOptions { config, stdin_feed, file, script_args })
+    Ok(RunOptions { policy, limits, prompt, seed, script_args_are_args: !files_only, file, script_args })
 }
 
 const TAKES_VALUE: &[&str] = &[
@@ -433,10 +442,13 @@ fn report_error(e: &Error) -> u8 {
 
 fn cmd_run(args: &[String]) -> Result<u8, String> {
     let opts = run_options(args)?;
-    let file = opts.file.ok_or("missing FILE to run")?;
-    let mut engine = Engine::new(opts.config.exit_after_run(true)).map_err(|e| e.render())?;
+    let file = opts.file.clone().ok_or("missing FILE to run")?;
+    let (config, stdin_feed) = opts.config();
+    let mut engine = Engine::new(config.exit_after_run(true)).map_err(|e| e.render())?;
     let rt = runtime()?;
-    let r = rt.block_on(with_stdin_forwarded(&opts.stdin_feed, engine.run_file(&file)));
+    let r = rt.block_on(with_stdin_forwarded(&stdin_feed, engine.run_file(&file)));
+    // A read of the process's standard input cannot be cancelled; do not wait for it.
+    rt.shutdown_background();
     if std::env::var_os("SAND_GC_STATS").is_some() {
         eprintln!("{:#?}", engine.gc_stats());
     }
@@ -624,23 +636,27 @@ fn fmt_stdin(check: bool) -> Result<u8, String> {
 /// are code like any other: everything is denied unless allowed).
 fn cmd_test(args: &[String]) -> Result<u8, String> {
     let opts = parse_run_options(args, true)?;
-    let files: Vec<PathBuf> = opts.file.into_iter().chain(opts.script_args.iter().map(PathBuf::from)).collect();
+    let files: Vec<PathBuf> = opts.file.iter().cloned().chain(opts.script_args.iter().map(PathBuf::from)).collect();
     if files.is_empty() {
         return Err("missing FILE".into());
     }
     let rt = runtime()?;
     let mut failed = 0;
     for f in &files {
-        let opts = parse_run_options(args, true)?;
-        let mut engine = Engine::new(opts.config).map_err(|e| e.render())?;
-        match rt.block_on(with_stdin_forwarded(&opts.stdin_feed, engine.run_tests(f))) {
+        let (config, stdin_feed) = opts.config();
+        let mut engine = Engine::new(config).map_err(|e| e.render())?;
+        match rt.block_on(with_stdin_forwarded(&stdin_feed, engine.run_tests(f))) {
             Ok(report) => {
                 out!("{}", report.render());
                 failed += report.failed();
             }
-            Err(e) => return Ok(report_error(&e)),
+            Err(e) => {
+                rt.shutdown_background();
+                return Ok(report_error(&e));
+            }
         }
     }
+    rt.shutdown_background();
     Ok(if failed > 0 { 1 } else { 0 })
 }
 

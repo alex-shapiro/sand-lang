@@ -12,7 +12,7 @@ use sandlang::platform::{Clock, ClockFuture, Instant, SystemTime, UNIX_EPOCH};
 use sandlang::session::RESET_NOTE;
 use sandlang::vm::{Ctl, Vm};
 use sandlang::{
-    Capability, Config, Decision, Engine, Error, LimitKind, Limits, MemorySink, NativeModule, PromptAnswer, RulePolicy, Session,
+    Capability, Config, Decision, Engine, Error, LimitKind, Limits, MemorySink, NativeModule, PromptAnswer, RulePolicy, Session, StdinFeed,
     StdinRequest,
 };
 use std::sync::Arc;
@@ -934,6 +934,16 @@ fn types_of_generic_functions() {
     assert_eq!(ty("[]"), "[_]");
 }
 
+/// Waits until a read of `feed` waits while no other task can run.
+async fn input_needed(feed: &StdinFeed) {
+    while !feed.wait_for_request().await.wait_until_nothing_else_runs().await {}
+}
+
+/// Whether a read of `feed` waits for input now.
+fn has_request(rt: &tokio::runtime::Runtime, feed: &StdinFeed) -> bool {
+    rt.block_on(async { tokio::time::timeout(Duration::ZERO, feed.wait_for_request()).await }).is_ok()
+}
+
 #[test]
 fn scripts_read_the_input_the_host_feeds() {
     let (config, feed) = Config::new().policy(sandlang::RulePolicy::allow_all()).stdin_feed();
@@ -942,12 +952,12 @@ fn scripts_read_the_input_the_host_feeds() {
     // Data sent ahead is kept until read.
     feed.send("early\npart");
     assert_eq!(r.value("io.stdin.read_line()?"), "Some(\"early\")");
-    assert!(!feed.needs_input());
+    assert!(!has_request(&r.rt, &feed));
     // A waiting read requests input when all other tasks are idle.
     let Repl { session, rt, .. } = &mut r;
     let (value, ()) = rt.block_on(async {
         let answer = async {
-            feed.wait_until_input_needed().await;
+            input_needed(&feed).await;
             feed.send("ial\n");
         };
         tokio::join!(session.eval("io.stdin.read_line()?"), answer)
@@ -960,13 +970,13 @@ fn scripts_read_the_input_the_host_feeds() {
     assert_eq!(r.value("io.stdin.read_line()?"), "Some(\"again\")");
     // A task's read waits between inputs, until the host sends a line.
     r.ok("let t = spawn io.stdin.read_line()");
-    let got = r.rt.block_on(r.session.run_tasks_until(feed.wait_until_input_needed(), |e| panic!("{e}")));
+    let got = r.rt.block_on(r.session.run_tasks_until(input_needed(&feed), |e| panic!("{e}")));
     assert_eq!(got, Some(()));
     assert!(r.idle(50).is_empty());
     assert_eq!(r.value("t.is_done()"), "false");
     feed.send("late\n");
     assert_eq!(r.value("t.wait()?"), "Some(\"late\")");
-    assert!(!feed.needs_input());
+    assert!(!has_request(&r.rt, &feed));
 }
 
 #[test]
@@ -979,7 +989,7 @@ fn read_is_awaited_while_other_tasks_run() {
     let (value, ()) = rt.block_on(async {
         let answer = async {
             let request = feed.wait_for_request().await;
-            assert!(!feed.needs_input());
+            assert!(!request.nothing_else_runs());
             assert!(request.answer("move\n"));
             assert!(!request.is_open());
         };
@@ -1163,7 +1173,7 @@ fn io_feed_wait_counts_toward_wall_time_limit() {
     let Repl { session, rt, .. } = &mut r;
     let (value, ()) = rt.block_on(async {
         let send = async {
-            feed.wait_until_input_needed().await;
+            input_needed(&feed).await;
             tokio::time::sleep(Duration::from_secs(60)).await;
             feed.send("late\n");
         };
@@ -1181,7 +1191,7 @@ fn stdin_wait_pauses_wall_time_limit() {
     let Repl { session, rt, .. } = &mut r;
     let (value, ()) = rt.block_on(async {
         let answer = async {
-            feed.wait_until_input_needed().await;
+            input_needed(&feed).await;
             tokio::time::sleep(Duration::from_secs(60)).await;
             feed.send("late\n");
         };

@@ -2009,25 +2009,29 @@ and `Config::stdin_feed` gives them input that the host sends while they run.
 `Config::stdin_feed` creates a new `StdinFeed` and returns it with the
 config. The engine that the host creates from the config reads that feed, and
 so do the engine's sessions. A host that runs scripts with its process's
-standard input, as the `sand` command does, forwards that input to the feed. A
-`StdinFeed` supports two host models:
+standard input, as the `sand` command does, forwards that input to the feed.
 
-- Terminal hosts wait for `StdinFeed::wait_until_input_needed` and send user
-  input with `StdinFeed::send`. `wait_until_input_needed` is resolved if a read
-  waits for input and all other tasks are idle. Queued data persists across
-  reads until a script consumes it. `StdinFeed::end` queues an end-of-input
-  marker for the next read that reaches it.
-- Interactive applications display an input prompt while a read waits.
-  `StdinFeed::wait_for_request` waits until a read needs input, even if other
-  tasks are running, and returns a `StdinRequest` for that read.
-  `StdinRequest::wait_until_closed` waits until the read finishes or stops
-  waiting. `StdinRequest::answer(data)` supplies `data`, a trailing newline if
-  `data` lacks one, and an end-of-input marker so that any read operation
-  completes. `StdinRequest::dismiss()` supplies only an end-of-input marker,
-  which causes `read_line` to return `None` if the read has no buffered data.
-  Each read accepts at most one response; both methods return `false` if the
-  read is already closed. When the read finishes, the engine discards any
-  unread bytes from the response.
+A host learns that a script wants input from `StdinFeed::wait_for_request`. It
+waits until a read needs input, even if other tasks are running, and returns a
+`StdinRequest` for that read. `StdinRequest::wait_until_closed` waits until the
+read gets input or ends. `StdinRequest::wait_until_nothing_else_runs` waits
+until no other task of the script can run while the read waits; a host that
+shares a terminal with the script, such as `sand repl`, waits for this before
+it takes a line from the terminal.
+
+A host gives input in one of two ways:
+
+- As a stream, for a terminal or a pipe. `StdinFeed::send` adds bytes to the
+  input, and `StdinFeed::end` adds an end of input for the next read that
+  reaches it. Bytes that one read does not use stay for the next read.
+- As one answer to one read, for an input field in an app.
+  `StdinRequest::answer(data)` gives the read `data`, a trailing newline if
+  `data` lacks one, and an end of input, so that a read of any kind completes.
+  `StdinRequest::dismiss()` gives the read only an end of input, so
+  `read_line` returns `None` if the read has no data yet. Each read accepts at
+  most one answer; both methods return `false` if the read is already closed.
+  When the read finishes, the engine discards the part of the answer that it
+  did not use.
 
 Idle time spent waiting for user input does not count toward `max_wall_time`.
 Time spent running other tasks still counts. If one task waits for the user,
@@ -2035,9 +2039,8 @@ elapsed time while other tasks wait for timers or network I/O also does not
 count toward `max_wall_time`; the CPU time, instruction, memory, and output
 limits still bound the run during that wait. User waits include:
 
-- reads from a `StdinFeed` made by `Config::stdin_feed` (the host observes each
-  waiting read through `wait_until_input_needed` and `wait_for_request`, and
-  can prompt for or dismiss it)
+- reads from a `StdinFeed` made by `Config::stdin_feed` (the host sees each
+  waiting read through `wait_for_request`, and can prompt for or dismiss it)
 - host functions that return a `Later` with `WaitKind::User` (§16.3)
 
 `Config::stdin_io_feed` makes a feed for input that comes from a program, such

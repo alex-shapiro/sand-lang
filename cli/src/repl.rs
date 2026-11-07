@@ -64,10 +64,10 @@ pub(crate) fn cmd_repl(args: &[String]) -> Result<u8, String> {
     }
     let rt = runtime()?;
     let screen = Screen::default();
+    let (config, stdin_feed) = opts.config();
     let config =
-        opts.config.stdout(ReplSink { screen: screen.clone(), stderr: false }).stderr(ReplSink { screen: screen.clone(), stderr: true });
+        config.stdout(ReplSink { screen: screen.clone(), stderr: false }).stderr(ReplSink { screen: screen.clone(), stderr: true });
     let mut session = Session::new(config).map_err(|e| e.render())?;
-    let stdin_feed = Some(opts.stdin_feed);
     let reader = if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         Reader::Editor(EditorReader::new(screen.clone()))
     } else {
@@ -75,13 +75,16 @@ pub(crate) fn cmd_repl(args: &[String]) -> Result<u8, String> {
     };
     let mut io = Io { reader, stdin_feed, ended: false };
     outln!("sand {} — help() for documentation, :help for the REPL's commands, :quit to exit", env!("CARGO_PKG_VERSION"));
-    Ok(rt.block_on(repl(&mut session, &screen, &mut io)))
+    let status = rt.block_on(repl(&mut session, &screen, &mut io));
+    // A read of the process's standard input cannot be cancelled; do not wait for it.
+    rt.shutdown_background();
+    Ok(status)
 }
 
 /// Standard input for the REPL and its scripts.
 struct Io {
     reader: Reader,
-    stdin_feed: Option<StdinFeed>,
+    stdin_feed: StdinFeed,
     /// True if piped input has reached EOF.
     ended: bool,
 }
@@ -194,25 +197,25 @@ async fn foreground<T>(handle: sandlang::InterruptHandle, io: &mut Io, fut: impl
     let mut fut = std::pin::pin!(fut);
     let mut reading = false;
     loop {
+        let feed = &io.stdin_feed;
         let input_needed = async {
-            match &io.stdin_feed {
-                Some(feed) if !reading => feed.wait_until_input_needed().await,
-                _ => std::future::pending().await,
+            if reading {
+                return std::future::pending().await;
             }
+            while !feed.wait_for_request().await.wait_until_nothing_else_runs().await {}
         };
         tokio::select! {
             r = &mut fut => return r,
             Ok(()) = tokio::signal::ctrl_c() => handle.interrupt(),
             () = input_needed => {
                 if io.ended {
-                    io.stdin_feed.as_ref().expect("the REPL reads input only for its stdin feed").end();
+                    feed.end();
                 } else {
                     reading = true;
                 }
             }
             event = io.reader.script_line(), if reading => {
                 reading = false;
-                let feed = io.stdin_feed.as_ref().expect("the REPL reads input only for its stdin feed");
                 match event {
                     InputEvent::Line(line) => feed.send(line),
                     InputEvent::End => {

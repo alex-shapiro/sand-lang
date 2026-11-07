@@ -11,11 +11,10 @@ use tokio::io::{AsyncBufRead, AsyncRead, ReadBuf};
 use tokio::sync::Notify;
 
 /// A channel that supplies standard input from the host to scripts
-/// ([`crate::Config::stdin_feed`]). Terminal hosts wait for
-/// [`StdinFeed::wait_until_input_needed`] and forward input with
-/// [`StdinFeed::send`]. Interactive applications wait for
-/// [`StdinFeed::wait_for_request`] and respond to each [`StdinRequest`]. Clones
-/// share the same underlying stream.
+/// ([`crate::Config::stdin_feed`]). Hosts wait for
+/// [`StdinFeed::wait_for_request`], and stream input with [`StdinFeed::send`]
+/// or answer one read with [`StdinRequest::answer`]. Clones share the same
+/// underlying stream.
 #[derive(Clone)]
 pub struct StdinFeed {
     channel: Arc<StdinChannel>,
@@ -47,19 +46,19 @@ pub(crate) struct StdinChannel {
 #[derive(Default)]
 struct StdinChannelState {
     queue: VecDeque<QueuedInput>,
-    reads_started: u64,
+    reads_waited: u64,
     /// True if the engine has no runnable tasks or ready I/O.
     engine_idle: bool,
     /// The active read operation, once it has waited for input.
-    waiting_read: Option<WaitingRead>,
+    current_read: Option<CurrentRead>,
 }
 
 /// A read operation that has waited for input.
-struct WaitingRead {
+struct CurrentRead {
     id: StdinReadId,
     /// True if the read is currently waiting for input. Set to `false` when the
     /// read consumes queued input, and back to `true` if it waits again.
-    waiting: bool,
+    needs_input: bool,
     waker: Option<Waker>,
 }
 
@@ -103,17 +102,6 @@ impl StdinFeed {
         self.channel.push(QueuedInput { target: None, data: None, start: 0 });
     }
 
-    /// Returns `true` if a read is waiting for input and all other engine
-    /// tasks are idle.
-    pub fn needs_input(&self) -> bool {
-        self.channel.lock().needs_input()
-    }
-
-    /// Waits until [`StdinFeed::needs_input`] is `true`.
-    pub async fn wait_until_input_needed(&self) {
-        self.channel.wait_until(|state| state.needs_input().then_some(())).await;
-    }
-
     /// Waits until a read needs input, even if other tasks are running, and
     /// returns its [`StdinRequest`].
     pub async fn wait_for_request(&self) -> StdinRequest {
@@ -152,6 +140,26 @@ impl StdinRequest {
         let read = self.read;
         self.channel.wait_until(|state| (state.waiting_read_id() != Some(read)).then_some(())).await;
     }
+
+    /// Returns `true` if the read is still waiting and no other task of the
+    /// script can run.
+    pub fn nothing_else_runs(&self) -> bool {
+        let state = self.channel.lock();
+        state.engine_idle && state.waiting_read_id() == Some(self.read)
+    }
+
+    /// Waits until no other task of the script can run while the read waits,
+    /// as a host needs that shares a terminal with the script. Returns `false`
+    /// if the read closes first.
+    pub async fn wait_until_nothing_else_runs(&self) -> bool {
+        let read = self.read;
+        self.channel
+            .wait_until(|state| match state.waiting_read_id() {
+                Some(id) if id == read => state.engine_idle.then_some(true),
+                _ => Some(false),
+            })
+            .await
+    }
 }
 
 impl PartialEq for StdinRequest {
@@ -169,18 +177,14 @@ impl std::fmt::Debug for StdinRequest {
 }
 
 impl StdinChannelState {
-    fn needs_input(&self) -> bool {
-        self.engine_idle && self.waiting_read_id().is_some()
-    }
-
     /// Returns the ID of the read waiting for unqueued input, if any.
     fn waiting_read_id(&self) -> Option<StdinReadId> {
-        let read = self.waiting_read.as_ref().filter(|r| r.waiting)?;
+        let read = self.current_read.as_ref().filter(|r| r.needs_input)?;
         (!self.queue.iter().any(|input| input.is_for_read(Some(read.id)))).then_some(read.id)
     }
 
-    fn read_id(&self) -> Option<StdinReadId> {
-        self.waiting_read.as_ref().map(|r| r.id)
+    fn current_read_id(&self) -> Option<StdinReadId> {
+        self.current_read.as_ref().map(|r| r.id)
     }
 }
 
@@ -221,7 +225,7 @@ impl StdinChannel {
     }
 
     fn notify(&self, mut state: MutexGuard<'_, StdinChannelState>) {
-        let waker = state.waiting_read.as_mut().and_then(|r| r.waker.take());
+        let waker = state.current_read.as_mut().and_then(|r| r.waker.take());
         drop(state);
         if let Some(waker) = waker {
             waker.wake();
@@ -302,11 +306,11 @@ impl ActiveStdinRead<'_> {
         let r = &mut *self.reader;
         if r.at == r.buf.len() && !r.ended {
             let mut state = r.channel.lock();
-            let read = state.read_id();
+            let read = state.current_read_id();
             let next = state.queue.iter().position(|input| input.is_for_read(read));
             if let Some(input) = next.and_then(|i| state.queue.remove(i)) {
-                if let Some(read) = &mut state.waiting_read {
-                    read.waiting = false;
+                if let Some(read) = &mut state.current_read {
+                    read.needs_input = false;
                 }
                 r.buf_target = input.target;
                 match input.data {
@@ -327,7 +331,7 @@ impl Drop for ActiveStdinRead<'_> {
             if target.is_none() && start < unread.len() {
                 state.queue.push_front(QueuedInput { target: None, data: Some(unread), start });
             }
-            let Some(read) = state.waiting_read.take() else { return };
+            let Some(read) = state.current_read.take() else { return };
             state.queue.retain(|input| input.target != Some(read.id));
         });
     }
@@ -353,14 +357,14 @@ impl AsyncBufRead for ActiveStdinRead<'_> {
                 return Poll::Ready(Ok(&r.buf[r.at..]));
             }
             let mut state = this.reader.channel.lock();
-            let read = state.read_id();
+            let read = state.current_read_id();
             if !state.queue.iter().any(|input| input.is_for_read(read)) {
                 let id = read.unwrap_or_else(|| {
-                    state.reads_started += 1;
-                    StdinReadId(NonZeroU64::new(state.reads_started).expect("read count overflow"))
+                    state.reads_waited += 1;
+                    StdinReadId(NonZeroU64::new(state.reads_waited).expect("read count overflow"))
                 });
-                let read = state.waiting_read.get_or_insert(WaitingRead { id, waiting: true, waker: None });
-                read.waiting = true;
+                let read = state.current_read.get_or_insert(CurrentRead { id, needs_input: true, waker: None });
+                read.needs_input = true;
                 read.waker = Some(cx.waker().clone());
                 drop(state);
                 this.reader.channel.changed.notify_waiters();
