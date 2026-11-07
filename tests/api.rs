@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{TempDir, rt, run_with};
+use common::{TempDir, literal, rt, run_with};
 use jiff::civil::Date;
 use parking_lot::Mutex;
 use sandlang::engine::{Config, Engine, Error, LimitKind, Limits, MemorySink};
@@ -2216,8 +2216,8 @@ fn rule_policy_confines_paths() {
     std::os::unix::fs::symlink(dir.path().join("private/b.txt"), dir.path().join("public/link.txt")).unwrap();
 
     let policy = sandlang::policy::rules::RulePolicy::standard()
-        .allow_read(PathPattern::literal(dir.path().join("public")).unwrap())
-        .allow_write(PathPattern::literal(dir.path().join("public/sub")).unwrap());
+        .allow_read(literal(dir.path().join("public")))
+        .allow_write(literal(dir.path().join("public/sub")));
     let config = Config::new().policy(policy).cwd(dir.path());
     let src = r#"
 import fs
@@ -2249,8 +2249,8 @@ fn rule_policy_deny_overrides_allow() {
     dir.write("data/ok.txt", "ok");
     dir.write("data/secret/key.txt", "key");
     let policy = sandlang::policy::rules::RulePolicy::standard()
-        .allow_read(PathPattern::literal(dir.path().join("data")).unwrap())
-        .deny_read(PathPattern::literal(dir.path().join("data/secret")).unwrap());
+        .allow_read(literal(dir.path().join("data")))
+        .deny_read(literal(dir.path().join("data/secret")));
     let config = Config::new().policy(policy).cwd(dir.path());
     let (r, out, _) =
         run_src(config, "import fs\nprint(fs.read_text(\"data/ok.txt\").is_ok())\nprint(fs.read_text(\"data/secret/key.txt\").is_ok())");
@@ -2394,15 +2394,11 @@ fn unallowed_import_reports_the_missing_rule() {
         ),
         other => panic!("{other:?}"),
     }
-    let mut engine = Engine::new(
-        Config::new().policy(sandlang::policy::rules::RulePolicy::standard().allow_import(PathPattern::literal(&lib).unwrap())),
-    )
-    .unwrap();
+    let mut engine =
+        Engine::new(Config::new().policy(sandlang::policy::rules::RulePolicy::standard().allow_import(literal(&lib)))).unwrap();
     rt().block_on(engine.run_file(&main)).unwrap();
     let util = lib.join("util.sand");
-    let policy = sandlang::policy::rules::RulePolicy::standard()
-        .allow_import(PathPattern::literal(&lib).unwrap())
-        .prompt_import(PathPattern::literal(&util).unwrap());
+    let policy = sandlang::policy::rules::RulePolicy::standard().allow_import(literal(&lib)).prompt_import(literal(&util));
     let mut engine = Engine::new(Config::new().policy(policy)).unwrap();
     match rt().block_on(engine.run_file(&main)) {
         Err(Error::Compile(d)) => assert_eq!(

@@ -5,12 +5,11 @@
 
 mod common;
 
-use common::{TempDir, rt};
+use common::{TempDir, literal, rt};
 use sandlang::engine::{Config, Engine, Error, LimitKind, Limits, MemorySink};
 use sandlang::native::NativeModule;
 use sandlang::native::func::Later;
 use sandlang::platform::{Clock, ClockFuture, Instant, SystemTime, UNIX_EPOCH};
-use sandlang::policy::rules::PathPattern;
 use sandlang::policy::rules::RulePolicy;
 use sandlang::policy::{Capability, Decision, PromptAnswer};
 use sandlang::session::RESET_NOTE;
@@ -515,7 +514,7 @@ fn dropping_an_eval_future_leaves_a_usable_session() {
         if n.fetch_add(1, Ordering::SeqCst) == 0 { Box::pin(std::future::pending()) } else { Box::pin(async { PromptAnswer::AllowOnce }) }
     };
     // Imports are prompted for (only those under `elsewhere` would be allowed).
-    let rules = sandlang::policy::rules::RulePolicy::standard().allow_import(PathPattern::literal(dir.path().join("elsewhere")).unwrap());
+    let rules = sandlang::policy::rules::RulePolicy::standard().allow_import(literal(dir.path().join("elsewhere")));
     let policy = rules;
     let mut r = Repl::with(Config::new().policy(policy).prompter(prompter).module_root(dir.path()).cwd(dir.path()));
     let timeout = |r: &mut Repl, src: &str| {

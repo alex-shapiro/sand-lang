@@ -69,6 +69,11 @@ pub fn rt() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
 }
 
+/// A pattern for `path` and every path under it. Panics if `path` is relative.
+pub fn literal(path: impl AsRef<Path>) -> sandlang::policy::rules::PathPattern {
+    sandlang::policy::rules::PathPattern::literal(path).unwrap()
+}
+
 /// Runs `source` as `main.sand` in a fresh temp dir with an allow-all policy.
 pub fn run(source: &str) -> RunResult {
     run_with(source, |c| c)
