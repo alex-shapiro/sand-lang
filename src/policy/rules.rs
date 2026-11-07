@@ -67,7 +67,7 @@ impl From<AbsolutePath> for PathPattern {
 /// A path pattern for a file rule, such as `/data`, `/srv/**/*.log`, or `**/.env`.
 ///
 /// A rule for a path also applies to every path under it. Parse a wildcard pattern with
-/// [`str::parse`], or build a literal pattern with [`PathPattern::literal`] or
+/// [`str::parse`]. Build a literal pattern with [`PathPattern::literal`] or
 /// [`AbsolutePath`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PathPattern {
@@ -113,7 +113,7 @@ impl PathPattern {
 
 /// An environment variable name pattern for an `env` rule, such as `HOME`, `AWS_*`, or `*`.
 ///
-/// Parse a wildcard pattern with [`str::parse`], or build a literal pattern with
+/// Parse a wildcard pattern with [`str::parse`]. Build a literal pattern with
 /// [`NamePattern::exact`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct NamePattern(pub(crate) NameKind);
@@ -183,8 +183,8 @@ impl Transports {
 
 /// An HTTP request method for an `http` rule, such as `GET` or `M-SEARCH`.
 ///
-/// [`str::parse`] accepts the standard methods in any case and custom uppercase tokens
-/// made of ASCII letters, digits, `-`, and `_`.
+/// [`str::parse`] accepts standard methods in any case. It also accepts custom uppercase
+/// tokens made of ASCII letters, digits, `-`, and `_`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct HttpMethod(Cow<'static, str>);
 
@@ -263,7 +263,7 @@ impl Methods {
     }
 }
 
-/// The methods of a `net` rule, which controls every HTTP request to its hosts.
+/// Matches all HTTP methods for a `net` rule.
 static ALL_METHODS: Methods = Methods(None);
 
 /// A name or detail pattern for a custom capability rule.
@@ -303,7 +303,7 @@ pub(crate) enum RuleKind {
     Stdout,
     Stderr,
     TimeZone,
-    /// A custom capability rule: its names and its details.
+    /// A custom capability rule for a name and detail pattern.
     Custom(CustomMatch, CustomMatch),
 }
 

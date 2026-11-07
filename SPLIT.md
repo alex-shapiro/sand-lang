@@ -48,10 +48,10 @@ Source commits: `2c21305`, `003daed`, and the two documentation link fixes from
 
 ### 2. Typed policy builders
 
-`RulePolicy` builder methods take parsed pattern types instead of raw strings.
-The builder methods cannot fail. `PathPattern` rejects relative file paths to
-close issue 033. This changeset replaces the `bitflags` set `Transports` with an
-enum and removes the `bitflags` dependency.
+`RulePolicy` builder methods take validated pattern types instead of raw
+strings. `PathPattern` rejects relative file paths to close issue 033. This
+changeset replaces the `bitflags` set `Transports` with an enum. It also removes
+the `bitflags` dependency.
 
 Public types:
 
