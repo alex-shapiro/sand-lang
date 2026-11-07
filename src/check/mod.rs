@@ -6,7 +6,7 @@ mod docs;
 mod expr;
 mod fuse;
 pub(crate) mod help;
-pub mod pat;
+mod pat;
 pub mod persist;
 mod resources;
 pub mod traits;
