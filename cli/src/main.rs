@@ -460,10 +460,10 @@ async fn with_stdin_forwarded<T>(feed: &StdinFeed, run: impl Future<Output = T>)
 
 /// Sends the process's standard input to `feed` until it ends or fails. It
 /// reads the input only while a script read waits, so that a script that does
-/// not read does not take input from the terminal. Each read of the input
-/// waits for a script read, so a small buffer would make large inputs slow.
+/// not read does not take input from the terminal.
 async fn forward_stdin(feed: &StdinFeed) {
     use tokio::io::AsyncBufReadExt;
+    // Each fill waits for a script read, so a small buffer makes large inputs slow.
     let mut stdin = tokio::io::BufReader::with_capacity(256 << 10, tokio::io::stdin());
     loop {
         feed.wait_for_request().await;

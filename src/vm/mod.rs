@@ -64,13 +64,13 @@ const _: () = assert!(std::mem::size_of::<Ctl>() == std::mem::size_of::<usize>()
 const _: () = assert!(std::mem::size_of::<Result<Value, Ctl>>() == 16);
 const _: () = assert!(std::mem::size_of::<Result<Option<Value>, Ctl>>() == 16);
 
-/// Cause of task suspension, for purposes of counting
-/// or ignoring idle time against the wall-time limit.
+/// What a suspended task waits for. It decides whether idle time counts
+/// toward `max_wall_time`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WaitKind {
-    /// I/O operation or timer, counted.
+    /// An I/O operation or a timer. Idle time counts.
     Io,
-    /// User action, not counted.
+    /// A user action. Idle time does not count.
     User,
 }
 

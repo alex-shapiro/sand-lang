@@ -19,10 +19,10 @@ pub struct StdinFeed {
     channel: Arc<StdinChannel>,
 }
 
-/// A wait of a standard input read for host input. Respond to the wait with
-/// [`StdinRequest::answer`] or [`StdinRequest::dismiss`]. A request that
-/// closes stays closed: if the read takes part of a line and waits again, the
-/// new wait is a new request.
+/// A standard input read that waits for host input. Respond to it with
+/// [`StdinRequest::answer`] or [`StdinRequest::dismiss`]. Each wait gets its
+/// own request: if the read takes part of a line and waits again, the engine
+/// makes a new request.
 #[derive(Clone)]
 pub struct StdinRequest {
     channel: Arc<StdinChannel>,
