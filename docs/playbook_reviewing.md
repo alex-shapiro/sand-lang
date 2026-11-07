@@ -1,8 +1,8 @@
 # Playbook: Reviewing a Branch
 
-Review this branch's diff against main and issue fixes on this branch in order to converge it to PR-worthiness. Each iteration must review the full branch diff. Focus on product impact and system design.
+Review this branch's diff against main and issue fixes on this branch in order to converge it to PR-worthiness. Each iteration must audit the full branch diff. Focus on product impact and system design.
 
-## Review Criteria
+## Audit Criteria
 
 ### Product Impact
 
@@ -32,17 +32,17 @@ Commit each fix independently, with a concise description of the problem and the
 
 ## Communicating Tradeoffs
 
-If a review find a design problem where the best solution requires a significant product trade-off, write down the problem, potential solutions, and tradeoffs concisely in a standalone, short (short!), readable section of a docs/TRADEOFFS.md file. This doc will allow follow-up work to reference branch-specific, unresolved tradeoffs. After a tradeoff is resolved, remove it from the doc and write the decision and its reason in a commit message. A future reviewer can read the commit message to understand the tradeoff decision.
+If an audit finds a design problem where the best solution requires a significant product trade-off, write down the problem, potential solutions, and tradeoffs concisely in a standalone, short (short!), readable section of a docs/TRADEOFFS.md file. This doc will allow follow-up work to reference branch-specific, unresolved tradeoffs. After a tradeoff is resolved, remove it from the doc and write the decision and its reason in a commit message. A future auditor can read the commit message to understand the tradeoff decision.
 
 Merely documenting a design issue is less desirable than fixing it. If a tradeoff is weak or nonexistent, prefer to fix a design issue than to note it. But if you find that there is a significant tradeoff that would force changes to the nature of the product, it is better to note it in TRADEOFFS.md than to commando-fix it prior to my input. Breaking backwards compatibility is ok; a tradeoff must be a _real_ product or systemic tradeoff.
 
 ## Review Loop
 
-When you are done with all fixes, reviews, and notes, kick off another independent review cycle, again reviewing the full branch diff. Each iteration must have access to past fixes and tradeoff notes. Break the review loop if a review iteration finds no significant new design flaws that have not already been fixed or noted. If the loop continues past five iterations, break the loop and report remaining flaws to the user.
+When you are done with the audit, fixes, and notes, kick off another independent review cycle, again auditing the full branch diff. Each iteration must have access to past fixes and tradeoff notes. Break the review loop if an audit iteration finds no significant new flaws that have not already been fixed or noted. If the loop continues past five iterations, break the loop and report remaining flaws to the user.
 
 At the end of the review, report unresolved tradeoffs to the user. Move each unresolved tradeoff to TODO.md and delete TRADEOFFS.md.
 
-Approach each review iteration and fix from first principles; we control all repos and can make any changes necessary. If a suboptimal approach is being taken and you are justified in replacing it with a better alternative, do so.
+Approach each review iteration and each fix from first principles; we control all repos and can make any changes necessary. If a suboptimal approach is being taken and you are justified in replacing it with a better alternative, do so.
 
 Use sub-agents as necessary, especially to keep reviewers independent from fixers. If you use a sub-agent, ensure that it has sufficient context across restarts. Context: in the past, sub-agents have been killed and restarted with half context, resulting in suboptimal design and implementation.
 
@@ -62,7 +62,7 @@ Run autonomously until the task is complete.
 
 ## Copy Editing
 
-The best thinking and coding model is Claude Opus 5.5; however, it is also the worst writer. The model that performs best at writing is Gemini Argon 4. Thus, after the review is complete, you should attempt to call Gemini for copy editing.
+The best thinking and coding model is Claude Opus 5.5; however, it is also the worst writer. The model that performs best at writing is Gemini Argon 4. Thus, after the review loop is complete, you should attempt to call Gemini for copy editing.
 
 Check whether the environment contains the antigravity CLI `agy`. The CLI is available locally but not in a cloud-hosted sandbox. If `agy` is not available, tell the user and skip this step.
 
