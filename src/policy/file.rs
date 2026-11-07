@@ -166,7 +166,7 @@ fn quote_part(s: &str, first: bool) -> String {
 }
 
 fn quote(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "\\r"))
 }
 
 pub(crate) fn transport(word: &str) -> Option<Transports> {
@@ -266,7 +266,9 @@ fn lex_line(line: &str) -> Result<Line, (usize, String)> {
                             }
                             Some((j, '\\')) => match chars.next() {
                                 Some((_, e @ ('"' | '\\'))) => text.push(e),
-                                _ => return Err((column(i + 1 + j), "invalid escape in quotes: use \\\" or \\\\".into())),
+                                Some((_, 'n')) => text.push('\n'),
+                                Some((_, 'r')) => text.push('\r'),
+                                _ => return Err((column(i + 1 + j), "invalid escape in quotes: use \\\", \\\\, \\n, or \\r".into())),
                             },
                             Some((_, c)) => text.push(c),
                             None => return Err((column(i), "unterminated quotes".into())),
@@ -707,7 +709,7 @@ pub fn rule_for(cap: &Capability, allow: bool) -> Option<String> {
         Capability::Custom { name, detail } => format!("custom {} {}", quote_part(name, true), quote_part(detail, true)),
         Capability::NetAddr { .. } => return None,
     };
-    (!rule.contains(['\n', '\r'])).then(|| format!("{} {rule}", verb(decision)))
+    Some(format!("{} {rule}", verb(decision)))
 }
 
 impl fmt::Display for Rule {
@@ -1454,8 +1456,12 @@ allow http GET a.com tls"
         assert_eq!(rule_for(&plain, true).unwrap(), "allow net plaintext localhost:5432");
         assert_eq!(rule_for(&Capability::Stdout, true).as_deref(), Some("allow stdout"));
         assert_eq!(rule_for(&Capability::Stderr, false).as_deref(), Some("deny stderr"));
-        assert_eq!(rule_for(&Capability::FsRead(PathBuf::from("/tmp/a\nb")), true), None);
-        assert_eq!(rule_for(&Capability::Env("A\rB".into()), true), None);
+        let line_breaks = [Capability::FsRead(PathBuf::from("/tmp/a\nb")), Capability::Env("A\rB".into())];
+        assert_eq!(rule_for(&line_breaks[0], true).unwrap(), "allow read \"/tmp/a\\nb\"");
+        assert_eq!(rule_for(&line_breaks[1], true).unwrap(), "allow env \"A\\rB\"");
+        for cap in line_breaks {
+            assert_eq!(decide(&parse(&rule_for(&cap, true).unwrap()), cap), Allow);
+        }
         let p = parse(&rule_for(caps.last().unwrap(), true).unwrap());
         assert_eq!(decide(&p, Capability::NetListen("[::1]:22".parse().unwrap())), Prompt);
         let request = |method: &str| Capability::Http {
