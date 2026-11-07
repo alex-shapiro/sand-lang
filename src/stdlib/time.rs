@@ -1,4 +1,10 @@
-//! Implementation of the `time` standard library module.
+//! The `time` module, and the Rust types of its values.
+//!
+//! `time.Instant`, `time.PlainDateTime`, `time.PlainDate`, and `time.PlainTime`
+//! are [`jiff::Timestamp`], [`jiff::civil::DateTime`], [`jiff::civil::Date`],
+//! and [`jiff::civil::Time`]. A `duration` is a [`jiff::SignedDuration`]. The
+//! other `time` types are the types of this module, and its enums are in
+//! [`enums`].
 
 use crate::check::ModKind;
 use crate::native::convert::{HostError, IntoValue};
@@ -517,6 +523,7 @@ impl Difference for Date {
     }
 }
 
+/// The enums of the `time` module.
 pub mod enums {
     /// A calendar or clock unit, ordered from largest to smallest.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, crate::SandEnum)]

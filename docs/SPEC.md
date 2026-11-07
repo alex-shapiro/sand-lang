@@ -2186,6 +2186,10 @@ collects garbage and checks the memory limit after the call completes.
 | `HashSet<T>`, `BTreeSet<T>`                         | `Set<T>`                                               |
 | `Result<T, E>`                                      | `Result<T, Error>` or `T`, depending on `E`            |
 | `Never`                                             | `never`                                                |
+| `jiff::Timestamp`                                   | `time.Instant`                                         |
+| `jiff::civil::DateTime`                             | `time.PlainDateTime`                                   |
+| `jiff::civil::Date`                                 | `time.PlainDate`                                       |
+| `jiff::civil::Time`                                 | `time.PlainTime`                                       |
 | `sandlang::stdlib::json::Json`                      | `json.Json`                                            |
 | bound type `T`                                      | `T`, or `&T` for a borrowed object parameter           |
 | `Val<T>`                                            | `T`, passed as an uncopied heap handle                 |

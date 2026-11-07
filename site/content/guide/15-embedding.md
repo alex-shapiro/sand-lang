@@ -154,6 +154,10 @@ Sand infers the Sand function signature from the Rust parameter and return types
 | `HashMap<K, V>`, `BTreeMap<K, V>`, `IndexMap<K, V>`          | `[K: V]`                     |
 | `HashSet<T>`, `BTreeSet<T>`                                  | `Set<T>`                     |
 | `jiff::SignedDuration`                                       | `duration`                   |
+| `jiff::Timestamp`                                            | `time.Instant`               |
+| `jiff::civil::DateTime`                                      | `time.PlainDateTime`         |
+| `jiff::civil::Date`                                          | `time.PlainDate`             |
+| `jiff::civil::Time`                                          | `time.PlainTime`             |
 | `sandlang::stdlib::json::Json`                               | `json.Json`                  |
 | tuples of up to 8 elements                                   | tuples                       |
 | Rust enum with `#[derive(SandEnum)]`                         | matching Sand `enum`         |
@@ -161,7 +165,7 @@ Sand infers the Sand function signature from the Rust parameter and return types
 | `&T` (argument) or `T` (result) with `#[derive(SandObject)]` | opaque type `T`              |
 | `ValueType` `T` with `#[derive(SandValue)]`                  | opaque value type `T`        |
 
-`IndexMap` comes from the `indexmap` crate (version 2). `SignedDuration` and the other time types come from the `jiff` crate (version 0.2). To name these types, add these crates to the dependencies of your crate.
+`IndexMap` comes from the `indexmap` crate (version 2). The `jiff` types come from the `jiff` crate (version 0.2). To name these types, add these crates to the dependencies of your crate. The Rust types of the other `time` values are in `sandlang::stdlib::time`.
 
 The engine automatically exports registered functions that are not declared in `NativeModule::source` as `pub`, with default parameter names `arg1`, `arg2`, ... unless overridden by `params`. Registering a function as `"Type.name"` defines a method on `Type`; the method takes `self` if its first parameter has type `Type` (such as `Counter.add` below). Generic functions must be declared with `native fn` in `NativeModule::source`.
 

@@ -1,9 +1,5 @@
-//! Sandboxed file system abstraction over the host OS (`Fs::Host`, behind the
-//! `os` feature) and an in-memory file system ([`MemFs`]).
-//!
-//! Perform all script file and module-loading I/O through `Fs` on a worker
-//! thread (`Vm::offload`). Do not call path-based `std::fs` or `tokio::fs`
-//! functions on script paths.
+//! File systems that an engine gives to scripts: the host file system (with
+//! the `os` feature) or an in-memory file system, [`MemFs`].
 
 #[cfg(feature = "os")]
 mod host;

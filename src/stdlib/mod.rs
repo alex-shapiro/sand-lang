@@ -1,7 +1,5 @@
-//! The standard library: Sand declarations plus Rust natives.
-//!
-//! Each module `name` consists of `name.sand` (public declarations, docs and
-//! pure-Sand helpers) and `name.rs` (the natives, registered by name).
+//! The Sand standard library. An embedder uses the Rust types of three of its
+//! modules: [`json::Json`], the log sink of [`log`], and the values of [`time`].
 
 mod base64;
 pub(crate) mod core;

@@ -1,4 +1,5 @@
-//! The `log` module.
+//! The `log` module, and the [`LogSink`] that receives the records that
+//! scripts log.
 
 use crate::check::ModKind;
 use crate::native::NativeModule;
