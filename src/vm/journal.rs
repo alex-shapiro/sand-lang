@@ -73,36 +73,55 @@ pub struct Wait {
     /// outcome the journal records. `None` for a local operation, and in a
     /// run without a journal.
     pub(crate) op: Option<u64>,
-    /// How long the run may be suspended while the task waits. `None` if
-    /// the engine must wait.
-    pub(crate) park: Option<Park>,
-    /// What a parked host call waits for.
-    pub(crate) host_wait: Option<HostWait>,
+    pub(crate) parking: Parking,
     pub(crate) work: WaitWork,
 }
 
-/// What a parked host call waits for: the function and the tag that it
-/// gave ([`ParkedCall`]).
-pub(crate) struct HostWait {
-    pub function: Arc<str>,
-    pub tag: String,
+/// Whether the engine may suspend the run while an operation waits
+/// (SPEC §16.7).
+pub(crate) enum Parking {
+    /// The engine must wait for the operation.
+    Never,
+    /// A timer of a journaled run, which is due at this time.
+    Timer(SystemTime),
+    /// A parked call of host function `function`, with the tag that it
+    /// gave ([`ParkedCall`]).
+    Host { park: Park, function: Arc<str>, tag: String },
 }
 
-impl HostWait {
-    /// The call as a suspension lists it, if it parked with `park`.
-    pub fn parked(&self, park: Option<Park>) -> Option<ParkedCall> {
-        let wake_at = match park? {
+impl Parking {
+    /// How long the run may be suspended, if it may.
+    pub(crate) fn park(&self) -> Option<Park> {
+        match self {
+            Parking::Never => None,
+            Parking::Timer(t) => Some(Park::Until(*t)),
+            Parking::Host { park, .. } => Some(*park),
+        }
+    }
+
+    /// The host call as a suspension lists it, if this is one.
+    pub(crate) fn parked_call(&self) -> Option<ParkedCall> {
+        let Parking::Host { park, function, tag } = self else { return None };
+        let wake_at = match *park {
             Park::UntilResumed => None,
             Park::Until(t) => Some(t),
         };
-        Some(ParkedCall { function: self.function.to_string(), tag: self.tag.clone(), wake_at })
+        Some(ParkedCall { function: function.to_string(), tag: tag.clone(), wake_at })
     }
 }
 
+/// Whether an operation has effects outside the run.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Effects {
+    /// The operation has no effects outside the run.
+    Pure,
+    /// The journal is made durable before the operation starts.
+    External,
+}
+
 pub(crate) enum WaitWork {
-    /// The future runs, and its finisher gives the result. The journal is
-    /// flushed before it starts if it is `effectful`.
-    Run { fut: BoxFuture, effectful: bool },
+    /// The future runs, and its finisher gives the result.
+    Run { fut: BoxFuture, effects: Effects },
     /// Replay delivers the recorded outcome at its step, through the build
     /// function.
     Replay(BuildFn),
@@ -111,7 +130,7 @@ pub(crate) enum WaitWork {
 impl Wait {
     /// A wait for local operation `fut`: replay runs it again.
     pub(crate) fn local(fut: BoxFuture) -> Wait {
-        Wait { op: None, park: None, host_wait: None, work: WaitWork::Run { fut, effectful: false } }
+        Wait { op: None, parking: Parking::Never, work: WaitWork::Run { fut, effects: Effects::Pure } }
     }
 }
 
@@ -125,14 +144,11 @@ impl Ctl {
 /// The description of an operation whose outcome the journal records.
 pub(crate) struct OpSpec {
     pub kind: OpKind,
-    /// Whether the operation has effects outside the run: the journal is
-    /// flushed before it starts.
-    pub effectful: bool,
-    /// How long the run can be suspended while the operation waits, if it
-    /// can. A timer's comes from its wake time.
-    pub park: Option<Park>,
-    /// What the operation waits for, for a host call that parks.
-    pub host_wait: Option<HostWait>,
+    pub effects: Effects,
+    /// Whether the run may be suspended while the operation waits. A
+    /// timer's parking comes from its wake time, which only a journaled
+    /// run has.
+    pub parking: Parking,
     /// Fuel that the native spent before it started the operation.
     pub pre_fuel: u64,
     /// How long a timer waits.
@@ -172,8 +188,8 @@ impl Rerun {
             j.pos += 1;
             j.ops += 1;
         }
-        let park = self.wake.map(Park::Until).or(spec.park);
-        Live { op: Some(self.op), seq: Some(self.seq), wake: self.wake, park, host_wait: spec.host_wait, effectful: spec.effectful }
+        let parking = self.wake.map_or(spec.parking, Parking::Timer);
+        Live { op: Some(self.op), seq: Some(self.seq), wake: self.wake, parking, effects: spec.effects }
     }
 }
 
@@ -192,8 +208,8 @@ impl Fresh {
         let wake = spec.timer.map(|d| j.wall(&*vm.host.clock) + d);
         j.record(EntryData::Start(OpStart { kind: spec.kind, identity, pre_fuel: spec.pre_fuel, wake, label }));
         j.ops += 1;
-        let park = wake.map(Park::Until).or(spec.park);
-        Live { op: Some(op), seq: Some(seq), wake, park, host_wait: spec.host_wait, effectful: spec.effectful }
+        let parking = wake.map_or(spec.parking, Parking::Timer);
+        Live { op: Some(op), seq: Some(seq), wake, parking, effects: spec.effects }
     }
 }
 
@@ -218,7 +234,7 @@ pub(crate) struct Replayed {
 impl Replayed {
     /// The wait for the recorded outcome, which `build` turns into the result.
     pub fn wait(self, build: BuildFn) -> Ctl {
-        Ctl::wait(Wait { op: Some(self.op), park: None, host_wait: None, work: WaitWork::Replay(build) })
+        Ctl::wait(Wait { op: Some(self.op), parking: Parking::Never, work: WaitWork::Replay(build) })
     }
 }
 
@@ -231,15 +247,14 @@ pub(crate) struct Live {
     pub seq: Option<u64>,
     /// When a timer expires.
     pub wake: Option<SystemTime>,
-    park: Option<Park>,
-    host_wait: Option<HostWait>,
-    effectful: bool,
+    parking: Parking,
+    effects: Effects,
 }
 
 impl Live {
     /// An operation of a run without a journal.
     fn unjournaled(spec: OpSpec) -> Live {
-        Live { op: None, seq: None, wake: None, park: spec.park, host_wait: spec.host_wait, effectful: spec.effectful }
+        Live { op: None, seq: None, wake: None, parking: spec.parking, effects: spec.effects }
     }
 
     /// The wait for `fut`. Without a journal, the program gets the outcome
@@ -263,7 +278,7 @@ impl Live {
                 }) as Finisher
             }),
         };
-        Ctl::wait(Wait { op: self.op, park: self.park, host_wait: self.host_wait, work: WaitWork::Run { fut, effectful: self.effectful } })
+        Ctl::wait(Wait { op: self.op, parking: self.parking, work: WaitWork::Run { fut, effects: self.effects } })
     }
 }
 
@@ -305,8 +320,7 @@ impl Outcome for Expired {
 /// journal records its wake time, and replay delivers its expiry without
 /// waiting.
 pub(crate) fn sleep(vm: &mut Vm, d: Duration) -> Ctl {
-    let spec =
-        OpSpec { kind: OpKind::Timer, effectful: false, park: Some(Park::UntilResumed), host_wait: None, pre_fuel: 0, timer: Some(d) };
+    let spec = OpSpec { kind: OpKind::Timer, effects: Effects::Pure, parking: Parking::Never, pre_fuel: 0, timer: Some(d) };
     let describe = |_: &Vm| {
         let identity = Identity::default().add(&d.as_nanos().to_le_bytes()).finish();
         Ok((identity, format!("sleep {}", crate::vm::display::fmt_duration(d.as_nanos().min(i64::MAX as u128) as i64))))
@@ -347,12 +361,12 @@ pub(crate) fn sleep(vm: &mut Vm, d: Duration) -> Ctl {
 /// `args` (SPEC §16.7). In replay, returns its recorded result without
 /// calling it. The future of an effectful function starts only once the
 /// journal, with the call's `Start` entry, is durable.
-pub(crate) fn journaled_call(vm: &mut Vm, call: Call, inner: &super::HostFn, name: &Arc<str>, effectful: bool, args: &[Value]) -> NResult {
+pub(crate) fn journaled_call(vm: &mut Vm, call: Call, inner: &super::HostFn, name: &Arc<str>, effects: Effects, args: &[Value]) -> NResult {
     // A journaled function reads no journal input (it has no `Call`), so
     // the entry that the call records or replays is the next one.
     let call = Call { seq: vm.journal_state().map(|j| j.position()), ..call };
     let inner = |vm: &mut Vm| inner.call(vm, call, args);
-    let spec = |pre_fuel: u64, (park, host_wait): Parking| OpSpec { kind: OpKind::Call, effectful, park, host_wait, pre_fuel, timer: None };
+    let spec = |pre_fuel: u64, parking: Parking| OpSpec { kind: OpKind::Call, effects, parking, pre_fuel, timer: None };
     let run = |live: Live, fin: BoxFuture| {
         let label = name.clone();
         live.run(async move { Box::new(CallOutcome { fin: fin.await, label }) as Box<dyn Outcome> }, Box::new(payload_outcome))
@@ -378,7 +392,7 @@ pub(crate) fn journaled_call(vm: &mut Vm, call: Call, inner: &super::HostFn, nam
                 Err(r) => {
                     let payload = outcome_payload(vm, r, name)?.to_payload();
                     let ready: Finisher = Box::new(move |vm: &mut Vm| payload_outcome(vm, &payload));
-                    (Box::pin(std::future::ready(ready)) as BoxFuture, (None, None))
+                    (Box::pin(std::future::ready(ready)) as BoxFuture, Parking::Never)
                 }
             };
             Err(run(rerun.start(vm, spec(pre_fuel, parking)), fin))
@@ -400,17 +414,13 @@ pub(crate) fn journaled_call(vm: &mut Vm, call: Call, inner: &super::HostFn, nam
     }
 }
 
-/// How a waiting host call parks: how long the run may be suspended, and
-/// what the call waits for.
-type Parking = (Option<Park>, Option<HostWait>);
-
 /// The future that the result `r` of a call of host function `name` asks
 /// the task to wait for, and how the call parks. Gives back any other
 /// result.
 fn waiting(r: NResult, name: &Arc<str>) -> Result<(BoxFuture, Parking), NResult> {
     match r.map_err(Ctl::into_kind) {
-        Err(CtlKind::Request(Request::Async(fut))) => Ok((fut, (None, None))),
-        Err(CtlKind::Request(Request::Parked(fut, park, tag))) => Ok((fut, (Some(park), Some(HostWait { function: name.clone(), tag })))),
+        Err(CtlKind::Request(Request::Async(fut))) => Ok((fut, Parking::Never)),
+        Err(CtlKind::Request(Request::Parked(fut, park, tag))) => Ok((fut, Parking::Host { park, function: name.clone(), tag })),
         r => Err(r.map_err(Ctl::new)),
     }
 }

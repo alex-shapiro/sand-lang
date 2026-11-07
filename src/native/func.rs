@@ -2,6 +2,7 @@
 
 use super::convert::{Conversion, FromValue, HostError, IntoValue};
 use super::ty::{JournalArg, JournalData, SandType, Type};
+use crate::vm::journal::Effects;
 use crate::vm::value::Value;
 use crate::vm::{BoxFuture, Ctl, Finisher, HostFn, NResult, NativeFn, Vm};
 use std::future::Future;
@@ -335,12 +336,12 @@ where
         F::signature()
     }
     fn into_host(self, key: &Arc<str>) -> Box<NativeFn> {
-        journaled(self.0.into_host(key), key, false)
+        journaled(self.0.into_host(key), key, Effects::Pure)
     }
 }
 
 macro_rules! journaled_impls {
-    ($($wrapper:ident: $effectful:literal $(, $ret:path)?);*) => {$(
+    ($($wrapper:ident: $effects:expr $(, $ret:path)?);*) => {$(
         impl<M, F: VmFunction<M, CallParam: JournaledCallParam>> VmFunction<M> for $wrapper<F>
         where
             F::Args: JournalArgs,
@@ -354,7 +355,7 @@ macro_rules! journaled_impls {
                 F::signature()
             }
             fn into_host(self, key: &Arc<str>) -> Box<NativeFn> {
-                journaled(self.0.into_host(key), key, $effectful)
+                journaled(self.0.into_host(key), key, $effects)
             }
         }
 
@@ -369,19 +370,19 @@ macro_rules! journaled_impls {
                 F::signature()
             }
             fn into_host(self, key: &Arc<str>) -> Box<NativeFn> {
-                journaled(self.0.into_host(key), key, $effectful)
+                journaled(self.0.into_host(key), key, $effects)
             }
         }
     )*};
 }
-journaled_impls!(Journaled: false; Effectful: true, Deferred);
+journaled_impls!(Journaled: Effects::Pure; Effectful: Effects::External, Deferred);
 
 /// Wraps `inner`, registered under `key`, so that its calls go through the
 /// journal.
-fn journaled(inner: Box<NativeFn>, key: &Arc<str>, effectful: bool) -> Box<NativeFn> {
+fn journaled(inner: Box<NativeFn>, key: &Arc<str>, effects: Effects) -> Box<NativeFn> {
     let inner = HostFn::Shared(inner.into());
     let key = key.clone();
-    Box::new(move |vm: &mut Vm, call: Call, args: &[Value]| crate::vm::journal::journaled_call(vm, call, &inner, &key, effectful, args))
+    Box::new(move |vm: &mut Vm, call: Call, args: &[Value]| crate::vm::journal::journaled_call(vm, call, &inner, &key, effects, args))
 }
 
 /// Deferred result returned by a [`VmFunction`] that may suspend the calling

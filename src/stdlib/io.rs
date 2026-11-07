@@ -10,7 +10,7 @@ use crate::native::{NativeModule, NativeObject, ObjectType};
 use crate::policy::Capability;
 use crate::stdlib::core::Error;
 use crate::vm::iomem::Reservation;
-use crate::vm::journal::{Begun, BuildFn, Identity, OpSpec, Outcome, Payload, Ready, Whole};
+use crate::vm::journal::{Begun, BuildFn, Effects, Identity, OpSpec, Outcome, Parking, Payload, Ready, Whole};
 use crate::vm::value::{Obj, Value, to_usize_saturating, u64_to_usize_saturating};
 use crate::vm::{Ctl, StdinSource, Vm};
 use std::collections::BTreeMap;
@@ -149,7 +149,7 @@ fn read_stdin<R: IntoValue + Send + 'static>(
         let read = StdinRead::from_payload(payload).ok_or_else(|| Ctl::internal("a journaled read of standard input is malformed"))?;
         read.map_err(HostError::from).and_then(|data| done(vm, data)).into_value(vm)
     });
-    let spec = OpSpec { kind: OpKind::Stdin, effectful: false, park: None, host_wait: None, pre_fuel: 0, timer: None };
+    let spec = OpSpec { kind: OpKind::Stdin, effects: Effects::Pure, parking: Parking::Never, pre_fuel: 0, timer: None };
     Err(match vm.begin_op(spec, describe)? {
         Begun::Replayed(r) => r.wait(build),
         Begun::Live(live) => live.run(

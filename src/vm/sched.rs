@@ -1,7 +1,7 @@
 //! The task scheduler: runs fibers round-robin and drives pending I/O.
 
 use super::interp::Exit;
-use super::journal::{Due, HostWait, Wait, WaitWork};
+use super::journal::{Due, Effects, Parking, Wait, WaitWork};
 use super::*;
 use crate::engine::LimitKind;
 use crate::journal::{ParkedCall, Suspension};
@@ -59,11 +59,7 @@ struct IoOp {
     fid: u32,
     wgen: u64,
     fut: BoxFuture,
-    /// How long the run may be suspended while the operation waits, if it
-    /// may (journaled timers and parked host calls).
-    park: Option<Park>,
-    /// What the operation waits for, if it is a parked host call.
-    host_wait: Option<HostWait>,
+    parking: Parking,
 }
 
 /// The pending I/O operations of a VM, in slots (an operation's id is its
@@ -84,14 +80,7 @@ impl IoTable {
 
     /// Adds the operation `fut` of task `fid` (waiting as `wgen`), polling
     /// it once: returns its id, or its result if it is done already.
-    pub(crate) fn add(
-        &mut self,
-        fid: u32,
-        wgen: u64,
-        mut fut: BoxFuture,
-        park: Option<Park>,
-        host_wait: Option<HostWait>,
-    ) -> Result<u64, Finisher> {
+    pub(crate) fn add(&mut self, fid: u32, wgen: u64, mut fut: BoxFuture, parking: Parking) -> Result<u64, Finisher> {
         let slot = match self.free.pop() {
             Some(s) => s,
             None => {
@@ -105,7 +94,7 @@ impl IoTable {
             self.free.push(slot);
             return Err(fin);
         }
-        self.ops[slot as usize] = Some(IoOp { fid, wgen, fut, park, host_wait });
+        self.ops[slot as usize] = Some(IoOp { fid, wgen, fut, parking });
         self.pending += 1;
         Ok(u64::from(slot))
     }
@@ -125,7 +114,7 @@ impl IoTable {
 
     /// The host calls that parked and wait.
     fn parked_calls(&self) -> Vec<ParkedCall> {
-        self.ops.iter().flatten().filter_map(|op| op.host_wait.as_ref()?.parked(op.park)).collect()
+        self.ops.iter().flatten().filter_map(|op| op.parking.parked_call()).collect()
     }
 
     /// How long the run may be suspended while every pending operation
@@ -133,7 +122,7 @@ impl IoTable {
     /// if one of them does not let the run be suspended.
     fn park(&self) -> Option<Park> {
         self.ops.iter().flatten().try_fold(Park::UntilResumed, |park, op| {
-            Some(match (park, op.park?) {
+            Some(match (park, op.parking.park()?) {
                 (Park::Until(a), Park::Until(b)) => Park::Until(a.min(b)),
                 (Park::Until(t), _) | (_, Park::Until(t)) => Park::Until(t),
                 _ => Park::UntilResumed,
@@ -372,23 +361,23 @@ impl Vm {
         f.state = FiberState::Waiting;
         f.jop = wait.op;
         self.fibers[fid as usize] = Some(f);
-        let (fut, effectful) = match wait.work {
+        let (fut, effects) = match wait.work {
             WaitWork::Replay(build) => {
                 if let (Some(op), Some(mut j)) = (wait.op, self.journal_state()) {
                     j.replayed.insert(op, (fid, g, super::journal::Replaying::Recorded(build)));
                 }
                 return Ok(());
             }
-            WaitWork::Run { fut, effectful } => (fut, effectful),
+            WaitWork::Run { fut, effects } => (fut, effects),
         };
         // The journal holds the operation's `Start` entry. Making it durable
         // with the inputs before it gives the effect the same sequence
         // number in a resumed run, whatever completions that run delivers
         // first.
-        if effectful && self.must_flush() {
+        if effects == Effects::External && self.must_flush() {
             self.flush_journal().await?;
         }
-        let added = self.io.add(fid, g, fut, wait.park, wait.host_wait);
+        let added = self.io.add(fid, g, fut, wait.parking);
         match added {
             Ok(io) => {
                 if let Some(f) = self.fibers[fid as usize].as_mut() {

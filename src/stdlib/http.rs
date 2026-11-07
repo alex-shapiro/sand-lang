@@ -23,7 +23,7 @@ use crate::policy::Policy;
 use crate::stdlib::core::Error;
 use crate::vm::Vm;
 use crate::vm::iomem::{Reservation, ResourceSlot};
-use crate::vm::journal::{Begun, BuildFn, EncodeFn, OpSpec, Outcome, Payload};
+use crate::vm::journal::{Begun, BuildFn, Effects, EncodeFn, OpSpec, Outcome, Parking, Payload};
 use jiff::SignedDuration;
 use std::future::Future;
 use std::pin::Pin;
@@ -627,7 +627,7 @@ fn send(
     vm.charge_bytes(body.len())?;
     let max_body = vm.host.limits.max_http_body;
     let build = recorded_response(req.text.clone(), max_body);
-    let spec = OpSpec { kind: OpKind::Http, effectful: true, park: None, host_wait: None, pre_fuel: 0, timer: None };
+    let spec = OpSpec { kind: OpKind::Http, effects: Effects::External, parking: Parking::Never, pre_fuel: 0, timer: None };
     let live = match vm.begin_op(spec, |_| Ok(req.describe(&body)))? {
         Begun::Replayed(r) => return Err(r.wait(build).into()),
         Begun::Live(live) => live,

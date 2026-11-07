@@ -21,7 +21,7 @@ use crate::native::ty::Val;
 use crate::stdlib::core::Error;
 use crate::vm::Vm;
 use crate::vm::iomem::Reservation;
-use crate::vm::journal::{Begun, BuildFn, EncodeFn, OpSpec, Outcome, Payload};
+use crate::vm::journal::{Begun, BuildFn, Effects, EncodeFn, OpSpec, Outcome, Parking, Payload};
 use jiff::SignedDuration;
 use js_sys::{Array, Function, Object, Promise, Reflect, Uint8Array};
 use std::cell::{Cell, RefCell};
@@ -71,7 +71,7 @@ fn send(
     vm.charge_bytes(body.len())?;
     let max_body = vm.host.limits.max_http_body;
     let build = recorded_response(req.text.clone(), max_body);
-    let spec = OpSpec { kind: OpKind::Http, effectful: true, park: None, host_wait: None, pre_fuel: 0, timer: None };
+    let spec = OpSpec { kind: OpKind::Http, effects: Effects::External, parking: Parking::Never, pre_fuel: 0, timer: None };
     let live = match vm.begin_op(spec, |_| Ok(req.describe(&body)))? {
         Begun::Replayed(r) => return Err(r.wait(build).into()),
         Begun::Live(live) => live,
