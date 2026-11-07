@@ -525,7 +525,7 @@ impl JournalState {
     fn record(&mut self, data: EntryData) {
         self.len += 1;
         self.unflushed = true;
-        self.sink.record(Entry { kind: data.kind(), data: data.encode() });
+        self.sink.record(Entry::from(data));
     }
 
     pub fn flush(&mut self) -> Option<crate::journal::FlushFuture> {
@@ -544,18 +544,17 @@ pub(crate) fn start(
     origin: Instant,
     suspend_after: Option<Duration>,
     limits: &crate::engine::Limits,
-) -> Result<JournalState, Divergence> {
+) -> JournalState {
     let mut done = HashMap::new();
     let mut replay = Vec::new();
     for (i, e) in sink.replay().into_iter().enumerate() {
-        let seq = i as u64;
-        let data = e.decode().ok_or_else(|| Divergence { seq, message: format!("entry {i} is a malformed {} entry", e.kind.name()) })?;
+        let data = e.into_data();
         if let EntryData::Done(d) = &data {
             done.insert(d.op, i);
         }
         replay.push(data);
     }
-    Ok(JournalState {
+    JournalState {
         len: replay.len() as u64,
         sink,
         replay,
@@ -573,7 +572,7 @@ pub(crate) fn start(
         wall_floor: crate::platform::UNIX_EPOCH,
         suspend_after,
         live_memory: IoMemory::new(limits.max_memory, limits.max_open_resources),
-    })
+    }
 }
 
 impl JournalState {
@@ -620,11 +619,6 @@ impl Writer {
     pub fn str(&mut self, s: &str) -> &mut Self {
         self.bytes(s.as_bytes())
     }
-    /// Appends `b` without a length: the rest of the data.
-    pub fn raw(&mut self, b: &[u8]) -> &mut Self {
-        self.0.extend_from_slice(b);
-        self
-    }
 }
 
 /// Reads the fields a [`Writer`] wrote; `None` at a malformed field.
@@ -660,9 +654,6 @@ impl<'a> Reader<'a> {
     }
     pub fn str(&mut self) -> Option<&'a str> {
         std::str::from_utf8(self.bytes()?).ok()
-    }
-    pub fn rest(&mut self) -> &'a [u8] {
-        std::mem::take(&mut self.0)
     }
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
@@ -806,23 +797,26 @@ impl Identity {
 
 const MAX_DEPTH: usize = 256;
 
-mod tag {
-    pub const UNIT: u8 = 0;
-    pub const BOOL: u8 = 1;
-    pub const INT: u8 = 2;
-    pub const FLOAT: u8 = 3;
-    pub const DUR: u8 = 4;
-    pub const STR: u8 = 5;
-    pub const BYTES: u8 = 6;
-    pub const LIST: u8 = 7;
-    pub const MAP: u8 = 8;
-    pub const SET: u8 = 9;
-    pub const TUPLE: u8 = 10;
-    pub const STRUCT: u8 = 11;
-    pub const VARIANT: u8 = 12;
-    pub const RANGE: u8 = 13;
-    /// A value of a bound value type, in a call identity only.
-    pub const VALUE: u8 = 14;
+crate::journal::coded_enum! {
+    /// The kind of an encoded Sand value.
+    enum Tag {
+        Unit = 0;
+        Bool = 1;
+        Int = 2;
+        Float = 3;
+        Dur = 4;
+        Str = 5;
+        Bytes = 6;
+        List = 7;
+        Map = 8;
+        Set = 9;
+        Tuple = 10;
+        Struct = 11;
+        Variant = 12;
+        Range = 13;
+        /// A value of a bound value type, in a call identity only.
+        Value = 14;
+    }
 }
 
 fn struct_name(prog: &Program, id: u32) -> Option<String> {
@@ -863,79 +857,79 @@ fn encode_into(vm: &Vm, v: Value, w: &mut Writer, depth: usize, enc: Encoding) -
         return Err(format!("it takes more than {max} bytes"));
     }
     let variant = |w: &mut Writer, id: u32, fields: &[Value]| -> Result<(), String> {
-        w.u8(tag::VARIANT).u64(u64::from(id)).str(&variant_name(&vm.prog, id).unwrap_or_default()).u64(fields.len() as u64);
+        w.u8(Tag::Variant.code()).u64(u64::from(id)).str(&variant_name(&vm.prog, id).unwrap_or_default()).u64(fields.len() as u64);
         fields.iter().try_for_each(|&f| encode_into(vm, f, w, depth + 1, enc))
     };
     match v {
         Value::Unit => {
-            w.u8(tag::UNIT);
+            w.u8(Tag::Unit.code());
         }
         Value::Bool(b) => {
-            w.u8(tag::BOOL).u8(u8::from(b));
+            w.u8(Tag::Bool.code()).u8(u8::from(b));
         }
         Value::Int(i) => {
-            w.u8(tag::INT).i64(i);
+            w.u8(Tag::Int.code()).i64(i);
         }
         Value::Float(f) => {
-            w.u8(tag::FLOAT).u64(f.to_bits());
+            w.u8(Tag::Float.code()).u64(f.to_bits());
         }
         Value::Dur(d) => {
-            w.u8(tag::DUR).i64(d);
+            w.u8(Tag::Dur.code()).i64(d);
         }
         Value::Tag(id) => variant(w, id, &[])?,
         Value::Pair(a, b) => {
-            w.u8(tag::TUPLE).u64(2).u8(tag::INT).i64(i64::from(a)).u8(tag::INT).i64(b);
+            w.u8(Tag::Tuple.code()).u64(2).u8(Tag::Int.code()).i64(i64::from(a)).u8(Tag::Int.code()).i64(b);
         }
         Value::Uninit => return Err("it holds an uninitialized value".into()),
         Value::Obj(_) => match vm.heap.get(v) {
             Obj::Str(s) => {
-                w.u8(tag::STR).str(s);
+                w.u8(Tag::Str.code()).str(s);
             }
             Obj::Bytes(b) => {
-                w.u8(tag::BYTES).bytes(b);
+                w.u8(Tag::Bytes.code()).bytes(b);
             }
             Obj::List(items) => {
-                w.u8(tag::LIST).u64(items.len() as u64);
+                w.u8(Tag::List.code()).u64(items.len() as u64);
                 for &x in items {
                     encode_into(vm, x, w, depth + 1, enc)?;
                 }
             }
             Obj::Tuple(items) => {
-                w.u8(tag::TUPLE).u64(items.len() as u64);
+                w.u8(Tag::Tuple.code()).u64(items.len() as u64);
                 for &x in items.iter() {
                     encode_into(vm, x, w, depth + 1, enc)?;
                 }
             }
             Obj::Map(m) => {
-                w.u8(tag::MAP).u64(m.live as u64);
+                w.u8(Tag::Map.code()).u64(m.live as u64);
                 for &(k, x) in m.entries.iter().flatten() {
                     encode_into(vm, k, w, depth + 1, enc)?;
                     encode_into(vm, x, w, depth + 1, enc)?;
                 }
             }
             Obj::Set(s) => {
-                w.u8(tag::SET).u64(s.live as u64);
+                w.u8(Tag::Set.code()).u64(s.live as u64);
                 for &k in s.entries.iter().flatten() {
                     encode_into(vm, k, w, depth + 1, enc)?;
                 }
             }
             Obj::Struct(id, fields) => {
-                w.u8(tag::STRUCT).u64(u64::from(*id)).str(&struct_name(&vm.prog, *id).unwrap_or_default()).u64(fields.len() as u64);
+                w.u8(Tag::Struct.code()).u64(u64::from(*id)).str(&struct_name(&vm.prog, *id).unwrap_or_default()).u64(fields.len() as u64);
                 for &x in fields.iter() {
                     encode_into(vm, x, w, depth + 1, enc)?;
                 }
             }
             Obj::Variant(id, fields) => variant(w, *id, fields)?,
             Obj::Range(a, b, inclusive) => {
-                w.u8(tag::RANGE).i64(*a).i64(*b).u8(u8::from(*inclusive));
+                w.u8(Tag::Range.code()).i64(*a).i64(*b).u8(u8::from(*inclusive));
             }
             Obj::Value(x) if enc.values => {
                 let mut text = String::new();
                 x.write_text(&mut text);
-                w.u8(tag::VALUE).str(x.type_name()).str(&text);
+                w.u8(Tag::Value.code()).str(x.type_name()).str(&text);
             }
             Obj::Packed(t, bits) if enc.values => {
-                w.u8(tag::VALUE).str(t.name()).u64(bits[0]).u64(bits[1]);
+                w.u8(Tag::Value.code()).str(t.name()).u64(bits[0]).u64(bits[1]);
             }
             other => return Err(format!("it holds a value of kind {}", other.kind_name())),
         },
@@ -1006,63 +1000,63 @@ fn decode_from(vm: &mut Vm, r: &mut Reader<'_>, depth: usize, types: &mut Option
     let items = |vm: &mut Vm, r: &mut Reader<'_>, n: usize, types: &mut Option<HashMap<(bool, String), u32>>| -> Result<Vec<Value>, Ctl> {
         (0..n).map(|_| decode_from(vm, r, depth + 1, types)).collect()
     };
-    let t = r.u8().ok_or_else(malformed)?;
+    let t = Tag::from_code(r.u8().ok_or_else(malformed)?).ok_or_else(malformed)?;
     Ok(match t {
-        tag::UNIT => Value::Unit,
-        tag::BOOL => Value::Bool(r.u8().ok_or_else(malformed)? != 0),
-        tag::INT => Value::Int(r.i64().ok_or_else(malformed)?),
-        tag::FLOAT => Value::Float(f64::from_bits(r.u64().ok_or_else(malformed)?)),
-        tag::DUR => Value::Dur(r.i64().ok_or_else(malformed)?),
-        tag::STR => {
+        Tag::Unit => Value::Unit,
+        Tag::Bool => Value::Bool(r.u8().ok_or_else(malformed)? != 0),
+        Tag::Int => Value::Int(r.i64().ok_or_else(malformed)?),
+        Tag::Float => Value::Float(f64::from_bits(r.u64().ok_or_else(malformed)?)),
+        Tag::Dur => Value::Dur(r.i64().ok_or_else(malformed)?),
+        Tag::Str => {
             let s = r.str().ok_or_else(malformed)?;
             vm.short_str(s)
         }
-        tag::BYTES => {
+        Tag::Bytes => {
             let b = r.bytes().ok_or_else(malformed)?;
             vm.heap.new_bytes(b.to_vec())
         }
-        tag::LIST => {
+        Tag::List => {
             let n = count(r)?;
             let xs = items(vm, r, n, types)?;
             vm.heap.new_list(xs)
         }
-        tag::TUPLE => {
+        Tag::Tuple => {
             let n = count(r)?;
             let xs = items(vm, r, n, types)?;
             vm.heap.new_tuple(&xs)
         }
-        tag::MAP => {
+        Tag::Map => {
             let n = count(r)?;
             let xs = items(vm, r, 2 * n, types)?;
             let m = vm.heap.alloc(Obj::Map(Box::<MapObj>::default()));
             xs.chunks_exact(2).try_for_each(|kv| vm.map_insert(m, kv[0], kv[1]).map(drop))?;
             m
         }
-        tag::SET => {
+        Tag::Set => {
             let n = count(r)?;
             let xs = items(vm, r, n, types)?;
             let s = vm.heap.alloc(Obj::Set(Box::<SetObj>::default()));
             xs.iter().try_for_each(|&k| vm.set_add(s, k).map(drop))?;
             s
         }
-        tag::STRUCT | tag::VARIANT => {
+        Tag::Struct | Tag::Variant => {
             let id = r.u64().ok_or_else(malformed)?;
             let name = r.str().ok_or_else(malformed)?.to_string();
-            let id = resolve(vm, id, &name, t == tag::VARIANT, types)?;
+            let id = resolve(vm, id, &name, t == Tag::Variant, types)?;
             let n = count(r)?;
             let xs = items(vm, r, n, types)?;
-            if t == tag::VARIANT {
+            if t == Tag::Variant {
                 vm.heap.new_variant(id, &xs)
             } else {
                 let fields = vm.heap.boxed(&xs);
                 vm.heap.alloc(Obj::Struct(id, fields))
             }
         }
-        tag::RANGE => {
+        Tag::Range => {
             let (a, b, inclusive) = (r.i64().ok_or_else(malformed)?, r.i64().ok_or_else(malformed)?, r.u8().ok_or_else(malformed)?);
             vm.heap.alloc(Obj::Range(a, b, inclusive != 0))
         }
-        _ => return Err(malformed()),
+        Tag::Value => return Err(malformed()),
     })
 }
 

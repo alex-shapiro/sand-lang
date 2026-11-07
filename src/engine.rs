@@ -1617,8 +1617,7 @@ impl Engine {
         let Some(durable) = &self.config.durable else { return Ok(()) };
         vm.host.prompter = None;
         vm.host.always = Always::default();
-        let state = crate::vm::journal::start(durable.journal.clone(), self.config.clock.now(), durable.suspend_after, &self.config.limits)
-            .map_err(Trap::Diverged)?;
+        let state = crate::vm::journal::start(durable.journal.clone(), self.config.clock.now(), durable.suspend_after, &self.config.limits);
         vm.attach_journal(state, self.config.seed.is_some()).map_err(Trap::Diverged)
     }
 

@@ -767,7 +767,7 @@ print("\(a) \(c == 2 * n) \(flags)")
         );
     }
     assert_eq!(world.log.calls.load(Ordering::SeqCst), 2, "each host function ran once across record and replay");
-    let kinds: Vec<EntryKind> = journal.entries().iter().map(|e| e.kind).collect();
+    let kinds: Vec<EntryKind> = journal.entries().iter().map(|e| e.kind()).collect();
     assert_eq!(kinds, [EntryKind::Seed, EntryKind::Result, EntryKind::Start, EntryKind::Done]);
 }
 
@@ -806,15 +806,15 @@ fn entries_round_trip_through_bytes() {
     world.run(CONCURRENT, &journal);
     for e in journal.entries() {
         assert_eq!(Entry::from_bytes(&e.to_bytes()), Some(e.clone()));
-        assert_eq!(e.byte_len(), e.to_bytes().len());
-        assert!(e.decode().is_some(), "{e:?}");
-        assert!(!e.describe().starts_with("a malformed"), "{e:?}");
     }
     assert_eq!(Entry::from_bytes(&[]), None);
     assert_eq!(Entry::from_bytes(&[200, 2]), None);
-    let bad = Entry { kind: EntryKind::Start, data: vec![9] };
-    assert_eq!(bad.decode(), None);
-    assert_eq!(bad.describe(), "a malformed start entry");
+    // An entry whose data does not decode as its kind does not exist.
+    assert_eq!(Entry::from_bytes(&[EntryKind::Start.code(), 9]), None);
+    let wall = journal.entries().into_iter().find(|e| e.kind() == EntryKind::Wall).expect("the run reads the clock");
+    let mut start = wall.to_bytes();
+    start[0] = EntryKind::Start.code();
+    assert_eq!(Entry::from_bytes(&start), None);
 }
 
 #[test]
@@ -837,7 +837,7 @@ fn operations_pair_starts_with_their_ends() {
     assert_eq!(statuses, [200, 404]);
     assert!(ops.iter().all(|o| o.start.kind == OpKind::Http && !o.cancelled()));
     let mut entries = journal.entries();
-    let done = entries.iter().position(|e| e.kind == EntryKind::Done).unwrap();
+    let done = entries.iter().position(|e| e.kind() == EntryKind::Done).unwrap();
     entries.push(entries[done].clone());
     assert!(operations(&entries).unwrap_err().contains("a second time"));
 }
@@ -870,7 +870,7 @@ print(env.vars().len() > 0)
     assert!(r.is_ok(), "{r:?}");
     assert_eq!(out.contents(), plain.contents());
     // A line that is available is a synchronous input; a read that waits is an operation.
-    let kinds: Vec<EntryKind> = journal.entries().iter().map(|e| e.kind).collect();
+    let kinds: Vec<EntryKind> = journal.entries().iter().map(|e| e.kind()).collect();
     assert_eq!(kinds, [EntryKind::Result, EntryKind::Start, EntryKind::Done, EntryKind::Result, EntryKind::Result]);
     // Replay does not read the feed, which has nothing now.
     let empty = sandlang::feed::StdinFeed::new();
@@ -1158,7 +1158,7 @@ fn effects_have_the_same_sequence_number_in_every_execution() {
     let entries = journal.entries();
     for (_, seq) in &first {
         let seq = seq.expect("a journaled call has a sequence number") as usize;
-        assert!(matches!(entries[seq].kind, EntryKind::Result | EntryKind::Start), "{:?}", entries[seq]);
+        assert!(matches!(entries[seq].kind(), EntryKind::Result | EntryKind::Start), "{:?}", entries[seq]);
     }
     let requests = filtered.lock().unwrap().clone();
     let http = operations(&entries).unwrap().into_iter().find(|o| o.start.kind == OpKind::Http).unwrap();
@@ -1294,7 +1294,7 @@ fn a_host_abort_ends_the_run_with_its_payload_and_is_not_journaled() {
         Err(Error::Aborted(a)) => assert_eq!(a.downcast_ref::<Outage>(), Some(&Outage(7))),
         other => panic!("expected an abort, got {other:?}"),
     }
-    assert!(journal.entries().iter().all(|e| e.kind != EntryKind::Done), "{:?}", journal.entries());
+    assert!(journal.entries().iter().all(|e| e.kind() != EntryKind::Done), "{:?}", journal.entries());
     // The resumed run calls the function again.
     let (r, out) = run();
     assert!(r.is_ok(), "{r:?}");
@@ -1445,7 +1445,7 @@ fn a_journaled_function_that_reads_the_clock_replays_with_the_same_sequence_numb
     let entries = journal.entries();
     let first = seqs.lock().unwrap().clone();
     let [Some(stamp), Some(later)] = first[..] else { panic!("{first:?}") };
-    assert_eq!((entries[stamp as usize].kind, entries[later as usize].kind), (EntryKind::Result, EntryKind::Start));
+    assert_eq!((entries[stamp as usize].kind(), entries[later as usize].kind()), (EntryKind::Result, EntryKind::Start));
     // Replay returns the recorded results without a call, also when the host's clock moved.
     clock.advance(Duration::from_secs(100));
     let (r, again) = run(&MemoryJournal::with_entries(entries.clone()));
@@ -1467,10 +1467,10 @@ fn replay_reports_a_cancellation_that_the_journal_does_not_record_where_it_occur
     let recorded = world.run(&src("print(time.now().epoch_seconds() > 0)"), &journal);
     assert!(recorded.result.is_ok(), "{:?}", recorded.result);
     let mut entries = journal.entries();
-    let cancelled = entries.iter().position(|e| e.kind == EntryKind::Done).expect("the journal records the cancellation");
+    let cancelled = entries.iter().position(|e| e.kind() == EntryKind::Done).expect("the journal records the cancellation");
     // The journal records the cancellation after the clock reading that follows it.
     entries.swap(cancelled, cancelled + 1);
-    assert_eq!(entries[cancelled].kind, EntryKind::Wall);
+    assert_eq!(entries[cancelled].kind(), EntryKind::Wall);
     // The run reads nothing after the cancellation, so only the cancellation can report it.
     let r = world.run(&src("print(1)"), &MemoryJournal::with_entries(entries)).result;
     assert!(
@@ -1505,7 +1505,7 @@ fn a_resumed_call_that_runs_again_after_a_collection_consumes_its_start_once() {
     assert!(r.is_ok(), "{r:?}");
     assert_eq!(out, "30\n");
     let entries = journal.entries();
-    let second = entries.iter().rposition(|e| e.kind == EntryKind::Start).unwrap();
+    let second = entries.iter().rposition(|e| e.kind() == EntryKind::Start).unwrap();
     let before = calls.load(Ordering::SeqCst);
     let (r, resumed) = run(&MemoryJournal::with_entries(entries[..=second].to_vec()));
     assert!(r.is_ok(), "{r:?}");

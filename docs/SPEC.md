@@ -2387,12 +2387,14 @@ The `sandlang::journal` module defines the interface. The engine calls
 executions. Replay needs every entry before the run starts: when the run
 starts an operation, the engine replays it only if a later entry records its
 end. The engine calls `Journal::record` for each new entry and
-`Journal::flush` to make the entries durable. An `Entry` has an `EntryKind`
-and `data` in an encoding that the engine defines for each version of
-`sandlang`. The sequence number of an entry is its position in the journal,
-counted from 0; the entry does not store it. `Entry::to_bytes` and
-`Entry::from_bytes` convert an entry to bytes and back. `Entry::decode` gives
-the decoded data as an `EntryData`, and `Entry::describe` describes the entry.
+`Journal::flush` to make the entries durable. An `Entry` holds its
+`EntryData`; `Entry::kind` gives its `EntryKind`, `Entry::data` its data, and
+`Entry::describe` describes it. The sequence number of an entry is its
+position in the journal, counted from 0; the entry does not store it.
+`Entry::to_bytes` encodes an entry as bytes, in an encoding that the engine
+defines for each version of `sandlang`, and `Entry::from_bytes` decodes it.
+`Entry::from_bytes` refuses bytes that do not decode, so every entry that the
+engine replays is well formed.
 `journal::operations` pairs the `Start` and `Done` entries of each
 asynchronous operation, and `Operation::http` decodes the outcome of an HTTP
 request as an `HttpOutcome`: `Ok(HttpResponse { status, headers, body })`, or

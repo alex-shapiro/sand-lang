@@ -21,28 +21,47 @@ use std::time::Duration;
 /// One recorded input of a run.
 ///
 /// The sequence number of an entry is its position in the journal, from 0.
+/// A host stores an entry as its bytes ([`Entry::to_bytes`]), whose
+/// encoding is stable for one version of `sandlang`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Entry {
-    pub kind: EntryKind,
-    /// The engine's encoding of the input. It is stable for one version of
-    /// `sandlang`.
-    pub data: Vec<u8>,
-}
+pub struct Entry(EntryData);
 
-/// Declares a field-less enum with a one-byte code and a lowercase name for
-/// each variant. Each variant must have a code, and the compiler rejects a
-/// duplicate code.
+/// Declares a field-less enum with a one-byte code for each variant, and
+/// optionally a lowercase name. Each variant must have a code, and the
+/// compiler rejects a duplicate code.
 macro_rules! coded_enum {
     (
         $(#[$meta:meta])*
-        pub enum $name:ident {
+        $vis:vis enum $name:ident {
             $($(#[$vmeta:meta])* $variant:ident = $code:literal, $text:literal;)*
+        }
+    ) => {
+        coded_enum! {
+            $(#[$meta])*
+            $vis enum $name {
+                $($(#[$vmeta])* $variant = $code;)*
+            }
+        }
+
+        impl $name {
+            /// The name of the kind in lowercase.
+            pub fn name(self) -> &'static str {
+                match self {
+                    $($name::$variant => $text,)*
+                }
+            }
+        }
+    };
+    (
+        $(#[$meta:meta])*
+        $vis:vis enum $name:ident {
+            $($(#[$vmeta:meta])* $variant:ident = $code:literal;)*
         }
     ) => {
         $(#[$meta])*
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
         #[repr(u8)]
-        pub enum $name {
+        $vis enum $name {
             $($(#[$vmeta])* $variant = $code,)*
         }
 
@@ -57,13 +76,6 @@ macro_rules! coded_enum {
                 match code {
                     $($code => Some($name::$variant),)*
                     _ => None,
-                }
-            }
-
-            /// The name of the kind in lowercase.
-            pub fn name(self) -> &'static str {
-                match self {
-                    $($name::$variant => $text,)*
                 }
             }
         }
@@ -94,38 +106,48 @@ coded_enum! {
     }
 }
 
+pub(crate) use coded_enum;
+
+impl From<EntryData> for Entry {
+    fn from(data: EntryData) -> Entry {
+        Entry(data)
+    }
+}
+
 impl Entry {
-    /// Encodes the entry as bytes: the kind code (1 byte), then the data.
+    pub(crate) fn into_data(self) -> EntryData {
+        self.0
+    }
+
+    pub fn kind(&self) -> EntryKind {
+        self.0.kind()
+    }
+
+    /// What the entry records.
+    pub fn data(&self) -> &EntryData {
+        &self.0
+    }
+
+    /// Encodes the entry as bytes: the kind code (1 byte), then the
+    /// encoding of its data.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(self.byte_len());
-        out.push(self.kind.code());
-        out.extend_from_slice(&self.data);
-        out
+        let mut w = Writer::default();
+        w.u8(self.kind().code());
+        self.0.encode(&mut w);
+        w.0
     }
 
-    /// The length of [`Entry::to_bytes`].
-    pub fn byte_len(&self) -> usize {
-        1 + self.data.len()
-    }
-
-    /// Decodes an entry that [`Entry::to_bytes`] encoded.
+    /// Decodes an entry that [`Entry::to_bytes`] encoded, or returns `None`
+    /// if the bytes are malformed.
     pub fn from_bytes(bytes: &[u8]) -> Option<Entry> {
-        let (&kind, data) = bytes.split_first()?;
-        Some(Entry { kind: EntryKind::from_code(kind)?, data: data.to_vec() })
-    }
-
-    /// Decodes the data of the entry, or returns `None` if it is malformed.
-    pub fn decode(&self) -> Option<EntryData> {
-        EntryData::decode(self.kind, &self.data)
+        let (&code, data) = bytes.split_first()?;
+        EntryData::decode(EntryKind::from_code(code)?, data).map(Entry)
     }
 
     /// A short description of the entry for messages, such as
     /// ``the start of http `GET http://example.com/` ``.
     pub fn describe(&self) -> String {
-        match self.decode() {
-            Some(d) => d.describe(),
-            None => format!("a malformed {} entry", self.kind.name()),
-        }
+        self.0.describe()
     }
 }
 
@@ -210,7 +232,6 @@ pub enum OpEnd {
 
 /// The result of a synchronous journaled call ([`EntryKind::Result`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct CallResult {
     /// A hash of the call: the function and its arguments.
     pub identity: u64,
@@ -236,73 +257,37 @@ impl EntryData {
         }
     }
 
-    /// The bytes of an [`Entry`] of kind [`EntryData::kind`].
-    pub(crate) fn encode(&self) -> Vec<u8> {
-        let mut w = Writer::default();
+    /// Writes the data, without its kind.
+    fn encode(&self, w: &mut Writer) {
         match self {
             EntryData::Seed(s) => {
                 w.u64(*s);
             }
-            EntryData::Wall(t) => {
-                w.i128(nanos_of(*t));
-            }
+            EntryData::Wall(t) => t.encode(w),
             EntryData::Monotonic(d) => {
                 w.u64(d.as_nanos().min(u64::MAX as u128) as u64);
             }
             EntryData::Fuel { at, extra } => {
                 w.u64(*at).u64(*extra);
             }
-            EntryData::Start(s) => {
-                w.u8(s.kind.code()).u64(s.identity).u64(s.pre_fuel);
-                match s.wake {
-                    Some(t) => w.u8(1).i128(nanos_of(t)),
-                    None => w.u8(0),
-                };
-                w.str(&s.label);
-            }
-            EntryData::Done(d) => {
-                w.u64(d.op).u64(d.step).u64(d.fuel);
-                match &d.end {
-                    OpEnd::Completed(payload) => w.u8(0).raw(payload),
-                    OpEnd::Cancelled => w.u8(1),
-                };
-            }
-            EntryData::Result(r) => {
-                w.u64(r.identity).str(&r.label).u64(r.fuel).raw(&r.outcome);
-            }
+            EntryData::Start(s) => s.encode(w),
+            EntryData::Done(d) => d.encode(w),
+            EntryData::Result(r) => r.encode(w),
         }
-        w.0
     }
 
+    /// The data of an entry of `kind` that [`EntryData::encode`] wrote, or
+    /// `None` if it is malformed.
     fn decode(kind: EntryKind, data: &[u8]) -> Option<EntryData> {
         let mut r = Reader::new(data);
         let d = match kind {
             EntryKind::Seed => EntryData::Seed(r.u64()?),
-            EntryKind::Wall => EntryData::Wall(time_of(r.i128()?)),
+            EntryKind::Wall => EntryData::Wall(SystemTime::decode(&mut r)?),
             EntryKind::Monotonic => EntryData::Monotonic(Duration::from_nanos(r.u64()?)),
             EntryKind::Fuel => EntryData::Fuel { at: r.u64()?, extra: r.u64()? },
-            EntryKind::Start => {
-                let (kind, identity, pre_fuel) = (OpKind::from_code(r.u8()?)?, r.u64()?, r.u64()?);
-                let wake = match r.u8()? {
-                    0 => None,
-                    1 => Some(time_of(r.i128()?)),
-                    _ => return None,
-                };
-                EntryData::Start(OpStart { kind, identity, pre_fuel, wake, label: r.str()?.to_string() })
-            }
-            EntryKind::Done => {
-                let (op, step, fuel) = (r.u64()?, r.u64()?, r.u64()?);
-                let end = match r.u8()? {
-                    0 => OpEnd::Completed(r.rest().to_vec()),
-                    1 => OpEnd::Cancelled,
-                    _ => return None,
-                };
-                EntryData::Done(OpDone { op, step, fuel, end })
-            }
-            EntryKind::Result => {
-                let (identity, label, fuel) = (r.u64()?, r.str()?.to_string(), r.u64()?);
-                EntryData::Result(CallResult { identity, label, fuel, outcome: r.rest().to_vec() })
-            }
+            EntryKind::Start => EntryData::Start(OpStart::decode(&mut r)?),
+            EntryKind::Done => EntryData::Done(OpDone::decode(&mut r)?),
+            EntryKind::Result => EntryData::Result(CallResult::decode(&mut r)?),
         };
         r.is_empty().then_some(d)
     }
@@ -351,26 +336,85 @@ impl Operation {
     }
 }
 
+impl Payload for SystemTime {
+    fn encode(&self, w: &mut Writer) {
+        w.i128(nanos_of(*self));
+    }
+    fn decode(r: &mut Reader<'_>) -> Option<SystemTime> {
+        r.i128().map(time_of)
+    }
+}
+
+impl Payload for OpStart {
+    fn encode(&self, w: &mut Writer) {
+        w.u8(self.kind.code()).u64(self.identity).u64(self.pre_fuel);
+        self.wake.encode(w);
+        self.label.encode(w);
+    }
+    fn decode(r: &mut Reader<'_>) -> Option<OpStart> {
+        let (kind, identity, pre_fuel) = (OpKind::from_code(r.u8()?)?, r.u64()?, r.u64()?);
+        Some(OpStart { kind, identity, pre_fuel, wake: Option::decode(r)?, label: String::decode(r)? })
+    }
+}
+
+impl Payload for OpDone {
+    fn encode(&self, w: &mut Writer) {
+        w.u64(self.op).u64(self.step).u64(self.fuel);
+        self.end.encode(w);
+    }
+    fn decode(r: &mut Reader<'_>) -> Option<OpDone> {
+        let (op, step, fuel) = (r.u64()?, r.u64()?, r.u64()?);
+        Some(OpDone { op, step, fuel, end: OpEnd::decode(r)? })
+    }
+}
+
+impl Payload for OpEnd {
+    fn encode(&self, w: &mut Writer) {
+        match self {
+            OpEnd::Completed(payload) => {
+                w.u8(0);
+                payload.encode(w);
+            }
+            OpEnd::Cancelled => {
+                w.u8(1);
+            }
+        }
+    }
+    fn decode(r: &mut Reader<'_>) -> Option<OpEnd> {
+        match r.u8()? {
+            0 => Some(OpEnd::Completed(Vec::decode(r)?)),
+            1 => Some(OpEnd::Cancelled),
+            _ => None,
+        }
+    }
+}
+
+impl Payload for CallResult {
+    fn encode(&self, w: &mut Writer) {
+        w.u64(self.identity).str(&self.label).u64(self.fuel).bytes(&self.outcome);
+    }
+    fn decode(r: &mut Reader<'_>) -> Option<CallResult> {
+        let (identity, label, fuel) = (r.u64()?, String::decode(r)?, r.u64()?);
+        Some(CallResult { identity, label, fuel, outcome: Vec::decode(r)? })
+    }
+}
+
 /// The asynchronous operations that `entries` record, by id. Fails with a
-/// message if an entry does not decode or an operation ends twice or before
-/// it starts.
+/// message if an operation ends twice or before it starts.
 pub fn operations(entries: &[Entry]) -> Result<Vec<Operation>, String> {
     let mut out: Vec<Operation> = Vec::new();
     for (seq, e) in entries.iter().enumerate() {
-        if !matches!(e.kind, EntryKind::Start | EntryKind::Done) {
-            continue;
-        }
-        match e.decode() {
-            Some(EntryData::Start(start)) => out.push(Operation { id: out.len() as u64, seq: seq as u64, start, done: None }),
-            Some(EntryData::Done(done)) => {
+        match e.data() {
+            EntryData::Start(start) => out.push(Operation { id: out.len() as u64, seq: seq as u64, start: start.clone(), done: None }),
+            EntryData::Done(done) => {
                 let op = done.op;
                 let slot = out.get_mut(op as usize).ok_or_else(|| format!("entry {seq} ends operation {op}, which has not started"))?;
                 if slot.done.is_some() {
                     return Err(format!("entry {seq} ends operation {op} a second time"));
                 }
-                slot.done = Some(done);
+                slot.done = Some(done.clone());
             }
-            _ => return Err(format!("entry {seq} is malformed")),
+            _ => {}
         }
     }
     Ok(out)
