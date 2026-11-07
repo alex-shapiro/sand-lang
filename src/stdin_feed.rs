@@ -143,13 +143,6 @@ impl StdinRequest {
         self.channel.wait_until(|state| (state.open_wait() != Some(wait)).then_some(())).await;
     }
 
-    /// Returns `true` if the read is still waiting and no other task of the
-    /// script can run.
-    pub fn nothing_else_runs(&self) -> bool {
-        let state = self.channel.lock();
-        state.engine_idle && state.open_wait() == Some(self.wait)
-    }
-
     /// Waits until no other task of the script can run while the read waits,
     /// as a host needs that shares a terminal with the script. Returns `false`
     /// if the read closes first.

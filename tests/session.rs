@@ -989,7 +989,6 @@ fn read_is_awaited_while_other_tasks_run() {
     let (value, ()) = rt.block_on(async {
         let answer = async {
             let request = feed.wait_for_request().await;
-            assert!(!request.nothing_else_runs());
             assert!(request.answer("move\n"));
             assert!(!request.is_open());
         };
