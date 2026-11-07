@@ -5,8 +5,9 @@
 //! live in a thread-local table and the sinks and prompters hold their key.
 
 use js_sys::Function;
-use sandlang::policy::format_host_port;
-use sandlang::{Capability, OutputSink, PromptAnswer, Prompter};
+use sandlang::policy::net::format_host_port;
+use sandlang::policy::{Capability, PromptAnswer, Prompter};
+use sandlang::vm::OutputSink;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
@@ -121,7 +122,7 @@ impl Prompter for JsPrompter {
             // host, ...; empty for standard streams), the request in words, and
             // the policy rules that answer it from now on ("always" and "never").
             let (kind, target) = describe(&cap);
-            let rule = |allow| sandlang::policy::rule_for(&cap, allow).map_or(JsValue::UNDEFINED, JsValue::from);
+            let rule = |allow| sandlang::policy::file::rule_for(&cap, allow).map_or(JsValue::UNDEFINED, JsValue::from);
             let request = crate::object(&[
                 ("kind", kind.into()),
                 ("target", target.into()),

@@ -2,7 +2,9 @@
 
 use super::stream::{self, IoFailure, Suspended, bytes_read, line_read};
 use super::uri;
-use crate::native::{HostError, IntoValue, NativeModule, NativeObject, Val};
+use crate::native::convert::{HostError, IntoValue};
+use crate::native::ty::Val;
+use crate::native::{NativeModule, NativeObject};
 use crate::vm::WaitKind;
 use crate::vm::iomem::Reservation;
 use crate::vm::value::to_usize_saturating;

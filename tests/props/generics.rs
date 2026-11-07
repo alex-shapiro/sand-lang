@@ -14,7 +14,7 @@
 
 use super::{Mode, int_lit, run_modes, str_lit};
 use proptest::prelude::*;
-use sandlang::{Config, Engine, Error};
+use sandlang::engine::{Config, Engine, Error};
 use std::cmp::Ordering;
 
 struct Rng(u64);
@@ -709,7 +709,7 @@ fn generate(seed: u64) -> (Case, Vec<(String, String)>) {
 
 /// Returns the compile error messages for `src`, or `None` if `src` compiles.
 fn compile_errors(src: &str) -> Option<Vec<String>> {
-    let engine = Engine::new(Config::new().policy(sandlang::RulePolicy::standard())).unwrap();
+    let engine = Engine::new(Config::new().policy(sandlang::policy::rules::RulePolicy::standard())).unwrap();
     match engine.check_source("main.sand", src) {
         Ok(()) => None,
         Err(Error::Compile(ds)) => Some(ds.into_iter().map(|d| d.message).collect()),

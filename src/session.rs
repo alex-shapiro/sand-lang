@@ -35,8 +35,9 @@ use std::task::Poll;
 /// executes in the context of earlier inputs.
 ///
 /// ```no_run
-/// # async fn demo() -> Result<(), sandlang::Error> {
-/// use sandlang::{Config, Session};
+/// # async fn demo() -> Result<(), sandlang::engine::Error> {
+/// use sandlang::engine::Config;
+/// use sandlang::session::Session;
 /// let mut session = Session::new(Config::new())?;
 /// session.eval("var count = 0\nfn bump() -> int { count += 1\n count }").await?;
 /// assert_eq!(session.eval("bump()").await?, Some("1".to_string()));
@@ -172,7 +173,7 @@ impl Session {
         st.graph.rollback(&mark);
         on_compile_stack(move || {
             let resolve = |ds: &[Diag]| Error::Compile(ds.iter().map(|d| sm.resolve(d)).collect());
-            let res = crate::syntax::parse_module(&expr, file);
+            let res = crate::syntax::parser::parse_module(&expr, file);
             let mut errors = res.errors;
             let is_expr = matches!(res.module.items.as_slice(), [item] if matches!(&item.kind, ItemKind::Stmt(s) if matches!(s.kind, StmtKind::Expr(_))));
             if errors.is_empty() && !is_expr {
@@ -284,7 +285,7 @@ impl Session {
     /// so that they do not compete with the front end for its input; no
     /// script code runs while one waits. A front end that reads the
     /// process's standard input should pass it on through a
-    /// [`crate::StdinFeed`].
+    /// [`crate::stdin_feed::StdinFeed`].
     ///
     /// If a task fails with an error, exceeds a limit or is interrupted, every task is
     /// cancelled (as after a failed input), the error is passed to `on_error`
@@ -419,7 +420,7 @@ impl Session {
             name: SESSION_MODULE.into(),
             file,
             source: graph.sm.file(file).clone(),
-            ast: crate::syntax::parse_module("", file).module,
+            ast: crate::syntax::parser::parse_module("", file).module,
             comments: Vec::new(),
             kind: ModKind::Script { main: true },
             imports: HashMap::new(),

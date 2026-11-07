@@ -65,7 +65,7 @@ impl Type {
     }
 
     pub fn error() -> Type {
-        <crate::stdlib::Error as SandType>::sand_type()
+        <crate::stdlib::core::Error as SandType>::sand_type()
     }
 
     pub(crate) fn visit(&self, f: &mut impl FnMut(&Type)) {
@@ -220,13 +220,13 @@ impl<T: SandType> SandType for Option<T> {
     }
 }
 
-impl<T: SandType, E: crate::native::IntoHostError> SandType for Result<T, E> {
+impl<T: SandType, E: crate::native::convert::IntoHostError> SandType for Result<T, E> {
     fn sand_type() -> Type {
         Type::result(T::sand_type(), Type::error())
     }
 }
 
-impl<T: SandType, E: crate::native::NativeError> SandType for Result<crate::native::Later<T, E>, E> {
+impl<T: SandType, E: crate::native::func::NativeError> SandType for Result<crate::native::func::Later<T, E>, E> {
     fn sand_type() -> Type {
         E::result_type(T::sand_type())
     }

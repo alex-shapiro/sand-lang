@@ -416,7 +416,7 @@ mod tests {
     use super::*;
 
     fn reference() -> Reference {
-        Reference::new(sandlang::Engine::new(sandlang::Config::new()).unwrap().docs().unwrap())
+        Reference::new(sandlang::engine::Engine::new(sandlang::engine::Config::new()).unwrap().docs().unwrap())
     }
 
     #[test]

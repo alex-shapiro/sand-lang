@@ -2,9 +2,9 @@
 
 use super::int;
 use proptest::prelude::*;
-use sandlang::{Config, Engine, Error, MemorySink};
+use sandlang::engine::{Config, Engine, Error, MemorySink};
 
-fn run(src: &str) -> (Result<sandlang::Outcome, Error>, String) {
+fn run(src: &str) -> (Result<sandlang::engine::Outcome, Error>, String) {
     let out = MemorySink::new();
     let mut engine = Engine::new(Config::new().stdout(out.clone())).unwrap();
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();

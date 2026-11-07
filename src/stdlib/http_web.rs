@@ -12,7 +12,8 @@
 use super::http_common::{BodyReader, MemoryBody, Prepared, ResponseStream, prepare_request, response};
 use super::stream::{self, IoFailure, Suspended, suspend};
 use crate::check::ModKind;
-use crate::native::{NativeModule, Val};
+use crate::native::NativeModule;
+use crate::native::ty::Val;
 use crate::vm::Vm;
 use crate::vm::WaitKind;
 use crate::vm::iomem::Reservation;

@@ -24,7 +24,7 @@ use super::compare::{
 use super::display;
 use super::meter::{MemoryLimit, Scratch, code_fuel, loop_fuel};
 use super::*;
-use crate::LimitKind;
+use crate::engine::LimitKind;
 
 /// Why metered work stopped. Must fit in a register.
 #[derive(Clone, Copy)]

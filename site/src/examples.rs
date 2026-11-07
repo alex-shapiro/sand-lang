@@ -1,7 +1,8 @@
 //! Verification and execution of `sand` and `policy` code blocks in site Markdown.
 
-use sandlang::policy::PolicyFile;
-use sandlang::{Config, Engine, Error, MemFs, MemorySink};
+use sandlang::engine::{Config, Engine, Error, MemorySink};
+use sandlang::files::mem::MemFs;
+use sandlang::policy::file::PolicyFile;
 use std::path::Path;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

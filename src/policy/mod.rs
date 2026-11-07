@@ -7,21 +7,15 @@ use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
-mod file;
-mod format;
-mod lint;
-mod net;
+pub mod file;
+pub mod format;
+pub mod lint;
+pub mod net;
 mod path;
-mod rules;
+pub mod rules;
 
-pub use file::{PolicyError, PolicyFile, parse_duration, parse_size, rule_for};
-pub use format::format_policy;
-pub use lint::lint_policy;
-use net::format_url_origin;
-pub use net::{check_net_pattern, format_host_port, is_private_address, is_valid_listen_pattern};
-#[cfg(feature = "os")]
-pub(crate) use net::{is_localhost, is_valid_host, parse_ip, parse_port, split_port};
-pub use rules::RulePolicy;
+use net::{format_host_port, format_url_origin};
+use rules::RulePolicy;
 
 /// A request for an operation outside the sandbox.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -134,7 +128,7 @@ where
     }
 }
 
-/// Host-defined policy callback; see [`crate::Config::custom_policy`].
+/// Host-defined policy callback; see [`crate::engine::Config::custom_policy`].
 pub trait CustomPolicy: Send + Sync {
     /// Evaluates `cap`. File paths in `cap` are normalized with [`normalize_path`].
     fn check(&self, cap: &Capability) -> Decision;
@@ -205,7 +199,7 @@ impl Policy {
             Policy::Custom(p) => {
                 let (Capability::Net { host, .. } | Capability::Http { host, .. }) = request else { return Ok(()) };
                 match p.check(&Capability::NetAddr { host: host.clone(), addr, tls: rules::uses_tls(request) }) {
-                    Decision::Deny if is_private_address(addr.ip()) => Err("is private or internal and is not allowed".into()),
+                    Decision::Deny if net::is_private_address(addr.ip()) => Err("is private or internal and is not allowed".into()),
                     Decision::Deny => Err("is not allowed".into()),
                     Decision::Allow | Decision::Prompt => Ok(()),
                 }

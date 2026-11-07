@@ -10,7 +10,7 @@ The `sandlang` crate embeds the Sand compiler and VM as a Rust library. Construc
 `Engine::run_source` compiles and executes a script, returning a future that runs on any Tokio runtime with timers enabled:
 
 ```rust
-use sandlang::{Config, Engine, Error, Outcome};
+use sandlang::engine::{Config, Engine, Error, Outcome};
 
 async fn run(source: &str) -> Result<Outcome, Error> {
     Engine::new(Config::new())?.run_source("main.sand", source).await
@@ -27,7 +27,7 @@ async fn main() {
 
 The script executes inside the future on the polling thread. The first argument is the source name used in diagnostics and stack traces. Use `Engine::run_file(path)` to load the entry module from disk.
 
-Failed runs return a `sandlang::Error`:
+Failed runs return a `sandlang::engine::Error`:
 
 | Variant                           | Cause                                      |
 | --------------------------------- | ------------------------------------------ |
@@ -47,7 +47,9 @@ Failed runs return a `sandlang::Error`:
 ```rust
 # #[tokio::main(flavor = "current_thread")]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-use sandlang::{Config, Engine, Limits, MemFs, MemorySink, RulePolicy};
+use sandlang::engine::{Config, Engine, Limits, MemorySink};
+use sandlang::files::mem::MemFs;
+use sandlang::policy::rules::RulePolicy;
 use std::time::Duration;
 
 let files = MemFs::new();
@@ -87,12 +89,13 @@ let report = files.read("/out/report.txt")?;
 - **Logging.** `Config::log_sink` routes `log` records to a host `LogSink` as a `LogRecord` containing the level, message, fields, and caller location. `LogSink::enabled` filters levels before record construction, and `Config::log_level` sets the initial script log level. Emitted records count against the output limit.
 - **Environment.** `Config::args` and `Config::env` set the command-line arguments and environment map exposed to the script. If `Config::env` is not set, `env.get` reads the host process environment subject to the policy.
 
-To load a `.policy` file from disk, parse it with `sandlang::policy::PolicyFile`:
+To load a `.policy` file from disk, parse it with `sandlang::policy::file::PolicyFile`:
 
 ```rust no_run
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
-# use sandlang::{Config, RulePolicy};
-use sandlang::policy::PolicyFile;
+# use sandlang::engine::Config;
+# use sandlang::policy::rules::RulePolicy;
+use sandlang::policy::file::PolicyFile;
 use std::path::Path;
 
 let text = std::fs::read_to_string("app.policy")?;
@@ -111,7 +114,9 @@ To handle `prompt` decisions, pass an async callback to `Config::prompter` that 
 `NativeModule` exposes Rust functions to Sand scripts as an importable module:
 
 ```rust
-use sandlang::{Config, HostError, NativeModule};
+use sandlang::engine::Config;
+use sandlang::native::NativeModule;
+use sandlang::native::convert::HostError;
 
 let mut geo = NativeModule::new("geo");
 geo.function("dist", |x: f64, y: f64| -> f64 { (x * x + y * y).sqrt() })
@@ -149,12 +154,14 @@ Sand infers the Sand function signature from the Rust parameter and return types
 | `HashMap<K, V>`, `BTreeMap<K, V>`, `IndexMap<K, V>`          | `[K: V]`                     |
 | `HashSet<T>`, `BTreeSet<T>`                                  | `Set<T>`                     |
 | `jiff::SignedDuration`                                       | `duration`                   |
-| `sandlang::json::Json`                                       | `json.Json`                  |
+| `sandlang::stdlib::json::Json`                               | `json.Json`                  |
 | tuples of up to 8 elements                                   | tuples                       |
 | Rust enum with `#[derive(SandEnum)]`                         | matching Sand `enum`         |
 | Rust struct with `#[derive(SandStruct)]`                     | matching Sand `struct`       |
 | `&T` (argument) or `T` (result) with `#[derive(SandObject)]` | opaque type `T`              |
 | `ValueType` `T` with `#[derive(SandValue)]`                  | opaque value type `T`        |
+
+`IndexMap` comes from the `indexmap` crate (version 2). `SignedDuration` and the other time types come from the `jiff` crate (version 0.2). To name these types, add these crates to the dependencies of your crate.
 
 The engine automatically exports registered functions that are not declared in `NativeModule::source` as `pub`, with default parameter names `arg1`, `arg2`, ... unless overridden by `params`. Registering a function as `"Type.name"` defines a method on `Type`; the method takes `self` if its first parameter has type `Type` (such as `Counter.add` below). Generic functions must be declared with `native fn` in `NativeModule::source`.
 
@@ -165,7 +172,8 @@ Each derive macro (`SandEnum`, `SandStruct`, `SandObject`, `SandValue`) binds a 
 Derive `SandEnum` on a Rust enum to pass enum values between Rust and Sand:
 
 ```rust
-use sandlang::{NativeModule, SandEnum};
+use sandlang::SandEnum;
+use sandlang::native::NativeModule;
 
 /// A two-dimensional shape.
 #[derive(SandEnum)]
@@ -190,7 +198,8 @@ The engine generates the `pub enum Shape` declaration in `geo` from the Rust var
 Derive `SandStruct` on a Rust struct with named fields to copy struct values between Rust and Sand. Fields are `pub` and immutable by default; annotate a field with `#[sand(private)]` to make it private, `#[sand(var)]` to make it mutable, `#[sand(name = "kind")]` to override its Sand name, or `#[sand(default)]` (`#[sand(default = 1.0)]`) to give it a default value:
 
 ```rust
-use sandlang::{NativeModule, SandStruct};
+use sandlang::SandStruct;
+use sandlang::native::NativeModule;
 
 /// A point in the plane.
 #[derive(SandStruct)]
@@ -214,7 +223,8 @@ Scripts construct and access `Point` like any Sand struct (`geo.mid(geo.Point { 
 Derive `SandObject` on a Rust type to expose opaque reference handles to scripts. Registered functions borrow an object parameter as `&T` and return a new object by value as `T`; scripts compare object handles by identity:
 
 ```rust
-use sandlang::{NativeModule, NativeObject, SandObject};
+use sandlang::SandObject;
+use sandlang::native::{NativeModule, NativeObject};
 use std::sync::atomic::{AtomicI64, Ordering};
 
 /// A shared atomic counter.
@@ -237,8 +247,12 @@ To check a sandbox capability inside a native function, register the function wi
 ```rust
 # #[tokio::main(flavor = "current_thread")]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+use sandlang::engine::{Config, Engine};
+use sandlang::native::NativeModule;
+use sandlang::native::convert::HostError;
+use sandlang::policy::Capability;
+use sandlang::policy::rules::RulePolicy;
 use sandlang::vm::Vm;
-use sandlang::{Capability, Config, Engine, HostError, NativeModule, RulePolicy};
 
 let mut door = NativeModule::new("door");
 door.vm_function("open", |vm: &mut Vm, name: String| -> Result<String, HostError> {
@@ -270,7 +284,8 @@ A generic Rust function accepts values of its `N`-th type parameter as `Param<N,
 ```rust
 # #[tokio::main(flavor = "current_thread")]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-# use sandlang::{Config, Session};
+# use sandlang::engine::Config;
+# use sandlang::session::Session;
 # let config = Config::new();
 let mut session = Session::new(config)?;
 session.eval("var hits = 0\nfn hit() -> int {\n    hits += 1\n    hits\n}").await?;
@@ -288,7 +303,7 @@ assert_eq!(session.eval("hit() + hit()").await?, Some("3".to_string()));
 ```rust
 # #[tokio::main(flavor = "current_thread")]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-use sandlang::{Config, Engine, Error};
+use sandlang::engine::{Config, Engine, Error};
 use std::time::Duration;
 
 let mut engine = Engine::new(Config::new())?;

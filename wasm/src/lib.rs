@@ -26,9 +26,11 @@ mod hooks;
 
 use hooks::{Hooks, JsOutput, JsPrompter};
 use js_sys::{Array, Object, Reflect};
+use sandlang::diag::{Diagnostic, Severity};
+use sandlang::engine::{Config, Error};
+use sandlang::files::mem::MemFs;
 use sandlang::lint::LintWarning;
-use sandlang::policy::{PolicyError, PolicyFile};
-use sandlang::{Config, Diagnostic, Error, MemFs, Severity};
+use sandlang::policy::file::{PolicyError, PolicyFile};
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
@@ -174,7 +176,7 @@ impl HostConfig {
         let key =
             Rc::new(HookKey(hooks::register(Hooks { on_output: function(hooks, "onOutput")?, on_prompt: function(hooks, "onPrompt")? })));
         let mut config = Config::new()
-            .policy(policy.rules.with_defaults(sandlang::RulePolicy::standard().allow_import("/")))
+            .policy(policy.rules.with_defaults(sandlang::policy::rules::RulePolicy::standard().allow_import("/")))
             .limits(policy.limits.clone())
             .memory_fs(fs.clone())
             .cwd(&cwd)
@@ -190,7 +192,7 @@ impl HostConfig {
             config = config.seed(seed as u64);
         }
         if let Some(name) = string_option(options, "timeZone")? {
-            let zone = sandlang::time::TimeZone::get(&name).ok_or_else(|| error(&format!("unknown timeZone {name:?}")))?;
+            let zone = sandlang::stdlib::time::TimeZone::get(&name).ok_or_else(|| error(&format!("unknown timeZone {name:?}")))?;
             config = config.time_zone(zone);
         }
         Ok(HostConfig { config, fs, hooks: key })
@@ -202,9 +204,9 @@ impl HostConfig {
 #[wasm_bindgen]
 pub struct Engine {
     /// Taken while a run uses it.
-    engine: Rc<RefCell<Option<sandlang::Engine>>>,
+    engine: Rc<RefCell<Option<sandlang::engine::Engine>>>,
     fs: MemFs,
-    interrupt: sandlang::InterruptHandle,
+    interrupt: sandlang::engine::InterruptHandle,
     /// Keeps the engine's hooks registered until the engine is freed.
     _hooks: Rc<HookKey>,
 }
@@ -221,7 +223,7 @@ impl Engine {
         #[wasm_bindgen(unchecked_param_type = "EngineHooks")] hooks: JsValue,
     ) -> Result<Engine, JsValue> {
         let HostConfig { config, fs, hooks } = HostConfig::new(&options, &hooks)?;
-        let engine = sandlang::Engine::new(config).map_err(|e| error(&e.render()))?;
+        let engine = sandlang::engine::Engine::new(config).map_err(|e| error(&e.render()))?;
         let interrupt = engine.interrupt_handle();
         Ok(Engine { engine: Rc::new(RefCell::new(Some(engine))), fs, interrupt, _hooks: hooks })
     }
@@ -341,9 +343,9 @@ impl FileSystem {
 /// An interactive session that compiles and runs inputs incrementally.
 #[wasm_bindgen]
 pub struct Session {
-    session: Rc<RefCell<Option<sandlang::Session>>>,
+    session: Rc<RefCell<Option<sandlang::session::Session>>>,
     fs: MemFs,
-    interrupt: sandlang::InterruptHandle,
+    interrupt: sandlang::engine::InterruptHandle,
     hooks: Rc<HookKey>,
     /// Ends the `runTasks` in progress.
     stop_tasks: Rc<RefCell<Option<tokio::sync::oneshot::Sender<()>>>>,
@@ -358,7 +360,7 @@ impl Session {
         #[wasm_bindgen(unchecked_param_type = "EngineHooks")] hooks: JsValue,
     ) -> Result<Session, JsValue> {
         let HostConfig { config, fs, hooks } = HostConfig::new(&options, &hooks)?;
-        let session = sandlang::Session::new(config).map_err(|e| error(&e.render()))?;
+        let session = sandlang::session::Session::new(config).map_err(|e| error(&e.render()))?;
         let interrupt = session.interrupt_handle();
         Ok(Session { session: Rc::new(RefCell::new(Some(session))), fs, interrupt, hooks, stop_tasks: Rc::default() })
     }
@@ -456,7 +458,7 @@ impl Session {
     /// comments): a front end continues reading lines until it is.
     #[wasm_bindgen(js_name = isComplete)]
     pub fn is_complete(source: &str) -> bool {
-        sandlang::Session::is_complete(source)
+        sandlang::session::Session::is_complete(source)
     }
 }
 
@@ -488,7 +490,7 @@ pub fn format(source: &str) -> Result<String, JsValue> {
 /// not split into words.
 #[wasm_bindgen(js_name = formatPolicy)]
 pub fn format_policy(policy: &str) -> Result<String, JsValue> {
-    sandlang::policy::format_policy(policy).map_err(policy_error)
+    sandlang::policy::format::format_policy(policy).map_err(policy_error)
 }
 
 /// Lints a policy file whose relative paths start at `cwd` (default `/`);
@@ -496,7 +498,7 @@ pub fn format_policy(policy: &str) -> Result<String, JsValue> {
 #[wasm_bindgen(js_name = lintPolicy, unchecked_return_type = "LintWarning[]")]
 pub fn lint_policy(policy: &str, cwd: Option<String>) -> Result<JsValue, JsValue> {
     let cwd = cwd.unwrap_or_else(|| "/".into());
-    let warnings = sandlang::policy::lint_policy(policy, Path::new(&cwd), None).map_err(policy_error)?;
+    let warnings = sandlang::policy::lint::lint_policy(policy, Path::new(&cwd), None).map_err(policy_error)?;
     Ok(array(&warnings, lint_warning))
 }
 
@@ -536,7 +538,7 @@ pub fn highlight_kinds() -> Vec<String> {
 /// Returns true if `name` is a supported time zone.
 #[wasm_bindgen(js_name = isTimeZone)]
 pub fn is_time_zone(name: &str) -> bool {
-    sandlang::time::TimeZone::get(name).is_some()
+    sandlang::stdlib::time::TimeZone::get(name).is_some()
 }
 
 /// The version of Sand.
@@ -676,7 +678,7 @@ fn write_files(fs: &MemFs, options: &JsValue) -> Result<(), JsValue> {
 }
 
 /// The frames of a trace, innermost first.
-fn frames(trace: &[sandlang::TraceFrame]) -> JsValue {
+fn frames(trace: &[sandlang::engine::TraceFrame]) -> JsValue {
     array(trace, |t| object(&[("function", t.function.as_str().into()), ("file", t.file.as_str().into()), ("line", t.line.into())]))
 }
 

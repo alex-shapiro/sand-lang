@@ -62,10 +62,10 @@ impl<F: Future> Future for CatchUnwind<F> {
 }
 
 /// Runs the engine future `f`, reporting a panic as an internal error.
-pub(crate) async fn guard<T>(f: impl Future<Output = Result<T, crate::Error>>) -> Result<T, crate::Error> {
+pub(crate) async fn guard<T>(f: impl Future<Output = Result<T, crate::engine::Error>>) -> Result<T, crate::engine::Error> {
     match CatchUnwind::new(f).await {
         Ok(r) => r,
-        Err(msg) => Err(crate::Error::Internal { message: msg, trace: vec![] }),
+        Err(msg) => Err(crate::engine::Error::Internal { message: msg, trace: vec![] }),
     }
 }
 
@@ -76,12 +76,12 @@ mod tests {
     #[test]
     fn panics_become_errors() {
         let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
-        let r: Result<i32, crate::Error> = rt.block_on(guard(async {
+        let r: Result<i32, crate::engine::Error> = rt.block_on(guard(async {
             tokio::task::yield_now().await;
             panic!("boom {}", 1)
         }));
-        assert!(matches!(r, Err(crate::Error::Internal { ref message, .. }) if message == "boom 1"), "{r:?}");
-        assert_eq!(rt.block_on(guard(async { Ok::<_, crate::Error>(5) })).unwrap(), 5);
+        assert!(matches!(r, Err(crate::engine::Error::Internal { ref message, .. }) if message == "boom 1"), "{r:?}");
+        assert_eq!(rt.block_on(guard(async { Ok::<_, crate::engine::Error>(5) })).unwrap(), 5);
         assert_eq!(catch(|| panic!("static")), Err::<(), _>("static".to_string()));
     }
 }

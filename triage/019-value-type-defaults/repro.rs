@@ -1,5 +1,7 @@
-use sandlang::jiff::{Timestamp, civil::Date};
-use sandlang::{Config, Engine, MemorySink, NativeModule};
+use jiff::Timestamp;
+use jiff::civil::Date;
+use sandlang::engine::{Config, Engine, MemorySink};
+use sandlang::native::NativeModule;
 
 #[derive(Clone, Debug, sandlang::SandStruct)]
 #[sand(module = "jobs")]

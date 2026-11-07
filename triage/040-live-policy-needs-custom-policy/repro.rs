@@ -1,5 +1,7 @@
-use sandlang::policy::PolicyFile;
-use sandlang::{Capability, Config, Decision, Engine, MemorySink, RulePolicy};
+use sandlang::policy::file::PolicyFile;
+use sandlang::policy::{Capability, Decision};
+use sandlang::engine::{Config, Engine, MemorySink};
+use sandlang::policy::rules::RulePolicy;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 

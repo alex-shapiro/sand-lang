@@ -1,6 +1,6 @@
 //! Policy file formatter.
 
-use super::PolicyError;
+use super::file::PolicyError;
 use super::file::{Line, is_method, lex, transport};
 
 /// Formats a policy file into canonical whitespace, quoting, keyword case,
@@ -66,7 +66,8 @@ fn format_line_words(line: &Line) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::{Capability, PathSpace, PolicyFile};
+    use crate::policy::file::PolicyFile;
+    use crate::policy::{Capability, PathSpace};
     use proptest::prelude::*;
     use std::path::{Path, PathBuf};
 

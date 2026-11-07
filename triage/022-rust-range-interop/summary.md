@@ -2,7 +2,7 @@
 
 Host functions and `#[derive(SandStruct)]` structs cannot accept or return
 `std::ops::Range<i64>` or `RangeInclusive<i64>` because neither type implements
-`SandType`, `FromValue`, or `IntoValue`. `Val<sandlang::native::Range>` is not
+`SandType`, `FromValue`, or `IntoValue`. `Val<sandlang::native::ty::Range>` is not
 a usable alternative because its `bounds` method is private, which forces host
 APIs to use tuples instead of Sand `Range` values.
 

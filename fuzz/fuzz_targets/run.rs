@@ -2,7 +2,8 @@
 //! limits, asserting that the engine never returns an internal error.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use sandlang::{Config, Engine, Error, Limits, MemorySink, RulePolicy};
+use sandlang::engine::{Config, Engine, Error, Limits, MemorySink};
+use sandlang::policy::rules::RulePolicy;
 use std::time::Duration;
 
 fuzz_target!(|data: &[u8]| {

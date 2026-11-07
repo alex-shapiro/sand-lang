@@ -5,8 +5,9 @@
 //! Each stage runs over every example, repeatedly; the harness reports the
 //! best time of several runs and the throughput in source bytes per second.
 
-use sandlang::syntax::{lexer, parse_module};
-use sandlang::{Config, Engine};
+use sandlang::engine::{Config, Engine};
+use sandlang::syntax::lexer;
+use sandlang::syntax::parser::parse_module;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -33,7 +34,7 @@ fn main() {
     let bytes: usize = sources.iter().map(|(_, s)| s.len()).sum::<usize>() * PASSES;
 
     // Checking and linting see the examples' directory (for their imports).
-    let engine = || Engine::new(Config::new().policy(sandlang::RulePolicy::standard()).cwd(&dir)).unwrap();
+    let engine = || Engine::new(Config::new().policy(sandlang::policy::rules::RulePolicy::standard()).cwd(&dir)).unwrap();
     let stages: [(&str, Stage); 5] = [
         ("lex", Box::new(|src| assert!(lexer::lex(src, 0).errors.is_empty()))),
         ("parse", Box::new(|src| assert!(parse_module(src, 0).errors.is_empty()))),

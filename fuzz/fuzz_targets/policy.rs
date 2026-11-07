@@ -1,8 +1,10 @@
 //! Fuzz target for policy parsing, linting, formatting, and round-trip serialization.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use sandlang::Capability;
-use sandlang::policy::{PolicyFile, format_policy, lint_policy};
+use sandlang::policy::Capability;
+use sandlang::policy::file::PolicyFile;
+use sandlang::policy::format::format_policy;
+use sandlang::policy::lint::lint_policy;
 use std::path::{Path, PathBuf};
 
 fuzz_target!(|data: &[u8]| {

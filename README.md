@@ -68,7 +68,9 @@ sand run script.sand --policy=app.policy
 A sand-lang interpreter can be embedded in Rust and import native modules:
 
 ```rust
-use sandlang::{Config, NativeModule, Session};
+use sandlang::engine::Config;
+use sandlang::native::NativeModule;
+use sandlang::session::Session;
 
 let mut geo = NativeModule::new("geo");
 geo.function("dist", |a: f64, b: f64| -> f64 { (a * a + b * b).sqrt() });

@@ -2,7 +2,7 @@
 
 use super::interp::Exit;
 use super::*;
-use crate::LimitKind;
+use crate::engine::LimitKind;
 use crate::platform::{ClockFuture, Instant};
 use std::sync::atomic::Ordering;
 use std::task::{Context, Poll, Wake, Waker};

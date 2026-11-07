@@ -2,7 +2,10 @@
 
 use super::stream::{self, IoFailure, Suspended, bytes_read, line_read, read_line, read_to_end_reserved, read_upto, strip_eol};
 use crate::check::ModKind;
-use crate::native::{HostError, IntoValue, Later, NativeModule, NativeObject, ObjectType, Val};
+use crate::native::convert::{HostError, IntoValue};
+use crate::native::func::Later;
+use crate::native::ty::Val;
+use crate::native::{NativeModule, NativeObject, ObjectType};
 use crate::policy::Capability;
 use crate::stdin_feed::StdinChannel;
 use crate::vm::iomem::Reservation;

@@ -117,7 +117,9 @@ Sand also runs in WebAssembly. Try it in your browser with the [Sand playground]
 ```rust
 # #[tokio::main(flavor = "current_thread")]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-use sandlang::{Config, Engine, NativeModule, RulePolicy};
+use sandlang::engine::{Config, Engine};
+use sandlang::native::NativeModule;
+use sandlang::policy::rules::RulePolicy;
 
 let mut geo = NativeModule::new("geo");
 geo.function("dist", |a: f64, b: f64| -> f64 { (a * a + b * b).sqrt() });

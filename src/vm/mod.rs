@@ -11,9 +11,9 @@ pub mod meter;
 pub mod sched;
 pub mod value;
 
-use crate::native::HostError;
+use crate::engine::{LimitKind, Limits};
+use crate::native::convert::HostError;
 use crate::policy::{Capability, Decision, Policy, PromptAnswer, Prompter};
-use crate::{LimitKind, Limits};
 use bytecode::*;
 use heap::{Heap, Staging};
 use meter::Meter;
@@ -489,20 +489,20 @@ pub struct Host {
     pub env: Option<Vec<(String, String)>>,
     pub rng: Rng,
     /// Minimum active script log level, or `None` if logging is disabled.
-    pub log_level: Option<crate::LogLevel>,
-    pub(crate) log_sink: Option<Arc<dyn crate::LogSink>>,
+    pub log_level: Option<crate::stdlib::log::LogLevel>,
+    pub(crate) log_sink: Option<Arc<dyn crate::stdlib::log::LogSink>>,
     pub interrupt: Arc<AtomicBool>,
     /// Cached decisions for stdout (index 0) and stderr (1).
     pub stream_decisions: [Option<bool>; 2],
     #[cfg(feature = "os")]
-    pub(crate) tls: crate::stdlib::TlsSettings,
+    pub(crate) tls: crate::stdlib::net::TlsSettings,
     /// The run's idle `http` connections.
     #[cfg(feature = "os")]
-    pub(crate) http_pool: Arc<crate::stdlib::HttpPool>,
+    pub(crate) http_pool: Arc<crate::stdlib::http::Pool>,
     pub(crate) regex_cache: Vec<(u64, u32)>,
     /// The file system of the `fs` module.
     pub(crate) fs: crate::files::Fs,
-    /// Rewrites or refuses outgoing HTTP requests (see [`crate::Config::request_filter`]).
+    /// Rewrites or refuses outgoing HTTP requests (see [`crate::engine::Config::request_filter`]).
     #[cfg_attr(not(any(feature = "os", web)), expect(dead_code, reason = "HTTP client is disabled in this build"))]
     pub(crate) request_filter: Option<crate::engine::RequestFilter>,
     /// Clock and timer provider for the engine.
@@ -885,7 +885,7 @@ impl Vm {
         display::to_debug_metered(&self.prog, &self.heap, &self.meter, v)
     }
 
-    /// If [`Config::retry_stress`](crate::Config::retry_stress) is enabled and
+    /// If [`Config::retry_stress`](crate::engine::Config::retry_stress) is enabled and
     /// this call is not a retry, forces the next memory or resource check to fail.
     pub(crate) fn arm_retry_stress(&self) {
         self.heap.fail_next_check.set(self.retry_stress && !self.collected);
@@ -1275,7 +1275,7 @@ impl Vm {
                 }
                 let stack = nregs.max(INITIAL_STACK_SLOTS);
                 if self.heap.would_exceed(stack * std::mem::size_of::<Value>()) {
-                    return Err(Ctl::limit(crate::LimitKind::Memory));
+                    return Err(Ctl::limit(crate::engine::LimitKind::Memory));
                 }
                 let mut frames = Vec::with_capacity(8);
                 frames.push(frame);

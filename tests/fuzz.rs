@@ -8,7 +8,7 @@
 mod common;
 
 use common::rt;
-use sandlang::{Config, Engine, Error, Limits, MemorySink};
+use sandlang::engine::{Config, Engine, Error, Limits, MemorySink};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::Duration;
 
@@ -36,13 +36,15 @@ fn iters(default: usize) -> usize {
 }
 
 fn limited_config() -> Config {
-    Config::new().policy(sandlang::RulePolicy::standard()).stdout(MemorySink::new()).stderr(MemorySink::new()).limits(Limits {
-        max_instructions: Some(200_000),
-        max_memory: Some(32 << 20),
-        max_wall_time: Some(Duration::from_secs(2)),
-        max_call_depth: 500,
-        ..Limits::default()
-    })
+    Config::new().policy(sandlang::policy::rules::RulePolicy::standard()).stdout(MemorySink::new()).stderr(MemorySink::new()).limits(
+        Limits {
+            max_instructions: Some(200_000),
+            max_memory: Some(32 << 20),
+            max_wall_time: Some(Duration::from_secs(2)),
+            max_call_depth: 500,
+            ..Limits::default()
+        },
+    )
 }
 
 /// Compiles and runs `src`, asserting that the host does not panic and that the

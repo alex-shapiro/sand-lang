@@ -1,4 +1,5 @@
-use sandlang::{Config, Engine, MemorySink, NativeModule};
+use sandlang::engine::{Config, Engine, MemorySink};
+use sandlang::native::NativeModule;
 use std::collections::BTreeSet;
 
 #[derive(Clone, sandlang::SandStruct)]

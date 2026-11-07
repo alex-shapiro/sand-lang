@@ -1675,7 +1675,7 @@ example, under `allow net plaintext *` and `deny net 10.0.0.0/8`, a request to
 `http://evil.example/` fails if DNS returns `10.0.0.5`, whereas an explicit
 hostname rule such as `allow net db.internal` outranks the `/8` prefix and
 permits connecting to `10.0.0.5` via `db.internal`.
-`sandlang::policy::is_private_address` reports whether an IP address belongs to
+`sandlang::policy::net::is_private_address` reports whether an IP address belongs to
 a private, loopback, link-local, or other non-public range.
 
 ### 14.7 Policy files
@@ -1683,7 +1683,7 @@ a private, loopback, link-local, or other non-public range.
 A policy file uses the `.policy` extension and declares authorization rules and
 resource limits in a line-oriented text format. Pass a policy file to the CLI
 with `sand run --policy=FILE` (§17.5), or parse it in Rust with
-`sandlang::policy::PolicyFile::parse(text, base, home)` to obtain
+`sandlang::policy::file::PolicyFile::parse(text, base, home)` to obtain
 `PolicyFile::rules` and `PolicyFile::limits`. A parsed `PolicyFile` contains
 only the rules written in the file; a host can append default rules with
 `file.rules.with_defaults(RulePolicy::standard())`.
@@ -1771,7 +1771,7 @@ column on `PolicyError`.
 formatter normalizes whitespace, quotes special characters, preserves explicit
 quotes, lowercases transports, uppercases HTTP methods, aligns trailing comments
 on consecutive lines, and collapses multiple blank lines.
-`sandlang::policy::lint_policy` checks a policy file for the following warnings
+`sandlang::policy::lint::lint_policy` checks a policy file for the following warnings
 by comparing file paths lexically without resolving symlinks:
 
 | Lint                   | Description                                                                                                  |
@@ -1785,7 +1785,7 @@ An `allow` rule for an exact hostname is not flagged as `redundant-rule` under a
 domain wildcard if an IP address rule ranks between them, because the exact
 hostname rule also overrides the IP address rule during stage 2 (§14.6).
 
-`sandlang::policy::rule_for(capability, allow)` formats a persistent `allow` or
+`sandlang::policy::file::rule_for(capability, allow)` formats a persistent `allow` or
 `deny` rule line for a promptable `Capability`, such as `allow read /data/a.txt`
 or `deny http tls GET example.com:443/a`.
 
@@ -1946,7 +1946,9 @@ multiple engines concurrently across threads or asynchronous tasks, or
 interleaved on a single thread in WebAssembly (§16.5).
 
 ```rust
-use sandlang::{Config, Engine, Limits, NativeModule, RulePolicy};
+use sandlang::engine::{Config, Engine, Limits};
+use sandlang::native::NativeModule;
+use sandlang::policy::rules::RulePolicy;
 
 let mut module = NativeModule::new("geo");
 module.function("dist", |a: f64, b: f64| -> f64 { (a * a + b * b).sqrt() });
@@ -2184,7 +2186,7 @@ collects garbage and checks the memory limit after the call completes.
 | `HashSet<T>`, `BTreeSet<T>`                         | `Set<T>`                                               |
 | `Result<T, E>`                                      | `Result<T, Error>` or `T`, depending on `E`            |
 | `Never`                                             | `never`                                                |
-| `sandlang::json::Json`                              | `json.Json`                                            |
+| `sandlang::stdlib::json::Json`                      | `json.Json`                                            |
 | bound type `T`                                      | `T`, or `&T` for a borrowed object parameter           |
 | `Val<T>`                                            | `T`, passed as an uncopied heap handle                 |
 | `Param<N, B>`, `Reflect<N>`                         | `N`-th type parameter and its runtime type description |
