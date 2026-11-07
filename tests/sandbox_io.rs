@@ -537,6 +537,15 @@ print(net.connect("127.0.0.1", {port}).is_ok())
     assert_eq!(r.ok_stdout(), "Ok(\"hi\")\nOk(\"hi\")\nOk(\"hi\")\nOk(\"hi\")\ntrue\n");
 }
 
+#[test]
+fn only_more_specific_rules_override_deny_private_net() {
+    let with = |rule: &str| parse_rules(rule).deny_private_net();
+    assert_eq!(with("allow net localhost:8080").check(&net("localhost", 8080)), Decision::Allow);
+    assert_eq!(with("allow net 10.0.0.5").check(&net("10.0.0.5", 443)), Decision::Allow);
+    assert_eq!(with("allow net localhost").check(&net("localhost", 8080)), Decision::Deny, "equal specificity");
+    assert_eq!(with("allow net 10.0.0.0/8").check(&net("10.0.0.5", 443)), Decision::Deny, "equal specificity");
+}
+
 /// Under a wildcard allow rule, `deny_private_net` blocks every loopback host, and a more
 /// specific rule makes an exception.
 // Relies on the resolver accepting `127.1` for 127.0.0.1 (glibc, macOS).

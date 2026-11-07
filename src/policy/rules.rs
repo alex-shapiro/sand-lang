@@ -1,7 +1,7 @@
 //! Rule-based capability policies.
 
 use super::file;
-use super::net::{Dest, HostIndex, HostKind, ListenPattern, NetPattern, UrlPattern, internal_ranges, parse_ip, url_segments};
+use super::net::{Dest, HostIndex, HostKind, ListenPattern, NetPattern, UrlPattern, parse_ip, private_ranges, url_segments};
 use super::path::{Glob, Seg, Tok, Trie, path_segments, unquoted_tokens};
 use super::{Capability, Decision, PathSpace, PatternError, fold_name, lexical, normalize_path};
 use crate::files::Mode;
@@ -511,11 +511,14 @@ impl RulePolicy {
     pub fn prompt_http(self, transports: Transports, methods: Methods, url: UrlPattern) -> Self {
         self.push(Decision::Prompt, RuleKind::Http(methods, url, transports))
     }
-    /// Denies connections to `localhost` and to every address for which
-    /// [`super::net::is_private_address`] returns `true`.
+    /// Adds `deny net` rules for `localhost` and for each address range that
+    /// [`super::net::is_private_address`] reports.
+    ///
+    /// A more specific rule overrides these rules, such as `allow net localhost:8080` or
+    /// `allow net 10.0.0.5`. A rule of equal specificity, such as `allow net localhost`, does not.
     pub fn deny_private_net(self) -> Self {
         let localhost = NetPattern { kind: HostKind::Host("localhost".into()), port: None };
-        let hosts = std::iter::once(localhost).chain(internal_ranges().iter().cloned());
+        let hosts = std::iter::once(localhost).chain(private_ranges().iter().cloned());
         hosts.fold(self, |policy, host| policy.deny_net(Transports::Both, host))
     }
     /// Allows binding a listener to an address that matches `pattern`.

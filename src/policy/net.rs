@@ -477,7 +477,7 @@ pub(crate) fn is_localhost(host: &str) -> bool {
 }
 
 /// Non-public IPv4 and IPv6 CIDR ranges.
-const INTERNAL_RANGES: [&str; 24] = [
+const PRIVATE_RANGES: [&str; 24] = [
     "0.0.0.0/8",       // unspecified
     "10.0.0.0/8",      // RFC 1918
     "100.64.0.0/10",   // shared address space
@@ -504,9 +504,9 @@ const INTERNAL_RANGES: [&str; 24] = [
     "ff00::/8",        // multicast
 ];
 
-pub(crate) fn internal_ranges() -> &'static [NetPattern] {
+pub(crate) fn private_ranges() -> &'static [NetPattern] {
     static PATTERNS: std::sync::LazyLock<Vec<NetPattern>> =
-        std::sync::LazyLock::new(|| INTERNAL_RANGES.iter().map(|p| NetPattern::parse_host_port(p).expect("a valid range")).collect());
+        std::sync::LazyLock::new(|| PRIVATE_RANGES.iter().map(|p| NetPattern::parse_host_port(p).expect("a valid range")).collect());
     &PATTERNS
 }
 
@@ -517,7 +517,7 @@ pub(crate) fn internal_ranges() -> &'static [NetPattern] {
 /// benchmarking, and reserved ranges. IPv6 addresses that embed an IPv4
 /// address are classified by the embedded IPv4 address.
 pub fn is_private_address(ip: IpAddr) -> bool {
-    internal_ranges().iter().any(|p| p.denies_ip(ip))
+    private_ranges().iter().any(|p| p.denies_ip(ip))
 }
 
 /// Formats `host` and `port` as `host:port`, enclosing IPv6 addresses in brackets.
@@ -835,7 +835,7 @@ mod tests {
     }
 
     fn edge_address() -> impl Strategy<Value = IpAddr> {
-        let edges: Vec<IpAddr> = INTERNAL_RANGES
+        let edges: Vec<IpAddr> = PRIVATE_RANGES
             .iter()
             .chain(&["64:ff9b::/96", "2002::/16", "::ffff:0:0/96", "::ffff:0:0:0/96"])
             .flat_map(|r| {
@@ -855,7 +855,7 @@ mod tests {
 
     proptest! {
         #[test]
-        fn internal_ranges_match_oracle(
+        fn private_ranges_match_oracle(
             v4 in any::<u32>(),
             v6 in any::<u128>(),
             embed in 0..EMBEDDINGS.len(),

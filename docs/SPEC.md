@@ -1678,8 +1678,8 @@ connecting to `10.0.0.5` through `db.internal`.
 `sandlang::policy::net::is_private_address` reports whether an IP address belongs to
 a private, loopback, link-local, or other non-public range.
 `RulePolicy::deny_private_net` adds a `deny net` rule for `localhost` and for
-each of these ranges. A more specific rule can make an exception, as with any
-other rule.
+each of these ranges. A more specific rule overrides them, such as
+`allow net localhost:8080` or `allow net 10.0.0.5`.
 
 ### 14.7 Policy files
 
