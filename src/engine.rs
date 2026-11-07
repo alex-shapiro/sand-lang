@@ -806,7 +806,6 @@ pub(crate) fn on_compile_stack<R: Send + 'static>(f: impl FnOnce() -> Result<R, 
 
 impl Engine {
     /// Creates an engine with `config`, checking any registered host modules.
-    ///
     pub fn new(config: Config) -> Result<Engine, Error> {
         let registry = Registry::for_config(&config);
         if registry.base.is_some() {
