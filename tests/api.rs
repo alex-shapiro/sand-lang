@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{TempDir, literal, rt, run_with};
+use common::{TempDir, literal_path, rt, run_with};
 use jiff::civil::Date;
 use parking_lot::Mutex;
 use sandlang::engine::{Config, Engine, Error, LimitKind, Limits, MemorySink};
@@ -2216,8 +2216,8 @@ fn rule_policy_confines_paths() {
     std::os::unix::fs::symlink(dir.path().join("private/b.txt"), dir.path().join("public/link.txt")).unwrap();
 
     let policy = sandlang::policy::rules::RulePolicy::standard()
-        .allow_read(literal(dir.path().join("public")))
-        .allow_write(literal(dir.path().join("public/sub")));
+        .allow_read(literal_path(dir.path().join("public")))
+        .allow_write(literal_path(dir.path().join("public/sub")));
     let config = Config::new().policy(policy).cwd(dir.path());
     let src = r#"
 import fs
@@ -2249,8 +2249,8 @@ fn rule_policy_deny_overrides_allow() {
     dir.write("data/ok.txt", "ok");
     dir.write("data/secret/key.txt", "key");
     let policy = sandlang::policy::rules::RulePolicy::standard()
-        .allow_read(literal(dir.path().join("data")))
-        .deny_read(literal(dir.path().join("data/secret")));
+        .allow_read(literal_path(dir.path().join("data")))
+        .deny_read(literal_path(dir.path().join("data/secret")));
     let config = Config::new().policy(policy).cwd(dir.path());
     let (r, out, _) =
         run_src(config, "import fs\nprint(fs.read_text(\"data/ok.txt\").is_ok())\nprint(fs.read_text(\"data/secret/key.txt\").is_ok())");
@@ -2259,7 +2259,7 @@ fn rule_policy_deny_overrides_allow() {
 }
 
 #[test]
-fn typed_rule_builders_make_the_rules_of_the_policy_file_syntax() {
+fn typed_rule_builders_round_trip_through_policy_text() {
     use sandlang::policy::file::PolicyFile;
     use sandlang::policy::rules::{HttpMethod, Methods, NamePattern, RulePolicy, Transports};
     let methods = Methods::only("get".parse().unwrap(), ["M-SEARCH".parse().unwrap(), "GET".parse().unwrap()]);
@@ -2386,10 +2386,10 @@ fn unallowed_import_reports_the_missing_rule() {
         other => panic!("{other:?}"),
     }
     let mut engine =
-        Engine::new(Config::new().policy(sandlang::policy::rules::RulePolicy::standard().allow_import(literal(&lib)))).unwrap();
+        Engine::new(Config::new().policy(sandlang::policy::rules::RulePolicy::standard().allow_import(literal_path(&lib)))).unwrap();
     rt().block_on(engine.run_file(&main)).unwrap();
     let util = lib.join("util.sand");
-    let policy = sandlang::policy::rules::RulePolicy::standard().allow_import(literal(&lib)).prompt_import(literal(&util));
+    let policy = sandlang::policy::rules::RulePolicy::standard().allow_import(literal_path(&lib)).prompt_import(literal_path(&util));
     let mut engine = Engine::new(Config::new().policy(policy)).unwrap();
     match rt().block_on(engine.run_file(&main)) {
         Err(Error::Compile(d)) => assert_eq!(

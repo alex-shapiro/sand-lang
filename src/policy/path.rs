@@ -10,7 +10,7 @@ use std::borrow::Cow;
 use std::hash::{Hash, Hasher};
 use std::path::{Component, Path};
 
-/// Returns `true` if a file rule can anchor a pattern at `path`, as [`super::rules::AbsolutePath::new`] describes.
+/// Returns `true` if `path` is an absolute path on the current platform.
 pub(crate) const fn is_absolute(path: &[u8]) -> bool {
     match path {
         [b'/', ..] => true,
@@ -23,8 +23,8 @@ pub(crate) const fn is_absolute(path: &[u8]) -> bool {
 /// A character in a pattern and whether it is an unquoted `*` wildcard.
 pub(crate) type Tok = (char, bool);
 
-/// Tokenizes `text` as an unquoted policy word, in which every `*` is a wildcard.
-pub(crate) fn wild_tokens(text: &str) -> Vec<Tok> {
+/// Converts unquoted pattern text into tokens where every `*` is a wildcard.
+pub(crate) fn unquoted_tokens(text: &str) -> Vec<Tok> {
     text.chars().map(|c| (c, c == '*')).collect()
 }
 
@@ -432,7 +432,7 @@ mod tests {
     use super::*;
 
     fn pattern(s: &str) -> Vec<Seg> {
-        s.split('/').map(|seg| Seg::parse(&wild_tokens(seg)).unwrap()).collect()
+        s.split('/').map(|seg| Seg::parse(&unquoted_tokens(seg)).unwrap()).collect()
     }
 
     fn matches(t: &Trie<&'static str>, path: &str) -> Vec<(&'static str, usize)> {

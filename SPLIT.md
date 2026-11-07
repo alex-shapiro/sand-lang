@@ -48,17 +48,24 @@ Source commits: `2c21305`, `003daed`, and the two documentation link fixes from
 
 ### 2. Typed policy builders
 
-`RulePolicy` builder methods accept parsed pattern types instead of raw strings.
-This makes the builder methods infallible. The builders also reject relative
-file paths to close issue 033. This changeset replaces the `bitflags` set
-`Transports` with an enum. It also removes the `bitflags` dependency.
+`RulePolicy` builder methods take parsed pattern types instead of raw strings.
+The builder methods cannot fail. `PathPattern` rejects relative file paths to
+close issue 033. This changeset replaces the `bitflags` set `Transports` with an
+enum and removes the `bitflags` dependency.
 
-Public types, by module:
+Public types:
 
-- `policy::rules`: `PathPattern`, `AbsolutePath`, `NamePattern`, `Transports`,
-  `HttpMethod`, `Methods`, and `CustomMatch`
-- `policy::net`: `NetPattern`, `UrlPattern`, and `ListenPattern`
-- `policy`: `PatternError`
+- `policy::PatternError`
+- `policy::net::ListenPattern`
+- `policy::net::NetPattern`
+- `policy::net::UrlPattern`
+- `policy::rules::AbsolutePath`
+- `policy::rules::CustomMatch`
+- `policy::rules::HttpMethod`
+- `policy::rules::Methods`
+- `policy::rules::NamePattern`
+- `policy::rules::PathPattern`
+- `policy::rules::Transports`
 
 Source commits: `464b03a`, `c5ca2d7`, `b111b33`, `335ae8b`, `89186fa`, `265e762`.
 

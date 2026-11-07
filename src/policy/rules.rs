@@ -2,7 +2,7 @@
 
 use super::file;
 use super::net::{Dest, HostIndex, HostKind, ListenPattern, NetPattern, UrlPattern, parse_ip, url_segments};
-use super::path::{Glob, Seg, Tok, Trie, path_segments, wild_tokens};
+use super::path::{Glob, Seg, Tok, Trie, path_segments, unquoted_tokens};
 use super::{Capability, Decision, PathSpace, PatternError, fold_name, lexical, normalize_path};
 use crate::files::Mode;
 use crate::vm::value::FxHashMap;
@@ -36,16 +36,17 @@ impl Access {
     }
 }
 
-/// An absolute path that a `const` can hold, such as a fixed directory of a host. Its
-/// [`PathPattern`] matches the path literally.
+/// A static absolute path for a file rule. Convert it to a literal [`PathPattern`] with
+/// [`From`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct AbsolutePath(&'static str);
 
 impl AbsolutePath {
-    /// The path `path`. Panics if `path` is not absolute; in a `const`, the panic is a
-    /// compile error. A path that starts with `/` is absolute on every platform. On
-    /// Windows, a path that starts with `\`, such as `\data` or `\\server\share`, and a
-    /// drive path such as `C:\data` are also absolute.
+    /// Validates that `path` is absolute at compile time or runtime.
+    ///
+    /// A path that starts with `/` is absolute on all platforms. On Windows, paths that
+    /// start with `\` or a drive prefix such as `C:\` are also absolute. Panics if `path`
+    /// is relative.
     ///
     /// ```compile_fail
     /// use sandlang::policy::rules::AbsolutePath;
@@ -59,14 +60,15 @@ impl AbsolutePath {
 
 impl From<AbsolutePath> for PathPattern {
     fn from(path: AbsolutePath) -> PathPattern {
-        PathPattern::of_absolute(Path::new(path.0))
+        PathPattern::from_absolute(Path::new(path.0))
     }
 }
 
-/// A path pattern of a file rule, such as `/data`, `/srv/**/*.log`, or `**/.env`. A rule
-/// for a path also applies to every path under it. Parse one with [`str::parse`], which
-/// rejects a relative path, or make one that matches a path literally with
-/// [`PathPattern::literal`], or from an [`AbsolutePath`].
+/// A path pattern for a file rule, such as `/data`, `/srv/**/*.log`, or `**/.env`.
+///
+/// A rule for a path also applies to every path under it. Parse a wildcard pattern with
+/// [`str::parse`], or build a literal pattern with [`PathPattern::literal`] or
+/// [`AbsolutePath`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PathPattern {
     pub(crate) prefix: PathBuf,
@@ -77,26 +79,26 @@ impl std::str::FromStr for PathPattern {
     type Err = PatternError;
 
     fn from_str(text: &str) -> Result<PathPattern, PatternError> {
-        super::file::parse_path(&wild_tokens(text), false, None, None).map_err(PatternError)
+        super::file::parse_path(&unquoted_tokens(text), false, None, None).map_err(PatternError)
     }
 }
 
 impl PathPattern {
-    /// A pattern for `path` and every path under it. A `*` in `path` matches only itself.
-    /// Returns an error if `path` is relative.
+    /// Creates a pattern that matches `path` and its descendants literally. Returns an
+    /// error if `path` is relative.
     pub fn literal(path: impl AsRef<Path>) -> Result<PathPattern, PatternError> {
         let path = path.as_ref();
         if !super::path::is_absolute(path.as_os_str().as_encoded_bytes()) {
             return Err(PatternError(format!("path `{}` is not anchored: write an absolute path", path.display())));
         }
-        Ok(PathPattern::of_absolute(path))
+        Ok(PathPattern::from_absolute(path))
     }
 
-    fn of_absolute(path: &Path) -> PathPattern {
+    fn from_absolute(path: &Path) -> PathPattern {
         PathPattern { prefix: lexical(path), rest: vec![] }
     }
 
-    /// The pattern `**`, which matches every path.
+    /// Returns a pattern that matches every path (`**`).
     pub fn everything() -> PathPattern {
         PathPattern { prefix: PathBuf::new(), rest: vec![] }
     }
@@ -109,14 +111,15 @@ impl PathPattern {
     }
 }
 
-/// A name pattern of an `env` rule: an exact name, a `*` glob pattern such as `AWS_*`, or
-/// `*` for all variables. Parse one with [`str::parse`], or make one that matches a name
-/// literally with [`NamePattern::exact`].
+/// An environment variable name pattern for an `env` rule, such as `HOME`, `AWS_*`, or `*`.
+///
+/// Parse a wildcard pattern with [`str::parse`], or build a literal pattern with
+/// [`NamePattern::exact`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct NamePattern(pub(crate) NameKind);
 
 impl NamePattern {
-    /// A pattern that matches only `name`. A `*` in `name` matches only itself.
+    /// Creates a pattern that matches `name` literally.
     pub fn exact(name: impl Into<String>) -> NamePattern {
         NamePattern(NameKind::Exact(name.into()))
     }
@@ -126,7 +129,7 @@ impl std::str::FromStr for NamePattern {
     type Err = PatternError;
 
     fn from_str(name: &str) -> Result<NamePattern, PatternError> {
-        NameKind::from_tokens(&wild_tokens(name)).map(NamePattern).map_err(PatternError)
+        NameKind::from_tokens(&unquoted_tokens(name)).map(NamePattern).map_err(PatternError)
     }
 }
 
@@ -153,23 +156,22 @@ impl NameKind {
 /// The transports that a `net` or `http` rule controls.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Transports {
-    /// Connections that use TLS.
+    /// Encrypted TLS connections.
     Tls,
-    /// Connections that do not use TLS.
+    /// Unencrypted connections.
     Plaintext,
-    /// Connections that use TLS and connections that do not.
+    /// Both TLS and plaintext connections.
     Both,
 }
 
 impl Transports {
-    /// The transports of a rule without transport keywords: `Tls` for `Allow`, and `Both`
-    /// for `Deny` or `Prompt`.
+    /// Returns the default transports for a rule without transport keywords: `Tls` for
+    /// `Allow`, and `Both` for `Deny` or `Prompt`.
     pub(crate) fn default_for(decision: Decision) -> Transports {
         if decision == Decision::Allow { Transports::Tls } else { Transports::Both }
     }
 
-    /// Returns `true` if a rule with these transports controls a connection that uses TLS
-    /// when `tls` is `true`, or plaintext when `tls` is `false`.
+    /// Returns `true` if `self` includes the transport indicated by `tls`.
     pub(crate) fn controls(self, tls: bool) -> bool {
         match self {
             Transports::Tls => tls,
@@ -179,9 +181,10 @@ impl Transports {
     }
 }
 
-/// The HTTP request method of an `http` rule, such as `GET` or `M-SEARCH`. Parse one
-/// with [`str::parse`]: a known method in any case, or an uppercase token of letters,
-/// digits, `-`, and `_`. A transport keyword such as `TLS` is not a method.
+/// An HTTP request method for an `http` rule, such as `GET` or `M-SEARCH`.
+///
+/// [`str::parse`] accepts the standard methods in any case and custom uppercase tokens
+/// made of ASCII letters, digits, `-`, and `_`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct HttpMethod(Cow<'static, str>);
 
@@ -196,11 +199,11 @@ impl HttpMethod {
     pub const TRACE: HttpMethod = HttpMethod(Cow::Borrowed("TRACE"));
     pub const CONNECT: HttpMethod = HttpMethod(Cow::Borrowed("CONNECT"));
 
-    /// The methods that [`str::parse`] accepts in any case.
+    /// Standard HTTP methods that [`str::parse`] accepts in any case.
     const KNOWN: [HttpMethod; 9] =
         [Self::GET, Self::HEAD, Self::POST, Self::PUT, Self::PATCH, Self::DELETE, Self::OPTIONS, Self::TRACE, Self::CONNECT];
 
-    /// The method in uppercase, such as `GET`.
+    /// Returns the method name in uppercase, such as `"GET"`.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -228,17 +231,17 @@ impl std::str::FromStr for HttpMethod {
     }
 }
 
-/// The HTTP methods that an `http` rule controls: every method, or a list of at least one.
+/// The HTTP methods that an `http` rule matches.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Methods(Option<Vec<HttpMethod>>);
 
 impl Methods {
-    /// Every method.
+    /// Matches every HTTP method.
     pub fn all() -> Methods {
         Methods(None)
     }
 
-    /// Only `first` and the methods of `rest`, each once.
+    /// Matches only `first` and the methods in `rest`, deduplicated in order.
     pub fn only(first: HttpMethod, rest: impl IntoIterator<Item = HttpMethod>) -> Methods {
         let mut list = vec![first];
         for method in rest {
@@ -249,12 +252,12 @@ impl Methods {
         Methods(Some(list))
     }
 
-    /// The listed methods, or `None` for every method.
+    /// Returns the explicit method list, or `None` if all methods match.
     pub(crate) fn listed(&self) -> Option<&[HttpMethod]> {
         self.0.as_deref()
     }
 
-    /// Returns `true` if `method`, in uppercase, is one of these methods.
+    /// Returns `true` if `self` matches the uppercase method name `method`.
     pub(crate) fn matches(&self, method: &str) -> bool {
         self.0.as_ref().is_none_or(|list| list.iter().any(|m| m.as_str() == method))
     }
@@ -263,12 +266,12 @@ impl Methods {
 /// The methods of a `net` rule, which controls every HTTP request to its hosts.
 static ALL_METHODS: Methods = Methods(None);
 
-/// The names or the details of the custom capabilities that a `custom` rule controls.
+/// A name or detail pattern for a custom capability rule.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum CustomMatch {
-    /// Every name or detail.
+    /// Matches any name or detail.
     Any,
-    /// Only this name or detail. A `*` in it matches only itself.
+    /// Matches this exact string literally.
     Exact(String),
 }
 
@@ -498,16 +501,15 @@ impl RulePolicy {
     pub fn prompt_net(self, transports: Transports, host: NetPattern) -> Self {
         self.push(Decision::Prompt, RuleKind::Net(host, transports))
     }
-    /// Allows HTTP requests with one of `methods` over `transports` to URLs that match `url`.
+    /// Allows HTTP requests matching `methods` and `url` over `transports`.
     pub fn allow_http(self, transports: Transports, methods: Methods, url: UrlPattern) -> Self {
         self.push(Decision::Allow, RuleKind::Http(methods, url, transports))
     }
-    /// Denies HTTP requests with one of `methods` over `transports` to URLs that match `url`.
+    /// Denies HTTP requests matching `methods` and `url` over `transports`.
     pub fn deny_http(self, transports: Transports, methods: Methods, url: UrlPattern) -> Self {
         self.push(Decision::Deny, RuleKind::Http(methods, url, transports))
     }
-    /// Prompts before HTTP requests with one of `methods` over `transports` to URLs that match
-    /// `url`.
+    /// Prompts before HTTP requests matching `methods` and `url` over `transports`.
     pub fn prompt_http(self, transports: Transports, methods: Methods, url: UrlPattern) -> Self {
         self.push(Decision::Prompt, RuleKind::Http(methods, url, transports))
     }
@@ -571,16 +573,15 @@ impl RulePolicy {
     pub fn prompt_timezone(self) -> Self {
         self.push(Decision::Prompt, RuleKind::TimeZone)
     }
-    /// Allows the custom capabilities whose name matches `name` and whose detail matches `detail`.
+    /// Allows custom capabilities matching `name` and `detail`.
     pub fn allow_custom(self, name: CustomMatch, detail: CustomMatch) -> Self {
         self.push(Decision::Allow, RuleKind::Custom(name, detail))
     }
-    /// Denies the custom capabilities whose name matches `name` and whose detail matches `detail`.
+    /// Denies custom capabilities matching `name` and `detail`.
     pub fn deny_custom(self, name: CustomMatch, detail: CustomMatch) -> Self {
         self.push(Decision::Deny, RuleKind::Custom(name, detail))
     }
-    /// Prompts before the custom capabilities whose name matches `name` and whose detail matches
-    /// `detail`.
+    /// Prompts before custom capabilities matching `name` and `detail`.
     pub fn prompt_custom(self, name: CustomMatch, detail: CustomMatch) -> Self {
         self.push(Decision::Prompt, RuleKind::Custom(name, detail))
     }

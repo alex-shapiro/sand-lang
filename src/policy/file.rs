@@ -12,7 +12,7 @@
 //! ```
 
 use super::net::{HostKind, NetPattern, QUOTED_STAR_IN_HOST, UrlPattern, format_host_port, url_segments};
-use super::path::{Seg, Tok, wild_tokens};
+use super::path::{Seg, Tok, unquoted_tokens};
 use super::rules::{Access, CustomMatch, HttpMethod, Methods, NameKind, NamePattern, Origin, PathPattern, Rule, RuleKind, Transports};
 use super::{Capability, Decision, PatternError, RulePolicy};
 use crate::engine::Limits;
@@ -108,7 +108,7 @@ impl Word {
         let mut out = Vec::new();
         for p in &self.parts {
             match p {
-                Part::Raw(s) => out.extend(wild_tokens(s)),
+                Part::Raw(s) => out.extend(unquoted_tokens(s)),
                 Part::Quoted(s) => out.extend(s.chars().map(|c| (c, false))),
                 Part::Ref(_) => {}
             }
@@ -557,8 +557,8 @@ impl Context<'_> {
     }
 }
 
-/// Parses a path pattern. A path that starts with `./` or `../` needs `base`, and a path that
-/// starts with `~` needs `home`.
+/// Parses a tokenized path pattern. Uses `base` to resolve `./` and `../` paths. Uses
+/// `home` to resolve `~` paths.
 pub(crate) fn parse_path(text: &[Tok], bare: bool, base: Option<&Path>, home: Option<&Path>) -> Result<PathPattern, String> {
     let flat: String = text.iter().map(|t| t.0).collect();
     let sep = |c: char| c == '/' || (cfg!(windows) && c == '\\');

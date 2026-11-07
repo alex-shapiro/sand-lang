@@ -516,12 +516,12 @@ impl<'a> PathRules<'a> {
     }
 }
 
-/// Returns `true` if a rule with transports `a` controls every connection that a rule with transports `b` controls.
+/// Returns `true` if `a` includes every transport in `b`.
 fn transports_cover(a: Transports, b: Transports) -> bool {
     a == b || a == Transports::Both
 }
 
-/// Returns `true` if rules with transports `a` and `b` both control some connection.
+/// Returns `true` if `a` and `b` have a transport in common.
 fn transports_overlap(a: Transports, b: Transports) -> bool {
     a == b || a == Transports::Both || b == Transports::Both
 }
@@ -787,7 +787,6 @@ mod tests {
             lint("allow http tls plaintext api.example.com\nallow http plaintext api.example.com/x"),
             ["2:22: warning[redundant-rule]: `api.example.com` on line 1 already allows this"]
         );
-        // A rule for other transports cannot override between two rules.
         assert_eq!(
             lint("allow http tls a.example\ndeny http plaintext a.example/x\nallow http tls a.example/x/y"),
             ["3:16: warning[redundant-rule]: `a.example` on line 1 already allows this"]

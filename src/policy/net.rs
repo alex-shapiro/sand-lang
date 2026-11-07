@@ -1,14 +1,15 @@
 //! Host patterns, URL patterns, and IP address classification.
 
 use super::PatternError;
-use super::path::{Seg, Tok, wild_tokens};
+use super::path::{Seg, Tok, unquoted_tokens};
 use crate::vm::value::FxHashMap;
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
-/// A host pattern of a `net` rule, such as `api.example.com:443`, `*.example.com`, or
-/// `10.0.0.0/8`. Parse one with [`str::parse`].
+/// A host or IP pattern for a `net` rule, with an optional port.
+///
+/// Parse a pattern with [`str::parse`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct NetPattern {
     pub(crate) kind: HostKind,
@@ -38,7 +39,7 @@ impl std::str::FromStr for NetPattern {
     type Err = PatternError;
 
     fn from_str(pattern: &str) -> Result<NetPattern, PatternError> {
-        NetPattern::from_tokens(&wild_tokens(pattern)).map_err(PatternError)
+        NetPattern::from_tokens(&unquoted_tokens(pattern)).map_err(PatternError)
     }
 }
 
@@ -548,8 +549,10 @@ pub(crate) fn parse_port(text: &str) -> Option<u16> {
     if text.bytes().all(|b| b.is_ascii_digit()) { text.parse().ok() } else { None }
 }
 
-/// An address pattern of a `listen` rule: `ip:port`, `[ipv6]:port`, `ip`, `localhost`,
-/// `*:port`, or `*`. Parse one with [`str::parse`].
+/// A bind address pattern for a `listen` rule.
+///
+/// A pattern is an IP address, `localhost`, or `*`, with an optional `:port`. Parse a
+/// pattern with [`str::parse`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ListenPattern {
     host: ListenHost,
@@ -615,8 +618,9 @@ impl ListenPattern {
     }
 }
 
-/// A URL pattern of an `http` rule: a host pattern and an optional path pattern without a
-/// scheme, such as `api.example.com/v1/**`. Parse one with [`str::parse`].
+/// A host and path pattern for an `http` rule, such as `api.example.com/v1/**`.
+///
+/// Parse a pattern with [`str::parse`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct UrlPattern {
     pub(crate) host: NetPattern,
@@ -627,7 +631,7 @@ impl std::str::FromStr for UrlPattern {
     type Err = PatternError;
 
     fn from_str(text: &str) -> Result<UrlPattern, PatternError> {
-        UrlPattern::from_tokens(&wild_tokens(text)).map_err(PatternError)
+        UrlPattern::from_tokens(&unquoted_tokens(text)).map_err(PatternError)
     }
 }
 
@@ -775,7 +779,7 @@ mod tests {
     use proptest::prelude::*;
 
     fn url(text: &str) -> Result<UrlPattern, String> {
-        UrlPattern::from_tokens(&wild_tokens(text))
+        UrlPattern::from_tokens(&unquoted_tokens(text))
     }
 
     #[test]

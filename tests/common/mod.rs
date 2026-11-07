@@ -69,13 +69,15 @@ pub fn rt() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
 }
 
-/// A pattern for `path` and every path under it. Panics if `path` is relative.
-pub fn literal(path: impl AsRef<Path>) -> sandlang::policy::rules::PathPattern {
+/// Creates a literal [`sandlang::policy::rules::PathPattern`] for `path`. Panics if `path`
+/// is relative.
+pub fn literal_path(path: impl AsRef<Path>) -> sandlang::policy::rules::PathPattern {
     sandlang::policy::rules::PathPattern::literal(path).unwrap()
 }
 
-/// The rules of the policy file `text`, with relative paths resolved from `/`.
-pub fn policy_text(text: &str) -> sandlang::policy::rules::RulePolicy {
+/// Parses policy file `text` into a [`sandlang::policy::rules::RulePolicy`] with `/` as
+/// the base directory.
+pub fn parse_rules(text: &str) -> sandlang::policy::rules::RulePolicy {
     sandlang::policy::file::PolicyFile::parse(text, Path::new("/"), None).unwrap().rules
 }
 

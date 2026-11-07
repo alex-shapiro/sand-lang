@@ -82,16 +82,16 @@ let report = files.read("/out/report.txt")?;
 # }
 ```
 
-- **Policy.** `RulePolicy` has `allow_`, `deny_`, and `prompt_` builder methods for each capability kind, such as `allow_read`, `deny_net`, and `prompt_write`. Each builder method takes typed patterns, so it cannot fail:
-  - `PathPattern` is the pattern of a file rule. It must be absolute or start with `**`, because a builder has no base directory. `PathPattern::literal` makes a pattern that matches a host path literally. For a fixed directory, write `const SRV: AbsolutePath = AbsolutePath::new("/srv");` and use `PathPattern::from(SRV)`. In a `const`, a relative path is a compile error.
-  - `NetPattern` is the host of a `net` rule, `UrlPattern` is the URL of an `http` rule, and `ListenPattern` is the address of a `listen` rule.
-  - `NamePattern` is the variable name of an `env` rule. `NamePattern::exact` makes a pattern without wildcards.
-  - `Transports` sets the connections that a `net` or `http` rule controls: `Tls`, `Plaintext`, or `Both`.
-  - `Methods` sets the HTTP methods that an `http` rule controls: `Methods::all()`, or `Methods::only(first, rest)` with one or more `HttpMethod` values, such as `HttpMethod::GET`.
-  - `CustomMatch` sets the name and the detail that a `custom` rule controls: `Any`, or `Exact(text)`.
-
-  Each pattern type parses the policy file syntax with `str::parse`. It returns a `PatternError` if the pattern is not valid. For example: `allow_http(Transports::Plaintext, Methods::only(HttpMethod::GET, []), "localhost:8080/api/**".parse()?)`.
-- **Default rules.** `RulePolicy::default()` is empty. `RulePolicy::standard()` allows `stdout` and `stderr`. `RulePolicy::allow_all()` allows all capabilities for trusted scripts. `user_rules.with_defaults(host_rules)` adds fallback rules, which apply only if a request matches no rule in `user_rules`. `Config::custom_policy` replaces rule evaluation with a host-defined `CustomPolicy`.
+- **Policy.** `RulePolicy` has `allow_`, `deny_`, and `prompt_` builder methods for each capability kind, such as `allow_read`, `deny_net`, and `prompt_write`. Each builder method takes typed arguments. Pattern types parse policy file syntax with `str::parse` and return `PatternError` if the input is invalid:
+  - `PathPattern` is the path of a file rule. It must be absolute or start with `**`. `PathPattern::literal` matches a host path literally. `AbsolutePath::new` validates a static path at compile time, as in `const SRV: AbsolutePath = AbsolutePath::new("/srv");`. Convert an `AbsolutePath` with `PathPattern::from`.
+  - `NetPattern` is the host of a `net` rule.
+  - `UrlPattern` is the URL of an `http` rule.
+  - `ListenPattern` is the address of a `listen` rule.
+  - `NamePattern` is the variable name of an `env` rule. `NamePattern::exact` matches a literal variable name.
+  - `Transports` selects `Tls`, `Plaintext`, or `Both` for a `net` or `http` rule.
+  - `Methods` selects the HTTP methods for an `http` rule. Use `Methods::all()` for all methods, or `Methods::only(first, rest)` for specific `HttpMethod` values such as `HttpMethod::GET`.
+  - `CustomMatch` selects `Any` or `Exact(text)` for the name and detail of a `custom` rule.
+- **Default rules.** `RulePolicy::default()` is empty. `RulePolicy::standard()` allows `stdout` and `stderr`. `RulePolicy::allow_all()` allows all capabilities for trusted scripts. `user_rules.with_defaults(host_rules)` adds fallback rules for requests that do not match `user_rules`. `Config::custom_policy` replaces rule evaluation with a host-defined `CustomPolicy`.
 - **Limits.** `Limits` configures every resource bound described in [Sandbox and policies](/guide/sandbox/).
 - **Virtual file system.** `Config::memory_fs` replaces host disk access with an in-memory `MemFs`. Clones of a `MemFs` share the same underlying storage so the host can populate input files before a run and read output files afterward.
 - **Streams.** `Config::stdout` and `Config::stderr` redirect script output to a `MemorySink` or custom sink. `Config::stdin_bytes` supplies fixed input bytes. `Config::stdin_feed` and `Config::stdin_io_feed` return a `StdinFeed` that the host uses to send input while the script runs.
