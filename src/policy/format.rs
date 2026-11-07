@@ -1,7 +1,8 @@
 //! Policy file formatter.
 
 use super::file::PolicyError;
-use super::file::{HttpMethod, Line, lex, transport};
+use super::file::{Line, lex, transport};
+use super::rules::HttpMethod;
 
 /// Formats a policy file into canonical whitespace, quoting, keyword case,
 /// and aligned trailing comments. Returns an error only if a quoted string is

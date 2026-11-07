@@ -1,11 +1,11 @@
 //! Linter for policy files.
 
+use super::file::PolicyError;
 use super::file::parse;
-use super::file::{HttpMethod, PolicyError};
 use super::net::{HostKind, NetPattern, ProbeTargets, domains_above, enclosing_ranges, is_localhost};
 use super::path::{self, Pattern, Seg, name_counts};
 use super::rules::{
-    Connection, IMPORT, Precedence, READ, Rank, Rule, RuleKind, Transports, WRITE, fold_segments, method_matches, precedence,
+    Connection, HttpMethod, IMPORT, Precedence, READ, Rank, Rule, RuleKind, Transports, WRITE, fold_segments, method_matches, precedence,
     resolution_key,
 };
 use super::{Capability, Decision, PathSpace};

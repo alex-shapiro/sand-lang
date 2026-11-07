@@ -1,6 +1,6 @@
 //! Rule-based capability policies.
 
-use super::file::HttpMethod;
+use super::file;
 use super::net::{Dest, HostIndex, HostKind, ListenPattern, NetPattern, UrlPattern, parse_ip, url_segments};
 use super::path::{Glob, Seg, Tok, Trie, path_segments, wild_tokens};
 use super::{Capability, Decision, PathSpace, PatternError, fold_name, lexical, normalize_path};
@@ -187,6 +187,38 @@ impl Transports {
             Transports::Plaintext => !tls,
             Transports::Both => true,
         }
+    }
+}
+
+/// The HTTP request method of an `http` rule, such as `GET` or `M-SEARCH`. Parse one
+/// with [`str::parse`]: a known method in any case, or an uppercase token of letters,
+/// digits, `-`, and `_`. A transport keyword such as `TLS` is not a method.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct HttpMethod(String);
+
+impl HttpMethod {
+    /// The method in uppercase, such as `GET`.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for HttpMethod {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::str::FromStr for HttpMethod {
+    type Err = PatternError;
+
+    fn from_str(word: &str) -> Result<HttpMethod, PatternError> {
+        if file::transport(word).is_some() || file::invalid_transport_hint(word).is_some() || !file::is_method(word) {
+            return Err(PatternError(format!(
+                "`{word}` is not an HTTP method: expected a method such as `GET`, or an uppercase token such as `M-SEARCH`"
+            )));
+        }
+        Ok(HttpMethod(word.to_ascii_uppercase()))
     }
 }
 

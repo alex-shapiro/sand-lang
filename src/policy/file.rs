@@ -13,7 +13,7 @@
 
 use super::net::{HostKind, NetPattern, QUOTED_STAR_IN_HOST, UrlPattern, format_host_port, url_segments};
 use super::path::{Seg, Tok, wild_tokens};
-use super::rules::{Access, CustomName, Methods, NameKind, Origin, PathPattern, Rule, RuleKind, Transports};
+use super::rules::{Access, CustomName, HttpMethod, Methods, NameKind, Origin, PathPattern, Rule, RuleKind, Transports};
 use super::{Capability, Decision, PatternError, RulePolicy};
 use crate::engine::Limits;
 use crate::vm::value::FxHashMap;
@@ -179,7 +179,7 @@ pub(crate) fn transport(word: &str) -> Option<Transports> {
     }
 }
 
-fn invalid_transport_hint(word: &str) -> Option<String> {
+pub(crate) fn invalid_transport_hint(word: &str) -> Option<String> {
     let lower = word.to_ascii_lowercase();
     let advice = match lower.as_str() {
         "http" => "write `plaintext` for unencrypted connections such as `http://`",
@@ -303,38 +303,7 @@ fn is_name(s: &str) -> bool {
 
 const KNOWN_METHODS: [&str; 9] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE", "CONNECT"];
 
-/// The HTTP request method of an `http` rule, such as `GET` or `M-SEARCH`. Parse one
-/// with [`str::parse`]: a known method in any case, or an uppercase token of letters,
-/// digits, `-`, and `_`. A transport keyword such as `TLS` is not a method.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct HttpMethod(String);
-
-impl HttpMethod {
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for HttpMethod {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::str::FromStr for HttpMethod {
-    type Err = PatternError;
-
-    fn from_str(word: &str) -> Result<HttpMethod, PatternError> {
-        if transport(word).is_some() || invalid_transport_hint(word).is_some() || !is_method(word) {
-            return Err(PatternError(format!(
-                "`{word}` is not an HTTP method: expected a method such as `GET`, or an uppercase token such as `M-SEARCH`"
-            )));
-        }
-        Ok(HttpMethod(word.to_ascii_uppercase()))
-    }
-}
-
-fn is_method(word: &str) -> bool {
+pub(crate) fn is_method(word: &str) -> bool {
     KNOWN_METHODS.iter().any(|m| m.eq_ignore_ascii_case(word))
         || (word.bytes().any(|b| b.is_ascii_uppercase())
             && word.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-' || b == b'_'))

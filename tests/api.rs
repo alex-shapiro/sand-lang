@@ -2260,7 +2260,8 @@ fn rule_policy_deny_overrides_allow() {
 
 #[test]
 fn typed_rule_builders_make_the_rules_of_the_policy_file_syntax() {
-    use sandlang::policy::file::{HttpMethod, PolicyFile};
+    use sandlang::policy::file::PolicyFile;
+    use sandlang::policy::rules::HttpMethod;
     use sandlang::policy::rules::{Methods, NamePattern, RulePolicy, Transports};
     let methods = Methods::only("get".parse().unwrap(), ["M-SEARCH".parse().unwrap()]);
     let built = RulePolicy::new()
