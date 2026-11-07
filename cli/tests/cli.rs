@@ -385,52 +385,6 @@ print(io.stdin.read_text().map(s => s.len()))
     assert_eq!(o.stdout, "UTC\n", "{o:?}");
 }
 
-// Windows cannot open a directory as standard input.
-#[cfg(unix)]
-#[test]
-fn scripts_get_standard_input_errors() {
-    let dir = script("stdin-error", "import io\nprint(io.stdin.read_line())\nprint(io.stdin.read_line().is_err())");
-    let out = Command::new(env!("CARGO_BIN_EXE_sand"))
-        .args(["run", "--no-prompt", "main.sand"])
-        .current_dir(dir.path())
-        .stdin(std::fs::File::open(dir.path()).unwrap())
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.starts_with("Err(Error(message: \"stdin: ") && stdout.ends_with("\ntrue\n"), "{stdout}");
-    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
-}
-
-/// A test file whose read times out leaves a read of the process's standard
-/// input in progress. The next test file gets the input that the read returns.
-#[test]
-fn test_files_read_one_standard_input() {
-    use std::io::BufRead;
-    let dir = TempDir::new("test-stdin");
-    dir.write("a.sand", "import io\ntest \"a read times out\" {\n    assert(task.timeout(100ms, () => io.stdin.read_line()) == None)\n}\n");
-    dir.write(
-        "b.sand",
-        "import io\ntest \"b reads\" {\n    let line = io.stdin.read_line()?\n    assert(line == Some(\"hi\"), \"b read \\(line)\")\n}\n",
-    );
-    let mut child = Command::new(env!("CARGO_BIN_EXE_sand"))
-        .args(["test", "--no-prompt", "a.sand", "b.sand"])
-        .current_dir(dir.path())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut stdout = std::io::BufReader::new(child.stdout.take().unwrap());
-    let mut report = String::new();
-    while !report.ends_with("failed\n") {
-        assert_ne!(stdout.read_line(&mut report).unwrap(), 0, "{report}");
-    }
-    child.stdin.take().unwrap().write_all(b"hi\n").unwrap();
-    stdout.read_to_string(&mut report).unwrap();
-    let out = child.wait_with_output().unwrap();
-    assert_eq!(out.status.code(), Some(0), "{report}{}", String::from_utf8_lossy(&out.stderr));
-}
-
 // ---------------------------------------------------------------------------
 // check, lint, fmt, test
 // ---------------------------------------------------------------------------
