@@ -24,6 +24,7 @@ use crate::vm::sched::{RunEnd, Stop, Until};
 use crate::vm::value::Value;
 use crate::vm::{Trap, Vm};
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -557,7 +558,7 @@ impl Session {
         vm.host.output_bytes = 0;
         // Waiting for input may take any time.
         vm.deadline = None;
-        let r = vm.drive(Until::Idle).await;
+        let r = vm.drive::<Infallible>(Until::Idle).await;
         let r = r.and_then(|stop| vm.drain_output().map(|()| stop).map_err(|c| vm.trap_of(c, |_| vec![])));
         let r = match r {
             Ok(Stop::Prompt(cap)) => {
@@ -565,7 +566,6 @@ impl Session {
                 return Ok(false);
             }
             Ok(Stop::Idle | Stop::Main(_)) => return Ok(false),
-            Ok(Stop::Suspended(_)) => unreachable!("only a run with a main task suspends"),
             Ok(Stop::Exit(c)) => Ok(RunEnd::Exit(c)),
             Err(t) => Err(t),
         };
@@ -576,10 +576,9 @@ impl Session {
 /// The outcome of a run of the session's VM: the main task's result, or
 /// `None` if a task called `exit` (recorded in `exit_code`). On failure and
 /// exit, cancels all tasks.
-fn conclude(vm: &mut Vm, r: Result<RunEnd, Trap>, exit_code: &mut Option<i32>) -> Result<Option<Value>, Error> {
+fn conclude(vm: &mut Vm, r: Result<RunEnd<Infallible>, Trap>, exit_code: &mut Option<i32>) -> Result<Option<Value>, Error> {
     let e = match r {
         Ok(RunEnd::Finished(v)) => return Ok(Some(v)),
-        Ok(RunEnd::Suspended(_)) => unreachable!("a session runs without a journal"),
         Ok(RunEnd::Exit(c)) | Err(Trap::Exit(c)) => {
             *exit_code = Some(c);
             vm.abandon_tasks();

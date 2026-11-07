@@ -6,6 +6,7 @@ use crate::compile::{CompileInput, compile_more};
 use crate::diag::{Diag, Diagnostic, FileId, Span};
 use crate::files::Fs;
 use crate::files::mem::MemFs;
+use crate::journal::Suspension;
 use crate::modules::{ImportRef, ModuleGraph, Snapshot, Target, budget_error, native_info};
 use crate::native::convert::{Conversion, FromValue};
 use crate::native::func::Signature;
@@ -20,11 +21,12 @@ use crate::types::{FnId, ModId};
 use crate::vm::bytecode::Program;
 use crate::vm::heap::GcStats;
 use crate::vm::journal::Divergence;
-use crate::vm::sched::{IoShared, IoTable, RunEnd};
+use crate::vm::sched::{IoShared, IoTable, RunEnd, Suspends};
 use crate::vm::value::{Obj, TypeDesc, Value};
 use crate::vm::{Always, Host, HostFn, NativeEntry, OutputSink, Rng, SharedSink, StdinSource, TraceEntry, Trap, Vm, entropy_seed};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
+use std::convert::Infallible;
 use std::fmt;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -1440,7 +1442,7 @@ impl Engine {
         let entry = compiled.program.entry;
         let r = self
             .execute(compiled, cwd, async |vm: &mut Vm| {
-                let r = vm.run_main(entry).await;
+                let r = vm.run_main::<Suspension>(entry).await;
                 end_run(vm, r).await
             })
             .await;
@@ -1465,20 +1467,18 @@ impl Engine {
         for (tname, proto) in prog.tests.clone() {
             let mut vm = self.new_vm(prog.clone(), compiled.natives.clone(), cwd.clone(), true);
             vm.deadline = deadline;
-            let init = vm.run_main(prog.entry).await;
+            let init = vm.run_main::<Infallible>(prog.entry).await;
             let result = match init {
                 Ok(RunEnd::Finished(_)) => {
                     vm.ready.clear();
-                    let r = vm.run_main(proto).await;
+                    let r = vm.run_main::<Infallible>(proto).await;
                     match end_run(&mut vm, r).await {
                         Ok(RunEnd::Finished(_)) | Ok(RunEnd::Exit(0)) => Ok(()),
                         Ok(RunEnd::Exit(c)) => Err(format!("exited with code {c}")),
-                        Ok(RunEnd::Suspended(_)) => unreachable!("a test runs without a journal"),
                         Err(t) => Err(trap_message(t)),
                     }
                 }
                 Ok(RunEnd::Exit(c)) => Err(format!("module exited with code {c}")),
-                Ok(RunEnd::Suspended(_)) => unreachable!("a test runs without a journal"),
                 Err(t) => Err(trap_message(t)),
             };
             deadline = vm.deadline;
@@ -2089,7 +2089,7 @@ fn returned(vm: &Vm, v: Value, returns: &Returns) -> Result<Returned, crate::vm:
     }
 }
 
-async fn end_run(vm: &mut Vm, r: Result<RunEnd, Trap>) -> Result<RunEnd, Trap> {
+async fn end_run<S: Suspends>(vm: &mut Vm, r: Result<RunEnd<S>, Trap>) -> Result<RunEnd<S>, Trap> {
     match r {
         Ok(RunEnd::Finished(v)) => Ok(vm.end_tasks().await?.map_or(RunEnd::Finished(v), RunEnd::Exit)),
         r => r,

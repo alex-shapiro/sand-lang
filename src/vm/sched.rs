@@ -167,16 +167,39 @@ const CLOCK_SLICES: u32 = 32;
 /// host's executor run.
 const YIELD_EVERY: Duration = Duration::from_millis(2);
 
-/// Result of running the program's main task.
-pub enum RunEnd {
+/// Result of running the program's main task. `S` is how the run can
+/// suspend ([`Suspends`]).
+pub enum RunEnd<S> {
     Finished(Value),
     Exit(i32),
     /// The journaled run suspended ([`Stop::Suspended`]).
-    Suspended(Suspension),
+    Suspended(S),
 }
 
-/// Why [`Vm::drive`] returned.
-pub(crate) enum Stop {
+/// How a run can suspend when every task waits: [`Suspension`] for a run
+/// that can have a journal (SPEC §16.7), and [`Infallible`](std::convert::Infallible)
+/// for one that has none, such as a test or a session, so that its end has
+/// no suspension to handle.
+pub trait Suspends: Sized {
+    /// The suspension of `vm` if it suspends now.
+    #[doc(hidden)]
+    fn now(vm: &Vm) -> Option<Self>;
+}
+
+impl Suspends for Suspension {
+    fn now(vm: &Vm) -> Option<Suspension> {
+        vm.suspension()
+    }
+}
+
+impl Suspends for std::convert::Infallible {
+    fn now(_: &Vm) -> Option<std::convert::Infallible> {
+        None
+    }
+}
+
+/// Why [`Vm::drive`] returned. `S` is how the run can suspend.
+pub(crate) enum Stop<S> {
     /// The main task finished with this value.
     Main(Value),
     /// A task called `exit`.
@@ -188,7 +211,7 @@ pub(crate) enum Stop {
     /// Every task waits for a timer or a parked host call, and the journal
     /// lets the run suspend (SPEC §16.7). Only a run with a main task
     /// suspends.
-    Suspended(Suspension),
+    Suspended(S),
 }
 
 /// What [`Vm::drive`] runs the tasks for.
@@ -480,7 +503,7 @@ impl Vm {
     /// finishes, running the other tasks meanwhile, then returns (other
     /// tasks are left as they are). The wall-time limit is `self.deadline`.
     /// Buffered standard output is flushed at the end.
-    pub async fn run_main(&mut self, proto: u32) -> Result<RunEnd, Trap> {
+    pub async fn run_main<S: Suspends>(&mut self, proto: u32) -> Result<RunEnd<S>, Trap> {
         let closure = self.heap.alloc(Obj::Closure(proto, Box::new([])));
         self.run_call(closure, &[]).await
     }
@@ -488,7 +511,7 @@ impl Vm {
     /// Like [`Vm::run_main`], with `closure` called with `args` as the main
     /// task. A closure with captures takes no arguments: its captures fill
     /// the first registers.
-    pub(crate) async fn run_call(&mut self, closure: Value, args: &[Value]) -> Result<RunEnd, Trap> {
+    pub(crate) async fn run_call<S: Suspends>(&mut self, closure: Value, args: &[Value]) -> Result<RunEnd<S>, Trap> {
         let r = match self.start_main(closure, args) {
             Ok(fid) => match self.drive(Until::Main(fid)).await {
                 Ok(Stop::Exit(c)) => Ok(RunEnd::Exit(c)),
@@ -528,7 +551,7 @@ impl Vm {
     /// task, also stops when a task needs a permission prompt
     /// ([`Stop::Prompt`]). The future may be dropped where it waits: every
     /// task is then in the scheduler's tables.
-    pub(crate) async fn drive(&mut self, until: Until) -> Result<Stop, Trap> {
+    pub(crate) async fn drive<S: Suspends>(&mut self, until: Until) -> Result<Stop<S>, Trap> {
         let main = match until {
             Until::Main(fid) => Some(fid),
             Until::Idle | Until::EndTasks => None,
@@ -712,7 +735,7 @@ impl Vm {
                 return Ok(Stop::Idle);
             }
             if main.is_some()
-                && let Some(s) = self.suspension()
+                && let Some(s) = S::now(self)
             {
                 return Ok(Stop::Suspended(s));
             }

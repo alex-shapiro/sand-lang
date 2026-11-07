@@ -1587,7 +1587,7 @@ impl Vm {
         if self.ready.is_empty() {
             return Ok(None);
         }
-        let r = self.drive(sched::Until::EndTasks).await;
+        let r = self.drive::<std::convert::Infallible>(sched::Until::EndTasks).await;
         let r = r.and_then(|stop| self.drain_output().map(|()| stop).map_err(|c| self.trap_of(c, |_| vec![])));
         match r {
             Ok(sched::Stop::Exit(c)) => Ok(Some(c)),
