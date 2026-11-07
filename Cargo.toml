@@ -1,6 +1,6 @@
 [workspace]
 members = [".", "cli", "macros", "wasm", "site"]
-default-members = [".", "cli"]
+default-members = [".", "cli", "macros"]
 resolver = "3"
 
 [package]
