@@ -4,7 +4,7 @@ use super::convert::{Conversion, FromValue, HostError, IntoValue};
 use super::ty::{JournalArg, JournalData, SandType, Type};
 use crate::vm::journal::Effects;
 use crate::vm::value::Value;
-use crate::vm::{BoxFuture, Ctl, Finisher, NResult, NativeFn, Vm};
+use crate::vm::{AfterEffect, BoxFuture, Ctl, Finisher, NResult, NativeFn, Vm};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -99,33 +99,33 @@ pub trait VmReturn: SandType {
     /// The result outside the journal. A parked call is then a plain wait:
     /// only a run with a journal suspends.
     #[doc(hidden)]
-    fn into_result(self, vm: &mut Vm) -> NResult;
+    fn into_result(self, fx: &mut AfterEffect<'_>) -> NResult;
     #[doc(hidden)]
-    fn into_answer(self, vm: &mut Vm) -> Result<Answer, Ctl>;
+    fn into_answer(self, fx: &mut AfterEffect<'_>) -> Result<Answer, Ctl>;
 }
 
 impl<R: IntoValue> VmReturn for R {
     type Parking = NoPark;
-    fn into_result(self, vm: &mut Vm) -> NResult {
-        self.into_value(vm)
+    fn into_result(self, fx: &mut AfterEffect<'_>) -> NResult {
+        self.into_value(fx)
     }
-    fn into_answer(self, vm: &mut Vm) -> Result<Answer, Ctl> {
-        self.into_value(vm).map(Answer::Value)
+    fn into_answer(self, fx: &mut AfterEffect<'_>) -> Result<Answer, Ctl> {
+        self.into_value(fx).map(Answer::Value)
     }
 }
 
 impl<T: SandType, E: NativeError> VmReturn for Result<Parked<T, E>, E> {
     type Parking = Parks;
-    fn into_result(self, vm: &mut Vm) -> NResult {
+    fn into_result(self, fx: &mut AfterEffect<'_>) -> NResult {
         match self {
-            Ok(Parked { later, .. }) => later.finish(vm),
-            Err(e) => E::finish(Err::<(), E>(e), vm),
+            Ok(Parked { later, .. }) => later.finish(fx),
+            Err(e) => E::finish(Err::<(), E>(e), fx),
         }
     }
-    fn into_answer(self, vm: &mut Vm) -> Result<Answer, Ctl> {
+    fn into_answer(self, fx: &mut AfterEffect<'_>) -> Result<Answer, Ctl> {
         match self {
             Ok(Parked { later: Later(Wait::Future(fut), _), park: Some((park, tag)) }) => Ok(Answer::Parked(fut, park, tag)),
-            r => r.into_result(vm).map(Answer::Value),
+            r => r.into_result(fx).map(Answer::Value),
         }
     }
 }
@@ -469,7 +469,7 @@ enum Wait {
 /// Error type for a [`Later`] result ([`Ctl`] or [`HostError`]).
 pub trait NativeError: Send + Sized + 'static + sealed::Sealed {
     fn result_type(t: Type) -> Type;
-    fn finish<T: IntoValue>(r: Result<T, Self>, vm: &mut Vm) -> NResult;
+    fn finish<T: IntoValue>(r: Result<T, Self>, fx: &mut AfterEffect<'_>) -> NResult;
 }
 
 mod sealed {
@@ -485,8 +485,8 @@ impl NativeError for Ctl {
     fn result_type(t: Type) -> Type {
         t
     }
-    fn finish<T: IntoValue>(r: Result<T, Ctl>, vm: &mut Vm) -> NResult {
-        r.into_value(vm)
+    fn finish<T: IntoValue>(r: Result<T, Ctl>, fx: &mut AfterEffect<'_>) -> NResult {
+        r.into_value(fx)
     }
 }
 
@@ -494,31 +494,33 @@ impl NativeError for HostError {
     fn result_type(t: Type) -> Type {
         Type::result(t, Type::error())
     }
-    fn finish<T: IntoValue>(r: Result<T, HostError>, vm: &mut Vm) -> NResult {
-        r.into_value(vm)
+    fn finish<T: IntoValue>(r: Result<T, HostError>, fx: &mut AfterEffect<'_>) -> NResult {
+        r.into_value(fx)
     }
 }
 
 impl<T: IntoValue + Send + 'static, E: NativeError> Later<T, E> {
     /// Suspends the calling task until `fut` is resolved, and then executes the
-    /// returned closure on the VM thread to produce the Sand result.
+    /// returned closure on the VM thread to produce the Sand result. The
+    /// closure runs after the effect, so it sees the VM as an
+    /// [`AfterEffect`].
     ///
     /// Do not capture [`Value`]s in `fut`; the garbage collector does not trace
     /// pending futures while a task is suspended.
     pub fn new<F>(fut: impl Future<Output = F> + Send + 'static) -> Later<T, E>
     where
-        F: FnOnce(&mut Vm) -> Result<T, E> + Send + 'static,
+        F: FnOnce(&mut AfterEffect<'_>) -> Result<T, E> + Send + 'static,
     {
         let fut = async move {
             let finish = fut.await;
-            Box::new(move |vm: &mut Vm| E::finish(finish(vm), vm)) as Finisher
+            Box::new(move |fx: &mut AfterEffect<'_>| E::finish(finish(fx), fx)) as Finisher
         };
         Later(Wait::Future(Box::pin(fut)), PhantomData)
     }
 
     /// Completes immediately with `r` without suspending the calling task.
     pub fn ready(r: Result<T, E>) -> Later<T, E> {
-        Later(Wait::Ready(Box::new(move |vm: &mut Vm| E::finish(r, vm))), PhantomData)
+        Later(Wait::Ready(Box::new(move |fx: &mut AfterEffect<'_>| E::finish(r, fx))), PhantomData)
     }
 }
 
@@ -537,19 +539,19 @@ impl<T, E> Later<T, E> {
     /// ```compile_fail
     /// # use sandlang::native::convert::HostError;
     /// # use sandlang::native::func::{Later, Park, Parked};
-    /// # use sandlang::vm::Vm;
+    /// # use sandlang::vm::{AfterEffect, Vm};
     /// let mut m = sandlang::native::NativeModule::new("signals");
     /// m.vm_function("wait", |_: &mut Vm| -> Result<Parked<i64, HostError>, HostError> {
-    ///     Ok(Later::new(async { |_: &mut Vm| Ok::<_, HostError>(1) }).parked(Park::UntilResumed, "go"))
+    ///     Ok(Later::new(async { |_: &mut AfterEffect| Ok::<_, HostError>(1) }).parked(Park::UntilResumed, "go"))
     /// });
     /// ```
     pub fn parked(self, park: Park, tag: impl Into<String>) -> Parked<T, E> {
         Parked { later: self, park: Some((park, tag.into())) }
     }
 
-    pub(crate) fn finish(self, vm: &mut Vm) -> NResult {
+    pub(crate) fn finish(self, fx: &mut AfterEffect<'_>) -> NResult {
         match self.0 {
-            Wait::Ready(f) => f(vm),
+            Wait::Ready(f) => f(fx),
             Wait::Future(fut) => Err(Ctl::suspend(fut)),
         }
     }
@@ -615,7 +617,7 @@ macro_rules! fn_impls {
                         $(let $a = $a::from_value(vm, $a, &mut conv)?;)*
                         call(&self, $($a),*)
                     };
-                    vm.unchecked(|vm| r.into_value(vm))
+                    r.into_value(&mut AfterEffect::new(vm))
                 })
             }
         }
@@ -691,7 +693,7 @@ macro_rules! fn_impls {
                     $(let $a = $a::from_value(vm, $a, &mut conv)?;)*
                     vm.arm_retry_stress(call);
                     let r = self(vm, call, $($a),*);
-                    vm.unchecked(|vm| r.into_result(vm))
+                    r.into_result(&mut AfterEffect::new(vm))
                 })
             }
             fn into_journaled(self, _: &Arc<str>) -> Box<JournaledFn> {
@@ -701,7 +703,7 @@ macro_rules! fn_impls {
                     $(let $a = $a::from_value(vm, $a, &mut conv)?;)*
                     vm.arm_retry_stress(call);
                     let r = self(vm, call, $($a),*);
-                    vm.unchecked(|vm| r.into_answer(vm))
+                    r.into_answer(&mut AfterEffect::new(vm))
                 })
             }
         }
@@ -727,7 +729,7 @@ macro_rules! fn_impls {
                     let fut = self($($a),*);
                     Err(Ctl::suspend(Box::pin(async move {
                         let r = fut.await;
-                        Box::new(move |vm: &mut Vm| r.into_value(vm)) as Finisher
+                        Box::new(move |fx: &mut AfterEffect<'_>| r.into_value(fx)) as Finisher
                     })))
                 })
             }

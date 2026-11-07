@@ -277,7 +277,7 @@ fn accept_request(vm: &mut Vm, server: Val<Server>) -> Suspended<Request> {
     };
     let max_body = vm.host.limits.max_http_body;
     let clock = vm.host.clock.clone();
-    stream::suspend(closed.guard(serve), move |vm, received: Received| {
+    stream::suspend(closed.guard(serve), move |fx, received: Received| {
         let Received { head: (method, path, query, headers), framing, expects_continue, persists, http10, conn, res } = received;
         drop(res);
         let conn = conn.into_conn();
@@ -287,8 +287,8 @@ fn accept_request(vm: &mut Vm, server: Val<Server>) -> Suspended<Request> {
             let handle = conn.handle().expect("a new connection is open");
             BodyReader::new(Box::new(Framed::on_conn(&handle, framing, BODY_TIMEOUT, clock, expects_continue)), max_body, None)
         };
-        let exchange = vm.new_object(Exchange { persists, http10, server: weak })?;
-        let (body, conn) = (vm.new_object(Body::new(body))?, vm.new_object(conn)?);
+        let exchange = fx.new_object(Exchange { persists, http10, server: weak });
+        let (body, conn) = (fx.new_object(Body::new(body)), fx.new_object(conn));
         Ok(Request { method, path, query, headers, body, conn, exchange })
     })
 }

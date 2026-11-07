@@ -46,7 +46,9 @@ impl HostFn {
         }
     }
 }
-pub type Finisher = Box<dyn FnOnce(&mut Vm) -> NResult + Send>;
+/// What gives the result of an I/O operation once its future completes. It
+/// runs on the VM thread, after the operation's effect.
+pub type Finisher = Box<dyn FnOnce(&mut AfterEffect<'_>) -> NResult + Send>;
 pub type BoxFuture = Pin<Box<dyn Future<Output = Finisher> + Send>>;
 
 #[derive(Clone)]
@@ -302,6 +304,93 @@ enum Blocking {
     Ready(Value),
     /// The task waits. When it wakes, the engine cancels the tasks of `race`.
     Waits { race: Vec<Value> },
+}
+
+/// The VM as the code that follows an effect sees it: the finisher of an
+/// I/O operation, or the conversion of a native's result into a value.
+///
+/// The effect has occurred, so a memory limit must not fail this code: the
+/// engine would call the native again and repeat the effect. Thus the
+/// allocations of this view do not check the memory limit. The engine
+/// enforces the limit, after a collection, once it roots the result.
+///
+/// The view reads the VM through `Deref`, and allocates with its own
+/// methods. It does not lend the VM mutably, so the code cannot use the
+/// allocations of the VM that check the limit, such as [`Vm::map_insert`]:
+///
+/// ```compile_fail,E0596
+/// # use sandlang::vm::{AfterEffect, value::Value};
+/// fn finish(fx: &mut AfterEffect, m: Value) {
+///     let _ = (**fx).map_insert(m, Value::Unit, Value::Unit);
+/// }
+/// ```
+pub struct AfterEffect<'a> {
+    vm: &'a mut Vm,
+}
+
+impl<'a> AfterEffect<'a> {
+    /// The view of `vm` after an effect. The caller must enforce the memory
+    /// limit ([`Vm::enforce_limit`]) once it roots the result.
+    pub(crate) fn new(vm: &'a mut Vm) -> AfterEffect<'a> {
+        AfterEffect { vm }
+    }
+
+    /// The heap. Its allocations do not check the memory limit.
+    pub fn heap_mut(&mut self) -> &mut Heap {
+        &mut self.vm.heap
+    }
+
+    /// The heap, to allocate in, and the meter, to charge for the work.
+    pub(crate) fn heap_and_meter(&mut self) -> (&mut Heap, &Meter) {
+        (&mut self.vm.heap, &self.vm.meter)
+    }
+
+    /// Allocates the native object `x`.
+    pub fn new_object<T: crate::native::ObjectType>(&mut self, x: T) -> crate::native::ty::Val<T> {
+        crate::native::ty::Val::from_raw(self.vm.heap.alloc(Obj::Native(Box::new(x))))
+    }
+
+    pub fn new_str(&mut self, s: impl Into<compact_str::CompactString>) -> Value {
+        self.vm.new_str(s)
+    }
+
+    /// See [`Vm::short_str`].
+    pub fn short_str(&mut self, s: &str) -> Value {
+        self.vm.short_str(s)
+    }
+
+    pub fn new_value<T: value::ValueType>(&mut self, x: T) -> Value {
+        self.vm.new_value(x)
+    }
+
+    pub fn some(&mut self, v: Value) -> Value {
+        self.vm.some(v)
+    }
+
+    pub fn ok(&mut self, v: Value) -> Value {
+        self.vm.ok(v)
+    }
+
+    pub fn err(&mut self, v: Value) -> Value {
+        self.vm.err(v)
+    }
+
+    /// Inserts or replaces `k` in map `m` (see [`Vm::map_insert`]).
+    pub fn map_insert(&mut self, m: Value, k: Value, v: Value) -> Result<(), Ctl> {
+        self.vm.map_store::<heap::Unchecked>(m, k, v, true).map(drop)
+    }
+
+    /// Adds `k` to set `s` (see [`Vm::set_add`]).
+    pub fn set_add(&mut self, s: Value, k: Value) -> Result<(), Ctl> {
+        self.vm.set_insert::<heap::Unchecked>(s, k).map(drop)
+    }
+}
+
+impl std::ops::Deref for AfterEffect<'_> {
+    type Target = Vm;
+    fn deref(&self) -> &Vm {
+        self.vm
+    }
 }
 
 /// A call frame (20 bytes).
@@ -981,15 +1070,6 @@ impl Vm {
     /// limit (see [`Heap::check_memory`](heap::Heap::check_memory)).
     pub fn check_memory(&self, extra: usize) -> Result<(), Ctl> {
         self.heap.check_memory(extra)
-    }
-
-    /// Runs `f` with heap memory-limit checks disabled so post-effect result conversion cannot trigger a retry. Call [`Vm::enforce_limit`] after rooting the result.
-    /// A scope nests: it restores the state of the scope around it.
-    pub(crate) fn unchecked<R>(&mut self, f: impl FnOnce(&mut Vm) -> R) -> R {
-        let around = std::mem::replace(&mut self.heap.unchecked, true);
-        let r = f(self);
-        self.heap.unchecked = around;
-        r
     }
 
     /// Runs a full garbage collection if the heap exceeds the memory limit, and returns `Err(LimitKind::Memory)` if it still exceeds the limit. All live values must be rooted.

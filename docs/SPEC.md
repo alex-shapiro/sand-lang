@@ -2193,7 +2193,10 @@ kind: kind))` in Sand, whereas `?` converts a `Ctl` into a `HostError` that
   aborts the run with a runtime error via `Ctl::fail`, a resource limit error,
   or an exit code.
 - `Result<Later<T, E>, E>` suspends the calling task on a future and maps to
-  the same Sand return type as `Result<T, E>`.
+  the same Sand return type as `Result<T, E>`. When the future completes, its
+  closure gives the result. The closure runs after the effect, so it gets an
+  `AfterEffect`, a view of the VM whose allocations do not check the memory
+  limit.
 
 A host module can read host data of each run, its context. A module made with
 `NativeModule::<C>::with_context(name)` registers such functions with
@@ -2218,8 +2221,10 @@ performing any side effects. `Vm::reserve_io` and `Vm::resource_slot` take the
 attempt of the call, a limit that is still reached is an error, not a request
 for a collection. `Config::retry_stress` tests this requirement by
 failing the first memory or resource check in each `vm_function` call.
-Return-value conversion does not fail on the memory limit; instead, the engine
-collects garbage and checks the memory limit after the call completes.
+Return-value conversion does not fail on the memory limit: `IntoValue`
+converts through an `AfterEffect`, whose allocations do not check the limit.
+Instead, the engine collects garbage and checks the memory limit after the
+call completes.
 
 | Rust type                                           | Sand type                                              |
 | --------------------------------------------------- | ------------------------------------------------------ |

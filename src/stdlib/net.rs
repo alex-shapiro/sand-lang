@@ -535,9 +535,9 @@ fn conn_read_line(vm: &mut Vm, c: Val<Conn>) -> Suspended<Option<String>> {
             let line = read_line(&mut *h.reader.lock().await, &mut res).await?;
             Ok((line, res))
         }),
-        |vm, (line, res)| {
+        |fx, (line, res)| {
             drop(res);
-            line_read(vm, line, "line is not valid UTF-8")
+            line_read(fx, line, "line is not valid UTF-8")
         },
     )
 }

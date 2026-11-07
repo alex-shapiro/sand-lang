@@ -19,9 +19,9 @@ use crate::native::convert::{HostError, IntoValue};
 use crate::native::func::Call;
 use crate::native::ty::Val;
 use crate::stdlib::core::Error;
-use crate::vm::Vm;
 use crate::vm::iomem::Reservation;
 use crate::vm::journal::{Begun, BuildFn, Effects, EncodeFn, OpSpec, Outcome, Parking, Payload};
+use crate::vm::{AfterEffect, Vm};
 use jiff::SignedDuration;
 use js_sys::{Array, Function, Object, Promise, Reflect, Uint8Array};
 use std::cell::{Cell, RefCell};
@@ -112,16 +112,16 @@ struct Fetched {
 }
 
 impl Outcome for Fetched {
-    fn deliver(self: Box<Self>, vm: &mut Vm, _: BuildFn) -> crate::vm::NResult {
+    fn deliver(self: Box<Self>, fx: &mut AfterEffect<'_>, _: BuildFn) -> crate::vm::NResult {
         let r = match self.result {
             // The body stays reserved while it is read.
             Ok((status, headers, body, res)) => {
                 let reader = BodyReader::new(Box::new(MemoryBody::new(body)), self.max_body, Some(res));
-                response(vm, self.url, status, headers, reader).map_err(HostError::from)
+                Ok(response(fx, self.url, status, headers, reader))
             }
             Err(e) => Err(HostError::from(e)),
         };
-        r.into_value(vm)
+        r.into_value(fx)
     }
 
     fn settle(self: Box<Self>) -> Pin<Box<dyn Future<Output = EncodeFn> + Send>> {
@@ -130,7 +130,7 @@ impl Outcome for Fetched {
             Err(e) => Err(Error::from(e)),
         };
         let payload = outcome.to_payload();
-        Box::pin(std::future::ready(Box::new(move |_: &mut Vm| Ok(payload)) as EncodeFn))
+        Box::pin(std::future::ready(Box::new(move |_: &mut AfterEffect<'_>| Ok(payload)) as EncodeFn))
     }
 }
 

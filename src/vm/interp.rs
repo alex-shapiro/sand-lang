@@ -22,6 +22,7 @@ use super::compare::{
     values_le_metered, values_lt, values_lt_metered,
 };
 use super::display;
+use super::heap::{Checked, MemoryCheck};
 use super::meter::{MemoryLimit, Scratch, code_fuel, loop_fuel};
 use super::*;
 use crate::engine::LimitKind;
@@ -2205,7 +2206,7 @@ impl Vm {
     /// Inserts or replaces `k` in map `m`; returns the old value.
     #[inline(never)]
     pub fn map_insert(&mut self, m: Value, k: Value, v: Value) -> Result<Option<Value>, Ctl> {
-        self.map_store(m, k, v, true)
+        self.map_store::<Checked>(m, k, v, true)
     }
 
     /// `m[k] = v`: `map_insert` without the old value.
@@ -2219,11 +2220,11 @@ impl Vm {
                 let hash = hash_key(&self.heap, &self.meter, k)?;
                 match find_entry(&self.heap, &self.meter, &mo.index, hash, k, &mo.entries, |e| e.0)? {
                     Some(s) => Some(s),
-                    None => return self.map_push(m, k, v, hash),
+                    None => return self.map_push::<Checked>(m, k, v, hash),
                 }
             }
         };
-        let Some(s) = found else { return self.map_push(m, k, v, int_hash(k.as_int())) };
+        let Some(s) = found else { return self.map_push::<Checked>(m, k, v, int_hash(k.as_int())) };
         self.unpin(m)?;
         // The key stays: it equals `k`.
         let Obj::Map(mo) = self.heap.entries_mut_storing(m, s, false, &[v]) else { unreachable!() };
@@ -2237,11 +2238,12 @@ impl Vm {
     /// Inserts `k` with value `v` into map `m` unless it is there already;
     /// returns its existing value. One lookup, unlike `map_get` then `map_insert`.
     pub fn map_get_or_insert(&mut self, m: Value, k: Value, v: Value) -> Result<Option<Value>, Ctl> {
-        self.map_store(m, k, v, false)
+        self.map_store::<Checked>(m, k, v, false)
     }
 
-    /// `map_insert` (`replace`) or `map_get_or_insert`.
-    fn map_store(&mut self, m: Value, k: Value, v: Value, replace: bool) -> Result<Option<Value>, Ctl> {
+    /// `map_insert` (`replace`) or `map_get_or_insert`. `B` says whether
+    /// the growth of the map counts against the memory limit.
+    pub(crate) fn map_store<B: MemoryCheck>(&mut self, m: Value, k: Value, v: Value, replace: bool) -> Result<Option<Value>, Ctl> {
         let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
         let hash = hash_key(&self.heap, &self.meter, k)?;
         let found = find_entry(&self.heap, &self.meter, &mo.index, hash, k, &mo.entries, |e| e.0)?;
@@ -2255,19 +2257,19 @@ impl Vm {
             mo.set_dense(k, v);
             return Ok(old);
         }
-        self.map_push(m, k, v, hash)?;
+        self.map_push::<B>(m, k, v, hash)?;
         Ok(None)
     }
 
     /// Appends the entry `k: v` to map `m`, which does not hold `k` (with
     /// hash `hash`).
-    fn map_push(&mut self, m: Value, k: Value, v: Value, hash: u64) -> Result<(), Ctl> {
+    fn map_push<B: MemoryCheck>(&mut self, m: Value, k: Value, v: Value, hash: u64) -> Result<(), Ctl> {
         let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
         let end = mo.entries.len();
         if !slot_fits(end) {
             return Err(Ctl::fail("limit", "map too large"));
         }
-        let new_cap = self.entries_capacity(end, mo.entries.capacity(), MAP_ENTRY_SIZE, mo.index_growth(k))?;
+        let new_cap = self.entries_capacity::<B>(end, mo.entries.capacity(), MAP_ENTRY_SIZE, mo.index_growth(k))?;
         self.unpin(m)?;
         let Obj::Map(mo) = self.heap.entries_mut_storing(m, end, true, &[k, v]) else { unreachable!() };
         let keys = mo.entries.iter().enumerate().filter_map(|(s, e)| e.map(|(k, _)| (s, k)));
@@ -2290,21 +2292,23 @@ impl Vm {
     /// entry allocates `index` bytes for the index. Fails with the memory
     /// limit, before anything changes, if the growth does not fit.
     #[inline]
-    fn entries_capacity(&self, len: usize, cap: usize, elem: usize, index: usize) -> Result<usize, Ctl> {
+    fn entries_capacity<B: MemoryCheck>(&self, len: usize, cap: usize, elem: usize, index: usize) -> Result<usize, Ctl> {
         if len < cap && index == 0 {
             return Ok(cap);
         }
-        self.entries_capacity_slow(len, cap, elem, index)
+        self.entries_capacity_slow::<B>(len, cap, elem, index)
     }
 
     #[cold]
     #[inline(never)]
-    fn entries_capacity_slow(&self, len: usize, cap: usize, elem: usize, index: usize) -> Result<usize, Ctl> {
+    fn entries_capacity_slow<B: MemoryCheck>(&self, len: usize, cap: usize, elem: usize, index: usize) -> Result<usize, Ctl> {
         if len < cap {
-            self.check_memory(index)?;
+            if B::CHECKS {
+                self.check_memory(index)?;
+            }
             return Ok(cap);
         }
-        self.heap.grown_capacity(cap, len + 1, elem, index).map_err(Ctl::limit)
+        self.heap.grown_capacity::<B>(cap, len + 1, elem, index).map_err(Ctl::limit)
     }
 
     /// Removes `k` from map `m`; returns its value.
@@ -2332,6 +2336,12 @@ impl Vm {
 
     /// Adds `k` to set `s`; false if it was there already.
     pub fn set_add(&mut self, s: Value, k: Value) -> Result<bool, Ctl> {
+        self.set_insert::<Checked>(s, k)
+    }
+
+    /// `set_add`. `B` says whether the growth of the set counts against the
+    /// memory limit.
+    pub(crate) fn set_insert<B: MemoryCheck>(&mut self, s: Value, k: Value) -> Result<bool, Ctl> {
         let Obj::Set(so) = self.heap.get(s) else { return Err(internal("not a set")) };
         let hash = hash_key(&self.heap, &self.meter, k)?;
         if find_entry(&self.heap, &self.meter, &so.index, hash, k, &so.entries, |&e| e)?.is_some() {
@@ -2341,7 +2351,7 @@ impl Vm {
         if !slot_fits(end) {
             return Err(Ctl::fail("limit", "set too large"));
         }
-        let new_cap = self.entries_capacity(end, so.entries.capacity(), SET_ENTRY_SIZE, so.index_growth(k))?;
+        let new_cap = self.entries_capacity::<B>(end, so.entries.capacity(), SET_ENTRY_SIZE, so.index_growth(k))?;
         self.unpin(s)?;
         let Obj::Set(so) = self.heap.entries_mut_storing(s, end, true, &[k]) else { unreachable!() };
         let keys = so.entries.iter().enumerate().filter_map(|(s, e)| e.map(|k| (s, k)));

@@ -10,7 +10,7 @@ use crate::syntax::lexer::{is_ident, is_keyword};
 use crate::types::{ConstVal, MAX_CONST_DEPTH, MAX_CONST_PARTS, ValueTypeInfo};
 use crate::vm::heap::Heap;
 use crate::vm::value::{ChannelObj, MapObj, Obj, SetObj, TaskObj, TypeDesc, Value, ValueType};
-use crate::vm::{Ctl, HostFn, NativeFn, Vm};
+use crate::vm::{AfterEffect, Ctl, HostFn, NativeFn, Vm};
 use convert::{Conversion, FromValue, mismatch};
 use func::{AsyncHostFunction, Call, HostFunction, LocalCallParam, LocalParking, Signature, VmFunction};
 use std::any::{Any, TypeId};
@@ -243,19 +243,18 @@ pub fn struct_from_value<T: StructType>(
 
 #[doc(hidden)]
 pub fn struct_into_value<T: StructType>(
-    vm: &mut Vm,
+    fx: &mut AfterEffect<'_>,
     depth: convert::Depth,
-    write: impl FnOnce(&mut Vm, convert::Depth) -> Result<Box<[Value]>, Ctl>,
+    write: impl FnOnce(&mut AfterEffect<'_>, convert::Depth) -> Result<Box<[Value]>, Ctl>,
 ) -> Result<Value, Ctl> {
-    let Some(&def) = vm.prog.struct_types.get(&T::rust_type()) else {
+    let Some(&def) = fx.prog.struct_types.get(&T::rust_type()) else {
         return Err(Ctl::internal(format!("struct {}.{} is not loaded", T::MODULE, T::NAME)));
     };
-    let fields = write(vm, depth.enter()?)?;
+    let fields = write(fx, depth.enter()?)?;
     if fields.len() != T::FIELDS.len() {
         return Err(Ctl::internal(format!("struct {}.{} takes {} fields, not {}", T::MODULE, T::NAME, T::FIELDS.len(), fields.len())));
     }
-    vm.check_memory(fields.len() * std::mem::size_of::<Value>())?;
-    Ok(vm.heap.alloc(Obj::Struct(def, fields)))
+    Ok(fx.heap_mut().alloc(Obj::Struct(def, fields)))
 }
 
 #[doc(hidden)]
@@ -305,26 +304,25 @@ pub fn variant_field(vm: &Vm, v: Value, i: usize) -> Result<Value, Ctl> {
 
 #[doc(hidden)]
 pub fn variant_into_value<T: EnumType, const N: usize>(
-    vm: &mut Vm,
+    fx: &mut AfterEffect<'_>,
     depth: convert::Depth,
     index: usize,
-    write: impl FnOnce(&mut Vm, convert::Depth) -> Result<[Value; N], Ctl>,
+    write: impl FnOnce(&mut AfterEffect<'_>, convert::Depth) -> Result<[Value; N], Ctl>,
 ) -> Result<Value, Ctl> {
-    let Some(&first) = vm.prog.enum_types.get(&T::rust_type()) else {
+    let Some(&first) = fx.prog.enum_types.get(&T::rust_type()) else {
         return Err(Ctl::internal(format!("enum {}.{} is not loaded", T::MODULE, T::NAME)));
     };
     let id = first + index as u32;
     if N == 0 {
         return Ok(Value::Tag(id));
     }
-    let fields = write(vm, depth.enter()?)?;
+    let fields = write(fx, depth.enter()?)?;
     if let [p] = fields.as_slice()
         && let Some(v) = Value::variant1(id, *p)
     {
         return Ok(v);
     }
-    vm.check_memory(N * std::mem::size_of::<Value>())?;
-    Ok(vm.heap.new_variant(id, &fields))
+    Ok(fx.heap_mut().new_variant(id, &fields))
 }
 
 /// ```compile_fail

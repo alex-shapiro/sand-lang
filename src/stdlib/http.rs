@@ -21,9 +21,9 @@ use crate::network::{Network, Stream};
 use crate::platform::{Clock, Instant};
 use crate::policy::Policy;
 use crate::stdlib::core::Error;
-use crate::vm::Vm;
 use crate::vm::iomem::{Reservation, ResourceSlot};
 use crate::vm::journal::{Begun, BuildFn, Effects, EncodeFn, OpSpec, Outcome, Parking, Payload};
+use crate::vm::{AfterEffect, Vm};
 use jiff::SignedDuration;
 use std::future::Future;
 use std::pin::Pin;
@@ -742,17 +742,17 @@ impl BodyFrom {
 }
 
 impl Outcome for Exchange {
-    fn deliver(self: Box<Self>, vm: &mut Vm, _: BuildFn) -> crate::vm::NResult {
+    fn deliver(self: Box<Self>, fx: &mut AfterEffect<'_>, _: BuildFn) -> crate::vm::NResult {
         let Exchange { result, body } = *self;
         let r = match result {
             Ok(Exchanged { conn, head, close, head_res }) => {
                 drop(head_res);
                 let (status, headers, reader) = body.read(conn, head, close);
-                response(vm, body.url, status, headers, reader).map_err(HostError::from)
+                Ok(response(fx, body.url, status, headers, reader))
             }
             Err(e) => Err(HostError::from(e)),
         };
-        r.into_value(vm)
+        r.into_value(fx)
     }
 
     fn settle(self: Box<Self>) -> Pin<Box<dyn Future<Output = EncodeFn> + Send>> {
@@ -770,7 +770,7 @@ impl Outcome for Exchange {
                 Err(e) => Err(Error::from(e)),
             };
             let payload = outcome.to_payload();
-            Box::new(move |_: &mut Vm| Ok(payload)) as EncodeFn
+            Box::new(move |_: &mut AfterEffect<'_>| Ok(payload)) as EncodeFn
         })
     }
 }
@@ -875,10 +875,10 @@ fn upload(
                 None => Err(IoFailure::new("timeout", format!("connecting to {text} timed out"))),
             }
         },
-        move |vm, (mut conn, slot): (net::Conn, ResourceSlot)| {
+        move |fx, (mut conn, slot): (net::Conn, ResourceSlot)| {
             conn.attach(slot);
-            let conn = vm.new_object(conn)?;
-            let body = vm.new_object(Outgoing { head: Some(head.into_bytes()), delimit, left: length, finished: false, after: None })?;
+            let conn = fx.new_object(conn);
+            let body = fx.new_object(Outgoing { head: Some(head.into_bytes()), delimit, left: length, finished: false, after: None });
             Ok(Upload { url: url_text, conn, body, head_only, timeout: sand_timeout })
         },
     )
@@ -958,13 +958,13 @@ fn read_response(vm: &mut Vm, upload: Upload) -> Suspended<ResponseStream> {
                 None => Err(IoFailure::new("timeout", "timed out waiting for the response")),
             }
         }),
-        move |vm, head: ResponseHead| {
+        move |fx, head: ResponseHead| {
             let reader = if head.framing == Framing::Done {
                 BodyReader::empty(max_body)
             } else {
                 BodyReader::new(Box::new(Framed::on_conn(&h, head.framing, timeout, body_clock, false)), max_body, None)
             };
-            Ok(response(vm, url, head.status, head.headers, reader)?)
+            Ok(response(fx, url, head.status, head.headers, reader))
         },
     )
 }

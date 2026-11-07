@@ -2770,6 +2770,25 @@ fn an_async_result_that_needs_a_collection_does_not_end_the_run() {
 }
 
 #[test]
+fn a_finisher_that_builds_a_map_after_garbage_does_not_end_the_run() {
+    use sandlang::native::convert::HostError;
+    use sandlang::native::func::Later;
+    use sandlang::vm::AfterEffect;
+    let mut m = NativeModule::new("slow");
+    m.function("table", || -> Result<Later<HashMap<i64, String>, HostError>, HostError> {
+        Ok(Later::new(async { |_: &mut AfterEffect| Ok((0..10_000).map(|i| (i, format!("v{i}"))).collect()) }))
+    });
+    let limits = Limits { max_memory: Some(8 << 20), ..Limits::default() };
+    let config = Config::new().host_modules(HostModules::new([m]).unwrap()).limits(limits);
+    let src = "import slow\nvar s = \"y\".repeat(3_900_000)\ns = \"y\".repeat(3_900_000)\nprint(slow.table()?.len())";
+    let (r, out, _) = run_src(config.clone().retry_stress(true), src);
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!(out, "10000\n");
+    let (r, _, _) = run_src(config, "import slow\nlet s = \"y\".repeat(7_800_000)\nprint(slow.table()?.len() + s.len())");
+    assert!(matches!(r, Err(Error::Limit(LimitKind::Memory))), "{r:?}");
+}
+
+#[test]
 fn memory_limit_counts_big_buffers() {
     let config = Config::new().limits(Limits { max_memory: Some(4 << 20), ..Limits::default() });
     let (r, _, _) = run_src(config, "let s = \"x\".repeat(100000000)\nprint(s.len())");
@@ -3567,11 +3586,11 @@ fn host_modules_can_define_resources() {
 fn host_errors_are_err_values_and_aborts_end_the_run() {
     use sandlang::native::convert::HostError;
     use sandlang::native::func::Later;
-    use sandlang::vm::{Ctl, Vm};
+    use sandlang::vm::{AfterEffect, Ctl};
     let mut m = NativeModule::new("errs");
     m.function("now", || -> Result<i64, HostError> { Err(HostError::new("invalid", "bad input")) });
     m.function("later", || -> Result<Later<i64, HostError>, HostError> {
-        Ok(Later::new(async { |_: &mut Vm| Err(HostError::new("io", "broken pipe")) }))
+        Ok(Later::new(async { |_: &mut AfterEffect| Err(HostError::new("io", "broken pipe")) }))
     });
     m.function("abort", || -> Result<i64, HostError> { Err(Ctl::fail("invalid", "no result").into()) });
     let run = |src: &str| run_src(Config::new().host_modules(HostModules::new([m.clone()]).unwrap()), &format!("import errs\n{src}"));

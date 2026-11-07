@@ -141,8 +141,6 @@ pub struct Heap {
     pub(crate) fail_next_check: std::cell::Cell<bool>,
     /// The most memory seen in use by a memory check (see [`Heap::peak`]).
     peak: std::cell::Cell<usize>,
-    /// Disables memory-limit checks during post-effect result conversion (see [`Vm::unchecked`](crate::vm::Vm::unchecked)).
-    pub(crate) unchecked: bool,
     /// Buffers of pending I/O, counted against `limit` with the heap.
     pub io_memory: Arc<IoMemory>,
     worklist: Vec<u32>,
@@ -188,6 +186,28 @@ const STAGE_CHUNK: usize = 4096;
 const CHUNK_BYTES: usize = STAGE_CHUNK * std::mem::size_of::<(u32, Obj)>();
 /// The most boxes kept of each length: about what a minor collection frees.
 const SPARE_MAX: usize = 1 << 14;
+
+/// Whether an allocation checks the memory limit before it grows the heap:
+/// [`Checked`] or [`Unchecked`].
+pub trait MemoryCheck {
+    const CHECKS: bool;
+}
+
+/// The allocation checks the memory limit first.
+pub enum Checked {}
+
+impl MemoryCheck for Checked {
+    const CHECKS: bool = true;
+}
+
+/// The allocation does not check the memory limit: it follows an effect,
+/// and the engine enforces the limit once it roots the result
+/// ([`AfterEffect`](crate::vm::AfterEffect)).
+pub enum Unchecked {}
+
+impl MemoryCheck for Unchecked {
+    const CHECKS: bool = false;
+}
 
 /// New objects being built by [`Heap::staged`]. Their handles are taken in
 /// advance from the heap's free list (which cannot change while it is
@@ -374,7 +394,6 @@ impl Heap {
             stress: false,
             fail_next_check: std::cell::Cell::new(false),
             peak: std::cell::Cell::new(0),
-            unchecked: false,
             io_memory: IoMemory::new(limit, max_resources),
             worklist: Vec::new(),
             scan: Vec::new(),
@@ -575,7 +594,7 @@ impl Heap {
     /// covers buffers reserved by pending I/O).
     pub fn would_exceed(&self, extra: usize) -> bool {
         self.note_peak();
-        if self.fail_next_check.get() && !self.unchecked {
+        if self.fail_next_check.get() {
             self.fail_next_check.set(false);
             return true;
         }
@@ -585,7 +604,7 @@ impl Heap {
                 // Publishing on every check before the heap grows keeps the
                 // size that pending I/O checks against up to date.
                 self.io_memory.publish_heap(used);
-                !self.unchecked && used.saturating_add(self.io_memory.reserved()).saturating_add(extra) > l
+                used.saturating_add(self.io_memory.reserved()).saturating_add(extra) > l
             }
             None => extra > super::iomem::UNLIMITED,
         }
@@ -1019,7 +1038,7 @@ impl Heap {
         if need <= cap {
             return Ok(());
         }
-        let new_cap = self.grown_capacity(cap, need, VALUE_SIZE, 0)?;
+        let new_cap = self.grown_capacity::<Checked>(cap, need, VALUE_SIZE, 0)?;
         let Obj::List(l) = &mut self.objs[h as usize] else { unreachable!() };
         l.reserve_exact(new_cap - len);
         self.bytes += (l.capacity() - cap) * VALUE_SIZE;
@@ -1044,8 +1063,9 @@ impl Heap {
     /// does not fit in the memory limit, it grows by an eighth instead, which
     /// keeps appends amortized constant time and lets a script use almost
     /// all of its memory. Fails if that does not fit either.
-    pub fn grown_capacity(&self, cap: usize, need: usize, elem: usize, extra: usize) -> Result<usize, LimitKind> {
-        let fits = |c: usize| !self.would_exceed((c - cap).saturating_mul(elem).saturating_add(extra));
+    /// `B` says whether the growth counts against the limit.
+    pub fn grown_capacity<B: MemoryCheck>(&self, cap: usize, need: usize, elem: usize, extra: usize) -> Result<usize, LimitKind> {
+        let fits = |c: usize| !B::CHECKS || !self.would_exceed((c - cap).saturating_mul(elem).saturating_add(extra));
         let doubled = need.max(cap.saturating_mul(2)).max(4);
         if fits(doubled) {
             return Ok(doubled);
@@ -1096,7 +1116,7 @@ impl Heap {
         let Obj::Channel(c) = &self.objs[h as usize] else { return Ok(()) };
         let (len, cap) = (c.len(), c.queue().capacity());
         if len == cap {
-            let new_cap = self.grown_capacity(cap, len + 1, VALUE_SIZE, 0)?;
+            let new_cap = self.grown_capacity::<Checked>(cap, len + 1, VALUE_SIZE, 0)?;
             let Obj::Channel(c) = &mut self.objs[h as usize] else { unreachable!() };
             c.reserve_exact(new_cap - len);
             self.bytes += (c.queue().capacity() - cap) * VALUE_SIZE;

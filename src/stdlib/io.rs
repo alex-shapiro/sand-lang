@@ -12,7 +12,7 @@ use crate::stdlib::core::Error;
 use crate::vm::iomem::Reservation;
 use crate::vm::journal::{Begun, BuildFn, Effects, Identity, OpSpec, Outcome, Parking, Payload, Ready, Whole};
 use crate::vm::value::{Obj, Value, to_usize_saturating, u64_to_usize_saturating};
-use crate::vm::{Ctl, StdinSource, Vm};
+use crate::vm::{AfterEffect, Ctl, StdinSource, Vm};
 use std::collections::BTreeMap;
 use tokio::io::AsyncBufRead;
 use tokio::sync::Mutex;
@@ -106,7 +106,7 @@ fn read_stdin<R: IntoValue + Send + 'static>(
     vm: &mut Vm,
     call: Call,
     what: Read,
-    done: fn(&mut Vm, Option<Vec<u8>>) -> Result<R, HostError>,
+    done: fn(&Vm, Option<Vec<u8>>) -> Result<R, HostError>,
 ) -> Suspended<R> {
     if !vm.permit(&Capability::Stdin)? {
         return Err(HostError::new("permission_denied", "permission denied: read standard input"));
@@ -140,14 +140,14 @@ fn read_stdin<R: IntoValue + Send + 'static>(
         Ok((data, res))
     };
     if !external {
-        return stream::suspend(read, move |vm, (data, res)| {
+        return stream::suspend(read, move |fx, (data, res)| {
             drop(res);
-            done(vm, data)
+            done(fx, data)
         });
     }
-    let build: BuildFn = Box::new(move |vm: &mut Vm, payload: &[u8]| -> crate::vm::NResult {
+    let build: BuildFn = Box::new(move |fx: &mut AfterEffect<'_>, payload: &[u8]| -> crate::vm::NResult {
         let read = StdinRead::from_payload(payload).ok_or_else(|| Ctl::internal("a journaled read of standard input is malformed"))?;
-        read.map_err(HostError::from).and_then(|data| done(vm, data)).into_value(vm)
+        read.map_err(HostError::from).and_then(|data| done(fx, data)).into_value(fx)
     });
     let spec = OpSpec { kind: OpKind::Stdin, effects: Effects::Pure, parking: Parking::Never, pre_fuel: 0, timer: None };
     Err(match vm.begin_op(spec, describe)? {
@@ -163,7 +163,7 @@ fn read_stdin<R: IntoValue + Send + 'static>(
     .into())
 }
 
-fn input_line(vm: &mut Vm, line: Option<Vec<u8>>) -> Result<Option<String>, HostError> {
+fn input_line(vm: &Vm, line: Option<Vec<u8>>) -> Result<Option<String>, HostError> {
     line_read(vm, line, "stdin: input is not valid UTF-8")
 }
 
@@ -253,19 +253,19 @@ pub(crate) fn env_module() -> NativeModule {
         }
         let label = format!("env.get {name}");
         let lookup = move |vm: &mut Vm| match &vm.host.env {
-            Some(vars) => vars.iter().find(|(k, _)| *k == name).map(|(_, v)| v.clone()).into_value(vm),
-            None => process_var(&name).into_value(vm),
+            Some(vars) => vars.iter().find(|(k, _)| *k == name).map(|(_, v)| v.clone()).into_value(&mut AfterEffect::new(vm)),
+            None => process_var(&name).into_value(&mut AfterEffect::new(vm)),
         };
         Ok(Val::from_raw(process_input(vm, &label, lookup)?))
     });
     m.vm_function("args", |vm: &mut Vm| vm.host.args.clone());
     m.vm_function("vars", |vm: &mut Vm| -> Result<Val<BTreeMap<String, String>>, Ctl> {
         if !vm.permit(&Capability::Env("*".into()))? {
-            return Ok(Val::from_raw(BTreeMap::<String, String>::new().into_value(vm)?));
+            return Ok(Val::from_raw(BTreeMap::<String, String>::new().into_value(&mut AfterEffect::new(vm))?));
         }
         let lookup = |vm: &mut Vm| match &vm.host.env {
-            Some(vars) => vars.iter().cloned().collect::<BTreeMap<_, _>>().into_value(vm),
-            None => process_vars().into_value(vm),
+            Some(vars) => vars.iter().cloned().collect::<BTreeMap<_, _>>().into_value(&mut AfterEffect::new(vm)),
+            None => process_vars().into_value(&mut AfterEffect::new(vm)),
         };
         Ok(Val::from_raw(process_input(vm, "env.vars", lookup)?))
     });

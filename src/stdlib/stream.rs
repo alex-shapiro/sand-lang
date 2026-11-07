@@ -5,7 +5,7 @@ use super::io_kind;
 use crate::native::convert::{HostError, IntoValue};
 use crate::native::func::Later;
 use crate::vm::iomem::{MemoryLimit, Reservation};
-use crate::vm::{Ctl, Vm};
+use crate::vm::{AfterEffect, Ctl, Vm};
 use std::future::Future;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt};
 
@@ -39,11 +39,11 @@ pub(crate) type Suspended<T> = Result<Later<T, HostError>, HostError>;
 /// Suspends the calling task on `fut` and runs `ok` when `fut` succeeds.
 pub(crate) fn suspend<T: Send + 'static, R: IntoValue + Send + 'static>(
     fut: impl Future<Output = Result<T, IoFailure>> + Send + 'static,
-    ok: impl FnOnce(&mut Vm, T) -> Result<R, HostError> + Send + 'static,
+    ok: impl FnOnce(&mut AfterEffect<'_>, T) -> Result<R, HostError> + Send + 'static,
 ) -> Suspended<R> {
     Ok(Later::new(async move {
         let r = fut.await;
-        move |vm: &mut Vm| ok(vm, r?)
+        move |fx: &mut AfterEffect<'_>| ok(fx, r?)
     }))
 }
 
@@ -64,7 +64,7 @@ pub(crate) fn utf8(vm: &Vm, data: Vec<u8>) -> Result<Option<String>, Ctl> {
     Ok(String::from_utf8(data).ok())
 }
 
-pub(crate) fn bytes_read(_: &mut Vm, data: Option<Vec<u8>>) -> Result<Vec<u8>, HostError> {
+pub(crate) fn bytes_read(_: &Vm, data: Option<Vec<u8>>) -> Result<Vec<u8>, HostError> {
     Ok(data.unwrap_or_default())
 }
 

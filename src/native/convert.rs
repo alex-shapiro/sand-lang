@@ -7,7 +7,7 @@ use crate::types::ConstVal;
 use crate::types::traits;
 use crate::vm::meter::Scratch;
 use crate::vm::value::{Obj, Value, ValueType};
-use crate::vm::{Ctl, Vm};
+use crate::vm::{AfterEffect, Ctl, Vm};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::Hash;
 
@@ -73,20 +73,23 @@ impl Conversion {
     }
 }
 
-/// Converts a Rust return value into a Sand [`Value`], charging fuel and
-/// reserving heap memory.
+/// Converts a Rust return value into a Sand [`Value`], charging fuel.
+///
+/// The conversion follows the native's effect, so it allocates through an
+/// [`AfterEffect`], which does not check the memory limit: the engine
+/// enforces the limit once it roots the value.
 pub trait IntoValue: SandType {
     /// Converts `self`, which is nested `depth` structs and enum variants
     /// deep in the value that a native returns. Give `depth` to the
     /// conversion of each part of `self`.
-    fn into_value_at(self, vm: &mut Vm, depth: Depth) -> Result<Value, Ctl>;
+    fn into_value_at(self, fx: &mut AfterEffect<'_>, depth: Depth) -> Result<Value, Ctl>;
 
     /// Converts `self` as a whole value.
-    fn into_value(self, vm: &mut Vm) -> Result<Value, Ctl>
+    fn into_value(self, fx: &mut AfterEffect<'_>) -> Result<Value, Ctl>
     where
         Self: Sized,
     {
-        self.into_value_at(vm, Depth::default())
+        self.into_value_at(fx, Depth::default())
     }
 
     /// Converts `self` into a compile-time Sand [`Constant`], or returns `None`
@@ -197,7 +200,7 @@ macro_rules! scalar {
             }
         }
         impl IntoValue for $t {
-            fn into_value_at(self, _: &mut Vm, _: Depth) -> Result<Value, Ctl> {
+            fn into_value_at(self, _: &mut AfterEffect<'_>, _: Depth) -> Result<Value, Ctl> {
                 let $v = self;
                 Ok($into)
             }
@@ -221,7 +224,7 @@ impl FromValue for () {
     }
 }
 impl IntoValue for () {
-    fn into_value_at(self, _: &mut Vm, _: Depth) -> Result<Value, Ctl> {
+    fn into_value_at(self, _: &mut AfterEffect<'_>, _: Depth) -> Result<Value, Ctl> {
         Ok(Value::Unit)
     }
     fn to_const(&self) -> Option<Constant> {
@@ -240,7 +243,7 @@ impl FromValue for jiff::SignedDuration {
 }
 
 impl IntoValue for jiff::SignedDuration {
-    fn into_value_at(self, _: &mut Vm, _: Depth) -> Result<Value, Ctl> {
+    fn into_value_at(self, _: &mut AfterEffect<'_>, _: Depth) -> Result<Value, Ctl> {
         match i64::try_from(self.as_nanos()) {
             Ok(n) => Ok(Value::Dur(n)),
             Err(_) => Err(Ctl::fail("overflow", "the duration is out of range")),
@@ -252,7 +255,7 @@ impl IntoValue for jiff::SignedDuration {
 }
 
 impl IntoValue for Never {
-    fn into_value_at(self, _: &mut Vm, _: Depth) -> Result<Value, Ctl> {
+    fn into_value_at(self, _: &mut AfterEffect<'_>, _: Depth) -> Result<Value, Ctl> {
         match self {}
     }
 }
@@ -277,20 +280,18 @@ impl FromValue for String {
     }
 }
 impl IntoValue for String {
-    fn into_value_at(self, vm: &mut Vm, _: Depth) -> Result<Value, Ctl> {
-        vm.check_memory(self.len())?;
-        vm.charge_bytes(self.len())?;
-        Ok(vm.heap.new_str(self))
+    fn into_value_at(self, fx: &mut AfterEffect<'_>, _: Depth) -> Result<Value, Ctl> {
+        fx.charge_bytes(self.len())?;
+        Ok(fx.heap_mut().new_str(self))
     }
     fn to_const(&self) -> Option<Constant> {
         Some(Constant(ConstVal::Str(self.clone())))
     }
 }
 impl IntoValue for &str {
-    fn into_value_at(self, vm: &mut Vm, _: Depth) -> Result<Value, Ctl> {
-        vm.check_memory(self.len())?;
-        vm.charge_bytes(self.len())?;
-        Ok(vm.heap.new_str(self))
+    fn into_value_at(self, fx: &mut AfterEffect<'_>, _: Depth) -> Result<Value, Ctl> {
+        fx.charge_bytes(self.len())?;
+        Ok(fx.heap_mut().new_str(self))
     }
 }
 
@@ -313,20 +314,18 @@ impl FromValue for Vec<u8> {
     }
 }
 impl IntoValue for Vec<u8> {
-    fn into_value_at(self, vm: &mut Vm, _: Depth) -> Result<Value, Ctl> {
-        vm.check_memory(self.len())?;
-        vm.charge_bytes(self.len())?;
-        Ok(vm.heap.new_bytes(self))
+    fn into_value_at(self, fx: &mut AfterEffect<'_>, _: Depth) -> Result<Value, Ctl> {
+        fx.charge_bytes(self.len())?;
+        Ok(fx.heap_mut().new_bytes(self))
     }
     fn to_const(&self) -> Option<Constant> {
         Some(Constant(ConstVal::Bytes(self.clone())))
     }
 }
 impl IntoValue for &[u8] {
-    fn into_value_at(self, vm: &mut Vm, _: Depth) -> Result<Value, Ctl> {
-        vm.check_memory(self.len())?;
-        vm.charge_bytes(self.len())?;
-        Ok(vm.heap.new_bytes(self))
+    fn into_value_at(self, fx: &mut AfterEffect<'_>, _: Depth) -> Result<Value, Ctl> {
+        fx.charge_bytes(self.len())?;
+        Ok(fx.heap_mut().new_bytes(self))
     }
 }
 
@@ -340,14 +339,13 @@ impl<T: FromValue> FromValue for Vec<T> {
     }
 }
 impl<T: IntoValue> IntoValue for Vec<T> {
-    fn into_value_at(self, vm: &mut Vm, depth: Depth) -> Result<Value, Ctl> {
-        vm.check_memory(self.len().saturating_mul(std::mem::size_of::<Value>()))?;
-        vm.charge(self.len() as u64)?;
+    fn into_value_at(self, fx: &mut AfterEffect<'_>, depth: Depth) -> Result<Value, Ctl> {
+        fx.charge(self.len() as u64)?;
         let mut items = Vec::with_capacity(self.len());
         for x in self {
-            items.push(x.into_value_at(vm, depth)?);
+            items.push(x.into_value_at(fx, depth)?);
         }
-        Ok(vm.heap.new_list(items))
+        Ok(fx.heap_mut().new_list(items))
     }
     fn to_const(&self) -> Option<Constant> {
         Some(Constant(ConstVal::List(super::collect_consts(self.iter().map(T::to_const))?)))
@@ -362,8 +360,8 @@ impl<T: for<'a> FromValue<Item<'a> = T>> FromValue for Box<T> {
     }
 }
 impl<T: IntoValue> IntoValue for Box<T> {
-    fn into_value_at(self, vm: &mut Vm, depth: Depth) -> Result<Value, Ctl> {
-        (*self).into_value_at(vm, depth)
+    fn into_value_at(self, fx: &mut AfterEffect<'_>, depth: Depth) -> Result<Value, Ctl> {
+        (*self).into_value_at(fx, depth)
     }
     fn to_const(&self) -> Option<Constant> {
         (**self).to_const()
@@ -377,13 +375,13 @@ impl<T: FromValue> FromValue for Option<T> {
     }
 }
 impl<T: IntoValue> IntoValue for Option<T> {
-    fn into_value_at(self, vm: &mut Vm, depth: Depth) -> Result<Value, Ctl> {
+    fn into_value_at(self, fx: &mut AfterEffect<'_>, depth: Depth) -> Result<Value, Ctl> {
         Ok(match self {
             Some(x) => {
-                let v = x.into_value_at(vm, depth)?;
-                vm.some(v)
+                let v = x.into_value_at(fx, depth)?;
+                fx.some(v)
             }
-            None => vm.none(),
+            None => fx.none(),
         })
     }
     fn to_const(&self) -> Option<Constant> {
@@ -395,16 +393,16 @@ impl<T: IntoValue> IntoValue for Option<T> {
 }
 
 impl<T: IntoValue, E: IntoHostError> IntoValue for Result<T, E> {
-    fn into_value_at(self, vm: &mut Vm, depth: Depth) -> Result<Value, Ctl> {
+    fn into_value_at(self, fx: &mut AfterEffect<'_>, depth: Depth) -> Result<Value, Ctl> {
         match self {
             Ok(x) => {
-                let v = x.into_value_at(vm, depth)?;
-                Ok(vm.ok(v))
+                let v = x.into_value_at(fx, depth)?;
+                Ok(fx.ok(v))
             }
             Err(e) => match *e.into_host_error().0 {
                 HostErrorKind::Error { kind, message } => {
-                    let e = crate::stdlib::core::Error { kind, message }.into_value_at(vm, depth)?;
-                    Ok(vm.err(e))
+                    let e = crate::stdlib::core::Error { kind, message }.into_value_at(fx, depth)?;
+                    Ok(fx.err(e))
                 }
                 HostErrorKind::Abort(c) => Err(c),
             },
@@ -413,17 +411,17 @@ impl<T: IntoValue, E: IntoHostError> IntoValue for Result<T, E> {
 }
 
 impl<T: SandType, E: NativeError> IntoValue for Result<Later<T, E>, E> {
-    fn into_value_at(self, vm: &mut Vm, _: Depth) -> Result<Value, Ctl> {
+    fn into_value_at(self, fx: &mut AfterEffect<'_>, _: Depth) -> Result<Value, Ctl> {
         match self {
-            Ok(later) => later.finish(vm),
-            Err(e) => E::finish(Err::<(), E>(e), vm),
+            Ok(later) => later.finish(fx),
+            Err(e) => E::finish(Err::<(), E>(e), fx),
         }
     }
 }
 
 impl<T: IntoValue> IntoValue for Result<T, Ctl> {
-    fn into_value_at(self, vm: &mut Vm, depth: Depth) -> Result<Value, Ctl> {
-        self?.into_value_at(vm, depth)
+    fn into_value_at(self, fx: &mut AfterEffect<'_>, depth: Depth) -> Result<Value, Ctl> {
+        self?.into_value_at(fx, depth)
     }
 }
 
@@ -443,17 +441,15 @@ where
     m.entries.iter().flatten().map(|&(k, x)| Ok((K::from_value(vm, k, conv)?, V::from_value(vm, x, conv)?))).collect()
 }
 fn write_map<K: IntoValue, V: IntoValue>(
-    vm: &mut Vm,
+    fx: &mut AfterEffect<'_>,
     depth: Depth,
-    len: usize,
     items: impl IntoIterator<Item = (K, V)>,
 ) -> Result<Value, Ctl> {
-    vm.check_memory(len.saturating_mul(4 * std::mem::size_of::<Value>()))?;
-    let m = vm.heap.alloc(Obj::Map(Box::default()));
+    let m = fx.heap_mut().alloc(Obj::Map(Box::default()));
     for (k, v) in items {
-        let k = k.into_value_at(vm, depth)?;
-        let v = v.into_value_at(vm, depth)?;
-        vm.map_insert(m, k, v)?;
+        let k = k.into_value_at(fx, depth)?;
+        let v = v.into_value_at(fx, depth)?;
+        fx.map_insert(m, k, v)?;
     }
     Ok(m)
 }
@@ -466,11 +462,11 @@ impl<K: for<'k> FromValue<Item<'k> = K> + Eq + Hash, V: FromValue> FromValue for
 /// Sorts keys before insertion so the Sand map's iteration order is
 /// deterministic.
 impl<K: IntoValue + Ord, V: IntoValue> IntoValue for HashMap<K, V> {
-    fn into_value_at(self, vm: &mut Vm, depth: Depth) -> Result<Value, Ctl> {
+    fn into_value_at(self, fx: &mut AfterEffect<'_>, depth: Depth) -> Result<Value, Ctl> {
         let mut items: Vec<(K, V)> = self.into_iter().collect();
-        vm.charge(sort_cost(items.len()))?;
+        fx.charge(sort_cost(items.len()))?;
         items.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-        write_map(vm, depth, items.len(), items)
+        write_map(fx, depth, items)
     }
     fn to_const(&self) -> Option<Constant> {
         let mut items: Vec<(&K, &V)> = self.iter().collect();
@@ -485,8 +481,8 @@ impl<K: for<'k> FromValue<Item<'k> = K> + Ord, V: FromValue> FromValue for BTree
     }
 }
 impl<K: IntoValue, V: IntoValue> IntoValue for BTreeMap<K, V> {
-    fn into_value_at(self, vm: &mut Vm, depth: Depth) -> Result<Value, Ctl> {
-        write_map(vm, depth, self.len(), self)
+    fn into_value_at(self, fx: &mut AfterEffect<'_>, depth: Depth) -> Result<Value, Ctl> {
+        write_map(fx, depth, self)
     }
     fn to_const(&self) -> Option<Constant> {
         map_const(self)
@@ -500,8 +496,8 @@ impl<K: for<'k> FromValue<Item<'k> = K> + Eq + Hash, V: FromValue> FromValue for
     }
 }
 impl<K: IntoValue, V: IntoValue> IntoValue for indexmap::IndexMap<K, V> {
-    fn into_value_at(self, vm: &mut Vm, depth: Depth) -> Result<Value, Ctl> {
-        write_map(vm, depth, self.len(), self)
+    fn into_value_at(self, fx: &mut AfterEffect<'_>, depth: Depth) -> Result<Value, Ctl> {
+        write_map(fx, depth, self)
     }
     fn to_const(&self) -> Option<Constant> {
         map_const(self)
@@ -519,12 +515,11 @@ fn read_set<T: for<'k> FromValue<Item<'k> = T>, C: FromIterator<T>>(vm: &Vm, v: 
     vm.charge(s.live as u64)?;
     s.entries.iter().flatten().map(|&x| T::from_value(vm, x, conv)).collect()
 }
-fn write_set<T: IntoValue>(vm: &mut Vm, depth: Depth, len: usize, items: impl IntoIterator<Item = T>) -> Result<Value, Ctl> {
-    vm.check_memory(len.saturating_mul(3 * std::mem::size_of::<Value>()))?;
-    let s = vm.heap.alloc(Obj::Set(Box::default()));
+fn write_set<T: IntoValue>(fx: &mut AfterEffect<'_>, depth: Depth, items: impl IntoIterator<Item = T>) -> Result<Value, Ctl> {
+    let s = fx.heap_mut().alloc(Obj::Set(Box::default()));
     for x in items {
-        let x = x.into_value_at(vm, depth)?;
-        vm.set_add(s, x)?;
+        let x = x.into_value_at(fx, depth)?;
+        fx.set_add(s, x)?;
     }
     Ok(s)
 }
@@ -537,11 +532,11 @@ impl<T: for<'k> FromValue<Item<'k> = T> + Eq + Hash> FromValue for HashSet<T> {
 /// Sorts elements before insertion so the Sand set's iteration order is
 /// deterministic.
 impl<T: IntoValue + Ord> IntoValue for HashSet<T> {
-    fn into_value_at(self, vm: &mut Vm, depth: Depth) -> Result<Value, Ctl> {
+    fn into_value_at(self, fx: &mut AfterEffect<'_>, depth: Depth) -> Result<Value, Ctl> {
         let mut items: Vec<T> = self.into_iter().collect();
-        vm.charge(sort_cost(items.len()))?;
+        fx.charge(sort_cost(items.len()))?;
         items.sort_unstable();
-        write_set(vm, depth, items.len(), items)
+        write_set(fx, depth, items)
     }
     fn to_const(&self) -> Option<Constant> {
         let mut items: Vec<&T> = self.iter().collect();
@@ -556,8 +551,8 @@ impl<T: for<'k> FromValue<Item<'k> = T> + Ord> FromValue for BTreeSet<T> {
     }
 }
 impl<T: IntoValue> IntoValue for BTreeSet<T> {
-    fn into_value_at(self, vm: &mut Vm, depth: Depth) -> Result<Value, Ctl> {
-        write_set(vm, depth, self.len(), self)
+    fn into_value_at(self, fx: &mut AfterEffect<'_>, depth: Depth) -> Result<Value, Ctl> {
+        write_set(fx, depth, self)
     }
     fn to_const(&self) -> Option<Constant> {
         Some(Constant(ConstVal::Set(super::collect_consts(self.iter().map(T::to_const))?)))
@@ -592,10 +587,9 @@ macro_rules! tuple_impls {
             }
         }
         impl<$($n: IntoValue),+> IntoValue for ($($n,)+) {
-            fn into_value_at(self, vm: &mut Vm, depth: Depth) -> Result<Value, Ctl> {
-                let items = [$(self.$i.into_value_at(vm, depth)?),+];
-                vm.check_memory(items.len() * std::mem::size_of::<Value>())?;
-                Ok(vm.heap.new_tuple(&items))
+            fn into_value_at(self, fx: &mut AfterEffect<'_>, depth: Depth) -> Result<Value, Ctl> {
+                let items = [$(self.$i.into_value_at(fx, depth)?),+];
+                Ok(fx.heap_mut().new_tuple(&items))
             }
             fn to_const(&self) -> Option<Constant> {
                 Some(Constant(ConstVal::Tuple(vec![$(self.$i.to_const()?.0),+])))
@@ -634,10 +628,10 @@ macro_rules! __value_type_impls {
         impl $crate::native::convert::IntoValue for $t {
             fn into_value_at(
                 self,
-                vm: &mut $crate::vm::Vm,
+                fx: &mut $crate::vm::AfterEffect<'_>,
                 _: $crate::native::convert::Depth,
             ) -> ::std::result::Result<$crate::vm::value::Value, $crate::vm::Ctl> {
-                $crate::native::convert::value_into(self, vm)
+                ::std::result::Result::Ok(fx.new_value(self))
             }
         }
     };
@@ -646,14 +640,6 @@ macro_rules! __value_type_impls {
 #[doc(hidden)]
 pub fn value_from<T: ValueType>(vm: &Vm, v: Value) -> Result<T, Ctl> {
     vm.heap.value::<T>(v).ok_or_else(mismatch::<T>)
-}
-
-#[doc(hidden)]
-pub fn value_into<T: ValueType>(x: T, vm: &mut Vm) -> Result<Value, Ctl> {
-    if T::PACKING.is_none() {
-        vm.check_memory(ValueType::size(&x))?;
-    }
-    Ok(vm.new_value(x))
 }
 
 macro_rules! handle {
@@ -665,7 +651,7 @@ macro_rules! handle {
             }
         }
         impl<$($g)*> IntoValue for $t {
-            fn into_value_at(self, _: &mut Vm, _: Depth) -> Result<Value, Ctl> {
+            fn into_value_at(self, _: &mut AfterEffect<'_>, _: Depth) -> Result<Value, Ctl> {
                 Ok(self.raw())
             }
         }

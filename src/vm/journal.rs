@@ -14,7 +14,7 @@
 use super::bytecode::Program;
 use super::iomem::IoMemory;
 use super::value::{MapObj, Obj, SetObj, Value};
-use super::{BoxFuture, Ctl, CtlKind, End, Finisher, NResult, Request, Vm};
+use super::{AfterEffect, BoxFuture, Ctl, CtlKind, End, Finisher, NResult, Request, Vm};
 use crate::journal::{CallResult, Durable, Entry, EntryData, EntryKind, Journal, OpDone, OpEnd, OpKind, OpStart, ParkedCall};
 use crate::native::func::{Answer, Call, JournaledFn, Park};
 use crate::platform::{Instant, SystemTime};
@@ -34,18 +34,19 @@ pub struct Divergence {
 }
 
 /// Builds the result of a recorded operation from the journal's encoding of
-/// its outcome. It runs in record and in replay alike.
-pub(crate) type BuildFn = Box<dyn FnOnce(&mut Vm, &[u8]) -> NResult + Send>;
+/// its outcome. It runs in record and in replay alike, after the effect.
+pub(crate) type BuildFn = Box<dyn FnOnce(&mut AfterEffect<'_>, &[u8]) -> NResult + Send>;
 
-/// The journal's encoding of an outcome, made on the VM thread.
-pub(crate) type EncodeFn = Box<dyn FnOnce(&mut Vm) -> Result<Vec<u8>, Ctl> + Send>;
+/// The journal's encoding of an outcome, made on the VM thread after the
+/// effect.
+pub(crate) type EncodeFn = Box<dyn FnOnce(&mut AfterEffect<'_>) -> Result<Vec<u8>, Ctl> + Send>;
 
 /// The outcome of a live operation whose result the journal records.
 pub(crate) trait Outcome: Send + 'static {
     /// The result as the outcome arrives, in a run without a journal (an
     /// HTTP body streams). `build` makes the result from the journal's
     /// encoding of an outcome.
-    fn deliver(self: Box<Self>, vm: &mut Vm, build: BuildFn) -> NResult;
+    fn deliver(self: Box<Self>, fx: &mut AfterEffect<'_>, build: BuildFn) -> NResult;
 
     /// Waits for the whole outcome, which a journaled run records as one
     /// entry before the program gets it (an HTTP body is read to its end).
@@ -57,13 +58,13 @@ pub(crate) trait Outcome: Send + 'static {
 pub(crate) struct Whole(pub Vec<u8>);
 
 impl Outcome for Whole {
-    fn deliver(self: Box<Self>, vm: &mut Vm, build: BuildFn) -> NResult {
-        build(vm, &self.0)
+    fn deliver(self: Box<Self>, fx: &mut AfterEffect<'_>, build: BuildFn) -> NResult {
+        build(fx, &self.0)
     }
 
     fn settle(self: Box<Self>) -> Pin<Box<dyn Future<Output = EncodeFn> + Send>> {
         let payload = self.0;
-        Box::pin(std::future::ready(Box::new(move |_: &mut Vm| Ok(payload)) as EncodeFn))
+        Box::pin(std::future::ready(Box::new(move |_: &mut AfterEffect<'_>| Ok(payload)) as EncodeFn))
     }
 }
 
@@ -195,7 +196,7 @@ impl Recorded {
             };
             return Err(Ctl::diverged(Divergence { seq, message }));
         }
-        let v = payload_outcome(vm, &outcome);
+        let v = payload_outcome(&mut AfterEffect::new(vm), &outcome);
         vm.charge(fuel)?;
         v
     }
@@ -314,16 +315,16 @@ impl Live {
         let fut: BoxFuture = match self.journal {
             None => Box::pin(async move {
                 let outcome = fut.await;
-                Box::new(move |vm: &mut Vm| outcome.deliver(vm, build)) as Finisher
+                Box::new(move |fx: &mut AfterEffect<'_>| outcome.deliver(fx, build)) as Finisher
             }),
             Some(LiveOp { journal, op, .. }) => Box::pin(async move {
                 let encode = fut.await.settle().await;
-                Box::new(move |vm: &mut Vm| {
-                    let start = vm.meter.used();
-                    let payload = encode(vm)?;
-                    let fuel = vm.meter.used().saturating_sub(start);
+                Box::new(move |fx: &mut AfterEffect<'_>| {
+                    let start = fx.meter.used();
+                    let payload = encode(fx)?;
+                    let fuel = fx.meter.used().saturating_sub(start);
                     journal.state().record_done(op, fuel, OpEnd::Completed(payload.to_vec()));
-                    build(vm, &payload)
+                    build(fx, &payload)
                 }) as Finisher
             }),
         };
@@ -339,15 +340,15 @@ struct CallOutcome {
 }
 
 impl Outcome for CallOutcome {
-    fn deliver(self: Box<Self>, vm: &mut Vm, _: BuildFn) -> NResult {
-        (self.fin)(vm)
+    fn deliver(self: Box<Self>, fx: &mut AfterEffect<'_>, _: BuildFn) -> NResult {
+        (self.fin)(fx)
     }
 
     fn settle(self: Box<Self>) -> Pin<Box<dyn Future<Output = EncodeFn> + Send>> {
         let CallOutcome { fin, label } = *self;
-        Box::pin(std::future::ready(Box::new(move |vm: &mut Vm| {
-            let r = fin(vm);
-            outcome_payload(vm, r, &label).map(|outcome| outcome.to_payload())
+        Box::pin(std::future::ready(Box::new(move |fx: &mut AfterEffect<'_>| {
+            let r = fin(fx);
+            outcome_payload(fx, r, &label).map(|outcome| outcome.to_payload())
         }) as EncodeFn))
     }
 }
@@ -356,12 +357,12 @@ impl Outcome for CallOutcome {
 struct Expired;
 
 impl Outcome for Expired {
-    fn deliver(self: Box<Self>, _: &mut Vm, _: BuildFn) -> NResult {
+    fn deliver(self: Box<Self>, _: &mut AfterEffect<'_>, _: BuildFn) -> NResult {
         Ok(Value::Unit)
     }
 
     fn settle(self: Box<Self>) -> Pin<Box<dyn Future<Output = EncodeFn> + Send>> {
-        Box::pin(std::future::ready(Box::new(|_: &mut Vm| Ok(Vec::new())) as EncodeFn))
+        Box::pin(std::future::ready(Box::new(|_: &mut AfterEffect<'_>| Ok(Vec::new())) as EncodeFn))
     }
 }
 
@@ -376,7 +377,7 @@ pub(crate) fn sleep(vm: &mut Vm, d: Duration) -> Ctl {
     };
     // The expiry of a journaled timer: the run has seen its wake time.
     let expired = |wake: Option<(SystemTime, JournalHandle)>| -> BuildFn {
-        Box::new(move |_: &mut Vm, _: &[u8]| {
+        Box::new(move |_: &mut AfterEffect<'_>, _: &[u8]| {
             if let Some((t, journal)) = wake {
                 journal.state().saw_wall(t);
             }
@@ -446,7 +447,7 @@ pub(crate) fn journaled_call(vm: &mut Vm, call: Call, inner: &JournaledFn, name:
                 Ok(w) => w,
                 Err(r) => {
                     let payload = outcome_payload(vm, r, name)?.to_payload();
-                    let ready: Finisher = Box::new(move |vm: &mut Vm| payload_outcome(vm, &payload));
+                    let ready: Finisher = Box::new(move |fx: &mut AfterEffect<'_>| payload_outcome(fx, &payload));
                     (Box::pin(std::future::ready(ready)) as BoxFuture, Parking::Never)
                 }
             };
@@ -1015,15 +1016,14 @@ fn encode_into(vm: &Vm, v: Value, w: &mut Writer, depth: usize, enc: Encoding) -
     Ok(())
 }
 
-/// Decodes a value that [`encode_value`] encoded, allocating it on the heap
-/// (memory checks are off: the caller checks the limit after rooting it).
+/// Decodes a value that [`encode_value`] encoded, allocating it on the heap.
 /// Decoding costs no fuel: the call charged for converting its result, live
 /// or as the recorded fuel in replay, so a journaled run uses the fuel of a
 /// run without a journal.
-pub(crate) fn decode_value(vm: &mut Vm, data: &[u8]) -> NResult {
+pub(crate) fn decode_value(fx: &mut AfterEffect<'_>, data: &[u8]) -> NResult {
     let mut r = Reader::new(data);
     let mut types = None;
-    vm.unchecked(|vm| decode_from(vm, &mut r, 0, &mut types))
+    decode_from(fx, &mut r, 0, &mut types)
 }
 
 fn malformed() -> Ctl {
@@ -1061,7 +1061,7 @@ fn resolve(vm: &Vm, id: u64, name: &str, is_variant: bool, types: &mut Option<Ha
         .ok_or_else(|| Ctl::internal(format!("the journal holds a value of type `{name}`, which this program does not define")))
 }
 
-fn decode_from(vm: &mut Vm, r: &mut Reader<'_>, depth: usize, types: &mut Option<HashMap<(bool, String), u32>>) -> NResult {
+fn decode_from(fx: &mut AfterEffect<'_>, r: &mut Reader<'_>, depth: usize, types: &mut Option<HashMap<(bool, String), u32>>) -> NResult {
     if depth > MAX_DEPTH {
         return Err(malformed());
     }
@@ -1071,9 +1071,11 @@ fn decode_from(vm: &mut Vm, r: &mut Reader<'_>, depth: usize, types: &mut Option
         if n > r.0.len() { Err(malformed()) } else { Ok(n) }
     };
     // Nothing collects garbage while a value is decoded.
-    let items = |vm: &mut Vm, r: &mut Reader<'_>, n: usize, types: &mut Option<HashMap<(bool, String), u32>>| -> Result<Vec<Value>, Ctl> {
-        (0..n).map(|_| decode_from(vm, r, depth + 1, types)).collect()
-    };
+    let items = |fx: &mut AfterEffect<'_>,
+                 r: &mut Reader<'_>,
+                 n: usize,
+                 types: &mut Option<HashMap<(bool, String), u32>>|
+     -> Result<Vec<Value>, Ctl> { (0..n).map(|_| decode_from(fx, r, depth + 1, types)).collect() };
     let t = Tag::from_code(r.u8().ok_or_else(malformed)?).ok_or_else(malformed)?;
     Ok(match t {
         Tag::Unit => Value::Unit,
@@ -1083,52 +1085,52 @@ fn decode_from(vm: &mut Vm, r: &mut Reader<'_>, depth: usize, types: &mut Option
         Tag::Dur => Value::Dur(r.i64().ok_or_else(malformed)?),
         Tag::Str => {
             let s = r.str().ok_or_else(malformed)?;
-            vm.short_str(s)
+            fx.short_str(s)
         }
         Tag::Bytes => {
             let b = r.bytes().ok_or_else(malformed)?;
-            vm.heap.new_bytes(b.to_vec())
+            fx.heap_mut().new_bytes(b.to_vec())
         }
         Tag::List => {
             let n = count(r)?;
-            let xs = items(vm, r, n, types)?;
-            vm.heap.new_list(xs)
+            let xs = items(fx, r, n, types)?;
+            fx.heap_mut().new_list(xs)
         }
         Tag::Tuple => {
             let n = count(r)?;
-            let xs = items(vm, r, n, types)?;
-            vm.heap.new_tuple(&xs)
+            let xs = items(fx, r, n, types)?;
+            fx.heap_mut().new_tuple(&xs)
         }
         Tag::Map => {
             let n = count(r)?;
-            let xs = items(vm, r, 2 * n, types)?;
-            let m = vm.heap.alloc(Obj::Map(Box::<MapObj>::default()));
-            xs.chunks_exact(2).try_for_each(|kv| vm.map_insert(m, kv[0], kv[1]).map(drop))?;
+            let xs = items(fx, r, 2 * n, types)?;
+            let m = fx.heap_mut().alloc(Obj::Map(Box::<MapObj>::default()));
+            xs.chunks_exact(2).try_for_each(|kv| fx.map_insert(m, kv[0], kv[1]))?;
             m
         }
         Tag::Set => {
             let n = count(r)?;
-            let xs = items(vm, r, n, types)?;
-            let s = vm.heap.alloc(Obj::Set(Box::<SetObj>::default()));
-            xs.iter().try_for_each(|&k| vm.set_add(s, k).map(drop))?;
+            let xs = items(fx, r, n, types)?;
+            let s = fx.heap_mut().alloc(Obj::Set(Box::<SetObj>::default()));
+            xs.iter().try_for_each(|&k| fx.set_add(s, k))?;
             s
         }
         Tag::Struct | Tag::Variant => {
             let id = r.u64().ok_or_else(malformed)?;
             let name = r.str().ok_or_else(malformed)?.to_string();
-            let id = resolve(vm, id, &name, t == Tag::Variant, types)?;
+            let id = resolve(fx, id, &name, t == Tag::Variant, types)?;
             let n = count(r)?;
-            let xs = items(vm, r, n, types)?;
+            let xs = items(fx, r, n, types)?;
             if t == Tag::Variant {
-                vm.heap.new_variant(id, &xs)
+                fx.heap_mut().new_variant(id, &xs)
             } else {
-                let fields = vm.heap.boxed(&xs);
-                vm.heap.alloc(Obj::Struct(id, fields))
+                let fields = fx.heap_mut().boxed(&xs);
+                fx.heap_mut().alloc(Obj::Struct(id, fields))
             }
         }
         Tag::Range => {
             let (a, b, inclusive) = (r.i64().ok_or_else(malformed)?, r.i64().ok_or_else(malformed)?, r.u8().ok_or_else(malformed)?);
-            vm.heap.alloc(Obj::Range(a, b, inclusive != 0))
+            fx.heap_mut().alloc(Obj::Range(a, b, inclusive != 0))
         }
         Tag::Value => return Err(malformed()),
     })
@@ -1171,7 +1173,7 @@ impl Payload for Encoded {
 type CallPayload = Result<Encoded, String>;
 
 /// The payload that records a call's outcome `r`.
-fn outcome_payload(vm: &mut Vm, r: NResult, label: &str) -> Result<CallPayload, Ctl> {
+fn outcome_payload(vm: &Vm, r: NResult, label: &str) -> Result<CallPayload, Ctl> {
     match r {
         Ok(v) => match encode_value(vm, v, max_value_bytes(vm)) {
             Ok(bytes) => Ok(Ok(Encoded(bytes))),
@@ -1187,16 +1189,16 @@ fn outcome_payload(vm: &mut Vm, r: NResult, label: &str) -> Result<CallPayload, 
 /// The result of a call that `outcome` records. The value is decoded
 /// from its encoding also in a live run, so that record and replay
 /// allocate alike.
-fn call_outcome(vm: &mut Vm, outcome: &CallPayload) -> NResult {
+fn call_outcome(fx: &mut AfterEffect<'_>, outcome: &CallPayload) -> NResult {
     match outcome {
-        Ok(Encoded(bytes)) => decode_value(vm, bytes),
+        Ok(Encoded(bytes)) => decode_value(fx, bytes),
         Err(m) => Err(Ctl::end(End::RuntimeError(m.clone()))),
     }
 }
 
 /// The result of a call that the bytes of a [`CallPayload`] record.
-fn payload_outcome(vm: &mut Vm, payload: &[u8]) -> NResult {
-    call_outcome(vm, &CallPayload::from_payload(payload).ok_or_else(malformed)?)
+fn payload_outcome(fx: &mut AfterEffect<'_>, payload: &[u8]) -> NResult {
+    call_outcome(fx, &CallPayload::from_payload(payload).ok_or_else(malformed)?)
 }
 
 /// Whether `r` asks for the call to run again after a collection: the
@@ -1428,7 +1430,7 @@ impl Vm {
         if let Some(mut j) = self.journal_state() {
             j.record(EntryData::Result(CallResult { identity, label, fuel, outcome: outcome.to_payload() }));
         }
-        call_outcome(self, &outcome)
+        call_outcome(&mut AfterEffect::new(self), &outcome)
     }
 
     /// Whether entries recorded since the last flush must be made durable
@@ -1637,9 +1639,9 @@ impl Vm {
             }
             Some((fid, wgen, Replaying::Recorded(build))) => {
                 j.pos += 1;
-                let fin = Box::new(move |vm: &mut Vm| {
-                    let v = build(vm, &payload);
-                    vm.charge(fuel)?;
+                let fin = Box::new(move |fx: &mut AfterEffect<'_>| {
+                    let v = build(fx, &payload);
+                    fx.charge(fuel)?;
                     v
                 });
                 Ok(Due::Ready(fid, wgen, fin))

@@ -388,12 +388,10 @@ impl Vm {
             }
             self.local_done(fid);
             // A Rust panic in the finisher (a bug) becomes an internal error.
-            let r = match crate::unwind::catch(|| self.unchecked(fin)) {
+            let r = match crate::unwind::catch(|| fin(&mut AfterEffect::new(self))) {
                 Ok(r) => r,
                 Err(msg) => {
                     self.broken = true;
-                    // The panic skipped the restore of the scope, and no scope is around it.
-                    self.heap.unchecked = false;
                     Err(Ctl::internal(msg))
                 }
             };

@@ -413,7 +413,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
                 }
             }
             names.push(bind.clone());
-            puts.push(quote!(#krate::native::convert::IntoValue::into_value_at(#bind, vm, depth)?));
+            puts.push(quote!(#krate::native::convert::IntoValue::into_value_at(#bind, fx, depth)?));
         }
         variants.push(quote! {
             #krate::native::EnumVariant { name: #vname, doc: #vdoc, fields: &[#(#infos),*] }
@@ -432,9 +432,9 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
         reads.push(quote! { #i => #build });
         let write = match names.is_empty() {
             true => quote!(|_, _| ::std::result::Result::Ok([])),
-            false => quote!(move |vm, depth| ::std::result::Result::Ok([#(#puts),*])),
+            false => quote!(move |fx, depth| ::std::result::Result::Ok([#(#puts),*])),
         };
-        writes.push(quote! { #pattern => #krate::native::variant_into_value::<Self, _>(vm, depth, #i, #write) });
+        writes.push(quote! { #pattern => #krate::native::variant_into_value::<Self, _>(fx, depth, #i, #write) });
         consts.push(
             quote! { #pattern => #krate::native::variant_const::<Self>(#i, [#(#krate::native::convert::IntoValue::to_const(#names)),*]) },
         );
@@ -481,7 +481,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
         impl #imp #krate::native::convert::IntoValue for #ty #tyg #wh_into {
             fn into_value_at(
                 self,
-                vm: &mut #krate::vm::Vm,
+                fx: &mut #krate::vm::AfterEffect<'_>,
                 depth: #krate::native::convert::Depth,
             ) -> ::std::result::Result<#krate::vm::value::Value, #krate::vm::Ctl> {
                 match self {
@@ -530,10 +530,10 @@ fn sand_object(input: &DeriveInput) -> syn::Result<Tokens> {
         impl #krate::native::convert::IntoValue for #ty {
             fn into_value_at(
                 self,
-                vm: &mut #krate::vm::Vm,
+                fx: &mut #krate::vm::AfterEffect<'_>,
                 _: #krate::native::convert::Depth,
             ) -> ::std::result::Result<#krate::vm::value::Value, #krate::vm::Ctl> {
-                vm.new_object(self).map(#krate::native::ty::Val::raw)
+                ::std::result::Result::Ok(fx.new_object(self).raw())
             }
         }
     })
@@ -609,7 +609,7 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
             }
         });
         reads.push(quote! { #ident: #krate::native::field_from_value::<#fty>(vm, fields[#i], conv)? });
-        writes.push(quote! { #krate::native::convert::IntoValue::into_value_at(self.#ident, vm, depth)? });
+        writes.push(quote! { #krate::native::convert::IntoValue::into_value_at(self.#ident, fx, depth)? });
         consts.push(quote! { #krate::native::convert::IntoValue::to_const(&self.#ident) });
     }
     let named = expand_named_type(input, &attrs, &type_params, quote! { #krate::native::Binding::of_struct() });
@@ -645,10 +645,10 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
         impl #imp #krate::native::convert::IntoValue for #ty #tyg #wh_into {
             fn into_value_at(
                 self,
-                vm: &mut #krate::vm::Vm,
+                fx: &mut #krate::vm::AfterEffect<'_>,
                 depth: #krate::native::convert::Depth,
             ) -> ::std::result::Result<#krate::vm::value::Value, #krate::vm::Ctl> {
-                #krate::native::struct_into_value::<Self>(vm, depth, move |vm, depth| {
+                #krate::native::struct_into_value::<Self>(fx, depth, move |fx, depth| {
                     ::std::result::Result::Ok(::std::boxed::Box::new([#(#writes),*]))
                 })
             }
@@ -807,7 +807,7 @@ mod tests {
         assert!(out.contains("VariantField { name : :: std :: option :: Option :: Some (\"w\") , ty : < f64 as"), "{out}");
         assert!(out.contains("E :: B (..) => 1usize"), "{out}");
         assert!(
-            out.contains("E :: C { w : f0 } => :: sandlang :: native :: variant_into_value :: < Self , _ > (vm , depth , 2usize"),
+            out.contains("E :: C { w : f0 } => :: sandlang :: native :: variant_into_value :: < Self , _ > (fx , depth , 2usize"),
             "{out}"
         );
         let out = expand(sand_enum, "#[sand(module = \"m\")] enum E { A { #[sand(name = \"kind\")] r#type: i64 } }");

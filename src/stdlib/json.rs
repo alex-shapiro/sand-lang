@@ -11,15 +11,16 @@ use crate::types::ConstVal;
 use crate::types::traits;
 use crate::vm::bytecode::Program;
 use crate::vm::compare::{hash_key, str_hash};
-use crate::vm::heap::{Heap, Staging};
+use crate::vm::heap::{Checked, Heap, MemoryCheck, Staging, Unchecked};
 use crate::vm::meter::{BYTES_PER_UNIT, Meter, SLOW_BYTES_PER_UNIT, Scratch};
 use crate::vm::value::{
     FieldDefault, FieldDesc, FxHashMap, KeyIndex, KeyTable, MAP_ENTRY_SIZE, MapObj, Obj, TypeDesc, Value, ValueRef, VariantDesc, slot_fits,
 };
-use crate::vm::{Ctl, NResult, Vm, fail, internal, without_trait};
+use crate::vm::{AfterEffect, Ctl, NResult, Vm, fail, internal, without_trait};
 use hashbrown::HashTable;
 use std::borrow::Cow;
 use std::fmt::Write;
+use std::marker::PhantomData;
 
 const MAX_DEPTH: usize = 512;
 const NODE_BYTES: usize = 64;
@@ -260,13 +261,16 @@ const MAX_SHARED_KEY_LEN: usize = 64;
 const MAX_SHARED_KEYS: usize = 4096;
 const SCANNED_KEYS: usize = 16;
 
-struct Builder<'a, 's, 'h> {
+/// Builds the values of a JSON document in a staging area. `B` says whether
+/// the values count against the memory limit as they are built.
+struct Builder<'a, 's, 'h, B: MemoryCheck = Checked> {
     heap: &'a Heap,
     st: &'s mut Staging<'h>,
     meter: &'a Meter,
     pending: usize,
     keys: HashTable<(u64, Cow<'a, str>, Value)>,
     entries: Vec<Entry<'a>>,
+    budget: PhantomData<B>,
 }
 
 struct Entry<'a> {
@@ -282,20 +286,26 @@ struct MapBuilder {
     index: Option<KeyTable>,
 }
 
-impl<'a, 's, 'h> Builder<'a, 's, 'h> {
+impl<'a, 's, 'h, B: MemoryCheck> Builder<'a, 's, 'h, B> {
     fn new(heap: &'a Heap, st: &'s mut Staging<'h>, meter: &'a Meter) -> Self {
-        Builder { heap, st, meter, pending: 0, keys: HashTable::new(), entries: Vec::new() }
+        Builder { heap, st, meter, pending: 0, keys: HashTable::new(), entries: Vec::new(), budget: PhantomData }
+    }
+
+    /// Checks that `extra` more bytes, beside those pending, fit in the
+    /// memory limit, if `B` counts against it.
+    fn check_memory(&self, extra: usize) -> Result<(), Ctl> {
+        if B::CHECKS { self.st.check_memory(self.pending.saturating_add(extra)) } else { Ok(()) }
     }
 
     fn reserve(&self) -> Result<(), Ctl> {
-        self.st.check_memory(NODE_BYTES + self.pending)
+        self.check_memory(NODE_BYTES)
     }
 
     /// Checks list buffer growth against the memory limit so that lists of inline values cannot grow unchecked.
     fn push(&mut self, items: &mut Vec<Value>, v: Value) -> Result<(), Ctl> {
         if items.len() == items.capacity() {
             let more = items.capacity().max(4);
-            self.st.check_memory((NODE_BYTES + self.pending).saturating_add(more.saturating_mul(2 * std::mem::size_of::<Value>())))?;
+            self.check_memory(NODE_BYTES.saturating_add(more.saturating_mul(2 * std::mem::size_of::<Value>())))?;
             let before = items.capacity();
             items.reserve_exact(more);
             self.pending += (items.capacity() - before) * std::mem::size_of::<Value>();
@@ -410,10 +420,10 @@ impl FromValue for Json {
 }
 
 impl IntoValue for Json {
-    fn into_value_at(self, vm: &mut Vm, _: Depth) -> Result<Value, Ctl> {
-        let ids = JsonIds::of(&vm.prog)?;
-        let meter = &vm.meter;
-        vm.heap.staged(|heap, st| walk(&mut Writer { b: Builder::new(heap, st, meter), ids }, self))
+    fn into_value_at(self, fx: &mut AfterEffect<'_>, _: Depth) -> Result<Value, Ctl> {
+        let ids = JsonIds::of(&fx.prog)?;
+        let (heap, meter) = fx.heap_and_meter();
+        heap.staged(|heap, st| walk(&mut Writer { b: Builder::new(heap, st, meter), ids }, self))
     }
 
     fn to_const(&self) -> Option<Constant> {
@@ -561,7 +571,7 @@ impl<'h> Walk for Reader<'h, '_> {
 }
 
 struct Writer<'a, 's, 'h> {
-    b: Builder<'a, 's, 'h>,
+    b: Builder<'a, 's, 'h, Unchecked>,
     ids: JsonIds,
 }
 
@@ -585,7 +595,6 @@ impl Walk for Writer<'_, '_, '_> {
             Json::Int(i) => b.st.new_variant(ids.int, &[Value::Int(i)]),
             Json::Float(f) => b.st.new_variant(ids.float, &[Value::Float(f)]),
             Json::Str(s) => {
-                b.st.check_memory((NODE_BYTES + b.pending).saturating_add(s.len()))?;
                 b.meter.charge_bytes(s.len())?;
                 let s = b.st.new_str(s);
                 b.st.new_variant(ids.str_, &[s])
@@ -1412,7 +1421,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
         self.b.meter.charge(1)?;
         if !self.indexes.contains_key(&id) {
             self.b.meter.charge(fields.len() as u64)?;
-            self.b.st.check_memory(self.b.pending.saturating_add(fields.len().saturating_mul(32)))?;
+            self.b.check_memory(fields.len().saturating_mul(32))?;
             self.b.pending += fields.len() * 32;
             let index = fields.iter().enumerate().rev().map(|(i, f)| (f.0.as_str(), i)).collect();
             self.indexes.insert(id, index);
@@ -1818,7 +1827,7 @@ impl<'a> Converter<'a, '_, '_> {
                     self.b.st.new_variant(ids.str_, &[s])
                 }
                 Obj::Bytes(b) => {
-                    self.b.st.check_memory(self.b.pending.saturating_add(b.len() / 3 * 4 + 4))?;
+                    self.b.check_memory(b.len() / 3 * 4 + 4)?;
                     self.b.meter.charge_slow_bytes(b.len())?;
                     let s = self.b.st.new_str(base64::encode(b, false));
                     self.b.st.new_variant(ids.str_, &[s])
