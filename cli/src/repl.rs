@@ -15,7 +15,7 @@ use reedline::{
     default_emacs_keybindings,
 };
 use sandlang::syntax::highlight::{Highlight, highlight};
-use sandlang::{Error, Session, StdinFeed};
+use sandlang::{Error, Session, StdinFeed, StdinRequest};
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::io::{BufRead, IsTerminal, Write};
@@ -73,7 +73,7 @@ pub(crate) fn cmd_repl(args: &[String]) -> Result<u8, String> {
     } else {
         Reader::Plain(LineReader::new())
     };
-    let mut io = Io { reader, stdin_feed, ended: false };
+    let mut io = Io { reader, stdin_feed };
     outln!("sand {} — help() for documentation, :help for the REPL's commands, :quit to exit", env!("CARGO_PKG_VERSION"));
     let status = rt.block_on(repl(&mut session, &screen, &mut io));
     // A read of the process's standard input cannot be cancelled; do not wait for it.
@@ -85,8 +85,6 @@ pub(crate) fn cmd_repl(args: &[String]) -> Result<u8, String> {
 struct Io {
     reader: Reader,
     stdin_feed: StdinFeed,
-    /// True if piped input has reached EOF.
-    ended: bool,
 }
 
 /// An event from the REPL input reader.
@@ -140,7 +138,7 @@ async fn repl(session: &mut Session, screen: &Screen, io: &mut Io) -> u8 {
                 // End of input: run what was entered.
                 if !input.trim().is_empty() {
                     outln!();
-                    io.ended = true;
+                    io.stdin_feed.end();
                     eval(session, io, &input).await;
                 }
                 break;
@@ -195,33 +193,31 @@ async fn eval(session: &mut Session, io: &mut Io, input: &str) {
 /// Awaits `fut` and interrupts the session if Ctrl-C is pressed.
 async fn foreground<T>(handle: sandlang::InterruptHandle, io: &mut Io, fut: impl std::future::Future<Output = T>) -> T {
     let mut fut = std::pin::pin!(fut);
-    let mut reading = false;
+    let mut reading: Option<StdinRequest> = None;
     loop {
         let feed = &io.stdin_feed;
+        let is_reading = reading.is_some();
         let input_needed = async {
-            if reading {
+            if is_reading {
                 return std::future::pending().await;
             }
-            while !feed.wait_for_request().await.wait_until_nothing_else_runs().await {}
+            loop {
+                let request = feed.wait_for_request().await;
+                if request.wait_until_nothing_else_runs().await {
+                    return request;
+                }
+            }
         };
         tokio::select! {
             r = &mut fut => return r,
             Ok(()) = tokio::signal::ctrl_c() => handle.interrupt(),
-            () = input_needed => {
-                if io.ended {
-                    feed.end();
-                } else {
-                    reading = true;
-                }
-            }
-            event = io.reader.script_line(), if reading => {
-                reading = false;
+            request = input_needed => reading = Some(request),
+            event = io.reader.script_line(), if is_reading => {
+                let request = reading.take().expect("a read waits");
                 match event {
                     InputEvent::Line(line) => feed.send(line),
-                    InputEvent::End => {
-                        io.ended = io.reader.ends_for_good();
-                        feed.end();
-                    }
+                    InputEvent::End if io.reader.ends_for_good() => feed.end(),
+                    InputEvent::End => _ = request.dismiss(),
                     InputEvent::Interrupt { .. } => {}
                 }
             }

@@ -963,11 +963,6 @@ fn scripts_read_the_input_the_host_feeds() {
         tokio::join!(session.eval("io.stdin.read_line()?"), answer)
     });
     assert_eq!(value.unwrap().as_deref(), Some("Some(\"partial\")"));
-    // An end of input ends one read.
-    feed.end();
-    assert_eq!(r.value("io.stdin.read_line()?"), "None");
-    feed.send("again\n");
-    assert_eq!(r.value("io.stdin.read_line()?"), "Some(\"again\")");
     // A task's read waits between inputs, until the host sends a line.
     r.ok("let t = spawn io.stdin.read_line()");
     let got = r.rt.block_on(r.session.run_tasks_until(input_needed(&feed), |e| panic!("{e}")));
@@ -977,6 +972,51 @@ fn scripts_read_the_input_the_host_feeds() {
     feed.send("late\n");
     assert_eq!(r.value("t.wait()?"), "Some(\"late\")");
     assert!(!has_request(&r.rt, &feed));
+}
+
+#[test]
+fn an_ended_stream_ends_every_later_read() {
+    let (config, feed) = Config::new().policy(RulePolicy::allow_all()).stdin_feed();
+    let mut r = Repl::with(config);
+    r.ok("import io");
+    feed.send("last\n");
+    feed.end();
+    feed.send("ignored\n");
+    assert_eq!(r.value("io.stdin.read_line()?"), "Some(\"last\")");
+    assert_eq!(r.value("io.stdin.read_line()?"), "None");
+    assert_eq!(r.value("io.stdin.read_all()?.len()"), "0");
+    assert!(!has_request(&r.rt, &feed));
+}
+
+#[test]
+fn a_failed_stream_fails_every_later_read() {
+    let (config, feed) = Config::new().policy(RulePolicy::allow_all()).stdin_feed();
+    let mut r = Repl::with(config);
+    r.ok("import io");
+    feed.send("last\n");
+    feed.fail(std::io::Error::other("the pipe broke"));
+    assert_eq!(r.value("io.stdin.read_line()?"), "Some(\"last\")");
+    let failure = "Err(Error(message: \"stdin: the pipe broke\", kind: \"io\"))";
+    assert_eq!(r.value("io.stdin.read_line()"), failure);
+    assert_eq!(r.value("io.stdin.read_line()"), failure);
+}
+
+#[test]
+fn ending_the_stream_ends_a_waiting_read() {
+    let (config, feed) = Config::new().policy(RulePolicy::allow_all()).stdin_feed();
+    let mut r = Repl::with(config);
+    r.ok("import io");
+    let Repl { session, rt, .. } = &mut r;
+    let (value, ()) = rt.block_on(async {
+        let end = async {
+            let request = feed.wait_for_request().await;
+            feed.end();
+            assert!(!request.is_open());
+            assert!(!request.answer("late"));
+        };
+        tokio::join!(session.eval("io.stdin.read_line()?"), end)
+    });
+    assert_eq!(value.unwrap().as_deref(), Some("None"));
 }
 
 #[test]

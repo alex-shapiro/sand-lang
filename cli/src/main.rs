@@ -466,35 +466,31 @@ type ProcessStdin = tokio::io::BufReader<tokio::io::Stdin>;
 
 /// Awaits `run` while it forwards `stdin` to `feed`.
 async fn with_stdin_forwarded<T>(stdin: &mut ProcessStdin, feed: &StdinFeed, run: impl Future<Output = T>) -> T {
+    let mut run = std::pin::pin!(run);
     tokio::select! {
         biased;
-        result = run => result,
-        never = forward_stdin(stdin, feed) => never,
+        result = &mut run => return result,
+        () = forward_stdin(stdin, feed) => {}
     }
+    run.await
 }
 
-/// Sends `stdin` to `feed`. It reads `stdin` only while a script read waits,
-/// so that a script that does not read does not take input from the terminal.
-/// After `stdin` ends or fails, every later read gets an end of input.
-async fn forward_stdin(stdin: &mut ProcessStdin, feed: &StdinFeed) -> ! {
+/// Sends `stdin` to `feed` until `stdin` ends or fails. It reads `stdin` only
+/// while a script read waits, so that a script that does not read does not
+/// take input from the terminal.
+async fn forward_stdin(stdin: &mut ProcessStdin, feed: &StdinFeed) {
     use tokio::io::AsyncBufReadExt;
     loop {
         feed.wait_for_request().await;
         match stdin.fill_buf().await {
-            Ok([]) => break,
+            Ok([]) => return feed.end(),
             Ok(data) => {
                 let len = data.len();
                 feed.send(data.to_vec());
                 stdin.consume(len);
             }
-            Err(e) => {
-                eprintln!("sand: cannot read standard input: {e}");
-                break;
-            }
+            Err(e) => return feed.fail(e),
         }
-    }
-    loop {
-        feed.wait_for_request().await.dismiss();
     }
 }
 

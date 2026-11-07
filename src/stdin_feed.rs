@@ -52,6 +52,15 @@ struct StdinChannelState {
     engine_idle: bool,
     /// The active read operation, once it has waited for input.
     current_read: Option<CurrentRead>,
+    /// How the host ended the input stream, if it did.
+    stream_end: Option<StreamEnd>,
+}
+
+/// How the host ended the input stream ([`StdinFeed::end`] or
+/// [`StdinFeed::fail`]).
+enum StreamEnd {
+    Eof,
+    Failed(io::Error),
 }
 
 /// A read operation that has waited for input.
@@ -90,7 +99,7 @@ impl StdinFeed {
     }
 
     /// Appends `data` to the input stream. Queued data persists across reads
-    /// until a script consumes it.
+    /// until a script consumes it. Has no effect after the stream ends.
     pub fn send(&self, data: impl Into<Vec<u8>>) {
         let data = data.into();
         if !data.is_empty() {
@@ -98,10 +107,16 @@ impl StdinFeed {
         }
     }
 
-    /// Enqueues an end-of-input marker for the next read that reaches it.
-    /// Later reads wait for new input.
+    /// Ends the input stream. Reads take the input that is already queued,
+    /// and then every read gets an end of input without a wait.
     pub fn end(&self) {
-        self.channel.push(QueuedInput { target: None, data: None, start: 0 });
+        self.channel.end_stream(StreamEnd::Eof);
+    }
+
+    /// Ends the input stream with `error`. Reads take the input that is
+    /// already queued, and then every read fails with `error`.
+    pub fn fail(&self, error: io::Error) {
+        self.channel.end_stream(StreamEnd::Failed(error));
     }
 
     /// Waits until a read needs input, even if other tasks are running, and
@@ -174,6 +189,9 @@ impl std::fmt::Debug for StdinRequest {
 impl StdinChannelState {
     /// Returns the open wait that no queued input can end, if any.
     fn open_wait(&self) -> Option<StdinWaitId> {
+        if self.stream_end.is_some() {
+            return None;
+        }
         let read = self.current_read.as_ref().filter(|r| r.needs_input)?;
         (!self.queue.iter().any(|input| input.is_for_wait(Some(read.wait)))).then_some(read.wait)
     }
@@ -190,7 +208,15 @@ impl StdinChannel {
 
     fn push(&self, input: QueuedInput) {
         let mut state = self.lock();
-        state.queue.push_back(input);
+        if state.stream_end.is_none() {
+            state.queue.push_back(input);
+            self.notify(state);
+        }
+    }
+
+    fn end_stream(&self, end: StreamEnd) {
+        let mut state = self.lock();
+        state.stream_end.get_or_insert(end);
         self.notify(state);
     }
 
@@ -296,8 +322,8 @@ pub(crate) struct ActiveStdinRead<'a> {
 
 impl ActiveStdinRead<'_> {
     /// Returns buffered bytes available without waiting and whether the
-    /// current read has reached EOF.
-    pub(crate) fn available(&mut self) -> (&[u8], bool) {
+    /// current read has reached EOF, or the error that ended the stream.
+    pub(crate) fn available(&mut self) -> io::Result<(&[u8], bool)> {
         let r = &mut *self.reader;
         if r.at == r.buf.len() && !r.ended {
             let mut state = r.channel.lock();
@@ -312,9 +338,15 @@ impl ActiveStdinRead<'_> {
                     Some(data) => (r.buf, r.at) = (data, input.start),
                     None => r.ended = true,
                 }
+            } else {
+                match &state.stream_end {
+                    None => {}
+                    Some(StreamEnd::Eof) => r.ended = true,
+                    Some(StreamEnd::Failed(e)) => return Err(io::Error::new(e.kind(), e.to_string())),
+                }
             }
         }
-        (&r.buf[r.at..], r.ended)
+        Ok((&r.buf[r.at..], r.ended))
     }
 }
 
@@ -346,14 +378,14 @@ impl AsyncBufRead for ActiveStdinRead<'_> {
     fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
         let this = self.get_mut();
         loop {
-            let (data, ended) = this.available();
+            let (data, ended) = this.available()?;
             if !data.is_empty() || ended {
                 let r = &*this.reader;
                 return Poll::Ready(Ok(&r.buf[r.at..]));
             }
             let mut state = this.reader.channel.lock();
             let wait = state.current_wait();
-            if !state.queue.iter().any(|input| input.is_for_wait(wait)) {
+            if state.stream_end.is_none() && !state.queue.iter().any(|input| input.is_for_wait(wait)) {
                 let waker = Some(cx.waker().clone());
                 match &mut state.current_read {
                     Some(read) if read.needs_input => read.waker = waker,

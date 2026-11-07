@@ -2024,8 +2024,10 @@ it takes a line from the terminal.
 A host gives input in one of two ways:
 
 - As a stream, for a terminal or a pipe. `StdinFeed::send` adds bytes to the
-  input, and `StdinFeed::end` adds an end of input for the next read that
-  reaches it. Bytes that one read does not use stay for the next read.
+  input. Bytes that one read does not use stay for the next read.
+  `StdinFeed::end` ends the stream: after the reads take the queued bytes,
+  every read gets an end of input without a wait. `StdinFeed::fail(error)`
+  ends the stream with an error, so every later read fails with `error`.
 - As one answer to one read, for an input field in an app.
   `StdinRequest::answer(data)` gives the read `data`, a trailing newline if
   `data` lacks one, and an end of input, so that a read of any kind completes.

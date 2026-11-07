@@ -388,17 +388,17 @@ print(io.stdin.read_text().map(s => s.len()))
 // Windows cannot open a directory as standard input.
 #[cfg(unix)]
 #[test]
-fn standard_input_errors_are_reported() {
-    let dir = script("stdin-error", "import io\nprint(io.stdin.read_line())");
+fn scripts_get_standard_input_errors() {
+    let dir = script("stdin-error", "import io\nprint(io.stdin.read_line())\nprint(io.stdin.read_line().is_err())");
     let out = Command::new(env!("CARGO_BIN_EXE_sand"))
         .args(["run", "--no-prompt", "main.sand"])
         .current_dir(dir.path())
         .stdin(std::fs::File::open(dir.path()).unwrap())
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.starts_with("sand: cannot read standard input: "), "{stderr}");
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "Ok(None)\n");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.starts_with("Err(Error(message: \"stdin: ") && stdout.ends_with("\ntrue\n"), "{stdout}");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
 }
 
 /// A test file whose read times out leaves a read of the process's standard
