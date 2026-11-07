@@ -1687,10 +1687,11 @@ with `sand run --policy=FILE`, as described in §17.5. In Rust, call
 `PolicyFile`. A parsed `PolicyFile` contains only the rules and limits from the
 file. Call `file.rules.with_defaults(RulePolicy::standard())` to append default
 rules. Call `file.apply_limits(defaults)` to apply the `limit` directives to
-default limits. `PolicyFile::rule_directives` and
-`PolicyFile::limit_directives` give the line, column, and value of each
-directive. A host that supports only some capabilities or limit values uses
-them to reject a file at the position of the directive.
+default limits. `PolicyFile::rule_directives` gives the line, column, decision,
+and capability of each rule. `PolicyFile::limit_directives` gives the line,
+column, and value of each `limit` directive. A host that supports only some
+capabilities or limit values uses them to reject a file at the position of the
+directive.
 
 Each line in a policy file is an independent statement. `#` starts a comment
 that extends to the end of the line. Spaces or commas separate words. Double
@@ -1765,7 +1766,7 @@ reference other sets.
 - `memory`, `output`, `source`, and `http-body` accept byte counts such as `4096`, `64K`, `256M`, and `1G`.
 - `time` and `cpu` accept durations such as `500ms`, `10s`, `1.5m`, `2h`, and `1d`.
 - `instructions`, `compile-fuel`, `tasks`, `call-depth`, and `open-resources` accept integer counts such as `1_000_000`.
-- `none` removes the limit for `memory`, `time`, `cpu`, `instructions`, `compile-fuel`, or `output`.
+- `none` or `unlimited` removes the limit for `memory`, `time`, `cpu`, `instructions`, `compile-fuel`, or `output`.
 
 `apply_limits` applies the `limit` directives in file order, so a later
 directive overrides an earlier directive for the same limit. Limits that the

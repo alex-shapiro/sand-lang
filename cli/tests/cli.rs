@@ -158,7 +158,7 @@ fn run_limit_violations_exit_3() {
 }
 
 #[test]
-fn max_flags_accept_every_policy_limit_and_its_values() {
+fn max_flags_use_policy_limit_syntax() {
     let spin = "var i = 0\nwhile true { i += 1 }";
     for args in [&["--max-instructions=10_000"][..], &["--max-instructions", "10_000"], &["--max-memory=none", "--max-instructions=10000"]]
     {
