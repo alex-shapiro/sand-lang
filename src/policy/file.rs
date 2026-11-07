@@ -1447,9 +1447,14 @@ allow http GET a.com tls"
         assert_eq!(rule_for(&plain, true).unwrap(), "allow net plaintext localhost:5432");
         assert_eq!(rule_for(&Capability::Stdout, true).as_deref(), Some("allow stdout"));
         assert_eq!(rule_for(&Capability::Stderr, false).as_deref(), Some("deny stderr"));
-        let line_breaks = [Capability::FsRead(PathBuf::from("/tmp/a\nb")), Capability::Env("A\rB".into())];
+        let line_breaks = [
+            Capability::FsRead(PathBuf::from("/tmp/a\nb")),
+            Capability::Env("A\rB".into()),
+            Capability::Custom { name: "db\n".into(), detail: "\\\"\r".into() },
+        ];
         assert_eq!(rule_for(&line_breaks[0], true).unwrap(), "allow read \"/tmp/a\\nb\"");
         assert_eq!(rule_for(&line_breaks[1], true).unwrap(), "allow env \"A\\rB\"");
+        assert_eq!(rule_for(&line_breaks[2], true).unwrap(), "allow custom \"db\\n\" \"\\\\\\\"\\r\"");
         for cap in line_breaks {
             assert_eq!(decide(&parse(&rule_for(&cap, true).unwrap()), cap), Allow);
         }
