@@ -8,7 +8,7 @@ use parking_lot::Mutex;
 use sandlang::engine::Limits;
 use sandlang::policy::file::PolicyFile;
 use sandlang::policy::net::{NetPattern, is_private_address};
-use sandlang::policy::rules::{AbsolutePath, CustomName, Methods, NamePattern, PathPattern, RulePolicy, Transports};
+use sandlang::policy::rules::{AbsolutePath, CustomMatch, Methods, NamePattern, PathPattern, RulePolicy, Transports};
 use sandlang::policy::{Capability, Decision, PromptAnswer};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -496,9 +496,9 @@ fn default_rules_apply_only_to_unmatched_requests() {
 fn custom_builders_match_a_star_name_or_detail_only_literally() {
     let custom = |name: &str, detail: &str| Capability::Custom { name: name.into(), detail: detail.into() };
     let p = RulePolicy::new()
-        .allow_custom(CustomName::Any, None)
-        .deny_custom(CustomName::Named("db".into()), Some("*"))
-        .deny_custom(CustomName::Named("*".into()), None);
+        .allow_custom(CustomMatch::Any, CustomMatch::Any)
+        .deny_custom(CustomMatch::Exact("db".into()), CustomMatch::Exact("*".into()))
+        .deny_custom(CustomMatch::Exact("*".into()), CustomMatch::Any);
     assert_eq!(p.check(&custom("db", "drop")), Decision::Allow);
     assert_eq!(p.check(&custom("db", "*")), Decision::Deny);
     assert_eq!(p.check(&custom("*", "x")), Decision::Deny);

@@ -13,7 +13,7 @@
 
 use super::net::{HostKind, NetPattern, QUOTED_STAR_IN_HOST, UrlPattern, format_host_port, url_segments};
 use super::path::{Seg, Tok, wild_tokens};
-use super::rules::{Access, CustomName, HttpMethod, Methods, NameKind, Origin, PathPattern, Rule, RuleKind, Transports};
+use super::rules::{Access, CustomMatch, HttpMethod, Methods, NameKind, Origin, PathPattern, Rule, RuleKind, Transports};
 use super::{Capability, Decision, PatternError, RulePolicy};
 use crate::engine::Limits;
 use crate::vm::value::FxHashMap;
@@ -462,14 +462,14 @@ impl Context<'_> {
                 Some(d) => {
                     self.expand(d)?.into_iter().map(|w| parse_custom_pattern(&w).map_err(|m| (d.column, m))).collect::<Result<_, _>>()?
                 }
-                None => vec![None],
+                None => vec![CustomMatch::Any],
             };
             let names = self.expand(name)?;
             if names.len().saturating_mul(details.len()) > MAX_EXPANSION {
                 return Err((name.column, format!("`{verb_text} custom` expands to more than {MAX_EXPANSION} rules")));
             }
             for word in names {
-                let name_pattern = parse_custom_pattern(&word).map_err(|m| (name.column, m))?.map_or(CustomName::Any, CustomName::Named);
+                let name_pattern = parse_custom_pattern(&word).map_err(|m| (name.column, m))?;
                 for detail in &details {
                     let kind = RuleKind::Custom(name_pattern.clone(), detail.clone());
                     rules.push(file_rule(decision, kind, Origin { line, column: name.column, text: word.render() }));
@@ -618,15 +618,15 @@ pub(crate) fn parse_path(text: &[Tok], bare: bool, base: Option<&Path>, home: Op
     Ok(PathPattern { prefix, rest: segs })
 }
 
-fn parse_custom_pattern(word: &Word) -> Result<Option<String>, String> {
+fn parse_custom_pattern(word: &Word) -> Result<CustomMatch, String> {
     let tokens = word.tokens();
     match tokens.as_slice() {
-        [('*', true)] => Ok(None),
+        [('*', true)] => Ok(CustomMatch::Any),
         t if t.iter().any(|t| t.1) => Err(format!(
             "custom names and details must be exact or `*`: quote literal asterisks as `\"{}\"`",
             word.text().replace('"', "\\\"")
         )),
-        t => Ok(Some(t.iter().map(|t| t.0).collect())),
+        t => Ok(CustomMatch::Exact(t.iter().map(|t| t.0).collect())),
     }
 }
 
@@ -766,12 +766,12 @@ impl fmt::Display for Rule {
             RuleKind::TimeZone => write!(f, "timezone"),
             RuleKind::Custom(name, detail) => {
                 match name {
-                    CustomName::Any => write!(f, "custom *")?,
-                    CustomName::Named(n) => write!(f, "custom {}", quote_part(n, true))?,
+                    CustomMatch::Any => write!(f, "custom *")?,
+                    CustomMatch::Exact(n) => write!(f, "custom {}", quote_part(n, true))?,
                 }
                 match detail {
-                    Some(detail) => write!(f, " {}", quote_part(detail, true)),
-                    None => Ok(()),
+                    CustomMatch::Exact(detail) => write!(f, " {}", quote_part(detail, true)),
+                    CustomMatch::Any => Ok(()),
                 }
             }
         }

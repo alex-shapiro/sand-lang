@@ -262,13 +262,22 @@ impl Methods {
     }
 }
 
-/// The capability names that a `custom` rule controls.
+/// The names or the details of the custom capabilities that a `custom` rule controls.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum CustomName {
-    /// Every name.
+pub enum CustomMatch {
+    /// Every name or detail.
     Any,
-    /// Only this name. A `*` in it matches only itself.
-    Named(String),
+    /// Only this name or detail. A `*` in it matches only itself.
+    Exact(String),
+}
+
+impl CustomMatch {
+    pub(crate) fn matches(&self, text: &str) -> bool {
+        match self {
+            CustomMatch::Any => true,
+            CustomMatch::Exact(exact) => exact == text,
+        }
+    }
 }
 
 pub(crate) fn uses_tls(cap: &Capability) -> bool {
@@ -290,8 +299,8 @@ pub(crate) enum RuleKind {
     Stdout,
     Stderr,
     TimeZone,
-    /// A custom capability rule: the names, and the detail, or `None` for any detail.
-    Custom(CustomName, Option<String>),
+    /// A custom capability rule: its names and its details.
+    Custom(CustomMatch, CustomMatch),
 }
 
 impl RuleKind {
@@ -398,7 +407,7 @@ impl RulePolicy {
             RuleKind::Stdout,
             RuleKind::Stderr,
             RuleKind::TimeZone,
-            RuleKind::Custom(CustomName::Any, None),
+            RuleKind::Custom(CustomMatch::Any, CustomMatch::Any),
         ];
         rules.into_iter().fold(RulePolicy::new(), |p, kind| p.push(Decision::Allow, kind))
     }
@@ -557,20 +566,18 @@ impl RulePolicy {
     pub fn prompt_timezone(self) -> Self {
         self.push(Decision::Prompt, RuleKind::TimeZone)
     }
-    /// Allows the custom capabilities of `name` with `detail`, or with any detail if `detail`
-    /// is `None`. A `*` in `detail` matches only itself.
-    pub fn allow_custom(self, name: CustomName, detail: Option<&str>) -> Self {
-        self.push(Decision::Allow, RuleKind::Custom(name, detail.map(String::from)))
+    /// Allows the custom capabilities whose name matches `name` and whose detail matches `detail`.
+    pub fn allow_custom(self, name: CustomMatch, detail: CustomMatch) -> Self {
+        self.push(Decision::Allow, RuleKind::Custom(name, detail))
     }
-    /// Denies the custom capabilities of `name` with `detail`, or with any detail if `detail`
-    /// is `None`.
-    pub fn deny_custom(self, name: CustomName, detail: Option<&str>) -> Self {
-        self.push(Decision::Deny, RuleKind::Custom(name, detail.map(String::from)))
+    /// Denies the custom capabilities whose name matches `name` and whose detail matches `detail`.
+    pub fn deny_custom(self, name: CustomMatch, detail: CustomMatch) -> Self {
+        self.push(Decision::Deny, RuleKind::Custom(name, detail))
     }
-    /// Prompts before the custom capabilities of `name` with `detail`, or with any detail if
-    /// `detail` is `None`.
-    pub fn prompt_custom(self, name: CustomName, detail: Option<&str>) -> Self {
-        self.push(Decision::Prompt, RuleKind::Custom(name, detail.map(String::from)))
+    /// Prompts before the custom capabilities whose name matches `name` and whose detail matches
+    /// `detail`.
+    pub fn prompt_custom(self, name: CustomMatch, detail: CustomMatch) -> Self {
+        self.push(Decision::Prompt, RuleKind::Custom(name, detail))
     }
 
     /// Evaluates `cap`, normalizing file paths with [`super::normalize_path`].
@@ -762,8 +769,9 @@ impl RulePolicy {
             Capability::Custom { name, detail } => {
                 let named = index.custom.get(name.as_str()).into_iter().flatten().map(|e| (true, e));
                 for (named, &(ref detail_pattern, d, rule)) in named.chain(index.any_custom.iter().map(|e| (false, e))) {
-                    if detail_pattern.as_ref().is_none_or(|p| p == detail) {
-                        best.offer([2 * named as u32 + detail_pattern.is_some() as u32, 0, 0, 0], d, rule);
+                    if detail_pattern.matches(detail) {
+                        let exact_detail = matches!(detail_pattern, CustomMatch::Exact(_));
+                        best.offer([2 * named as u32 + exact_detail as u32, 0, 0, 0], d, rule);
                     }
                 }
             }
@@ -1120,8 +1128,8 @@ struct Index {
     env_names: FxHashMap<String, Vec<(Decision, u32)>>,
     env: Vec<(NameKind, Decision, u32)>,
     unit: Vec<(Capability, Decision, u32)>,
-    custom: FxHashMap<String, Vec<(Option<String>, Decision, u32)>>,
-    any_custom: Vec<(Option<String>, Decision, u32)>,
+    custom: FxHashMap<String, Vec<(CustomMatch, Decision, u32)>>,
+    any_custom: Vec<(CustomMatch, Decision, u32)>,
 }
 
 #[derive(Debug)]
@@ -1185,10 +1193,10 @@ impl Index {
                 RuleKind::Stdout => index.unit.push((Capability::Stdout, decision, rule_id)),
                 RuleKind::Stderr => index.unit.push((Capability::Stderr, decision, rule_id)),
                 RuleKind::TimeZone => index.unit.push((Capability::TimeZone, decision, rule_id)),
-                RuleKind::Custom(CustomName::Named(n), d) => {
+                RuleKind::Custom(CustomMatch::Exact(n), d) => {
                     index.custom.entry(n.clone()).or_default().push((d.clone(), decision, rule_id))
                 }
-                RuleKind::Custom(CustomName::Any, d) => index.any_custom.push((d.clone(), decision, rule_id)),
+                RuleKind::Custom(CustomMatch::Any, d) => index.any_custom.push((d.clone(), decision, rule_id)),
             }
         }
         index
