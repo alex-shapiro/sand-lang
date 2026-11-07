@@ -2158,8 +2158,8 @@ kind: kind))` in Sand, whereas `?` converts a `Ctl` into a `HostError` that
   or an exit code.
 - `Result<Later<T, E>, E>` suspends the calling task on a future and maps to
   the same Sand return type as `Result<T, E>`. `Later::new(wait_kind, fut)`
-  specifies the `WaitKind` of `fut`. Use `WaitKind::User` if `fut` waits for a
-  user action so that idle wait time does not count toward `max_wall_time`
+  specifies the `WaitKind` of `fut`. Use `WaitKind::User` if the task waits for
+  a user action so that idle wait time does not count toward `max_wall_time`
   (§16.2). Functions registered with `async_function` use `WaitKind::Io`.
 
 To check a sandbox capability inside a `vm_function`, call

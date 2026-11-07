@@ -303,7 +303,7 @@ impl FileSystem {
         file_entries(self.0.files())
     }
 
-    /// Returns a counter that increments whenever a file is written or moved.
+    /// Returns a counter that is incremented if a file is written or moved.
     pub fn generation(&self) -> f64 {
         self.0.generation() as f64
     }

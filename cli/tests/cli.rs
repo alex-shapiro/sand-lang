@@ -954,8 +954,8 @@ fn invalid_network_patterns_are_explained() {
     assert!(out.stderr.contains("invalid host pattern `a..b`"), "{}", out.stderr);
 }
 
-/// `sand run` exits when it reaches `--max-time`, even if a read of process
-/// standard input is still blocked.
+/// `sand run` exits if it reaches `--max-time` while a read of process
+/// standard input is blocked.
 #[test]
 fn open_stdin_pipe_exits_at_time_limit() {
     let dir = script("stdin-open", "import io\nio.stdin.read_line()");

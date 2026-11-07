@@ -953,7 +953,7 @@ fn scripts_read_the_input_the_host_feeds() {
     feed.send("early\npart");
     assert_eq!(r.value("io.stdin.read_line()?"), "Some(\"early\")");
     assert!(!has_request(&r.rt, &feed));
-    // `input_needed` resolves once the read waits and all other tasks are idle.
+    // `input_needed` is resolved once the request is open and all other tasks are idle.
     let Repl { session, rt, .. } = &mut r;
     let (value, ()) = rt.block_on(async {
         let answer = async {
@@ -1136,7 +1136,7 @@ fn an_io_feed_wait_counts_toward_the_wall_time_limit() {
 }
 
 #[test]
-fn a_cancelled_read_no_longer_pauses_wall_time_limit() {
+fn cancelled_read_resumes_wall_time_limit() {
     let mut r = Repl::paused(wall_time_limited().stdin_feed().0);
     r.ok("import io");
     let src = "task.timeout(50ms, () => io.stdin.read_line())\ntask.sleep(200ms)";
