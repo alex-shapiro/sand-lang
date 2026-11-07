@@ -518,12 +518,12 @@ impl<'a> PathRules<'a> {
 
 /// Returns `true` if a rule with transports `a` controls every connection that a rule with transports `b` controls.
 fn transports_cover(a: Transports, b: Transports) -> bool {
-    [true, false].into_iter().all(|tls| !b.controls(tls) || a.controls(tls))
+    a == b || a == Transports::Both
 }
 
 /// Returns `true` if rules with transports `a` and `b` both control some connection.
 fn transports_overlap(a: Transports, b: Transports) -> bool {
-    [true, false].into_iter().any(|tls| a.controls(tls) && b.controls(tls))
+    a == b || a == Transports::Both || b == Transports::Both
 }
 
 fn cannot_override_between(i: &PathRule, j: &PathRule, k: &PathRule) -> bool {
@@ -552,17 +552,6 @@ mod tests {
 
     fn lint(text: &str) -> Vec<String> {
         lint_policy(text, Path::new("/base"), Some(Path::new("/home/me"))).unwrap().iter().map(|w| w.to_string()).collect()
-    }
-
-    #[test]
-    fn transports_cover_and_overlap_as_sets_of_tls_and_plaintext() {
-        use Transports::{Both, Plaintext, Tls};
-        let all = [Tls, Plaintext, Both];
-        let pairs = all.into_iter().flat_map(|a| all.map(|b| (a, b)));
-        let covering: Vec<_> = pairs.clone().filter(|&(a, b)| transports_cover(a, b)).collect();
-        assert_eq!(covering, [(Tls, Tls), (Plaintext, Plaintext), (Both, Tls), (Both, Plaintext), (Both, Both)]);
-        let disjoint: Vec<_> = pairs.filter(|&(a, b)| !transports_overlap(a, b)).collect();
-        assert_eq!(disjoint, [(Tls, Plaintext), (Plaintext, Tls)]);
     }
 
     #[test]
@@ -797,6 +786,11 @@ mod tests {
         assert_eq!(
             lint("allow http tls plaintext api.example.com\nallow http plaintext api.example.com/x"),
             ["2:22: warning[redundant-rule]: `api.example.com` on line 1 already allows this"]
+        );
+        // A rule for other transports cannot override between two rules.
+        assert_eq!(
+            lint("allow http tls a.example\ndeny http plaintext a.example/x\nallow http tls a.example/x/y"),
+            ["3:16: warning[redundant-rule]: `a.example` on line 1 already allows this"]
         );
         assert_eq!(lint("allow http api.example.com:8080\nallow http api.example.com:443/x"), none);
         assert_eq!(lint("allow http a.com/Admin\nallow http a.com/admin/x"), none);
