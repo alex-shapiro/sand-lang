@@ -2507,10 +2507,11 @@ explicit `--deny` or `--prompt` flags still take precedence; for example,
 `--allow-all --prompt='write **'` prompts before every file write. `--no-prompt`
 disables interactive prompts and denies any request that evaluates to `Prompt`.
 
-Limit and execution options: `--max-memory=BYTES` with suffixes `K`, `M`, and `G`,
-`--max-time=DURATION`, `--max-cpu=DURATION`, `--max-instructions=N`,
-`--max-compile-fuel=N`, and `--seed=N` for the PRNG seed. Options that take a
-value accept either `--opt=VALUE` or `--opt VALUE`.
+Limit options: `--max-NAME=VALUE` sets a limit with the same name and value
+syntax as the policy directive `limit NAME VALUE` (§14.7), for example
+`--max-memory=256M`, `--max-time=10s`, or `--max-instructions=none`.
+`--seed=N` sets the PRNG seed. Options that take a value accept either
+`--opt=VALUE` or `--opt VALUE`.
 
 Arguments after `--` and positional arguments after `FILE` are passed to the
 script in `env.args()`. Exit codes: the script's exit code, clamped to 255 if

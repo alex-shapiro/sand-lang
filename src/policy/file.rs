@@ -970,7 +970,7 @@ fn render_seg(seg: &Seg, name: impl Fn(&str, bool) -> String) -> String {
 }
 
 /// Parses a byte count with an optional `K`, `M`, or `G` binary suffix, saturating on overflow.
-pub fn parse_size(s: &str) -> Result<usize, String> {
+fn parse_size(s: &str) -> Result<usize, String> {
     parse_size_u64(s).map(crate::vm::value::u64_to_usize_saturating)
 }
 
@@ -986,7 +986,7 @@ fn parse_size_u64(s: &str) -> Result<u64, String> {
 }
 
 /// Parses a duration such as `500ms`, `10s`, `1.5m`, or `1d`.
-pub fn parse_duration(s: &str) -> Result<Duration, String> {
+fn parse_duration(s: &str) -> Result<Duration, String> {
     let s = s.trim();
     let units: [(&str, f64); 8] =
         [("ms", 1e-3), ("us", 1e-6), ("ns", 1e-9), ("s", 1.0), ("m", 60.0), ("h", 3600.0), ("d", 86400.0), ("w", 604800.0)];
@@ -1942,6 +1942,7 @@ allow http GET a.com tls"
         assert_eq!(parse_size_u64("8G"), Ok(8 << 30));
         assert_eq!(parse_size_u64("99999999999G"), Ok(u64::MAX));
         assert_eq!(parse_size("8589934592").map(|n| n as u64), Ok((8u64 << 30).min(usize::MAX as u64)));
+        assert_eq!(parse_duration("1.5s"), Ok(Duration::from_millis(1500)));
         assert_eq!(parse_duration("250ms"), Ok(Duration::from_millis(250)));
         assert_eq!(parse_duration("2m"), Ok(Duration::from_secs(120)));
         assert!(parse_duration("10").is_err());
