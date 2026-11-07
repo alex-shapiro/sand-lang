@@ -2043,8 +2043,7 @@ elapsed time while other tasks wait for timers or network I/O also does not
 count toward `max_wall_time`; the CPU time, instruction, memory, and output
 limits still bound the run during that wait. User waits include:
 
-- reads from a `StdinFeed` made by `Config::stdin_feed` (the host sees each
-  waiting read through `wait_for_request`, and can prompt for or dismiss it)
+- reads from a `StdinFeed` made by `Config::stdin_feed`
 - host functions that return a `Later` with `WaitKind::User` (§16.3)
 
 `Config::stdin_io_feed` makes a feed for input that comes from a program, such
