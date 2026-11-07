@@ -132,9 +132,9 @@ return types instead of `Vm` fields. This updates the native module API in four
 steps:
 
 - **9a. Control-flow types.** Split `Fail` and engine-only requests out of
-  `Ctl`, and add typed exits and `HostError<C>`. This also fixes a bug where a test failed if a finisher
-  called `exit(0)`. Source commits: `fc27559`, `fb9367e`, `5bdac47`, `61bfe31`,
-  `d84df4d`, `c690c03`, `906ac91`, `4792919`.
+  `Ctl`. Add typed exits and `HostError<C>`. This also fixes a bug where a test
+  failed if a finisher called `exit(0)`. Source commits: `fc27559`, `fb9367e`,
+  `5bdac47`, `61bfe31`, `d84df4d`, `c690c03`, `906ac91`, `4792919`.
 - **9b. Native call context.** Pass `Call<'a>` to native functions. Source
   commits: `33beccd`, `e4ed4cb`.
 - **9c. Post-effect heap view.** Replace `Heap::unchecked` with `AfterEffect`.

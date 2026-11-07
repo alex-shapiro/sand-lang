@@ -1680,7 +1680,7 @@ a private, loopback, link-local, or other non-public range.
 
 ### 14.7 Policy files
 
-A policy file uses the `.policy` extension and declares authorization rules and
+A policy file uses the `.policy` extension. It declares authorization rules and
 resource limits in a line-oriented text format. Pass a policy file to the CLI
 with `sand run --policy=FILE`, as described in §17.5. In Rust, call
 `sandlang::policy::file::PolicyFile::parse(text, base, home)` to obtain
@@ -2182,26 +2182,30 @@ failing the first memory or resource check in each `vm_function` call.
 Return-value conversion does not fail on the memory limit; instead, the engine
 collects garbage and checks the memory limit after the call completes.
 
-| Rust type                                           | Sand type                                             |
-| --------------------------------------------------- | ----------------------------------------------------- |
-| `i64`, `f64`, `bool`, `()`, `jiff::SignedDuration`  | `int`, `float`, `bool`, `()`, `duration`              |
-| `String`, `&str`; `Vec<u8>`, `&[u8]`                | `str`; `bytes`                                        |
-| `Vec<T>`, `Option<T>`, tuples of 2 to 8 elements    | `[T]`, `T?`, tuples                                   |
-| `Box<T>`                                            | `T`                                                   |
-| `HashMap<K, V>`, `BTreeMap<K, V>`, `IndexMap<K, V>` | `[K: V]`                                              |
-| `HashSet<T>`, `BTreeSet<T>`                         | `Set<T>`                                              |
-| `Result<T, E>`                                      | `Result<T, Error>` or `T`, based on `E`               |
-| `Never`                                             | `never`                                               |
-| `jiff::Timestamp`                                   | `time.Instant`                                        |
-| `jiff::civil::DateTime`                             | `time.PlainDateTime`                                  |
-| `jiff::civil::Date`                                 | `time.PlainDate`                                      |
-| `jiff::civil::Time`                                 | `time.PlainTime`                                      |
-| `sandlang::stdlib::json::Json`                      | `json.Json`                                           |
-| bound type `T`                                      | `T`, or `&T` for a borrowed object                    |
-| `Val<T>`                                            | `T`, passed as an uncopied heap handle                |
-| `Param<N, B>`                                       | `N`-th type parameter                                 |
-| `Reflect<N>`                                        | runtime type description of the `N`-th type parameter |
-| `Num<N>`                                            | `Num` evidence of the `N`-th type parameter           |
+| Rust type                         | Sand type                                             |
+| --------------------------------- | ----------------------------------------------------- |
+| `i64`, `f64`, `bool`, `()`        | `int`, `float`, `bool`, `()`                          |
+| `String`, `&str`                  | `str`                                                 |
+| `Vec<u8>`, `&[u8]`                | `bytes`                                               |
+| `Vec<T>`, `Option<T>`             | `[T]`, `T?`                                           |
+| tuples of 2 to 8 elements         | tuples                                                |
+| `Box<T>`                          | `T`                                                   |
+| `HashMap<K, V>`, `BTreeMap<K, V>` | `[K: V]`                                              |
+| `IndexMap<K, V>`                  | `[K: V]`                                              |
+| `HashSet<T>`, `BTreeSet<T>`       | `Set<T>`                                              |
+| `Result<T, E>`                    | `Result<T, Error>` or `T`, based on `E`               |
+| `Never`                           | `never`                                               |
+| `jiff::SignedDuration`            | `duration`                                            |
+| `jiff::Timestamp`                 | `time.Instant`                                        |
+| `jiff::civil::DateTime`           | `time.PlainDateTime`                                  |
+| `jiff::civil::Date`               | `time.PlainDate`                                      |
+| `jiff::civil::Time`               | `time.PlainTime`                                      |
+| `sandlang::stdlib::json::Json`    | `json.Json`                                           |
+| bound type `T`                    | `T`, or `&T` for a borrowed object                    |
+| `Val<T>`                          | `T`, passed as an uncopied heap handle                |
+| `Param<N, B>`                     | `N`-th type parameter                                 |
+| `Reflect<N>`                      | runtime type description of the `N`-th type parameter |
+| `Num<N>`                          | `Num` evidence of the `N`-th type parameter           |
 
 `Param<N, B>` specifies the built-in traits `B` required on the `N`-th type
 parameter: `traits::Eq`, `traits::Ord`, `traits::Hash`, `traits::Num`,

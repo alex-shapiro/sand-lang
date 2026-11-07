@@ -59,9 +59,9 @@ use std::task::Poll;
 /// * The instruction, CPU time, wall time, and output limits apply to each
 ///   input separately. The memory limit applies to the shared session heap.
 /// * An internal error or caught Rust panic can leave the VM in an
-///   inconsistent state. The session resets itself, and [`Session::was_reset`]
-///   returns `true`. The call returns [`Error::Internal`] with [`RESET_NOTE`] appended
-///   to the message.
+///   inconsistent state. The session then resets itself.
+///   [`Session::was_reset`] returns `true` after the reset. The call returns
+///   [`Error::Internal`] with [`RESET_NOTE`] appended to the message.
 pub struct Session {
     /// Shares the configuration, natives and "always" answers of the engine
     /// that created the session, with its own interrupt flag.

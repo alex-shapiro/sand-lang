@@ -162,7 +162,7 @@ Sand infers the Sand function signature from the Rust parameter and return types
 | tuples of up to 8 elements                                   | tuples                       |
 | Rust enum with `#[derive(SandEnum)]`                         | matching Sand `enum`         |
 | Rust struct with `#[derive(SandStruct)]`                     | matching Sand `struct`       |
-| `&T` (argument) or `T` (result) with `#[derive(SandObject)]` | opaque type `T`              |
+| `&T` parameter or `T` return with `#[derive(SandObject)]`    | opaque type `T`              |
 | `ValueType` `T` with `#[derive(SandValue)]`                  | opaque value type `T`        |
 
 Add `indexmap` 2 or `jiff` 0.2 to `Cargo.toml` to use `IndexMap` or the `jiff` types directly. `sandlang::stdlib::time` defines the remaining `time` types.
