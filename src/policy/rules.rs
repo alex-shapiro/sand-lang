@@ -506,10 +506,14 @@ impl RulePolicy {
     ///
     /// The method adds a `deny net` rule for `localhost` and for each address range that
     /// [`super::net::is_private_address`] reports. A more specific address rule overrides these
-    /// rules, such as `allow net localhost:8080` or `allow net 10.0.0.5`. A rule of equal
-    /// specificity, such as `allow net localhost`, does not, and neither does a host name rule,
-    /// such as `allow net api.example.com`. Add these rules to the primary rules: in a
-    /// [`RulePolicy::with_defaults`] tier, they do not apply to a request that a primary rule allows.
+    /// rules, such as `allow net 10.0.0.5`, for every host name that the policy allows. A rule of
+    /// equal specificity, such as `allow net localhost`, does not, and neither does a host name
+    /// rule, such as `allow net api.example.com`. Host name rules do not match IP literals, so
+    /// allow a local server under each spelling, as in
+    /// `allow net localhost:8080 127.0.0.1:8080 [::1]:8080`.
+    ///
+    /// Add these rules to the primary rules: in a [`RulePolicy::with_defaults`] tier, they do not
+    /// apply to a request that a primary rule matches.
     ///
     /// In the WebAssembly build, the browser resolves host names, so these rules block only IP
     /// literals and `localhost` names.
@@ -701,11 +705,7 @@ impl RulePolicy {
         }
         let tls = uses_tls(request);
         let mut best = Best::new(self, &[]);
-        index.named.find_address(&dest, ip, |is_alt, e| {
-            if matches_address_form(e.decision, is_alt) && e.transports.controls(tls) {
-                best.offer(e.rank.spec(0), e.decision, e.rule);
-            }
-        });
+        index.net.find_address(&dest, ip, |is_alt, e| e.offer_to(&mut best, tls, is_alt));
         address_verdict(self.verdict(request, PathSpace::Host, &[]), &mut best)
     }
 
@@ -823,11 +823,7 @@ impl RulePolicy {
     }
 
     fn net_verdict(&self, dest: &Dest, tls: bool, best: &mut Best<'_>) {
-        self.non_file_index().named.find(dest, |is_alt, e| {
-            if matches_address_form(e.decision, is_alt) && e.transports.controls(tls) {
-                best.offer(e.rank.spec(0), e.decision, e.rule);
-            }
-        });
+        self.non_file_index().net.find(dest, |is_alt, e| e.offer_to(best, tls, is_alt));
     }
 
     fn check_http(&self, cap: &Capability, exclude: &[usize], find: &FindGroups) -> Option<(Decision, usize)> {
@@ -1117,7 +1113,7 @@ impl Resolver {
 
 #[derive(Debug, Default)]
 struct Index {
-    named: HostIndex<NetEntry>,
+    net: HostIndex<NetEntry>,
     http: HostIndex<u32>,
     groups: Vec<HttpGroup>,
     listen: Vec<(ListenPattern, Decision, u32)>,
@@ -1134,6 +1130,15 @@ struct NetEntry {
     decision: Decision,
     transports: Transports,
     rank: Rank,
+}
+
+impl NetEntry {
+    /// Offers the rule to `best` if it matches the transport and the address form.
+    fn offer_to(&self, best: &mut Best<'_>, tls: bool, is_alternate: bool) {
+        if matches_address_form(self.decision, is_alternate) && self.transports.controls(tls) {
+            best.offer(self.rank.spec(0), self.decision, self.rule);
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1160,7 +1165,7 @@ impl Index {
             if let Some(http) = rule.kind.http_match() {
                 let rank = Rank::http(&http);
                 if rule.kind.connects() {
-                    index.named.insert(http.host, NetEntry { rule: rule_id, decision, transports: http.transports, rank });
+                    index.net.insert(http.host, NetEntry { rule: rule_id, decision, transports: http.transports, rank });
                 }
                 let group = *groups.entry(http.host).or_insert_with(|| {
                     index.http.insert(http.host, index.groups.len() as u32);
