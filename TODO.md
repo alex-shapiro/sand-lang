@@ -107,29 +107,29 @@ The host cannot rely on engine limits, stability, or control.
       thread before checking `max_source_bytes`. Offloading the bounded read
       enforces `max_source_bytes`, `max_wall_time`, and interrupts on a large
       file, a FIFO, or a hung mount.
-- [ ] ❓ _Memory._ Account for compiler and linter data against `max_memory`.
+- [ ] ❓ _Memory._ Count compiler and linter memory toward `max_memory`.
       SPEC §15.3 excludes compilation from `max_memory`. Only `max_source_bytes`
-      and `max_compile_fuel` bound memory use during compilation. Accounting for
+      and `max_compile_fuel` bound memory use during compilation. Counting
       compiler memory will reject scripts that compile today under a low
       `max_memory` limit.
 - [ ] ❓ _Memory._ Bound the size of lint warning messages. Identifiers can be as
       long as the source file. The linter charges fuel per identifier rather
       than per byte of warning text. In `shadowed-variable`, the linter also
-      allocates the full type string before it charges fuel for the string. The
-      linter can therefore allocate gigabytes of warning text for large
-      identifiers or deep types. Either cap identifier length in the lexer or
-      charge fuel per byte before formatting warning text.
+      formats the full type before charging fuel. The linter can therefore
+      allocate gigabytes of warning text for long identifiers or deep types.
+      Either cap identifier length in the lexer or charge fuel per byte before
+      formatting warning text.
 - [ ] ❓ _Performance._ Index enum variants and struct fields by name in
       `TypeDef`. Variant and field lookups in `src/check/expr.rs` and
       `src/check/pat.rs` scan the member list linearly without charging compile
-      fuel. A 16 MiB script with 400,000 variants runs for 91 seconds before it
-      exhausts compile fuel.
+      fuel. A 16 MiB script with 400,000 variants runs for 91 seconds before
+      exhausting compile fuel.
 - [ ] ❓ _Embedding._ Charge lint-only checker work to the lint budget. During
       linting, the type checker charges `argument-order` and import checks to
       the compile budget. A script near the compile limit can therefore pass
       `sand check` and fail `sand lint` with `program too complex to compile`.
 - [ ] ❓ _Embedding._ Allow hosts to configure the lint fuel limit.
-      `lint_module` derives the lint budget solely from the source size. Add
+      `lint_module` derives the lint budget only from the source size. Add
       `Limits::max_lint_fuel` or derive the lint budget from
       `Limits::max_compile_fuel`.
 

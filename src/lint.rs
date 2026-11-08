@@ -47,12 +47,13 @@ struct Linter<'a> {
     /// Enum definition for each uppercase binding in the main module, indexed
     /// by the byte offset of its name.
     enum_defs: HashMap<u32, TypeDefId>,
-    /// The names of the bindings (with known types) of each scope enclosing
-    /// the current point of the current function, innermost last.
+    /// Binding names in each enclosing scope of the current function, from
+    /// outermost to innermost.
     let_scopes: Vec<Vec<String>>,
-    /// The types of the bindings in `let_scopes` by name, innermost last.
+    /// Types of the bindings in `let_scopes` by name, from outermost to
+    /// innermost.
     in_scope: HashMap<String, Vec<TypeId>>,
-    /// Names that may shadow the prelude's (see [`declarations`]).
+    /// Module-level declarations that can shadow the prelude.
     declared: HashSet<String>,
     budget: &'a CompileBudget,
 }
@@ -63,7 +64,7 @@ fn run_lints(main: &ParsedModule, checked: &CheckedProgram, budget: &CompileBudg
         return vec![];
     }
     let locals = || checked.lint.locals.iter().filter(|f| f.span.file == main.file);
-    let mut l = Linter {
+    let mut linter = Linter {
         file,
         out: Vec::new(),
         checked,
@@ -74,11 +75,11 @@ fn run_lints(main: &ParsedModule, checked: &CheckedProgram, budget: &CompileBudg
         declared: declarations(&main.ast),
         budget,
     };
-    l.module(&main.ast);
+    linter.module(&main.ast);
     if budget.stopped().is_some() {
         return vec![];
     }
-    l.fact_lints(main.file);
+    linter.fact_lints(main.file);
 
     let src = &*file.text;
     let mut file_allow: HashSet<String> = HashSet::new();
@@ -94,11 +95,11 @@ fn run_lints(main: &ParsedModule, checked: &CheckedProgram, budget: &CompileBudg
         if c.kind == CommentKind::ModuleDoc {
             file_allow.extend(names);
         } else {
-            let line = l.line_of(c.lo);
+            let line = linter.line_of(c.lo);
             line_allow.entry(line + 1).or_default().extend(names);
         }
     }
-    let mut out: Vec<LintWarning> = l
+    let mut out: Vec<LintWarning> = linter
         .out
         .into_iter()
         .filter(|w| !file_allow.contains(w.code) && !line_allow.get(&w.line).is_some_and(|s| s.contains(w.code)))
@@ -443,8 +444,7 @@ impl<'a> Linter<'a> {
         p.bindings(&mut ids);
         for id in &ids {
             let Some(ty) = self.binding_type(id) else { continue };
-            let prior = self.in_scope.get(&id.name).and_then(|types| types.last()).copied();
-            if let Some(prev_ty) = prior
+            if let Some(&prev_ty) = self.in_scope.get(&id.name).and_then(|types| types.last())
                 && prev_ty != ty
             {
                 let (prev_text, text) = (self.type_text(prev_ty), self.type_text(ty));

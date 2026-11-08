@@ -2794,25 +2794,25 @@ impl Checker {
     }
 
     /// Emits an `argument-order` warning if a positional argument or pattern
-    /// in `given` shares a name with a field or parameter at another index in
-    /// `names`.
+    /// in `positional` shares a name with a field or parameter at another
+    /// index in `expected_names`.
     pub(crate) fn note_argument_order<'g>(
         &mut self,
         target_name: &str,
-        names: &[&str],
-        given: impl Iterator<Item = (usize, &'g str, Span)>,
+        expected_names: &[&str],
+        positional: impl Iterator<Item = (usize, &'g str, Span)>,
     ) {
-        if !self.linting() || !self.budget.charge(names.len() as u64) {
+        if !self.linting() || !self.budget.charge(expected_names.len() as u64) {
             return;
         }
-        let known_names: HashSet<&str> = names.iter().copied().collect();
-        for (i, name, span) in given {
-            if names.get(i) == Some(&name) || !known_names.contains(name) {
+        let known_names: HashSet<&str> = expected_names.iter().copied().collect();
+        for (i, name, span) in positional {
+            if expected_names.get(i) == Some(&name) || !known_names.contains(name) {
                 continue;
             }
             let msg = format!(
                 "`{name}` is given for `{}` of {target_name}, which also has `{name}`; write `{}: {name}` if this is intended",
-                names[i], names[i]
+                expected_names[i], expected_names[i]
             );
             self.lint.argument_order.push((span, msg));
         }
@@ -3038,7 +3038,7 @@ impl Checker {
                 continue;
             }
             let ty = self.zonk(self.fs.data[i].ty);
-            let enum_def = if name.starts_with(|c: char| c.is_ascii_uppercase()) { self.enum_def_of(ty) } else { None };
+            let enum_def = if name.starts_with(|c: char| c.is_ascii_uppercase()) { self.enum_def(ty) } else { None };
             let data = &self.fs.data[i];
             self.lint.locals.push(LocalFact {
                 span: data.decl_span,
@@ -3053,7 +3053,7 @@ impl Checker {
     }
 
     /// Returns the type definition ID of `t` if `t` is an enum.
-    fn enum_def_of(&self, t: TypeId) -> Option<TypeDefId> {
+    fn enum_def(&self, t: TypeId) -> Option<TypeDefId> {
         let Ty::Named(def_id, _) = self.rty(t) else { return None };
         matches!(self.types[def_id as usize].kind, TypeDefKind::Enum { .. }).then_some(def_id)
     }

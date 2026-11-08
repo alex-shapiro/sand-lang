@@ -268,9 +268,9 @@ fn duplicate_member_checks_are_linear() {
     let fields: String = (0..128_000).map(|i| format!("    f{i}: int\n")).collect();
     let methods: String = (0..128_000).map(|i| format!("    fn m{i}(self) -> int\n")).collect();
     let src = format!("enum E {{\n{variants}}}\nstruct S {{\n{fields}}}\ntrait T {{\n{methods}}}\n");
-    let (r, took) = check(Config::new(), &src);
-    r.unwrap();
-    assert!(took < FAST, "took {took:?}");
+    let (result, elapsed) = check(Config::new(), &src);
+    result.unwrap();
+    assert!(elapsed < FAST, "took {elapsed:?}");
 }
 
 #[test]
@@ -316,7 +316,7 @@ fn the_linter_is_bounded() {
 }
 
 #[test]
-fn variant_suggestions_are_charged_to_the_lint_budget() {
+fn variant_suggestions_charge_the_lint_budget() {
     let engine = Engine::new(Config::new());
     for (payload, argument) in [("", ""), ("(int)", "(1)")] {
         let variants: String = (0..4_000).map(|i| format!("    V{i}{payload}\n")).collect();
@@ -349,8 +349,8 @@ fn argument_order_lint_is_linear_in_the_arguments() {
 }
 
 /// Test clock that returns a fixed timestamp for `readings_before_stop` calls
-/// to [`Clock::now`]. Subsequent calls trigger `interrupt` if set, or advance
-/// the clock past any test deadline.
+/// to [`Clock::now`]. After that, each call triggers `interrupt` or advances
+/// the clock past the test deadline.
 struct StoppingClock {
     origin: PlatformInstant,
     readings: AtomicU64,

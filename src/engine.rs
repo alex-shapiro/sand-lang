@@ -1001,7 +1001,8 @@ impl Engine {
 
     /// Type-checks the file at `path` and its imports, then lints the file.
     ///
-    /// See [`Engine::lint_source`] for the errors this method returns.
+    /// Returns [`Error::Io`] if the engine cannot read `path`, or any error
+    /// that [`Engine::lint_source`] returns.
     pub fn lint_file(&self, path: impl AsRef<Path>) -> Result<Vec<crate::lint::LintWarning>, Error> {
         let call = self.begin_call();
         let (name, source, root) = self.read_main(path.as_ref())?;

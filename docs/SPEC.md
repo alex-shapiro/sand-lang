@@ -2492,8 +2492,8 @@ then enforces a lint fuel budget of 64 units per byte of source, with a minimum
 of 10,000,000 units. If a file exceeds this budget, linting fails with `source
 too complex to lint` (`Error::Compile`, exit code 2). Each unit of fuel covers:
 
-- one syntax tree node visit
-- one variant or character-pair comparison in `variant-like-binding`
+- a syntax tree node visit
+- a variant or character-pair comparison in `variant-like-binding`
 - 16 bytes of formatted type text in a `shadowed-variable` warning
 
 ### 17.3 `sand fmt FILE... [--check]`, `sand fmt - [--check]`
