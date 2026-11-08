@@ -112,13 +112,13 @@ The host cannot rely on engine limits, stability, or control.
       and `max_compile_fuel` bound memory use during compilation. Accounting for
       compiler memory will reject scripts that compile today under a low
       `max_memory` limit.
-- [ ] ❓ _Memory._ Bound the size of lint warning messages. The lexer does not
-      limit identifier length, and the linter charges fuel per identifier rather
+- [ ] ❓ _Memory._ Bound the size of lint warning messages. Identifiers can be as
+      long as the source file. The linter charges fuel per identifier rather
       than per byte of warning text. In `shadowed-variable`, the linter also
-      allocates the full type string before it charges fuel for the string.
-      Large identifiers or deep types can therefore allocate gigabytes of
-      warning text and abort the process. Either cap identifier length in the
-      lexer or charge fuel per byte before formatting warning text.
+      allocates the full type string before it charges fuel for the string. The
+      linter can therefore allocate gigabytes of warning text for large
+      identifiers or deep types. Either cap identifier length in the lexer or
+      charge fuel per byte before formatting warning text.
 - [ ] ❓ _Performance._ Index enum variants and struct fields by name in
       `TypeDef`. Variant and field lookups in `src/check/expr.rs` and
       `src/check/pat.rs` scan the member list linearly without charging compile
@@ -129,9 +129,9 @@ The host cannot rely on engine limits, stability, or control.
       the compile budget. A script near the compile limit can therefore pass
       `sand check` and fail `sand lint` with `program too complex to compile`.
 - [ ] ❓ _Embedding._ Allow hosts to configure the lint fuel limit.
-      `lint_module` derives the lint budget from the source size and ignores
-      `max_compile_fuel`. Add `Limits::max_lint_fuel` or derive the lint budget
-      from `Limits::max_compile_fuel`.
+      `lint_module` derives the lint budget solely from the source size. Add
+      `Limits::max_lint_fuel` or derive the lint budget from
+      `Limits::max_compile_fuel`.
 
 ## Tier 3: ordinary scripts
 

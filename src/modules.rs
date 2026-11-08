@@ -525,7 +525,7 @@ pub(crate) fn budget_error(stop: Stop, sm: &SourceMap, main_file: u32) -> Error 
     stop_error(stop, sm, main_file, "program too complex to compile: exceeded the compile budget (max_compile_fuel)")
 }
 
-/// Converts a budget `stop` into an [`Error`], using `out_of_fuel_message` when
+/// Converts a budget `stop` into an [`Error`]. Uses `out_of_fuel_message` if
 /// the operation exhausts its fuel budget.
 pub(crate) fn stop_error(stop: Stop, sm: &SourceMap, main_file: u32, out_of_fuel_message: &str) -> Error {
     match stop {

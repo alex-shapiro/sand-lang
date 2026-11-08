@@ -283,8 +283,8 @@ fn shadowing_warnings_charge_their_type_text() {
     assert!(matches!(err, Error::Compile(_)) && err.to_string().contains("source too complex to lint"), "{err}");
 }
 
-/// Generates a script whose lint work scales with `depth` while type-checking
-/// work stays constant.
+/// Generates a script with `depth` nested loops to scale lint work without
+/// increasing type-checking work.
 fn nested_loops(depth: usize) -> String {
     let mut src = String::from("var x = 0\n");
     for i in 0..depth {
@@ -406,8 +406,8 @@ fn stopped_lint_reports_stop_reason() {
         Engine::new(config).lint_source("main.sand", &src)
     };
 
-    // Type checking finishes before the last 10 clock polls, so stopping at
-    // `readings - 10` stops inside the linter.
+    // Type checking finishes before the last 10 clock polls. Stopping at
+    // `readings - 10` therefore stops inside the linter.
     let counting_clock = StoppingClock::new(u64::MAX, None);
     let err = lint_with_clock(counting_clock.clone(), None).unwrap_err();
     assert!(matches!(err, Error::Compile(_)) && err.to_string().contains("source too complex to lint"), "{err}");
