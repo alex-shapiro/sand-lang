@@ -330,10 +330,10 @@ fn variant_suggestions_are_charged_to_the_lint_budget() {
 #[test]
 fn argument_order_lint_is_linear_in_the_arguments() {
     let fields: String = (0..32_000).map(|i| format!("    f{i}: int\n")).collect();
-    let locals: String = (0..32_000).map(|i| format!("    let h{i} = {i}\n")).collect();
+    let globals: String = (0..32_000).map(|i| format!("let h{i} = {i}\n")).collect();
     let arguments = (0..32_000).map(|i| format!("h{i}")).collect::<Vec<_>>().join(", ");
     let calls: String = (0..20).map(|i| format!("    let _s{i} = S({arguments})\n")).collect();
-    let src = format!("struct S {{\n{fields}}}\nfn g() {{\n{locals}{calls}}}\ng()\n");
+    let src = format!("struct S {{\n{fields}}}\n{globals}fn g() {{\n{calls}}}\ng()\n");
     let start = Instant::now();
     Engine::new(limits(|l| l.max_compile_fuel = None)).lint_source("main.sand", &src).unwrap();
     assert!(start.elapsed() < FAST, "took {:?}", start.elapsed());
