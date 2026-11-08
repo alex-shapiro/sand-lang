@@ -283,8 +283,8 @@ impl Engine {
         Ok(array(&r.map_err(|e| error(&e.to_string()))?, lint_warning))
     }
 
-    /// Stops the current run (or session input) as soon as it waits or
-    /// checks its limits; it fails with an `interrupted` error.
+    /// Stops the current run as soon as it waits or checks its limits; it
+    /// fails with an `interrupted` error.
     pub fn interrupt(&self) {
         self.interrupt.interrupt();
     }
@@ -451,7 +451,7 @@ impl Session {
         Ok(())
     }
 
-    /// Stops the running input (see [`Engine::interrupt`]).
+    /// Stops the running input or `runTasks` call (see [`Engine::interrupt`]).
     pub fn interrupt(&self) {
         self.interrupt.interrupt();
     }

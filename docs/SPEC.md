@@ -2383,9 +2383,9 @@ remaining background tasks without running their `defer` blocks.
 
 `Session::set_wall_time` overrides `max_wall_time` for subsequent inputs. The
 interrupt handle of the session configuration (§15.1) cancels the active
-session call. Dropping an `eval` future
-before completion cancels the input in the same way as an interrupt, and leaves
-the session state unchanged if the input was still loading imports. `reset()`
+session call. Dropping an `eval` future before completion cancels the input in
+the same way as an interrupt, and leaves the session state unchanged if the
+input was still loading imports. `reset()`
 clears all session bindings and state. If an internal error (§10.3) occurs
 during `eval`, `run_tests`, `type_of`, or `run_tasks_until`, the session
 automatically resets itself, appends `" (the session was reset)"` from
