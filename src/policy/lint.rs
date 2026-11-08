@@ -955,8 +955,9 @@ mod tests {
         ]
     }
 
-    /// Generates `http` and `net` rules for hosts that can resolve to loopback
-    /// addresses, using few paths and methods so that rule ranks interleave.
+    /// Generates `http` and `net` rules for hosts that can be resolved to
+    /// loopback addresses, using few paths and methods so that rule ranks
+    /// interleave.
     fn loopback_rule_line() -> impl Strategy<Value = String> {
         let verb = || prop::sample::select(vec!["allow", "deny", "prompt"]);
         let transport = || prop::sample::select(vec!["tls plaintext ", "tls plaintext ", "tls ", "plaintext "]);

@@ -1678,7 +1678,7 @@ unless it is in a lower `with_defaults` tier than the stage-1 rule. If no
 address rule matches in the same or higher tier, the engine allows the address.
 The stage-1 rule acts as `allow`, even if it is an approved `prompt` rule. Any
 other `prompt` address rule denies the connection because stage 2 cannot
-prompt, and the error states that the address requires approval. A
+prompt. In that case, the error states that the address requires approval. A
 `CustomPolicy` evaluates `NetAddr` directly and treats `Prompt` as `Allow`.
 
 This two-stage check prevents DNS rebinding to denied IP ranges. For example,

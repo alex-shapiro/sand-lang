@@ -619,7 +619,7 @@ fn redirects_to_denied_addresses_are_denied() {
         "/tls" => HttpResponse::new(302, "").header("location", "http://example.com/"),
         _ => HttpResponse::new(302, "").header("location", &format!("http://localhost:{tport}/")),
     });
-    // The origin is allowed explicitly; the redirect targets only by the wildcard.
+    // The origin is allowed by a host rule, and the redirect targets are allowed only by `*`.
     let policy = RulePolicy::standard()
         .extend(parse_rules(&format!("allow net tls plaintext *\ndeny net 127.0.0.0/8 [::1]\nallow net plaintext {}", origin.addr)));
     let src = format!(
