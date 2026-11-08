@@ -540,6 +540,10 @@ fn only_more_specific_rules_override_deny_private_net() {
     assert_eq!(with("allow net 10.0.0.5").check(&net("10.0.0.5", 443)), Decision::Allow);
     assert_eq!(with("allow net localhost").check(&net("localhost", 8080)), Decision::Deny, "equal specificity");
     assert_eq!(with("allow net 10.0.0.0/8").check(&net("10.0.0.5", 443)), Decision::Deny, "equal specificity");
+    let exact = with("allow net api.example.com");
+    for addr in ["127.0.0.1:443", "[::1]:443", "169.254.169.254:443"] {
+        assert_eq!(exact.check_resolved(&net("api.example.com", 443), addr.parse().unwrap()), Decision::Allow, "{addr}");
+    }
 }
 
 /// Under a wildcard allow rule, `deny_private_net` blocks every loopback host, and a more

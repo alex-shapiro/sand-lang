@@ -511,11 +511,13 @@ impl RulePolicy {
     pub fn prompt_http(self, transports: Transports, methods: Methods, url: UrlPattern) -> Self {
         self.push(Decision::Prompt, RuleKind::Http(methods, url, transports))
     }
-    /// Adds `deny net` rules for `localhost` and for each address range that
-    /// [`super::net::is_private_address`] reports.
+    /// Denies connections to `localhost` and to private network addresses.
     ///
-    /// A more specific rule overrides these rules, such as `allow net localhost:8080` or
-    /// `allow net 10.0.0.5`. A rule of equal specificity, such as `allow net localhost`, does not.
+    /// The method adds a `deny net` rule for `localhost` and for each address range that
+    /// [`super::net::is_private_address`] reports. A more specific rule overrides these rules,
+    /// such as `allow net localhost:8080` or `allow net 10.0.0.5`. A rule of equal specificity,
+    /// such as `allow net localhost`, does not. An exact host name rule, such as
+    /// `allow net api.example.com`, also allows each private address that the name resolves to.
     ///
     /// In the WebAssembly build, the browser resolves host names, so these rules block only IP
     /// literals and `localhost` names.

@@ -1691,7 +1691,9 @@ connecting to `10.0.0.5` through `db.internal`.
 a private, loopback, link-local, or other non-public range.
 `RulePolicy::deny_private_net` adds a `deny net` rule for `localhost` and for
 each of these ranges. A more specific rule overrides them, such as
-`allow net localhost:8080` or `allow net 10.0.0.5`.
+`allow net localhost:8080` or `allow net 10.0.0.5`. An exact hostname rule
+outranks the ranges, so `allow net api.example.com` permits each private
+address that `api.example.com` resolves to.
 
 ### 14.7 Policy files
 

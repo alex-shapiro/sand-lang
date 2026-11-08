@@ -50,3 +50,35 @@ keeps two orders and makes stage 2 larger.
 
 **Recommendation.** Fix A. It removes the second order and the special case,
 and it gives `with_defaults` one meaning.
+
+## An exact host name rule allows private addresses
+
+**Problem.** An exact host name rule turns off `deny_private_net` for every
+address that the name resolves to. Take `allow net api.partner.com` plus
+`deny_private_net()`. If DNS for `api.partner.com` returns `127.0.0.1`, `::1`,
+or `169.254.169.254`, the engine connects. A list of exact API hosts plus
+`deny_private_net` is the main use of the floor, so DNS rebinding reaches
+loopback and cloud metadata.
+
+Stage 2 compares the host rank of the name rule with the IP rules, and an exact
+host name ranks equal to a single IP address. SPEC §14.6 documents this on
+purpose: `allow net db.internal` permits `10.0.0.5`.
+
+Industry practice differs. Stripe's Smokescreen and ash's own gate
+(`ash-sand/src/gate.rs`) need a rule for the private address itself.
+
+**Fix A: only address rules decide about resolved addresses.**
+
+- Stage 2 runs the stage-1 ranking over IP rules only. This removes
+  `resolution_key`, and with it the second precedence order of the first
+  section.
+- `localhost` rules must count as address rules, because RFC 6761 maps them to
+  loopback. Otherwise `allow net localhost:8080` stops working.
+- Cost: a host that connects to internal names must also allow their
+  addresses, such as `allow net db.internal 10.0.0.5`.
+
+**Fix B: keep the current behavior.** The `deny_private_net` doc and SPEC now
+say that an exact host name rule allows the private addresses of the name.
+
+**Recommendation.** Fix A. It agrees with industry practice and it makes stage
+2 one ranking.
