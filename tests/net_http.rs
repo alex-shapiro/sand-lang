@@ -1103,6 +1103,20 @@ serving.cancel()
 }
 
 #[test]
+fn cross_origin_redirects_drop_credentials() {
+    let credentials = ["authorization", "cookie", "proxy-authorization", "x-kept"];
+    let target = http_server(move |req| {
+        let seen: Vec<&str> = credentials.iter().map(|&name| req.header(name).unwrap_or("-")).collect();
+        HttpResponse::new(200, seen.join(" "))
+    });
+    let target_addr = target.addr;
+    let origin = http_server(move |_| HttpResponse::new(302, "").header("location", &format!("http://{target_addr}/")));
+    let headers = credentials.map(|name| format!("(\"{name}\", \"secret\")")).join(", ");
+    let src = format!("import http\nprint(http.get(\"http://{}/\", headers: [{headers}])?.text()?)", origin.addr);
+    assert_eq!(run_with(&src, |c| c).ok_stdout(), "- - - secret\n");
+}
+
+#[test]
 fn request_filters_rewrite_and_refuse_requests() {
     let server = http_server(|req| HttpResponse::new(200, req.header("authorization").unwrap_or("-").to_string()));
     let base = format!("http://{}", server.addr);
