@@ -2494,7 +2494,7 @@ too complex to lint` (`Error::Compile`, exit code 2). Each unit of fuel covers:
 
 - one syntax tree node visit
 - one variant or character-pair comparison in `variant-like-binding`
-- 16 bytes of formatted type text in a warning
+- 16 bytes of formatted type text in a `shadowed-variable` warning
 
 ### 17.3 `sand fmt FILE... [--check]`, `sand fmt - [--check]`
 
