@@ -4,9 +4,7 @@ use super::file::PolicyError;
 use super::file::parse;
 use super::net::{HostKind, NetPattern, ProbeTargets, domains_above, enclosing_ranges, is_localhost};
 use super::path::{self, Pattern, Seg, name_counts};
-use super::rules::{
-    Connection, IMPORT, Methods, Precedence, READ, Rank, Rule, RuleKind, Transports, WRITE, fold_segments, precedence, resolution_key,
-};
+use super::rules::{IMPORT, Methods, READ, Rank, Rule, RuleKind, Transports, WRITE, fold_segments, precedence};
 use super::{Capability, Decision, PathSpace};
 use crate::lint::LintWarning;
 use crate::vm::value::{FxBuild, FxHashMap};
@@ -82,9 +80,7 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
                 let rule = &rules[i];
                 let identical = same[&(rule.decision, &rule.kind)].iter().copied().find(|&c| is_kept(c));
                 let (decision, by, repeat) = match identical {
-                    Some(c) if paths.get(i).is_none_or(|r| paths.preserves_address_resolution(r, &[c], &|j| !is_kept(j))) => {
-                        (true, vec![c], true)
-                    }
+                    Some(c) => (true, vec![c], true),
                     _ => {
                         let (decision, by) = paths.subsuming_rules(paths.get(i)?, &|j| !is_kept(j))?;
                         (decision, by, false)
@@ -123,9 +119,7 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
                 [url.host.clone()].into_iter().chain(url.host.alternate_ip_ranges()).chain(url.host.localhost_subdomain_pattern(false));
             let denied = denied.collect::<Vec<_>>();
             let mut reach = paths.opposing_rules(r, 0).flat_map(|k| match k.scope {
-                Scope::Http { host, connections, .. } if connections.contains(&Connection::Named) => {
-                    denied.iter().filter_map(|d| host.intersection(d)).collect()
-                }
+                Scope::Http { host, is_net_rule: true, .. } => denied.iter().filter_map(|d| host.intersection(d)).collect(),
                 _ => Vec::new(),
             });
             reach.find_map(|reach| bypass(reach, &url.host, *transports))
@@ -148,48 +142,25 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
 
 enum Scope<'a> {
     Files(u8),
-    Http { host: &'a NetPattern, transports: Transports, methods: &'a Methods, connections: &'static [Connection] },
+    Http { host: &'a NetPattern, transports: Transports, methods: &'a Methods, is_net_rule: bool },
 }
 
 #[derive(Clone, Copy)]
 enum Op<'a> {
     File(u8),
     Method(Option<&'a str>),
-    Connect(Connection),
+    Connect,
 }
 
 struct PathRule<'a> {
     index: usize,
     decision: Decision,
     scope: Scope<'a>,
-    address_resolution: Option<AddressResolution>,
     segs: Vec<Seg>,
     folded: Option<Vec<Seg>>,
     prefixes: Vec<u64>,
     rank: Rank,
     counts: (usize, Option<usize>),
-}
-
-/// Role and precedence of a rule during post-DNS address checks; see
-/// [`super::RulePolicy::check_resolved`].
-#[derive(Clone, Copy)]
-struct AddressResolution {
-    role: Role,
-    key: Precedence,
-    port: Option<u16>,
-    transports: Transports,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Role {
-    Name,
-    Address,
-}
-
-impl AddressResolution {
-    fn lowest(host: u32) -> Precedence {
-        precedence([host, 0, 0, 0], Decision::Prompt, usize::MAX)
-    }
 }
 
 impl<'a> PathRule<'a> {
@@ -203,21 +174,9 @@ impl<'a> PathRule<'a> {
             kind => {
                 let http = kind.http_match()?;
                 let scope =
-                    Scope::Http { host: http.host, transports: http.transports, methods: http.methods, connections: kind.connections() };
+                    Scope::Http { host: http.host, transports: http.transports, methods: http.methods, is_net_rule: kind.is_net_rule() };
                 (scope, http.path.to_vec(), Rank::http(&http))
             }
-        };
-        let address_resolution = match scope {
-            Scope::Http { host, transports, .. } => {
-                let role = match (&host.kind, rule.decision) {
-                    (HostKind::Ip(..), Decision::Deny | Decision::Prompt) => Some(Role::Address),
-                    (HostKind::Ip(..), _) | (_, Decision::Deny) => None,
-                    _ => Some(Role::Name),
-                };
-                let key = resolution_key(&rule.kind, rule.decision);
-                role.map(|role| AddressResolution { role, key, port: host.port, transports })
-            }
-            Scope::Files(_) => None,
         };
         let exact = rule.decision == Decision::Allow;
         let folded = fold_segments(&raw);
@@ -234,7 +193,6 @@ impl<'a> PathRule<'a> {
             index,
             decision: rule.decision,
             scope,
-            address_resolution,
             prefixes,
             rank,
             counts: name_counts(&raw),
@@ -246,12 +204,12 @@ impl<'a> PathRule<'a> {
     fn ops(&self) -> Vec<Op<'a>> {
         match self.scope {
             Scope::Files(mask) => [READ, WRITE, IMPORT].into_iter().filter(|&op| mask & op != 0).map(Op::File).collect(),
-            Scope::Http { methods, connections, .. } => {
+            Scope::Http { methods, is_net_rule, .. } => {
                 let methods: Vec<Op> = match methods.listed() {
                     Some(methods) => methods.iter().map(|m| Op::Method(Some(m.as_str()))).collect(),
                     None => vec![Op::Method(None)],
                 };
-                methods.into_iter().chain(connections.iter().map(|&c| Op::Connect(c))).collect()
+                methods.into_iter().chain(is_net_rule.then_some(Op::Connect)).collect()
             }
         }
     }
@@ -261,7 +219,7 @@ impl<'a> PathRule<'a> {
             (Scope::Files(mask), Op::File(op)) => mask & op != 0,
             (Scope::Http { methods, .. }, Op::Method(Some(m))) => methods.matches(m),
             (Scope::Http { methods, .. }, Op::Method(None)) => methods.listed().is_none(),
-            (_, Op::Connect(_)) => self.matches_op(op),
+            (_, Op::Connect) => self.matches_op(op),
             _ => false,
         }
     }
@@ -270,13 +228,20 @@ impl<'a> PathRule<'a> {
         match (&self.scope, op) {
             (Scope::Files(mask), Op::File(op)) => mask & op != 0,
             (Scope::Http { methods, .. }, Op::Method(m)) => m.is_none_or(|m| methods.matches(m)),
-            (Scope::Http { connections, .. }, Op::Connect(c)) => connections.contains(&c),
+            (Scope::Http { is_net_rule, .. }, Op::Connect) => *is_net_rule,
             _ => false,
         }
     }
 
     fn exact(&self) -> bool {
         self.decision == Decision::Allow
+    }
+
+    fn address_kind(&self) -> Option<AddressKind> {
+        match self.scope {
+            Scope::Http { host, .. } => AddressKind::of(host),
+            Scope::Files(_) => None,
+        }
     }
 
     fn rank(&self) -> impl Ord {
@@ -375,12 +340,30 @@ enum Key<'a> {
     Ips,
 }
 
+/// Host category of an address rule in [`super::RulePolicy::check_resolved`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AddressKind {
+    Ip,
+    Localhost,
+}
+
+impl AddressKind {
+    fn of(host: &NetPattern) -> Option<AddressKind> {
+        match host.kind {
+            HostKind::Ip(..) => Some(AddressKind::Ip),
+            HostKind::Host(ref name) | HostKind::Suffix(ref name) if is_localhost(name) => Some(AddressKind::Localhost),
+            _ => None,
+        }
+    }
+}
+
 struct PathRules<'a> {
     rules: Vec<PathRule<'a>>,
     at: Vec<usize>,
     exact: FxHashMap<u64, Vec<usize>>,
     within: FxHashMap<u64, Vec<usize>>,
-    by_resolution_role: [Vec<(Precedence, usize)>; 2],
+    /// Decisions of address rules, indexed by [`AddressKind`].
+    address_decisions: [Vec<Decision>; 2],
     hasher: FxBuild,
     #[cfg(test)]
     visits: std::cell::Cell<usize>,
@@ -393,7 +376,10 @@ impl<'a> PathRules<'a> {
             at: vec![usize::MAX; rules.len()],
             exact: Default::default(),
             within: Default::default(),
-            by_resolution_role: [Vec::new(), Vec::new()],
+            address_decisions: [AddressKind::Ip, AddressKind::Localhost].map(|kind| {
+                let rules = rules.iter().filter(|r| r.kind.http_match().is_some_and(|h| AddressKind::of(h.host) == Some(kind)));
+                rules.map(|r| r.decision).collect()
+            }),
             hasher: FxBuild::default(),
             #[cfg(test)]
             visits: Default::default(),
@@ -409,38 +395,31 @@ impl<'a> PathRules<'a> {
                 let last = rule.prefixes[rule.prefixes.len() - 1];
                 paths.exact.entry(paths.hasher.hash_one((key, last))).or_default().push(at);
             }
-            if let Some(r) = rule.address_resolution {
-                paths.by_resolution_role[r.role as usize].push((r.key, at));
-            }
             paths.at[index] = at;
             paths.rules.push(rule);
         }
         for bucket in paths.exact.values_mut().chain(paths.within.values_mut()) {
             bucket.sort_by_key(|&at| std::cmp::Reverse(paths.rules[at].rank.host));
         }
-        for list in &mut paths.by_resolution_role {
-            list.sort_unstable_by_key(|e| e.0);
-        }
         paths
     }
 
-    /// Returns `true` if removing `i` in favor of `subsuming` does not change
-    /// post-DNS address checks.
-    fn preserves_address_resolution(&self, i: &PathRule, subsuming: &[usize], excluded: &dyn Fn(usize) -> bool) -> bool {
-        let Some(r) = i.address_resolution else { return true };
-        let others = &self.by_resolution_role[match r.role {
-            Role::Name => Role::Address,
-            Role::Address => Role::Name,
-        } as usize];
+    /// Returns `true` if replacing `i` with `subsuming` preserves all
+    /// resolved-address checks; see [`super::RulePolicy::check_resolved`].
+    ///
+    /// At a resolved loopback address, `Ip` and `Localhost` rules compete by
+    /// specificity. A rule with the same [`AddressKind`], rank, and path
+    /// preserves the rank at every loopback address. Any other broader rule can
+    /// replace `i` only if every rule of the other [`AddressKind`] has the same
+    /// non-prompt decision.
+    fn preserves_address_resolution(&self, i: &PathRule, subsuming: &[usize]) -> bool {
+        let Some(kind) = i.address_kind() else { return true };
+        let other_decisions = &self.address_decisions[1 - kind as usize];
+        let other_kind_agrees = other_decisions.iter().all(|&d| d == i.decision && d != Decision::Prompt);
         subsuming.iter().all(|&j| {
-            let host = self.get(j).and_then(|j| j.address_resolution).map_or(0, |j| j.key.0[0]);
-            let from = others.partition_point(|e| e.0 < AddressResolution::lowest(host));
-            others[from..].iter().take_while(|e| e.0 <= r.key).all(|&(_, at)| {
-                let k = &self.rules[at];
-                let Some(kr) = k.address_resolution else { return true };
-                let ports_differ = r.port.is_some() && kr.port.is_some() && r.port != kr.port;
-                excluded(k.index) || k.index == i.index || ports_differ || !transports_overlap(r.transports, kr.transports)
-            })
+            let Some(j) = self.get(j) else { return false };
+            let same_rank = j.address_kind() == Some(kind) && j.rank.spec(0) == i.rank.spec(0) && j.segs == i.segs;
+            same_rank || (other_kind_agrees && (j.address_kind().is_some() || j.decision == Decision::Allow))
         })
     }
 
@@ -497,7 +476,7 @@ impl<'a> PathRules<'a> {
         subsuming.sort_unstable();
         subsuming.dedup();
         let same_decision = same_decision?;
-        if same_decision && !self.preserves_address_resolution(i, &subsuming, excluded) {
+        if same_decision && !self.preserves_address_resolution(i, &subsuming) {
             return None;
         }
         Some((same_decision, subsuming))
@@ -829,13 +808,15 @@ mod tests {
                 "6:11: warning[redundant-rule]: `10.0.0.0/8` on line 5 already allows this",
             ]
         );
-        assert_eq!(lint("deny net 10.0.0.0/8\nallow net *.example.com\nallow net api.example.com"), none);
-        assert_eq!(lint("prompt http 10.0.0.5\nallow http *.example.com\nallow http api.example.com"), none);
-        assert_eq!(lint("prompt http 10.0.0.5\nallow net *.example.com\nallow net api.example.com"), none);
-        assert_eq!(
-            lint("deny http 10.0.0.5/x\nallow http *.example.com\nallow http api.example.com"),
-            ["3:12: warning[redundant-rule]: `*.example.com` on line 2 already allows this"],
-        );
+        // Only address rules apply to resolved addresses, so a broader hostname rule subsumes a narrower hostname rule.
+        for (address, verb, column) in
+            [("deny net 10.0.0.0/8", "net", 11), ("prompt http 10.0.0.5", "http", 12), ("deny http 10.0.0.5/x", "http", 12)]
+        {
+            assert_eq!(
+                lint(&format!("{address}\nallow {verb} *.example.com\nallow {verb} api.example.com")),
+                [format!("3:{column}: warning[redundant-rule]: `*.example.com` on line 2 already allows this")],
+            );
+        }
         assert_eq!(lint("prompt net *\nprompt http 0.0.0.0"), none);
         assert_eq!(
             lint("deny net 10.0.0.0/8\nallow net *.example.com\nallow net *.api.example.com"),
@@ -848,8 +829,17 @@ mod tests {
         assert_eq!(lint("allow http *.example.com\nallow net api.example.com"), none);
         assert_eq!(lint("allow net *\ndeny net *.example.com\nallow net api.example.com"), none);
         assert_eq!(lint("deny net *\ndeny net 10.0.0.0/8"), none);
-        assert_eq!(lint("allow net *\nallow net 8.8.8.8"), none);
+        assert_eq!(lint("allow net *\nallow net 8.8.8.8"), ["2:11: warning[redundant-rule]: `*` on line 1 already allows this"]);
         assert_eq!(lint("allow net *\nallow net localhost"), ["2:11: warning[redundant-rule]: `*` on line 1 already allows this"]);
+        assert_eq!(lint("allow net *\ndeny net 127.0.0.0/8\nallow net localhost"), none, "the localhost rule outranks the prefix");
+        // An address rule of the other kind ranks between these rules by path or method at loopback addresses.
+        for policy in [
+            "deny http 127.0.0.1/a\ndeny http 127.0.0.1/**\nallow http localhost/*",
+            "deny http GET 127.0.0.1\ndeny net 127.0.0.1\nallow http GET localhost",
+            "allow http localhost/a\nallow http localhost/**\ndeny http 127.0.0.1/*",
+        ] {
+            assert_eq!(lint(policy), none, "{policy}");
+        }
         assert_eq!(lint("allow net plaintext *\nallow net localhost"), none);
         assert_eq!(
             lint("allow net *.localhost\nallow net a.localhost:80\nallow net 127.0.0.0/8\nallow net 127.0.0.0/16"),
@@ -963,6 +953,40 @@ mod tests {
             (verb, transport(), net_hosts, port()).prop_map(|(v, t, h, port)| format!("{v} net {t}{h}{port}")),
         ]
     }
+
+    /// Generates `http` and `net` rules for hosts that can be resolved to
+    /// loopback addresses. Uses a small set of paths and methods so that rule
+    /// ranks overlap.
+    fn loopback_rule_line() -> impl Strategy<Value = String> {
+        let verb = || prop::sample::select(vec!["allow", "deny", "prompt"]);
+        let transport = || prop::sample::select(vec!["tls plaintext ", "tls plaintext ", "tls ", "plaintext "]);
+        let port = || prop::sample::select(vec!["", "", "", ":443"]);
+        let hosts = vec!["*", "localhost", "*.localhost", "127.0.0.1", "[::1]", "0.0.0.0", "[::ffff:127.0.0.1]", "[64:ff9b::7f00:1]"];
+        let net_hosts = prop::sample::select(hosts.iter().chain(&["127.0.0.0/8", "[::]"]).copied().collect::<Vec<_>>());
+        let methods = prop::sample::select(vec!["", "GET "]);
+        let path = prop::sample::select(vec!["", "/a", "/*", "/**"]);
+        prop_oneof![
+            3 => (verb(), transport(), methods, prop::sample::select(hosts), port(), path)
+                .prop_map(|(v, t, m, h, port, p)| format!("{v} http {t}{m}{h}{port}{p}")),
+            1 => (verb(), transport(), net_hosts, port()).prop_map(|(v, t, h, port)| format!("{v} net {t}{h}{port}")),
+        ]
+    }
+
+    /// Loopback `Ip` and `Localhost` rules with overlapping ranks.
+    const LOOPBACK_LINES: [&str; 12] = [
+        "allow net tls plaintext *",
+        "allow http tls plaintext localhost/**",
+        "allow http tls plaintext localhost/*",
+        "allow http tls plaintext localhost/a",
+        "allow http tls plaintext GET localhost",
+        "prompt net tls plaintext localhost",
+        "prompt net tls plaintext 127.0.0.1",
+        "prompt http tls plaintext 127.0.0.1/**",
+        "deny http tls plaintext 127.0.0.1/**",
+        "deny http tls plaintext 127.0.0.1/a",
+        "deny http tls plaintext GET 127.0.0.1",
+        "deny net tls plaintext 127.0.0.0/8",
+    ];
 
     const SETS: &str = "\nlet n = a b\nlet h = api.example.com 10.0.0.1 *.com";
 
@@ -1117,36 +1141,70 @@ mod tests {
         hosts.iter().flat_map(|h| ports.iter().map(move |&p| (h.clone(), p))).collect()
     }
 
+    #[test]
+    fn removing_reported_rules_preserves_loopback_triple_decisions() {
+        for (a, b, c) in ordered_triples(LOOPBACK_LINES.len()) {
+            let lines = [a, b, c].map(|i| LOOPBACK_LINES[i].to_string());
+            check_removing_reported_rules_preserves_decisions(&lines).unwrap();
+        }
+    }
+
+    fn ordered_triples(n: usize) -> impl Iterator<Item = (usize, usize, usize)> {
+        (0..n).flat_map(move |a| (0..n).flat_map(move |b| (0..n).map(move |c| (a, b, c))))
+    }
+
+    fn check_removing_reported_rules_preserves_decisions(lines: &[String]) -> Result<(), TestCaseError> {
+        let (base, home) = (Path::new("/base"), Some(Path::new("/home/me")));
+        let text = |lines: &[String]| lines.join("\n") + SETS;
+        let policy = |lines: &[String]| PolicyFile::parse(&text(lines), base, home).unwrap().rules;
+        let with = policy(lines);
+        let reported: Vec<usize> = lint_policy(&text(lines), base, home)
+            .unwrap()
+            .iter()
+            .filter(|w| w.code == "redundant-rule" || w.code == "overridden-rule")
+            .map(|w| w.line - 1)
+            .collect();
+        let removals = reported.iter().map(|&line| vec![line]).chain(std::iter::once(reported.clone()));
+        for removed in removals {
+            let rest: Vec<String> = lines.iter().enumerate().filter(|(i, _)| !removed.contains(i)).map(|(_, l)| l.clone()).collect();
+            let without = policy(&rest);
+            for cap in probes() {
+                let (a, b) = (with.check_normalized_in(cap, PathSpace::Memory), without.check_normalized_in(cap, PathSpace::Memory));
+                prop_assert_eq!(a, b, "{}\nwithout lines {:?}: {}", text(lines), removed.iter().map(|l| l + 1).collect::<Vec<_>>(), cap);
+            }
+            for (request, addr) in
+                resolutions().iter().filter(|(r, _)| with.check_normalized_in(r, PathSpace::Memory) != crate::policy::Decision::Deny)
+            {
+                let (a, b) = (with.check_resolved(request, *addr), without.check_resolved(request, *addr));
+                prop_assert_eq!(
+                    a,
+                    b,
+                    "{}\nwithout lines {:?}: {} at {}",
+                    text(lines),
+                    removed.iter().map(|l| l + 1).collect::<Vec<_>>(),
+                    request,
+                    addr
+                );
+            }
+        }
+        Ok(())
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(512))]
 
         #[test]
-        fn reported_rules_are_not_needed(
+        fn removing_reported_rules_preserves_decisions(
             lines in prop::collection::vec(rule_line(), 1..9),
         ) {
-            let (base, home) = (Path::new("/base"), Some(Path::new("/home/me")));
-            let text = |lines: &[String]| lines.join("\n") + SETS;
-            let policy = |lines: &[String]| PolicyFile::parse(&text(lines), base, home).unwrap().rules;
-            let with = policy(&lines);
-            let reported: Vec<usize> = lint_policy(&text(&lines), base, home)
-                .unwrap()
-                .iter()
-                .filter(|w| w.code == "redundant-rule" || w.code == "overridden-rule")
-                .map(|w| w.line - 1)
-                .collect();
-            let removals = reported.iter().map(|&line| vec![line]).chain(std::iter::once(reported.clone()));
-            for removed in removals {
-                let rest: Vec<String> = lines.iter().enumerate().filter(|(i, _)| !removed.contains(i)).map(|(_, l)| l.clone()).collect();
-                let without = policy(&rest);
-                for cap in probes() {
-                    let (a, b) = (with.check_normalized_in(cap, PathSpace::Memory), without.check_normalized_in(cap, PathSpace::Memory));
-                    prop_assert_eq!(a, b, "{}\nwithout lines {:?}: {}", text(&lines), removed.iter().map(|l| l + 1).collect::<Vec<_>>(), cap);
-                }
-                for (request, addr) in resolutions().iter().filter(|(r, _)| with.check_normalized_in(r, PathSpace::Memory) != crate::policy::Decision::Deny) {
-                    let (a, b) = (with.check_resolved(request, *addr), without.check_resolved(request, *addr));
-                    prop_assert_eq!(a, b, "{}\nwithout lines {:?}: {} at {}", text(&lines), removed.iter().map(|l| l + 1).collect::<Vec<_>>(), request, addr);
-                }
-            }
+            check_removing_reported_rules_preserves_decisions(&lines)?;
+        }
+
+        #[test]
+        fn removing_reported_loopback_rules_preserves_decisions(
+            lines in prop::collection::vec(loopback_rule_line(), 1..6),
+        ) {
+            check_removing_reported_rules_preserves_decisions(&lines)?;
         }
 
         #[test]

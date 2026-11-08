@@ -1,0 +1,7 @@
+# Seeds for failure cases that proptest has generated in the past. Proptest
+# reads this file and runs these cases before generating new cases.
+#
+# Commit this file to source control so that all test runs include these
+# saved cases.
+cc 34c6b9ee34e6f6add231960f37ed0e6fdebe3b194291cbe1687331d3aea4edbe # shrinks to host = "[a]:", port = None
+cc bba3624a89880139c631779683fa568d8c4f566ec71f3dad6966716660bfc454 # shrinks to host = "0177.0.0.1", port = None

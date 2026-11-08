@@ -148,6 +148,17 @@ Visible defects that rarely block users.
       permits `read /x/o.txt`.
 - [ ] 🔴 [035](triage/035-denied-address-missing-from-error/summary.md) _Policy._ Include any policy-denied IP addresses in the error message if
       `resolve_allowed` fails to connect to the remaining allowed addresses.
+- [ ] ❓ _Policy._ Include the deciding rule in all `permission_denied` messages.
+      Resolved-address denials already include the rule. A host-check denial
+      such as `permission denied: GET http://localhost:8080/` omits it. Return
+      the rule from the stage-1 check and format both messages with
+      `RulePolicy::describe_rule`.
+- [ ] ❓ _Policy._ Parse each host into a canonical `Host` enum with
+      `Name(String)` and `Ip(IpAddr)` variants across URLs, `net.connect`, and
+      policy rules. Six functions normalize host text and disagree. A rule
+      accepts `deny net 169.254.169.254.`, whereas a URL with that host is
+      invalid. `Url` also keeps the raw host, such as `api.github.com.`. A
+      request filter for `api.github.com` then misses the request.
 - [ ] 🔴 [036](triage/036-lint-http-method-host-confusion/summary.md) _Policy._ Warn in `lint_policy` if an uppercase hostname in an `http` rule is
       parsed as an HTTP method, or if a lowercase method is parsed as a
       hostname.

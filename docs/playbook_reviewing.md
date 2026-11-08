@@ -1,72 +1,108 @@
 # Playbook: Reviewing a Branch
 
-Review this branch's diff against main and issue fixes on this branch in order to converge it to PR-worthiness. Each iteration must audit the full branch diff. Focus on product impact and system design.
+Bring this branch to a shippable state. You own every subsystem that the branch touches.
 
-## Audit Criteria
+## Priorities
 
-### Product Impact
+Review at three levels, in this order of importance:
 
-1. How does this change materially improve or degrade the user-facing product? More useful featureset, more usable interface, higher reliability, improved safety, faster performance, etc.
+1. **Product:** what host developers and script authors can do, and what can surprise them.
+2. **System design:** how the parts fit together.
+3. **Code:** how readable and how small the code is.
 
-2. After this change, do all impacted features work as a normal user would expect?
+Lower priorities have less weight, but remain in scope. Report findings at all three levels.
 
-### System Design
+## Audit
 
-3. Typically, we want each user action to follow a single path through code. Where does this branch introduce parallel paths, creating distinct ways to cover minor variants of doing basically one thing? Inventory, then explore: what alternative designs avoid or minimize splitting, or even reverse an existing split where it exists by merging two pathways together?
+### 1. Write the product brief
 
-4. If two disparate pieces of code must stay in sync, it is preferable to enforce that dependency statically (shared types, macros, etc.) than to enforce at runtime. Look for, and inventory, such dependencies in new and existing code. Then explore: what alternative designs would remove the dependencies, unify them, or sync them statically?
+Before you read the code in detail, write a short brief:
 
-5. System types and symbols, and code in general should be understandable. Look for, and inventory, places in code where type signatures are less intelligible: heavy nesting, huge tuples, signatures with lots of parameters. What are the upstream (or downstream) requirements that push for such a complex type signature? Is there a way to simplify those requirements and thus the type signature?
+- What new actions can a user take after this change?
+- What can surprise a user?
+- What promises do the docs make about the affected features?
 
-6. Typically, we want the system to meet product goals and priorities while avoiding diverging too far from industry best practices. A divergence may be justified, and justification is a judgment call: the larger the divergence, the more important to upholding system goals the justification must be. Where are the largest divergences from best practice in this branch, and where are the justifications most suspect?
+Audit the branch and its dependent code paths against this brief.
 
-7. Typically, we want the system to be as small as possible while still meeting product goals and priorities. Each LoC requires understanding and maintenance. What can we cut?
+### 2. Ask the questions
+
+**Product**
+
+- What does the change give users or take from them? Consider features, usability, reliability, safety, and speed.
+- Does each affected feature work as a user expects? Does the code keep every promise in the brief?
+
+**System design**
+
+- Does each user action follow a single path through the code? Where do two paths do nearly the same thing? Find a design that merges them, even if the split predates the branch.
+- Where must two pieces of code stay in sync? Prefer a design that removes the dependency or enforces it at compile time with shared types or macros.
+- Where does the branch diverge from industry practice? A larger divergence requires a stronger justification.
+
+**Code**
+
+- Which types and signatures are hard to read because of deep nesting, large tuples, or many parameters? Find the requirement that forces the complexity, and simplify that requirement.
+- What can we cut? Every line adds maintenance cost.
+
+### 3. Report causes
+
+A bug is usually a symptom of an underlying cause. For each finding, identify the cause and check for other instances of it. Report the cause.
+
+Example from the `deny_private_net` review:
+
+- **Symptom:** "An IP literal skips the stage-2 check in `check_resolved`."
+- **Cause:** "Network checks use two precedence orders. Stage 2 ignores tiers and ports, so the same connection can receive different decisions."
+
+Fixing the symptom expands the second order. Fixing the cause removes it.
+
+### 4. Look outside the questions
+
+End each audit with a question: what is the most important problem outside this playbook?
 
 ## Fixing
 
-An audit may reveal problems that can be fixed or improved with limited or no product tradeoffs. For each such problem, verify that the problem is legitimate, and that fixing will meaningfully improve the codebase in at least one of the audit criteria above without meaningfully regressing the others.
+Fix a problem if the change improves a priority level without degrading a higher priority level. Ensure that tests prove the new behavior.
 
-Fix any such problem automatically and, where applicable, ensure that tests prove the soundness of the new approach. Each fix MUST adhere to the audit criteria.
+Commit each fix separately. In the commit message, state the problem, the fix, and the test or measurement results so that future work can reference them.
 
-Commit each fix independently, with a concise description of the problem and the solution. Include any tests, experiments, measurements, and outcomes so that follow-up work can reference past findings easily.
+## Tradeoffs
 
-## Communicating Tradeoffs
+Before making a change that affects the product, ask the user to decide. Document the problem, the options, and their tradeoffs in a short section of `docs/TRADEOFFS.md`. Include only real product or system tradeoffs. Breaking backward compatibility is not a tradeoff.
 
-If an audit finds a design problem where the best solution requires a significant product trade-off, write down the problem, potential solutions, and tradeoffs concisely in a standalone, short (short!), readable section of a docs/TRADEOFFS.md file. This doc will allow follow-up work to reference branch-specific, unresolved tradeoffs. After a tradeoff is resolved, remove it from the doc and write the decision and its reason in a commit message. A future auditor can read the commit message to understand the tradeoff decision.
+After the user decides, remove the section and record the decision and rationale in the commit message.
 
-Merely documenting a design issue is less desirable than fixing it. If a tradeoff is weak or nonexistent, prefer to fix a design issue than to note it. But if you find that there is a significant tradeoff that would force changes to the nature of the product, it is better to note it in TRADEOFFS.md than to commando-fix it prior to my input. Breaking backwards compatibility is ok; a tradeoff must be a _real_ product or systemic tradeoff.
+If the branch relies on a significant preexisting problem that is out of scope to fix, add the problem to `TODO.md` and inform the user.
 
 ## Review Loop
 
-When you are done with the audit, fixes, and notes, kick off another independent review cycle, again auditing the full branch diff. Each iteration must have access to past fixes and tradeoff notes. Break the review loop if an audit iteration finds no significant new flaws that have not already been fixed or noted. If the loop continues past five iterations, break the loop and report remaining flaws to the user.
+Repeat the audit and fix cycle. Each audit covers the full branch and receives the prior fixes and `docs/TRADEOFFS.md`. Stop if an audit finds only minor problems, or after five audits. Report any remaining problems to the user.
 
-At the end of the review, report unresolved tradeoffs to the user. Move each unresolved tradeoff to TODO.md and delete TRADEOFFS.md.
+At the end of the review, report open tradeoffs to the user, move them to `TODO.md`, and delete `docs/TRADEOFFS.md`.
 
-Approach each review iteration and each fix from first principles; we control all repos and can make any changes necessary. If a suboptimal approach is being taken and you are justified in replacing it with a better alternative, do so.
-
-Use sub-agents as necessary, especially to keep reviewers independent from fixers. If you use a sub-agent, ensure that it has sufficient context across restarts. Context: in the past, sub-agents have been killed and restarted with half context, resulting in suboptimal design and implementation.
-
-Start each reviewer sub-agent with the exact prompt:
+Run each audit in a sub-agent to keep the reviewer independent from the fixer. Give each sub-agent full context. A restarted sub-agent with partial context makes poor design decisions. Start each reviewer with this prompt:
 
 ```
-Run the audit portion of a review iteration, following `docs/playbook_reviewing.md`.
-Review the full diff in this branch, up to its most recent commit, against origin/main.
-Read AGENTS.md and, if it exists, docs/TRADEOFFS.md.
+You own every subsystem that this branch touches. Run the audit in
+docs/playbook_reviewing.md on this branch against origin/main. Report what you
+would change before you ship it. Read AGENTS.md and, if it exists,
+docs/TRADEOFFS.md. Do not edit files, commit, or push.
 
-Do not edit files, commit, or push. For each finding, give file:line, the
-problem, a proposed fix, and whether the fix requires a real product tradeoff.
-Rank findings from most to least significant, and label each as "significant" or "minor".
+Start with the product brief. Report the findings from most to least important,
+and label each finding "significant" or "minor". For each finding, give its
+cause, the best fixes across the priorities, and whether each fix requires a
+product tradeoff. Include file:line if the finding is at a single location. End
+with the most important problem outside this playbook.
 ```
+
+For a large branch, run three reviewers in parallel, one for each priority level. Append "Focus on the product", "Focus on the system design", or "Focus on the code" to their prompts. Combine their findings before applying fixes.
 
 Run autonomously until the task is complete.
 
 ## Copy Editing
 
-The best thinking and coding model is Claude Opus 5.5; however, it is also the worst writer. The model that performs best at writing is Gemini Argon 4. Thus, after the review loop is complete, you should attempt to call Gemini for copy editing.
+Claude Opus 5.5 is the strongest model for reasoning and coding. Gemini Argon 4 is the strongest model for writing. After the review loop completes, run Gemini for copy editing.
 
-Check whether the environment contains the antigravity CLI `agy`. The CLI is available locally but not in a cloud-hosted sandbox. If `agy` is not available, tell the user and skip this step.
+Check whether the environment provides the Antigravity CLI `agy`. The CLI is available only on a local machine. If `agy` is unavailable, inform the user and skip this step.
 
-Run Gemini with the exact following command:
+Run Gemini with this exact command:
 
 ```
 agy --dangerously-skip-permissions -p "Run docs/playbook_copyediting.md on this branch."

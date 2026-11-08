@@ -143,7 +143,7 @@ Transport keywords do not change rule specificity: `allow net plaintext x.exampl
 
 ### Resolved addresses
 
-After a hostname rule allows a connection, Sand resolves the hostname and checks each returned IP address against the IP and CIDR rules in the policy. This check prevents DNS rebinding and blocks public hostnames that are resolved to denied internal networks. For example, with `allow net tls plaintext *` and `deny net 10.0.0.0/8`, Sand denies connections to any wildcard-matched hostname that is resolved to `10.0.0.5`. An exact hostname rule such as `allow net db.internal` is more specific than a CIDR range and allows connections to `db.internal` at `10.0.0.5`, whereas wildcard rules such as `*` or `*.example.com` do not override CIDR rules.
+After a hostname rule allows a connection, Sand resolves the hostname and checks each returned IP address against the address rules in the policy. Address rules are IP rules, CIDR rules, and `localhost` rules for `localhost` requests. This check prevents DNS rebinding to denied internal networks. For example, with `allow net tls plaintext *` and `deny net 10.0.0.0/8`, Sand denies connections to any hostname that is resolved to `10.0.0.5`. To connect to `db.internal` at `10.0.0.5`, allow both the hostname and the address: `allow net tls plaintext db.internal 10.0.0.5`. The address rule applies to all allowed hostnames. Avoid pairing it with a wildcard hostname rule such as `allow net *`.
 
 Sand resolves `localhost` and `*.localhost` directly to `127.0.0.1` and `::1` without querying DNS, per RFC 6761. A `deny` or `prompt` rule for `localhost` also applies to `*.localhost`. Because hostname rules do not apply to IP literals, block local connections completely with `deny net localhost 127.0.0.0/8 ::1`.
 

@@ -193,6 +193,9 @@ impl Policy {
     pub(crate) fn check_resolved(&self, request: &Capability, addr: SocketAddr) -> Result<(), String> {
         match self {
             Policy::Rules(r) => r.resolved_verdict(request, addr).map_err(|rule| match rule {
+                Some(rule) if r.rules()[rule].decision == Decision::Prompt => {
+                    format!("needs approval under {}, and the engine cannot ask after DNS resolution", r.describe_rule(rule))
+                }
                 Some(rule) => format!("is not allowed by {}", r.describe_rule(rule)),
                 None => "is not the requested address".to_string(),
             }),

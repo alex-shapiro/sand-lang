@@ -236,7 +236,7 @@ pub fn open(
         if not same_origin(current_url, next) {
             // Strip credentials before following a cross-origin redirect.
             current_headers = current_headers.filter(
-                h => not ["authorization", "cookie", "host"].contains(h.0.to_lower()),
+                h => not ["authorization", "cookie", "host", "proxy-authorization"].contains(h.0.to_lower()),
             )
         }
         if status == 303 and current_method != "HEAD" {

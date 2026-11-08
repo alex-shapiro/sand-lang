@@ -24,7 +24,6 @@ pub(crate) enum HostKind {
     Ip(IpAddr, u8),
 }
 
-#[cfg(feature = "os")]
 pub(crate) fn is_valid_host(host: &str) -> bool {
     host.parse::<IpAddr>().is_ok() || canonical_hostname(host).is_some()
 }
@@ -32,7 +31,14 @@ pub(crate) fn is_valid_host(host: &str) -> bool {
 fn canonical_hostname(name: &str) -> Option<String> {
     let name = name.strip_suffix('.').unwrap_or(name);
     let label_ok = |l: &str| (1..=63).contains(&l.len()) && l.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b));
-    (name.len() <= 253 && name.split('.').all(label_ok)).then(|| name.to_ascii_lowercase())
+    (name.len() <= 253 && name.split('.').all(label_ok) && !has_numeric_last_label(name)).then(|| name.to_ascii_lowercase())
+}
+
+/// Returns `true` if browsers parse `name` as an IPv4 address, such as `127.1` or `0x7f000001`.
+fn has_numeric_last_label(name: &str) -> bool {
+    let last = name.rsplit('.').next().unwrap_or(name);
+    let hex = last.strip_prefix("0x").or_else(|| last.strip_prefix("0X"));
+    last.bytes().all(|b| b.is_ascii_digit()) || hex.is_some_and(|h| h.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 impl std::str::FromStr for NetPattern {
@@ -387,6 +393,28 @@ impl<T> HostIndex<T> {
     /// `is_alternate` is `true` if the pattern matches an alternate IP
     /// representation or matches a `*.localhost` subdomain via a `localhost` rule.
     pub(crate) fn find(&self, dest: &Dest, mut f: impl FnMut(bool, &T)) {
+        for (port, t) in &self.any {
+            if port.is_none_or(|p| p == dest.port) {
+                f(false, t);
+            }
+        }
+        match dest.ip {
+            Some(ip) => self.find_ip(ip, dest.port, f),
+            None => self.find_names(dest, f),
+        }
+    }
+
+    /// Calls `f(is_alternate, value)` for each address pattern that matches `ip`
+    /// resolved for `dest`. Matches IP and CIDR patterns, plus `localhost`
+    /// patterns if `dest` is a `localhost` name.
+    pub(crate) fn find_address(&self, dest: &Dest, ip: IpAddr, mut f: impl FnMut(bool, &T)) {
+        self.find_ip(ip, dest.port, &mut f);
+        if is_localhost(dest.name) {
+            self.find_names(dest, f);
+        }
+    }
+
+    fn find_names(&self, dest: &Dest, mut f: impl FnMut(bool, &T)) {
         let mut each = |list: Option<&Ported<T>>, is_alternate: bool| {
             for (port, t) in list.into_iter().flatten() {
                 if port.is_none_or(|p| p == dest.port) {
@@ -394,11 +422,6 @@ impl<T> HostIndex<T> {
                 }
             }
         };
-        each(Some(&self.any), false);
-        if let Some(ip) = dest.ip {
-            self.find_ip(ip, dest.port, f);
-            return;
-        }
         let lower;
         let name = if dest.name.bytes().any(|b| b.is_ascii_uppercase()) {
             lower = dest.name.to_ascii_lowercase();
@@ -477,7 +500,7 @@ pub(crate) fn is_localhost(host: &str) -> bool {
 }
 
 /// Non-public IPv4 and IPv6 CIDR ranges.
-const INTERNAL_RANGES: [&str; 24] = [
+const PRIVATE_RANGES: [&str; 24] = [
     "0.0.0.0/8",       // unspecified
     "10.0.0.0/8",      // RFC 1918
     "100.64.0.0/10",   // shared address space
@@ -504,9 +527,9 @@ const INTERNAL_RANGES: [&str; 24] = [
     "ff00::/8",        // multicast
 ];
 
-fn internal_ranges() -> &'static [NetPattern] {
+pub(crate) fn private_ranges() -> &'static [NetPattern] {
     static PATTERNS: std::sync::LazyLock<Vec<NetPattern>> =
-        std::sync::LazyLock::new(|| INTERNAL_RANGES.iter().map(|p| NetPattern::parse_host_port(p).expect("a valid range")).collect());
+        std::sync::LazyLock::new(|| PRIVATE_RANGES.iter().map(|p| NetPattern::parse_host_port(p).expect("a valid range")).collect());
     &PATTERNS
 }
 
@@ -517,7 +540,7 @@ fn internal_ranges() -> &'static [NetPattern] {
 /// benchmarking, and reserved ranges. IPv6 addresses that embed an IPv4
 /// address are classified by the embedded IPv4 address.
 pub fn is_private_address(ip: IpAddr) -> bool {
-    internal_ranges().iter().any(|p| p.denies_ip(ip))
+    private_ranges().iter().any(|p| p.denies_ip(ip))
 }
 
 /// Formats `host` and `port` as `host:port`, enclosing IPv6 addresses in brackets.
@@ -835,7 +858,7 @@ mod tests {
     }
 
     fn edge_address() -> impl Strategy<Value = IpAddr> {
-        let edges: Vec<IpAddr> = INTERNAL_RANGES
+        let edges: Vec<IpAddr> = PRIVATE_RANGES
             .iter()
             .chain(&["64:ff9b::/96", "2002::/16", "::ffff:0:0/96", "::ffff:0:0:0/96"])
             .flat_map(|r| {
@@ -855,7 +878,7 @@ mod tests {
 
     proptest! {
         #[test]
-        fn internal_ranges_match_oracle(
+        fn private_ranges_match_oracle(
             v4 in any::<u32>(),
             v6 in any::<u128>(),
             embed in 0..EMBEDDINGS.len(),
@@ -926,6 +949,46 @@ mod tests {
                     prop_assert_eq!(parsed.path, url(&format!("example.com{path}")).unwrap().path);
                 }
                 Err(e) => prop_assert_eq!(parsed.unwrap_err(), e),
+            }
+        }
+
+        /// Primary `deny_private_net` rules override wildcard allow rules for all
+        /// private literal and resolved addresses. Default `deny_private_net` rules
+        /// yield to primary wildcard allow rules.
+        #[test]
+        fn deny_private_net_denies_only_private_addresses(
+            v4 in any::<u32>(),
+            v6 in any::<u128>(),
+            embed in 0..EMBEDDINGS.len(),
+            edge in edge_address(),
+        ) {
+            use crate::policy::rules::{Methods, RulePolicy, Transports};
+            use crate::policy::{Capability, Decision};
+            let wildcards = || {
+                RulePolicy::new()
+                    .allow_net(Transports::Both, "*".parse().unwrap())
+                    .allow_http(Transports::Both, Methods::all(), "*".parse().unwrap())
+            };
+            let primary = wildcards().deny_private_net();
+            let default = wildcards().with_defaults(RulePolicy::new().deny_private_net());
+            let net = |host: String| Capability::Net { host, port: 443, tls: true };
+            let http = |host: String| Capability::Http { method: "GET".into(), scheme: "https".into(), host, port: 443, path: "/".into() };
+            let (prefix, _, shift) = EMBEDDINGS[embed];
+            for ip in [
+                IpAddr::V4(v4.into()),
+                IpAddr::V6(v6.into()),
+                IpAddr::V6(Ipv6Addr::from(prefix | (v4 as u128) << shift)),
+                IpAddr::V6(Ipv4Addr::from(v4).to_ipv6_mapped()),
+                edge,
+            ] {
+                let private = if is_private_address(ip) { Decision::Deny } else { Decision::Allow };
+                let addr = std::net::SocketAddr::new(ip, 443);
+                for (tier, policy, expected) in [("primary", &primary, private), ("default", &default, Decision::Allow)] {
+                    prop_assert_eq!(policy.check(&net(ip.to_string())), expected, "{} net {}", tier, ip);
+                    prop_assert_eq!(policy.check(&http(ip.to_string())), expected, "{} http {}", tier, ip);
+                    prop_assert_eq!(policy.check_resolved(&net("db.example.com".into()), addr), expected, "{} resolved net {}", tier, ip);
+                    prop_assert_eq!(policy.check_resolved(&http("db.example.com".into()), addr), expected, "{} resolved http {}", tier, ip);
+                }
             }
         }
     }

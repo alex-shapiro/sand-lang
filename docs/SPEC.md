@@ -1575,12 +1575,10 @@ overrides `prompt`. If a request does not match any rule, the policy returns
 `RulePolicy`, and `Display` formats a `RulePolicy` as `.policy` text (§14.7).
 
 `RulePolicy::with_defaults(defaults)` appends fallback rules that apply only if
-the primary rules do not match a request. A host can use `with_defaults` to
-combine user rules with host defaults (§17.5). Existing default rules on
-`defaults` remain in the fallback tier. During stage-2 resolved-address checks
-(§14.6), the policy compares the stage-1 allowing rule against IP address rules
-by host specificity alone, so a user domain wildcard cannot bypass a default IP
-deny rule.
+the primary rules do not match a request (§14.6). A host can use `with_defaults`
+to combine user rules with host defaults (§17.5). Existing default rules on
+`defaults` remain in the fallback tier. To make a host rule compete with user
+rules by specificity, add it to the primary rules with `RulePolicy::extend`.
 
 Specificity depends on the capability category:
 
@@ -1658,25 +1656,44 @@ The engine checks every outgoing network connection from `net.connect`,
    `"permission_denied"` and reports the denied address and matching rule.
    `NetAddr` never prompts.
 
-In stage 2, `RulePolicy::check_resolved` compares the host specificity of the
-rule that allowed stage 1 against all IP address rules that match the resolved
-address and transport, including `net` rules and `http` rules that match the
-request method and path. An exact hostname has the same host specificity as a
-single IP address, and `*.localhost` ranks above all CIDR prefixes. Wildcard
-domain patterns such as `*.example.com` and `*` rank below all IP address rules.
-If the stage-1 rule has higher specificity or if the IP address rules do not
-match, the engine allows the address. Otherwise, the policy applies the most
-specific matching IP address rule, and a `prompt` IP address rule denies the
-connection because stage 2 cannot prompt. A `CustomPolicy` evaluates `NetAddr`
-directly and treats `Prompt` as `Allow`.
+A host must be an ASCII hostname or a full IP address. The engine rejects hosts with
+percent-encoded or non-ASCII characters. It also rejects any host whose last
+label is a number, such as `127.1` or `0x7f000001`. Browsers parse these hosts as
+IPv4 addresses. An invalid host in a URL fails with kind `"parse"`. An invalid
+host in `net.connect` fails with kind `"invalid"`.
 
-This two-stage check prevents DNS rebinding against denied IP ranges. For
-example, under `allow net plaintext *` and `deny net 10.0.0.0/8`, a request to
-`http://evil.example/` fails if DNS returns `10.0.0.5`. An explicit hostname
-rule such as `allow net db.internal` outranks the `/8` prefix. It permits
-connecting to `10.0.0.5` through `db.internal`.
+In the WebAssembly build (§16.5), the browser resolves hostnames. The engine
+therefore runs only stage 1. IP and CIDR rules apply only to IP literals.
+`deny_private_net` blocks only `localhost` names and private IP literals.
+
+In stage 2, only address rules apply. Address rules are IP and CIDR rules that
+match the resolved address and transport, plus `localhost` rules for `localhost`
+requests. Address rules include `net` rules and `http` rules that match the
+request method and path. `RulePolicy::check_resolved`
+ranks these rules in the same order as for an IP literal. The stage-1 rule
+takes the place of `*` and acts as `allow`, even if it is an approved `prompt`
+rule. An address rule in the same or higher `with_defaults` tier overrides the
+stage-1 rule. If the winning rule is a `prompt` address rule, `check_resolved`
+denies the connection and reports that the address requires approval. A
+`CustomPolicy` evaluates `NetAddr` directly and treats `Prompt` as `Allow`.
+
+This two-stage check prevents DNS rebinding to denied IP ranges. For example,
+under `allow net plaintext *` and `deny net 10.0.0.0/8`, a request to
+`http://evil.example/` fails if DNS returns `10.0.0.5`. To connect to
+`10.0.0.5` through `db.internal`, allow both the hostname and the address:
+`allow net db.internal 10.0.0.5`. The address rule applies to every hostname
+that stage 1 allows. With `allow net *`, DNS can map any hostname to
+`10.0.0.5`.
+
 `sandlang::policy::net::is_private_address` reports whether an IP address belongs to
 a private, loopback, link-local, or other non-public range.
+`RulePolicy::deny_private_net` adds `deny net` rules for `localhost` and for
+each of these ranges. Only a more specific address rule, such as
+`allow net 10.0.0.5`, overrides these rules. They still block private addresses
+resolved from an allowed hostname such as `api.example.com`. To allow a local
+server on all loopback hosts, list each host:
+`allow net localhost:8080 127.0.0.1:8080 [::1]:8080`. Add `deny_private_net` to
+the primary rules so that it applies to all requests.
 
 ### 14.7 Policy files
 
@@ -1752,8 +1769,8 @@ If an `http` rule omits the method, the rule matches all HTTP methods. URL
 patterns have the form `host[:port][/path]`, where `host` is a hostname, domain
 wildcard, or single IP address, and `path` is a percent-decoded path pattern. A
 URL pattern without a port matches all ports, and URL patterns must not include
-a `scheme://` prefix. An `http` rule for an IP address also applies to stage-2
-resolved-address checks for HTTP requests (§14.6).
+a `scheme://` prefix. An `http` rule for an IP address or a `localhost` name is
+an address rule in resolved-address checks for HTTP requests (§14.6).
 
 A `let NAME = VALUE...` statement defines a reusable set of values anywhere in
 the file. Referencing `{NAME}` inside a rule expands to each value in the set,
@@ -1792,10 +1809,8 @@ policy file for four warnings:
   destination that a `deny http` or `prompt http` rule restricts.
 - `unused-set`: a `let` set is unused.
 
-If an IP address rule ranks between a domain wildcard and an exact hostname
-`allow` rule, the exact hostname rule overrides the IP address rule during stage
-2 in §14.6. The linter therefore keeps the exact hostname rule without a
-`redundant-rule` warning.
+The linter keeps an address rule if deleting it can change a resolved-address
+check (§14.6).
 
 `sandlang::policy::file::rule_for(capability, allow)` formats a persistent `allow` or
 `deny` rule line for a promptable `Capability`, such as `allow read /data/a.txt`

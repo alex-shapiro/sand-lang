@@ -20,8 +20,8 @@ journal. The sections below group these commits into self-contained changesets.
 
 1. Module path cleanup: merged in #26 from `module-paths`
 2. Typed policy builders: merged in #27 from `typed-policy-builders`
-3. Rule and limit positions in policy: in review on `policy-positions`
-4. `deny_private_net` and absolute rules: not started
+3. Rule and limit positions in policy: merged in #28 from `policy-positions`
+4. `deny_private_net`: in review on `deny-private-net`
 5. Precompiled host modules: not started
 6. `InterruptHandle::new`: not started
 7. Linter budget and interrupt errors: not started
@@ -77,13 +77,13 @@ the caller.
 Source commit: `d4a2e5c`. Skip `HostPattern` from `d859942`, because `d4a2e5c`
 removes it.
 
-### 4. `deny_private_net` and absolute rules
+### 4. `deny_private_net`
 
-`Tier::Absolute` ensures that `deny_private_net` overrides all other rules for
-private IP addresses. Previously, a fallback rule for a specific host could
-permit a private address.
+`RulePolicy::deny_private_net` adds `deny net` rules for `localhost` and for
+the ranges in `is_private_address`. Skip `Tier::Absolute` from `50dae44`. The
+host controls all rules and can rank them by specificity.
 
-Source commits: the `deny_private_net` changes in `d859942`, and `50dae44`.
+Source commit: the `deny_private_net` changes in `d859942`.
 
 ### 5. Precompiled host modules
 

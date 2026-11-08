@@ -206,7 +206,8 @@ fn parse_authority(auth: &str) -> Result<Authority, String> {
     let (host, port) = if let Some(inner) = hostport.strip_prefix('[') {
         let Some(close) = inner.find(']') else { return Err("unterminated IPv6 literal".into()) };
         let host = &inner[..close];
-        let valid = !host.is_empty()
+        // IPv6 and IPvFuture addresses contain `:`, which `Display` uses to add brackets.
+        let valid = host.contains(':')
             && host.bytes().all(|b| b.is_ascii_hexdigit() || matches!(b, b':' | b'.' | b'%' | b'v' | b'V') || is_unreserved(b));
         if !valid {
             return Err("invalid IPv6 literal".into());

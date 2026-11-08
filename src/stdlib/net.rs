@@ -155,7 +155,8 @@ fn check_port(port: i64) -> Result<u16, HostError> {
 fn check_endpoint(vm: &Vm, host: Val<String>, port: i64) -> Result<(String, u16), HostError> {
     let host = host.str(&vm.heap);
     if !is_valid_host(host) {
-        let msg = format!("invalid host {:?} (expected a host name or an IP address without brackets)", super::truncate(host, 200));
+        let msg =
+            format!("invalid host {:?} (expected an ASCII host name or a full IP address without brackets)", super::truncate(host, 200));
         return Err(HostError::new("invalid", msg));
     }
     Ok((host.to_string(), check_port(port)?))

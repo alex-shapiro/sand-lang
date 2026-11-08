@@ -58,6 +58,12 @@ impl Url {
         }
         // Credentials in URLs are not supported; they are ignored.
         let Some(authority) = parts.authority.filter(|a| !a.host.is_empty()) else { return Err(fail("missing host")) };
+        if !authority.host.is_ascii() {
+            return Err(fail("invalid host (expected an ASCII host name; write a non-ASCII name in its xn-- form)"));
+        }
+        if !crate::policy::net::is_valid_host(&authority.host) {
+            return Err(fail("invalid host (expected an ASCII host name or a full IP address, such as 127.0.0.1)"));
+        }
         let port = match authority.port {
             Some(p) => u16::try_from(p).map_err(|_| fail("invalid port"))?,
             None => default,
@@ -107,7 +113,7 @@ pub(crate) fn resolve(base: &str, location: &str) -> Result<String, IoFailure> {
     let mut target = uri::resolve(&parse(base, true)?, parse(location.trim(), false)?);
     target.fragment = None;
     let text = target.to_string();
-    Url::from_parts(&text, target)?;
+    Url::from_parts(&text, target).map_err(|e| IoFailure { message: format!("redirect from {base}: {}", e.message), ..e })?;
     Ok(text)
 }
 
@@ -523,4 +529,47 @@ fn body_natives(m: &mut NativeModule) {
         b.reader = None;
         Ok(())
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Url;
+    use proptest::prelude::*;
+
+    fn host_char() -> impl Strategy<Value = char> {
+        prop::sample::select(vec!['0', '1', '7', '9', 'a', 'f', 'x', 'X', 'L', 'l', '.', '-', '_', '%', ':', '[', ']', 'ｌ', 'é', '\u{ad}'])
+    }
+
+    proptest! {
+        #[test]
+        fn accepted_urls_match_browser_parsed_hosts(
+            host in prop_oneof![
+                prop::collection::vec(host_char(), 1..14).prop_map(|cs| cs.into_iter().collect::<String>()),
+                prop::sample::select(vec![
+                    "[::1]", "[::ffff:127.0.0.1]", "[::ffff:7f00:1]", "[::7f00:1]", "[fe80::1%25eth0]", "[v1.a]", "[v1.a:b]",
+                    "[127.0.0.1]", "[localhost]", "LOCALHOST", "localhost.", "app.localhost.", "127.0.0.1.", "0177.0.0.1",
+                    "1.2.3.4.5", "a..b", "xn--mnchen-3ya.de", "_dmarc.example", "0x7f.1", "999.1.1.1", "1.1.1.0x1",
+                ]).prop_map(str::to_string),
+            ],
+            port in prop::option::of(0u16..=65535),
+        ) {
+            let text = match port {
+                Some(port) => format!("http://{host}:{port}/"),
+                None => format!("http://{host}/"),
+            };
+            let Ok(sand_url) = Url::parse(&text) else { return Ok(()) };
+            let whatwg_url = url::Url::parse(&text);
+            prop_assert!(whatwg_url.is_ok(), "{} parses only here", text);
+            let whatwg_url = whatwg_url.unwrap();
+            let whatwg_host = match whatwg_url.host() {
+                Some(url::Host::Ipv4(ip)) => ip.to_string(),
+                Some(url::Host::Ipv6(ip)) => ip.to_canonical().to_string(),
+                Some(url::Host::Domain(name)) => name.to_string(),
+                None => String::new(),
+            };
+            let sand_host = crate::policy::net::parse_ip(&sand_url.host).map_or(sand_url.host.clone(), |ip| ip.to_string());
+            prop_assert_eq!(sand_host, whatwg_host, "{}", text);
+            prop_assert_eq!(Some(sand_url.port), whatwg_url.port_or_known_default(), "{}", text);
+        }
+    }
 }

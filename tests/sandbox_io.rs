@@ -6,6 +6,7 @@ mod common;
 use common::{HttpResponse, TempDir, http_server, literal_path, parse_rules, run_with};
 use parking_lot::Mutex;
 use sandlang::engine::Limits;
+use sandlang::network::OsNetwork;
 use sandlang::policy::net::{NetPattern, is_private_address};
 use sandlang::policy::rules::{AbsolutePath, CustomMatch, HttpMethod, Methods, NamePattern, PathPattern, RulePolicy, Transports};
 use sandlang::policy::{Capability, Decision, PromptAnswer};
@@ -46,7 +47,7 @@ fn net_patterns_match_ip_literals_and_ranges() {
     assert_eq!(p.check(&net("EXAMPLE.com", 443)), Decision::Allow);
     assert_eq!(p.check(&net("10.example", 80)), Decision::Prompt);
     assert_eq!(p.check(&net_addr("example.com", "127.0.0.1:443")), Decision::Allow);
-    assert_eq!(p.check(&net_addr("example.com", "10.9.0.1:443")), Decision::Allow);
+    assert_eq!(p.check(&net_addr("example.com", "10.9.0.1:443")), Decision::Deny);
     assert_eq!(p.check(&net_addr("other.example", "10.9.0.1:443")), Decision::Deny);
     assert_eq!(p.check(&net_addr("other.example", "[::ffff:10.9.0.1]:443")), Decision::Deny);
     assert_eq!(p.check(&net_addr("other.example", "10.1.0.1:443")), Decision::Allow);
@@ -269,10 +270,10 @@ fn http_address_rules_apply_to_resolved_addresses() {
     assert_eq!(p.check_resolved(&get("POST", "app.example", "/public"), at), Decision::Deny);
     assert_eq!(p.check_resolved(&plain("app.example", 80), at), Decision::Allow);
     let p = parse_rules("allow http plaintext db.internal\ndeny net 10.0.0.0/8");
-    assert_eq!(p.check_resolved(&get("GET", "db.internal", "/"), at), Decision::Allow);
-    assert_eq!(p.check_resolved(&get("GET", "other.internal", "/"), at), Decision::Deny);
-    let p = parse_rules("allow http plaintext db.internal\ndeny http 10.0.0.5");
     assert_eq!(p.check_resolved(&get("GET", "db.internal", "/"), at), Decision::Deny);
+    let p = parse_rules("allow http plaintext db.internal 10.0.0.5\ndeny net 10.0.0.0/8");
+    assert_eq!(p.check_resolved(&get("GET", "db.internal", "/"), at), Decision::Allow);
+    assert_eq!(p.check_resolved(&get("GET", "other.internal", "/"), at), Decision::Allow, "an address rule allows every name");
     let p = parse_rules("allow http plaintext *\ndeny http 127.0.0.1");
     assert_eq!(p.check_resolved(&get("GET", "evil.example", "/"), "[::ffff:127.0.0.1]:80".parse().unwrap()), Decision::Deny);
     assert_eq!(p.check_resolved(&get("GET", "evil.example", "/"), "0.0.0.0:80".parse().unwrap()), Decision::Deny);
@@ -280,7 +281,7 @@ fn http_address_rules_apply_to_resolved_addresses() {
 
 #[test]
 fn encoded_path_separators_are_checked_at_resolved_addresses() {
-    let p = parse_rules("allow http tls plaintext *\nallow http plaintext api.example.com/*.txt\ndeny net 10.0.0.0/8");
+    let p = parse_rules("allow http tls plaintext *\nallow http plaintext 10.0.0.5/*.txt\ndeny net 10.0.0.0/8");
     let get = |path: &str| Capability::Http {
         method: "GET".into(),
         scheme: "http".into(),
@@ -295,12 +296,14 @@ fn encoded_path_separators_are_checked_at_resolved_addresses() {
 }
 
 #[test]
-fn explicit_host_rules_outrank_cidr_prefixes_at_resolved_addresses() {
+fn only_address_rules_decide_resolved_addresses() {
     let p = parse_rules("allow net db.internal *.corp.example\ndeny net 10.0.0.0/8 10.0.0.6");
+    assert_eq!(p.check(&net_addr("db.internal", "10.0.0.5:5432")), Decision::Deny);
+    assert_eq!(p.check(&net_addr("db.corp.example", "8.8.8.8:5432")), Decision::Allow);
+    let p = parse_rules("allow net db.internal 10.0.0.5\ndeny net 10.0.0.0/8 10.0.0.6");
     assert_eq!(p.check(&net_addr("db.internal", "10.0.0.5:5432")), Decision::Allow);
     assert_eq!(p.check(&net_addr("db.internal", "10.0.0.6:5432")), Decision::Deny);
-    assert_eq!(p.check(&net_addr("db.corp.example", "10.0.0.5:5432")), Decision::Deny);
-    assert_eq!(p.check(&net_addr("db.corp.example", "8.8.8.8:5432")), Decision::Allow);
+    assert_eq!(p.check(&net_addr("db.corp.example", "10.0.0.5:5432")), Decision::Allow, "an address rule allows every name");
     let metadata: SocketAddr = "169.254.169.254:443".parse().unwrap();
     for (allow, deny) in
         [("example.com", "169.254.169.254"), ("example.com:443", "169.254.169.254"), ("example.com", "169.254.169.254:443")]
@@ -313,9 +316,9 @@ fn explicit_host_rules_outrank_cidr_prefixes_at_resolved_addresses() {
     assert_eq!(p.check(&net_addr("example.com", "127.0.0.1:3000")), Decision::Deny);
     let p = parse_rules("prompt net db.internal\nallow net *\nprompt net 93.184.0.0/16");
     assert_eq!(p.check(&net("db.internal", 5432)), Decision::Prompt);
-    assert_eq!(p.check(&net_addr("db.internal", "93.184.0.5:5432")), Decision::Allow);
-    assert_eq!(p.check(&net_addr("example.com", "93.184.215.14:443")), Decision::Deny);
-    let p = parse_rules("allow http GET db.internal/api\ndeny net 10.0.0.0/8");
+    assert_eq!(p.check(&net_addr("db.internal", "93.184.0.5:5432")), Decision::Deny);
+    assert_eq!(p.check(&net_addr("db.internal", "8.8.8.8:5432")), Decision::Allow);
+    let p = parse_rules("allow http GET db.internal/api 10.0.0.5/api\ndeny net 10.0.0.0/8");
     let get = |path: &str| Capability::Http {
         method: "GET".into(),
         scheme: "https".into(),
@@ -376,14 +379,19 @@ fn default_rules_apply_only_to_unmatched_requests() {
     assert_eq!(p.check(&all), Decision::Allow);
     let p = parse_rules("prompt env SECRET").with_defaults(RulePolicy::allow_all());
     assert_eq!(p.check(&all), Decision::Prompt);
+    // A default address rule applies only if the primary rules do not match the request.
     let metadata: SocketAddr = "169.254.169.254:80".parse().unwrap();
-    let floor = || parse_rules("deny net 169.254.0.0/16");
-    let p = parse_rules("allow net tls plaintext *.example.com").with_defaults(floor());
-    assert_eq!(p.check_resolved(&plain("evil.example.com", 80), metadata), Decision::Deny);
-    let p = parse_rules("allow net tls plaintext *").with_defaults(floor());
-    assert_eq!(p.check_resolved(&plain("evil.example", 80), metadata), Decision::Deny);
-    let p = parse_rules("allow net tls plaintext meta.internal").with_defaults(floor());
-    assert_eq!(p.check_resolved(&plain("meta.internal", 80), metadata), Decision::Allow);
+    let deny = || parse_rules("deny net 169.254.0.0/16");
+    let allow = || parse_rules("allow net tls plaintext *");
+    for (p, expected) in [
+        (allow().with_defaults(deny()), Decision::Allow),
+        (deny().with_defaults(allow()), Decision::Deny),
+        (RulePolicy::new().with_defaults(allow().extend(deny())), Decision::Deny),
+        (parse_rules("deny net 169.254.0.0/16\nallow net tls plaintext *.example.com").with_defaults(allow()), Decision::Deny),
+    ] {
+        assert_eq!(p.check(&plain("169.254.169.254", 80)), expected, "literal under {p}");
+        assert_eq!(p.check_resolved(&plain("evil.example.com", 80), metadata), expected, "resolved under {p}");
+    }
     let host = parse_rules("prompt write /").with_defaults(RulePolicy::allow_all());
     let write = Capability::FsWrite("/tmp/x".into());
     assert_eq!(host.check_normalized(&write), Decision::Prompt);
@@ -476,34 +484,31 @@ fn constructors_start_with_their_rules() {
     assert_eq!(parse_rules(&text).to_string(), text);
 }
 
-#[cfg(unix)]
 #[test]
 fn hosts_resolved_to_denied_addresses_are_blocked() {
     let server = http_server(|_| HttpResponse::new(200, "internal"));
     let port = server.addr.port();
-    // `127.1` and `2130706433` are not IP literals, but the resolver maps them to 127.0.0.1.
     let src = format!(
         r#"
 import http
 import net
-for host in ["127.1", "2130706433", "localhost", "127.0.0.1"] {{
+for host in ["loopback.test", "localhost", "127.0.0.1"] {{
     let e = http.get("http://\(host):{port}/").unwrap_err()
     print("\(e.kind): \(e.message)")
 }}
-print(net.connect("127.1", {port}).unwrap_err().kind)
+print(net.connect("loopback.test", {port}).unwrap_err().kind)
 "#
     );
     let policy = RulePolicy::standard()
         .allow_net(Transports::Both, "*".parse().unwrap())
         .deny_net(Transports::Both, "127.0.0.0/8".parse().unwrap())
         .deny_net(Transports::Both, "[::1]".parse().unwrap());
-    let r = run_with(&src, |c| c.policy(policy));
+    let r = run_with(&src, |c| c.policy(policy).network(Arc::new(RebindingNetwork)));
     let rule = "the rule `deny net 127.0.0.0/8`";
     assert_eq!(
         r.ok_stdout(),
         format!(
-            "permission_denied: permission denied: connect to 127.1:{port}: address 127.0.0.1 is not allowed by {rule}\n\
-             permission_denied: permission denied: connect to 2130706433:{port}: address 127.0.0.1 is not allowed by {rule}\n\
+            "permission_denied: permission denied: connect to loopback.test:{port}: address 127.0.0.1 is not allowed by {rule}\n\
              permission_denied: permission denied: connect to localhost:{port}: address 127.0.0.1 is not allowed by {rule}\n\
              permission_denied: permission denied: GET http://127.0.0.1:{port}/\n\
              permission_denied\n"
@@ -512,8 +517,6 @@ print(net.connect("127.1", {port}).unwrap_err().kind)
     assert!(server.requests.lock().is_empty());
 }
 
-// Relies on the resolver accepting `127.1` for 127.0.0.1 (glibc, macOS).
-#[cfg(unix)]
 #[test]
 fn explicitly_allowed_hosts_reach_denied_ranges() {
     let server = http_server(|_| HttpResponse::new(200, "hi"));
@@ -525,57 +528,122 @@ import net
 print(http.get("http://127.0.0.1:{port}/").map(r => r.text().unwrap()))
 print(http.get("http://localhost:{port}/").map(r => r.text().unwrap()))
 print(http.get("http://app.localhost:{port}/").map(r => r.text().unwrap()))
-print(http.get("http://127.1:{port}/").map(r => r.text().unwrap()))
+print(http.get("http://loopback.test:{port}/").map(r => r.text().unwrap()))
 print(net.connect("127.0.0.1", {port}).is_ok())
 "#
     );
-    // `127.1` is allowed by name only through `*`; its address by the explicit IP rule.
+    // `*` allows `loopback.test` by name, and the IP rule allows its resolved address.
     let policy = RulePolicy::standard().extend(parse_rules(&format!(
         "allow net tls plaintext *\ndeny net 127.0.0.0/8 [::1]\nallow net plaintext 127.0.0.1:{port} localhost *.localhost"
     )));
-    let r = run_with(&src, |c| c.policy(policy));
+    let r = run_with(&src, |c| c.policy(policy).network(Arc::new(RebindingNetwork)));
     assert_eq!(r.ok_stdout(), "Ok(\"hi\")\nOk(\"hi\")\nOk(\"hi\")\nOk(\"hi\")\ntrue\n");
 }
 
-// Relies on the resolver accepting `127.1` for 127.0.0.1 (glibc, macOS).
-#[cfg(unix)]
+/// An approved `prompt` rule acts as `allow` at its resolved address in any
+/// rule order. An unapproved `prompt` address rule denies the connection.
+#[test]
+fn approved_prompts_allow_their_resolved_addresses_in_any_order() {
+    let loopback: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+    for rules in ["prompt net 127.0.0.1 [::1] localhost", "prompt net localhost 127.0.0.1 [::1]"] {
+        assert_eq!(parse_rules(rules).check_resolved(&net("localhost", 8080), loopback), Decision::Allow, "{rules}");
+    }
+    let p = parse_rules("prompt net *\nprompt net 10.0.0.0/8");
+    assert_eq!(p.check_resolved(&net("db.example", 443), "10.0.0.5:443".parse().unwrap()), Decision::Deny);
+    assert_eq!(p.check_resolved(&net("db.example", 443), "8.8.8.8:443".parse().unwrap()), Decision::Allow);
+}
+
+#[test]
+fn only_more_specific_rules_override_deny_private_net() {
+    let with = |rule: &str| parse_rules(rule).deny_private_net();
+    assert_eq!(with("allow net localhost:8080").check(&net("localhost", 8080)), Decision::Allow);
+    assert_eq!(with("allow net 10.0.0.5").check(&net("10.0.0.5", 443)), Decision::Allow);
+    assert_eq!(with("allow net localhost").check(&net("localhost", 8080)), Decision::Deny, "equal specificity");
+    assert_eq!(with("allow net 10.0.0.0/8").check(&net("10.0.0.5", 443)), Decision::Deny, "equal specificity");
+    let local = with("allow net localhost:8080 127.0.0.1:8080 [::1]:8080");
+    for host in ["localhost", "127.0.0.1", "::1"] {
+        assert_eq!(local.check(&net(host, 8080)), Decision::Allow, "{host}");
+    }
+    for addr in ["127.0.0.1:8080", "[::1]:8080"] {
+        assert_eq!(local.check_resolved(&net("localhost", 8080), addr.parse().unwrap()), Decision::Allow, "{addr}");
+    }
+    let exact = with("allow net api.example.com");
+    for addr in ["127.0.0.1:443", "[::1]:443", "169.254.169.254:443"] {
+        assert_eq!(exact.check_resolved(&net("api.example.com", 443), addr.parse().unwrap()), Decision::Deny, "{addr}");
+    }
+}
+
+#[test]
+fn deny_private_net_blocks_loopback_hosts_except_specific_allows() {
+    let server = http_server(|_| HttpResponse::new(200, "hi"));
+    let port = server.addr.port();
+    let src = format!(
+        r#"
+import http
+import net
+for host in ["127.0.0.1", "localhost", "app.localhost"] {{
+    print(http.get("http://\(host):{port}/").unwrap_err().message)
+}}
+print(net.connect("127.0.0.1", {port}).unwrap_err().kind)
+"#
+    );
+    let wildcard = RulePolicy::standard().allow_net(Transports::Both, "*".parse().unwrap());
+    let r = run_with(&src, |c| c.policy(wildcard.clone().deny_private_net()));
+    assert_eq!(
+        r.ok_stdout(),
+        format!(
+            "permission denied: GET http://127.0.0.1:{port}/\n\
+             permission denied: GET http://localhost:{port}/\n\
+             permission denied: GET http://app.localhost:{port}/\n\
+             permission_denied\n"
+        )
+    );
+    assert!(server.requests.lock().is_empty());
+    let exception = wildcard.deny_private_net().allow_net(Transports::Both, format!("localhost:{port}").parse().unwrap());
+    let r =
+        run_with(&format!("import http\nprint(http.get(\"http://localhost:{port}/\").unwrap().text().unwrap())"), |c| c.policy(exception));
+    assert_eq!(r.ok_stdout(), "hi\n");
+}
+
 #[test]
 fn redirects_to_denied_addresses_are_denied() {
     let target = http_server(|_| HttpResponse::new(200, "secret"));
     let tport = target.addr.port();
     let origin = http_server(move |req| match req.path() {
-        "/name" => HttpResponse::new(302, "").header("location", &format!("http://127.1:{tport}/")),
+        "/name" => HttpResponse::new(302, "").header("location", &format!("http://loopback.test:{tport}/")),
+        "/numeric" => HttpResponse::new(302, "").header("location", &format!("http://127.1:{tport}/")),
         "/tls" => HttpResponse::new(302, "").header("location", "http://example.com/"),
         _ => HttpResponse::new(302, "").header("location", &format!("http://localhost:{tport}/")),
     });
-    // The origin is allowed explicitly; the redirect targets only by the wildcard.
+    // An IP rule allows the origin, and `*` allows the redirect targets.
     let policy = RulePolicy::standard()
         .extend(parse_rules(&format!("allow net tls plaintext *\ndeny net 127.0.0.0/8 [::1]\nallow net plaintext {}", origin.addr)));
     let src = format!(
-        "import http\nprint(http.get(\"http://{0}/name\").unwrap_err().kind)\nprint(http.get(\"http://{0}/local\").unwrap_err().kind)",
+        "import http\nfor path in [\"name\", \"local\", \"numeric\"] {{\n    print(http.get(\"http://{0}/\\(path)\").unwrap_err().kind)\n}}\nprint(http.get(\"http://{0}/numeric\").unwrap_err().message)",
         origin.addr
     );
-    let r = run_with(&src, |c| c.policy(policy));
-    assert_eq!(r.ok_stdout(), "permission_denied\npermission_denied\n");
-    assert_eq!(origin.requests.lock().len(), 2);
+    let r = run_with(&src, |c| c.policy(policy).network(Arc::new(RebindingNetwork)));
+    let out = r.ok_stdout();
+    assert!(out.starts_with("permission_denied\npermission_denied\nparse\n"), "{out}");
+    let invalid = format!("redirect from http://{}/numeric: invalid URL \"http://127.1:{tport}/\": invalid host", origin.addr);
+    assert!(out.lines().nth(3).is_some_and(|m| m.starts_with(&invalid)), "{out}");
+    assert_eq!(origin.requests.lock().len(), 4);
     assert!(target.requests.lock().is_empty());
 }
 
-// Relies on the resolver accepting `127.1` for 127.0.0.1 (glibc, macOS).
-#[cfg(unix)]
 #[test]
 fn prompt_answers_do_not_override_address_rules() {
     let server = http_server(|_| HttpResponse::new(200, "hi"));
     let port = server.addr.port();
     let src = format!(
-        "import http\nfor host in [\"localhost\", \"127.1\"] {{\n    print(http.get(\"http://\\(host):{port}/\").map(r => r.text().unwrap()))\n}}"
+        "import http\nfor host in [\"localhost\", \"loopback.test\"] {{\n    print(http.get(\"http://\\(host):{port}/\").map(r => r.text().unwrap()))\n}}"
     );
     let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
     let asked = prompts.clone();
     let run = |policy: RulePolicy| {
         let asked = asked.clone();
         run_with(&src, move |c| {
-            c.policy(policy).prompter(move |cap: Capability| {
+            c.policy(policy).network(Arc::new(RebindingNetwork)).prompter(move |cap: Capability| {
                 asked.lock().push(cap.to_string());
                 async { PromptAnswer::AllowOnce }
             })
@@ -591,6 +659,54 @@ fn prompt_answers_do_not_override_address_rules() {
     assert!(lines[1].contains("address 127.0.0.1 is not allowed by the rule `deny net plaintext 127.0.0.0/8`"), "{out}");
     assert_eq!(prompts.lock().len(), 4);
     assert_eq!(server.requests.lock().len(), 2);
+    let out = run(RulePolicy::standard().prompt_net(Transports::Plaintext, "127.0.0.0/8".parse().unwrap()));
+    let needs = "address 127.0.0.1 needs approval under the rule `prompt net plaintext 127.0.0.0/8`, and the engine cannot ask";
+    assert!(out.lines().nth(1).is_some_and(|l| l.contains(needs)), "{out}");
+}
+
+/// Simulates DNS rebinding by resolving `loopback.test` to `127.0.0.1`.
+/// Delegates all other operations to [`OsNetwork`].
+struct RebindingNetwork;
+
+impl sandlang::network::Network for RebindingNetwork {
+    fn resolve<'a>(&'a self, host: &'a str, port: u16) -> sandlang::network::NetworkFuture<'a, Vec<SocketAddr>> {
+        if host == "loopback.test" {
+            return Box::pin(async move { Ok(vec![SocketAddr::from(([127, 0, 0, 1], port))]) });
+        }
+        OsNetwork.resolve(host, port)
+    }
+
+    fn connect<'a>(
+        &'a self,
+        addrs: &'a [SocketAddr],
+    ) -> sandlang::network::NetworkFuture<'a, (Box<dyn sandlang::network::Stream>, SocketAddr)> {
+        OsNetwork.connect(addrs)
+    }
+
+    fn listen(&self, addr: SocketAddr) -> sandlang::network::NetworkFuture<'_, Box<dyn sandlang::network::Listener>> {
+        OsNetwork.listen(addr)
+    }
+}
+
+/// Browsers parse these hosts as loopback addresses. Rejecting them keeps the
+/// policy and the browser on the same destination.
+#[test]
+fn ambiguous_browser_hosts_are_invalid() {
+    let src = r#"
+import http
+import net
+for host in ["127.1", "0x7f000001", "2130706433", "%6cocalhost", "ｌｏｃａｌｈｏｓｔ", "app.0"] {
+    print(http.get("http://\(host)/").unwrap_err().message)
+    print(net.connect(host, 80).unwrap_err().kind)
+}
+"#;
+    let out = run_with(src, |c| c).ok_stdout().to_string();
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 12, "{out}");
+    for pair in lines.chunks(2) {
+        assert!(pair[0].contains("invalid host (expected an ASCII host name"), "{out}");
+        assert_eq!(pair[1], "invalid", "{out}");
+    }
 }
 
 struct KeepAliveNetwork {
@@ -641,7 +757,7 @@ fn pooled_connections_are_reused_only_at_addresses_allowed_for_the_request() {
     let connected = Arc::new(Mutex::new(Vec::new()));
     let network = Arc::new(KeepAliveNetwork { addrs: vec![addr], connected: connected.clone() });
     let policy = RulePolicy::standard()
-        .allow_http(Transports::Plaintext, Methods::only(HttpMethod::GET, []), "api.example.com/a".parse().unwrap())
+        .allow_http(Transports::Plaintext, Methods::only(HttpMethod::GET, []), "10.0.0.5/a".parse().unwrap())
         .allow_http(Transports::Plaintext, Methods::all(), "*".parse().unwrap())
         .deny_net(Transports::Plaintext, "10.0.0.0/8".parse().unwrap());
     let src = r#"

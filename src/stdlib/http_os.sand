@@ -1,11 +1,12 @@
 //! HTTP/1.1 client and server.
 //!
-//! Outgoing requests require `Http` and `Net(host:port)` capabilities, checked
-//! on every redirect hop, as well as `NetAddr` on the resolved socket address.
-//! `serve` requires `NetListen(ip:port)`. `https` URLs use TLS if the engine is
-//! built with the `tls` feature. Buffered response bodies larger than
-//! `max_http_body` fail with kind `"limit"`; use `open` to stream larger
-//! response bodies incrementally.
+//! Outgoing requests require the `Http` and `Net(host:port)` capabilities on
+//! each redirect hop, and `NetAddr` on the resolved socket address. `serve`
+//! requires `NetListen(ip:port)`. A URL host must be an ASCII hostname or a
+//! full IP address, such as `127.0.0.1`. Other hosts fail with kind `"parse"`.
+//! `https` URLs use TLS if the engine is built with the `tls` feature. Buffered
+//! response bodies larger than `max_http_body` fail with kind `"limit"`. Use
+//! `open` to stream larger response bodies.
 //!
 //! When a response body is read to completion and the connection permits
 //! reuse, the client returns the connection to a per-engine pool for up to 20

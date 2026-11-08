@@ -17,7 +17,9 @@ Replace long lists of facts and symbols in prose. Such lists are impossible for 
 
 Replace any table whose longest row is > 100 columns with an alternative that is human-readable.
 
-After the rewrite, all pieces of writing must comply with AST-STE100 guidelines. Structurally, the rewrite must ensure that all writing places key ideas at the top rather than buried somewhere among the factslop.
+If there are vague or sloppy symbol names in branch code, rename those as well to conform with AST-STE100 guidelines and AGENTS.md guidelines. However, do not rewrite any logic beyond renaming the symbols.
+
+After the rewrite, all pieces of writing and all symbols must comply with AST-STE100 guidelines. Structurally, the rewrite must ensure that all writing places key ideas at the top rather than buried somewhere among the factslop.
 
 ## Completion
 
@@ -48,4 +50,4 @@ A few non-exhaustive examples of idiosyncratic LLM-ish tells:
 - Long runs of facts and symbols
 - Middle voice
 
-All of the above apply both to regular writing and to symbol names, which may be vague or sloppy. Rename any offending symbols to conform with AST-STE100 guidelines. However, do not rewrite any logic beyond renaming the symbols.
+All of the above apply both to regular writing and to symbol names.
