@@ -446,7 +446,7 @@ fn lint_command() {
 }
 
 #[test]
-fn lint_reports_an_exhausted_budget_like_a_compile_error() {
+fn lint_reports_exhausted_budget_as_compile_error() {
     let dir = TempDir::new("lint-budget");
     let mut src = String::from("var x = 0\n");
     for i in 0..120 {
@@ -457,11 +457,11 @@ fn lint_reports_an_exhausted_budget_like_a_compile_error() {
         src += &format!("break @l{i}\n}}\nx = 2\n");
     }
     dir.write("deep.sand", &src);
-    let o = sand(dir.path(), &["lint", "deep.sand"]);
-    assert_eq!(o.code, 2, "{o:?}");
-    assert!(o.stderr.contains("source too complex to lint"), "{o:?}");
-    assert_eq!(o.stderr.matches("deep.sand").count(), 1, "{o:?}");
-    assert!(o.stderr.contains("var x = 0"), "{o:?}");
+    let out = sand(dir.path(), &["lint", "deep.sand"]);
+    assert_eq!(out.code, 2, "{out:?}");
+    assert!(out.stderr.contains("source too complex to lint"), "{out:?}");
+    assert_eq!(out.stderr.matches("deep.sand").count(), 1, "{out:?}");
+    assert!(out.stderr.contains("var x = 0"), "{out:?}");
 }
 
 #[test]

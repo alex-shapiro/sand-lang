@@ -2007,14 +2007,16 @@ deny any import that requires an interactive permission prompt.
 A completed run returns `Outcome { exit_code: i32 }`, and a failed operation
 returns an `Error`:
 
-| Variant                              | Meaning                                                              |
-| ------------------------------------ | -------------------------------------------------------------------- |
-| `Error::Compile(diagnostics)`        | Compilation failed (§18), or compilation or linting ran out of fuel. |
-| `Error::Runtime { message, trace }`  | Execution failed with an uncaught runtime error (§10.3).             |
-| `Error::Limit(kind)`                 | Execution, compilation, or linting exceeded a resource limit (§15).  |
-| `Error::Interrupted`                 | The host cancelled the call through an `InterruptHandle`.            |
-| `Error::Io(message)`                 | The entry script file could not be read.                             |
-| `Error::Internal { message, trace }` | An internal invariant failed or a host callback panicked (§10.3).    |
+- `Error::Compile(diagnostics)`: compilation failed (§18), or compilation or
+  linting exhausted its fuel.
+- `Error::Runtime { message, trace }`: execution failed with an uncaught runtime
+  error (§10.3).
+- `Error::Limit(kind)`: execution, compilation, or linting exceeded a resource
+  limit (§15).
+- `Error::Interrupted`: the host canceled the call through an `InterruptHandle`.
+- `Error::Io(message)`: the engine could not read the entry script file.
+- `Error::Internal { message, trace }`: an internal invariant failed or a host
+  callback panicked (§10.3).
 
 If `sandlang` is compiled with the default `panic = "unwind"` setting, the
 engine catches Rust panics inside library native functions, host callbacks, I/O
@@ -2485,13 +2487,14 @@ names of impl methods are checked at the trait.
 A lint can be suppressed for the next line with `// lint: allow(name)`, or for
 a file with `//! lint: allow(name)`.
 
-Linting checks the file first, with the default limits (§15.3). The lints
-may spend 64 units of fuel per byte of source (at least 10,000,000), about
-one per syntax tree node, per node a lint examines again, per variant and
-pair of characters that `variant-like-binding` compares, and per 16 bytes of
-type text in a `shadowed-variable` warning; a file that
-needs more fails with `source too complex to lint` (`Error::Compile`, exit
-code 2).
+The linter first type-checks the file under the compile-time limits (§15.3). It
+then enforces a lint fuel budget of 64 units per byte of source, with a minimum
+of 10,000,000 units. If a file exceeds this budget, linting fails with `source
+too complex to lint` (`Error::Compile`, exit code 2). Each unit of fuel covers:
+
+- one syntax tree node visit
+- one variant or character-pair comparison in `variant-like-binding`
+- 16 bytes of formatted type text in a warning
 
 ### 17.3 `sand fmt FILE... [--check]`, `sand fmt - [--check]`
 

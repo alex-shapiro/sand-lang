@@ -279,11 +279,12 @@ fn shadowing_warnings_charge_their_type_text() {
     let pairs: String = (0..20).map(|i| format!("    let x{i} = a11\n    let x{i} = 0\n")).collect();
     let doubled: String = (1..=11).map(|i| format!("    let a{i} = (a{}, a{})\n", i - 1, i - 1)).collect();
     let src = format!("struct {name} {{\n    x: int\n}}\nfn f() {{\n    let a0 = {name}(x: 1)\n{doubled}{pairs}}}\nf()\n");
-    let e = Engine::new(Config::new()).lint_source("main.sand", &src).unwrap_err();
-    assert!(matches!(e, Error::Compile(_)) && e.to_string().contains("source too complex to lint"), "{e}");
+    let err = Engine::new(Config::new()).lint_source("main.sand", &src).unwrap_err();
+    assert!(matches!(err, Error::Compile(_)) && err.to_string().contains("source too complex to lint"), "{err}");
 }
 
-/// A source whose lint work grows with `depth` and whose type check does not.
+/// Generates a script whose lint work scales with `depth` while type-checking
+/// work stays constant.
 fn nested_loops(depth: usize) -> String {
     let mut src = String::from("var x = 0\n");
     for i in 0..depth {
@@ -301,12 +302,12 @@ fn the_linter_is_bounded() {
     let engine = Engine::new(Config::new());
     let lint = |src: &str| engine.lint_source("main.sand", src).map_err(|e| e.to_string());
     let start = Instant::now();
-    let e = engine.lint_source("main.sand", &nested_loops(120)).unwrap_err();
-    assert!(matches!(e, Error::Compile(_)) && e.to_string().contains("source too complex to lint"), "{e}");
+    let err = engine.lint_source("main.sand", &nested_loops(120)).unwrap_err();
+    assert!(matches!(err, Error::Compile(_)) && err.to_string().contains("source too complex to lint"), "{err}");
     assert!(start.elapsed() < FAST, "took {:?}", start.elapsed());
     assert_eq!(lint(&nested_loops(20)).unwrap(), vec![]);
-    let e = lint(&slow_program()).unwrap_err();
-    assert!(e.contains("program too complex to compile"), "{e}");
+    let err = lint(&slow_program()).unwrap_err();
+    assert!(err.contains("program too complex to compile"), "{err}");
     let lets: String = (0..20_000).map(|i| format!("let _v{i} = {i}; ")).collect();
     let src = format!("// \u{e9}\nfn f() {{ {lets}}}\nf()\n");
     let start = Instant::now();
@@ -322,15 +323,17 @@ fn variant_suggestions_are_charged_to_the_lint_budget() {
         let bindings: String = (0..4_000).map(|i| format!("    let B{i} = s\n")).collect();
         let src = format!("enum E {{\n{variants}}}\nfn f(s: E) {{\n{bindings}}}\nf(E.V0{argument})\n");
         let start = Instant::now();
-        let e = engine.lint_source("main.sand", &src).unwrap_err();
-        assert!(matches!(e, Error::Compile(_)) && e.to_string().contains("source too complex to lint"), "{e}");
+        let err = engine.lint_source("main.sand", &src).unwrap_err();
+        assert!(matches!(err, Error::Compile(_)) && err.to_string().contains("source too complex to lint"), "{err}");
         assert!(start.elapsed() < FAST, "took {:?}", start.elapsed());
     }
 
-    let long = "a".repeat(3_000);
-    let src = format!("enum E {{\n    V0{long}\n    V1{long}\n    V2{long}\n}}\nfn f(s: E) {{\n    let B{long} = s\n}}\nf(E.V0{long})\n");
-    let e = engine.lint_source("main.sand", &src).unwrap_err();
-    assert!(matches!(e, Error::Compile(_)) && e.to_string().contains("source too complex to lint"), "{e}");
+    let long_suffix = "a".repeat(3_000);
+    let src = format!(
+        "enum E {{\n    V0{long_suffix}\n    V1{long_suffix}\n    V2{long_suffix}\n}}\nfn f(s: E) {{\n    let B{long_suffix} = s\n}}\nf(E.V0{long_suffix})\n"
+    );
+    let err = engine.lint_source("main.sand", &src).unwrap_err();
+    assert!(matches!(err, Error::Compile(_)) && err.to_string().contains("source too complex to lint"), "{err}");
 }
 
 #[test]
@@ -345,8 +348,9 @@ fn argument_order_lint_is_linear_in_the_arguments() {
     assert!(start.elapsed() < FAST, "took {:?}", start.elapsed());
 }
 
-/// A clock that stands still for `readings_before_stop` monotonic readings.
-/// After that, it interrupts `interrupt` or, without one, passes every deadline.
+/// Test clock that returns a fixed timestamp for `readings_before_stop` calls
+/// to [`Clock::now`]. Subsequent calls trigger `interrupt` if set, or advance
+/// the clock past any test deadline.
 struct StoppingClock {
     origin: PlatformInstant,
     readings: AtomicU64,
@@ -392,9 +396,9 @@ impl Clock for StoppingClock {
 }
 
 #[test]
-fn a_stopped_lint_reports_why_it_stopped() {
+fn stopped_lint_reports_stop_reason() {
     let src = nested_loops(120);
-    let timed = |clock: Arc<StoppingClock>, handle: Option<InterruptHandle>| {
+    let lint_with_clock = |clock: Arc<StoppingClock>, handle: Option<InterruptHandle>| {
         let mut config = limits(|l| l.max_wall_time = Some(Duration::from_secs(60))).clock(clock);
         if let Some(handle) = handle {
             config = config.interrupt(handle);
@@ -402,20 +406,21 @@ fn a_stopped_lint_reports_why_it_stopped() {
         Engine::new(config).lint_source("main.sand", &src)
     };
 
-    // The lint uses all of its fuel, so the last clock readings are its own polls.
-    let counting = StoppingClock::new(u64::MAX, None);
-    let e = timed(counting.clone(), None).unwrap_err();
-    assert!(matches!(e, Error::Compile(_)) && e.to_string().contains("source too complex to lint"), "{e}");
-    let readings = counting.readings.load(Ordering::Relaxed);
+    // Type checking finishes before the last 10 clock polls, so stopping at
+    // `readings - 10` stops inside the linter.
+    let counting_clock = StoppingClock::new(u64::MAX, None);
+    let err = lint_with_clock(counting_clock.clone(), None).unwrap_err();
+    assert!(matches!(err, Error::Compile(_)) && err.to_string().contains("source too complex to lint"), "{err}");
+    let readings = counting_clock.readings.load(Ordering::Relaxed);
     assert!(readings > 20, "the lint polled the clock only {readings} times");
-    let during_lint = readings - 10;
+    let lint_poll_reading = readings - 10;
 
-    let e = timed(StoppingClock::new(during_lint, None), None).unwrap_err();
-    assert!(matches!(e, Error::Limit(LimitKind::WallTime)), "{e}");
+    let err = lint_with_clock(StoppingClock::new(lint_poll_reading, None), None).unwrap_err();
+    assert!(matches!(err, Error::Limit(LimitKind::WallTime)), "{err}");
 
     let handle = InterruptHandle::new();
-    let e = timed(StoppingClock::new(during_lint, Some(handle.clone())), Some(handle)).unwrap_err();
-    assert!(matches!(e, Error::Interrupted), "{e}");
+    let err = lint_with_clock(StoppingClock::new(lint_poll_reading, Some(handle.clone())), Some(handle)).unwrap_err();
+    assert!(matches!(err, Error::Interrupted), "{err}");
 }
 
 #[test]

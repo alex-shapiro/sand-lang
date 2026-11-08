@@ -23,11 +23,13 @@ impl std::fmt::Display for LintWarning {
     }
 }
 
-/// Lints `main`, the main module of `checked`, with
-/// fuel of its own ([`tool_fuel`]) and `compile`'s deadline and interrupt
-/// flag. Returns the reason if the budget stops the lint.
-pub(crate) fn lint_module(main: &ParsedModule, checked: &CheckedProgram, compile: &CompileBudget) -> Result<Vec<LintWarning>, Stop> {
-    let budget = compile.with_fuel(tool_fuel(main.source.text.len()));
+/// Lints the main module `main` of `checked`.
+///
+/// The linter runs with a fresh fuel budget from [`tool_fuel`] and inherits
+/// the deadline and interrupt flag from `compile_budget`. Returns [`Stop`] if
+/// the budget stops the linter.
+pub(crate) fn lint_module(main: &ParsedModule, checked: &CheckedProgram, compile_budget: &CompileBudget) -> Result<Vec<LintWarning>, Stop> {
+    let budget = compile_budget.with_fuel(tool_fuel(main.source.text.len()));
     let warnings = run_lints(main, checked, &budget);
     match budget.stopped() {
         Some(stop) => Err(stop),
@@ -39,11 +41,11 @@ struct Linter<'a> {
     file: &'a SourceFile,
     out: Vec<LintWarning>,
     checked: &'a CheckedProgram,
-    /// Types of the main module's bindings by the offset of their name,
-    /// from the checker.
+    /// Type of each binding in the main module, indexed by the byte offset of
+    /// its name.
     types: HashMap<u32, TypeId>,
-    /// The enum types of capitalized bindings by the offset of their name,
-    /// from the checker (`variant-like-binding`).
+    /// Enum definition for each uppercase binding in the main module, indexed
+    /// by the byte offset of its name.
     enum_defs: HashMap<u32, TypeDefId>,
     /// The names of the bindings (with known types) of each scope enclosing
     /// the current point of the current function, innermost last.
@@ -388,12 +390,12 @@ impl<'a> Linter<'a> {
         }
     }
 
-    /// The checker's type of the binding introduced at `id`, if known.
+    /// Returns the type of the binding introduced at `id`.
     fn binding_type(&self, id: &Ident) -> Option<TypeId> {
         self.types.get(&id.span.lo).copied()
     }
 
-    /// The text of `t`, charged to the lint budget.
+    /// Formats `t` and charges its byte length to the lint budget.
     fn type_text(&self, t: TypeId) -> String {
         let text = self.checked.printer().show(t);
         self.budget.charge(text.len() as u64 / TEXT_BYTES_PER_UNIT);
@@ -554,20 +556,20 @@ impl<'a> Linter<'a> {
     /// new variable, most likely a misspelled variant without a payload.
     fn variant_like_binding(&mut self, id: &Ident) {
         let name = id.name.to_ascii_lowercase();
-        let suggestion = self.enum_defs.get(&id.span.lo).and_then(|&d| {
-            let def = &self.checked.types[d as usize];
+        let suggestion = self.enum_defs.get(&id.span.lo).and_then(|&def_id| {
+            let def = &self.checked.types[def_id as usize];
             let variant = self.closest_payloadless_variant(&name, def)?;
             Some(format!("{}.{variant}", self.checked.name(def.name)))
         });
         let message = match suggestion {
-            Some(v) => format!("`{}` binds a new variable; did you mean the variant `{v}`?", id.name),
+            Some(variant) => format!("`{}` binds a new variable; did you mean the variant `{variant}`?", id.name),
             None => format!("`{}` binds a new variable rather than matching a variant; use a lowercase name for a binding", id.name),
         };
         self.warn(id.span.lo, "variant-like-binding", message);
     }
 
-    /// The variant of `def` without a payload whose name is closest to the
-    /// lowercase `name`, if one is close enough to be a misspelling.
+    /// Returns the closest payloadless variant of `def` to the lowercase
+    /// `name`, if a variant is within the edit-distance threshold.
     fn closest_payloadless_variant(&self, name: &str, def: &TypeDef) -> Option<&'a str> {
         let max_distance = (name.chars().count() / 3).max(1);
         def.variants()

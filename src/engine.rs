@@ -984,12 +984,15 @@ impl Engine {
         self.gc_stats
     }
 
-    /// Type checks `source` as [`Engine::check_source`] does, and lints it.
+    /// Type-checks and lints `source`.
     ///
-    /// Returns [`Error::Compile`] on compile errors or if the lint exhausts
-    /// its fuel, [`Error::Limit`] if the lint exceeds
-    /// [`Limits::max_wall_time`], and [`Error::Interrupted`] if the host
-    /// interrupts the lint.
+    /// Returns an [`Error`] if checking or linting fails:
+    ///
+    /// - [`Error::Compile`] if compilation fails or the linter exhausts its
+    ///   fuel budget
+    /// - [`Error::Limit`] if the call exceeds [`Limits::max_wall_time`] or
+    ///   [`Limits::max_source_bytes`]
+    /// - [`Error::Interrupted`] if the host interrupts the call
     pub fn lint_source(&self, name: &str, source: &str) -> Result<Vec<crate::lint::LintWarning>, Error> {
         let call = self.begin_call();
         let compiled = self.compile_now(&call, name, source, &self.source_root().1, None, true)?;
@@ -997,8 +1000,9 @@ impl Engine {
         Ok(compiled.lints.unwrap_or_default())
     }
 
-    /// Type checks the file at `path` and its imports, and lints the file,
-    /// as [`Engine::lint_source`] does.
+    /// Type-checks the file at `path` and its imports, then lints the file.
+    ///
+    /// See [`Engine::lint_source`] for the errors this method returns.
     pub fn lint_file(&self, path: impl AsRef<Path>) -> Result<Vec<crate::lint::LintWarning>, Error> {
         let call = self.begin_call();
         let (name, source, root) = self.read_main(path.as_ref())?;

@@ -322,8 +322,8 @@ pub struct LocalFact {
     pub mutable: bool,
     pub assigned: bool,
     pub ty: TypeId,
-    /// The enum type of a binding whose name starts with an upper-case
-    /// letter. The binding may be a misspelled variant of this enum.
+    /// Enum type of an uppercase binding. The linter checks whether the
+    /// binding is a misspelled variant of this enum.
     pub enum_def: Option<TypeDefId>,
 }
 
@@ -828,7 +828,7 @@ impl Checker {
         self.printer().show(t)
     }
 
-    /// The text of `t`, charged to the compile budget.
+    /// Formats `t` and charges its byte length to the compile budget.
     pub(crate) fn show_charged(&self, t: TypeId) -> String {
         let text = self.show(t);
         self.budget.charge(text.len() as u64 / budget::TEXT_BYTES_PER_UNIT);
@@ -2793,9 +2793,9 @@ impl Checker {
         true
     }
 
-    /// Emits an `argument-order` lint for each positional argument or
-    /// sub-pattern in `given`, as (index, name, span), whose name matches a
-    /// different field or parameter in `names`.
+    /// Emits an `argument-order` warning if a positional argument or pattern
+    /// in `given` shares a name with a field or parameter at another index in
+    /// `names`.
     pub(crate) fn note_argument_order<'g>(
         &mut self,
         target_name: &str,
@@ -3052,10 +3052,10 @@ impl Checker {
         }
     }
 
-    /// The definition of `t`, if `t` is an enum.
+    /// Returns the type definition ID of `t` if `t` is an enum.
     fn enum_def_of(&self, t: TypeId) -> Option<TypeDefId> {
-        let Ty::Named(d, _) = self.rty(t) else { return None };
-        matches!(self.types[d as usize].kind, TypeDefKind::Enum { .. }).then_some(d)
+        let Ty::Named(def_id, _) = self.rty(t) else { return None };
+        matches!(self.types[def_id as usize].kind, TypeDefKind::Enum { .. }).then_some(def_id)
     }
 
     /// Final checks for a function: required traits, inference completeness; the

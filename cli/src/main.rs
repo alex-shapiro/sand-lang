@@ -535,11 +535,11 @@ fn cmd_lint(args: &[String]) -> Result<u8, String> {
         } else {
             match Engine::new(Config::new().policy(allow_all_imports_policy())).lint_file(f) {
                 Ok(warnings) => warnings,
-                Err(e) => return Ok(report_error(&e)),
+                Err(err) => return Ok(report_error(&err)),
             }
         };
-        for w in warnings {
-            outln!("{f}:{w}");
+        for warning in warnings {
+            outln!("{f}:{warning}");
             count += 1;
         }
     }

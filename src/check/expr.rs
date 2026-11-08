@@ -2953,11 +2953,11 @@ impl Checker {
     }
 }
 
-/// The positional arguments of `args` that are plain identifiers, as
-/// (index, name, span).
+/// Returns the index, name, and span of each positional argument in `args`
+/// that is a plain identifier.
 fn positional_idents<'a>(args: &'a CallArgs<'_>) -> impl Iterator<Item = (usize, &'a str, Span)> {
-    args.positional.iter().enumerate().filter_map(|(i, a)| match &a.kind {
-        ExprKind::Ident(id) => Some((i, id.name.as_str(), a.span)),
+    args.positional.iter().enumerate().filter_map(|(index, arg)| match &arg.kind {
+        ExprKind::Ident(ident) => Some((index, ident.name.as_str(), arg.span)),
         _ => None,
     })
 }

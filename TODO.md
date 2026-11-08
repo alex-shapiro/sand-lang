@@ -107,30 +107,31 @@ The host cannot rely on engine limits, stability, or control.
       thread before checking `max_source_bytes`. Offloading the bounded read
       enforces `max_source_bytes`, `max_wall_time`, and interrupts on a large
       file, a FIFO, or a hung mount.
-- [ ] ❓ Count compiler and linter data against `max_memory`. SPEC §15.3 excludes
-      compilation from the limit, so a host that sets a low limit for untrusted
-      scripts has no memory bound during compilation other than
-      `max_source_bytes` and `max_compile_fuel`. A charge would reject programs
-      that compile today under a low limit.
-- [ ] ❓ Bound the text of lint warnings. Fuel counts names, but warning text
-      grows with the bytes of each name, and no limit applies to identifier
-      length. An audit of `lint-budget-errors` measured 1.10 GB for a 286 KB
-      script with a 256 KB field name and 1,000 calls, and 2.16 GB for one
-      `shadowed-variable` warning. An allocation failure aborts every engine in
-      the process. The simplest fix is an identifier length limit in the lexer,
-      which is a new language limit. Charging each message at one point adds no
-      limit, but must estimate type text before it renders the text.
-- [ ] ❓ Look up enum variants and struct fields through a map per `TypeDef`.
-      Each use scans the member list in `check/expr.rs` and `check/pat.rs`
-      without a charge. An audit measured 91 s for a 16 MiB source with 400,000
-      variants before compile fuel ran out.
-- [ ] ❓ Charge lint-only checker work to the lint fuel. A struct with 30,000
-      defaulted fields and 60 constructor calls passes `sand check` and fails
-      `sand lint` with `program too complex to compile`.
-- [ ] ❓ Let hosts set the lint fuel. `lint_module` derives the fuel from the source
-      size and ignores `max_compile_fuel`, so a host can neither lower nor raise
-      the budget. `Limits::max_lint_fuel` is one option, and it adds a limit to
-      the public API.
+- [ ] ❓ _Memory._ Account for compiler and linter data against `max_memory`.
+      SPEC §15.3 excludes compilation from `max_memory`. Only `max_source_bytes`
+      and `max_compile_fuel` bound memory use during compilation. Accounting for
+      compiler memory will reject scripts that compile today under a low
+      `max_memory` limit.
+- [ ] ❓ _Memory._ Bound the size of lint warning messages. The lexer does not
+      limit identifier length, and the linter charges fuel per identifier rather
+      than per byte of warning text. In `shadowed-variable`, the linter also
+      allocates the full type string before it charges fuel for the string.
+      Large identifiers or deep types can therefore allocate gigabytes of
+      warning text and abort the process. Either cap identifier length in the
+      lexer or charge fuel per byte before formatting warning text.
+- [ ] ❓ _Performance._ Index enum variants and struct fields by name in
+      `TypeDef`. Variant and field lookups in `src/check/expr.rs` and
+      `src/check/pat.rs` scan the member list linearly without charging compile
+      fuel. A 16 MiB script with 400,000 variants runs for 91 seconds before it
+      exhausts compile fuel.
+- [ ] ❓ _Embedding._ Charge lint-only checker work to the lint budget. During
+      linting, the type checker charges `argument-order` and import checks to
+      the compile budget. A script near the compile limit can therefore pass
+      `sand check` and fail `sand lint` with `program too complex to compile`.
+- [ ] ❓ _Embedding._ Allow hosts to configure the lint fuel limit.
+      `lint_module` derives the lint budget from the source size and ignores
+      `max_compile_fuel`. Add `Limits::max_lint_fuel` or derive the lint budget
+      from `Limits::max_compile_fuel`.
 
 ## Tier 3: ordinary scripts
 
@@ -319,9 +320,9 @@ Visible defects that rarely block users.
 - [ ] ⚪ Unify the terminology for Rust types attached via `NativeModule::bind`
       across `BoundKind`, `BoundType`, `Type::bound`, `declare_bound_types`, and
       `Binding<T>`.
-- [ ] ❓ Return a typed stop reason from `format_source_with`. It returns text,
-      so a host that sets a deadline or an interrupt must parse the message to
-      find why the formatter stopped.
+- [ ] ❓ Return a typed error from `format_source_with`. This function returns a
+      `String` error today. Callers must parse the error message to distinguish
+      syntax errors, fuel exhaustion, timeouts, and interrupts.
 
 ### Policy
 
