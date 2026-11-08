@@ -1009,8 +1009,8 @@ impl Engine {
         self.root.get_or_init(|| {
             let root = self.config.module_root.clone().or_else(|| self.config.cwd.clone()).unwrap_or_else(|| self.default_root());
             let fs = &self.config.fs;
-            let normal = fs.resolve(&fs.absolute(&root));
-            (root, normal)
+            let normalized_root = fs.resolve(&fs.absolute(&root));
+            (root, normalized_root)
         })
     }
 
@@ -1037,11 +1037,11 @@ impl Engine {
     /// Resolves and checks imports under this engine's file system and policy,
     /// as [`Engine::run_source`] does.
     pub async fn compile_source(&self, name: &str, source: &str) -> Result<CompiledProgram, Error> {
-        let compiling = async {
+        crate::unwind::guard(async {
             let (compiled, _) = self.compile_main_source(name, source).await?;
             Ok(compiled.into_program())
-        };
-        crate::unwind::guard(compiling).await
+        })
+        .await
     }
 
     /// Compiles the script at `path` and its imports into a [`CompiledProgram`].
@@ -1049,11 +1049,11 @@ impl Engine {
     /// Resolves and checks imports under this engine's file system and policy,
     /// as [`Engine::run_file`] does.
     pub async fn compile_file(&self, path: impl AsRef<Path>) -> Result<CompiledProgram, Error> {
-        let compiling = async {
+        crate::unwind::guard(async {
             let (compiled, _) = self.compile_main_file(path.as_ref()).await?;
             Ok(compiled.into_program())
-        };
-        crate::unwind::guard(compiling).await
+        })
+        .await
     }
 
     /// Executes `program` on this engine.
@@ -1080,8 +1080,8 @@ impl Engine {
     /// Compiles `source` as the main module. Returns the compiled program and
     /// the working directory for its run.
     async fn compile_main_source(&self, name: &str, source: &str) -> Result<(Compiled, PathBuf), Error> {
-        let (root, normal) = self.source_root().clone();
-        Ok((self.compile(name, source, &normal, None).await?, self.run_cwd(root)))
+        let (root, normalized_root) = self.source_root().clone();
+        Ok((self.compile(name, source, &normalized_root, None).await?, self.run_cwd(root)))
     }
 
     /// Compiles the file at `path` as the main module. Returns the compiled

@@ -105,10 +105,10 @@ impl Session {
     /// Creates a session with `config`.
     pub fn new(config: Config) -> Session {
         let engine = Engine::new(config);
-        let (root, normal_root) = engine.source_root().clone();
+        let (root, normalized_root) = engine.source_root().clone();
         let cwd = engine.run_cwd(root);
         let wall_time = engine.config().limits.max_wall_time;
-        Session { engine, root: normal_root, cwd, state: None, inputs: 0, exit_code: None, was_reset: false, wall_time }
+        Session { engine, root: normalized_root, cwd, state: None, inputs: 0, exit_code: None, was_reset: false, wall_time }
     }
 
     /// Checks, compiles and runs one input. Returns the debug form of its

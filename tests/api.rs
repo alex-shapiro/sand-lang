@@ -915,7 +915,7 @@ fn host_modules_cannot_use_each_others_types_in_a_cycle() {
 }
 
 #[test]
-fn engines_check_host_modules_when_created() {
+fn host_modules_new_type_checks_module_source() {
     let mut broken = NativeModule::new("broken");
     broken.source("pub fn bad() -> int { \"not an int\" }\n");
     let errors = host_module_errors([broken]);
