@@ -496,8 +496,23 @@ impl Config {
     }
 }
 
-/// A thread-safe handle for stopping active calls on engines and sessions
-/// configured with [`Config::interrupt`].
+/// A thread-safe handle for stopping an engine or session.
+/// Configured with [`Config::interrupt`].
+///
+/// If configured, the engine checks for an interrupt flag at regular checkpoints:
+///
+/// - During compilation, at fixed intervals
+/// - During execution, at meter checkpoints
+/// - During waits for I/O, timers, and permission prompts
+///
+/// If an interrupt is received at a checkpoint, the engine or session cancels
+/// all ongoing compilation and VM tasks without running `defer` blocks.
+/// The engine or session can be called again safely in the future, and a
+/// session's global state remains safe.
+///
+/// An interrupted engine returns [`Error::Interrupted`].
+/// An interrupted REPL session cancels all ongoing tasks, but it
+/// continues to wait for host input.
 #[derive(Clone, Default)]
 pub struct InterruptHandle {
     targets: Arc<Mutex<InterruptTargets>>,
@@ -544,21 +559,12 @@ impl CallInterrupt {
 }
 
 impl InterruptHandle {
-    /// Creates an interrupt handle to pass to [`Config::interrupt`].
+    /// Creates an interrupt handle.
     pub fn new() -> InterruptHandle {
         InterruptHandle::default()
     }
 
-    /// Stops active calls on every engine and session configured with this
-    /// handle.
-    ///
-    /// Active engine and session calls return [`Error::Interrupted`]. As an
-    /// exception, [`Session::run_tasks_until`] cancels the background tasks,
-    /// passes [`Error::Interrupted`] to `on_error`, and continues waiting for
-    /// `until`. An engine or session ignores calls to `interrupt()` that occur
-    /// before a call starts.
-    ///
-    /// [`Session::run_tasks_until`]: crate::session::Session::run_tasks_until
+    /// Stops and returns from the engine or session.
     pub fn interrupt(&self) {
         let calls: Vec<_> =
             self.targets.lock().calls.iter().filter_map(|target| Some((target.flag.upgrade()?, target.io.upgrade()?))).collect();
