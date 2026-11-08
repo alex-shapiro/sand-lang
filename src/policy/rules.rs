@@ -316,12 +316,9 @@ impl RuleKind {
         }
     }
 
-    pub(crate) fn connections(&self) -> &'static [Connection] {
-        match self {
-            RuleKind::Net(NetPattern { kind: HostKind::Ip(..), .. }, _) => &[Connection::Named, Connection::Resolved],
-            RuleKind::Net(..) => &[Connection::Named],
-            _ => &[],
-        }
+    /// Returns `true` if the rule controls raw TCP connections.
+    pub(crate) fn connects(&self) -> bool {
+        matches!(self, RuleKind::Net(..))
     }
 }
 
@@ -331,12 +328,6 @@ pub(crate) struct HttpMatch<'a> {
     pub transports: Transports,
     pub host: &'a NetPattern,
     pub path: &'a [Seg],
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Connection {
-    Named,
-    Resolved,
 }
 
 #[derive(Clone, Debug)]
@@ -514,10 +505,11 @@ impl RulePolicy {
     /// Denies connections to `localhost` and to private network addresses.
     ///
     /// The method adds a `deny net` rule for `localhost` and for each address range that
-    /// [`super::net::is_private_address`] reports. A more specific rule overrides these rules,
-    /// such as `allow net localhost:8080` or `allow net 10.0.0.5`. A rule of equal specificity,
-    /// such as `allow net localhost`, does not. An exact host name rule, such as
-    /// `allow net api.example.com`, also allows each private address that the name resolves to.
+    /// [`super::net::is_private_address`] reports. A more specific address rule overrides these
+    /// rules, such as `allow net localhost:8080` or `allow net 10.0.0.5`. A rule of equal
+    /// specificity, such as `allow net localhost`, does not, and neither does a host name rule,
+    /// such as `allow net api.example.com`. Add these rules to the primary rules: in a
+    /// [`RulePolicy::with_defaults`] tier, they do not apply to a request that a primary rule allows.
     ///
     /// In the WebAssembly build, the browser resolves host names, so these rules block only IP
     /// literals and `localhost` names.
@@ -670,12 +662,11 @@ impl RulePolicy {
     /// `Net` or `Http` `request` is permitted. Returns [`Decision::Allow`]
     /// or [`Decision::Deny`].
     ///
-    /// The rule that matched `request` is compared by host specificity against
-    /// IP and CIDR rules that match `addr`: an exact hostname ranks equal to
-    /// a single IP address, `*.localhost` ranks above CIDR ranges, and other
-    /// wildcard domain patterns such as `*.domain` and `*` rank below all IP
-    /// and CIDR rules. If the winning IP rule is a `deny` or `prompt` rule,
-    /// this method returns [`Decision::Deny`].
+    /// Address rules decide: rules for IP addresses and CIDR prefixes that match `addr`, and
+    /// rules for `localhost` names if `request` names `localhost`. The policy ranks them as it
+    /// ranks rules for an IP literal, with the rule that allowed `request` in place of `*`. So an
+    /// address rule overrides the allowing rule unless the address rule is in a lower
+    /// [`RulePolicy::with_defaults`] tier. A `prompt` address rule denies the connection.
     pub fn check_resolved(&self, request: &Capability, addr: std::net::SocketAddr) -> Decision {
         if self.resolved_verdict(request, addr).is_ok() { Decision::Allow } else { Decision::Deny }
     }
@@ -687,35 +678,35 @@ impl RulePolicy {
             return if literal == ip { Ok(()) } else { Err(None) };
         }
         let index = self.non_file_index();
-        if let Capability::Http { host, port, path, .. } = request {
-            let dest = Dest::new(host, *port);
+        let dest = Dest::new(host, addr.port());
+        let address_verdict = |allowing: Option<(Decision, usize)>, best: &mut Best| {
+            let allowing = allowing.filter(|&(d, _)| d != Decision::Deny);
+            if let Some((d, rule)) = allowing {
+                best.offer([0; 4], d, rule as u32);
+            }
+            match best.verdict() {
+                Some((Decision::Allow, _)) | None => Ok(()),
+                Some((_, rule)) if allowing.is_some_and(|(_, a)| a == rule) => Ok(()),
+                Some((_, rule)) => Err(Some(rule)),
+            }
+        };
+        if let Capability::Http { method, path, .. } = request {
             let (names, alt) = url_segments(path);
             return std::iter::once(names).chain(alt).try_for_each(|names| {
-                let decider = self.check_http_segments(request, &names, &[], &|f| index.http.find(&dest, f));
-                let address = self.check_http_segments(request, &names, &[], &|f| index.http.find_ip(ip, addr.port(), f));
-                self.resolve(decider, address)
+                let allowing = self.check_http_segments(request, &names, &[], &|f| index.http.find(&dest, f));
+                let mut best = Best::new(self, &[]);
+                self.http_verdict(&|f| index.http.find_address(&dest, ip, f), method, uses_tls(request), &names, &mut best);
+                address_verdict(allowing, &mut best)
             });
         }
         let tls = uses_tls(request);
         let mut best = Best::new(self, &[]);
-        index.resolved.find_ip(ip, addr.port(), |is_alt, e| {
+        index.named.find_address(&dest, ip, |is_alt, e| {
             if matches_address_form(e.decision, is_alt) && e.transports.controls(tls) {
                 best.offer(e.rank.spec(0), e.decision, e.rule);
             }
         });
-        self.resolve(self.verdict(request, PathSpace::Host, &[]), best.verdict())
-    }
-
-    fn resolve(&self, decider: Option<(Decision, usize)>, address: Option<(Decision, usize)>) -> Result<(), Option<usize>> {
-        let Some((decision, rule)) = address else { return Ok(()) };
-        if let Some((d, decider)) = decider.filter(|&(d, _)| d != Decision::Deny) {
-            // Compare by host specificity across all tiers so a wildcard domain rule cannot bypass a default IP deny rule.
-            let key = |i: usize, d: Decision| resolution_key(&self.rules[i].kind, d);
-            if key(decider, d) > key(rule, decision) {
-                return Ok(());
-            }
-        }
-        if decision == Decision::Allow { Ok(()) } else { Err(Some(rule)) }
+        address_verdict(self.verdict(request, PathSpace::Host, &[]), &mut best)
     }
 
     pub(crate) fn denies_under_normalized_in(&self, path: &Path, space: PathSpace) -> bool {
@@ -930,15 +921,6 @@ fn refs<S: AsRef<str>>(names: &[S]) -> Vec<&str> {
     names.iter().map(AsRef::as_ref).collect()
 }
 
-pub(crate) fn resolution_key(kind: &RuleKind, decision: Decision) -> Precedence {
-    let host = match kind.http_match() {
-        Some(HttpMatch { host: NetPattern { kind: HostKind::Suffix(s), .. }, .. }) if !super::net::is_localhost(s) => 0,
-        Some(http) => http.host.host_rank(),
-        None => 0,
-    };
-    precedence([host, 0, 0, 0], decision, usize::MAX)
-}
-
 pub(crate) fn matches_address_form(decision: Decision, is_alternate_ip: bool) -> bool {
     !is_alternate_ip || decision != Decision::Allow
 }
@@ -1136,7 +1118,6 @@ impl Resolver {
 #[derive(Debug, Default)]
 struct Index {
     named: HostIndex<NetEntry>,
-    resolved: HostIndex<NetEntry>,
     http: HostIndex<u32>,
     groups: Vec<HttpGroup>,
     listen: Vec<(ListenPattern, Decision, u32)>,
@@ -1178,12 +1159,8 @@ impl Index {
             let (rule_id, decision) = (i as u32, rule.decision);
             if let Some(http) = rule.kind.http_match() {
                 let rank = Rank::http(&http);
-                for &connection in rule.kind.connections() {
-                    let entry = NetEntry { rule: rule_id, decision, transports: http.transports, rank };
-                    match connection {
-                        Connection::Named => index.named.insert(http.host, entry),
-                        Connection::Resolved => index.resolved.insert(http.host, entry),
-                    }
+                if rule.kind.connects() {
+                    index.named.insert(http.host, NetEntry { rule: rule_id, decision, transports: http.transports, rank });
                 }
                 let group = *groups.entry(http.host).or_insert_with(|| {
                     index.http.insert(http.host, index.groups.len() as u32);

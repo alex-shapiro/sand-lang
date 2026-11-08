@@ -125,6 +125,16 @@ impl NetPattern {
         self.host_rank() * 2 + self.port.is_some() as u32
     }
 
+    /// Returns `true` if the pattern names addresses: an IP address, a CIDR prefix, or a
+    /// `localhost` name, which RFC 6761 maps to loopback.
+    pub(crate) fn is_address(&self) -> bool {
+        match &self.kind {
+            HostKind::Ip(..) => true,
+            HostKind::Host(name) | HostKind::Suffix(name) => is_localhost(name),
+            HostKind::Any => false,
+        }
+    }
+
     pub(crate) fn host_rank(&self) -> u32 {
         match &self.kind {
             HostKind::Host(_) => 3000,
@@ -394,6 +404,28 @@ impl<T> HostIndex<T> {
     /// `is_alternate` is `true` if the pattern matches an alternate IP
     /// representation or matches a `*.localhost` subdomain via a `localhost` rule.
     pub(crate) fn find(&self, dest: &Dest, mut f: impl FnMut(bool, &T)) {
+        for (port, t) in &self.any {
+            if port.is_none_or(|p| p == dest.port) {
+                f(false, t);
+            }
+        }
+        match dest.ip {
+            Some(ip) => self.find_ip(ip, dest.port, f),
+            None => self.find_names(dest, f),
+        }
+    }
+
+    /// Calls `f(is_alternate, value)` for each address pattern that matches `ip`, an address
+    /// that `dest` resolved to. Address patterns are IP addresses and CIDR prefixes, and also
+    /// `localhost` names if `dest` is a `localhost` name, because RFC 6761 maps them to loopback.
+    pub(crate) fn find_address(&self, dest: &Dest, ip: IpAddr, mut f: impl FnMut(bool, &T)) {
+        self.find_ip(ip, dest.port, &mut f);
+        if is_localhost(dest.name) {
+            self.find_names(dest, f);
+        }
+    }
+
+    fn find_names(&self, dest: &Dest, mut f: impl FnMut(bool, &T)) {
         let mut each = |list: Option<&Ported<T>>, is_alternate: bool| {
             for (port, t) in list.into_iter().flatten() {
                 if port.is_none_or(|p| p == dest.port) {
@@ -401,11 +433,6 @@ impl<T> HostIndex<T> {
                 }
             }
         };
-        each(Some(&self.any), false);
-        if let Some(ip) = dest.ip {
-            self.find_ip(ip, dest.port, f);
-            return;
-        }
         let lower;
         let name = if dest.name.bytes().any(|b| b.is_ascii_uppercase()) {
             lower = dest.name.to_ascii_lowercase();
@@ -937,7 +964,8 @@ mod tests {
         }
 
         /// Under wildcard allow rules, `deny_private_net` denies exactly the private addresses: as IP
-        /// literals, and as addresses that a host name resolves to.
+        /// literals, and as addresses that a host name resolves to. In a `with_defaults` tier, it
+        /// denies none of them.
         #[test]
         fn deny_private_net_denies_exactly_private_addresses(
             v4 in any::<u32>(),
@@ -947,10 +975,13 @@ mod tests {
         ) {
             use crate::policy::rules::{Methods, RulePolicy, Transports};
             use crate::policy::{Capability, Decision};
-            let policy = RulePolicy::new()
-                .allow_net(Transports::Both, "*".parse().unwrap())
-                .allow_http(Transports::Both, Methods::all(), "*".parse().unwrap())
-                .deny_private_net();
+            let wildcards = || {
+                RulePolicy::new()
+                    .allow_net(Transports::Both, "*".parse().unwrap())
+                    .allow_http(Transports::Both, Methods::all(), "*".parse().unwrap())
+            };
+            let primary = wildcards().deny_private_net();
+            let default = wildcards().with_defaults(RulePolicy::new().deny_private_net());
             let net = |host: String| Capability::Net { host, port: 443, tls: true };
             let http = |host: String| Capability::Http { method: "GET".into(), scheme: "https".into(), host, port: 443, path: "/".into() };
             let (prefix, _, shift) = EMBEDDINGS[embed];
@@ -961,12 +992,14 @@ mod tests {
                 IpAddr::V6(Ipv4Addr::from(v4).to_ipv6_mapped()),
                 edge,
             ] {
-                let expected = if is_private_address(ip) { Decision::Deny } else { Decision::Allow };
+                let private = if is_private_address(ip) { Decision::Deny } else { Decision::Allow };
                 let addr = std::net::SocketAddr::new(ip, 443);
-                prop_assert_eq!(policy.check(&net(ip.to_string())), expected, "net {}", ip);
-                prop_assert_eq!(policy.check(&http(ip.to_string())), expected, "http {}", ip);
-                prop_assert_eq!(policy.check_resolved(&net("db.example.com".into()), addr), expected, "resolved net {}", ip);
-                prop_assert_eq!(policy.check_resolved(&http("db.example.com".into()), addr), expected, "resolved http {}", ip);
+                for (tier, policy, expected) in [("primary", &primary, private), ("default", &default, Decision::Allow)] {
+                    prop_assert_eq!(policy.check(&net(ip.to_string())), expected, "{} net {}", tier, ip);
+                    prop_assert_eq!(policy.check(&http(ip.to_string())), expected, "{} http {}", tier, ip);
+                    prop_assert_eq!(policy.check_resolved(&net("db.example.com".into()), addr), expected, "{} resolved net {}", tier, ip);
+                    prop_assert_eq!(policy.check_resolved(&http("db.example.com".into()), addr), expected, "{} resolved http {}", tier, ip);
+                }
             }
         }
     }

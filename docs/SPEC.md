@@ -1577,10 +1577,9 @@ overrides `prompt`. If a request does not match any rule, the policy returns
 `RulePolicy::with_defaults(defaults)` appends fallback rules that apply only if
 the primary rules do not match a request. A host can use `with_defaults` to
 combine user rules with host defaults (§17.5). Existing default rules on
-`defaults` remain in the fallback tier. During stage-2 resolved-address checks
-(§14.6), the policy compares the stage-1 allowing rule against IP address rules
-by host specificity alone, so a user domain wildcard cannot bypass a default IP
-deny rule.
+`defaults` remain in the fallback tier. A default rule never overrides a primary
+rule, also in resolved-address checks (§14.6). To make a host rule compete with
+user rules by specificity, add it to the primary rules with `RulePolicy::extend`.
 
 Specificity depends on the capability category:
 
@@ -1670,30 +1669,31 @@ engine checks only stage 1. Rules for IP addresses and CIDR prefixes then apply
 only to IP literals, and `deny_private_net` does not block a host name that
 resolves to a private address.
 
-In stage 2, `RulePolicy::check_resolved` compares the host specificity of the
-rule that allowed stage 1 against all IP address rules that match the resolved
-address and transport, including `net` rules and `http` rules that match the
-request method and path. An exact hostname has the same host specificity as a
-single IP address, and `*.localhost` ranks above all CIDR prefixes. Wildcard
-domain patterns such as `*.example.com` and `*` rank below all IP address rules.
-If the stage-1 rule has higher specificity or if the IP address rules do not
-match, the engine allows the address. Otherwise, the policy applies the most
-specific matching IP address rule, and a `prompt` IP address rule denies the
-connection because stage 2 cannot prompt. A `CustomPolicy` evaluates `NetAddr`
-directly and treats `Prompt` as `Allow`.
+In stage 2, only address rules decide. Address rules are the rules for IP
+addresses and CIDR prefixes that match the resolved address and transport, and
+the rules for `localhost` names if the request names `localhost`. They include
+`net` rules and `http` rules that match the request method and path.
+`RulePolicy::check_resolved` ranks address rules as it ranks rules for an IP
+literal, with the rule that allowed stage 1 in place of `*`. Thus a matching
+address rule decides the connection, unless it is in a lower `with_defaults`
+tier than the stage-1 rule. If no address rule decides, the engine allows the
+address. A `prompt` address rule denies the connection, because stage 2 cannot
+prompt. A `CustomPolicy` evaluates `NetAddr` directly and treats `Prompt` as
+`Allow`.
 
 This two-stage check prevents DNS rebinding against denied IP ranges. For
 example, under `allow net plaintext *` and `deny net 10.0.0.0/8`, a request to
-`http://evil.example/` fails if DNS returns `10.0.0.5`. An explicit hostname
-rule such as `allow net db.internal` outranks the `/8` prefix. It permits
-connecting to `10.0.0.5` through `db.internal`.
+`http://evil.example/` fails if DNS returns `10.0.0.5`. A hostname rule does not
+override an address rule. To connect to `10.0.0.5` through `db.internal`, allow
+both, as in `allow net db.internal 10.0.0.5`.
 `sandlang::policy::net::is_private_address` reports whether an IP address belongs to
 a private, loopback, link-local, or other non-public range.
 `RulePolicy::deny_private_net` adds a `deny net` rule for `localhost` and for
-each of these ranges. A more specific rule overrides them, such as
-`allow net localhost:8080` or `allow net 10.0.0.5`. An exact hostname rule
-outranks the ranges, so `allow net api.example.com` permits each private
-address that `api.example.com` resolves to.
+each of these ranges. A more specific address rule overrides them, such as
+`allow net localhost:8080` or `allow net 10.0.0.5`. A hostname rule such as
+`allow net api.example.com` does not, so DNS cannot point an allowed name at a
+private address. In a `with_defaults` tier, the rules do not apply to a request
+that a primary rule allows.
 
 ### 14.7 Policy files
 
@@ -1769,8 +1769,8 @@ If an `http` rule omits the method, the rule matches all HTTP methods. URL
 patterns have the form `host[:port][/path]`, where `host` is a hostname, domain
 wildcard, or single IP address, and `path` is a percent-decoded path pattern. A
 URL pattern without a port matches all ports, and URL patterns must not include
-a `scheme://` prefix. An `http` rule for an IP address also applies to stage-2
-resolved-address checks for HTTP requests (§14.6).
+a `scheme://` prefix. An `http` rule for an IP address or a `localhost` name is
+an address rule in resolved-address checks for HTTP requests (§14.6).
 
 A `let NAME = VALUE...` statement defines a reusable set of values anywhere in
 the file. Referencing `{NAME}` inside a rule expands to each value in the set,

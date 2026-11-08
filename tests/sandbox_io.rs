@@ -47,7 +47,7 @@ fn net_patterns_match_ip_literals_and_ranges() {
     assert_eq!(p.check(&net("EXAMPLE.com", 443)), Decision::Allow);
     assert_eq!(p.check(&net("10.example", 80)), Decision::Prompt);
     assert_eq!(p.check(&net_addr("example.com", "127.0.0.1:443")), Decision::Allow);
-    assert_eq!(p.check(&net_addr("example.com", "10.9.0.1:443")), Decision::Allow);
+    assert_eq!(p.check(&net_addr("example.com", "10.9.0.1:443")), Decision::Deny);
     assert_eq!(p.check(&net_addr("other.example", "10.9.0.1:443")), Decision::Deny);
     assert_eq!(p.check(&net_addr("other.example", "[::ffff:10.9.0.1]:443")), Decision::Deny);
     assert_eq!(p.check(&net_addr("other.example", "10.1.0.1:443")), Decision::Allow);
@@ -270,10 +270,10 @@ fn http_address_rules_apply_to_resolved_addresses() {
     assert_eq!(p.check_resolved(&get("POST", "app.example", "/public"), at), Decision::Deny);
     assert_eq!(p.check_resolved(&plain("app.example", 80), at), Decision::Allow);
     let p = parse_rules("allow http plaintext db.internal\ndeny net 10.0.0.0/8");
-    assert_eq!(p.check_resolved(&get("GET", "db.internal", "/"), at), Decision::Allow);
-    assert_eq!(p.check_resolved(&get("GET", "other.internal", "/"), at), Decision::Deny);
-    let p = parse_rules("allow http plaintext db.internal\ndeny http 10.0.0.5");
     assert_eq!(p.check_resolved(&get("GET", "db.internal", "/"), at), Decision::Deny);
+    let p = parse_rules("allow http plaintext db.internal 10.0.0.5\ndeny net 10.0.0.0/8");
+    assert_eq!(p.check_resolved(&get("GET", "db.internal", "/"), at), Decision::Allow);
+    assert_eq!(p.check_resolved(&get("GET", "other.internal", "/"), at), Decision::Allow, "an address rule allows every name");
     let p = parse_rules("allow http plaintext *\ndeny http 127.0.0.1");
     assert_eq!(p.check_resolved(&get("GET", "evil.example", "/"), "[::ffff:127.0.0.1]:80".parse().unwrap()), Decision::Deny);
     assert_eq!(p.check_resolved(&get("GET", "evil.example", "/"), "0.0.0.0:80".parse().unwrap()), Decision::Deny);
@@ -281,7 +281,7 @@ fn http_address_rules_apply_to_resolved_addresses() {
 
 #[test]
 fn encoded_path_separators_are_checked_at_resolved_addresses() {
-    let p = parse_rules("allow http tls plaintext *\nallow http plaintext api.example.com/*.txt\ndeny net 10.0.0.0/8");
+    let p = parse_rules("allow http tls plaintext *\nallow http plaintext 10.0.0.5/*.txt\ndeny net 10.0.0.0/8");
     let get = |path: &str| Capability::Http {
         method: "GET".into(),
         scheme: "http".into(),
@@ -296,12 +296,14 @@ fn encoded_path_separators_are_checked_at_resolved_addresses() {
 }
 
 #[test]
-fn explicit_host_rules_outrank_cidr_prefixes_at_resolved_addresses() {
+fn only_address_rules_decide_resolved_addresses() {
     let p = parse_rules("allow net db.internal *.corp.example\ndeny net 10.0.0.0/8 10.0.0.6");
+    assert_eq!(p.check(&net_addr("db.internal", "10.0.0.5:5432")), Decision::Deny);
+    assert_eq!(p.check(&net_addr("db.corp.example", "8.8.8.8:5432")), Decision::Allow);
+    let p = parse_rules("allow net db.internal 10.0.0.5\ndeny net 10.0.0.0/8 10.0.0.6");
     assert_eq!(p.check(&net_addr("db.internal", "10.0.0.5:5432")), Decision::Allow);
     assert_eq!(p.check(&net_addr("db.internal", "10.0.0.6:5432")), Decision::Deny);
-    assert_eq!(p.check(&net_addr("db.corp.example", "10.0.0.5:5432")), Decision::Deny);
-    assert_eq!(p.check(&net_addr("db.corp.example", "8.8.8.8:5432")), Decision::Allow);
+    assert_eq!(p.check(&net_addr("db.corp.example", "10.0.0.5:5432")), Decision::Allow, "an address rule allows every name");
     let metadata: SocketAddr = "169.254.169.254:443".parse().unwrap();
     for (allow, deny) in
         [("example.com", "169.254.169.254"), ("example.com:443", "169.254.169.254"), ("example.com", "169.254.169.254:443")]
@@ -314,9 +316,9 @@ fn explicit_host_rules_outrank_cidr_prefixes_at_resolved_addresses() {
     assert_eq!(p.check(&net_addr("example.com", "127.0.0.1:3000")), Decision::Deny);
     let p = parse_rules("prompt net db.internal\nallow net *\nprompt net 93.184.0.0/16");
     assert_eq!(p.check(&net("db.internal", 5432)), Decision::Prompt);
-    assert_eq!(p.check(&net_addr("db.internal", "93.184.0.5:5432")), Decision::Allow);
-    assert_eq!(p.check(&net_addr("example.com", "93.184.215.14:443")), Decision::Deny);
-    let p = parse_rules("allow http GET db.internal/api\ndeny net 10.0.0.0/8");
+    assert_eq!(p.check(&net_addr("db.internal", "93.184.0.5:5432")), Decision::Deny);
+    assert_eq!(p.check(&net_addr("db.internal", "8.8.8.8:5432")), Decision::Allow);
+    let p = parse_rules("allow http GET db.internal/api 10.0.0.5/api\ndeny net 10.0.0.0/8");
     let get = |path: &str| Capability::Http {
         method: "GET".into(),
         scheme: "https".into(),
@@ -377,14 +379,20 @@ fn default_rules_apply_only_to_unmatched_requests() {
     assert_eq!(p.check(&all), Decision::Allow);
     let p = parse_rules("prompt env SECRET").with_defaults(RulePolicy::allow_all());
     assert_eq!(p.check(&all), Decision::Prompt);
+    // A default address rule applies at a resolved address only if the primary rules do not
+    // decide the request, as at an IP literal.
     let metadata: SocketAddr = "169.254.169.254:80".parse().unwrap();
-    let floor = || parse_rules("deny net 169.254.0.0/16");
-    let p = parse_rules("allow net tls plaintext *.example.com").with_defaults(floor());
-    assert_eq!(p.check_resolved(&plain("evil.example.com", 80), metadata), Decision::Deny);
-    let p = parse_rules("allow net tls plaintext *").with_defaults(floor());
-    assert_eq!(p.check_resolved(&plain("evil.example", 80), metadata), Decision::Deny);
-    let p = parse_rules("allow net tls plaintext meta.internal").with_defaults(floor());
-    assert_eq!(p.check_resolved(&plain("meta.internal", 80), metadata), Decision::Allow);
+    let deny = || parse_rules("deny net 169.254.0.0/16");
+    let allow = || parse_rules("allow net tls plaintext *");
+    for (p, expected) in [
+        (allow().with_defaults(deny()), Decision::Allow),
+        (deny().with_defaults(allow()), Decision::Deny),
+        (RulePolicy::new().with_defaults(allow().extend(deny())), Decision::Deny),
+        (parse_rules("deny net 169.254.0.0/16\nallow net tls plaintext *.example.com").with_defaults(allow()), Decision::Deny),
+    ] {
+        assert_eq!(p.check(&plain("169.254.169.254", 80)), expected, "literal under {p}");
+        assert_eq!(p.check_resolved(&plain("evil.example.com", 80), metadata), expected, "resolved under {p}");
+    }
     let host = parse_rules("prompt write /").with_defaults(RulePolicy::allow_all());
     let write = Capability::FsWrite("/tmp/x".into());
     assert_eq!(host.check_normalized(&write), Decision::Prompt);
@@ -542,7 +550,7 @@ fn only_more_specific_rules_override_deny_private_net() {
     assert_eq!(with("allow net 10.0.0.0/8").check(&net("10.0.0.5", 443)), Decision::Deny, "equal specificity");
     let exact = with("allow net api.example.com");
     for addr in ["127.0.0.1:443", "[::1]:443", "169.254.169.254:443"] {
-        assert_eq!(exact.check_resolved(&net("api.example.com", 443), addr.parse().unwrap()), Decision::Allow, "{addr}");
+        assert_eq!(exact.check_resolved(&net("api.example.com", 443), addr.parse().unwrap()), Decision::Deny, "{addr}");
     }
 }
 
@@ -725,7 +733,7 @@ fn pooled_connections_are_reused_only_at_addresses_allowed_for_the_request() {
     let connected = Arc::new(Mutex::new(Vec::new()));
     let network = Arc::new(KeepAliveNetwork { addrs: vec![addr], connected: connected.clone() });
     let policy = RulePolicy::standard()
-        .allow_http(Transports::Plaintext, Methods::only(HttpMethod::GET, []), "api.example.com/a".parse().unwrap())
+        .allow_http(Transports::Plaintext, Methods::only(HttpMethod::GET, []), "10.0.0.5/a".parse().unwrap())
         .allow_http(Transports::Plaintext, Methods::all(), "*".parse().unwrap())
         .deny_net(Transports::Plaintext, "10.0.0.0/8".parse().unwrap());
     let src = r#"

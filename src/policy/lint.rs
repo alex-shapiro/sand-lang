@@ -4,9 +4,7 @@ use super::file::PolicyError;
 use super::file::parse;
 use super::net::{HostKind, NetPattern, ProbeTargets, domains_above, enclosing_ranges, is_localhost};
 use super::path::{self, Pattern, Seg, name_counts};
-use super::rules::{
-    Connection, IMPORT, Methods, Precedence, READ, Rank, Rule, RuleKind, Transports, WRITE, fold_segments, precedence, resolution_key,
-};
+use super::rules::{IMPORT, Methods, READ, Rank, Rule, RuleKind, Transports, WRITE, fold_segments, precedence};
 use super::{Capability, Decision, PathSpace};
 use crate::lint::LintWarning;
 use crate::vm::value::{FxBuild, FxHashMap};
@@ -82,9 +80,7 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
                 let rule = &rules[i];
                 let identical = same[&(rule.decision, &rule.kind)].iter().copied().find(|&c| is_kept(c));
                 let (decision, by, repeat) = match identical {
-                    Some(c) if paths.get(i).is_none_or(|r| paths.preserves_address_resolution(r, &[c], &|j| !is_kept(j))) => {
-                        (true, vec![c], true)
-                    }
+                    Some(c) if paths.get(i).is_none_or(|r| paths.preserves_address_resolution(r, &[c])) => (true, vec![c], true),
                     _ => {
                         let (decision, by) = paths.subsuming_rules(paths.get(i)?, &|j| !is_kept(j))?;
                         (decision, by, false)
@@ -123,9 +119,7 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
                 [url.host.clone()].into_iter().chain(url.host.alternate_ip_ranges()).chain(url.host.localhost_subdomain_pattern(false));
             let denied = denied.collect::<Vec<_>>();
             let mut reach = paths.opposing_rules(r, 0).flat_map(|k| match k.scope {
-                Scope::Http { host, connections, .. } if connections.contains(&Connection::Named) => {
-                    denied.iter().filter_map(|d| host.intersection(d)).collect()
-                }
+                Scope::Http { host, connects: true, .. } => denied.iter().filter_map(|d| host.intersection(d)).collect(),
                 _ => Vec::new(),
             });
             reach.find_map(|reach| bypass(reach, &url.host, *transports))
@@ -148,48 +142,25 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
 
 enum Scope<'a> {
     Files(u8),
-    Http { host: &'a NetPattern, transports: Transports, methods: &'a Methods, connections: &'static [Connection] },
+    Http { host: &'a NetPattern, transports: Transports, methods: &'a Methods, connects: bool },
 }
 
 #[derive(Clone, Copy)]
 enum Op<'a> {
     File(u8),
     Method(Option<&'a str>),
-    Connect(Connection),
+    Connect,
 }
 
 struct PathRule<'a> {
     index: usize,
     decision: Decision,
     scope: Scope<'a>,
-    address_resolution: Option<AddressResolution>,
     segs: Vec<Seg>,
     folded: Option<Vec<Seg>>,
     prefixes: Vec<u64>,
     rank: Rank,
     counts: (usize, Option<usize>),
-}
-
-/// Role and precedence of a rule during post-DNS address checks; see
-/// [`super::RulePolicy::check_resolved`].
-#[derive(Clone, Copy)]
-struct AddressResolution {
-    role: Role,
-    key: Precedence,
-    port: Option<u16>,
-    transports: Transports,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Role {
-    Name,
-    Address,
-}
-
-impl AddressResolution {
-    fn lowest(host: u32) -> Precedence {
-        precedence([host, 0, 0, 0], Decision::Prompt, usize::MAX)
-    }
 }
 
 impl<'a> PathRule<'a> {
@@ -202,22 +173,9 @@ impl<'a> PathRule<'a> {
             }
             kind => {
                 let http = kind.http_match()?;
-                let scope =
-                    Scope::Http { host: http.host, transports: http.transports, methods: http.methods, connections: kind.connections() };
+                let scope = Scope::Http { host: http.host, transports: http.transports, methods: http.methods, connects: kind.connects() };
                 (scope, http.path.to_vec(), Rank::http(&http))
             }
-        };
-        let address_resolution = match scope {
-            Scope::Http { host, transports, .. } => {
-                let role = match (&host.kind, rule.decision) {
-                    (HostKind::Ip(..), Decision::Deny | Decision::Prompt) => Some(Role::Address),
-                    (HostKind::Ip(..), _) | (_, Decision::Deny) => None,
-                    _ => Some(Role::Name),
-                };
-                let key = resolution_key(&rule.kind, rule.decision);
-                role.map(|role| AddressResolution { role, key, port: host.port, transports })
-            }
-            Scope::Files(_) => None,
         };
         let exact = rule.decision == Decision::Allow;
         let folded = fold_segments(&raw);
@@ -234,7 +192,6 @@ impl<'a> PathRule<'a> {
             index,
             decision: rule.decision,
             scope,
-            address_resolution,
             prefixes,
             rank,
             counts: name_counts(&raw),
@@ -246,12 +203,12 @@ impl<'a> PathRule<'a> {
     fn ops(&self) -> Vec<Op<'a>> {
         match self.scope {
             Scope::Files(mask) => [READ, WRITE, IMPORT].into_iter().filter(|&op| mask & op != 0).map(Op::File).collect(),
-            Scope::Http { methods, connections, .. } => {
+            Scope::Http { methods, connects, .. } => {
                 let methods: Vec<Op> = match methods.listed() {
                     Some(methods) => methods.iter().map(|m| Op::Method(Some(m.as_str()))).collect(),
                     None => vec![Op::Method(None)],
                 };
-                methods.into_iter().chain(connections.iter().map(|&c| Op::Connect(c))).collect()
+                methods.into_iter().chain(connects.then_some(Op::Connect)).collect()
             }
         }
     }
@@ -261,7 +218,7 @@ impl<'a> PathRule<'a> {
             (Scope::Files(mask), Op::File(op)) => mask & op != 0,
             (Scope::Http { methods, .. }, Op::Method(Some(m))) => methods.matches(m),
             (Scope::Http { methods, .. }, Op::Method(None)) => methods.listed().is_none(),
-            (_, Op::Connect(_)) => self.matches_op(op),
+            (_, Op::Connect) => self.matches_op(op),
             _ => false,
         }
     }
@@ -270,13 +227,20 @@ impl<'a> PathRule<'a> {
         match (&self.scope, op) {
             (Scope::Files(mask), Op::File(op)) => mask & op != 0,
             (Scope::Http { methods, .. }, Op::Method(m)) => m.is_none_or(|m| methods.matches(m)),
-            (Scope::Http { connections, .. }, Op::Connect(c)) => connections.contains(&c),
+            (Scope::Http { connects, .. }, Op::Connect) => *connects,
             _ => false,
         }
     }
 
     fn exact(&self) -> bool {
         self.decision == Decision::Allow
+    }
+
+    fn address_kind(&self) -> Option<AddressKind> {
+        match self.scope {
+            Scope::Http { host, .. } => AddressKind::of(host),
+            Scope::Files(_) => None,
+        }
     }
 
     fn rank(&self) -> impl Ord {
@@ -375,12 +339,30 @@ enum Key<'a> {
     Ips,
 }
 
+/// The kind of an address rule; see [`NetPattern::is_address`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AddressKind {
+    Ip,
+    Localhost,
+}
+
+impl AddressKind {
+    fn of(host: &NetPattern) -> Option<AddressKind> {
+        match host.kind {
+            HostKind::Ip(..) => Some(AddressKind::Ip),
+            _ if host.is_address() => Some(AddressKind::Localhost),
+            _ => None,
+        }
+    }
+}
+
 struct PathRules<'a> {
     rules: Vec<PathRule<'a>>,
     at: Vec<usize>,
     exact: FxHashMap<u64, Vec<usize>>,
     within: FxHashMap<u64, Vec<usize>>,
-    by_resolution_role: [Vec<(Precedence, usize)>; 2],
+    /// The decisions of address rules, by [`AddressKind`].
+    address_decisions: [Vec<Decision>; 2],
     hasher: FxBuild,
     #[cfg(test)]
     visits: std::cell::Cell<usize>,
@@ -393,7 +375,10 @@ impl<'a> PathRules<'a> {
             at: vec![usize::MAX; rules.len()],
             exact: Default::default(),
             within: Default::default(),
-            by_resolution_role: [Vec::new(), Vec::new()],
+            address_decisions: [AddressKind::Ip, AddressKind::Localhost].map(|kind| {
+                let rules = rules.iter().filter(|r| r.kind.http_match().is_some_and(|h| AddressKind::of(h.host) == Some(kind)));
+                rules.map(|r| r.decision).collect()
+            }),
             hasher: FxBuild::default(),
             #[cfg(test)]
             visits: Default::default(),
@@ -409,38 +394,32 @@ impl<'a> PathRules<'a> {
                 let last = rule.prefixes[rule.prefixes.len() - 1];
                 paths.exact.entry(paths.hasher.hash_one((key, last))).or_default().push(at);
             }
-            if let Some(r) = rule.address_resolution {
-                paths.by_resolution_role[r.role as usize].push((r.key, at));
-            }
             paths.at[index] = at;
             paths.rules.push(rule);
         }
         for bucket in paths.exact.values_mut().chain(paths.within.values_mut()) {
             bucket.sort_by_key(|&at| std::cmp::Reverse(paths.rules[at].rank.host));
         }
-        for list in &mut paths.by_resolution_role {
-            list.sort_unstable_by_key(|e| e.0);
-        }
         paths
     }
 
     /// Returns `true` if removing `i` in favor of `subsuming` does not change
-    /// post-DNS address checks.
-    fn preserves_address_resolution(&self, i: &PathRule, subsuming: &[usize], excluded: &dyn Fn(usize) -> bool) -> bool {
-        let Some(r) = i.address_resolution else { return true };
-        let others = &self.by_resolution_role[match r.role {
-            Role::Name => Role::Address,
-            Role::Address => Role::Name,
-        } as usize];
+    /// post-DNS address checks; see [`super::RulePolicy::check_resolved`].
+    ///
+    /// Only address rules decide those checks, and the rule that allowed the
+    /// request acts as an `allow` rule below them. At a resolved address, an
+    /// address rule meets the rules that it meets at an IP literal or a
+    /// `localhost` name, and also the address rules of the other kind. So a
+    /// broader rule can replace `i` only if no rule of the other kind can
+    /// change the result. A rule of the same kind and rank can always replace it.
+    fn preserves_address_resolution(&self, i: &PathRule, subsuming: &[usize]) -> bool {
+        let Some(kind) = i.address_kind() else { return true };
+        let others = &self.address_decisions[1 - kind as usize];
+        let no_rival = others.iter().all(|&d| d == i.decision && d != Decision::Prompt);
         subsuming.iter().all(|&j| {
-            let host = self.get(j).and_then(|j| j.address_resolution).map_or(0, |j| j.key.0[0]);
-            let from = others.partition_point(|e| e.0 < AddressResolution::lowest(host));
-            others[from..].iter().take_while(|e| e.0 <= r.key).all(|&(_, at)| {
-                let k = &self.rules[at];
-                let Some(kr) = k.address_resolution else { return true };
-                let ports_differ = r.port.is_some() && kr.port.is_some() && r.port != kr.port;
-                excluded(k.index) || k.index == i.index || ports_differ || !transports_overlap(r.transports, kr.transports)
-            })
+            let Some(j) = self.get(j) else { return false };
+            let same_rank = j.address_kind() == Some(kind) && j.rank.host == i.rank.host;
+            same_rank || (no_rival && (j.address_kind().is_some() || j.decision == Decision::Allow))
         })
     }
 
@@ -497,7 +476,7 @@ impl<'a> PathRules<'a> {
         subsuming.sort_unstable();
         subsuming.dedup();
         let same_decision = same_decision?;
-        if same_decision && !self.preserves_address_resolution(i, &subsuming, excluded) {
+        if same_decision && !self.preserves_address_resolution(i, &subsuming) {
             return None;
         }
         Some((same_decision, subsuming))
@@ -829,13 +808,15 @@ mod tests {
                 "6:11: warning[redundant-rule]: `10.0.0.0/8` on line 5 already allows this",
             ]
         );
-        assert_eq!(lint("deny net 10.0.0.0/8\nallow net *.example.com\nallow net api.example.com"), none);
-        assert_eq!(lint("prompt http 10.0.0.5\nallow http *.example.com\nallow http api.example.com"), none);
-        assert_eq!(lint("prompt http 10.0.0.5\nallow net *.example.com\nallow net api.example.com"), none);
-        assert_eq!(
-            lint("deny http 10.0.0.5/x\nallow http *.example.com\nallow http api.example.com"),
-            ["3:12: warning[redundant-rule]: `*.example.com` on line 2 already allows this"],
-        );
+        // Host name rules do not decide resolved addresses, so address rules do not keep them.
+        for (address, verb, column) in
+            [("deny net 10.0.0.0/8", "net", 11), ("prompt http 10.0.0.5", "http", 12), ("deny http 10.0.0.5/x", "http", 12)]
+        {
+            assert_eq!(
+                lint(&format!("{address}\nallow {verb} *.example.com\nallow {verb} api.example.com")),
+                [format!("3:{column}: warning[redundant-rule]: `*.example.com` on line 2 already allows this")],
+            );
+        }
         assert_eq!(lint("prompt net *\nprompt http 0.0.0.0"), none);
         assert_eq!(
             lint("deny net 10.0.0.0/8\nallow net *.example.com\nallow net *.api.example.com"),
@@ -848,8 +829,9 @@ mod tests {
         assert_eq!(lint("allow http *.example.com\nallow net api.example.com"), none);
         assert_eq!(lint("allow net *\ndeny net *.example.com\nallow net api.example.com"), none);
         assert_eq!(lint("deny net *\ndeny net 10.0.0.0/8"), none);
-        assert_eq!(lint("allow net *\nallow net 8.8.8.8"), none);
+        assert_eq!(lint("allow net *\nallow net 8.8.8.8"), ["2:11: warning[redundant-rule]: `*` on line 1 already allows this"]);
         assert_eq!(lint("allow net *\nallow net localhost"), ["2:11: warning[redundant-rule]: `*` on line 1 already allows this"]);
+        assert_eq!(lint("allow net *\ndeny net 127.0.0.0/8\nallow net localhost"), none, "the localhost rule outranks the prefix");
         assert_eq!(lint("allow net plaintext *\nallow net localhost"), none);
         assert_eq!(
             lint("allow net *.localhost\nallow net a.localhost:80\nallow net 127.0.0.0/8\nallow net 127.0.0.0/16"),
