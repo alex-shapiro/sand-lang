@@ -262,6 +262,16 @@ fn the_formatter_is_bounded() {
     assert_eq!(format_source_with("let x = 1\n", interrupted).unwrap_err(), "interrupted");
 }
 
+#[test]
+fn duplicate_member_checks_are_linear() {
+    let variants: String = (0..128_000).map(|i| format!("    V{i}\n")).collect();
+    let fields: String = (0..128_000).map(|i| format!("    f{i}: int\n")).collect();
+    let src = format!("enum E {{\n{variants}}}\nstruct S {{\n{fields}}}\n");
+    let (r, took) = check(Config::new(), &src);
+    r.unwrap();
+    assert!(took < FAST, "took {took:?}");
+}
+
 /// A source whose lint work grows with `depth` and whose type check does not.
 fn nested_loops(depth: usize) -> String {
     let mut src = String::from("var x = 0\n");

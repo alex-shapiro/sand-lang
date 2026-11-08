@@ -1573,8 +1573,9 @@ impl Checker {
         let scope = self.generic_scope(&gens);
         let self_ty = self.def_self_ty(id, &gens);
         let mut fields: Vec<FieldDef> = Vec::new();
+        let mut seen_names = HashSet::new();
         for f in &s.fields {
-            if fields.iter().any(|x| self.name(x.name) == f.name.name) {
+            if !seen_names.insert(f.name.name.as_str()) {
                 self.error(f.name.span, format!("field `{}` is defined twice", f.name.name));
                 continue;
             }
@@ -1632,8 +1633,9 @@ impl Checker {
         let scope = self.generic_scope(&gens);
         let self_ty = self.def_self_ty(id, &gens);
         let mut variants: Vec<VariantDef> = Vec::new();
+        let mut seen_names = HashSet::new();
         for (i, v) in e.variants.iter().enumerate() {
-            if variants.iter().any(|x| self.name(x.name) == v.name.name) {
+            if !seen_names.insert(v.name.name.as_str()) {
                 self.error(v.name.span, format!("variant `{}` is defined twice", v.name.name));
                 continue;
             }
