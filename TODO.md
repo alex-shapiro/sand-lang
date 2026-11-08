@@ -112,6 +112,21 @@ The host cannot rely on engine limits, stability, or control.
       scripts has no memory bound during compilation other than
       `max_source_bytes` and `max_compile_fuel`. A charge would reject programs
       that compile today under a low limit.
+- [ ] ❓ Bound the text of lint warnings. Fuel counts names, but warning text
+      grows with the bytes of each name, and no limit applies to identifier
+      length. An audit of `lint-budget-errors` measured 1.10 GB for a 286 KB
+      script with a 256 KB field name and 1,000 calls, and 2.16 GB for one
+      `shadowed-variable` warning. An allocation failure aborts every engine in
+      the process. The simplest fix is an identifier length limit in the lexer,
+      which is a new language limit. Charging each message at one point adds no
+      limit, but must estimate type text before it renders the text.
+- [ ] ❓ Look up enum variants and struct fields through a map per `TypeDef`.
+      Each use scans the member list in `check/expr.rs` and `check/pat.rs`
+      without a charge. An audit measured 91 s for a 16 MiB source with 400,000
+      variants before compile fuel ran out.
+- [ ] ❓ Charge lint-only checker work to the lint fuel. A struct with 30,000
+      defaulted fields and 60 constructor calls passes `sand check` and fails
+      `sand lint` with `program too complex to compile`.
 
 ## Tier 3: ordinary scripts
 

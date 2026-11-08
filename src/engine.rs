@@ -997,8 +997,8 @@ impl Engine {
         Ok(compiled.lints.unwrap_or_default())
     }
 
-    /// Type checks and lints the file at `path` and its imports, as
-    /// [`Engine::lint_source`] does.
+    /// Type checks the file at `path` and its imports, and lints the file,
+    /// as [`Engine::lint_source`] does.
     pub fn lint_file(&self, path: impl AsRef<Path>) -> Result<Vec<crate::lint::LintWarning>, Error> {
         let call = self.begin_call();
         let (name, source, root) = self.read_main(path.as_ref())?;

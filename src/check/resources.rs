@@ -793,7 +793,7 @@ impl Ctx<'_> {
                 let what = match s.kind {
                     SinkKind::Return => "returned".to_string(),
                     SinkKind::Store => "stored".to_string(),
-                    SinkKind::Own(t) => format!("taken over by a new {}", self.ck.show(t)),
+                    SinkKind::Own(t) => format!("taken over by a new {}", self.ck.show_charged(t)),
                     SinkKind::Spawn => "captured by a task".to_string(),
                     SinkKind::Pass(g) => {
                         format!("passed to `{}`, which keeps it", self.ck.fns[g as usize].runtime_name(&self.ck.types, &self.ck.syms))
