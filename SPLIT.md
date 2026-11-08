@@ -35,11 +35,11 @@ source branch only as a reference.
 11. Deterministic fuel: not started
 12. `VmValue` rename: not started
 13. Single native function registration: not started
-14. Shared `Encode` and `Decode` paths: not started
-15. Host-owned `Value`: not started; requires 12 and 14
-16. `serde` support for `Value`: not started; requires 15
-17. Single run method and `Outcome`: not started; requires 15
-18. Host function calls: not started; requires 17
+14. `Value` and the shared encode path: not started; requires 12
+15. Shared decode path and `Value` input: not started; requires 14
+16. `serde` support for `Value`: not started; requires 14
+17. Single run method and `Outcome`: not started; requires 14
+18. Host function calls: not started; requires 15 and 17
 19. Host context: not started; requires 13 and 17
 20. Run statistics: not started
 21. Journal core: not started; requires 10, 11, 18, and 19
@@ -256,19 +256,7 @@ module.function("slow", |url: String| async move { fetch(url).await });
 
 This changeset has no source commits.
 
-### 14. Shared `Encode` and `Decode` paths
-
-The Sand traits `Encode` and `Decode` define what can cross the host boundary, and
-`json` already implements them. Generalize that code with no change in behavior:
-
-- The heap walk in `Encoder` writes to a sink. JSON text is the first sink.
-- The type-directed `Decoder` reads from a source. JSON text is the first source.
-- Rules that are specific to JSON, such as Base64 for `bytes` and text for native
-  value types, exist only in the JSON sink and source.
-
-This changeset has no source commits.
-
-### 15. Host-owned `Value`
+### 14. `Value` and the shared encode path
 
 `sandlang::value::Value` is the Rust form of every Sand value that implements
 `Encode`. It holds unit, bool, int, float, duration, string, bytes, list, tuple,
@@ -276,8 +264,16 @@ map, set, range, structs and enums with their names, and native value types. A
 `Value` does not reference the VM, so it remains valid after the run ends. `Value`
 is `#[non_exhaustive]`, so a new variant does not break hosts.
 
-- Add `Value` as a sink and a source of the shared paths. The source also accepts
-  the JSON form of each type, so a `Value` that comes from JSON is valid input.
+The Sand trait `Encode` defines what can leave the VM, and `json` already implements
+it twice: in `Encoder` and in `Converter`, which is `to_json`. Replace both walks with
+a single heap walk that writes to a sink. The sinks are JSON text, the Sand `Json`
+value, and `Value`.
+
+- The walk reports what each value is: list, tuple, set, map with its key values,
+  struct or variant with its name, and native value.
+- Rules that are specific to JSON exist only in the JSON sinks. These rules flatten
+  `Some`, write `None` as `null`, pass the `Json` enum through, write map keys as
+  text, and use Base64 for `bytes` and text for native value types.
 - The value types of the `time` module have their own variants, such as
   `Value::Instant(jiff::Timestamp)` and `Value::PlainDate(jiff::civil::Date)`,
   because dates and times are central to Sand programs.
@@ -292,16 +288,40 @@ is `#[non_exhaustive]`, so a new variant does not break hosts.
   the type name. Native objects, such as files and connections, are not `Encode`.
   A native object lives on the heap of the VM, and its resources count against the
   limits of the run, so it cannot leave the VM.
-- `value::Encode` and `value::Decode: Encode` mirror the Sand traits. Primitives,
-  collections, and `ValueType` types implement them. `#[derive(SandStruct)]`,
-  `#[derive(SandEnum)]`, and `#[derive(SandValue)]` generate them. A host that
-  knows a type writes `let receipt: Receipt = value.decode()?`.
+- `value::Encode` mirrors the Sand trait. Primitives, collections, and `ValueType`
+  types implement it. `#[derive(SandStruct)]`, `#[derive(SandEnum)]`, and
+  `#[derive(SandValue)]` generate it.
 - The copy out of the heap uses the fuel, memory, and 512-level depth bounds of
   `json.encode`. A cycle reaches the depth bound. A copy that exceeds a bound
   returns a limit error.
+- A benchmark must show that `json.encode` keeps its speed.
 
 This changeset has no source commits. `03076c5` returned `Json`, which loses the
 difference between `bytes` and a string, and between `()` and `None`.
+
+### 15. Shared decode path and `Value` input
+
+The Sand trait `Decode` defines what can enter the VM, and `Decoder` implements it
+for JSON text. Make `Decoder` read from a source. The sources are JSON text and
+`Value`.
+
+- A source answers requests for a type, such as "give me bytes" or "give me this
+  map key as this type". The JSON source parses Base64 or key text, and the `Value`
+  source matches a variant.
+- Error paths, field defaults, computed-default thunks, and deferred set and map
+  fills stay in the shared decoder.
+- The `Value` source also accepts the JSON form of each type, so a `Value` that
+  comes from JSON is valid input.
+- `value::Decode: Encode` mirrors the Sand trait. Primitives, collections, and
+  `ValueType` types implement it, and the derives in changeset 14 generate it. A
+  host that knows a type writes `let receipt: Receipt = value.decode()?`.
+- `stdlib::core::Error` is public, and implements `value::Decode`.
+- A benchmark must show that `json.decode` keeps its speed.
+
+Do not convert a `Value` to JSON text and decode the text. `NaN` and infinity encode
+as `null`, which fails to decode as a float.
+
+This changeset has no source commits.
 
 ### 16. `serde` support for `Value`
 
@@ -329,7 +349,7 @@ match engine.run(target).await? {
 
 - `Returned(Value)` holds the result. A result of `()` is `Value::Unit`.
 - `Failed(Value)` holds the payload of a returned `Err`, for a script or a
-  function. `stdlib::core::Error` is public, and implements `Decode`.
+  function.
 - `Exited(i32)` holds the code of a call to `exit`.
 - `Outcome::exit_code` gives a process exit code for any outcome.
 - The result of a script is its top-level `return` value or its final expression.
@@ -463,13 +483,18 @@ silently repeats it. `run_journaled` returns an error that identifies an
 unclassified host function before the script starts. Hosts that do not use the
 journal are not affected.
 
-| Class    | Meaning                       | In replay                 |
-| -------- | ----------------------------- | ------------------------- |
-| `Pure`   | Same result in each execution | The engine calls it again |
-| `Input`  | Reads the outside world       | Returns the recorded data |
-| `Effect` | Changes the outside world     | Returns the recorded data |
+| Class       | Meaning                       | In replay                 |
+| ----------- | ----------------------------- | ------------------------- |
+| `Pure`      | Same result in each execution | The engine calls it again |
+| `ReadOnly`  | Reads the outside world       | Returns the recorded data |
+| `Effectful` | Changes the outside world     | Returns the recorded data |
 
-**Give `Input` and `Effect` functions plain arguments only.** The body gets its
+The docs of `Pure` must say that a `Pure` function cannot depend on anything that
+differs between executions, such as a time zone setting. The engine saves the
+journal before an `Effectful` function starts. A `ReadOnly` function does not need
+this save, so read-heavy runs avoid a storage write for each read.
+
+**Give `ReadOnly` and `Effectful` functions plain arguments only.** The body gets its
 arguments, its context, and an optional `JournalSeq`, and it does not get
 `&mut Vm`. A body therefore cannot read the journaled clock or random numbers, and
 it cannot ask for a retry after garbage collection. Every journaled function in
@@ -478,18 +503,18 @@ converts the result. A Sand wrapper that calls a `Pure` native checks a permissi
 before it calls the body. This sketch shows Sahara's functions in this form:
 
 ```rust
-module.function("get", Input(|ctx: Context<RunCtx>, key: String| async move {
+module.function("get", ReadOnly(|ctx: Context<RunCtx>, key: String| async move {
     ctx.effects.kv_get(key).await.map_err(kv_error)
 }));
 
-module.function("put", Effect(|ctx: Context<RunCtx>, seq: JournalSeq, key: String, value: Json| async move {
+module.function("put", Effectful(|ctx: Context<RunCtx>, seq: JournalSeq, key: String, value: Json| async move {
     ctx.effects.kv_write(key, Some(value), seq).await.map_err(kv_error)
 }));
 ```
 
-**Let a host choose the behavior after an unknown outcome.** An `Effect` runs at
-least once by default. An `Effect` can instead fail the run if a crash leaves its
-outcome unknown, for an operation that cannot be repeated safely.
+**Let a host choose the behavior after an unknown outcome.** An `Effectful` function
+runs at least once by default. An `Effectful` function can instead fail the run if a
+crash leaves its outcome unknown, for an operation that cannot be repeated safely.
 
 Source commits: `722ea6d`, `f46c14c`, `5cf6fae`, `9b0a692`, `9630b0e`, `ff1d63e`,
 `c24783a`, `12895c8`, `561cff0`, `b490c8e`, `4672531`.
@@ -500,7 +525,7 @@ A journaled run can pause if every task waits for a timer or a parked host call
 that is not due soon. The run returns `Suspended`, and the host resumes it later.
 
 ```rust
-module.function("wait_until", Input(|ctx: Context<RunCtx>, name: String, deadline: Timestamp| {
+module.function("wait_until", ReadOnly(|ctx: Context<RunCtx>, name: String, deadline: Timestamp| {
     Parked::until(deadline, name.clone(), async move { ctx.poll_signal(name, deadline).await })
 }));
 ```
@@ -538,7 +563,7 @@ This changeset has no source commits.
 | `18f7bf7`           | `Run` and `D`           | Run-scoped values are arguments         |
 | `300c107`           | `JournaledCall` borrow  | A sequence number is a plain value      |
 | `fe2dd83`           | Non-suspending end type | `run` cannot suspend                    |
-| `03076c5`           | `Json` results          | See changeset 15                        |
+| `03076c5`           | `Json` results          | See changeset 14                        |
 | `29e1f37`           | `bind` and `BoundCall`  | `run` reports the argument count error  |
 
 ## Other commits on the source branch
