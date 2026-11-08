@@ -29,6 +29,15 @@ The script executes inside the future on the polling thread. The first argument 
 
 To run the same script many times, compile it once. `Engine::compile_source` and `Engine::compile_file` compile a script and its imports and return a `CompiledProgram`. `Engine::run_program` runs a `CompiledProgram` on any engine. Each run starts with new globals.
 
+The compiling engine sets these parts of a `CompiledProgram`:
+
+- the source of the script and its imports, as they were during compilation
+- the import decisions of its policy
+- its host modules
+- the working directory of a run, if the running engine does not set `Config::cwd`
+
+The running engine supplies all other configuration, such as the policy, limits, streams, and file system.
+
 ```rust
 # #[tokio::main(flavor = "current_thread")]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {

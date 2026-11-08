@@ -1935,8 +1935,8 @@ Checking a program happens before it runs, so it is bounded separately:
   `max_compile_fuel` is exhausted, compilation fails with `program too complex
 to compile`. `None` means unlimited.
 - **Time and interrupts.** Compilation fails with `time limit exceeded` if
-  `max_wall_time` elapses, excluding waits for permission prompts. The run that
-  follows uses the remaining time budget. Compilation fails with an interrupt
+  `max_wall_time` elapses, excluding waits for permission prompts. In
+  `run_source` and `run_file`, the run uses the remaining time budget. Compilation fails with an interrupt
   error if the host interrupts the engine. The standard library compiles once
   per process, and `HostModules::new` compiles host modules once (§16.3).
   These compilations do not count against the budget of a program.
@@ -2020,11 +2020,15 @@ so that panics do not unwind into the host.
 A host that runs the same script many times can compile it once.
 `Engine::compile_source` and `Engine::compile_file` compile a script and its
 imports, as `run_source` and `run_file` do, and return a `CompiledProgram`.
-The policy of the compiling engine controls the imports. `Engine::run_program`
-runs a `CompiledProgram` on any engine. The run uses the host modules of the
-compiling engine and the remaining configuration of the running engine. If
-the running engine does not set `Config::cwd`, the run uses the working
-directory that a run on the compiling engine uses. Each run starts with new
+`Engine::run_program` runs a `CompiledProgram` on any engine. The compiling
+engine sets these parts of the program:
+
+- the source of the script and its imports, as they were during compilation
+- the import decisions of its policy
+- its host modules
+- the working directory of a run, if the running engine does not set `Config::cwd`
+
+The running engine supplies all other configuration. Each run starts with new
 globals, and its limits count from the start of the run.
 
 ### 16.2 Host environment and providers

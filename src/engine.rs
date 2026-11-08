@@ -554,18 +554,14 @@ impl HostModules {
     ///
     /// # Panics
     ///
-    /// If two modules have the same name.
+    /// If two modules have the same name, or if two modules bind the same
+    /// Rust type.
     pub fn new(modules: impl IntoIterator<Item = NativeModule>) -> Result<HostModules, Error> {
-        HostModules::compile(&modules.into_iter().collect::<Vec<_>>(), true)
-    }
-
-    /// Like [`HostModules::new`], with the optimizations of
-    /// [`Config::optimize`] on or off.
-    pub(crate) fn compile(modules: &[NativeModule], optimize: bool) -> Result<HostModules, Error> {
+        let modules: Vec<NativeModule> = modules.into_iter().collect();
         for (i, m) in modules.iter().enumerate() {
             assert!(!modules[..i].iter().any(|x| x.name() == m.name()), "host module `{}` is added twice", m.name());
         }
-        let registry = Registry::for_modules(modules, optimize);
+        let registry = Registry::for_modules(&modules);
         if registry.base.is_some() {
             registry.snapshot()?;
         }
@@ -607,7 +603,6 @@ pub(crate) struct Registry {
     pub natives: Arc<Vec<NativeEntry>>,
     pub decls: Arc<NativeDecls>,
     pub sources: BTreeMap<Cow<'static, str>, Source>,
-    pub optimize: bool,
     /// The standard library's registry, whose snapshot this one's extends.
     base: Option<Arc<Registry>>,
     /// The modules checked and compiled, made on first use.
@@ -670,7 +665,6 @@ impl Registry {
             natives: Arc::default(),
             decls: Arc::default(),
             sources: BTreeMap::new(),
-            optimize: true,
             base: None,
             snapshot: OnceLock::new(),
             core: OnceLock::new(),
@@ -678,18 +672,12 @@ impl Registry {
         }
     }
 
-    fn for_modules(modules: &[NativeModule], optimize: bool) -> Arc<Registry> {
+    fn for_modules(modules: &[NativeModule]) -> Arc<Registry> {
         let std = STD.clone();
         if modules.is_empty() {
             return std;
         }
-        let mut r = Registry {
-            natives: std.natives.clone(),
-            decls: std.decls.clone(),
-            sources: std.sources.clone(),
-            optimize,
-            ..Registry::empty()
-        };
+        let mut r = Registry { natives: std.natives.clone(), decls: std.decls.clone(), sources: std.sources.clone(), ..Registry::empty() };
         for m in modules {
             m.register_types(&mut r);
         }
@@ -847,8 +835,9 @@ pub(crate) struct Compiled {
     pub host_modules: HostModules,
     /// The main module's lint warnings (if asked for).
     pub lints: Option<Vec<crate::lint::LintWarning>>,
-    /// When the run's wall-time limit passes, counted from the start of
-    /// compilation, excluding import prompts.
+    /// When the run's wall-time limit passes. For a run that compiles its
+    /// program, the limit counts from the start of compilation, excluding
+    /// import prompts.
     pub deadline: Option<Instant>,
     /// Base snapshot when no additional native modules were compiled, allowing `program` to be recycled.
     pub snapshot: Option<Arc<Snapshot>>,
@@ -1737,25 +1726,21 @@ mod registry_tests {
     }
 
     #[test]
-    fn host_module_source_follows_the_optimize_setting() {
+    fn host_module_source_compiles_with_the_optimizations() {
         let src = "fn double(x: int) -> int { x * 2 }\npub fn doubled_total(xs: [int]) -> int { xs.map(double).filter(x => x > 2).sum() }";
-        let code = |optimize: bool| {
-            let mut m = NativeModule::new("host");
-            m.source(src);
-            let snap = HostModules::compile(&[m], optimize).unwrap().0.snapshot().unwrap();
-            let proto = snap.program.protos.iter().find(|p| p.name == "doubled_total").expect("doubled_total is compiled");
-            proto.code.clone()
-        };
+        let mut m = NativeModule::new("host");
+        m.source(src);
+        let snap = HostModules::new([m]).unwrap().0.snapshot().unwrap();
+        let host = snap.program.protos.iter().find(|p| p.name == "doubled_total").expect("doubled_total is compiled").code.clone();
         let script = |optimize: bool| {
             let engine = Engine::new(Config::new().optimize(optimize));
             let c = engine.compile_now("main.sand", src, Path::new("."), None, false).unwrap();
             let proto = c.program.protos.iter().find(|p| p.name == "doubled_total").expect("doubled_total is compiled");
             proto.code.clone()
         };
-        let (fast, slow) = (code(true), code(false));
-        assert_ne!(fast, slow);
-        assert_eq!(fast.len(), script(true).len());
-        assert_eq!(slow.len(), script(false).len());
+        let (fast, slow) = (script(true), script(false));
+        assert_ne!(fast.len(), slow.len());
+        assert_eq!(host.len(), fast.len());
     }
 
     #[test]
