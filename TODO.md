@@ -83,7 +83,7 @@ The host cannot rely on engine limits, stability, or control.
         However, if two engines share a handle, resetting the handle for the
         first engine clears a pending interrupt for the second engine.
       - Recommended: make `InterruptHandle` single-use and sticky, like
-        `tokio::util::sync::CancellationToken`, `AbortSignal`, and Go's
+        `tokio_util::sync::CancellationToken`, `AbortSignal`, and Go's
         `context`. Add `Engine::set_interrupt` and `Session::set_interrupt` so
         the host can replace a used handle. This design also supports item 015.
       - Give each `Run` its own interrupt handle in changeset 11 of `SPLIT.md`.

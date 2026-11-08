@@ -345,7 +345,7 @@ impl Session {
                 state.vm.apply_answer(capability, answer);
             }
         }
-        // Cancel remaining tasks if an interrupt arrived after `run_idle` stopped.
+        // Cancel remaining tasks if an interrupt arrived while `run_idle` was not running.
         if self.call.is_set() && self.cancel_tasks() > 0 {
             on_error(Error::Interrupted);
         }
