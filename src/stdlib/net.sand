@@ -30,10 +30,9 @@ pub native fn listen(ip: str, port: int) -> Result<Listener>
 /// Opens a TCP connection to `host` and `port`, or fails with kind `"timeout"`
 /// if the connection does not complete within `timeout`.
 ///
-/// `host` must be a valid DNS name or an unbracketed IPv4 or IPv6 address, and
-/// `port` must be in `0..=65535`; otherwise `connect` fails with kind
-/// `"invalid"`. A hostname whose last label is a number, such as `127.1`, is
-/// invalid. Write the full address instead, such as `127.0.0.1`.
+/// `host` must be an ASCII hostname or a full IP address without brackets, such
+/// as `127.0.0.1`. `port` must be in `0..=65535`. Other values fail with kind
+/// `"invalid"`.
 pub native fn connect(host: str, port: int, timeout: duration = 30s) -> Result<Conn>
 
 /// Opens a TLS-encrypted TCP connection to `host` and `port`, and verifies the

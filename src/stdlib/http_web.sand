@@ -1,7 +1,7 @@
 //! HTTP client backed by the browser Fetch API.
 //!
 //! Requests require the `Http` and `Net(host:port)` capabilities. A URL host
-//! must be an ASCII hostname or a full IP address, such as `127.0.0.1`; other
+//! must be an ASCII hostname or a full IP address, such as `127.0.0.1`. Other
 //! hosts fail with kind `"parse"`. The browser controls forbidden request
 //! headers, omits ambient cookies (`credentials: "omit"`), and enforces CORS
 //! rules on cross-origin responses. Redirects are not followed and fail with

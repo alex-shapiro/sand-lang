@@ -557,19 +557,19 @@ mod tests {
                 Some(port) => format!("http://{host}:{port}/"),
                 None => format!("http://{host}/"),
             };
-            let Ok(ours) = Url::parse(&text) else { return Ok(()) };
-            let theirs = url::Url::parse(&text);
-            prop_assert!(theirs.is_ok(), "{} parses only here", text);
-            let theirs = theirs.unwrap();
-            let read = match theirs.host() {
+            let Ok(sand_url) = Url::parse(&text) else { return Ok(()) };
+            let whatwg_url = url::Url::parse(&text);
+            prop_assert!(whatwg_url.is_ok(), "{} parses only here", text);
+            let whatwg_url = whatwg_url.unwrap();
+            let whatwg_host = match whatwg_url.host() {
                 Some(url::Host::Ipv4(ip)) => ip.to_string(),
                 Some(url::Host::Ipv6(ip)) => ip.to_canonical().to_string(),
                 Some(url::Host::Domain(name)) => name.to_string(),
                 None => String::new(),
             };
-            let policy = crate::policy::net::parse_ip(&ours.host).map_or(ours.host.clone(), |ip| ip.to_string());
-            prop_assert_eq!(policy, read, "{}", text);
-            prop_assert_eq!(Some(ours.port), theirs.port_or_known_default(), "{}", text);
+            let sand_host = crate::policy::net::parse_ip(&sand_url.host).map_or(sand_url.host.clone(), |ip| ip.to_string());
+            prop_assert_eq!(sand_host, whatwg_host, "{}", text);
+            prop_assert_eq!(Some(sand_url.port), whatwg_url.port_or_known_default(), "{}", text);
         }
     }
 }

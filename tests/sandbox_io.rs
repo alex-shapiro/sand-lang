@@ -532,7 +532,7 @@ print(http.get("http://loopback.test:{port}/").map(r => r.text().unwrap()))
 print(net.connect("127.0.0.1", {port}).is_ok())
 "#
     );
-    // `loopback.test` is allowed by name only through `*`, and its address is allowed by the IP rule.
+    // `*` allows `loopback.test` by name, and the IP rule allows its resolved address.
     let policy = RulePolicy::standard().extend(parse_rules(&format!(
         "allow net tls plaintext *\ndeny net 127.0.0.0/8 [::1]\nallow net plaintext 127.0.0.1:{port} localhost *.localhost"
     )));
@@ -540,9 +540,8 @@ print(net.connect("127.0.0.1", {port}).is_ok())
     assert_eq!(r.ok_stdout(), "Ok(\"hi\")\nOk(\"hi\")\nOk(\"hi\")\nOk(\"hi\")\ntrue\n");
 }
 
-/// An approved `prompt` rule acts as `allow` at the resolved address, so rule
-/// order does not affect the decision. An address matched only by an unapproved
-/// `prompt` rule is denied because the engine cannot prompt after DNS resolution.
+/// An approved `prompt` rule acts as `allow` at its resolved address in any
+/// rule order. An unapproved `prompt` address rule denies the connection.
 #[test]
 fn approved_prompts_allow_their_resolved_addresses_in_any_order() {
     let loopback: SocketAddr = "127.0.0.1:8080".parse().unwrap();
@@ -574,8 +573,6 @@ fn only_more_specific_rules_override_deny_private_net() {
     }
 }
 
-/// Under a wildcard allow rule, `deny_private_net` blocks all loopback hosts,
-/// and a more specific rule allows an exception.
 #[test]
 fn deny_private_net_blocks_loopback_hosts_except_specific_allows() {
     let server = http_server(|_| HttpResponse::new(200, "hi"));
@@ -618,7 +615,7 @@ fn redirects_to_denied_addresses_are_denied() {
         "/tls" => HttpResponse::new(302, "").header("location", "http://example.com/"),
         _ => HttpResponse::new(302, "").header("location", &format!("http://localhost:{tport}/")),
     });
-    // The origin is allowed by a host rule, and the redirect targets are allowed only by `*`.
+    // A host rule allows the origin, and `*` allows the redirect targets.
     let policy = RulePolicy::standard()
         .extend(parse_rules(&format!("allow net tls plaintext *\ndeny net 127.0.0.0/8 [::1]\nallow net plaintext {}", origin.addr)));
     let src = format!(
@@ -667,8 +664,8 @@ fn prompt_answers_do_not_override_address_rules() {
     assert!(out.lines().nth(1).is_some_and(|l| l.contains(needs)), "{out}");
 }
 
-/// Resolves `loopback.test` to `127.0.0.1` to simulate DNS rebinding, and
-/// delegates all other requests to [`OsNetwork`].
+/// Simulates DNS rebinding by resolving `loopback.test` to `127.0.0.1`.
+/// Delegates all other operations to [`OsNetwork`].
 struct RebindingNetwork;
 
 impl sandlang::network::Network for RebindingNetwork {
@@ -691,8 +688,8 @@ impl sandlang::network::Network for RebindingNetwork {
     }
 }
 
-/// Browsers parse these hosts as loopback addresses, which would cause the
-/// policy and the browser to disagree on the destination.
+/// Browsers parse these hosts as loopback addresses. Rejecting them keeps the
+/// policy and the browser on the same destination.
 #[test]
 fn ambiguous_browser_hosts_are_invalid() {
     let src = r#"

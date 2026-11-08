@@ -119,7 +119,7 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
                 [url.host.clone()].into_iter().chain(url.host.alternate_ip_ranges()).chain(url.host.localhost_subdomain_pattern(false));
             let denied = denied.collect::<Vec<_>>();
             let mut reach = paths.opposing_rules(r, 0).flat_map(|k| match k.scope {
-                Scope::Http { host, connects: true, .. } => denied.iter().filter_map(|d| host.intersection(d)).collect(),
+                Scope::Http { host, is_net_rule: true, .. } => denied.iter().filter_map(|d| host.intersection(d)).collect(),
                 _ => Vec::new(),
             });
             reach.find_map(|reach| bypass(reach, &url.host, *transports))
@@ -142,7 +142,7 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
 
 enum Scope<'a> {
     Files(u8),
-    Http { host: &'a NetPattern, transports: Transports, methods: &'a Methods, connects: bool },
+    Http { host: &'a NetPattern, transports: Transports, methods: &'a Methods, is_net_rule: bool },
 }
 
 #[derive(Clone, Copy)]
@@ -173,7 +173,8 @@ impl<'a> PathRule<'a> {
             }
             kind => {
                 let http = kind.http_match()?;
-                let scope = Scope::Http { host: http.host, transports: http.transports, methods: http.methods, connects: kind.connects() };
+                let scope =
+                    Scope::Http { host: http.host, transports: http.transports, methods: http.methods, is_net_rule: kind.is_net_rule() };
                 (scope, http.path.to_vec(), Rank::http(&http))
             }
         };
@@ -203,12 +204,12 @@ impl<'a> PathRule<'a> {
     fn ops(&self) -> Vec<Op<'a>> {
         match self.scope {
             Scope::Files(mask) => [READ, WRITE, IMPORT].into_iter().filter(|&op| mask & op != 0).map(Op::File).collect(),
-            Scope::Http { methods, connects, .. } => {
+            Scope::Http { methods, is_net_rule, .. } => {
                 let methods: Vec<Op> = match methods.listed() {
                     Some(methods) => methods.iter().map(|m| Op::Method(Some(m.as_str()))).collect(),
                     None => vec![Op::Method(None)],
                 };
-                methods.into_iter().chain(connects.then_some(Op::Connect)).collect()
+                methods.into_iter().chain(is_net_rule.then_some(Op::Connect)).collect()
             }
         }
     }
@@ -227,7 +228,7 @@ impl<'a> PathRule<'a> {
         match (&self.scope, op) {
             (Scope::Files(mask), Op::File(op)) => mask & op != 0,
             (Scope::Http { methods, .. }, Op::Method(m)) => m.is_none_or(|m| methods.matches(m)),
-            (Scope::Http { connects, .. }, Op::Connect) => *connects,
+            (Scope::Http { is_net_rule, .. }, Op::Connect) => *is_net_rule,
             _ => false,
         }
     }
@@ -339,8 +340,7 @@ enum Key<'a> {
     Ips,
 }
 
-/// Category of an address rule: an IP rule or a `localhost` rule, which
-/// RFC 6761 maps to loopback addresses. See [`super::RulePolicy::check_resolved`].
+/// Host category of an address rule in [`super::RulePolicy::check_resolved`].
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AddressKind {
     Ip,
@@ -407,20 +407,19 @@ impl<'a> PathRules<'a> {
     /// Returns `true` if replacing `i` with `subsuming` preserves all
     /// resolved-address checks; see [`super::RulePolicy::check_resolved`].
     ///
-    /// Only address rules apply during resolved-address checks, and the stage-1
-    /// allowing rule acts as an `allow` rule below them. At a resolved
-    /// loopback address, `Ip` and `Localhost` rules compete with each other.
-    /// A broader rule can replace `i` only if no rule of the other
-    /// [`AddressKind`] can change the decision. A rule with the same
-    /// [`AddressKind`], rank, and path can always replace `i`.
+    /// At a resolved loopback address, `Ip` and `Localhost` rules compete by
+    /// specificity. A rule with the same [`AddressKind`], rank, and path
+    /// preserves the rank at every loopback address. Any other broader rule can
+    /// replace `i` only if every rule of the other [`AddressKind`] has the same
+    /// non-prompt decision.
     fn preserves_address_resolution(&self, i: &PathRule, subsuming: &[usize]) -> bool {
         let Some(kind) = i.address_kind() else { return true };
-        let others = &self.address_decisions[1 - kind as usize];
-        let no_rival = others.iter().all(|&d| d == i.decision && d != Decision::Prompt);
+        let other_decisions = &self.address_decisions[1 - kind as usize];
+        let other_kind_agrees = other_decisions.iter().all(|&d| d == i.decision && d != Decision::Prompt);
         subsuming.iter().all(|&j| {
             let Some(j) = self.get(j) else { return false };
             let same_rank = j.address_kind() == Some(kind) && j.rank.spec(0) == i.rank.spec(0) && j.segs == i.segs;
-            same_rank || (no_rival && (j.address_kind().is_some() || j.decision == Decision::Allow))
+            same_rank || (other_kind_agrees && (j.address_kind().is_some() || j.decision == Decision::Allow))
         })
     }
 
@@ -809,7 +808,7 @@ mod tests {
                 "6:11: warning[redundant-rule]: `10.0.0.0/8` on line 5 already allows this",
             ]
         );
-        // Hostname rules do not apply to resolved addresses, so address rules do not keep them.
+        // Only address rules apply to resolved addresses, so a broader hostname rule subsumes a narrower one.
         for (address, verb, column) in
             [("deny net 10.0.0.0/8", "net", 11), ("prompt http 10.0.0.5", "http", 12), ("deny http 10.0.0.5/x", "http", 12)]
         {
@@ -956,8 +955,8 @@ mod tests {
     }
 
     /// Generates `http` and `net` rules for hosts that can be resolved to
-    /// loopback addresses, using few paths and methods so that rule ranks
-    /// interleave.
+    /// loopback addresses. Uses a small set of paths and methods so that rule
+    /// ranks overlap.
     fn loopback_rule_line() -> impl Strategy<Value = String> {
         let verb = || prop::sample::select(vec!["allow", "deny", "prompt"]);
         let transport = || prop::sample::select(vec!["tls plaintext ", "tls plaintext ", "tls ", "plaintext "]);
@@ -973,9 +972,7 @@ mod tests {
         ]
     }
 
-    /// Loopback `Ip` and `Localhost` rules with interleaved ranks, including
-    /// `prompt` rules. `reported_rules_are_not_needed_for_every_loopback_triple`
-    /// tests every ordered triple of these rules.
+    /// Loopback `Ip` and `Localhost` rules with overlapping ranks.
     const LOOPBACK_LINES: [&str; 12] = [
         "allow net tls plaintext *",
         "allow http tls plaintext localhost/**",
@@ -1145,10 +1142,10 @@ mod tests {
     }
 
     #[test]
-    fn reported_rules_are_not_needed_for_every_loopback_triple() {
+    fn removing_reported_rules_preserves_loopback_triple_decisions() {
         for (a, b, c) in ordered_triples(LOOPBACK_LINES.len()) {
             let lines = [a, b, c].map(|i| LOOPBACK_LINES[i].to_string());
-            check_reported_rules_are_not_needed(&lines).unwrap();
+            check_removing_reported_rules_preserves_decisions(&lines).unwrap();
         }
     }
 
@@ -1156,8 +1153,7 @@ mod tests {
         (0..n).flat_map(move |a| (0..n).flat_map(move |b| (0..n).map(move |c| (a, b, c))))
     }
 
-    /// Verifies that removing any rule reported by the linter preserves all policy decisions.
-    fn check_reported_rules_are_not_needed(lines: &[String]) -> Result<(), TestCaseError> {
+    fn check_removing_reported_rules_preserves_decisions(lines: &[String]) -> Result<(), TestCaseError> {
         let (base, home) = (Path::new("/base"), Some(Path::new("/home/me")));
         let text = |lines: &[String]| lines.join("\n") + SETS;
         let policy = |lines: &[String]| PolicyFile::parse(&text(lines), base, home).unwrap().rules;
@@ -1198,17 +1194,17 @@ mod tests {
         #![proptest_config(ProptestConfig::with_cases(512))]
 
         #[test]
-        fn reported_rules_are_not_needed(
+        fn removing_reported_rules_preserves_decisions(
             lines in prop::collection::vec(rule_line(), 1..9),
         ) {
-            check_reported_rules_are_not_needed(&lines)?;
+            check_removing_reported_rules_preserves_decisions(&lines)?;
         }
 
         #[test]
-        fn reported_rules_are_not_needed_near_loopback(
+        fn removing_reported_loopback_rules_preserves_decisions(
             lines in prop::collection::vec(loopback_rule_line(), 1..6),
         ) {
-            check_reported_rules_are_not_needed(&lines)?;
+            check_removing_reported_rules_preserves_decisions(&lines)?;
         }
 
         #[test]

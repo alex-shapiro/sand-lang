@@ -81,7 +81,7 @@ removes it.
 
 `RulePolicy::deny_private_net` adds `deny net` rules for `localhost` and for
 the ranges in `is_private_address`. Skip `Tier::Absolute` from `50dae44`. The
-host controls all rules, so no rule needs to rank above specificity.
+host controls all rules and can rank them by specificity.
 
 Source commit: the `deny_private_net` changes in `d859942`.
 

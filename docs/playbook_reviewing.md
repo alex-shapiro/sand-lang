@@ -1,6 +1,6 @@
 # Playbook: Reviewing a Branch
 
-Bring this branch to a shippable state. You own every subsystem that the branch touches. Review the branch as an owner, not as a checker.
+Bring this branch to a shippable state. You own every subsystem that the branch touches.
 
 ## Priorities
 
@@ -10,7 +10,7 @@ Review at three levels, in this order of importance:
 2. **System design:** how the parts fit together.
 3. **Code:** how readable and how small the code is.
 
-Lower priorities carry less weight, but remain in scope. Report findings at all three levels.
+Lower priorities have less weight, but remain in scope. Report findings at all three levels.
 
 ## Audit
 
@@ -18,7 +18,7 @@ Lower priorities carry less weight, but remain in scope. Report findings at all 
 
 Before you read the code in detail, write a short brief:
 
-- What can a user do after this change that they could not do before?
+- What new actions can a user take after this change?
 - What can surprise a user?
 - What promises do the docs make about the affected features?
 
@@ -42,20 +42,20 @@ Audit the branch and its dependent code paths against this brief.
 - Which types and signatures are hard to read because of deep nesting, large tuples, or many parameters? Find the requirement that forces the complexity, and simplify that requirement.
 - What can we cut? Every line adds maintenance cost.
 
-### 3. Report causes, not symptoms
+### 3. Report causes
 
-A bug is usually a symptom. For each finding, identify the underlying mechanism and check for other instances of it. Report the mechanism.
+A bug is usually a symptom of an underlying cause. For each finding, identify the cause and check for other instances of it. Report the cause.
 
 Example from the `deny_private_net` review:
 
 - **Symptom:** "An IP literal skips the stage-2 check in `check_resolved`."
 - **Cause:** "Network checks use two precedence orders. Stage 2 ignores tiers and ports, so the same connection can receive different decisions."
 
-Fixing the symptom would expand the second order. Fixing the cause removes it.
+Fixing the symptom expands the second order. Fixing the cause removes it.
 
 ### 4. Look outside the questions
 
-End each audit with one question: what is the most important problem that this playbook did not ask about?
+End each audit with a question: what is the most important problem outside this playbook?
 
 ## Fixing
 
@@ -65,7 +65,7 @@ Commit each fix separately. In the commit message, state the problem, the fix, a
 
 ## Tradeoffs
 
-Do not make a fix that changes the product before the user decides. Instead, document the problem, the options, and their tradeoffs in a short section of `docs/TRADEOFFS.md`. A tradeoff must be a real product or system tradeoff. Breaking backward compatibility is not a tradeoff.
+Before making a change that affects the product, ask the user to decide. Document the problem, the options, and their tradeoffs in a short section of `docs/TRADEOFFS.md`. Only real product or system tradeoffs belong in this file; breaking backward compatibility does not.
 
 After the user decides, remove the section and record the decision and rationale in the commit message.
 
@@ -73,7 +73,7 @@ If the branch relies on a significant preexisting problem that is out of scope t
 
 ## Review Loop
 
-Repeat the audit and fix cycle. Each audit covers the full branch and receives the prior fixes and `docs/TRADEOFFS.md`. Stop when an audit finds no significant new problems, or after five audits. Report any remaining problems to the user.
+Repeat the audit and fix cycle. Each audit covers the full branch and receives the prior fixes and `docs/TRADEOFFS.md`. Stop if an audit finds only minor problems, or after five audits. Report any remaining problems to the user.
 
 At the end of the review, report open tradeoffs to the user, move them to `TODO.md`, and delete `docs/TRADEOFFS.md`.
 
@@ -81,15 +81,15 @@ Run each audit in a sub-agent to keep the reviewer independent from the fixer. G
 
 ```
 You own every subsystem that this branch touches. Run the audit in
-docs/playbook_reviewing.md on this branch against origin/main, and report what you
+docs/playbook_reviewing.md on this branch against origin/main. Report what you
 would change before you ship it. Read AGENTS.md and, if it exists,
 docs/TRADEOFFS.md. Do not edit files, commit, or push.
 
-Start with the product brief. Then report findings, most important first, and
-label each one "significant" or "minor". For each finding, give its cause, the
-best fixes across the priorities, and whether each fix needs a real product
-tradeoff. Give a file:line if the finding is in one place. End with the most
-important problem that the playbook did not ask about.
+Start with the product brief. Report the findings from most to least important,
+and label each finding "significant" or "minor". For each finding, give its
+cause, the best fixes across the priorities, and whether each fix requires a
+product tradeoff. Include file:line if the finding is at a single location. End
+with the most important problem outside this playbook.
 ```
 
 For a large branch, run three reviewers in parallel, one for each priority level. Append "Focus on the product", "Focus on the system design", or "Focus on the code" to their prompts. Combine their findings before applying fixes.
@@ -100,7 +100,7 @@ Run autonomously until the task is complete.
 
 Claude Opus 5.5 is the strongest model for reasoning and coding, whereas Gemini Argon 4 is the strongest model for writing. After the review loop completes, run Gemini for copy editing.
 
-Check whether the environment provides the Antigravity CLI `agy`. The CLI is available locally, not in a cloud sandbox. If `agy` is unavailable, inform the user and skip this step.
+Check whether the environment provides the Antigravity CLI `agy`. The CLI is available only on a local machine. If `agy` is unavailable, inform the user and skip this step.
 
 Run Gemini with this exact command:
 
