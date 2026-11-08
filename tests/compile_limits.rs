@@ -266,7 +266,8 @@ fn the_formatter_is_bounded() {
 fn duplicate_member_checks_are_linear() {
     let variants: String = (0..128_000).map(|i| format!("    V{i}\n")).collect();
     let fields: String = (0..128_000).map(|i| format!("    f{i}: int\n")).collect();
-    let src = format!("enum E {{\n{variants}}}\nstruct S {{\n{fields}}}\n");
+    let methods: String = (0..128_000).map(|i| format!("    fn m{i}(self) -> int\n")).collect();
+    let src = format!("enum E {{\n{variants}}}\nstruct S {{\n{fields}}}\ntrait T {{\n{methods}}}\n");
     let (r, took) = check(Config::new(), &src);
     r.unwrap();
     assert!(took < FAST, "took {took:?}");
@@ -325,6 +326,11 @@ fn variant_suggestions_are_charged_to_the_lint_budget() {
         assert!(matches!(e, Error::Compile(_)) && e.to_string().contains("source too complex to lint"), "{e}");
         assert!(start.elapsed() < FAST, "took {:?}", start.elapsed());
     }
+
+    let long = "a".repeat(3_000);
+    let src = format!("enum E {{\n    V0{long}\n    V1{long}\n    V2{long}\n}}\nfn f(s: E) {{\n    let B{long} = s\n}}\nf(E.V0{long})\n");
+    let e = engine.lint_source("main.sand", &src).unwrap_err();
+    assert!(matches!(e, Error::Compile(_)) && e.to_string().contains("source too complex to lint"), "{e}");
 }
 
 #[test]

@@ -2489,7 +2489,7 @@ Linting checks the file first, with the default limits (§15.3). The lints
 may spend 64 units of fuel per byte of source (at least 10,000,000), about
 one per syntax tree node, per node a lint examines again, per variant and
 pair of characters that `variant-like-binding` compares, and per 16 bytes of
-type text in a warning; a file that
+type text in a `shadowed-variable` warning; a file that
 needs more fails with `source too complex to lint` (`Error::Compile`, exit
 code 2).
 

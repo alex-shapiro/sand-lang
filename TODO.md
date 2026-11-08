@@ -127,6 +127,10 @@ The host cannot rely on engine limits, stability, or control.
 - [ ] ❓ Charge lint-only checker work to the lint fuel. A struct with 30,000
       defaulted fields and 60 constructor calls passes `sand check` and fails
       `sand lint` with `program too complex to compile`.
+- [ ] ❓ Let hosts set the lint fuel. `lint_module` derives the fuel from the source
+      size and ignores `max_compile_fuel`, so a host can neither lower nor raise
+      the budget. `Limits::max_lint_fuel` is one option, and it adds a limit to
+      the public API.
 
 ## Tier 3: ordinary scripts
 
