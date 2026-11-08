@@ -24,7 +24,6 @@ pub(crate) enum HostKind {
     Ip(IpAddr, u8),
 }
 
-#[cfg(feature = "os")]
 pub(crate) fn is_valid_host(host: &str) -> bool {
     host.parse::<IpAddr>().is_ok() || canonical_hostname(host).is_some()
 }
@@ -32,7 +31,15 @@ pub(crate) fn is_valid_host(host: &str) -> bool {
 fn canonical_hostname(name: &str) -> Option<String> {
     let name = name.strip_suffix('.').unwrap_or(name);
     let label_ok = |l: &str| (1..=63).contains(&l.len()) && l.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b));
-    (name.len() <= 253 && name.split('.').all(label_ok)).then(|| name.to_ascii_lowercase())
+    (name.len() <= 253 && name.split('.').all(label_ok) && !ends_in_number(name)).then(|| name.to_ascii_lowercase())
+}
+
+/// Returns `true` if browsers parse `name` as an IPv4 address, such as `127.1` or `0x7f000001`
+/// (WHATWG URL "ends in a number").
+fn ends_in_number(name: &str) -> bool {
+    let last = name.rsplit('.').next().unwrap_or(name);
+    let hex = last.strip_prefix("0x").or_else(|| last.strip_prefix("0X"));
+    last.bytes().all(|b| b.is_ascii_digit()) || hex.is_some_and(|h| h.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 impl std::str::FromStr for NetPattern {

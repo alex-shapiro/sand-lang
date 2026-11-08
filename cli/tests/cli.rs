@@ -869,20 +869,18 @@ fn hi_server() -> u16 {
     port
 }
 
-// Relies on the resolver accepting `127.1` for 127.0.0.1 (glibc, macOS).
-#[cfg(unix)]
 #[test]
 fn net_rules_filter_transports_and_resolved_addresses() {
     let port = hi_server();
-    let dir = script("net", &format!("import http\nprint(http.get(\"http://127.1:{port}/\").map(r => r.text().unwrap()))"));
+    let dir = script("net", &format!("import http\nprint(http.get(\"http://localhost:{port}/\").map(r => r.text().unwrap()))"));
     let run = |flags: &[&str]| {
         let mut args = vec!["run", "main.sand"];
         args.extend_from_slice(flags);
         sand(dir.path(), &args)
     };
-    assert!(run(&["--allow=net *"]).stdout.starts_with("Err(Error(message: \"permission denied: GET http://127.1"), "TLS only");
+    assert!(run(&["--allow=net *"]).stdout.starts_with("Err(Error(message: \"permission denied: GET http://localhost"), "TLS only");
     assert_eq!(run(&["--allow=net plaintext *"]).stdout, "Ok(\"hi\")\n");
-    let denied = run(&["--allow=net plaintext *", "--deny=net 127.0.0.0/8"]).stdout;
+    let denied = run(&["--allow=net plaintext *", "--deny=net 127.0.0.0/8 ::1"]).stdout;
     assert!(denied.contains("address 127.0.0.1 is not allowed by the rule `deny net 127.0.0.0/8`"), "{denied}");
     let removed = run(&["--allow-private-net"]);
     assert_eq!(removed.code, 2, "{removed:?}");

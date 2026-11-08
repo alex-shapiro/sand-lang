@@ -6,6 +6,7 @@ mod common;
 use common::{HttpResponse, TempDir, http_server, literal_path, parse_rules, run_with};
 use parking_lot::Mutex;
 use sandlang::engine::Limits;
+use sandlang::network::OsNetwork;
 use sandlang::policy::net::{NetPattern, is_private_address};
 use sandlang::policy::rules::{AbsolutePath, CustomMatch, HttpMethod, Methods, NamePattern, PathPattern, RulePolicy, Transports};
 use sandlang::policy::{Capability, Decision, PromptAnswer};
@@ -476,34 +477,31 @@ fn constructors_start_with_their_rules() {
     assert_eq!(parse_rules(&text).to_string(), text);
 }
 
-#[cfg(unix)]
 #[test]
 fn hosts_resolved_to_denied_addresses_are_blocked() {
     let server = http_server(|_| HttpResponse::new(200, "internal"));
     let port = server.addr.port();
-    // `127.1` and `2130706433` are not IP literals, but the resolver maps them to 127.0.0.1.
     let src = format!(
         r#"
 import http
 import net
-for host in ["127.1", "2130706433", "localhost", "127.0.0.1"] {{
+for host in ["loopback.test", "localhost", "127.0.0.1"] {{
     let e = http.get("http://\(host):{port}/").unwrap_err()
     print("\(e.kind): \(e.message)")
 }}
-print(net.connect("127.1", {port}).unwrap_err().kind)
+print(net.connect("loopback.test", {port}).unwrap_err().kind)
 "#
     );
     let policy = RulePolicy::standard()
         .allow_net(Transports::Both, "*".parse().unwrap())
         .deny_net(Transports::Both, "127.0.0.0/8".parse().unwrap())
         .deny_net(Transports::Both, "[::1]".parse().unwrap());
-    let r = run_with(&src, |c| c.policy(policy));
+    let r = run_with(&src, |c| c.policy(policy).network(Arc::new(RebindingNetwork)));
     let rule = "the rule `deny net 127.0.0.0/8`";
     assert_eq!(
         r.ok_stdout(),
         format!(
-            "permission_denied: permission denied: connect to 127.1:{port}: address 127.0.0.1 is not allowed by {rule}\n\
-             permission_denied: permission denied: connect to 2130706433:{port}: address 127.0.0.1 is not allowed by {rule}\n\
+            "permission_denied: permission denied: connect to loopback.test:{port}: address 127.0.0.1 is not allowed by {rule}\n\
              permission_denied: permission denied: connect to localhost:{port}: address 127.0.0.1 is not allowed by {rule}\n\
              permission_denied: permission denied: GET http://127.0.0.1:{port}/\n\
              permission_denied\n"
@@ -512,8 +510,6 @@ print(net.connect("127.1", {port}).unwrap_err().kind)
     assert!(server.requests.lock().is_empty());
 }
 
-// Relies on the resolver accepting `127.1` for 127.0.0.1 (glibc, macOS).
-#[cfg(unix)]
 #[test]
 fn explicitly_allowed_hosts_reach_denied_ranges() {
     let server = http_server(|_| HttpResponse::new(200, "hi"));
@@ -525,15 +521,15 @@ import net
 print(http.get("http://127.0.0.1:{port}/").map(r => r.text().unwrap()))
 print(http.get("http://localhost:{port}/").map(r => r.text().unwrap()))
 print(http.get("http://app.localhost:{port}/").map(r => r.text().unwrap()))
-print(http.get("http://127.1:{port}/").map(r => r.text().unwrap()))
+print(http.get("http://loopback.test:{port}/").map(r => r.text().unwrap()))
 print(net.connect("127.0.0.1", {port}).is_ok())
 "#
     );
-    // `127.1` is allowed by name only through `*`; its address by the explicit IP rule.
+    // `loopback.test` is allowed by name only through `*`; its address by the explicit IP rule.
     let policy = RulePolicy::standard().extend(parse_rules(&format!(
         "allow net tls plaintext *\ndeny net 127.0.0.0/8 [::1]\nallow net plaintext 127.0.0.1:{port} localhost *.localhost"
     )));
-    let r = run_with(&src, |c| c.policy(policy));
+    let r = run_with(&src, |c| c.policy(policy).network(Arc::new(RebindingNetwork)));
     assert_eq!(r.ok_stdout(), "Ok(\"hi\")\nOk(\"hi\")\nOk(\"hi\")\nOk(\"hi\")\ntrue\n");
 }
 
@@ -580,14 +576,12 @@ print(net.connect("127.0.0.1", {port}).unwrap_err().kind)
     assert_eq!(r.ok_stdout(), "hi\n");
 }
 
-// Relies on the resolver accepting `127.1` for 127.0.0.1 (glibc, macOS).
-#[cfg(unix)]
 #[test]
 fn redirects_to_denied_addresses_are_denied() {
     let target = http_server(|_| HttpResponse::new(200, "secret"));
     let tport = target.addr.port();
     let origin = http_server(move |req| match req.path() {
-        "/name" => HttpResponse::new(302, "").header("location", &format!("http://127.1:{tport}/")),
+        "/name" => HttpResponse::new(302, "").header("location", &format!("http://loopback.test:{tport}/")),
         "/tls" => HttpResponse::new(302, "").header("location", "http://example.com/"),
         _ => HttpResponse::new(302, "").header("location", &format!("http://localhost:{tport}/")),
     });
@@ -598,27 +592,25 @@ fn redirects_to_denied_addresses_are_denied() {
         "import http\nprint(http.get(\"http://{0}/name\").unwrap_err().kind)\nprint(http.get(\"http://{0}/local\").unwrap_err().kind)",
         origin.addr
     );
-    let r = run_with(&src, |c| c.policy(policy));
+    let r = run_with(&src, |c| c.policy(policy).network(Arc::new(RebindingNetwork)));
     assert_eq!(r.ok_stdout(), "permission_denied\npermission_denied\n");
     assert_eq!(origin.requests.lock().len(), 2);
     assert!(target.requests.lock().is_empty());
 }
 
-// Relies on the resolver accepting `127.1` for 127.0.0.1 (glibc, macOS).
-#[cfg(unix)]
 #[test]
 fn prompt_answers_do_not_override_address_rules() {
     let server = http_server(|_| HttpResponse::new(200, "hi"));
     let port = server.addr.port();
     let src = format!(
-        "import http\nfor host in [\"localhost\", \"127.1\"] {{\n    print(http.get(\"http://\\(host):{port}/\").map(r => r.text().unwrap()))\n}}"
+        "import http\nfor host in [\"localhost\", \"loopback.test\"] {{\n    print(http.get(\"http://\\(host):{port}/\").map(r => r.text().unwrap()))\n}}"
     );
     let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
     let asked = prompts.clone();
     let run = |policy: RulePolicy| {
         let asked = asked.clone();
         run_with(&src, move |c| {
-            c.policy(policy).prompter(move |cap: Capability| {
+            c.policy(policy).network(Arc::new(RebindingNetwork)).prompter(move |cap: Capability| {
                 asked.lock().push(cap.to_string());
                 async { PromptAnswer::AllowOnce }
             })
@@ -634,6 +626,51 @@ fn prompt_answers_do_not_override_address_rules() {
     assert!(lines[1].contains("address 127.0.0.1 is not allowed by the rule `deny net plaintext 127.0.0.0/8`"), "{out}");
     assert_eq!(prompts.lock().len(), 4);
     assert_eq!(server.requests.lock().len(), 2);
+}
+
+/// Resolves `loopback.test` to 127.0.0.1, as a DNS rebinding attack does, and uses the
+/// operating system network for everything else.
+struct RebindingNetwork;
+
+impl sandlang::network::Network for RebindingNetwork {
+    fn resolve<'a>(&'a self, host: &'a str, port: u16) -> sandlang::network::NetworkFuture<'a, Vec<SocketAddr>> {
+        if host == "loopback.test" {
+            return Box::pin(async move { Ok(vec![SocketAddr::from(([127, 0, 0, 1], port))]) });
+        }
+        OsNetwork.resolve(host, port)
+    }
+
+    fn connect<'a>(
+        &'a self,
+        addrs: &'a [SocketAddr],
+    ) -> sandlang::network::NetworkFuture<'a, (Box<dyn sandlang::network::Stream>, SocketAddr)> {
+        OsNetwork.connect(addrs)
+    }
+
+    fn listen(&self, addr: SocketAddr) -> sandlang::network::NetworkFuture<'_, Box<dyn sandlang::network::Listener>> {
+        OsNetwork.listen(addr)
+    }
+}
+
+/// Browsers read these hosts as loopback addresses, so the policy and the browser would disagree
+/// about the destination.
+#[test]
+fn hosts_that_browsers_read_differently_are_invalid() {
+    let src = r#"
+import http
+import net
+for host in ["127.1", "0x7f000001", "2130706433", "%6cocalhost", "ｌｏｃａｌｈｏｓｔ", "app.0"] {
+    print(http.get("http://\(host)/").unwrap_err().message)
+    print(net.connect(host, 80).unwrap_err().kind)
+}
+"#;
+    let out = run_with(src, |c| c).ok_stdout().to_string();
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 12, "{out}");
+    for pair in lines.chunks(2) {
+        assert!(pair[0].ends_with("invalid host (expected an ASCII host name or a full IP address, such as 127.0.0.1)"), "{out}");
+        assert_eq!(pair[1], "invalid", "{out}");
+    }
 }
 
 struct KeepAliveNetwork {

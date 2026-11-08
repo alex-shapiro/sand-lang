@@ -1658,6 +1658,13 @@ The engine checks every outgoing network connection from `net.connect`,
    `"permission_denied"` and reports the denied address and matching rule.
    `NetAddr` never prompts.
 
+A host must be an ASCII host name or a full IP address, so that the policy and
+the browser read the same destination. The engine rejects a host with
+percent-encoded or non-ASCII characters. It also rejects a host whose last
+label is a number, such as `127.1` or `0x7f000001`, because browsers read it as
+an IPv4 address. A URL with such a host fails with kind `"parse"`, and
+`net.connect` fails with kind `"invalid"`.
+
 In the WebAssembly build (§16.5), the browser resolves host names, so the
 engine checks only stage 1. Rules for IP addresses and CIDR prefixes then apply
 only to IP literals, and `deny_private_net` does not block a host name that

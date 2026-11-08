@@ -58,6 +58,9 @@ impl Url {
         }
         // Credentials in URLs are not supported; they are ignored.
         let Some(authority) = parts.authority.filter(|a| !a.host.is_empty()) else { return Err(fail("missing host")) };
+        if !crate::policy::net::is_valid_host(&authority.host) {
+            return Err(fail("invalid host (expected an ASCII host name or a full IP address, such as 127.0.0.1)"));
+        }
         let port = match authority.port {
             Some(p) => u16::try_from(p).map_err(|_| fail("invalid port"))?,
             None => default,

@@ -32,7 +32,8 @@ pub native fn listen(ip: str, port: int) -> Result<Listener>
 ///
 /// `host` must be a valid DNS name or an unbracketed IPv4 or IPv6 address, and
 /// `port` must be in `0..=65535`; otherwise `connect` fails with kind
-/// `"invalid"`.
+/// `"invalid"`. A name whose last label is a number, such as `127.1`, is not
+/// valid; write the full address, such as `127.0.0.1`.
 pub native fn connect(host: str, port: int, timeout: duration = 30s) -> Result<Conn>
 
 /// Opens a TLS-encrypted TCP connection to `host` and `port`, and verifies the
