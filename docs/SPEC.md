@@ -1578,8 +1578,8 @@ overrides `prompt`. If a request does not match any rule, the policy returns
 the primary rules do not match a request. A host can use `with_defaults` to
 combine user rules with host defaults (§17.5). Existing default rules on
 `defaults` remain in the fallback tier. A default rule never overrides a primary
-rule, also in resolved-address checks (§14.6). To make a host rule compete with
-user rules by specificity, add it to the primary rules with `RulePolicy::extend`.
+rule (§14.6). To make a host rule compete with user rules by specificity, add it
+to the primary rules with `RulePolicy::extend`.
 
 Specificity depends on the capability category:
 
@@ -1657,48 +1657,48 @@ The engine checks every outgoing network connection from `net.connect`,
    `"permission_denied"` and reports the denied address and matching rule.
    `NetAddr` never prompts.
 
-A host must be an ASCII host name or a full IP address, so that the policy and
-the browser read the same destination. The engine rejects a host with
-percent-encoded or non-ASCII characters. It also rejects a host whose last
-label is a number, such as `127.1` or `0x7f000001`, because browsers read it as
-an IPv4 address. A URL with such a host fails with kind `"parse"`, and
+A host must be an ASCII hostname or a full IP address. The engine rejects hosts with
+percent-encoded or non-ASCII characters. It also rejects any host whose last
+label is a number, such as `127.1` or `0x7f000001`, because browsers parse it as
+an IPv4 address. A URL with such a host fails with kind `"parse"`.
 `net.connect` fails with kind `"invalid"`.
 
-In the WebAssembly build (§16.5), the browser resolves host names, so the
-engine checks only stage 1. Rules for IP addresses and CIDR prefixes then apply
-only to IP literals, and `deny_private_net` does not block a host name that
-resolves to a private address.
+In the WebAssembly build (§16.5), the browser resolves hostnames, so the
+engine runs only stage 1. IP and CIDR rules then apply only to IP literals, and
+`deny_private_net` does not block a hostname that is resolved to a private
+address.
 
-In stage 2, only address rules decide. Address rules are the rules for IP
-addresses and CIDR prefixes that match the resolved address and transport, and
-the rules for `localhost` names if the request names `localhost`. They include
-`net` rules and `http` rules that match the request method and path.
-`RulePolicy::check_resolved` ranks address rules as it ranks rules for an IP
-literal, with the rule that allowed stage 1 in place of `*`. Thus a matching
-address rule decides the connection, unless it is in a lower `with_defaults`
-tier than the stage-1 rule. If no address rule decides, the engine allows the
-address. The stage-1 rule counts as `allow`, also if it is a `prompt` rule that
-the user approved. Any other `prompt` address rule denies the connection,
-because stage 2 cannot prompt, and the error says that the address needs
-approval. A `CustomPolicy` evaluates `NetAddr` directly and treats `Prompt` as
-`Allow`.
+In stage 2, only address rules apply. Address rules are IP and CIDR rules that
+match the resolved address and transport, plus `localhost` rules if the request
+specifies a `localhost` name. Address rules include `net` rules and `http`
+rules that match the request method and path. `RulePolicy::check_resolved`
+ranks address rules using the same order as for an IP literal, with the stage-1
+allowing rule in place of `*`. A matching address rule decides the connection
+unless it is in a lower `with_defaults` tier than the stage-1 rule. If no
+address rule matches in the same or higher tier, the engine allows the address.
+The stage-1 rule acts as `allow`, even if it is an approved `prompt` rule. Any
+other `prompt` address rule denies the connection because stage 2 cannot
+prompt, and the error states that the address requires approval. A
+`CustomPolicy` evaluates `NetAddr` directly and treats `Prompt` as `Allow`.
 
-This two-stage check prevents DNS rebinding against denied IP ranges. For
-example, under `allow net plaintext *` and `deny net 10.0.0.0/8`, a request to
+This two-stage check prevents DNS rebinding to denied IP ranges. For example,
+under `allow net plaintext *` and `deny net 10.0.0.0/8`, a request to
 `http://evil.example/` fails if DNS returns `10.0.0.5`. A hostname rule does not
 override an address rule. To connect to `10.0.0.5` through `db.internal`, allow
-both, as in `allow net db.internal 10.0.0.5`. The address rule applies to every
-hostname that stage 1 allows, so under `allow net *`, DNS can point any name at
-`10.0.0.5`.
+both: `allow net db.internal 10.0.0.5`. The address rule applies to all
+hostnames that stage 1 allows, so under `allow net *`, DNS can map any hostname
+to `10.0.0.5`.
+
 `sandlang::policy::net::is_private_address` reports whether an IP address belongs to
 a private, loopback, link-local, or other non-public range.
-`RulePolicy::deny_private_net` adds a `deny net` rule for `localhost` and for
-each of these ranges. A more specific address rule overrides them, such as
-`allow net 10.0.0.5`. A hostname rule such as `allow net api.example.com` does
-not, so DNS cannot point an allowed name at a private address. Hostname rules do
-not match IP literals, so allow a local server under each spelling, as in
-`allow net localhost:8080 127.0.0.1:8080 [::1]:8080`. In a `with_defaults` tier,
-the rules do not apply to a request that a primary rule matches.
+`RulePolicy::deny_private_net` adds `deny net` rules for `localhost` and for
+each of these ranges. A more specific address rule, such as `allow net 10.0.0.5`,
+overrides them. A hostname rule such as `allow net api.example.com` does not
+override them, so DNS cannot map an allowed hostname to a private address.
+Hostname rules do not match IP literals. To allow a local server, list each
+host form: `allow net localhost:8080 127.0.0.1:8080 [::1]:8080`. In a
+`with_defaults` tier, these rules do not apply to requests that match a primary
+rule.
 
 ### 14.7 Policy files
 

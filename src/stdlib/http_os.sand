@@ -2,7 +2,7 @@
 //!
 //! Outgoing requests require `Http` and `Net(host:port)` capabilities, checked
 //! on every redirect hop, as well as `NetAddr` on the resolved socket address.
-//! `serve` requires `NetListen(ip:port)`. A URL host must be an ASCII host name
+//! `serve` requires `NetListen(ip:port)`. A URL host must be an ASCII hostname
 //! or a full IP address, such as `127.0.0.1`; other hosts fail with kind
 //! `"parse"`. `https` URLs use TLS if the engine is built with the `tls`
 //! feature. Buffered response bodies larger than `max_http_body` fail with kind

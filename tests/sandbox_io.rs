@@ -380,7 +380,7 @@ fn default_rules_apply_only_to_unmatched_requests() {
     let p = parse_rules("prompt env SECRET").with_defaults(RulePolicy::allow_all());
     assert_eq!(p.check(&all), Decision::Prompt);
     // A default address rule applies at a resolved address only if the primary rules do not
-    // decide the request, as at an IP literal.
+    // match the request, matching the behavior for an IP literal.
     let metadata: SocketAddr = "169.254.169.254:80".parse().unwrap();
     let deny = || parse_rules("deny net 169.254.0.0/16");
     let allow = || parse_rules("allow net tls plaintext *");
@@ -533,7 +533,7 @@ print(http.get("http://loopback.test:{port}/").map(r => r.text().unwrap()))
 print(net.connect("127.0.0.1", {port}).is_ok())
 "#
     );
-    // `loopback.test` is allowed by name only through `*`; its address by the explicit IP rule.
+    // `loopback.test` is allowed by name only through `*`, and its address is allowed by the IP rule.
     let policy = RulePolicy::standard().extend(parse_rules(&format!(
         "allow net tls plaintext *\ndeny net 127.0.0.0/8 [::1]\nallow net plaintext 127.0.0.1:{port} localhost *.localhost"
     )));
@@ -541,9 +541,9 @@ print(net.connect("127.0.0.1", {port}).is_ok())
     assert_eq!(r.ok_stdout(), "Ok(\"hi\")\nOk(\"hi\")\nOk(\"hi\")\nOk(\"hi\")\ntrue\n");
 }
 
-/// An approved `prompt` rule counts as `allow` at the resolved address, so rule order does not
-/// change the result. An address that only a `prompt` rule matches is denied, because the
-/// engine cannot ask after DNS resolution.
+/// An approved `prompt` rule acts as `allow` at the resolved address, so rule
+/// order does not affect the decision. An address matched only by an unapproved
+/// `prompt` rule is denied because the engine cannot prompt after DNS resolution.
 #[test]
 fn approved_prompts_allow_their_resolved_addresses_in_any_order() {
     let loopback: SocketAddr = "127.0.0.1:8080".parse().unwrap();
@@ -575,8 +575,8 @@ fn only_more_specific_rules_override_deny_private_net() {
     }
 }
 
-/// Under a wildcard allow rule, `deny_private_net` blocks every loopback host, and a more
-/// specific rule makes an exception.
+/// Under a wildcard allow rule, `deny_private_net` blocks all loopback hosts,
+/// and a more specific rule allows an exception.
 #[test]
 fn deny_private_net_blocks_loopback_hosts_except_specific_allows() {
     let server = http_server(|_| HttpResponse::new(200, "hi"));
@@ -668,8 +668,8 @@ fn prompt_answers_do_not_override_address_rules() {
     assert!(out.lines().nth(1).is_some_and(|l| l.contains(needs)), "{out}");
 }
 
-/// Resolves `loopback.test` to 127.0.0.1, as a DNS rebinding attack does, and uses the
-/// operating system network for everything else.
+/// Resolves `loopback.test` to `127.0.0.1` to simulate DNS rebinding, and
+/// delegates all other requests to [`OsNetwork`].
 struct RebindingNetwork;
 
 impl sandlang::network::Network for RebindingNetwork {
@@ -692,10 +692,10 @@ impl sandlang::network::Network for RebindingNetwork {
     }
 }
 
-/// Browsers read these hosts as loopback addresses, so the policy and the browser would disagree
-/// about the destination.
+/// Browsers parse these hosts as loopback addresses, which would cause the
+/// policy and the browser to disagree on the destination.
 #[test]
-fn hosts_that_browsers_read_differently_are_invalid() {
+fn ambiguous_browser_hosts_are_invalid() {
     let src = r#"
 import http
 import net

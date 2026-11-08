@@ -541,10 +541,10 @@ mod tests {
     }
 
     proptest! {
-        /// A URL that the engine accepts names the same host and port for the policy as for the
-        /// browser, whose URL parser follows the WHATWG URL standard.
+        /// Every accepted URL specifies the same host and port for the policy
+        /// and for the browser, which follows the WHATWG URL standard.
         #[test]
-        fn accepted_urls_name_the_host_that_browsers_read(
+        fn accepted_urls_match_browser_parsed_hosts(
             host in prop_oneof![
                 prop::collection::vec(host_char(), 1..14).prop_map(|cs| cs.into_iter().collect::<String>()),
                 prop::sample::select(vec![

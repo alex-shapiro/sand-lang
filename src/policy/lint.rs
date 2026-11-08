@@ -339,7 +339,7 @@ enum Key<'a> {
     Ips,
 }
 
-/// The kind of an address rule: a rule for IP addresses, or a rule for `localhost` names, which
+/// Category of an address rule: an IP rule or a `localhost` rule, which
 /// RFC 6761 maps to loopback addresses. See [`super::RulePolicy::check_resolved`].
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AddressKind {
@@ -362,7 +362,7 @@ struct PathRules<'a> {
     at: Vec<usize>,
     exact: FxHashMap<u64, Vec<usize>>,
     within: FxHashMap<u64, Vec<usize>>,
-    /// The decisions of address rules, by [`AddressKind`].
+    /// Decisions of address rules, indexed by [`AddressKind`].
     address_decisions: [Vec<Decision>; 2],
     hasher: FxBuild,
     #[cfg(test)]
@@ -404,15 +404,15 @@ impl<'a> PathRules<'a> {
         paths
     }
 
-    /// Returns `true` if removing `i` in favor of `subsuming` does not change
-    /// post-DNS address checks; see [`super::RulePolicy::check_resolved`].
+    /// Returns `true` if replacing `i` with `subsuming` preserves all
+    /// resolved-address checks; see [`super::RulePolicy::check_resolved`].
     ///
-    /// Only address rules decide those checks, and the rule that allowed the
-    /// request acts as an `allow` rule below them. At a resolved address, an
-    /// address rule meets the rules that it meets at an IP literal or a
-    /// `localhost` name, and also the address rules of the other kind. So a
-    /// broader rule can replace `i` only if no rule of the other kind can
-    /// change the result. A rule of the same kind, rank, and path can always replace it.
+    /// Only address rules apply during resolved-address checks, and the stage-1
+    /// allowing rule acts as an `allow` rule below them. At a resolved
+    /// loopback address, `Ip` and `Localhost` rules compete with each other.
+    /// A broader rule can replace `i` only if no rule of the other
+    /// [`AddressKind`] can change the decision. A rule with the same
+    /// [`AddressKind`], rank, and path can always replace `i`.
     fn preserves_address_resolution(&self, i: &PathRule, subsuming: &[usize]) -> bool {
         let Some(kind) = i.address_kind() else { return true };
         let others = &self.address_decisions[1 - kind as usize];
@@ -809,7 +809,7 @@ mod tests {
                 "6:11: warning[redundant-rule]: `10.0.0.0/8` on line 5 already allows this",
             ]
         );
-        // Host name rules do not decide resolved addresses, so address rules do not keep them.
+        // Hostname rules do not apply to resolved addresses, so address rules do not keep them.
         for (address, verb, column) in
             [("deny net 10.0.0.0/8", "net", 11), ("prompt http 10.0.0.5", "http", 12), ("deny http 10.0.0.5/x", "http", 12)]
         {
@@ -833,7 +833,7 @@ mod tests {
         assert_eq!(lint("allow net *\nallow net 8.8.8.8"), ["2:11: warning[redundant-rule]: `*` on line 1 already allows this"]);
         assert_eq!(lint("allow net *\nallow net localhost"), ["2:11: warning[redundant-rule]: `*` on line 1 already allows this"]);
         assert_eq!(lint("allow net *\ndeny net 127.0.0.0/8\nallow net localhost"), none, "the localhost rule outranks the prefix");
-        // A rule of the other address kind ranks between these rules by path or method at loopback addresses.
+        // An address rule of the other kind ranks between these rules by path or method at loopback addresses.
         for policy in [
             "deny http 127.0.0.1/a\ndeny http 127.0.0.1/**\nallow http localhost/*",
             "deny http GET 127.0.0.1\ndeny net 127.0.0.1\nallow http GET localhost",
@@ -955,8 +955,8 @@ mod tests {
         ]
     }
 
-    /// `http` and `net` rule lines for only the hosts that meet at loopback addresses in
-    /// resolved-address checks, with few paths and methods so that their ranks interleave.
+    /// Generates `http` and `net` rules for hosts that can resolve to loopback
+    /// addresses, using few paths and methods so that rule ranks interleave.
     fn loopback_rule_line() -> impl Strategy<Value = String> {
         let verb = || prop::sample::select(vec!["allow", "deny", "prompt"]);
         let transport = || prop::sample::select(vec!["tls plaintext ", "tls plaintext ", "tls ", "plaintext "]);
@@ -972,9 +972,9 @@ mod tests {
         ]
     }
 
-    /// Rules of both address kinds that meet at loopback addresses with interleaved ranks,
-    /// including prompt rules. `reported_rules_are_not_needed_for_every_loopback_triple` checks
-    /// every ordered triple of them.
+    /// Loopback `Ip` and `Localhost` rules with interleaved ranks, including
+    /// `prompt` rules. `reported_rules_are_not_needed_for_every_loopback_triple`
+    /// tests every ordered triple of these rules.
     const LOOPBACK_LINES: [&str; 12] = [
         "allow net tls plaintext *",
         "allow http tls plaintext localhost/**",
@@ -1155,7 +1155,7 @@ mod tests {
         (0..n).flat_map(move |a| (0..n).flat_map(move |b| (0..n).map(move |c| (a, b, c))))
     }
 
-    /// Asserts that deleting the rules that the linter reports does not change any decision.
+    /// Verifies that removing any rule reported by the linter preserves all policy decisions.
     fn check_reported_rules_are_not_needed(lines: &[String]) -> Result<(), TestCaseError> {
         let (base, home) = (Path::new("/base"), Some(Path::new("/home/me")));
         let text = |lines: &[String]| lines.join("\n") + SETS;

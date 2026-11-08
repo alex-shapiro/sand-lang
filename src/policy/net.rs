@@ -405,9 +405,9 @@ impl<T> HostIndex<T> {
         }
     }
 
-    /// Calls `f(is_alternate, value)` for each address pattern that matches `ip`, an address
-    /// that `dest` resolved to. Address patterns are IP addresses and CIDR prefixes, and also
-    /// `localhost` names if `dest` is a `localhost` name, because RFC 6761 maps them to loopback.
+    /// Calls `f(is_alternate, value)` for each address pattern that matches `ip`.
+    /// `ip` is an address resolved for `dest`. Address patterns are IP and CIDR
+    /// patterns, plus `localhost` patterns if `dest` is a `localhost` name.
     pub(crate) fn find_address(&self, dest: &Dest, ip: IpAddr, mut f: impl FnMut(bool, &T)) {
         self.find_ip(ip, dest.port, &mut f);
         if is_localhost(dest.name) {
@@ -953,11 +953,11 @@ mod tests {
             }
         }
 
-        /// Under wildcard allow rules, `deny_private_net` denies exactly the private addresses: as IP
-        /// literals, and as addresses that a host name resolves to. In a `with_defaults` tier, it
-        /// denies none of them.
+        /// Under wildcard allow rules, `deny_private_net` denies all private
+        /// addresses, both as IP literals and as resolved addresses. In a
+        /// `with_defaults` tier, it denies none of them.
         #[test]
-        fn deny_private_net_denies_exactly_private_addresses(
+        fn deny_private_net_denies_only_private_addresses(
             v4 in any::<u32>(),
             v6 in any::<u128>(),
             embed in 0..EMBEDDINGS.len(),

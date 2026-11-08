@@ -502,21 +502,21 @@ impl RulePolicy {
     pub fn prompt_http(self, transports: Transports, methods: Methods, url: UrlPattern) -> Self {
         self.push(Decision::Prompt, RuleKind::Http(methods, url, transports))
     }
-    /// Denies connections to `localhost` and to private network addresses.
+    /// Denies connections to `localhost` and private network addresses.
     ///
-    /// The method adds a `deny net` rule for `localhost` and for each address range that
-    /// [`super::net::is_private_address`] reports. A more specific address rule overrides these
-    /// rules, such as `allow net 10.0.0.5`, for every host name that the policy allows. A rule of
-    /// equal specificity, such as `allow net localhost`, does not, and neither does a host name
-    /// rule, such as `allow net api.example.com`. Host name rules do not match IP literals, so
-    /// allow a local server under each spelling, as in
-    /// `allow net localhost:8080 127.0.0.1:8080 [::1]:8080`.
+    /// Adds a `deny net` rule for `localhost` and for each address range in
+    /// [`super::net::is_private_address`]. A more specific address rule, such as
+    /// `allow net 10.0.0.5`, overrides these rules for all allowed hostnames.
+    /// Rules of equal specificity, such as `allow net localhost`, and hostname
+    /// rules, such as `allow net api.example.com`, do not override them.
+    /// Hostname rules do not match IP literals. To allow a local server, list
+    /// each host form: `allow net localhost:8080 127.0.0.1:8080 [::1]:8080`.
     ///
-    /// Add these rules to the primary rules: in a [`RulePolicy::with_defaults`] tier, they do not
-    /// apply to a request that a primary rule matches.
+    /// Add these rules to the primary rules. In a [`RulePolicy::with_defaults`]
+    /// tier, they do not apply to requests that match a primary rule.
     ///
-    /// In the WebAssembly build, the browser resolves host names, so these rules block only IP
-    /// literals and `localhost` names.
+    /// In the WebAssembly build, the browser resolves hostnames, so these rules
+    /// block only IP literals and `localhost` names.
     pub fn deny_private_net(self) -> Self {
         let localhost = NetPattern { kind: HostKind::Host("localhost".into()), port: None };
         let hosts = std::iter::once(localhost).chain(private_ranges().iter().cloned());
@@ -666,13 +666,14 @@ impl RulePolicy {
     /// `Net` or `Http` `request` is permitted. Returns [`Decision::Allow`]
     /// or [`Decision::Deny`].
     ///
-    /// Address rules decide: rules for IP addresses and CIDR prefixes that match `addr`, and
-    /// rules for `localhost` names if `request` names `localhost`. The policy ranks them as it
-    /// ranks rules for an IP literal, with the rule that allowed `request` in place of `*`. So an
-    /// address rule overrides the allowing rule unless the address rule is in a lower
-    /// [`RulePolicy::with_defaults`] tier. The rule that allowed `request` counts as `allow`, also
-    /// if it is a `prompt` rule that the user approved. Any other `prompt` address rule denies
-    /// the connection.
+    /// Only address rules apply: IP and CIDR rules that match `addr`, plus
+    /// `localhost` rules if `request` specifies a `localhost` name. The policy
+    /// ranks address rules using the same order as for an IP literal, with the
+    /// rule that allowed `request` in place of `*`. A matching address rule
+    /// overrides the allowing rule unless the address rule is in a lower
+    /// [`RulePolicy::with_defaults`] tier. The allowing rule acts as `allow`,
+    /// even if it is an approved `prompt` rule. Any other `prompt` address rule
+    /// denies the connection.
     pub fn check_resolved(&self, request: &Capability, addr: std::net::SocketAddr) -> Decision {
         if self.resolved_verdict(request, addr).is_ok() { Decision::Allow } else { Decision::Deny }
     }
@@ -685,7 +686,7 @@ impl RulePolicy {
         }
         let index = self.non_file_index();
         let dest = Dest::new(host, addr.port());
-        // The rule that allowed `request`, also a `prompt` rule that the user approved, counts as `allow`.
+        // The rule that allowed `request` acts as `allow`, even if it is an approved `prompt` rule.
         let address_verdict = |allowing: Option<(Decision, usize)>, offer_address_rules: &dyn Fn(&mut Best)| {
             let allowing = allowing.filter(|&(d, _)| d != Decision::Deny).map(|(_, rule)| rule);
             let mut best = Best { approved: allowing, ..Best::new(self, &[]) };
@@ -981,7 +982,7 @@ pub(crate) fn precedence(spec: Spec, decision: Decision, rule: usize) -> Precede
 struct Best<'a> {
     exclude: &'a [usize],
     rules: &'a [Rule],
-    /// A rule that counts as `allow`, such as a `prompt` rule that the user approved.
+    /// Rule index that acts as `allow`, such as an approved `prompt` rule.
     approved: Option<usize>,
     best: Option<((std::cmp::Reverse<u32>, Precedence), Decision)>,
 }

@@ -79,9 +79,9 @@ removes it.
 
 ### 4. `deny_private_net`
 
-`RulePolicy::deny_private_net` adds plain `deny net` rules for `localhost` and
-for the ranges of `is_private_address`. Skip `Tier::Absolute` from `50dae44`.
-The host controls every rule, so no rule needs to rank above specificity.
+`RulePolicy::deny_private_net` adds `deny net` rules for `localhost` and for
+the ranges in `is_private_address`. Skip `Tier::Absolute` from `50dae44`. The
+host controls all rules, so no rule needs to rank above specificity.
 
 Source commit: the `deny_private_net` changes in `d859942`.
 
