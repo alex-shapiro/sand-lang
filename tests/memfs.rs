@@ -308,3 +308,21 @@ fn source_text_runs_in_the_configured_working_directory() {
     r.unwrap();
     assert_eq!(out, "from work\n");
 }
+
+/// A library script cannot take the name of a standard module, also of one
+/// that the build does not have.
+#[test]
+fn library_scripts_cannot_take_standard_module_names() {
+    let fs = MemFs::new();
+    for name in sandlang::stdlib::STD_MODULES {
+        fs.write(format!("/lib/{name}.sand"), "pub fn f() -> int { 1 }").unwrap();
+    }
+    let policy = RulePolicy::standard().extend(parse_rules("allow import /lib"));
+    let config = || Config::new().policy(policy.clone()).memory_fs(fs.clone()).library("/lib");
+    let (r, _) = run(config(), "import prelude\nprint(prelude.f())");
+    let Err(Error::Compile(ds)) = r else { panic!("expected a compile error, got {r:?}") };
+    assert!(ds[0].message.contains("unknown module `prelude`"), "{ds:?}");
+    let (r, out) = run(config(), "import json\nprint(json.encode(1))");
+    r.unwrap();
+    assert_eq!(out, "1\n");
+}
