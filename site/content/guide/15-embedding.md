@@ -364,7 +364,7 @@ assert!(matches!(result, Err(Error::Interrupted)));
 # }
 ```
 
-A handle in the configuration of a `Session` cancels the `Session::eval` call in progress. If you give clones of one handle to several configurations, the handle stops each of their engines and sessions. An engine ignores an interrupt that comes before its next compilation or run.
+A handle in the configuration of a `Session` cancels the session call in progress: `eval`, `run_tests`, `type_of`, or `run_tasks_until`. If you give clones of one handle to several configurations, the handle stops each of their engines and sessions. An engine or session ignores an interrupt that comes before its next call.
 
 ## Multiple engines
 

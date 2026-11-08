@@ -309,8 +309,8 @@ impl Config {
         }
     }
 
-    /// Lets `handle` stop the engine or session made from this configuration.
-    /// Without this call, nothing can interrupt it.
+    /// Lets `handle` stop the engine or session made from this configuration
+    /// from another thread.
     pub fn interrupt(mut self, handle: InterruptHandle) -> Self {
         self.interrupt = Some(handle);
         self
@@ -519,8 +519,8 @@ impl InterruptHandle {
 
     /// Stops the compilation or run in progress in each engine and session
     /// whose configuration holds this handle. The compilation or run fails
-    /// with [`Error::Interrupted`]. An engine ignores an interrupt that comes
-    /// before its next compilation or run.
+    /// with [`Error::Interrupted`]. An engine or session ignores an interrupt
+    /// that comes before its next call, such as `run_source` or `eval`.
     pub fn interrupt(&self) {
         for target in self.targets.lock().iter() {
             if let (Some(flag), Some(io)) = (target.flag.upgrade(), target.io.upgrade()) {
@@ -981,8 +981,8 @@ impl Engine {
         &self.config.host_modules.0
     }
 
-    /// Forgets interrupts of earlier runs; interrupts from now on stop the
-    /// next compilation or run.
+    /// Forgets interrupts of earlier calls. Each public call clears the flag
+    /// once at its start, so that interrupts from then on stop the call.
     pub(crate) fn clear_interrupt(&self) {
         self.interrupt.store(false, Ordering::SeqCst);
     }

@@ -3240,7 +3240,8 @@ fn source_size_limit() {
 #[test]
 fn interrupt_from_another_thread() {
     let handle = InterruptHandle::new();
-    let mut engine = Engine::new(Config::new().interrupt(handle.clone()));
+    let limits = Limits { max_wall_time: Some(Duration::from_secs(10)), ..Limits::default() };
+    let mut engine = Engine::new(Config::new().limits(limits).interrupt(handle.clone()));
     let t = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(50));
         handle.interrupt();
@@ -3253,13 +3254,21 @@ fn interrupt_from_another_thread() {
 #[test]
 fn an_interrupt_stops_each_engine_that_holds_its_handle() {
     let handle = InterruptHandle::new();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
     let runs: Vec<_> = (0..2)
         .map(|_| {
-            let mut engine = Engine::new(Config::new().interrupt(handle.clone()));
-            std::thread::spawn(move || rt().block_on(engine.run_source("main.sand", "while true {}")))
+            let mut m = NativeModule::new("signal");
+            let started_tx = started_tx.clone();
+            m.function("started", move || started_tx.send(()).unwrap());
+            let limits = Limits { max_wall_time: Some(Duration::from_secs(10)), ..Limits::default() };
+            let config = Config::new().limits(limits).host_modules(HostModules::new([m]).unwrap()).interrupt(handle.clone());
+            let mut engine = Engine::new(config);
+            std::thread::spawn(move || rt().block_on(engine.run_source("main.sand", "import signal\nsignal.started()\nwhile true {}")))
         })
         .collect();
-    std::thread::sleep(Duration::from_millis(100));
+    for _ in &runs {
+        started_rx.recv().unwrap();
+    }
     handle.interrupt();
     for r in runs {
         let r = r.join().unwrap();

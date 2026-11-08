@@ -1871,8 +1871,8 @@ stops compilation, bytecode, long-running library functions, and waits for
 I/O or prompt answers. The host creates the handle (`InterruptHandle::new()`)
 and gives it to the configuration of an engine or session
 (`Config::interrupt`). A handle stops each engine and session whose
-configuration holds a clone of it. An engine ignores an interrupt that comes
-before its next compilation or run.
+configuration holds a clone of it. An engine or session ignores an interrupt
+that comes before its next call, such as `run_source` or `eval`.
 
 ### 15.2 Fuel
 
