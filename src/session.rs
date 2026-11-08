@@ -109,7 +109,7 @@ impl Session {
         let (root, normalized_root) = engine.source_root().clone();
         let cwd = engine.run_cwd(root);
         let wall_time = engine.config().limits.max_wall_time;
-        let call = CallInterrupt::default();
+        let call = engine.begin_call();
         Session { engine, root: normalized_root, cwd, state: None, inputs: 0, exit_code: None, was_reset: false, wall_time, call }
     }
 
@@ -198,6 +198,9 @@ impl Session {
     /// Runs every `test` block entered so far (the latest of those with the
     /// same name), each as the main task of the session's VM, against the
     /// current state; their effects persist.
+    ///
+    /// A test that fails or exceeds a limit fails only in the report, and the
+    /// run continues. An interrupt ends the run with [`Error::Interrupted`].
     pub async fn run_tests(&mut self) -> Result<TestReport, Error> {
         self.begin_call();
         let r = CatchUnwind::new(self.run_tests_inner()).await;
@@ -280,9 +283,10 @@ impl Session {
     /// permission prompt, all script execution pauses. Forward process standard
     /// input through [`crate::stdin_feed::StdinFeed`].
     ///
-    /// If a task fails with an error, exceeds a limit, or receives an
-    /// interrupt, the session cancels all tasks and passes the error to
-    /// `on_error`. The call then continues to await `until`. If a task calls
+    /// If a task fails with an error or exceeds a limit, or if the call
+    /// receives an interrupt while tasks are left, the session cancels all
+    /// tasks and passes the error to `on_error`. The call then continues to
+    /// await `until`. If a task calls
     /// `exit`, this method records the exit code in [`Session::exit_code`]. It
     /// then drops `until` and returns `None`.
     pub async fn run_tasks_until<F: Future>(&mut self, until: F, mut on_error: impl FnMut(Error)) -> Option<F::Output> {
@@ -292,36 +296,37 @@ impl Session {
             st.recover();
             !st.vm.ready.is_empty() || !st.vm.io.is_empty()
         });
-        if !runnable {
-            return Some(until.await);
-        }
-        // Run the tasks until `until` completes (the run is then dropped,
-        // where it waits) or they stop.
-        let stopped = {
-            let mut run = std::pin::pin!(CatchUnwind::new(self.run_idle()));
-            std::future::poll_fn(|cx| {
-                if let Poll::Ready(v) = until.as_mut().poll(cx) {
-                    return Poll::Ready(Err(v));
+        let output = if runnable {
+            // Run the tasks until `until` completes (the run is then dropped,
+            // where it waits) or they stop.
+            let stopped = {
+                let mut run = std::pin::pin!(CatchUnwind::new(self.run_idle()));
+                std::future::poll_fn(|cx| {
+                    if let Poll::Ready(v) = until.as_mut().poll(cx) {
+                        return Poll::Ready(Err(v));
+                    }
+                    run.as_mut().poll(cx).map(Ok)
+                })
+                .await
+            };
+            match stopped {
+                Err(v) => {
+                    if let Some(st) = self.state.as_ref() {
+                        st.vm.flush_stdout();
+                    }
+                    v
                 }
-                run.as_mut().poll(cx).map(Ok)
-            })
-            .await
-        };
-        let output = match stopped {
-            Err(v) => {
-                if let Some(st) = self.state.as_ref() {
-                    st.vm.flush_stdout();
+                Ok(r) => {
+                    match self.settle(r) {
+                        Ok(false) => {}
+                        Ok(true) => return None,
+                        Err(e) => on_error(e),
+                    }
+                    until.await
                 }
-                v
             }
-            Ok(r) => {
-                match self.settle(r) {
-                    Ok(false) => {}
-                    Ok(true) => return None,
-                    Err(e) => on_error(e),
-                }
-                until.await
-            }
+        } else {
+            until.await
         };
         // A prompt a task needed meanwhile is asked now; the task retries
         // its call when it runs again.
@@ -332,13 +337,14 @@ impl Session {
                 Some(p) => self.call.unless_interrupted(p.prompt(cap.clone())).await,
                 None => Some(PromptAnswer::DenyOnce),
             };
-            match answer {
-                Some(answer) => st.vm.apply_answer(cap, answer),
-                None => {
-                    st.vm.abandon_tasks();
-                    on_error(Error::Interrupted);
-                }
+            if let Some(answer) = answer {
+                st.vm.apply_answer(cap, answer);
             }
+        }
+        // An interrupt while the tasks waited, or during the prompt, cancels
+        // the tasks that are left.
+        if self.call.is_set() && self.cancel_tasks() > 0 {
+            on_error(Error::Interrupted);
         }
         Some(output)
     }

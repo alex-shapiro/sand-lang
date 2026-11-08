@@ -523,7 +523,7 @@ struct InterruptTarget {
 /// The interrupt state of one engine or session call: the flag that the
 /// [`InterruptHandle`] of the configuration sets, and the I/O state whose
 /// waker the handle wakes.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct CallInterrupt {
     pub flag: Arc<AtomicBool>,
     pub io: Arc<IoShared>,
@@ -1188,6 +1188,12 @@ impl Engine {
         self.config.cwd.clone().unwrap_or(root)
     }
 
+    /// Compiles the script at `path` and runs each of its `test` blocks on a
+    /// new VM after the module initializer. Returns a report with the result
+    /// of each test.
+    ///
+    /// A test that fails or exceeds a limit fails only in the report, and the
+    /// run continues. An interrupt ends the run with [`Error::Interrupted`].
     pub async fn run_tests(&mut self, path: impl AsRef<Path>) -> Result<TestReport, Error> {
         crate::unwind::guard(self.run_tests_inner(path.as_ref())).await
     }

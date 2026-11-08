@@ -885,6 +885,27 @@ fn exit_in_a_task_between_inputs() {
     assert_eq!(r.session.exit_code(), Some(7));
 }
 
+#[test]
+fn interrupt_cancels_waiting_tasks_between_inputs() {
+    let handle = InterruptHandle::new();
+    let mut r = Repl::with(Config::new().interrupt(handle.clone()));
+    r.ok("let c: Channel<int> = Channel()\nlet t = spawn { c.recv() }");
+    let interrupter = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        handle.interrupt();
+    });
+    let input = async {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        "the input"
+    };
+    let mut errors = Vec::new();
+    let got = r.rt.block_on(r.session.run_tasks_until(input, |e| errors.push(e)));
+    interrupter.join().unwrap();
+    assert_eq!(got, Some("the input"));
+    assert!(matches!(errors[..], [Error::Interrupted]), "{errors:?}");
+    assert_eq!(r.session.cancel_tasks(), 0);
+}
+
 #[cfg(feature = "os")]
 #[test]
 fn interrupt_stops_a_prompt_between_inputs() {
