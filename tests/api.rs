@@ -3343,6 +3343,21 @@ fn interrupt_stops_a_compilation_waiting_for_an_import_prompt() {
     });
 }
 
+#[cfg(feature = "os")]
+#[test]
+fn interrupt_stops_engine_test_runs() {
+    let dir = TempDir::new("interrupttests");
+    let main = dir.write("main.sand", "import stop\ntest \"first\" { stop.interrupt()\nwhile true {} }\ntest \"second\" {}");
+    let handle = InterruptHandle::new();
+    let mut m = NativeModule::new("stop");
+    let h = handle.clone();
+    m.function("interrupt", move || h.interrupt());
+    let limits = Limits { max_wall_time: Some(Duration::from_secs(10)), ..Limits::default() };
+    let mut engine = Engine::new(Config::new().limits(limits).host_modules(HostModules::new([m]).unwrap()).interrupt(handle));
+    let r = rt().block_on(engine.run_tests(&main));
+    assert!(matches!(r, Err(Error::Interrupted)), "{r:?}");
+}
+
 #[test]
 fn an_interrupt_skips_engines_that_start_later() {
     let handle = InterruptHandle::new();

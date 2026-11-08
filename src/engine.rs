@@ -1165,10 +1165,12 @@ impl Engine {
                     match end_run(&mut vm, r).await {
                         Ok(RunEnd::Finished(_)) | Ok(RunEnd::Exit(0)) => Ok(()),
                         Ok(RunEnd::Exit(c)) => Err(format!("exited with code {c}")),
+                        Err(Trap::Interrupted) => return Err(Error::Interrupted),
                         Err(t) => Err(trap_message(t)),
                     }
                 }
                 Ok(RunEnd::Exit(c)) => Err(format!("module exited with code {c}")),
+                Err(Trap::Interrupted) => return Err(Error::Interrupted),
                 Err(t) => Err(trap_message(t)),
             };
             deadline = vm.deadline;
