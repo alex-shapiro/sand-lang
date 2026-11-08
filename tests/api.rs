@@ -7,7 +7,7 @@ mod common;
 use common::{TempDir, literal_path, rt, run_with};
 use jiff::civil::Date;
 use parking_lot::Mutex;
-use sandlang::engine::{CompiledProgram, Config, Engine, Error, HostModules, LimitKind, Limits, MemorySink};
+use sandlang::engine::{CompiledProgram, Config, Engine, Error, HostModules, InterruptHandle, LimitKind, Limits, MemorySink};
 use sandlang::files::mem::MemFs;
 use sandlang::native::NativeModule;
 use sandlang::policy::rules::{PathPattern, RulePolicy};
@@ -3239,8 +3239,9 @@ fn source_size_limit() {
 
 #[test]
 fn interrupt_from_another_thread() {
-    let mut engine = Engine::new(Config::new());
-    let handle = engine.interrupt_handle();
+    let handle = InterruptHandle::new();
+    let limits = Limits { max_wall_time: Some(Duration::from_secs(10)), ..Limits::default() };
+    let mut engine = Engine::new(Config::new().limits(limits).interrupt(handle.clone()));
     let t = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(50));
         handle.interrupt();
@@ -3251,6 +3252,121 @@ fn interrupt_from_another_thread() {
 }
 
 #[test]
+fn interrupt_stops_all_engines_and_sessions_with_shared_handle() {
+    let handle = InterruptHandle::new();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let config = || {
+        let mut module = NativeModule::new("signal");
+        let started_tx = started_tx.clone();
+        module.function("started", move || started_tx.send(()).unwrap());
+        let limits = Limits { max_wall_time: Some(Duration::from_secs(10)), ..Limits::default() };
+        Config::new().limits(limits).host_modules(HostModules::new([module]).unwrap()).interrupt(handle.clone())
+    };
+    let source = "import signal\nsignal.started()\nwhile true {}";
+    let mut engine = Engine::new(config());
+    let mut session = Session::new(config());
+    let runs = [
+        std::thread::spawn(move || rt().block_on(engine.run_source("main.sand", source)).map(|_| ())),
+        std::thread::spawn(move || rt().block_on(session.eval(source)).map(|_| ())),
+    ];
+    for _ in &runs {
+        started_rx.recv().unwrap();
+    }
+    handle.interrupt();
+    for run in runs {
+        let result = run.join().unwrap();
+        assert!(matches!(result, Err(Error::Interrupted)), "{result:?}");
+    }
+}
+
+#[cfg(feature = "os")]
+#[test]
+fn interrupt_remains_set_across_concurrent_call_on_same_engine() {
+    let dir = TempDir::new("interruptoverlap");
+    dir.write("lib.sand", "pub let X = 1");
+    let main = dir.write("main.sand", "import \"./lib.sand\"\nprint(lib.X)");
+    let (asked_tx, asked_rx) = std::sync::mpsc::channel();
+    let asked_tx = Mutex::new(asked_tx);
+    let (release_tx, release_rx) = tokio::sync::watch::channel(false);
+    let handle = InterruptHandle::new();
+    let config = Config::new().custom_policy(prompt_for_imports()).interrupt(handle.clone()).prompter(move |_cap: Capability| {
+        let _ = asked_tx.lock().send(());
+        let mut release = release_rx.clone();
+        async move {
+            let _ = release.wait_for(|released| *released).await;
+            PromptAnswer::AllowOnce
+        }
+    });
+    let engine = Engine::new(config);
+    let result = std::thread::scope(|scope| {
+        let compiling = scope.spawn(|| rt().block_on(engine.compile_file(&main)).map(|_| ()));
+        asked_rx.recv_timeout(Duration::from_secs(10)).expect("the prompter was not asked");
+        handle.interrupt();
+        engine.check_source("main.sand", "print(1)").unwrap();
+        release_tx.send(true).unwrap();
+        compiling.join().unwrap()
+    });
+    assert!(matches!(result, Err(Error::Interrupted)), "{result:?}");
+}
+
+/// Runs `call` with a pending import prompt, interrupts the call during the
+/// prompt, and asserts that `call` returns `Err(Error::Interrupted)`.
+fn assert_interrupt_stops_an_import_prompt(call: impl FnOnce(Config) -> Result<(), Error> + Send + 'static) {
+    let (asked_tx, asked_rx) = std::sync::mpsc::channel();
+    let asked_tx = Mutex::new(asked_tx);
+    let handle = InterruptHandle::new();
+    let config = Config::new().custom_policy(prompt_for_imports()).interrupt(handle.clone()).prompter(move |_cap: Capability| {
+        let _ = asked_tx.lock().send(());
+        std::future::pending::<PromptAnswer>()
+    });
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done_tx.send(call(config));
+    });
+    asked_rx.recv_timeout(Duration::from_secs(10)).expect("the prompter was not asked");
+    handle.interrupt();
+    let result = done_rx.recv_timeout(Duration::from_secs(10)).expect("the interrupt did not stop the call");
+    assert!(matches!(result, Err(Error::Interrupted)), "{result:?}");
+}
+
+#[cfg(feature = "os")]
+#[test]
+fn interrupt_stops_a_compilation_waiting_for_an_import_prompt() {
+    let dir = TempDir::new("interruptimport");
+    dir.write("lib.sand", "pub let X = 1");
+    let main = dir.write("main.sand", "import \"./lib.sand\"\nprint(lib.X)");
+    assert_interrupt_stops_an_import_prompt(move |config| rt().block_on(Engine::new(config).run_file(&main)).map(|_| ()));
+    let root = dir.path().to_path_buf();
+    assert_interrupt_stops_an_import_prompt(move |config| {
+        rt().block_on(Session::new(config.module_root(root)).eval("import \"./lib.sand\"")).map(|_| ())
+    });
+}
+
+#[cfg(feature = "os")]
+#[test]
+fn interrupt_stops_engine_test_runs() {
+    let dir = TempDir::new("interrupttests");
+    let main = dir.write("main.sand", "import stop\ntest \"first\" { stop.interrupt()\nwhile true {} }\ntest \"second\" {}");
+    let handle = InterruptHandle::new();
+    let mut module = NativeModule::new("stop");
+    let interrupter = handle.clone();
+    module.function("interrupt", move || interrupter.interrupt());
+    let limits = Limits { max_wall_time: Some(Duration::from_secs(10)), ..Limits::default() };
+    let mut engine = Engine::new(Config::new().limits(limits).host_modules(HostModules::new([module]).unwrap()).interrupt(handle));
+    let result = rt().block_on(engine.run_tests(&main));
+    assert!(matches!(result, Err(Error::Interrupted)), "{result:?}");
+}
+
+#[test]
+fn engine_ignores_interrupt_before_call_starts() {
+    let handle = InterruptHandle::new();
+    handle.interrupt();
+    let mut engine = Engine::new(Config::new().interrupt(handle.clone()));
+    let result = rt().block_on(engine.run_source("main.sand", "print(1)"));
+    assert!(result.is_ok(), "{result:?}");
+}
+
+#[test]
 fn interrupt_stops_a_run_waiting_for_a_prompt() {
     let (asked_tx, asked_rx) = std::sync::mpsc::channel();
     let asked_tx = Mutex::new(asked_tx);
@@ -3258,8 +3374,8 @@ fn interrupt_stops_a_run_waiting_for_a_prompt() {
         let _ = asked_tx.lock().send(());
         std::future::pending::<PromptAnswer>()
     });
-    let mut engine = Engine::new(config);
-    let handle = engine.interrupt_handle();
+    let handle = InterruptHandle::new();
+    let mut engine = Engine::new(config.interrupt(handle.clone()));
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let r = rt().block_on(engine.run_source("main.sand", "import env\nprint(env.get(\"HOME\"))"));

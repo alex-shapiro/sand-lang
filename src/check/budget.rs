@@ -1,26 +1,21 @@
-//! The compile budget: bounds the work of type checking so that a hostile
-//! program cannot stall the host before any runtime limit applies.
+//! Bounds the work of compilation and linting so that a hostile program
+//! cannot stall the host.
 //!
 //! Type checking is near-linear for ordinary programs, but some inputs are
-//! superlinear: exhaustiveness checking (Maranget's usefulness algorithm) is
-//! exponential in the worst case, and inferred or aliased types can double in
-//! size at each step (`let b = (a, a)`), which makes every later clone or
-//! zonk of them exponential. Three mechanisms bound this work:
+//! superlinear. Exhaustiveness checking is exponential in the worst case.
+//! Inferred or aliased types can also double in size at each step, which makes
+//! cloning or substituting them exponential. Three mechanisms bound this work:
 //!
-//! * a global fuel counter (`Limits::max_compile_fuel`), charged one unit per
-//!   expression checked, unification step, type node visited or produced,
-//!   and pattern row examined;
-//! * local limits with precise diagnostics: types may have at most
-//!   [`MAX_TYPE_SIZE`] nodes (`type too large`), and the exhaustiveness check
-//!   of one `match` may do at most [`MAX_PATTERN_WORK`] units of work
-//!   (`pattern too complex to check for exhaustiveness`);
-//! * a deadline (`Limits::max_wall_time`, counted from the start of
-//!   compilation) and the engine's interrupt flag, polled every
-//!   [`POLL_INTERVAL`] units.
+//! * A fuel counter for `Limits::max_compile_fuel`. The checker charges a unit
+//!   for each expression, unification step, type node, and pattern row.
+//! * Local size limits. A type can have at most [`MAX_TYPE_SIZE`] nodes, and a
+//!   `match` exhaustiveness check can perform at most [`MAX_PATTERN_WORK`]
+//!   units of work.
+//! * A wall-time deadline from `Limits::max_wall_time` and the call's
+//!   interrupt flag, polled every [`POLL_INTERVAL`] units.
 //!
-//! The counters are relaxed atomics used as plain cells (one thread charges a
-//! budget at a time): charging works through `&self`, and a checker holding a
-//! budget stays `Send`, which REPL sessions need to keep it between inputs.
+//! The counters use relaxed atomics so that callers can charge a budget
+//! through `&self` and keep the checker `Send` across REPL inputs.
 
 use crate::platform::Deadline;
 use std::sync::Arc;

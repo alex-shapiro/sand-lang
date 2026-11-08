@@ -6,7 +6,7 @@
 mod common;
 
 use common::{TempDir, literal_path, rt};
-use sandlang::engine::{Config, Engine, Error, HostModules, LimitKind, Limits, MemorySink};
+use sandlang::engine::{Config, Engine, Error, HostModules, InterruptHandle, LimitKind, Limits, MemorySink};
 use sandlang::native::NativeModule;
 use sandlang::native::func::Later;
 use sandlang::platform::{Clock, ClockFuture, Instant, SystemTime, UNIX_EPOCH};
@@ -485,9 +485,9 @@ fn limits_apply_per_input_and_memory_to_the_heap() {
 
 #[test]
 fn interrupting_an_input() {
-    let mut r = Repl::new();
+    let handle = InterruptHandle::new();
+    let mut r = Repl::with(Config::new().interrupt(handle.clone()));
     r.ok("var steps = 0");
-    let handle = r.session.interrupt_handle();
     let t = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(200));
         handle.interrupt();
@@ -499,6 +499,20 @@ fn interrupting_an_input() {
     t.join().unwrap();
     // The session continues, with the state reached.
     assert_eq!(r.value("steps > 0"), "true");
+}
+
+#[test]
+fn interrupt_during_test_block_stops_session_test_run() {
+    let handle = InterruptHandle::new();
+    let mut module = NativeModule::new("stop");
+    let interrupter = handle.clone();
+    module.function("interrupt", move || interrupter.interrupt());
+    let limits = Limits { max_wall_time: Some(Duration::from_secs(2)), ..Limits::default() };
+    let config = Config::new().limits(limits).host_modules(HostModules::new([module]).unwrap()).interrupt(handle);
+    let mut repl = Repl::with(config);
+    repl.ok("import stop\ntest \"first\" { stop.interrupt() }\ntest \"second\" { while true {} }");
+    let report = repl.rt.block_on(repl.session.run_tests());
+    assert!(matches!(report, Err(Error::Interrupted)), "{report:?}");
 }
 
 #[cfg(feature = "os")]
@@ -869,6 +883,58 @@ fn exit_in_a_task_between_inputs() {
     assert_eq!(got, None);
     assert!(start.elapsed() < Duration::from_secs(10));
     assert_eq!(r.session.exit_code(), Some(7));
+}
+
+#[test]
+fn interrupt_cancels_waiting_tasks_between_inputs() {
+    let handle = InterruptHandle::new();
+    let mut repl = Repl::with(Config::new().interrupt(handle.clone()));
+    repl.ok("let c: Channel<int> = Channel()\nlet t = spawn { c.recv() }");
+    let interrupter = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        handle.interrupt();
+    });
+    let input = async {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        "the input"
+    };
+    let mut errors = Vec::new();
+    let got = repl.rt.block_on(repl.session.run_tasks_until(input, |err| errors.push(err)));
+    interrupter.join().unwrap();
+    assert_eq!(got, Some("the input"));
+    assert!(matches!(errors[..], [Error::Interrupted]), "{errors:?}");
+    assert_eq!(repl.session.cancel_tasks(), 0);
+}
+
+#[cfg(feature = "os")]
+#[test]
+fn interrupt_stops_a_prompt_between_inputs() {
+    let dir = TempDir::new("session-idle-prompt-interrupt");
+    std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
+    let (asked_tx, asked_rx) = std::sync::mpsc::channel();
+    let asked_tx = std::sync::Mutex::new(asked_tx);
+    let prompter = move |_: Capability| -> sandlang::policy::PromptFuture {
+        let _ = asked_tx.lock().unwrap().send(());
+        Box::pin(std::future::pending())
+    };
+    let handle = InterruptHandle::new();
+    let config = Config::new().policy(RulePolicy::standard()).prompter(prompter).cwd(dir.path()).module_root(dir.path());
+    let mut repl = Repl::with(config.interrupt(handle.clone()));
+    repl.ok("import fs");
+    repl.ok("let t = spawn { task.sleep(10ms)\nfs.read_text(\"a.txt\") }");
+    let interrupter = std::thread::spawn(move || {
+        asked_rx.recv_timeout(Duration::from_secs(10)).expect("the prompter was not asked");
+        handle.interrupt();
+    });
+    let input = async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        "the input"
+    };
+    let mut errors = Vec::new();
+    let got = repl.rt.block_on(repl.session.run_tasks_until(input, |err| errors.push(err)));
+    interrupter.join().unwrap();
+    assert_eq!(got, Some("the input"));
+    assert!(matches!(errors[..], [Error::Interrupted]), "{errors:?}");
 }
 
 #[cfg(feature = "os")]

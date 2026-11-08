@@ -22,8 +22,8 @@ journal. The sections below group these commits into self-contained changesets.
 2. Typed policy builders: merged in #27 from `typed-policy-builders`
 3. Rule and limit positions in policy: merged in #28 from `policy-positions`
 4. `deny_private_net`: merged in #29 from `deny-private-net`
-5. Precompiled host modules: in review on `precompiled-host-modules`
-6. `InterruptHandle::new`: not started
+5. Precompiled host modules: merged in #30 from `precompiled-host-modules`
+6. `InterruptHandle::new`: in review on `interrupt-handle`
 7. Linter budget and interrupt errors: not started
 8. Host calls to main-module functions: not started; requires 5
 9. Explicit VM control flow and call state: not started

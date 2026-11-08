@@ -70,6 +70,43 @@ The host cannot rely on engine limits, stability, or control.
       `Engine::interrupt` only reaches an engine that is waiting. With
       cross-origin isolation, store the interrupt flag in a
       `SharedArrayBuffer` that the page sets directly.
+- [ ] ❓ _Embedding._ **Decide whether an interrupt before a call starts should
+      stop that call.** `InterruptHandle::interrupt` sets the interrupt flags
+      of active calls only. Each call creates a new flag at the first poll of
+      its future. On the web, `engine.run(src); engine.interrupt();` leaves the
+      run active because `engine.run` polls the future asynchronously. A host
+      with an engine per job also cannot cancel a queued job before `run`
+      starts. Options:
+      - Keep this behavior. Optionally create the interrupt flag before
+        returning the future so that an immediate interrupt stops the call.
+      - Make `InterruptHandle` sticky and add `InterruptHandle::reset()`.
+        However, if two engines share a handle, resetting the handle for one
+        engine clears a pending interrupt for the other engine.
+      - Recommended: make `InterruptHandle` single-use and sticky, like
+        `tokio_util::sync::CancellationToken`, `AbortSignal`, and Go's
+        `context`. Add `Engine::set_interrupt` and `Session::set_interrupt` so
+        the host can replace a used handle. This design also supports item 015.
+      - Give each `Run` its own interrupt handle in changeset 11 of `SPLIT.md`.
+- [ ] ❓ _Sandbox._ Cap the number of worker threads for blocking I/O jobs. If
+      a call stops at a limit or an interrupt during a blocking job, the
+      engine abandons the job. The worker thread remains blocked, and
+      `Pool::run` in `src/platform.rs` spawns a new thread for the next job.
+      Repeated calls against a hung path can exhaust host threads. Cap the
+      thread pool or the blocked jobs per engine. Return an I/O error if a new
+      job exceeds the cap.
+- [ ] ❓ _Embedding._ Share test-execution logic between `Engine::run_tests`
+      and `Session::run_tests`, and apply `max_wall_time` consistently.
+      `Engine::run_tests` applies `max_wall_time` to the entire test suite.
+      `Session::run_tests` applies `max_wall_time` to each test individually.
+      Choose a single rule and document it in SPEC §4.8. Keep session tests on
+      the persistent session VM. Stop the test suite if an internal error
+      resets the session.
+- [ ] ❓ _Sandbox._ Read the main script file through `Engine::discovery_io`
+      and `Fs::read_source` in `Engine::read_main`, as module imports do.
+      `Engine::read_main` currently reads the entire file on the caller's
+      thread before checking `max_source_bytes`. Offloading the bounded read
+      enforces `max_source_bytes`, `max_wall_time`, and interrupts on a large
+      file, a FIFO, or a hung mount.
 
 ## Tier 3: ordinary scripts
 

@@ -7,7 +7,7 @@ mod common;
 
 use common::{TempDir, rt};
 use sandlang::check::budget::CompileBudget;
-use sandlang::engine::{Config, Engine, Error, HostModules, LimitKind, Limits, MemorySink};
+use sandlang::engine::{Config, Engine, Error, HostModules, InterruptHandle, LimitKind, Limits, MemorySink};
 use sandlang::platform::{Deadline, SystemClock};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -303,8 +303,8 @@ fn wall_time_and_interrupts_stop_compilation() {
     assert!(matches!(r, Err(Error::Limit(LimitKind::WallTime))), "{r:?}");
     assert!(took < FAST, "took {took:?}");
 
-    let mut engine = Engine::new(unlimited().stdout(MemorySink::new()));
-    let handle = engine.interrupt_handle();
+    let handle = InterruptHandle::new();
+    let mut engine = Engine::new(unlimited().stdout(MemorySink::new()).interrupt(handle.clone()));
     let t = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(100));
         handle.interrupt();

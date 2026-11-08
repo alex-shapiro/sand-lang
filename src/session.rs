@@ -12,7 +12,7 @@ use crate::check::budget::CompileBudget;
 use crate::check::{Checker, ModKind, ParsedModule};
 use crate::compile::{CompileInput, Incremental, ProgramMark, compile_more};
 use crate::diag::{Diag, FileId, Span};
-use crate::engine::{Config, Discovery, Engine, Error, InterruptHandle, Registry, TestReport, TestResult, on_compile_stack};
+use crate::engine::{CallInterrupt, Config, Discovery, Engine, Error, Registry, TestReport, TestResult, on_compile_stack};
 use crate::modules::{GraphMark, ModuleGraph, NativeInfo, Snapshot, budget_error, native_info};
 use crate::platform::Instant;
 use crate::policy::{Capability, PromptAnswer};
@@ -63,8 +63,7 @@ use std::task::Poll;
 ///   [`Session::was_reset`] returns `true` after the reset. The call returns
 ///   [`Error::Internal`] with [`RESET_NOTE`] appended to the message.
 pub struct Session {
-    /// Shares the configuration, natives and "always" answers of the engine
-    /// that created the session, with its own interrupt flag.
+    /// Compiles and runs the inputs.
     engine: Engine,
     root: PathBuf,
     cwd: PathBuf,
@@ -75,6 +74,8 @@ pub struct Session {
     was_reset: bool,
     /// The wall-time limit of each input (see [`Session::set_wall_time`]).
     wall_time: Option<std::time::Duration>,
+    /// The interrupt state of the current call.
+    call: CallInterrupt,
 }
 
 /// The suffix of the error message of a call that reset the session.
@@ -108,7 +109,8 @@ impl Session {
         let (root, normalized_root) = engine.source_root().clone();
         let cwd = engine.run_cwd(root);
         let wall_time = engine.config().limits.max_wall_time;
-        Session { engine, root: normalized_root, cwd, state: None, inputs: 0, exit_code: None, was_reset: false, wall_time }
+        let call = engine.begin_call();
+        Session { engine, root: normalized_root, cwd, state: None, inputs: 0, exit_code: None, was_reset: false, wall_time, call }
     }
 
     /// Checks, compiles and runs one input. Returns the debug form of its
@@ -129,14 +131,13 @@ impl Session {
     }
 
     async fn eval_named(&mut self, name: Option<&str>, source: &str) -> Result<Option<String>, Error> {
-        self.was_reset = false;
+        self.begin_call();
         let r = CatchUnwind::new(self.eval_inner(name, source)).await;
         self.settle(r)
     }
 
     async fn eval_inner(&mut self, name: Option<&str>, source: &str) -> Result<Option<String>, Error> {
         self.exit_code = None;
-        self.engine.clear_interrupt();
         self.start().await?;
         self.inputs += 1;
         let name = name.map_or_else(|| format!("<input {}>", self.inputs), str::to_string);
@@ -151,15 +152,14 @@ impl Session {
     /// The type of an expression, checked in the context of the session's
     /// inputs without running it (or changing the session).
     pub fn type_of(&mut self, expr: &str) -> Result<String, Error> {
-        self.was_reset = false;
+        self.begin_call();
         let r = crate::unwind::catch(|| self.type_of_inner(expr));
         self.settle(r)
     }
 
     fn type_of_inner(&mut self, expr: &str) -> Result<String, Error> {
-        self.engine.clear_interrupt();
         let registry = self.engine.registry().clone();
-        let budget = self.engine.compile_budget(self.deadline());
+        let budget = self.engine.compile_budget(self.deadline(), &self.call);
         let st = self.state()?;
         let mark = st.graph.mark();
         let file = st.graph.sm.add("<type>", expr);
@@ -195,11 +195,17 @@ impl Session {
         })
     }
 
-    /// Runs every `test` block entered so far (the latest of those with the
-    /// same name), each as the main task of the session's VM, against the
-    /// current state; their effects persist.
+    /// Runs every `test` block defined in the session on the session's VM and
+    /// returns a [`TestReport`].
+    ///
+    /// If multiple `test` blocks share a name, only the latest definition
+    /// runs. State changes made by a test persist for subsequent tests and
+    /// inputs. Runtime errors and limit violations are recorded as test
+    /// failures in the report so that remaining tests still run. Calling
+    /// [`InterruptHandle::interrupt`](crate::engine::InterruptHandle::interrupt)
+    /// stops the test run and returns [`Error::Interrupted`].
     pub async fn run_tests(&mut self) -> Result<TestReport, Error> {
-        self.was_reset = false;
+        self.begin_call();
         let r = CatchUnwind::new(self.run_tests_inner()).await;
         self.settle(r)
     }
@@ -269,70 +275,78 @@ impl Session {
         self.was_reset
     }
 
-    /// Runs background tasks from earlier inputs until `until` completes.
-    /// Returns the output of `until`. Pass a future that reads the next user
-    /// input so background tasks continue to run between inputs.
+    /// Runs background tasks from earlier inputs until `until` completes, and
+    /// returns the output of `until`.
     ///
-    /// The instruction, CPU time, and output limits apply to this call just
-    /// like an input. The wall-time limit does not apply to this call.
-    /// Permission prompts wait until `until` completes so they do not compete
-    /// with the front end for terminal input. While a task waits for a
-    /// permission prompt, all script execution pauses. Forward process standard
-    /// input through [`crate::stdin_feed::StdinFeed`].
+    /// Pass a future that reads the next user input so that background tasks
+    /// continue to run between inputs. Forward process standard input through
+    /// [`crate::stdin_feed::StdinFeed`].
     ///
-    /// If a task fails with an error, exceeds a limit, or receives an
-    /// interrupt, the session cancels all tasks and passes the error to
-    /// `on_error`. The call then continues to await `until`. If a task calls
-    /// `exit`, this method records the exit code in [`Session::exit_code`]. It
-    /// then drops `until` and returns `None`.
+    /// The instruction, CPU-time, and output limits apply to this call.
+    /// `max_wall_time` does not apply. If a task needs a permission prompt,
+    /// the session pauses script execution and asks the prompter after `until`
+    /// completes so that the front end has exclusive access to terminal input.
+    ///
+    /// If a task fails with an error or exceeds a limit, the session cancels
+    /// all tasks, passes the error to `on_error`, and continues awaiting
+    /// `until`. If [`InterruptHandle::interrupt`](crate::engine::InterruptHandle::interrupt)
+    /// is called when background tasks exist, the session also cancels all
+    /// tasks, passes [`Error::Interrupted`] to `on_error`, and continues
+    /// awaiting `until`. If a task calls `exit`, the session records the code
+    /// in [`Session::exit_code`], drops `until`, and returns `None`.
     pub async fn run_tasks_until<F: Future>(&mut self, until: F, mut on_error: impl FnMut(Error)) -> Option<F::Output> {
-        self.was_reset = false;
+        self.begin_call();
         let mut until = std::pin::pin!(until);
-        let runnable = self.state.as_mut().is_some_and(|st| {
-            st.recover();
-            !st.vm.ready.is_empty() || !st.vm.io.is_empty()
+        let runnable = self.state.as_mut().is_some_and(|state| {
+            state.recover();
+            !state.vm.ready.is_empty() || !state.vm.io.is_empty()
         });
-        if !runnable {
-            return Some(until.await);
-        }
-        // Run the tasks until `until` completes (the run is then dropped,
-        // where it waits) or they stop.
-        let stopped = {
-            let mut run = std::pin::pin!(CatchUnwind::new(self.run_idle()));
-            std::future::poll_fn(|cx| {
-                if let Poll::Ready(v) = until.as_mut().poll(cx) {
-                    return Poll::Ready(Err(v));
+        let output = if runnable {
+            // Poll background tasks until `until` completes or the tasks stop.
+            let stopped = {
+                let mut run = std::pin::pin!(CatchUnwind::new(self.run_idle()));
+                std::future::poll_fn(|cx| {
+                    if let Poll::Ready(out) = until.as_mut().poll(cx) {
+                        return Poll::Ready(Err(out));
+                    }
+                    run.as_mut().poll(cx).map(Ok)
+                })
+                .await
+            };
+            match stopped {
+                Err(out) => {
+                    if let Some(state) = self.state.as_ref() {
+                        state.vm.flush_stdout();
+                    }
+                    out
                 }
-                run.as_mut().poll(cx).map(Ok)
-            })
-            .await
-        };
-        let output = match stopped {
-            Err(v) => {
-                if let Some(st) = self.state.as_ref() {
-                    st.vm.flush_stdout();
+                Ok(idle_result) => {
+                    match self.settle(idle_result) {
+                        Ok(false) => {}
+                        Ok(true) => return None,
+                        Err(err) => on_error(err),
+                    }
+                    until.await
                 }
-                v
             }
-            Ok(r) => {
-                match self.settle(r) {
-                    Ok(false) => {}
-                    Ok(true) => return None,
-                    Err(e) => on_error(e),
-                }
-                until.await
-            }
+        } else {
+            until.await
         };
-        // A prompt a task needed meanwhile is asked now; the task retries
-        // its call when it runs again.
-        if let Some(st) = self.state.as_mut()
-            && let Some(cap) = st.deferred_prompt.take()
+        // Ask any deferred permission prompt after `until` completes.
+        if let Some(state) = self.state.as_mut()
+            && let Some(capability) = state.deferred_prompt.take()
         {
             let answer = match self.engine.config().prompter.clone() {
-                Some(p) => p.prompt(cap.clone()).await,
-                None => PromptAnswer::DenyOnce,
+                Some(prompter) => self.call.unless_interrupted(prompter.prompt(capability.clone())).await,
+                None => Some(PromptAnswer::DenyOnce),
             };
-            st.vm.apply_answer(cap, answer);
+            if let Some(answer) = answer {
+                state.vm.apply_answer(capability, answer);
+            }
+        }
+        // If an interrupt arrived outside `run_idle`, cancel the remaining tasks.
+        if self.call.is_set() && self.cancel_tasks() > 0 {
+            on_error(Error::Interrupted);
         }
         Some(output)
     }
@@ -367,12 +381,6 @@ impl Session {
         r
     }
 
-    /// A handle that interrupts the input being run, from any thread. The
-    /// input fails with [`Error::Interrupted`]; the session remains usable.
-    pub fn interrupt_handle(&self) -> InterruptHandle {
-        self.engine.interrupt_handle()
-    }
-
     /// Whether `source` is a complete input, as far as the lexer can tell: a
     /// line-based front end keeps reading while it is not (brackets or a
     /// string or comment left open, a final binary operator or a trailing doc
@@ -390,6 +398,13 @@ impl Session {
             self.state = Some(Box::new(self.init()?));
         }
         Ok(self.state.as_mut().unwrap())
+    }
+
+    /// Resets per-call flags and registers a fresh [`CallInterrupt`] for the
+    /// current call.
+    fn begin_call(&mut self) {
+        self.was_reset = false;
+        self.call = self.engine.begin_call_with_io(self.call.io.clone());
     }
 
     /// Makes sure the session is started and its standard modules initialized.
@@ -423,7 +438,7 @@ impl Session {
         // The standard library's program; its entry initializes the prelude and `task`.
         let prog = snapshot.program.clone();
         let pending = Some(prog.entry);
-        let vm = self.engine.new_vm(Arc::new(prog), self.engine.host_modules(), self.cwd.clone(), false);
+        let vm = self.engine.new_vm(Arc::new(prog), self.engine.host_modules(), self.cwd.clone(), false, &self.call);
         let compiler = snapshot.compiler.clone();
         Ok(State { snapshot, graph, checker, compiler, vm, pending, loading: None, running: false, deferred_prompt: None })
     }
@@ -443,7 +458,7 @@ impl Session {
         deadline: Option<Instant>,
     ) -> Result<(u32, Option<TypeId>, bool, Option<Instant>), Error> {
         let max_source = self.engine.config().limits.max_source_bytes;
-        let Session { engine, root, state, .. } = self;
+        let Session { engine, root, state, call, .. } = self;
         let registry = engine.registry();
         let st = state.as_mut().expect("session not started");
         if let Some(mark) = st.loading.take() {
@@ -461,7 +476,7 @@ impl Session {
         let mut errors = Vec::new();
         st.loading = Some(mark);
         let mut prompted = std::time::Duration::ZERO;
-        let discovery = Discovery { snap: &st.snapshot, root, deadline, prompt: true };
+        let discovery = Discovery { snap: &st.snapshot, root, deadline, prompt: true, interrupt: call };
         let stop = engine.discover(&discovery, &mut st.graph, cell, imports, format!("input:{name}"), &mut errors, &mut prompted).await;
         st.loading = None;
         if let Some(e) = stop {
@@ -487,7 +502,7 @@ impl Session {
             compiler: st.compiler.clone(),
             snapshot: st.snapshot.clone(),
             registry: registry.clone(),
-            budget: engine.compile_budget(deadline),
+            budget: engine.compile_budget(deadline, call),
             optimize: engine.config().optimize,
             new_mods,
             cell,
@@ -525,14 +540,11 @@ impl Session {
     /// wall-time limit passing at `deadline`. Returns the debug form of its
     /// result if `show`. On failure, cancels all tasks.
     async fn run(&mut self, proto: u32, show: bool, deadline: Option<Instant>) -> Result<Option<String>, Error> {
-        let Session { engine, state, exit_code, .. } = self;
+        let Session { state, exit_code, call, .. } = self;
         let st = state.as_mut().expect("session not started");
         st.recover();
         let vm = &mut st.vm;
-        engine.clear_interrupt();
-        // Limits other than memory apply to each input.
-        vm.meter.reset();
-        vm.host.output_bytes = 0;
+        vm.begin_session_run(call);
         vm.deadline = deadline;
         st.running = true;
         let r = vm.run_main(proto).await;
@@ -555,12 +567,10 @@ impl Session {
     /// none can run or one needs a permission prompt, which is deferred.
     /// Returns whether a task called `exit`.
     async fn run_idle(&mut self) -> Result<bool, Error> {
-        let Session { engine, state, exit_code, .. } = self;
+        let Session { state, exit_code, call, .. } = self;
         let st = state.as_mut().expect("session not started");
         let vm = &mut st.vm;
-        engine.clear_interrupt();
-        vm.meter.reset();
-        vm.host.output_bytes = 0;
+        vm.begin_session_run(call);
         // Waiting for input may take any time.
         vm.deadline = None;
         let r = vm.drive(None).await;

@@ -15,7 +15,7 @@ use reedline::{
     PromptHistorySearch, Reedline, ReedlineEvent, ReedlineRawEvent, Signal, StyledText, ValidationResult, Validator,
     default_emacs_keybindings,
 };
-use sandlang::engine::Error;
+use sandlang::engine::{Error, InterruptHandle};
 use sandlang::session::Session;
 use sandlang::stdin_feed::{StdinFeed, StdinRequest};
 use sandlang::syntax::highlight::{Highlight, highlight};
@@ -70,7 +70,8 @@ pub(crate) fn cmd_repl(args: &[String]) -> Result<u8, String> {
     let stdin_feed = opts.stdin_feed;
     let config =
         opts.config.stdout(ReplSink { screen: screen.clone(), stderr: false }).stderr(ReplSink { screen: screen.clone(), stderr: true });
-    let mut session = Session::new(config);
+    let interrupt = InterruptHandle::new();
+    let mut session = Session::new(config.interrupt(interrupt.clone()));
     let reader = if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         Reader::Editor(EditorReader::new(screen.clone()))
     } else {
@@ -78,7 +79,7 @@ pub(crate) fn cmd_repl(args: &[String]) -> Result<u8, String> {
     };
     let mut io = Io { reader, stdin_feed };
     outln!("sand {} — help() for documentation, :help for the REPL's commands, :quit to exit", env!("CARGO_PKG_VERSION"));
-    let status = rt.block_on(repl(&mut session, &screen, &mut io));
+    let status = rt.block_on(repl(&mut session, &interrupt, &screen, &mut io));
     // Drop the runtime without waiting for a blocked stdin read thread.
     rt.shutdown_background();
     Ok(status)
@@ -100,7 +101,7 @@ enum InputEvent {
     End,
 }
 
-async fn repl(session: &mut Session, screen: &Screen, io: &mut Io) -> u8 {
+async fn repl(session: &mut Session, interrupt: &InterruptHandle, screen: &Screen, io: &mut Io) -> u8 {
     let mut input = String::new();
     loop {
         let prompt = if input.is_empty() { "> " } else { "... " };
@@ -142,7 +143,7 @@ async fn repl(session: &mut Session, screen: &Screen, io: &mut Io) -> u8 {
                 if !input.trim().is_empty() {
                     outln!();
                     io.stdin_feed.end();
-                    eval(session, io, &input).await;
+                    eval(session, interrupt, io, &input).await;
                 }
                 break;
             }
@@ -162,7 +163,7 @@ async fn repl(session: &mut Session, screen: &Screen, io: &mut Io) -> u8 {
                         Ok(t) => outln!("{t}"),
                         Err(e) => eprint!("{}", e.render()),
                     },
-                    "test" => match foreground(session.interrupt_handle(), io, session.run_tests()).await {
+                    "test" => match foreground(interrupt, io, session.run_tests()).await {
                         Ok(report) => out!("{}", report.render()),
                         Err(e) => eprint!("{}", e.render()),
                     },
@@ -175,7 +176,7 @@ async fn repl(session: &mut Session, screen: &Screen, io: &mut Io) -> u8 {
         if !Session::is_complete(&input) {
             continue;
         }
-        eval(session, io, &std::mem::take(&mut input)).await;
+        eval(session, interrupt, io, &std::mem::take(&mut input)).await;
         if let Some(code) = session.exit_code() {
             return exit_status(code);
         }
@@ -183,19 +184,18 @@ async fn repl(session: &mut Session, screen: &Screen, io: &mut Io) -> u8 {
     0
 }
 
-/// Runs one input, printing its value or error.
-async fn eval(session: &mut Session, io: &mut Io, input: &str) {
-    let handle = session.interrupt_handle();
-    match foreground(handle, io, session.eval(input)).await {
+/// Evaluates `input` and prints its value or error.
+async fn eval(session: &mut Session, interrupt: &InterruptHandle, io: &mut Io, input: &str) {
+    match foreground(interrupt, io, session.eval(input)).await {
         Ok(Some(value)) => outln!("{value}"),
         Ok(None) => {}
-        Err(e) => eprint!("{}", e.render()),
+        Err(err) => eprint!("{}", err.render()),
     }
 }
 
-/// Awaits `fut` and interrupts the session if Ctrl-C is pressed.
-async fn foreground<T>(handle: sandlang::engine::InterruptHandle, io: &mut Io, fut: impl std::future::Future<Output = T>) -> T {
-    let mut fut = std::pin::pin!(fut);
+/// Awaits `future` and interrupts the session if Ctrl-C is pressed.
+async fn foreground<T>(interrupt: &InterruptHandle, io: &mut Io, future: impl std::future::Future<Output = T>) -> T {
+    let mut future = std::pin::pin!(future);
     let mut active_request: Option<StdinRequest> = None;
     loop {
         let feed = &io.stdin_feed;
@@ -208,8 +208,8 @@ async fn foreground<T>(handle: sandlang::engine::InterruptHandle, io: &mut Io, f
             }
         };
         tokio::select! {
-            r = &mut fut => return r,
-            Ok(()) = tokio::signal::ctrl_c() => handle.interrupt(),
+            output = &mut future => return output,
+            Ok(()) = tokio::signal::ctrl_c() => interrupt.interrupt(),
             request = input_needed, if active_request.is_none() => active_request = Some(request),
             event = io.reader.script_line(), if active_request.is_some() => {
                 let request = active_request.take().expect("active stdin request");

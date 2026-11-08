@@ -20,7 +20,7 @@ use crate::stdlib::time::TimeZone;
 use crate::types::{FnId, ModId};
 use crate::vm::bytecode::Program;
 use crate::vm::heap::GcStats;
-use crate::vm::sched::{IoShared, IoTable, RunEnd};
+use crate::vm::sched::{IoShared, RunEnd};
 use crate::vm::{Always, Host, HostFn, NativeEntry, OutputSink, Rng, SharedSink, TraceFrame, Trap, Vm, WaitKind, entropy_seed};
 use parking_lot::Mutex;
 use std::borrow::Cow;
@@ -29,7 +29,7 @@ use std::fmt;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, OnceLock};
+use std::sync::{Arc, LazyLock, OnceLock, Weak};
 use std::time::Duration;
 
 /// Per-engine resource limits.
@@ -252,6 +252,7 @@ pub struct Config {
     #[cfg(feature = "os")]
     pub(crate) network: Option<Arc<dyn crate::network::Network>>,
     pub(crate) time_zone: Option<TimeZone>,
+    interrupt: Option<InterruptHandle>,
 }
 
 /// HTTP request destination.
@@ -304,7 +305,15 @@ impl Config {
             #[cfg(feature = "os")]
             network: None,
             time_zone: None,
+            interrupt: None,
         }
+    }
+
+    /// Sets the [`InterruptHandle`] used to stop active calls on the engine or
+    /// session built from this configuration.
+    pub fn interrupt(mut self, handle: InterruptHandle) -> Self {
+        self.interrupt = Some(handle);
+        self
     }
 
     /// Sets the clock and timer provider for the engine.
@@ -487,17 +496,91 @@ impl Config {
     }
 }
 
-/// Stops a running engine from another thread.
-#[derive(Clone)]
+/// A thread-safe handle for stopping an engine or session.
+/// Configured with [`Config::interrupt`].
+///
+/// If configured, the engine checks for an interrupt flag at regular checkpoints:
+///
+/// - During compilation, at fixed intervals
+/// - During execution, at meter checkpoints
+/// - During waits for I/O, timers, and permission prompts
+///
+/// If an interrupt is received at a checkpoint, the engine or session cancels
+/// all ongoing compilation and VM tasks without running `defer` blocks.
+/// The engine or session can be called again safely in the future, and a
+/// session's global state remains safe.
+///
+/// An interrupted engine returns [`Error::Interrupted`].
+/// An interrupted REPL session cancels all ongoing tasks,
+/// but `run_tasks_until` continues to wait for host input.
+#[derive(Clone, Default)]
 pub struct InterruptHandle {
-    flag: Arc<AtomicBool>,
-    shared: Arc<IoShared>,
+    targets: Arc<Mutex<InterruptTargets>>,
+}
+
+/// Active and recently finished calls registered with an [`InterruptHandle`].
+#[derive(Default)]
+struct InterruptTargets {
+    calls: Vec<InterruptTarget>,
+    /// Call count threshold at which `attach` prunes finished calls.
+    cleanup_len: usize,
+}
+
+/// Weak references to a call's interrupt flag and I/O waker.
+struct InterruptTarget {
+    flag: Weak<AtomicBool>,
+    io: Weak<IoShared>,
+}
+
+/// Interrupt flag and I/O waker for an active engine or session call.
+#[derive(Clone)]
+pub(crate) struct CallInterrupt {
+    pub flag: Arc<AtomicBool>,
+    pub io: Arc<IoShared>,
+}
+
+impl CallInterrupt {
+    pub fn is_set(&self) -> bool {
+        self.flag.load(Ordering::Relaxed)
+    }
+
+    /// Awaits `future`, or returns `None` if the call is interrupted.
+    pub async fn unless_interrupted<T>(&self, future: impl Future<Output = T>) -> Option<T> {
+        let mut future = std::pin::pin!(future);
+        std::future::poll_fn(|cx| {
+            self.io.set_waker(cx.waker());
+            if self.is_set() {
+                return std::task::Poll::Ready(None);
+            }
+            future.as_mut().poll(cx).map(Some)
+        })
+        .await
+    }
 }
 
 impl InterruptHandle {
+    /// Creates an interrupt handle.
+    pub fn new() -> InterruptHandle {
+        InterruptHandle::default()
+    }
+
+    /// Stops and returns from the engine or session.
     pub fn interrupt(&self) {
-        self.flag.store(true, Ordering::SeqCst);
-        self.shared.wake();
+        let calls: Vec<_> =
+            self.targets.lock().calls.iter().filter_map(|target| Some((target.flag.upgrade()?, target.io.upgrade()?))).collect();
+        for (flag, io) in calls {
+            flag.store(true, Ordering::SeqCst);
+            io.wake();
+        }
+    }
+
+    fn attach(&self, call: &CallInterrupt) {
+        let mut targets = self.targets.lock();
+        if targets.calls.len() >= targets.cleanup_len {
+            targets.calls.retain(|target| target.flag.strong_count() > 0);
+            targets.cleanup_len = 2 * targets.calls.len().max(4);
+        }
+        targets.calls.push(InterruptTarget { flag: Arc::downgrade(&call.flag), io: Arc::downgrade(&call.io) });
     }
 }
 
@@ -807,8 +890,6 @@ impl Registry {
 
 pub struct Engine {
     config: Config,
-    interrupt: Arc<AtomicBool>,
-    shared: Arc<IoShared>,
     /// "Always" prompt answers, remembered for the lifetime of the engine
     /// (SPEC 14.3): shared by import checks and every run (and VM).
     always: Always,
@@ -864,16 +945,7 @@ impl Engine {
     /// Creates an engine with `config`.
     pub fn new(config: Config) -> Engine {
         let origin = config.clock.now();
-        Engine {
-            origin,
-            config,
-            interrupt: Arc::new(AtomicBool::new(false)),
-            shared: Arc::new(IoShared::default()),
-            always: Arc::default(),
-            gc_stats: GcStats::default(),
-            root: OnceLock::new(),
-            spare: Mutex::default(),
-        }
+        Engine { origin, config, always: Arc::default(), gc_stats: GcStats::default(), root: OnceLock::new(), spare: Mutex::default() }
     }
 
     /// Returns the sorted names of all registered standard and host modules.
@@ -912,25 +984,25 @@ impl Engine {
         self.gc_stats
     }
 
-    /// Type checks source text as [`Engine::check_source`] does, and lints
-    /// it. Compile errors are an [`Error::Compile`]; a lint that runs out of
-    /// budget or time is an [`Error::Io`].
+    /// Type checks `source` as [`Engine::check_source`] does, and lints it.
+    ///
+    /// Returns [`Error::Compile`] on compile errors, or [`Error::Io`] if
+    /// linting exceeds its fuel or wall-time budget.
     pub fn lint_source(&self, name: &str, source: &str) -> Result<Vec<crate::lint::LintWarning>, Error> {
-        let c = self.compile_now(name, source, &self.source_root().1, None, true)?;
-        self.recycle(c.program, c.snapshot);
-        Ok(c.lints.unwrap_or_default())
+        let call = self.begin_call();
+        let compiled = self.compile_now(&call, name, source, &self.source_root().1, None, true)?;
+        self.recycle(compiled.program, compiled.snapshot);
+        Ok(compiled.lints.unwrap_or_default())
     }
 
-    /// Lints a file and its imports, like [`Engine::lint_source`].
+    /// Type checks and lints the file at `path` and its imports, as
+    /// [`Engine::lint_source`] does.
     pub fn lint_file(&self, path: impl AsRef<Path>) -> Result<Vec<crate::lint::LintWarning>, Error> {
+        let call = self.begin_call();
         let (name, source, root) = self.read_main(path.as_ref())?;
-        let c = self.compile_now(&name, &source, &root, Some(path.as_ref()), true)?;
-        self.recycle(c.program, c.snapshot);
-        Ok(c.lints.unwrap_or_default())
-    }
-
-    pub fn interrupt_handle(&self) -> InterruptHandle {
-        InterruptHandle { flag: self.interrupt.clone(), shared: self.shared.clone() }
+        let compiled = self.compile_now(&call, &name, &source, &root, Some(path.as_ref()), true)?;
+        self.recycle(compiled.program, compiled.snapshot);
+        Ok(compiled.lints.unwrap_or_default())
     }
 
     pub(crate) fn config(&self) -> &Config {
@@ -945,54 +1017,75 @@ impl Engine {
         &self.config.host_modules.0
     }
 
-    /// Forgets interrupts of earlier runs; interrupts from now on stop the
-    /// next compilation or run.
-    pub(crate) fn clear_interrupt(&self) {
-        self.interrupt.store(false, Ordering::SeqCst);
+    /// Creates a [`CallInterrupt`] for a new call and registers it with the
+    /// configured [`InterruptHandle`].
+    pub(crate) fn begin_call(&self) -> CallInterrupt {
+        self.begin_call_with_io(Arc::default())
     }
 
-    /// The point at which a run starting now (with its compilation)
-    /// exceeds the wall-time limit.
+    /// Creates a [`CallInterrupt`] that shares `io` with an existing VM and
+    /// registers it with the configured [`InterruptHandle`].
+    pub(crate) fn begin_call_with_io(&self, io: Arc<IoShared>) -> CallInterrupt {
+        let call = CallInterrupt { flag: Arc::default(), io };
+        if let Some(handle) = &self.config.interrupt {
+            handle.attach(&call);
+        }
+        call
+    }
+
+    /// Returns the instant at which a call starting now reaches
+    /// `Limits::max_wall_time`.
     pub(crate) fn deadline(&self) -> Option<Instant> {
         self.config.limits.max_wall_time.and_then(|t| self.config.clock.now().checked_add(t))
     }
 
-    /// A compile budget for a compilation that must end by `deadline`.
-    pub(crate) fn compile_budget(&self, deadline: Option<Instant>) -> Arc<CompileBudget> {
+    /// Creates a [`CompileBudget`] for `call` with `deadline`.
+    pub(crate) fn compile_budget(&self, deadline: Option<Instant>, call: &CallInterrupt) -> Arc<CompileBudget> {
         let limits = &self.config.limits;
         let deadline = deadline.map(|at| crate::platform::Deadline { at, clock: self.config.clock.clone() });
-        Arc::new(CompileBudget::new(limits.max_compile_fuel, deadline, Some(self.interrupt.clone())))
+        Arc::new(CompileBudget::new(limits.max_compile_fuel, deadline, Some(call.flag.clone())))
     }
 
-    /// Type checks a source without running it. Imports the policy would
-    /// prompt for are denied.
+    /// Type checks `source` without running it. Denies imports that require a
+    /// permission prompt.
     pub fn check_source(&self, name: &str, source: &str) -> Result<(), Error> {
-        let c = self.compile_now(name, source, &self.source_root().1, None, false)?;
-        self.recycle(c.program, c.snapshot);
+        let call = self.begin_call();
+        let compiled = self.compile_now(&call, name, source, &self.source_root().1, None, false)?;
+        self.recycle(compiled.program, compiled.snapshot);
         Ok(())
     }
 
-    /// Type checks a file and its imports, like [`Engine::check_source`].
+    /// Type checks the file at `path` and its imports, as
+    /// [`Engine::check_source`] does.
     pub fn check_file(&self, path: impl AsRef<Path>) -> Result<(), Error> {
+        let call = self.begin_call();
         let (name, source, root) = self.read_main(path.as_ref())?;
-        let c = self.compile_now(&name, &source, &root, Some(path.as_ref()), false)?;
-        self.recycle(c.program, c.snapshot);
+        let compiled = self.compile_now(&call, &name, &source, &root, Some(path.as_ref()), false)?;
+        self.recycle(compiled.program, compiled.snapshot);
         Ok(())
     }
 
-    /// Keeps `prog` (if `snapshot` is given and nothing else holds it),
-    /// truncated to the snapshot's tables, to compile the next program on:
-    /// copying the snapshot's program costs more than compiling a small one.
+    /// Saves `prog` as a spare base program if `snapshot` is present and
+    /// `prog` has a single reference. Rolling `prog` back to `snapshot` is
+    /// cheaper than cloning the snapshot program for the next compilation.
     fn recycle(&self, prog: Arc<Program>, snapshot: Option<Arc<Snapshot>>) {
         let (Ok(mut prog), Some(snap)) = (Arc::try_unwrap(prog), snapshot) else { return };
         snap.mark.rollback(&mut prog);
         *self.spare.lock() = Some((snap, prog));
     }
 
-    /// Compiles synchronously: without prompts, it never waits.
-    fn compile_now(&self, name: &str, source: &str, root: &Path, path: Option<&Path>, lint: bool) -> Result<Compiled, Error> {
+    /// Compiles `source` synchronously with import prompts disabled.
+    fn compile_now(
+        &self,
+        call: &CallInterrupt,
+        name: &str,
+        source: &str,
+        root: &Path,
+        path: Option<&Path>,
+        lint: bool,
+    ) -> Result<Compiled, Error> {
         let options = CompileOptions { prompt: false, lint };
-        let compiling = std::pin::pin!(self.compile_with(name, source, root, path, options));
+        let compiling = std::pin::pin!(self.compile_with(call, name, source, root, path, options));
         let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
         match crate::unwind::catch(|| compiling.poll(&mut cx)) {
             Ok(std::task::Poll::Ready(r)) => r,
@@ -1019,8 +1112,9 @@ impl Engine {
     }
 
     async fn run_source_inner(&mut self, name: &str, source: &str) -> Result<Outcome, Error> {
-        let (compiled, cwd) = self.compile_main_source(name, source).await?;
-        self.execute(compiled, cwd).await
+        let call = self.begin_call();
+        let (compiled, cwd) = self.compile_main_source(&call, name, source).await?;
+        self.execute(&call, compiled, cwd).await
     }
 
     pub async fn run_file(&mut self, path: impl AsRef<Path>) -> Result<Outcome, Error> {
@@ -1028,8 +1122,9 @@ impl Engine {
     }
 
     async fn run_file_inner(&mut self, path: &Path) -> Result<Outcome, Error> {
-        let (compiled, cwd) = self.compile_main_file(path).await?;
-        self.execute(compiled, cwd).await
+        let call = self.begin_call();
+        let (compiled, cwd) = self.compile_main_file(&call, path).await?;
+        self.execute(&call, compiled, cwd).await
     }
 
     /// Compiles `source` and its imports into a [`CompiledProgram`].
@@ -1038,7 +1133,8 @@ impl Engine {
     /// as [`Engine::run_source`] does.
     pub async fn compile_source(&self, name: &str, source: &str) -> Result<CompiledProgram, Error> {
         crate::unwind::guard(async {
-            let (compiled, _) = self.compile_main_source(name, source).await?;
+            let call = self.begin_call();
+            let (compiled, _) = self.compile_main_source(&call, name, source).await?;
             Ok(compiled.into_program())
         })
         .await
@@ -1050,7 +1146,8 @@ impl Engine {
     /// as [`Engine::run_file`] does.
     pub async fn compile_file(&self, path: impl AsRef<Path>) -> Result<CompiledProgram, Error> {
         crate::unwind::guard(async {
-            let (compiled, _) = self.compile_main_file(path.as_ref()).await?;
+            let call = self.begin_call();
+            let (compiled, _) = self.compile_main_file(&call, path.as_ref()).await?;
             Ok(compiled.into_program())
         })
         .await
@@ -1065,7 +1162,7 @@ impl Engine {
     /// Each run starts with fresh globals. The engine measures resource limits
     /// from the start of the run.
     pub async fn run_program(&mut self, program: &CompiledProgram) -> Result<Outcome, Error> {
-        self.clear_interrupt();
+        let call = self.begin_call();
         let compiled = Compiled {
             program: program.program.clone(),
             host_modules: program.host_modules.clone(),
@@ -1074,21 +1171,21 @@ impl Engine {
             snapshot: None,
         };
         let cwd = self.run_cwd(self.source_root().0.clone());
-        crate::unwind::guard(self.execute(compiled, cwd)).await
+        crate::unwind::guard(self.execute(&call, compiled, cwd)).await
     }
 
-    /// Compiles `source` as the main module. Returns the compiled program and
-    /// the working directory for its run.
-    async fn compile_main_source(&self, name: &str, source: &str) -> Result<(Compiled, PathBuf), Error> {
-        let (root, normalized_root) = self.source_root().clone();
-        Ok((self.compile(name, source, &normalized_root, None).await?, self.run_cwd(root)))
-    }
-
-    /// Compiles the file at `path` as the main module. Returns the compiled
+    /// Compiles `source` as the main module for `call`. Returns the compiled
     /// program and the working directory for its run.
-    async fn compile_main_file(&self, path: &Path) -> Result<(Compiled, PathBuf), Error> {
+    async fn compile_main_source(&self, call: &CallInterrupt, name: &str, source: &str) -> Result<(Compiled, PathBuf), Error> {
+        let (root, normalized_root) = self.source_root().clone();
+        Ok((self.compile(call, name, source, &normalized_root, None).await?, self.run_cwd(root)))
+    }
+
+    /// Compiles the file at `path` as the main module for `call`. Returns the
+    /// compiled program and the working directory for its run.
+    async fn compile_main_file(&self, call: &CallInterrupt, path: &Path) -> Result<(Compiled, PathBuf), Error> {
         let (name, source, root) = self.read_main(path)?;
-        Ok((self.compile(&name, &source, &root, Some(path)).await?, self.run_cwd(root)))
+        Ok((self.compile(call, &name, &source, &root, Some(path)).await?, self.run_cwd(root)))
     }
 
     /// Returns the working directory for a run whose module root is `root`.
@@ -1096,18 +1193,27 @@ impl Engine {
         self.config.cwd.clone().unwrap_or(root)
     }
 
+    /// Compiles the script at `path` and runs each of its `test` blocks on a
+    /// fresh VM after the module initializer. Returns a [`TestReport`] with
+    /// the outcome of each test.
+    ///
+    /// Runtime errors and limit violations are recorded as test failures in
+    /// the report so that remaining tests still run. Calling
+    /// [`InterruptHandle::interrupt`] stops the test run and returns
+    /// [`Error::Interrupted`].
     pub async fn run_tests(&mut self, path: impl AsRef<Path>) -> Result<TestReport, Error> {
         crate::unwind::guard(self.run_tests_inner(path.as_ref())).await
     }
 
     async fn run_tests_inner(&mut self, path: &Path) -> Result<TestReport, Error> {
-        let (compiled, cwd) = self.compile_main_file(path).await?;
+        let call = self.begin_call();
+        let (compiled, cwd) = self.compile_main_file(&call, path).await?;
         let prog = compiled.program;
         // The wall-time limit bounds the whole test run.
         let mut deadline = compiled.deadline;
         let mut report = TestReport::default();
         for (tname, proto) in prog.tests.clone() {
-            let mut vm = self.new_vm(prog.clone(), &compiled.host_modules, cwd.clone(), true);
+            let mut vm = self.new_vm(prog.clone(), &compiled.host_modules, cwd.clone(), true, &call);
             vm.deadline = deadline;
             let init = vm.run_main(prog.entry).await;
             let result = match init {
@@ -1117,10 +1223,12 @@ impl Engine {
                     match end_run(&mut vm, r).await {
                         Ok(RunEnd::Finished(_)) | Ok(RunEnd::Exit(0)) => Ok(()),
                         Ok(RunEnd::Exit(c)) => Err(format!("exited with code {c}")),
+                        Err(Trap::Interrupted) => return Err(Error::Interrupted),
                         Err(t) => Err(trap_message(t)),
                     }
                 }
                 Ok(RunEnd::Exit(c)) => Err(format!("module exited with code {c}")),
+                Err(Trap::Interrupted) => return Err(Error::Interrupted),
                 Err(t) => Err(trap_message(t)),
             };
             deadline = vm.deadline;
@@ -1151,8 +1259,8 @@ impl Engine {
         Ok((name, source, root))
     }
 
-    /// Creates a VM to execute `prog` with the native functions in `host_modules`.
-    pub(crate) fn new_vm(&self, prog: Arc<Program>, host_modules: &HostModules, cwd: PathBuf, quiet: bool) -> Vm {
+    /// Creates a VM to execute `prog` with `host_modules` during `call`.
+    pub(crate) fn new_vm(&self, prog: Arc<Program>, host_modules: &HostModules, cwd: PathBuf, quiet: bool, call: &CallInterrupt) -> Vm {
         let c = &self.config;
         let stdin = match &c.stdin {
             StdinConfig::None => None,
@@ -1178,7 +1286,7 @@ impl Engine {
             rng: Rng::new(c.seed.unwrap_or_else(entropy_seed)),
             log_level: c.log_level,
             log_sink: if quiet { Some(Arc::new(NullLogSink)) } else { c.log_sink.clone() },
-            interrupt: self.interrupt.clone(),
+            interrupt: call.clone(),
             stream_decisions: [None; 2],
             #[cfg(feature = "os")]
             tls: c.tls.clone(),
@@ -1194,7 +1302,6 @@ impl Engine {
             time_zone: c.time_zone.as_ref().map(|z| z.zone().clone()),
         };
         let mut vm = Vm::new(prog, host_modules.0.natives.clone(), host);
-        vm.io = IoTable::with_shared(self.shared.clone());
         if c.gc_stress {
             vm.heap.stress = true;
             vm.heap.next_gc = 0;
@@ -1203,7 +1310,7 @@ impl Engine {
         vm
     }
 
-    async fn execute(&mut self, compiled: Compiled, cwd: PathBuf) -> Result<Outcome, Error> {
+    async fn execute(&mut self, call: &CallInterrupt, compiled: Compiled, cwd: PathBuf) -> Result<Outcome, Error> {
         let prog = compiled.program;
         if self.config.dump_bytecode {
             for (i, p) in prog.protos.iter().enumerate() {
@@ -1215,7 +1322,7 @@ impl Engine {
                 }
             }
         }
-        let mut vm = self.new_vm(prog.clone(), &compiled.host_modules, cwd, false);
+        let mut vm = self.new_vm(prog.clone(), &compiled.host_modules, cwd, false, call);
         vm.deadline = compiled.deadline;
         let r = vm.run_main(prog.entry).await;
         let r = end_run(&mut vm, r).await;
@@ -1241,26 +1348,30 @@ impl Engine {
     // ------------------------------------------------------------------
     // Loading and compiling
 
-    /// Checks `path` against the import policy and prompts if `prompt` is true.
-    async fn check_import(&self, path: &Path, prompt: bool) -> Result<bool, &'static str> {
-        let cap = Capability::Import(path.to_path_buf());
-        if let Some(&d) = self.always.lock().get(&cap) {
-            return Ok(d);
+    /// Checks `path` against the import policy and prompts if
+    /// `discovery.prompt` is true.
+    async fn check_import(&self, path: &Path, discovery: &Discovery<'_>) -> ImportDecision {
+        let capability = Capability::Import(path.to_path_buf());
+        let decided = |allowed| if allowed { ImportDecision::Allowed } else { ImportDecision::Denied };
+        if let Some(&allowed) = self.always.lock().get(&capability) {
+            return decided(allowed);
         }
-        match self.config.policy.check_normalized_in(&cap, self.config.fs.space()) {
-            Decision::Allow => Ok(true),
-            Decision::Deny => Ok(false),
+        match self.config.policy.check_normalized_in(&capability, self.config.fs.space()) {
+            Decision::Allow => ImportDecision::Allowed,
+            Decision::Deny => ImportDecision::Denied,
             Decision::Prompt => match &self.config.prompter {
-                Some(p) if prompt => {
-                    let answer = p.prompt(cap.clone()).await;
+                Some(prompter) if discovery.prompt => {
+                    let Some(answer) = discovery.interrupt.unless_interrupted(prompter.prompt(capability.clone())).await else {
+                        return ImportDecision::Interrupted;
+                    };
                     let allowed = matches!(answer, PromptAnswer::AllowOnce | PromptAnswer::AllowAlways);
                     if matches!(answer, PromptAnswer::AllowAlways | PromptAnswer::DenyAlways) {
-                        self.always.lock().insert(cap, allowed);
+                        self.always.lock().insert(capability, allowed);
                     }
-                    Ok(allowed)
+                    decided(allowed)
                 }
-                Some(_) => Err("cannot prompt during check"),
-                None => Err("a prompter is not configured"),
+                Some(_) => ImportDecision::Unprompted("cannot prompt during check"),
+                None => ImportDecision::Unprompted("a prompter is not configured"),
             },
         }
     }
@@ -1279,29 +1390,30 @@ impl Engine {
         }
     }
 
-    /// Loads, checks and compiles the program whose main module is
-    /// `main_source` (the file `main_path`, if it is one), to run it.
+    /// Loads, checks, and compiles `main_source` and its imports for `call`.
+    /// `main_path` is `Some` if the main module was loaded from a file.
     pub(crate) async fn compile(
         &self,
+        call: &CallInterrupt,
         main_name: &str,
         main_source: &str,
         root: &Path,
         main_path: Option<&Path>,
     ) -> Result<Compiled, Error> {
-        self.compile_with(main_name, main_source, root, main_path, RUN).await
+        self.compile_with(call, main_name, main_source, root, main_path, RUN).await
     }
 
-    /// Like [`Engine::compile`], with `options`. `root` is the module root,
-    /// in normal form (resolved by the engine's file system).
+    /// Loads, checks, and compiles `main_source` and its imports with
+    /// `options`. `root` is the normalized module root.
     pub(crate) async fn compile_with(
         &self,
+        call: &CallInterrupt,
         main_name: &str,
         main_source: &str,
         root: &Path,
         main_path: Option<&Path>,
         options: CompileOptions,
     ) -> Result<Compiled, Error> {
-        self.clear_interrupt();
         // Unless the full snapshot exists, compile on the core extended with
         // just the standard modules the program imports (`Registry::extended`).
         let mut snap = match self.registry().ready() {
@@ -1329,7 +1441,7 @@ impl Engine {
         let mut errors: Vec<Diag> = Vec::new();
         let mut prompted = Duration::ZERO;
         let deadline = self.deadline();
-        let discovery = Discovery { snap: &snap, root, deadline, prompt: options.prompt };
+        let discovery = Discovery { snap: &snap, root, deadline, prompt: options.prompt, interrupt: call };
         if let Some(stop) = self.discover(&discovery, &mut g, main, imports, main_key, &mut errors, &mut prompted).await {
             return Err(stop);
         }
@@ -1344,7 +1456,7 @@ impl Engine {
         let main_file = g.modules[main].file;
         // Time spent waiting for prompt answers does not count.
         let deadline = deadline.map(|d| d + prompted);
-        let budget = self.compile_budget(deadline);
+        let budget = self.compile_budget(deadline, call);
         let spare = match self.spare.lock().take() {
             Some((s, p)) if Arc::ptr_eq(&s, &snap) => Some(p),
             _ => None,
@@ -1374,7 +1486,7 @@ impl Engine {
         #[cfg(feature = "os")]
         {
             let check = || {
-                if self.interrupt.load(Ordering::Relaxed) {
+                if d.interrupt.is_set() {
                     return Err(Error::Interrupted);
                 }
                 if d.deadline.is_some_and(|t| self.config.clock.now() >= t + prompted) {
@@ -1418,7 +1530,7 @@ impl Engine {
         let mut path_stack: Vec<String> = vec![key];
         let mut stale_cache: HashMap<usize, bool> = HashMap::new();
         while let Some((mi, imports, pos)) = stack.pop() {
-            if self.interrupt.load(Ordering::Relaxed) {
+            if d.interrupt.is_set() {
                 return Some(Error::Interrupted);
             }
             if d.deadline.is_some_and(|t| self.config.clock.now() >= t + *prompted) {
@@ -1527,10 +1639,15 @@ impl Engine {
                 }
             }
             let asked = self.config.clock.now();
-            let allowed = self.check_import(&target, d.prompt).await;
+            let decision = self.check_import(&target, d).await;
             *prompted += self.config.clock.now().saturating_duration_since(asked);
-            if allowed != Ok(true) {
-                let hint = allowed.err().map(|why| format!("; {}", self.format_unprompted_import_reason(&target, why))).unwrap_or_default();
+            let hint = match decision {
+                ImportDecision::Allowed => None,
+                ImportDecision::Denied => Some(String::new()),
+                ImportDecision::Unprompted(why) => Some(format!("; {}", self.format_unprompted_import_reason(&target, why))),
+                ImportDecision::Interrupted => return Some(Error::Interrupted),
+            };
+            if let Some(hint) = hint {
                 errors.push(Diag::error(span, format!("cannot import `{import_label}`: permission denied{hint}")));
                 // Stop after a denied import to avoid prompting for remaining imports.
                 break;
@@ -1626,14 +1743,27 @@ impl Engine {
 /// The run's compile options: imports are prompted for, no linting.
 const RUN: CompileOptions = CompileOptions { prompt: true, lint: false };
 
-/// What module discovery needs besides the graph.
+/// Context for module discovery in [`Engine::discover`].
 pub(crate) struct Discovery<'a> {
     pub snap: &'a Snapshot,
-    /// The module root: script imports must be below it.
+    /// Normalized module root. Script imports must resolve inside this path.
     pub root: &'a Path,
-    /// When the wall-time limit passes (plus the time spent on prompts).
+    /// Wall-time deadline before adding time spent on prompts.
     pub deadline: Option<Instant>,
     pub prompt: bool,
+    /// Interrupt state for the active call.
+    pub interrupt: &'a CallInterrupt,
+}
+
+/// Policy decision for a module import in [`Engine::check_import`].
+enum ImportDecision {
+    Allowed,
+    Denied,
+    /// The policy requires a prompt, which is unavailable for the given
+    /// reason.
+    Unprompted(&'static str),
+    /// An interrupt stopped the call during the prompt wait.
+    Interrupted,
 }
 
 /// Module discovery stops after this many errors (they are all reported).
@@ -1733,8 +1863,8 @@ mod registry_tests {
         let host = snap.program.protos.iter().find(|p| p.name == "doubled_total").expect("doubled_total is compiled").code.clone();
         let script = |optimize: bool| {
             let engine = Engine::new(Config::new().optimize(optimize));
-            let c = engine.compile_now("main.sand", src, Path::new("."), None, false).unwrap();
-            let proto = c.program.protos.iter().find(|p| p.name == "doubled_total").expect("doubled_total is compiled");
+            let compiled = engine.compile_now(&engine.begin_call(), "main.sand", src, Path::new("."), None, false).unwrap();
+            let proto = compiled.program.protos.iter().find(|p| p.name == "doubled_total").expect("doubled_total is compiled");
             proto.code.clone()
         };
         let (fast, slow) = (script(true), script(false));
@@ -1814,8 +1944,8 @@ mod offload_tests {
         let r = rt().block_on(engine.run_source("main.sand", "import hung\nhung.hang()"));
         assert!(matches!(r, Err(Error::Limit(LimitKind::WallTime))), "{r:?}");
 
-        let mut engine = Engine::new(config());
-        let handle = engine.interrupt_handle();
+        let handle = InterruptHandle::new();
+        let mut engine = Engine::new(config().interrupt(handle.clone()));
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(50));
             handle.interrupt();
