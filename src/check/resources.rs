@@ -761,7 +761,7 @@ impl Ctx<'_> {
                 continue;
             }
             let ty = self.resource_in(o.ty);
-            let ty = self.ck.show(ty);
+            let ty = self.ck.show_charged(ty);
             let (span, msg) = match o.binding.map(|l| &f.body.locals[l as usize]) {
                 Some(local) if local.name != Symbol::TMP => {
                     let name = self.ck.name(local.name);
@@ -842,7 +842,7 @@ impl Ctx<'_> {
                     TypeDefKind::Opaque(_) => vec![],
                 };
                 let Some(t) = tys.into_iter().find(|&t| self.holds_resource(t)) else { continue };
-                let ty = self.ck.show(t);
+                let ty = self.ck.show_charged(t);
                 let tname = &name.name;
                 let what = if matches!(def.kind, TypeDefKind::Enum { .. }) { "variant" } else { "field" };
                 let msg = format!(

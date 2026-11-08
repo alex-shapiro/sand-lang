@@ -587,10 +587,7 @@ impl Checker {
             used: gi.is_pub,
             mutable: gi.mutable,
             assigned: false,
-            ty: String::new(),
-            is_param: false,
-            global: true,
-            func: u32::MAX,
+            ty: TypeId::ERROR,
             enum_def: None,
         });
         self.global_facts.insert(g, self.lint.locals.len() - 1);

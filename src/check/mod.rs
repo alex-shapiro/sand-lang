@@ -321,11 +321,7 @@ pub struct LocalFact {
     pub used: bool,
     pub mutable: bool,
     pub assigned: bool,
-    pub ty: String,
-    pub is_param: bool,
-    pub global: bool,
-    /// Identifies the function the binding belongs to (for shadowing checks).
-    pub func: u32,
+    pub ty: TypeId,
     /// The enum type of a binding whose name starts with an upper-case
     /// letter. The binding may be a misspelled variant of this enum.
     pub enum_def: Option<TypeDefId>,
@@ -610,7 +606,6 @@ pub struct Checker {
     pub(crate) global_facts: HashMap<GlobalId, usize>,
     /// Whether lint facts (`lint`) are gathered (for the main module only).
     pub lint_facts: bool,
-    pub(crate) lint_func: u32,
     /// Names referenced from functions of the module being checked.
     pub(crate) fn_names: HashSet<String, FxBuild>,
     pub traits: PVec<TraitDef>,
@@ -683,7 +678,6 @@ impl Default for Checker {
             fs_unused: Vec::new(),
             global_facts: HashMap::new(),
             lint_facts: true,
-            lint_func: 0,
             fn_names: HashSet::default(),
             traits: PVec::new(),
             impls: PVec::new(),
@@ -832,6 +826,13 @@ impl Checker {
 
     pub fn show(&self, t: TypeId) -> String {
         self.printer().show(t)
+    }
+
+    /// The text of `t`, charged to the compile budget.
+    pub(crate) fn show_charged(&self, t: TypeId) -> String {
+        let text = self.show(t);
+        self.budget.charge(text.len() as u64 / budget::TEXT_BYTES_PER_UNIT);
+        text
     }
 
     /// Visits the nodes of `t` written out as a tree, following the
@@ -1455,7 +1456,7 @@ impl Checker {
                     self.globals[g].ty = t;
                 }
                 if let Some(&i) = self.global_facts.get(&(g as GlobalId)) {
-                    self.lint.locals[i].ty = self.show(self.globals[g].ty);
+                    self.lint.locals[i].ty = self.globals[g].ty;
                 }
             }
         }
@@ -3019,24 +3020,22 @@ impl Checker {
                 self.lint.unused_results.push(sp);
             }
         }
-        self.lint_func += 1;
-        for (i, d) in self.fs.data.iter().enumerate() {
-            let info = &self.fs.locals[i];
-            let name = self.syms.str(info.name);
+        for i in 0..self.fs.data.len() {
+            let name = self.syms.str(self.fs.locals[i].name).to_string();
             if name.starts_with('<') {
                 continue;
             }
+            let ty = self.zonk(self.fs.data[i].ty);
+            let enum_def = if name.starts_with(|c: char| c.is_ascii_uppercase()) { self.enum_def_of(ty) } else { None };
+            let data = &self.fs.data[i];
             self.lint.locals.push(LocalFact {
-                span: d.decl_span,
-                name: name.to_string(),
-                used: d.used,
-                mutable: info.mutable,
-                assigned: d.assigned,
-                ty: self.printer().show(d.ty),
-                is_param: d.is_param,
-                global: false,
-                func: self.lint_func,
-                enum_def: if name.starts_with(|c: char| c.is_ascii_uppercase()) { self.enum_def_of(d.ty) } else { None },
+                span: data.decl_span,
+                name,
+                used: data.used,
+                mutable: self.fs.locals[i].mutable,
+                assigned: data.assigned,
+                ty,
+                enum_def,
             });
         }
     }

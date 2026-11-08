@@ -1,12 +1,12 @@
 //! The linter: style and correctness warnings on top of the type checker.
 
-use crate::check::budget::{CompileBudget, Stop, tool_fuel};
+use crate::check::budget::{CompileBudget, Stop, TEXT_BYTES_PER_UNIT, tool_fuel};
 use crate::check::{CheckedProgram, Ctor, FnInfo, FnKind, ParsedModule};
 use crate::diag::{FileId, SourceFile};
 use crate::hir::{HArg, HKind};
 use crate::syntax::ast::*;
 use crate::syntax::lexer::CommentKind;
-use crate::types::{FnId, TypeDef, TypeDefId};
+use crate::types::{FnId, TypeDef, TypeDefId, TypeId};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,8 +40,8 @@ struct Linter<'a> {
     out: Vec<LintWarning>,
     checked: &'a CheckedProgram,
     /// Types of the main module's bindings by the offset of their name,
-    /// from the checker (empty for top-level bindings).
-    types: HashMap<u32, &'a str>,
+    /// from the checker.
+    types: HashMap<u32, TypeId>,
     /// The enum types of capitalized bindings by the offset of their name,
     /// from the checker (`variant-like-binding`).
     enum_defs: HashMap<u32, TypeDefId>,
@@ -49,7 +49,7 @@ struct Linter<'a> {
     /// the current point of the current function, innermost last.
     let_scopes: Vec<Vec<String>>,
     /// The types of the bindings in `let_scopes` by name, innermost last.
-    in_scope: HashMap<String, Vec<&'a str>>,
+    in_scope: HashMap<String, Vec<TypeId>>,
     /// Names that may shadow the prelude's (see [`declarations`]).
     declared: HashSet<String>,
     budget: &'a CompileBudget,
@@ -65,7 +65,7 @@ fn run_lints(main: &ParsedModule, checked: &CheckedProgram, budget: &CompileBudg
         file,
         out: Vec::new(),
         checked,
-        types: locals().map(|f| (f.span.lo, f.ty.as_str())).collect(),
+        types: locals().map(|f| (f.span.lo, f.ty)).collect(),
         enum_defs: locals().filter_map(|f| Some((f.span.lo, f.enum_def?))).collect(),
         let_scopes: vec![vec![]],
         in_scope: HashMap::new(),
@@ -386,8 +386,15 @@ impl<'a> Linter<'a> {
     }
 
     /// The checker's type of the binding introduced at `id`, if known.
-    fn binding_type(&self, id: &Ident) -> Option<&'a str> {
-        self.types.get(&id.span.lo).copied().filter(|t| !t.is_empty())
+    fn binding_type(&self, id: &Ident) -> Option<TypeId> {
+        self.types.get(&id.span.lo).copied()
+    }
+
+    /// The text of `t`, charged to the lint budget.
+    fn type_text(&self, t: TypeId) -> String {
+        let text = self.checked.printer().show(t);
+        self.budget.charge(text.len() as u64 / TEXT_BYTES_PER_UNIT);
+        text
     }
 
     /// Brings a binding into the innermost scope. Names without a checker type
@@ -431,14 +438,15 @@ impl<'a> Linter<'a> {
         p.bindings(&mut ids);
         for id in &ids {
             let Some(ty) = self.binding_type(id) else { continue };
-            let prior = self.in_scope.get(&id.name).and_then(|types| types.last()).cloned();
+            let prior = self.in_scope.get(&id.name).and_then(|types| types.last()).copied();
             if let Some(prev_ty) = prior
                 && prev_ty != ty
             {
+                let (prev_text, text) = (self.type_text(prev_ty), self.type_text(ty));
                 self.warn(
                     id.span.lo,
                     "shadowed-variable",
-                    format!("`{}` shadows a binding of a different type ({prev_ty} vs {ty})", id.name),
+                    format!("`{}` shadows a binding of a different type ({prev_text} vs {text})", id.name),
                 );
             }
         }

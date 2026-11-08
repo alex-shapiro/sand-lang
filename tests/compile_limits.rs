@@ -272,6 +272,16 @@ fn duplicate_member_checks_are_linear() {
     assert!(took < FAST, "took {took:?}");
 }
 
+#[test]
+fn shadowing_warnings_charge_their_type_text() {
+    let name = format!("S{}", "a".repeat(20_000));
+    let pairs: String = (0..20).map(|i| format!("    let x{i} = a11\n    let x{i} = 0\n")).collect();
+    let doubled: String = (1..=11).map(|i| format!("    let a{i} = (a{}, a{})\n", i - 1, i - 1)).collect();
+    let src = format!("struct {name} {{\n    x: int\n}}\nfn f() {{\n    let a0 = {name}(x: 1)\n{doubled}{pairs}}}\nf()\n");
+    let e = Engine::new(Config::new()).lint_source("main.sand", &src).unwrap_err();
+    assert!(matches!(e, Error::Compile(_)) && e.to_string().contains("source too complex to lint"), "{e}");
+}
+
 /// A source whose lint work grows with `depth` and whose type check does not.
 fn nested_loops(depth: usize) -> String {
     let mut src = String::from("var x = 0\n");
