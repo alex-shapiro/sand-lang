@@ -70,6 +70,19 @@ The host cannot rely on engine limits, stability, or control.
       `Engine::interrupt` only reaches an engine that is waiting. With
       cross-origin isolation, store the interrupt flag in a
       `SharedArrayBuffer` that the page sets directly.
+- [ ] ❓ _Sandbox._ Limit the worker threads of blocked I/O jobs. When an
+      interrupt or a limit stops a call that waits for a blocking job, the
+      engine abandons the job, but its worker thread stays blocked.
+      `Pool::run` in `src/platform.rs` then starts a new thread for the next
+      job. A host that runs many scripts against a hung path loses one thread
+      for each stopped call. Limit the pool, or the blocked jobs of each
+      engine, and fail new jobs with an I/O error when the limit is reached.
+- [ ] ❓ _Sandbox._ Read the main file of `run_file`, `check_file`,
+      `lint_file`, `compile_file` and `run_tests` the way imports are read:
+      through `Engine::discovery_io` with `read_source(max_source_bytes)`.
+      `read_main` reads the whole file on the caller's thread, so an
+      interrupt or the wall-time limit cannot stop a read of a FIFO or a hung
+      mount, and `max_source_bytes` applies only after the read.
 
 ## Tier 3: ordinary scripts
 

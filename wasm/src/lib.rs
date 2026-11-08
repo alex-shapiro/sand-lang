@@ -451,7 +451,8 @@ impl Session {
         Ok(())
     }
 
-    /// Stops the running input or `runTasks` call (see [`Engine::interrupt`]).
+    /// Stops the running input, or cancels the tasks that `runTasks` runs
+    /// (see [`Engine::interrupt`]).
     pub fn interrupt(&self) {
         self.interrupt.interrupt();
     }

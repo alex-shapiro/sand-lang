@@ -2382,11 +2382,12 @@ to `on_error`, and continues waiting for `until`. `cancel_tasks()` cancels
 remaining background tasks without running their `defer` blocks.
 
 `Session::set_wall_time` overrides `max_wall_time` for subsequent inputs. The
-interrupt handle of the session configuration (§15.1) cancels the active
-session call. Dropping an `eval` future before completion cancels the input in
-the same way as an interrupt, and leaves the session state unchanged if the
-input was still loading imports. `reset()`
-clears all session bindings and state. If an internal error (§10.3) occurs
+interrupt handle of the session configuration (§15.1) cancels an active `eval`,
+`run_tests`, or `type_of` call. In `run_tasks_until`, an interrupt fails the
+running tasks as described above, and the call continues to wait for `until`.
+Dropping an `eval` future before completion cancels the input in the same way
+as an interrupt, and leaves the session state unchanged if the input was still
+loading imports. `reset()` clears all session bindings and state. If an internal error (§10.3) occurs
 during `eval`, `run_tests`, `type_of`, or `run_tasks_until`, the session
 automatically resets itself, appends `" (the session was reset)"` from
 `sandlang::session::RESET_NOTE` to the error message, and sets `was_reset()`
