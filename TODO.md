@@ -70,6 +70,23 @@ The host cannot rely on engine limits, stability, or control.
       `Engine::interrupt` only reaches an engine that is waiting. With
       cross-origin isolation, store the interrupt flag in a
       `SharedArrayBuffer` that the page sets directly.
+- [ ] ❓ _Embedding._ **Decide: an interrupt before a call starts.** An
+      engine or session ignores an interrupt that comes before its next call,
+      because each call makes a new flag and an interrupt sets only the flags
+      of calls in progress. A call starts at the first poll of its future, so
+      on the web `engine.run(src); engine.interrupt();` does not stop the run.
+      A host with one engine for each job cannot cancel a job in setup or in a
+      queue. Options:
+      - A: keep this behavior. Optionally start each call when the host calls
+        the method, to close the first-poll window.
+      - B: a sticky handle with `InterruptHandle::reset()`. A reset for one
+        engine can erase an interrupt for another engine with a clone of the
+        handle.
+      - B′ (recommended): a single-use sticky handle, like tokio's
+        `CancellationToken`, `AbortSignal` and Go's `context`. A setter such as
+        `Session::set_interrupt(handle)` gives an engine or session a new
+        handle after an interrupt. It also fits item 015.
+      - C: an interrupt handle for each `Run` (changeset 11 in SPLIT.md).
 - [ ] ❓ _Sandbox._ Limit the worker threads of blocked I/O jobs. When an
       interrupt or a limit stops a call that waits for a blocking job, the
       engine abandons the job, but its worker thread stays blocked.
