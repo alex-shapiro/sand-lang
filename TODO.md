@@ -86,7 +86,6 @@ The host cannot rely on engine limits, stability, or control.
         `tokio_util::sync::CancellationToken`, `AbortSignal`, and Go's
         `context`. Add `Engine::set_interrupt` and `Session::set_interrupt` so
         the host can replace a used handle. This design also supports item 015.
-      - Give each `Run` its own interrupt handle in changeset 11 of `SPLIT.md`.
 - [ ] ❓ _Sandbox._ Cap the number of worker threads for blocking I/O jobs. If
       a call stops at a limit or an interrupt during a blocking job, the
       engine abandons the job. The worker thread remains blocked, and
