@@ -1658,8 +1658,8 @@ The engine checks every outgoing network connection from `net.connect`,
 
 A host must be an ASCII hostname or a full IP address. The engine rejects hosts with
 percent-encoded or non-ASCII characters. It also rejects any host whose last
-label is a number, such as `127.1` or `0x7f000001`, because browsers parse it as
-an IPv4 address. An invalid host in a URL fails with kind `"parse"`. An invalid
+label is a number, such as `127.1` or `0x7f000001`. Browsers parse these hosts as
+IPv4 addresses. An invalid host in a URL fails with kind `"parse"`. An invalid
 host in `net.connect` fails with kind `"invalid"`.
 
 In the WebAssembly build (§16.5), the browser resolves hostnames. The engine

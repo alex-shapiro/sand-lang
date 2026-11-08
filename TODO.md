@@ -148,9 +148,9 @@ Visible defects that rarely block users.
       permits `read /x/o.txt`.
 - [ ] 🔴 [035](triage/035-denied-address-missing-from-error/summary.md) _Policy._ Include any policy-denied IP addresses in the error message if
       `resolve_allowed` fails to connect to the remaining allowed addresses.
-- [ ] ❓ _Policy._ Name the deciding rule in all `permission_denied` messages.
-      Resolved-address denials already name the rule. A host-check denial such
-      as `permission denied: GET http://localhost:8080/` omits the rule. Return
+- [ ] ❓ _Policy._ Include the deciding rule in all `permission_denied` messages.
+      Resolved-address denials already include the rule. A host-check denial
+      such as `permission denied: GET http://localhost:8080/` omits it. Return
       the rule from the stage-1 check and format both messages with
       `RulePolicy::describe_rule`.
 - [ ] ❓ _Policy._ Parse each host into a canonical `Host` enum with

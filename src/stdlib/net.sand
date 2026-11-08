@@ -27,12 +27,12 @@ import io
 /// and accepts only IPv6 connections.
 pub native fn listen(ip: str, port: int) -> Result<Listener>
 
-/// Opens a TCP connection to `host` and `port`, or fails with kind `"timeout"`
-/// if the connection does not complete within `timeout`.
+/// Opens a TCP connection to `host` and `port`.
 ///
-/// `host` must be an ASCII hostname or a full IP address without brackets, such
-/// as `127.0.0.1`. `port` must be in `0..=65535`. Other values fail with kind
-/// `"invalid"`.
+/// Fails with kind `"timeout"` if the connection does not complete within
+/// `timeout`. `host` must be an ASCII hostname or a full IP address without
+/// brackets, such as `127.0.0.1`. `port` must be in `0..=65535`. Other values
+/// fail with kind `"invalid"`.
 pub native fn connect(host: str, port: int, timeout: duration = 30s) -> Result<Conn>
 
 /// Opens a TLS-encrypted TCP connection to `host` and `port`, and verifies the

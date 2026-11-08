@@ -808,7 +808,7 @@ mod tests {
                 "6:11: warning[redundant-rule]: `10.0.0.0/8` on line 5 already allows this",
             ]
         );
-        // Only address rules apply to resolved addresses, so a broader hostname rule subsumes a narrower one.
+        // Only address rules apply to resolved addresses, so a broader hostname rule subsumes a narrower hostname rule.
         for (address, verb, column) in
             [("deny net 10.0.0.0/8", "net", 11), ("prompt http 10.0.0.5", "http", 12), ("deny http 10.0.0.5/x", "http", 12)]
         {

@@ -3,11 +3,10 @@
 //! Requests require the `Http` and `Net(host:port)` capabilities. A URL host
 //! must be an ASCII hostname or a full IP address, such as `127.0.0.1`. Other
 //! hosts fail with kind `"parse"`. The browser controls forbidden request
-//! headers, omits ambient cookies (`credentials: "omit"`), and enforces CORS
-//! rules on cross-origin responses. Redirects are not followed and fail with
-//! kind `"http"`. The browser buffers the full response body before `open`
-//! returns, so `max_http_body` applies to `open` as well as `request`, and
-//! `timeout` covers the entire exchange.
+//! headers, omits ambient cookies, and enforces CORS rules on cross-origin
+//! responses. Redirects fail with kind `"http"`. The browser buffers the full
+//! response body before `open` returns. `max_http_body` therefore applies to
+//! both `open` and `request`, and `timeout` covers the entire exchange.
 
 import io
 import json

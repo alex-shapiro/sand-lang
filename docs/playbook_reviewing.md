@@ -59,7 +59,7 @@ End each audit with a question: what is the most important problem outside this 
 
 ## Fixing
 
-Fix a problem if the change improves one priority level without degrading a higher priority level. Ensure that tests prove the new behavior.
+Fix a problem if the change improves a priority level without degrading a higher priority level. Ensure that tests prove the new behavior.
 
 Commit each fix separately. In the commit message, state the problem, the fix, and the test or measurement results so that future work can reference them.
 
