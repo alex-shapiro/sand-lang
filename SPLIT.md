@@ -43,7 +43,7 @@ source branch only as a reference.
 19. Host context: not started; requires 13 and 17
 20. Run statistics: not started
 21. Journal core: not started; requires 10, 11, 18, and 19
-22. Journaled operations and wait-point scheduling: not started; requires 21
+22. Journaled operations: not started; requires 21
 23. Host function classes: not started; requires 13 and 22
 24. Suspension and parked host calls: not started; requires 23
 25. File system restriction in journaled runs: not started; requires 21
@@ -143,17 +143,13 @@ The source branch built the journal first and then corrected it. Changesets 8
 to 26 land the foundations first and the journal last, so that each changeset
 builds on finished work. Each changeset merges on its own and has its own tests.
 
-**Prototype wait-point scheduling before you start changeset 21.** Changesets 21
-to 24 depend on it.
-
-**Keep the replay model of the source branch, and change how it orders tasks.**
-Scripts need no special syntax. In a journaled run, tasks switch only where a task
-waits, and the journal records the order in which results arrive. Replay compares
-the sequence of operations with the journal. Engine internals such as fuel costs
-are not part of this comparison, so most engine upgrades do not affect a paused
-run. Temporal, Restate, and AWS Lambda durable functions use this kind of
-comparison, and the source branch's fuel-based steps have no equivalent among
-them.
+**Keep the replay model of the source branch.** Scripts need no special syntax.
+Plain and journaled runs share a single scheduler, which switches tasks when a fuel
+slice runs out. The journal records the slice number at which each result arrives,
+and replay delivers the result after the same slice. A release that moves slice
+boundaries makes paused runs incompatible. Across 22 commits that touched the
+compiler, the interpreter, or the Sand standard library, fuel and task interleaving
+did not change for the tested workloads.
 
 **Separate engine-scoped data from run-scoped data.** `Config` and `Session::new`
 hold data for the lifetime of an engine or session. A value is run-scoped if two
@@ -171,7 +167,7 @@ Output sinks, the seed, the network provider, and the request filter stay in
 
 **Keep these decisions from the source branch:**
 
-- The entry kinds, except for the scheduling step in a `Done` entry.
+- The entry kinds, including the scheduling step in a `Done` entry.
 - The divergence check and `Error::Diverged`.
 - A save before each external action. Effects occur at least once, and the
   sequence number of an effect is the same in each execution.
@@ -215,9 +211,9 @@ Source commits: `c690c03`, `906ac91`, `4792919`.
 
 ### 11. Deterministic fuel
 
-Fuel must be a function of the program alone. Hosts get repeatable fuel reports,
-and a replay uses the same fuel as the original run, so a fuel limit gives the
-same result in each execution.
+Fuel must be a function of the program alone, because replay depends on it. Fuel
+slices decide when tasks switch, so a difference in fuel can move a task switch and
+change what a replay does. Hosts also get repeatable fuel reports.
 
 - Charge fuel once if the VM retries a native function after garbage
   collection.
@@ -448,9 +444,10 @@ seeds, and the environment.
   limit, which violates the hard memory limit of the sandbox.
 - **Detect an incompatible journal before replay.** The first entry holds a
   format number, a hash of the script source and its imports, and the arguments
-  of the run. A mismatch returns an error before the script starts. The hash uses
-  source text, so a compiler change does not invalidate a paused run. Bump the
-  format number for any change to the encoding or to the order of operations.
+  of the run. A mismatch returns an error before the script starts. Bump the format
+  number for any change to the encoding, and for any change to fuel costs, the
+  compiler, or the scheduler that moves slice boundaries. The host finishes a paused
+  run on the old engine or marks it as failed.
 - **Leave room for a history reset.** A journal grows with each operation, and
   replay starts from the beginning. Other systems bound the history and offer a
   reset, such as Temporal's continue-as-new. The format must allow a later entry
@@ -460,17 +457,15 @@ Source commits: `4aad4b0`, `4b9a0ea`, `b6ca288`, `610e371`, `98727a1`, `f7bbeb6`
 `19e04e3`, `667e651`, `f858796`, `ae3c293`, `2c037fe`, `be1871b`, `733c8dd`, and
 the `HostAbort` part of `a31c9fb`.
 
-### 22. Journaled operations and wait-point scheduling
+### 22. Journaled operations
 
 This changeset adds timers, HTTP, standard input, and local futures to journaled
 runs. `main` has a single path for timers, standard input, and `http.send`. The
 journal keeps this property, so each operation has one implementation with or
 without a journal.
 
-A task in a journaled run runs until it waits. The engine delivers a result only
-at a wait point, in journal order. A CPU-bound task is not preempted in a journaled
-run, so it can delay other tasks until it waits. The fuel limit still stops a task
-that never waits.
+The journal records the slice number at which each result arrives, and replay
+delivers the result after the same slice.
 
 Source commits: `d4a4ac0`, `16da2fb`, `483ac31`, `e541a7a`, `3bf577b`, `5c5068e`,
 `385677e`, and `3a59f06`, because replay decodes values inside a finisher.
@@ -546,8 +541,9 @@ This changeset has no source commits.
 
 ### 26. Journal corpus and Sahara acceptance
 
-Keep a corpus of journals from earlier engine versions in the repository. A release
-that cannot replay them must bump the format number.
+Keep a corpus of journals from earlier engine versions in the repository, and run
+it as a release gate. A change that moves slice boundaries without a format number
+bump fails the gate.
 
 Port Sahara to the final API. Its simulator, replay oracles, and bug zoo must pass.
 
