@@ -591,7 +591,7 @@ impl Checker {
             is_param: false,
             global: true,
             func: u32::MAX,
-            variants: Vec::new(),
+            enum_def: None,
         });
         self.global_facts.insert(g, self.lint.locals.len() - 1);
     }

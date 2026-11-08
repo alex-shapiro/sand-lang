@@ -326,10 +326,9 @@ pub struct LocalFact {
     pub global: bool,
     /// Identifies the function the binding belongs to (for shadowing checks).
     pub func: u32,
-    /// For a binding whose name starts with an upper-case letter and whose
-    /// type is an enum: the enum's variants without a payload, qualified
-    /// (`State.Empty`), which a misspelled variant pattern may have meant.
-    pub variants: Vec<String>,
+    /// The enum type of a binding whose name starts with an upper-case
+    /// letter. The binding may be a misspelled variant of this enum.
+    pub enum_def: Option<TypeDefId>,
 }
 
 /// The checked bodies of the functions checked since the bodies were last
@@ -3035,22 +3034,15 @@ impl Checker {
                 is_param: d.is_param,
                 global: false,
                 func: self.lint_func,
-                variants: if name.starts_with(|c: char| c.is_ascii_uppercase()) { self.payloadless_variants(d.ty) } else { Vec::new() },
+                enum_def: if name.starts_with(|c: char| c.is_ascii_uppercase()) { self.enum_def_of(d.ty) } else { None },
             });
         }
     }
 
-    /// The variants without a payload of `ty`, if it is an enum, qualified
-    /// with its name (for the linter).
-    fn payloadless_variants(&self, t: TypeId) -> Vec<String> {
-        let Ty::Named(d, _) = self.rty(t) else { return Vec::new() };
-        let def = &self.types[d as usize];
-        match &def.kind {
-            TypeDefKind::Enum { variants } => {
-                variants.iter().filter(|v| v.fields.is_empty()).map(|v| format!("{}.{}", self.name(def.name), self.name(v.name))).collect()
-            }
-            _ => Vec::new(),
-        }
+    /// The definition of `t`, if `t` is an enum.
+    fn enum_def_of(&self, t: TypeId) -> Option<TypeDefId> {
+        let Ty::Named(d, _) = self.rty(t) else { return None };
+        matches!(self.types[d as usize].kind, TypeDefKind::Enum { .. }).then_some(d)
     }
 
     /// Final checks for a function: required traits, inference completeness; the

@@ -293,6 +293,18 @@ fn the_linter_is_bounded() {
     assert!(start.elapsed() < FAST, "took {:?}", start.elapsed());
 }
 
+#[test]
+fn variant_suggestions_are_charged_to_the_lint_budget() {
+    let variants: String = (0..4_000).map(|i| format!("    V{i}\n")).collect();
+    let bindings: String = (0..4_000).map(|i| format!("    let B{i} = s\n")).collect();
+    let src = format!("enum E {{\n{variants}}}\nfn f(s: E) {{\n{bindings}}}\nf(E.V0)\n");
+    let engine = Engine::new(Config::new());
+    let start = Instant::now();
+    let e = engine.lint_source("main.sand", &src).unwrap_err();
+    assert!(matches!(e, Error::Compile(_)) && e.to_string().contains("source too complex to lint"), "{e}");
+    assert!(start.elapsed() < FAST, "took {:?}", start.elapsed());
+}
+
 /// A clock that stands still for `readings_before_stop` monotonic readings.
 /// After that, it interrupts `interrupt` or, without one, passes every deadline.
 struct StoppingClock {

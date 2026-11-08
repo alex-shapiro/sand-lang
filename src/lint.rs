@@ -6,7 +6,7 @@ use crate::diag::{FileId, SourceFile};
 use crate::hir::{HArg, HKind};
 use crate::syntax::ast::*;
 use crate::syntax::lexer::CommentKind;
-use crate::types::FnId;
+use crate::types::{FnId, TypeDef, TypeDefId};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,9 +47,9 @@ struct Linter<'a> {
     /// Types of the main module's bindings by the offset of their name,
     /// from the checker (empty for top-level bindings).
     types: HashMap<u32, &'a str>,
-    /// The payload-less variants of the enum type of capitalized bindings
-    /// by the offset of their name, from the checker (`variant-like-binding`).
-    variants: HashMap<u32, &'a [String]>,
+    /// The enum types of capitalized bindings by the offset of their name,
+    /// from the checker (`variant-like-binding`).
+    enum_defs: HashMap<u32, TypeDefId>,
     /// The names of the bindings (with known types) of each scope enclosing
     /// the current point of the current function, innermost last.
     let_scopes: Vec<Vec<String>>,
@@ -70,7 +70,7 @@ fn run_lints(main: &ParsedModule, file: &SourceFile, checked: &CheckedProgram, b
         out: Vec::new(),
         checked,
         types: locals().map(|f| (f.span.lo, f.ty.as_str())).collect(),
-        variants: locals().filter(|f| !f.variants.is_empty()).map(|f| (f.span.lo, f.variants.as_slice())).collect(),
+        enum_defs: locals().filter_map(|f| Some((f.span.lo, f.enum_def?))).collect(),
         let_scopes: vec![vec![]],
         in_scope: HashMap::new(),
         declared: declarations(&main.ast),
@@ -547,19 +547,31 @@ impl<'a> Linter<'a> {
     /// new variable, most likely a misspelled variant without a payload.
     fn variant_like_binding(&mut self, id: &Ident) {
         let name = id.name.to_ascii_lowercase();
-        let close = self.variants.get(&id.span.lo).and_then(|variants| {
-            variants
-                .iter()
-                .map(|v| (edit_distance(&name, &v.rsplit('.').next().unwrap_or(v).to_ascii_lowercase()), v))
-                .filter(|&(d, _)| d <= (name.chars().count() / 3).max(1))
-                .min_by_key(|&(d, _)| d)
-                .map(|(_, v)| v.clone())
+        let suggestion = self.enum_defs.get(&id.span.lo).and_then(|&d| {
+            let def = &self.checked.types[d as usize];
+            let variant = self.closest_payloadless_variant(&name, def)?;
+            Some(format!("{}.{variant}", self.checked.name(def.name)))
         });
-        let message = match close {
+        let message = match suggestion {
             Some(v) => format!("`{}` binds a new variable; did you mean the variant `{v}`?", id.name),
             None => format!("`{}` binds a new variable rather than matching a variant; use a lowercase name for a binding", id.name),
         };
         self.warn(id.span.lo, "variant-like-binding", message);
+    }
+
+    /// The variant of `def` without a payload whose name is closest to the
+    /// lowercase `name`, if one is close enough to be a misspelling.
+    fn closest_payloadless_variant(&self, name: &str, def: &TypeDef) -> Option<&'a str> {
+        let max_distance = (name.chars().count() / 3).max(1);
+        def.variants()
+            .iter()
+            .filter(|variant| variant.fields.is_empty())
+            .map(|variant| self.checked.name(variant.name))
+            .take_while(|variant| self.budget.charge(1 + name.len() as u64 * variant.len() as u64))
+            .map(|variant| (edit_distance(name, &variant.to_ascii_lowercase()), variant))
+            .filter(|&(distance, _)| distance <= max_distance)
+            .min_by_key(|&(distance, _)| distance)
+            .map(|(_, variant)| variant)
     }
 
     fn stmt(&mut self, s: &Stmt, top: bool) {
