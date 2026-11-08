@@ -31,7 +31,7 @@ pub fn format_source(src: &str) -> Result<String, String> {
 /// Like [`format_source`], with the work bounded by a budget.
 pub fn format_source_with(src: &str, budget: CompileBudget) -> Result<String, String> {
     if !budget.check() {
-        return Err(stop_message(budget.stopped().unwrap_or(Stop::Interrupted), "format"));
+        return Err(stop_message(budget.stopped().unwrap_or(Stop::Interrupted)));
     }
     // Like the compiler, the formatter recurses, so it needs a deep stack.
     let (src, budget) = (src.to_owned(), Arc::new(budget));
@@ -39,17 +39,18 @@ pub fn format_source_with(src: &str, budget: CompileBudget) -> Result<String, St
     let out = crate::platform::on_deep_stack(move || format_on_this_thread(&src, &theirs))
         .unwrap_or_else(|p| Err(format!("internal formatter error: {}", crate::unwind::panic_text(&*p))));
     match budget.stopped() {
-        Some(stop) => Err(stop_message(stop, "format")),
+        Some(stop) => Err(stop_message(stop)),
         None => out,
     }
 }
 
-pub(crate) fn stop_message(stop: Stop, what: &str) -> String {
+fn stop_message(stop: Stop) -> String {
     match stop {
-        Stop::Fuel => format!("source too complex to {what}: exceeded the {what} budget"),
-        Stop::Time => format!("time limit exceeded (while trying to {what} the source)"),
-        Stop::Interrupted => "interrupted".into(),
+        Stop::Fuel => "source too complex to format: exceeded the format budget",
+        Stop::Time => "time limit exceeded (while trying to format the source)",
+        Stop::Interrupted => "interrupted",
     }
+    .into()
 }
 
 fn format_on_this_thread(src: &str, budget: &CompileBudget) -> Result<String, String> {

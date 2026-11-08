@@ -1,9 +1,8 @@
 //! The linter: style and correctness warnings on top of the type checker.
 
-use crate::check::budget::{CompileBudget, tool_fuel};
+use crate::check::budget::{CompileBudget, Stop, tool_fuel};
 use crate::check::{CheckedProgram, Ctor, FnInfo, FnKind, ParsedModule};
 use crate::diag::{FileId, SourceFile};
-use crate::engine::Error;
 use crate::hir::{HArg, HKind};
 use crate::syntax::ast::*;
 use crate::syntax::lexer::CommentKind;
@@ -26,17 +25,17 @@ impl std::fmt::Display for LintWarning {
 
 /// Lints `main`, the main module of `checked`, whose source is `file`, with
 /// fuel of its own ([`tool_fuel`]) and `compile`'s deadline and interrupt
-/// flag. Running out is an [`Error::Io`].
+/// flag. Returns the reason if the budget stops the lint.
 pub(crate) fn lint_module(
     main: &ParsedModule,
     file: &SourceFile,
     checked: &CheckedProgram,
     compile: &CompileBudget,
-) -> Result<Vec<LintWarning>, Error> {
+) -> Result<Vec<LintWarning>, Stop> {
     let budget = compile.with_fuel(tool_fuel(file.text.len()));
     let warnings = run_lints(main, file, checked, &budget);
     match budget.stopped() {
-        Some(stop) => Err(Error::Io(crate::fmt::stop_message(stop, "lint"))),
+        Some(stop) => Err(stop),
         None => Ok(warnings),
     }
 }

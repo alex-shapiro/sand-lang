@@ -1825,7 +1825,7 @@ Configurable per engine:
 - `max_memory` (default: 512 MiB): if exceeded, the run fails with `memory limit exceeded`. I/O operations whose buffers do not fit fail with kind `"limit"`.
 - `max_instructions` (default: unlimited): if exceeded, the run fails with `instruction limit exceeded`. Instructions are counted in fuel units (§15.2).
 - `max_cpu_time` (default: unlimited): if exceeded, the run fails with `cpu time limit exceeded`. This limit measures the CPU execution time of the engine thread, excluding I/O waits and permission prompts. On platforms without a thread CPU clock, it measures elapsed execution time.
-- `max_wall_time` (default: unlimited): if exceeded, the run fails with `time limit exceeded`. This limit measures elapsed time across compilation and execution, excluding waits for permission prompts and user actions (§16.2).
+- `max_wall_time` (default: unlimited): if exceeded, the run fails with `time limit exceeded`. This limit measures elapsed time across compilation, linting, and execution, excluding waits for permission prompts and user actions (§16.2).
 - `max_call_depth` (default: 10,000): if exceeded, execution fails with `limit: stack overflow`.
 - `max_tasks` (default: 10,000): if exceeded, `spawn` fails with `limit: task limit exceeded`.
 - `max_open_resources` (default: 1,024): if exceeded after garbage collection (§10.8), opening a file, connecting, listening, accepting a connection, or sending an HTTP request fails with kind `"limit"`. Sockets held by pending operations count toward this limit.
@@ -2011,8 +2011,8 @@ returns an `Error`:
 | ------------------------------------ | -------------------------------------------------------------------- |
 | `Error::Compile(diagnostics)`        | Syntax or static type errors occurred during compilation (§18).      |
 | `Error::Runtime { message, trace }`  | Execution failed with an uncaught runtime error (§10.3).             |
-| `Error::Limit(kind)`                 | Execution or compilation exceeded a configured resource limit (§15). |
-| `Error::Interrupted`                 | The host cancelled execution through an `InterruptHandle`.           |
+| `Error::Limit(kind)`                 | Execution, compilation, or linting exceeded a resource limit (§15).  |
+| `Error::Interrupted`                 | The host cancelled the call through an `InterruptHandle`.            |
 | `Error::Io(message)`                 | The entry script file could not be read.                             |
 | `Error::Internal { message, trace }` | An internal invariant failed or a host callback panicked (§10.3).    |
 
@@ -2488,7 +2488,8 @@ a file with `//! lint: allow(name)`.
 Linting checks the file first, with the default limits (§15.3). The lints
 may spend 64 units of fuel per byte of source (at least 10,000,000), about
 one per syntax tree node and per node a lint examines again; a file that
-needs more fails with `source too complex to lint` (exit code 2).
+needs more fails with `source too complex to lint` (`Error::Compile`, exit
+code 2).
 
 ### 17.3 `sand fmt FILE... [--check]`, `sand fmt - [--check]`
 

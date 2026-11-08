@@ -6,7 +6,7 @@ use crate::compile::{CompileInput, compile_more};
 use crate::diag::{Diag, Diagnostic, FileId, Span};
 use crate::files::Fs;
 use crate::files::mem::MemFs;
-use crate::modules::{ImportRef, ModuleGraph, Snapshot, Target, budget_error, native_info};
+use crate::modules::{ImportRef, ModuleGraph, Snapshot, Target, budget_error, lint_budget_error, native_info};
 use crate::native::func::Signature;
 use crate::native::ty::Type;
 use crate::native::{BoundType, NativeDecl, NativeModule};
@@ -986,8 +986,10 @@ impl Engine {
 
     /// Type checks `source` as [`Engine::check_source`] does, and lints it.
     ///
-    /// Returns [`Error::Compile`] on compile errors, or [`Error::Io`] if
-    /// linting exceeds its fuel or wall-time budget.
+    /// Returns [`Error::Compile`] on compile errors or if the lint exhausts
+    /// its fuel, [`Error::Limit`] if the lint exceeds
+    /// [`Limits::max_wall_time`], and [`Error::Interrupted`] if the host
+    /// interrupts the lint.
     pub fn lint_source(&self, name: &str, source: &str) -> Result<Vec<crate::lint::LintWarning>, Error> {
         let call = self.begin_call();
         let compiled = self.compile_now(&call, name, source, &self.source_root().1, None, true)?;
@@ -1825,7 +1827,9 @@ fn compile_program(
     let host = g.has_natives(&order);
     let cp = checker.take_checked();
     let lints = match modules.iter().find(|m| m.file == main_file).filter(|_| lint) {
-        Some(main) => Some(crate::lint::lint_module(main, &main.source, &cp, budget)?),
+        Some(main) => {
+            Some(crate::lint::lint_module(main, &main.source, &cp, budget).map_err(|stop| lint_budget_error(stop, sm, main_file))?)
+        }
         None => None,
     };
     let native_info = if host { native_info(&cp, registry) } else { crate::modules::NativeInfo::default() };

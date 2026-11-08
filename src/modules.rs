@@ -522,11 +522,17 @@ impl ModuleGraph {
 
 /// The error for a compilation stopped by its budget.
 pub(crate) fn budget_error(stop: Stop, sm: &SourceMap, main_file: u32) -> Error {
+    stop_error(stop, sm, main_file, "program too complex to compile: exceeded the compile budget (max_compile_fuel)")
+}
+
+/// The error for a lint stopped by its budget.
+pub(crate) fn lint_budget_error(stop: Stop, sm: &SourceMap, main_file: u32) -> Error {
+    stop_error(stop, sm, main_file, "source too complex to lint: exceeded the lint budget")
+}
+
+fn stop_error(stop: Stop, sm: &SourceMap, main_file: u32, out_of_fuel: &str) -> Error {
     match stop {
-        Stop::Fuel => Error::Compile(vec![sm.resolve(&Diag::error(
-            Span::new(main_file, 0, 0),
-            "program too complex to compile: exceeded the compile budget (max_compile_fuel)",
-        ))]),
+        Stop::Fuel => Error::Compile(vec![sm.resolve(&Diag::error(Span::new(main_file, 0, 0), out_of_fuel))]),
         Stop::Time => Error::Limit(crate::engine::LimitKind::WallTime),
         Stop::Interrupted => Error::Interrupted,
     }

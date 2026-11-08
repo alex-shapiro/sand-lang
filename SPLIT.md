@@ -23,8 +23,8 @@ journal. The sections below group these commits into self-contained changesets.
 3. Rule and limit positions in policy: merged in #28 from `policy-positions`
 4. `deny_private_net`: merged in #29 from `deny-private-net`
 5. Precompiled host modules: merged in #30 from `precompiled-host-modules`
-6. `InterruptHandle::new`: in review on `interrupt-handle`
-7. Linter budget and interrupt errors: not started
+6. `InterruptHandle::new`: merged in #31 from `interrupt-handle`
+7. Linter budget and interrupt errors: in review on `lint-budget-errors`
 8. Host calls to main-module functions: not started; requires 5
 9. Explicit VM control flow and call state: not started
 10. Fuel accounting for retried host calls: not started

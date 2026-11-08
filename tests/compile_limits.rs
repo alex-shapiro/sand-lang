@@ -8,10 +8,10 @@ mod common;
 use common::{TempDir, rt};
 use sandlang::check::budget::CompileBudget;
 use sandlang::engine::{Config, Engine, Error, HostModules, InterruptHandle, LimitKind, Limits, MemorySink};
-use sandlang::platform::{Deadline, SystemClock};
+use sandlang::platform::{Clock, ClockFuture, Deadline, Instant as PlatformInstant, SystemClock};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime};
 
 const FAST: Duration = Duration::from_secs(10);
 
@@ -262,26 +262,28 @@ fn the_formatter_is_bounded() {
     assert_eq!(format_source_with("let x = 1\n", interrupted).unwrap_err(), "interrupted");
 }
 
+/// A source whose lint work grows with `depth` and whose type check does not.
+fn nested_loops(depth: usize) -> String {
+    let mut src = String::from("var x = 0\n");
+    for i in 0..depth {
+        src += &format!("@l{i} loop {{\n");
+    }
+    src += &"x = x + 1\n".repeat(20_000);
+    for i in (0..depth).rev() {
+        src += &format!("break @l{i}\n}}\nx = 2\n");
+    }
+    src
+}
+
 #[test]
 fn the_linter_is_bounded() {
-    let nested = |depth: usize| {
-        let mut src = String::from("var x = 0\n");
-        for i in 0..depth {
-            src += &format!("@l{i} loop {{\n");
-        }
-        src += &"x = x + 1\n".repeat(20_000);
-        for i in (0..depth).rev() {
-            src += &format!("break @l{i}\n}}\nx = 2\n");
-        }
-        src
-    };
     let engine = Engine::new(Config::new());
     let lint = |src: &str| engine.lint_source("main.sand", src).map_err(|e| e.to_string());
     let start = Instant::now();
-    let e = lint(&nested(120)).unwrap_err();
-    assert!(e.contains("source too complex to lint"), "{e}");
+    let e = engine.lint_source("main.sand", &nested_loops(120)).unwrap_err();
+    assert!(matches!(e, Error::Compile(_)) && e.to_string().contains("source too complex to lint"), "{e}");
     assert!(start.elapsed() < FAST, "took {:?}", start.elapsed());
-    assert_eq!(lint(&nested(20)).unwrap(), vec![]);
+    assert_eq!(lint(&nested_loops(20)).unwrap(), vec![]);
     let e = lint(&slow_program()).unwrap_err();
     assert!(e.contains("program too complex to compile"), "{e}");
     let lets: String = (0..20_000).map(|i| format!("let _v{i} = {i}; ")).collect();
@@ -289,6 +291,79 @@ fn the_linter_is_bounded() {
     let start = Instant::now();
     assert_eq!(lint(&src).unwrap(), vec![]);
     assert!(start.elapsed() < FAST, "took {:?}", start.elapsed());
+}
+
+/// A clock that stands still for `readings_before_stop` monotonic readings.
+/// After that, it interrupts `interrupt` or, without one, passes every deadline.
+struct StoppingClock {
+    origin: PlatformInstant,
+    readings: AtomicU64,
+    readings_before_stop: u64,
+    interrupt: Option<InterruptHandle>,
+}
+
+impl StoppingClock {
+    fn new(readings_before_stop: u64, interrupt: Option<InterruptHandle>) -> Arc<StoppingClock> {
+        Arc::new(StoppingClock { origin: PlatformInstant::now(), readings: AtomicU64::new(0), readings_before_stop, interrupt })
+    }
+}
+
+impl Clock for StoppingClock {
+    fn wall(&self) -> SystemTime {
+        SystemClock.wall()
+    }
+
+    fn now(&self) -> PlatformInstant {
+        if self.readings.fetch_add(1, Ordering::Relaxed) < self.readings_before_stop {
+            return self.origin;
+        }
+        match &self.interrupt {
+            Some(handle) => {
+                handle.interrupt();
+                self.origin
+            }
+            None => self.origin + Duration::from_secs(3600),
+        }
+    }
+
+    fn cpu_time(&self) -> Duration {
+        SystemClock.cpu_time()
+    }
+
+    fn sleep(&self, duration: Duration) -> ClockFuture {
+        SystemClock.sleep(duration)
+    }
+
+    fn yield_now(&self) -> ClockFuture {
+        SystemClock.yield_now()
+    }
+}
+
+#[test]
+fn a_stopped_lint_reports_why_it_stopped() {
+    let src = nested_loops(120);
+    let timed = |clock: Arc<StoppingClock>, handle: Option<InterruptHandle>| {
+        let mut config = limits(|l| l.max_wall_time = Some(Duration::from_secs(60))).clock(clock);
+        if let Some(handle) = handle {
+            config = config.interrupt(handle);
+        }
+        Engine::new(config).lint_source("main.sand", &src)
+    };
+
+    // The lint uses all of its fuel, so the last clock readings are its own polls.
+    let counting = StoppingClock::new(u64::MAX, None);
+    let e = timed(counting.clone(), None).unwrap_err();
+    assert!(matches!(e, Error::Compile(_)) && e.to_string().contains("source too complex to lint"), "{e}");
+    let readings = counting.readings.load(Ordering::Relaxed);
+    assert!(readings > 20, "the lint polled the clock only {readings} times");
+    let during_lint = readings - 10;
+
+    let e = timed(StoppingClock::new(during_lint, None), None).unwrap_err();
+    assert!(matches!(e, Error::Limit(LimitKind::WallTime)), "{e}");
+
+    let handle = InterruptHandle::new();
+    let e = timed(StoppingClock::new(during_lint, Some(handle.clone())), Some(handle)).unwrap_err();
+    assert!(matches!(e, Error::Interrupted), "{e}");
 }
 
 #[test]
