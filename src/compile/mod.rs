@@ -4392,7 +4392,7 @@ mod tests {
         let engine = Engine::new(Config::new());
         let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let root = std::env::current_dir().unwrap();
-        match rt.block_on(engine.compile("main.sand", src, &root, None)) {
+        match rt.block_on(engine.compile(&engine.begin_call(Default::default()), "main.sand", src, &root, None)) {
             Ok(c) => c.program,
             Err(e) => panic!("{e}"),
         }

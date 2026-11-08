@@ -23,7 +23,6 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use value::*;
 
 pub type NResult = Result<Value, Ctl>;
@@ -491,7 +490,8 @@ pub struct Host {
     /// Minimum active script log level, or `None` if logging is disabled.
     pub log_level: Option<crate::stdlib::log::LogLevel>,
     pub(crate) log_sink: Option<Arc<dyn crate::stdlib::log::LogSink>>,
-    pub interrupt: Arc<AtomicBool>,
+    /// The interrupt state of the call that runs the VM.
+    pub(crate) interrupt: crate::engine::CallInterrupt,
     /// Cached decisions for stdout (index 0) and stderr (1).
     pub stream_decisions: [Option<bool>; 2],
     #[cfg(feature = "os")]
@@ -633,7 +633,8 @@ impl Vm {
         let heap = Heap::new(host.limits.max_memory, host.limits.max_open_resources);
         let consts = Vec::with_capacity(prog.consts.len());
         let globals = vec![Value::Uninit; prog.nglobals];
-        let meter = Meter::new(host.limits.max_instructions, host.interrupt.clone(), host.clock.clone());
+        let meter = Meter::new(host.limits.max_instructions, host.interrupt.flag.clone(), host.clock.clone());
+        let io = sched::IoTable::with_shared(host.interrupt.io.clone());
         let mut vm = Vm {
             prog,
             natives,
@@ -648,7 +649,7 @@ impl Vm {
             main_fiber: 0,
             live_tasks: 0,
             host,
-            io: sched::IoTable::default(),
+            io,
             gen_counter: 1,
             meter,
             deadline: None,
@@ -729,12 +730,13 @@ impl Vm {
         self.host.denies_once.clear();
     }
 
-    /// Starts a new run of a session VM that `interrupt` stops. Limits
-    /// other than memory apply to each run.
-    pub(crate) fn begin_session_run(&mut self, interrupt: Arc<AtomicBool>) {
-        self.meter.reset(interrupt.clone());
+    /// Starts a new run of a session VM in `call`, which must use the I/O
+    /// state of the VM. Limits other than memory apply to each run.
+    pub(crate) fn begin_session_run(&mut self, call: &crate::engine::CallInterrupt) {
+        debug_assert!(Arc::ptr_eq(&call.io, &self.io.shared));
+        self.meter.reset(call.flag.clone());
         self.host.output_bytes = 0;
-        self.host.interrupt = interrupt;
+        self.host.interrupt = call.clone();
     }
 
     /// Frees the fiber of the main task after it finished, leaving other

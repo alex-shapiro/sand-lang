@@ -4,7 +4,6 @@ use super::interp::Exit;
 use super::*;
 use crate::engine::LimitKind;
 use crate::platform::{ClockFuture, Instant};
-use std::sync::atomic::Ordering;
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
@@ -25,25 +24,11 @@ impl IoShared {
     }
 
     /// Registers the engine task's waker (woken by I/O and interrupts).
-    fn set_waker(&self, w: &Waker) {
+    pub(crate) fn set_waker(&self, w: &Waker) {
         let mut slot = self.waker.lock();
         if !slot.as_ref().is_some_and(|x| x.will_wake(w)) {
             *slot = Some(w.clone());
         }
-    }
-
-    /// Awaits `fut`, or returns `None` once `interrupt` is set. An
-    /// interrupt handle that sets `interrupt` wakes this table.
-    pub async fn unless_interrupted<T>(&self, interrupt: &AtomicBool, fut: impl Future<Output = T>) -> Option<T> {
-        let mut fut = std::pin::pin!(fut);
-        std::future::poll_fn(|cx| {
-            self.set_waker(cx.waker());
-            if interrupt.load(Ordering::Relaxed) {
-                return Poll::Ready(None);
-            }
-            fut.as_mut().poll(cx).map(Some)
-        })
-        .await
     }
 }
 
@@ -260,7 +245,7 @@ impl Vm {
     }
 
     fn check_limits(&self, timer: &RunTimer) -> Result<(), Trap> {
-        if self.host.interrupt.load(Ordering::Relaxed) {
+        if self.host.interrupt.is_set() {
             return Err(Trap::Interrupted);
         }
         let l = &self.host.limits;
@@ -470,8 +455,8 @@ impl Vm {
                         let asked = timer.now;
                         let answer = match self.host.prompter.clone() {
                             Some(p) => {
-                                let (interrupt, shared) = (self.host.interrupt.clone(), self.io.shared.clone());
-                                match shared.unless_interrupted(&interrupt, p.prompt(cap.clone())).await {
+                                let interrupt = self.host.interrupt.clone();
+                                match interrupt.unless_interrupted(p.prompt(cap.clone())).await {
                                     Some(a) => a,
                                     None => return Err(Trap::Interrupted),
                                 }
@@ -544,7 +529,7 @@ impl Vm {
                 if !done.is_empty() {
                     return Poll::Ready(done);
                 }
-                if interrupt.load(Ordering::Relaxed) {
+                if interrupt.is_set() {
                     return Poll::Ready(vec![]);
                 }
                 if let Some(s) = sleep.as_mut()

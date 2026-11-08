@@ -20,7 +20,7 @@ use crate::stdlib::time::TimeZone;
 use crate::types::{FnId, ModId};
 use crate::vm::bytecode::Program;
 use crate::vm::heap::GcStats;
-use crate::vm::sched::{IoShared, IoTable, RunEnd};
+use crate::vm::sched::{IoShared, RunEnd};
 use crate::vm::{Always, Host, HostFn, NativeEntry, OutputSink, Rng, SharedSink, TraceFrame, Trap, Vm, WaitKind, entropy_seed};
 use parking_lot::Mutex;
 use std::borrow::Cow;
@@ -526,7 +526,15 @@ impl CallInterrupt {
 
     /// Awaits `fut`, or returns `None` once the call is interrupted.
     pub async fn unless_interrupted<T>(&self, fut: impl Future<Output = T>) -> Option<T> {
-        self.io.unless_interrupted(&self.flag, fut).await
+        let mut fut = std::pin::pin!(fut);
+        std::future::poll_fn(|cx| {
+            self.io.set_waker(cx.waker());
+            if self.is_set() {
+                return std::task::Poll::Ready(None);
+            }
+            fut.as_mut().poll(cx).map(Some)
+        })
+        .await
     }
 }
 
@@ -886,8 +894,6 @@ pub(crate) struct Compiled {
     /// Wall-time deadline for the run. If the run compiled the program, the
     /// deadline starts at compilation and excludes import prompts.
     pub deadline: Option<Instant>,
-    /// The interrupt state of the call that compiled the program, for its run.
-    pub interrupt: CallInterrupt,
     /// Base snapshot used to recycle `program` if the program does not define
     /// native modules.
     pub snapshot: Option<Arc<Snapshot>>,
@@ -962,15 +968,17 @@ impl Engine {
     /// it. Compile errors are an [`Error::Compile`]; a lint that runs out of
     /// budget or time is an [`Error::Io`].
     pub fn lint_source(&self, name: &str, source: &str) -> Result<Vec<crate::lint::LintWarning>, Error> {
-        let c = self.compile_now(name, source, &self.source_root().1, None, true)?;
+        let call = self.begin_call(Arc::default());
+        let c = self.compile_now(&call, name, source, &self.source_root().1, None, true)?;
         self.recycle(c.program, c.snapshot);
         Ok(c.lints.unwrap_or_default())
     }
 
     /// Lints a file and its imports, like [`Engine::lint_source`].
     pub fn lint_file(&self, path: impl AsRef<Path>) -> Result<Vec<crate::lint::LintWarning>, Error> {
+        let call = self.begin_call(Arc::default());
         let (name, source, root) = self.read_main(path.as_ref())?;
-        let c = self.compile_now(&name, &source, &root, Some(path.as_ref()), true)?;
+        let c = self.compile_now(&call, &name, &source, &root, Some(path.as_ref()), true)?;
         self.recycle(c.program, c.snapshot);
         Ok(c.lints.unwrap_or_default())
     }
@@ -1015,15 +1023,17 @@ impl Engine {
     /// Type checks a source without running it. Imports the policy would
     /// prompt for are denied.
     pub fn check_source(&self, name: &str, source: &str) -> Result<(), Error> {
-        let c = self.compile_now(name, source, &self.source_root().1, None, false)?;
+        let call = self.begin_call(Arc::default());
+        let c = self.compile_now(&call, name, source, &self.source_root().1, None, false)?;
         self.recycle(c.program, c.snapshot);
         Ok(())
     }
 
     /// Type checks a file and its imports, like [`Engine::check_source`].
     pub fn check_file(&self, path: impl AsRef<Path>) -> Result<(), Error> {
+        let call = self.begin_call(Arc::default());
         let (name, source, root) = self.read_main(path.as_ref())?;
-        let c = self.compile_now(&name, &source, &root, Some(path.as_ref()), false)?;
+        let c = self.compile_now(&call, &name, &source, &root, Some(path.as_ref()), false)?;
         self.recycle(c.program, c.snapshot);
         Ok(())
     }
@@ -1037,10 +1047,18 @@ impl Engine {
         *self.spare.lock() = Some((snap, prog));
     }
 
-    /// Compiles synchronously: without prompts, it never waits.
-    fn compile_now(&self, name: &str, source: &str, root: &Path, path: Option<&Path>, lint: bool) -> Result<Compiled, Error> {
+    /// Compiles synchronously for `call`: without prompts, it never waits.
+    fn compile_now(
+        &self,
+        call: &CallInterrupt,
+        name: &str,
+        source: &str,
+        root: &Path,
+        path: Option<&Path>,
+        lint: bool,
+    ) -> Result<Compiled, Error> {
         let options = CompileOptions { prompt: false, lint };
-        let compiling = std::pin::pin!(self.compile_with(name, source, root, path, options));
+        let compiling = std::pin::pin!(self.compile_with(call, name, source, root, path, options));
         let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
         match crate::unwind::catch(|| compiling.poll(&mut cx)) {
             Ok(std::task::Poll::Ready(r)) => r,
@@ -1067,8 +1085,9 @@ impl Engine {
     }
 
     async fn run_source_inner(&mut self, name: &str, source: &str) -> Result<Outcome, Error> {
-        let (compiled, cwd) = self.compile_main_source(name, source).await?;
-        self.execute(compiled, cwd).await
+        let call = self.begin_call(Arc::default());
+        let (compiled, cwd) = self.compile_main_source(&call, name, source).await?;
+        self.execute(&call, compiled, cwd).await
     }
 
     pub async fn run_file(&mut self, path: impl AsRef<Path>) -> Result<Outcome, Error> {
@@ -1076,8 +1095,9 @@ impl Engine {
     }
 
     async fn run_file_inner(&mut self, path: &Path) -> Result<Outcome, Error> {
-        let (compiled, cwd) = self.compile_main_file(path).await?;
-        self.execute(compiled, cwd).await
+        let call = self.begin_call(Arc::default());
+        let (compiled, cwd) = self.compile_main_file(&call, path).await?;
+        self.execute(&call, compiled, cwd).await
     }
 
     /// Compiles `source` and its imports into a [`CompiledProgram`].
@@ -1086,7 +1106,8 @@ impl Engine {
     /// as [`Engine::run_source`] does.
     pub async fn compile_source(&self, name: &str, source: &str) -> Result<CompiledProgram, Error> {
         crate::unwind::guard(async {
-            let (compiled, _) = self.compile_main_source(name, source).await?;
+            let call = self.begin_call(Arc::default());
+            let (compiled, _) = self.compile_main_source(&call, name, source).await?;
             Ok(compiled.into_program())
         })
         .await
@@ -1098,7 +1119,8 @@ impl Engine {
     /// as [`Engine::run_file`] does.
     pub async fn compile_file(&self, path: impl AsRef<Path>) -> Result<CompiledProgram, Error> {
         crate::unwind::guard(async {
-            let (compiled, _) = self.compile_main_file(path.as_ref()).await?;
+            let call = self.begin_call(Arc::default());
+            let (compiled, _) = self.compile_main_file(&call, path.as_ref()).await?;
             Ok(compiled.into_program())
         })
         .await
@@ -1113,30 +1135,30 @@ impl Engine {
     /// Each run starts with fresh globals. The engine measures resource limits
     /// from the start of the run.
     pub async fn run_program(&mut self, program: &CompiledProgram) -> Result<Outcome, Error> {
+        let call = self.begin_call(Arc::default());
         let compiled = Compiled {
             program: program.program.clone(),
             host_modules: program.host_modules.clone(),
             lints: None,
             deadline: self.deadline(),
-            interrupt: self.begin_call(Arc::default()),
             snapshot: None,
         };
         let cwd = self.run_cwd(self.source_root().0.clone());
-        crate::unwind::guard(self.execute(compiled, cwd)).await
+        crate::unwind::guard(self.execute(&call, compiled, cwd)).await
     }
 
-    /// Compiles `source` as the main module. Returns the compiled program and
-    /// the working directory for its run.
-    async fn compile_main_source(&self, name: &str, source: &str) -> Result<(Compiled, PathBuf), Error> {
-        let (root, normalized_root) = self.source_root().clone();
-        Ok((self.compile(name, source, &normalized_root, None).await?, self.run_cwd(root)))
-    }
-
-    /// Compiles the file at `path` as the main module. Returns the compiled
+    /// Compiles `source` as the main module for `call`. Returns the compiled
     /// program and the working directory for its run.
-    async fn compile_main_file(&self, path: &Path) -> Result<(Compiled, PathBuf), Error> {
+    async fn compile_main_source(&self, call: &CallInterrupt, name: &str, source: &str) -> Result<(Compiled, PathBuf), Error> {
+        let (root, normalized_root) = self.source_root().clone();
+        Ok((self.compile(call, name, source, &normalized_root, None).await?, self.run_cwd(root)))
+    }
+
+    /// Compiles the file at `path` as the main module for `call`. Returns the
+    /// compiled program and the working directory for its run.
+    async fn compile_main_file(&self, call: &CallInterrupt, path: &Path) -> Result<(Compiled, PathBuf), Error> {
         let (name, source, root) = self.read_main(path)?;
-        Ok((self.compile(&name, &source, &root, Some(path)).await?, self.run_cwd(root)))
+        Ok((self.compile(call, &name, &source, &root, Some(path)).await?, self.run_cwd(root)))
     }
 
     /// Returns the working directory for a run whose module root is `root`.
@@ -1149,13 +1171,14 @@ impl Engine {
     }
 
     async fn run_tests_inner(&mut self, path: &Path) -> Result<TestReport, Error> {
-        let (compiled, cwd) = self.compile_main_file(path).await?;
+        let call = self.begin_call(Arc::default());
+        let (compiled, cwd) = self.compile_main_file(&call, path).await?;
         let prog = compiled.program;
         // The wall-time limit bounds the whole test run.
         let mut deadline = compiled.deadline;
         let mut report = TestReport::default();
         for (tname, proto) in prog.tests.clone() {
-            let mut vm = self.new_vm(prog.clone(), &compiled.host_modules, cwd.clone(), true, &compiled.interrupt);
+            let mut vm = self.new_vm(prog.clone(), &compiled.host_modules, cwd.clone(), true, &call);
             vm.deadline = deadline;
             let init = vm.run_main(prog.entry).await;
             let result = match init {
@@ -1229,7 +1252,7 @@ impl Engine {
             rng: Rng::new(c.seed.unwrap_or_else(entropy_seed)),
             log_level: c.log_level,
             log_sink: if quiet { Some(Arc::new(NullLogSink)) } else { c.log_sink.clone() },
-            interrupt: call.flag.clone(),
+            interrupt: call.clone(),
             stream_decisions: [None; 2],
             #[cfg(feature = "os")]
             tls: c.tls.clone(),
@@ -1245,7 +1268,6 @@ impl Engine {
             time_zone: c.time_zone.as_ref().map(|z| z.zone().clone()),
         };
         let mut vm = Vm::new(prog, host_modules.0.natives.clone(), host);
-        vm.io = IoTable::with_shared(call.io.clone());
         if c.gc_stress {
             vm.heap.stress = true;
             vm.heap.next_gc = 0;
@@ -1254,7 +1276,7 @@ impl Engine {
         vm
     }
 
-    async fn execute(&mut self, compiled: Compiled, cwd: PathBuf) -> Result<Outcome, Error> {
+    async fn execute(&mut self, call: &CallInterrupt, compiled: Compiled, cwd: PathBuf) -> Result<Outcome, Error> {
         let prog = compiled.program;
         if self.config.dump_bytecode {
             for (i, p) in prog.protos.iter().enumerate() {
@@ -1266,7 +1288,7 @@ impl Engine {
                 }
             }
         }
-        let mut vm = self.new_vm(prog.clone(), &compiled.host_modules, cwd, false, &compiled.interrupt);
+        let mut vm = self.new_vm(prog.clone(), &compiled.host_modules, cwd, false, call);
         vm.deadline = compiled.deadline;
         let r = vm.run_main(prog.entry).await;
         let r = end_run(&mut vm, r).await;
@@ -1333,28 +1355,29 @@ impl Engine {
     }
 
     /// Loads, checks and compiles the program whose main module is
-    /// `main_source` (the file `main_path`, if it is one), to run it.
+    /// `main_source` (the file `main_path`, if it is one), to run it in `call`.
     pub(crate) async fn compile(
         &self,
+        call: &CallInterrupt,
         main_name: &str,
         main_source: &str,
         root: &Path,
         main_path: Option<&Path>,
     ) -> Result<Compiled, Error> {
-        self.compile_with(main_name, main_source, root, main_path, RUN).await
+        self.compile_with(call, main_name, main_source, root, main_path, RUN).await
     }
 
     /// Like [`Engine::compile`], with `options`. `root` is the module root,
     /// in normal form (resolved by the engine's file system).
     pub(crate) async fn compile_with(
         &self,
+        call: &CallInterrupt,
         main_name: &str,
         main_source: &str,
         root: &Path,
         main_path: Option<&Path>,
         options: CompileOptions,
     ) -> Result<Compiled, Error> {
-        let interrupt = self.begin_call(Arc::default());
         // Unless the full snapshot exists, compile on the core extended with
         // just the standard modules the program imports (`Registry::extended`).
         let mut snap = match self.registry().ready() {
@@ -1382,7 +1405,7 @@ impl Engine {
         let mut errors: Vec<Diag> = Vec::new();
         let mut prompted = Duration::ZERO;
         let deadline = self.deadline();
-        let discovery = Discovery { snap: &snap, root, deadline, prompt: options.prompt, interrupt: &interrupt };
+        let discovery = Discovery { snap: &snap, root, deadline, prompt: options.prompt, interrupt: call };
         if let Some(stop) = self.discover(&discovery, &mut g, main, imports, main_key, &mut errors, &mut prompted).await {
             return Err(stop);
         }
@@ -1397,7 +1420,7 @@ impl Engine {
         let main_file = g.modules[main].file;
         // Time spent waiting for prompt answers does not count.
         let deadline = deadline.map(|d| d + prompted);
-        let budget = self.compile_budget(deadline, &interrupt);
+        let budget = self.compile_budget(deadline, call);
         let spare = match self.spare.lock().take() {
             Some((s, p)) if Arc::ptr_eq(&s, &snap) => Some(p),
             _ => None,
@@ -1407,7 +1430,7 @@ impl Engine {
         let (program, lints) =
             on_compile_stack(move || compile_program(&base, &mut g, &registry, &budget, main_file, options.lint, optimize, spare))?;
         let host_modules = self.config.host_modules.clone();
-        Ok(Compiled { program, host_modules, lints, deadline, interrupt, snapshot: (!has_natives).then_some(snap) })
+        Ok(Compiled { program, host_modules, lints, deadline, snapshot: (!has_natives).then_some(snap) })
     }
 
     /// Runs `job`, file system work for module discovery, on a worker
@@ -1788,7 +1811,7 @@ mod registry_tests {
         let host = snap.program.protos.iter().find(|p| p.name == "doubled_total").expect("doubled_total is compiled").code.clone();
         let script = |optimize: bool| {
             let engine = Engine::new(Config::new().optimize(optimize));
-            let c = engine.compile_now("main.sand", src, Path::new("."), None, false).unwrap();
+            let c = engine.compile_now(&engine.begin_call(Arc::default()), "main.sand", src, Path::new("."), None, false).unwrap();
             let proto = c.program.protos.iter().find(|p| p.name == "doubled_total").expect("doubled_total is compiled");
             proto.code.clone()
         };

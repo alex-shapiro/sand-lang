@@ -15,7 +15,7 @@
 //!   of one `match` may do at most [`MAX_PATTERN_WORK`] units of work
 //!   (`pattern too complex to check for exhaustiveness`);
 //! * a deadline (`Limits::max_wall_time`, counted from the start of
-//!   compilation) and the engine's interrupt flag, polled every
+//!   compilation) and the interrupt flag of the call, polled every
 //!   [`POLL_INTERVAL`] units.
 //!
 //! The counters are relaxed atomics used as plain cells (one thread charges a

@@ -535,7 +535,7 @@ impl Session {
         let st = state.as_mut().expect("session not started");
         st.recover();
         let vm = &mut st.vm;
-        vm.begin_session_run(call.flag.clone());
+        vm.begin_session_run(call);
         vm.deadline = deadline;
         st.running = true;
         let r = vm.run_main(proto).await;
@@ -561,7 +561,7 @@ impl Session {
         let Session { state, exit_code, call, .. } = self;
         let st = state.as_mut().expect("session not started");
         let vm = &mut st.vm;
-        vm.begin_session_run(call.flag.clone());
+        vm.begin_session_run(call);
         // Waiting for input may take any time.
         vm.deadline = None;
         let r = vm.drive(None).await;
