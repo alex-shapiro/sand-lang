@@ -3252,15 +3252,15 @@ fn interrupt_from_another_thread() {
 }
 
 #[test]
-fn an_interrupt_stops_each_engine_and_session_that_holds_its_handle() {
+fn interrupt_stops_all_engines_and_sessions_with_shared_handle() {
     let handle = InterruptHandle::new();
     let (started_tx, started_rx) = std::sync::mpsc::channel();
     let config = || {
-        let mut m = NativeModule::new("signal");
+        let mut module = NativeModule::new("signal");
         let started_tx = started_tx.clone();
-        m.function("started", move || started_tx.send(()).unwrap());
+        module.function("started", move || started_tx.send(()).unwrap());
         let limits = Limits { max_wall_time: Some(Duration::from_secs(10)), ..Limits::default() };
-        Config::new().limits(limits).host_modules(HostModules::new([m]).unwrap()).interrupt(handle.clone())
+        Config::new().limits(limits).host_modules(HostModules::new([module]).unwrap()).interrupt(handle.clone())
     };
     let source = "import signal\nsignal.started()\nwhile true {}";
     let mut engine = Engine::new(config());
@@ -3273,15 +3273,15 @@ fn an_interrupt_stops_each_engine_and_session_that_holds_its_handle() {
         started_rx.recv().unwrap();
     }
     handle.interrupt();
-    for r in runs {
-        let r = r.join().unwrap();
-        assert!(matches!(r, Err(Error::Interrupted)), "{r:?}");
+    for run in runs {
+        let result = run.join().unwrap();
+        assert!(matches!(result, Err(Error::Interrupted)), "{result:?}");
     }
 }
 
 #[cfg(feature = "os")]
 #[test]
-fn an_interrupt_survives_a_later_call_on_the_same_engine() {
+fn interrupt_remains_set_across_concurrent_call_on_same_engine() {
     let dir = TempDir::new("interruptoverlap");
     dir.write("lib.sand", "pub let X = 1");
     let main = dir.write("main.sand", "import \"./lib.sand\"\nprint(lib.X)");
@@ -3298,7 +3298,7 @@ fn an_interrupt_survives_a_later_call_on_the_same_engine() {
         }
     });
     let engine = Engine::new(config);
-    let r = std::thread::scope(|scope| {
+    let result = std::thread::scope(|scope| {
         let compiling = scope.spawn(|| rt().block_on(engine.compile_file(&main)).map(|_| ()));
         asked_rx.recv_timeout(Duration::from_secs(10)).expect("the prompter was not asked");
         handle.interrupt();
@@ -3306,12 +3306,11 @@ fn an_interrupt_survives_a_later_call_on_the_same_engine() {
         release_tx.send(true).unwrap();
         compiling.join().unwrap()
     });
-    assert!(matches!(r, Err(Error::Interrupted)), "{r:?}");
+    assert!(matches!(result, Err(Error::Interrupted)), "{result:?}");
 }
 
-/// Runs `call` with a configuration whose import prompts never get an
-/// answer. Interrupts the call during its first prompt, and checks that the
-/// call fails with `Error::Interrupted`.
+/// Runs `call` with a pending import prompt, interrupts the call during the
+/// prompt, and asserts that `call` returns `Err(Error::Interrupted)`.
 fn assert_interrupt_stops_an_import_prompt(call: impl FnOnce(Config) -> Result<(), Error> + Send + 'static) {
     let (asked_tx, asked_rx) = std::sync::mpsc::channel();
     let asked_tx = Mutex::new(asked_tx);
@@ -3326,8 +3325,8 @@ fn assert_interrupt_stops_an_import_prompt(call: impl FnOnce(Config) -> Result<(
     });
     asked_rx.recv_timeout(Duration::from_secs(10)).expect("the prompter was not asked");
     handle.interrupt();
-    let r = done_rx.recv_timeout(Duration::from_secs(10)).expect("the call did not stop after the interrupt");
-    assert!(matches!(r, Err(Error::Interrupted)), "{r:?}");
+    let result = done_rx.recv_timeout(Duration::from_secs(10)).expect("the call did not stop after the interrupt");
+    assert!(matches!(result, Err(Error::Interrupted)), "{result:?}");
 }
 
 #[cfg(feature = "os")]
@@ -3349,22 +3348,22 @@ fn interrupt_stops_engine_test_runs() {
     let dir = TempDir::new("interrupttests");
     let main = dir.write("main.sand", "import stop\ntest \"first\" { stop.interrupt()\nwhile true {} }\ntest \"second\" {}");
     let handle = InterruptHandle::new();
-    let mut m = NativeModule::new("stop");
-    let h = handle.clone();
-    m.function("interrupt", move || h.interrupt());
+    let mut module = NativeModule::new("stop");
+    let interrupter = handle.clone();
+    module.function("interrupt", move || interrupter.interrupt());
     let limits = Limits { max_wall_time: Some(Duration::from_secs(10)), ..Limits::default() };
-    let mut engine = Engine::new(Config::new().limits(limits).host_modules(HostModules::new([m]).unwrap()).interrupt(handle));
-    let r = rt().block_on(engine.run_tests(&main));
-    assert!(matches!(r, Err(Error::Interrupted)), "{r:?}");
+    let mut engine = Engine::new(Config::new().limits(limits).host_modules(HostModules::new([module]).unwrap()).interrupt(handle));
+    let result = rt().block_on(engine.run_tests(&main));
+    assert!(matches!(result, Err(Error::Interrupted)), "{result:?}");
 }
 
 #[test]
-fn an_interrupt_skips_engines_that_start_later() {
+fn engine_ignores_interrupt_before_call_starts() {
     let handle = InterruptHandle::new();
     handle.interrupt();
     let mut engine = Engine::new(Config::new().interrupt(handle.clone()));
-    let r = rt().block_on(engine.run_source("main.sand", "print(1)"));
-    assert!(r.is_ok(), "{r:?}");
+    let result = rt().block_on(engine.run_source("main.sand", "print(1)"));
+    assert!(result.is_ok(), "{result:?}");
 }
 
 #[test]

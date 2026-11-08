@@ -184,18 +184,18 @@ async fn repl(session: &mut Session, interrupt: &InterruptHandle, screen: &Scree
     0
 }
 
-/// Runs one input, printing its value or error.
+/// Evaluates `input` and prints its value or error.
 async fn eval(session: &mut Session, interrupt: &InterruptHandle, io: &mut Io, input: &str) {
     match foreground(interrupt, io, session.eval(input)).await {
         Ok(Some(value)) => outln!("{value}"),
         Ok(None) => {}
-        Err(e) => eprint!("{}", e.render()),
+        Err(err) => eprint!("{}", err.render()),
     }
 }
 
-/// Awaits `fut` and interrupts the session if Ctrl-C is pressed.
-async fn foreground<T>(interrupt: &InterruptHandle, io: &mut Io, fut: impl std::future::Future<Output = T>) -> T {
-    let mut fut = std::pin::pin!(fut);
+/// Awaits `future` and interrupts the session if Ctrl-C is pressed.
+async fn foreground<T>(interrupt: &InterruptHandle, io: &mut Io, future: impl std::future::Future<Output = T>) -> T {
+    let mut future = std::pin::pin!(future);
     let mut active_request: Option<StdinRequest> = None;
     loop {
         let feed = &io.stdin_feed;
@@ -208,7 +208,7 @@ async fn foreground<T>(interrupt: &InterruptHandle, io: &mut Io, fut: impl std::
             }
         };
         tokio::select! {
-            r = &mut fut => return r,
+            output = &mut future => return output,
             Ok(()) = tokio::signal::ctrl_c() => interrupt.interrupt(),
             request = input_needed, if active_request.is_none() => active_request = Some(request),
             event = io.reader.script_line(), if active_request.is_some() => {

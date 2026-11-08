@@ -502,16 +502,16 @@ fn interrupting_an_input() {
 }
 
 #[test]
-fn an_interrupt_during_one_test_block_stops_the_next() {
+fn interrupt_during_test_block_stops_session_test_run() {
     let handle = InterruptHandle::new();
-    let mut m = NativeModule::new("stop");
-    let h = handle.clone();
-    m.function("interrupt", move || h.interrupt());
+    let mut module = NativeModule::new("stop");
+    let interrupter = handle.clone();
+    module.function("interrupt", move || interrupter.interrupt());
     let limits = Limits { max_wall_time: Some(Duration::from_secs(2)), ..Limits::default() };
-    let config = Config::new().limits(limits).host_modules(HostModules::new([m]).unwrap()).interrupt(handle);
-    let mut r = Repl::with(config);
-    r.ok("import stop\ntest \"first\" { stop.interrupt() }\ntest \"second\" { while true {} }");
-    let report = r.rt.block_on(r.session.run_tests());
+    let config = Config::new().limits(limits).host_modules(HostModules::new([module]).unwrap()).interrupt(handle);
+    let mut repl = Repl::with(config);
+    repl.ok("import stop\ntest \"first\" { stop.interrupt() }\ntest \"second\" { while true {} }");
+    let report = repl.rt.block_on(repl.session.run_tests());
     assert!(matches!(report, Err(Error::Interrupted)), "{report:?}");
 }
 
@@ -888,8 +888,8 @@ fn exit_in_a_task_between_inputs() {
 #[test]
 fn interrupt_cancels_waiting_tasks_between_inputs() {
     let handle = InterruptHandle::new();
-    let mut r = Repl::with(Config::new().interrupt(handle.clone()));
-    r.ok("let c: Channel<int> = Channel()\nlet t = spawn { c.recv() }");
+    let mut repl = Repl::with(Config::new().interrupt(handle.clone()));
+    repl.ok("let c: Channel<int> = Channel()\nlet t = spawn { c.recv() }");
     let interrupter = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(50));
         handle.interrupt();
@@ -899,11 +899,11 @@ fn interrupt_cancels_waiting_tasks_between_inputs() {
         "the input"
     };
     let mut errors = Vec::new();
-    let got = r.rt.block_on(r.session.run_tasks_until(input, |e| errors.push(e)));
+    let got = repl.rt.block_on(repl.session.run_tasks_until(input, |err| errors.push(err)));
     interrupter.join().unwrap();
     assert_eq!(got, Some("the input"));
     assert!(matches!(errors[..], [Error::Interrupted]), "{errors:?}");
-    assert_eq!(r.session.cancel_tasks(), 0);
+    assert_eq!(repl.session.cancel_tasks(), 0);
 }
 
 #[cfg(feature = "os")]
@@ -919,9 +919,9 @@ fn interrupt_stops_a_prompt_between_inputs() {
     };
     let handle = InterruptHandle::new();
     let config = Config::new().policy(RulePolicy::standard()).prompter(prompter).cwd(dir.path()).module_root(dir.path());
-    let mut r = Repl::with(config.interrupt(handle.clone()));
-    r.ok("import fs");
-    r.ok("let t = spawn { task.sleep(10ms)\nfs.read_text(\"a.txt\") }");
+    let mut repl = Repl::with(config.interrupt(handle.clone()));
+    repl.ok("import fs");
+    repl.ok("let t = spawn { task.sleep(10ms)\nfs.read_text(\"a.txt\") }");
     let interrupter = std::thread::spawn(move || {
         asked_rx.recv_timeout(Duration::from_secs(10)).expect("the prompter was not asked");
         handle.interrupt();
@@ -931,7 +931,7 @@ fn interrupt_stops_a_prompt_between_inputs() {
         "the input"
     };
     let mut errors = Vec::new();
-    let got = r.rt.block_on(r.session.run_tasks_until(input, |e| errors.push(e)));
+    let got = repl.rt.block_on(repl.session.run_tasks_until(input, |err| errors.push(err)));
     interrupter.join().unwrap();
     assert_eq!(got, Some("the input"));
     assert!(matches!(errors[..], [Error::Interrupted]), "{errors:?}");

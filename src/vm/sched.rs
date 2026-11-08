@@ -23,11 +23,12 @@ impl IoShared {
         }
     }
 
-    /// Registers the engine task's waker (woken by I/O and interrupts).
-    pub(crate) fn set_waker(&self, w: &Waker) {
+    /// Stores `waker` so that I/O completions and interrupts wake the caller's
+    /// task.
+    pub(crate) fn set_waker(&self, waker: &Waker) {
         let mut slot = self.waker.lock();
-        if !slot.as_ref().is_some_and(|x| x.will_wake(w)) {
-            *slot = Some(w.clone());
+        if !slot.as_ref().is_some_and(|current| current.will_wake(waker)) {
+            *slot = Some(waker.clone());
         }
     }
 }
@@ -454,10 +455,10 @@ impl Vm {
                         timer.read();
                         let asked = timer.now;
                         let answer = match self.host.prompter.clone() {
-                            Some(p) => {
+                            Some(prompter) => {
                                 let interrupt = self.host.interrupt.clone();
-                                match interrupt.unless_interrupted(p.prompt(cap.clone())).await {
-                                    Some(a) => a,
+                                match interrupt.unless_interrupted(prompter.prompt(cap.clone())).await {
+                                    Some(answer) => answer,
                                     None => return Err(Trap::Interrupted),
                                 }
                             }

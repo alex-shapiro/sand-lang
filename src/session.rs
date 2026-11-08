@@ -195,12 +195,15 @@ impl Session {
         })
     }
 
-    /// Runs every `test` block entered so far (the latest of those with the
-    /// same name), each as the main task of the session's VM, against the
-    /// current state; their effects persist.
+    /// Runs every `test` block defined in the session on the session's VM and
+    /// returns a [`TestReport`].
     ///
-    /// A test that fails or exceeds a limit fails only in the report, and the
-    /// run continues. An interrupt ends the run with [`Error::Interrupted`].
+    /// If multiple `test` blocks share a name, only the latest definition
+    /// runs. State changes made by a test persist for subsequent tests and
+    /// inputs. Runtime errors and limit violations are recorded as test
+    /// failures in the report so that remaining tests still run. Calling
+    /// [`InterruptHandle::interrupt`](crate::engine::InterruptHandle::interrupt)
+    /// stops the test run and returns [`Error::Interrupted`].
     pub async fn run_tests(&mut self) -> Result<TestReport, Error> {
         self.begin_call();
         let r = CatchUnwind::new(self.run_tests_inner()).await;
@@ -272,55 +275,57 @@ impl Session {
         self.was_reset
     }
 
-    /// Runs background tasks from earlier inputs until `until` completes.
-    /// Returns the output of `until`. Pass a future that reads the next user
-    /// input so background tasks continue to run between inputs.
+    /// Runs background tasks from earlier inputs until `until` completes, and
+    /// returns the output of `until`.
     ///
-    /// The instruction, CPU time, and output limits apply to this call just
-    /// like an input. The wall-time limit does not apply to this call.
-    /// Permission prompts wait until `until` completes so they do not compete
-    /// with the front end for terminal input. While a task waits for a
-    /// permission prompt, all script execution pauses. Forward process standard
-    /// input through [`crate::stdin_feed::StdinFeed`].
+    /// Pass a future that reads the next user input so that background tasks
+    /// continue to run between inputs. Forward process standard input through
+    /// [`crate::stdin_feed::StdinFeed`].
     ///
-    /// If a task fails with an error or exceeds a limit, or if the call
-    /// receives an interrupt while tasks are left, the session cancels all
-    /// tasks and passes the error to `on_error`. The call then continues to
-    /// await `until`. If a task calls
-    /// `exit`, this method records the exit code in [`Session::exit_code`]. It
-    /// then drops `until` and returns `None`.
+    /// The instruction, CPU-time, and output limits apply to this call, while
+    /// `max_wall_time` is ignored. If a task needs a permission prompt, the
+    /// session pauses script execution and asks the prompter after `until`
+    /// completes so that prompts do not compete with terminal input.
+    ///
+    /// If a task fails with an error or exceeds a limit, the session cancels
+    /// all tasks, passes the error to `on_error`, and continues awaiting
+    /// `until`. Calling
+    /// [`InterruptHandle::interrupt`](crate::engine::InterruptHandle::interrupt)
+    /// while background tasks exist also cancels all tasks, passes
+    /// [`Error::Interrupted`] to `on_error`, and continues awaiting `until`.
+    /// If a task calls `exit`, the session records the code in
+    /// [`Session::exit_code`], drops `until`, and returns `None`.
     pub async fn run_tasks_until<F: Future>(&mut self, until: F, mut on_error: impl FnMut(Error)) -> Option<F::Output> {
         self.begin_call();
         let mut until = std::pin::pin!(until);
-        let runnable = self.state.as_mut().is_some_and(|st| {
-            st.recover();
-            !st.vm.ready.is_empty() || !st.vm.io.is_empty()
+        let runnable = self.state.as_mut().is_some_and(|state| {
+            state.recover();
+            !state.vm.ready.is_empty() || !state.vm.io.is_empty()
         });
         let output = if runnable {
-            // Run the tasks until `until` completes (the run is then dropped,
-            // where it waits) or they stop.
+            // Poll background tasks until `until` completes or the tasks stop.
             let stopped = {
                 let mut run = std::pin::pin!(CatchUnwind::new(self.run_idle()));
                 std::future::poll_fn(|cx| {
-                    if let Poll::Ready(v) = until.as_mut().poll(cx) {
-                        return Poll::Ready(Err(v));
+                    if let Poll::Ready(out) = until.as_mut().poll(cx) {
+                        return Poll::Ready(Err(out));
                     }
                     run.as_mut().poll(cx).map(Ok)
                 })
                 .await
             };
             match stopped {
-                Err(v) => {
-                    if let Some(st) = self.state.as_ref() {
-                        st.vm.flush_stdout();
+                Err(out) => {
+                    if let Some(state) = self.state.as_ref() {
+                        state.vm.flush_stdout();
                     }
-                    v
+                    out
                 }
-                Ok(r) => {
-                    match self.settle(r) {
+                Ok(idle_result) => {
+                    match self.settle(idle_result) {
                         Ok(false) => {}
                         Ok(true) => return None,
-                        Err(e) => on_error(e),
+                        Err(err) => on_error(err),
                     }
                     until.await
                 }
@@ -328,21 +333,19 @@ impl Session {
         } else {
             until.await
         };
-        // A prompt a task needed meanwhile is asked now; the task retries
-        // its call when it runs again.
-        if let Some(st) = self.state.as_mut()
-            && let Some(cap) = st.deferred_prompt.take()
+        // Ask any deferred permission prompt after `until` completes.
+        if let Some(state) = self.state.as_mut()
+            && let Some(capability) = state.deferred_prompt.take()
         {
             let answer = match self.engine.config().prompter.clone() {
-                Some(p) => self.call.unless_interrupted(p.prompt(cap.clone())).await,
+                Some(prompter) => self.call.unless_interrupted(prompter.prompt(capability.clone())).await,
                 None => Some(PromptAnswer::DenyOnce),
             };
             if let Some(answer) = answer {
-                st.vm.apply_answer(cap, answer);
+                state.vm.apply_answer(capability, answer);
             }
         }
-        // An interrupt while the tasks waited, or during the prompt, cancels
-        // the tasks that are left.
+        // Cancel remaining tasks if an interrupt arrived after `run_idle` stopped.
         if self.call.is_set() && self.cancel_tasks() > 0 {
             on_error(Error::Interrupted);
         }
@@ -398,7 +401,8 @@ impl Session {
         Ok(self.state.as_mut().unwrap())
     }
 
-    /// Starts a public call: interrupts that come from now on stop it.
+    /// Resets per-call flags and registers a fresh [`CallInterrupt`] for the
+    /// current call.
     fn begin_call(&mut self) {
         self.was_reset = false;
         self.call = self.engine.begin_call_with_io(self.call.io.clone());

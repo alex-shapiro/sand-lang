@@ -194,8 +194,8 @@ impl Meter {
         self.base.get().saturating_add(self.spent())
     }
 
-    /// Counts the fuel used from zero again, and checks `interrupt` from now
-    /// on (a new run of a REPL session).
+    /// Resets the fuel counter to zero and replaces the interrupt flag for a
+    /// new session run.
     pub(crate) fn reset(&mut self, interrupt: Arc<AtomicBool>) {
         self.base.set(0);
         self.slice.set(self.fuel.get());

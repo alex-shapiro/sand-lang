@@ -70,45 +70,43 @@ The host cannot rely on engine limits, stability, or control.
       `Engine::interrupt` only reaches an engine that is waiting. With
       cross-origin isolation, store the interrupt flag in a
       `SharedArrayBuffer` that the page sets directly.
-- [ ] ❓ _Embedding._ **Decide: an interrupt before a call starts.** An
-      engine or session ignores an interrupt that comes before its next call,
-      because each call makes a new flag and an interrupt sets only the flags
-      of calls in progress. A call starts at the first poll of its future, so
-      on the web `engine.run(src); engine.interrupt();` does not stop the run.
-      A host with one engine for each job cannot cancel a job in setup or in a
-      queue. Options:
-      - A: keep this behavior. Optionally start each call when the host calls
-        the method, to close the first-poll window.
-      - B: a sticky handle with `InterruptHandle::reset()`. A reset for one
-        engine can erase an interrupt for another engine with a clone of the
-        handle.
-      - B′ (recommended): a single-use sticky handle, like tokio's
-        `CancellationToken`, `AbortSignal` and Go's `context`. A setter such as
-        `Session::set_interrupt(handle)` gives an engine or session a new
-        handle after an interrupt. It also fits item 015.
-      - C: an interrupt handle for each `Run` (changeset 11 in SPLIT.md).
-- [ ] ❓ _Sandbox._ Limit the worker threads of blocked I/O jobs. When an
-      interrupt or a limit stops a call that waits for a blocking job, the
-      engine abandons the job, but its worker thread stays blocked.
-      `Pool::run` in `src/platform.rs` then starts a new thread for the next
-      job. A host that runs many scripts against a hung path loses one thread
-      for each stopped call. Limit the pool, or the blocked jobs of each
-      engine, and fail new jobs with an I/O error when the limit is reached.
-- [ ] ❓ _Embedding._ Use one test runner for `Engine::run_tests` and
-      `Session::run_tests`, or at least one function that turns a test run
-      into a `TestResult`. The two runners apply `max_wall_time` differently:
-      `Engine::run_tests` gives the whole test run one limit, and
-      `Session::run_tests` gives each test its own limit. With a 10 s limit
-      and 100 slow tests, `sand test` stops after 10 s, but the REPL's `:test`
-      can run for 1,000 s. Choose one rule and document it in SPEC §4.8. The
-      session must keep its own VM for each test run, and it must stop after
-      an internal error.
-- [ ] ❓ _Sandbox._ Read the main file of `run_file`, `check_file`,
-      `lint_file`, `compile_file` and `run_tests` the way imports are read:
-      through `Engine::discovery_io` with `read_source(max_source_bytes)`.
-      `read_main` reads the whole file on the caller's thread, so an
-      interrupt or the wall-time limit cannot stop a read of a FIFO or a hung
-      mount, and `max_source_bytes` applies only after the read.
+- [ ] ❓ _Embedding._ **Decide whether an interrupt before a call starts should
+      stop that call.** `InterruptHandle::interrupt` sets the interrupt flags
+      of active calls only. Each call creates a new flag at the first poll of
+      its future. On the web, `engine.run(src); engine.interrupt();` does not
+      stop the run because the future has not been polled yet. A host that
+      creates an engine per job also cannot cancel a job while the job is in
+      setup or in a queue. Options:
+      - Keep this behavior. Optionally create the interrupt flag before
+        returning the future so that an immediate interrupt stops the call.
+      - Make `InterruptHandle` sticky and add `InterruptHandle::reset()`.
+        However, if two engines share a handle, resetting the handle for the
+        first engine clears a pending interrupt for the second engine.
+      - Recommended: make `InterruptHandle` single-use and sticky, like
+        `tokio::util::sync::CancellationToken`, `AbortSignal`, and Go's
+        `context`. Add `Engine::set_interrupt` and `Session::set_interrupt` so
+        the host can replace a used handle. This design also supports item 015.
+      - Give each `Run` its own interrupt handle in changeset 11 of `SPLIT.md`.
+- [ ] ❓ _Sandbox._ Cap the number of worker threads for blocking I/O jobs. If
+      a call stops at a limit or an interrupt during a blocking job, the
+      engine abandons the job. The worker thread remains blocked, and
+      `Pool::run` in `src/platform.rs` spawns a new thread for the next job.
+      Repeated calls against a hung path can exhaust host threads. Cap the
+      thread pool or the blocked jobs per engine. Return an I/O error if a new
+      job exceeds the cap.
+- [ ] ❓ _Embedding._ Share test-execution logic between `Engine::run_tests`
+      and `Session::run_tests`, and apply `max_wall_time` consistently.
+      `Engine::run_tests` applies `max_wall_time` to the entire test suite.
+      `Session::run_tests` applies `max_wall_time` to each test individually.
+      Choose a single rule and document it in SPEC §4.8. Keep session tests on
+      the persistent session VM, and stop the test suite if an internal error
+      resets the session.
+- [ ] ❓ _Sandbox._ Read the main script file through `Engine::discovery_io`
+      and `Fs::read_source` in `Engine::read_main`, as module imports do.
+      `Engine::read_main` currently reads the entire file on the caller's
+      thread before checking `max_source_bytes`. Offloading the bounded read
+      lets `max_source_bytes`, `max_wall_time`, and interrupts stop a read
+      from a large file, a FIFO, or a hung mount.
 
 ## Tier 3: ordinary scripts
 

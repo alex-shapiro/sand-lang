@@ -344,7 +344,7 @@ assert_eq!(session.eval("hit() + hit()").await?, Some("3".to_string()));
 
 ## Interrupts
 
-An `InterruptHandle` cancels an in-progress compilation, VM execution, or I/O wait from another thread. Create the handle first, and give it to the engine configuration with `Config::interrupt`:
+Use an `InterruptHandle` to stop an active compilation, VM execution, or I/O wait from another thread. Pass the handle to `Config::interrupt` before creating the engine or session:
 
 ```rust
 # #[tokio::main(flavor = "current_thread")]
@@ -364,7 +364,7 @@ assert!(matches!(result, Err(Error::Interrupted)));
 # }
 ```
 
-A handle in the configuration of a `Session` cancels the `eval`, `run_tests`, or `type_of` call in progress. In `run_tasks_until`, an interrupt cancels the background tasks and passes `Error::Interrupted` to `on_error`. The call then continues to wait for `until`. If you give clones of one handle to several configurations, the handle stops each of their engines and sessions. An engine or session ignores an interrupt that comes before its next call.
+In a `Session`, `InterruptHandle::interrupt` cancels an active `eval`, `run_tests`, or `type_of` call. In `run_tasks_until`, an interrupt cancels the background tasks and passes `Error::Interrupted` to `on_error`. The call then continues to wait for `until`. You can pass clones of a handle to multiple configurations to stop all of their engines and sessions together. An engine or session ignores calls to `interrupt()` that occur before a call starts.
 
 ## Multiple engines
 

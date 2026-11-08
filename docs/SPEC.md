@@ -1862,17 +1862,18 @@ the allocator retains. This allocator overhead is typically under 25% of
 `max_memory`, but can be higher if a script frees many allocations of one
 size class and then allocates another size class.
 
-In a session (§16.6, §17.6), the instruction, CPU time, wall time and
-output limits apply to each input; the memory limit to the session's
-persistent heap. Limit violations are reported to the host as distinct
-error variants and cannot be intercepted by scripts. The host may also
-interrupt an engine from another thread with an `InterruptHandle`, which
-stops compilation, bytecode, long-running library functions, and waits for
-I/O or prompt answers. The host creates the handle (`InterruptHandle::new()`)
-and gives it to the configuration of an engine or session
-(`Config::interrupt`). A handle stops each engine and session whose
-configuration holds a clone of it. An engine or session ignores an interrupt
-that comes before its next call, such as `run_source` or `eval`.
+In a session, the instruction, CPU-time, wall-time, and output limits apply to
+each input separately; see §16.6 and §17.6. The memory limit applies to the
+session's persistent heap. The engine reports limit violations to the host as
+distinct error variants that scripts cannot catch.
+
+The host can also stop an active engine or session call from any thread with an
+`InterruptHandle`. The host creates a handle with `InterruptHandle::new()` and
+passes it to `Config::interrupt`. Calling `InterruptHandle::interrupt()` stops
+compilation, bytecode execution, long-running library functions, I/O waits, and
+permission prompts in every engine or session configured with that handle or a
+clone of it. An engine or session ignores calls to `interrupt()` that occur
+before a call starts.
 
 ### 15.2 Fuel
 
@@ -2381,20 +2382,24 @@ limit, or interruption, the session cancels all running tasks, passes the error
 to `on_error`, and continues waiting for `until`. `cancel_tasks()` cancels
 remaining background tasks without running their `defer` blocks.
 
-`Session::set_wall_time` overrides `max_wall_time` for subsequent inputs. The
-interrupt handle of the session configuration (§15.1) cancels an active `eval`,
-`run_tests`, or `type_of` call. In `run_tasks_until`, an interrupt fails the
-running tasks as described above, and the call continues to wait for `until`.
-Dropping an `eval` future before completion cancels the input in the same way
-as an interrupt, and leaves the session state unchanged if the input was still
-loading imports. A host can drop the future only between its polls, so a
-compilation or an import read that is in progress ends first. An interrupt
-stops these too. `reset()` clears all session bindings and state. If an
-internal error (§10.3) occurs during `eval`, `run_tests`, `type_of`, or
-`run_tasks_until`, the session automatically resets itself, appends
-`" (the session was reset)"` from `sandlang::session::RESET_NOTE` to the error
-message, and sets `was_reset()` to `true` until the next call while preserving
-remembered `"always"` prompt decisions.
+`Session::set_wall_time` overrides `max_wall_time` for subsequent inputs.
+
+Calling `InterruptHandle::interrupt()` on the session's handle stops an active
+`eval`, `run_tests`, or `type_of` call with `Error::Interrupted`; see §15.1. In
+`run_tasks_until`, an interrupt cancels the background tasks, passes
+`Error::Interrupted` to `on_error`, and continues waiting for `until`. Dropping
+an `eval` future before it finishes cancels the input like an interrupt. If the
+input was still loading imports, dropping the future leaves the session state
+unchanged. Because the host can drop a future only between polls, a synchronous
+compilation step or import read finishes before the drop takes effect.
+`InterruptHandle::interrupt()` stops compilation and import reads while a poll
+is in progress.
+
+`reset()` clears all session bindings and state. If an internal error occurs
+during a session call, the session resets itself and preserves remembered
+`"always"` prompt decisions; see §10.3. It appends `" (the session was reset)"`
+from `sandlang::session::RESET_NOTE` to the error message and sets
+`was_reset()` to `true` until the next call.
 
 ## 17. Tooling
 
