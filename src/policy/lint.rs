@@ -80,7 +80,7 @@ pub fn lint_policy(text: &str, base: &Path, home: Option<&Path>) -> Result<Vec<L
                 let rule = &rules[i];
                 let identical = same[&(rule.decision, &rule.kind)].iter().copied().find(|&c| is_kept(c));
                 let (decision, by, repeat) = match identical {
-                    Some(c) if paths.get(i).is_none_or(|r| paths.preserves_address_resolution(r, &[c])) => (true, vec![c], true),
+                    Some(c) => (true, vec![c], true),
                     _ => {
                         let (decision, by) = paths.subsuming_rules(paths.get(i)?, &|j| !is_kept(j))?;
                         (decision, by, false)
@@ -339,7 +339,8 @@ enum Key<'a> {
     Ips,
 }
 
-/// The kind of an address rule; see [`NetPattern::is_address`].
+/// The kind of an address rule: a rule for IP addresses, or a rule for `localhost` names, which
+/// RFC 6761 maps to loopback addresses. See [`super::RulePolicy::check_resolved`].
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AddressKind {
     Ip,
@@ -350,7 +351,7 @@ impl AddressKind {
     fn of(host: &NetPattern) -> Option<AddressKind> {
         match host.kind {
             HostKind::Ip(..) => Some(AddressKind::Ip),
-            _ if host.is_address() => Some(AddressKind::Localhost),
+            HostKind::Host(ref name) | HostKind::Suffix(ref name) if is_localhost(name) => Some(AddressKind::Localhost),
             _ => None,
         }
     }
@@ -958,15 +959,36 @@ mod tests {
     /// resolved-address checks, with few paths and methods so that their ranks interleave.
     fn loopback_rule_line() -> impl Strategy<Value = String> {
         let verb = || prop::sample::select(vec!["allow", "deny", "prompt"]);
-        let hosts = prop::sample::select(vec!["*", "localhost", "*.localhost", "127.0.0.1", "[::1]"]);
-        let net_hosts = prop::sample::select(vec!["*", "localhost", "127.0.0.1", "127.0.0.0/8", "[::1]"]);
+        let transport = || prop::sample::select(vec!["tls plaintext ", "tls plaintext ", "tls ", "plaintext "]);
+        let port = || prop::sample::select(vec!["", "", "", ":443"]);
+        let hosts = vec!["*", "localhost", "*.localhost", "127.0.0.1", "[::1]", "0.0.0.0", "[::ffff:127.0.0.1]", "[64:ff9b::7f00:1]"];
+        let net_hosts = prop::sample::select(hosts.iter().chain(&["127.0.0.0/8", "[::]"]).copied().collect::<Vec<_>>());
         let methods = prop::sample::select(vec!["", "GET "]);
         let path = prop::sample::select(vec!["", "/a", "/*", "/**"]);
         prop_oneof![
-            3 => (verb(), methods, hosts, path).prop_map(|(v, m, h, p)| format!("{v} http tls plaintext {m}{h}{p}")),
-            1 => (verb(), net_hosts).prop_map(|(v, h)| format!("{v} net tls plaintext {h}")),
+            3 => (verb(), transport(), methods, prop::sample::select(hosts), port(), path)
+                .prop_map(|(v, t, m, h, port, p)| format!("{v} http {t}{m}{h}{port}{p}")),
+            1 => (verb(), transport(), net_hosts, port()).prop_map(|(v, t, h, port)| format!("{v} net {t}{h}{port}")),
         ]
     }
+
+    /// Rules of both address kinds that meet at loopback addresses with interleaved ranks,
+    /// including prompt rules. `reported_rules_are_not_needed_for_every_loopback_triple` checks
+    /// every ordered triple of them.
+    const LOOPBACK_LINES: [&str; 12] = [
+        "allow net tls plaintext *",
+        "allow http tls plaintext localhost/**",
+        "allow http tls plaintext localhost/*",
+        "allow http tls plaintext localhost/a",
+        "allow http tls plaintext GET localhost",
+        "prompt net tls plaintext localhost",
+        "prompt net tls plaintext 127.0.0.1",
+        "prompt http tls plaintext 127.0.0.1/**",
+        "deny http tls plaintext 127.0.0.1/**",
+        "deny http tls plaintext 127.0.0.1/a",
+        "deny http tls plaintext GET 127.0.0.1",
+        "deny net tls plaintext 127.0.0.0/8",
+    ];
 
     const SETS: &str = "\nlet n = a b\nlet h = api.example.com 10.0.0.1 *.com";
 
@@ -1119,6 +1141,18 @@ mod tests {
         ports.sort();
         ports.dedup();
         hosts.iter().flat_map(|h| ports.iter().map(move |&p| (h.clone(), p))).collect()
+    }
+
+    #[test]
+    fn reported_rules_are_not_needed_for_every_loopback_triple() {
+        for (a, b, c) in ordered_triples(LOOPBACK_LINES.len()) {
+            let lines = [a, b, c].map(|i| LOOPBACK_LINES[i].to_string());
+            check_reported_rules_are_not_needed(&lines).unwrap();
+        }
+    }
+
+    fn ordered_triples(n: usize) -> impl Iterator<Item = (usize, usize, usize)> {
+        (0..n).flat_map(move |a| (0..n).flat_map(move |b| (0..n).map(move |c| (a, b, c))))
     }
 
     /// Asserts that deleting the rules that the linter reports does not change any decision.

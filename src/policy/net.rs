@@ -125,16 +125,6 @@ impl NetPattern {
         self.host_rank() * 2 + self.port.is_some() as u32
     }
 
-    /// Returns `true` if the pattern names addresses: an IP address, a CIDR prefix, or a
-    /// `localhost` name, which RFC 6761 maps to loopback.
-    pub(crate) fn is_address(&self) -> bool {
-        match &self.kind {
-            HostKind::Ip(..) => true,
-            HostKind::Host(name) | HostKind::Suffix(name) => is_localhost(name),
-            HostKind::Any => false,
-        }
-    }
-
     pub(crate) fn host_rank(&self) -> u32 {
         match &self.kind {
             HostKind::Host(_) => 3000,
