@@ -2157,28 +2157,27 @@ fn compiling_reports_errors_and_checks_imports_with_the_compiling_engine() {
 
 #[test]
 fn program_runs_use_the_working_directory_of_the_running_engine() {
+    let src = "import fs\nprint(fs.read_text(\"in.txt\")?)";
     let fs = MemFs::new();
-    fs.write("/app/main.sand", "import fs\nprint(fs.read_text(\"in.txt\")?)").unwrap();
+    fs.write("/app/main.sand", src).unwrap();
+    fs.write("/in.txt", "root").unwrap();
     fs.write("/app/in.txt", "app").unwrap();
     fs.write("/work/in.txt", "work").unwrap();
-    let program = rt().block_on(Engine::new(Config::new().memory_fs(fs.clone())).compile_file("/app/main.sand")).unwrap();
+    let compiler = Engine::new(Config::new().memory_fs(fs.clone()).module_root("/app").cwd("/work"));
+    let programs = [
+        rt().block_on(compiler.compile_file("/app/main.sand")).unwrap(),
+        rt().block_on(compiler.compile_source("main.sand", src)).unwrap(),
+        // A program compiled on the host file system.
+        rt().block_on(Engine::new(Config::new()).compile_source("main.sand", src)).unwrap(),
+    ];
     let policy = RulePolicy::standard().allow_read("/".parse().unwrap());
     let config = || Config::new().policy(policy.clone()).memory_fs(fs.clone());
-    let (r, out) = run_program_with(config(), &program);
-    r.unwrap();
-    assert_eq!(out, "app\n");
-    let (r, out) = run_program_with(config().cwd("/work"), &program);
-    r.unwrap();
-    assert_eq!(out, "work\n");
-    // The working directory of the compiling engine applies also with a module root.
-    let compiler = Engine::new(Config::new().memory_fs(fs.clone()).module_root("/app").cwd("/work"));
-    for program in [
-        rt().block_on(compiler.compile_file("/app/main.sand")).unwrap(),
-        rt().block_on(compiler.compile_source("main.sand", "import fs\nprint(fs.read_text(\"in.txt\")?)")).unwrap(),
-    ] {
-        let (r, out) = run_program_with(config(), &program);
-        r.unwrap();
-        assert_eq!(out, "work\n");
+    for program in &programs {
+        for (config, expected) in [(config(), "root\n"), (config().module_root("/app"), "app\n"), (config().cwd("/work"), "work\n")] {
+            let (r, out) = run_program_with(config, program);
+            r.unwrap();
+            assert_eq!(out, expected);
+        }
     }
 }
 

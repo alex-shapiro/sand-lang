@@ -2026,9 +2026,10 @@ engine sets these parts of the program:
 - the source of the script and its imports, as they were during compilation
 - the import decisions of its policy
 - its host modules
-- the working directory of a run, if the running engine does not set `Config::cwd`
 
-The running engine supplies all other configuration. Each run starts with new
+The running engine supplies all other configuration, including the working
+directory: `Config::cwd`, then `Config::module_root`, then the default
+directory of its file system, as for `run_source`. Each run starts with new
 globals, and its limits count from the start of the run.
 
 ### 16.2 Host environment and providers

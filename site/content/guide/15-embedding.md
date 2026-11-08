@@ -34,9 +34,8 @@ The compiling engine sets these parts of a `CompiledProgram`:
 - the source of the script and its imports, as they were during compilation
 - the import decisions of its policy
 - its host modules
-- the working directory of a run, if the running engine does not set `Config::cwd`
 
-The running engine supplies all other configuration, such as the policy, limits, streams, and file system.
+The running engine supplies all other configuration, such as the policy, limits, streams, file system, and working directory.
 
 ```rust
 # #[tokio::main(flavor = "current_thread")]

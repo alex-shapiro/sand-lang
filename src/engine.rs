@@ -583,17 +583,11 @@ impl fmt::Debug for HostModules {
 pub struct CompiledProgram {
     program: Arc<Program>,
     host_modules: HostModules,
-    /// The working directory of a run on the compiling engine, for runs on
-    /// engines without [`Config::cwd`].
-    default_cwd: PathBuf,
 }
 
 impl fmt::Debug for CompiledProgram {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("CompiledProgram")
-            .field("host_modules", &self.host_modules)
-            .field("default_cwd", &self.default_cwd)
-            .finish_non_exhaustive()
+        f.debug_struct("CompiledProgram").field("host_modules", &self.host_modules).finish_non_exhaustive()
     }
 }
 
@@ -844,10 +838,8 @@ pub(crate) struct Compiled {
 }
 
 impl Compiled {
-    /// The program, to run with `default_cwd` as its working directory on
-    /// engines without [`Config::cwd`].
-    fn into_program(self, default_cwd: PathBuf) -> CompiledProgram {
-        CompiledProgram { program: self.program, host_modules: self.host_modules, default_cwd }
+    fn into_program(self) -> CompiledProgram {
+        CompiledProgram { program: self.program, host_modules: self.host_modules }
     }
 }
 
@@ -1043,8 +1035,8 @@ impl Engine {
     /// engine.
     pub async fn compile_source(&self, name: &str, source: &str) -> Result<CompiledProgram, Error> {
         let compiling = async {
-            let (compiled, cwd) = self.compile_main_source(name, source).await?;
-            Ok(compiled.into_program(cwd))
+            let (compiled, _) = self.compile_main_source(name, source).await?;
+            Ok(compiled.into_program())
         };
         crate::unwind::guard(compiling).await
     }
@@ -1054,17 +1046,18 @@ impl Engine {
     /// engine.
     pub async fn compile_file(&self, path: impl AsRef<Path>) -> Result<CompiledProgram, Error> {
         let compiling = async {
-            let (compiled, cwd) = self.compile_main_file(path.as_ref()).await?;
-            Ok(compiled.into_program(cwd))
+            let (compiled, _) = self.compile_main_file(path.as_ref()).await?;
+            Ok(compiled.into_program())
         };
         crate::unwind::guard(compiling).await
     }
 
     /// Runs `program` with the host modules that it was compiled with and the
-    /// rest of the configuration of this engine. If this engine does not set
-    /// [`Config::cwd`], the run uses the working directory of a run on the
-    /// compiling engine. Each run starts with new globals, and its limits
-    /// count from the start of the run.
+    /// rest of the configuration of this engine. The working directory is
+    /// [`Config::cwd`], then [`Config::module_root`], then the default
+    /// directory of the file system, as for [`Engine::run_source`]. Each run
+    /// starts with new globals, and its limits count from the start of the
+    /// run.
     pub async fn run_program(&mut self, program: &CompiledProgram) -> Result<Outcome, Error> {
         self.clear_interrupt();
         let compiled = Compiled {
@@ -1074,7 +1067,7 @@ impl Engine {
             deadline: self.deadline(),
             snapshot: None,
         };
-        let cwd = self.run_cwd(program.default_cwd.clone());
+        let cwd = self.run_cwd(self.source_root().0.clone());
         crate::unwind::guard(self.execute(compiled, cwd)).await
     }
 
