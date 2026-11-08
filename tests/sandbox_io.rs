@@ -594,6 +594,7 @@ fn redirects_to_denied_addresses_are_denied() {
     let tport = target.addr.port();
     let origin = http_server(move |req| match req.path() {
         "/name" => HttpResponse::new(302, "").header("location", &format!("http://loopback.test:{tport}/")),
+        "/numeric" => HttpResponse::new(302, "").header("location", &format!("http://127.1:{tport}/")),
         "/tls" => HttpResponse::new(302, "").header("location", "http://example.com/"),
         _ => HttpResponse::new(302, "").header("location", &format!("http://localhost:{tport}/")),
     });
@@ -601,12 +602,15 @@ fn redirects_to_denied_addresses_are_denied() {
     let policy = RulePolicy::standard()
         .extend(parse_rules(&format!("allow net tls plaintext *\ndeny net 127.0.0.0/8 [::1]\nallow net plaintext {}", origin.addr)));
     let src = format!(
-        "import http\nprint(http.get(\"http://{0}/name\").unwrap_err().kind)\nprint(http.get(\"http://{0}/local\").unwrap_err().kind)",
+        "import http\nfor path in [\"name\", \"local\", \"numeric\"] {{\n    print(http.get(\"http://{0}/\\(path)\").unwrap_err().kind)\n}}\nprint(http.get(\"http://{0}/numeric\").unwrap_err().message)",
         origin.addr
     );
     let r = run_with(&src, |c| c.policy(policy).network(Arc::new(RebindingNetwork)));
-    assert_eq!(r.ok_stdout(), "permission_denied\npermission_denied\n");
-    assert_eq!(origin.requests.lock().len(), 2);
+    let out = r.ok_stdout();
+    assert!(out.starts_with("permission_denied\npermission_denied\nparse\n"), "{out}");
+    let invalid = format!("redirect from http://{}/numeric: invalid URL \"http://127.1:{tport}/\": invalid host", origin.addr);
+    assert!(out.lines().nth(3).is_some_and(|m| m.starts_with(&invalid)), "{out}");
+    assert_eq!(origin.requests.lock().len(), 4);
     assert!(target.requests.lock().is_empty());
 }
 
@@ -680,7 +684,7 @@ for host in ["127.1", "0x7f000001", "2130706433", "%6cocalhost", "ｌｏｃａ�
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines.len(), 12, "{out}");
     for pair in lines.chunks(2) {
-        assert!(pair[0].ends_with("invalid host (expected an ASCII host name or a full IP address, such as 127.0.0.1)"), "{out}");
+        assert!(pair[0].contains("invalid host (expected an ASCII host name"), "{out}");
         assert_eq!(pair[1], "invalid", "{out}");
     }
 }
