@@ -117,7 +117,7 @@ fn engine(files: &[(String, String)]) -> (Engine, MemorySink) {
         .seed(42)
         .stdout(sink.clone())
         .stderr(sink.clone());
-    (Engine::new(config).unwrap(), sink)
+    (Engine::new(config), sink)
 }
 
 fn diff(a: &str, b: &str) -> String {

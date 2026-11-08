@@ -6,7 +6,7 @@
 mod common;
 
 use common::{TempDir, literal_path, rt};
-use sandlang::engine::{Config, Engine, Error, LimitKind, Limits, MemorySink};
+use sandlang::engine::{Config, Engine, Error, HostModules, LimitKind, Limits, MemorySink};
 use sandlang::native::NativeModule;
 use sandlang::native::func::Later;
 use sandlang::platform::{Clock, ClockFuture, Instant, SystemTime, UNIX_EPOCH};
@@ -36,7 +36,7 @@ impl Repl {
     fn with(config: Config) -> Repl {
         let out = MemorySink::new();
         let err = MemorySink::new();
-        let session = Session::new(config.stdout(out.clone()).stderr(err.clone())).unwrap();
+        let session = Session::new(config.stdout(out.clone()).stderr(err.clone()));
         Repl { session, out, err, rt: rt() }
     }
 
@@ -641,7 +641,7 @@ fn output_goes_to_the_configured_sinks() {
 #[test]
 fn session_future_is_send() {
     fn assert_send<T: Send>(_: &T) {}
-    let mut s = Session::new(Config::new()).unwrap();
+    let mut s = Session::new(Config::new());
     assert_send(&s);
     let fut = s.eval("1");
     assert_send(&fut);
@@ -699,7 +699,7 @@ fn assert_reset(r: &Repl, message: &str, panic: &str) {
 
 #[test]
 fn internal_panics_reset_the_session() {
-    let mut r = Repl::with(Config::new().module(buggy_module()));
+    let mut r = Repl::with(Config::new().host_modules(HostModules::new([buggy_module()]).unwrap()));
     r.ok("import bug\nlet x = 1");
     assert_eq!(r.value("bug.crash(0) + x"), "1");
     assert!(!r.session.was_reset());
@@ -726,7 +726,7 @@ fn internal_panics_reset_the_session() {
 
 #[test]
 fn internal_panics_in_background_tasks_reset_the_session() {
-    let mut r = Repl::with(Config::new().module(buggy_module()));
+    let mut r = Repl::with(Config::new().host_modules(HostModules::new([buggy_module()]).unwrap()));
     r.ok("import bug\nlet t = spawn { task.sleep(20ms)\nbug.crash(1) }");
     let mut errors = Vec::new();
     let got = r.rt.block_on(r.session.run_tasks_until(async { tokio::time::sleep(Duration::from_millis(300)).await }, |e| errors.push(e)));
@@ -1089,7 +1089,7 @@ fn cancelling_a_read_closes_its_request() {
 fn unread_input_stays_in_the_feed_for_the_next_run() {
     let out = MemorySink::new();
     let (config, feed) = Config::new().policy(RulePolicy::allow_all()).stdout(out.clone()).stdin_feed();
-    let mut engine = Engine::new(config).unwrap();
+    let mut engine = Engine::new(config);
     feed.send("a\nb\n");
     let read_line = "import io\nprint(io.stdin.read_line()?)";
     rt().block_on(engine.run_source("main.sand", read_line)).unwrap();
@@ -1162,7 +1162,7 @@ fn waits_module() -> NativeModule {
 #[test]
 fn host_user_wait_pauses_wall_time_limit() {
     let limits = Limits { max_wall_time: Some(Duration::from_millis(100)), ..Limits::default() };
-    let mut r = Repl::paused(Config::new().module(waits_module()).limits(limits));
+    let mut r = Repl::paused(Config::new().host_modules(HostModules::new([waits_module()]).unwrap()).limits(limits));
     r.ok("import waits");
     r.ok("waits.user()");
     assert!(matches!(r.eval("waits.io()"), Err(Error::Limit(LimitKind::WallTime))));
@@ -1186,7 +1186,7 @@ fn redefined_types_are_told_apart_in_messages() {
 
 #[test]
 fn inputs_can_be_named() {
-    let mut session = Session::new(Config::new()).unwrap();
+    let mut session = Session::new(Config::new());
     match rt().block_on(session.eval_as("main.sand", "let a = 1\nlet b: int = \"no\"")) {
         Err(Error::Compile(d)) => assert_eq!((d[0].file.as_str(), d[0].line), ("main.sand", 2)),
         other => panic!("{other:?}"),

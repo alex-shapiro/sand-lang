@@ -1935,11 +1935,12 @@ Checking a program happens before it runs, so it is bounded separately:
   `max_compile_fuel` is exhausted, compilation fails with `program too complex
 to compile`. `None` means unlimited.
 - **Time and interrupts.** Compilation fails with `time limit exceeded` if
-  `max_wall_time` elapses, excluding waits for permission prompts. The run that
-  follows uses the remaining time budget. Compilation fails with an interrupt
-  error if the host interrupts the engine. The standard library is compiled once
-  per process, or once per engine if host modules are registered, outside any
-  program's budget.
+  `max_wall_time` elapses. Waits for permission prompts do not count toward
+  `max_wall_time`. In `run_source` and `run_file`, execution uses the
+  remaining time budget. Compilation fails with an interrupt error if the
+  host interrupts the engine. The standard library is compiled once per
+  process. `HostModules::new` compiles host modules (§16.3). Neither
+  compilation counts toward a program's budget.
 - **Local limits**, reported at the offending construct: nesting of
   expressions, types, patterns and blocks to 256 levels (`nesting too
 deep`); strings nested inside string interpolations to 32 levels
@@ -1973,7 +1974,7 @@ multiple engines concurrently across threads or asynchronous tasks, or
 interleaved on a single thread in WebAssembly (§16.5).
 
 ```rust
-use sandlang::engine::{Config, Engine, Limits};
+use sandlang::engine::{Config, Engine, HostModules, Limits};
 use sandlang::native::NativeModule;
 use sandlang::policy::rules::RulePolicy;
 
@@ -1984,22 +1985,20 @@ module.async_function("lookup", |key: String| async move { Ok::<_, String>(key.l
 let config = Config::new()
     .policy(RulePolicy::standard())
     .limits(Limits { max_memory: Some(64 << 20), ..Limits::default() })
-    .module(module);
-let mut engine = Engine::new(config)?;
+    .host_modules(HostModules::new([module])?);
+let mut engine = Engine::new(config);
 let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 4.0))"#).await?;
 ```
 
 ### 16.1 Execution and errors
 
-`Engine::new` validates registered host modules (§16.3) and constructs an
-`Engine`. `Engine::run_source` and `Engine::run_file` compile and execute a
-script inside
-the returned future on the thread that polls it. `Engine::run_tests` compiles a
-module and executes its `test` blocks (§4.8). For static analysis without
-execution, `check_source`, `check_file`, `lint_source`, and `lint_file` (§17.2)
-resolve imported modules from the engine's file system under its policy, except
-that the compiler denies any import that requires an interactive permission
-prompt.
+`Engine::new` constructs an `Engine` from a `Config`. `Engine::run_source` and
+`Engine::run_file` compile and execute a script inside the returned future on
+the thread that polls it. `Engine::run_tests` compiles a module and executes
+its `test` blocks (§4.8). `check_source`, `check_file`, `lint_source`, and
+`lint_file` (§17.2) analyze a script without executing it. These methods
+resolve imported modules from the engine's file system under its policy. They
+deny any import that requires an interactive permission prompt.
 
 A completed run returns `Outcome { exit_code: i32 }`, and a failed operation
 returns an `Error`:
@@ -2017,6 +2016,22 @@ If `sandlang` is compiled with the default `panic = "unwind"` setting, the
 engine catches Rust panics inside library native functions, host callbacks, I/O
 operations, and permission prompters and converts them into `Error::Internal`
 so that panics do not unwind into the host.
+
+A host that runs the same script many times can compile it once.
+`Engine::compile_source` and `Engine::compile_file` compile a script and its
+imports into a `CompiledProgram`. `Engine::run_program` runs a
+`CompiledProgram` on any engine. The compiling engine fixes three parts of the
+program:
+
+- the script and its imported modules
+- the policy decisions for those imports
+- the host modules
+
+The running engine supplies all other configuration. It selects the working
+directory in the same order as `run_source`: `Config::cwd`,
+`Config::module_root`, or the default directory of its file system. Each run
+starts with fresh globals. The engine measures resource limits from the start
+of each run.
 
 ### 16.2 Host environment and providers
 
@@ -2114,12 +2129,14 @@ interactive `Prompter` (§14).
 ### 16.3 Native modules
 
 `NativeModule` exposes Rust functions and types to Sand scripts as an
-importable module registered with `Config::module`. The engine infers the Sand
-signature of each registered function from its Rust parameter and return types,
-and charges fuel and memory when converting arguments and return values.
-`NativeModule` and `Config::module` panic if a module, type, or function name
-is invalid or already registered, or if a host module uses the name of a
-standard library module.
+importable module. `HostModules::new(modules)` type-checks and compiles native
+modules. `Config::host_modules` registers the compiled `HostModules` on an
+engine. Clones of a `HostModules` share the compiled modules across engines.
+The engine infers each function's Sand signature from its Rust parameter and
+return types. The VM charges fuel and memory to convert arguments and return
+values. `NativeModule` and `HostModules::new` panic if a module, type, or
+function name is invalid or duplicated. `NativeModule::new` also panics if a
+module uses a standard library name from `sandlang::stdlib::STD_MODULES`.
 
 | Method                       | Registered item                                                                     |
 | ---------------------------- | ----------------------------------------------------------------------------------- |
@@ -2251,8 +2268,7 @@ A function registered as `"Type.init"` constructs `Type` (§4.2).
 Generic functions and functions with default parameter values must be declared
 explicitly with `native fn` in `NativeModule::source`.
 
-`Engine::new` compiles and validates all registered host modules and returns
-`Error::Compile` if:
+`HostModules::new` returns `Error::Compile` if:
 
 - the module's Sand source contains a syntax or type error;
 - a `native fn` declaration in Sand source does not match the Rust function's
@@ -2334,7 +2350,7 @@ which it owns. `Session` implements the evaluation semantics of `sand repl`
 (§17.6):
 
 ```rust
-let mut session = Session::new(config)?;
+let mut session = Session::new(config);
 session.eval("var hits = 0\nfn hit() -> int { hits += 1\n hits }").await?;   // Ok(None)
 assert_eq!(session.eval("hit() + hit()").await?, Some("3".to_string()));
 ```

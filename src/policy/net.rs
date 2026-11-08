@@ -24,6 +24,7 @@ pub(crate) enum HostKind {
     Ip(IpAddr, u8),
 }
 
+#[cfg(any(feature = "os", web))]
 pub(crate) fn is_valid_host(host: &str) -> bool {
     host.parse::<IpAddr>().is_ok() || canonical_hostname(host).is_some()
 }

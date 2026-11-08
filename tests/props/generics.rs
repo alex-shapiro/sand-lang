@@ -709,7 +709,7 @@ fn generate(seed: u64) -> (Case, Vec<(String, String)>) {
 
 /// Returns the compile error messages for `src`, or `None` if `src` compiles.
 fn compile_errors(src: &str) -> Option<Vec<String>> {
-    let engine = Engine::new(Config::new().policy(sandlang::policy::rules::RulePolicy::standard())).unwrap();
+    let engine = Engine::new(Config::new().policy(sandlang::policy::rules::RulePolicy::standard()));
     match engine.check_source("main.sand", src) {
         Ok(()) => None,
         Err(Error::Compile(ds)) => Some(ds.into_iter().map(|d| d.message).collect()),

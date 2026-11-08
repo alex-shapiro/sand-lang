@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 fn run(config: Config, source: &str) -> (Result<sandlang::engine::Outcome, Error>, String) {
     let out = MemorySink::new();
-    let mut engine = Engine::new(config.stdout(out.clone())).unwrap();
+    let mut engine = Engine::new(config.stdout(out.clone()));
     let r = rt().block_on(engine.run_source("main.sand", source));
     (r, out.contents())
 }
@@ -121,7 +121,7 @@ fn imports_and_main_files_come_from_the_memory_file_system() {
     fs.write("/app/lib/helper.sand", "pub fn add(a: int, b: int) -> int { a + b }\n").unwrap();
     let out = MemorySink::new();
     let policy = RulePolicy::standard().extend(parse_rules("allow import /"));
-    let mut engine = Engine::new(Config::new().policy(policy).memory_fs(fs.clone()).stdout(out.clone())).unwrap();
+    let mut engine = Engine::new(Config::new().policy(policy).memory_fs(fs.clone()).stdout(out.clone()));
     rt().block_on(engine.run_file("/app/main.sand")).unwrap();
     assert_eq!(out.contents(), "42\n");
     engine.check_file("/app/main.sand").unwrap();
@@ -134,7 +134,7 @@ fn imports_and_main_files_come_from_the_memory_file_system() {
     }
     // `allow import` restricts them further.
     let rules = RulePolicy::standard().extend(parse_rules("allow import /app/lib"));
-    let mut engine = Engine::new(Config::new().policy(rules).memory_fs(fs.clone()).stdout(MemorySink::new())).unwrap();
+    let mut engine = Engine::new(Config::new().policy(rules).memory_fs(fs.clone()).stdout(MemorySink::new()));
     rt().block_on(engine.run_file("/app/main.sand")).unwrap();
     fs.write("/app/other.sand", "pub fn f() -> int { 1 }\n").unwrap();
     match rt().block_on(engine.run_source("main.sand", "import \"other\"\nprint(other.f())")) {
@@ -198,7 +198,7 @@ fn engines_can_share_a_file_system() {
 fn checks_and_lints_see_the_memory_file_system() {
     let fs = MemFs::new();
     fs.write("/lib.sand", "pub fn f() -> int { 1 }\n").unwrap();
-    let engine = Engine::new(Config::new().policy(RulePolicy::standard().extend(parse_rules("allow import /"))).memory_fs(fs)).unwrap();
+    let engine = Engine::new(Config::new().policy(RulePolicy::standard().extend(parse_rules("allow import /"))).memory_fs(fs));
     engine.check_source("main.sand", "import \"lib\"\nprint(lib.f())").unwrap();
     match engine.check_source("main.sand", "import \"missing\"") {
         Err(Error::Compile(d)) => assert!(d[0].message.contains("cannot load module `missing`"), "{d:?}"),
@@ -293,4 +293,35 @@ fn waiting_for_prompt_answers_is_not_run_time() {
     let (r, out) = run(config, src);
     r.unwrap();
     assert_eq!(out, "42\ntrue\n");
+}
+
+/// `Config::cwd` sets the working directory for `run_source` even if
+/// `Config::module_root` is set.
+#[test]
+fn run_source_uses_the_configured_working_directory() {
+    let fs = MemFs::new();
+    fs.create_dir_all("/root").unwrap();
+    fs.write("/work/in.txt", "from work").unwrap();
+    let policy = RulePolicy::standard().allow_read("/work".parse().unwrap());
+    let config = Config::new().policy(policy).memory_fs(fs).module_root("/root").cwd("/work");
+    let (r, out) = run(config, "import fs\nprint(fs.read_text(\"in.txt\")?)");
+    r.unwrap();
+    assert_eq!(out, "from work\n");
+}
+
+/// Library lookup ignores scripts whose names are in `STD_MODULES`.
+#[test]
+fn library_lookup_ignores_standard_module_names() {
+    let fs = MemFs::new();
+    for name in sandlang::stdlib::STD_MODULES {
+        fs.write(format!("/lib/{name}.sand"), "pub fn f() -> int { 1 }").unwrap();
+    }
+    let policy = RulePolicy::standard().extend(parse_rules("allow import /lib"));
+    let config = || Config::new().policy(policy.clone()).memory_fs(fs.clone()).library("/lib");
+    let (r, _) = run(config(), "import prelude\nprint(prelude.f())");
+    let Err(Error::Compile(ds)) = r else { panic!("expected a compile error, got {r:?}") };
+    assert!(ds[0].message.contains("unknown module `prelude`"), "{ds:?}");
+    let (r, out) = run(config(), "import json\nprint(json.encode(1))");
+    r.unwrap();
+    assert_eq!(out, "1\n");
 }
