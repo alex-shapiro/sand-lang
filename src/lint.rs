@@ -1,13 +1,12 @@
 //! The linter: style and correctness warnings on top of the type checker.
 
-use crate::check::budget::{CompileBudget, tool_fuel};
+use crate::check::budget::{CompileBudget, Stop, TEXT_BYTES_PER_UNIT, tool_fuel};
 use crate::check::{CheckedProgram, Ctor, FnInfo, FnKind, ParsedModule};
 use crate::diag::{FileId, SourceFile};
-use crate::engine::Error;
 use crate::hir::{HArg, HKind};
 use crate::syntax::ast::*;
 use crate::syntax::lexer::CommentKind;
-use crate::types::FnId;
+use crate::types::{FnId, TypeDef, TypeDefId, TypeId};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,19 +23,16 @@ impl std::fmt::Display for LintWarning {
     }
 }
 
-/// Lints `main`, the main module of `checked`, whose source is `file`, with
-/// fuel of its own ([`tool_fuel`]) and `compile`'s deadline and interrupt
-/// flag. Running out is an [`Error::Io`].
-pub(crate) fn lint_module(
-    main: &ParsedModule,
-    file: &SourceFile,
-    checked: &CheckedProgram,
-    compile: &CompileBudget,
-) -> Result<Vec<LintWarning>, Error> {
-    let budget = compile.with_fuel(tool_fuel(file.text.len()));
-    let warnings = run_lints(main, file, checked, &budget);
+/// Lints the main module `main` of `checked`.
+///
+/// The linter runs with a fresh fuel budget from [`tool_fuel`] and inherits
+/// the deadline and interrupt flag from `compile_budget`. Returns [`Stop`] if
+/// the budget stops the linter.
+pub(crate) fn lint_module(main: &ParsedModule, checked: &CheckedProgram, compile_budget: &CompileBudget) -> Result<Vec<LintWarning>, Stop> {
+    let budget = compile_budget.with_fuel(tool_fuel(main.source.text.len()));
+    let warnings = run_lints(main, checked, &budget);
     match budget.stopped() {
-        Some(stop) => Err(Error::Io(crate::fmt::stop_message(stop, "lint"))),
+        Some(stop) => Err(stop),
         None => Ok(warnings),
     }
 }
@@ -45,40 +41,45 @@ struct Linter<'a> {
     file: &'a SourceFile,
     out: Vec<LintWarning>,
     checked: &'a CheckedProgram,
-    /// Types of the main module's bindings by the offset of their name,
-    /// from the checker (empty for top-level bindings).
-    types: HashMap<u32, &'a str>,
-    /// The payload-less variants of the enum type of capitalized bindings
-    /// by the offset of their name, from the checker (`variant-like-binding`).
-    variants: HashMap<u32, &'a [String]>,
-    /// The names of the bindings (with known types) of each scope enclosing
-    /// the current point of the current function, innermost last.
+    /// Type of each binding in the main module, indexed by the byte offset of
+    /// its name.
+    types: HashMap<u32, TypeId>,
+    /// Enum definition for each uppercase binding in the main module, indexed
+    /// by the byte offset of its name.
+    enum_defs: HashMap<u32, TypeDefId>,
+    /// Binding names in each enclosing scope of the current function, from
+    /// outermost to innermost.
     let_scopes: Vec<Vec<String>>,
-    /// The types of the bindings in `let_scopes` by name, innermost last.
-    in_scope: HashMap<String, Vec<&'a str>>,
-    /// Names that may shadow the prelude's (see [`declarations`]).
+    /// Types of the bindings in `let_scopes` by name, from outermost to
+    /// innermost.
+    in_scope: HashMap<String, Vec<TypeId>>,
+    /// Module-level declarations that can shadow the prelude.
     declared: HashSet<String>,
     budget: &'a CompileBudget,
 }
 
-fn run_lints(main: &ParsedModule, file: &SourceFile, checked: &CheckedProgram, budget: &CompileBudget) -> Vec<LintWarning> {
+fn run_lints(main: &ParsedModule, checked: &CheckedProgram, budget: &CompileBudget) -> Vec<LintWarning> {
+    let file = &main.source;
     if !budget.charge((file.text.len() / 64) as u64) {
         return vec![];
     }
     let locals = || checked.lint.locals.iter().filter(|f| f.span.file == main.file);
-    let mut l = Linter {
+    let mut linter = Linter {
         file,
         out: Vec::new(),
         checked,
-        types: locals().map(|f| (f.span.lo, f.ty.as_str())).collect(),
-        variants: locals().filter(|f| !f.variants.is_empty()).map(|f| (f.span.lo, f.variants.as_slice())).collect(),
+        types: locals().map(|f| (f.span.lo, f.ty)).collect(),
+        enum_defs: locals().filter_map(|f| Some((f.span.lo, f.enum_def?))).collect(),
         let_scopes: vec![vec![]],
         in_scope: HashMap::new(),
         declared: declarations(&main.ast),
         budget,
     };
-    l.module(&main.ast);
-    l.fact_lints(main.file);
+    linter.module(&main.ast);
+    if budget.stopped().is_some() {
+        return vec![];
+    }
+    linter.fact_lints(main.file);
 
     let src = &*file.text;
     let mut file_allow: HashSet<String> = HashSet::new();
@@ -94,11 +95,11 @@ fn run_lints(main: &ParsedModule, file: &SourceFile, checked: &CheckedProgram, b
         if c.kind == CommentKind::ModuleDoc {
             file_allow.extend(names);
         } else {
-            let line = l.line_of(c.lo);
+            let line = linter.line_of(c.lo);
             line_allow.entry(line + 1).or_default().extend(names);
         }
     }
-    let mut out: Vec<LintWarning> = l
+    let mut out: Vec<LintWarning> = linter
         .out
         .into_iter()
         .filter(|w| !file_allow.contains(w.code) && !line_allow.get(&w.line).is_some_and(|s| s.contains(w.code)))
@@ -390,9 +391,16 @@ impl<'a> Linter<'a> {
         }
     }
 
-    /// The checker's type of the binding introduced at `id`, if known.
-    fn binding_type(&self, id: &Ident) -> Option<&'a str> {
-        self.types.get(&id.span.lo).copied().filter(|t| !t.is_empty())
+    /// Returns the type of the binding introduced at `id`.
+    fn binding_type(&self, id: &Ident) -> Option<TypeId> {
+        self.types.get(&id.span.lo).copied()
+    }
+
+    /// Formats `t` and charges its byte length to the lint budget.
+    fn type_text(&self, t: TypeId) -> String {
+        let text = self.checked.printer().show(t);
+        self.budget.charge(text.len() as u64 / TEXT_BYTES_PER_UNIT);
+        text
     }
 
     /// Brings a binding into the innermost scope. Names without a checker type
@@ -436,14 +444,14 @@ impl<'a> Linter<'a> {
         p.bindings(&mut ids);
         for id in &ids {
             let Some(ty) = self.binding_type(id) else { continue };
-            let prior = self.in_scope.get(&id.name).and_then(|types| types.last()).cloned();
-            if let Some(prev_ty) = prior
+            if let Some(&prev_ty) = self.in_scope.get(&id.name).and_then(|types| types.last())
                 && prev_ty != ty
             {
+                let (prev_text, text) = (self.type_text(prev_ty), self.type_text(ty));
                 self.warn(
                     id.span.lo,
                     "shadowed-variable",
-                    format!("`{}` shadows a binding of a different type ({prev_ty} vs {ty})", id.name),
+                    format!("`{}` shadows a binding of a different type ({prev_text} vs {text})", id.name),
                 );
             }
         }
@@ -548,19 +556,32 @@ impl<'a> Linter<'a> {
     /// new variable, most likely a misspelled variant without a payload.
     fn variant_like_binding(&mut self, id: &Ident) {
         let name = id.name.to_ascii_lowercase();
-        let close = self.variants.get(&id.span.lo).and_then(|variants| {
-            variants
-                .iter()
-                .map(|v| (edit_distance(&name, &v.rsplit('.').next().unwrap_or(v).to_ascii_lowercase()), v))
-                .filter(|&(d, _)| d <= (name.chars().count() / 3).max(1))
-                .min_by_key(|&(d, _)| d)
-                .map(|(_, v)| v.clone())
+        let suggestion = self.enum_defs.get(&id.span.lo).and_then(|&def_id| {
+            let def = &self.checked.types[def_id as usize];
+            let variant = self.closest_payloadless_variant(&name, def)?;
+            Some(format!("{}.{variant}", self.checked.name(def.name)))
         });
-        let message = match close {
-            Some(v) => format!("`{}` binds a new variable; did you mean the variant `{v}`?", id.name),
+        let message = match suggestion {
+            Some(variant) => format!("`{}` binds a new variable; did you mean the variant `{variant}`?", id.name),
             None => format!("`{}` binds a new variable rather than matching a variant; use a lowercase name for a binding", id.name),
         };
         self.warn(id.span.lo, "variant-like-binding", message);
+    }
+
+    /// Returns the closest payloadless variant of `def` to the lowercase
+    /// `name`, if a variant is within the edit-distance threshold.
+    fn closest_payloadless_variant(&self, name: &str, def: &TypeDef) -> Option<&'a str> {
+        let max_distance = (name.chars().count() / 3).max(1);
+        def.variants()
+            .iter()
+            .take_while(|_| self.budget.charge(1))
+            .filter(|variant| variant.fields.is_empty())
+            .map(|variant| self.checked.name(variant.name))
+            .take_while(|variant| self.budget.charge(name.len() as u64 * variant.len() as u64))
+            .map(|variant| (edit_distance(name, &variant.to_ascii_lowercase()), variant))
+            .filter(|&(distance, _)| distance <= max_distance)
+            .min_by_key(|&(distance, _)| distance)
+            .map(|(_, variant)| variant)
     }
 
     fn stmt(&mut self, s: &Stmt, top: bool) {

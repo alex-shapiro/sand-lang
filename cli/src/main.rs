@@ -529,23 +529,18 @@ fn cmd_lint(args: &[String]) -> Result<u8, String> {
         let warnings = if is_policy(f) {
             let text = std::fs::read_to_string(f).map_err(|e| format!("cannot read {f}: {e}"))?;
             match sandlang::policy::lint::lint_policy(&text, &policy_base(Path::new(f)), std::env::home_dir().as_deref()) {
-                Ok(ws) => Ok(ws),
+                Ok(warnings) => warnings,
                 Err(errors) => return Ok(report_policy_errors(f, &errors)),
             }
         } else {
-            Engine::new(Config::new().policy(allow_all_imports_policy())).lint_file(f).map_err(|e| e.to_string())
+            match Engine::new(Config::new().policy(allow_all_imports_policy())).lint_file(f) {
+                Ok(warnings) => warnings,
+                Err(err) => return Ok(report_error(&err)),
+            }
         };
-        match warnings {
-            Ok(ws) => {
-                for w in ws {
-                    outln!("{f}:{w}");
-                    count += 1;
-                }
-            }
-            Err(e) => {
-                eprintln!("{f}: {e}");
-                return Ok(2);
-            }
+        for warning in warnings {
+            outln!("{f}:{warning}");
+            count += 1;
         }
     }
     Ok(if count > 0 && !allow { 1 } else { 0 })

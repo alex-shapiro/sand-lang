@@ -520,13 +520,16 @@ impl ModuleGraph {
     }
 }
 
-/// The error for a compilation stopped by its budget.
+/// Converts a compilation budget stop into an [`Error`].
 pub(crate) fn budget_error(stop: Stop, sm: &SourceMap, main_file: u32) -> Error {
+    stop_error(stop, sm, main_file, "program too complex to compile: exceeded the compile budget (max_compile_fuel)")
+}
+
+/// Converts a budget `stop` into an [`Error`]. Uses `out_of_fuel_message` if
+/// the operation exhausts its fuel budget.
+pub(crate) fn stop_error(stop: Stop, sm: &SourceMap, main_file: u32, out_of_fuel_message: &str) -> Error {
     match stop {
-        Stop::Fuel => Error::Compile(vec![sm.resolve(&Diag::error(
-            Span::new(main_file, 0, 0),
-            "program too complex to compile: exceeded the compile budget (max_compile_fuel)",
-        ))]),
+        Stop::Fuel => Error::Compile(vec![sm.resolve(&Diag::error(Span::new(main_file, 0, 0), out_of_fuel_message))]),
         Stop::Time => Error::Limit(crate::engine::LimitKind::WallTime),
         Stop::Interrupted => Error::Interrupted,
     }

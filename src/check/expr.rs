@@ -587,11 +587,8 @@ impl Checker {
             used: gi.is_pub,
             mutable: gi.mutable,
             assigned: false,
-            ty: String::new(),
-            is_param: false,
-            global: true,
-            func: u32::MAX,
-            variants: Vec::new(),
+            ty: TypeId::ERROR,
+            enum_def: None,
         });
         self.global_facts.insert(g, self.lint.locals.len() - 1);
     }
@@ -1437,11 +1434,7 @@ impl Checker {
             let names: Vec<String> = (offset..n).filter_map(|i| self.param_name(callee, i).map(str::to_string)).collect();
             let names: Vec<&str> = names.iter().map(String::as_str).collect();
             let target = self.callee_name(callee);
-            for (i, a) in args.positional.iter().enumerate() {
-                if let ExprKind::Ident(id) = &a.kind {
-                    self.note_argument_order(&target, &names, i, &id.name, a.span);
-                }
-            }
+            self.note_argument_order(&target, &names, positional_idents(args));
         }
         for (i, a) in args.positional.iter().enumerate() {
             let pi = i + offset;
@@ -2147,11 +2140,7 @@ impl Checker {
         if self.linting() {
             let names: Vec<String> = self.types[d as usize].fields().iter().map(|f| self.name(f.name).to_string()).collect();
             let names: Vec<&str> = names.iter().map(String::as_str).collect();
-            for (i, a) in args.positional.iter().enumerate() {
-                if let ExprKind::Ident(id) = &a.kind {
-                    self.note_argument_order(&format!("`{name}`"), &names, i, &id.name, a.span);
-                }
-            }
+            self.note_argument_order(&format!("`{name}`"), &names, positional_idents(args));
         }
         for (i, a) in args.positional.iter().enumerate() {
             let fty = self.field_type(d, i, &targs);
@@ -2962,6 +2951,15 @@ impl Checker {
         let fty = self.fn_ty(&ptys, ret);
         mk(HKind::Lambda(Box::new(HLambda { id, name: "<lambda>".into(), params: locals, body: body_h, self_local: None })), fty, span)
     }
+}
+
+/// Returns the index, name, and span of each positional argument in `args`
+/// that is a plain identifier.
+fn positional_idents<'a>(args: &'a CallArgs<'_>) -> impl Iterator<Item = (usize, &'a str, Span)> {
+    args.positional.iter().enumerate().filter_map(|(index, arg)| match &arg.kind {
+        ExprKind::Ident(ident) => Some((index, ident.name.as_str(), arg.span)),
+        _ => None,
+    })
 }
 
 fn is_lambda(e: &Expr) -> bool {

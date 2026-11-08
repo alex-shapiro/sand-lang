@@ -1825,7 +1825,7 @@ Configurable per engine:
 - `max_memory` (default: 512 MiB): if exceeded, the run fails with `memory limit exceeded`. I/O operations whose buffers do not fit fail with kind `"limit"`.
 - `max_instructions` (default: unlimited): if exceeded, the run fails with `instruction limit exceeded`. Instructions are counted in fuel units (§15.2).
 - `max_cpu_time` (default: unlimited): if exceeded, the run fails with `cpu time limit exceeded`. This limit measures the CPU execution time of the engine thread, excluding I/O waits and permission prompts. On platforms without a thread CPU clock, it measures elapsed execution time.
-- `max_wall_time` (default: unlimited): if exceeded, the run fails with `time limit exceeded`. This limit measures elapsed time across compilation and execution, excluding waits for permission prompts and user actions (§16.2).
+- `max_wall_time` (default: unlimited): if exceeded, the run fails with `time limit exceeded`. This limit measures elapsed time across compilation, linting, and execution, excluding waits for permission prompts and user actions (§16.2).
 - `max_call_depth` (default: 10,000): if exceeded, execution fails with `limit: stack overflow`.
 - `max_tasks` (default: 10,000): if exceeded, `spawn` fails with `limit: task limit exceeded`.
 - `max_open_resources` (default: 1,024): if exceeded after garbage collection (§10.8), opening a file, connecting, listening, accepting a connection, or sending an HTTP request fails with kind `"limit"`. Sockets held by pending operations count toward this limit.
@@ -2007,14 +2007,16 @@ deny any import that requires an interactive permission prompt.
 A completed run returns `Outcome { exit_code: i32 }`, and a failed operation
 returns an `Error`:
 
-| Variant                              | Meaning                                                              |
-| ------------------------------------ | -------------------------------------------------------------------- |
-| `Error::Compile(diagnostics)`        | Syntax or static type errors occurred during compilation (§18).      |
-| `Error::Runtime { message, trace }`  | Execution failed with an uncaught runtime error (§10.3).             |
-| `Error::Limit(kind)`                 | Execution or compilation exceeded a configured resource limit (§15). |
-| `Error::Interrupted`                 | The host cancelled execution through an `InterruptHandle`.           |
-| `Error::Io(message)`                 | The entry script file could not be read.                             |
-| `Error::Internal { message, trace }` | An internal invariant failed or a host callback panicked (§10.3).    |
+- `Error::Compile(diagnostics)`: compilation failed (§18), or compilation or
+  linting exhausted its fuel.
+- `Error::Runtime { message, trace }`: execution failed with an uncaught runtime
+  error (§10.3).
+- `Error::Limit(kind)`: execution, compilation, or linting exceeded a resource
+  limit (§15).
+- `Error::Interrupted`: the host canceled the call through an `InterruptHandle`.
+- `Error::Io(message)`: the engine could not read the entry script file.
+- `Error::Internal { message, trace }`: an internal invariant failed or a host
+  callback panicked (§10.3).
 
 If `sandlang` is compiled with the default `panic = "unwind"` setting, the
 engine catches Rust panics inside library native functions, host callbacks, I/O
@@ -2485,10 +2487,14 @@ names of impl methods are checked at the trait.
 A lint can be suppressed for the next line with `// lint: allow(name)`, or for
 a file with `//! lint: allow(name)`.
 
-Linting checks the file first, with the default limits (§15.3). The lints
-may spend 64 units of fuel per byte of source (at least 10,000,000), about
-one per syntax tree node and per node a lint examines again; a file that
-needs more fails with `source too complex to lint` (exit code 2).
+The linter first type-checks the file under the compile-time limits (§15.3). It
+then enforces a lint fuel budget of 64 units per byte of source, with a minimum
+of 10,000,000 units. If a file exceeds this budget, linting fails with `source
+too complex to lint` (`Error::Compile`, exit code 2). Each unit of fuel covers:
+
+- a syntax tree node visit
+- a variant or character-pair comparison in `variant-like-binding`
+- 16 bytes of formatted type text in a `shadowed-variable` warning
 
 ### 17.3 `sand fmt FILE... [--check]`, `sand fmt - [--check]`
 

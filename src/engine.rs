@@ -6,7 +6,7 @@ use crate::compile::{CompileInput, compile_more};
 use crate::diag::{Diag, Diagnostic, FileId, Span};
 use crate::files::Fs;
 use crate::files::mem::MemFs;
-use crate::modules::{ImportRef, ModuleGraph, Snapshot, Target, budget_error, native_info};
+use crate::modules::{ImportRef, ModuleGraph, Snapshot, Target, budget_error, native_info, stop_error};
 use crate::native::func::Signature;
 use crate::native::ty::Type;
 use crate::native::{BoundType, NativeDecl, NativeModule};
@@ -984,10 +984,14 @@ impl Engine {
         self.gc_stats
     }
 
-    /// Type checks `source` as [`Engine::check_source`] does, and lints it.
+    /// Type-checks and lints `source`.
     ///
-    /// Returns [`Error::Compile`] on compile errors, or [`Error::Io`] if
-    /// linting exceeds its fuel or wall-time budget.
+    /// Returns an [`Error`] if checking or linting fails:
+    ///
+    /// - [`Error::Compile`] if compilation fails or the linter exhausts its
+    ///   fuel budget
+    /// - [`Error::Limit`] if the call exceeds [`Limits::max_wall_time`]
+    /// - [`Error::Interrupted`] if the host interrupts the call
     pub fn lint_source(&self, name: &str, source: &str) -> Result<Vec<crate::lint::LintWarning>, Error> {
         let call = self.begin_call();
         let compiled = self.compile_now(&call, name, source, &self.source_root().1, None, true)?;
@@ -995,8 +999,10 @@ impl Engine {
         Ok(compiled.lints.unwrap_or_default())
     }
 
-    /// Type checks and lints the file at `path` and its imports, as
-    /// [`Engine::lint_source`] does.
+    /// Type-checks the file at `path` and its imports, then lints the file.
+    ///
+    /// Returns [`Error::Io`] if the engine cannot read `path`, or any error
+    /// that [`Engine::lint_source`] returns.
     pub fn lint_file(&self, path: impl AsRef<Path>) -> Result<Vec<crate::lint::LintWarning>, Error> {
         let call = self.begin_call();
         let (name, source, root) = self.read_main(path.as_ref())?;
@@ -1825,7 +1831,10 @@ fn compile_program(
     let host = g.has_natives(&order);
     let cp = checker.take_checked();
     let lints = match modules.iter().find(|m| m.file == main_file).filter(|_| lint) {
-        Some(main) => Some(crate::lint::lint_module(main, &main.source, &cp, budget)?),
+        Some(main) => Some(
+            crate::lint::lint_module(main, &cp, budget)
+                .map_err(|stop| stop_error(stop, sm, main_file, "source too complex to lint: exceeded the lint budget"))?,
+        ),
         None => None,
     };
     let native_info = if host { native_info(&cp, registry) } else { crate::modules::NativeInfo::default() };

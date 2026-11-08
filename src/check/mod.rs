@@ -321,15 +321,10 @@ pub struct LocalFact {
     pub used: bool,
     pub mutable: bool,
     pub assigned: bool,
-    pub ty: String,
-    pub is_param: bool,
-    pub global: bool,
-    /// Identifies the function the binding belongs to (for shadowing checks).
-    pub func: u32,
-    /// For a binding whose name starts with an upper-case letter and whose
-    /// type is an enum: the enum's variants without a payload, qualified
-    /// (`State.Empty`), which a misspelled variant pattern may have meant.
-    pub variants: Vec<String>,
+    pub ty: TypeId,
+    /// Enum type of an uppercase binding. The linter checks whether the
+    /// binding is a misspelled variant of this enum.
+    pub enum_def: Option<TypeDefId>,
 }
 
 /// The checked bodies of the functions checked since the bodies were last
@@ -611,7 +606,6 @@ pub struct Checker {
     pub(crate) global_facts: HashMap<GlobalId, usize>,
     /// Whether lint facts (`lint`) are gathered (for the main module only).
     pub lint_facts: bool,
-    pub(crate) lint_func: u32,
     /// Names referenced from functions of the module being checked.
     pub(crate) fn_names: HashSet<String, FxBuild>,
     pub traits: PVec<TraitDef>,
@@ -684,7 +678,6 @@ impl Default for Checker {
             fs_unused: Vec::new(),
             global_facts: HashMap::new(),
             lint_facts: true,
-            lint_func: 0,
             fn_names: HashSet::default(),
             traits: PVec::new(),
             impls: PVec::new(),
@@ -833,6 +826,13 @@ impl Checker {
 
     pub fn show(&self, t: TypeId) -> String {
         self.printer().show(t)
+    }
+
+    /// Formats `t` and charges its byte length to the compile budget.
+    pub(crate) fn show_charged(&self, t: TypeId) -> String {
+        let text = self.show(t);
+        self.budget.charge(text.len() as u64 / budget::TEXT_BYTES_PER_UNIT);
+        text
     }
 
     /// Visits the nodes of `t` written out as a tree, following the
@@ -1456,7 +1456,7 @@ impl Checker {
                     self.globals[g].ty = t;
                 }
                 if let Some(&i) = self.global_facts.get(&(g as GlobalId)) {
-                    self.lint.locals[i].ty = self.show(self.globals[g].ty);
+                    self.lint.locals[i].ty = self.globals[g].ty;
                 }
             }
         }
@@ -1574,8 +1574,9 @@ impl Checker {
         let scope = self.generic_scope(&gens);
         let self_ty = self.def_self_ty(id, &gens);
         let mut fields: Vec<FieldDef> = Vec::new();
+        let mut seen_names = HashSet::new();
         for f in &s.fields {
-            if fields.iter().any(|x| self.name(x.name) == f.name.name) {
+            if !seen_names.insert(f.name.name.as_str()) {
                 self.error(f.name.span, format!("field `{}` is defined twice", f.name.name));
                 continue;
             }
@@ -1633,8 +1634,9 @@ impl Checker {
         let scope = self.generic_scope(&gens);
         let self_ty = self.def_self_ty(id, &gens);
         let mut variants: Vec<VariantDef> = Vec::new();
+        let mut seen_names = HashSet::new();
         for (i, v) in e.variants.iter().enumerate() {
-            if variants.iter().any(|x| self.name(x.name) == v.name.name) {
+            if !seen_names.insert(v.name.name.as_str()) {
                 self.error(v.name.span, format!("variant `{}` is defined twice", v.name.name));
                 continue;
             }
@@ -2791,17 +2793,29 @@ impl Checker {
         true
     }
 
-    /// Emits an `argument-order` lint if positional argument or sub-pattern
-    /// `name` at index `i` matches a different field or parameter in `names`.
-    pub(crate) fn note_argument_order(&mut self, target_name: &str, names: &[&str], i: usize, name: &str, span: Span) {
-        if !self.linting() || names.get(i) == Some(&name) || !names.contains(&name) {
+    /// Emits an `argument-order` warning if a positional argument or pattern
+    /// in `positional` shares a name with a field or parameter at another
+    /// index in `expected_names`.
+    pub(crate) fn note_argument_order<'g>(
+        &mut self,
+        target_name: &str,
+        expected_names: &[&str],
+        positional: impl Iterator<Item = (usize, &'g str, Span)>,
+    ) {
+        if !self.linting() || !self.budget.charge(expected_names.len() as u64) {
             return;
         }
-        let msg = format!(
-            "`{name}` is given for `{}` of {target_name}, which also has `{name}`; write `{}: {name}` if this is intended",
-            names[i], names[i]
-        );
-        self.lint.argument_order.push((span, msg));
+        let known_names: HashSet<&str> = expected_names.iter().copied().collect();
+        for (i, name, span) in positional {
+            if expected_names.get(i) == Some(&name) || !known_names.contains(name) {
+                continue;
+            }
+            let msg = format!(
+                "`{name}` is given for `{}` of {target_name}, which also has `{name}`; write `{}: {name}` if this is intended",
+                expected_names[i], expected_names[i]
+            );
+            self.lint.argument_order.push((span, msg));
+        }
     }
 
     pub(crate) fn visible(&self, module: ModId, is_pub: bool) -> bool {
@@ -3018,39 +3032,30 @@ impl Checker {
                 self.lint.unused_results.push(sp);
             }
         }
-        self.lint_func += 1;
-        for (i, d) in self.fs.data.iter().enumerate() {
-            let info = &self.fs.locals[i];
-            let name = self.syms.str(info.name);
+        for i in 0..self.fs.data.len() {
+            let name = self.syms.str(self.fs.locals[i].name).to_string();
             if name.starts_with('<') {
                 continue;
             }
+            let ty = self.zonk(self.fs.data[i].ty);
+            let enum_def = if name.starts_with(|c: char| c.is_ascii_uppercase()) { self.enum_def(ty) } else { None };
+            let data = &self.fs.data[i];
             self.lint.locals.push(LocalFact {
-                span: d.decl_span,
-                name: name.to_string(),
-                used: d.used,
-                mutable: info.mutable,
-                assigned: d.assigned,
-                ty: self.printer().show(d.ty),
-                is_param: d.is_param,
-                global: false,
-                func: self.lint_func,
-                variants: if name.starts_with(|c: char| c.is_ascii_uppercase()) { self.payloadless_variants(d.ty) } else { Vec::new() },
+                span: data.decl_span,
+                name,
+                used: data.used,
+                mutable: self.fs.locals[i].mutable,
+                assigned: data.assigned,
+                ty,
+                enum_def,
             });
         }
     }
 
-    /// The variants without a payload of `ty`, if it is an enum, qualified
-    /// with its name (for the linter).
-    fn payloadless_variants(&self, t: TypeId) -> Vec<String> {
-        let Ty::Named(d, _) = self.rty(t) else { return Vec::new() };
-        let def = &self.types[d as usize];
-        match &def.kind {
-            TypeDefKind::Enum { variants } => {
-                variants.iter().filter(|v| v.fields.is_empty()).map(|v| format!("{}.{}", self.name(def.name), self.name(v.name))).collect()
-            }
-            _ => Vec::new(),
-        }
+    /// Returns the type definition ID of `t` if `t` is an enum.
+    fn enum_def(&self, t: TypeId) -> Option<TypeDefId> {
+        let Ty::Named(def_id, _) = self.rty(t) else { return None };
+        matches!(self.types[def_id as usize].kind, TypeDefKind::Enum { .. }).then_some(def_id)
     }
 
     /// Final checks for a function: required traits, inference completeness; the

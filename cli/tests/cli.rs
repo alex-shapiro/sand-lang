@@ -446,6 +446,25 @@ fn lint_command() {
 }
 
 #[test]
+fn lint_reports_exhausted_budget_as_compile_error() {
+    let dir = TempDir::new("lint-budget");
+    let mut src = String::from("var x = 0\n");
+    for i in 0..120 {
+        src += &format!("@l{i} loop {{\n");
+    }
+    src += &"x = x + 1\n".repeat(20_000);
+    for i in (0..120).rev() {
+        src += &format!("break @l{i}\n}}\nx = 2\n");
+    }
+    dir.write("deep.sand", &src);
+    let out = sand(dir.path(), &["lint", "deep.sand"]);
+    assert_eq!(out.code, 2, "{out:?}");
+    assert!(out.stderr.contains("source too complex to lint"), "{out:?}");
+    assert_eq!(out.stderr.matches("deep.sand").count(), 1, "{out:?}");
+    assert!(out.stderr.contains("var x = 0"), "{out:?}");
+}
+
+#[test]
 fn output_stops_quietly_if_stdout_is_closed() {
     let dir = TempDir::new("lint-pipe");
     let rules: String = (0..20_000).map(|i| format!("deny net h{i}.example.com\n")).collect();

@@ -252,14 +252,14 @@ impl Checker {
             return out;
         }
         let field_name = |c: &Self, i: usize| names.map_or_else(|| i.to_string(), |ns| c.name(ns[i]).to_string());
-        if let Some(ns) = names.filter(|_| self.linting()) {
-            let ns: Vec<String> = ns.iter().map(|&s| self.name(s).to_string()).collect();
-            let ns: Vec<&str> = ns.iter().map(String::as_str).collect();
-            for (i, p) in args.positional.iter().enumerate() {
-                if let PatternKind::Binding(id) = &p.kind {
-                    self.note_argument_order(target_name, &ns, i, &id.name, p.span);
-                }
-            }
+        if let Some(field_symbols) = names.filter(|_| self.linting()) {
+            let owned_names: Vec<String> = field_symbols.iter().map(|&s| self.name(s).to_string()).collect();
+            let expected_names: Vec<&str> = owned_names.iter().map(String::as_str).collect();
+            let positional_bindings = args.positional.iter().enumerate().filter_map(|(i, p)| match &p.kind {
+                PatternKind::Binding(id) => Some((i, id.name.as_str(), p.span)),
+                _ => None,
+            });
+            self.note_argument_order(target_name, &expected_names, positional_bindings);
         }
         for (i, p) in args.positional.iter().enumerate() {
             if is_private(self, i) {
