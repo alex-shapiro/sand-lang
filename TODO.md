@@ -154,6 +154,13 @@ Visible defects that rarely block users.
       denied the request, so a script author cannot tell which rule to change.
       Return the rule from the stage-1 check and format both messages with
       `RulePolicy::describe_rule`.
+- [ ] ❓ _Policy._ Parse a host into one canonical form, such as
+      `enum Host { Name(String), Ip(IpAddr) }`, that `Url`, `net.connect`,
+      `NetPattern`, and `Dest` all use. Six functions now normalize host
+      text, and they disagree: a rule accepts `deny net 169.254.169.254.`,
+      but a URL with that host is invalid. `Url` also keeps the raw host, so
+      `RequestTarget.host` can be `api.github.com.`, and a request filter
+      that matches `api.github.com` does not see it.
 - [ ] 🔴 [036](triage/036-lint-http-method-host-confusion/summary.md) _Policy._ Warn in `lint_policy` if an uppercase hostname in an `http` rule is
       parsed as an HTTP method, or if a lowercase method is parsed as a
       hostname.
