@@ -153,12 +153,12 @@ Visible defects that rarely block users.
       as `permission denied: GET http://localhost:8080/` omits the rule. Return
       the rule from the stage-1 check and format both messages with
       `RulePolicy::describe_rule`.
-- [ ] ❓ _Policy._ Parse each host into a canonical `Host` enum (`Name(String)`
-      or `Ip(IpAddr)`) across URLs, `net.connect`, and policy rules. Six
-      functions normalize host text and disagree. A rule accepts
-      `deny net 169.254.169.254.`, whereas a URL with that host is invalid.
-      `Url` also keeps the raw host, such as `api.github.com.`. A request
-      filter for `api.github.com` then misses the request.
+- [ ] ❓ _Policy._ Parse each host into a canonical `Host` enum with
+      `Name(String)` and `Ip(IpAddr)` variants across URLs, `net.connect`, and
+      policy rules. Six functions normalize host text and disagree. A rule
+      accepts `deny net 169.254.169.254.`, whereas a URL with that host is
+      invalid. `Url` also keeps the raw host, such as `api.github.com.`. A
+      request filter for `api.github.com` then misses the request.
 - [ ] 🔴 [036](triage/036-lint-http-method-host-confusion/summary.md) _Policy._ Warn in `lint_policy` if an uppercase hostname in an `http` rule is
       parsed as an HTTP method, or if a lowercase method is parsed as a
       hostname.

@@ -663,7 +663,7 @@ impl RulePolicy {
 
     /// Checks whether a connection to `addr` from an allowed `Net` or `Http` `request` is permitted.
     ///
-    /// Uses IP and CIDR rules to match `addr`, plus `localhost` rules if applicable.
+    /// Uses IP and CIDR rules that match `addr`, plus `localhost` rules for `localhost` requests.
     /// The policy ranks address rules in the same order as for an IP literal.
     /// The rule that allowed `request` takes the place of `*` and acts as `allow`,
     /// even if it is an approved `prompt` rule. An address rule in the same or

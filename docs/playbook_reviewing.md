@@ -65,7 +65,7 @@ Commit each fix separately. In the commit message, state the problem, the fix, a
 
 ## Tradeoffs
 
-Before making a change that affects the product, ask the user to decide. Document the problem, the options, and their tradeoffs in a short section of `docs/TRADEOFFS.md`. Only real product or system tradeoffs belong in this file; breaking backward compatibility does not.
+Before making a change that affects the product, ask the user to decide. Document the problem, the options, and their tradeoffs in a short section of `docs/TRADEOFFS.md`. Include only real product or system tradeoffs. Breaking backward compatibility is not a tradeoff.
 
 After the user decides, remove the section and record the decision and rationale in the commit message.
 
@@ -77,7 +77,7 @@ Repeat the audit and fix cycle. Each audit covers the full branch and receives t
 
 At the end of the review, report open tradeoffs to the user, move them to `TODO.md`, and delete `docs/TRADEOFFS.md`.
 
-Run each audit in a sub-agent to keep the reviewer independent from the fixer. Give each sub-agent full context; a restarted sub-agent with partial context makes poor design decisions. Start each reviewer with this prompt:
+Run each audit in a sub-agent to keep the reviewer independent from the fixer. Give each sub-agent full context. A restarted sub-agent with partial context makes poor design decisions. Start each reviewer with this prompt:
 
 ```
 You own every subsystem that this branch touches. Run the audit in
@@ -98,7 +98,7 @@ Run autonomously until the task is complete.
 
 ## Copy Editing
 
-Claude Opus 5.5 is the strongest model for reasoning and coding, whereas Gemini Argon 4 is the strongest model for writing. After the review loop completes, run Gemini for copy editing.
+Claude Opus 5.5 is the strongest model for reasoning and coding. Gemini Argon 4 is the strongest model for writing. After the review loop completes, run Gemini for copy editing.
 
 Check whether the environment provides the Antigravity CLI `agy`. The CLI is available only on a local machine. If `agy` is unavailable, inform the user and skip this step.
 

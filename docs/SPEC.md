@@ -1667,9 +1667,9 @@ therefore runs only stage 1. IP and CIDR rules apply only to IP literals.
 `deny_private_net` blocks only `localhost` names and private IP literals.
 
 In stage 2, only address rules apply. Address rules are IP and CIDR rules that
-match the resolved address and transport, plus `localhost` rules if the request
-specifies a `localhost` name. Address rules include `net` rules and `http`
-rules that match the request method and path. `RulePolicy::check_resolved`
+match the resolved address and transport, plus `localhost` rules for `localhost`
+requests. Address rules include `net` rules and `http` rules that match the
+request method and path. `RulePolicy::check_resolved`
 ranks these rules in the same order as for an IP literal. The stage-1 rule
 takes the place of `*` and acts as `allow`, even if it is an approved `prompt`
 rule. An address rule in the same or higher `with_defaults` tier overrides the
