@@ -511,8 +511,8 @@ impl Config {
 /// session's global state remains safe.
 ///
 /// An interrupted engine returns [`Error::Interrupted`].
-/// An interrupted REPL session cancels all ongoing tasks, but it
-/// continues to wait for host input.
+/// An interrupted REPL session cancels all ongoing tasks,
+/// but `run_tasks_until` continues to wait for host input.
 #[derive(Clone, Default)]
 pub struct InterruptHandle {
     targets: Arc<Mutex<InterruptTargets>>,
