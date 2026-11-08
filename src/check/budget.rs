@@ -15,7 +15,7 @@
 //!   interrupt flag, polled every [`POLL_INTERVAL`] units.
 //!
 //! The counters use relaxed atomics so that callers can charge a budget
-//! through `&self` while keeping the checker `Send` across REPL inputs.
+//! through `&self` and keep the checker `Send` across REPL inputs.
 
 use crate::platform::Deadline;
 use std::sync::Arc;

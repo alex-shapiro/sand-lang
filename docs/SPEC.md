@@ -2391,8 +2391,8 @@ an `eval` future before it finishes cancels the input like an interrupt. If the
 input was still loading imports, dropping the future leaves the session state
 unchanged. Because the host can drop a future only between polls, a synchronous
 compilation step or import read finishes before the drop takes effect.
-`InterruptHandle::interrupt()` stops compilation and import reads while a poll
-is in progress.
+`InterruptHandle::interrupt()` stops compilation and import reads during a
+poll.
 
 `reset()` clears all session bindings and state. If an internal error occurs
 during a session call, the session resets itself and preserves remembered

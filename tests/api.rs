@@ -3325,7 +3325,7 @@ fn assert_interrupt_stops_an_import_prompt(call: impl FnOnce(Config) -> Result<(
     });
     asked_rx.recv_timeout(Duration::from_secs(10)).expect("the prompter was not asked");
     handle.interrupt();
-    let result = done_rx.recv_timeout(Duration::from_secs(10)).expect("the call did not stop after the interrupt");
+    let result = done_rx.recv_timeout(Duration::from_secs(10)).expect("the interrupt did not stop the call");
     assert!(matches!(result, Err(Error::Interrupted)), "{result:?}");
 }
 

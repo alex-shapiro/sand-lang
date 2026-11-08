@@ -282,19 +282,18 @@ impl Session {
     /// continue to run between inputs. Forward process standard input through
     /// [`crate::stdin_feed::StdinFeed`].
     ///
-    /// The instruction, CPU-time, and output limits apply to this call, while
-    /// `max_wall_time` is ignored. If a task needs a permission prompt, the
-    /// session pauses script execution and asks the prompter after `until`
+    /// The instruction, CPU-time, and output limits apply to this call.
+    /// `max_wall_time` does not apply. If a task needs a permission prompt,
+    /// the session pauses script execution and asks the prompter after `until`
     /// completes so that the front end has exclusive access to terminal input.
     ///
     /// If a task fails with an error or exceeds a limit, the session cancels
     /// all tasks, passes the error to `on_error`, and continues awaiting
-    /// `until`. Calling
-    /// [`InterruptHandle::interrupt`](crate::engine::InterruptHandle::interrupt)
-    /// while background tasks exist also cancels all tasks, passes
-    /// [`Error::Interrupted`] to `on_error`, and continues awaiting `until`.
-    /// If a task calls `exit`, the session records the code in
-    /// [`Session::exit_code`], drops `until`, and returns `None`.
+    /// `until`. If [`InterruptHandle::interrupt`](crate::engine::InterruptHandle::interrupt)
+    /// is called when background tasks exist, the session also cancels all
+    /// tasks, passes [`Error::Interrupted`] to `on_error`, and continues
+    /// awaiting `until`. If a task calls `exit`, the session records the code
+    /// in [`Session::exit_code`], drops `until`, and returns `None`.
     pub async fn run_tasks_until<F: Future>(&mut self, until: F, mut on_error: impl FnMut(Error)) -> Option<F::Output> {
         self.begin_call();
         let mut until = std::pin::pin!(until);
@@ -345,7 +344,7 @@ impl Session {
                 state.vm.apply_answer(capability, answer);
             }
         }
-        // Cancel remaining tasks if an interrupt arrived while `run_idle` was not running.
+        // If an interrupt arrived outside `run_idle`, cancel the remaining tasks.
         if self.call.is_set() && self.cancel_tasks() > 0 {
             on_error(Error::Interrupted);
         }

@@ -80,8 +80,8 @@ The host cannot rely on engine limits, stability, or control.
       - Keep this behavior. Optionally create the interrupt flag before
         returning the future so that an immediate interrupt stops the call.
       - Make `InterruptHandle` sticky and add `InterruptHandle::reset()`.
-        However, if two engines share a handle, resetting the handle for the
-        first engine clears a pending interrupt for the second engine.
+        However, if two engines share a handle, resetting the handle for one
+        engine clears a pending interrupt for the other engine.
       - Recommended: make `InterruptHandle` single-use and sticky, like
         `tokio_util::sync::CancellationToken`, `AbortSignal`, and Go's
         `context`. Add `Engine::set_interrupt` and `Session::set_interrupt` so
@@ -99,14 +99,14 @@ The host cannot rely on engine limits, stability, or control.
       `Engine::run_tests` applies `max_wall_time` to the entire test suite.
       `Session::run_tests` applies `max_wall_time` to each test individually.
       Choose a single rule and document it in SPEC §4.8. Keep session tests on
-      the persistent session VM, and stop the test suite if an internal error
+      the persistent session VM. Stop the test suite if an internal error
       resets the session.
 - [ ] ❓ _Sandbox._ Read the main script file through `Engine::discovery_io`
       and `Fs::read_source` in `Engine::read_main`, as module imports do.
       `Engine::read_main` currently reads the entire file on the caller's
       thread before checking `max_source_bytes`. Offloading the bounded read
-      enforces `max_source_bytes`, `max_wall_time`, and interrupts while
-      reading a large file, a FIFO, or a hung mount.
+      enforces `max_source_bytes`, `max_wall_time`, and interrupts on a large
+      file, a FIFO, or a hung mount.
 
 ## Tier 3: ordinary scripts
 

@@ -1753,10 +1753,10 @@ pub(crate) struct Discovery<'a> {
 enum ImportDecision {
     Allowed,
     Denied,
-    /// The policy requires a prompt, but prompting is unavailable for the
-    /// contained reason.
+    /// The policy requires a prompt, which is unavailable for the given
+    /// reason.
     Unprompted(&'static str),
-    /// The call was interrupted while waiting for the prompt answer.
+    /// An interrupt stopped the call during the prompt wait.
     Interrupted,
 }
 
