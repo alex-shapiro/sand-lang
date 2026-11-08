@@ -13,7 +13,7 @@ The `sandlang` crate embeds the Sand compiler and VM as a Rust library. Construc
 use sandlang::engine::{Config, Engine, Error, Outcome};
 
 async fn run(source: &str) -> Result<Outcome, Error> {
-    Engine::new(Config::new())?.run_source("main.sand", source).await
+    Engine::new(Config::new()).run_source("main.sand", source).await
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -26,6 +26,21 @@ async fn main() {
 ```
 
 The script executes inside the future on the polling thread. The first argument is the source name used in diagnostics and stack traces. Use `Engine::run_file(path)` to load the entry module from disk.
+
+To run the same script many times, compile it once. `Engine::compile_source` and `Engine::compile_file` compile a script and its imports and return a `CompiledProgram`. `Engine::run_program` runs a `CompiledProgram` on any engine. Each run starts with new globals.
+
+```rust
+# #[tokio::main(flavor = "current_thread")]
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
+use sandlang::engine::{Config, Engine};
+
+let program = Engine::new(Config::new()).compile_source("main.sand", "print(\"hello\")").await?;
+for _ in 0..3 {
+    Engine::new(Config::new()).run_program(&program).await?;
+}
+# Ok(())
+# }
+```
 
 Failed runs return a `sandlang::engine::Error`:
 
@@ -74,7 +89,7 @@ let config = Config::new()
     .memory_fs(files.clone())
     .stdout(out.clone());
 
-let mut engine = Engine::new(config)?;
+let mut engine = Engine::new(config);
 engine.run_source("main.sand", script).await?;
 println!("{}", out.contents());
 let report = files.read("/out/report.txt")?;
@@ -125,10 +140,11 @@ To handle `prompt` decisions, pass an async callback to `Config::prompter` that 
 
 ## Native modules
 
-`NativeModule` exposes Rust functions to Sand scripts as an importable module:
+`NativeModule` exposes Rust functions to Sand scripts as an importable module. `HostModules::new` compiles native modules, and `Config::host_modules` lets scripts import them:
 
 ```rust
-use sandlang::engine::Config;
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+use sandlang::engine::{Config, HostModules};
 use sandlang::native::NativeModule;
 use sandlang::native::convert::HostError;
 
@@ -142,8 +158,12 @@ geo.function("country", |code: &str| -> Result<String, HostError> {
         _ => Err(HostError::new("not_found", format!("unknown country {code}"))),
     }
 });
-let config = Config::new().module(geo);
+let config = Config::new().host_modules(HostModules::new([geo])?);
+# Ok(())
+# }
 ```
+
+`HostModules::new` compiles the modules one time. Clones of a `HostModules` share the compiled modules, so create it one time and give a clone to each `Config`.
 
 ```sand ignore
 import geo
@@ -265,7 +285,7 @@ To check a sandbox capability inside a native function, register the function wi
 ```rust
 # #[tokio::main(flavor = "current_thread")]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-use sandlang::engine::{Config, Engine};
+use sandlang::engine::{Config, Engine, HostModules};
 use sandlang::native::NativeModule;
 use sandlang::native::convert::HostError;
 use sandlang::policy::Capability;
@@ -278,7 +298,7 @@ door.vm_function("open", |vm: &mut Vm, name: String| -> Result<String, HostError
     Ok(format!("opened {name}"))
 });
 let policy = RulePolicy::standard().allow_custom(CustomMatch::Exact("door".into()), CustomMatch::Exact("front".into()));
-let mut engine = Engine::new(Config::new().module(door).policy(policy))?;
+let mut engine = Engine::new(Config::new().host_modules(HostModules::new([door])?).policy(policy));
 engine.run_source("main.sand", "import door\nprint(door.open(\"front\"))\nprint(door.open(\"back\"))").await?;
 # Ok(())
 # }
@@ -291,7 +311,7 @@ Ok("opened front")
 Err(Error(message: "permission denied: door back", kind: "permission_denied"))
 ```
 
-`NativeModule::source` attaches Sand source declarations to a native module. Use `native fn` declarations in the Sand source to specify default parameter values or generic type parameters for registered functions. `Engine::new` type-checks registered modules and returns `Error::Compile` if a `native fn` declaration does not match its Rust function signature.
+`NativeModule::source` attaches Sand source declarations to a native module. Use `native fn` declarations in the Sand source to specify default parameter values or generic type parameters for registered functions. `HostModules::new` type-checks the modules and returns `Error::Compile` if a `native fn` declaration does not match its Rust function signature.
 
 A generic Rust function accepts values of its `N`-th type parameter as `Param<N, B>`, where `B` declares any built-in traits (`traits::Eq`, `traits::Ord`, `traits::Hash`, `traits::Num`, `traits::Encode`, or a tuple such as `(traits::Ord, traits::Hash)`) required by the Rust implementation. The corresponding `native fn` declaration in `NativeModule::source` must require those traits (`native fn max<T: Ord>(xs: [T]) -> T?`), directly or through traits that have them as supertraits. If a `native fn` declaration requires `Num` of its `N`-th type parameter, the Rust function can accept `Num<N>` (providing `zero` and `one`) before the value parameters.
 
@@ -305,7 +325,7 @@ A generic Rust function accepts values of its `N`-th type parameter as `Param<N,
 # use sandlang::engine::Config;
 # use sandlang::session::Session;
 # let config = Config::new();
-let mut session = Session::new(config)?;
+let mut session = Session::new(config);
 session.eval("var hits = 0\nfn hit() -> int {\n    hits += 1\n    hits\n}").await?;
 assert_eq!(session.eval("hit() + hit()").await?, Some("3".to_string()));
 # Ok(())
@@ -324,7 +344,7 @@ assert_eq!(session.eval("hit() + hit()").await?, Some("3".to_string()));
 use sandlang::engine::{Config, Engine, Error};
 use std::time::Duration;
 
-let mut engine = Engine::new(Config::new())?;
+let mut engine = Engine::new(Config::new());
 let handle = engine.interrupt_handle();
 std::thread::spawn(move || {
     std::thread::sleep(Duration::from_secs(1));

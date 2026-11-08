@@ -68,14 +68,15 @@ sand run script.sand --policy=app.policy
 Embed the Sand interpreter in a Rust application:
 
 ```rust
-use sandlang::engine::Config;
+use sandlang::engine::{Config, HostModules};
 use sandlang::native::NativeModule;
 use sandlang::session::Session;
 
 let mut geo = NativeModule::new("geo");
 geo.function("dist", |a: f64, b: f64| -> f64 { (a * a + b * b).sqrt() });
 
-let mut session = Session::new(Config::new().module(geo))?;
+let host_modules = HostModules::new([geo])?;
+let mut session = Session::new(Config::new().host_modules(host_modules));
 let result = session.eval("import geo\ngeo.dist(3.0, 4.0)").await?;
 assert_eq!(result, Some("5.0".to_string()));
 ```

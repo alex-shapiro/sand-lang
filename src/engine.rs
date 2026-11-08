@@ -227,7 +227,7 @@ pub struct Config {
     pub(crate) policy: Policy,
     pub(crate) prompter: Option<Arc<dyn Prompter>>,
     pub(crate) limits: Limits,
-    pub(crate) modules: Vec<NativeModule>,
+    host_modules: HostModules,
     pub(crate) stdout: SharedSink,
     pub(crate) stderr: SharedSink,
     log_sink: Option<Arc<dyn LogSink>>,
@@ -279,7 +279,7 @@ impl Config {
             policy: Policy::Rules(Arc::new(RulePolicy::standard())),
             prompter: None,
             limits: Limits::default(),
-            modules: Vec::new(),
+            host_modules: HostModules::default(),
             stdout: Arc::new(crate::stdio::StdoutSink::default()),
             stderr: Arc::new(crate::stdio::StderrSink::default()),
             log_sink: None,
@@ -347,14 +347,10 @@ impl Config {
         self.limits = l;
         self
     }
-    /// Adds a host module.
-    ///
-    /// # Panics
-    ///
-    /// If a module of the same name was added already.
-    pub fn module(mut self, m: NativeModule) -> Self {
-        assert!(!self.modules.iter().any(|x| x.name() == m.name()), "host module `{}` is added twice", m.name());
-        self.modules.push(m);
+    /// Sets the host modules that scripts can import. By default, scripts
+    /// can import only the standard library.
+    pub fn host_modules(mut self, host_modules: HostModules) -> Self {
+        self.host_modules = host_modules;
         self
     }
     pub fn stdout(mut self, s: impl OutputSink + 'static) -> Self {
@@ -461,7 +457,8 @@ impl Config {
         self
     }
     /// Enables or disables loop fusion, loop specialization, inlining, and
-    /// loop-invariant hoisting.
+    /// loop-invariant hoisting in the programs that the engine compiles.
+    /// Host modules always compile with these optimizations.
     #[doc(hidden)]
     pub fn optimize(mut self, on: bool) -> Self {
         self.optimize = on;
@@ -538,8 +535,73 @@ impl TestReport {
     }
 }
 
+/// Host modules that scripts can import (see [`Config::host_modules`]),
+/// checked and compiled with the standard library. Clones share the compiled
+/// modules, so engines that hold clones of one `HostModules` do not compile
+/// them again. The default holds only the standard library.
+#[derive(Clone)]
+pub struct HostModules(Arc<Registry>);
+
+impl Default for HostModules {
+    fn default() -> Self {
+        HostModules(STD.clone())
+    }
+}
+
+impl HostModules {
+    /// Checks and compiles `modules`. Returns [`Error::Compile`] if the Sand
+    /// source of a module has an error or does not match its Rust functions.
+    ///
+    /// # Panics
+    ///
+    /// If two modules have the same name.
+    pub fn new(modules: impl IntoIterator<Item = NativeModule>) -> Result<HostModules, Error> {
+        HostModules::compile(&modules.into_iter().collect::<Vec<_>>(), true)
+    }
+
+    /// Like [`HostModules::new`], with the optimizations of
+    /// [`Config::optimize`] on or off.
+    pub(crate) fn compile(modules: &[NativeModule], optimize: bool) -> Result<HostModules, Error> {
+        for (i, m) in modules.iter().enumerate() {
+            assert!(!modules[..i].iter().any(|x| x.name() == m.name()), "host module `{}` is added twice", m.name());
+        }
+        let registry = Registry::for_modules(modules, optimize);
+        if registry.base.is_some() {
+            registry.snapshot()?;
+        }
+        Ok(HostModules(registry))
+    }
+}
+
+impl fmt::Debug for HostModules {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let names = self.0.sources.iter().filter(|(_, src)| src.kind == ModKind::Host).map(|(name, _)| name);
+        f.debug_list().entries(names).finish()
+    }
+}
+
+/// A compiled script and its imports, which any engine can run with
+/// [`Engine::run_program`]. [`Engine::compile_source`] and
+/// [`Engine::compile_file`] make it. Clones share the compiled code.
+#[derive(Clone)]
+pub struct CompiledProgram {
+    program: Arc<Program>,
+    host_modules: HostModules,
+    /// The working directory of runs on engines without [`Config::cwd`].
+    default_cwd: PathBuf,
+}
+
+impl fmt::Debug for CompiledProgram {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CompiledProgram")
+            .field("host_modules", &self.host_modules)
+            .field("default_cwd", &self.default_cwd)
+            .finish_non_exhaustive()
+    }
+}
+
 /// The natives and module sources that engines compile against: the
-/// standard library's, followed by those of a configuration's host modules.
+/// standard library's, followed by those of some host modules.
 pub(crate) struct Registry {
     pub natives: Arc<Vec<NativeEntry>>,
     pub decls: Arc<NativeDecls>,
@@ -615,22 +677,22 @@ impl Registry {
         }
     }
 
-    fn for_config(config: &Config) -> Arc<Registry> {
+    fn for_modules(modules: &[NativeModule], optimize: bool) -> Arc<Registry> {
         let std = STD.clone();
-        if config.modules.is_empty() {
+        if modules.is_empty() {
             return std;
         }
         let mut r = Registry {
             natives: std.natives.clone(),
             decls: std.decls.clone(),
             sources: std.sources.clone(),
-            optimize: config.optimize,
+            optimize,
             ..Registry::empty()
         };
-        for m in &config.modules {
+        for m in modules {
             m.register_types(&mut r);
         }
-        for m in &config.modules {
+        for m in modules {
             m.register(&mut r);
         }
         r.base = Some(std);
@@ -761,7 +823,6 @@ impl Registry {
 
 pub struct Engine {
     config: Config,
-    registry: Arc<Registry>,
     interrupt: Arc<AtomicBool>,
     shared: Arc<IoShared>,
     /// "Always" prompt answers, remembered for the lifetime of the engine
@@ -781,6 +842,8 @@ pub struct Engine {
 /// A compiled program.
 pub(crate) struct Compiled {
     pub program: Arc<Program>,
+    /// The natives that `program` calls.
+    pub natives: Arc<Vec<NativeEntry>>,
     /// The main module's lint warnings (if asked for).
     pub lints: Option<Vec<crate::lint::LintWarning>>,
     /// When the run's wall-time limit passes, counted from the start of
@@ -807,29 +870,24 @@ pub(crate) fn on_compile_stack<R: Send + 'static>(f: impl FnOnce() -> Result<R, 
 }
 
 impl Engine {
-    /// Creates an engine with `config`, checking any registered host modules.
-    pub fn new(config: Config) -> Result<Engine, Error> {
-        let registry = Registry::for_config(&config);
-        if registry.base.is_some() {
-            registry.snapshot()?;
-        }
+    /// Creates an engine with `config`.
+    pub fn new(config: Config) -> Engine {
         let origin = config.clock.now();
-        Ok(Engine {
+        Engine {
             origin,
             config,
-            registry,
             interrupt: Arc::new(AtomicBool::new(false)),
             shared: Arc::new(IoShared::default()),
             always: Arc::default(),
             gc_stats: GcStats::default(),
             root: OnceLock::new(),
             spare: Mutex::default(),
-        })
+        }
     }
 
     /// Returns the sorted names of all registered standard and host modules.
     pub fn module_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.registry.sources.keys().filter(|n| *n != "prelude").map(|n| n.to_string()).collect();
+        let mut names: Vec<String> = self.registry().sources.keys().filter(|n| *n != "prelude").map(|n| n.to_string()).collect();
         names.sort_unstable();
         names
     }
@@ -839,7 +897,7 @@ impl Engine {
     pub fn docs(&self) -> Result<Vec<crate::docs::ModuleDoc>, Error> {
         use crate::check::ModKind;
         use crate::docs::ModuleKind;
-        let snapshot = self.registry.snapshot()?;
+        let snapshot = self.registry().snapshot()?;
         let mut checker = snapshot.checker.clone();
         let mut mods: Vec<(ModuleKind, &str, ModId)> = snapshot
             .by_name
@@ -889,7 +947,7 @@ impl Engine {
     }
 
     pub(crate) fn registry(&self) -> &Arc<Registry> {
-        &self.registry
+        &self.config.host_modules.0
     }
 
     /// Forgets interrupts of earlier runs; interrupts from now on stop the
@@ -965,9 +1023,9 @@ impl Engine {
     }
 
     async fn run_source_inner(&mut self, name: &str, source: &str) -> Result<Outcome, Error> {
-        let (root, normal) = self.source_root().clone();
-        let compiled = self.compile(name, source, &normal, None).await?;
-        self.execute(compiled, root).await
+        let (compiled, root) = self.compile_main_source(name, source).await?;
+        let cwd = self.run_cwd(root);
+        self.execute(compiled, cwd).await
     }
 
     pub async fn run_file(&mut self, path: impl AsRef<Path>) -> Result<Outcome, Error> {
@@ -975,10 +1033,70 @@ impl Engine {
     }
 
     async fn run_file_inner(&mut self, path: &Path) -> Result<Outcome, Error> {
-        let (name, source, root) = self.read_main(path)?;
-        let compiled = self.compile(&name, &source, &root, Some(path)).await?;
-        let cwd = self.config.cwd.clone().unwrap_or(root);
+        let (compiled, root) = self.compile_main_file(path).await?;
+        let cwd = self.run_cwd(root);
         self.execute(compiled, cwd).await
+    }
+
+    /// Compiles source text and its imports without running them, as
+    /// [`Engine::run_source`] does. The imports must pass the policy of this
+    /// engine.
+    pub async fn compile_source(&self, name: &str, source: &str) -> Result<CompiledProgram, Error> {
+        let compiling = async {
+            let (compiled, root) = self.compile_main_source(name, source).await?;
+            Ok(self.compiled_program(compiled, root))
+        };
+        crate::unwind::guard(compiling).await
+    }
+
+    /// Compiles a file and its imports without running them, as
+    /// [`Engine::run_file`] does. The imports must pass the policy of this
+    /// engine.
+    pub async fn compile_file(&self, path: impl AsRef<Path>) -> Result<CompiledProgram, Error> {
+        let compiling = async {
+            let (compiled, root) = self.compile_main_file(path.as_ref()).await?;
+            Ok(self.compiled_program(compiled, root))
+        };
+        crate::unwind::guard(compiling).await
+    }
+
+    /// Runs `program` with the host modules that it was compiled with and the
+    /// rest of the configuration of this engine. Each run starts with new
+    /// globals, and its limits count from the start of the run.
+    pub async fn run_program(&mut self, program: &CompiledProgram) -> Result<Outcome, Error> {
+        self.clear_interrupt();
+        let compiled = Compiled {
+            program: program.program.clone(),
+            natives: program.host_modules.0.natives.clone(),
+            lints: None,
+            deadline: self.deadline(),
+            snapshot: None,
+        };
+        let cwd = self.run_cwd(program.default_cwd.clone());
+        crate::unwind::guard(self.execute(compiled, cwd)).await
+    }
+
+    fn compiled_program(&self, compiled: Compiled, root: PathBuf) -> CompiledProgram {
+        CompiledProgram { program: compiled.program, host_modules: self.config.host_modules.clone(), default_cwd: root }
+    }
+
+    /// Compiles source text as the main module. Returns the program and the
+    /// module root.
+    async fn compile_main_source(&self, name: &str, source: &str) -> Result<(Compiled, PathBuf), Error> {
+        let (root, normal) = self.source_root().clone();
+        Ok((self.compile(name, source, &normal, None).await?, root))
+    }
+
+    /// Compiles the file at `path` as the main module. Returns the program
+    /// and the module root.
+    async fn compile_main_file(&self, path: &Path) -> Result<(Compiled, PathBuf), Error> {
+        let (name, source, root) = self.read_main(path)?;
+        Ok((self.compile(&name, &source, &root, Some(path)).await?, root))
+    }
+
+    /// The working directory of a run of a program with module root `root`.
+    fn run_cwd(&self, root: PathBuf) -> PathBuf {
+        self.config.cwd.clone().unwrap_or(root)
     }
 
     pub async fn run_tests(&mut self, path: impl AsRef<Path>) -> Result<TestReport, Error> {
@@ -986,15 +1104,14 @@ impl Engine {
     }
 
     async fn run_tests_inner(&mut self, path: &Path) -> Result<TestReport, Error> {
-        let (name, source, root) = self.read_main(path)?;
-        let compiled = self.compile(&name, &source, &root, Some(path)).await?;
-        let cwd = self.config.cwd.clone().unwrap_or(root);
+        let (compiled, root) = self.compile_main_file(path).await?;
+        let cwd = self.run_cwd(root);
         let prog = compiled.program;
         // The wall-time limit bounds the whole test run.
         let mut deadline = compiled.deadline;
         let mut report = TestReport::default();
         for (tname, proto) in prog.tests.clone() {
-            let mut vm = self.new_vm(prog.clone(), cwd.clone(), true);
+            let mut vm = self.new_vm(prog.clone(), compiled.natives.clone(), cwd.clone(), true);
             vm.deadline = deadline;
             let init = vm.run_main(prog.entry).await;
             let result = match init {
@@ -1038,7 +1155,8 @@ impl Engine {
         Ok((name, source, root))
     }
 
-    pub(crate) fn new_vm(&self, prog: Arc<Program>, cwd: PathBuf, quiet: bool) -> Vm {
+    /// A VM that runs `prog`, which calls `natives`.
+    pub(crate) fn new_vm(&self, prog: Arc<Program>, natives: Arc<Vec<NativeEntry>>, cwd: PathBuf, quiet: bool) -> Vm {
         let c = &self.config;
         let stdin = match &c.stdin {
             StdinConfig::None => None,
@@ -1079,7 +1197,7 @@ impl Engine {
             network: c.network.clone().unwrap_or_else(|| Arc::new(crate::network::OsNetwork)),
             time_zone: c.time_zone.as_ref().map(|z| z.zone().clone()),
         };
-        let mut vm = Vm::new(prog, self.registry.natives.clone(), host);
+        let mut vm = Vm::new(prog, natives, host);
         vm.io = IoTable::with_shared(self.shared.clone());
         if c.gc_stress {
             vm.heap.stress = true;
@@ -1101,7 +1219,7 @@ impl Engine {
                 }
             }
         }
-        let mut vm = self.new_vm(prog.clone(), cwd, false);
+        let mut vm = self.new_vm(prog.clone(), compiled.natives, cwd, false);
         vm.deadline = compiled.deadline;
         let r = vm.run_main(prog.entry).await;
         let r = end_run(&mut vm, r).await;
@@ -1190,9 +1308,9 @@ impl Engine {
         self.clear_interrupt();
         // Unless the full snapshot exists, compile on the core extended with
         // just the standard modules the program imports (`Registry::extended`).
-        let mut snap = match self.registry.ready() {
+        let mut snap = match self.registry().ready() {
             Some(s) => s,
-            None => self.registry.core()?,
+            None => self.registry().core()?,
         };
         let mut g = ModuleGraph::new(&snap);
         g.source_bytes = main_source.len();
@@ -1224,7 +1342,7 @@ impl Engine {
         }
         let std: Vec<&str> = g.modules.iter().filter(|m| m.kind == ModKind::Std).map(|m| m.name.as_str()).collect();
         if !std.is_empty() {
-            snap = self.registry.extended(&std)?;
+            snap = self.registry().extended(&std)?;
             g = g.rebase(&snap);
         }
         let main_file = g.modules[main].file;
@@ -1235,11 +1353,12 @@ impl Engine {
             Some((s, p)) if Arc::ptr_eq(&s, &snap) => Some(p),
             _ => None,
         };
-        let natives = g.has_natives(&g.order);
-        let (base, registry, optimize) = (snap.clone(), self.registry.clone(), self.config.optimize);
+        let has_natives = g.has_natives(&g.order);
+        let (base, registry, optimize) = (snap.clone(), self.registry().clone(), self.config.optimize);
         let (program, lints) =
             on_compile_stack(move || compile_program(&base, &mut g, &registry, &budget, main_file, options.lint, optimize, spare))?;
-        Ok(Compiled { program, lints, deadline, snapshot: (!natives).then_some(snap) })
+        let natives = self.registry().natives.clone();
+        Ok(Compiled { program, natives, lints, deadline, snapshot: (!has_natives).then_some(snap) })
     }
 
     /// Runs `job`, file system work for module discovery, on a worker
@@ -1322,7 +1441,7 @@ impl Engine {
             let optional = matches!(imp, ImportRef::Implicit(..));
             let script_import = match imp {
                 ImportRef::Name(name, span) | ImportRef::Implicit(name, span) => {
-                    let registered = self.registry.sources.get(name.as_str()).filter(|_| name != "prelude");
+                    let registered = self.registry().sources.get(name.as_str()).filter(|_| name != "prelude");
                     if let Some(id) = d.snap.module(&name).filter(|_| name != "prelude") {
                         g.use_std(d.snap, id);
                         g.modules[mi].imports.push((span, Target::Snapshot(id)));
@@ -1615,13 +1734,12 @@ mod registry_tests {
         let code = |optimize: bool| {
             let mut m = NativeModule::new("host");
             m.source(src);
-            let engine = Engine::new(Config::new().optimize(optimize).module(m)).unwrap();
-            let snap = engine.registry.snapshot().unwrap();
+            let snap = HostModules::compile(&[m], optimize).unwrap().0.snapshot().unwrap();
             let proto = snap.program.protos.iter().find(|p| p.name == "doubled_total").expect("doubled_total is compiled");
             proto.code.clone()
         };
         let script = |optimize: bool| {
-            let engine = Engine::new(Config::new().optimize(optimize)).unwrap();
+            let engine = Engine::new(Config::new().optimize(optimize));
             let c = engine.compile_now("main.sand", src, Path::new("."), None, false).unwrap();
             let proto = c.program.protos.iter().find(|p| p.name == "doubled_total").expect("doubled_total is compiled");
             proto.code.clone()
@@ -1630,6 +1748,17 @@ mod registry_tests {
         assert_ne!(fast, slow);
         assert_eq!(fast.len(), script(true).len());
         assert_eq!(slow.len(), script(false).len());
+    }
+
+    #[test]
+    fn engines_share_the_registry_of_their_host_modules() {
+        let host_modules = HostModules::new([NativeModule::new("a")]).unwrap();
+        let one = Engine::new(Config::new().host_modules(host_modules.clone()));
+        let two = Engine::new(Config::new().seed(1).host_modules(host_modules.clone()));
+        assert!(Arc::ptr_eq(one.registry(), two.registry()));
+        assert!(Arc::ptr_eq(one.registry(), &host_modules.0));
+        assert!(Arc::ptr_eq(Engine::new(Config::new()).registry(), &STD));
+        assert_eq!(format!("{host_modules:?}"), r#"["a"]"#);
     }
 
     /// `STD_MODULES` (the names host modules cannot take) lists the standard modules.
@@ -1688,12 +1817,12 @@ mod offload_tests {
     fn hung_io_is_abandoned_at_limits_and_interrupts() {
         let (release, progress) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicUsize::new(0)));
         let limits = Limits { max_wall_time: Some(Duration::from_millis(100)), ..Limits::default() };
-        let config = || Config::new().module(hang_module(release.clone(), progress.clone()));
-        let mut engine = Engine::new(config().limits(limits)).unwrap();
+        let config = || Config::new().host_modules(HostModules::new([hang_module(release.clone(), progress.clone())]).unwrap());
+        let mut engine = Engine::new(config().limits(limits));
         let r = rt().block_on(engine.run_source("main.sand", "import hung\nhung.hang()"));
         assert!(matches!(r, Err(Error::Limit(LimitKind::WallTime))), "{r:?}");
 
-        let mut engine = Engine::new(config()).unwrap();
+        let mut engine = Engine::new(config());
         let handle = engine.interrupt_handle();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(50));

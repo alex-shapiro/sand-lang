@@ -38,7 +38,7 @@ use std::task::Poll;
 /// # async fn demo() -> Result<(), sandlang::engine::Error> {
 /// use sandlang::engine::Config;
 /// use sandlang::session::Session;
-/// let mut session = Session::new(Config::new())?;
+/// let mut session = Session::new(Config::new());
 /// session.eval("var count = 0\nfn bump() -> int { count += 1\n count }").await?;
 /// assert_eq!(session.eval("bump()").await?, Some("1".to_string()));
 /// assert_eq!(session.eval("bump() + 10").await?, Some("12".to_string()));
@@ -102,17 +102,16 @@ struct State {
 const SESSION_MODULE: &str = "repl";
 
 impl Session {
-    /// Creates a session with `config` and validates any registered host
-    /// modules.
-    pub fn new(config: Config) -> Result<Session, Error> {
-        let engine = Engine::new(config)?;
+    /// Creates a session with `config`.
+    pub fn new(config: Config) -> Session {
+        let engine = Engine::new(config);
         let config = engine.config();
         let fs = &config.fs;
         let root = config.module_root.clone().or_else(|| config.cwd.clone()).unwrap_or_else(|| fs.default_dir());
         let cwd = config.cwd.clone().unwrap_or_else(|| root.clone());
         let root = fs.resolve(&fs.absolute(&root));
         let wall_time = config.limits.max_wall_time;
-        Ok(Session { engine, root, cwd, state: None, inputs: 0, exit_code: None, was_reset: false, wall_time })
+        Session { engine, root, cwd, state: None, inputs: 0, exit_code: None, was_reset: false, wall_time }
     }
 
     /// Checks, compiles and runs one input. Returns the debug form of its
@@ -427,7 +426,7 @@ impl Session {
         // The standard library's program; its entry initializes the prelude and `task`.
         let prog = snapshot.program.clone();
         let pending = Some(prog.entry);
-        let vm = self.engine.new_vm(Arc::new(prog), self.cwd.clone(), false);
+        let vm = self.engine.new_vm(Arc::new(prog), registry.natives.clone(), self.cwd.clone(), false);
         let compiler = snapshot.compiler.clone();
         Ok(State { snapshot, graph, checker, compiler, vm, pending, loading: None, running: false, deferred_prompt: None })
     }

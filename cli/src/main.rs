@@ -423,7 +423,7 @@ fn report_error(e: &Error) -> u8 {
 fn cmd_run(args: &[String]) -> Result<u8, String> {
     let opts = run_options(args)?;
     let file = opts.file.ok_or("missing FILE to run")?;
-    let mut engine = Engine::new(opts.config.exit_after_run(true)).map_err(|e| e.render())?;
+    let mut engine = Engine::new(opts.config.exit_after_run(true));
     let rt = runtime()?;
     let r = rt.block_on(with_stdin_forwarded(&opts.stdin_feed, engine.run_file(&file)));
     // Drop the runtime without waiting for a blocked stdin read thread.
@@ -512,7 +512,7 @@ fn cmd_check(args: &[String]) -> Result<u8, String> {
             }
             continue;
         }
-        let engine = Engine::new(Config::new().policy(allow_all_imports_policy())).map_err(|e| e.render())?;
+        let engine = Engine::new(Config::new().policy(allow_all_imports_policy()));
         match engine.check_file(path) {
             Ok(()) => outln!("{f}: ok"),
             Err(e) => code = code.max(report_error(&e)),
@@ -533,7 +533,7 @@ fn cmd_lint(args: &[String]) -> Result<u8, String> {
                 Err(errors) => return Ok(report_policy_errors(f, &errors)),
             }
         } else {
-            Engine::new(Config::new().policy(allow_all_imports_policy())).and_then(|e| e.lint_file(f)).map_err(|e| e.to_string())
+            Engine::new(Config::new().policy(allow_all_imports_policy())).lint_file(f).map_err(|e| e.to_string())
         };
         match warnings {
             Ok(ws) => {
@@ -622,7 +622,7 @@ fn cmd_test(args: &[String]) -> Result<u8, String> {
         return Err("missing FILE".into());
     }
     let rt = runtime()?;
-    let mut engine = Engine::new(opts.config).map_err(|e| e.render())?;
+    let mut engine = Engine::new(opts.config);
     let run = async {
         let mut failed = 0;
         for f in &files {

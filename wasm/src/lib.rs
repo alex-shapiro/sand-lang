@@ -225,7 +225,7 @@ impl Engine {
         #[wasm_bindgen(unchecked_param_type = "EngineHooks")] hooks: JsValue,
     ) -> Result<Engine, JsValue> {
         let HostConfig { config, fs, hooks } = HostConfig::new(&options, &hooks)?;
-        let engine = sandlang::engine::Engine::new(config).map_err(|e| error(&e.render()))?;
+        let engine = sandlang::engine::Engine::new(config);
         let interrupt = engine.interrupt_handle();
         Ok(Engine { engine: Rc::new(RefCell::new(Some(engine))), fs, interrupt, _hooks: hooks })
     }
@@ -362,7 +362,7 @@ impl Session {
         #[wasm_bindgen(unchecked_param_type = "EngineHooks")] hooks: JsValue,
     ) -> Result<Session, JsValue> {
         let HostConfig { config, fs, hooks } = HostConfig::new(&options, &hooks)?;
-        let session = sandlang::session::Session::new(config).map_err(|e| error(&e.render()))?;
+        let session = sandlang::session::Session::new(config);
         let interrupt = session.interrupt_handle();
         Ok(Session { session: Rc::new(RefCell::new(Some(session))), fs, interrupt, hooks, stop_tasks: Rc::default() })
     }
