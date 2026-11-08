@@ -39,9 +39,11 @@ pub(crate) const OS_MODULES: &[&str] = &["http", "net"];
 #[cfg(web)]
 pub(crate) const OS_MODULES: &[&str] = &["net"];
 
-/// The names of the standard modules (and of the prelude), which host
-/// modules cannot take.
-pub(crate) const STD_MODULES: &[&str] = &[
+/// The names of the standard library modules and the prelude, on all
+/// platforms. A host module cannot use one of these names, and `import` of
+/// one of these names never loads a library script
+/// (see [`Config::library`](crate::engine::Config::library)).
+pub const STD_MODULES: &[&str] = &[
     "prelude",
     "base64",
     "crypto",
