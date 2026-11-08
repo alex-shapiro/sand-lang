@@ -587,7 +587,8 @@ impl fmt::Debug for HostModules {
 pub struct CompiledProgram {
     program: Arc<Program>,
     host_modules: HostModules,
-    /// The working directory of runs on engines without [`Config::cwd`].
+    /// The working directory of a run on the compiling engine, for runs on
+    /// engines without [`Config::cwd`].
     default_cwd: PathBuf,
 }
 
@@ -842,8 +843,8 @@ pub struct Engine {
 /// A compiled program.
 pub(crate) struct Compiled {
     pub program: Arc<Program>,
-    /// The natives that `program` calls.
-    pub natives: Arc<Vec<NativeEntry>>,
+    /// The host modules that `program` was compiled with.
+    pub host_modules: HostModules,
     /// The main module's lint warnings (if asked for).
     pub lints: Option<Vec<crate::lint::LintWarning>>,
     /// When the run's wall-time limit passes, counted from the start of
@@ -851,6 +852,14 @@ pub(crate) struct Compiled {
     pub deadline: Option<Instant>,
     /// Base snapshot when no additional native modules were compiled, allowing `program` to be recycled.
     pub snapshot: Option<Arc<Snapshot>>,
+}
+
+impl Compiled {
+    /// The program, to run with `default_cwd` as its working directory on
+    /// engines without [`Config::cwd`].
+    fn into_program(self, default_cwd: PathBuf) -> CompiledProgram {
+        CompiledProgram { program: self.program, host_modules: self.host_modules, default_cwd }
+    }
 }
 
 /// How to compile a program.
@@ -946,6 +955,10 @@ impl Engine {
         &self.config
     }
 
+    pub(crate) fn host_modules(&self) -> &HostModules {
+        &self.config.host_modules
+    }
+
     pub(crate) fn registry(&self) -> &Arc<Registry> {
         &self.config.host_modules.0
     }
@@ -1009,7 +1022,7 @@ impl Engine {
     /// The module root of source text: the configured root or working
     /// directory, or [`Engine::default_root`] (as it is when first needed),
     /// and its normal form.
-    fn source_root(&self) -> &(PathBuf, PathBuf) {
+    pub(crate) fn source_root(&self) -> &(PathBuf, PathBuf) {
         self.root.get_or_init(|| {
             let root = self.config.module_root.clone().or_else(|| self.config.cwd.clone()).unwrap_or_else(|| self.default_root());
             let fs = &self.config.fs;
@@ -1023,8 +1036,7 @@ impl Engine {
     }
 
     async fn run_source_inner(&mut self, name: &str, source: &str) -> Result<Outcome, Error> {
-        let (compiled, root) = self.compile_main_source(name, source).await?;
-        let cwd = self.run_cwd(root);
+        let (compiled, cwd) = self.compile_main_source(name, source).await?;
         self.execute(compiled, cwd).await
     }
 
@@ -1033,8 +1045,7 @@ impl Engine {
     }
 
     async fn run_file_inner(&mut self, path: &Path) -> Result<Outcome, Error> {
-        let (compiled, root) = self.compile_main_file(path).await?;
-        let cwd = self.run_cwd(root);
+        let (compiled, cwd) = self.compile_main_file(path).await?;
         self.execute(compiled, cwd).await
     }
 
@@ -1043,8 +1054,8 @@ impl Engine {
     /// engine.
     pub async fn compile_source(&self, name: &str, source: &str) -> Result<CompiledProgram, Error> {
         let compiling = async {
-            let (compiled, root) = self.compile_main_source(name, source).await?;
-            Ok(self.compiled_program(compiled, root))
+            let (compiled, cwd) = self.compile_main_source(name, source).await?;
+            Ok(compiled.into_program(cwd))
         };
         crate::unwind::guard(compiling).await
     }
@@ -1054,20 +1065,22 @@ impl Engine {
     /// engine.
     pub async fn compile_file(&self, path: impl AsRef<Path>) -> Result<CompiledProgram, Error> {
         let compiling = async {
-            let (compiled, root) = self.compile_main_file(path.as_ref()).await?;
-            Ok(self.compiled_program(compiled, root))
+            let (compiled, cwd) = self.compile_main_file(path.as_ref()).await?;
+            Ok(compiled.into_program(cwd))
         };
         crate::unwind::guard(compiling).await
     }
 
     /// Runs `program` with the host modules that it was compiled with and the
-    /// rest of the configuration of this engine. Each run starts with new
-    /// globals, and its limits count from the start of the run.
+    /// rest of the configuration of this engine. If this engine does not set
+    /// [`Config::cwd`], the run uses the working directory of a run on the
+    /// compiling engine. Each run starts with new globals, and its limits
+    /// count from the start of the run.
     pub async fn run_program(&mut self, program: &CompiledProgram) -> Result<Outcome, Error> {
         self.clear_interrupt();
         let compiled = Compiled {
             program: program.program.clone(),
-            natives: program.host_modules.0.natives.clone(),
+            host_modules: program.host_modules.clone(),
             lints: None,
             deadline: self.deadline(),
             snapshot: None,
@@ -1076,26 +1089,22 @@ impl Engine {
         crate::unwind::guard(self.execute(compiled, cwd)).await
     }
 
-    fn compiled_program(&self, compiled: Compiled, root: PathBuf) -> CompiledProgram {
-        CompiledProgram { program: compiled.program, host_modules: self.config.host_modules.clone(), default_cwd: root }
-    }
-
     /// Compiles source text as the main module. Returns the program and the
-    /// module root.
+    /// working directory of its run.
     async fn compile_main_source(&self, name: &str, source: &str) -> Result<(Compiled, PathBuf), Error> {
         let (root, normal) = self.source_root().clone();
-        Ok((self.compile(name, source, &normal, None).await?, root))
+        Ok((self.compile(name, source, &normal, None).await?, self.run_cwd(root)))
     }
 
     /// Compiles the file at `path` as the main module. Returns the program
-    /// and the module root.
+    /// and the working directory of its run.
     async fn compile_main_file(&self, path: &Path) -> Result<(Compiled, PathBuf), Error> {
         let (name, source, root) = self.read_main(path)?;
-        Ok((self.compile(&name, &source, &root, Some(path)).await?, root))
+        Ok((self.compile(&name, &source, &root, Some(path)).await?, self.run_cwd(root)))
     }
 
     /// The working directory of a run of a program with module root `root`.
-    fn run_cwd(&self, root: PathBuf) -> PathBuf {
+    pub(crate) fn run_cwd(&self, root: PathBuf) -> PathBuf {
         self.config.cwd.clone().unwrap_or(root)
     }
 
@@ -1104,14 +1113,13 @@ impl Engine {
     }
 
     async fn run_tests_inner(&mut self, path: &Path) -> Result<TestReport, Error> {
-        let (compiled, root) = self.compile_main_file(path).await?;
-        let cwd = self.run_cwd(root);
+        let (compiled, cwd) = self.compile_main_file(path).await?;
         let prog = compiled.program;
         // The wall-time limit bounds the whole test run.
         let mut deadline = compiled.deadline;
         let mut report = TestReport::default();
         for (tname, proto) in prog.tests.clone() {
-            let mut vm = self.new_vm(prog.clone(), compiled.natives.clone(), cwd.clone(), true);
+            let mut vm = self.new_vm(prog.clone(), &compiled.host_modules, cwd.clone(), true);
             vm.deadline = deadline;
             let init = vm.run_main(prog.entry).await;
             let result = match init {
@@ -1155,8 +1163,8 @@ impl Engine {
         Ok((name, source, root))
     }
 
-    /// A VM that runs `prog`, which calls `natives`.
-    pub(crate) fn new_vm(&self, prog: Arc<Program>, natives: Arc<Vec<NativeEntry>>, cwd: PathBuf, quiet: bool) -> Vm {
+    /// A VM that runs `prog`, which calls the natives of `host_modules`.
+    pub(crate) fn new_vm(&self, prog: Arc<Program>, host_modules: &HostModules, cwd: PathBuf, quiet: bool) -> Vm {
         let c = &self.config;
         let stdin = match &c.stdin {
             StdinConfig::None => None,
@@ -1197,7 +1205,7 @@ impl Engine {
             network: c.network.clone().unwrap_or_else(|| Arc::new(crate::network::OsNetwork)),
             time_zone: c.time_zone.as_ref().map(|z| z.zone().clone()),
         };
-        let mut vm = Vm::new(prog, natives, host);
+        let mut vm = Vm::new(prog, host_modules.0.natives.clone(), host);
         vm.io = IoTable::with_shared(self.shared.clone());
         if c.gc_stress {
             vm.heap.stress = true;
@@ -1219,7 +1227,7 @@ impl Engine {
                 }
             }
         }
-        let mut vm = self.new_vm(prog.clone(), compiled.natives, cwd, false);
+        let mut vm = self.new_vm(prog.clone(), &compiled.host_modules, cwd, false);
         vm.deadline = compiled.deadline;
         let r = vm.run_main(prog.entry).await;
         let r = end_run(&mut vm, r).await;
@@ -1357,8 +1365,8 @@ impl Engine {
         let (base, registry, optimize) = (snap.clone(), self.registry().clone(), self.config.optimize);
         let (program, lints) =
             on_compile_stack(move || compile_program(&base, &mut g, &registry, &budget, main_file, options.lint, optimize, spare))?;
-        let natives = self.registry().natives.clone();
-        Ok(Compiled { program, natives, lints, deadline, snapshot: (!has_natives).then_some(snap) })
+        let host_modules = self.config.host_modules.clone();
+        Ok(Compiled { program, host_modules, lints, deadline, snapshot: (!has_natives).then_some(snap) })
     }
 
     /// Runs `job`, file system work for module discovery, on a worker

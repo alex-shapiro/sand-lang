@@ -2023,8 +2023,8 @@ imports, as `run_source` and `run_file` do, and return a `CompiledProgram`.
 The policy of the compiling engine controls the imports. `Engine::run_program`
 runs a `CompiledProgram` on any engine. The run uses the host modules of the
 compiling engine and the remaining configuration of the running engine. If
-the running engine does not set `Config::cwd`, the run uses the module root
-of the compiling engine as its working directory. Each run starts with new
+the running engine does not set `Config::cwd`, the run uses the working
+directory that a run on the compiling engine uses. Each run starts with new
 globals, and its limits count from the start of the run.
 
 ### 16.2 Host environment and providers

@@ -105,13 +105,10 @@ impl Session {
     /// Creates a session with `config`.
     pub fn new(config: Config) -> Session {
         let engine = Engine::new(config);
-        let config = engine.config();
-        let fs = &config.fs;
-        let root = config.module_root.clone().or_else(|| config.cwd.clone()).unwrap_or_else(|| fs.default_dir());
-        let cwd = config.cwd.clone().unwrap_or_else(|| root.clone());
-        let root = fs.resolve(&fs.absolute(&root));
-        let wall_time = config.limits.max_wall_time;
-        Session { engine, root, cwd, state: None, inputs: 0, exit_code: None, was_reset: false, wall_time }
+        let (root, normal_root) = engine.source_root().clone();
+        let cwd = engine.run_cwd(root);
+        let wall_time = engine.config().limits.max_wall_time;
+        Session { engine, root: normal_root, cwd, state: None, inputs: 0, exit_code: None, was_reset: false, wall_time }
     }
 
     /// Checks, compiles and runs one input. Returns the debug form of its
@@ -426,7 +423,7 @@ impl Session {
         // The standard library's program; its entry initializes the prelude and `task`.
         let prog = snapshot.program.clone();
         let pending = Some(prog.entry);
-        let vm = self.engine.new_vm(Arc::new(prog), registry.natives.clone(), self.cwd.clone(), false);
+        let vm = self.engine.new_vm(Arc::new(prog), self.engine.host_modules(), self.cwd.clone(), false);
         let compiler = snapshot.compiler.clone();
         Ok(State { snapshot, graph, checker, compiler, vm, pending, loading: None, running: false, deferred_prompt: None })
     }

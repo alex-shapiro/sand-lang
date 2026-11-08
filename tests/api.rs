@@ -2170,6 +2170,16 @@ fn program_runs_use_the_working_directory_of_the_running_engine() {
     let (r, out) = run_program_with(config().cwd("/work"), &program);
     r.unwrap();
     assert_eq!(out, "work\n");
+    // The working directory of the compiling engine applies also with a module root.
+    let compiler = Engine::new(Config::new().memory_fs(fs.clone()).module_root("/app").cwd("/work"));
+    for program in [
+        rt().block_on(compiler.compile_file("/app/main.sand")).unwrap(),
+        rt().block_on(compiler.compile_source("main.sand", "import fs\nprint(fs.read_text(\"in.txt\")?)")).unwrap(),
+    ] {
+        let (r, out) = run_program_with(config(), &program);
+        r.unwrap();
+        assert_eq!(out, "work\n");
+    }
 }
 
 #[test]
