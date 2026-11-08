@@ -27,7 +27,7 @@ mod hooks;
 use hooks::{Hooks, JsOutput, JsPrompter};
 use js_sys::{Array, Object, Reflect};
 use sandlang::diag::{Diagnostic, Severity};
-use sandlang::engine::{Config, Error, Limits};
+use sandlang::engine::{Config, Error, InterruptHandle, Limits};
 use sandlang::files::mem::MemFs;
 use sandlang::lint::LintWarning;
 use sandlang::policy::file::{PolicyError, PolicyFile};
@@ -152,6 +152,7 @@ impl Drop for HookKey {
 struct HostConfig {
     config: Config,
     fs: MemFs,
+    interrupt: InterruptHandle,
     hooks: Rc<HookKey>,
 }
 
@@ -197,7 +198,8 @@ impl HostConfig {
             let zone = sandlang::stdlib::time::TimeZone::get(&name).ok_or_else(|| error(&format!("unknown timeZone {name:?}")))?;
             config = config.time_zone(zone);
         }
-        Ok(HostConfig { config, fs, hooks: key })
+        let interrupt = InterruptHandle::new();
+        Ok(HostConfig { config: config.interrupt(interrupt.clone()), fs, interrupt, hooks: key })
     }
 }
 
@@ -208,7 +210,7 @@ pub struct Engine {
     /// Taken while a run uses it.
     engine: Rc<RefCell<Option<sandlang::engine::Engine>>>,
     fs: MemFs,
-    interrupt: sandlang::engine::InterruptHandle,
+    interrupt: InterruptHandle,
     /// Keeps the engine's hooks registered until the engine is freed.
     _hooks: Rc<HookKey>,
 }
@@ -224,9 +226,8 @@ impl Engine {
         #[wasm_bindgen(unchecked_param_type = "EngineOptions")] options: JsValue,
         #[wasm_bindgen(unchecked_param_type = "EngineHooks")] hooks: JsValue,
     ) -> Result<Engine, JsValue> {
-        let HostConfig { config, fs, hooks } = HostConfig::new(&options, &hooks)?;
+        let HostConfig { config, fs, interrupt, hooks } = HostConfig::new(&options, &hooks)?;
         let engine = sandlang::engine::Engine::new(config);
-        let interrupt = engine.interrupt_handle();
         Ok(Engine { engine: Rc::new(RefCell::new(Some(engine))), fs, interrupt, _hooks: hooks })
     }
 
@@ -347,7 +348,7 @@ impl FileSystem {
 pub struct Session {
     session: Rc<RefCell<Option<sandlang::session::Session>>>,
     fs: MemFs,
-    interrupt: sandlang::engine::InterruptHandle,
+    interrupt: InterruptHandle,
     hooks: Rc<HookKey>,
     /// Ends the `runTasks` in progress.
     stop_tasks: Rc<RefCell<Option<tokio::sync::oneshot::Sender<()>>>>,
@@ -361,9 +362,8 @@ impl Session {
         #[wasm_bindgen(unchecked_param_type = "EngineOptions")] options: JsValue,
         #[wasm_bindgen(unchecked_param_type = "EngineHooks")] hooks: JsValue,
     ) -> Result<Session, JsValue> {
-        let HostConfig { config, fs, hooks } = HostConfig::new(&options, &hooks)?;
+        let HostConfig { config, fs, interrupt, hooks } = HostConfig::new(&options, &hooks)?;
         let session = sandlang::session::Session::new(config);
-        let interrupt = session.interrupt_handle();
         Ok(Session { session: Rc::new(RefCell::new(Some(session))), fs, interrupt, hooks, stop_tasks: Rc::default() })
     }
 

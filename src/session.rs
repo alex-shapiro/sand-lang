@@ -12,7 +12,7 @@ use crate::check::budget::CompileBudget;
 use crate::check::{Checker, ModKind, ParsedModule};
 use crate::compile::{CompileInput, Incremental, ProgramMark, compile_more};
 use crate::diag::{Diag, FileId, Span};
-use crate::engine::{Config, Discovery, Engine, Error, InterruptHandle, Registry, TestReport, TestResult, on_compile_stack};
+use crate::engine::{Config, Discovery, Engine, Error, Registry, TestReport, TestResult, on_compile_stack};
 use crate::modules::{GraphMark, ModuleGraph, NativeInfo, Snapshot, budget_error, native_info};
 use crate::platform::Instant;
 use crate::policy::{Capability, PromptAnswer};
@@ -63,8 +63,7 @@ use std::task::Poll;
 ///   [`Session::was_reset`] returns `true` after the reset. The call returns
 ///   [`Error::Internal`] with [`RESET_NOTE`] appended to the message.
 pub struct Session {
-    /// Shares the configuration, natives and "always" answers of the engine
-    /// that created the session, with its own interrupt flag.
+    /// Compiles and runs the inputs.
     engine: Engine,
     root: PathBuf,
     cwd: PathBuf,
@@ -365,12 +364,6 @@ impl Session {
         self.reset();
         self.was_reset = true;
         r
-    }
-
-    /// A handle that interrupts the input being run, from any thread. The
-    /// input fails with [`Error::Interrupted`]; the session remains usable.
-    pub fn interrupt_handle(&self) -> InterruptHandle {
-        self.engine.interrupt_handle()
     }
 
     /// Whether `source` is a complete input, as far as the lexer can tell: a

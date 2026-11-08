@@ -7,7 +7,7 @@ mod common;
 use common::{TempDir, literal_path, rt, run_with};
 use jiff::civil::Date;
 use parking_lot::Mutex;
-use sandlang::engine::{CompiledProgram, Config, Engine, Error, HostModules, LimitKind, Limits, MemorySink};
+use sandlang::engine::{CompiledProgram, Config, Engine, Error, HostModules, InterruptHandle, LimitKind, Limits, MemorySink};
 use sandlang::files::mem::MemFs;
 use sandlang::native::NativeModule;
 use sandlang::policy::rules::{PathPattern, RulePolicy};
@@ -3239,8 +3239,8 @@ fn source_size_limit() {
 
 #[test]
 fn interrupt_from_another_thread() {
-    let mut engine = Engine::new(Config::new());
-    let handle = engine.interrupt_handle();
+    let handle = InterruptHandle::new();
+    let mut engine = Engine::new(Config::new().interrupt(handle.clone()));
     let t = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(50));
         handle.interrupt();
@@ -3251,6 +3251,32 @@ fn interrupt_from_another_thread() {
 }
 
 #[test]
+fn an_interrupt_stops_each_engine_that_holds_its_handle() {
+    let handle = InterruptHandle::new();
+    let runs: Vec<_> = (0..2)
+        .map(|_| {
+            let mut engine = Engine::new(Config::new().interrupt(handle.clone()));
+            std::thread::spawn(move || rt().block_on(engine.run_source("main.sand", "while true {}")))
+        })
+        .collect();
+    std::thread::sleep(Duration::from_millis(100));
+    handle.interrupt();
+    for r in runs {
+        let r = r.join().unwrap();
+        assert!(matches!(r, Err(Error::Interrupted)), "{r:?}");
+    }
+}
+
+#[test]
+fn an_interrupt_skips_engines_that_start_later() {
+    let handle = InterruptHandle::new();
+    handle.interrupt();
+    let mut engine = Engine::new(Config::new().interrupt(handle.clone()));
+    let r = rt().block_on(engine.run_source("main.sand", "print(1)"));
+    assert!(r.is_ok(), "{r:?}");
+}
+
+#[test]
 fn interrupt_stops_a_run_waiting_for_a_prompt() {
     let (asked_tx, asked_rx) = std::sync::mpsc::channel();
     let asked_tx = Mutex::new(asked_tx);
@@ -3258,8 +3284,8 @@ fn interrupt_stops_a_run_waiting_for_a_prompt() {
         let _ = asked_tx.lock().send(());
         std::future::pending::<PromptAnswer>()
     });
-    let mut engine = Engine::new(config);
-    let handle = engine.interrupt_handle();
+    let handle = InterruptHandle::new();
+    let mut engine = Engine::new(config.interrupt(handle.clone()));
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let r = rt().block_on(engine.run_source("main.sand", "import env\nprint(env.get(\"HOME\"))"));

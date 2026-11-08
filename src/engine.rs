@@ -29,7 +29,7 @@ use std::fmt;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, OnceLock};
+use std::sync::{Arc, LazyLock, OnceLock, Weak};
 use std::time::Duration;
 
 /// Per-engine resource limits.
@@ -252,6 +252,7 @@ pub struct Config {
     #[cfg(feature = "os")]
     pub(crate) network: Option<Arc<dyn crate::network::Network>>,
     pub(crate) time_zone: Option<TimeZone>,
+    interrupt: Option<InterruptHandle>,
 }
 
 /// HTTP request destination.
@@ -304,7 +305,15 @@ impl Config {
             #[cfg(feature = "os")]
             network: None,
             time_zone: None,
+            interrupt: None,
         }
+    }
+
+    /// Lets `handle` stop the engine or session made from this configuration.
+    /// Without this call, nothing can interrupt it.
+    pub fn interrupt(mut self, handle: InterruptHandle) -> Self {
+        self.interrupt = Some(handle);
+        self
     }
 
     /// Sets the clock and timer provider for the engine.
@@ -487,17 +496,44 @@ impl Config {
     }
 }
 
-/// Stops a running engine from another thread.
-#[derive(Clone)]
+/// Stops, from any thread, the engines and sessions whose configurations
+/// hold this handle (see [`Config::interrupt`]).
+#[derive(Clone, Default)]
 pub struct InterruptHandle {
-    flag: Arc<AtomicBool>,
-    shared: Arc<IoShared>,
+    targets: Arc<Mutex<Vec<InterruptTarget>>>,
+}
+
+/// The interrupt flag and I/O waker of one engine that an
+/// [`InterruptHandle`] stops.
+struct InterruptTarget {
+    flag: Weak<AtomicBool>,
+    io: Weak<IoShared>,
 }
 
 impl InterruptHandle {
+    /// Creates a handle. The handle stops nothing until you give it to a
+    /// configuration with [`Config::interrupt`].
+    pub fn new() -> InterruptHandle {
+        InterruptHandle::default()
+    }
+
+    /// Stops the compilation or run in progress in each engine and session
+    /// whose configuration holds this handle. The compilation or run fails
+    /// with [`Error::Interrupted`]. An engine ignores an interrupt that comes
+    /// before its next compilation or run.
     pub fn interrupt(&self) {
-        self.flag.store(true, Ordering::SeqCst);
-        self.shared.wake();
+        for target in self.targets.lock().iter() {
+            if let (Some(flag), Some(io)) = (target.flag.upgrade(), target.io.upgrade()) {
+                flag.store(true, Ordering::SeqCst);
+                io.wake();
+            }
+        }
+    }
+
+    fn attach(&self, flag: &Arc<AtomicBool>, io: &Arc<IoShared>) {
+        let mut targets = self.targets.lock();
+        targets.retain(|t| t.flag.strong_count() > 0);
+        targets.push(InterruptTarget { flag: Arc::downgrade(flag), io: Arc::downgrade(io) });
     }
 }
 
@@ -864,11 +900,15 @@ impl Engine {
     /// Creates an engine with `config`.
     pub fn new(config: Config) -> Engine {
         let origin = config.clock.now();
+        let (interrupt, shared) = (Arc::new(AtomicBool::new(false)), Arc::new(IoShared::default()));
+        if let Some(handle) = &config.interrupt {
+            handle.attach(&interrupt, &shared);
+        }
         Engine {
             origin,
             config,
-            interrupt: Arc::new(AtomicBool::new(false)),
-            shared: Arc::new(IoShared::default()),
+            interrupt,
+            shared,
             always: Arc::default(),
             gc_stats: GcStats::default(),
             root: OnceLock::new(),
@@ -927,10 +967,6 @@ impl Engine {
         let c = self.compile_now(&name, &source, &root, Some(path.as_ref()), true)?;
         self.recycle(c.program, c.snapshot);
         Ok(c.lints.unwrap_or_default())
-    }
-
-    pub fn interrupt_handle(&self) -> InterruptHandle {
-        InterruptHandle { flag: self.interrupt.clone(), shared: self.shared.clone() }
     }
 
     pub(crate) fn config(&self) -> &Config {
@@ -1814,8 +1850,8 @@ mod offload_tests {
         let r = rt().block_on(engine.run_source("main.sand", "import hung\nhung.hang()"));
         assert!(matches!(r, Err(Error::Limit(LimitKind::WallTime))), "{r:?}");
 
-        let mut engine = Engine::new(config());
-        let handle = engine.interrupt_handle();
+        let handle = InterruptHandle::new();
+        let mut engine = Engine::new(config().interrupt(handle.clone()));
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(50));
             handle.interrupt();

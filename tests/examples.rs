@@ -4,7 +4,7 @@ mod common;
 
 use common::{HttpResponse, TempDir, http_server, literal_path, rt};
 use parking_lot::Mutex;
-use sandlang::engine::{Config, Engine, Error, MemorySink};
+use sandlang::engine::{Config, Engine, Error, InterruptHandle, MemorySink};
 use sandlang::policy::rules::{RulePolicy, Transports};
 use sandlang::policy::{Capability, Decision};
 use std::collections::BTreeMap;
@@ -313,9 +313,9 @@ fn tcp_chat_server() {
     let out = MemorySink::new();
     let err = MemorySink::new();
     let policy = RulePolicy::standard().allow_listen("127.0.0.1:0".parse().unwrap());
+    let interrupt = InterruptHandle::new();
     let config = Config::new().policy(policy).stdout(out.clone()).stderr(err.clone()).args(vec!["0".into()]);
-    let mut engine = Engine::new(config);
-    let interrupt = engine.interrupt_handle();
+    let mut engine = Engine::new(config.interrupt(interrupt.clone()));
     let server = std::thread::spawn(move || rt().block_on(engine.run_file(example("chat_server.sand"))));
 
     let start = Instant::now();
