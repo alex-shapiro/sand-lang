@@ -285,7 +285,7 @@ impl Session {
     /// The instruction, CPU-time, and output limits apply to this call, while
     /// `max_wall_time` is ignored. If a task needs a permission prompt, the
     /// session pauses script execution and asks the prompter after `until`
-    /// completes so that prompts do not compete with terminal input.
+    /// completes so that the front end has exclusive access to terminal input.
     ///
     /// If a task fails with an error or exceeds a limit, the session cancels
     /// all tasks, passes the error to `on_error`, and continues awaiting

@@ -1870,10 +1870,9 @@ distinct error variants that scripts cannot catch.
 The host can also stop an active engine or session call from any thread with an
 `InterruptHandle`. The host creates a handle with `InterruptHandle::new()` and
 passes it to `Config::interrupt`. Calling `InterruptHandle::interrupt()` stops
-compilation, bytecode execution, long-running library functions, I/O waits, and
-permission prompts in every engine or session configured with that handle or a
-clone of it. An engine or session ignores calls to `interrupt()` that occur
-before a call starts.
+compilation, execution, and host waits in every engine or session configured
+with that handle or a clone of it. An engine or session ignores calls to
+`interrupt()` that occur before a call starts.
 
 ### 15.2 Fuel
 

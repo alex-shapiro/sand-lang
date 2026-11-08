@@ -73,10 +73,10 @@ The host cannot rely on engine limits, stability, or control.
 - [ ] ❓ _Embedding._ **Decide whether an interrupt before a call starts should
       stop that call.** `InterruptHandle::interrupt` sets the interrupt flags
       of active calls only. Each call creates a new flag at the first poll of
-      its future. On the web, `engine.run(src); engine.interrupt();` does not
-      stop the run because the future has not been polled yet. A host that
-      creates an engine per job also cannot cancel a job while the job is in
-      setup or in a queue. Options:
+      its future. On the web, `engine.run(src); engine.interrupt();` leaves the
+      run active because `engine.run` polls the future asynchronously. A host
+      with an engine per job also cannot cancel a queued job before `run`
+      starts. Options:
       - Keep this behavior. Optionally create the interrupt flag before
         returning the future so that an immediate interrupt stops the call.
       - Make `InterruptHandle` sticky and add `InterruptHandle::reset()`.
@@ -105,8 +105,8 @@ The host cannot rely on engine limits, stability, or control.
       and `Fs::read_source` in `Engine::read_main`, as module imports do.
       `Engine::read_main` currently reads the entire file on the caller's
       thread before checking `max_source_bytes`. Offloading the bounded read
-      lets `max_source_bytes`, `max_wall_time`, and interrupts stop a read
-      from a large file, a FIFO, or a hung mount.
+      enforces `max_source_bytes`, `max_wall_time`, and interrupts while
+      reading a large file, a FIFO, or a hung mount.
 
 ## Tier 3: ordinary scripts
 

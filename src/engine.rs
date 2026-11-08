@@ -309,8 +309,8 @@ impl Config {
         }
     }
 
-    /// Attaches an [`InterruptHandle`] that can stop active calls on the
-    /// engine or session built from this configuration.
+    /// Sets the [`InterruptHandle`] used to stop active calls on the engine or
+    /// session built from this configuration.
     pub fn interrupt(mut self, handle: InterruptHandle) -> Self {
         self.interrupt = Some(handle);
         self
@@ -496,7 +496,7 @@ impl Config {
     }
 }
 
-/// A thread-safe handle that stops active calls on engines and sessions
+/// A thread-safe handle for stopping active calls on engines and sessions
 /// configured with [`Config::interrupt`].
 #[derive(Clone, Default)]
 pub struct InterruptHandle {
@@ -552,11 +552,11 @@ impl InterruptHandle {
     /// Stops active calls on every engine and session configured with this
     /// handle.
     ///
-    /// Active compilation, check, lint, evaluation, and execution calls return
-    /// [`Error::Interrupted`]. In [`Session::run_tasks_until`], an interrupt
-    /// cancels the background tasks, passes [`Error::Interrupted`] to
-    /// `on_error`, and continues waiting for `until`. An engine or session
-    /// ignores calls to `interrupt()` that occur before a call starts.
+    /// Active engine and session calls return [`Error::Interrupted`]. As an
+    /// exception, [`Session::run_tasks_until`] cancels the background tasks,
+    /// passes [`Error::Interrupted`] to `on_error`, and continues waiting for
+    /// `until`. An engine or session ignores calls to `interrupt()` that occur
+    /// before a call starts.
     ///
     /// [`Session::run_tasks_until`]: crate::session::Session::run_tasks_until
     pub fn interrupt(&self) {
@@ -1385,7 +1385,7 @@ impl Engine {
     }
 
     /// Loads, checks, and compiles `main_source` and its imports for `call`.
-    /// `main_path` is the file path of the main module when compiling a file.
+    /// `main_path` is `Some` if the main module was loaded from a file.
     pub(crate) async fn compile(
         &self,
         call: &CallInterrupt,
@@ -1857,8 +1857,8 @@ mod registry_tests {
         let host = snap.program.protos.iter().find(|p| p.name == "doubled_total").expect("doubled_total is compiled").code.clone();
         let script = |optimize: bool| {
             let engine = Engine::new(Config::new().optimize(optimize));
-            let c = engine.compile_now(&engine.begin_call(), "main.sand", src, Path::new("."), None, false).unwrap();
-            let proto = c.program.protos.iter().find(|p| p.name == "doubled_total").expect("doubled_total is compiled");
+            let compiled = engine.compile_now(&engine.begin_call(), "main.sand", src, Path::new("."), None, false).unwrap();
+            let proto = compiled.program.protos.iter().find(|p| p.name == "doubled_total").expect("doubled_total is compiled");
             proto.code.clone()
         };
         let (fast, slow) = (script(true), script(false));
