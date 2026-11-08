@@ -733,7 +733,6 @@ impl Vm {
     /// Starts a new run of a session VM in `call`, which must use the I/O
     /// state of the VM. Limits other than memory apply to each run.
     pub(crate) fn begin_session_run(&mut self, call: &crate::engine::CallInterrupt) {
-        debug_assert!(Arc::ptr_eq(&call.io, &self.io.shared));
         self.meter.reset(call.flag.clone());
         self.host.output_bytes = 0;
         self.host.interrupt = call.clone();

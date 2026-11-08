@@ -395,7 +395,7 @@ impl Session {
     /// Starts a public call: interrupts that come from now on stop it.
     fn begin_call(&mut self) {
         self.was_reset = false;
-        self.call = self.engine.begin_call(self.call.io.clone());
+        self.call = self.engine.begin_call_with_io(self.call.io.clone());
     }
 
     /// Makes sure the session is started and its standard modules initialized.

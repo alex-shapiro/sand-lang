@@ -500,7 +500,17 @@ impl Config {
 /// hold this handle (see [`Config::interrupt`]).
 #[derive(Clone, Default)]
 pub struct InterruptHandle {
-    targets: Arc<Mutex<Vec<InterruptTarget>>>,
+    targets: Arc<Mutex<InterruptTargets>>,
+}
+
+/// The calls that an [`InterruptHandle`] stops, with the targets of ended
+/// calls not yet removed.
+#[derive(Default)]
+struct InterruptTargets {
+    calls: Vec<InterruptTarget>,
+    /// The length at which the next attached call removes the targets of
+    /// ended calls.
+    cleanup_len: usize,
 }
 
 /// The interrupt flag and I/O waker of one call in progress that an
@@ -547,10 +557,14 @@ impl InterruptHandle {
 
     /// Stops the compilation or run in progress in each engine and session
     /// whose configuration holds this handle. The compilation or run fails
-    /// with [`Error::Interrupted`]. An engine or session ignores an interrupt
-    /// that comes before its next call, such as `run_source` or `eval`.
+    /// with [`Error::Interrupted`]. In [`Session::run_tasks_until`], the
+    /// interrupt cancels the tasks instead, and the call continues. An engine
+    /// or session ignores an interrupt that comes before its next call, such
+    /// as `run_source` or `eval`.
+    ///
+    /// [`Session::run_tasks_until`]: crate::session::Session::run_tasks_until
     pub fn interrupt(&self) {
-        let calls: Vec<_> = self.targets.lock().iter().filter_map(|t| Some((t.flag.upgrade()?, t.io.upgrade()?))).collect();
+        let calls: Vec<_> = self.targets.lock().calls.iter().filter_map(|t| Some((t.flag.upgrade()?, t.io.upgrade()?))).collect();
         for (flag, io) in calls {
             flag.store(true, Ordering::SeqCst);
             io.wake();
@@ -559,8 +573,11 @@ impl InterruptHandle {
 
     fn attach(&self, call: &CallInterrupt) {
         let mut targets = self.targets.lock();
-        targets.retain(|t| t.flag.strong_count() > 0);
-        targets.push(InterruptTarget { flag: Arc::downgrade(&call.flag), io: Arc::downgrade(&call.io) });
+        if targets.calls.len() >= targets.cleanup_len {
+            targets.calls.retain(|t| t.flag.strong_count() > 0);
+            targets.cleanup_len = 2 * targets.calls.len().max(4);
+        }
+        targets.calls.push(InterruptTarget { flag: Arc::downgrade(&call.flag), io: Arc::downgrade(&call.io) });
     }
 }
 
@@ -968,7 +985,7 @@ impl Engine {
     /// it. Compile errors are an [`Error::Compile`]; a lint that runs out of
     /// budget or time is an [`Error::Io`].
     pub fn lint_source(&self, name: &str, source: &str) -> Result<Vec<crate::lint::LintWarning>, Error> {
-        let call = self.begin_call(Arc::default());
+        let call = self.begin_call();
         let c = self.compile_now(&call, name, source, &self.source_root().1, None, true)?;
         self.recycle(c.program, c.snapshot);
         Ok(c.lints.unwrap_or_default())
@@ -976,7 +993,7 @@ impl Engine {
 
     /// Lints a file and its imports, like [`Engine::lint_source`].
     pub fn lint_file(&self, path: impl AsRef<Path>) -> Result<Vec<crate::lint::LintWarning>, Error> {
-        let call = self.begin_call(Arc::default());
+        let call = self.begin_call();
         let (name, source, root) = self.read_main(path.as_ref())?;
         let c = self.compile_now(&call, &name, &source, &root, Some(path.as_ref()), true)?;
         self.recycle(c.program, c.snapshot);
@@ -995,10 +1012,15 @@ impl Engine {
         &self.config.host_modules.0
     }
 
-    /// The interrupt state of a call that starts now, with `io` as the
-    /// waker of its waits. The [`InterruptHandle`] of the configuration
-    /// stops the call until it ends.
-    pub(crate) fn begin_call(&self, io: Arc<IoShared>) -> CallInterrupt {
+    /// The interrupt state of a call that starts now. The
+    /// [`InterruptHandle`] of the configuration stops the call until it ends.
+    pub(crate) fn begin_call(&self) -> CallInterrupt {
+        self.begin_call_with_io(Arc::default())
+    }
+
+    /// Like [`Engine::begin_call`], with `io` as the waker of the waits of
+    /// the call.
+    pub(crate) fn begin_call_with_io(&self, io: Arc<IoShared>) -> CallInterrupt {
         let call = CallInterrupt { flag: Arc::default(), io };
         if let Some(handle) = &self.config.interrupt {
             handle.attach(&call);
@@ -1023,7 +1045,7 @@ impl Engine {
     /// Type checks a source without running it. Imports the policy would
     /// prompt for are denied.
     pub fn check_source(&self, name: &str, source: &str) -> Result<(), Error> {
-        let call = self.begin_call(Arc::default());
+        let call = self.begin_call();
         let c = self.compile_now(&call, name, source, &self.source_root().1, None, false)?;
         self.recycle(c.program, c.snapshot);
         Ok(())
@@ -1031,7 +1053,7 @@ impl Engine {
 
     /// Type checks a file and its imports, like [`Engine::check_source`].
     pub fn check_file(&self, path: impl AsRef<Path>) -> Result<(), Error> {
-        let call = self.begin_call(Arc::default());
+        let call = self.begin_call();
         let (name, source, root) = self.read_main(path.as_ref())?;
         let c = self.compile_now(&call, &name, &source, &root, Some(path.as_ref()), false)?;
         self.recycle(c.program, c.snapshot);
@@ -1085,7 +1107,7 @@ impl Engine {
     }
 
     async fn run_source_inner(&mut self, name: &str, source: &str) -> Result<Outcome, Error> {
-        let call = self.begin_call(Arc::default());
+        let call = self.begin_call();
         let (compiled, cwd) = self.compile_main_source(&call, name, source).await?;
         self.execute(&call, compiled, cwd).await
     }
@@ -1095,7 +1117,7 @@ impl Engine {
     }
 
     async fn run_file_inner(&mut self, path: &Path) -> Result<Outcome, Error> {
-        let call = self.begin_call(Arc::default());
+        let call = self.begin_call();
         let (compiled, cwd) = self.compile_main_file(&call, path).await?;
         self.execute(&call, compiled, cwd).await
     }
@@ -1106,7 +1128,7 @@ impl Engine {
     /// as [`Engine::run_source`] does.
     pub async fn compile_source(&self, name: &str, source: &str) -> Result<CompiledProgram, Error> {
         crate::unwind::guard(async {
-            let call = self.begin_call(Arc::default());
+            let call = self.begin_call();
             let (compiled, _) = self.compile_main_source(&call, name, source).await?;
             Ok(compiled.into_program())
         })
@@ -1119,7 +1141,7 @@ impl Engine {
     /// as [`Engine::run_file`] does.
     pub async fn compile_file(&self, path: impl AsRef<Path>) -> Result<CompiledProgram, Error> {
         crate::unwind::guard(async {
-            let call = self.begin_call(Arc::default());
+            let call = self.begin_call();
             let (compiled, _) = self.compile_main_file(&call, path.as_ref()).await?;
             Ok(compiled.into_program())
         })
@@ -1135,7 +1157,7 @@ impl Engine {
     /// Each run starts with fresh globals. The engine measures resource limits
     /// from the start of the run.
     pub async fn run_program(&mut self, program: &CompiledProgram) -> Result<Outcome, Error> {
-        let call = self.begin_call(Arc::default());
+        let call = self.begin_call();
         let compiled = Compiled {
             program: program.program.clone(),
             host_modules: program.host_modules.clone(),
@@ -1171,7 +1193,7 @@ impl Engine {
     }
 
     async fn run_tests_inner(&mut self, path: &Path) -> Result<TestReport, Error> {
-        let call = self.begin_call(Arc::default());
+        let call = self.begin_call();
         let (compiled, cwd) = self.compile_main_file(&call, path).await?;
         let prog = compiled.program;
         // The wall-time limit bounds the whole test run.
@@ -1315,29 +1337,31 @@ impl Engine {
     // Loading and compiling
 
     /// Checks `path` against the import policy and prompts if `d.prompt` is
-    /// true. Returns `None` if the call of `d` is interrupted during the
-    /// prompt.
-    async fn check_import(&self, path: &Path, d: &Discovery<'_>) -> Option<Result<bool, &'static str>> {
+    /// true.
+    async fn check_import(&self, path: &Path, d: &Discovery<'_>) -> ImportDecision {
         let cap = Capability::Import(path.to_path_buf());
+        let decided = |allowed| if allowed { ImportDecision::Allowed } else { ImportDecision::Denied };
         if let Some(&allowed) = self.always.lock().get(&cap) {
-            return Some(Ok(allowed));
+            return decided(allowed);
         }
-        Some(match self.config.policy.check_normalized_in(&cap, self.config.fs.space()) {
-            Decision::Allow => Ok(true),
-            Decision::Deny => Ok(false),
+        match self.config.policy.check_normalized_in(&cap, self.config.fs.space()) {
+            Decision::Allow => ImportDecision::Allowed,
+            Decision::Deny => ImportDecision::Denied,
             Decision::Prompt => match &self.config.prompter {
                 Some(p) if d.prompt => {
-                    let answer = d.interrupt.unless_interrupted(p.prompt(cap.clone())).await?;
+                    let Some(answer) = d.interrupt.unless_interrupted(p.prompt(cap.clone())).await else {
+                        return ImportDecision::Interrupted;
+                    };
                     let allowed = matches!(answer, PromptAnswer::AllowOnce | PromptAnswer::AllowAlways);
                     if matches!(answer, PromptAnswer::AllowAlways | PromptAnswer::DenyAlways) {
                         self.always.lock().insert(cap, allowed);
                     }
-                    Ok(allowed)
+                    decided(allowed)
                 }
-                Some(_) => Err("cannot prompt during check"),
-                None => Err("a prompter is not configured"),
+                Some(_) => ImportDecision::Unprompted("cannot prompt during check"),
+                None => ImportDecision::Unprompted("a prompter is not configured"),
             },
-        })
+        }
     }
 
     fn format_unprompted_import_reason(&self, path: &Path, why: &str) -> String {
@@ -1603,10 +1627,15 @@ impl Engine {
                 }
             }
             let asked = self.config.clock.now();
-            let Some(allowed) = self.check_import(&target, d).await else { return Some(Error::Interrupted) };
+            let decision = self.check_import(&target, d).await;
             *prompted += self.config.clock.now().saturating_duration_since(asked);
-            if allowed != Ok(true) {
-                let hint = allowed.err().map(|why| format!("; {}", self.format_unprompted_import_reason(&target, why))).unwrap_or_default();
+            let hint = match decision {
+                ImportDecision::Allowed => None,
+                ImportDecision::Denied => Some(String::new()),
+                ImportDecision::Unprompted(why) => Some(format!("; {}", self.format_unprompted_import_reason(&target, why))),
+                ImportDecision::Interrupted => return Some(Error::Interrupted),
+            };
+            if let Some(hint) = hint {
                 errors.push(Diag::error(span, format!("cannot import `{import_label}`: permission denied{hint}")));
                 // Stop after a denied import to avoid prompting for remaining imports.
                 break;
@@ -1714,6 +1743,17 @@ pub(crate) struct Discovery<'a> {
     pub interrupt: &'a CallInterrupt,
 }
 
+/// The result of [`Engine::check_import`].
+enum ImportDecision {
+    Allowed,
+    Denied,
+    /// The policy requires a prompt that the call cannot ask, for the reason
+    /// given.
+    Unprompted(&'static str),
+    /// The call was interrupted during the prompt.
+    Interrupted,
+}
+
 /// Module discovery stops after this many errors (they are all reported).
 const MAX_DISCOVERY_ERRORS: usize = 100;
 
@@ -1811,7 +1851,7 @@ mod registry_tests {
         let host = snap.program.protos.iter().find(|p| p.name == "doubled_total").expect("doubled_total is compiled").code.clone();
         let script = |optimize: bool| {
             let engine = Engine::new(Config::new().optimize(optimize));
-            let c = engine.compile_now(&engine.begin_call(Arc::default()), "main.sand", src, Path::new("."), None, false).unwrap();
+            let c = engine.compile_now(&engine.begin_call(), "main.sand", src, Path::new("."), None, false).unwrap();
             let proto = c.program.protos.iter().find(|p| p.name == "doubled_total").expect("doubled_total is compiled");
             proto.code.clone()
         };
