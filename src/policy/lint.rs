@@ -411,14 +411,14 @@ impl<'a> PathRules<'a> {
     /// address rule meets the rules that it meets at an IP literal or a
     /// `localhost` name, and also the address rules of the other kind. So a
     /// broader rule can replace `i` only if no rule of the other kind can
-    /// change the result. A rule of the same kind and rank can always replace it.
+    /// change the result. A rule of the same kind, rank, and path can always replace it.
     fn preserves_address_resolution(&self, i: &PathRule, subsuming: &[usize]) -> bool {
         let Some(kind) = i.address_kind() else { return true };
         let others = &self.address_decisions[1 - kind as usize];
         let no_rival = others.iter().all(|&d| d == i.decision && d != Decision::Prompt);
         subsuming.iter().all(|&j| {
             let Some(j) = self.get(j) else { return false };
-            let same_rank = j.address_kind() == Some(kind) && j.rank.host == i.rank.host;
+            let same_rank = j.address_kind() == Some(kind) && j.rank.spec(0) == i.rank.spec(0) && j.segs == i.segs;
             same_rank || (no_rival && (j.address_kind().is_some() || j.decision == Decision::Allow))
         })
     }
@@ -832,6 +832,14 @@ mod tests {
         assert_eq!(lint("allow net *\nallow net 8.8.8.8"), ["2:11: warning[redundant-rule]: `*` on line 1 already allows this"]);
         assert_eq!(lint("allow net *\nallow net localhost"), ["2:11: warning[redundant-rule]: `*` on line 1 already allows this"]);
         assert_eq!(lint("allow net *\ndeny net 127.0.0.0/8\nallow net localhost"), none, "the localhost rule outranks the prefix");
+        // A rule of the other address kind ranks between these rules by path or method at loopback addresses.
+        for policy in [
+            "deny http 127.0.0.1/a\ndeny http 127.0.0.1/**\nallow http localhost/*",
+            "deny http GET 127.0.0.1\ndeny net 127.0.0.1\nallow http GET localhost",
+            "allow http localhost/a\nallow http localhost/**\ndeny http 127.0.0.1/*",
+        ] {
+            assert_eq!(lint(policy), none, "{policy}");
+        }
         assert_eq!(lint("allow net plaintext *\nallow net localhost"), none);
         assert_eq!(
             lint("allow net *.localhost\nallow net a.localhost:80\nallow net 127.0.0.0/8\nallow net 127.0.0.0/16"),
@@ -943,6 +951,20 @@ mod tests {
             (verb.clone(), transport(), methods, hosts, port(), path)
                 .prop_map(|(v, t, m, h, port, p)| format!("{v} http {t}{m}{h}{port}{p}")),
             (verb, transport(), net_hosts, port()).prop_map(|(v, t, h, port)| format!("{v} net {t}{h}{port}")),
+        ]
+    }
+
+    /// `http` and `net` rule lines for only the hosts that meet at loopback addresses in
+    /// resolved-address checks, with few paths and methods so that their ranks interleave.
+    fn loopback_rule_line() -> impl Strategy<Value = String> {
+        let verb = || prop::sample::select(vec!["allow", "deny", "prompt"]);
+        let hosts = prop::sample::select(vec!["*", "localhost", "*.localhost", "127.0.0.1", "[::1]"]);
+        let net_hosts = prop::sample::select(vec!["*", "localhost", "127.0.0.1", "127.0.0.0/8", "[::1]"]);
+        let methods = prop::sample::select(vec!["", "GET "]);
+        let path = prop::sample::select(vec!["", "/a", "/*", "/**"]);
+        prop_oneof![
+            3 => (verb(), methods, hosts, path).prop_map(|(v, m, h, p)| format!("{v} http tls plaintext {m}{h}{p}")),
+            1 => (verb(), net_hosts).prop_map(|(v, h)| format!("{v} net tls plaintext {h}")),
         ]
     }
 
@@ -1099,6 +1121,44 @@ mod tests {
         hosts.iter().flat_map(|h| ports.iter().map(move |&p| (h.clone(), p))).collect()
     }
 
+    /// Asserts that deleting the rules that the linter reports does not change any decision.
+    fn check_reported_rules_are_not_needed(lines: &[String]) -> Result<(), TestCaseError> {
+        let (base, home) = (Path::new("/base"), Some(Path::new("/home/me")));
+        let text = |lines: &[String]| lines.join("\n") + SETS;
+        let policy = |lines: &[String]| PolicyFile::parse(&text(lines), base, home).unwrap().rules;
+        let with = policy(lines);
+        let reported: Vec<usize> = lint_policy(&text(lines), base, home)
+            .unwrap()
+            .iter()
+            .filter(|w| w.code == "redundant-rule" || w.code == "overridden-rule")
+            .map(|w| w.line - 1)
+            .collect();
+        let removals = reported.iter().map(|&line| vec![line]).chain(std::iter::once(reported.clone()));
+        for removed in removals {
+            let rest: Vec<String> = lines.iter().enumerate().filter(|(i, _)| !removed.contains(i)).map(|(_, l)| l.clone()).collect();
+            let without = policy(&rest);
+            for cap in probes() {
+                let (a, b) = (with.check_normalized_in(cap, PathSpace::Memory), without.check_normalized_in(cap, PathSpace::Memory));
+                prop_assert_eq!(a, b, "{}\nwithout lines {:?}: {}", text(lines), removed.iter().map(|l| l + 1).collect::<Vec<_>>(), cap);
+            }
+            for (request, addr) in
+                resolutions().iter().filter(|(r, _)| with.check_normalized_in(r, PathSpace::Memory) != crate::policy::Decision::Deny)
+            {
+                let (a, b) = (with.check_resolved(request, *addr), without.check_resolved(request, *addr));
+                prop_assert_eq!(
+                    a,
+                    b,
+                    "{}\nwithout lines {:?}: {} at {}",
+                    text(lines),
+                    removed.iter().map(|l| l + 1).collect::<Vec<_>>(),
+                    request,
+                    addr
+                );
+            }
+        }
+        Ok(())
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(512))]
 
@@ -1106,29 +1166,14 @@ mod tests {
         fn reported_rules_are_not_needed(
             lines in prop::collection::vec(rule_line(), 1..9),
         ) {
-            let (base, home) = (Path::new("/base"), Some(Path::new("/home/me")));
-            let text = |lines: &[String]| lines.join("\n") + SETS;
-            let policy = |lines: &[String]| PolicyFile::parse(&text(lines), base, home).unwrap().rules;
-            let with = policy(&lines);
-            let reported: Vec<usize> = lint_policy(&text(&lines), base, home)
-                .unwrap()
-                .iter()
-                .filter(|w| w.code == "redundant-rule" || w.code == "overridden-rule")
-                .map(|w| w.line - 1)
-                .collect();
-            let removals = reported.iter().map(|&line| vec![line]).chain(std::iter::once(reported.clone()));
-            for removed in removals {
-                let rest: Vec<String> = lines.iter().enumerate().filter(|(i, _)| !removed.contains(i)).map(|(_, l)| l.clone()).collect();
-                let without = policy(&rest);
-                for cap in probes() {
-                    let (a, b) = (with.check_normalized_in(cap, PathSpace::Memory), without.check_normalized_in(cap, PathSpace::Memory));
-                    prop_assert_eq!(a, b, "{}\nwithout lines {:?}: {}", text(&lines), removed.iter().map(|l| l + 1).collect::<Vec<_>>(), cap);
-                }
-                for (request, addr) in resolutions().iter().filter(|(r, _)| with.check_normalized_in(r, PathSpace::Memory) != crate::policy::Decision::Deny) {
-                    let (a, b) = (with.check_resolved(request, *addr), without.check_resolved(request, *addr));
-                    prop_assert_eq!(a, b, "{}\nwithout lines {:?}: {} at {}", text(&lines), removed.iter().map(|l| l + 1).collect::<Vec<_>>(), request, addr);
-                }
-            }
+            check_reported_rules_are_not_needed(&lines)?;
+        }
+
+        #[test]
+        fn reported_rules_are_not_needed_near_loopback(
+            lines in prop::collection::vec(loopback_rule_line(), 1..6),
+        ) {
+            check_reported_rules_are_not_needed(&lines)?;
         }
 
         #[test]
