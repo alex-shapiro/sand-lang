@@ -1685,15 +1685,18 @@ This two-stage check prevents DNS rebinding against denied IP ranges. For
 example, under `allow net plaintext *` and `deny net 10.0.0.0/8`, a request to
 `http://evil.example/` fails if DNS returns `10.0.0.5`. A hostname rule does not
 override an address rule. To connect to `10.0.0.5` through `db.internal`, allow
-both, as in `allow net db.internal 10.0.0.5`.
+both, as in `allow net db.internal 10.0.0.5`. The address rule applies to every
+hostname that stage 1 allows, so under `allow net *`, DNS can point any name at
+`10.0.0.5`.
 `sandlang::policy::net::is_private_address` reports whether an IP address belongs to
 a private, loopback, link-local, or other non-public range.
 `RulePolicy::deny_private_net` adds a `deny net` rule for `localhost` and for
 each of these ranges. A more specific address rule overrides them, such as
-`allow net localhost:8080` or `allow net 10.0.0.5`. A hostname rule such as
-`allow net api.example.com` does not, so DNS cannot point an allowed name at a
-private address. In a `with_defaults` tier, the rules do not apply to a request
-that a primary rule allows.
+`allow net 10.0.0.5`. A hostname rule such as `allow net api.example.com` does
+not, so DNS cannot point an allowed name at a private address. Hostname rules do
+not match IP literals, so allow a local server under each spelling, as in
+`allow net localhost:8080 127.0.0.1:8080 [::1]:8080`. In a `with_defaults` tier,
+the rules do not apply to a request that a primary rule matches.
 
 ### 14.7 Policy files
 
@@ -1809,10 +1812,8 @@ policy file for four warnings:
   destination that a `deny http` or `prompt http` rule restricts.
 - `unused-set`: a `let` set is unused.
 
-If an IP address rule ranks between a domain wildcard and an exact hostname
-`allow` rule, the exact hostname rule overrides the IP address rule during stage
-2 in §14.6. The linter therefore keeps the exact hostname rule without a
-`redundant-rule` warning.
+The linter keeps an address rule if deleting it can change a resolved-address
+check (§14.6).
 
 `sandlang::policy::file::rule_for(capability, allow)` formats a persistent `allow` or
 `deny` rule line for a promptable `Capability`, such as `allow read /data/a.txt`
