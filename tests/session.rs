@@ -887,6 +887,37 @@ fn exit_in_a_task_between_inputs() {
 
 #[cfg(feature = "os")]
 #[test]
+fn interrupt_stops_a_prompt_between_inputs() {
+    let dir = TempDir::new("session-idle-prompt-interrupt");
+    std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
+    let (asked_tx, asked_rx) = std::sync::mpsc::channel();
+    let asked_tx = std::sync::Mutex::new(asked_tx);
+    let prompter = move |_: Capability| -> sandlang::policy::PromptFuture {
+        let _ = asked_tx.lock().unwrap().send(());
+        Box::pin(std::future::pending())
+    };
+    let handle = InterruptHandle::new();
+    let config = Config::new().policy(RulePolicy::standard()).prompter(prompter).cwd(dir.path()).module_root(dir.path());
+    let mut r = Repl::with(config.interrupt(handle.clone()));
+    r.ok("import fs");
+    r.ok("let t = spawn { task.sleep(10ms)\nfs.read_text(\"a.txt\") }");
+    let interrupter = std::thread::spawn(move || {
+        asked_rx.recv_timeout(Duration::from_secs(10)).expect("the prompter was not asked");
+        handle.interrupt();
+    });
+    let input = async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        "the input"
+    };
+    let mut errors = Vec::new();
+    let got = r.rt.block_on(r.session.run_tasks_until(input, |e| errors.push(e)));
+    interrupter.join().unwrap();
+    assert_eq!(got, Some("the input"));
+    assert!(matches!(errors[..], [Error::Interrupted]), "{errors:?}");
+}
+
+#[cfg(feature = "os")]
+#[test]
 fn prompts_between_inputs_wait_for_the_input() {
     let dir = TempDir::new("session-idle-prompt");
     std::fs::write(dir.path().join("a.txt"), "hello").unwrap();

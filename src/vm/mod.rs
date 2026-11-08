@@ -729,6 +729,14 @@ impl Vm {
         self.host.denies_once.clear();
     }
 
+    /// Starts a new run of a session VM that `interrupt` stops. Limits
+    /// other than memory apply to each run.
+    pub(crate) fn begin_session_run(&mut self, interrupt: Arc<AtomicBool>) {
+        self.meter.reset(interrupt.clone());
+        self.host.output_bytes = 0;
+        self.host.interrupt = interrupt;
+    }
+
     /// Frees the fiber of the main task after it finished, leaving other
     /// tasks to run (REPL sessions).
     pub fn release_main(&mut self) {

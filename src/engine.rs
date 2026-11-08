@@ -503,11 +503,31 @@ pub struct InterruptHandle {
     targets: Arc<Mutex<Vec<InterruptTarget>>>,
 }
 
-/// The interrupt flag and I/O waker of one engine that an
+/// The interrupt flag and I/O waker of one call in progress that an
 /// [`InterruptHandle`] stops.
 struct InterruptTarget {
     flag: Weak<AtomicBool>,
     io: Weak<IoShared>,
+}
+
+/// The interrupt state of one engine or session call: the flag that the
+/// [`InterruptHandle`] of the configuration sets, and the I/O state whose
+/// waker the handle wakes.
+#[derive(Clone, Default)]
+pub(crate) struct CallInterrupt {
+    pub flag: Arc<AtomicBool>,
+    pub io: Arc<IoShared>,
+}
+
+impl CallInterrupt {
+    pub fn is_set(&self) -> bool {
+        self.flag.load(Ordering::Relaxed)
+    }
+
+    /// Awaits `fut`, or returns `None` once the call is interrupted.
+    pub async fn unless_interrupted<T>(&self, fut: impl Future<Output = T>) -> Option<T> {
+        self.io.unless_interrupted(&self.flag, fut).await
+    }
 }
 
 impl InterruptHandle {
@@ -522,18 +542,17 @@ impl InterruptHandle {
     /// with [`Error::Interrupted`]. An engine or session ignores an interrupt
     /// that comes before its next call, such as `run_source` or `eval`.
     pub fn interrupt(&self) {
-        for target in self.targets.lock().iter() {
-            if let (Some(flag), Some(io)) = (target.flag.upgrade(), target.io.upgrade()) {
-                flag.store(true, Ordering::SeqCst);
-                io.wake();
-            }
+        let calls: Vec<_> = self.targets.lock().iter().filter_map(|t| Some((t.flag.upgrade()?, t.io.upgrade()?))).collect();
+        for (flag, io) in calls {
+            flag.store(true, Ordering::SeqCst);
+            io.wake();
         }
     }
 
-    fn attach(&self, flag: &Arc<AtomicBool>, io: &Arc<IoShared>) {
+    fn attach(&self, call: &CallInterrupt) {
         let mut targets = self.targets.lock();
         targets.retain(|t| t.flag.strong_count() > 0);
-        targets.push(InterruptTarget { flag: Arc::downgrade(flag), io: Arc::downgrade(io) });
+        targets.push(InterruptTarget { flag: Arc::downgrade(&call.flag), io: Arc::downgrade(&call.io) });
     }
 }
 
@@ -843,8 +862,6 @@ impl Registry {
 
 pub struct Engine {
     config: Config,
-    interrupt: Arc<AtomicBool>,
-    shared: Arc<IoShared>,
     /// "Always" prompt answers, remembered for the lifetime of the engine
     /// (SPEC 14.3): shared by import checks and every run (and VM).
     always: Always,
@@ -869,6 +886,8 @@ pub(crate) struct Compiled {
     /// Wall-time deadline for the run. If the run compiled the program, the
     /// deadline starts at compilation and excludes import prompts.
     pub deadline: Option<Instant>,
+    /// The interrupt state of the call that compiled the program, for its run.
+    pub interrupt: CallInterrupt,
     /// Base snapshot used to recycle `program` if the program does not define
     /// native modules.
     pub snapshot: Option<Arc<Snapshot>>,
@@ -900,20 +919,7 @@ impl Engine {
     /// Creates an engine with `config`.
     pub fn new(config: Config) -> Engine {
         let origin = config.clock.now();
-        let (interrupt, shared) = (Arc::new(AtomicBool::new(false)), Arc::new(IoShared::default()));
-        if let Some(handle) = &config.interrupt {
-            handle.attach(&interrupt, &shared);
-        }
-        Engine {
-            origin,
-            config,
-            interrupt,
-            shared,
-            always: Arc::default(),
-            gc_stats: GcStats::default(),
-            root: OnceLock::new(),
-            spare: Mutex::default(),
-        }
+        Engine { origin, config, always: Arc::default(), gc_stats: GcStats::default(), root: OnceLock::new(), spare: Mutex::default() }
     }
 
     /// Returns the sorted names of all registered standard and host modules.
@@ -981,10 +987,15 @@ impl Engine {
         &self.config.host_modules.0
     }
 
-    /// Forgets interrupts of earlier calls. Each public call clears the flag
-    /// once at its start, so that interrupts from then on stop the call.
-    pub(crate) fn clear_interrupt(&self) {
-        self.interrupt.store(false, Ordering::SeqCst);
+    /// The interrupt state of a call that starts now, with `io` as the
+    /// waker of its waits. The [`InterruptHandle`] of the configuration
+    /// stops the call until it ends.
+    pub(crate) fn begin_call(&self, io: Arc<IoShared>) -> CallInterrupt {
+        let call = CallInterrupt { flag: Arc::default(), io };
+        if let Some(handle) = &self.config.interrupt {
+            handle.attach(&call);
+        }
+        call
     }
 
     /// The point at which a run starting now (with its compilation)
@@ -993,11 +1004,12 @@ impl Engine {
         self.config.limits.max_wall_time.and_then(|t| self.config.clock.now().checked_add(t))
     }
 
-    /// A compile budget for a compilation that must end by `deadline`.
-    pub(crate) fn compile_budget(&self, deadline: Option<Instant>) -> Arc<CompileBudget> {
+    /// A compile budget for a compilation of `call` that must end by
+    /// `deadline`.
+    pub(crate) fn compile_budget(&self, deadline: Option<Instant>, call: &CallInterrupt) -> Arc<CompileBudget> {
         let limits = &self.config.limits;
         let deadline = deadline.map(|at| crate::platform::Deadline { at, clock: self.config.clock.clone() });
-        Arc::new(CompileBudget::new(limits.max_compile_fuel, deadline, Some(self.interrupt.clone())))
+        Arc::new(CompileBudget::new(limits.max_compile_fuel, deadline, Some(call.flag.clone())))
     }
 
     /// Type checks a source without running it. Imports the policy would
@@ -1101,12 +1113,12 @@ impl Engine {
     /// Each run starts with fresh globals. The engine measures resource limits
     /// from the start of the run.
     pub async fn run_program(&mut self, program: &CompiledProgram) -> Result<Outcome, Error> {
-        self.clear_interrupt();
         let compiled = Compiled {
             program: program.program.clone(),
             host_modules: program.host_modules.clone(),
             lints: None,
             deadline: self.deadline(),
+            interrupt: self.begin_call(Arc::default()),
             snapshot: None,
         };
         let cwd = self.run_cwd(self.source_root().0.clone());
@@ -1143,7 +1155,7 @@ impl Engine {
         let mut deadline = compiled.deadline;
         let mut report = TestReport::default();
         for (tname, proto) in prog.tests.clone() {
-            let mut vm = self.new_vm(prog.clone(), &compiled.host_modules, cwd.clone(), true);
+            let mut vm = self.new_vm(prog.clone(), &compiled.host_modules, cwd.clone(), true, &compiled.interrupt);
             vm.deadline = deadline;
             let init = vm.run_main(prog.entry).await;
             let result = match init {
@@ -1187,8 +1199,9 @@ impl Engine {
         Ok((name, source, root))
     }
 
-    /// Creates a VM to execute `prog` with the native functions in `host_modules`.
-    pub(crate) fn new_vm(&self, prog: Arc<Program>, host_modules: &HostModules, cwd: PathBuf, quiet: bool) -> Vm {
+    /// Creates a VM to execute `prog` with the native functions in
+    /// `host_modules`, for the call that `call` stops.
+    pub(crate) fn new_vm(&self, prog: Arc<Program>, host_modules: &HostModules, cwd: PathBuf, quiet: bool, call: &CallInterrupt) -> Vm {
         let c = &self.config;
         let stdin = match &c.stdin {
             StdinConfig::None => None,
@@ -1214,7 +1227,7 @@ impl Engine {
             rng: Rng::new(c.seed.unwrap_or_else(entropy_seed)),
             log_level: c.log_level,
             log_sink: if quiet { Some(Arc::new(NullLogSink)) } else { c.log_sink.clone() },
-            interrupt: self.interrupt.clone(),
+            interrupt: call.flag.clone(),
             stream_decisions: [None; 2],
             #[cfg(feature = "os")]
             tls: c.tls.clone(),
@@ -1230,7 +1243,7 @@ impl Engine {
             time_zone: c.time_zone.as_ref().map(|z| z.zone().clone()),
         };
         let mut vm = Vm::new(prog, host_modules.0.natives.clone(), host);
-        vm.io = IoTable::with_shared(self.shared.clone());
+        vm.io = IoTable::with_shared(call.io.clone());
         if c.gc_stress {
             vm.heap.stress = true;
             vm.heap.next_gc = 0;
@@ -1251,7 +1264,7 @@ impl Engine {
                 }
             }
         }
-        let mut vm = self.new_vm(prog.clone(), &compiled.host_modules, cwd, false);
+        let mut vm = self.new_vm(prog.clone(), &compiled.host_modules, cwd, false, &compiled.interrupt);
         vm.deadline = compiled.deadline;
         let r = vm.run_main(prog.entry).await;
         let r = end_run(&mut vm, r).await;
@@ -1277,18 +1290,20 @@ impl Engine {
     // ------------------------------------------------------------------
     // Loading and compiling
 
-    /// Checks `path` against the import policy and prompts if `prompt` is true.
-    async fn check_import(&self, path: &Path, prompt: bool) -> Result<bool, &'static str> {
+    /// Checks `path` against the import policy and prompts if `d.prompt` is
+    /// true. Returns `None` if the call of `d` is interrupted during the
+    /// prompt.
+    async fn check_import(&self, path: &Path, d: &Discovery<'_>) -> Option<Result<bool, &'static str>> {
         let cap = Capability::Import(path.to_path_buf());
-        if let Some(&d) = self.always.lock().get(&cap) {
-            return Ok(d);
+        if let Some(&allowed) = self.always.lock().get(&cap) {
+            return Some(Ok(allowed));
         }
-        match self.config.policy.check_normalized_in(&cap, self.config.fs.space()) {
+        Some(match self.config.policy.check_normalized_in(&cap, self.config.fs.space()) {
             Decision::Allow => Ok(true),
             Decision::Deny => Ok(false),
             Decision::Prompt => match &self.config.prompter {
-                Some(p) if prompt => {
-                    let answer = p.prompt(cap.clone()).await;
+                Some(p) if d.prompt => {
+                    let answer = d.interrupt.unless_interrupted(p.prompt(cap.clone())).await?;
                     let allowed = matches!(answer, PromptAnswer::AllowOnce | PromptAnswer::AllowAlways);
                     if matches!(answer, PromptAnswer::AllowAlways | PromptAnswer::DenyAlways) {
                         self.always.lock().insert(cap, allowed);
@@ -1298,7 +1313,7 @@ impl Engine {
                 Some(_) => Err("cannot prompt during check"),
                 None => Err("a prompter is not configured"),
             },
-        }
+        })
     }
 
     fn format_unprompted_import_reason(&self, path: &Path, why: &str) -> String {
@@ -1337,7 +1352,7 @@ impl Engine {
         main_path: Option<&Path>,
         options: CompileOptions,
     ) -> Result<Compiled, Error> {
-        self.clear_interrupt();
+        let interrupt = self.begin_call(Arc::default());
         // Unless the full snapshot exists, compile on the core extended with
         // just the standard modules the program imports (`Registry::extended`).
         let mut snap = match self.registry().ready() {
@@ -1365,7 +1380,7 @@ impl Engine {
         let mut errors: Vec<Diag> = Vec::new();
         let mut prompted = Duration::ZERO;
         let deadline = self.deadline();
-        let discovery = Discovery { snap: &snap, root, deadline, prompt: options.prompt };
+        let discovery = Discovery { snap: &snap, root, deadline, prompt: options.prompt, interrupt: &interrupt };
         if let Some(stop) = self.discover(&discovery, &mut g, main, imports, main_key, &mut errors, &mut prompted).await {
             return Err(stop);
         }
@@ -1380,7 +1395,7 @@ impl Engine {
         let main_file = g.modules[main].file;
         // Time spent waiting for prompt answers does not count.
         let deadline = deadline.map(|d| d + prompted);
-        let budget = self.compile_budget(deadline);
+        let budget = self.compile_budget(deadline, &interrupt);
         let spare = match self.spare.lock().take() {
             Some((s, p)) if Arc::ptr_eq(&s, &snap) => Some(p),
             _ => None,
@@ -1390,7 +1405,7 @@ impl Engine {
         let (program, lints) =
             on_compile_stack(move || compile_program(&base, &mut g, &registry, &budget, main_file, options.lint, optimize, spare))?;
         let host_modules = self.config.host_modules.clone();
-        Ok(Compiled { program, host_modules, lints, deadline, snapshot: (!has_natives).then_some(snap) })
+        Ok(Compiled { program, host_modules, lints, deadline, interrupt, snapshot: (!has_natives).then_some(snap) })
     }
 
     /// Runs `job`, file system work for module discovery, on a worker
@@ -1410,7 +1425,7 @@ impl Engine {
         #[cfg(feature = "os")]
         {
             let check = || {
-                if self.interrupt.load(Ordering::Relaxed) {
+                if d.interrupt.is_set() {
                     return Err(Error::Interrupted);
                 }
                 if d.deadline.is_some_and(|t| self.config.clock.now() >= t + prompted) {
@@ -1454,7 +1469,7 @@ impl Engine {
         let mut path_stack: Vec<String> = vec![key];
         let mut stale_cache: HashMap<usize, bool> = HashMap::new();
         while let Some((mi, imports, pos)) = stack.pop() {
-            if self.interrupt.load(Ordering::Relaxed) {
+            if d.interrupt.is_set() {
                 return Some(Error::Interrupted);
             }
             if d.deadline.is_some_and(|t| self.config.clock.now() >= t + *prompted) {
@@ -1563,7 +1578,7 @@ impl Engine {
                 }
             }
             let asked = self.config.clock.now();
-            let allowed = self.check_import(&target, d.prompt).await;
+            let Some(allowed) = self.check_import(&target, d).await else { return Some(Error::Interrupted) };
             *prompted += self.config.clock.now().saturating_duration_since(asked);
             if allowed != Ok(true) {
                 let hint = allowed.err().map(|why| format!("; {}", self.format_unprompted_import_reason(&target, why))).unwrap_or_default();
@@ -1670,6 +1685,8 @@ pub(crate) struct Discovery<'a> {
     /// When the wall-time limit passes (plus the time spent on prompts).
     pub deadline: Option<Instant>,
     pub prompt: bool,
+    /// The interrupt state of the call that discovers the modules.
+    pub interrupt: &'a CallInterrupt,
 }
 
 /// Module discovery stops after this many errors (they are all reported).

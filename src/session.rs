@@ -12,7 +12,7 @@ use crate::check::budget::CompileBudget;
 use crate::check::{Checker, ModKind, ParsedModule};
 use crate::compile::{CompileInput, Incremental, ProgramMark, compile_more};
 use crate::diag::{Diag, FileId, Span};
-use crate::engine::{Config, Discovery, Engine, Error, Registry, TestReport, TestResult, on_compile_stack};
+use crate::engine::{CallInterrupt, Config, Discovery, Engine, Error, Registry, TestReport, TestResult, on_compile_stack};
 use crate::modules::{GraphMark, ModuleGraph, NativeInfo, Snapshot, budget_error, native_info};
 use crate::platform::Instant;
 use crate::policy::{Capability, PromptAnswer};
@@ -74,6 +74,8 @@ pub struct Session {
     was_reset: bool,
     /// The wall-time limit of each input (see [`Session::set_wall_time`]).
     wall_time: Option<std::time::Duration>,
+    /// The interrupt state of the current call.
+    call: CallInterrupt,
 }
 
 /// The suffix of the error message of a call that reset the session.
@@ -107,7 +109,8 @@ impl Session {
         let (root, normalized_root) = engine.source_root().clone();
         let cwd = engine.run_cwd(root);
         let wall_time = engine.config().limits.max_wall_time;
-        Session { engine, root: normalized_root, cwd, state: None, inputs: 0, exit_code: None, was_reset: false, wall_time }
+        let call = CallInterrupt::default();
+        Session { engine, root: normalized_root, cwd, state: None, inputs: 0, exit_code: None, was_reset: false, wall_time, call }
     }
 
     /// Checks, compiles and runs one input. Returns the debug form of its
@@ -156,7 +159,7 @@ impl Session {
 
     fn type_of_inner(&mut self, expr: &str) -> Result<String, Error> {
         let registry = self.engine.registry().clone();
-        let budget = self.engine.compile_budget(self.deadline());
+        let budget = self.engine.compile_budget(self.deadline(), &self.call);
         let st = self.state()?;
         let mark = st.graph.mark();
         let file = st.graph.sm.add("<type>", expr);
@@ -326,10 +329,16 @@ impl Session {
             && let Some(cap) = st.deferred_prompt.take()
         {
             let answer = match self.engine.config().prompter.clone() {
-                Some(p) => p.prompt(cap.clone()).await,
-                None => PromptAnswer::DenyOnce,
+                Some(p) => self.call.unless_interrupted(p.prompt(cap.clone())).await,
+                None => Some(PromptAnswer::DenyOnce),
             };
-            st.vm.apply_answer(cap, answer);
+            match answer {
+                Some(answer) => st.vm.apply_answer(cap, answer),
+                None => {
+                    st.vm.abandon_tasks();
+                    on_error(Error::Interrupted);
+                }
+            }
         }
         Some(output)
     }
@@ -386,7 +395,7 @@ impl Session {
     /// Starts a public call: interrupts that come from now on stop it.
     fn begin_call(&mut self) {
         self.was_reset = false;
-        self.engine.clear_interrupt();
+        self.call = self.engine.begin_call(self.call.io.clone());
     }
 
     /// Makes sure the session is started and its standard modules initialized.
@@ -420,7 +429,7 @@ impl Session {
         // The standard library's program; its entry initializes the prelude and `task`.
         let prog = snapshot.program.clone();
         let pending = Some(prog.entry);
-        let vm = self.engine.new_vm(Arc::new(prog), self.engine.host_modules(), self.cwd.clone(), false);
+        let vm = self.engine.new_vm(Arc::new(prog), self.engine.host_modules(), self.cwd.clone(), false, &self.call);
         let compiler = snapshot.compiler.clone();
         Ok(State { snapshot, graph, checker, compiler, vm, pending, loading: None, running: false, deferred_prompt: None })
     }
@@ -440,7 +449,7 @@ impl Session {
         deadline: Option<Instant>,
     ) -> Result<(u32, Option<TypeId>, bool, Option<Instant>), Error> {
         let max_source = self.engine.config().limits.max_source_bytes;
-        let Session { engine, root, state, .. } = self;
+        let Session { engine, root, state, call, .. } = self;
         let registry = engine.registry();
         let st = state.as_mut().expect("session not started");
         if let Some(mark) = st.loading.take() {
@@ -458,7 +467,7 @@ impl Session {
         let mut errors = Vec::new();
         st.loading = Some(mark);
         let mut prompted = std::time::Duration::ZERO;
-        let discovery = Discovery { snap: &st.snapshot, root, deadline, prompt: true };
+        let discovery = Discovery { snap: &st.snapshot, root, deadline, prompt: true, interrupt: call };
         let stop = engine.discover(&discovery, &mut st.graph, cell, imports, format!("input:{name}"), &mut errors, &mut prompted).await;
         st.loading = None;
         if let Some(e) = stop {
@@ -484,7 +493,7 @@ impl Session {
             compiler: st.compiler.clone(),
             snapshot: st.snapshot.clone(),
             registry: registry.clone(),
-            budget: engine.compile_budget(deadline),
+            budget: engine.compile_budget(deadline, call),
             optimize: engine.config().optimize,
             new_mods,
             cell,
@@ -522,13 +531,11 @@ impl Session {
     /// wall-time limit passing at `deadline`. Returns the debug form of its
     /// result if `show`. On failure, cancels all tasks.
     async fn run(&mut self, proto: u32, show: bool, deadline: Option<Instant>) -> Result<Option<String>, Error> {
-        let Session { state, exit_code, .. } = self;
+        let Session { state, exit_code, call, .. } = self;
         let st = state.as_mut().expect("session not started");
         st.recover();
         let vm = &mut st.vm;
-        // Limits other than memory apply to each input.
-        vm.meter.reset();
-        vm.host.output_bytes = 0;
+        vm.begin_session_run(call.flag.clone());
         vm.deadline = deadline;
         st.running = true;
         let r = vm.run_main(proto).await;
@@ -551,11 +558,10 @@ impl Session {
     /// none can run or one needs a permission prompt, which is deferred.
     /// Returns whether a task called `exit`.
     async fn run_idle(&mut self) -> Result<bool, Error> {
-        let Session { state, exit_code, .. } = self;
+        let Session { state, exit_code, call, .. } = self;
         let st = state.as_mut().expect("session not started");
         let vm = &mut st.vm;
-        vm.meter.reset();
-        vm.host.output_bytes = 0;
+        vm.begin_session_run(call.flag.clone());
         // Waiting for input may take any time.
         vm.deadline = None;
         let r = vm.drive(None).await;

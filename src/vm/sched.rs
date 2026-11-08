@@ -31,6 +31,20 @@ impl IoShared {
             *slot = Some(w.clone());
         }
     }
+
+    /// Awaits `fut`, or returns `None` once `interrupt` is set. An
+    /// interrupt handle that sets `interrupt` wakes this table.
+    pub async fn unless_interrupted<T>(&self, interrupt: &AtomicBool, fut: impl Future<Output = T>) -> Option<T> {
+        let mut fut = std::pin::pin!(fut);
+        std::future::poll_fn(|cx| {
+            self.set_waker(cx.waker());
+            if interrupt.load(Ordering::Relaxed) {
+                return Poll::Ready(None);
+            }
+            fut.as_mut().poll(cx).map(Some)
+        })
+        .await
+    }
 }
 
 /// Wakes the operation in a slot of an [`IoTable`]; a stale wake-up only
@@ -456,18 +470,8 @@ impl Vm {
                         let asked = timer.now;
                         let answer = match self.host.prompter.clone() {
                             Some(p) => {
-                                // A host interrupt stops the run while a prompt is pending.
-                                let mut prompt = p.prompt(cap.clone());
                                 let (interrupt, shared) = (self.host.interrupt.clone(), self.io.shared.clone());
-                                let answer = std::future::poll_fn(|cx| {
-                                    shared.set_waker(cx.waker());
-                                    if interrupt.load(Ordering::Relaxed) {
-                                        return Poll::Ready(None);
-                                    }
-                                    prompt.as_mut().poll(cx).map(Some)
-                                })
-                                .await;
-                                match answer {
+                                match shared.unless_interrupted(&interrupt, p.prompt(cap.clone())).await {
                                     Some(a) => a,
                                     None => return Err(Trap::Interrupted),
                                 }

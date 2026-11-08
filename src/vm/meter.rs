@@ -194,10 +194,12 @@ impl Meter {
         self.base.get().saturating_add(self.spent())
     }
 
-    /// Counts the fuel used from zero again (a new input of a REPL session).
-    pub(crate) fn reset(&self) {
+    /// Counts the fuel used from zero again, and checks `interrupt` from now
+    /// on (a new run of a REPL session).
+    pub(crate) fn reset(&mut self, interrupt: Arc<AtomicBool>) {
         self.base.set(0);
         self.slice.set(self.fuel.get());
+        self.interrupt = interrupt;
     }
 
     /// Charges `units` of fuel. Cheap; checks limits only at checkpoints.
@@ -411,10 +413,10 @@ mod tests {
         assert!(m.charge(1_000_000 - SLICE_FUEL as u64 - 1).is_ok(), "1,000,000 units used");
         assert!(matches!(m.charge(1).map_err(Ctl::into_kind), Err(CtlKind::Limit(LimitKind::Instructions))));
         // Charges between slices count too.
-        let m = Meter::new(Some(100), Arc::new(AtomicBool::new(false)), system());
+        let mut m = Meter::new(Some(100), Arc::new(AtomicBool::new(false)), system());
         assert!(m.charge(60).is_ok());
         assert_eq!(m.start_slice(None, None), 40);
-        m.reset();
+        m.reset(Arc::new(AtomicBool::new(false)));
         assert_eq!((m.used(), m.start_slice(None, None)), (0, 100));
     }
 

@@ -3252,20 +3252,23 @@ fn interrupt_from_another_thread() {
 }
 
 #[test]
-fn an_interrupt_stops_each_engine_that_holds_its_handle() {
+fn an_interrupt_stops_each_engine_and_session_that_holds_its_handle() {
     let handle = InterruptHandle::new();
     let (started_tx, started_rx) = std::sync::mpsc::channel();
-    let runs: Vec<_> = (0..2)
-        .map(|_| {
-            let mut m = NativeModule::new("signal");
-            let started_tx = started_tx.clone();
-            m.function("started", move || started_tx.send(()).unwrap());
-            let limits = Limits { max_wall_time: Some(Duration::from_secs(10)), ..Limits::default() };
-            let config = Config::new().limits(limits).host_modules(HostModules::new([m]).unwrap()).interrupt(handle.clone());
-            let mut engine = Engine::new(config);
-            std::thread::spawn(move || rt().block_on(engine.run_source("main.sand", "import signal\nsignal.started()\nwhile true {}")))
-        })
-        .collect();
+    let config = || {
+        let mut m = NativeModule::new("signal");
+        let started_tx = started_tx.clone();
+        m.function("started", move || started_tx.send(()).unwrap());
+        let limits = Limits { max_wall_time: Some(Duration::from_secs(10)), ..Limits::default() };
+        Config::new().limits(limits).host_modules(HostModules::new([m]).unwrap()).interrupt(handle.clone())
+    };
+    let source = "import signal\nsignal.started()\nwhile true {}";
+    let mut engine = Engine::new(config());
+    let mut session = Session::new(config());
+    let runs = [
+        std::thread::spawn(move || rt().block_on(engine.run_source("main.sand", source)).map(|_| ())),
+        std::thread::spawn(move || rt().block_on(session.eval(source)).map(|_| ())),
+    ];
     for _ in &runs {
         started_rx.recv().unwrap();
     }
@@ -3274,6 +3277,70 @@ fn an_interrupt_stops_each_engine_that_holds_its_handle() {
         let r = r.join().unwrap();
         assert!(matches!(r, Err(Error::Interrupted)), "{r:?}");
     }
+}
+
+#[cfg(feature = "os")]
+#[test]
+fn an_interrupt_survives_a_later_call_on_the_same_engine() {
+    let dir = TempDir::new("interruptoverlap");
+    dir.write("lib.sand", "pub let X = 1");
+    let main = dir.write("main.sand", "import \"./lib.sand\"\nprint(lib.X)");
+    let (asked_tx, asked_rx) = std::sync::mpsc::channel();
+    let asked_tx = Mutex::new(asked_tx);
+    let (release_tx, release_rx) = tokio::sync::watch::channel(false);
+    let handle = InterruptHandle::new();
+    let config = Config::new().custom_policy(prompt_for_imports()).interrupt(handle.clone()).prompter(move |_cap: Capability| {
+        let _ = asked_tx.lock().send(());
+        let mut release = release_rx.clone();
+        async move {
+            let _ = release.wait_for(|released| *released).await;
+            PromptAnswer::AllowOnce
+        }
+    });
+    let engine = Engine::new(config);
+    let r = std::thread::scope(|scope| {
+        let compiling = scope.spawn(|| rt().block_on(engine.compile_file(&main)).map(|_| ()));
+        asked_rx.recv_timeout(Duration::from_secs(10)).expect("the prompter was not asked");
+        handle.interrupt();
+        engine.check_source("main.sand", "print(1)").unwrap();
+        release_tx.send(true).unwrap();
+        compiling.join().unwrap()
+    });
+    assert!(matches!(r, Err(Error::Interrupted)), "{r:?}");
+}
+
+/// Runs `call` with a configuration whose import prompts never get an
+/// answer. Interrupts the call during its first prompt, and checks that the
+/// call fails with `Error::Interrupted`.
+fn assert_interrupt_stops_an_import_prompt(call: impl FnOnce(Config) -> Result<(), Error> + Send + 'static) {
+    let (asked_tx, asked_rx) = std::sync::mpsc::channel();
+    let asked_tx = Mutex::new(asked_tx);
+    let handle = InterruptHandle::new();
+    let config = Config::new().custom_policy(prompt_for_imports()).interrupt(handle.clone()).prompter(move |_cap: Capability| {
+        let _ = asked_tx.lock().send(());
+        std::future::pending::<PromptAnswer>()
+    });
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done_tx.send(call(config));
+    });
+    asked_rx.recv_timeout(Duration::from_secs(10)).expect("the prompter was not asked");
+    handle.interrupt();
+    let r = done_rx.recv_timeout(Duration::from_secs(10)).expect("the call did not stop after the interrupt");
+    assert!(matches!(r, Err(Error::Interrupted)), "{r:?}");
+}
+
+#[cfg(feature = "os")]
+#[test]
+fn interrupt_stops_a_compilation_waiting_for_an_import_prompt() {
+    let dir = TempDir::new("interruptimport");
+    dir.write("lib.sand", "pub let X = 1");
+    let main = dir.write("main.sand", "import \"./lib.sand\"\nprint(lib.X)");
+    assert_interrupt_stops_an_import_prompt(move |config| rt().block_on(Engine::new(config).run_file(&main)).map(|_| ()));
+    let root = dir.path().to_path_buf();
+    assert_interrupt_stops_an_import_prompt(move |config| {
+        rt().block_on(Session::new(config.module_root(root)).eval("import \"./lib.sand\"")).map(|_| ())
+    });
 }
 
 #[test]
