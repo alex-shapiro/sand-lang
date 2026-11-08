@@ -73,6 +73,9 @@ fn run_lints(main: &ParsedModule, checked: &CheckedProgram, budget: &CompileBudg
         budget,
     };
     l.module(&main.ast);
+    if budget.stopped().is_some() {
+        return vec![];
+    }
     l.fact_lints(main.file);
 
     let src = &*file.text;
@@ -569,9 +572,10 @@ impl<'a> Linter<'a> {
         let max_distance = (name.chars().count() / 3).max(1);
         def.variants()
             .iter()
+            .take_while(|_| self.budget.charge(1))
             .filter(|variant| variant.fields.is_empty())
             .map(|variant| self.checked.name(variant.name))
-            .take_while(|variant| self.budget.charge(1 + name.len() as u64 * variant.len() as u64))
+            .take_while(|variant| self.budget.charge(name.len() as u64 * variant.len() as u64))
             .map(|variant| (edit_distance(name, &variant.to_ascii_lowercase()), variant))
             .filter(|&(distance, _)| distance <= max_distance)
             .min_by_key(|&(distance, _)| distance)

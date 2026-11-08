@@ -2793,17 +2793,29 @@ impl Checker {
         true
     }
 
-    /// Emits an `argument-order` lint if positional argument or sub-pattern
-    /// `name` at index `i` matches a different field or parameter in `names`.
-    pub(crate) fn note_argument_order(&mut self, target_name: &str, names: &[&str], i: usize, name: &str, span: Span) {
-        if !self.linting() || names.get(i) == Some(&name) || !names.contains(&name) {
+    /// Emits an `argument-order` lint for each positional argument or
+    /// sub-pattern in `given`, as (index, name, span), whose name matches a
+    /// different field or parameter in `names`.
+    pub(crate) fn note_argument_order<'g>(
+        &mut self,
+        target_name: &str,
+        names: &[&str],
+        given: impl Iterator<Item = (usize, &'g str, Span)>,
+    ) {
+        if !self.linting() || !self.budget.charge(names.len() as u64) {
             return;
         }
-        let msg = format!(
-            "`{name}` is given for `{}` of {target_name}, which also has `{name}`; write `{}: {name}` if this is intended",
-            names[i], names[i]
-        );
-        self.lint.argument_order.push((span, msg));
+        let known_names: HashSet<&str> = names.iter().copied().collect();
+        for (i, name, span) in given {
+            if names.get(i) == Some(&name) || !known_names.contains(name) {
+                continue;
+            }
+            let msg = format!(
+                "`{name}` is given for `{}` of {target_name}, which also has `{name}`; write `{}: {name}` if this is intended",
+                names[i], names[i]
+            );
+            self.lint.argument_order.push((span, msg));
+        }
     }
 
     pub(crate) fn visible(&self, module: ModId, is_pub: bool) -> bool {

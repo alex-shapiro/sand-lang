@@ -315,13 +315,27 @@ fn the_linter_is_bounded() {
 
 #[test]
 fn variant_suggestions_are_charged_to_the_lint_budget() {
-    let variants: String = (0..4_000).map(|i| format!("    V{i}\n")).collect();
-    let bindings: String = (0..4_000).map(|i| format!("    let B{i} = s\n")).collect();
-    let src = format!("enum E {{\n{variants}}}\nfn f(s: E) {{\n{bindings}}}\nf(E.V0)\n");
     let engine = Engine::new(Config::new());
+    for (payload, argument) in [("", ""), ("(int)", "(1)")] {
+        let variants: String = (0..4_000).map(|i| format!("    V{i}{payload}\n")).collect();
+        let bindings: String = (0..4_000).map(|i| format!("    let B{i} = s\n")).collect();
+        let src = format!("enum E {{\n{variants}}}\nfn f(s: E) {{\n{bindings}}}\nf(E.V0{argument})\n");
+        let start = Instant::now();
+        let e = engine.lint_source("main.sand", &src).unwrap_err();
+        assert!(matches!(e, Error::Compile(_)) && e.to_string().contains("source too complex to lint"), "{e}");
+        assert!(start.elapsed() < FAST, "took {:?}", start.elapsed());
+    }
+}
+
+#[test]
+fn argument_order_lint_is_linear_in_the_arguments() {
+    let fields: String = (0..32_000).map(|i| format!("    f{i}: int\n")).collect();
+    let locals: String = (0..32_000).map(|i| format!("    let h{i} = {i}\n")).collect();
+    let arguments = (0..32_000).map(|i| format!("h{i}")).collect::<Vec<_>>().join(", ");
+    let calls: String = (0..20).map(|i| format!("    let _s{i} = S({arguments})\n")).collect();
+    let src = format!("struct S {{\n{fields}}}\nfn g() {{\n{locals}{calls}}}\ng()\n");
     let start = Instant::now();
-    let e = engine.lint_source("main.sand", &src).unwrap_err();
-    assert!(matches!(e, Error::Compile(_)) && e.to_string().contains("source too complex to lint"), "{e}");
+    Engine::new(limits(|l| l.max_compile_fuel = None)).lint_source("main.sand", &src).unwrap();
     assert!(start.elapsed() < FAST, "took {:?}", start.elapsed());
 }
 

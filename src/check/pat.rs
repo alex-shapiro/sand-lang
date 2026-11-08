@@ -255,11 +255,11 @@ impl Checker {
         if let Some(ns) = names.filter(|_| self.linting()) {
             let ns: Vec<String> = ns.iter().map(|&s| self.name(s).to_string()).collect();
             let ns: Vec<&str> = ns.iter().map(String::as_str).collect();
-            for (i, p) in args.positional.iter().enumerate() {
-                if let PatternKind::Binding(id) = &p.kind {
-                    self.note_argument_order(target_name, &ns, i, &id.name, p.span);
-                }
-            }
+            let given = args.positional.iter().enumerate().filter_map(|(i, p)| match &p.kind {
+                PatternKind::Binding(id) => Some((i, id.name.as_str(), p.span)),
+                _ => None,
+            });
+            self.note_argument_order(target_name, &ns, given);
         }
         for (i, p) in args.positional.iter().enumerate() {
             if is_private(self, i) {

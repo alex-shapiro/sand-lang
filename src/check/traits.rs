@@ -827,6 +827,7 @@ impl Checker {
             return;
         }
         let cur = self.cur_mod;
+        self.budget.charge(self.mods[cur as usize].module_imports.len() as u64);
         let names: Vec<String> =
             self.mods[cur as usize].module_imports.iter().filter(|(x, _)| *x == m).map(|&(_, n)| self.name(n).to_string()).collect();
         for name in names {
