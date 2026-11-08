@@ -990,8 +990,7 @@ impl Engine {
     ///
     /// - [`Error::Compile`] if compilation fails or the linter exhausts its
     ///   fuel budget
-    /// - [`Error::Limit`] if the call exceeds [`Limits::max_wall_time`] or
-    ///   [`Limits::max_source_bytes`]
+    /// - [`Error::Limit`] if the call exceeds [`Limits::max_wall_time`]
     /// - [`Error::Interrupted`] if the host interrupts the call
     pub fn lint_source(&self, name: &str, source: &str) -> Result<Vec<crate::lint::LintWarning>, Error> {
         let call = self.begin_call();
