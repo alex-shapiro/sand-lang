@@ -128,14 +128,13 @@ impl Session {
     }
 
     async fn eval_named(&mut self, name: Option<&str>, source: &str) -> Result<Option<String>, Error> {
-        self.was_reset = false;
+        self.begin_call();
         let r = CatchUnwind::new(self.eval_inner(name, source)).await;
         self.settle(r)
     }
 
     async fn eval_inner(&mut self, name: Option<&str>, source: &str) -> Result<Option<String>, Error> {
         self.exit_code = None;
-        self.engine.clear_interrupt();
         self.start().await?;
         self.inputs += 1;
         let name = name.map_or_else(|| format!("<input {}>", self.inputs), str::to_string);
@@ -150,13 +149,12 @@ impl Session {
     /// The type of an expression, checked in the context of the session's
     /// inputs without running it (or changing the session).
     pub fn type_of(&mut self, expr: &str) -> Result<String, Error> {
-        self.was_reset = false;
+        self.begin_call();
         let r = crate::unwind::catch(|| self.type_of_inner(expr));
         self.settle(r)
     }
 
     fn type_of_inner(&mut self, expr: &str) -> Result<String, Error> {
-        self.engine.clear_interrupt();
         let registry = self.engine.registry().clone();
         let budget = self.engine.compile_budget(self.deadline());
         let st = self.state()?;
@@ -198,7 +196,7 @@ impl Session {
     /// same name), each as the main task of the session's VM, against the
     /// current state; their effects persist.
     pub async fn run_tests(&mut self) -> Result<TestReport, Error> {
-        self.was_reset = false;
+        self.begin_call();
         let r = CatchUnwind::new(self.run_tests_inner()).await;
         self.settle(r)
     }
@@ -285,7 +283,7 @@ impl Session {
     /// `exit`, this method records the exit code in [`Session::exit_code`]. It
     /// then drops `until` and returns `None`.
     pub async fn run_tasks_until<F: Future>(&mut self, until: F, mut on_error: impl FnMut(Error)) -> Option<F::Output> {
-        self.was_reset = false;
+        self.begin_call();
         let mut until = std::pin::pin!(until);
         let runnable = self.state.as_mut().is_some_and(|st| {
             st.recover();
@@ -383,6 +381,12 @@ impl Session {
             self.state = Some(Box::new(self.init()?));
         }
         Ok(self.state.as_mut().unwrap())
+    }
+
+    /// Starts a public call: interrupts that come from now on stop it.
+    fn begin_call(&mut self) {
+        self.was_reset = false;
+        self.engine.clear_interrupt();
     }
 
     /// Makes sure the session is started and its standard modules initialized.
@@ -518,11 +522,10 @@ impl Session {
     /// wall-time limit passing at `deadline`. Returns the debug form of its
     /// result if `show`. On failure, cancels all tasks.
     async fn run(&mut self, proto: u32, show: bool, deadline: Option<Instant>) -> Result<Option<String>, Error> {
-        let Session { engine, state, exit_code, .. } = self;
+        let Session { state, exit_code, .. } = self;
         let st = state.as_mut().expect("session not started");
         st.recover();
         let vm = &mut st.vm;
-        engine.clear_interrupt();
         // Limits other than memory apply to each input.
         vm.meter.reset();
         vm.host.output_bytes = 0;
@@ -548,10 +551,9 @@ impl Session {
     /// none can run or one needs a permission prompt, which is deferred.
     /// Returns whether a task called `exit`.
     async fn run_idle(&mut self) -> Result<bool, Error> {
-        let Session { engine, state, exit_code, .. } = self;
+        let Session { state, exit_code, .. } = self;
         let st = state.as_mut().expect("session not started");
         let vm = &mut st.vm;
-        engine.clear_interrupt();
         vm.meter.reset();
         vm.host.output_bytes = 0;
         // Waiting for input may take any time.

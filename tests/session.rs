@@ -501,6 +501,20 @@ fn interrupting_an_input() {
     assert_eq!(r.value("steps > 0"), "true");
 }
 
+#[test]
+fn an_interrupt_during_one_test_block_stops_the_next() {
+    let handle = InterruptHandle::new();
+    let mut m = NativeModule::new("stop");
+    let h = handle.clone();
+    m.function("interrupt", move || h.interrupt());
+    let limits = Limits { max_wall_time: Some(Duration::from_secs(2)), ..Limits::default() };
+    let config = Config::new().limits(limits).host_modules(HostModules::new([m]).unwrap()).interrupt(handle);
+    let mut r = Repl::with(config);
+    r.ok("import stop\ntest \"first\" { stop.interrupt() }\ntest \"second\" { while true {} }");
+    let report = r.rt.block_on(r.session.run_tests());
+    assert!(matches!(report, Err(Error::Interrupted)), "{report:?}");
+}
+
 #[cfg(feature = "os")]
 #[test]
 fn dropping_an_eval_future_leaves_a_usable_session() {
