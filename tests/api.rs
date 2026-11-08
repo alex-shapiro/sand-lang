@@ -36,7 +36,7 @@ fn run_src(config: Config, src: &str) -> (Result<sandlang::engine::Outcome, Erro
     (r, out.contents(), err.contents())
 }
 
-/// The messages of the compile errors of `modules`.
+/// Returns the compile error messages for `modules`.
 fn host_module_errors(modules: impl IntoIterator<Item = NativeModule>) -> Vec<String> {
     match HostModules::new(modules) {
         Err(Error::Compile(ds)) => ds.into_iter().map(|d| d.message).collect(),
@@ -2103,7 +2103,7 @@ fn native_module_capability_prompts() {
 // Compiled programs and host modules
 // ---------------------------------------------------------------------------
 
-/// Runs `program` on a new engine with `config`, and returns its output.
+/// Runs `program` on a new engine with `config` and returns its outcome and stdout.
 fn run_program_with(config: Config, program: &CompiledProgram) -> (Result<sandlang::engine::Outcome, Error>, String) {
     let out = MemorySink::new();
     let mut engine = Engine::new(config.stdout(out.clone()));
@@ -2112,12 +2112,11 @@ fn run_program_with(config: Config, program: &CompiledProgram) -> (Result<sandla
 }
 
 #[test]
-fn programs_run_with_the_host_modules_that_they_were_compiled_with() {
+fn compiled_programs_use_their_compiled_host_modules() {
     let host_modules = HostModules::new([geo_module()]).unwrap();
     let compiler = Engine::new(Config::new().host_modules(host_modules));
     let src = "import geo\nvar runs = 0\nruns += 1\nprint(\"\\(geo.dist(3.0, 4.0)) \\(runs)\")";
     let program = rt().block_on(compiler.compile_source("main.sand", src)).unwrap();
-    // The running engines do not have the host module, and each run starts with new globals.
     for _ in 0..2 {
         let (r, out) = run_program_with(Config::new(), &program);
         r.unwrap();
@@ -2131,7 +2130,7 @@ fn programs_run_with_the_host_modules_that_they_were_compiled_with() {
 }
 
 #[test]
-fn compiling_reports_errors_and_checks_imports_with_the_compiling_engine() {
+fn compile_methods_check_types_and_import_policies() {
     let engine = Engine::new(Config::new());
     let r = rt().block_on(engine.compile_source("main.sand", "let x: int = \"text\""));
     assert!(matches!(r, Err(Error::Compile(_))), "{r:?}");
@@ -2148,7 +2147,7 @@ fn compiling_reports_errors_and_checks_imports_with_the_compiling_engine() {
     let policy = RulePolicy::standard().allow_import(PathPattern::literal("/app").unwrap());
     let compiler = Engine::new(Config::new().policy(policy).memory_fs(fs.clone()));
     let program = rt().block_on(compiler.compile_file("/app/main.sand")).unwrap();
-    // A run does not load the imports again: it needs no import rule and sees no later change.
+    // `run_program` uses the modules loaded during compilation.
     fs.write("/app/lib.sand", "pub fn value() -> int { 2 }").unwrap();
     let (r, out) = run_program_with(Config::new().memory_fs(fs), &program);
     r.unwrap();
@@ -2156,7 +2155,7 @@ fn compiling_reports_errors_and_checks_imports_with_the_compiling_engine() {
 }
 
 #[test]
-fn program_runs_use_the_working_directory_of_the_running_engine() {
+fn run_program_uses_the_running_engine_working_directory() {
     let src = "import fs\nprint(fs.read_text(\"in.txt\")?)";
     let fs = MemFs::new();
     fs.write("/app/main.sand", src).unwrap();
@@ -2167,7 +2166,6 @@ fn program_runs_use_the_working_directory_of_the_running_engine() {
     let programs = [
         rt().block_on(compiler.compile_file("/app/main.sand")).unwrap(),
         rt().block_on(compiler.compile_source("main.sand", src)).unwrap(),
-        // A program compiled on the host file system.
         rt().block_on(Engine::new(Config::new()).compile_source("main.sand", src)).unwrap(),
     ];
     let policy = RulePolicy::standard().allow_read("/".parse().unwrap());
@@ -2182,7 +2180,7 @@ fn program_runs_use_the_working_directory_of_the_running_engine() {
 }
 
 #[test]
-fn program_runs_count_limits_from_their_start() {
+fn run_program_measures_limits_per_run() {
     let program = rt().block_on(Engine::new(Config::new()).compile_source("main.sand", "var n = 0\nfor i in 0..20000 { n += i }")).unwrap();
     let limited = |max: u64| Config::new().limits(Limits { max_instructions: Some(max), ..Limits::default() });
     let fits = |max: u64| rt().block_on(Engine::new(limited(max)).run_program(&program)).is_ok();
@@ -2191,7 +2189,7 @@ fn program_runs_count_limits_from_their_start() {
     while !fits(max) {
         max *= 2;
     }
-    // A run needs more than `max / 2` instructions, so two runs need more than `max`.
+    // Each run executes more than `max / 2` instructions.
     let mut engine = Engine::new(limited(max));
     for _ in 0..3 {
         rt().block_on(engine.run_program(&program)).unwrap();

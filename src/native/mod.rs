@@ -764,8 +764,9 @@ struct FnDef {
 /// Registering a function as `"Type.name"` defines a method on `Type`. The
 /// method takes `self` if its first parameter has type `Type`. Use `native fn`
 /// declarations in [`NativeModule::source`] to specify default parameter
-/// values or generic type parameters. [`Engine::new`](crate::engine::Engine::new)
-/// checks all declarations against the registered Rust signatures.
+/// values or generic type parameters.
+/// [`HostModules::new`](crate::engine::HostModules::new) checks all
+/// declarations against the registered Rust signatures.
 ///
 /// The VM re-runs a registered function from the start after a permission
 /// prompt or after a garbage collection triggered by a memory or resource

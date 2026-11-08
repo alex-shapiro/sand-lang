@@ -295,10 +295,10 @@ fn waiting_for_prompt_answers_is_not_run_time() {
     assert_eq!(out, "42\ntrue\n");
 }
 
-/// `Config::cwd` sets the working directory of a run of source text, also
-/// with a module root.
+/// `Config::cwd` sets the working directory for `run_source` even if
+/// `Config::module_root` is set.
 #[test]
-fn source_text_runs_in_the_configured_working_directory() {
+fn run_source_uses_the_configured_working_directory() {
     let fs = MemFs::new();
     fs.create_dir_all("/root").unwrap();
     fs.write("/work/in.txt", "from work").unwrap();
@@ -309,10 +309,9 @@ fn source_text_runs_in_the_configured_working_directory() {
     assert_eq!(out, "from work\n");
 }
 
-/// A library script cannot take the name of a standard module, also of one
-/// that the build does not have.
+/// Library lookup ignores scripts whose names are in `STD_MODULES`.
 #[test]
-fn library_scripts_cannot_take_standard_module_names() {
+fn library_lookup_ignores_standard_module_names() {
     let fs = MemFs::new();
     for name in sandlang::stdlib::STD_MODULES {
         fs.write(format!("/lib/{name}.sand"), "pub fn f() -> int { 1 }").unwrap();

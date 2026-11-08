@@ -27,15 +27,15 @@ async fn main() {
 
 The script executes inside the future on the polling thread. The first argument is the source name used in diagnostics and stack traces. Use `Engine::run_file(path)` to load the entry module from disk.
 
-To run the same script many times, compile it once. `Engine::compile_source` and `Engine::compile_file` compile a script and its imports and return a `CompiledProgram`. `Engine::run_program` runs a `CompiledProgram` on any engine. Each run starts with new globals.
+To run the same script many times, compile it once. `Engine::compile_source` and `Engine::compile_file` compile a script and its imports into a `CompiledProgram`. `Engine::run_program` runs a `CompiledProgram` on any engine. Each run starts with fresh globals.
 
-The compiling engine sets these parts of a `CompiledProgram`:
+The compiling engine fixes three parts of a `CompiledProgram`:
 
-- the source of the script and its imports, as they were during compilation
-- the import decisions of its policy
-- its host modules
+- the script and its imported modules
+- the policy decisions for those imports
+- the host modules
 
-The running engine supplies all other configuration, such as the policy, limits, streams, file system, and working directory.
+The running engine supplies all other runtime configuration.
 
 ```rust
 # #[tokio::main(flavor = "current_thread")]
@@ -148,7 +148,7 @@ To handle `prompt` decisions, pass an async callback to `Config::prompter` that 
 
 ## Native modules
 
-`NativeModule` exposes Rust functions to Sand scripts as an importable module. `HostModules::new` compiles native modules, and `Config::host_modules` lets scripts import them:
+`NativeModule` exposes Rust functions to Sand scripts as an importable module. `HostModules::new` compiles native modules. `Config::host_modules` registers them on a `Config`:
 
 ```rust
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -171,7 +171,7 @@ let config = Config::new().host_modules(HostModules::new([geo])?);
 # }
 ```
 
-`HostModules::new` compiles the modules one time. Clones of a `HostModules` share the compiled modules, so create it one time and give a clone to each `Config`.
+Clones of a `HostModules` share the compiled modules. Create a `HostModules` once and pass clones to each `Config`.
 
 ```sand ignore
 import geo
@@ -319,7 +319,7 @@ Ok("opened front")
 Err(Error(message: "permission denied: door back", kind: "permission_denied"))
 ```
 
-`NativeModule::source` attaches Sand source declarations to a native module. Use `native fn` declarations in the Sand source to specify default parameter values or generic type parameters for registered functions. `HostModules::new` type-checks the modules and returns `Error::Compile` if a `native fn` declaration does not match its Rust function signature.
+`NativeModule::source` attaches Sand source declarations to a native module. Use `native fn` declarations in the Sand source to specify default parameter values or generic type parameters for registered functions. `HostModules::new` type-checks each module against its registered Rust functions. It returns `Error::Compile` if a `native fn` declaration does not match its Rust signature.
 
 A generic Rust function accepts values of its `N`-th type parameter as `Param<N, B>`, where `B` declares any built-in traits (`traits::Eq`, `traits::Ord`, `traits::Hash`, `traits::Num`, `traits::Encode`, or a tuple such as `(traits::Ord, traits::Hash)`) required by the Rust implementation. The corresponding `native fn` declaration in `NativeModule::source` must require those traits (`native fn max<T: Ord>(xs: [T]) -> T?`), directly or through traits that have them as supertraits. If a `native fn` declaration requires `Num` of its `N`-th type parameter, the Rust function can accept `Num<N>` (providing `zero` and `one`) before the value parameters.
 

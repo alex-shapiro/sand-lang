@@ -456,9 +456,8 @@ impl Config {
         self.retry_stress = on;
         self
     }
-    /// Enables or disables loop fusion, loop specialization, inlining, and
-    /// loop-invariant hoisting in the programs that the engine compiles.
-    /// Host modules always compile with these optimizations.
+    /// Enables or disables compiler optimizations for scripts. Host modules
+    /// are always compiled with optimizations enabled.
     #[doc(hidden)]
     pub fn optimize(mut self, on: bool) -> Self {
         self.optimize = on;
@@ -535,10 +534,11 @@ impl TestReport {
     }
 }
 
-/// Host modules that scripts can import (see [`Config::host_modules`]),
-/// checked and compiled with the standard library. Clones share the compiled
-/// modules, so engines that hold clones of one `HostModules` do not compile
-/// them again. The default holds only the standard library.
+/// Compiled host modules that scripts can import.
+///
+/// Pass a `HostModules` to [`Config::host_modules`] to expose native modules
+/// to scripts. Clones share the compiled modules across engines.
+/// [`HostModules::default`] contains only the standard library.
 #[derive(Clone)]
 pub struct HostModules(Arc<Registry>);
 
@@ -549,13 +549,12 @@ impl Default for HostModules {
 }
 
 impl HostModules {
-    /// Checks and compiles `modules`. Returns [`Error::Compile`] if the Sand
-    /// source of a module has an error or does not match its Rust functions.
+    /// Type-checks and compiles `modules`. Returns [`Error::Compile`] if a
+    /// module's Sand source is invalid or does not match its Rust functions.
     ///
     /// # Panics
     ///
-    /// If two modules have the same name, or if two modules bind the same
-    /// Rust type.
+    /// Panics if two modules share a name or bind the same Rust type.
     pub fn new(modules: impl IntoIterator<Item = NativeModule>) -> Result<HostModules, Error> {
         let modules: Vec<NativeModule> = modules.into_iter().collect();
         for (i, m) in modules.iter().enumerate() {
@@ -576,9 +575,11 @@ impl fmt::Debug for HostModules {
     }
 }
 
-/// A compiled script and its imports, which any engine can run with
-/// [`Engine::run_program`]. [`Engine::compile_source`] and
-/// [`Engine::compile_file`] make it. Clones share the compiled code.
+/// A compiled script and its imported modules.
+///
+/// [`Engine::compile_source`] and [`Engine::compile_file`] produce a
+/// `CompiledProgram`. [`Engine::run_program`] executes it on any engine.
+/// Clones share the compiled bytecode.
 #[derive(Clone)]
 pub struct CompiledProgram {
     program: Arc<Program>,
@@ -591,8 +592,8 @@ impl fmt::Debug for CompiledProgram {
     }
 }
 
-/// The natives and module sources that engines compile against: the
-/// standard library's, followed by those of some host modules.
+/// Native functions, bound types, and module sources for the standard library
+/// and optional host modules.
 pub(crate) struct Registry {
     pub natives: Arc<Vec<NativeEntry>>,
     pub decls: Arc<NativeDecls>,
@@ -825,15 +826,15 @@ pub struct Engine {
 /// A compiled program.
 pub(crate) struct Compiled {
     pub program: Arc<Program>,
-    /// The host modules that `program` was compiled with.
+    /// Host modules linked into `program`.
     pub host_modules: HostModules,
-    /// The main module's lint warnings (if asked for).
+    /// Lint warnings for the main module.
     pub lints: Option<Vec<crate::lint::LintWarning>>,
-    /// When the run's wall-time limit passes. For a run that compiles its
-    /// program, the limit counts from the start of compilation, excluding
-    /// import prompts.
+    /// Wall-time deadline for the run. If the run compiled the program, the
+    /// deadline starts at compilation and excludes import prompts.
     pub deadline: Option<Instant>,
-    /// Base snapshot when no additional native modules were compiled, allowing `program` to be recycled.
+    /// Base snapshot used to recycle `program` if the program does not define
+    /// native modules.
     pub snapshot: Option<Arc<Snapshot>>,
 }
 
@@ -1000,9 +1001,10 @@ impl Engine {
         }
     }
 
-    /// The module root of source text: the configured root or working
-    /// directory, or [`Engine::default_root`] (as it is when first needed),
-    /// and its normal form.
+    /// Returns the unnormalized and normalized module root for source text.
+    ///
+    /// Uses [`Config::module_root`], [`Config::cwd`], or
+    /// [`Engine::default_root`] in that order.
     pub(crate) fn source_root(&self) -> &(PathBuf, PathBuf) {
         self.root.get_or_init(|| {
             let root = self.config.module_root.clone().or_else(|| self.config.cwd.clone()).unwrap_or_else(|| self.default_root());
@@ -1030,9 +1032,10 @@ impl Engine {
         self.execute(compiled, cwd).await
     }
 
-    /// Compiles source text and its imports without running them, as
-    /// [`Engine::run_source`] does. The imports must pass the policy of this
-    /// engine.
+    /// Compiles `source` and its imports into a [`CompiledProgram`].
+    ///
+    /// Resolves and checks imports under this engine's file system and policy,
+    /// as [`Engine::run_source`] does.
     pub async fn compile_source(&self, name: &str, source: &str) -> Result<CompiledProgram, Error> {
         let compiling = async {
             let (compiled, _) = self.compile_main_source(name, source).await?;
@@ -1041,9 +1044,10 @@ impl Engine {
         crate::unwind::guard(compiling).await
     }
 
-    /// Compiles a file and its imports without running them, as
-    /// [`Engine::run_file`] does. The imports must pass the policy of this
-    /// engine.
+    /// Compiles the script at `path` and its imports into a [`CompiledProgram`].
+    ///
+    /// Resolves and checks imports under this engine's file system and policy,
+    /// as [`Engine::run_file`] does.
     pub async fn compile_file(&self, path: impl AsRef<Path>) -> Result<CompiledProgram, Error> {
         let compiling = async {
             let (compiled, _) = self.compile_main_file(path.as_ref()).await?;
@@ -1052,12 +1056,14 @@ impl Engine {
         crate::unwind::guard(compiling).await
     }
 
-    /// Runs `program` with the host modules that it was compiled with and the
-    /// rest of the configuration of this engine. The working directory is
-    /// [`Config::cwd`], then [`Config::module_root`], then the default
-    /// directory of the file system, as for [`Engine::run_source`]. Each run
-    /// starts with new globals, and its limits count from the start of the
-    /// run.
+    /// Executes `program` on this engine.
+    ///
+    /// The run uses the host modules from `program` and takes all other
+    /// configuration from this engine. It selects the working directory in the
+    /// same order as [`Engine::run_source`]: [`Config::cwd`],
+    /// [`Config::module_root`], or the default directory of the file system.
+    /// Each run starts with fresh globals. The engine measures resource limits
+    /// from the start of the run.
     pub async fn run_program(&mut self, program: &CompiledProgram) -> Result<Outcome, Error> {
         self.clear_interrupt();
         let compiled = Compiled {
@@ -1071,21 +1077,21 @@ impl Engine {
         crate::unwind::guard(self.execute(compiled, cwd)).await
     }
 
-    /// Compiles source text as the main module. Returns the program and the
-    /// working directory of its run.
+    /// Compiles `source` as the main module. Returns the compiled program and
+    /// the working directory for its run.
     async fn compile_main_source(&self, name: &str, source: &str) -> Result<(Compiled, PathBuf), Error> {
         let (root, normal) = self.source_root().clone();
         Ok((self.compile(name, source, &normal, None).await?, self.run_cwd(root)))
     }
 
-    /// Compiles the file at `path` as the main module. Returns the program
-    /// and the working directory of its run.
+    /// Compiles the file at `path` as the main module. Returns the compiled
+    /// program and the working directory for its run.
     async fn compile_main_file(&self, path: &Path) -> Result<(Compiled, PathBuf), Error> {
         let (name, source, root) = self.read_main(path)?;
         Ok((self.compile(&name, &source, &root, Some(path)).await?, self.run_cwd(root)))
     }
 
-    /// The working directory of a run of a program with module root `root`.
+    /// Returns the working directory for a run whose module root is `root`.
     pub(crate) fn run_cwd(&self, root: PathBuf) -> PathBuf {
         self.config.cwd.clone().unwrap_or(root)
     }
@@ -1145,7 +1151,7 @@ impl Engine {
         Ok((name, source, root))
     }
 
-    /// A VM that runs `prog`, which calls the natives of `host_modules`.
+    /// Creates a VM to execute `prog` with the native functions in `host_modules`.
     pub(crate) fn new_vm(&self, prog: Arc<Program>, host_modules: &HostModules, cwd: PathBuf, quiet: bool) -> Vm {
         let c = &self.config;
         let stdin = match &c.stdin {
@@ -1719,7 +1725,7 @@ mod registry_tests {
     }
 
     #[test]
-    fn host_module_source_compiles_with_the_optimizations() {
+    fn host_module_source_is_compiled_with_optimizations() {
         let src = "fn double(x: int) -> int { x * 2 }\npub fn doubled_total(xs: [int]) -> int { xs.map(double).filter(x => x > 2).sum() }";
         let mut m = NativeModule::new("host");
         m.source(src);
@@ -1747,7 +1753,7 @@ mod registry_tests {
         assert_eq!(format!("{host_modules:?}"), r#"["a"]"#);
     }
 
-    /// `STD_MODULES` (the names host modules cannot take) lists the standard modules.
+    /// `STD_MODULES` lists every standard library module and the prelude.
     #[test]
     fn std_module_names_are_listed() {
         for name in STD.sources.keys() {

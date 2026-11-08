@@ -1935,11 +1935,12 @@ Checking a program happens before it runs, so it is bounded separately:
   `max_compile_fuel` is exhausted, compilation fails with `program too complex
 to compile`. `None` means unlimited.
 - **Time and interrupts.** Compilation fails with `time limit exceeded` if
-  `max_wall_time` elapses, excluding waits for permission prompts. In
-  `run_source` and `run_file`, the run uses the remaining time budget. Compilation fails with an interrupt
-  error if the host interrupts the engine. The standard library compiles once
-  per process, and `HostModules::new` compiles host modules once (§16.3).
-  These compilations do not count against the budget of a program.
+  `max_wall_time` elapses. Waits for permission prompts do not count toward
+  `max_wall_time`. In `run_source` and `run_file`, execution uses the
+  remaining time budget. Compilation fails with an interrupt error if the
+  host interrupts the engine. The standard library is compiled once per
+  process. `HostModules::new` compiles host modules (§16.3). Neither
+  compilation counts toward a program's budget.
 - **Local limits**, reported at the offending construct: nesting of
   expressions, types, patterns and blocks to 256 levels (`nesting too
 deep`); strings nested inside string interpolations to 32 levels
@@ -1993,12 +1994,11 @@ let outcome = engine.run_source("main.sand", r#"import geo; print(geo.dist(3.0, 
 
 `Engine::new` constructs an `Engine` from a `Config`. `Engine::run_source` and
 `Engine::run_file` compile and execute a script inside the returned future on
-the thread that polls it. `Engine::run_tests` compiles a
-module and executes its `test` blocks (§4.8). For static analysis without
-execution, `check_source`, `check_file`, `lint_source`, and `lint_file` (§17.2)
-resolve imported modules from the engine's file system under its policy, except
-that the compiler denies any import that requires an interactive permission
-prompt.
+the thread that polls it. `Engine::run_tests` compiles a module and executes
+its `test` blocks (§4.8). `check_source`, `check_file`, `lint_source`, and
+`lint_file` (§17.2) analyze a script without executing it. These methods
+resolve imported modules from the engine's file system under its policy. They
+deny any import that requires an interactive permission prompt.
 
 A completed run returns `Outcome { exit_code: i32 }`, and a failed operation
 returns an `Error`:
@@ -2019,18 +2019,19 @@ so that panics do not unwind into the host.
 
 A host that runs the same script many times can compile it once.
 `Engine::compile_source` and `Engine::compile_file` compile a script and its
-imports, as `run_source` and `run_file` do, and return a `CompiledProgram`.
-`Engine::run_program` runs a `CompiledProgram` on any engine. The compiling
-engine sets these parts of the program:
+imports into a `CompiledProgram`. `Engine::run_program` runs a
+`CompiledProgram` on any engine. The compiling engine fixes three parts of the
+program:
 
-- the source of the script and its imports, as they were during compilation
-- the import decisions of its policy
-- its host modules
+- the script and its imported modules
+- the policy decisions for those imports
+- the host modules
 
-The running engine supplies all other configuration, including the working
-directory: `Config::cwd`, then `Config::module_root`, then the default
-directory of its file system, as for `run_source`. Each run starts with new
-globals, and its limits count from the start of the run.
+The running engine supplies all other configuration. It selects the working
+directory in the same order as `run_source`: `Config::cwd`,
+`Config::module_root`, or the default directory of its file system. Each run
+starts with fresh globals. The engine measures resource limits from the start
+of each run.
 
 ### 16.2 Host environment and providers
 
@@ -2128,16 +2129,14 @@ interactive `Prompter` (§14).
 ### 16.3 Native modules
 
 `NativeModule` exposes Rust functions and types to Sand scripts as an
-importable module. `HostModules::new(modules)` checks and compiles native
-modules once, and `Config::host_modules` lets scripts import them. Engines
-whose configurations hold clones of one `HostModules` share its compiled
-modules. The engine infers the Sand signature of each registered function from
-its Rust parameter and return types, and charges fuel and memory when
-converting arguments and return values. `NativeModule` and `HostModules::new`
-panic if a module, type, or function name is invalid or already registered, or
-if a host module uses the name of a standard library module.
-`sandlang::stdlib::STD_MODULES` lists the names of the standard library
-modules.
+importable module. `HostModules::new(modules)` type-checks and compiles native
+modules. `Config::host_modules` registers the compiled `HostModules` on an
+engine. Clones of a `HostModules` share the compiled modules across engines.
+The engine infers each function's Sand signature from its Rust parameter and
+return types. The VM charges fuel and memory to convert arguments and return
+values. `NativeModule` and `HostModules::new` panic if a module, type, or
+function name is invalid or duplicated. `NativeModule::new` also panics if a
+module uses a standard library name from `sandlang::stdlib::STD_MODULES`.
 
 | Method                       | Registered item                                                                     |
 | ---------------------------- | ----------------------------------------------------------------------------------- |

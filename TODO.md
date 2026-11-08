@@ -25,14 +25,13 @@ Untrusted code violates a valid policy.
 
 The host cannot rely on engine limits, stability, or control.
 
-- [ ] ❓ _Memory._ Share the bytecode of the standard library and host modules
-      between programs. `compile_program` starts each program from a copy of
-      the snapshot's `Program`, so each `CompiledProgram` keeps its own copy:
-      about 74 KB for `print(1)`, and about 173 KB with one host module. A
-      host that keeps 1,000 compiled programs uses about 170 MB for the
-      copies. Split `Program` into a shared base and a part for each
-      program, benchmark the extra lookup in the VM, and then remove
-      `Engine::recycle` and `Compiled::snapshot`.
+- [ ] ❓ _Memory._ Share standard library and host module bytecode across
+      programs. `compile_program` copies the snapshot `Program` into each
+      `CompiledProgram`. A copy takes about 74 KB for `print(1)` and 173 KB
+      with a host module. Keeping 1,000 compiled programs uses about 170 MB for
+      these copies. Split `Program` into a shared base and per-program tables.
+      Benchmark the extra VM lookup. Then remove `Engine::recycle` and
+      `Compiled::snapshot`.
 - [ ] ❓ _Memory._ Allocate small object buffers from fixed-size block pools so that the
       engine accounts for retained pool capacity against `max_memory`. If a
       script frees small buffers and then allocates larger ones, the system
@@ -223,9 +222,8 @@ Visible defects that rarely block users.
 - [ ] ⚪ Extend `tests/props/generics.rs` to generate enums with payloads, generic
       traits, method type parameters, `where` clauses, `extend` blocks, generic
       function values, local generic functions, and Rust-bound types.
-- [ ] ⚪ Compile the `repro.rs` files in `triage/` in a test. No build compiles
-      them now, so 018, 019, 026, 027, and 040 use removed APIs such as
-      `Config::module`.
+- [ ] ⚪ Compile the `triage/` `repro.rs` files in a test. Several `repro.rs`
+      files call removed APIs such as `Config::module`.
 - [ ] ⚪ Mutate typed ASTs in `tests/fuzz.rs` instead of mutating raw source
       characters.
 
@@ -251,10 +249,10 @@ Visible defects that rarely block users.
       compilation and execution. During compilation, module discovery adds
       prompt wait time to a `prompted` total and checks `deadline + prompted`.
       During execution, `Vm::exclude_wall_time` shifts `deadline` directly.
-- [ ] ❓ Let a host check, lint, and test a script with one compilation. ash
-      compiles each tool three times, with `check_file`, `lint_file`, and
-      `run_tests`. A compile that returns its lint warnings, and a
-      `run_tests` that takes a `CompiledProgram`, would remove two of them.
+- [ ] ❓ Compile a script once to check, lint, and test it. `ash` currently
+      compiles each tool three times across `check_file`, `lint_file`, and
+      `run_tests`. Return lint warnings from compilation and accept a
+      `CompiledProgram` in `run_tests`.
 - [ ] ⚪ Pass `Num<N>` evidence to native `impl` methods by extracting the `Num`
       dictionary from the `impl` dictionary.
 - [ ] ⚪ Unify the terminology for Rust types attached via `NativeModule::bind`
