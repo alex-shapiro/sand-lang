@@ -6,7 +6,7 @@ use crate::compile::{CompileInput, compile_more};
 use crate::diag::{Diag, Diagnostic, FileId, Span};
 use crate::files::Fs;
 use crate::files::mem::MemFs;
-use crate::modules::{ImportRef, ModuleGraph, Snapshot, Target, budget_error, lint_budget_error, native_info};
+use crate::modules::{ImportRef, ModuleGraph, Snapshot, Target, budget_error, native_info, stop_error};
 use crate::native::func::Signature;
 use crate::native::ty::Type;
 use crate::native::{BoundType, NativeDecl, NativeModule};
@@ -1827,9 +1827,10 @@ fn compile_program(
     let host = g.has_natives(&order);
     let cp = checker.take_checked();
     let lints = match modules.iter().find(|m| m.file == main_file).filter(|_| lint) {
-        Some(main) => {
-            Some(crate::lint::lint_module(main, &main.source, &cp, budget).map_err(|stop| lint_budget_error(stop, sm, main_file))?)
-        }
+        Some(main) => Some(
+            crate::lint::lint_module(main, &cp, budget)
+                .map_err(|stop| stop_error(stop, sm, main_file, "source too complex to lint: exceeded the lint budget"))?,
+        ),
         None => None,
     };
     let native_info = if host { native_info(&cp, registry) } else { crate::modules::NativeInfo::default() };

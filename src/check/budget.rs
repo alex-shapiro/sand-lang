@@ -94,12 +94,12 @@ pub fn tool_fuel(len: usize) -> u64 {
     DEFAULT_COMPILE_FUEL.max(TOOL_FUEL_PER_BYTE.saturating_mul(len as u64))
 }
 
-/// Why compilation was stopped.
+/// Why a budget stopped compiling, linting, or formatting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stop {
-    /// `max_compile_fuel` was exhausted.
+    /// The budget ran out of fuel.
     Fuel,
-    /// The compile deadline passed.
+    /// The deadline passed.
     Time,
     /// The host interrupted the engine.
     Interrupted,

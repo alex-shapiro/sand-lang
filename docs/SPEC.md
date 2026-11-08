@@ -2009,7 +2009,7 @@ returns an `Error`:
 
 | Variant                              | Meaning                                                              |
 | ------------------------------------ | -------------------------------------------------------------------- |
-| `Error::Compile(diagnostics)`        | Syntax or static type errors occurred during compilation (§18).      |
+| `Error::Compile(diagnostics)`        | Compilation failed (§18), or compilation or linting ran out of fuel. |
 | `Error::Runtime { message, trace }`  | Execution failed with an uncaught runtime error (§10.3).             |
 | `Error::Limit(kind)`                 | Execution, compilation, or linting exceeded a resource limit (§15).  |
 | `Error::Interrupted`                 | The host cancelled the call through an `InterruptHandle`.            |

@@ -52,14 +52,14 @@ for _ in 0..3 {
 
 Failed runs return a `sandlang::engine::Error`:
 
-| Variant                           | Cause                                      |
-| --------------------------------- | ------------------------------------------ |
-| `Error::Compile(diagnostics)`     | syntax or static type errors               |
-| `Error::Runtime { message, .. }`  | uncaught runtime failure                   |
-| `Error::Limit(kind)`              | resource limit exceeded                    |
-| `Error::Interrupted`              | execution cancelled via `InterruptHandle`  |
-| `Error::Io(message)`              | entry script file could not be read        |
-| `Error::Internal { message, .. }` | internal engine or native module invariant |
+| Variant                           | Cause                                                 |
+| --------------------------------- | ----------------------------------------------------- |
+| `Error::Compile(diagnostics)`     | syntax or type errors, or out of compile or lint fuel |
+| `Error::Runtime { message, .. }`  | uncaught runtime failure                              |
+| `Error::Limit(kind)`              | resource limit exceeded                               |
+| `Error::Interrupted`              | call cancelled via `InterruptHandle`                  |
+| `Error::Io(message)`              | entry script file could not be read                   |
+| `Error::Internal { message, .. }` | internal engine or native module invariant            |
 
 `err.render()` formats the error with source snippets and stack traces. `Engine::check_source` type-checks a script without executing it, and `Engine::lint_source` returns lint diagnostics.
 

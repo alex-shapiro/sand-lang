@@ -107,6 +107,11 @@ The host cannot rely on engine limits, stability, or control.
       thread before checking `max_source_bytes`. Offloading the bounded read
       enforces `max_source_bytes`, `max_wall_time`, and interrupts on a large
       file, a FIFO, or a hung mount.
+- [ ] ❓ Count compiler and linter data against `max_memory`. SPEC §15.3 excludes
+      compilation from the limit, so a host that sets a low limit for untrusted
+      scripts has no memory bound during compilation other than
+      `max_source_bytes` and `max_compile_fuel`. A charge would reject programs
+      that compile today under a low limit.
 
 ## Tier 3: ordinary scripts
 
@@ -295,6 +300,9 @@ Visible defects that rarely block users.
 - [ ] ⚪ Unify the terminology for Rust types attached via `NativeModule::bind`
       across `BoundKind`, `BoundType`, `Type::bound`, `declare_bound_types`, and
       `Binding<T>`.
+- [ ] ❓ Return a typed stop reason from `format_source_with`. It returns text,
+      so a host that sets a deadline or an interrupt must parse the message to
+      find why the formatter stopped.
 
 ### Policy
 

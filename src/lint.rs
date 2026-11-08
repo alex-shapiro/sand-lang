@@ -23,17 +23,12 @@ impl std::fmt::Display for LintWarning {
     }
 }
 
-/// Lints `main`, the main module of `checked`, whose source is `file`, with
+/// Lints `main`, the main module of `checked`, with
 /// fuel of its own ([`tool_fuel`]) and `compile`'s deadline and interrupt
 /// flag. Returns the reason if the budget stops the lint.
-pub(crate) fn lint_module(
-    main: &ParsedModule,
-    file: &SourceFile,
-    checked: &CheckedProgram,
-    compile: &CompileBudget,
-) -> Result<Vec<LintWarning>, Stop> {
-    let budget = compile.with_fuel(tool_fuel(file.text.len()));
-    let warnings = run_lints(main, file, checked, &budget);
+pub(crate) fn lint_module(main: &ParsedModule, checked: &CheckedProgram, compile: &CompileBudget) -> Result<Vec<LintWarning>, Stop> {
+    let budget = compile.with_fuel(tool_fuel(main.source.text.len()));
+    let warnings = run_lints(main, checked, &budget);
     match budget.stopped() {
         Some(stop) => Err(stop),
         None => Ok(warnings),
@@ -60,7 +55,8 @@ struct Linter<'a> {
     budget: &'a CompileBudget,
 }
 
-fn run_lints(main: &ParsedModule, file: &SourceFile, checked: &CheckedProgram, budget: &CompileBudget) -> Vec<LintWarning> {
+fn run_lints(main: &ParsedModule, checked: &CheckedProgram, budget: &CompileBudget) -> Vec<LintWarning> {
+    let file = &main.source;
     if !budget.charge((file.text.len() / 64) as u64) {
         return vec![];
     }
