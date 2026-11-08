@@ -21,7 +21,7 @@ journal. The sections below group these commits into self-contained changesets.
 1. Module path cleanup: merged in #26 from `module-paths`
 2. Typed policy builders: merged in #27 from `typed-policy-builders`
 3. Rule and limit positions in policy: merged in #28 from `policy-positions`
-4. `deny_private_net`: in review on `deny-private-net`
+4. `deny_private_net`: merged in #29 from `deny-private-net`
 5. Precompiled host modules: in review on `precompiled-host-modules`
 6. `InterruptHandle::new`: not started
 7. Linter budget and interrupt errors: not started
