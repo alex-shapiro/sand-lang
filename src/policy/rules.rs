@@ -670,7 +670,9 @@ impl RulePolicy {
     /// rules for `localhost` names if `request` names `localhost`. The policy ranks them as it
     /// ranks rules for an IP literal, with the rule that allowed `request` in place of `*`. So an
     /// address rule overrides the allowing rule unless the address rule is in a lower
-    /// [`RulePolicy::with_defaults`] tier. A `prompt` address rule denies the connection.
+    /// [`RulePolicy::with_defaults`] tier. The rule that allowed `request` counts as `allow`, also
+    /// if it is a `prompt` rule that the user approved. Any other `prompt` address rule denies
+    /// the connection.
     pub fn check_resolved(&self, request: &Capability, addr: std::net::SocketAddr) -> Decision {
         if self.resolved_verdict(request, addr).is_ok() { Decision::Allow } else { Decision::Deny }
     }
@@ -683,30 +685,29 @@ impl RulePolicy {
         }
         let index = self.non_file_index();
         let dest = Dest::new(host, addr.port());
-        let address_verdict = |allowing: Option<(Decision, usize)>, best: &mut Best| {
-            let allowing = allowing.filter(|&(d, _)| d != Decision::Deny);
-            if let Some((d, rule)) = allowing {
-                best.offer([0; 4], d, rule as u32);
+        // The rule that allowed `request`, also a `prompt` rule that the user approved, counts as `allow`.
+        let address_verdict = |allowing: Option<(Decision, usize)>, offer_address_rules: &dyn Fn(&mut Best)| {
+            let allowing = allowing.filter(|&(d, _)| d != Decision::Deny).map(|(_, rule)| rule);
+            let mut best = Best { approved: allowing, ..Best::new(self, &[]) };
+            offer_address_rules(&mut best);
+            if let Some(rule) = allowing {
+                best.offer([0; 4], Decision::Allow, rule as u32);
             }
             match best.verdict() {
                 Some((Decision::Allow, _)) | None => Ok(()),
-                Some((_, rule)) if allowing.is_some_and(|(_, a)| a == rule) => Ok(()),
                 Some((_, rule)) => Err(Some(rule)),
             }
         };
+        let tls = uses_tls(request);
         if let Capability::Http { method, path, .. } = request {
             let (names, alt) = url_segments(path);
             return std::iter::once(names).chain(alt).try_for_each(|names| {
                 let allowing = self.check_http_segments(request, &names, &[], &|f| index.http.find(&dest, f));
-                let mut best = Best::new(self, &[]);
-                self.http_verdict(&|f| index.http.find_address(&dest, ip, f), method, uses_tls(request), &names, &mut best);
-                address_verdict(allowing, &mut best)
+                address_verdict(allowing, &|best| self.http_verdict(&|f| index.http.find_address(&dest, ip, f), method, tls, &names, best))
             });
         }
-        let tls = uses_tls(request);
-        let mut best = Best::new(self, &[]);
-        index.net.find_address(&dest, ip, |is_alt, e| e.offer_to(&mut best, tls, is_alt));
-        address_verdict(self.verdict(request, PathSpace::Host, &[]), &mut best)
+        let allowing = self.verdict(request, PathSpace::Host, &[]);
+        address_verdict(allowing, &|best| index.net.find_address(&dest, ip, |is_alt, e| e.offer_to(best, tls, is_alt)))
     }
 
     pub(crate) fn denies_under_normalized_in(&self, path: &Path, space: PathSpace) -> bool {
@@ -980,16 +981,19 @@ pub(crate) fn precedence(spec: Spec, decision: Decision, rule: usize) -> Precede
 struct Best<'a> {
     exclude: &'a [usize],
     rules: &'a [Rule],
+    /// A rule that counts as `allow`, such as a `prompt` rule that the user approved.
+    approved: Option<usize>,
     best: Option<((std::cmp::Reverse<u32>, Precedence), Decision)>,
 }
 
 impl<'a> Best<'a> {
     fn new(policy: &'a RulePolicy, exclude: &'a [usize]) -> Best<'a> {
-        Best { exclude, rules: &policy.rules, best: None }
+        Best { exclude, rules: &policy.rules, approved: None, best: None }
     }
 
     fn offer(&mut self, spec: Spec, decision: Decision, rule: u32) {
         let rule = rule as usize;
+        let decision = if self.approved == Some(rule) { Decision::Allow } else { decision };
         let candidate = (std::cmp::Reverse(self.rules[rule].tier), precedence(spec, decision, rule));
         if !self.exclude.contains(&rule) && self.best.is_none_or(|(b, _)| candidate > b) {
             self.best = Some((candidate, decision));

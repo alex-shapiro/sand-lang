@@ -1677,8 +1677,10 @@ the rules for `localhost` names if the request names `localhost`. They include
 literal, with the rule that allowed stage 1 in place of `*`. Thus a matching
 address rule decides the connection, unless it is in a lower `with_defaults`
 tier than the stage-1 rule. If no address rule decides, the engine allows the
-address. A `prompt` address rule denies the connection, because stage 2 cannot
-prompt. A `CustomPolicy` evaluates `NetAddr` directly and treats `Prompt` as
+address. The stage-1 rule counts as `allow`, also if it is a `prompt` rule that
+the user approved. Any other `prompt` address rule denies the connection,
+because stage 2 cannot prompt, and the error says that the address needs
+approval. A `CustomPolicy` evaluates `NetAddr` directly and treats `Prompt` as
 `Allow`.
 
 This two-stage check prevents DNS rebinding against denied IP ranges. For

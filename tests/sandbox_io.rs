@@ -541,6 +541,20 @@ print(net.connect("127.0.0.1", {port}).is_ok())
     assert_eq!(r.ok_stdout(), "Ok(\"hi\")\nOk(\"hi\")\nOk(\"hi\")\nOk(\"hi\")\ntrue\n");
 }
 
+/// An approved `prompt` rule counts as `allow` at the resolved address, so rule order does not
+/// change the result. An address that only a `prompt` rule matches is denied, because the
+/// engine cannot ask after DNS resolution.
+#[test]
+fn approved_prompts_allow_their_resolved_addresses_in_any_order() {
+    let loopback: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+    for rules in ["prompt net 127.0.0.1 [::1] localhost", "prompt net localhost 127.0.0.1 [::1]"] {
+        assert_eq!(parse_rules(rules).check_resolved(&net("localhost", 8080), loopback), Decision::Allow, "{rules}");
+    }
+    let p = parse_rules("prompt net *\nprompt net 10.0.0.0/8");
+    assert_eq!(p.check_resolved(&net("db.example", 443), "10.0.0.5:443".parse().unwrap()), Decision::Deny);
+    assert_eq!(p.check_resolved(&net("db.example", 443), "8.8.8.8:443".parse().unwrap()), Decision::Allow);
+}
+
 #[test]
 fn only_more_specific_rules_override_deny_private_net() {
     let with = |rule: &str| parse_rules(rule).deny_private_net();
@@ -649,6 +663,9 @@ fn prompt_answers_do_not_override_address_rules() {
     assert!(lines[1].contains("address 127.0.0.1 is not allowed by the rule `deny net plaintext 127.0.0.0/8`"), "{out}");
     assert_eq!(prompts.lock().len(), 4);
     assert_eq!(server.requests.lock().len(), 2);
+    let out = run(RulePolicy::standard().prompt_net(Transports::Plaintext, "127.0.0.0/8".parse().unwrap()));
+    let needs = "address 127.0.0.1 needs approval under the rule `prompt net plaintext 127.0.0.0/8`, and the engine cannot ask";
+    assert!(out.lines().nth(1).is_some_and(|l| l.contains(needs)), "{out}");
 }
 
 /// Resolves `loopback.test` to 127.0.0.1, as a DNS rebinding attack does, and uses the
