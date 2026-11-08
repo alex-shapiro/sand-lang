@@ -379,8 +379,7 @@ fn default_rules_apply_only_to_unmatched_requests() {
     assert_eq!(p.check(&all), Decision::Allow);
     let p = parse_rules("prompt env SECRET").with_defaults(RulePolicy::allow_all());
     assert_eq!(p.check(&all), Decision::Prompt);
-    // A default address rule applies at a resolved address only if the primary rules do not
-    // match the request, matching the behavior for an IP literal.
+    // A default address rule applies only if the primary rules do not match the request.
     let metadata: SocketAddr = "169.254.169.254:80".parse().unwrap();
     let deny = || parse_rules("deny net 169.254.0.0/16");
     let allow = || parse_rules("allow net tls plaintext *");

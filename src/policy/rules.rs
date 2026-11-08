@@ -662,18 +662,16 @@ impl RulePolicy {
         self.verdict(cap, space, &[]).map_or(Decision::Prompt, |(d, _)| d)
     }
 
-    /// Evaluates whether a connection to `addr` resolved from an allowed
-    /// `Net` or `Http` `request` is permitted. Returns [`Decision::Allow`]
-    /// or [`Decision::Deny`].
+    /// Checks whether a connection from a `Net` or `Http` `request`
+    /// is permitted.
     ///
-    /// Only address rules apply: IP and CIDR rules that match `addr`, plus
-    /// `localhost` rules if `request` specifies a `localhost` name. The policy
-    /// ranks address rules using the same order as for an IP literal, with the
-    /// rule that allowed `request` in place of `*`. A matching address rule
-    /// overrides the allowing rule unless the address rule is in a lower
-    /// [`RulePolicy::with_defaults`] tier. The allowing rule acts as `allow`,
-    /// even if it is an approved `prompt` rule. Any other `prompt` address rule
-    /// denies the connection.
+    /// Uses IP and CIDR rules to match `addr`, plus `localhost` rules if `request`
+    /// specifies a `localhost` name. The policy ranks address rules using the
+    /// same order as for an IP literal, with the rule that allowed `request` in
+    /// place of `*`. A matching address rule overrides the allowing rule unless
+    /// the address rule is in a lower [`RulePolicy::with_defaults`] tier.
+    /// The allowing rule acts as `allow`, even if it is an approved `prompt` rule.
+    /// Any other `prompt` address rule denies the connection.
     pub fn check_resolved(&self, request: &Capability, addr: std::net::SocketAddr) -> Decision {
         if self.resolved_verdict(request, addr).is_ok() { Decision::Allow } else { Decision::Deny }
     }

@@ -541,8 +541,6 @@ mod tests {
     }
 
     proptest! {
-        /// Every accepted URL specifies the same host and port for the policy
-        /// and for the browser, which follows the WHATWG URL standard.
         #[test]
         fn accepted_urls_match_browser_parsed_hosts(
             host in prop_oneof![
