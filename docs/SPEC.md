@@ -2387,12 +2387,14 @@ interrupt handle of the session configuration (§15.1) cancels an active `eval`,
 running tasks as described above, and the call continues to wait for `until`.
 Dropping an `eval` future before completion cancels the input in the same way
 as an interrupt, and leaves the session state unchanged if the input was still
-loading imports. `reset()` clears all session bindings and state. If an internal error (§10.3) occurs
-during `eval`, `run_tests`, `type_of`, or `run_tasks_until`, the session
-automatically resets itself, appends `" (the session was reset)"` from
-`sandlang::session::RESET_NOTE` to the error message, and sets `was_reset()`
-to `true` until the next call while preserving remembered `"always"` prompt
-decisions.
+loading imports. A host can drop the future only between its polls, so a
+compilation or an import read that is in progress ends first. An interrupt
+stops these too. `reset()` clears all session bindings and state. If an
+internal error (§10.3) occurs during `eval`, `run_tests`, `type_of`, or
+`run_tasks_until`, the session automatically resets itself, appends
+`" (the session was reset)"` from `sandlang::session::RESET_NOTE` to the error
+message, and sets `was_reset()` to `true` until the next call while preserving
+remembered `"always"` prompt decisions.
 
 ## 17. Tooling
 

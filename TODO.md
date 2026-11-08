@@ -77,6 +77,15 @@ The host cannot rely on engine limits, stability, or control.
       job. A host that runs many scripts against a hung path loses one thread
       for each stopped call. Limit the pool, or the blocked jobs of each
       engine, and fail new jobs with an I/O error when the limit is reached.
+- [ ] ❓ _Embedding._ Use one test runner for `Engine::run_tests` and
+      `Session::run_tests`, or at least one function that turns a test run
+      into a `TestResult`. The two runners apply `max_wall_time` differently:
+      `Engine::run_tests` gives the whole test run one limit, and
+      `Session::run_tests` gives each test its own limit. With a 10 s limit
+      and 100 slow tests, `sand test` stops after 10 s, but the REPL's `:test`
+      can run for 1,000 s. Choose one rule and document it in SPEC §4.8. The
+      session must keep its own VM for each test run, and it must stop after
+      an internal error.
 - [ ] ❓ _Sandbox._ Read the main file of `run_file`, `check_file`,
       `lint_file`, `compile_file` and `run_tests` the way imports are read:
       through `Engine::discovery_io` with `read_source(max_source_bytes)`.
