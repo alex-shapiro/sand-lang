@@ -307,6 +307,9 @@ pub struct Fiber {
     pub io: Option<u64>,
     /// An error (`kind: message`) to raise when the fiber resumes.
     pub pending_error: Option<String>,
+    /// Whether the fiber stopped in a native call or just after it, so that
+    /// its instruction pointer is one past that call.
+    pub stopped_in_native_call: bool,
 }
 
 /// A stack trace frame from a runtime error.
@@ -1303,6 +1306,7 @@ impl Vm {
                     waiters_prune_at: MIN_PRUNE,
                     io: None,
                     pending_error: None,
+                    stopped_in_native_call: false,
                 });
                 self.heap.fiber_bytes += fiber.footprint();
                 fiber
@@ -1349,6 +1353,7 @@ impl Vm {
         f.waiters.clear();
         f.waiters_prune_at = MIN_PRUNE;
         f.io = None;
+        f.stopped_in_native_call = false;
         f.pending_error = None;
         self.spare_fibers.push(f);
     }
@@ -1476,8 +1481,7 @@ impl Vm {
         for (w, g) in std::mem::take(&mut f.waiters) {
             self.deliver_error(w, g, "cancelled: task cancelled");
         }
-        // A fiber waiting in a call, or woken to fail in it, stopped before the call completed.
-        let in_call = f.state == FiberState::Waiting || f.pending_error.is_some();
+        let in_call = f.stopped_in_native_call;
         if self.unwind_to_pad(&mut f, in_call) {
             f.pending_error = None;
             f.state = FiberState::Ready;

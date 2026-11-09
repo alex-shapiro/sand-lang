@@ -534,6 +534,7 @@ impl Vm {
 
     /// Runs `fiber` until it finishes, blocks, or exhausts `fuel`.
     pub(crate) fn interp(&mut self, fiber: &mut Fiber, fuel_out: &mut i64) -> Result<FiberStop, RunEnding> {
+        fiber.stopped_in_native_call = false;
         if let Some(msg) = fiber.pending_error.take() {
             let ip = fiber.frames.last().map(|f| f.ip).unwrap_or(0) as usize;
             return Err(self.error_trap(fiber, ip, msg));
@@ -1710,12 +1711,15 @@ impl Vm {
                 if self.meter.fuel() <= 0 {
                     // Natives used up the slice: let the scheduler check
                     // limits and run other tasks.
+                    fiber.stopped_in_native_call = true;
                     return Ok(Some(FiberStop::Preempt));
                 }
                 return Ok(None);
             }
             Err(c) => c,
         };
+        // A prompt rewinds the frame so that the call runs again.
+        fiber.stopped_in_native_call = !matches!(r.kind(), CtlKind::NeedPermission(_));
         match r.kind() {
             CtlKind::Yield => {
                 self.recycle(r);

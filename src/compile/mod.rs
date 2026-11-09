@@ -1362,9 +1362,6 @@ impl<'a> Compiler<'a> {
         'scopes: for i in (from..f.defers.len()).rev() {
             for j in (0..f.defers[i].len()).rev() {
                 let (x, pad) = f.defers[i][j];
-                // A task stopped just after the last guarded call resumes here
-                // and has not started this copy, so this position stays guarded.
-                self.emit(f, Op::Nop);
                 self.set_pending(f, f.pads[pad].1);
                 if !self.emit_defer_copy(f, x) {
                     break 'scopes;
