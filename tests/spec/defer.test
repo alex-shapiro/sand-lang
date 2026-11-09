@@ -425,3 +425,98 @@ let t = spawn {
 task.yield_now()
 --- stdout
 closing
+
+=== cancelling a task woken from its last guarded call runs its deferred code
+let ch: Channel<int> = Channel()
+let t = spawn {
+    defer print("deferred")
+    ch.recv()
+}
+task.sleep(1ms)
+ch.send(1)
+t.cancel()
+task.sleep(1ms)
+print("end")
+--- stdout
+deferred
+end
+
+=== cancelling a task that yielded in its last guarded call runs its deferred code
+let t = spawn {
+    defer print("deferred")
+    task.yield_now()
+}
+task.yield_now()
+t.cancel()
+task.sleep(1ms)
+print("end")
+--- stdout
+deferred
+end
+
+=== a task that cancels itself in its last guarded call runs its deferred code
+let ch: Channel<Task<()>> = Channel()
+let t = spawn {
+    defer print("deferred")
+    ch.recv().unwrap().cancel()
+}
+ch.send(t)
+task.sleep(1ms)
+print("end")
+--- stdout
+deferred
+end
+
+=== cancelling a task woken from its last guarded call closes its resource
+struct Res { name: str }
+impl Close for Res {
+    fn close(self) {
+        print("closed \(self.name)")
+    }
+}
+let ch: Channel<int> = Channel()
+let t = spawn {
+    use r = Res(name: "a")
+    ch.recv()
+}
+task.sleep(1ms)
+ch.send(1)
+t.cancel()
+task.sleep(1ms)
+print("end")
+--- stdout
+closed a
+end
+
+=== cancelling a task between two deferred blocks runs only the block not started
+let t = spawn {
+    defer print("outer")
+    defer {
+        print("inner")
+        task.yield_now()
+    }
+}
+task.yield_now()
+t.cancel()
+task.sleep(1ms)
+print("end")
+--- stdout
+inner
+outer
+end
+
+=== cancelling a task inside its deferred code does not run that code again
+let t = spawn {
+    defer {
+        print("started")
+        task.sleep(1h)
+        print("not reached")
+    }
+}
+task.sleep(1ms)
+t.cancel()
+task.sleep(1ms)
+print("end")
+--- stdout
+started
+end
