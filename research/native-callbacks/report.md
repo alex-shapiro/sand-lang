@@ -11,9 +11,14 @@ sometimes it needs the answer at once. Sand needs three things for that:
 - an async entry and a sync entry from the host into Sand;
 - a timer and I/O reactor on the host's UI thread.
 
-None of these needs a native function to call back into the VM. For the
-narrower case where a native does call back (Sand → native → Sand), the
-best mechanism is a **stackless continuation**:
+These three do not need a native function to call back into the VM. One
+open question can change that. In a custom layout, a script's measure code
+calls the host, which can measure a child whose layout is also script code
+(J-S10b, J-S11b). Then the host calls Sand while a native is on the Rust
+stack. That case needs a restricted nested call (section 8.3), and we did
+not test it on a UI framework. For a native that calls back from a Sand
+task (Sand → native → Sand), the best mechanism is a **stackless
+continuation**:
 
 1. The native does not call the Sand function itself. It returns a request
    to the VM.
@@ -73,16 +78,19 @@ task is waiting. Two host-side tests set the order of the work:
   on a background thread, the same loop worked. Sand's web build uses
   JavaScript timers instead, so a host-supplied timer is also possible.
 - An event that the host starts with `spawn` runs during the host's next
-  `eval` until it suspends. It resumes only while the host drives
-  `Session::run_tasks_until`. So a sync entry can see a handler that has
-  run only partway.
+  `eval` until it suspends. It resumes inside any later entry that waits,
+  or that runs for more than 2 ms, and under `Session::run_tasks_until`.
+  So any entry, sync entries included, can see a handler that has run only
+  partway.
 
 Our recommendations, in order:
 
 0. **[necessary]** Build a spike that runs a session on a real UI run loop
    (CFRunLoop or Android's Looper), with a timer, an async entry, and a
    sync entry. The two tests above ran on Linux only. The spike must also
-   choose how the host supplies the timer and reactor (F-S7).
+   choose how the host supplies the timer and reactor (F-S7), and it must
+   include a nested custom layout: script measure code that measures a
+   script child. That result decides whether section 8.3 is necessary.
 
 1. **[necessary]** Add GC-rooted handles that a host can keep. Today, the
    VM resets the session if a host uses a handle after a garbage
@@ -100,7 +108,8 @@ Our recommendations, in order:
    changes.
 3. **[necessary]** Add P2 continuations for Sand → native → Sand callbacks.
 4. **[blocker]** Do not use nested calls on the Rust stack for Sand →
-   native → Sand callbacks.
+   native → Sand callbacks. A restricted nested call stays a candidate for
+   a sync host entry while a native runs (section 8.3).
 5. **[blocker]** Do not use separate native stacks (fibers).
 
 ## 2. Method
@@ -156,7 +165,7 @@ Each fact gives a source ID and a test.
     and comment prefixes. **[necessary]**
   - The script also checks that every quoted string of 25 or more
     characters in this report is a checked quote or a test output.
-  - Result: 71 of 71 quotes found, 0 report quotes without a check, and
+  - Result: 72 of 72 quotes found, 0 report quotes without a check, and
     0 cited paths that git does not track
     (`lab/results/sources.txt`).
 - **Tests** have IDs such as `E2`. Each runtime has one program for its
@@ -211,12 +220,15 @@ Section 10 gives the runtime versions.
   finishes only while the host drives the session's tasks.** The host
   started two handlers with `spawn`. In the next `eval`, the handler
   without a suspension finished (`plain 1`). The other handler started
-  and stopped at its sleep (`started 1, taps 0`). It finished only when
-  the host called `Session::run_tasks_until` (`taps 1`). A sync entry
-  right after a new event ran that handler up to its sleep (`started 2,
-  taps 1`). Test: `sand_host` E17. **[necessary] [hazard]**: a UI host
-  must own one loop that both drives tasks and makes sync calls, and a
-  sync entry can see a handler that has run only partway.
+  and stopped at its sleep (`started 1, taps 0`). Two short `eval` calls
+  did not resume it, but `Session::run_tasks_until` did (`taps 1`). It
+  also resumed inside an `eval` that slept 5 ms, and inside an `eval` that
+  computed for more than 2 ms (E17e, E17f). A sync entry right after a new
+  event ran that handler up to its sleep (`started 2, taps 1`). The
+  `Session` docs promise that "Tasks spawned by an input continue to run during later
+  inputs" (S-S7). Test: `sand_host` E17. **[necessary] [hazard]**: any entry,
+  sync entries included, can see a handler that has run only partway, and
+  a handler's later steps can interleave with unrelated entries.
 - **F-S7. Sand's native build needs a tokio runtime for its timers.** On a
   plain run loop without a tokio runtime, an `eval` that computed worked,
   but an `eval` that slept failed with "there is no reactor running", and
@@ -317,7 +329,8 @@ async half.
 
 - **F-A1.** Wren's guide says not to call into the VM from a foreign
   method, because "The VM is not re-entrant". Its check is an assert,
-  "Cannot already be in foreign call." Source: R-S8, R-S8b.
+  "Cannot already be in foreign call.", and asserts run only in debug
+  builds. Source: R-S8, R-S8b.
   **[tangential] [source-only]**: a precedent, not a design to copy.
 - **F-A2.** Erlang asks a NIF to "return to its caller within 1
   millisecond". For long work, it prefers `enif_schedule_nif`, a tail
@@ -697,12 +710,14 @@ Each item gives the test, then the P1 and P2 results.
   "instruction limit exceeded". **[necessary]**
 - **E5, unbounded allocation in a callback.** P2 stopped it with "memory
   limit exceeded". **[necessary]**
-- **E11, the caller's locals after a GC inside a callback.**
-  **[blocker] [hazard]** for P1 without parking.
+- **E11, the caller's locals after a GC inside a callback.** One script
+  for both designs, under `gc_stress`. **[blocker] [hazard]** for P1
+  without parking.
   - P1 without parking: the GC freed the caller's list and gave its slot to
     another object. The script then read that object: "index 49, length 1".
   - P1 with parking: correct.
-  - P2 under `gc_stress`: correct.
+  - P2: correct (`results/sand_p2_e11b.txt`). A second P2 test sorted with
+    an allocating comparator, also correctly.
 - **E12, a comparator that empties the list and allocates, under
   `gc_stress`.** **[necessary] [hazard]**
   - P1 keeps the elements in Rust `Vec`s, which are not GC roots. The GC
@@ -849,11 +864,13 @@ A UI binding needs two kinds of call into Sand.
    - **One owner.** The host needs one loop that both drives tasks and
      makes sync calls (F-S6), with a timer and reactor (F-S7). Sand can
      ship that loop as a host-side driver.
-   - **Queued handlers.** Today a sync entry runs queued handlers until
-     they suspend (F-S6), so it can see a handler that has run only
-     partway. This is a **product tradeoff**: run queued handlers to
-     completion before the sync call, which adds latency, or isolate the
-     sync call from them, which needs new scheduler support.
+   - **Partial handlers.** Any entry can see a handler that has run only
+     partway (F-S6). The UI thread cannot wait for a handler that waits on
+     I/O. This is a **product tradeoff**:
+     - accept it, as JavaScript does, and document that handlers must keep
+       their invariants across every wait; or
+     - give the sync entry a mode in which no other task runs, which needs
+       scheduler work and removes the 2 ms yield (E16c).
    - **Sync entry:** run the handler to completion and return its value.
      If the handler suspends, fail with a clear error (E16). The host API
      demands an immediate answer, so Sand cannot avoid this failure. The
@@ -930,9 +947,18 @@ mechanics:
 - lifetime-branded handles (F-L2), against E12;
 - a retry rule that collects garbage in place, without a restart (E13).
 
-We found no source and ran no test that shows whether SwiftUI or Compose
-call back into script code during a synchronous host call that the script
-started. **[necessary]** to research before a UI binding ships. If they
+The API shapes suggest that custom layout needs this case: a Compose
+measure policy measures its children inside `MeasureScope.measure`
+(J-S11b), and a SwiftUI `Layout` asks its subviews for sizes inside
+`sizeThatFits` (J-S10b). If a script child has script layout code, the
+host calls Sand while the parent's native is on the Rust stack. We could
+not test this on a UI framework. **[necessary]** to test in the spike of
+recommendation 0. The product choice:
+- design the layout binding so that script measure code returns a
+  description and never measures a child synchronously, which keeps one
+  callback path but limits scripts; or
+- accept a restricted nested sync entry, which adds a second callback path
+  to the VM. If they
 do, Sand needs P1's parking. F-O2 measures parking on every native call;
 parking only for natives that can call back would cost less, but we did
 not measure that.
@@ -956,7 +982,15 @@ not measure that.
   We did not test a host that shares a session through other means.
   **[necessary]** to test before work on the sync entry starts.
 - **Prototype scope.** The prototypes handle only the cases in section
-  7.2. Section 8.2 lists the gaps. **[necessary]**
+  7.2. Section 8.2 lists the gaps. Two more: P1's callbacks run without
+  the CPU-time deadline (`call_nested` passes none), and no test covers
+  the CPU limit in either prototype. P1's E1 and E6 numbers come from the
+  parking build, so they include parking's cost on every native call.
+  E16 ran on the P2 binary, but it uses only today's `Session` API.
+  **[necessary]**
+- **Reproduction side effect.** `sandlab/build.sh` applies the patch to
+  this repository's `src/` and leaves it there. Revert it with
+  `git checkout -- Cargo.toml src`. **[nice to have]**
 - **Unoptimized prototypes.** The P1 and P2 per-call costs come from
   unoptimized code, so the ranking in E1 can change. **[nice to have]**
 - **Test scope.** We ran the tests of the `sandlang` package, not of `cli/`
@@ -979,16 +1013,16 @@ All paths are under `lab/` unless noted. Runtime versions:
 | ID         | Question                                       | Location                    |
 | ---------- | ---------------------------------------------- | --------------------------- |
 | E1         | Cost of a callback, and of a script call       | every runtime               |
-| E2, E2b    | Native ↔ script recursion depth                | every runtime               |
-| E3, E3b    | Can a callback suspend on I/O?                 | every runtime               |
-| E4         | Fuel or instruction limit inside a callback    | every runtime               |
+| E2, E2b    | Native ↔ script recursion depth                | all but mlua                |
+| E3, E3b    | Can a callback suspend on I/O?                 | see F-N6, F-T2, F-F1        |
+| E4         | Fuel or instruction limit inside a callback    | see F-N7, F-N8, F-T3        |
 | E5         | Memory limit inside a callback                 | Lua, QuickJS, Sand P2       |
 | E6         | Sort with a comparator                         | `sort/`, Lua, CPython, Sand |
 | E7         | The host keeps a handler and calls it later    | Lua                         |
 | E8, E8b    | Callback isolation in CPython                  | `py/cb.py`                  |
 | E9         | Re-entrant Rust callback guards                | `mlua_cb.rs`                |
 | E10        | Component Model re-entrance                    | `wasmtime_async_cb.rs`      |
-| E11        | Caller's locals after a GC in a callback       | `sandlab`                   |
+| E11, E11b  | Caller's locals after a GC in a callback       | `sandlab`                   |
 | E12        | Native-held handles after a GC in a callback   | `sandlab`                   |
 | E13, E13b  | Retry of a native after a callback             | `sandlab`                   |
 | E14        | Cancel a task during a suspended callback      | `sandlab`                   |

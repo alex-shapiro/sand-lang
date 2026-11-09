@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Runs every experiment serially and writes results/*.txt. Run on a quiet machine.
-# Prerequisites: build/ (see README), `cargo build --release` here and in ../sandlab.
+# Prerequisites: see ../README.md (Reproduce): build/, `cargo build --release`
+# here, and ../sandlab/build.sh.
 set -u
 cd "$(dirname "$0")"
 mkdir -p results

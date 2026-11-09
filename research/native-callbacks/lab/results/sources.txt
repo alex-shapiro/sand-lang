@@ -68,8 +68,9 @@ S-S2 FOUND repo:docs/SPEC.md :: 'the engine re-runs a `vm_function` from the sta
 S-S3 FOUND repo:src/stdlib/prelude.sand :: 'self.sort_by_keys(self.map(key))'
 S-S5 FOUND repo:src/vm/sched.rs :: 'const YIELD_EVERY: Duration = Duration::from_millis(2);'
 S-S6 FOUND repo:src/platform.rs :: 'Waits for `d` (with JavaScript timers, which wait at most 2^31 - 1 ms).'
+S-S7 FOUND repo:src/session.rs :: 'Tasks spawned by an input continue to run during later inputs'
 S-S4 FOUND repo:src/lib.rs :: '#![forbid(unsafe_code)]'
-71/71 quotes found in their sources
+72/72 quotes found in their sources
 0 report quotes without a check
 0 cited paths untracked or empty
-report states this run's count ('71 of 71 quotes found'): yes
+report states this run's count ('72 of 72 quotes found'): yes

@@ -175,6 +175,9 @@ async fn main() {
     // E14: cancelling a task while its callback is suspended; the task's defer runs; the fiber is reused
     let r = s.eval("var log: [str] = []\nfn job() -> int {\n defer { log.push(\"deferred\") }\n host.call(() => { task.sleep(1s)\n 1 })\n}\nlet t = spawn job()\ntask.sleep(5ms)\nt.cancel()\nlet again = host.repeat_(x => x + 1, 3)\nlet t2 = spawn host.call(() => { task.sleep(1ms)\n 7 })\n\"\\(log) \\(again) \\(t2.wait())\"").await;
     println!("E14 cancel a task whose callback is suspended, then reuse fibers: {:?}", r.map_err(|e| e.to_string().lines().next().unwrap_or("").to_string()));
+    // E11b: the same script as P1's E11: the caller's locals after a GC inside a callback
+    let r = s6.eval("fn work() -> bool {\n let keep = (0..50).map(i => [i, i + 1])\n let r = host.call(() => { var junk: [[int]] = []\n for i in 0..200 { junk.push([i]) }\n junk.len() })\n r == 200 and keep[49][1] == 50 and keep.len() == 50\n}\nwork()").await;
+    println!("E11b caller's locals after a GC inside a callback (P1's E11 script), under gc_stress: {:?}", r.map_err(|e| e.to_string().lines().next().unwrap_or("").to_string()));
     // E12: a comparator that empties the list and allocates, under gc_stress
     let r = s6.eval("let t = (0..64).map(i => [64 - i])\nhost.sort_with(t, (a, b) => { t.clear()\n var junk: [[int]] = []\n for i in 0..50 { junk.push([i]) }\n a[0] < b[0] })\nt.map(x => x[0]) == (1..65).map(i => i)").await;
     println!("E12 comparator that empties the list under gc_stress: {:?}", r.map_err(|e| e.to_string().lines().next().unwrap_or("").to_string()));

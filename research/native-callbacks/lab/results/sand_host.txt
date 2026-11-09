@@ -7,4 +7,6 @@ E17a after the events, two later evals: Ok(Some("\"started 1, taps 0, plain 1\""
 E17b after the host drives run_tasks_until for 20 ms: Ok(Some("\"started 1, taps 1\""))
 E17c sync entry right after a host event: Some(Ok(Some("\"layout 320, started 2, taps 1\"")))
 E17d after run_tasks_until: Ok(Some("\"started 2, taps 2\""))
+E17e new event, then a short eval: Ok(Some("\"started 3, taps 2\"")); then an eval that sleeps 5 ms: Ok(Some("\"started 3, taps 3\""))
+E17f new event, then an eval that computes for more than 2 ms: Ok(Some("\"started 4, taps 4\""))
 exit=0

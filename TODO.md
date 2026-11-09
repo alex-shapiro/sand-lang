@@ -146,11 +146,12 @@ Common scripts fail, require workarounds, or produce misleading diagnostics.
 - [ ] ❓ _Native modules._ **Callbacks into Sand.** A host cannot keep a
       Sand function to call later, and a native function cannot call a Sand
       function. UI bindings such as SwiftUI and Jetpack Compose need both.
-      In order: run a session on a real UI run loop (CFRunLoop, Looper);
-      add GC-rooted host handles; add an async and a sync host entry point;
+      In order: run a session on a real UI run loop (CFRunLoop, Looper),
+      including a nested custom layout, which decides whether Sand also
+      needs a restricted nested call; add GC-rooted host handles; add an async and a sync host entry point;
       then add stackless continuations (`Ctl::call`). Open product
-      tradeoffs: the sync entry's budget and partial changes, the host loop
-      that owns the session, and whether a native fails or works on a
+      tradeoffs: the sync entry's budget and partial changes, handlers that
+      other entries see partway, the host's timer and reactor, and whether a native fails or works on a
       snapshot if a callback changes its inputs. See
       [the research report](research/native-callbacks/report.md).
 - [ ] ❓ _Testing._ Decide whether `exit(0)` should pass a test. `exit(0)`

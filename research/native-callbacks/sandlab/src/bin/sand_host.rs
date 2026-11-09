@@ -38,6 +38,16 @@ async fn e17() {
     println!("E17c sync entry right after a host event: {sync:?}");
     s.run_tasks_until(tokio::time::sleep(Duration::from_millis(20)), |e| println!("task error: {e}")).await;
     println!("E17d after run_tasks_until: {:?}", s.eval("\"started \\(started), taps \\(taps)\"").await);
+    // A suspended handler can also resume inside a later eval that waits, or that computes for more than 2 ms.
+    s.eval("spawn on_tap()").await.unwrap();
+    let e = s.eval("\"started \\(started), taps \\(taps)\"").await;
+    let f = s.eval("task.sleep(5ms)\n\"started \\(started), taps \\(taps)\"").await;
+    println!("E17e new event, then a short eval: {e:?}; then an eval that sleeps 5 ms: {f:?}");
+    s.eval("spawn on_tap()").await.unwrap();
+    let _ = s.eval("\"started \\(started)\"").await;
+    std::thread::sleep(Duration::from_millis(3));
+    let g = s.eval("var a = 0\nfor i in 0..3000000 { a += i % 7 }\n\"started \\(started), taps \\(taps)\"").await;
+    println!("E17f new event, then an eval that computes for more than 2 ms: {g:?}");
 }
 
 /// A minimal run loop: a thread-parking waker and no tokio runtime.

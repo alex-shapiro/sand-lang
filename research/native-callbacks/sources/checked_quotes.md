@@ -126,6 +126,8 @@ are in this repository. The other `sources/*.md` files hold research notes.
   > const YIELD_EVERY: Duration = Duration::from_millis(2);
 - **S-S6** repo:src/platform.rs
   > Waits for `d` (with JavaScript timers, which wait at most 2^31 - 1 ms).
+- **S-S7** repo:src/session.rs
+  > Tasks spawned by an input continue to run during later inputs
 - **W-S10** https://raw.githubusercontent.com/WebAssembly/js-promise-integration/5b247b1026d2f438eefe51914a79f4218cbda9f9/proposals/js-promise-integration/Overview.md
   > Not all applications can equally tolerate being reentrant in this way
 - **W-S2** crates:wasmtime-50.0.1/src/runtime/store.rs

@@ -1,0 +1,2 @@
+E11b caller's locals after a GC inside a callback (P1's E11 script), under gc_stress: Ok(Some("true"))
+exit=0
