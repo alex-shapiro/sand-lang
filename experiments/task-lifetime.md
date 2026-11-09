@@ -25,7 +25,7 @@ Sand kept these behaviors:
 
 ## Method
 
-We ran the same scenarios in each system. In each scenario, a worker task sleeps for 80 ms and records whether it finished or was cancelled. Cancellations occur about 10 ms after the workers start. Each program waits long enough for the worker to finish.
+We ran the same scenarios in each system. In each scenario, worker tasks sleep and record whether they finished or were cancelled. A slow worker sleeps for 80 ms. The faster worker in a race sleeps for 10 to 50 ms. Most cancellations occur about 10 ms after the workers start. Each program waits long enough for the worker to finish.
 
 | System | Version | Tasks tested |
 | --- | --- | --- |
@@ -87,13 +87,13 @@ The work was cancelled in asyncio, Trio, Tokio, Kotlin, and Go. Before this chan
 | The race returns the cancelled task | asyncio `wait` |
 | The whole program ends and the script cannot prevent it | Sand before this change |
 
-We did not test this case in Swift. Go has no race primitive.
+We did not test this case in Swift or Go.
 
 ## Sand measurements
 
 ### How scripts use tasks
 
-We ran 50 Sand scripts that spawn tasks, from the language specs, the examples, and the guide. They started 1,068 tasks. Of these, 34 scripts had at least one task that ran while no task was waiting for it. This count includes tasks whose results a script read after they finished. One test starts 1,000 of the tasks. The specs emphasize cancellation, so these numbers are only a rough guide.
+We ran 50 Sand scripts that spawn tasks, from the language specs, the examples, and the guide. They started 1,068 tasks. Of these scripts, 34 had at least one task that never had a waiter while it was running. This count includes tasks whose results a script read after they finished. One test starts 1,000 of the tasks. The specs emphasize cancellation, so these numbers are only a rough guide.
 
 `examples/chat_server.sand` starts a task for each client and never waits for it. The rule in our assumption would stop these tasks.
 
@@ -101,7 +101,7 @@ The 34 recorded model transcripts in the `ash` project contained no model-writte
 
 ### Candidates
 
-Speed is the change in retired instructions for 200,000 spawn and wait pairs, against the unchanged engine. Cancel time is the same measure for cancelling 9,000 sleeping tasks. "Failing tests" counts failures out of 1,135 tests.
+Speed is the change in retired instructions for 200,000 spawn and wait pairs, against the unchanged engine. Cancel time is the same measure for cancelling 9,000 sleeping tasks. "Failing tests" counts failures out of 1,135 tests. Differences of about 0.5% or less are within run-to-run variation: the cancel baseline moved by about 1.4% between sessions.
 
 | Candidate | Effect | Failing tests | Speed | Cancel time |
 | --- | --- | --- | --- | --- |
@@ -120,7 +120,7 @@ We did not prototype a rule that stops tasks when garbage collection finds their
 
 ### Final implementation
 
-The race prototype scanned the race list on each cancellation, which could allow unmetered quadratic work. The final implementation counts the tasks that can still finish the race, so each cancellation costs constant time. Against the unchanged engine, retired instructions changed by -0.01% for a channel ping-pong, +0.01% for spawn and wait pairs, and +0.21% for cancelling 9,000 tasks. All 1,135 tests passed.
+The race prototype scanned the race list on each cancellation, which could allow unmetered quadratic work. The final implementation counts the tasks that can still finish the race, so each cancellation costs constant time. Against the unchanged engine, retired instructions changed by -0.01% for a channel ping-pong, +0.01% for spawn and wait pairs, and +0.21% for cancelling 9,000 tasks. A repeat measurement gave +0.01%, 0.00%, and -0.57%, so these differences are within run-to-run variation. All 1,135 tests passed.
 
 ## Open follow-up
 
