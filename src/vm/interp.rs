@@ -61,7 +61,7 @@ pub enum Exit {
     Blocked,
     Async(Suspension),
     Prompt(Capability),
-    /// `exit(code)` or a top-level `?` failure.
+    /// A task called `exit` with this code.
     Terminate(i32),
     /// `task.yield_now()`.
     YieldNow,
@@ -449,14 +449,14 @@ impl Vm {
 
     #[cold]
     #[inline(never)]
-    fn try_top(&mut self, fiber: &mut Fiber, ip: usize, prog: &Program, res: Value) -> Trap {
+    fn try_top(&mut self, fiber: &mut Fiber, ip: usize, prog: &Program, res: Value) -> Result<Exit, Trap> {
         // `Option::None` has 0 fields; `Result::Err(e)` stores `e` at field 0.
         let Some(e) = self.heap.field(res, 0) else {
-            return self.ctl_trap(fiber, ip, Ctl::fail("none", "`?` found None"));
+            return self.ctl_exit(fiber, ip, Ctl::fail("none", "`?` found None"));
         };
         match display::to_display_metered(prog, &self.heap, &self.meter, e) {
-            Ok(text) => self.error_trap(fiber, ip, text),
-            Err(c) => self.ctl_trap(fiber, ip, c),
+            Ok(text) => Err(self.error_trap(fiber, ip, text)),
+            Err(c) => self.ctl_exit(fiber, ip, c),
         }
     }
 
@@ -503,16 +503,21 @@ impl Vm {
         Trap::Internal { message: msg, trace: self.trace_of(fiber, Some(ip as u32)) }
     }
 
-    /// The trap for a failed metered operation.
+    /// How the interpreter leaves the task after a failed metered operation.
     #[cold]
     #[inline(never)]
-    fn ctl_trap(&mut self, fiber: &mut Fiber, ip: usize, c: Ctl) -> Trap {
-        match c.into_kind() {
-            CtlKind::RuntimeError(m) => self.error_trap(fiber, ip, m),
-            CtlKind::Internal(m) => self.internal_trap(fiber, ip, m),
-            CtlKind::Limit(k) => self.limit_trap(fiber, ip, k),
-            CtlKind::Interrupted => Trap::Interrupted,
-            other => self.internal_trap(fiber, ip, format!("unexpected {other:?}")),
+    fn ctl_exit(&mut self, fiber: &mut Fiber, ip: usize, c: Ctl) -> Result<Exit, Trap> {
+        if let Some(k) = c.as_limit() {
+            return Err(self.limit_trap(fiber, ip, k));
+        }
+        self.ended_task_exit(fiber, ip, c.into_kind())
+    }
+
+    /// How the interpreter leaves the task when `kind` ends the run.
+    fn ended_task_exit(&mut self, fiber: &mut Fiber, ip: usize, kind: CtlKind) -> Result<Exit, Trap> {
+        match self.run_ending(kind, |vm| vm.trace_of(fiber, Some(ip as u32))) {
+            RunEnding::Exit(code) => Ok(Exit::Terminate(code)),
+            RunEnding::Trap(t) => Err(t),
         }
     }
 
@@ -584,7 +589,7 @@ impl Vm {
         macro_rules! fail_ctl {
             ($c:expr) => {{
                 save!();
-                return Err(self.ctl_trap(fiber, ip, $c));
+                return self.ctl_exit(fiber, ip, $c);
             }};
         }
         macro_rules! int {
@@ -1637,7 +1642,7 @@ impl Vm {
                     Op::TryTop { src } => {
                         save!();
                         let e = r!(src);
-                        return Err(self.try_top(fiber, ip, &prog, e));
+                        return self.try_top(fiber, ip, &prog, e);
                     }
                     Op::Internal { msg } => {
                         save!();
@@ -1739,12 +1744,6 @@ impl Vm {
             _ => {}
         }
         match r.into_kind() {
-            CtlKind::RuntimeError(m) => Err(self.error_trap(fiber, ip, m)),
-            CtlKind::Internal(m) => Err(self.internal_trap(fiber, ip, m)),
-            // Already retried after a collection.
-            CtlKind::Limit(k) => Err(Trap::Limit(k)),
-            CtlKind::Interrupted => Err(Trap::Interrupted),
-            CtlKind::Exit(c) => Ok(Some(Exit::Terminate(c))),
             CtlKind::NeedPermission(cap) => {
                 // Retry the call instruction after the prompt.
                 fiber.frames.last_mut().unwrap().ip = (ip - 1) as u32;
@@ -1756,6 +1755,8 @@ impl Vm {
             }
             CtlKind::Yield | CtlKind::Blocked => unreachable!("handled above"),
             CtlKind::Collect => Err(self.internal_trap(fiber, ip, "a native asked for a collection twice".into())),
+            // A limit here is final: the call already ran again after a collection.
+            ended => self.ended_task_exit(fiber, ip, ended).map(Some),
         }
     }
 

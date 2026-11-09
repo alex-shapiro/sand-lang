@@ -20,8 +20,9 @@ use crate::stdlib::time::TimeZone;
 use crate::types::{FnId, ModId};
 use crate::vm::bytecode::Program;
 use crate::vm::heap::GcStats;
-use crate::vm::sched::{IoShared, RunEnd};
-use crate::vm::{Always, Host, HostFn, NativeEntry, OutputSink, Rng, SharedSink, TraceFrame, Trap, Vm, WaitKind, entropy_seed};
+use crate::vm::sched::IoShared;
+use crate::vm::value::Value;
+use crate::vm::{Always, Host, HostFn, NativeEntry, OutputSink, Rng, RunEnding, SharedSink, TraceFrame, Trap, Vm, WaitKind, entropy_seed};
 use parking_lot::Mutex;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
@@ -1223,19 +1224,19 @@ impl Engine {
             vm.deadline = deadline;
             let init = vm.run_main(prog.entry).await;
             let result = match init {
-                Ok(RunEnd::Finished(_)) => {
+                Ok(_) => {
                     vm.ready.clear();
                     let r = vm.run_main(proto).await;
                     match end_run(&mut vm, r).await {
-                        Ok(RunEnd::Finished(_)) | Ok(RunEnd::Exit(0)) => Ok(()),
-                        Ok(RunEnd::Exit(c)) => Err(format!("exited with code {c}")),
-                        Err(Trap::Interrupted) => return Err(Error::Interrupted),
-                        Err(t) => Err(trap_message(t)),
+                        Ok(_) | Err(RunEnding::Exit(0)) => Ok(()),
+                        Err(RunEnding::Exit(c)) => Err(format!("exited with code {c}")),
+                        Err(RunEnding::Trap(Trap::Interrupted)) => return Err(Error::Interrupted),
+                        Err(RunEnding::Trap(t)) => Err(trap_message(t)),
                     }
                 }
-                Ok(RunEnd::Exit(c)) => Err(format!("module exited with code {c}")),
-                Err(Trap::Interrupted) => return Err(Error::Interrupted),
-                Err(t) => Err(trap_message(t)),
+                Err(RunEnding::Exit(c)) => Err(format!("module exited with code {c}")),
+                Err(RunEnding::Trap(Trap::Interrupted)) => return Err(Error::Interrupted),
+                Err(RunEnding::Trap(t)) => Err(trap_message(t)),
             };
             deadline = vm.deadline;
             report.results.push(TestResult { name: tname, passed: result.is_ok(), message: result.err() });
@@ -1341,13 +1342,9 @@ impl Engine {
             self.recycle(prog, compiled.snapshot);
         }
         match r {
-            Ok(RunEnd::Finished(_)) => Ok(Outcome { exit_code: 0 }),
-            Ok(RunEnd::Exit(c)) => Ok(Outcome { exit_code: c }),
-            Err(Trap::Exit(c)) => Ok(Outcome { exit_code: c }),
-            Err(Trap::Error { message, trace }) => Err(Error::Runtime { message, trace }),
-            Err(Trap::Internal { message, trace }) => Err(Error::Internal { message, trace }),
-            Err(Trap::Limit(k)) => Err(Error::Limit(k)),
-            Err(Trap::Interrupted) => Err(Error::Interrupted),
+            Ok(_) => Ok(Outcome { exit_code: 0 }),
+            Err(RunEnding::Exit(c)) => Ok(Outcome { exit_code: c }),
+            Err(RunEnding::Trap(t)) => Err(trap_error(t)),
         }
     }
 
@@ -1776,11 +1773,10 @@ enum ImportDecision {
 const MAX_DISCOVERY_ERRORS: usize = 100;
 
 /// Ends a run whose main task finished (`Vm::end_tasks`).
-async fn end_run(vm: &mut Vm, r: Result<RunEnd, Trap>) -> Result<RunEnd, Trap> {
-    match r {
-        Ok(RunEnd::Finished(v)) => Ok(vm.end_tasks().await?.map_or(RunEnd::Finished(v), RunEnd::Exit)),
-        r => r,
-    }
+async fn end_run(vm: &mut Vm, r: Result<Value, RunEnding>) -> Result<Value, RunEnding> {
+    let v = r?;
+    vm.end_tasks().await?;
+    Ok(v)
 }
 
 fn trap_message(t: Trap) -> String {
@@ -1789,7 +1785,16 @@ fn trap_message(t: Trap) -> String {
         Trap::Internal { message, .. } => format!("internal error: {message}"),
         Trap::Limit(k) => k.to_string(),
         Trap::Interrupted => "interrupted".into(),
-        Trap::Exit(c) => format!("exited with code {c}"),
+    }
+}
+
+/// The error of a run that `t` ended.
+pub(crate) fn trap_error(t: Trap) -> Error {
+    match t {
+        Trap::Error { message, trace } => Error::Runtime { message, trace },
+        Trap::Internal { message, trace } => Error::Internal { message, trace },
+        Trap::Limit(k) => Error::Limit(k),
+        Trap::Interrupted => Error::Interrupted,
     }
 }
 

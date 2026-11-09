@@ -2049,6 +2049,52 @@ fn host_functions_take_and_return_durations_and_never() {
     assert!(matches!(&r, Err(Error::Runtime { message, .. }) if message.contains("the duration is out of range")), "{r:?}");
 }
 
+/// An `exit` from the finisher of a host call ends a test as an `exit` in the script does.
+#[cfg(feature = "os")]
+#[test]
+fn exit_from_a_finisher_ends_a_test_like_a_script_exit() {
+    use sandlang::vm::Ctl;
+    let mut m = NativeModule::new("quit");
+    m.async_function("now", |code: i64| async move { Err::<(), Ctl>(Ctl::exit(code as i32)) });
+    let dir = TempDir::new("exit-tests");
+    let main = dir.write("t.sand", "import quit\ntest \"zero\" { quit.now(0) }\ntest \"one\" { quit.now(1) }\ntest \"plain\" { exit(0) }");
+    let mut engine = Engine::new(Config::new().host_modules(HostModules::new([m]).unwrap()));
+    let report = rt().block_on(engine.run_tests(&main)).unwrap();
+    let results: Vec<_> = report.results.iter().map(|r| (r.name.as_str(), r.passed, r.message.as_deref())).collect();
+    assert_eq!(results, [("zero", true, None), ("one", false, Some("exited with code 1")), ("plain", true, None)]);
+}
+
+/// An `exit` from a finisher during module initialization reports the module, as an `exit` in the
+/// script does.
+#[cfg(feature = "os")]
+#[test]
+fn exit_from_a_finisher_in_module_init_fails_each_test_like_a_script_exit() {
+    use sandlang::vm::Ctl;
+    let mut m = NativeModule::new("quit");
+    m.async_function("now", |code: i64| async move { Err::<(), Ctl>(Ctl::exit(code as i32)) });
+    let dir = TempDir::new("exit-init");
+    let main = dir.write("t.sand", "import quit\nquit.now(4)\ntest \"t\" { }");
+    let mut engine = Engine::new(Config::new().host_modules(HostModules::new([m]).unwrap()));
+    let report = rt().block_on(engine.run_tests(&main)).unwrap();
+    assert_eq!(report.results[0].message.as_deref(), Some("module exited with code 4"));
+}
+
+/// An `exit` from a finisher while the tasks of a finished run unwind sets the exit code, as an
+/// `exit` in the deferred code does.
+#[cfg(feature = "os")]
+#[test]
+fn exit_from_a_finisher_in_deferred_code_sets_the_exit_code() {
+    use sandlang::vm::Ctl;
+    let mut m = NativeModule::new("quit");
+    m.async_function("now", |code: i64| async move { Err::<(), Ctl>(Ctl::exit(code as i32)) });
+    let src = "import quit\nlet c: Channel<int> = Channel()\nspawn {\n    defer DEFERRED\n    c.recv()\n};\ntask.yield_now()";
+    for (deferred, expected) in [("quit.now(5)", 5), ("exit(5)", 5)] {
+        let config = Config::new().host_modules(HostModules::new([m.clone()]).unwrap());
+        let (r, _, _) = run_src(config, &src.replace("DEFERRED", deferred));
+        assert_eq!(r.unwrap().exit_code, expected, "{deferred}");
+    }
+}
+
 #[test]
 fn public_fields_of_public_host_types_use_public_types() {
     let mut m = NativeModule::new("shapes");

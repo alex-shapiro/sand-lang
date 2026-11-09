@@ -319,17 +319,19 @@ pub enum Trap {
     },
     Limit(LimitKind),
     Interrupted,
-    Exit(i32),
 }
 
-impl Trap {
-    /// The trap for an error from the meter: a limit or an interrupt.
-    pub(crate) fn from_ctl(c: Ctl) -> Trap {
-        match c.into_kind() {
-            CtlKind::Limit(k) => Trap::Limit(k),
-            CtlKind::Interrupted => Trap::Interrupted,
-            other => Trap::Internal { message: format!("unexpected {other:?}"), trace: vec![] },
-        }
+/// How a run ended without a returned value from its main task.
+#[derive(Debug)]
+pub enum RunEnding {
+    /// A task called `exit` with this code.
+    Exit(i32),
+    Trap(Trap),
+}
+
+impl From<Trap> for RunEnding {
+    fn from(t: Trap) -> RunEnding {
+        RunEnding::Trap(t)
     }
 }
 
@@ -1130,12 +1132,17 @@ impl Vm {
 
     /// Flushes standard output and error, and waits until they are written.
     /// Fails if the meter reports an interrupt or a limit first.
-    pub fn drain_output(&self) -> Result<(), Ctl> {
+    pub fn drain_output(&mut self) -> Result<(), RunEnding> {
         self.flush_stdout();
-        for sink in [&self.host.stdout, &self.host.stderr] {
-            self.wait_backlog(sink, 0)?;
-        }
-        Ok(())
+        let drained = [&self.host.stdout, &self.host.stderr].into_iter().try_for_each(|sink| self.wait_backlog(sink, 0));
+        drained.map_err(|c| self.run_ending(c.into_kind(), |_| vec![]))
+    }
+
+    /// Drains the output of a scheduler run that ended with `r`. A drain failure replaces any
+    /// result except a trap.
+    pub(crate) fn drain_output_after<T>(&mut self, r: Result<T, RunEnding>) -> Result<T, RunEnding> {
+        let drained = self.drain_output();
+        if matches!(r, Err(RunEnding::Trap(_))) { r } else { drained.and(r) }
     }
 
     /// Waits until `sink`'s backlog is at most `max` bytes. Fails if the
@@ -1491,26 +1498,35 @@ impl Vm {
     }
 
     /// Ends a run whose main task finished: cancels the other tasks and runs
-    /// their pending deferred code until it finishes or would wait. Returns
-    /// the exit code if deferred code calls `exit`.
-    pub async fn end_tasks(&mut self) -> Result<Option<i32>, Trap> {
+    /// their pending deferred code until it finishes or would wait.
+    pub async fn end_tasks(&mut self) -> Result<(), RunEnding> {
         self.release_main();
         let tasks: Vec<Value> = self.fibers.iter().flatten().map(|f| f.task).collect();
         for t in tasks {
             self.cancel_task(t);
         }
         if self.ready.is_empty() {
-            return Ok(None);
+            return Ok(());
         }
         self.ending = true;
         let r = self.drive(None).await;
         self.ending = false;
-        let r = r.and_then(|stop| self.drain_output().map(|()| stop).map_err(Trap::from_ctl));
-        match r {
-            Ok(sched::Stop::Exit(c)) => Ok(Some(c)),
-            Ok(_) => Ok(None),
-            Err(t) => Err(t),
-        }
+        self.drain_output_after(r).map(|_| ())
+    }
+
+    /// How a [`CtlKind`] that no caller handled ends the run. `trace` gives the stack trace of an
+    /// error. A request to the scheduler is an internal error here.
+    pub(crate) fn run_ending(&mut self, kind: CtlKind, trace: impl FnOnce(&Vm) -> Vec<TraceFrame>) -> RunEnding {
+        let message = match kind {
+            CtlKind::Exit(code) => return RunEnding::Exit(code),
+            CtlKind::RuntimeError(message) => return Trap::Error { message, trace: trace(self) }.into(),
+            CtlKind::Limit(k) => return Trap::Limit(k).into(),
+            CtlKind::Interrupted => return Trap::Interrupted.into(),
+            CtlKind::Internal(message) => message,
+            request => format!("unexpected {request:?}"),
+        };
+        self.broken = true;
+        Trap::Internal { message, trace: trace(self) }.into()
     }
 
     // ------------------------------------------------------------------

@@ -20,9 +20,9 @@ use crate::syntax::ast::{ItemKind, StmtKind};
 use crate::types::{FnId, ModId, TypeId};
 use crate::unwind::CatchUnwind;
 use crate::vm::bytecode::Program;
-use crate::vm::sched::{RunEnd, Stop};
+use crate::vm::sched::Stop;
 use crate::vm::value::Value;
-use crate::vm::{CtlKind, Trap, Vm};
+use crate::vm::{RunEnding, Vm};
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
@@ -555,11 +555,10 @@ impl Session {
         match shown {
             None => Ok(None),
             Some(Ok(s)) => Ok(Some(s)),
-            Some(Err(c)) => match c.into_kind() {
-                CtlKind::Limit(k) => Err(Error::Limit(k)),
-                CtlKind::RuntimeError(message) => Err(Error::Runtime { message, trace: vec![] }),
-                other => Err(Error::Internal { message: format!("cannot show the value: {other:?}"), trace: vec![] }),
-            },
+            Some(Err(c)) => {
+                let ending = vm.run_ending(c.into_kind(), |_| vec![]);
+                conclude(vm, Err(ending), exit_code).map(|_| None)
+            }
         }
     }
 
@@ -574,35 +573,29 @@ impl Session {
         // Waiting for input may take any time.
         vm.deadline = None;
         let r = vm.drive(None).await;
-        let r = r.and_then(|stop| vm.drain_output().map(|()| stop).map_err(Trap::from_ctl));
-        let r = match r {
+        match vm.drain_output_after(r) {
             Ok(Stop::Prompt(cap)) => {
                 st.deferred_prompt = Some(cap);
-                return Ok(false);
+                Ok(false)
             }
-            Ok(Stop::Idle | Stop::Main(_)) => return Ok(false),
-            Ok(Stop::Exit(c)) => Ok(RunEnd::Exit(c)),
-            Err(t) => Err(t),
-        };
-        Ok(conclude(vm, r, exit_code)?.is_none())
+            Ok(Stop::Idle | Stop::Main(_)) => Ok(false),
+            Err(ending) => Ok(conclude(vm, Err(ending), exit_code)?.is_none()),
+        }
     }
 }
 
 /// The outcome of a run of the session's VM: the main task's result, or
 /// `None` if a task called `exit` (recorded in `exit_code`). On failure and
 /// exit, cancels all tasks.
-fn conclude(vm: &mut Vm, r: Result<RunEnd, Trap>, exit_code: &mut Option<i32>) -> Result<Option<Value>, Error> {
+fn conclude(vm: &mut Vm, r: Result<Value, RunEnding>, exit_code: &mut Option<i32>) -> Result<Option<Value>, Error> {
     let e = match r {
-        Ok(RunEnd::Finished(v)) => return Ok(Some(v)),
-        Ok(RunEnd::Exit(c)) | Err(Trap::Exit(c)) => {
+        Ok(v) => return Ok(Some(v)),
+        Err(RunEnding::Exit(c)) => {
             *exit_code = Some(c);
             vm.abandon_tasks();
             return Ok(None);
         }
-        Err(Trap::Error { message, trace }) => Error::Runtime { message, trace },
-        Err(Trap::Internal { message, trace }) => Error::Internal { message, trace },
-        Err(Trap::Limit(k)) => Error::Limit(k),
-        Err(Trap::Interrupted) => Error::Interrupted,
+        Err(RunEnding::Trap(t)) => crate::engine::trap_error(t),
     };
     vm.abandon_tasks();
     if matches!(e, Error::Limit(_)) {

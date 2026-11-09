@@ -148,18 +148,10 @@ const CLOCK_SLICES: u32 = 32;
 /// host's executor run.
 const YIELD_EVERY: Duration = Duration::from_millis(2);
 
-/// Result of running the program's main task.
-pub enum RunEnd {
-    Finished(Value),
-    Exit(i32),
-}
-
 /// Why [`Vm::drive`] returned.
 pub(crate) enum Stop {
     /// The main task finished with this value.
     Main(Value),
-    /// A task called `exit`.
-    Exit(i32),
     /// Idle state when all tasks are blocked and all I/O is complete.
     Idle,
     /// Suspended state awaiting permission prompt.
@@ -268,7 +260,7 @@ impl Vm {
 
     /// Runs the finishers of completed I/O operations, which charge the
     /// meter like natives.
-    fn apply_completions(&mut self, done: Vec<(u32, u64, Finisher)>, timer: &RunTimer) -> Result<(), Trap> {
+    fn apply_completions(&mut self, done: Vec<(u32, u64, Finisher)>, timer: &RunTimer) -> Result<(), RunEnding> {
         if done.is_empty() {
             return Ok(());
         }
@@ -292,24 +284,10 @@ impl Vm {
                     self.enforce_limit(None).map_err(Trap::Limit)?;
                 }
                 Err(c) => {
-                    let trace = match &self.fibers[fid as usize] {
-                        Some(f) => self.trace_of(f, None),
+                    return Err(self.run_ending(c.into_kind(), |vm| match &vm.fibers[fid as usize] {
+                        Some(f) => vm.trace_of(f, None),
                         None => vec![],
-                    };
-                    return Err(match c.into_kind() {
-                        CtlKind::RuntimeError(message) => Trap::Error { message, trace },
-                        CtlKind::Internal(message) => {
-                            self.broken = true;
-                            Trap::Internal { message, trace }
-                        }
-                        CtlKind::Limit(k) => Trap::Limit(k),
-                        CtlKind::Interrupted => Trap::Interrupted,
-                        CtlKind::Exit(c) => Trap::Exit(c),
-                        other => {
-                            self.broken = true;
-                            Trap::Internal { message: format!("unexpected {other:?} from an I/O operation"), trace }
-                        }
-                    });
+                    }));
                 }
             }
         }
@@ -320,22 +298,16 @@ impl Vm {
     /// finishes, running the other tasks meanwhile, then returns (other
     /// tasks are left as they are). The wall-time limit is `self.deadline`.
     /// Buffered standard output is flushed at the end.
-    pub async fn run_main(&mut self, proto: u32) -> Result<RunEnd, Trap> {
+    pub async fn run_main(&mut self, proto: u32) -> Result<Value, RunEnding> {
         let r = match self.start_main(proto) {
-            Ok(fid) => match self.drive(Some(fid)).await {
-                Ok(Stop::Exit(c)) => Ok(RunEnd::Exit(c)),
-                Ok(Stop::Main(v)) => Ok(RunEnd::Finished(v)),
+            Ok(fid) => self.drive(Some(fid)).await.map(|stop| match stop {
+                Stop::Main(v) => v,
                 // Only runs without a main task stop this way.
-                Ok(Stop::Idle | Stop::Prompt(_)) => Ok(RunEnd::Finished(Value::Unit)),
-                Err(t) => Err(t),
-            },
-            Err(t) => Err(t),
+                Stop::Idle | Stop::Prompt(_) => Value::Unit,
+            }),
+            Err(t) => Err(t.into()),
         };
-        let drained = self.drain_output();
-        match drained {
-            Err(c) if r.is_ok() => Err(Trap::from_ctl(c)),
-            _ => r,
-        }
+        self.drain_output_after(r)
     }
 
     fn start_main(&mut self, proto: u32) -> Result<u32, Trap> {
@@ -357,7 +329,7 @@ impl Vm {
     /// `main`) finishes or, without one, until nothing can run or a task
     /// needs a permission prompt ([`Stop::Prompt`]). The future may be
     /// dropped where it waits: every task is then in the scheduler's tables.
-    pub(crate) async fn drive(&mut self, main: Option<u32>) -> Result<Stop, Trap> {
+    pub(crate) async fn drive(&mut self, main: Option<u32>) -> Result<Stop, RunEnding> {
         let mut timer = RunTimer::start(self.host.clock.clone());
         // Where an instruction was retried after a memory limit error.
         let mut gc_retried: Option<(u32, usize, u32)> = None;
@@ -399,11 +371,11 @@ impl Vm {
                         // the limit. A retry is told apart from a later run of
                         // the same instruction by the fuel spent: reaching it
                         // again takes a back edge or a call, which cost fuel.
-                        let Some(&fr) = f.frames.last() else { return Err(Trap::Limit(LimitKind::Memory)) };
+                        let Some(&fr) = f.frames.last() else { return Err(Trap::Limit(LimitKind::Memory).into()) };
                         let at = (fid, f.frames.len(), fr.ip);
                         let op = self.prog.protos[fr.proto as usize].code[fr.ip as usize];
                         if gc_retried == Some(at) && slice - fuel <= super::interp::call_tick(op) {
-                            return Err(Trap::Limit(LimitKind::Memory));
+                            return Err(Trap::Limit(LimitKind::Memory).into());
                         }
                         gc_retried = Some(at);
                         self.collect_all_garbage(Some(&mut f));
@@ -412,8 +384,7 @@ impl Vm {
                         self.ready.push_front(fid);
                         continue;
                     }
-                    Err(Trap::Exit(c)) => return Ok(Stop::Exit(c)),
-                    Err(t) => return Err(t),
+                    Err(t) => return Err(t.into()),
                 };
                 match exit {
                     Exit::Done(v) => {
@@ -451,7 +422,7 @@ impl Vm {
                             return Ok(Stop::Prompt(cap));
                         }
                         // Write the script's output before showing the prompt.
-                        self.drain_output().map_err(Trap::from_ctl)?;
+                        self.drain_output()?;
                         timer.read();
                         let asked = timer.now;
                         let answer = match self.host.prompter.clone() {
@@ -459,7 +430,7 @@ impl Vm {
                                 let interrupt = self.host.interrupt.clone();
                                 match interrupt.unless_interrupted(prompter.prompt(cap.clone())).await {
                                     Some(answer) => answer,
-                                    None => return Err(Trap::Interrupted),
+                                    None => return Err(Trap::Interrupted.into()),
                                 }
                             }
                             None => PromptAnswer::DenyOnce,
@@ -468,7 +439,7 @@ impl Vm {
                         timer.resume();
                         self.apply_answer(cap, answer);
                     }
-                    Exit::Terminate(c) => return Ok(Stop::Exit(c)),
+                    Exit::Terminate(c) => return Err(RunEnding::Exit(c)),
                     Exit::Cancelled => {
                         // The task cancelled itself.
                         self.end_cancelled(fid, f);
@@ -509,7 +480,7 @@ impl Vm {
                     Some(Some(f)) => self.trace_of(f, None),
                     _ => vec![],
                 };
-                return Err(Trap::Error { message: "deadlock: all tasks are blocked".into(), trace });
+                return Err(Trap::Error { message: "deadlock: all tasks are blocked".into(), trace }.into());
             }
             let done = self.io.poll_ready(None);
             if !done.is_empty() {

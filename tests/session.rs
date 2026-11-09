@@ -885,6 +885,44 @@ fn exit_in_a_task_between_inputs() {
     assert_eq!(r.session.exit_code(), Some(7));
 }
 
+fn quit_module() -> HostModules {
+    let mut m = NativeModule::new("quit");
+    m.async_function("now", |code: i64| async move { Err::<(), Ctl>(Ctl::exit(code as i32)) });
+    HostModules::new([m]).unwrap()
+}
+
+#[test]
+fn exit_from_a_finisher_ends_the_input() {
+    let mut r = Repl::with(Config::new().host_modules(quit_module()));
+    r.ok("import quit\nprint(\"a\")\nquit.now(3)\nprint(\"b\")");
+    assert_eq!(r.session.exit_code(), Some(3));
+    assert_eq!(r.take_out(), "a\n");
+    assert_eq!(r.value("1"), "1");
+}
+
+#[test]
+fn exit_from_a_finisher_in_a_task_between_inputs() {
+    let mut r = Repl::with(Config::new().host_modules(quit_module()));
+    r.ok("import quit\nspawn { task.sleep(10ms)\nquit.now(7) };");
+    let got = r.rt.block_on(r.session.run_tasks_until(async { tokio::time::sleep(Duration::from_secs(20)).await }, |e| panic!("{e}")));
+    assert_eq!(got, None);
+    assert_eq!(r.session.exit_code(), Some(7));
+}
+
+#[test]
+fn interrupt_while_showing_a_result_is_an_interrupt() {
+    let handle = InterruptHandle::new();
+    let fired = handle.clone();
+    let mut m = NativeModule::new("stop");
+    m.function("now", move || fired.interrupt());
+    let mut r = Repl::with(Config::new().interrupt(handle).host_modules(HostModules::new([m]).unwrap()));
+    r.ok("import stop\nvar xs: List<int> = []\nfor i in 0..200000 { xs.push(i) }");
+    match r.eval("stop.now()\nxs") {
+        Err(Error::Interrupted) => {}
+        other => panic!("{other:?}"),
+    }
+}
+
 #[test]
 fn interrupt_cancels_waiting_tasks_between_inputs() {
     let handle = InterruptHandle::new();
