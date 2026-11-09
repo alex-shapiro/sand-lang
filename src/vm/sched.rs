@@ -282,9 +282,9 @@ impl Vm {
                     self.deliver(fid, wgen, v);
                     self.enforce_limit(None).map_err(Trap::Limit)?;
                 }
-                Err(c) => {
-                    return Err(self.run_ending_of(c.into_kind(), |vm| match &vm.fibers[fid as usize] {
-                        Some(f) => vm.trace_of(f, None),
+                Err(ctl) => {
+                    return Err(self.run_ending_of(ctl.into_kind(), |vm| match &vm.fibers[fid as usize] {
+                        Some(fiber) => vm.trace_of(fiber, None),
                         None => vec![],
                     }));
                 }
@@ -298,23 +298,23 @@ impl Vm {
     /// tasks are left as they are). The wall-time limit is `self.deadline`.
     /// Buffered standard output is flushed at the end.
     pub async fn run_main(&mut self, proto: u32) -> Result<Value, RunEnding> {
-        let r = match self.start_main(proto) {
+        let main_result = match self.start_main(proto) {
             Ok(fid) => self.drive(Some(fid)).await.map(|stop| match stop {
-                Stop::Main(v) => v,
+                Stop::Main(value) => value,
                 // Only runs without a main task stop this way.
                 Stop::Idle | Stop::Prompt(_) => Value::Unit,
             }),
             Err(ending) => Err(ending),
         };
-        self.drain_output_after(r)
+        self.drain_output_after(main_result)
     }
 
     fn start_main(&mut self, proto: u32) -> Result<u32, RunEnding> {
         let closure = self.heap.alloc(Obj::Closure(proto, Box::new([])));
         let task = self.heap.alloc(Obj::Task(Box::new(TaskObj { fiber: 0, state: TaskState::Running, result: Value::Unit })));
-        let fid = self.spawn_fiber(closure, task).map_err(|c| self.run_ending_of(c.into_kind(), |_| vec![]))?;
-        if let Obj::Task(t) = self.heap.get_mut(task) {
-            t.fiber = fid;
+        let fid = self.spawn_fiber(closure, task).map_err(|ctl| self.run_ending_of(ctl.into_kind(), |_| vec![]))?;
+        if let Obj::Task(task_obj) = self.heap.get_mut(task) {
+            task_obj.fiber = fid;
         }
         self.main_fiber = fid;
         self.live_tasks += 1;
@@ -355,10 +355,10 @@ impl Vm {
                 // Pending I/O checks its buffers against the heap's size.
                 self.heap.io_memory.publish_heap(self.heap.used());
                 self.current = u32::MAX;
-                let exit = match r {
-                    Ok(e) => {
+                let stop = match r {
+                    Ok(stop) => {
                         gc_retried = None;
-                        e
+                        stop
                     }
                     Err(RunEnding::Trap(Trap::Limit(LimitKind::Memory))) if std::mem::take(&mut self.gc_retry) => {
                         // Memory checks count garbage that has not been
@@ -382,7 +382,7 @@ impl Vm {
                     }
                     Err(ending) => return Err(ending),
                 };
-                match exit {
+                match stop {
                     FiberStop::Done(v) => {
                         self.fibers[fid as usize] = Some(f);
                         if Some(fid) == main {

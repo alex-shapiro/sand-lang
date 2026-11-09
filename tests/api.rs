@@ -2049,19 +2049,16 @@ fn host_functions_take_and_return_durations_and_never() {
     assert!(matches!(&r, Err(Error::Runtime { message, .. }) if message.contains("the duration is out of range")), "{r:?}");
 }
 
-/// A host module whose function exits the run from its finisher.
 fn quit_module() -> HostModules {
-    let mut m = NativeModule::new("quit");
-    m.async_function("now", |code: i64| async move { Err::<(), sandlang::vm::Ctl>(sandlang::vm::Ctl::exit(code as i32)) });
-    HostModules::new([m]).unwrap()
+    let mut module = NativeModule::new("quit");
+    module.async_function("now", |code: i64| async move { Err::<(), sandlang::vm::Ctl>(sandlang::vm::Ctl::exit(code as i32)) });
+    HostModules::new([module]).unwrap()
 }
 
-/// A script whose main task finishes while a task waits with `deferred` pending.
-fn with_deferred_task(deferred: &str) -> String {
+fn script_with_deferred_task(deferred: &str) -> String {
     format!("import quit\nlet c: Channel<int> = Channel()\nspawn {{\n    defer {deferred}\n    c.recv()\n}};\ntask.yield_now()")
 }
 
-/// An `exit` from the finisher of a host call ends a test as an `exit` in the script does.
 #[cfg(feature = "os")]
 #[test]
 fn exit_from_a_finisher_ends_a_test_like_a_script_exit() {
@@ -2073,8 +2070,6 @@ fn exit_from_a_finisher_ends_a_test_like_a_script_exit() {
     assert_eq!(results, [("zero", true, None), ("one", false, Some("exited with code 1")), ("plain", true, None)]);
 }
 
-/// An `exit` from a finisher during module initialization reports the module, as an `exit` in the
-/// script does.
 #[cfg(feature = "os")]
 #[test]
 fn exit_from_a_finisher_in_module_init_fails_each_test_like_a_script_exit() {
@@ -2087,22 +2082,18 @@ fn exit_from_a_finisher_in_module_init_fails_each_test_like_a_script_exit() {
     }
 }
 
-/// An `exit` from a finisher while the tasks of a finished run unwind sets the exit code, as an
-/// `exit` in the deferred code does.
 #[test]
 fn exit_from_a_finisher_in_deferred_code_sets_the_exit_code() {
     for deferred in ["quit.now(5)", "exit(5)"] {
-        let (r, _, _) = run_src(Config::new().host_modules(quit_module()), &with_deferred_task(deferred));
-        assert_eq!(r.unwrap().exit_code, 5, "{deferred}");
+        let (outcome, _, _) = run_src(Config::new().host_modules(quit_module()), &script_with_deferred_task(deferred));
+        assert_eq!(outcome.unwrap().exit_code, 5, "{deferred}");
     }
 }
 
-/// An output sink that counts each wait for its backlog. If `stuck_until` is set, the sink never
-/// drains and fires that interrupt, which stops the wait.
 #[derive(Clone)]
 struct BacklogSink {
     waits: Arc<AtomicUsize>,
-    stuck_until: Option<InterruptHandle>,
+    interrupt_on_wait: Option<InterruptHandle>,
 }
 
 impl sandlang::vm::OutputSink for BacklogSink {
@@ -2112,31 +2103,29 @@ impl sandlang::vm::OutputSink for BacklogSink {
 
     fn wait_backlog(&self, _: usize, _: Duration) -> bool {
         self.waits.fetch_add(1, Ordering::SeqCst);
-        if let Some(interrupt) = &self.stuck_until {
+        if let Some(interrupt) = &self.interrupt_on_wait {
             interrupt.interrupt();
         }
-        self.stuck_until.is_none()
+        self.interrupt_on_wait.is_none()
     }
 }
 
-/// `end_tasks` drains output however the deferred code ends, like `run_main`: one wait each.
 #[test]
 fn ending_tasks_drains_output_after_an_exit_or_a_trap() {
     for deferred in ["exit(5)", "quit.now(5)", "fail(\"error\", \"boom\")"] {
-        let sink = BacklogSink { waits: Arc::new(AtomicUsize::new(0)), stuck_until: None };
+        let sink = BacklogSink { waits: Arc::new(AtomicUsize::new(0)), interrupt_on_wait: None };
         let config = Config::new().host_modules(quit_module()).stdout(sink.clone());
         let mut engine = Engine::new(config);
-        let _ = rt().block_on(engine.run_source("main.sand", &with_deferred_task(deferred)));
+        let _ = rt().block_on(engine.run_source("main.sand", &script_with_deferred_task(deferred)));
         assert_eq!(sink.waits.load(Ordering::SeqCst), 2, "{deferred}");
     }
 }
 
-/// A drain that fails replaces an `exit`, whichever way the `exit` arrives, but not a trap.
 #[test]
 fn a_failed_drain_replaces_an_exit_but_not_a_trap() {
     let run = |src: &str| {
         let interrupt = InterruptHandle::new();
-        let sink = BacklogSink { waits: Arc::new(AtomicUsize::new(0)), stuck_until: Some(interrupt.clone()) };
+        let sink = BacklogSink { waits: Arc::new(AtomicUsize::new(0)), interrupt_on_wait: Some(interrupt.clone()) };
         let mut engine = Engine::new(Config::new().host_modules(quit_module()).stdout(sink).interrupt(interrupt));
         rt().block_on(engine.run_source("main.sand", src))
     };

@@ -107,7 +107,7 @@ FAIL a failing test: assert: left == right
 2 passed, 1 failed
 ```
 
-A test passes if its block finishes without failing or calls `exit(0)`. A call to `exit` with another code fails the test, and a call to `exit` in top-level code fails every test. Each test starts from a snapshot of the top-level module variables captured after top-level initialization.
+A test passes if its block finishes without failing or calls `exit(0)`. Calling `exit` with a non-zero code fails the test. Calling `exit` with any code in top-level code fails every test. Each test starts from a snapshot of the top-level module variables captured after top-level initialization.
 
 `test.property(name, gen, prop)` runs a deterministic property check: it invokes `gen` with a seeded random generator to produce 100 inputs and verifies that `prop(input)` returns `true` for each input. For all test assertions and generators, see the [`test` reference](/std/test/).
 

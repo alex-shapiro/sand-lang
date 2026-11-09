@@ -202,7 +202,7 @@ impl Session {
     /// runs. State changes made by a test persist for subsequent tests and
     /// inputs. Runtime errors and limit violations are recorded as test
     /// failures in the report so that remaining tests still run. A test that
-    /// calls `exit(0)` passes, and a test that calls `exit` with another code
+    /// calls `exit(0)` passes. A test that calls `exit` with a non-zero code
     /// fails. Calling
     /// [`InterruptHandle::interrupt`](crate::engine::InterruptHandle::interrupt)
     /// stops the test run and returns [`Error::Interrupted`].
@@ -225,8 +225,8 @@ impl Session {
         for (name, proto) in tests {
             self.exit_code = None;
             let deadline = self.deadline();
-            let end = self.run(proto, false, deadline).await.map(|_| self.exit_code.unwrap_or(0));
-            let message = crate::engine::test_failure(end)?;
+            let run_result = self.run(proto, false, deadline).await.map(|_| self.exit_code.unwrap_or(0));
+            let message = crate::engine::test_failure(run_result)?;
             report.results.push(TestResult { name, passed: message.is_none(), message });
             if self.poisoned() {
                 // No more tests on a VM that may be inconsistent.
@@ -542,19 +542,19 @@ impl Session {
         vm.begin_session_run(call);
         vm.deadline = deadline;
         st.running = true;
-        let r = vm.run_main(proto).await;
+        let main_result = vm.run_main(proto).await;
         st.running = false;
-        let v = match r {
-            Ok(v) => v,
+        let value = match main_result {
+            Ok(value) => value,
             Err(ending) => return end_session_run(vm, ending, exit_code).map(|()| None),
         };
-        let shown = if show && v != Value::Unit { Some(vm.debug(v)) } else { None };
+        let shown = if show && value != Value::Unit { Some(vm.debug(value)) } else { None };
         vm.release_main();
         match shown {
             None => Ok(None),
-            Some(Ok(s)) => Ok(Some(s)),
-            Some(Err(c)) => {
-                let ending = vm.run_ending_of(c.into_kind(), |_| vec![]);
+            Some(Ok(text)) => Ok(Some(text)),
+            Some(Err(ctl)) => {
+                let ending = vm.run_ending_of(ctl.into_kind(), |_| vec![]);
                 end_session_run(vm, ending, exit_code).map(|()| None)
             }
         }
@@ -570,8 +570,8 @@ impl Session {
         vm.begin_session_run(call);
         // Waiting for input may take any time.
         vm.deadline = None;
-        let r = vm.drive(None).await;
-        match vm.drain_output_after(r) {
+        let drive_result = vm.drive(None).await;
+        match vm.drain_output_after(drive_result) {
             Ok(Stop::Prompt(cap)) => {
                 st.deferred_prompt = Some(cap);
                 Ok(false)
@@ -582,8 +582,8 @@ impl Session {
     }
 }
 
-/// Cancels all tasks after `ending` stopped a run of the session's VM, and records the code of
-/// an `exit` in `exit_code` or returns the error of a trap.
+/// Finishes a session VM run that stopped with `ending`. Cancels all tasks,
+/// stores an exit code in `exit_code`, and converts a trap into an [`Error`].
 fn end_session_run(vm: &mut Vm, ending: RunEnding, exit_code: &mut Option<i32>) -> Result<(), Error> {
     vm.abandon_tasks();
     let trap = match ending {

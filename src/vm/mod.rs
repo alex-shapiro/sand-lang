@@ -130,7 +130,7 @@ impl Ctl {
         Ctl(Box::new(CtlKind::Interrupted))
     }
 
-    /// Ends the run with exit code `code`, as a call to the script function `exit` does.
+    /// Ends the run with exit code `code`, like the built-in `exit` function.
     pub fn exit(code: i32) -> Ctl {
         Ctl(Box::new(CtlKind::Exit(code)))
     }
@@ -321,17 +321,17 @@ pub enum Trap {
     Interrupted,
 }
 
-/// How a run ended without a returned value from its main task.
+/// An early exit or trap that stops a VM run.
 #[derive(Debug)]
 pub enum RunEnding {
-    /// A task called `exit` with this code.
+    /// A task exited with this status code.
     Exit(i32),
     Trap(Trap),
 }
 
 impl From<Trap> for RunEnding {
-    fn from(t: Trap) -> RunEnding {
-        RunEnding::Trap(t)
+    fn from(trap: Trap) -> RunEnding {
+        RunEnding::Trap(trap)
     }
 }
 
@@ -1135,14 +1135,15 @@ impl Vm {
     pub(crate) fn drain_output(&mut self) -> Result<(), RunEnding> {
         self.flush_stdout();
         let drained = [&self.host.stdout, &self.host.stderr].into_iter().try_for_each(|sink| self.wait_backlog(sink, 0));
-        drained.map_err(|c| self.run_ending_of(c.into_kind(), |_| vec![]))
+        drained.map_err(|ctl| self.run_ending_of(ctl.into_kind(), |_| vec![]))
     }
 
-    /// Drains the output of a scheduler run that ended with `r`. A drain failure replaces any
-    /// result except a trap.
-    pub(crate) fn drain_output_after<T>(&mut self, r: Result<T, RunEnding>) -> Result<T, RunEnding> {
+    /// Drains standard output and error after a scheduler run. A drain failure
+    /// overrides an `Ok` result or [`RunEnding::Exit`], but preserves
+    /// [`RunEnding::Trap`].
+    pub(crate) fn drain_output_after<T>(&mut self, run_result: Result<T, RunEnding>) -> Result<T, RunEnding> {
         let drained = self.drain_output();
-        if matches!(r, Err(RunEnding::Trap(_))) { r } else { drained.and(r) }
+        if matches!(run_result, Err(RunEnding::Trap(_))) { run_result } else { drained.and(run_result) }
     }
 
     /// Waits until `sink`'s backlog is at most `max` bytes. Fails if the
@@ -1497,30 +1498,31 @@ impl Vm {
         false
     }
 
-    /// Ends a run whose main task finished: cancels the other tasks and runs
-    /// their pending deferred code until it finishes or would wait.
+    /// Cancels remaining tasks after the main task finishes, and runs their
+    /// pending `defer` blocks until they finish or block.
     pub async fn end_tasks(&mut self) -> Result<(), RunEnding> {
         self.release_main();
         let tasks: Vec<Value> = self.fibers.iter().flatten().map(|f| f.task).collect();
-        for t in tasks {
-            self.cancel_task(t);
+        for task in tasks {
+            self.cancel_task(task);
         }
         if self.ready.is_empty() {
             return Ok(());
         }
         self.ending = true;
-        let r = self.drive(None).await;
+        let drive_result = self.drive(None).await;
         self.ending = false;
-        self.drain_output_after(r).map(|_| ())
+        self.drain_output_after(drive_result).map(|_| ())
     }
 
-    /// How a [`CtlKind`] that no caller handled ends the run. `trace` gives the stack trace of an
-    /// error. A request to the scheduler is an internal error here.
+    /// Converts an unhandled [`CtlKind`] into a [`RunEnding`], using `trace`
+    /// to build stack traces for errors. Marks the VM broken if `kind` is an
+    /// internal error or an unexpected scheduler request.
     pub(crate) fn run_ending_of(&mut self, kind: CtlKind, trace: impl FnOnce(&Vm) -> Vec<TraceFrame>) -> RunEnding {
         let message = match kind {
             CtlKind::Exit(code) => return RunEnding::Exit(code),
             CtlKind::RuntimeError(message) => return Trap::Error { message, trace: trace(self) }.into(),
-            CtlKind::Limit(k) => return Trap::Limit(k).into(),
+            CtlKind::Limit(kind) => return Trap::Limit(kind).into(),
             CtlKind::Interrupted => return Trap::Interrupted.into(),
             CtlKind::Internal(message) => message,
             request => format!("unexpected {request:?}"),

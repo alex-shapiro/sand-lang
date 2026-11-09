@@ -501,14 +501,14 @@ impl Vm {
         Trap::Internal { message: msg, trace: self.trace_of(fiber, Some(ip as u32)) }.into()
     }
 
-    /// How a failed metered operation ends the run.
+    /// Converts a failed metered operation into a [`RunEnding`].
     #[cold]
     #[inline(never)]
-    fn ctl_ending(&mut self, fiber: &mut Fiber, ip: usize, c: Ctl) -> RunEnding {
-        if let Some(k) = c.as_limit() {
-            return self.limit_trap(fiber, ip, k);
+    fn ctl_ending(&mut self, fiber: &mut Fiber, ip: usize, ctl: Ctl) -> RunEnding {
+        if let Some(kind) = ctl.as_limit() {
+            return self.limit_trap(fiber, ip, kind);
         }
-        self.run_ending_of(c.into_kind(), |vm| vm.trace_of(fiber, Some(ip as u32)))
+        self.run_ending_of(ctl.into_kind(), |vm| vm.trace_of(fiber, Some(ip as u32)))
     }
 
     /// A limit hit by the instruction before `ip`. Memory checks count
@@ -1745,8 +1745,8 @@ impl Vm {
             }
             CtlKind::Yield | CtlKind::Blocked => unreachable!("handled above"),
             CtlKind::Collect => Err(self.internal_trap(fiber, ip, "a native asked for a collection twice".into())),
-            // A limit here is final: the call already ran again after a collection.
-            ended => Err(self.run_ending_of(ended, |vm| vm.trace_of(fiber, Some(ip as u32)))),
+            // Do not retry memory limits here because the call already retried after garbage collection.
+            kind => Err(self.run_ending_of(kind, |vm| vm.trace_of(fiber, Some(ip as u32)))),
         }
     }
 

@@ -886,38 +886,39 @@ fn exit_in_a_task_between_inputs() {
 }
 
 fn quit_module() -> HostModules {
-    let mut m = NativeModule::new("quit");
-    m.async_function("now", |code: i64| async move { Err::<(), Ctl>(Ctl::exit(code as i32)) });
-    HostModules::new([m]).unwrap()
+    let mut module = NativeModule::new("quit");
+    module.async_function("now", |code: i64| async move { Err::<(), Ctl>(Ctl::exit(code as i32)) });
+    HostModules::new([module]).unwrap()
 }
 
 #[test]
 fn exit_from_a_finisher_ends_the_input() {
-    let mut r = Repl::with(Config::new().host_modules(quit_module()));
-    r.ok("import quit\nprint(\"a\")\nquit.now(3)\nprint(\"b\")");
-    assert_eq!(r.session.exit_code(), Some(3));
-    assert_eq!(r.take_out(), "a\n");
-    assert_eq!(r.value("1"), "1");
+    let mut repl = Repl::with(Config::new().host_modules(quit_module()));
+    repl.ok("import quit\nprint(\"a\")\nquit.now(3)\nprint(\"b\")");
+    assert_eq!(repl.session.exit_code(), Some(3));
+    assert_eq!(repl.take_out(), "a\n");
+    assert_eq!(repl.value("1"), "1");
 }
 
 #[test]
 fn exit_from_a_finisher_in_a_task_between_inputs() {
-    let mut r = Repl::with(Config::new().host_modules(quit_module()));
-    r.ok("import quit\nspawn { task.sleep(10ms)\nquit.now(7) };");
-    let got = r.rt.block_on(r.session.run_tasks_until(async { tokio::time::sleep(Duration::from_secs(20)).await }, |e| panic!("{e}")));
+    let mut repl = Repl::with(Config::new().host_modules(quit_module()));
+    repl.ok("import quit\nspawn { task.sleep(10ms)\nquit.now(7) };");
+    let got =
+        repl.rt.block_on(repl.session.run_tasks_until(async { tokio::time::sleep(Duration::from_secs(20)).await }, |e| panic!("{e}")));
     assert_eq!(got, None);
-    assert_eq!(r.session.exit_code(), Some(7));
+    assert_eq!(repl.session.exit_code(), Some(7));
 }
 
 #[test]
-fn interrupt_while_showing_a_result_is_an_interrupt() {
+fn interrupt_while_showing_a_result_returns_interrupted_error() {
     let handle = InterruptHandle::new();
     let fired = handle.clone();
-    let mut m = NativeModule::new("stop");
-    m.function("now", move || fired.interrupt());
-    let mut r = Repl::with(Config::new().interrupt(handle).host_modules(HostModules::new([m]).unwrap()));
-    r.ok("import stop\nvar xs: List<int> = []\nfor i in 0..200000 { xs.push(i) }");
-    match r.eval("stop.now()\nxs") {
+    let mut module = NativeModule::new("stop");
+    module.function("now", move || fired.interrupt());
+    let mut repl = Repl::with(Config::new().interrupt(handle).host_modules(HostModules::new([module]).unwrap()));
+    repl.ok("import stop\nvar xs: List<int> = []\nfor i in 0..200000 { xs.push(i) }");
+    match repl.eval("stop.now()\nxs") {
         Err(Error::Interrupted) => {}
         other => panic!("{other:?}"),
     }
@@ -925,24 +926,22 @@ fn interrupt_while_showing_a_result_is_an_interrupt() {
 
 #[test]
 fn exit_in_a_test_block_follows_the_test_rule() {
-    let mut r = Repl::new();
-    r.ok("test \"zero\" { exit(0) }\ntest \"one\" { exit(1) }\ntest \"plain\" { }");
-    let report = r.rt.block_on(r.session.run_tests()).unwrap();
+    let mut repl = Repl::new();
+    repl.ok("test \"zero\" { exit(0) }\ntest \"one\" { exit(1) }\ntest \"plain\" { }");
+    let report = repl.rt.block_on(repl.session.run_tests()).unwrap();
     let results: Vec<_> = report.results.iter().map(|t| (t.name.as_str(), t.passed, t.message.as_deref())).collect();
     assert_eq!(results, [("zero", true, None), ("one", false, Some("exited with code 1")), ("plain", true, None)]);
 }
 
-/// A result that exceeds a limit while the session shows it is a failed input, so it cancels the
-/// session's tasks.
 #[test]
 fn a_failure_while_showing_a_result_cancels_tasks() {
     let limits = Limits { max_instructions: Some(150_000), ..Limits::default() };
-    let mut r = Repl::with(Config::new().limits(limits));
-    r.ok("let c: Channel<int> = Channel()\nlet t = spawn { c.recv() };");
-    r.ok("struct Tree { l: Option<Tree>, r: Option<Tree> }\nvar t = Tree(l: None, r: None)\nfor _ in 0..24 { t = Tree(l: Some(t), r: Some(t)) }");
-    let shown = r.eval("t");
+    let mut repl = Repl::with(Config::new().limits(limits));
+    repl.ok("let c: Channel<int> = Channel()\nlet t = spawn { c.recv() };");
+    repl.ok("struct Tree { l: Option<Tree>, r: Option<Tree> }\nvar t = Tree(l: None, r: None)\nfor _ in 0..24 { t = Tree(l: Some(t), r: Some(t)) }");
+    let shown = repl.eval("t");
     assert!(matches!(shown, Err(Error::Limit(LimitKind::Instructions))), "{shown:?}");
-    assert_eq!(r.session.cancel_tasks(), 0);
+    assert_eq!(repl.session.cancel_tasks(), 0);
 }
 
 #[test]

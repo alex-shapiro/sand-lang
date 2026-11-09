@@ -1206,8 +1206,8 @@ impl Engine {
     ///
     /// Runtime errors and limit violations are recorded as test failures in
     /// the report so that remaining tests still run. A test that calls
-    /// `exit(0)` passes, and a test that calls `exit` with another code fails.
-    /// A call to `exit` in the module initializer fails every test. Calling
+    /// `exit(0)` passes. A test that calls `exit` with a non-zero code fails.
+    /// Calling `exit` in the module initializer fails every test. Calling
     /// [`InterruptHandle::interrupt`] stops the test run and returns
     /// [`Error::Interrupted`].
     pub async fn run_tests(&mut self, path: impl AsRef<Path>) -> Result<TestReport, Error> {
@@ -1228,11 +1228,11 @@ impl Engine {
             let failure = match init {
                 Ok(_) => {
                     vm.ready.clear();
-                    let r = vm.run_main(proto).await;
-                    test_failure(end_run(&mut vm, r).await)?
+                    let run_result = vm.run_main(proto).await;
+                    test_failure(end_run(&mut vm, run_result).await)?
                 }
-                Err(RunEnding::Exit(c)) => Some(format!("module exited with code {c}")),
-                Err(RunEnding::Trap(t)) => test_failure(Err(t.into()))?,
+                Err(RunEnding::Exit(code)) => Some(format!("module exited with code {code}")),
+                Err(RunEnding::Trap(trap)) => test_failure(Err(trap.into()))?,
             };
             deadline = vm.deadline;
             report.results.push(TestResult { name: tname, passed: failure.is_none(), message: failure });
@@ -1327,8 +1327,8 @@ impl Engine {
         }
         let mut vm = self.new_vm(prog.clone(), &compiled.host_modules, cwd, false, call);
         vm.deadline = compiled.deadline;
-        let r = vm.run_main(prog.entry).await;
-        let r = end_run(&mut vm, r).await;
+        let main_result = vm.run_main(prog.entry).await;
+        let run_result = end_run(&mut vm, main_result).await;
         let _ = self.config.stdout.flush();
         self.gc_stats = vm.heap.stats;
         if self.config.exit_after_run {
@@ -1337,7 +1337,7 @@ impl Engine {
             drop(vm);
             self.recycle(prog, compiled.snapshot);
         }
-        r.map(|exit_code| Outcome { exit_code })
+        run_result.map(|exit_code| Outcome { exit_code })
     }
 
     // ------------------------------------------------------------------
@@ -1764,38 +1764,39 @@ enum ImportDecision {
 /// Module discovery stops after this many errors (they are all reported).
 const MAX_DISCOVERY_ERRORS: usize = 100;
 
-/// Ends a run whose main task stopped with `r`, and returns its exit code or its error.
-async fn end_run(vm: &mut Vm, r: Result<Value, RunEnding>) -> Result<i32, Error> {
-    let ended = match r {
+/// Finishes a VM run after the main task returns `main_result`. Returns
+/// the exit code or error.
+async fn end_run(vm: &mut Vm, main_result: Result<Value, RunEnding>) -> Result<i32, Error> {
+    let ended = match main_result {
         Ok(_) => vm.end_tasks().await,
         Err(ending) => Err(ending),
     };
     match ended {
         Ok(()) => Ok(0),
         Err(RunEnding::Exit(code)) => Ok(code),
-        Err(RunEnding::Trap(t)) => Err(t.into()),
+        Err(RunEnding::Trap(trap)) => Err(trap.into()),
     }
 }
 
-/// The failure message of a test that ended with `end`, or `None` if the test passed. An
-/// interrupt stops the test run, so it stays an error.
-pub(crate) fn test_failure(end: Result<i32, Error>) -> Result<Option<String>, Error> {
-    match end {
+/// Converts a test's run result into a failure message, or `None` if the
+/// test passed. Propagates [`Error::Interrupted`] to stop the test suite.
+pub(crate) fn test_failure(run_result: Result<i32, Error>) -> Result<Option<String>, Error> {
+    match run_result {
         Ok(0) => Ok(None),
         Ok(code) => Ok(Some(format!("exited with code {code}"))),
         Err(Error::Interrupted) => Err(Error::Interrupted),
         Err(Error::Runtime { message, .. }) => Ok(Some(message)),
         Err(Error::Internal { message, .. }) => Ok(Some(format!("internal error: {message}"))),
-        Err(e) => Ok(Some(e.to_string())),
+        Err(err) => Ok(Some(err.to_string())),
     }
 }
 
 impl From<Trap> for Error {
-    fn from(t: Trap) -> Error {
-        match t {
+    fn from(trap: Trap) -> Error {
+        match trap {
             Trap::Error { message, trace } => Error::Runtime { message, trace },
             Trap::Internal { message, trace } => Error::Internal { message, trace },
-            Trap::Limit(k) => Error::Limit(k),
+            Trap::Limit(kind) => Error::Limit(kind),
             Trap::Interrupted => Error::Interrupted,
         }
     }
