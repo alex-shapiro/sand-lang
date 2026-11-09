@@ -1972,6 +1972,14 @@ impl Vm {
                         return Ok(BlockOutcome::Ready(r));
                     }
                 }
+                let task_where = |t: Value, wanted: &dyn Fn(&TaskObj) -> bool| matches!(self.heap.get(t), Obj::Task(to) if wanted(to));
+                if !tasks.iter().any(|&t| task_where(t, &|to| to.state == TaskState::Running && to.fiber != me)) {
+                    return Err(if tasks.iter().any(|&t| task_where(t, &|to| to.state == TaskState::Cancelled)) {
+                        Ctl::fail("cancelled", "task cancelled")
+                    } else {
+                        Ctl::fail("deadlock", "a task cannot wait for itself")
+                    });
+                }
                 for &t in &tasks {
                     let fid = match self.heap.get(t) {
                         Obj::Task(to) if to.state == TaskState::Running => to.fiber,

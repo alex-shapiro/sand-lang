@@ -196,6 +196,24 @@ sent
 racer woke
 true
 
+=== a race of only cancelled tasks fails
+let a = spawn task.sleep(1h)
+a.cancel()
+task.race([a])
+--- fail
+task cancelled
+
+=== a race of only the running task fails
+let ch: Channel<Task<()>> = Channel()
+let t = spawn {
+    let me = ch.recv().unwrap()
+    task.race([me])
+}
+ch.send(t)
+t.wait()
+--- fail
+a task cannot wait for itself
+
 === channels
 let ch = Channel()
 let producer = spawn {
