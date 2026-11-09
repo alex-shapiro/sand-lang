@@ -1722,9 +1722,9 @@ impl Vm {
                 fiber.stack[slot] = Value::Unit;
                 return Ok(Some(FiberStop::YieldNow));
             }
-            CtlKind::Blocked { wait } => {
+            CtlKind::Blocked { wait_gen } => {
                 fiber.result_slot = slot;
-                fiber.wgen = *wait;
+                fiber.wgen = *wait_gen;
                 self.recycle(r);
                 return Ok(Some(FiberStop::Blocked));
             }
@@ -1740,9 +1740,9 @@ impl Vm {
                 fiber.result_slot = slot;
                 Ok(Some(FiberStop::Async(suspension)))
             }
-            CtlKind::Racing { wait, tasks } => {
+            CtlKind::Racing { wait_gen, tasks } => {
                 fiber.result_slot = slot;
-                fiber.wgen = wait;
+                fiber.wgen = wait_gen;
                 fiber.race = tasks;
                 Ok(Some(FiberStop::Blocked))
             }
@@ -1918,35 +1918,27 @@ impl Vm {
         entry.f.call(self, args)
     }
 
-    /// Waits for `on` (a native's result): its value if it is there
-    /// already, or else `Blocked`, having registered the running task's wait.
+    /// Waits for `on` (a native's result): its value if it is there already,
+    /// or else `Blocked` or `Racing`, having registered the running task's
+    /// wait.
     pub fn block(&mut self, on: BlockOn) -> NResult {
-        let wait = self.next_gen();
-        match self.block_on(self.current, wait, on)? {
-            BlockOutcome::Ready(v) => Ok(v),
-            BlockOutcome::Waiting => Err(self.signal(CtlKind::Blocked { wait })),
-            BlockOutcome::Racing(tasks) => Err(Ctl::from(CtlKind::Racing { wait, tasks })),
-        }
-    }
-
-    /// Registers a blocking wait for fiber `me`, or returns the value if it
-    /// is there already.
-    fn block_on(&mut self, me: u32, g: u64, b: BlockOn) -> Result<BlockOutcome, Ctl> {
-        match b {
+        let me = self.current;
+        let wait_gen = self.next_gen();
+        match on {
             BlockOn::Join(task) => {
                 let (fid, state, result) = match self.heap.get(task) {
                     Obj::Task(t) => (t.fiber, t.state, t.result),
                     _ => return Err(internal("not a task")),
                 };
                 match state {
-                    TaskState::Done => Ok(BlockOutcome::Ready(result)),
+                    TaskState::Done => Ok(result),
                     TaskState::Cancelled => Err(Ctl::fail("cancelled", "task cancelled")),
                     TaskState::Running => {
                         if fid == me {
                             return Err(Ctl::fail("deadlock", "a task cannot wait for itself"));
                         }
-                        self.add_waiter(fid, (me, g))?;
-                        Ok(BlockOutcome::Waiting)
+                        self.add_waiter(fid, (me, wait_gen))?;
+                        Err(self.signal(CtlKind::Blocked { wait_gen }))
                     }
                 }
             }
@@ -1969,12 +1961,18 @@ impl Vm {
                             }
                         }
                         cancelled?;
-                        return Ok(BlockOutcome::Ready(r));
+                        return Ok(r);
                     }
                 }
-                let task_where = |t: Value, wanted: &dyn Fn(&TaskObj) -> bool| matches!(self.heap.get(t), Obj::Task(to) if wanted(to));
-                if !tasks.iter().any(|&t| task_where(t, &|to| to.state == TaskState::Running && to.fiber != me)) {
-                    return Err(if tasks.iter().any(|&t| task_where(t, &|to| to.state == TaskState::Cancelled)) {
+                let (mut any_cancelled, mut can_finish) = (false, false);
+                for &t in &tasks {
+                    if let Obj::Task(to) = self.heap.get(t) {
+                        any_cancelled |= to.state == TaskState::Cancelled;
+                        can_finish |= to.state == TaskState::Running && to.fiber != me;
+                    }
+                }
+                if !can_finish {
+                    return Err(if any_cancelled {
                         Ctl::fail("cancelled", "task cancelled")
                     } else {
                         Ctl::fail("deadlock", "a task cannot wait for itself")
@@ -1985,10 +1983,10 @@ impl Vm {
                         Obj::Task(to) if to.state == TaskState::Running => to.fiber,
                         _ => continue,
                     };
-                    self.add_waiter(fid, (me, g))?;
+                    self.add_waiter(fid, (me, wait_gen))?;
                 }
                 self.heap.fiber_bytes += tasks.capacity() * std::mem::size_of::<Value>();
-                Ok(BlockOutcome::Racing(tasks))
+                Err(Ctl::from(CtlKind::Racing { wait_gen, tasks }))
             }
             BlockOn::Recv(ch) => {
                 let Some(c) = self.heap.channel_mut(ch, None) else { return Err(internal("not a channel")) };
@@ -1998,10 +1996,10 @@ impl Vm {
                         // If the sender went away, its value stays queued.
                         self.deliver(sf, sg, Value::Bool(true));
                     }
-                    return Ok(BlockOutcome::Ready(some));
+                    return Ok(some);
                 }
                 if c.closed {
-                    return Ok(BlockOutcome::Ready(self.none()));
+                    return Ok(self.none());
                 }
                 if c.receivers.len() >= c.receivers_prune_at.max(MIN_PRUNE) {
                     // Drop the waits of cancelled tasks.
@@ -2011,33 +2009,33 @@ impl Vm {
                     c.receivers_prune_at = 2 * c.receivers.len();
                 }
                 let before = c.receivers.capacity();
-                c.receivers.push_back((me, g));
+                c.receivers.push_back((me, wait_gen));
                 let grown = c.receivers.capacity().saturating_sub(before);
                 self.heap.bytes += grown * std::mem::size_of::<(u32, u64)>();
-                Ok(BlockOutcome::Waiting)
+                Err(self.signal(CtlKind::Blocked { wait_gen }))
             }
             BlockOn::Send(ch, v) => {
                 let Some(c) = self.heap.channel_mut(ch, None) else { return Err(internal("not a channel")) };
                 if c.closed {
-                    return Ok(BlockOutcome::Ready(Value::Bool(false)));
+                    return Ok(Value::Bool(false));
                 }
                 while let Some((rf, rg)) = c.receivers.pop_front() {
                     if wait_is_live(&self.fibers, (rf, rg)) {
                         let some = self.some(v);
                         self.deliver(rf, rg, some);
-                        return Ok(BlockOutcome::Ready(Value::Bool(true)));
+                        return Ok(Value::Bool(true));
                     }
                 }
                 if c.has_room() {
                     self.heap.channel_push(ch, v).map_err(Ctl::limit)?;
-                    return Ok(BlockOutcome::Ready(Value::Bool(true)));
+                    return Ok(Value::Bool(true));
                 }
                 let Some(c) = self.heap.channel_mut(ch, Some(v)) else { unreachable!() };
                 let before = c.senders.capacity();
-                c.senders.push_back((me, g, v));
+                c.senders.push_back((me, wait_gen, v));
                 let grown = c.senders.capacity().saturating_sub(before);
                 self.heap.bytes += grown * std::mem::size_of::<(u32, u64, Value)>();
-                Ok(BlockOutcome::Waiting)
+                Err(self.signal(CtlKind::Blocked { wait_gen }))
             }
         }
     }

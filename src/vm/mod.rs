@@ -93,14 +93,14 @@ pub enum CtlKind {
     /// Suspend the task until the future completes.
     Async(Suspension),
     /// The task waits for the scheduler event that [`Vm::block`] registered
-    /// as generation `wait`; the call returns what wakes it.
+    /// as generation `wait_gen`; the call returns what wakes it.
     Blocked {
-        wait: u64,
+        wait_gen: u64,
     },
     /// Like `Blocked`, for `task.race`: on the wake-up, the engine cancels
     /// the remaining `tasks`.
     Racing {
-        wait: u64,
+        wait_gen: u64,
         tasks: Vec<Value>,
     },
     /// Let other tasks run; the call returns `()`.
@@ -193,8 +193,8 @@ impl std::fmt::Debug for CtlKind {
             CtlKind::Exit(c) => write!(f, "Exit({c})"),
             CtlKind::NeedPermission(c) => write!(f, "NeedPermission({c})"),
             CtlKind::Async(s) => write!(f, "Async({:?})", s.wait_kind),
-            CtlKind::Blocked { wait } => write!(f, "Blocked({wait})"),
-            CtlKind::Racing { wait, .. } => write!(f, "Racing({wait})"),
+            CtlKind::Blocked { wait_gen } => write!(f, "Blocked({wait_gen})"),
+            CtlKind::Racing { wait_gen, .. } => write!(f, "Racing({wait_gen})"),
             CtlKind::Yield => write!(f, "Yield"),
             CtlKind::Interrupted => write!(f, "Interrupted"),
             CtlKind::Collect => write!(f, "Collect"),
@@ -233,16 +233,6 @@ pub enum BlockOn {
     Race(Vec<Value>),
     Recv(Value),
     Send(Value, Value),
-}
-
-/// What [`Vm::block`] found or registered.
-enum BlockOutcome {
-    /// The value is already there.
-    Ready(Value),
-    /// The task waits.
-    Waiting,
-    /// The task waits. On the wake-up, the engine cancels these tasks.
-    Racing(Vec<Value>),
 }
 
 /// A call frame (20 bytes).
@@ -774,6 +764,7 @@ impl Vm {
     /// Keeps the box of a consumed `Blocked` or `Yield` for [`Vm::signal`].
     #[inline]
     pub(crate) fn recycle(&mut self, c: Ctl) {
+        debug_assert!(matches!(c.kind(), CtlKind::Blocked { .. } | CtlKind::Yield));
         if self.spare_ctl.is_none() {
             self.spare_ctl = Some(c.0);
         }
@@ -1343,7 +1334,7 @@ impl Vm {
     /// it must not hold handles of objects freed since.
     fn recycle_fiber(&mut self, mut f: Box<Fiber>) {
         let small = f.stack.capacity() <= MAX_SPARE_STACK_SLOTS && f.frames.capacity() <= MAX_SPARE_FRAMES;
-        if self.spare_fibers.len() >= MAX_SPARE_FIBERS || !small || !f.race.is_empty() || f.waiters.capacity() > MIN_PRUNE {
+        if self.spare_fibers.len() >= MAX_SPARE_FIBERS || !small || f.waiters.capacity() > MIN_PRUNE {
             self.heap.fiber_bytes = self.heap.fiber_bytes.saturating_sub(f.footprint());
             return;
         }
