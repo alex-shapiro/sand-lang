@@ -48,7 +48,7 @@ In the results below:
 - "Cancelled" means the task stopped early and ran its cleanup.
 - "Killed" means the process exited before the task finished.
 
-### No task waits for the task and its handle is dropped
+### Unowned tasks without waiters
 
 The task finished in every system that allows an unowned task. In Trio, the block that starts a task always waits for that task to end.
 
@@ -56,21 +56,21 @@ In one extra asyncio test, a task waited on a future that only the task could re
 
 ### The main task returns while another task is running
 
-- **Cancelled**: Sand, asyncio, and Tokio (dropped at runtime shutdown).
+- **Cancelled**: Sand, asyncio, and Tokio.
 - **Killed**: Go, Swift, Kotlin global tasks, and Java virtual threads.
 - **Main waits**: Trio, Kotlin child tasks, Java platform threads, and Node.
 
 ### The only waiter of a task is cancelled
 
-- **Finishes**: Sand, Tokio spawned tasks, Swift `Task`, Kotlin global tasks, and Java. Go and Node tasks also finish unless the caller passes cancellation to the task.
+- **Finishes**: Sand, Tokio spawned tasks, Swift `Task`, Kotlin global tasks, and Java. Go and Node tasks also finish unless the caller passes a cancellation token to the task.
 - **Cancelled**: asyncio, Trio, Tokio plain futures, Swift `async let`, and Kotlin child tasks.
 
 If one of two waiters was cancelled, asyncio cancelled the task and sent `CancelledError` to the second waiter. Swift and Kotlin kept the task running and sent its result to the second waiter.
 
 ### The caller of a race is cancelled
 
-- **Tasks finish**: Sand, and races over unowned tasks in asyncio (`wait`), Tokio (`select!`), Kotlin (`select`), and Node (`Promise.race`).
-- **Tasks cancelled**: Scoped task groups in asyncio, Trio, Tokio (`JoinSet`), Swift, Kotlin, Java, and Go derived contexts.
+- **Tasks finish**: Sand, and races over unowned tasks in asyncio, Tokio, Kotlin, and Node.
+- **Tasks cancelled**: Scoped task groups in asyncio, Trio, Tokio, Swift, Kotlin, Java, and Go derived contexts.
 
 ### The caller of a timeout is cancelled
 
@@ -78,7 +78,7 @@ All five tested systems cancelled the timed work. Before this change, Sand was t
 
 ### A task in a race is cancelled during the race
 
-- **Another task wins**: Trio (a race built on a nursery), Java (where the task failed), and Node `Promise.any`.
+- **Another task wins**: Trio, Java, and Node `Promise.any`.
 - **The race returns a catchable error**: Tokio, Kotlin, and Node `Promise.race`.
 - **The race returns the cancelled task**: asyncio `wait`.
 - **The program aborts**: Sand before this change.
@@ -89,7 +89,7 @@ We did not test this case in Swift or Go.
 
 ### How scripts use tasks
 
-In 50 Sand scripts that spawn tasks, 34 scripts had at least one task that ran without a waiter. Across the specs, examples, and guide, these scripts started 1,068 tasks (one test started 1,000 tasks). This count includes tasks whose results a script read after they finished. Because the specs emphasize cancellation, these numbers are only a rough guide.
+In 50 Sand scripts that spawn tasks, 34 scripts had at least one task that ran without a waiter. Across the specs, examples, and guide, these scripts started 1,068 tasks; one test started 1,000 of those tasks. This count includes tasks whose results a script read after they finished. Because the specs emphasize cancellation, these numbers are only a rough guide.
 
 `examples/chat_server.sand` starts a task for each client and never waits for it. Requiring a waiter would stop these client tasks.
 
@@ -121,7 +121,7 @@ Two spec tests caused the 8 failures in the race and sole-waiter candidates acro
 
 The 7x cancel times came from prototypes that scanned every task. We did not build an index to avoid the scan.
 
-We did not prototype stopping tasks when garbage collection reclaims their handles. That rule would make execution depend on collection timing and could drop pending tasks as in asyncio.
+We did not prototype a rule that stops tasks when garbage collection reclaims their handles. That rule would make execution depend on collection timing and could drop pending tasks as in asyncio.
 
 ### Final implementation
 
