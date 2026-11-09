@@ -143,6 +143,14 @@ The host cannot rely on engine limits, stability, or control.
 
 Common scripts fail, require workarounds, or produce misleading diagnostics.
 
+- [ ] ❓ _Tasks._ Run all deferred code at the end of a run. If deferred code
+      needs a permission prompt at the end of a run, `Vm::end_tasks` stops, and
+      the deferred code of the other tasks does not run. The run reports no
+      error.
+- [ ] ❓ _Tasks._ Mark a task as finished when its failure ends a REPL input.
+      `Vm::abandon_tasks` cannot see the fiber that failed, so `is_done` returns
+      `false` for that task. `Task` methods can also use the old fiber id of
+      the task, which a later task can reuse.
 - [ ] ❓ _Testing._ Decide whether `exit(0)` should pass a test. `exit(0)`
       currently stops a test early and passes it. A test that calls `exit(0)`
       before a failing `assert` therefore passes. If `exit` always fails a test,
