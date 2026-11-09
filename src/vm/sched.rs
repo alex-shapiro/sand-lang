@@ -1,6 +1,6 @@
 //! The task scheduler: runs fibers round-robin and drives pending I/O.
 
-use super::interp::Exit;
+use super::interp::FiberStop;
 use super::*;
 use crate::engine::LimitKind;
 use crate::platform::{ClockFuture, Instant};
@@ -273,7 +273,6 @@ impl Vm {
             let r = match crate::unwind::catch(|| self.unchecked(fin)) {
                 Ok(r) => r,
                 Err(msg) => {
-                    self.broken = true;
                     self.heap.unchecked = false;
                     Err(Ctl::internal(msg))
                 }
@@ -384,23 +383,23 @@ impl Vm {
                     Err(ending) => return Err(ending),
                 };
                 match exit {
-                    Exit::Done(v) => {
+                    FiberStop::Done(v) => {
                         self.fibers[fid as usize] = Some(f);
                         if Some(fid) == main {
                             return Ok(Stop::Main(v));
                         }
                         self.finish_task(fid, v);
                     }
-                    Exit::Preempt | Exit::YieldNow => {
+                    FiberStop::Preempt | FiberStop::YieldNow => {
                         f.state = FiberState::Ready;
                         self.fibers[fid as usize] = Some(f);
                         self.ready.push_back(fid);
                     }
-                    Exit::Blocked => {
+                    FiberStop::Blocked => {
                         f.state = FiberState::Waiting;
                         self.fibers[fid as usize] = Some(f);
                     }
-                    Exit::Async(suspension) => {
+                    FiberStop::Async(suspension) => {
                         let g = self.next_gen();
                         f.wgen = g;
                         f.state = FiberState::Waiting;
@@ -411,7 +410,7 @@ impl Vm {
                             self.apply_completions(vec![(fid, g, fin)], &timer)?;
                         }
                     }
-                    Exit::Prompt(cap) => {
+                    FiberStop::Prompt(cap) => {
                         f.state = FiberState::Ready;
                         self.fibers[fid as usize] = Some(f);
                         self.ready.push_front(fid);
@@ -436,7 +435,7 @@ impl Vm {
                         timer.resume();
                         self.apply_answer(cap, answer);
                     }
-                    Exit::Cancelled => {
+                    FiberStop::Cancelled => {
                         // The task cancelled itself.
                         self.end_cancelled(fid, f);
                         if self.fibers[fid as usize].is_some() {
@@ -445,7 +444,7 @@ impl Vm {
                             return Ok(Stop::Main(Value::Unit));
                         }
                     }
-                    Exit::Unwound => {
+                    FiberStop::Unwound => {
                         self.free_fibers.push(fid);
                         self.live_tasks = self.live_tasks.saturating_sub(1);
                         self.recycle_fiber(f);
