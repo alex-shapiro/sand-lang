@@ -70,5 +70,4 @@ S-S5 FOUND repo:src/vm/sched.rs :: 'const YIELD_EVERY: Duration = Duration::from
 S-S4 FOUND repo:src/lib.rs :: '#![forbid(unsafe_code)]'
 70/70 quotes found in their sources
 0 report quotes without a check
-UNTRACKED or EMPTY cited path: results/sand_p2_e13b_without_fix.txt
-1 cited paths untracked or empty
+0 cited paths untracked or empty
