@@ -136,26 +136,27 @@ The host cannot rely on engine limits, stability, or control.
 
 - [ ] ❓ _Embedding._ Yield to the executor while waiting for an output sink.
       `Vm::wait_backlog` blocks the current thread in a loop. A stalled sink
-      blocks other engines on that thread and prevents `Session::run_tasks_until`
-      from polling its `until` future. Only a limit or an interrupt from another
-      thread can stop the wait.
+      blocks other engines on that thread. It also prevents
+      `Session::run_tasks_until` from polling its `until` future. Only a limit
+      or an interrupt from another thread can stop the wait.
 
 ## Tier 3: ordinary scripts
 
 - [ ] ❓ _Testing._ Decide whether `exit(0)` should pass a test. `exit(0)`
-      currently stops a test early and marks it as passed. A test that calls
-      `exit(0)` before a failing `assert` therefore passes. If `exit` always
-      fails a test, add an API for tests that expect an exit code. Top-level
-      `exit(0)` also fails every test in the module. A script that calls
-      `exit(0)` at the top level cannot have passing tests.
+      currently stops a test early and passes it. A test that calls `exit(0)`
+      before a failing `assert` therefore passes. If `exit` always fails a test,
+      add an API for tests that expect an exit code. Top-level `exit(0)` also
+      fails every test in the module. A script that calls `exit(0)` at the top
+      level cannot have passing tests.
 - [ ] ❓ _Testing._ Measure fuel or probe counts instead of wall-clock time in
       `keys_chosen_to_collide_do_not_slow_down_maps` in `tests/metering.rs`.
-      The test currently compares elapsed times and fails when the host is
-      under load.
+      The test currently compares elapsed times and fails if the host is under
+      load.
 - [ ] ❓ _Testing._ Capture test output in `Engine::run_tests` and display it
       for failed tests, or remove the capture claim from SPEC §17.4. SPEC
-      §17.4 states that `sand test` captures output, but `Engine::run_tests`
-      sends output to `NullSink` and `TestResult` does not store output.
+      §17.4 states that `sand test` captures output. However,
+      `Engine::run_tests` sends output to `NullSink`, and `TestResult` does not
+      store output.
 
 Common scripts fail, require workarounds, or produce misleading diagnostics.
 

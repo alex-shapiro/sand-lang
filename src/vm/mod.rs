@@ -1498,7 +1498,7 @@ impl Vm {
         false
     }
 
-    /// Cancels remaining tasks after the main task finishes, and runs their
+    /// Cancels remaining tasks after the main task finishes. Runs their
     /// pending `defer` blocks until they finish or block.
     pub async fn end_tasks(&mut self) -> Result<(), RunEnding> {
         self.release_main();
