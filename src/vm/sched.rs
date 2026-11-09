@@ -50,11 +50,10 @@ impl Wake for SlotWaker {
     }
 }
 
-/// A pending I/O operation: the future of a native call of task `fid`,
-/// which waits for it as wait generation `wgen`.
+/// A pending I/O operation for fiber `fid` at generation `wait_gen`.
 struct IoOp {
     fid: u32,
-    wgen: u64,
+    wait_gen: u64,
     suspension: Suspension,
 }
 
@@ -77,7 +76,7 @@ impl IoTable {
     /// Polls the future of `suspension` once and registers it for task `fid`
     /// if still pending. Returns the slot ID, or the finisher if ready
     /// immediately.
-    pub fn add(&mut self, fid: u32, wgen: u64, mut suspension: Suspension) -> Result<u64, Finisher> {
+    pub fn add(&mut self, fid: u32, wait_gen: u64, mut suspension: Suspension) -> Result<u64, Finisher> {
         let slot = match self.free.pop() {
             Some(s) => s,
             None => {
@@ -91,7 +90,7 @@ impl IoTable {
             self.free.push(slot);
             return Err(fin);
         }
-        self.ops[slot as usize] = Some(IoOp { fid, wgen, suspension });
+        self.ops[slot as usize] = Some(IoOp { fid, wait_gen, suspension });
         self.pending += 1;
         Ok(u64::from(slot))
     }
@@ -131,10 +130,10 @@ impl IoTable {
         for slot in slots {
             let Some(Some(op)) = self.ops.get_mut(slot as usize) else { continue };
             if let Poll::Ready(fin) = op.suspension.future.as_mut().poll(&mut Context::from_waker(&self.wakers[slot as usize])) {
-                let IoOp { fid, wgen, .. } = self.ops[slot as usize].take().expect("polled");
+                let IoOp { fid, wait_gen, .. } = self.ops[slot as usize].take().expect("polled");
                 self.free.push(slot);
                 self.pending -= 1;
-                done.push((fid, wgen, fin));
+                done.push((fid, wait_gen, fin));
             }
         }
         done
@@ -148,14 +147,85 @@ const CLOCK_SLICES: u32 = 32;
 /// host's executor run.
 const YIELD_EVERY: Duration = Duration::from_millis(2);
 
-/// Why [`Vm::drive`] returned.
-pub(crate) enum Stop {
-    /// The main task finished with this value.
-    Main(Value),
-    /// Idle state when all tasks are blocked and all I/O is complete.
+/// Stopping policy for [`Vm::drive`]. Each policy defines its own
+/// [`Stop`](Self::Stop) type so callers handle only the stops that can occur.
+pub(crate) trait DriveUntil {
+    type Stop;
+
+    /// Returns a stop if finishing fiber `fid` with `result` ends the drive.
+    fn stop_on_finish(&self, fid: u32, result: Value) -> Option<Self::Stop>;
+
+    /// Returns a stop if a permission prompt for `capability` ends the drive.
+    /// Returns `None` if the engine should prompt immediately.
+    fn stop_on_prompt(&self, capability: &Capability) -> Option<Self::Stop>;
+
+    /// Returns the outcome if all tasks are blocked and all I/O is complete.
+    fn stop_on_all_blocked(&self, vm: &Vm) -> Result<Self::Stop, RunEnding>;
+
+    /// Returns a stop if pending I/O ends the drive instead of waiting.
+    fn stop_before_io_wait(&self) -> Option<Self::Stop>;
+}
+
+/// Drives tasks until the main fiber finishes.
+pub(crate) struct UntilMainDone(u32);
+
+impl DriveUntil for UntilMainDone {
+    type Stop = Value;
+
+    fn stop_on_finish(&self, fid: u32, result: Value) -> Option<Value> {
+        (fid == self.0).then_some(result)
+    }
+
+    fn stop_on_prompt(&self, _capability: &Capability) -> Option<Value> {
+        None
+    }
+
+    fn stop_on_all_blocked(&self, vm: &Vm) -> Result<Value, RunEnding> {
+        let trace = match vm.fibers.get(self.0 as usize) {
+            Some(Some(f)) => vm.trace_of(f, None),
+            _ => vec![],
+        };
+        Err(Trap::Error { message: "deadlock: all tasks are blocked".into(), trace }.into())
+    }
+
+    fn stop_before_io_wait(&self) -> Option<Value> {
+        None
+    }
+}
+
+/// Why a drive with [`UntilIdle`] stopped.
+pub(crate) enum IdleStop {
+    /// All tasks are finished or blocked.
     Idle,
-    /// Suspended state awaiting permission prompt.
+    /// A task needs a permission prompt.
     Prompt(Capability),
+}
+
+/// Drives tasks until all tasks are finished or blocked, or a task needs a
+/// permission prompt.
+pub(crate) struct UntilIdle {
+    /// Whether the drive waits for pending I/O before stopping.
+    pub waits_for_io: bool,
+}
+
+impl DriveUntil for UntilIdle {
+    type Stop = IdleStop;
+
+    fn stop_on_finish(&self, _fid: u32, _result: Value) -> Option<IdleStop> {
+        None
+    }
+
+    fn stop_on_prompt(&self, capability: &Capability) -> Option<IdleStop> {
+        Some(IdleStop::Prompt(capability.clone()))
+    }
+
+    fn stop_on_all_blocked(&self, _vm: &Vm) -> Result<IdleStop, RunEnding> {
+        Ok(IdleStop::Idle)
+    }
+
+    fn stop_before_io_wait(&self) -> Option<IdleStop> {
+        (!self.waits_for_io).then_some(IdleStop::Idle)
+    }
 }
 
 /// Execution timer tracking elapsed CPU and clock time.
@@ -265,8 +335,8 @@ impl Vm {
             return Ok(());
         }
         self.meter.start_slice(timer.cpu_deadline(self.host.limits.max_cpu_time), self.deadline);
-        for (fid, wgen, fin) in done {
-            if !wait_is_live(&self.fibers, (fid, wgen)) {
+        for (fid, wait_gen, fin) in done {
+            if !wait_is_live(&self.fibers, (fid, wait_gen)) {
                 continue;
             }
             // A Rust panic in the finisher (a bug) becomes an internal error.
@@ -279,7 +349,7 @@ impl Vm {
             };
             match r {
                 Ok(v) => {
-                    self.deliver(fid, wgen, v);
+                    self.deliver(fid, wait_gen, v);
                     self.enforce_limit(None).map_err(Trap::Limit)?;
                 }
                 Err(ctl) => {
@@ -299,11 +369,7 @@ impl Vm {
     /// Buffered standard output is flushed at the end.
     pub async fn run_main(&mut self, proto: u32) -> Result<Value, RunEnding> {
         let main_result = match self.start_main(proto) {
-            Ok(fid) => self.drive(Some(fid)).await.map(|stop| match stop {
-                Stop::Main(value) => value,
-                // Only runs without a main task stop this way.
-                Stop::Idle | Stop::Prompt(_) => Value::Unit,
-            }),
+            Ok(fid) => self.drive(UntilMainDone(fid)).await,
             Err(ending) => Err(ending),
         };
         self.drain_output_after(main_result)
@@ -321,11 +387,10 @@ impl Vm {
         Ok(fid)
     }
 
-    /// Runs the ready tasks and pending I/O until the main task (fiber
-    /// `main`) finishes or, without one, until nothing can run or a task
-    /// needs a permission prompt ([`Stop::Prompt`]). The future may be
-    /// dropped where it waits: every task is then in the scheduler's tables.
-    pub(crate) async fn drive(&mut self, main: Option<u32>) -> Result<Stop, RunEnding> {
+    /// Runs ready tasks and pending I/O until `until` stops the drive.
+    /// If the future is dropped at an `.await` point, all tasks remain in the
+    /// scheduler tables.
+    pub(crate) async fn drive<U: DriveUntil>(&mut self, until: U) -> Result<U::Stop, RunEnding> {
         let mut timer = RunTimer::start(self.host.clock.clone());
         // Where an instruction was retried after a memory limit error.
         let mut gc_retried: Option<(u32, usize, u32)> = None;
@@ -356,21 +421,23 @@ impl Vm {
                 self.heap.io_memory.publish_heap(self.heap.used());
                 self.current = u32::MAX;
                 let stop = match r {
-                    Ok(stop) => {
-                        gc_retried = None;
-                        stop
+                    Ok(stop) => stop,
+                    Err(ending) => {
+                        self.fibers[fid as usize] = Some(f);
+                        return Err(ending);
                     }
-                    Err(RunEnding::Trap(Trap::Limit(LimitKind::Memory))) if std::mem::take(&mut self.gc_retry) => {
-                        // Memory checks count garbage that has not been
-                        // collected yet, so collect and run the failed
-                        // instruction again. If the retry itself failed, report
-                        // the limit. A retry is told apart from a later run of
-                        // the same instruction by the fuel spent: reaching it
-                        // again takes a back edge or a call, which cost fuel.
-                        let Some(&fr) = f.frames.last() else { return Err(Trap::Limit(LimitKind::Memory).into()) };
-                        let at = (fid, f.frames.len(), fr.ip);
-                        let op = self.prog.protos[fr.proto as usize].code[fr.ip as usize];
-                        if gc_retried == Some(at) && slice - fuel <= super::interp::call_tick(op) {
+                };
+                let retried_at = gc_retried.take();
+                match stop {
+                    FiberStop::CollectAndRetry(frame) => {
+                        // A later execution of the same instruction must cross
+                        // a back edge or a call, both of which spend fuel. If
+                        // the instruction failed again without spending fuel,
+                        // the retry itself hit the memory limit.
+                        let at = (fid, f.frames.len(), frame.ip);
+                        let op = self.prog.protos[frame.proto as usize].code[frame.ip as usize];
+                        if retried_at == Some(at) && slice - fuel <= super::interp::call_tick(op) {
+                            self.fibers[fid as usize] = Some(f);
                             return Err(Trap::Limit(LimitKind::Memory).into());
                         }
                         gc_retried = Some(at);
@@ -380,13 +447,10 @@ impl Vm {
                         self.ready.push_front(fid);
                         continue;
                     }
-                    Err(ending) => return Err(ending),
-                };
-                match stop {
                     FiberStop::Done(v) => {
                         self.fibers[fid as usize] = Some(f);
-                        if Some(fid) == main {
-                            return Ok(Stop::Main(v));
+                        if let Some(stop) = until.stop_on_finish(fid, v) {
+                            return Ok(stop);
                         }
                         self.finish_task(fid, v);
                     }
@@ -401,7 +465,7 @@ impl Vm {
                     }
                     FiberStop::Async(suspension) => {
                         let g = self.next_gen();
-                        f.wgen = g;
+                        f.wait_gen = g;
                         f.state = FiberState::Waiting;
                         let added = self.io.add(fid, g, suspension);
                         f.io = added.as_ref().ok().copied();
@@ -414,8 +478,8 @@ impl Vm {
                         f.state = FiberState::Ready;
                         self.fibers[fid as usize] = Some(f);
                         self.ready.push_front(fid);
-                        if main.is_none() {
-                            return Ok(Stop::Prompt(cap));
+                        if let Some(stop) = until.stop_on_prompt(&cap) {
+                            return Ok(stop);
                         }
                         // Write the script's output before showing the prompt.
                         self.drain_output()?;
@@ -440,17 +504,12 @@ impl Vm {
                         self.end_cancelled(fid, f);
                         if self.fibers[fid as usize].is_some() {
                             self.ready.push_back(fid);
-                        } else if Some(fid) == main {
-                            return Ok(Stop::Main(Value::Unit));
                         }
                     }
                     FiberStop::Unwound => {
                         self.free_fibers.push(fid);
                         self.live_tasks = self.live_tasks.saturating_sub(1);
                         self.recycle_fiber(f);
-                        if Some(fid) == main {
-                            return Ok(Stop::Main(Value::Unit));
-                        }
                     }
                 }
                 self.check_limits(&timer)?;
@@ -470,12 +529,7 @@ impl Vm {
             }
             self.flush_stdout();
             if self.io.is_empty() {
-                let Some(main) = main else { return Ok(Stop::Idle) };
-                let trace = match self.fibers.get(main as usize) {
-                    Some(Some(f)) => self.trace_of(f, None),
-                    _ => vec![],
-                };
-                return Err(Trap::Error { message: "deadlock: all tasks are blocked".into(), trace }.into());
+                return until.stop_on_all_blocked(self);
             }
             let done = self.io.poll_ready(None);
             if !done.is_empty() {
@@ -483,8 +537,8 @@ impl Vm {
                 self.check_limits(&timer)?;
                 continue;
             }
-            if self.ending {
-                return Ok(Stop::Idle);
+            if let Some(stop) = until.stop_before_io_wait() {
+                return Ok(stop);
             }
             timer.read();
             let idle = self.host.stdin.clone().map(crate::stdin_feed::StdinIdleGuard::new);

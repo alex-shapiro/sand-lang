@@ -92,9 +92,17 @@ pub enum CtlKind {
     NeedPermission(Capability),
     /// Suspend the task until the future completes.
     Async(Suspension),
-    /// The task waits for the scheduler event that [`Vm::block`]
-    /// registered; the call returns what wakes it.
-    Blocked,
+    /// Wait for the scheduler event that [`Vm::block`] registered as
+    /// generation `wait_gen`. The call returns the value that wakes the task.
+    Blocked {
+        wait_gen: u64,
+    },
+    /// Wait for a `task.race` event registered as generation `wait_gen`. On
+    /// wake-up, the engine cancels the remaining `tasks`.
+    Racing {
+        wait_gen: u64,
+        tasks: Vec<Value>,
+    },
     /// Let other tasks run; the call returns `()`.
     Yield,
     /// The host interrupted the engine (see `Meter::check`).
@@ -103,6 +111,8 @@ pub enum CtlKind {
     /// open-resource slot, I/O buffer space) may be held by garbage. See
     /// [`Vm::resource_slot`].
     Collect,
+    /// The native cancelled the running task. See [`Vm::cancel_task`].
+    Cancelled,
 }
 
 impl Ctl {
@@ -183,10 +193,12 @@ impl std::fmt::Debug for CtlKind {
             CtlKind::Exit(c) => write!(f, "Exit({c})"),
             CtlKind::NeedPermission(c) => write!(f, "NeedPermission({c})"),
             CtlKind::Async(s) => write!(f, "Async({:?})", s.wait_kind),
-            CtlKind::Blocked => write!(f, "Blocked"),
+            CtlKind::Blocked { wait_gen } => write!(f, "Blocked({wait_gen})"),
+            CtlKind::Racing { wait_gen, .. } => write!(f, "Racing({wait_gen})"),
             CtlKind::Yield => write!(f, "Yield"),
             CtlKind::Interrupted => write!(f, "Interrupted"),
             CtlKind::Collect => write!(f, "Collect"),
+            CtlKind::Cancelled => write!(f, "Cancelled"),
         }
     }
 }
@@ -265,8 +277,8 @@ const MAX_SPARE_FRAMES: usize = 64;
 pub(crate) const MIN_PRUNE: usize = 16;
 
 /// Whether the wait `(fiber, generation)` is still current.
-pub(crate) fn wait_is_live(fibers: &[Option<Box<Fiber>>], (fid, wgen): (u32, u64)) -> bool {
-    matches!(fibers.get(fid as usize), Some(Some(f)) if f.state == FiberState::Waiting && f.wgen == wgen)
+pub(crate) fn wait_is_live(fibers: &[Option<Box<Fiber>>], (fid, wait_gen): (u32, u64)) -> bool {
+    matches!(fibers.get(fid as usize), Some(Some(f)) if f.state == FiberState::Waiting && f.wait_gen == wait_gen)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -282,7 +294,7 @@ pub struct Fiber {
     pub task: Value,
     pub state: FiberState,
     /// Wait generation; waiters record it to detect stale wake-ups.
-    pub wgen: u64,
+    pub wait_gen: u64,
     /// Absolute stack slot receiving the result of a blocking call.
     pub result_slot: usize,
     /// Tasks to cancel when a `race` completes.
@@ -295,6 +307,9 @@ pub struct Fiber {
     pub io: Option<u64>,
     /// An error (`kind: message`) to raise when the fiber resumes.
     pub pending_error: Option<String>,
+    /// Whether the fiber stopped in or just after a native call. Its
+    /// instruction pointer is then one past that call.
+    pub stopped_in_native_call: bool,
 }
 
 /// A stack trace frame from a runtime error.
@@ -540,25 +555,15 @@ pub struct Vm {
     /// When the run exceeds the wall-time limit (moved on by the time
     /// spent waiting for prompt answers).
     pub(crate) deadline: Option<crate::platform::Instant>,
-    /// Set when the running instruction hit the memory limit and should be
-    /// retried after a garbage collection (see `interp::limit_trap`).
-    pub(crate) gc_retry: bool,
     /// Set while a native that asked for a collection (`CtlKind::Collect`)
     /// is called again after it.
     pub(crate) collected: bool,
     /// Function and instruction pointer of the active native call.
     caller_site: (u32, u32),
-    pub cancel_current: bool,
-    /// Set while the tasks left at the end of a run unwind (`end_tasks`):
-    /// `drive` stops instead of waiting for I/O.
-    pub(crate) ending: bool,
     /// Extra GC roots (e.g. values held by the test runner).
     pub pinned: Vec<Value>,
-    pub(crate) pending_race: Option<Vec<Value>>,
     /// The box of the last `Blocked` or `Yield` consumed (see `Vm::signal`).
     spare_ctl: Option<Box<CtlKind>>,
-    /// The wait generation of the wait [`Vm::block`] registered.
-    wait_gen: u64,
     /// The map handle and slot of the last lookup of a key other than an
     /// int, which a store to the same key reuses (see `Vm::map_set`).
     last_slot: std::cell::Cell<(u32, u32)>,
@@ -655,15 +660,10 @@ impl Vm {
             gen_counter: 1,
             meter,
             deadline: None,
-            gc_retry: false,
             collected: false,
             caller_site: (0, 0),
-            cancel_current: false,
-            ending: false,
             pinned: Vec::new(),
-            pending_race: None,
             spare_ctl: None,
-            wait_gen: 0,
             last_slot: std::cell::Cell::new((u32::MAX, 0)),
             ascii_strs: Vec::new(),
             broken: false,
@@ -726,8 +726,6 @@ impl Vm {
         self.ready.clear();
         self.io.clear();
         self.live_tasks = 0;
-        self.cancel_current = false;
-        self.pending_race = None;
         self.host.grants_once.clear();
         self.host.denies_once.clear();
     }
@@ -753,13 +751,12 @@ impl Vm {
         }
     }
 
-    /// The dataless `kind` (`Blocked` or `Yield`) as a [`Ctl`], in the box
-    /// of the last one consumed.
+    /// Wraps `kind` in a [`Ctl`], reusing `spare_ctl` if available. `kind`
+    /// must be `Blocked` or `Yield`.
     #[inline]
     fn signal(&mut self, kind: CtlKind) -> Ctl {
         match self.spare_ctl.take() {
             Some(mut b) => {
-                // A dataless kind: nothing to drop.
                 std::mem::forget(std::mem::replace(&mut *b, kind));
                 Ctl(b)
             }
@@ -770,6 +767,7 @@ impl Vm {
     /// Keeps the box of a consumed `Blocked` or `Yield` for [`Vm::signal`].
     #[inline]
     pub(crate) fn recycle(&mut self, c: Ctl) {
+        debug_assert!(matches!(c.kind(), CtlKind::Blocked { .. } | CtlKind::Yield));
         if self.spare_ctl.is_none() {
             self.spare_ctl = Some(c.0);
         }
@@ -1301,13 +1299,14 @@ impl Vm {
                     frames,
                     task,
                     state: FiberState::Ready,
-                    wgen: 0,
+                    wait_gen: 0,
                     result_slot: 0,
                     race: vec![],
                     waiters: vec![],
                     waiters_prune_at: MIN_PRUNE,
                     io: None,
                     pending_error: None,
+                    stopped_in_native_call: false,
                 });
                 self.heap.fiber_bytes += fiber.footprint();
                 fiber
@@ -1339,7 +1338,7 @@ impl Vm {
     /// it must not hold handles of objects freed since.
     fn recycle_fiber(&mut self, mut f: Box<Fiber>) {
         let small = f.stack.capacity() <= MAX_SPARE_STACK_SLOTS && f.frames.capacity() <= MAX_SPARE_FRAMES;
-        if self.spare_fibers.len() >= MAX_SPARE_FIBERS || !small || !f.race.is_empty() || f.waiters.capacity() > MIN_PRUNE {
+        if self.spare_fibers.len() >= MAX_SPARE_FIBERS || !small || f.waiters.capacity() > MIN_PRUNE {
             self.heap.fiber_bytes = self.heap.fiber_bytes.saturating_sub(f.footprint());
             return;
         }
@@ -1349,11 +1348,12 @@ impl Vm {
         f.frames.clear();
         f.task = Value::Unit;
         f.state = FiberState::Ready;
-        f.wgen = 0;
+        f.wait_gen = 0;
         f.result_slot = 0;
         f.waiters.clear();
         f.waiters_prune_at = MIN_PRUNE;
         f.io = None;
+        f.stopped_in_native_call = false;
         f.pending_error = None;
         self.spare_fibers.push(f);
     }
@@ -1384,9 +1384,9 @@ impl Vm {
     }
 
     /// Delivers a value to a waiting fiber (if the wait is still current).
-    pub fn deliver(&mut self, fid: u32, wgen: u64, v: Value) -> bool {
+    pub fn deliver(&mut self, fid: u32, wait_gen: u64, v: Value) -> bool {
         let Some(Some(f)) = self.fibers.get_mut(fid as usize) else { return false };
-        if f.state != FiberState::Waiting || f.wgen != wgen {
+        if f.state != FiberState::Waiting || f.wait_gen != wait_gen {
             return false;
         }
         let slot = f.result_slot;
@@ -1398,16 +1398,16 @@ impl Vm {
         let race = std::mem::take(&mut f.race);
         self.ready.push_back(fid);
         for t in race {
-            self.cancel_task(t);
+            self.cancel_other_task(t);
         }
         true
     }
 
     /// Wakes a waiting fiber with an error, `kind: message`.
-    pub fn deliver_error(&mut self, fid: u32, wgen: u64, msg: &str) {
+    pub fn deliver_error(&mut self, fid: u32, wait_gen: u64, msg: &str) {
         if let Some(Some(f)) = self.fibers.get_mut(fid as usize)
             && f.state == FiberState::Waiting
-            && f.wgen == wgen
+            && f.wait_gen == wait_gen
         {
             f.pending_error = Some(msg.to_string());
             f.state = FiberState::Ready;
@@ -1431,8 +1431,23 @@ impl Vm {
         self.recycle_fiber(f);
     }
 
-    /// Cancels a task (no-op if already finished).
-    pub fn cancel_task(&mut self, task: Value) {
+    /// Cancels a running `task`. If `task` is the caller, returns
+    /// [`CtlKind::Cancelled`]. The native must propagate this error so the
+    /// engine ends the task.
+    pub fn cancel_task(&mut self, task: Value) -> Result<(), Ctl> {
+        if let Obj::Task(t) = self.heap.get_mut(task)
+            && t.state == TaskState::Running
+            && t.fiber == self.current
+        {
+            t.state = TaskState::Cancelled;
+            return Err(Ctl::from(CtlKind::Cancelled));
+        }
+        self.cancel_other_task(task);
+        Ok(())
+    }
+
+    /// Cancels a running `task` other than `self.current`.
+    fn cancel_other_task(&mut self, task: Value) {
         let (fid, state) = match self.heap.get(task) {
             Obj::Task(t) => (t.fiber, t.state),
             _ => return,
@@ -1440,13 +1455,9 @@ impl Vm {
         if state != TaskState::Running {
             return;
         }
+        debug_assert_ne!(fid, self.current, "use cancel_task for the running task");
         if let Obj::Task(t) = self.heap.get_mut(task) {
             t.state = TaskState::Cancelled;
-        }
-        if fid == self.current && self.fibers.get(fid as usize).map(|f| f.is_none()).unwrap_or(false) {
-            // Cancelling the running task: stop it after the current call.
-            self.cancel_current = true;
-            return;
         }
         if let Some(mut f) = self.fibers.get_mut(fid as usize).and_then(|f| f.take()) {
             if let Some(io) = f.io.take() {
@@ -1460,15 +1471,15 @@ impl Vm {
         }
     }
 
-    /// Ends the fiber of a cancelled task: wakes its waiters with an error,
-    /// then resumes it at its pending deferred code (`unwind_to_pad`), or
-    /// frees it if there is none.
+    /// Ends the fiber of a cancelled task. Clears its active race and wakes
+    /// its waiters with an error. Resumes the fiber at its next cleanup pad,
+    /// or frees the fiber if all cleanups have run.
     pub(crate) fn end_cancelled(&mut self, fid: u32, mut f: Box<Fiber>) {
+        f.race = Vec::new();
         for (w, g) in std::mem::take(&mut f.waiters) {
             self.deliver_error(w, g, "cancelled: task cancelled");
         }
-        // A fiber waiting in a call, or woken to fail in it, stopped before the call completed.
-        let in_call = f.state == FiberState::Waiting || f.pending_error.is_some();
+        let in_call = f.stopped_in_native_call;
         if self.unwind_to_pad(&mut f, in_call) {
             f.pending_error = None;
             f.state = FiberState::Ready;
@@ -1504,14 +1515,12 @@ impl Vm {
         self.release_main();
         let tasks: Vec<Value> = self.fibers.iter().flatten().map(|f| f.task).collect();
         for task in tasks {
-            self.cancel_task(task);
+            self.cancel_other_task(task);
         }
         if self.ready.is_empty() {
             return Ok(());
         }
-        self.ending = true;
-        let drive_result = self.drive(None).await;
-        self.ending = false;
+        let drive_result = self.drive(sched::UntilIdle { waits_for_io: false }).await;
         self.drain_output_after(drive_result).map(|_| ())
     }
 

@@ -100,6 +100,120 @@ print(t.wait())
 --- fail
 task cancelled
 
+=== a task that cancels itself stops at the call and runs its deferred code
+let ch: Channel<Task<()>> = Channel()
+let t = spawn {
+    defer print("deferred")
+    let me = ch.recv().unwrap()
+    print("before")
+    me.cancel()
+    print("after")
+}
+ch.send(t)
+task.sleep(10ms)
+print(t.is_done())
+--- stdout
+before
+deferred
+true
+
+=== a task that races itself and a finished task stops at the race
+let ch = Channel()
+let done = spawn print("done")
+let t = spawn {
+    let me = ch.recv().unwrap()
+    task.sleep(5ms)
+    print("racing")
+    task.race([me, done])
+    print("after")
+}
+ch.send(t)
+task.sleep(20ms)
+print(t.is_done())
+--- stdout
+done
+racing
+true
+
+=== a race cancels the slower tasks after its winner finishes
+let slow = spawn {
+    defer print("slow cancelled")
+    task.sleep(1s)
+    1
+}
+let fast = spawn {
+    task.sleep(1ms)
+    2
+}
+print(task.race([slow, fast]))
+task.yield_now()
+print(slow.is_done())
+--- stdout
+2
+slow cancelled
+true
+
+=== a cancelled race leaves its tasks running if its deferred code sleeps
+let a = spawn task.sleep(1h)
+let r = spawn {
+    defer {
+        task.sleep(1ms)
+        print("racer woke")
+    }
+    task.race([a])
+}
+task.sleep(5ms)
+r.cancel()
+task.sleep(5ms)
+print(a.is_done())
+--- stdout
+racer woke
+false
+
+=== a cancelled race leaves its tasks running if a raced task wakes its deferred code
+let ch: Channel<int> = Channel()
+let go: Channel<int> = Channel()
+let a = spawn {
+    go.recv()
+    ch.send(1)
+    print("sent")
+}
+let r = spawn {
+    defer {
+        ch.recv()
+        print("racer woke")
+    }
+    task.race([a])
+}
+task.sleep(5ms)
+r.cancel()
+task.sleep(5ms)
+go.send(1)
+task.sleep(5ms)
+print(a.is_done())
+--- stdout
+sent
+racer woke
+true
+
+=== a race of only cancelled tasks fails
+let a = spawn task.sleep(1h)
+a.cancel()
+task.race([a])
+--- fail
+task cancelled
+
+=== a race of only the running task fails
+let ch: Channel<Task<()>> = Channel()
+let t = spawn {
+    let me = ch.recv().unwrap()
+    task.race([me])
+}
+ch.send(t)
+t.wait()
+--- fail
+a task cannot wait for itself
+
 === channels
 let ch = Channel()
 let producer = spawn {

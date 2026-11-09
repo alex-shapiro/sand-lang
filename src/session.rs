@@ -20,7 +20,7 @@ use crate::syntax::ast::{ItemKind, StmtKind};
 use crate::types::{FnId, ModId, TypeId};
 use crate::unwind::CatchUnwind;
 use crate::vm::bytecode::Program;
-use crate::vm::sched::Stop;
+use crate::vm::sched::{IdleStop, UntilIdle};
 use crate::vm::value::Value;
 use crate::vm::{RunEnding, Trap, Vm};
 use std::collections::HashMap;
@@ -570,13 +570,13 @@ impl Session {
         vm.begin_session_run(call);
         // Waiting for input may take any time.
         vm.deadline = None;
-        let drive_result = vm.drive(None).await;
+        let drive_result = vm.drive(UntilIdle { waits_for_io: true }).await;
         match vm.drain_output_after(drive_result) {
-            Ok(Stop::Prompt(cap)) => {
+            Ok(IdleStop::Prompt(cap)) => {
                 st.deferred_prompt = Some(cap);
                 Ok(false)
             }
-            Ok(Stop::Idle | Stop::Main(_)) => Ok(false),
+            Ok(IdleStop::Idle) => Ok(false),
             Err(ending) => end_session_run(vm, ending, exit_code).map(|()| true),
         }
     }

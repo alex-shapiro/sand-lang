@@ -29,8 +29,8 @@ source branch only as a reference.
 5. Precompiled host modules: merged in #30 from `precompiled-host-modules`
 6. `InterruptHandle::new`: merged in #31 from `interrupt-handle`
 7. Linter budget and interrupt errors: merged in #32 from `lint-budget-errors`
-8. Single exit path: in review on `single-exit-path`
-9. Explicit VM control flow: not started
+8. Single exit path: merged in #34 from `single-exit-path`
+9. Explicit VM control flow: in review on `explicit-vm-control-flow`
 10. `Fail` failure type: not started; requires 8
 11. Deterministic fuel: not started
 12. `VmValue` rename: not started
@@ -187,9 +187,21 @@ Source commit: `d84df4d`.
 
 ### 9. Explicit VM control flow
 
-Replace the `Vm` fields `wait_gen`, `pending_race`, `cancel_current`, `gc_retry`,
-and `ending` with explicit return values and parameters. This work is internal
-and does not change the host API.
+Replace control-flow flags on `Vm` with explicit return values and parameters.
+`Vm::cancel_task` returns a `Result` that native modules must propagate.
+`CtlKind` represents racing and self-cancellation as variants.
+`CtlKind::Blocked` includes the wait generation.
+
+This changeset also fixes four task defects:
+
+- Cancelling a task in `task.race` clears its race list so a later wake-up in
+  `defer` does not cancel the raced tasks.
+- `task.race` fails immediately if every task is cancelled or only the caller
+  remains.
+- The scheduler keeps a failing fiber in the fiber table so session cleanup
+  cancels its task.
+- A cancelled task runs its deferred code once if it stopped in or just after a
+  native call.
 
 Source commits: `fc27559`, `fb9367e`, `5bdac47`, `61bfe31`.
 

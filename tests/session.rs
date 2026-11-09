@@ -432,6 +432,17 @@ fn exit_ends_the_input() {
 }
 
 #[test]
+fn a_task_whose_failure_ends_an_input_is_cancelled() {
+    let mut r = Repl::new();
+    r.ok("let t = spawn { fail(\"stop\") };");
+    let _ = r.runtime_error("t.wait()");
+    assert_eq!(r.value("t.is_done()"), "true");
+    assert!(r.runtime_error("t.wait()").contains("task cancelled"));
+    r.ok("t.cancel()\nlet later = spawn 1 + 2");
+    assert_eq!(r.value("later.wait()"), "3");
+}
+
+#[test]
 fn tasks_persist_across_inputs() {
     let mut r = Repl::new();
     r.ok("let ch: Channel<int> = Channel(10)");
