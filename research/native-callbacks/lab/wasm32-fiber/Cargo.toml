@@ -1,0 +1,11 @@
+[package]
+name = "wasm32-fiber"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+# Async wasmtime on a wasm32 host: does the fiber crate support it?
+[dependencies]
+wasmtime = { version = "=50.0.1", default-features = false, features = ["runtime", "async", "pulley"] }

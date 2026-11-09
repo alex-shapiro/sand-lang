@@ -1,0 +1,4 @@
+== 3.14.6 recursionlimit=1e6
+E2b native<->script max depth: 10221 | RecursionError: Stack overflow (used 8148 kB) while calling a Python object
+E2b script-only max depth: 999998 | RecursionError: maximum recursion depth exceeded
+exit=0

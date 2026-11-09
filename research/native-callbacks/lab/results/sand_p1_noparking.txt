@@ -1,0 +1,36 @@
+== sandlang prototype P1 (nested calls), fiber parking: false
+E11 caller's locals after a GC inside a nested callback: Err("error: bounds: index out of bounds: index 49, length 1")
+
+thread 'main' (28235) panicked at /home/user/sand-lang/src/vm/heap.rs:1601:45:
+index out of bounds: the len is 386 but the index is 386
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+   1: core::panicking::panic_fmt
+   2: core::panicking::panic_bounds_check
+   3: sandlang::vm::heap::trace
+   4: <sandlang::vm::heap::Heap>::collect::<alloc::vec::Vec<sandlang::vm::value::Value>>
+   5: <sandlang::vm::Vm>::collect_garbage_with
+   6: <sandlang::vm::Vm>::safe_point
+   7: <sandlang::vm::Vm>::interp
+   8: <sandlang::vm::Vm>::call_nested
+   9: <[sandlang::vm::value::Value]>::sort_by::<sand_nested::module::{closure#1}::{closure#0}>::{closure#0}
+  10: core::slice::sort::stable::drift::sort::<sandlang::vm::value::Value, <[sandlang::vm::value::Value]>::sort_by<sand_nested::module::{closure#1}::{closure#0}>::{closure#0}>
+  11: core::slice::sort::stable::driftsort_main::<sandlang::vm::value::Value, <[sandlang::vm::value::Value]>::sort_by<sand_nested::module::{closure#1}::{closure#0}>::{closure#0}, alloc::vec::Vec<sandlang::vm::value::Value>>
+  12: <sand_nested::module::{closure#1} as sandlang::native::func::VmFunction<(sandlang::vm::Vm, sandlang::native::ty::Val<alloc::vec::Vec<sandlang::native::ty::Param<0>>>, sandlang::native::ty::Val<fn(sandlang::native::ty::Param<0>, sandlang::native::ty::Param<0>) -> bool>)>>::into_host::{closure#0}
+  13: <sandlang::vm::Vm>::call_native
+  14: <sandlang::vm::Vm>::interp
+  15: <sandlang::session::Session>::run::{closure#0}
+  16: <sandlang::session::Session>::eval_inner::{closure#0}
+  17: <sandlang::unwind::CatchUnwind<<sandlang::session::Session>::eval_inner::{closure#0}> as core::future::future::Future>::poll
+  18: <sandlang::session::Session>::eval::{closure#0}
+  19: sand_nested::time::{closure#0}
+  20: <tokio::runtime::scheduler::current_thread::Context>::enter::<core::task::poll::Poll<()>, <tokio::runtime::scheduler::current_thread::CoreGuard>::block_on<sand_nested::main::{closure#0}>::{closure#0}::{closure#0}>
+  21: <tokio::runtime::context::scoped::Scoped<tokio::runtime::scheduler::Context>>::set::<<tokio::runtime::scheduler::current_thread::CoreGuard>::enter<<tokio::runtime::scheduler::current_thread::CoreGuard>::block_on<sand_nested::main::{closure#0}>::{closure#0}, core::option::Option<()>>::{closure#0}, (alloc::boxed::Box<tokio::runtime::scheduler::current_thread::Core>, core::option::Option<()>)>
+  22: <tokio::runtime::scheduler::current_thread::CoreGuard>::block_on::<sand_nested::main::{closure#0}>
+  23: tokio::runtime::context::runtime::enter_runtime::<<tokio::runtime::scheduler::current_thread::CurrentThread>::block_on<sand_nested::main::{closure#0}>::{closure#0}, ()>
+  24: <tokio::runtime::runtime::Runtime>::block_on::<sand_nested::main::{closure#0}>
+  25: sand_nested::main
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+E12 comparator that empties the list under gc_stress: Err("internal error: index out of bounds: the len is 386 but the index is 386 (the session was reset)")
+E13 callback side effect, then a retried memory check: Ok(Some("\"callback ran 2 times, native returned 2\""))
+exit=0

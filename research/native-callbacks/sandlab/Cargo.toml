@@ -1,0 +1,17 @@
+[package]
+name = "sandlab"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+sandlang = { path = "../../.." }
+tokio = { version = "1", features = ["rt", "macros", "time"] }
+
+[profile.release]
+debug = false
+
+[features]
+nested = ["sandlang/nested_callbacks"]

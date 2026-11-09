@@ -1,0 +1,2 @@
+    Finished `release` profile [optimized] target(s) in 0.25s
+Note: the build succeeds because wasmtime-internal-fiber selects its 'unsupported' module for wasm32 and defers the error to run time (W-S5, W-S5b: "fibers unsupported on this host architecture").

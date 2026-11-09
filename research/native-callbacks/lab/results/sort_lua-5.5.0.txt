@@ -1,0 +1,2 @@
+E6 Lua 5.5 sort 200000 ints: table.sort with Lua comparator 116.7 ms; table.sort default 55.3 ms
+exit=0

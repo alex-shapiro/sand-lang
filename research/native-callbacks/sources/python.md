@@ -1,0 +1,14 @@
+# CPython / PyO3 sources (CPython repo docs at tags; PEPs)
+- P-S1 extending.rst v3.13.0 "check that the return value isn't NULL. If it is, the Python function terminated by raising an exception." https://github.com/python/cpython/blob/v3.13.0/Doc/extending/extending.rst
+- P-S2 sys.rst v3.14.0 "This limit prevents infinite recursion from causing an overflow of the C stack and crashing Python." https://github.com/python/cpython/blob/v3.14.0/Doc/library/sys.rst
+- P-S3 whatsnew 3.12 "The recursion limit now applies only to Python code. Builtin functions do not use the recursion limit, but are protected by a different mechanism" ; v3.13 pystate.h "#  define Py_C_RECURSION_LIMIT 10000"
+- P-S4 3.14 ceval.c uses machine stack pointer `_Py_get_machine_stack_pointer()`; message "Stack overflow (used %d kB)%s"; whatsnew 3.14 "Remove the undocumented APIs Py_C_RECURSION_LIMIT and PyThreadState.c_recursion_remaining"
+- P-S5 whatsnew 3.11 "Most Python function calls now consume no C stack space." https://github.com/python/cpython/blob/v3.11.0/Doc/whatsnew/3.11.rst
+- P-S6 PEP 219 "The problem is that the C stack now holds a nested execution of the byte-code interpreter." ; PEP 380 generator "can only yield to its immediate caller"
+- P-S7 greenlet caveats https://github.com/python-greenlet/greenlet/blob/master/docs/caveats.rst "Use caution when switching greenlet stacks that include native (C) frames"; greenlet.cpp copies C stack slices to heap
+- P-S8 listobject.c v3.13.0 "allowing mutations during sorting is a core-dump factory, since ob_item may change"; "list modified during sort"
+- P-S9 extending.rst "Thin Ice": "implicit invocations of the interpreter, which can cause the owner of a reference to dispose of it."
+- P-S10 PEP 578 "This is not sandboxing, as this proposal does not attempt to prevent malicious behavior" ; "Sandboxing CPython has been attempted many times in the past, and each past attempt has failed."
+- P-S11 PEP 684 "some process-global resources (e.g. memory, file descriptors, environment variables) are shared." ; PEP 734 shared "process memory (though allocators *are* isolated)"
+- P-S12 init.rst Py_AddPendingCall "on a bytecode boundary"; PEP 669 INSTRUCTION event; no fuel API found; PyMem_SetAllocator is process-wide.
+- P-S13 PyO3 class.md "PyO3 does borrow checking at runtime... similar to std::cell::RefCell<T>"; pycell.rs "RuntimeError: Already borrowed"; panic.rs PanicException

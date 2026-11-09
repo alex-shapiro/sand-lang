@@ -1,0 +1,5 @@
+== wasmtime 50.0.1 async and component model
+E3 guest -> async host -> guest callback -> async host (sleeps 5 ms): Ok(42) in 6.237091ms
+E3b blocking call on an async store: Err("store configuration requires that `*_async` functions are used instead")
+E10 component re-entered during an import call: Ok(())
+exit=0

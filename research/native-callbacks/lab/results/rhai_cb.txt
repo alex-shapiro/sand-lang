@@ -1,0 +1,5 @@
+== rhai 1.27.0 (release build: default max_call_levels 64)
+E1 loop without call: 197.6 ns/iter; script->script call loop: 451.7 ns/iter; native->script callback loop: 270.1 ns/iter
+E2 native<->script max depth: 32 | Some("Stack overflow (line 1, position 30)")
+E4 progress limit inside callback: Some("Script terminated (line 1, position 24)")
+exit=0

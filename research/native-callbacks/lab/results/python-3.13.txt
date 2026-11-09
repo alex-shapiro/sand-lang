@@ -1,0 +1,12 @@
+== 3.13.18
+E1 loop without call: 66.3 ns/iter; script->script call loop: 85.8 ns/iter; native->script callback loop: 43.5 ns/iter
+E2 native<->script max depth: 998 | RecursionError: maximum recursion depth exceeded
+E2 script-only max depth: 998 | RecursionError: maximum recursion depth exceeded
+E3 generator yield inside callback: [('callback returned', 'generator')]
+E3 async handler from native returns: coroutine
+E3 warning: ["coroutine 'handler' was never awaited"]
+E4 callback error: ZeroDivisionError('division by zero') acquired/cleaned: (1, 1)
+E6 sort with mutating key: ValueError('list modified during sort')
+E8 callback reaches os module: True
+E8b subclasses reachable with empty builtins: True
+exit=0

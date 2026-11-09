@@ -1,0 +1,8 @@
+== sandlang (this branch), release build
+E1 loop without call: 13.1 ns/iter; script->script direct call loop: 12.8 ns/iter; script->script call through fn value: 31.9 ns/iter; native->script callback: not possible
+E-S1 native schedules Sand closure as task, script waits: result Ok(Some("55")); 354.5 ns per round trip
+E-S1b deferred callback that sleeps: Ok(Some("7"))
+E-S3 keep: Ok(None)
+E-S3 churn heap: Ok("ok")
+E-S3 fire kept handle after GC: Err(Internal { message: "spawn: not a closure (the session was reset)", trace: [TraceFrame { function: "<top level>", file: "<input 3>", line: 2 }] })
+exit=0

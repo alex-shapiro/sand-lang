@@ -1,0 +1,7 @@
+== piccolo 0.3.3
+E1 loop without call: 36.3 ns/iter; script->script call loop: 98.0 ns/iter; native->script callback loop: 79.9 ns/iter
+E2 native<->script recursion to depth 10000: Ok(10000)
+E2 native<->script recursion to depth 1000000: Ok(1000000)
+E3 yield inside callback, resumed with 21: Ok(42)
+E4 infinite loop inside callback: finished=false after 1000 fuel slices of 10000; host regained control after each slice
+exit=0

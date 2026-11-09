@@ -1,0 +1,22 @@
+program             base       p2       p1   p2/base  p1/base
+binary_trees       780ms    846ms    768ms     1.085    0.985
+collatz            736ms    747ms    733ms     1.015    0.996
+csv                608ms    560ms    667ms     0.921    1.097
+dijkstra          1120ms   1189ms   1276ms     1.062    1.139
+fannkuch           332ms    347ms    492ms     1.045    1.482
+generators         854ms    856ms    780ms     1.002    0.913
+graph             1495ms   1454ms   1483ms     0.973    0.992
+interpreter       1074ms    996ms    975ms     0.927    0.908
+json              2024ms   1857ms   1950ms     0.917    0.963
+knucleotide        921ms    867ms    846ms     0.941    0.919
+memo               988ms    941ms    919ms     0.952    0.930
+nbody             1074ms   1026ms   1132ms     0.955    1.054
+pipeline           708ms    696ms    709ms     0.983    1.001
+ray                504ms    586ms    603ms     1.163    1.196
+results           1997ms   2008ms   2171ms     1.006    1.087
+richards           792ms    801ms    779ms     1.011    0.984
+spectral_norm      849ms    822ms    906ms     0.968    1.067
+wordfreq          1227ms   1196ms   1249ms     0.975    1.018
+geomean p2/base: 0.993 (best of the per-round medians)
+geomean p1/base: 1.033 (best of the per-round medians)
+noise: largest base-vs-base spread for one program across rounds: 1.233

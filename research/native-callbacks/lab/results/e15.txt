@@ -1,0 +1,9 @@
+== rustc 1.97.0
+-- bad.rs (raw Val across the call):
+error[E0502]: cannot borrow `*vm` as mutable because it is also borrowed as immutable
+  |             -- immutable borrow occurs here
+  |     ^^^^^^^^^^^^^^^^ mutable borrow occurs here
+  |            - immutable borrow later used here
+error: aborting due to 1 previous error
+-- good.rs (rooted Handle across the call):
+E15 rooted handle across the nested call: arg

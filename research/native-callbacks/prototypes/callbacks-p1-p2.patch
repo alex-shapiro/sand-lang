@@ -1,0 +1,404 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 1a68d29..ccdf682 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -18,6 +18,7 @@ path = "src/lib.rs"
+ default = ["os", "tls"]
+ os = ["dep:rustix", "dep:fs_at", "dep:same-file", "dep:winx", "dep:socket2", "tokio/net", "tokio/io-std", "tokio/macros", "jiff/tz-system"]
+ tls = ["os", "dep:rustls", "dep:tokio-rustls", "dep:webpki-roots"]
++nested_callbacks = []
+ 
+ [dependencies]
+ sandlang-macros = { path = "macros" }
+diff --git a/src/vm/interp.rs b/src/vm/interp.rs
+index 7a432bc..85efd85 100644
+--- a/src/vm/interp.rs
++++ b/src/vm/interp.rs
+@@ -67,6 +67,8 @@ pub enum FiberStop {
+     Cancelled,
+     /// A cancelled task ran its pending deferred code.
+     Unwound,
++    /// A native pushed a callback frame: continue at the innermost frame.
++    Reenter,
+ }
+ 
+ #[inline(always)]
+@@ -632,6 +634,13 @@ impl Vm {
+                 fuel.left = self.meter.resync();
+                 match r {
+                     Ok(None) => reload!(),
++                    Ok(Some(FiberStop::Reenter)) => {
++                        let fr = *fiber.frames.last().unwrap();
++                        code = &protos[fr.proto as usize].code;
++                        ip = fr.ip as usize;
++                        base = fr.base as usize;
++                        reload!();
++                    }
+                     Ok(Some(exit)) => return Ok(exit),
+                     Err(t) => return Err(t),
+                 }
+@@ -681,18 +690,33 @@ impl Vm {
+         macro_rules! do_return {
+             ($v:expr) => {{
+                 let v = $v;
+-                let ret = fiber.frames.pop().map_or(0, |f| f.ret as usize);
+-                match fiber.frames.last() {
+-                    None => {
+-                        fiber.stack.truncate(0);
+-                        return Ok(FiberStop::Done(v));
+-                    }
+-                    Some(caller) => {
+-                        code = &protos[caller.proto as usize].code;
+-                        ip = caller.ip as usize;
+-                        base = caller.base as usize;
+-                        fiber.stack[ret] = v;
+-                        reload!();
++                let ret = fiber.frames.pop().map_or(0, |f| f.ret);
++                if ret == CONTINUATION_RET {
++                    self.meter.sync(fuel.left);
++                    let r = self.resume_continuation(&natives, fiber, v);
++                    fuel.left = self.meter.resync();
++                    if let Err(t) = r {
++                        return Err(t);
++                    }
++                    let fr = *fiber.frames.last().unwrap();
++                    code = &protos[fr.proto as usize].code;
++                    ip = fr.ip as usize;
++                    base = fr.base as usize;
++                    reload!();
++                } else {
++                    let ret = ret as usize;
++                    match fiber.frames.last() {
++                        None => {
++                            fiber.stack.truncate(0);
++                            return Ok(FiberStop::Done(v));
++                        }
++                        Some(caller) => {
++                            code = &protos[caller.proto as usize].code;
++                            ip = caller.ip as usize;
++                            base = caller.base as usize;
++                            fiber.stack[ret] = v;
++                            reload!();
++                        }
+                     }
+                 }
+             }};
+@@ -1685,7 +1709,19 @@ impl Vm {
+         let frame = fiber.frames.last_mut().unwrap();
+         frame.ip = ip as u32;
+         self.caller_site = (frame.proto, frame.ip);
++        #[cfg(not(feature = "nested_callbacks"))]
+         let mut r = Self::invoke_native(self, natives, n, &fiber.stack[start..start + argc]);
++        // Prototype P1: park the caller's fiber where the GC can see it while
++        // the native runs, since a nested callback may collect garbage.
++        #[cfg(feature = "nested_callbacks")]
++        let mut r = {
++            let mut args = [Value::Unit; 16];
++            args[..argc].copy_from_slice(&fiber.stack[start..start + argc]);
++            self.parked.push(std::mem::replace(fiber, Vm::empty_fiber()));
++            let r = Self::invoke_native(self, natives, n, &args[..argc]);
++            *fiber = self.parked.pop().unwrap();
++            r
++        };
+         self.heap.fail_next_check.set(false);
+         if r.is_memory_limit() || matches!(&r, Err(c) if matches!(c.kind(), CtlKind::Collect)) {
+             // Native functions check memory and open-resource limits against
+@@ -1743,6 +1779,15 @@ impl Vm {
+                 fiber.result_slot = slot;
+                 Ok(Some(FiberStop::Async(suspension)))
+             }
++            CtlKind::Call(request) => {
++                let CallRequest { callee, args, state, then } = *request;
++                let Some(then) = then else {
++                    return Err(self.internal_trap(fiber, ip, "`Ctl::call_again` outside a continuation".into()));
++                };
++                fiber.continuations.push(Continuation { slot, state, then });
++                self.enter_callback(fiber, callee, &args, ip)?;
++                Ok(Some(FiberStop::Reenter))
++            }
+             CtlKind::Yield | CtlKind::Blocked => unreachable!("handled above"),
+             CtlKind::Collect => Err(self.internal_trap(fiber, ip, "a native asked for a collection twice".into())),
+             // Do not retry memory limits here because the call already retried after garbage collection.
+@@ -1750,6 +1795,57 @@ impl Vm {
+         }
+     }
+ 
++    /// Pushes a frame that calls Sand closure `callee` with `args` above the
++    /// live registers; its result goes to the innermost continuation.
++    fn enter_callback(&mut self, fiber: &mut Fiber, callee: Value, args: &[Value], ip: usize) -> Result<(), RunEnding> {
++        let (proto, h) = match (callee, self.heap.get(callee)) {
++            (Value::Obj(h), Obj::Closure(p, _)) => (*p, h),
++            _ => return Err(self.internal_trap(fiber, ip, "a native callback must be a Sand function".into())),
++        };
++        if fiber.frames.len() >= self.host.limits.max_call_depth {
++            return Err(self.error_trap(fiber, ip, "limit: stack overflow".into()));
++        }
++        let prog = self.prog.clone();
++        let p = &prog.protos[proto as usize];
++        let nb = fiber.live_top(&prog);
++        let need = nb + p.nregs as usize;
++        if fiber.stack.len() < need
++            && let Err(c) = fiber.grow_stack(need, &mut self.heap)
++        {
++            return Err(self.run_ending_of(c.into_kind(), |vm| vm.trace_of(fiber, Some(ip as u32))));
++        }
++        fiber.stack[nb..nb + args.len()].copy_from_slice(args);
++        load_captures(&self.heap, h, &mut fiber.stack[nb + p.nparams as usize..]);
++        fiber.frames.push(Frame { proto, ip: 0, base: nb as u32, ret: CONTINUATION_RET, closure: h });
++        Ok(())
++    }
++
++    /// Passes callback result `v` to the innermost continuation, and either
++    /// stores the native's result or enters the next callback.
++    #[inline(never)]
++    fn resume_continuation(&mut self, natives: &[NativeEntry], fiber: &mut Fiber, v: Value) -> Result<(), RunEnding> {
++        let _ = natives;
++        let mut c = fiber.continuations.pop().expect("a callback frame without a continuation");
++        let ip = fiber.frames.last().map_or(0, |f| f.ip) as usize;
++        match (c.then)(self, v, &mut c.state) {
++            Ok(result) => {
++                fiber.stack[c.slot] = result;
++                Ok(())
++            }
++            Err(ctl) => match ctl.into_kind() {
++                CtlKind::Call(request) => {
++                    let CallRequest { callee, args, state, then } = *request;
++                    match then {
++                        Some(then) => fiber.continuations.push(Continuation { slot: c.slot, state, then }),
++                        None => fiber.continuations.push(c),
++                    }
++                    self.enter_callback(fiber, callee, &args, ip)
++                }
++                kind => Err(self.run_ending_of(kind, |vm| vm.trace_of(fiber, Some(ip as u32)))),
++            },
++        }
++    }
++
+     /// `Op::StrClass`: the character-class tests of strings.
+     #[inline(never)]
+     fn str_class(&self, v: Value, class: u8) -> Result<bool, Stop> {
+diff --git a/src/vm/mod.rs b/src/vm/mod.rs
+index a0b6e1f..f9985a6 100644
+--- a/src/vm/mod.rs
++++ b/src/vm/mod.rs
+@@ -103,8 +103,37 @@ pub enum CtlKind {
+     /// open-resource slot, I/O buffer space) may be held by garbage. See
+     /// [`Vm::resource_slot`].
+     Collect,
++    /// Call a Sand function on the current fiber, then continue the native
++    /// with its result (see [`Ctl::call`]).
++    Call(Box<CallRequest>),
+ }
+ 
++/// The continuation of a native after a Sand callback returns: it receives
++/// the callback's result and the rooted state, and returns the native's
++/// result or another [`Ctl::call`].
++pub type CallThen = Box<dyn FnMut(&mut Vm, Value, &mut Vec<Value>) -> NResult + Send>;
++
++/// A request from a native to call a Sand function (see [`Ctl::call`]).
++pub struct CallRequest {
++    pub callee: Value,
++    pub args: Vec<Value>,
++    pub state: Vec<Value>,
++    /// `None` from a continuation: keep that continuation and its state.
++    pub then: Option<CallThen>,
++}
++
++/// A native waiting for a Sand callback to return.
++pub struct Continuation {
++    /// Absolute stack slot receiving the native's result.
++    pub slot: usize,
++    /// GC-rooted values that the continuation needs.
++    pub state: Vec<Value>,
++    pub then: CallThen,
++}
++
++/// `Frame::ret` of a callback frame: its result goes to the innermost continuation.
++pub const CONTINUATION_RET: u32 = u32::MAX;
++
+ impl Ctl {
+     /// Aborts execution with an uncatchable runtime error of `kind`. For recoverable `Result` errors, return [`HostError`] instead.
+     #[cold]
+@@ -112,6 +141,25 @@ impl Ctl {
+         Ctl(Box::new(CtlKind::RuntimeError(format!("{kind}: {msg}"))))
+     }
+ 
++    /// Calls Sand function `callee` with `args` on the running task, then
++    /// calls `then` with its result and `state`. The GC roots `state` while
++    /// the callback runs, so the callback can allocate, suspend on I/O and
++    /// call natives. `then` must keep heap values in `state`, not in captures.
++    pub fn call(
++        callee: Value,
++        args: Vec<Value>,
++        state: Vec<Value>,
++        then: impl FnMut(&mut Vm, Value, &mut Vec<Value>) -> NResult + Send + 'static,
++    ) -> Ctl {
++        Ctl(Box::new(CtlKind::Call(Box::new(CallRequest { callee, args, state, then: Some(Box::new(then)) }))))
++    }
++
++    /// From a continuation: calls `callee` with `args`, then calls the same
++    /// continuation again with the result and the same state.
++    pub fn call_again(callee: Value, args: Vec<Value>) -> Ctl {
++        Ctl(Box::new(CtlKind::Call(Box::new(CallRequest { callee, args, state: Vec::new(), then: None }))))
++    }
++
+     /// An internal error: an invariant of the engine broke.
+     #[cold]
+     pub fn internal(msg: impl Into<String>) -> Ctl {
+@@ -187,6 +235,7 @@ impl std::fmt::Debug for CtlKind {
+             CtlKind::Yield => write!(f, "Yield"),
+             CtlKind::Interrupted => write!(f, "Interrupted"),
+             CtlKind::Collect => write!(f, "Collect"),
++            CtlKind::Call(_) => write!(f, "Call"),
+         }
+     }
+ }
+@@ -295,6 +344,8 @@ pub struct Fiber {
+     pub io: Option<u64>,
+     /// An error (`kind: message`) to raise when the fiber resumes.
+     pub pending_error: Option<String>,
++    /// Natives waiting for callbacks, innermost last.
++    pub continuations: Vec<Continuation>,
+ }
+ 
+ /// A stack trace frame from a runtime error.
+@@ -554,6 +605,9 @@ pub struct Vm {
+     pub(crate) ending: bool,
+     /// Extra GC roots (e.g. values held by the test runner).
+     pub pinned: Vec<Value>,
++    /// Fibers whose natives run nested callbacks (prototype P1), innermost last.
++    pub parked: Vec<Fiber>,
++    pub nested_depth: usize,
+     pub(crate) pending_race: Option<Vec<Value>>,
+     /// The box of the last `Blocked` or `Yield` consumed (see `Vm::signal`).
+     spare_ctl: Option<Box<CtlKind>>,
+@@ -661,6 +715,8 @@ impl Vm {
+             cancel_current: false,
+             ending: false,
+             pinned: Vec::new(),
++            parked: Vec::new(),
++            nested_depth: 0,
+             pending_race: None,
+             spare_ctl: None,
+             wait_gen: 0,
+@@ -1308,6 +1364,7 @@ impl Vm {
+                     waiters_prune_at: MIN_PRUNE,
+                     io: None,
+                     pending_error: None,
++                    continuations: Vec::new(),
+                 });
+                 self.heap.fiber_bytes += fiber.footprint();
+                 fiber
+@@ -1347,6 +1404,7 @@ impl Vm {
+         f.stack.clear();
+         f.stack.resize(slots, Value::Unit);
+         f.frames.clear();
++        f.continuations.clear();
+         f.task = Value::Unit;
+         f.state = FiberState::Ready;
+         f.wgen = 0;
+@@ -1365,6 +1423,74 @@ impl Vm {
+         self.spare_fibers = Vec::new();
+     }
+ 
++    /// An empty fiber (prototype P1).
++    pub fn empty_fiber() -> Fiber {
++        Fiber {
++            stack: Vec::new(),
++            frames: Vec::new(),
++            task: Value::Unit,
++            state: FiberState::Ready,
++            wgen: 0,
++            result_slot: 0,
++            race: vec![],
++            waiters: vec![],
++            waiters_prune_at: MIN_PRUNE,
++            io: None,
++            pending_error: None,
++            continuations: Vec::new(),
++        }
++    }
++
++    /// Prototype P1: calls Sand closure `callee` with `args` and runs it to
++    /// completion on the Rust stack. The callback cannot suspend.
++    pub fn call_nested(&mut self, callee: Value, args: &[Value]) -> Result<Value, Ctl> {
++        const MAX_NESTED_CALLBACKS: usize = 200;
++        if self.nested_depth >= MAX_NESTED_CALLBACKS {
++            return Err(Ctl::fail("limit", "native callback nesting too deep"));
++        }
++        let (proto, h) = match (callee, self.heap.get(callee)) {
++            (Value::Obj(h), Obj::Closure(p, _)) => (*p, h),
++            _ => return Err(Ctl::fail("error", "a native callback must be a Sand function")),
++        };
++        let prog = self.prog.clone();
++        let p = &prog.protos[proto as usize];
++        let mut nf = Vm::empty_fiber();
++        nf.stack = vec![Value::Unit; (p.nregs as usize).max(INITIAL_STACK_SLOTS)];
++        nf.stack[..args.len()].copy_from_slice(args);
++        if let Obj::Closure(_, caps) = self.heap.get(callee) {
++            let n = p.nparams as usize;
++            nf.stack[n..n + caps.len()].copy_from_slice(caps);
++        }
++        nf.frames.push(Frame { proto, ip: 0, base: 0, ret: 0, closure: h });
++        self.nested_depth += 1;
++        let r = loop {
++            let mut fuel = self.meter.resync();
++            if fuel <= 0 {
++                fuel = self.meter.start_slice(None, self.deadline);
++                if let Err(c) = self.meter.check() {
++                    break Err(c);
++                }
++                if fuel <= 0 {
++                    break Err(Ctl::limit(LimitKind::Instructions));
++                }
++            }
++            let r = self.interp(&mut nf, &mut fuel);
++            self.meter.sync(fuel);
++            match r {
++                Ok(interp::FiberStop::Done(v)) => break Ok(v),
++                Ok(interp::FiberStop::Preempt | interp::FiberStop::YieldNow) => continue,
++                Ok(_) => break Err(Ctl::fail("error", "a native callback cannot suspend")),
++                Err(RunEnding::Trap(Trap::Error { message, .. })) => break Err(Ctl::from(message.as_str())),
++                Err(RunEnding::Trap(Trap::Limit(k))) => break Err(Ctl::limit(k)),
++                Err(RunEnding::Trap(Trap::Interrupted)) => break Err(Ctl::interrupted()),
++                Err(e) => break Err(Ctl::internal(format!("callback ended: {e:?}"))),
++            }
++        };
++        self.nested_depth -= 1;
++        self.meter.resync();
++        r
++    }
++
+     /// Spawns a new task running `closure`; returns the task handle.
+     pub fn spawn_task(&mut self, closure: Value) -> NResult {
+         if self.live_tasks >= self.host.limits.max_tasks {
+@@ -1571,11 +1697,17 @@ impl Vm {
+             roots.extend(f.frames.iter().map(|fr| fr.closure_value()));
+             roots.push(f.task);
+             roots.extend(f.race.iter().copied());
++            for c in &f.continuations {
++                roots.extend(c.state.iter().copied());
++            }
+             fiber_bytes += f.footprint();
+         };
+         for f in self.fibers.iter_mut().flatten() {
+             add_fiber(f, &mut roots);
+         }
++        for f in self.parked.iter_mut() {
++            add_fiber(f, &mut roots);
++        }
+         if let Some(f) = current {
+             add_fiber(f, &mut roots);
+         }
+diff --git a/src/vm/sched.rs b/src/vm/sched.rs
+index 8f00864..a1ef2b7 100644
+--- a/src/vm/sched.rs
++++ b/src/vm/sched.rs
+@@ -444,6 +444,7 @@ impl Vm {
+                             return Ok(Stop::Main(Value::Unit));
+                         }
+                     }
++                    FiberStop::Reenter => unreachable!("handled by the interpreter"),
+                     FiberStop::Unwound => {
+                         self.free_fibers.push(fid);
+                         self.live_tasks = self.live_tasks.saturating_sub(1);

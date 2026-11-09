@@ -1,0 +1,61 @@
+import time
+
+// Status quo: a merge sort with a comparator, written in Sand.
+fn merge_sort<T>(xs: [T], less: fn(T, T) -> bool) -> [T] {
+    var src = xs.copy()
+    var dst = xs.copy()
+    let n = xs.len()
+    var width = 1
+    while width < n {
+        var lo = 0
+        while lo < n {
+            let mid = if lo + width < n { lo + width } else { n }
+            let hi = if lo + 2 * width < n { lo + 2 * width } else { n }
+            var i = lo
+            var j = mid
+            var k = lo
+            while i < mid and j < hi {
+                if less(src[j], src[i]) {
+                    dst[k] = src[j]
+                    j += 1
+                } else {
+                    dst[k] = src[i]
+                    i += 1
+                }
+                k += 1
+            }
+            while i < mid {
+                dst[k] = src[i]
+                i += 1
+                k += 1
+            }
+            while j < hi {
+                dst[k] = src[j]
+                j += 1
+                k += 1
+            }
+            lo = hi
+        }
+        let t = src
+        src = dst
+        dst = t
+        width *= 2
+    }
+    src
+}
+
+var seed = 1
+fn rnd() -> int {
+    seed = (seed * 1103515245 + 12345) % 2147483648
+    seed
+}
+let data = (0..200000).map(_ => rnd())
+var times: [duration] = []
+for _ in 0..5 {
+    let sw = time.Stopwatch()
+    let sorted = merge_sort(data, (a, b) => a < b)
+    times.push(sw.elapsed())
+    assert(sorted == data.sorted())
+}
+times.sort()
+print("E6 Sand status quo: merge sort written in Sand with a Sand comparator, 200000 ints: median \(times[2])")

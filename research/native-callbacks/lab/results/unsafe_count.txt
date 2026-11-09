@@ -1,0 +1,10 @@
+piccolo-0.3.3                    unsafe blocks/fns/impls:    21   forbid(unsafe_code) in lib.rs: no
+gc-arena-0.5.3                   unsafe blocks/fns/impls:   119   forbid(unsafe_code) in lib.rs: no
+wasmi-2.0.0                      unsafe blocks/fns/impls:   290   forbid(unsafe_code) in lib.rs: no
+rhai-1.27.0                      unsafe blocks/fns/impls:     4   forbid(unsafe_code) in lib.rs: no
+rune-0.14.2                      unsafe blocks/fns/impls:   219   forbid(unsafe_code) in lib.rs: no
+starlark-0.14.2                  unsafe blocks/fns/impls:   781   forbid(unsafe_code) in lib.rs: no
+mlua-0.11.6                      unsafe blocks/fns/impls:   435   forbid(unsafe_code) in lib.rs: no
+rquickjs-core-0.14.0             unsafe blocks/fns/impls:   632   forbid(unsafe_code) in lib.rs: no
+wasmtime-internal-fiber-50.0.1   unsafe blocks/fns/impls:   109   forbid(unsafe_code) in lib.rs: no
+sandlang (this tree)             unsafe blocks/fns/impls:     0   forbid(unsafe_code) in lib.rs: yes

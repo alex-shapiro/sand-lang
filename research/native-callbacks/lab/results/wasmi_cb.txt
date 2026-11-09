@@ -1,0 +1,9 @@
+== wasmi 2.0.0 (interpreter)
+E1 (interp) script->script call loop: 17.2 ns/iter; native->script callback loop: 89.3 ns/iter
+E4 fuel inside callback: Some("all fuel consumed by WebAssembly")
+E2 starting unbounded native<->script recursion...
+
+thread 'main' (28181) has overflowed its stack
+fatal runtime error: stack overflow, aborting
+./run_all.sh: line 7: 28180 Aborted                 "$@"
+exit=134

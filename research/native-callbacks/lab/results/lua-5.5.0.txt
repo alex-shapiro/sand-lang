@@ -1,0 +1,14 @@
+== Lua 5.5.0
+E1 loop without call: 5.5 ns/iter; script->script call loop: 21.2 ns/iter; native->script callback loop: 14.9 ns/iter
+E2 native<->script max depth: 197 | error: C stack overflow
+E2 script-only max depth: 499989 | error: c/lua_cb.lua:25: stack overflow
+E3 lua_call + yield:	false	attempt to yield across a C-call boundary
+E3 lua_callk + yield (first resume):	true	y
+E3 lua_callk + yield (second resume):	true	r	continuation ran
+E4 callback error:	false	c/lua_cb.lua:35: boom	acquired/cleaned:	1	0
+E4 hook inside callback:	false	fuel exhausted
+E5 memory limit inside callback:	false	not enough memory
+E6 table.sort with mutating comparator:	false	c/lua_cb.lua:49: attempt to compare number with nil
+E6 table.sort with inconsistent comparator:	false	invalid order function for sorting
+E7 handler called later with	tap
+exit=0

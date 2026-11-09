@@ -1,0 +1,5 @@
+== wasmtime 50.0.1
+E1 (JIT) script->script call loop: 2.5 ns/iter; native->script callback loop: 17.1 ns/iter
+E2 native<->script max depth: 546 | Some("wasm trap: call stack exhausted")
+E4 fuel inside callback: Some("wasm trap: all fuel consumed by WebAssembly")
+exit=0

@@ -1,0 +1,9 @@
+== rune 0.14.2
+E1 loop without call: 92.3 ns/iter; script->script call loop: 113.9 ns/iter; native->script callback loop: 161.5 ns/iter
+E3 async callback from sync native: Err("Expected number type, but found `::std::future::Future`")
+E2 starting unbounded native<->script recursion...
+
+thread 'main' (28196) has overflowed its stack
+fatal runtime error: stack overflow, aborting
+./run_all.sh: line 7: 28195 Aborted                 "$@"
+exit=134
