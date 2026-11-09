@@ -555,9 +555,6 @@ pub struct Vm {
     /// When the run exceeds the wall-time limit (moved on by the time
     /// spent waiting for prompt answers).
     pub(crate) deadline: Option<crate::platform::Instant>,
-    /// Set when the running instruction hit the memory limit and should be
-    /// retried after a garbage collection (see `interp::limit_trap`).
-    pub(crate) gc_retry: bool,
     /// Set while a native that asked for a collection (`CtlKind::Collect`)
     /// is called again after it.
     pub(crate) collected: bool,
@@ -666,7 +663,6 @@ impl Vm {
             gen_counter: 1,
             meter,
             deadline: None,
-            gc_retry: false,
             collected: false,
             caller_site: (0, 0),
             ending: false,

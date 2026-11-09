@@ -355,22 +355,18 @@ impl Vm {
                 // Pending I/O checks its buffers against the heap's size.
                 self.heap.io_memory.publish_heap(self.heap.used());
                 self.current = u32::MAX;
-                let stop = match r {
-                    Ok(stop) => {
-                        gc_retried = None;
-                        stop
-                    }
-                    Err(RunEnding::Trap(Trap::Limit(LimitKind::Memory))) if std::mem::take(&mut self.gc_retry) => {
+                let retried_at = gc_retried.take();
+                match r? {
+                    FiberStop::CollectAndRetry(frame) => {
                         // Memory checks count garbage that has not been
                         // collected yet, so collect and run the failed
                         // instruction again. If the retry itself failed, report
                         // the limit. A retry is told apart from a later run of
                         // the same instruction by the fuel spent: reaching it
                         // again takes a back edge or a call, which cost fuel.
-                        let Some(&fr) = f.frames.last() else { return Err(Trap::Limit(LimitKind::Memory).into()) };
-                        let at = (fid, f.frames.len(), fr.ip);
-                        let op = self.prog.protos[fr.proto as usize].code[fr.ip as usize];
-                        if gc_retried == Some(at) && slice - fuel <= super::interp::call_tick(op) {
+                        let at = (fid, f.frames.len(), frame.ip);
+                        let op = self.prog.protos[frame.proto as usize].code[frame.ip as usize];
+                        if retried_at == Some(at) && slice - fuel <= super::interp::call_tick(op) {
                             return Err(Trap::Limit(LimitKind::Memory).into());
                         }
                         gc_retried = Some(at);
@@ -380,9 +376,6 @@ impl Vm {
                         self.ready.push_front(fid);
                         continue;
                     }
-                    Err(ending) => return Err(ending),
-                };
-                match stop {
                     FiberStop::Done(v) => {
                         self.fibers[fid as usize] = Some(f);
                         if Some(fid) == main {

@@ -67,6 +67,9 @@ pub enum FiberStop {
     Cancelled,
     /// A cancelled task ran its pending deferred code.
     Unwound,
+    /// The instruction at the instruction pointer of this rewound frame hit
+    /// the memory limit: collect garbage and run it again.
+    CollectAndRetry(Frame),
 }
 
 #[inline(always)]
@@ -447,14 +450,14 @@ impl Vm {
 
     #[cold]
     #[inline(never)]
-    fn try_top(&mut self, fiber: &mut Fiber, ip: usize, prog: &Program, res: Value) -> RunEnding {
+    fn try_top(&mut self, fiber: &mut Fiber, ip: usize, prog: &Program, res: Value) -> Result<FiberStop, RunEnding> {
         // `Option::None` has 0 fields; `Result::Err(e)` stores `e` at field 0.
         let Some(e) = self.heap.field(res, 0) else {
-            return self.ctl_ending(fiber, ip, Ctl::fail("none", "`?` found None"));
+            return self.ctl_stop(fiber, ip, Ctl::fail("none", "`?` found None"));
         };
         match display::to_display_metered(prog, &self.heap, &self.meter, e) {
-            Ok(text) => self.error_trap(fiber, ip, text),
-            Err(c) => self.ctl_ending(fiber, ip, c),
+            Ok(text) => Err(self.error_trap(fiber, ip, text)),
+            Err(c) => self.ctl_stop(fiber, ip, c),
         }
     }
 
@@ -501,31 +504,32 @@ impl Vm {
         Trap::Internal { message: msg, trace: self.trace_of(fiber, Some(ip as u32)) }.into()
     }
 
-    /// Converts a failed metered operation into a [`RunEnding`].
+    /// How the interpreter stops after a failed metered operation.
     #[cold]
     #[inline(never)]
-    fn ctl_ending(&mut self, fiber: &mut Fiber, ip: usize, ctl: Ctl) -> RunEnding {
+    fn ctl_stop(&mut self, fiber: &mut Fiber, ip: usize, ctl: Ctl) -> Result<FiberStop, RunEnding> {
         if let Some(kind) = ctl.as_limit() {
-            return self.limit_trap(fiber, ip, kind);
+            return self.limit_stop(fiber, ip, kind);
         }
-        self.run_ending_of(ctl.into_kind(), |vm| vm.trace_of(fiber, Some(ip as u32)))
+        Err(self.run_ending_of(ctl.into_kind(), |vm| vm.trace_of(fiber, Some(ip as u32))))
     }
 
-    /// A limit hit by the instruction before `ip`. Memory checks count
-    /// garbage that has not been collected yet, so for the memory limit the
-    /// frame is rewound to that instruction and the scheduler collects and
-    /// runs it once more (the operations that check memory have no side
-    /// effects before the check, other than charging [`call_tick`]).
+    /// How the interpreter stops after the instruction before `ip` hits a
+    /// limit. Memory checks count garbage that has not been collected yet, so
+    /// for the memory limit the frame is rewound to that instruction and the
+    /// scheduler collects and runs it once more (the operations that check
+    /// memory have no side effects before the check, other than charging
+    /// [`call_tick`]).
     #[cold]
     #[inline(never)]
-    fn limit_trap(&mut self, fiber: &mut Fiber, ip: usize, k: LimitKind) -> RunEnding {
+    fn limit_stop(&mut self, fiber: &mut Fiber, ip: usize, k: LimitKind) -> Result<FiberStop, RunEnding> {
         if k == LimitKind::Memory
             && let Some(fr) = fiber.frames.last_mut()
         {
             fr.ip = ip.saturating_sub(1) as u32;
-            self.gc_retry = true;
+            return Ok(FiberStop::CollectAndRetry(*fr));
         }
-        Trap::Limit(k).into()
+        Err(Trap::Limit(k).into())
     }
 
     /// Runs `fiber` until it finishes, blocks, or exhausts `fuel`.
@@ -579,7 +583,7 @@ impl Vm {
         macro_rules! fail_ctl {
             ($c:expr) => {{
                 save!();
-                return Err(self.ctl_ending(fiber, ip, $c));
+                return self.ctl_stop(fiber, ip, $c);
             }};
         }
         macro_rules! int {
@@ -1329,7 +1333,7 @@ impl Vm {
                     Op::ListPush { list, src } => {
                         let (l, v) = (r!(list), r!(src));
                         if self.heap.list_push(l, v).is_err() {
-                            return Err(self.limit_trap(fiber, ip, LimitKind::Memory));
+                            return self.limit_stop(fiber, ip, LimitKind::Memory);
                         }
                     }
                     Op::CheckRepeat { src } => {
@@ -1632,7 +1636,7 @@ impl Vm {
                     Op::TryTop { src } => {
                         save!();
                         let e = r!(src);
-                        return Err(self.try_top(fiber, ip, &prog, e));
+                        return self.try_top(fiber, ip, &prog, e);
                     }
                     Op::Internal { msg } => {
                         save!();
