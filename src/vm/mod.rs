@@ -92,9 +92,13 @@ pub enum CtlKind {
     NeedPermission(Capability),
     /// Suspend the task until the future completes.
     Async(Suspension),
-    /// The task waits for the scheduler event that [`Vm::block`]
-    /// registered; the call returns what wakes it.
-    Blocked,
+    /// The task waits for the scheduler event that [`Vm::block`] registered
+    /// as generation `wait`; the call returns what wakes it. On that wake-up,
+    /// the engine cancels the tasks of `race`.
+    Blocked {
+        wait: u64,
+        race: Vec<Value>,
+    },
     /// Let other tasks run; the call returns `()`.
     Yield,
     /// The host interrupted the engine (see `Meter::check`).
@@ -103,6 +107,8 @@ pub enum CtlKind {
     /// open-resource slot, I/O buffer space) may be held by garbage. See
     /// [`Vm::resource_slot`].
     Collect,
+    /// The native cancelled the task that runs it (see [`Vm::cancel_task`]).
+    Cancelled,
 }
 
 impl Ctl {
@@ -183,10 +189,11 @@ impl std::fmt::Debug for CtlKind {
             CtlKind::Exit(c) => write!(f, "Exit({c})"),
             CtlKind::NeedPermission(c) => write!(f, "NeedPermission({c})"),
             CtlKind::Async(s) => write!(f, "Async({:?})", s.wait_kind),
-            CtlKind::Blocked => write!(f, "Blocked"),
+            CtlKind::Blocked { wait, .. } => write!(f, "Blocked({wait})"),
             CtlKind::Yield => write!(f, "Yield"),
             CtlKind::Interrupted => write!(f, "Interrupted"),
             CtlKind::Collect => write!(f, "Collect"),
+            CtlKind::Cancelled => write!(f, "Cancelled"),
         }
     }
 }
@@ -221,6 +228,14 @@ pub enum BlockOn {
     Race(Vec<Value>),
     Recv(Value),
     Send(Value, Value),
+}
+
+/// What [`Vm::block`] found or registered.
+enum BlockOutcome {
+    /// The value is already there.
+    Ready(Value),
+    /// The task waits. On the wake-up, the engine cancels the tasks of `race`.
+    Waiting { race: Vec<Value> },
 }
 
 /// A call frame (20 bytes).
@@ -548,17 +563,13 @@ pub struct Vm {
     pub(crate) collected: bool,
     /// Function and instruction pointer of the active native call.
     caller_site: (u32, u32),
-    pub cancel_current: bool,
     /// Set while the tasks left at the end of a run unwind (`end_tasks`):
     /// `drive` stops instead of waiting for I/O.
     pub(crate) ending: bool,
     /// Extra GC roots (e.g. values held by the test runner).
     pub pinned: Vec<Value>,
-    pub(crate) pending_race: Option<Vec<Value>>,
     /// The box of the last `Blocked` or `Yield` consumed (see `Vm::signal`).
     spare_ctl: Option<Box<CtlKind>>,
-    /// The wait generation of the wait [`Vm::block`] registered.
-    wait_gen: u64,
     /// The map handle and slot of the last lookup of a key other than an
     /// int, which a store to the same key reuses (see `Vm::map_set`).
     last_slot: std::cell::Cell<(u32, u32)>,
@@ -658,12 +669,9 @@ impl Vm {
             gc_retry: false,
             collected: false,
             caller_site: (0, 0),
-            cancel_current: false,
             ending: false,
             pinned: Vec::new(),
-            pending_race: None,
             spare_ctl: None,
-            wait_gen: 0,
             last_slot: std::cell::Cell::new((u32::MAX, 0)),
             ascii_strs: Vec::new(),
             broken: false,
@@ -726,8 +734,6 @@ impl Vm {
         self.ready.clear();
         self.io.clear();
         self.live_tasks = 0;
-        self.cancel_current = false;
-        self.pending_race = None;
         self.host.grants_once.clear();
         self.host.denies_once.clear();
     }
@@ -753,13 +759,13 @@ impl Vm {
         }
     }
 
-    /// The dataless `kind` (`Blocked` or `Yield`) as a [`Ctl`], in the box
-    /// of the last one consumed.
+    /// `kind` (`Blocked` or `Yield`) as a [`Ctl`], in the box of the last one
+    /// consumed.
     #[inline]
     fn signal(&mut self, kind: CtlKind) -> Ctl {
         match self.spare_ctl.take() {
             Some(mut b) => {
-                // A dataless kind: nothing to drop.
+                // A consumed kind owns no memory: nothing to drop.
                 std::mem::forget(std::mem::replace(&mut *b, kind));
                 Ctl(b)
             }
@@ -1398,7 +1404,7 @@ impl Vm {
         let race = std::mem::take(&mut f.race);
         self.ready.push_back(fid);
         for t in race {
-            self.cancel_task(t);
+            self.cancel_other_task(t);
         }
         true
     }
@@ -1431,8 +1437,25 @@ impl Vm {
         self.recycle_fiber(f);
     }
 
-    /// Cancels a task (no-op if already finished).
-    pub fn cancel_task(&mut self, task: Value) {
+    /// Cancels `task` on behalf of the running native. Does nothing if `task`
+    /// has finished. If `task` is the running task, returns
+    /// [`CtlKind::Cancelled`], which the native must return so that the engine
+    /// ends the task.
+    pub fn cancel_task(&mut self, task: Value) -> Result<(), Ctl> {
+        if let Obj::Task(t) = self.heap.get_mut(task)
+            && t.state == TaskState::Running
+            && t.fiber == self.current
+        {
+            t.state = TaskState::Cancelled;
+            return Err(Ctl::from(CtlKind::Cancelled));
+        }
+        self.cancel_other_task(task);
+        Ok(())
+    }
+
+    /// Cancels `task`, which is not the running task. Does nothing if `task`
+    /// has finished.
+    fn cancel_other_task(&mut self, task: Value) {
         let (fid, state) = match self.heap.get(task) {
             Obj::Task(t) => (t.fiber, t.state),
             _ => return,
@@ -1442,11 +1465,6 @@ impl Vm {
         }
         if let Obj::Task(t) = self.heap.get_mut(task) {
             t.state = TaskState::Cancelled;
-        }
-        if fid == self.current && self.fibers.get(fid as usize).map(|f| f.is_none()).unwrap_or(false) {
-            // Cancelling the running task: stop it after the current call.
-            self.cancel_current = true;
-            return;
         }
         if let Some(mut f) = self.fibers.get_mut(fid as usize).and_then(|f| f.take()) {
             if let Some(io) = f.io.take() {
@@ -1504,7 +1522,7 @@ impl Vm {
         self.release_main();
         let tasks: Vec<Value> = self.fibers.iter().flatten().map(|f| f.task).collect();
         for task in tasks {
-            self.cancel_task(task);
+            self.cancel_other_task(task);
         }
         if self.ready.is_empty() {
             return Ok(());
