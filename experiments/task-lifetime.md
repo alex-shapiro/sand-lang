@@ -25,20 +25,20 @@ Sand kept two behaviors:
 
 ## Method
 
-We ran the same scenarios across eight concurrency runtimes. In each scenario, worker tasks sleep and record whether they finish or are cancelled. A slow worker sleeps for 80 ms. The faster worker in a race sleeps for 10 to 50 ms. Most cancellations occur about 10 ms after the workers start. Each program waits long enough for the worker to finish.
+We ran the same scenarios across eight concurrency runtimes:
 
-| System | Version | Features tested |
-| --- | --- | --- |
-| Python asyncio | 3.15.2 | `create_task`, `wait`, `wait_for`, `TaskGroup` |
-| Trio | 0.35.0 | nurseries, cancel scopes, `move_on_after` |
-| Rust Tokio | 1.54.1 | `spawn`, `select!`, `JoinSet`, `timeout` |
-| Swift | 6.4.2 | `Task`, `async let`, task groups |
-| Kotlin | 2.4.21 (coroutines 1.11.0) | `GlobalScope`, child coroutines, `select`, `withTimeout` |
-| Java | 25.0.5 (preview) | threads, `StructuredTaskScope` |
-| Go | 1.27.3 | goroutines, `context` |
-| Node | 26.13.0 | promises, `AbortController` |
+- Python 3.15.2 (`asyncio`)
+- Trio 0.35.0
+- Rust Tokio 1.54.1
+- Swift 6.4.2
+- Kotlin 2.4.21 (`kotlinx.coroutines` 1.11.0)
+- Java 25.0.5 (with preview features)
+- Go 1.27.3
+- Node 26.13.0
 
-Each program ran 10 times per system. Every run produced the same output. Each Sand candidate ran each scenario 5 times with the same result. We did not test Haskell or Erlang because they were not installed.
+In each scenario, worker tasks sleep and record whether they finish or are cancelled. A slow worker sleeps for 80 ms. The faster worker in a race sleeps for 10 to 50 ms. Most cancellations occur about 10 ms after the workers start. Each program waits long enough for the worker to finish.
+
+Each program ran 10 times per system, and every run produced the same output. Each Sand candidate ran each scenario 5 times with the same result. We did not test Haskell or Erlang because they were not installed.
 
 ## Results from other systems
 
@@ -62,15 +62,15 @@ In one extra asyncio test, a task waited on a future that only the task could re
 
 ### The only waiter of a task is cancelled
 
-- **Finishes**: Sand, Tokio spawned tasks, Swift `Task`, Kotlin global tasks, and Java. Go and Node tasks also finish unless the caller passes a cancellation token to the task.
-- **Cancelled**: asyncio, Trio, Tokio plain futures, Swift `async let`, and Kotlin child tasks.
+- **Finishes**: Sand, and unowned tasks such as Tokio spawned tasks, Swift `Task`, Kotlin global tasks, and Java threads. Go and Node tasks also finish unless the caller passes a cancellation token to the task.
+- **Cancelled**: asyncio futures and tasks, and scoped child tasks in Trio, Tokio, Swift, and Kotlin.
 
 If one of two waiters was cancelled, asyncio cancelled the task and sent `CancelledError` to the second waiter. Swift and Kotlin kept the task running and sent its result to the second waiter.
 
 ### The caller of a race is cancelled
 
 - **Tasks finish**: Sand, and races over unowned tasks in asyncio, Tokio, Kotlin, and Node.
-- **Tasks cancelled**: Scoped task groups in asyncio, Trio, Tokio, Swift, Kotlin, Java, and Go derived contexts.
+- **Tasks cancelled**: Scoped task groups, and races using Go derived contexts.
 
 ### The caller of a timeout is cancelled
 
@@ -135,4 +135,4 @@ All 1,135 tests passed, and instruction counts stayed within run-to-run noise. A
 
 ## Open follow-up
 
-Owner-scoped tasks match the original assumption most closely. An owner block cannot exit until its tasks end, and cancelling the block cancels its tasks. Trio, Swift task groups, Kotlin scopes, and Java `StructuredTaskScope` use this model. We did not build it for Sand.
+Owner-scoped tasks match the original assumption most closely. An owner block cannot exit until its tasks end, and cancelling the block cancels its tasks. Several runtimes use this model, including Trio nurseries, Swift task groups, Kotlin coroutine scopes, and Java `StructuredTaskScope`. We did not build it for Sand.
