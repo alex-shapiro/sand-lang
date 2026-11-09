@@ -52,7 +52,7 @@ impl From<Stop> for Ctl {
 }
 
 /// Why a fiber stopped running.
-pub enum Exit {
+pub enum FiberStop {
     /// The fiber's outermost function returned.
     Done(Value),
     /// Out of fuel: preempted.
@@ -61,8 +61,6 @@ pub enum Exit {
     Blocked,
     Async(Suspension),
     Prompt(Capability),
-    /// `exit(code)` or a top-level `?` failure.
-    Terminate(i32),
     /// `task.yield_now()`.
     YieldNow,
     /// The running task was cancelled.
@@ -449,21 +447,21 @@ impl Vm {
 
     #[cold]
     #[inline(never)]
-    fn try_top(&mut self, fiber: &mut Fiber, ip: usize, prog: &Program, res: Value) -> Trap {
+    fn try_top(&mut self, fiber: &mut Fiber, ip: usize, prog: &Program, res: Value) -> RunEnding {
         // `Option::None` has 0 fields; `Result::Err(e)` stores `e` at field 0.
         let Some(e) = self.heap.field(res, 0) else {
-            return self.ctl_trap(fiber, ip, Ctl::fail("none", "`?` found None"));
+            return self.ctl_ending(fiber, ip, Ctl::fail("none", "`?` found None"));
         };
         match display::to_display_metered(prog, &self.heap, &self.meter, e) {
             Ok(text) => self.error_trap(fiber, ip, text),
-            Err(c) => self.ctl_trap(fiber, ip, c),
+            Err(c) => self.ctl_ending(fiber, ip, c),
         }
     }
 
     /// `Op::Internal`: an internal error with constant message `msg`.
     #[cold]
     #[inline(never)]
-    fn const_internal(&mut self, fiber: &mut Fiber, ip: usize, prog: &Program, msg: u32) -> Trap {
+    fn const_internal(&mut self, fiber: &mut Fiber, ip: usize, prog: &Program, msg: u32) -> RunEnding {
         let m = match &prog.consts[msg as usize] {
             Const::Str(s) => s.clone(),
             _ => "unknown".into(),
@@ -474,7 +472,7 @@ impl Vm {
     /// The trap for an operand of the wrong type (a compiler bug).
     #[cold]
     #[inline(never)]
-    fn operand_trap(&mut self, fiber: &mut Fiber, ip: usize, v: Value, want: &str) -> Trap {
+    fn operand_trap(&mut self, fiber: &mut Fiber, ip: usize, v: Value, want: &str) -> RunEnding {
         fiber.frames.last_mut().unwrap().ip = ip as u32;
         self.internal_trap(fiber, ip, format!("expected {want}, found {v:?}"))
     }
@@ -482,7 +480,7 @@ impl Vm {
     /// The trap for a `GetField` on a value without that field (a compiler bug).
     #[cold]
     #[inline(never)]
-    fn field_trap(&mut self, fiber: &mut Fiber, ip: usize, v: Value, idx: u16) -> Trap {
+    fn field_trap(&mut self, fiber: &mut Fiber, ip: usize, v: Value, idx: u16) -> RunEnding {
         fiber.frames.last_mut().unwrap().ip = ip as u32;
         let msg = format!("field {idx} of {v:?} {:?}", self.heap.get(v));
         self.internal_trap(fiber, ip, msg)
@@ -491,29 +489,26 @@ impl Vm {
     /// The trap for an error whose message `msg` is `kind: message`.
     #[cold]
     #[inline(never)]
-    fn error_trap(&mut self, fiber: &mut Fiber, ip: usize, msg: String) -> Trap {
-        Trap::Error { message: msg, trace: self.trace_of(fiber, Some(ip as u32)) }
+    fn error_trap(&mut self, fiber: &mut Fiber, ip: usize, msg: String) -> RunEnding {
+        Trap::Error { message: msg, trace: self.trace_of(fiber, Some(ip as u32)) }.into()
     }
 
     /// The trap for an internal error, which marks the engine broken.
     #[cold]
     #[inline(never)]
-    fn internal_trap(&mut self, fiber: &mut Fiber, ip: usize, msg: String) -> Trap {
+    fn internal_trap(&mut self, fiber: &mut Fiber, ip: usize, msg: String) -> RunEnding {
         self.broken = true;
-        Trap::Internal { message: msg, trace: self.trace_of(fiber, Some(ip as u32)) }
+        Trap::Internal { message: msg, trace: self.trace_of(fiber, Some(ip as u32)) }.into()
     }
 
-    /// The trap for a failed metered operation.
+    /// Converts a failed metered operation into a [`RunEnding`].
     #[cold]
     #[inline(never)]
-    fn ctl_trap(&mut self, fiber: &mut Fiber, ip: usize, c: Ctl) -> Trap {
-        match c.into_kind() {
-            CtlKind::RuntimeError(m) => self.error_trap(fiber, ip, m),
-            CtlKind::Internal(m) => self.internal_trap(fiber, ip, m),
-            CtlKind::Limit(k) => self.limit_trap(fiber, ip, k),
-            CtlKind::Interrupted => Trap::Interrupted,
-            other => self.internal_trap(fiber, ip, format!("unexpected {other:?}")),
+    fn ctl_ending(&mut self, fiber: &mut Fiber, ip: usize, ctl: Ctl) -> RunEnding {
+        if let Some(kind) = ctl.as_limit() {
+            return self.limit_trap(fiber, ip, kind);
         }
+        self.run_ending_of(ctl.into_kind(), |vm| vm.trace_of(fiber, Some(ip as u32)))
     }
 
     /// A limit hit by the instruction before `ip`. Memory checks count
@@ -523,18 +518,18 @@ impl Vm {
     /// effects before the check, other than charging [`call_tick`]).
     #[cold]
     #[inline(never)]
-    fn limit_trap(&mut self, fiber: &mut Fiber, ip: usize, k: LimitKind) -> Trap {
+    fn limit_trap(&mut self, fiber: &mut Fiber, ip: usize, k: LimitKind) -> RunEnding {
         if k == LimitKind::Memory
             && let Some(fr) = fiber.frames.last_mut()
         {
             fr.ip = ip.saturating_sub(1) as u32;
             self.gc_retry = true;
         }
-        Trap::Limit(k)
+        Trap::Limit(k).into()
     }
 
     /// Runs `fiber` until it finishes, blocks, or exhausts `fuel`.
-    pub(crate) fn interp(&mut self, fiber: &mut Fiber, fuel_out: &mut i64) -> Result<Exit, Trap> {
+    pub(crate) fn interp(&mut self, fiber: &mut Fiber, fuel_out: &mut i64) -> Result<FiberStop, RunEnding> {
         if let Some(msg) = fiber.pending_error.take() {
             let ip = fiber.frames.last().map(|f| f.ip).unwrap_or(0) as usize;
             return Err(self.error_trap(fiber, ip, msg));
@@ -584,7 +579,7 @@ impl Vm {
         macro_rules! fail_ctl {
             ($c:expr) => {{
                 save!();
-                return Err(self.ctl_trap(fiber, ip, $c));
+                return Err(self.ctl_ending(fiber, ip, $c));
             }};
         }
         macro_rules! int {
@@ -690,7 +685,7 @@ impl Vm {
                 match fiber.frames.last() {
                     None => {
                         fiber.stack.truncate(0);
-                        return Ok(Exit::Done(v));
+                        return Ok(FiberStop::Done(v));
                     }
                     Some(caller) => {
                         code = &protos[caller.proto as usize].code;
@@ -1199,7 +1194,7 @@ impl Vm {
                     Op::Unwind => {
                         fiber.frames.pop();
                         if !self.unwind_to_pad(fiber, true) {
-                            return Ok(Exit::Unwound);
+                            return Ok(FiberStop::Unwound);
                         }
                         let fr = *fiber.frames.last().unwrap();
                         code = &protos[fr.proto as usize].code;
@@ -1344,7 +1339,7 @@ impl Vm {
                         }
                         if self.heap.would_exceed(to_usize_saturating(n).saturating_mul(std::mem::size_of::<Value>())) {
                             save!();
-                            return Err(Trap::Limit(LimitKind::Memory));
+                            return Err(Trap::Limit(LimitKind::Memory).into());
                         }
                     }
                     Op::Len { dst, src } => {
@@ -1657,16 +1652,16 @@ impl Vm {
     /// must; the fiber resumes at `resume_ip`.
     #[cold]
     #[inline(never)]
-    fn safe_point(&mut self, fiber: &mut Fiber, fuel_left: i64, resume_ip: usize) -> Option<Result<Exit, Trap>> {
+    fn safe_point(&mut self, fiber: &mut Fiber, fuel_left: i64, resume_ip: usize) -> Option<Result<FiberStop, RunEnding>> {
         fiber.frames.last_mut().unwrap().ip = resume_ip as u32;
         if self.heap.wants_gc() {
             self.collect_garbage(Some(fiber));
             if self.heap.over_limit() {
-                return Some(Err(Trap::Limit(LimitKind::Memory)));
+                return Some(Err(Trap::Limit(LimitKind::Memory).into()));
             }
         }
         if fuel_left <= 0 {
-            return Some(Ok(Exit::Preempt));
+            return Some(Ok(FiberStop::Preempt));
         }
         None
     }
@@ -1686,7 +1681,7 @@ impl Vm {
         argc: usize,
         slot: usize,
         ip: usize,
-    ) -> Result<Option<Exit>, Trap> {
+    ) -> Result<Option<FiberStop>, RunEnding> {
         let frame = fiber.frames.last_mut().unwrap();
         frame.ip = ip as u32;
         self.caller_site = (frame.proto, frame.ip);
@@ -1710,12 +1705,12 @@ impl Vm {
                 self.enforce_limit(Some(fiber)).map_err(Trap::Limit)?;
                 if self.cancel_current {
                     self.cancel_current = false;
-                    return Ok(Some(Exit::Cancelled));
+                    return Ok(Some(FiberStop::Cancelled));
                 }
                 if self.meter.fuel() <= 0 {
                     // Natives used up the slice: let the scheduler check
                     // limits and run other tasks.
-                    return Ok(Some(Exit::Preempt));
+                    return Ok(Some(FiberStop::Preempt));
                 }
                 return Ok(None);
             }
@@ -1725,7 +1720,7 @@ impl Vm {
             CtlKind::Yield => {
                 self.recycle(r);
                 fiber.stack[slot] = Value::Unit;
-                return Ok(Some(Exit::YieldNow));
+                return Ok(Some(FiberStop::YieldNow));
             }
             CtlKind::Blocked => {
                 self.recycle(r);
@@ -1734,28 +1729,24 @@ impl Vm {
                 if let Some(r) = self.pending_race.take() {
                     fiber.race = r;
                 }
-                return Ok(Some(Exit::Blocked));
+                return Ok(Some(FiberStop::Blocked));
             }
             _ => {}
         }
         match r.into_kind() {
-            CtlKind::RuntimeError(m) => Err(self.error_trap(fiber, ip, m)),
-            CtlKind::Internal(m) => Err(self.internal_trap(fiber, ip, m)),
-            // Already retried after a collection.
-            CtlKind::Limit(k) => Err(Trap::Limit(k)),
-            CtlKind::Interrupted => Err(Trap::Interrupted),
-            CtlKind::Exit(c) => Ok(Some(Exit::Terminate(c))),
             CtlKind::NeedPermission(cap) => {
                 // Retry the call instruction after the prompt.
                 fiber.frames.last_mut().unwrap().ip = (ip - 1) as u32;
-                Ok(Some(Exit::Prompt(cap)))
+                Ok(Some(FiberStop::Prompt(cap)))
             }
             CtlKind::Async(suspension) => {
                 fiber.result_slot = slot;
-                Ok(Some(Exit::Async(suspension)))
+                Ok(Some(FiberStop::Async(suspension)))
             }
             CtlKind::Yield | CtlKind::Blocked => unreachable!("handled above"),
             CtlKind::Collect => Err(self.internal_trap(fiber, ip, "a native asked for a collection twice".into())),
+            // Do not retry memory limits here because the call already retried after garbage collection.
+            kind => Err(self.run_ending_of(kind, |vm| vm.trace_of(fiber, Some(ip as u32)))),
         }
     }
 

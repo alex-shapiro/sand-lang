@@ -97,9 +97,11 @@ The host cannot rely on engine limits, stability, or control.
       and `Session::run_tests`, and apply `max_wall_time` consistently.
       `Engine::run_tests` applies `max_wall_time` to the entire test suite.
       `Session::run_tests` applies `max_wall_time` to each test individually.
-      Choose a single rule and document it in SPEC §4.8. Keep session tests on
-      the persistent session VM. Stop the test suite if an internal error
-      resets the session.
+      `Engine::run_tests` unwinds spawned tasks after each test.
+      `Session::run_tests` leaves spawned tasks running. A task from an earlier
+      test can then call `exit` or `fail` during a later test. Choose a single
+      rule and document it in SPEC §4.8. Keep session tests on the persistent
+      session VM. Stop the test suite if an internal error resets the session.
 - [ ] ❓ _Sandbox._ Read the main script file through `Engine::discovery_io`
       and `Fs::read_source` in `Engine::read_main`, as module imports do.
       `Engine::read_main` currently reads the entire file on the caller's
@@ -131,11 +133,31 @@ The host cannot rely on engine limits, stability, or control.
       `lint_module` derives the lint budget only from the source size. Add
       `Limits::max_lint_fuel` or derive the lint budget from
       `Limits::max_compile_fuel`.
+- [ ] ❓ _Embedding._ Yield to the executor while waiting for an output sink.
+      `Vm::wait_backlog` blocks the current thread in a loop. A stalled sink
+      blocks other engines on that thread. It also prevents
+      `Session::run_tasks_until` from polling its `until` future. Only a limit
+      or an interrupt from another thread can stop the wait.
 
 ## Tier 3: ordinary scripts
 
 Common scripts fail, require workarounds, or produce misleading diagnostics.
 
+- [ ] ❓ _Testing._ Decide whether `exit(0)` should pass a test. `exit(0)`
+      currently stops a test early and passes it. A test that calls `exit(0)`
+      before a failing `assert` therefore passes. If `exit` always fails a test,
+      add an API for tests that expect an exit code. Top-level `exit(0)` also
+      fails every test in the module. A script that calls `exit(0)` at the top
+      level cannot have passing tests.
+- [ ] ❓ _Testing._ Measure fuel or probe counts instead of wall-clock time in
+      `keys_chosen_to_collide_do_not_slow_down_maps` in `tests/metering.rs`.
+      The test currently compares elapsed times and fails if the host is under
+      load.
+- [ ] ❓ _Testing._ Capture test output in `Engine::run_tests` and display it
+      for failed tests, or remove the capture claim from SPEC §17.4. SPEC
+      §17.4 states that `sand test` captures output. However,
+      `Engine::run_tests` sends output to `NullSink`, and `TestResult` does not
+      store output.
 - [ ] 🔴 [058](triage/058-enum-variant-inference/summary.md) _Language._ Infer the enum type of a variant expression from the expected type, as
       pattern matching does.
 - [ ] 🔴 [064](triage/064-default-params-fn-values/summary.md) _Language._ Preserve default parameter values in function types so that calls through

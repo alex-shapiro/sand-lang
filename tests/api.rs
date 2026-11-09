@@ -2049,6 +2049,92 @@ fn host_functions_take_and_return_durations_and_never() {
     assert!(matches!(&r, Err(Error::Runtime { message, .. }) if message.contains("the duration is out of range")), "{r:?}");
 }
 
+fn quit_module() -> HostModules {
+    let mut module = NativeModule::new("quit");
+    module.async_function("now", |code: i64| async move { Err::<(), sandlang::vm::Ctl>(sandlang::vm::Ctl::exit(code as i32)) });
+    HostModules::new([module]).unwrap()
+}
+
+fn script_with_deferred_task(deferred: &str) -> String {
+    format!("import quit\nlet c: Channel<int> = Channel()\nspawn {{\n    defer {deferred}\n    c.recv()\n}};\ntask.yield_now()")
+}
+
+#[cfg(feature = "os")]
+#[test]
+fn exit_from_a_finisher_ends_a_test_like_a_script_exit() {
+    let dir = TempDir::new("exit-tests");
+    let main = dir.write("t.sand", "import quit\ntest \"zero\" { quit.now(0) }\ntest \"one\" { quit.now(1) }\ntest \"plain\" { exit(0) }");
+    let mut engine = Engine::new(Config::new().host_modules(quit_module()));
+    let report = rt().block_on(engine.run_tests(&main)).unwrap();
+    let results: Vec<_> = report.results.iter().map(|r| (r.name.as_str(), r.passed, r.message.as_deref())).collect();
+    assert_eq!(results, [("zero", true, None), ("one", false, Some("exited with code 1")), ("plain", true, None)]);
+}
+
+#[cfg(feature = "os")]
+#[test]
+fn exit_from_a_finisher_in_module_init_fails_each_test_like_a_script_exit() {
+    for code in [0, 4] {
+        let dir = TempDir::new("exit-init");
+        let main = dir.write("t.sand", &format!("import quit\nquit.now({code})\ntest \"t\" {{ }}"));
+        let mut engine = Engine::new(Config::new().host_modules(quit_module()));
+        let report = rt().block_on(engine.run_tests(&main)).unwrap();
+        assert_eq!(report.results[0].message.as_deref(), Some(format!("module exited with code {code}").as_str()));
+    }
+}
+
+#[test]
+fn exit_from_a_finisher_in_deferred_code_sets_the_exit_code() {
+    for deferred in ["quit.now(5)", "exit(5)"] {
+        let (outcome, _, _) = run_src(Config::new().host_modules(quit_module()), &script_with_deferred_task(deferred));
+        assert_eq!(outcome.unwrap().exit_code, 5, "{deferred}");
+    }
+}
+
+#[derive(Clone)]
+struct BacklogSink {
+    waits: Arc<AtomicUsize>,
+    interrupt_on_wait: Option<InterruptHandle>,
+}
+
+impl sandlang::vm::OutputSink for BacklogSink {
+    fn write(&self, _: &[u8]) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn wait_backlog(&self, _: usize, _: Duration) -> bool {
+        self.waits.fetch_add(1, Ordering::SeqCst);
+        if let Some(interrupt) = &self.interrupt_on_wait {
+            interrupt.interrupt();
+        }
+        self.interrupt_on_wait.is_none()
+    }
+}
+
+#[test]
+fn ending_tasks_drains_output_after_an_exit_or_a_trap() {
+    for deferred in ["exit(5)", "quit.now(5)", "fail(\"error\", \"boom\")"] {
+        let sink = BacklogSink { waits: Arc::new(AtomicUsize::new(0)), interrupt_on_wait: None };
+        let config = Config::new().host_modules(quit_module()).stdout(sink.clone());
+        let mut engine = Engine::new(config);
+        let _ = rt().block_on(engine.run_source("main.sand", &script_with_deferred_task(deferred)));
+        assert_eq!(sink.waits.load(Ordering::SeqCst), 2, "{deferred}");
+    }
+}
+
+#[test]
+fn a_failed_drain_replaces_an_exit_but_not_a_trap() {
+    let run = |src: &str| {
+        let interrupt = InterruptHandle::new();
+        let sink = BacklogSink { waits: Arc::new(AtomicUsize::new(0)), interrupt_on_wait: Some(interrupt.clone()) };
+        let mut engine = Engine::new(Config::new().host_modules(quit_module()).stdout(sink).interrupt(interrupt));
+        rt().block_on(engine.run_source("main.sand", src))
+    };
+    for src in ["exit(3)", "import quit\nquit.now(3)"] {
+        assert!(matches!(run(src), Err(Error::Interrupted)), "{src}");
+    }
+    assert!(matches!(run("fail(\"error\", \"boom\")"), Err(Error::Runtime { .. })));
+}
+
 #[test]
 fn public_fields_of_public_host_types_use_public_types() {
     let mut m = NativeModule::new("shapes");

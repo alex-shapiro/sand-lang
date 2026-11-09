@@ -20,9 +20,9 @@ use crate::syntax::ast::{ItemKind, StmtKind};
 use crate::types::{FnId, ModId, TypeId};
 use crate::unwind::CatchUnwind;
 use crate::vm::bytecode::Program;
-use crate::vm::sched::{RunEnd, Stop};
+use crate::vm::sched::Stop;
 use crate::vm::value::Value;
-use crate::vm::{CtlKind, Trap, Vm};
+use crate::vm::{RunEnding, Trap, Vm};
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
@@ -201,7 +201,9 @@ impl Session {
     /// If multiple `test` blocks share a name, only the latest definition
     /// runs. State changes made by a test persist for subsequent tests and
     /// inputs. Runtime errors and limit violations are recorded as test
-    /// failures in the report so that remaining tests still run. Calling
+    /// failures in the report so that remaining tests still run. A test that
+    /// calls `exit(0)` passes. A test that calls `exit` with a non-zero code
+    /// fails. Calling
     /// [`InterruptHandle::interrupt`](crate::engine::InterruptHandle::interrupt)
     /// stops the test run and returns [`Error::Interrupted`].
     pub async fn run_tests(&mut self) -> Result<TestReport, Error> {
@@ -223,15 +225,8 @@ impl Session {
         for (name, proto) in tests {
             self.exit_code = None;
             let deadline = self.deadline();
-            let message = match self.run(proto, false, deadline).await {
-                Ok(_) => match self.exit_code {
-                    Some(0) | None => None,
-                    Some(c) => Some(format!("exited with code {c}")),
-                },
-                Err(Error::Interrupted) => return Err(Error::Interrupted),
-                Err(Error::Runtime { message, .. }) => Some(message),
-                Err(e) => Some(e.to_string()),
-            };
+            let run_result = self.run(proto, false, deadline).await.map(|_| self.exit_code.unwrap_or(0));
+            let message = crate::engine::test_failure(run_result)?;
             report.results.push(TestResult { name, passed: message.is_none(), message });
             if self.poisoned() {
                 // No more tests on a VM that may be inconsistent.
@@ -547,19 +542,21 @@ impl Session {
         vm.begin_session_run(call);
         vm.deadline = deadline;
         st.running = true;
-        let r = vm.run_main(proto).await;
+        let main_result = vm.run_main(proto).await;
         st.running = false;
-        let Some(v) = conclude(vm, r, exit_code)? else { return Ok(None) };
-        let shown = if show && v != Value::Unit { Some(vm.debug(v)) } else { None };
+        let value = match main_result {
+            Ok(value) => value,
+            Err(ending) => return end_session_run(vm, ending, exit_code).map(|()| None),
+        };
+        let shown = if show && value != Value::Unit { Some(vm.debug(value)) } else { None };
         vm.release_main();
         match shown {
             None => Ok(None),
-            Some(Ok(s)) => Ok(Some(s)),
-            Some(Err(c)) => match c.into_kind() {
-                CtlKind::Limit(k) => Err(Error::Limit(k)),
-                CtlKind::RuntimeError(message) => Err(Error::Runtime { message, trace: vec![] }),
-                other => Err(Error::Internal { message: format!("cannot show the value: {other:?}"), trace: vec![] }),
-            },
+            Some(Ok(text)) => Ok(Some(text)),
+            Some(Err(ctl)) => {
+                let ending = vm.run_ending_of(ctl.into_kind(), |_| vec![]);
+                end_session_run(vm, ending, exit_code).map(|()| None)
+            }
         }
     }
 
@@ -573,42 +570,33 @@ impl Session {
         vm.begin_session_run(call);
         // Waiting for input may take any time.
         vm.deadline = None;
-        let r = vm.drive(None).await;
-        let r = r.and_then(|stop| vm.drain_output().map(|()| stop).map_err(Trap::from_ctl));
-        let r = match r {
+        let drive_result = vm.drive(None).await;
+        match vm.drain_output_after(drive_result) {
             Ok(Stop::Prompt(cap)) => {
                 st.deferred_prompt = Some(cap);
-                return Ok(false);
+                Ok(false)
             }
-            Ok(Stop::Idle | Stop::Main(_)) => return Ok(false),
-            Ok(Stop::Exit(c)) => Ok(RunEnd::Exit(c)),
-            Err(t) => Err(t),
-        };
-        Ok(conclude(vm, r, exit_code)?.is_none())
+            Ok(Stop::Idle | Stop::Main(_)) => Ok(false),
+            Err(ending) => end_session_run(vm, ending, exit_code).map(|()| true),
+        }
     }
 }
 
-/// The outcome of a run of the session's VM: the main task's result, or
-/// `None` if a task called `exit` (recorded in `exit_code`). On failure and
-/// exit, cancels all tasks.
-fn conclude(vm: &mut Vm, r: Result<RunEnd, Trap>, exit_code: &mut Option<i32>) -> Result<Option<Value>, Error> {
-    let e = match r {
-        Ok(RunEnd::Finished(v)) => return Ok(Some(v)),
-        Ok(RunEnd::Exit(c)) | Err(Trap::Exit(c)) => {
-            *exit_code = Some(c);
-            vm.abandon_tasks();
-            return Ok(None);
-        }
-        Err(Trap::Error { message, trace }) => Error::Runtime { message, trace },
-        Err(Trap::Internal { message, trace }) => Error::Internal { message, trace },
-        Err(Trap::Limit(k)) => Error::Limit(k),
-        Err(Trap::Interrupted) => Error::Interrupted,
-    };
+/// Finishes a session VM run that stopped with `ending`. Cancels all tasks,
+/// stores an exit code in `exit_code`, and converts a trap into an [`Error`].
+fn end_session_run(vm: &mut Vm, ending: RunEnding, exit_code: &mut Option<i32>) -> Result<(), Error> {
     vm.abandon_tasks();
-    if matches!(e, Error::Limit(_)) {
+    let trap = match ending {
+        RunEnding::Exit(code) => {
+            *exit_code = Some(code);
+            return Ok(());
+        }
+        RunEnding::Trap(trap) => trap,
+    };
+    if matches!(trap, Trap::Limit(_)) {
         vm.collect_garbage(None);
     }
-    Err(e)
+    Err(trap.into())
 }
 
 /// What compiling an input needs, owned so that it can move to the
