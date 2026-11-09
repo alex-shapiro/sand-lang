@@ -1205,7 +1205,9 @@ impl Engine {
     /// the outcome of each test.
     ///
     /// Runtime errors and limit violations are recorded as test failures in
-    /// the report so that remaining tests still run. Calling
+    /// the report so that remaining tests still run. A test that calls
+    /// `exit(0)` passes, and a test that calls `exit` with another code fails.
+    /// A call to `exit` in the module initializer fails every test. Calling
     /// [`InterruptHandle::interrupt`] stops the test run and returns
     /// [`Error::Interrupted`].
     pub async fn run_tests(&mut self, path: impl AsRef<Path>) -> Result<TestReport, Error> {
@@ -1227,7 +1229,7 @@ impl Engine {
                 Ok(_) => {
                     vm.ready.clear();
                     let r = vm.run_main(proto).await;
-                    test_failure(exit_code_of(end_run(&mut vm, r).await))?
+                    test_failure(end_run(&mut vm, r).await)?
                 }
                 Err(RunEnding::Exit(c)) => Some(format!("module exited with code {c}")),
                 Err(RunEnding::Trap(t)) => test_failure(Err(t.into()))?,
@@ -1335,7 +1337,7 @@ impl Engine {
             drop(vm);
             self.recycle(prog, compiled.snapshot);
         }
-        exit_code_of(r).map(|exit_code| Outcome { exit_code })
+        r.map(|exit_code| Outcome { exit_code })
     }
 
     // ------------------------------------------------------------------
@@ -1762,17 +1764,14 @@ enum ImportDecision {
 /// Module discovery stops after this many errors (they are all reported).
 const MAX_DISCOVERY_ERRORS: usize = 100;
 
-/// Ends a run whose main task finished (`Vm::end_tasks`).
-async fn end_run(vm: &mut Vm, r: Result<Value, RunEnding>) -> Result<Value, RunEnding> {
-    let v = r?;
-    vm.end_tasks().await?;
-    Ok(v)
-}
-
-/// The exit code of a run that ended with `r`, or its error.
-fn exit_code_of(r: Result<Value, RunEnding>) -> Result<i32, Error> {
-    match r {
-        Ok(_) => Ok(0),
+/// Ends a run whose main task stopped with `r`, and returns its exit code or its error.
+async fn end_run(vm: &mut Vm, r: Result<Value, RunEnding>) -> Result<i32, Error> {
+    let ended = match r {
+        Ok(_) => vm.end_tasks().await,
+        Err(ending) => Err(ending),
+    };
+    match ended {
+        Ok(()) => Ok(0),
         Err(RunEnding::Exit(code)) => Ok(code),
         Err(RunEnding::Trap(t)) => Err(t.into()),
     }

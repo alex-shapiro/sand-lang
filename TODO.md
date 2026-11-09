@@ -97,6 +97,9 @@ The host cannot rely on engine limits, stability, or control.
       and `Session::run_tests`, and apply `max_wall_time` consistently.
       `Engine::run_tests` applies `max_wall_time` to the entire test suite.
       `Session::run_tests` applies `max_wall_time` to each test individually.
+      A task that a session test leaves running also changes the result of
+      a later test: its `exit` or `fail` lands on the test that runs next.
+      A session test does not unwind its tasks, as `Engine::run_tests` does.
       Choose a single rule and document it in SPEC §4.8. Keep session tests on
       the persistent session VM. Stop the test suite if an internal error
       resets the session.
@@ -139,6 +142,21 @@ The host cannot rely on engine limits, stability, or control.
       another thread or a meter limit ends the wait.
 
 ## Tier 3: ordinary scripts
+
+- [ ] ❓ _Testing._ Decide whether `exit(0)` should pass a test. Today `exit(0)`
+      ends a test at that call and passes it, so `exit(0)` before a failing
+      `assert` reports success. To fail on any `exit`, as Go and pytest do, add
+      a way for a test to expect an exit. A top-level `exit(0)` fails every
+      test, so a script cannot keep both its `exit` and its tests.
+- [ ] ❓ _Testing._ `keys_chosen_to_collide_do_not_slow_down_maps` in
+      `tests/metering.rs` compares wall-clock times and fails under load. It
+      failed in 2 of 5 runs on `main` at a load average of about 10. Compare a
+      count that load cannot change, such as fuel or probes.
+- [ ] ❓ _Testing._ `sand test` discards the output of tests. §17.4 says that
+      top-level code runs "with output captured", but `Engine::run_tests`
+      gives each VM a `NullSink`, and `TestResult` has no output field. A
+      failing test cannot show what it printed. Capture output per test and
+      show it for failed tests, or correct §17.4.
 
 Common scripts fail, require workarounds, or produce misleading diagnostics.
 

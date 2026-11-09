@@ -2078,11 +2078,13 @@ fn exit_from_a_finisher_ends_a_test_like_a_script_exit() {
 #[cfg(feature = "os")]
 #[test]
 fn exit_from_a_finisher_in_module_init_fails_each_test_like_a_script_exit() {
-    let dir = TempDir::new("exit-init");
-    let main = dir.write("t.sand", "import quit\nquit.now(4)\ntest \"t\" { }");
-    let mut engine = Engine::new(Config::new().host_modules(quit_module()));
-    let report = rt().block_on(engine.run_tests(&main)).unwrap();
-    assert_eq!(report.results[0].message.as_deref(), Some("module exited with code 4"));
+    for code in [0, 4] {
+        let dir = TempDir::new("exit-init");
+        let main = dir.write("t.sand", &format!("import quit\nquit.now({code})\ntest \"t\" {{ }}"));
+        let mut engine = Engine::new(Config::new().host_modules(quit_module()));
+        let report = rt().block_on(engine.run_tests(&main)).unwrap();
+        assert_eq!(report.results[0].message.as_deref(), Some(format!("module exited with code {code}").as_str()));
+    }
 }
 
 /// An `exit` from a finisher while the tasks of a finished run unwind sets the exit code, as an
@@ -2095,11 +2097,12 @@ fn exit_from_a_finisher_in_deferred_code_sets_the_exit_code() {
     }
 }
 
-/// An output sink that reports each wait for its backlog, and drains only if `drains`.
+/// An output sink that counts each wait for its backlog. If `stuck_until` is set, the sink never
+/// drains and fires that interrupt, which stops the wait.
 #[derive(Clone)]
 struct BacklogSink {
     waits: Arc<AtomicUsize>,
-    drains: bool,
+    stuck_until: Option<InterruptHandle>,
 }
 
 impl sandlang::vm::OutputSink for BacklogSink {
@@ -2107,12 +2110,12 @@ impl sandlang::vm::OutputSink for BacklogSink {
         Ok(())
     }
 
-    fn wait_backlog(&self, _: usize, timeout: Duration) -> bool {
+    fn wait_backlog(&self, _: usize, _: Duration) -> bool {
         self.waits.fetch_add(1, Ordering::SeqCst);
-        if !self.drains {
-            std::thread::sleep(timeout);
+        if let Some(interrupt) = &self.stuck_until {
+            interrupt.interrupt();
         }
-        self.drains
+        self.stuck_until.is_none()
     }
 }
 
@@ -2120,7 +2123,7 @@ impl sandlang::vm::OutputSink for BacklogSink {
 #[test]
 fn ending_tasks_drains_output_after_an_exit_or_a_trap() {
     for deferred in ["exit(5)", "quit.now(5)", "fail(\"error\", \"boom\")"] {
-        let sink = BacklogSink { waits: Arc::new(AtomicUsize::new(0)), drains: true };
+        let sink = BacklogSink { waits: Arc::new(AtomicUsize::new(0)), stuck_until: None };
         let config = Config::new().host_modules(quit_module()).stdout(sink.clone());
         let mut engine = Engine::new(config);
         let _ = rt().block_on(engine.run_source("main.sand", &with_deferred_task(deferred)));
@@ -2132,13 +2135,13 @@ fn ending_tasks_drains_output_after_an_exit_or_a_trap() {
 #[test]
 fn a_failed_drain_replaces_an_exit_but_not_a_trap() {
     let run = |src: &str| {
-        let sink = BacklogSink { waits: Arc::new(AtomicUsize::new(0)), drains: false };
-        let limits = Limits { max_wall_time: Some(Duration::from_millis(20)), ..Limits::default() };
-        let mut engine = Engine::new(Config::new().host_modules(quit_module()).stdout(sink).limits(limits));
+        let interrupt = InterruptHandle::new();
+        let sink = BacklogSink { waits: Arc::new(AtomicUsize::new(0)), stuck_until: Some(interrupt.clone()) };
+        let mut engine = Engine::new(Config::new().host_modules(quit_module()).stdout(sink).interrupt(interrupt));
         rt().block_on(engine.run_source("main.sand", src))
     };
     for src in ["exit(3)", "import quit\nquit.now(3)"] {
-        assert!(matches!(run(src), Err(Error::Limit(LimitKind::WallTime))), "{src}");
+        assert!(matches!(run(src), Err(Error::Interrupted)), "{src}");
     }
     assert!(matches!(run("fail(\"error\", \"boom\")"), Err(Error::Runtime { .. })));
 }

@@ -2527,7 +2527,8 @@ Runs the module's top-level code with output captured, then every `test` block
 as a separate task with a fresh view of top-level state _as initialized_. Each
 test passes if it completes without an error. A call to `exit(0)` ends the test
 at that call, and the test passes. A call to `exit` with another code fails the
-test. Output: one line per test
+test. A call to `exit` in top-level code fails every test, including a call to
+`exit(0)`. Output: one line per test
 (`ok name` / `FAIL name: message`) and a summary `N passed, M failed`. Exit
 code 1 if any test failed, 2 for compile errors. `sand test` accepts the policy
 and limit options of `sand run` (§17.5) and prompts for any capability request

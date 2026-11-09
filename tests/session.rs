@@ -923,6 +923,15 @@ fn interrupt_while_showing_a_result_is_an_interrupt() {
     }
 }
 
+#[test]
+fn exit_in_a_test_block_follows_the_test_rule() {
+    let mut r = Repl::new();
+    r.ok("test \"zero\" { exit(0) }\ntest \"one\" { exit(1) }\ntest \"plain\" { }");
+    let report = r.rt.block_on(r.session.run_tests()).unwrap();
+    let results: Vec<_> = report.results.iter().map(|t| (t.name.as_str(), t.passed, t.message.as_deref())).collect();
+    assert_eq!(results, [("zero", true, None), ("one", false, Some("exited with code 1")), ("plain", true, None)]);
+}
+
 /// A result that exceeds a limit while the session shows it is a failed input, so it cancels the
 /// session's tasks.
 #[test]

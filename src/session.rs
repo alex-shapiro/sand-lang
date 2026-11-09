@@ -201,7 +201,9 @@ impl Session {
     /// If multiple `test` blocks share a name, only the latest definition
     /// runs. State changes made by a test persist for subsequent tests and
     /// inputs. Runtime errors and limit violations are recorded as test
-    /// failures in the report so that remaining tests still run. Calling
+    /// failures in the report so that remaining tests still run. A test that
+    /// calls `exit(0)` passes, and a test that calls `exit` with another code
+    /// fails. Calling
     /// [`InterruptHandle::interrupt`](crate::engine::InterruptHandle::interrupt)
     /// stops the test run and returns [`Error::Interrupted`].
     pub async fn run_tests(&mut self) -> Result<TestReport, Error> {

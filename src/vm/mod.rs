@@ -130,7 +130,7 @@ impl Ctl {
         Ctl(Box::new(CtlKind::Interrupted))
     }
 
-    /// `exit(code)`.
+    /// Ends the run with exit code `code`, as a call to the script function `exit` does.
     pub fn exit(code: i32) -> Ctl {
         Ctl(Box::new(CtlKind::Exit(code)))
     }
