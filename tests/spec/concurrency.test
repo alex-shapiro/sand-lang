@@ -214,6 +214,18 @@ t.wait()
 --- fail
 a task cannot wait for itself
 
+=== cancelling the caller of a timeout cancels its work
+let caller = spawn task.timeout(10s, () => {
+    task.sleep(20ms)
+    print("work finished")
+})
+task.sleep(5ms)
+caller.cancel()
+task.sleep(40ms)
+print("end")
+--- stdout
+end
+
 === channels
 let ch = Channel()
 let producer = spawn {

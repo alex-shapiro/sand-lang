@@ -23,12 +23,17 @@ pub fn all<T>(tasks: [Task<T>]) -> [T] {
 pub native fn race<T>(tasks: [Task<T>]) -> T
 
 /// Runs `f` in a spawned task and returns `Some(result)` if it completes within
-/// duration `d`, or cancels the task and returns `None`.
+/// duration `d`, or cancels the task and returns `None`. If the caller is
+/// cancelled, also cancels the task.
 pub fn timeout<T>(d: duration, f: fn() -> T) -> T? {
     let work = spawn Some(f())
     let timer = spawn {
         sleep(d)
         None
+    }
+    defer {
+        work.cancel()
+        timer.cancel()
     }
     race([work, timer])
 }
