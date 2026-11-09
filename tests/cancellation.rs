@@ -1,5 +1,6 @@
-//! Cancelled tasks run each `defer` and `use` cleanup exactly once, for every
-//! way code leaves the guarded block and every place the task can stop.
+//! Cancelled tasks that stopped in or just after a native call run each
+//! `defer` and `use` cleanup exactly once, for each way to leave the guarded
+//! code.
 
 mod common;
 

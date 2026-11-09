@@ -196,8 +196,8 @@ defects:
 - A cancelled `task.race` no longer cancels its tasks at a later wake-up.
 - A race with no task left to finish fails instead of waiting forever.
 - A task whose failure ends a REPL input is cancelled instead of running forever.
-- Cancellation runs the deferred code of a task exactly once, wherever the task
-  stopped.
+- Cancellation runs the deferred code of a task exactly once if the task stopped
+  in or just after a native call.
 
 Source commits: `fc27559`, `fb9367e`, `5bdac47`, `61bfe31`.
 

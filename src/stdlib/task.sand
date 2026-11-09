@@ -14,8 +14,9 @@ pub fn all<T>(tasks: [Task<T>]) -> [T] {
 
 /// Waits for the first task in `tasks` to complete, cancels the remaining
 /// tasks, and returns the winning result. Aborts with kind `"invalid"` if
-/// `tasks` is empty, with kind `"cancelled"` if the tasks that remain are all
-/// cancelled, and with kind `"deadlock"` if the only task is the caller.
+/// `tasks` is empty, with kind `"cancelled"` if every task other than the
+/// caller is cancelled, and with kind `"deadlock"` if the only task is the
+/// caller.
 pub native fn race<T>(tasks: [Task<T>]) -> T
 
 /// Runs `f` in a spawned task and returns `Some(result)` if it completes within
