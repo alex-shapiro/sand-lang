@@ -1,5 +1,5 @@
 //! Tests that a cancelled task runs each `defer` and `use` cleanup once across
-//! all block exit forms and suspension points.
+//! block exit forms, if the task stopped in or just after a native call.
 
 mod common;
 
