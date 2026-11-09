@@ -1223,23 +1223,17 @@ impl Engine {
             let mut vm = self.new_vm(prog.clone(), &compiled.host_modules, cwd.clone(), true, &call);
             vm.deadline = deadline;
             let init = vm.run_main(prog.entry).await;
-            let result = match init {
+            let failure = match init {
                 Ok(_) => {
                     vm.ready.clear();
                     let r = vm.run_main(proto).await;
-                    match end_run(&mut vm, r).await {
-                        Ok(_) | Err(RunEnding::Exit(0)) => Ok(()),
-                        Err(RunEnding::Exit(c)) => Err(format!("exited with code {c}")),
-                        Err(RunEnding::Trap(Trap::Interrupted)) => return Err(Error::Interrupted),
-                        Err(RunEnding::Trap(t)) => Err(trap_message(t)),
-                    }
+                    test_failure(exit_code_of(end_run(&mut vm, r).await))?
                 }
-                Err(RunEnding::Exit(c)) => Err(format!("module exited with code {c}")),
-                Err(RunEnding::Trap(Trap::Interrupted)) => return Err(Error::Interrupted),
-                Err(RunEnding::Trap(t)) => Err(trap_message(t)),
+                Err(RunEnding::Exit(c)) => Some(format!("module exited with code {c}")),
+                Err(RunEnding::Trap(t)) => test_failure(Err(t.into()))?,
             };
             deadline = vm.deadline;
-            report.results.push(TestResult { name: tname, passed: result.is_ok(), message: result.err() });
+            report.results.push(TestResult { name: tname, passed: failure.is_none(), message: failure });
         }
         self.recycle(prog, compiled.snapshot);
         Ok(report)
@@ -1341,11 +1335,7 @@ impl Engine {
             drop(vm);
             self.recycle(prog, compiled.snapshot);
         }
-        match r {
-            Ok(_) => Ok(Outcome { exit_code: 0 }),
-            Err(RunEnding::Exit(c)) => Ok(Outcome { exit_code: c }),
-            Err(RunEnding::Trap(t)) => Err(trap_error(t)),
-        }
+        exit_code_of(r).map(|exit_code| Outcome { exit_code })
     }
 
     // ------------------------------------------------------------------
@@ -1779,22 +1769,36 @@ async fn end_run(vm: &mut Vm, r: Result<Value, RunEnding>) -> Result<Value, RunE
     Ok(v)
 }
 
-fn trap_message(t: Trap) -> String {
-    match t {
-        Trap::Error { message, .. } => message,
-        Trap::Internal { message, .. } => format!("internal error: {message}"),
-        Trap::Limit(k) => k.to_string(),
-        Trap::Interrupted => "interrupted".into(),
+/// The exit code of a run that ended with `r`, or its error.
+fn exit_code_of(r: Result<Value, RunEnding>) -> Result<i32, Error> {
+    match r {
+        Ok(_) => Ok(0),
+        Err(RunEnding::Exit(code)) => Ok(code),
+        Err(RunEnding::Trap(t)) => Err(t.into()),
     }
 }
 
-/// The error of a run that `t` ended.
-pub(crate) fn trap_error(t: Trap) -> Error {
-    match t {
-        Trap::Error { message, trace } => Error::Runtime { message, trace },
-        Trap::Internal { message, trace } => Error::Internal { message, trace },
-        Trap::Limit(k) => Error::Limit(k),
-        Trap::Interrupted => Error::Interrupted,
+/// The failure message of a test that ended with `end`, or `None` if the test passed. An
+/// interrupt stops the test run, so it stays an error.
+pub(crate) fn test_failure(end: Result<i32, Error>) -> Result<Option<String>, Error> {
+    match end {
+        Ok(0) => Ok(None),
+        Ok(code) => Ok(Some(format!("exited with code {code}"))),
+        Err(Error::Interrupted) => Err(Error::Interrupted),
+        Err(Error::Runtime { message, .. }) => Ok(Some(message)),
+        Err(Error::Internal { message, .. }) => Ok(Some(format!("internal error: {message}"))),
+        Err(e) => Ok(Some(e.to_string())),
+    }
+}
+
+impl From<Trap> for Error {
+    fn from(t: Trap) -> Error {
+        match t {
+            Trap::Error { message, trace } => Error::Runtime { message, trace },
+            Trap::Internal { message, trace } => Error::Internal { message, trace },
+            Trap::Limit(k) => Error::Limit(k),
+            Trap::Interrupted => Error::Interrupted,
+        }
     }
 }
 

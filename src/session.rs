@@ -22,7 +22,7 @@ use crate::unwind::CatchUnwind;
 use crate::vm::bytecode::Program;
 use crate::vm::sched::Stop;
 use crate::vm::value::Value;
-use crate::vm::{RunEnding, Vm};
+use crate::vm::{RunEnding, Trap, Vm};
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
@@ -223,15 +223,8 @@ impl Session {
         for (name, proto) in tests {
             self.exit_code = None;
             let deadline = self.deadline();
-            let message = match self.run(proto, false, deadline).await {
-                Ok(_) => match self.exit_code {
-                    Some(0) | None => None,
-                    Some(c) => Some(format!("exited with code {c}")),
-                },
-                Err(Error::Interrupted) => return Err(Error::Interrupted),
-                Err(Error::Runtime { message, .. }) => Some(message),
-                Err(e) => Some(e.to_string()),
-            };
+            let end = self.run(proto, false, deadline).await.map(|_| self.exit_code.unwrap_or(0));
+            let message = crate::engine::test_failure(end)?;
             report.results.push(TestResult { name, passed: message.is_none(), message });
             if self.poisoned() {
                 // No more tests on a VM that may be inconsistent.
@@ -549,7 +542,10 @@ impl Session {
         st.running = true;
         let r = vm.run_main(proto).await;
         st.running = false;
-        let Some(v) = conclude(vm, r, exit_code)? else { return Ok(None) };
+        let v = match r {
+            Ok(v) => v,
+            Err(ending) => return end_session_run(vm, ending, exit_code).map(|()| None),
+        };
         let shown = if show && v != Value::Unit { Some(vm.debug(v)) } else { None };
         vm.release_main();
         match shown {
@@ -557,7 +553,7 @@ impl Session {
             Some(Ok(s)) => Ok(Some(s)),
             Some(Err(c)) => {
                 let ending = vm.run_ending_of(c.into_kind(), |_| vec![]);
-                conclude(vm, Err(ending), exit_code).map(|_| None)
+                end_session_run(vm, ending, exit_code).map(|()| None)
             }
         }
     }
@@ -579,29 +575,26 @@ impl Session {
                 Ok(false)
             }
             Ok(Stop::Idle | Stop::Main(_)) => Ok(false),
-            Err(ending) => Ok(conclude(vm, Err(ending), exit_code)?.is_none()),
+            Err(ending) => end_session_run(vm, ending, exit_code).map(|()| true),
         }
     }
 }
 
-/// The outcome of a run of the session's VM: the main task's result, or
-/// `None` if a task called `exit` (recorded in `exit_code`). On failure and
-/// exit, cancels all tasks.
-fn conclude(vm: &mut Vm, r: Result<Value, RunEnding>, exit_code: &mut Option<i32>) -> Result<Option<Value>, Error> {
-    let e = match r {
-        Ok(v) => return Ok(Some(v)),
-        Err(RunEnding::Exit(c)) => {
-            *exit_code = Some(c);
-            vm.abandon_tasks();
-            return Ok(None);
-        }
-        Err(RunEnding::Trap(t)) => crate::engine::trap_error(t),
-    };
+/// Cancels all tasks after `ending` stopped a run of the session's VM, and records the code of
+/// an `exit` in `exit_code` or returns the error of a trap.
+fn end_session_run(vm: &mut Vm, ending: RunEnding, exit_code: &mut Option<i32>) -> Result<(), Error> {
     vm.abandon_tasks();
-    if matches!(e, Error::Limit(_)) {
+    let trap = match ending {
+        RunEnding::Exit(code) => {
+            *exit_code = Some(code);
+            return Ok(());
+        }
+        RunEnding::Trap(trap) => trap,
+    };
+    if matches!(trap, Trap::Limit(_)) {
         vm.collect_garbage(None);
     }
-    Err(e)
+    Err(trap.into())
 }
 
 /// What compiling an input needs, owned so that it can move to the
