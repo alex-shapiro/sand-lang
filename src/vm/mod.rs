@@ -560,9 +560,6 @@ pub struct Vm {
     pub(crate) collected: bool,
     /// Function and instruction pointer of the active native call.
     caller_site: (u32, u32),
-    /// Set while the tasks left at the end of a run unwind (`end_tasks`):
-    /// `drive` stops instead of waiting for I/O.
-    pub(crate) ending: bool,
     /// Extra GC roots (e.g. values held by the test runner).
     pub pinned: Vec<Value>,
     /// The box of the last `Blocked` or `Yield` consumed (see `Vm::signal`).
@@ -665,7 +662,6 @@ impl Vm {
             deadline: None,
             collected: false,
             caller_site: (0, 0),
-            ending: false,
             pinned: Vec::new(),
             spare_ctl: None,
             last_slot: std::cell::Cell::new((u32::MAX, 0)),
@@ -1523,9 +1519,7 @@ impl Vm {
         if self.ready.is_empty() {
             return Ok(());
         }
-        self.ending = true;
-        let drive_result = self.drive(None).await;
-        self.ending = false;
+        let drive_result = self.drive(sched::UntilIdle { waits_for_io: false }).await;
         self.drain_output_after(drive_result).map(|_| ())
     }
 

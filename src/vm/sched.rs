@@ -148,14 +148,87 @@ const CLOCK_SLICES: u32 = 32;
 /// host's executor run.
 const YIELD_EVERY: Duration = Duration::from_millis(2);
 
-/// Why [`Vm::drive`] returned.
-pub(crate) enum Stop {
-    /// The main task finished with this value.
-    Main(Value),
-    /// Idle state when all tasks are blocked and all I/O is complete.
+/// What [`Vm::drive`] runs the tasks for. Each purpose has its own stop type,
+/// so a caller handles only the stops that its purpose can produce.
+pub(crate) trait DriveUntil {
+    type Stop;
+
+    /// The stop when the task of fiber `fid` finishes with `result`, if that
+    /// ends the drive.
+    fn stop_on_finish(&self, fid: u32, result: Value) -> Option<Self::Stop>;
+
+    /// The stop when a task needs a permission prompt, or `None` if the
+    /// engine asks the prompter at once.
+    fn stop_on_prompt(&self, capability: &Capability) -> Option<Self::Stop>;
+
+    /// The outcome when no task can run and no I/O is pending.
+    fn stop_when_blocked(&self, vm: &Vm) -> Result<Self::Stop, RunEnding>;
+
+    /// The stop before the engine waits for pending I/O, or `None` if it
+    /// waits.
+    fn stop_before_io_wait(&self) -> Option<Self::Stop>;
+}
+
+/// Drives the tasks until the main task, the fiber with this id, finishes
+/// with a value.
+pub(crate) struct UntilMainDone(u32);
+
+impl DriveUntil for UntilMainDone {
+    type Stop = Value;
+
+    fn stop_on_finish(&self, fid: u32, result: Value) -> Option<Value> {
+        (fid == self.0).then_some(result)
+    }
+
+    fn stop_on_prompt(&self, _capability: &Capability) -> Option<Value> {
+        None
+    }
+
+    fn stop_when_blocked(&self, vm: &Vm) -> Result<Value, RunEnding> {
+        let trace = match vm.fibers.get(self.0 as usize) {
+            Some(Some(f)) => vm.trace_of(f, None),
+            _ => vec![],
+        };
+        Err(Trap::Error { message: "deadlock: all tasks are blocked".into(), trace }.into())
+    }
+
+    fn stop_before_io_wait(&self) -> Option<Value> {
+        None
+    }
+}
+
+/// Why a drive of [`UntilIdle`] stopped.
+pub(crate) enum IdleStop {
+    /// No task can run.
     Idle,
-    /// Suspended state awaiting permission prompt.
+    /// A task needs an answer to a permission prompt.
     Prompt(Capability),
+}
+
+/// Drives the tasks until no task can run.
+pub(crate) struct UntilIdle {
+    /// Whether tasks that wait for pending I/O count as able to run.
+    pub waits_for_io: bool,
+}
+
+impl DriveUntil for UntilIdle {
+    type Stop = IdleStop;
+
+    fn stop_on_finish(&self, _fid: u32, _result: Value) -> Option<IdleStop> {
+        None
+    }
+
+    fn stop_on_prompt(&self, capability: &Capability) -> Option<IdleStop> {
+        Some(IdleStop::Prompt(capability.clone()))
+    }
+
+    fn stop_when_blocked(&self, _vm: &Vm) -> Result<IdleStop, RunEnding> {
+        Ok(IdleStop::Idle)
+    }
+
+    fn stop_before_io_wait(&self) -> Option<IdleStop> {
+        (!self.waits_for_io).then_some(IdleStop::Idle)
+    }
 }
 
 /// Execution timer tracking elapsed CPU and clock time.
@@ -299,11 +372,7 @@ impl Vm {
     /// Buffered standard output is flushed at the end.
     pub async fn run_main(&mut self, proto: u32) -> Result<Value, RunEnding> {
         let main_result = match self.start_main(proto) {
-            Ok(fid) => self.drive(Some(fid)).await.map(|stop| match stop {
-                Stop::Main(value) => value,
-                // Only runs without a main task stop this way.
-                Stop::Idle | Stop::Prompt(_) => Value::Unit,
-            }),
+            Ok(fid) => self.drive(UntilMainDone(fid)).await,
             Err(ending) => Err(ending),
         };
         self.drain_output_after(main_result)
@@ -321,11 +390,10 @@ impl Vm {
         Ok(fid)
     }
 
-    /// Runs the ready tasks and pending I/O until the main task (fiber
-    /// `main`) finishes or, without one, until nothing can run or a task
-    /// needs a permission prompt ([`Stop::Prompt`]). The future may be
-    /// dropped where it waits: every task is then in the scheduler's tables.
-    pub(crate) async fn drive(&mut self, main: Option<u32>) -> Result<Stop, RunEnding> {
+    /// Runs the ready tasks and pending I/O until `until` stops the drive.
+    /// The future may be dropped where it waits: every task is then in the
+    /// scheduler's tables.
+    pub(crate) async fn drive<U: DriveUntil>(&mut self, until: U) -> Result<U::Stop, RunEnding> {
         let mut timer = RunTimer::start(self.host.clock.clone());
         // Where an instruction was retried after a memory limit error.
         let mut gc_retried: Option<(u32, usize, u32)> = None;
@@ -378,8 +446,8 @@ impl Vm {
                     }
                     FiberStop::Done(v) => {
                         self.fibers[fid as usize] = Some(f);
-                        if Some(fid) == main {
-                            return Ok(Stop::Main(v));
+                        if let Some(stop) = until.stop_on_finish(fid, v) {
+                            return Ok(stop);
                         }
                         self.finish_task(fid, v);
                     }
@@ -407,8 +475,8 @@ impl Vm {
                         f.state = FiberState::Ready;
                         self.fibers[fid as usize] = Some(f);
                         self.ready.push_front(fid);
-                        if main.is_none() {
-                            return Ok(Stop::Prompt(cap));
+                        if let Some(stop) = until.stop_on_prompt(&cap) {
+                            return Ok(stop);
                         }
                         // Write the script's output before showing the prompt.
                         self.drain_output()?;
@@ -433,16 +501,16 @@ impl Vm {
                         self.end_cancelled(fid, f);
                         if self.fibers[fid as usize].is_some() {
                             self.ready.push_back(fid);
-                        } else if Some(fid) == main {
-                            return Ok(Stop::Main(Value::Unit));
+                        } else if let Some(stop) = until.stop_on_finish(fid, Value::Unit) {
+                            return Ok(stop);
                         }
                     }
                     FiberStop::Unwound => {
                         self.free_fibers.push(fid);
                         self.live_tasks = self.live_tasks.saturating_sub(1);
                         self.recycle_fiber(f);
-                        if Some(fid) == main {
-                            return Ok(Stop::Main(Value::Unit));
+                        if let Some(stop) = until.stop_on_finish(fid, Value::Unit) {
+                            return Ok(stop);
                         }
                     }
                 }
@@ -463,12 +531,7 @@ impl Vm {
             }
             self.flush_stdout();
             if self.io.is_empty() {
-                let Some(main) = main else { return Ok(Stop::Idle) };
-                let trace = match self.fibers.get(main as usize) {
-                    Some(Some(f)) => self.trace_of(f, None),
-                    _ => vec![],
-                };
-                return Err(Trap::Error { message: "deadlock: all tasks are blocked".into(), trace }.into());
+                return until.stop_when_blocked(self);
             }
             let done = self.io.poll_ready(None);
             if !done.is_empty() {
@@ -476,8 +539,8 @@ impl Vm {
                 self.check_limits(&timer)?;
                 continue;
             }
-            if self.ending {
-                return Ok(Stop::Idle);
+            if let Some(stop) = until.stop_before_io_wait() {
+                return Ok(stop);
             }
             timer.read();
             let idle = self.host.stdin.clone().map(crate::stdin_feed::StdinIdleGuard::new);
