@@ -1461,6 +1461,7 @@ impl Vm {
         if state != TaskState::Running {
             return;
         }
+        debug_assert_ne!(fid, self.current, "the running task must stop through `cancel_task`");
         if let Obj::Task(t) = self.heap.get_mut(task) {
             t.state = TaskState::Cancelled;
         }

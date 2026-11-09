@@ -501,17 +501,12 @@ impl Vm {
                         self.end_cancelled(fid, f);
                         if self.fibers[fid as usize].is_some() {
                             self.ready.push_back(fid);
-                        } else if let Some(stop) = until.stop_on_finish(fid, Value::Unit) {
-                            return Ok(stop);
                         }
                     }
                     FiberStop::Unwound => {
                         self.free_fibers.push(fid);
                         self.live_tasks = self.live_tasks.saturating_sub(1);
                         self.recycle_fiber(f);
-                        if let Some(stop) = until.stop_on_finish(fid, Value::Unit) {
-                            return Ok(stop);
-                        }
                     }
                 }
                 self.check_limits(&timer)?;

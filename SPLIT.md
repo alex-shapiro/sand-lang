@@ -188,8 +188,8 @@ Source commit: `d84df4d`.
 ### 9. Explicit VM control flow
 
 Replace the `Vm` fields `wait_gen`, `pending_race`, `cancel_current`, `gc_retry`,
-and `ending` with explicit return values and parameters. This work is internal
-and does not change the host API.
+and `ending` with explicit return values and parameters. This work is internal.
+Native modules that call `Vm::cancel_task` must return its error.
 
 Source commits: `fc27559`, `fb9367e`, `5bdac47`, `61bfe31`.
 
