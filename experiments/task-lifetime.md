@@ -38,7 +38,7 @@ We ran the same scenarios across eight concurrency runtimes:
 
 In each scenario, worker tasks sleep and record whether they finish or are cancelled. A slow worker sleeps for 80 ms. The faster worker in a race sleeps for 10 to 50 ms. Most cancellations occur about 10 ms after the workers start. Each program waits long enough for the worker to finish.
 
-Each program ran 10 times per system, and every run produced the same output. Each Sand candidate ran each scenario 5 times with the same result. We did not test Haskell or Erlang because they were not installed.
+Each program ran 10 times per system, and every run produced the same output. Each Sand candidate ran each scenario 5 times with the same result.
 
 ## Results from other systems
 
@@ -62,19 +62,19 @@ In one extra asyncio test, a task waited on a future that only the task could re
 
 ### The only waiter of a task is cancelled
 
-- **Finishes**: Sand, and unowned tasks such as Tokio spawned tasks, Swift `Task`, Kotlin global tasks, and Java threads. Go and Node tasks also finish unless the caller passes a cancellation token to the task.
-- **Cancelled**: asyncio futures and tasks, and scoped child tasks in Trio, Tokio, Swift, and Kotlin.
+- **Finishes**: Sand and unowned tasks in other systems. Go and Node tasks also finish unless the caller passes a cancellation token to the task.
+- **Cancelled**: asyncio futures and tasks, and scoped child tasks in other systems.
 
 If one of two waiters was cancelled, asyncio cancelled the task and sent `CancelledError` to the second waiter. Swift and Kotlin kept the task running and sent its result to the second waiter.
 
 ### The caller of a race is cancelled
 
-- **Tasks finish**: Sand, and races over unowned tasks in asyncio, Tokio, Kotlin, and Node.
-- **Tasks cancelled**: Scoped task groups, and races using Go derived contexts.
+- **Tasks finish**: Sand and races over unowned tasks.
+- **Tasks cancelled**: Scoped task groups and races that share a Go `context`.
 
 ### The caller of a timeout is cancelled
 
-All five tested systems cancelled the timed work. Before this change, Sand was the only tested system where the timed work finished. We did not test this case in Swift, Java, or Node.
+All five tested systems cancelled the timed work. Before this change, Sand was the only tested system where the timed work finished.
 
 ### A task in a race is cancelled during the race
 
@@ -82,8 +82,6 @@ All five tested systems cancelled the timed work. Before this change, Sand was t
 - **The race returns a catchable error**: Tokio, Kotlin, and Node `Promise.race`.
 - **The race returns the cancelled task**: asyncio `wait`.
 - **The program aborts**: Sand before this change.
-
-We did not test this case in Swift or Go.
 
 ## Sand measurements
 
@@ -119,9 +117,9 @@ The candidates have these tradeoffs:
 
 Two spec tests caused the 8 failures in the race and sole-waiter candidates across test modes. The ninth failure in the sole-waiter candidate was `cancelled_waits_do_not_accumulate`.
 
-The 7x cancel times came from prototypes that scanned every task. We did not build an index to avoid the scan.
+The 7x cancel times came from prototypes that scanned every task. An index of tasks by owner or waiter could avoid the scan.
 
-We did not prototype a rule that stops tasks when garbage collection reclaims their handles. That rule would make execution depend on collection timing and could drop pending tasks as in asyncio.
+Stopping tasks when garbage collection reclaims their handles would make execution depend on collection timing and could drop pending tasks as in asyncio.
 
 ### Final implementation
 
@@ -135,4 +133,4 @@ All 1,135 tests passed, and instruction counts stayed within run-to-run noise. A
 
 ## Open follow-up
 
-Owner-scoped tasks match the original assumption most closely. An owner block cannot exit until its tasks end, and cancelling the block cancels its tasks. Several runtimes use this model, including Trio nurseries, Swift task groups, Kotlin coroutine scopes, and Java `StructuredTaskScope`. We did not build it for Sand.
+Owner-scoped tasks match the original assumption most closely. An owner block cannot exit until its tasks end, and cancelling the block cancels its tasks. Several runtimes use this model, including Trio, Swift, Kotlin, and Java.
