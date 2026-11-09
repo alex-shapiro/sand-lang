@@ -1703,7 +1703,7 @@ impl Vm {
         if !matches!(&r, Err(c) if matches!(c.kind(), CtlKind::NeedPermission(_))) {
             self.forget_once_answers();
         }
-        let mut r = match r {
+        let r = match r {
             Ok(v) => {
                 fiber.stack[slot] = v;
                 self.enforce_limit(Some(fiber)).map_err(Trap::Limit)?;
@@ -1716,16 +1716,15 @@ impl Vm {
             }
             Err(c) => c,
         };
-        match &mut *r.0 {
+        match r.kind() {
             CtlKind::Yield => {
                 self.recycle(r);
                 fiber.stack[slot] = Value::Unit;
                 return Ok(Some(FiberStop::YieldNow));
             }
-            CtlKind::Blocked { wait, race } => {
+            CtlKind::Blocked { wait } => {
                 fiber.result_slot = slot;
                 fiber.wgen = *wait;
-                fiber.race = std::mem::take(race);
                 self.recycle(r);
                 return Ok(Some(FiberStop::Blocked));
             }
@@ -1740,6 +1739,12 @@ impl Vm {
             CtlKind::Async(suspension) => {
                 fiber.result_slot = slot;
                 Ok(Some(FiberStop::Async(suspension)))
+            }
+            CtlKind::Racing { wait, tasks } => {
+                fiber.result_slot = slot;
+                fiber.wgen = wait;
+                fiber.race = tasks;
+                Ok(Some(FiberStop::Blocked))
             }
             CtlKind::Cancelled => Ok(Some(FiberStop::Cancelled)),
             CtlKind::Yield | CtlKind::Blocked { .. } => unreachable!("handled above"),
@@ -1919,7 +1924,8 @@ impl Vm {
         let wait = self.next_gen();
         match self.block_on(self.current, wait, on)? {
             BlockOutcome::Ready(v) => Ok(v),
-            BlockOutcome::Waiting { race } => Err(self.signal(CtlKind::Blocked { wait, race })),
+            BlockOutcome::Waiting => Err(self.signal(CtlKind::Blocked { wait })),
+            BlockOutcome::Racing(tasks) => Err(Ctl::from(CtlKind::Racing { wait, tasks })),
         }
     }
 
@@ -1940,7 +1946,7 @@ impl Vm {
                             return Err(Ctl::fail("deadlock", "a task cannot wait for itself"));
                         }
                         self.add_waiter(fid, (me, g))?;
-                        Ok(BlockOutcome::Waiting { race: Vec::new() })
+                        Ok(BlockOutcome::Waiting)
                     }
                 }
             }
@@ -1974,7 +1980,7 @@ impl Vm {
                     self.add_waiter(fid, (me, g))?;
                 }
                 self.heap.fiber_bytes += tasks.capacity() * std::mem::size_of::<Value>();
-                Ok(BlockOutcome::Waiting { race: tasks })
+                Ok(BlockOutcome::Racing(tasks))
             }
             BlockOn::Recv(ch) => {
                 let Some(c) = self.heap.channel_mut(ch, None) else { return Err(internal("not a channel")) };
@@ -2000,7 +2006,7 @@ impl Vm {
                 c.receivers.push_back((me, g));
                 let grown = c.receivers.capacity().saturating_sub(before);
                 self.heap.bytes += grown * std::mem::size_of::<(u32, u64)>();
-                Ok(BlockOutcome::Waiting { race: Vec::new() })
+                Ok(BlockOutcome::Waiting)
             }
             BlockOn::Send(ch, v) => {
                 let Some(c) = self.heap.channel_mut(ch, None) else { return Err(internal("not a channel")) };
@@ -2023,7 +2029,7 @@ impl Vm {
                 c.senders.push_back((me, g, v));
                 let grown = c.senders.capacity().saturating_sub(before);
                 self.heap.bytes += grown * std::mem::size_of::<(u32, u64, Value)>();
-                Ok(BlockOutcome::Waiting { race: Vec::new() })
+                Ok(BlockOutcome::Waiting)
             }
         }
     }

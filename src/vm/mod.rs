@@ -93,11 +93,15 @@ pub enum CtlKind {
     /// Suspend the task until the future completes.
     Async(Suspension),
     /// The task waits for the scheduler event that [`Vm::block`] registered
-    /// as generation `wait`; the call returns what wakes it. On that wake-up,
-    /// the engine cancels the tasks of `race`.
+    /// as generation `wait`; the call returns what wakes it.
     Blocked {
         wait: u64,
-        race: Vec<Value>,
+    },
+    /// Like `Blocked`, for `task.race`: on the wake-up, the engine cancels
+    /// the remaining `tasks`.
+    Racing {
+        wait: u64,
+        tasks: Vec<Value>,
     },
     /// Let other tasks run; the call returns `()`.
     Yield,
@@ -189,7 +193,8 @@ impl std::fmt::Debug for CtlKind {
             CtlKind::Exit(c) => write!(f, "Exit({c})"),
             CtlKind::NeedPermission(c) => write!(f, "NeedPermission({c})"),
             CtlKind::Async(s) => write!(f, "Async({:?})", s.wait_kind),
-            CtlKind::Blocked { wait, .. } => write!(f, "Blocked({wait})"),
+            CtlKind::Blocked { wait } => write!(f, "Blocked({wait})"),
+            CtlKind::Racing { wait, .. } => write!(f, "Racing({wait})"),
             CtlKind::Yield => write!(f, "Yield"),
             CtlKind::Interrupted => write!(f, "Interrupted"),
             CtlKind::Collect => write!(f, "Collect"),
@@ -234,8 +239,10 @@ pub enum BlockOn {
 enum BlockOutcome {
     /// The value is already there.
     Ready(Value),
-    /// The task waits. On the wake-up, the engine cancels the tasks of `race`.
-    Waiting { race: Vec<Value> },
+    /// The task waits.
+    Waiting,
+    /// The task waits. On the wake-up, the engine cancels these tasks.
+    Racing(Vec<Value>),
 }
 
 /// A call frame (20 bytes).
@@ -751,13 +758,12 @@ impl Vm {
         }
     }
 
-    /// `kind` (`Blocked` or `Yield`) as a [`Ctl`], in the box of the last one
-    /// consumed.
+    /// `kind` (`Blocked` or `Yield`, which own no memory) as a [`Ctl`], in the
+    /// box of the last one consumed.
     #[inline]
     fn signal(&mut self, kind: CtlKind) -> Ctl {
         match self.spare_ctl.take() {
             Some(mut b) => {
-                // A consumed kind owns no memory: nothing to drop.
                 std::mem::forget(std::mem::replace(&mut *b, kind));
                 Ctl(b)
             }
