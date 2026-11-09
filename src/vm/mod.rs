@@ -300,7 +300,7 @@ pub struct Fiber {
     pub result_slot: usize,
     /// Tasks to cancel when a `race` completes.
     pub race: Vec<Value>,
-    /// How many tasks can still finish the fiber's `race`.
+    /// How many entries of the fiber's `race` can still finish it.
     pub race_contenders: u32,
     /// Fibers waiting for this one: (fiber, generation).
     pub waiters: Vec<(u32, u64)>,

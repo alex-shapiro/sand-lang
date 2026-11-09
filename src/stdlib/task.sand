@@ -7,14 +7,16 @@ pub native fn sleep(d: duration)
 /// Yields execution of the calling task so other ready tasks can run.
 pub native fn yield_now()
 
-/// Waits for all tasks in `tasks` to complete and returns their results in order.
+/// Waits for all tasks in `tasks` to complete and returns their results in
+/// order. If the caller is cancelled, the tasks keep running.
 pub fn all<T>(tasks: [Task<T>]) -> [T] {
     tasks.map(t => t.wait())
 }
 
 /// Waits for the first task in `tasks` to finish. Cancels the other tasks and
 /// returns the winning result. A cancelled task cannot win, and the race
-/// continues while another task can finish.
+/// continues while another task can finish. If the caller is cancelled, the
+/// tasks keep running.
 ///
 /// Aborts in these cases:
 ///

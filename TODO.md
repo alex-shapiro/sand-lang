@@ -150,6 +150,8 @@ Common scripts fail, require workarounds, or produce misleading diagnostics.
       method. In a tight loop with a `defer` in each iteration, 99 of 300 runs
       skipped cleanup. Avoid preemption at that call. Add a scheduling stress
       mode that suspends and cancels tasks at each safe point.
+- [ ] ❓ _Tasks._ Decide what a caller listed in its own `task.race` does. When
+      another task wins, the race cancels the caller with the other tasks.
 - [ ] ❓ _Tasks._ Evaluate owner-scoped tasks: a block that owns the tasks it
       starts, cannot exit until they end, and cancels them if it is cancelled.
       See [the task lifetime experiment](experiments/task-lifetime.md).
