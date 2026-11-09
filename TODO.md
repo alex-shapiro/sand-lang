@@ -133,7 +133,6 @@ The host cannot rely on engine limits, stability, or control.
       `lint_module` derives the lint budget only from the source size. Add
       `Limits::max_lint_fuel` or derive the lint budget from
       `Limits::max_compile_fuel`.
-
 - [ ] ❓ _Embedding._ Yield to the executor while waiting for an output sink.
       `Vm::wait_backlog` blocks the current thread in a loop. A stalled sink
       blocks other engines on that thread. It also prevents
@@ -141,6 +140,8 @@ The host cannot rely on engine limits, stability, or control.
       or an interrupt from another thread can stop the wait.
 
 ## Tier 3: ordinary scripts
+
+Common scripts fail, require workarounds, or produce misleading diagnostics.
 
 - [ ] ❓ _Testing._ Decide whether `exit(0)` should pass a test. `exit(0)`
       currently stops a test early and passes it. A test that calls `exit(0)`
@@ -157,8 +158,6 @@ The host cannot rely on engine limits, stability, or control.
       §17.4 states that `sand test` captures output. However,
       `Engine::run_tests` sends output to `NullSink`, and `TestResult` does not
       store output.
-
-Common scripts fail, require workarounds, or produce misleading diagnostics.
 
 - [ ] 🔴 [058](triage/058-enum-variant-inference/summary.md) _Language._ Infer the enum type of a variant expression from the expected type, as
       pattern matching does.
