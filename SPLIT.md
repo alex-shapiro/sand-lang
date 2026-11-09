@@ -188,9 +188,9 @@ Source commit: `d84df4d`.
 ### 9. Explicit VM control flow
 
 Replace control-flow flags on `Vm` with explicit return values and parameters.
-`Vm::cancel_task` now returns a `Result`, and native modules must propagate its
-error. `CtlKind` adds variants for racing and self-cancellation, and includes
-the wait generation in `CtlKind::Blocked`.
+`Vm::cancel_task` returns a `Result` that native modules must propagate.
+`CtlKind` represents racing and self-cancellation as variants.
+`CtlKind::Blocked` includes the wait generation.
 
 This changeset also fixes four task defects:
 

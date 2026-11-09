@@ -17,8 +17,7 @@ const EXITS: [(&str, &str); 7] = [
     ("block value", "fn work() {\nlet v = {\nGUARD\nSTOP\n1\n}\nif v == 2 { print(\"x\") }\n}"),
 ];
 
-/// Task suspension cases: name, final guarded statement, cleanup body, and
-/// main task body.
+/// Task suspension cases for `work` and the main task.
 const STOPS: [(&str, &str, &str, &str); 6] = [
     ("yielded in guarded code", "task.yield_now()", "print(\"d\")", "task.yield_now()\nt.cancel()"),
     ("woken in guarded code", "let _ = gate.recv()", "print(\"d\")", "task.sleep(1ms)\ngate.send(1)\nt.cancel()"),

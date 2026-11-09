@@ -145,7 +145,7 @@ Common scripts fail, require workarounds, or produce misleading diagnostics.
 
 - [ ] ❓ _Tasks._ Run cleanup if a task is cancelled while preempted at the
       first script call of its deferred code. `tick_call!` rewinds the frame to
-      that call, which lies outside the cleanup range. As a result, `defer`
+      that call. That instruction lies outside the cleanup range, so `defer`
       blocks and `use` bindings with a script `close` method are skipped
       silently. In a tight loop with a `defer` in each iteration, 99 of 300 runs
       lost a cleanup. Avoid preemption at that call. Add a scheduling stress
