@@ -284,7 +284,7 @@ impl Vm {
                     self.enforce_limit(None).map_err(Trap::Limit)?;
                 }
                 Err(c) => {
-                    return Err(self.run_ending(c.into_kind(), |vm| match &vm.fibers[fid as usize] {
+                    return Err(self.run_ending_of(c.into_kind(), |vm| match &vm.fibers[fid as usize] {
                         Some(f) => vm.trace_of(f, None),
                         None => vec![],
                     }));
@@ -305,18 +305,15 @@ impl Vm {
                 // Only runs without a main task stop this way.
                 Stop::Idle | Stop::Prompt(_) => Value::Unit,
             }),
-            Err(t) => Err(t.into()),
+            Err(ending) => Err(ending),
         };
         self.drain_output_after(r)
     }
 
-    fn start_main(&mut self, proto: u32) -> Result<u32, Trap> {
+    fn start_main(&mut self, proto: u32) -> Result<u32, RunEnding> {
         let closure = self.heap.alloc(Obj::Closure(proto, Box::new([])));
         let task = self.heap.alloc(Obj::Task(Box::new(TaskObj { fiber: 0, state: TaskState::Running, result: Value::Unit })));
-        let fid = self.spawn_fiber(closure, task).map_err(|c| match c.as_limit() {
-            Some(k) => Trap::Limit(k),
-            None => Trap::Internal { message: "cannot start main task".into(), trace: vec![] },
-        })?;
+        let fid = self.spawn_fiber(closure, task).map_err(|c| self.run_ending_of(c.into_kind(), |_| vec![]))?;
         if let Obj::Task(t) = self.heap.get_mut(task) {
             t.fiber = fid;
         }
@@ -351,7 +348,7 @@ impl Vm {
                     Ok(r) => r,
                     Err(msg) => {
                         self.broken = true;
-                        Err(Trap::Internal { message: msg, trace: self.trace_of(&f, None) })
+                        Err(Trap::Internal { message: msg, trace: self.trace_of(&f, None) }.into())
                     }
                 };
                 self.meter.sync(fuel);
@@ -364,7 +361,7 @@ impl Vm {
                         gc_retried = None;
                         e
                     }
-                    Err(Trap::Limit(LimitKind::Memory)) if std::mem::take(&mut self.gc_retry) => {
+                    Err(RunEnding::Trap(Trap::Limit(LimitKind::Memory))) if std::mem::take(&mut self.gc_retry) => {
                         // Memory checks count garbage that has not been
                         // collected yet, so collect and run the failed
                         // instruction again. If the retry itself failed, report
@@ -384,7 +381,7 @@ impl Vm {
                         self.ready.push_front(fid);
                         continue;
                     }
-                    Err(t) => return Err(t.into()),
+                    Err(ending) => return Err(ending),
                 };
                 match exit {
                     Exit::Done(v) => {
@@ -439,7 +436,6 @@ impl Vm {
                         timer.resume();
                         self.apply_answer(cap, answer);
                     }
-                    Exit::Terminate(c) => return Err(RunEnding::Exit(c)),
                     Exit::Cancelled => {
                         // The task cancelled itself.
                         self.end_cancelled(fid, f);

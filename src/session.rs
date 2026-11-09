@@ -556,7 +556,7 @@ impl Session {
             None => Ok(None),
             Some(Ok(s)) => Ok(Some(s)),
             Some(Err(c)) => {
-                let ending = vm.run_ending(c.into_kind(), |_| vec![]);
+                let ending = vm.run_ending_of(c.into_kind(), |_| vec![]);
                 conclude(vm, Err(ending), exit_code).map(|_| None)
             }
         }

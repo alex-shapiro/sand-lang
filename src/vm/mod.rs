@@ -1132,10 +1132,10 @@ impl Vm {
 
     /// Flushes standard output and error, and waits until they are written.
     /// Fails if the meter reports an interrupt or a limit first.
-    pub fn drain_output(&mut self) -> Result<(), RunEnding> {
+    pub(crate) fn drain_output(&mut self) -> Result<(), RunEnding> {
         self.flush_stdout();
         let drained = [&self.host.stdout, &self.host.stderr].into_iter().try_for_each(|sink| self.wait_backlog(sink, 0));
-        drained.map_err(|c| self.run_ending(c.into_kind(), |_| vec![]))
+        drained.map_err(|c| self.run_ending_of(c.into_kind(), |_| vec![]))
     }
 
     /// Drains the output of a scheduler run that ended with `r`. A drain failure replaces any
@@ -1516,7 +1516,7 @@ impl Vm {
 
     /// How a [`CtlKind`] that no caller handled ends the run. `trace` gives the stack trace of an
     /// error. A request to the scheduler is an internal error here.
-    pub(crate) fn run_ending(&mut self, kind: CtlKind, trace: impl FnOnce(&Vm) -> Vec<TraceFrame>) -> RunEnding {
+    pub(crate) fn run_ending_of(&mut self, kind: CtlKind, trace: impl FnOnce(&Vm) -> Vec<TraceFrame>) -> RunEnding {
         let message = match kind {
             CtlKind::Exit(code) => return RunEnding::Exit(code),
             CtlKind::RuntimeError(message) => return Trap::Error { message, trace: trace(self) }.into(),

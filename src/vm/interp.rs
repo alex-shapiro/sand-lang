@@ -61,8 +61,6 @@ pub enum Exit {
     Blocked,
     Async(Suspension),
     Prompt(Capability),
-    /// A task called `exit` with this code.
-    Terminate(i32),
     /// `task.yield_now()`.
     YieldNow,
     /// The running task was cancelled.
@@ -449,21 +447,21 @@ impl Vm {
 
     #[cold]
     #[inline(never)]
-    fn try_top(&mut self, fiber: &mut Fiber, ip: usize, prog: &Program, res: Value) -> Result<Exit, Trap> {
+    fn try_top(&mut self, fiber: &mut Fiber, ip: usize, prog: &Program, res: Value) -> RunEnding {
         // `Option::None` has 0 fields; `Result::Err(e)` stores `e` at field 0.
         let Some(e) = self.heap.field(res, 0) else {
-            return self.ctl_exit(fiber, ip, Ctl::fail("none", "`?` found None"));
+            return self.ctl_ending(fiber, ip, Ctl::fail("none", "`?` found None"));
         };
         match display::to_display_metered(prog, &self.heap, &self.meter, e) {
-            Ok(text) => Err(self.error_trap(fiber, ip, text)),
-            Err(c) => self.ctl_exit(fiber, ip, c),
+            Ok(text) => self.error_trap(fiber, ip, text),
+            Err(c) => self.ctl_ending(fiber, ip, c),
         }
     }
 
     /// `Op::Internal`: an internal error with constant message `msg`.
     #[cold]
     #[inline(never)]
-    fn const_internal(&mut self, fiber: &mut Fiber, ip: usize, prog: &Program, msg: u32) -> Trap {
+    fn const_internal(&mut self, fiber: &mut Fiber, ip: usize, prog: &Program, msg: u32) -> RunEnding {
         let m = match &prog.consts[msg as usize] {
             Const::Str(s) => s.clone(),
             _ => "unknown".into(),
@@ -474,7 +472,7 @@ impl Vm {
     /// The trap for an operand of the wrong type (a compiler bug).
     #[cold]
     #[inline(never)]
-    fn operand_trap(&mut self, fiber: &mut Fiber, ip: usize, v: Value, want: &str) -> Trap {
+    fn operand_trap(&mut self, fiber: &mut Fiber, ip: usize, v: Value, want: &str) -> RunEnding {
         fiber.frames.last_mut().unwrap().ip = ip as u32;
         self.internal_trap(fiber, ip, format!("expected {want}, found {v:?}"))
     }
@@ -482,7 +480,7 @@ impl Vm {
     /// The trap for a `GetField` on a value without that field (a compiler bug).
     #[cold]
     #[inline(never)]
-    fn field_trap(&mut self, fiber: &mut Fiber, ip: usize, v: Value, idx: u16) -> Trap {
+    fn field_trap(&mut self, fiber: &mut Fiber, ip: usize, v: Value, idx: u16) -> RunEnding {
         fiber.frames.last_mut().unwrap().ip = ip as u32;
         let msg = format!("field {idx} of {v:?} {:?}", self.heap.get(v));
         self.internal_trap(fiber, ip, msg)
@@ -491,34 +489,26 @@ impl Vm {
     /// The trap for an error whose message `msg` is `kind: message`.
     #[cold]
     #[inline(never)]
-    fn error_trap(&mut self, fiber: &mut Fiber, ip: usize, msg: String) -> Trap {
-        Trap::Error { message: msg, trace: self.trace_of(fiber, Some(ip as u32)) }
+    fn error_trap(&mut self, fiber: &mut Fiber, ip: usize, msg: String) -> RunEnding {
+        Trap::Error { message: msg, trace: self.trace_of(fiber, Some(ip as u32)) }.into()
     }
 
     /// The trap for an internal error, which marks the engine broken.
     #[cold]
     #[inline(never)]
-    fn internal_trap(&mut self, fiber: &mut Fiber, ip: usize, msg: String) -> Trap {
+    fn internal_trap(&mut self, fiber: &mut Fiber, ip: usize, msg: String) -> RunEnding {
         self.broken = true;
-        Trap::Internal { message: msg, trace: self.trace_of(fiber, Some(ip as u32)) }
+        Trap::Internal { message: msg, trace: self.trace_of(fiber, Some(ip as u32)) }.into()
     }
 
-    /// How the interpreter leaves the task after a failed metered operation.
+    /// How a failed metered operation ends the run.
     #[cold]
     #[inline(never)]
-    fn ctl_exit(&mut self, fiber: &mut Fiber, ip: usize, c: Ctl) -> Result<Exit, Trap> {
+    fn ctl_ending(&mut self, fiber: &mut Fiber, ip: usize, c: Ctl) -> RunEnding {
         if let Some(k) = c.as_limit() {
-            return Err(self.limit_trap(fiber, ip, k));
+            return self.limit_trap(fiber, ip, k);
         }
-        self.ended_task_exit(fiber, ip, c.into_kind())
-    }
-
-    /// How the interpreter leaves the task when `kind` ends the run.
-    fn ended_task_exit(&mut self, fiber: &mut Fiber, ip: usize, kind: CtlKind) -> Result<Exit, Trap> {
-        match self.run_ending(kind, |vm| vm.trace_of(fiber, Some(ip as u32))) {
-            RunEnding::Exit(code) => Ok(Exit::Terminate(code)),
-            RunEnding::Trap(t) => Err(t),
-        }
+        self.run_ending_of(c.into_kind(), |vm| vm.trace_of(fiber, Some(ip as u32)))
     }
 
     /// A limit hit by the instruction before `ip`. Memory checks count
@@ -528,18 +518,18 @@ impl Vm {
     /// effects before the check, other than charging [`call_tick`]).
     #[cold]
     #[inline(never)]
-    fn limit_trap(&mut self, fiber: &mut Fiber, ip: usize, k: LimitKind) -> Trap {
+    fn limit_trap(&mut self, fiber: &mut Fiber, ip: usize, k: LimitKind) -> RunEnding {
         if k == LimitKind::Memory
             && let Some(fr) = fiber.frames.last_mut()
         {
             fr.ip = ip.saturating_sub(1) as u32;
             self.gc_retry = true;
         }
-        Trap::Limit(k)
+        Trap::Limit(k).into()
     }
 
     /// Runs `fiber` until it finishes, blocks, or exhausts `fuel`.
-    pub(crate) fn interp(&mut self, fiber: &mut Fiber, fuel_out: &mut i64) -> Result<Exit, Trap> {
+    pub(crate) fn interp(&mut self, fiber: &mut Fiber, fuel_out: &mut i64) -> Result<Exit, RunEnding> {
         if let Some(msg) = fiber.pending_error.take() {
             let ip = fiber.frames.last().map(|f| f.ip).unwrap_or(0) as usize;
             return Err(self.error_trap(fiber, ip, msg));
@@ -589,7 +579,7 @@ impl Vm {
         macro_rules! fail_ctl {
             ($c:expr) => {{
                 save!();
-                return self.ctl_exit(fiber, ip, $c);
+                return Err(self.ctl_ending(fiber, ip, $c));
             }};
         }
         macro_rules! int {
@@ -1349,7 +1339,7 @@ impl Vm {
                         }
                         if self.heap.would_exceed(to_usize_saturating(n).saturating_mul(std::mem::size_of::<Value>())) {
                             save!();
-                            return Err(Trap::Limit(LimitKind::Memory));
+                            return Err(Trap::Limit(LimitKind::Memory).into());
                         }
                     }
                     Op::Len { dst, src } => {
@@ -1642,7 +1632,7 @@ impl Vm {
                     Op::TryTop { src } => {
                         save!();
                         let e = r!(src);
-                        return self.try_top(fiber, ip, &prog, e);
+                        return Err(self.try_top(fiber, ip, &prog, e));
                     }
                     Op::Internal { msg } => {
                         save!();
@@ -1662,12 +1652,12 @@ impl Vm {
     /// must; the fiber resumes at `resume_ip`.
     #[cold]
     #[inline(never)]
-    fn safe_point(&mut self, fiber: &mut Fiber, fuel_left: i64, resume_ip: usize) -> Option<Result<Exit, Trap>> {
+    fn safe_point(&mut self, fiber: &mut Fiber, fuel_left: i64, resume_ip: usize) -> Option<Result<Exit, RunEnding>> {
         fiber.frames.last_mut().unwrap().ip = resume_ip as u32;
         if self.heap.wants_gc() {
             self.collect_garbage(Some(fiber));
             if self.heap.over_limit() {
-                return Some(Err(Trap::Limit(LimitKind::Memory)));
+                return Some(Err(Trap::Limit(LimitKind::Memory).into()));
             }
         }
         if fuel_left <= 0 {
@@ -1691,7 +1681,7 @@ impl Vm {
         argc: usize,
         slot: usize,
         ip: usize,
-    ) -> Result<Option<Exit>, Trap> {
+    ) -> Result<Option<Exit>, RunEnding> {
         let frame = fiber.frames.last_mut().unwrap();
         frame.ip = ip as u32;
         self.caller_site = (frame.proto, frame.ip);
@@ -1756,7 +1746,7 @@ impl Vm {
             CtlKind::Yield | CtlKind::Blocked => unreachable!("handled above"),
             CtlKind::Collect => Err(self.internal_trap(fiber, ip, "a native asked for a collection twice".into())),
             // A limit here is final: the call already ran again after a collection.
-            ended => self.ended_task_exit(fiber, ip, ended).map(Some),
+            ended => Err(self.run_ending_of(ended, |vm| vm.trace_of(fiber, Some(ip as u32)))),
         }
     }
 
