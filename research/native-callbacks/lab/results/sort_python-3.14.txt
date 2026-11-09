@@ -1,2 +1,2 @@
-E6 Python 3.14.6 sort 200000 ints: list.sort(key=cmp_to_key(py comparator)) 276.4 ms; list.sort(key=lambda) 58.0 ms; list.sort() 50.9 ms
+E6 Python 3.14.6 sort 200000 ints: list.sort(key=cmp_to_key(py comparator)) 245.6 ms; list.sort(key=lambda) 46.4 ms; list.sort() 38.4 ms
 exit=0

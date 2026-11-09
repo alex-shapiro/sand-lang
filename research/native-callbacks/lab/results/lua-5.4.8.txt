@@ -1,5 +1,5 @@
 == Lua 5.4.8
-E1 loop without call: 5.4 ns/iter; script->script call loop: 20.0 ns/iter; native->script callback loop: 15.5 ns/iter
+E1 loop without call: 5.0 ns/iter; script->script call loop: 19.5 ns/iter; native->script callback loop: 14.5 ns/iter
 E2 native<->script max depth: 197 | error: C stack overflow
 E2 script-only max depth: 499989 | error: c/lua_cb.lua:25: stack overflow
 E3 lua_call + yield:	false	attempt to yield across a C-call boundary

@@ -1,5 +1,5 @@
 == piccolo 0.3.3
-E1 loop without call: 36.3 ns/iter; script->script call loop: 98.0 ns/iter; native->script callback loop: 79.9 ns/iter
+E1 loop without call: 30.5 ns/iter; script->script call loop: 97.9 ns/iter; native->script callback loop: 74.7 ns/iter
 E2 native<->script recursion to depth 10000: Ok(10000)
 E2 native<->script recursion to depth 1000000: Ok(1000000)
 E3 yield inside callback, resumed with 21: Ok(42)

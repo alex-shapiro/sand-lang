@@ -1,7 +1,29 @@
+// Shared by sand_stackless and sand_nested. Times only the sort; median of 5.
 import time
 
-// Status quo: a merge sort with a comparator, written in Sand.
-fn merge_sort<T>(xs: [T], less: fn(T, T) -> bool) -> [T] {
+var seed = 1
+fn rnd() -> int {
+    seed = (seed * 1103515245 + 12345) % 2147483648
+    seed
+}
+let data = (0..200000).map(_ => rnd())
+let expected = data.sorted()
+
+fn bench(run: fn([int]) -> ()) -> duration {
+    var times: [duration] = []
+    for _ in 0..5 {
+        let xs = data.copy()
+        let sw = time.Stopwatch()
+        run(xs)
+        times.push(sw.elapsed())
+        assert(xs == expected)
+    }
+    times.sort()
+    times[2]
+}
+
+// The same bottom-up merge sort as the natives, written in Sand. Sorts `xs` in place.
+fn merge_sort<T>(xs: [T], less: fn(T, T) -> bool) {
     var src = xs.copy()
     var dst = xs.copy()
     let n = xs.len()
@@ -41,21 +63,7 @@ fn merge_sort<T>(xs: [T], less: fn(T, T) -> bool) -> [T] {
         dst = t
         width *= 2
     }
-    src
+    for i in 0..n {
+        xs[i] = src[i]
+    }
 }
-
-var seed = 1
-fn rnd() -> int {
-    seed = (seed * 1103515245 + 12345) % 2147483648
-    seed
-}
-let data = (0..200000).map(_ => rnd())
-var times: [duration] = []
-for _ in 0..5 {
-    let sw = time.Stopwatch()
-    let sorted = merge_sort(data, (a, b) => a < b)
-    times.push(sw.elapsed())
-    assert(sorted == data.sorted())
-}
-times.sort()
-print("E6 Sand status quo: merge sort written in Sand with a Sand comparator, 200000 ints: median \(times[2])")

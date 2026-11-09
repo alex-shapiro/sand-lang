@@ -7,3 +7,4 @@ error[E0502]: cannot borrow `*vm` as mutable because it is also borrowed as immu
 error: aborting due to 1 previous error
 -- good.rs (rooted Handle across the call):
 E15 rooted handle across the nested call: arg
+exit=0

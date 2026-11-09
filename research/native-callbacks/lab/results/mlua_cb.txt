@@ -1,5 +1,5 @@
 == mlua 0.11.6 (Lua 5.4, vendored)
-E1 loop without call: 6.3 ns/iter; script->script call loop: 19.0 ns/iter; native->script callback loop (each Rust->Lua call is protected): 63.3 ns/iter
+E1 loop without call: 4.6 ns/iter; script->script call loop: 17.8 ns/iter; native->script callback loop (each Rust->Lua call is protected): 50.7 ns/iter
 E9 re-entered FnMut callback: Some("mutable callback called recursively")
 E9 userdata re-borrow during callback: Some("mutable callback called recursively")
 E3 async host fn inside callback inside sync native: Err("runtime error: attempt to yield across a C-call boundary")

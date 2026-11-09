@@ -1,23 +1,23 @@
 workload                    sand
 --------------------------------
-binary_trees               866ms
-collatz                    703ms
-csv                        686ms
-dijkstra                  1440ms
-fannkuch                   545ms
-generators                 812ms
-graph                     1627ms
-interpreter               1001ms
-json                      2049ms
-knucleotide                906ms
-memo                       996ms
-nbody                     1179ms
-pipeline                   694ms
-ray                        608ms
-results                   2174ms
-richards                   829ms
-spectral_norm              879ms
-wordfreq                  1384ms
+binary_trees               798ms
+collatz                    668ms
+csv                        639ms
+dijkstra                  1376ms
+fannkuch                   527ms
+generators                 848ms
+graph                     1392ms
+interpreter                905ms
+json                      1995ms
+knucleotide                884ms
+memo                       878ms
+nbody                     1056ms
+pipeline                   676ms
+ray                        664ms
+results                   1968ms
+richards                   746ms
+spectral_norm              829ms
+wordfreq                  1234ms
 --------------------------------
 geomean programs                
 times are medians; /lua and /python are sand time / that time (< 1: Sand is faster)

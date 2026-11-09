@@ -1,2 +1,0 @@
-E6 Sand status quo: merge sort written in Sand with a Sand comparator, 200000 ints: median 227.298875ms
-exit=0

@@ -1,0 +1,20 @@
+test listeners_bind_exactly_the_checked_address ... FAILED
+test tcp_reads_raw_bytes_and_eof ... ok
+--
+thread 'listeners_bind_exactly_the_checked_address' (26393) panicked at tests/common/mod.rs:54:13:
+run failed: error: io: Address family not supported by protocol (os error 97)
+--
+test result: FAILED. 37 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.98s
+
+--
+test peak_memory_stays_near_the_memory_limit ... FAILED
+
+--
+thread 'peak_memory_stays_near_the_memory_limit' (26412) panicked at tests/peak_memory.rs:107:9:
+old lists storing a young value: peak memory is 1.32 times the limit (channel of lists: 1.04, list of lists: 1.06, map growth: 0.92, set growth: 0.82, string building: 0.50, list doubling: 0.90, type descriptions: 1.09, old lists storing a young value: 1.32)
+--
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.61s
+
+--
+test names_that_are_not_utf8 ... FAILED
+test parent_directories_cannot_escape ... ok

@@ -1,4 +1,2 @@
-   Compiling web-time v1.1.0
-   Compiling wasm-bindgen-futures v0.4.78
-    Finished `release` profile [optimized] target(s) in 1m 36s
- 3 files changed, 241 insertions(+), 12 deletions(-)
+    Finished `release` profile [optimized] target(s) in 1m 16s
+ 4 files changed, 291 insertions(+), 12 deletions(-)

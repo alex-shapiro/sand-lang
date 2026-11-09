@@ -1,5 +1,5 @@
 == 3.14.6
-E1 loop without call: 66.6 ns/iter; script->script call loop: 77.1 ns/iter; native->script callback loop: 36.3 ns/iter
+E1 loop without call: 53.5 ns/iter; script->script call loop: 72.7 ns/iter; native->script callback loop: 34.3 ns/iter
 E2 native<->script max depth: 998 | RecursionError: maximum recursion depth exceeded
 E2 script-only max depth: 998 | RecursionError: maximum recursion depth exceeded
 E3 generator yield inside callback: [('callback returned', 'generator')]

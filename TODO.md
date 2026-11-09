@@ -149,7 +149,6 @@ Common scripts fail, require workarounds, or produce misleading diagnostics.
       stackless continuations (`Ctl::call`), GC-rooted host handles, and an
       async and a sync host entry point, as
       [the research report](research/native-callbacks/report.md) recommends.
-
 - [ ] ❓ _Testing._ Decide whether `exit(0)` should pass a test. `exit(0)`
       currently stops a test early and passes it. A test that calls `exit(0)`
       before a failing `assert` therefore passes. If `exit` always fails a test,

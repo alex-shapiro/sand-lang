@@ -11,7 +11,7 @@ index 1a68d29..ccdf682 100644
  [dependencies]
  sandlang-macros = { path = "macros" }
 diff --git a/src/vm/interp.rs b/src/vm/interp.rs
-index 7a432bc..85efd85 100644
+index 7a432bc..13aa918 100644
 --- a/src/vm/interp.rs
 +++ b/src/vm/interp.rs
 @@ -67,6 +67,8 @@ pub enum FiberStop {
@@ -56,7 +56,7 @@ index 7a432bc..85efd85 100644
 +                let ret = fiber.frames.pop().map_or(0, |f| f.ret);
 +                if ret == CONTINUATION_RET {
 +                    self.meter.sync(fuel.left);
-+                    let r = self.resume_continuation(&natives, fiber, v);
++                    let r = self.resume_continuation(fiber, v);
 +                    fuel.left = self.meter.resync();
 +                    if let Err(t) = r {
 +                        return Err(t);
@@ -83,7 +83,7 @@ index 7a432bc..85efd85 100644
                      }
                  }
              }};
-@@ -1685,7 +1709,19 @@ impl Vm {
+@@ -1685,7 +1709,18 @@ impl Vm {
          let frame = fiber.frames.last_mut().unwrap();
          frame.ip = ip as u32;
          self.caller_site = (frame.proto, frame.ip);
@@ -93,17 +93,16 @@ index 7a432bc..85efd85 100644
 +        // the native runs, since a nested callback may collect garbage.
 +        #[cfg(feature = "nested_callbacks")]
 +        let mut r = {
-+            let mut args = [Value::Unit; 16];
-+            args[..argc].copy_from_slice(&fiber.stack[start..start + argc]);
++            let args: smallvec_args::Args = smallvec_args::Args::from(&fiber.stack[start..start + argc]);
 +            self.parked.push(std::mem::replace(fiber, Vm::empty_fiber()));
-+            let r = Self::invoke_native(self, natives, n, &args[..argc]);
++            let r = Self::invoke_native(self, natives, n, args.as_slice());
 +            *fiber = self.parked.pop().unwrap();
 +            r
 +        };
          self.heap.fail_next_check.set(false);
          if r.is_memory_limit() || matches!(&r, Err(c) if matches!(c.kind(), CtlKind::Collect)) {
              // Native functions check memory and open-resource limits against
-@@ -1743,6 +1779,15 @@ impl Vm {
+@@ -1743,6 +1778,15 @@ impl Vm {
                  fiber.result_slot = slot;
                  Ok(Some(FiberStop::Async(suspension)))
              }
@@ -119,7 +118,7 @@ index 7a432bc..85efd85 100644
              CtlKind::Yield | CtlKind::Blocked => unreachable!("handled above"),
              CtlKind::Collect => Err(self.internal_trap(fiber, ip, "a native asked for a collection twice".into())),
              // Do not retry memory limits here because the call already retried after garbage collection.
-@@ -1750,6 +1795,57 @@ impl Vm {
+@@ -1750,6 +1794,71 @@ impl Vm {
          }
      }
  
@@ -151,11 +150,25 @@ index 7a432bc..85efd85 100644
 +    /// Passes callback result `v` to the innermost continuation, and either
 +    /// stores the native's result or enters the next callback.
 +    #[inline(never)]
-+    fn resume_continuation(&mut self, natives: &[NativeEntry], fiber: &mut Fiber, v: Value) -> Result<(), RunEnding> {
-+        let _ = natives;
++    fn resume_continuation(&mut self, fiber: &mut Fiber, v: Value) -> Result<(), RunEnding> {
 +        let mut c = fiber.continuations.pop().expect("a callback frame without a continuation");
 +        let ip = fiber.frames.last().map_or(0, |f| f.ip) as usize;
-+        match (c.then)(self, v, &mut c.state) {
++        // A continuation follows the rule for natives: it checks limits before
++        // its side effects, so the VM can collect garbage and run it again.
++        // A retry repeats only this step, never the callback before it.
++        self.arm_retry_stress();
++        let mut r = (c.then)(self, v, &mut c.state);
++        self.heap.fail_next_check.set(false);
++        if r.is_memory_limit() || matches!(&r, Err(e) if matches!(e.kind(), CtlKind::Collect)) {
++            fiber.continuations.push(Continuation { slot: c.slot, state: std::mem::take(&mut c.state), then: Box::new(|_, _, _| Ok(Value::Unit)) });
++            self.collect_all_garbage(Some(fiber));
++            let rooted = fiber.continuations.pop().unwrap();
++            c.state = rooted.state;
++            self.collected = true;
++            r = (c.then)(self, v, &mut c.state);
++            self.collected = false;
++        }
++        match r {
 +            Ok(result) => {
 +                fiber.stack[c.slot] = result;
 +                Ok(())
@@ -177,8 +190,39 @@ index 7a432bc..85efd85 100644
      /// `Op::StrClass`: the character-class tests of strings.
      #[inline(never)]
      fn str_class(&self, v: Value, class: u8) -> Result<bool, Stop> {
+@@ -2460,3 +2569,30 @@ pub(crate) fn internal(msg: impl std::fmt::Display) -> Ctl {
+ fn overflow(what: &str) -> Ctl {
+     Ctl::fail("overflow", format!("{what} overflow"))
+ }
++
++/// Native arguments copied off the stack (prototype P1): inline up to 16.
++#[cfg(feature = "nested_callbacks")]
++mod smallvec_args {
++    use super::Value;
++    pub enum Args {
++        Inline([Value; 16], usize),
++        Heap(Vec<Value>),
++    }
++    impl Args {
++        pub fn from(src: &[Value]) -> Args {
++            if src.len() <= 16 {
++                let mut a = [Value::Unit; 16];
++                a[..src.len()].copy_from_slice(src);
++                Args::Inline(a, src.len())
++            } else {
++                Args::Heap(src.to_vec())
++            }
++        }
++        pub fn as_slice(&self) -> &[Value] {
++            match self {
++                Args::Inline(a, n) => &a[..*n],
++                Args::Heap(v) => v,
++            }
++        }
++    }
++}
 diff --git a/src/vm/mod.rs b/src/vm/mod.rs
-index a0b6e1f..f9985a6 100644
+index a0b6e1f..5fc6017 100644
 --- a/src/vm/mod.rs
 +++ b/src/vm/mod.rs
 @@ -103,8 +103,37 @@ pub enum CtlKind {
@@ -262,26 +306,29 @@ index a0b6e1f..f9985a6 100644
  }
  
  /// A stack trace frame from a runtime error.
-@@ -554,6 +605,9 @@ pub struct Vm {
+@@ -554,6 +605,11 @@ pub struct Vm {
      pub(crate) ending: bool,
      /// Extra GC roots (e.g. values held by the test runner).
      pub pinned: Vec<Value>,
 +    /// Fibers whose natives run nested callbacks (prototype P1), innermost last.
 +    pub parked: Vec<Fiber>,
 +    pub nested_depth: usize,
++    /// Callback fibers that `call_nested` reuses (prototype P1).
++    pub spare_nested: Vec<Fiber>,
      pub(crate) pending_race: Option<Vec<Value>>,
      /// The box of the last `Blocked` or `Yield` consumed (see `Vm::signal`).
      spare_ctl: Option<Box<CtlKind>>,
-@@ -661,6 +715,8 @@ impl Vm {
+@@ -661,6 +717,9 @@ impl Vm {
              cancel_current: false,
              ending: false,
              pinned: Vec::new(),
 +            parked: Vec::new(),
 +            nested_depth: 0,
++            spare_nested: Vec::new(),
              pending_race: None,
              spare_ctl: None,
              wait_gen: 0,
-@@ -1308,6 +1364,7 @@ impl Vm {
+@@ -1308,6 +1367,7 @@ impl Vm {
                      waiters_prune_at: MIN_PRUNE,
                      io: None,
                      pending_error: None,
@@ -289,7 +336,7 @@ index a0b6e1f..f9985a6 100644
                  });
                  self.heap.fiber_bytes += fiber.footprint();
                  fiber
-@@ -1347,6 +1404,7 @@ impl Vm {
+@@ -1347,6 +1407,7 @@ impl Vm {
          f.stack.clear();
          f.stack.resize(slots, Value::Unit);
          f.frames.clear();
@@ -297,7 +344,7 @@ index a0b6e1f..f9985a6 100644
          f.task = Value::Unit;
          f.state = FiberState::Ready;
          f.wgen = 0;
-@@ -1365,6 +1423,74 @@ impl Vm {
+@@ -1365,6 +1426,80 @@ impl Vm {
          self.spare_fibers = Vec::new();
      }
  
@@ -332,8 +379,11 @@ index a0b6e1f..f9985a6 100644
 +        };
 +        let prog = self.prog.clone();
 +        let p = &prog.protos[proto as usize];
-+        let mut nf = Vm::empty_fiber();
-+        nf.stack = vec![Value::Unit; (p.nregs as usize).max(INITIAL_STACK_SLOTS)];
++        let mut nf = self.spare_nested.pop().unwrap_or_else(Vm::empty_fiber);
++        let need = (p.nregs as usize).max(INITIAL_STACK_SLOTS);
++        if nf.stack.len() < need {
++            nf.stack.resize(need, Value::Unit);
++        }
 +        nf.stack[..args.len()].copy_from_slice(args);
 +        if let Obj::Closure(_, caps) = self.heap.get(callee) {
 +            let n = p.nparams as usize;
@@ -366,13 +416,16 @@ index a0b6e1f..f9985a6 100644
 +        };
 +        self.nested_depth -= 1;
 +        self.meter.resync();
++        nf.frames.clear();
++        nf.stack.fill(Value::Unit);
++        self.spare_nested.push(nf);
 +        r
 +    }
 +
      /// Spawns a new task running `closure`; returns the task handle.
      pub fn spawn_task(&mut self, closure: Value) -> NResult {
          if self.live_tasks >= self.host.limits.max_tasks {
-@@ -1571,11 +1697,17 @@ impl Vm {
+@@ -1571,11 +1706,17 @@ impl Vm {
              roots.extend(f.frames.iter().map(|fr| fr.closure_value()));
              roots.push(f.task);
              roots.extend(f.race.iter().copied());

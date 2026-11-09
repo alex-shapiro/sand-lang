@@ -1,5 +1,5 @@
 == QuickJS-NG 0.16.2 via rquickjs 0.14.0
-E1 loop without call: 27.2 ns/iter; script->script call loop: 52.7 ns/iter; native->script callback loop: 64.5 ns/iter
+E1 loop without call: 26.6 ns/iter; script->script call loop: 37.5 ns/iter; native->script callback loop: 66.1 ns/iter
 E2 native<->script max depth: 347 | Ok(Some("RangeError: Maximum call stack size exceeded"))
 E2 Ok(Some("script-only depth 1362 RangeError: Maximum call stack size exceeded"))
 E4 interrupt inside callback: Err("Error: interrupted\n    at <anonymous> (eval_script:1:1)\n    at <eval> (eval_script:1:14)\n")

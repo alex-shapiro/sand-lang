@@ -5,7 +5,7 @@
 - P-S4 3.14 ceval.c uses machine stack pointer `_Py_get_machine_stack_pointer()`; message "Stack overflow (used %d kB)%s"; whatsnew 3.14 "Remove the undocumented APIs Py_C_RECURSION_LIMIT and PyThreadState.c_recursion_remaining"
 - P-S5 whatsnew 3.11 "Most Python function calls now consume no C stack space." https://github.com/python/cpython/blob/v3.11.0/Doc/whatsnew/3.11.rst
 - P-S6 PEP 219 "The problem is that the C stack now holds a nested execution of the byte-code interpreter." ; PEP 380 generator "can only yield to its immediate caller"
-- P-S7 greenlet caveats https://github.com/python-greenlet/greenlet/blob/master/docs/caveats.rst "Use caution when switching greenlet stacks that include native (C) frames"; greenlet.cpp copies C stack slices to heap
+- P-S7 greenlet caveats https://github.com/python-greenlet/greenlet/blob/4c22fe41c284a5c5b0ecd19f4607121cd8b31847/docs/caveats.rst "Use caution when switching greenlet stacks that include native (C) frames"; greenlet.cpp copies C stack slices to heap
 - P-S8 listobject.c v3.13.0 "allowing mutations during sorting is a core-dump factory, since ob_item may change"; "list modified during sort"
 - P-S9 extending.rst "Thin Ice": "implicit invocations of the interpreter, which can cause the owner of a reference to dispose of it."
 - P-S10 PEP 578 "This is not sandboxing, as this proposal does not attempt to prevent malicious behavior" ; "Sandboxing CPython has been attempted many times in the past, and each past attempt has failed."

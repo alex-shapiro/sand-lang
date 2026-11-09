@@ -1,4 +1,4 @@
 == starlark-rust 0.14.2
-E1 loop without call: 67.9 ns/iter; script->script call loop: 75.7 ns/iter; native->script callback loop: 29.5 ns/iter
+E1 loop without call: 64.8 ns/iter; script->script call loop: 78.9 ns/iter; native->script callback loop: 32.9 ns/iter
 E2 native<->script recursion: depth 16 | Err("error: Starlark call stack overflow")
 exit=0

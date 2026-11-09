@@ -18,7 +18,6 @@ run rune_cb_budget timeout 60 ./target/release/rune_cb budget
 for v in 5.4.8 5.5.0; do run sort_lua-$v ./build/lua_cb-$v sort/sort.lua; done
 run sort_python-3.13 /usr/local/bin/python3.13 -I sort/sort.py
 run sort_python-3.14 "$PY314" -I sort/sort.py
-run sort_sand "${SAND_BASE:-sand}" run sort/sort.sand
 run e15 ./e15/run.sh
 run unsafe_count ./unsafe_count.sh
 S=../sandlab/bin

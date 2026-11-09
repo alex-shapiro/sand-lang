@@ -1,22 +1,22 @@
 program             base       p2       p1   p2/base  p1/base
-binary_trees       792ms    750ms    794ms     0.947    1.003
-collatz            720ms    716ms    703ms     0.994    0.976
-csv                557ms    526ms    630ms     0.944    1.131
-dijkstra          1080ms   1161ms   1317ms     1.075    1.219
-fannkuch           317ms    327ms    444ms     1.032    1.401
-generators         816ms    809ms    812ms     0.991    0.995
-graph             1473ms   1361ms   1479ms     0.924    1.004
-interpreter       1000ms    897ms   1001ms     0.897    1.001
-json              1675ms   1921ms   2010ms     1.147    1.200
-knucleotide        882ms    872ms    843ms     0.989    0.956
-memo               924ms    922ms    959ms     0.998    1.038
-nbody              965ms   1020ms   1156ms     1.057    1.198
-pipeline           710ms    676ms    694ms     0.952    0.977
-ray                498ms    525ms    608ms     1.054    1.221
-results           1929ms   1919ms   2131ms     0.995    1.105
-richards           778ms    746ms    733ms     0.959    0.942
-spectral_norm      900ms    815ms    818ms     0.906    0.909
-wordfreq          1186ms   1277ms   1323ms     1.077    1.116
-geomean p2/base: 0.994 (best of the per-round medians)
-geomean p1/base: 1.070 (best of the per-round medians)
-noise: largest base-vs-base spread for one program across rounds: 1.171
+binary_trees       742ms    729ms    723ms     0.982    0.974
+collatz            675ms    663ms    648ms     0.982    0.960
+csv                542ms    510ms    605ms     0.941    1.116
+dijkstra           963ms   1080ms   1277ms     1.121    1.326
+fannkuch           282ms    329ms    511ms     1.167    1.812
+generators         844ms    821ms    785ms     0.973    0.930
+graph             1453ms   1219ms   1392ms     0.839    0.958
+interpreter        923ms    915ms    880ms     0.991    0.953
+json              1645ms   1691ms   1939ms     1.028    1.179
+knucleotide        853ms    841ms    867ms     0.986    1.016
+memo               909ms    833ms    812ms     0.916    0.893
+nbody              977ms   1004ms   1056ms     1.028    1.081
+pipeline           627ms    633ms    649ms     1.010    1.035
+ray                496ms    518ms    624ms     1.044    1.258
+results           1705ms   1745ms   1885ms     1.023    1.106
+richards           768ms    754ms    746ms     0.982    0.971
+spectral_norm      785ms    848ms    826ms     1.080    1.052
+wordfreq          1126ms   1162ms   1133ms     1.032    1.006
+geomean p2/base: 1.004 (best of the per-round medians)
+geomean p1/base: 1.075 (best of the per-round medians)
+noise: largest base-vs-base spread for one program across rounds: 1.230
