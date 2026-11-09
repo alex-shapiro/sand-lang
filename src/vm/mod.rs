@@ -298,9 +298,9 @@ pub struct Fiber {
     pub wait_gen: u64,
     /// Absolute stack slot receiving the result of a blocking call.
     pub result_slot: usize,
-    /// Tasks to cancel when a `race` completes.
+    /// Tasks to cancel when a `race` finishes.
     pub race: Vec<Value>,
-    /// How many entries of the fiber's `race` can still finish it.
+    /// Number of tasks in `race` that can still finish the race.
     pub race_contenders: u32,
     /// Fibers waiting for this one: (fiber, generation).
     pub waiters: Vec<(u32, u64)>,
