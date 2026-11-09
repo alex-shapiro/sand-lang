@@ -22,21 +22,22 @@ fn config() -> Config {
 
 async fn e17() {
     let mut s = Session::new(config());
-    s.eval("var taps = 0\nfn on_tap() { task.sleep(1ms)\n taps += 1 }\nfn on_layout(w: int) -> int { w / 2 }").await.unwrap();
-    // The host sends an event: it can only evaluate code that spawns the handler.
-    s.eval("spawn on_tap()").await.unwrap();
+    s.eval("var started = 0\nvar taps = 0\nvar plain = 0\nfn on_tap() { started += 1\n task.sleep(1ms)\n taps += 1 }\nfn on_plain() { plain += 1 }\nfn on_layout(w: int) -> int { w / 2 }").await.unwrap();
+    // The host sends events: it can only evaluate code that spawns the handlers.
+    s.eval("spawn on_tap()\nspawn on_plain()").await.unwrap();
     std::thread::sleep(Duration::from_millis(5));
-    let a = s.eval("taps").await;
-    let b = s.eval("taps").await;
-    println!("E17a after the event, two later evals (5 ms apart from the spawn): taps = {a:?}, {b:?}");
+    let a = s.eval("\"started \\(started), taps \\(taps), plain \\(plain)\"").await;
+    std::thread::sleep(Duration::from_millis(5));
+    let b = s.eval("\"started \\(started), taps \\(taps), plain \\(plain)\"").await;
+    println!("E17a after the events, two later evals: {a:?}; {b:?}");
     s.run_tasks_until(tokio::time::sleep(Duration::from_millis(20)), |e| println!("task error: {e}")).await;
-    println!("E17b after the host drives run_tasks_until for 20 ms: taps = {:?}", s.eval("taps").await);
-    // Interleave: the task starts and sleeps; the host stops driving it to run a sync entry; then resumes.
+    println!("E17b after the host drives run_tasks_until for 20 ms: {:?}", s.eval("\"started \\(started), taps \\(taps)\"").await);
+    // A sync entry while a handler is queued: does the sync entry run part of the handler?
     s.eval("spawn on_tap()").await.unwrap();
-    s.run_tasks_until(tokio::time::sleep(Duration::from_micros(300)), |e| println!("task error: {e}")).await;
-    let sync = poll_once(s.eval("on_layout(640)"));
+    let sync = poll_once(s.eval("\"layout \\(on_layout(640)), started \\(started), taps \\(taps)\""));
+    println!("E17c sync entry right after a host event: {sync:?}");
     s.run_tasks_until(tokio::time::sleep(Duration::from_millis(20)), |e| println!("task error: {e}")).await;
-    println!("E17c sync entry between two run_tasks_until calls: {sync:?}; taps afterwards = {:?}", s.eval("taps").await);
+    println!("E17d after run_tasks_until: {:?}", s.eval("\"started \\(started), taps \\(taps)\"").await);
 }
 
 /// A minimal run loop: a thread-parking waker and no tokio runtime.

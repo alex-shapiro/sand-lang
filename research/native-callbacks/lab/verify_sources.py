@@ -96,6 +96,7 @@ LOCAL = [('W-S2', 'crates:wasmtime-50.0.1/src/runtime/store.rs', 'cannot do bloc
     ('S-S2', 'repo:docs/SPEC.md', 'the engine re-runs a `vm_function` from the start'),
     ('S-S3', 'repo:src/stdlib/prelude.sand', 'self.sort_by_keys(self.map(key))'),
     ('S-S5', 'repo:src/vm/sched.rs', 'const YIELD_EVERY: Duration = Duration::from_millis(2);'),
+    ('S-S6', 'repo:src/platform.rs', 'Waits for `d` (with JavaScript timers, which wait at most 2^31 - 1 ms).'),
     ('S-S4', 'repo:src/lib.rs', '#![forbid(unsafe_code)]')]
 
 def read(loc):

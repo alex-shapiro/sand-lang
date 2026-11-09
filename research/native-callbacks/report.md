@@ -2,9 +2,18 @@
 
 ## 1. Summary
 
-Sand can let native functions call Sand functions safely. The callback can
-suspend on I/O, the engine limits still apply, and Sand stays in 100% safe
-Rust. The best mechanism is a **stackless continuation**:
+Most callbacks in SwiftUI and Jetpack Compose go from the host into Sand:
+the UI framework calls a script function at a time that it chooses, and
+sometimes it needs the answer at once. Sand needs three things for that:
+
+- handles to Sand functions that a host can keep, safe across garbage
+  collection;
+- an async entry and a sync entry from the host into Sand;
+- a timer and I/O reactor on the host's UI thread.
+
+None of these needs a native function to call back into the VM. For the
+narrower case where a native does call back (Sand → native → Sand), the
+best mechanism is a **stackless continuation**:
 
 1. The native does not call the Sand function itself. It returns a request
    to the VM.
@@ -45,8 +54,8 @@ captures.
 
 The cost of P2 is ergonomic. Code that calls back many times must be a
 state machine. Our merge sort with a Sand comparator needs 58 lines in P2
-and 24 lines in P1. A Rust `async` adapter could remove most of this cost;
-we did not build one.
+and 24 lines in P1. We expect that a Rust `async` adapter can reduce this
+cost, but we did not build or test one.
 
 Callbacks across the native boundary are slower than Sand calls. In each
 binary, a native merge sort with a Sand comparator took about 1.6 times as
@@ -59,18 +68,21 @@ script code from the UI thread at times that they choose. Some of those
 calls must return a value at once. P2 cannot serve them, because no Sand
 task is waiting. Two host-side tests set the order of the work:
 
-- Sand's timers need a tokio runtime. A session on a plain run loop, as on
-  a UI thread, failed as soon as a script slept. With a tokio runtime on a
-  background thread, the same loop worked.
-- An event that the host starts with `spawn` runs only while the host
-  drives `Session::run_tasks_until`. A sync entry can run between two such
-  calls, and the task survives.
+- Sand's native build uses tokio for timers. A session on a plain run loop,
+  as on a UI thread, failed as soon as a script slept. With a tokio runtime
+  on a background thread, the same loop worked. Sand's web build uses
+  JavaScript timers instead, so a host-supplied timer is also possible.
+- An event that the host starts with `spawn` runs during the host's next
+  `eval` until it suspends. It resumes only while the host drives
+  `Session::run_tasks_until`. So a sync entry can see a handler that has
+  run only partway.
 
 Our recommendations, in order:
 
 0. **[necessary]** Build a spike that runs a session on a real UI run loop
    (CFRunLoop or Android's Looper), with a timer, an async entry, and a
-   sync entry. The two tests above ran on Linux only.
+   sync entry. The two tests above ran on Linux only. The spike must also
+   choose how the host supplies the timer and reactor (F-S7).
 
 1. **[necessary]** Add GC-rooted handles that a host can keep. Today, the
    VM resets the session if a host uses a handle after a garbage
@@ -81,7 +93,8 @@ Our recommendations, in order:
      that fails if the handler suspends.
 
    React Native, Flutter, and Valdi have the same two entry points. Our
-   spike of a sync entry took 41 µs per call. The spike also showed two
+   spike of a sync entry took 41 µs per call, including the compilation
+   of the call expression. The spike also showed two
    problems that a real sync entry must solve: it failed a handler that
    only computed for more than 2 ms, and a failed handler left its partial
    changes.
@@ -143,7 +156,7 @@ Each fact gives a source ID and a test.
     and comment prefixes. **[necessary]**
   - The script also checks that every quoted string of 25 or more
     characters in this report is a checked quote or a test output.
-  - Result: 70 of 70 quotes found, 0 report quotes without a check, and
+  - Result: 71 of 71 quotes found, 0 report quotes without a check, and
     0 cited paths that git does not track
     (`lab/results/sources.txt`).
 - **Tests** have IDs such as `E2`. Each runtime has one program for its
@@ -194,19 +207,30 @@ Section 10 gives the runtime versions.
   **[necessary]** to keep. This test covers a native that schedules a
   callback. It does not cover an event from the host, which has no `Vm`
   outside a native call (F-S6).
-- **F-S6. An event from the host runs only while the host drives the
-  session's tasks.** The host started a handler with `spawn`. The handler
-  did not run during two later `eval` calls (`taps` stayed `0`). It ran
-  when the host called `Session::run_tasks_until`. A sync entry between two
-  `run_tasks_until` calls worked, and the second task finished
-  (`taps = 2`). Test: `sand_host` E17. **[necessary]**: a UI host must own
-  one loop that both drives tasks and makes sync calls.
-- **F-S7. Sand's timers need a tokio runtime.** On a plain run loop without
-  a tokio runtime, an `eval` that computed worked, but an `eval` that slept
-  failed with "there is no reactor running", and the VM reset the session.
-  With a tokio runtime entered, its timer driven by another thread, the
-  same loop returned `5`. Test: `sand_host` E18. **[necessary]**: a UI host
-  must enter a tokio runtime on its UI thread.
+- **F-S6. An event from the host runs partly during the next `eval`, and
+  finishes only while the host drives the session's tasks.** The host
+  started two handlers with `spawn`. In the next `eval`, the handler
+  without a suspension finished (`plain 1`). The other handler started
+  and stopped at its sleep (`started 1, taps 0`). It finished only when
+  the host called `Session::run_tasks_until` (`taps 1`). A sync entry
+  right after a new event ran that handler up to its sleep (`started 2,
+  taps 1`). Test: `sand_host` E17. **[necessary] [hazard]**: a UI host
+  must own one loop that both drives tasks and makes sync calls, and a
+  sync entry can see a handler that has run only partway.
+- **F-S7. Sand's native build needs a tokio runtime for its timers.** On a
+  plain run loop without a tokio runtime, an `eval` that computed worked,
+  but an `eval` that slept failed with "there is no reactor running", and
+  the VM reset the session. With a tokio runtime entered, its timer driven
+  by another thread, the same loop returned `5`. Test: `sand_host` E18.
+  The web build uses JavaScript timers instead (S-S6). E18 tested timers
+  only, not network I/O, which also uses tokio. **[necessary]**: a UI host
+  must supply a timer and an I/O reactor. Two options:
+  - enter a tokio runtime on the UI thread, as E18c does, at the cost of
+    an extra thread and the tokio dependency in each app;
+  - let the host plug in its own timer and reactor, as the web build
+    does, at the cost of a new embedding API.
+
+  Choosing between them is a **product tradeoff**.
 - **F-S4. A host cannot keep a handle.** The `Val` documentation says that
   "a `Val` is valid only for the duration of the synchronous native call"
   (S-S1). Our host kept a handle and then caused a garbage collection.
@@ -322,6 +346,7 @@ wasmi, and Sand P1 use this design.
 | Runtime                    | Loop, no call | Script → script | Native → script |
 | -------------------------- | ------------: | --------------: | --------------: |
 | Lua 5.4.8 (C API)          |           5.0 |            19.5 |            14.5 |
+| piccolo 0.3.3 (stackless)  |          30.5 |            97.9 |            74.7 |
 | Lua 5.5.0 (C API)          |           4.6 |            18.3 |            12.6 |
 | Lua 5.4 through mlua       |           4.6 |            17.8 |            50.7 |
 | CPython 3.13.18            |          59.0 |            84.6 |            42.3 |
@@ -331,11 +356,13 @@ wasmi, and Sand P1 use this design.
 | starlark-rust 0.14.2       |          64.8 |            78.9 |            32.9 |
 | Rune 0.14.2                |          69.8 |            86.3 |           134.6 |
 | Rhai 1.27.0                |         172.2 |           440.4 |           323.9 |
+| Sand (unpatched)           |          13.0 |            30.2 |               – |
 | Sand P1 (nested)           |             – |            31.0 |           101.3 |
 | Sand P2 (stackless)        |             – |            27.1 |            69.9 |
 | wasmtime 50 (JIT, ref.)    |             – |             1.8 |            12.5 |
 
-The Sand "script → script" column calls through a function value. A
+Sources: `results/<runtime>.txt` for each row. The Sand "script →
+script" column calls through a function value. A
 direct call to a small function costs about the same as the loop alone
 (12.4 ns vs 13.0 ns, `sand_current` E1).
 
@@ -604,7 +631,9 @@ ratios within each runtime, not the times across runtimes.
   sort took about 1.6 times as long as the Sand version (P2: 329 ms vs
   205 ms; P1: 359 ms vs 218 ms). A P2 callback costs 70 ns, and a Sand call
   through a function value costs 27 ns (`sand_p2` E1). **[necessary]**: keep
-  higher-order library code in Sand. Use callbacks for host APIs.
+  higher-order library code in Sand, and use callbacks for host APIs. An
+  optimized P2 could narrow the gap (section 9), so measure again after
+  the optimization.
 - **F-X2. A comparator callback per comparison is always the slow path.**
   The comparator sort took about 2.2 to 2.7 times as long as the plain
   sort in Lua, and 5.3 to 6.5 times in CPython. In Sand, P2's comparator
@@ -737,9 +766,10 @@ interleaved rounds of 5 runs each (`lab/overhead.sh`). For each binary
 and program, we used the best of the per-round medians.
 
 - **F-O1. P2 has no consistent cost.** The geomean P2/base ratio was
-  1.004, and no program was slower in all 3 rounds. Two programs were 10%
-  to 17% slower in 2 of the 3 rounds: `dijkstra` (0.96, 1.17, 1.15) and
-  `fannkuch` (1.10, 1.17, 0.96). A small cost on those two is possible;
+  1.004, and no program was slower in all 3 rounds. Three programs were
+  10% to 17% slower in 2 of the 3 rounds: `dijkstra` (0.96, 1.17, 1.15),
+  `fannkuch` (1.10, 1.17, 0.96), and `ray` (1.13, 1.15, 0.93). A small
+  cost on those three is possible;
   more rounds would settle it. **[necessary]**
 - **F-O2. P1's parking costs about 7.5% overall, and up to 87% on one
   program.** The geomean P1/base ratio was 1.075. In every round,
@@ -817,10 +847,13 @@ A UI binding needs two kinds of call into Sand.
      `eval` a `spawn`, and the task runs only while the host drives
      `run_tasks_until` (F-S6). Use the async entry for events.
    - **One owner.** The host needs one loop that both drives tasks and
-     makes sync calls (F-S6), on a thread with a tokio runtime (F-S7). This
-     is a **product tradeoff**: Sand can ship that loop as a host-side
-     driver, which costs the host a more complex integration, or the sync
-     entry can also advance ready tasks, which adds latency to sync calls.
+     makes sync calls (F-S6), with a timer and reactor (F-S7). Sand can
+     ship that loop as a host-side driver.
+   - **Queued handlers.** Today a sync entry runs queued handlers until
+     they suspend (F-S6), so it can see a handler that has run only
+     partway. This is a **product tradeoff**: run queued handlers to
+     completion before the sync call, which adds latency, or isolate the
+     sync call from them, which needs new scheduler support.
    - **Sync entry:** run the handler to completion and return its value.
      If the handler suspends, fail with a clear error (E16). The host API
      demands an immediate answer, so Sand cannot avoid this failure. The
