@@ -132,6 +132,12 @@ The host cannot rely on engine limits, stability, or control.
       `Limits::max_lint_fuel` or derive the lint budget from
       `Limits::max_compile_fuel`.
 
+- [ ] ❓ _Embedding._ Make the wait for output sinks awaitable. `Vm::wait_backlog`
+      blocks the thread in a loop, while every other wait in `drive` yields to
+      the executor. A stalled sink stops the other engines on the thread and the
+      `until` future of `Session::run_tasks_until`. Only an interrupt from
+      another thread or a meter limit ends the wait.
+
 ## Tier 3: ordinary scripts
 
 Common scripts fail, require workarounds, or produce misleading diagnostics.

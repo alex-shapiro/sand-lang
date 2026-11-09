@@ -923,6 +923,19 @@ fn interrupt_while_showing_a_result_is_an_interrupt() {
     }
 }
 
+/// A result that exceeds a limit while the session shows it is a failed input, so it cancels the
+/// session's tasks.
+#[test]
+fn a_failure_while_showing_a_result_cancels_tasks() {
+    let limits = Limits { max_instructions: Some(150_000), ..Limits::default() };
+    let mut r = Repl::with(Config::new().limits(limits));
+    r.ok("let c: Channel<int> = Channel()\nlet t = spawn { c.recv() };");
+    r.ok("struct Tree { l: Option<Tree>, r: Option<Tree> }\nvar t = Tree(l: None, r: None)\nfor _ in 0..24 { t = Tree(l: Some(t), r: Some(t)) }");
+    let shown = r.eval("t");
+    assert!(matches!(shown, Err(Error::Limit(LimitKind::Instructions))), "{shown:?}");
+    assert_eq!(r.session.cancel_tasks(), 0);
+}
+
 #[test]
 fn interrupt_cancels_waiting_tasks_between_inputs() {
     let handle = InterruptHandle::new();
