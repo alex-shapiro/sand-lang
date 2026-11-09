@@ -423,8 +423,15 @@ impl Vm {
                 // Pending I/O checks its buffers against the heap's size.
                 self.heap.io_memory.publish_heap(self.heap.used());
                 self.current = u32::MAX;
+                let stop = match r {
+                    Ok(stop) => stop,
+                    Err(ending) => {
+                        self.fibers[fid as usize] = Some(f);
+                        return Err(ending);
+                    }
+                };
                 let retried_at = gc_retried.take();
-                match r? {
+                match stop {
                     FiberStop::CollectAndRetry(frame) => {
                         // Memory checks count garbage that has not been
                         // collected yet, so collect and run the failed
@@ -435,6 +442,7 @@ impl Vm {
                         let at = (fid, f.frames.len(), frame.ip);
                         let op = self.prog.protos[frame.proto as usize].code[frame.ip as usize];
                         if retried_at == Some(at) && slice - fuel <= super::interp::call_tick(op) {
+                            self.fibers[fid as usize] = Some(f);
                             return Err(Trap::Limit(LimitKind::Memory).into());
                         }
                         gc_retried = Some(at);
