@@ -76,7 +76,7 @@ When the entry module finishes top-level execution, Sand cancels any remaining t
 The prelude `task` module provides combinators for waiting on multiple tasks:
 
 - `task.all(tasks)` waits for every task in `tasks` and returns their results in order.
-- `task.race(tasks)` returns the result of the first task to complete and cancels the remaining tasks.
+- `task.race(tasks)` returns the result of the first task to complete and cancels the remaining tasks. A cancelled task cannot win, and the race continues while another task can finish.
 - `task.timeout(d, f)` runs `f()` in a task and returns `Some(result)` if it completes within duration `d`, or cancels the task and returns `None`. If the caller is cancelled, the task is also cancelled.
 - `task.sleep(d)` suspends the calling task for duration `d`.
 
