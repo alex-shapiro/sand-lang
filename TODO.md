@@ -143,16 +143,16 @@ The host cannot rely on engine limits, stability, or control.
 
 Common scripts fail, require workarounds, or produce misleading diagnostics.
 
-- [ ] ❓ _Tasks._ Run cleanup if a task is cancelled while preempted at the
-      first script call of its deferred code. `tick_call!` rewinds the frame to
-      that call. That instruction lies outside the cleanup range, so `defer`
-      blocks and `use` bindings with a script `close` method are skipped
-      silently. In a tight loop with a `defer` in each iteration, 99 of 300 runs
-      lost a cleanup. Avoid preemption at that call. Add a scheduling stress
+- [ ] ❓ _Tasks._ Run cleanup if a task is preempted at the first script call
+      of its deferred code and then cancelled. `tick_call!` rewinds the frame to
+      that call. That instruction is outside the cleanup range. As a result, the
+      engine skips `defer` blocks and `use` bindings with a script `close`
+      method. In a tight loop with a `defer` in each iteration, 99 of 300 runs
+      skipped cleanup. Avoid preemption at that call. Add a scheduling stress
       mode that suspends and cancels tasks at each safe point.
 - [ ] ❓ _Tasks._ Decide whether cancelling a task in `task.race` cancels the
       other raced tasks. Today the other tasks continue running. A cancelled
-      `task.timeout` caller can therefore leave its work running silently. If
+      `task.timeout` caller can therefore leave its spawned task running. If
       cancelling a race cancels all of its tasks, a task can be cancelled
       through a race that another task started.
 - [ ] ❓ _Tasks._ Decide how `task.race` handles a task that is cancelled during
@@ -171,7 +171,7 @@ Common scripts fail, require workarounds, or produce misleading diagnostics.
       debug builds.
 - [ ] ❓ _Tasks._ Run all deferred code at the end of a run. `Vm::end_tasks`
       returns early if deferred code requests a permission prompt. The
-      remaining tasks then skip their deferred code silently.
+      remaining tasks then skip their deferred code.
 - [ ] ❓ _Testing._ Decide whether `exit(0)` should pass a test. `exit(0)`
       currently stops a test early and passes it. A test that calls `exit(0)`
       before a failing `assert` therefore passes. If `exit` always fails a test,

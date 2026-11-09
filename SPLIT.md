@@ -194,10 +194,12 @@ Replace control-flow flags on `Vm` with explicit return values and parameters.
 
 This changeset also fixes four task defects:
 
-- A cancelled `task.race` leaves its tasks running.
-- A race fails immediately if all of its tasks are cancelled or only the caller
+- Cancelling a task in `task.race` clears its race list so a later wake-up in
+  `defer` does not cancel the raced tasks.
+- `task.race` fails immediately if every task is cancelled or only the caller
   remains.
-- A task whose failure ends a REPL input is cancelled.
+- The scheduler keeps a failing fiber in the fiber table so session cleanup
+  cancels its task.
 - A cancelled task runs its deferred code once if it stopped in or just after a
   native call.
 
