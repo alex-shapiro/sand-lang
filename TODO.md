@@ -158,7 +158,6 @@ Common scripts fail, require workarounds, or produce misleading diagnostics.
       §17.4 states that `sand test` captures output. However,
       `Engine::run_tests` sends output to `NullSink`, and `TestResult` does not
       store output.
-
 - [ ] 🔴 [058](triage/058-enum-variant-inference/summary.md) _Language._ Infer the enum type of a variant expression from the expected type, as
       pattern matching does.
 - [ ] 🔴 [064](triage/064-default-params-fn-values/summary.md) _Language._ Preserve default parameter values in function types so that calls through
