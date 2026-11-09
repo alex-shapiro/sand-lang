@@ -1724,7 +1724,7 @@ impl Vm {
             }
             CtlKind::Blocked { wait_gen } => {
                 fiber.result_slot = slot;
-                fiber.wgen = *wait_gen;
+                fiber.wait_gen = *wait_gen;
                 self.recycle(r);
                 return Ok(Some(FiberStop::Blocked));
             }
@@ -1742,7 +1742,7 @@ impl Vm {
             }
             CtlKind::Racing { wait_gen, tasks } => {
                 fiber.result_slot = slot;
-                fiber.wgen = wait_gen;
+                fiber.wait_gen = wait_gen;
                 fiber.race = tasks;
                 Ok(Some(FiberStop::Blocked))
             }
@@ -1949,10 +1949,10 @@ impl Vm {
                 // One waiter per task, and the list of tasks to cancel.
                 self.meter.charge(tasks.len() as u64)?;
                 self.heap.check_memory(tasks.len() * (std::mem::size_of::<Value>() + std::mem::size_of::<(u32, u64)>()))?;
+                let (mut any_cancelled, mut can_finish) = (false, false);
                 for &t in &tasks {
-                    if let Obj::Task(to) = self.heap.get(t)
-                        && to.state == TaskState::Done
-                    {
+                    let Obj::Task(to) = self.heap.get(t) else { continue };
+                    if to.state == TaskState::Done {
                         let r = to.result;
                         let mut cancelled = Ok(());
                         for &o in &tasks {
@@ -1963,13 +1963,8 @@ impl Vm {
                         cancelled?;
                         return Ok(r);
                     }
-                }
-                let (mut any_cancelled, mut can_finish) = (false, false);
-                for &t in &tasks {
-                    if let Obj::Task(to) = self.heap.get(t) {
-                        any_cancelled |= to.state == TaskState::Cancelled;
-                        can_finish |= to.state == TaskState::Running && to.fiber != me;
-                    }
+                    any_cancelled |= to.state == TaskState::Cancelled;
+                    can_finish |= to.state == TaskState::Running && to.fiber != me;
                 }
                 if !can_finish {
                     return Err(if any_cancelled {

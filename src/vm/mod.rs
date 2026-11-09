@@ -277,8 +277,8 @@ const MAX_SPARE_FRAMES: usize = 64;
 pub(crate) const MIN_PRUNE: usize = 16;
 
 /// Whether the wait `(fiber, generation)` is still current.
-pub(crate) fn wait_is_live(fibers: &[Option<Box<Fiber>>], (fid, wgen): (u32, u64)) -> bool {
-    matches!(fibers.get(fid as usize), Some(Some(f)) if f.state == FiberState::Waiting && f.wgen == wgen)
+pub(crate) fn wait_is_live(fibers: &[Option<Box<Fiber>>], (fid, wait_gen): (u32, u64)) -> bool {
+    matches!(fibers.get(fid as usize), Some(Some(f)) if f.state == FiberState::Waiting && f.wait_gen == wait_gen)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -294,7 +294,7 @@ pub struct Fiber {
     pub task: Value,
     pub state: FiberState,
     /// Wait generation; waiters record it to detect stale wake-ups.
-    pub wgen: u64,
+    pub wait_gen: u64,
     /// Absolute stack slot receiving the result of a blocking call.
     pub result_slot: usize,
     /// Tasks to cancel when a `race` completes.
@@ -1296,7 +1296,7 @@ impl Vm {
                     frames,
                     task,
                     state: FiberState::Ready,
-                    wgen: 0,
+                    wait_gen: 0,
                     result_slot: 0,
                     race: vec![],
                     waiters: vec![],
@@ -1344,7 +1344,7 @@ impl Vm {
         f.frames.clear();
         f.task = Value::Unit;
         f.state = FiberState::Ready;
-        f.wgen = 0;
+        f.wait_gen = 0;
         f.result_slot = 0;
         f.waiters.clear();
         f.waiters_prune_at = MIN_PRUNE;
@@ -1379,9 +1379,9 @@ impl Vm {
     }
 
     /// Delivers a value to a waiting fiber (if the wait is still current).
-    pub fn deliver(&mut self, fid: u32, wgen: u64, v: Value) -> bool {
+    pub fn deliver(&mut self, fid: u32, wait_gen: u64, v: Value) -> bool {
         let Some(Some(f)) = self.fibers.get_mut(fid as usize) else { return false };
-        if f.state != FiberState::Waiting || f.wgen != wgen {
+        if f.state != FiberState::Waiting || f.wait_gen != wait_gen {
             return false;
         }
         let slot = f.result_slot;
@@ -1399,10 +1399,10 @@ impl Vm {
     }
 
     /// Wakes a waiting fiber with an error, `kind: message`.
-    pub fn deliver_error(&mut self, fid: u32, wgen: u64, msg: &str) {
+    pub fn deliver_error(&mut self, fid: u32, wait_gen: u64, msg: &str) {
         if let Some(Some(f)) = self.fibers.get_mut(fid as usize)
             && f.state == FiberState::Waiting
-            && f.wgen == wgen
+            && f.wait_gen == wait_gen
         {
             f.pending_error = Some(msg.to_string());
             f.state = FiberState::Ready;

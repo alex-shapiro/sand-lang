@@ -143,6 +143,15 @@ The host cannot rely on engine limits, stability, or control.
 
 Common scripts fail, require workarounds, or produce misleading diagnostics.
 
+- [ ] ❓ _Tasks._ Free the fiber of the module initializer before each test.
+      `sand test` allows one task fewer than `sand run`, because
+      `Engine::run_tests` calls `run_main` twice and the first fiber stays live.
+- [ ] ❓ _Tasks._ Decide what module-level tasks do during tests. `run_tests`
+      clears the ready queue after the module runs, so a `Ready` task is never
+      queued again. A test that waits for that task fails with a deadlock error.
+- [ ] ❓ _Tasks._ Test the fiber lifecycle as a matrix of each stop kind and
+      each event (cancel, wake, finish, end of run), with a debug check of the
+      scheduler invariants after each slice.
 - [ ] ❓ _Tasks._ Run all deferred code at the end of a run. If deferred code
       needs a permission prompt at the end of a run, `Vm::end_tasks` stops, and
       the deferred code of the other tasks does not run. The run reports no

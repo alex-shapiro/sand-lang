@@ -51,10 +51,10 @@ impl Wake for SlotWaker {
 }
 
 /// A pending I/O operation: the future of a native call of task `fid`,
-/// which waits for it as wait generation `wgen`.
+/// which waits for it as wait generation `wait_gen`.
 struct IoOp {
     fid: u32,
-    wgen: u64,
+    wait_gen: u64,
     suspension: Suspension,
 }
 
@@ -77,7 +77,7 @@ impl IoTable {
     /// Polls the future of `suspension` once and registers it for task `fid`
     /// if still pending. Returns the slot ID, or the finisher if ready
     /// immediately.
-    pub fn add(&mut self, fid: u32, wgen: u64, mut suspension: Suspension) -> Result<u64, Finisher> {
+    pub fn add(&mut self, fid: u32, wait_gen: u64, mut suspension: Suspension) -> Result<u64, Finisher> {
         let slot = match self.free.pop() {
             Some(s) => s,
             None => {
@@ -91,7 +91,7 @@ impl IoTable {
             self.free.push(slot);
             return Err(fin);
         }
-        self.ops[slot as usize] = Some(IoOp { fid, wgen, suspension });
+        self.ops[slot as usize] = Some(IoOp { fid, wait_gen, suspension });
         self.pending += 1;
         Ok(u64::from(slot))
     }
@@ -131,10 +131,10 @@ impl IoTable {
         for slot in slots {
             let Some(Some(op)) = self.ops.get_mut(slot as usize) else { continue };
             if let Poll::Ready(fin) = op.suspension.future.as_mut().poll(&mut Context::from_waker(&self.wakers[slot as usize])) {
-                let IoOp { fid, wgen, .. } = self.ops[slot as usize].take().expect("polled");
+                let IoOp { fid, wait_gen, .. } = self.ops[slot as usize].take().expect("polled");
                 self.free.push(slot);
                 self.pending -= 1;
-                done.push((fid, wgen, fin));
+                done.push((fid, wait_gen, fin));
             }
         }
         done
@@ -338,8 +338,8 @@ impl Vm {
             return Ok(());
         }
         self.meter.start_slice(timer.cpu_deadline(self.host.limits.max_cpu_time), self.deadline);
-        for (fid, wgen, fin) in done {
-            if !wait_is_live(&self.fibers, (fid, wgen)) {
+        for (fid, wait_gen, fin) in done {
+            if !wait_is_live(&self.fibers, (fid, wait_gen)) {
                 continue;
             }
             // A Rust panic in the finisher (a bug) becomes an internal error.
@@ -352,7 +352,7 @@ impl Vm {
             };
             match r {
                 Ok(v) => {
-                    self.deliver(fid, wgen, v);
+                    self.deliver(fid, wait_gen, v);
                     self.enforce_limit(None).map_err(Trap::Limit)?;
                 }
                 Err(ctl) => {
@@ -470,7 +470,7 @@ impl Vm {
                     }
                     FiberStop::Async(suspension) => {
                         let g = self.next_gen();
-                        f.wgen = g;
+                        f.wait_gen = g;
                         f.state = FiberState::Waiting;
                         let added = self.io.add(fid, g, suspension);
                         f.io = added.as_ref().ok().copied();
