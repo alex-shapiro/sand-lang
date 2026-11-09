@@ -11,7 +11,7 @@ When should a Sand task stop running? We started from the assumption that a task
 
 ## Conclusions
 
-Ownership, not waiting, decides whether a task stops. In every system that allows a task without a waiter or handle, that task runs to completion.
+Ownership, not waiting, decides whether a task stops. In every tested system that allows a task without a waiter or handle, that task ran to completion.
 
 Sand made two changes:
 
@@ -78,7 +78,7 @@ All five tested systems cancelled the timed work. Before this change, Sand was t
 
 ### A task in a race is cancelled during the race
 
-- **Another task wins**: Trio, Java, and Node `Promise.any`.
+- **Another task wins**: Trio, Java (the task failed instead of being cancelled), and Node `Promise.any`.
 - **The race returns a catchable error**: Tokio, Kotlin, and Node `Promise.race`.
 - **The race returns the cancelled task**: asyncio `wait`.
 - **The program aborts**: Sand before this change.
@@ -87,7 +87,7 @@ All five tested systems cancelled the timed work. Before this change, Sand was t
 
 ### How scripts use tasks
 
-In 50 Sand scripts that spawn tasks, 34 scripts had at least one task that ran without a waiter. Across the specs, examples, and guide, these scripts started 1,068 tasks; one test started 1,000 of those tasks. This count includes tasks whose results a script read after they finished. Because the specs emphasize cancellation, these numbers are only a rough guide.
+In 50 Sand scripts that spawn tasks, 34 scripts had at least one task that ran without a waiter. Across the specs, examples, and guide, the 50 scripts started 1,068 tasks; one test started 1,000 of those tasks. This count includes tasks whose results a script read after they finished. Because the specs emphasize cancellation, these numbers are only a rough guide.
 
 `examples/chat_server.sand` starts a task for each client and never waits for it. Requiring a waiter would stop these client tasks.
 
