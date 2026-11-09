@@ -22,6 +22,7 @@ run e15 ./e15/run.sh
 run unsafe_count ./unsafe_count.sh
 S=../sandlab/bin
 run sand_current $S/sand_current
+run sand_host env RUST_BACKTRACE=0 $S/sand_host
 run sand_p2 $S/sand_stackless
 run sand_p1 $S/sand_nested
 run sand_p1_noparking $S/sand_nested_noparking gc

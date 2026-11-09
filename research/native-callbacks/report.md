@@ -23,15 +23,17 @@ We built two prototypes in the Sand VM and tested them against each other:
   `Err(Ctl::call(f, args, state, then))`. The VM runs `f`, then calls
   `then` with the result.
 
-P2 kept every Sand product priority that we tested. P1 failed two of them:
+P2 kept every Sand product priority that we tested. P1 failed one, and
+needs a rule change for another:
 
 - A P1 callback cannot suspend, so any callback that does I/O fails. Sand
   does async I/O by default.
-- A P1 native that calls back cannot follow SPEC §16.3. The rule says that
-  a native must check its limits before any side effect, because the engine
-  can retry the native from the start. In P1, the callback is a side effect
-  that happens before the native's later checks, so a retry runs the
-  callback again.
+- Under today's retry rule, a P1 native that calls back cannot follow SPEC
+  §16.3. The rule says that a native must check its limits before any side
+  effect, because the engine can retry the native from the start. In P1,
+  the callback is a side effect before the native's later checks, so a
+  retry runs the callback again. P1 would need a different rule: collect
+  garbage in place, without a restart.
 
 Both prototypes need a rooting rule for heap handles that native Rust code
 holds. In P1, every handle in a Rust variable is at risk during each
@@ -55,7 +57,20 @@ must call script code, such as UI frameworks.
 Most UI callbacks go the other way: SwiftUI and Jetpack Compose call
 script code from the UI thread at times that they choose. Some of those
 calls must return a value at once. P2 cannot serve them, because no Sand
-task is waiting. Our recommendations, in order:
+task is waiting. Two host-side tests set the order of the work:
+
+- Sand's timers need a tokio runtime. A session on a plain run loop, as on
+  a UI thread, failed as soon as a script slept. With a tokio runtime on a
+  background thread, the same loop worked.
+- An event that the host starts with `spawn` runs only while the host
+  drives `Session::run_tasks_until`. A sync entry can run between two such
+  calls, and the task survives.
+
+Our recommendations, in order:
+
+0. **[necessary]** Build a spike that runs a session on a real UI run loop
+   (CFRunLoop or Android's Looper), with a timer, an async entry, and a
+   sync entry. The two tests above ran on Linux only.
 
 1. **[necessary]** Add GC-rooted handles that a host can keep. Today, the
    VM resets the session if a host uses a handle after a garbage
@@ -128,7 +143,8 @@ Each fact gives a source ID and a test.
     and comment prefixes. **[necessary]**
   - The script also checks that every quoted string of 25 or more
     characters in this report is a checked quote or a test output.
-  - Result: 73 of 73 quotes found, and 0 report quotes without a check
+  - Result: 70 of 70 quotes found, 0 report quotes without a check, and
+    0 cited paths that git does not track
     (`lab/results/sources.txt`).
 - **Tests** have IDs such as `E2`. Each runtime has one program for its
   tests, and its output is in `lab/results/<runtime>.txt`. Section 10 lists
@@ -138,9 +154,10 @@ The tests follow these rules for fairness. **[necessary]**
 
 - **Same workload.** Every runtime runs the same workload with the same
   callback body, `x => x + 1`. All sort tests sort the same 200,000 ints.
-- **Same timing method.** Each time is the median of 5 runs. All timed
-  runs ran one after another on an otherwise idle machine
-  (`lab/run_all.sh`, then `lab/overhead.sh`). All times are wall-clock
+- **Same timing method.** Each time is the median of 5 runs. Each timed
+  run ran alone on an otherwise idle machine (`lab/run_all.sh`, then
+  `lab/overhead.sh`). We ran the Sand programs again after the second
+  review, also alone. All times are wall-clock
   times, except Lua's sort, which uses `os.clock` (CPU time).
 - **Same algorithm within Sand.** The three Sand merge sorts use one
   algorithm and one comparator call per comparison. Only the sort is
@@ -174,8 +191,22 @@ Section 10 gives the runtime versions.
   the `Task`. The script waits for the task, and the closure can suspend
   on I/O. Test: `sand_current` E-S1 returned `55` with 351 ns per
   round trip. E-S1b ran a closure that sleeps and returned `7`.
-  **[necessary]** to keep, as the async entry for events such as a button
-  action.
+  **[necessary]** to keep. This test covers a native that schedules a
+  callback. It does not cover an event from the host, which has no `Vm`
+  outside a native call (F-S6).
+- **F-S6. An event from the host runs only while the host drives the
+  session's tasks.** The host started a handler with `spawn`. The handler
+  did not run during two later `eval` calls (`taps` stayed `0`). It ran
+  when the host called `Session::run_tasks_until`. A sync entry between two
+  `run_tasks_until` calls worked, and the second task finished
+  (`taps = 2`). Test: `sand_host` E17. **[necessary]**: a UI host must own
+  one loop that both drives tasks and makes sync calls.
+- **F-S7. Sand's timers need a tokio runtime.** On a plain run loop without
+  a tokio runtime, an `eval` that computed worked, but an `eval` that slept
+  failed with "there is no reactor running", and the VM reset the session.
+  With a tokio runtime entered, its timer driven by another thread, the
+  same loop returned `5`. Test: `sand_host` E18. **[necessary]**: a UI host
+  must enter a tokio runtime on its UI thread.
 - **F-S4. A host cannot keep a handle.** The `Val` documentation says that
   "a `Val` is valid only for the duration of the synchronous native call"
   (S-S1). Our host kept a handle and then caused a garbage collection.
@@ -195,26 +226,27 @@ Section 10 gives the runtime versions.
 - **F-U1. SwiftUI calls synchronous closures on the main actor.** `View` is
   `@MainActor`, and `Layout` has a synchronous
   `sizeThatFits(proposal:subviews:cache:)` that returns a size. Source:
-  J-S10. **[necessary] [source-only]**: Sand must answer some host calls
+  J-S10, J-S10b. **[necessary] [source-only]**: Sand must answer some host calls
   at once, on the host's thread.
 - **F-U2. Jetpack Compose has the same split.**
   - `MeasureScope.measure` is a synchronous function that returns a value.
   - `LaunchedEffect` takes a `suspend` block for async work.
   - Composable functions run "as often as every frame of an animation".
 
-  Source: J-S11. **[necessary] [source-only]**
+  Source: J-S11, J-S11b, J-S11c. **[necessary] [source-only]**
 - **F-U3. React Native replaced its async-only bridge with synchronous
   calls.** Its team says that "some updates need to render synchronously in
   response to user input", and "Since the old architecture was only
   asynchronous, we needed to rewrite it". Also, before the change, "layout
-  could not be read synchronously". Source: J-S1.
+  could not be read synchronously". Source: J-S1, J-S1b, J-S1c.
   **[necessary] [source-only]**: async delivery alone, which is Sand's
   status quo (F-S3), is not enough for UI.
 - **F-U4. Production bridges have a sync entry and an async entry.**
   - React Native's `CallInvoker` has `invokeAsync` and `invokeSync` (J-S3).
   - Dart's `NativeCallable.isolateLocal` is synchronous: "It will abort
     the process if invoked on any other thread". `NativeCallable.listener`
-    is async, so "only functions returning void are supported" (J-S7).
+    is async, so "only functions returning void are supported" (J-S7,
+    J-S7b).
   - Valdi says that "calling a JS function will automatically
     asynchronously dispatch to the JS thread if needed" (J-S13). For a
     synchronous result, it says: "If your function need to return a value
@@ -261,12 +293,12 @@ async half.
 
 - **F-A1.** Wren's guide says not to call into the VM from a foreign
   method, because "The VM is not re-entrant". Its check is an assert,
-  "Cannot already be in foreign call." Source: R-S8.
+  "Cannot already be in foreign call." Source: R-S8, R-S8b.
   **[tangential] [source-only]**: a precedent, not a design to copy.
 - **F-A2.** Erlang asks a NIF to "return to its caller within 1
   millisecond". For long work, it prefers `enif_schedule_nif`, a tail
   continuation: "This approach is always preferred over the other
-  alternatives". Source: R-S7. **[nice to have] [source-only]**: a tail
+  alternatives". Source: R-S7, R-S7b. **[nice to have] [source-only]**: a tail
   continuation is a subset of P2.
 - **F-A3.** Flutter platform channels pass messages "asynchronously through
   channels to ensure the user interface remains responsive". Source: J-S6.
@@ -575,9 +607,10 @@ ratios within each runtime, not the times across runtimes.
   higher-order library code in Sand. Use callbacks for host APIs.
 - **F-X2. A comparator callback per comparison is always the slow path.**
   The comparator sort took about 2.2 to 2.7 times as long as the plain
-  sort in Lua, 5.3 to 6.5 times in CPython, and about 27 times with Sand
-  P2. **[nice to have]**: Sand's `sort_by(key)` already avoids the
-  comparator.
+  sort in Lua, and 5.3 to 6.5 times in CPython. In Sand, P2's comparator
+  sort took about 27 times as long as `sort()`, but those are different
+  algorithms; the like-for-like ratio is F-X1's 1.6. **[nice to have]**:
+  Sand's `sort_by(key)` already avoids the comparator.
 
 ## 7. Sand prototypes
 
@@ -652,10 +685,12 @@ Each item gives the test, then the P1 and P2 results.
 - **E13, a callback with a side effect, then a native step that checks
   memory before it allocates.** The size of the allocation depends on the
   callback's result, so the check must come after the callback. The test
-  forces the first memory check to fail. **[blocker]** for P1 under Sand's
-  retry rule.
+  forces the first memory check to fail. **[necessary] [hazard]** under
+  Sand's current retry rule.
   - P1: "callback ran 2 times". The engine retried the whole native, so
-    the native cannot follow SPEC §16.3.
+    the native cannot follow SPEC §16.3. P1 needs a different retry rule:
+    collect garbage in place, without a restart. That rule needs parking
+    and branded handles (section 7.4).
   - P2: "callback ran 1 times", and "the continuation ran 2 times". The
     engine retried only the step after the callback. SPEC §16.3 must
     change to say this.
@@ -701,15 +736,15 @@ binaries: unpatched, P2, and P2 with P1's parking. There were 3
 interleaved rounds of 5 runs each (`lab/overhead.sh`). For each binary
 and program, we used the best of the per-round medians.
 
-- **F-O1. P2 has no measurable cost overall.** The geomean P2/base ratio
-  was 1.004. One program, `fannkuch`, took 329 ms to 352 ms with P2 and
-  282 ms to 347 ms with the baseline. That gap is within the baseline's
-  noise, but a small cost there is possible. **[necessary]**
-- **F-O2. P1's parking costs about 7.5% overall, and up to 80% on one
+- **F-O1. P2 has no consistent cost.** The geomean P2/base ratio was
+  1.004, and no program was slower in all 3 rounds. Two programs were 10%
+  to 17% slower in 2 of the 3 rounds: `dijkstra` (0.96, 1.17, 1.15) and
+  `fannkuch` (1.10, 1.17, 0.96). A small cost on those two is possible;
+  more rounds would settle it. **[necessary]**
+- **F-O2. P1's parking costs about 7.5% overall, and up to 87% on one
   program.** The geomean P1/base ratio was 1.075. In every round,
-  `fannkuch` took 511 ms to 527 ms with P1 and 282 ms to 347 ms with the
-  baseline, and `dijkstra` was 20% to 35% slower. Parking moves the fiber
-  on every native call.
+  `fannkuch` was 1.50 to 1.87 times as slow, and `dijkstra` 1.20 to 1.43
+  times. Parking moves the fiber on every native call.
   **[nice to have]**: if Sand ever uses P1, it should park only for
   natives that can call back.
 - **Noise.** One program's baseline varied by up to 23% between
@@ -718,7 +753,7 @@ and program, we used the best of the per-round medians.
   which changes only the retry path, not the hot path.
   **[necessary]** for the reading of F-O1 and F-O2.
 
-Full table: `lab/results/overhead_summary.txt`.
+Full table, with per-round ratios: `lab/results/overhead_summary.txt`.
 
 ### 7.4 Handles that native code holds
 
@@ -735,10 +770,10 @@ Full table: `lab/results/overhead_summary.txt`.
 
 ### 7.5 Platforms, safety, and regressions
 
-- **F-P1. P2 builds for the web.** With the patch, `sandlang-wasm` built
+- **F-P1. P2 builds for the web.** With the final patch, `sandlang-wasm` built
   for `wasm32-unknown-unknown`. Test: `results/wasm32_sandlang_p2.txt`.
   **[necessary]**
-- **F-P2. P2 keeps Sand free of `unsafe` code.** With the patch, Sand's
+- **F-P2. P2 keeps Sand free of `unsafe` code.** With the final patch, Sand's
   `src/` has no `unsafe` blocks, functions, or impls, and `lib.rs` keeps
   `#![forbid(unsafe_code)]` (S-S4). Every other Rust runtime that we
   tested has `unsafe` code. `results/unsafe_count.txt` gives the counts.
@@ -778,8 +813,14 @@ A UI binding needs two kinds of call into Sand.
    that it chooses, for example SwiftUI's `body`, Compose's `measure`, or a
    button action. Swift or Kotlin code on the UI thread waits, not a Sand
    task, so P2 cannot serve this direction. **[necessary]**
-   - **Async entry:** run the handler as a task, as `Vm::spawn_task` can
-     today (F-S3). Use it for events.
+   - **Async entry:** run the handler as a task. Today a host can only
+     `eval` a `spawn`, and the task runs only while the host drives
+     `run_tasks_until` (F-S6). Use the async entry for events.
+   - **One owner.** The host needs one loop that both drives tasks and
+     makes sync calls (F-S6), on a thread with a tokio runtime (F-S7). This
+     is a **product tradeoff**: Sand can ship that loop as a host-side
+     driver, which costs the host a more complex integration, or the sync
+     entry can also advance ready tasks, which adds latency to sync calls.
    - **Sync entry:** run the handler to completion and return its value.
      If the handler suspends, fail with a clear error (E16). The host API
      demands an immediate answer, so Sand cannot avoid this failure. The
@@ -853,12 +894,15 @@ mechanics:
 - parking the active fiber (E11);
 - a nesting bound (F-N4, F-N5);
 - a ban on suspension, as for any sync entry (8.1);
-- lifetime-branded handles (F-L2), against E12.
+- lifetime-branded handles (F-L2), against E12;
+- a retry rule that collects garbage in place, without a restart (E13).
 
 We found no source and ran no test that shows whether SwiftUI or Compose
 call back into script code during a synchronous host call that the script
 started. **[necessary]** to research before a UI binding ships. If they
-do, Sand needs P1's parking, at the cost in F-O2.
+do, Sand needs P1's parking. F-O2 measures parking on every native call;
+parking only for natives that can call back would cost less, but we did
+not measure that.
 
 ## 9. Limits of this research
 
@@ -871,8 +915,9 @@ do, Sand needs P1's parking, at the cost in F-O2.
   - We ran QuickJS (F-N4 to F-N9) but did not test its threading rule
     (F-U6).
 - **Host event loop.** No test embeds Sand in a real UI run loop. E16
-  shows that one poll of a session on a single-threaded executor works
-  for short handlers, and E16c shows that it fails for long ones.
+  shows that one poll of a session works for short handlers, and E16c
+  shows that it fails for long ones. E17 and E18 ran a plain loop on
+  Linux, not CFRunLoop or Looper. **[necessary]**: recommendation 0.
   A host must not call the sync entry while it already polls the same
   session. Rust's `&mut Session` borrow prevents that for a single owner.
   We did not test a host that shares a session through other means.
@@ -916,6 +961,7 @@ All paths are under `lab/` unless noted. Runtime versions:
 | E14        | Cancel a task during a suspended callback      | `sandlab`                   |
 | E15        | Compile-time ban on handles across a callback  | `e15/`                      |
 | E16, c, d  | Sync host entry by one poll                    | `sandlab`                   |
+| E17, E18   | Host event; plain run loop without tokio       | `sandlab` (`sand_host.rs`)  |
 | E-S1, E-S3 | Sand today: deferred callback; kept handle     | `sandlab`                   |
 | Overhead   | Prototype cost on `bench/` programs            | `overhead.sh`               |
 | Sources    | Every printed quote is in its source           | `verify_sources.py`         |

@@ -71,3 +71,4 @@ S-S4 FOUND repo:src/lib.rs :: '#![forbid(unsafe_code)]'
 70/70 quotes found in their sources
 0 report quotes without a check
 0 cited paths untracked or empty
+report states this run's count ('70 of 70 quotes found'): yes

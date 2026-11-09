@@ -8,10 +8,7 @@ publish = false
 
 [dependencies]
 sandlang = { path = "../../.." }
-tokio = { version = "1", features = ["rt", "macros", "time"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
 
 [profile.release]
 debug = false
-
-[features]
-nested = ["sandlang/nested_callbacks"]

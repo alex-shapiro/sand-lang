@@ -1,0 +1,9 @@
+== sandlang host entry experiments
+E18a compute-only eval on a plain run loop, no tokio runtime: Ok(Ok(Some("2")))
+
+E18b eval that sleeps on a plain run loop, no tokio runtime: Ok(Err("internal error: there is no reactor running, must be called from the context of a Tokio 1.x runtime (the session was reset)"))
+E18c eval that sleeps on a plain run loop, with a tokio runtime entered on another thread: Ok(Ok(Some("5")))
+E17a after the event, two later evals (5 ms apart from the spawn): taps = Ok(Some("0")), Ok(Some("0"))
+E17b after the host drives run_tasks_until for 20 ms: taps = Ok(Some("1"))
+E17c sync entry between two run_tasks_until calls: Some(Ok(Some("320"))); taps afterwards = Ok(Some("2"))
+exit=0

@@ -159,3 +159,7 @@ for path in sorted(set(re.findall(r"`((?:lab|sandlab|sources|prototypes|results|
 for path in missing:
     print(f"UNTRACKED or EMPTY cited path: {path}")
 print(f"{len(missing)} cited paths untracked or empty")
+
+# The count that the report prints must match this run.
+claim = f"{found} of {len(checks)} quotes found"
+print(f"report states this run's count ({claim!r}): {'yes' if claim in report else 'NO'}")

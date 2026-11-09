@@ -1,2 +1,2 @@
-    Finished `release` profile [optimized] target(s) in 1m 16s
- 4 files changed, 291 insertions(+), 12 deletions(-)
+    Finished `release` profile [optimized] target(s) in 1m 18s
+ 4 files changed, 294 insertions(+), 12 deletions(-)

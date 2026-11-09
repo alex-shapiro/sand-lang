@@ -20,3 +20,23 @@ wordfreq          1126ms   1162ms   1133ms     1.032    1.006
 geomean p2/base: 1.004 (best of the per-round medians)
 geomean p1/base: 1.075 (best of the per-round medians)
 noise: largest base-vs-base spread for one program across rounds: 1.230
+
+per-round ratios to the same round's base (p2 | p1):
+binary_trees    1.02 1.00 0.98  |  0.97 1.04 0.97
+collatz         1.04 0.98 0.93  |  1.10 0.99 0.91
+csv             0.93 0.99 0.94  |  1.07 1.13 1.17
+dijkstra        0.96 1.17 1.15  |  1.20 1.43 1.29
+fannkuch        1.10 1.17 0.96  |  1.60 1.87 1.50
+generators      1.04 0.96 0.99  |  0.98 1.00 0.93
+graph           1.00 0.89 0.84  |  1.08 0.94 0.97
+interpreter     0.94 1.03 0.99  |  0.92 0.97 0.95
+json            0.98 1.05 0.97  |  1.09 1.21 1.11
+knucleotide     0.92 1.01 1.02  |  1.01 1.04 0.99
+memo            0.91 0.99 1.05  |  1.05 0.96 0.89
+nbody           0.99 1.07 0.99  |  1.17 1.08 1.13
+pipeline        1.10 1.00 0.95  |  1.16 1.07 0.93
+ray             1.13 1.15 0.93  |  1.25 1.34 1.11
+results         1.06 0.97 1.02  |  1.17 1.10 1.11
+richards        0.99 1.00 0.97  |  1.00 0.95 1.04
+spectral_norm   0.98 1.01 1.16  |  0.95 0.98 1.11
+wordfreq        0.96 1.03 1.05  |  1.02 1.10 0.96

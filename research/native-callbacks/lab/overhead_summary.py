@@ -29,3 +29,19 @@ fs = sorted(rounds)
 if len(fs) >= 2:
     worst = max(max(rounds[a][p] for a in fs) / min(rounds[a][p] for a in fs) for p in progs)
     print(f"noise: largest base-vs-base spread for one program across rounds: {worst:.3f}")
+
+# Per-round ratios: a single program's cost is significant only if every round shows it.
+per = {}
+for f in sorted(glob.glob(f"{d}/*-round*.txt")):
+    name, rnd = f.split("/")[-1][:-4].split("-round")
+    for line in open(f):
+        m = re.match(r"(\w+)\s+(\d+)ms", line)
+        if m:
+            per.setdefault(m[1], {}).setdefault(name, {})[rnd] = int(m[2])
+print()
+print("per-round ratios to the same round's base (p2 | p1):")
+for p in progs:
+    rs = sorted(per[p]["base"])
+    r2 = " ".join(f"{per[p]['p2'][r] / per[p]['base'][r]:.2f}" for r in rs)
+    r1 = " ".join(f"{per[p]['p1'][r] / per[p]['base'][r]:.2f}" for r in rs)
+    print(f"{p:<15} {r2}  |  {r1}")

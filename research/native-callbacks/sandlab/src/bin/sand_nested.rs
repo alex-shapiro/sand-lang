@@ -71,7 +71,7 @@ async fn time(s: &mut Session, src: &str, n: u64) -> (f64, String) {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    println!("== sandlang prototype P1 (nested calls), fiber parking: {}", cfg!(feature = "nested"));
+    println!("== sandlang prototype P1 (nested calls), fiber parking: {}", option_env!("SANDLAB_PARKING").is_some());
     let limits = Limits { max_instructions: None, max_cpu_time: None, max_wall_time: None, ..Limits::default() };
     let config = |l: Limits| Config::new().host_modules(HostModules::new([module()]).unwrap()).limits(l);
     let only_gc = std::env::args().nth(1).as_deref() == Some("gc");
