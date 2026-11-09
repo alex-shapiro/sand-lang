@@ -1,7 +1,7 @@
 == sandlang prototype P1 (nested calls), fiber parking: false
 E11 caller's locals after a GC inside a nested callback: Err("error: bounds: index out of bounds: index 49, length 1")
 
-thread 'main' (28144) panicked at /home/user/sand-lang/src/vm/heap.rs:1601:45:
+thread 'main' (7173) panicked at /home/user/sand-lang/src/vm/heap.rs:1601:45:
 index out of bounds: the len is 386 but the index is 386
 stack backtrace:
    0: __rustc::rust_begin_unwind

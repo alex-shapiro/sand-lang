@@ -1,0 +1,1 @@
+E13b WITHOUT the rooting fix: heap result of a callback across a retried step, under retry_stress and gc_stress: Err("error: limit: value too deeply nested to display")

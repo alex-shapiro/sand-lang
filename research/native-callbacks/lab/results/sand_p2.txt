@@ -1,6 +1,6 @@
 == sandlang prototype P2 (stackless continuations)
-E1 script->script call through fn value: 29.4 ns/iter; native->script callback loop: 64.4 ns/iter (result Ok(Some("12500002500000")))
-E6 sort 200000 ints, median of 5: Ok(Some("\"native merge sort + Sand comparator (P2) 311.486549ms; merge sort written in Sand 183.638609ms; sort_by(key) 58.21939ms; sort() 10.782751ms\""))
+E1 script->script call through fn value: 27.1 ns/iter; native->script callback loop: 69.9 ns/iter (result Ok(Some("12500002500000")))
+E6 sort 200000 ints, median of 5: Ok(Some("\"native merge sort + Sand comparator (P2) 328.896523ms; merge sort written in Sand 204.650089ms; sort_by(key) 64.979519ms; sort() 12.042021ms\""))
 E6 small sort [3, 1, 2]: Ok(Some("[1, 2, 3]"))
 E6 small sort [5, 4, 3, 2, 1]: Ok(Some("[1, 2, 3, 4, 5]"))
 E6 small sort [2, 1]: Ok(Some("[1, 2]"))
@@ -18,5 +18,10 @@ E11 sort under gc_stress with allocating comparator: Ok(Some("true"))
 E13 callback with a side effect, then a native step that checks memory and is retried: Ok(Some("\"callback ran 1 times, native returned [0, 0, 0]\"")); the continuation ran 2 times
 E14 cancel a task whose callback is suspended, then reuse fibers: Ok(Some("\"[\\\"deferred\\\"] 6 7\""))
 E12 comparator that empties the list under gc_stress: Ok(Some("true"))
-E16 sync entry by polling once: handler that returns Some(Ok(Some("320"))); handler that sleeps None; session afterwards Ok(Some("1")); 43.1 us per sync entry (eval of a call expression)
+E16 sync entry by polling once: handler that returns Some(Ok(Some("320"))); handler that sleeps None; session afterwards Ok(Some("1")); 41.1 us per sync entry (eval of a call expression)
+E13b heap result of a callback across a retried step, under retry_stress and gc_stress: Ok(Some("[[\"view\", \"tree\"]]"))
+E16c compute-only handler on_measure(10000) by one poll: Some(Ok(Some("29994"))) after 0.17 ms
+E16c compute-only handler on_measure(100000) by one poll: Some(Ok(Some("299995"))) after 0.86 ms
+E16c compute-only handler on_measure(1000000) by one poll: None after 2.19 ms
+E16d handler that changes state, then sleeps: None; state afterwards: Ok(Some("[1]"))
 exit=0

@@ -1,6 +1,6 @@
 == sandlang (this branch), release build
-E1 loop without call: 11.4 ns/iter; script->script direct call loop: 11.3 ns/iter; script->script call through fn value: 26.8 ns/iter; native->script callback: not possible
-E-S1 native schedules Sand closure as task, script waits: result Ok(Some("55")); 298.2 ns per round trip
+E1 loop without call: 13.0 ns/iter; script->script direct call loop: 12.4 ns/iter; script->script call through fn value: 30.2 ns/iter; native->script callback: not possible
+E-S1 native schedules Sand closure as task, script waits: result Ok(Some("55")); 351.2 ns per round trip
 E-S1b deferred callback that sleeps: Ok(Some("7"))
 E-S3 keep: Ok(None)
 E-S3 churn heap: Ok("ok")

@@ -1,16 +1,17 @@
 # Checked quotes
 
-Each quote that `report.md` prints, with its source. `lab/verify_sources.py`
-checks every entry. `crates:` paths are in the crates.io source of that
-version (the same files that docs.rs shows). `repo:` paths are in this
-repository. The other `sources/*.md` files hold the research notes.
+Each quote or code fragment that `report.md` cites by source ID, with its
+source. `lab/verify_sources.py` holds the same list and checks every entry;
+regenerate this file from it after a change. `crates:` paths are in the
+crates.io source of that version, which docs.rs also shows. `repo:` paths
+are in this repository. The other `sources/*.md` files hold research notes.
 
 - **J-S1** https://raw.githubusercontent.com/facebook/react-native-website/266ef4d753fdf274efb8aafb575762c01032ead6/website/blog/2024-10-23-the-new-architecture-is-here.mdx
   > some updates need to render synchronously in response to user input
 - **J-S10** https://developer.apple.com/tutorials/data/documentation/swiftui/view.json
-  > MainActor
+  > @MainActor @preconcurrency protocol View
 - **J-S10b** https://developer.apple.com/tutorials/data/documentation/swiftui/layout.json
-  > sizeThatFits(proposal:subviews:cache:)
+  > func sizeThatFits(proposal: ProposedViewSize, subviews: Self.Subviews, cache: inout Self.Cache) -> CGSize
 - **J-S11** https://developer.android.com/develop/ui/compose/mental-model
   > as often as every frame of an animation
 - **J-S11b** https://raw.githubusercontent.com/androidx/androidx/edf01d0d436697bc1a6b3bffdf65a462b756f88f/compose/ui/ui/src/commonMain/kotlin/androidx/compose/ui/layout/MeasurePolicy.kt
@@ -21,6 +22,8 @@ repository. The other `sources/*.md` files hold the research notes.
   > animations lagging behind gestures
 - **J-S13** https://raw.githubusercontent.com/Snapchat/Valdi/b527b091ea98b4952b1a525388d0c0b66ca04940/docs/docs/native-bindings.md
   > calling a JS function will automatically asynchronously dispatch to the JS thread if needed
+- **J-S13b** https://raw.githubusercontent.com/Snapchat/Valdi/b527b091ea98b4952b1a525388d0c0b66ca04940/docs/docs/native-bindings.md
+  > If your function need to return a value synchronously to platform code, make sure you call this function within a createScopedJSRuntime scope
 - **J-S1b** https://raw.githubusercontent.com/facebook/react-native-website/266ef4d753fdf274efb8aafb575762c01032ead6/website/blog/2024-10-23-the-new-architecture-is-here.mdx
   > Since the old architecture was only asynchronous, we needed to rewrite it
 - **J-S1c** https://raw.githubusercontent.com/facebook/react-native-website/266ef4d753fdf274efb8aafb575762c01032ead6/website/blog/2024-10-23-the-new-architecture-is-here.mdx
@@ -49,18 +52,16 @@ repository. The other `sources/*.md` files hold the research notes.
   > lua_pushcclosurek
 - **L-S11** https://raw.githubusercontent.com/Roblox/roact/1676d95c4886d51ee2b21bfcd55c6e50ece799e5/src/SingleEventManager.lua
   > event:Connect(function(...)
-- **L-S12** https://raw.githubusercontent.com/LuaJIT/LuaJIT/c4b1e2f73a2e10fbcc637fcec474f639c38daafe/doc/ext_ffi_semantics.html
-  > Callbacks are slow!
 - **L-S13** https://raw.githubusercontent.com/mlua-rs/mlua/v0.11.6/README.md
   > is protected by `lua_pcall`
 - **L-S13b** https://raw.githubusercontent.com/mlua-rs/mlua/v0.11.6/src/error.rs
   > called the same mutable callback again
+- **L-S14** https://raw.githubusercontent.com/lua/lua/v5.4.8/ltablib.c
+  > Quicksort algorithm (recursive function)
 - **L-S3** https://raw.githubusercontent.com/lua/lua/v5.4.8/llimits.h
   > #define LUAI_MAXCCALLS 200
 - **L-S3b** https://raw.githubusercontent.com/lua/lua/v5.4.8/lstate.c
   > luaG_runerror(L, "C stack overflow")
-- **L-S4** https://raw.githubusercontent.com/lua/lua/v5.5.0/manual/manual.of
-  > The function lua_setcstacklimit is deprecated
 - **L-S5** https://raw.githubusercontent.com/lua/lua/v5.4.8/manual/manual.of
   > its frame in the C stack was destroyed by the yield
 - **L-S5b** https://raw.githubusercontent.com/lua/lua/v5.4.8/manual/manual.of
@@ -71,20 +72,16 @@ repository. The other `sources/*.md` files hold the research notes.
   > This event only happens while Lua is executing a Lua function
 - **L-S8** https://raw.githubusercontent.com/lua/lua/v5.4.8/manual/manual.of
   > Creates and returns a reference
-- **L-S9** https://raw.githubusercontent.com/luau-lang/site/c0eb09dc75b30cac6af600df0a4c07b4079a4b51/src/content/docs/guides/sandbox.md
-  > load trusted and untrusted code into separate VMs
 - **P-S10** https://raw.githubusercontent.com/python/peps/efec2601611c2fa53b1b1791b09b0368840c038c/peps/pep-0578.rst
   > Sandboxing CPython has been attempted many times in the past, and each past attempt has failed
 - **P-S13** https://raw.githubusercontent.com/PyO3/pyo3/f41d7e8799cad7f1c393d00276a4fa7b83acf885/src/pycell.rs
   > Already borrowed
-- **P-S3** https://raw.githubusercontent.com/python/cpython/v3.12.0/Doc/whatsnew/3.12.rst
-  > The recursion limit now applies only to Python code
+- **P-S14** https://raw.githubusercontent.com/python/cpython/v3.13.0/Objects/listsort.txt
+  > an adaptive, stable, natural mergesort
 - **P-S3b** https://raw.githubusercontent.com/python/cpython/v3.13.0/Include/cpython/pystate.h
   > Py_C_RECURSION_LIMIT 10000
 - **P-S4** https://raw.githubusercontent.com/python/cpython/v3.14.0/Python/ceval.c
   > Stack overflow (used %d kB)%s
-- **P-S5** https://raw.githubusercontent.com/python/cpython/v3.11.0/Doc/whatsnew/3.11.rst
-  > Most Python function calls now consume no C stack space
 - **P-S6** https://raw.githubusercontent.com/python/peps/efec2601611c2fa53b1b1791b09b0368840c038c/peps/pep-0219.rst
   > the C stack now holds a nested execution of the byte-code interpreter
 - **P-S7** https://raw.githubusercontent.com/python-greenlet/greenlet/4c22fe41c284a5c5b0ecd19f4607121cd8b31847/docs/caveats.rst
@@ -98,9 +95,7 @@ repository. The other `sources/*.md` files hold the research notes.
 - **R-S1c** https://raw.githubusercontent.com/kyren/piccolo/ce709eb1dae5c543cbc78e7e12bb80249d88c55f/README.md
   > there are a few sources of unsafety, but crucially these sources of unsafety are isolated
 - **R-S1d** https://raw.githubusercontent.com/kyren/piccolo/ce709eb1dae5c543cbc78e7e12bb80249d88c55f/README.md
-  > fuel
-- **R-S2** crates:piccolo-0.3.3/src/thread/executor.rs
-  > will panic
+  > This method takes a `fuel` parameter which controls how long the VM should run before pausing
 - **R-S3** crates:rhai-1.27.0/src/api/limits.rs
   > pub const MAX_CALL_STACK_DEPTH: usize = 64;
 - **R-S4** crates:rune-0.14.2/src/runtime/function.rs
@@ -127,6 +122,8 @@ repository. The other `sources/*.md` files hold the research notes.
   > self.sort_by_keys(self.map(key))
 - **S-S4** repo:src/lib.rs
   > #![forbid(unsafe_code)]
+- **S-S5** repo:src/vm/sched.rs
+  > const YIELD_EVERY: Duration = Duration::from_millis(2);
 - **W-S10** https://raw.githubusercontent.com/WebAssembly/js-promise-integration/5b247b1026d2f438eefe51914a79f4218cbda9f9/proposals/js-promise-integration/Overview.md
   > Not all applications can equally tolerate being reentrant in this way
 - **W-S2** crates:wasmtime-50.0.1/src/runtime/store.rs
@@ -149,5 +146,3 @@ repository. The other `sources/*.md` files hold the research notes.
   > must be careful to only perform recursive reentrance on components when explicitly supported by the component's documented API
 - **W-S8c** crates:wasmtime-50.0.1/src/runtime/component/store.rs
   > We return `false` here only `self` has been poisoned due to a trap.
-- **W-S9** crates:wasmi-2.0.0/src/func/into_func.rs
-  > runs on another `Stack`

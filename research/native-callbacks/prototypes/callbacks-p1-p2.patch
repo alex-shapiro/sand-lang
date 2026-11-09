@@ -11,7 +11,7 @@ index 1a68d29..ccdf682 100644
  [dependencies]
  sandlang-macros = { path = "macros" }
 diff --git a/src/vm/interp.rs b/src/vm/interp.rs
-index 7a432bc..13aa918 100644
+index 7a432bc..2b0bee9 100644
 --- a/src/vm/interp.rs
 +++ b/src/vm/interp.rs
 @@ -67,6 +67,8 @@ pub enum FiberStop {
@@ -118,7 +118,7 @@ index 7a432bc..13aa918 100644
              CtlKind::Yield | CtlKind::Blocked => unreachable!("handled above"),
              CtlKind::Collect => Err(self.internal_trap(fiber, ip, "a native asked for a collection twice".into())),
              // Do not retry memory limits here because the call already retried after garbage collection.
-@@ -1750,6 +1794,71 @@ impl Vm {
+@@ -1750,6 +1794,74 @@ impl Vm {
          }
      }
  
@@ -160,6 +160,9 @@ index 7a432bc..13aa918 100644
 +        let mut r = (c.then)(self, v, &mut c.state);
 +        self.heap.fail_next_check.set(false);
 +        if r.is_memory_limit() || matches!(&r, Err(e) if matches!(e.kind(), CtlKind::Collect)) {
++            // Root the callback's result and the state across the collection:
++            // the result goes to the native's result slot in the caller's frame.
++            fiber.stack[c.slot] = v;
 +            fiber.continuations.push(Continuation { slot: c.slot, state: std::mem::take(&mut c.state), then: Box::new(|_, _, _| Ok(Value::Unit)) });
 +            self.collect_all_garbage(Some(fiber));
 +            let rooted = fiber.continuations.pop().unwrap();
@@ -190,7 +193,7 @@ index 7a432bc..13aa918 100644
      /// `Op::StrClass`: the character-class tests of strings.
      #[inline(never)]
      fn str_class(&self, v: Value, class: u8) -> Result<bool, Stop> {
-@@ -2460,3 +2569,30 @@ pub(crate) fn internal(msg: impl std::fmt::Display) -> Ctl {
+@@ -2460,3 +2572,30 @@ pub(crate) fn internal(msg: impl std::fmt::Display) -> Ctl {
  fn overflow(what: &str) -> Ctl {
      Ctl::fail("overflow", format!("{what} overflow"))
  }

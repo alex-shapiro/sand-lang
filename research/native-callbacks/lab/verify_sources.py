@@ -9,7 +9,7 @@ report.md must equal one of the checked quotes, or appear in a result file.
 
 Usage: python3 -I verify_sources.py > results/sources.txt
 """
-import glob, os, re, urllib.request
+import glob, json, os, re, subprocess, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, "../../.."))
@@ -29,22 +29,19 @@ def norm(s):
 WEB = [('L-S1', 'https://raw.githubusercontent.com/lua/lua/v5.4.8/manual/manual.of', 'Lua uses the C longjmp facility to handle errors'),
     ('L-S3', 'https://raw.githubusercontent.com/lua/lua/v5.4.8/llimits.h', '#define LUAI_MAXCCALLS 200'),
     ('L-S3b', 'https://raw.githubusercontent.com/lua/lua/v5.4.8/lstate.c', 'luaG_runerror(L, "C stack overflow")'),
-    ('L-S4', 'https://raw.githubusercontent.com/lua/lua/v5.5.0/manual/manual.of', 'The function lua_setcstacklimit is deprecated'),
+    ('L-S14', 'https://raw.githubusercontent.com/lua/lua/v5.4.8/ltablib.c', 'Quicksort algorithm (recursive function)'),
+    ('P-S14', 'https://raw.githubusercontent.com/python/cpython/v3.13.0/Objects/listsort.txt', 'an adaptive, stable, natural mergesort'),
     ('L-S5', 'https://raw.githubusercontent.com/lua/lua/v5.4.8/manual/manual.of', 'its frame in the C stack was destroyed by the yield'),
     ('L-S5b', 'https://raw.githubusercontent.com/lua/lua/v5.4.8/manual/manual.of', 'Lua calls a continuation function'),
     ('L-S5c', 'https://raw.githubusercontent.com/lua/lua/v5.4.8/ldo.c', 'attempt to yield across a C-call boundary'),
     ('L-S6', 'https://raw.githubusercontent.com/lua/lua/v5.4.8/manual/manual.of', 'This event only happens while Lua is executing a Lua function'),
     ('L-S8', 'https://raw.githubusercontent.com/lua/lua/v5.4.8/manual/manual.of', 'Creates and returns a reference'),
-    ('L-S9', 'https://raw.githubusercontent.com/luau-lang/site/c0eb09dc75b30cac6af600df0a4c07b4079a4b51/src/content/docs/guides/sandbox.md', 'load trusted and untrusted code into separate VMs'),
     ('L-S10', 'https://raw.githubusercontent.com/luau-lang/luau/12a6ba75883272c79b66b59815efef4c574196f6/VM/include/lua.h', 'lua_pushcclosurek'),
     ('L-S11', 'https://raw.githubusercontent.com/Roblox/roact/1676d95c4886d51ee2b21bfcd55c6e50ece799e5/src/SingleEventManager.lua', 'event:Connect(function(...)'),
-    ('L-S12', 'https://raw.githubusercontent.com/LuaJIT/LuaJIT/c4b1e2f73a2e10fbcc637fcec474f639c38daafe/doc/ext_ffi_semantics.html', 'Callbacks are slow!'),
     ('L-S13', 'https://raw.githubusercontent.com/mlua-rs/mlua/v0.11.6/README.md', 'is protected by `lua_pcall`'),
     ('L-S13b', 'https://raw.githubusercontent.com/mlua-rs/mlua/v0.11.6/src/error.rs', 'called the same mutable callback again'),
-    ('P-S3', 'https://raw.githubusercontent.com/python/cpython/v3.12.0/Doc/whatsnew/3.12.rst', 'The recursion limit now applies only to Python code'),
     ('P-S3b', 'https://raw.githubusercontent.com/python/cpython/v3.13.0/Include/cpython/pystate.h', 'Py_C_RECURSION_LIMIT 10000'),
     ('P-S4', 'https://raw.githubusercontent.com/python/cpython/v3.14.0/Python/ceval.c', 'Stack overflow (used %d kB)%s'),
-    ('P-S5', 'https://raw.githubusercontent.com/python/cpython/v3.11.0/Doc/whatsnew/3.11.rst', 'Most Python function calls now consume no C stack space'),
     ('P-S6', 'https://raw.githubusercontent.com/python/peps/efec2601611c2fa53b1b1791b09b0368840c038c/peps/pep-0219.rst', 'the C stack now holds a nested execution of the byte-code interpreter'),
     ('P-S7', 'https://raw.githubusercontent.com/python-greenlet/greenlet/4c22fe41c284a5c5b0ecd19f4607121cd8b31847/docs/caveats.rst', 'native (C) frames'),
     ('P-S8', 'https://raw.githubusercontent.com/python/cpython/v3.13.0/Objects/listobject.c', 'allowing mutations during sorting is a core-dump factory'),
@@ -66,17 +63,18 @@ WEB = [('L-S1', 'https://raw.githubusercontent.com/lua/lua/v5.4.8/manual/manual.
     ('J-S7b', 'https://raw.githubusercontent.com/dart-lang/sdk/55afb51719372c2b2a9799852bddb46dc096fee8/sdk/lib/ffi/ffi.dart', 'only functions returning void are supported'),
     ('J-S8', 'https://raw.githubusercontent.com/flutter/website/b3ec0c2f546294a91d6ad14c4f30c5a80a82d712/sites/docs/src/content/release/breaking-changes/macos-windows-merged-threads.md', 'The split-thread design prevented Flutter apps and plugins from using Dart FFI'),
     ('J-S9', 'https://raw.githubusercontent.com/NativeScript/docs/fe3d25290163f7802b7487863c4a36c5694e3ca9/content/guide/multithreading.md', 'JavaScript executes on the main thread'),
-    ('J-S10', 'https://developer.apple.com/tutorials/data/documentation/swiftui/view.json', 'MainActor'),
-    ('J-S10b', 'https://developer.apple.com/tutorials/data/documentation/swiftui/layout.json', 'sizeThatFits(proposal:subviews:cache:)'),
+    ('J-S10', 'https://developer.apple.com/tutorials/data/documentation/swiftui/view.json', '@MainActor @preconcurrency protocol View'),
+    ('J-S10b', 'https://developer.apple.com/tutorials/data/documentation/swiftui/layout.json', 'func sizeThatFits(proposal: ProposedViewSize, subviews: Self.Subviews, cache: inout Self.Cache) -> CGSize'),
     ('J-S11', 'https://developer.android.com/develop/ui/compose/mental-model', 'as often as every frame of an animation'),
     ('J-S11b', 'https://raw.githubusercontent.com/androidx/androidx/edf01d0d436697bc1a6b3bffdf65a462b756f88f/compose/ui/ui/src/commonMain/kotlin/androidx/compose/ui/layout/MeasurePolicy.kt', 'fun MeasureScope.measure('),
     ('J-S11c', 'https://raw.githubusercontent.com/androidx/androidx/edf01d0d436697bc1a6b3bffdf65a462b756f88f/compose/runtime/runtime/src/commonMain/kotlin/androidx/compose/runtime/Effects.kt', 'block: suspend CoroutineScope.() -> Unit'),
     ('J-S12', 'https://raw.githubusercontent.com/lynx-family/lynx-website/e6a8e427758ccead03ef7648065478dff43a9a2a/docs/en/react/main-thread-script.mdx', 'animations lagging behind gestures'),
+    ('J-S13b', 'https://raw.githubusercontent.com/Snapchat/Valdi/b527b091ea98b4952b1a525388d0c0b66ca04940/docs/docs/native-bindings.md', 'If your function need to return a value synchronously to platform code, make sure you call this function within a createScopedJSRuntime scope'),
     ('J-S13', 'https://raw.githubusercontent.com/Snapchat/Valdi/b527b091ea98b4952b1a525388d0c0b66ca04940/docs/docs/native-bindings.md', 'calling a JS function will automatically asynchronously dispatch to the JS thread if needed'),
     ('R-S1', 'https://raw.githubusercontent.com/kyren/piccolo/ce709eb1dae5c543cbc78e7e12bb80249d88c55f/README.md', 'It does not rely on the rust stack'),
     ('R-S1b', 'https://raw.githubusercontent.com/kyren/piccolo/ce709eb1dae5c543cbc78e7e12bb80249d88c55f/README.md', 'writing things as a `Sequence` implementation is much more difficult than writing in normal, straight control flow'),
     ('R-S1c', 'https://raw.githubusercontent.com/kyren/piccolo/ce709eb1dae5c543cbc78e7e12bb80249d88c55f/README.md', 'there are a few sources of unsafety, but crucially these sources of unsafety are isolated'),
-    ('R-S1d', 'https://raw.githubusercontent.com/kyren/piccolo/ce709eb1dae5c543cbc78e7e12bb80249d88c55f/README.md', 'fuel'),
+    ('R-S1d', 'https://raw.githubusercontent.com/kyren/piccolo/ce709eb1dae5c543cbc78e7e12bb80249d88c55f/README.md', 'This method takes a `fuel` parameter which controls how long the VM should run before pausing'),
     ('R-S5', 'https://raw.githubusercontent.com/google/starlark-go/4f4267fb140d1e8b91c9bce55cee2f809e8840dd/starlark/interp.go', 'called recursively'),
     ('R-S7', 'https://raw.githubusercontent.com/erlang/otp/OTP-28.1/erts/doc/references/erl_nif.md', 'return to its caller within 1 millisecond'),
     ('R-S7b', 'https://raw.githubusercontent.com/erlang/otp/OTP-28.1/erts/doc/references/erl_nif.md', 'This approach is always preferred over the other alternatives'),
@@ -90,8 +88,6 @@ LOCAL = [('W-S2', 'crates:wasmtime-50.0.1/src/runtime/store.rs', 'cannot do bloc
     ('W-S6', 'crates:wasmtime-50.0.1/src/config.rs', 'space consumed by a host function is counted towards this limit'),
     ('W-S6b', 'crates:wasmtime-50.0.1/src/config.rs', 'Exhausting the thread stack typically leads to an abort of the process'),
     ('W-S8c', 'crates:wasmtime-50.0.1/src/runtime/component/store.rs', 'We return `false` here only `self` has been poisoned due to a trap.'),
-    ('W-S9', 'crates:wasmi-2.0.0/src/func/into_func.rs', 'runs on another `Stack`'),
-    ('R-S2', 'crates:piccolo-0.3.3/src/thread/executor.rs', 'will panic'),
     ('R-S3', 'crates:rhai-1.27.0/src/api/limits.rs', 'pub const MAX_CALL_STACK_DEPTH: usize = 64;'),
     ('R-S4', 'crates:rune-0.14.2/src/runtime/function.rs', 'let mut vm = Vm::new(self.context.clone(), self.unit.clone());'),
     ('R-S4b', 'crates:rune-0.14.2/src/runtime/budget.rs', 'without explicit co-operation from native functions the budget cannot be enforced'),
@@ -99,6 +95,7 @@ LOCAL = [('W-S2', 'crates:wasmtime-50.0.1/src/runtime/store.rs', 'cannot do bloc
     ('S-S1', 'repo:src/native/ty.rs', 'a `Val` is valid only for the duration of the synchronous native call'),
     ('S-S2', 'repo:docs/SPEC.md', 'the engine re-runs a `vm_function` from the start'),
     ('S-S3', 'repo:src/stdlib/prelude.sand', 'self.sort_by_keys(self.map(key))'),
+    ('S-S5', 'repo:src/vm/sched.rs', 'const YIELD_EVERY: Duration = Duration::from_millis(2);'),
     ('S-S4', 'repo:src/lib.rs', '#![forbid(unsafe_code)]')]
 
 def read(loc):
@@ -109,7 +106,11 @@ def read(loc):
         return open(os.path.join(ROOT, path), encoding="utf-8").read()
     req = urllib.request.Request(loc, headers={"User-Agent": "sandlang-research"})
     with urllib.request.urlopen(req, timeout=30) as r:
-        return r.read().decode("utf-8", "replace")
+        raw = r.read().decode("utf-8", "replace")
+    if "developer.apple.com" in loc:
+        # Apple's JSON splits a declaration into tokens; join their text.
+        return "".join(json.loads('"' + t + '"') for t in re.findall(r'"text":"((?:[^"\\\\]|\\\\.)*)"', raw))
+    return raw
 
 cache, found = {}, 0
 checks = WEB + LOCAL
@@ -139,3 +140,22 @@ for q in [q for q in re.findall(r'"([^"\n]+)"', report) if len(q) >= 25]:
 for q in unchecked:
     print(f"UNCHECKED report quote: {q!r}")
 print(f"{len(unchecked)} report quotes without a check")
+
+# Every path that the report cites must be tracked by git and not empty.
+tracked = set(subprocess.run(["git", "ls-files"], cwd=os.path.join(HERE, ".."), capture_output=True, text=True).stdout.split())
+base = os.path.join(HERE, "..")
+missing = []
+for path in sorted(set(re.findall(r"`((?:lab|sandlab|sources|prototypes|results|\.\./sandlab)/[\w./-]+)`", report))):
+    rel = path.replace("../sandlab", "sandlab")
+    rel = "lab/" + rel if rel.startswith("results/") else rel
+    if rel.endswith("/"):
+        ok = any(t.startswith(rel) for t in tracked)
+    elif "*" in rel:
+        ok = True
+    else:
+        ok = rel in tracked and os.path.getsize(os.path.join(base, rel)) > 0
+    if not ok:
+        missing.append(path)
+for path in missing:
+    print(f"UNTRACKED or EMPTY cited path: {path}")
+print(f"{len(missing)} cited paths untracked or empty")

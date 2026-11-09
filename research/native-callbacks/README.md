@@ -20,6 +20,9 @@ the report cites, so that every result can be reproduced.
 
 ## Reproduce
 
+The patch applies to commit `1520314`. Check out that commit's `src/`
+before step 5 if `src/` has changed since.
+
 1. Fetch the crates: `cd lab && cargo fetch`.
 2. Build Lua 5.4.8 and 5.5.0 from the `lua-src` crate into `lab/build/lua-<v>/liblua.a`
    (compile every `.c` file except `lua.c`, `luac.c` and `onelua.c` with

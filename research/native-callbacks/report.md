@@ -27,41 +27,50 @@ P2 kept every Sand product priority that we tested. P1 failed two of them:
 
 - A P1 callback cannot suspend, so any callback that does I/O fails. Sand
   does async I/O by default.
-- P1 runs a callback again if the engine retries the native. Sand retries a
-  native after a garbage collection, even if the native follows the rules
-  of SPEC §16.3.
+- A P1 native that calls back cannot follow SPEC §16.3. The rule says that
+  a native must check its limits before any side effect, because the engine
+  can retry the native from the start. In P1, the callback is a side effect
+  that happens before the native's later checks, so a retry runs the
+  callback again.
 
 Both prototypes need a rooting rule for heap handles that native Rust code
 holds. In P1, every handle in a Rust variable is at risk during each
-callback. In P2, only handles that a continuation captures are at risk, and
-an API can prevent those captures.
+callback. In P2, the VM roots the continuation's state and the callback's
+result. Our first P2 prototype did not root the result in its retry path;
+test E13b found the bug, and the fix is in the patch. Handles that a
+continuation captures are still at risk, and an API can prevent those
+captures.
 
 The cost of P2 is ergonomic. Code that calls back many times must be a
 state machine. Our merge sort with a Sand comparator needs 58 lines in P2
 and 24 lines in P1. A Rust `async` adapter could remove most of this cost;
 we did not build one.
 
-Callbacks across the native boundary are slower than Sand calls. A merge
-sort written in Sand took 184 ms. The same merge sort as a native with a
-Sand comparator took 311 ms in P2 and 328 ms in P1. So higher-order library
-code should stay in Sand, as it does today. Callbacks are for host APIs that
+Callbacks across the native boundary are slower than Sand calls. In each
+binary, a native merge sort with a Sand comparator took about 1.6 times as
+long as the same merge sort written in Sand. So higher-order library code
+should stay in Sand, as it does today. Callbacks are for host APIs that
 must call script code, such as UI frameworks.
 
-UI frameworks also need a second, separate mechanism. SwiftUI and Jetpack
-Compose call script code from the UI thread at times that they choose.
-Some of those calls must return a value at once. Our recommendations:
+Most UI callbacks go the other way: SwiftUI and Jetpack Compose call
+script code from the UI thread at times that they choose. Some of those
+calls must return a value at once. P2 cannot serve them, because no Sand
+task is waiting. Our recommendations, in order:
 
-1. **[necessary]** Add P2 continuations for Sand → native → Sand callbacks.
-2. **[necessary]** Add GC-rooted handles that a host can keep. Today, the
-   VM reset the session after our host kept a handle across a garbage
+1. **[necessary]** Add GC-rooted handles that a host can keep. Today, the
+   VM resets the session if a host uses a handle after a garbage
    collection.
-3. **[necessary]** Add two host → Sand entry points:
+2. **[necessary]** Add two host → Sand entry points:
    - an async entry that runs a handler as a task;
-   - a sync entry that runs a handler to completion, and that fails if the
-     handler suspends.
+   - a sync entry that runs a handler to completion within a budget, and
+     that fails if the handler suspends.
 
    React Native, Flutter, and Valdi have the same two entry points. Our
-   spike of a sync entry took 43 µs per call.
+   spike of a sync entry took 41 µs per call. The spike also showed two
+   problems that a real sync entry must solve: it failed a handler that
+   only computed for more than 2 ms, and a failed handler left its partial
+   changes.
+3. **[necessary]** Add P2 continuations for Sand → native → Sand callbacks.
 4. **[blocker]** Do not use nested calls on the Rust stack for Sand →
    native → Sand callbacks.
 5. **[blocker]** Do not use separate native stacks (fibers).
@@ -131,9 +140,14 @@ The tests follow these rules for fairness. **[necessary]**
   callback body, `x => x + 1`. All sort tests sort the same 200,000 ints.
 - **Same timing method.** Each time is the median of 5 runs. All timed
   runs ran one after another on an otherwise idle machine
-  (`lab/run_all.sh`, then `lab/overhead.sh`).
-- **Same algorithm.** The three Sand merge sorts use one algorithm and one
-  comparator call per comparison. Only the sort is timed.
+  (`lab/run_all.sh`, then `lab/overhead.sh`). All times are wall-clock
+  times, except Lua's sort, which uses `os.clock` (CPU time).
+- **Same algorithm within Sand.** The three Sand merge sorts use one
+  algorithm and one comparator call per comparison. Only the sort is
+  timed. Other runtimes use their own sort algorithms (section 6).
+- **Same binary for ratios.** Each Sand comparison is a ratio to a
+  baseline in the same binary, because a rebuild changed the same Sand
+  code's speed by up to 15%.
 - **No JIT in the speed comparison.** Sand prohibits a JIT. Wasmtime
   compiles WebAssembly to machine code, so its numbers are for reference
   only. wasmi is the interpreter to compare with.
@@ -153,12 +167,12 @@ Section 10 gives the runtime versions.
 - **F-S2. The standard library writes higher-order functions in Sand.**
   `map` and `filter` are Sand code. `sort_by` computes every key in Sand,
   then calls a native sort (S-S3). This pattern needs no callback. On
-  200,000 ints, `sort_by(key)` took 58 ms and `sort()` took 11 ms. Test:
+  200,000 ints, `sort_by(key)` took 65 ms and `sort()` took 12 ms. Test:
   `sand_p2` E6. **[necessary]** to keep.
 - **F-S3. A native can already run a Sand closure later, as a task.**
   `Vm::spawn_task` is public. A native can spawn the closure and return
   the `Task`. The script waits for the task, and the closure can suspend
-  on I/O. Test: `sand_current` E-S1 returned `55` with 298 ns per
+  on I/O. Test: `sand_current` E-S1 returned `55` with 351 ns per
   round trip. E-S1b ran a closure that sleeps and returned `7`.
   **[necessary]** to keep, as the async entry for events such as a button
   action.
@@ -166,7 +180,9 @@ Section 10 gives the runtime versions.
   "a `Val` is valid only for the duration of the synchronous native call"
   (S-S1). Our host kept a handle and then caused a garbage collection.
   When the host used the handle again, the VM stopped with "spawn: not a
-  closure" and reset the session. Test: `sand_current` E-S3.
+  closure" and reset the session. Test: `sand_current` E-S3. The garbage
+  collector gives a freed slot to a new object (E11 in section 7), so a
+  kept handle can also name a different, live object.
   **[necessary] [hazard]**: UI hosts must keep event handlers.
 - **F-S5. The engine retries a native from the start.** After a permission
   prompt or a garbage collection, "the engine re-runs a `vm_function` from
@@ -200,7 +216,10 @@ Section 10 gives the runtime versions.
     the process if invoked on any other thread". `NativeCallable.listener`
     is async, so "only functions returning void are supported" (J-S7).
   - Valdi says that "calling a JS function will automatically
-    asynchronously dispatch to the JS thread if needed" (J-S13).
+    asynchronously dispatch to the JS thread if needed" (J-S13). For a
+    synchronous result, it says: "If your function need to return a value
+    synchronously to platform code, make sure you call this function
+    within a createScopedJSRuntime scope" (J-S13b).
 
   **[necessary] [source-only]**: Sand needs both entry points (section 8).
 - **F-U5. Frameworks moved script code onto the UI thread for synchronous
@@ -280,13 +299,13 @@ wasmi, and Sand P1 use this design.
 | starlark-rust 0.14.2       |          64.8 |            78.9 |            32.9 |
 | Rune 0.14.2                |          69.8 |            86.3 |           134.6 |
 | Rhai 1.27.0                |         172.2 |           440.4 |           323.9 |
-| Sand P1 (nested)           |             – |            34.2 |            98.1 |
-| Sand P2 (stackless)        |             – |            29.4 |            64.4 |
+| Sand P1 (nested)           |             – |            31.0 |           101.3 |
+| Sand P2 (stackless)        |             – |            27.1 |            69.9 |
 | wasmtime 50 (JIT, ref.)    |             – |             1.8 |            12.5 |
 
 The Sand "script → script" column calls through a function value. A
 direct call to a small function costs about the same as the loop alone
-(11.3 ns vs 11.4 ns, `sand_current` E1).
+(12.4 ns vs 13.0 ns, `sand_current` E1).
 
 - **F-N1. A nested call is cheap if the host language owns the API.** In
   Lua's C API, a host loop that calls a Lua callback (14.5 ns) costs less
@@ -534,24 +553,29 @@ of 5. **[nice to have]**
 | CPython 3.13, `sort()`                                 |  47 ms |
 | CPython 3.14, `sort(key=cmp_to_key(comparator))`       | 246 ms |
 | CPython 3.14, `sort()`                                 |  38 ms |
-| Sand, merge sort written in Sand, Sand comparator      | 184 ms |
-| Sand P2, native merge sort, Sand comparator            | 311 ms |
-| Sand P1, native merge sort, nested Sand comparator     | 328 ms |
-| Sand, `sort_by(key)`                                   |  58 ms |
-| Sand, `sort()`                                         |  11 ms |
+| Sand P2 binary, merge sort written in Sand             | 205 ms |
+| Sand P2 binary, native merge sort, Sand comparator     | 329 ms |
+| Sand P1 binary, merge sort written in Sand             | 218 ms |
+| Sand P1 binary, native merge sort, Sand comparator     | 359 ms |
+| Sand, `sort_by(key)`                                   |  65 ms |
+| Sand, `sort()`                                         |  12 ms |
 
 Sources: `sort_lua-*.txt`, `sort_python-*.txt`, `sand_p2.txt`,
-`sand_p1.txt`. The Sand merge sort took 184 ms in the P2 session and
-207 ms in the P1 session.
+`sand_p1.txt`. The runtimes use different algorithms. Lua's `table.sort`
+is a quicksort (L-S14). CPython's sort is "an adaptive, stable, natural
+mergesort" (P-S14), and the comparator goes through a `cmp_to_key`
+wrapper. The Sand rows are a bottom-up merge sort. So compare the
+ratios within each runtime, not the times across runtimes.
 
 - **F-X1. In Sand, a higher-order function in Sand is faster than a native
-  that calls back.** The merge sort in Sand beat both native versions of
-  the same algorithm. A P2 callback costs 64 ns, and a Sand call through a
-  function value costs 29 ns (`sand_p2` E1). **[necessary]**: keep
+  that calls back.** In each binary, the native version of the same merge
+  sort took about 1.6 times as long as the Sand version (P2: 329 ms vs
+  205 ms; P1: 359 ms vs 218 ms). A P2 callback costs 70 ns, and a Sand call
+  through a function value costs 27 ns (`sand_p2` E1). **[necessary]**: keep
   higher-order library code in Sand. Use callbacks for host APIs.
 - **F-X2. A comparator callback per comparison is always the slow path.**
   The comparator sort took about 2.2 to 2.7 times as long as the plain
-  sort in Lua, 5.3 to 6.5 times in CPython, and about 29 times with Sand
+  sort in Lua, 5.3 to 6.5 times in CPython, and about 27 times with Sand
   P2. **[nice to have]**: Sand's `sort_by(key)` already avoids the
   comparator.
 
@@ -585,8 +609,9 @@ second fiber, on the Rust stack under the native's frame.
    continuation returns the native's result, or `Ctl::call_again` for the
    next callback.
 
-The GC roots `state`. The VM retries a continuation after a garbage
-collection, as it retries a native. The only change to the interpreter's
+The GC roots `state` and the callback's result. The VM retries a
+continuation after a garbage collection, as it retries a native, but a
+retry repeats only the continuation step. The only change to the interpreter's
 hot path is one comparison when a frame returns.
 
 ### 7.2 Results
@@ -594,9 +619,9 @@ hot path is one comparison when a frame returns.
 Each item gives the test, then the P1 and P2 results.
 
 - **E1, cost of one callback.** **[nice to have]**
-  - P1: 98.1 ns.
-  - P2: 64.4 ns.
-  - A Sand call through a function value: about 30 ns.
+  - P1: 101.3 ns.
+  - P2: 69.9 ns.
+  - A Sand call through a function value: 27 ns to 31 ns.
 - **E3, a callback that sleeps 10 ms while another task runs.**
   **[blocker]** for P1.
   - P1 failed with "a native callback cannot suspend".
@@ -625,17 +650,28 @@ Each item gives the test, then the P1 and P2 results.
   - Both designs need a rule (section 7.4). P2's prototype also keeps the
     callee in `state`, not in a capture, for the same reason.
 - **E13, a callback with a side effect, then a native step that checks
-  memory before it allocates.** Each native follows SPEC §16.3. The test
-  forces the first memory check to fail. **[blocker]** for P1.
-  - P1: "callback ran 2 times". The engine retried the whole native.
+  memory before it allocates.** The size of the allocation depends on the
+  callback's result, so the check must come after the callback. The test
+  forces the first memory check to fail. **[blocker]** for P1 under Sand's
+  retry rule.
+  - P1: "callback ran 2 times". The engine retried the whole native, so
+    the native cannot follow SPEC §16.3.
   - P2: "callback ran 1 times", and "the continuation ran 2 times". The
-    engine retried only the step after the callback.
+    engine retried only the step after the callback. SPEC §16.3 must
+    change to say this.
+- **E13b, a callback that returns a heap value, then a retried
+  continuation, under `retry_stress` and `gc_stress`.** **[necessary]
+  [hazard]**
+  - P2: the script got `[["view", "tree"]]`, the correct value.
+  - P2 without the fix that roots the result: the script got a corrupted
+    value and failed with "value too deeply nested to display"
+    (`results/sand_p2_e13b_without_fix.txt`).
 - **E14, cancel a task while its callback is suspended.** P2 ran the
   task's `defer` and then reused fibers correctly. **[necessary]**
 - **E6, sort 200,000 ints with the same merge sort.** **[nice to have]**
-  - P1: 328 ms.
-  - P2: 311 ms.
-  - Sand code: 184 ms to 207 ms.
+  - P1: 359 ms, 1.65 times the Sand code in the same binary.
+  - P2: 329 ms, 1.61 times the Sand code in the same binary.
+  - The difference between P1 and P2 is within the noise between builds.
 - **Native source size for the merge sort.** **[nice to have]** to reduce
   (F-T4).
   - P1: 24 lines in direct style.
@@ -646,7 +682,14 @@ Each item gives the test, then the P1 and P2 results.
   - A handler that sleeps gave "not ready".
   - The session worked correctly afterwards.
   - Each sync entry, including the compilation of the call expression,
-    took 43.1 µs.
+    took 41.1 µs.
+- **E16c, a handler that only computes.** **[necessary] [hazard]**
+  - It returned after 0.17 ms and 0.86 ms for small inputs.
+  - With a larger input, it gave "not ready" after 2.19 ms, without any
+    I/O. The VM's scheduler yields to the host every 2 ms (S-S5), and one
+    poll treats the yield as a suspension.
+- **E16d, a handler that changes state, then sleeps.** The entry failed,
+  and the change stayed: the list was `[1]`. **[necessary] [hazard]**
 
 Raw output: `lab/results/sand_p1.txt`, `sand_p1_noparking.txt`,
 `sand_p2.txt`.
@@ -658,14 +701,21 @@ binaries: unpatched, P2, and P2 with P1's parking. There were 3
 interleaved rounds of 5 runs each (`lab/overhead.sh`). For each binary
 and program, we used the best of the per-round medians.
 
-- **F-O1. P2 has no measurable cost.** The geomean P2/base ratio was
-  1.004. **[necessary]**
-- **F-O2. P1's parking costs about 7.5%.** The geomean P1/base
-  ratio was 1.075. Parking moves the fiber on every native call.
+- **F-O1. P2 has no measurable cost overall.** The geomean P2/base ratio
+  was 1.004. One program, `fannkuch`, took 329 ms to 352 ms with P2 and
+  282 ms to 347 ms with the baseline. That gap is within the baseline's
+  noise, but a small cost there is possible. **[necessary]**
+- **F-O2. P1's parking costs about 7.5% overall, and up to 80% on one
+  program.** The geomean P1/base ratio was 1.075. In every round,
+  `fannkuch` took 511 ms to 527 ms with P1 and 282 ms to 347 ms with the
+  baseline, and `dijkstra` was 20% to 35% slower. Parking moves the fiber
+  on every native call.
   **[nice to have]**: if Sand ever uses P1, it should park only for
   natives that can call back.
 - **Noise.** One program's baseline varied by up to 23% between
-  rounds. So ratios for single programs are not significant.
+  rounds. So a ratio for a single program is significant only if it holds
+  in every round. The binaries came from the patch before the E13b fix,
+  which changes only the retry path, not the hot path.
   **[necessary]** for the reading of F-O1 and F-O2.
 
 Full table: `lab/results/overhead_summary.txt`.
@@ -681,8 +731,7 @@ Full table: `lab/results/overhead_summary.txt`.
   a `Val` across the call with error E0502. A native that first made a
   rooted `Handle` compiled and read the right value. Test: `lab/e15/`,
   `results/e15.txt`. **[necessary]** for any design that runs callbacks
-  while a native holds handles. piccolo's GC library uses the same idea
-  with a `'gc` lifetime (R-S1).
+  while a native holds handles.
 
 ### 7.5 Platforms, safety, and regressions
 
@@ -702,8 +751,8 @@ Full table: `lab/results/overhead_summary.txt`.
   supply. Test: `results/wasm32_wasmtime_fiber.txt`.
   **[blocker] [source-only]**
 - **F-P4. The patch did not change Sand's test results.** With the patch,
-  1,127 tests passed and 3 failed. The same 3 tests also fail without the
-  patch:
+  1,127 tests of the `sandlang` package passed and 3 failed. The same 3
+  tests also fail without the patch:
   - `listeners_bind_exactly_the_checked_address`: this machine has no
     IPv6.
   - `names_that_are_not_utf8`: the file system of this machine.
@@ -737,6 +786,13 @@ A UI binding needs two kinds of call into Sand.
      host can then use an async update instead, as Compose code does with
      `LaunchedEffect`. This is the model of `invokeSync` and
      `NativeCallable.isolateLocal` (F-U4).
+   - The sync entry needs a run mode without the 2 ms yield to the host
+     (E16c), bounded by an instruction or CPU budget instead. This is a
+     **product tradeoff**: a long handler either blocks the UI thread up
+     to the budget, or fails.
+   - A failed sync entry leaves partial changes (E16d). This is also a
+     **product tradeoff**: document the partial changes, or let the type
+     checker reject sync handlers that can suspend.
 
 The ban on suspension in the sync entry does not conflict with F-N6. F-N6
 is a blocker for Sand → native → Sand callbacks, where P2 lets the
@@ -745,7 +801,14 @@ suspend.
 
 ### 8.2 Work items
 
-1. **[necessary]** Land P2. Close these gaps first:
+1. **[necessary]** Add rooted handles that a host can keep and must
+   release (F-S4). The VM's `pinned` list is a root set that this API can
+   use.
+2. **[necessary]** Add the async and sync host entry points of 8.1, with
+   the run mode and the partial-change rule that 8.1 describes. E16 polls
+   `eval`; a real API should call a kept handle directly, without
+   compilation.
+3. **[necessary]** Land P2. Close these gaps first:
    - A continuation must be able to return `Async`, `NeedPermission`, and
      `Yield`. A continuation must also go through the checks that
      `call_native` does: limits, cancellation, and preemption.
@@ -757,21 +820,20 @@ suspend.
    - Show native frames in stack traces.
    - Remove the allocations on each callback, to approach the cost of a
      Sand call.
-2. **[necessary]** Prevent unrooted handles in continuations. Give `Val` a
+   - Let the VM collect garbage and retry if `enter_callback` cannot grow
+     the stack. Today that failure ends the run.
+   - Change SPEC §16.3: a retry repeats only the current continuation
+     step (E13).
+4. **[necessary]** Prevent unrooted handles in continuations. Give `Val` a
    lifetime (F-L2), or pass all heap state through a typed, rooted
    container.
-3. **[necessary]** Add rooted handles that a host can keep and must
-   release (F-S4). The VM's `pinned` list is a root set that this API can
-   use.
-4. **[necessary]** Add the async and sync host entry points of 8.1. E16
-   polls `eval`; a real API should call a kept handle directly, without
-   compilation.
 5. **[necessary]** Decide what a native does if a callback changes its
-   inputs (F-N10). This is a product decision:
+   inputs (F-N10). This is a product tradeoff:
    - fail with an error, as CPython does; or
    - work on a snapshot and lose the change, as P2's sort does.
 
-   We judge that "fail" surprises users less.
+   We have no evidence about which choice users prefer. CPython chose to
+   fail.
 6. **[necessary]** Guard `NativeObject` borrows against re-entry (F-N11).
 7. **[necessary]** Keep higher-order library functions in Sand (F-X1).
 8. **[nice to have]** Add an adapter that turns a Rust `async` block into a
@@ -793,7 +855,10 @@ mechanics:
 - a ban on suspension, as for any sync entry (8.1);
 - lifetime-branded handles (F-L2), against E12.
 
-**[nice to have]** until a UI binding needs it.
+We found no source and ran no test that shows whether SwiftUI or Compose
+call back into script code during a synchronous host call that the script
+started. **[necessary]** to research before a UI binding ships. If they
+do, Sand needs P1's parking, at the cost in F-O2.
 
 ## 9. Limits of this research
 
@@ -806,7 +871,8 @@ mechanics:
   - We ran QuickJS (F-N4 to F-N9) but did not test its threading rule
     (F-U6).
 - **Host event loop.** No test embeds Sand in a real UI run loop. E16
-  shows that one poll of a session on a single-threaded executor works.
+  shows that one poll of a session on a single-threaded executor works
+  for short handlers, and E16c shows that it fails for long ones.
   A host must not call the sync entry while it already polls the same
   session. Rust's `&mut Session` borrow prevents that for a single owner.
   We did not test a host that shares a session through other means.
@@ -815,8 +881,12 @@ mechanics:
   7.2. Section 8.2 lists the gaps. **[necessary]**
 - **Unoptimized prototypes.** The P1 and P2 per-call costs come from
   unoptimized code, so the ranking in E1 can change. **[nice to have]**
-- **One P1 limit.** We did not run Sand's tests with the `nested_callbacks`
-  feature. **[tangential]**
+- **Test scope.** We ran the tests of the `sandlang` package, not of `cli/`
+  or `wasm/`, and not with the `nested_callbacks` feature.
+  **[tangential]**
+- **Reproduction.** The patch applies to commit `1520314` (origin/main at
+  the time of this research). Later changes to `src/` can stop it from
+  applying. **[nice to have]** to keep in mind.
 
 ## 10. Experiment index
 
@@ -842,10 +912,10 @@ All paths are under `lab/` unless noted. Runtime versions:
 | E10        | Component Model re-entrance                    | `wasmtime_async_cb.rs`      |
 | E11        | Caller's locals after a GC in a callback       | `sandlab`                   |
 | E12        | Native-held handles after a GC in a callback   | `sandlab`                   |
-| E13        | Retry of a native after a callback             | `sandlab`                   |
+| E13, E13b  | Retry of a native after a callback             | `sandlab`                   |
 | E14        | Cancel a task during a suspended callback      | `sandlab`                   |
 | E15        | Compile-time ban on handles across a callback  | `e15/`                      |
-| E16        | Sync host entry by one poll                    | `sandlab`                   |
+| E16, c, d  | Sync host entry by one poll                    | `sandlab`                   |
 | E-S1, E-S3 | Sand today: deferred callback; kept handle     | `sandlab`                   |
 | Overhead   | Prototype cost on `bench/` programs            | `overhead.sh`               |
 | Sources    | Every printed quote is in its source           | `verify_sources.py`         |

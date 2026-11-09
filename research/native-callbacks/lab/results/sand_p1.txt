@@ -1,6 +1,6 @@
 == sandlang prototype P1 (nested calls), fiber parking: true
-E1 script->script call through fn value: 34.2 ns/iter; native->script callback loop: 98.1 ns/iter (result Ok(Some("12500002500000")))
-E6 sort 200000 ints, median of 5: Ok(Some("\"native merge sort + nested Sand comparator (P1) 328.198585ms; merge sort written in Sand 207.111479ms\""))
+E1 script->script call through fn value: 31.0 ns/iter; native->script callback loop: 101.3 ns/iter (result Ok(Some("12500002500000")))
+E6 sort 200000 ints, median of 5: Ok(Some("\"native merge sort + nested Sand comparator (P1) 359.483637ms; merge sort written in Sand 217.980883ms\""))
 E3 callback that sleeps 10 ms: Err("error: a native callback cannot suspend")
 E2 native<->script recursion to depth 100: Ok(Some("100"))
 E2 native<->script recursion to depth 199: Ok(Some("199"))
@@ -9,7 +9,7 @@ E2 native<->script recursion to depth 1000: Err("error: limit: native callback n
 E4 instruction limit inside callback: Err("instruction limit exceeded")
 E11 caller's locals after a GC inside a nested callback: Ok(Some("true"))
 
-thread 'main' (28142) panicked at /home/user/sand-lang/src/vm/heap.rs:1601:45:
+thread 'main' (7171) panicked at /home/user/sand-lang/src/vm/heap.rs:1601:45:
 index out of bounds: the len is 439 but the index is 439
 stack backtrace:
    0: __rustc::rust_begin_unwind
