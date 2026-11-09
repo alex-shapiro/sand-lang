@@ -153,7 +153,7 @@ Common scripts fail, require workarounds, or produce misleading diagnostics.
 - [ ] ❓ _Tasks._ Decide what a caller listed in its own `task.race` does. If
       another task wins, the race cancels the caller with the other tasks.
 - [ ] ❓ _Tasks._ Evaluate owner-scoped tasks. An owner block cannot exit until
-      its tasks end, and cancelling the block cancels its tasks. See
+      its tasks end. Cancelling the block cancels its tasks. See
       [the task lifetime experiment](experiments/task-lifetime.md).
 - [ ] ❓ _Tasks._ Free the module-initializer fiber before each test.
       `Engine::run_tests` calls `run_main` twice and keeps the first fiber

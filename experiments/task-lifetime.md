@@ -38,7 +38,7 @@ We ran the same scenarios across eight concurrency runtimes:
 
 In each scenario, worker tasks sleep and record whether they finish or are cancelled. A slow worker sleeps for 80 ms. The faster worker in a race sleeps for 10 to 50 ms. Most cancellations occur about 10 ms after the workers start. Each program waits long enough for the worker to finish.
 
-Each program ran 10 times per system, and every run produced the same output. Each Sand candidate ran each scenario 5 times with the same result.
+Each program ran 10 times per system. Every run produced the same output. Each Sand candidate ran each scenario 5 times with the same result.
 
 ## Results from other systems
 
@@ -78,7 +78,7 @@ All five tested systems cancelled the timed work. Before this change, Sand was t
 
 ### A task in a race is cancelled during the race
 
-- **Another task wins**: Trio, Java (the task failed instead of being cancelled), and Node `Promise.any`.
+- **Another task wins**: Trio, Java, and Node `Promise.any`. In Java, the task failed instead of being cancelled.
 - **The race returns a catchable error**: Tokio, Kotlin, and Node `Promise.race`.
 - **The race returns the cancelled task**: asyncio `wait`.
 - **The program aborts**: Sand before this change.
@@ -125,7 +125,7 @@ Stopping tasks when garbage collection reclaims their handles would make executi
 
 The final implementation tracks the number of tasks that can still finish a race, so each cancellation takes constant time. The initial race prototype scanned the race list on each cancellation, which allowed unmetered quadratic work.
 
-All 1,135 tests passed, and instruction counts stayed within run-to-run noise. Across two runs against the baseline engine, retired instructions changed by:
+All 1,135 tests passed. Instruction counts stayed within run-to-run noise. Across two runs against the baseline engine, retired instructions changed by:
 
 - -0.01% and +0.01% for channel ping-pong
 - +0.01% and 0.00% for spawn-and-wait pairs
@@ -133,4 +133,4 @@ All 1,135 tests passed, and instruction counts stayed within run-to-run noise. A
 
 ## Open follow-up
 
-Owner-scoped tasks match the original assumption most closely. An owner block cannot exit until its tasks end, and cancelling the block cancels its tasks. Several runtimes use this model.
+Owner-scoped tasks match the original assumption most closely. An owner block cannot exit until its tasks end. Cancelling the block cancels its tasks. Several runtimes use this model.
