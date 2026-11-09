@@ -133,4 +133,4 @@ All 1,135 tests passed, and instruction counts stayed within run-to-run noise. A
 
 ## Open follow-up
 
-Owner-scoped tasks match the original assumption most closely. An owner block cannot exit until its tasks end, and cancelling the block cancels its tasks. Several runtimes use this model, including Trio, Swift, Kotlin, and Java.
+Owner-scoped tasks match the original assumption most closely. An owner block cannot exit until its tasks end, and cancelling the block cancels its tasks. Several runtimes use this model.
