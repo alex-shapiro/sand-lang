@@ -1470,10 +1470,11 @@ impl Vm {
         }
     }
 
-    /// Ends the fiber of a cancelled task: wakes its waiters with an error,
-    /// then resumes it at its pending deferred code (`unwind_to_pad`), or
-    /// frees it if there is none.
+    /// Ends the fiber of a cancelled task: abandons its race, wakes its
+    /// waiters with an error, then resumes it at its pending deferred code
+    /// (`unwind_to_pad`), or frees it if there is none.
     pub(crate) fn end_cancelled(&mut self, fid: u32, mut f: Box<Fiber>) {
+        f.race = Vec::new();
         for (w, g) in std::mem::take(&mut f.waiters) {
             self.deliver_error(w, g, "cancelled: task cancelled");
         }

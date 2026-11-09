@@ -153,6 +153,49 @@ print(slow.is_done())
 slow cancelled
 true
 
+=== a cancelled race leaves its tasks running when its deferred code sleeps
+let a = spawn task.sleep(1h)
+let r = spawn {
+    defer {
+        task.sleep(1ms)
+        print("racer woke")
+    }
+    task.race([a])
+}
+task.sleep(5ms)
+r.cancel()
+task.sleep(5ms)
+print(a.is_done())
+--- stdout
+racer woke
+false
+
+=== a cancelled race leaves its tasks running when one wakes its deferred code
+let ch: Channel<int> = Channel()
+let go: Channel<int> = Channel()
+let a = spawn {
+    go.recv()
+    ch.send(1)
+    print("sent")
+}
+let r = spawn {
+    defer {
+        ch.recv()
+        print("racer woke")
+    }
+    task.race([a])
+}
+task.sleep(5ms)
+r.cancel()
+task.sleep(5ms)
+go.send(1)
+task.sleep(5ms)
+print(a.is_done())
+--- stdout
+sent
+racer woke
+true
+
 === channels
 let ch = Channel()
 let producer = spawn {
