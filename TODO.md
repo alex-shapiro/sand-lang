@@ -143,33 +143,35 @@ The host cannot rely on engine limits, stability, or control.
 
 Common scripts fail, require workarounds, or produce misleading diagnostics.
 
-- [ ] ❓ _Tasks._ Run cleanup if cancellation finds a task preempted at the first
-      script call of its deferred code. `tick_call!` rewinds to that call, which
-      is outside the cleanup range, so `defer cleanup()` or a `use` binding with
-      a script `close` does not run. The run reports no error. In a tight loop
-      with a `defer` for each iteration, 99 of 300 runs lost a cleanup. Do not
-      preempt at that call, and add a scheduling stress mode that stops and
-      cancels tasks at each safe point.
-- [ ] ❓ _Tasks._ Decide if cancelling a task in `task.race` cancels the other
-      tasks of the race. They keep running today, so a cancelled `task.timeout`
-      caller can leave its work running with no error. If they stop, a task can
-      stop because another task cancelled a race that it did not start.
-- [ ] ❓ _Tasks._ Decide what a task that is cancelled during `task.race` does.
-      `task.race([a, b])` returns the result of `b` if `a` was cancelled before
-      the race, but the run stops if `a` is cancelled during the race.
-- [ ] ❓ _Tasks._ Free the fiber of the module initializer before each test.
-      `sand test` allows one task fewer than `sand run`, because
-      `Engine::run_tests` calls `run_main` twice and the first fiber stays live.
-- [ ] ❓ _Tasks._ Decide what module-level tasks do during tests. `run_tests`
-      clears the ready queue after the module runs, so a `Ready` task is never
-      queued again. A test that waits for that task fails with a deadlock error.
-- [ ] ❓ _Tasks._ Test the fiber lifecycle as a matrix of each stop kind and
-      each event (cancel, wake, finish, end of run), with a debug check of the
-      scheduler invariants after each slice.
-- [ ] ❓ _Tasks._ Run all deferred code at the end of a run. If deferred code
-      needs a permission prompt at the end of a run, `Vm::end_tasks` stops, and
-      the deferred code of the other tasks does not run. The run reports no
-      error.
+- [ ] ❓ _Tasks._ Run cleanup if a task is cancelled while preempted at the
+      first script call of its deferred code. `tick_call!` rewinds the frame to
+      that call, which lies outside the cleanup range. As a result, `defer`
+      blocks and `use` bindings with a script `close` method are skipped
+      silently. In a tight loop with a `defer` in each iteration, 99 of 300 runs
+      lost a cleanup. Avoid preemption at that call. Add a scheduling stress
+      mode that suspends and cancels tasks at each safe point.
+- [ ] ❓ _Tasks._ Decide whether cancelling a task in `task.race` cancels the
+      other raced tasks. Today the other tasks continue running. A cancelled
+      `task.timeout` caller can therefore leave its work running silently. If
+      cancelling a race cancels all of its tasks, a task can be cancelled
+      through a race that another task started.
+- [ ] ❓ _Tasks._ Decide how `task.race` handles a task that is cancelled during
+      the race. `task.race([a, b])` returns the result of `b` if `a` is
+      cancelled before the race starts. However, the run fails if `a` is
+      cancelled while the race is waiting.
+- [ ] ❓ _Tasks._ Free the module-initializer fiber before each test.
+      `Engine::run_tests` calls `run_main` twice and keeps the first fiber
+      alive. As a result, `sand test` allows one fewer task than `sand run`.
+- [ ] ❓ _Tasks._ Decide how module-level tasks behave during tests. `run_tests`
+      clears the ready queue after the module initializer finishes. A `Ready`
+      task is never queued again. A test that waits for that task fails with a
+      deadlock error.
+- [ ] ❓ _Tasks._ Test the fiber lifecycle across every combination of stop kind
+      and scheduler event. Check the scheduler invariants after each slice in
+      debug builds.
+- [ ] ❓ _Tasks._ Run all deferred code at the end of a run. `Vm::end_tasks`
+      returns early if deferred code requests a permission prompt. The
+      remaining tasks then skip their deferred code silently.
 - [ ] ❓ _Testing._ Decide whether `exit(0)` should pass a test. `exit(0)`
       currently stops a test early and passes it. A test that calls `exit(0)`
       before a failing `assert` therefore passes. If `exit` always fails a test,

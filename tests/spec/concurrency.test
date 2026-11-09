@@ -135,7 +135,7 @@ done
 racing
 true
 
-=== a race cancels the slower tasks when its winner finishes
+=== a race cancels the slower tasks after its winner finishes
 let slow = spawn {
     defer print("slow cancelled")
     task.sleep(1s)
@@ -153,7 +153,7 @@ print(slow.is_done())
 slow cancelled
 true
 
-=== a cancelled race leaves its tasks running when its deferred code sleeps
+=== a cancelled race leaves its tasks running if its deferred code sleeps
 let a = spawn task.sleep(1h)
 let r = spawn {
     defer {
@@ -170,7 +170,7 @@ print(a.is_done())
 racer woke
 false
 
-=== a cancelled race leaves its tasks running when one wakes its deferred code
+=== a cancelled race leaves its tasks running if a raced task wakes its deferred code
 let ch: Channel<int> = Channel()
 let go: Channel<int> = Channel()
 let a = spawn {

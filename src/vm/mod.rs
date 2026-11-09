@@ -92,13 +92,13 @@ pub enum CtlKind {
     NeedPermission(Capability),
     /// Suspend the task until the future completes.
     Async(Suspension),
-    /// The task waits for the scheduler event that [`Vm::block`] registered
-    /// as generation `wait_gen`; the call returns what wakes it.
+    /// Wait for the scheduler event that [`Vm::block`] registered as
+    /// generation `wait_gen`. The call returns the value that wakes the task.
     Blocked {
         wait_gen: u64,
     },
-    /// Like `Blocked`, for `task.race`: on the wake-up, the engine cancels
-    /// the remaining `tasks`.
+    /// Wait for a `task.race` event registered as generation `wait_gen`. On
+    /// wake-up, the engine cancels the remaining `tasks`.
     Racing {
         wait_gen: u64,
         tasks: Vec<Value>,
@@ -111,7 +111,7 @@ pub enum CtlKind {
     /// open-resource slot, I/O buffer space) may be held by garbage. See
     /// [`Vm::resource_slot`].
     Collect,
-    /// The native cancelled the task that runs it (see [`Vm::cancel_task`]).
+    /// The native cancelled the running task. See [`Vm::cancel_task`].
     Cancelled,
 }
 
@@ -307,8 +307,8 @@ pub struct Fiber {
     pub io: Option<u64>,
     /// An error (`kind: message`) to raise when the fiber resumes.
     pub pending_error: Option<String>,
-    /// Whether the fiber stopped in a native call or just after it, so that
-    /// its instruction pointer is one past that call.
+    /// Whether the fiber stopped in or just after a native call. Its
+    /// instruction pointer is then one past that call.
     pub stopped_in_native_call: bool,
 }
 
@@ -751,8 +751,8 @@ impl Vm {
         }
     }
 
-    /// `kind` (`Blocked` or `Yield`, which own no memory) as a [`Ctl`], in the
-    /// box of the last one consumed.
+    /// Wraps `kind` in a [`Ctl`], reusing `spare_ctl` if available. `kind`
+    /// must be `Blocked` or `Yield`.
     #[inline]
     fn signal(&mut self, kind: CtlKind) -> Ctl {
         match self.spare_ctl.take() {
@@ -1431,10 +1431,9 @@ impl Vm {
         self.recycle_fiber(f);
     }
 
-    /// Cancels `task` on behalf of the running native. Does nothing if `task`
-    /// has finished. If `task` is the running task, returns
-    /// [`CtlKind::Cancelled`], which the native must return so that the engine
-    /// ends the task.
+    /// Cancels a running `task`. If `task` is the caller, returns
+    /// [`CtlKind::Cancelled`]. The native must propagate this error so the
+    /// engine ends the task.
     pub fn cancel_task(&mut self, task: Value) -> Result<(), Ctl> {
         if let Obj::Task(t) = self.heap.get_mut(task)
             && t.state == TaskState::Running
@@ -1447,8 +1446,7 @@ impl Vm {
         Ok(())
     }
 
-    /// Cancels `task`, which is not the running task. Does nothing if `task`
-    /// has finished.
+    /// Cancels a running `task` other than `self.current`.
     fn cancel_other_task(&mut self, task: Value) {
         let (fid, state) = match self.heap.get(task) {
             Obj::Task(t) => (t.fiber, t.state),
@@ -1457,7 +1455,7 @@ impl Vm {
         if state != TaskState::Running {
             return;
         }
-        debug_assert_ne!(fid, self.current, "the running task must stop through `cancel_task`");
+        debug_assert_ne!(fid, self.current, "use cancel_task for the running task");
         if let Obj::Task(t) = self.heap.get_mut(task) {
             t.state = TaskState::Cancelled;
         }
@@ -1473,9 +1471,9 @@ impl Vm {
         }
     }
 
-    /// Ends the fiber of a cancelled task: abandons its race, wakes its
-    /// waiters with an error, then resumes it at its pending deferred code
-    /// (`unwind_to_pad`), or frees it if there is none.
+    /// Ends the fiber of a cancelled task. Clears its active race and wakes
+    /// its waiters with an error. Resumes the fiber at its next cleanup pad,
+    /// or frees the fiber if all cleanups have run.
     pub(crate) fn end_cancelled(&mut self, fid: u32, mut f: Box<Fiber>) {
         f.race = Vec::new();
         for (w, g) in std::mem::take(&mut f.waiters) {

@@ -50,8 +50,7 @@ impl Wake for SlotWaker {
     }
 }
 
-/// A pending I/O operation: the future of a native call of task `fid`,
-/// which waits for it as wait generation `wait_gen`.
+/// A pending I/O operation for fiber `fid` at generation `wait_gen`.
 struct IoOp {
     fid: u32,
     wait_gen: u64,
@@ -148,29 +147,26 @@ const CLOCK_SLICES: u32 = 32;
 /// host's executor run.
 const YIELD_EVERY: Duration = Duration::from_millis(2);
 
-/// What [`Vm::drive`] runs the tasks for. Each purpose has its own stop type,
-/// so a caller handles only the stops that its purpose can produce.
+/// Stopping policy for [`Vm::drive`]. Each policy defines its own
+/// [`Stop`](Self::Stop) type so callers handle only the stops that can occur.
 pub(crate) trait DriveUntil {
     type Stop;
 
-    /// The stop when the task of fiber `fid` finishes with `result`, if that
-    /// ends the drive.
+    /// Returns a stop if finishing fiber `fid` with `result` ends the drive.
     fn stop_on_finish(&self, fid: u32, result: Value) -> Option<Self::Stop>;
 
-    /// The stop when a task needs a permission prompt, or `None` if the
-    /// engine asks the prompter at once.
+    /// Returns a stop if a permission prompt for `capability` ends the drive.
+    /// Returns `None` if the engine should prompt immediately.
     fn stop_on_prompt(&self, capability: &Capability) -> Option<Self::Stop>;
 
-    /// The outcome when no task can run and no I/O is pending.
-    fn stop_when_blocked(&self, vm: &Vm) -> Result<Self::Stop, RunEnding>;
+    /// Returns the outcome if all tasks are blocked and all I/O is complete.
+    fn stop_on_all_blocked(&self, vm: &Vm) -> Result<Self::Stop, RunEnding>;
 
-    /// The stop before the engine waits for pending I/O, or `None` if it
-    /// waits.
+    /// Returns a stop if pending I/O ends the drive instead of waiting.
     fn stop_before_io_wait(&self) -> Option<Self::Stop>;
 }
 
-/// Drives the tasks until the main task, the fiber with this id, finishes
-/// with a value.
+/// Drives tasks until the main fiber finishes.
 pub(crate) struct UntilMainDone(u32);
 
 impl DriveUntil for UntilMainDone {
@@ -184,7 +180,7 @@ impl DriveUntil for UntilMainDone {
         None
     }
 
-    fn stop_when_blocked(&self, vm: &Vm) -> Result<Value, RunEnding> {
+    fn stop_on_all_blocked(&self, vm: &Vm) -> Result<Value, RunEnding> {
         let trace = match vm.fibers.get(self.0 as usize) {
             Some(Some(f)) => vm.trace_of(f, None),
             _ => vec![],
@@ -197,17 +193,18 @@ impl DriveUntil for UntilMainDone {
     }
 }
 
-/// Why a drive of [`UntilIdle`] stopped.
+/// Why a drive with [`UntilIdle`] stopped.
 pub(crate) enum IdleStop {
-    /// No task can run.
+    /// All tasks are finished or blocked.
     Idle,
-    /// A task needs an answer to a permission prompt.
+    /// A task needs a permission prompt.
     Prompt(Capability),
 }
 
-/// Drives the tasks until no task can run.
+/// Drives tasks until all tasks are finished or blocked, or a task needs a
+/// permission prompt.
 pub(crate) struct UntilIdle {
-    /// Whether tasks that wait for pending I/O count as able to run.
+    /// Whether the drive waits for pending I/O before stopping.
     pub waits_for_io: bool,
 }
 
@@ -222,7 +219,7 @@ impl DriveUntil for UntilIdle {
         Some(IdleStop::Prompt(capability.clone()))
     }
 
-    fn stop_when_blocked(&self, _vm: &Vm) -> Result<IdleStop, RunEnding> {
+    fn stop_on_all_blocked(&self, _vm: &Vm) -> Result<IdleStop, RunEnding> {
         Ok(IdleStop::Idle)
     }
 
@@ -390,9 +387,9 @@ impl Vm {
         Ok(fid)
     }
 
-    /// Runs the ready tasks and pending I/O until `until` stops the drive.
-    /// The future may be dropped where it waits: every task is then in the
-    /// scheduler's tables.
+    /// Runs ready tasks and pending I/O until `until` stops the drive.
+    /// If the future is dropped at an `.await` point, all tasks remain in the
+    /// scheduler tables.
     pub(crate) async fn drive<U: DriveUntil>(&mut self, until: U) -> Result<U::Stop, RunEnding> {
         let mut timer = RunTimer::start(self.host.clock.clone());
         // Where an instruction was retried after a memory limit error.
@@ -433,12 +430,10 @@ impl Vm {
                 let retried_at = gc_retried.take();
                 match stop {
                     FiberStop::CollectAndRetry(frame) => {
-                        // Memory checks count garbage that has not been
-                        // collected yet, so collect and run the failed
-                        // instruction again. If the retry itself failed, report
-                        // the limit. A retry is told apart from a later run of
-                        // the same instruction by the fuel spent: reaching it
-                        // again takes a back edge or a call, which cost fuel.
+                        // A later execution of the same instruction must cross
+                        // a back edge or a call, both of which spend fuel. If
+                        // the instruction failed again without spending fuel,
+                        // the retry itself hit the memory limit.
                         let at = (fid, f.frames.len(), frame.ip);
                         let op = self.prog.protos[frame.proto as usize].code[frame.ip as usize];
                         if retried_at == Some(at) && slice - fuel <= super::interp::call_tick(op) {
@@ -534,7 +529,7 @@ impl Vm {
             }
             self.flush_stdout();
             if self.io.is_empty() {
-                return until.stop_when_blocked(self);
+                return until.stop_on_all_blocked(self);
             }
             let done = self.io.poll_ready(None);
             if !done.is_empty() {

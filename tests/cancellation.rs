@@ -1,13 +1,12 @@
-//! Cancelled tasks that stopped in or just after a native call run each
-//! `defer` and `use` cleanup exactly once, for each way to leave the guarded
-//! code.
+//! Tests that a cancelled task runs each `defer` and `use` cleanup once across
+//! all block exit forms and suspension points.
 
 mod common;
 
 use common::run;
 
-/// The bodies of `work`, one for each way to leave the guarded code. `GUARD`
-/// is the cleanup and `STOP` is the last guarded statement.
+/// Function bodies for each way to exit guarded code. `GUARD` is replaced with
+/// the cleanup statement. `STOP` is replaced with the final guarded statement.
 const EXITS: [(&str, &str); 7] = [
     ("tail", "fn work() {\nGUARD\nSTOP\n}"),
     ("return", "fn work() {\nGUARD\nif on {\nSTOP\nreturn\n}\nprint(\"x\")\n}"),
@@ -18,8 +17,8 @@ const EXITS: [(&str, &str); 7] = [
     ("block value", "fn work() {\nlet v = {\nGUARD\nSTOP\n1\n}\nif v == 2 { print(\"x\") }\n}"),
 ];
 
-/// Where the task stops, as (name, last guarded statement, cleanup code, main
-/// task's code).
+/// Task suspension cases: name, final guarded statement, cleanup body, and
+/// main task body.
 const STOPS: [(&str, &str, &str, &str); 6] = [
     ("yielded in guarded code", "task.yield_now()", "print(\"d\")", "task.yield_now()\nt.cancel()"),
     ("woken in guarded code", "let _ = gate.recv()", "print(\"d\")", "task.sleep(1ms)\ngate.send(1)\nt.cancel()"),
@@ -29,7 +28,7 @@ const STOPS: [(&str, &str, &str, &str); 6] = [
     ("waiting at the end of cleanup", "let s = 0", "print(\"d\")\nlet _ = gate.recv()", "task.sleep(1ms)\nt.cancel()"),
 ];
 
-/// The two forms of cleanup, as (name, guard statement).
+/// Cleanup forms: name and guard statement.
 const GUARDS: [(&str, &str); 2] = [("defer", "defer {\nCLEANUP\n}"), ("use", "use r = Res(name: \"r\")")];
 
 #[test]

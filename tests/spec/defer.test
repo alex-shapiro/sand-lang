@@ -488,7 +488,7 @@ print("end")
 closed a
 end
 
-=== cancelling a task between two deferred blocks runs only the block not started
+=== cancelling a task between two deferred blocks runs only the remaining block
 let t = spawn {
     defer print("outer")
     defer {
@@ -505,7 +505,7 @@ inner
 outer
 end
 
-=== cancelling a task inside its deferred code does not run that code again
+=== cancelling a task inside its deferred code runs that code once
 let t = spawn {
     defer {
         print("started")

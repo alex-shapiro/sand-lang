@@ -187,17 +187,19 @@ Source commit: `d84df4d`.
 
 ### 9. Explicit VM control flow
 
-Replace the `Vm` fields `wait_gen`, `pending_race`, `cancel_current`, `gc_retry`,
-and `ending` with explicit return values and parameters. Native modules that
-call `Vm::cancel_task` must return its error. `CtlKind::Blocked` gains a field,
-and `CtlKind` gains `Racing` and `Cancelled`. The changeset also fixes four task
-defects:
+Replace control-flow flags on `Vm` with explicit return values and parameters.
+`Vm::cancel_task` now returns a `Result`, and native modules must propagate its
+error. `CtlKind` adds variants for racing and self-cancellation, and includes
+the wait generation in `CtlKind::Blocked`.
 
-- A cancelled `task.race` no longer cancels its tasks at a later wake-up.
-- A race with no task left to finish fails instead of waiting forever.
-- A task whose failure ends a REPL input is cancelled instead of running forever.
-- Cancellation runs the deferred code of a task exactly once if the task stopped
-  in or just after a native call.
+This changeset also fixes four task defects:
+
+- A cancelled `task.race` leaves its tasks running.
+- A race fails immediately if all of its tasks are cancelled or only the caller
+  remains.
+- A task whose failure ends a REPL input is cancelled.
+- A cancelled task runs its deferred code once if it stopped in or just after a
+  native call.
 
 Source commits: `fc27559`, `fb9367e`, `5bdac47`, `61bfe31`.
 
