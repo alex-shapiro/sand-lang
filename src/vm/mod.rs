@@ -617,8 +617,10 @@ pub struct Vm {
     /// interpreter, a native or an I/O finisher: the VM is memory safe but may
     /// be inconsistent, so a REPL session discards it.
     pub(crate) broken: bool,
-    /// Testing aid: causes the first memory or resource check in each `vm_function` call to fail (see `Config::retry_stress`).
+    /// Testing aid: causes the first memory or resource check in each `vm_function` call and instruction to fail (see `Config::retry_stress`).
     pub(crate) retry_stress: bool,
+    /// Under `retry_stress`, set while an instruction runs again after a collection.
+    pub(crate) instruction_retried: bool,
     /// Struct nesting depth during conversion to Sand (see [`struct_into_value`](crate::native::struct_into_value)).
     pub(crate) struct_depth: usize,
 }
@@ -710,6 +712,7 @@ impl Vm {
             ascii_strs: Vec::new(),
             broken: false,
             retry_stress: false,
+            instruction_retried: false,
             struct_depth: 0,
         };
         vm.load_program();

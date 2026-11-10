@@ -194,6 +194,11 @@ impl Meter {
         self.base.get().saturating_add(self.spent())
     }
 
+    /// Gives back the fuel charged since [`Meter::fuel`] returned `mark`.
+    pub(crate) fn refund_to(&self, mark: i64) {
+        self.fuel.set(mark);
+    }
+
     /// Resets the fuel counter to zero and replaces the interrupt flag for a
     /// new session run.
     pub(crate) fn reset(&mut self, interrupt: Arc<AtomicBool>) {

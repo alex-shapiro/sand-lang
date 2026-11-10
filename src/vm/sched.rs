@@ -387,13 +387,48 @@ impl Vm {
         Ok(fid)
     }
 
+    /// Runs `f` until it stops or spends the slice `fuel`.
+    ///
+    /// An instruction that reaches a memory limit runs again here after a
+    /// collection, with the fuel the slice had before it, because a limit
+    /// depends on when the collector ran and task switches must not.
+    fn run_slice(&mut self, f: &mut Fiber, fuel: &mut i64) -> Result<FiberStop, RunEnding> {
+        // Where an instruction ran again, and the slice's fuel at that point.
+        let mut retried: Option<((usize, u32), i64)> = None;
+        loop {
+            // A Rust panic in the interpreter or a native (a bug) ends
+            // the run as an internal error instead of unwinding into the
+            // host; caught per slice, which costs nothing per native call.
+            let r = match crate::unwind::catch(|| self.interp(f, fuel)) {
+                Ok(r) => r,
+                Err(msg) => {
+                    self.broken = true;
+                    return Err(Trap::Internal { message: msg, trace: self.trace_of(f, None) }.into());
+                }
+            };
+            let Ok(FiberStop::CollectAndRetry(frame)) = r else { return r };
+            let tick = super::interp::call_tick(self.prog.protos[frame.proto as usize].code[frame.ip as usize]);
+            self.meter.sync(*fuel + tick);
+            *fuel = self.meter.resync();
+            // A later execution of the same instruction must cross a back
+            // edge or a call, both of which spend fuel. If the instruction
+            // failed again without spending fuel, the retry itself hit the
+            // memory limit.
+            let at = (f.frames.len(), frame.ip);
+            if retried.is_some_and(|(retried_at, fuel_at_retry)| retried_at == at && *fuel >= fuel_at_retry) {
+                return Err(Trap::Limit(LimitKind::Memory).into());
+            }
+            retried = Some((at, *fuel));
+            self.collect_all_garbage(Some(f));
+            self.instruction_retried = self.retry_stress;
+        }
+    }
+
     /// Runs ready tasks and pending I/O until `until` stops the drive.
     /// If the future is dropped at an `.await` point, all tasks remain in the
     /// scheduler tables.
     pub(crate) async fn drive<U: DriveUntil>(&mut self, until: U) -> Result<U::Stop, RunEnding> {
         let mut timer = RunTimer::start(self.host.clock.clone());
-        // Where an instruction was retried after a memory limit error.
-        let mut gc_retried: Option<(u32, usize, u32)> = None;
         loop {
             while let Some(fid) = self.ready.pop_front() {
                 let Some(mut f) = self.fibers.get_mut(fid as usize).and_then(|f| f.take()) else { continue };
@@ -404,17 +439,7 @@ impl Vm {
                 self.current = fid;
                 // Deadlines let long natives check the time limits mid-call.
                 let mut fuel = self.meter.start_slice(timer.cpu_deadline(self.host.limits.max_cpu_time), self.deadline);
-                let slice = fuel;
-                // A Rust panic in the interpreter or a native (a bug) ends
-                // the run as an internal error instead of unwinding into the
-                // host; caught per slice, which costs nothing per native call.
-                let r = match crate::unwind::catch(|| self.interp(&mut f, &mut fuel)) {
-                    Ok(r) => r,
-                    Err(msg) => {
-                        self.broken = true;
-                        Err(Trap::Internal { message: msg, trace: self.trace_of(&f, None) }.into())
-                    }
-                };
+                let r = self.run_slice(&mut f, &mut fuel);
                 self.meter.sync(fuel);
                 timer.ran(self.meter.spent());
                 // Pending I/O checks its buffers against the heap's size.
@@ -427,26 +452,8 @@ impl Vm {
                         return Err(ending);
                     }
                 };
-                let retried_at = gc_retried.take();
                 match stop {
-                    FiberStop::CollectAndRetry(frame) => {
-                        // A later execution of the same instruction must cross
-                        // a back edge or a call, both of which spend fuel. If
-                        // the instruction failed again without spending fuel,
-                        // the retry itself hit the memory limit.
-                        let at = (fid, f.frames.len(), frame.ip);
-                        let op = self.prog.protos[frame.proto as usize].code[frame.ip as usize];
-                        if retried_at == Some(at) && slice - fuel <= super::interp::call_tick(op) {
-                            self.fibers[fid as usize] = Some(f);
-                            return Err(Trap::Limit(LimitKind::Memory).into());
-                        }
-                        gc_retried = Some(at);
-                        self.collect_all_garbage(Some(&mut f));
-                        f.state = FiberState::Ready;
-                        self.fibers[fid as usize] = Some(f);
-                        self.ready.push_front(fid);
-                        continue;
-                    }
+                    FiberStop::CollectAndRetry(_) => unreachable!("run_slice handles retries"),
                     FiberStop::Done(v) => {
                         self.fibers[fid as usize] = Some(f);
                         if let Some(stop) = until.stop_on_finish(fid, v) {
