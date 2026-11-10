@@ -1018,3 +1018,35 @@ fn cached_regexes_do_not_lower_the_memory_available_at_a_safe_point() {
     }
     assert!(fits(200, low * 199 / 200), "{low} list nodes fit without cached regexes");
 }
+
+fn fuel_under_gc_stress(src: &str, gc_stress: bool) -> String {
+    let config = Config::new().clock(Arc::new(StoppedClock(sandlang::platform::Instant::now())));
+    let (r, out) = run(config.host_modules(HostModules::new([fuel_probe()]).unwrap()).gc_stress(gc_stress), src);
+    assert!(r.is_ok(), "{r:?}");
+    out
+}
+
+#[test]
+fn changing_a_map_after_an_early_break_costs_the_same_after_a_collection() {
+    let src = r#"import probe
+var m: [str: int] = [:]
+for i in 0..2000 { m["key\(i)"] = i }
+fn peek(m: [str: int], depth: int) {
+    if depth > 0 {
+        peek(m, depth - 1)
+        return
+    }
+    for (k, v) in m { break }
+}
+var i = 0
+while i < 200 {
+    peek(m, 1)
+    var j = 0
+    while j < 2 { j += 1 }
+    m["key0"] = i
+    i += 1
+}
+print(probe.fuel())
+"#;
+    assert_eq!(fuel_under_gc_stress(src, false), fuel_under_gc_stress(src, true));
+}

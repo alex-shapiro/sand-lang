@@ -655,6 +655,9 @@ pub struct Pins {
 impl Clone for Pins {
     fn clone(&self) -> Pins {
         Pins::default()
+    /// Iterators made since the last detach that have not finished. Unlike
+    /// the length of `its`, this count does not depend on the collector.
+    pub open: usize,
     }
 }
 

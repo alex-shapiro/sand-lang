@@ -58,8 +58,9 @@ impl Vm {
         // The steps cannot fail, so the removed entries they will skip are
         // charged now: an iterator walks exactly these entries (the map or
         // set does not change before the iterator moves to a copy of them).
-        let skipped = (slots - live) as u64;
-        self.meter.charge(if prune { skipped + pins.its.len() as u64 } else { skipped })?;
+        // The extra unit pays for this iterator's place in later walks of the
+        // pins, because the length of the pins depends on the collector.
+        self.meter.charge((slots - live) as u64 + 1)?;
         let it = self.iter_fn(src);
         let Value::Obj(ih) = it else { unreachable!() };
         let kept = if prune {
@@ -77,6 +78,7 @@ impl Vm {
             pins.its = its;
         }
         pins.its.push(ih);
+        pins.open += 1;
         let after = pins.bytes();
         self.heap.account(before, after);
         Ok(it)
@@ -88,8 +90,8 @@ impl Vm {
     #[inline]
     pub(crate) fn unpin(&mut self, c: Value) -> Result<(), Fail> {
         let pinned = match self.heap.get(c) {
-            Obj::Map(m) => !m.pins.its.is_empty(),
-            Obj::Set(s) => !s.pins.its.is_empty(),
+            Obj::Map(m) => m.pins.open > 0,
+            Obj::Set(s) => s.pins.open > 0,
             _ => false,
         };
         if pinned { self.detach_iters(c) } else { Ok(()) }
@@ -104,10 +106,11 @@ impl Vm {
             Obj::Set(s) => (&s.pins, s.entries.len(), s.entries.len() * SET_ENTRY_SIZE),
             _ => return Ok(()),
         };
-        let pinned = pins.its.len();
+        // The charge uses the count of open iterators, so a copy costs the same
+        // whether or not the collector has freed the iterators that need it.
+        self.meter.charge(if pins.open > 0 { slots as u64 } else { 0 })?;
         let live: Vec<u32> = pins.its.iter().copied().filter(|&p| reads_in_place(&self.heap, p, h)).collect();
         if !live.is_empty() {
-            self.meter.charge((slots + pinned) as u64)?;
             self.check_memory(bytes.saturating_add(std::mem::size_of::<Obj>()))?;
             let copy = match self.heap.get(c) {
                 Obj::Map(m) => Obj::Map(Box::new(MapObj { entries: m.entries.clone(), live: m.live, ..MapObj::default() })),
@@ -131,6 +134,13 @@ impl Vm {
             self.heap.account(before, 0);
         }
         Ok(())
+    }
+
+    /// Records that an iterator reading map or set `container` finished.
+    fn close_iterator(&mut self, container: u32) {
+        if let Some(pins) = self.heap.pins_mut(Value::Obj(container)) {
+            pins.open = pins.open.saturating_sub(1);
+        }
     }
 
     /// Calls the iterator function `it` (an [`Obj::IterFn`]): the next
@@ -174,11 +184,17 @@ impl Vm {
                     let pair = self.heap.new_tuple(&[k, v]);
                     (Some(pair), IterSrc::Map { map, slot: s + 1 })
                 }
-                None => (None, IterSrc::Done),
+                None => {
+                    self.close_iterator(map);
+                    (None, IterSrc::Done)
+                }
             },
             IterSrc::Set { set, slot } => match set_entry(&self.heap, set, slot) {
                 Some((s, x)) => (Some(x), IterSrc::Set { set, slot: s + 1 }),
-                None => (None, IterSrc::Done),
+                None => {
+                    self.close_iterator(set);
+                    (None, IterSrc::Done)
+                }
             },
         };
         if let Some(src) = self.heap.iter_src_mut(it) {
@@ -197,7 +213,10 @@ impl Vm {
                 *out = x;
                 (IterSrc::Set { set, slot: s + 1 }, true)
             }
-            None => (IterSrc::Done, false),
+            None => {
+                self.close_iterator(set);
+                (IterSrc::Done, false)
+            }
         };
         if let Some(src) = self.heap.iter_src_mut(it) {
             *src = state;
@@ -216,7 +235,10 @@ impl Vm {
                 out[1] = v;
                 (IterSrc::Map { map, slot: s + 1 }, true)
             }
-            None => (IterSrc::Done, false),
+            None => {
+                self.close_iterator(map);
+                (IterSrc::Done, false)
+            }
         };
         if let Some(src) = self.heap.iter_src_mut(it) {
             *src = state;
