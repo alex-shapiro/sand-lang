@@ -50,6 +50,13 @@ The host cannot rely on engine limits, stability, or control.
       allocations reuse high-index slots first.
 - [ ] 🔴 [052](triage/052-dead-temporaries-rooted/summary.md) _Performance._ Clear dead temporaries before native calls so that inlined allocations
       do not stay rooted in caller frame registers during garbage collection.
+- [ ] ❓ _Metering._ Make regex fuel independent of execution speed. Regex work
+      charges at least one unit per microsecond it takes, so the fuel of a
+      script that uses regexes differs between runs, and even a short search
+      can add a unit. Fuel slices decide task switches, so a task switch can
+      move between runs. The time charge bounds regex work that the
+      deterministic charges underestimate. Replace it with a deterministic
+      cost model, or check the time limits without charging fuel.
 - [ ] ❓ _Embedding._ Convert derived `SandEnum` and `SandStruct` values iteratively with an
       explicit stack. The derived `FromValue` and `IntoValue` implementations
       recurse once per nesting level, so deep values can overflow a small host
