@@ -180,11 +180,6 @@ impl Fail {
     pub(crate) fn into_kind(self) -> FailKind {
         *self.0
     }
-
-    #[cfg(test)]
-    pub(crate) fn kind(&self) -> &FailKind {
-        &self.0
-    }
 }
 
 impl Ctl {

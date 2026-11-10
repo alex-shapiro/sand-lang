@@ -136,7 +136,7 @@ enum Completion {
 pub trait NativeError: Send + Sized + 'static + sealed::Sealed {
     /// The error of the closure that finishes the call: this error without
     /// its requests to the scheduler, because the closure runs after the wait.
-    type Finish: Send + 'static;
+    type FinishError: Send + 'static;
     #[doc(hidden)]
     fn stop_call(self, vm: &mut Vm) -> Result<Value, Ctl>;
 }
@@ -149,21 +149,21 @@ mod sealed {
 }
 
 impl NativeError for Ctl {
-    type Finish = Fail;
+    type FinishError = Fail;
     fn stop_call(self, _: &mut Vm) -> Result<Value, Ctl> {
         Err(self)
     }
 }
 
 impl NativeError for Fail {
-    type Finish = Fail;
+    type FinishError = Fail;
     fn stop_call(self, _: &mut Vm) -> Result<Value, Ctl> {
         Err(self.into())
     }
 }
 
 impl NativeError for HostError {
-    type Finish = HostError<Fail>;
+    type FinishError = HostError<Fail>;
     fn stop_call(self, vm: &mut Vm) -> Result<Value, Ctl> {
         self.into_sand_error(vm)
     }
@@ -174,7 +174,7 @@ impl<T: IntoValue + Send + 'static, E: NativeError> Later<T, E> {
     /// returned closure on the VM thread to produce the Sand result.
     ///
     /// The closure can only fail, because its error is
-    /// [`NativeError::Finish`]. It cannot write to the standard streams,
+    /// [`NativeError::FinishError`]. It cannot write to the standard streams,
     /// because a write can ask for a permission. Return the data to the script
     /// instead, and let the script print it.
     /// A closure that returns a [`Ctl`] does not compile:
@@ -195,8 +195,8 @@ impl<T: IntoValue + Send + 'static, E: NativeError> Later<T, E> {
     /// pending futures while a task is suspended.
     pub fn new<F>(wait_kind: WaitKind, fut: impl Future<Output = F> + Send + 'static) -> Later<T, E>
     where
-        F: FnOnce(&mut Vm) -> Result<T, E::Finish> + Send + 'static,
-        Result<T, E::Finish>: HostReturn<Fail>,
+        F: FnOnce(&mut Vm) -> Result<T, E::FinishError> + Send + 'static,
+        Result<T, E::FinishError>: HostReturn<Fail>,
     {
         let fut = async move {
             let finish = fut.await;
@@ -206,9 +206,9 @@ impl<T: IntoValue + Send + 'static, E: NativeError> Later<T, E> {
     }
 
     /// Completes immediately with `r` without suspending the calling task.
-    pub fn ready(r: Result<T, E::Finish>) -> Later<T, E>
+    pub fn ready(r: Result<T, E::FinishError>) -> Later<T, E>
     where
-        Result<T, E::Finish>: HostReturn<Fail>,
+        Result<T, E::FinishError>: HostReturn<Fail>,
     {
         Later(Completion::Now(Box::new(move |vm: &mut Vm| r.into_call_result(vm))), PhantomData)
     }
@@ -231,8 +231,8 @@ fn strip_dict_args(args: &[Value], n: usize) -> &[Value] {
 }
 
 #[cold]
-fn too_few_args() -> Fail {
-    Fail::internal("native function called with too few arguments")
+fn too_few_args() -> Ctl {
+    Fail::internal("native function called with too few arguments").into()
 }
 
 macro_rules! fn_impls {
@@ -256,7 +256,7 @@ macro_rules! fn_impls {
                 }
                 Box::new(move |vm: &mut Vm, args: &[Value]| -> Result<Value, Ctl> {
                     let r = {
-                        let &[$($a),*] = strip_dict_args(args, $n) else { return Err(too_few_args().into()) };
+                        let &[$($a),*] = strip_dict_args(args, $n) else { return Err(too_few_args()) };
                         let mut conv = Conversion::new();
                         $(let $a = $a::from_value(vm, $a, &mut conv)?;)*
                         call(&self, $($a),*)
@@ -278,7 +278,7 @@ macro_rules! fn_impls {
             }
             fn into_host(self) -> Box<NativeFn> {
                 Box::new(move |vm: &mut Vm, args: &[Value]| -> Result<Value, Ctl> {
-                    let &[$($a),*] = strip_dict_args(args, $n) else { return Err(too_few_args().into()) };
+                    let &[$($a),*] = strip_dict_args(args, $n) else { return Err(too_few_args()) };
                     let mut conv = Conversion::new();
                     $(let $a = $a::from_value(vm, $a, &mut conv)?;)*
                     vm.arm_retry_stress();
@@ -301,7 +301,7 @@ macro_rules! fn_impls {
             }
             fn into_host(self) -> Box<NativeFn> {
                 Box::new(move |vm: &mut Vm, args: &[Value]| -> Result<Value, Ctl> {
-                    let &[$($a),*] = strip_dict_args(args, $n) else { return Err(too_few_args().into()) };
+                    let &[$($a),*] = strip_dict_args(args, $n) else { return Err(too_few_args()) };
                     let mut conv = Conversion::new();
                     $(let $a = $a::from_value(vm, $a, &mut conv)?;)*
                     let fut = self($($a),*);

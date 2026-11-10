@@ -355,8 +355,6 @@ Visible defects that rarely block users.
       a collection, so a write before `Vm::require` occurs twice. A check phase
       that returns `Ctl` and an effect phase that returns `Fail` would close
       this gap for journaled runs.
-- [ ] ⚪ Fix the private and broken links that make `cargo doc` fail with
-      `-D warnings` in `vm/display.rs`, `vm/meter.rs`, and `vm/value.rs`.
 - [ ] ❓ Decide whether `Config::stdin_bytes` should share its channel across
       every VM of an engine, as `StdinFeed` does. `Engine::new_vm` creates a
       fresh channel for `Config::stdin_bytes`, so `Session::reset` and each

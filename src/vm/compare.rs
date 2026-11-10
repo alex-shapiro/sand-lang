@@ -1254,7 +1254,8 @@ mod tests {
         let nested = heap.alloc(Obj::Tuple(vec![Value::Int(1), tuple].into()));
         for (v, what) in [(Value::Float(1.5), "a float"), (list, "a list"), (tuple, "a list"), (nested, "a list")] {
             let e = hash_key(&heap, &Unmetered, v).unwrap_err();
-            assert!(matches!(e.kind(), FailKind::Internal(m) if m.starts_with(what)), "{e:?}");
+            let message = format!("{e:?}");
+            assert!(matches!(e.into_kind(), FailKind::Internal(m) if m.starts_with(what)), "{message}");
         }
         let ok = heap.alloc(Obj::Tuple(vec![one, Value::Bool(true), Value::Unit].into()));
         assert!(hash_key(&heap, &Unmetered, ok).is_ok());
@@ -1270,7 +1271,8 @@ mod tests {
         let (t1, t2) = (in_tuple(&mut heap, m1), in_tuple(&mut heap, m2));
         for (a, b, what) in [(m1, m2, "a map is compared"), (t1, t2, "a map is compared"), (m1, s, "values of different types")] {
             let e = values_cmp_metered(&prog, &heap, &Unmetered, a, b).unwrap_err();
-            assert!(matches!(e.kind(), FailKind::Internal(m) if m.starts_with(what)), "{e:?}");
+            let message = format!("{e:?}");
+            assert!(matches!(e.into_kind(), FailKind::Internal(m) if m.starts_with(what)), "{message}");
         }
         let (x, y) = (in_tuple(&mut heap, s), in_tuple(&mut heap, Value::Bool(true)));
         assert!(values_cmp_metered(&prog, &heap, &Unmetered, x, x).is_ok());
