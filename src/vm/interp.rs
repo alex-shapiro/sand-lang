@@ -1758,9 +1758,15 @@ impl Vm {
             // native needs a collection depends on when the collector ran.
             self.collect_all_garbage(Some(fiber));
             self.meter.refund_to(fuel_at_call);
-            self.collected = true;
-            r = Self::invoke_native(self, natives, n, &fiber.stack[start..start + argc]);
-            self.collected = false;
+            r = match self.meter.check() {
+                Ok(()) => {
+                    self.collected = true;
+                    let retried = Self::invoke_native(self, natives, n, &fiber.stack[start..start + argc]);
+                    self.collected = false;
+                    retried
+                }
+                Err(fail) => Err(fail.into()),
+            };
         }
         if !matches!(&r, Err(c) if matches!(c.kind(), CtlKind::NeedPermission(_))) {
             self.forget_once_answers();

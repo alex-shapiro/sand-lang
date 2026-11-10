@@ -1058,3 +1058,15 @@ fn a_repeat_expression_collects_garbage_before_it_reports_a_memory_limit() {
     assert!(r.is_ok(), "{r:?}");
     assert_eq!(out, "1000000\n");
 }
+
+#[test]
+fn a_long_regex_pattern_uses_the_compile_cache() {
+    let pattern = "a".repeat(300);
+    let src = format!(
+        "import probe\nimport regex\nlet before = probe.fuel()\nlet _ = regex.Regex(\"{pattern}\").unwrap()\nlet first = probe.fuel() - before\nlet again = probe.fuel()\nlet _ = regex.Regex(\"{pattern}\").unwrap()\nprint(first > 100 * (probe.fuel() - again))"
+    );
+    let config = Config::new().clock(Arc::new(StoppedClock(sandlang::platform::Instant::now())));
+    let (r, out) = run(config.host_modules(HostModules::new([fuel_probe()]).unwrap()), &src);
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!(out, "true\n");
+}

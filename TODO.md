@@ -59,9 +59,8 @@ The host cannot rely on engine limits, stability, or control.
       cost model, or check the time limits without charging fuel. The compile
       charge also uses `memory_usage`, which differs between CPUs and pointer
       widths.
-- [ ] ❓ _Testing._ Compare fuel and task order across the hash seed and the
-      garbage collector for the spec and example suites. This needs a
-      test-only way to set the hash seed.
+- [ ] ❓ _Testing._ Compare fuel across hash seeds for the spec suite. This needs
+      a test-only way to set the hash seed.
 - [ ] ❓ _Embedding._ Convert derived `SandEnum` and `SandStruct` values iteratively with an
       explicit stack. The derived `FromValue` and `IntoValue` implementations
       recurse once per nesting level, so deep values can overflow a small host

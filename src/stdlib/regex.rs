@@ -11,7 +11,7 @@ use crate::native::ty::Val;
 use crate::native::{NativeModule, NativeObject};
 use crate::platform::Instant;
 use crate::vm::meter::{SLOW_BYTES_PER_UNIT, Scratch};
-use crate::vm::value::Value;
+use crate::vm::value::{FxHasher, Value};
 use crate::vm::{Fail, Vm};
 use regex_automata::meta::{self, Cache};
 use regex_automata::util::captures::Captures as Groups;
@@ -20,6 +20,7 @@ use regex_automata::util::iter::Searcher;
 use regex_automata::util::syntax;
 use regex_automata::{Input, MatchKind, PatternID};
 use std::cell::{Cell, RefCell};
+use std::hash::Hasher;
 
 /// Limit on each compiled NFA (forward and reverse) of a regex.
 const NFA_SIZE_LIMIT: usize = 4 << 20;
@@ -50,7 +51,7 @@ const COMPILE_PER_BYTE: u64 = 16;
 /// every one-letter match), and the PikeVM fallback costs time per byte in
 /// the program's size. The engine does not report how much it scanned, so
 /// such work is timed. Ordinary searches take about a nanosecond per byte,
-/// far below the floor, so their fuel stays deterministic.
+/// far below the floor, so the floor adds at most a few units to them.
 const FLOOR_NANOS: u128 = 1000;
 
 /// Metering of regex work. A single search cannot be stopped, so it is
@@ -156,9 +157,6 @@ impl NativeObject for RegexObj {
 /// of the pattern).
 const REGEX_CACHE_SLOTS: usize = 64;
 
-/// The longest pattern the cache holds. A longer pattern compiles on each use.
-const MAX_CACHED_PATTERN_LEN: usize = 256;
-
 /// Base fuel cost for a cache hit in `regex.Regex` (in addition to the byte
 /// length of `pattern`).
 const CACHED_COST: u64 = 4;
@@ -166,17 +164,43 @@ const CACHED_COST: u64 = 4;
 /// A pattern in the regex cache. The cache decides what a compile costs from
 /// the pattern alone, so fuel does not depend on the garbage collector.
 pub(crate) struct RegexCacheEntry {
-    pattern: Box<str>,
+    pattern_hash: u64,
     /// The compiled regex (a GC root), until a full collection releases it.
     pub(crate) regex: Option<Value>,
 }
 
-/// The regex cache slot of `pattern`. The hash has no seed, so the patterns
+/// The hash of `pattern` in the regex cache. It has no seed, so the patterns
 /// that share a slot, and the fuel of each compile, are the same in each
 /// process.
-fn cache_slot(pattern: &str) -> usize {
-    let hash = pattern.bytes().fold(0xcbf2_9ce4_8423_25c3_u64, |h, b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3));
-    (hash % REGEX_CACHE_SLOTS as u64) as usize
+fn cache_hash(pattern: &str) -> u64 {
+    let mut hasher = FxHasher::unseeded();
+    hasher.write(pattern.as_bytes());
+    hasher.write_usize(pattern.len());
+    hasher.finish()
+}
+
+fn cache_slot(pattern_hash: u64) -> usize {
+    (pattern_hash % REGEX_CACHE_SLOTS as u64) as usize
+}
+
+/// What the regex cache knows about a pattern.
+enum CachedRegex {
+    Absent,
+    /// A full collection released the compiled regex.
+    Released,
+    Live(Val<RegexObj>),
+}
+
+fn lookup_cached_regex(vm: &Vm, pattern: &str, pattern_hash: u64) -> CachedRegex {
+    let Some(Some(entry)) = vm.host.regex_cache.get(cache_slot(pattern_hash)) else { return CachedRegex::Absent };
+    if entry.pattern_hash != pattern_hash {
+        return CachedRegex::Absent;
+    }
+    let Some(regex) = entry.regex else { return CachedRegex::Released };
+    match vm.heap.native::<RegexObj>(regex) {
+        Some(obj) if *obj.pattern == *pattern => CachedRegex::Live(Val::from_raw(regex)),
+        _ => CachedRegex::Absent,
+    }
 }
 
 /// Runs `search` with the regex `re` and its cache, then accounts for the
@@ -373,28 +397,27 @@ pub(crate) fn module() -> NativeModule {
 
     m.vm_function("Regex.init", |vm: &mut Vm, pattern: Val<String>| -> Result<Val<RegexObj>, HostError> {
         let text_len = pattern.str(&vm.heap).len();
-        let slot = (text_len <= MAX_CACHED_PATTERN_LEN).then(|| cache_slot(pattern.str(&vm.heap)));
-        let hit = slot.and_then(|s| vm.host.regex_cache.get(s)?.as_ref()).filter(|e| *e.pattern == *pattern.str(&vm.heap)).map(|e| e.regex);
-        let built = if let Some(regex) = hit {
+        let pattern_hash = cache_hash(pattern.str(&vm.heap));
+        let cached = lookup_cached_regex(vm, pattern.str(&vm.heap), pattern_hash);
+        let compile_charged = matches!(cached, CachedRegex::Absent);
+        if !compile_charged {
             vm.charge(CACHED_COST)?;
             vm.charge_bytes(text_len)?;
-            if let Some(regex) = regex {
-                return Ok(Val::from_raw(regex));
-            }
-            let mut scan = Scan::new(vm);
-            let built = builder().build(pattern.str(&vm.heap));
-            scan.finish(vm)?;
-            built
-        } else {
-            let mut scan = Scan::new(vm);
+        }
+        if let CachedRegex::Live(regex) = cached {
+            return Ok(regex);
+        }
+        let mut scan = Scan::new(vm);
+        if compile_charged {
             scan.charge(vm, COMPILE_BASE + COMPILE_PER_BYTE * text_len as u64)?;
-            let built = builder().build(pattern.str(&vm.heap));
+        }
+        let built = builder().build(pattern.str(&vm.heap));
+        if compile_charged {
             // Compiling does work in proportion to the program it builds.
             let compiled = built.as_ref().map_or_else(|e| e.size_limit().unwrap_or(0), |re| re.memory_usage());
             scan.charge(vm, (compiled / SLOW_BYTES_PER_UNIT) as u64)?;
-            scan.finish(vm)?;
-            built
-        };
+        }
+        scan.finish(vm)?;
         let re = match built {
             Ok(re) => re,
             Err(e) => {
@@ -406,12 +429,9 @@ pub(crate) fn module() -> NativeModule {
             }
         };
         let obj = vm.new_object(RegexObj::new(re, pattern.str(&vm.heap)))?;
-        if let Some(slot) = slot {
-            let entry = RegexCacheEntry { pattern: pattern.str(&vm.heap).into(), regex: Some(obj.raw()) };
-            let cache = &mut vm.host.regex_cache;
-            cache.resize_with(REGEX_CACHE_SLOTS, || None);
-            cache[slot] = Some(entry);
-        }
+        let cache = &mut vm.host.regex_cache;
+        cache.resize_with(REGEX_CACHE_SLOTS, || None);
+        cache[cache_slot(pattern_hash)] = Some(RegexCacheEntry { pattern_hash, regex: Some(obj.raw()) });
         Ok(obj)
     });
     m.vm_function("Regex.is_match", |vm: &mut Vm, re: Val<RegexObj>, text: Val<String>| {
@@ -510,10 +530,10 @@ pub(crate) fn module() -> NativeModule {
 
 #[cfg(test)]
 mod tests {
-    use super::cache_slot;
+    use super::cache_hash;
 
     #[test]
-    fn a_cache_slot_is_the_same_in_each_process() {
-        assert_eq!((cache_slot("a+b"), cache_slot("[0-9]+"), cache_slot("")), (47, 2, 3));
+    fn a_cache_hash_is_the_same_in_each_process() {
+        assert_eq!([cache_hash("a+b"), cache_hash("")], [17277465237014725391, 0]);
     }
 }

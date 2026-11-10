@@ -1907,8 +1907,8 @@ letters scans the rest of the text per match), and searches the lazy DFA
 cannot handle fall back to an engine whose cost per byte grows with the
 pattern. Time is measured as the function runs and charged between matches
 when iterating. Ordinary searches take a few to a hundred nanoseconds per
-unit of their deterministic charge, so only work that charge underestimates
-by an order of magnitude or more is charged by time. Time-based regex charges
+unit of their deterministic charge, so the time charge adds at most a few
+units to them. Time-based regex charges
 depend on execution speed, and the size of a compiled regex can differ between
 platforms. All other fuel charges are a function of the program and its
 inputs. They do not depend on the hash seed of the process or on when the
