@@ -2204,7 +2204,7 @@ returns a Sand `Result` or aborts the run on failure:
   `Err(Error(message, kind: kind))` in Sand. `?` converts a `Fail` or a `Ctl`
   into a `HostError` that halts or suspends the VM. `?` also converts a
   `std::io::Error` into a `HostError` with the corresponding standard error
-  kind. A synchronous function cannot return `HostError<Fail>`.
+  kind.
 - `Result<T, std::io::Error>`, `Result<T, String>`, and `Result<T, &str>` also
   map to `Result<T, Error>`; string errors use the kind `"error"`.
 - `Result<T, Fail>` maps to the Sand return type `T`. A `Fail` ends the run with
