@@ -108,7 +108,7 @@ impl Vm {
         };
         // The charge uses the count of open iterators, so a copy costs the same
         // whether or not the collector has freed the iterators that need it.
-        self.meter.charge(if pins.open > 0 { slots as u64 } else { 0 })?;
+        self.meter.charge(slots as u64)?;
         let live: Vec<u32> = pins.its.iter().copied().filter(|&p| reads_in_place(&self.heap, p, h)).collect();
         if !live.is_empty() {
             self.check_memory(bytes.saturating_add(std::mem::size_of::<Obj>()))?;

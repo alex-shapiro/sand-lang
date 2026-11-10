@@ -10,7 +10,7 @@ use crate::native::convert::HostError;
 use crate::native::ty::Val;
 use crate::native::{NativeModule, NativeObject};
 use crate::platform::Instant;
-use crate::vm::meter::{SLOW_BYTES_PER_UNIT, Scratch};
+use crate::vm::meter::{BYTES_PER_UNIT, SLOW_BYTES_PER_UNIT, Scratch};
 use crate::vm::value::{FxHasher, Value};
 use crate::vm::{Fail, Vm};
 use regex_automata::meta::{self, Cache};
@@ -399,20 +399,26 @@ pub(crate) fn module() -> NativeModule {
         let text_len = pattern.str(&vm.heap).len();
         let pattern_hash = cache_hash(pattern.str(&vm.heap));
         let cached = lookup_cached_regex(vm, pattern.str(&vm.heap), pattern_hash);
-        let compile_charged = matches!(cached, CachedRegex::Absent);
-        if !compile_charged {
-            vm.charge(CACHED_COST)?;
-            vm.charge_bytes(text_len)?;
-        }
-        if let CachedRegex::Live(regex) = cached {
-            return Ok(regex);
-        }
-        let mut scan = Scan::new(vm);
-        if compile_charged {
-            scan.charge(vm, COMPILE_BASE + COMPILE_PER_BYTE * text_len as u64)?;
-        }
+        let is_new_pattern = matches!(cached, CachedRegex::Absent);
+        let cached_cost = CACHED_COST + (text_len / BYTES_PER_UNIT) as u64;
+        let mut scan = match cached {
+            CachedRegex::Live(regex) => {
+                vm.charge(cached_cost)?;
+                return Ok(regex);
+            }
+            CachedRegex::Released => {
+                let mut scan = Scan::new(vm);
+                scan.charge(vm, cached_cost)?;
+                scan
+            }
+            CachedRegex::Absent => {
+                let mut scan = Scan::new(vm);
+                scan.charge(vm, COMPILE_BASE + COMPILE_PER_BYTE * text_len as u64)?;
+                scan
+            }
+        };
         let built = builder().build(pattern.str(&vm.heap));
-        if compile_charged {
+        if is_new_pattern {
             // Compiling does work in proportion to the program it builds.
             let compiled = built.as_ref().map_or_else(|e| e.size_limit().unwrap_or(0), |re| re.memory_usage());
             scan.charge(vm, (compiled / SLOW_BYTES_PER_UNIT) as u64)?;

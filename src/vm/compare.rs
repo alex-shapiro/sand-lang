@@ -524,20 +524,21 @@ fn find_metered(
 ) -> Result<Option<usize>, Fail> {
     let mark = budget.fuel_mark();
     let mut failed = None;
-    let slot = table.find(k, hash, |i| {
-        budget.refund_to(mark);
-        eq(i).unwrap_or_else(|c| {
+    let slot = table.find(k, hash, |i| match eq(i) {
+        Ok(true) => true,
+        Ok(false) => {
+            budget.refund_to(mark);
+            false
+        }
+        Err(c) => {
             failed.get_or_insert(c);
             false
-        })
+        }
     });
-    if let Some(c) = failed {
-        return Err(c);
+    match failed {
+        Some(c) => Err(c),
+        None => Ok(slot),
     }
-    if slot.is_none() {
-        budget.refund_to(mark);
-    }
-    Ok(slot)
 }
 
 /// Equality of two keys (of a `Hash` type).
