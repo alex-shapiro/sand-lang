@@ -109,6 +109,31 @@ impl Budget for Unmetered {
     }
 }
 
+/// A budget that adds up charges and never fails, for work whose cost
+/// applies only if a later check succeeds.
+#[derive(Default)]
+pub struct Tally {
+    units: Cell<u64>,
+}
+
+impl Tally {
+    pub fn units(&self) -> u64 {
+        self.units.get()
+    }
+
+    pub fn clear(&self) {
+        self.units.set(0);
+    }
+}
+
+impl Budget for Tally {
+    #[inline(always)]
+    fn charge(&self, units: u64) -> Result<(), Fail> {
+        self.units.set(self.units.get().saturating_add(units));
+        Ok(())
+    }
+}
+
 /// The fuel counter of an engine.
 pub struct Meter {
     /// Fuel left in the current slice; negative once overspent.

@@ -5,7 +5,7 @@
 
 use super::bytecode::Program;
 use super::heap::Heap;
-use super::meter::{Budget, Unmetered};
+use super::meter::{Budget, Tally, Unmetered};
 use super::value::*;
 use super::{Fail, without_trait};
 use std::cmp::Ordering;
@@ -458,23 +458,19 @@ pub fn map_slot_tuple(heap: &Heap, budget: &impl Budget, m: &MapObj, items: &[Va
         h.write_u64(hash_key(heap, budget, x)?);
     }
     budget.charge(1)?;
-    let mut failed = None;
-    let slot = m.index.find(Value::Unit, h.finish(), |s| {
-        let Some((Value::Obj(t), _)) = m.entries[s] else { return false };
-        let Obj::Tuple(t) = heap.obj(t) else { return false };
-        t.len() == items.len()
-            && t.iter().zip(items).all(|(&a, &b)| match keys_eq(heap, budget, a, b) {
-                Ok(eq) => eq,
-                Err(c) => {
-                    failed.get_or_insert(c);
-                    false
-                }
-            })
-    });
-    match failed {
-        Some(c) => Err(c),
-        None => Ok(slot),
-    }
+    find_metered(budget, &m.index, Value::Unit, h.finish(), |tally, s| {
+        let Some((Value::Obj(t), _)) = m.entries[s] else { return Ok(false) };
+        let Obj::Tuple(t) = heap.obj(t) else { return Ok(false) };
+        if t.len() != items.len() {
+            return Ok(false);
+        }
+        for (&a, &b) in t.iter().zip(items) {
+            if !keys_eq(heap, tally, a, b)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    })
 }
 
 /// The slot of element `k` in set `s`.
@@ -507,21 +503,41 @@ pub fn find_key(
     k: Value,
     key_at: impl Fn(usize) -> Option<Value>,
 ) -> Result<Option<usize>, Fail> {
+    find_metered(budget, table, k, hash, |tally, i| match key_at(i) {
+        Some(x) => keys_eq(heap, tally, x, k),
+        None => Ok(false),
+    })
+}
+
+/// The slot of `table` for key `k`, with hash `hash`, that satisfies `eq`.
+///
+/// Charges `budget` only for the comparison that finds the key. A different
+/// key with the same 32-bit hash tag costs nothing, so fuel does not depend on
+/// the hash seed of the process.
+#[inline]
+fn find_metered(
+    budget: &impl Budget,
+    table: &KeyIndex,
+    k: Value,
+    hash: u64,
+    eq: impl Fn(&Tally, usize) -> Result<bool, Fail>,
+) -> Result<Option<usize>, Fail> {
+    let tally = Tally::default();
     let mut failed = None;
-    let slot = table.find(k, hash, |i| match key_at(i) {
-        Some(x) => match keys_eq(heap, budget, x, k) {
-            Ok(eq) => eq,
-            Err(c) => {
-                failed.get_or_insert(c);
-                false
-            }
-        },
-        None => false,
+    let slot = table.find(k, hash, |i| {
+        tally.clear();
+        eq(&tally, i).unwrap_or_else(|c| {
+            failed.get_or_insert(c);
+            false
+        })
     });
-    match failed {
-        Some(c) => Err(c),
-        None => Ok(slot),
+    if let Some(c) = failed {
+        return Err(c);
     }
+    if slot.is_some() {
+        budget.charge(tally.units())?;
+    }
+    Ok(slot)
 }
 
 /// Equality of two keys (of a `Hash` type).
@@ -1243,6 +1259,23 @@ mod tests {
         assert!(floats.last().unwrap().as_float().is_nan());
         // Mixed lists use the generic sort.
         assert!(try_sort_numbers(&mut [Value::Int(1), Value::Float(1.0)], &Unmetered).is_none());
+    }
+
+    #[test]
+    fn only_the_comparison_that_finds_a_key_costs_fuel() {
+        let mut heap = Heap::new(None, usize::MAX);
+        let key = heap.new_str("a".repeat(6400));
+        let equal = heap.new_str("a".repeat(6400));
+        let other = heap.new_str("b".repeat(6400));
+        let hash = hash_key(&heap, &Unmetered, key).unwrap();
+        let mut index = KeyIndex::default();
+        index.insert(key, hash, 0);
+
+        let tally = Tally::default();
+        assert_eq!(find_key(&heap, &tally, &index, hash, key, |_| Some(other)).unwrap(), None);
+        assert_eq!(tally.units(), 0, "a false match of the hash tag costs nothing");
+        assert_eq!(find_key(&heap, &tally, &index, hash, key, |_| Some(equal)).unwrap(), Some(0));
+        assert_eq!(tally.units(), 100, "6400 bytes compared");
     }
 
     #[test]
