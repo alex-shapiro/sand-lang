@@ -557,7 +557,7 @@ impl OpenState {
 
     /// Reads up to `FILE_BUFFER` more bytes into the buffer (after
     /// `make_room`); 0 at the end of the file.
-    fn fill(&mut self, vm: &Vm) -> Result<io::Result<usize>, Ctl> {
+    fn fill(&mut self, vm: &Vm) -> Result<io::Result<usize>, Fail> {
         vm.charge(SYSCALL_FUEL)?;
         let old = self.buf.len();
         let mut buf = std::mem::take(&mut self.buf);
