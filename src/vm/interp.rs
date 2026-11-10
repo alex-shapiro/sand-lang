@@ -363,9 +363,9 @@ impl Vm {
             (0, Int(x), Int(y)) => Int(x.checked_add(y).ok_or_else(|| overflow("integer"))?),
             (1, Int(x), Int(y)) => Int(x.checked_sub(y).ok_or_else(|| overflow("integer"))?),
             (2, Int(x), Int(y)) => Int(x.checked_mul(y).ok_or_else(|| overflow("integer"))?),
-            (3, Int(x), Int(y)) => Int(int_div(x, y).map_err(Fail::from)?),
-            (4, Int(x), Int(y)) => Int(int_rem(x, y).map_err(Fail::from)?),
-            (5, Int(x), Int(y)) => Int(int_pow(x, y).map_err(Fail::from)?),
+            (3, Int(x), Int(y)) => Int(int_div(x, y).map_err(arith_fail)?),
+            (4, Int(x), Int(y)) => Int(int_rem(x, y).map_err(arith_fail)?),
+            (5, Int(x), Int(y)) => Int(int_pow(x, y).map_err(arith_fail)?),
             (0, Float(x), Float(y)) => Float(x + y),
             (1, Float(x), Float(y)) => Float(x - y),
             (2, Float(x), Float(y)) => Float(x * y),
@@ -2470,6 +2470,11 @@ pub(crate) fn internal(msg: impl std::fmt::Display) -> Fail {
 #[cold]
 fn overflow(what: &str) -> Fail {
     Fail::runtime_error("overflow", format!("{what} overflow"))
+}
+
+/// The failure of an integer operation whose error is `kind: message`.
+fn arith_fail(message: &str) -> Fail {
+    Fail(Box::new(FailKind::RuntimeError(message.to_string())))
 }
 
 /// Returns whether a garbage collection may let a failed native call succeed.

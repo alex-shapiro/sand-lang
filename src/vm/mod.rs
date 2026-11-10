@@ -252,13 +252,6 @@ impl std::fmt::Debug for CtlKind {
     }
 }
 
-impl From<&str> for Fail {
-    /// An error whose message `msg` is `kind: message`.
-    fn from(msg: &str) -> Fail {
-        Fail(Box::new(FailKind::RuntimeError(msg.to_string())))
-    }
-}
-
 /// Aborts execution with a runtime error of kind `kind` (see [`Fail::runtime_error`]).
 pub fn fail<T>(kind: &str, msg: impl std::fmt::Display) -> Result<T, Fail> {
     Err(Fail::runtime_error(kind, msg))
