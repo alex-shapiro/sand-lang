@@ -1261,8 +1261,6 @@ mod tests {
         assert!(try_sort_numbers(&mut [Value::Int(1), Value::Float(1.0)], &Unmetered).is_none());
     }
 
-    use crate::vm::meter::FuelMark;
-
     #[derive(Default)]
     struct CountingBudget {
         units: std::cell::Cell<i64>,
@@ -1274,12 +1272,12 @@ mod tests {
             Ok(())
         }
 
-        fn fuel_mark(&self) -> FuelMark {
-            FuelMark { fuel: self.units.get(), check_at: 0 }
+        fn fuel_mark(&self) -> i64 {
+            self.units.get()
         }
 
-        fn refund_to(&self, mark: FuelMark) {
-            self.units.set(mark.fuel);
+        fn refund_to(&self, mark: i64) {
+            self.units.set(mark);
         }
     }
 

@@ -22,7 +22,7 @@ use super::compare::{
     values_le_metered, values_lt, values_lt_metered,
 };
 use super::display;
-use super::meter::{FuelMark, Scratch, code_fuel, loop_fuel};
+use super::meter::{Scratch, code_fuel, loop_fuel};
 use super::*;
 use crate::engine::LimitKind;
 
@@ -540,18 +540,18 @@ impl Vm {
     /// Starts an instruction that can reach a memory limit after it charges
     /// fuel, and returns the fuel to give back if it does.
     #[inline(always)]
-    fn begin_retryable_op(&mut self) -> FuelMark {
+    fn begin_retryable_op(&mut self) -> i64 {
         if self.retry_stress {
             self.arm_instruction_retry_stress();
         }
-        self.meter.fuel_mark()
+        self.meter.fuel()
     }
 
     /// Ends an instruction started with [`Vm::begin_retryable_op`]. A memory
     /// limit gives the instruction's fuel back, because the scheduler runs it
     /// again after a collection.
     #[inline(always)]
-    fn end_retryable_op<T>(&self, fuel_mark: FuelMark, result: Result<T, Fail>) -> Result<T, Fail> {
+    fn end_retryable_op<T>(&self, fuel_mark: i64, result: Result<T, Fail>) -> Result<T, Fail> {
         if self.retry_stress {
             self.heap.fail_next_check.set(false);
         }
@@ -1748,7 +1748,7 @@ impl Vm {
         let frame = fiber.frames.last_mut().unwrap();
         frame.ip = ip as u32;
         self.caller_site = (frame.proto, frame.ip);
-        let fuel_at_call = self.meter.fuel_mark();
+        let fuel_at_call = self.meter.fuel();
         let mut r = Self::invoke_native(self, natives, n, &fiber.stack[start..start + argc]);
         self.heap.fail_next_check.set(false);
         if collection_may_help(&r) {

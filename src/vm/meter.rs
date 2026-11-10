@@ -99,17 +99,10 @@ pub trait Budget {
     }
 
     /// A mark to give back later charges with [`Budget::refund_to`].
-    fn fuel_mark(&self) -> FuelMark;
+    fn fuel_mark(&self) -> i64;
 
     /// Gives back the units charged since [`Budget::fuel_mark`] returned `mark`.
-    fn refund_to(&self, mark: FuelMark);
-}
-
-/// A point in a budget's use, to give back the charges after it.
-#[derive(Clone, Copy, Default)]
-pub struct FuelMark {
-    pub(crate) fuel: i64,
-    pub(crate) check_at: i64,
+    fn refund_to(&self, mark: i64);
 }
 
 /// A budget that never runs out.
@@ -122,12 +115,12 @@ impl Budget for Unmetered {
     }
 
     #[inline(always)]
-    fn fuel_mark(&self) -> FuelMark {
-        FuelMark::default()
+    fn fuel_mark(&self) -> i64 {
+        0
     }
 
     #[inline(always)]
-    fn refund_to(&self, _: FuelMark) {}
+    fn refund_to(&self, _: i64) {}
 }
 
 /// The fuel counter of an engine.
@@ -215,18 +208,12 @@ impl Meter {
         self.base.get().saturating_add(self.spent())
     }
 
-    /// A mark to give back later charges with [`Meter::refund_to`].
+    /// Gives back the fuel charged since [`Meter::fuel`] returned `mark`. The
+    /// next limit check stays within [`CHECK_INTERVAL`] of the restored fuel.
     #[inline]
-    pub(crate) fn fuel_mark(&self) -> FuelMark {
-        FuelMark { fuel: self.fuel.get(), check_at: self.check_at.get() }
-    }
-
-    /// Gives back the fuel charged since [`Meter::fuel_mark`] returned `mark`,
-    /// and restores the limit check that was due then.
-    #[inline]
-    pub(crate) fn refund_to(&self, mark: FuelMark) {
-        self.fuel.set(mark.fuel);
-        self.check_at.set(mark.check_at);
+    pub(crate) fn refund_to(&self, mark: i64) {
+        self.fuel.set(mark);
+        self.check_at.set(self.check_at.get().max(mark.saturating_sub(CHECK_INTERVAL)));
     }
 
     /// Resets the fuel counter to zero and replaces the interrupt flag for a
@@ -299,12 +286,12 @@ impl Budget for Meter {
     }
 
     #[inline]
-    fn fuel_mark(&self) -> FuelMark {
-        Meter::fuel_mark(self)
+    fn fuel_mark(&self) -> i64 {
+        self.fuel()
     }
 
     #[inline]
-    fn refund_to(&self, mark: FuelMark) {
+    fn refund_to(&self, mark: i64) {
         Meter::refund_to(self, mark);
     }
 }
@@ -455,11 +442,11 @@ mod tests {
     }
 
     #[test]
-    fn a_refund_restores_the_limit_check_that_was_due() {
+    fn a_refund_keeps_the_next_limit_check_close() {
         let flag = Arc::new(AtomicBool::new(false));
         let m = Meter::new(None, flag.clone(), system());
         m.start_slice(None, None);
-        let mark = m.fuel_mark();
+        let mark = m.fuel();
         assert!(m.charge(SLICE_FUEL as u64 + 1).is_ok(), "a checkpoint moves the next check down");
         m.refund_to(mark);
         flag.store(true, Ordering::SeqCst);
