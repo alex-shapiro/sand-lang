@@ -970,3 +970,20 @@ fn a_failing_top_level_try_reports_the_memory_limit() {
     });
     expect_stop(config, src, is_limit(LimitKind::Memory), Duration::from_secs(10));
 }
+
+#[test]
+fn cached_regexes_do_not_lower_the_memory_available_at_a_safe_point() {
+    const LIMIT: usize = 32 << 20;
+    let build = |regexes: usize, nodes: usize| {
+        format!(
+            "import regex\nenum L {{ Nil, Cons(int, L) }}\nfor i in 0..{regexes} {{\n    let r = regex.Regex(\"[a-z]{{1,100}}q\\(i)\").unwrap()\n    let _ = r.is_match(\"abcdefgh\")\n}}\nvar l = L.Nil\nfor i in 0..{nodes} {{ l = L.Cons(i, l) }}\nprint(\"done\")"
+        )
+    };
+    let fits = |regexes: usize, nodes: usize| run(limits(|l| l.max_memory = Some(LIMIT)), &build(regexes, nodes)).0.is_ok();
+    let (mut low, mut high) = (1, 2_000_000);
+    while high - low > 1024 {
+        let mid = (low + high) / 2;
+        if fits(0, mid) { low = mid } else { high = mid }
+    }
+    assert!(fits(200, low * 199 / 200), "{low} list nodes fit without cached regexes");
+}

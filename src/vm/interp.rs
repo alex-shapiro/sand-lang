@@ -1719,8 +1719,8 @@ impl Vm {
         fiber.frames.last_mut().unwrap().ip = resume_ip as u32;
         if self.heap.wants_gc() {
             self.collect_garbage(Some(fiber));
-            if self.heap.over_limit() {
-                return Some(Err(Trap::Limit(LimitKind::Memory).into()));
+            if let Err(limit) = self.enforce_limit(Some(fiber)) {
+                return Some(Err(Trap::Limit(limit).into()));
             }
         }
         if fuel_left <= 0 {
