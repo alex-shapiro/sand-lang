@@ -55,17 +55,14 @@ pub struct NativeEntry {
 /// The outcome of a native call that does not return a value: a [`Fail`],
 /// or a request to the scheduler.
 ///
-/// A host makes a `Ctl` from a [`Fail`] or with [`Ctl::need_permission`]. The
-/// `Vm` methods that wait, such as [`Vm::yield_now`], make the other requests.
-/// A host cannot build a request itself:
+/// A host makes a `Ctl` from a [`Fail`]. The `Vm` methods that wait or ask for
+/// a permission, such as [`Vm::yield_now`] and [`Vm::permit`], make the
+/// requests. A host cannot build a request itself:
 ///
 /// ```compile_fail,E0603
 /// let _ = sandlang::vm::CtlKind::Yield;
 /// ```
-///
-/// One pointer, so that `Result<Value, Ctl>` is 16 bytes like a `Value`
-/// (see `interp`). [`Vm::block`] and
-/// [`Vm::yield_now`] reuse a spare box instead of allocating.
+#[must_use]
 pub struct Ctl(Box<CtlKind>);
 
 /// The end of a run: a runtime error, a limit, an interrupt, an exit, or an
@@ -73,8 +70,11 @@ pub struct Ctl(Box<CtlKind>);
 ///
 /// Code that cannot make a request to the scheduler returns a `Fail` instead
 /// of a [`Ctl`]. `?` converts a `Fail` to a `Ctl`, but not the reverse.
+#[must_use]
 pub struct Fail(Box<FailKind>);
 
+// One pointer each, so that a native result is 16 bytes like a `Value` (see
+// `interp`).
 const _: () = assert!(std::mem::size_of::<Ctl>() == std::mem::size_of::<usize>());
 const _: () = assert!(std::mem::size_of::<Result<Value, Ctl>>() == 16);
 const _: () = assert!(std::mem::size_of::<Result<Option<Value>, Ctl>>() == 16);
@@ -139,7 +139,7 @@ pub(crate) enum FailKind {
 }
 
 impl Fail {
-    /// Aborts execution with an uncatchable runtime error of `kind`. For recoverable `Result` errors, return [`HostError`] instead.
+    /// A runtime error of `kind` that ends the run. A script cannot catch it. For recoverable `Result` errors, return [`HostError`] instead.
     #[cold]
     pub fn new(kind: &str, msg: impl std::fmt::Display) -> Fail {
         Fail(Box::new(FailKind::RuntimeError(format!("{kind}: {msg}"))))
@@ -193,7 +193,7 @@ impl Ctl {
     }
 
     /// Ask the user for `cap`.
-    pub fn need_permission(cap: Capability) -> Ctl {
+    pub(crate) fn need_permission(cap: Capability) -> Ctl {
         Ctl(Box::new(CtlKind::NeedPermission(cap)))
     }
 

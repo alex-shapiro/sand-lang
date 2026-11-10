@@ -32,6 +32,11 @@ impl Signature {
     note = "each parameter must implement `FromValue`, and the return type must implement `NativeReturn`",
     note = "a synchronous function returns `HostError`, not `HostError<Fail>`"
 )]
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be a host function",
+    note = "each parameter must implement `FromValue`, and the return type must implement `NativeReturn`",
+    note = "a synchronous function returns `HostError`, not `HostError<Fail>`"
+)]
 pub trait HostFunction<Marker>: Send + Sync + 'static {
     fn signature() -> Signature;
     fn into_host(self) -> Box<NativeFn>;
@@ -60,6 +65,25 @@ pub trait HostFunction<Marker>: Send + Sync + 'static {
     note = "the first parameter must be `&mut Vm`, each other parameter must be an owned `FromValue` type, and the return type must implement `NativeReturn`",
     note = "a synchronous function returns `HostError`, not `HostError<Fail>`"
 )]
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be a host function",
+    note = "each parameter must implement `FromValue`, and the return type must implement `NativeReturn`",
+    note = "a synchronous function returns `HostError`, not `HostError<Fail>`"
+)]
+pub trait HostFunction<Marker>: Send + Sync + 'static {
+    fn signature() -> Signature;
+    fn into_host(self) -> Box<NativeFn>;
+}
+
+/// Synchronous function registered with [`NativeModule::vm_function`](super::NativeModule::vm_function).
+///
+/// Receives `&mut Vm` as its first argument; remaining arguments must be owned
+/// [`FromValue`] types or [`Val`](super::Val) handles.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be a `Vm` function",
+    note = "the first parameter must be `&mut Vm`, each other parameter must be an owned `FromValue` type, and the return type must implement `NativeReturn`",
+    note = "a synchronous function returns `HostError`, not `HostError<Fail>`"
+)]
 pub trait VmFunction<Marker>: Send + Sync + 'static {
     fn signature() -> Signature;
     fn into_host(self) -> Box<NativeFn>;
@@ -69,6 +93,39 @@ pub trait VmFunction<Marker>: Send + Sync + 'static {
 ///
 /// Arguments must be owned [`FromValue`] types so the returned future can
 /// outlive the initial call.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be a host function",
+    note = "each parameter must implement `FromValue`, and the return type must implement `NativeReturn`",
+    note = "a synchronous function returns `HostError`, not `HostError<Fail>`"
+)]
+pub trait HostFunction<Marker>: Send + Sync + 'static {
+    fn signature() -> Signature;
+    fn into_host(self) -> Box<NativeFn>;
+}
+
+/// Synchronous function registered with [`NativeModule::vm_function`](super::NativeModule::vm_function).
+///
+/// Receives `&mut Vm` as its first argument; remaining arguments must be owned
+/// [`FromValue`] types or [`Val`](super::Val) handles.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be a `Vm` function",
+    note = "the first parameter must be `&mut Vm`, each other parameter must be an owned `FromValue` type, and the return type must implement `NativeReturn`",
+    note = "a synchronous function returns `HostError`, not `HostError<Fail>`"
+)]
+pub trait VmFunction<Marker>: Send + Sync + 'static {
+    fn signature() -> Signature;
+    fn into_host(self) -> Box<NativeFn>;
+}
+
+/// Asynchronous function registered with [`NativeModule::async_function`](super::NativeModule::async_function).
+///
+/// Arguments must be owned [`FromValue`] types so the returned future can
+/// outlive the initial call.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be an async host function",
+    note = "each parameter must be an owned `FromValue` type, and the output of the future must implement `AsyncReturn`",
+    note = "a future returns `HostError<Fail>`, not `HostError`, because it cannot make a request to the scheduler"
+)]
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be a host function",
     note = "each parameter must implement `FromValue`, and the return type must implement `NativeReturn`",
@@ -264,15 +321,14 @@ impl<T: IntoValue + Send + 'static, E: NativeError> Later<T, E> {
     /// returned closure on the VM thread to produce the Sand result.
     ///
     /// The closure can only fail, because its error is [`NativeError::Finish`].
-    /// A closure that asks for a permission does not compile:
+    /// A closure that returns a [`Ctl`] does not compile:
     ///
     /// ```compile_fail,E0271
     /// # use sandlang::native::func::Later;
-    /// # use sandlang::policy::Capability;
     /// # use sandlang::vm::{Ctl, Vm, WaitKind};
-    /// let _: Later<i64, Ctl> = Later::new(WaitKind::Io, async {
-    ///     |_: &mut Vm| -> Result<i64, Ctl> { Err(Ctl::need_permission(Capability::Stdin)) }
-    /// });
+    /// fn later(ctl: Ctl) -> Later<i64, Ctl> {
+    ///     Later::new(WaitKind::Io, async { move |_: &mut Vm| -> Result<i64, Ctl> { Err(ctl) } })
+    /// }
     /// ```
     ///
     /// `wait_kind` classifies the wait. Pass [`WaitKind::User`] if the task
