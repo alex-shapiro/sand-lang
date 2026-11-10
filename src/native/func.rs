@@ -121,6 +121,7 @@ where
 /// Return `Result<Later<T, E>, E>` from the function: if `E` is [`Ctl`] or
 /// [`Fail`], the Sand return type is `T`; if `E` is a [`HostError`], the Sand
 /// return type is `Result<T, Error>`.
+#[must_use]
 pub struct Later<T, E>(Completion, PhantomData<fn() -> (T, E)>);
 
 /// Execution mode of a [`Later`] value.

@@ -106,6 +106,7 @@ pub trait IntoValue: SandType {
 ///     text.parse().map_err(|_| HostError::new("parse", "not a number"))
 /// }
 /// ```
+#[must_use]
 pub struct HostError<C = Ctl>(Box<HostErrorKind<C>>);
 
 enum HostErrorKind<C> {
