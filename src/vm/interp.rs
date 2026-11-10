@@ -475,7 +475,9 @@ impl Vm {
         let Some(e) = self.heap.field(res, 0) else {
             return self.fail_stop(fiber, ip, Fail::runtime_error("none", "`?` found None"));
         };
-        match display::to_display_metered(prog, &self.heap, &self.meter, e) {
+        let fuel_mark = self.begin_retryable_op();
+        let text = display::to_display_metered(prog, &self.heap, &self.meter, e);
+        match self.end_retryable_op(fuel_mark, text) {
             Ok(text) => Err(self.error_trap(fiber, ip, text)),
             Err(c) => self.fail_stop(fiber, ip, c),
         }
@@ -2504,8 +2506,8 @@ impl Vm {
     }
 }
 
-/// The fuel that instruction `op` spends before it can fail. Only calls
-/// spend any, at their safe point (`tick_call!`).
+/// The interpreter's fuel that instruction `op` spends before it can fail.
+/// Only calls spend any, at their safe point (`tick_call!`).
 pub(super) fn call_tick(op: Op) -> i64 {
     match op {
         Op::CallDirect { .. }

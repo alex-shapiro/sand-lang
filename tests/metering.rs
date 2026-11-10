@@ -960,3 +960,13 @@ fn looking_up_a_key_with_shared_structure_stops_at_the_instruction_limit() {
     let src = format!("{DAG}let m: [T: int] = [a: 1]\nprint(m[b])");
     expect_stop(limits(|l| l.max_instructions = Some(1_000_000)), &src, is_limit(LimitKind::Instructions), Duration::from_secs(10));
 }
+
+#[test]
+fn a_failing_top_level_try_reports_the_memory_limit() {
+    let src = "fn fails() -> Result<int, [str]> {\n    let text = \"x\".repeat(4 << 20)\n    Err((0..16).map(_ => text))\n}\nlet n = fails()?\nprint(n)";
+    let config = limits(|l| {
+        l.max_memory = Some(16 << 20);
+        l.max_wall_time = Some(Duration::from_secs(5));
+    });
+    expect_stop(config, src, is_limit(LimitKind::Memory), Duration::from_secs(10));
+}

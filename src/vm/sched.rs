@@ -393,9 +393,10 @@ impl Vm {
     /// collection, with the fuel the slice had before it, because a limit
     /// depends on when the collector ran and task switches must not.
     fn run_slice(&mut self, f: &mut Fiber, fuel: &mut i64) -> Result<FiberStop, RunEnding> {
-        // Where an instruction ran again, and the slice's fuel at that point.
-        let mut retried: Option<((usize, u32), i64)> = None;
+        // Where an instruction last ran again.
+        let mut retried_at = None;
         loop {
+            let entry_fuel = *fuel;
             // A Rust panic in the interpreter or a native (a bug) ends
             // the run as an internal error instead of unwinding into the
             // host; caught per slice, which costs nothing per native call.
@@ -408,19 +409,22 @@ impl Vm {
             };
             let Ok(FiberStop::CollectAndRetry(frame)) = r else { return r };
             let tick = super::interp::call_tick(self.prog.protos[frame.proto as usize].code[frame.ip as usize]);
-            self.meter.sync(*fuel + tick);
-            *fuel = self.meter.resync();
             // A later execution of the same instruction must cross a back
-            // edge or a call, both of which spend fuel. If the instruction
-            // failed again without spending fuel, the retry itself hit the
-            // memory limit.
+            // edge or a call, both of which spend the interpreter's fuel. If
+            // the instruction failed again without spending any, the retry
+            // itself hit the memory limit.
             let at = (f.frames.len(), frame.ip);
-            if retried.is_some_and(|(retried_at, fuel_at_retry)| retried_at == at && *fuel >= fuel_at_retry) {
+            if retried_at == Some(at) && entry_fuel - *fuel <= tick {
                 return Err(Trap::Limit(LimitKind::Memory).into());
             }
-            retried = Some((at, *fuel));
+            retried_at = Some(at);
+            self.meter.sync(*fuel + tick);
+            *fuel = self.meter.resync();
             self.collect_all_garbage(Some(f));
             self.instruction_retried = self.retry_stress;
+            if let Err(fail) = self.meter.check() {
+                return Err(self.run_ending_of(fail, |vm| vm.trace_of(f, None)));
+            }
         }
     }
 

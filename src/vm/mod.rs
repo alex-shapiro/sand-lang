@@ -617,7 +617,7 @@ pub struct Vm {
     /// interpreter, a native or an I/O finisher: the VM is memory safe but may
     /// be inconsistent, so a REPL session discards it.
     pub(crate) broken: bool,
-    /// Testing aid: causes the first memory or resource check in each `vm_function` call and instruction to fail (see `Config::retry_stress`).
+    /// Testing aid: causes the first memory or resource check in each `vm_function` call and in each retryable instruction to fail (see `Config::retry_stress`).
     pub(crate) retry_stress: bool,
     /// Under `retry_stress`, set while an instruction runs again after a collection.
     pub(crate) instruction_retried: bool,
