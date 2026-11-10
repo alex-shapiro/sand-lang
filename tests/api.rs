@@ -3855,6 +3855,10 @@ fn natives_that_cannot_make_scheduler_requests_return_fail() {
     m.async_function("async_ok", || async { Ok::<i64, HostError<Fail>>(4) });
     m.async_function("async_err", || async { Err::<i64, HostError<Fail>>(HostError::new("io", "broken pipe")) });
     m.async_function("async_stop", || async { Err::<i64, Fail>(Fail::new("invalid", "no result")) });
+    m.async_function("async_exit", || async {
+        Err(Fail::exit(3))?;
+        Ok::<i64, HostError<Fail>>(4)
+    });
     let run = |src: &str| run_src(Config::new().host_modules(HostModules::new([m.clone()]).unwrap()), &format!("import fails\n{src}"));
 
     let (r, out, _) = run("print(fails.async_ok())\nprint(fails.async_err())");
@@ -3868,6 +3872,9 @@ fn natives_that_cannot_make_scheduler_requests_return_fail() {
 
     let (r, _, _) = run("print(fails.later_exit())");
     assert_eq!(r.unwrap().exit_code, 7);
+
+    let (r, out, _) = run("print(fails.async_exit())");
+    assert_eq!((r.unwrap().exit_code, out.as_str()), (3, ""));
 }
 
 #[test]

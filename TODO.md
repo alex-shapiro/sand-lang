@@ -306,6 +306,9 @@ Visible defects that rarely block users.
 
 ### Test coverage
 
+- [ ] ⚪ Check the error codes of the `compile_fail` doctests that guard the host
+      API. Stable rustdoc ignores the codes, so a snippet that stops compiling
+      for another reason still passes.
 - [ ] ⚪ Run the CI workflow on Windows and Linux, including the ConPTY variant of
       `cli/tests/prompt_tty.rs` and the REPL line editor.
 - [ ] ⚪ Run the Windows path resolver and file operations in `files/windows.rs` on
@@ -347,6 +350,13 @@ Visible defects that rarely block users.
 
 ### Embedding
 
+- [ ] ⚪ Let the compiler prove that a `vm_function` makes its scheduler requests
+      before its side effects. The engine runs the call again after a prompt or
+      a collection, so a write before `Vm::require` occurs twice. A check phase
+      that returns `Ctl` and an effect phase that returns `Fail` would close
+      this gap for journaled runs.
+- [ ] ⚪ Fix the private and broken links that make `cargo doc` fail with
+      `-D warnings` in `vm/display.rs`, `vm/meter.rs`, and `vm/value.rs`.
 - [ ] ❓ Decide whether `Config::stdin_bytes` should share its channel across
       every VM of an engine, as `StdinFeed` does. `Engine::new_vm` creates a
       fresh channel for `Config::stdin_bytes`, so `Session::reset` and each

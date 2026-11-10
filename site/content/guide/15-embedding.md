@@ -284,7 +284,7 @@ stats.function("counter", || Counter(AtomicI64::new(0)));
 stats.function("Counter.add", |c: &Counter, n: i64| c.0.fetch_add(n, Ordering::Relaxed) + n).params(&["n"]);
 ```
 
-`NativeModule::async_function` registers an async Rust function; while its future is pending, only the calling Sand task suspends. To return a recoverable error from the future, use `Result<T, HostError<Fail>>`. The future cannot ask for a permission or make another request to the scheduler.
+`NativeModule::async_function` registers an async Rust function; while its future is pending, only the calling Sand task suspends. To return a recoverable error from the future, use `Result<T, HostError<sandlang::vm::Fail>>`. The future cannot ask for a permission or make another request to the scheduler. If an operation needs a permission, register it with `NativeModule::vm_function`, call `Vm::require` before the wait, and return a `sandlang::native::func::Later`.
 
 To check a sandbox capability inside a native function, register the function with `NativeModule::vm_function` and call `Vm::require`, which returns a `"permission_denied"` error if the policy denies the request. Because the engine re-runs a `vm_function` after a permission prompt or after a garbage collection triggered by a memory or resource check (`Vm::check_memory`, `Vm::reserve_io`, `Vm::resource_slot`), check permissions and limits before performing any side effects. Enable `Config::retry_stress(true)` in tests to force the first memory or resource check in each `vm_function` call to trigger a collection and retry:
 
