@@ -558,7 +558,7 @@ pub struct Host {
     /// The run's idle `http` connections.
     #[cfg(feature = "os")]
     pub(crate) http_pool: Arc<crate::stdlib::http::Pool>,
-    pub(crate) regex_cache: Vec<(u64, u32)>,
+    pub(crate) regex_cache: Vec<Option<crate::stdlib::regex::RegexCacheEntry>>,
     /// The file system of the `fs` module.
     pub(crate) fs: crate::files::Fs,
     /// Rewrites or blocks outgoing HTTP requests. See [`crate::engine::Config::request_filter`].
@@ -1611,10 +1611,11 @@ impl Vm {
     /// A major collection, freeing all unreachable objects; used before
     /// reporting a memory limit, since a minor collection leaves old garbage.
     /// Also closes idle `http` connections, which hold resource slots and
-    /// buffers.
+    /// buffers, and releases cached regexes, which hold compiled programs.
     pub fn collect_all_garbage(&mut self, current: Option<&mut Fiber>) {
         #[cfg(feature = "os")]
         self.host.http_pool.clear();
+        self.host.regex_cache.iter_mut().flatten().for_each(|entry| entry.regex = None);
         self.collect_garbage_with(current, true);
     }
 
@@ -1628,6 +1629,7 @@ impl Vm {
         roots.extend(self.consts.iter().copied());
         roots.extend(self.pinned.iter().copied());
         roots.extend(self.ascii_strs.iter().copied());
+        roots.extend(self.host.regex_cache.iter().flatten().filter_map(|entry| entry.regex));
         let prog = &self.prog;
         let mut fiber_bytes = 0;
         let mut add_fiber = |f: &mut Fiber, roots: &mut Vec<Value>| {

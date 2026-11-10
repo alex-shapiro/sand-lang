@@ -936,3 +936,19 @@ print((order, probe.fuel()))
 "#,
     );
 }
+
+#[test]
+fn compiling_a_regex_costs_the_same_after_a_collection_released_it() {
+    assert_retries_cost_no_fuel(
+        r#"import probe
+import regex
+var hits = 0
+for i in 0..50 {
+    for pattern in ["a+b", "[0-9]+", "x|y"] {
+        if regex.Regex(pattern).unwrap().is_match("aab 12 x") { hits += 1 }
+    }
+}
+print((hits, probe.fuel()))
+"#,
+    );
+}
