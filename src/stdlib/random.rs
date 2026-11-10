@@ -4,7 +4,7 @@ use crate::check::ModKind;
 use crate::native::ty::{Param, Val};
 use crate::native::{NativeModule, NativeObject};
 use crate::vm::value::{FxHashMap, Value, to_usize_saturating};
-use crate::vm::{Ctl, Rng, Vm, fail};
+use crate::vm::{Fail, Rng, Vm, fail};
 
 /// An isolated pseudo-random number generator.
 #[derive(crate::SandObject)]
@@ -13,14 +13,14 @@ struct RngObj(Rng);
 
 impl NativeObject for RngObj {}
 
-fn with_engine<R>(vm: &mut Vm, op: impl FnOnce(&mut Vm, &mut Rng) -> Result<R, Ctl>) -> Result<R, Ctl> {
+fn with_engine<R>(vm: &mut Vm, op: impl FnOnce(&mut Vm, &mut Rng) -> Result<R, Fail>) -> Result<R, Fail> {
     let mut rng = vm.host.rng.clone();
     let result = op(vm, &mut rng);
     vm.host.rng = rng;
     result
 }
 
-fn with_object<R>(vm: &mut Vm, obj: Val<RngObj>, op: impl FnOnce(&mut Vm, &mut Rng) -> Result<R, Ctl>) -> Result<R, Ctl> {
+fn with_object<R>(vm: &mut Vm, obj: Val<RngObj>, op: impl FnOnce(&mut Vm, &mut Rng) -> Result<R, Fail>) -> Result<R, Fail> {
     let mut rng = obj.get(&vm.heap)?.0.clone();
     let result = op(vm, &mut rng);
     obj.get_mut(&mut vm.heap)?.0 = rng;
@@ -30,7 +30,7 @@ fn with_object<R>(vm: &mut Vm, obj: Val<RngObj>, op: impl FnOnce(&mut Vm, &mut R
 pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("random", ModKind::Std, include_str!("random.sand"));
     m.bind::<RngObj>();
-    m.vm_function("seed", |vm: &mut Vm, s: i64| -> Result<_, Ctl> {
+    m.vm_function("seed", |vm: &mut Vm, s: i64| -> Result<_, Fail> {
         vm.host.rng = Rng::new(s as u64);
         Ok(())
     });
@@ -38,8 +38,8 @@ pub(crate) fn module() -> NativeModule {
 
     macro_rules! ops {
         ($($name:literal => |$($a:ident: $t:ty),*| -> $r:ty = $op:expr;)*) => {$(
-            m.vm_function($name, |vm: &mut Vm, $($a: $t),*| -> Result<$r, Ctl> { with_engine(vm, |vm, rng| $op(vm, rng, $($a),*)) });
-            m.vm_function(concat!("Rng.", $name), |vm: &mut Vm, obj: Val<RngObj>, $($a: $t),*| -> Result<$r, Ctl> {
+            m.vm_function($name, |vm: &mut Vm, $($a: $t),*| -> Result<$r, Fail> { with_engine(vm, |vm, rng| $op(vm, rng, $($a),*)) });
+            m.vm_function(concat!("Rng.", $name), |vm: &mut Vm, obj: Val<RngObj>, $($a: $t),*| -> Result<$r, Fail> {
                 with_object(vm, obj, |vm, rng| $op(vm, rng, $($a),*))
             });
         )*};
@@ -56,7 +56,7 @@ pub(crate) fn module() -> NativeModule {
     m
 }
 
-fn int(_: &mut Vm, rng: &mut Rng, lo: i64, hi: i64) -> Result<i64, Ctl> {
+fn int(_: &mut Vm, rng: &mut Rng, lo: i64, hi: i64) -> Result<i64, Fail> {
     if lo >= hi {
         return fail("invalid", format!("random.int: empty range {lo}..{hi}"));
     }
@@ -64,13 +64,13 @@ fn int(_: &mut Vm, rng: &mut Rng, lo: i64, hi: i64) -> Result<i64, Ctl> {
     Ok((lo as i128 + rng.below(span) as i128) as i64)
 }
 
-fn choice(vm: &mut Vm, rng: &mut Rng, xs: Val<Vec<Param<0>>>) -> Result<Option<Param<0>>, Ctl> {
+fn choice(vm: &mut Vm, rng: &mut Rng, xs: Val<Vec<Param<0>>>) -> Result<Option<Param<0>>, Fail> {
     let xs = xs.items(&vm.heap);
     Ok((!xs.is_empty()).then(|| Param::from_raw(xs[rng.below(xs.len() as u64) as usize])))
 }
 
 /// Fisher-Yates.
-fn shuffle(vm: &mut Vm, rng: &mut Rng, xs: Val<Vec<Param<0>>>) -> Result<(), Ctl> {
+fn shuffle(vm: &mut Vm, rng: &mut Rng, xs: Val<Vec<Param<0>>>) -> Result<(), Fail> {
     vm.charge(xs.items(&vm.heap).len() as u64)?;
     let xs = vm.heap.list_mut(xs.raw());
     for i in (1..xs.len()).rev() {
@@ -82,7 +82,7 @@ fn shuffle(vm: &mut Vm, rng: &mut Rng, xs: Val<Vec<Param<0>>>) -> Result<(), Ctl
 
 /// A partial Fisher-Yates shuffle of the positions, recording only those it
 /// has disturbed (the element now at each).
-fn sample(vm: &mut Vm, rng: &mut Rng, xs: Val<Vec<Param<0>>>, k: i64) -> Result<Vec<Param<0>>, Ctl> {
+fn sample(vm: &mut Vm, rng: &mut Rng, xs: Val<Vec<Param<0>>>, k: i64) -> Result<Vec<Param<0>>, Fail> {
     let items = xs.items(&vm.heap);
     let n = items.len();
     let k = k.clamp(0, n as i64) as usize;
@@ -99,7 +99,7 @@ fn sample(vm: &mut Vm, rng: &mut Rng, xs: Val<Vec<Param<0>>>, k: i64) -> Result<
     Ok(out)
 }
 
-fn bytes(vm: &mut Vm, rng: &mut Rng, n: i64) -> Result<Vec<u8>, Ctl> {
+fn bytes(vm: &mut Vm, rng: &mut Rng, n: i64) -> Result<Vec<u8>, Fail> {
     if n < 0 {
         return fail("invalid", "random.bytes: negative length");
     }

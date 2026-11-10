@@ -553,8 +553,8 @@ impl Session {
         match shown {
             None => Ok(None),
             Some(Ok(text)) => Ok(Some(text)),
-            Some(Err(ctl)) => {
-                let ending = vm.run_ending_of(ctl.into_kind(), |_| vec![]);
+            Some(Err(fail)) => {
+                let ending = vm.run_ending_of(fail, |_| vec![]);
                 end_session_run(vm, ending, exit_code).map(|()| None)
             }
         }

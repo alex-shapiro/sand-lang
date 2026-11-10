@@ -209,7 +209,7 @@ Add `indexmap` 2 or `jiff` 0.2 to `Cargo.toml` to use `IndexMap` or the `jiff` t
 
 The engine automatically exports registered functions that are not declared in `NativeModule::source` as `pub`, with default parameter names `arg1`, `arg2`, ... unless overridden by `params`. Registering a function as `"Type.name"` defines a method on `Type`; the method takes `self` if its first parameter has type `Type` (such as `Counter.add` below). Generic functions must be declared with `native fn` in `NativeModule::source`.
 
-Returning `Err(HostError::new(kind, message))` produces a Sand `Err(Error)` with the given `kind` and `message`. The engine also converts `std::io::Error` into an `Error` with its standard kind, and `String` or `&str` errors into an `Error` with kind `"error"`. A function that returns `Result<T, sandlang::vm::Ctl>` has the Sand return type `T`; returning `Err(ctl)` aborts the run with a runtime error (`Ctl::fail`), a resource limit error, or an exit code.
+Returning `Err(HostError::new(kind, message))` produces a Sand `Err(Error)` with the given `kind` and `message`. The engine also converts `std::io::Error` into an `Error` with its standard kind, and `String` or `&str` errors into an `Error` with kind `"error"`. A function that returns `Result<T, sandlang::vm::Fail>` has the Sand return type `T`. Returning `Err(fail)` aborts the run with a runtime error (`Fail::runtime_error`), a resource limit error, or an exit code (`Fail::exit`).
 
 Each derive macro (`SandEnum`, `SandStruct`, `SandObject`, `SandValue`) binds a Rust type to a Sand type in the module specified by `#[sand(module = "...")]`. Register each bound type with `NativeModule::bind`. Do not redeclare a bound type in `NativeModule::source`; use `extend` to add Sand methods to it. Optional type attributes override the Sand name (`#[sand(name = "Kind")]`), make the type private to its module (`#[sand(private)]`), or specify a renamed `sandlang` dependency (`#[sand(crate = my_sandlang)]`).
 
@@ -284,7 +284,7 @@ stats.function("counter", || Counter(AtomicI64::new(0)));
 stats.function("Counter.add", |c: &Counter, n: i64| c.0.fetch_add(n, Ordering::Relaxed) + n).params(&["n"]);
 ```
 
-`NativeModule::async_function` registers an async Rust function; while its future is pending, only the calling Sand task suspends.
+`NativeModule::async_function` registers an async Rust function. While its future is pending, only the calling Sand task suspends. To return a recoverable error from the future, use `Result<T, HostError<sandlang::vm::Fail>>`. The future cannot make a scheduler request such as a permission check. If an operation needs a permission, register it with `NativeModule::vm_function`, call `Vm::require` before the wait, and return a `sandlang::native::func::Later`.
 
 To check a sandbox capability inside a native function, register the function with `NativeModule::vm_function` and call `Vm::require`, which returns a `"permission_denied"` error if the policy denies the request. Because the engine re-runs a `vm_function` after a permission prompt or after a garbage collection triggered by a memory or resource check (`Vm::check_memory`, `Vm::reserve_io`, `Vm::resource_slot`), check permissions and limits before performing any side effects. Enable `Config::retry_stress(true)` in tests to force the first memory or resource check in each `vm_function` call to trigger a collection and retry:
 

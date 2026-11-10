@@ -4,7 +4,7 @@ use crate::check::ModKind;
 use crate::native::NativeModule;
 use crate::native::ty::Val;
 use crate::vm::display::escape_str_debug;
-use crate::vm::{Ctl, Vm};
+use crate::vm::{Ctl, Fail, Vm};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
@@ -114,11 +114,11 @@ pub(crate) fn module() -> NativeModule {
     m.vm_function("warn", |vm: &mut Vm, msg: Val<String>, fields: Fields| emit_record(vm, LogLevel::Warn, msg, fields));
     m.vm_function("error", |vm: &mut Vm, msg: Val<String>, fields: Fields| emit_record(vm, LogLevel::Error, msg, fields));
     m.bind::<LogLevel>();
-    m.vm_function("set_level", |vm: &mut Vm, level: LogLevel| -> Result<_, Ctl> {
+    m.vm_function("set_level", |vm: &mut Vm, level: LogLevel| -> Result<_, Fail> {
         vm.host.log_level = Some(level);
         Ok(())
     });
-    m.vm_function("disable", |vm: &mut Vm| -> Result<_, Ctl> {
+    m.vm_function("disable", |vm: &mut Vm| -> Result<_, Fail> {
         vm.host.log_level = None;
         Ok(())
     });

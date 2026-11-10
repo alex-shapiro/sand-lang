@@ -76,7 +76,7 @@ impl IoTable {
     /// Polls the future of `suspension` once and registers it for task `fid`
     /// if still pending. Returns the slot ID, or the finisher if ready
     /// immediately.
-    pub fn add(&mut self, fid: u32, wait_gen: u64, mut suspension: Suspension) -> Result<u64, Finisher> {
+    pub(crate) fn add(&mut self, fid: u32, wait_gen: u64, mut suspension: Suspension) -> Result<u64, Finisher> {
         let slot = match self.free.pop() {
             Some(s) => s,
             None => {
@@ -121,7 +121,7 @@ impl IoTable {
     }
 
     /// Polls the operations that were woken. Returns those completed.
-    pub fn poll_ready(&mut self, task_waker: Option<&Waker>) -> Vec<(u32, u64, Finisher)> {
+    pub(crate) fn poll_ready(&mut self, task_waker: Option<&Waker>) -> Vec<(u32, u64, Finisher)> {
         if let Some(w) = task_waker {
             self.shared.set_waker(w);
         }
@@ -344,7 +344,7 @@ impl Vm {
                 Ok(r) => r,
                 Err(msg) => {
                     self.heap.unchecked = false;
-                    Err(Ctl::internal(msg))
+                    Err(Fail::internal(msg))
                 }
             };
             match r {
@@ -352,8 +352,8 @@ impl Vm {
                     self.deliver(fid, wait_gen, v);
                     self.enforce_limit(None).map_err(Trap::Limit)?;
                 }
-                Err(ctl) => {
-                    return Err(self.run_ending_of(ctl.into_kind(), |vm| match &vm.fibers[fid as usize] {
+                Err(fail) => {
+                    return Err(self.run_ending_of(fail, |vm| match &vm.fibers[fid as usize] {
                         Some(fiber) => vm.trace_of(fiber, None),
                         None => vec![],
                     }));
@@ -378,7 +378,7 @@ impl Vm {
     fn start_main(&mut self, proto: u32) -> Result<u32, RunEnding> {
         let closure = self.heap.alloc(Obj::Closure(proto, Box::new([])));
         let task = self.heap.alloc(Obj::Task(Box::new(TaskObj { fiber: 0, state: TaskState::Running, result: Value::Unit })));
-        let fid = self.spawn_fiber(closure, task).map_err(|ctl| self.run_ending_of(ctl.into_kind(), |_| vec![]))?;
+        let fid = self.spawn_fiber(closure, task).map_err(|fail| self.run_ending_of(fail, |_| vec![]))?;
         if let Obj::Task(task_obj) = self.heap.get_mut(task) {
             task_obj.fiber = fid;
         }

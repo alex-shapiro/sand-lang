@@ -10,9 +10,9 @@
 //! - Back edges leave the `match` with their offset and share one safe point.
 //! - Loops, allocations, formatting and error paths go into `#[inline(never)]`
 //!   or `#[cold]` functions, not into the arms.
-//! - Results stay 16 bytes (`Ctl` is one pointer), and a helper returns a
-//!   `Value` whole (`Ok(*v)`), not through an `Option<Value>`: larger or
-//!   split results go through memory and stall the caller's load.
+//! - Results stay 16 bytes (`Ctl` and `Fail` are pointer-sized), and a helper
+//!   returns a `Value` directly (`Ok(*v)`) instead of an `Option<Value>`.
+//!   Larger or split results go through memory and stall the caller's load.
 //!
 //! Measure changes with `cargo bench` and by looking for stack loads and
 //! stores around the dispatch jump in the disassembly of `Vm::interp`.
@@ -22,7 +22,7 @@ use super::compare::{
     values_le_metered, values_lt, values_lt_metered,
 };
 use super::display;
-use super::meter::{MemoryLimit, Scratch, code_fuel, loop_fuel};
+use super::meter::{Scratch, code_fuel, loop_fuel};
 use super::*;
 use crate::engine::LimitKind;
 
@@ -33,8 +33,8 @@ enum Stop {
     Limit(LimitKind),
 }
 
-impl From<Ctl> for Stop {
-    fn from(c: Ctl) -> Stop {
+impl From<Fail> for Stop {
+    fn from(c: Fail) -> Stop {
         match c.as_limit() {
             Some(k) => Stop::Limit(k),
             None => Stop::Interrupted,
@@ -42,11 +42,11 @@ impl From<Ctl> for Stop {
     }
 }
 
-impl From<Stop> for Ctl {
-    fn from(s: Stop) -> Ctl {
+impl From<Stop> for Fail {
+    fn from(s: Stop) -> Fail {
         match s {
-            Stop::Limit(k) => Ctl::limit(k),
-            Stop::Interrupted => Ctl::interrupted(),
+            Stop::Limit(k) => Fail::limit(k),
+            Stop::Interrupted => Fail::interrupted(),
         }
     }
 }
@@ -357,15 +357,15 @@ fn shift_amount(b: i64) -> Result<u32, &'static str> {
 impl Vm {
     /// Generic arithmetic on runtime values.
     #[inline(never)]
-    pub fn arith(&mut self, op: u8, a: Value, b: Value) -> Result<Value, Ctl> {
+    pub fn arith(&mut self, op: u8, a: Value, b: Value) -> Result<Value, Fail> {
         use Value::*;
         Ok(match (op, a, b) {
             (0, Int(x), Int(y)) => Int(x.checked_add(y).ok_or_else(|| overflow("integer"))?),
             (1, Int(x), Int(y)) => Int(x.checked_sub(y).ok_or_else(|| overflow("integer"))?),
             (2, Int(x), Int(y)) => Int(x.checked_mul(y).ok_or_else(|| overflow("integer"))?),
-            (3, Int(x), Int(y)) => Int(int_div(x, y).map_err(Ctl::from)?),
-            (4, Int(x), Int(y)) => Int(int_rem(x, y).map_err(Ctl::from)?),
-            (5, Int(x), Int(y)) => Int(int_pow(x, y).map_err(Ctl::from)?),
+            (3, Int(x), Int(y)) => Int(int_div(x, y).map_err(arith_fail)?),
+            (4, Int(x), Int(y)) => Int(int_rem(x, y).map_err(arith_fail)?),
+            (5, Int(x), Int(y)) => Int(int_pow(x, y).map_err(arith_fail)?),
             (0, Float(x), Float(y)) => Float(x + y),
             (1, Float(x), Float(y)) => Float(x - y),
             (2, Float(x), Float(y)) => Float(x * y),
@@ -378,13 +378,13 @@ impl Vm {
             (2, Dur(x), Float(y)) | (2, Float(y), Dur(x)) => Dur(dur_scale(x, y).ok_or_else(|| overflow("duration"))?),
             (3, Dur(x), Int(y)) => {
                 if y == 0 {
-                    return Err(Ctl::fail("invalid", "division by zero"));
+                    return Err(Fail::runtime_error("invalid", "division by zero"));
                 }
                 Dur(x.checked_div(y).ok_or_else(|| overflow("duration"))?)
             }
             (3, Dur(x), Float(y)) => {
                 if y == 0.0 {
-                    return Err(Ctl::fail("invalid", "division by zero"));
+                    return Err(Fail::runtime_error("invalid", "division by zero"));
                 }
                 Dur(dur_div(x, y).ok_or_else(|| overflow("duration"))?)
             }
@@ -444,8 +444,8 @@ impl Vm {
 
     #[cold]
     #[inline(never)]
-    fn key_error(&self, k: Value) -> Ctl {
-        Ctl::fail("not_found", format!("key not found: {}", self.debug(k).unwrap_or_default()))
+    fn key_error(&self, k: Value) -> Fail {
+        Fail::runtime_error("not_found", format!("key not found: {}", self.debug(k).unwrap_or_default()))
     }
 
     #[cold]
@@ -453,11 +453,11 @@ impl Vm {
     fn try_top(&mut self, fiber: &mut Fiber, ip: usize, prog: &Program, res: Value) -> Result<FiberStop, RunEnding> {
         // `Option::None` has 0 fields; `Result::Err(e)` stores `e` at field 0.
         let Some(e) = self.heap.field(res, 0) else {
-            return self.ctl_stop(fiber, ip, Ctl::fail("none", "`?` found None"));
+            return self.fail_stop(fiber, ip, Fail::runtime_error("none", "`?` found None"));
         };
         match display::to_display_metered(prog, &self.heap, &self.meter, e) {
             Ok(text) => Err(self.error_trap(fiber, ip, text)),
-            Err(c) => self.ctl_stop(fiber, ip, c),
+            Err(c) => self.fail_stop(fiber, ip, c),
         }
     }
 
@@ -508,11 +508,11 @@ impl Vm {
     /// [`RunEnding`].
     #[cold]
     #[inline(never)]
-    fn ctl_stop(&mut self, fiber: &mut Fiber, ip: usize, ctl: Ctl) -> Result<FiberStop, RunEnding> {
-        if let Some(kind) = ctl.as_limit() {
+    fn fail_stop(&mut self, fiber: &mut Fiber, ip: usize, fail: Fail) -> Result<FiberStop, RunEnding> {
+        if let Some(kind) = fail.as_limit() {
             return self.limit_stop(fiber, ip, kind);
         }
-        Err(self.run_ending_of(ctl.into_kind(), |vm| vm.trace_of(fiber, Some(ip as u32))))
+        Err(self.run_ending_of(fail, |vm| vm.trace_of(fiber, Some(ip as u32))))
     }
 
     /// Converts a limit hit at the instruction before `ip` into a
@@ -583,10 +583,10 @@ impl Vm {
                 return Err(self.internal_trap(fiber, ip, String::from($msg)));
             }};
         }
-        macro_rules! fail_ctl {
+        macro_rules! fail_stop {
             ($c:expr) => {{
                 save!();
-                return self.ctl_stop(fiber, ip, $c);
+                return self.fail_stop(fiber, ip, $c);
             }};
         }
         macro_rules! int {
@@ -657,12 +657,12 @@ impl Vm {
                 if fiber.stack.len() < need
                     && let Err(c) = fiber.grow_stack(need, &mut self.heap)
                 {
-                    fail_ctl!(c);
+                    fail_stop!(c);
                 }
                 if fiber.frames.len() == fiber.frames.capacity()
                     && let Err(c) = fiber.grow_frames(&mut self.heap)
                 {
-                    fail_ctl!(c);
+                    fail_stop!(c);
                 }
                 fiber.frames.push(Frame { proto: $proto, ip: 0, base: nb as u32, ret: $ret as u32, closure: $closure });
                 code = &p.code;
@@ -833,7 +833,7 @@ impl Vm {
                         let (x, y) = (r!(a), r!(b));
                         match self.arith(code_op, x, y) {
                             Ok(v) => r!(dst) = v,
-                            Err(c) => fail_ctl!(c),
+                            Err(c) => fail_stop!(c),
                         }
                     }
                     Op::Neg { dst, a } => {
@@ -880,12 +880,12 @@ impl Vm {
                     Op::JNeqK { a, k, off } => match self.eq_const(&r!(a), k) {
                         Ok(true) => {}
                         Ok(false) => jump!(off),
-                        Err(c) => fail_ctl!(c),
+                        Err(c) => fail_stop!(c),
                     },
                     Op::JNneK { a, k, off } => match self.eq_const(&r!(a), k) {
                         Ok(true) => jump!(off),
                         Ok(false) => {}
-                        Err(c) => fail_ctl!(c),
+                        Err(c) => fail_stop!(c),
                     },
                     Op::Eq { dst, a, b } if let Some(eq) = quick_eq(&self.heap, &r!(a), &r!(b)) => r!(dst) = Value::Bool(eq),
                     Op::Ne { dst, a, b } if let Some(eq) = quick_eq(&self.heap, &r!(a), &r!(b)) => r!(dst) = Value::Bool(!eq),
@@ -894,7 +894,7 @@ impl Vm {
                     Op::Eq { .. } | Op::Ne { .. } | Op::Lt { .. } | Op::Le { .. } | Op::JNeq { .. } | Op::JNne { .. } => {
                         match self.op_compare(&prog, op, regs) {
                             Ok(off) => jump!(off),
-                            Err(c) => fail_ctl!(c),
+                            Err(c) => fail_stop!(c),
                         }
                     }
 
@@ -1138,7 +1138,7 @@ impl Vm {
                         if fiber.stack.len() < need
                             && let Err(c) = fiber.grow_stack(need, &mut self.heap)
                         {
-                            fail_ctl!(c);
+                            fail_stop!(c);
                         }
                         reload!();
                         shift_args(regs, src, n);
@@ -1163,7 +1163,7 @@ impl Vm {
                                 if fiber.stack.len() < need
                                     && let Err(c) = fiber.grow_stack(need, &mut self.heap)
                                 {
-                                    fail_ctl!(c);
+                                    fail_stop!(c);
                                 }
                                 reload!();
                                 shift_args(regs, src, n);
@@ -1244,7 +1244,7 @@ impl Vm {
                             let k = regs[s + 2 * i];
                             let v = regs[s + 2 * i + 1];
                             if let Err(c) = self.map_insert(m, k, v) {
-                                fail_ctl!(c);
+                                fail_stop!(c);
                             }
                         }
                         r!(dst) = m;
@@ -1301,7 +1301,7 @@ impl Vm {
                         Dense::Hit(v) => r!(dst) = *v,
                         _ => match self.map_index(r!(obj), r!(key)) {
                             Ok(v) => r!(dst) = v,
-                            Err(c) => fail_ctl!(c),
+                            Err(c) => fail_stop!(c),
                         },
                     },
                     Op::SetIndex { obj, idx, src } => {
@@ -1321,7 +1321,7 @@ impl Vm {
                     Op::SetIndexMap { obj, key, src } => {
                         let (m, k, v) = (r!(obj), r!(key), r!(src));
                         if let Err(c) = self.map_set(m, k, v) {
-                            fail_ctl!(c);
+                            fail_stop!(c);
                         }
                     }
                     Op::Slice { dst, base: b, flags } => {
@@ -1330,7 +1330,7 @@ impl Vm {
                         let end = if flags & 2 != 0 { Some(int!(b + 2)) } else { None };
                         match self.slice(o, start, end, flags & 4 != 0) {
                             Ok(v) => r!(dst) = v,
-                            Err(c) => fail_ctl!(c),
+                            Err(c) => fail_stop!(c),
                         }
                     }
                     Op::ListPush { list, src } => {
@@ -1397,21 +1397,21 @@ impl Vm {
                         }
                         Dense::Unknown => match self.map_get_option(r!(map), r!(key)) {
                             Ok(v) => r!(dst) = v,
-                            Err(c) => fail_ctl!(c),
+                            Err(c) => fail_stop!(c),
                         },
                     },
                     Op::MapGetTuple { dst, map, start, n } => {
                         let s = start as usize;
                         match self.map_get_tuple(r!(map), &regs[s..s + n as usize]) {
                             Ok(v) => r!(dst) = v,
-                            Err(c) => fail_ctl!(c),
+                            Err(c) => fail_stop!(c),
                         }
                     }
                     Op::MapHasTuple { dst, map, start, n } => {
                         let s = start as usize;
                         match self.map_has_tuple(r!(map), &regs[s..s + n as usize]) {
                             Ok(b) => r!(dst) = Value::Bool(b),
-                            Err(c) => fail_ctl!(c),
+                            Err(c) => fail_stop!(c),
                         }
                     }
                     Op::MapGetOr { dst, map, key } => match dense_get(&self.heap, &r!(map), &r!(key)) {
@@ -1420,31 +1420,31 @@ impl Vm {
                         Dense::Unknown => {
                             let (m, k) = (r!(map), r!(key));
                             if let Err(c) = self.map_get_or(m, k, &mut r!(dst)) {
-                                fail_ctl!(c);
+                                fail_stop!(c);
                             }
                         }
                     },
                     Op::MapHas { dst, map, key } => match self.map_has(r!(map), r!(key)) {
                         Ok(b) => r!(dst) = Value::Bool(b),
-                        Err(c) => fail_ctl!(c),
+                        Err(c) => fail_stop!(c),
                     },
                     Op::SetHas { dst, set, key } => match self.set_contains(r!(set), r!(key)) {
                         Ok(b) => r!(dst) = Value::Bool(b),
-                        Err(c) => fail_ctl!(c),
+                        Err(c) => fail_stop!(c),
                     },
                     Op::SetAdd { dst, set, key } => match self.set_add(r!(set), r!(key)) {
                         Ok(b) => r!(dst) = Value::Bool(b),
-                        Err(c) => fail_ctl!(c),
+                        Err(c) => fail_stop!(c),
                     },
                     Op::IntToFloat { dst, src } => r!(dst) = Value::Float(int!(src) as f64),
                     Op::AppendStr { local, src } => {
                         let add = r!(src);
                         if let Err(c) = self.meter.charge_bytes(self.heap.append_copies(r!(local), add)) {
-                            fail_ctl!(c);
+                            fail_stop!(c);
                         }
                         match self.heap.append_str(r!(local), add) {
                             Ok(v) => r!(local) = v,
-                            Err(k) => fail_ctl!(Ctl::limit(k)),
+                            Err(k) => fail_stop!(Fail::limit(k)),
                         }
                     }
                     Op::FreezeStr { reg } => self.heap.freeze_str(r!(reg)),
@@ -1454,11 +1454,11 @@ impl Vm {
                                 jump!(off)
                             }
                         }
-                        Err(c) => fail_ctl!(c.into()),
+                        Err(c) => fail_stop!(c.into()),
                     },
                     Op::StrClass { dst, src, class } => match self.str_class(r!(src), class) {
                         Ok(b) => r!(dst) = Value::Bool(b),
-                        Err(c) => fail_ctl!(c.into()),
+                        Err(c) => fail_stop!(c.into()),
                     },
                     Op::ForList { elem, base: b, off } => {
                         let i = int!(b + 1);
@@ -1573,7 +1573,7 @@ impl Vm {
                     },
                     Op::NewIter { dst, src } => match self.container_iter(r!(src)) {
                         Ok(v) => r!(dst) = v,
-                        Err(c) => fail_ctl!(c),
+                        Err(c) => fail_stop!(c),
                     },
                     Op::JListLen { src, n, off } => {
                         if self.heap.list(r!(src)).len() != n as usize {
@@ -1594,7 +1594,7 @@ impl Vm {
                     }
                     Op::ListRest { dst, list, before, after } => match self.list_rest(r!(list), before as usize, after as usize) {
                         Ok(v) => r!(dst) = v,
-                        Err(c) => fail_ctl!(c),
+                        Err(c) => fail_stop!(c),
                     },
 
                     // ---------------- strings
@@ -1608,24 +1608,24 @@ impl Vm {
                         }
                         match self.op_display(&prog, v, false) {
                             Ok(v) => r!(dst) = v,
-                            Err(c) => fail_ctl!(c),
+                            Err(c) => fail_stop!(c),
                         }
                     }
                     Op::Debug { dst, src } => match self.op_display(&prog, r!(src), true) {
                         Ok(v) => r!(dst) = v,
-                        Err(c) => fail_ctl!(c),
+                        Err(c) => fail_stop!(c),
                     },
                     Op::Interp { dst, tmpl } => match self.op_interp(&prog, tmpl, regs) {
                         Ok(v) => r!(dst) = v,
-                        Err(c) => fail_ctl!(c),
+                        Err(c) => fail_stop!(c),
                     },
                     Op::AppendInterp { local, tmpl } => match self.op_append_interp(&prog, tmpl, local, regs) {
                         Ok(v) => r!(local) = v,
-                        Err(c) => fail_ctl!(c),
+                        Err(c) => fail_stop!(c),
                     },
                     Op::Describe { base, tmpl } => match self.op_describe(&prog, tmpl, &regs[base as usize..]) {
                         Ok(v) => r!(base) = v,
-                        Err(c) => fail_ctl!(c),
+                        Err(c) => fail_stop!(c),
                     },
 
                     // ---------------- misc
@@ -1633,7 +1633,7 @@ impl Vm {
                         let c = r!(closure);
                         match self.spawn_task(c) {
                             Ok(t) => r!(dst) = t,
-                            Err(c) => fail_ctl!(c),
+                            Err(c) => fail_stop!(c),
                         }
                     }
                     Op::TryTop { src } => {
@@ -1694,7 +1694,7 @@ impl Vm {
         self.caller_site = (frame.proto, frame.ip);
         let mut r = Self::invoke_native(self, natives, n, &fiber.stack[start..start + argc]);
         self.heap.fail_next_check.set(false);
-        if r.is_memory_limit() || matches!(&r, Err(c) if matches!(c.kind(), CtlKind::Collect)) {
+        if collection_may_help(&r) {
             // Native functions check memory and open-resource limits against
             // counts that include uncollected garbage. Run a full collection
             // and retry once.
@@ -1756,8 +1756,8 @@ impl Vm {
             CtlKind::Cancelled => Ok(Some(FiberStop::Cancelled)),
             CtlKind::Yield | CtlKind::Blocked { .. } => unreachable!("handled above"),
             CtlKind::Collect => Err(self.internal_trap(fiber, ip, "a native asked for a collection twice".into())),
-            // Do not retry memory limits here because the call already retried after garbage collection.
-            kind => Err(self.run_ending_of(kind, |vm| vm.trace_of(fiber, Some(ip as u32)))),
+            // Do not retry memory limits here. `call_native` already retried the call after garbage collection.
+            CtlKind::Fail(fail) => Err(self.run_ending_of(fail, |vm| vm.trace_of(fiber, Some(ip as u32)))),
         }
     }
 
@@ -1795,7 +1795,7 @@ impl Vm {
     /// (else 0). Composite values are compared with metering, so deep
     /// comparisons cost fuel and can be interrupted.
     #[inline(never)]
-    fn op_compare(&mut self, prog: &Program, op: Op, regs: &mut [Value]) -> Result<i16, Ctl> {
+    fn op_compare(&mut self, prog: &Program, op: Op, regs: &mut [Value]) -> Result<i16, Fail> {
         let (Op::Eq { a, b, .. }
         | Op::Ne { a, b, .. }
         | Op::Lt { a, b, .. }
@@ -1832,7 +1832,7 @@ impl Vm {
 
     /// `v == consts[k]`.
     #[inline(always)]
-    fn eq_const(&self, v: &Value, k: u16) -> Result<bool, Ctl> {
+    fn eq_const(&self, v: &Value, k: u16) -> Result<bool, Fail> {
         let c = &self.consts[k as usize];
         match quick_eq(&self.heap, v, c) {
             Some(eq) => Ok(eq),
@@ -1841,13 +1841,13 @@ impl Vm {
     }
 
     #[inline(never)]
-    fn eq_slow(&self, a: Value, b: Value) -> Result<bool, Ctl> {
+    fn eq_slow(&self, a: Value, b: Value) -> Result<bool, Fail> {
         values_eq_metered(&self.heap, &self.meter, a, b)
     }
 
     /// `ToStr` (display) and `Debug` of a value, as a new string.
     #[inline(never)]
-    fn op_display(&mut self, prog: &Program, v: Value, debug: bool) -> Result<Value, Ctl> {
+    fn op_display(&mut self, prog: &Program, v: Value, debug: bool) -> Result<Value, Fail> {
         let s = if debug {
             display::to_debug_metered(prog, &self.heap, &self.meter, v)?
         } else {
@@ -1857,7 +1857,7 @@ impl Vm {
     }
 
     /// The text of template `tmpl` with the values of the registers `regs`.
-    fn render_template(&self, prog: &Program, tmpl: u32, regs: &[Value]) -> Result<String, Ctl> {
+    fn render_template(&self, prog: &Program, tmpl: u32, regs: &[Value]) -> Result<String, Fail> {
         let t = &prog.templates[tmpl as usize];
         self.meter.charge_bytes(t.text_len)?;
         let mut out = String::with_capacity(t.text_len + 8 * t.pieces.len());
@@ -1879,7 +1879,7 @@ impl Vm {
     /// `Op::Describe`: instantiates a type descriptor template with the
     /// argument descriptors at the start of `args`.
     #[inline(never)]
-    fn op_describe(&mut self, prog: &Program, tmpl: u32, args: &[Value]) -> Result<Value, Ctl> {
+    fn op_describe(&mut self, prog: &Program, tmpl: u32, args: &[Value]) -> Result<Value, Fail> {
         let t = &prog.desc_templates[tmpl as usize];
         self.meter.charge(t.size() as u64)?;
         let args = &args[..t.arity()];
@@ -1897,7 +1897,7 @@ impl Vm {
 
     /// `Op::Interp`: string interpolation into one buffer.
     #[inline(never)]
-    fn op_interp(&mut self, prog: &Program, tmpl: u32, regs: &[Value]) -> Result<Value, Ctl> {
+    fn op_interp(&mut self, prog: &Program, tmpl: u32, regs: &[Value]) -> Result<Value, Fail> {
         let s = self.render_template(prog, tmpl, regs)?;
         Ok(self.heap.new_str(s))
     }
@@ -1906,7 +1906,7 @@ impl Vm {
     /// local in register `local` (charged like `AppendStr`). Returns the
     /// local's new value.
     #[inline(never)]
-    fn op_append_interp(&mut self, prog: &Program, tmpl: u32, local: Reg, regs: &[Value]) -> Result<Value, Ctl> {
+    fn op_append_interp(&mut self, prog: &Program, tmpl: u32, local: Reg, regs: &[Value]) -> Result<Value, Fail> {
         let s = self.render_template(prog, tmpl, regs)?;
         let cur = regs[local as usize];
         let copied = match self.heap.get(cur) {
@@ -1914,35 +1914,35 @@ impl Vm {
             _ => self.heap.str(cur).len() + s.len(),
         };
         self.meter.charge_bytes(copied)?;
-        self.heap.append_text(cur, &s).map_err(Ctl::limit)
+        self.heap.append_text(cur, &s).map_err(Fail::limit)
     }
 
     /// Calls native `n`. A Rust panic in it is caught by the scheduler
     /// around the whole slice (`crate::unwind`).
     #[inline(always)]
-    fn invoke_native(&mut self, natives: &[NativeEntry], n: u32, args: &[Value]) -> NResult {
+    fn invoke_native(&mut self, natives: &[NativeEntry], n: u32, args: &[Value]) -> Result<Value, Ctl> {
         let entry = &natives[n as usize];
         entry.f.call(self, args)
     }
 
     /// Returns the result of `on` if it is ready. Otherwise, registers a wait
-    /// for the running task and returns [`CtlKind::Blocked`] or
-    /// [`CtlKind::Racing`].
-    pub fn block(&mut self, on: BlockOn) -> NResult {
+    /// for the running task and returns a [`Ctl`] that the native function must
+    /// propagate.
+    pub fn block(&mut self, on: BlockOn) -> Result<Value, Ctl> {
         let caller = self.current;
         let wait_gen = self.next_gen();
         match on {
             BlockOn::Join(task) => {
                 let (fid, state, result) = match self.heap.get(task) {
                     Obj::Task(t) => (t.fiber, t.state, t.result),
-                    _ => return Err(internal("not a task")),
+                    _ => return Err(internal("not a task").into()),
                 };
                 match state {
                     TaskState::Done => Ok(result),
-                    TaskState::Cancelled => Err(Ctl::fail("cancelled", "task cancelled")),
+                    TaskState::Cancelled => Err(Fail::runtime_error("cancelled", "task cancelled").into()),
                     TaskState::Running => {
                         if fid == caller {
-                            return Err(Ctl::fail("deadlock", "a task cannot wait for itself"));
+                            return Err(Fail::runtime_error("deadlock", "a task cannot wait for itself").into());
                         }
                         self.add_waiter(fid, (caller, wait_gen))?;
                         Err(self.signal(CtlKind::Blocked { wait_gen }))
@@ -1951,7 +1951,7 @@ impl Vm {
             }
             BlockOn::Race(tasks) => {
                 if tasks.is_empty() {
-                    return Err(Ctl::fail("invalid", "task.race called with an empty list"));
+                    return Err(Fail::runtime_error("invalid", "task.race called with an empty list").into());
                 }
                 // One waiter per task, and the list of tasks to cancel.
                 self.meter.charge(tasks.len() as u64)?;
@@ -1974,11 +1974,11 @@ impl Vm {
                     contenders += u32::from(task.state == TaskState::Running && task.fiber != caller);
                 }
                 if contenders == 0 {
-                    return Err(if any_cancelled {
-                        Ctl::fail("cancelled", "task cancelled")
+                    return Err(Ctl::from(if any_cancelled {
+                        Fail::runtime_error("cancelled", "task cancelled")
                     } else {
-                        Ctl::fail("deadlock", "a task cannot wait for itself")
-                    });
+                        Fail::runtime_error("deadlock", "a task cannot wait for itself")
+                    }));
                 }
                 for &task_val in &tasks {
                     let fid = match self.heap.get(task_val) {
@@ -1991,7 +1991,7 @@ impl Vm {
                 Err(Ctl::from(CtlKind::Racing { wait_gen, tasks, contenders }))
             }
             BlockOn::Recv(ch) => {
-                let Some(c) = self.heap.channel_mut(ch, None) else { return Err(internal("not a channel")) };
+                let Some(c) = self.heap.channel_mut(ch, None) else { return Err(internal("not a channel").into()) };
                 if let Some((v, woken)) = c.take() {
                     let some = self.some(v);
                     if let Some((sf, sg)) = woken {
@@ -2017,7 +2017,7 @@ impl Vm {
                 Err(self.signal(CtlKind::Blocked { wait_gen }))
             }
             BlockOn::Send(ch, v) => {
-                let Some(c) = self.heap.channel_mut(ch, None) else { return Err(internal("not a channel")) };
+                let Some(c) = self.heap.channel_mut(ch, None) else { return Err(internal("not a channel").into()) };
                 if c.closed {
                     return Ok(Value::Bool(false));
                 }
@@ -2029,7 +2029,7 @@ impl Vm {
                     }
                 }
                 if c.has_room() {
-                    self.heap.channel_push(ch, v).map_err(Ctl::limit)?;
+                    self.heap.channel_push(ch, v).map_err(Fail::limit)?;
                     return Ok(Value::Bool(true));
                 }
                 let Some(c) = self.heap.channel_mut(ch, Some(v)) else { unreachable!() };
@@ -2045,7 +2045,7 @@ impl Vm {
     /// Registers `waiter` to be woken when the task of fiber `target`
     /// finishes, first dropping stale waits (of cancelled tasks) if the list
     /// has grown enough.
-    fn add_waiter(&mut self, target: u32, waiter: (u32, u64)) -> Result<(), Ctl> {
+    fn add_waiter(&mut self, target: u32, waiter: (u32, u64)) -> Result<(), Fail> {
         let Some(Some(f)) = self.fibers.get_mut(target as usize) else { return Ok(()) };
         let prune = f.waiters.len() >= f.waiters_prune_at.max(MIN_PRUNE);
         if prune {
@@ -2075,7 +2075,7 @@ impl Vm {
 
     /// The value of key `k` in map `m`, or `None`.
     #[inline]
-    pub fn map_get(&self, m: Value, k: Value) -> Result<Option<Value>, Ctl> {
+    pub fn map_get(&self, m: Value, k: Value) -> Result<Option<Value>, Fail> {
         let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
         match map_slot(&self.heap, &self.meter, mo, k)?.map(|s| &mo.entries[s]) {
             Some(Some((_, v))) => Ok(Some(*v)),
@@ -2109,7 +2109,7 @@ impl Vm {
     /// `m.get(k)`: the value as an option (built here rather than returned
     /// as an `Option<Value>`, for the reason given at `map_index`).
     #[inline(never)]
-    fn map_get_option(&mut self, m: Value, k: Value) -> Result<Value, Ctl> {
+    fn map_get_option(&mut self, m: Value, k: Value) -> Result<Value, Fail> {
         let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
         if let Value::Int(i) = k {
             let v = map_get_int(mo, i).copied();
@@ -2124,7 +2124,7 @@ impl Vm {
     /// The slot of key `k` (not an int) in map `m`, remembered for a store
     /// to the same key right after (`m[k] = m.get_or(k, 0) + 1`).
     #[inline]
-    fn map_lookup(&self, m: Value, mo: &MapObj, k: Value) -> Result<Option<usize>, Ctl> {
+    fn map_lookup(&self, m: Value, mo: &MapObj, k: Value) -> Result<Option<usize>, Fail> {
         let s = map_slot(&self.heap, &self.meter, mo, k)?;
         if let (Some(s), Value::Obj(h)) = (s, m) {
             self.last_slot.set((h, s as u32));
@@ -2148,7 +2148,7 @@ impl Vm {
 
     /// `Op::MapGetOr`: the value of `k` in map `m` to `out`, if there is one.
     #[inline(never)]
-    fn map_get_or(&self, m: Value, k: Value, out: &mut Value) -> Result<(), Ctl> {
+    fn map_get_or(&self, m: Value, k: Value, out: &mut Value) -> Result<(), Fail> {
         let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
         let v = match k {
             Value::Int(i) => map_get_int(mo, i),
@@ -2162,7 +2162,7 @@ impl Vm {
 
     /// `Op::MapGetTuple`.
     #[inline(never)]
-    fn map_get_tuple(&mut self, m: Value, items: &[Value]) -> Result<Value, Ctl> {
+    fn map_get_tuple(&mut self, m: Value, items: &[Value]) -> Result<Value, Fail> {
         let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
         match map_slot_tuple(&self.heap, &self.meter, mo, items)?.map(|s| &mo.entries[s]) {
             Some(&Some((_, v))) => Ok(self.some(v)),
@@ -2172,7 +2172,7 @@ impl Vm {
 
     /// `Op::MapHasTuple`.
     #[inline(never)]
-    fn map_has_tuple(&self, m: Value, items: &[Value]) -> Result<bool, Ctl> {
+    fn map_has_tuple(&self, m: Value, items: &[Value]) -> Result<bool, Fail> {
         let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
         Ok(map_slot_tuple(&self.heap, &self.meter, mo, items)?.is_some())
     }
@@ -2182,7 +2182,7 @@ impl Vm {
     /// `Option<Value>`, whose niche makes LLVM write the result piecewise and
     /// stalls the caller's 16-byte load on store forwarding.
     #[inline(never)]
-    fn map_index(&self, m: Value, k: Value) -> Result<Value, Ctl> {
+    fn map_index(&self, m: Value, k: Value) -> Result<Value, Fail> {
         let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
         if let Value::Int(i) = k {
             return match map_get_int(mo, i) {
@@ -2198,13 +2198,13 @@ impl Vm {
 
     /// Inserts or replaces `k` in map `m`; returns the old value.
     #[inline(never)]
-    pub fn map_insert(&mut self, m: Value, k: Value, v: Value) -> Result<Option<Value>, Ctl> {
+    pub fn map_insert(&mut self, m: Value, k: Value, v: Value) -> Result<Option<Value>, Fail> {
         self.map_store(m, k, v, true)
     }
 
     /// `m[k] = v`: `map_insert` without the old value.
     #[inline(never)]
-    fn map_set(&mut self, m: Value, k: Value, v: Value) -> Result<(), Ctl> {
+    fn map_set(&mut self, m: Value, k: Value, v: Value) -> Result<(), Fail> {
         let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
         let found = match k {
             Value::Int(i) => mo.index.find_int(i, |s| matches!(mo.entries[s], Some((Value::Int(x), _)) if x == i)),
@@ -2230,12 +2230,12 @@ impl Vm {
 
     /// Inserts `k` with value `v` into map `m` unless it is there already;
     /// returns its existing value. One lookup, unlike `map_get` then `map_insert`.
-    pub fn map_get_or_insert(&mut self, m: Value, k: Value, v: Value) -> Result<Option<Value>, Ctl> {
+    pub fn map_get_or_insert(&mut self, m: Value, k: Value, v: Value) -> Result<Option<Value>, Fail> {
         self.map_store(m, k, v, false)
     }
 
     /// `map_insert` (`replace`) or `map_get_or_insert`.
-    fn map_store(&mut self, m: Value, k: Value, v: Value, replace: bool) -> Result<Option<Value>, Ctl> {
+    fn map_store(&mut self, m: Value, k: Value, v: Value, replace: bool) -> Result<Option<Value>, Fail> {
         let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
         let hash = hash_key(&self.heap, &self.meter, k)?;
         let found = find_entry(&self.heap, &self.meter, &mo.index, hash, k, &mo.entries, |e| e.0)?;
@@ -2255,11 +2255,11 @@ impl Vm {
 
     /// Appends the entry `k: v` to map `m`, which does not hold `k` (with
     /// hash `hash`).
-    fn map_push(&mut self, m: Value, k: Value, v: Value, hash: u64) -> Result<(), Ctl> {
+    fn map_push(&mut self, m: Value, k: Value, v: Value, hash: u64) -> Result<(), Fail> {
         let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
         let end = mo.entries.len();
         if !slot_fits(end) {
-            return Err(Ctl::fail("limit", "map too large"));
+            return Err(Fail::runtime_error("limit", "map too large"));
         }
         let new_cap = self.entries_capacity(end, mo.entries.capacity(), MAP_ENTRY_SIZE, mo.index_growth(k))?;
         self.unpin(m)?;
@@ -2284,7 +2284,7 @@ impl Vm {
     /// entry allocates `index` bytes for the index. Fails with the memory
     /// limit, before anything changes, if the growth does not fit.
     #[inline]
-    fn entries_capacity(&self, len: usize, cap: usize, elem: usize, index: usize) -> Result<usize, Ctl> {
+    fn entries_capacity(&self, len: usize, cap: usize, elem: usize, index: usize) -> Result<usize, Fail> {
         if len < cap && index == 0 {
             return Ok(cap);
         }
@@ -2293,16 +2293,16 @@ impl Vm {
 
     #[cold]
     #[inline(never)]
-    fn entries_capacity_slow(&self, len: usize, cap: usize, elem: usize, index: usize) -> Result<usize, Ctl> {
+    fn entries_capacity_slow(&self, len: usize, cap: usize, elem: usize, index: usize) -> Result<usize, Fail> {
         if len < cap {
             self.check_memory(index)?;
             return Ok(cap);
         }
-        self.heap.grown_capacity(cap, len + 1, elem, index).map_err(Ctl::limit)
+        self.heap.grown_capacity(cap, len + 1, elem, index).map_err(Fail::limit)
     }
 
     /// Removes `k` from map `m`; returns its value.
-    pub fn map_remove(&mut self, m: Value, k: Value) -> Result<Option<Value>, Ctl> {
+    pub fn map_remove(&mut self, m: Value, k: Value) -> Result<Option<Value>, Fail> {
         let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
         if mo.live == 0 {
             return Ok(None);
@@ -2325,7 +2325,7 @@ impl Vm {
     }
 
     /// Adds `k` to set `s`; false if it was there already.
-    pub fn set_add(&mut self, s: Value, k: Value) -> Result<bool, Ctl> {
+    pub fn set_add(&mut self, s: Value, k: Value) -> Result<bool, Fail> {
         let Obj::Set(so) = self.heap.get(s) else { return Err(internal("not a set")) };
         let hash = hash_key(&self.heap, &self.meter, k)?;
         if find_entry(&self.heap, &self.meter, &so.index, hash, k, &so.entries, |&e| e)?.is_some() {
@@ -2333,7 +2333,7 @@ impl Vm {
         }
         let end = so.entries.len();
         if !slot_fits(end) {
-            return Err(Ctl::fail("limit", "set too large"));
+            return Err(Fail::runtime_error("limit", "set too large"));
         }
         let new_cap = self.entries_capacity(end, so.entries.capacity(), SET_ENTRY_SIZE, so.index_growth(k))?;
         self.unpin(s)?;
@@ -2353,7 +2353,7 @@ impl Vm {
     }
 
     #[inline(never)]
-    pub fn set_contains(&self, s: Value, k: Value) -> Result<bool, Ctl> {
+    pub fn set_contains(&self, s: Value, k: Value) -> Result<bool, Fail> {
         let Obj::Set(so) = self.heap.get(s) else { return Err(internal("not a set")) };
         if let Value::Int(i) = k {
             return Ok(set_has_int(so, i));
@@ -2363,7 +2363,7 @@ impl Vm {
 
     /// `m.contains(k)`.
     #[inline(never)]
-    fn map_has(&self, m: Value, k: Value) -> Result<bool, Ctl> {
+    fn map_has(&self, m: Value, k: Value) -> Result<bool, Fail> {
         let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
         if let Value::Int(i) = k {
             return Ok(map_get_int(mo, i).is_some());
@@ -2372,7 +2372,7 @@ impl Vm {
     }
 
     /// Removes `k` from set `s`; false if it was not there.
-    pub fn set_remove(&mut self, s: Value, k: Value) -> Result<bool, Ctl> {
+    pub fn set_remove(&mut self, s: Value, k: Value) -> Result<bool, Fail> {
         let Obj::Set(so) = self.heap.get(s) else { return Err(internal("not a set")) };
         if so.live == 0 {
             return Ok(false);
@@ -2395,7 +2395,7 @@ impl Vm {
     /// `Op::ListRest`: a copy of `list` without its first `before` and last
     /// `after` elements.
     #[inline(never)]
-    fn list_rest(&mut self, list: Value, before: usize, after: usize) -> Result<Value, Ctl> {
+    fn list_rest(&mut self, list: Value, before: usize, after: usize) -> Result<Value, Fail> {
         let l = self.heap.list(list);
         let end = l.len().saturating_sub(after).max(before);
         let n = end.saturating_sub(before);
@@ -2406,7 +2406,7 @@ impl Vm {
     }
 
     #[inline(never)]
-    fn slice(&mut self, o: Value, start: Option<i64>, end: Option<i64>, inclusive: bool) -> Result<Value, Ctl> {
+    fn slice(&mut self, o: Value, start: Option<i64>, end: Option<i64>, inclusive: bool) -> Result<Value, Fail> {
         let len = match self.heap.get(o) {
             Obj::List(l) => l.len(),
             Obj::Str(s) => s.len(),
@@ -2416,10 +2416,10 @@ impl Vm {
         let a = start.unwrap_or(0);
         let mut b = end.unwrap_or(len);
         if inclusive {
-            b = b.checked_add(1).ok_or_else(|| Ctl::fail("bounds", "slice end out of range"))?;
+            b = b.checked_add(1).ok_or_else(|| Fail::runtime_error("bounds", "slice end out of range"))?;
         }
         if a < 0 || b > len || a > b {
-            return Err(Ctl::fail("bounds", format!("slice {a}..{b} out of range for length {len}")));
+            return Err(Fail::runtime_error("bounds", format!("slice {a}..{b} out of range for length {len}")));
         }
         let (a, b) = (a as usize, b as usize);
         let list = matches!(self.heap.get(o), Obj::List(_));
@@ -2433,7 +2433,7 @@ impl Vm {
             }
             Obj::Str(s) => {
                 if !s.is_char_boundary(a) || !s.is_char_boundary(b) {
-                    return Err(Ctl::fail("bounds", format!("slice {a}..{b} is not on a character boundary")));
+                    return Err(Fail::runtime_error("bounds", format!("slice {a}..{b} is not on a character boundary")));
                 }
                 let t = s[a..b].to_string();
                 self.heap.new_str(t)
@@ -2463,11 +2463,28 @@ pub(super) fn call_tick(op: Op) -> i64 {
 
 /// An internal error: a compiler or runtime bug.
 #[cold]
-pub(crate) fn internal(msg: impl std::fmt::Display) -> Ctl {
-    Ctl::internal(msg.to_string())
+pub(crate) fn internal(msg: impl std::fmt::Display) -> Fail {
+    Fail::internal(msg.to_string())
 }
 
 #[cold]
-fn overflow(what: &str) -> Ctl {
-    Ctl::fail("overflow", format!("{what} overflow"))
+fn overflow(what: &str) -> Fail {
+    Fail::runtime_error("overflow", format!("{what} overflow"))
+}
+
+/// Converts an integer arithmetic error (`kind: message`) into a [`Fail`].
+fn arith_fail(message: &str) -> Fail {
+    Fail(Box::new(FailKind::RuntimeError(message.to_string())))
+}
+
+/// Returns `true` if a garbage collection can resolve the failure of a native call.
+fn collection_may_help(r: &Result<Value, Ctl>) -> bool {
+    match r {
+        Ok(_) => false,
+        Err(c) => match c.kind() {
+            CtlKind::Collect => true,
+            CtlKind::Fail(fail) => fail.as_limit() == Some(LimitKind::Memory),
+            _ => false,
+        },
+    }
 }

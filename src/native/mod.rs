@@ -10,7 +10,7 @@ use crate::syntax::lexer::{is_ident, is_keyword};
 use crate::types::{ConstVal, MAX_CONST_DEPTH, MAX_CONST_PARTS, ValueTypeInfo};
 use crate::vm::heap::Heap;
 use crate::vm::value::{ChannelObj, MapObj, Obj, SetObj, TaskObj, TypeDesc, Value, ValueType};
-use crate::vm::{Ctl, HostFn, NativeFn, Vm};
+use crate::vm::{Ctl, Fail, HostFn, NativeFn, Vm};
 use convert::{Conversion, FromValue, mismatch};
 use func::{AsyncHostFunction, HostFunction, Signature, VmFunction};
 use std::any::{Any, TypeId};
@@ -227,8 +227,8 @@ pub fn struct_from_value<T: StructType>(
     vm: &Vm,
     v: Value,
     conv: &mut Conversion,
-    read: impl FnOnce(&[Value], &mut Conversion) -> Result<T, Ctl>,
-) -> Result<T, Ctl> {
+    read: impl FnOnce(&[Value], &mut Conversion) -> Result<T, Fail>,
+) -> Result<T, Fail> {
     let def = vm.prog.struct_types.get(&T::rust_type());
     let fields = match (def, v) {
         (Some(&def), Value::Obj(_)) => match vm.heap.get(v) {
@@ -242,16 +242,16 @@ pub fn struct_from_value<T: StructType>(
 }
 
 #[doc(hidden)]
-pub fn struct_into_value<T: StructType>(vm: &mut Vm, write: impl FnOnce(&mut Vm) -> Result<Box<[Value]>, Ctl>) -> Result<Value, Ctl> {
+pub fn struct_into_value<T: StructType>(vm: &mut Vm, write: impl FnOnce(&mut Vm) -> Result<Box<[Value]>, Fail>) -> Result<Value, Fail> {
     let Some(&def) = vm.prog.struct_types.get(&T::rust_type()) else {
-        return Err(Ctl::internal(format!("struct {}.{} is not loaded", T::MODULE, T::NAME)));
+        return Err(Fail::internal(format!("struct {}.{} is not loaded", T::MODULE, T::NAME)));
     };
     vm.struct_depth = convert::enter_struct(vm.struct_depth)?;
     let fields = write(vm);
     vm.struct_depth -= 1;
     let fields = fields?;
     if fields.len() != T::FIELDS.len() {
-        return Err(Ctl::internal(format!("struct {}.{} takes {} fields, not {}", T::MODULE, T::NAME, T::FIELDS.len(), fields.len())));
+        return Err(Fail::internal(format!("struct {}.{} takes {} fields, not {}", T::MODULE, T::NAME, T::FIELDS.len(), fields.len())));
     }
     vm.check_memory(fields.len() * std::mem::size_of::<Value>())?;
     Ok(vm.heap.alloc(Obj::Struct(def, fields)))
@@ -268,7 +268,7 @@ pub const fn is_name(name: &str) -> bool {
 }
 
 #[doc(hidden)]
-pub fn field_from_value<T: for<'a> FromValue<Item<'a> = T>>(vm: &Vm, v: Value, conv: &mut Conversion) -> Result<T, Ctl> {
+pub fn field_from_value<T: for<'a> FromValue<Item<'a> = T>>(vm: &Vm, v: Value, conv: &mut Conversion) -> Result<T, Fail> {
     T::from_value(vm, v, conv)
 }
 
@@ -277,8 +277,8 @@ pub fn enum_from_value<T: EnumType>(
     vm: &Vm,
     v: Value,
     conv: &mut Conversion,
-    read: impl FnOnce(usize, &mut Conversion) -> Result<T, Ctl>,
-) -> Result<T, Ctl> {
+    read: impl FnOnce(usize, &mut Conversion) -> Result<T, Fail>,
+) -> Result<T, Fail> {
     let id = vm.heap.variant_id(v);
     let index = vm.prog.enum_types.get(&T::rust_type()).and_then(|&first| id.checked_sub(first)).map(|i| i as usize);
     let Some((index, variant)) = index.and_then(|i| Some((i, T::VARIANTS.get(i)?))) else { return Err(mismatch::<T>()) };
@@ -298,18 +298,18 @@ pub fn enum_from_value<T: EnumType>(
 }
 
 #[doc(hidden)]
-pub fn variant_field(vm: &Vm, v: Value, i: usize) -> Result<Value, Ctl> {
-    vm.heap.field(v, i).ok_or_else(|| Ctl::internal("a native function read a missing variant payload"))
+pub fn variant_field(vm: &Vm, v: Value, i: usize) -> Result<Value, Fail> {
+    vm.heap.field(v, i).ok_or_else(|| Fail::internal("a native function read a missing variant payload"))
 }
 
 #[doc(hidden)]
 pub fn variant_into_value<T: EnumType, const N: usize>(
     vm: &mut Vm,
     index: usize,
-    write: impl FnOnce(&mut Vm) -> Result<[Value; N], Ctl>,
-) -> Result<Value, Ctl> {
+    write: impl FnOnce(&mut Vm) -> Result<[Value; N], Fail>,
+) -> Result<Value, Fail> {
     let Some(&first) = vm.prog.enum_types.get(&T::rust_type()) else {
-        return Err(Ctl::internal(format!("enum {}.{} is not loaded", T::MODULE, T::NAME)));
+        return Err(Fail::internal(format!("enum {}.{} is not loaded", T::MODULE, T::NAME)));
     };
     let id = first + index as u32;
     if N == 0 {
@@ -567,20 +567,20 @@ impl<T: ObjectType> DynObject for T {
 }
 
 impl<T: ObjectType> Val<T> {
-    pub fn get(self, heap: &Heap) -> Result<&T, Ctl> {
+    pub fn get(self, heap: &Heap) -> Result<&T, Fail> {
         heap.native::<T>(self.raw()).ok_or_else(mismatch::<T>)
     }
 
-    pub fn get_mut(self, heap: &mut Heap) -> Result<&mut T, Ctl> {
+    pub fn get_mut(self, heap: &mut Heap) -> Result<&mut T, Fail> {
         heap.native_mut::<T>(self.raw()).ok_or_else(mismatch::<T>)
     }
 }
 
 impl<const N: u8> Reflect<N> {
-    pub fn desc(self, heap: &Heap) -> Result<&Arc<TypeDesc>, Ctl> {
+    pub fn desc(self, heap: &Heap) -> Result<&Arc<TypeDesc>, Fail> {
         match heap.get(self.raw()) {
             Obj::TypeDesc(d) => Ok(&d.desc),
-            _ => Err(Ctl::internal("a native function expected a type description")),
+            _ => Err(Fail::internal("a native function expected a type description")),
         }
     }
 }
@@ -604,7 +604,7 @@ impl<const N: u8> Num<N> {
             Obj::Tuple(slots) => slots.get(slot).map(|&f| vm.heap.get(f)),
             _ => None,
         };
-        let Some(&Obj::NativeFn(n)) = f else { return Err(Ctl::internal("a native function expected `Num` evidence")) };
+        let Some(&Obj::NativeFn(n)) = f else { return Err(Fail::internal("a native function expected `Num` evidence").into()) };
         let f = vm.natives[n as usize].f.clone();
         f.call(vm, &[]).map(Param::from_raw)
     }
@@ -629,7 +629,7 @@ impl<T: SandType> Val<Vec<T>> {
 }
 
 impl<K: SandType, V: SandType> Val<std::collections::HashMap<K, V>> {
-    pub(crate) fn map(self, heap: &Heap) -> Result<&MapObj, Ctl> {
+    pub(crate) fn map(self, heap: &Heap) -> Result<&MapObj, Fail> {
         match heap.get(self.raw()) {
             Obj::Map(m) => Ok(m),
             _ => Err(mismatch::<std::collections::HashMap<K, V>>()),
@@ -638,7 +638,7 @@ impl<K: SandType, V: SandType> Val<std::collections::HashMap<K, V>> {
 }
 
 impl<T: SandType> Val<std::collections::HashSet<T>> {
-    pub(crate) fn set(self, heap: &Heap) -> Result<&SetObj, Ctl> {
+    pub(crate) fn set(self, heap: &Heap) -> Result<&SetObj, Fail> {
         match heap.get(self.raw()) {
             Obj::Set(s) => Ok(s),
             _ => Err(mismatch::<std::collections::HashSet<T>>()),
@@ -648,7 +648,7 @@ impl<T: SandType> Val<std::collections::HashSet<T>> {
 
 impl Val<Range> {
     /// Returns the `(start, end, inclusive)` bounds of the range.
-    pub(crate) fn bounds(self, heap: &Heap) -> Result<(i64, i64, bool), Ctl> {
+    pub(crate) fn bounds(self, heap: &Heap) -> Result<(i64, i64, bool), Fail> {
         match *heap.get(self.raw()) {
             Obj::Range(a, b, inclusive) => Ok((a, b, inclusive)),
             _ => Err(mismatch::<Range>()),
@@ -657,20 +657,20 @@ impl Val<Range> {
 }
 
 impl<T: SandType> Val<Channel<T>> {
-    pub(crate) fn channel(self, heap: &Heap) -> Result<&ChannelObj, Ctl> {
+    pub(crate) fn channel(self, heap: &Heap) -> Result<&ChannelObj, Fail> {
         match heap.get(self.raw()) {
             Obj::Channel(c) => Ok(c),
             _ => Err(mismatch::<Channel<T>>()),
         }
     }
 
-    pub(crate) fn channel_mut(self, heap: &mut Heap) -> Result<&mut ChannelObj, Ctl> {
+    pub(crate) fn channel_mut(self, heap: &mut Heap) -> Result<&mut ChannelObj, Fail> {
         heap.channel_mut(self.raw(), None).ok_or_else(mismatch::<Channel<T>>)
     }
 }
 
 impl<T: SandType> Val<Task<T>> {
-    pub(crate) fn task(self, heap: &Heap) -> Result<&TaskObj, Ctl> {
+    pub(crate) fn task(self, heap: &Heap) -> Result<&TaskObj, Fail> {
         match heap.get(self.raw()) {
             Obj::Task(t) => Ok(t),
             _ => Err(mismatch::<Task<T>>()),
@@ -681,7 +681,7 @@ impl<T: SandType> Val<Task<T>> {
 impl Vm {
     /// Allocates `x` on the heap after checking `x.size()` bytes against the
     /// memory limit.
-    pub fn new_object<T: ObjectType>(&mut self, x: T) -> Result<Val<T>, Ctl> {
+    pub fn new_object<T: ObjectType>(&mut self, x: T) -> Result<Val<T>, Fail> {
         self.check_memory(NativeObject::size(&x))?;
         Ok(Val::from_raw(self.heap.alloc(Obj::Native(Box::new(x)))))
     }
