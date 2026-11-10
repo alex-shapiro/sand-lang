@@ -1926,7 +1926,7 @@ impl Vm {
     }
 
     /// Returns the result of `on` if it is ready. Otherwise, registers a wait
-    /// for the running task and returns a [`Ctl`] that the native must
+    /// for the running task and returns a [`Ctl`] that the native function must
     /// propagate.
     pub fn block(&mut self, on: BlockOn) -> Result<Value, Ctl> {
         let caller = self.current;

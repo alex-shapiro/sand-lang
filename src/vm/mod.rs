@@ -189,7 +189,7 @@ impl Ctl {
         Ctl(Box::new(CtlKind::Async(suspension)))
     }
 
-    /// Ask the user for `cap`.
+    /// Prompts the user for `cap`.
     pub(crate) fn need_permission(cap: Capability) -> Ctl {
         Ctl(Box::new(CtlKind::NeedPermission(cap)))
     }
@@ -1479,7 +1479,7 @@ impl Vm {
     }
 
     /// Cancels a running `task`. If `task` is the caller, returns a [`Ctl`]
-    /// that the native must propagate so the engine ends the task.
+    /// that the native function must propagate so the engine ends the task.
     pub fn cancel_task(&mut self, task: Value) -> Result<(), Ctl> {
         if let Obj::Task(t) = self.heap.get_mut(task)
             && t.state == TaskState::Running

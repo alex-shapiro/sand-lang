@@ -39,8 +39,9 @@ pub trait HostFunction<Marker>: Send + Sync + 'static {
 
 /// Synchronous function registered with [`NativeModule::vm_function`](super::NativeModule::vm_function).
 ///
-/// Receives `&mut Vm` as its first argument; remaining arguments must be owned
-/// [`FromValue`] types or [`Val`](super::Val) handles.
+/// Receives `&mut Vm` as its first argument. Remaining arguments must be owned
+/// [`FromValue`] types or [`Val`](super::Val) handles, and the return type
+/// implements [`HostReturn<Ctl>`].
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be a `Vm` function",
     note = "the first parameter must be `&mut Vm`, each other parameter must be an owned `FromValue` type, and the return type must implement `HostReturn<Ctl>`",
