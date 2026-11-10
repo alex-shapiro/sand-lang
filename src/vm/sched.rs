@@ -387,42 +387,39 @@ impl Vm {
         Ok(fid)
     }
 
-    /// Runs `f` until it stops or spends the slice `fuel`.
+    /// Runs `fiber` until it stops or spends `fuel`.
     ///
-    /// An instruction that reaches a memory limit runs again here after a
-    /// collection, with the fuel the slice had before it, because a limit
-    /// depends on when the collector ran and task switches must not.
-    fn run_slice(&mut self, f: &mut Fiber, fuel: &mut i64) -> Result<FiberStop, RunEnding> {
-        // Where an instruction last ran again.
-        let mut retried_at = None;
+    /// If an instruction hits a memory limit, `run_slice` collects all garbage,
+    /// restores the instruction's fuel, and retries the instruction in the same
+    /// slice.
+    fn run_slice(&mut self, fiber: &mut Fiber, fuel: &mut i64) -> Result<FiberStop, RunEnding> {
+        let mut last_retry_site = None;
         loop {
             let entry_fuel = *fuel;
-            // A Rust panic in the interpreter or a native (a bug) ends
-            // the run as an internal error instead of unwinding into the
-            // host; caught per slice, which costs nothing per native call.
-            let r = match crate::unwind::catch(|| self.interp(f, fuel)) {
-                Ok(r) => r,
+            // Catch panics once per slice and report them as internal errors
+            // instead of unwinding into the host.
+            let stop = match crate::unwind::catch(|| self.interp(fiber, fuel)) {
+                Ok(stop) => stop,
                 Err(msg) => {
                     self.broken = true;
-                    return Err(Trap::Internal { message: msg, trace: self.trace_of(f, None) }.into());
+                    return Err(Trap::Internal { message: msg, trace: self.trace_of(fiber, None) }.into());
                 }
             };
-            let Ok(FiberStop::CollectAndRetry(frame)) = r else { return r };
+            let Ok(FiberStop::CollectAndRetry(frame)) = stop else { return stop };
             let tick = super::interp::call_tick(self.prog.protos[frame.proto as usize].code[frame.ip as usize]);
-            // A later execution of the same instruction must cross a back
-            // edge or a call, both of which spend the interpreter's fuel. If
-            // the instruction failed again without spending any, the retry
-            // itself hit the memory limit.
-            let at = (f.frames.len(), frame.ip);
-            if retried_at == Some(at) && entry_fuel - *fuel <= tick {
+            // Reaching the same instruction again requires a back edge or a
+            // call, which spends interpreter fuel. If the instruction fails
+            // again at the same fuel, the retry itself exceeded `max_memory`.
+            let retry_site = (fiber.frames.len(), frame.ip);
+            if last_retry_site == Some(retry_site) && entry_fuel - *fuel <= tick {
                 return Err(Trap::Limit(LimitKind::Memory).into());
             }
-            retried_at = Some(at);
+            last_retry_site = Some(retry_site);
             *fuel += tick;
-            self.collect_all_garbage(Some(f));
+            self.collect_all_garbage(Some(fiber));
             self.instruction_retried = self.retry_stress;
             if let Err(fail) = self.meter.check() {
-                return Err(self.run_ending_of(fail, |vm| vm.trace_of(f, None)));
+                return Err(self.run_ending_of(fail, |vm| vm.trace_of(fiber, None)));
             }
         }
     }

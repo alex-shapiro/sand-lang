@@ -371,7 +371,7 @@ fn run_file(name: &str, mode: Mode, backend: Backend) {
     }
 }
 
-/// The output of `case`, ending with the fuel that the run used.
+/// Runs `case` in `mode` and returns stdout followed by total fuel used.
 fn output_with_fuel(case: &Case, mode: Mode) -> String {
     let mut probe = NativeModule::new("fuel_probe");
     probe.vm_function("used", |vm: &mut Vm| vm.meter.used() as i64);
@@ -395,7 +395,7 @@ fn output_with_fuel(case: &Case, mode: Mode) -> String {
 }
 
 #[test]
-fn fuel_does_not_depend_on_the_collector_or_on_retries() {
+fn spec_cases_use_identical_fuel_under_gc_and_retry_stress() {
     const UNSUPPORTED: [&str; 8] = ["error", "fmt", "lint", "test", "file", "stdin", "args", "env"];
     let dir = format!("{}/tests/spec", env!("CARGO_MANIFEST_DIR"));
     let mut failures = Vec::new();

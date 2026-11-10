@@ -833,7 +833,7 @@ fn the_collection_at_the_memory_limit_releases_the_staging_buffer() {
 // Fuel is a function of the program
 // ---------------------------------------------------------------------------
 
-/// A host module whose `fuel()` reports the fuel the run has used.
+/// Builds the `probe` host module for fuel and retry tests.
 fn fuel_probe() -> NativeModule {
     let mut m = NativeModule::new("probe");
     m.vm_function("fuel", |vm: &mut Vm| vm.meter.used() as i64);
@@ -845,9 +845,9 @@ fn fuel_probe() -> NativeModule {
     m
 }
 
-/// Runs `src` with and without forced retries, and checks that the output,
-/// which includes `probe.fuel()`, is the same.
-fn assert_retries_cost_no_fuel(src: &str) {
+/// Runs `src` with and without `retry_stress` and asserts that both runs
+/// produce the same output.
+fn assert_retries_preserve_fuel(src: &str) {
     let run_stressed = |stress: bool| {
         let (r, out) = run(
             Config::new()
@@ -865,15 +865,15 @@ fn assert_retries_cost_no_fuel(src: &str) {
 }
 
 #[test]
-fn a_native_that_runs_again_after_a_collection_costs_the_fuel_of_one_call() {
-    assert_retries_cost_no_fuel(
+fn retried_native_call_charges_fuel_once() {
+    assert_retries_preserve_fuel(
         "import probe\nvar total = 0\nfor i in 0..3 {\n    total += probe.grow(i * 10)\n}\nprint((total, probe.fuel()))",
     );
 }
 
 #[test]
-fn an_instruction_that_runs_again_after_a_collection_costs_the_fuel_of_one_execution() {
-    assert_retries_cost_no_fuel(
+fn retried_instruction_charges_fuel_once() {
+    assert_retries_preserve_fuel(
         r#"import probe
 var m: [str: int] = [:]
 var tuples: [(int, str): int] = [:]
@@ -895,8 +895,8 @@ print((more, m.len(), text.len(), probe.fuel()))
 }
 
 #[test]
-fn a_retried_instruction_keeps_the_rest_of_its_slice() {
-    assert_retries_cost_no_fuel(
+fn retried_instruction_keeps_remaining_slice_fuel() {
+    assert_retries_preserve_fuel(
         r#"import probe
 var order = ""
 let long_key = "k".repeat(6400)
@@ -919,8 +919,8 @@ print((order, probe.fuel()))
 }
 
 #[test]
-fn compiling_a_regex_costs_the_same_after_a_collection_released_it() {
-    assert_retries_cost_no_fuel(
+fn compiling_a_regex_after_gc_charges_cache_hit_fuel() {
+    assert_retries_preserve_fuel(
         r#"import probe
 import regex
 var hits = 0
@@ -935,7 +935,7 @@ print((hits, probe.fuel()))
 }
 
 #[test]
-fn a_map_store_costs_the_same_if_a_dead_maps_handle_is_reused() {
+fn map_store_charges_same_fuel_after_map_handle_reuse() {
     let src = r#"import probe
 fn lookup(k: str) -> int {
     var m: [str: int] = [:]
@@ -965,8 +965,7 @@ print((hits, probe.fuel()))
     assert_eq!(fuel(false), fuel(true));
 }
 
-/// A lookup of a key whose equal copy is in the map compares both shared
-/// structures, so limits must apply while it runs.
+/// Verifies that a map lookup comparing a deep key enforces `max_instructions`.
 #[test]
 fn looking_up_a_key_with_shared_structure_stops_at_the_instruction_limit() {
     let src = format!("{DAG}let m: [T: int] = [a: 1]\nprint(m[b])");
@@ -984,7 +983,7 @@ fn a_failing_top_level_try_reports_the_memory_limit() {
 }
 
 #[test]
-fn cached_regexes_do_not_lower_the_memory_available_at_a_safe_point() {
+fn full_gc_releases_cached_regexes_before_memory_limit() {
     const LIMIT: usize = 32 << 20;
     let build = |regexes: usize, nodes: usize| {
         format!(
@@ -1008,7 +1007,7 @@ fn fuel_under_gc_stress(src: &str, gc_stress: bool) -> String {
 }
 
 #[test]
-fn changing_a_map_after_an_early_break_costs_the_same_after_a_collection() {
+fn mutating_a_map_after_an_early_break_charges_same_fuel_under_gc() {
     let src = r#"import probe
 var m: [str: int] = [:]
 for i in 0..2000 { m["key\(i)"] = i }
@@ -1053,7 +1052,7 @@ fn a_long_regex_pattern_uses_the_compile_cache() {
 }
 
 #[test]
-fn a_call_retried_after_stack_growth_fails_costs_the_fuel_of_one_call() {
+fn call_retried_after_stack_growth_charges_fuel_once() {
     let src = r#"import probe
 fn deep(n: int) -> int {
     if n == 0 { 0 } else { 1 + deep(n - 1) }

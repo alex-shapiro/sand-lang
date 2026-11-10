@@ -617,9 +617,9 @@ pub struct Vm {
     /// interpreter, a native or an I/O finisher: the VM is memory safe but may
     /// be inconsistent, so a REPL session discards it.
     pub(crate) broken: bool,
-    /// Testing aid: causes the first memory or resource check in each `vm_function` call and in each retryable instruction to fail (see `Config::retry_stress`).
+    /// Testing aid that fails the first memory or resource check in each native call and retryable instruction. See [`crate::engine::Config::retry_stress`].
     pub(crate) retry_stress: bool,
-    /// Under `retry_stress`, set while an instruction runs again after a collection.
+    /// True while `retry_stress` runs an instruction a second time after garbage collection.
     pub(crate) instruction_retried: bool,
     /// Struct nesting depth during conversion to Sand (see [`struct_into_value`](crate::native::struct_into_value)).
     pub(crate) struct_depth: usize,
@@ -1608,10 +1608,9 @@ impl Vm {
         self.collect_garbage_with(current, false);
     }
 
-    /// A major collection, freeing all unreachable objects; used before
-    /// reporting a memory limit, since a minor collection leaves old garbage.
-    /// Also closes idle `http` connections, which hold resource slots and
-    /// buffers, and releases cached regexes, which hold compiled programs.
+    /// Runs a major garbage collection to free all unreachable objects before a
+    /// memory limit check. Also clears idle HTTP connections and cached
+    /// regexes.
     pub fn collect_all_garbage(&mut self, current: Option<&mut Fiber>) {
         #[cfg(feature = "os")]
         self.host.http_pool.clear();

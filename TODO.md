@@ -50,27 +50,23 @@ The host cannot rely on engine limits, stability, or control.
       allocations reuse high-index slots first.
 - [ ] 🔴 [052](triage/052-dead-temporaries-rooted/summary.md) _Performance._ Clear dead temporaries before native calls so that inlined allocations
       do not stay rooted in caller frame registers during garbage collection.
-- [ ] ❓ _Metering._ Make regex fuel independent of execution speed. Regex work
-      charges at least one unit per microsecond it takes, so the fuel of a
-      script that uses regexes differs between runs, and even a short search
-      can add a unit. Fuel slices decide task switches, so a task switch can
-      move between runs. The time charge bounds regex work that the
-      deterministic charges underestimate. Replace it with a deterministic
-      cost model, or check the time limits without charging fuel. The compile
-      charge also uses `memory_usage`, which differs between CPUs and pointer
-      widths.
-- [ ] ❓ _Scheduling._ End a slice when an instruction spends the slice's fuel. The
-      interpreter applies instruction charges only at native calls, so a task
-      can spend far more than its 20,000-unit slice while other tasks wait. A
-      loop of lookups with a 6,400-byte key spent about 300,000 units in a
-      slice. Fix this before the journal lands, because a change to slice
-      boundaries makes paused runs incompatible.
-- [ ] ❓ _Testing._ Compare the fiber and fuel at each slice start across the
-      collector and retry modes. Tests compare final fuel, and a task switch
-      can move at equal total fuel. A golden trace would also catch a cost
-      change that makes paused runs incompatible.
-- [ ] ❓ _Testing._ Compare fuel across hash seeds for the spec suite. This needs
-      a test-only way to set the hash seed.
+- [ ] ❓ _Metering._ Make regex fuel independent of the machine. The engine
+      charges regex work at least 1 unit per microsecond to bound searches that
+      the byte charge underestimates. This time charge changes total fuel and
+      task switches between runs. The compile charge also uses `memory_usage`,
+      which differs across platforms. Replace both charges with a deterministic
+      cost model, or check the time limits without charging fuel.
+- [ ] ❓ _Scheduling._ End a slice after an instruction spends the slice's fuel.
+      The interpreter syncs instruction charges to the meter only at native
+      calls. A task that runs only instructions can spend far more than its
+      20,000-unit slice while other tasks wait. Fix this before adding the
+      journal, because slice changes break paused runs.
+- [ ] ❓ _Testing._ Compare the active fiber and fuel at the start of each slice
+      across GC and retry modes. Current tests compare only total fuel, which
+      misses task switches that shift without changing total fuel. A slice
+      trace also catches cost changes that break paused runs.
+- [ ] ❓ _Testing._ Compare fuel across hash seeds across the spec suite. Add a
+      test configuration option to set the hash seed.
 - [ ] ❓ _Embedding._ Convert derived `SandEnum` and `SandStruct` values iteratively with an
       explicit stack. The derived `FromValue` and `IntoValue` implementations
       recurse once per nesting level, so deep values can overflow a small host

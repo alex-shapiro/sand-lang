@@ -98,10 +98,10 @@ pub trait Budget {
         self.charge((n / BYTES_PER_UNIT) as u64)
     }
 
-    /// A mark to give back later charges with [`Budget::refund_to`].
+    /// Returns the current fuel position for [`Budget::refund_to`].
     fn fuel_mark(&self) -> i64;
 
-    /// Gives back the units charged since [`Budget::fuel_mark`] returned `mark`.
+    /// Refunds the fuel charged since [`Budget::fuel_mark`] returned `mark`.
     fn refund_to(&self, mark: i64);
 }
 
@@ -208,8 +208,9 @@ impl Meter {
         self.base.get().saturating_add(self.spent())
     }
 
-    /// Gives back the fuel charged since [`Meter::fuel`] returned `mark`. The
-    /// next limit check stays within [`CHECK_INTERVAL`] of the restored fuel.
+    /// Refunds the fuel charged since [`Meter::fuel`] returned `mark`.
+    ///
+    /// Keeps the next limit check within [`CHECK_INTERVAL`] of `mark`.
     #[inline]
     pub(crate) fn refund_to(&self, mark: i64) {
         self.fuel.set(mark);
@@ -442,12 +443,12 @@ mod tests {
     }
 
     #[test]
-    fn a_refund_keeps_the_next_limit_check_close() {
+    fn refund_to_restores_checkpoint_interval() {
         let flag = Arc::new(AtomicBool::new(false));
         let m = Meter::new(None, flag.clone(), system());
         m.start_slice(None, None);
         let mark = m.fuel();
-        assert!(m.charge(SLICE_FUEL as u64 + 1).is_ok(), "a checkpoint moves the next check down");
+        assert!(m.charge(SLICE_FUEL as u64 + 1).is_ok(), "checkpoint advances check_at");
         m.refund_to(mark);
         flag.store(true, Ordering::SeqCst);
         assert!(matches!(m.charge(SLICE_FUEL as u64 + 1).map_err(Fail::into_kind), Err(FailKind::Interrupted)));

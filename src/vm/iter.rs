@@ -55,11 +55,10 @@ impl Vm {
             return Ok(self.iter_fn(IterSrc::Done));
         }
         let prune = pins.its.len() >= pins.prune_at.max(MIN_PRUNE);
-        // The steps cannot fail, so the removed entries they will skip are
-        // charged now: an iterator walks exactly these entries (the map or
-        // set does not change before the iterator moves to a copy of them).
-        // The extra unit pays for this iterator's place in later walks of the
-        // pins, because the length of the pins depends on the collector.
+        // Iterator steps cannot fail, so charge here for the tombstones that
+        // the iterator will skip. Charge 1 more unit here for this iterator
+        // instead of charging for `pins.its.len()` during prune and detach.
+        // That length depends on when garbage collection frees dead iterators.
         self.meter.charge((slots - live) as u64 + 1)?;
         let it = self.iter_fn(src);
         let Value::Obj(ih) = it else { unreachable!() };
@@ -89,8 +88,8 @@ impl Vm {
     /// they started with. On error nothing has changed.
     #[inline]
     pub(crate) fn unpin(&mut self, c: Value) -> Result<(), Fail> {
-        // Open iterators decide the charge for a copy, so a copy costs the same
-        // whether or not the collector has freed the iterators that need it.
+        // Check `pins.open` so `detach_iters` charges for the copy even if
+        // garbage collection already freed the unreachable iterators.
         let pinned = match self.heap.get(c) {
             Obj::Map(m) => m.pins.open > 0,
             Obj::Set(s) => s.pins.open > 0,

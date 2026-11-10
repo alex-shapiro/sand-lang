@@ -1900,21 +1900,17 @@ n numbers costs about n·log₂(n) units, `==` on two lists of n integers about 
 units, and `json.parse` about one unit per value plus one per 8 bytes of
 text.
 
-Regex work is charged by time too because it is not always proportional to
-the text: with leftmost-first semantics a search may look far past its
-match (iterating over the matches of `[a-z]*X|[a-z]` in a long run of
-letters scans the rest of the text per match), and searches the lazy DFA
-cannot handle fall back to an engine whose cost per byte grows with the
-pattern. Time is measured as the function runs and charged between matches
-when iterating. Ordinary searches take a few to a hundred nanoseconds per
-unit of their deterministic charge, so the time charge adds at most a few
-units to them. Time-based regex charges
-depend on execution speed, and the size of a compiled regex can differ between
-platforms. All other fuel charges are a function of the program and its
-inputs. They do not depend on the hash seed of the process or on when the
-garbage collector runs. An instruction or library function
-that the engine runs again after a garbage collection (§16.3) costs only the
-fuel of the execution that completes.
+All fuel charges except regex charges are a deterministic function of the
+program and its inputs across hash seeds and garbage collections. If the
+engine runs an instruction or library function again after garbage collection
+as described in §16.3, it charges fuel only for the attempt that completes.
+Regex compilation charges fuel from the size of the compiled regex, which can
+differ across platforms. Regex functions also measure elapsed time and charge
+at least 1 unit per microsecond. This time floor bounds leftmost-first
+searches that scan past a match and searches that fall back from the lazy DFA
+to a slower engine. Iterating over matches charges the time floor between
+matches. Ordinary searches take at most 100 nanoseconds per unit of their byte
+charge. The time floor adds at most a few units to those searches.
 
 Fuel counts against `max_instructions`. Once a scheduling slice's fuel is
 spent, long operations check the instruction budget, the CPU and

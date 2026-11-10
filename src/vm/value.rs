@@ -211,7 +211,7 @@ impl Default for FxHasher {
 }
 
 impl FxHasher {
-    /// A hasher with no seed, for a hash that must be the same in each process.
+    /// Returns a hasher initialized to zero so hashes match across processes.
     pub(crate) fn unseeded() -> FxHasher {
         FxHasher { hash: 0 }
     }
@@ -655,8 +655,9 @@ pub struct Pins {
     pub its: Vec<u32>,
     /// Length of `its` at which stale handles are pruned.
     pub prune_at: usize,
-    /// Iterators made since the last detach that have not finished. Unlike
-    /// the length of `its`, this count does not depend on the collector.
+    /// Active iterators created since the last detach. This count changes only
+    /// as iterators start, finish, or detach, so it is independent of garbage
+    /// collection.
     pub open: usize,
 }
 

@@ -422,21 +422,21 @@ impl Vm {
         })
     }
 
-    /// `Op::NewMap`: a map of the alternating keys and values in `entries`.
+    /// Creates a map from the alternating keys and values in `entries`.
     #[inline(never)]
     fn op_new_map(&mut self, entries: &[Value]) -> Result<Value, Fail> {
-        let m = self.heap.alloc(Obj::Map(Box::default()));
+        let map = self.heap.alloc(Obj::Map(Box::default()));
         for pair in entries.as_chunks::<2>().0 {
-            self.map_insert(m, pair[0], pair[1])?;
+            self.map_insert(map, pair[0], pair[1])?;
         }
-        Ok(m)
+        Ok(map)
     }
 
-    /// `Op::AppendStr`: appends string `add` to the builder `cur`.
+    /// Appends `suffix` to string `builder`.
     #[inline(never)]
-    fn op_append_str(&mut self, cur: Value, add: Value) -> Result<Value, Fail> {
-        self.meter.charge_bytes(self.heap.append_copies(cur, add))?;
-        self.heap.append_str(cur, add).map_err(Fail::limit)
+    fn op_append_str(&mut self, builder: Value, suffix: Value) -> Result<Value, Fail> {
+        self.meter.charge_bytes(self.heap.append_copies(builder, suffix))?;
+        self.heap.append_str(builder, suffix).map_err(Fail::limit)
     }
 
     /// `Op::NewTuple` of anything but an inline pair.
@@ -537,8 +537,7 @@ impl Vm {
         Err(self.run_ending_of(fail, |vm| vm.trace_of(fiber, Some(ip as u32))))
     }
 
-    /// Starts an instruction that can reach a memory limit after it charges
-    /// fuel, and returns the fuel to give back if it does.
+    /// Records the meter fuel before an instruction that may hit a memory limit.
     #[inline(always)]
     fn begin_retryable_op(&mut self) -> i64 {
         if self.retry_stress {
@@ -547,9 +546,10 @@ impl Vm {
         self.meter.fuel()
     }
 
-    /// Ends an instruction started with [`Vm::begin_retryable_op`]. A memory
-    /// limit gives the instruction's fuel back, because the scheduler runs it
-    /// again after a collection.
+    /// Finishes an instruction started with [`Vm::begin_retryable_op`].
+    ///
+    /// Refunds the instruction's fuel on a memory limit before the scheduler
+    /// collects garbage and retries the instruction.
     #[inline(always)]
     fn end_retryable_op<T>(&self, fuel_mark: i64, result: Result<T, Fail>) -> Result<T, Fail> {
         if self.retry_stress {
@@ -677,9 +677,9 @@ impl Vm {
                 }
             };
         }
-        // The result of an instruction body that `Vm::begin_retryable_op`
-        // describes. A macro, because a closure would capture `regs` by
-        // reference and take it out of its machine register.
+        // Runs `$body` between `begin_retryable_op` and `end_retryable_op`.
+        // A macro keeps `regs` in a machine register, whereas a closure would
+        // capture `regs` by reference.
         macro_rules! retryable {
             ($body:expr) => {{
                 let fuel_mark = self.begin_retryable_op();
@@ -1752,10 +1752,9 @@ impl Vm {
         let mut r = Self::invoke_native(self, natives, n, &fiber.stack[start..start + argc]);
         self.heap.fail_next_check.set(false);
         if collection_may_help(&r) {
-            // Native functions check memory and open-resource limits against
-            // counts that include uncollected garbage. Run a full collection
-            // and retry once. Only the retry costs fuel, because whether a
-            // native needs a collection depends on when the collector ran.
+            // Native functions check memory and resource limits before garbage
+            // collection. Collect all garbage, refund the failed attempt's
+            // fuel, and retry the call once.
             self.collect_all_garbage(Some(fiber));
             self.meter.refund_to(fuel_at_call);
             r = match self.meter.check() {
@@ -2197,21 +2196,20 @@ impl Vm {
         Ok(s)
     }
 
-    /// The slot of string key `k` in map `m` if it is the slot last looked
-    /// up: the entry there holds `k` itself.
+    /// Returns the cached slot from the previous lookup if `map` and `key` match it.
     #[inline]
-    fn last_slot(&self, m: Value, mo: &MapObj, k: Value) -> Result<Option<usize>, Fail> {
-        let (h, s) = self.last_slot.get();
-        let (Value::Obj(map_handle), Value::Obj(key_handle)) = (m, k) else { return Ok(None) };
-        let Some(Some((Value::Obj(stored_key), _))) = mo.entries.get(s as usize) else { return Ok(None) };
-        if map_handle != h || *stored_key != key_handle {
+    fn last_slot(&self, map: Value, map_obj: &MapObj, key: Value) -> Result<Option<usize>, Fail> {
+        let (cached_map, cached_slot) = self.last_slot.get();
+        let (Value::Obj(map_handle), Value::Obj(key_handle)) = (map, key) else { return Ok(None) };
+        let Some(Some((Value::Obj(stored_key), _))) = map_obj.entries.get(cached_slot as usize) else { return Ok(None) };
+        if map_handle != cached_map || *stored_key != key_handle {
             return Ok(None);
         }
-        let Obj::Str(text) = self.heap.get(k) else { return Ok(None) };
-        // A hit costs the same as hashing `k`, because the collector decides
-        // whether a dead map's handle is reused.
+        let Obj::Str(text) = self.heap.get(key) else { return Ok(None) };
+        // Charge the hash cost of `key` so fuel stays the same if garbage
+        // collection reuses a map handle.
         self.meter.charge_bytes(text.len())?;
-        Ok(Some(s as usize))
+        Ok(Some(cached_slot as usize))
     }
 
     /// `Op::MapGetOr`: the value of `k` in map `m` to `out`, if there is one.
@@ -2515,8 +2513,7 @@ impl Vm {
     }
 }
 
-/// The interpreter's fuel that instruction `op` spends before it can fail.
-/// Only calls spend any, at their safe point (`tick_call!`).
+/// Returns the interpreter fuel that `op` spends at `tick_call!` before it can fail.
 pub(super) fn call_tick(op: Op) -> i64 {
     match op {
         Op::CallDirect { .. }

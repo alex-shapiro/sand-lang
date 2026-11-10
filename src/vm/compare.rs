@@ -458,13 +458,13 @@ pub fn map_slot_tuple(heap: &Heap, budget: &impl Budget, m: &MapObj, items: &[Va
         h.write_u64(hash_key(heap, budget, x)?);
     }
     budget.charge(1)?;
-    find_metered(budget, &m.index, Value::Unit, h.finish(), |s| {
-        let Some((Value::Obj(t), _)) = m.entries[s] else { return Ok(false) };
-        let Obj::Tuple(t) = heap.obj(t) else { return Ok(false) };
-        if t.len() != items.len() {
+    find_metered(budget, &m.index, Value::Unit, h.finish(), |slot| {
+        let Some((Value::Obj(tuple_handle), _)) = m.entries[slot] else { return Ok(false) };
+        let Obj::Tuple(tuple) = heap.obj(tuple_handle) else { return Ok(false) };
+        if tuple.len() != items.len() {
             return Ok(false);
         }
-        for (&a, &b) in t.iter().zip(items) {
+        for (&a, &b) in tuple.iter().zip(items) {
             if !keys_eq(heap, budget, a, b)? {
                 return Ok(false);
             }
@@ -503,40 +503,39 @@ pub fn find_key(
     k: Value,
     key_at: impl Fn(usize) -> Option<Value>,
 ) -> Result<Option<usize>, Fail> {
-    find_metered(budget, table, k, hash, |i| match key_at(i) {
-        Some(x) => keys_eq(heap, budget, x, k),
+    find_metered(budget, table, k, hash, |slot| match key_at(slot) {
+        Some(stored_key) => keys_eq(heap, budget, stored_key, k),
         None => Ok(false),
     })
 }
 
-/// The slot of `table` for key `k`, with hash `hash`, that satisfies `eq`.
+/// Finds the slot in `table` for `key` with `hash` that satisfies `is_match`.
 ///
-/// Keeps only the charges of the comparison that finds the key. A different
-/// key with the same 32-bit hash tag costs nothing, so fuel does not depend on
-/// the hash seed of the process.
+/// Refunds the fuel of each non-matching comparison so only the matching
+/// comparison charges `budget`.
 #[inline]
 fn find_metered(
     budget: &impl Budget,
     table: &KeyIndex,
-    k: Value,
+    key: Value,
     hash: u64,
-    eq: impl Fn(usize) -> Result<bool, Fail>,
+    is_match: impl Fn(usize) -> Result<bool, Fail>,
 ) -> Result<Option<usize>, Fail> {
     let mark = budget.fuel_mark();
-    let mut failed = None;
-    let slot = table.find(k, hash, |i| match eq(i) {
+    let mut failure = None;
+    let slot = table.find(key, hash, |slot| match is_match(slot) {
         Ok(true) => true,
         Ok(false) => {
             budget.refund_to(mark);
             false
         }
-        Err(c) => {
-            failed.get_or_insert(c);
+        Err(fail) => {
+            failure.get_or_insert(fail);
             false
         }
     });
-    match failed {
-        Some(c) => Err(c),
+    match failure {
+        Some(fail) => Err(fail),
         None => Ok(slot),
     }
 }
@@ -1283,7 +1282,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_comparison_that_finds_a_key_costs_fuel() {
+    fn find_key_charges_only_for_the_matching_comparison() {
         let mut heap = Heap::new(None, usize::MAX);
         let key = heap.new_str("a".repeat(6400));
         let equal = heap.new_str("a".repeat(6400));
@@ -1294,7 +1293,7 @@ mod tests {
 
         let budget = CountingBudget::default();
         assert_eq!(find_key(&heap, &budget, &index, hash, key, |_| Some(other)).unwrap(), None);
-        assert_eq!(budget.units.get(), 0, "a false match of the hash tag costs nothing");
+        assert_eq!(budget.units.get(), 0, "hash-tag collision refunded");
         assert_eq!(find_key(&heap, &budget, &index, hash, key, |_| Some(equal)).unwrap(), Some(0));
         assert_eq!(budget.units.get(), 100, "6400 bytes compared");
     }

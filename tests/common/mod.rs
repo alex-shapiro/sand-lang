@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-/// A clock that never advances, so that regex work has no time-based charge.
+/// A clock that returns a fixed instant and zero elapsed CPU time.
 pub struct StoppedClock(pub sandlang::platform::Instant);
 
 impl sandlang::platform::Clock for StoppedClock {
