@@ -454,8 +454,9 @@ seeds, and the environment.
   of live operations. The engine also saves them if they pass a fixed size. On
   the source branch a loop of `time.now()` grows a host buffer outside every
   limit, which violates the hard memory limit of the sandbox.
-- **Record time-based fuel.** Regex work charges fuel by time, so a replay reads
-  the time-based charge from the journal.
+- **Record regex fuel that depends on the machine.** Regex work charges fuel by
+  time and by the size of the compiled program, so a replay reads these charges
+  from the journal.
 - **Detect an incompatible journal before replay.** The first entry holds a
   format number, a hash of the script source and its imports, and the arguments
   of the run. A mismatch returns an error before the script starts. Bump the format

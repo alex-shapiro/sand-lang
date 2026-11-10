@@ -157,7 +157,7 @@ impl NativeObject for RegexObj {
 const REGEX_CACHE_SLOTS: usize = 64;
 
 /// The longest pattern the cache holds. A longer pattern compiles on each use.
-const MAX_CACHED_PATTERN_LEN: usize = 4096;
+const MAX_CACHED_PATTERN_LEN: usize = 256;
 
 /// Base fuel cost for a cache hit in `regex.Regex` (in addition to the byte
 /// length of `pattern`).
@@ -381,7 +381,10 @@ pub(crate) fn module() -> NativeModule {
             if let Some(regex) = regex {
                 return Ok(Val::from_raw(regex));
             }
-            builder().build(pattern.str(&vm.heap))
+            let mut scan = Scan::new(vm);
+            let built = builder().build(pattern.str(&vm.heap));
+            scan.finish(vm)?;
+            built
         } else {
             let mut scan = Scan::new(vm);
             scan.charge(vm, COMPILE_BASE + COMPILE_PER_BYTE * text_len as u64)?;
