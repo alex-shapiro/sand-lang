@@ -2191,18 +2191,20 @@ impl Vm {
         Ok(s)
     }
 
-    /// The slot of `k` in map `m` if it is the slot last looked up: the
-    /// entry there holds `k` itself.
+    /// The slot of string key `k` in map `m` if it is the slot last looked
+    /// up: the entry there holds `k` itself. Charges the cost of hashing `k`,
+    /// because the collector decides whether a dead map's handle is reused.
     #[inline]
-    fn last_slot(&self, m: Value, mo: &MapObj, k: Value) -> Option<usize> {
+    fn last_slot(&self, m: Value, mo: &MapObj, k: Value) -> Result<Option<usize>, Fail> {
         let (h, s) = self.last_slot.get();
-        let hit = matches!(m, Value::Obj(x) if x == h)
-            && match (mo.entries.get(s as usize), k) {
-                (Some(Some((Value::Obj(x), _))), Value::Obj(y)) => *x == y,
-                (Some(Some((x, _))), _) => *x == k,
-                _ => false,
-            };
-        hit.then_some(s as usize)
+        let (Value::Obj(map_handle), Value::Obj(key_handle)) = (m, k) else { return Ok(None) };
+        let Some(Some((Value::Obj(stored_key), _))) = mo.entries.get(s as usize) else { return Ok(None) };
+        if map_handle != h || *stored_key != key_handle {
+            return Ok(None);
+        }
+        let Obj::Str(text) = self.heap.get(k) else { return Ok(None) };
+        self.meter.charge_bytes(text.len())?;
+        Ok(Some(s as usize))
     }
 
     /// `Op::MapGetOr`: the value of `k` in map `m` to `out`, if there is one.
@@ -2267,7 +2269,7 @@ impl Vm {
         let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
         let found = match k {
             Value::Int(i) => mo.index.find_int(i, |s| matches!(mo.entries[s], Some((Value::Int(x), _)) if x == i)),
-            _ if let Some(s) = self.last_slot(m, mo, k) => Some(s),
+            _ if let Some(s) = self.last_slot(m, mo, k)? => Some(s),
             _ => {
                 let hash = hash_key(&self.heap, &self.meter, k)?;
                 match find_entry(&self.heap, &self.meter, &mo.index, hash, k, &mo.entries, |e| e.0)? {

@@ -953,6 +953,37 @@ print((hits, probe.fuel()))
     );
 }
 
+#[test]
+fn a_map_store_costs_the_same_if_a_dead_maps_handle_is_reused() {
+    let src = r#"import probe
+fn lookup(k: str) -> int {
+    var m: [str: int] = [:]
+    m[k] = 1
+    if m.contains(k) { return 1 } else { return 0 }
+}
+fn store(k: str) -> int {
+    var m: [str: int] = [:]
+    m[k] = 1
+    m[k] = 2
+    return m.len()
+}
+let k = "x".repeat(6400)
+var hits = 0
+for i in 0..300 {
+    hits += lookup(k)
+    hits += store(k)
+}
+print((hits, probe.fuel()))
+"#;
+    let fuel = |gc_stress: bool| {
+        let config = Config::new().clock(Arc::new(StoppedClock(sandlang::platform::Instant::now())));
+        let (r, out) = run(config.host_modules(HostModules::new([fuel_probe()]).unwrap()).gc_stress(gc_stress), src);
+        assert!(r.is_ok(), "{r:?}");
+        out
+    };
+    assert_eq!(fuel(false), fuel(true));
+}
+
 /// A lookup of a key whose equal copy is in the map compares both shared
 /// structures, so limits must apply while it runs.
 #[test]
