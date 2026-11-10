@@ -226,9 +226,12 @@ impl<T: SandType, E: crate::native::convert::IntoHostError> SandType for Result<
     }
 }
 
-impl<T: SandType, E: crate::native::func::NativeError> SandType for Result<crate::native::func::Later<T, E>, E> {
+impl<T: SandType, E: crate::native::func::NativeError> SandType for Result<crate::native::func::Later<T, E>, E>
+where
+    Result<T, E>: SandType,
+{
     fn sand_type() -> Type {
-        E::result_type(T::sand_type())
+        <Result<T, E>>::sand_type()
     }
 }
 

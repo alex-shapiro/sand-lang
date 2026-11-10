@@ -1,6 +1,6 @@
 //! Traits and types for registering Rust functions in a [`NativeModule`](super::NativeModule).
 
-use super::convert::{Conversion, FromValue, HostError, IntoValue};
+use super::convert::{Conversion, FromValue, HostError, IntoValue, ok_value};
 use super::ty::{SandType, Type};
 use crate::vm::value::Value;
 use crate::vm::{Ctl, Fail, Finisher, NResult, NativeFn, Suspension, Vm, WaitKind};
@@ -27,105 +27,6 @@ impl Signature {
 ///
 /// Parameters implement [`FromValue`] (borrowing `&str`, `&[u8]`, and `&T`
 /// directly from the VM heap), and the return type implements [`NativeReturn`].
-#[diagnostic::on_unimplemented(
-    message = "`{Self}` cannot be a host function",
-    note = "each parameter must implement `FromValue`, and the return type must implement `NativeReturn`",
-    note = "a synchronous function returns `HostError`, not `HostError<Fail>`"
-)]
-#[diagnostic::on_unimplemented(
-    message = "`{Self}` cannot be a host function",
-    note = "each parameter must implement `FromValue`, and the return type must implement `NativeReturn`",
-    note = "a synchronous function returns `HostError`, not `HostError<Fail>`"
-)]
-pub trait HostFunction<Marker>: Send + Sync + 'static {
-    fn signature() -> Signature;
-    fn into_host(self) -> Box<NativeFn>;
-}
-
-/// Synchronous function registered with [`NativeModule::vm_function`](super::NativeModule::vm_function).
-///
-/// Receives `&mut Vm` as its first argument; remaining arguments must be owned
-/// [`FromValue`] types or [`Val`](super::Val) handles.
-#[diagnostic::on_unimplemented(
-    message = "`{Self}` cannot be a host function",
-    note = "each parameter must implement `FromValue`, and the return type must implement `NativeReturn`",
-    note = "a synchronous function returns `HostError`, not `HostError<Fail>`"
-)]
-pub trait HostFunction<Marker>: Send + Sync + 'static {
-    fn signature() -> Signature;
-    fn into_host(self) -> Box<NativeFn>;
-}
-
-/// Synchronous function registered with [`NativeModule::vm_function`](super::NativeModule::vm_function).
-///
-/// Receives `&mut Vm` as its first argument; remaining arguments must be owned
-/// [`FromValue`] types or [`Val`](super::Val) handles.
-#[diagnostic::on_unimplemented(
-    message = "`{Self}` cannot be a `Vm` function",
-    note = "the first parameter must be `&mut Vm`, each other parameter must be an owned `FromValue` type, and the return type must implement `NativeReturn`",
-    note = "a synchronous function returns `HostError`, not `HostError<Fail>`"
-)]
-#[diagnostic::on_unimplemented(
-    message = "`{Self}` cannot be a host function",
-    note = "each parameter must implement `FromValue`, and the return type must implement `NativeReturn`",
-    note = "a synchronous function returns `HostError`, not `HostError<Fail>`"
-)]
-pub trait HostFunction<Marker>: Send + Sync + 'static {
-    fn signature() -> Signature;
-    fn into_host(self) -> Box<NativeFn>;
-}
-
-/// Synchronous function registered with [`NativeModule::vm_function`](super::NativeModule::vm_function).
-///
-/// Receives `&mut Vm` as its first argument; remaining arguments must be owned
-/// [`FromValue`] types or [`Val`](super::Val) handles.
-#[diagnostic::on_unimplemented(
-    message = "`{Self}` cannot be a `Vm` function",
-    note = "the first parameter must be `&mut Vm`, each other parameter must be an owned `FromValue` type, and the return type must implement `NativeReturn`",
-    note = "a synchronous function returns `HostError`, not `HostError<Fail>`"
-)]
-pub trait VmFunction<Marker>: Send + Sync + 'static {
-    fn signature() -> Signature;
-    fn into_host(self) -> Box<NativeFn>;
-}
-
-/// Asynchronous function registered with [`NativeModule::async_function`](super::NativeModule::async_function).
-///
-/// Arguments must be owned [`FromValue`] types so the returned future can
-/// outlive the initial call.
-#[diagnostic::on_unimplemented(
-    message = "`{Self}` cannot be a host function",
-    note = "each parameter must implement `FromValue`, and the return type must implement `NativeReturn`",
-    note = "a synchronous function returns `HostError`, not `HostError<Fail>`"
-)]
-pub trait HostFunction<Marker>: Send + Sync + 'static {
-    fn signature() -> Signature;
-    fn into_host(self) -> Box<NativeFn>;
-}
-
-/// Synchronous function registered with [`NativeModule::vm_function`](super::NativeModule::vm_function).
-///
-/// Receives `&mut Vm` as its first argument; remaining arguments must be owned
-/// [`FromValue`] types or [`Val`](super::Val) handles.
-#[diagnostic::on_unimplemented(
-    message = "`{Self}` cannot be a `Vm` function",
-    note = "the first parameter must be `&mut Vm`, each other parameter must be an owned `FromValue` type, and the return type must implement `NativeReturn`",
-    note = "a synchronous function returns `HostError`, not `HostError<Fail>`"
-)]
-pub trait VmFunction<Marker>: Send + Sync + 'static {
-    fn signature() -> Signature;
-    fn into_host(self) -> Box<NativeFn>;
-}
-
-/// Asynchronous function registered with [`NativeModule::async_function`](super::NativeModule::async_function).
-///
-/// Arguments must be owned [`FromValue`] types so the returned future can
-/// outlive the initial call.
-#[diagnostic::on_unimplemented(
-    message = "`{Self}` cannot be an async host function",
-    note = "each parameter must be an owned `FromValue` type, and the output of the future must implement `AsyncReturn`",
-    note = "a future returns `HostError<Fail>`, not `HostError`, because it cannot make a request to the scheduler"
-)]
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be a host function",
     note = "each parameter must implement `FromValue`, and the return type must implement `NativeReturn`",
@@ -186,20 +87,20 @@ impl<T: IntoValue> NativeReturn for Result<T, Ctl> {
 impl<T: IntoValue> NativeReturn for Result<T, HostError> {
     fn into_native_result(self, vm: &mut Vm) -> NResult {
         match self {
-            Ok(x) => {
-                let v = x.into_value(vm)?;
-                Ok(vm.ok(v))
-            }
-            Err(e) => e.into_native_result(vm),
+            Ok(x) => Ok(ok_value(x, vm)?),
+            Err(e) => NativeError::into_native_result(e, vm),
         }
     }
 }
 
-impl<T: SandType, E: NativeError> NativeReturn for Result<Later<T, E>, E> {
+impl<T: SandType, E: NativeError> NativeReturn for Result<Later<T, E>, E>
+where
+    Result<T, E>: SandType,
+{
     fn into_native_result(self, vm: &mut Vm) -> NResult {
         match self {
             Ok(later) => later.start(vm),
-            Err(e) => e.into_native_result(vm),
+            Err(e) => NativeError::into_native_result(e, vm),
         }
     }
 }
@@ -234,10 +135,7 @@ impl<T: IntoValue + Send + 'static> AsyncReturn for Result<T, HostError<Fail>> {
 /// The Sand `Result` of a call that finishes with `r`.
 fn finish_host_result<T: IntoValue>(r: Result<T, HostError<Fail>>, vm: &mut Vm) -> Result<Value, Fail> {
     match r {
-        Ok(x) => {
-            let v = x.into_value(vm)?;
-            Ok(vm.ok(v))
-        }
+        Ok(x) => ok_value(x, vm),
         Err(e) => e.into_sand_error(vm)?,
     }
 }
@@ -263,7 +161,6 @@ pub trait NativeError: Send + Sized + 'static + sealed::Sealed {
     /// The error of the closure that finishes the call: this error without
     /// its requests to the scheduler, because the closure runs after the wait.
     type Finish: Send + 'static;
-    fn result_type(t: Type) -> Type;
     #[doc(hidden)]
     fn finish<T: IntoValue>(r: Result<T, Self::Finish>, vm: &mut Vm) -> Result<Value, Fail>;
     #[doc(hidden)]
@@ -274,14 +171,11 @@ mod sealed {
     pub trait Sealed {}
     impl Sealed for crate::vm::Ctl {}
     impl Sealed for crate::vm::Fail {}
-    impl<C> Sealed for super::HostError<C> {}
+    impl Sealed for super::HostError {}
 }
 
 impl NativeError for Ctl {
     type Finish = Fail;
-    fn result_type(t: Type) -> Type {
-        t
-    }
     fn finish<T: IntoValue>(r: Result<T, Fail>, vm: &mut Vm) -> Result<Value, Fail> {
         r.into_value(vm)
     }
@@ -292,9 +186,6 @@ impl NativeError for Ctl {
 
 impl NativeError for Fail {
     type Finish = Fail;
-    fn result_type(t: Type) -> Type {
-        t
-    }
     fn finish<T: IntoValue>(r: Result<T, Fail>, vm: &mut Vm) -> Result<Value, Fail> {
         r.into_value(vm)
     }
@@ -303,16 +194,13 @@ impl NativeError for Fail {
     }
 }
 
-impl<C: Into<Ctl> + Send + 'static> NativeError for HostError<C> {
+impl NativeError for HostError {
     type Finish = HostError<Fail>;
-    fn result_type(t: Type) -> Type {
-        Type::result(t, Type::error())
-    }
     fn finish<T: IntoValue>(r: Result<T, HostError<Fail>>, vm: &mut Vm) -> Result<Value, Fail> {
         finish_host_result(r, vm)
     }
     fn into_native_result(self, vm: &mut Vm) -> NResult {
-        self.into_sand_error(vm)?.map_err(Into::into)
+        self.into_sand_error(vm)?
     }
 }
 

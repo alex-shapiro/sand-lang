@@ -95,6 +95,17 @@ pub trait IntoValue: SandType {
 ///     Err(ctl)?
 /// }
 /// ```
+///
+/// A helper that a native function and a finisher share is generic over `C`:
+///
+/// ```
+/// # use sandlang::native::convert::HostError;
+/// # use sandlang::vm::{Fail, Vm};
+/// fn parse<C: From<Fail>>(vm: &Vm, text: &str) -> Result<i64, HostError<C>> {
+///     vm.charge_bytes(text.len())?;
+///     text.parse().map_err(|_| HostError::new("parse", "not a number"))
+/// }
+/// ```
 pub struct HostError<C = Ctl>(Box<HostErrorKind<C>>);
 
 enum HostErrorKind<C> {
@@ -394,10 +405,7 @@ impl<T: IntoValue> IntoValue for Option<T> {
 impl<T: IntoValue, E: IntoHostError> IntoValue for Result<T, E> {
     fn into_value(self, vm: &mut Vm) -> Result<Value, Fail> {
         match self {
-            Ok(x) => {
-                let v = x.into_value(vm)?;
-                Ok(vm.ok(v))
-            }
+            Ok(x) => ok_value(x, vm),
             Err(e) => e.into_host_error().into_sand_error(vm)?,
         }
     }
@@ -407,6 +415,12 @@ impl<T: IntoValue> IntoValue for Result<T, Fail> {
     fn into_value(self, vm: &mut Vm) -> Result<Value, Fail> {
         self?.into_value(vm)
     }
+}
+
+/// The Sand `Ok` of `x`.
+pub(crate) fn ok_value<T: IntoValue>(x: T, vm: &mut Vm) -> Result<Value, Fail> {
+    let v = x.into_value(vm)?;
+    Ok(vm.ok(v))
 }
 
 fn sort_cost(n: usize) -> u64 {
