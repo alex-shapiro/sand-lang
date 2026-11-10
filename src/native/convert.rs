@@ -85,8 +85,8 @@ pub trait IntoValue: SandType {
 /// Construct a recoverable script error with [`HostError::new`], or propagate a
 /// [`Fail`], a [`Ctl`], or a `std::io::Error` with `?`.
 ///
-/// `C` is what the error can stop the call with. A `HostError<Fail>` holds no
-/// request to the scheduler, so it cannot hold a `Ctl`:
+/// `C` is the control signal that aborts or suspends the call. A
+/// `HostError<Fail>` cannot hold a scheduler request (`Ctl`):
 ///
 /// ```compile_fail,E0277
 /// # use sandlang::native::convert::HostError;
@@ -96,7 +96,8 @@ pub trait IntoValue: SandType {
 /// }
 /// ```
 ///
-/// A helper that a native function and a finisher share is generic over `C`:
+/// Make a helper generic over `C` to share it between a native function and a
+/// finisher:
 ///
 /// ```
 /// # use sandlang::native::convert::HostError;
@@ -136,8 +137,8 @@ impl<C: From<Fail>> From<Fail> for HostError<C> {
 }
 
 impl<C: From<Fail>> HostError<C> {
-    /// The Sand `Err` value of a recoverable error, or what the error stops
-    /// the call with.
+    /// Converts a recoverable error into a Sand `Err` value, or returns the
+    /// control signal that stops the call.
     pub(crate) fn into_sand_error(self, vm: &mut Vm) -> Result<Value, C> {
         match *self.0 {
             HostErrorKind::Error { kind, message } => {
@@ -418,7 +419,7 @@ impl<T: IntoValue> IntoValue for Result<T, Fail> {
     }
 }
 
-/// The Sand `Ok` of `x`.
+/// Converts `x` into a Sand `Ok` value.
 pub(crate) fn ok_value<T: IntoValue>(x: T, vm: &mut Vm) -> Result<Value, Fail> {
     let v = x.into_value(vm)?;
     Ok(vm.ok(v))

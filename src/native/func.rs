@@ -55,8 +55,7 @@ pub trait VmFunction<Marker>: Send + Sync + 'static {
 ///
 /// Arguments must be owned [`FromValue`] types so the returned future can
 /// outlive the initial call. The output of the future implements
-/// [`HostReturn<Fail>`], because the future cannot make a request to the
-/// scheduler:
+/// [`HostReturn<Fail>`] because the future cannot make a scheduler request:
 ///
 /// ```compile_fail,E0277
 /// # use sandlang::native::NativeModule;
@@ -67,16 +66,17 @@ pub trait VmFunction<Marker>: Send + Sync + 'static {
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be an async host function",
     note = "each parameter must be an owned `FromValue` type, and the output of the future must implement `HostReturn<Fail>`",
-    note = "a future returns `HostError<Fail>`, not `HostError`, because it cannot make a request to the scheduler"
+    note = "a future returns `HostError<Fail>`, not `HostError`, because it cannot make a scheduler request"
 )]
 pub trait AsyncHostFunction<Marker>: Send + Sync + 'static {
     fn signature() -> Signature;
     fn into_host(self) -> Box<NativeFn>;
 }
 
-/// What a registered function returns. `C` is what the call can stop with:
-/// a [`Ctl`] for a function that runs before any wait, and a [`Fail`] for code
-/// that runs after one.
+/// Return type of a registered function.
+///
+/// `C` is the control signal that stops the call. Functions that run before any
+/// wait use [`Ctl`], and code that runs after a wait uses [`Fail`].
 pub trait HostReturn<C>: SandType {
     #[doc(hidden)]
     fn into_call_result(self, vm: &mut Vm) -> Result<Value, C>;
@@ -118,8 +118,8 @@ where
 /// Deferred result returned by a [`VmFunction`] that may suspend the calling
 /// Sand task on a future.
 ///
-/// Return `Result<Later<T, E>, E>` from the function: if `E` is [`Ctl`] or
-/// [`Fail`], the Sand return type is `T`; if `E` is a [`HostError`], the Sand
+/// Return `Result<Later<T, E>, E>` from the function. If `E` is [`Ctl`] or
+/// [`Fail`], the Sand return type is `T`. If `E` is [`HostError`], the Sand
 /// return type is `Result<T, Error>`.
 #[must_use]
 pub struct Later<T, E>(Completion, PhantomData<fn() -> (T, E)>);
@@ -134,8 +134,8 @@ enum Completion {
 
 /// Error type for a [`Later`] result ([`Ctl`], [`Fail`], or [`HostError`]).
 pub trait NativeError: Send + Sized + 'static + sealed::Sealed {
-    /// The error of the closure that finishes the call: this error without
-    /// its requests to the scheduler, because the closure runs after the wait.
+    /// Error type of the finisher closure. It excludes scheduler requests
+    /// because the closure runs after the wait.
     type FinishError: Send + 'static;
     #[doc(hidden)]
     fn stop_call(self, vm: &mut Vm) -> Result<Value, Ctl>;
@@ -173,11 +173,10 @@ impl<T: IntoValue + Send + 'static, E: NativeError> Later<T, E> {
     /// Suspends the calling task until `fut` is resolved, and then executes the
     /// returned closure on the VM thread to produce the Sand result.
     ///
-    /// The closure can only fail, because its error is
-    /// [`NativeError::FinishError`]. It cannot write to the standard streams,
-    /// because a write can ask for a permission. Return the data to the script
-    /// instead, and let the script print it.
-    /// A closure that returns a [`Ctl`] does not compile:
+    /// The closure returns [`NativeError::FinishError`], so it cannot make a
+    /// scheduler request. It cannot write to standard output or standard error
+    /// because a write can prompt for permission. Return the data to the script
+    /// instead. A closure that returns a [`Ctl`] does not compile:
     ///
     /// ```compile_fail,E0271
     /// # use sandlang::native::func::Later;

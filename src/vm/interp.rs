@@ -10,9 +10,9 @@
 //! - Back edges leave the `match` with their offset and share one safe point.
 //! - Loops, allocations, formatting and error paths go into `#[inline(never)]`
 //!   or `#[cold]` functions, not into the arms.
-//! - Results stay 16 bytes (`Ctl` and `Fail` are one pointer), and a helper returns a
-//!   `Value` whole (`Ok(*v)`), not through an `Option<Value>`: larger or
-//!   split results go through memory and stall the caller's load.
+//! - Results stay 16 bytes (`Ctl` and `Fail` are pointer-sized), and a helper
+//!   returns a `Value` directly (`Ok(*v)`) instead of an `Option<Value>`.
+//!   Larger or split results go through memory and stall the caller's load.
 //!
 //! Measure changes with `cargo bench` and by looking for stack loads and
 //! stores around the dispatch jump in the disassembly of `Vm::interp`.
@@ -1756,7 +1756,7 @@ impl Vm {
             CtlKind::Cancelled => Ok(Some(FiberStop::Cancelled)),
             CtlKind::Yield | CtlKind::Blocked { .. } => unreachable!("handled above"),
             CtlKind::Collect => Err(self.internal_trap(fiber, ip, "a native asked for a collection twice".into())),
-            // Do not retry memory limits here because the call already retried after garbage collection.
+            // Do not retry memory limits here. `call_native` already retried the call after garbage collection.
             CtlKind::Fail(fail) => Err(self.run_ending_of(fail, |vm| vm.trace_of(fiber, Some(ip as u32)))),
         }
     }
@@ -2472,12 +2472,12 @@ fn overflow(what: &str) -> Fail {
     Fail::runtime_error("overflow", format!("{what} overflow"))
 }
 
-/// The failure of an integer operation whose error is `kind: message`.
+/// Converts an integer arithmetic error (`kind: message`) into a [`Fail`].
 fn arith_fail(message: &str) -> Fail {
     Fail(Box::new(FailKind::RuntimeError(message.to_string())))
 }
 
-/// Returns whether a garbage collection may let a failed native call succeed.
+/// Returns `true` if a garbage collection can resolve the failure of a native call.
 fn collection_may_help(r: &Result<Value, Ctl>) -> bool {
     match r {
         Ok(_) => false,

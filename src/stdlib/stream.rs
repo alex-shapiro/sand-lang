@@ -30,15 +30,15 @@ impl<C> From<IoFailure> for HostError<C> {
 
 pub(crate) type Suspended<T> = Result<Later<T, HostError>, HostError>;
 
-/// The result of the closure that finishes a suspended call.
-pub(crate) type Finished<T> = Result<T, HostError<Fail>>;
+/// Result of a finisher closure for a suspended I/O call.
+pub(crate) type FinishResult<T> = Result<T, HostError<Fail>>;
 
 /// Suspends the calling task on `fut` with `wait_kind`. If `fut` returns `Ok`,
 /// runs `ok` on the VM thread to produce the Sand result.
 pub(crate) fn suspend<T: Send + 'static, R: IntoValue + Send + 'static>(
     wait_kind: WaitKind,
     fut: impl Future<Output = Result<T, IoFailure>> + Send + 'static,
-    ok: impl FnOnce(&mut Vm, T) -> Finished<R> + Send + 'static,
+    ok: impl FnOnce(&mut Vm, T) -> FinishResult<R> + Send + 'static,
 ) -> Suspended<R> {
     Ok(Later::new(wait_kind, async move {
         let r = fut.await;
@@ -63,11 +63,11 @@ pub(crate) fn utf8(vm: &Vm, data: Vec<u8>) -> Result<Option<String>, Fail> {
     Ok(String::from_utf8(data).ok())
 }
 
-pub(crate) fn bytes_read(_: &mut Vm, data: Option<Vec<u8>>) -> Finished<Vec<u8>> {
+pub(crate) fn bytes_read(_: &mut Vm, data: Option<Vec<u8>>) -> FinishResult<Vec<u8>> {
     Ok(data.unwrap_or_default())
 }
 
-pub(crate) fn line_read(vm: &Vm, line: Option<Vec<u8>>, message: &str) -> Finished<Option<String>> {
+pub(crate) fn line_read(vm: &Vm, line: Option<Vec<u8>>, message: &str) -> FinishResult<Option<String>> {
     let Some(line) = line else { return Ok(None) };
     utf8(vm, line)?.map(Some).ok_or_else(|| HostError::new("invalid", message))
 }

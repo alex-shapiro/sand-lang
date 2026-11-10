@@ -51,12 +51,11 @@ pub struct NativeEntry {
     pub f: HostFn,
 }
 
-/// The outcome of a native call that does not return a value: a [`Fail`],
-/// or a request to the scheduler.
+/// Control signal from a native call that does not return a value. A `Ctl` is a
+/// [`Fail`] or a scheduler request.
 ///
-/// A host makes a `Ctl` from a [`Fail`]. The `Vm` methods that wait or ask for
-/// a permission, such as [`Vm::yield_now`] and [`Vm::permit`], make the
-/// requests. A host cannot build a request itself:
+/// Convert a [`Fail`] into a `Ctl` with `?` or [`From`]. Only `Vm` methods such
+/// as [`Vm::yield_now`] and [`Vm::permit`] construct scheduler requests:
 ///
 /// ```compile_fail,E0603
 /// let _ = sandlang::vm::CtlKind::Yield;
@@ -64,16 +63,17 @@ pub struct NativeEntry {
 #[must_use]
 pub struct Ctl(Box<CtlKind>);
 
-/// The end of a run: a runtime error, a limit, an interrupt, an exit, or an
-/// internal error.
+/// Terminal failure that ends a run: a runtime error, a limit error, an
+/// interrupt, an exit code, or an internal error.
 ///
-/// Code that cannot make a request to the scheduler returns a `Fail` instead
-/// of a [`Ctl`]. `?` converts a `Fail` to a `Ctl`, but not the reverse.
+/// Code that cannot make a scheduler request returns a `Fail` instead of a
+/// [`Ctl`]. `?` converts a `Fail` into a `Ctl`, and does not convert a `Ctl`
+/// into a `Fail`.
 #[must_use]
 pub struct Fail(Box<FailKind>);
 
-// One pointer each, so that a native result is 16 bytes like a `Value` (see
-// `interp`).
+// Keep `Ctl` and `Fail` pointer-sized so a native result is 16 bytes like a
+// `Value` (see `interp`).
 const _: () = assert!(std::mem::size_of::<Ctl>() == std::mem::size_of::<usize>());
 const _: () = assert!(std::mem::size_of::<Result<Value, Ctl>>() == 16);
 const _: () = assert!(std::mem::size_of::<Result<Option<Value>, Ctl>>() == 16);
@@ -90,16 +90,16 @@ pub enum WaitKind {
     User,
 }
 
-/// A suspended native call: the pending future and its [`WaitKind`].
+/// Suspended native call: the pending future and its [`WaitKind`].
 pub(crate) struct Suspension {
     pub(crate) future: BoxFuture,
     pub(crate) wait_kind: WaitKind,
 }
 
-/// What a [`Ctl`] is.
+/// Variant of a [`Ctl`].
 pub(crate) enum CtlKind {
     Fail(Fail),
-    /// Ask the user; the call is retried afterwards.
+    /// Prompt the user for the capability, and then retry the call.
     NeedPermission(Capability),
     /// Suspend the task until the future completes.
     Async(Suspension),
@@ -115,50 +115,51 @@ pub(crate) enum CtlKind {
         tasks: Vec<Value>,
         contenders: u32,
     },
-    /// Let other tasks run; the call returns `()`.
+    /// Let other tasks run. The call returns `()`.
     Yield,
-    /// Collect garbage and call the native again (once): what it needs (an
-    /// open-resource slot, I/O buffer space) may be held by garbage. See
+    /// Collect garbage and retry the native call once. Garbage may hold an
+    /// open-resource slot or I/O buffer space that the call needs. See
     /// [`Vm::resource_slot`].
     Collect,
-    /// The native cancelled the running task. See [`Vm::cancel_task`].
+    /// The native call cancelled the running task. See [`Vm::cancel_task`].
     Cancelled,
 }
 
-/// What a [`Fail`] is.
+/// Variant of a [`Fail`].
 pub(crate) enum FailKind {
     /// Uncaught runtime error (`kind: message`) that terminates the run (see [`Fail::runtime_error`]).
     RuntimeError(String),
-    /// An invariant of the engine broke: a bug, which ends a session.
+    /// Broken engine invariant that ends the session.
     Internal(String),
     Limit(LimitKind),
-    /// The host interrupted the engine (see `Meter::check`).
+    /// Host interrupt (see `Meter::check`).
     Interrupted,
     Exit(i32),
 }
 
 impl Fail {
-    /// A runtime error of `kind` that ends the run. A script cannot catch it. For recoverable `Result` errors, return [`HostError`] instead.
+    /// Aborts the run with an uncaught runtime error of `kind`. For recoverable `Result` errors, return [`HostError`] instead.
     #[cold]
     pub fn runtime_error(kind: &str, msg: impl std::fmt::Display) -> Fail {
         Fail(Box::new(FailKind::RuntimeError(format!("{kind}: {msg}"))))
     }
 
-    /// An internal error: an invariant of the engine broke. It ends the
-    /// session. For a check in a host function, use [`Fail::runtime_error`].
+    /// Reports a broken engine invariant and ends the session. For checks in a
+    /// host function, use [`Fail::runtime_error`].
     #[cold]
     pub fn internal(msg: impl Into<String>) -> Fail {
         Fail(Box::new(FailKind::Internal(msg.into())))
     }
 
-    /// A limit was exceeded. After [`LimitKind::Memory`] from a native call,
-    /// the engine collects garbage and calls the native again once.
+    /// Reports that the run exceeded limit `k`. If a native call returns
+    /// [`LimitKind::Memory`], the engine collects garbage and retries the call
+    /// once.
     #[cold]
     pub fn limit(k: LimitKind) -> Fail {
         Fail(Box::new(FailKind::Limit(k)))
     }
 
-    /// The host interrupted the engine.
+    /// Reports that the host interrupted the engine.
     #[cold]
     pub fn interrupted() -> Fail {
         Fail(Box::new(FailKind::Interrupted))
@@ -169,7 +170,7 @@ impl Fail {
         Fail(Box::new(FailKind::Exit(code)))
     }
 
-    /// The limit, if this is one.
+    /// Returns the exceeded limit if `self` is a limit error.
     pub fn as_limit(&self) -> Option<LimitKind> {
         match *self.0 {
             FailKind::Limit(k) => Some(k),

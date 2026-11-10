@@ -3878,7 +3878,7 @@ fn natives_that_cannot_make_scheduler_requests_return_fail() {
 }
 
 #[test]
-fn host_error_closures_need_no_return_annotation() {
+fn host_error_closures_infer_their_return_type() {
     use sandlang::native::convert::HostError;
     let mut m = NativeModule::new("inferred");
     m.function("positive", |n: i64| if n > 0 { Ok(n) } else { Err(HostError::new("invalid", "not positive")) });
