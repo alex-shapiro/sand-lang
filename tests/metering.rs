@@ -902,16 +902,16 @@ var tuples: [(int, str): int] = [:]
 var s: Set<str> = Set()
 var text = ""
 for i in 0..200 {
-    let key = "key{i}"
+    let key = "key\(i)"
     m[key] = i
     tuples[(i, key)] = i
     s.add(key)
     text += key
-    text = "{text},{i}"
+    text = "\(text),\(i)"
     print((m[key], s.contains(key), m.contains(key)))
 }
 let more: [str: int] = ["a": 1, "b": 2]
-print((more, text.len(), probe.fuel()))
+print((more, m.len(), text.len(), probe.fuel()))
 "#,
     );
 }
@@ -951,4 +951,12 @@ for i in 0..50 {
 print((hits, probe.fuel()))
 "#,
     );
+}
+
+/// A lookup of a key whose equal copy is in the map compares both shared
+/// structures, so limits must apply while it runs.
+#[test]
+fn looking_up_a_key_with_shared_structure_stops_at_the_instruction_limit() {
+    let src = format!("{DAG}let m: [T: int] = [a: 1]\nprint(m[b])");
+    expect_stop(limits(|l| l.max_instructions = Some(1_000_000)), &src, is_limit(LimitKind::Instructions), Duration::from_secs(10));
 }

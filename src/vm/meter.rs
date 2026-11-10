@@ -97,6 +97,16 @@ pub trait Budget {
     fn charge_bytes(&self, n: usize) -> Result<(), Fail> {
         self.charge((n / BYTES_PER_UNIT) as u64)
     }
+
+    /// A mark to give back later charges with [`Budget::refund_to`].
+    #[inline]
+    fn fuel_mark(&self) -> i64 {
+        0
+    }
+
+    /// Gives back the units charged since [`Budget::fuel_mark`] returned `mark`.
+    #[inline]
+    fn refund_to(&self, _mark: i64) {}
 }
 
 /// A budget that never runs out.
@@ -105,31 +115,6 @@ pub struct Unmetered;
 impl Budget for Unmetered {
     #[inline(always)]
     fn charge(&self, _: u64) -> Result<(), Fail> {
-        Ok(())
-    }
-}
-
-/// A budget that adds up charges and never fails, for work whose cost
-/// applies only if a later check succeeds.
-#[derive(Default)]
-pub struct Tally {
-    units: Cell<u64>,
-}
-
-impl Tally {
-    pub fn units(&self) -> u64 {
-        self.units.get()
-    }
-
-    pub fn clear(&self) {
-        self.units.set(0);
-    }
-}
-
-impl Budget for Tally {
-    #[inline(always)]
-    fn charge(&self, units: u64) -> Result<(), Fail> {
-        self.units.set(self.units.get().saturating_add(units));
         Ok(())
     }
 }
@@ -291,6 +276,16 @@ impl Budget for Meter {
     #[inline]
     fn charge(&self, units: u64) -> Result<(), Fail> {
         Meter::charge(self, units)
+    }
+
+    #[inline]
+    fn fuel_mark(&self) -> i64 {
+        self.fuel()
+    }
+
+    #[inline]
+    fn refund_to(&self, mark: i64) {
+        Meter::refund_to(self, mark);
     }
 }
 
