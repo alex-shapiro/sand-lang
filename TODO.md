@@ -65,6 +65,10 @@ The host cannot rely on engine limits, stability, or control.
       loop of lookups with a 6,400-byte key spent about 300,000 units in a
       slice. Fix this before the journal lands, because a change to slice
       boundaries makes paused runs incompatible.
+- [ ] ❓ _Testing._ Compare the fiber and fuel at each slice start across the
+      collector and retry modes. Tests compare final fuel, and a task switch
+      can move at equal total fuel. A golden trace would also catch a cost
+      change that makes paused runs incompatible.
 - [ ] ❓ _Testing._ Compare fuel across hash seeds for the spec suite. This needs
       a test-only way to set the hash seed.
 - [ ] ❓ _Embedding._ Convert derived `SandEnum` and `SandStruct` values iteratively with an

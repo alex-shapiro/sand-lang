@@ -89,6 +89,8 @@ impl Vm {
     /// they started with. On error nothing has changed.
     #[inline]
     pub(crate) fn unpin(&mut self, c: Value) -> Result<(), Fail> {
+        // Open iterators decide the charge for a copy, so a copy costs the same
+        // whether or not the collector has freed the iterators that need it.
         let pinned = match self.heap.get(c) {
             Obj::Map(m) => m.pins.open > 0,
             Obj::Set(s) => s.pins.open > 0,
@@ -106,8 +108,6 @@ impl Vm {
             Obj::Set(s) => (&s.pins, s.entries.len(), s.entries.len() * SET_ENTRY_SIZE),
             _ => return Ok(()),
         };
-        // The charge uses the count of open iterators, so a copy costs the same
-        // whether or not the collector has freed the iterators that need it.
         self.meter.charge(slots as u64)?;
         let live: Vec<u32> = pins.its.iter().copied().filter(|&p| reads_in_place(&self.heap, p, h)).collect();
         if !live.is_empty() {

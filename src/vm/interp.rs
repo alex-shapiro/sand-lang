@@ -1627,7 +1627,7 @@ impl Vm {
                         }
                         None => internal!("not a range"),
                     },
-                    Op::NewIter { dst, src } => match retryable!(self.container_iter(r!(src))) {
+                    Op::NewIter { dst, src } => match self.container_iter(r!(src)) {
                         Ok(v) => r!(dst) = v,
                         Err(c) => fail_stop!(c),
                     },
@@ -2198,8 +2198,7 @@ impl Vm {
     }
 
     /// The slot of string key `k` in map `m` if it is the slot last looked
-    /// up: the entry there holds `k` itself. Charges the cost of hashing `k`,
-    /// because the collector decides whether a dead map's handle is reused.
+    /// up: the entry there holds `k` itself.
     #[inline]
     fn last_slot(&self, m: Value, mo: &MapObj, k: Value) -> Result<Option<usize>, Fail> {
         let (h, s) = self.last_slot.get();
@@ -2209,6 +2208,8 @@ impl Vm {
             return Ok(None);
         }
         let Obj::Str(text) = self.heap.get(k) else { return Ok(None) };
+        // A hit costs the same as hashing `k`, because the collector decides
+        // whether a dead map's handle is reused.
         self.meter.charge_bytes(text.len())?;
         Ok(Some(s as usize))
     }
