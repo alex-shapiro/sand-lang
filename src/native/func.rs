@@ -27,6 +27,11 @@ impl Signature {
 ///
 /// Parameters implement [`FromValue`] (borrowing `&str`, `&[u8]`, and `&T`
 /// directly from the VM heap), and the return type implements [`NativeReturn`].
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be a host function",
+    note = "each parameter must implement `FromValue`, and the return type must implement `NativeReturn`",
+    note = "a synchronous function returns `HostError`, not `HostError<Fail>`"
+)]
 pub trait HostFunction<Marker>: Send + Sync + 'static {
     fn signature() -> Signature;
     fn into_host(self) -> Box<NativeFn>;
@@ -36,6 +41,25 @@ pub trait HostFunction<Marker>: Send + Sync + 'static {
 ///
 /// Receives `&mut Vm` as its first argument; remaining arguments must be owned
 /// [`FromValue`] types or [`Val`](super::Val) handles.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be a host function",
+    note = "each parameter must implement `FromValue`, and the return type must implement `NativeReturn`",
+    note = "a synchronous function returns `HostError`, not `HostError<Fail>`"
+)]
+pub trait HostFunction<Marker>: Send + Sync + 'static {
+    fn signature() -> Signature;
+    fn into_host(self) -> Box<NativeFn>;
+}
+
+/// Synchronous function registered with [`NativeModule::vm_function`](super::NativeModule::vm_function).
+///
+/// Receives `&mut Vm` as its first argument; remaining arguments must be owned
+/// [`FromValue`] types or [`Val`](super::Val) handles.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be a `Vm` function",
+    note = "the first parameter must be `&mut Vm`, each other parameter must be an owned `FromValue` type, and the return type must implement `NativeReturn`",
+    note = "a synchronous function returns `HostError`, not `HostError<Fail>`"
+)]
 pub trait VmFunction<Marker>: Send + Sync + 'static {
     fn signature() -> Signature;
     fn into_host(self) -> Box<NativeFn>;
@@ -45,6 +69,39 @@ pub trait VmFunction<Marker>: Send + Sync + 'static {
 ///
 /// Arguments must be owned [`FromValue`] types so the returned future can
 /// outlive the initial call.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be a host function",
+    note = "each parameter must implement `FromValue`, and the return type must implement `NativeReturn`",
+    note = "a synchronous function returns `HostError`, not `HostError<Fail>`"
+)]
+pub trait HostFunction<Marker>: Send + Sync + 'static {
+    fn signature() -> Signature;
+    fn into_host(self) -> Box<NativeFn>;
+}
+
+/// Synchronous function registered with [`NativeModule::vm_function`](super::NativeModule::vm_function).
+///
+/// Receives `&mut Vm` as its first argument; remaining arguments must be owned
+/// [`FromValue`] types or [`Val`](super::Val) handles.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be a `Vm` function",
+    note = "the first parameter must be `&mut Vm`, each other parameter must be an owned `FromValue` type, and the return type must implement `NativeReturn`",
+    note = "a synchronous function returns `HostError`, not `HostError<Fail>`"
+)]
+pub trait VmFunction<Marker>: Send + Sync + 'static {
+    fn signature() -> Signature;
+    fn into_host(self) -> Box<NativeFn>;
+}
+
+/// Asynchronous function registered with [`NativeModule::async_function`](super::NativeModule::async_function).
+///
+/// Arguments must be owned [`FromValue`] types so the returned future can
+/// outlive the initial call.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be an async host function",
+    note = "each parameter must be an owned `FromValue` type, and the output of the future must implement `AsyncReturn`",
+    note = "a future returns `HostError<Fail>`, not `HostError`, because it cannot make a request to the scheduler"
+)]
 pub trait AsyncHostFunction<Marker>: Send + Sync + 'static {
     fn signature() -> Signature;
     fn into_host(self) -> Box<NativeFn>;
