@@ -206,6 +206,8 @@ impl Ctl {
 }
 
 impl From<Fail> for Ctl {
+    #[cold]
+    #[inline(never)]
     fn from(fail: Fail) -> Ctl {
         Ctl(Box::new(CtlKind::Fail(fail)))
     }
