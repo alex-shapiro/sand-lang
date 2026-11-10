@@ -62,11 +62,11 @@ The host cannot rely on engine limits, stability, or control.
       20,000-unit slice while other tasks wait. Fix this before adding the
       journal, because slice changes break paused runs.
 - [ ] ❓ _Testing._ Compare the active fiber and fuel at the start of each slice
-      across GC and retry modes. Current tests compare only total fuel, which
-      misses task switches that shift without changing total fuel. A slice
-      trace also catches cost changes that break paused runs.
-- [ ] ❓ _Testing._ Compare fuel across hash seeds across the spec suite. Add a
-      test configuration option to set the hash seed.
+      across GC and retry modes. Current tests compare only total fuel.
+      Comparing each slice catches task-switch changes and cost changes that
+      break paused runs.
+- [ ] ❓ _Testing._ Compare fuel across hash seeds in the spec suite. Add a test
+      configuration option to set the hash seed.
 - [ ] ❓ _Embedding._ Convert derived `SandEnum` and `SandStruct` values iteratively with an
       explicit stack. The derived `FromValue` and `IntoValue` implementations
       recurse once per nesting level, so deep values can overflow a small host

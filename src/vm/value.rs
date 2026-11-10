@@ -656,8 +656,7 @@ pub struct Pins {
     /// Length of `its` at which stale handles are pruned.
     pub prune_at: usize,
     /// Active iterators created since the last detach. This count changes only
-    /// as iterators start, finish, or detach, so it is independent of garbage
-    /// collection.
+    /// as iterators start, finish, or detach.
     pub open: usize,
 }
 

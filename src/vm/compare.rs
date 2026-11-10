@@ -511,8 +511,8 @@ pub fn find_key(
 
 /// Finds the slot in `table` for `key` with `hash` that satisfies `is_match`.
 ///
-/// Refunds the fuel of each non-matching comparison so only the matching
-/// comparison charges `budget`.
+/// Refunds the fuel of each failed comparison. Only the matching comparison
+/// charges `budget`.
 #[inline]
 fn find_metered(
     budget: &impl Budget,

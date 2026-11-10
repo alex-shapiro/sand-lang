@@ -160,11 +160,11 @@ const CACHED_COST: u64 = 4;
 
 /// A slot in the per-engine regex cache.
 ///
-/// A full collection clears `regex` while keeping `pattern_hash`, so a later
-/// compile of the same pattern charges the cache-hit cost.
+/// A full collection clears `regex` and keeps `pattern_hash`. A later compile
+/// of the same pattern still charges the cache-hit cost.
 pub(crate) struct RegexCacheEntry {
     pattern_hash: u64,
-    /// The cached `RegexObj`, traced as a GC root until a full collection clears it.
+    /// The compiled `RegexObj`, which is a GC root while present.
     pub(crate) regex: Option<Value>,
 }
 

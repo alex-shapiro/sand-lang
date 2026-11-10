@@ -55,10 +55,9 @@ impl Vm {
             return Ok(self.iter_fn(IterSrc::Done));
         }
         let prune = pins.its.len() >= pins.prune_at.max(MIN_PRUNE);
-        // Iterator steps cannot fail, so charge here for the tombstones that
-        // the iterator will skip. Charge 1 more unit here for this iterator
-        // instead of charging for `pins.its.len()` during prune and detach.
-        // That length depends on when garbage collection frees dead iterators.
+        // Charge here for the tombstones that the iterator will skip and for 1
+        // pin slot. Charging 1 unit per iterator keeps prune and detach fuel
+        // independent of how many dead iterators remain in `pins.its`.
         self.meter.charge((slots - live) as u64 + 1)?;
         let it = self.iter_fn(src);
         let Value::Obj(ih) = it else { unreachable!() };

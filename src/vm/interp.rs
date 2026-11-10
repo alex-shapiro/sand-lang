@@ -678,8 +678,8 @@ impl Vm {
             };
         }
         // Runs `$body` between `begin_retryable_op` and `end_retryable_op`.
-        // A macro keeps `regs` in a machine register, whereas a closure would
-        // capture `regs` by reference.
+        // A closure would capture `regs` by reference. A macro keeps `regs` in
+        // a machine register.
         macro_rules! retryable {
             ($body:expr) => {{
                 let fuel_mark = self.begin_retryable_op();
