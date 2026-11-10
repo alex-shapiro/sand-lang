@@ -102,6 +102,7 @@ pub enum CtlKind {
     Racing {
         wait_gen: u64,
         tasks: Vec<Value>,
+        contenders: u32,
     },
     /// Let other tasks run; the call returns `()`.
     Yield,
@@ -297,8 +298,10 @@ pub struct Fiber {
     pub wait_gen: u64,
     /// Absolute stack slot receiving the result of a blocking call.
     pub result_slot: usize,
-    /// Tasks to cancel when a `race` completes.
+    /// Tasks to cancel when a `race` finishes.
     pub race: Vec<Value>,
+    /// Number of tasks in `race` that can still finish the race.
+    pub race_contenders: u32,
     /// Fibers waiting for this one: (fiber, generation).
     pub waiters: Vec<(u32, u64)>,
     /// Stale `waiters` are pruned when it reaches this length.
@@ -1302,6 +1305,7 @@ impl Vm {
                     wait_gen: 0,
                     result_slot: 0,
                     race: vec![],
+                    race_contenders: 0,
                     waiters: vec![],
                     waiters_prune_at: MIN_PRUNE,
                     io: None,
@@ -1477,7 +1481,9 @@ impl Vm {
     pub(crate) fn end_cancelled(&mut self, fid: u32, mut f: Box<Fiber>) {
         f.race = Vec::new();
         for (w, g) in std::mem::take(&mut f.waiters) {
-            self.deliver_error(w, g, "cancelled: task cancelled");
+            if !self.race_outlasts_cancelled_contender(w, g) {
+                self.deliver_error(w, g, "cancelled: task cancelled");
+            }
         }
         let in_call = f.stopped_in_native_call;
         if self.unwind_to_pad(&mut f, in_call) {
@@ -1489,6 +1495,17 @@ impl Vm {
             self.live_tasks = self.live_tasks.saturating_sub(1);
             self.recycle_fiber(f);
         }
+    }
+
+    /// Records that a contender of the race wait `(fid, wait_gen)` was
+    /// cancelled. Returns whether another contender can still finish the race.
+    fn race_outlasts_cancelled_contender(&mut self, fid: u32, wait_gen: u64) -> bool {
+        let Some(Some(racer)) = self.fibers.get_mut(fid as usize) else { return false };
+        if racer.state != FiberState::Waiting || racer.wait_gen != wait_gen || racer.race.is_empty() {
+            return false;
+        }
+        racer.race_contenders = racer.race_contenders.saturating_sub(1);
+        racer.race_contenders > 0
     }
 
     /// Drops the frames of `f` above the innermost one with deferred code

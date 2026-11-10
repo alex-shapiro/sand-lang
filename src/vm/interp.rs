@@ -1746,10 +1746,11 @@ impl Vm {
                 fiber.result_slot = slot;
                 Ok(Some(FiberStop::Async(suspension)))
             }
-            CtlKind::Racing { wait_gen, tasks } => {
+            CtlKind::Racing { wait_gen, tasks, contenders } => {
                 fiber.result_slot = slot;
                 fiber.wait_gen = wait_gen;
                 fiber.race = tasks;
+                fiber.race_contenders = contenders;
                 Ok(Some(FiberStop::Blocked))
             }
             CtlKind::Cancelled => Ok(Some(FiberStop::Cancelled)),
@@ -1955,7 +1956,7 @@ impl Vm {
                 // One waiter per task, and the list of tasks to cancel.
                 self.meter.charge(tasks.len() as u64)?;
                 self.heap.check_memory(tasks.len() * (std::mem::size_of::<Value>() + std::mem::size_of::<(u32, u64)>()))?;
-                let (mut any_cancelled, mut can_finish) = (false, false);
+                let (mut any_cancelled, mut contenders) = (false, 0);
                 for &task_val in &tasks {
                     let Obj::Task(task) = self.heap.get(task_val) else { continue };
                     if task.state == TaskState::Done {
@@ -1970,9 +1971,9 @@ impl Vm {
                         return Ok(result);
                     }
                     any_cancelled |= task.state == TaskState::Cancelled;
-                    can_finish |= task.state == TaskState::Running && task.fiber != caller;
+                    contenders += u32::from(task.state == TaskState::Running && task.fiber != caller);
                 }
-                if !can_finish {
+                if contenders == 0 {
                     return Err(if any_cancelled {
                         Ctl::fail("cancelled", "task cancelled")
                     } else {
@@ -1987,7 +1988,7 @@ impl Vm {
                     self.add_waiter(fid, (caller, wait_gen))?;
                 }
                 self.heap.fiber_bytes += tasks.capacity() * std::mem::size_of::<Value>();
-                Err(Ctl::from(CtlKind::Racing { wait_gen, tasks }))
+                Err(Ctl::from(CtlKind::Racing { wait_gen, tasks, contenders }))
             }
             BlockOn::Recv(ch) => {
                 let Some(c) = self.heap.channel_mut(ch, None) else { return Err(internal("not a channel")) };

@@ -150,15 +150,11 @@ Common scripts fail, require workarounds, or produce misleading diagnostics.
       method. In a tight loop with a `defer` in each iteration, 99 of 300 runs
       skipped cleanup. Avoid preemption at that call. Add a scheduling stress
       mode that suspends and cancels tasks at each safe point.
-- [ ] ❓ _Tasks._ Decide whether cancelling a task in `task.race` cancels the
-      other raced tasks. Today the other tasks continue running. A cancelled
-      `task.timeout` caller can therefore leave its spawned task running. If
-      cancelling a race cancels all of its tasks, a task can be cancelled
-      through a race that another task started.
-- [ ] ❓ _Tasks._ Decide how `task.race` handles a task that is cancelled during
-      the race. `task.race([a, b])` returns the result of `b` if `a` is
-      cancelled before the race starts. However, the run fails if `a` is
-      cancelled while the race is waiting.
+- [ ] ❓ _Tasks._ Decide what a caller listed in its own `task.race` does. If
+      another task wins, the race cancels the caller with the other tasks.
+- [ ] ❓ _Tasks._ Evaluate owner-scoped tasks. An owner block cannot exit until
+      its tasks end. Cancelling the block cancels its tasks. See
+      [the task lifetime experiment](experiments/task-lifetime.md).
 - [ ] ❓ _Tasks._ Free the module-initializer fiber before each test.
       `Engine::run_tests` calls `run_main` twice and keeps the first fiber
       alive. As a result, `sand test` allows one fewer task than `sand run`.

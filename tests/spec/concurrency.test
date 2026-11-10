@@ -214,6 +214,128 @@ t.wait()
 --- fail
 a task cannot wait for itself
 
+=== cancelling the caller of a timeout cancels its work
+let caller = spawn task.timeout(10s, () => {
+    task.sleep(20ms)
+    print("work finished")
+})
+task.sleep(5ms)
+caller.cancel()
+task.sleep(40ms)
+print("end")
+--- stdout
+end
+
+=== a race continues if a task is cancelled during the race
+let a = spawn {
+    task.sleep(1h)
+    "a"
+}
+let b = spawn {
+    task.sleep(20ms)
+    "b"
+}
+let other = spawn {
+    task.sleep(5ms)
+    a.cancel()
+}
+print(task.race([a, b]))
+--- stdout
+b
+
+=== a race fails if its last task that can finish is cancelled
+let a = spawn task.sleep(1h)
+let b = spawn task.sleep(1h)
+let other = spawn {
+    task.sleep(5ms)
+    a.cancel()
+    task.sleep(5ms)
+    b.cancel()
+}
+task.race([a, b])
+--- fail
+task cancelled
+
+=== a race continues if another race cancels one of its tasks
+let shared = spawn {
+    task.sleep(1h)
+    "shared"
+}
+let fast = spawn {
+    task.sleep(5ms)
+    "fast"
+}
+let slow = spawn {
+    task.sleep(30ms)
+    "slow"
+}
+let first = spawn task.race([shared, fast])
+print(task.race([shared, slow]))
+print(first.wait())
+--- stdout
+slow
+fast
+
+=== a race counts a task listed twice as one that can finish
+let a = spawn {
+    task.sleep(1h)
+    "a"
+}
+let b = spawn {
+    task.sleep(20ms)
+    "b"
+}
+let other = spawn {
+    task.sleep(5ms)
+    a.cancel()
+}
+print(task.race([a, a, b]))
+--- stdout
+b
+
+=== a race continues if one of its tasks cancels itself
+let ch: Channel<Task<str>> = Channel()
+let a = spawn {
+    let me = ch.recv().unwrap()
+    me.cancel()
+    "a"
+}
+let b = spawn {
+    task.sleep(20ms)
+    "b"
+}
+let other = spawn {
+    task.sleep(5ms)
+    ch.send(a)
+}
+print(task.race([a, b]))
+--- stdout
+b
+
+=== a race does not count its caller as a task that can finish
+let ch: Channel<Task<()>> = Channel()
+let a = spawn task.sleep(1h)
+let t = spawn {
+    let me = ch.recv().unwrap()
+    task.race([me, a])
+}
+ch.send(t)
+task.sleep(5ms)
+a.cancel()
+task.sleep(5ms)
+--- fail
+task cancelled
+
+=== a wait fails if its task is cancelled during the wait
+let a = spawn task.sleep(1h)
+let other = spawn {
+    task.sleep(5ms)
+    a.cancel()
+}
+a.wait()
+--- fail
+task cancelled
+
 === channels
 let ch = Channel()
 let producer = spawn {
