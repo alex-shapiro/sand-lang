@@ -3833,7 +3833,7 @@ fn host_errors_are_err_values_and_aborts_end_the_run() {
     m.function("later", || -> Result<Later<i64, HostError>, HostError> {
         Ok(Later::new(WaitKind::Io, async { |_: &mut Vm| Err(HostError::new("io", "broken pipe")) }))
     });
-    m.function("abort", || -> Result<i64, HostError> { Err(Fail::new("invalid", "no result").into()) });
+    m.function("abort", || -> Result<i64, HostError> { Err(Fail::runtime_error("invalid", "no result").into()) });
     let run = |src: &str| run_src(Config::new().host_modules(HostModules::new([m.clone()]).unwrap()), &format!("import errs\n{src}"));
     let (r, out, _) = run("print(errs.now())\nprint(errs.later())");
     r.unwrap();
@@ -3848,13 +3848,13 @@ fn natives_that_cannot_make_scheduler_requests_return_fail() {
     use sandlang::native::func::Later;
     use sandlang::vm::{Fail, Vm, WaitKind};
     let mut m = NativeModule::new("fails");
-    m.function("stop", || -> Result<i64, Fail> { Err(Fail::new("invalid", "no result")) });
+    m.function("stop", || -> Result<i64, Fail> { Err(Fail::runtime_error("invalid", "no result")) });
     m.function("later_exit", || -> Result<Later<i64, Fail>, Fail> {
         Ok(Later::new(WaitKind::Io, async { |_: &mut Vm| Err(Fail::exit(7)) }))
     });
     m.async_function("async_ok", || async { Ok::<i64, HostError<Fail>>(4) });
     m.async_function("async_err", || async { Err::<i64, HostError<Fail>>(HostError::new("io", "broken pipe")) });
-    m.async_function("async_stop", || async { Err::<i64, Fail>(Fail::new("invalid", "no result")) });
+    m.async_function("async_stop", || async { Err::<i64, Fail>(Fail::runtime_error("invalid", "no result")) });
     m.async_function("async_exit", || async {
         Err(Fail::exit(3))?;
         Ok::<i64, HostError<Fail>>(4)

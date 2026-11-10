@@ -378,13 +378,13 @@ impl Vm {
             (2, Dur(x), Float(y)) | (2, Float(y), Dur(x)) => Dur(dur_scale(x, y).ok_or_else(|| overflow("duration"))?),
             (3, Dur(x), Int(y)) => {
                 if y == 0 {
-                    return Err(Fail::new("invalid", "division by zero"));
+                    return Err(Fail::runtime_error("invalid", "division by zero"));
                 }
                 Dur(x.checked_div(y).ok_or_else(|| overflow("duration"))?)
             }
             (3, Dur(x), Float(y)) => {
                 if y == 0.0 {
-                    return Err(Fail::new("invalid", "division by zero"));
+                    return Err(Fail::runtime_error("invalid", "division by zero"));
                 }
                 Dur(dur_div(x, y).ok_or_else(|| overflow("duration"))?)
             }
@@ -445,7 +445,7 @@ impl Vm {
     #[cold]
     #[inline(never)]
     fn key_error(&self, k: Value) -> Fail {
-        Fail::new("not_found", format!("key not found: {}", self.debug(k).unwrap_or_default()))
+        Fail::runtime_error("not_found", format!("key not found: {}", self.debug(k).unwrap_or_default()))
     }
 
     #[cold]
@@ -453,7 +453,7 @@ impl Vm {
     fn try_top(&mut self, fiber: &mut Fiber, ip: usize, prog: &Program, res: Value) -> Result<FiberStop, RunEnding> {
         // `Option::None` has 0 fields; `Result::Err(e)` stores `e` at field 0.
         let Some(e) = self.heap.field(res, 0) else {
-            return self.fail_stop(fiber, ip, Fail::new("none", "`?` found None"));
+            return self.fail_stop(fiber, ip, Fail::runtime_error("none", "`?` found None"));
         };
         match display::to_display_metered(prog, &self.heap, &self.meter, e) {
             Ok(text) => Err(self.error_trap(fiber, ip, text)),
@@ -1939,10 +1939,10 @@ impl Vm {
                 };
                 match state {
                     TaskState::Done => Ok(result),
-                    TaskState::Cancelled => Err(Fail::new("cancelled", "task cancelled").into()),
+                    TaskState::Cancelled => Err(Fail::runtime_error("cancelled", "task cancelled").into()),
                     TaskState::Running => {
                         if fid == caller {
-                            return Err(Fail::new("deadlock", "a task cannot wait for itself").into());
+                            return Err(Fail::runtime_error("deadlock", "a task cannot wait for itself").into());
                         }
                         self.add_waiter(fid, (caller, wait_gen))?;
                         Err(self.signal(CtlKind::Blocked { wait_gen }))
@@ -1951,7 +1951,7 @@ impl Vm {
             }
             BlockOn::Race(tasks) => {
                 if tasks.is_empty() {
-                    return Err(Fail::new("invalid", "task.race called with an empty list").into());
+                    return Err(Fail::runtime_error("invalid", "task.race called with an empty list").into());
                 }
                 // One waiter per task, and the list of tasks to cancel.
                 self.meter.charge(tasks.len() as u64)?;
@@ -1975,9 +1975,9 @@ impl Vm {
                 }
                 if contenders == 0 {
                     return Err(Ctl::from(if any_cancelled {
-                        Fail::new("cancelled", "task cancelled")
+                        Fail::runtime_error("cancelled", "task cancelled")
                     } else {
-                        Fail::new("deadlock", "a task cannot wait for itself")
+                        Fail::runtime_error("deadlock", "a task cannot wait for itself")
                     }));
                 }
                 for &task_val in &tasks {
@@ -2259,7 +2259,7 @@ impl Vm {
         let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
         let end = mo.entries.len();
         if !slot_fits(end) {
-            return Err(Fail::new("limit", "map too large"));
+            return Err(Fail::runtime_error("limit", "map too large"));
         }
         let new_cap = self.entries_capacity(end, mo.entries.capacity(), MAP_ENTRY_SIZE, mo.index_growth(k))?;
         self.unpin(m)?;
@@ -2333,7 +2333,7 @@ impl Vm {
         }
         let end = so.entries.len();
         if !slot_fits(end) {
-            return Err(Fail::new("limit", "set too large"));
+            return Err(Fail::runtime_error("limit", "set too large"));
         }
         let new_cap = self.entries_capacity(end, so.entries.capacity(), SET_ENTRY_SIZE, so.index_growth(k))?;
         self.unpin(s)?;
@@ -2416,10 +2416,10 @@ impl Vm {
         let a = start.unwrap_or(0);
         let mut b = end.unwrap_or(len);
         if inclusive {
-            b = b.checked_add(1).ok_or_else(|| Fail::new("bounds", "slice end out of range"))?;
+            b = b.checked_add(1).ok_or_else(|| Fail::runtime_error("bounds", "slice end out of range"))?;
         }
         if a < 0 || b > len || a > b {
-            return Err(Fail::new("bounds", format!("slice {a}..{b} out of range for length {len}")));
+            return Err(Fail::runtime_error("bounds", format!("slice {a}..{b} out of range for length {len}")));
         }
         let (a, b) = (a as usize, b as usize);
         let list = matches!(self.heap.get(o), Obj::List(_));
@@ -2433,7 +2433,7 @@ impl Vm {
             }
             Obj::Str(s) => {
                 if !s.is_char_boundary(a) || !s.is_char_boundary(b) {
-                    return Err(Fail::new("bounds", format!("slice {a}..{b} is not on a character boundary")));
+                    return Err(Fail::runtime_error("bounds", format!("slice {a}..{b} is not on a character boundary")));
                 }
                 let t = s[a..b].to_string();
                 self.heap.new_str(t)
@@ -2469,7 +2469,7 @@ pub(crate) fn internal(msg: impl std::fmt::Display) -> Fail {
 
 #[cold]
 fn overflow(what: &str) -> Fail {
-    Fail::new("overflow", format!("{what} overflow"))
+    Fail::runtime_error("overflow", format!("{what} overflow"))
 }
 
 /// Returns whether a garbage collection may let a failed native call succeed.

@@ -1352,7 +1352,7 @@ impl DescTemplate {
     pub(crate) fn instantiate(&self, args: &[&TypeDescObj], handles: Box<[Value]>) -> Result<TypeDescObj, crate::vm::Fail> {
         let depth = self.depth + args.iter().map(|a| a.depth()).max().unwrap_or(0);
         if depth > MAX_DESC_DEPTH {
-            return Err(crate::vm::Fail::new("limit", "the description of a type argument is nested too deeply"));
+            return Err(crate::vm::Fail::runtime_error("limit", "the description of a type argument is nested too deeply"));
         }
         if args.len() != self.params.len() {
             return Err(crate::vm::Fail::internal("a type description template has the wrong number of arguments"));

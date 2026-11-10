@@ -127,7 +127,7 @@ pub(crate) enum CtlKind {
 
 /// What a [`Fail`] is.
 pub(crate) enum FailKind {
-    /// Uncaught runtime error (`kind: message`) that terminates the run (see [`Fail::new`]).
+    /// Uncaught runtime error (`kind: message`) that terminates the run (see [`Fail::runtime_error`]).
     RuntimeError(String),
     /// An invariant of the engine broke: a bug, which ends a session.
     Internal(String),
@@ -140,7 +140,7 @@ pub(crate) enum FailKind {
 impl Fail {
     /// A runtime error of `kind` that ends the run. A script cannot catch it. For recoverable `Result` errors, return [`HostError`] instead.
     #[cold]
-    pub fn new(kind: &str, msg: impl std::fmt::Display) -> Fail {
+    pub fn runtime_error(kind: &str, msg: impl std::fmt::Display) -> Fail {
         Fail(Box::new(FailKind::RuntimeError(format!("{kind}: {msg}"))))
     }
 
@@ -257,9 +257,9 @@ impl From<&str> for Fail {
     }
 }
 
-/// Aborts execution with a runtime error of kind `kind` (see [`Fail::new`]).
+/// Aborts execution with a runtime error of kind `kind` (see [`Fail::runtime_error`]).
 pub fn fail<T>(kind: &str, msg: impl std::fmt::Display) -> Result<T, Fail> {
-    Err(Fail::new(kind, msg))
+    Err(Fail::runtime_error(kind, msg))
 }
 
 /// Fails with an internal error.
@@ -649,7 +649,7 @@ impl Fiber {
     #[inline(never)]
     pub fn grow_stack(&mut self, need: usize, heap: &mut Heap) -> Result<(), Fail> {
         if need > MAX_STACK_SLOTS {
-            return Err(Fail::new("limit", "stack overflow"));
+            return Err(Fail::runtime_error("limit", "stack overflow"));
         }
         let n = need.max(self.stack.len() * 2).min(MAX_STACK_SLOTS);
         let before = self.stack.capacity();
@@ -1268,9 +1268,11 @@ impl Vm {
     /// stream `which`, and counts them; a denial fails.
     fn admit_output(&mut self, which: u8, len: usize) -> Result<(), Ctl> {
         if !self.output_allowed(which)? {
-            return Err(
-                Fail::new("permission_denied", if which == 1 { "permission denied: stdout" } else { "permission denied: stderr" }).into()
-            );
+            return Err(Fail::runtime_error(
+                "permission_denied",
+                if which == 1 { "permission denied: stdout" } else { "permission denied: stderr" },
+            )
+            .into());
         }
         Ok(self.count_output(which, len)?)
     }

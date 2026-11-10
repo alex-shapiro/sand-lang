@@ -40,7 +40,7 @@ pub struct Conversion {
 const MAX_STRUCT_DEPTH: usize = 256;
 
 pub(crate) fn enter_struct(depth: usize) -> Result<usize, Fail> {
-    if depth < MAX_STRUCT_DEPTH { Ok(depth + 1) } else { Err(Fail::new("limit", "value too deeply nested to convert")) }
+    if depth < MAX_STRUCT_DEPTH { Ok(depth + 1) } else { Err(Fail::runtime_error("limit", "value too deeply nested to convert")) }
 }
 
 impl Conversion {
@@ -251,7 +251,7 @@ impl IntoValue for jiff::SignedDuration {
     fn into_value(self, _: &mut Vm) -> Result<Value, Fail> {
         match i64::try_from(self.as_nanos()) {
             Ok(n) => Ok(Value::Dur(n)),
-            Err(_) => Err(Fail::new("overflow", "the duration is out of range")),
+            Err(_) => Err(Fail::runtime_error("overflow", "the duration is out of range")),
         }
     }
     fn to_const(&self) -> Option<Constant> {

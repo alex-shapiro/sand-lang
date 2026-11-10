@@ -661,13 +661,13 @@ fn rounding_options(smallest: enums::Unit, increment: i64, mode: enums::Rounding
 fn parse_increment(increment: i64) -> Result<i64, Fail> {
     match increment {
         i @ 1..=1_000_000_000 => Ok(i),
-        i => Err(Fail::new("invalid", format!("the rounding increment must be from 1 to 1000000000, not {i}"))),
+        i => Err(Fail::runtime_error("invalid", format!("the rounding increment must be from 1 to 1000000000, not {i}"))),
     }
 }
 
 fn check_clock_unit(smallest: Unit, what: &str) -> Result<(), Fail> {
     if smallest > Unit::Hour {
-        return Err(Fail::new("invalid", format!("{what} can only be rounded to hours or smaller units")));
+        return Err(Fail::runtime_error("invalid", format!("{what} can only be rounded to hours or smaller units")));
     }
     Ok(())
 }
@@ -684,9 +684,9 @@ fn difference_options(
 
 fn jiff_error(e: jiff::Error) -> Fail {
     if e.is_range() {
-        Fail::new("overflow", "the result is outside the supported range (years -9999 to 9999)")
+        Fail::runtime_error("overflow", "the result is outside the supported range (years -9999 to 9999)")
     } else {
-        Fail::new("invalid", e)
+        Fail::runtime_error("invalid", e)
     }
 }
 
@@ -706,10 +706,10 @@ fn exact_time([h, m, s, ms, us, ns]: [i64; 6]) -> Option<Time> {
 
 fn constrain_date(year: i64, month: i64, day: i64) -> Result<Date, Fail> {
     if month < 1 || day < 1 {
-        return Err(Fail::new("invalid", format!("month and day must be positive: {month}, {day}")));
+        return Err(Fail::runtime_error("invalid", format!("month and day must be positive: {month}, {day}")));
     }
     let Some(first) = exact_date(year, month.min(12), 1) else {
-        return Err(Fail::new("invalid", format!("year out of range: {year}")));
+        return Err(Fail::runtime_error("invalid", format!("year out of range: {year}")));
     };
     let day = day.min(first.days_in_month().into());
     exact_date(year, month.min(12), day).ok_or_else(|| Fail::internal("a clamped date is invalid"))
@@ -755,7 +755,7 @@ fn format(vm: &mut Vm, format: Val<String>, t: impl Into<BrokenDownTime>) -> Res
     // Bound output size before formatting.
     vm.check_memory(format.len().saturating_mul(64))?;
     vm.charge_slow_bytes(format.len())?;
-    strtime::format(format, t).map_err(|e| Fail::new("invalid", e))
+    strtime::format(format, t).map_err(|e| Fail::runtime_error("invalid", e))
 }
 
 /// Returns the first transition that changes the UTC offset (ignoring abbreviation-only transitions).
@@ -789,7 +789,7 @@ fn positive_epoch_round_mode(mode: RoundMode) -> RoundMode {
 fn require_relative_to(spans: &[jiff::Span], largest: Option<Unit>, rel: &Option<ZonedDateTime>) -> Result<(), Fail> {
     let calendar = spans.iter().any(|s| s.get_years() != 0 || s.get_months() != 0) || matches!(largest, Some(Unit::Year | Unit::Month));
     if calendar && rel.is_none() {
-        return Err(Fail::new("invalid", "a span with years or months needs `relative_to`"));
+        return Err(Fail::runtime_error("invalid", "a span with years or months needs `relative_to`"));
     }
     Ok(())
 }
@@ -811,7 +811,7 @@ fn now(vm: &Vm) -> Result<Timestamp, Fail> {
 
 fn epoch_div(t: Timestamp, unit: i128) -> Result<i64, Fail> {
     i64::try_from(t.as_nanosecond().div_euclid(unit))
-        .map_err(|_| Fail::new("overflow", "the time is too far from 1970 for nanoseconds in an int"))
+        .map_err(|_| Fail::runtime_error("overflow", "the time is too far from 1970 for nanoseconds in an int"))
 }
 
 type Part<P, R> = (&'static str, fn(P) -> R);
@@ -945,7 +945,7 @@ fn register_module(m: &mut NativeModule) {
     m.function("Span.init", |y: i64, mo: i64, w: i64, d: i64, h: i64, mi: i64, s: i64, ms: i64, us: i64, ns: i64| {
         let units = [y, mo, w, d, h, mi, s, ms, us, ns];
         if units.iter().any(|&u| u > 0) && units.iter().any(|&u| u < 0) {
-            return Err(Fail::new("invalid", "the units of a span must not have different signs"));
+            return Err(Fail::runtime_error("invalid", "the units of a span must not have different signs"));
         }
         build_span(units).and_then(Span::new).map_err(jiff_error)
     });
@@ -1128,14 +1128,14 @@ fn register_year_month(m: &mut NativeModule) {
     m.function("PlainYearMonth.add_span", |ym: PlainYearMonth, s: Span| {
         let s = s.0;
         if span_units(&s)[2..].iter().any(|&u| u != 0) {
-            return Err(Fail::new("invalid", format!("a PlainYearMonth can only add years and months, not {s}")));
+            return Err(Fail::runtime_error("invalid", format!("a PlainYearMonth can only add years and months, not {s}")));
         }
         ym.0.checked_add(s).map(PlainYearMonth).map_err(jiff_error)
     });
     m.function("PlainYearMonth.until", |ym: PlainYearMonth, other: PlainYearMonth, largest: enums::Unit| {
         let largest = Unit::from(largest);
         if !matches!(largest, Unit::Year | Unit::Month) {
-            return Err(Fail::new("invalid", "the largest unit between months must be years or months"));
+            return Err(Fail::runtime_error("invalid", "the largest unit between months must be years or months"));
         }
         let s = ym.0.until(DateDifference::new(other.0).largest(largest).smallest(Unit::Month));
         s.and_then(Span::new).map_err(jiff_error)

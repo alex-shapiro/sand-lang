@@ -619,7 +619,7 @@ fn index_check(i: i64, len: usize, inclusive: bool) -> Result<usize, Fail> {
     let max = if inclusive { len } else { len.saturating_sub(1) };
     match to_index(i) {
         Some(at) if at <= max && (inclusive || len > 0) => Ok(at),
-        _ => Err(Fail::new("bounds", format!("index out of bounds: index {i}, length {len}"))),
+        _ => Err(Fail::runtime_error("bounds", format!("index out of bounds: index {i}, length {len}"))),
     }
 }
 
@@ -863,7 +863,7 @@ fn count(bounds: Option<(i64, i64)>) -> i128 {
 }
 
 fn exact(n: i128) -> Result<i64, Fail> {
-    i64::try_from(n).map_err(|_| Fail::new("overflow", "integer overflow"))
+    i64::try_from(n).map_err(|_| Fail::runtime_error("overflow", "integer overflow"))
 }
 
 fn ranges(m: &mut NativeModule) {
@@ -893,7 +893,7 @@ fn ranges(m: &mut NativeModule) {
     m.vm_function("Range.sum", |vm: &mut Vm, r: Range| {
         let Some((first, last)) = inclusive(vm, r)? else { return Ok(0) };
         let n = count(Some((first, last)));
-        let twice = n.checked_mul(first as i128 + last as i128).ok_or_else(|| Fail::new("overflow", "integer overflow"))?;
+        let twice = n.checked_mul(first as i128 + last as i128).ok_or_else(|| Fail::runtime_error("overflow", "integer overflow"))?;
         exact(twice / 2)
     });
     m.vm_function("Range.product", |vm: &mut Vm, r: Range| {

@@ -2208,7 +2208,7 @@ returns a Sand `Result` or aborts the run on failure:
 - `Result<T, std::io::Error>`, `Result<T, String>`, and `Result<T, &str>` also
   map to `Result<T, Error>`; string errors use the kind `"error"`.
 - `Result<T, Fail>` maps to the Sand return type `T`. A `Fail` ends the run with
-  a runtime error (`Fail::new`), a resource limit error, or an exit code
+  a runtime error (`Fail::runtime_error`), a resource limit error, or an exit code
   (`Fail::exit`).
 - `Result<T, Ctl>` maps to the Sand return type `T`. A `Ctl` is a `Fail` or a
   request to the scheduler, such as a permission prompt.
