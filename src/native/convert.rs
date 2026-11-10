@@ -134,16 +134,16 @@ impl<C: From<Fail>> From<Fail> for HostError<C> {
     }
 }
 
-impl<C> HostError<C> {
+impl<C: From<Fail>> HostError<C> {
     /// The Sand `Err` value of a recoverable error, or what the error stops
     /// the call with.
-    pub(crate) fn into_sand_error(self, vm: &mut Vm) -> Result<Result<Value, C>, Fail> {
+    pub(crate) fn into_sand_error(self, vm: &mut Vm) -> Result<Value, C> {
         match *self.0 {
             HostErrorKind::Error { kind, message } => {
                 let e = crate::stdlib::core::Error { kind, message }.into_value(vm)?;
-                Ok(Ok(vm.err(e)))
+                Ok(vm.err(e))
             }
-            HostErrorKind::Abort(c) => Ok(Err(c)),
+            HostErrorKind::Abort(c) => Err(c),
         }
     }
 }
@@ -406,7 +406,7 @@ impl<T: IntoValue, E: IntoHostError> IntoValue for Result<T, E> {
     fn into_value(self, vm: &mut Vm) -> Result<Value, Fail> {
         match self {
             Ok(x) => ok_value(x, vm),
-            Err(e) => e.into_host_error().into_sand_error(vm)?,
+            Err(e) => e.into_host_error().into_sand_error(vm),
         }
     }
 }

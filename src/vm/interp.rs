@@ -1920,7 +1920,7 @@ impl Vm {
     /// Calls native `n`. A Rust panic in it is caught by the scheduler
     /// around the whole slice (`crate::unwind`).
     #[inline(always)]
-    fn invoke_native(&mut self, natives: &[NativeEntry], n: u32, args: &[Value]) -> NResult {
+    fn invoke_native(&mut self, natives: &[NativeEntry], n: u32, args: &[Value]) -> Result<Value, Ctl> {
         let entry = &natives[n as usize];
         entry.f.call(self, args)
     }
@@ -1928,7 +1928,7 @@ impl Vm {
     /// Returns the result of `on` if it is ready. Otherwise, registers a wait
     /// for the running task and returns a [`Ctl`] that the native must
     /// propagate.
-    pub fn block(&mut self, on: BlockOn) -> NResult {
+    pub fn block(&mut self, on: BlockOn) -> Result<Value, Ctl> {
         let caller = self.current;
         let wait_gen = self.next_gen();
         match on {
@@ -2473,7 +2473,7 @@ fn overflow(what: &str) -> Fail {
 }
 
 /// Returns whether a garbage collection may let a failed native call succeed.
-fn collection_may_help(r: &NResult) -> bool {
+fn collection_may_help(r: &Result<Value, Ctl>) -> bool {
     match r {
         Ok(_) => false,
         Err(c) => match c.kind() {

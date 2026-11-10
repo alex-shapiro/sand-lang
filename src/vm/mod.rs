@@ -25,8 +25,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use value::*;
 
-pub type NResult = Result<Value, Ctl>;
-pub type NativeFn = dyn Fn(&mut Vm, &[Value]) -> NResult + Send + Sync;
+pub type NativeFn = dyn Fn(&mut Vm, &[Value]) -> Result<Value, Ctl> + Send + Sync;
 
 #[derive(Clone)]
 pub enum HostFn {
@@ -36,7 +35,7 @@ pub enum HostFn {
 
 impl HostFn {
     #[inline(always)]
-    pub fn call(&self, vm: &mut Vm, args: &[Value]) -> NResult {
+    pub fn call(&self, vm: &mut Vm, args: &[Value]) -> Result<Value, Ctl> {
         match self {
             HostFn::Static(f) => f(vm, args),
             HostFn::Shared(f) => f(vm, args),
