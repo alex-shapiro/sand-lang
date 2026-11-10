@@ -144,13 +144,15 @@ impl Fail {
         Fail(Box::new(FailKind::RuntimeError(format!("{kind}: {msg}"))))
     }
 
-    /// An internal error: an invariant of the engine broke.
+    /// An internal error: an invariant of the engine broke. It ends the
+    /// session. For a check in a host function, use [`Fail::runtime_error`].
     #[cold]
     pub fn internal(msg: impl Into<String>) -> Fail {
         Fail(Box::new(FailKind::Internal(msg.into())))
     }
 
-    /// A limit was exceeded.
+    /// A limit was exceeded. After [`LimitKind::Memory`] from a native call,
+    /// the engine collects garbage and calls the native again once.
     #[cold]
     pub fn limit(k: LimitKind) -> Fail {
         Fail(Box::new(FailKind::Limit(k)))

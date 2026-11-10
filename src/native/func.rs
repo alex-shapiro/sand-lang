@@ -172,7 +172,10 @@ impl<T: IntoValue + Send + 'static, E: NativeError> Later<T, E> {
     /// Suspends the calling task until `fut` is resolved, and then executes the
     /// returned closure on the VM thread to produce the Sand result.
     ///
-    /// The closure can only fail, because its error is [`NativeError::Finish`].
+    /// The closure can only fail, because its error is
+    /// [`NativeError::Finish`]. It cannot write to the standard streams,
+    /// because a write can ask for a permission. Return the data to the script
+    /// instead, and let the script print it.
     /// A closure that returns a [`Ctl`] does not compile:
     ///
     /// ```compile_fail,E0271
