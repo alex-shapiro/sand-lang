@@ -422,6 +422,23 @@ impl Vm {
         })
     }
 
+    /// `Op::NewMap`: a map of the alternating keys and values in `entries`.
+    #[inline(never)]
+    fn op_new_map(&mut self, entries: &[Value]) -> Result<Value, Fail> {
+        let m = self.heap.alloc(Obj::Map(Box::default()));
+        for pair in entries.as_chunks::<2>().0 {
+            self.map_insert(m, pair[0], pair[1])?;
+        }
+        Ok(m)
+    }
+
+    /// `Op::AppendStr`: appends string `add` to the builder `cur`.
+    #[inline(never)]
+    fn op_append_str(&mut self, cur: Value, add: Value) -> Result<Value, Fail> {
+        self.meter.charge_bytes(self.heap.append_copies(cur, add))?;
+        self.heap.append_str(cur, add).map_err(Fail::limit)
+    }
+
     /// `Op::NewTuple` of anything but an inline pair.
     #[inline(never)]
     fn new_tuple(&mut self, items: &[Value]) -> Value {
@@ -518,24 +535,37 @@ impl Vm {
         Err(self.run_ending_of(fail, |vm| vm.trace_of(fiber, Some(ip as u32))))
     }
 
-    /// Runs the body of an instruction that can reach a memory limit after it
-    /// charges fuel. On that error, gives the fuel back, because the scheduler
-    /// runs the instruction again after a collection.
+    /// Starts an instruction that can reach a memory limit after it charges
+    /// fuel, and returns the fuel to give back if it does.
     #[inline(always)]
-    fn retryable_op<T>(&mut self, body: impl FnOnce(&mut Vm) -> Result<T, Fail>) -> Result<T, Fail> {
-        let mark = self.meter.fuel();
+    fn begin_retryable_op(&mut self) -> i64 {
         if self.retry_stress {
-            self.heap.fail_next_check.set(!self.instruction_retried);
-            self.instruction_retried = false;
+            self.arm_instruction_retry_stress();
         }
-        let r = body(self);
+        self.meter.fuel()
+    }
+
+    /// Ends an instruction started with [`Vm::begin_retryable_op`]. A memory
+    /// limit gives the instruction's fuel back, because the scheduler runs it
+    /// again after a collection.
+    #[inline(always)]
+    fn end_retryable_op<T>(&self, fuel_mark: i64, result: Result<T, Fail>) -> Result<T, Fail> {
         if self.retry_stress {
             self.heap.fail_next_check.set(false);
         }
-        if matches!(&r, Err(fail) if fail.as_limit() == Some(LimitKind::Memory)) {
-            self.meter.refund_to(mark);
+        if let Err(fail) = &result
+            && fail.as_limit() == Some(LimitKind::Memory)
+        {
+            self.meter.refund_to(fuel_mark);
         }
-        r
+        result
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn arm_instruction_retry_stress(&mut self) {
+        self.heap.fail_next_check.set(!self.instruction_retried);
+        self.instruction_retried = false;
     }
 
     /// Converts a limit hit at the instruction before `ip` into a
@@ -644,6 +674,16 @@ impl Vm {
                     reload!();
                 }
             };
+        }
+        // The result of an instruction body that `Vm::begin_retryable_op`
+        // describes. A macro, because a closure would capture `regs` by
+        // reference and take it out of its machine register.
+        macro_rules! retryable {
+            ($body:expr) => {{
+                let fuel_mark = self.begin_retryable_op();
+                let result = $body;
+                self.end_retryable_op(fuel_mark, result)
+            }};
         }
         // A safe point of a call instruction: on preemption the call is
         // re-executed when the fiber resumes. It charges `call_tick`.
@@ -914,7 +954,7 @@ impl Vm {
                     // Metered and out of line (`op_compare`); the branches
                     // `JNeq` and `JNne` share the arm to keep one call site.
                     Op::Eq { .. } | Op::Ne { .. } | Op::Lt { .. } | Op::Le { .. } | Op::JNeq { .. } | Op::JNne { .. } => {
-                        match self.retryable_op(|vm| vm.op_compare(&prog, op, regs)) {
+                        match retryable!(self.op_compare(&prog, op, regs)) {
                             Ok(off) => jump!(off),
                             Err(c) => fail_stop!(c),
                         }
@@ -1261,14 +1301,7 @@ impl Vm {
                     }
                     Op::NewMap { dst, start, count } => {
                         let s = start as usize;
-                        let built = self.retryable_op(|vm| {
-                            let m = vm.heap.alloc(Obj::Map(Box::default()));
-                            for i in 0..count as usize {
-                                vm.map_insert(m, regs[s + 2 * i], regs[s + 2 * i + 1])?;
-                            }
-                            Ok(m)
-                        });
-                        match built {
+                        match retryable!(self.op_new_map(&regs[s..s + 2 * count as usize])) {
                             Ok(m) => r!(dst) = m,
                             Err(c) => fail_stop!(c),
                         }
@@ -1323,7 +1356,7 @@ impl Vm {
                     }
                     Op::IndexMap { dst, obj, key } => match dense_get(&self.heap, &r!(obj), &r!(key)) {
                         Dense::Hit(v) => r!(dst) = *v,
-                        _ => match self.retryable_op(|vm| vm.map_index(r!(obj), r!(key))) {
+                        _ => match retryable!(self.map_index(r!(obj), r!(key))) {
                             Ok(v) => r!(dst) = v,
                             Err(c) => fail_stop!(c),
                         },
@@ -1344,7 +1377,7 @@ impl Vm {
                     }
                     Op::SetIndexMap { obj, key, src } => {
                         let (m, k, v) = (r!(obj), r!(key), r!(src));
-                        if let Err(c) = self.retryable_op(|vm| vm.map_set(m, k, v)) {
+                        if let Err(c) = retryable!(self.map_set(m, k, v)) {
                             fail_stop!(c);
                         }
                     }
@@ -1419,21 +1452,21 @@ impl Vm {
                                 jump!(off);
                             }
                         }
-                        Dense::Unknown => match self.retryable_op(|vm| vm.map_get_option(r!(map), r!(key))) {
+                        Dense::Unknown => match retryable!(self.map_get_option(r!(map), r!(key))) {
                             Ok(v) => r!(dst) = v,
                             Err(c) => fail_stop!(c),
                         },
                     },
                     Op::MapGetTuple { dst, map, start, n } => {
                         let s = start as usize;
-                        match self.retryable_op(|vm| vm.map_get_tuple(r!(map), &regs[s..s + n as usize])) {
+                        match retryable!(self.map_get_tuple(r!(map), &regs[s..s + n as usize])) {
                             Ok(v) => r!(dst) = v,
                             Err(c) => fail_stop!(c),
                         }
                     }
                     Op::MapHasTuple { dst, map, start, n } => {
                         let s = start as usize;
-                        match self.retryable_op(|vm| vm.map_has_tuple(r!(map), &regs[s..s + n as usize])) {
+                        match retryable!(self.map_has_tuple(r!(map), &regs[s..s + n as usize])) {
                             Ok(b) => r!(dst) = Value::Bool(b),
                             Err(c) => fail_stop!(c),
                         }
@@ -1443,32 +1476,27 @@ impl Vm {
                         Dense::Miss => {}
                         Dense::Unknown => {
                             let (m, k) = (r!(map), r!(key));
-                            let out = &mut r!(dst);
-                            if let Err(c) = self.retryable_op(|vm| vm.map_get_or(m, k, out)) {
+                            if let Err(c) = retryable!(self.map_get_or(m, k, &mut r!(dst))) {
                                 fail_stop!(c);
                             }
                         }
                     },
-                    Op::MapHas { dst, map, key } => match self.retryable_op(|vm| vm.map_has(r!(map), r!(key))) {
+                    Op::MapHas { dst, map, key } => match retryable!(self.map_has(r!(map), r!(key))) {
                         Ok(b) => r!(dst) = Value::Bool(b),
                         Err(c) => fail_stop!(c),
                     },
-                    Op::SetHas { dst, set, key } => match self.retryable_op(|vm| vm.set_contains(r!(set), r!(key))) {
+                    Op::SetHas { dst, set, key } => match retryable!(self.set_contains(r!(set), r!(key))) {
                         Ok(b) => r!(dst) = Value::Bool(b),
                         Err(c) => fail_stop!(c),
                     },
-                    Op::SetAdd { dst, set, key } => match self.retryable_op(|vm| vm.set_add(r!(set), r!(key))) {
+                    Op::SetAdd { dst, set, key } => match retryable!(self.set_add(r!(set), r!(key))) {
                         Ok(b) => r!(dst) = Value::Bool(b),
                         Err(c) => fail_stop!(c),
                     },
                     Op::IntToFloat { dst, src } => r!(dst) = Value::Float(int!(src) as f64),
                     Op::AppendStr { local, src } => {
                         let (cur, add) = (r!(local), r!(src));
-                        let appended = self.retryable_op(|vm| {
-                            vm.meter.charge_bytes(vm.heap.append_copies(cur, add))?;
-                            vm.heap.append_str(cur, add).map_err(Fail::limit)
-                        });
-                        match appended {
+                        match retryable!(self.op_append_str(cur, add)) {
                             Ok(v) => r!(local) = v,
                             Err(c) => fail_stop!(c),
                         }
@@ -1597,7 +1625,7 @@ impl Vm {
                         }
                         None => internal!("not a range"),
                     },
-                    Op::NewIter { dst, src } => match self.retryable_op(|vm| vm.container_iter(r!(src))) {
+                    Op::NewIter { dst, src } => match retryable!(self.container_iter(r!(src))) {
                         Ok(v) => r!(dst) = v,
                         Err(c) => fail_stop!(c),
                     },
@@ -1632,24 +1660,24 @@ impl Vm {
                             r!(dst) = v;
                             continue 'dispatch;
                         }
-                        match self.retryable_op(|vm| vm.op_display(&prog, v, false)) {
+                        match retryable!(self.op_display(&prog, v, false)) {
                             Ok(v) => r!(dst) = v,
                             Err(c) => fail_stop!(c),
                         }
                     }
-                    Op::Debug { dst, src } => match self.retryable_op(|vm| vm.op_display(&prog, r!(src), true)) {
+                    Op::Debug { dst, src } => match retryable!(self.op_display(&prog, r!(src), true)) {
                         Ok(v) => r!(dst) = v,
                         Err(c) => fail_stop!(c),
                     },
-                    Op::Interp { dst, tmpl } => match self.retryable_op(|vm| vm.op_interp(&prog, tmpl, regs)) {
+                    Op::Interp { dst, tmpl } => match retryable!(self.op_interp(&prog, tmpl, regs)) {
                         Ok(v) => r!(dst) = v,
                         Err(c) => fail_stop!(c),
                     },
-                    Op::AppendInterp { local, tmpl } => match self.retryable_op(|vm| vm.op_append_interp(&prog, tmpl, local, regs)) {
+                    Op::AppendInterp { local, tmpl } => match retryable!(self.op_append_interp(&prog, tmpl, local, regs)) {
                         Ok(v) => r!(local) = v,
                         Err(c) => fail_stop!(c),
                     },
-                    Op::Describe { base, tmpl } => match self.retryable_op(|vm| vm.op_describe(&prog, tmpl, &regs[base as usize..])) {
+                    Op::Describe { base, tmpl } => match retryable!(self.op_describe(&prog, tmpl, &regs[base as usize..])) {
                         Ok(v) => r!(base) = v,
                         Err(c) => fail_stop!(c),
                     },
@@ -1657,7 +1685,7 @@ impl Vm {
                     // ---------------- misc
                     Op::Spawn { dst, closure } => {
                         let c = r!(closure);
-                        match self.retryable_op(|vm| vm.spawn_task(c)) {
+                        match retryable!(self.spawn_task(c)) {
                             Ok(t) => r!(dst) = t,
                             Err(c) => fail_stop!(c),
                         }
