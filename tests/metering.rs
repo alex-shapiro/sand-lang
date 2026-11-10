@@ -1050,3 +1050,11 @@ print(probe.fuel())
 "#;
     assert_eq!(fuel_under_gc_stress(src, false), fuel_under_gc_stress(src, true));
 }
+
+#[test]
+fn a_repeat_expression_collects_garbage_before_it_reports_a_memory_limit() {
+    let src = "var garbage = \"x\".repeat(20 << 20)\ngarbage = \"\"\nlet xs = [0; 1000000]\nprint(xs.len())";
+    let (r, out) = run(limits(|l| l.max_memory = Some(32 << 20)), src);
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!(out, "1000000\n");
+}

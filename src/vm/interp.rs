@@ -1405,7 +1405,7 @@ impl Vm {
                         }
                         if self.heap.would_exceed(to_usize_saturating(n).saturating_mul(std::mem::size_of::<Value>())) {
                             save!();
-                            return Err(Trap::Limit(LimitKind::Memory).into());
+                            return self.limit_stop(fiber, ip, LimitKind::Memory);
                         }
                     }
                     Op::Len { dst, src } => {
