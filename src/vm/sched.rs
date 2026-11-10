@@ -76,7 +76,7 @@ impl IoTable {
     /// Polls the future of `suspension` once and registers it for task `fid`
     /// if still pending. Returns the slot ID, or the finisher if ready
     /// immediately.
-    pub fn add(&mut self, fid: u32, wait_gen: u64, mut suspension: Suspension) -> Result<u64, Finisher> {
+    pub(crate) fn add(&mut self, fid: u32, wait_gen: u64, mut suspension: Suspension) -> Result<u64, Finisher> {
         let slot = match self.free.pop() {
             Some(s) => s,
             None => {
@@ -121,7 +121,7 @@ impl IoTable {
     }
 
     /// Polls the operations that were woken. Returns those completed.
-    pub fn poll_ready(&mut self, task_waker: Option<&Waker>) -> Vec<(u32, u64, Finisher)> {
+    pub(crate) fn poll_ready(&mut self, task_waker: Option<&Waker>) -> Vec<(u32, u64, Finisher)> {
         if let Some(w) = task_waker {
             self.shared.set_waker(w);
         }

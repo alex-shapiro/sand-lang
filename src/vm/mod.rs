@@ -42,8 +42,8 @@ impl HostFn {
         }
     }
 }
-pub type Finisher = Box<dyn FnOnce(&mut Vm) -> Result<Value, Fail> + Send>;
-pub type BoxFuture = Pin<Box<dyn Future<Output = Finisher> + Send>>;
+pub(crate) type Finisher = Box<dyn FnOnce(&mut Vm) -> Result<Value, Fail> + Send>;
+pub(crate) type BoxFuture = Pin<Box<dyn Future<Output = Finisher> + Send>>;
 
 #[derive(Clone)]
 pub struct NativeEntry {
@@ -91,7 +91,7 @@ pub enum WaitKind {
 }
 
 /// A suspended native call: the pending future and its [`WaitKind`].
-pub struct Suspension {
+pub(crate) struct Suspension {
     pub(crate) future: BoxFuture,
     pub(crate) wait_kind: WaitKind,
 }
