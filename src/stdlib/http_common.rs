@@ -8,7 +8,7 @@ use crate::native::{NativeModule, NativeObject};
 use crate::vm::WaitKind;
 use crate::vm::iomem::Reservation;
 use crate::vm::value::to_usize_saturating;
-use crate::vm::{Ctl, Vm};
+use crate::vm::{Fail, Vm};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -126,7 +126,7 @@ pub(crate) fn natives(m: &mut NativeModule) {
         vm.charge_slow_bytes(base.len().saturating_add(location.len()))?;
         Ok(resolve(base, location)?)
     });
-    m.vm_function("same_origin", |vm: &mut Vm, a: Val<String>, b: Val<String>| -> Result<bool, Ctl> {
+    m.vm_function("same_origin", |vm: &mut Vm, a: Val<String>, b: Val<String>| -> Result<bool, Fail> {
         let (a, b) = (a.str(&vm.heap), b.str(&vm.heap));
         vm.charge_slow_bytes(a.len().saturating_add(b.len()))?;
         Ok(match (Url::parse(a), Url::parse(b)) {
@@ -155,7 +155,7 @@ pub(crate) fn header_pairs(vm: &Vm, list: Val<Vec<(String, String)>>) -> Result<
     let mut pairs = Vec::with_capacity(items.len());
     let mut size = 0usize;
     for &item in items {
-        let [k, v] = vm.heap.fields(item) else { return Err(Ctl::internal("a header is not a pair").into()) };
+        let [k, v] = vm.heap.fields(item) else { return Err(Fail::internal("a header is not a pair").into()) };
         let (k, v) = (vm.str(*k), vm.str(*v));
         size = size.saturating_add(k.len() + v.len() + 64);
         vm.charge_bytes(k.len() + v.len())?;
@@ -237,7 +237,7 @@ pub(crate) fn response(
     status: i64,
     headers: Vec<(String, String)>,
     reader: BodyReader,
-) -> Result<ResponseStream, Ctl> {
+) -> Result<ResponseStream, Fail> {
     let body = vm.new_object(Body::new(reader))?;
     Ok(ResponseStream { status, headers, body, url })
 }
@@ -465,7 +465,7 @@ fn read_body<R: IntoValue + Send + 'static>(
     vm: &mut Vm,
     body: Val<Body>,
     what: BodyRead,
-    done: fn(&mut Vm, Option<Vec<u8>>) -> Result<R, HostError>,
+    done: fn(&mut Vm, Option<Vec<u8>>) -> stream::Finished<R>,
 ) -> Suspended<R> {
     let body = body.get(&vm.heap)?;
     let Some(reader) = body.reader.clone() else { return Err(HostError::new("closed", "body closed")) };
@@ -521,7 +521,7 @@ fn body_natives(m: &mut NativeModule) {
         read_body(vm, body, BodyRead::Line, |vm, line| line_read(vm, line, "line is not valid UTF-8"))
     });
     m.vm_function("Body.read_all", |vm: &mut Vm, body: Val<Body>| read_body(vm, body, BodyRead::All, bytes_read));
-    m.vm_function("Body.close", |vm: &mut Vm, body: Val<Body>| -> Result<_, Ctl> {
+    m.vm_function("Body.close", |vm: &mut Vm, body: Val<Body>| -> Result<_, Fail> {
         let b = body.get_mut(&mut vm.heap)?;
         b.closed.send_replace(true);
         // The stream and the connection go with the last reference to the

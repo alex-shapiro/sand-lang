@@ -2,7 +2,7 @@
 
 use crate::check::ModKind;
 use crate::native::NativeModule;
-use crate::vm::{Ctl, fail};
+use crate::vm::{Fail, fail};
 
 pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("math", ModKind::Std, include_str!("math.sand"));
@@ -60,7 +60,7 @@ fn gcd(a: i64, b: i64) -> u64 {
 }
 
 /// Converts a non-negative result to `int`, failing if it does not fit.
-fn int_result(v: u64) -> Result<i64, Ctl> {
+fn int_result(v: u64) -> Result<i64, Fail> {
     match i64::try_from(v) {
         Ok(i) => Ok(i),
         Err(_) => fail("overflow", "integer overflow"),

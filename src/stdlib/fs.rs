@@ -19,7 +19,7 @@ use crate::policy::{Capability, Decision, MAX_PATH_BYTES, Policy};
 use crate::vm::iomem::{Reservation, ResourceSlot};
 use crate::vm::meter::{Allowance, Stopped};
 use crate::vm::value::to_usize_saturating;
-use crate::vm::{Ctl, CtlKind, Permits, Vm};
+use crate::vm::{Ctl, CtlKind, Fail, Permits, Vm};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -191,7 +191,7 @@ pub(crate) fn module() -> NativeModule {
     });
 
     // Pure path helpers.
-    m.vm_function("join", |vm: &mut Vm, parts: Val<Vec<String>>| -> Result<String, Ctl> {
+    m.vm_function("join", |vm: &mut Vm, parts: Val<Vec<String>>| -> Result<String, Fail> {
         let items = parts.items(&vm.heap);
         vm.charge(items.len() as u64)?;
         let mut path = PathBuf::new();
@@ -200,13 +200,13 @@ pub(crate) fn module() -> NativeModule {
         }
         Ok(path.to_string_lossy().into_owned())
     });
-    m.vm_function("basename", |vm: &mut Vm, path: Val<String>| -> Result<String, Ctl> {
+    m.vm_function("basename", |vm: &mut Vm, path: Val<String>| -> Result<String, Fail> {
         Ok(lexical(vm, path)?.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
     });
-    m.vm_function("dirname", |vm: &mut Vm, path: Val<String>| -> Result<String, Ctl> {
+    m.vm_function("dirname", |vm: &mut Vm, path: Val<String>| -> Result<String, Fail> {
         Ok(lexical(vm, path)?.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default())
     });
-    m.vm_function("extension", |vm: &mut Vm, path: Val<String>| -> Result<Option<String>, Ctl> {
+    m.vm_function("extension", |vm: &mut Vm, path: Val<String>| -> Result<Option<String>, Fail> {
         Ok(lexical(vm, path)?.extension().map(|e| e.to_string_lossy().into_owned()))
     });
     m
@@ -238,7 +238,7 @@ fn target(vm: &mut Vm, p: Val<String>, mode: Mode) -> Result<(String, Target), H
 
 /// Charges for the symlinks followed and the entries scanned resolving `t`
 /// (beyond the names of the path itself, charged before).
-fn charge_work(vm: &Vm, t: &Target) -> Result<(), Ctl> {
+fn charge_work(vm: &Vm, t: &Target) -> Result<(), Fail> {
     let w = t.work();
     vm.charge(4 * (w.steps.saturating_sub(t.path.components().count()) + w.scanned) as u64)?;
     vm.charge_bytes(w.bytes.saturating_add(w.scanned_bytes).saturating_mul(4))
@@ -424,7 +424,7 @@ fn write(vm: &mut Vm, path: Val<String>, data: Vec<u8>, res: Reservation) -> FsR
     run(vm, shown, op, ok_unit)
 }
 
-fn lexical(vm: &Vm, p: Val<String>) -> Result<&Path, Ctl> {
+fn lexical(vm: &Vm, p: Val<String>) -> Result<&Path, Fail> {
     let p = p.str(&vm.heap);
     vm.charge_bytes(p.len())?;
     Ok(Path::new(p))
@@ -514,8 +514,8 @@ impl Drop for FileObj {
 
 impl OpenState {
     /// Runs `op` on the file on a worker thread (see `Vm::offload`).
-    fn io<T: Send + 'static>(&mut self, vm: &Vm, op: impl FnOnce(&mut OpenedFile) -> T + Send + 'static) -> Result<T, Ctl> {
-        let mut file = self.file.take().ok_or_else(|| Ctl::internal("a file without its file"))?;
+    fn io<T: Send + 'static>(&mut self, vm: &Vm, op: impl FnOnce(&mut OpenedFile) -> T + Send + 'static) -> Result<T, Fail> {
+        let mut file = self.file.take().ok_or_else(|| Fail::internal("a file without its file"))?;
         let (file, t) = vm.offload(move |_| {
             let t = op(&mut file);
             (file, t)
@@ -770,7 +770,7 @@ fn register_file(m: &mut NativeModule) {
     m.vm_function("File.write_str", |vm: &mut Vm, file: Val<FileObj>, text: Val<String>| {
         write_file(vm, file, move |vm| text.str(&vm.heap).as_bytes())
     });
-    m.vm_function("File.close", |vm: &mut Vm, file: Val<FileObj>| -> Result<_, Ctl> {
+    m.vm_function("File.close", |vm: &mut Vm, file: Val<FileObj>| -> Result<_, Fail> {
         let f = file.get_mut(&mut vm.heap)?;
         let before = f.size();
         let open = f.open.take();
@@ -792,7 +792,7 @@ fn register_file(m: &mut NativeModule) {
         with_file(vm, file, Needs::Nothing, |vm, st| {
             vm.charge(SYSCALL_FUEL)?;
             st.take_unread();
-            st.io(vm, move |f| f.seek(pos))
+            Ok(st.io(vm, move |f| f.seek(pos))?)
         })
     });
     m.vm_function("File.position", |vm: &mut Vm, file: Val<FileObj>| {
@@ -825,10 +825,10 @@ fn register_file(m: &mut NativeModule) {
     m.vm_function("File.sync", |vm: &mut Vm, file: Val<FileObj>| {
         with_file(vm, file, Needs::Nothing, |vm, st| {
             vm.charge(SYSCALL_FUEL)?;
-            st.io(vm, |f| f.sync())
+            Ok(st.io(vm, |f| f.sync())?)
         })
     });
-    m.vm_function("File.path", |vm: &mut Vm, file: Val<FileObj>| -> Result<String, Ctl> { Ok(file.get(&vm.heap)?.shown.clone()) });
+    m.vm_function("File.path", |vm: &mut Vm, file: Val<FileObj>| -> Result<String, Fail> { Ok(file.get(&vm.heap)?.shown.clone()) });
 }
 
 fn open(vm: &mut Vm, path: Val<String>, mode: OpenMode) -> FsResult<FileObj> {
@@ -892,7 +892,7 @@ fn read_rest<R: IntoValue>(
         data.extend_from_slice(&st.buf[st.at..]);
         st.take_unread();
         st.shrink();
-        let mut file = st.file.take().ok_or_else(|| Ctl::internal("a file without its file"))?;
+        let mut file = st.file.take().ok_or_else(|| Fail::internal("a file without its file"))?;
         let (file, read) = vm.offload(move |allowance| {
             let r = read_to_end(&mut file, &mut data, &mut res, allowance);
             (file, r.map(|r| r.map(|()| (data, res))))

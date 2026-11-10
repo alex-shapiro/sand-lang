@@ -289,8 +289,8 @@ impl Staging<'_> {
     }
 
     /// Returns a memory-limit error if `extra` additional bytes exceed the heap limit.
-    pub fn check_memory(&self, extra: usize) -> Result<(), crate::vm::Ctl> {
-        if self.would_exceed(extra) { Err(crate::vm::Ctl::limit(LimitKind::Memory)) } else { Ok(()) }
+    pub fn check_memory(&self, extra: usize) -> Result<(), crate::vm::Fail> {
+        if self.would_exceed(extra) { Err(crate::vm::Fail::limit(LimitKind::Memory)) } else { Ok(()) }
     }
 }
 
@@ -589,8 +589,8 @@ impl Heap {
 
     /// Returns a memory-limit error if `extra` additional bytes exceed the heap limit.
     /// Allocate the bytes immediately after this check, or use [`Scratch`](super::meter::Scratch) to track a growing buffer.
-    pub fn check_memory(&self, extra: usize) -> Result<(), crate::vm::Ctl> {
-        if self.would_exceed(extra) { Err(crate::vm::Ctl::limit(LimitKind::Memory)) } else { Ok(()) }
+    pub fn check_memory(&self, extra: usize) -> Result<(), crate::vm::Fail> {
+        if self.would_exceed(extra) { Err(crate::vm::Fail::limit(LimitKind::Memory)) } else { Ok(()) }
     }
 
     pub fn over_limit(&self) -> bool {

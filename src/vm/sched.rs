@@ -344,7 +344,7 @@ impl Vm {
                 Ok(r) => r,
                 Err(msg) => {
                     self.heap.unchecked = false;
-                    Err(Ctl::internal(msg))
+                    Err(Fail::internal(msg))
                 }
             };
             match r {
@@ -352,8 +352,8 @@ impl Vm {
                     self.deliver(fid, wait_gen, v);
                     self.enforce_limit(None).map_err(Trap::Limit)?;
                 }
-                Err(ctl) => {
-                    return Err(self.run_ending_of(ctl.into_kind(), |vm| match &vm.fibers[fid as usize] {
+                Err(fail) => {
+                    return Err(self.run_ending_of(fail, |vm| match &vm.fibers[fid as usize] {
                         Some(fiber) => vm.trace_of(fiber, None),
                         None => vec![],
                     }));
@@ -378,7 +378,7 @@ impl Vm {
     fn start_main(&mut self, proto: u32) -> Result<u32, RunEnding> {
         let closure = self.heap.alloc(Obj::Closure(proto, Box::new([])));
         let task = self.heap.alloc(Obj::Task(Box::new(TaskObj { fiber: 0, state: TaskState::Running, result: Value::Unit })));
-        let fid = self.spawn_fiber(closure, task).map_err(|ctl| self.run_ending_of(ctl.into_kind(), |_| vec![]))?;
+        let fid = self.spawn_fiber(closure, task).map_err(|fail| self.run_ending_of(fail, |_| vec![]))?;
         if let Obj::Task(task_obj) = self.heap.get_mut(task) {
             task_obj.fiber = fid;
         }

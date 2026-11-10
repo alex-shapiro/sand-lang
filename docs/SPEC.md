@@ -2201,19 +2201,28 @@ returns a Sand `Result` or aborts the run on failure:
 
 - `Result<T, HostError>` maps to the Sand return type `Result<T, Error>`.
   Returning `Err(HostError::new(kind, message))` yields `Err(Error(message,
-kind: kind))` in Sand, whereas `?` converts a `Ctl` into a `HostError` that
-  halts or suspends the VM and converts a `std::io::Error` into a `HostError`
+kind: kind))` in Sand, whereas `?` converts a `Fail` or a `Ctl` into a
+  `HostError` that halts or suspends the VM and converts a `std::io::Error` into a `HostError`
   with the corresponding standard error kind.
 - `Result<T, std::io::Error>`, `Result<T, String>`, and `Result<T, &str>` also
   map to `Result<T, Error>`; string errors use the kind `"error"`.
-- `Result<T, Ctl>` maps to the Sand return type `T`. Returning `Err(ctl)`
-  aborts the run with a runtime error via `Ctl::fail`, a resource limit error,
-  or an exit code.
+- `Result<T, Fail>` maps to the Sand return type `T`. A `Fail` ends the run with
+  a runtime error (`Fail::new`), a resource limit error, or an exit code
+  (`Fail::exit`).
+- `Result<T, Ctl>` maps to the Sand return type `T`. A `Ctl` is a `Fail` or a
+  request to the scheduler, such as a permission prompt.
 - `Result<Later<T, E>, E>` suspends the calling task on a future and maps to
   the same Sand return type as `Result<T, E>`. `Later::new(wait_kind, fut)`
   specifies the `WaitKind` of `fut`. Use `WaitKind::User` if the task waits for
   a user action so that idle wait time does not count toward `max_wall_time`
   (§16.2). Functions registered with `async_function` use `WaitKind::Io`.
+  The closure that `fut` returns runs after the wait, so it cannot make a
+  request to the scheduler. If `E` is `Ctl` or `Fail`, the closure returns
+  `Result<T, Fail>`. If `E` is a `HostError`, the closure returns
+  `Result<T, HostError<Fail>>`.
+- The future of an `async_function` also runs without scheduler requests. Its
+  output is a type that converts to a Sand value, a `Result<T, Fail>`, or a
+  `Result<T, HostError<Fail>>`.
 
 To check a sandbox capability inside a `vm_function`, call
 `Vm::require(&capability)` (§14), which returns an error of kind

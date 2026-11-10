@@ -43,7 +43,7 @@ impl HostFn {
         }
     }
 }
-pub type Finisher = Box<dyn FnOnce(&mut Vm) -> NResult + Send>;
+pub type Finisher = Box<dyn FnOnce(&mut Vm) -> Result<Value, Fail> + Send>;
 pub type BoxFuture = Pin<Box<dyn Future<Output = Finisher> + Send>>;
 
 #[derive(Clone)]
@@ -52,17 +52,34 @@ pub struct NativeEntry {
     pub f: HostFn,
 }
 
-/// A non-local outcome of a native call or a VM helper: an error, a limit, a
-/// request to the scheduler, ...
+/// The outcome of a native call that does not return a value: a [`Fail`],
+/// or a request to the scheduler.
+///
+/// A host makes a `Ctl` from a [`Fail`] or with [`Ctl::need_permission`]. The
+/// `Vm` methods that wait, such as [`Vm::yield_now`], make the other requests.
+/// A host cannot build a request itself:
+///
+/// ```compile_fail,E0603
+/// let _ = sandlang::vm::CtlKind::Yield;
+/// ```
 ///
 /// One pointer, so that `Result<Value, Ctl>` is 16 bytes like a `Value`
 /// (see `interp`). [`Vm::block`] and
 /// [`Vm::yield_now`] reuse a spare box instead of allocating.
 pub struct Ctl(Box<CtlKind>);
 
+/// The end of a run: a runtime error, a limit, an interrupt, an exit, or an
+/// internal error.
+///
+/// Code that cannot make a request to the scheduler returns a `Fail` instead
+/// of a [`Ctl`]. `?` converts a `Fail` to a `Ctl`, but not the reverse.
+pub struct Fail(Box<FailKind>);
+
 const _: () = assert!(std::mem::size_of::<Ctl>() == std::mem::size_of::<usize>());
 const _: () = assert!(std::mem::size_of::<Result<Value, Ctl>>() == 16);
 const _: () = assert!(std::mem::size_of::<Result<Option<Value>, Ctl>>() == 16);
+const _: () = assert!(std::mem::size_of::<Result<Value, Fail>>() == 16);
+const _: () = assert!(std::mem::size_of::<Result<Option<Value>, Fail>>() == 16);
 
 /// Classification of a task wait. Determines whether idle wait time counts
 /// toward `max_wall_time`.
@@ -81,13 +98,8 @@ pub struct Suspension {
 }
 
 /// What a [`Ctl`] is.
-pub enum CtlKind {
-    /// Uncaught runtime error (`kind: message`) that terminates the run (see [`Ctl::fail`]).
-    RuntimeError(String),
-    /// An invariant of the engine broke: a bug, which ends a session.
-    Internal(String),
-    Limit(LimitKind),
-    Exit(i32),
+pub(crate) enum CtlKind {
+    Fail(Fail),
     /// Ask the user; the call is retried afterwards.
     NeedPermission(Capability),
     /// Suspend the task until the future completes.
@@ -106,8 +118,6 @@ pub enum CtlKind {
     },
     /// Let other tasks run; the call returns `()`.
     Yield,
-    /// The host interrupted the engine (see `Meter::check`).
-    Interrupted,
     /// Collect garbage and call the native again (once): what it needs (an
     /// open-resource slot, I/O buffer space) may be held by garbage. See
     /// [`Vm::resource_slot`].
@@ -116,36 +126,67 @@ pub enum CtlKind {
     Cancelled,
 }
 
-impl Ctl {
+/// What a [`Fail`] is.
+pub(crate) enum FailKind {
+    /// Uncaught runtime error (`kind: message`) that terminates the run (see [`Fail::new`]).
+    RuntimeError(String),
+    /// An invariant of the engine broke: a bug, which ends a session.
+    Internal(String),
+    Limit(LimitKind),
+    /// The host interrupted the engine (see `Meter::check`).
+    Interrupted,
+    Exit(i32),
+}
+
+impl Fail {
     /// Aborts execution with an uncatchable runtime error of `kind`. For recoverable `Result` errors, return [`HostError`] instead.
     #[cold]
-    pub fn fail(kind: &str, msg: impl std::fmt::Display) -> Ctl {
-        Ctl(Box::new(CtlKind::RuntimeError(format!("{kind}: {msg}"))))
+    pub fn new(kind: &str, msg: impl std::fmt::Display) -> Fail {
+        Fail(Box::new(FailKind::RuntimeError(format!("{kind}: {msg}"))))
     }
 
     /// An internal error: an invariant of the engine broke.
     #[cold]
-    pub fn internal(msg: impl Into<String>) -> Ctl {
-        Ctl(Box::new(CtlKind::Internal(msg.into())))
+    pub fn internal(msg: impl Into<String>) -> Fail {
+        Fail(Box::new(FailKind::Internal(msg.into())))
     }
 
     /// A limit was exceeded.
     #[cold]
-    pub fn limit(k: LimitKind) -> Ctl {
-        Ctl(Box::new(CtlKind::Limit(k)))
+    pub fn limit(k: LimitKind) -> Fail {
+        Fail(Box::new(FailKind::Limit(k)))
     }
 
     /// The host interrupted the engine.
     #[cold]
-    pub fn interrupted() -> Ctl {
-        Ctl(Box::new(CtlKind::Interrupted))
+    pub fn interrupted() -> Fail {
+        Fail(Box::new(FailKind::Interrupted))
     }
 
     /// Ends the run with exit code `code`, like the built-in `exit` function.
-    pub fn exit(code: i32) -> Ctl {
-        Ctl(Box::new(CtlKind::Exit(code)))
+    pub fn exit(code: i32) -> Fail {
+        Fail(Box::new(FailKind::Exit(code)))
     }
 
+    /// The limit, if this is one.
+    pub fn as_limit(&self) -> Option<LimitKind> {
+        match *self.0 {
+            FailKind::Limit(k) => Some(k),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn into_kind(self) -> FailKind {
+        *self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn kind(&self) -> &FailKind {
+        &self.0
+    }
+}
+
+impl Ctl {
     /// Suspends the calling task on `suspension`.
     pub(crate) fn suspend(suspension: Suspension) -> Ctl {
         Ctl(Box::new(CtlKind::Async(suspension)))
@@ -156,20 +197,18 @@ impl Ctl {
         Ctl(Box::new(CtlKind::NeedPermission(cap)))
     }
 
-    pub fn kind(&self) -> &CtlKind {
+    pub(crate) fn kind(&self) -> &CtlKind {
         &self.0
     }
 
-    pub fn into_kind(self) -> CtlKind {
+    pub(crate) fn into_kind(self) -> CtlKind {
         *self.0
     }
+}
 
-    /// The limit, if this is one.
-    pub fn as_limit(&self) -> Option<LimitKind> {
-        match *self.0 {
-            CtlKind::Limit(k) => Some(k),
-            _ => None,
-        }
+impl From<Fail> for Ctl {
+    fn from(fail: Fail) -> Ctl {
+        Ctl(Box::new(CtlKind::Fail(fail)))
     }
 }
 
@@ -185,47 +224,55 @@ impl std::fmt::Debug for Ctl {
     }
 }
 
+impl std::fmt::Debug for Fail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &*self.0 {
+            FailKind::RuntimeError(m) => write!(f, "RuntimeError({m})"),
+            FailKind::Internal(m) => write!(f, "Internal({m})"),
+            FailKind::Limit(k) => write!(f, "Limit({k:?})"),
+            FailKind::Interrupted => write!(f, "Interrupted"),
+            FailKind::Exit(c) => write!(f, "Exit({c})"),
+        }
+    }
+}
+
 impl std::fmt::Debug for CtlKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CtlKind::RuntimeError(m) => write!(f, "RuntimeError({m})"),
-            CtlKind::Internal(m) => write!(f, "Internal({m})"),
-            CtlKind::Limit(k) => write!(f, "Limit({k:?})"),
-            CtlKind::Exit(c) => write!(f, "Exit({c})"),
+            CtlKind::Fail(fail) => fail.fmt(f),
             CtlKind::NeedPermission(c) => write!(f, "NeedPermission({c})"),
             CtlKind::Async(s) => write!(f, "Async({:?})", s.wait_kind),
             CtlKind::Blocked { wait_gen } => write!(f, "Blocked({wait_gen})"),
             CtlKind::Racing { wait_gen, .. } => write!(f, "Racing({wait_gen})"),
             CtlKind::Yield => write!(f, "Yield"),
-            CtlKind::Interrupted => write!(f, "Interrupted"),
             CtlKind::Collect => write!(f, "Collect"),
             CtlKind::Cancelled => write!(f, "Cancelled"),
         }
     }
 }
 
-impl From<&str> for Ctl {
+impl From<&str> for Fail {
     /// An error whose message `msg` is `kind: message`.
-    fn from(msg: &str) -> Ctl {
-        Ctl(Box::new(CtlKind::RuntimeError(msg.to_string())))
+    fn from(msg: &str) -> Fail {
+        Fail(Box::new(FailKind::RuntimeError(msg.to_string())))
     }
 }
 
-/// Aborts execution with a runtime error of kind `kind` (see [`Ctl::fail`]).
-pub fn fail<T>(kind: &str, msg: impl std::fmt::Display) -> Result<T, Ctl> {
-    Err(Ctl::fail(kind, msg))
+/// Aborts execution with a runtime error of kind `kind` (see [`Fail::new`]).
+pub fn fail<T>(kind: &str, msg: impl std::fmt::Display) -> Result<T, Fail> {
+    Err(Fail::new(kind, msg))
 }
 
 /// Fails with an internal error.
-pub fn internal<T>(msg: impl Into<String>) -> Result<T, Ctl> {
-    Err(Ctl::internal(msg))
+pub fn internal<T>(msg: impl Into<String>) -> Result<T, Fail> {
+    Err(Fail::internal(msg))
 }
 
 /// Returns an internal error if a value of kind `what` (see [`Obj::kind_name`])
 /// is used as `role` without implementing `trait_name`.
 #[cold]
-pub(crate) fn without_trait(what: &str, role: &str, trait_name: &str) -> Ctl {
-    Ctl::internal(format!("a {what} is {role}, but its type does not implement `{trait_name}`"))
+pub(crate) fn without_trait(what: &str, role: &str, trait_name: &str) -> Fail {
+    Fail::internal(format!("a {what} is {role}, but its type does not implement `{trait_name}`"))
 }
 
 /// What [`Vm::block`] waits for.
@@ -601,9 +648,9 @@ impl Fiber {
     /// `MAX_STACK_SLOTS`, or with the memory limit error.
     #[cold]
     #[inline(never)]
-    pub fn grow_stack(&mut self, need: usize, heap: &mut Heap) -> Result<(), Ctl> {
+    pub fn grow_stack(&mut self, need: usize, heap: &mut Heap) -> Result<(), Fail> {
         if need > MAX_STACK_SLOTS {
-            return Err(Ctl::fail("limit", "stack overflow"));
+            return Err(Fail::new("limit", "stack overflow"));
         }
         let n = need.max(self.stack.len() * 2).min(MAX_STACK_SLOTS);
         let before = self.stack.capacity();
@@ -619,7 +666,7 @@ impl Fiber {
     /// the memory like [`Fiber::grow_stack`].
     #[cold]
     #[inline(never)]
-    pub fn grow_frames(&mut self, heap: &mut Heap) -> Result<(), Ctl> {
+    pub fn grow_frames(&mut self, heap: &mut Heap) -> Result<(), Fail> {
         let before = self.frames.capacity();
         let more = before.max(8);
         heap.check_memory(more * std::mem::size_of::<Frame>())?;
@@ -888,12 +935,12 @@ impl Vm {
     }
 
     /// The display form of `v`, charging the meter for the work.
-    pub fn display(&self, v: Value) -> Result<String, Ctl> {
+    pub fn display(&self, v: Value) -> Result<String, Fail> {
         display::to_display_metered(&self.prog, &self.heap, &self.meter, v)
     }
 
     /// The debug form of `v`, charging the meter for the work.
-    pub fn debug(&self, v: Value) -> Result<String, Ctl> {
+    pub fn debug(&self, v: Value) -> Result<String, Fail> {
         display::to_debug_metered(&self.prog, &self.heap, &self.meter, v)
     }
 
@@ -905,7 +952,7 @@ impl Vm {
 
     /// Returns a memory-limit error if `extra` additional heap bytes exceed the
     /// limit (see [`Heap::check_memory`](heap::Heap::check_memory)).
-    pub fn check_memory(&self, extra: usize) -> Result<(), Ctl> {
+    pub fn check_memory(&self, extra: usize) -> Result<(), Fail> {
         self.heap.check_memory(extra)
     }
 
@@ -989,19 +1036,19 @@ impl Vm {
     /// visited, compared or produced. Fails if a limit is exceeded or the
     /// engine was interrupted; propagate the error with `?`.
     #[inline]
-    pub fn charge(&self, units: u64) -> Result<(), Ctl> {
+    pub fn charge(&self, units: u64) -> Result<(), Fail> {
         self.meter.charge(units)
     }
 
     /// Charges for `n` bytes copied, compared or scanned.
     #[inline]
-    pub fn charge_bytes(&self, n: usize) -> Result<(), Ctl> {
+    pub fn charge_bytes(&self, n: usize) -> Result<(), Fail> {
         self.meter.charge_bytes(n)
     }
 
     /// Charges for `n` bytes processed one at a time (hashing, encoding).
     #[inline]
-    pub fn charge_slow_bytes(&self, n: usize) -> Result<(), Ctl> {
+    pub fn charge_slow_bytes(&self, n: usize) -> Result<(), Fail> {
         self.meter.charge_slow_bytes(n)
     }
 
@@ -1069,7 +1116,7 @@ impl Vm {
     /// [`meter::Allowance`], and the meter is then charged the same amount.
     /// If a charge to the allowance failed, the job's result is discarded
     /// and the meter's error is returned.
-    pub(crate) fn offload<T: Send + 'static>(&self, job: impl FnOnce(&mut meter::Allowance) -> T + Send + 'static) -> Result<T, Ctl> {
+    pub(crate) fn offload<T: Send + 'static>(&self, job: impl FnOnce(&mut meter::Allowance) -> T + Send + 'static) -> Result<T, Fail> {
         let mut allowance = self.meter.allowance();
         let finish = |t: T, used: u64, stopped: bool| {
             self.meter.charge(used)?;
@@ -1088,7 +1135,7 @@ impl Vm {
             });
             match pending.wait(|| self.meter.check()) {
                 Ok(Ok((t, used, stopped))) => finish(t, used, stopped),
-                Ok(Err(panic)) => Err(Ctl::internal(panic)),
+                Ok(Err(panic)) => Err(Fail::internal(panic)),
                 Err(c) => {
                     abandon.store(true, std::sync::atomic::Ordering::Relaxed);
                     Err(c)
@@ -1100,8 +1147,8 @@ impl Vm {
     }
 
     /// The error to return when a charge to a [`meter::Allowance`] failed.
-    fn stopped(&self) -> Ctl {
-        self.meter.check().err().unwrap_or_else(Ctl::interrupted)
+    fn stopped(&self) -> Fail {
+        self.meter.check().err().unwrap_or_else(Fail::interrupted)
     }
 
     /// Forgets "once" answers. They hold while a native is retried after
@@ -1136,7 +1183,7 @@ impl Vm {
     pub(crate) fn drain_output(&mut self) -> Result<(), RunEnding> {
         self.flush_stdout();
         let drained = [&self.host.stdout, &self.host.stderr].into_iter().try_for_each(|sink| self.wait_backlog(sink, 0));
-        drained.map_err(|ctl| self.run_ending_of(ctl.into_kind(), |_| vec![]))
+        drained.map_err(|fail| self.run_ending_of(fail, |_| vec![]))
     }
 
     /// Drains standard output and error after a scheduler run. A drain failure
@@ -1149,7 +1196,7 @@ impl Vm {
 
     /// Waits until `sink`'s backlog is at most `max` bytes. Fails if the
     /// meter reports an interrupt or a limit first.
-    fn wait_backlog(&self, sink: &SharedSink, max: usize) -> Result<(), Ctl> {
+    fn wait_backlog(&self, sink: &SharedSink, max: usize) -> Result<(), Fail> {
         while !sink.wait_backlog(max, std::time::Duration::from_millis(5)) {
             self.meter.check()?;
         }
@@ -1159,7 +1206,7 @@ impl Vm {
     /// Flushes standard output before reading standard input, if the sink
     /// wants to (see [`OutputSink::flush_before_input`]), and waits until it
     /// is written.
-    pub fn flush_before_input(&self) -> Result<(), Ctl> {
+    pub fn flush_before_input(&self) -> Result<(), Fail> {
         let _ = self.host.stdout.flush_before_input();
         self.wait_backlog(&self.host.stdout, 0)
     }
@@ -1168,10 +1215,10 @@ impl Vm {
     /// limits; a denial fails (as `print` does).
     pub fn write_stream(&mut self, which: u8, data: &[u8]) -> Result<(), Ctl> {
         self.admit_output(which, data.len())?;
-        self.write_counted(which, data)
+        Ok(self.write_counted(which, data)?)
     }
 
-    pub(crate) fn write_counted(&mut self, which: u8, data: &[u8]) -> Result<(), Ctl> {
+    pub(crate) fn write_counted(&mut self, which: u8, data: &[u8]) -> Result<(), Fail> {
         let _ = self.stream_sink(which).write(data);
         self.limit_backlog(which)
     }
@@ -1181,12 +1228,12 @@ impl Vm {
     pub fn write_stream_str(&mut self, which: u8, s: Value) -> Result<(), Ctl> {
         self.admit_output(which, self.heap.str(s).len())?;
         let _ = self.stream_sink(which).write(self.heap.str(s).as_bytes());
-        self.limit_backlog(which)
+        Ok(self.limit_backlog(which)?)
     }
 
     /// If the backlog of stream `which` exceeds [`MAX_OUTPUT_BACKLOG`], waits
     /// until half of it has been written.
-    fn limit_backlog(&self, which: u8) -> Result<(), Ctl> {
+    fn limit_backlog(&self, which: u8) -> Result<(), Fail> {
         let sink = self.stream_sink(which);
         if sink.backlog() > MAX_OUTPUT_BACKLOG {
             self.wait_backlog(sink, MAX_OUTPUT_BACKLOG / 2)?;
@@ -1222,9 +1269,11 @@ impl Vm {
     /// stream `which`, and counts them; a denial fails.
     fn admit_output(&mut self, which: u8, len: usize) -> Result<(), Ctl> {
         if !self.output_allowed(which)? {
-            return fail("permission_denied", if which == 1 { "permission denied: stdout" } else { "permission denied: stderr" });
+            return Err(
+                Fail::new("permission_denied", if which == 1 { "permission denied: stdout" } else { "permission denied: stderr" }).into()
+            );
         }
-        self.count_output(which, len)
+        Ok(self.count_output(which, len)?)
     }
 
     /// Whether the policy allows writing to stream `which`.
@@ -1250,12 +1299,12 @@ impl Vm {
     }
 
     /// Counts `len` bytes written to stream `which` against the output limit.
-    pub(crate) fn count_output(&mut self, which: u8, len: usize) -> Result<(), Ctl> {
+    pub(crate) fn count_output(&mut self, which: u8, len: usize) -> Result<(), Fail> {
         self.host.output_bytes += len as u64;
         if let Some(max) = self.host.limits.max_output_bytes
             && self.host.output_bytes > max
         {
-            return Err(Ctl::limit(LimitKind::Output));
+            return Err(Fail::limit(LimitKind::Output));
         }
         if which != 1 {
             self.flush_stdout();
@@ -1272,7 +1321,7 @@ impl Vm {
     // Fibers
 
     /// Creates a fiber that calls `closure` with no arguments.
-    pub fn spawn_fiber(&mut self, closure: Value, task: Value) -> Result<u32, Ctl> {
+    pub fn spawn_fiber(&mut self, closure: Value, task: Value) -> Result<u32, Fail> {
         let (proto, ncaps) = match self.heap.get(closure) {
             Obj::Closure(p, caps) => (*p, caps.len()),
             _ => return internal("spawn: not a closure"),
@@ -1293,7 +1342,7 @@ impl Vm {
                 }
                 let stack = nregs.max(INITIAL_STACK_SLOTS);
                 if self.heap.would_exceed(stack * std::mem::size_of::<Value>()) {
-                    return Err(Ctl::limit(LimitKind::Memory));
+                    return Err(Fail::limit(LimitKind::Memory));
                 }
                 let mut frames = Vec::with_capacity(8);
                 frames.push(frame);
@@ -1370,7 +1419,7 @@ impl Vm {
     }
 
     /// Spawns a new task running `closure`; returns the task handle.
-    pub fn spawn_task(&mut self, closure: Value) -> NResult {
+    pub fn spawn_task(&mut self, closure: Value) -> Result<Value, Fail> {
         if self.live_tasks >= self.host.limits.max_tasks {
             return fail("limit", "task limit exceeded");
         }
@@ -1435,9 +1484,8 @@ impl Vm {
         self.recycle_fiber(f);
     }
 
-    /// Cancels a running `task`. If `task` is the caller, returns
-    /// [`CtlKind::Cancelled`]. The native must propagate this error so the
-    /// engine ends the task.
+    /// Cancels a running `task`. If `task` is the caller, returns a [`Ctl`]
+    /// that the native must propagate so the engine ends the task.
     pub fn cancel_task(&mut self, task: Value) -> Result<(), Ctl> {
         if let Obj::Task(t) = self.heap.get_mut(task)
             && t.state == TaskState::Running
@@ -1541,20 +1589,19 @@ impl Vm {
         self.drain_output_after(drive_result).map(|_| ())
     }
 
-    /// Converts an unhandled [`CtlKind`] into a [`RunEnding`], using `trace`
-    /// to build stack traces for errors. Marks the VM broken if `kind` is an
-    /// internal error or an unexpected scheduler request.
-    pub(crate) fn run_ending_of(&mut self, kind: CtlKind, trace: impl FnOnce(&Vm) -> Vec<TraceFrame>) -> RunEnding {
-        let message = match kind {
-            CtlKind::Exit(code) => return RunEnding::Exit(code),
-            CtlKind::RuntimeError(message) => return Trap::Error { message, trace: trace(self) }.into(),
-            CtlKind::Limit(kind) => return Trap::Limit(kind).into(),
-            CtlKind::Interrupted => return Trap::Interrupted.into(),
-            CtlKind::Internal(message) => message,
-            request => format!("unexpected {request:?}"),
-        };
-        self.broken = true;
-        Trap::Internal { message, trace: trace(self) }.into()
+    /// Converts `fail` into a [`RunEnding`], using `trace` to build stack
+    /// traces for errors. Marks the VM broken if `fail` is an internal error.
+    pub(crate) fn run_ending_of(&mut self, fail: Fail, trace: impl FnOnce(&Vm) -> Vec<TraceFrame>) -> RunEnding {
+        match fail.into_kind() {
+            FailKind::Exit(code) => RunEnding::Exit(code),
+            FailKind::RuntimeError(message) => Trap::Error { message, trace: trace(self) }.into(),
+            FailKind::Limit(kind) => Trap::Limit(kind).into(),
+            FailKind::Interrupted => Trap::Interrupted.into(),
+            FailKind::Internal(message) => {
+                self.broken = true;
+                Trap::Internal { message, trace: trace(self) }.into()
+            }
+        }
     }
 
     // ------------------------------------------------------------------

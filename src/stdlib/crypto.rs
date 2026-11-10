@@ -5,25 +5,25 @@ use crate::check::ModKind;
 use crate::native::NativeModule;
 use crate::native::ty::Val;
 use crate::vm::meter::{Budget, SLOW_BYTES_PER_UNIT};
-use crate::vm::{Ctl, Vm};
+use crate::vm::{Fail, Vm};
 use hmac::{KeyInit, Mac};
 use sha2::Digest;
 
 pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("crypto", ModKind::Std, include_str!("crypto.sand"));
-    m.vm_function("sha256", |vm: &mut Vm, data: Val<Vec<u8>>| -> Result<_, Ctl> {
+    m.vm_function("sha256", |vm: &mut Vm, data: Val<Vec<u8>>| -> Result<_, Fail> {
         Ok(sha256_parts(&[data.bytes(&vm.heap)], &vm.meter)?.to_vec())
     });
-    m.vm_function("sha1", |vm: &mut Vm, data: Val<Vec<u8>>| -> Result<_, Ctl> {
+    m.vm_function("sha1", |vm: &mut Vm, data: Val<Vec<u8>>| -> Result<_, Fail> {
         Ok(digest::<sha1::Sha1>(&[data.bytes(&vm.heap)], &vm.meter)?.to_vec())
     });
-    m.vm_function("md5", |vm: &mut Vm, data: Val<Vec<u8>>| -> Result<_, Ctl> {
+    m.vm_function("md5", |vm: &mut Vm, data: Val<Vec<u8>>| -> Result<_, Fail> {
         Ok(digest::<md5::Md5>(&[data.bytes(&vm.heap)], &vm.meter)?.to_vec())
     });
-    m.vm_function("hmac_sha256", |vm: &mut Vm, key: Val<Vec<u8>>, data: Val<Vec<u8>>| -> Result<_, Ctl> {
+    m.vm_function("hmac_sha256", |vm: &mut Vm, key: Val<Vec<u8>>, data: Val<Vec<u8>>| -> Result<_, Fail> {
         Ok(hmac_sha256(key.bytes(&vm.heap), data.bytes(&vm.heap), &vm.meter)?.to_vec())
     });
-    m.vm_function("constant_time_eq", |vm: &mut Vm, a: Val<Vec<u8>>, b: Val<Vec<u8>>| -> Result<_, Ctl> {
+    m.vm_function("constant_time_eq", |vm: &mut Vm, a: Val<Vec<u8>>, b: Val<Vec<u8>>| -> Result<_, Fail> {
         vm.charge_bytes(a.bytes(&vm.heap).len())?;
         Ok(constant_time_eq(a.bytes(&vm.heap), b.bytes(&vm.heap)))
     });
@@ -35,7 +35,7 @@ const CHUNK: usize = 4096;
 
 /// Feeds the concatenation of `parts` to `update`, charging `budget` as it
 /// goes so that hashing huge inputs can be stopped.
-fn feed(parts: &[&[u8]], budget: &impl Budget, mut update: impl FnMut(&[u8])) -> Result<(), Ctl> {
+fn feed(parts: &[&[u8]], budget: &impl Budget, mut update: impl FnMut(&[u8])) -> Result<(), Fail> {
     for part in parts {
         for chunk in part.chunks(CHUNK) {
             budget.charge((chunk.len() / SLOW_BYTES_PER_UNIT) as u64)?;
@@ -46,22 +46,22 @@ fn feed(parts: &[&[u8]], budget: &impl Budget, mut update: impl FnMut(&[u8])) ->
 }
 
 /// The digest of the concatenation of `parts`.
-fn digest<D: Digest>(parts: &[&[u8]], budget: &impl Budget) -> Result<sha2::digest::Output<D>, Ctl> {
+fn digest<D: Digest>(parts: &[&[u8]], budget: &impl Budget) -> Result<sha2::digest::Output<D>, Fail> {
     let mut h = D::new();
     feed(parts, budget, |chunk| h.update(chunk))?;
     Ok(h.finalize())
 }
 
 /// SHA-256 (FIPS 180-4) of the concatenation of `parts`.
-pub(crate) fn sha256_parts(parts: &[&[u8]], budget: &impl Budget) -> Result<[u8; 32], Ctl> {
+pub(crate) fn sha256_parts(parts: &[&[u8]], budget: &impl Budget) -> Result<[u8; 32], Fail> {
     Ok(digest::<sha2::Sha256>(parts, budget)?.into())
 }
 
 /// HMAC-SHA256 (RFC 2104).
-pub(crate) fn hmac_sha256(key: &[u8], data: &[u8], budget: &impl Budget) -> Result<[u8; 32], Ctl> {
+pub(crate) fn hmac_sha256(key: &[u8], data: &[u8], budget: &impl Budget) -> Result<[u8; 32], Fail> {
     // A key longer than a block is hashed first.
     budget.charge((key.len() / SLOW_BYTES_PER_UNIT) as u64)?;
-    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(key).map_err(|_| Ctl::internal("HMAC key"))?;
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(key).map_err(|_| Fail::internal("HMAC key"))?;
     feed(&[data], budget, |chunk| mac.update(chunk))?;
     Ok(mac.finalize().into_bytes().into())
 }

@@ -16,7 +16,7 @@ use sandlang::session::RESET_NOTE;
 use sandlang::session::Session;
 use sandlang::stdin_feed::{StdinFeed, StdinRequest};
 use sandlang::vm::WaitKind;
-use sandlang::vm::{Ctl, Vm};
+use sandlang::vm::{Fail, Vm};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -898,7 +898,7 @@ fn exit_in_a_task_between_inputs() {
 
 fn quit_module() -> HostModules {
     let mut module = NativeModule::new("quit");
-    module.async_function("now", |code: i64| async move { Err::<(), Ctl>(Ctl::exit(code as i32)) });
+    module.async_function("now", |code: i64| async move { Err::<(), Fail>(Fail::exit(code as i32)) });
     HostModules::new([module]).unwrap()
 }
 
@@ -1284,13 +1284,13 @@ fn cancelled_read_resumes_wall_time_limit() {
 }
 
 fn waits_module() -> NativeModule {
-    async fn wait() -> impl FnOnce(&mut Vm) -> Result<(), Ctl> {
+    async fn wait() -> impl FnOnce(&mut Vm) -> Result<(), Fail> {
         tokio::time::sleep(Duration::from_secs(10)).await;
         |_: &mut Vm| Ok(())
     }
     let mut m = NativeModule::new("waits");
-    m.vm_function("user", |_: &mut Vm| Ok::<_, Ctl>(Later::new(WaitKind::User, wait())));
-    m.vm_function("io", |_: &mut Vm| Ok::<_, Ctl>(Later::new(WaitKind::Io, wait())));
+    m.vm_function("user", |_: &mut Vm| Ok::<_, Fail>(Later::new(WaitKind::User, wait())));
+    m.vm_function("io", |_: &mut Vm| Ok::<_, Fail>(Later::new(WaitKind::Io, wait())));
     m.async_function("async_io", || tokio::time::sleep(Duration::from_secs(10)));
     m
 }

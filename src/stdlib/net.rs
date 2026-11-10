@@ -16,7 +16,7 @@ use crate::policy::{Capability, Policy};
 use crate::vm::WaitKind;
 use crate::vm::iomem::{Reservation, ResourceSlot};
 use crate::vm::value::{ValueType, to_usize_saturating};
-use crate::vm::{Ctl, Vm};
+use crate::vm::{Fail, Vm};
 use jiff::SignedDuration;
 use std::fmt;
 use std::future::Future;
@@ -37,8 +37,8 @@ pub(crate) fn module() -> NativeModule {
     m.vm_function("connect", connect);
     m.vm_function("connect_tls", connect_tls);
     m.vm_function("Listener.accept", listener_accept);
-    m.vm_function("Listener.addr", |vm: &mut Vm, l: Val<Listener>| -> Result<SocketAddr, Ctl> { Ok(l.get(&vm.heap)?.addr) });
-    m.vm_function("Listener.close", |vm: &mut Vm, l: Val<Listener>| -> Result<_, Ctl> {
+    m.vm_function("Listener.addr", |vm: &mut Vm, l: Val<Listener>| -> Result<SocketAddr, Fail> { Ok(l.get(&vm.heap)?.addr) });
+    m.vm_function("Listener.close", |vm: &mut Vm, l: Val<Listener>| -> Result<_, Fail> {
         l.get_mut(&mut vm.heap)?.close();
         Ok(())
     });
@@ -47,8 +47,8 @@ pub(crate) fn module() -> NativeModule {
     m.vm_function("Conn.read_all", conn_read_all);
     m.vm_function("Conn.write", |vm: &mut Vm, c: Val<Conn>, data: Val<Vec<u8>>| conn_write(vm, c, |vm| data.bytes(&vm.heap)));
     m.vm_function("Conn.write_str", |vm: &mut Vm, c: Val<Conn>, text: Val<String>| conn_write(vm, c, |vm| text.str(&vm.heap).as_bytes()));
-    m.vm_function("Conn.peer_addr", |vm: &mut Vm, c: Val<Conn>| -> Result<SocketAddr, Ctl> { Ok(c.get(&vm.heap)?.peer) });
-    m.vm_function("Conn.close", |vm: &mut Vm, c: Val<Conn>| -> Result<_, Ctl> {
+    m.vm_function("Conn.peer_addr", |vm: &mut Vm, c: Val<Conn>| -> Result<SocketAddr, Fail> { Ok(c.get(&vm.heap)?.peer) });
+    m.vm_function("Conn.close", |vm: &mut Vm, c: Val<Conn>| -> Result<_, Fail> {
         c.get_mut(&mut vm.heap)?.close();
         Ok(())
     });

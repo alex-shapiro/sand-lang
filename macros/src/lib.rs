@@ -414,7 +414,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
                 vm: &#krate::vm::Vm,
                 v: #krate::vm::value::Value,
                 conv: &mut #krate::native::convert::Conversion,
-            ) -> ::std::result::Result<Self, #krate::vm::Ctl> {
+            ) -> ::std::result::Result<Self, #krate::vm::Fail> {
                 #krate::native::enum_from_value::<Self>(vm, v, conv, |index, conv| {
                     ::std::result::Result::Ok(match index {
                         #(#reads,)*
@@ -424,7 +424,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
             }
         }
         impl #imp #krate::native::convert::IntoValue for #ty #tyg #wh_into {
-            fn into_value(self, vm: &mut #krate::vm::Vm) -> ::std::result::Result<#krate::vm::value::Value, #krate::vm::Ctl> {
+            fn into_value(self, vm: &mut #krate::vm::Vm) -> ::std::result::Result<#krate::vm::value::Value, #krate::vm::Fail> {
                 match self {
                     #(#writes),*
                 }
@@ -464,12 +464,12 @@ fn sand_object(input: &DeriveInput) -> syn::Result<Tokens> {
                 vm: &'a #krate::vm::Vm,
                 v: #krate::vm::value::Value,
                 _: &mut #krate::native::convert::Conversion,
-            ) -> ::std::result::Result<&'a #ty, #krate::vm::Ctl> {
+            ) -> ::std::result::Result<&'a #ty, #krate::vm::Fail> {
                 #krate::native::ty::Val::<#ty>::from_raw(v).get(&vm.heap)
             }
         }
         impl #krate::native::convert::IntoValue for #ty {
-            fn into_value(self, vm: &mut #krate::vm::Vm) -> ::std::result::Result<#krate::vm::value::Value, #krate::vm::Ctl> {
+            fn into_value(self, vm: &mut #krate::vm::Vm) -> ::std::result::Result<#krate::vm::value::Value, #krate::vm::Fail> {
                 vm.new_object(self).map(#krate::native::ty::Val::raw)
             }
         }
@@ -572,12 +572,12 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
                 vm: &#krate::vm::Vm,
                 v: #krate::vm::value::Value,
                 conv: &mut #krate::native::convert::Conversion,
-            ) -> ::std::result::Result<Self, #krate::vm::Ctl> {
+            ) -> ::std::result::Result<Self, #krate::vm::Fail> {
                 #krate::native::struct_from_value(vm, v, conv, |fields, conv| ::std::result::Result::Ok(#ty { #(#reads),* }))
             }
         }
         impl #imp #krate::native::convert::IntoValue for #ty #tyg #wh_into {
-            fn into_value(self, vm: &mut #krate::vm::Vm) -> ::std::result::Result<#krate::vm::value::Value, #krate::vm::Ctl> {
+            fn into_value(self, vm: &mut #krate::vm::Vm) -> ::std::result::Result<#krate::vm::value::Value, #krate::vm::Fail> {
                 #krate::native::struct_into_value::<Self>(vm, move |vm| ::std::result::Result::Ok(::std::boxed::Box::new([#(#writes),*])))
             }
             fn to_const(&self) -> ::std::option::Option<#krate::native::Constant> {

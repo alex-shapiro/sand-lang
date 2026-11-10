@@ -102,7 +102,7 @@ enum Read {
 fn read_stdin<R: IntoValue + Send + 'static>(
     vm: &mut Vm,
     what: Read,
-    done: fn(&mut Vm, Option<Vec<u8>>) -> Result<R, HostError>,
+    done: fn(&mut Vm, Option<Vec<u8>>) -> stream::Finished<R>,
 ) -> Suspended<R> {
     if !vm.permit(&Capability::Stdin)? {
         return Err(HostError::new("permission_denied", "permission denied: read standard input"));
@@ -132,7 +132,7 @@ fn read_stdin<R: IntoValue + Send + 'static>(
     })
 }
 
-fn input_line(vm: &mut Vm, line: Option<Vec<u8>>) -> Result<Option<String>, HostError> {
+fn input_line(vm: &mut Vm, line: Option<Vec<u8>>) -> stream::Finished<Option<String>> {
     line_read(vm, line, "stdin: input is not valid UTF-8")
 }
 

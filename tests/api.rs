@@ -1356,11 +1356,11 @@ fn boxes_module() -> NativeModule {
     m.function("total", |l: Labeled<i64>| l.value + l.history.iter().sum::<i64>());
     m.vm_function(
         "relabel",
-        |_: &mut sandlang::vm::Vm, l: Labeled<Param<0>>, label: String| -> Result<Labeled<Param<0>>, sandlang::vm::Ctl> {
+        |_: &mut sandlang::vm::Vm, l: Labeled<Param<0>>, label: String| -> Result<Labeled<Param<0>>, sandlang::vm::Fail> {
             Ok(Labeled { label, ..l })
         },
     );
-    m.vm_function("unwrap", |vm: &mut sandlang::vm::Vm, e: Val<Either<Param<0>, Param<0>>>| -> Result<Param<0>, sandlang::vm::Ctl> {
+    m.vm_function("unwrap", |vm: &mut sandlang::vm::Vm, e: Val<Either<Param<0>, Param<0>>>| -> Result<Param<0>, sandlang::vm::Fail> {
         Ok(Param::from_raw(vm.heap.field(e.raw(), 0).unwrap()))
     });
     m.source("pub native fn relabel<T>(l: Labeled<T>, label: str) -> Labeled<T>\npub native fn unwrap<T>(e: Either<T, T>) -> T");
@@ -1694,7 +1694,7 @@ fn rust_field_defaults_can_be_any_constant() {
 fn natives_take_num_evidence() {
     use sandlang::native::ty::{Num, Param, Val};
     use sandlang::types::traits;
-    use sandlang::vm::{Ctl, Vm};
+    use sandlang::vm::{Ctl, Fail, Vm};
     let module = |decl: &str| {
         let mut m = NativeModule::new("nums");
         m.vm_function("total", |vm: &mut Vm, num: Num<0>, xs: Val<Vec<Param<0, traits::Num>>>| -> Result<Param<0>, Ctl> {
@@ -1705,7 +1705,7 @@ fn natives_take_num_evidence() {
                     (sandlang::vm::value::Value::Float(a), sandlang::vm::value::Value::Float(b)) => {
                         sandlang::vm::value::Value::Float(a + b)
                     }
-                    _ => return Err(Ctl::internal("not a number")),
+                    _ => return Err(Fail::internal("not a number").into()),
                 };
             }
             Ok(Param::from_raw(acc))
@@ -1971,7 +1971,7 @@ fn native_declarations_must_require_the_traits_of_their_rust_functions() {
 #[test]
 fn generic_natives_take_type_parameters() {
     use sandlang::native::ty::{Param, Reflect, Val};
-    use sandlang::vm::{Ctl, Vm};
+    use sandlang::vm::{Fail, Vm};
     let module = |src: &str| {
         let mut m = NativeModule::new("gen");
         m.source(src);
@@ -1979,7 +1979,7 @@ fn generic_natives_take_type_parameters() {
     };
     let mut m = module("pub native fn second<T>(xs: [T]) -> T?\npub native fn swap<A, B>(p: (A, B)) -> (B, A)");
     m.vm_function("second", |vm: &mut Vm, xs: Val<Vec<Param<0>>>| xs.items(&vm.heap).get(1).copied().map(Param::<0>::from_raw));
-    m.vm_function("swap", |vm: &mut Vm, p: Val<(Param<0>, Param<1>)>| -> Result<(Param<1>, Param<0>), Ctl> {
+    m.vm_function("swap", |vm: &mut Vm, p: Val<(Param<0>, Param<1>)>| -> Result<(Param<1>, Param<0>), Fail> {
         let (a, b) = (vm.heap.field(p.raw(), 0), vm.heap.field(p.raw(), 1));
         Ok((Param::from_raw(b.unwrap()), Param::from_raw(a.unwrap())))
     });
@@ -1993,13 +1993,13 @@ fn generic_natives_take_type_parameters() {
     type Register = fn(&mut NativeModule);
     let cases: [(&str, Register); 4] = [
         ("is declared `fn([T]) -> T?`, but its Rust function is `fn([T]) -> T`", |m| {
-            m.vm_function("second", |_: &mut Vm, xs: Val<Vec<Param<0>>>| -> Result<Param<0>, Ctl> { Ok(Param::from_raw(xs.raw())) });
+            m.vm_function("second", |_: &mut Vm, xs: Val<Vec<Param<0>>>| -> Result<Param<0>, Fail> { Ok(Param::from_raw(xs.raw())) });
         }),
         ("uses type parameter 1, which its declaration does not have", |m| {
-            m.vm_function("second", |_: &mut Vm, _: Val<Vec<Param<1>>>| -> Result<Option<Param<1>>, Ctl> { Ok(None) });
+            m.vm_function("second", |_: &mut Vm, _: Val<Vec<Param<1>>>| -> Result<Option<Param<1>>, Fail> { Ok(None) });
         }),
         ("is declared `fn([T]) -> T?`, but its Rust function is `fn(<description of T>, [T]) -> T?`", |m| {
-            m.vm_function("second", |_: &mut Vm, _: Reflect<0>, _: Val<Vec<Param<0>>>| -> Result<Option<Param<0>>, Ctl> { Ok(None) });
+            m.vm_function("second", |_: &mut Vm, _: Reflect<0>, _: Val<Vec<Param<0>>>| -> Result<Option<Param<0>>, Fail> { Ok(None) });
         }),
         ("is declared `fn([T]) -> T?`, but its Rust function is `fn([int]) -> int?`", |m| {
             m.function("second", |xs: Vec<i64>| xs.get(1).copied());
@@ -2013,7 +2013,7 @@ fn generic_natives_take_type_parameters() {
     }
 
     let mut m = NativeModule::new("gen");
-    m.vm_function("second", |_: &mut Vm, _: Val<Vec<Param<0>>>| -> Result<Option<Param<0>>, Ctl> { Ok(None) });
+    m.vm_function("second", |_: &mut Vm, _: Val<Vec<Param<0>>>| -> Result<Option<Param<0>>, Fail> { Ok(None) });
     let errors = host_module_errors([m]);
     assert!(errors[0].contains("native `gen.second` is generic, so the module must declare it with `native fn`"), "{errors:?}");
 }
@@ -2021,11 +2021,11 @@ fn generic_natives_take_type_parameters() {
 #[test]
 fn reflecting_natives_take_type_descriptions() {
     use sandlang::native::ty::{Param, Reflect};
-    use sandlang::vm::Ctl;
+    use sandlang::vm::Fail;
     use sandlang::vm::Vm;
     let mut m = NativeModule::new("desc");
     m.source("pub native fn describe<reflect T>(x: T) -> str");
-    m.vm_function("describe", |vm: &mut Vm, t: Reflect<0>, _: Param<0>| -> Result<String, Ctl> { Ok(format!("{:?}", t.desc(&vm.heap)?)) });
+    m.vm_function("describe", |vm: &mut Vm, t: Reflect<0>, _: Param<0>| -> Result<String, Fail> { Ok(format!("{:?}", t.desc(&vm.heap)?)) });
     let (r, out, _) = run_src(Config::new().host_modules(HostModules::new([m]).unwrap()), "import desc\nprint(desc.describe([1]))");
     r.unwrap();
     assert_eq!(out, "List(Int)\n");
@@ -2035,11 +2035,11 @@ fn reflecting_natives_take_type_descriptions() {
 fn host_functions_take_and_return_durations_and_never() {
     use jiff::SignedDuration;
     use sandlang::native::ty::Never;
-    use sandlang::vm::{Ctl, Vm};
+    use sandlang::vm::{Fail, Vm};
     let mut m = NativeModule::new("clock");
     m.function("double", |d: SignedDuration| d * 2);
     m.function("forever", || SignedDuration::MAX);
-    m.vm_function("halt", |_: &mut Vm, code: i64| -> Result<Never, Ctl> { Err(Ctl::exit(code as i32)) });
+    m.vm_function("halt", |_: &mut Vm, code: i64| -> Result<Never, Fail> { Err(Fail::exit(code as i32)) });
     let (r, out, _) = run_src(
         Config::new().host_modules(HostModules::new([m.clone()]).unwrap()),
         "import clock\nprint(clock.double(1500ms))\nlet n: int = clock.halt(3)",
@@ -2051,7 +2051,7 @@ fn host_functions_take_and_return_durations_and_never() {
 
 fn quit_module() -> HostModules {
     let mut module = NativeModule::new("quit");
-    module.async_function("now", |code: i64| async move { Err::<(), sandlang::vm::Ctl>(sandlang::vm::Ctl::exit(code as i32)) });
+    module.async_function("now", |code: i64| async move { Err::<(), sandlang::vm::Fail>(sandlang::vm::Fail::exit(code as i32)) });
     HostModules::new([module]).unwrap()
 }
 
@@ -3782,7 +3782,7 @@ fn host_modules_can_define_resources() {
     use sandlang::native::NativeObject;
     use sandlang::native::ty::Val;
     use sandlang::vm::iomem::ResourceSlot;
-    use sandlang::vm::{Ctl, Vm};
+    use sandlang::vm::{Fail, Vm};
 
     /// A pooled connection.
     #[derive(sandlang::SandObject)]
@@ -3806,7 +3806,7 @@ fn host_modules_can_define_resources() {
         let slot = vm.resource_slot()?;
         Ok(Conn { slot: Some(slot), closed: c.clone() })
     });
-    m.vm_function("Conn.close", |vm: &mut Vm, conn: Val<Conn>| -> Result<(), Ctl> {
+    m.vm_function("Conn.close", |vm: &mut Vm, conn: Val<Conn>| -> Result<(), Fail> {
         let conn = conn.get_mut(&mut vm.heap)?;
         if conn.slot.take().is_some() {
             conn.closed.fetch_add(1, Ordering::Relaxed);
@@ -3827,19 +3827,58 @@ fn host_errors_are_err_values_and_aborts_end_the_run() {
     use sandlang::native::convert::HostError;
     use sandlang::native::func::Later;
     use sandlang::vm::WaitKind;
-    use sandlang::vm::{Ctl, Vm};
+    use sandlang::vm::{Fail, Vm};
     let mut m = NativeModule::new("errs");
     m.function("now", || -> Result<i64, HostError> { Err(HostError::new("invalid", "bad input")) });
     m.function("later", || -> Result<Later<i64, HostError>, HostError> {
         Ok(Later::new(WaitKind::Io, async { |_: &mut Vm| Err(HostError::new("io", "broken pipe")) }))
     });
-    m.function("abort", || -> Result<i64, HostError> { Err(Ctl::fail("invalid", "no result").into()) });
+    m.function("abort", || -> Result<i64, HostError> { Err(Fail::new("invalid", "no result").into()) });
     let run = |src: &str| run_src(Config::new().host_modules(HostModules::new([m.clone()]).unwrap()), &format!("import errs\n{src}"));
     let (r, out, _) = run("print(errs.now())\nprint(errs.later())");
     r.unwrap();
     assert_eq!(out, "Err(Error(message: \"bad input\", kind: \"invalid\"))\nErr(Error(message: \"broken pipe\", kind: \"io\"))\n");
     let (r, _, _) = run("print(errs.abort())");
     assert!(matches!(&r, Err(Error::Runtime { message, .. }) if message.contains("no result")), "{r:?}");
+}
+
+#[test]
+fn natives_that_cannot_make_scheduler_requests_return_fail() {
+    use sandlang::native::convert::HostError;
+    use sandlang::native::func::Later;
+    use sandlang::vm::{Fail, Vm, WaitKind};
+    let mut m = NativeModule::new("fails");
+    m.function("stop", || -> Result<i64, Fail> { Err(Fail::new("invalid", "no result")) });
+    m.function("later_exit", || -> Result<Later<i64, Fail>, Fail> {
+        Ok(Later::new(WaitKind::Io, async { |_: &mut Vm| Err(Fail::exit(7)) }))
+    });
+    m.async_function("async_ok", || async { Ok::<i64, HostError<Fail>>(4) });
+    m.async_function("async_err", || async { Err::<i64, HostError<Fail>>(HostError::new("io", "broken pipe")) });
+    m.async_function("async_stop", || async { Err::<i64, Fail>(Fail::new("invalid", "no result")) });
+    let run = |src: &str| run_src(Config::new().host_modules(HostModules::new([m.clone()]).unwrap()), &format!("import fails\n{src}"));
+
+    let (r, out, _) = run("print(fails.async_ok())\nprint(fails.async_err())");
+    r.unwrap();
+    assert_eq!(out, "Ok(4)\nErr(Error(message: \"broken pipe\", kind: \"io\"))\n");
+
+    for call in ["fails.stop()", "fails.async_stop()"] {
+        let (r, _, _) = run(&format!("print({call})"));
+        assert!(matches!(&r, Err(Error::Runtime { message, .. }) if message.contains("no result")), "{call}: {r:?}");
+    }
+
+    let (r, _, _) = run("print(fails.later_exit())");
+    assert_eq!(r.unwrap().exit_code, 7);
+}
+
+#[test]
+fn host_error_closures_need_no_return_annotation() {
+    use sandlang::native::convert::HostError;
+    let mut m = NativeModule::new("inferred");
+    m.function("positive", |n: i64| if n > 0 { Ok(n) } else { Err(HostError::new("invalid", "not positive")) });
+    let config = Config::new().host_modules(HostModules::new([m]).unwrap());
+    let (r, out, _) = run_src(config, "import inferred\nprint(inferred.positive(1))\nprint(inferred.positive(0))");
+    r.unwrap();
+    assert_eq!(out, "Ok(1)\nErr(Error(message: \"not positive\", kind: \"invalid\"))\n");
 }
 
 #[test]
@@ -3881,7 +3920,7 @@ fn retry_stress_fails_a_check_in_the_native_body() {
     let calls = Arc::new(AtomicUsize::new(0));
     let c = calls.clone();
     let mut m = NativeModule::new("probe");
-    m.vm_function("touch", move |vm: &mut Vm, s: String| -> Result<i64, sandlang::vm::Ctl> {
+    m.vm_function("touch", move |vm: &mut Vm, s: String| -> Result<i64, sandlang::vm::Fail> {
         c.fetch_add(1, Ordering::SeqCst);
         vm.check_memory(s.len())?;
         Ok(s.len() as i64)

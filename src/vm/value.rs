@@ -1349,18 +1349,18 @@ impl DescTemplate {
     }
 
     /// Substitutes `args` for `self.params`, retaining `handles` for GC tracing.
-    pub(crate) fn instantiate(&self, args: &[&TypeDescObj], handles: Box<[Value]>) -> Result<TypeDescObj, crate::vm::Ctl> {
+    pub(crate) fn instantiate(&self, args: &[&TypeDescObj], handles: Box<[Value]>) -> Result<TypeDescObj, crate::vm::Fail> {
         let depth = self.depth + args.iter().map(|a| a.depth()).max().unwrap_or(0);
         if depth > MAX_DESC_DEPTH {
-            return Err(crate::vm::Ctl::fail("limit", "the description of a type argument is nested too deeply"));
+            return Err(crate::vm::Fail::new("limit", "the description of a type argument is nested too deeply"));
         }
         if args.len() != self.params.len() {
-            return Err(crate::vm::Ctl::internal("a type description template has the wrong number of arguments"));
+            return Err(crate::vm::Fail::internal("a type description template has the wrong number of arguments"));
         }
         let mut b = TemplateInstantiator { t: self, args, memo: FxHashMap::default(), allocated_bytes: 0, missing: false };
         let desc = b.node(&self.desc);
         if b.missing {
-            return Err(crate::vm::Ctl::internal("a type description template has no argument for a type parameter"));
+            return Err(crate::vm::Fail::internal("a type description template has no argument for a type parameter"));
         }
         let instantiated =
             InstantiatedDesc { bytes: u32::try_from(b.allocated_bytes).unwrap_or(u32::MAX), depth: depth as u16, args: handles };

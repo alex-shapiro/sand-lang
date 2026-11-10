@@ -10,7 +10,7 @@ mod common;
 use common::{rt, run_with};
 use sandlang::engine::{Config, Engine, Error, HostModules, InterruptHandle, LimitKind, Limits, MemorySink, Outcome};
 use sandlang::native::NativeModule;
-use sandlang::vm::{Ctl, Vm};
+use sandlang::vm::{Fail, Vm};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -309,7 +309,7 @@ fn interrupt_stops_a_big_json_parse() {
 fn host_natives_can_charge_and_be_stopped() {
     // A raw native that works forever, charging the meter as it goes.
     let mut m = NativeModule::new("busy");
-    m.vm_function("spin", |vm: &mut Vm| -> Result<i64, Ctl> {
+    m.vm_function("spin", |vm: &mut Vm| -> Result<i64, Fail> {
         let mut n: i64 = 0;
         loop {
             vm.charge(1)?;
@@ -338,7 +338,7 @@ fn natives_stop_exactly_at_the_instruction_limit() {
     let granted = Arc::new(AtomicU64::new(0));
     let mut m = NativeModule::new("busy");
     let g = granted.clone();
-    m.vm_function("spin", move |vm: &mut Vm| -> Result<i64, Ctl> {
+    m.vm_function("spin", move |vm: &mut Vm| -> Result<i64, Fail> {
         loop {
             vm.charge(1)?;
             g.fetch_add(1, Ordering::Relaxed);

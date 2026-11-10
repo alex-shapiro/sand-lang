@@ -13,7 +13,7 @@ use crate::native::{NativeModule, NativeObject};
 use crate::network::{Listener, NetworkFuture, Stream};
 use crate::vm::WaitKind;
 use crate::vm::iomem::{IoMemory, Reservation, ResourceSlot};
-use crate::vm::{Ctl, Vm};
+use crate::vm::{Fail, Vm};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,8 +35,8 @@ pub(super) fn natives(m: &mut NativeModule) {
     m.bind::<Exchange>();
     m.bind::<Request>();
     m.vm_function("serve", serve);
-    m.vm_function("Server.addr", |vm: &mut Vm, server: Val<Server>| -> Result<net::SocketAddr, Ctl> { Ok(server.get(&vm.heap)?.addr) });
-    m.vm_function("Server.close", |vm: &mut Vm, server: Val<Server>| -> Result<_, Ctl> {
+    m.vm_function("Server.addr", |vm: &mut Vm, server: Val<Server>| -> Result<net::SocketAddr, Fail> { Ok(server.get(&vm.heap)?.addr) });
+    m.vm_function("Server.close", |vm: &mut Vm, server: Val<Server>| -> Result<_, Fail> {
         server.get_mut(&mut vm.heap)?.close();
         Ok(())
     });
@@ -448,7 +448,7 @@ pub(super) struct After {
 }
 
 /// True if the connection is reused for subsequent requests.
-fn after(vm: &Vm, exchange: Val<Exchange>, body: Val<Body>, delimit: Delimit) -> Result<(After, Option<&'static str>), Ctl> {
+fn after(vm: &Vm, exchange: Val<Exchange>, body: Val<Body>, delimit: Delimit) -> Result<(After, Option<&'static str>), Fail> {
     let ex = exchange.get(&vm.heap)?;
     let complete = body.get(&vm.heap)?.is_complete();
     let persists = ex.persists && complete && delimit != Delimit::Close && ex.server.strong_count() > 0;

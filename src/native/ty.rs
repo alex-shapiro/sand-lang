@@ -238,6 +238,18 @@ impl<T: SandType> SandType for Result<T, crate::vm::Ctl> {
     }
 }
 
+impl<T: SandType> SandType for Result<T, crate::vm::Fail> {
+    fn sand_type() -> Type {
+        T::sand_type()
+    }
+}
+
+impl<T: SandType, C> SandType for Result<T, crate::native::convert::HostError<C>> {
+    fn sand_type() -> Type {
+        Type::result(T::sand_type(), Type::error())
+    }
+}
+
 impl<K: SandType, V: SandType> SandType for HashMap<K, V> {
     fn sand_type() -> Type {
         Type::Map(Box::new(K::sand_type()), Box::new(V::sand_type()))

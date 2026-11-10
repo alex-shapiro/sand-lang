@@ -5,7 +5,7 @@ use super::io_kind;
 use crate::native::convert::{HostError, IntoValue};
 use crate::native::func::Later;
 use crate::vm::iomem::{MemoryLimit, Reservation};
-use crate::vm::{Ctl, Vm, WaitKind};
+use crate::vm::{Fail, Vm, WaitKind};
 use std::future::Future;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt};
 
@@ -22,20 +22,23 @@ impl IoFailure {
     }
 }
 
-impl From<IoFailure> for HostError {
-    fn from(e: IoFailure) -> HostError {
+impl<C> From<IoFailure> for HostError<C> {
+    fn from(e: IoFailure) -> HostError<C> {
         HostError::new(e.kind, e.message)
     }
 }
 
 pub(crate) type Suspended<T> = Result<Later<T, HostError>, HostError>;
 
+/// The result of the closure that finishes a suspended call.
+pub(crate) type Finished<T> = Result<T, HostError<Fail>>;
+
 /// Suspends the calling task on `fut` with `wait_kind`. If `fut` returns `Ok`,
 /// runs `ok` on the VM thread to produce the Sand result.
 pub(crate) fn suspend<T: Send + 'static, R: IntoValue + Send + 'static>(
     wait_kind: WaitKind,
     fut: impl Future<Output = Result<T, IoFailure>> + Send + 'static,
-    ok: impl FnOnce(&mut Vm, T) -> Result<R, HostError> + Send + 'static,
+    ok: impl FnOnce(&mut Vm, T) -> Finished<R> + Send + 'static,
 ) -> Suspended<R> {
     Ok(Later::new(wait_kind, async move {
         let r = fut.await;
@@ -55,16 +58,16 @@ impl From<std::io::Error> for IoFailure {
     }
 }
 
-pub(crate) fn utf8(vm: &Vm, data: Vec<u8>) -> Result<Option<String>, Ctl> {
+pub(crate) fn utf8(vm: &Vm, data: Vec<u8>) -> Result<Option<String>, Fail> {
     vm.charge_slow_bytes(data.len())?;
     Ok(String::from_utf8(data).ok())
 }
 
-pub(crate) fn bytes_read(_: &mut Vm, data: Option<Vec<u8>>) -> Result<Vec<u8>, HostError> {
+pub(crate) fn bytes_read(_: &mut Vm, data: Option<Vec<u8>>) -> Finished<Vec<u8>> {
     Ok(data.unwrap_or_default())
 }
 
-pub(crate) fn line_read(vm: &Vm, line: Option<Vec<u8>>, message: &str) -> Result<Option<String>, HostError> {
+pub(crate) fn line_read(vm: &Vm, line: Option<Vec<u8>>, message: &str) -> Finished<Option<String>> {
     let Some(line) = line else { return Ok(None) };
     utf8(vm, line)?.map(Some).ok_or_else(|| HostError::new("invalid", message))
 }
