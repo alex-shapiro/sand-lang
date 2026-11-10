@@ -418,8 +418,7 @@ impl Vm {
                 return Err(Trap::Limit(LimitKind::Memory).into());
             }
             retried_at = Some(at);
-            self.meter.sync(*fuel + tick);
-            *fuel = self.meter.resync();
+            *fuel += tick;
             self.collect_all_garbage(Some(f));
             self.instruction_retried = self.retry_stress;
             if let Err(fail) = self.meter.check() {

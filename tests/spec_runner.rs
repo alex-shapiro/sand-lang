@@ -33,16 +33,14 @@
 
 mod common;
 
-use common::rt;
+use common::{StoppedClock, rt};
 use sandlang::engine::{Config, Engine, Error, HostModules, Limits, MemorySink};
 use sandlang::files::mem::MemFs;
 use sandlang::native::NativeModule;
-use sandlang::platform::{Clock, ClockFuture, SystemTime, UNIX_EPOCH};
 use sandlang::vm::Vm;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
@@ -370,27 +368,6 @@ fn run_file(name: &str, mode: Mode, backend: Backend) {
     }
     if !failures.is_empty() {
         panic!("{} of {ran} cases failed:\n\n{}", failures.len(), failures.join("\n\n"));
-    }
-}
-
-/// A clock that never advances, so that regex work has no time-based charge.
-struct StoppedClock(sandlang::platform::Instant);
-
-impl Clock for StoppedClock {
-    fn wall(&self) -> SystemTime {
-        UNIX_EPOCH
-    }
-    fn now(&self) -> sandlang::platform::Instant {
-        self.0
-    }
-    fn cpu_time(&self) -> Duration {
-        Duration::ZERO
-    }
-    fn sleep(&self, _duration: Duration) -> ClockFuture {
-        Box::pin(std::future::ready(()))
-    }
-    fn yield_now(&self) -> ClockFuture {
-        Box::pin(std::future::ready(()))
     }
 }
 

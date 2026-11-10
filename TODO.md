@@ -59,6 +59,12 @@ The host cannot rely on engine limits, stability, or control.
       cost model, or check the time limits without charging fuel. The compile
       charge also uses `memory_usage`, which differs between CPUs and pointer
       widths.
+- [ ] ❓ _Scheduling._ End a slice when an instruction spends the slice's fuel. The
+      interpreter applies instruction charges only at native calls, so a task
+      can spend far more than its 20,000-unit slice while other tasks wait. A
+      loop of lookups with a 6,400-byte key spent about 300,000 units in a
+      slice. Fix this before the journal lands, because a change to slice
+      boundaries makes paused runs incompatible.
 - [ ] ❓ _Testing._ Compare fuel across hash seeds for the spec suite. This needs
       a test-only way to set the hash seed.
 - [ ] ❓ _Embedding._ Convert derived `SandEnum` and `SandStruct` values iteratively with an

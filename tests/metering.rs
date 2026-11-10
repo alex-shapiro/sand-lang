@@ -7,10 +7,9 @@
 
 mod common;
 
-use common::{rt, run_with};
+use common::{StoppedClock, rt, run_with};
 use sandlang::engine::{Config, Engine, Error, HostModules, InterruptHandle, LimitKind, Limits, MemorySink, Outcome};
 use sandlang::native::NativeModule;
-use sandlang::platform::{Clock, ClockFuture, SystemTime, UNIX_EPOCH};
 use sandlang::vm::{Fail, Vm};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
@@ -846,27 +845,6 @@ fn fuel_probe() -> NativeModule {
     m
 }
 
-/// A clock that never advances, so that regex work has no time-based charge.
-struct StoppedClock(sandlang::platform::Instant);
-
-impl Clock for StoppedClock {
-    fn wall(&self) -> SystemTime {
-        UNIX_EPOCH
-    }
-    fn now(&self) -> sandlang::platform::Instant {
-        self.0
-    }
-    fn cpu_time(&self) -> Duration {
-        Duration::ZERO
-    }
-    fn sleep(&self, _duration: Duration) -> ClockFuture {
-        Box::pin(std::future::ready(()))
-    }
-    fn yield_now(&self) -> ClockFuture {
-        Box::pin(std::future::ready(()))
-    }
-}
-
 /// Runs `src` with and without forced retries, and checks that the output,
 /// which includes `probe.fuel()`, is the same.
 fn assert_retries_cost_no_fuel(src: &str) {
@@ -921,11 +899,14 @@ fn a_retried_instruction_keeps_the_rest_of_its_slice() {
     assert_retries_cost_no_fuel(
         r#"import probe
 var order = ""
+let long_key = "k".repeat(6400)
 fn work(name: str) {
     var m: [str: int] = [:]
-    for i in 0..12000 {
-        m["key"] = i
-        if i % 1000 == 0 { order += name }
+    for i in 0..3000 {
+        m[long_key] = i
+        let _ = m.contains(long_key)
+        let text = "\(name)\(i)"
+        if i % 100 == 0 { order += text[0..1] }
     }
 }
 let a = spawn work("a")
