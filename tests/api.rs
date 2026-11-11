@@ -1775,14 +1775,13 @@ fn rust_field_defaults_must_be_values_of_declared_types() {
     assert_eq!(
         host_module_errors([m]),
         [
-            "the Rust field `shade` of `lab.Lamp` has a default with the variant `lab.Tint.Light` where `Shade` is expected",
-            "the Rust field `glow` of `lab.Lamp` has a default with the variant `lab.Glow.Off`, which `lab.Glow` does not declare",
-            "the Rust field `flash` of `lab.Lamp` has a default with the variant `lab.Glow.Bright` with a positional payload of 1 values \
-             where its declaration has no fields",
-            "the Rust field `spot` of `lab.Lamp` has a default with a `lab.Spot` with the fields (y) where its declaration has the fields (x)",
-            "the Rust field `beam` of `lab.Lamp` has a default with a `str` where `int` is expected",
-            "the Rust field `halo` of `lab.Lamp` has a default with an `int` where `Spot` is expected",
-            "the Rust field `trail` of `lab.Lamp` has a default with a `str` where `int` is expected",
+            "the Rust field `shade` of `lab.Lamp` has a default that is not a value of `lab.Shade`",
+            "the Rust field `glow` of `lab.Lamp` has a default that is not a value of `lab.Glow`",
+            "the Rust field `flash` of `lab.Lamp` has a default that is not a value of `lab.Glow`",
+            "the Rust field `spot` of `lab.Lamp` has a default that is not a value of `lab.Spot`",
+            "the Rust field `beam` of `lab.Lamp` has a default that is not a value of `lab.Spot`",
+            "the Rust field `halo` of `lab.Lamp` has a default that is not a value of `lab.Spot`",
+            "the Rust field `trail` of `lab.Lamp` has a default that is not a value of `[lab.Spot?]`",
         ]
     );
 }
