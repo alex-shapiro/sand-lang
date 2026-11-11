@@ -12,9 +12,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::mem::{size_of, size_of_val};
 use std::sync::{Arc, OnceLock};
 
-/// The Rust form of a Sand value whose type implements `Encode`.
+/// The Rust form of a Sand value.
 ///
-/// A `Value` does not reference the VM, so it remains valid after the run ends.
+/// Each part of the value whose type does not implement `Encode` is a
+/// [`Value::Opaque`]. A `Value` does not reference the VM, so it remains valid
+/// after the run ends.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum Value {
@@ -36,9 +38,13 @@ pub enum Value {
     List(Vec<Value>),
     /// A tuple.
     Tuple(Vec<Value>),
-    /// A set, with its elements in iteration order.
+    /// A set, with its elements in iteration order. Equality of two `Value`s
+    /// compares the elements in order, although Sand set equality ignores
+    /// order.
     Set(Vec<Value>),
-    /// A map, with its entries in iteration order.
+    /// A map, with its entries in iteration order. Equality of two `Value`s
+    /// compares the entries in order, although Sand map equality ignores
+    /// order.
     Map(Vec<(Value, Value)>),
     /// An integer range: `start..end`, or `start..=end` if `inclusive` is true.
     Range { start: i64, end: i64, inclusive: bool },
@@ -67,7 +73,7 @@ pub enum Value {
     /// A value of a native value type without its own variant, from the
     /// standard library or a host.
     Native(Box<NativeValue>),
-    /// A value whose type does not implement `Encode`, such as a function, a
+    /// A part whose type does not implement `Encode`, such as a function, a
     /// task, a channel, or a native object. It holds only the type name.
     Opaque { type_name: Arc<str> },
 }
@@ -84,7 +90,8 @@ pub struct StructValue {
 /// The name and field names of a struct type. All values of the type share it.
 #[derive(Debug, PartialEq, Eq)]
 pub struct StructDesc {
-    /// The module-qualified type name, such as `shop.Order`.
+    /// The module-qualified type name, such as `shop.Order`. The name is a
+    /// label, as [`NativeValue::type_name`] describes.
     pub name: String,
     /// The field names in declaration order.
     pub fields: Vec<String>,
@@ -103,7 +110,8 @@ pub struct VariantValue {
 /// One variant of an enum type. All values of the variant share it.
 #[derive(Debug, PartialEq, Eq)]
 pub struct VariantDesc {
-    /// The module-qualified enum name, such as `shop.Status`.
+    /// The module-qualified enum name, such as `shop.Status`. The name is a
+    /// label, as [`NativeValue::type_name`] describes.
     pub enum_name: String,
     /// The variant name, such as `Shipped`.
     pub name: String,
@@ -167,6 +175,11 @@ fn field_named<'a>(names: &[String], values: &'a [Value], name: &str) -> Option<
 #[derive(Clone, Debug, PartialEq)]
 pub struct NativeValue {
     /// The module-qualified type name, such as `net.SocketAddr`.
+    ///
+    /// A type name is a label, not a reference to a type. The module of a
+    /// type from the main script is the file stem of the script, such as
+    /// `main.Order` for a type of `main.sand`, so a script can declare a type
+    /// whose name equals the name of a host type.
     pub type_name: Arc<str>,
     /// The `Display` text of the value. [`ValueType::parse`] turns it back
     /// into an equal value.
@@ -229,7 +242,9 @@ impl Value {
 /// [`#[derive(SandStruct)]`](crate::SandStruct) and
 /// [`#[derive(SandEnum)]`](crate::SandEnum) implement it for a struct or an
 /// enum. The `Value` of a derived type is equal to the `Value` that
-/// [`Vm::to_value`] copies for the same Sand value.
+/// [`Vm::to_value`] copies for the same Sand value. A hand-written `encode`
+/// for a type that also converts to a `VmValue` must return the same `Value`
+/// that `Vm::to_value` returns for the converted value.
 ///
 /// ```
 /// # use sandlang::value::{Encode, Value};

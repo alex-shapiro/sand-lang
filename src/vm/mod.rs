@@ -920,12 +920,13 @@ impl Vm {
     /// remains valid after the run ends.
     ///
     /// The copy has each value that `v` contains, with the names of structs,
-    /// enums, and native value types. A value whose type does not implement
-    /// `Encode`, such as a function, becomes
-    /// [`Value::Opaque`](crate::value::Value::Opaque). The copy charges fuel
+    /// enums, and native value types. Each part of `v` whose type does not
+    /// implement `Encode`, such as a function, is a
+    /// [`Value::Opaque`](crate::value::Value::Opaque), so a struct with a
+    /// function field is a struct with an opaque field. The copy charges fuel
     /// and counts its memory against the limits of the run. It fails with kind
     /// `"limit"` if `v` has more than 512 levels of nesting, which includes a
-    /// value that contains itself.
+    /// value that contains itself. Each `Some` counts as one level.
     ///
     /// ```
     /// # use sandlang::native::NativeModule;
