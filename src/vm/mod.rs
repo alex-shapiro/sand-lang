@@ -3,6 +3,7 @@
 pub mod bytecode;
 pub mod compare;
 pub mod display;
+pub(crate) mod encode;
 pub mod heap;
 mod interp;
 pub mod iomem;
@@ -913,6 +914,35 @@ impl Vm {
 
     pub fn new_native_value<T: value::ValueType>(&mut self, x: T) -> VmValue {
         self.heap.alloc(value::value_obj(x))
+    }
+
+    /// Copies `v` out of the VM as a [`Value`](crate::value::Value), which
+    /// remains valid after the run ends.
+    ///
+    /// The copy has each value that `v` contains, with the names of structs,
+    /// enums, and native value types. A value whose type does not implement
+    /// `Encode`, such as a function, becomes
+    /// [`Value::Opaque`](crate::value::Value::Opaque). The copy charges fuel
+    /// and counts its memory against the limits of the run. It fails with kind
+    /// `"limit"` if `v` has more than 512 levels of nesting, which includes a
+    /// value that contains itself.
+    ///
+    /// ```
+    /// # use sandlang::native::NativeModule;
+    /// # use sandlang::native::ty::Param;
+    /// # use sandlang::value::Value;
+    /// # use sandlang::vm::{Fail, Vm};
+    /// let mut module = NativeModule::new("audit");
+    /// module.source("pub native fn record<T>(event: T) -> int");
+    /// module.function("record", |vm: &mut Vm, event: Param<0>| -> Result<i64, Fail> {
+    ///     match vm.to_value(event.raw())? {
+    ///         Value::Struct(event) => Ok(event.fields.len() as i64),
+    ///         _ => Ok(0),
+    ///     }
+    /// });
+    /// ```
+    pub fn to_value(&self, v: VmValue) -> Result<crate::value::Value, Fail> {
+        crate::value::copy_from_vm(self, v)
     }
 
     #[inline]

@@ -547,6 +547,7 @@ pub trait ObjectType: NativeObject + NamedType + SandType {}
 
 /// Type-erased heap representation of an [`ObjectType`].
 pub trait DynObject: Any + Send + sealed::Sealed {
+    fn module_name(&self) -> &'static str;
     fn type_name(&self) -> &'static str;
     fn size(&self) -> usize;
     fn is_resource(&self) -> bool;
@@ -558,6 +559,9 @@ mod sealed {
 }
 
 impl<T: ObjectType> DynObject for T {
+    fn module_name(&self) -> &'static str {
+        T::MODULE
+    }
     fn type_name(&self) -> &'static str {
         T::NAME
     }

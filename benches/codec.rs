@@ -1,4 +1,4 @@
-//! Benchmarks for the `json` module.
+//! Benchmarks for the `json` module and for [`Vm::to_value`].
 //!
 //! `cargo bench --bench codec` reports the best time for each operation over
 //! `BENCH_RUNS` engine runs (default 3). Each run executes each operation
@@ -15,11 +15,16 @@
 //!
 //! `cargo test --benches` runs each program once and checks its output.
 
-use sandlang::engine::{Config, Engine, Error, Limits, MemorySink};
+use sandlang::engine::{Config, Engine, Error, HostModules, Limits, MemorySink};
+use sandlang::native::NativeModule;
+use sandlang::native::ty::Param;
+use sandlang::value::Value;
+use sandlang::vm::{Fail, Vm};
 
 /// Sets up `doc`, a document of `{n}` users.
 const PRELUDE: &str = r#"import json
 import time
+import host
 enum Status { Active, Suspended(reason: str), Banned(int, str) }
 struct Address { street: str, city: str, zip: str? }
 struct User { id: int, name: str, email: str, score: float, active: bool, tags: [str], address: Address, status: Status, logins: [int], meta: [str: int] }
@@ -78,6 +83,7 @@ bench("parse", {n}, () => {
     [p].len()
 })
 bench("encode_value", {n}, () => json.encode(value).len())
+bench("to_value", {n}, () => host.copied_users(doc))
 let addr = Address(street: "1 Main St", city: "Springfield", zip: Some("01234"))
 let atext = json.encode(addr)
 bench("small_encode", 20000, () => {
@@ -137,7 +143,27 @@ const LIMIT_OPS: &[(&str, &str, &str)] = &[
     ("decode", "let text = json.encode(doc)", "let r: Doc = json.decode(text).unwrap()"),
     ("parse", "let text = json.encode(doc)", "let r: json.Json = json.decode(text).unwrap()"),
     ("encode_value", "let value = json.to_json(doc)", "let r = json.encode(value)"),
+    ("to_value", "", "let r = host.copied_users(doc)"),
 ];
+
+/// Returns the module `host`. Its function `copied_users` copies a document
+/// out of the VM with [`Vm::to_value`] and returns the number of users in the
+/// copy.
+fn host_modules() -> HostModules {
+    let mut host = NativeModule::new("host");
+    host.source("pub native fn copied_users<T>(doc: T) -> int");
+    host.function("copied_users", |vm: &mut Vm, doc: Param<0>| -> Result<i64, Fail> {
+        let users = match vm.to_value(doc.raw())? {
+            Value::Struct(doc) => match doc.fields.first() {
+                Some((_, Value::List(users))) => users.len(),
+                _ => 0,
+            },
+            _ => 0,
+        };
+        Ok(users as i64)
+    });
+    HostModules::new([host]).unwrap()
+}
 
 fn fill(template: &str, users: usize, reps: usize) -> String {
     let ops = std::env::var("BENCH_OPS").unwrap_or_default();
@@ -147,7 +173,7 @@ fn fill(template: &str, users: usize, reps: usize) -> String {
 
 fn run(src: &str, limits: Limits) -> Result<String, Error> {
     let out = MemorySink::new();
-    let mut engine = Engine::new(Config::new().limits(limits).stdout(out.clone()));
+    let mut engine = Engine::new(Config::new().limits(limits).host_modules(host_modules()).stdout(out.clone()));
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(engine.run_source("bench.sand", src))?;
     Ok(out.contents())

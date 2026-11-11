@@ -1,5 +1,6 @@
 //! Runtime values and heap objects.
 
+use crate::value::{NativeValue, Value};
 use compact_str::CompactString;
 use hashbrown::HashTable;
 use std::any::Any;
@@ -903,6 +904,11 @@ pub trait ValueType:
     fn size(&self) -> usize {
         std::mem::size_of::<Self>()
     }
+    /// Returns the [`Value`] form of `self`.
+    #[doc(hidden)]
+    fn to_value(&self) -> Value {
+        Value::Native(Box::new(NativeValue { type_name: format!("{}.{}", Self::MODULE, Self::NAME).into(), text: self.to_string() }))
+    }
 }
 
 /// Packs a [`ValueType`] into 16 bytes so it can be stored inline in a heap slot.
@@ -931,6 +937,7 @@ pub trait ValueObj: Any + Send {
     fn value_hash(&self) -> u64;
     fn write_text(&self, out: &mut String);
     fn size(&self) -> usize;
+    fn to_value(&self) -> Value;
 }
 
 impl<T: ValueType> ValueObj for T {
@@ -955,6 +962,9 @@ impl<T: ValueType> ValueObj for T {
     fn size(&self) -> usize {
         ValueType::size(self)
     }
+    fn to_value(&self) -> Value {
+        ValueType::to_value(self)
+    }
 }
 
 type PackedOrder = fn([u64; 2], [u64; 2]) -> std::cmp::Ordering;
@@ -965,6 +975,7 @@ pub struct PackedType {
     order: Option<PackedOrder>,
     pub(crate) ordered_bits: bool,
     write_text: fn([u64; 2], &mut String),
+    to_value: fn([u64; 2]) -> Option<Value>,
     type_id: fn() -> std::any::TypeId,
 }
 
@@ -997,6 +1008,7 @@ impl<T: ValueType> PackedTypeOf<T> {
                 x.write_text(out)
             }
         },
+        to_value: |a| unpack::<T>(a).map(|x| x.to_value()),
         type_id: std::any::TypeId::of::<T>,
     };
 }
@@ -1058,6 +1070,15 @@ impl ValueRef<'_> {
         let mut s = String::new();
         self.write_text(&mut s);
         s
+    }
+
+    /// Returns the [`Value`] form of the value, or `None` if a packed value
+    /// cannot be unpacked.
+    pub(crate) fn to_value(self) -> Option<Value> {
+        match self {
+            ValueRef::Boxed(x) => Some(x.to_value()),
+            ValueRef::Packed(t, a) => (t.to_value)(a),
+        }
     }
 }
 

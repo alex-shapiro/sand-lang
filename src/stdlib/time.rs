@@ -17,6 +17,7 @@ use crate::native::ty::VmVal;
 use crate::native::{Binding, NamedType, NativeModule, NativeObject};
 use crate::platform::{Instant as Monotonic, UNIX_EPOCH};
 use crate::policy::Capability;
+use crate::value::Value;
 use crate::vm::value::{Packing, ValueType};
 use crate::vm::{Ctl, Fail, Vm};
 use jiff::civil::{Date, DateDifference, DateTime, DateTimeDifference, DateTimeRound, Time, TimeRound};
@@ -102,6 +103,9 @@ impl ValueType for Timestamp {
         },
         ordered: true,
     });
+    fn to_value(&self) -> Value {
+        Value::Instant(*self)
+    }
     fn parse(text: &str) -> Result<Self, String> {
         text.parse().map_err(|_| parse_error(text, Self::NAME))
     }
@@ -114,6 +118,9 @@ impl ValueType for DateTime {
         unpack: |[d, t]| unpack_date(d).to_datetime(unpack_time(t)),
         ordered: true,
     });
+    fn to_value(&self) -> Value {
+        Value::PlainDateTime(*self)
+    }
     fn parse(text: &str) -> Result<Self, String> {
         text.parse().map_err(|_| parse_error(text, Self::NAME))
     }
@@ -122,6 +129,9 @@ impl ValueType for DateTime {
 impl ValueType for Date {
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
     const PACKING: Option<Packing<Self>> = Some(Packing { pack: |d| [pack_date(d), 0], unpack: |[d, _]| unpack_date(d), ordered: true });
+    fn to_value(&self) -> Value {
+        Value::PlainDate(*self)
+    }
     fn parse(text: &str) -> Result<Self, String> {
         text.parse().map_err(|_| parse_error(text, Self::NAME))
     }
@@ -130,6 +140,9 @@ impl ValueType for Date {
 impl ValueType for Time {
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
     const PACKING: Option<Packing<Self>> = Some(Packing { pack: |t| [pack_time(t), 0], unpack: |[t, _]| unpack_time(t), ordered: true });
+    fn to_value(&self) -> Value {
+        Value::PlainTime(*self)
+    }
     fn parse(text: &str) -> Result<Self, String> {
         text.parse().map_err(|_| parse_error(text, Self::NAME))
     }
@@ -203,6 +216,9 @@ impl fmt::Display for ZonedDateTime {
 }
 impl ValueType for ZonedDateTime {
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
+    fn to_value(&self) -> Value {
+        Value::ZonedDateTime(Box::new(self.clone()))
+    }
     fn parse(text: &str) -> Result<Self, String> {
         let z = PARSER.parse_zoned_with(&DB, text).map_err(|_| parse_error(text, Self::NAME))?;
         check_supported_zone(z.time_zone())?;
@@ -239,6 +255,9 @@ impl ValueType for PlainYearMonth {
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
     const PACKING: Option<Packing<Self>> =
         Some(Packing { pack: |ym| [pack_date(&ym.0), 0], unpack: |[d, _]| PlainYearMonth(unpack_date(d)), ordered: true });
+    fn to_value(&self) -> Value {
+        Value::PlainYearMonth(*self)
+    }
     fn parse(text: &str) -> Result<Self, String> {
         format!("{text}-01")
             .parse::<Date>()
@@ -280,6 +299,9 @@ impl ValueType for PlainMonthDay {
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
     const PACKING: Option<Packing<Self>> =
         Some(Packing { pack: |md| [pack_date(&md.0), 0], unpack: |[d, _]| PlainMonthDay(unpack_date(d)), ordered: true });
+    fn to_value(&self) -> Value {
+        Value::PlainMonthDay(*self)
+    }
     fn parse(text: &str) -> Result<Self, String> {
         let short = text.strip_prefix("--").unwrap_or(text);
         let two_digits = |s: &str| (s.len() == 2 && s.bytes().all(|b| b.is_ascii_digit())).then(|| s.parse::<i8>().ok()).flatten();
@@ -366,6 +388,9 @@ impl fmt::Display for Span {
     }
 }
 impl ValueType for Span {
+    fn to_value(&self) -> Value {
+        Value::Span(Box::new(*self))
+    }
     fn parse(text: &str) -> Result<Self, String> {
         text.parse().and_then(Span::new).map_err(|_| parse_error(text, Self::NAME))
     }
@@ -417,6 +442,9 @@ impl fmt::Display for TimeZone {
     }
 }
 impl ValueType for TimeZone {
+    fn to_value(&self) -> Value {
+        Value::TimeZone(self.clone())
+    }
     fn parse(text: &str) -> Result<Self, String> {
         parse_zone(text).map(TimeZone)
     }

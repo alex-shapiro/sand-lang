@@ -17,6 +17,7 @@ use sandlang::policy::{Capability, Decision, PromptAnswer};
 use sandlang::session::Session;
 use sandlang::stdlib::log::{LogLevel, LogRecord, LogSink};
 use sandlang::stdlib::time::TimeZone;
+use sandlang::value::{NativeValue, Payload, StructValue, Value, VariantValue};
 use sandlang::vm::value::{ValueType, VmValue};
 use sandlang::vm::{Fail, Vm};
 use std::collections::HashMap;
@@ -4085,4 +4086,297 @@ fn rust_bound_field_types_meet_the_requirements_of_their_constructors() {
     m.bind::<Seen>();
     let errors = host_module_errors([m]);
     assert_eq!(errors, ["field `rows` of `Seen`: [int] does not implement `Hash` (required for the elements of Set<[int]>)"]);
+}
+
+// ---------------------------------------------------------------------------
+// Values copied out of the VM
+// ---------------------------------------------------------------------------
+
+/// Runs `src` with the module `host` and the modules in `modules`. The
+/// function `host.copy` copies its argument out of the VM with
+/// [`Vm::to_value`]. Returns the result of the run and the copies.
+fn run_and_copy_values(
+    config: Config,
+    modules: impl IntoIterator<Item = NativeModule>,
+    src: &str,
+) -> (Result<sandlang::engine::Outcome, Error>, Vec<Value>) {
+    use sandlang::native::ty::Param;
+    let copies = Arc::new(Mutex::new(Vec::new()));
+    let copied = copies.clone();
+    let mut host = NativeModule::new("host");
+    host.source("pub native fn copy<T>(value: T)");
+    host.function("copy", move |vm: &mut Vm, value: Param<0>| -> Result<(), Fail> {
+        copied.lock().push(vm.to_value(value.raw())?);
+        Ok(())
+    });
+    let modules = HostModules::new(modules.into_iter().chain([host])).unwrap();
+    let (r, _, _) = run_src(config.host_modules(modules), &format!("import host\n{src}"));
+    let values = std::mem::take(&mut *copies.lock());
+    (r, values)
+}
+
+/// Returns the copies that `src` makes with `host.copy`.
+fn copied_values(src: &str) -> Vec<Value> {
+    let (r, values) = run_and_copy_values(Config::new(), [bank_module(), stats_module()], src);
+    r.unwrap();
+    values
+}
+
+fn struct_value(type_name: &str, fields: impl IntoIterator<Item = (&'static str, Value)>) -> Value {
+    let fields = fields.into_iter().map(|(name, value)| (name.into(), value)).collect();
+    Value::Struct(Box::new(StructValue { type_name: type_name.into(), fields }))
+}
+
+fn variant_value(type_name: &str, name: &str, payload: impl IntoIterator<Item = Value>) -> Value {
+    let payload = Payload::Positional(payload.into_iter().collect());
+    Value::Variant(Box::new(VariantValue { type_name: type_name.into(), name: name.into(), payload }))
+}
+
+fn opaque_value(type_name: &str) -> Value {
+    Value::Opaque { type_name: type_name.into() }
+}
+
+#[test]
+fn to_value_copies_each_kind_of_value() {
+    let values = copied_values(
+        "host.copy(())\nhost.copy(true)\nhost.copy(-7)\nhost.copy(1.5)\nhost.copy(1500ms)\nhost.copy(\"text\")\n\
+         var grown = \"a\"\nfor _ in 0..3 {\n    grown += \"b\"\n}\nhost.copy(grown)\n\
+         host.copy(bytes.from_list([0, 255]))\nhost.copy([1, 2])\nhost.copy((1, \"a\", 2.5))\nhost.copy((1, 2))\n\
+         host.copy(Set([3, 1]))\nhost.copy([\"k\": [1], \"j\": []])\nhost.copy(0..3)\nhost.copy(-1..=1)\n",
+    );
+    let ints = |ints: &[i64]| ints.iter().map(|&i| Value::Int(i)).collect::<Vec<_>>();
+    let expected = [
+        Value::Unit,
+        Value::Bool(true),
+        Value::Int(-7),
+        Value::Float(1.5),
+        Value::Duration(jiff::SignedDuration::from_millis(1500)),
+        Value::Str("text".into()),
+        Value::Str("abbb".into()),
+        Value::Bytes(vec![0, 255]),
+        Value::List(ints(&[1, 2])),
+        Value::Tuple(vec![Value::Int(1), Value::Str("a".into()), Value::Float(2.5)]),
+        Value::Tuple(ints(&[1, 2])),
+        Value::Set(ints(&[3, 1])),
+        Value::Map(vec![(Value::Str("k".into()), Value::List(ints(&[1]))), (Value::Str("j".into()), Value::List(vec![]))]),
+        Value::Range { start: 0, end: 3, inclusive: false },
+        Value::Range { start: -1, end: 1, inclusive: true },
+    ];
+    assert_eq!(values, expected);
+}
+
+#[test]
+fn to_value_names_structs_variants_and_native_value_types() {
+    let values = copied_values(
+        "import bank\nimport json\nstruct Order { id: int, note: str? }\nenum Status { Active, Suspended(reason: str), Banned(int, str) }\n\
+         host.copy(Order(id: 1, note: Some(\"gift\")))\nhost.copy(Order(id: 2, note: None))\n\
+         host.copy(Status.Active)\nhost.copy(Status.Suspended(reason: \"late\"))\nhost.copy(Status.Banned(3, \"spam\"))\n\
+         let failed: Result<int> = Err(Error(kind: \"io\", message: \"closed\"))\nhost.copy(failed)\n\
+         let done: Result<Order> = Ok(Order(id: 3, note: None))\nhost.copy(done)\n\
+         host.copy(json.Json.Null)\nhost.copy(json.Json.Arr([json.Json.Int(1)]))\nhost.copy(bank.cents(1250))\nhost.copy(bank.cell(2, 3))\n",
+    );
+    let str_ = |s: &str| Value::Str(s.into());
+    let (some, none) = (|value| variant_value("Option", "Some", [value]), || variant_value("Option", "None", []));
+    let order = |id, note| struct_value("main.Order", [("id", Value::Int(id)), ("note", note)]);
+    let native = |type_name: &str, text: &str| Value::Native(Box::new(NativeValue { type_name: type_name.into(), text: text.into() }));
+    let suspended = Value::Variant(Box::new(VariantValue {
+        type_name: "main.Status".into(),
+        name: "Suspended".into(),
+        payload: Payload::Named(vec![("reason".into(), str_("late"))]),
+    }));
+    let expected = [
+        order(1, some(str_("gift"))),
+        order(2, none()),
+        variant_value("main.Status", "Active", []),
+        suspended,
+        variant_value("main.Status", "Banned", [Value::Int(3), str_("spam")]),
+        variant_value("Result", "Err", [struct_value("Error", [("message", str_("closed")), ("kind", str_("io"))])]),
+        variant_value("Result", "Ok", [order(3, none())]),
+        variant_value("json.Json", "Null", []),
+        variant_value("json.Json", "Arr", [Value::List(vec![variant_value("json.Json", "Int", [Value::Int(1)])])]),
+        native("bank.Money", "12.50"),
+        native("bank.Cell", "2:3"),
+    ];
+    assert_eq!(values, expected);
+}
+
+#[test]
+fn to_value_gives_each_time_type_its_own_variant() {
+    use sandlang::stdlib::time::{PlainMonthDay, PlainYearMonth, Span, ZonedDateTime};
+    let values = copied_values(
+        "import time\nhost.copy(time.Instant.parse(\"2024-03-10T07:30:00Z\")?)\nhost.copy(time.PlainDateTime.parse(\"2024-03-10T03:30:00\")?)\n\
+         host.copy(time.PlainDate.parse(\"2024-03-10\")?)\nhost.copy(time.PlainTime.parse(\"03:30:00\")?)\n\
+         host.copy(time.PlainYearMonth(2024, 3)?)\nhost.copy(time.PlainMonthDay(3, 10)?)\n\
+         host.copy(time.ZonedDateTime.parse(\"2024-03-10T03:30:00-04:00[America/New_York]\")?)\n\
+         host.copy(time.Span.parse(\"P1DT2H\")?)\nhost.copy(time.TimeZone(\"Europe/Paris\")?)\n",
+    );
+    let expected = [
+        Value::Instant("2024-03-10T07:30:00Z".parse().unwrap()),
+        Value::PlainDateTime("2024-03-10T03:30:00".parse().unwrap()),
+        Value::PlainDate("2024-03-10".parse().unwrap()),
+        Value::PlainTime("03:30:00".parse().unwrap()),
+        Value::PlainYearMonth(PlainYearMonth::parse("2024-03").unwrap()),
+        Value::PlainMonthDay(PlainMonthDay::new(3, 10).unwrap()),
+        Value::ZonedDateTime(Box::new(ZonedDateTime::parse("2024-03-10T03:30:00-04:00[America/New_York]").unwrap())),
+        Value::Span(Box::new(Span::parse("P1DT2H").unwrap())),
+        Value::TimeZone(TimeZone::parse("Europe/Paris").unwrap()),
+    ];
+    assert_eq!(values, expected);
+}
+
+#[test]
+fn to_value_keeps_the_shape_of_a_container_that_holds_values_without_encode() {
+    let values = copied_values(
+        "import stats\nimport time\nstruct Job { name: str, run: fn() -> int }\nfn one() -> int { 1 }\n\
+         let ch: Channel<int> = Channel()\nlet t = spawn 1 + 2\n\
+         host.copy(Job(name: \"first\", run: one))\nhost.copy([one, () => 2])\nhost.copy((1, ch, t))\n\
+         host.copy([\"a\": stats.counter()])\nhost.copy(Some(time.Stopwatch()))\nprint(t.wait())\n",
+    );
+    let expected = [
+        struct_value("main.Job", [("name", Value::Str("first".into())), ("run", opaque_value("fn"))]),
+        Value::List(vec![opaque_value("fn"), opaque_value("fn")]),
+        Value::Tuple(vec![Value::Int(1), opaque_value("Channel"), opaque_value("Task")]),
+        Value::Map(vec![(Value::Str("a".into()), opaque_value("stats.Counter"))]),
+        variant_value("Option", "Some", [opaque_value("time.Stopwatch")]),
+    ];
+    assert_eq!(values, expected);
+}
+
+#[test]
+fn to_value_copies_map_keys_that_are_not_strings() {
+    let values = copied_values(
+        "import bank\nenum Side { Left, Right }\nstruct Point { x: int, y: int }\n\
+         host.copy([2: \"two\", 1: \"one\"])\nhost.copy([(1, 2): true])\nhost.copy([Side.Right: 1.5])\nhost.copy([false: ()])\n\
+         host.copy([Point(x: 1, y: 2): [1]])\nhost.copy([bank.cents(5): Some(1)])\nhost.copy([(1, \"a\"): 3])\n",
+    );
+    let str_ = |s: &str| Value::Str(s.into());
+    let pair = Value::Tuple(vec![Value::Int(1), Value::Int(2)]);
+    let point = struct_value("main.Point", [("x", Value::Int(1)), ("y", Value::Int(2))]);
+    let money = Value::Native(Box::new(NativeValue { type_name: "bank.Money".into(), text: "0.05".into() }));
+    let expected = [
+        Value::Map(vec![(Value::Int(2), str_("two")), (Value::Int(1), str_("one"))]),
+        Value::Map(vec![(pair, Value::Bool(true))]),
+        Value::Map(vec![(variant_value("main.Side", "Right", []), Value::Float(1.5))]),
+        Value::Map(vec![(Value::Bool(false), Value::Unit)]),
+        Value::Map(vec![(point, Value::List(vec![Value::Int(1)]))]),
+        Value::Map(vec![(money, variant_value("Option", "Some", [Value::Int(1)]))]),
+        Value::Map(vec![(Value::Tuple(vec![Value::Int(1), str_("a")]), Value::Int(3))]),
+    ];
+    assert_eq!(values, expected);
+}
+
+#[test]
+fn to_value_shares_each_name_within_a_copy() {
+    let values = copied_values(
+        "import bank\nstruct Order { id: int }\nenum Status { Active, Banned(code: int) }\nfn one() -> int { 1 }\n\
+         host.copy(([Order(id: 1), Order(id: 2)], [Status.Active, Status.Banned(code: 1), Status.Active, Status.Banned(code: 2)], \
+         [bank.cents(1), bank.cents(2)], [one, one], [Some(1), None, Some(2)]))\n",
+    );
+    let [Value::Tuple(lists)] = &values[..] else { panic!("{values:?}") };
+    let items = |i: usize| match &lists[i] {
+        Value::List(items) => items,
+        other => panic!("{other:?}"),
+    };
+    let same = |a: &Arc<str>, b: &Arc<str>| Arc::ptr_eq(a, b);
+    let [Value::Struct(first), Value::Struct(second)] = &items(0)[..] else { panic!("{:?}", items(0)) };
+    assert!(same(&first.type_name, &second.type_name) && same(&first.fields[0].0, &second.fields[0].0), "{first:?} {second:?}");
+    let statuses: Vec<&VariantValue> = items(1).iter().map(|v| if let Value::Variant(v) = v { &**v } else { panic!("{v:?}") }).collect();
+    assert!(statuses.iter().all(|v| same(&v.type_name, &statuses[0].type_name)), "{statuses:?}");
+    assert!(same(&statuses[0].name, &statuses[2].name) && same(&statuses[1].name, &statuses[3].name), "{statuses:?}");
+    let (Payload::Named(a), Payload::Named(b)) = (&statuses[1].payload, &statuses[3].payload) else { panic!("{statuses:?}") };
+    assert!(same(&a[0].0, &b[0].0), "{statuses:?}");
+    let [Value::Native(first), Value::Native(second)] = &items(2)[..] else { panic!("{:?}", items(2)) };
+    assert!(same(&first.type_name, &second.type_name), "{first:?} {second:?}");
+    let [Value::Opaque { type_name: first }, Value::Opaque { type_name: second }] = &items(3)[..] else { panic!("{:?}", items(3)) };
+    assert!(same(first, second));
+    let [Value::Variant(some), Value::Variant(none), Value::Variant(other)] = &items(4)[..] else { panic!("{:?}", items(4)) };
+    assert!(same(&some.type_name, &none.type_name) && same(&some.name, &other.name), "{some:?} {none:?} {other:?}");
+}
+
+/// Sets up `chain(n)`, a value that nests `n` structs, and `ring`, a struct
+/// that contains itself.
+const NESTED_VALUES: &str = "struct Link { var next: Link? }\nfn chain(n: int) -> Link {\n    var link = Link(next: None)\n    \
+                             for _ in 1..n {\n        link = Link(next: Some(link))\n    }\n    link\n}\n\
+                             let ring = Link(next: None)\nring.next = Some(ring)\n";
+
+#[test]
+fn to_value_fails_beyond_512_levels_of_nesting() {
+    // Each `Link` after the first adds a struct level and a `Some` level.
+    let (r, values) = run_and_copy_values(Config::new(), [], &format!("{NESTED_VALUES}host.copy([chain(256)])\nhost.copy(chain(256))"));
+    r.unwrap();
+    let mut depth = 0;
+    let mut value = &values[0];
+    loop {
+        value = match value {
+            Value::List(items) => &items[0],
+            Value::Struct(link) => &link.fields[0].1,
+            Value::Variant(option) => match &option.payload {
+                Payload::Positional(payload) if !payload.is_empty() => &payload[0],
+                _ => break,
+            },
+            other => panic!("{other:?}"),
+        };
+        depth += 1;
+    }
+    assert_eq!(depth, 512);
+    for src in ["host.copy([[chain(256)]])", "host.copy(chain(257))", "host.copy(ring)", "let rings = [ring]\nhost.copy(rings)"] {
+        let (r, values) = run_and_copy_values(Config::new(), [], &format!("{NESTED_VALUES}{src}"));
+        let Err(Error::Runtime { message, .. }) = r else { panic!("{src}: expected a runtime error, got {r:?}") };
+        assert_eq!(message, "limit: value too deeply nested to copy", "{src}");
+        assert!(values.is_empty(), "{src}");
+    }
+}
+
+#[test]
+fn encode_deep_and_cyclic_values_on_a_small_stack() {
+    let run = |src: String| {
+        let run = move || run_and_copy_values(Config::new(), [], &format!("import json\n{NESTED_VALUES}{src}"));
+        let (r, values) = std::thread::Builder::new().stack_size(512 << 10).spawn(run).unwrap().join().unwrap();
+        (r, values.len())
+    };
+    let (r, copies) =
+        run("let deep = chain(512)\nlet text = json.encode(deep)\nprint(text.len())\nprint(json.encode(json.to_json(deep)) == text)\n\
+                           host.copy([chain(256)])\n"
+            .to_string());
+    r.unwrap();
+    assert_eq!(copies, 1);
+    for (operation, message) in [
+        ("json.encode", "limit: value too deeply nested to encode as JSON"),
+        ("json.to_json", "limit: value too deeply nested to convert to JSON"),
+        ("host.copy", "limit: value too deeply nested to copy"),
+    ] {
+        for value in ["chain(513)", "ring"] {
+            let (r, _) = run(format!("{operation}({value})"));
+            let Err(Error::Runtime { message: actual, .. }) = r else {
+                panic!("{operation}({value}): expected a runtime error, got {r:?}")
+            };
+            assert_eq!(actual, message, "{operation}({value})");
+        }
+    }
+}
+
+#[test]
+fn to_value_charges_fuel_for_each_value_and_for_copied_bytes() {
+    // Each program builds its value for less than 100,000 units of fuel.
+    let rows = "let row = (0..100).to_list()\nlet rows = []\nfor _ in 0..5000 {\n    rows.push(row)\n}\n";
+    let texts = "let text = \"x\".repeat(64000)\nlet texts = []\nfor _ in 0..5000 {\n    texts.push(text)\n}\n";
+    for (setup, value) in [(rows, "rows"), (texts, "texts")] {
+        let limited = || Config::new().limits(Limits { max_instructions: Some(400_000), ..Limits::default() });
+        let (r, _) = run_and_copy_values(limited(), [], setup);
+        r.unwrap();
+        let (r, values) = run_and_copy_values(limited(), [], &format!("{setup}host.copy({value})"));
+        assert!(matches!(r, Err(Error::Limit(LimitKind::Instructions))), "{value}: {r:?}");
+        assert!(values.is_empty(), "{value}");
+    }
+}
+
+#[test]
+fn to_value_counts_its_memory_against_the_memory_limit() {
+    for (big, value) in [("(0..100000).to_list()", "list"), ("\"x\".repeat(4000000)", "str"), ("\"x\".repeat(4000000).bytes()", "bytes")] {
+        let src = format!("let big = {big}\nlet shared = []\nfor _ in 0..1000 {{\n    shared.push(big)\n}}\nhost.copy(shared)");
+        let config = Config::new().limits(Limits { max_memory: Some(64 << 20), ..Limits::default() });
+        let (r, values) = run_and_copy_values(config, [], &src);
+        assert!(matches!(r, Err(Error::Limit(LimitKind::Memory))), "{value}: {r:?}");
+        assert!(values.is_empty(), "{value}");
+    }
 }
