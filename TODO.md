@@ -420,6 +420,14 @@ Visible defects that rarely block users.
 - [ ] ❓ Return a typed error from `format_source_with`. This function returns a
       `String` error today. Callers must parse the error message to distinguish
       syntax errors, fuel exhaustion, timeouts, and interrupts.
+- [ ] ❓ Read a Sand `Json` value into a Rust `Json` through `encode::walk`.
+      `stdlib/json.rs` keeps a second walk (`Walk`, `Reader`, `Writer`) for
+      `FromVmValue` and `IntoVmValue` of `Json`. `Reader` cannot be a
+      `JsonOutput` today without a change of its fuel and memory accounting. It
+      charges one unit for each `Json` value, but `JsonSink` reports a `Json`
+      variant and its payload as two values. It also charges for the entries
+      of an object when the object begins, and `Begin::Object` has no entry
+      count.
 
 ### Policy
 

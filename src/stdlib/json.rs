@@ -11,7 +11,7 @@ use crate::types::traits;
 use crate::value::{Encode, Value};
 use crate::vm::bytecode::{Program, RtIds};
 use crate::vm::compare::{hash_key, str_hash};
-use crate::vm::encode::{self, Container, EncodeSink, EnumVariant, Leaf, MAX_DEPTH, Opened, Role};
+use crate::vm::encode::{self, Container, EncodeSink, Leaf, MAX_DEPTH, Opened, Role, VariantRef};
 use crate::vm::heap::{Heap, Staging};
 use crate::vm::meter::{BYTES_PER_UNIT, Meter, SLOW_BYTES_PER_UNIT, Scratch};
 use crate::vm::value::{
@@ -1669,7 +1669,7 @@ impl<'h, O: JsonOutput<'h>> EncodeSink<'h> for JsonSink<'h, O> {
             Leaf::Tag(variant) if variant.id == self.rt_ids.none || variant.id == self.json_ids.null => Scalar::Null,
             Leaf::Tag(variant) => Scalar::Str(JsonText { variant_id: Some(variant.id), ..JsonText::new(variant.name) }),
             Leaf::Native(native) => Scalar::Str(JsonText::new(native.text())),
-            Leaf::Opaque(kind) => return Err(without_trait(kind.kind_name(), "encoded as JSON", "Encode")),
+            Leaf::Opaque { kind_name, .. } => return Err(without_trait(kind_name, "encoded as JSON", "Encode")),
         };
         self.out.scalar(parent, scalar)
     }
@@ -1696,7 +1696,7 @@ impl<'h, O: JsonOutput<'h>> EncodeSink<'h> for JsonSink<'h, O> {
         let members = self.begin(match container {
             Container::Map => Begin::Object,
             Container::Struct { ty, .. } => Begin::Fields(&ty.fields),
-            Container::Variant(EnumVariant { field_names: Some(names), .. }) => Begin::Fields(names),
+            Container::Variant(VariantRef { field_names: Some(names), .. }) => Begin::Fields(names),
             _ => Begin::Array(len),
         })?;
         Ok(Opened::Children(OpenJson { members, variant }))

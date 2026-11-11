@@ -1,9 +1,8 @@
 //! The walk over a Sand value that reports each value to an [`EncodeSink`].
 //!
 //! The Sand trait `Encode` defines the values that can leave the VM. [`walk`]
-//! is the only code that reads such a value from the VM heap. A sink gives the
-//! value a form outside the heap, such as JSON text or a
-//! [`Value`](crate::value::Value).
+//! reads such a value from the VM heap for a sink. The sink gives the value
+//! another form, such as JSON text or a [`Value`](crate::value::Value).
 //!
 //! The walk keeps its position in each open container on a stack of frames
 //! that it allocates, so its use of the Rust stack does not grow with the
@@ -30,7 +29,9 @@ const INLINE_FRAMES: usize = 4;
 ///
 /// The walk reports the children of a container in order, between the call of
 /// [`EncodeSink::open`] and the call of [`EncodeSink::close`] for that
-/// container. Each child has a [`Role`] in its container.
+/// container. Each child has a [`Role`] in its container. The walk reports a
+/// field value only with the name of its field. It reports no value beyond
+/// the field names of a struct type or of a variant.
 pub(crate) trait EncodeSink<'h> {
     /// The state of a container whose children the walk reports.
     type Open;
@@ -88,11 +89,15 @@ pub(crate) enum Leaf<'h> {
         inclusive: bool,
     },
     /// An enum variant without a payload.
-    Tag(EnumVariant<'h>),
+    Tag(VariantRef<'h>),
     /// A value of a native value type.
     Native(ValueRef<'h>),
-    /// A value whose type does not implement `Encode`.
-    Opaque(OpaqueKind),
+    /// A value whose type does not implement `Encode`. `kind_name` is the
+    /// [`Obj::kind_name`] of the value.
+    Opaque {
+        kind: OpaqueKind,
+        kind_name: &'static str,
+    },
 }
 
 /// A value with children.
@@ -107,12 +112,12 @@ pub(crate) enum Container<'h> {
         ty: &'h StructRt,
     },
     /// An enum variant with a payload.
-    Variant(EnumVariant<'h>),
+    Variant(VariantRef<'h>),
 }
 
 /// An enum variant and its names.
 #[derive(Clone, Copy)]
-pub(crate) struct EnumVariant<'h> {
+pub(crate) struct VariantRef<'h> {
     pub value: VmValue,
     /// The runtime variant ID.
     pub id: u32,
@@ -123,7 +128,7 @@ pub(crate) struct EnumVariant<'h> {
     types: &'h [StructRt],
 }
 
-impl<'h> EnumVariant<'h> {
+impl<'h> VariantRef<'h> {
     pub(crate) fn enum_type(&self) -> &'h StructRt {
         &self.types[self.enum_def as usize]
     }
@@ -142,19 +147,6 @@ pub(crate) enum OpaqueKind {
     },
     /// A heap object that a script cannot hold.
     Internal,
-}
-
-impl OpaqueKind {
-    /// Returns the kind name that [`Obj::kind_name`] gives the value.
-    pub(crate) fn kind_name(self) -> &'static str {
-        match self {
-            OpaqueKind::Function => "function",
-            OpaqueKind::Task => "task",
-            OpaqueKind::Channel => "channel",
-            OpaqueKind::Object { .. } => "native object",
-            OpaqueKind::Internal => "internal object",
-        }
-    }
 }
 
 /// The answer of a sink to [`EncodeSink::open`].
@@ -179,9 +171,9 @@ pub(crate) fn walk<'h, S: EncodeSink<'h>>(
     let mut outer = SmallVec::<[Frame<'h, S::Open>; INLINE_FRAMES]>::new();
     let mut top = Frame { children: Children::One(Role::Root, Some(value)), open: root };
     // The payload that the walk reports before the next child of `top`.
-    let mut first = None;
+    let mut payload = None;
     loop {
-        let (role, child) = match first.take() {
+        let (role, child) = match payload.take() {
             Some(payload) => (Role::Payload, payload),
             None => match top.children.next() {
                 Some(child) => child,
@@ -201,7 +193,7 @@ pub(crate) fn walk<'h, S: EncodeSink<'h>>(
                 }
                 outer.push(std::mem::replace(&mut top, frame));
             }
-            Reported::Unwrapped(payload) => first = Some(payload),
+            Reported::Unwrapped(unwrapped) => payload = Some(unwrapped),
         }
     }
 }
@@ -226,13 +218,14 @@ fn report<'h, S: EncodeSink<'h>>(
     role: Role<'h>,
     value: VmValue,
 ) -> Result<Reported<'h, S::Open>, Fail> {
+    let opaque = |obj: &Obj, kind| Leaf::Opaque { kind, kind_name: obj.kind_name() };
     let (container, len, mut children) = match value {
         VmValue::Unit | VmValue::Uninit => return leaf(sink, parent, role, Leaf::Unit),
         VmValue::Bool(b) => return leaf(sink, parent, role, Leaf::Bool(b)),
         VmValue::Int(i) => return leaf(sink, parent, role, Leaf::Int(i)),
         VmValue::Float(f) => return leaf(sink, parent, role, Leaf::Float(f)),
         VmValue::Dur(d) => return leaf(sink, parent, role, Leaf::Duration(d)),
-        VmValue::Tag(id) => return leaf(sink, parent, role, Leaf::Tag(enum_variant(prog, value, id)?)),
+        VmValue::Tag(id) => return leaf(sink, parent, role, Leaf::Tag(variant_ref(prog, value, id)?)),
         VmValue::Pair(first, second) => (Container::Tuple, 2, Children::Pair(first, second)),
         VmValue::Obj(handle) => match heap.obj(handle) {
             Obj::Str(s) => return leaf(sink, parent, role, Leaf::Str { text: s, heap_str: Some(value) }),
@@ -247,7 +240,7 @@ fn report<'h, S: EncodeSink<'h>>(
                 fields(Container::Struct { def: *def, ty }, &ty.fields, values)
             }
             Obj::Variant(id, values) => {
-                let variant = enum_variant(prog, value, *id)?;
+                let variant = variant_ref(prog, value, *id)?;
                 match variant.field_names {
                     Some(names) => fields(Container::Variant(variant), names, values),
                     None => (Container::Variant(variant), values.len(), Children::Items(values.iter())),
@@ -258,14 +251,16 @@ fn report<'h, S: EncodeSink<'h>>(
             }
             Obj::Value(native) => return leaf(sink, parent, role, Leaf::Native(ValueRef::Boxed(&**native))),
             Obj::Packed(ty, bits) => return leaf(sink, parent, role, Leaf::Native(ValueRef::Packed(ty, *bits))),
-            Obj::Closure(..) | Obj::NativeFn(_) | Obj::IterFn(_) => return leaf(sink, parent, role, Leaf::Opaque(OpaqueKind::Function)),
-            Obj::Task(_) => return leaf(sink, parent, role, Leaf::Opaque(OpaqueKind::Task)),
-            Obj::Channel(_) => return leaf(sink, parent, role, Leaf::Opaque(OpaqueKind::Channel)),
-            Obj::Native(object) => {
-                let kind = OpaqueKind::Object { module: object.module_name(), name: object.type_name() };
-                return leaf(sink, parent, role, Leaf::Opaque(kind));
+            obj @ (Obj::Closure(..) | Obj::NativeFn(_) | Obj::IterFn(_)) => {
+                return leaf(sink, parent, role, opaque(obj, OpaqueKind::Function));
             }
-            Obj::TypeDesc(_) | Obj::Cell(_) | Obj::Free(_) => return leaf(sink, parent, role, Leaf::Opaque(OpaqueKind::Internal)),
+            obj @ Obj::Task(_) => return leaf(sink, parent, role, opaque(obj, OpaqueKind::Task)),
+            obj @ Obj::Channel(_) => return leaf(sink, parent, role, opaque(obj, OpaqueKind::Channel)),
+            obj @ Obj::Native(object) => {
+                let kind = OpaqueKind::Object { module: object.module_name(), name: object.type_name() };
+                return leaf(sink, parent, role, opaque(obj, kind));
+            }
+            obj @ (Obj::TypeDesc(_) | Obj::Cell(_) | Obj::Free(_)) => return leaf(sink, parent, role, opaque(obj, OpaqueKind::Internal)),
         },
         VmValue::VUnit(..)
         | VmValue::VBool(..)
@@ -275,7 +270,7 @@ fn report<'h, S: EncodeSink<'h>>(
         | VmValue::VTag(..)
         | VmValue::VObj(..) => {
             let Some((id, payload)) = value.as_inline_variant() else { return internal("encode: not an inline variant") };
-            let variant = enum_variant(prog, value, id)?;
+            let variant = variant_ref(prog, value, id)?;
             let role = variant.field_names.and_then(<[String]>::first).map_or(Role::Item, Role::Field);
             (Container::Variant(variant), 1, Children::One(role, Some(payload)))
         }
@@ -302,9 +297,9 @@ fn fields<'h>(container: Container<'h>, names: &'h [String], values: &'h [VmValu
 }
 
 #[inline(always)]
-fn enum_variant(prog: &Program, value: VmValue, id: u32) -> Result<EnumVariant<'_>, Fail> {
+fn variant_ref(prog: &Program, value: VmValue, id: u32) -> Result<VariantRef<'_>, Fail> {
     let Some(rt) = prog.variants.get(id as usize) else { return internal("encode: unknown variant ID") };
-    Ok(EnumVariant { value, id, name: &rt.name, field_names: rt.field_names.as_deref(), enum_def: rt.def, types: &prog.types })
+    Ok(VariantRef { value, id, name: &rt.name, field_names: rt.field_names.as_deref(), enum_def: rt.def, types: &prog.types })
 }
 
 /// An open container: its children that the walk has not reported, and the

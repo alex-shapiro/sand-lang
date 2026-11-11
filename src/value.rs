@@ -3,7 +3,7 @@
 use crate::native::ty::Never;
 use crate::stdlib::time::{PlainMonthDay, PlainYearMonth, Span, TimeZone, ZonedDateTime};
 use crate::vm::bytecode::StructRt;
-use crate::vm::encode::{self, Container, EncodeSink, EnumVariant, Leaf, OpaqueKind, Opened, Role};
+use crate::vm::encode::{self, Container, EncodeSink, Leaf, OpaqueKind, Opened, Role, VariantRef};
 use crate::vm::heap::Heap;
 use crate::vm::meter::{Meter, Scratch};
 use crate::vm::value::{FxHashMap, ValueRef, ValueType, VmValue};
@@ -558,7 +558,7 @@ impl ValueSink<'_> {
         Ok(desc)
     }
 
-    fn variant_desc(&mut self, variant: &EnumVariant<'_>) -> Result<Arc<VariantDesc>, Fail> {
+    fn variant_desc(&mut self, variant: &VariantRef<'_>) -> Result<Arc<VariantDesc>, Fail> {
         if let Some(desc) = self.variants.get(&variant.id) {
             return Ok(desc.clone());
         }
@@ -638,7 +638,7 @@ impl<'h> EncodeSink<'h> for ValueSink<'h> {
             Leaf::Range { start, end, inclusive } => Value::Range { start, end, inclusive },
             Leaf::Tag(variant) => Value::Variant(VariantValue { ty: self.variant_desc(&variant)?, payload: Box::default() }),
             Leaf::Native(native) => self.native(native)?,
-            Leaf::Opaque(kind) => self.opaque(kind)?,
+            Leaf::Opaque { kind, .. } => self.opaque(kind)?,
         };
         put(parent, value);
         Ok(())

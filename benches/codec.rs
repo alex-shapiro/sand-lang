@@ -74,15 +74,15 @@ bench("decode", {n}, () => {
     let d: Doc = json.decode(text).unwrap()
     d.users[d.users.len() - 1].id
 })
-bench("value", {n}, () => {
+bench("to_json", {n}, () => {
     let v = json.to_json(doc)
     [v].len()
 })
-bench("parse", {n}, () => {
+bench("decode_json", {n}, () => {
     let p: json.Json = json.decode(text).unwrap()
     [p].len()
 })
-bench("encode_value", {n}, () => json.encode(value).len())
+bench("encode_json", {n}, () => json.encode(value).len())
 bench("to_value", {n}, () => host.copied_users(doc))
 let addr = Address(street: "1 Main St", city: "Springfield", zip: Some("01234"))
 let atext = json.encode(addr)
@@ -139,10 +139,10 @@ print("check text length: \(text.len())")
 const LIMIT_OPS: &[(&str, &str, &str)] = &[
     ("encode", "", "let r = json.encode(doc)"),
     ("encode_indent", "", "let r = json.encode(doc, indent: 2)"),
-    ("value", "", "let r = json.to_json(doc)"),
+    ("to_json", "", "let r = json.to_json(doc)"),
     ("decode", "let text = json.encode(doc)", "let r: Doc = json.decode(text).unwrap()"),
-    ("parse", "let text = json.encode(doc)", "let r: json.Json = json.decode(text).unwrap()"),
-    ("encode_value", "let value = json.to_json(doc)", "let r = json.encode(value)"),
+    ("decode_json", "let text = json.encode(doc)", "let r: json.Json = json.decode(text).unwrap()"),
+    ("encode_json", "let value = json.to_json(doc)", "let r = json.encode(value)"),
     ("to_value", "", "let r = host.copied_users(doc)"),
 ];
 
@@ -250,7 +250,7 @@ fn main() {
     }
     assert!(!checks.is_empty(), "json: the program printed no checks");
     println!("best ns per item ({users} users, {runs} runs of {reps} repetitions)");
-    println!("{:<14} {:>10}", "operation", "json");
+    println!("{:<14} {:>10}", "operation", "ns");
     for (name, ns) in &table {
         println!("{name:<14} {ns:>10}");
     }
