@@ -2190,7 +2190,10 @@ optional type attributes:
 - `#[sand(private)]`: keeps the type private to its module.
 - `#[sand(crate = <path>)]`: specifies a renamed `sandlang` dependency.
 - `#[sand(manual_conversion)]`: on `SandEnum` and `SandStruct`, omits the
-  derived `FromVmValue`, `IntoVmValue`, and `Encode` implementations.
+  derived `FromVmValue` and `IntoVmValue` implementations. If the VM form of
+  the type differs from its Rust shape, the type also takes `no_value` or
+  implements `Encode` by hand, so that `encode` returns the copy that
+  `Vm::to_value` returns.
 - `#[sand(no_value)]`: on `SandEnum` and `SandStruct`, states that the type
   has no `Value` form, and omits the derived `Encode` implementation. Use it
   for a type with a field that has no `Value` form, such as a `VmVal<T>`

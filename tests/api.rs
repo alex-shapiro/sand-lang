@@ -4655,6 +4655,16 @@ fn encode_of_a_derived_type_equals_its_copy_out_of_the_vm() {
 }
 
 #[test]
+fn encode_of_json_equals_its_copy_out_of_the_vm() {
+    use sandlang::value::Encode;
+    let mut doc = NativeModule::new("doc");
+    doc.function("make", default_doc);
+    let (r, copies) = run_and_copy_values(Config::new(), [doc], "import doc\nhost.copy(doc.make())\n");
+    r.unwrap();
+    assert_eq!(copies, [default_doc().encode()]);
+}
+
+#[test]
 fn native_reads_a_native_value_type_from_its_value() {
     let money = Value::Native(Box::new(NativeValue { type_name: "bank.Money".into(), text: "12.50".into() }));
     assert_eq!(money.native::<Money>(), Some(Money(1250)));

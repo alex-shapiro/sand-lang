@@ -6,7 +6,9 @@
 //! - `#[sand(name = "<Name>")]` overrides the Sand type name.
 //! - `#[sand(private)]` makes the type private.
 //! - `#[sand(crate = <path>)]` overrides the `::sandlang` crate path.
-//! - `#[sand(manual_conversion)]` omits the `FromVmValue`, `IntoVmValue`, and `Encode` implementations.
+//! - `#[sand(manual_conversion)]` omits the `FromVmValue` and `IntoVmValue` implementations. If the
+//!   VM form of the type differs from its Rust shape, also add `no_value` or implement `Encode` by
+//!   hand, so that `encode` returns the copy that `Vm::to_value` returns.
 //! - `#[sand(no_value)]` states that the type has no `Value` form, and omits the `Encode`
 //!   implementation. Use it for a type with a field that has no `Value` form, such as a `VmVal`
 //!   handle.
@@ -428,22 +430,6 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
         into_vm_value_where: wh_into,
         encode_where: wh_encode,
     } = ConversionGenerics::new(input, krate, &type_params);
-    let reflection = quote! {
-        #named
-        #sand_type
-        #(#checks)*
-        impl #imp #krate::native::EnumType for #ty #tyg #wh {
-            const VARIANTS: &'static [#krate::native::EnumVariant] = &[#(#variants),*];
-            fn index(&self) -> usize {
-                match self {
-                    #(#indexes),*
-                }
-            }
-        }
-    };
-    if attrs.manual_conversion {
-        return Ok(reflection);
-    }
     let count = data.variants.len();
     let encode = (!attrs.no_value).then(|| {
         quote! {
@@ -458,31 +444,46 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
             }
         }
     });
-    Ok(quote! {
-        #reflection
-        impl #imp #krate::native::convert::FromVmValue for #ty #tyg #wh_from {
-            type Item<'a> = Self;
-            #[allow(unused_variables)]
-            fn from_vm_value(
-                vm: &#krate::vm::Vm,
-                v: #krate::vm::value::VmValue,
-                conv: &mut #krate::native::convert::Conversion,
-            ) -> ::std::result::Result<Self, #krate::vm::Fail> {
-                #krate::native::enum_from_vm_value::<Self>(vm, v, conv, |index, conv| {
-                    ::std::result::Result::Ok(match index {
-                        #(#reads,)*
-                        _ => return ::std::result::Result::Err(#krate::native::convert::mismatch::<Self>()),
+    let conversion = (!attrs.manual_conversion).then(|| {
+        quote! {
+            impl #imp #krate::native::convert::FromVmValue for #ty #tyg #wh_from {
+                type Item<'a> = Self;
+                #[allow(unused_variables)]
+                fn from_vm_value(
+                    vm: &#krate::vm::Vm,
+                    v: #krate::vm::value::VmValue,
+                    conv: &mut #krate::native::convert::Conversion,
+                ) -> ::std::result::Result<Self, #krate::vm::Fail> {
+                    #krate::native::enum_from_vm_value::<Self>(vm, v, conv, |index, conv| {
+                        ::std::result::Result::Ok(match index {
+                            #(#reads,)*
+                            _ => return ::std::result::Result::Err(#krate::native::convert::mismatch::<Self>()),
+                        })
                     })
-                })
+                }
             }
-        }
-        impl #imp #krate::native::convert::IntoVmValue for #ty #tyg #wh_into {
-            fn into_vm_value(self, vm: &mut #krate::vm::Vm) -> ::std::result::Result<#krate::vm::value::VmValue, #krate::vm::Fail> {
-                match self {
-                    #(#writes),*
+            impl #imp #krate::native::convert::IntoVmValue for #ty #tyg #wh_into {
+                fn into_vm_value(self, vm: &mut #krate::vm::Vm) -> ::std::result::Result<#krate::vm::value::VmValue, #krate::vm::Fail> {
+                    match self {
+                        #(#writes),*
+                    }
                 }
             }
         }
+    });
+    Ok(quote! {
+        #named
+        #sand_type
+        #(#checks)*
+        impl #imp #krate::native::EnumType for #ty #tyg #wh {
+            const VARIANTS: &'static [#krate::native::EnumVariant] = &[#(#variants),*];
+            fn index(&self) -> usize {
+                match self {
+                    #(#indexes),*
+                }
+            }
+        }
+        #conversion
         #encode
     })
 }
@@ -609,17 +610,6 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
         into_vm_value_where: wh_into,
         encode_where: wh_encode,
     } = ConversionGenerics::new(input, krate, &type_params);
-    let reflection = quote! {
-        #named
-        #sand_type
-        #(#checks)*
-        impl #imp #krate::native::StructType for #ty #tyg #wh {
-            const FIELDS: &'static [#krate::native::StructField] = &[#(#infos),*];
-        }
-    };
-    if attrs.manual_conversion {
-        return Ok(reflection);
-    }
     let encode = (!attrs.no_value).then(|| {
         quote! {
             impl #imp #krate::value::Encode for #ty #tyg #wh_encode {
@@ -630,24 +620,34 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
             }
         }
     });
+    let conversion = (!attrs.manual_conversion).then(|| {
+        quote! {
+            impl #imp #krate::native::convert::FromVmValue for #ty #tyg #wh_from {
+                type Item<'a> = Self;
+                #[allow(unused_variables)]
+                fn from_vm_value(
+                    vm: &#krate::vm::Vm,
+                    v: #krate::vm::value::VmValue,
+                    conv: &mut #krate::native::convert::Conversion,
+                ) -> ::std::result::Result<Self, #krate::vm::Fail> {
+                    #krate::native::struct_from_vm_value(vm, v, conv, |fields, conv| ::std::result::Result::Ok(#ty { #(#reads),* }))
+                }
+            }
+            impl #imp #krate::native::convert::IntoVmValue for #ty #tyg #wh_into {
+                fn into_vm_value(self, vm: &mut #krate::vm::Vm) -> ::std::result::Result<#krate::vm::value::VmValue, #krate::vm::Fail> {
+                    #krate::native::struct_into_vm_value::<Self>(vm, move |vm| ::std::result::Result::Ok(::std::boxed::Box::new([#(#writes),*])))
+                }
+            }
+        }
+    });
     Ok(quote! {
-        #reflection
-        impl #imp #krate::native::convert::FromVmValue for #ty #tyg #wh_from {
-            type Item<'a> = Self;
-            #[allow(unused_variables)]
-            fn from_vm_value(
-                vm: &#krate::vm::Vm,
-                v: #krate::vm::value::VmValue,
-                conv: &mut #krate::native::convert::Conversion,
-            ) -> ::std::result::Result<Self, #krate::vm::Fail> {
-                #krate::native::struct_from_vm_value(vm, v, conv, |fields, conv| ::std::result::Result::Ok(#ty { #(#reads),* }))
-            }
+        #named
+        #sand_type
+        #(#checks)*
+        impl #imp #krate::native::StructType for #ty #tyg #wh {
+            const FIELDS: &'static [#krate::native::StructField] = &[#(#infos),*];
         }
-        impl #imp #krate::native::convert::IntoVmValue for #ty #tyg #wh_into {
-            fn into_vm_value(self, vm: &mut #krate::vm::Vm) -> ::std::result::Result<#krate::vm::value::VmValue, #krate::vm::Fail> {
-                #krate::native::struct_into_vm_value::<Self>(vm, move |vm| ::std::result::Result::Ok(::std::boxed::Box::new([#(#writes),*])))
-            }
-        }
+        #conversion
         #encode
     })
 }
@@ -842,13 +842,14 @@ mod tests {
     }
 
     #[test]
-    fn manual_conversion_omits_conversion_impls() {
+    fn manual_conversion_omits_only_the_vm_conversion_impls() {
         let cases: [(Derive, &str, &str); 2] =
             [(sand_enum, "enum E { A(i64) }", "EnumType for E"), (sand_struct, "struct S { x: i64 }", "StructType for S")];
         for (f, item, reflection) in cases {
             let derived = expand(f, &format!("#[sand(module = \"m\")] {item}"));
             let manual = expand(f, &format!("#[sand(module = \"m\", manual_conversion)] {item}"));
-            for out in [&derived, &manual] {
+            let bare = expand(f, &format!("#[sand(module = \"m\", manual_conversion, no_value)] {item}"));
+            for out in [&derived, &manual, &bare] {
                 assert!(out.contains("NamedType for") && out.contains("SandType for") && out.contains(reflection), "{out}");
             }
             assert!(
@@ -856,9 +857,10 @@ mod tests {
                 "{derived}"
             );
             assert!(
-                !manual.contains("FromVmValue for") && !manual.contains("IntoVmValue for") && !manual.contains("Encode for"),
+                !manual.contains("FromVmValue for") && !manual.contains("IntoVmValue for") && manual.contains("Encode for"),
                 "{manual}"
             );
+            assert!(!bare.contains("FromVmValue for") && !bare.contains("IntoVmValue for") && !bare.contains("Encode for"), "{bare}");
         }
     }
 

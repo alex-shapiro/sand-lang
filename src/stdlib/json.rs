@@ -4,11 +4,10 @@ use super::base64;
 use crate::check::ModKind;
 use crate::native::convert::{Conversion, FromVmValue, HostError, IntoVmValue, mismatch};
 use crate::native::ty::{Param, Reflect, VmVal};
-use crate::native::{EnumType, NamedType, NativeModule, VariantDescCell, encode_variant, variant_index};
+use crate::native::{EnumType, NamedType, NativeModule, variant_index};
 use crate::syntax::lexer::is_ident;
 use crate::types::ConstVal;
 use crate::types::traits;
-use crate::value::{Encode, Value};
 use crate::vm::bytecode::{Program, RtIds};
 use crate::vm::compare::{hash_key, str_hash};
 use crate::vm::encode::{self, Container, EncodeSink, Leaf, MAX_DEPTH, Opened, Role, VariantRef};
@@ -378,22 +377,6 @@ impl IntoVmValue for Json {
         let ids = JsonIds::of(&vm.prog)?;
         let meter = &vm.meter;
         vm.heap.staged(|heap, st| walk(&mut Writer { b: Builder::new(heap, st, meter), ids }, self))
-    }
-}
-
-impl Encode for Json {
-    fn encode(&self) -> Value {
-        static VARIANT_DESCS: [VariantDescCell; Json::VARIANTS.len()] = [const { VariantDescCell::new() }; Json::VARIANTS.len()];
-        let payload = match self {
-            Json::Null => None,
-            Json::Bool(b) => Some(b.encode()),
-            Json::Int(i) => Some(i.encode()),
-            Json::Float(f) => Some(f.encode()),
-            Json::Str(s) => Some(s.encode()),
-            Json::Arr(items) => Some(items.encode()),
-            Json::Obj(fields) => Some(fields.encode()),
-        };
-        encode_variant::<Json>(&VARIANT_DESCS, self.index(), payload)
     }
 }
 
