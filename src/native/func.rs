@@ -50,7 +50,11 @@ impl Signature {
 ///   implements [`NativeReturn<Ctl>`].
 /// - **`&mut Vm` first.** Each parameter after the `Vm` is an owned
 ///   [`NativeParam`] type, such as `String` or a [`VmVal`](super::ty::VmVal)
-///   handle. The return type implements [`NativeReturn<Ctl>`].
+///   handle. The return type implements [`NativeReturn<Ctl>`]. The engine runs
+///   the function again from the start after a permission prompt, or after a
+///   garbage collection that a memory or resource check triggers. Check
+///   permissions and limits before any side effect. To wait for a future,
+///   return a [`Later`].
 /// - **A future as the result.** Only the calling Sand task waits for the
 ///   future. Each parameter is an owned [`NativeParam`] type that is `Send`.
 ///   The output of the future is `Send` and implements [`NativeReturn<Fail>`].
@@ -93,10 +97,12 @@ impl Signature {
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be a native function",
     note = "each parameter must implement `NativeParam`, and the return type must implement `NativeReturn<Ctl>`",
-    note = "a function that takes `&mut Vm` first must take owned parameters after it",
+    note = "`&mut Vm` must be the first parameter, and each parameter after it must be an owned type",
     note = "a function that returns a future must take owned `Send` parameters, and the output of the future must be `Send` and implement `NativeReturn<Fail>`",
+    note = "a function that takes `&mut Vm` cannot return a future: return a `Later` to wait",
     note = "a VM handle such as `VmVal` is not `Send`, because a handle cannot cross a wait",
-    note = "a synchronous function returns `HostError`, and a future returns `HostError<Fail>`"
+    note = "a synchronous function returns `HostError`, and a future returns `HostError<Fail>`",
+    note = "a function takes at most 12 parameters"
 )]
 pub trait NativeFunction<Form>: Send + Sync + 'static {
     /// Returns the Sand types of the script arguments and of the result.
@@ -127,27 +133,6 @@ pub trait NativeFunction<Form>: Send + Sync + 'static {
 ///
 /// ```compile_fail,E0277
 /// # use sandlang::native::NativeModule;
-/// # use sandlang::native::ty::Param;
-/// let mut module = NativeModule::new("m");
-/// module.function("f", |x: Param<0>| async move { 0 });
-/// ```
-///
-/// ```compile_fail,E0277
-/// # use sandlang::native::NativeModule;
-/// # use sandlang::native::ty::Num;
-/// let mut module = NativeModule::new("m");
-/// module.function("f", |num: Num<0>| async move { 0 });
-/// ```
-///
-/// ```compile_fail,E0277
-/// # use sandlang::native::NativeModule;
-/// # use sandlang::native::ty::Reflect;
-/// let mut module = NativeModule::new("m");
-/// module.function("f", |ty: Reflect<0>| async move { 0 });
-/// ```
-///
-/// ```compile_fail,E0277
-/// # use sandlang::native::NativeModule;
 /// # use sandlang::native::ty::VmVal;
 /// let mut module = NativeModule::new("m");
 /// module.function("f", |items: Vec<VmVal<String>>| async move { 0 });
@@ -159,6 +144,20 @@ pub trait NativeFunction<Form>: Send + Sync + 'static {
 /// # use sandlang::vm::Fail;
 /// let mut module = NativeModule::new("m");
 /// module.function("f", || -> Result<i64, HostError<Fail>> { Ok(0) });
+/// ```
+///
+/// ```compile_fail,E0277
+/// # use sandlang::native::NativeModule;
+/// # use sandlang::vm::Vm;
+/// let mut module = NativeModule::new("m");
+/// module.function("f", |x: i64, _: &mut Vm| x);
+/// ```
+///
+/// ```compile_fail,E0277
+/// # use sandlang::native::NativeModule;
+/// # use sandlang::vm::Vm;
+/// let mut module = NativeModule::new("m");
+/// module.function("f", |_: &mut Vm| async { 0 });
 /// ```
 #[cfg(doctest)]
 struct FunctionFormErrors;

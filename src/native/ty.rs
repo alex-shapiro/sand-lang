@@ -297,8 +297,9 @@ fn_type!(A);
 fn_type!(A, B);
 fn_type!(A, B, C);
 
-/// Makes a handle to the VM heap `!Send`, so that the handle cannot cross a wait.
-type NotSend = PhantomData<*const ()>;
+/// Makes a handle `!Send`, because a handle is valid only during the native
+/// call that received or allocated it.
+struct CallScoped(#[allow(dead_code)] *const ());
 
 /// Uninhabited return type for native functions that never return (Sand `never`).
 #[derive(Clone, Copy, Debug)]
@@ -313,7 +314,7 @@ pub enum Never {}
 /// `VmVal<Vec<Param<0>>>` and returns `Option<Param<0>>`. If the Rust function
 /// uses `Param<0, traits::Hash>`, the `native fn` declaration must declare
 /// `T: Hash`.
-pub struct Param<const N: u8, B: traits::Set = ()>(VmValue, PhantomData<fn() -> B>, NotSend);
+pub struct Param<const N: u8, B: traits::Set = ()>(VmValue, PhantomData<fn() -> B>, PhantomData<CallScoped>);
 
 impl<const N: u8, B: traits::Set> Param<N, B> {
     pub fn raw(self) -> VmValue {
@@ -352,7 +353,7 @@ impl<const N: u8, B: traits::Set> SandType for Param<N, B> {
 /// A Rust function can accept `Num<N>` for any type parameter that the
 /// `native fn` declaration declares as `T: Num`. Place `Num<N>` parameters in ascending order of `N`, after
 /// any [`Reflect`] parameters and before regular value parameters.
-pub struct Num<const N: u8>(VmValue, NotSend);
+pub struct Num<const N: u8>(VmValue, PhantomData<CallScoped>);
 
 impl<const N: u8> Num<N> {
     pub fn raw(self) -> VmValue {
@@ -387,7 +388,7 @@ impl<const N: u8> SandType for Num<N> {
 /// Runtime type descriptor for the `N`-th `reflect` type parameter of a
 /// `native fn` (see [`Type::Reflect`]).
 #[derive(Clone, Copy)]
-pub struct Reflect<const N: u8>(VmValue, NotSend);
+pub struct Reflect<const N: u8>(VmValue, PhantomData<CallScoped>);
 
 impl<const N: u8> Reflect<N> {
     pub fn raw(self) -> VmValue {
@@ -430,9 +431,27 @@ impl<const N: u8> SandType for Reflect<N> {
 /// assert_send::<VmVal<String>>();
 /// ```
 ///
+/// ```compile_fail,E0277
+/// # use sandlang::native::ty::Param;
+/// fn assert_send<T: Send>() {}
+/// assert_send::<Param<0>>();
+/// ```
+///
+/// ```compile_fail,E0277
+/// # use sandlang::native::ty::Num;
+/// fn assert_send<T: Send>() {}
+/// assert_send::<Num<0>>();
+/// ```
+///
+/// ```compile_fail,E0277
+/// # use sandlang::native::ty::Reflect;
+/// fn assert_send<T: Send>() {}
+/// assert_send::<Reflect<0>>();
+/// ```
+///
 /// [`VmVal::raw`] returns a [`VmValue`] without this check. Do not hold a raw
 /// [`VmValue`] across a wait.
-pub struct VmVal<T: ?Sized>(VmValue, PhantomData<fn() -> T>, NotSend);
+pub struct VmVal<T: ?Sized>(VmValue, PhantomData<fn() -> T>, PhantomData<CallScoped>);
 
 impl<T: ?Sized> VmVal<T> {
     pub fn raw(self) -> VmValue {

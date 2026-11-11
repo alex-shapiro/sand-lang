@@ -828,7 +828,9 @@ impl NativeModule {
     /// method on a type in this module).
     ///
     /// The parameters and the return type of `f` select its behavior. See
-    /// [`NativeFunction`]:
+    /// [`NativeFunction`]. The engine can run a function that takes `&mut Vm`
+    /// again from the start, so the function must check permissions and limits
+    /// before any side effect:
     ///
     /// ```
     /// # use sandlang::native::NativeModule;
