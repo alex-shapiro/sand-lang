@@ -1644,6 +1644,8 @@ impl<'h, O: JsonOutput<'h>> JsonSink<'h, O> {
 impl<'h, O: JsonOutput<'h>> EncodeSink<'h> for JsonSink<'h, O> {
     type Open = OpenJson<O::Open>;
 
+    const TOO_DEEP: &'static str = O::TOO_DEEP;
+
     #[inline(always)]
     fn leaf(&mut self, parent: &mut Self::Open, role: Role<'h>, leaf: Leaf<'h>) -> Result<(), Fail> {
         let parent = &mut parent.members;

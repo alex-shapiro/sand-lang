@@ -12,13 +12,13 @@
 use super::bytecode::{Program, StructRt};
 use super::heap::Heap;
 use super::value::{Obj, ValueRef, VmValue};
-use super::{Fail, internal};
+use super::{Fail, fail, internal};
 use smallvec::SmallVec;
 
-/// The largest number of containers that a sink lets the walk nest.
+/// The largest number of containers that the walk holds open.
 ///
-/// A script can build a value that contains itself, so each sink must fail
-/// with a limit error instead of opening a container beyond this depth.
+/// A script can build a value that contains itself, so the walk fails with a
+/// limit error instead of opening a container beyond this depth.
 pub(crate) const MAX_DEPTH: usize = 512;
 
 /// The number of open containers whose frames the walk stores without an
@@ -34,6 +34,10 @@ const INLINE_FRAMES: usize = 4;
 pub(crate) trait EncodeSink<'h> {
     /// The state of a container whose children the walk reports.
     type Open;
+
+    /// The message of the limit error for a value that nests more than
+    /// [`MAX_DEPTH`] containers.
+    const TOO_DEEP: &'static str;
 
     /// Receives a value without children as the next child of `parent`.
     fn leaf(&mut self, parent: &mut Self::Open, role: Role<'h>, leaf: Leaf<'h>) -> Result<(), Fail>;
@@ -191,7 +195,12 @@ pub(crate) fn walk<'h, S: EncodeSink<'h>>(
         };
         match report(prog, heap, sink, &mut top.open, role, child)? {
             Reported::Closed => {}
-            Reported::Opened(frame) => outer.push(std::mem::replace(&mut top, frame)),
+            Reported::Opened(frame) => {
+                if outer.len() >= MAX_DEPTH {
+                    return fail("limit", S::TOO_DEEP);
+                }
+                outer.push(std::mem::replace(&mut top, frame));
+            }
             Reported::Unwrapped(payload) => first = Some(payload),
         }
     }

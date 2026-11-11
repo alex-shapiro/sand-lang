@@ -3,11 +3,11 @@
 use crate::native::ty::Never;
 use crate::stdlib::time::{PlainMonthDay, PlainYearMonth, Span, TimeZone, ZonedDateTime};
 use crate::vm::bytecode::StructRt;
-use crate::vm::encode::{self, Container, EncodeSink, EnumVariant, Leaf, MAX_DEPTH, OpaqueKind, Opened, Role};
+use crate::vm::encode::{self, Container, EncodeSink, EnumVariant, Leaf, OpaqueKind, Opened, Role};
 use crate::vm::heap::Heap;
 use crate::vm::meter::{Meter, Scratch};
 use crate::vm::value::{FxHashMap, ValueRef, ValueType, VmValue};
-use crate::vm::{Fail, Vm, fail, internal};
+use crate::vm::{Fail, Vm, internal};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::mem::{size_of, size_of_val};
 use std::sync::{Arc, OnceLock};
@@ -440,7 +440,6 @@ pub(crate) fn copy_from_vm(vm: &Vm, value: VmValue) -> Result<Value, Fail> {
         meter: &vm.meter,
         allocated: 0,
         scratch: Scratch::new(),
-        depth: 0,
         type_names: FxHashMap::default(),
         structs: FxHashMap::default(),
         variants: FxHashMap::default(),
@@ -483,7 +482,6 @@ struct ValueSink<'h> {
     /// The bytes of Rust memory that the copy has allocated.
     allocated: usize,
     scratch: Scratch,
-    depth: usize,
     /// The shared name of each native value type and each type of an opaque
     /// value in the copy, by its module and name.
     type_names: FxHashMap<(Option<&'static str>, &'static str), Arc<str>>,
@@ -618,6 +616,8 @@ fn put(parent: &mut OpenValue, value: Value) {
 impl<'h> EncodeSink<'h> for ValueSink<'h> {
     type Open = OpenValue;
 
+    const TOO_DEEP: &'static str = "value too deeply nested to copy";
+
     #[inline(always)]
     fn leaf(&mut self, parent: &mut OpenValue, _: Role<'h>, leaf: Leaf<'h>) -> Result<(), Fail> {
         self.meter.charge(1)?;
@@ -647,10 +647,6 @@ impl<'h> EncodeSink<'h> for ValueSink<'h> {
     #[inline(always)]
     fn open(&mut self, _: &mut OpenValue, _: Role<'h>, container: Container<'h>, len: usize) -> Result<Opened<OpenValue>, Fail> {
         self.meter.charge(1)?;
-        if self.depth >= MAX_DEPTH {
-            return fail("limit", "value too deeply nested to copy");
-        }
-        self.depth += 1;
         Ok(Opened::Children(match container {
             Container::List => OpenValue::List(self.items(len)?),
             Container::Tuple => OpenValue::Tuple(self.items(len)?),
@@ -666,7 +662,6 @@ impl<'h> EncodeSink<'h> for ValueSink<'h> {
 
     #[inline(always)]
     fn close(&mut self, parent: &mut OpenValue, open: OpenValue) -> Result<(), Fail> {
-        self.depth -= 1;
         let value = match open {
             OpenValue::Root(_) => return internal("to_value: the walk closed the root"),
             OpenValue::List(items) => Value::List(items),
