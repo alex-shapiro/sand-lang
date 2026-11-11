@@ -1,9 +1,9 @@
 //! The `random` module.
 
 use crate::check::ModKind;
-use crate::native::ty::{Param, Val};
+use crate::native::ty::{Param, VmVal};
 use crate::native::{NativeModule, NativeObject};
-use crate::vm::value::{FxHashMap, Value, to_usize_saturating};
+use crate::vm::value::{FxHashMap, VmValue, to_usize_saturating};
 use crate::vm::{Fail, Rng, Vm, fail};
 
 /// An isolated pseudo-random number generator.
@@ -20,7 +20,7 @@ fn with_engine<R>(vm: &mut Vm, op: impl FnOnce(&mut Vm, &mut Rng) -> Result<R, F
     result
 }
 
-fn with_object<R>(vm: &mut Vm, obj: Val<RngObj>, op: impl FnOnce(&mut Vm, &mut Rng) -> Result<R, Fail>) -> Result<R, Fail> {
+fn with_object<R>(vm: &mut Vm, obj: VmVal<RngObj>, op: impl FnOnce(&mut Vm, &mut Rng) -> Result<R, Fail>) -> Result<R, Fail> {
     let mut rng = obj.get(&vm.heap)?.0.clone();
     let result = op(vm, &mut rng);
     obj.get_mut(&mut vm.heap)?.0 = rng;
@@ -39,7 +39,7 @@ pub(crate) fn module() -> NativeModule {
     macro_rules! ops {
         ($($name:literal => |$($a:ident: $t:ty),*| -> $r:ty = $op:expr;)*) => {$(
             m.vm_function($name, |vm: &mut Vm, $($a: $t),*| -> Result<$r, Fail> { with_engine(vm, |vm, rng| $op(vm, rng, $($a),*)) });
-            m.vm_function(concat!("Rng.", $name), |vm: &mut Vm, obj: Val<RngObj>, $($a: $t),*| -> Result<$r, Fail> {
+            m.vm_function(concat!("Rng.", $name), |vm: &mut Vm, obj: VmVal<RngObj>, $($a: $t),*| -> Result<$r, Fail> {
                 with_object(vm, obj, |vm, rng| $op(vm, rng, $($a),*))
             });
         )*};
@@ -48,9 +48,9 @@ pub(crate) fn module() -> NativeModule {
         "int" => |lo: i64, hi: i64| -> i64 = int;
         "float" => | | -> f64 = |_: &mut Vm, rng: &mut Rng| Ok(rng.float());
         "bool" => | | -> bool = |_: &mut Vm, rng: &mut Rng| Ok(rng.next_u64() >> 63 == 1);
-        "choice" => |xs: Val<Vec<Param<0>>>| -> Option<Param<0>> = choice;
-        "shuffle" => |xs: Val<Vec<Param<0>>>| -> () = shuffle;
-        "sample" => |xs: Val<Vec<Param<0>>>, k: i64| -> Vec<Param<0>> = sample;
+        "choice" => |xs: VmVal<Vec<Param<0>>>| -> Option<Param<0>> = choice;
+        "shuffle" => |xs: VmVal<Vec<Param<0>>>| -> () = shuffle;
+        "sample" => |xs: VmVal<Vec<Param<0>>>, k: i64| -> Vec<Param<0>> = sample;
         "bytes" => |n: i64| -> Vec<u8> = bytes;
     }
     m
@@ -64,13 +64,13 @@ fn int(_: &mut Vm, rng: &mut Rng, lo: i64, hi: i64) -> Result<i64, Fail> {
     Ok((lo as i128 + rng.below(span) as i128) as i64)
 }
 
-fn choice(vm: &mut Vm, rng: &mut Rng, xs: Val<Vec<Param<0>>>) -> Result<Option<Param<0>>, Fail> {
+fn choice(vm: &mut Vm, rng: &mut Rng, xs: VmVal<Vec<Param<0>>>) -> Result<Option<Param<0>>, Fail> {
     let xs = xs.items(&vm.heap);
     Ok((!xs.is_empty()).then(|| Param::from_raw(xs[rng.below(xs.len() as u64) as usize])))
 }
 
 /// Fisher-Yates.
-fn shuffle(vm: &mut Vm, rng: &mut Rng, xs: Val<Vec<Param<0>>>) -> Result<(), Fail> {
+fn shuffle(vm: &mut Vm, rng: &mut Rng, xs: VmVal<Vec<Param<0>>>) -> Result<(), Fail> {
     vm.charge(xs.items(&vm.heap).len() as u64)?;
     let xs = vm.heap.list_mut(xs.raw());
     for i in (1..xs.len()).rev() {
@@ -82,11 +82,11 @@ fn shuffle(vm: &mut Vm, rng: &mut Rng, xs: Val<Vec<Param<0>>>) -> Result<(), Fai
 
 /// A partial Fisher-Yates shuffle of the positions, recording only those it
 /// has disturbed (the element now at each).
-fn sample(vm: &mut Vm, rng: &mut Rng, xs: Val<Vec<Param<0>>>, k: i64) -> Result<Vec<Param<0>>, Fail> {
+fn sample(vm: &mut Vm, rng: &mut Rng, xs: VmVal<Vec<Param<0>>>, k: i64) -> Result<Vec<Param<0>>, Fail> {
     let items = xs.items(&vm.heap);
     let n = items.len();
     let k = k.clamp(0, n as i64) as usize;
-    vm.check_memory(k.saturating_mul(2 * std::mem::size_of::<Value>()))?;
+    vm.check_memory(k.saturating_mul(2 * std::mem::size_of::<VmValue>()))?;
     let mut moved: FxHashMap<usize, usize> = FxHashMap::default();
     let mut out = Vec::with_capacity(k);
     for i in 0..k {

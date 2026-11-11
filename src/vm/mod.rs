@@ -25,7 +25,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use value::*;
 
-pub type NativeFn = dyn Fn(&mut Vm, &[Value]) -> Result<Value, Ctl> + Send + Sync;
+pub type NativeFn = dyn Fn(&mut Vm, &[VmValue]) -> Result<VmValue, Ctl> + Send + Sync;
 
 #[derive(Clone)]
 pub enum HostFn {
@@ -35,14 +35,14 @@ pub enum HostFn {
 
 impl HostFn {
     #[inline(always)]
-    pub fn call(&self, vm: &mut Vm, args: &[Value]) -> Result<Value, Ctl> {
+    pub fn call(&self, vm: &mut Vm, args: &[VmValue]) -> Result<VmValue, Ctl> {
         match self {
             HostFn::Static(f) => f(vm, args),
             HostFn::Shared(f) => f(vm, args),
         }
     }
 }
-pub(crate) type Finisher = Box<dyn FnOnce(&mut Vm) -> Result<Value, Fail> + Send>;
+pub(crate) type Finisher = Box<dyn FnOnce(&mut Vm) -> Result<VmValue, Fail> + Send>;
 pub(crate) type BoxFuture = Pin<Box<dyn Future<Output = Finisher> + Send>>;
 
 #[derive(Clone)]
@@ -73,12 +73,12 @@ pub struct Ctl(Box<CtlKind>);
 pub struct Fail(Box<FailKind>);
 
 // Keep `Ctl` and `Fail` pointer-sized so a native result is 16 bytes like a
-// `Value` (see `interp`).
+// `VmValue` (see `interp`).
 const _: () = assert!(std::mem::size_of::<Ctl>() == std::mem::size_of::<usize>());
-const _: () = assert!(std::mem::size_of::<Result<Value, Ctl>>() == 16);
-const _: () = assert!(std::mem::size_of::<Result<Option<Value>, Ctl>>() == 16);
-const _: () = assert!(std::mem::size_of::<Result<Value, Fail>>() == 16);
-const _: () = assert!(std::mem::size_of::<Result<Option<Value>, Fail>>() == 16);
+const _: () = assert!(std::mem::size_of::<Result<VmValue, Ctl>>() == 16);
+const _: () = assert!(std::mem::size_of::<Result<Option<VmValue>, Ctl>>() == 16);
+const _: () = assert!(std::mem::size_of::<Result<VmValue, Fail>>() == 16);
+const _: () = assert!(std::mem::size_of::<Result<Option<VmValue>, Fail>>() == 16);
 
 /// Classification of a task wait. Determines whether idle wait time counts
 /// toward `max_wall_time`.
@@ -112,7 +112,7 @@ pub(crate) enum CtlKind {
     /// wake-up, the engine cancels the remaining `tasks`.
     Racing {
         wait_gen: u64,
-        tasks: Vec<Value>,
+        tasks: Vec<VmValue>,
         contenders: u32,
     },
     /// Let other tasks run. The call returns `()`.
@@ -269,10 +269,10 @@ pub(crate) fn without_trait(what: &str, role: &str, trait_name: &str) -> Fail {
 
 /// What [`Vm::block`] waits for.
 pub enum BlockOn {
-    Join(Value),
-    Race(Vec<Value>),
-    Recv(Value),
-    Send(Value, Value),
+    Join(VmValue),
+    Race(Vec<VmValue>),
+    Recv(VmValue),
+    Send(VmValue, VmValue),
 }
 
 /// A call frame (20 bytes).
@@ -293,8 +293,8 @@ pub const NO_CLOSURE: u32 = u32::MAX;
 impl Frame {
     /// The running closure as a value (`Unit` for direct calls).
     #[inline]
-    pub fn closure_value(&self) -> Value {
-        if self.closure == NO_CLOSURE { Value::Unit } else { Value::Obj(self.closure) }
+    pub fn closure_value(&self) -> VmValue {
+        if self.closure == NO_CLOSURE { VmValue::Unit } else { VmValue::Obj(self.closure) }
     }
 }
 
@@ -329,16 +329,16 @@ pub enum FiberState {
 }
 
 pub struct Fiber {
-    pub stack: Vec<Value>,
+    pub stack: Vec<VmValue>,
     pub frames: Vec<Frame>,
-    pub task: Value,
+    pub task: VmValue,
     pub state: FiberState,
     /// Wait generation; waiters record it to detect stale wake-ups.
     pub wait_gen: u64,
     /// Absolute stack slot receiving the result of a blocking call.
     pub result_slot: usize,
     /// Tasks to cancel when a `race` finishes.
-    pub race: Vec<Value>,
+    pub race: Vec<VmValue>,
     /// Number of tasks in `race` that can still finish the race.
     pub race_contenders: u32,
     /// Fibers waiting for this one: (fiber, generation).
@@ -578,8 +578,8 @@ pub struct Vm {
     pub prog: Arc<Program>,
     pub natives: Arc<Vec<NativeEntry>>,
     pub heap: Heap,
-    pub globals: Vec<Value>,
-    pub consts: Vec<Value>,
+    pub globals: Vec<VmValue>,
+    pub consts: Vec<VmValue>,
     pub fibers: Vec<Option<Box<Fiber>>>,
     pub free_fibers: Vec<u32>,
     /// Finished fibers kept for reuse, boxed so they move without copying.
@@ -603,7 +603,7 @@ pub struct Vm {
     /// Function and instruction pointer of the active native call.
     caller_site: (u32, u32),
     /// Extra GC roots (e.g. values held by the test runner).
-    pub pinned: Vec<Value>,
+    pub pinned: Vec<VmValue>,
     /// The box of the last `Blocked` or `Yield` consumed (see `Vm::signal`).
     spare_ctl: Option<Box<CtlKind>>,
     /// The map handle and slot of the last lookup of a key other than an
@@ -611,7 +611,7 @@ pub struct Vm {
     last_slot: std::cell::Cell<(u32, u32)>,
     /// Strings of one ASCII character, by byte (`Unit` until first
     /// made); shared, since strings are immutable. GC roots.
-    ascii_strs: Vec<Value>,
+    ascii_strs: Vec<VmValue>,
 
     /// Set by an internal error (a bug), including a Rust panic caught in the
     /// interpreter, a native or an I/O finisher: the VM is memory safe but may
@@ -621,7 +621,7 @@ pub struct Vm {
     pub(crate) retry_stress: bool,
     /// True while `retry_stress` runs an instruction a second time after garbage collection.
     pub(crate) instruction_retried: bool,
-    /// Struct nesting depth during conversion to Sand (see [`struct_into_value`](crate::native::struct_into_value)).
+    /// Struct nesting depth during conversion to Sand (see [`struct_into_vm_value`](crate::native::struct_into_vm_value)).
     pub(crate) struct_depth: usize,
 }
 
@@ -648,11 +648,11 @@ impl Fiber {
         }
         let n = need.max(self.stack.len() * 2).min(MAX_STACK_SLOTS);
         let before = self.stack.capacity();
-        let extra = n.saturating_sub(before) * std::mem::size_of::<Value>();
+        let extra = n.saturating_sub(before) * std::mem::size_of::<VmValue>();
         heap.check_memory(extra)?;
         self.stack.reserve_exact(n - self.stack.len());
-        self.stack.resize(n, Value::Unit);
-        heap.fiber_bytes += self.stack.capacity().saturating_sub(before) * std::mem::size_of::<Value>();
+        self.stack.resize(n, VmValue::Unit);
+        heap.fiber_bytes += self.stack.capacity().saturating_sub(before) * std::mem::size_of::<VmValue>();
         Ok(())
     }
 
@@ -672,9 +672,9 @@ impl Fiber {
     /// Memory used by the fiber, as counted in `Heap::fiber_bytes`.
     pub fn footprint(&self) -> usize {
         std::mem::size_of::<Fiber>()
-            + self.stack.capacity() * std::mem::size_of::<Value>()
+            + self.stack.capacity() * std::mem::size_of::<VmValue>()
             + self.frames.capacity() * std::mem::size_of::<Frame>()
-            + self.race.capacity() * std::mem::size_of::<Value>()
+            + self.race.capacity() * std::mem::size_of::<VmValue>()
             + self.waiters.capacity() * std::mem::size_of::<(u32, u64)>()
     }
 }
@@ -683,7 +683,7 @@ impl Vm {
     pub fn new(prog: Arc<Program>, natives: Arc<Vec<NativeEntry>>, host: Host) -> Vm {
         let heap = Heap::new(host.limits.max_memory, host.limits.max_open_resources);
         let consts = Vec::with_capacity(prog.consts.len());
-        let globals = vec![Value::Uninit; prog.nglobals];
+        let globals = vec![VmValue::Uninit; prog.nglobals];
         let meter = Meter::new(host.limits.max_instructions, host.interrupt.flag.clone(), host.clock.clone());
         let io = sched::IoTable::with_shared(host.interrupt.io.clone());
         let mut vm = Vm {
@@ -732,9 +732,9 @@ impl Vm {
             }
             let heap = &mut self.heap;
             let v = match &prog.consts[i] {
-                Const::Int(i) => Value::Int(*i),
-                Const::Float(f) => Value::Float(*f),
-                Const::Dur(d) => Value::Dur(*d),
+                Const::Int(i) => VmValue::Int(*i),
+                Const::Float(f) => VmValue::Float(*f),
+                Const::Dur(d) => VmValue::Dur(*d),
                 Const::Str(_) => unreachable!(),
                 Const::Bytes(b) => heap.new_bytes(b.clone()),
                 Const::Fn(p) => heap.alloc(Obj::Closure(*p, Box::new([]))),
@@ -745,13 +745,13 @@ impl Vm {
             self.consts.push(v);
         }
         if self.globals.len() < self.prog.nglobals {
-            self.globals.resize(self.prog.nglobals, Value::Uninit);
+            self.globals.resize(self.prog.nglobals, VmValue::Uninit);
         }
     }
 
     /// Which globals are initialized, by id.
     pub(crate) fn initialized_globals(&self) -> Vec<bool> {
-        self.globals.iter().map(|v| !matches!(v, Value::Uninit)).collect()
+        self.globals.iter().map(|v| !matches!(v, VmValue::Uninit)).collect()
     }
 
     /// Ends every task: after the main task of a REPL session input has
@@ -831,18 +831,18 @@ impl Vm {
     // ------------------------------------------------------------------
     // Values
 
-    pub fn str(&self, v: Value) -> &str {
+    pub fn str(&self, v: VmValue) -> &str {
         self.heap.str(v)
     }
 
-    pub fn new_str(&mut self, s: impl Into<compact_str::CompactString>) -> Value {
+    pub fn new_str(&mut self, s: impl Into<compact_str::CompactString>) -> VmValue {
         self.heap.new_str(s)
     }
 
     /// [`Heap::staged`], also passing the shared strings of one ASCII
     /// character (indexed by the character; see `short_str`), for natives
     /// that split text into many short pieces.
-    pub fn staged_strs<R>(&mut self, f: impl FnOnce(&Heap, &mut Staging<'_>, &[Value]) -> R) -> R {
+    pub fn staged_strs<R>(&mut self, f: impl FnOnce(&Heap, &mut Staging<'_>, &[VmValue]) -> R) -> R {
         self.ascii_table();
         let ascii = &self.ascii_strs;
         self.heap.staged(|heap, st| f(heap, st, ascii))
@@ -857,7 +857,7 @@ impl Vm {
 
     /// The shared string of one ASCII character `b` (see `short_str`).
     #[inline]
-    fn ascii_str(&mut self, b: u8) -> Value {
+    fn ascii_str(&mut self, b: u8) -> VmValue {
         match self.ascii_strs.get(b as usize) {
             Some(&v) => v,
             None => self.short_str(std::str::from_utf8(&[b]).unwrap_or("?")),
@@ -867,7 +867,7 @@ impl Vm {
     /// A string equal to `s`, which may be shared: strings of one ASCII
     /// character (as `chars`, `char_at` and splitting produce in bulk) are
     /// made once per VM.
-    pub fn short_str(&mut self, s: &str) -> Value {
+    pub fn short_str(&mut self, s: &str) -> VmValue {
         match s.as_bytes() {
             &[b] if b.is_ascii() => {
                 self.ascii_table();
@@ -878,34 +878,34 @@ impl Vm {
     }
 
     #[inline]
-    pub fn some(&mut self, v: Value) -> Value {
+    pub fn some(&mut self, v: VmValue) -> VmValue {
         let id = self.prog.ids.some;
-        match Value::variant1(id, v) {
+        match VmValue::variant1(id, v) {
             Some(inline) => inline,
             None => self.heap.new_variant(id, &[v]),
         }
     }
 
-    pub fn none(&self) -> Value {
-        Value::Tag(self.prog.ids.none)
+    pub fn none(&self) -> VmValue {
+        VmValue::Tag(self.prog.ids.none)
     }
 
-    pub fn ok(&mut self, v: Value) -> Value {
+    pub fn ok(&mut self, v: VmValue) -> VmValue {
         let id = self.prog.ids.ok;
         self.heap.new_variant(id, &[v])
     }
 
-    pub fn err(&mut self, v: Value) -> Value {
+    pub fn err(&mut self, v: VmValue) -> VmValue {
         let id = self.prog.ids.err;
         self.heap.new_variant(id, &[v])
     }
 
-    pub fn new_value<T: value::ValueType>(&mut self, x: T) -> Value {
+    pub fn new_value<T: value::ValueType>(&mut self, x: T) -> VmValue {
         self.heap.alloc(value::value_obj(x))
     }
 
     #[inline]
-    pub fn option(&mut self, v: Option<Value>) -> Value {
+    pub fn option(&mut self, v: Option<VmValue>) -> VmValue {
         match v {
             Some(v) => self.some(v),
             None => self.none(),
@@ -913,29 +913,29 @@ impl Vm {
     }
 
     /// Unpacks an Option: `Some(x)` → `Some(x)`.
-    pub fn as_option(&self, v: Value) -> Option<Value> {
+    pub fn as_option(&self, v: VmValue) -> Option<VmValue> {
         if self.heap.variant_id(v) == self.prog.ids.some { self.heap.field(v, 0) } else { None }
     }
 
     /// Unpacks a Result: `Ok(x)` → `Ok(x)`, `Err(e)` → `Err(e)`.
-    pub fn as_result(&self, v: Value) -> Result<Value, Value> {
-        let payload = self.heap.field(v, 0).unwrap_or(Value::Unit);
+    pub fn as_result(&self, v: VmValue) -> Result<VmValue, VmValue> {
+        let payload = self.heap.field(v, 0).unwrap_or(VmValue::Unit);
         if self.heap.variant_id(v) == self.prog.ids.ok { Ok(payload) } else { Err(payload) }
     }
 
     /// Payload field `i` of an enum variant value, whatever its
     /// representation (`Unit` if there is no such field).
-    pub fn variant_payload(&self, v: Value, i: usize) -> Value {
-        self.heap.field(v, i).unwrap_or(Value::Unit)
+    pub fn variant_payload(&self, v: VmValue, i: usize) -> VmValue {
+        self.heap.field(v, i).unwrap_or(VmValue::Unit)
     }
 
     /// The display form of `v`, charging the meter for the work.
-    pub fn display(&self, v: Value) -> Result<String, Fail> {
+    pub fn display(&self, v: VmValue) -> Result<String, Fail> {
         display::to_display_metered(&self.prog, &self.heap, &self.meter, v)
     }
 
     /// The debug form of `v`, charging the meter for the work.
-    pub fn debug(&self, v: Value) -> Result<String, Fail> {
+    pub fn debug(&self, v: VmValue) -> Result<String, Fail> {
         display::to_debug_metered(&self.prog, &self.heap, &self.meter, v)
     }
 
@@ -1220,7 +1220,7 @@ impl Vm {
 
     /// Writes string `s` (a heap value) to stdout (1) or stderr (2), like
     /// `write_stream`, without copying it out of the heap first.
-    pub fn write_stream_str(&mut self, which: u8, s: Value) -> Result<(), Ctl> {
+    pub fn write_stream_str(&mut self, which: u8, s: VmValue) -> Result<(), Ctl> {
         self.admit_output(which, self.heap.str(s).len())?;
         let _ = self.stream_sink(which).write(self.heap.str(s).as_bytes());
         Ok(self.limit_backlog(which)?)
@@ -1240,7 +1240,7 @@ impl Vm {
     /// stderr (2) for `io.stdout` and `io.stderr`: a denial or a failed
     /// write is the `Err(Error)` value it returns (`Ok(Unit)` otherwise);
     /// exceeding the output limit stops the run.
-    pub fn write_stream_value(&mut self, which: u8, v: Value) -> Result<(), HostError> {
+    pub fn write_stream_value(&mut self, which: u8, v: VmValue) -> Result<(), HostError> {
         let len = match self.heap.get(v) {
             Obj::Str(s) => s.len(),
             _ => self.heap.bytes_of(v).len(),
@@ -1318,13 +1318,13 @@ impl Vm {
     // Fibers
 
     /// Creates a fiber that calls `closure` with no arguments.
-    pub fn spawn_fiber(&mut self, closure: Value, task: Value) -> Result<u32, Fail> {
+    pub fn spawn_fiber(&mut self, closure: VmValue, task: VmValue) -> Result<u32, Fail> {
         let (proto, ncaps) = match self.heap.get(closure) {
             Obj::Closure(p, caps) => (*p, caps.len()),
             _ => return internal("spawn: not a closure"),
         };
         let nregs = self.prog.protos[proto as usize].nregs as usize;
-        let Value::Obj(closure) = closure else { return internal("spawn: not a closure") };
+        let VmValue::Obj(closure) = closure else { return internal("spawn: not a closure") };
         let frame = Frame { proto, ip: 0, base: 0, ret: 0, closure };
         let fiber = match self.spare_fibers.pop() {
             // A recycled fiber is already counted in `fiber_bytes`.
@@ -1338,13 +1338,13 @@ impl Vm {
                     self.heap.fiber_bytes = self.heap.fiber_bytes.saturating_sub(f.footprint());
                 }
                 let stack = nregs.max(INITIAL_STACK_SLOTS);
-                if self.heap.would_exceed(stack * std::mem::size_of::<Value>()) {
+                if self.heap.would_exceed(stack * std::mem::size_of::<VmValue>()) {
                     return Err(Fail::limit(LimitKind::Memory));
                 }
                 let mut frames = Vec::with_capacity(8);
                 frames.push(frame);
                 let fiber = Box::new(Fiber {
-                    stack: vec![Value::Unit; stack],
+                    stack: vec![VmValue::Unit; stack],
                     frames,
                     task,
                     state: FiberState::Ready,
@@ -1364,7 +1364,7 @@ impl Vm {
         };
         // A task's function takes no parameters: its captures come first.
         let mut fiber = fiber;
-        if let Obj::Closure(_, caps) = self.heap.get(Value::Obj(closure)) {
+        if let Obj::Closure(_, caps) = self.heap.get(VmValue::Obj(closure)) {
             fiber.stack[..ncaps].copy_from_slice(caps);
         }
         let id = match self.free_fibers.pop() {
@@ -1394,9 +1394,9 @@ impl Vm {
         }
         let slots = f.stack.capacity();
         f.stack.clear();
-        f.stack.resize(slots, Value::Unit);
+        f.stack.resize(slots, VmValue::Unit);
         f.frames.clear();
-        f.task = Value::Unit;
+        f.task = VmValue::Unit;
         f.state = FiberState::Ready;
         f.wait_gen = 0;
         f.result_slot = 0;
@@ -1416,7 +1416,7 @@ impl Vm {
     }
 
     /// Spawns a new task running `closure`; returns the task handle.
-    pub fn spawn_task(&mut self, closure: Value) -> Result<Value, Fail> {
+    pub fn spawn_task(&mut self, closure: VmValue) -> Result<VmValue, Fail> {
         if self.live_tasks >= self.host.limits.max_tasks {
             return fail("limit", "task limit exceeded");
         }
@@ -1424,7 +1424,7 @@ impl Vm {
             let p = &self.prog.protos[*p as usize];
             self.meter.charge(meter::code_fuel(p.code.len() + p.nregs as usize) as u64)?;
         }
-        let task = self.heap.alloc(Obj::Task(Box::new(TaskObj { fiber: u32::MAX, state: TaskState::Running, result: Value::Unit })));
+        let task = self.heap.alloc(Obj::Task(Box::new(TaskObj { fiber: u32::MAX, state: TaskState::Running, result: VmValue::Unit })));
         let fid = self.spawn_fiber(closure, task)?;
         if let Obj::Task(t) = self.heap.get_mut(task) {
             t.fiber = fid;
@@ -1434,7 +1434,7 @@ impl Vm {
     }
 
     /// Delivers a value to a waiting fiber (if the wait is still current).
-    pub fn deliver(&mut self, fid: u32, wait_gen: u64, v: Value) -> bool {
+    pub fn deliver(&mut self, fid: u32, wait_gen: u64, v: VmValue) -> bool {
         let Some(Some(f)) = self.fibers.get_mut(fid as usize) else { return false };
         if f.state != FiberState::Waiting || f.wait_gen != wait_gen {
             return false;
@@ -1466,7 +1466,7 @@ impl Vm {
     }
 
     /// Marks a task finished and wakes its waiters.
-    pub fn finish_task(&mut self, fid: u32, result: Value) {
+    pub fn finish_task(&mut self, fid: u32, result: VmValue) {
         let Some(f) = self.fibers[fid as usize].take() else { return };
         let task = f.task;
         if let Obj::Task(t) = self.heap.get_mut(task) {
@@ -1483,7 +1483,7 @@ impl Vm {
 
     /// Cancels a running `task`. If `task` is the caller, returns a [`Ctl`]
     /// that the native function must propagate so the engine ends the task.
-    pub fn cancel_task(&mut self, task: Value) -> Result<(), Ctl> {
+    pub fn cancel_task(&mut self, task: VmValue) -> Result<(), Ctl> {
         if let Obj::Task(t) = self.heap.get_mut(task)
             && t.state == TaskState::Running
             && t.fiber == self.current
@@ -1496,7 +1496,7 @@ impl Vm {
     }
 
     /// Cancels a running `task` other than `self.current`.
-    fn cancel_other_task(&mut self, task: Value) {
+    fn cancel_other_task(&mut self, task: VmValue) {
         let (fid, state) = match self.heap.get(task) {
             Obj::Task(t) => (t.fiber, t.state),
             _ => return,
@@ -1575,7 +1575,7 @@ impl Vm {
     /// pending `defer` blocks until they finish or block.
     pub async fn end_tasks(&mut self) -> Result<(), RunEnding> {
         self.release_main();
-        let tasks: Vec<Value> = self.fibers.iter().flatten().map(|f| f.task).collect();
+        let tasks: Vec<VmValue> = self.fibers.iter().flatten().map(|f| f.task).collect();
         for task in tasks {
             self.cancel_other_task(task);
         }
@@ -1622,8 +1622,8 @@ impl Vm {
     /// windows, closures, tasks and race lists. Clears dead slots of stacks so
     /// that they never hold handles to objects freed later. Shrinks stacks left
     /// large by deep recursion and recounts `heap.fiber_bytes`.
-    fn gc_roots(&mut self, current: Option<&mut Fiber>) -> Vec<Value> {
-        let mut roots: Vec<Value> = Vec::with_capacity(1024);
+    fn gc_roots(&mut self, current: Option<&mut Fiber>) -> Vec<VmValue> {
+        let mut roots: Vec<VmValue> = Vec::with_capacity(1024);
         roots.extend(self.globals.iter().copied());
         roots.extend(self.consts.iter().copied());
         roots.extend(self.pinned.iter().copied());
@@ -1631,14 +1631,14 @@ impl Vm {
         roots.extend(self.host.regex_cache.iter().flatten().filter_map(|entry| entry.regex));
         let prog = &self.prog;
         let mut fiber_bytes = 0;
-        let mut add_fiber = |f: &mut Fiber, roots: &mut Vec<Value>| {
+        let mut add_fiber = |f: &mut Fiber, roots: &mut Vec<VmValue>| {
             let top = f.live_top(prog);
             roots.extend(f.stack[..top].iter().copied());
             if f.stack.len() > 2 * top + 4096 {
                 f.stack.truncate((top + top / 2).max(INITIAL_STACK_SLOTS));
                 f.stack.shrink_to_fit();
             }
-            f.stack[top..].fill(Value::Unit);
+            f.stack[top..].fill(VmValue::Unit);
             roots.extend(f.frames.iter().map(|fr| fr.closure_value()));
             roots.push(f.task);
             roots.extend(f.race.iter().copied());

@@ -1,21 +1,21 @@
 //! The bytecode interpreter loop.
 //!
-//! Its speed depends on how LLVM allocates registers across the loop: when
-//! too many values stay live, the hottest ones (`code`, `ip`) are spilled
-//! and every instruction reloads them, which unrelated edits can trigger.
-//! So:
+//! Loop throughput depends on register allocation across the dispatch loop. If
+//! too many values stay live, LLVM spills `code` and `ip` and reloads them on
+//! every instruction. To keep those values in registers:
 //!
-//! - The loop carries only `code`, `ip`, `base`, `regs` and the fuel;
-//!   anything else is read from memory where needed.
-//! - Back edges leave the `match` with their offset and share one safe point.
-//! - Loops, allocations, formatting and error paths go into `#[inline(never)]`
-//!   or `#[cold]` functions, not into the arms.
-//! - Results stay 16 bytes (`Ctl` and `Fail` are pointer-sized), and a helper
-//!   returns a `Value` directly (`Ok(*v)`) instead of an `Option<Value>`.
-//!   Larger or split results go through memory and stall the caller's load.
+//! - Keep only `code`, `ip`, `base`, `regs`, and `fuel` live across the loop.
+//!   Read other state from memory on demand.
+//! - Exit the `match` on back edges with the jump offset so that all back edges
+//!   share one safe point.
+//! - Move loops, allocations, formatting, and error paths into
+//!   `#[inline(never)]` or `#[cold]` functions instead of the `match` arms.
+//! - Keep helper return types at 16 bytes so that results stay in registers and
+//!   do not stall store-to-load forwarding. [`Ctl`] and [`Fail`] are
+//!   pointer-sized. Helpers return `VmValue` instead of `Option<VmValue>`.
 //!
-//! Measure changes with `cargo bench` and by looking for stack loads and
-//! stores around the dispatch jump in the disassembly of `Vm::interp`.
+//! Verify changes with `cargo bench` and check the disassembly of `Vm::interp`
+//! for stack loads and stores around the dispatch jump.
 
 use super::compare::{
     find_entry, find_key, hash_key, map_get_int, map_slot, map_slot_tuple, set_has_int, set_slot, values_eq, values_eq_metered, values_le,
@@ -54,7 +54,7 @@ impl From<Stop> for Fail {
 /// Why a fiber stopped running.
 pub enum FiberStop {
     /// The fiber's outermost function returned.
-    Done(Value),
+    Done(VmValue),
     /// Out of fuel: preempted.
     Preempt,
     /// Waiting on a scheduler event (already registered).
@@ -114,7 +114,7 @@ pub fn int_pow(a: i64, b: i64) -> Result<i64, &'static str> {
 
 /// A lookup in the dense values of a map (`MapObj::vals`).
 enum Dense<'h> {
-    Hit(&'h Value),
+    Hit(&'h VmValue),
     Miss,
     /// The map has no dense values, or the key is not an int.
     Unknown,
@@ -122,21 +122,21 @@ enum Dense<'h> {
 
 /// The int key `k` in map `m`, if it has dense values.
 #[inline(always)]
-fn dense_get<'h>(heap: &'h Heap, m: &Value, k: &Value) -> Dense<'h> {
-    let (&Value::Obj(h), &Value::Int(i)) = (m, k) else { return Dense::Unknown };
+fn dense_get<'h>(heap: &'h Heap, m: &VmValue, k: &VmValue) -> Dense<'h> {
+    let (&VmValue::Obj(h), &VmValue::Int(i)) = (m, k) else { return Dense::Unknown };
     let Obj::Map(mo) = heap.obj(h) else { return Dense::Unknown };
     if mo.vals.is_empty() {
         return Dense::Unknown;
     }
     match usize::try_from(i).ok().and_then(|i| mo.vals.get(i)) {
-        Some(Value::Uninit) | None => Dense::Miss,
+        Some(VmValue::Uninit) | None => Dense::Miss,
         Some(v) => Dense::Hit(v),
     }
 }
 
 /// Copies the captures of closure `h` to the start of `regs`.
 #[inline]
-fn load_captures(heap: &Heap, h: u32, regs: &mut [Value]) {
+fn load_captures(heap: &Heap, h: u32, regs: &mut [VmValue]) {
     if let Obj::Closure(_, caps) = heap.obj(h) {
         copy_values(caps, regs);
     }
@@ -145,7 +145,7 @@ fn load_captures(heap: &Heap, h: u32, regs: &mut [Value]) {
 /// Moves the `n` registers from `src` to the start of `regs` (a tail call's
 /// arguments), inline for the usual few.
 #[inline(always)]
-fn shift_args(regs: &mut [Value], src: usize, n: usize) {
+fn shift_args(regs: &mut [VmValue], src: usize, n: usize) {
     match n {
         0 => {}
         1 => regs[0] = regs[src],
@@ -160,7 +160,7 @@ fn shift_args(regs: &mut [Value], src: usize, n: usize) {
 /// Copies `src` to the start of `dst`, inline for the usual few values
 /// (`copy_from_slice` calls `memmove`).
 #[inline(always)]
-fn copy_values(src: &[Value], dst: &mut [Value]) {
+fn copy_values(src: &[VmValue], dst: &mut [VmValue]) {
     match *src {
         [] => {}
         [a] => dst[0] = a,
@@ -181,10 +181,10 @@ fn copy_values(src: &[Value], dst: &mut [Value]) {
 /// interpreter's struct field fast path stays small).
 #[cold]
 #[inline(never)]
-fn inline_field(v: &Value, idx: u16) -> Value {
+fn inline_field(v: &VmValue, idx: u16) -> VmValue {
     match v.as_inline_variant() {
         Some((_, p)) if idx == 0 => p,
-        _ => Value::Uninit,
+        _ => VmValue::Uninit,
     }
 }
 
@@ -206,8 +206,8 @@ fn uninit_global(prog: &Program, g: u32) -> String {
 /// Takes references: matching copies of 16-byte values makes LLVM spill them
 /// to the stack to read their tags.
 #[inline(always)]
-fn quick_eq(heap: &Heap, a: &Value, b: &Value) -> Option<bool> {
-    let (&Value::Obj(x), &Value::Obj(y)) = (a, b) else { return None };
+fn quick_eq(heap: &Heap, a: &VmValue, b: &VmValue) -> Option<bool> {
+    let (&VmValue::Obj(x), &VmValue::Obj(y)) = (a, b) else { return None };
     if x == y {
         return Some(true);
     }
@@ -229,7 +229,7 @@ fn short_eq(p: &[u8], q: &[u8]) -> bool {
 
 /// `Op::Payload`: the field of a one-field variant, inline or boxed.
 #[inline(never)]
-fn payload(heap: &Heap, v: Value) -> Option<Value> {
+fn payload(heap: &Heap, v: VmValue) -> Option<VmValue> {
     match v.as_inline_variant() {
         Some((_, p)) => Some(p),
         None => heap.fields(v).first().copied(),
@@ -238,9 +238,9 @@ fn payload(heap: &Heap, v: Value) -> Option<Value> {
 
 /// The byte of a string of one byte, or -1 (`Op::SwitchChar`).
 #[inline(always)]
-fn char_code(heap: &Heap, v: &Value) -> i64 {
+fn char_code(heap: &Heap, v: &VmValue) -> i64 {
     match *v {
-        Value::Obj(h) => match heap.obj(h) {
+        VmValue::Obj(h) => match heap.obj(h) {
             Obj::Str(s) if s.len() == 1 => s.as_bytes()[0] as i64,
             _ => -1,
         },
@@ -357,8 +357,8 @@ fn shift_amount(b: i64) -> Result<u32, &'static str> {
 impl Vm {
     /// Generic arithmetic on runtime values.
     #[inline(never)]
-    pub fn arith(&mut self, op: u8, a: Value, b: Value) -> Result<Value, Fail> {
-        use Value::*;
+    pub fn arith(&mut self, op: u8, a: VmValue, b: VmValue) -> Result<VmValue, Fail> {
+        use VmValue::*;
         Ok(match (op, a, b) {
             (0, Int(x), Int(y)) => Int(x.checked_add(y).ok_or_else(|| overflow("integer"))?),
             (1, Int(x), Int(y)) => Int(x.checked_sub(y).ok_or_else(|| overflow("integer"))?),
@@ -408,7 +408,7 @@ impl Vm {
                         self.heap.new_bytes(v)
                     }
                     (super::value::Obj::List(x), super::value::Obj::List(y)) => {
-                        self.heap.check_memory((x.len() + y.len()) * std::mem::size_of::<Value>())?;
+                        self.heap.check_memory((x.len() + y.len()) * std::mem::size_of::<VmValue>())?;
                         self.meter.charge((x.len() + y.len()) as u64)?;
                         let mut v = Vec::with_capacity(x.len() + y.len());
                         v.extend_from_slice(x);
@@ -424,7 +424,7 @@ impl Vm {
 
     /// Creates a map from the alternating keys and values in `entries`.
     #[inline(never)]
-    fn op_new_map(&mut self, entries: &[Value]) -> Result<Value, Fail> {
+    fn op_new_map(&mut self, entries: &[VmValue]) -> Result<VmValue, Fail> {
         let map = self.heap.alloc(Obj::Map(Box::default()));
         for pair in entries.as_chunks::<2>().0 {
             self.map_insert(map, pair[0], pair[1])?;
@@ -434,14 +434,14 @@ impl Vm {
 
     /// Appends `suffix` to string `builder`.
     #[inline(never)]
-    fn op_append_str(&mut self, builder: Value, suffix: Value) -> Result<Value, Fail> {
+    fn op_append_str(&mut self, builder: VmValue, suffix: VmValue) -> Result<VmValue, Fail> {
         self.meter.charge_bytes(self.heap.append_copies(builder, suffix))?;
         self.heap.append_str(builder, suffix).map_err(Fail::limit)
     }
 
     /// `Op::NewTuple` of anything but an inline pair.
     #[inline(never)]
-    fn new_tuple(&mut self, items: &[Value]) -> Value {
+    fn new_tuple(&mut self, items: &[VmValue]) -> VmValue {
         let items = self.heap.boxed(items);
         self.heap.alloc(Obj::Tuple(items))
     }
@@ -449,9 +449,9 @@ impl Vm {
     /// `Op::MakeClosure`: a closure of `proto` (`p`) capturing from the
     /// registers `regs`.
     #[inline(never)]
-    fn make_closure(&mut self, p: &Proto, proto: u32, regs: &[Value]) -> Value {
-        let capture = |&r: &Reg| if r == NO_REG { Value::Unit } else { regs[r as usize] };
-        let caps: Box<[Value]> = match *p.captures {
+    fn make_closure(&mut self, p: &Proto, proto: u32, regs: &[VmValue]) -> VmValue {
+        let capture = |&r: &Reg| if r == NO_REG { VmValue::Unit } else { regs[r as usize] };
+        let caps: Box<[VmValue]> = match *p.captures {
             [a] => self.heap.boxed(&[capture(&a)]),
             [a, b] => self.heap.boxed(&[capture(&a), capture(&b)]),
             _ => p.captures.iter().map(capture).collect(),
@@ -461,7 +461,7 @@ impl Vm {
 
     #[cold]
     #[inline(never)]
-    fn key_error(&self, k: Value) -> Fail {
+    fn key_error(&self, k: VmValue) -> Fail {
         match self.debug(k) {
             Ok(text) => Fail::runtime_error("not_found", format!("key not found: {text}")),
             Err(fail) => fail,
@@ -470,7 +470,7 @@ impl Vm {
 
     #[cold]
     #[inline(never)]
-    fn try_top(&mut self, fiber: &mut Fiber, ip: usize, prog: &Program, res: Value) -> Result<FiberStop, RunEnding> {
+    fn try_top(&mut self, fiber: &mut Fiber, ip: usize, prog: &Program, res: VmValue) -> Result<FiberStop, RunEnding> {
         // `Option::None` has 0 fields; `Result::Err(e)` stores `e` at field 0.
         let Some(e) = self.heap.field(res, 0) else {
             return self.fail_stop(fiber, ip, Fail::runtime_error("none", "`?` found None"));
@@ -497,7 +497,7 @@ impl Vm {
     /// The trap for an operand of the wrong type (a compiler bug).
     #[cold]
     #[inline(never)]
-    fn operand_trap(&mut self, fiber: &mut Fiber, ip: usize, v: Value, want: &str) -> RunEnding {
+    fn operand_trap(&mut self, fiber: &mut Fiber, ip: usize, v: VmValue, want: &str) -> RunEnding {
         fiber.frames.last_mut().unwrap().ip = ip as u32;
         self.internal_trap(fiber, ip, format!("expected {want}, found {v:?}"))
     }
@@ -505,7 +505,7 @@ impl Vm {
     /// The trap for a `GetField` on a value without that field (a compiler bug).
     #[cold]
     #[inline(never)]
-    fn field_trap(&mut self, fiber: &mut Fiber, ip: usize, v: Value, idx: u16) -> RunEnding {
+    fn field_trap(&mut self, fiber: &mut Fiber, ip: usize, v: VmValue, idx: u16) -> RunEnding {
         fiber.frames.last_mut().unwrap().ip = ip as u32;
         let msg = format!("field {idx} of {v:?} {:?}", self.heap.get(v));
         self.internal_trap(fiber, ip, msg)
@@ -607,7 +607,7 @@ impl Vm {
         let mut fuel = FuelGuard { left: *fuel_out, out: fuel_out };
         // The current frame's register window. Re-derived (`reload!`) after
         // anything that may move or resize the stack.
-        let mut regs: &mut [Value] = &mut fiber.stack[base..];
+        let mut regs: &mut [VmValue] = &mut fiber.stack[base..];
 
         macro_rules! r {
             ($x:expr) => {
@@ -646,7 +646,7 @@ impl Vm {
         macro_rules! int {
             ($x:expr) => {
                 match r!($x) {
-                    Value::Int(i) => i,
+                    VmValue::Int(i) => i,
                     other => return Err(self.operand_trap(fiber, ip, other, "int")),
                 }
             };
@@ -654,7 +654,7 @@ impl Vm {
         macro_rules! float {
             ($x:expr) => {
                 match r!($x) {
-                    Value::Float(f) => f,
+                    VmValue::Float(f) => f,
                     other => return Err(self.operand_trap(fiber, ip, other, "float")),
                 }
             };
@@ -778,14 +778,14 @@ impl Vm {
                 match op {
                     Op::Nop => {}
                     Op::Move { dst, src } => r!(dst) = r!(src),
-                    Op::LoadUnit { dst } => r!(dst) = Value::Unit,
-                    Op::LoadBool { dst, v } => r!(dst) = Value::Bool(v),
-                    Op::LoadInt { dst, v } => r!(dst) = Value::Int(v as i64),
+                    Op::LoadUnit { dst } => r!(dst) = VmValue::Unit,
+                    Op::LoadBool { dst, v } => r!(dst) = VmValue::Bool(v),
+                    Op::LoadInt { dst, v } => r!(dst) = VmValue::Int(v as i64),
                     Op::LoadConst { dst, k } => r!(dst) = self.consts[k as usize],
-                    Op::LoadTag { dst, tag } => r!(dst) = Value::Tag(tag),
+                    Op::LoadTag { dst, tag } => r!(dst) = VmValue::Tag(tag),
                     Op::LoadGlobal { dst, g } => {
                         let v = &self.globals[g as usize];
-                        if let Value::Uninit = v {
+                        if let VmValue::Uninit = v {
                             fail!(uninit_global(&prog, g));
                         }
                         r!(dst) = *v;
@@ -795,10 +795,10 @@ impl Vm {
                         let v = r!(src);
                         r!(dst) = self.heap.alloc(Obj::Cell(v));
                     }
-                    // Each arm stores: a `Value` merged from a loaded one and
-                    // a constant is built in pieces through the stack.
+                    // Store only in the matching branch. Merging a loaded
+                    // `VmValue` with a fallback constant spills to the stack.
                     Op::LoadCell { dst, cell } => {
-                        if let Value::Obj(h) = r!(cell)
+                        if let VmValue::Obj(h) = r!(cell)
                             && let Obj::Cell(v) = self.heap.obj(h)
                         {
                             r!(dst) = *v;
@@ -813,71 +813,71 @@ impl Vm {
 
                     // ---------------- integer arithmetic
                     Op::AddI { dst, a, b } => match int!(a).checked_add(int!(b)) {
-                        Some(v) => r!(dst) = Value::Int(v),
+                        Some(v) => r!(dst) = VmValue::Int(v),
                         None => fail!("overflow: integer overflow"),
                     },
                     Op::SubI { dst, a, b } => match int!(a).checked_sub(int!(b)) {
-                        Some(v) => r!(dst) = Value::Int(v),
+                        Some(v) => r!(dst) = VmValue::Int(v),
                         None => fail!("overflow: integer overflow"),
                     },
                     Op::MulI { dst, a, b } => match int!(a).checked_mul(int!(b)) {
-                        Some(v) => r!(dst) = Value::Int(v),
+                        Some(v) => r!(dst) = VmValue::Int(v),
                         None => fail!("overflow: integer overflow"),
                     },
                     Op::DivI { dst, a, b } => match int_div(int!(a), int!(b)) {
-                        Ok(v) => r!(dst) = Value::Int(v),
+                        Ok(v) => r!(dst) = VmValue::Int(v),
                         Err(m) => fail!(m),
                     },
                     Op::RemI { dst, a, b } => match int_rem(int!(a), int!(b)) {
-                        Ok(v) => r!(dst) = Value::Int(v),
+                        Ok(v) => r!(dst) = VmValue::Int(v),
                         Err(m) => fail!(m),
                     },
                     Op::PowI { dst, a, b } => match int_pow(int!(a), int!(b)) {
-                        Ok(v) => r!(dst) = Value::Int(v),
+                        Ok(v) => r!(dst) = VmValue::Int(v),
                         Err(m) => fail!(m),
                     },
                     Op::AddIK { dst, a, k } => match int!(a).checked_add(k as i64) {
-                        Some(v) => r!(dst) = Value::Int(v),
+                        Some(v) => r!(dst) = VmValue::Int(v),
                         None => fail!("overflow: integer overflow"),
                     },
                     Op::MulIK { dst, a, k } => match int!(a).checked_mul(k as i64) {
-                        Some(v) => r!(dst) = Value::Int(v),
+                        Some(v) => r!(dst) = VmValue::Int(v),
                         None => fail!("overflow: integer overflow"),
                     },
                     // Floor division and modulo by a positive power of two
                     // are a shift and a mask.
-                    Op::DivIK { dst, a, k } if k > 0 && k & (k - 1) == 0 => r!(dst) = Value::Int(int!(a) >> k.trailing_zeros()),
+                    Op::DivIK { dst, a, k } if k > 0 && k & (k - 1) == 0 => r!(dst) = VmValue::Int(int!(a) >> k.trailing_zeros()),
                     Op::DivIK { dst, a, k } => match floor_div(int!(a), k as i64) {
-                        Some(v) => r!(dst) = Value::Int(v),
+                        Some(v) => r!(dst) = VmValue::Int(v),
                         None => fail!("overflow: integer overflow"),
                     },
-                    Op::RemIK { dst, a, k } if k > 0 && k & (k - 1) == 0 => r!(dst) = Value::Int(int!(a) & (k as i64 - 1)),
-                    Op::RemIK { dst, a, k } => r!(dst) = Value::Int(floor_rem(int!(a), k as i64)),
+                    Op::RemIK { dst, a, k } if k > 0 && k & (k - 1) == 0 => r!(dst) = VmValue::Int(int!(a) & (k as i64 - 1)),
+                    Op::RemIK { dst, a, k } => r!(dst) = VmValue::Int(floor_rem(int!(a), k as i64)),
                     Op::NegI { dst, a } => match int!(a).checked_neg() {
-                        Some(v) => r!(dst) = Value::Int(v),
+                        Some(v) => r!(dst) = VmValue::Int(v),
                         None => fail!("overflow: integer overflow"),
                     },
-                    Op::BitAnd { dst, a, b } => r!(dst) = Value::Int(int!(a) & int!(b)),
-                    Op::BitOr { dst, a, b } => r!(dst) = Value::Int(int!(a) | int!(b)),
-                    Op::BitXor { dst, a, b } => r!(dst) = Value::Int(int!(a) ^ int!(b)),
+                    Op::BitAnd { dst, a, b } => r!(dst) = VmValue::Int(int!(a) & int!(b)),
+                    Op::BitOr { dst, a, b } => r!(dst) = VmValue::Int(int!(a) | int!(b)),
+                    Op::BitXor { dst, a, b } => r!(dst) = VmValue::Int(int!(a) ^ int!(b)),
                     Op::Shl { dst, a, b } => match shift_amount(int!(b)) {
-                        Ok(s) => r!(dst) = Value::Int(int!(a).wrapping_shl(s)),
+                        Ok(s) => r!(dst) = VmValue::Int(int!(a).wrapping_shl(s)),
                         Err(m) => fail!(m),
                     },
                     Op::Shr { dst, a, b } => match shift_amount(int!(b)) {
-                        Ok(s) => r!(dst) = Value::Int(int!(a) >> s),
+                        Ok(s) => r!(dst) = VmValue::Int(int!(a) >> s),
                         Err(m) => fail!(m),
                     },
-                    Op::BitNot { dst, a } => r!(dst) = Value::Int(!int!(a)),
+                    Op::BitNot { dst, a } => r!(dst) = VmValue::Int(!int!(a)),
 
                     // ---------------- float arithmetic
-                    Op::AddF { dst, a, b } => r!(dst) = Value::Float(float!(a) + float!(b)),
-                    Op::SubF { dst, a, b } => r!(dst) = Value::Float(float!(a) - float!(b)),
-                    Op::MulF { dst, a, b } => r!(dst) = Value::Float(float!(a) * float!(b)),
-                    Op::DivF { dst, a, b } => r!(dst) = Value::Float(float!(a) / float!(b)),
-                    Op::RemF { dst, a, b } => r!(dst) = Value::Float(float_rem(float!(a), float!(b))),
-                    Op::PowF { dst, a, b } => r!(dst) = Value::Float(float!(a).powf(float!(b))),
-                    Op::NegF { dst, a } => r!(dst) = Value::Float(-float!(a)),
+                    Op::AddF { dst, a, b } => r!(dst) = VmValue::Float(float!(a) + float!(b)),
+                    Op::SubF { dst, a, b } => r!(dst) = VmValue::Float(float!(a) - float!(b)),
+                    Op::MulF { dst, a, b } => r!(dst) = VmValue::Float(float!(a) * float!(b)),
+                    Op::DivF { dst, a, b } => r!(dst) = VmValue::Float(float!(a) / float!(b)),
+                    Op::RemF { dst, a, b } => r!(dst) = VmValue::Float(float_rem(float!(a), float!(b))),
+                    Op::PowF { dst, a, b } => r!(dst) = VmValue::Float(float!(a).powf(float!(b))),
+                    Op::NegF { dst, a } => r!(dst) = VmValue::Float(-float!(a)),
 
                     // ---------------- generic arithmetic
                     Op::Add { dst, a, b }
@@ -902,35 +902,35 @@ impl Vm {
                     }
                     Op::Neg { dst, a } => {
                         r!(dst) = match r!(a) {
-                            Value::Int(i) => match i.checked_neg() {
-                                Some(v) => Value::Int(v),
+                            VmValue::Int(i) => match i.checked_neg() {
+                                Some(v) => VmValue::Int(v),
                                 None => fail!("overflow: integer overflow"),
                             },
-                            Value::Float(f) => Value::Float(-f),
-                            Value::Dur(d) => match d.checked_neg() {
-                                Some(v) => Value::Dur(v),
+                            VmValue::Float(f) => VmValue::Float(-f),
+                            VmValue::Dur(d) => match d.checked_neg() {
+                                Some(v) => VmValue::Dur(v),
                                 None => fail!("overflow: duration overflow"),
                             },
                             other => internal!(format!("cannot negate {other:?}")),
                         }
                     }
-                    Op::Not { dst, a } => r!(dst) = Value::Bool(!r!(a).as_bool()),
+                    Op::Not { dst, a } => r!(dst) = VmValue::Bool(!r!(a).as_bool()),
 
                     // ---------------- comparisons
-                    Op::EqI { dst, a, b } => r!(dst) = Value::Bool(int!(a) == int!(b)),
-                    Op::NeI { dst, a, b } => r!(dst) = Value::Bool(int!(a) != int!(b)),
-                    Op::LtI { dst, a, b } => r!(dst) = Value::Bool(int!(a) < int!(b)),
-                    Op::LeI { dst, a, b } => r!(dst) = Value::Bool(int!(a) <= int!(b)),
-                    Op::EqIK { dst, a, k } => r!(dst) = Value::Bool(int!(a) == k as i64),
-                    Op::NeIK { dst, a, k } => r!(dst) = Value::Bool(int!(a) != k as i64),
-                    Op::LtIK { dst, a, k } => r!(dst) = Value::Bool(int!(a) < k as i64),
-                    Op::LeIK { dst, a, k } => r!(dst) = Value::Bool(int!(a) <= k as i64),
-                    Op::GtIK { dst, a, k } => r!(dst) = Value::Bool(int!(a) > k as i64),
-                    Op::GeIK { dst, a, k } => r!(dst) = Value::Bool(int!(a) >= k as i64),
-                    Op::EqF { dst, a, b } => r!(dst) = Value::Bool(float!(a) == float!(b)),
-                    Op::NeF { dst, a, b } => r!(dst) = Value::Bool(float!(a) != float!(b)),
-                    Op::LtF { dst, a, b } => r!(dst) = Value::Bool(float!(a) < float!(b)),
-                    Op::LeF { dst, a, b } => r!(dst) = Value::Bool(float!(a) <= float!(b)),
+                    Op::EqI { dst, a, b } => r!(dst) = VmValue::Bool(int!(a) == int!(b)),
+                    Op::NeI { dst, a, b } => r!(dst) = VmValue::Bool(int!(a) != int!(b)),
+                    Op::LtI { dst, a, b } => r!(dst) = VmValue::Bool(int!(a) < int!(b)),
+                    Op::LeI { dst, a, b } => r!(dst) = VmValue::Bool(int!(a) <= int!(b)),
+                    Op::EqIK { dst, a, k } => r!(dst) = VmValue::Bool(int!(a) == k as i64),
+                    Op::NeIK { dst, a, k } => r!(dst) = VmValue::Bool(int!(a) != k as i64),
+                    Op::LtIK { dst, a, k } => r!(dst) = VmValue::Bool(int!(a) < k as i64),
+                    Op::LeIK { dst, a, k } => r!(dst) = VmValue::Bool(int!(a) <= k as i64),
+                    Op::GtIK { dst, a, k } => r!(dst) = VmValue::Bool(int!(a) > k as i64),
+                    Op::GeIK { dst, a, k } => r!(dst) = VmValue::Bool(int!(a) >= k as i64),
+                    Op::EqF { dst, a, b } => r!(dst) = VmValue::Bool(float!(a) == float!(b)),
+                    Op::NeF { dst, a, b } => r!(dst) = VmValue::Bool(float!(a) != float!(b)),
+                    Op::LtF { dst, a, b } => r!(dst) = VmValue::Bool(float!(a) < float!(b)),
+                    Op::LeF { dst, a, b } => r!(dst) = VmValue::Bool(float!(a) <= float!(b)),
                     Op::JNeq { a, b, off } if let Some(eq) = quick_eq(&self.heap, &r!(a), &r!(b)) => {
                         if !eq {
                             jump!(off)
@@ -951,8 +951,8 @@ impl Vm {
                         Ok(false) => {}
                         Err(c) => fail_stop!(c),
                     },
-                    Op::Eq { dst, a, b } if let Some(eq) = quick_eq(&self.heap, &r!(a), &r!(b)) => r!(dst) = Value::Bool(eq),
-                    Op::Ne { dst, a, b } if let Some(eq) = quick_eq(&self.heap, &r!(a), &r!(b)) => r!(dst) = Value::Bool(!eq),
+                    Op::Eq { dst, a, b } if let Some(eq) = quick_eq(&self.heap, &r!(a), &r!(b)) => r!(dst) = VmValue::Bool(eq),
+                    Op::Ne { dst, a, b } if let Some(eq) = quick_eq(&self.heap, &r!(a), &r!(b)) => r!(dst) = VmValue::Bool(!eq),
                     // Metered and out of line (`op_compare`); the branches
                     // `JNeq` and `JNne` share the arm to keep one call site.
                     Op::Eq { .. } | Op::Ne { .. } | Op::Lt { .. } | Op::Le { .. } | Op::JNeq { .. } | Op::JNne { .. } => {
@@ -1036,11 +1036,11 @@ impl Vm {
                         }
                     }
                     Op::JNotSome { src, dst, off } => match self.heap.payload_if(&r!(src), prog.ids.some) {
-                        Value::Uninit => jump!(off),
+                        VmValue::Uninit => jump!(off),
                         p => r!(dst) = p,
                     },
                     Op::JNotOk { src, dst, off } => match self.heap.payload_if(&r!(src), prog.ids.ok) {
-                        Value::Uninit => jump!(off),
+                        VmValue::Uninit => jump!(off),
                         p => r!(dst) = p,
                     },
                     Op::JmpIfBack { cond, off } => {
@@ -1105,7 +1105,7 @@ impl Vm {
                     }
                     Op::JSomeBack { src, dst, off } => {
                         let p = self.heap.payload_if(&r!(src), prog.ids.some);
-                        if !matches!(p, Value::Uninit) {
+                        if !matches!(p, VmValue::Uninit) {
                             r!(dst) = p;
                             break 'back off as i32;
                         }
@@ -1133,7 +1133,7 @@ impl Vm {
                         match self.heap.get(callee) {
                             Obj::Closure(p, _) => {
                                 let p = *p;
-                                let Value::Obj(h) = callee else { unreachable!() };
+                                let VmValue::Obj(h) = callee else { unreachable!() };
                                 let nb = base + b as usize;
                                 enter_closure!(p, nb, base + dst as usize, h);
                             }
@@ -1231,7 +1231,7 @@ impl Vm {
                                 }
                                 reload!();
                                 shift_args(regs, src, n);
-                                let Value::Obj(h) = callee else { unreachable!() };
+                                let VmValue::Obj(h) = callee else { unreachable!() };
                                 load_captures(&self.heap, h, &mut regs[pr.nparams as usize..]);
                                 let top = fiber.frames.last_mut().unwrap();
                                 top.proto = proto;
@@ -1255,13 +1255,13 @@ impl Vm {
                         do_return!(v);
                     }
                     Op::RetVariant { src, variant } => {
-                        let v = match Value::variant1(variant as u32, r!(src)) {
+                        let v = match VmValue::variant1(variant as u32, r!(src)) {
                             Some(v) => v,
                             None => self.heap.new_variant(variant as u32, &[r!(src)]),
                         };
                         do_return!(v);
                     }
-                    Op::RetUnit => do_return!(Value::Unit),
+                    Op::RetUnit => do_return!(VmValue::Unit),
                     Op::Unwind => {
                         fiber.frames.pop();
                         if !self.unwind_to_pad(fiber, true) {
@@ -1283,7 +1283,7 @@ impl Vm {
                     Op::NewTuple { dst, start, count } => {
                         let s = start as usize;
                         r!(dst) = match regs[s..s + count as usize] {
-                            [Value::Int(a), Value::Int(b)] if let Ok(a) = i32::try_from(a) => Value::Pair(a, b),
+                            [VmValue::Int(a), VmValue::Int(b)] if let Ok(a) = i32::try_from(a) => VmValue::Pair(a, b),
                             _ => self.new_tuple(&regs[s..s + count as usize]),
                         };
                     }
@@ -1296,7 +1296,7 @@ impl Vm {
                     Op::NewVariant { dst, start, variant } => {
                         let n = prog.variants[variant as usize].arity;
                         let s = start as usize;
-                        r!(dst) = match Value::variant1(variant as u32, r!(s)) {
+                        r!(dst) = match VmValue::variant1(variant as u32, r!(s)) {
                             Some(v) if n == 1 => v,
                             _ => self.heap.new_variant(variant as u32, &regs[s..s + n]),
                         };
@@ -1317,7 +1317,7 @@ impl Vm {
                         r!(dst) = self.heap.alloc(Obj::Range(x, y, true));
                     }
                     Op::GetField { dst, obj, idx } => match r!(obj) {
-                        Value::Obj(h) => match self.heap.obj(h) {
+                        VmValue::Obj(h) => match self.heap.obj(h) {
                             Obj::Struct(_, f) | Obj::Tuple(f) | Obj::Variant(_, f) | Obj::Closure(_, f) if (idx as usize) < f.len() => {
                                 r!(dst) = f[idx as usize];
                             }
@@ -1326,9 +1326,9 @@ impl Vm {
                                 return Err(self.field_trap(fiber, ip, v, idx));
                             }
                         },
-                        Value::Pair(a, b) => r!(dst) = Value::Int(if idx == 0 { a as i64 } else { b }),
+                        VmValue::Pair(a, b) => r!(dst) = VmValue::Int(if idx == 0 { a as i64 } else { b }),
                         v => match inline_field(&v, idx) {
-                            Value::Uninit => return Err(self.field_trap(fiber, ip, v, idx)),
+                            VmValue::Uninit => return Err(self.field_trap(fiber, ip, v, idx)),
                             p => r!(dst) = p,
                         },
                     },
@@ -1403,7 +1403,7 @@ impl Vm {
                         if n < 0 {
                             fail!(format!("invalid: negative repeat count: {n}"));
                         }
-                        if self.heap.would_exceed(to_usize_saturating(n).saturating_mul(std::mem::size_of::<Value>())) {
+                        if self.heap.would_exceed(to_usize_saturating(n).saturating_mul(std::mem::size_of::<VmValue>())) {
                             save!();
                             return self.limit_stop(fiber, ip, LimitKind::Memory);
                         }
@@ -1418,7 +1418,7 @@ impl Vm {
                             Obj::Set(s) => s.live,
                             _ => 0,
                         };
-                        r!(dst) = Value::Int(n as i64);
+                        r!(dst) = VmValue::Int(n as i64);
                     }
                     Op::ListGet { dst, list, idx } => {
                         let v = to_index(int!(idx)).and_then(|i| self.heap.list(r!(list)).get(i)).copied();
@@ -1469,7 +1469,7 @@ impl Vm {
                     Op::MapHasTuple { dst, map, start, n } => {
                         let s = start as usize;
                         match retryable!(self.map_has_tuple(r!(map), &regs[s..s + n as usize])) {
-                            Ok(b) => r!(dst) = Value::Bool(b),
+                            Ok(b) => r!(dst) = VmValue::Bool(b),
                             Err(c) => fail_stop!(c),
                         }
                     }
@@ -1484,18 +1484,18 @@ impl Vm {
                         }
                     },
                     Op::MapHas { dst, map, key } => match retryable!(self.map_has(r!(map), r!(key))) {
-                        Ok(b) => r!(dst) = Value::Bool(b),
+                        Ok(b) => r!(dst) = VmValue::Bool(b),
                         Err(c) => fail_stop!(c),
                     },
                     Op::SetHas { dst, set, key } => match retryable!(self.set_contains(r!(set), r!(key))) {
-                        Ok(b) => r!(dst) = Value::Bool(b),
+                        Ok(b) => r!(dst) = VmValue::Bool(b),
                         Err(c) => fail_stop!(c),
                     },
                     Op::SetAdd { dst, set, key } => match retryable!(self.set_add(r!(set), r!(key))) {
-                        Ok(b) => r!(dst) = Value::Bool(b),
+                        Ok(b) => r!(dst) = VmValue::Bool(b),
                         Err(c) => fail_stop!(c),
                     },
-                    Op::IntToFloat { dst, src } => r!(dst) = Value::Float(int!(src) as f64),
+                    Op::IntToFloat { dst, src } => r!(dst) = VmValue::Float(int!(src) as f64),
                     Op::AppendStr { local, src } => {
                         let (cur, add) = (r!(local), r!(src));
                         match retryable!(self.op_append_str(cur, add)) {
@@ -1513,7 +1513,7 @@ impl Vm {
                         Err(c) => fail_stop!(c.into()),
                     },
                     Op::StrClass { dst, src, class } => match self.str_class(r!(src), class) {
-                        Ok(b) => r!(dst) = Value::Bool(b),
+                        Ok(b) => r!(dst) = VmValue::Bool(b),
                         Err(c) => fail_stop!(c.into()),
                     },
                     Op::ForList { elem, base: b, off } => {
@@ -1523,7 +1523,7 @@ impl Vm {
                         if i < n && (i as usize) < l.len() {
                             let v = l[i as usize];
                             r!(elem) = v;
-                            r!(b + 1) = Value::Int(i + 1);
+                            r!(b + 1) = VmValue::Int(i + 1);
                         } else {
                             jump!(off);
                         }
@@ -1531,8 +1531,8 @@ impl Vm {
                     Op::ForRange { var, base: b, off } => {
                         let i = int!(b);
                         if i < int!(b + 1) {
-                            r!(var) = Value::Int(i);
-                            r!(b) = Value::Int(i + 1);
+                            r!(var) = VmValue::Int(i);
+                            r!(b) = VmValue::Int(i + 1);
                         } else {
                             jump!(off);
                         }
@@ -1540,11 +1540,11 @@ impl Vm {
                     Op::ForRangeIncl { var, base: b, off } => {
                         let i = int!(b);
                         if !r!(b + 2).as_bool() && i <= int!(b + 1) {
-                            r!(var) = Value::Int(i);
+                            r!(var) = VmValue::Int(i);
                             if i == int!(b + 1) {
-                                r!(b + 2) = Value::Bool(true);
+                                r!(b + 2) = VmValue::Bool(true);
                             } else {
-                                r!(b) = Value::Int(i + 1);
+                                r!(b) = VmValue::Int(i + 1);
                             }
                         } else {
                             jump!(off);
@@ -1557,26 +1557,26 @@ impl Vm {
                         if i < n && (i as usize) < l.len() {
                             let v = l[i as usize];
                             r!(elem) = v;
-                            r!(b + 1) = Value::Int(i + 1);
+                            r!(b + 1) = VmValue::Int(i + 1);
                             break 'back off as i32;
                         }
                     }
                     Op::ForRangeBack { var, base: b, off } => {
                         let i = int!(b);
                         if i < int!(b + 1) {
-                            r!(var) = Value::Int(i);
-                            r!(b) = Value::Int(i + 1);
+                            r!(var) = VmValue::Int(i);
+                            r!(b) = VmValue::Int(i + 1);
                             break 'back off as i32;
                         }
                     }
                     Op::ForRangeInclBack { var, base: b, off } => {
                         let i = int!(b);
                         if !r!(b + 2).as_bool() && i <= int!(b + 1) {
-                            r!(var) = Value::Int(i);
+                            r!(var) = VmValue::Int(i);
                             if i == int!(b + 1) {
-                                r!(b + 2) = Value::Bool(true);
+                                r!(b + 2) = VmValue::Bool(true);
                             } else {
-                                r!(b) = Value::Int(i + 1);
+                                r!(b) = VmValue::Int(i + 1);
                             }
                             break 'back off as i32;
                         }
@@ -1608,22 +1608,22 @@ impl Vm {
                     Op::ForChars { elem, base: b, off } => match self.next_char(&r!(b), &r!(b + 1)) {
                         Some((c, at)) => {
                             r!(elem) = c;
-                            r!(b + 1) = Value::Int(at);
+                            r!(b + 1) = VmValue::Int(at);
                         }
                         None => jump!(off),
                     },
                     Op::ForCharsBack { elem, base: b, off } => {
                         if let Some((c, at)) = self.next_char(&r!(b), &r!(b + 1)) {
                             r!(elem) = c;
-                            r!(b + 1) = Value::Int(at);
+                            r!(b + 1) = VmValue::Int(at);
                             break 'back off as i32;
                         }
                     }
                     Op::UnpackRange { base: b, src } => match unpack_range(self.heap.get(r!(src))) {
                         Some((first, last, done)) => {
-                            r!(b) = Value::Int(first);
-                            r!(b + 1) = Value::Int(last);
-                            r!(b + 2) = Value::Bool(done);
+                            r!(b) = VmValue::Int(first);
+                            r!(b + 1) = VmValue::Int(last);
+                            r!(b + 2) = VmValue::Bool(done);
                         }
                         None => internal!("not a range"),
                     },
@@ -1656,7 +1656,7 @@ impl Vm {
                     // ---------------- strings
                     Op::ToStr { dst, src } => {
                         let v = r!(src);
-                        if let Value::Obj(_) = v
+                        if let VmValue::Obj(_) = v
                             && let Obj::Str(_) = self.heap.get(v)
                         {
                             r!(dst) = v;
@@ -1789,7 +1789,7 @@ impl Vm {
         match r.kind() {
             CtlKind::Yield => {
                 self.recycle(r);
-                fiber.stack[slot] = Value::Unit;
+                fiber.stack[slot] = VmValue::Unit;
                 return Ok(Some(FiberStop::YieldNow));
             }
             CtlKind::Blocked { wait_gen } => {
@@ -1827,7 +1827,7 @@ impl Vm {
 
     /// `Op::StrClass`: the character-class tests of strings.
     #[inline(never)]
-    fn str_class(&self, v: Value, class: u8) -> Result<bool, Stop> {
+    fn str_class(&self, v: VmValue, class: u8) -> Result<bool, Stop> {
         let t = self.heap.str(v);
         if let &[b] = t.as_bytes()
             && b.is_ascii()
@@ -1859,7 +1859,7 @@ impl Vm {
     /// (else 0). Composite values are compared with metering, so deep
     /// comparisons cost fuel and can be interrupted.
     #[inline(never)]
-    fn op_compare(&mut self, prog: &Program, op: Op, regs: &mut [Value]) -> Result<i16, Fail> {
+    fn op_compare(&mut self, prog: &Program, op: Op, regs: &mut [VmValue]) -> Result<i16, Fail> {
         let (Op::Eq { a, b, .. }
         | Op::Ne { a, b, .. }
         | Op::Lt { a, b, .. }
@@ -1872,7 +1872,9 @@ impl Vm {
         let (x, y) = (regs[a as usize], regs[b as usize]);
         // Anything but two plain scalars may be arbitrarily large (inline
         // variants such as `Some(x)` hold heap values too).
-        let scalar = |v: Value| matches!(v, Value::Unit | Value::Bool(_) | Value::Int(_) | Value::Float(_) | Value::Dur(_) | Value::Tag(_));
+        let scalar = |v: VmValue| {
+            matches!(v, VmValue::Unit | VmValue::Bool(_) | VmValue::Int(_) | VmValue::Float(_) | VmValue::Dur(_) | VmValue::Tag(_))
+        };
         let composite = !(scalar(x) && scalar(y));
         let v = match op {
             Op::Eq { .. } | Op::Ne { .. } | Op::JNeq { .. } | Op::JNne { .. } => {
@@ -1886,7 +1888,7 @@ impl Vm {
         };
         Ok(match op {
             Op::Eq { dst, .. } | Op::Ne { dst, .. } | Op::Lt { dst, .. } | Op::Le { dst, .. } => {
-                regs[dst as usize] = Value::Bool(v);
+                regs[dst as usize] = VmValue::Bool(v);
                 0
             }
             Op::JNeq { off, .. } | Op::JNne { off, .. } if !v => off,
@@ -1896,7 +1898,7 @@ impl Vm {
 
     /// `v == consts[k]`.
     #[inline(always)]
-    fn eq_const(&self, v: &Value, k: u16) -> Result<bool, Fail> {
+    fn eq_const(&self, v: &VmValue, k: u16) -> Result<bool, Fail> {
         let c = &self.consts[k as usize];
         match quick_eq(&self.heap, v, c) {
             Some(eq) => Ok(eq),
@@ -1905,13 +1907,13 @@ impl Vm {
     }
 
     #[inline(never)]
-    fn eq_slow(&self, a: Value, b: Value) -> Result<bool, Fail> {
+    fn eq_slow(&self, a: VmValue, b: VmValue) -> Result<bool, Fail> {
         values_eq_metered(&self.heap, &self.meter, a, b)
     }
 
     /// `ToStr` (display) and `Debug` of a value, as a new string.
     #[inline(never)]
-    fn op_display(&mut self, prog: &Program, v: Value, debug: bool) -> Result<Value, Fail> {
+    fn op_display(&mut self, prog: &Program, v: VmValue, debug: bool) -> Result<VmValue, Fail> {
         let s = if debug {
             display::to_debug_metered(prog, &self.heap, &self.meter, v)?
         } else {
@@ -1921,7 +1923,7 @@ impl Vm {
     }
 
     /// The text of template `tmpl` with the values of the registers `regs`.
-    fn render_template(&self, prog: &Program, tmpl: u32, regs: &[Value]) -> Result<String, Fail> {
+    fn render_template(&self, prog: &Program, tmpl: u32, regs: &[VmValue]) -> Result<String, Fail> {
         let t = &prog.templates[tmpl as usize];
         self.meter.charge_bytes(t.text_len)?;
         let mut out = String::with_capacity(t.text_len + 8 * t.pieces.len());
@@ -1943,7 +1945,7 @@ impl Vm {
     /// `Op::Describe`: instantiates a type descriptor template with the
     /// argument descriptors at the start of `args`.
     #[inline(never)]
-    fn op_describe(&mut self, prog: &Program, tmpl: u32, args: &[Value]) -> Result<Value, Fail> {
+    fn op_describe(&mut self, prog: &Program, tmpl: u32, args: &[VmValue]) -> Result<VmValue, Fail> {
         let t = &prog.desc_templates[tmpl as usize];
         self.meter.charge(t.size() as u64)?;
         let args = &args[..t.arity()];
@@ -1961,7 +1963,7 @@ impl Vm {
 
     /// `Op::Interp`: string interpolation into one buffer.
     #[inline(never)]
-    fn op_interp(&mut self, prog: &Program, tmpl: u32, regs: &[Value]) -> Result<Value, Fail> {
+    fn op_interp(&mut self, prog: &Program, tmpl: u32, regs: &[VmValue]) -> Result<VmValue, Fail> {
         let s = self.render_template(prog, tmpl, regs)?;
         Ok(self.heap.new_str(s))
     }
@@ -1970,7 +1972,7 @@ impl Vm {
     /// local in register `local` (charged like `AppendStr`). Returns the
     /// local's new value.
     #[inline(never)]
-    fn op_append_interp(&mut self, prog: &Program, tmpl: u32, local: Reg, regs: &[Value]) -> Result<Value, Fail> {
+    fn op_append_interp(&mut self, prog: &Program, tmpl: u32, local: Reg, regs: &[VmValue]) -> Result<VmValue, Fail> {
         let s = self.render_template(prog, tmpl, regs)?;
         let cur = regs[local as usize];
         let copied = match self.heap.get(cur) {
@@ -1984,7 +1986,7 @@ impl Vm {
     /// Calls native `n`. A Rust panic in it is caught by the scheduler
     /// around the whole slice (`crate::unwind`).
     #[inline(always)]
-    fn invoke_native(&mut self, natives: &[NativeEntry], n: u32, args: &[Value]) -> Result<Value, Ctl> {
+    fn invoke_native(&mut self, natives: &[NativeEntry], n: u32, args: &[VmValue]) -> Result<VmValue, Ctl> {
         let entry = &natives[n as usize];
         entry.f.call(self, args)
     }
@@ -1992,7 +1994,7 @@ impl Vm {
     /// Returns the result of `on` if it is ready. Otherwise, registers a wait
     /// for the running task and returns a [`Ctl`] that the native function must
     /// propagate.
-    pub fn block(&mut self, on: BlockOn) -> Result<Value, Ctl> {
+    pub fn block(&mut self, on: BlockOn) -> Result<VmValue, Ctl> {
         let caller = self.current;
         let wait_gen = self.next_gen();
         match on {
@@ -2019,7 +2021,7 @@ impl Vm {
                 }
                 // One waiter per task, and the list of tasks to cancel.
                 self.meter.charge(tasks.len() as u64)?;
-                self.heap.check_memory(tasks.len() * (std::mem::size_of::<Value>() + std::mem::size_of::<(u32, u64)>()))?;
+                self.heap.check_memory(tasks.len() * (std::mem::size_of::<VmValue>() + std::mem::size_of::<(u32, u64)>()))?;
                 let (mut any_cancelled, mut contenders) = (false, 0);
                 for &task_val in &tasks {
                     let Obj::Task(task) = self.heap.get(task_val) else { continue };
@@ -2051,7 +2053,7 @@ impl Vm {
                     };
                     self.add_waiter(fid, (caller, wait_gen))?;
                 }
-                self.heap.fiber_bytes += tasks.capacity() * std::mem::size_of::<Value>();
+                self.heap.fiber_bytes += tasks.capacity() * std::mem::size_of::<VmValue>();
                 Err(Ctl::from(CtlKind::Racing { wait_gen, tasks, contenders }))
             }
             BlockOn::Recv(ch) => {
@@ -2060,7 +2062,7 @@ impl Vm {
                     let some = self.some(v);
                     if let Some((sf, sg)) = woken {
                         // If the sender went away, its value stays queued.
-                        self.deliver(sf, sg, Value::Bool(true));
+                        self.deliver(sf, sg, VmValue::Bool(true));
                     }
                     return Ok(some);
                 }
@@ -2083,24 +2085,24 @@ impl Vm {
             BlockOn::Send(ch, v) => {
                 let Some(c) = self.heap.channel_mut(ch, None) else { return Err(internal("not a channel").into()) };
                 if c.closed {
-                    return Ok(Value::Bool(false));
+                    return Ok(VmValue::Bool(false));
                 }
                 while let Some((rf, rg)) = c.receivers.pop_front() {
                     if wait_is_live(&self.fibers, (rf, rg)) {
                         let some = self.some(v);
                         self.deliver(rf, rg, some);
-                        return Ok(Value::Bool(true));
+                        return Ok(VmValue::Bool(true));
                     }
                 }
                 if c.has_room() {
                     self.heap.channel_push(ch, v).map_err(Fail::limit)?;
-                    return Ok(Value::Bool(true));
+                    return Ok(VmValue::Bool(true));
                 }
                 let Some(c) = self.heap.channel_mut(ch, Some(v)) else { unreachable!() };
                 let before = c.senders.capacity();
                 c.senders.push_back((caller, wait_gen, v));
                 let grown = c.senders.capacity().saturating_sub(before);
-                self.heap.bytes += grown * std::mem::size_of::<(u32, u64, Value)>();
+                self.heap.bytes += grown * std::mem::size_of::<(u32, u64, VmValue)>();
                 Err(self.signal(CtlKind::Blocked { wait_gen }))
             }
         }
@@ -2139,7 +2141,7 @@ impl Vm {
 
     /// The value of key `k` in map `m`, or `None`.
     #[inline]
-    pub fn map_get(&self, m: Value, k: Value) -> Result<Option<Value>, Fail> {
+    pub fn map_get(&self, m: VmValue, k: VmValue) -> Result<Option<VmValue>, Fail> {
         let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
         match map_slot(&self.heap, &self.meter, mo, k)?.map(|s| &mo.entries[s]) {
             Some(Some((_, v))) => Ok(Some(*v)),
@@ -2150,8 +2152,8 @@ impl Vm {
     /// `Op::ForChars`: the character of string `s` at byte offset `at`, and
     /// the offset after it; `None` at the end.
     #[inline]
-    fn next_char(&mut self, s: &Value, at: &Value) -> Option<(Value, i64)> {
-        let (&Value::Obj(h), &Value::Int(i)) = (s, at) else { return None };
+    fn next_char(&mut self, s: &VmValue, at: &VmValue) -> Option<(VmValue, i64)> {
+        let (&VmValue::Obj(h), &VmValue::Int(i)) = (s, at) else { return None };
         let Obj::Str(t) = self.heap.obj(h) else { return None };
         let i = i as usize;
         let &b = t.as_bytes().get(i)?;
@@ -2162,7 +2164,7 @@ impl Vm {
     }
 
     #[inline(never)]
-    fn next_char_slow(&mut self, h: u32, i: usize) -> Option<(Value, i64)> {
+    fn next_char_slow(&mut self, h: u32, i: usize) -> Option<(VmValue, i64)> {
         let Obj::Str(t) = self.heap.obj(h) else { return None };
         let c = t.get(i..)?.chars().next()?;
         let end = i + c.len_utf8();
@@ -2170,12 +2172,13 @@ impl Vm {
         Some((self.heap.new_str(text), end as i64))
     }
 
-    /// `m.get(k)`: the value as an option (built here rather than returned
-    /// as an `Option<Value>`, for the reason given at `map_index`).
+    /// Returns `m.get(k)` as a Sand `Option`. Builds the Sand `Option` directly
+    /// instead of returning `Option<VmValue>` for the reason described on
+    /// [`Vm::map_index`].
     #[inline(never)]
-    fn map_get_option(&mut self, m: Value, k: Value) -> Result<Value, Fail> {
+    fn map_get_option(&mut self, m: VmValue, k: VmValue) -> Result<VmValue, Fail> {
         let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
-        if let Value::Int(i) = k {
+        if let VmValue::Int(i) = k {
             let v = map_get_int(mo, i).copied();
             return Ok(self.option(v));
         }
@@ -2188,9 +2191,9 @@ impl Vm {
     /// The slot of key `k` (not an int) in map `m`, remembered for a store
     /// to the same key right after (`m[k] = m.get_or(k, 0) + 1`).
     #[inline]
-    fn map_lookup(&self, m: Value, mo: &MapObj, k: Value) -> Result<Option<usize>, Fail> {
+    fn map_lookup(&self, m: VmValue, mo: &MapObj, k: VmValue) -> Result<Option<usize>, Fail> {
         let s = map_slot(&self.heap, &self.meter, mo, k)?;
-        if let (Some(s), Value::Obj(h)) = (s, m) {
+        if let (Some(s), VmValue::Obj(h)) = (s, m) {
             self.last_slot.set((h, s as u32));
         }
         Ok(s)
@@ -2198,10 +2201,10 @@ impl Vm {
 
     /// Returns the cached slot from the previous lookup if `map` and `key` match it.
     #[inline]
-    fn last_slot(&self, map: Value, map_obj: &MapObj, key: Value) -> Result<Option<usize>, Fail> {
+    fn last_slot(&self, map: VmValue, map_obj: &MapObj, key: VmValue) -> Result<Option<usize>, Fail> {
         let (cached_map, cached_slot) = self.last_slot.get();
-        let (Value::Obj(map_handle), Value::Obj(key_handle)) = (map, key) else { return Ok(None) };
-        let Some(Some((Value::Obj(stored_key), _))) = map_obj.entries.get(cached_slot as usize) else { return Ok(None) };
+        let (VmValue::Obj(map_handle), VmValue::Obj(key_handle)) = (map, key) else { return Ok(None) };
+        let Some(Some((VmValue::Obj(stored_key), _))) = map_obj.entries.get(cached_slot as usize) else { return Ok(None) };
         if map_handle != cached_map || *stored_key != key_handle {
             return Ok(None);
         }
@@ -2214,10 +2217,10 @@ impl Vm {
 
     /// `Op::MapGetOr`: the value of `k` in map `m` to `out`, if there is one.
     #[inline(never)]
-    fn map_get_or(&self, m: Value, k: Value, out: &mut Value) -> Result<(), Fail> {
+    fn map_get_or(&self, m: VmValue, k: VmValue, out: &mut VmValue) -> Result<(), Fail> {
         let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
         let v = match k {
-            Value::Int(i) => map_get_int(mo, i),
+            VmValue::Int(i) => map_get_int(mo, i),
             _ => self.map_lookup(m, mo, k)?.and_then(|s| mo.entries[s].as_ref()).map(|(_, v)| v),
         };
         if let Some(v) = v {
@@ -2228,7 +2231,7 @@ impl Vm {
 
     /// `Op::MapGetTuple`.
     #[inline(never)]
-    fn map_get_tuple(&mut self, m: Value, items: &[Value]) -> Result<Value, Fail> {
+    fn map_get_tuple(&mut self, m: VmValue, items: &[VmValue]) -> Result<VmValue, Fail> {
         let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
         match map_slot_tuple(&self.heap, &self.meter, mo, items)?.map(|s| &mo.entries[s]) {
             Some(&Some((_, v))) => Ok(self.some(v)),
@@ -2238,19 +2241,19 @@ impl Vm {
 
     /// `Op::MapHasTuple`.
     #[inline(never)]
-    fn map_has_tuple(&self, m: Value, items: &[Value]) -> Result<bool, Fail> {
+    fn map_has_tuple(&self, m: VmValue, items: &[VmValue]) -> Result<bool, Fail> {
         let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
         Ok(map_slot_tuple(&self.heap, &self.meter, mo, items)?.is_some())
     }
 
-    /// `m[k]`: the value, or an error if the key is missing. It copies the
-    /// value out of the entry directly rather than through `map_get`'s
-    /// `Option<Value>`, whose niche makes LLVM write the result piecewise and
-    /// stalls the caller's 16-byte load on store forwarding.
+    /// Returns `m[k]`, or an error if `k` is absent. Copies the value from the
+    /// entry directly instead of calling [`Vm::map_get`]. Returning
+    /// `Option<VmValue>` causes piecewise stack writes that stall store-to-load
+    /// forwarding.
     #[inline(never)]
-    fn map_index(&self, m: Value, k: Value) -> Result<Value, Fail> {
+    fn map_index(&self, m: VmValue, k: VmValue) -> Result<VmValue, Fail> {
         let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
-        if let Value::Int(i) = k {
+        if let VmValue::Int(i) = k {
             return match map_get_int(mo, i) {
                 Some(v) => Ok(*v),
                 None => Err(self.key_error(k)),
@@ -2264,16 +2267,16 @@ impl Vm {
 
     /// Inserts or replaces `k` in map `m`; returns the old value.
     #[inline(never)]
-    pub fn map_insert(&mut self, m: Value, k: Value, v: Value) -> Result<Option<Value>, Fail> {
+    pub fn map_insert(&mut self, m: VmValue, k: VmValue, v: VmValue) -> Result<Option<VmValue>, Fail> {
         self.map_store(m, k, v, true)
     }
 
     /// `m[k] = v`: `map_insert` without the old value.
     #[inline(never)]
-    fn map_set(&mut self, m: Value, k: Value, v: Value) -> Result<(), Fail> {
+    fn map_set(&mut self, m: VmValue, k: VmValue, v: VmValue) -> Result<(), Fail> {
         let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
         let found = match k {
-            Value::Int(i) => mo.index.find_int(i, |s| matches!(mo.entries[s], Some((Value::Int(x), _)) if x == i)),
+            VmValue::Int(i) => mo.index.find_int(i, |s| matches!(mo.entries[s], Some((VmValue::Int(x), _)) if x == i)),
             _ if let Some(s) = self.last_slot(m, mo, k)? => Some(s),
             _ => {
                 let hash = hash_key(&self.heap, &self.meter, k)?;
@@ -2296,12 +2299,12 @@ impl Vm {
 
     /// Inserts `k` with value `v` into map `m` unless it is there already;
     /// returns its existing value. One lookup, unlike `map_get` then `map_insert`.
-    pub fn map_get_or_insert(&mut self, m: Value, k: Value, v: Value) -> Result<Option<Value>, Fail> {
+    pub fn map_get_or_insert(&mut self, m: VmValue, k: VmValue, v: VmValue) -> Result<Option<VmValue>, Fail> {
         self.map_store(m, k, v, false)
     }
 
     /// `map_insert` (`replace`) or `map_get_or_insert`.
-    fn map_store(&mut self, m: Value, k: Value, v: Value, replace: bool) -> Result<Option<Value>, Fail> {
+    fn map_store(&mut self, m: VmValue, k: VmValue, v: VmValue, replace: bool) -> Result<Option<VmValue>, Fail> {
         let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
         let hash = hash_key(&self.heap, &self.meter, k)?;
         let found = find_entry(&self.heap, &self.meter, &mo.index, hash, k, &mo.entries, |e| e.0)?;
@@ -2321,7 +2324,7 @@ impl Vm {
 
     /// Appends the entry `k: v` to map `m`, which does not hold `k` (with
     /// hash `hash`).
-    fn map_push(&mut self, m: Value, k: Value, v: Value, hash: u64) -> Result<(), Fail> {
+    fn map_push(&mut self, m: VmValue, k: VmValue, v: VmValue, hash: u64) -> Result<(), Fail> {
         let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
         let end = mo.entries.len();
         if !slot_fits(end) {
@@ -2368,7 +2371,7 @@ impl Vm {
     }
 
     /// Removes `k` from map `m`; returns its value.
-    pub fn map_remove(&mut self, m: Value, k: Value) -> Result<Option<Value>, Fail> {
+    pub fn map_remove(&mut self, m: VmValue, k: VmValue) -> Result<Option<VmValue>, Fail> {
         let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
         if mo.live == 0 {
             return Ok(None);
@@ -2383,7 +2386,7 @@ impl Vm {
         mo.index.remove(k, hash, |i| i == s);
         let old = mo.entries[s].take().map(|(_, v)| v);
         mo.live -= 1;
-        mo.set_dense(k, Value::Uninit);
+        mo.set_dense(k, VmValue::Uninit);
         compact_entries(&mut mo.entries, mo.live, &mut mo.index);
         let after = mo.entries.capacity() * MAP_ENTRY_SIZE + mo.index_bytes();
         self.heap.account(before, after);
@@ -2391,7 +2394,7 @@ impl Vm {
     }
 
     /// Adds `k` to set `s`; false if it was there already.
-    pub fn set_add(&mut self, s: Value, k: Value) -> Result<bool, Fail> {
+    pub fn set_add(&mut self, s: VmValue, k: VmValue) -> Result<bool, Fail> {
         let Obj::Set(so) = self.heap.get(s) else { return Err(internal("not a set")) };
         let hash = hash_key(&self.heap, &self.meter, k)?;
         if find_entry(&self.heap, &self.meter, &so.index, hash, k, &so.entries, |&e| e)?.is_some() {
@@ -2419,9 +2422,9 @@ impl Vm {
     }
 
     #[inline(never)]
-    pub fn set_contains(&self, s: Value, k: Value) -> Result<bool, Fail> {
+    pub fn set_contains(&self, s: VmValue, k: VmValue) -> Result<bool, Fail> {
         let Obj::Set(so) = self.heap.get(s) else { return Err(internal("not a set")) };
-        if let Value::Int(i) = k {
+        if let VmValue::Int(i) = k {
             return Ok(set_has_int(so, i));
         }
         Ok(set_slot(&self.heap, &self.meter, so, k)?.is_some())
@@ -2429,16 +2432,16 @@ impl Vm {
 
     /// `m.contains(k)`.
     #[inline(never)]
-    fn map_has(&self, m: Value, k: Value) -> Result<bool, Fail> {
+    fn map_has(&self, m: VmValue, k: VmValue) -> Result<bool, Fail> {
         let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
-        if let Value::Int(i) = k {
+        if let VmValue::Int(i) = k {
             return Ok(map_get_int(mo, i).is_some());
         }
         Ok(self.map_lookup(m, mo, k)?.is_some())
     }
 
     /// Removes `k` from set `s`; false if it was not there.
-    pub fn set_remove(&mut self, s: Value, k: Value) -> Result<bool, Fail> {
+    pub fn set_remove(&mut self, s: VmValue, k: VmValue) -> Result<bool, Fail> {
         let Obj::Set(so) = self.heap.get(s) else { return Err(internal("not a set")) };
         if so.live == 0 {
             return Ok(false);
@@ -2461,18 +2464,18 @@ impl Vm {
     /// `Op::ListRest`: a copy of `list` without its first `before` and last
     /// `after` elements.
     #[inline(never)]
-    fn list_rest(&mut self, list: Value, before: usize, after: usize) -> Result<Value, Fail> {
+    fn list_rest(&mut self, list: VmValue, before: usize, after: usize) -> Result<VmValue, Fail> {
         let l = self.heap.list(list);
         let end = l.len().saturating_sub(after).max(before);
         let n = end.saturating_sub(before);
-        self.check_memory(n * std::mem::size_of::<Value>())?;
+        self.check_memory(n * std::mem::size_of::<VmValue>())?;
         self.meter.charge(n as u64)?;
-        let items = self.heap.list(list).get(before..end).map(<[Value]>::to_vec).unwrap_or_default();
+        let items = self.heap.list(list).get(before..end).map(<[VmValue]>::to_vec).unwrap_or_default();
         Ok(self.heap.new_list(items))
     }
 
     #[inline(never)]
-    fn slice(&mut self, o: Value, start: Option<i64>, end: Option<i64>, inclusive: bool) -> Result<Value, Fail> {
+    fn slice(&mut self, o: VmValue, start: Option<i64>, end: Option<i64>, inclusive: bool) -> Result<VmValue, Fail> {
         let len = match self.heap.get(o) {
             Obj::List(l) => l.len(),
             Obj::Str(s) => s.len(),
@@ -2490,7 +2493,7 @@ impl Vm {
         let (a, b) = (a as usize, b as usize);
         let list = matches!(self.heap.get(o), Obj::List(_));
         let cost = if list { (b - a) as u64 } else { ((b - a) / super::meter::BYTES_PER_UNIT) as u64 };
-        self.heap.check_memory(if list { (b - a) * std::mem::size_of::<Value>() } else { b - a })?;
+        self.heap.check_memory(if list { (b - a) * std::mem::size_of::<VmValue>() } else { b - a })?;
         self.meter.charge(cost)?;
         Ok(match self.heap.get(o) {
             Obj::List(l) => {
@@ -2543,7 +2546,7 @@ fn arith_fail(message: &str) -> Fail {
 }
 
 /// Returns `true` if a garbage collection can resolve the failure of a native call.
-fn collection_may_help(r: &Result<Value, Ctl>) -> bool {
+fn collection_may_help(r: &Result<VmValue, Ctl>) -> bool {
     match r {
         Ok(_) => false,
         Err(c) => match c.kind() {

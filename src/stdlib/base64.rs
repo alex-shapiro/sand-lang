@@ -3,7 +3,7 @@
 use crate::check::ModKind;
 use crate::native::NativeModule;
 use crate::native::convert::HostError;
-use crate::native::ty::Val;
+use crate::native::ty::VmVal;
 use crate::vm::{Fail, Vm};
 
 const STANDARD: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -11,21 +11,21 @@ const URL_SAFE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwx
 
 pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("base64", ModKind::Std, include_str!("base64.sand"));
-    m.vm_function("encode", |vm: &mut Vm, data: Val<Vec<u8>>| encode_native(vm, data, false));
-    m.vm_function("encode_url", |vm: &mut Vm, data: Val<Vec<u8>>| encode_native(vm, data, true));
-    m.vm_function("decode", |vm: &mut Vm, text: Val<String>| decode_native(vm, text, false));
-    m.vm_function("decode_url", |vm: &mut Vm, text: Val<String>| decode_native(vm, text, true));
+    m.vm_function("encode", |vm: &mut Vm, data: VmVal<Vec<u8>>| encode_native(vm, data, false));
+    m.vm_function("encode_url", |vm: &mut Vm, data: VmVal<Vec<u8>>| encode_native(vm, data, true));
+    m.vm_function("decode", |vm: &mut Vm, text: VmVal<String>| decode_native(vm, text, false));
+    m.vm_function("decode_url", |vm: &mut Vm, text: VmVal<String>| decode_native(vm, text, true));
     m
 }
 
-fn encode_native(vm: &mut Vm, data: Val<Vec<u8>>, url: bool) -> Result<String, Fail> {
+fn encode_native(vm: &mut Vm, data: VmVal<Vec<u8>>, url: bool) -> Result<String, Fail> {
     let data = data.bytes(&vm.heap);
     vm.check_memory(data.len() / 3 * 4 + 4)?;
     vm.charge_slow_bytes(data.len())?;
     Ok(encode(data, url))
 }
 
-fn decode_native(vm: &mut Vm, text: Val<String>, url: bool) -> Result<Vec<u8>, HostError> {
+fn decode_native(vm: &mut Vm, text: VmVal<String>, url: bool) -> Result<Vec<u8>, HostError> {
     let text = text.str(&vm.heap);
     vm.check_memory(text.len() / 4 * 3 + 3)?;
     vm.charge_slow_bytes(text.len())?;

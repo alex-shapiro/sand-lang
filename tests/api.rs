@@ -10,13 +10,15 @@ use parking_lot::Mutex;
 use sandlang::engine::{CompiledProgram, Config, Engine, Error, HostModules, InterruptHandle, LimitKind, Limits, MemorySink};
 use sandlang::files::mem::MemFs;
 use sandlang::native::NativeModule;
+use sandlang::native::convert::{Conversion, FromVmValue, IntoVmValue};
+use sandlang::native::ty::{SandType, Type};
 use sandlang::policy::rules::{PathPattern, RulePolicy};
 use sandlang::policy::{Capability, Decision, PromptAnswer};
 use sandlang::session::Session;
 use sandlang::stdlib::log::{LogLevel, LogRecord, LogSink};
 use sandlang::stdlib::time::TimeZone;
-use sandlang::vm::Vm;
-use sandlang::vm::value::ValueType;
+use sandlang::vm::value::{ValueType, VmValue};
+use sandlang::vm::{Fail, Vm};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -279,6 +281,39 @@ help(geo.dist)
         out,
         "5.0\n5\n[\"a\", \"b\"]\nSome(2)\nNone\nOk(3)\nnegative: -1\n2\n(42, \"X\")\nb\"cba\"\ntrue\nfn geo.dist(a: float, b: float) -> float\n\nEuclidean length of (a, b).\n"
     );
+}
+
+/// Cent count converted to and from a Sand `int`.
+struct Cents(i64);
+
+impl SandType for Cents {
+    fn sand_type() -> Type {
+        Type::Int
+    }
+}
+
+impl FromVmValue for Cents {
+    type Item<'a> = Cents;
+    fn from_vm_value(vm: &Vm, value: VmValue, conv: &mut Conversion) -> Result<Cents, Fail> {
+        i64::from_vm_value(vm, value, conv).map(Cents)
+    }
+}
+
+impl IntoVmValue for Cents {
+    fn into_vm_value(self, vm: &mut Vm) -> Result<VmValue, Fail> {
+        self.0.into_vm_value(vm)
+    }
+}
+
+#[test]
+fn host_type_implements_vm_value_conversion() {
+    let mut module = NativeModule::new("till");
+    module.function("double", |cents: Cents| Cents(cents.0 * 2));
+    module.async_function("refund", |cents: Cents| async move { Cents(-cents.0) });
+    let config = Config::new().host_modules(HostModules::new([module]).unwrap());
+    let (result, out, _) = run_src(config, "import till\nprint(till.double(21))\nprint(till.refund(5))");
+    result.unwrap();
+    assert_eq!(out, "42\n-5\n");
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, sandlang::SandValue)]
@@ -1347,7 +1382,7 @@ enum Either<L, R> {
 }
 
 fn boxes_module() -> NativeModule {
-    use sandlang::native::ty::{Param, Val};
+    use sandlang::native::ty::{Param, VmVal};
     let mut m = NativeModule::new("boxes");
     m.bind::<Labeled<()>>().bind::<Either<(), ()>>();
     m.function("count", |n: i64| Labeled { label: "count".into(), value: n, history: (0..n).collect() });
@@ -1360,7 +1395,7 @@ fn boxes_module() -> NativeModule {
             Ok(Labeled { label, ..l })
         },
     );
-    m.vm_function("unwrap", |vm: &mut sandlang::vm::Vm, e: Val<Either<Param<0>, Param<0>>>| -> Result<Param<0>, sandlang::vm::Fail> {
+    m.vm_function("unwrap", |vm: &mut sandlang::vm::Vm, e: VmVal<Either<Param<0>, Param<0>>>| -> Result<Param<0>, sandlang::vm::Fail> {
         Ok(Param::from_raw(vm.heap.field(e.raw(), 0).unwrap()))
     });
     m.source("pub native fn relabel<T>(l: Labeled<T>, label: str) -> Labeled<T>\npub native fn unwrap<T>(e: Either<T, T>) -> T");
@@ -1692,18 +1727,20 @@ fn rust_field_defaults_can_be_any_constant() {
 
 #[test]
 fn natives_take_num_evidence() {
-    use sandlang::native::ty::{Num, Param, Val};
+    use sandlang::native::ty::{Num, Param, VmVal};
     use sandlang::types::traits;
     use sandlang::vm::{Ctl, Fail, Vm};
     let module = |decl: &str| {
         let mut m = NativeModule::new("nums");
-        m.vm_function("total", |vm: &mut Vm, num: Num<0>, xs: Val<Vec<Param<0, traits::Num>>>| -> Result<Param<0>, Ctl> {
+        m.vm_function("total", |vm: &mut Vm, num: Num<0>, xs: VmVal<Vec<Param<0, traits::Num>>>| -> Result<Param<0>, Ctl> {
             let mut acc = num.zero(vm)?.raw();
             for &x in xs.items(&vm.heap) {
                 acc = match (acc, x) {
-                    (sandlang::vm::value::Value::Int(a), sandlang::vm::value::Value::Int(b)) => sandlang::vm::value::Value::Int(a + b),
-                    (sandlang::vm::value::Value::Float(a), sandlang::vm::value::Value::Float(b)) => {
-                        sandlang::vm::value::Value::Float(a + b)
+                    (sandlang::vm::value::VmValue::Int(a), sandlang::vm::value::VmValue::Int(b)) => {
+                        sandlang::vm::value::VmValue::Int(a + b)
+                    }
+                    (sandlang::vm::value::VmValue::Float(a), sandlang::vm::value::VmValue::Float(b)) => {
+                        sandlang::vm::value::VmValue::Float(a + b)
                     }
                     _ => return Err(Fail::internal("not a number").into()),
                 };
@@ -1769,7 +1806,7 @@ print(none.product())
     assert_eq!(errors, ["native function `first` must declare `T: Num`, as its Rust function requires `T: Num`"]);
 
     let mut m = NativeModule::new("nums");
-    m.vm_function("List.go", |vm: &mut Vm, num: Num<0>, _: Val<Vec<Param<0, traits::Num>>>| num.one(vm));
+    m.vm_function("List.go", |vm: &mut Vm, num: Num<0>, _: VmVal<Vec<Param<0, traits::Num>>>| num.one(vm));
     m.source("pub trait Go { fn go(self) -> int }\nimpl<T: Num> Go for [T] { native fn go(self) -> T }");
     let errors = host_module_errors([m]);
     assert!(errors.iter().any(|e| e == "the Rust function of a native impl method cannot take `Num` evidence"), "{errors:?}");
@@ -1970,7 +2007,7 @@ fn native_declarations_must_require_the_traits_of_their_rust_functions() {
 
 #[test]
 fn generic_natives_take_type_parameters() {
-    use sandlang::native::ty::{Param, Reflect, Val};
+    use sandlang::native::ty::{Param, Reflect, VmVal};
     use sandlang::vm::{Fail, Vm};
     let module = |src: &str| {
         let mut m = NativeModule::new("gen");
@@ -1978,8 +2015,8 @@ fn generic_natives_take_type_parameters() {
         m
     };
     let mut m = module("pub native fn second<T>(xs: [T]) -> T?\npub native fn swap<A, B>(p: (A, B)) -> (B, A)");
-    m.vm_function("second", |vm: &mut Vm, xs: Val<Vec<Param<0>>>| xs.items(&vm.heap).get(1).copied().map(Param::<0>::from_raw));
-    m.vm_function("swap", |vm: &mut Vm, p: Val<(Param<0>, Param<1>)>| -> Result<(Param<1>, Param<0>), Fail> {
+    m.vm_function("second", |vm: &mut Vm, xs: VmVal<Vec<Param<0>>>| xs.items(&vm.heap).get(1).copied().map(Param::<0>::from_raw));
+    m.vm_function("swap", |vm: &mut Vm, p: VmVal<(Param<0>, Param<1>)>| -> Result<(Param<1>, Param<0>), Fail> {
         let (a, b) = (vm.heap.field(p.raw(), 0), vm.heap.field(p.raw(), 1));
         Ok((Param::from_raw(b.unwrap()), Param::from_raw(a.unwrap())))
     });
@@ -1993,13 +2030,13 @@ fn generic_natives_take_type_parameters() {
     type Register = fn(&mut NativeModule);
     let cases: [(&str, Register); 4] = [
         ("is declared `fn([T]) -> T?`, but its Rust function is `fn([T]) -> T`", |m| {
-            m.vm_function("second", |_: &mut Vm, xs: Val<Vec<Param<0>>>| -> Result<Param<0>, Fail> { Ok(Param::from_raw(xs.raw())) });
+            m.vm_function("second", |_: &mut Vm, xs: VmVal<Vec<Param<0>>>| -> Result<Param<0>, Fail> { Ok(Param::from_raw(xs.raw())) });
         }),
         ("uses type parameter 1, which its declaration does not have", |m| {
-            m.vm_function("second", |_: &mut Vm, _: Val<Vec<Param<1>>>| -> Result<Option<Param<1>>, Fail> { Ok(None) });
+            m.vm_function("second", |_: &mut Vm, _: VmVal<Vec<Param<1>>>| -> Result<Option<Param<1>>, Fail> { Ok(None) });
         }),
         ("is declared `fn([T]) -> T?`, but its Rust function is `fn(<description of T>, [T]) -> T?`", |m| {
-            m.vm_function("second", |_: &mut Vm, _: Reflect<0>, _: Val<Vec<Param<0>>>| -> Result<Option<Param<0>>, Fail> { Ok(None) });
+            m.vm_function("second", |_: &mut Vm, _: Reflect<0>, _: VmVal<Vec<Param<0>>>| -> Result<Option<Param<0>>, Fail> { Ok(None) });
         }),
         ("is declared `fn([T]) -> T?`, but its Rust function is `fn([int]) -> int?`", |m| {
             m.function("second", |xs: Vec<i64>| xs.get(1).copied());
@@ -2013,7 +2050,7 @@ fn generic_natives_take_type_parameters() {
     }
 
     let mut m = NativeModule::new("gen");
-    m.vm_function("second", |_: &mut Vm, _: Val<Vec<Param<0>>>| -> Result<Option<Param<0>>, Fail> { Ok(None) });
+    m.vm_function("second", |_: &mut Vm, _: VmVal<Vec<Param<0>>>| -> Result<Option<Param<0>>, Fail> { Ok(None) });
     let errors = host_module_errors([m]);
     assert!(errors[0].contains("native `gen.second` is generic, so the module must declare it with `native fn`"), "{errors:?}");
 }
@@ -3780,7 +3817,7 @@ fn a_symlinked_main_file_imports_from_its_own_directory() {
 #[test]
 fn host_modules_can_define_resources() {
     use sandlang::native::NativeObject;
-    use sandlang::native::ty::Val;
+    use sandlang::native::ty::VmVal;
     use sandlang::vm::iomem::ResourceSlot;
     use sandlang::vm::{Fail, Vm};
 
@@ -3806,7 +3843,7 @@ fn host_modules_can_define_resources() {
         let slot = vm.resource_slot()?;
         Ok(Conn { slot: Some(slot), closed: c.clone() })
     });
-    m.vm_function("Conn.close", |vm: &mut Vm, conn: Val<Conn>| -> Result<(), Fail> {
+    m.vm_function("Conn.close", |vm: &mut Vm, conn: VmVal<Conn>| -> Result<(), Fail> {
         let conn = conn.get_mut(&mut vm.heap)?;
         if conn.slot.take().is_some() {
             conn.closed.fetch_add(1, Ordering::Relaxed);

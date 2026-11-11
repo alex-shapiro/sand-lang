@@ -2,8 +2,8 @@
 
 use super::stream::{self, IoFailure, Suspended, bytes_read, line_read};
 use super::uri;
-use crate::native::convert::{HostError, IntoValue};
-use crate::native::ty::Val;
+use crate::native::convert::{HostError, IntoVmValue};
+use crate::native::ty::VmVal;
 use crate::native::{NativeModule, NativeObject};
 use crate::vm::WaitKind;
 use crate::vm::iomem::Reservation;
@@ -121,12 +121,12 @@ pub(crate) fn natives(m: &mut NativeModule) {
     m.bind::<Body>();
     m.bind::<ResponseStream>();
     body_natives(m);
-    m.vm_function("resolve", |vm: &mut Vm, base: Val<String>, location: Val<String>| -> Result<String, HostError> {
+    m.vm_function("resolve", |vm: &mut Vm, base: VmVal<String>, location: VmVal<String>| -> Result<String, HostError> {
         let (base, location) = (base.str(&vm.heap), location.str(&vm.heap));
         vm.charge_slow_bytes(base.len().saturating_add(location.len()))?;
         Ok(resolve(base, location)?)
     });
-    m.vm_function("same_origin", |vm: &mut Vm, a: Val<String>, b: Val<String>| -> Result<bool, Fail> {
+    m.vm_function("same_origin", |vm: &mut Vm, a: VmVal<String>, b: VmVal<String>| -> Result<bool, Fail> {
         let (a, b) = (a.str(&vm.heap), b.str(&vm.heap));
         vm.charge_slow_bytes(a.len().saturating_add(b.len()))?;
         Ok(match (Url::parse(a), Url::parse(b)) {
@@ -149,7 +149,7 @@ pub(crate) fn valid_header(name: &str, value: &str) -> bool {
 
 /// Validates and converts a `[(str, str)]` list into header pairs, or fails
 /// with kind `"invalid"`.
-pub(crate) fn header_pairs(vm: &Vm, list: Val<Vec<(String, String)>>) -> Result<Vec<(String, String)>, HostError> {
+pub(crate) fn header_pairs(vm: &Vm, list: VmVal<Vec<(String, String)>>) -> Result<Vec<(String, String)>, HostError> {
     let items = list.items(&vm.heap);
     vm.charge(items.len() as u64)?;
     let mut pairs = Vec::with_capacity(items.len());
@@ -180,9 +180,9 @@ pub(crate) struct Prepared {
 
 pub(crate) fn prepare_request(
     vm: &Vm,
-    method: Val<String>,
-    url: Val<String>,
-    headers: Val<Vec<(String, String)>>,
+    method: VmVal<String>,
+    url: VmVal<String>,
+    headers: VmVal<Vec<(String, String)>>,
 ) -> Result<Prepared, HostError> {
     let (method, text) = (method.str(&vm.heap), url.str(&vm.heap));
     vm.charge_slow_bytes(method.len().saturating_add(text.len()))?;
@@ -225,7 +225,7 @@ pub(crate) struct ResponseStream {
     /// Response headers in receipt order, with lowercase names.
     pub headers: Vec<(String, String)>,
     /// Streaming response body.
-    pub body: Val<Body>,
+    pub body: VmVal<Body>,
     /// Final URL after any redirects.
     pub url: String,
 }
@@ -461,9 +461,9 @@ enum BodyRead {
     All,
 }
 
-fn read_body<R: IntoValue + Send + 'static>(
+fn read_body<R: IntoVmValue + Send + 'static>(
     vm: &mut Vm,
-    body: Val<Body>,
+    body: VmVal<Body>,
     what: BodyRead,
     done: fn(&mut Vm, Option<Vec<u8>>) -> stream::FinishResult<R>,
 ) -> Suspended<R> {
@@ -511,17 +511,17 @@ fn read_body<R: IntoValue + Send + 'static>(
 }
 
 fn body_natives(m: &mut NativeModule) {
-    m.vm_function("Body.read", |vm: &mut Vm, body: Val<Body>, max: i64| {
+    m.vm_function("Body.read", |vm: &mut Vm, body: VmVal<Body>, max: i64| {
         if max <= 0 {
             return Err(HostError::new("invalid", "read: max must be positive"));
         }
         read_body(vm, body, BodyRead::Upto(to_usize_saturating(max)), bytes_read)
     });
-    m.vm_function("Body.read_line", |vm: &mut Vm, body: Val<Body>| {
+    m.vm_function("Body.read_line", |vm: &mut Vm, body: VmVal<Body>| {
         read_body(vm, body, BodyRead::Line, |vm, line| line_read(vm, line, "line is not valid UTF-8"))
     });
-    m.vm_function("Body.read_all", |vm: &mut Vm, body: Val<Body>| read_body(vm, body, BodyRead::All, bytes_read));
-    m.vm_function("Body.close", |vm: &mut Vm, body: Val<Body>| -> Result<_, Fail> {
+    m.vm_function("Body.read_all", |vm: &mut Vm, body: VmVal<Body>| read_body(vm, body, BodyRead::All, bytes_read));
+    m.vm_function("Body.close", |vm: &mut Vm, body: VmVal<Body>| -> Result<_, Fail> {
         let b = body.get_mut(&mut vm.heap)?;
         b.closed.send_replace(true);
         // The stream and the connection go with the last reference to the

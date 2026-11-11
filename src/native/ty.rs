@@ -1,7 +1,7 @@
 //! Rust representations of Sand types.
 
 use crate::types::{Builtins, traits};
-use crate::vm::value::Value;
+use crate::vm::value::VmValue;
 use std::any::TypeId;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
@@ -301,23 +301,24 @@ fn_type!(A, B, C);
 #[derive(Clone, Copy, Debug)]
 pub enum Never {}
 
-/// Value of the `N`-th generic type parameter of a `native fn` (see
-/// [`Type::Param`]), with the built-in traits `B` that the Rust function
-/// requires of it (see [`traits`]).
+/// Value of the `N`-th generic type parameter of a `native fn`.
+///
+/// `B` lists the built-in [`traits`] that the Rust function requires of the
+/// type parameter. See [`Type::Param`].
 ///
 /// For `native fn first<T>(xs: [T]) -> T?`, the Rust function takes
-/// `Val<Vec<Param<0>>>` and returns `Option<Param<0>>`. If the Rust function
-/// requires a built-in trait of `T` (such as `Param<0, traits::Hash>`), the
-/// `native fn` declaration must declare `T: Hash`.
-pub struct Param<const N: u8, B: traits::Set = ()>(Value, PhantomData<fn() -> B>);
+/// `VmVal<Vec<Param<0>>>` and returns `Option<Param<0>>`. If the Rust function
+/// uses `Param<0, traits::Hash>`, the `native fn` declaration must declare
+/// `T: Hash`.
+pub struct Param<const N: u8, B: traits::Set = ()>(VmValue, PhantomData<fn() -> B>);
 
 impl<const N: u8, B: traits::Set> Param<N, B> {
-    pub fn raw(self) -> Value {
+    pub fn raw(self) -> VmValue {
         self.0
     }
 
     /// Wraps `v`, which must have the type of the `N`-th type parameter.
-    pub fn from_raw(v: Value) -> Self {
+    pub fn from_raw(v: VmValue) -> Self {
         Param(v, PhantomData)
     }
 }
@@ -348,14 +349,14 @@ impl<const N: u8, B: traits::Set> SandType for Param<N, B> {
 /// A Rust function can accept `Num<N>` for any type parameter that the
 /// `native fn` declaration declares as `T: Num`. Place `Num<N>` parameters in ascending order of `N`, after
 /// any [`Reflect`] parameters and before regular value parameters.
-pub struct Num<const N: u8>(Value);
+pub struct Num<const N: u8>(VmValue);
 
 impl<const N: u8> Num<N> {
-    pub fn raw(self) -> Value {
+    pub fn raw(self) -> VmValue {
         self.0
     }
 
-    pub(crate) fn from_raw(v: Value) -> Self {
+    pub(crate) fn from_raw(v: VmValue) -> Self {
         Num(v)
     }
 }
@@ -383,14 +384,14 @@ impl<const N: u8> SandType for Num<N> {
 /// Runtime type descriptor for the `N`-th `reflect` type parameter of a
 /// `native fn` (see [`Type::Reflect`]).
 #[derive(Clone, Copy)]
-pub struct Reflect<const N: u8>(Value);
+pub struct Reflect<const N: u8>(VmValue);
 
 impl<const N: u8> Reflect<N> {
-    pub fn raw(self) -> Value {
+    pub fn raw(self) -> VmValue {
         self.0
     }
 
-    pub(crate) fn from_raw(v: Value) -> Self {
+    pub(crate) fn from_raw(v: VmValue) -> Self {
         Reflect(v)
     }
 }
@@ -407,51 +408,49 @@ impl<const N: u8> SandType for Reflect<N> {
     }
 }
 
-/// Uncopied handle to a Sand [`Value`] with the Sand type of `T`.
+/// An uncopied [`VmValue`] with the Sand type of `T`.
 ///
 /// Functions registered with [`NativeModule::vm_function`](super::NativeModule::vm_function)
-/// can accept and return `Val<T>` to avoid copying heap values (for example,
-/// `Val<String>` for `str`, `Val<Vec<Param<0>>>` for `[T]`, or
-/// `Val<fn() -> Option<String>>` for `fn() -> str?`).
+/// can accept and return `VmVal<T>` to avoid copying heap values.
 ///
-/// Because the garbage collector does not trace `Val` handles stored in Rust
-/// structs, a `Val` is valid only for the duration of the synchronous native
-/// call that received or allocated it. Never store a `Val` inside a
+/// A `VmVal` is valid only during the synchronous native call that received or
+/// allocated it. The garbage collector does not trace `VmVal` handles stored in
+/// Rust structs. Never store a `VmVal` inside a
 /// [`NativeObject`](super::NativeObject) or across an async suspension point.
-pub struct Val<T: ?Sized>(Value, PhantomData<fn() -> T>);
+pub struct VmVal<T: ?Sized>(VmValue, PhantomData<fn() -> T>);
 
-impl<T: ?Sized> Val<T> {
-    pub fn raw(self) -> Value {
+impl<T: ?Sized> VmVal<T> {
+    pub fn raw(self) -> VmValue {
         self.0
     }
 
     /// Wraps `v`, which must have the Sand type of `T`.
-    pub fn from_raw(v: Value) -> Self {
-        Val(v, PhantomData)
+    pub fn from_raw(v: VmValue) -> Self {
+        VmVal(v, PhantomData)
     }
 }
 
-impl<T: ?Sized> Clone for Val<T> {
+impl<T: ?Sized> Clone for VmVal<T> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<T: ?Sized> Copy for Val<T> {}
+impl<T: ?Sized> Copy for VmVal<T> {}
 
-impl<T: ?Sized> fmt::Debug for Val<T> {
+impl<T: ?Sized> fmt::Debug for VmVal<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Val({:?})", self.0)
+        write!(f, "VmVal({:?})", self.0)
     }
 }
 
-impl<T: SandType + ?Sized> SandType for Val<T> {
+impl<T: SandType + ?Sized> SandType for VmVal<T> {
     fn sand_type() -> Type {
         T::sand_type()
     }
 }
 
-/// Marker type representing the prelude's `Task<T>` in [`Val<Task<T>>`](Val).
+/// Marker type representing the prelude's `Task<T>` in [`VmVal<Task<T>>`](VmVal).
 pub struct Task<T>(PhantomData<T>);
 
 impl<T: SandType> SandType for Task<T> {
@@ -460,7 +459,7 @@ impl<T: SandType> SandType for Task<T> {
     }
 }
 
-/// Marker type representing the prelude's `Channel<T>` in [`Val<Channel<T>>`](Val).
+/// Marker type representing the prelude's `Channel<T>` in [`VmVal<Channel<T>>`](VmVal).
 pub struct Channel<T>(PhantomData<T>);
 
 impl<T: SandType> SandType for Channel<T> {
@@ -469,7 +468,7 @@ impl<T: SandType> SandType for Channel<T> {
     }
 }
 
-/// Marker type representing the prelude's `Range` in [`Val<Range>`](Val).
+/// Marker type representing the prelude's `Range` in [`VmVal<Range>`](VmVal).
 pub struct Range;
 
 impl SandType for Range {

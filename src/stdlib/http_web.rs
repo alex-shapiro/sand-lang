@@ -13,7 +13,7 @@ use super::http_common::{BodyReader, MemoryBody, Prepared, ResponseStream, prepa
 use super::stream::{self, IoFailure, Suspended, suspend};
 use crate::check::ModKind;
 use crate::native::NativeModule;
-use crate::native::ty::Val;
+use crate::native::ty::VmVal;
 use crate::vm::Vm;
 use crate::vm::WaitKind;
 use crate::vm::iomem::Reservation;
@@ -48,10 +48,10 @@ type Received = (i64, Vec<(String, String)>, Vec<u8>, Reservation);
 
 fn send(
     vm: &mut Vm,
-    method: Val<String>,
-    url: Val<String>,
-    headers: Val<Vec<(String, String)>>,
-    body: Val<Vec<u8>>,
+    method: VmVal<String>,
+    url: VmVal<String>,
+    headers: VmVal<Vec<(String, String)>>,
+    body: VmVal<Vec<u8>>,
     timeout: SignedDuration,
 ) -> Suspended<ResponseStream> {
     let mut req = prepare_request(vm, method, url, headers)?;

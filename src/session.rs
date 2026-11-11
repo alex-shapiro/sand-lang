@@ -21,7 +21,7 @@ use crate::types::{FnId, ModId, TypeId};
 use crate::unwind::CatchUnwind;
 use crate::vm::bytecode::Program;
 use crate::vm::sched::{IdleStop, UntilIdle};
-use crate::vm::value::Value;
+use crate::vm::value::VmValue;
 use crate::vm::{RunEnding, Trap, Vm};
 use std::collections::HashMap;
 use std::future::Future;
@@ -548,7 +548,7 @@ impl Session {
             Ok(value) => value,
             Err(ending) => return end_session_run(vm, ending, exit_code).map(|()| None),
         };
-        let shown = if show && value != Value::Unit { Some(vm.debug(value)) } else { None };
+        let shown = if show && value != VmValue::Unit { Some(vm.debug(value)) } else { None };
         vm.release_main();
         match shown {
             None => Ok(None),

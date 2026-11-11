@@ -7,19 +7,23 @@ use std::collections::{HashMap, VecDeque};
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::sync::{Arc, OnceLock};
 
-/// A runtime value. Immediate values are stored inline; everything else is a
-/// handle into the engine's heap.
+/// A Sand value as the VM stores it: an immediate value, or a handle to an
+/// object on the VM heap.
 ///
-/// Enum variants with exactly one payload are stored inline (`VUnit` ..
-/// `VObj`: runtime variant id, then the payload) whenever the payload is not
-/// itself an inline variant; e.g. `Some(1)` is `VInt(some, 1)`, `Ok("x")` is
-/// `VObj(ok, handle)` and `Some(None)` is `VTag(some, none)`, while
-/// `Some(Some(1))` is a heap `Obj::Variant`. This representation is
-/// canonical: always build variants with `Value::variant1`/`Heap::new_variant`
-/// (or `Vm::some`/`ok`/`err`), and inspect them with `Heap::variant`,
-/// `Heap::variant_id` and `Heap::field`.
+/// A heap handle is valid only during the native call that received or
+/// allocated it. The garbage collector does not trace a `VmValue` held in a
+/// native function.
+///
+/// Variants `VUnit` through `VObj` store single-payload enum variants inline if
+/// the payload is not itself an inline variant. Each variant holds the runtime
+/// variant ID followed by the payload. Single-payload variants whose payload is
+/// an inline variant use a heap [`Obj::Variant`]. Build variants with
+/// [`VmValue::variant1`] or [`Heap::new_variant`](super::heap::Heap::new_variant).
+/// Inspect variants with [`Heap::variant`](super::heap::Heap::variant),
+/// [`Heap::variant_id`](super::heap::Heap::variant_id), and
+/// [`Heap::field`](super::heap::Heap::field).
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Value {
+pub enum VmValue {
     Unit,
     Bool(bool),
     Int(i64),
@@ -45,54 +49,53 @@ pub enum Value {
     VTag(u32, u32),
     /// `variant(object)`: the payload is the heap object with this handle.
     VObj(u32, u32),
-    /// The tuple `(a, b)` of two ints whose first fits in 32 bits. Such
-    /// tuples are always stored inline (build them with `Value::tuple2` or
-    /// `Heap::new_tuple`); other tuples are heap objects.
+    /// An inline 2-tuple of integers whose first element fits in 32 bits. Build
+    /// tuples with [`VmValue::tuple2`] or
+    /// [`Heap::new_tuple`](super::heap::Heap::new_tuple).
     Pair(i32, i64),
 }
 
 // The inline variants pack the discriminant, the u32 variant id and an
 // 8-byte payload into the same 16 bytes as the other values.
-const _: () = assert!(std::mem::size_of::<Value>() == 16);
+const _: () = assert!(std::mem::size_of::<VmValue>() == 16);
 
-impl Value {
-    /// The single-payload variant `id(payload)` stored inline, or `None` if
-    /// the payload cannot be stored inline (it is itself an inline variant)
-    /// and the variant must be heap-allocated.
+impl VmValue {
+    /// Returns the single-payload variant `id(payload)` in its inline form, or
+    /// `None` if `payload` is itself an inline variant.
     #[inline]
-    pub fn variant1(id: u32, payload: Value) -> Option<Value> {
+    pub fn variant1(id: u32, payload: VmValue) -> Option<VmValue> {
         Some(match payload {
-            Value::Unit => Value::VUnit(id),
-            Value::Bool(b) => Value::VBool(id, b),
-            Value::Int(i) => Value::VInt(id, i),
-            Value::Float(f) => Value::VFloat(id, f),
-            Value::Dur(d) => Value::VDur(id, d),
-            Value::Tag(t) => Value::VTag(id, t),
-            Value::Obj(h) => Value::VObj(id, h),
+            VmValue::Unit => VmValue::VUnit(id),
+            VmValue::Bool(b) => VmValue::VBool(id, b),
+            VmValue::Int(i) => VmValue::VInt(id, i),
+            VmValue::Float(f) => VmValue::VFloat(id, f),
+            VmValue::Dur(d) => VmValue::VDur(id, d),
+            VmValue::Tag(t) => VmValue::VTag(id, t),
+            VmValue::Obj(h) => VmValue::VObj(id, h),
             _ => return None,
         })
     }
 
     /// The tuple `(a, b)`, if it is stored inline.
     #[inline]
-    pub fn tuple2(a: Value, b: Value) -> Option<Value> {
+    pub fn tuple2(a: VmValue, b: VmValue) -> Option<VmValue> {
         match (a, b) {
-            (Value::Int(x), Value::Int(y)) => Some(Value::Pair(i32::try_from(x).ok()?, y)),
+            (VmValue::Int(x), VmValue::Int(y)) => Some(VmValue::Pair(i32::try_from(x).ok()?, y)),
             _ => None,
         }
     }
 
     /// For an inline variant: its runtime variant id and payload.
     #[inline]
-    pub fn as_inline_variant(self) -> Option<(u32, Value)> {
+    pub fn as_inline_variant(self) -> Option<(u32, VmValue)> {
         Some(match self {
-            Value::VUnit(id) => (id, Value::Unit),
-            Value::VBool(id, b) => (id, Value::Bool(b)),
-            Value::VInt(id, i) => (id, Value::Int(i)),
-            Value::VFloat(id, f) => (id, Value::Float(f)),
-            Value::VDur(id, d) => (id, Value::Dur(d)),
-            Value::VTag(id, t) => (id, Value::Tag(t)),
-            Value::VObj(id, h) => (id, Value::Obj(h)),
+            VmValue::VUnit(id) => (id, VmValue::Unit),
+            VmValue::VBool(id, b) => (id, VmValue::Bool(b)),
+            VmValue::VInt(id, i) => (id, VmValue::Int(i)),
+            VmValue::VFloat(id, f) => (id, VmValue::Float(f)),
+            VmValue::VDur(id, d) => (id, VmValue::Dur(d)),
+            VmValue::VTag(id, t) => (id, VmValue::Tag(t)),
+            VmValue::VObj(id, h) => (id, VmValue::Obj(h)),
             _ => return None,
         })
     }
@@ -102,7 +105,7 @@ impl Value {
     #[inline]
     pub fn handle(self) -> Option<u32> {
         match self {
-            Value::Obj(h) | Value::VObj(_, h) => Some(h),
+            VmValue::Obj(h) | VmValue::VObj(_, h) => Some(h),
             _ => None,
         }
     }
@@ -110,22 +113,22 @@ impl Value {
     #[inline]
     pub fn as_int(self) -> i64 {
         match self {
-            Value::Int(i) => i,
-            Value::Dur(d) => d,
+            VmValue::Int(i) => i,
+            VmValue::Dur(d) => d,
             _ => 0,
         }
     }
     #[inline]
     pub fn as_float(self) -> f64 {
         match self {
-            Value::Float(f) => f,
-            Value::Int(i) => i as f64,
+            VmValue::Float(f) => f,
+            VmValue::Int(i) => i as f64,
             _ => 0.0,
         }
     }
     #[inline]
     pub fn as_bool(self) -> bool {
-        matches!(self, Value::Bool(true))
+        matches!(self, VmValue::Bool(true))
     }
 }
 
@@ -161,13 +164,12 @@ fn saturate<N, T: TryFrom<N>>(n: N, max: T) -> T {
     T::try_from(n).unwrap_or(max)
 }
 
-/// A view of an enum variant value, independent of its representation
-/// (`Value::Tag`, an inline variant or a heap `Obj::Variant`).
+/// A view of an enum variant across inline and heap representations.
 #[derive(Clone, Copy, Debug)]
 pub enum VariantRef<'a> {
     /// A payload-less variant or an inline single-payload variant.
-    Inline(u32, Option<Value>),
-    Heap(u32, &'a [Value]),
+    Inline(u32, Option<VmValue>),
+    Heap(u32, &'a [VmValue]),
 }
 
 impl VariantRef<'_> {
@@ -181,7 +183,7 @@ impl VariantRef<'_> {
 
     /// The payload fields.
     #[inline]
-    pub fn fields(&self) -> &[Value] {
+    pub fn fields(&self) -> &[VmValue] {
         match self {
             VariantRef::Inline(_, p) => p.as_slice(),
             VariantRef::Heap(_, f) => f,
@@ -451,8 +453,8 @@ fn dense_fits(k: i64, count: usize) -> bool {
 impl KeyIndex {
     /// Returns an empty dense index if all `keys` fit in a dense table for
     /// `count` entries, or a preallocated hash index.
-    pub fn for_keys(count: usize, mut keys: impl Iterator<Item = Value>) -> KeyIndex {
-        if keys.all(|k| matches!(k, Value::Int(i) if dense_fits(i, count))) {
+    pub fn for_keys(count: usize, mut keys: impl Iterator<Item = VmValue>) -> KeyIndex {
+        if keys.all(|k| matches!(k, VmValue::Int(i) if dense_fits(i, count))) {
             return KeyIndex::default();
         }
         let mut t = KeyTable::default();
@@ -474,9 +476,9 @@ impl KeyIndex {
 
     /// The slot of key `k`, with hash `hash`, satisfying `eq(slot)`.
     #[inline]
-    pub fn find(&self, k: Value, hash: u64, eq: impl FnMut(usize) -> bool) -> Option<usize> {
+    pub fn find(&self, k: VmValue, hash: u64, eq: impl FnMut(usize) -> bool) -> Option<usize> {
         match (self, k) {
-            (KeyIndex::Dense { .. }, Value::Int(i)) => self.find_int(i, eq),
+            (KeyIndex::Dense { .. }, VmValue::Int(i)) => self.find_int(i, eq),
             // A dense index holds only ints.
             (KeyIndex::Dense { .. }, _) => None,
             (KeyIndex::Hashed(t), _) => t.find(hash, eq),
@@ -485,9 +487,9 @@ impl KeyIndex {
 
     /// Adds `slot` (see [`slot_fits`]) for key `k`, with hash `hash`, which
     /// is not in the index.
-    pub fn insert(&mut self, k: Value, hash: u64, slot: usize) {
+    pub fn insert(&mut self, k: VmValue, hash: u64, slot: usize) {
         if let KeyIndex::Dense { slots, count } = self {
-            if let Value::Int(i) = k
+            if let VmValue::Int(i) = k
                 && dense_fits(i, *count)
             {
                 let i = i as usize;
@@ -523,15 +525,15 @@ impl KeyIndex {
 
     /// Where a hashed index would grow, makes it dense if its `keys` (with
     /// their slots) allow `count` keys: those and one more to be inserted.
-    pub fn densify(&mut self, count: usize, keys: impl Iterator<Item = (usize, Value)> + Clone) {
+    pub fn densify(&mut self, count: usize, keys: impl Iterator<Item = (usize, VmValue)> + Clone) {
         let KeyIndex::Hashed(t) = self else { return };
-        if t.len() < t.capacity() || !keys.clone().all(|(_, k)| matches!(k, Value::Int(i) if dense_fits(i, count))) {
+        if t.len() < t.capacity() || !keys.clone().all(|(_, k)| matches!(k, VmValue::Int(i) if dense_fits(i, count))) {
             return;
         }
         let mut slots = Vec::new();
         let mut n = 0;
         for (s, k) in keys {
-            let Value::Int(i) = k else { unreachable!() };
+            let VmValue::Int(i) = k else { unreachable!() };
             if i as usize >= slots.len() {
                 slots.resize(i as usize + 1, 0);
             }
@@ -542,10 +544,10 @@ impl KeyIndex {
     }
 
     /// Removes and returns the slot of key `k`, with hash `hash`, satisfying `eq(slot)`.
-    pub fn remove(&mut self, k: Value, hash: u64, eq: impl FnMut(usize) -> bool) -> Option<usize> {
+    pub fn remove(&mut self, k: VmValue, hash: u64, eq: impl FnMut(usize) -> bool) -> Option<usize> {
         match self {
             KeyIndex::Dense { slots, count } => {
-                let Value::Int(i) = k else { return None };
+                let VmValue::Int(i) = k else { return None };
                 let s = slots.get_mut(usize::try_from(i).ok()?)?;
                 let slot = (*s as usize).checked_sub(1)?;
                 *s = 0;
@@ -574,10 +576,10 @@ impl KeyIndex {
     /// For adding key `k` as the `count`th key, densifying first as
     /// `map_push` does: an upper bound of the bytes the index allocates, and
     /// the index's length if it is then dense.
-    fn insert_growth(&self, k: Value, count: usize) -> (usize, Option<usize>) {
+    fn insert_growth(&self, k: VmValue, count: usize) -> (usize, Option<usize>) {
         const SLOT: usize = std::mem::size_of::<u32>();
         match (self, k) {
-            (KeyIndex::Dense { slots, count: n }, Value::Int(i)) if dense_fits(i, *n) => {
+            (KeyIndex::Dense { slots, count: n }, VmValue::Int(i)) if dense_fits(i, *n) => {
                 let len = slots.len().max(i as usize + 1);
                 let cap = slots.capacity();
                 (if len <= cap { 0 } else { len.max(2 * cap).max(4) * SLOT }, Some(len))
@@ -627,21 +629,20 @@ pub fn compact_entries<T: Copy>(entries: &mut Vec<Option<T>>, live: usize, table
 #[derive(Debug, Default, Clone)]
 pub struct MapObj {
     pub index: KeyIndex,
-    pub entries: Vec<Option<(Value, Value)>>,
+    pub entries: Vec<Option<(VmValue, VmValue)>>,
     pub live: usize,
     pub pins: Pins,
-    /// While the index is dense and at least a quarter full: the value of
-    /// each key (`Value::Uninit` if absent), so that looking up a key reads
-    /// neither the index nor the entries. Every change of a value goes
-    /// through [`MapObj::set_dense`].
-    pub vals: Vec<Value>,
+    /// Direct key-to-value table used while `index` is dense and at least 25%
+    /// full. Absent keys hold [`VmValue::Uninit`]. Lookups read `vals[k]`
+    /// directly. [`MapObj::set_dense`] updates `vals` on every write.
+    pub vals: Vec<VmValue>,
 }
 
 /// An insertion-ordered hash set (see [`MapObj`]).
 #[derive(Debug, Default, Clone)]
 pub struct SetObj {
     pub index: KeyIndex,
-    pub entries: Vec<Option<Value>>,
+    pub entries: Vec<Option<VmValue>>,
     pub live: usize,
     pub pins: Pins,
 }
@@ -685,7 +686,7 @@ impl MapObj {
 
     /// An upper bound of the bytes that adding the new key `k` allocates for
     /// the index and the dense values (not the entries).
-    pub fn index_growth(&self, k: Value) -> usize {
+    pub fn index_growth(&self, k: VmValue) -> usize {
         let count = self.live + 1;
         let (index, dense) = self.index.insert_growth(k, count);
         // The dense values, sized as `set_dense` sizes them.
@@ -705,9 +706,9 @@ impl MapObj {
         index + vals
     }
 
-    /// Keeps `vals` in step after key `k` was given value `v` (or removed:
-    /// `Value::Uninit`), the index and entries being up to date.
-    pub fn set_dense(&mut self, k: Value, v: Value) {
+    /// Updates `vals` after setting key `k` to `v`, or removing `k` with
+    /// [`VmValue::Uninit`]. The caller must update `index` and `entries` first.
+    pub fn set_dense(&mut self, k: VmValue, v: VmValue) {
         let KeyIndex::Dense { slots, count } = &self.index else {
             self.vals = Vec::new();
             return;
@@ -720,7 +721,7 @@ impl MapObj {
             if *count * 4 < slots.len() {
                 return;
             }
-            self.vals = vec![Value::Uninit; slots.len()];
+            self.vals = vec![VmValue::Uninit; slots.len()];
             for (key, &s) in slots.iter().enumerate() {
                 if let Some(Some((_, x))) = s.checked_sub(1).map(|s| &self.entries[s as usize]) {
                     self.vals[key] = *x;
@@ -728,7 +729,7 @@ impl MapObj {
             }
             return;
         }
-        if let Value::Int(i) = k
+        if let VmValue::Int(i) = k
             && i as usize == self.vals.len()
             && slots.len() == self.vals.len() + 1
         {
@@ -736,9 +737,9 @@ impl MapObj {
             return;
         }
         if self.vals.len() < slots.len() {
-            self.vals.resize(slots.len(), Value::Uninit);
+            self.vals.resize(slots.len(), VmValue::Uninit);
         }
-        if let Value::Int(i) = k
+        if let VmValue::Int(i) = k
             && let Some(x) = self.vals.get_mut(i as usize)
         {
             *x = v;
@@ -753,7 +754,7 @@ impl SetObj {
 
     /// An upper bound of the bytes that adding the new key `k` allocates for
     /// the index (not the entries).
-    pub fn index_growth(&self, k: Value) -> usize {
+    pub fn index_growth(&self, k: VmValue) -> usize {
         self.index.insert_growth(k, self.live + 1).0
     }
 }
@@ -769,7 +770,7 @@ pub enum TaskState {
 pub struct TaskObj {
     pub fiber: u32,
     pub state: TaskState,
-    pub result: Value,
+    pub result: VmValue,
 }
 
 /// A channel. Values enter its queue only at the back ([`ChannelObj::push`])
@@ -777,7 +778,7 @@ pub struct TaskObj {
 /// `Heap::channel_mut`).
 #[derive(Debug, Default)]
 pub struct ChannelObj {
-    queue: VecDeque<Value>,
+    queue: VecDeque<VmValue>,
     /// The number of values pushed since the heap last remembered the
     /// channel. Only these values of the queue can be young.
     pub(super) pushed: usize,
@@ -789,7 +790,7 @@ pub struct ChannelObj {
     /// Stale `receivers` (of cancelled tasks) are pruned when it reaches this length.
     pub receivers_prune_at: usize,
     /// Fibers blocked in `send`, with their pending values.
-    pub senders: VecDeque<(u32, u64, Value)>,
+    pub senders: VecDeque<(u32, u64, VmValue)>,
 }
 
 impl ChannelObj {
@@ -811,7 +812,7 @@ impl ChannelObj {
         self.capacity == 0 || self.queue.len() < self.capacity
     }
 
-    pub(super) fn queue(&self) -> &VecDeque<Value> {
+    pub(super) fn queue(&self) -> &VecDeque<VmValue> {
         &self.queue
     }
 
@@ -821,7 +822,7 @@ impl ChannelObj {
     }
 
     /// Appends `v` to the queue.
-    pub(super) fn push(&mut self, v: Value) {
+    pub(super) fn push(&mut self, v: VmValue) {
         self.queue.push_back(v);
         self.pushed = self.pushed.saturating_add(1);
     }
@@ -830,7 +831,7 @@ impl ChannelObj {
     /// sender's value into the queue. If the queue is empty, takes the first
     /// blocked sender's value directly. Returns the value and the sender to
     /// wake, if any.
-    pub fn take(&mut self) -> Option<(Value, Option<(u32, u64)>)> {
+    pub fn take(&mut self) -> Option<(VmValue, Option<(u32, u64)>)> {
         match self.queue.pop_front() {
             Some(v) => {
                 let woken = self.senders.pop_front().map(|(f, g, sv)| {
@@ -882,8 +883,8 @@ impl ChannelObj {
 /// because the runtime treats these operations as constant-cost.
 pub trait ValueType:
     crate::native::NamedType
-    + crate::native::convert::IntoValue
-    + for<'a> crate::native::convert::FromValue<Item<'a> = Self>
+    + crate::native::convert::IntoVmValue
+    + for<'a> crate::native::convert::FromVmValue<Item<'a> = Self>
     + Clone
     + Eq
     + Hash
@@ -1280,7 +1281,7 @@ pub struct InstantiatedDesc {
     /// Maximum nesting depth of instantiated template nodes.
     depth: u16,
     /// Argument descriptor handles retained so the GC accounts for their shared subgraphs.
-    args: Box<[Value]>,
+    args: Box<[VmValue]>,
 }
 
 impl TypeDescObj {
@@ -1296,7 +1297,7 @@ impl TypeDescObj {
         self.instantiated.as_ref().map_or(0, |b| std::mem::size_of::<InstantiatedDesc>() + b.bytes as usize + b.args.len() * VALUE_SIZE)
     }
 
-    fn args(&self) -> &[Value] {
+    fn args(&self) -> &[VmValue] {
         self.instantiated.as_ref().map_or(&[], |b| &b.args)
     }
 }
@@ -1357,7 +1358,7 @@ impl DescTemplate {
     }
 
     /// Substitutes `args` for `self.params`, retaining `handles` for GC tracing.
-    pub(crate) fn instantiate(&self, args: &[&TypeDescObj], handles: Box<[Value]>) -> Result<TypeDescObj, crate::vm::Fail> {
+    pub(crate) fn instantiate(&self, args: &[&TypeDescObj], handles: Box<[VmValue]>) -> Result<TypeDescObj, crate::vm::Fail> {
         let depth = self.depth + args.iter().map(|a| a.depth()).max().unwrap_or(0);
         if depth > MAX_DESC_DEPTH {
             return Err(crate::vm::Fail::runtime_error("limit", "the description of a type argument is nested too deeply"));
@@ -1547,19 +1548,19 @@ pub enum Obj {
     /// turned into a `Str` before the value can be read anywhere else.
     StrBuf(String),
     Bytes(Box<[u8]>),
-    List(Vec<Value>),
+    List(Vec<VmValue>),
     Map(Box<MapObj>),
     Set(Box<SetObj>),
-    Tuple(Box<[Value]>),
-    Struct(u32, Box<[Value]>),
-    Variant(u32, Box<[Value]>),
-    Closure(u32, Box<[Value]>),
+    Tuple(Box<[VmValue]>),
+    Struct(u32, Box<[VmValue]>),
+    Variant(u32, Box<[VmValue]>),
+    Closure(u32, Box<[VmValue]>),
     NativeFn(u32),
     /// The `next` function of the iterator of a list, range, string, map
     /// or set: a function value (`fn() -> T?`) that the interpreter steps
     /// directly.
     IterFn(IterSrc),
-    Cell(Value),
+    Cell(VmValue),
     Range(i64, i64, bool),
     Task(Box<TaskObj>),
     Channel(Box<ChannelObj>),
@@ -1598,14 +1599,14 @@ impl std::fmt::Debug for Obj {
 }
 
 /// The size of a value in bytes.
-pub const VALUE_SIZE: usize = std::mem::size_of::<Value>();
+pub const VALUE_SIZE: usize = std::mem::size_of::<VmValue>();
 
 const _: () = assert!(std::mem::size_of::<Obj>() == 32);
 
-/// Bytes of an entry of a map (`Option<(Value, Value)>`).
-pub const MAP_ENTRY_SIZE: usize = std::mem::size_of::<Option<(Value, Value)>>();
-/// Bytes of an entry of a set (`Option<Value>`).
-pub const SET_ENTRY_SIZE: usize = std::mem::size_of::<Option<Value>>();
+/// Size of a map entry in bytes.
+pub const MAP_ENTRY_SIZE: usize = std::mem::size_of::<Option<(VmValue, VmValue)>>();
+/// Size of a set entry in bytes.
+pub const SET_ENTRY_SIZE: usize = std::mem::size_of::<Option<VmValue>>();
 
 impl Obj {
     /// Approximate memory footprint in bytes.
@@ -1626,7 +1627,7 @@ impl Obj {
             Obj::Channel(c) => {
                 64 + c.queue.capacity() * VALUE_SIZE
                     + c.receivers.capacity() * std::mem::size_of::<(u32, u64)>()
-                    + c.senders.capacity() * std::mem::size_of::<(u32, u64, Value)>()
+                    + c.senders.capacity() * std::mem::size_of::<(u32, u64, VmValue)>()
             }
             Obj::Native(n) => n.size(),
             Obj::Value(v) => v.size(),
@@ -1636,7 +1637,7 @@ impl Obj {
 
     /// Calls `f` on each value referenced by this object.
     #[inline]
-    pub fn children(&self, mut f: impl FnMut(Value)) {
+    pub fn children(&self, mut f: impl FnMut(VmValue)) {
         match self {
             Obj::List(l) => l.iter().for_each(|v| f(*v)),
             Obj::Map(m) => {
@@ -1650,7 +1651,7 @@ impl Obj {
             Obj::Cell(v) => f(*v),
             Obj::IterFn(it) => match *it {
                 IterSrc::List { list: h, .. } | IterSrc::Chars { s: h, .. } | IterSrc::Map { map: h, .. } | IterSrc::Set { set: h, .. } => {
-                    f(Value::Obj(h))
+                    f(VmValue::Obj(h))
                 }
                 IterSrc::Range { .. } | IterSrc::Done => {}
             },
@@ -1671,14 +1672,14 @@ mod tests {
 
     #[test]
     fn for_keys_selects_dense_or_preallocated_hashed_index() {
-        let strs = (0..100).map(Value::Obj);
+        let strs = (0..100).map(VmValue::Obj);
         let KeyIndex::Hashed(t) = KeyIndex::for_keys(100, strs) else { panic!("string keys need a hashed index") };
         assert!(t.capacity() >= 100, "{}", t.capacity());
-        let KeyIndex::Hashed(t) = KeyIndex::for_keys(3, [0, 1, 1 << 40].map(Value::Int).into_iter()) else {
+        let KeyIndex::Hashed(t) = KeyIndex::for_keys(3, [0, 1, 1 << 40].map(VmValue::Int).into_iter()) else {
             panic!("sparse int keys need a hashed index")
         };
         assert!(t.capacity() >= 3, "{}", t.capacity());
-        assert!(matches!(KeyIndex::for_keys(3, [2, 0, 1].map(Value::Int).into_iter()), KeyIndex::Dense { .. }));
+        assert!(matches!(KeyIndex::for_keys(3, [2, 0, 1].map(VmValue::Int).into_iter()), KeyIndex::Dense { .. }));
         assert!(matches!(KeyIndex::for_keys(0, std::iter::empty()), KeyIndex::Dense { .. }));
     }
 

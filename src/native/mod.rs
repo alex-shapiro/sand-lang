@@ -9,15 +9,15 @@ use crate::engine::Registry;
 use crate::syntax::lexer::{is_ident, is_keyword};
 use crate::types::{ConstVal, MAX_CONST_DEPTH, MAX_CONST_PARTS, ValueTypeInfo};
 use crate::vm::heap::Heap;
-use crate::vm::value::{ChannelObj, MapObj, Obj, SetObj, TaskObj, TypeDesc, Value, ValueType};
+use crate::vm::value::{ChannelObj, MapObj, Obj, SetObj, TaskObj, TypeDesc, ValueType, VmValue};
 use crate::vm::{Ctl, Fail, HostFn, NativeFn, Vm};
-use convert::{Conversion, FromValue, mismatch};
+use convert::{Conversion, FromVmValue, mismatch};
 use func::{AsyncHostFunction, HostFunction, Signature, VmFunction};
 use std::any::{Any, TypeId};
 use std::borrow::Cow;
 use std::marker::PhantomData;
 use std::sync::Arc;
-use ty::{Channel, Num, Param, Range, Reflect, SandType, Task, Type, Val};
+use ty::{Channel, Num, Param, Range, Reflect, SandType, Task, Type, VmVal};
 
 /// A Rust type bound to a nominal Sand type in a [`NativeModule`].
 ///
@@ -192,7 +192,7 @@ pub struct StructField {
     pub default: Option<fn() -> Option<Constant>>,
 }
 
-/// Compile-time Sand constant produced by [`IntoValue::to_const`](convert::IntoValue::to_const).
+/// Compile-time Sand constant produced by [`IntoVmValue::to_const`](convert::IntoVmValue::to_const).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Constant(pub(crate) ConstVal<RustVariant, TypeId>);
 
@@ -223,15 +223,15 @@ pub fn struct_const<T: StructType>(fields: impl IntoIterator<Item = Option<Const
 }
 
 #[doc(hidden)]
-pub fn struct_from_value<T: StructType>(
+pub fn struct_from_vm_value<T: StructType>(
     vm: &Vm,
-    v: Value,
+    v: VmValue,
     conv: &mut Conversion,
-    read: impl FnOnce(&[Value], &mut Conversion) -> Result<T, Fail>,
+    read: impl FnOnce(&[VmValue], &mut Conversion) -> Result<T, Fail>,
 ) -> Result<T, Fail> {
     let def = vm.prog.struct_types.get(&T::rust_type());
     let fields = match (def, v) {
-        (Some(&def), Value::Obj(_)) => match vm.heap.get(v) {
+        (Some(&def), VmValue::Obj(_)) => match vm.heap.get(v) {
             Obj::Struct(d, fields) if *d == def && fields.len() == T::FIELDS.len() => fields,
             _ => return Err(mismatch::<T>()),
         },
@@ -242,7 +242,10 @@ pub fn struct_from_value<T: StructType>(
 }
 
 #[doc(hidden)]
-pub fn struct_into_value<T: StructType>(vm: &mut Vm, write: impl FnOnce(&mut Vm) -> Result<Box<[Value]>, Fail>) -> Result<Value, Fail> {
+pub fn struct_into_vm_value<T: StructType>(
+    vm: &mut Vm,
+    write: impl FnOnce(&mut Vm) -> Result<Box<[VmValue]>, Fail>,
+) -> Result<VmValue, Fail> {
     let Some(&def) = vm.prog.struct_types.get(&T::rust_type()) else {
         return Err(Fail::internal(format!("struct {}.{} is not loaded", T::MODULE, T::NAME)));
     };
@@ -253,7 +256,7 @@ pub fn struct_into_value<T: StructType>(vm: &mut Vm, write: impl FnOnce(&mut Vm)
     if fields.len() != T::FIELDS.len() {
         return Err(Fail::internal(format!("struct {}.{} takes {} fields, not {}", T::MODULE, T::NAME, T::FIELDS.len(), fields.len())));
     }
-    vm.check_memory(fields.len() * std::mem::size_of::<Value>())?;
+    vm.check_memory(fields.len() * std::mem::size_of::<VmValue>())?;
     Ok(vm.heap.alloc(Obj::Struct(def, fields)))
 }
 
@@ -268,14 +271,14 @@ pub const fn is_name(name: &str) -> bool {
 }
 
 #[doc(hidden)]
-pub fn field_from_value<T: for<'a> FromValue<Item<'a> = T>>(vm: &Vm, v: Value, conv: &mut Conversion) -> Result<T, Fail> {
-    T::from_value(vm, v, conv)
+pub fn field_from_vm_value<T: for<'a> FromVmValue<Item<'a> = T>>(vm: &Vm, v: VmValue, conv: &mut Conversion) -> Result<T, Fail> {
+    T::from_vm_value(vm, v, conv)
 }
 
 #[doc(hidden)]
-pub fn enum_from_value<T: EnumType>(
+pub fn enum_from_vm_value<T: EnumType>(
     vm: &Vm,
-    v: Value,
+    v: VmValue,
     conv: &mut Conversion,
     read: impl FnOnce(usize, &mut Conversion) -> Result<T, Fail>,
 ) -> Result<T, Fail> {
@@ -298,33 +301,33 @@ pub fn enum_from_value<T: EnumType>(
 }
 
 #[doc(hidden)]
-pub fn variant_field(vm: &Vm, v: Value, i: usize) -> Result<Value, Fail> {
+pub fn variant_field(vm: &Vm, v: VmValue, i: usize) -> Result<VmValue, Fail> {
     vm.heap.field(v, i).ok_or_else(|| Fail::internal("a native function read a missing variant payload"))
 }
 
 #[doc(hidden)]
-pub fn variant_into_value<T: EnumType, const N: usize>(
+pub fn variant_into_vm_value<T: EnumType, const N: usize>(
     vm: &mut Vm,
     index: usize,
-    write: impl FnOnce(&mut Vm) -> Result<[Value; N], Fail>,
-) -> Result<Value, Fail> {
+    write: impl FnOnce(&mut Vm) -> Result<[VmValue; N], Fail>,
+) -> Result<VmValue, Fail> {
     let Some(&first) = vm.prog.enum_types.get(&T::rust_type()) else {
         return Err(Fail::internal(format!("enum {}.{} is not loaded", T::MODULE, T::NAME)));
     };
     let id = first + index as u32;
     if N == 0 {
-        return Ok(Value::Tag(id));
+        return Ok(VmValue::Tag(id));
     }
     vm.struct_depth = convert::enter_struct(vm.struct_depth)?;
     let fields = write(vm);
     vm.struct_depth -= 1;
     let fields = fields?;
     if let [p] = fields.as_slice()
-        && let Some(v) = Value::variant1(id, *p)
+        && let Some(v) = VmValue::variant1(id, *p)
     {
         return Ok(v);
     }
-    vm.check_memory(N * std::mem::size_of::<Value>())?;
+    vm.check_memory(N * std::mem::size_of::<VmValue>())?;
     Ok(vm.heap.new_variant(id, &fields))
 }
 
@@ -502,8 +505,8 @@ pub struct VariantField {
 
 /// Memory and resource accounting for a heap-allocated [`ObjectType`].
 ///
-/// Do not store [`Value`]s inside an implementor; the garbage collector does
-/// not trace native objects.
+/// Do not store [`VmValue`] values inside an implementor. The garbage collector
+/// does not trace native objects.
 pub trait NativeObject: Any + Send {
     /// Approximate heap memory used by `self`, in bytes.
     ///
@@ -539,7 +542,7 @@ pub trait NativeObject: Any + Send {
 ///
 /// Functions registered with [`NativeModule::function`] borrow an object as
 /// `&T` and return a new object by value as `T`. Functions registered with
-/// [`NativeModule::vm_function`] accept a [`Val<T>`] handle.
+/// [`NativeModule::vm_function`] accept a [`VmVal<T>`] handle.
 pub trait ObjectType: NativeObject + NamedType + SandType {}
 
 /// Type-erased heap representation of an [`ObjectType`].
@@ -566,7 +569,7 @@ impl<T: ObjectType> DynObject for T {
     }
 }
 
-impl<T: ObjectType> Val<T> {
+impl<T: ObjectType> VmVal<T> {
     pub fn get(self, heap: &Heap) -> Result<&T, Fail> {
         heap.native::<T>(self.raw()).ok_or_else(mismatch::<T>)
     }
@@ -610,25 +613,25 @@ impl<const N: u8> Num<N> {
     }
 }
 
-impl Val<String> {
+impl VmVal<String> {
     pub fn str(self, heap: &Heap) -> &str {
         heap.str(self.raw())
     }
 }
 
-impl Val<Vec<u8>> {
+impl VmVal<Vec<u8>> {
     pub fn bytes(self, heap: &Heap) -> &[u8] {
         heap.bytes_of(self.raw())
     }
 }
 
-impl<T: SandType> Val<Vec<T>> {
-    pub fn items(self, heap: &Heap) -> &[Value] {
+impl<T: SandType> VmVal<Vec<T>> {
+    pub fn items(self, heap: &Heap) -> &[VmValue] {
         heap.list(self.raw())
     }
 }
 
-impl<K: SandType, V: SandType> Val<std::collections::HashMap<K, V>> {
+impl<K: SandType, V: SandType> VmVal<std::collections::HashMap<K, V>> {
     pub(crate) fn map(self, heap: &Heap) -> Result<&MapObj, Fail> {
         match heap.get(self.raw()) {
             Obj::Map(m) => Ok(m),
@@ -637,7 +640,7 @@ impl<K: SandType, V: SandType> Val<std::collections::HashMap<K, V>> {
     }
 }
 
-impl<T: SandType> Val<std::collections::HashSet<T>> {
+impl<T: SandType> VmVal<std::collections::HashSet<T>> {
     pub(crate) fn set(self, heap: &Heap) -> Result<&SetObj, Fail> {
         match heap.get(self.raw()) {
             Obj::Set(s) => Ok(s),
@@ -646,7 +649,7 @@ impl<T: SandType> Val<std::collections::HashSet<T>> {
     }
 }
 
-impl Val<Range> {
+impl VmVal<Range> {
     /// Returns the `(start, end, inclusive)` bounds of the range.
     pub(crate) fn bounds(self, heap: &Heap) -> Result<(i64, i64, bool), Fail> {
         match *heap.get(self.raw()) {
@@ -656,7 +659,7 @@ impl Val<Range> {
     }
 }
 
-impl<T: SandType> Val<Channel<T>> {
+impl<T: SandType> VmVal<Channel<T>> {
     pub(crate) fn channel(self, heap: &Heap) -> Result<&ChannelObj, Fail> {
         match heap.get(self.raw()) {
             Obj::Channel(c) => Ok(c),
@@ -669,7 +672,7 @@ impl<T: SandType> Val<Channel<T>> {
     }
 }
 
-impl<T: SandType> Val<Task<T>> {
+impl<T: SandType> VmVal<Task<T>> {
     pub(crate) fn task(self, heap: &Heap) -> Result<&TaskObj, Fail> {
         match heap.get(self.raw()) {
             Obj::Task(t) => Ok(t),
@@ -681,9 +684,9 @@ impl<T: SandType> Val<Task<T>> {
 impl Vm {
     /// Allocates `x` on the heap after checking `x.size()` bytes against the
     /// memory limit.
-    pub fn new_object<T: ObjectType>(&mut self, x: T) -> Result<Val<T>, Fail> {
+    pub fn new_object<T: ObjectType>(&mut self, x: T) -> Result<VmVal<T>, Fail> {
         self.check_memory(NativeObject::size(&x))?;
-        Ok(Val::from_raw(self.heap.alloc(Obj::Native(Box::new(x)))))
+        Ok(VmVal::from_raw(self.heap.alloc(Obj::Native(Box::new(x)))))
     }
 }
 
@@ -835,14 +838,13 @@ impl NativeModule {
     }
 
     /// Registers a synchronous function `f` that receives `&mut Vm` as its
-    /// first parameter. Heap values that the function does not copy must be
-    /// taken as [`Val`] handles.
+    /// first parameter. Accept [`VmVal`] handles to read heap values without
+    /// copying them.
     ///
-    /// Because the VM re-runs `f` from the start after a permission prompt
-    /// ([`Vm::require`]) or after a garbage collection triggered by a memory or
-    /// resource check ([`Vm::check_memory`], [`Vm::reserve_io`],
-    /// [`Vm::resource_slot`]), `f` must perform all capability and limit checks
-    /// before any side effects.
+    /// `f` must check capabilities and limits before performing any side
+    /// effects. The VM re-runs `f` from the start after a permission prompt from
+    /// [`Vm::require`] or a garbage collection triggered by a memory or resource
+    /// check.
     ///
     /// # Panics
     ///

@@ -81,12 +81,12 @@ pub fn escape_bytes(b: &[u8], out: &mut String) {
 
 /// Pending output of `render`.
 enum Work<'p> {
-    Val(Value, usize, bool),
+    Val(VmValue, usize, bool),
     Text(&'static str),
     /// Remaining elements `i..` of a list, tuple, struct, or variant (prefixing
     /// each element with `names[i]` if present), followed by `close`.
     Seq {
-        obj: Value,
+        obj: VmValue,
         i: usize,
         depth: usize,
         names: Option<&'p [String]>,
@@ -94,7 +94,7 @@ enum Work<'p> {
     },
     /// Entries `i..` of a map (`key: value`) or set, then `close`.
     Entries {
-        obj: Value,
+        obj: VmValue,
         i: usize,
         depth: usize,
         close: &'static str,
@@ -107,7 +107,7 @@ const MAX_OUTPUT: usize = 1 << 30;
 /// [`render`], charging `budget` one unit per value plus the bytes written,
 /// and checking the output and work stack against the memory limit as they
 /// grow. Scratch space grows with the nesting depth, not the size of the value.
-pub fn render_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Value, debug: bool, out: &mut String) -> Result<(), Fail> {
+pub fn render_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: VmValue, debug: bool, out: &mut String) -> Result<(), Fail> {
     let mut work = vec![Work::Val(v, 0, debug)];
     let mut scratch = Scratch::new();
     let mut charged = out.len();
@@ -166,26 +166,26 @@ pub fn render_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Valu
                 }
                 budget.charge(1)?;
                 match v {
-                    Value::Unit => out.push_str("()"),
-                    Value::Bool(b) => out.push_str(if b { "true" } else { "false" }),
-                    Value::Int(i) => {
+                    VmValue::Unit => out.push_str("()"),
+                    VmValue::Bool(b) => out.push_str(if b { "true" } else { "false" }),
+                    VmValue::Int(i) => {
                         let _ = write!(out, "{i}");
                     }
-                    Value::Float(f) => out.push_str(&fmt_float(f)),
-                    Value::Dur(d) => out.push_str(&fmt_duration(d)),
-                    Value::Pair(a, b) => {
+                    VmValue::Float(f) => out.push_str(&fmt_float(f)),
+                    VmValue::Dur(d) => out.push_str(&fmt_duration(d)),
+                    VmValue::Pair(a, b) => {
                         let _ = write!(out, "({a}, {b})");
                     }
-                    Value::Uninit => out.push_str("<uninit>"),
-                    Value::Tag(t) => out.push_str(prog.variants.get(t as usize).map(|v| v.name.as_str()).unwrap_or("?")),
-                    Value::VUnit(_)
-                    | Value::VBool(..)
-                    | Value::VInt(..)
-                    | Value::VFloat(..)
-                    | Value::VDur(..)
-                    | Value::VTag(..)
-                    | Value::VObj(..) => {
-                        let (id, payload) = v.as_inline_variant().unwrap_or((u32::MAX, Value::Unit));
+                    VmValue::Uninit => out.push_str("<uninit>"),
+                    VmValue::Tag(t) => out.push_str(prog.variants.get(t as usize).map(|v| v.name.as_str()).unwrap_or("?")),
+                    VmValue::VUnit(_)
+                    | VmValue::VBool(..)
+                    | VmValue::VInt(..)
+                    | VmValue::VFloat(..)
+                    | VmValue::VDur(..)
+                    | VmValue::VTag(..)
+                    | VmValue::VObj(..) => {
+                        let (id, payload) = v.as_inline_variant().unwrap_or((u32::MAX, VmValue::Unit));
                         let variant = prog.variants.get(id as usize);
                         out.push_str(variant.map_or("?", |v| v.name.as_str()));
                         out.push('(');
@@ -196,7 +196,7 @@ pub fn render_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Valu
                         work.push(Work::Text(")"));
                         work.push(Work::Val(payload, depth + 1, true));
                     }
-                    Value::Obj(_) => {
+                    VmValue::Obj(_) => {
                         let d = depth + 1;
                         match heap.get(v) {
                             Obj::Str(_) | Obj::StrBuf(_) => {
@@ -291,14 +291,14 @@ pub fn render_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Valu
 }
 
 /// The display form of `v`, charging `budget` (see [`render_metered`]).
-pub fn to_display_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Value) -> Result<String, Fail> {
+pub fn to_display_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: VmValue) -> Result<String, Fail> {
     match v {
-        Value::Int(i) => return Ok(i.to_string()),
-        Value::Float(f) => return Ok(fmt_float(f)),
-        Value::Bool(b) => return Ok(if b { "true" } else { "false" }.to_string()),
+        VmValue::Int(i) => return Ok(i.to_string()),
+        VmValue::Float(f) => return Ok(fmt_float(f)),
+        VmValue::Bool(b) => return Ok(if b { "true" } else { "false" }.to_string()),
         _ => {}
     }
-    if let Value::Obj(_) = v
+    if let VmValue::Obj(_) = v
         && let Obj::Str(s) = heap.get(v)
     {
         budget.charge_bytes(s.len())?;
@@ -311,23 +311,23 @@ pub fn to_display_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: 
 
 /// Appends the display form of `v` to `out`, charging `budget` (see
 /// [`render_metered`]).
-pub fn write_display_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Value, out: &mut String) -> Result<(), Fail> {
+pub fn write_display_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: VmValue, out: &mut String) -> Result<(), Fail> {
     match v {
-        Value::Int(i) => {
+        VmValue::Int(i) => {
             let _ = write!(out, "{i}");
             return Ok(());
         }
-        Value::Float(f) => {
+        VmValue::Float(f) => {
             out.push_str(&fmt_float(f));
             return Ok(());
         }
-        Value::Bool(b) => {
+        VmValue::Bool(b) => {
             out.push_str(if b { "true" } else { "false" });
             return Ok(());
         }
         _ => {}
     }
-    if let Value::Obj(_) = v
+    if let VmValue::Obj(_) = v
         && let Obj::Str(s) = heap.get(v)
     {
         budget.charge_bytes(s.len())?;
@@ -338,7 +338,7 @@ pub fn write_display_metered(prog: &Program, heap: &Heap, budget: &impl Budget, 
 }
 
 /// The debug form of `v`, charging `budget` (see [`render_metered`]).
-pub fn to_debug_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Value) -> Result<String, Fail> {
+pub fn to_debug_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: VmValue) -> Result<String, Fail> {
     let mut s = String::new();
     render_metered(prog, heap, budget, v, true, &mut s)?;
     Ok(s)
@@ -346,15 +346,15 @@ pub fn to_debug_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Va
 
 /// [`format_value`], charging `budget` and checking large precisions and
 /// widths against the memory limit before allocating.
-pub fn format_value_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: Value, spec: &FormatSpec) -> Result<String, Fail> {
-    let numeric = matches!(v, Value::Int(_) | Value::Float(_));
-    if let (Value::Float(_), Some(p)) = (v, spec.precision) {
+pub fn format_value_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v: VmValue, spec: &FormatSpec) -> Result<String, Fail> {
+    let numeric = matches!(v, VmValue::Int(_) | VmValue::Float(_));
+    if let (VmValue::Float(_), Some(p)) = (v, spec.precision) {
         // `{x:.1000000000}` would print a billion digits.
         reserve(heap, budget, p)?;
     }
     let mut body = match (v, spec.kind) {
         (_, Some('?')) => to_debug_metered(prog, heap, budget, v)?,
-        (Value::Int(i), Some(k @ ('x' | 'X' | 'b' | 'o'))) => {
+        (VmValue::Int(i), Some(k @ ('x' | 'X' | 'b' | 'o'))) => {
             let mag = i.unsigned_abs();
             let digits = match k {
                 'x' => format!("{mag:x}"),
@@ -364,11 +364,11 @@ pub fn format_value_metered(prog: &Program, heap: &Heap, budget: &impl Budget, v
             };
             if i < 0 { format!("-{digits}") } else { digits }
         }
-        (Value::Float(f), Some('e')) => match spec.precision {
+        (VmValue::Float(f), Some('e')) => match spec.precision {
             Some(p) => format!("{f:.p$e}"),
             None => format!("{f:e}"),
         },
-        (Value::Float(f), _) => match spec.precision {
+        (VmValue::Float(f), _) => match spec.precision {
             Some(p) if f.is_finite() => format!("{f:.p$}"),
             _ => fmt_float(f),
         },

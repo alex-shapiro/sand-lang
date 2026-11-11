@@ -8,7 +8,7 @@ use super::net::{self, Detached};
 use super::stream::IoFailure;
 use super::stream::{self, Suspended};
 use crate::native::convert::HostError;
-use crate::native::ty::Val;
+use crate::native::ty::VmVal;
 use crate::native::{NativeModule, NativeObject};
 use crate::network::{Listener, NetworkFuture, Stream};
 use crate::vm::WaitKind;
@@ -35,8 +35,8 @@ pub(super) fn natives(m: &mut NativeModule) {
     m.bind::<Exchange>();
     m.bind::<Request>();
     m.vm_function("serve", serve);
-    m.vm_function("Server.addr", |vm: &mut Vm, server: Val<Server>| -> Result<net::SocketAddr, Fail> { Ok(server.get(&vm.heap)?.addr) });
-    m.vm_function("Server.close", |vm: &mut Vm, server: Val<Server>| -> Result<_, Fail> {
+    m.vm_function("Server.addr", |vm: &mut Vm, server: VmVal<Server>| -> Result<net::SocketAddr, Fail> { Ok(server.get(&vm.heap)?.addr) });
+    m.vm_function("Server.close", |vm: &mut Vm, server: VmVal<Server>| -> Result<_, Fail> {
         server.get_mut(&mut vm.heap)?.close();
         Ok(())
     });
@@ -162,7 +162,7 @@ impl NativeObject for Server {
     }
 }
 
-fn serve(vm: &mut Vm, ip: Val<String>, port: i64) -> Suspended<Server> {
+fn serve(vm: &mut Vm, ip: VmVal<String>, port: i64) -> Suspended<Server> {
     let shared = Arc::default();
     vm.host.http_pool.watch(&shared);
     net::listen_with(vm, ip, port, move |socket| Server::new(socket, shared))
@@ -190,16 +190,16 @@ struct Request {
     /// Request headers in receipt order, with lowercase names.
     pub headers: Vec<(String, String)>,
     /// Streaming request body. `read_all`, `bytes`, `text`, and `json` enforce `max_http_body`.
-    body: Val<Body>,
+    body: VmVal<Body>,
     /// Underlying client connection.
-    conn: Val<net::Conn>,
+    conn: VmVal<net::Conn>,
     #[sand(private)]
-    exchange: Val<Exchange>,
+    exchange: VmVal<Exchange>,
 }
 
 /// `Server.accept(server)`: accepts connections and reads request heads until
 /// a complete request is available.
-fn accept_request(vm: &mut Vm, server: Val<Server>) -> Suspended<Request> {
+fn accept_request(vm: &mut Vm, server: VmVal<Server>) -> Suspended<Request> {
     let srv = server.get(&vm.heap)?;
     let Some(socket) = srv.listener.clone() else { return Err(HostError::new("closed", "server closed")) };
     let closed = net::CloseSignal::of(&srv.closed);
@@ -448,7 +448,7 @@ pub(super) struct After {
 }
 
 /// True if the connection is reused for subsequent requests.
-fn after(vm: &Vm, exchange: Val<Exchange>, body: Val<Body>, delimit: Delimit) -> Result<(After, Option<&'static str>), Fail> {
+fn after(vm: &Vm, exchange: VmVal<Exchange>, body: VmVal<Body>, delimit: Delimit) -> Result<(After, Option<&'static str>), Fail> {
     let ex = exchange.get(&vm.heap)?;
     let complete = body.get(&vm.heap)?.is_complete();
     let persists = ex.persists && complete && delimit != Delimit::Close && ex.server.strong_count() > 0;
@@ -462,7 +462,7 @@ fn after(vm: &Vm, exchange: Val<Exchange>, body: Val<Body>, delimit: Delimit) ->
 
 /// Takes the connection out of `net.Conn` `c`, writes `data` (the end of a
 /// response) to it, then hands it back to the server or closes it.
-pub(super) fn end_response(vm: &mut Vm, c: Val<net::Conn>, data: Vec<u8>, res: Reservation, after: After) -> Suspended<()> {
+pub(super) fn end_response(vm: &mut Vm, c: VmVal<net::Conn>, data: Vec<u8>, res: Reservation, after: After) -> Suspended<()> {
     let conn = net::detach(vm, c)?;
     let mem = vm.heap.io_memory.clone();
     stream::suspend(
@@ -491,7 +491,7 @@ struct Parts {
     headers: Vec<(String, String)>,
 }
 
-fn validate_response(vm: &Vm, status: i64, headers: Val<Vec<(String, String)>>) -> Result<Parts, HostError> {
+fn validate_response(vm: &Vm, status: i64, headers: VmVal<Vec<(String, String)>>) -> Result<Parts, HostError> {
     if !(100..=999).contains(&status) {
         return Err(HostError::new("invalid", format!("invalid HTTP status {status}")));
     }
@@ -515,12 +515,12 @@ fn has_body(status: i64) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn write_response(
     vm: &mut Vm,
-    conn: Val<net::Conn>,
-    exchange: Val<Exchange>,
-    request_body: Val<Body>,
+    conn: VmVal<net::Conn>,
+    exchange: VmVal<Exchange>,
+    request_body: VmVal<Body>,
     status: i64,
-    body: Val<Vec<u8>>,
-    headers: Val<Vec<(String, String)>>,
+    body: VmVal<Vec<u8>>,
+    headers: VmVal<Vec<(String, String)>>,
     include_body: bool,
 ) -> Suspended<()> {
     let Parts { status, headers } = validate_response(vm, status, headers)?;
@@ -540,10 +540,10 @@ fn write_response(
 
 fn reply_body(
     vm: &mut Vm,
-    exchange: Val<Exchange>,
-    request_body: Val<Body>,
+    exchange: VmVal<Exchange>,
+    request_body: VmVal<Body>,
     status: i64,
-    headers: Val<Vec<(String, String)>>,
+    headers: VmVal<Vec<(String, String)>>,
     include_body: bool,
 ) -> Result<Outgoing, HostError> {
     let Parts { status, headers } = validate_response(vm, status, headers)?;

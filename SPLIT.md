@@ -32,8 +32,8 @@ source branch only as a reference.
 8. Single exit path: merged in #34 from `single-exit-path`
 9. Explicit VM control flow: merged in #35 from `explicit-vm-control-flow`
 10. `Fail` failure type: merged in #37 from `fail-failure-type`
-11. Deterministic fuel: in review on `deterministic-fuel`
-12. `VmValue` rename: not started
+11. Deterministic fuel: merged in #38 from `deterministic-fuel`
+12. `VmValue` rename: in review on `vm-value-rename`
 13. Single native function registration: not started
 14. `Value` and the shared encode path: not started; requires 12
 15. Shared decode path and `Value` input: not started; requires 14
@@ -259,6 +259,10 @@ module.function("slow", |url: String| async move { fetch(url).await });
   later changeset can add a provided value without a new method.
 - A closure that takes `&mut Vm` with a borrowed argument remains a compile error.
   An async closure with a borrowed argument also remains a compile error.
+- Reject VM handles in async closures and `Later` futures at compile time. Add
+  a marker trait for types that do not reference the VM heap. Require this
+  trait on async parameters and results so that a handle cannot cross a garbage
+  collection.
 - Check `Later`, retry stress, and trait dictionary arguments against this trait.
   A standalone prototype covered only the closure forms.
 
@@ -303,6 +307,12 @@ value, and `Value`.
   `json.encode`. A cycle reaches the depth bound. A copy that exceeds a bound
   returns a limit error.
 - A benchmark must show that `json.encode` keeps its speed.
+- Rename `Vm::new_value` and `Heap::value` to reflect `ValueType` rather than
+  `Value`.
+- Decide how `Constant` relates to `Value`. `IntoVmValue::to_const` builds
+  compile-time constants. The derive macros generate a separate walk for
+  `to_const`. Building constants from `Encode` or `Value` removes that walk so
+  that `IntoVmValue` only converts to `VmValue`.
 
 This changeset has no source commits. `03076c5` returned `Json`, which loses the
 difference between `bytes` and a string, and between `()` and `None`.

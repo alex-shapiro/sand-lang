@@ -1,14 +1,12 @@
 //! Off-heap memory and open-resource accounting for pending I/O operations.
 //!
-//! Pending I/O tasks (file and socket reads, HTTP transfers, standard input,
-//! and outbound write buffers) must reserve off-heap buffer capacity through a
+//! Pending I/O tasks must reserve off-heap buffer capacity through a
 //! [`Reservation`] before allocating. [`Heap::would_exceed`](super::heap::Heap::would_exceed)
-//! counts reserved bytes together with heap memory against `max_memory`; if a
-//! reservation exceeds the limit, the I/O operation fails with kind `"limit"`
-//! without allocating, and execution continues. Reserve bytes incrementally as
-//! data is received rather than pre-reserving an untrusted size declared by a
-//! peer (such as an HTTP `Content-Length` header). Drop the [`Reservation`]
-//! immediately before allocating the resulting heap [`Value`](super::value::Value),
+//! counts reserved bytes together with heap memory against `max_memory`. If the
+//! total exceeds `max_memory`, the I/O operation fails with kind `"limit"`
+//! without allocating. Reserve bytes incrementally as data arrives instead of
+//! pre-reserving an untrusted size from a peer. Drop the [`Reservation`]
+//! immediately before allocating the resulting heap [`VmValue`](super::value::VmValue),
 //! or on error or cancellation.
 
 use std::fmt;

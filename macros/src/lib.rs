@@ -6,9 +6,9 @@
 //! - `#[sand(name = "<Name>")]` overrides the Sand type name.
 //! - `#[sand(private)]` makes the type private.
 //! - `#[sand(crate = <path>)]` overrides the `::sandlang` crate path.
-//! - `#[sand(manual_conversion)]` omits `FromValue` and `IntoValue` implementations.
+//! - `#[sand(manual_conversion)]` omits `FromVmValue` and `IntoVmValue` implementations.
 //!
-//! Rust doc comments, including `#[doc = include_str!("...")]`, are copied into Sand docs.
+//! The macros copy Rust doc comments into Sand documentation.
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as Tokens};
@@ -21,11 +21,11 @@ use syn::{
     parse_macro_input, parse_quote,
 };
 
-/// Declare a sandlang enum.
+/// Binds a Rust enum to a Sand enum.
 ///
-/// Implements `NamedType`, `EnumType`, `SandType`, `FromValue`, and `IntoValue`.
-/// Supports unit, tuple, and struct variants, and type parameters. Each payload
-/// type must implement `IntoValue` and owned `FromValue`.
+/// Implements `NamedType`, `EnumType`, `SandType`, `FromVmValue`, and `IntoVmValue`.
+/// Supports unit, tuple, and struct variants, as well as type parameters. Each
+/// payload type must implement `IntoVmValue` and owned `FromVmValue`.
 ///
 /// Optional attributes:
 ///
@@ -35,10 +35,10 @@ pub fn derive_sand_enum(input: TokenStream) -> TokenStream {
     expand(input, sand_enum)
 }
 
-/// Declare a sandlang struct.
+/// Binds a Rust struct to a Sand struct.
 ///
-/// Implements `NamedType`, `StructType`, `SandType`, `FromValue`, and `IntoValue`.
-/// Each field type must implement `IntoValue` and owned `FromValue`.
+/// Implements `NamedType`, `StructType`, `SandType`, `FromVmValue`, and `IntoVmValue`.
+/// Each field type must implement `IntoVmValue` and owned `FromVmValue`.
 /// Rust type parameters define Sand type parameters.
 ///
 /// Optional field attributes:
@@ -47,25 +47,25 @@ pub fn derive_sand_enum(input: TokenStream) -> TokenStream {
 /// - `#[sand(private)]`: makes the field private.
 /// - `#[sand(var)]`: makes the field mutable.
 /// - `#[sand(default)]` or `#[sand(default = <expr>)]`: sets a default value from the `Default` trait or `Into::into(<expr>)`.
-///   `IntoValue::to_const` must return `Some` for the default value.
+///   `IntoVmValue::to_const` must return `Some` for the default value.
 #[proc_macro_derive(SandStruct, attributes(sand))]
 pub fn derive_sand_struct(input: TokenStream) -> TokenStream {
     expand(input, sand_struct)
 }
 
-/// Declare an sandlang opaque native type.
+/// Binds a Rust type to an opaque Sand reference type.
 ///
-/// Implements `NamedType`, `ObjectType`, `SandType`, `FromValue`, and `IntoValue`
-/// The type must implement the `NativeObject` marker trait.
+/// Implements `NamedType`, `ObjectType`, `SandType`, `FromVmValue`, and `IntoVmValue`.
+/// The type must implement `NativeObject`.
 #[proc_macro_derive(SandObject, attributes(sand))]
 pub fn derive_sand_object(input: TokenStream) -> TokenStream {
     expand(input, sand_object)
 }
 
-/// Declare a sandlang value type.
+/// Binds a Rust type to an opaque Sand value type.
 ///
-/// Implements `NamedType`, `SandType`, `FromValue`, and `IntoValue`.
-/// The type must implement the `ValueType` marker trait.
+/// Implements `NamedType`, `SandType`, `FromVmValue`, and `IntoVmValue`.
+/// The type must implement `ValueType`.
 #[proc_macro_derive(SandValue, attributes(sand))]
 pub fn derive_sand_value(input: TokenStream) -> TokenStream {
     expand(input, sand_value)
@@ -283,8 +283,8 @@ fn expand_sand_type(input: &DeriveInput, krate: &Path, type_params: &TypeParams)
 
 fn split_conversion_generics(input: &DeriveInput, krate: &Path, type_params: &TypeParams) -> (Tokens, Tokens, Tokens, Tokens, Tokens) {
     let (imp, tyg, wh) = type_params.split_for_impl(input, |_| quote!(#krate::native::ty::SandType));
-    let (_, _, from) = type_params.split_for_impl(input, |p| quote!(for<'a> #krate::native::convert::FromValue<Item<'a> = #p>));
-    let (_, _, into) = type_params.split_for_impl(input, |_| quote!(#krate::native::convert::IntoValue));
+    let (_, _, from) = type_params.split_for_impl(input, |p| quote!(for<'a> #krate::native::convert::FromVmValue<Item<'a> = #p>));
+    let (_, _, into) = type_params.split_for_impl(input, |_| quote!(#krate::native::convert::IntoVmValue));
     (imp, tyg, wh, from, into)
 }
 
@@ -348,7 +348,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
                 quote! { #krate::native::VariantField { name: #sname, ty: <#canonical as #krate::native::ty::SandType>::sand_type } },
             );
             let bind = format_ident!("f{k}");
-            let get = quote! { #krate::native::field_from_value::<#fty>(vm, #krate::native::variant_field(vm, v, #k)?, conv)? };
+            let get = quote! { #krate::native::field_from_vm_value::<#fty>(vm, #krate::native::variant_field(vm, v, #k)?, conv)? };
             match fname {
                 Some(n) => {
                     gets.push(quote!(#n: #get));
@@ -360,7 +360,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
                 }
             }
             names.push(bind.clone());
-            puts.push(quote!(#krate::native::convert::IntoValue::into_value(#bind, vm)?));
+            puts.push(quote!(#krate::native::convert::IntoVmValue::into_vm_value(#bind, vm)?));
         }
         variants.push(quote! {
             #krate::native::EnumVariant { name: #vname, doc: #vdoc, fields: &[#(#infos),*] }
@@ -381,9 +381,9 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
             true => quote!(|_| ::std::result::Result::Ok([])),
             false => quote!(move |vm| ::std::result::Result::Ok([#(#puts),*])),
         };
-        writes.push(quote! { #pattern => #krate::native::variant_into_value::<Self, _>(vm, #i, #write) });
+        writes.push(quote! { #pattern => #krate::native::variant_into_vm_value::<Self, _>(vm, #i, #write) });
         consts.push(
-            quote! { #pattern => #krate::native::variant_const::<Self>(#i, [#(#krate::native::convert::IntoValue::to_const(#names)),*]) },
+            quote! { #pattern => #krate::native::variant_const::<Self>(#i, [#(#krate::native::convert::IntoVmValue::to_const(#names)),*]) },
         );
     }
     let named = expand_named_type(input, &attrs, &type_params, quote! { #krate::native::Binding::of_enum() });
@@ -407,15 +407,15 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
     }
     Ok(quote! {
         #reflection
-        impl #imp #krate::native::convert::FromValue for #ty #tyg #wh_from {
+        impl #imp #krate::native::convert::FromVmValue for #ty #tyg #wh_from {
             type Item<'a> = Self;
             #[allow(unused_variables)]
-            fn from_value(
+            fn from_vm_value(
                 vm: &#krate::vm::Vm,
-                v: #krate::vm::value::Value,
+                v: #krate::vm::value::VmValue,
                 conv: &mut #krate::native::convert::Conversion,
             ) -> ::std::result::Result<Self, #krate::vm::Fail> {
-                #krate::native::enum_from_value::<Self>(vm, v, conv, |index, conv| {
+                #krate::native::enum_from_vm_value::<Self>(vm, v, conv, |index, conv| {
                     ::std::result::Result::Ok(match index {
                         #(#reads,)*
                         _ => return ::std::result::Result::Err(#krate::native::convert::mismatch::<Self>()),
@@ -423,8 +423,8 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
                 })
             }
         }
-        impl #imp #krate::native::convert::IntoValue for #ty #tyg #wh_into {
-            fn into_value(self, vm: &mut #krate::vm::Vm) -> ::std::result::Result<#krate::vm::value::Value, #krate::vm::Fail> {
+        impl #imp #krate::native::convert::IntoVmValue for #ty #tyg #wh_into {
+            fn into_vm_value(self, vm: &mut #krate::vm::Vm) -> ::std::result::Result<#krate::vm::value::VmValue, #krate::vm::Fail> {
                 match self {
                     #(#writes),*
                 }
@@ -458,19 +458,19 @@ fn sand_object(input: &DeriveInput) -> syn::Result<Tokens> {
                 <#ty as #krate::native::ty::SandType>::sand_type()
             }
         }
-        impl<'r> #krate::native::convert::FromValue for &'r #ty {
+        impl<'r> #krate::native::convert::FromVmValue for &'r #ty {
             type Item<'a> = &'a #ty;
-            fn from_value<'a>(
+            fn from_vm_value<'a>(
                 vm: &'a #krate::vm::Vm,
-                v: #krate::vm::value::Value,
+                v: #krate::vm::value::VmValue,
                 _: &mut #krate::native::convert::Conversion,
             ) -> ::std::result::Result<&'a #ty, #krate::vm::Fail> {
-                #krate::native::ty::Val::<#ty>::from_raw(v).get(&vm.heap)
+                #krate::native::ty::VmVal::<#ty>::from_raw(v).get(&vm.heap)
             }
         }
-        impl #krate::native::convert::IntoValue for #ty {
-            fn into_value(self, vm: &mut #krate::vm::Vm) -> ::std::result::Result<#krate::vm::value::Value, #krate::vm::Fail> {
-                vm.new_object(self).map(#krate::native::ty::Val::raw)
+        impl #krate::native::convert::IntoVmValue for #ty {
+            fn into_vm_value(self, vm: &mut #krate::vm::Vm) -> ::std::result::Result<#krate::vm::value::VmValue, #krate::vm::Fail> {
+                vm.new_object(self).map(#krate::native::ty::VmVal::raw)
             }
         }
     })
@@ -530,7 +530,7 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
                 quote_spanned! {fty.span()=>
                     ::std::option::Option::Some(|| {
                         let value: #canonical = ::std::convert::Into::into(#value);
-                        #krate::native::convert::IntoValue::to_const(&value)
+                        #krate::native::convert::IntoVmValue::to_const(&value)
                     })
                 }
             }
@@ -545,9 +545,9 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
                 default: #default,
             }
         });
-        reads.push(quote! { #ident: #krate::native::field_from_value::<#fty>(vm, fields[#i], conv)? });
-        writes.push(quote! { #krate::native::convert::IntoValue::into_value(self.#ident, vm)? });
-        consts.push(quote! { #krate::native::convert::IntoValue::to_const(&self.#ident) });
+        reads.push(quote! { #ident: #krate::native::field_from_vm_value::<#fty>(vm, fields[#i], conv)? });
+        writes.push(quote! { #krate::native::convert::IntoVmValue::into_vm_value(self.#ident, vm)? });
+        consts.push(quote! { #krate::native::convert::IntoVmValue::to_const(&self.#ident) });
     }
     let named = expand_named_type(input, &attrs, &type_params, quote! { #krate::native::Binding::of_struct() });
     let sand_type = expand_sand_type(input, krate, &type_params);
@@ -565,20 +565,20 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
     }
     Ok(quote! {
         #reflection
-        impl #imp #krate::native::convert::FromValue for #ty #tyg #wh_from {
+        impl #imp #krate::native::convert::FromVmValue for #ty #tyg #wh_from {
             type Item<'a> = Self;
             #[allow(unused_variables)]
-            fn from_value(
+            fn from_vm_value(
                 vm: &#krate::vm::Vm,
-                v: #krate::vm::value::Value,
+                v: #krate::vm::value::VmValue,
                 conv: &mut #krate::native::convert::Conversion,
             ) -> ::std::result::Result<Self, #krate::vm::Fail> {
-                #krate::native::struct_from_value(vm, v, conv, |fields, conv| ::std::result::Result::Ok(#ty { #(#reads),* }))
+                #krate::native::struct_from_vm_value(vm, v, conv, |fields, conv| ::std::result::Result::Ok(#ty { #(#reads),* }))
             }
         }
-        impl #imp #krate::native::convert::IntoValue for #ty #tyg #wh_into {
-            fn into_value(self, vm: &mut #krate::vm::Vm) -> ::std::result::Result<#krate::vm::value::Value, #krate::vm::Fail> {
-                #krate::native::struct_into_value::<Self>(vm, move |vm| ::std::result::Result::Ok(::std::boxed::Box::new([#(#writes),*])))
+        impl #imp #krate::native::convert::IntoVmValue for #ty #tyg #wh_into {
+            fn into_vm_value(self, vm: &mut #krate::vm::Vm) -> ::std::result::Result<#krate::vm::value::VmValue, #krate::vm::Fail> {
+                #krate::native::struct_into_vm_value::<Self>(vm, move |vm| ::std::result::Result::Ok(::std::boxed::Box::new([#(#writes),*])))
             }
             fn to_const(&self) -> ::std::option::Option<#krate::native::Constant> {
                 #krate::native::struct_const::<Self>([#(#consts),*])
@@ -683,7 +683,7 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("let value : i64 = :: std :: convert :: Into :: into (2) ;"), "{out}");
-        assert!(out.contains(":: sandlang :: native :: convert :: IntoValue :: to_const (& value)"), "{out}");
+        assert!(out.contains(":: sandlang :: native :: convert :: IntoVmValue :: to_const (& value)"), "{out}");
         assert_eq!(out.matches("default : :: std :: option :: Option :: None").count(), 1, "{out}");
     }
 
@@ -701,7 +701,7 @@ mod tests {
             out.contains("Option < (:: sandlang :: native :: ty :: Param < 0u8 > , :: sandlang :: native :: ty :: Param < 1u8 >) >"),
             "{out}"
         );
-        assert!(out.contains("A : 'static + for < 'a > :: sandlang :: native :: convert :: FromValue < Item < 'a > = A >"), "{out}");
+        assert!(out.contains("A : 'static + for < 'a > :: sandlang :: native :: convert :: FromVmValue < Item < 'a > = A >"), "{out}");
         let out = expand(sand_enum, "#[sand(module = \"m\")] enum E<T> { A(T), B(other::T) }");
         assert!(out.contains("ty : < other :: T as"), "{out}");
     }
@@ -713,7 +713,7 @@ mod tests {
         assert!(out.contains("VariantField { name : :: std :: option :: Option :: None , ty : < i64 as"), "{out}");
         assert!(out.contains("VariantField { name : :: std :: option :: Option :: Some (\"w\") , ty : < f64 as"), "{out}");
         assert!(out.contains("E :: B (..) => 1usize"), "{out}");
-        assert!(out.contains("E :: C { w : f0 } => :: sandlang :: native :: variant_into_value :: < Self , _ > (vm , 2usize"), "{out}");
+        assert!(out.contains("E :: C { w : f0 } => :: sandlang :: native :: variant_into_vm_value :: < Self , _ > (vm , 2usize"), "{out}");
         let out = expand(sand_enum, "#[sand(module = \"m\")] enum E { A { #[sand(name = \"kind\")] r#type: i64 } }");
         assert!(out.contains("VariantField { name : :: std :: option :: Option :: Some (\"kind\")"), "{out}");
         assert!(out.contains("E :: A { r#type : f0 }"), "{out}");
@@ -778,8 +778,8 @@ mod tests {
             for out in [&derived, &manual] {
                 assert!(out.contains("NamedType for") && out.contains("SandType for") && out.contains(reflection), "{out}");
             }
-            assert!(derived.contains("FromValue for") && derived.contains("IntoValue for"), "{derived}");
-            assert!(!manual.contains("FromValue for") && !manual.contains("IntoValue for"), "{manual}");
+            assert!(derived.contains("FromVmValue for") && derived.contains("IntoVmValue for"), "{derived}");
+            assert!(!manual.contains("FromVmValue for") && !manual.contains("IntoVmValue for"), "{manual}");
         }
     }
 }
