@@ -329,6 +329,51 @@ Err(Error(message: "permission denied: door back", kind: "permission_denied"))
 
 A generic Rust function accepts values of its `N`-th type parameter as `Param<N, B>`, where `B` declares any built-in traits (`traits::Eq`, `traits::Ord`, `traits::Hash`, `traits::Num`, `traits::Encode`, or a tuple such as `(traits::Ord, traits::Hash)`) required by the Rust implementation. The corresponding `native fn` declaration in `NativeModule::source` must require those traits (`native fn max<T: Ord>(xs: [T]) -> T?`), directly or through traits that have them as supertraits. If a `native fn` declaration requires `Num` of its `N`-th type parameter, the Rust function can accept `Num<N>` (providing `zero` and `one`) before the value parameters.
 
+## Values outside the VM
+
+`sandlang::value::Value` holds a Sand value in a Rust form. A `Value` does not reference the VM, so you can keep it after the run ends. A struct or an enum variant in a `Value` has its type name with its module, such as `shop.Order`. The `time` types have their own variants, such as `Value::Instant` and `Value::PlainDate`. Each other native value type is a `Value::Native` with its type name and text.
+
+`Vm::to_value` copies any script value out of the VM. A value whose type does not implement `Encode`, such as a function or a native object, becomes `Value::Opaque`. The copy charges fuel and counts against the memory limit, and it fails with a `"limit"` error beyond 512 levels of nesting:
+
+```rust
+use sandlang::native::NativeModule;
+use sandlang::native::ty::Param;
+use sandlang::value::Value;
+use sandlang::vm::{Fail, Vm};
+
+let mut audit = NativeModule::new("audit");
+audit.source("pub native fn record<T>(event: T)");
+audit.function("record", |vm: &mut Vm, event: Param<0>| -> Result<(), Fail> {
+    if let Value::Struct(event) = vm.to_value(event.raw())? {
+        println!("{} with {} fields", event.type_name, event.fields.len());
+    }
+    Ok(())
+});
+```
+
+The trait `sandlang::value::Encode` gives the `Value` form of a Rust value without a VM. Primitives, strings, collections, `Option`, tuples, and native value types implement it. `SandStruct`, `SandEnum`, and `SandValue` derive it. The `Value` of a derived type is equal to the copy that `Vm::to_value` makes of the same Sand value:
+
+```rust
+use sandlang::SandStruct;
+use sandlang::value::{Encode, Value};
+
+/// A point in the plane.
+#[derive(SandStruct)]
+#[sand(module = "geo")]
+struct Point {
+    x: f64,
+    y: f64,
+}
+
+let Value::Struct(point) = Point { x: 1.0, y: 2.0 }.encode() else { unreachable!() };
+assert_eq!(&*point.type_name, "geo.Point");
+assert_eq!(point.fields[0], ("x".into(), Value::Float(1.0)));
+```
+
+`Value::native::<T>()` returns a value as the native value type `T`, such as `value.native::<jiff::civil::Date>()`, or `None` if the value is not a `T`.
+
+A `#[sand(default)]` field default is the `Encode` form of its Rust value. The default must be a Sand constant, so a native value type such as `jiff::Timestamp` cannot be a field default. A derived type with a field that has no `Value` form, such as a `VmVal` handle, takes `#[sand(no_encode)]`.
+
 ## Interactive sessions
 
 `Session::new` creates a stateful `Session` that evaluates inputs incrementally, preserving bindings across calls:

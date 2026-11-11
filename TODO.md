@@ -92,10 +92,14 @@ The host cannot rely on engine limits, stability, or control.
       explicit stack. The derived `FromVmValue` and `IntoVmValue` implementations
       recurse once per nesting level. Deep values can overflow a small host
       thread stack in debug builds before reaching the 256-level limit.
-- [ ] ❓ _Embedding._ Convert `json.parse`, `json.encode`, `json.decode`, and `json.to_json`
-      to use an explicit stack without regressing throughput. These functions
-      recurse up to the 512-level nesting limit, which can overflow a 2 MiB
-      thread stack in debug builds.
+- [ ] ❓ _Embedding._ Convert `json.parse` and `json.decode` to use an explicit
+      stack without regressing throughput. These functions recurse up to the
+      512-level nesting limit, which can overflow a 2 MiB thread stack in debug
+      builds.
+- [ ] ❓ _Embedding._ Drop a deep `Value` without recursion. `Vm::to_value`
+      copies at most 512 levels, but a host can build a deeper `Value` in Rust.
+      The default drop recurses once per level, so such a value can overflow
+      the host thread stack when it drops.
 - [ ] 🔴 [019](triage/019-value-type-defaults/summary.md) _Embedding._ Represent `ValueType` constants in `ConstVal` by their text form so that
       `#[sand(default)]` supports value-type fields and `json.decode` evaluates
       constant value-type defaults directly.

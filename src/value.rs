@@ -109,8 +109,7 @@ pub enum Payload {
 pub struct NativeValue {
     /// The module-qualified type name, such as `net.SocketAddr`.
     pub type_name: Arc<str>,
-    /// The `Display` text of the value.
-    /// [`ValueType::parse`](crate::vm::value::ValueType::parse) turns it back
+    /// The `Display` text of the value. [`ValueType::parse`] turns it back
     /// into an equal value.
     pub text: String,
 }

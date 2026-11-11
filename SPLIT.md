@@ -34,8 +34,8 @@ source branch only as a reference.
 10. `Fail` failure type: merged in #37 from `fail-failure-type`
 11. Deterministic fuel: merged in #38 from `deterministic-fuel`
 12. `VmValue` rename: merged in #39 from `vm-value-rename`
-13. Single native function registration: in review on `single-native-function`
-14. `Value` and the shared encode path: not started; requires 12
+13. Single native function registration: merged in #40 from `single-native-function`
+14. `Value` and the shared encode path: in review on `value-encode`
 15. Shared decode path and `Value` input: not started; requires 14
 16. `serde` support for `Value`: not started; requires 14
 17. Single run method and `Outcome`: not started; requires 14

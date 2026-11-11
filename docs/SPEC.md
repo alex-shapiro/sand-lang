@@ -2177,9 +2177,11 @@ raw `VmValue` across a wait; allocate the value in the `Later::new` finisher
 instead.
 
 Four derive macros bind a Rust type to a Sand type in a native module. Each
-macro implements `NamedType`, `SandType`, `FromVmValue`, and `IntoVmValue`. The
-macros copy Rust doc comments into Sand documentation. They reject type,
-variant, and field names that are Sand keywords or invalid Sand identifiers.
+macro implements `NamedType`, `SandType`, `FromVmValue`, and `IntoVmValue`.
+`SandEnum`, `SandStruct`, and `SandValue` also implement `value::Encode`
+(§16.7). The macros copy Rust doc comments into Sand documentation. They reject
+type, variant, and field names that are Sand keywords or invalid Sand
+identifiers.
 
 Every derived type requires `#[sand(module = "<module>")]` and accepts these
 optional type attributes:
@@ -2188,7 +2190,10 @@ optional type attributes:
 - `#[sand(private)]`: keeps the type private to its module.
 - `#[sand(crate = <path>)]`: specifies a renamed `sandlang` dependency.
 - `#[sand(manual_conversion)]`: on `SandEnum` and `SandStruct`, omits the
-  derived `FromVmValue` and `IntoVmValue` implementations.
+  derived `FromVmValue`, `IntoVmValue`, and `Encode` implementations.
+- `#[sand(no_encode)]`: on `SandEnum` and `SandStruct`, omits the derived
+  `Encode` implementation. Use it for a type with a field that has no `Value`
+  form, such as a `VmVal<T>` handle.
 
 | Derive       | Sand type                                                                  |
 | ------------ | -------------------------------------------------------------------------- |
@@ -2198,9 +2203,9 @@ optional type attributes:
 | `SandStruct` | `struct` with the named fields of a Rust struct, copied on each conversion |
 
 Each field of a `SandStruct` and each payload of a `SandEnum` variant must
-implement `IntoVmValue` and owned `FromVmValue`. Unit variants map to variants
-without a payload. Tuple and struct variants map to variants with positional and
-named payloads. On a struct variant field, `#[sand(name = "<name>")]` overrides
+implement `IntoVmValue`, owned `FromVmValue`, and `Encode`. Unit variants map
+to variants without a payload. Tuple and struct variants map to variants with
+positional and named payloads. On a struct variant field, `#[sand(name = "<name>")]` overrides
 the payload field name. Generic type parameters on a `SandEnum` or `SandStruct`
 map to Sand type parameters. Pass any concrete instantiation to `bind`, such as
 `bind::<Pair<(), ()>>()`.
@@ -2209,10 +2214,11 @@ By default, struct fields are `pub` and immutable; `#[sand(private)]` makes a
 field private to the module, `#[sand(var)]` makes it mutable with `var`, and
 `#[sand(name = "<name>")]` overrides its Sand name. `#[sand(default)]` uses
 `Default::default()` as the Sand field default, and `#[sand(default = <expr>)]`
-uses `<expr>`. `bind` panics if a field default is not a constant built from
-numbers, `bool`, `()`, strings, `bytes`, durations, tuples, `Vec`, maps, sets,
-`Option`, `SandEnum`, and `SandStruct` values, with at most 65,536 nodes and 64
-nesting levels.
+uses `<expr>`. The field default is the `Encode` form of the Rust value.
+`bind` panics if that form is not a constant built from numbers, `bool`, `()`,
+strings, `bytes`, durations, ranges, tuples, lists, maps, sets, structs, and
+enum variants, with at most 65,536 nodes and 64 nesting levels. A native value
+type, such as `jiff::Timestamp`, has no constant form.
 
 Recursive types can reference themselves through `Vec`, map, or `Box` fields.
 Because the engine copies each reachable struct and enum value during
@@ -2324,7 +2330,10 @@ explicitly with `native fn` in `NativeModule::source`.
 - a method registered as `"Type.name"` targets a nonexistent type, or targets a
   generic type without a `native fn` declaration in Sand source;
 - host modules form a dependency cycle through their registered function types;
-- a function declared in Sand source also configures `params` or `doc` in Rust.
+- a function declared in Sand source also configures `params` or `doc` in Rust;
+- a field default holds a struct or a variant that the program does not
+  declare, or that does not have the declared fields or payload. Only a
+  hand-written `Encode` implementation can make such a default.
 
 ### 16.4 Operating-system access and file systems
 
@@ -2437,6 +2446,47 @@ during a session call, the session resets itself and preserves remembered
 `"always"` prompt decisions; see §10.3. It appends `" (the session was reset)"`
 from `sandlang::session::RESET_NOTE` to the error message and sets
 `was_reset()` to `true` until the next call.
+
+### 16.7 Values outside the VM
+
+`sandlang::value::Value` is the Rust form of a Sand value. A `Value` does not
+reference the VM, so it remains valid after the run ends. `Value` is
+`#[non_exhaustive]`.
+
+| Sand value                                   | `Value` variant                                                    |
+| -------------------------------------------- | ------------------------------------------------------------------ |
+| `()`, `bool`, `int`, `float`, `duration`     | `Unit`, `Bool`, `Int`, `Float`, `Duration`                         |
+| `str`, `bytes`                               | `Str`, `Bytes`                                                     |
+| list, tuple, `Set`, map                      | `List`, `Tuple`, `Set`, `Map`, with elements in iteration order    |
+| range                                        | `Range { start, end, inclusive }`                                  |
+| struct                                       | `Struct`, with the type name and the fields in declaration order   |
+| enum variant                                 | `Variant`, with the enum name, the variant name, and the payload   |
+| `time` value types                           | `Instant`, `PlainDate`, and one variant for each other `time` type |
+| other native value type                      | `Native { type_name, text }`                                       |
+| value whose type does not implement `Encode` | `Opaque { type_name }`                                             |
+
+A type name includes its module, such as `shop.Order`. A prelude type, such as
+`Option`, `Result`, or `Error`, has its name without a module. A variant
+payload is `Payload::Positional` or, for a variant with named fields,
+`Payload::Named`. The `text` of a native value is its `Display` output, which
+`ValueType::parse` turns back into an equal value.
+`Value::native::<T>()` returns the value as the native value type `T`, or
+`None` if the value is not a `T`.
+
+`Vm::to_value` copies a VM value into a `Value`. A value whose type does not
+implement `Encode`, such as a function, a task, a channel, or a native object,
+becomes `Value::Opaque`. The copy charges fuel and
+counts its memory against the memory limit. It fails with kind `"limit"` if the
+value has more than 512 levels of nesting, which includes a value that contains
+itself.
+
+`value::Encode` is the Rust counterpart of the Sand trait `Encode`: its
+`encode` method returns the `Value` form of a Rust value. `bool`, `i64`, `f64`,
+`()`, `jiff::SignedDuration`, `str`, `String`, `Vec<u8>` (as `bytes`), `Vec<T>`,
+`Box<T>`, `Option<T>`, maps, sets, tuples of 2 to 8 elements, `Value`, and each
+`ValueType` implement it. `encode` sorts the entries of a `HashMap` and the
+elements of a `HashSet`. The `Value` of a derived `SandEnum` or `SandStruct` is
+equal to the `Value` that `Vm::to_value` copies for the same Sand value.
 
 ## 17. Tooling
 
