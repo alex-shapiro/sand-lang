@@ -259,6 +259,11 @@ module.function("slow", |url: String| async move { fetch(url).await });
   later changeset can add a provided value without a new method.
 - A closure that takes `&mut Vm` with a borrowed argument remains a compile error.
   An async closure with a borrowed argument also remains a compile error.
+- An async closure that takes or returns a VM handle, such as `VmVal`, `Param`,
+  `Num`, or `Reflect`, directly or through `Later`, is a compile error. Today
+  the bound `for<'a> FromVmValue<Item<'a> = Self>` accepts these handles, so a
+  handle can outlive a garbage collection. Add a marker trait for values that
+  do not reference the heap, and require it of async parameters and results.
 - Check `Later`, retry stress, and trait dictionary arguments against this trait.
   A standalone prototype covered only the closure forms.
 

@@ -10,7 +10,7 @@ use crate::vm::{Ctl, Fail, Vm};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::Hash;
 
-/// Converts a Sand [`VmValue`] into a Rust argument for a native function.
+/// Converts a [`VmValue`] into a Rust argument for a native function.
 ///
 /// For functions registered with [`NativeModule::function`](super::NativeModule::function),
 /// [`FromVmValue::Item`] can borrow directly from the VM heap (`&str`, `&[u8]`,
@@ -62,7 +62,7 @@ impl Conversion {
     }
 }
 
-/// Converts a Rust return value into a Sand [`VmValue`], charging fuel and
+/// Converts a Rust return value into a [`VmValue`], charging fuel and
 /// reserving heap memory.
 pub trait IntoVmValue: SandType {
     fn into_vm_value(self, vm: &mut Vm) -> Result<VmValue, Fail>;
