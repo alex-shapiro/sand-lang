@@ -2215,10 +2215,11 @@ field private to the module, `#[sand(var)]` makes it mutable with `var`, and
 `#[sand(name = "<name>")]` overrides its Sand name. `#[sand(default)]` uses
 `Default::default()` as the Sand field default, and `#[sand(default = <expr>)]`
 uses `<expr>`. The field default is the `Encode` form of the Rust value.
-`bind` panics if that form is not a constant built from numbers, `bool`, `()`,
-strings, `bytes`, durations, ranges, tuples, lists, maps, sets, structs, and
-enum variants, with at most 65,536 nodes and 64 nesting levels. A native value
-type, such as `jiff::Timestamp`, has no constant form.
+`HostModules::new` returns a compile error if that form is not a constant of
+the declared field type, built from numbers, `bool`, `()`, strings, `bytes`,
+durations, ranges, tuples, lists, maps, sets, structs, and enum variants, with
+at most 65,536 parts and 64 nesting levels. A value of a native value type,
+such as `jiff::Timestamp`, cannot be a field default.
 
 Recursive types can reference themselves through `Vec`, map, or `Box` fields.
 Because the engine copies each reachable struct and enum value during

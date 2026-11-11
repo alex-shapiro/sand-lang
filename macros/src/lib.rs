@@ -50,8 +50,9 @@ pub fn derive_sand_enum(input: TokenStream) -> TokenStream {
 /// - `#[sand(private)]`: makes the field private.
 /// - `#[sand(var)]`: makes the field mutable.
 /// - `#[sand(default)]` or `#[sand(default = <expr>)]`: sets a default value from the `Default` trait or `Into::into(<expr>)`.
-///   The field default is the `Encode` form of the value. It must be a Sand constant, so it cannot
-///   hold a native value type.
+///   The field default is the `Encode` form of the value. It must be a Sand constant of the field
+///   type, so it cannot hold a native value type. `HostModules::new` reports a default that is not
+///   such a constant as a compile error.
 #[proc_macro_derive(SandStruct, attributes(sand))]
 pub fn derive_sand_struct(input: TokenStream) -> TokenStream {
     expand(input, sand_struct)

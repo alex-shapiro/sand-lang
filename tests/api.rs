@@ -1628,27 +1628,84 @@ fn rust_json_field_defaults_are_constants() {
 }
 
 #[test]
-#[should_panic(expected = "the default of field `at` of `Bad` is not a Sand constant")]
-fn rust_field_defaults_must_be_sand_constants() {
+fn rust_field_defaults_cannot_hold_native_or_opaque_values() {
+    use sandlang::value::Encode;
+    #[derive(Default, sandlang::SandStruct)]
+    #[sand(module = "lab", no_encode)]
+    struct Hook {
+        id: i64,
+    }
+    impl Encode for Hook {
+        fn encode(&self) -> Value {
+            opaque_value("fn")
+        }
+    }
     #[derive(sandlang::SandStruct)]
     #[sand(module = "lab")]
     struct Bad {
         #[sand(default = jiff::Timestamp::UNIX_EPOCH)]
         at: jiff::Timestamp,
+        #[sand(default = Money(5))]
+        price: Money,
+        #[sand(default)]
+        hook: Hook,
     }
-    NativeModule::new("lab").bind::<Bad>();
+    let mut m = NativeModule::new("lab");
+    m.bind::<Hook>().bind::<Bad>();
+    assert_eq!(
+        host_module_errors([bank_module(), m]),
+        [
+            "the Rust field `at` of `lab.Bad` has a default with a value of the native value type `time.Instant`, which cannot be a field default",
+            "the Rust field `price` of `lab.Bad` has a default with a value of the native value type `bank.Money`, which cannot be a field default",
+            "the Rust field `hook` of `lab.Bad` has a default with an opaque value of `fn`, which cannot be a field default",
+        ]
+    );
+}
+
+/// A link of a chain that ends in `None`.
+#[derive(sandlang::SandStruct)]
+#[sand(module = "lab")]
+struct ChainLink {
+    next: Option<Box<ChainLink>>,
+}
+
+/// Returns `n` links. Each link adds a struct level and a `Some` level.
+fn chain(n: usize) -> Option<Box<ChainLink>> {
+    (0..n).fold(None, |next, _| Some(Box::new(ChainLink { next })))
 }
 
 #[test]
-#[should_panic(expected = "the default of field `table` of `Big` is not a Sand constant, or has more than 65536 parts or 64 levels")]
 fn rust_field_defaults_are_bounded() {
+    #[derive(sandlang::SandStruct)]
+    #[sand(module = "lab")]
+    struct Bounded {
+        #[sand(default = vec![0; (1 << 16) - 1])]
+        table: Vec<i64>,
+        #[sand(default = chain(31))]
+        head: Option<Box<ChainLink>>,
+    }
     #[derive(sandlang::SandStruct)]
     #[sand(module = "lab")]
     struct Big {
         #[sand(default = vec![0; 1 << 16])]
         table: Vec<i64>,
+        #[sand(default = chain(32))]
+        head: Option<Box<ChainLink>>,
     }
-    NativeModule::new("lab").bind::<Big>();
+    let mut m = NativeModule::new("lab");
+    m.bind::<ChainLink>().bind::<Bounded>();
+    let (r, out, _) = run_src(Config::new().host_modules(HostModules::new([m]).unwrap()), "import lab\nprint(lab.Bounded().table.len())");
+    r.unwrap();
+    assert_eq!(out, "65535\n");
+    let mut m = NativeModule::new("lab");
+    m.bind::<ChainLink>().bind::<Big>();
+    assert_eq!(
+        host_module_errors([m]),
+        [
+            "the Rust field `table` of `lab.Big` has a default with more than 65536 parts",
+            "the Rust field `head` of `lab.Big` has a default with more than 64 levels",
+        ]
+    );
 }
 
 #[test]
@@ -1659,10 +1716,26 @@ fn rust_field_defaults_must_be_values_of_declared_types() {
     enum Shade {
         #[default]
         Light,
+        Tinted(i64),
     }
     impl Encode for Shade {
         fn encode(&self) -> Value {
             variant_value("lab.Tint", "Light", [])
+        }
+    }
+    #[derive(Default, sandlang::SandEnum)]
+    #[sand(module = "lab", no_encode)]
+    enum Glow {
+        #[default]
+        Dim,
+        Bright,
+    }
+    impl Encode for Glow {
+        fn encode(&self) -> Value {
+            match self {
+                Glow::Dim => variant_value("lab.Glow", "Off", []),
+                Glow::Bright => variant_value("lab.Glow", "Bright", [Value::Int(1)]),
+            }
         }
     }
     #[derive(Default, sandlang::SandStruct)]
@@ -1672,7 +1745,11 @@ fn rust_field_defaults_must_be_values_of_declared_types() {
     }
     impl Encode for Spot {
         fn encode(&self) -> Value {
-            struct_value("lab.Spot", [("y", Value::Int(self.x))])
+            match self.x {
+                0 => struct_value("lab.Spot", [("y", Value::Int(self.x))]),
+                1 => struct_value("lab.Spot", [("x", Value::Str("oops".into()))]),
+                _ => Value::Int(self.x),
+            }
         }
     }
     #[derive(sandlang::SandStruct)]
@@ -1681,17 +1758,61 @@ fn rust_field_defaults_must_be_values_of_declared_types() {
         #[sand(default)]
         shade: Shade,
         #[sand(default)]
+        glow: Glow,
+        #[sand(default = Glow::Bright)]
+        flash: Glow,
+        #[sand(default)]
         spot: Spot,
+        #[sand(default = Spot { x: 1 })]
+        beam: Spot,
+        #[sand(default = Spot { x: 2 })]
+        halo: Spot,
+        #[sand(default = vec![Some(Spot { x: 1 })])]
+        trail: Vec<Option<Spot>>,
     }
     let mut m = NativeModule::new("lab");
-    m.bind::<Shade>().bind::<Spot>().bind::<Lamp>();
+    m.bind::<Shade>().bind::<Glow>().bind::<Spot>().bind::<Lamp>();
     assert_eq!(
         host_module_errors([m]),
         [
-            "the Rust field `shade` of `lab.Lamp` has a default that uses `lab.Tint.Light`, which is not a declared variant",
-            "the Rust field `spot` of `lab.Lamp` has a default that uses `lab.Spot` with fields other than its declared fields",
+            "the Rust field `shade` of `lab.Lamp` has a default with the variant `lab.Tint.Light` where `Shade` is expected",
+            "the Rust field `glow` of `lab.Lamp` has a default with the variant `lab.Glow.Off`, which `lab.Glow` does not declare",
+            "the Rust field `flash` of `lab.Lamp` has a default with the variant `lab.Glow.Bright` with a positional payload of 1 values \
+             where its declaration has no fields",
+            "the Rust field `spot` of `lab.Lamp` has a default with a `lab.Spot` with the fields (y) where its declaration has the fields (x)",
+            "the Rust field `beam` of `lab.Lamp` has a default with a `str` where `int` is expected",
+            "the Rust field `halo` of `lab.Lamp` has a default with an `int` where `Spot` is expected",
+            "the Rust field `trail` of `lab.Lamp` has a default with a `str` where `int` is expected",
         ]
     );
+}
+
+#[test]
+fn rust_field_defaults_can_hold_private_types_of_other_modules() {
+    #[derive(Debug, sandlang::SandEnum)]
+    #[sand(module = "paint", private)]
+    enum Gloss {
+        High,
+    }
+    #[derive(Debug, sandlang::SandStruct)]
+    #[sand(module = "paint")]
+    struct Brush {
+        #[sand(private)]
+        gloss: Gloss,
+    }
+    #[derive(sandlang::SandStruct)]
+    #[sand(module = "lab")]
+    struct Easel {
+        #[sand(default = Brush { gloss: Gloss::High })]
+        brush: Brush,
+    }
+    let mut paint = NativeModule::new("paint");
+    paint.bind::<Gloss>().bind::<Brush>();
+    let mut lab = NativeModule::new("lab");
+    lab.bind::<Easel>();
+    let (r, out, _) = run_src(Config::new().host_modules(HostModules::new([paint, lab]).unwrap()), "import lab\nprint(lab.Easel())");
+    r.unwrap();
+    assert_eq!(out, "Easel(brush: Brush(gloss: High))\n");
 }
 
 #[test]

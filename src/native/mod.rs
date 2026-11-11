@@ -7,7 +7,7 @@ pub mod ty;
 use crate::check::ModKind;
 use crate::engine::Registry;
 use crate::syntax::lexer::{is_ident, is_keyword};
-use crate::types::{MAX_CONST_DEPTH, MAX_CONST_PARTS, ValueTypeInfo};
+use crate::types::ValueTypeInfo;
 use crate::value::{StructDesc, StructValue, Value, VariantDesc, VariantValue, qualified_name};
 use crate::vm::heap::Heap;
 use crate::vm::value::{ChannelObj, MapObj, Obj, SetObj, TaskObj, TypeDesc, ValueType, VmValue};
@@ -63,17 +63,7 @@ impl<T: ObjectType> Binding<T> {
 
 impl<T: StructType> Binding<T> {
     pub fn of_struct() -> Binding<T> {
-        let default = |f: &StructField| {
-            let d = f.default?();
-            assert!(
-                d.has_constant_form(),
-                "the default of field `{}` of `{}` is not a Sand constant, or has more than {MAX_CONST_PARTS} parts or {MAX_CONST_DEPTH} levels",
-                f.name,
-                T::NAME
-            );
-            Some(d)
-        };
-        let defaults = T::FIELDS.iter().map(default).collect();
+        let defaults = T::FIELDS.iter().map(|f| f.default.map(|default| default())).collect();
         Binding(BoundKind::Struct { rust: T::rust_type(), params: T::PARAMS, fields: T::FIELDS, defaults }, PhantomData)
     }
 }
@@ -191,7 +181,8 @@ pub struct StructField {
     pub ty: fn() -> Type,
     /// Returns the default value of the field (`#[sand(default)]`): the
     /// [`Encode`](crate::value::Encode) form of the Rust default. The default
-    /// must be a Sand constant, so it cannot hold a native value type.
+    /// must be a Sand constant of the field type, so it cannot hold a native
+    /// value type.
     pub default: Option<fn() -> Value>,
 }
 

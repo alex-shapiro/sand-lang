@@ -1,15 +1,15 @@
-# `#[sand(default)]` panics on `ValueType` fields such as `Date` and `Timestamp`
+# `#[sand(default)]` rejects `ValueType` fields such as `Date` and `Timestamp`
 
-`NativeModule::bind` panics if a `#[derive(SandStruct)]` field uses
-`#[sand(default)]` with a `ValueType` such as `Date` or `Timestamp`, because
-`ConstVal` cannot represent value-type constants. Without default support,
-every caller and JSON document must supply those fields explicitly.
+`HostModules::new` returns a compile error if a `#[derive(SandStruct)]` field
+uses `#[sand(default)]` with a `ValueType` such as `Date` or `Timestamp`,
+because `ConstVal` cannot represent value-type constants. Without default
+support, every caller and JSON document must supply those fields explicitly.
 
-Running `repro.rs` panics at startup:
+The struct of `repro.rs` fails with these errors:
 
 ```
-thread 'main' panicked at src/native/mod.rs:72:13:
-the default of field `since` of `Retention` is not a Sand constant, or has more than 65536 parts or 64 levels
+the Rust field `since` of `jobs.Retention` has a default with a value of the native value type `time.PlainDate`, which cannot be a field default
+the Rust field `last_run` of `jobs.Retention` has a default with a value of the native value type `time.Instant`, which cannot be a field default
 ```
 
 Representing `ValueType` constants in `ConstVal` by their text form allows

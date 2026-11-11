@@ -372,7 +372,7 @@ assert_eq!(point.field("x"), Some(&Value::Float(1.0)));
 
 `Value::native::<T>()` returns a value as the native value type `T`, such as `value.native::<jiff::civil::Date>()`, or `None` if the value is not a `T`.
 
-A `#[sand(default)]` field default is the `Encode` form of its Rust value. The default must be a Sand constant, so a native value type such as `jiff::Timestamp` cannot be a field default. A derived type with a field that has no `Value` form, such as a `VmVal` handle, takes `#[sand(no_encode)]`.
+A `#[sand(default)]` field default is the `Encode` form of its Rust value. The default must be a Sand constant of the field type, so a native value type such as `jiff::Timestamp` cannot be a field default. `HostModules::new` returns a compile error for a default that is not such a constant. A derived type with a field that has no `Value` form, such as a `VmVal` handle, takes `#[sand(no_encode)]`.
 
 ## Interactive sessions
 
