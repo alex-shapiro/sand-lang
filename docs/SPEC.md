@@ -2491,8 +2491,8 @@ itself.
 
 `value::Encode` is the Rust counterpart of the Sand trait `Encode`: its
 `encode` method returns the `Value` form of a Rust value. `bool`, `i64`, `f64`,
-`()`, `jiff::SignedDuration`, `str`, `String`, `Vec<u8>` (as `bytes`), `Vec<T>`,
-`Box<T>`, `Option<T>`, maps, sets, tuples of 2 to 8 elements, `Value`, and each
+`()`, `jiff::SignedDuration`, `str`, `String`, `Vec<u8>` and `[u8]` (as
+`bytes`), `Vec<T>`, `[T]`, `Box<T>`, `&T`, `Option<T>`, maps, sets, tuples of 2 to 8 elements, `Value`, and each
 `ValueType` implement it. `encode` sorts the entries of a `HashMap` and the
 elements of a `HashSet`. The `Value` of a derived `SandEnum` or `SandStruct` is
 equal to the `Value` that `Vm::to_value` copies for the same Sand value.

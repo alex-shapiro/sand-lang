@@ -4655,6 +4655,15 @@ fn encode_of_a_derived_type_equals_its_copy_out_of_the_vm() {
     let Value::Struct(fields) = &encoded else { panic!("{encoded:?}") };
     assert_eq!(fields.ty.name, "shop.Purchase");
     assert_eq!(copies, [encoded]);
+    let encoded = &copies[0];
+    assert_eq!(vec![&purchase].encode(), Value::List(vec![encoded.clone()]));
+    let Value::Struct(fields) = encoded else { panic!("{encoded:?}") };
+    assert_eq!(purchase.deliveries.as_slice().encode(), fields.fields[1]);
+    assert_eq!(purchase.note.as_deref().encode(), fields.fields[2]);
+    let tags: Vec<&str> = ["blue", "green", "red"].into();
+    assert_eq!(tags.encode(), Value::List(["blue", "green", "red"].map(|t| Value::Str(t.into())).into()));
+    assert_eq!(b"ab"[..].encode(), Value::Bytes(b"ab".to_vec()));
+    assert_eq!([1i64, 2][..].encode(), vec![1i64, 2].encode());
 }
 
 #[test]

@@ -223,8 +223,9 @@ impl Value {
 /// A Rust type whose values have a [`Value`] form, the counterpart of the Sand
 /// trait `Encode`.
 ///
-/// Primitives, strings, `Vec<u8>` (as `bytes`), collections, tuples,
-/// `Option`, and native value types implement `Encode`.
+/// Primitives, strings, `Vec<u8>` and `[u8]` (as `bytes`), collections,
+/// slices, tuples, `Option`, references, and native value types implement
+/// `Encode`.
 /// [`#[derive(SandStruct)]`](crate::SandStruct) and
 /// [`#[derive(SandEnum)]`](crate::SandEnum) implement it for a struct or an
 /// enum. The `Value` of a derived type is equal to the `Value` that
@@ -310,15 +311,33 @@ impl Encode for String {
     }
 }
 
+impl Encode for [u8] {
+    fn encode(&self) -> Value {
+        Value::Bytes(self.to_vec())
+    }
+}
+
 impl Encode for Vec<u8> {
     fn encode(&self) -> Value {
-        Value::Bytes(self.clone())
+        self.as_slice().encode()
+    }
+}
+
+impl<T: Encode> Encode for [T] {
+    fn encode(&self) -> Value {
+        Value::List(self.iter().map(T::encode).collect())
     }
 }
 
 impl<T: Encode> Encode for Vec<T> {
     fn encode(&self) -> Value {
-        Value::List(self.iter().map(T::encode).collect())
+        self.as_slice().encode()
+    }
+}
+
+impl<T: Encode + ?Sized> Encode for &T {
+    fn encode(&self) -> Value {
+        (**self).encode()
     }
 }
 

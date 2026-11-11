@@ -351,7 +351,7 @@ audit.function("record", |vm: &mut Vm, event: Param<0>| -> Result<(), Fail> {
 });
 ```
 
-The trait `sandlang::value::Encode` gives the `Value` form of a Rust value without a VM. Primitives, strings, collections, `Option`, tuples, and native value types implement it. `SandStruct`, `SandEnum`, and `SandValue` derive it. The `Value` of a derived type is equal to the copy that `Vm::to_value` makes of the same Sand value:
+The trait `sandlang::value::Encode` gives the `Value` form of a Rust value without a VM. Primitives, strings, collections, slices, `Option`, tuples, references, and native value types implement it. `SandStruct`, `SandEnum`, and `SandValue` derive it. The `Value` of a derived type is equal to the copy that `Vm::to_value` makes of the same Sand value:
 
 ```rust
 use sandlang::SandStruct;
