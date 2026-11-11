@@ -96,6 +96,17 @@ pub(crate) struct Suspension {
     pub(crate) wait_kind: WaitKind,
 }
 
+impl Suspension {
+    /// Waits for `fut`, and then runs the closure that `fut` returns on the VM
+    /// thread to produce the result of the call.
+    pub(crate) fn new<F>(wait_kind: WaitKind, fut: impl Future<Output = F> + Send + 'static) -> Suspension
+    where
+        F: FnOnce(&mut Vm) -> Result<VmValue, Fail> + Send + 'static,
+    {
+        Suspension { future: Box::pin(async move { Box::new(fut.await) as Finisher }), wait_kind }
+    }
+}
+
 /// Variant of a [`Ctl`].
 pub(crate) enum CtlKind {
     Fail(Fail),
