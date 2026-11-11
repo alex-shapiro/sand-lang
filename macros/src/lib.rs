@@ -422,18 +422,12 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
     }
     let named = expand_named_type(input, &attrs, &type_params, quote! { #krate::native::Binding::of_enum() });
     let sand_type = expand_sand_type(input, krate, &type_params);
-    let ConversionGenerics {
-        params: imp,
-        args: tyg,
-        reflection_where: wh,
-        from_vm_value_where: wh_from,
-        into_vm_value_where: wh_into,
-        encode_where: wh_encode,
-    } = ConversionGenerics::new(input, krate, &type_params);
+    let ConversionGenerics { params, args, reflection_where, from_vm_value_where, into_vm_value_where, encode_where } =
+        ConversionGenerics::new(input, krate, &type_params);
     let count = data.variants.len();
     let encode = (!attrs.no_value).then(|| {
         quote! {
-            impl #imp #krate::value::Encode for #ty #tyg #wh_encode {
+            impl #params #krate::value::Encode for #ty #args #encode_where {
                 fn encode(&self) -> #krate::value::Value {
                     static SAND_VARIANT_DESCS: [#krate::native::VariantDescCell; #count] =
                         [const { #krate::native::VariantDescCell::new() }; #count];
@@ -446,7 +440,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
     });
     let conversion = (!attrs.manual_conversion).then(|| {
         quote! {
-            impl #imp #krate::native::convert::FromVmValue for #ty #tyg #wh_from {
+            impl #params #krate::native::convert::FromVmValue for #ty #args #from_vm_value_where {
                 type Item<'a> = Self;
                 #[allow(unused_variables)]
                 fn from_vm_value(
@@ -462,7 +456,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
                     })
                 }
             }
-            impl #imp #krate::native::convert::IntoVmValue for #ty #tyg #wh_into {
+            impl #params #krate::native::convert::IntoVmValue for #ty #args #into_vm_value_where {
                 fn into_vm_value(self, vm: &mut #krate::vm::Vm) -> ::std::result::Result<#krate::vm::value::VmValue, #krate::vm::Fail> {
                     match self {
                         #(#writes),*
@@ -475,7 +469,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
         #named
         #sand_type
         #(#checks)*
-        impl #imp #krate::native::EnumType for #ty #tyg #wh {
+        impl #params #krate::native::EnumType for #ty #args #reflection_where {
             const VARIANTS: &'static [#krate::native::EnumVariant] = &[#(#variants),*];
             fn index(&self) -> usize {
                 match self {
@@ -602,17 +596,11 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
     }
     let named = expand_named_type(input, &attrs, &type_params, quote! { #krate::native::Binding::of_struct() });
     let sand_type = expand_sand_type(input, krate, &type_params);
-    let ConversionGenerics {
-        params: imp,
-        args: tyg,
-        reflection_where: wh,
-        from_vm_value_where: wh_from,
-        into_vm_value_where: wh_into,
-        encode_where: wh_encode,
-    } = ConversionGenerics::new(input, krate, &type_params);
+    let ConversionGenerics { params, args, reflection_where, from_vm_value_where, into_vm_value_where, encode_where } =
+        ConversionGenerics::new(input, krate, &type_params);
     let encode = (!attrs.no_value).then(|| {
         quote! {
-            impl #imp #krate::value::Encode for #ty #tyg #wh_encode {
+            impl #params #krate::value::Encode for #ty #args #encode_where {
                 fn encode(&self) -> #krate::value::Value {
                     static SAND_STRUCT_DESC: #krate::native::StructDescCell = #krate::native::StructDescCell::new();
                     #krate::native::encode_struct::<Self>(&SAND_STRUCT_DESC, [#(#encodes),*])
@@ -622,7 +610,7 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
     });
     let conversion = (!attrs.manual_conversion).then(|| {
         quote! {
-            impl #imp #krate::native::convert::FromVmValue for #ty #tyg #wh_from {
+            impl #params #krate::native::convert::FromVmValue for #ty #args #from_vm_value_where {
                 type Item<'a> = Self;
                 #[allow(unused_variables)]
                 fn from_vm_value(
@@ -633,7 +621,7 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
                     #krate::native::struct_from_vm_value(vm, v, conv, |fields, conv| ::std::result::Result::Ok(#ty { #(#reads),* }))
                 }
             }
-            impl #imp #krate::native::convert::IntoVmValue for #ty #tyg #wh_into {
+            impl #params #krate::native::convert::IntoVmValue for #ty #args #into_vm_value_where {
                 fn into_vm_value(self, vm: &mut #krate::vm::Vm) -> ::std::result::Result<#krate::vm::value::VmValue, #krate::vm::Fail> {
                     #krate::native::struct_into_vm_value::<Self>(vm, move |vm| ::std::result::Result::Ok(::std::boxed::Box::new([#(#writes),*])))
                 }
@@ -644,7 +632,7 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
         #named
         #sand_type
         #(#checks)*
-        impl #imp #krate::native::StructType for #ty #tyg #wh {
+        impl #params #krate::native::StructType for #ty #args #reflection_where {
             const FIELDS: &'static [#krate::native::StructField] = &[#(#infos),*];
         }
         #conversion
