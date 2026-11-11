@@ -423,6 +423,8 @@ let mut session = Session::new(config, run_ctx);
 
 - `Context<C>` is a value that the engine provides to a native function, as
   changeset 13 allows. A function that does not ask for it pays no cost.
+- Add the type parameter `C` to `NativeParam` and `NativeFunction`, so that the
+  compiler rejects a `Context` of the wrong type in `NativeModule<C>::function`.
 - `C` is a parameter of `NativeModule`, `HostModules`, `Config`, `Engine`,
   `CompiledProgram`, and `Function`. It defaults to `()`, so a host without a
   context does not name it.
@@ -536,6 +538,9 @@ module.function("put", Effectful(|ctx: Context<RunCtx>, seq: JournalSeq, key: St
     ctx.effects.kv_write(key, Some(value), seq).await.map_err(kv_error)
 }));
 ```
+
+The `Form` of a `NativeFunction` is `(marker, (A, B, ...))`, so a single impl for
+each wrapper can cover every arity and exclude the `&mut Vm` form.
 
 **Let a host choose the behavior after an unknown outcome.** An `Effectful` function
 runs at least once by default. An `Effectful` function can instead fail the run if a

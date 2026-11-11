@@ -422,31 +422,13 @@ impl<const N: u8> SandType for Reflect<N> {
 /// a collection during a wait can free its heap object. For this reason
 /// `VmVal`, [`Param`], [`Num`], and [`Reflect`] are not `Send`. The compiler
 /// rejects these handles in a [`NativeObject`](super::NativeObject), in the
-/// future of a native function, and in a
-/// [`Later`](super::func::Later):
+/// future of a native function, and in the future or closure of
+/// [`Later::new`](super::func::Later::new):
 ///
 /// ```compile_fail,E0277
 /// # use sandlang::native::ty::VmVal;
 /// fn assert_send<T: Send>() {}
 /// assert_send::<VmVal<String>>();
-/// ```
-///
-/// ```compile_fail,E0277
-/// # use sandlang::native::ty::Param;
-/// fn assert_send<T: Send>() {}
-/// assert_send::<Param<0>>();
-/// ```
-///
-/// ```compile_fail,E0277
-/// # use sandlang::native::ty::Num;
-/// fn assert_send<T: Send>() {}
-/// assert_send::<Num<0>>();
-/// ```
-///
-/// ```compile_fail,E0277
-/// # use sandlang::native::ty::Reflect;
-/// fn assert_send<T: Send>() {}
-/// assert_send::<Reflect<0>>();
 /// ```
 ///
 /// [`VmVal::raw`] returns a [`VmValue`] without this check. Do not hold a raw

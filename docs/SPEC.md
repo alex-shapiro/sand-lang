@@ -2158,7 +2158,7 @@ The parameters and the return type of `f` select one of three forms:
   after the `Vm` are owned types or VM handles such as `VmVal<T>`.
 - **A future as the result.** An asynchronous function that suspends only the
   calling task. Its parameters and the output of its future are owned `Send`
-  types.
+  types, and the future is `Send`.
 
 The compiler rejects a borrowed argument in a function that takes `&mut Vm` or
 returns a future. It also rejects a VM handle (`VmVal<T>`, `Param<N, B>`,

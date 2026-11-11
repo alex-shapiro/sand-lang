@@ -57,7 +57,8 @@ impl Signature {
 ///   return a [`Later`].
 /// - **A future as the result.** Only the calling Sand task waits for the
 ///   future. Each parameter is an owned [`NativeParam`] type that is `Send`.
-///   The output of the future is `Send` and implements [`NativeReturn<Fail>`].
+///   The future is `Send`. Its output is `Send` and implements
+///   [`NativeReturn<Fail>`].
 ///
 /// A function that takes `&mut Vm` cannot borrow an argument from the VM heap:
 ///
@@ -97,10 +98,8 @@ impl Signature {
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be a native function",
     note = "each parameter must implement `NativeParam`, and the return type must implement `NativeReturn<Ctl>`",
-    note = "`&mut Vm` must be the first parameter, and each parameter after it must be an owned type",
-    note = "a function that returns a future must take owned `Send` parameters, and the output of the future must be `Send` and implement `NativeReturn<Fail>`",
-    note = "a function that takes `&mut Vm` cannot return a future: return a `Later` to wait",
-    note = "a VM handle such as `VmVal` is not `Send`, because a handle cannot cross a wait",
+    note = "`&mut Vm` must be the first parameter, each parameter after it must be an owned type, and the function must return a `Later` to wait",
+    note = "a function that returns a future must take owned `Send` parameters, and the future and its output must be `Send`: a VM handle such as `VmVal` cannot cross a wait",
     note = "a synchronous function returns `HostError`, and a future returns `HostError<Fail>`",
     note = "a function takes at most 12 parameters"
 )]
@@ -159,13 +158,39 @@ pub trait NativeFunction<Form>: Send + Sync + 'static {
 /// let mut module = NativeModule::new("m");
 /// module.function("f", |_: &mut Vm| async { 0 });
 /// ```
+///
+/// ```compile_fail,E0277
+/// # use sandlang::native::ty::Param;
+/// fn assert_send<T: Send>() {}
+/// assert_send::<Param<0>>();
+/// ```
+///
+/// ```compile_fail,E0277
+/// # use sandlang::native::ty::Num;
+/// fn assert_send<T: Send>() {}
+/// assert_send::<Num<0>>();
+/// ```
+///
+/// ```compile_fail,E0277
+/// # use sandlang::native::ty::Reflect;
+/// fn assert_send<T: Send>() {}
+/// assert_send::<Reflect<0>>();
+/// ```
+///
+/// ```compile_fail,E0277
+/// # use sandlang::native::ty::VmVal;
+/// #[derive(sandlang::SandObject)]
+/// #[sand(module = "db")]
+/// struct Row(VmVal<String>);
+/// impl sandlang::native::NativeObject for Row {}
+/// ```
 #[cfg(doctest)]
 struct FunctionFormErrors;
 
 /// Parameter of a [`NativeFunction`].
 ///
 /// Each [`FromVmValue`] type is a parameter that reads a script argument.
-pub trait NativeParam: sealed::Param {
+pub trait NativeParam: sealed::NativeParam {
     /// Type that the function receives. A script argument can borrow from the
     /// VM heap for `'a`.
     type Item<'a>;
@@ -181,7 +206,7 @@ pub trait NativeParam: sealed::Param {
     fn from_call<'a>(vm: &'a Vm, script_args: &[VmValue], next_arg: usize, conv: &mut Conversion) -> Result<Self::Item<'a>, Fail>;
 }
 
-impl<T: FromVmValue> sealed::Param for T {}
+impl<T: FromVmValue> sealed::NativeParam for T {}
 
 impl<T: FromVmValue> NativeParam for T {
     type Item<'a> = T::Item<'a>;
@@ -204,9 +229,10 @@ fn too_few_args() -> Fail {
     Fail::internal("native function called with too few arguments")
 }
 
-/// Forms of a [`NativeFunction`].
+/// Forms of a [`NativeFunction`]. The `Form` of a function is a form marker
+/// and the tuple of its parameter types.
 mod form {
-    pub struct Params;
+    pub struct ParamsOnly;
     pub struct VmFirst;
     pub struct Async;
 }
@@ -288,7 +314,7 @@ mod sealed {
     impl Error for crate::vm::Fail {}
     impl Error for super::HostError {}
 
-    pub trait Param {}
+    pub trait NativeParam {}
 }
 
 impl NativeError for Ctl {
@@ -412,7 +438,7 @@ macro_rules! read_params {
 macro_rules! fn_impls {
     ($($a:ident),*) => {
         #[allow(non_snake_case, unused_variables, unused_mut, unused_assignments, clippy::unused_unit, clippy::too_many_arguments)]
-        impl<F, R, $($a,)*> NativeFunction<(form::Params, $($a,)*)> for F
+        impl<F, R, $($a,)*> NativeFunction<(form::ParamsOnly, ($($a,)*))> for F
         where
             F: Fn($($a),*) -> R + for<'a> Fn($($a::Item<'a>),*) -> R + Send + Sync + 'static,
             R: NativeReturn<Ctl>,
@@ -436,7 +462,7 @@ macro_rules! fn_impls {
         }
 
         #[allow(non_snake_case, unused_variables, unused_mut, unused_assignments, clippy::unused_unit, clippy::too_many_arguments)]
-        impl<F, R, $($a,)*> NativeFunction<(form::VmFirst, $($a,)*)> for F
+        impl<F, R, $($a,)*> NativeFunction<(form::VmFirst, ($($a,)*))> for F
         where
             F: Fn(&mut Vm, $($a),*) -> R + Send + Sync + 'static,
             R: NativeReturn<Ctl>,
@@ -456,7 +482,7 @@ macro_rules! fn_impls {
         }
 
         #[allow(non_snake_case, unused_variables, unused_mut, unused_assignments)]
-        impl<F, Fut, R, $($a,)*> NativeFunction<(form::Async, $($a,)*)> for F
+        impl<F, Fut, R, $($a,)*> NativeFunction<(form::Async, ($($a,)*))> for F
         where
             F: Fn($($a),*) -> Fut + Send + Sync + 'static,
             Fut: Future<Output = R> + Send + 'static,
@@ -503,7 +529,7 @@ mod tests {
     /// Value of [`Config::retry_stress`], which the engine provides.
     struct RetryStress(bool);
 
-    impl sealed::Param for RetryStress {}
+    impl sealed::NativeParam for RetryStress {}
 
     impl NativeParam for RetryStress {
         type Item<'a> = RetryStress;

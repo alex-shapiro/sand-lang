@@ -3939,6 +3939,26 @@ fn native_functions_can_be_fn_items_in_each_form() {
 }
 
 #[test]
+fn native_functions_take_async_closures_and_twelve_parameters() {
+    #[allow(clippy::too_many_arguments)]
+    fn sum(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64, k: i64, l: i64) -> i64 {
+        a + b + c + d + e + f + g + h + i + j + k + l
+    }
+    let mut m = NativeModule::new("wide");
+    m.function("waits", async |s: String| s.len() as i64);
+    m.function("params_only", sum);
+    m.function("vm_first", |_: &mut Vm, a, b, c, d, e, f, g, h, i, j, k, l| sum(a, b, c, d, e, f, g, h, i, j, k, l));
+    m.function("future", |a, b, c, d, e, f, g, h, i, j, k, l| async move { sum(a, b, c, d, e, f, g, h, i, j, k, l) });
+    let args = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12";
+    let src = format!(
+        "import wide\nprint(wide.waits(\"abc\"))\nprint(wide.params_only({args}))\nprint(wide.vm_first({args}))\nprint(wide.future({args}))"
+    );
+    let (r, out, _) = run_src(Config::new().host_modules(HostModules::new([m]).unwrap()), &src);
+    r.unwrap();
+    assert_eq!(out, "3\n78\n78\n78\n");
+}
+
+#[test]
 fn later_closures_return_new_handles() {
     use sandlang::native::func::Later;
     use sandlang::native::ty::VmVal;
