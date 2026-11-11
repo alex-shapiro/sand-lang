@@ -629,6 +629,11 @@ macro_rules! __value_type_impls {
                 $crate::native::convert::value_type_into_vm_value(self, vm)
             }
         }
+        impl $crate::value::Encode for $t {
+            fn encode(&self) -> $crate::value::Value {
+                $crate::vm::value::ValueType::to_value(self)
+            }
+        }
     };
 }
 

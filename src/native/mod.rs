@@ -8,6 +8,7 @@ use crate::check::ModKind;
 use crate::engine::Registry;
 use crate::syntax::lexer::{is_ident, is_keyword};
 use crate::types::{ConstVal, MAX_CONST_DEPTH, MAX_CONST_PARTS, ValueTypeInfo};
+use crate::value::{Payload, StructValue, Value, VariantValue, qualified_name};
 use crate::vm::heap::Heap;
 use crate::vm::value::{ChannelObj, MapObj, Obj, SetObj, TaskObj, TypeDesc, ValueType, VmValue};
 use crate::vm::{Ctl, Fail, HostFn, NativeFn, Vm};
@@ -220,6 +221,24 @@ pub fn variant_const<T: EnumType>(index: usize, payload: impl IntoIterator<Item 
 #[doc(hidden)]
 pub fn struct_const<T: StructType>(fields: impl IntoIterator<Item = Option<Constant>>) -> Option<Constant> {
     Some(Constant(ConstVal::Struct(T::rust_type(), collect_consts(fields)?)))
+}
+
+#[doc(hidden)]
+pub fn encode_struct<T: StructType>(fields: impl IntoIterator<Item = Value>) -> Value {
+    let fields = T::FIELDS.iter().zip(fields).map(|(f, value)| (Arc::from(f.name), value)).collect();
+    Value::Struct(Box::new(StructValue { type_name: qualified_name(T::MODULE, T::NAME).into(), fields }))
+}
+
+#[doc(hidden)]
+pub fn encode_variant<T: EnumType>(index: usize, payload: impl IntoIterator<Item = Value>) -> Value {
+    let variant = &T::VARIANTS[index];
+    let field_names: Option<Vec<&str>> = variant.fields.iter().map(|f| f.name).collect();
+    let payload = match field_names.filter(|names| !names.is_empty()) {
+        Some(names) => Payload::Named(names.into_iter().map(Arc::from).zip(payload).collect()),
+        None => Payload::Positional(payload.into_iter().collect()),
+    };
+    let name = variant.name.into();
+    Value::Variant(Box::new(VariantValue { type_name: qualified_name(T::MODULE, T::NAME).into(), name, payload }))
 }
 
 #[doc(hidden)]

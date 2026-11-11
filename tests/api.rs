@@ -4380,3 +4380,68 @@ fn to_value_counts_its_memory_against_the_memory_limit() {
         assert!(values.is_empty(), "{value}");
     }
 }
+
+/// The state of a delivery, with each kind of variant payload.
+#[derive(Clone, sandlang::SandEnum)]
+#[sand(module = "shop")]
+enum Delivery {
+    Pending,
+    Shipped(i64, String),
+    Held { reason: String, days: i64 },
+}
+
+/// An order with a field of each kind that `Encode` covers.
+#[derive(Clone, sandlang::SandStruct)]
+#[sand(module = "shop")]
+struct Purchase {
+    id: i64,
+    deliveries: Vec<Delivery>,
+    note: Option<String>,
+    gift: Option<i64>,
+    counts: HashMap<String, i64>,
+    tags: std::collections::HashSet<String>,
+    price: Money,
+    due: Date,
+}
+
+#[test]
+fn encode_of_a_derived_type_equals_its_copy_out_of_the_vm() {
+    use sandlang::value::Encode;
+    let purchase = Purchase {
+        id: 7,
+        deliveries: vec![Delivery::Pending, Delivery::Shipped(2, "dock".into()), Delivery::Held { reason: "customs".into(), days: 3 }],
+        note: Some("fragile".into()),
+        gift: None,
+        counts: HashMap::from([("pens".into(), 2), ("cups".into(), 1), ("ink".into(), 5)]),
+        tags: ["red".to_string(), "blue".to_string(), "green".to_string()].into(),
+        price: Money(1250),
+        due: Date::new(2024, 3, 10).unwrap(),
+    };
+    let mut shop = NativeModule::new("shop");
+    shop.bind::<Delivery>().bind::<Purchase>();
+    let returned = purchase.clone();
+    shop.function("purchase", move || returned.clone());
+    let (r, copies) = run_and_copy_values(Config::new(), [bank_module(), shop], "import shop\nhost.copy(shop.purchase())\n");
+    r.unwrap();
+    let encoded = purchase.encode();
+    let Value::Struct(fields) = &encoded else { panic!("{encoded:?}") };
+    assert_eq!(fields.type_name.as_ref(), "shop.Purchase");
+    assert_eq!(copies, [encoded]);
+}
+
+#[test]
+fn native_reads_a_native_value_type_from_its_value() {
+    let money = Value::Native(Box::new(NativeValue { type_name: "bank.Money".into(), text: "12.50".into() }));
+    assert_eq!(money.native::<Money>(), Some(Money(1250)));
+    let date = Date::new(2024, 3, 10).unwrap();
+    assert_eq!(Value::PlainDate(date).native::<Date>(), Some(date));
+    let cell = Value::Native(Box::new(NativeValue { type_name: "bank.Cell".into(), text: "12.50".into() }));
+    let unreadable = Value::Native(Box::new(NativeValue { type_name: "bank.Money".into(), text: "twelve".into() }));
+    let date_text = Value::Native(Box::new(NativeValue { type_name: "time.PlainDate".into(), text: "2024-03-10".into() }));
+    for other in [cell, unreadable, Value::Int(1250), Value::PlainDate(date)] {
+        assert_eq!(other.native::<Money>(), None, "{other:?}");
+    }
+    for other in [date_text, money, Value::Instant(jiff::Timestamp::UNIX_EPOCH)] {
+        assert_eq!(other.native::<Date>(), None, "{other:?}");
+    }
+}

@@ -731,7 +731,7 @@ pub(super) fn given_length(headers: &[(String, String)]) -> Result<Option<u64>, 
 
 /// An in-progress streaming HTTP request returned by `upload`.
 #[derive(crate::SandStruct)]
-#[sand(module = "http")]
+#[sand(module = "http", no_encode)]
 struct Upload {
     #[sand(private)]
     url: String,

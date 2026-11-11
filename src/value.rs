@@ -5,9 +5,9 @@ use crate::vm::bytecode::StructRt;
 use crate::vm::encode::{self, Container, EncodeSink, EnumVariant, Leaf, MAX_DEPTH, OpaqueKind, Opened};
 use crate::vm::heap::Heap;
 use crate::vm::meter::{Meter, Scratch};
-use crate::vm::value::{FxBuild, FxHashMap, ValueRef, VmValue};
+use crate::vm::value::{FxBuild, FxHashMap, ValueRef, ValueType, VmValue};
 use crate::vm::{Fail, Vm, fail, internal};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::mem::size_of;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -113,6 +113,192 @@ pub struct NativeValue {
     pub text: String,
 }
 
+impl Value {
+    /// Returns the value as the native value type `T`, or `None` if the value
+    /// is not a `T`.
+    ///
+    /// ```
+    /// # use sandlang::value::Value;
+    /// let start = Value::PlainDate(jiff::civil::date(2024, 3, 10));
+    /// assert_eq!(start.native::<jiff::civil::Date>(), Some(jiff::civil::date(2024, 3, 10)));
+    /// assert_eq!(start.native::<jiff::Timestamp>(), None);
+    /// ```
+    pub fn native<T: ValueType>(&self) -> Option<T> {
+        T::from_value(self)
+    }
+}
+
+/// A Rust type whose values have a [`Value`] form, the counterpart of the Sand
+/// trait `Encode`.
+///
+/// Primitives, strings, `Vec<u8>` (as `bytes`), collections, tuples,
+/// `Option`, and native value types implement `Encode`.
+/// [`#[derive(SandStruct)]`](crate::SandStruct) and
+/// [`#[derive(SandEnum)]`](crate::SandEnum) implement it for a struct or an
+/// enum. The `Value` of a derived type is equal to the `Value` that
+/// [`Vm::to_value`] copies for the same Sand value.
+///
+/// ```
+/// # use sandlang::value::{Encode, Value};
+/// /// A point in the plane.
+/// #[derive(sandlang::SandStruct)]
+/// #[sand(module = "geo")]
+/// pub struct Point {
+///     pub x: f64,
+///     pub y: f64,
+/// }
+///
+/// let Value::Struct(point) = Point { x: 1.0, y: 2.0 }.encode() else { unreachable!() };
+/// assert_eq!(&*point.type_name, "geo.Point");
+/// assert_eq!(point.fields[1], ("y".into(), Value::Float(2.0)));
+/// ```
+///
+/// A derived struct or enum with a field that has no `Value` form, such as a
+/// `VmVal` handle, takes `#[sand(no_encode)]`.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` has no `Value` form",
+    note = "a `SandStruct` or `SandEnum` with a field such as a `VmVal` handle takes `#[sand(no_encode)]`"
+)]
+pub trait Encode {
+    /// Returns the [`Value`] form of `self`.
+    fn encode(&self) -> Value;
+}
+
+impl Encode for Value {
+    fn encode(&self) -> Value {
+        self.clone()
+    }
+}
+
+impl Encode for () {
+    fn encode(&self) -> Value {
+        Value::Unit
+    }
+}
+
+impl Encode for bool {
+    fn encode(&self) -> Value {
+        Value::Bool(*self)
+    }
+}
+
+impl Encode for i64 {
+    fn encode(&self) -> Value {
+        Value::Int(*self)
+    }
+}
+
+impl Encode for f64 {
+    fn encode(&self) -> Value {
+        Value::Float(*self)
+    }
+}
+
+impl Encode for jiff::SignedDuration {
+    fn encode(&self) -> Value {
+        Value::Duration(*self)
+    }
+}
+
+impl Encode for str {
+    fn encode(&self) -> Value {
+        Value::Str(self.to_string())
+    }
+}
+
+impl Encode for String {
+    fn encode(&self) -> Value {
+        Value::Str(self.clone())
+    }
+}
+
+impl Encode for Vec<u8> {
+    fn encode(&self) -> Value {
+        Value::Bytes(self.clone())
+    }
+}
+
+impl<T: Encode> Encode for Vec<T> {
+    fn encode(&self) -> Value {
+        Value::List(self.iter().map(T::encode).collect())
+    }
+}
+
+impl<T: Encode + ?Sized> Encode for Box<T> {
+    fn encode(&self) -> Value {
+        (**self).encode()
+    }
+}
+
+impl<T: Encode> Encode for Option<T> {
+    fn encode(&self) -> Value {
+        let (name, payload) = match self {
+            Some(x) => ("Some", vec![x.encode()]),
+            None => ("None", Vec::new()),
+        };
+        Value::Variant(Box::new(VariantValue { type_name: "Option".into(), name: name.into(), payload: Payload::Positional(payload) }))
+    }
+}
+
+/// Sorts the entries by key, so that the map has the same order on each call.
+impl<K: Encode + Ord, V: Encode> Encode for HashMap<K, V> {
+    fn encode(&self) -> Value {
+        let mut entries: Vec<(&K, &V)> = self.iter().collect();
+        entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        encode_map(entries)
+    }
+}
+
+impl<K: Encode, V: Encode> Encode for BTreeMap<K, V> {
+    fn encode(&self) -> Value {
+        encode_map(self)
+    }
+}
+
+impl<K: Encode, V: Encode> Encode for indexmap::IndexMap<K, V> {
+    fn encode(&self) -> Value {
+        encode_map(self)
+    }
+}
+
+fn encode_map<'a, K: Encode + 'a, V: Encode + 'a>(entries: impl IntoIterator<Item = (&'a K, &'a V)>) -> Value {
+    Value::Map(entries.into_iter().map(|(k, v)| (k.encode(), v.encode())).collect())
+}
+
+/// Sorts the elements, so that the set has the same order on each call.
+impl<T: Encode + Ord> Encode for HashSet<T> {
+    fn encode(&self) -> Value {
+        let mut items: Vec<&T> = self.iter().collect();
+        items.sort_unstable();
+        Value::Set(items.into_iter().map(T::encode).collect())
+    }
+}
+
+impl<T: Encode> Encode for BTreeSet<T> {
+    fn encode(&self) -> Value {
+        Value::Set(self.iter().map(T::encode).collect())
+    }
+}
+
+macro_rules! encode_tuples {
+    ($(($($n:ident $i:tt),+)),* $(,)?) => {$(
+        impl<$($n: Encode),+> Encode for ($($n,)+) {
+            fn encode(&self) -> Value {
+                Value::Tuple(vec![$(self.$i.encode()),+])
+            }
+        }
+    )*};
+}
+encode_tuples! {
+    (A 0, B 1),
+    (A 0, B 1, C 2),
+    (A 0, B 1, C 2, D 3),
+    (A 0, B 1, C 2, D 3, E 4),
+    (A 0, B 1, C 2, D 3, E 4, F 5),
+    (A 0, B 1, C 2, D 3, E 4, F 5, G 6),
+    (A 0, B 1, C 2, D 3, E 4, F 5, G 6, H 7),
+}
+
 /// Copies `value` out of the heap of `vm`. See [`Vm::to_value`].
 pub(crate) fn copy_from_vm(vm: &Vm, value: VmValue) -> Result<Value, Fail> {
     let mut sink = ValueSink {
@@ -133,7 +319,7 @@ pub(crate) fn copy_from_vm(vm: &Vm, value: VmValue) -> Result<Value, Fail> {
 
 /// Returns the name of a type for a reader outside its module: `module.Name`,
 /// or `Name` for a prelude type, which no script can qualify.
-fn qualified_name(module: &str, name: &str) -> String {
+pub(crate) fn qualified_name(module: &str, name: &str) -> String {
     if module == "prelude" { name.to_string() } else { format!("{module}.{name}") }
 }
 

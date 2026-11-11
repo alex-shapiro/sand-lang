@@ -179,7 +179,7 @@ fn evict_beyond(reads: &[Pending], cap: usize) {
 /// An incoming HTTP request received by a `Server`. Header names are normalized
 /// to lowercase.
 #[derive(crate::SandStruct)]
-#[sand(module = "http")]
+#[sand(module = "http", no_encode)]
 struct Request {
     /// HTTP request method, such as `"GET"` or `"POST"`.
     pub method: String,

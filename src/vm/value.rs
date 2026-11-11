@@ -909,6 +909,14 @@ pub trait ValueType:
     fn to_value(&self) -> Value {
         Value::Native(Box::new(NativeValue { type_name: format!("{}.{}", Self::MODULE, Self::NAME).into(), text: self.to_string() }))
     }
+    /// Returns `value` as `Self`, or `None` if `value` is not a `Self`. See
+    /// [`Value::native`].
+    #[doc(hidden)]
+    fn from_value(value: &Value) -> Option<Self> {
+        let Value::Native(native) = value else { return None };
+        let name = native.type_name.strip_prefix(Self::MODULE)?.strip_prefix('.')?;
+        if name == Self::NAME { Self::parse(&native.text).ok() } else { None }
+    }
 }
 
 /// Packs a [`ValueType`] into 16 bytes so it can be stored inline in a heap slot.

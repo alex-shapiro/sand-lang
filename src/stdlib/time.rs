@@ -106,6 +106,12 @@ impl ValueType for Timestamp {
     fn to_value(&self) -> Value {
         Value::Instant(*self)
     }
+    fn from_value(value: &Value) -> Option<Self> {
+        match value {
+            Value::Instant(t) => Some(*t),
+            _ => None,
+        }
+    }
     fn parse(text: &str) -> Result<Self, String> {
         text.parse().map_err(|_| parse_error(text, Self::NAME))
     }
@@ -121,6 +127,12 @@ impl ValueType for DateTime {
     fn to_value(&self) -> Value {
         Value::PlainDateTime(*self)
     }
+    fn from_value(value: &Value) -> Option<Self> {
+        match value {
+            Value::PlainDateTime(t) => Some(*t),
+            _ => None,
+        }
+    }
     fn parse(text: &str) -> Result<Self, String> {
         text.parse().map_err(|_| parse_error(text, Self::NAME))
     }
@@ -132,6 +144,12 @@ impl ValueType for Date {
     fn to_value(&self) -> Value {
         Value::PlainDate(*self)
     }
+    fn from_value(value: &Value) -> Option<Self> {
+        match value {
+            Value::PlainDate(d) => Some(*d),
+            _ => None,
+        }
+    }
     fn parse(text: &str) -> Result<Self, String> {
         text.parse().map_err(|_| parse_error(text, Self::NAME))
     }
@@ -142,6 +160,12 @@ impl ValueType for Time {
     const PACKING: Option<Packing<Self>> = Some(Packing { pack: |t| [pack_time(t), 0], unpack: |[t, _]| unpack_time(t), ordered: true });
     fn to_value(&self) -> Value {
         Value::PlainTime(*self)
+    }
+    fn from_value(value: &Value) -> Option<Self> {
+        match value {
+            Value::PlainTime(t) => Some(*t),
+            _ => None,
+        }
     }
     fn parse(text: &str) -> Result<Self, String> {
         text.parse().map_err(|_| parse_error(text, Self::NAME))
@@ -219,6 +243,12 @@ impl ValueType for ZonedDateTime {
     fn to_value(&self) -> Value {
         Value::ZonedDateTime(Box::new(self.clone()))
     }
+    fn from_value(value: &Value) -> Option<Self> {
+        match value {
+            Value::ZonedDateTime(z) => Some((**z).clone()),
+            _ => None,
+        }
+    }
     fn parse(text: &str) -> Result<Self, String> {
         let z = PARSER.parse_zoned_with(&DB, text).map_err(|_| parse_error(text, Self::NAME))?;
         check_supported_zone(z.time_zone())?;
@@ -257,6 +287,12 @@ impl ValueType for PlainYearMonth {
         Some(Packing { pack: |ym| [pack_date(&ym.0), 0], unpack: |[d, _]| PlainYearMonth(unpack_date(d)), ordered: true });
     fn to_value(&self) -> Value {
         Value::PlainYearMonth(*self)
+    }
+    fn from_value(value: &Value) -> Option<Self> {
+        match value {
+            Value::PlainYearMonth(ym) => Some(*ym),
+            _ => None,
+        }
     }
     fn parse(text: &str) -> Result<Self, String> {
         format!("{text}-01")
@@ -301,6 +337,12 @@ impl ValueType for PlainMonthDay {
         Some(Packing { pack: |md| [pack_date(&md.0), 0], unpack: |[d, _]| PlainMonthDay(unpack_date(d)), ordered: true });
     fn to_value(&self) -> Value {
         Value::PlainMonthDay(*self)
+    }
+    fn from_value(value: &Value) -> Option<Self> {
+        match value {
+            Value::PlainMonthDay(md) => Some(*md),
+            _ => None,
+        }
     }
     fn parse(text: &str) -> Result<Self, String> {
         let short = text.strip_prefix("--").unwrap_or(text);
@@ -391,6 +433,12 @@ impl ValueType for Span {
     fn to_value(&self) -> Value {
         Value::Span(Box::new(*self))
     }
+    fn from_value(value: &Value) -> Option<Self> {
+        match value {
+            Value::Span(s) => Some(**s),
+            _ => None,
+        }
+    }
     fn parse(text: &str) -> Result<Self, String> {
         text.parse().and_then(Span::new).map_err(|_| parse_error(text, Self::NAME))
     }
@@ -444,6 +492,12 @@ impl fmt::Display for TimeZone {
 impl ValueType for TimeZone {
     fn to_value(&self) -> Value {
         Value::TimeZone(self.clone())
+    }
+    fn from_value(value: &Value) -> Option<Self> {
+        match value {
+            Value::TimeZone(z) => Some(z.clone()),
+            _ => None,
+        }
     }
     fn parse(text: &str) -> Result<Self, String> {
         parse_zone(text).map(TimeZone)

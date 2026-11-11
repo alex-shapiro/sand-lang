@@ -4,10 +4,11 @@ use super::base64;
 use crate::check::ModKind;
 use crate::native::convert::{Conversion, FromVmValue, HostError, IntoVmValue, mismatch};
 use crate::native::ty::{Param, Reflect, VmVal};
-use crate::native::{Constant, EnumType, NamedType, NativeModule, variant_const, variant_index};
+use crate::native::{Constant, EnumType, NamedType, NativeModule, encode_variant, variant_const, variant_index};
 use crate::syntax::lexer::is_ident;
 use crate::types::ConstVal;
 use crate::types::traits;
+use crate::value::{Encode, Value};
 use crate::vm::bytecode::{Program, RtIds};
 use crate::vm::compare::{hash_key, str_hash};
 use crate::vm::encode::{self, Container, EncodeSink, EnumVariant, Leaf, MAX_DEPTH, Opened};
@@ -179,7 +180,7 @@ pub(crate) fn module() -> NativeModule {
 }
 
 #[derive(crate::SandEnum)]
-#[sand(module = "json", private)]
+#[sand(module = "json", private, no_encode)]
 enum Decoded<T> {
     Done(T),
     Pending(T, VmVal<Vec<fn()>>),
@@ -390,6 +391,21 @@ impl IntoVmValue for Json {
             Json::Obj(fields) => Some(fields.to_const()),
         };
         variant_const::<Json>(self.index(), payload)
+    }
+}
+
+impl Encode for Json {
+    fn encode(&self) -> Value {
+        let payload = match self {
+            Json::Null => None,
+            Json::Bool(b) => Some(b.encode()),
+            Json::Int(i) => Some(i.encode()),
+            Json::Float(f) => Some(f.encode()),
+            Json::Str(s) => Some(s.encode()),
+            Json::Arr(items) => Some(items.encode()),
+            Json::Obj(fields) => Some(fields.encode()),
+        };
+        encode_variant::<Json>(self.index(), payload)
     }
 }
 
