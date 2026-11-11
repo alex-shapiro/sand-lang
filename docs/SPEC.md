@@ -2150,30 +2150,31 @@ module uses a standard library name from `sandlang::stdlib::STD_MODULES`.
 | `bind::<T>()`                | Rust type `T` with a derived `NamedType`                                    |
 | `params(names)`, `doc(text)` | parameter names and documentation for the most recently registered function |
 
-`NativeModule::function` accepts three forms of Rust function. The signature of
-`f` determines which form applies:
+`NativeModule::function` accepts three kinds of Rust function, selected by the
+function signature:
 
-- **Parameters only.** A synchronous function that can borrow `&str`, `&[u8]`,
-  and `&T` arguments from the VM heap.
-- **`&mut Vm` as the first parameter.** A synchronous function that uses the
-  VM. Each parameter after the `Vm` is an owned type or a VM handle such as
-  `VmVal<T>`.
-- **A future as the result.** An asynchronous function that suspends only the
-  calling task. Its parameters, its future, and the output of its future are
-  owned `Send` types.
+- **Synchronous.** Each parameter can borrow `&str`, `&[u8]`, or `&T` from the
+  VM heap.
+- **Synchronous with `&mut Vm` first.** A synchronous function that accesses
+  the VM. Each parameter after `&mut Vm` is an owned type or a VM handle such
+  as `VmVal<T>`.
+- **Asynchronous.** A function that returns a future and suspends only the
+  calling task. Its parameters, future, and future output are owned `Send`
+  types.
 
-The compiler rejects a borrowed argument in a function that takes `&mut Vm` or
-returns a future. Garbage collection during a wait can free the heap object of
-a VM handle (`VmVal<T>`, `Param<N, B>`, `Num<N>`, or `Reflect<N>`). Therefore,
-the compiler rejects a VM handle in these places:
+The compiler rejects a borrowed parameter in a function that takes `&mut Vm` or
+returns a future. Garbage collection during a wait can free the heap object
+that a VM handle refers to. Each VM handle type is therefore `!Send`, and the
+compiler rejects it in these places:
 
-- a parameter or output of a function that returns a future
-- the future or closure of `Later::new`
+- a parameter or output of an async native function
+- the future or finisher closure of `Later::new`
 - a `NativeObject`
 
-The compiler does not check a raw `VmValue`, which `IntoVmValue::into_vm_value`
-and the allocation methods of `Vm` return. Do not hold a raw `VmValue` across a
-wait. Allocate the value in the closure of `Later::new` after the wait.
+`IntoVmValue::into_vm_value` and `Vm` allocation methods return a raw
+`VmValue`. The compiler does not check `VmValue` across a wait. Do not hold a
+raw `VmValue` across a wait; allocate the value in the `Later::new` finisher
+instead.
 
 Four derive macros bind a Rust type to a Sand type in a native module. Each
 macro implements `NamedType`, `SandType`, `FromVmValue`, and `IntoVmValue`. The
@@ -2241,24 +2242,23 @@ returns a Sand `Result` or aborts the run on failure:
   the same Sand return type as `Result<T, E>`. `Later::new(wait_kind, fut)`
   sets the `WaitKind` of `fut`. Use `WaitKind::User` if the task waits for a
   user action so that idle wait time does not count toward `max_wall_time`
-  (§16.2). A function that returns a future uses `WaitKind::Io`. The closure
+  (§16.2). An async native function uses `WaitKind::Io`. The finisher closure
   that `fut` returns runs after the wait, so it cannot make a scheduler
-  request. The closure can allocate and return a new VM handle. If `E` is `Ctl`
-  or `Fail`, the closure returns `Result<T, Fail>`. If `E` is `HostError`, the
-  closure returns `Result<T, HostError<Fail>>`.
+  request. The finisher can allocate and return a new VM handle. If `E` is
+  `Ctl` or `Fail`, the finisher returns `Result<T, Fail>`. If `E` is
+  `HostError`, the finisher returns `Result<T, HostError<Fail>>`.
 - A future that a native function returns cannot make scheduler requests. Its
   output is a type that converts to a Sand value, `Result<T, Fail>`, or
   `Result<T, HostError<Fail>>`.
 
 To check a sandbox capability inside a function that takes `&mut Vm`, call
-`Vm::require(&capability)` (§14), which returns an error of kind
+`Vm::require(&capability)` (§14). `Vm::require` returns an error of kind
 `"permission_denied"` if the policy denies the request. A function that takes
-`&mut Vm` must check capabilities and limits before it causes side effects. The
-engine re-runs the function from the start after a permission prompt or after a
-garbage collection that `Vm::check_memory`, `Vm::reserve_io`, or
-`Vm::resource_slot` triggers. `Config::retry_stress` tests this requirement: it
-fails the first memory or resource check in each call of a function that takes
-`&mut Vm`.
+`&mut Vm` must check capabilities and limits before any side effect. The engine
+runs the function again from the start after a permission prompt or a garbage
+collection during a memory or resource check. `Config::retry_stress` tests this
+requirement: it fails the first memory or resource check in each call of a
+function that takes `&mut Vm`.
 Return-value conversion does not fail on the memory limit; instead, the engine
 collects garbage and checks the memory limit after the call completes.
 

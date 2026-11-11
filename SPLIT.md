@@ -256,18 +256,18 @@ module.function("slow", |url: String| async move { fetch(url).await });
 
 - A single trait, `NativeFunction`, replaces `HostFunction`, `VmFunction`, and
   `AsyncHostFunction`.
-- Each parameter implements `NativeParam`: a script argument or a value that the
-  engine provides. A later changeset can add a provided value without a new
-  method.
-- A closure that takes `&mut Vm` or returns a future cannot borrow an argument.
-- Reject VM handles in futures at compile time. `VmVal`, `Param`, `Num`, and
-  `Reflect` are not `Send`. Async parameters and results must be `Send`, and the
-  future and closure of a `Later` were already `Send`. Thus a handle cannot
-  cross a garbage collection.
+- Each parameter implements `NativeParam`. It reads a script argument or
+  receives a value that the engine provides. A later changeset can add an
+  engine-provided parameter without a new registration method.
+- A closure that takes `&mut Vm` or returns a future cannot have a borrowed
+  parameter.
+- Reject VM handles in futures at compile time. VM handles are not `Send`.
+  Async parameters and results must be `Send`. The `Later` future and finisher
+  closure are also `Send`. A future therefore cannot hold a handle across a
+  garbage collection.
 - Use `Send` instead of a marker trait. A trait bound cannot restrict the values
-  that a future captures, so a marker trait cannot check a `Later` future. Only
-  an auto trait can check captured values, and these futures already require
-  `Send`.
+  that a future captures. Only an auto trait can check captured values, and
+  these futures already require `Send`.
 - The compiler does not check a raw `VmValue`, because the VM heap must be
   `Send`.
 
@@ -539,8 +539,8 @@ module.function("put", Effectful(|ctx: Context<RunCtx>, seq: JournalSeq, key: St
 }));
 ```
 
-The `Form` of a `NativeFunction` is `(marker, (A, B, ...))`, so a single impl for
-each wrapper can cover every arity and exclude the `&mut Vm` form.
+In `NativeFunction<Kind>`, `Kind` is `(kind_marker, (A, B, ...))`. A single
+implementation for each wrapper covers every arity and excludes `VmNativeFn`.
 
 **Let a host choose the behavior after an unknown outcome.** An `Effectful` function
 runs at least once by default. An `Effectful` function can instead fail the run if a

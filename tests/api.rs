@@ -818,7 +818,7 @@ fn native_module_signatures_are_type_checked() {
 }
 
 #[test]
-fn natives_that_return_futures_suspend_only_their_task() {
+fn async_native_functions_suspend_only_their_task() {
     let mut m = NativeModule::new("slow");
     m.function("echo", |s: String, ms: i64| async move {
         tokio::time::sleep(Duration::from_millis(ms as u64)).await;
@@ -3915,7 +3915,7 @@ fn natives_that_cannot_make_scheduler_requests_return_fail() {
 }
 
 #[test]
-fn native_functions_can_be_fn_items_in_each_form() {
+fn native_module_registers_sync_vm_and_async_fn_items() {
     fn borrowed(s: &str) -> i64 {
         s.len() as i64
     }
@@ -3927,31 +3927,31 @@ fn native_functions_can_be_fn_items_in_each_form() {
         tokio::task::yield_now().await;
         s.len() as i64 * 100
     }
-    let mut m = NativeModule::new("forms");
+    let mut m = NativeModule::new("items");
     m.function("borrowed", borrowed);
     m.function("with_vm", with_vm);
     m.function("waits", waits);
     let config = Config::new().host_modules(HostModules::new([m]).unwrap());
     let (r, out, _) =
-        run_src(config, "import forms\nprint(forms.borrowed(\"ab\"))\nprint(forms.with_vm(\"abc\"))\nprint(forms.waits(\"abcd\"))");
+        run_src(config, "import items\nprint(items.borrowed(\"ab\"))\nprint(items.with_vm(\"abc\"))\nprint(items.waits(\"abcd\"))");
     r.unwrap();
     assert_eq!(out, "2\n30\n400\n");
 }
 
 #[test]
-fn native_functions_take_async_closures_and_twelve_parameters() {
+fn native_functions_take_async_closures_and_twelve_params() {
     #[allow(clippy::too_many_arguments)]
     fn sum(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64, k: i64, l: i64) -> i64 {
         a + b + c + d + e + f + g + h + i + j + k + l
     }
     let mut m = NativeModule::new("wide");
     m.function("waits", async |s: String| s.len() as i64);
-    m.function("params_only", sum);
-    m.function("vm_first", |_: &mut Vm, a, b, c, d, e, f, g, h, i, j, k, l| sum(a, b, c, d, e, f, g, h, i, j, k, l));
-    m.function("future", |a, b, c, d, e, f, g, h, i, j, k, l| async move { sum(a, b, c, d, e, f, g, h, i, j, k, l) });
+    m.function("sync_fn", sum);
+    m.function("vm_fn", |_: &mut Vm, a, b, c, d, e, f, g, h, i, j, k, l| sum(a, b, c, d, e, f, g, h, i, j, k, l));
+    m.function("async_fn", |a, b, c, d, e, f, g, h, i, j, k, l| async move { sum(a, b, c, d, e, f, g, h, i, j, k, l) });
     let args = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12";
     let src = format!(
-        "import wide\nprint(wide.waits(\"abc\"))\nprint(wide.params_only({args}))\nprint(wide.vm_first({args}))\nprint(wide.future({args}))"
+        "import wide\nprint(wide.waits(\"abc\"))\nprint(wide.sync_fn({args}))\nprint(wide.vm_fn({args}))\nprint(wide.async_fn({args}))"
     );
     let (r, out, _) = run_src(Config::new().host_modules(HostModules::new([m]).unwrap()), &src);
     r.unwrap();
@@ -3959,7 +3959,7 @@ fn native_functions_take_async_closures_and_twelve_parameters() {
 }
 
 #[test]
-fn later_closures_return_new_handles() {
+fn later_new_finishers_and_later_ready_return_vm_handles() {
     use sandlang::native::func::Later;
     use sandlang::native::ty::VmVal;
     use sandlang::vm::WaitKind;

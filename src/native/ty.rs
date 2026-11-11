@@ -297,9 +297,9 @@ fn_type!(A);
 fn_type!(A, B);
 fn_type!(A, B, C);
 
-/// Makes a handle `!Send`, because a handle is valid only during the native
-/// call that received or allocated it.
-struct CallScoped(#[allow(dead_code)] *const ());
+/// Makes a VM handle `!Send` and `!Sync`. A handle is valid only during the
+/// native call that received or allocated it.
+struct UnrootedVmHandle(#[allow(dead_code)] *const ());
 
 /// Uninhabited return type for native functions that never return (Sand `never`).
 #[derive(Clone, Copy, Debug)]
@@ -314,7 +314,7 @@ pub enum Never {}
 /// `VmVal<Vec<Param<0>>>` and returns `Option<Param<0>>`. If the Rust function
 /// uses `Param<0, traits::Hash>`, the `native fn` declaration must declare
 /// `T: Hash`.
-pub struct Param<const N: u8, B: traits::Set = ()>(VmValue, PhantomData<fn() -> B>, PhantomData<CallScoped>);
+pub struct Param<const N: u8, B: traits::Set = ()>(VmValue, PhantomData<fn() -> B>, PhantomData<UnrootedVmHandle>);
 
 impl<const N: u8, B: traits::Set> Param<N, B> {
     pub fn raw(self) -> VmValue {
@@ -353,7 +353,7 @@ impl<const N: u8, B: traits::Set> SandType for Param<N, B> {
 /// A Rust function can accept `Num<N>` for any type parameter that the
 /// `native fn` declaration declares as `T: Num`. Place `Num<N>` parameters in ascending order of `N`, after
 /// any [`Reflect`] parameters and before regular value parameters.
-pub struct Num<const N: u8>(VmValue, PhantomData<CallScoped>);
+pub struct Num<const N: u8>(VmValue, PhantomData<UnrootedVmHandle>);
 
 impl<const N: u8> Num<N> {
     pub fn raw(self) -> VmValue {
@@ -388,7 +388,7 @@ impl<const N: u8> SandType for Num<N> {
 /// Runtime type descriptor for the `N`-th `reflect` type parameter of a
 /// `native fn` (see [`Type::Reflect`]).
 #[derive(Clone, Copy)]
-pub struct Reflect<const N: u8>(VmValue, PhantomData<CallScoped>);
+pub struct Reflect<const N: u8>(VmValue, PhantomData<UnrootedVmHandle>);
 
 impl<const N: u8> Reflect<N> {
     pub fn raw(self) -> VmValue {
@@ -418,14 +418,14 @@ impl<const N: u8> SandType for Reflect<N> {
 /// accept and return `VmVal<T>` to avoid copying heap values.
 ///
 /// A `VmVal` is valid only during the native call that received or allocated
-/// it. The garbage collector does not trace a `VmVal` that Rust code holds, so
-/// a collection during a wait can free its heap object. For this reason
-/// `VmVal`, [`Param`], [`Num`], and [`Reflect`] are not `Send`. The compiler
-/// rejects these handles in these places:
+/// it. The garbage collector does not trace a `VmVal` that Rust code holds. A
+/// collection during a wait can free the heap object. For this reason, VM
+/// handles (`VmVal`, [`Param`], [`Num`], and [`Reflect`]) are not `Send`. The
+/// compiler rejects a VM handle in these places:
 ///
 /// - a [`NativeObject`](super::NativeObject)
-/// - the future of a native function
-/// - the future or closure of [`Later::new`](super::func::Later::new)
+/// - the future of an async native function
+/// - the future or finisher closure of [`Later::new`](super::func::Later::new)
 ///
 /// ```compile_fail,E0277
 /// # use sandlang::native::ty::VmVal;
@@ -435,7 +435,7 @@ impl<const N: u8> SandType for Reflect<N> {
 ///
 /// [`VmVal::raw`] returns a [`VmValue`] without this check. Do not hold a raw
 /// [`VmValue`] across a wait.
-pub struct VmVal<T: ?Sized>(VmValue, PhantomData<fn() -> T>, PhantomData<CallScoped>);
+pub struct VmVal<T: ?Sized>(VmValue, PhantomData<fn() -> T>, PhantomData<UnrootedVmHandle>);
 
 impl<T: ?Sized> VmVal<T> {
     pub fn raw(self) -> VmValue {

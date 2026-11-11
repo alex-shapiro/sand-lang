@@ -10,15 +10,15 @@ use crate::vm::{Ctl, Fail, Vm};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::Hash;
 
-/// Converts a [`VmValue`] into a Rust argument for a native function.
+/// Converts a [`VmValue`] argument into a parameter value for a
+/// [`NativeFunction`](super::func::NativeFunction).
 ///
-/// [`FromVmValue::Item`] can borrow `&str`, `&[u8]`, or `&T` directly from the
-/// VM heap in a [`NativeFunction`](super::func::NativeFunction) that does not
-/// take `&mut Vm` and does not return a future. Owned types allocate a Rust
-/// copy.
+/// In a synchronous function without `&mut Vm`, [`FromVmValue::Item`] can
+/// borrow `&str`, `&[u8]`, or `&T` from the VM heap. Owned types allocate a
+/// Rust copy.
 ///
-/// A Sand value can contain shared references to the same heap object.
-/// Converting a value into an owned Rust type copies each reachable reference.
+/// A Sand value can contain shared references to one heap object. Converting a
+/// value into an owned Rust type copies each reachable reference.
 /// Implementations must charge fuel to `vm` and record allocated bytes in
 /// [`Conversion`] so that instruction and memory limits bound shared-value
 /// expansion.

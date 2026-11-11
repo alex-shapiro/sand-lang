@@ -824,15 +824,13 @@ impl NativeModule {
         self
     }
 
-    /// Registers the function `f` under `name` (or `"Type.method"` for a
-    /// method on a type in this module).
+    /// Registers the Rust function `f` as `name` or `"Type.method"`.
     ///
-    /// `function` accepts three forms of Rust function: parameters only,
-    /// `&mut Vm` as the first parameter, or a future as the result. The
-    /// signature of `f` determines which form applies. See [`NativeFunction`].
-    /// A function that takes `&mut Vm` must check permissions and limits before
-    /// any side effect, because the engine can run the function again from the
-    /// start:
+    /// The function signature selects one of three kinds of [`NativeFunction`]:
+    /// a synchronous function, a synchronous function that takes `&mut Vm`
+    /// first, or an asynchronous function that returns a future. A function
+    /// that takes `&mut Vm` must check permissions and limits before any side
+    /// effect, because the engine can run it again from the start:
     ///
     /// ```
     /// # use sandlang::native::NativeModule;
@@ -840,22 +838,22 @@ impl NativeModule {
     /// # use sandlang::policy::Capability;
     /// # use sandlang::vm::Vm;
     /// let mut module = NativeModule::new("door");
-    /// // A synchronous function. It can borrow its arguments from the VM heap.
+    /// // A synchronous function. Parameters can borrow from the VM heap.
     /// module.function("width", |name: &str| name.len() as i64);
-    /// // A synchronous function that uses the VM.
+    /// // A synchronous function that accesses the VM.
     /// module.function("open", |vm: &mut Vm, name: String| -> Result<String, HostError> {
     ///     vm.require(&Capability::Custom { name: "door".into(), detail: name.clone() })?;
     ///     Ok(format!("{name} is open"))
     /// });
-    /// // A function that returns a future. Only the calling Sand task waits.
+    /// // An asynchronous function. Only the calling Sand task waits.
     /// module.function("knock", |name: String| async move { format!("{name} answered") });
     /// ```
     ///
     /// # Panics
     ///
-    /// Panics if `name` is not of the form `name` or `Type.name`, or if `name`
-    /// is already registered in this module.
-    pub fn function<Form, F: NativeFunction<Form>>(&mut self, name: &str, f: F) -> &mut Self {
+    /// Panics if `name` is not `name` or `Type.name`, or if `name` is already
+    /// registered in this module.
+    pub fn function<Kind, F: NativeFunction<Kind>>(&mut self, name: &str, f: F) -> &mut Self {
         self.add(name, F::signature(), f.into_native_fn())
     }
 
