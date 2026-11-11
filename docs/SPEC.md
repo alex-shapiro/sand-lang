@@ -2150,12 +2150,14 @@ module uses a standard library name from `sandlang::stdlib::STD_MODULES`.
 | `bind::<T>()`                | Rust type `T` with a derived `NamedType`                                    |
 | `params(names)`, `doc(text)` | parameter names and documentation for the most recently registered function |
 
-The parameters and the return type of `f` select one of three forms:
+`NativeModule::function` accepts three forms of Rust function. The signature of
+`f` determines which form applies:
 
 - **Parameters only.** A synchronous function that can borrow `&str`, `&[u8]`,
   and `&T` arguments from the VM heap.
-- **`&mut Vm` first.** A synchronous function that uses the VM. Each parameter
-  after the `Vm` is an owned type or a VM handle such as `VmVal<T>`.
+- **`&mut Vm` as the first parameter.** A synchronous function that uses the
+  VM. Each parameter after the `Vm` is an owned type or a VM handle such as
+  `VmVal<T>`.
 - **A future as the result.** An asynchronous function that suspends only the
   calling task. Its parameters, its future, and the output of its future are
   owned `Send` types.

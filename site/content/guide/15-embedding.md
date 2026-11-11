@@ -284,10 +284,10 @@ stats.function("counter", || Counter(AtomicI64::new(0)));
 stats.function("Counter.add", |c: &Counter, n: i64| c.0.fetch_add(n, Ordering::Relaxed) + n).params(&["n"]);
 ```
 
-The parameters and the return type of a registered function select its form:
+`NativeModule::function` accepts three forms of Rust function. The signature of the function determines which form applies:
 
 - **Parameters only.** A synchronous function that can borrow `&str`, `&[u8]`, and `&T` arguments.
-- **`&mut Vm` first.** A synchronous function that uses the VM. Its other parameters are owned types.
+- **`&mut Vm` as the first parameter.** A synchronous function that uses the VM. Its other parameters are owned types.
 - **A future as the result.** An asynchronous function that suspends only the calling Sand task. Its parameters, its future, and the output of its future are owned `Send` types.
 
 The compiler rejects a VM handle such as `sandlang::native::ty::VmVal` in a future, because garbage collection during the wait can free the heap object of the handle. The compiler does not check a raw `VmValue`, so do not hold one across a wait.

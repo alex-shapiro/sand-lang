@@ -827,10 +827,12 @@ impl NativeModule {
     /// Registers the function `f` under `name` (or `"Type.method"` for a
     /// method on a type in this module).
     ///
-    /// The parameters and the return type of `f` select its behavior. See
-    /// [`NativeFunction`]. A function that takes `&mut Vm` must check
-    /// permissions and limits before any side effect, because the engine can
-    /// run the function again from the start:
+    /// `function` accepts three forms of Rust function: parameters only,
+    /// `&mut Vm` as the first parameter, or a future as the result. The
+    /// signature of `f` determines which form applies. See [`NativeFunction`].
+    /// A function that takes `&mut Vm` must check permissions and limits before
+    /// any side effect, because the engine can run the function again from the
+    /// start:
     ///
     /// ```
     /// # use sandlang::native::NativeModule;

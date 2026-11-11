@@ -30,8 +30,9 @@ impl Signature {
 
 /// Rust function that [`NativeModule::function`](super::NativeModule::function) registers.
 ///
-/// The parameters and the return type of the function select one of three
-/// forms:
+/// [`NativeModule::function`](super::NativeModule::function) accepts three
+/// forms of Rust function. The signature of the function determines which form
+/// applies:
 ///
 /// ```
 /// # use sandlang::native::NativeModule;
@@ -48,13 +49,13 @@ impl Signature {
 /// - **Parameters only.** Each parameter implements [`NativeParam`] and can
 ///   borrow `&str`, `&[u8]`, or `&T` from the VM heap. The return type
 ///   implements [`NativeReturn<Ctl>`].
-/// - **`&mut Vm` first.** Each parameter after the `Vm` is an owned
-///   [`NativeParam`] type, such as `String` or a [`VmVal`](super::ty::VmVal)
-///   handle. The return type implements [`NativeReturn<Ctl>`]. Check
-///   permissions and limits before any side effect, because the engine runs the
-///   function again from the start after a permission prompt or after a garbage
-///   collection that a memory or resource check triggers. To wait for a future,
-///   return a [`Later`].
+/// - **`&mut Vm` as the first parameter.** Each parameter after the `Vm` is an
+///   owned [`NativeParam`] type, such as `String` or a
+///   [`VmVal`](super::ty::VmVal) handle. The return type implements
+///   [`NativeReturn<Ctl>`]. Check permissions and limits before any side
+///   effect, because the engine runs the function again from the start after a
+///   permission prompt or after a garbage collection that a memory or resource
+///   check triggers. To wait for a future, return a [`Later`].
 /// - **A future as the result.** Only the calling Sand task waits for the
 ///   future. Each parameter is an owned [`NativeParam`] type that is `Send`.
 ///   The future is `Send`. Its output is `Send` and implements
