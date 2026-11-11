@@ -17,7 +17,7 @@ use sandlang::policy::{Capability, Decision, PromptAnswer};
 use sandlang::session::Session;
 use sandlang::stdlib::log::{LogLevel, LogRecord, LogSink};
 use sandlang::stdlib::time::TimeZone;
-use sandlang::value::{NativeValue, StructDesc, StructValue, Value, VariantDesc, VariantValue};
+use sandlang::value::{NativeValue, StructValue, Value, VariantValue};
 use sandlang::vm::value::{ValueType, VmValue};
 use sandlang::vm::{Fail, Vm};
 use std::collections::HashMap;
@@ -1720,7 +1720,7 @@ fn rust_field_defaults_must_be_values_of_declared_types() {
     }
     impl Encode for Shade {
         fn encode(&self) -> Value {
-            variant_value("lab.Tint", "Light", [])
+            Value::Variant(VariantValue::new("lab.Tint", "Light", []))
         }
     }
     #[derive(Default, sandlang::SandEnum)]
@@ -1733,8 +1733,8 @@ fn rust_field_defaults_must_be_values_of_declared_types() {
     impl Encode for Glow {
         fn encode(&self) -> Value {
             match self {
-                Glow::Dim => variant_value("lab.Glow", "Off", []),
-                Glow::Bright => variant_value("lab.Glow", "Bright", [Value::Int(1)]),
+                Glow::Dim => Value::Variant(VariantValue::new("lab.Glow", "Off", [])),
+                Glow::Bright => Value::Variant(VariantValue::new("lab.Glow", "Bright", [Value::Int(1)])),
             }
         }
     }
@@ -1746,8 +1746,8 @@ fn rust_field_defaults_must_be_values_of_declared_types() {
     impl Encode for Spot {
         fn encode(&self) -> Value {
             match self.x {
-                0 => struct_value("lab.Spot", [("y", Value::Int(self.x))]),
-                1 => struct_value("lab.Spot", [("x", Value::Str("oops".into()))]),
+                0 => Value::Struct(StructValue::new("lab.Spot", [("y", Value::Int(self.x))])),
+                1 => Value::Struct(StructValue::new("lab.Spot", [("x", Value::Str("oops".into()))])),
                 _ => Value::Int(self.x),
             }
         }
@@ -4291,8 +4291,8 @@ fn to_value_qualifies_the_types_of_a_script_named_prelude() {
     let (mut engine, _, _) = engine_with(Config::new().host_modules(HostModules::new([host]).unwrap()));
     let src = "import host\nstruct Order { id: int }\nhost.copy((Order(id: 1), Some(2)))\n";
     rt().block_on(engine.run_source("prelude.sand", src)).unwrap();
-    let order = struct_value("prelude.Order", [("id", Value::Int(1))]);
-    assert_eq!(*copies.lock(), [Value::Tuple(vec![order, variant_value("Option", "Some", [Value::Int(2)])])]);
+    let order = Value::Struct(StructValue::new("prelude.Order", [("id", Value::Int(1))]));
+    assert_eq!(*copies.lock(), [Value::Tuple(vec![order, Value::Variant(VariantValue::new("Option", "Some", [Value::Int(2)]))])]);
 }
 
 /// Returns the copies that `src` makes with `host.copy`.
@@ -4300,15 +4300,6 @@ fn copied_values(src: &str) -> Vec<Value> {
     let (r, values) = run_and_copy_values(Config::new(), [bank_module(), stats_module()], src);
     r.unwrap();
     values
-}
-
-fn struct_value(type_name: &str, fields: impl IntoIterator<Item = (&'static str, Value)>) -> Value {
-    let (names, values): (Vec<&str>, Vec<Value>) = fields.into_iter().unzip();
-    Value::Struct(StructValue { ty: StructDesc::new(type_name, names), fields: values.into() })
-}
-
-fn variant_value(type_name: &str, name: &str, payload: impl IntoIterator<Item = Value>) -> Value {
-    Value::Variant(VariantValue { ty: VariantDesc::new(type_name, name), payload: payload.into_iter().collect() })
 }
 
 fn opaque_value(type_name: &str) -> Value {
@@ -4355,23 +4346,21 @@ fn to_value_names_structs_variants_and_native_value_types() {
          host.copy(json.Json.Null)\nhost.copy(json.Json.Arr([json.Json.Int(1)]))\nhost.copy(bank.cents(1250))\nhost.copy(bank.cell(2, 3))\n",
     );
     let str_ = |s: &str| Value::Str(s.into());
-    let (some, none) = (|value| variant_value("Option", "Some", [value]), || variant_value("Option", "None", []));
-    let order = |id, note| struct_value("main.Order", [("id", Value::Int(id)), ("note", note)]);
+    let variant = |enum_name: &str, name: &str, payload: Vec<Value>| Value::Variant(VariantValue::new(enum_name, name, payload));
+    let (some, none) = (|value| variant("Option", "Some", vec![value]), || variant("Option", "None", vec![]));
+    let order = |id, note| Value::Struct(StructValue::new("main.Order", [("id", Value::Int(id)), ("note", note)]));
     let native = |type_name: &str, text: &str| Value::Native(Box::new(NativeValue { type_name: type_name.into(), text: text.into() }));
-    let suspended = Value::Variant(VariantValue {
-        ty: VariantDesc::with_fields("main.Status", "Suspended", ["reason"]),
-        payload: Box::new([str_("late")]),
-    });
+    let error = Value::Struct(StructValue::new("Error", [("message", str_("closed")), ("kind", str_("io"))]));
     let expected = [
         order(1, some(str_("gift"))),
         order(2, none()),
-        variant_value("main.Status", "Active", []),
-        suspended,
-        variant_value("main.Status", "Banned", [Value::Int(3), str_("spam")]),
-        variant_value("Result", "Err", [struct_value("Error", [("message", str_("closed")), ("kind", str_("io"))])]),
-        variant_value("Result", "Ok", [order(3, none())]),
-        variant_value("json.Json", "Null", []),
-        variant_value("json.Json", "Arr", [Value::List(vec![variant_value("json.Json", "Int", [Value::Int(1)])])]),
+        variant("main.Status", "Active", vec![]),
+        Value::Variant(VariantValue::with_fields("main.Status", "Suspended", [("reason", str_("late"))])),
+        variant("main.Status", "Banned", vec![Value::Int(3), str_("spam")]),
+        variant("Result", "Err", vec![error]),
+        variant("Result", "Ok", vec![order(3, none())]),
+        variant("json.Json", "Null", vec![]),
+        variant("json.Json", "Arr", vec![Value::List(vec![variant("json.Json", "Int", vec![Value::Int(1)])])]),
         native("bank.Money", "12.50"),
         native("bank.Cell", "2:3"),
     ];
@@ -4416,11 +4405,11 @@ fn to_value_keeps_the_shape_of_a_container_that_holds_values_without_encode() {
          host.copy([\"a\": stats.counter()])\nhost.copy(Some(time.Stopwatch()))\nprint(t.wait())\n",
     );
     let expected = [
-        struct_value("main.Job", [("name", Value::Str("first".into())), ("run", opaque_value("fn"))]),
+        Value::Struct(StructValue::new("main.Job", [("name", Value::Str("first".into())), ("run", opaque_value("fn"))])),
         Value::List(vec![opaque_value("fn"), opaque_value("fn")]),
         Value::Tuple(vec![Value::Int(1), opaque_value("Channel"), opaque_value("Task")]),
         Value::Map(vec![(Value::Str("a".into()), opaque_value("stats.Counter"))]),
-        variant_value("Option", "Some", [opaque_value("time.Stopwatch")]),
+        Value::Variant(VariantValue::new("Option", "Some", [opaque_value("time.Stopwatch")])),
     ];
     assert_eq!(values, expected);
 }
@@ -4434,15 +4423,15 @@ fn to_value_copies_map_keys_that_are_not_strings() {
     );
     let str_ = |s: &str| Value::Str(s.into());
     let pair = Value::Tuple(vec![Value::Int(1), Value::Int(2)]);
-    let point = struct_value("main.Point", [("x", Value::Int(1)), ("y", Value::Int(2))]);
+    let point = Value::Struct(StructValue::new("main.Point", [("x", Value::Int(1)), ("y", Value::Int(2))]));
     let money = Value::Native(Box::new(NativeValue { type_name: "bank.Money".into(), text: "0.05".into() }));
     let expected = [
         Value::Map(vec![(Value::Int(2), str_("two")), (Value::Int(1), str_("one"))]),
         Value::Map(vec![(pair, Value::Bool(true))]),
-        Value::Map(vec![(variant_value("main.Side", "Right", []), Value::Float(1.5))]),
+        Value::Map(vec![(Value::Variant(VariantValue::new("main.Side", "Right", [])), Value::Float(1.5))]),
         Value::Map(vec![(Value::Bool(false), Value::Unit)]),
         Value::Map(vec![(point, Value::List(vec![Value::Int(1)]))]),
-        Value::Map(vec![(money, variant_value("Option", "Some", [Value::Int(1)]))]),
+        Value::Map(vec![(money, Value::Variant(VariantValue::new("Option", "Some", [Value::Int(1)])))]),
         Value::Map(vec![(Value::Tuple(vec![Value::Int(1), str_("a")]), Value::Int(3))]),
     ];
     assert_eq!(values, expected);

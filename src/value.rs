@@ -132,6 +132,19 @@ impl StructDesc {
 }
 
 impl StructValue {
+    /// Returns a value of the struct type `name` with `fields`, each a field
+    /// name and its value, in declaration order.
+    ///
+    /// ```
+    /// # use sandlang::value::{StructValue, Value};
+    /// let order = StructValue::new("shop.Order", [("id", Value::Int(1))]);
+    /// assert_eq!(order.field("id"), Some(&Value::Int(1)));
+    /// ```
+    pub fn new<N: Into<String>>(name: impl Into<String>, fields: impl IntoIterator<Item = (N, Value)>) -> StructValue {
+        let (names, values): (Vec<String>, Vec<Value>) = fields.into_iter().map(|(n, v)| (n.into(), v)).unzip();
+        StructValue { ty: StructDesc::new(name, names), fields: values.into() }
+    }
+
     /// Returns the value of the field `name`, or `None` if the struct has no
     /// such field.
     pub fn field(&self, name: &str) -> Option<&Value> {
@@ -164,6 +177,23 @@ impl VariantDesc {
 }
 
 impl VariantValue {
+    /// Returns the variant `name` of the enum `enum_name` with the positional
+    /// payload `payload`. An empty payload gives a variant without a payload.
+    pub fn new(enum_name: impl Into<String>, name: impl Into<String>, payload: impl IntoIterator<Item = Value>) -> VariantValue {
+        VariantValue { ty: VariantDesc::new(enum_name, name), payload: payload.into_iter().collect() }
+    }
+
+    /// Returns the variant `name` of the enum `enum_name` with the named
+    /// payload `fields`, each a field name and its value.
+    pub fn with_fields<N: Into<String>>(
+        enum_name: impl Into<String>,
+        name: impl Into<String>,
+        fields: impl IntoIterator<Item = (N, Value)>,
+    ) -> VariantValue {
+        let (names, payload): (Vec<String>, Vec<Value>) = fields.into_iter().map(|(n, v)| (n.into(), v)).unzip();
+        VariantValue { ty: VariantDesc::with_fields(enum_name, name, names), payload: payload.into() }
+    }
+
     /// Returns the value of the named payload field `name`, or `None` if the
     /// payload has no such field.
     pub fn field(&self, name: &str) -> Option<&Value> {
@@ -753,12 +783,10 @@ mod tests {
 
     #[test]
     fn debug_shows_structs_and_variants_by_name() {
-        let none = Value::Variant(VariantValue { ty: VariantDesc::new("Option", "None"), payload: Box::default() });
-        let some = Value::Variant(VariantValue { ty: VariantDesc::new("Option", "Some"), payload: Box::new([Value::Int(1)]) });
-        let order =
-            Value::Struct(StructValue { ty: StructDesc::new("shop.Order", ["id", "note"]), fields: Box::new([Value::Int(1), none]) });
-        let moved =
-            Value::Variant(VariantValue { ty: VariantDesc::with_fields("shop.Event", "Moved", ["x"]), payload: Box::new([Value::Int(1)]) });
+        let none = Value::Variant(VariantValue::new("Option", "None", []));
+        let some = Value::Variant(VariantValue::new("Option", "Some", [Value::Int(1)]));
+        let order = Value::Struct(StructValue::new("shop.Order", [("id", Value::Int(1)), ("note", none)]));
+        let moved = Value::Variant(VariantValue::with_fields("shop.Event", "Moved", [("x", Value::Int(1))]));
         assert_eq!(format!("{order:?}"), "shop.Order { id: Int(1), note: Option.None }");
         assert_eq!(format!("{some:?}"), "Option.Some(Int(1))");
         assert_eq!(format!("{moved:?}"), "shop.Event.Moved { x: Int(1) }");
