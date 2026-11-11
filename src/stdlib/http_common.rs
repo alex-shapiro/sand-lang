@@ -461,7 +461,7 @@ enum BodyRead {
     All,
 }
 
-fn read_body<R: IntoVmValue + Send + 'static>(
+fn read_body<R: IntoVmValue + 'static>(
     vm: &mut Vm,
     body: VmVal<Body>,
     what: BodyRead,

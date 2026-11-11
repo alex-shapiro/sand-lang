@@ -47,13 +47,13 @@ impl Signature {
 ///
 /// - **Parameters only.** Each parameter implements [`NativeParam`] and can
 ///   borrow `&str`, `&[u8]`, or `&T` from the VM heap. The return type
-///   implements [`HostReturn<Ctl>`].
+///   implements [`NativeReturn<Ctl>`].
 /// - **`&mut Vm` first.** Each parameter after the `Vm` is an owned
 ///   [`NativeParam`] type, such as `String` or a [`VmVal`](super::ty::VmVal)
-///   handle. The return type implements [`HostReturn<Ctl>`].
+///   handle. The return type implements [`NativeReturn<Ctl>`].
 /// - **A future as the result.** Only the calling Sand task waits for the
 ///   future. Each parameter is an owned [`NativeParam`] type that is `Send`.
-///   The output of the future is `Send` and implements [`HostReturn<Fail>`].
+///   The output of the future is `Send` and implements [`NativeReturn<Fail>`].
 ///
 /// A function that takes `&mut Vm` cannot borrow an argument from the VM heap:
 ///
@@ -92,9 +92,9 @@ impl Signature {
 /// ```
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be a native function",
-    note = "each parameter must implement `NativeParam`, and the return type must implement `HostReturn<Ctl>`",
+    note = "each parameter must implement `NativeParam`, and the return type must implement `NativeReturn<Ctl>`",
     note = "a function that takes `&mut Vm` first must take owned parameters after it",
-    note = "a function that returns a future must take owned `Send` parameters, and the output of the future must be `Send` and implement `HostReturn<Fail>`",
+    note = "a function that returns a future must take owned `Send` parameters, and the output of the future must be `Send` and implement `NativeReturn<Fail>`",
     note = "a VM handle such as `VmVal` is not `Send`, because a handle cannot cross a wait",
     note = "a synchronous function returns `HostError`, and a future returns `HostError<Fail>`"
 )]
@@ -216,24 +216,24 @@ mod form {
 ///
 /// `C` is the control signal that stops the call. Functions that run before any
 /// wait use [`Ctl`], and code that runs after a wait uses [`Fail`].
-pub trait HostReturn<C>: SandType {
+pub trait NativeReturn<C>: SandType {
     #[doc(hidden)]
     fn into_call_result(self, vm: &mut Vm) -> Result<VmValue, C>;
 }
 
-impl<R: IntoVmValue, C: From<Fail>> HostReturn<C> for R {
+impl<R: IntoVmValue, C: From<Fail>> NativeReturn<C> for R {
     fn into_call_result(self, vm: &mut Vm) -> Result<VmValue, C> {
         Ok(self.into_vm_value(vm)?)
     }
 }
 
-impl<T: IntoVmValue> HostReturn<Ctl> for Result<T, Ctl> {
+impl<T: IntoVmValue> NativeReturn<Ctl> for Result<T, Ctl> {
     fn into_call_result(self, vm: &mut Vm) -> Result<VmValue, Ctl> {
         Ok(self?.into_vm_value(vm)?)
     }
 }
 
-impl<T: IntoVmValue, C: From<Fail>> HostReturn<C> for Result<T, HostError<C>> {
+impl<T: IntoVmValue, C: From<Fail>> NativeReturn<C> for Result<T, HostError<C>> {
     fn into_call_result(self, vm: &mut Vm) -> Result<VmValue, C> {
         match self {
             Ok(x) => Ok(ok_vm_value(x, vm)?),
@@ -242,7 +242,7 @@ impl<T: IntoVmValue, C: From<Fail>> HostReturn<C> for Result<T, HostError<C>> {
     }
 }
 
-impl<T: IntoVmValue, E: NativeError> HostReturn<Ctl> for Result<Later<T, E>, E>
+impl<T: IntoVmValue, E: NativeError> NativeReturn<Ctl> for Result<Later<T, E>, E>
 where
     Result<T, E>: SandType,
 {
@@ -416,7 +416,7 @@ macro_rules! fn_impls {
         impl<F, R, $($a,)*> NativeFunction<(form::Params, $($a,)*)> for F
         where
             F: Fn($($a),*) -> R + for<'a> Fn($($a::Item<'a>),*) -> R + Send + Sync + 'static,
-            R: HostReturn<Ctl>,
+            R: NativeReturn<Ctl>,
             $($a: NativeParam + 'static,)*
         {
             fn signature() -> Signature {
@@ -440,7 +440,7 @@ macro_rules! fn_impls {
         impl<F, R, $($a,)*> NativeFunction<(form::VmFirst, $($a,)*)> for F
         where
             F: Fn(&mut Vm, $($a),*) -> R + Send + Sync + 'static,
-            R: HostReturn<Ctl>,
+            R: NativeReturn<Ctl>,
             $($a: for<'a> NativeParam<Item<'a> = $a> + 'static,)*
         {
             fn signature() -> Signature {
@@ -461,7 +461,7 @@ macro_rules! fn_impls {
         where
             F: Fn($($a),*) -> Fut + Send + Sync + 'static,
             Fut: Future<Output = R> + Send + 'static,
-            R: HostReturn<Fail> + Send + 'static,
+            R: NativeReturn<Fail> + Send + 'static,
             $($a: for<'a> NativeParam<Item<'a> = $a> + Send + 'static,)*
         {
             fn signature() -> Signature {

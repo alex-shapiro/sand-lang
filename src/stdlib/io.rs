@@ -99,7 +99,7 @@ enum Read {
     Upto(usize),
 }
 
-fn read_stdin<R: IntoVmValue + Send + 'static>(
+fn read_stdin<R: IntoVmValue + 'static>(
     vm: &mut Vm,
     what: Read,
     done: fn(&mut Vm, Option<Vec<u8>>) -> stream::FinishResult<R>,
