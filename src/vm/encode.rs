@@ -65,7 +65,7 @@ pub(crate) enum Role<'h> {
     /// The value of the map key that the walk reported last.
     MapValue,
     /// The value of the field with this name in a struct or in a named payload.
-    Field(&'h String),
+    Field(&'h str),
 }
 
 /// A value without children.
@@ -271,7 +271,7 @@ fn report<'h, S: EncodeSink<'h>>(
         | VmValue::VObj(..) => {
             let Some((id, payload)) = value.as_inline_variant() else { return internal("encode: not an inline variant") };
             let variant = variant_ref(prog, value, id)?;
-            let role = variant.field_names.and_then(<[String]>::first).map_or(Role::Item, Role::Field);
+            let role = variant.field_names.and_then(<[String]>::first).map_or(Role::Item, |name| Role::Field(name));
             (Container::Variant(variant), 1, Children::One(role, Some(payload)))
         }
     };
@@ -339,7 +339,7 @@ impl<'h> Children<'h> {
                     Some((Role::MapKey, key))
                 }
             },
-            Children::Fields(names, values) => Some((Role::Field(names.next()?), *values.next()?)),
+            Children::Fields(names, values) => Some((Role::Field(names.next()?.as_str()), *values.next()?)),
             Children::One(role, value) => Some((*role, value.take()?)),
             Children::Pair(first, second) => {
                 let first = VmValue::Int(i64::from(*first));

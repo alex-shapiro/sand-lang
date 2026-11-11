@@ -1505,7 +1505,7 @@ enum Scalar<'h> {
 enum JsonKey<'h> {
     Text(JsonText<'h>),
     /// The next of the field names that the object began with.
-    Field(&'h String),
+    Field(&'h str),
 }
 
 /// A JSON array or object that begins.
@@ -1792,7 +1792,10 @@ impl<'h> JsonOutput<'h> for JsonTextOutput<'h> {
             Some(JsonKey::Field(name)) => self.string(name)?,
             None => return Ok(()),
         }
-        self.text.push_str(if self.indent > 0 { ": " } else { ":" });
+        self.text.push(':');
+        if self.indent > 0 {
+            self.text.push(' ');
+        }
         Ok(())
     }
 
