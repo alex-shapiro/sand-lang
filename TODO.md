@@ -491,6 +491,13 @@ Visible defects that rarely block users.
       alternating runs, and a process environment of a different size in each
       round. The size of the environment alone changes one operation by up to
       45%. The repository records none of these steps.
+- [ ] ❓ Reduce the cost of `encode::walk` for each value that it reports.
+      `json.to_json` of one small struct (`small_to_json` in
+      `benches/codec.rs`) runs 2% more instructions than the direct recursion
+      that the walk replaced, although `json.to_json` of a large document
+      runs 7% fewer. For the same reason, the conversion of a `Json` parameter
+      keeps its own loop in `FromVmValue for Json`: a `JsonOutput` that builds
+      the Rust `Json` took 10% more time.
 - [ ] ⚪ Replace the VM dispatch loop with a threaded dispatch table once Rust
       stabilizes the `become` keyword for guaranteed tail calls.
 
