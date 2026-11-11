@@ -5,7 +5,8 @@
 
 use super::value::{DescTemplate, FxHashMap, TypeDesc};
 use crate::hir::FormatSpec;
-use std::sync::Arc;
+use crate::value::{StructDesc, VariantDesc, qualified_name};
+use std::sync::{Arc, OnceLock};
 
 pub type Reg = u16;
 
@@ -1231,6 +1232,20 @@ pub struct StructRt {
     pub module: Option<String>,
     pub fields: Vec<String>,
     pub is_enum: bool,
+    /// The value of [`StructRt::desc`], which the first call makes.
+    pub desc: OnceLock<Arc<StructDesc>>,
+}
+
+impl StructRt {
+    fn qualified_name(&self) -> String {
+        qualified_name(self.module.as_deref(), &self.name)
+    }
+
+    /// Returns the description of the struct type that each
+    /// [`Value`](crate::value::Value) of the type shares.
+    pub(crate) fn desc(&self) -> &Arc<StructDesc> {
+        self.desc.get_or_init(|| Arc::new(StructDesc { name: self.qualified_name(), fields: self.fields.clone() }))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1240,6 +1255,8 @@ pub struct VariantRt {
     pub name: String,
     pub field_names: Option<Vec<String>>,
     pub arity: usize,
+    /// The value of [`Program::variant_desc`], which the first call makes.
+    pub desc: OnceLock<Arc<VariantDesc>>,
 }
 
 /// Well-known runtime ids.
@@ -1282,4 +1299,16 @@ pub struct Program {
     pub desc_templates: Vec<DescTemplate>,
     /// The jump tables of `SwitchVariant`, `SwitchInt` and `SwitchChar`.
     pub switches: Vec<Switch>,
+}
+
+impl Program {
+    /// Returns the description that each [`Value`](crate::value::Value) of
+    /// the variant with the runtime ID `id` shares, or `None` if the program
+    /// has no such variant.
+    pub(crate) fn variant_desc(&self, id: u32) -> Option<&Arc<VariantDesc>> {
+        let variant = self.variants.get(id as usize)?;
+        let ty = self.types.get(variant.def as usize)?;
+        let desc = || VariantDesc { enum_name: ty.qualified_name(), name: variant.name.clone(), fields: variant.field_names.clone() };
+        Some(variant.desc.get_or_init(|| Arc::new(desc())))
+    }
 }

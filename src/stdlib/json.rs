@@ -1664,7 +1664,7 @@ impl<'h, O: JsonOutput<'h>> EncodeSink<'h> for JsonSink<'h, O> {
         }
         let members = self.begin(match container {
             Container::Map => Begin::Object,
-            Container::Struct { ty, .. } => Begin::Fields(&ty.fields),
+            Container::Struct(ty) => Begin::Fields(&ty.fields),
             Container::Variant(VariantRef { field_names: Some(names), .. }) => Begin::Fields(names),
             _ => Begin::Array(len),
         })?;

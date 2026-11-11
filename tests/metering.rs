@@ -1286,3 +1286,32 @@ fn a_value_of_each_kind_leaves_the_vm_for_pinned_fuel() {
     assert_eq!(plain, run_stressed(true, false));
     assert_eq!(plain, run_stressed(false, true));
 }
+
+#[test]
+fn to_value_takes_each_type_description_from_the_program() {
+    use sandlang::value::Value;
+    let copies: Arc<std::sync::Mutex<Vec<Value>>> = Arc::default();
+    let copied = copies.clone();
+    let mut host = NativeModule::new("host");
+    host.source("pub native fn copy<T>(value: T)");
+    host.function("copy", move |vm: &mut Vm, value: Param<0>| -> Result<(), Fail> {
+        copied.lock().unwrap().push(vm.to_value(value.raw())?);
+        Ok(())
+    });
+    let long = "Long".repeat(200);
+    let src = format!(
+        "import host\nimport probe\nstruct {long} {{ {long}: int }}\nstruct Short {{ x: int }}\nenum Status {{ Active, {long}({long}: int) }}\n\
+         let start = probe.fuel()\nhost.copy(Short(x: 1))\nlet short = probe.fuel()\nhost.copy({long}({long}: 1))\nlet long = probe.fuel()\n\
+         host.copy(Status.Active)\nlet tag = probe.fuel()\nhost.copy(Status.{long}({long}: 1))\nlet payload = probe.fuel()\n\
+         host.copy({long}({long}: 2))\nhost.copy(Status.{long}({long}: 2))\n\
+         print((long - short == short - start, payload - tag == short - start))"
+    );
+    let (r, out) = run(Config::new().host_modules(HostModules::new([host, fuel_probe()]).unwrap()), &src);
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!(out, "(true, true)\n");
+    let copies = copies.lock().unwrap();
+    let (Value::Struct(first), Value::Struct(second)) = (&copies[1], &copies[4]) else { panic!("{copies:?}") };
+    assert!(Arc::ptr_eq(&first.ty, &second.ty) && first.ty.name == format!("main.{long}"));
+    let (Value::Variant(first), Value::Variant(second)) = (&copies[3], &copies[5]) else { panic!("{copies:?}") };
+    assert!(Arc::ptr_eq(&first.ty, &second.ty) && first.ty.fields.as_deref() == Some(&[long][..]));
+}

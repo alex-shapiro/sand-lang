@@ -421,6 +421,7 @@ impl<'a> Compiler<'a> {
                 module: (t.module != prelude).then(|| name(t.module_name)),
                 fields: t.fields().iter().map(|f| name(f.name)).collect(),
                 is_enum: t.is_enum(),
+                desc: Default::default(),
             });
         }
         for &(d, i) in cp.variants.iter_from(self.prog.variants.len()) {
@@ -431,6 +432,7 @@ impl<'a> Compiler<'a> {
                 name: name(v.name),
                 field_names: v.field_names.as_ref().map(|ns| ns.iter().map(|&n| name(n)).collect()),
                 arity: v.fields.len(),
+                desc: Default::default(),
             });
         }
         let wk = cp.wk;

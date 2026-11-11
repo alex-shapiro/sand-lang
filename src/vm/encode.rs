@@ -107,11 +107,8 @@ pub(crate) enum Container<'h> {
     Tuple,
     Set,
     Map,
-    /// A struct of the type `ty`, which has the runtime type ID `def`.
-    Struct {
-        def: u32,
-        ty: &'h StructRt,
-    },
+    /// A struct and its type.
+    Struct(&'h StructRt),
     /// An enum variant with a payload.
     Variant(VariantRef<'h>),
 }
@@ -125,14 +122,6 @@ pub(crate) struct VariantRef<'h> {
     pub name: &'h str,
     /// The names of the payload fields, or `None` for a positional payload.
     pub field_names: Option<&'h [String]>,
-    enum_def: u32,
-    types: &'h [StructRt],
-}
-
-impl<'h> VariantRef<'h> {
-    pub(crate) fn enum_type(&self) -> &'h StructRt {
-        &self.types[self.enum_def as usize]
-    }
 }
 
 /// The kind of a value whose type does not implement `Encode`.
@@ -247,7 +236,7 @@ fn report<'h, S: EncodeSink<'h>>(
             Obj::Map(map) => (Container::Map, map.live, Children::Map(map.entries.iter(), None)),
             Obj::Struct(def, values) => {
                 let ty = &prog.types[*def as usize];
-                fields(Container::Struct { def: *def, ty }, &ty.fields, values)
+                fields(Container::Struct(ty), &ty.fields, values)
             }
             Obj::Variant(id, values) => {
                 let variant = variant_ref(prog, value, *id)?;
@@ -309,7 +298,7 @@ fn fields<'h>(container: Container<'h>, names: &'h [String], values: &'h [VmValu
 #[inline(always)]
 fn variant_ref(prog: &Program, value: VmValue, id: u32) -> Result<VariantRef<'_>, Fail> {
     let Some(rt) = prog.variants.get(id as usize) else { return internal("encode: unknown variant ID") };
-    Ok(VariantRef { value, id, name: &rt.name, field_names: rt.field_names.as_deref(), enum_def: rt.def, types: &prog.types })
+    Ok(VariantRef { value, id, name: &rt.name, field_names: rt.field_names.as_deref() })
 }
 
 /// An open container: its children that the walk has not reported, and the

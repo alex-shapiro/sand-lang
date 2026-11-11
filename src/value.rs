@@ -2,15 +2,15 @@
 
 use crate::native::ty::Never;
 use crate::stdlib::time::{PlainMonthDay, PlainYearMonth, Span, TimeZone, ZonedDateTime};
-use crate::vm::bytecode::StructRt;
-use crate::vm::encode::{self, Container, EncodeSink, Leaf, OpaqueKind, Opened, Role, VariantRef};
+use crate::vm::bytecode::Program;
+use crate::vm::encode::{self, Container, EncodeSink, Leaf, OpaqueKind, Opened, Role};
 use crate::vm::heap::Heap;
 use crate::vm::meter::{Meter, Scratch};
 use crate::vm::value::{FxHashMap, ValueRef, ValueType, VmValue};
 use crate::vm::{Fail, Vm, internal};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
-use std::mem::{size_of, size_of_val};
+use std::mem::size_of;
 use std::sync::{Arc, OnceLock};
 
 /// The Rust form of a Sand value.
@@ -532,13 +532,12 @@ encode_tuples! {
 /// Copies `value` out of the heap of `vm`. See [`Vm::to_value`].
 pub(crate) fn copy_from_vm(vm: &Vm, value: VmValue) -> Result<Value, Fail> {
     let mut sink = ValueSink {
+        prog: &vm.prog,
         heap: &vm.heap,
         meter: &vm.meter,
         allocated: 0,
         scratch: Scratch::new(),
         type_names: FxHashMap::default(),
-        structs: FxHashMap::default(),
-        variants: FxHashMap::default(),
     };
     match encode::walk(&vm.prog, &vm.heap, &vm.meter, &mut sink, OpenValue::Root(Value::Unit), value)? {
         OpenValue::Root(value) => Ok(value),
@@ -573,6 +572,7 @@ pub(crate) fn rust_type_module(module: &str) -> Option<&str> {
 
 /// The [`EncodeSink`] that builds a [`Value`].
 struct ValueSink<'h> {
+    prog: &'h Program,
     heap: &'h Heap,
     meter: &'h Meter,
     /// The bytes of Rust memory that the copy has allocated.
@@ -581,10 +581,6 @@ struct ValueSink<'h> {
     /// The shared name of each native value type and each type of an opaque
     /// value in the copy, by its module and name.
     type_names: FxHashMap<(Option<&'static str>, &'static str), Arc<str>>,
-    /// The description of each struct type in the copy, by runtime type ID.
-    structs: FxHashMap<u32, Arc<StructDesc>>,
-    /// The description of each variant in the copy, by runtime variant ID.
-    variants: FxHashMap<u32, Arc<VariantDesc>>,
 }
 
 /// A [`Value`] that waits for its children.
@@ -618,13 +614,6 @@ impl ValueSink<'_> {
         self.reserve(content.saturating_add(header))
     }
 
-    /// Charges fuel and memory for a description of `size` bytes in an `Arc`,
-    /// with `text` bytes of names and the field names `fields`.
-    fn reserve_desc(&mut self, size: usize, text: usize, fields: &[String]) -> Result<(), Fail> {
-        let text = fields.iter().fold(text, |sum, field| sum.saturating_add(field.len()));
-        self.reserve_copy(text, 2 * size_of::<usize>() + size + size_of_val(fields))
-    }
-
     fn items(&mut self, len: usize) -> Result<Vec<Value>, Fail> {
         self.reserve(len.saturating_mul(size_of::<Value>()))?;
         Ok(Vec::with_capacity(len))
@@ -643,29 +632,13 @@ impl ValueSink<'_> {
         Ok(type_name)
     }
 
-    fn struct_desc(&mut self, def: u32, ty: &StructRt) -> Result<Arc<StructDesc>, Fail> {
-        if let Some(desc) = self.structs.get(&def) {
-            return Ok(desc.clone());
+    /// Returns the description of the variant with the runtime ID `id`,
+    /// which the program owns.
+    fn variant_desc(&self, id: u32) -> Result<Arc<VariantDesc>, Fail> {
+        match self.prog.variant_desc(id) {
+            Some(desc) => Ok(desc.clone()),
+            None => internal("to_value: unknown variant ID"),
         }
-        let name = qualified_name(ty.module.as_deref(), &ty.name);
-        self.reserve_desc(size_of::<StructDesc>(), name.len(), &ty.fields)?;
-        let desc = Arc::new(StructDesc { name, fields: ty.fields.clone() });
-        self.structs.insert(def, desc.clone());
-        Ok(desc)
-    }
-
-    fn variant_desc(&mut self, variant: &VariantRef<'_>) -> Result<Arc<VariantDesc>, Fail> {
-        if let Some(desc) = self.variants.get(&variant.id) {
-            return Ok(desc.clone());
-        }
-        let ty = variant.enum_type();
-        let enum_name = qualified_name(ty.module.as_deref(), &ty.name);
-        let fields = variant.field_names.unwrap_or_default();
-        self.reserve_desc(size_of::<VariantDesc>(), enum_name.len() + variant.name.len(), fields)?;
-        let fields = variant.field_names.map(<[String]>::to_vec);
-        let desc = Arc::new(VariantDesc { enum_name, name: variant.name.to_string(), fields });
-        self.variants.insert(variant.id, desc.clone());
-        Ok(desc)
     }
 
     fn native(&mut self, native: ValueRef<'_>) -> Result<Value, Fail> {
@@ -731,7 +704,7 @@ impl<'h> EncodeSink<'h> for ValueSink<'h> {
                 Value::Bytes(bytes.to_vec())
             }
             Leaf::Range { start, end, inclusive } => Value::Range { start, end, inclusive },
-            Leaf::Tag(variant) => Value::Variant(VariantValue { ty: self.variant_desc(&variant)?, payload: Box::default() }),
+            Leaf::Tag(variant) => Value::Variant(VariantValue { ty: self.variant_desc(variant.id)?, payload: Box::default() }),
             Leaf::Native(native) => self.native(native)?,
             Leaf::Opaque { kind, .. } => self.opaque(kind)?,
         };
@@ -749,8 +722,8 @@ impl<'h> EncodeSink<'h> for ValueSink<'h> {
                 self.reserve(len.saturating_mul(size_of::<(Value, Value)>()))?;
                 OpenValue::Map(Vec::with_capacity(len), false)
             }
-            Container::Struct { def, ty } => OpenValue::Struct(self.struct_desc(def, ty)?, self.items(len)?),
-            Container::Variant(variant) => OpenValue::Variant(self.variant_desc(&variant)?, self.items(len)?),
+            Container::Struct(ty) => OpenValue::Struct(ty.desc().clone(), self.items(len)?),
+            Container::Variant(variant) => OpenValue::Variant(self.variant_desc(variant.id)?, self.items(len)?),
         }))
     }
 
