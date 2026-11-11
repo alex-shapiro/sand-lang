@@ -1,10 +1,11 @@
 //! Benchmarks for the `json` module and for [`Vm::to_value`].
 //!
 //! `cargo bench --bench codec` reports the best time for each operation over
-//! `BENCH_RUNS` engine runs (default 3). Each run executes each operation
-//! `BENCH_REPS` times (default 5) and keeps the fastest. The document has
-//! `BENCH_USERS` users (default 5000). `BENCH_OPS=encode,decode` limits the
-//! timed operations.
+//! `BENCH_RUNS` engine runs (default 3). Each operation runs in its own engine,
+//! so one operation does not change the time of another. Each run executes the
+//! operation `BENCH_REPS` times (default 5) and keeps the fastest. The document
+//! has `BENCH_USERS` users (default 5000). `BENCH_OPS=encode,decode` limits the
+//! operations.
 //!
 //! `cargo bench --bench codec -- --limits` reports the memory and fuel that the
 //! engine charges for each operation on `BENCH_LIMIT_USERS` users (default
@@ -18,10 +19,12 @@
 use sandlang::engine::{Config, Engine, Error, HostModules, Limits, MemorySink};
 use sandlang::native::NativeModule;
 use sandlang::native::ty::Param;
+use sandlang::stdlib::json::Json;
 use sandlang::value::Value;
 use sandlang::vm::{Fail, Vm};
 
-/// Sets up `doc`, a document of `{n}` users.
+/// Declares the types of a document and `make`, which returns a document of
+/// `n` users.
 const PRELUDE: &str = r#"import json
 import time
 import host
@@ -39,136 +42,193 @@ fn make(n: int) -> Doc {
     }
     Doc(users: users)
 }
-let doc = make({n})
 "#;
 
-/// Sets up `text` and `value`, the JSON text and the `Json` value of `doc`.
-const INPUTS: &str = "let text = json.encode(doc)\nlet value = json.to_json(doc)\n";
+/// A benchmark operation.
+struct Operation {
+    name: &'static str,
+    /// The Sand statements that make the inputs of the operation. `{n}` is the
+    /// number of users.
+    inputs: &'static str,
+    /// The Sand closure of type `fn() -> int` that runs the operation.
+    closure: &'static str,
+    /// The number of times that one call of `closure` runs the operation, or
+    /// `None` if one call runs the operation once on a document. The
+    /// benchmark reports the time of one run, or of one user of the document.
+    runs_per_call: Option<usize>,
+}
 
-/// Times each operation and prints `name ns_per_item check` for each, then the
-/// `check` lines.
-const TIMING: &str = r#"
-fn selected(name: str) -> bool {
-    let names: [str] = [{ops}]
-    names.is_empty() or names.contains(name)
+const DOC: &str = "let doc = make({n})\n";
+const DOC_TEXT: &str = "let text = json.encode(make({n}))\n";
+const DOC_JSON: &str = "let value = json.to_json(make({n}))\n";
+const ADDRESS: &str = "let addr = Address(street: \"1 Main St\", city: \"Springfield\", zip: Some(\"01234\"))\n";
+const ADDRESS_TEXT: &str = "let atext = json.encode(Address(street: \"1 Main St\", city: \"Springfield\", zip: Some(\"01234\")))\n";
+const DEEP: &str = r#"var nested = json.Json.Int(1)
+for _ in 0..400 {
+    nested = json.Json.Arr([nested])
 }
-fn bench(name: str, items: int, f: fn() -> int) {
-    if not selected(name) {
-        return
-    }
-    var best = -1
-    var check = 0
-    for _ in 0..{reps} {
-        let sw = time.Stopwatch()
-        check = f()
-        let t = sw.elapsed().nanos()
-        if best < 0 or t < best {
-            best = t
-        }
-    }
-    print("\(name) \(best / items) \(check)")
+let deep = json.Json.Obj(["v": nested])
+"#;
+const DEEP_TEXT: &str = r#"var nested = json.Json.Int(1)
+for _ in 0..400 {
+    nested = json.Json.Arr([nested])
 }
-bench("encode", {n}, () => json.encode(doc).len())
-bench("encode_indent", {n}, () => json.encode(doc, indent: 2).len())
-bench("decode", {n}, () => {
+let dtext = json.encode(json.Json.Obj(["v": nested]))
+"#;
+
+const OPERATIONS: &[Operation] = &[
+    Operation { name: "encode", inputs: DOC, closure: "() => json.encode(doc).len()", runs_per_call: None },
+    Operation { name: "encode_indent", inputs: DOC, closure: "() => json.encode(doc, indent: 2).len()", runs_per_call: None },
+    Operation {
+        name: "decode",
+        inputs: DOC_TEXT,
+        closure: r#"() => {
     let d: Doc = json.decode(text).unwrap()
     d.users[d.users.len() - 1].id
-})
-bench("to_json", {n}, () => {
-    let v = json.to_json(doc)
-    [v].len()
-})
-bench("decode_json", {n}, () => {
+}"#,
+        runs_per_call: None,
+    },
+    Operation { name: "to_json", inputs: DOC, closure: "() => [json.to_json(doc)].len()", runs_per_call: None },
+    Operation {
+        name: "decode_json",
+        inputs: DOC_TEXT,
+        closure: r#"() => {
     let p: json.Json = json.decode(text).unwrap()
     [p].len()
-})
-bench("encode_json", {n}, () => json.encode(value).len())
-bench("to_value", {n}, () => host.copied_users(doc))
-let addr = Address(street: "1 Main St", city: "Springfield", zip: Some("01234"))
-let atext = json.encode(addr)
-bench("small_encode", 20000, () => {
+}"#,
+        runs_per_call: None,
+    },
+    Operation { name: "encode_json", inputs: DOC_JSON, closure: "() => json.encode(value).len()", runs_per_call: None },
+    Operation { name: "json_param", inputs: DOC_JSON, closure: "() => host.json_members(value)", runs_per_call: None },
+    Operation { name: "to_value", inputs: DOC, closure: "() => host.copied_fields(doc)", runs_per_call: None },
+    Operation {
+        name: "small_encode",
+        inputs: ADDRESS,
+        closure: r#"() => {
     var t = 0
     for _ in 0..20000 {
         t += json.encode(addr).len()
     }
     t
-})
-bench("small_decode", 20000, () => {
+}"#,
+        runs_per_call: Some(20000),
+    },
+    Operation {
+        name: "small_decode",
+        inputs: ADDRESS_TEXT,
+        closure: r#"() => {
     var t = 0
     for _ in 0..20000 {
         let a: Address = json.decode(atext).unwrap()
         t += a.city.len()
     }
     t
-})
-var nested = json.Json.Int(1)
-for _ in 0..400 {
-    nested = json.Json.Arr([nested])
-}
-let deep = json.Json.Obj(["v": nested])
-let dtext = json.encode(deep)
-bench("deep_encode", 200, () => {
+}"#,
+        runs_per_call: Some(20000),
+    },
+    Operation {
+        name: "small_to_value",
+        inputs: ADDRESS,
+        closure: r#"() => {
+    var t = 0
+    for _ in 0..20000 {
+        t += host.copied_fields(addr)
+    }
+    t
+}"#,
+        runs_per_call: Some(20000),
+    },
+    Operation {
+        name: "deep_encode",
+        inputs: DEEP,
+        closure: r#"() => {
     var t = 0
     for _ in 0..200 {
         t += json.encode(deep).len()
     }
     t
-})
-bench("deep_decode", 200, () => {
+}"#,
+        runs_per_call: Some(200),
+    },
+    Operation {
+        name: "deep_decode",
+        inputs: DEEP_TEXT,
+        closure: r#"() => {
     var t = 0
     for _ in 0..200 {
         let p: json.Json = json.decode(dtext).unwrap()
         t += [p].len()
     }
     t
-})
+}"#,
+        runs_per_call: Some(200),
+    },
+];
+
+/// Times the closure `operation` and prints `ns_per_item check`.
+const TIMING: &str = r#"
+var best = -1
+var check = 0
+for _ in 0..{reps} {
+    let sw = time.Stopwatch()
+    check = operation()
+    let t = sw.elapsed().nanos()
+    if best < 0 or t < best {
+        best = t
+    }
+}
+print("\(best / {items}) \(check)")
+"#;
+
+/// Prints a `check` line for each property that the benchmark relies on.
+const CHECKS: &str = r#"
+let doc = make({n})
+let text = json.encode(doc)
 let p: json.Json = json.decode(text).unwrap()
 let t: Doc = json.decode(text).unwrap()
 let pretty: Doc = json.decode(json.encode(doc, indent: 2)).unwrap()
-print("check json.decode(text) == value: \(p == value)")
+print("check json.decode(text) == json.to_json(doc): \(p == json.to_json(doc))")
 print("check json.decode(text) == doc: \(t == doc)")
 print("check json.decode(indented text) == doc: \(pretty == doc)")
-let dp: json.Json = json.decode(dtext).unwrap()
-print("check json.decode(deep text) == deep: \(dp == deep)")
+print("check host.json_members(json.to_json(doc)) == 1: \(host.json_members(json.to_json(doc)) == 1)")
+print("check host.copied_fields(doc) == 1: \(host.copied_fields(doc) == 1)")
 print("check text length: \(text.len())")
 "#;
 
-/// Operations that the `--limits` mode measures, as a name, the Sand statement
-/// that makes the input of the operation, and the Sand statement of the
-/// operation.
-const LIMIT_OPS: &[(&str, &str, &str)] = &[
-    ("encode", "", "let r = json.encode(doc)"),
-    ("encode_indent", "", "let r = json.encode(doc, indent: 2)"),
-    ("to_json", "", "let r = json.to_json(doc)"),
-    ("decode", "let text = json.encode(doc)", "let r: Doc = json.decode(text).unwrap()"),
-    ("decode_json", "let text = json.encode(doc)", "let r: json.Json = json.decode(text).unwrap()"),
-    ("encode_json", "let value = json.to_json(doc)", "let r = json.encode(value)"),
-    ("to_value", "", "let r = host.copied_users(doc)"),
-];
-
-/// Returns the module `host`. Its function `copied_users` copies a document
-/// out of the VM with [`Vm::to_value`] and returns the number of users in the
-/// copy.
+/// Returns the module `host`. Its function `copied_fields` copies a struct out
+/// of the VM with [`Vm::to_value`] and returns the number of fields of the
+/// copy. Its function `json_members` takes a `Json` object as a Rust [`Json`]
+/// and returns the number of its members.
 fn host_modules() -> HostModules {
     let mut host = NativeModule::new("host");
-    host.source("pub native fn copied_users<T>(doc: T) -> int");
-    host.function("copied_users", |vm: &mut Vm, doc: Param<0>| -> Result<i64, Fail> {
-        let users = match vm.to_value(doc.raw())? {
-            Value::Struct(doc) => match doc.fields.first() {
-                Some(Value::List(users)) => users.len(),
-                _ => 0,
-            },
+    host.source("pub native fn copied_fields<T>(value: T) -> int");
+    host.function("copied_fields", |vm: &mut Vm, value: Param<0>| -> Result<i64, Fail> {
+        let fields = match vm.to_value(value.raw())? {
+            Value::Struct(value) => value.fields.len(),
             _ => 0,
         };
-        Ok(users as i64)
+        Ok(fields as i64)
+    });
+    host.function("json_members", |value: Json| -> i64 {
+        match value {
+            Json::Obj(members) => members.len() as i64,
+            _ => 0,
+        }
     });
     HostModules::new([host]).unwrap()
 }
 
-fn fill(template: &str, users: usize, reps: usize) -> String {
-    let ops = std::env::var("BENCH_OPS").unwrap_or_default();
-    let ops: Vec<String> = ops.split(',').filter(|o| !o.is_empty()).map(|o| format!("{o:?}")).collect();
-    template.replace("{ops}", &ops.join(", ")).replace("{n}", &users.to_string()).replace("{reps}", &reps.to_string())
+/// Returns the program that declares `operation`, the closure of `op`, for a
+/// document of `users` users.
+fn program(op: &Operation, users: usize) -> String {
+    format!("{PRELUDE}{}let operation = {}\n", op.inputs.replace("{n}", &users.to_string()), op.closure)
+}
+
+/// Returns the operations that `BENCH_OPS` names, or all operations.
+fn selected_operations() -> impl Iterator<Item = &'static Operation> {
+    let names = std::env::var("BENCH_OPS").unwrap_or_default();
+    let names: Vec<String> = names.split(',').filter(|name| !name.is_empty()).map(str::to_string).collect();
+    OPERATIONS.iter().filter(move |op| names.is_empty() || names.iter().any(|name| name == op.name))
 }
 
 fn run(src: &str, limits: Limits) -> Result<String, Error> {
@@ -207,14 +267,13 @@ fn charged(src: &str) -> (u64, u64) {
 
 fn limits_report() {
     let users = env("BENCH_LIMIT_USERS", 1000);
-    println!("charged memory (KiB) and fuel for one operation on {users} users, beyond the setup");
+    println!("charged memory (KiB) and fuel for one call of each operation on {users} users, beyond the setup");
     println!("{:<14} {:>12} {:>14}", "operation", "memory KiB", "fuel");
-    let prelude = fill(PRELUDE, users, 1);
-    for (op, input, stmt) in LIMIT_OPS {
-        let setup = format!("{prelude}{input}\n");
+    for op in selected_operations() {
+        let setup = program(op, users);
         let (base_memory, base_fuel) = charged(&setup);
-        let (memory, fuel) = charged(&format!("{setup}{stmt}\n"));
-        println!("{op:<14} {:>12} {:>14}", memory.saturating_sub(base_memory) >> 10, fuel.saturating_sub(base_fuel));
+        let (memory, fuel) = charged(&format!("{setup}let r = operation()\n"));
+        println!("{:<14} {:>12} {:>14}", op.name, memory.saturating_sub(base_memory) >> 10, fuel.saturating_sub(base_fuel));
     }
 }
 
@@ -224,37 +283,24 @@ fn main() {
     }
     let quick = std::env::var("BENCH_QUICK").is_ok() || !std::env::args().any(|a| a == "--bench");
     let (users, runs, reps) = if quick { (200, 1, 1) } else { (env("BENCH_USERS", 5000), env("BENCH_RUNS", 3), env("BENCH_REPS", 5)) };
-    let src = format!("{}{INPUTS}{}", fill(PRELUDE, users, reps), fill(TIMING, users, reps));
-    let mut table: Vec<(String, u64)> = Vec::new();
-    let mut checks = Vec::new();
-    for run_index in 0..runs {
-        let out = run(&src, Limits::default()).unwrap_or_else(|e| panic!("json: {e}"));
-        for line in out.lines() {
-            if let Some(check) = line.strip_prefix("check ") {
-                assert!(!check.ends_with("false"), "json: {check}");
-                if run_index == 0 {
-                    checks.push(check.to_string());
-                }
-                continue;
-            }
-            let mut parts = line.split(' ');
-            let (Some(name), Some(ns), Some(_)) = (parts.next(), parts.next(), parts.next()) else {
-                panic!("json: unexpected output line {line:?}")
-            };
-            let ns: u64 = ns.parse().unwrap();
-            match table.iter_mut().find(|(n, _)| n == name) {
-                Some((_, best)) => *best = (*best).min(ns),
-                None => table.push((name.to_string(), ns)),
-            }
-        }
+    let checks = CHECKS.replace("{n}", &users.to_string());
+    let checks = run(&format!("{PRELUDE}{checks}"), Limits::default()).unwrap_or_else(|e| panic!("checks: {e}"));
+    assert!(!checks.is_empty(), "the program printed no checks");
+    for check in checks.lines() {
+        assert!(check.starts_with("check ") && !check.ends_with("false"), "{check}");
     }
-    assert!(!checks.is_empty(), "json: the program printed no checks");
     println!("best ns per item ({users} users, {runs} runs of {reps} repetitions)");
     println!("{:<14} {:>10}", "operation", "ns");
-    for (name, ns) in &table {
-        println!("{name:<14} {ns:>10}");
+    for op in selected_operations() {
+        let items = op.runs_per_call.unwrap_or(users);
+        let timing = TIMING.replace("{reps}", &reps.to_string()).replace("{items}", &items.to_string());
+        let src = format!("{}{timing}", program(op, users));
+        let ns_per_item = |_| {
+            let out = run(&src, Limits::default()).unwrap_or_else(|e| panic!("{}: {e}", op.name));
+            let ns = out.split(' ').next().and_then(|ns| ns.parse::<u64>().ok());
+            ns.unwrap_or_else(|| panic!("{}: unexpected output {out:?}", op.name))
+        };
+        println!("{:<14} {:>10}", op.name, (0..runs).map(ns_per_item).min().unwrap_or_default());
     }
-    for check in checks {
-        println!("{check}");
-    }
+    print!("{checks}");
 }
