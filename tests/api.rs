@@ -4414,6 +4414,27 @@ fn to_value_charges_fuel_for_each_value_and_for_copied_bytes() {
 }
 
 #[test]
+fn to_value_fuel_is_the_same_on_each_pointer_width() {
+    use sandlang::native::ty::Param;
+    let mut host = NativeModule::new("host");
+    host.source("pub native fn copy_fuel<T>(value: T) -> int");
+    host.function("copy_fuel", |vm: &mut Vm, value: Param<0>| -> Result<i64, Fail> {
+        let before = vm.meter.used();
+        vm.to_value(value.raw())?;
+        Ok((vm.meter.used() - before) as i64)
+    });
+    let modules = HostModules::new([bank_module(), host]).unwrap();
+    // One unit for each value, and one for each 64 bytes of a text: the
+    // struct, the string with two units for its 130 bytes, and the native
+    // value with less than 64 bytes of text.
+    let src = "import bank\nimport host\nstruct Note { text: str, at: bank.Cell }\n\
+               print(host.copy_fuel(Note(text: \"x\".repeat(130), at: bank.cell(1234567890123, 1234567890123))))";
+    let (r, out, _) = run_src(Config::new().host_modules(modules), src);
+    r.unwrap();
+    assert_eq!(out, "5\n");
+}
+
+#[test]
 fn to_value_counts_its_memory_against_the_memory_limit() {
     for (big, value) in [("(0..100000).to_list()", "list"), ("\"x\".repeat(4000000)", "str"), ("\"x\".repeat(4000000).bytes()", "bytes")] {
         let src = format!("let big = {big}\nlet shared = []\nfor _ in 0..1000 {{\n    shared.push(big)\n}}\nhost.copy(shared)");

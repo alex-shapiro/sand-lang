@@ -405,10 +405,12 @@ impl ValueSink<'_> {
         self.scratch.check(self.heap, self.allocated)
     }
 
-    /// Charges fuel and memory for a copy of `bytes` bytes.
-    fn reserve_copy(&mut self, bytes: usize) -> Result<(), Fail> {
-        self.meter.charge_bytes(bytes)?;
-        self.reserve(bytes)
+    /// Charges fuel for a copy of `content` bytes of text, and counts the
+    /// copy and `header` more bytes of new Rust memory against the memory
+    /// limit. The fuel does not depend on the pointer width of the host.
+    fn reserve_copy(&mut self, content: usize, header: usize) -> Result<(), Fail> {
+        self.meter.charge_bytes(content)?;
+        self.reserve(content.saturating_add(header))
     }
 
     fn items(&mut self, len: usize) -> Result<Vec<Value>, Fail> {
@@ -417,7 +419,7 @@ impl ValueSink<'_> {
     }
 
     fn name(&mut self, text: &str) -> Result<Arc<str>, Fail> {
-        self.reserve_copy(text.len() + 2 * size_of::<usize>())?;
+        self.reserve_copy(text.len(), 2 * size_of::<usize>())?;
         Ok(Arc::from(text))
     }
 
@@ -474,7 +476,7 @@ impl ValueSink<'_> {
         let Some(mut value) = native.to_value() else { return internal("to_value: a packed value without an unpacked form") };
         match &mut value {
             Value::Native(native) => {
-                self.reserve_copy(size_of::<NativeValue>() + native.text.len())?;
+                self.reserve_copy(native.text.len(), size_of::<NativeValue>())?;
                 native.type_name = self.type_name(&native.type_name)?;
             }
             Value::ZonedDateTime(_) => self.reserve(size_of::<ZonedDateTime>())?,
@@ -534,11 +536,11 @@ impl<'h> EncodeSink<'h> for ValueSink<'h> {
             Leaf::Float(f) => Value::Float(f),
             Leaf::Duration(nanos) => Value::Duration(jiff::SignedDuration::from_nanos(nanos)),
             Leaf::Str { text, .. } => {
-                self.reserve_copy(text.len())?;
+                self.reserve_copy(text.len(), 0)?;
                 Value::Str(text.to_string())
             }
             Leaf::Bytes(bytes) => {
-                self.reserve_copy(bytes.len())?;
+                self.reserve_copy(bytes.len(), 0)?;
                 Value::Bytes(bytes.to_vec())
             }
             Leaf::Range { start, end, inclusive } => Value::Range { start, end, inclusive },
