@@ -110,7 +110,7 @@ pub(crate) fn module() -> NativeModule {
     m.function("encode", |vm: &mut Vm, value: Param<0, traits::Encode>, indent: i64| -> Result<VmVal<String>, Fail> {
         let (heap, meter, indent) = (&vm.heap, &vm.meter, indent.clamp(0, 1 << 16) as usize);
         let mut out = JsonTextOutput { heap, meter, indent, text: String::new(), charged: 0, scratch: Scratch::new() };
-        let root = OpenJsonText { is_array: false, is_empty: true };
+        let root = OpenBracket { is_array: false, is_empty: true };
         write_json(&vm.prog, heap, meter, JsonIds::of(&vm.prog)?, &mut out, root, value.raw())?;
         Ok(VmVal::from_raw(vm.new_str(out.text)))
     });
@@ -168,8 +168,8 @@ pub(crate) fn module() -> NativeModule {
         let (prog, meter) = (&vm.prog, &vm.meter);
         let v = vm.heap.staged(|heap, st| {
             let mut out = JsonValueOutput::new(Builder::new(heap, st, meter), json_ids);
-            match write_json(prog, heap, meter, json_ids, &mut out, OpenJsonValue::Root(VmValue::Unit), value.raw())? {
-                OpenJsonValue::Root(v) => Ok(v),
+            match write_json(prog, heap, meter, json_ids, &mut out, PartialJson::Root(VmValue::Unit), value.raw())? {
+                PartialJson::Root(v) => Ok(v),
                 _ => internal("json.to_json: the walk did not return the root"),
             }
         })?;
@@ -1537,6 +1537,9 @@ enum FieldsOwner {
 /// value, or an array or object with its own members. An output charges fuel
 /// only for the bytes that it writes or copies, because [`encode::walk`]
 /// charges for each value.
+///
+/// Each method of an implementation must be `#[inline(always)]`, for the
+/// reason that [`EncodeSink`] gives.
 trait JsonOutput<'h> {
     /// The state of a JSON array or object that waits for its members.
     type Open;
@@ -1582,12 +1585,12 @@ struct JsonSink<'h, 'o, O> {
 }
 
 /// The JSON arrays and objects that are open for a Sand container.
-struct OpenJson<O> {
+struct JsonLevels<O> {
     /// The array or object that receives the children of the container.
     members: O,
-    /// The object that holds the variant name, if the container is the payload
-    /// of a variant.
-    variant: Option<O>,
+    /// The object that has the variant name as its key and `members` as its
+    /// value, if the container is a variant with a payload.
+    wrapper: Option<O>,
 }
 
 /// Sends the JSON form of `value` to `out`, and returns `root` with the value
@@ -1603,7 +1606,7 @@ fn write_json<'h, O: JsonOutput<'h>>(
     value: VmValue,
 ) -> Result<O::Open, Fail> {
     let mut sink = JsonSink { out, meter, json_ids, rt_ids: prog.ids, depth: 0 };
-    Ok(encode::walk(prog, heap, meter, &mut sink, OpenJson { members: root, variant: None }, value)?.members)
+    Ok(encode::walk(prog, heap, meter, &mut sink, JsonLevels { members: root, wrapper: None }, value)?.members)
 }
 
 impl<'h, O: JsonOutput<'h>> JsonSink<'h, '_, O> {
@@ -1645,7 +1648,7 @@ impl<'h, O: JsonOutput<'h>> JsonSink<'h, '_, O> {
 }
 
 impl<'h, O: JsonOutput<'h>> EncodeSink<'h> for JsonSink<'h, '_, O> {
-    type Open = OpenJson<O::Open>;
+    type Open = JsonLevels<O::Open>;
 
     const TOO_DEEP: &'static str = O::TOO_DEEP;
 
@@ -1680,17 +1683,17 @@ impl<'h, O: JsonOutput<'h>> EncodeSink<'h> for JsonSink<'h, '_, O> {
     #[inline(always)]
     fn open(&mut self, parent: &mut Self::Open, role: Role<'h>, container: Container<'h>, len: usize) -> Result<Opened<Self::Open>, Fail> {
         let parent = &mut parent.members;
-        let mut variant = None;
-        if let Container::Variant(payload_of) = container {
-            if payload_of.id == self.rt_ids.some || self.json_ids.has(payload_of.id) {
+        let mut wrapper = None;
+        if let Container::Variant(variant) = container {
+            if variant.id == self.rt_ids.some || self.json_ids.has(variant.id) {
                 self.begin_value(parent, role)?;
-                let is_embedded = self.json_ids.has(payload_of.id) && self.out.embed(parent, payload_of.value)?;
+                let is_embedded = self.json_ids.has(variant.id) && self.out.embed(parent, variant.value)?;
                 return Ok(if is_embedded { Opened::Closed } else { Opened::Unwrapped });
             }
             self.begin_value(parent, role)?;
             let mut object = self.begin(Begin::Object)?;
-            self.out.member(&mut object, Some(JsonKey::Text(JsonText::variant_name(payload_of))), self.depth)?;
-            variant = Some(object);
+            self.out.member(&mut object, Some(JsonKey::Text(JsonText::variant_name(variant))), self.depth)?;
+            wrapper = Some(object);
         } else {
             self.begin_value(parent, role)?;
         }
@@ -1700,17 +1703,17 @@ impl<'h, O: JsonOutput<'h>> EncodeSink<'h> for JsonSink<'h, '_, O> {
             Container::Variant(VariantRef { id, field_names: Some(names), .. }) => Begin::Fields { owner: FieldsOwner::Variant(id), names },
             _ => Begin::Array(len),
         })?;
-        Ok(Opened::Children(OpenJson { members, variant }))
+        Ok(Opened::Children(JsonLevels { members, wrapper }))
     }
 
     #[inline(always)]
     fn close(&mut self, parent: &mut Self::Open, open: Self::Open) -> Result<(), Fail> {
-        let mut members = open.members;
-        if let Some(mut object) = open.variant {
-            self.end(&mut object, members)?;
-            members = object;
+        let mut outermost = open.members;
+        if let Some(mut wrapper) = open.wrapper {
+            self.end(&mut wrapper, outermost)?;
+            outermost = wrapper;
         }
-        self.end(&mut parent.members, members)
+        self.end(&mut parent.members, outermost)
     }
 }
 
@@ -1726,7 +1729,7 @@ struct JsonTextOutput<'h> {
 }
 
 /// A JSON array or object in the text that waits for its members.
-struct OpenJsonText {
+struct OpenBracket {
     is_array: bool,
     is_empty: bool,
 }
@@ -1772,7 +1775,7 @@ impl JsonTextOutput<'_> {
 }
 
 impl<'h> JsonOutput<'h> for JsonTextOutput<'h> {
-    type Open = OpenJsonText;
+    type Open = OpenBracket;
 
     const TOO_DEEP: &'static str = "value too deeply nested to encode as JSON";
 
@@ -1782,7 +1785,7 @@ impl<'h> JsonOutput<'h> for JsonTextOutput<'h> {
     }
 
     #[inline(always)]
-    fn member(&mut self, parent: &mut OpenJsonText, key: Option<JsonKey<'h>>, depth: usize) -> Result<(), Fail> {
+    fn member(&mut self, parent: &mut OpenBracket, key: Option<JsonKey<'h>>, depth: usize) -> Result<(), Fail> {
         if !std::mem::replace(&mut parent.is_empty, false) {
             self.text.push(',');
         }
@@ -1800,7 +1803,7 @@ impl<'h> JsonOutput<'h> for JsonTextOutput<'h> {
     }
 
     #[inline(always)]
-    fn scalar(&mut self, _: &mut OpenJsonText, scalar: Scalar<'h>) -> Result<(), Fail> {
+    fn scalar(&mut self, _: &mut OpenBracket, scalar: Scalar<'h>) -> Result<(), Fail> {
         self.charge_written()?;
         match scalar {
             Scalar::Bool(b) => self.text.push_str(if b { "true" } else { "false" }),
@@ -1814,20 +1817,20 @@ impl<'h> JsonOutput<'h> for JsonTextOutput<'h> {
     }
 
     #[inline(always)]
-    fn embed(&mut self, _: &mut OpenJsonText, _: VmValue) -> Result<bool, Fail> {
+    fn embed(&mut self, _: &mut OpenBracket, _: VmValue) -> Result<bool, Fail> {
         Ok(false)
     }
 
     #[inline(always)]
-    fn begin(&mut self, begin: Begin<'h>) -> Result<OpenJsonText, Fail> {
+    fn begin(&mut self, begin: Begin<'h>) -> Result<OpenBracket, Fail> {
         self.charge_written()?;
         let is_array = matches!(begin, Begin::Array(_));
         self.text.push(if is_array { '[' } else { '{' });
-        Ok(OpenJsonText { is_array, is_empty: true })
+        Ok(OpenBracket { is_array, is_empty: true })
     }
 
     #[inline(always)]
-    fn end(&mut self, _: &mut OpenJsonText, open: OpenJsonText, depth: usize) -> Result<(), Fail> {
+    fn end(&mut self, _: &mut OpenBracket, open: OpenBracket, depth: usize) -> Result<(), Fail> {
         if !open.is_empty {
             self.newline(depth)?;
         }
@@ -1942,7 +1945,7 @@ struct FieldKey {
 }
 
 /// A `Json.Arr` or `Json.Obj` value that waits for its members.
-enum OpenJsonValue {
+enum PartialJson {
     Root(VmValue),
     Array(Vec<VmValue>),
     Object(MapBuilder),
@@ -1978,16 +1981,16 @@ impl<'a, 's, 'h> JsonValueOutput<'a, 's, 'h> {
     }
 
     #[inline]
-    fn put(&mut self, parent: &mut OpenJsonValue, value: VmValue) -> Result<(), Fail> {
+    fn put(&mut self, parent: &mut PartialJson, value: VmValue) -> Result<(), Fail> {
         match parent {
-            OpenJsonValue::Root(root) => *root = value,
-            OpenJsonValue::Array(items) => items.push(value),
-            OpenJsonValue::Object(map) => {
+            PartialJson::Root(root) => *root = value,
+            PartialJson::Array(items) => items.push(value),
+            PartialJson::Object(map) => {
                 let Some((key, text)) = self.pending_keys.pop() else { return internal("json.to_json: a member without a key") };
                 let hash = self.b.hash(&text)?;
                 self.b.put(map, hash, Some(text), key, value)?;
             }
-            OpenJsonValue::Fields(map, first_key) => {
+            PartialJson::Fields(map, first_key) => {
                 let Some(key) = self.next_field_key(map, *first_key) else {
                     return internal("json.to_json: more members than field names");
                 };
@@ -2000,7 +2003,7 @@ impl<'a, 's, 'h> JsonValueOutput<'a, 's, 'h> {
 }
 
 impl<'a> JsonOutput<'a> for JsonValueOutput<'a, '_, '_> {
-    type Open = OpenJsonValue;
+    type Open = PartialJson;
 
     const TOO_DEEP: &'static str = "value too deeply nested to convert to JSON";
 
@@ -2010,7 +2013,7 @@ impl<'a> JsonOutput<'a> for JsonValueOutput<'a, '_, '_> {
     }
 
     #[inline(always)]
-    fn member(&mut self, _: &mut OpenJsonValue, key: Option<JsonKey<'a>>, _: usize) -> Result<(), Fail> {
+    fn member(&mut self, _: &mut PartialJson, key: Option<JsonKey<'a>>, _: usize) -> Result<(), Fail> {
         if let Some(JsonKey::Text(key)) = key {
             let string = match self.shared_str(&key) {
                 Some(string) => string,
@@ -2022,7 +2025,7 @@ impl<'a> JsonOutput<'a> for JsonValueOutput<'a, '_, '_> {
     }
 
     #[inline(always)]
-    fn scalar(&mut self, parent: &mut OpenJsonValue, scalar: Scalar<'a>) -> Result<(), Fail> {
+    fn scalar(&mut self, parent: &mut PartialJson, scalar: Scalar<'a>) -> Result<(), Fail> {
         self.b.reserve()?;
         let json_ids = self.json_ids;
         let (id, payload) = match scalar {
@@ -2044,18 +2047,18 @@ impl<'a> JsonOutput<'a> for JsonValueOutput<'a, '_, '_> {
     }
 
     #[inline(always)]
-    fn embed(&mut self, parent: &mut OpenJsonValue, json: VmValue) -> Result<bool, Fail> {
+    fn embed(&mut self, parent: &mut PartialJson, json: VmValue) -> Result<bool, Fail> {
         self.b.reserve()?;
         self.put(parent, json)?;
         Ok(true)
     }
 
     #[inline(always)]
-    fn begin(&mut self, begin: Begin<'a>) -> Result<OpenJsonValue, Fail> {
+    fn begin(&mut self, begin: Begin<'a>) -> Result<PartialJson, Fail> {
         self.b.reserve()?;
         let (owner, names) = match begin {
-            Begin::Array(len) => return Ok(OpenJsonValue::Array(self.b.list_buffer(len)?)),
-            Begin::Object => return Ok(OpenJsonValue::Object(self.b.start_map())),
+            Begin::Array(len) => return Ok(PartialJson::Array(self.b.list_buffer(len)?)),
+            Begin::Object => return Ok(PartialJson::Object(self.b.start_map())),
             Begin::Fields { owner, names } => (owner, names),
         };
         let first_key = *self.first_field_keys.entry(owner).or_insert_with(|| {
@@ -2064,16 +2067,16 @@ impl<'a> JsonOutput<'a> for JsonValueOutput<'a, '_, '_> {
             self.field_keys.extend(names.iter().map(key).chain([None]));
             first_key
         });
-        Ok(OpenJsonValue::Fields(self.b.start_map(), first_key))
+        Ok(PartialJson::Fields(self.b.start_map(), first_key))
     }
 
     #[inline(always)]
-    fn end(&mut self, parent: &mut OpenJsonValue, open: OpenJsonValue, _: usize) -> Result<(), Fail> {
+    fn end(&mut self, parent: &mut PartialJson, open: PartialJson, _: usize) -> Result<(), Fail> {
         let (id, payload) = match open {
-            OpenJsonValue::Root(_) => return internal("json.to_json: the root has no end"),
-            OpenJsonValue::Array(items) => (self.json_ids.arr, self.b.list(items)),
-            OpenJsonValue::Object(map) => (self.json_ids.obj, self.b.map(map)),
-            OpenJsonValue::Fields(map, first_key) => {
+            PartialJson::Root(_) => return internal("json.to_json: the root has no end"),
+            PartialJson::Array(items) => (self.json_ids.arr, self.b.list(items)),
+            PartialJson::Object(map) => (self.json_ids.obj, self.b.map(map)),
+            PartialJson::Fields(map, first_key) => {
                 if self.next_field_key(&map, first_key).is_some() {
                     return internal("json.to_json: fewer members than field names");
                 }

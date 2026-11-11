@@ -539,8 +539,8 @@ pub(crate) fn copy_from_vm(vm: &Vm, value: VmValue) -> Result<Value, Fail> {
         scratch: Scratch::new(),
         type_names: FxHashMap::default(),
     };
-    match encode::walk(&vm.prog, &vm.heap, &vm.meter, &mut sink, OpenValue::Root(Value::Unit), value)? {
-        OpenValue::Root(value) => Ok(value),
+    match encode::walk(&vm.prog, &vm.heap, &vm.meter, &mut sink, PartialValue::Root(Value::Unit), value)? {
+        PartialValue::Root(value) => Ok(value),
         _ => internal("to_value: the walk did not return the root"),
     }
 }
@@ -584,7 +584,7 @@ struct ValueSink<'h> {
 }
 
 /// A [`Value`] that waits for its children.
-enum OpenValue {
+enum PartialValue {
     Root(Value),
     List(Vec<Value>),
     Tuple(Vec<Value>),
@@ -664,15 +664,15 @@ impl ValueSink<'_> {
     }
 }
 
-fn put(parent: &mut OpenValue, value: Value) {
+fn put(parent: &mut PartialValue, value: Value) {
     match parent {
-        OpenValue::Root(root) => *root = value,
-        OpenValue::List(items)
-        | OpenValue::Tuple(items)
-        | OpenValue::Set(items)
-        | OpenValue::Struct(_, items)
-        | OpenValue::Variant(_, items) => items.push(value),
-        OpenValue::Map(entries, has_key) => {
+        PartialValue::Root(root) => *root = value,
+        PartialValue::List(items)
+        | PartialValue::Tuple(items)
+        | PartialValue::Set(items)
+        | PartialValue::Struct(_, items)
+        | PartialValue::Variant(_, items) => items.push(value),
+        PartialValue::Map(entries, has_key) => {
             match entries.last_mut() {
                 Some(entry) if *has_key => entry.1 = value,
                 _ => entries.push((value, Value::Unit)),
@@ -683,12 +683,12 @@ fn put(parent: &mut OpenValue, value: Value) {
 }
 
 impl<'h> EncodeSink<'h> for ValueSink<'h> {
-    type Open = OpenValue;
+    type Open = PartialValue;
 
     const TOO_DEEP: &'static str = "value too deeply nested to copy";
 
     #[inline(always)]
-    fn leaf(&mut self, parent: &mut OpenValue, _: Role<'h>, leaf: Leaf<'h>) -> Result<(), Fail> {
+    fn leaf(&mut self, parent: &mut PartialValue, _: Role<'h>, leaf: Leaf<'h>) -> Result<(), Fail> {
         let value = match leaf {
             Leaf::Unit => Value::Unit,
             Leaf::Bool(b) => Value::Bool(b),
@@ -713,30 +713,30 @@ impl<'h> EncodeSink<'h> for ValueSink<'h> {
     }
 
     #[inline(always)]
-    fn open(&mut self, _: &mut OpenValue, _: Role<'h>, container: Container<'h>, len: usize) -> Result<Opened<OpenValue>, Fail> {
+    fn open(&mut self, _: &mut PartialValue, _: Role<'h>, container: Container<'h>, len: usize) -> Result<Opened<PartialValue>, Fail> {
         Ok(Opened::Children(match container {
-            Container::List => OpenValue::List(self.items(len)?),
-            Container::Tuple => OpenValue::Tuple(self.items(len)?),
-            Container::Set => OpenValue::Set(self.items(len)?),
+            Container::List => PartialValue::List(self.items(len)?),
+            Container::Tuple => PartialValue::Tuple(self.items(len)?),
+            Container::Set => PartialValue::Set(self.items(len)?),
             Container::Map => {
                 self.reserve(len.saturating_mul(size_of::<(Value, Value)>()))?;
-                OpenValue::Map(Vec::with_capacity(len), false)
+                PartialValue::Map(Vec::with_capacity(len), false)
             }
-            Container::Struct { ty, .. } => OpenValue::Struct(ty.desc().clone(), self.items(len)?),
-            Container::Variant(variant) => OpenValue::Variant(self.variant_desc(variant.id)?, self.items(len)?),
+            Container::Struct { ty, .. } => PartialValue::Struct(ty.desc().clone(), self.items(len)?),
+            Container::Variant(variant) => PartialValue::Variant(self.variant_desc(variant.id)?, self.items(len)?),
         }))
     }
 
     #[inline(always)]
-    fn close(&mut self, parent: &mut OpenValue, open: OpenValue) -> Result<(), Fail> {
+    fn close(&mut self, parent: &mut PartialValue, open: PartialValue) -> Result<(), Fail> {
         let value = match open {
-            OpenValue::Root(_) => return internal("to_value: the walk closed the root"),
-            OpenValue::List(items) => Value::List(items),
-            OpenValue::Tuple(items) => Value::Tuple(items),
-            OpenValue::Set(items) => Value::Set(items),
-            OpenValue::Map(entries, _) => Value::Map(entries),
-            OpenValue::Struct(ty, fields) => Value::Struct(StructValue { ty, fields: fields.into_boxed_slice() }),
-            OpenValue::Variant(ty, payload) => Value::Variant(VariantValue { ty, payload: payload.into_boxed_slice() }),
+            PartialValue::Root(_) => return internal("to_value: the walk closed the root"),
+            PartialValue::List(items) => Value::List(items),
+            PartialValue::Tuple(items) => Value::Tuple(items),
+            PartialValue::Set(items) => Value::Set(items),
+            PartialValue::Map(entries, _) => Value::Map(entries),
+            PartialValue::Struct(ty, fields) => Value::Struct(StructValue { ty, fields: fields.into_boxed_slice() }),
+            PartialValue::Variant(ty, payload) => Value::Variant(VariantValue { ty, payload: payload.into_boxed_slice() }),
         };
         put(parent, value);
         Ok(())

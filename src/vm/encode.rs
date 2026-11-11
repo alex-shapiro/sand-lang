@@ -33,6 +33,12 @@ const INLINE_FRAMES: usize = 4;
 /// container. Each child has a [`Role`] in its container. The walk reports a
 /// field value only with the name of its field. It reports no value beyond
 /// the field names of a struct type or of a variant.
+///
+/// Each method of an implementation must be `#[inline(always)]`. The walk,
+/// the sink, and the code that the sink calls for each value are fast only if
+/// the compiler merges them into one function. Without the attributes,
+/// `json.encode` and `json.to_json` take 1.5 times as long, and
+/// `Vm::to_value` takes 1.3 times as long.
 pub(crate) trait EncodeSink<'h> {
     /// The state of a container whose children the walk reports.
     type Open;
@@ -188,26 +194,26 @@ pub(crate) fn walk<'h, S: EncodeSink<'h>>(
             meter.charge(1)?;
         }
         match report(prog, heap, sink, &mut top.open, role, child)? {
-            Reported::Closed => {}
-            Reported::Opened(frame) => {
+            Next::Sibling => {}
+            Next::Children(frame) => {
                 if outer.len() >= MAX_DEPTH {
                     return fail("limit", S::TOO_DEEP);
                 }
                 outer.push(std::mem::replace(&mut top, frame));
             }
-            Reported::Unwrapped(unwrapped) => payload = Some(unwrapped),
+            Next::Payload(unwrapped) => payload = Some(unwrapped),
         }
     }
 }
 
-/// What the walk does after it reports a value.
-enum Reported<'h, O> {
-    /// The walk continues with the next child of the same parent.
-    Closed,
-    /// The walk continues with the children of the value in this frame.
-    Opened(Frame<'h, O>),
-    /// The walk reports this value next, as a child of the same parent.
-    Unwrapped(VmValue),
+/// What the walk reports after a value.
+enum Next<'h, O> {
+    /// The next child of the same parent.
+    Sibling,
+    /// The children of the value, in this frame.
+    Children(Frame<'h, O>),
+    /// This payload of the value, as a child of the same parent.
+    Payload(VmValue),
 }
 
 /// Reports `value` as the next child of `parent`.
@@ -219,8 +225,11 @@ fn report<'h, S: EncodeSink<'h>>(
     parent: &mut S::Open,
     role: Role<'h>,
     value: VmValue,
-) -> Result<Reported<'h, S::Open>, Fail> {
+) -> Result<Next<'h, S::Open>, Fail> {
     let opaque = |obj: &Obj, kind| Leaf::Opaque { kind, kind_name: obj.kind_name() };
+    // Each arm for a value without children calls the sink, so that the
+    // compiler makes sink code for that kind of value. One call after the
+    // `match` makes `json.encode` 19% slower.
     let (container, len, mut children) = match value {
         VmValue::Unit | VmValue::Uninit => return leaf(sink, parent, role, Leaf::Unit),
         VmValue::Bool(b) => return leaf(sink, parent, role, Leaf::Bool(b)),
@@ -282,19 +291,19 @@ fn report<'h, S: EncodeSink<'h>>(
         }
     };
     Ok(match sink.open(parent, role, container, len)? {
-        Opened::Children(open) => Reported::Opened(Frame { children, open }),
+        Opened::Children(open) => Next::Children(Frame { children, open }),
         Opened::Unwrapped => match children.next() {
-            Some((_, payload)) => Reported::Unwrapped(payload),
+            Some((_, payload)) => Next::Payload(payload),
             None => return internal("encode: a sink unwrapped a container without a child"),
         },
-        Opened::Closed => Reported::Closed,
+        Opened::Closed => Next::Sibling,
     })
 }
 
 #[inline(always)]
-fn leaf<'h, S: EncodeSink<'h>>(sink: &mut S, parent: &mut S::Open, role: Role<'h>, leaf: Leaf<'h>) -> Result<Reported<'h, S::Open>, Fail> {
+fn leaf<'h, S: EncodeSink<'h>>(sink: &mut S, parent: &mut S::Open, role: Role<'h>, leaf: Leaf<'h>) -> Result<Next<'h, S::Open>, Fail> {
     sink.leaf(parent, role, leaf)?;
-    Ok(Reported::Closed)
+    Ok(Next::Sibling)
 }
 
 /// Returns `container` with a child for each of `names` that has a value in
