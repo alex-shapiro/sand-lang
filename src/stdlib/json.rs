@@ -109,10 +109,10 @@ pub(crate) fn module() -> NativeModule {
     });
     m.function("encode", |vm: &mut Vm, value: Param<0, traits::Encode>, indent: i64| -> Result<VmVal<String>, Fail> {
         let (heap, meter, indent) = (&vm.heap, &vm.meter, indent.clamp(0, 1 << 16) as usize);
-        let out = JsonTextOutput { heap, meter, indent, text: String::new(), charged: 0, scratch: Scratch::new(), level: 0 };
+        let mut out = JsonTextOutput { heap, meter, indent, text: String::new(), charged: 0, scratch: Scratch::new() };
         let root = OpenJsonText { is_array: false, is_empty: true };
-        let text = write_json((&vm.prog, heap, meter), JsonIds::of(&vm.prog)?, out, root, value.raw())?.0.text;
-        Ok(VmVal::from_raw(vm.new_str(text)))
+        write_json(&vm.prog, heap, meter, JsonIds::of(&vm.prog)?, &mut out, root, value.raw())?;
+        Ok(VmVal::from_raw(vm.new_str(out.text)))
     });
     m.bind::<Decoded<()>>();
     m.function("decode_raw", |vm: &mut Vm, ty: Reflect<0>, text: VmVal<String>| -> Result<Decoded<Param<0>>, Fail> {
@@ -167,8 +167,8 @@ pub(crate) fn module() -> NativeModule {
         let json_ids = JsonIds::of(&vm.prog)?;
         let (prog, meter) = (&vm.prog, &vm.meter);
         let v = vm.heap.staged(|heap, st| {
-            let out = JsonValueOutput::new(Builder::new(heap, st, meter), json_ids);
-            match write_json((prog, heap, meter), json_ids, out, OpenJsonValue::Root(VmValue::Unit), value.raw())?.1 {
+            let mut out = JsonValueOutput::new(Builder::new(heap, st, meter), json_ids);
+            match write_json(prog, heap, meter, json_ids, &mut out, OpenJsonValue::Root(VmValue::Unit), value.raw())? {
                 OpenJsonValue::Root(v) => Ok(v),
                 _ => internal("json.to_json: the walk did not return the root"),
             }
@@ -1447,16 +1447,34 @@ fn invalid_key<T>() -> Result<T, Fail> {
 /// The text of a JSON string or of an object key.
 struct JsonText<'h> {
     text: Cow<'h, str>,
-    /// The Sand `str` on the heap that has this text, if one exists.
-    heap_str: Option<VmValue>,
-    /// The runtime ID of the variant that has this text as its name, if an
-    /// output can use one string for each use of the name.
-    variant_id: Option<u32>,
+    sand_str: SandStr,
+}
+
+/// The Sand `str` that an output can use for a [`JsonText`].
+#[derive(Clone, Copy)]
+enum SandStr {
+    /// The `str` on the heap that has the text.
+    OnHeap(VmValue),
+    /// One `str` for each use of the name of the variant with this runtime
+    /// ID.
+    VariantName(u32),
+    /// A new copy of the text.
+    Copy,
 }
 
 impl<'h> JsonText<'h> {
     fn new(text: impl Into<Cow<'h, str>>) -> Self {
-        JsonText { text: text.into(), heap_str: None, variant_id: None }
+        JsonText { text: text.into(), sand_str: SandStr::Copy }
+    }
+
+    /// Returns the text of a string. `heap_str` is the string if it is an
+    /// immutable `str` on the heap.
+    fn for_str(text: &'h str, heap_str: Option<VmValue>) -> Self {
+        JsonText { text: text.into(), sand_str: heap_str.map_or(SandStr::Copy, SandStr::OnHeap) }
+    }
+
+    fn variant_name(variant: VariantRef<'h>) -> Self {
+        JsonText { text: variant.name.into(), sand_str: SandStr::VariantName(variant.id) }
     }
 
     /// Returns the text of `leaf` as a JSON object key, or `None` if `leaf`
@@ -1467,7 +1485,7 @@ impl<'h> JsonText<'h> {
             Leaf::Int(i) | Leaf::Duration(i) => JsonText::new(i.to_string()),
             Leaf::Bool(b) => JsonText::new(if b { "true" } else { "false" }),
             Leaf::Tag(variant) if variant.id != rt_ids.none => JsonText::new(variant.name),
-            Leaf::Str { text, heap_str } => JsonText { heap_str, ..JsonText::new(text) },
+            Leaf::Str { text, heap_str } => JsonText::for_str(text, heap_str),
             Leaf::Native(native) => JsonText::new(native.text()),
             _ => return None,
         })
@@ -1522,7 +1540,8 @@ trait JsonOutput<'h> {
     fn reserve(&mut self, len: usize) -> Result<(), Fail>;
 
     /// Starts the next member of `parent`. `key` is `None` in an array.
-    fn member(&mut self, parent: &mut Self::Open, key: Option<JsonKey<'h>>) -> Result<(), Fail>;
+    /// `depth` is the number of open arrays and objects.
+    fn member(&mut self, parent: &mut Self::Open, key: Option<JsonKey<'h>>, depth: usize) -> Result<(), Fail>;
 
     /// Receives `scalar` as the value of the member of `parent` that started
     /// last.
@@ -1536,14 +1555,15 @@ trait JsonOutput<'h> {
     fn begin(&mut self, begin: Begin<'h>) -> Result<Self::Open, Fail>;
 
     /// Receives the end of `open` as the value of the member of `parent` that
-    /// started last.
-    fn end(&mut self, parent: &mut Self::Open, open: Self::Open) -> Result<(), Fail>;
+    /// started last. `depth` is the number of arrays and objects that stay
+    /// open.
+    fn end(&mut self, parent: &mut Self::Open, open: Self::Open, depth: usize) -> Result<(), Fail>;
 }
 
 /// The [`EncodeSink`] that gives each Sand value its JSON form and sends that
 /// form to a [`JsonOutput`].
-struct JsonSink<'h, O> {
-    out: O,
+struct JsonSink<'h, 'o, O> {
+    out: &'o mut O,
     meter: &'h Meter,
     json_ids: JsonIds,
     rt_ids: RtIds,
@@ -1560,27 +1580,29 @@ struct OpenJson<O> {
     variant: Option<O>,
 }
 
-/// Sends the JSON form of `value` to `out`. Returns `out`, and `root` with the value in it.
+/// Sends the JSON form of `value` to `out`, and returns `root` with the value
+/// in it.
 #[inline(always)]
 fn write_json<'h, O: JsonOutput<'h>>(
-    (prog, heap, meter): (&'h Program, &'h Heap, &'h Meter),
+    prog: &'h Program,
+    heap: &'h Heap,
+    meter: &'h Meter,
     json_ids: JsonIds,
-    out: O,
+    out: &mut O,
     root: O::Open,
     value: VmValue,
-) -> Result<(O, O::Open), Fail> {
+) -> Result<O::Open, Fail> {
     let mut sink = JsonSink { out, meter, json_ids, rt_ids: prog.ids, depth: 0 };
-    let root = encode::walk(prog, heap, meter, &mut sink, OpenJson { members: root, variant: None }, value)?;
-    Ok((sink.out, root.members))
+    Ok(encode::walk(prog, heap, meter, &mut sink, OpenJson { members: root, variant: None }, value)?.members)
 }
 
-impl<'h, O: JsonOutput<'h>> JsonSink<'h, O> {
+impl<'h, O: JsonOutput<'h>> JsonSink<'h, '_, O> {
     /// Starts a value with the role `role` in `parent`.
     fn begin_value(&mut self, parent: &mut O::Open, role: Role<'h>) -> Result<(), Fail> {
         match role {
             Role::Root | Role::Payload | Role::MapValue => Ok(()),
-            Role::Item => self.out.member(parent, None),
-            Role::Field(name) => self.out.member(parent, Some(JsonKey::Field(name))),
+            Role::Item => self.out.member(parent, None, self.depth),
+            Role::Field(name) => self.out.member(parent, Some(JsonKey::Field(name)), self.depth),
             Role::MapKey => invalid_key(),
         }
     }
@@ -1597,21 +1619,21 @@ impl<'h, O: JsonOutput<'h>> JsonSink<'h, O> {
     #[inline(always)]
     fn end(&mut self, parent: &mut O::Open, open: O::Open) -> Result<(), Fail> {
         self.depth -= 1;
-        self.out.end(parent, open)
+        self.out.end(parent, open, self.depth)
     }
 
     fn range(&mut self, parent: &mut O::Open, start: i64, end: i64, inclusive: bool) -> Result<(), Fail> {
         let mut object = self.begin(Begin::Object)?;
         let fields = [("start", Scalar::Int(start)), ("end", Scalar::Int(end)), ("inclusive", Scalar::Bool(true))];
         for (name, value) in fields.into_iter().take(if inclusive { 3 } else { 2 }) {
-            self.out.member(&mut object, Some(JsonKey::Text(JsonText::new(name))))?;
+            self.out.member(&mut object, Some(JsonKey::Text(JsonText::new(name))), self.depth)?;
             self.out.scalar(&mut object, value)?;
         }
         self.end(parent, object)
     }
 }
 
-impl<'h, O: JsonOutput<'h>> EncodeSink<'h> for JsonSink<'h, O> {
+impl<'h, O: JsonOutput<'h>> EncodeSink<'h> for JsonSink<'h, '_, O> {
     type Open = OpenJson<O::Open>;
 
     const TOO_DEEP: &'static str = O::TOO_DEEP;
@@ -1621,7 +1643,7 @@ impl<'h, O: JsonOutput<'h>> EncodeSink<'h> for JsonSink<'h, O> {
         let parent = &mut parent.members;
         if let Role::MapKey = role {
             let Some(key) = JsonText::for_key(leaf, self.rt_ids) else { return invalid_key() };
-            return self.out.member(parent, Some(JsonKey::Text(key)));
+            return self.out.member(parent, Some(JsonKey::Text(key)), self.depth);
         }
         self.begin_value(parent, role)?;
         let scalar = match leaf {
@@ -1629,7 +1651,7 @@ impl<'h, O: JsonOutput<'h>> EncodeSink<'h> for JsonSink<'h, O> {
             Leaf::Bool(b) => Scalar::Bool(b),
             Leaf::Int(i) | Leaf::Duration(i) => Scalar::Int(i),
             Leaf::Float(f) => Scalar::Float(f),
-            Leaf::Str { text, heap_str } => Scalar::Str(JsonText { heap_str, ..JsonText::new(text) }),
+            Leaf::Str { text, heap_str } => Scalar::Str(JsonText::for_str(text, heap_str)),
             Leaf::Bytes(bytes) => {
                 self.out.reserve(bytes.len() / 3 * 4 + 4)?;
                 self.meter.charge_slow_bytes(bytes.len())?;
@@ -1637,7 +1659,7 @@ impl<'h, O: JsonOutput<'h>> EncodeSink<'h> for JsonSink<'h, O> {
             }
             Leaf::Range { start, end, inclusive } => return self.range(parent, start, end, inclusive),
             Leaf::Tag(variant) if variant.id == self.rt_ids.none || variant.id == self.json_ids.null => Scalar::Null,
-            Leaf::Tag(variant) => Scalar::Str(JsonText { variant_id: Some(variant.id), ..JsonText::new(variant.name) }),
+            Leaf::Tag(variant) => Scalar::Str(JsonText::variant_name(variant)),
             Leaf::Native(native) => Scalar::Str(JsonText::new(native.text())),
             Leaf::Opaque { kind_name, .. } => return Err(without_trait(kind_name, "encoded as JSON", "Encode")),
         };
@@ -1656,8 +1678,7 @@ impl<'h, O: JsonOutput<'h>> EncodeSink<'h> for JsonSink<'h, O> {
             }
             self.begin_value(parent, role)?;
             let mut object = self.begin(Begin::Object)?;
-            let name = JsonText { variant_id: Some(payload_of.id), ..JsonText::new(payload_of.name) };
-            self.out.member(&mut object, Some(JsonKey::Text(name)))?;
+            self.out.member(&mut object, Some(JsonKey::Text(JsonText::variant_name(payload_of))), self.depth)?;
             variant = Some(object);
         } else {
             self.begin_value(parent, role)?;
@@ -1691,8 +1712,6 @@ struct JsonTextOutput<'h> {
     /// The number of bytes of `text` that the output has charged fuel for.
     charged: usize,
     scratch: Scratch,
-    /// The number of open arrays and objects.
-    level: usize,
 }
 
 /// A JSON array or object in the text that waits for its members.
@@ -1702,13 +1721,14 @@ struct OpenJsonText {
 }
 
 impl JsonTextOutput<'_> {
+    /// Starts a line for a member at `depth`, if the text has an indent.
     #[inline(always)]
-    fn newline(&mut self) -> Result<(), Fail> {
-        if self.indent > 0 { self.indented_line() } else { Ok(()) }
+    fn newline(&mut self, depth: usize) -> Result<(), Fail> {
+        if self.indent > 0 { self.indented_line(depth) } else { Ok(()) }
     }
 
-    fn indented_line(&mut self) -> Result<(), Fail> {
-        let n = self.indent.saturating_mul(self.level);
+    fn indented_line(&mut self, depth: usize) -> Result<(), Fail> {
+        let n = self.indent.saturating_mul(depth);
         self.scratch.check(self.heap, self.text.len().saturating_add(n))?;
         self.text.push('\n');
         let mut left = n;
@@ -1751,11 +1771,11 @@ impl<'h> JsonOutput<'h> for JsonTextOutput<'h> {
     }
 
     #[inline(always)]
-    fn member(&mut self, parent: &mut OpenJsonText, key: Option<JsonKey<'h>>) -> Result<(), Fail> {
+    fn member(&mut self, parent: &mut OpenJsonText, key: Option<JsonKey<'h>>, depth: usize) -> Result<(), Fail> {
         if !std::mem::replace(&mut parent.is_empty, false) {
             self.text.push(',');
         }
-        self.newline()?;
+        self.newline(depth)?;
         match key {
             Some(JsonKey::Text(key)) => self.string(&key.text)?,
             Some(JsonKey::Field(name)) => self.string(name)?,
@@ -1792,15 +1812,13 @@ impl<'h> JsonOutput<'h> for JsonTextOutput<'h> {
         self.charge_written()?;
         let is_array = matches!(begin, Begin::Array(_));
         self.text.push(if is_array { '[' } else { '{' });
-        self.level += 1;
         Ok(OpenJsonText { is_array, is_empty: true })
     }
 
     #[inline(always)]
-    fn end(&mut self, _: &mut OpenJsonText, open: OpenJsonText) -> Result<(), Fail> {
-        self.level -= 1;
+    fn end(&mut self, _: &mut OpenJsonText, open: OpenJsonText, depth: usize) -> Result<(), Fail> {
         if !open.is_empty {
-            self.newline()?;
+            self.newline(depth)?;
         }
         self.text.push_str(if open.is_array { "]" } else { "}" });
         Ok(())
@@ -1926,12 +1944,14 @@ impl<'a, 's, 'h> JsonValueOutput<'a, 's, 'h> {
         JsonValueOutput { b, json_ids, field_keys, first_field_keys, variant_names, pending_keys }
     }
 
-    /// Returns the Sand `str` that has the text of `text`.
-    fn str(&mut self, text: &JsonText<'_>) -> VmValue {
-        match (text.heap_str, text.variant_id) {
-            (Some(heap_str), _) => heap_str,
-            (None, Some(id)) => *self.variant_names.entry(id).or_insert_with(|| self.b.st.new_str(&*text.text)),
-            (None, None) => self.b.st.new_str(&*text.text),
+    /// Returns the Sand `str` that has the text of `text`, or `None` if the
+    /// output must copy the text to make one.
+    #[inline(always)]
+    fn shared_str(&mut self, text: &JsonText<'_>) -> Option<VmValue> {
+        match text.sand_str {
+            SandStr::OnHeap(heap_str) => Some(heap_str),
+            SandStr::VariantName(id) => Some(*self.variant_names.entry(id).or_insert_with(|| self.b.st.new_str(&*text.text))),
+            SandStr::Copy => None,
         }
     }
 
@@ -1966,9 +1986,12 @@ impl<'a> JsonOutput<'a> for JsonValueOutput<'a, '_, '_> {
     }
 
     #[inline(always)]
-    fn member(&mut self, _: &mut OpenJsonValue, key: Option<JsonKey<'a>>) -> Result<(), Fail> {
+    fn member(&mut self, _: &mut OpenJsonValue, key: Option<JsonKey<'a>>, _: usize) -> Result<(), Fail> {
         if let Some(JsonKey::Text(key)) = key {
-            let string = self.str(&key);
+            let string = match self.shared_str(&key) {
+                Some(string) => string,
+                None => self.b.st.new_str(&*key.text),
+            };
             self.pending_keys.push((string, key.text));
         }
         Ok(())
@@ -1983,12 +2006,13 @@ impl<'a> JsonOutput<'a> for JsonValueOutput<'a, '_, '_> {
             Scalar::Bool(b) => (json_ids.bool_, VmValue::Bool(b)),
             Scalar::Int(i) => (json_ids.int, VmValue::Int(i)),
             Scalar::Float(f) => (json_ids.float, VmValue::Float(f)),
-            Scalar::Str(text) => {
-                if text.heap_str.is_none() && text.variant_id.is_none() {
+            Scalar::Str(text) => match self.shared_str(&text) {
+                Some(string) => (json_ids.str_, string),
+                None => {
                     self.b.meter.charge_bytes(text.text.len())?;
+                    (json_ids.str_, self.b.st.new_str(&*text.text))
                 }
-                (json_ids.str_, self.str(&text))
-            }
+            },
             Scalar::Base64(text) => (json_ids.str_, self.b.st.new_str(text)),
         };
         let value = self.b.st.new_variant(id, &[payload]);
@@ -2020,7 +2044,7 @@ impl<'a> JsonOutput<'a> for JsonValueOutput<'a, '_, '_> {
     }
 
     #[inline(always)]
-    fn end(&mut self, parent: &mut OpenJsonValue, open: OpenJsonValue) -> Result<(), Fail> {
+    fn end(&mut self, parent: &mut OpenJsonValue, open: OpenJsonValue, _: usize) -> Result<(), Fail> {
         let (id, payload) = match open {
             OpenJsonValue::Root(_) => return internal("json.to_json: the root has no end"),
             OpenJsonValue::Array(items) => (self.json_ids.arr, self.b.list(items)),
