@@ -10,13 +10,15 @@ use parking_lot::Mutex;
 use sandlang::engine::{CompiledProgram, Config, Engine, Error, HostModules, InterruptHandle, LimitKind, Limits, MemorySink};
 use sandlang::files::mem::MemFs;
 use sandlang::native::NativeModule;
+use sandlang::native::convert::{Conversion, FromVmValue, IntoVmValue};
+use sandlang::native::ty::{SandType, Type};
 use sandlang::policy::rules::{PathPattern, RulePolicy};
 use sandlang::policy::{Capability, Decision, PromptAnswer};
 use sandlang::session::Session;
 use sandlang::stdlib::log::{LogLevel, LogRecord, LogSink};
 use sandlang::stdlib::time::TimeZone;
-use sandlang::vm::Vm;
-use sandlang::vm::value::ValueType;
+use sandlang::vm::value::{ValueType, VmValue};
+use sandlang::vm::{Fail, Vm};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -279,6 +281,39 @@ help(geo.dist)
         out,
         "5.0\n5\n[\"a\", \"b\"]\nSome(2)\nNone\nOk(3)\nnegative: -1\n2\n(42, \"X\")\nb\"cba\"\ntrue\nfn geo.dist(a: float, b: float) -> float\n\nEuclidean length of (a, b).\n"
     );
+}
+
+/// A count of cents that a host function receives and returns as a Sand `int`.
+struct Cents(i64);
+
+impl SandType for Cents {
+    fn sand_type() -> Type {
+        Type::Int
+    }
+}
+
+impl FromVmValue for Cents {
+    type Item<'a> = Cents;
+    fn from_vm_value(vm: &Vm, v: VmValue, conv: &mut Conversion) -> Result<Cents, Fail> {
+        i64::from_vm_value(vm, v, conv).map(Cents)
+    }
+}
+
+impl IntoVmValue for Cents {
+    fn into_vm_value(self, vm: &mut Vm) -> Result<VmValue, Fail> {
+        self.0.into_vm_value(vm)
+    }
+}
+
+#[test]
+fn host_type_implements_vm_value_conversion() {
+    let mut m = NativeModule::new("till");
+    m.function("double", |c: Cents| Cents(c.0 * 2));
+    m.async_function("refund", |c: Cents| async move { Cents(-c.0) });
+    let config = Config::new().host_modules(HostModules::new([m]).unwrap());
+    let (r, out, _) = run_src(config, "import till\nprint(till.double(21))\nprint(till.refund(5))");
+    r.unwrap();
+    assert_eq!(out, "42\n-5\n");
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, sandlang::SandValue)]
