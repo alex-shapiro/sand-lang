@@ -458,23 +458,19 @@ pub fn map_slot_tuple(heap: &Heap, budget: &impl Budget, m: &MapObj, items: &[Va
         h.write_u64(hash_key(heap, budget, x)?);
     }
     budget.charge(1)?;
-    let mut failed = None;
-    let slot = m.index.find(Value::Unit, h.finish(), |s| {
-        let Some((Value::Obj(t), _)) = m.entries[s] else { return false };
-        let Obj::Tuple(t) = heap.obj(t) else { return false };
-        t.len() == items.len()
-            && t.iter().zip(items).all(|(&a, &b)| match keys_eq(heap, budget, a, b) {
-                Ok(eq) => eq,
-                Err(c) => {
-                    failed.get_or_insert(c);
-                    false
-                }
-            })
-    });
-    match failed {
-        Some(c) => Err(c),
-        None => Ok(slot),
-    }
+    find_metered(budget, &m.index, Value::Unit, h.finish(), |slot| {
+        let Some((Value::Obj(tuple_handle), _)) = m.entries[slot] else { return Ok(false) };
+        let Obj::Tuple(tuple) = heap.obj(tuple_handle) else { return Ok(false) };
+        if tuple.len() != items.len() {
+            return Ok(false);
+        }
+        for (&a, &b) in tuple.iter().zip(items) {
+            if !keys_eq(heap, budget, a, b)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    })
 }
 
 /// The slot of element `k` in set `s`.
@@ -507,19 +503,39 @@ pub fn find_key(
     k: Value,
     key_at: impl Fn(usize) -> Option<Value>,
 ) -> Result<Option<usize>, Fail> {
-    let mut failed = None;
-    let slot = table.find(k, hash, |i| match key_at(i) {
-        Some(x) => match keys_eq(heap, budget, x, k) {
-            Ok(eq) => eq,
-            Err(c) => {
-                failed.get_or_insert(c);
-                false
-            }
-        },
-        None => false,
+    find_metered(budget, table, k, hash, |slot| match key_at(slot) {
+        Some(stored_key) => keys_eq(heap, budget, stored_key, k),
+        None => Ok(false),
+    })
+}
+
+/// Finds the slot in `table` for `key` with `hash` that satisfies `is_match`.
+///
+/// Refunds the fuel of each failed comparison. Only the matching comparison
+/// charges `budget`.
+#[inline]
+fn find_metered(
+    budget: &impl Budget,
+    table: &KeyIndex,
+    key: Value,
+    hash: u64,
+    is_match: impl Fn(usize) -> Result<bool, Fail>,
+) -> Result<Option<usize>, Fail> {
+    let mark = budget.fuel_mark();
+    let mut failure = None;
+    let slot = table.find(key, hash, |slot| match is_match(slot) {
+        Ok(true) => true,
+        Ok(false) => {
+            budget.refund_to(mark);
+            false
+        }
+        Err(fail) => {
+            failure.get_or_insert(fail);
+            false
+        }
     });
-    match failed {
-        Some(c) => Err(c),
+    match failure {
+        Some(fail) => Err(fail),
         None => Ok(slot),
     }
 }
@@ -1243,6 +1259,43 @@ mod tests {
         assert!(floats.last().unwrap().as_float().is_nan());
         // Mixed lists use the generic sort.
         assert!(try_sort_numbers(&mut [Value::Int(1), Value::Float(1.0)], &Unmetered).is_none());
+    }
+
+    #[derive(Default)]
+    struct CountingBudget {
+        units: std::cell::Cell<i64>,
+    }
+
+    impl Budget for CountingBudget {
+        fn charge(&self, units: u64) -> Result<(), Fail> {
+            self.units.set(self.units.get() + units as i64);
+            Ok(())
+        }
+
+        fn fuel_mark(&self) -> i64 {
+            self.units.get()
+        }
+
+        fn refund_to(&self, mark: i64) {
+            self.units.set(mark);
+        }
+    }
+
+    #[test]
+    fn find_key_charges_only_for_the_matching_comparison() {
+        let mut heap = Heap::new(None, usize::MAX);
+        let key = heap.new_str("a".repeat(6400));
+        let equal = heap.new_str("a".repeat(6400));
+        let other = heap.new_str("b".repeat(6400));
+        let hash = hash_key(&heap, &Unmetered, key).unwrap();
+        let mut index = KeyIndex::default();
+        index.insert(key, hash, 0);
+
+        let budget = CountingBudget::default();
+        assert_eq!(find_key(&heap, &budget, &index, hash, key, |_| Some(other)).unwrap(), None);
+        assert_eq!(budget.units.get(), 0, "hash-tag collision refunded");
+        assert_eq!(find_key(&heap, &budget, &index, hash, key, |_| Some(equal)).unwrap(), Some(0));
+        assert_eq!(budget.units.get(), 100, "6400 bytes compared");
     }
 
     #[test]

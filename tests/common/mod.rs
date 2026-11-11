@@ -7,6 +7,27 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
+/// A clock that returns a fixed instant and zero elapsed CPU time.
+pub struct StoppedClock(pub sandlang::platform::Instant);
+
+impl sandlang::platform::Clock for StoppedClock {
+    fn wall(&self) -> sandlang::platform::SystemTime {
+        sandlang::platform::UNIX_EPOCH
+    }
+    fn now(&self) -> sandlang::platform::Instant {
+        self.0
+    }
+    fn cpu_time(&self) -> std::time::Duration {
+        std::time::Duration::ZERO
+    }
+    fn sleep(&self, _duration: std::time::Duration) -> sandlang::platform::ClockFuture {
+        Box::pin(std::future::ready(()))
+    }
+    fn yield_now(&self) -> sandlang::platform::ClockFuture {
+        Box::pin(std::future::ready(()))
+    }
+}
+
 /// A fresh, empty temporary directory, removed on drop.
 pub struct TempDir(pub PathBuf);
 

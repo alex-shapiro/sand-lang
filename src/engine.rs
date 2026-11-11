@@ -458,10 +458,11 @@ impl Config {
         self.gc_stress = on;
         self
     }
-    /// Testing aid: forces the first memory or resource check in each
-    /// `vm_function` call to fail, triggering garbage collection and re-running
-    /// the function. Use this option to verify that native functions check
-    /// memory and resource limits before performing side effects.
+    /// Testing aid: fails the first memory or resource check in each native
+    /// call and retryable instruction. A failed check triggers garbage
+    /// collection and runs the call or instruction again. Use this option to
+    /// verify that functions and instructions check limits before side effects
+    /// and refund fuel on retry.
     pub fn retry_stress(mut self, on: bool) -> Self {
         self.retry_stress = on;
         self

@@ -7,11 +7,11 @@
 
 mod common;
 
-use common::{rt, run_with};
+use common::{StoppedClock, rt, run_with};
 use sandlang::engine::{Config, Engine, Error, HostModules, InterruptHandle, LimitKind, Limits, MemorySink, Outcome};
 use sandlang::native::NativeModule;
 use sandlang::vm::{Fail, Vm};
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 fn run(config: Config, src: &str) -> (Result<Outcome, Error>, String) {
@@ -827,4 +827,254 @@ fn the_collection_at_the_memory_limit_releases_the_staging_buffer() {
     }
     assert!(lo >= 16, "{lo} MiB");
     assert!(fits(false, lo - 2), "{lo} MiB fit after churn, but {} MiB do not fit right after the parse", lo - 2);
+}
+
+// ---------------------------------------------------------------------------
+// Fuel is a function of the program
+// ---------------------------------------------------------------------------
+
+/// Builds the `probe` host module for fuel and retry tests.
+fn fuel_probe() -> NativeModule {
+    let mut m = NativeModule::new("probe");
+    m.vm_function("fuel", |vm: &mut Vm| vm.meter.used() as i64);
+    m.vm_function("grow", |vm: &mut Vm, n: i64| -> Result<i64, Fail> {
+        vm.charge(50)?;
+        vm.check_memory(n as usize)?;
+        Ok(n)
+    });
+    m
+}
+
+/// Runs `src` with and without `retry_stress` and asserts that both runs
+/// produce the same output.
+fn assert_retries_preserve_fuel(src: &str) {
+    let run_stressed = |stress: bool| {
+        let (r, out) = run(
+            Config::new()
+                .clock(Arc::new(StoppedClock(sandlang::platform::Instant::now())))
+                .host_modules(HostModules::new([fuel_probe()]).unwrap())
+                .retry_stress(stress),
+            src,
+        );
+        assert!(r.is_ok(), "{r:?}");
+        out
+    };
+    let plain = run_stressed(false);
+    assert!(!plain.is_empty());
+    assert_eq!(plain, run_stressed(true));
+}
+
+#[test]
+fn retried_native_call_charges_fuel_once() {
+    assert_retries_preserve_fuel(
+        "import probe\nvar total = 0\nfor i in 0..3 {\n    total += probe.grow(i * 10)\n}\nprint((total, probe.fuel()))",
+    );
+}
+
+#[test]
+fn retried_instruction_charges_fuel_once() {
+    assert_retries_preserve_fuel(
+        r#"import probe
+var m: [str: int] = [:]
+var tuples: [(int, str): int] = [:]
+var s: Set<str> = Set()
+var text = ""
+for i in 0..200 {
+    let key = "key\(i)"
+    m[key] = i
+    tuples[(i, key)] = i
+    s.add(key)
+    text += key
+    text = "\(text),\(i)"
+    print((m[key], s.contains(key), m.contains(key)))
+}
+let more: [str: int] = ["a": 1, "b": 2]
+print((more, m.len(), text.len(), probe.fuel()))
+"#,
+    );
+}
+
+#[test]
+fn retried_instruction_keeps_remaining_slice_fuel() {
+    assert_retries_preserve_fuel(
+        r#"import probe
+var order = ""
+let long_key = "k".repeat(6400)
+fn work(name: str) {
+    var m: [str: int] = [:]
+    for i in 0..3000 {
+        m[long_key] = i
+        let _ = m.contains(long_key)
+        let text = "\(name)\(i)"
+        if i % 100 == 0 { order += text[0..1] }
+    }
+}
+let a = spawn work("a")
+let b = spawn work("b")
+let _ = a.wait()
+let _ = b.wait()
+print((order, probe.fuel()))
+"#,
+    );
+}
+
+#[test]
+fn compiling_a_regex_after_gc_charges_cache_hit_fuel() {
+    assert_retries_preserve_fuel(
+        r#"import probe
+import regex
+var hits = 0
+for i in 0..50 {
+    for pattern in ["a+b", "[0-9]+", "x|y"] {
+        if regex.Regex(pattern).unwrap().is_match("aab 12 x") { hits += 1 }
+    }
+}
+print((hits, probe.fuel()))
+"#,
+    );
+}
+
+#[test]
+fn map_store_charges_same_fuel_after_map_handle_reuse() {
+    let src = r#"import probe
+fn lookup(k: str) -> int {
+    var m: [str: int] = [:]
+    m[k] = 1
+    if m.contains(k) { return 1 } else { return 0 }
+}
+fn store(k: str) -> int {
+    var m: [str: int] = [:]
+    m[k] = 1
+    m[k] = 2
+    return m.len()
+}
+let k = "x".repeat(6400)
+var hits = 0
+for i in 0..300 {
+    hits += lookup(k)
+    hits += store(k)
+}
+print((hits, probe.fuel()))
+"#;
+    let fuel = |gc_stress: bool| {
+        let config = Config::new().clock(Arc::new(StoppedClock(sandlang::platform::Instant::now())));
+        let (r, out) = run(config.host_modules(HostModules::new([fuel_probe()]).unwrap()).gc_stress(gc_stress), src);
+        assert!(r.is_ok(), "{r:?}");
+        out
+    };
+    assert_eq!(fuel(false), fuel(true));
+}
+
+/// Verifies that a map lookup comparing a deep key enforces `max_instructions`.
+#[test]
+fn looking_up_a_key_with_shared_structure_stops_at_the_instruction_limit() {
+    let src = format!("{DAG}let m: [T: int] = [a: 1]\nprint(m[b])");
+    expect_stop(limits(|l| l.max_instructions = Some(1_000_000)), &src, is_limit(LimitKind::Instructions), Duration::from_secs(10));
+}
+
+#[test]
+fn a_failing_top_level_try_reports_the_memory_limit() {
+    let src = "fn fails() -> Result<int, [str]> {\n    let text = \"x\".repeat(4 << 20)\n    Err((0..16).map(_ => text))\n}\nlet n = fails()?\nprint(n)";
+    let config = limits(|l| {
+        l.max_memory = Some(16 << 20);
+        l.max_wall_time = Some(Duration::from_secs(5));
+    });
+    expect_stop(config, src, is_limit(LimitKind::Memory), Duration::from_secs(10));
+}
+
+#[test]
+fn full_gc_releases_cached_regexes_before_memory_limit() {
+    const LIMIT: usize = 32 << 20;
+    let build = |regexes: usize, nodes: usize| {
+        format!(
+            "import regex\nenum L {{ Nil, Cons(int, L) }}\nfor i in 0..{regexes} {{\n    let r = regex.Regex(\"[a-z]{{1,100}}q\\(i)\").unwrap()\n    let _ = r.is_match(\"abcdefgh\")\n}}\nvar l = L.Nil\nfor i in 0..{nodes} {{ l = L.Cons(i, l) }}\nprint(\"done\")"
+        )
+    };
+    let fits = |regexes: usize, nodes: usize| run(limits(|l| l.max_memory = Some(LIMIT)), &build(regexes, nodes)).0.is_ok();
+    let (mut low, mut high) = (1, 2_000_000);
+    while high - low > 1024 {
+        let mid = (low + high) / 2;
+        if fits(0, mid) { low = mid } else { high = mid }
+    }
+    assert!(fits(200, low * 199 / 200), "{low} list nodes fit without cached regexes");
+}
+
+fn fuel_under_gc_stress(src: &str, gc_stress: bool) -> String {
+    let config = Config::new().clock(Arc::new(StoppedClock(sandlang::platform::Instant::now())));
+    let (r, out) = run(config.host_modules(HostModules::new([fuel_probe()]).unwrap()).gc_stress(gc_stress), src);
+    assert!(r.is_ok(), "{r:?}");
+    out
+}
+
+#[test]
+fn mutating_a_map_after_an_early_break_charges_same_fuel_under_gc() {
+    let src = r#"import probe
+var m: [str: int] = [:]
+for i in 0..2000 { m["key\(i)"] = i }
+fn peek(m: [str: int], depth: int) {
+    if depth > 0 {
+        peek(m, depth - 1)
+        return
+    }
+    for (k, v) in m { break }
+}
+var i = 0
+while i < 200 {
+    peek(m, 1)
+    var j = 0
+    while j < 2 { j += 1 }
+    m["key0"] = i
+    i += 1
+}
+print(probe.fuel())
+"#;
+    assert_eq!(fuel_under_gc_stress(src, false), fuel_under_gc_stress(src, true));
+}
+
+#[test]
+fn a_repeat_expression_collects_garbage_before_it_reports_a_memory_limit() {
+    let src = "var garbage = \"x\".repeat(20 << 20)\ngarbage = \"\"\nlet xs = [0; 1000000]\nprint(xs.len())";
+    let (r, out) = run(limits(|l| l.max_memory = Some(32 << 20)), src);
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!(out, "1000000\n");
+}
+
+#[test]
+fn a_long_regex_pattern_uses_the_compile_cache() {
+    let pattern = "a".repeat(300);
+    let src = format!(
+        "import probe\nimport regex\nlet before = probe.fuel()\nlet _ = regex.Regex(\"{pattern}\").unwrap()\nlet first = probe.fuel() - before\nlet again = probe.fuel()\nlet _ = regex.Regex(\"{pattern}\").unwrap()\nprint(first > 100 * (probe.fuel() - again))"
+    );
+    let config = Config::new().clock(Arc::new(StoppedClock(sandlang::platform::Instant::now())));
+    let (r, out) = run(config.host_modules(HostModules::new([fuel_probe()]).unwrap()), &src);
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!(out, "true\n");
+}
+
+#[test]
+fn call_retried_after_stack_growth_charges_fuel_once() {
+    let src = r#"import probe
+fn deep(n: int) -> int {
+    if n == 0 { 0 } else { 1 + deep(n - 1) }
+}
+var total = 0
+for round in 0..40 {
+    let garbage = "x".repeat(150000)
+    total += garbage.len() + deep(3000)
+}
+print((total, probe.fuel()))
+"#;
+    let fuel_with_limit = |max_memory: usize| {
+        let (r, out) = run(limits(|l| l.max_memory = Some(max_memory)).host_modules(HostModules::new([fuel_probe()]).unwrap()), src);
+        r.map(|_| out).ok()
+    };
+    let unconstrained = fuel_with_limit(512 << 20).unwrap();
+    let mut completed = 0;
+    for max_memory in (0..24).map(|i| (1 << 19) + i * (1 << 16)) {
+        if let Some(out) = fuel_with_limit(max_memory) {
+            completed += 1;
+            assert_eq!(out, unconstrained, "max_memory {max_memory}");
+        }
+    }
+    assert!(completed > 0, "every limit was too small");
 }

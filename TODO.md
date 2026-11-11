@@ -50,6 +50,23 @@ The host cannot rely on engine limits, stability, or control.
       allocations reuse high-index slots first.
 - [ ] 🔴 [052](triage/052-dead-temporaries-rooted/summary.md) _Performance._ Clear dead temporaries before native calls so that inlined allocations
       do not stay rooted in caller frame registers during garbage collection.
+- [ ] ❓ _Metering._ Make regex fuel independent of the machine. The engine
+      charges regex work at least 1 unit per microsecond to bound searches that
+      the byte charge underestimates. This time charge changes total fuel and
+      task switches between runs. The compile charge also uses `memory_usage`,
+      which differs across platforms. Replace both charges with a deterministic
+      cost model, or check the time limits without charging fuel.
+- [ ] ❓ _Scheduling._ End a slice after an instruction spends the slice's fuel.
+      The interpreter syncs instruction charges to the meter only at native
+      calls. A task that runs only instructions can spend far more than its
+      20,000-unit slice while other tasks wait. Fix this before adding the
+      journal, because slice changes break paused runs.
+- [ ] ❓ _Testing._ Compare the active fiber and fuel at the start of each slice
+      across GC and retry modes. Current tests compare only total fuel.
+      Comparing each slice catches task-switch changes and cost changes that
+      break paused runs.
+- [ ] ❓ _Testing._ Compare fuel across hash seeds in the spec suite. Add a test
+      configuration option to set the hash seed.
 - [ ] ❓ _Embedding._ Convert derived `SandEnum` and `SandStruct` values iteratively with an
       explicit stack. The derived `FromValue` and `IntoValue` implementations
       recurse once per nesting level, so deep values can overflow a small host

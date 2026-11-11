@@ -21,7 +21,7 @@ mod math;
 #[cfg(feature = "os")]
 pub(crate) mod net;
 mod random;
-mod regex;
+pub(crate) mod regex;
 mod statistics;
 mod stream;
 mod test;

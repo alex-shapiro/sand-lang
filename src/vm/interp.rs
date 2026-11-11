@@ -422,6 +422,23 @@ impl Vm {
         })
     }
 
+    /// Creates a map from the alternating keys and values in `entries`.
+    #[inline(never)]
+    fn op_new_map(&mut self, entries: &[Value]) -> Result<Value, Fail> {
+        let map = self.heap.alloc(Obj::Map(Box::default()));
+        for pair in entries.as_chunks::<2>().0 {
+            self.map_insert(map, pair[0], pair[1])?;
+        }
+        Ok(map)
+    }
+
+    /// Appends `suffix` to string `builder`.
+    #[inline(never)]
+    fn op_append_str(&mut self, builder: Value, suffix: Value) -> Result<Value, Fail> {
+        self.meter.charge_bytes(self.heap.append_copies(builder, suffix))?;
+        self.heap.append_str(builder, suffix).map_err(Fail::limit)
+    }
+
     /// `Op::NewTuple` of anything but an inline pair.
     #[inline(never)]
     fn new_tuple(&mut self, items: &[Value]) -> Value {
@@ -445,7 +462,10 @@ impl Vm {
     #[cold]
     #[inline(never)]
     fn key_error(&self, k: Value) -> Fail {
-        Fail::runtime_error("not_found", format!("key not found: {}", self.debug(k).unwrap_or_default()))
+        match self.debug(k) {
+            Ok(text) => Fail::runtime_error("not_found", format!("key not found: {text}")),
+            Err(fail) => fail,
+        }
     }
 
     #[cold]
@@ -455,7 +475,9 @@ impl Vm {
         let Some(e) = self.heap.field(res, 0) else {
             return self.fail_stop(fiber, ip, Fail::runtime_error("none", "`?` found None"));
         };
-        match display::to_display_metered(prog, &self.heap, &self.meter, e) {
+        let fuel_mark = self.begin_retryable_op();
+        let text = display::to_display_metered(prog, &self.heap, &self.meter, e);
+        match self.end_retryable_op(fuel_mark, text) {
             Ok(text) => Err(self.error_trap(fiber, ip, text)),
             Err(c) => self.fail_stop(fiber, ip, c),
         }
@@ -515,13 +537,45 @@ impl Vm {
         Err(self.run_ending_of(fail, |vm| vm.trace_of(fiber, Some(ip as u32))))
     }
 
+    /// Records the meter fuel before an instruction that may hit a memory limit.
+    #[inline(always)]
+    fn begin_retryable_op(&mut self) -> i64 {
+        if self.retry_stress {
+            self.arm_instruction_retry_stress();
+        }
+        self.meter.fuel()
+    }
+
+    /// Finishes an instruction started with [`Vm::begin_retryable_op`].
+    ///
+    /// Refunds the instruction's fuel on a memory limit before the scheduler
+    /// collects garbage and retries the instruction.
+    #[inline(always)]
+    fn end_retryable_op<T>(&self, fuel_mark: i64, result: Result<T, Fail>) -> Result<T, Fail> {
+        if self.retry_stress {
+            self.heap.fail_next_check.set(false);
+        }
+        if let Err(fail) = &result
+            && fail.as_limit() == Some(LimitKind::Memory)
+        {
+            self.meter.refund_to(fuel_mark);
+        }
+        result
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn arm_instruction_retry_stress(&mut self) {
+        self.heap.fail_next_check.set(!self.instruction_retried);
+        self.instruction_retried = false;
+    }
+
     /// Converts a limit hit at the instruction before `ip` into a
     /// [`FiberStop`] or [`RunEnding`].
     ///
     /// Memory checks include uncollected garbage. On a memory limit, this
     /// rewinds the frame to the instruction so the scheduler can collect
-    /// garbage and retry. Instructions that check memory only charge
-    /// [`call_tick`] before the check.
+    /// garbage and retry.
     #[cold]
     #[inline(never)]
     fn limit_stop(&mut self, fiber: &mut Fiber, ip: usize, k: LimitKind) -> Result<FiberStop, RunEnding> {
@@ -622,6 +676,16 @@ impl Vm {
                     reload!();
                 }
             };
+        }
+        // Runs `$body` between `begin_retryable_op` and `end_retryable_op`.
+        // A closure would capture `regs` by reference. A macro keeps `regs` in
+        // a machine register.
+        macro_rules! retryable {
+            ($body:expr) => {{
+                let fuel_mark = self.begin_retryable_op();
+                let result = $body;
+                self.end_retryable_op(fuel_mark, result)
+            }};
         }
         // A safe point of a call instruction: on preemption the call is
         // re-executed when the fiber resumes. It charges `call_tick`.
@@ -892,7 +956,7 @@ impl Vm {
                     // Metered and out of line (`op_compare`); the branches
                     // `JNeq` and `JNne` share the arm to keep one call site.
                     Op::Eq { .. } | Op::Ne { .. } | Op::Lt { .. } | Op::Le { .. } | Op::JNeq { .. } | Op::JNne { .. } => {
-                        match self.op_compare(&prog, op, regs) {
+                        match retryable!(self.op_compare(&prog, op, regs)) {
                             Ok(off) => jump!(off),
                             Err(c) => fail_stop!(c),
                         }
@@ -1238,16 +1302,11 @@ impl Vm {
                         };
                     }
                     Op::NewMap { dst, start, count } => {
-                        let m = self.heap.alloc(Obj::Map(Box::default()));
                         let s = start as usize;
-                        for i in 0..count as usize {
-                            let k = regs[s + 2 * i];
-                            let v = regs[s + 2 * i + 1];
-                            if let Err(c) = self.map_insert(m, k, v) {
-                                fail_stop!(c);
-                            }
+                        match retryable!(self.op_new_map(&regs[s..s + 2 * count as usize])) {
+                            Ok(m) => r!(dst) = m,
+                            Err(c) => fail_stop!(c),
                         }
-                        r!(dst) = m;
                     }
                     Op::NewRange { dst, a, b } => {
                         let (x, y) = (int!(a), int!(b));
@@ -1299,7 +1358,7 @@ impl Vm {
                     }
                     Op::IndexMap { dst, obj, key } => match dense_get(&self.heap, &r!(obj), &r!(key)) {
                         Dense::Hit(v) => r!(dst) = *v,
-                        _ => match self.map_index(r!(obj), r!(key)) {
+                        _ => match retryable!(self.map_index(r!(obj), r!(key))) {
                             Ok(v) => r!(dst) = v,
                             Err(c) => fail_stop!(c),
                         },
@@ -1320,7 +1379,7 @@ impl Vm {
                     }
                     Op::SetIndexMap { obj, key, src } => {
                         let (m, k, v) = (r!(obj), r!(key), r!(src));
-                        if let Err(c) = self.map_set(m, k, v) {
+                        if let Err(c) = retryable!(self.map_set(m, k, v)) {
                             fail_stop!(c);
                         }
                     }
@@ -1346,7 +1405,7 @@ impl Vm {
                         }
                         if self.heap.would_exceed(to_usize_saturating(n).saturating_mul(std::mem::size_of::<Value>())) {
                             save!();
-                            return Err(Trap::Limit(LimitKind::Memory).into());
+                            return self.limit_stop(fiber, ip, LimitKind::Memory);
                         }
                     }
                     Op::Len { dst, src } => {
@@ -1395,21 +1454,21 @@ impl Vm {
                                 jump!(off);
                             }
                         }
-                        Dense::Unknown => match self.map_get_option(r!(map), r!(key)) {
+                        Dense::Unknown => match retryable!(self.map_get_option(r!(map), r!(key))) {
                             Ok(v) => r!(dst) = v,
                             Err(c) => fail_stop!(c),
                         },
                     },
                     Op::MapGetTuple { dst, map, start, n } => {
                         let s = start as usize;
-                        match self.map_get_tuple(r!(map), &regs[s..s + n as usize]) {
+                        match retryable!(self.map_get_tuple(r!(map), &regs[s..s + n as usize])) {
                             Ok(v) => r!(dst) = v,
                             Err(c) => fail_stop!(c),
                         }
                     }
                     Op::MapHasTuple { dst, map, start, n } => {
                         let s = start as usize;
-                        match self.map_has_tuple(r!(map), &regs[s..s + n as usize]) {
+                        match retryable!(self.map_has_tuple(r!(map), &regs[s..s + n as usize])) {
                             Ok(b) => r!(dst) = Value::Bool(b),
                             Err(c) => fail_stop!(c),
                         }
@@ -1419,32 +1478,29 @@ impl Vm {
                         Dense::Miss => {}
                         Dense::Unknown => {
                             let (m, k) = (r!(map), r!(key));
-                            if let Err(c) = self.map_get_or(m, k, &mut r!(dst)) {
+                            if let Err(c) = retryable!(self.map_get_or(m, k, &mut r!(dst))) {
                                 fail_stop!(c);
                             }
                         }
                     },
-                    Op::MapHas { dst, map, key } => match self.map_has(r!(map), r!(key)) {
+                    Op::MapHas { dst, map, key } => match retryable!(self.map_has(r!(map), r!(key))) {
                         Ok(b) => r!(dst) = Value::Bool(b),
                         Err(c) => fail_stop!(c),
                     },
-                    Op::SetHas { dst, set, key } => match self.set_contains(r!(set), r!(key)) {
+                    Op::SetHas { dst, set, key } => match retryable!(self.set_contains(r!(set), r!(key))) {
                         Ok(b) => r!(dst) = Value::Bool(b),
                         Err(c) => fail_stop!(c),
                     },
-                    Op::SetAdd { dst, set, key } => match self.set_add(r!(set), r!(key)) {
+                    Op::SetAdd { dst, set, key } => match retryable!(self.set_add(r!(set), r!(key))) {
                         Ok(b) => r!(dst) = Value::Bool(b),
                         Err(c) => fail_stop!(c),
                     },
                     Op::IntToFloat { dst, src } => r!(dst) = Value::Float(int!(src) as f64),
                     Op::AppendStr { local, src } => {
-                        let add = r!(src);
-                        if let Err(c) = self.meter.charge_bytes(self.heap.append_copies(r!(local), add)) {
-                            fail_stop!(c);
-                        }
-                        match self.heap.append_str(r!(local), add) {
+                        let (cur, add) = (r!(local), r!(src));
+                        match retryable!(self.op_append_str(cur, add)) {
                             Ok(v) => r!(local) = v,
-                            Err(k) => fail_stop!(Fail::limit(k)),
+                            Err(c) => fail_stop!(c),
                         }
                     }
                     Op::FreezeStr { reg } => self.heap.freeze_str(r!(reg)),
@@ -1606,24 +1662,24 @@ impl Vm {
                             r!(dst) = v;
                             continue 'dispatch;
                         }
-                        match self.op_display(&prog, v, false) {
+                        match retryable!(self.op_display(&prog, v, false)) {
                             Ok(v) => r!(dst) = v,
                             Err(c) => fail_stop!(c),
                         }
                     }
-                    Op::Debug { dst, src } => match self.op_display(&prog, r!(src), true) {
+                    Op::Debug { dst, src } => match retryable!(self.op_display(&prog, r!(src), true)) {
                         Ok(v) => r!(dst) = v,
                         Err(c) => fail_stop!(c),
                     },
-                    Op::Interp { dst, tmpl } => match self.op_interp(&prog, tmpl, regs) {
+                    Op::Interp { dst, tmpl } => match retryable!(self.op_interp(&prog, tmpl, regs)) {
                         Ok(v) => r!(dst) = v,
                         Err(c) => fail_stop!(c),
                     },
-                    Op::AppendInterp { local, tmpl } => match self.op_append_interp(&prog, tmpl, local, regs) {
+                    Op::AppendInterp { local, tmpl } => match retryable!(self.op_append_interp(&prog, tmpl, local, regs)) {
                         Ok(v) => r!(local) = v,
                         Err(c) => fail_stop!(c),
                     },
-                    Op::Describe { base, tmpl } => match self.op_describe(&prog, tmpl, &regs[base as usize..]) {
+                    Op::Describe { base, tmpl } => match retryable!(self.op_describe(&prog, tmpl, &regs[base as usize..])) {
                         Ok(v) => r!(base) = v,
                         Err(c) => fail_stop!(c),
                     },
@@ -1631,7 +1687,7 @@ impl Vm {
                     // ---------------- misc
                     Op::Spawn { dst, closure } => {
                         let c = r!(closure);
-                        match self.spawn_task(c) {
+                        match retryable!(self.spawn_task(c)) {
                             Ok(t) => r!(dst) = t,
                             Err(c) => fail_stop!(c),
                         }
@@ -1663,8 +1719,8 @@ impl Vm {
         fiber.frames.last_mut().unwrap().ip = resume_ip as u32;
         if self.heap.wants_gc() {
             self.collect_garbage(Some(fiber));
-            if self.heap.over_limit() {
-                return Some(Err(Trap::Limit(LimitKind::Memory).into()));
+            if let Err(limit) = self.enforce_limit(Some(fiber)) {
+                return Some(Err(Trap::Limit(limit).into()));
             }
         }
         if fuel_left <= 0 {
@@ -1692,16 +1748,24 @@ impl Vm {
         let frame = fiber.frames.last_mut().unwrap();
         frame.ip = ip as u32;
         self.caller_site = (frame.proto, frame.ip);
+        let fuel_at_call = self.meter.fuel();
         let mut r = Self::invoke_native(self, natives, n, &fiber.stack[start..start + argc]);
         self.heap.fail_next_check.set(false);
         if collection_may_help(&r) {
-            // Native functions check memory and open-resource limits against
-            // counts that include uncollected garbage. Run a full collection
-            // and retry once.
+            // Native functions check memory and resource limits before garbage
+            // collection. Collect all garbage, refund the failed attempt's
+            // fuel, and retry the call once.
             self.collect_all_garbage(Some(fiber));
-            self.collected = true;
-            r = Self::invoke_native(self, natives, n, &fiber.stack[start..start + argc]);
-            self.collected = false;
+            self.meter.refund_to(fuel_at_call);
+            r = match self.meter.check() {
+                Ok(()) => {
+                    self.collected = true;
+                    let retried = Self::invoke_native(self, natives, n, &fiber.stack[start..start + argc]);
+                    self.collected = false;
+                    retried
+                }
+                Err(fail) => Err(fail.into()),
+            };
         }
         if !matches!(&r, Err(c) if matches!(c.kind(), CtlKind::NeedPermission(_))) {
             self.forget_once_answers();
@@ -2132,18 +2196,20 @@ impl Vm {
         Ok(s)
     }
 
-    /// The slot of `k` in map `m` if it is the slot last looked up: the
-    /// entry there holds `k` itself.
+    /// Returns the cached slot from the previous lookup if `map` and `key` match it.
     #[inline]
-    fn last_slot(&self, m: Value, mo: &MapObj, k: Value) -> Option<usize> {
-        let (h, s) = self.last_slot.get();
-        let hit = matches!(m, Value::Obj(x) if x == h)
-            && match (mo.entries.get(s as usize), k) {
-                (Some(Some((Value::Obj(x), _))), Value::Obj(y)) => *x == y,
-                (Some(Some((x, _))), _) => *x == k,
-                _ => false,
-            };
-        hit.then_some(s as usize)
+    fn last_slot(&self, map: Value, map_obj: &MapObj, key: Value) -> Result<Option<usize>, Fail> {
+        let (cached_map, cached_slot) = self.last_slot.get();
+        let (Value::Obj(map_handle), Value::Obj(key_handle)) = (map, key) else { return Ok(None) };
+        let Some(Some((Value::Obj(stored_key), _))) = map_obj.entries.get(cached_slot as usize) else { return Ok(None) };
+        if map_handle != cached_map || *stored_key != key_handle {
+            return Ok(None);
+        }
+        let Obj::Str(text) = self.heap.get(key) else { return Ok(None) };
+        // Charge the hash cost of `key` so fuel stays the same if garbage
+        // collection reuses a map handle.
+        self.meter.charge_bytes(text.len())?;
+        Ok(Some(cached_slot as usize))
     }
 
     /// `Op::MapGetOr`: the value of `k` in map `m` to `out`, if there is one.
@@ -2208,7 +2274,7 @@ impl Vm {
         let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
         let found = match k {
             Value::Int(i) => mo.index.find_int(i, |s| matches!(mo.entries[s], Some((Value::Int(x), _)) if x == i)),
-            _ if let Some(s) = self.last_slot(m, mo, k) => Some(s),
+            _ if let Some(s) = self.last_slot(m, mo, k)? => Some(s),
             _ => {
                 let hash = hash_key(&self.heap, &self.meter, k)?;
                 match find_entry(&self.heap, &self.meter, &mo.index, hash, k, &mo.entries, |e| e.0)? {
@@ -2447,8 +2513,7 @@ impl Vm {
     }
 }
 
-/// The fuel that instruction `op` spends before it can fail. Only calls
-/// spend any, at their safe point (`tick_call!`).
+/// Returns the interpreter fuel that `op` spends at `tick_call!` before it can fail.
 pub(super) fn call_tick(op: Op) -> i64 {
     match op {
         Op::CallDirect { .. }

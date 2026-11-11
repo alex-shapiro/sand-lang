@@ -558,7 +558,7 @@ pub struct Host {
     /// The run's idle `http` connections.
     #[cfg(feature = "os")]
     pub(crate) http_pool: Arc<crate::stdlib::http::Pool>,
-    pub(crate) regex_cache: Vec<(u64, u32)>,
+    pub(crate) regex_cache: Vec<Option<crate::stdlib::regex::RegexCacheEntry>>,
     /// The file system of the `fs` module.
     pub(crate) fs: crate::files::Fs,
     /// Rewrites or blocks outgoing HTTP requests. See [`crate::engine::Config::request_filter`].
@@ -617,8 +617,10 @@ pub struct Vm {
     /// interpreter, a native or an I/O finisher: the VM is memory safe but may
     /// be inconsistent, so a REPL session discards it.
     pub(crate) broken: bool,
-    /// Testing aid: causes the first memory or resource check in each `vm_function` call to fail (see `Config::retry_stress`).
+    /// Testing aid that fails the first memory or resource check in each native call and retryable instruction. See [`crate::engine::Config::retry_stress`].
     pub(crate) retry_stress: bool,
+    /// True while `retry_stress` runs an instruction a second time after garbage collection.
+    pub(crate) instruction_retried: bool,
     /// Struct nesting depth during conversion to Sand (see [`struct_into_value`](crate::native::struct_into_value)).
     pub(crate) struct_depth: usize,
 }
@@ -710,6 +712,7 @@ impl Vm {
             ascii_strs: Vec::new(),
             broken: false,
             retry_stress: false,
+            instruction_retried: false,
             struct_depth: 0,
         };
         vm.load_program();
@@ -1605,13 +1608,13 @@ impl Vm {
         self.collect_garbage_with(current, false);
     }
 
-    /// A major collection, freeing all unreachable objects; used before
-    /// reporting a memory limit, since a minor collection leaves old garbage.
-    /// Also closes idle `http` connections, which hold resource slots and
-    /// buffers.
+    /// Runs a major garbage collection to free all unreachable objects before a
+    /// memory limit check. Also clears idle HTTP connections and cached
+    /// regexes.
     pub fn collect_all_garbage(&mut self, current: Option<&mut Fiber>) {
         #[cfg(feature = "os")]
         self.host.http_pool.clear();
+        self.host.regex_cache.iter_mut().flatten().for_each(|entry| entry.regex = None);
         self.collect_garbage_with(current, true);
     }
 
@@ -1625,6 +1628,7 @@ impl Vm {
         roots.extend(self.consts.iter().copied());
         roots.extend(self.pinned.iter().copied());
         roots.extend(self.ascii_strs.iter().copied());
+        roots.extend(self.host.regex_cache.iter().flatten().filter_map(|entry| entry.regex));
         let prog = &self.prog;
         let mut fiber_bytes = 0;
         let mut add_fiber = |f: &mut Fiber, roots: &mut Vec<Value>| {

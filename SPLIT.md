@@ -31,8 +31,8 @@ source branch only as a reference.
 7. Linter budget and interrupt errors: merged in #32 from `lint-budget-errors`
 8. Single exit path: merged in #34 from `single-exit-path`
 9. Explicit VM control flow: merged in #35 from `explicit-vm-control-flow`
-10. `Fail` failure type: in review on `fail-failure-type`
-11. Deterministic fuel: not started
+10. `Fail` failure type: merged in #37 from `fail-failure-type`
+11. Deterministic fuel: in review on `deterministic-fuel`
 12. `VmValue` rename: not started
 13. Single native function registration: not started
 14. `Value` and the shared encode path: not started; requires 12
@@ -454,6 +454,9 @@ seeds, and the environment.
   of live operations. The engine also saves them if they pass a fixed size. On
   the source branch a loop of `time.now()` grows a host buffer outside every
   limit, which violates the hard memory limit of the sandbox.
+- **Record regex fuel that depends on the machine.** The engine charges regex
+  fuel from the elapsed time and the size of the compiled program. A replay
+  reads these charges from the journal.
 - **Detect an incompatible journal before replay.** The first entry holds a
   format number, a hash of the script source and its imports, and the arguments
   of the run. A mismatch returns an error before the script starts. Bump the format

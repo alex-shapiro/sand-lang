@@ -33,11 +33,14 @@
 
 mod common;
 
-use common::rt;
-use sandlang::engine::{Config, Engine, Error, MemorySink};
+use common::{StoppedClock, rt};
+use sandlang::engine::{Config, Engine, Error, HostModules, Limits, MemorySink};
 use sandlang::files::mem::MemFs;
+use sandlang::native::NativeModule;
+use sandlang::vm::Vm;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
@@ -366,6 +369,62 @@ fn run_file(name: &str, mode: Mode, backend: Backend) {
     if !failures.is_empty() {
         panic!("{} of {ran} cases failed:\n\n{}", failures.len(), failures.join("\n\n"));
     }
+}
+
+/// Runs `case` in `mode` and returns stdout followed by total fuel used.
+fn output_with_fuel(case: &Case, mode: Mode) -> String {
+    let mut probe = NativeModule::new("fuel_probe");
+    probe.vm_function("used", |vm: &mut Vm| vm.meter.used() as i64);
+    let dir = CaseDir::new(Backend::Memory, &case.name);
+    let out = MemorySink::new();
+    let limits = Limits { max_instructions: Some(300_000_000), ..Limits::default() };
+    let config = Config::new()
+        .limits(limits)
+        .policy(sandlang::policy::rules::RulePolicy::allow_all())
+        .stdout(out.clone())
+        .stderr(MemorySink::new())
+        .seed(42)
+        .clock(Arc::new(StoppedClock(sandlang::platform::Instant::now())))
+        .host_modules(HostModules::new([probe]).unwrap())
+        .gc_stress(mode == Mode::GcStress)
+        .retry_stress(mode == Mode::RetryStress);
+    let main = dir.write("main.sand", &format!("import fuel_probe\n{}\nprint(fuel_probe.used())\n", case.source));
+    let mut engine = Engine::new(dir.configure(config));
+    let _ = rt().block_on(engine.run_file(&main));
+    out.contents()
+}
+
+#[test]
+fn spec_cases_use_identical_fuel_under_gc_and_retry_stress() {
+    const UNSUPPORTED: [&str; 8] = ["error", "fmt", "lint", "test", "file", "stdin", "args", "env"];
+    let dir = format!("{}/tests/spec", env!("CARGO_MANIFEST_DIR"));
+    let mut failures = Vec::new();
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        let text = std::fs::read_to_string(&path).unwrap();
+        for case in parse_cases(&text) {
+            let is_plain_run = !case.sections.iter().any(|(header, _)| {
+                header.starts_with("requires") || UNSUPPORTED.iter().any(|name| header.split_whitespace().next() == Some(*name))
+            });
+            if !is_plain_run {
+                continue;
+            }
+            let plain = output_with_fuel(&case, Mode::Plain);
+            for mode in [Mode::GcStress, Mode::RetryStress] {
+                let stressed = output_with_fuel(&case, mode);
+                if plain != stressed {
+                    failures.push(format!(
+                        "[{}:{}] {}{}\nplain:\n{plain}stressed:\n{stressed}",
+                        path.display(),
+                        case.line,
+                        case.name,
+                        mode.note()
+                    ));
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{} runs differ:\n\n{}", failures.len(), failures.join("\n\n"));
 }
 
 macro_rules! spec_files {

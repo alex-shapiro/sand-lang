@@ -211,6 +211,11 @@ impl Default for FxHasher {
 }
 
 impl FxHasher {
+    /// Returns a hasher initialized to zero so hashes match across processes.
+    pub(crate) fn unseeded() -> FxHasher {
+        FxHasher { hash: 0 }
+    }
+
     #[inline]
     fn add(&mut self, w: u64) {
         let p = ((self.hash ^ w) as u128).wrapping_mul(MULTIPLIER as u128);
@@ -650,6 +655,9 @@ pub struct Pins {
     pub its: Vec<u32>,
     /// Length of `its` at which stale handles are pruned.
     pub prune_at: usize,
+    /// Active iterators created since the last detach. This count changes only
+    /// as iterators start, finish, or detach.
+    pub open: usize,
 }
 
 impl Clone for Pins {

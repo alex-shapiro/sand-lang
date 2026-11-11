@@ -97,6 +97,12 @@ pub trait Budget {
     fn charge_bytes(&self, n: usize) -> Result<(), Fail> {
         self.charge((n / BYTES_PER_UNIT) as u64)
     }
+
+    /// Returns the current fuel position for [`Budget::refund_to`].
+    fn fuel_mark(&self) -> i64;
+
+    /// Refunds the fuel charged since [`Budget::fuel_mark`] returned `mark`.
+    fn refund_to(&self, mark: i64);
 }
 
 /// A budget that never runs out.
@@ -107,6 +113,14 @@ impl Budget for Unmetered {
     fn charge(&self, _: u64) -> Result<(), Fail> {
         Ok(())
     }
+
+    #[inline(always)]
+    fn fuel_mark(&self) -> i64 {
+        0
+    }
+
+    #[inline(always)]
+    fn refund_to(&self, _: i64) {}
 }
 
 /// The fuel counter of an engine.
@@ -194,6 +208,15 @@ impl Meter {
         self.base.get().saturating_add(self.spent())
     }
 
+    /// Refunds the fuel charged since [`Meter::fuel`] returned `mark`.
+    ///
+    /// Keeps the next limit check within [`CHECK_INTERVAL`] of `mark`.
+    #[inline]
+    pub(crate) fn refund_to(&self, mark: i64) {
+        self.fuel.set(mark);
+        self.check_at.set(self.check_at.get().max(mark.saturating_sub(CHECK_INTERVAL)));
+    }
+
     /// Resets the fuel counter to zero and replaces the interrupt flag for a
     /// new session run.
     pub(crate) fn reset(&mut self, interrupt: Arc<AtomicBool>) {
@@ -261,6 +284,16 @@ impl Budget for Meter {
     #[inline]
     fn charge(&self, units: u64) -> Result<(), Fail> {
         Meter::charge(self, units)
+    }
+
+    #[inline]
+    fn fuel_mark(&self) -> i64 {
+        self.fuel()
+    }
+
+    #[inline]
+    fn refund_to(&self, mark: i64) {
+        Meter::refund_to(self, mark);
     }
 }
 
@@ -407,6 +440,18 @@ mod tests {
         assert_eq!(m.start_slice(None, None), 40);
         m.reset(Arc::new(AtomicBool::new(false)));
         assert_eq!((m.used(), m.start_slice(None, None)), (0, 100));
+    }
+
+    #[test]
+    fn refund_to_restores_checkpoint_interval() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let m = Meter::new(None, flag.clone(), system());
+        m.start_slice(None, None);
+        let mark = m.fuel();
+        assert!(m.charge(SLICE_FUEL as u64 + 1).is_ok(), "checkpoint advances check_at");
+        m.refund_to(mark);
+        flag.store(true, Ordering::SeqCst);
+        assert!(matches!(m.charge(SLICE_FUEL as u64 + 1).map_err(Fail::into_kind), Err(FailKind::Interrupted)));
     }
 
     #[test]
