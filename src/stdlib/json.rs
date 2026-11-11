@@ -1515,9 +1515,19 @@ enum Begin<'h> {
     /// An array with this number of members.
     Array(usize),
     Object,
-    /// An object with a [`JsonKey::Field`] for each of the field names of a
-    /// struct type or of a variant, in order.
-    Fields(&'h [String]),
+    /// An object with a [`JsonKey::Field`] for each of the field names
+    /// `names` of `owner`, in order.
+    Fields {
+        owner: FieldsOwner,
+        names: &'h [String],
+    },
+}
+
+/// A struct type or a variant with field names, by its runtime ID.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum FieldsOwner {
+    Struct(u32),
+    Variant(u32),
 }
 
 /// The receiver of the JSON values that a [`JsonSink`] makes from Sand values.
@@ -1598,6 +1608,7 @@ fn write_json<'h, O: JsonOutput<'h>>(
 
 impl<'h, O: JsonOutput<'h>> JsonSink<'h, '_, O> {
     /// Starts a value with the role `role` in `parent`.
+    #[inline(always)]
     fn begin_value(&mut self, parent: &mut O::Open, role: Role<'h>) -> Result<(), Fail> {
         match role {
             Role::Root | Role::Payload | Role::MapValue => Ok(()),
@@ -1685,8 +1696,8 @@ impl<'h, O: JsonOutput<'h>> EncodeSink<'h> for JsonSink<'h, '_, O> {
         }
         let members = self.begin(match container {
             Container::Map => Begin::Object,
-            Container::Struct(ty) => Begin::Fields(&ty.fields),
-            Container::Variant(VariantRef { field_names: Some(names), .. }) => Begin::Fields(names),
+            Container::Struct { def, ty } => Begin::Fields { owner: FieldsOwner::Struct(def), names: &ty.fields },
+            Container::Variant(VariantRef { id, field_names: Some(names), .. }) => Begin::Fields { owner: FieldsOwner::Variant(id), names },
             _ => Begin::Array(len),
         })?;
         Ok(Opened::Children(OpenJson { members, variant }))
@@ -1907,12 +1918,12 @@ fn write_escaped(out: &mut String, s: &str) {
 struct JsonValueOutput<'a, 's, 'h> {
     b: Builder<'a, 's, 'h>,
     json_ids: JsonIds,
-    /// The key of each field of the struct types and variants that the output
-    /// has received.
-    field_keys: Vec<FieldKey>,
-    /// The index in `field_keys` of the first field of a struct type or
-    /// variant, by the address of its field names in the program.
-    first_field_keys: FxHashMap<*const String, usize>,
+    /// The keys of the fields of each struct type and variant that the output
+    /// has received, in order. `None` follows the keys of each type.
+    field_keys: Vec<Option<FieldKey>>,
+    /// The index in `field_keys` of the first field of each struct type and
+    /// variant that the output has received.
+    first_field_keys: FxHashMap<FieldsOwner, usize>,
     /// The name string of each variant that the output has received, by
     /// runtime variant ID.
     variant_names: FxHashMap<u32, VmValue>,
@@ -1921,8 +1932,10 @@ struct JsonValueOutput<'a, 's, 'h> {
     pending_keys: Vec<(VmValue, Cow<'a, str>)>,
 }
 
+/// The key of an object member for a field.
 #[derive(Clone, Copy)]
 struct FieldKey {
+    /// The Sand `str` that has the field name.
     name: VmValue,
     hash: u64,
     name_len: usize,
@@ -1955,6 +1968,15 @@ impl<'a, 's, 'h> JsonValueOutput<'a, 's, 'h> {
         }
     }
 
+    /// Returns the key of the next member of an object with field names, or
+    /// `None` if the object has a member for each field name. The walk
+    /// reports the fields of a type in order, so the number of members that
+    /// the object has gives the next field.
+    #[inline(always)]
+    fn next_field_key(&self, map: &MapBuilder, first_key: usize) -> Option<FieldKey> {
+        self.field_keys.get(first_key + self.b.entries.len() - map.base).copied().flatten()
+    }
+
     #[inline]
     fn put(&mut self, parent: &mut OpenJsonValue, value: VmValue) -> Result<(), Fail> {
         match parent {
@@ -1966,7 +1988,9 @@ impl<'a, 's, 'h> JsonValueOutput<'a, 's, 'h> {
                 self.b.put(map, hash, Some(text), key, value)?;
             }
             OpenJsonValue::Fields(map, first_key) => {
-                let key = self.field_keys[*first_key + self.b.entries.len() - map.base];
+                let Some(key) = self.next_field_key(map, *first_key) else {
+                    return internal("json.to_json: more members than field names");
+                };
                 self.b.meter.charge_bytes(key.name_len)?;
                 self.b.append(map, key.hash, key.name, value)?;
             }
@@ -2029,15 +2053,15 @@ impl<'a> JsonOutput<'a> for JsonValueOutput<'a, '_, '_> {
     #[inline(always)]
     fn begin(&mut self, begin: Begin<'a>) -> Result<OpenJsonValue, Fail> {
         self.b.reserve()?;
-        let names = match begin {
+        let (owner, names) = match begin {
             Begin::Array(len) => return Ok(OpenJsonValue::Array(self.b.list_buffer(len)?)),
             Begin::Object => return Ok(OpenJsonValue::Object(self.b.start_map())),
-            Begin::Fields(names) => names,
+            Begin::Fields { owner, names } => (owner, names),
         };
-        let first_key = *self.first_field_keys.entry(names.as_ptr()).or_insert_with(|| {
+        let first_key = *self.first_field_keys.entry(owner).or_insert_with(|| {
             let first_key = self.field_keys.len();
-            let key = |name: &String| FieldKey { name: self.b.st.new_str(name.as_str()), hash: str_hash(name), name_len: name.len() };
-            self.field_keys.extend(names.iter().map(key));
+            let key = |name: &String| Some(FieldKey { name: self.b.st.new_str(name.as_str()), hash: str_hash(name), name_len: name.len() });
+            self.field_keys.extend(names.iter().map(key).chain([None]));
             first_key
         });
         Ok(OpenJsonValue::Fields(self.b.start_map(), first_key))
@@ -2048,7 +2072,13 @@ impl<'a> JsonOutput<'a> for JsonValueOutput<'a, '_, '_> {
         let (id, payload) = match open {
             OpenJsonValue::Root(_) => return internal("json.to_json: the root has no end"),
             OpenJsonValue::Array(items) => (self.json_ids.arr, self.b.list(items)),
-            OpenJsonValue::Object(map) | OpenJsonValue::Fields(map, _) => (self.json_ids.obj, self.b.map(map)),
+            OpenJsonValue::Object(map) => (self.json_ids.obj, self.b.map(map)),
+            OpenJsonValue::Fields(map, first_key) => {
+                if self.next_field_key(&map, first_key).is_some() {
+                    return internal("json.to_json: fewer members than field names");
+                }
+                (self.json_ids.obj, self.b.map(map))
+            }
         };
         let value = self.b.st.new_variant(id, &[payload]);
         self.put(parent, value)

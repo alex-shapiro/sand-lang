@@ -107,8 +107,11 @@ pub(crate) enum Container<'h> {
     Tuple,
     Set,
     Map,
-    /// A struct and its type.
-    Struct(&'h StructRt),
+    /// A struct of the type `ty`, which has the runtime type ID `def`.
+    Struct {
+        def: u32,
+        ty: &'h StructRt,
+    },
     /// An enum variant with a payload.
     Variant(VariantRef<'h>),
 }
@@ -236,7 +239,7 @@ fn report<'h, S: EncodeSink<'h>>(
             Obj::Map(map) => (Container::Map, map.live, Children::Map(map.entries.iter(), None)),
             Obj::Struct(def, values) => {
                 let ty = &prog.types[*def as usize];
-                fields(Container::Struct(ty), &ty.fields, values)
+                fields(Container::Struct { def: *def, ty }, &ty.fields, values)
             }
             Obj::Variant(id, values) => {
                 let variant = variant_ref(prog, value, *id)?;
@@ -270,13 +273,20 @@ fn report<'h, S: EncodeSink<'h>>(
         | VmValue::VObj(..) => {
             let Some((id, payload)) = value.as_inline_variant() else { return internal("encode: not an inline variant") };
             let variant = variant_ref(prog, value, id)?;
-            let role = variant.field_names.and_then(<[String]>::first).map_or(Role::Item, |name| Role::Field(name));
+            let role = match variant.field_names {
+                None => Role::Item,
+                Some([name]) => Role::Field(name),
+                Some(_) => return internal("encode: a variant with one payload value and another number of field names"),
+            };
             (Container::Variant(variant), 1, Children::One(role, Some(payload)))
         }
     };
     Ok(match sink.open(parent, role, container, len)? {
         Opened::Children(open) => Reported::Opened(Frame { children, open }),
-        Opened::Unwrapped => Reported::Unwrapped(children.next().map_or(VmValue::Unit, |(_, payload)| payload)),
+        Opened::Unwrapped => match children.next() {
+            Some((_, payload)) => Reported::Unwrapped(payload),
+            None => return internal("encode: a sink unwrapped a container without a child"),
+        },
         Opened::Closed => Reported::Closed,
     })
 }
@@ -291,6 +301,10 @@ fn leaf<'h, S: EncodeSink<'h>>(sink: &mut S, parent: &mut S::Open, role: Role<'h
 /// `values`.
 #[inline(always)]
 fn fields<'h>(container: Container<'h>, names: &'h [String], values: &'h [VmValue]) -> (Container<'h>, usize, Children<'h>) {
+    // The VM gives a struct one value for each field of its type, and a
+    // payload one value for each of its field names. The walk does not fail
+    // for another number of values, because the check makes `json.encode` 2%
+    // slower and `json.encode` of a `Json` value 3% to 5% slower.
     let len = names.len().min(values.len());
     (container, len, Children::Fields(names[..len].iter(), values[..len].iter()))
 }

@@ -722,7 +722,7 @@ impl<'h> EncodeSink<'h> for ValueSink<'h> {
                 self.reserve(len.saturating_mul(size_of::<(Value, Value)>()))?;
                 OpenValue::Map(Vec::with_capacity(len), false)
             }
-            Container::Struct(ty) => OpenValue::Struct(ty.desc().clone(), self.items(len)?),
+            Container::Struct { ty, .. } => OpenValue::Struct(ty.desc().clone(), self.items(len)?),
             Container::Variant(variant) => OpenValue::Variant(self.variant_desc(variant.id)?, self.items(len)?),
         }))
     }
