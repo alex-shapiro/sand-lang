@@ -101,10 +101,12 @@ The host cannot rely on engine limits, stability, or control.
       stack without regressing throughput. These functions recurse up to the
       512-level nesting limit, which can overflow a 2 MiB thread stack in debug
       builds.
-- [ ] ❓ _Embedding._ Drop a deep `Value` without recursion. `Vm::to_value`
-      copies at most 512 levels, but a host can build a deeper `Value` in Rust.
-      The default drop recurses once per level, so such a value can overflow
-      the host thread stack when it drops.
+- [ ] ❓ _Embedding._ Clone, compare, and drop a deep `Value` without
+      recursion. The derived `Clone` and `PartialEq` and the default drop
+      recurse once per level. For a 512-level value, which `Vm::to_value` can
+      return, a debug build needs up to 721 KiB of stack for `clone`, 417 KiB
+      for `==`, and 129 KiB for drop, so `clone` overflows a 512 KiB thread.
+      A host can also build a `Value` deeper than 512 levels in Rust.
 - [ ] 🔴 [019](triage/019-value-type-defaults/summary.md) _Embedding._ Represent `ValueType` constants in `ConstVal` by their text form so that
       `#[sand(default)]` supports value-type fields and `json.decode` evaluates
       constant value-type defaults directly.
@@ -433,6 +435,10 @@ Visible defects that rarely block users.
       variant and its payload as two values. It also charges for the entries
       of an object when the object begins, and `Begin::Object` has no entry
       count.
+- [ ] ❓ Make `display::render_metered` (`src/vm/display.rs`) a sink of
+      `encode::walk`. It is a second walk over a heap value with an explicit
+      stack, and it selects the work for each value by its kind, as
+      `encode::walk` does.
 
 ### Policy
 
