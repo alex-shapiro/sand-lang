@@ -3,39 +3,36 @@
 //! collector.
 //!
 //! The VM runs garbage collection only at safe points and never during a native
-//! call, so native functions may hold [`VmValue`]s in local variables. Do not
-//! hold a `&mut Obj` across a safe point, and mutate [`VmValue`]-containing
-//! objects only through [`Heap::get_mut`], [`Heap::get_mut_storing`], or the
-//! container methods built on them so that the collector records write
-//! barriers.
+//! call. Native functions may hold [`VmValue`] values in local variables during
+//! a call. Do not hold a `&mut Obj` across a safe point. Mutate objects that
+//! hold [`VmValue`] values only through [`Heap::get_mut`],
+//! [`Heap::get_mut_storing`], or the container methods built on them so that
+//! the collector records write barriers.
 //!
-//! The collector divides objects into young and old generations using sticky
-//! mark bits (`marks`). The allocator leaves new objects unmarked and appends
-//! them to `young`; objects that survive a collection keep their mark bit set
-//! and become old:
+//! The collector divides objects into young and old generations with sticky
+//! mark bits in `marks`. The allocator leaves new objects unmarked and appends
+//! them to `young`. Objects that remain reachable after a collection keep their
+//! mark bit set and become old:
 //!
-//! * A **minor collection** traces from roots and the remembered set
-//!   (`remembered` and `dirty`), skips unmarked old objects, and sweeps only
-//!   `young`.
+//! * A **minor collection** traces from roots and the remembered set, skips
+//!   unmarked old objects, and sweeps only `young`.
 //! * A **major collection** reclaims unreachable old objects across the entire
 //!   arena if `bytes` exceeds `major_at` or if a minor collection leaves the
 //!   heap above `limit`.
 //!
-//! For large heaps, the collector executes major collections incrementally in
-//! allocation-paced steps (`Phase::Marking` and `Phase::Sweeping`) while minor
-//! collections continue between steps:
+//! For large heaps, the collector runs major collections incrementally in
+//! allocation-paced marking and sweeping steps while minor collections continue
+//! between steps:
 //!
-//! * **Marking** traces reachable objects into a separate bitmap (`cmarks`)
-//!   using a bounded worklist (`gray`, chunked by `SCAN_CHUNK`). During
-//!   marking, write barriers shade newly stored values or push mutated objects
-//!   back onto `gray` (Dijkstra-style incremental update).
-//! * **Completion** rescans the roots (because the VM does not barrier writes
-//!   to fiber stacks or globals), drains `gray`, promotes all marked objects
-//!   (`marks = cmarks`), and clears `remembered` and `young`.
-//! * **Sweeping** frees unmarked slots in bounded steps while marking any newly
-//!   allocated objects in `cmarks`. If a memory limit forces an immediate
-//!   collection, the collector aborts the incremental cycle and performs a full
-//!   stop-the-world major collection.
+//! * **Marking** traces reachable objects into `cmarks` with a bounded worklist
+//!   in `gray`. Write barriers during marking shade newly stored values or push
+//!   mutated objects back onto `gray`.
+//! * **Completion** rescans the roots, drains `gray`, copies `cmarks` into
+//!   `marks`, and clears `remembered` and `young`.
+//! * **Sweeping** frees unmarked slots in bounded steps and marks newly
+//!   allocated objects in `cmarks`. If a memory limit requires an immediate
+//!   collection, the collector aborts the incremental cycle and runs a full
+//!   major collection.
 
 use super::iomem::IoMemory;
 use super::value::*;
@@ -857,8 +854,8 @@ impl Heap {
         }
     }
 
-    /// The fields of a heap tuple, struct, variant or closure. Inline
-    /// values (`VmValue::Pair`, inline variants) have none: see [`Heap::field`].
+    /// Returns the fields of a heap tuple, struct, variant, or closure. Use
+    /// [`Heap::field`] to read fields of inline pairs and inline variants.
     pub fn fields(&self, v: VmValue) -> &[VmValue] {
         match self.get(v) {
             Obj::Tuple(t) | Obj::Struct(_, t) | Obj::Variant(_, t) | Obj::Closure(_, t) => t,
@@ -878,7 +875,8 @@ impl Heap {
         self.alloc(Obj::List(items))
     }
 
-    /// The tuple of `items` (inline for a pair of ints, see `VmValue::Pair`).
+    /// Builds a tuple from `items`, using [`VmValue::Pair`] if `items` is an
+    /// inline pair of integers.
     pub fn new_tuple(&mut self, items: &[VmValue]) -> VmValue {
         match *items {
             [a, b] if let Some(v) = VmValue::tuple2(a, b) => v,
@@ -1086,9 +1084,10 @@ impl Heap {
         Ok(())
     }
 
-    /// The payload of `v` if it is the single-payload variant `id`, else
-    /// `VmValue::Uninit` (which no value holds): LLVM copies a value out of an
-    /// `Option` in unaligned pieces, which stalls the load that reads it back.
+    /// Returns the payload of `v` if `v` is the single-payload variant `id`, or
+    /// `VmValue::Uninit` otherwise. Returning `VmValue` instead of
+    /// `Option<VmValue>` avoids an unaligned piecewise copy that stalls
+    /// store-to-load forwarding.
     #[inline]
     pub fn payload_if(&self, v: &VmValue, id: u32) -> VmValue {
         match *v {

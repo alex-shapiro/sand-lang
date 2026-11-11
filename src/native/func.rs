@@ -25,8 +25,8 @@ impl Signature {
 
 /// Synchronous function registered with [`NativeModule::function`](super::NativeModule::function).
 ///
-/// Parameters implement [`FromVmValue`] (borrowing `&str`, `&[u8]`, and `&T`
-/// directly from the VM heap), and the return type implements [`HostReturn<Ctl>`].
+/// Each parameter implements [`FromVmValue`] and can borrow `&str`, `&[u8]`, or
+/// `&T` from the VM heap. The return type implements [`HostReturn<Ctl>`].
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be a host function",
     note = "each parameter must implement `FromVmValue`, and the return type must implement `HostReturn<Ctl>`",
@@ -40,7 +40,7 @@ pub trait HostFunction<Marker>: Send + Sync + 'static {
 /// Synchronous function registered with [`NativeModule::vm_function`](super::NativeModule::vm_function).
 ///
 /// Receives `&mut Vm` as its first argument. Remaining arguments must be owned
-/// [`FromVmValue`] types or [`VmVal`](super::VmVal) handles, and the return type
+/// [`FromVmValue`] types or [`VmVal`](super::VmVal) handles. The return type
 /// implements [`HostReturn<Ctl>`].
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be a `Vm` function",
@@ -191,8 +191,8 @@ impl<T: IntoVmValue + Send + 'static, E: NativeError> Later<T, E> {
     /// waits for a user action so that idle wait time does not count toward
     /// `max_wall_time`.
     ///
-    /// Do not capture [`VmValue`]s in `fut`; the garbage collector does not trace
-    /// pending futures while a task is suspended.
+    /// Do not capture [`VmValue`] values in `fut`. The garbage collector does
+    /// not trace pending futures while a task is suspended.
     pub fn new<F>(wait_kind: WaitKind, fut: impl Future<Output = F> + Send + 'static) -> Later<T, E>
     where
         F: FnOnce(&mut Vm) -> Result<T, E::FinishError> + Send + 'static,

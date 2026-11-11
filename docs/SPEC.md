@@ -2152,16 +2152,19 @@ module uses a standard library name from `sandlang::stdlib::STD_MODULES`.
 | `bind::<T>()`                | Rust type `T` with a derived `NamedType`                                            |
 | `params(names)`, `doc(text)` | parameter names and documentation for the most recently registered function         |
 
-Four derive macros bind a Rust type to a Sand type in a native module and
-implement `NamedType`, `SandType`, `FromVmValue`, and `IntoVmValue`. Every derived
-type requires `#[sand(module = "<module>")]` and accepts `#[sand(name = "<Name>")]`
-to override its Sand name, `#[sand(private)]` to keep the type private to its
-module, and `#[sand(crate = <path>)]` to specify a renamed `sandlang`
-dependency. `SandEnum` and `SandStruct` also accept
-`#[sand(manual_conversion)]` to omit the derived `FromVmValue` and `IntoVmValue`
-implementations. The macros copy Rust doc comments, including
-`#[doc = include_str!("...")]`, into Sand documentation, and reject type,
-variant, or field names that are Sand keywords or invalid Sand identifiers.
+Four derive macros bind a Rust type to a Sand type in a native module. Each
+macro implements `NamedType`, `SandType`, `FromVmValue`, and `IntoVmValue`. The
+macros copy Rust doc comments into Sand documentation. They reject type,
+variant, and field names that are Sand keywords or invalid Sand identifiers.
+
+Every derived type requires `#[sand(module = "<module>")]` and accepts these
+optional type attributes:
+
+- `#[sand(name = "<Name>")]`: overrides the Sand type name.
+- `#[sand(private)]`: keeps the type private to its module.
+- `#[sand(crate = <path>)]`: specifies a renamed `sandlang` dependency.
+- `#[sand(manual_conversion)]`: on `SandEnum` and `SandStruct`, omits the
+  derived `FromVmValue` and `IntoVmValue` implementations.
 
 | Derive       | Sand type                                                                  |
 | ------------ | -------------------------------------------------------------------------- |
@@ -2171,12 +2174,11 @@ variant, or field names that are Sand keywords or invalid Sand identifiers.
 | `SandStruct` | `struct` with the named fields of a Rust struct, copied on each conversion |
 
 Each field of a `SandStruct` and each payload of a `SandEnum` variant must
-implement `IntoVmValue` and owned `FromVmValue`. Unit variants map to unit
-variants, tuple variants map to variants with positional payloads such as
-`Circle(float)`, and struct variants map to variants with named payloads such
-as `Rect(w: float, h: float)`, where `#[sand(name = "<name>")]` overrides a
-payload field name. Generic type parameters on a `SandEnum` or `SandStruct` map
-to Sand type parameters; pass any concrete instantiation to `bind`, such as
+implement `IntoVmValue` and owned `FromVmValue`. Unit, tuple, and struct
+variants map to Sand variants with unit, positional, and named payloads. On a
+struct variant field, `#[sand(name = "<name>")]` overrides the payload field
+name. Generic type parameters on a `SandEnum` or `SandStruct` map to Sand type
+parameters. Pass any concrete instantiation to `bind`, such as
 `bind::<Pair<(), ()>>()`.
 
 By default, struct fields are `pub` and immutable; `#[sand(private)]` makes a
@@ -2256,7 +2258,7 @@ collects garbage and checks the memory limit after the call completes.
 | `jiff::civil::Time`               | `time.PlainTime`                                      |
 | `sandlang::stdlib::json::Json`    | `json.Json`                                           |
 | bound type `T`                    | `T`, or `&T` for a borrowed object                    |
-| `VmVal<T>`                        | `T`, passed as an uncopied heap handle                |
+| `VmVal<T>`                        | `T`, passed as an uncopied VM value                   |
 | `Param<N, B>`                     | `N`-th type parameter                                 |
 | `Reflect<N>`                      | runtime type description of the `N`-th type parameter |
 | `Num<N>`                          | `Num` evidence of the `N`-th type parameter           |

@@ -8,18 +8,20 @@ use std::hash::{BuildHasher, Hash, Hasher};
 use std::sync::{Arc, OnceLock};
 
 /// A Sand value as the VM stores it: an immediate value, or a handle to an
-/// object on the heap of one VM. The garbage collector does not trace a
-/// `VmValue` that a native function holds, so a handle is valid only during the
-/// native call that received or allocated it.
+/// object on the heap of one VM.
 ///
-/// Enum variants with exactly one payload are stored inline (`VUnit` ..
-/// `VObj`: runtime variant id, then the payload) whenever the payload is not
-/// itself an inline variant; e.g. `Some(1)` is `VInt(some, 1)`, `Ok("x")` is
-/// `VObj(ok, handle)` and `Some(None)` is `VTag(some, none)`, while
-/// `Some(Some(1))` is a heap `Obj::Variant`. This representation is
-/// canonical: always build variants with `VmValue::variant1`/`Heap::new_variant`
-/// (or `Vm::some`/`ok`/`err`), and inspect them with `Heap::variant`,
-/// `Heap::variant_id` and `Heap::field`.
+/// A heap handle is valid only during the native call that received or
+/// allocated it, because the garbage collector does not trace a `VmValue` held
+/// in a native function.
+///
+/// Variants `VUnit` through `VObj` store single-payload enum variants inline if
+/// the payload is not itself an inline variant. Each variant holds the runtime
+/// variant ID followed by the payload. Single-payload variants whose payload is
+/// an inline variant use a heap [`Obj::Variant`]. Build variants with
+/// [`VmValue::variant1`] or [`Heap::new_variant`](super::heap::Heap::new_variant).
+/// Inspect variants with [`Heap::variant`](super::heap::Heap::variant),
+/// [`Heap::variant_id`](super::heap::Heap::variant_id), and
+/// [`Heap::field`](super::heap::Heap::field).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum VmValue {
     Unit,
@@ -47,9 +49,9 @@ pub enum VmValue {
     VTag(u32, u32),
     /// `variant(object)`: the payload is the heap object with this handle.
     VObj(u32, u32),
-    /// The tuple `(a, b)` of two ints whose first fits in 32 bits. Such
-    /// tuples are always stored inline (build them with `VmValue::tuple2` or
-    /// `Heap::new_tuple`); other tuples are heap objects.
+    /// An inline 2-tuple of integers whose first element fits in 32 bits. Build
+    /// tuples with [`VmValue::tuple2`] or
+    /// [`Heap::new_tuple`](super::heap::Heap::new_tuple).
     Pair(i32, i64),
 }
 
@@ -58,9 +60,8 @@ pub enum VmValue {
 const _: () = assert!(std::mem::size_of::<VmValue>() == 16);
 
 impl VmValue {
-    /// The single-payload variant `id(payload)` stored inline, or `None` if
-    /// the payload cannot be stored inline (it is itself an inline variant)
-    /// and the variant must be heap-allocated.
+    /// Returns the single-payload variant `id(payload)` in its inline form, or
+    /// `None` if `payload` is itself an inline variant.
     #[inline]
     pub fn variant1(id: u32, payload: VmValue) -> Option<VmValue> {
         Some(match payload {
@@ -163,8 +164,7 @@ fn saturate<N, T: TryFrom<N>>(n: N, max: T) -> T {
     T::try_from(n).unwrap_or(max)
 }
 
-/// A view of an enum variant value, independent of its representation
-/// (`VmValue::Tag`, an inline variant or a heap `Obj::Variant`).
+/// A view of an enum variant across inline and heap representations.
 #[derive(Clone, Copy, Debug)]
 pub enum VariantRef<'a> {
     /// A payload-less variant or an inline single-payload variant.
@@ -632,10 +632,9 @@ pub struct MapObj {
     pub entries: Vec<Option<(VmValue, VmValue)>>,
     pub live: usize,
     pub pins: Pins,
-    /// While the index is dense and at least a quarter full: the value of
-    /// each key (`VmValue::Uninit` if absent), so that looking up a key reads
-    /// neither the index nor the entries. Every change of a value goes
-    /// through [`MapObj::set_dense`].
+    /// Direct key-to-value table used while `index` is dense and at least 25%
+    /// full. Absent keys hold [`VmValue::Uninit`]. Lookups read `vals[k]`
+    /// directly, and [`MapObj::set_dense`] updates `vals` on every write.
     pub vals: Vec<VmValue>,
 }
 
@@ -707,8 +706,8 @@ impl MapObj {
         index + vals
     }
 
-    /// Keeps `vals` in step after key `k` was given value `v` (or removed:
-    /// `VmValue::Uninit`), the index and entries being up to date.
+    /// Updates `vals` after setting key `k` to `v`, or removing `k` with
+    /// [`VmValue::Uninit`]. The caller must update `index` and `entries` first.
     pub fn set_dense(&mut self, k: VmValue, v: VmValue) {
         let KeyIndex::Dense { slots, count } = &self.index else {
             self.vals = Vec::new();
@@ -1604,9 +1603,9 @@ pub const VALUE_SIZE: usize = std::mem::size_of::<VmValue>();
 
 const _: () = assert!(std::mem::size_of::<Obj>() == 32);
 
-/// Bytes of an entry of a map (`Option<(VmValue, VmValue)>`).
+/// Size of a map entry in bytes.
 pub const MAP_ENTRY_SIZE: usize = std::mem::size_of::<Option<(VmValue, VmValue)>>();
-/// Bytes of an entry of a set (`Option<VmValue>`).
+/// Size of a set entry in bytes.
 pub const SET_ENTRY_SIZE: usize = std::mem::size_of::<Option<VmValue>>();
 
 impl Obj {

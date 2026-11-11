@@ -1,21 +1,22 @@
 //! The bytecode interpreter loop.
 //!
-//! Its speed depends on how LLVM allocates registers across the loop: when
-//! too many values stay live, the hottest ones (`code`, `ip`) are spilled
-//! and every instruction reloads them, which unrelated edits can trigger.
-//! So:
+//! Loop throughput depends on register allocation across the dispatch loop. If
+//! too many values stay live, LLVM spills `code` and `ip` and reloads them on
+//! every instruction. To keep those values in registers:
 //!
-//! - The loop carries only `code`, `ip`, `base`, `regs` and the fuel;
-//!   anything else is read from memory where needed.
-//! - Back edges leave the `match` with their offset and share one safe point.
-//! - Loops, allocations, formatting and error paths go into `#[inline(never)]`
-//!   or `#[cold]` functions, not into the arms.
-//! - Results stay 16 bytes (`Ctl` and `Fail` are pointer-sized), and a helper
-//!   returns a `VmValue` directly (`Ok(*v)`) instead of an `Option<VmValue>`.
-//!   Larger or split results go through memory and stall the caller's load.
+//! - Keep only `code`, `ip`, `base`, `regs`, and `fuel` live across the loop.
+//!   Read other state from memory on demand.
+//! - Exit the `match` on back edges with the jump offset so that all back edges
+//!   share one safe point.
+//! - Move loops, allocations, formatting, and error paths into
+//!   `#[inline(never)]` or `#[cold]` functions instead of the `match` arms.
+//! - Keep helper return types at 16 bytes. [`Ctl`] and [`Fail`] are
+//!   pointer-sized, and helpers return `VmValue` instead of `Option<VmValue>`
+//!   so that results stay in registers and do not stall store-to-load
+//!   forwarding.
 //!
-//! Measure changes with `cargo bench` and by looking for stack loads and
-//! stores around the dispatch jump in the disassembly of `Vm::interp`.
+//! Verify changes with `cargo bench` and check the disassembly of `Vm::interp`
+//! for stack loads and stores around the dispatch jump.
 
 use super::compare::{
     find_entry, find_key, hash_key, map_get_int, map_slot, map_slot_tuple, set_has_int, set_slot, values_eq, values_eq_metered, values_le,
@@ -795,8 +796,8 @@ impl Vm {
                         let v = r!(src);
                         r!(dst) = self.heap.alloc(Obj::Cell(v));
                     }
-                    // Each arm stores: a `VmValue` merged from a loaded one and
-                    // a constant is built in pieces through the stack.
+                    // Store only in the matching branch. Merging a loaded
+                    // `VmValue` with a fallback constant spills to the stack.
                     Op::LoadCell { dst, cell } => {
                         if let VmValue::Obj(h) = r!(cell)
                             && let Obj::Cell(v) = self.heap.obj(h)
@@ -2172,8 +2173,9 @@ impl Vm {
         Some((self.heap.new_str(text), end as i64))
     }
 
-    /// `m.get(k)`: the value as an option (built here rather than returned
-    /// as an `Option<VmValue>`, for the reason given at `map_index`).
+    /// Returns `m.get(k)` as a Sand `Option`. Builds the Sand `Option` directly
+    /// instead of returning `Option<VmValue>` for the reason described on
+    /// [`Vm::map_index`].
     #[inline(never)]
     fn map_get_option(&mut self, m: VmValue, k: VmValue) -> Result<VmValue, Fail> {
         let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
@@ -2245,10 +2247,10 @@ impl Vm {
         Ok(map_slot_tuple(&self.heap, &self.meter, mo, items)?.is_some())
     }
 
-    /// `m[k]`: the value, or an error if the key is missing. It copies the
-    /// value out of the entry directly rather than through `map_get`'s
-    /// `Option<VmValue>`, whose niche makes LLVM write the result piecewise and
-    /// stalls the caller's 16-byte load on store forwarding.
+    /// Returns `m[k]`, or an error if `k` is absent. Copies the value from the
+    /// entry directly instead of calling [`Vm::map_get`], because returning
+    /// `Option<VmValue>` causes piecewise stack writes that stall store-to-load
+    /// forwarding.
     #[inline(never)]
     fn map_index(&self, m: VmValue, k: VmValue) -> Result<VmValue, Fail> {
         let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };

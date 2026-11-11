@@ -283,7 +283,7 @@ help(geo.dist)
     );
 }
 
-/// A count of cents that a host function receives and returns as a Sand `int`.
+/// Cent count converted to and from a Sand `int`.
 struct Cents(i64);
 
 impl SandType for Cents {
@@ -294,8 +294,8 @@ impl SandType for Cents {
 
 impl FromVmValue for Cents {
     type Item<'a> = Cents;
-    fn from_vm_value(vm: &Vm, v: VmValue, conv: &mut Conversion) -> Result<Cents, Fail> {
-        i64::from_vm_value(vm, v, conv).map(Cents)
+    fn from_vm_value(vm: &Vm, value: VmValue, conv: &mut Conversion) -> Result<Cents, Fail> {
+        i64::from_vm_value(vm, value, conv).map(Cents)
     }
 }
 
@@ -307,12 +307,12 @@ impl IntoVmValue for Cents {
 
 #[test]
 fn host_type_implements_vm_value_conversion() {
-    let mut m = NativeModule::new("till");
-    m.function("double", |c: Cents| Cents(c.0 * 2));
-    m.async_function("refund", |c: Cents| async move { Cents(-c.0) });
-    let config = Config::new().host_modules(HostModules::new([m]).unwrap());
-    let (r, out, _) = run_src(config, "import till\nprint(till.double(21))\nprint(till.refund(5))");
-    r.unwrap();
+    let mut module = NativeModule::new("till");
+    module.function("double", |cents: Cents| Cents(cents.0 * 2));
+    module.async_function("refund", |cents: Cents| async move { Cents(-cents.0) });
+    let config = Config::new().host_modules(HostModules::new([module]).unwrap());
+    let (result, out, _) = run_src(config, "import till\nprint(till.double(21))\nprint(till.refund(5))");
+    result.unwrap();
     assert_eq!(out, "42\n-5\n");
 }
 

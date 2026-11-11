@@ -13,18 +13,18 @@ use std::hash::Hash;
 /// Converts a [`VmValue`] into a Rust argument for a native function.
 ///
 /// For functions registered with [`NativeModule::function`](super::NativeModule::function),
-/// [`FromVmValue::Item`] can borrow directly from the VM heap (`&str`, `&[u8]`,
-/// `&T`). Owned types (`String`, `Vec<T>`, ...) allocate a Rust copy.
+/// [`FromVmValue::Item`] can borrow `&str`, `&[u8]`, or `&T` directly from the
+/// VM heap. Owned types allocate a Rust copy.
 ///
-/// Because a Sand value can contain shared references to the same heap object,
-/// converting a value into owned Rust types copies each reachable reference.
+/// A Sand value can contain shared references to the same heap object.
+/// Converting a value into an owned Rust type copies each reachable reference.
 /// Implementations must charge fuel to `vm` and record allocated bytes in
-/// [`Conversion`] so that instruction and memory limits bound exponential
-/// expansion of shared values.
+/// [`Conversion`] so that instruction and memory limits bound shared-value
+/// expansion.
 pub trait FromVmValue: SandType {
     type Item<'a>;
 
-    /// Converts `v` into [`Self::Item`], charging fuel to `vm` and recording
+    /// Converts `v` into [`Self::Item`]. Charges fuel to `vm` and records
     /// temporary Rust allocations in `conv`.
     fn from_vm_value<'a>(vm: &'a Vm, v: VmValue, conv: &mut Conversion) -> Result<Self::Item<'a>, Fail>;
 }
@@ -62,19 +62,20 @@ impl Conversion {
     }
 }
 
-/// Converts a Rust return value into a [`VmValue`], charging fuel and
-/// reserving heap memory.
+/// Converts a Rust return value into a [`VmValue`].
+///
+/// Implementations charge fuel and check the VM memory limit before allocating
+/// on the heap.
 pub trait IntoVmValue: SandType {
     fn into_vm_value(self, vm: &mut Vm) -> Result<VmValue, Fail>;
 
     /// Converts `self` into a compile-time Sand [`Constant`], or returns `None`
-    /// if `self` cannot be represented as a constant.
+    /// if `self` has no constant form.
     ///
-    /// Scalars (`i64`, `f64`, `bool`, `()`, `String`, `Vec<u8>`,
-    /// [`jiff::SignedDuration`]) and collections, options,
-    /// [`SandEnum`](crate::SandEnum)s, and [`SandStruct`](crate::SandStruct)s
-    /// composed of constants can be converted. Field defaults declared with
-    /// `#[sand(default)]` require a constant value.
+    /// Field defaults declared with `#[sand(default)]` require a constant
+    /// value. Scalar types implement `to_const`, as do collections, `Option`,
+    /// [`SandEnum`](crate::SandEnum), and [`SandStruct`](crate::SandStruct)
+    /// values composed of constants.
     fn to_const(&self) -> Option<Constant> {
         None
     }

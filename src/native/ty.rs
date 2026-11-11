@@ -301,14 +301,15 @@ fn_type!(A, B, C);
 #[derive(Clone, Copy, Debug)]
 pub enum Never {}
 
-/// Value of the `N`-th generic type parameter of a `native fn` (see
-/// [`Type::Param`]), with the built-in traits `B` that the Rust function
-/// requires of it (see [`traits`]).
+/// Value of the `N`-th generic type parameter of a `native fn`.
+///
+/// `B` lists the built-in [`traits`] that the Rust function requires of the
+/// type parameter. See [`Type::Param`].
 ///
 /// For `native fn first<T>(xs: [T]) -> T?`, the Rust function takes
 /// `VmVal<Vec<Param<0>>>` and returns `Option<Param<0>>`. If the Rust function
-/// requires a built-in trait of `T` (such as `Param<0, traits::Hash>`), the
-/// `native fn` declaration must declare `T: Hash`.
+/// uses `Param<0, traits::Hash>`, the `native fn` declaration must declare
+/// `T: Hash`.
 pub struct Param<const N: u8, B: traits::Set = ()>(VmValue, PhantomData<fn() -> B>);
 
 impl<const N: u8, B: traits::Set> Param<N, B> {
@@ -410,13 +411,11 @@ impl<const N: u8> SandType for Reflect<N> {
 /// An uncopied [`VmValue`] with the Sand type of `T`.
 ///
 /// Functions registered with [`NativeModule::vm_function`](super::NativeModule::vm_function)
-/// can accept and return `VmVal<T>` to avoid copying heap values (for example,
-/// `VmVal<String>` for `str`, `VmVal<Vec<Param<0>>>` for `[T]`, or
-/// `VmVal<fn() -> Option<String>>` for `fn() -> str?`).
+/// can accept and return `VmVal<T>` to avoid copying heap values.
 ///
-/// Because the garbage collector does not trace `VmVal` handles stored in Rust
-/// structs, a `VmVal` is valid only for the duration of the synchronous native
-/// call that received or allocated it. Never store a `VmVal` inside a
+/// A `VmVal` is valid only during the synchronous native call that received or
+/// allocated it, because the garbage collector does not trace `VmVal` handles
+/// stored in Rust structs. Never store a `VmVal` inside a
 /// [`NativeObject`](super::NativeObject) or across an async suspension point.
 pub struct VmVal<T: ?Sized>(VmValue, PhantomData<fn() -> T>);
 

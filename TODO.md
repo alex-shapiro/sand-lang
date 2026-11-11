@@ -26,11 +26,10 @@ Untrusted code violates a valid policy.
 The host cannot rely on engine limits, stability, or control.
 
 - [ ] ❓ _Embedding._ Reject VM handles in async host functions at compile
-      time. `async_function` accepts `VmVal<T>`, `Param<N>`, `Num<N>`, and
-      `Reflect<N>` arguments and results, because their `FromVmValue::Item` is
-      `Self`. The future is not a garbage collection root, so a handle that it
-      returns after a suspension can name a freed or reused heap slot. SPLIT.md
-      changeset 13 lists the fix.
+      time. `async_function` accepts VM handle types because their
+      `FromVmValue::Item` is `Self`. Garbage collection can free or reuse the
+      heap slot of a handle while the future is suspended. See SPLIT.md
+      changeset 13.
 - [ ] ❓ _Memory._ Share standard library and host module bytecode across
       programs. `compile_program` copies the snapshot `Program` into each
       `CompiledProgram`. A copy takes about 74 KB for `print(1)` and 173 KB
@@ -75,7 +74,7 @@ The host cannot rely on engine limits, stability, or control.
       configuration option to set the hash seed.
 - [ ] ❓ _Embedding._ Convert derived `SandEnum` and `SandStruct` values iteratively with an
       explicit stack. The derived `FromVmValue` and `IntoVmValue` implementations
-      recurse once per nesting level, so deep values can overflow a small host
+      recurse once per nesting level. Deep values can overflow a small host
       thread stack in debug builds before reaching the 256-level limit.
 - [ ] ❓ _Embedding._ Convert `json.parse`, `json.encode`, `json.decode`, and `json.to_json`
       to use an explicit stack without regressing throughput. These functions

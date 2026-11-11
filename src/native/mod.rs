@@ -505,8 +505,8 @@ pub struct VariantField {
 
 /// Memory and resource accounting for a heap-allocated [`ObjectType`].
 ///
-/// Do not store [`VmValue`]s inside an implementor; the garbage collector does
-/// not trace native objects.
+/// Do not store [`VmValue`] values inside an implementor. The garbage collector
+/// does not trace native objects.
 pub trait NativeObject: Any + Send {
     /// Approximate heap memory used by `self`, in bytes.
     ///
@@ -838,14 +838,13 @@ impl NativeModule {
     }
 
     /// Registers a synchronous function `f` that receives `&mut Vm` as its
-    /// first parameter. Heap values that the function does not copy must be
-    /// taken as [`VmVal`] handles.
+    /// first parameter. Accept [`VmVal`] handles to read heap values without
+    /// copying them.
     ///
-    /// Because the VM re-runs `f` from the start after a permission prompt
-    /// ([`Vm::require`]) or after a garbage collection triggered by a memory or
-    /// resource check ([`Vm::check_memory`], [`Vm::reserve_io`],
-    /// [`Vm::resource_slot`]), `f` must perform all capability and limit checks
-    /// before any side effects.
+    /// `f` must check capabilities and limits before performing any side
+    /// effects. The VM re-runs `f` from the start after a permission prompt from
+    /// [`Vm::require`] or a garbage collection triggered by a memory or resource
+    /// check.
     ///
     /// # Panics
     ///

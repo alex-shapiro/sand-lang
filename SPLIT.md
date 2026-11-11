@@ -259,11 +259,10 @@ module.function("slow", |url: String| async move { fetch(url).await });
   later changeset can add a provided value without a new method.
 - A closure that takes `&mut Vm` with a borrowed argument remains a compile error.
   An async closure with a borrowed argument also remains a compile error.
-- An async closure that takes or returns a VM handle, such as `VmVal`, `Param`,
-  `Num`, or `Reflect`, directly or through `Later`, is a compile error. Today
-  the bound `for<'a> FromVmValue<Item<'a> = Self>` accepts these handles, so a
-  handle can outlive a garbage collection. Add a marker trait for values that
-  do not reference the heap, and require it of async parameters and results.
+- Reject VM handles in async closures and `Later` futures at compile time. Add
+  a marker trait for types that do not reference the VM heap. Require this
+  trait on async parameters and results so that a handle cannot cross a garbage
+  collection.
 - Check `Later`, retry stress, and trait dictionary arguments against this trait.
   A standalone prototype covered only the closure forms.
 
@@ -308,12 +307,12 @@ value, and `Value`.
   `json.encode`. A cycle reaches the depth bound. A copy that exceeds a bound
   returns a limit error.
 - A benchmark must show that `json.encode` keeps its speed.
-- Rename `Vm::new_value` and `Heap::value`, which work with `ValueType`, so that
-  they do not read as operations on `Value`.
-- Decide how `Constant` relates to `Value`. Today `IntoVmValue::to_const` makes
-  constants, although a constant never touches a VM, and the derives generate a
-  separate walk for it. If `Encode` or `Value` makes constants, the derives
-  generate one walk and `IntoVmValue` only converts to a `VmValue`.
+- Rename `Vm::new_value` and `Heap::value` to reflect `ValueType` rather than
+  `Value`.
+- Decide how `Constant` relates to `Value`. `IntoVmValue::to_const` builds
+  compile-time constants, and the derive macros generate a separate walk for it.
+  Moving constant construction to `Encode` or `Value` removes that extra walk
+  and limits `IntoVmValue` to VM conversion.
 
 This changeset has no source commits. `03076c5` returned `Json`, which loses the
 difference between `bytes` and a string, and between `()` and `None`.
