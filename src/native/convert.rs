@@ -70,7 +70,7 @@ pub trait IntoVmValue: SandType {
     fn into_vm_value(self, vm: &mut Vm) -> Result<VmValue, Fail>;
 
     /// Converts `self` into a compile-time Sand [`Constant`], or returns `None`
-    /// if `self` has no constant form.
+    /// if `self` is not a constant.
     ///
     /// Field defaults declared with `#[sand(default)]` require a constant
     /// value. Scalar types and composite types composed of constants implement

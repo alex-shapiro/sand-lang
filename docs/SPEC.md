@@ -2176,10 +2176,9 @@ optional type attributes:
 Each field of a `SandStruct` and each payload of a `SandEnum` variant must
 implement `IntoVmValue` and owned `FromVmValue`. Unit variants map to variants
 without a payload. Tuple and struct variants map to variants with positional and
-named payloads. On a
-struct variant field, `#[sand(name = "<name>")]` overrides the payload field
-name. Generic type parameters on a `SandEnum` or `SandStruct` map to Sand type
-parameters. Pass any concrete instantiation to `bind`, such as
+named payloads. On a struct variant field, `#[sand(name = "<name>")]` overrides
+the payload field name. Generic type parameters on a `SandEnum` or `SandStruct`
+map to Sand type parameters. Pass any concrete instantiation to `bind`, such as
 `bind::<Pair<(), ()>>()`.
 
 By default, struct fields are `pub` and immutable; `#[sand(private)]` makes a

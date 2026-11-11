@@ -8,7 +8,7 @@ use std::hash::{BuildHasher, Hash, Hasher};
 use std::sync::{Arc, OnceLock};
 
 /// A Sand value as the VM stores it: an immediate value, or a handle to an
-/// object on the heap of one VM.
+/// object on the VM heap.
 ///
 /// A heap handle is valid only during the native call that received or
 /// allocated it. The garbage collector does not trace a `VmValue` held in a
