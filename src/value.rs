@@ -540,7 +540,7 @@ pub(crate) fn copy_from_vm(vm: &Vm, value: VmValue) -> Result<Value, Fail> {
         structs: FxHashMap::default(),
         variants: FxHashMap::default(),
     };
-    match encode::walk(&vm.prog, &vm.heap, &mut sink, OpenValue::Root(Value::Unit), value)? {
+    match encode::walk(&vm.prog, &vm.heap, &vm.meter, &mut sink, OpenValue::Root(Value::Unit), value)? {
         OpenValue::Root(value) => Ok(value),
         _ => internal("to_value: the walk did not return the root"),
     }
@@ -716,7 +716,6 @@ impl<'h> EncodeSink<'h> for ValueSink<'h> {
 
     #[inline(always)]
     fn leaf(&mut self, parent: &mut OpenValue, _: Role<'h>, leaf: Leaf<'h>) -> Result<(), Fail> {
-        self.meter.charge(1)?;
         let value = match leaf {
             Leaf::Unit => Value::Unit,
             Leaf::Bool(b) => Value::Bool(b),
@@ -742,7 +741,6 @@ impl<'h> EncodeSink<'h> for ValueSink<'h> {
 
     #[inline(always)]
     fn open(&mut self, _: &mut OpenValue, _: Role<'h>, container: Container<'h>, len: usize) -> Result<Opened<OpenValue>, Fail> {
-        self.meter.charge(1)?;
         Ok(Opened::Children(match container {
             Container::List => OpenValue::List(self.items(len)?),
             Container::Tuple => OpenValue::Tuple(self.items(len)?),

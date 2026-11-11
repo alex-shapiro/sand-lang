@@ -12,7 +12,7 @@ use crate::vm::bytecode::{Program, RtIds};
 use crate::vm::compare::{hash_key, str_hash};
 use crate::vm::encode::{self, Container, EncodeSink, Leaf, MAX_DEPTH, Opened, Role, VariantRef};
 use crate::vm::heap::{Heap, Staging};
-use crate::vm::meter::{BYTES_PER_UNIT, Meter, SLOW_BYTES_PER_UNIT, Scratch};
+use crate::vm::meter::{Meter, SLOW_BYTES_PER_UNIT, Scratch};
 use crate::vm::value::{
     FieldDefault, FieldDesc, FxHashMap, KeyIndex, KeyTable, MAP_ENTRY_SIZE, MapObj, Obj, TypeDesc, VariantDesc, VmValue, slot_fits,
 };
@@ -240,6 +240,7 @@ impl<'a, 's, 'h> Builder<'a, 's, 'h> {
         Builder { heap, st, meter, pending: 0, keys: HashTable::new(), entries: Vec::new() }
     }
 
+    #[inline]
     fn reserve(&self) -> Result<(), Fail> {
         self.st.check_memory(NODE_BYTES + self.pending)
     }
@@ -1501,23 +1502,13 @@ enum Begin<'h> {
     Fields(&'h [String]),
 }
 
-/// What a [`JsonOutput`] charges fuel for.
-enum Charge {
-    /// A Sand value that becomes one JSON value.
-    Value,
-    /// A Sand value without a JSON value of its own: `Some` or a `Json` variant.
-    Unwrapped,
-    /// A JSON value that is not a Sand value: a field of a range, or a payload
-    /// in the object that holds its variant name.
-    Added,
-}
-
 /// The receiver of the JSON values that a [`JsonSink`] makes from Sand values.
 ///
 /// The sink starts each member of an array or object with
-/// [`JsonOutput::member`]. The value of the member follows: first
-/// [`JsonOutput::charge`], then a scalar, a `Json` value, or an array or
-/// object with its own members.
+/// [`JsonOutput::member`]. The value of the member follows: a scalar, a `Json`
+/// value, or an array or object with its own members. An output charges fuel
+/// only for the bytes that it writes or copies, because [`encode::walk`]
+/// charges for each value.
 trait JsonOutput<'h> {
     /// The state of a JSON array or object that waits for its members.
     type Open;
@@ -1525,8 +1516,6 @@ trait JsonOutput<'h> {
     /// The message of the limit error for a value with more than
     /// [`MAX_DEPTH`] levels of JSON arrays and objects.
     const TOO_DEEP: &'static str;
-
-    fn charge(&mut self, charge: Charge) -> Result<(), Fail>;
 
     /// Fails with a memory limit error if the output has no room for a string
     /// of `len` bytes.
@@ -1581,20 +1570,19 @@ fn write_json<'h, O: JsonOutput<'h>>(
     value: VmValue,
 ) -> Result<(O, O::Open), Fail> {
     let mut sink = JsonSink { out, meter, json_ids, rt_ids: prog.ids, depth: 0 };
-    let root = encode::walk(prog, heap, &mut sink, OpenJson { members: root, variant: None }, value)?;
+    let root = encode::walk(prog, heap, meter, &mut sink, OpenJson { members: root, variant: None }, value)?;
     Ok((sink.out, root.members))
 }
 
 impl<'h, O: JsonOutput<'h>> JsonSink<'h, O> {
-    /// Starts a value with the role `role` in `parent`, and charges `charge` for it.
-    fn begin_value(&mut self, parent: &mut O::Open, role: Role<'h>, charge: Charge) -> Result<(), Fail> {
+    /// Starts a value with the role `role` in `parent`.
+    fn begin_value(&mut self, parent: &mut O::Open, role: Role<'h>) -> Result<(), Fail> {
         match role {
-            Role::Root | Role::Payload | Role::MapValue => {}
-            Role::Item => self.out.member(parent, None)?,
-            Role::Field(name) => self.out.member(parent, Some(JsonKey::Field(name)))?,
-            Role::MapKey => return invalid_key(),
+            Role::Root | Role::Payload | Role::MapValue => Ok(()),
+            Role::Item => self.out.member(parent, None),
+            Role::Field(name) => self.out.member(parent, Some(JsonKey::Field(name))),
+            Role::MapKey => invalid_key(),
         }
-        self.out.charge(charge)
     }
 
     #[inline(always)]
@@ -1617,7 +1605,6 @@ impl<'h, O: JsonOutput<'h>> JsonSink<'h, O> {
         let fields = [("start", Scalar::Int(start)), ("end", Scalar::Int(end)), ("inclusive", Scalar::Bool(true))];
         for (name, value) in fields.into_iter().take(if inclusive { 3 } else { 2 }) {
             self.out.member(&mut object, Some(JsonKey::Text(JsonText::new(name))))?;
-            self.out.charge(Charge::Added)?;
             self.out.scalar(&mut object, value)?;
         }
         self.end(parent, object)
@@ -1636,7 +1623,7 @@ impl<'h, O: JsonOutput<'h>> EncodeSink<'h> for JsonSink<'h, O> {
             let Some(key) = JsonText::for_key(leaf, self.rt_ids) else { return invalid_key() };
             return self.out.member(parent, Some(JsonKey::Text(key)));
         }
-        self.begin_value(parent, role, Charge::Value)?;
+        self.begin_value(parent, role)?;
         let scalar = match leaf {
             Leaf::Unit => Scalar::Null,
             Leaf::Bool(b) => Scalar::Bool(b),
@@ -1663,18 +1650,17 @@ impl<'h, O: JsonOutput<'h>> EncodeSink<'h> for JsonSink<'h, O> {
         let mut variant = None;
         if let Container::Variant(payload_of) = container {
             if payload_of.id == self.rt_ids.some || self.json_ids.has(payload_of.id) {
-                self.begin_value(parent, role, Charge::Unwrapped)?;
+                self.begin_value(parent, role)?;
                 let is_embedded = self.json_ids.has(payload_of.id) && self.out.embed(parent, payload_of.value)?;
                 return Ok(if is_embedded { Opened::Closed } else { Opened::Unwrapped });
             }
-            self.begin_value(parent, role, Charge::Value)?;
+            self.begin_value(parent, role)?;
             let mut object = self.begin(Begin::Object)?;
             let name = JsonText { variant_id: Some(payload_of.id), ..JsonText::new(payload_of.name) };
             self.out.member(&mut object, Some(JsonKey::Text(name)))?;
-            self.out.charge(Charge::Added)?;
             variant = Some(object);
         } else {
-            self.begin_value(parent, role, Charge::Value)?;
+            self.begin_value(parent, role)?;
         }
         let members = self.begin(match container {
             Container::Map => Begin::Object,
@@ -1742,6 +1728,16 @@ impl JsonTextOutput<'_> {
         write_str(&mut self.text, s);
         Ok(())
     }
+
+    /// Charges fuel for the text that the output wrote before the JSON value
+    /// that starts now, and checks the text against the memory limit.
+    #[inline(always)]
+    fn charge_written(&mut self) -> Result<(), Fail> {
+        let written = self.text.len() - self.charged;
+        self.charged = self.text.len();
+        self.meter.charge_bytes(written)?;
+        self.scratch.check(self.heap, self.text.capacity())
+    }
 }
 
 impl<'h> JsonOutput<'h> for JsonTextOutput<'h> {
@@ -1750,16 +1746,6 @@ impl<'h> JsonOutput<'h> for JsonTextOutput<'h> {
     const TOO_DEEP: &'static str = "value too deeply nested to encode as JSON";
 
     #[inline(always)]
-    fn charge(&mut self, charge: Charge) -> Result<(), Fail> {
-        if let Charge::Unwrapped = charge {
-            return self.meter.charge(1);
-        }
-        let written = self.text.len() - self.charged;
-        self.charged = self.text.len();
-        self.meter.charge(1 + (written / BYTES_PER_UNIT) as u64)?;
-        self.scratch.check(self.heap, self.text.capacity())
-    }
-
     fn reserve(&mut self, len: usize) -> Result<(), Fail> {
         self.heap.check_memory(self.text.len().saturating_add(len))
     }
@@ -1784,6 +1770,7 @@ impl<'h> JsonOutput<'h> for JsonTextOutput<'h> {
 
     #[inline(always)]
     fn scalar(&mut self, _: &mut OpenJsonText, scalar: Scalar<'h>) -> Result<(), Fail> {
+        self.charge_written()?;
         match scalar {
             Scalar::Bool(b) => self.text.push_str(if b { "true" } else { "false" }),
             Scalar::Int(i) => self.text.push_str(itoa::Buffer::new().format(i)),
@@ -1795,17 +1782,21 @@ impl<'h> JsonOutput<'h> for JsonTextOutput<'h> {
         Ok(())
     }
 
+    #[inline(always)]
     fn embed(&mut self, _: &mut OpenJsonText, _: VmValue) -> Result<bool, Fail> {
         Ok(false)
     }
 
+    #[inline(always)]
     fn begin(&mut self, begin: Begin<'h>) -> Result<OpenJsonText, Fail> {
+        self.charge_written()?;
         let is_array = matches!(begin, Begin::Array(_));
         self.text.push(if is_array { '[' } else { '{' });
         self.level += 1;
         Ok(OpenJsonText { is_array, is_empty: true })
     }
 
+    #[inline(always)]
     fn end(&mut self, _: &mut OpenJsonText, open: OpenJsonText) -> Result<(), Fail> {
         self.level -= 1;
         if !open.is_empty {
@@ -1970,14 +1961,6 @@ impl<'a> JsonOutput<'a> for JsonValueOutput<'a, '_, '_> {
     const TOO_DEEP: &'static str = "value too deeply nested to convert to JSON";
 
     #[inline(always)]
-    fn charge(&mut self, charge: Charge) -> Result<(), Fail> {
-        if let Charge::Added = charge {
-            return Ok(());
-        }
-        self.b.reserve()?;
-        self.b.meter.charge(1)
-    }
-
     fn reserve(&mut self, len: usize) -> Result<(), Fail> {
         self.b.st.check_memory(self.b.pending.saturating_add(len))
     }
@@ -1993,6 +1976,7 @@ impl<'a> JsonOutput<'a> for JsonValueOutput<'a, '_, '_> {
 
     #[inline(always)]
     fn scalar(&mut self, parent: &mut OpenJsonValue, scalar: Scalar<'a>) -> Result<(), Fail> {
+        self.b.reserve()?;
         let json_ids = self.json_ids;
         let (id, payload) = match scalar {
             Scalar::Null => return self.put(parent, VmValue::Tag(json_ids.null)),
@@ -2011,13 +1995,16 @@ impl<'a> JsonOutput<'a> for JsonValueOutput<'a, '_, '_> {
         self.put(parent, value)
     }
 
+    #[inline(always)]
     fn embed(&mut self, parent: &mut OpenJsonValue, json: VmValue) -> Result<bool, Fail> {
+        self.b.reserve()?;
         self.put(parent, json)?;
         Ok(true)
     }
 
     #[inline(always)]
     fn begin(&mut self, begin: Begin<'a>) -> Result<OpenJsonValue, Fail> {
+        self.b.reserve()?;
         let names = match begin {
             Begin::Array(len) => return Ok(OpenJsonValue::Array(self.b.list_buffer(len)?)),
             Begin::Object => return Ok(OpenJsonValue::Object(self.b.start_map())),

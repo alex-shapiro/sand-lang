@@ -10,6 +10,7 @@
 
 use super::bytecode::{Program, StructRt};
 use super::heap::Heap;
+use super::meter::Meter;
 use super::value::{Obj, ValueRef, VmValue};
 use super::{Fail, fail, internal};
 use smallvec::SmallVec;
@@ -161,9 +162,15 @@ pub(crate) enum Opened<O> {
 }
 
 /// Reports `value` to `sink` as the only child of `root`, and returns `root`.
+///
+/// The walk charges one unit of fuel to `meter` for each value that it
+/// reports, except for a map key: a map entry costs one unit. A sink charges
+/// only for the bytes that it writes or copies.
+#[inline(always)]
 pub(crate) fn walk<'h, S: EncodeSink<'h>>(
     prog: &'h Program,
     heap: &'h Heap,
+    meter: &Meter,
     sink: &mut S,
     root: S::Open,
     value: VmValue,
@@ -185,6 +192,9 @@ pub(crate) fn walk<'h, S: EncodeSink<'h>>(
                 }
             },
         };
+        if !matches!(role, Role::MapKey) {
+            meter.charge(1)?;
+        }
         match report(prog, heap, sink, &mut top.open, role, child)? {
             Reported::Closed => {}
             Reported::Opened(frame) => {
