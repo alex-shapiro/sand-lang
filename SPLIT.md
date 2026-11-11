@@ -259,15 +259,15 @@ module.function("slow", |url: String| async move { fetch(url).await });
 - Each parameter implements `NativeParam`: a script argument or a value that the
   engine provides. A later changeset can add a provided value without a new
   method.
-- A closure that takes `&mut Vm` with a borrowed argument remains a compile error.
-  An async closure with a borrowed argument also remains a compile error.
-- Reject VM handles in async closures and `Later` futures at compile time. The
-  handle types `VmVal`, `Param`, `Num`, and `Reflect` are not `Send`. Async
-  parameters and results must be `Send`, and the future and closure of a `Later`
-  were already `Send`, so a handle cannot cross a garbage collection.
-- A marker trait is not used. A trait bound cannot restrict the values that a
-  future captures, so a marker trait cannot check a `Later` future. Only an auto
-  trait can, and `Send` is the auto trait that these futures already require.
+- A closure that takes `&mut Vm` or returns a future cannot borrow an argument.
+- Reject VM handles in futures at compile time. `VmVal`, `Param`, `Num`, and
+  `Reflect` are not `Send`. Async parameters and results must be `Send`, and the
+  future and closure of a `Later` were already `Send`. Thus a handle cannot
+  cross a garbage collection.
+- Use `Send` instead of a marker trait. A trait bound cannot restrict the values
+  that a future captures, so a marker trait cannot check a `Later` future. Only
+  an auto trait can check captured values, and these futures already require
+  `Send`.
 - The compiler does not check a raw `VmValue`, because the VM heap must be
   `Send`.
 

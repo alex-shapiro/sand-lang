@@ -97,8 +97,8 @@ pub(crate) struct Suspension {
 }
 
 impl Suspension {
-    /// Waits for `fut`, and then runs the closure that `fut` returns on the VM
-    /// thread to produce the result of the call.
+    /// Suspends the calling task until `fut` is resolved, and then runs the
+    /// returned closure on the VM thread to produce the call result.
     pub(crate) fn new<F>(wait_kind: WaitKind, fut: impl Future<Output = F> + Send + 'static) -> Suspension
     where
         F: FnOnce(&mut Vm) -> Result<VmValue, Fail> + Send + 'static,

@@ -26,27 +26,26 @@ Untrusted code violates a valid policy.
 The host cannot rely on engine limits, stability, or control.
 
 - [ ] ❓ _Embedding._ Reject a raw `VmValue` that a native function holds
-      across a wait. The typed handles are not `Send`, so the compiler rejects
-      them in a future. `IntoVmValue::into_vm_value` and the allocation methods
-      of `Vm` return a raw `VmValue`, which is `Send` because the heap stores
-      it. A function that allocates before a wait and reads the value in the
-      closure of `Later::new` compiles. After a garbage collection during the
-      wait, the read returns the data of another object without an error. If
-      the heap shrank, the read or the next collection panics. The engine
-      reports the panic as an internal error, and a `panic = "abort"` build
-      stops the process. Options: a host value type that is not `Send`, or a
-      generation check on each heap slot.
+      across a wait. The compiler rejects typed handles in a future because
+      they are not `Send`. However, `IntoVmValue::into_vm_value` and the
+      allocation methods of `Vm` return a raw `VmValue`. `VmValue` is `Send`
+      because the heap stores it. Thus a function that allocates before a wait
+      and reads the value in the closure of `Later::new` compiles. After a
+      garbage collection during the wait, the read returns the data of another
+      object without an error. If the heap shrank, the read or the next
+      collection panics. The engine reports the panic as an internal error, and
+      a `panic = "abort"` build stops the process. Options: a host value type
+      that is not `Send`, or a generation check on each heap slot.
 - [ ] ❓ _Embedding._ Add a rooted handle that keeps a script value alive
-      across a wait. A native function that must change an argument object or
-      return an early allocation after a wait has no checked way to do it.
-      `Vm::pinned` already holds garbage collection roots.
+      across a wait. A native function cannot safely change an argument object
+      or return an early allocation after a wait. `Vm::pinned` already holds
+      garbage collection roots.
 - [ ] ❓ _Embedding._ Give native functions a narrow call type in place of
       `&mut Vm`. A native function can call public scheduler and collector
-      methods such as `Vm::collect_all_garbage` during its own call, and the
-      typed accessors return raw `VmValue` slices. The narrow type has only
-      charge, check, permission, allocation, and typed read methods. This
-      removes the full access that zero-copy host code has now, so it is a
-      product decision.
+      methods such as `Vm::collect_all_garbage` during its own call. In
+      addition, the typed accessors return raw `VmValue` slices. A narrow type
+      with only charge, check, permission, allocation, and typed read methods
+      removes full VM access, which is a product decision.
 - [ ] ❓ _Memory._ Share standard library and host module bytecode across
       programs. `compile_program` copies the snapshot `Program` into each
       `CompiledProgram`. A copy takes about 74 KB for `print(1)` and 173 KB

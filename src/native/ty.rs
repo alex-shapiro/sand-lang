@@ -421,9 +421,11 @@ impl<const N: u8> SandType for Reflect<N> {
 /// it. The garbage collector does not trace a `VmVal` that Rust code holds, so
 /// a collection during a wait can free its heap object. For this reason
 /// `VmVal`, [`Param`], [`Num`], and [`Reflect`] are not `Send`. The compiler
-/// rejects these handles in a [`NativeObject`](super::NativeObject), in the
-/// future of a native function, and in the future or closure of
-/// [`Later::new`](super::func::Later::new):
+/// rejects these handles in these places:
+///
+/// - a [`NativeObject`](super::NativeObject)
+/// - the future of a native function
+/// - the future or closure of [`Later::new`](super::func::Later::new)
 ///
 /// ```compile_fail,E0277
 /// # use sandlang::native::ty::VmVal;

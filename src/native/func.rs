@@ -50,10 +50,10 @@ impl Signature {
 ///   implements [`NativeReturn<Ctl>`].
 /// - **`&mut Vm` first.** Each parameter after the `Vm` is an owned
 ///   [`NativeParam`] type, such as `String` or a [`VmVal`](super::ty::VmVal)
-///   handle. The return type implements [`NativeReturn<Ctl>`]. The engine runs
-///   the function again from the start after a permission prompt, or after a
-///   garbage collection that a memory or resource check triggers. Check
-///   permissions and limits before any side effect. To wait for a future,
+///   handle. The return type implements [`NativeReturn<Ctl>`]. Check
+///   permissions and limits before any side effect, because the engine runs the
+///   function again from the start after a permission prompt or after a garbage
+///   collection that a memory or resource check triggers. To wait for a future,
 ///   return a [`Later`].
 /// - **A future as the result.** Only the calling Sand task waits for the
 ///   future. Each parameter is an owned [`NativeParam`] type that is `Send`.
@@ -69,9 +69,9 @@ impl Signature {
 /// module.function("len", |_: &mut Vm, s: &str| s.len() as i64);
 /// ```
 ///
-/// A future cannot borrow an argument, and it cannot take or return a VM
-/// handle. Garbage collection can free the heap object of a handle during the
-/// wait:
+/// A future cannot borrow an argument. It also cannot take or return a VM
+/// handle, because garbage collection can free the heap object of a handle
+/// during the wait:
 ///
 /// ```compile_fail,E0277
 /// # use sandlang::native::NativeModule;
@@ -99,7 +99,7 @@ impl Signature {
     message = "`{Self}` cannot be a native function",
     note = "each parameter must implement `NativeParam`, and the return type must implement `NativeReturn<Ctl>`",
     note = "`&mut Vm` must be the first parameter, each parameter after it must be an owned type, and the function must return a `Later` to wait",
-    note = "a function that returns a future must take owned `Send` parameters, and the future and its output must be `Send`: a VM handle such as `VmVal` cannot cross a wait",
+    note = "an async function must have `Send` parameters, future, and output, and cannot hold a VM handle such as `VmVal` across a wait",
     note = "a synchronous function returns `HostError`, and a future returns `HostError<Fail>`",
     note = "a function takes at most 12 parameters"
 )]
@@ -239,8 +239,8 @@ mod form {
 
 /// Return type of a registered function.
 ///
-/// `C` is the control signal that stops the call. Functions that run before any
-/// wait use [`Ctl`], and code that runs after a wait uses [`Fail`].
+/// `C` is the control signal that stops the call. Code that runs before a wait
+/// uses [`Ctl`]. Code that runs after a wait uses [`Fail`].
 pub trait NativeReturn<C>: SandType {
     #[doc(hidden)]
     fn into_call_result(self, vm: &mut Vm) -> Result<VmValue, C>;
@@ -412,8 +412,8 @@ impl<T: IntoVmValue + 'static, E: NativeError> Later<T, E> {
 }
 
 /// Returns the last `n` of `args`, which are the script arguments that the
-/// parameters read. The Sand compiler can pass trait dictionaries that no
-/// parameter reads before them.
+/// parameters read. The Sand compiler can pass unused trait dictionaries before
+/// them.
 #[inline(always)]
 fn script_args(args: &[VmValue], n: usize) -> Result<&[VmValue], Fail> {
     match args.get(args.len().wrapping_sub(n)..) {
