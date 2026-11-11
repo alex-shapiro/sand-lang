@@ -921,12 +921,17 @@ impl Vm {
     ///
     /// The copy has each value that `v` contains, with the names of structs,
     /// enums, and native value types. Each part of `v` whose type does not
-    /// implement `Encode`, such as a function, is a
+    /// implement the Sand trait `Encode`, such as a function, is a
     /// [`Value::Opaque`](crate::value::Value::Opaque), so a struct with a
     /// function field is a struct with an opaque field. The copy charges fuel
     /// and counts its memory against the limits of the run. It fails with kind
     /// `"limit"` if `v` has more than 512 levels of nesting, which includes a
     /// value that contains itself. Each `Some` counts as one level.
+    ///
+    /// If the copy exceeds the memory limit, `to_value` returns a memory limit
+    /// error. When a native function returns that error, the engine collects
+    /// garbage and runs the function again from the start, so call `to_value`
+    /// before any side effect.
     ///
     /// ```
     /// # use sandlang::native::NativeModule;

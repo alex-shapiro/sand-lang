@@ -2455,17 +2455,17 @@ from `sandlang::session::RESET_NOTE` to the error message and sets
 reference the VM, so it remains valid after the run ends. `Value` is
 `#[non_exhaustive]`.
 
-| Sand value                                   | `Value` variant                                                    |
-| -------------------------------------------- | ------------------------------------------------------------------ |
-| `()`, `bool`, `int`, `float`, `duration`     | `Unit`, `Bool`, `Int`, `Float`, `Duration`                         |
-| `str`, `bytes`                               | `Str`, `Bytes`                                                     |
-| list, tuple, `Set`, map                      | `List`, `Tuple`, `Set`, `Map`, with elements in iteration order    |
-| range                                        | `Range { start, end, inclusive }`                                  |
-| struct                                       | `Struct`, with its type and the field values in declaration order  |
-| enum variant                                 | `Variant`, with its variant and the payload values                 |
-| `time` value types                           | `Instant`, `PlainDate`, and one variant for each other `time` type |
-| other native value type                      | `Native`, with a `NativeValue` of the type name and the text       |
-| part whose type does not implement `Encode`  | `Opaque { type_name }`                                             |
+| Sand value                                                 | `Value` variant                                                    |
+| ---------------------------------------------------------- | ------------------------------------------------------------------ |
+| `()`, `bool`, `int`, `float`, `duration`                   | `Unit`, `Bool`, `Int`, `Float`, `Duration`                         |
+| `str`, `bytes`                                             | `Str`, `Bytes`                                                     |
+| list, tuple, `Set`, map                                    | `List`, `Tuple`, `Set`, `Map`, with elements in iteration order    |
+| range                                                      | `Range { start, end, inclusive }`                                  |
+| struct                                                     | `Struct`, with its type and the field values in declaration order  |
+| enum variant                                               | `Variant`, with its variant and the payload values                 |
+| `time` value types                                         | `Instant`, `PlainDate`, and one variant for each other `time` type |
+| other native value type                                    | `Native`, with a `NativeValue` of the type name and the text       |
+| part whose type does not implement the Sand trait `Encode` | `Opaque { type_name }`                                             |
 
 A struct holds an `Arc<StructDesc>` with the type name and the field names. A
 variant holds an `Arc<VariantDesc>` with the enum name, the variant name, and
@@ -2491,13 +2491,16 @@ turns back into an equal value. `Value::native::<T>()` returns the value as the
 native value type `T`, or `None` if the value is not a `T`.
 
 `Vm::to_value` copies a VM value into a `Value`. Each part of the value whose
-type does not implement `Encode`, such as a function, a task, a channel, or a
-native object, is a `Value::Opaque`. Thus a struct with a function field is a
-`Struct` with an `Opaque` field. The copy charges fuel and counts its memory
-against the memory limit. It fails with kind `"limit"` if the value has more
-than 512 levels of nesting, which includes a value that contains itself. Each
-`Some` counts as one level of the copy, although `json.encode` does not count
-it.
+type does not implement the Sand trait `Encode`, such as a function, a task, a
+channel, or a native object, is a `Value::Opaque`. Thus a struct with a
+function field is a `Struct` with an `Opaque` field. The copy charges fuel and
+counts its memory against the memory limit. It fails with kind `"limit"` if the
+value has more than 512 levels of nesting, which includes a value that contains
+itself. Each `Some` counts as one level of the copy, although `json.encode` does
+not count it. If the copy exceeds the memory limit, `Vm::to_value` returns a
+memory limit error. When a native function returns that error, the engine
+collects garbage and runs the function again from the start (§16.3). Thus a
+native function must call `Vm::to_value` before any side effect.
 
 `value::Encode` is the Rust counterpart of the Sand trait `Encode`: its
 `encode` method returns the `Value` form of a Rust value. `bool`, `i64`, `f64`,

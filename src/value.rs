@@ -15,8 +15,8 @@ use std::sync::{Arc, OnceLock};
 
 /// The Rust form of a Sand value.
 ///
-/// Each part of the value whose type does not implement `Encode` is a
-/// [`Value::Opaque`]. A `Value` does not reference the VM, so it remains valid
+/// Each part of the value whose type does not implement the Sand trait
+/// `Encode` is a [`Value::Opaque`]. A `Value` does not reference the VM, so it remains valid
 /// after the run ends.
 ///
 /// The `Debug` output shows a struct or a variant with its name, such as
@@ -77,8 +77,9 @@ pub enum Value {
     /// A value of a native value type without its own variant, from the
     /// standard library or a host.
     Native(Box<NativeValue>),
-    /// A part whose type does not implement `Encode`, such as a function, a
-    /// task, a channel, or a native object. It holds only the type name.
+    /// A part whose type does not implement the Sand trait `Encode`, such as
+    /// a function, a task, a channel, or a native object. It holds only the
+    /// type name.
     Opaque { type_name: Arc<str> },
 }
 
@@ -94,8 +95,12 @@ pub struct StructValue {
 /// The name and field names of a struct type. All values of the type share it.
 #[derive(Debug, PartialEq, Eq)]
 pub struct StructDesc {
-    /// The module-qualified type name, such as `shop.Order`. The name is a
-    /// label, as [`NativeValue::type_name`] describes.
+    /// The module-qualified type name, such as `shop.Order`.
+    ///
+    /// A type name is a label, not a reference to a type. The module of a
+    /// type from the main script is the file stem of the script, such as
+    /// `main.Order` for a type of `main.sand`, so a script can declare a type
+    /// whose name equals the name of a host type.
     pub name: String,
     /// The field names in declaration order.
     pub fields: Vec<String>,
@@ -115,7 +120,7 @@ pub struct VariantValue {
 #[derive(Debug, PartialEq, Eq)]
 pub struct VariantDesc {
     /// The module-qualified enum name, such as `shop.Status`. The name is a
-    /// label, as [`NativeValue::type_name`] describes.
+    /// label, as [`StructDesc::name`] describes.
     pub enum_name: String,
     /// The variant name, such as `Shipped`.
     pub name: String,
@@ -208,12 +213,8 @@ fn field_named<'a>(names: &[String], values: &'a [Value], name: &str) -> Option<
 /// A value of a native value type with its type name and text.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NativeValue {
-    /// The module-qualified type name, such as `net.SocketAddr`.
-    ///
-    /// A type name is a label, not a reference to a type. The module of a
-    /// type from the main script is the file stem of the script, such as
-    /// `main.Order` for a type of `main.sand`, so a script can declare a type
-    /// whose name equals the name of a host type.
+    /// The module-qualified type name, such as `bank.Money` for a type
+    /// `Money` of a host module `bank`.
     pub type_name: Arc<str>,
     /// The `Display` text of the value. [`ValueType::parse`] turns it back
     /// into an equal value.

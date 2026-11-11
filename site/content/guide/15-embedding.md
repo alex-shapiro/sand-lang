@@ -333,7 +333,7 @@ A generic Rust function accepts values of its `N`-th type parameter as `Param<N,
 
 `sandlang::value::Value` holds a Sand value in a Rust form. A `Value` does not reference the VM, so you can keep it after the run ends. A struct or an enum variant in a `Value` holds a shared description of its type: the type name with its module, such as `shop.Order`, and the field names. `field("id")` returns the value of a field by its name. The `time` types have their own variants, such as `Value::Instant` and `Value::PlainDate`. Each other native value type is a `Value::Native` with its type name and text.
 
-`Vm::to_value` copies any script value out of the VM. Each part whose type does not implement `Encode`, such as a function or a native object, is a `Value::Opaque`, so a struct with a function field is a `Value::Struct` with an opaque field. A type name is a label: a type of the main script `main.sand` has the module `main`, so a script can declare a type whose name equals the name of a host type. The copy charges fuel and counts against the memory limit, and it fails with a `"limit"` error beyond 512 levels of nesting:
+`Vm::to_value` copies any script value out of the VM. Each part whose type does not implement the Sand trait `Encode`, such as a function or a native object, is a `Value::Opaque`, so a struct with a function field is a `Value::Struct` with an opaque field. A type name is a label: a type of the main script `main.sand` has the module `main`, so a script can declare a type whose name equals the name of a host type. The copy charges fuel and counts against the memory limit, and it fails with a `"limit"` error beyond 512 levels of nesting:
 
 ```rust
 use sandlang::native::NativeModule;
