@@ -8,7 +8,7 @@
 //! without allocating, and execution continues. Reserve bytes incrementally as
 //! data is received rather than pre-reserving an untrusted size declared by a
 //! peer (such as an HTTP `Content-Length` header). Drop the [`Reservation`]
-//! immediately before allocating the resulting heap [`Value`](super::value::Value),
+//! immediately before allocating the resulting heap [`VmValue`](super::value::VmValue),
 //! or on error or cancellation.
 
 use std::fmt;

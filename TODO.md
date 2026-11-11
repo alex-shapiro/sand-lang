@@ -68,7 +68,7 @@ The host cannot rely on engine limits, stability, or control.
 - [ ] ❓ _Testing._ Compare fuel across hash seeds in the spec suite. Add a test
       configuration option to set the hash seed.
 - [ ] ❓ _Embedding._ Convert derived `SandEnum` and `SandStruct` values iteratively with an
-      explicit stack. The derived `FromValue` and `IntoValue` implementations
+      explicit stack. The derived `FromVmValue` and `IntoVmValue` implementations
       recurse once per nesting level, so deep values can overflow a small host
       thread stack in debug builds before reaching the 256-level limit.
 - [ ] ❓ _Embedding._ Convert `json.parse`, `json.encode`, `json.decode`, and `json.to_json`
@@ -254,7 +254,7 @@ Visible defects that rarely block users.
       in `#[derive(SandEnum)]` and `#[derive(SandStruct)]`. These derive
       macros substitute `Param<N>` for each type parameter to describe field
       types, and `Param<N>` does not implement Rust traits such as `Ord`.
-- [ ] 🔴 [022](triage/022-rust-range-interop/summary.md) _Embedding._ Implement `SandType`, `FromValue`, and `IntoValue` for
+- [ ] 🔴 [022](triage/022-rust-range-interop/summary.md) _Embedding._ Implement `SandType`, `FromVmValue`, and `IntoVmValue` for
       `std::ops::Range<i64>` and `RangeInclusive<i64>` so that `SandStruct`
       fields can use Rust range types and `#[sand(default)]`.
 - [ ] 🔴 [024](triage/024-encoded-slash-rules/summary.md) _Policy._ Support HTTP paths with encoded separators `%2F` and `%5C` in `rule_for`

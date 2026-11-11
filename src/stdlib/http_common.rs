@@ -2,7 +2,7 @@
 
 use super::stream::{self, IoFailure, Suspended, bytes_read, line_read};
 use super::uri;
-use crate::native::convert::{HostError, IntoValue};
+use crate::native::convert::{HostError, IntoVmValue};
 use crate::native::ty::Val;
 use crate::native::{NativeModule, NativeObject};
 use crate::vm::WaitKind;
@@ -461,7 +461,7 @@ enum BodyRead {
     All,
 }
 
-fn read_body<R: IntoValue + Send + 'static>(
+fn read_body<R: IntoVmValue + Send + 'static>(
     vm: &mut Vm,
     body: Val<Body>,
     what: BodyRead,

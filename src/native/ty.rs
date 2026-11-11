@@ -1,7 +1,7 @@
 //! Rust representations of Sand types.
 
 use crate::types::{Builtins, traits};
-use crate::vm::value::Value;
+use crate::vm::value::VmValue;
 use std::any::TypeId;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
@@ -309,15 +309,15 @@ pub enum Never {}
 /// `Val<Vec<Param<0>>>` and returns `Option<Param<0>>`. If the Rust function
 /// requires a built-in trait of `T` (such as `Param<0, traits::Hash>`), the
 /// `native fn` declaration must declare `T: Hash`.
-pub struct Param<const N: u8, B: traits::Set = ()>(Value, PhantomData<fn() -> B>);
+pub struct Param<const N: u8, B: traits::Set = ()>(VmValue, PhantomData<fn() -> B>);
 
 impl<const N: u8, B: traits::Set> Param<N, B> {
-    pub fn raw(self) -> Value {
+    pub fn raw(self) -> VmValue {
         self.0
     }
 
     /// Wraps `v`, which must have the type of the `N`-th type parameter.
-    pub fn from_raw(v: Value) -> Self {
+    pub fn from_raw(v: VmValue) -> Self {
         Param(v, PhantomData)
     }
 }
@@ -348,14 +348,14 @@ impl<const N: u8, B: traits::Set> SandType for Param<N, B> {
 /// A Rust function can accept `Num<N>` for any type parameter that the
 /// `native fn` declaration declares as `T: Num`. Place `Num<N>` parameters in ascending order of `N`, after
 /// any [`Reflect`] parameters and before regular value parameters.
-pub struct Num<const N: u8>(Value);
+pub struct Num<const N: u8>(VmValue);
 
 impl<const N: u8> Num<N> {
-    pub fn raw(self) -> Value {
+    pub fn raw(self) -> VmValue {
         self.0
     }
 
-    pub(crate) fn from_raw(v: Value) -> Self {
+    pub(crate) fn from_raw(v: VmValue) -> Self {
         Num(v)
     }
 }
@@ -383,14 +383,14 @@ impl<const N: u8> SandType for Num<N> {
 /// Runtime type descriptor for the `N`-th `reflect` type parameter of a
 /// `native fn` (see [`Type::Reflect`]).
 #[derive(Clone, Copy)]
-pub struct Reflect<const N: u8>(Value);
+pub struct Reflect<const N: u8>(VmValue);
 
 impl<const N: u8> Reflect<N> {
-    pub fn raw(self) -> Value {
+    pub fn raw(self) -> VmValue {
         self.0
     }
 
-    pub(crate) fn from_raw(v: Value) -> Self {
+    pub(crate) fn from_raw(v: VmValue) -> Self {
         Reflect(v)
     }
 }
@@ -407,7 +407,7 @@ impl<const N: u8> SandType for Reflect<N> {
     }
 }
 
-/// Uncopied handle to a Sand [`Value`] with the Sand type of `T`.
+/// Uncopied handle to a Sand [`VmValue`] with the Sand type of `T`.
 ///
 /// Functions registered with [`NativeModule::vm_function`](super::NativeModule::vm_function)
 /// can accept and return `Val<T>` to avoid copying heap values (for example,
@@ -418,15 +418,15 @@ impl<const N: u8> SandType for Reflect<N> {
 /// structs, a `Val` is valid only for the duration of the synchronous native
 /// call that received or allocated it. Never store a `Val` inside a
 /// [`NativeObject`](super::NativeObject) or across an async suspension point.
-pub struct Val<T: ?Sized>(Value, PhantomData<fn() -> T>);
+pub struct Val<T: ?Sized>(VmValue, PhantomData<fn() -> T>);
 
 impl<T: ?Sized> Val<T> {
-    pub fn raw(self) -> Value {
+    pub fn raw(self) -> VmValue {
         self.0
     }
 
     /// Wraps `v`, which must have the Sand type of `T`.
-    pub fn from_raw(v: Value) -> Self {
+    pub fn from_raw(v: VmValue) -> Self {
         Val(v, PhantomData)
     }
 }

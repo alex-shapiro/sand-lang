@@ -12,7 +12,7 @@
 //! - `duration` is [`jiff::SignedDuration`].
 
 use crate::check::ModKind;
-use crate::native::convert::{HostError, IntoValue};
+use crate::native::convert::{HostError, IntoVmValue};
 use crate::native::ty::Val;
 use crate::native::{Binding, NamedType, NativeModule, NativeObject};
 use crate::platform::{Instant as Monotonic, UNIX_EPOCH};
@@ -816,7 +816,7 @@ fn epoch_div(t: Timestamp, unit: i128) -> Result<i64, Fail> {
 
 type Part<P, R> = (&'static str, fn(P) -> R);
 
-fn methods<T: ValueType, P: 'static, R: IntoValue + 'static>(m: &mut NativeModule, part: fn(&T) -> P, natives: &[Part<P, R>]) {
+fn methods<T: ValueType, P: 'static, R: IntoVmValue + 'static>(m: &mut NativeModule, part: fn(&T) -> P, natives: &[Part<P, R>]) {
     for &(name, f) in natives {
         m.function(&format!("{}.{name}", T::NAME), move |x: T| f(part(&x)));
     }

@@ -21,7 +21,7 @@ use crate::types::{FnId, ModId};
 use crate::vm::bytecode::Program;
 use crate::vm::heap::GcStats;
 use crate::vm::sched::IoShared;
-use crate::vm::value::Value;
+use crate::vm::value::VmValue;
 use crate::vm::{Always, Host, HostFn, NativeEntry, OutputSink, Rng, RunEnding, SharedSink, TraceFrame, Trap, Vm, WaitKind, entropy_seed};
 use parking_lot::Mutex;
 use std::borrow::Cow;
@@ -1767,7 +1767,7 @@ const MAX_DISCOVERY_ERRORS: usize = 100;
 
 /// Finishes a VM run after the main task returns `main_result`. Returns
 /// the exit code or error.
-async fn end_run(vm: &mut Vm, main_result: Result<Value, RunEnding>) -> Result<i32, Error> {
+async fn end_run(vm: &mut Vm, main_result: Result<VmValue, RunEnding>) -> Result<i32, Error> {
     let ended = match main_result {
         Ok(_) => vm.end_tasks().await,
         Err(ending) => Err(ending),

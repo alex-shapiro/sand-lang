@@ -12,7 +12,7 @@
 use super::io_kind;
 use crate::check::ModKind;
 use crate::files::{EntryKind, Fs, Mode, OpenMode, OpenedFile, Target, is_unchecked_symlink, too_many_open_files, unchecked_symlink};
-use crate::native::convert::{HostError, IntoValue};
+use crate::native::convert::{HostError, IntoVmValue};
 use crate::native::ty::Val;
 use crate::native::{NativeModule, NativeObject};
 use crate::policy::{Capability, Decision, MAX_PATH_BYTES, Policy};
@@ -358,7 +358,7 @@ fn protected(shown: &str) -> HostError {
 
 /// Runs the file system operation `op` on a worker thread (see
 /// `Vm::offload`) and converts its result with [`settle`].
-fn run<T: Send + 'static, R: IntoValue>(
+fn run<T: Send + 'static, R: IntoVmValue>(
     vm: &mut Vm,
     shown: String,
     op: impl FnOnce(&Fs) -> io::Result<T> + Send + 'static,
@@ -370,7 +370,7 @@ fn run<T: Send + 'static, R: IntoValue>(
 }
 
 /// Converts an I/O result into an engine result.
-fn settle<T, R: IntoValue>(vm: &mut Vm, shown: String, r: io::Result<T>, finish: impl FnOnce(&mut Vm, T) -> FsResult<R>) -> FsResult<R> {
+fn settle<T, R: IntoVmValue>(vm: &mut Vm, shown: String, r: io::Result<T>, finish: impl FnOnce(&mut Vm, T) -> FsResult<R>) -> FsResult<R> {
     match r {
         Ok(v) => finish(vm, v),
         Err(e) => Err(HostError::new(io_kind(&e), format!("{shown}: {e}"))),
@@ -627,7 +627,7 @@ enum Needs {
 
 /// Runs `op` on the open `file`, temporarily taking `OpenState` out of the
 /// object so `op` can borrow `vm`.
-fn with_file<R: IntoValue>(
+fn with_file<R: IntoVmValue>(
     vm: &mut Vm,
     file: Val<FileObj>,
     needs: Needs,
@@ -871,7 +871,7 @@ fn write_file(vm: &mut Vm, file: Val<FileObj>, data: impl Fn(&Vm) -> &[u8]) -> F
     })
 }
 
-fn read_rest<R: IntoValue>(
+fn read_rest<R: IntoVmValue>(
     vm: &mut Vm,
     file: Val<FileObj>,
     finish: impl FnOnce(&mut Vm, Vec<u8>) -> Result<io::Result<R>, Ctl>,

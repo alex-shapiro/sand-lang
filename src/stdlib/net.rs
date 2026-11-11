@@ -7,7 +7,7 @@
 
 use super::stream::{self, IoFailure, Suspended, line_read, read_line, read_to_end_reserved, read_upto, suspend};
 use crate::check::ModKind;
-use crate::native::convert::{HostError, IntoValue};
+use crate::native::convert::{HostError, IntoVmValue};
 use crate::native::ty::Val;
 use crate::native::{NativeModule, NativeObject};
 use crate::network::{self, Network, Stream};
@@ -62,7 +62,7 @@ pub(crate) fn closed() -> IoFailure {
     IoFailure::new("closed", "connection closed")
 }
 
-pub(crate) trait Resource: crate::native::ObjectType + IntoValue {
+pub(crate) trait Resource: crate::native::ObjectType + IntoVmValue {
     /// Attaches the slot that counted the resource while it was being opened.
     fn attach(&mut self, slot: ResourceSlot);
 }

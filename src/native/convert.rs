@@ -5,15 +5,15 @@ use super::{Constant, RustVariant};
 use crate::types::ConstVal;
 use crate::types::traits;
 use crate::vm::meter::Scratch;
-use crate::vm::value::{Obj, Value, ValueType};
+use crate::vm::value::{Obj, ValueType, VmValue};
 use crate::vm::{Ctl, Fail, Vm};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::Hash;
 
-/// Converts a Sand [`Value`] into a Rust argument for a native function.
+/// Converts a Sand [`VmValue`] into a Rust argument for a native function.
 ///
 /// For functions registered with [`NativeModule::function`](super::NativeModule::function),
-/// [`FromValue::Item`] can borrow directly from the VM heap (`&str`, `&[u8]`,
+/// [`FromVmValue::Item`] can borrow directly from the VM heap (`&str`, `&[u8]`,
 /// `&T`). Owned types (`String`, `Vec<T>`, ...) allocate a Rust copy.
 ///
 /// Because a Sand value can contain shared references to the same heap object,
@@ -21,12 +21,12 @@ use std::hash::Hash;
 /// Implementations must charge fuel to `vm` and record allocated bytes in
 /// [`Conversion`] so that instruction and memory limits bound exponential
 /// expansion of shared values.
-pub trait FromValue: SandType {
+pub trait FromVmValue: SandType {
     type Item<'a>;
 
     /// Converts `v` into [`Self::Item`], charging fuel to `vm` and recording
     /// temporary Rust allocations in `conv`.
-    fn from_value<'a>(vm: &'a Vm, v: Value, conv: &mut Conversion) -> Result<Self::Item<'a>, Fail>;
+    fn from_vm_value<'a>(vm: &'a Vm, v: VmValue, conv: &mut Conversion) -> Result<Self::Item<'a>, Fail>;
 }
 
 /// Tracks temporary Rust memory allocated while converting arguments for a
@@ -62,10 +62,10 @@ impl Conversion {
     }
 }
 
-/// Converts a Rust return value into a Sand [`Value`], charging fuel and
+/// Converts a Rust return value into a Sand [`VmValue`], charging fuel and
 /// reserving heap memory.
-pub trait IntoValue: SandType {
-    fn into_value(self, vm: &mut Vm) -> Result<Value, Fail>;
+pub trait IntoVmValue: SandType {
+    fn into_vm_value(self, vm: &mut Vm) -> Result<VmValue, Fail>;
 
     /// Converts `self` into a compile-time Sand [`Constant`], or returns `None`
     /// if `self` cannot be represented as a constant.
@@ -139,10 +139,10 @@ impl<C: From<Fail>> From<Fail> for HostError<C> {
 impl<C: From<Fail>> HostError<C> {
     /// Converts a recoverable error into a Sand `Err` value, or returns the
     /// control signal that stops the call.
-    pub(crate) fn into_sand_error(self, vm: &mut Vm) -> Result<Value, C> {
+    pub(crate) fn into_sand_error(self, vm: &mut Vm) -> Result<VmValue, C> {
         match *self.0 {
             HostErrorKind::Error { kind, message } => {
-                let e = crate::stdlib::core::Error { kind, message }.into_value(vm)?;
+                let e = crate::stdlib::core::Error { kind, message }.into_vm_value(vm)?;
                 Ok(vm.err(e))
             }
             HostErrorKind::Abort(c) => Err(c),
@@ -197,17 +197,17 @@ pub fn mismatch<S: SandType + ?Sized>() -> Fail {
 
 macro_rules! scalar {
     ($($t:ty: $p:pat => $e:expr, $v:ident => $into:expr, $c:path),* $(,)?) => {$(
-        impl FromValue for $t {
+        impl FromVmValue for $t {
             type Item<'a> = $t;
-            fn from_value(_: &Vm, v: Value, _: &mut Conversion) -> Result<$t, Fail> {
+            fn from_vm_value(_: &Vm, v: VmValue, _: &mut Conversion) -> Result<$t, Fail> {
                 match v {
                     $p => Ok($e),
                     _ => Err(mismatch::<$t>()),
                 }
             }
         }
-        impl IntoValue for $t {
-            fn into_value(self, _: &mut Vm) -> Result<Value, Fail> {
+        impl IntoVmValue for $t {
+            fn into_vm_value(self, _: &mut Vm) -> Result<VmValue, Fail> {
                 let $v = self;
                 Ok($into)
             }
@@ -219,40 +219,40 @@ macro_rules! scalar {
 }
 
 scalar! {
-    i64: Value::Int(i) => i, x => Value::Int(x), ConstVal::Int,
-    f64: Value::Float(f) => f, x => Value::Float(x), ConstVal::Float,
-    bool: Value::Bool(b) => b, x => Value::Bool(x), ConstVal::Bool,
+    i64: VmValue::Int(i) => i, x => VmValue::Int(x), ConstVal::Int,
+    f64: VmValue::Float(f) => f, x => VmValue::Float(x), ConstVal::Float,
+    bool: VmValue::Bool(b) => b, x => VmValue::Bool(x), ConstVal::Bool,
 }
 
-impl FromValue for () {
+impl FromVmValue for () {
     type Item<'a> = ();
-    fn from_value(_: &Vm, _: Value, _: &mut Conversion) -> Result<(), Fail> {
+    fn from_vm_value(_: &Vm, _: VmValue, _: &mut Conversion) -> Result<(), Fail> {
         Ok(())
     }
 }
-impl IntoValue for () {
-    fn into_value(self, _: &mut Vm) -> Result<Value, Fail> {
-        Ok(Value::Unit)
+impl IntoVmValue for () {
+    fn into_vm_value(self, _: &mut Vm) -> Result<VmValue, Fail> {
+        Ok(VmValue::Unit)
     }
     fn to_const(&self) -> Option<Constant> {
         Some(Constant(ConstVal::Unit))
     }
 }
 
-impl FromValue for jiff::SignedDuration {
+impl FromVmValue for jiff::SignedDuration {
     type Item<'a> = jiff::SignedDuration;
-    fn from_value(_: &Vm, v: Value, _: &mut Conversion) -> Result<Self, Fail> {
+    fn from_vm_value(_: &Vm, v: VmValue, _: &mut Conversion) -> Result<Self, Fail> {
         match v {
-            Value::Dur(n) => Ok(jiff::SignedDuration::from_nanos(n)),
+            VmValue::Dur(n) => Ok(jiff::SignedDuration::from_nanos(n)),
             _ => Err(mismatch::<Self>()),
         }
     }
 }
 
-impl IntoValue for jiff::SignedDuration {
-    fn into_value(self, _: &mut Vm) -> Result<Value, Fail> {
+impl IntoVmValue for jiff::SignedDuration {
+    fn into_vm_value(self, _: &mut Vm) -> Result<VmValue, Fail> {
         match i64::try_from(self.as_nanos()) {
-            Ok(n) => Ok(Value::Dur(n)),
+            Ok(n) => Ok(VmValue::Dur(n)),
             Err(_) => Err(Fail::runtime_error("overflow", "the duration is out of range")),
         }
     }
@@ -261,15 +261,15 @@ impl IntoValue for jiff::SignedDuration {
     }
 }
 
-impl IntoValue for Never {
-    fn into_value(self, _: &mut Vm) -> Result<Value, Fail> {
+impl IntoVmValue for Never {
+    fn into_vm_value(self, _: &mut Vm) -> Result<VmValue, Fail> {
         match self {}
     }
 }
 
-impl FromValue for &str {
+impl FromVmValue for &str {
     type Item<'a> = &'a str;
-    fn from_value<'a>(vm: &'a Vm, v: Value, _: &mut Conversion) -> Result<&'a str, Fail> {
+    fn from_vm_value<'a>(vm: &'a Vm, v: VmValue, _: &mut Conversion) -> Result<&'a str, Fail> {
         match vm.heap.get(v) {
             Obj::Str(s) => Ok(s),
             Obj::StrBuf(s) => Ok(s),
@@ -277,17 +277,17 @@ impl FromValue for &str {
         }
     }
 }
-impl FromValue for String {
+impl FromVmValue for String {
     type Item<'a> = String;
-    fn from_value(vm: &Vm, v: Value, conv: &mut Conversion) -> Result<String, Fail> {
-        let s = <&str>::from_value(vm, v, conv)?;
+    fn from_vm_value(vm: &Vm, v: VmValue, conv: &mut Conversion) -> Result<String, Fail> {
+        let s = <&str>::from_vm_value(vm, v, conv)?;
         conv.alloc(vm, s.len())?;
         vm.charge_bytes(s.len())?;
         Ok(s.to_string())
     }
 }
-impl IntoValue for String {
-    fn into_value(self, vm: &mut Vm) -> Result<Value, Fail> {
+impl IntoVmValue for String {
+    fn into_vm_value(self, vm: &mut Vm) -> Result<VmValue, Fail> {
         vm.check_memory(self.len())?;
         vm.charge_bytes(self.len())?;
         Ok(vm.heap.new_str(self))
@@ -296,34 +296,34 @@ impl IntoValue for String {
         Some(Constant(ConstVal::Str(self.clone())))
     }
 }
-impl IntoValue for &str {
-    fn into_value(self, vm: &mut Vm) -> Result<Value, Fail> {
+impl IntoVmValue for &str {
+    fn into_vm_value(self, vm: &mut Vm) -> Result<VmValue, Fail> {
         vm.check_memory(self.len())?;
         vm.charge_bytes(self.len())?;
         Ok(vm.heap.new_str(self))
     }
 }
 
-impl FromValue for &[u8] {
+impl FromVmValue for &[u8] {
     type Item<'a> = &'a [u8];
-    fn from_value<'a>(vm: &'a Vm, v: Value, _: &mut Conversion) -> Result<&'a [u8], Fail> {
+    fn from_vm_value<'a>(vm: &'a Vm, v: VmValue, _: &mut Conversion) -> Result<&'a [u8], Fail> {
         match vm.heap.get(v) {
             Obj::Bytes(b) => Ok(b),
             _ => Err(mismatch::<Vec<u8>>()),
         }
     }
 }
-impl FromValue for Vec<u8> {
+impl FromVmValue for Vec<u8> {
     type Item<'a> = Vec<u8>;
-    fn from_value(vm: &Vm, v: Value, conv: &mut Conversion) -> Result<Vec<u8>, Fail> {
-        let b = <&[u8]>::from_value(vm, v, conv)?;
+    fn from_vm_value(vm: &Vm, v: VmValue, conv: &mut Conversion) -> Result<Vec<u8>, Fail> {
+        let b = <&[u8]>::from_vm_value(vm, v, conv)?;
         conv.alloc(vm, b.len())?;
         vm.charge_bytes(b.len())?;
         Ok(b.to_vec())
     }
 }
-impl IntoValue for Vec<u8> {
-    fn into_value(self, vm: &mut Vm) -> Result<Value, Fail> {
+impl IntoVmValue for Vec<u8> {
+    fn into_vm_value(self, vm: &mut Vm) -> Result<VmValue, Fail> {
         vm.check_memory(self.len())?;
         vm.charge_bytes(self.len())?;
         Ok(vm.heap.new_bytes(self))
@@ -332,30 +332,30 @@ impl IntoValue for Vec<u8> {
         Some(Constant(ConstVal::Bytes(self.clone())))
     }
 }
-impl IntoValue for &[u8] {
-    fn into_value(self, vm: &mut Vm) -> Result<Value, Fail> {
+impl IntoVmValue for &[u8] {
+    fn into_vm_value(self, vm: &mut Vm) -> Result<VmValue, Fail> {
         vm.check_memory(self.len())?;
         vm.charge_bytes(self.len())?;
         Ok(vm.heap.new_bytes(self))
     }
 }
 
-impl<T: FromValue> FromValue for Vec<T> {
+impl<T: FromVmValue> FromVmValue for Vec<T> {
     type Item<'a> = Vec<T::Item<'a>>;
-    fn from_value<'a>(vm: &'a Vm, v: Value, conv: &mut Conversion) -> Result<Self::Item<'a>, Fail> {
+    fn from_vm_value<'a>(vm: &'a Vm, v: VmValue, conv: &mut Conversion) -> Result<Self::Item<'a>, Fail> {
         let Obj::List(items) = vm.heap.get(v) else { return Err(mismatch::<Self>()) };
         conv.alloc(vm, items.len().saturating_mul(std::mem::size_of::<T::Item<'a>>()))?;
         vm.charge(items.len() as u64)?;
-        items.iter().map(|&x| T::from_value(vm, x, conv)).collect()
+        items.iter().map(|&x| T::from_vm_value(vm, x, conv)).collect()
     }
 }
-impl<T: IntoValue> IntoValue for Vec<T> {
-    fn into_value(self, vm: &mut Vm) -> Result<Value, Fail> {
-        vm.check_memory(self.len().saturating_mul(std::mem::size_of::<Value>()))?;
+impl<T: IntoVmValue> IntoVmValue for Vec<T> {
+    fn into_vm_value(self, vm: &mut Vm) -> Result<VmValue, Fail> {
+        vm.check_memory(self.len().saturating_mul(std::mem::size_of::<VmValue>()))?;
         vm.charge(self.len() as u64)?;
         let mut items = Vec::with_capacity(self.len());
         for x in self {
-            items.push(x.into_value(vm)?);
+            items.push(x.into_vm_value(vm)?);
         }
         Ok(vm.heap.new_list(items))
     }
@@ -364,33 +364,33 @@ impl<T: IntoValue> IntoValue for Vec<T> {
     }
 }
 
-impl<T: for<'a> FromValue<Item<'a> = T>> FromValue for Box<T> {
+impl<T: for<'a> FromVmValue<Item<'a> = T>> FromVmValue for Box<T> {
     type Item<'a> = Box<T>;
-    fn from_value(vm: &Vm, v: Value, conv: &mut Conversion) -> Result<Box<T>, Fail> {
+    fn from_vm_value(vm: &Vm, v: VmValue, conv: &mut Conversion) -> Result<Box<T>, Fail> {
         conv.alloc(vm, std::mem::size_of::<T>())?;
-        T::from_value(vm, v, conv).map(Box::new)
+        T::from_vm_value(vm, v, conv).map(Box::new)
     }
 }
-impl<T: IntoValue> IntoValue for Box<T> {
-    fn into_value(self, vm: &mut Vm) -> Result<Value, Fail> {
-        (*self).into_value(vm)
+impl<T: IntoVmValue> IntoVmValue for Box<T> {
+    fn into_vm_value(self, vm: &mut Vm) -> Result<VmValue, Fail> {
+        (*self).into_vm_value(vm)
     }
     fn to_const(&self) -> Option<Constant> {
         (**self).to_const()
     }
 }
 
-impl<T: FromValue> FromValue for Option<T> {
+impl<T: FromVmValue> FromVmValue for Option<T> {
     type Item<'a> = Option<T::Item<'a>>;
-    fn from_value<'a>(vm: &'a Vm, v: Value, conv: &mut Conversion) -> Result<Self::Item<'a>, Fail> {
-        vm.as_option(v).map(|x| T::from_value(vm, x, conv)).transpose()
+    fn from_vm_value<'a>(vm: &'a Vm, v: VmValue, conv: &mut Conversion) -> Result<Self::Item<'a>, Fail> {
+        vm.as_option(v).map(|x| T::from_vm_value(vm, x, conv)).transpose()
     }
 }
-impl<T: IntoValue> IntoValue for Option<T> {
-    fn into_value(self, vm: &mut Vm) -> Result<Value, Fail> {
+impl<T: IntoVmValue> IntoVmValue for Option<T> {
+    fn into_vm_value(self, vm: &mut Vm) -> Result<VmValue, Fail> {
         Ok(match self {
             Some(x) => {
-                let v = x.into_value(vm)?;
+                let v = x.into_vm_value(vm)?;
                 vm.some(v)
             }
             None => vm.none(),
@@ -404,8 +404,8 @@ impl<T: IntoValue> IntoValue for Option<T> {
     }
 }
 
-impl<T: IntoValue, E: IntoHostError> IntoValue for Result<T, E> {
-    fn into_value(self, vm: &mut Vm) -> Result<Value, Fail> {
+impl<T: IntoVmValue, E: IntoHostError> IntoVmValue for Result<T, E> {
+    fn into_vm_value(self, vm: &mut Vm) -> Result<VmValue, Fail> {
         match self {
             Ok(x) => ok_value(x, vm),
             Err(e) => e.into_host_error().into_sand_error(vm),
@@ -413,15 +413,15 @@ impl<T: IntoValue, E: IntoHostError> IntoValue for Result<T, E> {
     }
 }
 
-impl<T: IntoValue> IntoValue for Result<T, Fail> {
-    fn into_value(self, vm: &mut Vm) -> Result<Value, Fail> {
-        self?.into_value(vm)
+impl<T: IntoVmValue> IntoVmValue for Result<T, Fail> {
+    fn into_vm_value(self, vm: &mut Vm) -> Result<VmValue, Fail> {
+        self?.into_vm_value(vm)
     }
 }
 
 /// Converts `x` into a Sand `Ok` value.
-pub(crate) fn ok_value<T: IntoValue>(x: T, vm: &mut Vm) -> Result<Value, Fail> {
-    let v = x.into_value(vm)?;
+pub(crate) fn ok_value<T: IntoVmValue>(x: T, vm: &mut Vm) -> Result<VmValue, Fail> {
+    let v = x.into_vm_value(vm)?;
     Ok(vm.ok(v))
 }
 
@@ -429,37 +429,37 @@ fn sort_cost(n: usize) -> u64 {
     (n as u64).saturating_mul(u64::from(usize::BITS - n.leading_zeros()))
 }
 
-fn read_map<'a, K, V, C>(vm: &'a Vm, v: Value, conv: &mut Conversion) -> Result<C, Fail>
+fn read_map<'a, K, V, C>(vm: &'a Vm, v: VmValue, conv: &mut Conversion) -> Result<C, Fail>
 where
-    K: for<'k> FromValue<Item<'k> = K>,
-    V: FromValue,
+    K: for<'k> FromVmValue<Item<'k> = K>,
+    V: FromVmValue,
     C: FromIterator<(K, V::Item<'a>)>,
 {
     let Obj::Map(m) = vm.heap.get(v) else { return Err(mismatch::<HashMap<K, V>>()) };
     conv.alloc(vm, m.live.saturating_mul(std::mem::size_of::<(K, V::Item<'a>)>()))?;
     vm.charge(m.live as u64)?;
-    m.entries.iter().flatten().map(|&(k, x)| Ok((K::from_value(vm, k, conv)?, V::from_value(vm, x, conv)?))).collect()
+    m.entries.iter().flatten().map(|&(k, x)| Ok((K::from_vm_value(vm, k, conv)?, V::from_vm_value(vm, x, conv)?))).collect()
 }
-fn write_map<K: IntoValue, V: IntoValue>(vm: &mut Vm, len: usize, items: impl IntoIterator<Item = (K, V)>) -> Result<Value, Fail> {
-    vm.check_memory(len.saturating_mul(4 * std::mem::size_of::<Value>()))?;
+fn write_map<K: IntoVmValue, V: IntoVmValue>(vm: &mut Vm, len: usize, items: impl IntoIterator<Item = (K, V)>) -> Result<VmValue, Fail> {
+    vm.check_memory(len.saturating_mul(4 * std::mem::size_of::<VmValue>()))?;
     let m = vm.heap.alloc(Obj::Map(Box::default()));
     for (k, v) in items {
-        let k = k.into_value(vm)?;
-        let v = v.into_value(vm)?;
+        let k = k.into_vm_value(vm)?;
+        let v = v.into_vm_value(vm)?;
         vm.map_insert(m, k, v)?;
     }
     Ok(m)
 }
-impl<K: for<'k> FromValue<Item<'k> = K> + Eq + Hash, V: FromValue> FromValue for HashMap<K, V> {
+impl<K: for<'k> FromVmValue<Item<'k> = K> + Eq + Hash, V: FromVmValue> FromVmValue for HashMap<K, V> {
     type Item<'a> = HashMap<K, V::Item<'a>>;
-    fn from_value<'a>(vm: &'a Vm, v: Value, conv: &mut Conversion) -> Result<Self::Item<'a>, Fail> {
+    fn from_vm_value<'a>(vm: &'a Vm, v: VmValue, conv: &mut Conversion) -> Result<Self::Item<'a>, Fail> {
         read_map::<K, V, _>(vm, v, conv)
     }
 }
 /// Sorts keys before insertion so the Sand map's iteration order is
 /// deterministic.
-impl<K: IntoValue + Ord, V: IntoValue> IntoValue for HashMap<K, V> {
-    fn into_value(self, vm: &mut Vm) -> Result<Value, Fail> {
+impl<K: IntoVmValue + Ord, V: IntoVmValue> IntoVmValue for HashMap<K, V> {
+    fn into_vm_value(self, vm: &mut Vm) -> Result<VmValue, Fail> {
         let mut items: Vec<(K, V)> = self.into_iter().collect();
         vm.charge(sort_cost(items.len()))?;
         items.sort_unstable_by(|a, b| a.0.cmp(&b.0));
@@ -471,14 +471,14 @@ impl<K: IntoValue + Ord, V: IntoValue> IntoValue for HashMap<K, V> {
         map_const(items)
     }
 }
-impl<K: for<'k> FromValue<Item<'k> = K> + Ord, V: FromValue> FromValue for BTreeMap<K, V> {
+impl<K: for<'k> FromVmValue<Item<'k> = K> + Ord, V: FromVmValue> FromVmValue for BTreeMap<K, V> {
     type Item<'a> = BTreeMap<K, V::Item<'a>>;
-    fn from_value<'a>(vm: &'a Vm, v: Value, conv: &mut Conversion) -> Result<Self::Item<'a>, Fail> {
+    fn from_vm_value<'a>(vm: &'a Vm, v: VmValue, conv: &mut Conversion) -> Result<Self::Item<'a>, Fail> {
         read_map::<K, V, _>(vm, v, conv)
     }
 }
-impl<K: IntoValue, V: IntoValue> IntoValue for BTreeMap<K, V> {
-    fn into_value(self, vm: &mut Vm) -> Result<Value, Fail> {
+impl<K: IntoVmValue, V: IntoVmValue> IntoVmValue for BTreeMap<K, V> {
+    fn into_vm_value(self, vm: &mut Vm) -> Result<VmValue, Fail> {
         write_map(vm, self.len(), self)
     }
     fn to_const(&self) -> Option<Constant> {
@@ -486,14 +486,14 @@ impl<K: IntoValue, V: IntoValue> IntoValue for BTreeMap<K, V> {
     }
 }
 
-impl<K: for<'k> FromValue<Item<'k> = K> + Eq + Hash, V: FromValue> FromValue for indexmap::IndexMap<K, V> {
+impl<K: for<'k> FromVmValue<Item<'k> = K> + Eq + Hash, V: FromVmValue> FromVmValue for indexmap::IndexMap<K, V> {
     type Item<'a> = indexmap::IndexMap<K, V::Item<'a>>;
-    fn from_value<'a>(vm: &'a Vm, v: Value, conv: &mut Conversion) -> Result<Self::Item<'a>, Fail> {
+    fn from_vm_value<'a>(vm: &'a Vm, v: VmValue, conv: &mut Conversion) -> Result<Self::Item<'a>, Fail> {
         read_map::<K, V, _>(vm, v, conv)
     }
 }
-impl<K: IntoValue, V: IntoValue> IntoValue for indexmap::IndexMap<K, V> {
-    fn into_value(self, vm: &mut Vm) -> Result<Value, Fail> {
+impl<K: IntoVmValue, V: IntoVmValue> IntoVmValue for indexmap::IndexMap<K, V> {
+    fn into_vm_value(self, vm: &mut Vm) -> Result<VmValue, Fail> {
         write_map(vm, self.len(), self)
     }
     fn to_const(&self) -> Option<Constant> {
@@ -501,36 +501,36 @@ impl<K: IntoValue, V: IntoValue> IntoValue for indexmap::IndexMap<K, V> {
     }
 }
 
-fn map_const<'a, K: IntoValue + 'a, V: IntoValue + 'a>(entries: impl IntoIterator<Item = (&'a K, &'a V)>) -> Option<Constant> {
+fn map_const<'a, K: IntoVmValue + 'a, V: IntoVmValue + 'a>(entries: impl IntoIterator<Item = (&'a K, &'a V)>) -> Option<Constant> {
     let entries = entries.into_iter().map(|(k, v)| Some((k.to_const()?.0, v.to_const()?.0))).collect::<Option<_>>()?;
     Some(Constant(ConstVal::Map(entries)))
 }
 
-fn read_set<T: for<'k> FromValue<Item<'k> = T>, C: FromIterator<T>>(vm: &Vm, v: Value, conv: &mut Conversion) -> Result<C, Fail> {
+fn read_set<T: for<'k> FromVmValue<Item<'k> = T>, C: FromIterator<T>>(vm: &Vm, v: VmValue, conv: &mut Conversion) -> Result<C, Fail> {
     let Obj::Set(s) = vm.heap.get(v) else { return Err(mismatch::<HashSet<T>>()) };
     conv.alloc(vm, s.live.saturating_mul(std::mem::size_of::<T>()))?;
     vm.charge(s.live as u64)?;
-    s.entries.iter().flatten().map(|&x| T::from_value(vm, x, conv)).collect()
+    s.entries.iter().flatten().map(|&x| T::from_vm_value(vm, x, conv)).collect()
 }
-fn write_set<T: IntoValue>(vm: &mut Vm, len: usize, items: impl IntoIterator<Item = T>) -> Result<Value, Fail> {
-    vm.check_memory(len.saturating_mul(3 * std::mem::size_of::<Value>()))?;
+fn write_set<T: IntoVmValue>(vm: &mut Vm, len: usize, items: impl IntoIterator<Item = T>) -> Result<VmValue, Fail> {
+    vm.check_memory(len.saturating_mul(3 * std::mem::size_of::<VmValue>()))?;
     let s = vm.heap.alloc(Obj::Set(Box::default()));
     for x in items {
-        let x = x.into_value(vm)?;
+        let x = x.into_vm_value(vm)?;
         vm.set_add(s, x)?;
     }
     Ok(s)
 }
-impl<T: for<'k> FromValue<Item<'k> = T> + Eq + Hash> FromValue for HashSet<T> {
+impl<T: for<'k> FromVmValue<Item<'k> = T> + Eq + Hash> FromVmValue for HashSet<T> {
     type Item<'a> = HashSet<T>;
-    fn from_value(vm: &Vm, v: Value, conv: &mut Conversion) -> Result<Self, Fail> {
+    fn from_vm_value(vm: &Vm, v: VmValue, conv: &mut Conversion) -> Result<Self, Fail> {
         read_set(vm, v, conv)
     }
 }
 /// Sorts elements before insertion so the Sand set's iteration order is
 /// deterministic.
-impl<T: IntoValue + Ord> IntoValue for HashSet<T> {
-    fn into_value(self, vm: &mut Vm) -> Result<Value, Fail> {
+impl<T: IntoVmValue + Ord> IntoVmValue for HashSet<T> {
+    fn into_vm_value(self, vm: &mut Vm) -> Result<VmValue, Fail> {
         let mut items: Vec<T> = self.into_iter().collect();
         vm.charge(sort_cost(items.len()))?;
         items.sort_unstable();
@@ -542,14 +542,14 @@ impl<T: IntoValue + Ord> IntoValue for HashSet<T> {
         Some(Constant(ConstVal::Set(super::collect_consts(items.into_iter().map(T::to_const))?)))
     }
 }
-impl<T: for<'k> FromValue<Item<'k> = T> + Ord> FromValue for BTreeSet<T> {
+impl<T: for<'k> FromVmValue<Item<'k> = T> + Ord> FromVmValue for BTreeSet<T> {
     type Item<'a> = BTreeSet<T>;
-    fn from_value(vm: &Vm, v: Value, conv: &mut Conversion) -> Result<Self, Fail> {
+    fn from_vm_value(vm: &Vm, v: VmValue, conv: &mut Conversion) -> Result<Self, Fail> {
         read_set(vm, v, conv)
     }
 }
-impl<T: IntoValue> IntoValue for BTreeSet<T> {
-    fn into_value(self, vm: &mut Vm) -> Result<Value, Fail> {
+impl<T: IntoVmValue> IntoVmValue for BTreeSet<T> {
+    fn into_vm_value(self, vm: &mut Vm) -> Result<VmValue, Fail> {
         write_set(vm, self.len(), self)
     }
     fn to_const(&self) -> Option<Constant> {
@@ -564,13 +564,13 @@ macro_rules! tuple_impls {
                 crate::native::ty::Type::Tuple(vec![$($n::sand_type()),+])
             }
         }
-        impl<$($n: FromValue),+> FromValue for ($($n,)+) {
+        impl<$($n: FromVmValue),+> FromVmValue for ($($n,)+) {
             type Item<'a> = ($($n::Item<'a>,)+);
-            fn from_value<'a>(vm: &'a Vm, v: Value, conv: &mut Conversion) -> Result<Self::Item<'a>, Fail> {
+            fn from_vm_value<'a>(vm: &'a Vm, v: VmValue, conv: &mut Conversion) -> Result<Self::Item<'a>, Fail> {
                 let pair;
-                let f: &[Value] = match v {
-                    Value::Pair(a, b) => {
-                        pair = [Value::Int(a as i64), Value::Int(b)];
+                let f: &[VmValue] = match v {
+                    VmValue::Pair(a, b) => {
+                        pair = [VmValue::Int(a as i64), VmValue::Int(b)];
                         &pair
                     }
                     _ => match vm.heap.get(v) {
@@ -581,13 +581,13 @@ macro_rules! tuple_impls {
                 if f.len() != $len {
                     return Err(mismatch::<Self>());
                 }
-                Ok(($($n::from_value(vm, f[$i], conv)?,)+))
+                Ok(($($n::from_vm_value(vm, f[$i], conv)?,)+))
             }
         }
-        impl<$($n: IntoValue),+> IntoValue for ($($n,)+) {
-            fn into_value(self, vm: &mut Vm) -> Result<Value, Fail> {
-                let items = [$(self.$i.into_value(vm)?),+];
-                vm.check_memory(items.len() * std::mem::size_of::<Value>())?;
+        impl<$($n: IntoVmValue),+> IntoVmValue for ($($n,)+) {
+            fn into_vm_value(self, vm: &mut Vm) -> Result<VmValue, Fail> {
+                let items = [$(self.$i.into_vm_value(vm)?),+];
+                vm.check_memory(items.len() * std::mem::size_of::<VmValue>())?;
                 Ok(vm.heap.new_tuple(&items))
             }
             fn to_const(&self) -> Option<Constant> {
@@ -613,18 +613,18 @@ macro_rules! __value_type_impls {
                 $crate::native::ty::Type::bound::<Self>(::std::vec::Vec::new())
             }
         }
-        impl $crate::native::convert::FromValue for $t {
+        impl $crate::native::convert::FromVmValue for $t {
             type Item<'a> = Self;
-            fn from_value(
+            fn from_vm_value(
                 vm: &$crate::vm::Vm,
-                v: $crate::vm::value::Value,
+                v: $crate::vm::value::VmValue,
                 _: &mut $crate::native::convert::Conversion,
             ) -> ::std::result::Result<Self, $crate::vm::Fail> {
                 $crate::native::convert::value_from(vm, v)
             }
         }
-        impl $crate::native::convert::IntoValue for $t {
-            fn into_value(self, vm: &mut $crate::vm::Vm) -> ::std::result::Result<$crate::vm::value::Value, $crate::vm::Fail> {
+        impl $crate::native::convert::IntoVmValue for $t {
+            fn into_vm_value(self, vm: &mut $crate::vm::Vm) -> ::std::result::Result<$crate::vm::value::VmValue, $crate::vm::Fail> {
                 $crate::native::convert::value_into(self, vm)
             }
         }
@@ -632,12 +632,12 @@ macro_rules! __value_type_impls {
 }
 
 #[doc(hidden)]
-pub fn value_from<T: ValueType>(vm: &Vm, v: Value) -> Result<T, Fail> {
+pub fn value_from<T: ValueType>(vm: &Vm, v: VmValue) -> Result<T, Fail> {
     vm.heap.value::<T>(v).ok_or_else(mismatch::<T>)
 }
 
 #[doc(hidden)]
-pub fn value_into<T: ValueType>(x: T, vm: &mut Vm) -> Result<Value, Fail> {
+pub fn value_into<T: ValueType>(x: T, vm: &mut Vm) -> Result<VmValue, Fail> {
     if T::PACKING.is_none() {
         vm.check_memory(ValueType::size(&x))?;
     }
@@ -646,14 +646,14 @@ pub fn value_into<T: ValueType>(x: T, vm: &mut Vm) -> Result<Value, Fail> {
 
 macro_rules! handle {
     ($([$($g:tt)*] $t:ty),* $(,)?) => {$(
-        impl<$($g)*> FromValue for $t {
+        impl<$($g)*> FromVmValue for $t {
             type Item<'a> = Self;
-            fn from_value(_: &Vm, v: Value, _: &mut Conversion) -> Result<Self, Fail> {
+            fn from_vm_value(_: &Vm, v: VmValue, _: &mut Conversion) -> Result<Self, Fail> {
                 Ok(Self::from_raw(v))
             }
         }
-        impl<$($g)*> IntoValue for $t {
-            fn into_value(self, _: &mut Vm) -> Result<Value, Fail> {
+        impl<$($g)*> IntoVmValue for $t {
+            fn into_vm_value(self, _: &mut Vm) -> Result<VmValue, Fail> {
                 Ok(self.raw())
             }
         }
@@ -664,9 +664,9 @@ handle! {
     [const N: u8, B: traits::Set] Param<N, B>,
 }
 
-impl<const N: u8> FromValue for Num<N> {
+impl<const N: u8> FromVmValue for Num<N> {
     type Item<'a> = Self;
-    fn from_value(vm: &Vm, v: Value, _: &mut Conversion) -> Result<Self, Fail> {
+    fn from_vm_value(vm: &Vm, v: VmValue, _: &mut Conversion) -> Result<Self, Fail> {
         match vm.heap.get(v) {
             Obj::Tuple(_) => Ok(Num::from_raw(v)),
             _ => Err(mismatch::<Self>()),
@@ -674,9 +674,9 @@ impl<const N: u8> FromValue for Num<N> {
     }
 }
 
-impl<const N: u8> FromValue for Reflect<N> {
+impl<const N: u8> FromVmValue for Reflect<N> {
     type Item<'a> = Self;
-    fn from_value(vm: &Vm, v: Value, _: &mut Conversion) -> Result<Self, Fail> {
+    fn from_vm_value(vm: &Vm, v: VmValue, _: &mut Conversion) -> Result<Self, Fail> {
         let r = Reflect::from_raw(v);
         r.desc(&vm.heap)?;
         Ok(r)

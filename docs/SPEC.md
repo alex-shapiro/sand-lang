@@ -2153,12 +2153,12 @@ module uses a standard library name from `sandlang::stdlib::STD_MODULES`.
 | `params(names)`, `doc(text)` | parameter names and documentation for the most recently registered function         |
 
 Four derive macros bind a Rust type to a Sand type in a native module and
-implement `NamedType`, `SandType`, `FromValue`, and `IntoValue`. Every derived
+implement `NamedType`, `SandType`, `FromVmValue`, and `IntoVmValue`. Every derived
 type requires `#[sand(module = "<module>")]` and accepts `#[sand(name = "<Name>")]`
 to override its Sand name, `#[sand(private)]` to keep the type private to its
 module, and `#[sand(crate = <path>)]` to specify a renamed `sandlang`
 dependency. `SandEnum` and `SandStruct` also accept
-`#[sand(manual_conversion)]` to omit the derived `FromValue` and `IntoValue`
+`#[sand(manual_conversion)]` to omit the derived `FromVmValue` and `IntoVmValue`
 implementations. The macros copy Rust doc comments, including
 `#[doc = include_str!("...")]`, into Sand documentation, and reject type,
 variant, or field names that are Sand keywords or invalid Sand identifiers.
@@ -2171,7 +2171,7 @@ variant, or field names that are Sand keywords or invalid Sand identifiers.
 | `SandStruct` | `struct` with the named fields of a Rust struct, copied on each conversion |
 
 Each field of a `SandStruct` and each payload of a `SandEnum` variant must
-implement `IntoValue` and owned `FromValue`. Unit variants map to unit
+implement `IntoVmValue` and owned `FromVmValue`. Unit variants map to unit
 variants, tuple variants map to variants with positional payloads such as
 `Circle(float)`, and struct variants map to variants with named payloads such
 as `Rect(w: float, h: float)`, where `#[sand(name = "<name>")]` overrides a

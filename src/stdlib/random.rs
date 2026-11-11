@@ -3,7 +3,7 @@
 use crate::check::ModKind;
 use crate::native::ty::{Param, Val};
 use crate::native::{NativeModule, NativeObject};
-use crate::vm::value::{FxHashMap, Value, to_usize_saturating};
+use crate::vm::value::{FxHashMap, VmValue, to_usize_saturating};
 use crate::vm::{Fail, Rng, Vm, fail};
 
 /// An isolated pseudo-random number generator.
@@ -86,7 +86,7 @@ fn sample(vm: &mut Vm, rng: &mut Rng, xs: Val<Vec<Param<0>>>, k: i64) -> Result<
     let items = xs.items(&vm.heap);
     let n = items.len();
     let k = k.clamp(0, n as i64) as usize;
-    vm.check_memory(k.saturating_mul(2 * std::mem::size_of::<Value>()))?;
+    vm.check_memory(k.saturating_mul(2 * std::mem::size_of::<VmValue>()))?;
     let mut moved: FxHashMap<usize, usize> = FxHashMap::default();
     let mut out = Vec::with_capacity(k);
     for i in 0..k {

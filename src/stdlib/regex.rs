@@ -11,7 +11,7 @@ use crate::native::ty::Val;
 use crate::native::{NativeModule, NativeObject};
 use crate::platform::Instant;
 use crate::vm::meter::{BYTES_PER_UNIT, SLOW_BYTES_PER_UNIT, Scratch};
-use crate::vm::value::{FxHasher, Value};
+use crate::vm::value::{FxHasher, VmValue};
 use crate::vm::{Fail, Vm};
 use regex_automata::meta::{self, Cache};
 use regex_automata::util::captures::Captures as Groups;
@@ -165,7 +165,7 @@ const CACHED_COST: u64 = 4;
 pub(crate) struct RegexCacheEntry {
     pattern_hash: u64,
     /// The compiled `RegexObj`, which is a GC root while present.
-    pub(crate) regex: Option<Value>,
+    pub(crate) regex: Option<VmValue>,
 }
 
 /// Computes the unseeded hash of `pattern` for the regex cache.
@@ -291,7 +291,7 @@ struct Captures {
 }
 
 /// Bytes counted per group of a match's spans (two list elements).
-const SPAN_COST: usize = 2 * std::mem::size_of::<Value>();
+const SPAN_COST: usize = 2 * std::mem::size_of::<VmValue>();
 
 /// Approximate heap cost of a `Captures` value excluding `spans`.
 const CAPTURES_COST: usize = 64;

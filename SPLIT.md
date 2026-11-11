@@ -32,8 +32,8 @@ source branch only as a reference.
 8. Single exit path: merged in #34 from `single-exit-path`
 9. Explicit VM control flow: merged in #35 from `explicit-vm-control-flow`
 10. `Fail` failure type: merged in #37 from `fail-failure-type`
-11. Deterministic fuel: in review on `deterministic-fuel`
-12. `VmValue` rename: not started
+11. Deterministic fuel: merged in #38 from `deterministic-fuel`
+12. `VmValue` rename: in review on `vm-value-rename`
 13. Single native function registration: not started
 14. `Value` and the shared encode path: not started; requires 12
 15. Shared decode path and `Value` input: not started; requires 14

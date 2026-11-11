@@ -2,7 +2,7 @@
 
 use super::base64;
 use crate::check::ModKind;
-use crate::native::convert::{Conversion, FromValue, HostError, IntoValue, mismatch};
+use crate::native::convert::{Conversion, FromVmValue, HostError, IntoVmValue, mismatch};
 use crate::native::ty::{Param, Reflect, Val};
 use crate::native::{Constant, EnumType, NamedType, NativeModule, variant_const, variant_index};
 use crate::syntax::lexer::is_ident;
@@ -13,7 +13,8 @@ use crate::vm::compare::{hash_key, str_hash};
 use crate::vm::heap::{Heap, Staging};
 use crate::vm::meter::{BYTES_PER_UNIT, Meter, SLOW_BYTES_PER_UNIT, Scratch};
 use crate::vm::value::{
-    FieldDefault, FieldDesc, FxHashMap, KeyIndex, KeyTable, MAP_ENTRY_SIZE, MapObj, Obj, TypeDesc, Value, ValueRef, VariantDesc, slot_fits,
+    FieldDefault, FieldDesc, FxHashMap, KeyIndex, KeyTable, MAP_ENTRY_SIZE, MapObj, Obj, TypeDesc, ValueRef, VariantDesc, VmValue,
+    slot_fits,
 };
 use crate::vm::{Fail, Vm, fail, internal, without_trait};
 use hashbrown::HashTable;
@@ -208,7 +209,7 @@ impl From<Fail> for Error {
 
 type PResult<T> = Result<T, Error>;
 
-fn into_result<T>(r: PResult<Value>) -> Result<Val<T>, HostError> {
+fn into_result<T>(r: PResult<VmValue>) -> Result<Val<T>, HostError> {
     match r {
         Ok(v) => Ok(Val::from_raw(v)),
         Err(Error::Parse(msg)) => Err(HostError::new("parse", msg)),
@@ -226,7 +227,7 @@ struct Builder<'a, 's, 'h> {
     st: &'s mut Staging<'h>,
     meter: &'a Meter,
     pending: usize,
-    keys: HashTable<(u64, Cow<'a, str>, Value)>,
+    keys: HashTable<(u64, Cow<'a, str>, VmValue)>,
     entries: Vec<Entry<'a>>,
 }
 
@@ -234,8 +235,8 @@ struct Entry<'a> {
     hash: u64,
     /// String key text used for equality checks before staged strings are committed to the heap.
     text: Option<Cow<'a, str>>,
-    key: Value,
-    value: Value,
+    key: VmValue,
+    value: VmValue,
 }
 
 struct MapBuilder {
@@ -253,20 +254,20 @@ impl<'a, 's, 'h> Builder<'a, 's, 'h> {
     }
 
     /// Checks list buffer growth against the memory limit so that lists of inline values cannot grow unchecked.
-    fn push(&mut self, items: &mut Vec<Value>, v: Value) -> Result<(), Fail> {
+    fn push(&mut self, items: &mut Vec<VmValue>, v: VmValue) -> Result<(), Fail> {
         if items.len() == items.capacity() {
             let more = items.capacity().max(4);
-            self.st.check_memory((NODE_BYTES + self.pending).saturating_add(more.saturating_mul(2 * std::mem::size_of::<Value>())))?;
+            self.st.check_memory((NODE_BYTES + self.pending).saturating_add(more.saturating_mul(2 * std::mem::size_of::<VmValue>())))?;
             let before = items.capacity();
             items.reserve_exact(more);
-            self.pending += (items.capacity() - before) * std::mem::size_of::<Value>();
+            self.pending += (items.capacity() - before) * std::mem::size_of::<VmValue>();
         }
         items.push(v);
         Ok(())
     }
 
-    fn list(&mut self, items: Vec<Value>) -> Value {
-        self.pending = self.pending.saturating_sub(items.capacity() * std::mem::size_of::<Value>());
+    fn list(&mut self, items: Vec<VmValue>) -> VmValue {
+        self.pending = self.pending.saturating_sub(items.capacity() * std::mem::size_of::<VmValue>());
         self.st.new_list(items)
     }
 
@@ -276,7 +277,7 @@ impl<'a, 's, 'h> Builder<'a, 's, 'h> {
     }
 
     #[allow(clippy::ptr_arg)]
-    fn key(&mut self, key: &Cow<'a, str>, hash: u64) -> Value {
+    fn key(&mut self, key: &Cow<'a, str>, hash: u64) -> VmValue {
         if let Some(&(_, _, v)) = self.keys.find(hash, |e| e.1 == *key) {
             return v;
         }
@@ -292,7 +293,7 @@ impl<'a, 's, 'h> Builder<'a, 's, 'h> {
         MapBuilder { base: self.entries.len(), index: None }
     }
 
-    fn put(&mut self, m: &mut MapBuilder, hash: u64, text: Option<Cow<'a, str>>, key: Value, value: Value) -> Result<(), Fail> {
+    fn put(&mut self, m: &mut MapBuilder, hash: u64, text: Option<Cow<'a, str>>, key: VmValue, value: VmValue) -> Result<(), Fail> {
         let segment = &self.entries[m.base..];
         let same = |e: &Entry| {
             e.hash == hash
@@ -338,7 +339,7 @@ impl<'a, 's, 'h> Builder<'a, 's, 'h> {
 
     /// Appends a unique key and value to `m`. Do not call with duplicate keys
     /// or mix with [`Builder::put`] on the same [`MapBuilder`].
-    fn append(&mut self, m: &MapBuilder, hash: u64, key: Value, value: Value) -> Result<(), Fail> {
+    fn append(&mut self, m: &MapBuilder, hash: u64, key: VmValue, value: VmValue) -> Result<(), Fail> {
         if !slot_fits(self.entries.len() - m.base) {
             return fail("limit", "map too large");
         }
@@ -347,7 +348,7 @@ impl<'a, 's, 'h> Builder<'a, 's, 'h> {
         Ok(())
     }
 
-    fn map(&mut self, m: MapBuilder) -> Value {
+    fn map(&mut self, m: MapBuilder) -> VmValue {
         let n = self.entries.len() - m.base;
         let index = KeyIndex::for_keys(n, self.entries[m.base..].iter().map(|e| e.key));
         let mut map = MapObj { entries: Vec::with_capacity(n), live: n, index, ..MapObj::default() };
@@ -363,15 +364,15 @@ impl<'a, 's, 'h> Builder<'a, 's, 'h> {
 
 const ENTRY_PENDING: usize = std::mem::size_of::<Entry>() + MAP_ENTRY_SIZE;
 
-impl FromValue for Json {
+impl FromVmValue for Json {
     type Item<'a> = Json;
-    fn from_value(vm: &Vm, v: Value, conv: &mut Conversion) -> Result<Json, Fail> {
+    fn from_vm_value(vm: &Vm, v: VmValue, conv: &mut Conversion) -> Result<Json, Fail> {
         walk(&mut Reader { vm, ids: JsonIds::of(&vm.prog)?, conv }, v)
     }
 }
 
-impl IntoValue for Json {
-    fn into_value(self, vm: &mut Vm) -> Result<Value, Fail> {
+impl IntoVmValue for Json {
+    fn into_vm_value(self, vm: &mut Vm) -> Result<VmValue, Fail> {
         let ids = JsonIds::of(&vm.prog)?;
         let meter = &vm.meter;
         vm.heap.staged(|heap, st| walk(&mut Writer { b: Builder::new(heap, st, meter), ids }, self))
@@ -434,14 +435,14 @@ struct Reader<'h, 'c> {
 }
 
 enum ReadFrame<'h> {
-    Arr(Vec<Json>, std::slice::Iter<'h, Value>),
-    Obj(indexmap::IndexMap<String, Json>, std::slice::Iter<'h, Option<(Value, Value)>>, String),
+    Arr(Vec<Json>, std::slice::Iter<'h, VmValue>),
+    Obj(indexmap::IndexMap<String, Json>, std::slice::Iter<'h, Option<(VmValue, VmValue)>>, String),
 }
 
 const OBJ_ENTRY_BYTES: usize = std::mem::size_of::<(u64, String, Json)>() + std::mem::size_of::<usize>();
 
 impl<'h> Reader<'h, '_> {
-    fn string(&mut self, v: Value) -> Result<String, Fail> {
+    fn string(&mut self, v: VmValue) -> Result<String, Fail> {
         let s = match self.vm.heap.get(v) {
             Obj::Str(s) => &**s,
             Obj::StrBuf(s) => s.as_str(),
@@ -454,11 +455,11 @@ impl<'h> Reader<'h, '_> {
 }
 
 impl<'h> Walk for Reader<'h, '_> {
-    type Node = Value;
+    type Node = VmValue;
     type Frame = ReadFrame<'h>;
     type Out = Json;
 
-    fn open(&mut self, v: Value, stack: &mut Vec<ReadFrame<'h>>) -> Result<Option<Json>, Fail> {
+    fn open(&mut self, v: VmValue, stack: &mut Vec<ReadFrame<'h>>) -> Result<Option<Json>, Fail> {
         let (vm, ids) = (self.vm, self.ids);
         vm.charge(1)?;
         let id = vm.heap.variant_id(v);
@@ -467,9 +468,9 @@ impl<'h> Walk for Reader<'h, '_> {
         }
         let payload = vm.heap.field(v, 0).ok_or_else(mismatch::<Json>)?;
         Ok(Some(match (id, payload) {
-            (_, Value::Bool(b)) if id == ids.bool_ => Json::Bool(b),
-            (_, Value::Int(i)) if id == ids.int => Json::Int(i),
-            (_, Value::Float(f)) if id == ids.float => Json::Float(f),
+            (_, VmValue::Bool(b)) if id == ids.bool_ => Json::Bool(b),
+            (_, VmValue::Int(i)) if id == ids.int => Json::Int(i),
+            (_, VmValue::Float(f)) if id == ids.float => Json::Float(f),
             _ if id == ids.str_ => Json::Str(self.string(payload)?),
             _ if id == ids.arr => {
                 let Obj::List(items) = vm.heap.get(payload) else { return Err(mismatch::<Json>()) };
@@ -490,7 +491,7 @@ impl<'h> Walk for Reader<'h, '_> {
         }))
     }
 
-    fn next(&mut self, frame: &mut ReadFrame<'h>) -> Result<Option<Value>, Fail> {
+    fn next(&mut self, frame: &mut ReadFrame<'h>) -> Result<Option<VmValue>, Fail> {
         Ok(match frame {
             ReadFrame::Arr(_, items) => items.next().copied(),
             ReadFrame::Obj(_, entries, key) => match entries.find_map(|e| *e) {
@@ -527,24 +528,24 @@ struct Writer<'a, 's, 'h> {
 }
 
 enum WriteFrame {
-    Arr(std::vec::IntoIter<Json>, Vec<Value>),
+    Arr(std::vec::IntoIter<Json>, Vec<VmValue>),
     Obj(indexmap::map::IntoIter<String, Json>, MapBuilder, String, u64),
 }
 
 impl Walk for Writer<'_, '_, '_> {
     type Node = Json;
     type Frame = WriteFrame;
-    type Out = Value;
+    type Out = VmValue;
 
-    fn open(&mut self, j: Json, stack: &mut Vec<WriteFrame>) -> Result<Option<Value>, Fail> {
+    fn open(&mut self, j: Json, stack: &mut Vec<WriteFrame>) -> Result<Option<VmValue>, Fail> {
         let (b, ids) = (&mut self.b, self.ids);
         b.reserve()?;
         b.meter.charge(1)?;
         Ok(Some(match j {
-            Json::Null => Value::Tag(ids.null),
-            Json::Bool(x) => b.st.new_variant(ids.bool_, &[Value::Bool(x)]),
-            Json::Int(i) => b.st.new_variant(ids.int, &[Value::Int(i)]),
-            Json::Float(f) => b.st.new_variant(ids.float, &[Value::Float(f)]),
+            Json::Null => VmValue::Tag(ids.null),
+            Json::Bool(x) => b.st.new_variant(ids.bool_, &[VmValue::Bool(x)]),
+            Json::Int(i) => b.st.new_variant(ids.int, &[VmValue::Int(i)]),
+            Json::Float(f) => b.st.new_variant(ids.float, &[VmValue::Float(f)]),
             Json::Str(s) => {
                 b.st.check_memory((NODE_BYTES + b.pending).saturating_add(s.len()))?;
                 b.meter.charge_bytes(s.len())?;
@@ -576,7 +577,7 @@ impl Walk for Writer<'_, '_, '_> {
         })
     }
 
-    fn put(&mut self, frame: &mut WriteFrame, child: Value) -> Result<(), Fail> {
+    fn put(&mut self, frame: &mut WriteFrame, child: VmValue) -> Result<(), Fail> {
         match frame {
             WriteFrame::Arr(_, out) => self.b.push(out, child),
             WriteFrame::Obj(_, m, key, hash) => {
@@ -586,7 +587,7 @@ impl Walk for Writer<'_, '_, '_> {
         }
     }
 
-    fn close(&mut self, frame: WriteFrame) -> Value {
+    fn close(&mut self, frame: WriteFrame) -> VmValue {
         let ids = self.ids;
         match frame {
             WriteFrame::Arr(_, out) => {
@@ -611,10 +612,10 @@ impl Number<'_> {
         self.text.parse().unwrap_or(f64::NAN)
     }
 
-    fn value(&self) -> Value {
+    fn value(&self) -> VmValue {
         match self.text.parse::<i64>() {
-            Ok(i) if self.is_int && !(i == 0 && self.text.starts_with('-')) => Value::Int(i),
-            _ => Value::Float(self.float()),
+            Ok(i) if self.is_int && !(i == 0 && self.text.starts_with('-')) => VmValue::Int(i),
+            _ => VmValue::Float(self.float()),
         }
     }
 
@@ -833,22 +834,22 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_json(&mut self, b: &mut Builder<'a, '_, '_>, ids: &JsonIds) -> PResult<Value> {
+    fn parse_json(&mut self, b: &mut Builder<'a, '_, '_>, ids: &JsonIds) -> PResult<VmValue> {
         self.ws();
         self.charge(b.meter)?;
         b.reserve()?;
         Ok(match self.peek() {
             Some(b'n') => {
                 self.literal(b"null")?;
-                Value::Tag(ids.null)
+                VmValue::Tag(ids.null)
             }
             Some(b't') => {
                 self.literal(b"true")?;
-                b.st.new_variant(ids.bool_, &[Value::Bool(true)])
+                b.st.new_variant(ids.bool_, &[VmValue::Bool(true)])
             }
             Some(b'f') => {
                 self.literal(b"false")?;
-                b.st.new_variant(ids.bool_, &[Value::Bool(false)])
+                b.st.new_variant(ids.bool_, &[VmValue::Bool(false)])
             }
             Some(b'"') => {
                 let s = self.string(true)?;
@@ -956,15 +957,15 @@ struct Decoder<'a, 'd, 's, 'h> {
     ids: crate::vm::bytecode::RtIds,
     path: Vec<Seg<'a>>,
     stack: Vec<&'d TypeDesc>,
-    slots: Vec<Option<Value>>,
+    slots: Vec<Option<VmValue>>,
     indexes: FxHashMap<u32, FxHashMap<&'d str, usize>>,
     fills: Vec<Fill>,
-    thunks: Vec<Value>,
+    thunks: Vec<VmValue>,
 }
 
 enum Fill {
-    Set(Value, Vec<Value>),
-    Map(Value, Vec<(Value, Value)>),
+    Set(VmValue, Vec<VmValue>),
+    Map(VmValue, Vec<(VmValue, VmValue)>),
 }
 
 impl<'a> Source<'a> for Decoder<'a, '_, '_, '_> {
@@ -1067,17 +1068,17 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
         r
     }
 
-    fn decode(&mut self, t: &'d TypeDesc) -> PResult<Value> {
+    fn decode(&mut self, t: &'d TypeDesc) -> PResult<VmValue> {
         self.p.ws();
         self.p.charge(self.b.meter)?;
         self.b.reserve()?;
         match t {
-            TypeDesc::Int => Ok(Value::Int(self.int()?)),
-            TypeDesc::Duration => Ok(Value::Dur(self.int()?)),
-            TypeDesc::Float => Ok(Value::Float(self.number("float")?.float())),
-            TypeDesc::Bool => Ok(Value::Bool(self.bool()?)),
+            TypeDesc::Int => Ok(VmValue::Int(self.int()?)),
+            TypeDesc::Duration => Ok(VmValue::Dur(self.int()?)),
+            TypeDesc::Float => Ok(VmValue::Float(self.number("float")?.float())),
+            TypeDesc::Bool => Ok(VmValue::Bool(self.bool()?)),
             TypeDesc::Unit => match self.p.peek() {
-                Some(b'n') => self.p.literal(b"null").map(|()| Value::Unit),
+                Some(b'n') => self.p.literal(b"null").map(|()| VmValue::Unit),
                 _ => Err(self.mismatch("null")),
             },
             TypeDesc::Str => {
@@ -1098,7 +1099,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                 self.b.meter.charge(layers)?;
                 if self.p.peek() == Some(b'n') {
                     self.p.literal(b"null")?;
-                    return Ok(Value::Tag(self.ids.none));
+                    return Ok(VmValue::Tag(self.ids.none));
                 }
                 let mut v = self.decode(inner)?;
                 for _ in 0..layers {
@@ -1195,7 +1196,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
         }
     }
 
-    fn decode_struct(&mut self, t: &'d TypeDesc, id: u32, def: u32, fields: &'d [FieldDesc]) -> PResult<Value> {
+    fn decode_struct(&mut self, t: &'d TypeDesc, id: u32, def: u32, fields: &'d [FieldDesc]) -> PResult<VmValue> {
         self.expect_open(b'{', "object")?;
         self.stack.push(t);
         let base = self.slots.len();
@@ -1231,9 +1232,9 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                         Some((f, mask)) if f == fill => *mask |= 1 << bit,
                         _ => computed.push((*fill, 1 << bit)),
                     }
-                    Value::Unit
+                    VmValue::Unit
                 }
-                (None, FieldDefault::None, TypeDesc::Option(_)) => Value::Tag(self.ids.none),
+                (None, FieldDefault::None, TypeDesc::Option(_)) => VmValue::Tag(self.ids.none),
                 (None, FieldDefault::None, _) => {
                     self.slots.truncate(base);
                     return Err(self.fail(&format!("missing field `{field}`")));
@@ -1243,27 +1244,27 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
         self.slots.truncate(base);
         let s = self.b.st.alloc(Obj::Struct(def, values.into_boxed_slice()));
         for (fill, mask) in computed {
-            self.thunk(fill, Box::new([s, Value::Int(mask)]))?;
+            self.thunk(fill, Box::new([s, VmValue::Int(mask)]))?;
         }
         Ok(s)
     }
 
-    fn thunk(&mut self, proto: u32, captures: Box<[Value]>) -> PResult<()> {
+    fn thunk(&mut self, proto: u32, captures: Box<[VmValue]>) -> PResult<()> {
         self.b.reserve()?;
         let c = self.b.st.alloc(Obj::Closure(proto, captures));
         Ok(self.b.push(&mut self.thunks, c)?)
     }
 
-    fn constant(&mut self, c: &ConstVal) -> PResult<Value> {
+    fn constant(&mut self, c: &ConstVal) -> PResult<VmValue> {
         self.b.meter.charge(1)?;
         self.b.reserve()?;
         let all = |d: &mut Self, xs: &[ConstVal]| xs.iter().map(|x| d.constant(x)).collect::<PResult<Vec<_>>>();
         Ok(match c {
-            ConstVal::Unit => Value::Unit,
-            ConstVal::Bool(b) => Value::Bool(*b),
-            ConstVal::Int(i) => Value::Int(*i),
-            ConstVal::Float(f) => Value::Float(*f),
-            ConstVal::Dur(d) => Value::Dur(*d),
+            ConstVal::Unit => VmValue::Unit,
+            ConstVal::Bool(b) => VmValue::Bool(*b),
+            ConstVal::Int(i) => VmValue::Int(*i),
+            ConstVal::Float(f) => VmValue::Float(*f),
+            ConstVal::Dur(d) => VmValue::Dur(*d),
             ConstVal::Str(s) => {
                 self.b.meter.charge_bytes(s.len())?;
                 self.b.st.new_str(s.as_str())
@@ -1307,7 +1308,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
         })
     }
 
-    fn decode_range(&mut self) -> PResult<Value> {
+    fn decode_range(&mut self) -> PResult<VmValue> {
         self.expect_open(b'{', "object")?;
         let (mut start, mut end, mut inclusive) = (None, None, false);
         self.object(true, |d, key| {
@@ -1344,7 +1345,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
         Ok(self.indexes[&id].get(key).copied())
     }
 
-    fn map_key(&mut self, t: &TypeDesc, key: Cow<'a, str>) -> PResult<(Value, u64, Option<Cow<'a, str>>)> {
+    fn map_key(&mut self, t: &TypeDesc, key: Cow<'a, str>) -> PResult<(VmValue, u64, Option<Cow<'a, str>>)> {
         let quoted = super::truncate(&key, QUOTED_KEY);
         let bad = |d: &Self| d.fail(&format!("invalid map key `{quoted}`"));
         let k = match t {
@@ -1353,15 +1354,15 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                 let k = self.b.key(&key, hash);
                 return Ok((k, hash, Some(key)));
             }
-            TypeDesc::Int => Value::Int(key.parse().map_err(|_| bad(self))?),
-            TypeDesc::Duration => Value::Dur(key.parse().map_err(|_| bad(self))?),
+            TypeDesc::Int => VmValue::Int(key.parse().map_err(|_| bad(self))?),
+            TypeDesc::Duration => VmValue::Dur(key.parse().map_err(|_| bad(self))?),
             TypeDesc::Bool => match &*key {
-                "true" => Value::Bool(true),
-                "false" => Value::Bool(false),
+                "true" => VmValue::Bool(true),
+                "false" => VmValue::Bool(false),
                 _ => return Err(bad(self)),
             },
             TypeDesc::Enum { variants, .. } => match lookup(self.b.meter, variants, |v| v.0 == *key && v.2.is_empty())? {
-                Some(i) => Value::Tag(variants[i].1),
+                Some(i) => VmValue::Tag(variants[i].1),
                 None => return Err(bad(self)),
             },
             TypeDesc::Value { parse, .. } => {
@@ -1376,7 +1377,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
         Ok((k, hash_key(self.b.heap, self.b.meter, k)?, None))
     }
 
-    fn decode_enum(&mut self, name: &str, variants: &'d [VariantDesc]) -> PResult<Value> {
+    fn decode_enum(&mut self, name: &str, variants: &'d [VariantDesc]) -> PResult<VmValue> {
         let find = |d: &Self, tag: &str| match lookup(d.b.meter, variants, |v| v.0 == tag)? {
             Some(i) => Ok(&variants[i]),
             None => Err(d.fail(&format!("unknown variant `{}` of {name}", super::truncate(tag, QUOTED_KEY)))),
@@ -1388,7 +1389,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                 if !v.2.is_empty() {
                     return Err(self.fail(&format!("variant `{tag}` of {name} needs a payload")));
                 }
-                Ok(Value::Tag(v.1))
+                Ok(VmValue::Tag(v.1))
             }
             Some(b'{') => {
                 let mut result = None;
@@ -1406,10 +1407,10 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
         }
     }
 
-    fn decode_payload(&mut self, v: &'d VariantDesc) -> PResult<Value> {
+    fn decode_payload(&mut self, v: &'d VariantDesc) -> PResult<VmValue> {
         let (_, id, types, names) = v;
         self.p.ws();
-        let mut slots: Vec<Option<Value>> = vec![None; types.len()];
+        let mut slots: Vec<Option<VmValue>> = vec![None; types.len()];
         match (self.p.peek(), names) {
             (Some(b'{'), Some(names)) => {
                 self.object(true, |d, key| match lookup(d.b.meter, names, |n| *n == *key)? {
@@ -1424,7 +1425,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                         if !matches!(*types[i], TypeDesc::Option(_)) {
                             return Err(self.fail(&format!("missing field `{}`", names[i])));
                         }
-                        *slot = Some(Value::Tag(self.ids.none));
+                        *slot = Some(VmValue::Tag(self.ids.none));
                     }
                 }
             }
@@ -1443,7 +1444,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
             }
             _ => return Err(self.mismatch(if names.is_some() { "object" } else { "array" })),
         }
-        let fields: Vec<Value> = slots.into_iter().map(|s| s.unwrap_or(Value::Unit)).collect();
+        let fields: Vec<VmValue> = slots.into_iter().map(|s| s.unwrap_or(VmValue::Unit)).collect();
         Ok(self.b.st.new_variant(*id, &fields))
     }
 }
@@ -1485,7 +1486,7 @@ impl Encoder<'_> {
         Ok(())
     }
 
-    fn array(&mut self, len: usize, items: impl Iterator<Item = Value>, level: usize) -> Result<(), Fail> {
+    fn array(&mut self, len: usize, items: impl Iterator<Item = VmValue>, level: usize) -> Result<(), Fail> {
         if level >= MAX_DEPTH {
             return fail("limit", "value too deeply nested to encode as JSON");
         }
@@ -1511,7 +1512,7 @@ impl Encoder<'_> {
         len: usize,
         entries: impl Iterator<Item = T>,
         level: usize,
-        mut entry: impl FnMut(&mut Self, T) -> Result<Value, Fail>,
+        mut entry: impl FnMut(&mut Self, T) -> Result<VmValue, Fail>,
     ) -> Result<(), Fail> {
         if level >= MAX_DEPTH {
             return fail("limit", "value too deeply nested to encode as JSON");
@@ -1535,24 +1536,24 @@ impl Encoder<'_> {
         Ok(())
     }
 
-    fn value(&mut self, mut v: Value, level: usize) -> Result<(), Fail> {
+    fn value(&mut self, mut v: VmValue, level: usize) -> Result<(), Fail> {
         self.step()?;
         let (prog, heap) = (self.prog, self.heap);
         while heap.variant_id(v) == prog.ids.some {
             self.meter.charge(1)?;
-            v = heap.field(v, 0).unwrap_or(Value::Unit);
+            v = heap.field(v, 0).unwrap_or(VmValue::Unit);
         }
         match v {
-            Value::Unit | Value::Uninit => self.out.push_str("null"),
-            Value::Bool(b) => self.out.push_str(if b { "true" } else { "false" }),
-            Value::Int(i) | Value::Dur(i) => {
+            VmValue::Unit | VmValue::Uninit => self.out.push_str("null"),
+            VmValue::Bool(b) => self.out.push_str(if b { "true" } else { "false" }),
+            VmValue::Int(i) | VmValue::Dur(i) => {
                 let _ = write!(self.out, "{i}");
             }
-            Value::Float(f) => write_float(&mut self.out, f),
-            Value::Pair(a, b) => self.array(2, [Value::Int(a as i64), Value::Int(b)].into_iter(), level)?,
-            Value::Tag(id) if id == prog.ids.none || id == self.ids.null => self.out.push_str("null"),
-            Value::Tag(id) => self.string(&prog.variants[id as usize].name)?,
-            Value::Obj(_) => match heap.get(v) {
+            VmValue::Float(f) => write_float(&mut self.out, f),
+            VmValue::Pair(a, b) => self.array(2, [VmValue::Int(a as i64), VmValue::Int(b)].into_iter(), level)?,
+            VmValue::Tag(id) if id == prog.ids.none || id == self.ids.null => self.out.push_str("null"),
+            VmValue::Tag(id) => self.string(&prog.variants[id as usize].name)?,
+            VmValue::Obj(_) => match heap.get(v) {
                 Obj::Str(s) => self.string(s)?,
                 Obj::StrBuf(s) => self.string(s)?,
                 Obj::Bytes(b) => {
@@ -1568,7 +1569,7 @@ impl Encoder<'_> {
                 Obj::Tuple(items) => self.array(items.len(), items.iter().copied(), level)?,
                 Obj::Set(s) => self.array(s.live, s.entries.iter().flatten().copied(), level)?,
                 Obj::Range(a, b, inclusive) => {
-                    let fields = [("start", Value::Int(*a)), ("end", Value::Int(*b)), ("inclusive", Value::Bool(true))];
+                    let fields = [("start", VmValue::Int(*a)), ("end", VmValue::Int(*b)), ("inclusive", VmValue::Bool(true))];
                     let n = if *inclusive { 3 } else { 2 };
                     self.object(n, fields[..n].iter(), level, |e, &(k, v)| {
                         e.string(k)?;
@@ -1596,17 +1597,17 @@ impl Encoder<'_> {
                 }
             },
             _ => {
-                let (id, payload) = v.as_inline_variant().unwrap_or((u32::MAX, Value::Unit));
+                let (id, payload) = v.as_inline_variant().unwrap_or((u32::MAX, VmValue::Unit));
                 self.variant(id, &[payload], level)?
             }
         }
         Ok(())
     }
 
-    fn variant(&mut self, id: u32, fields: &[Value], level: usize) -> Result<(), Fail> {
+    fn variant(&mut self, id: u32, fields: &[VmValue], level: usize) -> Result<(), Fail> {
         let Some(rt) = self.prog.variants.get(id as usize) else { return internal("json.encode: unknown variant ID") };
         if self.ids.has(id) {
-            return self.value(fields.first().copied().unwrap_or(Value::Unit), level);
+            return self.value(fields.first().copied().unwrap_or(VmValue::Unit), level);
         }
         if level >= MAX_DEPTH {
             return fail("limit", "value too deeply nested to encode as JSON");
@@ -1637,18 +1638,18 @@ fn write_float(out: &mut String, f: f64) {
     }
 }
 
-fn json_number(st: &mut Staging, ids: &JsonIds, n: Value) -> Value {
-    let id = if matches!(n, Value::Int(_)) { ids.int } else { ids.float };
+fn json_number(st: &mut Staging, ids: &JsonIds, n: VmValue) -> VmValue {
+    let id = if matches!(n, VmValue::Int(_)) { ids.int } else { ids.float };
     st.new_variant(id, &[n])
 }
 
-fn format_map_key<'v>(prog: &'v Program, heap: &'v Heap, k: Value) -> Result<Cow<'v, str>, Fail> {
+fn format_map_key<'v>(prog: &'v Program, heap: &'v Heap, k: VmValue) -> Result<Cow<'v, str>, Fail> {
     let bad = || fail("invalid", "a JSON object key must be a string, int, duration, bool, payload-less variant, or value type");
     Ok(match k {
-        Value::Int(i) | Value::Dur(i) => Cow::Owned(i.to_string()),
-        Value::Bool(b) => Cow::Borrowed(if b { "true" } else { "false" }),
-        Value::Tag(id) if id != prog.ids.none => Cow::Borrowed(prog.variants[id as usize].name.as_str()),
-        Value::Obj(_) => match heap.get(k) {
+        VmValue::Int(i) | VmValue::Dur(i) => Cow::Owned(i.to_string()),
+        VmValue::Bool(b) => Cow::Borrowed(if b { "true" } else { "false" }),
+        VmValue::Tag(id) if id != prog.ids.none => Cow::Borrowed(prog.variants[id as usize].name.as_str()),
+        VmValue::Obj(_) => match heap.get(k) {
             Obj::Str(s) => Cow::Borrowed(&**s),
             o @ (Obj::Value(_) | Obj::Packed(..)) => Cow::Owned(o.value().map(ValueRef::text).unwrap_or_default()),
             _ => return bad(),
@@ -1702,12 +1703,12 @@ struct Converter<'a, 's, 'h> {
     heap: &'a Heap,
     b: Builder<'a, 's, 'h>,
     ids: JsonIds,
-    fields: FxHashMap<u32, Vec<Value>>,
-    names: FxHashMap<u32, Value>,
+    fields: FxHashMap<u32, Vec<VmValue>>,
+    names: FxHashMap<u32, VmValue>,
 }
 
 impl<'a> Converter<'a, '_, '_> {
-    fn convert(&mut self, mut v: Value, depth: usize) -> Result<Value, Fail> {
+    fn convert(&mut self, mut v: VmValue, depth: usize) -> Result<VmValue, Fail> {
         let (prog, heap, ids) = (self.prog, self.heap, self.ids);
         self.b.reserve()?;
         self.b.meter.charge(1)?;
@@ -1720,20 +1721,20 @@ impl<'a> Converter<'a, '_, '_> {
                 break;
             }
             self.b.meter.charge(1)?;
-            v = heap.field(v, 0).unwrap_or(Value::Unit);
+            v = heap.field(v, 0).unwrap_or(VmValue::Unit);
         }
         Ok(match v {
-            Value::Unit | Value::Uninit => Value::Tag(ids.null),
-            Value::Bool(b) => self.b.st.new_variant(ids.bool_, &[Value::Bool(b)]),
-            Value::Int(i) | Value::Dur(i) => json_number(self.b.st, &ids, Value::Int(i)),
-            Value::Float(_) => json_number(self.b.st, &ids, v),
-            Value::Pair(a, b) => self.array([Value::Int(a as i64), Value::Int(b)].into_iter(), depth)?,
-            Value::Tag(id) if id == prog.ids.none => Value::Tag(ids.null),
-            Value::Tag(id) => {
+            VmValue::Unit | VmValue::Uninit => VmValue::Tag(ids.null),
+            VmValue::Bool(b) => self.b.st.new_variant(ids.bool_, &[VmValue::Bool(b)]),
+            VmValue::Int(i) | VmValue::Dur(i) => json_number(self.b.st, &ids, VmValue::Int(i)),
+            VmValue::Float(_) => json_number(self.b.st, &ids, v),
+            VmValue::Pair(a, b) => self.array([VmValue::Int(a as i64), VmValue::Int(b)].into_iter(), depth)?,
+            VmValue::Tag(id) if id == prog.ids.none => VmValue::Tag(ids.null),
+            VmValue::Tag(id) => {
                 let name = self.variant_name(id);
                 self.b.st.new_variant(ids.str_, &[name])
             }
-            Value::Obj(_) => match heap.get(v) {
+            VmValue::Obj(_) => match heap.get(v) {
                 Obj::Str(_) => self.b.st.new_variant(ids.str_, &[v]),
                 Obj::StrBuf(s) => {
                     self.b.meter.charge_bytes(s.len())?;
@@ -1752,11 +1753,11 @@ impl<'a> Converter<'a, '_, '_> {
                 Obj::Range(a, b, inclusive) => {
                     self.check_depth(depth)?;
                     let mut fields = vec![
-                        ("start", json_number(self.b.st, &ids, Value::Int(*a))),
-                        ("end", json_number(self.b.st, &ids, Value::Int(*b))),
+                        ("start", json_number(self.b.st, &ids, VmValue::Int(*a))),
+                        ("end", json_number(self.b.st, &ids, VmValue::Int(*b))),
                     ];
                     if *inclusive {
-                        fields.push(("inclusive", self.b.st.new_variant(ids.bool_, &[Value::Bool(true)])));
+                        fields.push(("inclusive", self.b.st.new_variant(ids.bool_, &[VmValue::Bool(true)])));
                     }
                     let mut out = self.b.start_map();
                     for (name, x) in fields {
@@ -1814,13 +1815,13 @@ impl<'a> Converter<'a, '_, '_> {
                 }
             },
             _ => {
-                let (id, payload) = v.as_inline_variant().unwrap_or((u32::MAX, Value::Unit));
+                let (id, payload) = v.as_inline_variant().unwrap_or((u32::MAX, VmValue::Unit));
                 self.variant(id, &[payload], depth)?
             }
         })
     }
 
-    fn put(&mut self, m: &mut MapBuilder, key: Value, text: Cow<'a, str>, value: Value) -> Result<(), Fail> {
+    fn put(&mut self, m: &mut MapBuilder, key: VmValue, text: Cow<'a, str>, value: VmValue) -> Result<(), Fail> {
         let hash = self.b.hash(&text)?;
         self.b.put(m, hash, Some(text), key, value)
     }
@@ -1829,12 +1830,12 @@ impl<'a> Converter<'a, '_, '_> {
         if depth >= MAX_DEPTH { fail("limit", "value too deeply nested to convert to JSON") } else { Ok(()) }
     }
 
-    fn variant_name(&mut self, id: u32) -> Value {
+    fn variant_name(&mut self, id: u32) -> VmValue {
         let prog = self.prog;
         *self.names.entry(id).or_insert_with(|| self.b.st.new_str(prog.variants[id as usize].name.as_str()))
     }
 
-    fn array(&mut self, items: impl Iterator<Item = Value>, depth: usize) -> Result<Value, Fail> {
+    fn array(&mut self, items: impl Iterator<Item = VmValue>, depth: usize) -> Result<VmValue, Fail> {
         self.check_depth(depth)?;
         let mut out = Vec::new();
         for x in items {
@@ -1845,7 +1846,7 @@ impl<'a> Converter<'a, '_, '_> {
         Ok(self.b.st.new_variant(self.ids.arr, &[list]))
     }
 
-    fn variant(&mut self, id: u32, fields: &[Value], depth: usize) -> Result<Value, Fail> {
+    fn variant(&mut self, id: u32, fields: &[VmValue], depth: usize) -> Result<VmValue, Fail> {
         let (prog, ids) = (self.prog, self.ids);
         let Some(rt) = prog.variants.get(id as usize) else { return internal("json.encode: unknown variant ID") };
         self.check_depth(depth)?;

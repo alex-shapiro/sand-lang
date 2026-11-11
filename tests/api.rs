@@ -1701,9 +1701,11 @@ fn natives_take_num_evidence() {
             let mut acc = num.zero(vm)?.raw();
             for &x in xs.items(&vm.heap) {
                 acc = match (acc, x) {
-                    (sandlang::vm::value::Value::Int(a), sandlang::vm::value::Value::Int(b)) => sandlang::vm::value::Value::Int(a + b),
-                    (sandlang::vm::value::Value::Float(a), sandlang::vm::value::Value::Float(b)) => {
-                        sandlang::vm::value::Value::Float(a + b)
+                    (sandlang::vm::value::VmValue::Int(a), sandlang::vm::value::VmValue::Int(b)) => {
+                        sandlang::vm::value::VmValue::Int(a + b)
+                    }
+                    (sandlang::vm::value::VmValue::Float(a), sandlang::vm::value::VmValue::Float(b)) => {
+                        sandlang::vm::value::VmValue::Float(a + b)
                     }
                     _ => return Err(Fail::internal("not a number").into()),
                 };

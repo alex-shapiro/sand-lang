@@ -2,14 +2,14 @@
 
 use super::stream::{self, IoFailure, Suspended, bytes_read, line_read, read_line, read_to_end_reserved, read_upto, strip_eol};
 use crate::check::ModKind;
-use crate::native::convert::{HostError, IntoValue};
+use crate::native::convert::{HostError, IntoVmValue};
 use crate::native::func::Later;
 use crate::native::ty::Val;
 use crate::native::{NativeModule, NativeObject, ObjectType};
 use crate::policy::Capability;
 use crate::stdin_feed::StdinChannel;
 use crate::vm::iomem::Reservation;
-use crate::vm::value::{Obj, Value, to_usize_saturating};
+use crate::vm::value::{Obj, VmValue, to_usize_saturating};
 use crate::vm::{Ctl, Vm, WaitKind};
 use std::collections::BTreeMap;
 use tokio::io::AsyncBufRead;
@@ -74,7 +74,7 @@ fn output<T: Output>(m: &mut NativeModule) {
 }
 
 /// Writes the `str` or `bytes` value `v` to stdout (1) or stderr (2).
-fn write_out(vm: &mut Vm, which: u8, v: Value) -> Result<(), HostError> {
+fn write_out(vm: &mut Vm, which: u8, v: VmValue) -> Result<(), HostError> {
     let len = match vm.heap.get(v) {
         Obj::Str(s) => s.len(),
         _ => vm.heap.bytes_of(v).len(),
@@ -99,7 +99,7 @@ enum Read {
     Upto(usize),
 }
 
-fn read_stdin<R: IntoValue + Send + 'static>(
+fn read_stdin<R: IntoVmValue + Send + 'static>(
     vm: &mut Vm,
     what: Read,
     done: fn(&mut Vm, Option<Vec<u8>>) -> stream::FinishResult<R>,

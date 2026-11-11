@@ -1,8 +1,8 @@
 //! Traits and types for registering Rust functions in a [`NativeModule`](super::NativeModule).
 
-use super::convert::{Conversion, FromValue, HostError, IntoValue, ok_value};
+use super::convert::{Conversion, FromVmValue, HostError, IntoVmValue, ok_value};
 use super::ty::{SandType, Type};
-use crate::vm::value::Value;
+use crate::vm::value::VmValue;
 use crate::vm::{Ctl, Fail, Finisher, NativeFn, Suspension, Vm, WaitKind};
 use std::future::Future;
 use std::marker::PhantomData;
@@ -25,11 +25,11 @@ impl Signature {
 
 /// Synchronous function registered with [`NativeModule::function`](super::NativeModule::function).
 ///
-/// Parameters implement [`FromValue`] (borrowing `&str`, `&[u8]`, and `&T`
+/// Parameters implement [`FromVmValue`] (borrowing `&str`, `&[u8]`, and `&T`
 /// directly from the VM heap), and the return type implements [`HostReturn<Ctl>`].
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be a host function",
-    note = "each parameter must implement `FromValue`, and the return type must implement `HostReturn<Ctl>`",
+    note = "each parameter must implement `FromVmValue`, and the return type must implement `HostReturn<Ctl>`",
     note = "a synchronous function returns `HostError`, not `HostError<Fail>`"
 )]
 pub trait HostFunction<Marker>: Send + Sync + 'static {
@@ -40,11 +40,11 @@ pub trait HostFunction<Marker>: Send + Sync + 'static {
 /// Synchronous function registered with [`NativeModule::vm_function`](super::NativeModule::vm_function).
 ///
 /// Receives `&mut Vm` as its first argument. Remaining arguments must be owned
-/// [`FromValue`] types or [`Val`](super::Val) handles, and the return type
+/// [`FromVmValue`] types or [`Val`](super::Val) handles, and the return type
 /// implements [`HostReturn<Ctl>`].
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be a `Vm` function",
-    note = "the first parameter must be `&mut Vm`, each other parameter must be an owned `FromValue` type, and the return type must implement `HostReturn<Ctl>`",
+    note = "the first parameter must be `&mut Vm`, each other parameter must be an owned `FromVmValue` type, and the return type must implement `HostReturn<Ctl>`",
     note = "a synchronous function returns `HostError`, not `HostError<Fail>`"
 )]
 pub trait VmFunction<Marker>: Send + Sync + 'static {
@@ -54,7 +54,7 @@ pub trait VmFunction<Marker>: Send + Sync + 'static {
 
 /// Asynchronous function registered with [`NativeModule::async_function`](super::NativeModule::async_function).
 ///
-/// Arguments must be owned [`FromValue`] types so the returned future can
+/// Arguments must be owned [`FromVmValue`] types so the returned future can
 /// outlive the initial call. The output of the future implements
 /// [`HostReturn<Fail>`] because the future cannot make a scheduler request:
 ///
@@ -66,7 +66,7 @@ pub trait VmFunction<Marker>: Send + Sync + 'static {
 /// ```
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be an async host function",
-    note = "each parameter must be an owned `FromValue` type, and the output of the future must implement `HostReturn<Fail>`",
+    note = "each parameter must be an owned `FromVmValue` type, and the output of the future must implement `HostReturn<Fail>`",
     note = "a future returns `HostError<Fail>`, not `HostError`, because it cannot make a scheduler request"
 )]
 pub trait AsyncHostFunction<Marker>: Send + Sync + 'static {
@@ -80,23 +80,23 @@ pub trait AsyncHostFunction<Marker>: Send + Sync + 'static {
 /// wait use [`Ctl`], and code that runs after a wait uses [`Fail`].
 pub trait HostReturn<C>: SandType {
     #[doc(hidden)]
-    fn into_call_result(self, vm: &mut Vm) -> Result<Value, C>;
+    fn into_call_result(self, vm: &mut Vm) -> Result<VmValue, C>;
 }
 
-impl<R: IntoValue, C: From<Fail>> HostReturn<C> for R {
-    fn into_call_result(self, vm: &mut Vm) -> Result<Value, C> {
-        Ok(self.into_value(vm)?)
+impl<R: IntoVmValue, C: From<Fail>> HostReturn<C> for R {
+    fn into_call_result(self, vm: &mut Vm) -> Result<VmValue, C> {
+        Ok(self.into_vm_value(vm)?)
     }
 }
 
-impl<T: IntoValue> HostReturn<Ctl> for Result<T, Ctl> {
-    fn into_call_result(self, vm: &mut Vm) -> Result<Value, Ctl> {
-        Ok(self?.into_value(vm)?)
+impl<T: IntoVmValue> HostReturn<Ctl> for Result<T, Ctl> {
+    fn into_call_result(self, vm: &mut Vm) -> Result<VmValue, Ctl> {
+        Ok(self?.into_vm_value(vm)?)
     }
 }
 
-impl<T: IntoValue, C: From<Fail>> HostReturn<C> for Result<T, HostError<C>> {
-    fn into_call_result(self, vm: &mut Vm) -> Result<Value, C> {
+impl<T: IntoVmValue, C: From<Fail>> HostReturn<C> for Result<T, HostError<C>> {
+    fn into_call_result(self, vm: &mut Vm) -> Result<VmValue, C> {
         match self {
             Ok(x) => Ok(ok_value(x, vm)?),
             Err(e) => e.into_sand_error(vm),
@@ -108,7 +108,7 @@ impl<T: SandType, E: NativeError> HostReturn<Ctl> for Result<Later<T, E>, E>
 where
     Result<T, E>: SandType,
 {
-    fn into_call_result(self, vm: &mut Vm) -> Result<Value, Ctl> {
+    fn into_call_result(self, vm: &mut Vm) -> Result<VmValue, Ctl> {
         match self {
             Ok(later) => later.start(vm),
             Err(e) => e.stop_call(vm),
@@ -139,7 +139,7 @@ pub trait NativeError: Send + Sized + 'static + sealed::Sealed {
     /// because the closure runs after the wait.
     type FinishError: Send + 'static;
     #[doc(hidden)]
-    fn stop_call(self, vm: &mut Vm) -> Result<Value, Ctl>;
+    fn stop_call(self, vm: &mut Vm) -> Result<VmValue, Ctl>;
 }
 
 mod sealed {
@@ -151,26 +151,26 @@ mod sealed {
 
 impl NativeError for Ctl {
     type FinishError = Fail;
-    fn stop_call(self, _: &mut Vm) -> Result<Value, Ctl> {
+    fn stop_call(self, _: &mut Vm) -> Result<VmValue, Ctl> {
         Err(self)
     }
 }
 
 impl NativeError for Fail {
     type FinishError = Fail;
-    fn stop_call(self, _: &mut Vm) -> Result<Value, Ctl> {
+    fn stop_call(self, _: &mut Vm) -> Result<VmValue, Ctl> {
         Err(self.into())
     }
 }
 
 impl NativeError for HostError {
     type FinishError = HostError<Fail>;
-    fn stop_call(self, vm: &mut Vm) -> Result<Value, Ctl> {
+    fn stop_call(self, vm: &mut Vm) -> Result<VmValue, Ctl> {
         self.into_sand_error(vm)
     }
 }
 
-impl<T: IntoValue + Send + 'static, E: NativeError> Later<T, E> {
+impl<T: IntoVmValue + Send + 'static, E: NativeError> Later<T, E> {
     /// Suspends the calling task until `fut` is resolved, and then executes the
     /// returned closure on the VM thread to produce the Sand result.
     ///
@@ -191,7 +191,7 @@ impl<T: IntoValue + Send + 'static, E: NativeError> Later<T, E> {
     /// waits for a user action so that idle wait time does not count toward
     /// `max_wall_time`.
     ///
-    /// Do not capture [`Value`]s in `fut`; the garbage collector does not trace
+    /// Do not capture [`VmValue`]s in `fut`; the garbage collector does not trace
     /// pending futures while a task is suspended.
     pub fn new<F>(wait_kind: WaitKind, fut: impl Future<Output = F> + Send + 'static) -> Later<T, E>
     where
@@ -215,7 +215,7 @@ impl<T: IntoValue + Send + 'static, E: NativeError> Later<T, E> {
 }
 
 impl<T, E> Later<T, E> {
-    fn start(self, vm: &mut Vm) -> Result<Value, Ctl> {
+    fn start(self, vm: &mut Vm) -> Result<VmValue, Ctl> {
         match self.0 {
             Completion::Now(f) => Ok(f(vm)?),
             Completion::After(suspension) => Err(Ctl::suspend(suspension)),
@@ -226,7 +226,7 @@ impl<T, E> Later<T, E> {
 /// Drops any leading trait-dictionary arguments passed before the `n` function
 /// arguments.
 #[inline(always)]
-fn strip_dict_args(args: &[Value], n: usize) -> &[Value] {
+fn strip_dict_args(args: &[VmValue], n: usize) -> &[VmValue] {
     args.get(args.len().wrapping_sub(n)..).unwrap_or_default()
 }
 
@@ -245,7 +245,7 @@ macro_rules! fn_impls {
         where
             F: Fn($($a),*) -> R + for<'a> Fn($($a::Item<'a>),*) -> R + Send + Sync + 'static,
             R: HostReturn<Ctl>,
-            $($a: FromValue + 'static,)*
+            $($a: FromVmValue + 'static,)*
         {
             fn signature() -> Signature {
                 Signature { params: vec![$($a::sand_type()),*], ret: R::sand_type() }
@@ -254,11 +254,11 @@ macro_rules! fn_impls {
                 fn call<R, $($a,)*>(f: &impl Fn($($a),*) -> R, $($a: $a,)*) -> R {
                     f($($a),*)
                 }
-                Box::new(move |vm: &mut Vm, args: &[Value]| -> Result<Value, Ctl> {
+                Box::new(move |vm: &mut Vm, args: &[VmValue]| -> Result<VmValue, Ctl> {
                     let r = {
                         let &[$($a),*] = strip_dict_args(args, $n) else { return Err(too_few_args()) };
                         let mut conv = Conversion::new();
-                        $(let $a = $a::from_value(vm, $a, &mut conv)?;)*
+                        $(let $a = $a::from_vm_value(vm, $a, &mut conv)?;)*
                         call(&self, $($a),*)
                     };
                     vm.unchecked(|vm| r.into_call_result(vm))
@@ -271,16 +271,16 @@ macro_rules! fn_impls {
         where
             F: Fn(&mut Vm, $($a),*) -> R + Send + Sync + 'static,
             R: HostReturn<Ctl>,
-            $($a: for<'a> FromValue<Item<'a> = $a> + 'static,)*
+            $($a: for<'a> FromVmValue<Item<'a> = $a> + 'static,)*
         {
             fn signature() -> Signature {
                 Signature { params: vec![$($a::sand_type()),*], ret: R::sand_type() }
             }
             fn into_host(self) -> Box<NativeFn> {
-                Box::new(move |vm: &mut Vm, args: &[Value]| -> Result<Value, Ctl> {
+                Box::new(move |vm: &mut Vm, args: &[VmValue]| -> Result<VmValue, Ctl> {
                     let &[$($a),*] = strip_dict_args(args, $n) else { return Err(too_few_args()) };
                     let mut conv = Conversion::new();
-                    $(let $a = $a::from_value(vm, $a, &mut conv)?;)*
+                    $(let $a = $a::from_vm_value(vm, $a, &mut conv)?;)*
                     vm.arm_retry_stress();
                     let r = self(vm, $($a),*);
                     vm.unchecked(|vm| r.into_call_result(vm))
@@ -294,16 +294,16 @@ macro_rules! fn_impls {
             F: Fn($($a),*) -> Fut + Send + Sync + 'static,
             Fut: Future<Output = R> + Send + 'static,
             R: HostReturn<Fail> + Send + 'static,
-            $($a: for<'a> FromValue<Item<'a> = $a> + 'static,)*
+            $($a: for<'a> FromVmValue<Item<'a> = $a> + 'static,)*
         {
             fn signature() -> Signature {
                 Signature { params: vec![$($a::sand_type()),*], ret: R::sand_type() }
             }
             fn into_host(self) -> Box<NativeFn> {
-                Box::new(move |vm: &mut Vm, args: &[Value]| -> Result<Value, Ctl> {
+                Box::new(move |vm: &mut Vm, args: &[VmValue]| -> Result<VmValue, Ctl> {
                     let &[$($a),*] = strip_dict_args(args, $n) else { return Err(too_few_args()) };
                     let mut conv = Conversion::new();
-                    $(let $a = $a::from_value(vm, $a, &mut conv)?;)*
+                    $(let $a = $a::from_vm_value(vm, $a, &mut conv)?;)*
                     let fut = self($($a),*);
                     let future = Box::pin(async move {
                         let r = fut.await;

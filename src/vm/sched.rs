@@ -153,7 +153,7 @@ pub(crate) trait DriveUntil {
     type Stop;
 
     /// Returns a stop if finishing fiber `fid` with `result` ends the drive.
-    fn stop_on_finish(&self, fid: u32, result: Value) -> Option<Self::Stop>;
+    fn stop_on_finish(&self, fid: u32, result: VmValue) -> Option<Self::Stop>;
 
     /// Returns a stop if a permission prompt for `capability` ends the drive.
     /// Returns `None` if the engine should prompt immediately.
@@ -170,17 +170,17 @@ pub(crate) trait DriveUntil {
 pub(crate) struct UntilMainDone(u32);
 
 impl DriveUntil for UntilMainDone {
-    type Stop = Value;
+    type Stop = VmValue;
 
-    fn stop_on_finish(&self, fid: u32, result: Value) -> Option<Value> {
+    fn stop_on_finish(&self, fid: u32, result: VmValue) -> Option<VmValue> {
         (fid == self.0).then_some(result)
     }
 
-    fn stop_on_prompt(&self, _capability: &Capability) -> Option<Value> {
+    fn stop_on_prompt(&self, _capability: &Capability) -> Option<VmValue> {
         None
     }
 
-    fn stop_on_all_blocked(&self, vm: &Vm) -> Result<Value, RunEnding> {
+    fn stop_on_all_blocked(&self, vm: &Vm) -> Result<VmValue, RunEnding> {
         let trace = match vm.fibers.get(self.0 as usize) {
             Some(Some(f)) => vm.trace_of(f, None),
             _ => vec![],
@@ -188,7 +188,7 @@ impl DriveUntil for UntilMainDone {
         Err(Trap::Error { message: "deadlock: all tasks are blocked".into(), trace }.into())
     }
 
-    fn stop_before_io_wait(&self) -> Option<Value> {
+    fn stop_before_io_wait(&self) -> Option<VmValue> {
         None
     }
 }
@@ -211,7 +211,7 @@ pub(crate) struct UntilIdle {
 impl DriveUntil for UntilIdle {
     type Stop = IdleStop;
 
-    fn stop_on_finish(&self, _fid: u32, _result: Value) -> Option<IdleStop> {
+    fn stop_on_finish(&self, _fid: u32, _result: VmValue) -> Option<IdleStop> {
         None
     }
 
@@ -367,7 +367,7 @@ impl Vm {
     /// finishes, running the other tasks meanwhile, then returns (other
     /// tasks are left as they are). The wall-time limit is `self.deadline`.
     /// Buffered standard output is flushed at the end.
-    pub async fn run_main(&mut self, proto: u32) -> Result<Value, RunEnding> {
+    pub async fn run_main(&mut self, proto: u32) -> Result<VmValue, RunEnding> {
         let main_result = match self.start_main(proto) {
             Ok(fid) => self.drive(UntilMainDone(fid)).await,
             Err(ending) => Err(ending),
@@ -377,7 +377,7 @@ impl Vm {
 
     fn start_main(&mut self, proto: u32) -> Result<u32, RunEnding> {
         let closure = self.heap.alloc(Obj::Closure(proto, Box::new([])));
-        let task = self.heap.alloc(Obj::Task(Box::new(TaskObj { fiber: 0, state: TaskState::Running, result: Value::Unit })));
+        let task = self.heap.alloc(Obj::Task(Box::new(TaskObj { fiber: 0, state: TaskState::Running, result: VmValue::Unit })));
         let fid = self.spawn_fiber(closure, task).map_err(|fail| self.run_ending_of(fail, |_| vec![]))?;
         if let Obj::Task(task_obj) = self.heap.get_mut(task) {
             task_obj.fiber = fid;

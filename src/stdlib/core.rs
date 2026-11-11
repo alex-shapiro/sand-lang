@@ -18,10 +18,10 @@ use std::collections::{HashMap, HashSet};
 
 /// Approximate heap cost of a small object (a string, tuple or list header)
 /// plus the list slot holding it, for reserving memory before building many.
-const ITEM: usize = std::mem::size_of::<Obj>() + 2 * std::mem::size_of::<Value>();
+const ITEM: usize = std::mem::size_of::<Obj>() + 2 * std::mem::size_of::<VmValue>();
 
 /// Approximate heap cost of a list element.
-const SLOT: usize = std::mem::size_of::<Value>();
+const SLOT: usize = std::mem::size_of::<VmValue>();
 
 type Str = Val<String>;
 type Bytes = Val<Vec<u8>>;
@@ -41,7 +41,7 @@ fn reserve_list(vm: &Vm, n: usize) -> Result<(), Fail> {
     vm.check_memory(n.saturating_mul(SLOT))
 }
 
-fn params<const N: u8>(items: Vec<Value>) -> Vec<Param<N>> {
+fn params<const N: u8>(items: Vec<VmValue>) -> Vec<Param<N>> {
     items.into_iter().map(Param::from_raw).collect()
 }
 
@@ -113,7 +113,7 @@ pub(crate) fn prelude() -> NativeModule {
     m.vm_function("Channel.try_recv", |vm: &mut Vm, c: Val<Channel<Param<0>>>| -> Result<Option<Param<0>>, Fail> {
         let Some((v, woken)) = c.channel_mut(&mut vm.heap)?.take() else { return Ok(None) };
         if let Some((sf, sg)) = woken {
-            vm.deliver(sf, sg, Value::Bool(true));
+            vm.deliver(sf, sg, VmValue::Bool(true));
         }
         Ok(Some(Param::from_raw(v)))
     });
@@ -121,13 +121,13 @@ pub(crate) fn prelude() -> NativeModule {
         let c = c.channel_mut(&mut vm.heap)?;
         c.closed = true;
         let receivers: Vec<(u32, u64)> = c.receivers.drain(..).collect();
-        let senders: Vec<(u32, u64, Value)> = c.senders.drain(..).collect();
+        let senders: Vec<(u32, u64, VmValue)> = c.senders.drain(..).collect();
         for (f, g) in receivers {
             let none = vm.none();
             vm.deliver(f, g, none);
         }
         for (f, g, _) in senders {
-            vm.deliver(f, g, Value::Bool(false));
+            vm.deliver(f, g, VmValue::Bool(false));
         }
         Ok(())
     });
@@ -259,7 +259,7 @@ fn split_list(vm: &mut Vm, text: Str, split: impl for<'h> Fn(&'h Heap, &mut dyn 
 }
 
 /// A new string holding the bytes `range` of string `v` (copied once).
-pub(crate) fn new_substr(vm: &mut Vm, v: Value, range: std::ops::Range<usize>) -> Value {
+pub(crate) fn new_substr(vm: &mut Vm, v: VmValue, range: std::ops::Range<usize>) -> VmValue {
     let s = compact_str::CompactString::new(vm.str(v).get(range).unwrap_or_default());
     vm.heap.new_str(s)
 }
@@ -625,7 +625,7 @@ fn index_check(i: i64, len: usize, inclusive: bool) -> Result<usize, Fail> {
 
 /// Sorts values by the language's total order; each comparison is charged
 /// to the meter, so sorting a huge list can be interrupted.
-fn sort_values(vm: &Vm, items: &mut [Value]) -> Result<(), Fail> {
+fn sort_values(vm: &Vm, items: &mut [VmValue]) -> Result<(), Fail> {
     produce(vm, items.len(), 0)?; // scratch for the merge sort
     if let Some(r) = try_sort_numbers(items, &vm.meter) {
         return r;
@@ -726,7 +726,7 @@ fn lists(m: &mut NativeModule) {
             let (prog, heap, meter) = (&vm.prog, &vm.heap, &vm.meter);
             try_sort_by(&mut idx, |&x, &y| values_cmp_metered(prog, heap, meter, keys[x], keys[y]))
         });
-        let sorted: Vec<Value> = match r {
+        let sorted: Vec<VmValue> = match r {
             Ok(()) => idx.into_iter().map(|i| items[i]).collect(),
             Err(_) => items,
         };
@@ -782,7 +782,7 @@ fn lists(m: &mut NativeModule) {
     m.vm_function("List.enumerate", |vm: &mut Vm, xs: List| -> Result<List<(i64, Param<0>)>, Fail> {
         produce(vm, list_len(vm, xs), list_len(vm, xs))?;
         Ok(Val::from_raw(vm.heap.staged(|heap, st| {
-            let pairs = xs.items(heap).iter().enumerate().map(|(i, &x)| st.new_tuple(vec![Value::Int(i as i64), x])).collect();
+            let pairs = xs.items(heap).iter().enumerate().map(|(i, &x)| st.new_tuple(vec![VmValue::Int(i as i64), x])).collect();
             st.new_list(pairs)
         })))
     });
@@ -798,7 +798,7 @@ fn lists(m: &mut NativeModule) {
         let items = xs.items(&vm.heap);
         vm.charge(items.len() as u64)?;
         reserve_list(vm, items.len())?;
-        let mut out: Vec<Value> = Vec::new();
+        let mut out: Vec<VmValue> = Vec::new();
         for &x in items {
             let dup = match out.last() {
                 Some(l) => values_eq_metered(&vm.heap, &vm.meter, *l, x)?,
@@ -832,7 +832,7 @@ fn lists(m: &mut NativeModule) {
     m.vm_function("List.product", |vm: &mut Vm, num: Num<0>, xs: List<Param<0, traits::Num>>| fold_num(vm, num, xs, true));
     fn extreme(vm: &mut Vm, xs: List<Param<0, traits::Ord>>, want: Ordering) -> Result<Option<Param<0>>, Fail> {
         let items = xs.items(&vm.heap);
-        let mut best: Option<Value> = None;
+        let mut best: Option<VmValue> = None;
         for &x in items {
             best = Some(match best {
                 None => x,
@@ -939,7 +939,7 @@ const ENTRY: usize = 3 * SLOT;
 
 /// Adds `x` to `set`, a set being built outside the heap (so it needs no
 /// write barrier); false if it was there already.
-fn set_insert(vm: &Vm, set: &mut SetObj, x: Value) -> Result<bool, Fail> {
+fn set_insert(vm: &Vm, set: &mut SetObj, x: VmValue) -> Result<bool, Fail> {
     let hash = hash_key(&vm.heap, &vm.meter, x)?;
     if find_key(&vm.heap, &vm.meter, &set.index, hash, x, |i| set.entries[i])?.is_some() {
         return Ok(false);
@@ -949,7 +949,7 @@ fn set_insert(vm: &Vm, set: &mut SetObj, x: Value) -> Result<bool, Fail> {
 }
 
 /// Appends `x`, which is not in `set` and has hash `hash`.
-fn set_push(set: &mut SetObj, hash: u64, x: Value) -> Result<(), Fail> {
+fn set_push(set: &mut SetObj, hash: u64, x: VmValue) -> Result<(), Fail> {
     if !slot_fits(set.entries.len()) {
         return fail("limit", "set too large");
     }
@@ -960,7 +960,7 @@ fn set_push(set: &mut SetObj, hash: u64, x: Value) -> Result<(), Fail> {
 }
 
 /// The set of `items` (the first of equal elements, in order).
-fn set_of(vm: &Vm, items: &[Value]) -> Result<SetObj, Fail> {
+fn set_of(vm: &Vm, items: &[VmValue]) -> Result<SetObj, Fail> {
     produce(vm, items.len().saturating_mul(ENTRY / SLOT), 0)?;
     let mut set = SetObj::default();
     for &x in items {
@@ -970,7 +970,7 @@ fn set_of(vm: &Vm, items: &[Value]) -> Result<SetObj, Fail> {
 }
 
 /// The set of the elements of set `s` that satisfy `keep`, in order.
-fn set_filter(vm: &Vm, s: Set, mut keep: impl FnMut(Value) -> Result<bool, Fail>) -> Result<SetObj, Fail> {
+fn set_filter(vm: &Vm, s: Set, mut keep: impl FnMut(VmValue) -> Result<bool, Fail>) -> Result<SetObj, Fail> {
     let src = s.set(&vm.heap)?;
     produce(vm, src.live.saturating_mul(ENTRY / SLOT), 0)?;
     let mut set = SetObj::default();
@@ -988,7 +988,7 @@ fn new_set(vm: &mut Vm, set: SetObj) -> Set {
     Val::from_raw(vm.heap.alloc(Obj::Set(Box::new(set))))
 }
 
-fn alloc_copy(vm: &mut Vm, copy: Obj) -> Result<Value, Fail> {
+fn alloc_copy(vm: &mut Vm, copy: Obj) -> Result<VmValue, Fail> {
     let size = copy.size();
     vm.check_memory(size)?;
     vm.charge_bytes(size)?;
@@ -996,7 +996,7 @@ fn alloc_copy(vm: &mut Vm, copy: Obj) -> Result<Value, Fail> {
 }
 
 /// Empties map or set `v`, accounting for the memory freed.
-fn clear_container(vm: &mut Vm, v: Value) -> Result<(), Fail> {
+fn clear_container(vm: &mut Vm, v: VmValue) -> Result<(), Fail> {
     vm.unpin(v)?;
     let before = vm.heap.get(v).size();
     match vm.heap.get_mut(v) {
@@ -1038,7 +1038,7 @@ fn maps(m: &mut NativeModule) {
     m.vm_function("Map.entries", |vm: &mut Vm, map: Map| -> Result<List<(Param<0>, Param<1>)>, Fail> {
         let n = map.map(&vm.heap)?.live;
         produce(vm, n, n)?;
-        let list = vm.heap.staged(|heap, st| -> Result<Value, Fail> {
+        let list = vm.heap.staged(|heap, st| -> Result<VmValue, Fail> {
             let items = map.map(heap)?.entries.iter().flatten().map(|&(k, v)| st.new_tuple(vec![k, v])).collect();
             Ok(st.new_list(items))
         })?;
@@ -1052,7 +1052,7 @@ fn maps(m: &mut NativeModule) {
     m.vm_function("Map.extend", |vm: &mut Vm, map: Map, other: Map| -> Result<_, Fail> {
         let mo = other.map(&vm.heap)?;
         produce(vm, 6 * mo.live, 0)?;
-        let es: Vec<(Value, Value)> = mo.entries.iter().flatten().copied().collect();
+        let es: Vec<(VmValue, VmValue)> = mo.entries.iter().flatten().copied().collect();
         for (k, v) in es {
             vm.map_insert(map.raw(), k, v)?;
         }
@@ -1103,7 +1103,7 @@ fn sets(m: &mut NativeModule) {
         slots.sort_unstable();
         let mut set = SetObj::default();
         for slot in slots {
-            let e = x.entries[slot].unwrap_or(Value::Unit);
+            let e = x.entries[slot].unwrap_or(VmValue::Unit);
             set_push(&mut set, hash_key(&vm.heap, &vm.meter, e)?, e)?;
         }
         Ok(new_set(vm, set))

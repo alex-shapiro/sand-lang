@@ -3,8 +3,8 @@
 //! collector.
 //!
 //! The VM runs garbage collection only at safe points and never during a native
-//! call, so native functions may hold [`Value`]s in local variables. Do not
-//! hold a `&mut Obj` across a safe point, and mutate [`Value`]-containing
+//! call, so native functions may hold [`VmValue`]s in local variables. Do not
+//! hold a `&mut Obj` across a safe point, and mutate [`VmValue`]-containing
 //! objects only through [`Heap::get_mut`], [`Heap::get_mut_storing`], or the
 //! container methods built on them so that the collector records write
 //! barriers.
@@ -172,7 +172,7 @@ pub struct Heap {
     /// `SPARE_LENS` values (by length), reused by [`Heap::boxed`]: such
     /// objects are made and dropped all the time. Counted as used memory;
     /// dropped by major collections.
-    spare: [Vec<Box<[Value]>>; SPARE_LENS],
+    spare: [Vec<Box<[VmValue]>>; SPARE_LENS],
     /// Reusable chunks of [`STAGE_CHUNK`] objects for [`Staging`], counted in
     /// `spare_bytes` and dropped on major collections.
     spare_chunks: Vec<Vec<(u32, Obj)>>,
@@ -211,7 +211,7 @@ pub struct Staging<'h> {
 
 impl Staging<'_> {
     /// Stages `obj`, returning the value it will have.
-    pub fn alloc(&mut self, obj: Obj) -> Value {
+    pub fn alloc(&mut self, obj: Obj) -> VmValue {
         self.bytes += obj.size();
         let h = if self.free != NONE {
             let h = self.free;
@@ -236,37 +236,37 @@ impl Staging<'_> {
                 self.chunks.push(c);
             }
         }
-        Value::Obj(h)
+        VmValue::Obj(h)
     }
 
     fn next_chunk_capacity(&self) -> usize {
         self.chunks.last().map_or(4, |c| (c.capacity() * 2).min(STAGE_CHUNK))
     }
 
-    pub fn new_str(&mut self, s: impl Into<CompactString>) -> Value {
+    pub fn new_str(&mut self, s: impl Into<CompactString>) -> VmValue {
         self.alloc(Obj::Str(s.into()))
     }
 
-    pub fn new_bytes(&mut self, b: impl Into<Box<[u8]>>) -> Value {
+    pub fn new_bytes(&mut self, b: impl Into<Box<[u8]>>) -> VmValue {
         self.alloc(Obj::Bytes(b.into()))
     }
 
-    pub fn new_list(&mut self, items: Vec<Value>) -> Value {
+    pub fn new_list(&mut self, items: Vec<VmValue>) -> VmValue {
         self.alloc(Obj::List(items))
     }
 
-    pub fn new_tuple(&mut self, items: Vec<Value>) -> Value {
+    pub fn new_tuple(&mut self, items: Vec<VmValue>) -> VmValue {
         match items[..] {
-            [a, b] if let Some(v) = Value::tuple2(a, b) => v,
+            [a, b] if let Some(v) = VmValue::tuple2(a, b) => v,
             _ => self.alloc(Obj::Tuple(items.into_boxed_slice())),
         }
     }
 
     /// [`Heap::new_variant`], staged.
-    pub fn new_variant(&mut self, id: u32, fields: &[Value]) -> Value {
+    pub fn new_variant(&mut self, id: u32, fields: &[VmValue]) -> VmValue {
         match fields {
-            [] => Value::Tag(id),
-            [p] => match Value::variant1(id, *p) {
+            [] => VmValue::Tag(id),
+            [p] => match VmValue::variant1(id, *p) {
                 Some(v) => v,
                 None => self.alloc(Obj::Variant(id, Box::new([*p]))),
             },
@@ -394,7 +394,7 @@ impl Heap {
 
     /// A box of `items`, reusing a freed one when there is one.
     #[inline]
-    pub fn boxed(&mut self, items: &[Value]) -> Box<[Value]> {
+    pub fn boxed(&mut self, items: &[VmValue]) -> Box<[VmValue]> {
         match items.len().checked_sub(1).and_then(|i| self.spare.get_mut(i)).and_then(Vec::pop) {
             Some(mut b) => {
                 self.spare_bytes -= size_of_val(&*b);
@@ -406,7 +406,7 @@ impl Heap {
     }
 
     #[inline]
-    pub fn alloc(&mut self, obj: Obj) -> Value {
+    pub fn alloc(&mut self, obj: Obj) -> VmValue {
         self.bytes += obj.size();
         self.live_objects += 1;
         if let Obj::Native(n) = &obj
@@ -441,7 +441,7 @@ impl Heap {
             set_bit(&mut self.cmarks, h);
         }
         self.young.push(h);
-        Value::Obj(h)
+        VmValue::Obj(h)
     }
 
     /// Runs `f` with read access to the heap and a [`Staging`] area for new
@@ -459,7 +459,7 @@ impl Heap {
         for mut c in chunks {
             for (h, obj) in c.drain(..) {
                 let v = self.alloc(obj);
-                debug_assert_eq!(v, Value::Obj(h), "staged handles follow the free list, then the arena's end");
+                debug_assert_eq!(v, VmValue::Obj(h), "staged handles follow the free list, then the arena's end");
             }
             if c.capacity() == STAGE_CHUNK {
                 spares.push(c);
@@ -627,9 +627,9 @@ impl Heap {
     }
 
     #[inline]
-    pub fn get(&self, v: Value) -> &Obj {
+    pub fn get(&self, v: VmValue) -> &Obj {
         match v {
-            Value::Obj(h) => &self.objs[h as usize],
+            VmValue::Obj(h) => &self.objs[h as usize],
             _ => &Obj::Free(0),
         }
     }
@@ -647,12 +647,12 @@ impl Heap {
     }
 
     /// Returns a mutable reference to the object for `v` and records a write
-    /// barrier. All mutations of [`Value`]s inside a heap object must use this
+    /// barrier. All mutations of [`VmValue`]s inside a heap object must use this
     /// method or one of the specialized barriered accessors.
     #[inline]
-    pub fn get_mut(&mut self, v: Value) -> &mut Obj {
+    pub fn get_mut(&mut self, v: VmValue) -> &mut Obj {
         match v {
-            Value::Obj(h) => {
+            VmValue::Obj(h) => {
                 self.barrier(h);
                 if matches!(self.phase, Phase::Marking) {
                     self.regray(h);
@@ -667,9 +667,9 @@ impl Heap {
     /// nothing else) into it: a precise write barrier that only remembers
     /// the object if one of the stored values refers to a young object.
     #[inline]
-    pub fn get_mut_storing(&mut self, v: Value, stored: &[Value]) -> &mut Obj {
+    pub fn get_mut_storing(&mut self, v: VmValue, stored: &[VmValue]) -> &mut Obj {
         match v {
-            Value::Obj(h) => {
+            VmValue::Obj(h) => {
                 if stored.iter().any(|s| s.handle().is_some_and(|c| !self.is_marked(c))) {
                     self.barrier(h);
                 }
@@ -684,9 +684,9 @@ impl Heap {
 
     /// Stores `v` into cell `c`.
     #[inline]
-    pub fn set_cell(&mut self, c: Value, v: Value) {
+    pub fn set_cell(&mut self, c: VmValue, v: VmValue) {
         let obj = match (c, v.handle()) {
-            (Value::Obj(h), None) => &mut self.objs[h as usize],
+            (VmValue::Obj(h), None) => &mut self.objs[h as usize],
             _ => self.get_mut_storing(c, &[v]),
         };
         if let Obj::Cell(x) = obj {
@@ -707,7 +707,7 @@ impl Heap {
     // ------------------------------------------------------------------
     // Typed accessors
 
-    pub fn str(&self, v: Value) -> &str {
+    pub fn str(&self, v: VmValue) -> &str {
         match self.get(v) {
             Obj::Str(s) => s,
             Obj::StrBuf(s) => s,
@@ -720,10 +720,10 @@ impl Heap {
     /// is amortised); otherwise all of `cur` too, which is copied into a new
     /// buffer (e.g. when `cur` was read, and so frozen, since the last append).
     #[inline(never)]
-    pub fn append_copies(&self, cur: Value, add: Value) -> usize {
+    pub fn append_copies(&self, cur: VmValue, add: VmValue) -> usize {
         let extra = self.str(add).len();
         match cur {
-            Value::Obj(h) if add.handle() != Some(h) && matches!(self.objs[h as usize], Obj::StrBuf(_)) => extra,
+            VmValue::Obj(h) if add.handle() != Some(h) && matches!(self.objs[h as usize], Obj::StrBuf(_)) => extra,
             _ => self.str(cur).len().saturating_add(extra),
         }
     }
@@ -732,9 +732,9 @@ impl Heap {
     /// string buffer, otherwise into a new buffer holding `cur` followed by
     /// `add` (the result). Fails (changing nothing) if the memory needed
     /// does not fit.
-    pub fn append_str(&mut self, cur: Value, add: Value) -> Result<Value, LimitKind> {
+    pub fn append_str(&mut self, cur: VmValue, add: VmValue) -> Result<VmValue, LimitKind> {
         let extra = self.str(add).len();
-        if let Value::Obj(h) = cur
+        if let VmValue::Obj(h) = cur
             && add.handle() != Some(h)
             && let Obj::StrBuf(buf) = &self.objs[h as usize]
         {
@@ -783,8 +783,8 @@ impl Heap {
     }
 
     /// `Op::AppendInterp`: appends `text` to `cur` like [`Heap::append_str`].
-    pub fn append_text(&mut self, cur: Value, text: &str) -> Result<Value, LimitKind> {
-        if let Value::Obj(h) = cur
+    pub fn append_text(&mut self, cur: VmValue, text: &str) -> Result<VmValue, LimitKind> {
+        if let VmValue::Obj(h) = cur
             && let Obj::StrBuf(buf) = &mut self.objs[h as usize]
         {
             let (len, cap) = (buf.len(), buf.capacity());
@@ -815,8 +815,8 @@ impl Heap {
 
     /// `Op::FreezeStr`: turns string buffer `v` into an ordinary string.
     #[inline]
-    pub fn freeze_str(&mut self, v: Value) {
-        if let Value::Obj(h) = v
+    pub fn freeze_str(&mut self, v: VmValue) {
+        if let VmValue::Obj(h) = v
             && let Obj::StrBuf(_) = self.objs[h as usize]
         {
             self.freeze_slow(h);
@@ -836,21 +836,21 @@ impl Heap {
         }
     }
 
-    pub fn bytes_of(&self, v: Value) -> &[u8] {
+    pub fn bytes_of(&self, v: VmValue) -> &[u8] {
         match self.get(v) {
             Obj::Bytes(b) => b,
             _ => &[],
         }
     }
 
-    pub fn list(&self, v: Value) -> &[Value] {
+    pub fn list(&self, v: VmValue) -> &[VmValue] {
         match self.get(v) {
             Obj::List(l) => l,
             _ => &[],
         }
     }
 
-    pub fn list_mut(&mut self, v: Value) -> &mut Vec<Value> {
+    pub fn list_mut(&mut self, v: VmValue) -> &mut Vec<VmValue> {
         match self.get_mut(v) {
             Obj::List(l) => l,
             other => panic!("internal error: expected list, found {other:?}"),
@@ -858,30 +858,30 @@ impl Heap {
     }
 
     /// The fields of a heap tuple, struct, variant or closure. Inline
-    /// values (`Value::Pair`, inline variants) have none: see [`Heap::field`].
-    pub fn fields(&self, v: Value) -> &[Value] {
+    /// values (`VmValue::Pair`, inline variants) have none: see [`Heap::field`].
+    pub fn fields(&self, v: VmValue) -> &[VmValue] {
         match self.get(v) {
             Obj::Tuple(t) | Obj::Struct(_, t) | Obj::Variant(_, t) | Obj::Closure(_, t) => t,
             _ => &[],
         }
     }
 
-    pub fn new_str(&mut self, s: impl Into<CompactString>) -> Value {
+    pub fn new_str(&mut self, s: impl Into<CompactString>) -> VmValue {
         self.alloc(Obj::Str(s.into()))
     }
 
-    pub fn new_bytes(&mut self, b: impl Into<Box<[u8]>>) -> Value {
+    pub fn new_bytes(&mut self, b: impl Into<Box<[u8]>>) -> VmValue {
         self.alloc(Obj::Bytes(b.into()))
     }
 
-    pub fn new_list(&mut self, items: Vec<Value>) -> Value {
+    pub fn new_list(&mut self, items: Vec<VmValue>) -> VmValue {
         self.alloc(Obj::List(items))
     }
 
-    /// The tuple of `items` (inline for a pair of ints, see `Value::Pair`).
-    pub fn new_tuple(&mut self, items: &[Value]) -> Value {
+    /// The tuple of `items` (inline for a pair of ints, see `VmValue::Pair`).
+    pub fn new_tuple(&mut self, items: &[VmValue]) -> VmValue {
         match *items {
-            [a, b] if let Some(v) = Value::tuple2(a, b) => v,
+            [a, b] if let Some(v) = VmValue::tuple2(a, b) => v,
             _ => {
                 let items = self.boxed(items);
                 self.alloc(Obj::Tuple(items))
@@ -894,8 +894,8 @@ impl Heap {
     /// `list` is not a list. Out of line because inlining it into the
     /// interpreter loop slows down unrelated instructions.
     #[inline(never)]
-    pub fn list_mut_storing(&mut self, list: Value, index: usize, stored: Value) -> Option<&mut Vec<Value>> {
-        let Value::Obj(h) = list else { return None };
+    pub fn list_mut_storing(&mut self, list: VmValue, index: usize, stored: VmValue) -> Option<&mut Vec<VmValue>> {
+        let VmValue::Obj(h) = list else { return None };
         if stored.handle().is_some_and(|c| !self.is_marked(c)) {
             self.list_barrier(h, index, false);
         }
@@ -911,9 +911,9 @@ impl Heap {
     /// The state of iterator function `v` (an `Obj::IterFn`), to update it:
     /// it holds no new object, so no write barrier is needed.
     #[inline]
-    pub fn iter_src_mut(&mut self, v: Value) -> Option<&mut IterSrc> {
+    pub fn iter_src_mut(&mut self, v: VmValue) -> Option<&mut IterSrc> {
         match v {
-            Value::Obj(h) => match &mut self.objs[h as usize] {
+            VmValue::Obj(h) => match &mut self.objs[h as usize] {
                 Obj::IterFn(src) => Some(src),
                 _ => None,
             },
@@ -923,9 +923,9 @@ impl Heap {
 
     /// The pins of map or set `v`, to update them: they are not values, so
     /// no write barrier is needed.
-    pub fn pins_mut(&mut self, v: Value) -> Option<&mut Pins> {
+    pub fn pins_mut(&mut self, v: VmValue) -> Option<&mut Pins> {
         match v {
-            Value::Obj(h) => match &mut self.objs[h as usize] {
+            VmValue::Obj(h) => match &mut self.objs[h as usize] {
                 Obj::Map(m) => Some(&mut m.pins),
                 Obj::Set(s) => Some(&mut s.pins),
                 _ => None,
@@ -939,8 +939,8 @@ impl Heap {
     /// stored and none moves. But a partially remembered list's pushed tail
     /// may now start past the end, so the next push must record where it
     /// stores (the tail shortcut of `list_barrier_old` assumes growth).
-    pub fn list_shrink(&mut self, list: Value) -> Option<&mut Vec<Value>> {
-        let Value::Obj(h) = list else { return None };
+    pub fn list_shrink(&mut self, list: VmValue) -> Option<&mut Vec<VmValue>> {
+        let VmValue::Obj(h) = list else { return None };
         clear_bit(&mut self.tail_bits, h);
         match &mut self.objs[h as usize] {
             Obj::List(l) => Some(l),
@@ -952,8 +952,8 @@ impl Heap {
     /// else) into its entry `slot` (`push`: appending the entry at `slot`,
     /// the current number of entries): the precise, card-marking write
     /// barrier of `list_mut_storing`, for entries.
-    pub fn entries_mut_storing(&mut self, obj: Value, slot: usize, push: bool, stored: &[Value]) -> &mut Obj {
-        let Value::Obj(h) = obj else { panic!("internal error: not an object") };
+    pub fn entries_mut_storing(&mut self, obj: VmValue, slot: usize, push: bool, stored: &[VmValue]) -> &mut Obj {
+        let VmValue::Obj(h) = obj else { panic!("internal error: not an object") };
         if stored.iter().any(|s| s.handle().is_some_and(|c| !self.is_marked(c))) {
             self.list_barrier(h, slot, push);
         }
@@ -966,8 +966,8 @@ impl Heap {
     /// Appends `v` to list `list`. If the list must grow and the growth does
     /// not fit in the memory limit, fails without changing anything.
     #[inline]
-    pub fn list_push(&mut self, list: Value, v: Value) -> Result<(), LimitKind> {
-        let Value::Obj(h) = list else { return Ok(()) };
+    pub fn list_push(&mut self, list: VmValue, v: VmValue) -> Result<(), LimitKind> {
+        let VmValue::Obj(h) = list else { return Ok(()) };
         let Obj::List(l) = &self.objs[h as usize] else { return Ok(()) };
         let len = l.len();
         if len == l.capacity() {
@@ -990,8 +990,8 @@ impl Heap {
     /// fails without changing anything.
     #[cold]
     #[inline(never)]
-    pub fn list_reserve(&mut self, list: Value, extra: usize) -> Result<(), LimitKind> {
-        let Value::Obj(h) = list else { return Ok(()) };
+    pub fn list_reserve(&mut self, list: VmValue, extra: usize) -> Result<(), LimitKind> {
+        let VmValue::Obj(h) = list else { return Ok(()) };
         let Obj::List(l) = &self.objs[h as usize] else { return Ok(()) };
         let (len, cap) = (l.len(), l.capacity());
         let need = len.checked_add(extra).ok_or(LimitKind::Memory)?;
@@ -1007,7 +1007,7 @@ impl Heap {
 
     /// Appends the elements of list `src` to list `dst`. The caller must
     /// first make room for them in `dst` (see [`Heap::list_reserve`]).
-    pub fn list_extend(&mut self, dst: Value, src: Value) {
+    pub fn list_extend(&mut self, dst: VmValue, src: VmValue) {
         if dst == src {
             self.list_mut(dst).extend_from_within(..);
             return;
@@ -1037,8 +1037,8 @@ impl Heap {
     /// barrier if `stored` references a young object. Because values are
     /// appended only to the back of the queue via [`Heap::channel_push`], minor
     /// collections scan only the last `ChannelObj::pushed` elements.
-    pub fn channel_mut(&mut self, ch: Value, stored: Option<Value>) -> Option<&mut ChannelObj> {
-        let Value::Obj(h) = ch else { return None };
+    pub fn channel_mut(&mut self, ch: VmValue, stored: Option<VmValue>) -> Option<&mut ChannelObj> {
+        let VmValue::Obj(h) = ch else { return None };
         if let Some(v) = stored {
             if v.handle().is_some_and(|c| !self.is_marked(c)) && self.is_marked(h) {
                 self.channel_barrier_old(h);
@@ -1070,8 +1070,8 @@ impl Heap {
     /// Appends `v` to the queue of channel `ch`. If the queue must grow and
     /// the growth does not fit in the memory limit, fails without changing
     /// anything.
-    pub fn channel_push(&mut self, ch: Value, v: Value) -> Result<(), LimitKind> {
-        let Value::Obj(h) = ch else { return Ok(()) };
+    pub fn channel_push(&mut self, ch: VmValue, v: VmValue) -> Result<(), LimitKind> {
+        let VmValue::Obj(h) = ch else { return Ok(()) };
         let Obj::Channel(c) = &self.objs[h as usize] else { return Ok(()) };
         let (len, cap) = (c.len(), c.queue().capacity());
         if len == cap {
@@ -1087,35 +1087,35 @@ impl Heap {
     }
 
     /// The payload of `v` if it is the single-payload variant `id`, else
-    /// `Value::Uninit` (which no value holds): LLVM copies a value out of an
+    /// `VmValue::Uninit` (which no value holds): LLVM copies a value out of an
     /// `Option` in unaligned pieces, which stalls the load that reads it back.
     #[inline]
-    pub fn payload_if(&self, v: &Value, id: u32) -> Value {
+    pub fn payload_if(&self, v: &VmValue, id: u32) -> VmValue {
         match *v {
-            Value::VUnit(x) if x == id => Value::Unit,
-            Value::VBool(x, b) if x == id => Value::Bool(b),
-            Value::VInt(x, i) if x == id => Value::Int(i),
-            Value::VFloat(x, f) if x == id => Value::Float(f),
-            Value::VDur(x, d) if x == id => Value::Dur(d),
-            Value::VTag(x, t) if x == id => Value::Tag(t),
-            Value::VObj(x, h) if x == id => Value::Obj(h),
-            Value::Obj(h) => match &self.objs[h as usize] {
+            VmValue::VUnit(x) if x == id => VmValue::Unit,
+            VmValue::VBool(x, b) if x == id => VmValue::Bool(b),
+            VmValue::VInt(x, i) if x == id => VmValue::Int(i),
+            VmValue::VFloat(x, f) if x == id => VmValue::Float(f),
+            VmValue::VDur(x, d) if x == id => VmValue::Dur(d),
+            VmValue::VTag(x, t) if x == id => VmValue::Tag(t),
+            VmValue::VObj(x, h) if x == id => VmValue::Obj(h),
+            VmValue::Obj(h) => match &self.objs[h as usize] {
                 Obj::Variant(vid, f) if *vid == id => match **f {
                     [p, ..] => p,
-                    [] => Value::Uninit,
+                    [] => VmValue::Uninit,
                 },
-                _ => Value::Uninit,
+                _ => VmValue::Uninit,
             },
-            _ => Value::Uninit,
+            _ => VmValue::Uninit,
         }
     }
 
     /// The runtime variant id of an enum value (`u32::MAX` if not a variant).
     #[inline]
-    pub fn variant_id(&self, v: Value) -> u32 {
+    pub fn variant_id(&self, v: VmValue) -> u32 {
         match v {
-            Value::Tag(t) => t,
-            Value::Obj(_) => match self.get(v) {
+            VmValue::Tag(t) => t,
+            VmValue::Obj(_) => match self.get(v) {
                 Obj::Variant(id, _) => *id,
                 _ => u32::MAX,
             },
@@ -1128,10 +1128,10 @@ impl Heap {
 
     /// A representation-independent view of an enum variant value.
     #[inline]
-    pub fn variant(&self, v: Value) -> Option<VariantRef<'_>> {
+    pub fn variant(&self, v: VmValue) -> Option<VariantRef<'_>> {
         match v {
-            Value::Tag(t) => Some(VariantRef::Inline(t, None)),
-            Value::Obj(_) => match self.get(v) {
+            VmValue::Tag(t) => Some(VariantRef::Inline(t, None)),
+            VmValue::Obj(_) => match self.get(v) {
                 Obj::Variant(id, f) => Some(VariantRef::Heap(*id, f)),
                 _ => None,
             },
@@ -1141,10 +1141,10 @@ impl Heap {
 
     /// Field `i` of a tuple, struct, closure or enum variant (inline or not).
     #[inline]
-    pub fn field(&self, v: Value, i: usize) -> Option<Value> {
+    pub fn field(&self, v: VmValue, i: usize) -> Option<VmValue> {
         match v {
-            Value::Obj(_) => self.fields(v).get(i).copied(),
-            Value::Pair(a, b) => [Value::Int(a as i64), Value::Int(b)].get(i).copied(),
+            VmValue::Obj(_) => self.fields(v).get(i).copied(),
+            VmValue::Pair(a, b) => [VmValue::Int(a as i64), VmValue::Int(b)].get(i).copied(),
             _ => match v.as_inline_variant() {
                 Some((_, p)) if i == 0 => Some(p),
                 _ => None,
@@ -1155,10 +1155,10 @@ impl Heap {
     /// Builds the variant `id(fields...)` in its canonical representation:
     /// a tag, an inline single-payload variant, or a heap object.
     #[inline(never)]
-    pub fn new_variant(&mut self, id: u32, fields: &[Value]) -> Value {
+    pub fn new_variant(&mut self, id: u32, fields: &[VmValue]) -> VmValue {
         match fields {
-            [] => Value::Tag(id),
-            [p] if let Some(v) = Value::variant1(id, *p) => v,
+            [] => VmValue::Tag(id),
+            [p] if let Some(v) = VmValue::variant1(id, *p) => v,
             _ => {
                 let fields = self.boxed(fields);
                 self.alloc(Obj::Variant(id, fields))
@@ -1166,20 +1166,20 @@ impl Heap {
         }
     }
 
-    pub fn native<T: 'static>(&self, v: Value) -> Option<&T> {
+    pub fn native<T: 'static>(&self, v: VmValue) -> Option<&T> {
         match self.get(v) {
             Obj::Native(n) => (&**n as &dyn std::any::Any).downcast_ref::<T>(),
             _ => None,
         }
     }
 
-    pub fn value<T: ValueType>(&self, v: Value) -> Option<T> {
+    pub fn value<T: ValueType>(&self, v: VmValue) -> Option<T> {
         value_of(self.get(v))
     }
 
-    pub fn native_mut<T: 'static>(&mut self, v: Value) -> Option<&mut T> {
+    pub fn native_mut<T: 'static>(&mut self, v: VmValue) -> Option<&mut T> {
         // Native objects hold no values: no write barrier needed.
-        let Value::Obj(h) = v else { return None };
+        let VmValue::Obj(h) = v else { return None };
         match &mut self.objs[h as usize] {
             Obj::Native(n) => (&mut **n as &mut dyn std::any::Any).downcast_mut::<T>(),
             _ => None,
@@ -1258,7 +1258,7 @@ impl Heap {
     /// Collects garbage reachable from `roots`: a minor collection (young
     /// objects only) or, if `major`, a full one. Unreachable native resources
     /// are dropped, which closes them.
-    pub fn collect(&mut self, roots: impl IntoIterator<Item = Value>, major: bool) {
+    pub fn collect(&mut self, roots: impl IntoIterator<Item = VmValue>, major: bool) {
         if major {
             self.drop_spares();
             self.abandon_cycle();
@@ -1277,7 +1277,7 @@ impl Heap {
             if major {
                 continue;
             }
-            let mut mark = |v: Value| mark(marks, worklist, v);
+            let mut mark = |v: VmValue| mark(marks, worklist, v);
             match (partial, &objs[h as usize]) {
                 (true, Obj::Channel(c)) => {
                     let q = c.queue();
@@ -1444,7 +1444,7 @@ impl Heap {
     }
 
     /// Starts an incremental major collection: shades the roots.
-    pub fn start_cycle(&mut self, roots: impl IntoIterator<Item = Value>) {
+    pub fn start_cycle(&mut self, roots: impl IntoIterator<Item = VmValue>) {
         self.drop_spares();
         self.cmarks.iter_mut().for_each(|m| *m = 0);
         self.gray_bits.iter_mut().for_each(|m| *m = 0);
@@ -1490,7 +1490,7 @@ impl Heap {
 
     /// Completes the marking: shades the roots again and drains the worklist.
     /// Everything marked is reachable and becomes old; sweeping starts.
-    pub fn finish_marking(&mut self, roots: impl IntoIterator<Item = Value>) {
+    pub fn finish_marking(&mut self, roots: impl IntoIterator<Item = VmValue>) {
         for r in roots {
             self.shade(r);
         }
@@ -1519,7 +1519,7 @@ impl Heap {
 
     /// Shades `v`: marks it and queues it for scanning, if not yet marked.
     #[inline]
-    fn shade(&mut self, v: Value) {
+    fn shade(&mut self, v: VmValue) {
         if let Some(h) = v.handle()
             && !test_bit(&self.cmarks, h)
         {
@@ -1621,7 +1621,7 @@ fn clear_bit(bits: &mut [u64], h: u32) {
 /// from the back. Values taken from the front between two chunks then do not
 /// shift the values not yet scanned past the scan's position.
 #[inline]
-fn chunk_children(obj: &Obj, start: usize, mut f: impl FnMut(Value)) -> Option<usize> {
+fn chunk_children(obj: &Obj, start: usize, mut f: impl FnMut(VmValue)) -> Option<usize> {
     let chunk = |len: usize| {
         let end = start.saturating_add(SCAN_CHUNK).min(len);
         (start.min(end)..end, (end < len).then_some(end))
@@ -1666,7 +1666,7 @@ fn chunk_children(obj: &Obj, start: usize, mut f: impl FnMut(Value)) -> Option<u
 /// Marks `v` and queues it for tracing, if it was not already marked. Mark
 /// bits stay set between minor collections.
 #[inline]
-fn mark(marks: &mut [u64], worklist: &mut Vec<u32>, v: Value) {
+fn mark(marks: &mut [u64], worklist: &mut Vec<u32>, v: VmValue) {
     if let Some(h) = v.handle() {
         let (w, b) = ((h / 64) as usize, 1u64 << (h % 64));
         if marks[w] & b == 0 {
@@ -1709,24 +1709,24 @@ mod tests {
         let before = used(&heap);
         let buffer = heap.staged(|_, st| {
             for i in 0..n {
-                st.new_list(vec![Value::Int(i as i64)]);
+                st.new_list(vec![VmValue::Int(i as i64)]);
             }
             assert_eq!(st.chunks.iter().map(Vec::len).sum::<usize>(), n);
             st.buffer_bytes()
         });
         let objs = (n + STAGE_CHUNK) * size;
         assert!(buffer >= objs && buffer < objs + 1024, "{buffer}");
-        let lists = n * Obj::List(vec![Value::Int(0)]).size();
+        let lists = n * Obj::List(vec![VmValue::Int(0)]).size();
         assert_eq!(used(&heap) - before, lists + 3 * CHUNK_BYTES);
-        heap.collect((0..n).map(|i| Value::Obj(i as u32)), true);
+        heap.collect((0..n).map(|i| VmValue::Obj(i as u32)), true);
         assert_eq!(used(&heap) - before, lists);
     }
 
     #[test]
     fn dirty_index_lists_stay_small() {
         let mut heap = Heap::new(None, usize::MAX);
-        let lists: Vec<Value> = (0..100).map(|_| heap.new_list(vec![Value::Int(0)])).collect();
-        let big = heap.new_list(vec![Value::Int(0); 800]);
+        let lists: Vec<VmValue> = (0..100).map(|_| heap.new_list(vec![VmValue::Int(0)])).collect();
+        let big = heap.new_list(vec![VmValue::Int(0); 800]);
         let mut roots = lists.clone();
         roots.push(big);
         heap.collect(roots.iter().copied(), false);
@@ -1752,9 +1752,9 @@ mod tests {
     #[test]
     fn write_barrier_tables_are_bounded_by_container_size() {
         let mut heap = Heap::new(None, usize::MAX);
-        let small: Vec<Value> = (0..100_000).map(|_| heap.new_list(vec![Value::Int(0)])).collect();
-        let big: Vec<Value> = (0..1000).map(|_| heap.new_list(vec![Value::Int(0); 1000])).collect();
-        let roots: Vec<Value> = small.iter().chain(&big).copied().collect();
+        let small: Vec<VmValue> = (0..100_000).map(|_| heap.new_list(vec![VmValue::Int(0)])).collect();
+        let big: Vec<VmValue> = (0..1000).map(|_| heap.new_list(vec![VmValue::Int(0); 1000])).collect();
+        let roots: Vec<VmValue> = small.iter().chain(&big).copied().collect();
         heap.collect(roots.iter().copied(), true);
         let young = heap.new_str("a young string, long enough to be on the heap");
         for &l in &small {
@@ -1778,18 +1778,18 @@ mod tests {
     #[test]
     fn minor_collection_accounts_for_retained_worklists() {
         let mut heap = Heap::new(None, usize::MAX);
-        let roots: Vec<Value> = (0..200_000).map(|i| heap.new_str(format!("a young string, long enough, {i}"))).collect();
+        let roots: Vec<VmValue> = (0..200_000).map(|i| heap.new_str(format!("a young string, long enough, {i}"))).collect();
         heap.collect(roots.iter().copied(), false);
         let work = heap.worklist.capacity() * std::mem::size_of::<u32>() + heap.scan.capacity() * std::mem::size_of::<(u32, usize)>();
         assert!(work > 0);
         assert!(heap.tables >= work, "{} bytes of tables counted, {work} bytes of work lists", heap.tables);
     }
 
-    fn new_channel(heap: &mut Heap) -> Value {
+    fn new_channel(heap: &mut Heap) -> VmValue {
         heap.alloc(Obj::Channel(Box::new(ChannelObj::new(0))))
     }
 
-    fn queued(heap: &Heap, ch: Value) -> Vec<String> {
+    fn queued(heap: &Heap, ch: VmValue) -> Vec<String> {
         let Obj::Channel(c) = heap.get(ch) else { panic!("not a channel") };
         c.queue().iter().map(|&v| heap.str(v).to_string()).collect()
     }
@@ -1806,7 +1806,7 @@ mod tests {
         let v = heap.new_str("a young value, then ints");
         heap.channel_push(ch, v).unwrap();
         for i in 0..100 {
-            heap.channel_push(ch, Value::Int(i)).unwrap();
+            heap.channel_push(ch, VmValue::Int(i)).unwrap();
         }
         let Obj::Channel(c) = heap.get(ch) else { unreachable!() };
         assert_eq!(c.pushed, 101, "only the values pushed since the channel was remembered are scanned");
@@ -1877,7 +1877,7 @@ mod tests {
     #[test]
     fn tracing_keeps_big_containers_in_chunks() {
         let mut heap = Heap::new(None, usize::MAX);
-        let items: Vec<Value> = (0..10 * SCAN_CHUNK).map(|i| heap.new_str(format!("an item, {i}"))).collect();
+        let items: Vec<VmValue> = (0..10 * SCAN_CHUNK).map(|i| heap.new_str(format!("an item, {i}"))).collect();
         let list = heap.new_list(items.clone());
         let ch = new_channel(&mut heap);
         for &v in &items {
@@ -1901,7 +1901,7 @@ mod tests {
         let mut heap = Heap::new(Some(limit), usize::MAX);
         let list = heap.new_list(Vec::new());
         let mut n = 0;
-        while heap.list_push(list, Value::Int(n)).is_ok() {
+        while heap.list_push(list, VmValue::Int(n)).is_ok() {
             n += 1;
         }
         let cap = heap.list(list).len();
@@ -1912,10 +1912,10 @@ mod tests {
         assert_eq!(l.len(), l.capacity(), "a failed push changes nothing");
         assert_eq!(heap.list_reserve(list, 1), Err(LimitKind::Memory));
         let ch = new_channel(&mut heap);
-        while heap.channel_push(ch, Value::Int(0)).is_ok() {}
+        while heap.channel_push(ch, VmValue::Int(0)).is_ok() {}
         assert!(heap.used() <= limit, "{} bytes used", heap.used());
         heap.collect([ch], true);
-        heap.channel_push(ch, Value::Int(0)).unwrap();
+        heap.channel_push(ch, VmValue::Int(0)).unwrap();
     }
 
     fn free_list(heap: &Heap) -> Vec<u32> {
@@ -1933,14 +1933,14 @@ mod tests {
     fn free_slots_are_counted_until_reused() {
         let mut heap = Heap::new(None, usize::MAX);
         let keep = heap.new_str("keep");
-        let garbage: Vec<Value> = (0..1000).map(|i| heap.new_list(vec![Value::Int(i)])).collect();
+        let garbage: Vec<VmValue> = (0..1000).map(|i| heap.new_list(vec![VmValue::Int(i)])).collect();
         let top = heap.new_str("top");
         heap.collect([keep, top], true);
         assert_eq!(free_list(&heap), (1..=1000).collect::<Vec<u32>>());
         let used = heap.used();
         assert!(used >= heap.bytes + 1000 * OBJ_SIZE, "{used} bytes used");
         let young = |heap: &Heap| heap.young.capacity() * std::mem::size_of::<u32>();
-        let ranges: Vec<Value> = (0..10).map(|i| heap.alloc(Obj::Range(i, i, false))).collect();
+        let ranges: Vec<VmValue> = (0..10).map(|i| heap.alloc(Obj::Range(i, i, false))).collect();
         assert_eq!(ranges, garbage[..10]);
         assert_eq!(heap.used() - young(&heap), used);
         let staged = heap.staged(|_, st| st.alloc(Obj::Range(0, 0, false)));
@@ -1953,7 +1953,7 @@ mod tests {
         let mut heap = Heap::new(None, usize::MAX);
         let keep = heap.new_str("keep");
         let n = 4 * SHRINK_SLOTS;
-        let list = heap.new_list((0..n as i64).map(Value::Int).collect());
+        let list = heap.new_list((0..n as i64).map(VmValue::Int).collect());
         for i in 0..n {
             let item = heap.new_str(format!("an item, {i}"));
             heap.list_mut(list)[i] = item;
@@ -1977,7 +1977,7 @@ mod tests {
     fn truncated_slots_are_counted_until_arena_shrinks() {
         let mut heap = Heap::new(None, usize::MAX);
         let n = 64 * SHRINK_SLOTS;
-        let mut live: Vec<Value> = (0..n).map(|i| heap.new_list(vec![Value::Int(i as i64)])).collect();
+        let mut live: Vec<VmValue> = (0..n).map(|i| heap.new_list(vec![VmValue::Int(i as i64)])).collect();
         heap.collect(live.iter().copied(), true);
         while live.len() > SHRINK_SLOTS {
             live.truncate(live.len() - (SHRINK_SLOTS - 1));
@@ -2014,7 +2014,7 @@ mod tests {
         #[test]
         fn heap_accounts_for_all_slots_and_preserves_roots(ops in proptest::collection::vec(op(), 1..200)) {
             let mut heap = Heap::new(None, usize::MAX);
-            let mut roots: Vec<(Value, Result<String, Vec<Value>>)> = Vec::new();
+            let mut roots: Vec<(VmValue, Result<String, Vec<VmValue>>)> = Vec::new();
             let mut n = 0;
             for op in ops {
                 match op {
@@ -2026,7 +2026,7 @@ mod tests {
                         }
                     }
                     Op::List(items) => {
-                        let items: Vec<Value> = items.iter().filter(|_| !roots.is_empty()).map(|i| roots[i % roots.len()].0).collect();
+                        let items: Vec<VmValue> = items.iter().filter(|_| !roots.is_empty()).map(|i| roots[i % roots.len()].0).collect();
                         let v = heap.new_list(items.clone());
                         roots.push((v, Err(items)));
                     }
@@ -2041,7 +2041,7 @@ mod tests {
                     }
                     Op::Drop(_) => {}
                     Op::Collect(major) => {
-                        let mut all: Vec<Value> = roots.iter().map(|r| r.0).collect();
+                        let mut all: Vec<VmValue> = roots.iter().map(|r| r.0).collect();
                         for (_, c) in &roots {
                             if let Err(items) = c {
                                 all.extend(items);
@@ -2115,18 +2115,18 @@ mod tests {
             let mut heap = Heap::new(None, usize::MAX);
             heap.stress = true;
             let lens = [0, 5, PARTIAL_MIN - 1, PARTIAL_MIN, PARTIAL_MIN + 1, 200, 300, 1000, SCAN_CHUNK + 10];
-            let lists: Vec<Value> = lens.iter().map(|&n| heap.new_list(vec![Value::Int(0); n])).collect();
+            let lists: Vec<VmValue> = lens.iter().map(|&n| heap.new_list(vec![VmValue::Int(0); n])).collect();
             let mut model: Vec<Vec<Option<String>>> = lens.iter().map(|&n| vec![None; n]).collect();
             let map_lens = [10, 300];
-            let maps: Vec<Value> = map_lens
+            let maps: Vec<VmValue> = map_lens
                 .iter()
                 .map(|&n| {
-                    let entries = (0..n).map(|i| Some((Value::Int(i as i64), Value::Int(0)))).collect();
+                    let entries = (0..n).map(|i| Some((VmValue::Int(i as i64), VmValue::Int(0)))).collect();
                     heap.alloc(Obj::Map(Box::new(MapObj { entries, live: n, ..MapObj::default() })))
                 })
                 .collect();
             let mut map_model: Vec<Vec<Option<String>>> = map_lens.iter().map(|&n| vec![None; n]).collect();
-            let roots: Vec<Value> = lists.iter().chain(&maps).copied().collect();
+            let roots: Vec<VmValue> = lists.iter().chain(&maps).copied().collect();
             heap.collect(roots.iter().copied(), true);
             let mut n = 0;
             let mut text = || {
@@ -2144,7 +2144,7 @@ mod tests {
                             let t = text();
                             (heap.new_str(t.as_str()), Some(t))
                         } else {
-                            (Value::Int(0), None)
+                            (VmValue::Int(0), None)
                         };
                         heap.list_mut_storing(lists[c], i, v).unwrap()[i] = v;
                         model[c][i] = t;
@@ -2185,16 +2185,16 @@ mod tests {
                         let s = s % map_model[m].len();
                         let t = text();
                         let v = heap.new_str(t.as_str());
-                        let Obj::Map(mo) = heap.entries_mut_storing(maps[m], s, false, &[Value::Int(s as i64), v]) else { unreachable!() };
-                        mo.entries[s] = Some((Value::Int(s as i64), v));
+                        let Obj::Map(mo) = heap.entries_mut_storing(maps[m], s, false, &[VmValue::Int(s as i64), v]) else { unreachable!() };
+                        mo.entries[s] = Some((VmValue::Int(s as i64), v));
                         map_model[m][s] = Some(t);
                     }
                     BarrierOp::MapPush(m) => {
                         let s = map_model[m].len();
                         let t = text();
                         let v = heap.new_str(t.as_str());
-                        let Obj::Map(mo) = heap.entries_mut_storing(maps[m], s, true, &[Value::Int(s as i64), v]) else { unreachable!() };
-                        mo.entries.push(Some((Value::Int(s as i64), v)));
+                        let Obj::Map(mo) = heap.entries_mut_storing(maps[m], s, true, &[VmValue::Int(s as i64), v]) else { unreachable!() };
+                        mo.entries.push(Some((VmValue::Int(s as i64), v)));
                         map_model[m].push(Some(t));
                     }
                     BarrierOp::MapRemove(m, s) => {
@@ -2227,7 +2227,7 @@ mod tests {
                     for (i, (&v, t)) in list.iter().zip(items).enumerate() {
                         match t {
                             Some(t) => proptest::prop_assert_eq!(heap.str(v), t.as_str(), "list {} index {}", c, i),
-                            None => proptest::prop_assert_eq!(v, Value::Int(0)),
+                            None => proptest::prop_assert_eq!(v, VmValue::Int(0)),
                         }
                     }
                 }
@@ -2238,7 +2238,7 @@ mod tests {
                         let v = e.unwrap().1;
                         match t {
                             Some(t) => proptest::prop_assert_eq!(heap.str(v), t.as_str(), "map {} entry {}", m, s),
-                            None => proptest::prop_assert_eq!(v, Value::Int(0)),
+                            None => proptest::prop_assert_eq!(v, VmValue::Int(0)),
                         }
                     }
                 }
