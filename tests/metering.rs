@@ -10,6 +10,8 @@ mod common;
 use common::{StoppedClock, rt, run_with};
 use sandlang::engine::{Config, Engine, Error, HostModules, InterruptHandle, LimitKind, Limits, MemorySink, Outcome};
 use sandlang::native::NativeModule;
+use sandlang::native::ty::Param;
+use sandlang::stdlib::json::Json;
 use sandlang::vm::{Fail, Vm};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
@@ -842,6 +844,9 @@ fn fuel_probe() -> NativeModule {
         vm.check_memory(n as usize)?;
         Ok(n)
     });
+    m.source("pub native fn copy<T>(value: T)");
+    m.function("copy", |vm: &mut Vm, value: Param<0>| vm.to_value(value.raw()).map(drop));
+    m.function("take_json", |_: Json| {});
     m
 }
 
@@ -1077,4 +1082,207 @@ print((total, probe.fuel()))
         }
     }
     assert!(completed > 0, "every limit was too small");
+}
+
+/// Prints the JSON text of one value of each kind, and the fuel of each way
+/// out of the VM for the value: `json.encode`, `json.encode` with an indent,
+/// `json.to_json`, a `Json` parameter of a native function, and
+/// `Vm::to_value`.
+const VALUE_OF_EACH_KIND: &str = r#"import json
+import probe
+import time
+struct Order { id: int, note: str?, tags: [str] }
+struct Holder { json: json.Json, maybe: json.Json? }
+enum Status { Active, Suspended(reason: str), Banned(int, str), One(int) }
+enum Side { Left, Right }
+enum Chain { End, Link(Chain) }
+let start = probe.fuel()
+let call = probe.fuel() - start
+fn show<T: Encode>(name: str, x: T) {
+    let f0 = probe.fuel()
+    let text = json.encode(x)
+    let f1 = probe.fuel()
+    let indented = json.encode(x, indent: 2)
+    let f2 = probe.fuel()
+    let value = json.to_json(x)
+    let f3 = probe.fuel()
+    probe.take_json(value)
+    let f4 = probe.fuel()
+    probe.copy(x)
+    let f5 = probe.fuel()
+    let shown = if text.len() <= 80 { text } else { "\(text.len()) bytes" }
+    print("\(name): \(shown)")
+    print("    encode \(f1 - f0 - call), indent \(f2 - f1 - call) for \(indented.len()) bytes, to_json \(f3 - f2 - call), Json parameter \(f4 - f3 - call), to_value \(f5 - f4 - call)")
+}
+show("unit", ())
+show("bool", true)
+show("int", -7)
+show("float", 1.5)
+show("duration", 1500ms)
+show("str", "plain")
+show("str with escapes", "q\"b\\n\n\t\u{1}é")
+show("str of 3000 bytes", "x".repeat(3000))
+show("bytes", bytes.from_list([0, 255, 7]))
+show("bytes of 3000 bytes", bytes.from_list((0..3000).map(i => i % 256)))
+show("list", [1, 2, 3])
+let empty: [int] = []
+show("empty list", empty)
+show("tuple", (1, "a", 2.5))
+show("pair of ints", (1, 2))
+show("set", Set([3, 1, 2]))
+show("map with str keys", ["k": [1], "j": []])
+show("map with int keys", [2: "two", 1: "one"])
+show("map with bool keys", [true: 1, false: 2])
+show("map with duration keys", [5ms: "d"])
+show("map with variant keys", [Side.Right: 1.5, Side.Left: 2.5])
+show("map with date keys", [time.PlainDate.parse("2024-03-10")?: 1])
+show("map with a key of 3000 bytes", ["k".repeat(3000): 1])
+show("range", 0..3)
+show("inclusive range", -1..=1)
+show("struct", Order(id: 1, note: Some("gift"), tags: ["a"]))
+show("variant without payload", Status.Active)
+show("variant with named payload", Status.Suspended(reason: "late"))
+show("variant with positional payload", Status.Banned(3, "spam"))
+show("variant with one int", Status.One(1))
+let nested: int?? = Some(Some(1))
+show("nested Some", nested)
+let none: int? = None
+show("None", none)
+let err: Result<int> = Err(Error(kind: "io", message: "closed"))
+show("Err", err)
+show("date", time.PlainDate.parse("2024-03-10")?)
+show("span", time.Span(months: 1, hours: 23))
+show("Json scalars", [json.Json.Null, json.Json.Bool(true), json.Json.Int(3), json.Json.Float(2.5), json.Json.Str("x")])
+show("Json array and object", json.parse("{\"a\": [1, null, {\"b\": {}}], \"c\": \"s\"}")?)
+show("struct with Json fields", Holder(json: json.Json.Arr([json.Json.Null]), maybe: Some(json.Json.Int(1))))
+show("list of structs", [Order(id: 1, note: Some("gift"), tags: ["a", "b"]), Order(id: 2, note: None, tags: [])])
+print(json.encode(Order(id: 1, note: None, tags: ["a"]), indent: 2))
+fn links(n: int) -> Chain {
+    var chain = Chain.End
+    for _ in 0..n {
+        chain = Chain.Link(chain)
+    }
+    chain
+}
+var arrays = json.Json.Null
+for _ in 0..512 {
+    arrays = json.Json.Arr([arrays])
+}
+let json_bound = links(256)
+let copy_bound = links(512)
+let d0 = probe.fuel()
+let text = json.encode(json_bound)
+let d1 = probe.fuel()
+let value = json.to_json(json_bound)
+let d2 = probe.fuel()
+probe.take_json(arrays)
+let d3 = probe.fuel()
+probe.copy(copy_bound)
+let d4 = probe.fuel()
+print("256 variants, which are 512 levels of JSON: encode \(d1 - d0 - call) for \(text.len()) bytes, to_json \(d2 - d1 - call)")
+print("512 Json arrays: Json parameter \(d3 - d2 - call)")
+print("512 variants: to_value \(d4 - d3 - call)")
+"#;
+
+const FUEL_OF_EACH_KIND: &str = r#"unit: null
+    encode 1, indent 1 for 4 bytes, to_json 1, Json parameter 1, to_value 1
+bool: true
+    encode 1, indent 1 for 4 bytes, to_json 1, Json parameter 1, to_value 1
+int: -7
+    encode 1, indent 1 for 2 bytes, to_json 1, Json parameter 1, to_value 1
+float: 1.5
+    encode 1, indent 1 for 3 bytes, to_json 1, Json parameter 1, to_value 1
+duration: 1500000000
+    encode 1, indent 1 for 10 bytes, to_json 1, Json parameter 1, to_value 1
+str: "plain"
+    encode 1, indent 1 for 7 bytes, to_json 1, Json parameter 1, to_value 1
+str with escapes: "q\"b\\n\n\t\u0001é"
+    encode 1, indent 1 for 21 bytes, to_json 1, Json parameter 1, to_value 1
+str of 3000 bytes: 3002 bytes
+    encode 1, indent 1 for 3002 bytes, to_json 1, Json parameter 47, to_value 47
+bytes: "AP8H"
+    encode 1, indent 1 for 6 bytes, to_json 1, Json parameter 1, to_value 1
+bytes of 3000 bytes: 4002 bytes
+    encode 376, indent 376 for 4002 bytes, to_json 376, Json parameter 63, to_value 47
+list: [1,2,3]
+    encode 4, indent 4 for 17 bytes, to_json 4, Json parameter 7, to_value 4
+empty list: []
+    encode 1, indent 1 for 2 bytes, to_json 1, Json parameter 1, to_value 1
+tuple: [1,"a",2.5]
+    encode 4, indent 4 for 21 bytes, to_json 4, Json parameter 7, to_value 4
+pair of ints: [1,2]
+    encode 3, indent 3 for 12 bytes, to_json 3, Json parameter 5, to_value 3
+set: [3,1,2]
+    encode 4, indent 4 for 17 bytes, to_json 4, Json parameter 7, to_value 4
+map with str keys: {"k":[1],"j":[]}
+    encode 4, indent 4 for 33 bytes, to_json 4, Json parameter 7, to_value 6
+map with int keys: {"2":"two","1":"one"}
+    encode 3, indent 3 for 30 bytes, to_json 3, Json parameter 5, to_value 5
+map with bool keys: {"true":1,"false":2}
+    encode 3, indent 3 for 29 bytes, to_json 3, Json parameter 5, to_value 5
+map with duration keys: {"5000000":"d"}
+    encode 2, indent 2 for 20 bytes, to_json 2, Json parameter 3, to_value 3
+map with variant keys: {"Right":1.5,"Left":2.5}
+    encode 3, indent 3 for 33 bytes, to_json 3, Json parameter 5, to_value 5
+map with date keys: {"2024-03-10":1}
+    encode 2, indent 2 for 21 bytes, to_json 2, Json parameter 3, to_value 3
+map with a key of 3000 bytes: 3006 bytes
+    encode 48, indent 49 for 3011 bytes, to_json 48, Json parameter 49, to_value 49
+range: {"start":0,"end":3}
+    encode 3, indent 3 for 28 bytes, to_json 1, Json parameter 5, to_value 1
+inclusive range: {"start":-1,"end":1,"inclusive":true}
+    encode 4, indent 4 for 50 bytes, to_json 1, Json parameter 7, to_value 1
+struct: {"id":1,"note":"gift","tags":["a"]}
+    encode 6, indent 6 for 56 bytes, to_json 6, Json parameter 9, to_value 6
+variant without payload: "Active"
+    encode 1, indent 1 for 8 bytes, to_json 1, Json parameter 1, to_value 1
+variant with named payload: {"Suspended":{"reason":"late"}}
+    encode 3, indent 3 for 45 bytes, to_json 2, Json parameter 5, to_value 2
+variant with positional payload: {"Banned":[3,"spam"]}
+    encode 4, indent 4 for 39 bytes, to_json 3, Json parameter 7, to_value 3
+variant with one int: {"One":[1]}
+    encode 3, indent 3 for 24 bytes, to_json 2, Json parameter 5, to_value 2
+nested Some: 1
+    encode 3, indent 3 for 1 bytes, to_json 3, Json parameter 1, to_value 3
+None: null
+    encode 1, indent 1 for 4 bytes, to_json 1, Json parameter 1, to_value 1
+Err: {"Err":[{"message":"closed","kind":"io"}]}
+    encode 5, indent 5 for 76 bytes, to_json 4, Json parameter 9, to_value 4
+date: "2024-03-10"
+    encode 1, indent 1 for 12 bytes, to_json 1, Json parameter 1, to_value 1
+span: "P1MT23H"
+    encode 1, indent 1 for 9 bytes, to_json 1, Json parameter 1, to_value 1
+Json scalars: [null,true,3,2.5,"x"]
+    encode 10, indent 10 for 37 bytes, to_json 6, Json parameter 11, to_value 10
+Json array and object: {"a":[1,null,{"b":{}}],"c":"s"}
+    encode 13, indent 13 for 71 bytes, to_json 1, Json parameter 13, to_value 16
+struct with Json fields: {"json":[null],"maybe":1}
+    encode 7, indent 7 for 42 bytes, to_json 4, Json parameter 7, to_value 7
+list of structs: [{"id":1,"note":"gift","tags":["a","b"]},{"id":2,"note":null,"tags":[]}]
+    encode 12, indent 12 for 140 bytes, to_json 12, Json parameter 21, to_value 12
+{
+  "id": 1,
+  "note": null,
+  "tags": [
+    "a"
+  ]
+}
+256 variants, which are 512 levels of JSON: encode 513 for 2821 bytes, to_json 257
+512 Json arrays: Json parameter 1025
+512 variants: to_value 513
+"#;
+
+#[test]
+fn a_value_of_each_kind_leaves_the_vm_for_pinned_fuel() {
+    let run_stressed = |gc_stress: bool, retry_stress: bool| {
+        let config = Config::new().clock(Arc::new(StoppedClock(sandlang::platform::Instant::now())));
+        let config = config.host_modules(HostModules::new([fuel_probe()]).unwrap()).gc_stress(gc_stress).retry_stress(retry_stress);
+        let (r, out) = run(config, VALUE_OF_EACH_KIND);
+        assert!(r.is_ok(), "{r:?}");
+        out
+    };
+    let plain = run_stressed(false, false);
+    assert_eq!(plain, FUEL_OF_EACH_KIND);
+    assert_eq!(plain, run_stressed(true, false));
+    assert_eq!(plain, run_stressed(false, true));
 }
