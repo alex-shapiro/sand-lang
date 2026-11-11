@@ -303,6 +303,12 @@ value, and `Value`.
   `json.encode`. A cycle reaches the depth bound. A copy that exceeds a bound
   returns a limit error.
 - A benchmark must show that `json.encode` keeps its speed.
+- Rename `Vm::new_value` and `Heap::value`, which work with `ValueType`, so that
+  they do not read as operations on `Value`.
+- Decide how `Constant` relates to `Value`. Today `IntoVmValue::to_const` makes
+  constants, although a constant never touches a VM, and the derives generate a
+  separate walk for it. If `Encode` or `Value` makes constants, the derives
+  generate one walk and `IntoVmValue` only converts to a `VmValue`.
 
 This changeset has no source commits. `03076c5` returned `Json`, which loses the
 difference between `bytes` and a string, and between `()` and `None`.
