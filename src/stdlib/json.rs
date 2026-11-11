@@ -96,7 +96,7 @@ fn is_json(t: &TypeDesc) -> bool {
 pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("json", ModKind::Std, include_str!("json.sand"));
     m.bind::<Json>();
-    m.vm_function("parse", |vm: &mut Vm, text: VmVal<String>| -> Result<VmVal<Json>, HostError> {
+    m.function("parse", |vm: &mut Vm, text: VmVal<String>| -> Result<VmVal<Json>, HostError> {
         let ids = JsonIds::of(&vm.prog)?;
         let meter = &vm.meter;
         let r = vm.heap.staged(|heap, st| {
@@ -108,7 +108,7 @@ pub(crate) fn module() -> NativeModule {
         });
         into_result(r)
     });
-    m.vm_function("encode", |vm: &mut Vm, value: Param<0, traits::Encode>, indent: i64| -> Result<VmVal<String>, Fail> {
+    m.function("encode", |vm: &mut Vm, value: Param<0, traits::Encode>, indent: i64| -> Result<VmVal<String>, Fail> {
         let ids = JsonIds::of(&vm.prog)?;
         let indent = indent.clamp(0, 1 << 16) as usize;
         let mut e = Encoder {
@@ -126,7 +126,7 @@ pub(crate) fn module() -> NativeModule {
         Ok(VmVal::from_raw(vm.new_str(out)))
     });
     m.bind::<Decoded<()>>();
-    m.vm_function("decode_raw", |vm: &mut Vm, ty: Reflect<0>, text: VmVal<String>| -> Result<Decoded<Param<0>>, Fail> {
+    m.function("decode_raw", |vm: &mut Vm, ty: Reflect<0>, text: VmVal<String>| -> Result<Decoded<Param<0>>, Fail> {
         let desc = ty.desc(&vm.heap)?.clone();
         let ids = vm.prog.ids;
         let meter = &vm.meter;
@@ -174,7 +174,7 @@ pub(crate) fn module() -> NativeModule {
             Err(Error::Fail(c)) => Err(c),
         }
     });
-    m.vm_function("to_json", |vm: &mut Vm, value: Param<0, traits::Encode>| -> Result<VmVal<Json>, Fail> {
+    m.function("to_json", |vm: &mut Vm, value: Param<0, traits::Encode>| -> Result<VmVal<Json>, Fail> {
         let ids = JsonIds::of(&vm.prog)?;
         let (prog, meter) = (&vm.prog, &vm.meter);
         let v = vm.heap.staged(|heap, st| {

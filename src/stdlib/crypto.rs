@@ -11,19 +11,19 @@ use sha2::Digest;
 
 pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("crypto", ModKind::Std, include_str!("crypto.sand"));
-    m.vm_function("sha256", |vm: &mut Vm, data: VmVal<Vec<u8>>| -> Result<_, Fail> {
+    m.function("sha256", |vm: &mut Vm, data: VmVal<Vec<u8>>| -> Result<_, Fail> {
         Ok(sha256_parts(&[data.bytes(&vm.heap)], &vm.meter)?.to_vec())
     });
-    m.vm_function("sha1", |vm: &mut Vm, data: VmVal<Vec<u8>>| -> Result<_, Fail> {
+    m.function("sha1", |vm: &mut Vm, data: VmVal<Vec<u8>>| -> Result<_, Fail> {
         Ok(digest::<sha1::Sha1>(&[data.bytes(&vm.heap)], &vm.meter)?.to_vec())
     });
-    m.vm_function("md5", |vm: &mut Vm, data: VmVal<Vec<u8>>| -> Result<_, Fail> {
+    m.function("md5", |vm: &mut Vm, data: VmVal<Vec<u8>>| -> Result<_, Fail> {
         Ok(digest::<md5::Md5>(&[data.bytes(&vm.heap)], &vm.meter)?.to_vec())
     });
-    m.vm_function("hmac_sha256", |vm: &mut Vm, key: VmVal<Vec<u8>>, data: VmVal<Vec<u8>>| -> Result<_, Fail> {
+    m.function("hmac_sha256", |vm: &mut Vm, key: VmVal<Vec<u8>>, data: VmVal<Vec<u8>>| -> Result<_, Fail> {
         Ok(hmac_sha256(key.bytes(&vm.heap), data.bytes(&vm.heap), &vm.meter)?.to_vec())
     });
-    m.vm_function("constant_time_eq", |vm: &mut Vm, a: VmVal<Vec<u8>>, b: VmVal<Vec<u8>>| -> Result<_, Fail> {
+    m.function("constant_time_eq", |vm: &mut Vm, a: VmVal<Vec<u8>>, b: VmVal<Vec<u8>>| -> Result<_, Fail> {
         vm.charge_bytes(a.bytes(&vm.heap).len())?;
         Ok(constant_time_eq(a.bytes(&vm.heap), b.bytes(&vm.heap)))
     });

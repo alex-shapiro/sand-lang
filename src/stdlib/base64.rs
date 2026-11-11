@@ -11,10 +11,10 @@ const URL_SAFE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwx
 
 pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("base64", ModKind::Std, include_str!("base64.sand"));
-    m.vm_function("encode", |vm: &mut Vm, data: VmVal<Vec<u8>>| encode_native(vm, data, false));
-    m.vm_function("encode_url", |vm: &mut Vm, data: VmVal<Vec<u8>>| encode_native(vm, data, true));
-    m.vm_function("decode", |vm: &mut Vm, text: VmVal<String>| decode_native(vm, text, false));
-    m.vm_function("decode_url", |vm: &mut Vm, text: VmVal<String>| decode_native(vm, text, true));
+    m.function("encode", |vm: &mut Vm, data: VmVal<Vec<u8>>| encode_native(vm, data, false));
+    m.function("encode_url", |vm: &mut Vm, data: VmVal<Vec<u8>>| encode_native(vm, data, true));
+    m.function("decode", |vm: &mut Vm, text: VmVal<String>| decode_native(vm, text, false));
+    m.function("decode_url", |vm: &mut Vm, text: VmVal<String>| decode_native(vm, text, true));
     m
 }
 

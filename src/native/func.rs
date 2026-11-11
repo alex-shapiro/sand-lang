@@ -5,7 +5,6 @@ use super::ty::{SandType, Type};
 use crate::vm::value::VmValue;
 use crate::vm::{Ctl, Fail, Finisher, NativeFn, Suspension, Vm, WaitKind};
 use std::future::Future;
-use std::marker::PhantomData;
 
 /// Sand parameter and return types derived from a Rust function signature.
 #[derive(Clone, Debug)]
@@ -15,6 +14,12 @@ pub struct Signature {
 }
 
 impl Signature {
+    /// Builds a signature from the Sand type of each script argument. `None`
+    /// is a value that the engine provides.
+    fn of<const N: usize>(params: [Option<Type>; N], ret: Type) -> Signature {
+        Signature { params: params.into_iter().flatten().collect(), ret }
+    }
+
     /// Returns `true` if `name` is `"Type.method"` and the first parameter has
     /// type `module.Type`.
     pub(crate) fn takes_self(&self, module: &str, name: &str) -> bool {
@@ -23,55 +28,191 @@ impl Signature {
     }
 }
 
-/// Synchronous function registered with [`NativeModule::function`](super::NativeModule::function).
+/// Rust function that [`NativeModule::function`](super::NativeModule::function) registers.
 ///
-/// Each parameter implements [`FromVmValue`] and can borrow `&str`, `&[u8]`, or
-/// `&T` from the VM heap. The return type implements [`HostReturn<Ctl>`].
-#[diagnostic::on_unimplemented(
-    message = "`{Self}` cannot be a host function",
-    note = "each parameter must implement `FromVmValue`, and the return type must implement `HostReturn<Ctl>`",
-    note = "a synchronous function returns `HostError`, not `HostError<Fail>`"
-)]
-pub trait HostFunction<Marker>: Send + Sync + 'static {
-    fn signature() -> Signature;
-    fn into_host(self) -> Box<NativeFn>;
-}
-
-/// Synchronous function registered with [`NativeModule::vm_function`](super::NativeModule::vm_function).
+/// The parameters and the return type of the function select one of three
+/// forms:
 ///
-/// Receives `&mut Vm` as its first argument. Remaining arguments must be owned
-/// [`FromVmValue`] types or [`VmVal`](super::VmVal) handles. The return type
-/// implements [`HostReturn<Ctl>`].
-#[diagnostic::on_unimplemented(
-    message = "`{Self}` cannot be a `Vm` function",
-    note = "the first parameter must be `&mut Vm`, each other parameter must be an owned `FromVmValue` type, and the return type must implement `HostReturn<Ctl>`",
-    note = "a synchronous function returns `HostError`, not `HostError<Fail>`"
-)]
-pub trait VmFunction<Marker>: Send + Sync + 'static {
-    fn signature() -> Signature;
-    fn into_host(self) -> Box<NativeFn>;
-}
-
-/// Asynchronous function registered with [`NativeModule::async_function`](super::NativeModule::async_function).
+/// ```
+/// # use sandlang::native::NativeModule;
+/// # use sandlang::vm::{Fail, Vm};
+/// let mut module = NativeModule::new("text");
+/// module.function("len", |s: &str| s.len() as i64);
+/// module.function("reserve", |vm: &mut Vm, s: String| -> Result<i64, Fail> {
+///     vm.check_memory(s.len())?;
+///     Ok(s.len() as i64)
+/// });
+/// module.function("fetch", |url: String| async move { url.len() as i64 });
+/// ```
 ///
-/// Arguments must be owned [`FromVmValue`] types so the returned future can
-/// outlive the initial call. The output of the future implements
-/// [`HostReturn<Fail>`] because the future cannot make a scheduler request:
+/// - **Parameters only.** Each parameter implements [`NativeParam`] and can
+///   borrow `&str`, `&[u8]`, or `&T` from the VM heap. The return type
+///   implements [`HostReturn<Ctl>`].
+/// - **`&mut Vm` first.** Each parameter after the `Vm` is an owned
+///   [`NativeParam`] type, such as `String` or a [`VmVal`](super::ty::VmVal)
+///   handle. The return type implements [`HostReturn<Ctl>`].
+/// - **A future as the result.** Only the calling Sand task waits for the
+///   future. Each parameter is an owned [`NativeParam`] type that is `Send`.
+///   The output of the future is `Send` and implements [`HostReturn<Fail>`].
+///
+/// A function that takes `&mut Vm` cannot borrow an argument from the VM heap:
+///
+/// ```compile_fail,E0277
+/// # use sandlang::native::NativeModule;
+/// # use sandlang::vm::Vm;
+/// let mut module = NativeModule::new("text");
+/// module.function("len", |_: &mut Vm, s: &str| s.len() as i64);
+/// ```
+///
+/// A future cannot borrow an argument, and it cannot take or return a VM
+/// handle. Garbage collection can free the heap object of a handle during the
+/// wait:
+///
+/// ```compile_fail,E0277
+/// # use sandlang::native::NativeModule;
+/// let mut module = NativeModule::new("text");
+/// module.function("fetch", |url: &str| async move { 0 });
+/// ```
+///
+/// ```compile_fail,E0277
+/// # use sandlang::native::NativeModule;
+/// # use sandlang::native::ty::VmVal;
+/// let mut module = NativeModule::new("text");
+/// module.function("fetch", |url: VmVal<String>| async move { 0 });
+/// ```
+///
+/// A future cannot make a scheduler request, so its output cannot hold a
+/// [`Ctl`]:
 ///
 /// ```compile_fail,E0277
 /// # use sandlang::native::NativeModule;
 /// # use sandlang::native::convert::HostError;
-/// let mut m = NativeModule::new("m");
-/// m.async_function("f", || async { Err::<i64, HostError>(HostError::new("io", "broken pipe")) });
+/// let mut module = NativeModule::new("text");
+/// module.function("fetch", || async { Err::<i64, HostError>(HostError::new("io", "broken pipe")) });
 /// ```
 #[diagnostic::on_unimplemented(
-    message = "`{Self}` cannot be an async host function",
-    note = "each parameter must be an owned `FromVmValue` type, and the output of the future must implement `HostReturn<Fail>`",
-    note = "a future returns `HostError<Fail>`, not `HostError`, because it cannot make a scheduler request"
+    message = "`{Self}` cannot be a native function",
+    note = "each parameter must implement `NativeParam`, and the return type must implement `HostReturn<Ctl>`",
+    note = "a function that takes `&mut Vm` first must take owned parameters after it",
+    note = "a function that returns a future must take owned `Send` parameters, and the output of the future must be `Send` and implement `HostReturn<Fail>`",
+    note = "a VM handle such as `VmVal` is not `Send`, because a handle cannot cross a wait",
+    note = "a synchronous function returns `HostError`, and a future returns `HostError<Fail>`"
 )]
-pub trait AsyncHostFunction<Marker>: Send + Sync + 'static {
+pub trait NativeFunction<Form>: Send + Sync + 'static {
+    /// Returns the Sand types of the script arguments and of the result.
     fn signature() -> Signature;
-    fn into_host(self) -> Box<NativeFn>;
+    #[doc(hidden)]
+    fn into_native_fn(self) -> Box<NativeFn>;
+}
+
+/// ```compile_fail,E0277
+/// # use sandlang::native::NativeModule;
+/// let mut module = NativeModule::new("m");
+/// module.function("f", |x: u32| 0);
+/// ```
+///
+/// ```compile_fail,E0277
+/// # use sandlang::native::NativeModule;
+/// let mut module = NativeModule::new("m");
+/// module.function("f", || 0u32);
+/// ```
+///
+/// ```compile_fail,E0277
+/// # use sandlang::native::NativeModule;
+/// # use sandlang::native::ty::VmVal;
+/// # use sandlang::vm::value::VmValue;
+/// let mut module = NativeModule::new("m");
+/// module.function("f", || async { VmVal::<String>::from_raw(VmValue::Unit) });
+/// ```
+///
+/// ```compile_fail,E0277
+/// # use sandlang::native::NativeModule;
+/// # use sandlang::native::ty::Param;
+/// let mut module = NativeModule::new("m");
+/// module.function("f", |x: Param<0>| async move { 0 });
+/// ```
+///
+/// ```compile_fail,E0277
+/// # use sandlang::native::NativeModule;
+/// # use sandlang::native::ty::Num;
+/// let mut module = NativeModule::new("m");
+/// module.function("f", |num: Num<0>| async move { 0 });
+/// ```
+///
+/// ```compile_fail,E0277
+/// # use sandlang::native::NativeModule;
+/// # use sandlang::native::ty::Reflect;
+/// let mut module = NativeModule::new("m");
+/// module.function("f", |ty: Reflect<0>| async move { 0 });
+/// ```
+///
+/// ```compile_fail,E0277
+/// # use sandlang::native::NativeModule;
+/// # use sandlang::native::ty::VmVal;
+/// let mut module = NativeModule::new("m");
+/// module.function("f", |items: Vec<VmVal<String>>| async move { 0 });
+/// ```
+///
+/// ```compile_fail,E0277
+/// # use sandlang::native::NativeModule;
+/// # use sandlang::native::convert::HostError;
+/// # use sandlang::vm::Fail;
+/// let mut module = NativeModule::new("m");
+/// module.function("f", || -> Result<i64, HostError<Fail>> { Ok(0) });
+/// ```
+#[cfg(doctest)]
+struct FunctionFormErrors;
+
+/// Parameter of a [`NativeFunction`]: a script argument, or a value that the
+/// engine provides.
+///
+/// Each [`FromVmValue`] type is a script argument. The Sand signature of a
+/// function lists only its script arguments.
+pub trait NativeParam {
+    /// Type that the function receives. A script argument can borrow from the
+    /// VM heap for `'a`.
+    type Item<'a>;
+
+    /// Number of script arguments that the parameter reads.
+    #[doc(hidden)]
+    const SCRIPT_ARGS: usize;
+
+    /// Returns the Sand type of a script argument, or `None` for a value that
+    /// the engine provides.
+    #[doc(hidden)]
+    fn sand_type() -> Option<Type>;
+
+    /// Reads the parameter. `script_args[next_arg]` is the first script
+    /// argument that the parameters before this one did not read.
+    #[doc(hidden)]
+    fn from_call<'a>(vm: &'a Vm, script_args: &[VmValue], next_arg: usize, conv: &mut Conversion) -> Result<Self::Item<'a>, Fail>;
+}
+
+impl<T: FromVmValue> NativeParam for T {
+    type Item<'a> = T::Item<'a>;
+
+    const SCRIPT_ARGS: usize = 1;
+
+    fn sand_type() -> Option<Type> {
+        Some(<T as SandType>::sand_type())
+    }
+
+    #[inline(always)]
+    fn from_call<'a>(vm: &'a Vm, script_args: &[VmValue], next_arg: usize, conv: &mut Conversion) -> Result<T::Item<'a>, Fail> {
+        T::from_vm_value(vm, script_args[next_arg], conv)
+    }
+}
+
+#[cold]
+fn too_few_args() -> Fail {
+    Fail::internal("native function called with too few arguments")
+}
+
+/// Forms of a [`NativeFunction`].
+mod form {
+    pub struct Params;
+    pub struct VmFirst;
+    pub struct Async;
 }
 
 /// Return type of a registered function.
@@ -107,28 +248,30 @@ impl<T: IntoVmValue, C: From<Fail>> HostReturn<C> for Result<T, HostError<C>> {
 impl<T: SandType, E: NativeError> HostReturn<Ctl> for Result<Later<T, E>, E>
 where
     Result<T, E>: SandType,
+    Result<T, E::FinishError>: HostReturn<Fail>,
 {
     fn into_call_result(self, vm: &mut Vm) -> Result<VmValue, Ctl> {
         match self {
-            Ok(later) => later.start(vm),
+            Ok(Later(Completion::Now(r))) => Ok(r.into_call_result(vm)?),
+            Ok(Later(Completion::After(suspension))) => Err(Ctl::suspend(suspension)),
             Err(e) => e.stop_call(vm),
         }
     }
 }
 
-/// Deferred result returned by a [`VmFunction`] that may suspend the calling
-/// Sand task on a future.
+/// Deferred result of a [`NativeFunction`] that can suspend the calling Sand
+/// task on a future.
 ///
 /// Return `Result<Later<T, E>, E>` from the function. If `E` is [`Ctl`] or
 /// [`Fail`], the Sand return type is `T`. If `E` is [`HostError`], the Sand
 /// return type is `Result<T, Error>`.
 #[must_use]
-pub struct Later<T, E>(Completion, PhantomData<fn() -> (T, E)>);
+pub struct Later<T, E: NativeError>(Completion<T, E>);
 
 /// Execution mode of a [`Later`] value.
-enum Completion {
-    /// Runs the finisher immediately without suspending the calling task.
-    Now(Finisher),
+enum Completion<T, E: NativeError> {
+    /// Returns the result without suspending the calling task.
+    Now(Result<T, E::FinishError>),
     /// Suspends the calling task until the future is resolved.
     After(Suspension),
 }
@@ -170,7 +313,7 @@ impl NativeError for HostError {
     }
 }
 
-impl<T: IntoVmValue + Send + 'static, E: NativeError> Later<T, E> {
+impl<T: IntoVmValue + 'static, E: NativeError> Later<T, E> {
     /// Suspends the calling task until `fut` is resolved, and then executes the
     /// returned closure on the VM thread to produce the Sand result.
     ///
@@ -191,8 +334,33 @@ impl<T: IntoVmValue + Send + 'static, E: NativeError> Later<T, E> {
     /// waits for a user action so that idle wait time does not count toward
     /// `max_wall_time`.
     ///
-    /// Do not capture [`VmValue`] values in `fut`. The garbage collector does
-    /// not trace pending futures while a task is suspended.
+    /// `fut` and the closure cannot hold a VM handle, because garbage
+    /// collection can free the heap object of the handle during the wait. The
+    /// closure can allocate and return a new handle.
+    ///
+    /// ```compile_fail,E0277
+    /// # use sandlang::native::func::Later;
+    /// # use sandlang::native::ty::VmVal;
+    /// # use sandlang::vm::{Fail, Vm, WaitKind};
+    /// fn later(text: VmVal<String>) -> Later<i64, Fail> {
+    ///     Later::new(WaitKind::Io, async move { move |vm: &mut Vm| Ok(text.str(&vm.heap).len() as i64) })
+    /// }
+    /// ```
+    ///
+    /// Copy the data that the closure needs before the wait:
+    ///
+    /// ```
+    /// # use sandlang::native::func::Later;
+    /// # use sandlang::native::ty::VmVal;
+    /// # use sandlang::vm::{Fail, Vm, WaitKind};
+    /// fn later(vm: &Vm, text: VmVal<String>) -> Later<i64, Fail> {
+    ///     let len = text.str(&vm.heap).len() as i64;
+    ///     Later::new(WaitKind::Io, async move { move |_: &mut Vm| Ok(len) })
+    /// }
+    /// ```
+    ///
+    /// The compiler does not check a raw [`VmValue`]. Do not hold a raw
+    /// [`VmValue`] in `fut` or in the closure.
     pub fn new<F>(wait_kind: WaitKind, fut: impl Future<Output = F> + Send + 'static) -> Later<T, E>
     where
         F: FnOnce(&mut Vm) -> Result<T, E::FinishError> + Send + 'static,
@@ -202,63 +370,57 @@ impl<T: IntoVmValue + Send + 'static, E: NativeError> Later<T, E> {
             let finish = fut.await;
             Box::new(move |vm: &mut Vm| finish(vm).into_call_result(vm)) as Finisher
         };
-        Later(Completion::After(Suspension { future: Box::pin(fut), wait_kind }), PhantomData)
+        Later(Completion::After(Suspension { future: Box::pin(fut), wait_kind }))
     }
 
     /// Completes immediately with `r` without suspending the calling task.
-    pub fn ready(r: Result<T, E::FinishError>) -> Later<T, E>
-    where
-        Result<T, E::FinishError>: HostReturn<Fail>,
-    {
-        Later(Completion::Now(Box::new(move |vm: &mut Vm| r.into_call_result(vm))), PhantomData)
+    pub fn ready(r: Result<T, E::FinishError>) -> Later<T, E> {
+        Later(Completion::Now(r))
     }
 }
 
-impl<T, E> Later<T, E> {
-    fn start(self, vm: &mut Vm) -> Result<VmValue, Ctl> {
-        match self.0 {
-            Completion::Now(f) => Ok(f(vm)?),
-            Completion::After(suspension) => Err(Ctl::suspend(suspension)),
-        }
-    }
-}
-
-/// Drops any leading trait-dictionary arguments passed before the `n` function
-/// arguments.
+/// Returns the last `n` of `args`, which are the script arguments. The
+/// compiler passes trait dictionaries before them.
 #[inline(always)]
-fn strip_dict_args(args: &[VmValue], n: usize) -> &[VmValue] {
-    args.get(args.len().wrapping_sub(n)..).unwrap_or_default()
+fn script_args(args: &[VmValue], n: usize) -> Result<&[VmValue], Fail> {
+    match args.get(args.len().wrapping_sub(n)..) {
+        Some(script_args) => Ok(script_args),
+        None => Err(too_few_args()),
+    }
 }
 
-#[cold]
-fn too_few_args() -> Ctl {
-    Fail::internal("native function called with too few arguments").into()
+/// Reads each parameter `$a` of a native call into a variable named `$a`.
+macro_rules! read_params {
+    ($vm:ident, $args:ident, $($a:ident),*) => {
+        let script_args = script_args($args, const { 0 $(+ $a::SCRIPT_ARGS)* })?;
+        let mut next_arg = 0;
+        let mut conv = Conversion::new();
+        $(
+            let $a = $a::from_call($vm, script_args, next_arg, &mut conv)?;
+            next_arg += $a::SCRIPT_ARGS;
+        )*
+    };
 }
 
 macro_rules! fn_impls {
     ($($a:ident),*) => {
-        fn_impls!(@impl [$($a),*] <[&str]>::len(&[$(stringify!($a)),*]));
-    };
-    (@impl [$($a:ident),*] $n:expr) => {
-        #[allow(non_snake_case, unused_variables, unused_mut, clippy::unused_unit, clippy::too_many_arguments)]
-        impl<F, R, $($a,)*> HostFunction<($($a,)*)> for F
+        #[allow(non_snake_case, unused_variables, unused_mut, unused_assignments, clippy::unused_unit, clippy::too_many_arguments)]
+        impl<F, R, $($a,)*> NativeFunction<(form::Params, $($a,)*)> for F
         where
             F: Fn($($a),*) -> R + for<'a> Fn($($a::Item<'a>),*) -> R + Send + Sync + 'static,
             R: HostReturn<Ctl>,
-            $($a: FromVmValue + 'static,)*
+            $($a: NativeParam + 'static,)*
         {
             fn signature() -> Signature {
-                Signature { params: vec![$($a::sand_type()),*], ret: R::sand_type() }
+                Signature::of([$($a::sand_type()),*], R::sand_type())
             }
-            fn into_host(self) -> Box<NativeFn> {
+            fn into_native_fn(self) -> Box<NativeFn> {
                 fn call<R, $($a,)*>(f: &impl Fn($($a),*) -> R, $($a: $a,)*) -> R {
                     f($($a),*)
                 }
                 Box::new(move |vm: &mut Vm, args: &[VmValue]| -> Result<VmValue, Ctl> {
                     let r = {
-                        let &[$($a),*] = strip_dict_args(args, $n) else { return Err(too_few_args()) };
-                        let mut conv = Conversion::new();
-                        $(let $a = $a::from_vm_value(vm, $a, &mut conv)?;)*
+                        read_params!(vm, args, $($a),*);
                         call(&self, $($a),*)
                     };
                     vm.unchecked(|vm| r.into_call_result(vm))
@@ -266,21 +428,19 @@ macro_rules! fn_impls {
             }
         }
 
-        #[allow(non_snake_case, unused_variables, unused_mut, clippy::unused_unit, clippy::too_many_arguments)]
-        impl<F, R, $($a,)*> VmFunction<(Vm, $($a,)*)> for F
+        #[allow(non_snake_case, unused_variables, unused_mut, unused_assignments, clippy::unused_unit, clippy::too_many_arguments)]
+        impl<F, R, $($a,)*> NativeFunction<(form::VmFirst, $($a,)*)> for F
         where
             F: Fn(&mut Vm, $($a),*) -> R + Send + Sync + 'static,
             R: HostReturn<Ctl>,
-            $($a: for<'a> FromVmValue<Item<'a> = $a> + 'static,)*
+            $($a: for<'a> NativeParam<Item<'a> = $a> + 'static,)*
         {
             fn signature() -> Signature {
-                Signature { params: vec![$($a::sand_type()),*], ret: R::sand_type() }
+                Signature::of([$($a::sand_type()),*], R::sand_type())
             }
-            fn into_host(self) -> Box<NativeFn> {
+            fn into_native_fn(self) -> Box<NativeFn> {
                 Box::new(move |vm: &mut Vm, args: &[VmValue]| -> Result<VmValue, Ctl> {
-                    let &[$($a),*] = strip_dict_args(args, $n) else { return Err(too_few_args()) };
-                    let mut conv = Conversion::new();
-                    $(let $a = $a::from_vm_value(vm, $a, &mut conv)?;)*
+                    read_params!(vm, args, $($a),*);
                     vm.arm_retry_stress();
                     let r = self(vm, $($a),*);
                     vm.unchecked(|vm| r.into_call_result(vm))
@@ -288,22 +448,20 @@ macro_rules! fn_impls {
             }
         }
 
-        #[allow(non_snake_case, unused_variables, unused_mut)]
-        impl<F, Fut, R, $($a,)*> AsyncHostFunction<(Fut, $($a,)*)> for F
+        #[allow(non_snake_case, unused_variables, unused_mut, unused_assignments)]
+        impl<F, Fut, R, $($a,)*> NativeFunction<(form::Async, $($a,)*)> for F
         where
             F: Fn($($a),*) -> Fut + Send + Sync + 'static,
             Fut: Future<Output = R> + Send + 'static,
             R: HostReturn<Fail> + Send + 'static,
-            $($a: for<'a> FromVmValue<Item<'a> = $a> + 'static,)*
+            $($a: for<'a> NativeParam<Item<'a> = $a> + Send + 'static,)*
         {
             fn signature() -> Signature {
-                Signature { params: vec![$($a::sand_type()),*], ret: R::sand_type() }
+                Signature::of([$($a::sand_type()),*], R::sand_type())
             }
-            fn into_host(self) -> Box<NativeFn> {
+            fn into_native_fn(self) -> Box<NativeFn> {
                 Box::new(move |vm: &mut Vm, args: &[VmValue]| -> Result<VmValue, Ctl> {
-                    let &[$($a),*] = strip_dict_args(args, $n) else { return Err(too_few_args()) };
-                    let mut conv = Conversion::new();
-                    $(let $a = $a::from_vm_value(vm, $a, &mut conv)?;)*
+                    read_params!(vm, args, $($a),*);
                     let fut = self($($a),*);
                     let future = Box::pin(async move {
                         let r = fut.await;
@@ -328,3 +486,57 @@ fn_impls!(A, B, C, D, E, G1, H, I, J);
 fn_impls!(A, B, C, D, E, G1, H, I, J, K);
 fn_impls!(A, B, C, D, E, G1, H, I, J, K, L);
 fn_impls!(A, B, C, D, E, G1, H, I, J, K, L, M);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::{Config, Engine, HostModules, MemorySink};
+    use crate::native::NativeModule;
+    use crate::native::ty::{Num, Param};
+
+    /// Value of [`Config::retry_stress`], which the engine provides.
+    struct RetryStress(bool);
+
+    impl NativeParam for RetryStress {
+        type Item<'a> = RetryStress;
+
+        const SCRIPT_ARGS: usize = 0;
+
+        fn sand_type() -> Option<Type> {
+            None
+        }
+
+        fn from_call(vm: &Vm, _: &[VmValue], _: usize, _: &mut Conversion) -> Result<RetryStress, Fail> {
+            Ok(RetryStress(vm.retry_stress))
+        }
+    }
+
+    fn script_params<Form, F: NativeFunction<Form>>(_: &F) -> Vec<String> {
+        F::signature().params.iter().map(Type::to_string).collect()
+    }
+
+    #[test]
+    fn each_form_takes_provided_values_among_script_arguments() {
+        let params_only = |stress: RetryStress, s: &str| format!("{s} {}", stress.0);
+        let vm_first = |_: &mut Vm, n: i64, stress: RetryStress| format!("{n} {}", stress.0);
+        let future = |stress: RetryStress, n: i64| async move { format!("{n} {}", stress.0) };
+        let generic = |_: Num<0>, stress: RetryStress, x: Param<0>| (x, stress.0);
+        assert_eq!(script_params(&params_only), ["str"]);
+        assert_eq!(script_params(&vm_first), ["int"]);
+        assert_eq!(script_params(&future), ["int"]);
+        assert_eq!(script_params(&generic).len(), 2);
+
+        let mut module = NativeModule::new("provided");
+        module.source("pub native fn generic<T: Num>(x: T) -> (T, bool)");
+        module.function("params_only", params_only).function("vm_first", vm_first).function("future", future).function("generic", generic);
+        let src = "import provided\n\
+                   print(provided.params_only(\"a\"))\nprint(provided.vm_first(1))\nprint(provided.future(2))\nprint(provided.generic(3))";
+        for stress in [false, true] {
+            let out = MemorySink::new();
+            let config = Config::new().retry_stress(stress).host_modules(HostModules::new([module.clone()]).unwrap()).stdout(out.clone());
+            let run = async { Engine::new(config).run_source("main.sand", src).await };
+            tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(run).unwrap();
+            assert_eq!(out.contents(), format!("a {stress}\n1 {stress}\n2 {stress}\n({}, {stress})\n", 3));
+        }
+    }
+}

@@ -30,7 +30,7 @@ use wasm_bindgen_futures::JsFuture;
 pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("http", ModKind::Std, concat!(include_str!("http_web.sand"), include_str!("http.sand")));
     super::http_common::natives(&mut m);
-    m.vm_function("send", send);
+    m.function("send", send);
     m
 }
 

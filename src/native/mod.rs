@@ -12,7 +12,7 @@ use crate::vm::heap::Heap;
 use crate::vm::value::{ChannelObj, MapObj, Obj, SetObj, TaskObj, TypeDesc, ValueType, VmValue};
 use crate::vm::{Ctl, Fail, HostFn, NativeFn, Vm};
 use convert::{Conversion, FromVmValue, mismatch};
-use func::{AsyncHostFunction, HostFunction, Signature, VmFunction};
+use func::{NativeFunction, Signature};
 use std::any::{Any, TypeId};
 use std::borrow::Cow;
 use std::marker::PhantomData;
@@ -540,9 +540,9 @@ pub trait NativeObject: Any + Send {
 /// impl sandlang::native::NativeObject for Counter {}
 /// ```
 ///
-/// Functions registered with [`NativeModule::function`] borrow an object as
-/// `&T` and return a new object by value as `T`. Functions registered with
-/// [`NativeModule::vm_function`] accept a [`VmVal<T>`] handle.
+/// A native function borrows an object as `&T` and returns a new object by
+/// value as `T`. A native function that takes `&mut Vm` accepts a [`VmVal<T>`]
+/// handle.
 pub trait ObjectType: NativeObject + NamedType + SandType {}
 
 /// Type-erased heap representation of an [`ObjectType`].
@@ -824,43 +824,35 @@ impl NativeModule {
         self
     }
 
-    /// Registers a synchronous function `f` under `name` (or `"Type.method"`
-    /// for a method on a type in this module). Parameters of type `&str`,
-    /// `&[u8]`, and `&T` (for an [`ObjectType`] `T`) borrow directly from the
-    /// VM heap without copying.
+    /// Registers the function `f` under `name` (or `"Type.method"` for a
+    /// method on a type in this module).
+    ///
+    /// The parameters and the return type of `f` select its behavior. See
+    /// [`NativeFunction`]:
+    ///
+    /// ```
+    /// # use sandlang::native::NativeModule;
+    /// # use sandlang::native::convert::HostError;
+    /// # use sandlang::policy::Capability;
+    /// # use sandlang::vm::Vm;
+    /// let mut module = NativeModule::new("door");
+    /// // A synchronous function. It can borrow its arguments from the VM heap.
+    /// module.function("width", |name: &str| name.len() as i64);
+    /// // A synchronous function that uses the VM.
+    /// module.function("open", |vm: &mut Vm, name: String| -> Result<String, HostError> {
+    ///     vm.require(&Capability::Custom { name: "door".into(), detail: name.clone() })?;
+    ///     Ok(format!("{name} is open"))
+    /// });
+    /// // A function that returns a future. Only the calling Sand task waits.
+    /// module.function("knock", |name: String| async move { format!("{name} answered") });
+    /// ```
     ///
     /// # Panics
     ///
     /// Panics if `name` is not of the form `name` or `Type.name`, or if `name`
     /// is already registered in this module.
-    pub fn function<M, F: HostFunction<M>>(&mut self, name: &str, f: F) -> &mut Self {
-        self.add(name, F::signature(), f.into_host())
-    }
-
-    /// Registers a synchronous function `f` that receives `&mut Vm` as its
-    /// first parameter. Accept [`VmVal`] handles to read heap values without
-    /// copying them.
-    ///
-    /// `f` must check capabilities and limits before performing any side
-    /// effects. The VM re-runs `f` from the start after a permission prompt from
-    /// [`Vm::require`] or a garbage collection triggered by a memory or resource
-    /// check.
-    ///
-    /// # Panics
-    ///
-    /// Panics under the same conditions as [`NativeModule::function`].
-    pub fn vm_function<M, F: VmFunction<M>>(&mut self, name: &str, f: F) -> &mut Self {
-        self.add(name, F::signature(), f.into_host())
-    }
-
-    /// Registers an asynchronous function `f` that suspends the calling Sand
-    /// task until the returned future completes.
-    ///
-    /// # Panics
-    ///
-    /// Panics under the same conditions as [`NativeModule::function`].
-    pub fn async_function<M, F: AsyncHostFunction<M>>(&mut self, name: &str, f: F) -> &mut Self {
-        self.add(name, F::signature(), f.into_host())
+    pub fn function<Form, F: NativeFunction<Form>>(&mut self, name: &str, f: F) -> &mut Self {
+        self.add(name, F::signature(), f.into_native_fn())
     }
 
     /// Sets the parameter names (excluding `self`) for the most recently

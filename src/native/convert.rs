@@ -12,9 +12,10 @@ use std::hash::Hash;
 
 /// Converts a [`VmValue`] into a Rust argument for a native function.
 ///
-/// For functions registered with [`NativeModule::function`](super::NativeModule::function),
 /// [`FromVmValue::Item`] can borrow `&str`, `&[u8]`, or `&T` directly from the
-/// VM heap. Owned types allocate a Rust copy.
+/// VM heap in a [`NativeFunction`](super::func::NativeFunction) that does not
+/// take `&mut Vm` and does not return a future. Owned types allocate a Rust
+/// copy.
 ///
 /// A Sand value can contain shared references to the same heap object.
 /// Converting a value into an owned Rust type copies each reachable reference.

@@ -898,7 +898,7 @@ fn exit_in_a_task_between_inputs() {
 
 fn quit_module() -> HostModules {
     let mut module = NativeModule::new("quit");
-    module.async_function("now", |code: i64| async move { Err::<(), Fail>(Fail::exit(code as i32)) });
+    module.function("now", |code: i64| async move { Err::<(), Fail>(Fail::exit(code as i32)) });
     HostModules::new([module]).unwrap()
 }
 
@@ -1289,9 +1289,9 @@ fn waits_module() -> NativeModule {
         |_: &mut Vm| Ok(())
     }
     let mut m = NativeModule::new("waits");
-    m.vm_function("user", |_: &mut Vm| Ok::<_, Fail>(Later::new(WaitKind::User, wait())));
-    m.vm_function("io", |_: &mut Vm| Ok::<_, Fail>(Later::new(WaitKind::Io, wait())));
-    m.async_function("async_io", || tokio::time::sleep(Duration::from_secs(10)));
+    m.function("user", |_: &mut Vm| Ok::<_, Fail>(Later::new(WaitKind::User, wait())));
+    m.function("io", |_: &mut Vm| Ok::<_, Fail>(Later::new(WaitKind::Io, wait())));
+    m.function("async_io", || tokio::time::sleep(Duration::from_secs(10)));
     m
 }
 

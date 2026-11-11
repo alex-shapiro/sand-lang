@@ -75,49 +75,49 @@ pub(crate) fn prelude() -> NativeModule {
     m.bind::<Error>();
 
     // Globals.
-    m.vm_function("print", |vm: &mut Vm, x: Param<0>| {
+    m.function("print", |vm: &mut Vm, x: Param<0>| {
         let mut s = vm.display(x.raw())?;
         s.push('\n');
         vm.write_stream(1, s.as_bytes())
     });
-    m.vm_function("eprint", |vm: &mut Vm, x: Param<0>| {
+    m.function("eprint", |vm: &mut Vm, x: Param<0>| {
         let mut s = vm.display(x.raw())?;
         s.push('\n');
         vm.write_stream(2, s.as_bytes())
     });
     m.function("fail", |message: &str, kind: &str| -> Result<Never, Fail> { fail(kind, message) });
     m.function("exit", |code: i64| -> Result<Never, Fail> { Err(Fail::exit(code.clamp(i32::MIN as i64, i32::MAX as i64) as i32)) });
-    m.vm_function("Set.init", |vm: &mut Vm, items: List<Param<0, traits::Hash>>| -> Result<_, Fail> {
+    m.function("Set.init", |vm: &mut Vm, items: List<Param<0, traits::Hash>>| -> Result<_, Fail> {
         let set = set_of(vm, items.items(&vm.heap))?;
         Ok(new_set(vm, set))
     });
 
     // Tasks and channels.
-    m.vm_function("Task.wait", |vm: &mut Vm, t: VmVal<Task<Param<0>>>| vm.block(BlockOn::Join(t.raw())).map(Param::<0>::from_raw));
-    m.vm_function("Task.is_done", |vm: &mut Vm, t: VmVal<Task<Param<0>>>| -> Result<bool, Fail> {
+    m.function("Task.wait", |vm: &mut Vm, t: VmVal<Task<Param<0>>>| vm.block(BlockOn::Join(t.raw())).map(Param::<0>::from_raw));
+    m.function("Task.is_done", |vm: &mut Vm, t: VmVal<Task<Param<0>>>| -> Result<bool, Fail> {
         Ok(t.task(&vm.heap)?.state != TaskState::Running)
     });
-    m.vm_function("Task.cancel", |vm: &mut Vm, t: VmVal<Task<Param<0>>>| vm.cancel_task(t.raw()));
-    m.vm_function("Channel.init", |vm: &mut Vm, cap: i64| -> Result<VmVal<Channel<Param<0>>>, Fail> {
+    m.function("Task.cancel", |vm: &mut Vm, t: VmVal<Task<Param<0>>>| vm.cancel_task(t.raw()));
+    m.function("Channel.init", |vm: &mut Vm, cap: i64| -> Result<VmVal<Channel<Param<0>>>, Fail> {
         if cap < 0 {
             return fail("invalid", "channel capacity must not be negative");
         }
         Ok(VmVal::from_raw(vm.heap.alloc(Obj::Channel(Box::new(ChannelObj::new(to_usize_saturating(cap)))))))
     });
-    m.vm_function("Channel.send", |vm: &mut Vm, c: VmVal<Channel<Param<0>>>, x: Param<0>| {
+    m.function("Channel.send", |vm: &mut Vm, c: VmVal<Channel<Param<0>>>, x: Param<0>| {
         vm.block(BlockOn::Send(c.raw(), x.raw())).map(VmVal::<bool>::from_raw)
     });
-    m.vm_function("Channel.recv", |vm: &mut Vm, c: VmVal<Channel<Param<0>>>| {
+    m.function("Channel.recv", |vm: &mut Vm, c: VmVal<Channel<Param<0>>>| {
         vm.block(BlockOn::Recv(c.raw())).map(VmVal::<Option<Param<0>>>::from_raw)
     });
-    m.vm_function("Channel.try_recv", |vm: &mut Vm, c: VmVal<Channel<Param<0>>>| -> Result<Option<Param<0>>, Fail> {
+    m.function("Channel.try_recv", |vm: &mut Vm, c: VmVal<Channel<Param<0>>>| -> Result<Option<Param<0>>, Fail> {
         let Some((v, woken)) = c.channel_mut(&mut vm.heap)?.take() else { return Ok(None) };
         if let Some((sf, sg)) = woken {
             vm.deliver(sf, sg, VmValue::Bool(true));
         }
         Ok(Some(Param::from_raw(v)))
     });
-    m.vm_function("Channel.close", |vm: &mut Vm, c: VmVal<Channel<Param<0>>>| -> Result<(), Fail> {
+    m.function("Channel.close", |vm: &mut Vm, c: VmVal<Channel<Param<0>>>| -> Result<(), Fail> {
         let c = c.channel_mut(&mut vm.heap)?;
         c.closed = true;
         let receivers: Vec<(u32, u64)> = c.receivers.drain(..).collect();
@@ -131,10 +131,8 @@ pub(crate) fn prelude() -> NativeModule {
         }
         Ok(())
     });
-    m.vm_function("Channel.len", |vm: &mut Vm, c: VmVal<Channel<Param<0>>>| -> Result<i64, Fail> { Ok(c.channel(&vm.heap)?.len() as i64) });
-    m.vm_function("Channel.is_closed", |vm: &mut Vm, c: VmVal<Channel<Param<0>>>| -> Result<bool, Fail> {
-        Ok(c.channel(&vm.heap)?.closed)
-    });
+    m.function("Channel.len", |vm: &mut Vm, c: VmVal<Channel<Param<0>>>| -> Result<i64, Fail> { Ok(c.channel(&vm.heap)?.len() as i64) });
+    m.function("Channel.is_closed", |vm: &mut Vm, c: VmVal<Channel<Param<0>>>| -> Result<bool, Fail> { Ok(c.channel(&vm.heap)?.closed) });
 
     numbers(&mut m);
     strings(&mut m);
@@ -148,7 +146,7 @@ pub(crate) fn prelude() -> NativeModule {
 
 pub(crate) fn task() -> NativeModule {
     let mut m = NativeModule::std("task", ModKind::Std, include_str!("task.sand"));
-    m.vm_function("sleep", |vm: &mut Vm, d: SignedDuration| {
+    m.function("sleep", |vm: &mut Vm, d: SignedDuration| {
         let d = nanos(d).max(0) as u64;
         let sleep = vm.host.clock.sleep(std::time::Duration::from_nanos(d));
         Ok::<_, Fail>(Later::new(WaitKind::Io, async move {
@@ -156,9 +154,9 @@ pub(crate) fn task() -> NativeModule {
             |_: &mut Vm| Ok::<_, Fail>(())
         }))
     });
-    m.vm_function("yield_now", |vm: &mut Vm| Err::<(), _>(vm.yield_now()));
+    m.function("yield_now", |vm: &mut Vm| Err::<(), _>(vm.yield_now()));
     // `BlockOn::Race` charges for the tasks and checks the memory limit.
-    m.vm_function("race", |vm: &mut Vm, tasks: List<Task<Param<0>>>| {
+    m.function("race", |vm: &mut Vm, tasks: List<Task<Param<0>>>| {
         let tasks = tasks.items(&vm.heap);
         vm.check_memory(tasks.len().saturating_mul(SLOT))?;
         let tasks = tasks.to_vec();
@@ -191,7 +189,7 @@ fn numbers(m: &mut NativeModule) {
         }
         Ok(digits.into_iter().rev().collect())
     });
-    m.vm_function("int.to_char", |vm: &mut Vm, i: i64| -> Result<Option<Str>, Fail> {
+    m.function("int.to_char", |vm: &mut Vm, i: i64| -> Result<Option<Str>, Fail> {
         let c = u32::try_from(i).ok().and_then(char::from_u32);
         Ok(c.map(|c| VmVal::from_raw(vm.short_str(c.encode_utf8(&mut [0; 4])))))
     });
@@ -279,59 +277,59 @@ fn char_class(vm: &Vm, s: Str, f: impl Fn(char) -> bool) -> Result<bool, Fail> {
 }
 
 fn strings(m: &mut NativeModule) {
-    m.vm_function("str.len", |vm: &mut Vm, s: Str| -> Result<i64, Fail> { Ok(s.str(&vm.heap).len() as i64) });
-    m.vm_function("str.is_empty", |vm: &mut Vm, s: Str| -> Result<bool, Fail> { Ok(s.str(&vm.heap).is_empty()) });
-    m.vm_function("str.chars", |vm: &mut Vm, s: Str| {
+    m.function("str.len", |vm: &mut Vm, s: Str| -> Result<i64, Fail> { Ok(s.str(&vm.heap).len() as i64) });
+    m.function("str.is_empty", |vm: &mut Vm, s: Str| -> Result<bool, Fail> { Ok(s.str(&vm.heap).is_empty()) });
+    m.function("str.chars", |vm: &mut Vm, s: Str| {
         vm.charge_bytes(s.str(&vm.heap).len())?;
         split_list(vm, s, |heap, f| {
             let t = s.str(heap);
             t.char_indices().for_each(|(i, c)| f(&t[i..i + c.len_utf8()]))
         })
     });
-    m.vm_function("str.char_count", |vm: &mut Vm, s: Str| -> Result<i64, Fail> {
+    m.function("str.char_count", |vm: &mut Vm, s: Str| -> Result<i64, Fail> {
         let t = s.str(&vm.heap);
         vm.charge_bytes(t.len())?;
         Ok(t.chars().count() as i64)
     });
-    m.vm_function("str.codepoints", |vm: &mut Vm, s: Str| -> Result<Vec<i64>, Fail> {
+    m.function("str.codepoints", |vm: &mut Vm, s: Str| -> Result<Vec<i64>, Fail> {
         let t = s.str(&vm.heap);
         vm.charge_bytes(t.len())?;
         reserve_list(vm, t.len())?;
         Ok(t.chars().map(|c| c as i64).collect())
     });
-    m.vm_function("str.bytes", |vm: &mut Vm, s: Str| -> Result<Vec<u8>, Fail> {
+    m.function("str.bytes", |vm: &mut Vm, s: Str| -> Result<Vec<u8>, Fail> {
         let t = s.str(&vm.heap);
         vm.check_memory(t.len())?;
         Ok(t.as_bytes().to_vec())
     });
     // Searches charge for the needle too: preparing the search scans it,
     // however short the text searched.
-    m.vm_function("str.contains", |vm: &mut Vm, s: Str, sub: Str| -> Result<bool, Fail> {
+    m.function("str.contains", |vm: &mut Vm, s: Str, sub: Str| -> Result<bool, Fail> {
         let (t, p) = (s.str(&vm.heap), sub.str(&vm.heap));
         vm.charge_bytes(t.len().saturating_add(p.len()))?;
         Ok(t.contains(p))
     });
-    m.vm_function("str.starts_with", |vm: &mut Vm, s: Str, prefix: Str| -> Result<bool, Fail> {
+    m.function("str.starts_with", |vm: &mut Vm, s: Str, prefix: Str| -> Result<bool, Fail> {
         let p = prefix.str(&vm.heap);
         vm.charge_bytes(p.len())?;
         Ok(s.str(&vm.heap).starts_with(p))
     });
-    m.vm_function("str.ends_with", |vm: &mut Vm, s: Str, suffix: Str| -> Result<bool, Fail> {
+    m.function("str.ends_with", |vm: &mut Vm, s: Str, suffix: Str| -> Result<bool, Fail> {
         let p = suffix.str(&vm.heap);
         vm.charge_bytes(p.len())?;
         Ok(s.str(&vm.heap).ends_with(p))
     });
-    m.vm_function("str.find", |vm: &mut Vm, s: Str, sub: Str| -> Result<Option<i64>, Fail> {
+    m.function("str.find", |vm: &mut Vm, s: Str, sub: Str| -> Result<Option<i64>, Fail> {
         let (t, p) = (s.str(&vm.heap), sub.str(&vm.heap));
         vm.charge_bytes(t.len().saturating_add(p.len()))?;
         Ok(t.find(p).map(|i| i as i64))
     });
-    m.vm_function("str.rfind", |vm: &mut Vm, s: Str, sub: Str| -> Result<Option<i64>, Fail> {
+    m.function("str.rfind", |vm: &mut Vm, s: Str, sub: Str| -> Result<Option<i64>, Fail> {
         let (t, p) = (s.str(&vm.heap), sub.str(&vm.heap));
         vm.charge_bytes(t.len().saturating_add(p.len()))?;
         Ok(t.rfind(p).map(|i| i as i64))
     });
-    m.vm_function("str.replace", |vm: &mut Vm, s: Str, pattern: Str, replacement: Str| -> Result<String, Fail> {
+    m.function("str.replace", |vm: &mut Vm, s: Str, pattern: Str, replacement: Str| -> Result<String, Fail> {
         let (t, from, to) = (s.str(&vm.heap), pattern.str(&vm.heap), replacement.str(&vm.heap));
         if from.is_empty() {
             vm.check_memory(t.len())?;
@@ -343,7 +341,7 @@ fn strings(m: &mut NativeModule) {
         vm.check_memory(t.len() - n * from.len() + n.saturating_mul(to.len()))?;
         Ok(t.replace(from, to))
     });
-    m.vm_function("str.split", |vm: &mut Vm, s: Str, sep: Str| {
+    m.function("str.split", |vm: &mut Vm, s: Str, sep: Str| {
         let (t, sep_s) = (s.str(&vm.heap), sep.str(&vm.heap));
         if sep_s.is_empty() {
             return fail("invalid", "split with an empty separator");
@@ -351,7 +349,7 @@ fn strings(m: &mut NativeModule) {
         vm.charge_bytes(t.len().saturating_add(sep_s.len()))?;
         split_list(vm, s, |heap, f| s.str(heap).split(sep.str(heap)).for_each(f))
     });
-    m.vm_function("str.split_once", |vm: &mut Vm, s: Str, sep: Str| -> Result<Option<VmVal<(String, String)>>, Fail> {
+    m.function("str.split_once", |vm: &mut Vm, s: Str, sep: Str| -> Result<Option<VmVal<(String, String)>>, Fail> {
         let (t, sep) = (s.str(&vm.heap), sep.str(&vm.heap));
         vm.charge_bytes(t.len().saturating_add(sep.len()))?;
         let Some((x, y)) = t.split_once(sep) else { return Ok(None) };
@@ -360,11 +358,11 @@ fn strings(m: &mut NativeModule) {
         let (x, y) = (new_substr(vm, s.raw(), x), new_substr(vm, s.raw(), y));
         Ok(Some(VmVal::from_raw(vm.heap.new_tuple(&[x, y]))))
     });
-    m.vm_function("str.split_whitespace", |vm: &mut Vm, s: Str| {
+    m.function("str.split_whitespace", |vm: &mut Vm, s: Str| {
         vm.charge_bytes(s.str(&vm.heap).len())?;
         split_list(vm, s, |heap, f| s.str(heap).split_whitespace().for_each(f))
     });
-    m.vm_function("str.lines", |vm: &mut Vm, s: Str| {
+    m.function("str.lines", |vm: &mut Vm, s: Str| {
         vm.charge_bytes(s.str(&vm.heap).len())?;
         split_list(vm, s, |heap, f| s.str(heap).lines().for_each(f))
     });
@@ -379,9 +377,9 @@ fn strings(m: &mut NativeModule) {
         copy_bytes(vm, range.len())?;
         Ok(VmVal::from_raw(new_substr(vm, s.raw(), range)))
     }
-    m.vm_function("str.trim", |vm: &mut Vm, s: Str| substr(vm, s, str::trim));
-    m.vm_function("str.trim_start", |vm: &mut Vm, s: Str| substr(vm, s, str::trim_start));
-    m.vm_function("str.trim_end", |vm: &mut Vm, s: Str| substr(vm, s, str::trim_end));
+    m.function("str.trim", |vm: &mut Vm, s: Str| substr(vm, s, str::trim));
+    m.function("str.trim_start", |vm: &mut Vm, s: Str| substr(vm, s, str::trim_start));
+    m.function("str.trim_end", |vm: &mut Vm, s: Str| substr(vm, s, str::trim_end));
     fn strip(vm: &mut Vm, s: Str, affix: Str, f: impl Fn(&str, &str) -> Option<usize>) -> Result<Option<Str>, Fail> {
         let (t, affix) = (s.str(&vm.heap), affix.str(&vm.heap));
         vm.charge_bytes(affix.len())?;
@@ -390,21 +388,21 @@ fn strings(m: &mut NativeModule) {
         copy_bytes(vm, range.len())?;
         Ok(Some(VmVal::from_raw(new_substr(vm, s.raw(), range))))
     }
-    m.vm_function("str.strip_prefix", |vm: &mut Vm, s: Str, prefix: Str| strip(vm, s, prefix, |t, p| t.starts_with(p).then_some(p.len())));
-    m.vm_function("str.strip_suffix", |vm: &mut Vm, s: Str, suffix: Str| strip(vm, s, suffix, |t, p| t.ends_with(p).then_some(0)));
-    m.vm_function("str.to_upper", |vm: &mut Vm, s: Str| -> Result<String, Fail> {
+    m.function("str.strip_prefix", |vm: &mut Vm, s: Str, prefix: Str| strip(vm, s, prefix, |t, p| t.starts_with(p).then_some(p.len())));
+    m.function("str.strip_suffix", |vm: &mut Vm, s: Str, suffix: Str| strip(vm, s, suffix, |t, p| t.ends_with(p).then_some(0)));
+    m.function("str.to_upper", |vm: &mut Vm, s: Str| -> Result<String, Fail> {
         let t = s.str(&vm.heap);
         vm.check_memory(case_mapped_bound(t))?;
         vm.charge_slow_bytes(t.len())?;
         Ok(t.to_uppercase())
     });
-    m.vm_function("str.to_lower", |vm: &mut Vm, s: Str| -> Result<String, Fail> {
+    m.function("str.to_lower", |vm: &mut Vm, s: Str| -> Result<String, Fail> {
         let t = s.str(&vm.heap);
         vm.check_memory(case_mapped_bound(t))?;
         vm.charge_slow_bytes(t.len())?;
         Ok(t.to_lowercase())
     });
-    m.vm_function("str.repeat", |vm: &mut Vm, s: Str, n: i64| -> Result<String, Fail> {
+    m.function("str.repeat", |vm: &mut Vm, s: Str, n: i64| -> Result<String, Fail> {
         if n < 0 {
             return fail("invalid", format!("negative repeat count: {n}"));
         }
@@ -427,9 +425,9 @@ fn strings(m: &mut NativeModule) {
         let p = if start { padding + t } else { format!("{t}{padding}") };
         Ok(VmVal::from_raw(vm.new_str(p)))
     }
-    m.vm_function("str.pad_start", |vm: &mut Vm, s: Str, width: i64, fill: Str| pad(vm, s, width, fill, true));
-    m.vm_function("str.pad_end", |vm: &mut Vm, s: Str, width: i64, fill: Str| pad(vm, s, width, fill, false));
-    m.vm_function("str.parse_int", |vm: &mut Vm, s: Str, radix: i64| -> Result<Option<i64>, Fail> {
+    m.function("str.pad_start", |vm: &mut Vm, s: Str, width: i64, fill: Str| pad(vm, s, width, fill, true));
+    m.function("str.pad_end", |vm: &mut Vm, s: Str, width: i64, fill: Str| pad(vm, s, width, fill, false));
+    m.function("str.parse_int", |vm: &mut Vm, s: Str, radix: i64| -> Result<Option<i64>, Fail> {
         if !(2..=36).contains(&radix) {
             return fail("invalid", format!("radix must be between 2 and 36, found {radix}"));
         }
@@ -437,7 +435,7 @@ fn strings(m: &mut NativeModule) {
         vm.charge_bytes(t.len())?;
         Ok(if t.starts_with('+') { None } else { i64::from_str_radix(t, radix as u32).ok() })
     });
-    m.vm_function("str.parse_float", |vm: &mut Vm, s: Str| -> Result<Option<f64>, Fail> {
+    m.function("str.parse_float", |vm: &mut Vm, s: Str| -> Result<Option<f64>, Fail> {
         let t = s.str(&vm.heap);
         vm.charge_bytes(t.len())?;
         // Decimal and scientific notation, and the non-finite values as
@@ -446,21 +444,21 @@ fn strings(m: &mut NativeModule) {
             || matches!(t, "inf" | "-inf" | "nan");
         Ok(if ok { t.parse::<f64>().ok() } else { None })
     });
-    m.vm_function("str.is_digit", |vm: &mut Vm, s: Str| char_class(vm, s, |c| c.is_ascii_digit()));
-    m.vm_function("str.is_alpha", |vm: &mut Vm, s: Str| char_class(vm, s, char::is_alphabetic));
-    m.vm_function("str.is_alnum", |vm: &mut Vm, s: Str| char_class(vm, s, char::is_alphanumeric));
-    m.vm_function("str.is_space", |vm: &mut Vm, s: Str| char_class(vm, s, char::is_whitespace));
-    m.vm_function("str.is_upper", |vm: &mut Vm, s: Str| char_class(vm, s, char::is_uppercase));
-    m.vm_function("str.is_lower", |vm: &mut Vm, s: Str| char_class(vm, s, char::is_lowercase));
-    m.vm_function("str.chars_iter_next", |vm: &mut Vm, s: Str| -> Result<IterFn<String>, Fail> {
+    m.function("str.is_digit", |vm: &mut Vm, s: Str| char_class(vm, s, |c| c.is_ascii_digit()));
+    m.function("str.is_alpha", |vm: &mut Vm, s: Str| char_class(vm, s, char::is_alphabetic));
+    m.function("str.is_alnum", |vm: &mut Vm, s: Str| char_class(vm, s, char::is_alphanumeric));
+    m.function("str.is_space", |vm: &mut Vm, s: Str| char_class(vm, s, char::is_whitespace));
+    m.function("str.is_upper", |vm: &mut Vm, s: Str| char_class(vm, s, char::is_uppercase));
+    m.function("str.is_lower", |vm: &mut Vm, s: Str| char_class(vm, s, char::is_lowercase));
+    m.function("str.chars_iter_next", |vm: &mut Vm, s: Str| -> Result<IterFn<String>, Fail> {
         Ok(VmVal::from_raw(vm.iter_fn(IterSrc::Chars { s: s.raw().handle().unwrap_or(0), i: 0 })))
     });
-    m.vm_function("str.char_at", |vm: &mut Vm, s: Str, i: i64| -> Result<Option<Str>, Fail> {
+    m.function("str.char_at", |vm: &mut Vm, s: Str, i: i64| -> Result<Option<Str>, Fail> {
         let t = s.str(&vm.heap);
         let c = to_index(i).filter(|&i| i < t.len() && t.is_char_boundary(i)).and_then(|i| t[i..].chars().next());
         Ok(c.map(|c| VmVal::from_raw(vm.short_str(c.encode_utf8(&mut [0; 4])))))
     });
-    m.vm_function("str.ord", |vm: &mut Vm, s: Str| -> Result<i64, Fail> {
+    m.function("str.ord", |vm: &mut Vm, s: Str| -> Result<i64, Fail> {
         let t = s.str(&vm.heap);
         let mut it = t.chars();
         match (it.next(), it.next()) {
@@ -468,12 +466,12 @@ fn strings(m: &mut NativeModule) {
             _ => fail("invalid", format!("ord requires a one-character string, found {:?}", super::truncate(t, 64))),
         }
     });
-    m.vm_function("str.reversed", |vm: &mut Vm, s: Str| -> Result<String, Fail> {
+    m.function("str.reversed", |vm: &mut Vm, s: Str| -> Result<String, Fail> {
         let t = s.str(&vm.heap);
         vm.check_memory(t.len())?;
         Ok(t.chars().rev().collect())
     });
-    m.vm_function("List.join", join);
+    m.function("List.join", join);
 }
 
 fn join(vm: &mut Vm, list: List<String>, sep: Str) -> Result<String, Fail> {
@@ -493,17 +491,17 @@ fn join(vm: &mut Vm, list: List<String>, sep: Str) -> Result<String, Fail> {
 }
 
 fn bytes(m: &mut NativeModule) {
-    m.vm_function("bytes.len", |vm: &mut Vm, b: Bytes| -> Result<i64, Fail> { Ok(b.bytes(&vm.heap).len() as i64) });
-    m.vm_function("bytes.is_empty", |vm: &mut Vm, b: Bytes| -> Result<bool, Fail> { Ok(b.bytes(&vm.heap).is_empty()) });
-    m.vm_function("bytes.get", |vm: &mut Vm, b: Bytes, i: i64| -> Result<Option<i64>, Fail> {
+    m.function("bytes.len", |vm: &mut Vm, b: Bytes| -> Result<i64, Fail> { Ok(b.bytes(&vm.heap).len() as i64) });
+    m.function("bytes.is_empty", |vm: &mut Vm, b: Bytes| -> Result<bool, Fail> { Ok(b.bytes(&vm.heap).is_empty()) });
+    m.function("bytes.get", |vm: &mut Vm, b: Bytes, i: i64| -> Result<Option<i64>, Fail> {
         Ok(to_index(i).and_then(|i| b.bytes(&vm.heap).get(i)).map(|b| *b as i64))
     });
-    m.vm_function("bytes.to_list", |vm: &mut Vm, b: Bytes| -> Result<Vec<i64>, Fail> {
+    m.function("bytes.to_list", |vm: &mut Vm, b: Bytes| -> Result<Vec<i64>, Fail> {
         let b = b.bytes(&vm.heap);
         reserve_list(vm, b.len())?;
         Ok(b.iter().map(|&x| x as i64).collect())
     });
-    m.vm_function("bytes.to_str", |vm: &mut Vm, b: Bytes| -> Result<String, HostError> {
+    m.function("bytes.to_str", |vm: &mut Vm, b: Bytes| -> Result<String, HostError> {
         let b = b.bytes(&vm.heap);
         vm.check_memory(b.len())?;
         match std::str::from_utf8(b) {
@@ -514,12 +512,12 @@ fn bytes(m: &mut NativeModule) {
             }
         }
     });
-    m.vm_function("bytes.to_str_lossy", |vm: &mut Vm, b: Bytes| -> Result<String, Fail> {
+    m.function("bytes.to_str_lossy", |vm: &mut Vm, b: Bytes| -> Result<String, Fail> {
         let b = b.bytes(&vm.heap);
         vm.check_memory(b.len())?;
         Ok(String::from_utf8_lossy(b).into_owned())
     });
-    m.vm_function("bytes.to_hex", |vm: &mut Vm, b: Bytes| -> Result<String, Fail> {
+    m.function("bytes.to_hex", |vm: &mut Vm, b: Bytes| -> Result<String, Fail> {
         const HEX: &[u8; 16] = b"0123456789abcdef";
         let b = b.bytes(&vm.heap);
         vm.check_memory(b.len().saturating_mul(2))?;
@@ -531,15 +529,15 @@ fn bytes(m: &mut NativeModule) {
         }
         Ok(s)
     });
-    m.vm_function("bytes.contains", |vm: &mut Vm, b: Bytes, needle: Bytes| -> Result<bool, Fail> {
+    m.function("bytes.contains", |vm: &mut Vm, b: Bytes, needle: Bytes| -> Result<bool, Fail> {
         let pos = find_bytes(vm, b.bytes(&vm.heap), needle.bytes(&vm.heap))?;
         Ok(pos.is_some())
     });
-    m.vm_function("bytes.find", |vm: &mut Vm, b: Bytes, needle: Bytes| -> Result<Option<i64>, Fail> {
+    m.function("bytes.find", |vm: &mut Vm, b: Bytes, needle: Bytes| -> Result<Option<i64>, Fail> {
         let pos = find_bytes(vm, b.bytes(&vm.heap), needle.bytes(&vm.heap))?;
         Ok(pos.map(|p| p as i64))
     });
-    m.vm_function("bytes.from_list", |vm: &mut Vm, items: List<i64>| -> Result<Vec<u8>, Fail> {
+    m.function("bytes.from_list", |vm: &mut Vm, items: List<i64>| -> Result<Vec<u8>, Fail> {
         let n = list_len(vm, items);
         vm.check_memory(n)?;
         vm.charge(n as u64)?;
@@ -553,7 +551,7 @@ fn bytes(m: &mut NativeModule) {
         }
         Ok(out)
     });
-    m.vm_function("bytes.from_hex", |vm: &mut Vm, text: Str| -> Result<Option<Vec<u8>>, Fail> {
+    m.function("bytes.from_hex", |vm: &mut Vm, text: Str| -> Result<Option<Vec<u8>>, Fail> {
         let t = text.str(&vm.heap);
         vm.check_memory(t.len() / 2)?;
         vm.charge_slow_bytes(t.len())?;
@@ -640,20 +638,20 @@ fn sort_values(vm: &Vm, items: &mut [VmValue]) -> Result<(), Fail> {
 }
 
 fn lists(m: &mut NativeModule) {
-    m.vm_function("List.len", |vm: &mut Vm, xs: List| -> Result<i64, Fail> { Ok(list_len(vm, xs) as i64) });
-    m.vm_function("List.is_empty", |vm: &mut Vm, xs: List| -> Result<bool, Fail> { Ok(list_len(vm, xs) == 0) });
-    m.vm_function("List.push", |vm: &mut Vm, xs: List, x: Param<0>| -> Result<_, Fail> {
+    m.function("List.len", |vm: &mut Vm, xs: List| -> Result<i64, Fail> { Ok(list_len(vm, xs) as i64) });
+    m.function("List.is_empty", |vm: &mut Vm, xs: List| -> Result<bool, Fail> { Ok(list_len(vm, xs) == 0) });
+    m.function("List.push", |vm: &mut Vm, xs: List, x: Param<0>| -> Result<_, Fail> {
         vm.heap.list_push(xs.raw(), x.raw()).map_err(Fail::limit)?;
         Ok(())
     });
-    m.vm_function("List.iter_next", |vm: &mut Vm, xs: List| -> Result<IterFn<Param<0>>, Fail> {
+    m.function("List.iter_next", |vm: &mut Vm, xs: List| -> Result<IterFn<Param<0>>, Fail> {
         let n = list_len(vm, xs) as i64;
         Ok(VmVal::from_raw(vm.iter_fn(IterSrc::List { list: xs.raw().handle().unwrap_or(0), i: 0, n })))
     });
-    m.vm_function("List.pop", |vm: &mut Vm, xs: List| -> Result<Option<Param<0>>, Fail> {
+    m.function("List.pop", |vm: &mut Vm, xs: List| -> Result<Option<Param<0>>, Fail> {
         Ok(vm.heap.list_shrink(xs.raw()).and_then(Vec::pop).map(Param::from_raw))
     });
-    m.vm_function("List.insert", |vm: &mut Vm, xs: List, i: i64, x: Param<0>| -> Result<_, Fail> {
+    m.function("List.insert", |vm: &mut Vm, xs: List, i: i64, x: Param<0>| -> Result<_, Fail> {
         let n = list_len(vm, xs);
         let i = index_check(i, n, true)?;
         vm.charge_bytes((n - i) * SLOT)?;
@@ -661,62 +659,62 @@ fn lists(m: &mut NativeModule) {
         vm.heap.list_mut(xs.raw()).insert(i, x.raw());
         Ok(())
     });
-    m.vm_function("List.remove", |vm: &mut Vm, xs: List, i: i64| -> Result<_, Fail> {
+    m.function("List.remove", |vm: &mut Vm, xs: List, i: i64| -> Result<_, Fail> {
         let n = list_len(vm, xs);
         let i = index_check(i, n, false)?;
         vm.charge_bytes((n - i) * SLOT)?;
         Ok(Param::<0>::from_raw(vm.heap.list_mut(xs.raw()).remove(i)))
     });
-    m.vm_function("List.extend", |vm: &mut Vm, xs: List, items: List| -> Result<_, Fail> {
+    m.function("List.extend", |vm: &mut Vm, xs: List, items: List| -> Result<_, Fail> {
         let n = list_len(vm, items);
         vm.charge(n as u64)?;
         vm.heap.list_reserve(xs.raw(), n).map_err(Fail::limit)?;
         vm.heap.list_extend(xs.raw(), items.raw());
         Ok(())
     });
-    m.vm_function("List.clear", |vm: &mut Vm, xs: List| -> Result<_, Fail> {
+    m.function("List.clear", |vm: &mut Vm, xs: List| -> Result<_, Fail> {
         if let Some(l) = vm.heap.list_shrink(xs.raw()) {
             l.clear();
         }
         Ok(())
     });
-    m.vm_function("List.get", |vm: &mut Vm, xs: List, i: i64| -> Result<Option<Param<0>>, Fail> {
+    m.function("List.get", |vm: &mut Vm, xs: List, i: i64| -> Result<Option<Param<0>>, Fail> {
         Ok(to_index(i).and_then(|i| xs.items(&vm.heap).get(i)).copied().map(Param::from_raw))
     });
-    m.vm_function("List.first", |vm: &mut Vm, xs: List| -> Result<Option<Param<0>>, Fail> {
+    m.function("List.first", |vm: &mut Vm, xs: List| -> Result<Option<Param<0>>, Fail> {
         Ok(xs.items(&vm.heap).first().copied().map(Param::from_raw))
     });
-    m.vm_function("List.last", |vm: &mut Vm, xs: List| -> Result<Option<Param<0>>, Fail> {
+    m.function("List.last", |vm: &mut Vm, xs: List| -> Result<Option<Param<0>>, Fail> {
         Ok(xs.items(&vm.heap).last().copied().map(Param::from_raw))
     });
-    m.vm_function("List.contains", |vm: &mut Vm, xs: List, x: Param<0, traits::Eq>| -> Result<bool, Fail> {
+    m.function("List.contains", |vm: &mut Vm, xs: List, x: Param<0, traits::Eq>| -> Result<bool, Fail> {
         Ok(index_of(vm, xs, x)?.is_some())
     });
-    m.vm_function("List.index_of", |vm: &mut Vm, xs: List, x: Param<0, traits::Eq>| -> Result<Option<i64>, Fail> {
+    m.function("List.index_of", |vm: &mut Vm, xs: List, x: Param<0, traits::Eq>| -> Result<Option<i64>, Fail> {
         Ok(index_of(vm, xs, x)?.map(|p| p as i64))
     });
-    m.vm_function("List.reverse", |vm: &mut Vm, xs: List| -> Result<_, Fail> {
+    m.function("List.reverse", |vm: &mut Vm, xs: List| -> Result<_, Fail> {
         vm.charge(list_len(vm, xs) as u64)?;
         vm.heap.list_mut(xs.raw()).reverse();
         Ok(())
     });
-    m.vm_function("List.reversed", |vm: &mut Vm, xs: List| -> Result<Vec<Param<0>>, Fail> {
+    m.function("List.reversed", |vm: &mut Vm, xs: List| -> Result<Vec<Param<0>>, Fail> {
         reserve_list(vm, list_len(vm, xs))?;
         Ok(params(xs.items(&vm.heap).iter().rev().copied().collect()))
     });
-    m.vm_function("List.sort", |vm: &mut Vm, xs: List<Param<0, traits::Ord>>| {
+    m.function("List.sort", |vm: &mut Vm, xs: List<Param<0, traits::Ord>>| {
         let mut v = std::mem::take(vm.heap.list_mut(xs.raw()));
         let r = sort_values(vm, &mut v);
         *vm.heap.list_mut(xs.raw()) = v;
         r
     });
-    m.vm_function("List.sorted", |vm: &mut Vm, xs: List<Param<0, traits::Ord>>| -> Result<Vec<Param<0>>, Fail> {
+    m.function("List.sorted", |vm: &mut Vm, xs: List<Param<0, traits::Ord>>| -> Result<Vec<Param<0>>, Fail> {
         reserve_list(vm, list_len(vm, xs))?;
         let mut v = xs.items(&vm.heap).to_vec();
         sort_values(vm, &mut v)?;
         Ok(params(v))
     });
-    m.vm_function("List.sort_by_keys", |vm: &mut Vm, xs: List, keys: List<Param<1, traits::Ord>>| {
+    m.function("List.sort_by_keys", |vm: &mut Vm, xs: List, keys: List<Param<1, traits::Ord>>| {
         let keys = keys.items(&vm.heap).to_vec();
         let items = std::mem::take(vm.heap.list_mut(xs.raw()));
         if keys.len() != items.len() {
@@ -735,30 +733,30 @@ fn lists(m: &mut NativeModule) {
         *vm.heap.list_mut(xs.raw()) = sorted;
         r
     });
-    m.vm_function("List.copy", |vm: &mut Vm, xs: List| -> Result<Vec<Param<0>>, Fail> {
+    m.function("List.copy", |vm: &mut Vm, xs: List| -> Result<Vec<Param<0>>, Fail> {
         reserve_list(vm, list_len(vm, xs))?;
         Ok(params(xs.items(&vm.heap).to_vec()))
     });
-    m.vm_function("List.swap", |vm: &mut Vm, xs: List, i: i64, j: i64| -> Result<_, Fail> {
+    m.function("List.swap", |vm: &mut Vm, xs: List, i: i64, j: i64| -> Result<_, Fail> {
         let n = list_len(vm, xs);
         let i = index_check(i, n, false)?;
         let j = index_check(j, n, false)?;
         vm.heap.list_mut(xs.raw()).swap(i, j);
         Ok(())
     });
-    m.vm_function("List.take", |vm: &mut Vm, xs: List, n: i64| -> Result<Vec<Param<0>>, Fail> {
+    m.function("List.take", |vm: &mut Vm, xs: List, n: i64| -> Result<Vec<Param<0>>, Fail> {
         let l = xs.items(&vm.heap);
         let n = to_usize_saturating(n).min(l.len());
         reserve_list(vm, n)?;
         Ok(params(l[..n].to_vec()))
     });
-    m.vm_function("List.skip", |vm: &mut Vm, xs: List, n: i64| -> Result<Vec<Param<0>>, Fail> {
+    m.function("List.skip", |vm: &mut Vm, xs: List, n: i64| -> Result<Vec<Param<0>>, Fail> {
         let l = xs.items(&vm.heap);
         let n = to_usize_saturating(n).min(l.len());
         reserve_list(vm, l.len() - n)?;
         Ok(params(l[n..].to_vec()))
     });
-    m.vm_function("List.chunks", |vm: &mut Vm, xs: List, n: i64| -> Result<List<Vec<Param<0>>>, Fail> {
+    m.function("List.chunks", |vm: &mut Vm, xs: List, n: i64| -> Result<List<Vec<Param<0>>>, Fail> {
         if n <= 0 {
             return fail("invalid", format!("chunk size must be positive, found {n}"));
         }
@@ -769,7 +767,7 @@ fn lists(m: &mut NativeModule) {
             st.new_list(parts)
         })))
     });
-    m.vm_function("List.windows", |vm: &mut Vm, xs: List, n: i64| -> Result<List<Vec<Param<0>>>, Fail> {
+    m.function("List.windows", |vm: &mut Vm, xs: List, n: i64| -> Result<List<Vec<Param<0>>>, Fail> {
         if n <= 0 {
             return fail("invalid", format!("window size must be positive, found {n}"));
         }
@@ -781,14 +779,14 @@ fn lists(m: &mut NativeModule) {
             st.new_list(parts)
         })))
     });
-    m.vm_function("List.enumerate", |vm: &mut Vm, xs: List| -> Result<List<(i64, Param<0>)>, Fail> {
+    m.function("List.enumerate", |vm: &mut Vm, xs: List| -> Result<List<(i64, Param<0>)>, Fail> {
         produce(vm, list_len(vm, xs), list_len(vm, xs))?;
         Ok(VmVal::from_raw(vm.heap.staged(|heap, st| {
             let pairs = xs.items(heap).iter().enumerate().map(|(i, &x)| st.new_tuple(vec![VmValue::Int(i as i64), x])).collect();
             st.new_list(pairs)
         })))
     });
-    m.vm_function("List.zip", |vm: &mut Vm, xs: List, ys: List<Param<1>>| -> Result<List<(Param<0>, Param<1>)>, Fail> {
+    m.function("List.zip", |vm: &mut Vm, xs: List, ys: List<Param<1>>| -> Result<List<(Param<0>, Param<1>)>, Fail> {
         let n = list_len(vm, xs).min(list_len(vm, ys));
         produce(vm, n, n)?;
         Ok(VmVal::from_raw(vm.heap.staged(|heap, st| {
@@ -796,7 +794,7 @@ fn lists(m: &mut NativeModule) {
             st.new_list(pairs)
         })))
     });
-    m.vm_function("List.dedup", |vm: &mut Vm, xs: List<Param<0, traits::Eq>>| -> Result<Vec<Param<0>>, Fail> {
+    m.function("List.dedup", |vm: &mut Vm, xs: List<Param<0, traits::Eq>>| -> Result<Vec<Param<0>>, Fail> {
         let items = xs.items(&vm.heap);
         vm.charge(items.len() as u64)?;
         reserve_list(vm, items.len())?;
@@ -812,12 +810,12 @@ fn lists(m: &mut NativeModule) {
         }
         Ok(params(out))
     });
-    m.vm_function("List.unique", |vm: &mut Vm, xs: List<Param<0, traits::Hash>>| -> Result<Vec<Param<0>>, Fail> {
+    m.function("List.unique", |vm: &mut Vm, xs: List<Param<0, traits::Hash>>| -> Result<Vec<Param<0>>, Fail> {
         let set = set_of(vm, xs.items(&vm.heap))?;
         reserve_list(vm, set.live)?;
         Ok(params(set.entries.into_iter().flatten().collect()))
     });
-    m.vm_function("List.to_set", |vm: &mut Vm, xs: List<Param<0, traits::Hash>>| -> Result<_, Fail> {
+    m.function("List.to_set", |vm: &mut Vm, xs: List<Param<0, traits::Hash>>| -> Result<_, Fail> {
         let set = set_of(vm, xs.items(&vm.heap))?;
         Ok(new_set(vm, set))
     });
@@ -830,8 +828,8 @@ fn lists(m: &mut NativeModule) {
         }
         Ok(Param::from_raw(acc))
     }
-    m.vm_function("List.sum", |vm: &mut Vm, num: Num<0>, xs: List<Param<0, traits::Num>>| fold_num(vm, num, xs, false));
-    m.vm_function("List.product", |vm: &mut Vm, num: Num<0>, xs: List<Param<0, traits::Num>>| fold_num(vm, num, xs, true));
+    m.function("List.sum", |vm: &mut Vm, num: Num<0>, xs: List<Param<0, traits::Num>>| fold_num(vm, num, xs, false));
+    m.function("List.product", |vm: &mut Vm, num: Num<0>, xs: List<Param<0, traits::Num>>| fold_num(vm, num, xs, true));
     fn extreme(vm: &mut Vm, xs: List<Param<0, traits::Ord>>, want: Ordering) -> Result<Option<Param<0>>, Fail> {
         let items = xs.items(&vm.heap);
         let mut best: Option<VmValue> = None;
@@ -849,8 +847,8 @@ fn lists(m: &mut NativeModule) {
         }
         Ok(best.map(Param::from_raw))
     }
-    m.vm_function("List.min", |vm: &mut Vm, xs: List<Param<0, traits::Ord>>| extreme(vm, xs, Ordering::Less));
-    m.vm_function("List.max", |vm: &mut Vm, xs: List<Param<0, traits::Ord>>| extreme(vm, xs, Ordering::Greater));
+    m.function("List.min", |vm: &mut Vm, xs: List<Param<0, traits::Ord>>| extreme(vm, xs, Ordering::Less));
+    m.function("List.max", |vm: &mut Vm, xs: List<Param<0, traits::Ord>>| extreme(vm, xs, Ordering::Greater));
 }
 
 /// Returns the inclusive `(first, last)` bounds, or `None` if empty.
@@ -869,36 +867,36 @@ fn exact(n: i128) -> Result<i64, Fail> {
 }
 
 fn ranges(m: &mut NativeModule) {
-    m.vm_function("Range.iter_next", |vm: &mut Vm, r: Range| -> Result<IterFn<i64>, Fail> {
+    m.function("Range.iter_next", |vm: &mut Vm, r: Range| -> Result<IterFn<i64>, Fail> {
         let src = match inclusive(vm, r)? {
             Some((i, last)) => IterSrc::Range { i, last },
             None => IterSrc::Done,
         };
         Ok(VmVal::from_raw(vm.iter_fn(src)))
     });
-    m.vm_function("Range.start", |vm: &mut Vm, r: Range| -> Result<i64, Fail> { Ok(r.bounds(&vm.heap)?.0) });
-    m.vm_function("Range.end", |vm: &mut Vm, r: Range| match r.bounds(&vm.heap)? {
+    m.function("Range.start", |vm: &mut Vm, r: Range| -> Result<i64, Fail> { Ok(r.bounds(&vm.heap)?.0) });
+    m.function("Range.end", |vm: &mut Vm, r: Range| match r.bounds(&vm.heap)? {
         (_, b, true) => exact(b as i128 + 1),
         (_, b, false) => Ok(b),
     });
-    m.vm_function("Range.len", |vm: &mut Vm, r: Range| exact(count(inclusive(vm, r)?)));
-    m.vm_function("Range.is_empty", |vm: &mut Vm, r: Range| -> Result<bool, Fail> { Ok(inclusive(vm, r)?.is_none()) });
-    m.vm_function("Range.contains", |vm: &mut Vm, r: Range, i: i64| -> Result<bool, Fail> {
+    m.function("Range.len", |vm: &mut Vm, r: Range| exact(count(inclusive(vm, r)?)));
+    m.function("Range.is_empty", |vm: &mut Vm, r: Range| -> Result<bool, Fail> { Ok(inclusive(vm, r)?.is_none()) });
+    m.function("Range.contains", |vm: &mut Vm, r: Range, i: i64| -> Result<bool, Fail> {
         Ok(inclusive(vm, r)?.is_some_and(|(first, last)| (first..=last).contains(&i)))
     });
     for name in ["Range.first", "Range.min"] {
-        m.vm_function(name, |vm: &mut Vm, r: Range| -> Result<Option<i64>, Fail> { Ok(inclusive(vm, r)?.map(|(first, _)| first)) });
+        m.function(name, |vm: &mut Vm, r: Range| -> Result<Option<i64>, Fail> { Ok(inclusive(vm, r)?.map(|(first, _)| first)) });
     }
     for name in ["Range.last", "Range.max"] {
-        m.vm_function(name, |vm: &mut Vm, r: Range| -> Result<Option<i64>, Fail> { Ok(inclusive(vm, r)?.map(|(_, last)| last)) });
+        m.function(name, |vm: &mut Vm, r: Range| -> Result<Option<i64>, Fail> { Ok(inclusive(vm, r)?.map(|(_, last)| last)) });
     }
-    m.vm_function("Range.sum", |vm: &mut Vm, r: Range| {
+    m.function("Range.sum", |vm: &mut Vm, r: Range| {
         let Some((first, last)) = inclusive(vm, r)? else { return Ok(0) };
         let n = count(Some((first, last)));
         let twice = n.checked_mul(first as i128 + last as i128).ok_or_else(|| Fail::runtime_error("overflow", "integer overflow"))?;
         exact(twice / 2)
     });
-    m.vm_function("Range.product", |vm: &mut Vm, r: Range| {
+    m.function("Range.product", |vm: &mut Vm, r: Range| {
         let Some((first, last)) = inclusive(vm, r)? else { return Ok(1) };
         if first <= 0 && 0 <= last {
             return Ok(0);
@@ -914,12 +912,12 @@ fn ranges(m: &mut NativeModule) {
         }
         exact(acc)
     });
-    m.vm_function("Range.to_list", |vm: &mut Vm, r: Range| -> Result<Vec<i64>, Fail> {
+    m.function("Range.to_list", |vm: &mut Vm, r: Range| -> Result<Vec<i64>, Fail> {
         let bounds = inclusive(vm, r)?;
         reserve_list(vm, usize::try_from(count(bounds)).unwrap_or(usize::MAX))?;
         Ok(bounds.into_iter().flat_map(|(first, last)| first..=last).collect())
     });
-    m.vm_function("Range.step_by", |vm: &mut Vm, r: Range, step: i64| -> Result<Vec<i64>, Fail> {
+    m.function("Range.step_by", |vm: &mut Vm, r: Range, step: i64| -> Result<Vec<i64>, Fail> {
         if step <= 0 {
             return fail("invalid", format!("step must be positive, found {step}"));
         }
@@ -928,7 +926,7 @@ fn ranges(m: &mut NativeModule) {
         // Stepped in `i64`: a step past `usize::MAX` (32-bit targets) must not be truncated.
         Ok(std::iter::successors(Some(first), |i| i.checked_add(step).filter(|i| *i <= last)).collect())
     });
-    m.vm_function("Range.reversed", |vm: &mut Vm, r: Range| -> Result<Vec<i64>, Fail> {
+    m.function("Range.reversed", |vm: &mut Vm, r: Range| -> Result<Vec<i64>, Fail> {
         let bounds = inclusive(vm, r)?;
         reserve_list(vm, usize::try_from(count(bounds)).unwrap_or(usize::MAX))?;
         Ok(bounds.into_iter().flat_map(|(first, last)| (first..=last).rev()).collect())
@@ -1017,27 +1015,27 @@ fn maps(m: &mut NativeModule) {
         reserve_list(vm, mo.live)?;
         Ok(mo.entries.iter().flatten().map(|&(k, v)| Param::from_raw(if N == 0 { k } else { v })).collect())
     }
-    m.vm_function("Map.len", |vm: &mut Vm, map: Map| -> Result<i64, Fail> { Ok(map.map(&vm.heap)?.live as i64) });
-    m.vm_function("Map.is_empty", |vm: &mut Vm, map: Map| -> Result<bool, Fail> { Ok(map.map(&vm.heap)?.live == 0) });
-    m.vm_function("Map.get", |vm: &mut Vm, map: Map, key: Param<0>| -> Result<Option<Param<1>>, Fail> {
+    m.function("Map.len", |vm: &mut Vm, map: Map| -> Result<i64, Fail> { Ok(map.map(&vm.heap)?.live as i64) });
+    m.function("Map.is_empty", |vm: &mut Vm, map: Map| -> Result<bool, Fail> { Ok(map.map(&vm.heap)?.live == 0) });
+    m.function("Map.get", |vm: &mut Vm, map: Map, key: Param<0>| -> Result<Option<Param<1>>, Fail> {
         Ok(vm.map_get(map.raw(), key.raw())?.map(Param::from_raw))
     });
-    m.vm_function("Map.get_or", |vm: &mut Vm, map: Map, key: Param<0>, default: Param<1>| -> Result<_, Fail> {
+    m.function("Map.get_or", |vm: &mut Vm, map: Map, key: Param<0>, default: Param<1>| -> Result<_, Fail> {
         Ok(Param::<1>::from_raw(vm.map_get(map.raw(), key.raw())?.unwrap_or(default.raw())))
     });
-    m.vm_function("Map.contains", |vm: &mut Vm, map: Map, key: Param<0>| -> Result<bool, Fail> {
+    m.function("Map.contains", |vm: &mut Vm, map: Map, key: Param<0>| -> Result<bool, Fail> {
         Ok(vm.map_get(map.raw(), key.raw())?.is_some())
     });
-    m.vm_function("Map.insert", |vm: &mut Vm, map: Map, key: Param<0>, value: Param<1>| -> Result<Option<Param<1>>, Fail> {
+    m.function("Map.insert", |vm: &mut Vm, map: Map, key: Param<0>, value: Param<1>| -> Result<Option<Param<1>>, Fail> {
         Ok(vm.map_insert(map.raw(), key.raw(), value.raw())?.map(Param::from_raw))
     });
-    m.vm_function("Map.remove", |vm: &mut Vm, map: Map, key: Param<0>| -> Result<Option<Param<1>>, Fail> {
+    m.function("Map.remove", |vm: &mut Vm, map: Map, key: Param<0>| -> Result<Option<Param<1>>, Fail> {
         Ok(vm.map_remove(map.raw(), key.raw())?.map(Param::from_raw))
     });
-    m.vm_function("Map.iter_next", |vm: &mut Vm, map: Map| vm.container_iter(map.raw()).map(IterFn::<(Param<0>, Param<1>)>::from_raw));
-    m.vm_function("Map.keys", |vm: &mut Vm, map: Map| map_column::<0>(vm, map));
-    m.vm_function("Map.values", |vm: &mut Vm, map: Map| map_column::<1>(vm, map));
-    m.vm_function("Map.entries", |vm: &mut Vm, map: Map| -> Result<List<(Param<0>, Param<1>)>, Fail> {
+    m.function("Map.iter_next", |vm: &mut Vm, map: Map| vm.container_iter(map.raw()).map(IterFn::<(Param<0>, Param<1>)>::from_raw));
+    m.function("Map.keys", |vm: &mut Vm, map: Map| map_column::<0>(vm, map));
+    m.function("Map.values", |vm: &mut Vm, map: Map| map_column::<1>(vm, map));
+    m.function("Map.entries", |vm: &mut Vm, map: Map| -> Result<List<(Param<0>, Param<1>)>, Fail> {
         let n = map.map(&vm.heap)?.live;
         produce(vm, n, n)?;
         let list = vm.heap.staged(|heap, st| -> Result<VmValue, Fail> {
@@ -1046,12 +1044,12 @@ fn maps(m: &mut NativeModule) {
         })?;
         Ok(VmVal::from_raw(list))
     });
-    m.vm_function("Map.clear", |vm: &mut Vm, map: Map| clear_container(vm, map.raw()));
-    m.vm_function("Map.copy", |vm: &mut Vm, map: Map| {
+    m.function("Map.clear", |vm: &mut Vm, map: Map| clear_container(vm, map.raw()));
+    m.function("Map.copy", |vm: &mut Vm, map: Map| {
         let copy = Obj::Map(Box::new(map.map(&vm.heap)?.clone()));
         alloc_copy(vm, copy).map(Map::from_raw)
     });
-    m.vm_function("Map.extend", |vm: &mut Vm, map: Map, other: Map| -> Result<_, Fail> {
+    m.function("Map.extend", |vm: &mut Vm, map: Map, other: Map| -> Result<_, Fail> {
         let mo = other.map(&vm.heap)?;
         produce(vm, 6 * mo.live, 0)?;
         let es: Vec<(VmValue, VmValue)> = mo.entries.iter().flatten().copied().collect();
@@ -1060,24 +1058,24 @@ fn maps(m: &mut NativeModule) {
         }
         Ok(())
     });
-    m.vm_function("Map.get_or_insert", |vm: &mut Vm, map: Map, key: Param<0>, default: Param<1>| -> Result<_, Fail> {
+    m.function("Map.get_or_insert", |vm: &mut Vm, map: Map, key: Param<0>, default: Param<1>| -> Result<_, Fail> {
         Ok(Param::<1>::from_raw(vm.map_get_or_insert(map.raw(), key.raw(), default.raw())?.unwrap_or(default.raw())))
     });
 }
 
 fn sets(m: &mut NativeModule) {
-    m.vm_function("Set.len", |vm: &mut Vm, s: Set| -> Result<i64, Fail> { Ok(s.set(&vm.heap)?.live as i64) });
-    m.vm_function("Set.is_empty", |vm: &mut Vm, s: Set| -> Result<bool, Fail> { Ok(s.set(&vm.heap)?.live == 0) });
-    m.vm_function("Set.add", |vm: &mut Vm, s: Set, x: Param<0>| vm.set_add(s.raw(), x.raw()));
-    m.vm_function("Set.remove", |vm: &mut Vm, s: Set, x: Param<0>| vm.set_remove(s.raw(), x.raw()));
-    m.vm_function("Set.contains", |vm: &mut Vm, s: Set, x: Param<0>| vm.set_contains(s.raw(), x.raw()));
-    m.vm_function("Set.iter_next", |vm: &mut Vm, s: Set| vm.container_iter(s.raw()).map(IterFn::<Param<0>>::from_raw));
-    m.vm_function("Set.to_list", |vm: &mut Vm, s: Set| -> Result<Vec<Param<0>>, Fail> {
+    m.function("Set.len", |vm: &mut Vm, s: Set| -> Result<i64, Fail> { Ok(s.set(&vm.heap)?.live as i64) });
+    m.function("Set.is_empty", |vm: &mut Vm, s: Set| -> Result<bool, Fail> { Ok(s.set(&vm.heap)?.live == 0) });
+    m.function("Set.add", |vm: &mut Vm, s: Set, x: Param<0>| vm.set_add(s.raw(), x.raw()));
+    m.function("Set.remove", |vm: &mut Vm, s: Set, x: Param<0>| vm.set_remove(s.raw(), x.raw()));
+    m.function("Set.contains", |vm: &mut Vm, s: Set, x: Param<0>| vm.set_contains(s.raw(), x.raw()));
+    m.function("Set.iter_next", |vm: &mut Vm, s: Set| vm.container_iter(s.raw()).map(IterFn::<Param<0>>::from_raw));
+    m.function("Set.to_list", |vm: &mut Vm, s: Set| -> Result<Vec<Param<0>>, Fail> {
         let so = s.set(&vm.heap)?;
         reserve_list(vm, so.live)?;
         Ok(params(so.entries.iter().flatten().copied().collect()))
     });
-    m.vm_function("Set.union", |vm: &mut Vm, s: Set, other: Set| -> Result<Set, Fail> {
+    m.function("Set.union", |vm: &mut Vm, s: Set, other: Set| -> Result<Set, Fail> {
         let mut set = s.set(&vm.heap)?.clone();
         let more = &other.set(&vm.heap)?.entries;
         produce(vm, (set.entries.len() + more.len()).saturating_mul(ENTRY / SLOT), 0)?;
@@ -1086,7 +1084,7 @@ fn sets(m: &mut NativeModule) {
         }
         Ok(new_set(vm, set))
     });
-    m.vm_function("Set.intersection", |vm: &mut Vm, s: Set, other: Set| -> Result<Set, Fail> {
+    m.function("Set.intersection", |vm: &mut Vm, s: Set, other: Set| -> Result<Set, Fail> {
         let (x, y) = (s.set(&vm.heap)?, other.set(&vm.heap)?);
         if x.live <= y.live {
             let set = set_filter(vm, s, |e| vm.set_contains(other.raw(), e))?;
@@ -1110,11 +1108,11 @@ fn sets(m: &mut NativeModule) {
         }
         Ok(new_set(vm, set))
     });
-    m.vm_function("Set.difference", |vm: &mut Vm, s: Set, other: Set| -> Result<_, Fail> {
+    m.function("Set.difference", |vm: &mut Vm, s: Set, other: Set| -> Result<_, Fail> {
         let set = set_filter(vm, s, |e| Ok(!vm.set_contains(other.raw(), e)?))?;
         Ok(new_set(vm, set))
     });
-    m.vm_function("Set.is_subset", |vm: &mut Vm, s: Set, other: Set| -> Result<bool, Fail> {
+    m.function("Set.is_subset", |vm: &mut Vm, s: Set, other: Set| -> Result<bool, Fail> {
         for &x in s.set(&vm.heap)?.entries.iter().flatten() {
             if !vm.set_contains(other.raw(), x)? {
                 return Ok(false);
@@ -1122,11 +1120,11 @@ fn sets(m: &mut NativeModule) {
         }
         Ok(true)
     });
-    m.vm_function("Set.copy", |vm: &mut Vm, s: Set| {
+    m.function("Set.copy", |vm: &mut Vm, s: Set| {
         let copy = Obj::Set(Box::new(s.set(&vm.heap)?.clone()));
         alloc_copy(vm, copy).map(Set::from_raw)
     });
-    m.vm_function("Set.clear", |vm: &mut Vm, s: Set| clear_container(vm, s.raw()));
+    m.function("Set.clear", |vm: &mut Vm, s: Set| clear_container(vm, s.raw()));
 }
 
 /// An upper bound of the length of `t` in upper or lower case: case mapping

@@ -109,16 +109,16 @@ type Fields = VmVal<HashMap<String, String>>;
 
 pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("log", ModKind::Std, include_str!("log.sand"));
-    m.vm_function("debug", |vm: &mut Vm, msg: VmVal<String>, fields: Fields| emit_record(vm, LogLevel::Debug, msg, fields));
-    m.vm_function("info", |vm: &mut Vm, msg: VmVal<String>, fields: Fields| emit_record(vm, LogLevel::Info, msg, fields));
-    m.vm_function("warn", |vm: &mut Vm, msg: VmVal<String>, fields: Fields| emit_record(vm, LogLevel::Warn, msg, fields));
-    m.vm_function("error", |vm: &mut Vm, msg: VmVal<String>, fields: Fields| emit_record(vm, LogLevel::Error, msg, fields));
+    m.function("debug", |vm: &mut Vm, msg: VmVal<String>, fields: Fields| emit_record(vm, LogLevel::Debug, msg, fields));
+    m.function("info", |vm: &mut Vm, msg: VmVal<String>, fields: Fields| emit_record(vm, LogLevel::Info, msg, fields));
+    m.function("warn", |vm: &mut Vm, msg: VmVal<String>, fields: Fields| emit_record(vm, LogLevel::Warn, msg, fields));
+    m.function("error", |vm: &mut Vm, msg: VmVal<String>, fields: Fields| emit_record(vm, LogLevel::Error, msg, fields));
     m.bind::<LogLevel>();
-    m.vm_function("set_level", |vm: &mut Vm, level: LogLevel| -> Result<_, Fail> {
+    m.function("set_level", |vm: &mut Vm, level: LogLevel| -> Result<_, Fail> {
         vm.host.log_level = Some(level);
         Ok(())
     });
-    m.vm_function("disable", |vm: &mut Vm| -> Result<_, Fail> {
+    m.function("disable", |vm: &mut Vm| -> Result<_, Fail> {
         vm.host.log_level = None;
         Ok(())
     });

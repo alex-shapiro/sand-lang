@@ -374,7 +374,7 @@ fn run_file(name: &str, mode: Mode, backend: Backend) {
 /// Runs `case` in `mode` and returns stdout followed by total fuel used.
 fn output_with_fuel(case: &Case, mode: Mode) -> String {
     let mut probe = NativeModule::new("fuel_probe");
-    probe.vm_function("used", |vm: &mut Vm| vm.meter.used() as i64);
+    probe.function("used", |vm: &mut Vm| vm.meter.used() as i64);
     let dir = CaseDir::new(Backend::Memory, &case.name);
     let out = MemorySink::new();
     let limits = Limits { max_instructions: Some(300_000_000), ..Limits::default() };

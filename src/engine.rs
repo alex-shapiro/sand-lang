@@ -1927,7 +1927,7 @@ mod offload_tests {
         let mut m = NativeModule::new("hung");
         m.source("pub native fn hang()\npub native fn walk()");
         let r = release.clone();
-        m.vm_function("hang", move |vm: &mut Vm| {
+        m.function("hang", move |vm: &mut Vm| {
             let r = r.clone();
             vm.offload(move |_| {
                 while !r.load(Ordering::SeqCst) {
@@ -1935,7 +1935,7 @@ mod offload_tests {
                 }
             })
         });
-        m.vm_function("walk", move |vm: &mut Vm| {
+        m.function("walk", move |vm: &mut Vm| {
             let p = progress.clone();
             vm.offload(move |allowance| {
                 while allowance.charge(1).is_ok() {

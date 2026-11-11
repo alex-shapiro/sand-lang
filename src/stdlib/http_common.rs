@@ -121,12 +121,12 @@ pub(crate) fn natives(m: &mut NativeModule) {
     m.bind::<Body>();
     m.bind::<ResponseStream>();
     body_natives(m);
-    m.vm_function("resolve", |vm: &mut Vm, base: VmVal<String>, location: VmVal<String>| -> Result<String, HostError> {
+    m.function("resolve", |vm: &mut Vm, base: VmVal<String>, location: VmVal<String>| -> Result<String, HostError> {
         let (base, location) = (base.str(&vm.heap), location.str(&vm.heap));
         vm.charge_slow_bytes(base.len().saturating_add(location.len()))?;
         Ok(resolve(base, location)?)
     });
-    m.vm_function("same_origin", |vm: &mut Vm, a: VmVal<String>, b: VmVal<String>| -> Result<bool, Fail> {
+    m.function("same_origin", |vm: &mut Vm, a: VmVal<String>, b: VmVal<String>| -> Result<bool, Fail> {
         let (a, b) = (a.str(&vm.heap), b.str(&vm.heap));
         vm.charge_slow_bytes(a.len().saturating_add(b.len()))?;
         Ok(match (Url::parse(a), Url::parse(b)) {
@@ -511,17 +511,17 @@ fn read_body<R: IntoVmValue + Send + 'static>(
 }
 
 fn body_natives(m: &mut NativeModule) {
-    m.vm_function("Body.read", |vm: &mut Vm, body: VmVal<Body>, max: i64| {
+    m.function("Body.read", |vm: &mut Vm, body: VmVal<Body>, max: i64| {
         if max <= 0 {
             return Err(HostError::new("invalid", "read: max must be positive"));
         }
         read_body(vm, body, BodyRead::Upto(to_usize_saturating(max)), bytes_read)
     });
-    m.vm_function("Body.read_line", |vm: &mut Vm, body: VmVal<Body>| {
+    m.function("Body.read_line", |vm: &mut Vm, body: VmVal<Body>| {
         read_body(vm, body, BodyRead::Line, |vm, line| line_read(vm, line, "line is not valid UTF-8"))
     });
-    m.vm_function("Body.read_all", |vm: &mut Vm, body: VmVal<Body>| read_body(vm, body, BodyRead::All, bytes_read));
-    m.vm_function("Body.close", |vm: &mut Vm, body: VmVal<Body>| -> Result<_, Fail> {
+    m.function("Body.read_all", |vm: &mut Vm, body: VmVal<Body>| read_body(vm, body, BodyRead::All, bytes_read));
+    m.function("Body.close", |vm: &mut Vm, body: VmVal<Body>| -> Result<_, Fail> {
         let b = body.get_mut(&mut vm.heap)?;
         b.closed.send_replace(true);
         // The stream and the connection go with the last reference to the
