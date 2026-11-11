@@ -419,8 +419,8 @@ impl<const N: u8> SandType for Reflect<N> {
 ///
 /// A `VmVal` is valid only during the native call that received or allocated
 /// it. The garbage collector does not trace a `VmVal` that Rust code holds. A
-/// collection during a wait can free the heap object. For this reason, VM
-/// handles (`VmVal`, [`Param`], [`Num`], and [`Reflect`]) are not `Send`. The
+/// collection during a wait can free the heap object. For this reason, `VmVal`
+/// is not `Send`, and neither are [`Param`], [`Num`], and [`Reflect`]. The
 /// compiler rejects a VM handle in these places:
 ///
 /// - a [`NativeObject`](super::NativeObject)

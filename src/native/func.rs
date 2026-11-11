@@ -507,18 +507,18 @@ macro_rules! fn_impls {
     };
 }
 fn_impls!();
-fn_impls!(A);
-fn_impls!(A, B);
-fn_impls!(A, B, C);
-fn_impls!(A, B, C, D);
-fn_impls!(A, B, C, D, E);
-fn_impls!(A, B, C, D, E, G1);
-fn_impls!(A, B, C, D, E, G1, H);
-fn_impls!(A, B, C, D, E, G1, H, I);
-fn_impls!(A, B, C, D, E, G1, H, I, J);
-fn_impls!(A, B, C, D, E, G1, H, I, J, K);
-fn_impls!(A, B, C, D, E, G1, H, I, J, K, L);
-fn_impls!(A, B, C, D, E, G1, H, I, J, K, L, M);
+fn_impls!(P1);
+fn_impls!(P1, P2);
+fn_impls!(P1, P2, P3);
+fn_impls!(P1, P2, P3, P4);
+fn_impls!(P1, P2, P3, P4, P5);
+fn_impls!(P1, P2, P3, P4, P5, P6);
+fn_impls!(P1, P2, P3, P4, P5, P6, P7);
+fn_impls!(P1, P2, P3, P4, P5, P6, P7, P8);
+fn_impls!(P1, P2, P3, P4, P5, P6, P7, P8, P9);
+fn_impls!(P1, P2, P3, P4, P5, P6, P7, P8, P9, P10);
+fn_impls!(P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11);
+fn_impls!(P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12);
 
 #[cfg(test)]
 mod tests {

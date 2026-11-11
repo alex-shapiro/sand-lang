@@ -539,7 +539,7 @@ module.function("put", Effectful(|ctx: Context<RunCtx>, seq: JournalSeq, key: St
 }));
 ```
 
-In `NativeFunction<Kind>`, `Kind` is `(kind_marker, (A, B, ...))`. A single
+In `NativeFunction<Kind>`, `Kind` is `(kind_marker, (P1, P2, ...))`. A single
 implementation for each wrapper covers every arity and excludes `VmNativeFn`.
 
 **Let a host choose the behavior after an unknown outcome.** An `Effectful` function
