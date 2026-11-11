@@ -369,7 +369,62 @@ const ENTRY_PENDING: usize = std::mem::size_of::<Entry>() + MAP_ENTRY_SIZE;
 impl FromVmValue for Json {
     type Item<'a> = Json;
     fn from_vm_value(vm: &Vm, v: VmValue, conv: &mut Conversion) -> Result<Json, Fail> {
-        walk(&mut Reader { vm, ids: JsonIds::of(&vm.prog)?, conv }, v)
+        let ids = JsonIds::of(&vm.prog)?;
+        let mut stack = Vec::new();
+        let mut node = v;
+        loop {
+            vm.charge(1)?;
+            let id = vm.heap.variant_id(node);
+            let mut value = match vm.heap.field(node, 0) {
+                _ if id == ids.null => Some(Json::Null),
+                Some(VmValue::Bool(b)) if id == ids.bool_ => Some(Json::Bool(b)),
+                Some(VmValue::Int(i)) if id == ids.int => Some(Json::Int(i)),
+                Some(VmValue::Float(f)) if id == ids.float => Some(Json::Float(f)),
+                Some(payload) if id == ids.str_ => Some(Json::Str(rust_string(vm, payload, conv)?)),
+                Some(payload) if id == ids.arr => {
+                    let Obj::List(items) = vm.heap.get(payload) else { return Err(mismatch::<Json>()) };
+                    conv.alloc(vm, items.len().saturating_mul(std::mem::size_of::<Json>()))?;
+                    vm.charge(items.len() as u64)?;
+                    stack.push(ReadFrame::Arr(Vec::with_capacity(items.len()), items.iter()));
+                    None
+                }
+                Some(payload) if id == ids.obj => {
+                    let Obj::Map(m) = vm.heap.get(payload) else { return Err(mismatch::<Json>()) };
+                    conv.alloc(vm, m.live.saturating_mul(OBJ_ENTRY_BYTES))?;
+                    vm.charge(m.live as u64)?;
+                    stack.push(ReadFrame::Obj(indexmap::IndexMap::with_capacity(m.live), m.entries.iter(), String::new()));
+                    None
+                }
+                _ => return Err(mismatch::<Json>()),
+            };
+            if stack.len() > MAX_DEPTH {
+                return fail("limit", "value too deeply nested to convert");
+            }
+            node = loop {
+                match stack.last_mut() {
+                    None => return value.ok_or_else(empty_stack),
+                    Some(ReadFrame::Arr(values, items)) => {
+                        values.extend(value.take());
+                        if let Some(&item) = items.next() {
+                            break item;
+                        }
+                    }
+                    Some(ReadFrame::Obj(members, entries, key)) => {
+                        if let Some(value) = value.take() {
+                            members.insert(std::mem::take(key), value);
+                        }
+                        if let Some((next_key, member)) = entries.find_map(|entry| *entry) {
+                            *key = rust_string(vm, next_key, conv)?;
+                            break member;
+                        }
+                    }
+                }
+                value = stack.pop().map(|frame| match frame {
+                    ReadFrame::Arr(values, _) => Json::Arr(values),
+                    ReadFrame::Obj(members, ..) => Json::Obj(members),
+                });
+            };
+        }
     }
 }
 
@@ -377,216 +432,110 @@ impl IntoVmValue for Json {
     fn into_vm_value(self, vm: &mut Vm) -> Result<VmValue, Fail> {
         let ids = JsonIds::of(&vm.prog)?;
         let meter = &vm.meter;
-        vm.heap.staged(|heap, st| walk(&mut Writer { b: Builder::new(heap, st, meter), ids }, self))
+        vm.heap.staged(|heap, st| Builder::new(heap, st, meter).json(ids, self))
     }
 }
 
-trait Walk {
-    type Node;
-    type Frame;
-    type Out;
-
-    fn open(&mut self, node: Self::Node, stack: &mut Vec<Self::Frame>) -> Result<Option<Self::Out>, Fail>;
-    fn next(&mut self, frame: &mut Self::Frame) -> Result<Option<Self::Node>, Fail>;
-    fn put(&mut self, frame: &mut Self::Frame, child: Self::Out) -> Result<(), Fail>;
-    fn close(&mut self, frame: Self::Frame) -> Self::Out;
+fn empty_stack() -> Fail {
+    Fail::internal("json: a conversion without a value")
 }
 
-fn walk<W: Walk>(w: &mut W, root: W::Node) -> Result<W::Out, Fail> {
-    let mut stack = Vec::new();
-    if let Some(out) = w.open(root, &mut stack)? {
-        return Ok(out);
-    }
-    while let Some(top) = stack.last_mut() {
-        let out = match w.next(top)? {
-            Some(child) => match w.open(child, &mut stack)? {
-                Some(out) => out,
-                None if stack.len() > MAX_DEPTH => return fail("limit", "value too deeply nested to convert"),
-                None => continue,
-            },
-            None => match stack.pop() {
-                Some(frame) => w.close(frame),
-                None => break,
-            },
-        };
-        match stack.last_mut() {
-            Some(top) => w.put(top, out)?,
-            None => return Ok(out),
-        }
-    }
-    internal("json: empty conversion stack")
-}
-
-struct Reader<'h, 'c> {
-    vm: &'h Vm,
-    ids: JsonIds,
-    conv: &'c mut Conversion,
-}
-
+/// A Sand `Json` array or object whose members wait for their Rust values.
 enum ReadFrame<'h> {
     Arr(Vec<Json>, std::slice::Iter<'h, VmValue>),
+    /// The members, the entries that remain, and the key of the member that
+    /// the conversion makes now.
     Obj(indexmap::IndexMap<String, Json>, std::slice::Iter<'h, Option<(VmValue, VmValue)>>, String),
 }
 
 const OBJ_ENTRY_BYTES: usize = std::mem::size_of::<(u64, String, Json)>() + std::mem::size_of::<usize>();
 
-impl<'h> Reader<'h, '_> {
-    fn string(&mut self, v: VmValue) -> Result<String, Fail> {
-        let s = match self.vm.heap.get(v) {
-            Obj::Str(s) => &**s,
-            Obj::StrBuf(s) => s.as_str(),
-            _ => return Err(mismatch::<Json>()),
-        };
-        self.conv.alloc(self.vm, s.len())?;
-        self.vm.charge_bytes(s.len())?;
-        Ok(s.to_string())
-    }
+/// Returns a copy of the Sand `str` `v`, and charges fuel and memory for the
+/// copy.
+fn rust_string(vm: &Vm, v: VmValue, conv: &mut Conversion) -> Result<String, Fail> {
+    let s = match vm.heap.get(v) {
+        Obj::Str(s) => &**s,
+        Obj::StrBuf(s) => s.as_str(),
+        _ => return Err(mismatch::<Json>()),
+    };
+    conv.alloc(vm, s.len())?;
+    vm.charge_bytes(s.len())?;
+    Ok(s.to_string())
 }
 
-impl<'h> Walk for Reader<'h, '_> {
-    type Node = VmValue;
-    type Frame = ReadFrame<'h>;
-    type Out = Json;
-
-    fn open(&mut self, v: VmValue, stack: &mut Vec<ReadFrame<'h>>) -> Result<Option<Json>, Fail> {
-        let (vm, ids) = (self.vm, self.ids);
-        vm.charge(1)?;
-        let id = vm.heap.variant_id(v);
-        if id == ids.null {
-            return Ok(Some(Json::Null));
-        }
-        let payload = vm.heap.field(v, 0).ok_or_else(mismatch::<Json>)?;
-        Ok(Some(match (id, payload) {
-            (_, VmValue::Bool(b)) if id == ids.bool_ => Json::Bool(b),
-            (_, VmValue::Int(i)) if id == ids.int => Json::Int(i),
-            (_, VmValue::Float(f)) if id == ids.float => Json::Float(f),
-            _ if id == ids.str_ => Json::Str(self.string(payload)?),
-            _ if id == ids.arr => {
-                let Obj::List(items) = vm.heap.get(payload) else { return Err(mismatch::<Json>()) };
-                self.conv.alloc(vm, items.len().saturating_mul(std::mem::size_of::<Json>()))?;
-                vm.charge(items.len() as u64)?;
-                stack.push(ReadFrame::Arr(Vec::with_capacity(items.len()), items.iter()));
-                return Ok(None);
-            }
-            _ if id == ids.obj => {
-                let Obj::Map(m) = vm.heap.get(payload) else { return Err(mismatch::<Json>()) };
-                self.conv.alloc(vm, m.live.saturating_mul(OBJ_ENTRY_BYTES))?;
-                vm.charge(m.live as u64)?;
-                let fields = indexmap::IndexMap::with_capacity(m.live);
-                stack.push(ReadFrame::Obj(fields, m.entries.iter(), String::new()));
-                return Ok(None);
-            }
-            _ => return Err(mismatch::<Json>()),
-        }))
-    }
-
-    fn next(&mut self, frame: &mut ReadFrame<'h>) -> Result<Option<VmValue>, Fail> {
-        Ok(match frame {
-            ReadFrame::Arr(_, items) => items.next().copied(),
-            ReadFrame::Obj(_, entries, key) => match entries.find_map(|e| *e) {
-                Some((k, v)) => {
-                    *key = self.string(k)?;
-                    Some(v)
-                }
-                None => None,
-            },
-        })
-    }
-
-    fn put(&mut self, frame: &mut ReadFrame<'h>, child: Json) -> Result<(), Fail> {
-        match frame {
-            ReadFrame::Arr(items, _) => items.push(child),
-            ReadFrame::Obj(fields, _, key) => {
-                fields.insert(std::mem::take(key), child);
-            }
-        }
-        Ok(())
-    }
-
-    fn close(&mut self, frame: ReadFrame<'h>) -> Json {
-        match frame {
-            ReadFrame::Arr(items, _) => Json::Arr(items),
-            ReadFrame::Obj(fields, _, _) => Json::Obj(fields),
-        }
-    }
-}
-
-struct Writer<'a, 's, 'h> {
-    b: Builder<'a, 's, 'h>,
-    ids: JsonIds,
-}
-
+/// A Rust `Json` array or object whose members wait for their Sand values.
 enum WriteFrame {
     Arr(std::vec::IntoIter<Json>, Vec<VmValue>),
+    /// The members that remain, the map, and the key and the key hash of the
+    /// member that the conversion makes now.
     Obj(indexmap::map::IntoIter<String, Json>, MapBuilder, String, u64),
 }
 
-impl Walk for Writer<'_, '_, '_> {
-    type Node = Json;
-    type Frame = WriteFrame;
-    type Out = VmValue;
-
-    fn open(&mut self, j: Json, stack: &mut Vec<WriteFrame>) -> Result<Option<VmValue>, Fail> {
-        let (b, ids) = (&mut self.b, self.ids);
-        b.reserve()?;
-        b.meter.charge(1)?;
-        Ok(Some(match j {
-            Json::Null => VmValue::Tag(ids.null),
-            Json::Bool(x) => b.st.new_variant(ids.bool_, &[VmValue::Bool(x)]),
-            Json::Int(i) => b.st.new_variant(ids.int, &[VmValue::Int(i)]),
-            Json::Float(f) => b.st.new_variant(ids.float, &[VmValue::Float(f)]),
-            Json::Str(s) => {
-                b.st.check_memory((NODE_BYTES + b.pending).saturating_add(s.len()))?;
-                b.meter.charge_bytes(s.len())?;
-                let s = b.st.new_str(s);
-                b.st.new_variant(ids.str_, &[s])
-            }
-            Json::Arr(items) => {
-                stack.push(WriteFrame::Arr(items.into_iter(), Vec::new()));
-                return Ok(None);
-            }
-            Json::Obj(fields) => {
-                stack.push(WriteFrame::Obj(fields.into_iter(), b.start_map(), String::new(), 0));
-                return Ok(None);
-            }
-        }))
-    }
-
-    fn next(&mut self, frame: &mut WriteFrame) -> Result<Option<Json>, Fail> {
-        Ok(match frame {
-            WriteFrame::Arr(items, _) => items.next(),
-            WriteFrame::Obj(entries, _, key, hash) => match entries.next() {
-                Some((k, v)) => {
-                    *hash = self.b.hash(&k)?;
-                    *key = k;
-                    Some(v)
+impl Builder<'_, '_, '_> {
+    /// Returns the Sand `Json` value of `json`.
+    fn json(&mut self, ids: JsonIds, json: Json) -> Result<VmValue, Fail> {
+        let mut stack = Vec::new();
+        let mut node = json;
+        loop {
+            self.reserve()?;
+            self.meter.charge(1)?;
+            let mut value = match node {
+                Json::Null => Some(VmValue::Tag(ids.null)),
+                Json::Bool(b) => Some(self.st.new_variant(ids.bool_, &[VmValue::Bool(b)])),
+                Json::Int(i) => Some(self.st.new_variant(ids.int, &[VmValue::Int(i)])),
+                Json::Float(f) => Some(self.st.new_variant(ids.float, &[VmValue::Float(f)])),
+                Json::Str(s) => {
+                    self.st.check_memory((NODE_BYTES + self.pending).saturating_add(s.len()))?;
+                    self.meter.charge_bytes(s.len())?;
+                    let s = self.st.new_str(s);
+                    Some(self.st.new_variant(ids.str_, &[s]))
                 }
-                None => None,
-            },
-        })
-    }
-
-    fn put(&mut self, frame: &mut WriteFrame, child: VmValue) -> Result<(), Fail> {
-        match frame {
-            WriteFrame::Arr(_, out) => self.b.push(out, child),
-            WriteFrame::Obj(_, m, key, hash) => {
-                let k = self.b.key(&Cow::Owned(std::mem::take(key)), *hash);
-                self.b.append(m, *hash, k, child)
+                Json::Arr(items) => {
+                    stack.push(WriteFrame::Arr(items.into_iter(), Vec::new()));
+                    None
+                }
+                Json::Obj(members) => {
+                    stack.push(WriteFrame::Obj(members.into_iter(), self.start_map(), String::new(), 0));
+                    None
+                }
+            };
+            if stack.len() > MAX_DEPTH {
+                return fail("limit", "value too deeply nested to convert");
             }
-        }
-    }
-
-    fn close(&mut self, frame: WriteFrame) -> VmValue {
-        let ids = self.ids;
-        match frame {
-            WriteFrame::Arr(_, out) => {
-                let list = self.b.list(out);
-                self.b.st.new_variant(ids.arr, &[list])
-            }
-            WriteFrame::Obj(_, m, _, _) => {
-                let map = self.b.map(m);
-                self.b.st.new_variant(ids.obj, &[map])
-            }
+            node = loop {
+                match stack.last_mut() {
+                    None => return value.ok_or_else(empty_stack),
+                    Some(WriteFrame::Arr(items, values)) => {
+                        if let Some(value) = value.take() {
+                            self.push(values, value)?;
+                        }
+                        if let Some(item) = items.next() {
+                            break item;
+                        }
+                    }
+                    Some(WriteFrame::Obj(members, map, key, hash)) => {
+                        if let Some(value) = value.take() {
+                            let key = self.key(&Cow::Owned(std::mem::take(key)), *hash);
+                            self.append(map, *hash, key, value)?;
+                        }
+                        if let Some((next_key, member)) = members.next() {
+                            *hash = self.hash(&next_key)?;
+                            *key = next_key;
+                            break member;
+                        }
+                    }
+                }
+                value = stack.pop().map(|frame| match frame {
+                    WriteFrame::Arr(_, values) => {
+                        let list = self.list(values);
+                        self.st.new_variant(ids.arr, &[list])
+                    }
+                    WriteFrame::Obj(_, map, ..) => {
+                        let map = self.map(map);
+                        self.st.new_variant(ids.obj, &[map])
+                    }
+                });
+            };
         }
     }
 }
