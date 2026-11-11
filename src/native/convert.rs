@@ -634,7 +634,7 @@ macro_rules! __value_type_impls {
 
 #[doc(hidden)]
 pub fn value_type_from_vm_value<T: ValueType>(vm: &Vm, v: VmValue) -> Result<T, Fail> {
-    vm.heap.value::<T>(v).ok_or_else(mismatch::<T>)
+    vm.heap.native_value::<T>(v).ok_or_else(mismatch::<T>)
 }
 
 #[doc(hidden)]
@@ -642,7 +642,7 @@ pub fn value_type_into_vm_value<T: ValueType>(x: T, vm: &mut Vm) -> Result<VmVal
     if T::PACKING.is_none() {
         vm.check_memory(ValueType::size(&x))?;
     }
-    Ok(vm.new_value(x))
+    Ok(vm.new_native_value(x))
 }
 
 macro_rules! handle {

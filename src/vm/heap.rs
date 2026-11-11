@@ -1172,7 +1172,7 @@ impl Heap {
         }
     }
 
-    pub fn value<T: ValueType>(&self, v: VmValue) -> Option<T> {
+    pub fn native_value<T: ValueType>(&self, v: VmValue) -> Option<T> {
         value_of(self.get(v))
     }
 

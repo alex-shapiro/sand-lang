@@ -911,7 +911,7 @@ impl Vm {
         self.heap.new_variant(id, &[v])
     }
 
-    pub fn new_value<T: value::ValueType>(&mut self, x: T) -> VmValue {
+    pub fn new_native_value<T: value::ValueType>(&mut self, x: T) -> VmValue {
         self.heap.alloc(value::value_obj(x))
     }
 
