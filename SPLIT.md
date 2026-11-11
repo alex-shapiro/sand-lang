@@ -310,9 +310,9 @@ value, and `Value`.
 - Rename `Vm::new_value` and `Heap::value` to reflect `ValueType` rather than
   `Value`.
 - Decide how `Constant` relates to `Value`. `IntoVmValue::to_const` builds
-  compile-time constants, and the derive macros generate a separate walk for it.
-  Moving constant construction to `Encode` or `Value` removes that extra walk
-  and limits `IntoVmValue` to VM conversion.
+  compile-time constants. The derive macros generate a separate walk for
+  `to_const`. Building constants from `Encode` or `Value` removes that walk so
+  that `IntoVmValue` only converts to `VmValue`.
 
 This changeset has no source commits. `03076c5` returned `Json`, which loses the
 difference between `bytes` and a string, and between `()` and `None`.

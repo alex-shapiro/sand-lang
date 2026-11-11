@@ -73,9 +73,8 @@ pub trait IntoVmValue: SandType {
     /// if `self` has no constant form.
     ///
     /// Field defaults declared with `#[sand(default)]` require a constant
-    /// value. Scalar types implement `to_const`, as do collections, `Option`,
-    /// [`SandEnum`](crate::SandEnum), and [`SandStruct`](crate::SandStruct)
-    /// values composed of constants.
+    /// value. Scalar types and composite types composed of constants implement
+    /// `to_const`.
     fn to_const(&self) -> Option<Constant> {
         None
     }

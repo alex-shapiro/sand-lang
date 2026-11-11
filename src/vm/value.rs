@@ -11,8 +11,8 @@ use std::sync::{Arc, OnceLock};
 /// object on the heap of one VM.
 ///
 /// A heap handle is valid only during the native call that received or
-/// allocated it, because the garbage collector does not trace a `VmValue` held
-/// in a native function.
+/// allocated it. The garbage collector does not trace a `VmValue` held in a
+/// native function.
 ///
 /// Variants `VUnit` through `VObj` store single-payload enum variants inline if
 /// the payload is not itself an inline variant. Each variant holds the runtime
@@ -634,7 +634,7 @@ pub struct MapObj {
     pub pins: Pins,
     /// Direct key-to-value table used while `index` is dense and at least 25%
     /// full. Absent keys hold [`VmValue::Uninit`]. Lookups read `vals[k]`
-    /// directly, and [`MapObj::set_dense`] updates `vals` on every write.
+    /// directly. [`MapObj::set_dense`] updates `vals` on every write.
     pub vals: Vec<VmValue>,
 }
 

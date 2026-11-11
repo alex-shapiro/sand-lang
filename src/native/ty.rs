@@ -414,8 +414,8 @@ impl<const N: u8> SandType for Reflect<N> {
 /// can accept and return `VmVal<T>` to avoid copying heap values.
 ///
 /// A `VmVal` is valid only during the synchronous native call that received or
-/// allocated it, because the garbage collector does not trace `VmVal` handles
-/// stored in Rust structs. Never store a `VmVal` inside a
+/// allocated it. The garbage collector does not trace `VmVal` handles stored in
+/// Rust structs. Never store a `VmVal` inside a
 /// [`NativeObject`](super::NativeObject) or across an async suspension point.
 pub struct VmVal<T: ?Sized>(VmValue, PhantomData<fn() -> T>);
 

@@ -10,10 +10,9 @@
 //!   share one safe point.
 //! - Move loops, allocations, formatting, and error paths into
 //!   `#[inline(never)]` or `#[cold]` functions instead of the `match` arms.
-//! - Keep helper return types at 16 bytes. [`Ctl`] and [`Fail`] are
-//!   pointer-sized, and helpers return `VmValue` instead of `Option<VmValue>`
-//!   so that results stay in registers and do not stall store-to-load
-//!   forwarding.
+//! - Keep helper return types at 16 bytes so that results stay in registers and
+//!   do not stall store-to-load forwarding. [`Ctl`] and [`Fail`] are
+//!   pointer-sized. Helpers return `VmValue` instead of `Option<VmValue>`.
 //!
 //! Verify changes with `cargo bench` and check the disassembly of `Vm::interp`
 //! for stack loads and stores around the dispatch jump.
@@ -2248,7 +2247,7 @@ impl Vm {
     }
 
     /// Returns `m[k]`, or an error if `k` is absent. Copies the value from the
-    /// entry directly instead of calling [`Vm::map_get`], because returning
+    /// entry directly instead of calling [`Vm::map_get`]. Returning
     /// `Option<VmValue>` causes piecewise stack writes that stall store-to-load
     /// forwarding.
     #[inline(never)]
