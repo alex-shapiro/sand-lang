@@ -3,7 +3,7 @@
 use crate::native::ty::Never;
 use crate::stdlib::time::{PlainMonthDay, PlainYearMonth, Span, TimeZone, ZonedDateTime};
 use crate::vm::bytecode::StructRt;
-use crate::vm::encode::{self, Container, EncodeSink, EnumVariant, Leaf, MAX_DEPTH, OpaqueKind, Opened};
+use crate::vm::encode::{self, Container, EncodeSink, EnumVariant, Leaf, MAX_DEPTH, OpaqueKind, Opened, Role};
 use crate::vm::heap::Heap;
 use crate::vm::meter::{Meter, Scratch};
 use crate::vm::value::{FxHashMap, ValueRef, ValueType, VmValue};
@@ -619,7 +619,7 @@ impl<'h> EncodeSink<'h> for ValueSink<'h> {
     type Open = OpenValue;
 
     #[inline(always)]
-    fn leaf(&mut self, parent: &mut OpenValue, leaf: Leaf<'h>) -> Result<(), Fail> {
+    fn leaf(&mut self, parent: &mut OpenValue, _: Role<'h>, leaf: Leaf<'h>) -> Result<(), Fail> {
         self.meter.charge(1)?;
         let value = match leaf {
             Leaf::Unit => Value::Unit,
@@ -645,7 +645,7 @@ impl<'h> EncodeSink<'h> for ValueSink<'h> {
     }
 
     #[inline(always)]
-    fn open(&mut self, _: &mut OpenValue, container: Container<'h>, len: usize) -> Result<Opened<OpenValue>, Fail> {
+    fn open(&mut self, _: &mut OpenValue, _: Role<'h>, container: Container<'h>, len: usize) -> Result<Opened<OpenValue>, Fail> {
         self.meter.charge(1)?;
         if self.depth >= MAX_DEPTH {
             return fail("limit", "value too deeply nested to copy");

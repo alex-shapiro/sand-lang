@@ -83,6 +83,7 @@ fn rtp<reflect X: Decode + Eq>(x: X) -> str {
     let r: Result<X> = json.decode(json.encode(x))
     \"\\(r == Ok(x))\"
 }
+fn jsonp<X: Encode>(x: X) -> str { \"\\(json.encode(json.to_json(x)) == json.encode(x))\" }
 fn countb<X: Eq + Ord + Hash + Encode>(xs: [X]) -> int { xs.len() }
 ";
 
@@ -177,6 +178,16 @@ impl Ty {
             _ => true,
         };
         own && self.implements(BuiltinTrait::Eq) && self.implements(BuiltinTrait::Encode) && self.parts().iter().all(|t| t.round_trips())
+    }
+
+    /// Returns `true` if `json.encode` and `json.to_json` accept each value of
+    /// `self`: `self` implements `Encode`, and each map key has a text form.
+    fn has_json_form(&self) -> bool {
+        let own = match self {
+            Ty::Map(k, _) => matches!(**k, Ty::Int | Ty::Str | Ty::Bool),
+            _ => true,
+        };
+        own && self.implements(BuiltinTrait::Encode) && self.parts().iter().all(|t| t.has_json_form())
     }
 
     /// Returns `true` if `v` can be inferred without an explicit type annotation
@@ -654,10 +665,18 @@ fn generate(seed: u64) -> (Case, Vec<(String, String)>) {
         }
     }
     for _ in 0..3 {
-        let (probe, b) =
-            [("eqp", BuiltinTrait::Eq), ("hashp", BuiltinTrait::Hash), ("ordp", BuiltinTrait::Ord), ("rtp", BuiltinTrait::Encode)]
-                [rng.below(4)];
-        let want = |t: &Ty| if probe == "rtp" { t.round_trips() } else { t.implements(b) };
+        let (probe, b) = [
+            ("eqp", BuiltinTrait::Eq),
+            ("hashp", BuiltinTrait::Hash),
+            ("ordp", BuiltinTrait::Ord),
+            ("rtp", BuiltinTrait::Encode),
+            ("jsonp", BuiltinTrait::Encode),
+        ][rng.below(5)];
+        let want = |t: &Ty| match probe {
+            "rtp" => t.round_trips(),
+            "jsonp" => t.has_json_form(),
+            _ => t.implements(b),
+        };
         let Some(t) = find_type(&mut rng, want) else { continue };
         let x = value(&mut rng, &t);
         let y = if rng.chance(3) { x.clone() } else { value(&mut rng, &t) };
@@ -666,7 +685,7 @@ fn generate(seed: u64) -> (Case, Vec<(String, String)>) {
             "eqp" => (format!("eqp({a}, {c})"), x.eq(&y).to_string()),
             "hashp" => (format!("hashp({a}, {c})"), if x.eq(&y) { "1" } else { "2" }.to_string()),
             "ordp" => (format!("ordp({a}, {c})"), format!("{} {}", x.cmp(&y).is_lt(), x.cmp(&y).is_le())),
-            _ => (format!("rtp({a})"), "true".into()),
+            _ => (format!("{probe}({a})"), "true".into()),
         };
         case.body += &format!("print({call})\n");
         case.stdout += &format!("{out}\n");

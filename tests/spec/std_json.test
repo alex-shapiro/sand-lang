@@ -349,6 +349,34 @@ Err(Error(message: "$: cannot decode map keys of type (int, int)", kind: "invali
 --- fail
 a JSON object key must be a string, int, duration, bool, payload-less variant, or value type
 
+=== encode rejects a map key before the value of the key
+import json
+enum T {
+    Leaf(x: int)
+    Wrap([T])
+}
+var t = T.Leaf(x: 1)
+for _ in 0..170 {
+    t = T.Wrap([t])
+}
+print(json.encode([(1, 2): [t]]))
+--- fail
+a JSON object key must be a string, int, duration, bool, payload-less variant, or value type
+
+=== to_json rejects a map key before the value of the key
+import json
+enum T {
+    Leaf(x: int)
+    Wrap([T])
+}
+var t = T.Leaf(x: 1)
+for _ in 0..170 {
+    t = T.Wrap([t])
+}
+print(json.to_json([(1, 2): [t]]))
+--- fail
+a JSON object key must be a string, int, duration, bool, payload-less variant, or value type
+
 === encode decode roundtrip
 import json
 struct P { x: int, y: [float], name: str, ok: bool }

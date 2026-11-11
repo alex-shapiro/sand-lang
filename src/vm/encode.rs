@@ -24,21 +24,37 @@ pub(crate) const MAX_DEPTH: usize = 512;
 ///
 /// The walk reports the children of a container in order, between the call of
 /// [`EncodeSink::open`] and the call of [`EncodeSink::close`] for that
-/// container. The children of a map are each key followed by its value. The
-/// children of a struct or a variant are its field values in declaration order.
+/// container. Each child has a [`Role`] in its container.
 pub(crate) trait EncodeSink<'h> {
     /// The state of a container whose children the walk reports.
     type Open;
 
     /// Receives a value without children as the next child of `parent`.
-    fn leaf(&mut self, parent: &mut Self::Open, leaf: Leaf<'h>) -> Result<(), Fail>;
+    fn leaf(&mut self, parent: &mut Self::Open, role: Role<'h>, leaf: Leaf<'h>) -> Result<(), Fail>;
 
     /// Receives a value with `len` children as the next child of `parent`. A
     /// map has `len` entries.
-    fn open(&mut self, parent: &mut Self::Open, container: Container<'h>, len: usize) -> Result<Opened<Self::Open>, Fail>;
+    fn open(&mut self, parent: &mut Self::Open, role: Role<'h>, container: Container<'h>, len: usize) -> Result<Opened<Self::Open>, Fail>;
 
     /// Receives the end of the container `open`, which is a child of `parent`.
     fn close(&mut self, parent: &mut Self::Open, open: Self::Open) -> Result<(), Fail>;
+}
+
+/// The place of a value in its container.
+#[derive(Clone, Copy)]
+pub(crate) enum Role<'h> {
+    /// The value that the walk starts from.
+    Root,
+    /// The payload that the walk reports in place of its container. The sink
+    /// received the role of the container with the container.
+    Payload,
+    /// An item of a list, tuple, or set, or a value of a positional payload.
+    Item,
+    MapKey,
+    /// The value of the map key that the walk reported last.
+    MapValue,
+    /// The value of the field with this name in a struct or in a named payload.
+    Field(&'h String),
 }
 
 /// A value without children.
@@ -135,7 +151,8 @@ impl OpaqueKind {
 pub(crate) enum Opened<O> {
     /// The walk reports the children, then closes the container with this state.
     Children(O),
-    /// The walk reports the first child in place of the container.
+    /// The walk reports the first child in place of the container, with the
+    /// role [`Role::Payload`].
     Unwrapped,
     /// The sink has finished the container, and the walk skips the children.
     Closed,
@@ -150,12 +167,12 @@ pub(crate) fn walk<'h, S: EncodeSink<'h>>(
     value: VmValue,
 ) -> Result<S::Open, Fail> {
     let mut outer = OuterFrames::new();
-    let mut top = Frame { children: Children::One(None), open: root };
-    // The value that the walk reports before the next child of `top`.
-    let mut first = Some(value);
+    let mut top = Frame { children: Children::One(Role::Root, Some(value)), open: root };
+    // The payload that the walk reports before the next child of `top`.
+    let mut first = None;
     loop {
-        let child = match first.take() {
-            Some(child) => child,
+        let (role, child) = match first.take() {
+            Some(payload) => (Role::Payload, payload),
             None => match top.children.next() {
                 Some(child) => child,
                 None => {
@@ -166,7 +183,7 @@ pub(crate) fn walk<'h, S: EncodeSink<'h>>(
                 }
             },
         };
-        match report(prog, heap, sink, &mut top.open, child)? {
+        match report(prog, heap, sink, &mut top.open, role, child)? {
             Reported::Closed => {}
             Reported::Opened(frame) => outer.push(std::mem::replace(&mut top, frame)),
             Reported::Unwrapped(payload) => first = Some(payload),
@@ -191,47 +208,49 @@ fn report<'h, S: EncodeSink<'h>>(
     heap: &'h Heap,
     sink: &mut S,
     parent: &mut S::Open,
+    role: Role<'h>,
     value: VmValue,
 ) -> Result<Reported<'h, S::Open>, Fail> {
     let (container, len, mut children) = match value {
-        VmValue::Unit | VmValue::Uninit => return leaf(sink, parent, Leaf::Unit),
-        VmValue::Bool(b) => return leaf(sink, parent, Leaf::Bool(b)),
-        VmValue::Int(i) => return leaf(sink, parent, Leaf::Int(i)),
-        VmValue::Float(f) => return leaf(sink, parent, Leaf::Float(f)),
-        VmValue::Dur(d) => return leaf(sink, parent, Leaf::Duration(d)),
-        VmValue::Tag(id) => return leaf(sink, parent, Leaf::Tag(enum_variant(prog, value, id)?)),
+        VmValue::Unit | VmValue::Uninit => return leaf(sink, parent, role, Leaf::Unit),
+        VmValue::Bool(b) => return leaf(sink, parent, role, Leaf::Bool(b)),
+        VmValue::Int(i) => return leaf(sink, parent, role, Leaf::Int(i)),
+        VmValue::Float(f) => return leaf(sink, parent, role, Leaf::Float(f)),
+        VmValue::Dur(d) => return leaf(sink, parent, role, Leaf::Duration(d)),
+        VmValue::Tag(id) => return leaf(sink, parent, role, Leaf::Tag(enum_variant(prog, value, id)?)),
         VmValue::Pair(first, second) => (Container::Tuple, 2, Children::Pair(first, second)),
         VmValue::Obj(handle) => match heap.obj(handle) {
-            Obj::Str(s) => return leaf(sink, parent, Leaf::Str { text: s, heap_str: Some(value) }),
-            Obj::StrBuf(s) => return leaf(sink, parent, Leaf::Str { text: s, heap_str: None }),
-            Obj::Bytes(b) => return leaf(sink, parent, Leaf::Bytes(b)),
+            Obj::Str(s) => return leaf(sink, parent, role, Leaf::Str { text: s, heap_str: Some(value) }),
+            Obj::StrBuf(s) => return leaf(sink, parent, role, Leaf::Str { text: s, heap_str: None }),
+            Obj::Bytes(b) => return leaf(sink, parent, role, Leaf::Bytes(b)),
             Obj::List(items) => (Container::List, items.len(), Children::Items(items.iter())),
             Obj::Tuple(items) => (Container::Tuple, items.len(), Children::Items(items.iter())),
             Obj::Set(set) => (Container::Set, set.live, Children::Set(set.entries.iter())),
-            Obj::Map(map) => (Container::Map, map.live, Children::Map(map.entries.iter(), false)),
-            Obj::Struct(def, fields) => {
+            Obj::Map(map) => (Container::Map, map.live, Children::Map(map.entries.iter(), None)),
+            Obj::Struct(def, values) => {
                 let ty = &prog.types[*def as usize];
-                let len = fields.len().min(ty.fields.len());
-                (Container::Struct { def: *def, ty }, len, Children::Items(fields[..len].iter()))
+                fields(Container::Struct { def: *def, ty }, &ty.fields, values)
             }
-            Obj::Variant(id, fields) => {
+            Obj::Variant(id, values) => {
                 let variant = enum_variant(prog, value, *id)?;
-                let len = variant.field_names.map_or(fields.len(), |names| fields.len().min(names.len()));
-                (Container::Variant(variant), len, Children::Items(fields[..len].iter()))
+                match variant.field_names {
+                    Some(names) => fields(Container::Variant(variant), names, values),
+                    None => (Container::Variant(variant), values.len(), Children::Items(values.iter())),
+                }
             }
             Obj::Range(start, end, inclusive) => {
-                return leaf(sink, parent, Leaf::Range { start: *start, end: *end, inclusive: *inclusive });
+                return leaf(sink, parent, role, Leaf::Range { start: *start, end: *end, inclusive: *inclusive });
             }
-            Obj::Value(native) => return leaf(sink, parent, Leaf::Native(ValueRef::Boxed(&**native))),
-            Obj::Packed(ty, bits) => return leaf(sink, parent, Leaf::Native(ValueRef::Packed(ty, *bits))),
-            Obj::Closure(..) | Obj::NativeFn(_) | Obj::IterFn(_) => return leaf(sink, parent, Leaf::Opaque(OpaqueKind::Function)),
-            Obj::Task(_) => return leaf(sink, parent, Leaf::Opaque(OpaqueKind::Task)),
-            Obj::Channel(_) => return leaf(sink, parent, Leaf::Opaque(OpaqueKind::Channel)),
+            Obj::Value(native) => return leaf(sink, parent, role, Leaf::Native(ValueRef::Boxed(&**native))),
+            Obj::Packed(ty, bits) => return leaf(sink, parent, role, Leaf::Native(ValueRef::Packed(ty, *bits))),
+            Obj::Closure(..) | Obj::NativeFn(_) | Obj::IterFn(_) => return leaf(sink, parent, role, Leaf::Opaque(OpaqueKind::Function)),
+            Obj::Task(_) => return leaf(sink, parent, role, Leaf::Opaque(OpaqueKind::Task)),
+            Obj::Channel(_) => return leaf(sink, parent, role, Leaf::Opaque(OpaqueKind::Channel)),
             Obj::Native(object) => {
                 let kind = OpaqueKind::Object { module: object.module_name(), name: object.type_name() };
-                return leaf(sink, parent, Leaf::Opaque(kind));
+                return leaf(sink, parent, role, Leaf::Opaque(kind));
             }
-            Obj::TypeDesc(_) | Obj::Cell(_) | Obj::Free(_) => return leaf(sink, parent, Leaf::Opaque(OpaqueKind::Internal)),
+            Obj::TypeDesc(_) | Obj::Cell(_) | Obj::Free(_) => return leaf(sink, parent, role, Leaf::Opaque(OpaqueKind::Internal)),
         },
         VmValue::VUnit(..)
         | VmValue::VBool(..)
@@ -241,20 +260,30 @@ fn report<'h, S: EncodeSink<'h>>(
         | VmValue::VTag(..)
         | VmValue::VObj(..) => {
             let Some((id, payload)) = value.as_inline_variant() else { return internal("encode: not an inline variant") };
-            (Container::Variant(enum_variant(prog, value, id)?), 1, Children::One(Some(payload)))
+            let variant = enum_variant(prog, value, id)?;
+            let role = variant.field_names.and_then(<[String]>::first).map_or(Role::Item, Role::Field);
+            (Container::Variant(variant), 1, Children::One(role, Some(payload)))
         }
     };
-    Ok(match sink.open(parent, container, len)? {
+    Ok(match sink.open(parent, role, container, len)? {
         Opened::Children(open) => Reported::Opened(Frame { children, open }),
-        Opened::Unwrapped => Reported::Unwrapped(children.next().unwrap_or(VmValue::Unit)),
+        Opened::Unwrapped => Reported::Unwrapped(children.next().map_or(VmValue::Unit, |(_, payload)| payload)),
         Opened::Closed => Reported::Closed,
     })
 }
 
 #[inline(always)]
-fn leaf<'h, S: EncodeSink<'h>>(sink: &mut S, parent: &mut S::Open, leaf: Leaf<'h>) -> Result<Reported<'h, S::Open>, Fail> {
-    sink.leaf(parent, leaf)?;
+fn leaf<'h, S: EncodeSink<'h>>(sink: &mut S, parent: &mut S::Open, role: Role<'h>, leaf: Leaf<'h>) -> Result<Reported<'h, S::Open>, Fail> {
+    sink.leaf(parent, role, leaf)?;
     Ok(Reported::Closed)
+}
+
+/// Returns `container` with a child for each of `names` that has a value in
+/// `values`.
+#[inline(always)]
+fn fields<'h>(container: Container<'h>, names: &'h [String], values: &'h [VmValue]) -> (Container<'h>, usize, Children<'h>) {
+    let len = names.len().min(values.len());
+    (container, len, Children::Fields(names[..len].iter(), values[..len].iter()))
 }
 
 #[inline(always)]
@@ -274,38 +303,38 @@ struct Frame<'h, O> {
 enum Children<'h> {
     Items(std::slice::Iter<'h, VmValue>),
     Set(std::slice::Iter<'h, Option<VmValue>>),
-    /// The entries of a map from the next key on. The flag is true if the walk
-    /// reported the key of the first entry and its value is next.
-    Map(std::slice::Iter<'h, Option<(VmValue, VmValue)>>, bool),
-    One(Option<VmValue>),
+    /// The entries of a map from the next key on, and the value of the key that
+    /// the walk reported last, until the walk reports that value.
+    Map(std::slice::Iter<'h, Option<(VmValue, VmValue)>>, Option<VmValue>),
+    /// The field names and the field values of a struct or of a named payload.
+    Fields(std::slice::Iter<'h, String>, std::slice::Iter<'h, VmValue>),
+    /// One child and its role.
+    One(Role<'h>, Option<VmValue>),
     /// The two integers of an inline tuple.
     Pair(i32, i64),
 }
 
-impl Children<'_> {
+impl<'h> Children<'h> {
     #[inline(always)]
-    fn next(&mut self) -> Option<VmValue> {
+    fn next(&mut self) -> Option<(Role<'h>, VmValue)> {
+        let item = |value| (Role::Item, value);
         match self {
-            Children::Items(items) => items.next().copied(),
-            Children::Set(entries) => entries.find_map(|entry| *entry),
-            Children::Map(entries, value_is_next @ true) => {
-                *value_is_next = false;
-                entries.next().copied().flatten().map(|(_, value)| value)
-            }
-            Children::Map(entries, value_is_next) => loop {
-                match entries.as_slice().first()? {
-                    Some((key, _)) => {
-                        *value_is_next = true;
-                        return Some(*key);
-                    }
-                    None => entries.next(),
-                };
+            Children::Items(items) => items.next().copied().map(item),
+            Children::Set(entries) => entries.find_map(|entry| *entry).map(item),
+            Children::Map(entries, value) => match value.take() {
+                Some(value) => Some((Role::MapValue, value)),
+                None => {
+                    let (key, key_value) = entries.find_map(|entry| *entry)?;
+                    *value = Some(key_value);
+                    Some((Role::MapKey, key))
+                }
             },
-            Children::One(value) => value.take(),
+            Children::Fields(names, values) => Some((Role::Field(names.next()?), *values.next()?)),
+            Children::One(role, value) => Some((*role, value.take()?)),
             Children::Pair(first, second) => {
                 let first = VmValue::Int(i64::from(*first));
-                *self = Children::One(Some(VmValue::Int(*second)));
-                Some(first)
+                *self = Children::One(Role::Item, Some(VmValue::Int(*second)));
+                Some(item(first))
             }
         }
     }
