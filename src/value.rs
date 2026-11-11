@@ -10,9 +10,8 @@ use crate::vm::meter::{Meter, Scratch};
 use crate::vm::value::{FxBuild, FxHashMap, ValueRef, ValueType, VmValue};
 use crate::vm::{Fail, Vm, fail, internal};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::mem::size_of;
-use std::rc::Rc;
-use std::sync::Arc;
+use std::mem::{size_of, size_of_val};
+use std::sync::{Arc, OnceLock};
 
 /// The Rust form of a Sand value whose type implements `Encode`.
 ///
@@ -45,9 +44,9 @@ pub enum Value {
     /// An integer range: `start..end`, or `start..=end` if `inclusive` is true.
     Range { start: i64, end: i64, inclusive: bool },
     /// A struct.
-    Struct(Box<StructValue>),
+    Struct(StructValue),
     /// An enum variant.
-    Variant(Box<VariantValue>),
+    Variant(VariantValue),
     /// A `time.Instant`.
     Instant(jiff::Timestamp),
     /// A `time.PlainDateTime`.
@@ -74,34 +73,95 @@ pub enum Value {
     Opaque { type_name: Arc<str> },
 }
 
-/// A struct with its type name and fields.
+/// A struct value: its type and one value for each field.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StructValue {
-    /// The module-qualified type name, such as `shop.Order`.
-    pub type_name: Arc<str>,
-    /// The field names and values in declaration order.
-    pub fields: Vec<(Arc<str>, Value)>,
+    /// The type of the struct.
+    pub ty: Arc<StructDesc>,
+    /// The field values in declaration order.
+    pub fields: Box<[Value]>,
 }
 
-/// An enum variant with its enum name, variant name, and payload.
+/// The name and field names of a struct type. All values of the type share it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct StructDesc {
+    /// The module-qualified type name, such as `shop.Order`.
+    pub name: String,
+    /// The field names in declaration order.
+    pub fields: Vec<String>,
+}
+
+/// An enum variant value: its variant and its payload.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VariantValue {
-    /// The module-qualified enum name, such as `shop.Status`.
-    pub type_name: Arc<str>,
-    /// The variant name, such as `Shipped`.
-    pub name: Arc<str>,
-    /// The payload of the variant.
-    pub payload: Payload,
+    /// The variant.
+    pub ty: Arc<VariantDesc>,
+    /// The payload values in declaration order. A variant without a payload
+    /// has none.
+    pub payload: Box<[Value]>,
 }
 
-/// The payload of an enum variant.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Payload {
-    /// Positional fields in declaration order. A variant without a payload has
-    /// no fields.
-    Positional(Vec<Value>),
-    /// Named fields in declaration order.
-    Named(Vec<(Arc<str>, Value)>),
+/// One variant of an enum type. All values of the variant share it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct VariantDesc {
+    /// The module-qualified enum name, such as `shop.Status`.
+    pub enum_name: String,
+    /// The variant name, such as `Shipped`.
+    pub name: String,
+    /// The names of the payload fields, or `None` for a positional payload.
+    pub fields: Option<Vec<String>>,
+}
+
+impl StructDesc {
+    /// Returns the description of the struct type `name` with the fields
+    /// `fields`.
+    pub fn new(name: impl Into<String>, fields: impl IntoIterator<Item = impl Into<String>>) -> Arc<StructDesc> {
+        Arc::new(StructDesc { name: name.into(), fields: fields.into_iter().map(Into::into).collect() })
+    }
+}
+
+impl StructValue {
+    /// Returns the value of the field `name`, or `None` if the struct has no
+    /// such field.
+    pub fn field(&self, name: &str) -> Option<&Value> {
+        field_named(&self.ty.fields, &self.fields, name)
+    }
+
+    /// Returns the field names and values in declaration order.
+    pub fn named_fields(&self) -> impl Iterator<Item = (&str, &Value)> {
+        self.ty.fields.iter().map(String::as_str).zip(&*self.fields)
+    }
+}
+
+impl VariantDesc {
+    /// Returns the description of the variant `name` of the enum `enum_name`,
+    /// with a positional payload or none.
+    pub fn new(enum_name: impl Into<String>, name: impl Into<String>) -> Arc<VariantDesc> {
+        Arc::new(VariantDesc { enum_name: enum_name.into(), name: name.into(), fields: None })
+    }
+
+    /// Returns the description of the variant `name` of the enum `enum_name`,
+    /// with the named payload fields `fields`.
+    pub fn with_fields(
+        enum_name: impl Into<String>,
+        name: impl Into<String>,
+        fields: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Arc<VariantDesc> {
+        let fields = Some(fields.into_iter().map(Into::into).collect());
+        Arc::new(VariantDesc { enum_name: enum_name.into(), name: name.into(), fields })
+    }
+}
+
+impl VariantValue {
+    /// Returns the value of the named payload field `name`, or `None` if the
+    /// payload has no such field.
+    pub fn field(&self, name: &str) -> Option<&Value> {
+        field_named(self.ty.fields.as_deref().unwrap_or_default(), &self.payload, name)
+    }
+}
+
+fn field_named<'a>(names: &[String], values: &'a [Value], name: &str) -> Option<&'a Value> {
+    values.get(names.iter().position(|n| n == name)?)
 }
 
 /// A value of a native value type with its type name and text.
@@ -144,11 +204,8 @@ impl Value {
                 Value::Duration(d) => return i64::try_from(d.as_nanos()).is_ok(),
                 Value::List(items) | Value::Tuple(items) | Value::Set(items) => &mut items.iter(),
                 Value::Map(entries) => &mut entries.iter().flat_map(|(k, v)| [k, v]),
-                Value::Struct(s) => &mut s.fields.iter().map(|(_, v)| v),
-                Value::Variant(v) => match &v.payload {
-                    Payload::Positional(items) => &mut items.iter(),
-                    Payload::Named(fields) => &mut fields.iter().map(|(_, v)| v),
-                },
+                Value::Struct(s) => &mut s.fields.iter(),
+                Value::Variant(v) => &mut v.payload.iter(),
                 _ => return false,
             };
             Iterator::all(&mut children, |child| fits(child, parts_left, depth_left - 1))
@@ -179,8 +236,8 @@ impl Value {
 /// }
 ///
 /// let Value::Struct(point) = Point { x: 1.0, y: 2.0 }.encode() else { unreachable!() };
-/// assert_eq!(&*point.type_name, "geo.Point");
-/// assert_eq!(point.fields[1], ("y".into(), Value::Float(2.0)));
+/// assert_eq!(point.ty.name, "geo.Point");
+/// assert_eq!(point.field("y"), Some(&Value::Float(2.0)));
 /// ```
 ///
 /// A derived struct or enum with a field that has no `Value` form, such as a
@@ -268,11 +325,13 @@ impl<T: Encode + ?Sized> Encode for Box<T> {
 
 impl<T: Encode> Encode for Option<T> {
     fn encode(&self) -> Value {
-        let (name, payload) = match self {
-            Some(x) => ("Some", vec![x.encode()]),
-            None => ("None", Vec::new()),
+        static SOME: OnceLock<Arc<VariantDesc>> = OnceLock::new();
+        static NONE: OnceLock<Arc<VariantDesc>> = OnceLock::new();
+        let (desc, name, payload): (_, _, Box<[Value]>) = match self {
+            Some(x) => (&SOME, "Some", Box::new([x.encode()])),
+            None => (&NONE, "None", Box::default()),
         };
-        Value::Variant(Box::new(VariantValue { type_name: "Option".into(), name: name.into(), payload: Payload::Positional(payload) }))
+        Value::Variant(VariantValue { ty: desc.get_or_init(|| VariantDesc::new("Option", name)).clone(), payload })
     }
 }
 
@@ -367,21 +426,12 @@ struct ValueSink<'h> {
     allocated: usize,
     scratch: Scratch,
     depth: usize,
+    /// The type names of the native values and opaque values in the copy.
     type_names: HashSet<Arc<str>, FxBuild>,
-    /// The names of each struct type that the walk has reported, by runtime
-    /// type ID.
-    structs: FxHashMap<u32, Rc<Names>>,
-    /// The name of each variant that the walk has reported and the names of
-    /// its enum and payload fields, by runtime variant ID.
-    variants: FxHashMap<u32, (Arc<str>, Rc<Names>)>,
-}
-
-/// The names that all copies of the values of a struct type or of a variant
-/// share.
-struct Names {
-    /// The module-qualified name of the struct type or of the enum.
-    type_name: Arc<str>,
-    fields: Vec<Arc<str>>,
+    /// The description of each struct type in the copy, by runtime type ID.
+    structs: FxHashMap<u32, Arc<StructDesc>>,
+    /// The description of each variant in the copy, by runtime variant ID.
+    variants: FxHashMap<u32, Arc<VariantDesc>>,
 }
 
 /// A [`Value`] that waits for its children.
@@ -393,8 +443,8 @@ enum OpenValue {
     /// The entries of a map. If the flag is true, the last entry has its key
     /// and waits for its value.
     Map(Vec<(Value, Value)>, bool),
-    Struct(Box<StructValue>, Rc<Names>),
-    Variant(Box<VariantValue>, Rc<Names>),
+    Struct(Arc<StructDesc>, Vec<Value>),
+    Variant(Arc<VariantDesc>, Vec<Value>),
 }
 
 impl ValueSink<'_> {
@@ -413,63 +463,51 @@ impl ValueSink<'_> {
         self.reserve(content.saturating_add(header))
     }
 
+    /// Charges fuel and memory for a description of `size` bytes in an `Arc`,
+    /// with `text` bytes of names and the field names `fields`.
+    fn reserve_desc(&mut self, size: usize, text: usize, fields: &[String]) -> Result<(), Fail> {
+        let text = fields.iter().fold(text, |sum, field| sum.saturating_add(field.len()));
+        self.reserve_copy(text, 2 * size_of::<usize>() + size + size_of_val(fields))
+    }
+
     fn items(&mut self, len: usize) -> Result<Vec<Value>, Fail> {
         self.reserve(len.saturating_mul(size_of::<Value>()))?;
         Ok(Vec::with_capacity(len))
-    }
-
-    fn name(&mut self, text: &str) -> Result<Arc<str>, Fail> {
-        self.reserve_copy(text.len(), 2 * size_of::<usize>())?;
-        Ok(Arc::from(text))
     }
 
     fn type_name(&mut self, text: &str) -> Result<Arc<str>, Fail> {
         if let Some(name) = self.type_names.get(text) {
             return Ok(name.clone());
         }
-        let name = self.name(text)?;
+        self.reserve_copy(text.len(), 2 * size_of::<usize>())?;
+        let name: Arc<str> = Arc::from(text);
         self.type_names.insert(name.clone());
         Ok(name)
     }
 
-    fn names(&mut self, ty: &StructRt, fields: &[String]) -> Result<Rc<Names>, Fail> {
-        let type_name = self.type_name(&qualified_name(&ty.module, &ty.name))?;
-        let fields = fields.iter().map(|field| self.name(field)).collect::<Result<_, _>>()?;
-        Ok(Rc::new(Names { type_name, fields }))
-    }
-
-    fn struct_names(&mut self, def: u32, ty: &StructRt) -> Result<Rc<Names>, Fail> {
-        if let Some(names) = self.structs.get(&def) {
-            return Ok(names.clone());
+    fn struct_desc(&mut self, def: u32, ty: &StructRt) -> Result<Arc<StructDesc>, Fail> {
+        if let Some(desc) = self.structs.get(&def) {
+            return Ok(desc.clone());
         }
-        let names = self.names(ty, &ty.fields)?;
-        self.structs.insert(def, names.clone());
-        Ok(names)
+        let name = qualified_name(&ty.module, &ty.name);
+        self.reserve_desc(size_of::<StructDesc>(), name.len(), &ty.fields)?;
+        let desc = Arc::new(StructDesc { name, fields: ty.fields.clone() });
+        self.structs.insert(def, desc.clone());
+        Ok(desc)
     }
 
-    fn variant_names(&mut self, variant: &EnumVariant<'_>) -> Result<(Arc<str>, Rc<Names>), Fail> {
-        if let Some(names) = self.variants.get(&variant.id) {
-            return Ok(names.clone());
+    fn variant_desc(&mut self, variant: &EnumVariant<'_>) -> Result<Arc<VariantDesc>, Fail> {
+        if let Some(desc) = self.variants.get(&variant.id) {
+            return Ok(desc.clone());
         }
-        let names = (self.name(variant.name)?, self.names(variant.enum_type(), variant.field_names.unwrap_or_default())?);
-        self.variants.insert(variant.id, names.clone());
-        Ok(names)
-    }
-
-    /// Returns an empty variant value that waits for `len` payload values.
-    fn variant(&mut self, variant: &EnumVariant<'_>, len: usize) -> Result<(Box<VariantValue>, Rc<Names>), Fail> {
-        let (name, names) = self.variant_names(variant)?;
-        let payload = match variant.field_names {
-            Some(_) => {
-                self.reserve(size_of::<VariantValue>() + len.saturating_mul(size_of::<(Arc<str>, Value)>()))?;
-                Payload::Named(Vec::with_capacity(len))
-            }
-            None => {
-                self.reserve(size_of::<VariantValue>())?;
-                Payload::Positional(self.items(len)?)
-            }
-        };
-        Ok((Box::new(VariantValue { type_name: names.type_name.clone(), name, payload }), names))
+        let ty = variant.enum_type();
+        let enum_name = qualified_name(&ty.module, &ty.name);
+        let fields = variant.field_names.unwrap_or_default();
+        self.reserve_desc(size_of::<VariantDesc>(), enum_name.len() + variant.name.len(), fields)?;
+        let fields = variant.field_names.map(<[String]>::to_vec);
+        let desc = Arc::new(VariantDesc { enum_name, name: variant.name.to_string(), fields });
+        self.variants.insert(variant.id, desc.clone());
+        Ok(desc)
     }
 
     fn native(&mut self, native: ValueRef<'_>) -> Result<Value, Fail> {
@@ -501,7 +539,11 @@ impl ValueSink<'_> {
 fn put(parent: &mut OpenValue, value: Value) {
     match parent {
         OpenValue::Root(root) => *root = value,
-        OpenValue::List(items) | OpenValue::Tuple(items) | OpenValue::Set(items) => items.push(value),
+        OpenValue::List(items)
+        | OpenValue::Tuple(items)
+        | OpenValue::Set(items)
+        | OpenValue::Struct(_, items)
+        | OpenValue::Variant(_, items) => items.push(value),
         OpenValue::Map(entries, has_key) => {
             match entries.last_mut() {
                 Some(entry) if *has_key => entry.1 = value,
@@ -509,17 +551,6 @@ fn put(parent: &mut OpenValue, value: Value) {
             }
             *has_key = !*has_key;
         }
-        OpenValue::Struct(s, names) => put_field(&mut s.fields, names, value),
-        OpenValue::Variant(v, names) => match &mut v.payload {
-            Payload::Positional(items) => items.push(value),
-            Payload::Named(fields) => put_field(fields, names, value),
-        },
-    }
-}
-
-fn put_field(fields: &mut Vec<(Arc<str>, Value)>, names: &Names, value: Value) {
-    if let Some(name) = names.fields.get(fields.len()) {
-        fields.push((name.clone(), value));
     }
 }
 
@@ -544,7 +575,7 @@ impl<'h> EncodeSink<'h> for ValueSink<'h> {
                 Value::Bytes(bytes.to_vec())
             }
             Leaf::Range { start, end, inclusive } => Value::Range { start, end, inclusive },
-            Leaf::Tag(variant) => Value::Variant(self.variant(&variant, 0)?.0),
+            Leaf::Tag(variant) => Value::Variant(VariantValue { ty: self.variant_desc(&variant)?, payload: Box::default() }),
             Leaf::Native(native) => self.native(native)?,
             Leaf::Opaque(kind) => self.opaque(kind)?,
         };
@@ -567,15 +598,8 @@ impl<'h> EncodeSink<'h> for ValueSink<'h> {
                 self.reserve(len.saturating_mul(size_of::<(Value, Value)>()))?;
                 OpenValue::Map(Vec::with_capacity(len), false)
             }
-            Container::Struct { def, ty } => {
-                let names = self.struct_names(def, ty)?;
-                self.reserve(size_of::<StructValue>() + len.saturating_mul(size_of::<(Arc<str>, Value)>()))?;
-                OpenValue::Struct(Box::new(StructValue { type_name: names.type_name.clone(), fields: Vec::with_capacity(len) }), names)
-            }
-            Container::Variant(variant) => {
-                let (value, names) = self.variant(&variant, len)?;
-                OpenValue::Variant(value, names)
-            }
+            Container::Struct { def, ty } => OpenValue::Struct(self.struct_desc(def, ty)?, self.items(len)?),
+            Container::Variant(variant) => OpenValue::Variant(self.variant_desc(&variant)?, self.items(len)?),
         }))
     }
 
@@ -588,8 +612,8 @@ impl<'h> EncodeSink<'h> for ValueSink<'h> {
             OpenValue::Tuple(items) => Value::Tuple(items),
             OpenValue::Set(items) => Value::Set(items),
             OpenValue::Map(entries, _) => Value::Map(entries),
-            OpenValue::Struct(value, _) => Value::Struct(value),
-            OpenValue::Variant(value, _) => Value::Variant(value),
+            OpenValue::Struct(ty, fields) => Value::Struct(StructValue { ty, fields: fields.into_boxed_slice() }),
+            OpenValue::Variant(ty, payload) => Value::Variant(VariantValue { ty, payload: payload.into_boxed_slice() }),
         };
         put(parent, value);
         Ok(())

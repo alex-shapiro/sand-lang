@@ -8,7 +8,7 @@ use crate::check::ModKind;
 use crate::engine::Registry;
 use crate::syntax::lexer::{is_ident, is_keyword};
 use crate::types::{MAX_CONST_DEPTH, MAX_CONST_PARTS, ValueTypeInfo};
-use crate::value::{Payload, StructValue, Value, VariantValue, qualified_name};
+use crate::value::{StructDesc, StructValue, Value, VariantDesc, VariantValue, qualified_name};
 use crate::vm::heap::Heap;
 use crate::vm::value::{ChannelObj, MapObj, Obj, SetObj, TaskObj, TypeDesc, ValueType, VmValue};
 use crate::vm::{Ctl, Fail, HostFn, NativeFn, Vm};
@@ -17,7 +17,7 @@ use func::{NativeFunction, Signature};
 use std::any::{Any, TypeId};
 use std::borrow::Cow;
 use std::marker::PhantomData;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use ty::{Channel, Num, Param, Range, Reflect, SandType, Task, Type, VmVal};
 
 /// A Rust type bound to a nominal Sand type in a [`NativeModule`].
@@ -195,22 +195,33 @@ pub struct StructField {
     pub default: Option<fn() -> Value>,
 }
 
+/// The description of a struct type that each value from a derived `encode`
+/// shares.
 #[doc(hidden)]
-pub fn encode_struct<T: StructType>(fields: impl IntoIterator<Item = Value>) -> Value {
-    let fields = T::FIELDS.iter().zip(fields).map(|(f, value)| (Arc::from(f.name), value)).collect();
-    Value::Struct(Box::new(StructValue { type_name: qualified_name(T::MODULE, T::NAME).into(), fields }))
+pub type StructDescCell = OnceLock<Arc<StructDesc>>;
+
+/// The description of a variant that each value from a derived `encode`
+/// shares.
+#[doc(hidden)]
+pub type VariantDescCell = OnceLock<Arc<VariantDesc>>;
+
+#[doc(hidden)]
+pub fn encode_struct<T: StructType>(ty: &StructDescCell, fields: impl IntoIterator<Item = Value>) -> Value {
+    let ty = ty.get_or_init(|| StructDesc::new(qualified_name(T::MODULE, T::NAME), T::FIELDS.iter().map(|f| f.name)));
+    Value::Struct(StructValue { ty: ty.clone(), fields: fields.into_iter().collect() })
 }
 
 #[doc(hidden)]
-pub fn encode_variant<T: EnumType>(index: usize, payload: impl IntoIterator<Item = Value>) -> Value {
-    let variant = &T::VARIANTS[index];
-    let field_names: Option<Vec<&str>> = variant.fields.iter().map(|f| f.name).collect();
-    let payload = match field_names.filter(|names| !names.is_empty()) {
-        Some(names) => Payload::Named(names.into_iter().map(Arc::from).zip(payload).collect()),
-        None => Payload::Positional(payload.into_iter().collect()),
-    };
-    let name = variant.name.into();
-    Value::Variant(Box::new(VariantValue { type_name: qualified_name(T::MODULE, T::NAME).into(), name, payload }))
+pub fn encode_variant<T: EnumType>(variants: &[VariantDescCell], index: usize, payload: impl IntoIterator<Item = Value>) -> Value {
+    let ty = variants[index].get_or_init(|| {
+        let (enum_name, variant) = (qualified_name(T::MODULE, T::NAME), &T::VARIANTS[index]);
+        let field_names: Option<Vec<&str>> = variant.fields.iter().map(|f| f.name).collect();
+        match field_names.filter(|names| !names.is_empty()) {
+            Some(names) => VariantDesc::with_fields(enum_name, variant.name, names),
+            None => VariantDesc::new(enum_name, variant.name),
+        }
+    });
+    Value::Variant(VariantValue { ty: ty.clone(), payload: payload.into_iter().collect() })
 }
 
 #[doc(hidden)]

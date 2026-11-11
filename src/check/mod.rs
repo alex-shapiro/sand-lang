@@ -21,7 +21,7 @@ use crate::native::ty::Type;
 use crate::native::{BoundKind, EnumVariant, NativeDecl, StructField};
 use crate::syntax::ast::{self, ItemKind, TypeExpr, TypeExprKind};
 use crate::types::*;
-use crate::value::{Payload, Value};
+use crate::value::Value;
 use crate::vm::value::{FxBuild, FxHashMap};
 use budget::{CompileBudget, MAX_TYPE_SIZE};
 use persist::{PMap, PVec};
@@ -1861,31 +1861,33 @@ impl Checker {
             ),
             Value::Range { start, end, inclusive } => ConstVal::Range(*start, *end, *inclusive),
             Value::Struct(s) => {
-                let def = self.type_named(&s.type_name).filter(|&d| self.types[d as usize].is_struct());
-                let def = def.ok_or_else(|| format!("uses `{}`, which is not a declared struct", s.type_name))?;
+                let def = self.type_named(&s.ty.name).filter(|&d| self.types[d as usize].is_struct());
+                let def = def.ok_or_else(|| format!("uses `{}`, which is not a declared struct", s.ty.name))?;
                 let declared = self.types[def as usize].fields();
-                let same_fields =
-                    declared.len() == s.fields.len() && declared.iter().zip(&s.fields).all(|(d, (name, _))| self.name(d.name) == &**name);
+                let same_fields = declared.len() == s.fields.len()
+                    && declared.len() == s.ty.fields.len()
+                    && declared.iter().zip(&s.ty.fields).all(|(d, name)| self.name(d.name) == name);
                 if !same_fields {
-                    return Err(format!("uses `{}` with fields other than its declared fields", s.type_name));
+                    return Err(format!("uses `{}` with fields other than its declared fields", s.ty.name));
                 }
-                ConstVal::Struct(def, all(&mut s.fields.iter().map(|(_, v)| v))?)
+                ConstVal::Struct(def, all(&mut s.fields.iter())?)
             }
             Value::Variant(v) => {
                 let variant = self
-                    .type_named(&v.type_name)
-                    .and_then(|d| self.types[d as usize].variants().iter().find(|x| self.name(x.name) == &*v.name));
-                let variant = variant.ok_or_else(|| format!("uses `{}.{}`, which is not a declared variant", v.type_name, v.name))?;
-                let payload = match (&v.payload, &variant.field_names) {
-                    (Payload::Positional(items), None) if items.len() == variant.fields.len() => all(&mut items.iter())?,
-                    (Payload::Named(fields), Some(names))
-                        if names.len() == fields.len() && names.iter().zip(fields).all(|(&d, (name, _))| self.name(d) == &**name) =>
-                    {
-                        all(&mut fields.iter().map(|(_, v)| v))?
+                    .type_named(&v.ty.enum_name)
+                    .and_then(|d| self.types[d as usize].variants().iter().find(|x| self.name(x.name) == v.ty.name));
+                let variant = variant.ok_or_else(|| format!("uses `{}.{}`, which is not a declared variant", v.ty.enum_name, v.ty.name))?;
+                let same_names = match (&v.ty.fields, &variant.field_names) {
+                    (None, None) => true,
+                    (Some(names), Some(declared)) => {
+                        names.len() == declared.len() && declared.iter().zip(names).all(|(&d, name)| self.name(d) == name)
                     }
-                    _ => return Err(format!("uses `{}.{}` with a payload other than its declared payload", v.type_name, v.name)),
+                    _ => false,
                 };
-                ConstVal::Variant(variant.rt_id, payload)
+                if !same_names || v.payload.len() != variant.fields.len() {
+                    return Err(format!("uses `{}.{}` with a payload other than its declared payload", v.ty.enum_name, v.ty.name));
+                }
+                ConstVal::Variant(variant.rt_id, all(&mut v.payload.iter())?)
             }
             _ => return Err("uses a value that is not a constant".to_string()),
         })

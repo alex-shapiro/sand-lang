@@ -4,7 +4,7 @@ use super::base64;
 use crate::check::ModKind;
 use crate::native::convert::{Conversion, FromVmValue, HostError, IntoVmValue, mismatch};
 use crate::native::ty::{Param, Reflect, VmVal};
-use crate::native::{EnumType, NamedType, NativeModule, encode_variant, variant_index};
+use crate::native::{EnumType, NamedType, NativeModule, VariantDescCell, encode_variant, variant_index};
 use crate::syntax::lexer::is_ident;
 use crate::types::ConstVal;
 use crate::types::traits;
@@ -383,6 +383,7 @@ impl IntoVmValue for Json {
 
 impl Encode for Json {
     fn encode(&self) -> Value {
+        static VARIANT_DESCS: [VariantDescCell; Json::VARIANTS.len()] = [const { VariantDescCell::new() }; Json::VARIANTS.len()];
         let payload = match self {
             Json::Null => None,
             Json::Bool(b) => Some(b.encode()),
@@ -392,7 +393,7 @@ impl Encode for Json {
             Json::Arr(items) => Some(items.encode()),
             Json::Obj(fields) => Some(fields.encode()),
         };
-        encode_variant::<Json>(self.index(), payload)
+        encode_variant::<Json>(&VARIANT_DESCS, self.index(), payload)
     }
 }
 

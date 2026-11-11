@@ -17,7 +17,7 @@ use sandlang::policy::{Capability, Decision, PromptAnswer};
 use sandlang::session::Session;
 use sandlang::stdlib::log::{LogLevel, LogRecord, LogSink};
 use sandlang::stdlib::time::TimeZone;
-use sandlang::value::{NativeValue, Payload, StructValue, Value, VariantValue};
+use sandlang::value::{NativeValue, StructDesc, StructValue, Value, VariantDesc, VariantValue};
 use sandlang::vm::value::{ValueType, VmValue};
 use sandlang::vm::{Fail, Vm};
 use std::collections::HashMap;
@@ -4166,13 +4166,12 @@ fn copied_values(src: &str) -> Vec<Value> {
 }
 
 fn struct_value(type_name: &str, fields: impl IntoIterator<Item = (&'static str, Value)>) -> Value {
-    let fields = fields.into_iter().map(|(name, value)| (name.into(), value)).collect();
-    Value::Struct(Box::new(StructValue { type_name: type_name.into(), fields }))
+    let (names, values): (Vec<&str>, Vec<Value>) = fields.into_iter().unzip();
+    Value::Struct(StructValue { ty: StructDesc::new(type_name, names), fields: values.into() })
 }
 
 fn variant_value(type_name: &str, name: &str, payload: impl IntoIterator<Item = Value>) -> Value {
-    let payload = Payload::Positional(payload.into_iter().collect());
-    Value::Variant(Box::new(VariantValue { type_name: type_name.into(), name: name.into(), payload }))
+    Value::Variant(VariantValue { ty: VariantDesc::new(type_name, name), payload: payload.into_iter().collect() })
 }
 
 fn opaque_value(type_name: &str) -> Value {
@@ -4222,11 +4221,10 @@ fn to_value_names_structs_variants_and_native_value_types() {
     let (some, none) = (|value| variant_value("Option", "Some", [value]), || variant_value("Option", "None", []));
     let order = |id, note| struct_value("main.Order", [("id", Value::Int(id)), ("note", note)]);
     let native = |type_name: &str, text: &str| Value::Native(Box::new(NativeValue { type_name: type_name.into(), text: text.into() }));
-    let suspended = Value::Variant(Box::new(VariantValue {
-        type_name: "main.Status".into(),
-        name: "Suspended".into(),
-        payload: Payload::Named(vec![("reason".into(), str_("late"))]),
-    }));
+    let suspended = Value::Variant(VariantValue {
+        ty: VariantDesc::with_fields("main.Status", "Suspended", ["reason"]),
+        payload: Box::new([str_("late")]),
+    });
     let expected = [
         order(1, some(str_("gift"))),
         order(2, none()),
@@ -4241,6 +4239,11 @@ fn to_value_names_structs_variants_and_native_value_types() {
         native("bank.Cell", "2:3"),
     ];
     assert_eq!(values, expected);
+    let (Value::Struct(order), Value::Variant(suspended)) = (&values[0], &values[3]) else { panic!("{values:?}") };
+    let fields: Vec<(&str, &Value)> = order.named_fields().collect();
+    assert_eq!(fields, [("id", &Value::Int(1)), ("note", &some(str_("gift")))]);
+    assert_eq!((order.field("note"), order.field("missing")), (Some(&some(str_("gift"))), None));
+    assert_eq!((suspended.field("reason"), suspended.field("note")), (Some(&str_("late")), None));
 }
 
 #[test]
@@ -4309,7 +4312,7 @@ fn to_value_copies_map_keys_that_are_not_strings() {
 }
 
 #[test]
-fn to_value_shares_each_name_within_a_copy() {
+fn to_value_shares_each_type_description_within_a_copy() {
     let values = copied_values(
         "import bank\nstruct Order { id: int }\nenum Status { Active, Banned(code: int) }\nfn one() -> int { 1 }\n\
          host.copy(([Order(id: 1), Order(id: 2)], [Status.Active, Status.Banned(code: 1), Status.Active, Status.Banned(code: 2)], \
@@ -4320,20 +4323,44 @@ fn to_value_shares_each_name_within_a_copy() {
         Value::List(items) => items,
         other => panic!("{other:?}"),
     };
-    let same = |a: &Arc<str>, b: &Arc<str>| Arc::ptr_eq(a, b);
     let [Value::Struct(first), Value::Struct(second)] = &items(0)[..] else { panic!("{:?}", items(0)) };
-    assert!(same(&first.type_name, &second.type_name) && same(&first.fields[0].0, &second.fields[0].0), "{first:?} {second:?}");
-    let statuses: Vec<&VariantValue> = items(1).iter().map(|v| if let Value::Variant(v) = v { &**v } else { panic!("{v:?}") }).collect();
-    assert!(statuses.iter().all(|v| same(&v.type_name, &statuses[0].type_name)), "{statuses:?}");
-    assert!(same(&statuses[0].name, &statuses[2].name) && same(&statuses[1].name, &statuses[3].name), "{statuses:?}");
-    let (Payload::Named(a), Payload::Named(b)) = (&statuses[1].payload, &statuses[3].payload) else { panic!("{statuses:?}") };
-    assert!(same(&a[0].0, &b[0].0), "{statuses:?}");
+    assert!(Arc::ptr_eq(&first.ty, &second.ty), "{first:?} {second:?}");
+    let statuses: Vec<&VariantValue> = items(1).iter().map(|v| if let Value::Variant(v) = v { v } else { panic!("{v:?}") }).collect();
+    assert!(Arc::ptr_eq(&statuses[0].ty, &statuses[2].ty) && Arc::ptr_eq(&statuses[1].ty, &statuses[3].ty), "{statuses:?}");
     let [Value::Native(first), Value::Native(second)] = &items(2)[..] else { panic!("{:?}", items(2)) };
-    assert!(same(&first.type_name, &second.type_name), "{first:?} {second:?}");
+    assert!(Arc::ptr_eq(&first.type_name, &second.type_name), "{first:?} {second:?}");
     let [Value::Opaque { type_name: first }, Value::Opaque { type_name: second }] = &items(3)[..] else { panic!("{:?}", items(3)) };
-    assert!(same(first, second));
-    let [Value::Variant(some), Value::Variant(none), Value::Variant(other)] = &items(4)[..] else { panic!("{:?}", items(4)) };
-    assert!(same(&some.type_name, &none.type_name) && same(&some.name, &other.name), "{some:?} {none:?} {other:?}");
+    assert!(Arc::ptr_eq(first, second));
+    let [Value::Variant(some), Value::Variant(_), Value::Variant(other)] = &items(4)[..] else { panic!("{:?}", items(4)) };
+    assert!(Arc::ptr_eq(&some.ty, &other.ty), "{some:?} {other:?}");
+}
+
+#[test]
+fn encode_shares_each_type_description_for_the_life_of_the_process() {
+    use sandlang::value::Encode;
+    #[derive(sandlang::SandStruct)]
+    #[sand(module = "geo")]
+    struct Point {
+        x: i64,
+    }
+    let ty = |value: Value| match value {
+        Value::Struct(s) => s.ty as Arc<dyn std::any::Any>,
+        Value::Variant(v) => v.ty as Arc<dyn std::any::Any>,
+        other => panic!("{other:?}"),
+    };
+    let pairs = [
+        (Delivery::Pending.encode(), Delivery::Pending.encode()),
+        (Delivery::Shipped(1, "a".into()).encode(), Delivery::Shipped(2, "b".into()).encode()),
+        (Some(1).encode(), Some(2).encode()),
+        (sandlang::stdlib::json::Json::Int(1).encode(), sandlang::stdlib::json::Json::Int(2).encode()),
+        (Point { x: 1 }.encode(), Point { x: 2 }.encode()),
+    ];
+    for (first, second) in pairs {
+        let text = format!("{first:?} {second:?}");
+        assert!(Arc::ptr_eq(&ty(first), &ty(second)), "{text}");
+    }
+    let (pending, shipped) = (ty(Delivery::Pending.encode()), ty(Delivery::Shipped(1, "a".into()).encode()));
+    assert!(!Arc::ptr_eq(&pending, &shipped));
 }
 
 /// Sets up `chain(n)`, a value that nests `n` structs, and `ring`, a struct
@@ -4352,10 +4379,10 @@ fn to_value_fails_beyond_512_levels_of_nesting() {
     loop {
         value = match value {
             Value::List(items) => &items[0],
-            Value::Struct(link) => &link.fields[0].1,
-            Value::Variant(option) => match &option.payload {
-                Payload::Positional(payload) if !payload.is_empty() => &payload[0],
-                _ => break,
+            Value::Struct(link) => &link.fields[0],
+            Value::Variant(option) => match option.payload.first() {
+                Some(payload) => payload,
+                None => break,
             },
             other => panic!("{other:?}"),
         };
@@ -4489,7 +4516,7 @@ fn encode_of_a_derived_type_equals_its_copy_out_of_the_vm() {
     r.unwrap();
     let encoded = purchase.encode();
     let Value::Struct(fields) = &encoded else { panic!("{encoded:?}") };
-    assert_eq!(fields.type_name.as_ref(), "shop.Purchase");
+    assert_eq!(fields.ty.name, "shop.Purchase");
     assert_eq!(copies, [encoded]);
 }
 

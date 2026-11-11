@@ -401,7 +401,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
             false => quote!(move |vm| ::std::result::Result::Ok([#(#puts),*])),
         };
         writes.push(quote! { #pattern => #krate::native::variant_into_vm_value::<Self, _>(vm, #i, #write) });
-        encodes.push(quote! { #pattern => #krate::native::encode_variant::<Self>(#i, [#(#krate::value::Encode::encode(#names)),*]) });
+        encodes.push(quote! { #pattern => #krate::native::encode_variant::<Self>(&SAND_VARIANT_DESCS, #i, [#(#krate::value::Encode::encode(#names)),*]) });
     }
     let named = expand_named_type(input, &attrs, &type_params, quote! { #krate::native::Binding::of_enum() });
     let sand_type = expand_sand_type(input, krate, &type_params);
@@ -422,10 +422,13 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
     if attrs.manual_conversion {
         return Ok(reflection);
     }
+    let count = data.variants.len();
     let encode = (!attrs.no_encode).then(|| {
         quote! {
             impl #imp #krate::value::Encode for #ty #tyg #wh_encode {
                 fn encode(&self) -> #krate::value::Value {
+                    static SAND_VARIANT_DESCS: [#krate::native::VariantDescCell; #count] =
+                        [const { #krate::native::VariantDescCell::new() }; #count];
                     match self {
                         #(#encodes),*
                     }
@@ -592,7 +595,8 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
         quote! {
             impl #imp #krate::value::Encode for #ty #tyg #wh_encode {
                 fn encode(&self) -> #krate::value::Value {
-                    #krate::native::encode_struct::<Self>([#(#encodes),*])
+                    static SAND_STRUCT_DESC: #krate::native::StructDescCell = #krate::native::StructDescCell::new();
+                    #krate::native::encode_struct::<Self>(&SAND_STRUCT_DESC, [#(#encodes),*])
                 }
             }
         }
@@ -840,10 +844,15 @@ mod tests {
     #[test]
     fn encode_names_each_field_and_variant_payload() {
         let out = expand(sand_struct, "#[sand(module = \"m\")] struct S<T> { x: i64, y: T }");
-        assert!(out.contains(":: sandlang :: native :: encode_struct :: < Self > ([:: sandlang :: value :: Encode :: encode (& self . x) , :: sandlang :: value :: Encode :: encode (& self . y)])"), "{out}");
+        assert!(out.contains(":: sandlang :: native :: encode_struct :: < Self > (& SAND_STRUCT_DESC , [:: sandlang :: value :: Encode :: encode (& self . x) , :: sandlang :: value :: Encode :: encode (& self . y)])"), "{out}");
+        assert!(out.contains("static SAND_STRUCT_DESC : :: sandlang :: native :: StructDescCell"), "{out}");
         assert!(out.contains("T : 'static + :: sandlang :: native :: ty :: SandType + :: sandlang :: value :: Encode"), "{out}");
         let out = expand(sand_enum, "#[sand(module = \"m\")] enum E { A, B(i64), C { w: f64 } }");
-        assert!(out.contains("E :: A => :: sandlang :: native :: encode_variant :: < Self > (0usize , [])"), "{out}");
-        assert!(out.contains("E :: C { w : f0 } => :: sandlang :: native :: encode_variant :: < Self > (2usize , [:: sandlang :: value :: Encode :: encode (f0)])"), "{out}");
+        assert!(out.contains("static SAND_VARIANT_DESCS : [:: sandlang :: native :: VariantDescCell ; 3usize]"), "{out}");
+        assert!(
+            out.contains("E :: A => :: sandlang :: native :: encode_variant :: < Self > (& SAND_VARIANT_DESCS , 0usize , [])"),
+            "{out}"
+        );
+        assert!(out.contains("E :: C { w : f0 } => :: sandlang :: native :: encode_variant :: < Self > (& SAND_VARIANT_DESCS , 2usize , [:: sandlang :: value :: Encode :: encode (f0)])"), "{out}");
     }
 }

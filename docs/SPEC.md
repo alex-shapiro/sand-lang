@@ -2459,16 +2459,23 @@ reference the VM, so it remains valid after the run ends. `Value` is
 | `str`, `bytes`                               | `Str`, `Bytes`                                                     |
 | list, tuple, `Set`, map                      | `List`, `Tuple`, `Set`, `Map`, with elements in iteration order    |
 | range                                        | `Range { start, end, inclusive }`                                  |
-| struct                                       | `Struct`, with the type name and the fields in declaration order   |
-| enum variant                                 | `Variant`, with the enum name, the variant name, and the payload   |
+| struct                                       | `Struct`, with its type and the field values in declaration order  |
+| enum variant                                 | `Variant`, with its variant and the payload values                 |
 | `time` value types                           | `Instant`, `PlainDate`, and one variant for each other `time` type |
 | other native value type                      | `Native { type_name, text }`                                       |
 | value whose type does not implement `Encode` | `Opaque { type_name }`                                             |
 
+A struct holds an `Arc<StructDesc>` with the type name and the field names. A
+variant holds an `Arc<VariantDesc>` with the enum name, the variant name, and
+the payload field names, or `None` for a positional payload. A variant without
+a payload has an empty payload. All values of a type in one copy share one
+description. All values that `encode` returns for one derived type, or one
+variant of a derived enum, share one description. `StructValue::field` and
+`VariantValue::field` return a value by its field name.
+
 A type name includes its module, such as `shop.Order`. A prelude type, such as
-`Option`, `Result`, or `Error`, has its name without a module. A variant
-payload is `Payload::Positional` or, for a variant with named fields,
-`Payload::Named`. The `text` of a native value is its `Display` output, which
+`Option`, `Result`, or `Error`, has its name without a module. The `text` of a
+native value is its `Display` output, which
 `ValueType::parse` turns back into an equal value.
 `Value::native::<T>()` returns the value as the native value type `T`, or
 `None` if the value is not a `T`.

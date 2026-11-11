@@ -331,7 +331,7 @@ A generic Rust function accepts values of its `N`-th type parameter as `Param<N,
 
 ## Values outside the VM
 
-`sandlang::value::Value` holds a Sand value in a Rust form. A `Value` does not reference the VM, so you can keep it after the run ends. A struct or an enum variant in a `Value` has its type name with its module, such as `shop.Order`. The `time` types have their own variants, such as `Value::Instant` and `Value::PlainDate`. Each other native value type is a `Value::Native` with its type name and text.
+`sandlang::value::Value` holds a Sand value in a Rust form. A `Value` does not reference the VM, so you can keep it after the run ends. A struct or an enum variant in a `Value` holds a shared description of its type: the type name with its module, such as `shop.Order`, and the field names. `field("id")` returns the value of a field by its name. The `time` types have their own variants, such as `Value::Instant` and `Value::PlainDate`. Each other native value type is a `Value::Native` with its type name and text.
 
 `Vm::to_value` copies any script value out of the VM. A value whose type does not implement `Encode`, such as a function or a native object, becomes `Value::Opaque`. The copy charges fuel and counts against the memory limit, and it fails with a `"limit"` error beyond 512 levels of nesting:
 
@@ -345,7 +345,7 @@ let mut audit = NativeModule::new("audit");
 audit.source("pub native fn record<T>(event: T)");
 audit.function("record", |vm: &mut Vm, event: Param<0>| -> Result<(), Fail> {
     if let Value::Struct(event) = vm.to_value(event.raw())? {
-        println!("{} with {} fields", event.type_name, event.fields.len());
+        println!("{} with {} fields", event.ty.name, event.fields.len());
     }
     Ok(())
 });
@@ -366,8 +366,8 @@ struct Point {
 }
 
 let Value::Struct(point) = Point { x: 1.0, y: 2.0 }.encode() else { unreachable!() };
-assert_eq!(&*point.type_name, "geo.Point");
-assert_eq!(point.fields[0], ("x".into(), Value::Float(1.0)));
+assert_eq!(point.ty.name, "geo.Point");
+assert_eq!(point.field("x"), Some(&Value::Float(1.0)));
 ```
 
 `Value::native::<T>()` returns a value as the native value type `T`, such as `value.native::<jiff::civil::Date>()`, or `None` if the value is not a `T`.

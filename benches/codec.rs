@@ -155,7 +155,7 @@ fn host_modules() -> HostModules {
     host.function("copied_users", |vm: &mut Vm, doc: Param<0>| -> Result<i64, Fail> {
         let users = match vm.to_value(doc.raw())? {
             Value::Struct(doc) => match doc.fields.first() {
-                Some((_, Value::List(users))) => users.len(),
+                Some(Value::List(users)) => users.len(),
                 _ => 0,
             },
             _ => 0,
