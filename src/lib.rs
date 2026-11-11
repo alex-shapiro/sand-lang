@@ -3,7 +3,9 @@
 //!
 //! Configure and run the interpreter with [`engine::Config`] and
 //! [`engine::Engine`]. Register host functions and types with
-//! [`native::NativeModule`]. Import each item from the module that defines it.
+//! [`native::NativeModule`]. [`value::Value`] holds a Sand value in a Rust form
+//! that does not reference the VM. Import each item from the module that
+//! defines it.
 //!
 //! See `docs/SPEC.md` for the language specification.
 #![forbid(unsafe_code)]
@@ -34,6 +36,7 @@ pub mod stdlib;
 pub mod syntax;
 pub mod types;
 mod unwind;
+pub mod value;
 pub mod vm;
 
 pub use sandlang_macros::{SandEnum, SandObject, SandStruct, SandValue};
