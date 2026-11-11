@@ -302,7 +302,7 @@ fn_type!(A, B, C);
 struct UnrootedVmHandle(#[allow(dead_code)] *const ());
 
 /// Uninhabited return type for native functions that never return (Sand `never`).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Never {}
 
 /// Value of the `N`-th generic type parameter of a `native fn`.

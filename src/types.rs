@@ -628,12 +628,8 @@ pub struct FieldDef {
 
 /// A compile-time constant value constructed from literals, ranges, and data
 /// constructors.
-///
-/// Compiled programs identify variants by runtime ID (`V = u32`) and structs by
-/// definition ID (`S = TypeDefId`). Native modules identify both by Rust
-/// `TypeId`.
 #[derive(Clone, Debug, PartialEq)]
-pub enum ConstVal<V = u32, S = TypeDefId> {
+pub enum ConstVal {
     Unit,
     Bool(bool),
     Int(i64),
@@ -643,15 +639,15 @@ pub enum ConstVal<V = u32, S = TypeDefId> {
     Dur(i64),
     /// `a..b`, or `a..=b` if inclusive.
     Range(i64, i64, bool),
-    Tuple(Vec<ConstVal<V, S>>),
-    List(Vec<ConstVal<V, S>>),
-    Map(Vec<(ConstVal<V, S>, ConstVal<V, S>)>),
+    Tuple(Vec<ConstVal>),
+    List(Vec<ConstVal>),
+    Map(Vec<(ConstVal, ConstVal)>),
     /// `set([...])`, with the elements in insertion order.
-    Set(Vec<ConstVal<V, S>>),
-    /// A variant and its payload.
-    Variant(V, Vec<ConstVal<V, S>>),
+    Set(Vec<ConstVal>),
+    /// A variant, by runtime variant ID, and its payload.
+    Variant(u32, Vec<ConstVal>),
     /// A struct and its fields in declaration order.
-    Struct(S, Vec<ConstVal<V, S>>),
+    Struct(TypeDefId, Vec<ConstVal>),
 }
 
 /// Maximum number of nodes in a constant field default.
@@ -660,11 +656,11 @@ pub const MAX_CONST_PARTS: usize = 1 << 16;
 /// Maximum nesting depth of a constant field default (a scalar has depth 1).
 pub const MAX_CONST_DEPTH: usize = 64;
 
-impl<V, S> ConstVal<V, S> {
+impl ConstVal {
     /// Returns the node count and total string and byte length of `self`, or
     /// `None` if `self` exceeds [`MAX_CONST_PARTS`] or [`MAX_CONST_DEPTH`].
     pub fn measure(&self) -> Option<(usize, usize)> {
-        fn walk<V, S>(c: &ConstVal<V, S>, left: &mut usize, bytes: &mut usize, depth: usize) -> bool {
+        fn walk(c: &ConstVal, left: &mut usize, bytes: &mut usize, depth: usize) -> bool {
             if depth == 0 || *left == 0 {
                 return false;
             }
@@ -687,30 +683,6 @@ impl<V, S> ConstVal<V, S> {
         }
         let (mut left, mut bytes) = (MAX_CONST_PARTS, 0);
         walk(self, &mut left, &mut bytes, MAX_CONST_DEPTH).then_some((MAX_CONST_PARTS - left, bytes))
-    }
-
-    /// Maps each variant ID with `variant` and each struct ID with `def`, or
-    /// returns `None` if any mapping returns `None`.
-    pub fn resolve<V2, S2>(&self, variant: &impl Fn(&V) -> Option<V2>, def: &impl Fn(&S) -> Option<S2>) -> Option<ConstVal<V2, S2>> {
-        let all = |xs: &[ConstVal<V, S>]| xs.iter().map(|x| x.resolve(variant, def)).collect::<Option<Vec<_>>>();
-        Some(match self {
-            ConstVal::Unit => ConstVal::Unit,
-            ConstVal::Bool(b) => ConstVal::Bool(*b),
-            ConstVal::Int(i) => ConstVal::Int(*i),
-            ConstVal::Float(f) => ConstVal::Float(*f),
-            ConstVal::Str(s) => ConstVal::Str(s.clone()),
-            ConstVal::Bytes(b) => ConstVal::Bytes(b.clone()),
-            ConstVal::Dur(d) => ConstVal::Dur(*d),
-            ConstVal::Range(a, b, inclusive) => ConstVal::Range(*a, *b, *inclusive),
-            ConstVal::Tuple(xs) => ConstVal::Tuple(all(xs)?),
-            ConstVal::List(xs) => ConstVal::List(all(xs)?),
-            ConstVal::Set(xs) => ConstVal::Set(all(xs)?),
-            ConstVal::Map(kvs) => {
-                ConstVal::Map(kvs.iter().map(|(k, v)| Some((k.resolve(variant, def)?, v.resolve(variant, def)?))).collect::<Option<_>>()?)
-            }
-            ConstVal::Variant(v, xs) => ConstVal::Variant(variant(v)?, all(xs)?),
-            ConstVal::Struct(s, xs) => ConstVal::Struct(def(s)?, all(xs)?),
-        })
     }
 }
 

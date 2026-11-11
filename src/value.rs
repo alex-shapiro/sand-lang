@@ -1,6 +1,8 @@
 //! Sand values in a Rust form that does not reference the VM.
 
+use crate::native::ty::Never;
 use crate::stdlib::time::{PlainMonthDay, PlainYearMonth, Span, TimeZone, ZonedDateTime};
+use crate::types::{MAX_CONST_DEPTH, MAX_CONST_PARTS};
 use crate::vm::bytecode::StructRt;
 use crate::vm::encode::{self, Container, EncodeSink, EnumVariant, Leaf, MAX_DEPTH, OpaqueKind, Opened};
 use crate::vm::heap::Heap;
@@ -126,6 +128,35 @@ impl Value {
     pub fn native<T: ValueType>(&self) -> Option<T> {
         T::from_value(self)
     }
+
+    /// Returns `true` if the value has the form of a Sand compile-time
+    /// constant with at most [`MAX_CONST_PARTS`] parts and [`MAX_CONST_DEPTH`]
+    /// levels. A native value type and an opaque value have no constant form.
+    pub(crate) fn has_constant_form(&self) -> bool {
+        fn fits(value: &Value, parts_left: &mut usize, depth_left: usize) -> bool {
+            if depth_left == 0 || *parts_left == 0 {
+                return false;
+            }
+            *parts_left -= 1;
+            let mut children: &mut dyn Iterator<Item = &Value> = match value {
+                Value::Unit | Value::Bool(_) | Value::Int(_) | Value::Float(_) | Value::Str(_) | Value::Bytes(_) | Value::Range { .. } => {
+                    return true;
+                }
+                Value::Duration(d) => return i64::try_from(d.as_nanos()).is_ok(),
+                Value::List(items) | Value::Tuple(items) | Value::Set(items) => &mut items.iter(),
+                Value::Map(entries) => &mut entries.iter().flat_map(|(k, v)| [k, v]),
+                Value::Struct(s) => &mut s.fields.iter().map(|(_, v)| v),
+                Value::Variant(v) => match &v.payload {
+                    Payload::Positional(items) => &mut items.iter(),
+                    Payload::Named(fields) => &mut fields.iter().map(|(_, v)| v),
+                },
+                _ => return false,
+            };
+            Iterator::all(&mut children, |child| fits(child, parts_left, depth_left - 1))
+        }
+        let mut parts_left = MAX_CONST_PARTS;
+        fits(self, &mut parts_left, MAX_CONST_DEPTH)
+    }
 }
 
 /// A Rust type whose values have a [`Value`] form, the counterpart of the Sand
@@ -162,6 +193,12 @@ impl Value {
 pub trait Encode {
     /// Returns the [`Value`] form of `self`.
     fn encode(&self) -> Value;
+}
+
+impl Encode for Never {
+    fn encode(&self) -> Value {
+        match *self {}
+    }
 }
 
 impl Encode for Value {

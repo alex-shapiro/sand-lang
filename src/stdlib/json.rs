@@ -4,7 +4,7 @@ use super::base64;
 use crate::check::ModKind;
 use crate::native::convert::{Conversion, FromVmValue, HostError, IntoVmValue, mismatch};
 use crate::native::ty::{Param, Reflect, VmVal};
-use crate::native::{Constant, EnumType, NamedType, NativeModule, encode_variant, variant_const, variant_index};
+use crate::native::{EnumType, NamedType, NativeModule, encode_variant, variant_index};
 use crate::syntax::lexer::is_ident;
 use crate::types::ConstVal;
 use crate::types::traits;
@@ -378,19 +378,6 @@ impl IntoVmValue for Json {
         let ids = JsonIds::of(&vm.prog)?;
         let meter = &vm.meter;
         vm.heap.staged(|heap, st| walk(&mut Writer { b: Builder::new(heap, st, meter), ids }, self))
-    }
-
-    fn to_const(&self) -> Option<Constant> {
-        let payload = match self {
-            Json::Null => None,
-            Json::Bool(b) => Some(b.to_const()),
-            Json::Int(i) => Some(i.to_const()),
-            Json::Float(f) => Some(f.to_const()),
-            Json::Str(s) => Some(s.to_const()),
-            Json::Arr(items) => Some(items.to_const()),
-            Json::Obj(fields) => Some(fields.to_const()),
-        };
-        variant_const::<Json>(self.index(), payload)
     }
 }
 

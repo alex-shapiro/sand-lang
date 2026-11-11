@@ -1652,6 +1652,49 @@ fn rust_field_defaults_are_bounded() {
 }
 
 #[test]
+fn rust_field_defaults_must_be_values_of_declared_types() {
+    use sandlang::value::Encode;
+    #[derive(Default, sandlang::SandEnum)]
+    #[sand(module = "lab", no_encode)]
+    enum Shade {
+        #[default]
+        Light,
+    }
+    impl Encode for Shade {
+        fn encode(&self) -> Value {
+            variant_value("lab.Tint", "Light", [])
+        }
+    }
+    #[derive(Default, sandlang::SandStruct)]
+    #[sand(module = "lab", no_encode)]
+    struct Spot {
+        x: i64,
+    }
+    impl Encode for Spot {
+        fn encode(&self) -> Value {
+            struct_value("lab.Spot", [("y", Value::Int(self.x))])
+        }
+    }
+    #[derive(sandlang::SandStruct)]
+    #[sand(module = "lab")]
+    struct Lamp {
+        #[sand(default)]
+        shade: Shade,
+        #[sand(default)]
+        spot: Spot,
+    }
+    let mut m = NativeModule::new("lab");
+    m.bind::<Shade>().bind::<Spot>().bind::<Lamp>();
+    assert_eq!(
+        host_module_errors([m]),
+        [
+            "the Rust field `shade` of `lab.Lamp` has a default that uses `lab.Tint.Light`, which is not a declared variant",
+            "the Rust field `spot` of `lab.Lamp` has a default that uses `lab.Spot` with fields other than its declared fields",
+        ]
+    );
+}
+
+#[test]
 fn help_cuts_long_rust_field_defaults_as_it_cuts_sand_ones() {
     #[derive(sandlang::SandStruct)]
     #[sand(module = "lab")]

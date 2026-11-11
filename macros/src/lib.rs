@@ -50,7 +50,8 @@ pub fn derive_sand_enum(input: TokenStream) -> TokenStream {
 /// - `#[sand(private)]`: makes the field private.
 /// - `#[sand(var)]`: makes the field mutable.
 /// - `#[sand(default)]` or `#[sand(default = <expr>)]`: sets a default value from the `Default` trait or `Into::into(<expr>)`.
-///   `IntoVmValue::to_const` must return `Some` for the default value.
+///   The field default is the `Encode` form of the value. It must be a Sand constant, so it cannot
+///   hold a native value type.
 #[proc_macro_derive(SandStruct, attributes(sand))]
 pub fn derive_sand_struct(input: TokenStream) -> TokenStream {
     expand(input, sand_struct)
@@ -126,17 +127,14 @@ fn parse_type_attrs(input: &DeriveInput, derive: &str) -> syn::Result<TypeAttrs>
 }
 
 struct TypeParams {
+    ty: Ident,
     params: Vec<Ident>,
-    canonical_self: Type,
 }
 
 impl TypeParams {
     fn empty(input: &DeriveInput, derive: &str) -> syn::Result<Self> {
         match input.generics.params.is_empty() {
-            true => {
-                let ty = &input.ident;
-                Ok(Self { params: Vec::new(), canonical_self: parse_quote!(#ty) })
-            }
+            true => Ok(Self { ty: input.ident.clone(), params: Vec::new() }),
             false => Err(Error::new_spanned(
                 &input.generics,
                 format!("`{derive}` cannot be derived for a type with type or lifetime parameters"),
@@ -144,7 +142,7 @@ impl TypeParams {
         }
     }
 
-    fn parse(input: &DeriveInput, derive: &str, krate: &Path) -> syn::Result<Self> {
+    fn parse(input: &DeriveInput, derive: &str) -> syn::Result<Self> {
         let mut params = Vec::new();
         for p in &input.generics.params {
             match p {
@@ -160,33 +158,39 @@ impl TypeParams {
         if params.len() > 255 {
             return Err(Error::new_spanned(&input.generics, "a Sand type has at most 255 type parameters"));
         }
-        let ty = &input.ident;
-        let canonical_self = match params.len() {
-            0 => parse_quote!(#ty),
-            n => {
-                let i = (0..n).map(|i| i as u8);
-                parse_quote!(#ty<#(#krate::native::ty::Param<#i>),*>)
-            }
-        };
-        Ok(Self { params, canonical_self })
+        Ok(Self { ty: input.ident.clone(), params })
     }
 
     /// Replaces `Self` and each type parameter in `ty` with `Param<N>`.
     fn replace_self(&self, krate: &Path, ty: &Type) -> Type {
-        struct Subst<'a>(&'a TypeParams, &'a Path);
+        self.substitute(ty, &|i| parse_quote!(#krate::native::ty::Param<#i>))
+    }
+
+    /// Replaces each type parameter in `ty`, also in `Self`, with the
+    /// uninhabited `Never`. A value of the result holds no value of a type
+    /// parameter.
+    fn replace_params_with_never(&self, krate: &Path, ty: &Type) -> Type {
+        self.substitute(ty, &|_| parse_quote!(#krate::native::ty::Never))
+    }
+
+    /// Replaces type parameter `N` in `ty` with `param(N)`, and `Self` with the
+    /// type whose arguments are `param(0)`, `param(1)`, and so on.
+    fn substitute(&self, ty: &Type, param: &dyn Fn(u8) -> Type) -> Type {
+        struct Subst<'a>(&'a TypeParams, &'a dyn Fn(u8) -> Type);
         impl VisitMut for Subst<'_> {
             fn visit_type_mut(&mut self, t: &mut Type) {
                 if let Type::Path(p) = t
                     && p.qself.is_none()
                     && let Some(id) = p.path.get_ident()
                 {
+                    let (ty, params) = (&self.0.ty, &self.0.params);
                     if id == "Self" {
-                        *t = self.0.canonical_self.clone();
+                        let args = (0..params.len()).map(|i| (self.1)(i as u8));
+                        *t = if params.is_empty() { parse_quote!(#ty) } else { parse_quote!(#ty<#(#args),*>) };
                         return;
                     }
-                    if let Some(i) = self.0.params.iter().position(|x| x == id) {
-                        let (i, krate) = (i as u8, self.1);
-                        *t = parse_quote!(#krate::native::ty::Param<#i>);
+                    if let Some(i) = params.iter().position(|x| x == id) {
+                        *t = (self.1)(i as u8);
                         return;
                     }
                 }
@@ -194,7 +198,7 @@ impl TypeParams {
             }
         }
         let mut t = ty.clone();
-        Subst(self, krate).visit_type_mut(&mut t);
+        Subst(self, param).visit_type_mut(&mut t);
         t
     }
 
@@ -323,7 +327,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
         return Err(Error::new_spanned(ty, "`SandEnum` can only be derived for enums"));
     };
     let attrs = parse_type_attrs(input, "SandEnum")?;
-    let type_params = TypeParams::parse(input, "SandEnum", &attrs.krate)?;
+    let type_params = TypeParams::parse(input, "SandEnum")?;
     reject_member_attrs(&input.data)?;
     if data.variants.is_empty() {
         return Err(Error::new_spanned(ty, "a Sand enum must have at least one variant"));
@@ -333,7 +337,6 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
     let mut indexes = Vec::new();
     let mut reads = Vec::new();
     let mut writes = Vec::new();
-    let mut consts = Vec::new();
     let mut encodes = Vec::new();
     let mut checks = Vec::new();
     for (i, v) in data.variants.iter().enumerate() {
@@ -398,9 +401,6 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
             false => quote!(move |vm| ::std::result::Result::Ok([#(#puts),*])),
         };
         writes.push(quote! { #pattern => #krate::native::variant_into_vm_value::<Self, _>(vm, #i, #write) });
-        consts.push(
-            quote! { #pattern => #krate::native::variant_const::<Self>(#i, [#(#krate::native::convert::IntoVmValue::to_const(#names)),*]) },
-        );
         encodes.push(quote! { #pattern => #krate::native::encode_variant::<Self>(#i, [#(#krate::value::Encode::encode(#names)),*]) });
     }
     let named = expand_named_type(input, &attrs, &type_params, quote! { #krate::native::Binding::of_enum() });
@@ -457,11 +457,6 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
                     #(#writes),*
                 }
             }
-            fn to_const(&self) -> ::std::option::Option<#krate::native::Constant> {
-                match self {
-                    #(#consts),*
-                }
-            }
         }
         #encode
     })
@@ -511,7 +506,7 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
         return Err(Error::new_spanned(ty, "`SandStruct` can only be derived for structs"));
     };
     let attrs = parse_type_attrs(input, "SandStruct")?;
-    let type_params = TypeParams::parse(input, "SandStruct", &attrs.krate)?;
+    let type_params = TypeParams::parse(input, "SandStruct")?;
     let krate = &attrs.krate;
     let fields = match &data.fields {
         Fields::Named(f) => f.named.iter().collect::<Vec<_>>(),
@@ -522,7 +517,6 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
     let mut reads = Vec::new();
     let mut writes = Vec::new();
     let mut names = Vec::new();
-    let mut consts = Vec::new();
     let mut encodes = Vec::new();
     let mut checks = Vec::new();
     for (i, f) in fields.iter().enumerate() {
@@ -556,11 +550,12 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
         let default = match default {
             None => quote!(::std::option::Option::None),
             Some(value) => {
-                let value = value.map_or_else(|| quote!(<#canonical as ::std::default::Default>::default()), |e| quote!(#e));
+                let value_ty = type_params.replace_params_with_never(krate, fty);
+                let value = value.map_or_else(|| quote!(<#value_ty as ::std::default::Default>::default()), |e| quote!(#e));
                 quote_spanned! {fty.span()=>
                     ::std::option::Option::Some(|| {
-                        let value: #canonical = ::std::convert::Into::into(#value);
-                        #krate::native::convert::IntoVmValue::to_const(&value)
+                        let value: #value_ty = ::std::convert::Into::into(#value);
+                        #krate::value::Encode::encode(&value)
                     })
                 }
             }
@@ -577,7 +572,6 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
         });
         reads.push(quote! { #ident: #krate::native::field_from_vm_value::<#fty>(vm, fields[#i], conv)? });
         writes.push(quote! { #krate::native::convert::IntoVmValue::into_vm_value(self.#ident, vm)? });
-        consts.push(quote! { #krate::native::convert::IntoVmValue::to_const(&self.#ident) });
         encodes.push(quote! { #krate::value::Encode::encode(&self.#ident) });
     }
     let named = expand_named_type(input, &attrs, &type_params, quote! { #krate::native::Binding::of_struct() });
@@ -619,9 +613,6 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
         impl #imp #krate::native::convert::IntoVmValue for #ty #tyg #wh_into {
             fn into_vm_value(self, vm: &mut #krate::vm::Vm) -> ::std::result::Result<#krate::vm::value::VmValue, #krate::vm::Fail> {
                 #krate::native::struct_into_vm_value::<Self>(vm, move |vm| ::std::result::Result::Ok(::std::boxed::Box::new([#(#writes),*])))
-            }
-            fn to_const(&self) -> ::std::option::Option<#krate::native::Constant> {
-                #krate::native::struct_const::<Self>([#(#consts),*])
             }
         }
         #encode
@@ -723,9 +714,17 @@ mod tests {
             out.contains("let value : i64 = :: std :: convert :: Into :: into (< i64 as :: std :: default :: Default > :: default ())"),
             "{out}"
         );
-        assert!(out.contains("let value : i64 = :: std :: convert :: Into :: into (2) ;"), "{out}");
-        assert!(out.contains(":: sandlang :: native :: convert :: IntoVmValue :: to_const (& value)"), "{out}");
+        assert!(
+            out.contains("let value : i64 = :: std :: convert :: Into :: into (2) ; :: sandlang :: value :: Encode :: encode (& value)"),
+            "{out}"
+        );
         assert_eq!(out.matches("default : :: std :: option :: Option :: None").count(), 1, "{out}");
+        let out = expand(
+            sand_struct,
+            "#[sand(module = \"m\")] struct G<T> { #[sand(default)] xs: Vec<T>, #[sand(default)] next: Option<Box<Self>> }",
+        );
+        assert!(out.contains("let value : Vec < :: sandlang :: native :: ty :: Never > = :: std :: convert :: Into :: into"), "{out}");
+        assert!(out.contains("let value : Option < Box < G < :: sandlang :: native :: ty :: Never > > > ="), "{out}");
     }
 
     #[test]

@@ -7,7 +7,7 @@ pub mod ty;
 use crate::check::ModKind;
 use crate::engine::Registry;
 use crate::syntax::lexer::{is_ident, is_keyword};
-use crate::types::{ConstVal, MAX_CONST_DEPTH, MAX_CONST_PARTS, ValueTypeInfo};
+use crate::types::{MAX_CONST_DEPTH, MAX_CONST_PARTS, ValueTypeInfo};
 use crate::value::{Payload, StructValue, Value, VariantValue, qualified_name};
 use crate::vm::heap::Heap;
 use crate::vm::value::{ChannelObj, MapObj, Obj, SetObj, TaskObj, TypeDesc, ValueType, VmValue};
@@ -66,12 +66,12 @@ impl<T: StructType> Binding<T> {
         let default = |f: &StructField| {
             let d = f.default?();
             assert!(
-                d.as_ref().is_some_and(|c| c.0.measure().is_some()),
+                d.has_constant_form(),
                 "the default of field `{}` of `{}` is not a Sand constant, or has more than {MAX_CONST_PARTS} parts or {MAX_CONST_DEPTH} levels",
                 f.name,
                 T::NAME
             );
-            d
+            Some(d)
         };
         let defaults = T::FIELDS.iter().map(default).collect();
         Binding(BoundKind::Struct { rust: T::rust_type(), params: T::PARAMS, fields: T::FIELDS, defaults }, PhantomData)
@@ -189,38 +189,10 @@ pub struct StructField {
     pub var: bool,
     /// Returns the Sand [`Type`] of the field.
     pub ty: fn() -> Type,
-    /// Evaluates the default value of the field (`#[sand(default)]`) as a compile-time [`Constant`].
-    pub default: Option<fn() -> Option<Constant>>,
-}
-
-/// Compile-time Sand constant produced by [`IntoVmValue::to_const`](convert::IntoVmValue::to_const).
-#[derive(Clone, Debug, PartialEq)]
-pub struct Constant(pub(crate) ConstVal<RustVariant, TypeId>);
-
-/// Enum variant identifier inside a [`Constant`].
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum RustVariant {
-    None,
-    Some,
-    /// Variant `index` of the Rust-bound enum identified by `rust` ([`NamedType::rust_type`]).
-    Bound {
-        rust: TypeId,
-        index: usize,
-    },
-}
-
-pub(crate) fn collect_consts(cs: impl IntoIterator<Item = Option<Constant>>) -> Option<Vec<ConstVal<RustVariant, TypeId>>> {
-    cs.into_iter().map(|c| c.map(|c| c.0)).collect()
-}
-
-#[doc(hidden)]
-pub fn variant_const<T: EnumType>(index: usize, payload: impl IntoIterator<Item = Option<Constant>>) -> Option<Constant> {
-    Some(Constant(ConstVal::Variant(RustVariant::Bound { rust: T::rust_type(), index }, collect_consts(payload)?)))
-}
-
-#[doc(hidden)]
-pub fn struct_const<T: StructType>(fields: impl IntoIterator<Item = Option<Constant>>) -> Option<Constant> {
-    Some(Constant(ConstVal::Struct(T::rust_type(), collect_consts(fields)?)))
+    /// Returns the default value of the field (`#[sand(default)]`): the
+    /// [`Encode`](crate::value::Encode) form of the Rust default. The default
+    /// must be a Sand constant, so it cannot hold a native value type.
+    pub default: Option<fn() -> Value>,
 }
 
 #[doc(hidden)]
@@ -736,7 +708,7 @@ pub(crate) enum BoundKind {
         rust: TypeId,
         params: &'static [&'static str],
         fields: &'static [StructField],
-        defaults: Arc<[Option<Constant>]>,
+        defaults: Arc<[Option<Value>]>,
     },
     /// Built-in generic type (`Task<T>` or `Channel<T>`) and its type parameter names.
     Builtin(&'static [&'static str]),
