@@ -88,6 +88,11 @@ The host cannot rely on engine limits, stability, or control.
       break paused runs.
 - [ ] ❓ _Testing._ Compare fuel across hash seeds in the spec suite. Add a test
       configuration option to set the hash seed.
+- [ ] ❓ _Testing._ Compare fuel between a 32-bit and a 64-bit target. No test
+      runs a program on both, so the deterministic fuel rule holds across
+      platforms only by review. Add a small set of programs with pinned fuel
+      totals that runs on a native target and on `wasm32`. Include a host
+      function that calls `Vm::to_value`.
 - [ ] ❓ _Embedding._ Convert derived `SandEnum` and `SandStruct` values iteratively with an
       explicit stack. The derived `FromVmValue` and `IntoVmValue` implementations
       recurse once per nesting level. Deep values can overflow a small host
@@ -475,6 +480,11 @@ Visible defects that rarely block users.
       shift loop alignment. On Apple silicon, code placement changes alter
       `integer loop 10M`, `game of life`, and `option ? chains` in
       `benches/vm.rs` by up to 13% at identical instruction counts.
+- [ ] ❓ Add a comparison mode to `benches/codec.rs`. Speed evidence for the
+      `json` module and for `Vm::to_value` needs two benchmark executables,
+      alternating runs, and a process environment of a different size in each
+      round. The size of the environment alone changes one operation by up to
+      45%. The repository records none of these steps.
 - [ ] ⚪ Replace the VM dispatch loop with a threaded dispatch table once Rust
       stabilizes the `become` keyword for guaranteed tail calls.
 
