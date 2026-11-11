@@ -7,9 +7,10 @@ use std::collections::{HashMap, VecDeque};
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::sync::{Arc, OnceLock};
 
-/// A Sand value in the representation of the VM. The VM keeps a primitive
-/// value inline, and keeps each other value as a handle to an object on the
-/// heap of the VM that made it.
+/// A Sand value as the VM stores it: an immediate value, or a handle to an
+/// object on the heap of one VM. The garbage collector does not trace a
+/// `VmValue` that a native function holds, so a handle is valid only during the
+/// native call that received or allocated it.
 ///
 /// Enum variants with exactly one payload are stored inline (`VUnit` ..
 /// `VObj`: runtime variant id, then the payload) whenever the payload is not

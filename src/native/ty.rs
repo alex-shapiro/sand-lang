@@ -407,7 +407,7 @@ impl<const N: u8> SandType for Reflect<N> {
     }
 }
 
-/// Uncopied handle to a Sand [`VmValue`] with the Sand type of `T`.
+/// An uncopied [`VmValue`] with the Sand type of `T`.
 ///
 /// Functions registered with [`NativeModule::vm_function`](super::NativeModule::vm_function)
 /// can accept and return `Val<T>` to avoid copying heap values (for example,

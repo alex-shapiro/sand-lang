@@ -1,4 +1,4 @@
-//! Value conversion between Sand and Rust.
+//! Conversion between VM values and the arguments and results of native functions.
 
 use super::ty::{Never, Num, Param, Reflect, SandType, Val};
 use super::{Constant, RustVariant};
