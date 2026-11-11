@@ -33,24 +33,22 @@ pub(crate) fn module() -> NativeModule {
     m.function("SocketAddr.ip", |addr: SocketAddr| addr.0.ip().to_string());
     m.function("SocketAddr.port", |addr: SocketAddr| i64::from(addr.0.port()));
     m.function("split_host_port", split_host_port);
-    m.vm_function("listen", |vm: &mut Vm, ip: VmVal<String>, port: i64| listen_with(vm, ip, port, Listener::new));
-    m.vm_function("connect", connect);
-    m.vm_function("connect_tls", connect_tls);
-    m.vm_function("Listener.accept", listener_accept);
-    m.vm_function("Listener.addr", |vm: &mut Vm, l: VmVal<Listener>| -> Result<SocketAddr, Fail> { Ok(l.get(&vm.heap)?.addr) });
-    m.vm_function("Listener.close", |vm: &mut Vm, l: VmVal<Listener>| -> Result<_, Fail> {
+    m.function("listen", |vm: &mut Vm, ip: VmVal<String>, port: i64| listen_with(vm, ip, port, Listener::new));
+    m.function("connect", connect);
+    m.function("connect_tls", connect_tls);
+    m.function("Listener.accept", listener_accept);
+    m.function("Listener.addr", |vm: &mut Vm, l: VmVal<Listener>| -> Result<SocketAddr, Fail> { Ok(l.get(&vm.heap)?.addr) });
+    m.function("Listener.close", |vm: &mut Vm, l: VmVal<Listener>| -> Result<_, Fail> {
         l.get_mut(&mut vm.heap)?.close();
         Ok(())
     });
-    m.vm_function("Conn.read", conn_read);
-    m.vm_function("Conn.read_line", conn_read_line);
-    m.vm_function("Conn.read_all", conn_read_all);
-    m.vm_function("Conn.write", |vm: &mut Vm, c: VmVal<Conn>, data: VmVal<Vec<u8>>| conn_write(vm, c, |vm| data.bytes(&vm.heap)));
-    m.vm_function("Conn.write_str", |vm: &mut Vm, c: VmVal<Conn>, text: VmVal<String>| {
-        conn_write(vm, c, |vm| text.str(&vm.heap).as_bytes())
-    });
-    m.vm_function("Conn.peer_addr", |vm: &mut Vm, c: VmVal<Conn>| -> Result<SocketAddr, Fail> { Ok(c.get(&vm.heap)?.peer) });
-    m.vm_function("Conn.close", |vm: &mut Vm, c: VmVal<Conn>| -> Result<_, Fail> {
+    m.function("Conn.read", conn_read);
+    m.function("Conn.read_line", conn_read_line);
+    m.function("Conn.read_all", conn_read_all);
+    m.function("Conn.write", |vm: &mut Vm, c: VmVal<Conn>, data: VmVal<Vec<u8>>| conn_write(vm, c, |vm| data.bytes(&vm.heap)));
+    m.function("Conn.write_str", |vm: &mut Vm, c: VmVal<Conn>, text: VmVal<String>| conn_write(vm, c, |vm| text.str(&vm.heap).as_bytes()));
+    m.function("Conn.peer_addr", |vm: &mut Vm, c: VmVal<Conn>| -> Result<SocketAddr, Fail> { Ok(c.get(&vm.heap)?.peer) });
+    m.function("Conn.close", |vm: &mut Vm, c: VmVal<Conn>| -> Result<_, Fail> {
         c.get_mut(&mut vm.heap)?.close();
         Ok(())
     });

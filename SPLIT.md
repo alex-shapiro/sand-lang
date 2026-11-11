@@ -33,8 +33,8 @@ source branch only as a reference.
 9. Explicit VM control flow: merged in #35 from `explicit-vm-control-flow`
 10. `Fail` failure type: merged in #37 from `fail-failure-type`
 11. Deterministic fuel: merged in #38 from `deterministic-fuel`
-12. `VmValue` rename: in review on `vm-value-rename`
-13. Single native function registration: not started
+12. `VmValue` rename: merged in #39 from `vm-value-rename`
+13. Single native function registration: in review on `single-native-function`
 14. `Value` and the shared encode path: not started; requires 12
 15. Shared decode path and `Value` input: not started; requires 14
 16. `serde` support for `Value`: not started; requires 14
@@ -254,17 +254,22 @@ module.function("touch", |vm: &mut Vm, path: String| { /* uses the VM */ });
 module.function("slow", |url: String| async move { fetch(url).await });
 ```
 
-- A single trait replaces `HostFunction`, `VmFunction`, and `AsyncHostFunction`.
-- Each parameter is a script argument or a value that the engine provides. A
-  later changeset can add a provided value without a new method.
-- A closure that takes `&mut Vm` with a borrowed argument remains a compile error.
-  An async closure with a borrowed argument also remains a compile error.
-- Reject VM handles in async closures and `Later` futures at compile time. Add
-  a marker trait for types that do not reference the VM heap. Require this
-  trait on async parameters and results so that a handle cannot cross a garbage
-  collection.
-- Check `Later`, retry stress, and trait dictionary arguments against this trait.
-  A standalone prototype covered only the closure forms.
+- A single trait, `NativeFunction`, replaces `HostFunction`, `VmFunction`, and
+  `AsyncHostFunction`.
+- Each parameter implements `NativeParam`. It reads a script argument or
+  receives a value that the engine provides. A later changeset can add an
+  engine-provided parameter without a new registration method.
+- A closure that takes `&mut Vm` or returns a future cannot have a borrowed
+  parameter.
+- Reject VM handles in futures at compile time. VM handles are not `Send`.
+  Async parameters and results must be `Send`. The `Later` future and finisher
+  closure are also `Send`. A future therefore cannot hold a handle across a
+  garbage collection.
+- Use `Send` instead of a marker trait. A trait bound cannot restrict the values
+  that a future captures. Only an auto trait can check captured values, and
+  these futures already require `Send`.
+- The compiler does not check a raw `VmValue`, because the VM heap must be
+  `Send`.
 
 This changeset has no source commits.
 
@@ -418,6 +423,8 @@ let mut session = Session::new(config, run_ctx);
 
 - `Context<C>` is a value that the engine provides to a native function, as
   changeset 13 allows. A function that does not ask for it pays no cost.
+- Add the type parameter `C` to `NativeParam` and `NativeFunction`, so that the
+  compiler rejects a `Context` of the wrong type in `NativeModule<C>::function`.
 - `C` is a parameter of `NativeModule`, `HostModules`, `Config`, `Engine`,
   `CompiledProgram`, and `Function`. It defaults to `()`, so a host without a
   context does not name it.
@@ -531,6 +538,9 @@ module.function("put", Effectful(|ctx: Context<RunCtx>, seq: JournalSeq, key: St
     ctx.effects.kv_write(key, Some(value), seq).await.map_err(kv_error)
 }));
 ```
+
+In `NativeFunction<Kind>`, `Kind` is `(kind_marker, (P1, P2, ...))`. A single
+implementation for each wrapper covers every arity and excludes `VmNativeFn`.
 
 **Let a host choose the behavior after an unknown outcome.** An `Effectful` function
 runs at least once by default. An `Effectful` function can instead fail the run if a

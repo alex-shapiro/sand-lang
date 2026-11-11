@@ -242,7 +242,7 @@ fn json_layers() -> impl Strategy<Value = Vec<JsonLayer>> {
 
 fn sum_module() -> NativeModule {
     let mut m = NativeModule::new("nums");
-    m.vm_function("total", |vm: &mut Vm, num: Num<0>, xs: VmVal<Vec<Param<0, traits::Num>>>| -> Result<Param<0>, Ctl> {
+    m.function("total", |vm: &mut Vm, num: Num<0>, xs: VmVal<Vec<Param<0, traits::Num>>>| -> Result<Param<0>, Ctl> {
         let mut acc = num.zero(vm)?.raw();
         for &x in xs.items(&vm.heap) {
             acc = match (acc, x) {

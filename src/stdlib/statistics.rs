@@ -11,13 +11,13 @@ type Floats = VmVal<Vec<f64>>;
 pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("statistics", ModKind::Std, include_str!("statistics.sand"));
 
-    m.vm_function("mean", |vm: &mut Vm, xs: Floats| -> Result<Option<f64>, Fail> { Ok(mean(floats(vm, xs)?)) });
-    m.vm_function("mean_int", |vm: &mut Vm, xs: VmVal<Vec<i64>>| -> Result<_, Fail> {
+    m.function("mean", |vm: &mut Vm, xs: Floats| -> Result<Option<f64>, Fail> { Ok(mean(floats(vm, xs)?)) });
+    m.function("mean_int", |vm: &mut Vm, xs: VmVal<Vec<i64>>| -> Result<_, Fail> {
         let items = xs.items(&vm.heap);
         vm.charge(items.len() as u64)?;
         Ok(mean(items.iter().map(|v| v.as_int() as f64)))
     });
-    m.vm_function("median", |vm: &mut Vm, xs: Floats| -> Result<_, Fail> {
+    m.function("median", |vm: &mut Vm, xs: Floats| -> Result<_, Fail> {
         let mut xs = copied(vm, xs)?;
         let n = xs.len();
         Ok(match n {
@@ -31,7 +31,7 @@ pub(crate) fn module() -> NativeModule {
             }
         })
     });
-    m.vm_function("mode", |vm: &mut Vm, xs: Floats| -> Result<_, Fail> {
+    m.function("mode", |vm: &mut Vm, xs: Floats| -> Result<_, Fail> {
         let items = xs.items(&vm.heap);
         vm.charge(items.len() as u64)?;
         vm.check_memory(items.len().saturating_mul(32))?;
@@ -45,14 +45,14 @@ pub(crate) fn module() -> NativeModule {
         let best = counts.values().max_by(|(c1, i1), (c2, i2)| c1.cmp(c2).then(i2.cmp(i1)));
         Ok(best.map(|&(_, i)| items[i].as_float()))
     });
-    m.vm_function("variance", |vm: &mut Vm, xs: Floats| -> Result<Option<f64>, Fail> { Ok(variance(floats(vm, xs)?, 1)) });
-    m.vm_function("stdev", |vm: &mut Vm, xs: Floats| -> Result<Option<f64>, Fail> { Ok(variance(floats(vm, xs)?, 1).map(f64::sqrt)) });
-    m.vm_function("pvariance", |vm: &mut Vm, xs: Floats| -> Result<Option<f64>, Fail> { Ok(variance(floats(vm, xs)?, 0)) });
-    m.vm_function("pstdev", |vm: &mut Vm, xs: Floats| -> Result<Option<f64>, Fail> { Ok(variance(floats(vm, xs)?, 0).map(f64::sqrt)) });
-    m.vm_function("min", |vm: &mut Vm, xs: Floats| -> Result<Option<f64>, Fail> { Ok(floats(vm, xs)?.reduce(f64::min)) });
-    m.vm_function("max", |vm: &mut Vm, xs: Floats| -> Result<Option<f64>, Fail> { Ok(floats(vm, xs)?.reduce(f64::max)) });
-    m.vm_function("sum", |vm: &mut Vm, xs: Floats| -> Result<f64, Fail> { Ok(sum(floats(vm, xs)?)) });
-    m.vm_function("quantile", |vm: &mut Vm, xs: Floats, q: f64| -> Result<_, Fail> {
+    m.function("variance", |vm: &mut Vm, xs: Floats| -> Result<Option<f64>, Fail> { Ok(variance(floats(vm, xs)?, 1)) });
+    m.function("stdev", |vm: &mut Vm, xs: Floats| -> Result<Option<f64>, Fail> { Ok(variance(floats(vm, xs)?, 1).map(f64::sqrt)) });
+    m.function("pvariance", |vm: &mut Vm, xs: Floats| -> Result<Option<f64>, Fail> { Ok(variance(floats(vm, xs)?, 0)) });
+    m.function("pstdev", |vm: &mut Vm, xs: Floats| -> Result<Option<f64>, Fail> { Ok(variance(floats(vm, xs)?, 0).map(f64::sqrt)) });
+    m.function("min", |vm: &mut Vm, xs: Floats| -> Result<Option<f64>, Fail> { Ok(floats(vm, xs)?.reduce(f64::min)) });
+    m.function("max", |vm: &mut Vm, xs: Floats| -> Result<Option<f64>, Fail> { Ok(floats(vm, xs)?.reduce(f64::max)) });
+    m.function("sum", |vm: &mut Vm, xs: Floats| -> Result<f64, Fail> { Ok(sum(floats(vm, xs)?)) });
+    m.function("quantile", |vm: &mut Vm, xs: Floats, q: f64| -> Result<_, Fail> {
         if xs.items(&vm.heap).is_empty() || !(0.0..=1.0).contains(&q) {
             return Ok(None);
         }
@@ -65,13 +65,13 @@ pub(crate) fn module() -> NativeModule {
         let y = xs[lo + 1..].iter().copied().min_by(f64::total_cmp).unwrap_or(x);
         Ok(Some(x + (y - x) * frac))
     });
-    m.vm_function("correlation", |vm: &mut Vm, xs: Floats, ys: Floats| -> Result<Option<f64>, Fail> {
+    m.function("correlation", |vm: &mut Vm, xs: Floats, ys: Floats| -> Result<Option<f64>, Fail> {
         Ok(moments(floats(vm, xs)?, floats(vm, ys)?).and_then(|m| {
             let denom = (m.sxx * m.syy).sqrt();
             (denom > 0.0 && denom.is_finite()).then(|| (m.sxy / denom).clamp(-1.0, 1.0))
         }))
     });
-    m.vm_function("linear_regression", |vm: &mut Vm, xs: Floats, ys: Floats| -> Result<Option<(f64, f64)>, Fail> {
+    m.function("linear_regression", |vm: &mut Vm, xs: Floats, ys: Floats| -> Result<Option<(f64, f64)>, Fail> {
         Ok(moments(floats(vm, xs)?, floats(vm, ys)?).filter(|m| m.sxx > 0.0).map(|m| {
             let slope = m.sxy / m.sxx;
             (slope, m.mean_y - slope * m.mean_x)

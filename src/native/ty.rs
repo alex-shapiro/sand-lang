@@ -297,6 +297,10 @@ fn_type!(A);
 fn_type!(A, B);
 fn_type!(A, B, C);
 
+/// Makes a VM handle `!Send` and `!Sync`. A handle is valid only during the
+/// native call that received or allocated it.
+struct UnrootedVmHandle(#[allow(dead_code)] *const ());
+
 /// Uninhabited return type for native functions that never return (Sand `never`).
 #[derive(Clone, Copy, Debug)]
 pub enum Never {}
@@ -310,7 +314,7 @@ pub enum Never {}
 /// `VmVal<Vec<Param<0>>>` and returns `Option<Param<0>>`. If the Rust function
 /// uses `Param<0, traits::Hash>`, the `native fn` declaration must declare
 /// `T: Hash`.
-pub struct Param<const N: u8, B: traits::Set = ()>(VmValue, PhantomData<fn() -> B>);
+pub struct Param<const N: u8, B: traits::Set = ()>(VmValue, PhantomData<fn() -> B>, PhantomData<UnrootedVmHandle>);
 
 impl<const N: u8, B: traits::Set> Param<N, B> {
     pub fn raw(self) -> VmValue {
@@ -319,7 +323,7 @@ impl<const N: u8, B: traits::Set> Param<N, B> {
 
     /// Wraps `v`, which must have the type of the `N`-th type parameter.
     pub fn from_raw(v: VmValue) -> Self {
-        Param(v, PhantomData)
+        Param(v, PhantomData, PhantomData)
     }
 }
 
@@ -349,7 +353,7 @@ impl<const N: u8, B: traits::Set> SandType for Param<N, B> {
 /// A Rust function can accept `Num<N>` for any type parameter that the
 /// `native fn` declaration declares as `T: Num`. Place `Num<N>` parameters in ascending order of `N`, after
 /// any [`Reflect`] parameters and before regular value parameters.
-pub struct Num<const N: u8>(VmValue);
+pub struct Num<const N: u8>(VmValue, PhantomData<UnrootedVmHandle>);
 
 impl<const N: u8> Num<N> {
     pub fn raw(self) -> VmValue {
@@ -357,7 +361,7 @@ impl<const N: u8> Num<N> {
     }
 
     pub(crate) fn from_raw(v: VmValue) -> Self {
-        Num(v)
+        Num(v, PhantomData)
     }
 }
 
@@ -384,7 +388,7 @@ impl<const N: u8> SandType for Num<N> {
 /// Runtime type descriptor for the `N`-th `reflect` type parameter of a
 /// `native fn` (see [`Type::Reflect`]).
 #[derive(Clone, Copy)]
-pub struct Reflect<const N: u8>(VmValue);
+pub struct Reflect<const N: u8>(VmValue, PhantomData<UnrootedVmHandle>);
 
 impl<const N: u8> Reflect<N> {
     pub fn raw(self) -> VmValue {
@@ -392,7 +396,7 @@ impl<const N: u8> Reflect<N> {
     }
 
     pub(crate) fn from_raw(v: VmValue) -> Self {
-        Reflect(v)
+        Reflect(v, PhantomData)
     }
 }
 
@@ -410,14 +414,28 @@ impl<const N: u8> SandType for Reflect<N> {
 
 /// An uncopied [`VmValue`] with the Sand type of `T`.
 ///
-/// Functions registered with [`NativeModule::vm_function`](super::NativeModule::vm_function)
-/// can accept and return `VmVal<T>` to avoid copying heap values.
+/// A [`NativeFunction`](super::func::NativeFunction) that takes `&mut Vm` can
+/// accept and return `VmVal<T>` to avoid copying heap values.
 ///
-/// A `VmVal` is valid only during the synchronous native call that received or
-/// allocated it. The garbage collector does not trace `VmVal` handles stored in
-/// Rust structs. Never store a `VmVal` inside a
-/// [`NativeObject`](super::NativeObject) or across an async suspension point.
-pub struct VmVal<T: ?Sized>(VmValue, PhantomData<fn() -> T>);
+/// A `VmVal` is valid only during the native call that received or allocated
+/// it. The garbage collector does not trace a `VmVal` that Rust code holds. A
+/// collection during a wait can free the heap object. For this reason, `VmVal`
+/// is not `Send`, and neither are [`Param`], [`Num`], and [`Reflect`]. The
+/// compiler rejects a VM handle in these places:
+///
+/// - a [`NativeObject`](super::NativeObject)
+/// - the future of an async native function
+/// - the future or finisher closure of [`Later::new`](super::func::Later::new)
+///
+/// ```compile_fail,E0277
+/// # use sandlang::native::ty::VmVal;
+/// fn assert_send<T: Send>() {}
+/// assert_send::<VmVal<String>>();
+/// ```
+///
+/// [`VmVal::raw`] returns a [`VmValue`] without this check. Do not hold a raw
+/// [`VmValue`] across a wait.
+pub struct VmVal<T: ?Sized>(VmValue, PhantomData<fn() -> T>, PhantomData<UnrootedVmHandle>);
 
 impl<T: ?Sized> VmVal<T> {
     pub fn raw(self) -> VmValue {
@@ -426,7 +444,7 @@ impl<T: ?Sized> VmVal<T> {
 
     /// Wraps `v`, which must have the Sand type of `T`.
     pub fn from_raw(v: VmValue) -> Self {
-        VmVal(v, PhantomData)
+        VmVal(v, PhantomData, PhantomData)
     }
 }
 

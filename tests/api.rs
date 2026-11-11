@@ -309,7 +309,7 @@ impl IntoVmValue for Cents {
 fn host_type_implements_vm_value_conversion() {
     let mut module = NativeModule::new("till");
     module.function("double", |cents: Cents| Cents(cents.0 * 2));
-    module.async_function("refund", |cents: Cents| async move { Cents(-cents.0) });
+    module.function("refund", |cents: Cents| async move { Cents(-cents.0) });
     let config = Config::new().host_modules(HostModules::new([module]).unwrap());
     let (result, out, _) = run_src(config, "import till\nprint(till.double(21))\nprint(till.refund(5))");
     result.unwrap();
@@ -730,7 +730,7 @@ fn native_module_conversions() {
     })
     .params(&["key"]);
     m.function("many", |n: i64| -> Vec<String> { (0..n).map(|i| "x".repeat(1000) + &i.to_string()).collect() });
-    m.vm_function("write", |vm: &mut Vm, path: String, data: Vec<u8>| -> Result<i64, sandlang::native::convert::HostError> {
+    m.function("write", |vm: &mut Vm, path: String, data: Vec<u8>| -> Result<i64, sandlang::native::convert::HostError> {
         vm.require(&Capability::Custom { name: "write".into(), detail: format!("{path} {}", data.len()) })?;
         Ok((path.len() + data.len()) as i64)
     });
@@ -818,9 +818,9 @@ fn native_module_signatures_are_type_checked() {
 }
 
 #[test]
-fn native_async_functions_suspend_only_their_task() {
+fn async_native_functions_suspend_only_their_task() {
     let mut m = NativeModule::new("slow");
-    m.async_function("echo", |s: String, ms: i64| async move {
+    m.function("echo", |s: String, ms: i64| async move {
         tokio::time::sleep(Duration::from_millis(ms as u64)).await;
         s
     });
@@ -1389,13 +1389,13 @@ fn boxes_module() -> NativeModule {
     m.function("names", || Labeled { label: "names".into(), value: vec!["a".to_string()], history: Vec::new() });
     m.function("split", |x: i64| if x < 0 { Either::Left(x.to_string()) } else { Either::Right(x as f64) });
     m.function("total", |l: Labeled<i64>| l.value + l.history.iter().sum::<i64>());
-    m.vm_function(
+    m.function(
         "relabel",
         |_: &mut sandlang::vm::Vm, l: Labeled<Param<0>>, label: String| -> Result<Labeled<Param<0>>, sandlang::vm::Fail> {
             Ok(Labeled { label, ..l })
         },
     );
-    m.vm_function("unwrap", |vm: &mut sandlang::vm::Vm, e: VmVal<Either<Param<0>, Param<0>>>| -> Result<Param<0>, sandlang::vm::Fail> {
+    m.function("unwrap", |vm: &mut sandlang::vm::Vm, e: VmVal<Either<Param<0>, Param<0>>>| -> Result<Param<0>, sandlang::vm::Fail> {
         Ok(Param::from_raw(vm.heap.field(e.raw(), 0).unwrap()))
     });
     m.source("pub native fn relabel<T>(l: Labeled<T>, label: str) -> Labeled<T>\npub native fn unwrap<T>(e: Either<T, T>) -> T");
@@ -1732,7 +1732,7 @@ fn natives_take_num_evidence() {
     use sandlang::vm::{Ctl, Fail, Vm};
     let module = |decl: &str| {
         let mut m = NativeModule::new("nums");
-        m.vm_function("total", |vm: &mut Vm, num: Num<0>, xs: VmVal<Vec<Param<0, traits::Num>>>| -> Result<Param<0>, Ctl> {
+        m.function("total", |vm: &mut Vm, num: Num<0>, xs: VmVal<Vec<Param<0, traits::Num>>>| -> Result<Param<0>, Ctl> {
             let mut acc = num.zero(vm)?.raw();
             for &x in xs.items(&vm.heap) {
                 acc = match (acc, x) {
@@ -1747,7 +1747,7 @@ fn natives_take_num_evidence() {
             }
             Ok(Param::from_raw(acc))
         });
-        m.vm_function("unit", |vm: &mut Vm, num: Num<1>, _: Param<0>, _: Param<1>| num.one(vm));
+        m.function("unit", |vm: &mut Vm, num: Num<1>, _: Param<0>, _: Param<1>| num.one(vm));
         m.source(decl);
         m
     };
@@ -1806,7 +1806,7 @@ print(none.product())
     assert_eq!(errors, ["native function `first` must declare `T: Num`, as its Rust function requires `T: Num`"]);
 
     let mut m = NativeModule::new("nums");
-    m.vm_function("List.go", |vm: &mut Vm, num: Num<0>, _: VmVal<Vec<Param<0, traits::Num>>>| num.one(vm));
+    m.function("List.go", |vm: &mut Vm, num: Num<0>, _: VmVal<Vec<Param<0, traits::Num>>>| num.one(vm));
     m.source("pub trait Go { fn go(self) -> int }\nimpl<T: Num> Go for [T] { native fn go(self) -> T }");
     let errors = host_module_errors([m]);
     assert!(errors.iter().any(|e| e == "the Rust function of a native impl method cannot take `Num` evidence"), "{errors:?}");
@@ -2015,8 +2015,8 @@ fn generic_natives_take_type_parameters() {
         m
     };
     let mut m = module("pub native fn second<T>(xs: [T]) -> T?\npub native fn swap<A, B>(p: (A, B)) -> (B, A)");
-    m.vm_function("second", |vm: &mut Vm, xs: VmVal<Vec<Param<0>>>| xs.items(&vm.heap).get(1).copied().map(Param::<0>::from_raw));
-    m.vm_function("swap", |vm: &mut Vm, p: VmVal<(Param<0>, Param<1>)>| -> Result<(Param<1>, Param<0>), Fail> {
+    m.function("second", |vm: &mut Vm, xs: VmVal<Vec<Param<0>>>| xs.items(&vm.heap).get(1).copied().map(Param::<0>::from_raw));
+    m.function("swap", |vm: &mut Vm, p: VmVal<(Param<0>, Param<1>)>| -> Result<(Param<1>, Param<0>), Fail> {
         let (a, b) = (vm.heap.field(p.raw(), 0), vm.heap.field(p.raw(), 1));
         Ok((Param::from_raw(b.unwrap()), Param::from_raw(a.unwrap())))
     });
@@ -2030,13 +2030,13 @@ fn generic_natives_take_type_parameters() {
     type Register = fn(&mut NativeModule);
     let cases: [(&str, Register); 4] = [
         ("is declared `fn([T]) -> T?`, but its Rust function is `fn([T]) -> T`", |m| {
-            m.vm_function("second", |_: &mut Vm, xs: VmVal<Vec<Param<0>>>| -> Result<Param<0>, Fail> { Ok(Param::from_raw(xs.raw())) });
+            m.function("second", |_: &mut Vm, xs: VmVal<Vec<Param<0>>>| -> Result<Param<0>, Fail> { Ok(Param::from_raw(xs.raw())) });
         }),
         ("uses type parameter 1, which its declaration does not have", |m| {
-            m.vm_function("second", |_: &mut Vm, _: VmVal<Vec<Param<1>>>| -> Result<Option<Param<1>>, Fail> { Ok(None) });
+            m.function("second", |_: &mut Vm, _: VmVal<Vec<Param<1>>>| -> Result<Option<Param<1>>, Fail> { Ok(None) });
         }),
         ("is declared `fn([T]) -> T?`, but its Rust function is `fn(<description of T>, [T]) -> T?`", |m| {
-            m.vm_function("second", |_: &mut Vm, _: Reflect<0>, _: VmVal<Vec<Param<0>>>| -> Result<Option<Param<0>>, Fail> { Ok(None) });
+            m.function("second", |_: &mut Vm, _: Reflect<0>, _: VmVal<Vec<Param<0>>>| -> Result<Option<Param<0>>, Fail> { Ok(None) });
         }),
         ("is declared `fn([T]) -> T?`, but its Rust function is `fn([int]) -> int?`", |m| {
             m.function("second", |xs: Vec<i64>| xs.get(1).copied());
@@ -2050,7 +2050,7 @@ fn generic_natives_take_type_parameters() {
     }
 
     let mut m = NativeModule::new("gen");
-    m.vm_function("second", |_: &mut Vm, _: VmVal<Vec<Param<0>>>| -> Result<Option<Param<0>>, Fail> { Ok(None) });
+    m.function("second", |_: &mut Vm, _: VmVal<Vec<Param<0>>>| -> Result<Option<Param<0>>, Fail> { Ok(None) });
     let errors = host_module_errors([m]);
     assert!(errors[0].contains("native `gen.second` is generic, so the module must declare it with `native fn`"), "{errors:?}");
 }
@@ -2062,7 +2062,7 @@ fn reflecting_natives_take_type_descriptions() {
     use sandlang::vm::Vm;
     let mut m = NativeModule::new("desc");
     m.source("pub native fn describe<reflect T>(x: T) -> str");
-    m.vm_function("describe", |vm: &mut Vm, t: Reflect<0>, _: Param<0>| -> Result<String, Fail> { Ok(format!("{:?}", t.desc(&vm.heap)?)) });
+    m.function("describe", |vm: &mut Vm, t: Reflect<0>, _: Param<0>| -> Result<String, Fail> { Ok(format!("{:?}", t.desc(&vm.heap)?)) });
     let (r, out, _) = run_src(Config::new().host_modules(HostModules::new([m]).unwrap()), "import desc\nprint(desc.describe([1]))");
     r.unwrap();
     assert_eq!(out, "List(Int)\n");
@@ -2076,7 +2076,7 @@ fn host_functions_take_and_return_durations_and_never() {
     let mut m = NativeModule::new("clock");
     m.function("double", |d: SignedDuration| d * 2);
     m.function("forever", || SignedDuration::MAX);
-    m.vm_function("halt", |_: &mut Vm, code: i64| -> Result<Never, Fail> { Err(Fail::exit(code as i32)) });
+    m.function("halt", |_: &mut Vm, code: i64| -> Result<Never, Fail> { Err(Fail::exit(code as i32)) });
     let (r, out, _) = run_src(
         Config::new().host_modules(HostModules::new([m.clone()]).unwrap()),
         "import clock\nprint(clock.double(1500ms))\nlet n: int = clock.halt(3)",
@@ -2088,7 +2088,7 @@ fn host_functions_take_and_return_durations_and_never() {
 
 fn quit_module() -> HostModules {
     let mut module = NativeModule::new("quit");
-    module.async_function("now", |code: i64| async move { Err::<(), sandlang::vm::Fail>(sandlang::vm::Fail::exit(code as i32)) });
+    module.function("now", |code: i64| async move { Err::<(), sandlang::vm::Fail>(sandlang::vm::Fail::exit(code as i32)) });
     HostModules::new([module]).unwrap()
 }
 
@@ -2183,7 +2183,7 @@ fn public_fields_of_public_host_types_use_public_types() {
 #[test]
 fn native_module_custom_capability() {
     let mut m = NativeModule::new("door");
-    m.vm_function("open", |vm: &mut Vm, name: String| -> Result<String, sandlang::native::convert::HostError> {
+    m.function("open", |vm: &mut Vm, name: String| -> Result<String, sandlang::native::convert::HostError> {
         vm.require(&Capability::Custom { name: "door".into(), detail: name.clone() })?;
         Ok(format!("opened {name}"))
     });
@@ -2203,7 +2203,7 @@ fn native_module_capability_prompts() {
     let opened = Arc::new(AtomicUsize::new(0));
     let o = opened.clone();
     let mut m = NativeModule::new("door");
-    m.vm_function("open", move |vm: &mut Vm, name: String| -> Result<String, sandlang::native::convert::HostError> {
+    m.function("open", move |vm: &mut Vm, name: String| -> Result<String, sandlang::native::convert::HostError> {
         vm.require(&Capability::Custom { name: "door".into(), detail: name.clone() })?;
         o.fetch_add(1, Ordering::SeqCst);
         Ok(format!("opened {name}"))
@@ -2976,7 +2976,7 @@ fn a_native_runs_once_when_its_result_needs_a_collection() {
 #[test]
 fn an_async_result_that_needs_a_collection_does_not_end_the_run() {
     let mut m = NativeModule::new("slow");
-    m.async_function("read", || async { "x".repeat(700_000) });
+    m.function("read", || async { "x".repeat(700_000) });
     let config =
         Config::new().host_modules(HostModules::new([m]).unwrap()).limits(Limits { max_memory: Some(8 << 20), ..Limits::default() });
     let src = "import slow\nvar s = \"y\".repeat(3_900_000)\ns = \"y\".repeat(3_900_000)\nprint(slow.read().len())";
@@ -3839,11 +3839,11 @@ fn host_modules_can_define_resources() {
     m.bind::<Conn>();
     m.source("impl Close for Conn {\n    native fn close(self)\n}");
     let c = closed.clone();
-    m.vm_function("connect", move |vm: &mut Vm| -> Result<Conn, sandlang::native::convert::HostError> {
+    m.function("connect", move |vm: &mut Vm| -> Result<Conn, sandlang::native::convert::HostError> {
         let slot = vm.resource_slot()?;
         Ok(Conn { slot: Some(slot), closed: c.clone() })
     });
-    m.vm_function("Conn.close", |vm: &mut Vm, conn: VmVal<Conn>| -> Result<(), Fail> {
+    m.function("Conn.close", |vm: &mut Vm, conn: VmVal<Conn>| -> Result<(), Fail> {
         let conn = conn.get_mut(&mut vm.heap)?;
         if conn.slot.take().is_some() {
             conn.closed.fetch_add(1, Ordering::Relaxed);
@@ -3889,10 +3889,10 @@ fn natives_that_cannot_make_scheduler_requests_return_fail() {
     m.function("later_exit", || -> Result<Later<i64, Fail>, Fail> {
         Ok(Later::new(WaitKind::Io, async { |_: &mut Vm| Err(Fail::exit(7)) }))
     });
-    m.async_function("async_ok", || async { Ok::<i64, HostError<Fail>>(4) });
-    m.async_function("async_err", || async { Err::<i64, HostError<Fail>>(HostError::new("io", "broken pipe")) });
-    m.async_function("async_stop", || async { Err::<i64, Fail>(Fail::runtime_error("invalid", "no result")) });
-    m.async_function("async_exit", || async {
+    m.function("async_ok", || async { Ok::<i64, HostError<Fail>>(4) });
+    m.function("async_err", || async { Err::<i64, HostError<Fail>>(HostError::new("io", "broken pipe")) });
+    m.function("async_stop", || async { Err::<i64, Fail>(Fail::runtime_error("invalid", "no result")) });
+    m.function("async_exit", || async {
         Err(Fail::exit(3))?;
         Ok::<i64, HostError<Fail>>(4)
     });
@@ -3912,6 +3912,75 @@ fn natives_that_cannot_make_scheduler_requests_return_fail() {
 
     let (r, out, _) = run("print(fails.async_exit())");
     assert_eq!((r.unwrap().exit_code, out.as_str()), (3, ""));
+}
+
+#[test]
+fn native_module_registers_sync_vm_and_async_fn_items() {
+    fn borrowed(s: &str) -> i64 {
+        s.len() as i64
+    }
+    fn with_vm(vm: &mut Vm, s: String) -> Result<i64, Fail> {
+        vm.check_memory(s.len())?;
+        Ok(s.len() as i64 * 10)
+    }
+    async fn waits(s: String) -> i64 {
+        tokio::task::yield_now().await;
+        s.len() as i64 * 100
+    }
+    let mut m = NativeModule::new("items");
+    m.function("borrowed", borrowed);
+    m.function("with_vm", with_vm);
+    m.function("waits", waits);
+    let config = Config::new().host_modules(HostModules::new([m]).unwrap());
+    let (r, out, _) =
+        run_src(config, "import items\nprint(items.borrowed(\"ab\"))\nprint(items.with_vm(\"abc\"))\nprint(items.waits(\"abcd\"))");
+    r.unwrap();
+    assert_eq!(out, "2\n30\n400\n");
+}
+
+#[test]
+fn native_functions_take_async_closures_and_twelve_params() {
+    #[allow(clippy::too_many_arguments)]
+    fn sum(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64, k: i64, l: i64) -> i64 {
+        a + b + c + d + e + f + g + h + i + j + k + l
+    }
+    let mut m = NativeModule::new("wide");
+    m.function("waits", async |s: String| s.len() as i64);
+    m.function("sync_fn", sum);
+    m.function("vm_fn", |_: &mut Vm, a, b, c, d, e, f, g, h, i, j, k, l| sum(a, b, c, d, e, f, g, h, i, j, k, l));
+    m.function("async_fn", |a, b, c, d, e, f, g, h, i, j, k, l| async move { sum(a, b, c, d, e, f, g, h, i, j, k, l) });
+    let args = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12";
+    let src = format!(
+        "import wide\nprint(wide.waits(\"abc\"))\nprint(wide.sync_fn({args}))\nprint(wide.vm_fn({args}))\nprint(wide.async_fn({args}))"
+    );
+    let (r, out, _) = run_src(Config::new().host_modules(HostModules::new([m]).unwrap()), &src);
+    r.unwrap();
+    assert_eq!(out, "3\n78\n78\n78\n");
+}
+
+#[test]
+fn later_new_finishers_and_later_ready_return_vm_handles() {
+    use sandlang::native::func::Later;
+    use sandlang::native::ty::VmVal;
+    use sandlang::vm::WaitKind;
+    let mut m = NativeModule::new("handles");
+    m.function("after_wait", |_: &mut Vm, n: i64| -> Result<Later<VmVal<String>, Fail>, Fail> {
+        Ok(Later::new(WaitKind::Io, async move {
+            tokio::task::yield_now().await;
+            move |vm: &mut Vm| {
+                let v = format!("made {n}").into_vm_value(vm)?;
+                Ok(VmVal::<String>::from_raw(v))
+            }
+        }))
+    });
+    m.function("now", |vm: &mut Vm, n: i64| -> Result<Later<VmVal<String>, Fail>, Fail> {
+        let v = format!("ready {n}").into_vm_value(vm)?;
+        Ok(Later::ready(Ok(VmVal::from_raw(v))))
+    });
+    let config = Config::new().gc_stress(true).host_modules(HostModules::new([m]).unwrap());
+    let (r, out, _) = run_src(config, "import handles\nprint(handles.after_wait(1))\nprint(handles.now(2))");
+    r.unwrap();
+    assert_eq!(out, "made 1\nready 2\n");
 }
 
 #[test]
@@ -3964,7 +4033,7 @@ fn retry_stress_fails_a_check_in_the_native_body() {
     let calls = Arc::new(AtomicUsize::new(0));
     let c = calls.clone();
     let mut m = NativeModule::new("probe");
-    m.vm_function("touch", move |vm: &mut Vm, s: String| -> Result<i64, sandlang::vm::Fail> {
+    m.function("touch", move |vm: &mut Vm, s: String| -> Result<i64, sandlang::vm::Fail> {
         c.fetch_add(1, Ordering::SeqCst);
         vm.check_memory(s.len())?;
         Ok(s.len() as i64)

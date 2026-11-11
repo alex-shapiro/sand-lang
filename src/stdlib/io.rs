@@ -19,17 +19,17 @@ pub(crate) fn module() -> NativeModule {
     m.bind::<Stdin>();
     m.bind::<Stdout>();
     m.bind::<Stderr>();
-    m.vm_function("new_stdin", |vm: &mut Vm| vm.new_object(Stdin));
-    m.vm_function("new_stdout", |vm: &mut Vm| vm.new_object(Stdout));
-    m.vm_function("new_stderr", |vm: &mut Vm| vm.new_object(Stderr));
-    m.vm_function("Stdin.read", |vm: &mut Vm, _: VmVal<Stdin>, max: i64| {
+    m.function("new_stdin", |vm: &mut Vm| vm.new_object(Stdin));
+    m.function("new_stdout", |vm: &mut Vm| vm.new_object(Stdout));
+    m.function("new_stderr", |vm: &mut Vm| vm.new_object(Stderr));
+    m.function("Stdin.read", |vm: &mut Vm, _: VmVal<Stdin>, max: i64| {
         if max <= 0 {
             return Err(HostError::new("invalid", "read: max must be positive"));
         }
         read_stdin(vm, Read::Upto(to_usize_saturating(max)), bytes_read)
     });
-    m.vm_function("Stdin.read_line", |vm: &mut Vm, _: VmVal<Stdin>| read_stdin(vm, Read::Line, input_line));
-    m.vm_function("Stdin.read_all", |vm: &mut Vm, _: VmVal<Stdin>| read_stdin(vm, Read::All, bytes_read));
+    m.function("Stdin.read_line", |vm: &mut Vm, _: VmVal<Stdin>| read_stdin(vm, Read::Line, input_line));
+    m.function("Stdin.read_all", |vm: &mut Vm, _: VmVal<Stdin>| read_stdin(vm, Read::All, bytes_read));
     output::<Stdout>(&mut m);
     output::<Stderr>(&mut m);
     m
@@ -68,9 +68,9 @@ impl Output for Stderr {
 }
 
 fn output<T: Output>(m: &mut NativeModule) {
-    m.vm_function(&format!("{}.write", T::NAME), |vm: &mut Vm, _: VmVal<T>, data: VmVal<Vec<u8>>| write_out(vm, T::STREAM, data.raw()));
-    m.vm_function(&format!("{}.write_str", T::NAME), |vm: &mut Vm, _: VmVal<T>, text: VmVal<String>| write_out(vm, T::STREAM, text.raw()));
-    m.vm_function(&format!("{}.flush", T::NAME), |vm: &mut Vm, _: VmVal<T>| flush_out(vm, T::STREAM));
+    m.function(&format!("{}.write", T::NAME), |vm: &mut Vm, _: VmVal<T>, data: VmVal<Vec<u8>>| write_out(vm, T::STREAM, data.raw()));
+    m.function(&format!("{}.write_str", T::NAME), |vm: &mut Vm, _: VmVal<T>, text: VmVal<String>| write_out(vm, T::STREAM, text.raw()));
+    m.function(&format!("{}.flush", T::NAME), |vm: &mut Vm, _: VmVal<T>| flush_out(vm, T::STREAM));
 }
 
 /// Writes the `str` or `bytes` value `v` to stdout (1) or stderr (2).
@@ -99,7 +99,7 @@ enum Read {
     Upto(usize),
 }
 
-fn read_stdin<R: IntoVmValue + Send + 'static>(
+fn read_stdin<R: IntoVmValue + 'static>(
     vm: &mut Vm,
     what: Read,
     done: fn(&mut Vm, Option<Vec<u8>>) -> stream::FinishResult<R>,
@@ -185,7 +185,7 @@ async fn read_from<R: AsyncBufRead + Unpin>(r: &mut R, what: Read, res: &mut Res
 
 pub(crate) fn env_module() -> NativeModule {
     let mut m = NativeModule::std("env", ModKind::Std, include_str!("env.sand"));
-    m.vm_function("get", |vm: &mut Vm, name: VmVal<String>| -> Result<Option<String>, Ctl> {
+    m.function("get", |vm: &mut Vm, name: VmVal<String>| -> Result<Option<String>, Ctl> {
         let name = name.str(&vm.heap).to_string();
         if !vm.permit(&Capability::Env(name.clone()))? {
             return Ok(None);
@@ -202,8 +202,8 @@ pub(crate) fn env_module() -> NativeModule {
             None => None,
         })
     });
-    m.vm_function("args", |vm: &mut Vm| vm.host.args.clone());
-    m.vm_function("vars", |vm: &mut Vm| -> Result<BTreeMap<String, String>, Ctl> {
+    m.function("args", |vm: &mut Vm| vm.host.args.clone());
+    m.function("vars", |vm: &mut Vm| -> Result<BTreeMap<String, String>, Ctl> {
         if !vm.permit(&Capability::Env("*".into()))? {
             return Ok(BTreeMap::new());
         }

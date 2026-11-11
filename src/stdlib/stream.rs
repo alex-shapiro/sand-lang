@@ -35,7 +35,7 @@ pub(crate) type FinishResult<T> = Result<T, HostError<Fail>>;
 
 /// Suspends the calling task on `fut` with `wait_kind`. If `fut` returns `Ok`,
 /// runs `ok` on the VM thread to produce the Sand result.
-pub(crate) fn suspend<T: Send + 'static, R: IntoVmValue + Send + 'static>(
+pub(crate) fn suspend<T: Send + 'static, R: IntoVmValue + 'static>(
     wait_kind: WaitKind,
     fut: impl Future<Output = Result<T, IoFailure>> + Send + 'static,
     ok: impl FnOnce(&mut Vm, T) -> FinishResult<R> + Send + 'static,

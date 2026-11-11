@@ -44,10 +44,10 @@ pub(crate) fn module() -> NativeModule {
     m.bind::<Outgoing>();
     super::http_server::natives(&mut m);
     m.bind::<Upload>();
-    m.vm_function("send", send);
-    m.vm_function("upload", upload);
-    m.vm_function("write_body", write_body);
-    m.vm_function("read_response", read_response);
+    m.function("send", send);
+    m.function("upload", upload);
+    m.function("write_body", write_body);
+    m.function("read_response", read_response);
     m
 }
 

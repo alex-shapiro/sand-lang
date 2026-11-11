@@ -284,9 +284,17 @@ stats.function("counter", || Counter(AtomicI64::new(0)));
 stats.function("Counter.add", |c: &Counter, n: i64| c.0.fetch_add(n, Ordering::Relaxed) + n).params(&["n"]);
 ```
 
-`NativeModule::async_function` registers an async Rust function. While its future is pending, only the calling Sand task suspends. To return a recoverable error from the future, use `Result<T, HostError<sandlang::vm::Fail>>`. The future cannot make a scheduler request such as a permission check. If an operation needs a permission, register it with `NativeModule::vm_function`, call `Vm::require` before the wait, and return a `sandlang::native::func::Later`.
+`NativeModule::function` accepts three kinds of Rust function, selected by the function signature:
 
-To check a sandbox capability inside a native function, register the function with `NativeModule::vm_function` and call `Vm::require`, which returns a `"permission_denied"` error if the policy denies the request. Because the engine re-runs a `vm_function` after a permission prompt or after a garbage collection triggered by a memory or resource check (`Vm::check_memory`, `Vm::reserve_io`, `Vm::resource_slot`), check permissions and limits before performing any side effects. Enable `Config::retry_stress(true)` in tests to force the first memory or resource check in each `vm_function` call to trigger a collection and retry:
+- **Synchronous.** Each parameter can borrow `&str`, `&[u8]`, or `&T` from the VM heap.
+- **Synchronous with `&mut Vm` first.** A synchronous function that accesses the VM. Its other parameters are owned types or VM handles.
+- **Asynchronous.** A function that returns a future and suspends only the calling Sand task. Its parameters, future, and future output are owned `Send` types.
+
+The compiler rejects a VM handle such as `sandlang::native::ty::VmVal` in a future, because garbage collection during the wait can free the heap object. The compiler does not check a raw `VmValue`. Do not hold a raw `VmValue` across a wait.
+
+To return a recoverable error from a future, use `Result<T, HostError<sandlang::vm::Fail>>`. The future cannot make a scheduler request such as a permission check. If an operation needs a permission, take `&mut Vm`, call `Vm::require` before the wait, and return a `sandlang::native::func::Later`.
+
+To check a sandbox capability inside a native function, take `&mut Vm` as the first parameter and call `Vm::require`. `Vm::require` returns a `"permission_denied"` error if the policy denies the request. A function that takes `&mut Vm` must check permissions and limits before any side effect. The engine runs the function again after a permission prompt or a garbage collection during a memory or resource check. Enable `Config::retry_stress(true)` in tests to collect garbage and retry on the first memory or resource check in each call:
 
 ```rust
 # #[tokio::main(flavor = "current_thread")]
@@ -299,7 +307,7 @@ use sandlang::policy::rules::{CustomMatch, RulePolicy};
 use sandlang::vm::Vm;
 
 let mut door = NativeModule::new("door");
-door.vm_function("open", |vm: &mut Vm, name: String| -> Result<String, HostError> {
+door.function("open", |vm: &mut Vm, name: String| -> Result<String, HostError> {
     vm.require(&Capability::Custom { name: "door".into(), detail: name.clone() })?;
     Ok(format!("opened {name}"))
 });

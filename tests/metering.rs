@@ -309,7 +309,7 @@ fn interrupt_stops_a_big_json_parse() {
 fn host_natives_can_charge_and_be_stopped() {
     // A raw native that works forever, charging the meter as it goes.
     let mut m = NativeModule::new("busy");
-    m.vm_function("spin", |vm: &mut Vm| -> Result<i64, Fail> {
+    m.function("spin", |vm: &mut Vm| -> Result<i64, Fail> {
         let mut n: i64 = 0;
         loop {
             vm.charge(1)?;
@@ -338,7 +338,7 @@ fn natives_stop_exactly_at_the_instruction_limit() {
     let granted = Arc::new(AtomicU64::new(0));
     let mut m = NativeModule::new("busy");
     let g = granted.clone();
-    m.vm_function("spin", move |vm: &mut Vm| -> Result<i64, Fail> {
+    m.function("spin", move |vm: &mut Vm| -> Result<i64, Fail> {
         loop {
             vm.charge(1)?;
             g.fetch_add(1, Ordering::Relaxed);
@@ -515,11 +515,11 @@ fn probe() -> NativeModule {
     use sandlang::native::ty::{Channel, Task, VmVal};
     use sandlang::vm::value::Obj;
     let mut m = NativeModule::new("probe");
-    m.vm_function("receivers", |vm: &mut Vm, ch: VmVal<Channel<i64>>| match vm.heap.get(ch.raw()) {
+    m.function("receivers", |vm: &mut Vm, ch: VmVal<Channel<i64>>| match vm.heap.get(ch.raw()) {
         Obj::Channel(c) => c.receivers.len() as i64,
         _ => -1,
     });
-    m.vm_function("waiters", |vm: &mut Vm, t: VmVal<Task<()>>| {
+    m.function("waiters", |vm: &mut Vm, t: VmVal<Task<()>>| {
         let fid = match vm.heap.get(t.raw()) {
             Obj::Task(t) => t.fiber as usize,
             _ => return -1,
@@ -836,8 +836,8 @@ fn the_collection_at_the_memory_limit_releases_the_staging_buffer() {
 /// Builds the `probe` host module for fuel and retry tests.
 fn fuel_probe() -> NativeModule {
     let mut m = NativeModule::new("probe");
-    m.vm_function("fuel", |vm: &mut Vm| vm.meter.used() as i64);
-    m.vm_function("grow", |vm: &mut Vm, n: i64| -> Result<i64, Fail> {
+    m.function("fuel", |vm: &mut Vm| vm.meter.used() as i64);
+    m.function("grow", |vm: &mut Vm, n: i64| -> Result<i64, Fail> {
         vm.charge(50)?;
         vm.check_memory(n as usize)?;
         Ok(n)

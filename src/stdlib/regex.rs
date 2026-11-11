@@ -394,7 +394,7 @@ pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("regex", ModKind::Std, include_str!("regex.sand"));
     m.bind::<RegexObj>().bind::<Match>().bind::<Captures>();
 
-    m.vm_function("Regex.init", |vm: &mut Vm, pattern: VmVal<String>| -> Result<VmVal<RegexObj>, HostError> {
+    m.function("Regex.init", |vm: &mut Vm, pattern: VmVal<String>| -> Result<VmVal<RegexObj>, HostError> {
         let text_len = pattern.str(&vm.heap).len();
         let hash = pattern_hash(pattern.str(&vm.heap));
         let cached = lookup_cached_regex(vm, pattern.str(&vm.heap), hash);
@@ -438,7 +438,7 @@ pub(crate) fn module() -> NativeModule {
         cache[cache_slot(hash)] = Some(RegexCacheEntry { pattern_hash: hash, regex: Some(obj.raw()) });
         Ok(obj)
     });
-    m.vm_function("Regex.is_match", |vm: &mut Vm, re: VmVal<RegexObj>, text: VmVal<String>| {
+    m.function("Regex.is_match", |vm: &mut Vm, re: VmVal<RegexObj>, text: VmVal<String>| {
         with_regex(vm, re, |vm, obj, cache| {
             let text = text.str(&vm.heap);
             let mut scan = Scan::new(vm);
@@ -448,7 +448,7 @@ pub(crate) fn module() -> NativeModule {
             Ok(found)
         })
     });
-    m.vm_function("Regex.find", |vm: &mut Vm, re: VmVal<RegexObj>, text: VmVal<String>| -> Result<Option<Match>, Fail> {
+    m.function("Regex.find", |vm: &mut Vm, re: VmVal<RegexObj>, text: VmVal<String>| -> Result<Option<Match>, Fail> {
         let found = with_regex(vm, re, |vm, obj, cache| {
             let t = text.str(&vm.heap);
             let mut scan = Scan::new(vm);
@@ -460,7 +460,7 @@ pub(crate) fn module() -> NativeModule {
         })?;
         Ok(found.map(|span| Match::new(vm, text, span)))
     });
-    m.vm_function("Regex.find_all", |vm: &mut Vm, re: VmVal<RegexObj>, text: VmVal<String>| -> Result<Vec<Match>, Fail> {
+    m.function("Regex.find_all", |vm: &mut Vm, re: VmVal<RegexObj>, text: VmVal<String>| -> Result<Vec<Match>, Fail> {
         let spans = with_regex(vm, re, |vm, obj, cache| {
             let t = text.str(&vm.heap);
             let (mut spans, mut cost, mut scan) = (Vec::new(), 0, Scan::new(vm));
@@ -474,7 +474,7 @@ pub(crate) fn module() -> NativeModule {
         })?;
         Ok(spans.into_iter().map(|span| Match::new(vm, text, span)).collect())
     });
-    m.vm_function("Regex.captures", |vm: &mut Vm, re: VmVal<RegexObj>, text: VmVal<String>| -> Result<Option<Captures>, Fail> {
+    m.function("Regex.captures", |vm: &mut Vm, re: VmVal<RegexObj>, text: VmVal<String>| -> Result<Option<Captures>, Fail> {
         with_regex(vm, re, |vm, obj, cache| {
             let t = text.str(&vm.heap);
             let mut scan = Scan::new(vm);
@@ -486,7 +486,7 @@ pub(crate) fn module() -> NativeModule {
             Ok(caps.is_match().then(|| Captures { text, spans: spans(&caps), regex: re }))
         })
     });
-    m.vm_function("Regex.captures_all", |vm: &mut Vm, re: VmVal<RegexObj>, text: VmVal<String>| -> Result<Vec<Captures>, Fail> {
+    m.function("Regex.captures_all", |vm: &mut Vm, re: VmVal<RegexObj>, text: VmVal<String>| -> Result<Vec<Captures>, Fail> {
         with_regex(vm, re, |vm, obj, cache| {
             let t = text.str(&vm.heap);
             let (mut all, mut cost, mut scan) = (Vec::new(), 0, Scan::new(vm));
@@ -499,17 +499,17 @@ pub(crate) fn module() -> NativeModule {
             Ok(all)
         })
     });
-    m.vm_function("Regex.group_index", |vm: &mut Vm, re: VmVal<RegexObj>, name: VmVal<String>| -> Result<Option<i64>, Fail> {
+    m.function("Regex.group_index", |vm: &mut Vm, re: VmVal<RegexObj>, name: VmVal<String>| -> Result<Option<i64>, Fail> {
         let index = re.get(&vm.heap)?.re.group_info().to_index(PatternID::ZERO, name.str(&vm.heap));
         Ok(index.map(|i| i as i64))
     });
-    m.vm_function("Regex.replace", |vm: &mut Vm, re: VmVal<RegexObj>, text: VmVal<String>, rep: VmVal<String>| {
+    m.function("Regex.replace", |vm: &mut Vm, re: VmVal<RegexObj>, text: VmVal<String>, rep: VmVal<String>| {
         replace(vm, re, text, rep, false)
     });
-    m.vm_function("Regex.replace_all", |vm: &mut Vm, re: VmVal<RegexObj>, text: VmVal<String>, rep: VmVal<String>| {
+    m.function("Regex.replace_all", |vm: &mut Vm, re: VmVal<RegexObj>, text: VmVal<String>, rep: VmVal<String>| {
         replace(vm, re, text, rep, true)
     });
-    m.vm_function("Regex.split", |vm: &mut Vm, re: VmVal<RegexObj>, text: VmVal<String>| -> Result<VmVal<Vec<String>>, Fail> {
+    m.function("Regex.split", |vm: &mut Vm, re: VmVal<RegexObj>, text: VmVal<String>| -> Result<VmVal<Vec<String>>, Fail> {
         let (spans, cost) = with_regex(vm, re, |vm, obj, cache| {
             let text = text.str(&vm.heap);
             let (mut spans, mut cost, mut scan) = (Vec::new(), 0, Scan::new(vm));

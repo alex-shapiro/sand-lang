@@ -34,15 +34,15 @@ pub(super) fn natives(m: &mut NativeModule) {
     m.bind::<Server>();
     m.bind::<Exchange>();
     m.bind::<Request>();
-    m.vm_function("serve", serve);
-    m.vm_function("Server.addr", |vm: &mut Vm, server: VmVal<Server>| -> Result<net::SocketAddr, Fail> { Ok(server.get(&vm.heap)?.addr) });
-    m.vm_function("Server.close", |vm: &mut Vm, server: VmVal<Server>| -> Result<_, Fail> {
+    m.function("serve", serve);
+    m.function("Server.addr", |vm: &mut Vm, server: VmVal<Server>| -> Result<net::SocketAddr, Fail> { Ok(server.get(&vm.heap)?.addr) });
+    m.function("Server.close", |vm: &mut Vm, server: VmVal<Server>| -> Result<_, Fail> {
         server.get_mut(&mut vm.heap)?.close();
         Ok(())
     });
-    m.vm_function("Server.accept", accept_request);
-    m.vm_function("write_response", write_response);
-    m.vm_function("reply_body", reply_body);
+    m.function("Server.accept", accept_request);
+    m.function("write_response", write_response);
+    m.function("reply_body", reply_body);
 }
 
 // ----------------------------------------------------------------------

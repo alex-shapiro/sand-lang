@@ -30,17 +30,17 @@ fn with_object<R>(vm: &mut Vm, obj: VmVal<RngObj>, op: impl FnOnce(&mut Vm, &mut
 pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("random", ModKind::Std, include_str!("random.sand"));
     m.bind::<RngObj>();
-    m.vm_function("seed", |vm: &mut Vm, s: i64| -> Result<_, Fail> {
+    m.function("seed", |vm: &mut Vm, s: i64| -> Result<_, Fail> {
         vm.host.rng = Rng::new(s as u64);
         Ok(())
     });
-    m.vm_function("Rng.init", |vm: &mut Vm, seed: i64| vm.new_object(RngObj(Rng::new(seed as u64))));
+    m.function("Rng.init", |vm: &mut Vm, seed: i64| vm.new_object(RngObj(Rng::new(seed as u64))));
 
     macro_rules! ops {
-        ($($name:literal => |$($a:ident: $t:ty),*| -> $r:ty = $op:expr;)*) => {$(
-            m.vm_function($name, |vm: &mut Vm, $($a: $t),*| -> Result<$r, Fail> { with_engine(vm, |vm, rng| $op(vm, rng, $($a),*)) });
-            m.vm_function(concat!("Rng.", $name), |vm: &mut Vm, obj: VmVal<RngObj>, $($a: $t),*| -> Result<$r, Fail> {
-                with_object(vm, obj, |vm, rng| $op(vm, rng, $($a),*))
+        ($($name:literal => |$($param:ident: $t:ty),*| -> $r:ty = $op:expr;)*) => {$(
+            m.function($name, |vm: &mut Vm, $($param: $t),*| -> Result<$r, Fail> { with_engine(vm, |vm, rng| $op(vm, rng, $($param),*)) });
+            m.function(concat!("Rng.", $name), |vm: &mut Vm, obj: VmVal<RngObj>, $($param: $t),*| -> Result<$r, Fail> {
+                with_object(vm, obj, |vm, rng| $op(vm, rng, $($param),*))
             });
         )*};
     }

@@ -25,11 +25,27 @@ Untrusted code violates a valid policy.
 
 The host cannot rely on engine limits, stability, or control.
 
-- [ ] ❓ _Embedding._ Reject VM handles in async host functions at compile
-      time. `async_function` accepts VM handle types because their
-      `FromVmValue::Item` is `Self`. Garbage collection can free or reuse the
-      heap slot of a handle while the future is suspended. See SPLIT.md
-      changeset 13.
+- [ ] ❓ _Embedding._ Reject a raw `VmValue` that a native function holds
+      across a wait. The compiler rejects typed VM handles in a future because
+      they are not `Send`. However, `IntoVmValue::into_vm_value` and `Vm`
+      allocation methods return a raw `VmValue`. `VmValue` is `Send` because the
+      heap stores it. The compiler therefore accepts a function that allocates a
+      `VmValue` before a wait and reads it in the `Later::new` finisher. After a
+      garbage collection during the wait, the read returns the data of another
+      object without an error. If the collector shrank the heap, the read or the
+      next collection causes a panic. The engine reports the panic as an
+      internal error. A `panic = "abort"` build stops the process. Options: a
+      host value type that is not `Send`, or a generation check on each heap
+      slot.
+- [ ] ❓ _Embedding._ Add a rooted handle that keeps a script value alive
+      across a wait. A native function cannot safely change an argument object
+      or return an early allocation after a wait. `Vm::pinned` already holds
+      garbage collection roots.
+- [ ] ❓ _Embedding._ Give native functions a narrow call context in place of
+      `&mut Vm`. With `&mut Vm`, a native function can call public scheduler and
+      collector methods such as `Vm::collect_all_garbage`. Typed accessors also
+      return raw `VmValue` slices. A narrow context exposes only host call
+      operations.
 - [ ] ❓ _Memory._ Share standard library and host module bytecode across
       programs. `compile_program` copies the snapshot `Program` into each
       `CompiledProgram`. A copy takes about 74 KB for `print(1)` and 173 KB
@@ -344,9 +360,10 @@ Visible defects that rarely block users.
       `many_locals_resolve_in_linear_time` in `tests/compile_limits.rs`, and
       `keys_chosen_to_collide_do_not_slow_down_maps` in `tests/metering.rs`.
 - [ ] ⚪ Run the playground page tests in CI across Chrome, Firefox, and Safari.
-- [ ] ⚪ `Config::retry_stress` fails only the first check in a `vm_function`
-      body, so it does not detect a side effect between the first and second
-      checks. Run stressed tests for each check index reached during a call.
+- [ ] ⚪ `Config::retry_stress` fails only the first check in a native function
+      that takes `&mut Vm`. It does not detect a side effect between the first
+      and second checks. Run stressed tests for each check index that a call
+      reaches.
 - [ ] ⚪ Schedule the `cargo fuzz` targets and update the `run` target to compare
       optimized and unoptimized executions.
 - [ ] ⚪ Extend `src/check/verify.rs` to verify full HIR expression typing in
@@ -372,11 +389,11 @@ Visible defects that rarely block users.
 
 ### Embedding
 
-- [ ] ⚪ Require at compile time that a `vm_function` makes its scheduler
-      requests before its side effects. The engine runs the call again after a
-      prompt or a garbage collection, so a write before `Vm::require` runs
-      twice. A check phase that returns `Ctl` and an effect phase that returns
-      `Fail` would prevent this in journaled runs.
+- [ ] ⚪ Require at compile time that a native function that takes `&mut Vm`
+      makes its scheduler requests before its side effects. The engine runs the
+      call again after a prompt or a garbage collection, so it executes any
+      earlier side effect twice. A check phase that returns `Ctl` and an effect
+      phase that returns `Fail` would prevent this in journaled runs.
 - [ ] ❓ Decide whether `Config::stdin_bytes` should share its channel across
       every VM of an engine, as `StdinFeed` does. `Engine::new_vm` creates a
       fresh channel for `Config::stdin_bytes`, so `Session::reset` and each

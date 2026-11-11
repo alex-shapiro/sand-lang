@@ -1984,7 +1984,7 @@ use sandlang::policy::rules::RulePolicy;
 
 let mut module = NativeModule::new("geo");
 module.function("dist", |a: f64, b: f64| -> f64 { (a * a + b * b).sqrt() });
-module.async_function("lookup", |key: String| async move { Ok::<_, String>(key.len() as i64) }).params(&["key"]);
+module.function("lookup", |key: String| async move { Ok::<_, String>(key.len() as i64) }).params(&["key"]);
 
 let config = Config::new()
     .policy(RulePolicy::standard())
@@ -2144,13 +2144,37 @@ values. `NativeModule` and `HostModules::new` panic if a module, type, or
 function name is invalid or duplicated. `NativeModule::new` also panics if a
 module uses a standard library name from `sandlang::stdlib::STD_MODULES`.
 
-| Method                       | Registered item                                                                     |
-| ---------------------------- | ----------------------------------------------------------------------------------- |
-| `function(name, f)`          | synchronous function that can borrow `&str`, `&[u8]`, and `&T` arguments            |
-| `vm_function(name, f)`       | synchronous function that takes `&mut Vm` and owned arguments                       |
-| `async_function(name, f)`    | asynchronous function that takes owned arguments and suspends only the calling task |
-| `bind::<T>()`                | Rust type `T` with a derived `NamedType`                                            |
-| `params(names)`, `doc(text)` | parameter names and documentation for the most recently registered function         |
+| Method                       | Registered item                                                             |
+| ---------------------------- | --------------------------------------------------------------------------- |
+| `function(name, f)`          | Rust function or closure `f`                                                |
+| `bind::<T>()`                | Rust type `T` with a derived `NamedType`                                    |
+| `params(names)`, `doc(text)` | parameter names and documentation for the most recently registered function |
+
+`NativeModule::function` accepts three kinds of Rust function, selected by the
+function signature:
+
+- **Synchronous.** Each parameter can borrow `&str`, `&[u8]`, or `&T` from the
+  VM heap.
+- **Synchronous with `&mut Vm` first.** A synchronous function that accesses
+  the VM. Each parameter after `&mut Vm` is an owned type or a VM handle such
+  as `VmVal<T>`.
+- **Asynchronous.** A function that returns a future and suspends only the
+  calling task. Its parameters, future, and future output are owned `Send`
+  types.
+
+The compiler rejects a borrowed parameter in a function that takes `&mut Vm` or
+returns a future. Garbage collection during a wait can free the heap object
+that a VM handle refers to. Each VM handle type is therefore `!Send`, and the
+compiler rejects it in these places:
+
+- a parameter or output of an async native function
+- the future or finisher closure of `Later::new`
+- a `NativeObject`
+
+`IntoVmValue::into_vm_value` and `Vm` allocation methods return a raw
+`VmValue`. The compiler does not check `VmValue` across a wait. Do not hold a
+raw `VmValue` across a wait; allocate the value in the `Later::new` finisher
+instead.
 
 Four derive macros bind a Rust type to a Sand type in a native module. Each
 macro implements `NamedType`, `SandType`, `FromVmValue`, and `IntoVmValue`. The
@@ -2218,23 +2242,23 @@ returns a Sand `Result` or aborts the run on failure:
   the same Sand return type as `Result<T, E>`. `Later::new(wait_kind, fut)`
   sets the `WaitKind` of `fut`. Use `WaitKind::User` if the task waits for a
   user action so that idle wait time does not count toward `max_wall_time`
-  (§16.2). Functions registered with `async_function` use `WaitKind::Io`.
-  The closure that `fut` returns runs after the wait, so it cannot make a
-  scheduler request. If `E` is `Ctl` or `Fail`, the closure returns
-  `Result<T, Fail>`. If `E` is `HostError`, the closure returns
-  `Result<T, HostError<Fail>>`.
-- The future of an `async_function` cannot make scheduler requests. Its output
-  is a type that converts to a Sand value, `Result<T, Fail>`, or
+  (§16.2). An async native function uses `WaitKind::Io`. The finisher closure
+  that `fut` returns runs after the wait, so it cannot make a scheduler
+  request. The finisher can allocate and return a new VM handle. If `E` is
+  `Ctl` or `Fail`, the finisher returns `Result<T, Fail>`. If `E` is
+  `HostError`, the finisher returns `Result<T, HostError<Fail>>`.
+- A future that a native function returns cannot make scheduler requests. Its
+  output is a type that converts to a Sand value, `Result<T, Fail>`, or
   `Result<T, HostError<Fail>>`.
 
-To check a sandbox capability inside a `vm_function`, call
-`Vm::require(&capability)` (§14), which returns an error of kind
-`"permission_denied"` if the policy denies the request. Because the engine
-re-runs a `vm_function` from the start after a permission prompt or after a
-garbage collection triggered by `Vm::check_memory`, `Vm::reserve_io`, or
-`Vm::resource_slot`, the function must check capabilities and limits before
-performing any side effects. `Config::retry_stress` tests this requirement by
-failing the first memory or resource check in each `vm_function` call.
+To check a sandbox capability inside a function that takes `&mut Vm`, call
+`Vm::require(&capability)` (§14). `Vm::require` returns an error of kind
+`"permission_denied"` if the policy denies the request. A function that takes
+`&mut Vm` must check capabilities and limits before any side effect. The engine
+runs the function again from the start after a permission prompt or a garbage
+collection during a memory or resource check. `Config::retry_stress` tests this
+requirement: it fails the first memory or resource check in each call of a
+function that takes `&mut Vm`.
 Return-value conversion does not fail on the memory limit; instead, the engine
 collects garbage and checks the memory limit after the call completes.
 
