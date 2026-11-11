@@ -103,8 +103,8 @@ impl ValueType for Timestamp {
         },
         ordered: true,
     });
-    fn to_value(&self) -> Value {
-        Value::Instant(*self)
+    fn to_own_variant(&self) -> Option<Value> {
+        Some(Value::Instant(*self))
     }
     fn from_value(value: &Value) -> Option<Self> {
         match value {
@@ -124,8 +124,8 @@ impl ValueType for DateTime {
         unpack: |[d, t]| unpack_date(d).to_datetime(unpack_time(t)),
         ordered: true,
     });
-    fn to_value(&self) -> Value {
-        Value::PlainDateTime(*self)
+    fn to_own_variant(&self) -> Option<Value> {
+        Some(Value::PlainDateTime(*self))
     }
     fn from_value(value: &Value) -> Option<Self> {
         match value {
@@ -141,8 +141,8 @@ impl ValueType for DateTime {
 impl ValueType for Date {
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
     const PACKING: Option<Packing<Self>> = Some(Packing { pack: |d| [pack_date(d), 0], unpack: |[d, _]| unpack_date(d), ordered: true });
-    fn to_value(&self) -> Value {
-        Value::PlainDate(*self)
+    fn to_own_variant(&self) -> Option<Value> {
+        Some(Value::PlainDate(*self))
     }
     fn from_value(value: &Value) -> Option<Self> {
         match value {
@@ -158,8 +158,8 @@ impl ValueType for Date {
 impl ValueType for Time {
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
     const PACKING: Option<Packing<Self>> = Some(Packing { pack: |t| [pack_time(t), 0], unpack: |[t, _]| unpack_time(t), ordered: true });
-    fn to_value(&self) -> Value {
-        Value::PlainTime(*self)
+    fn to_own_variant(&self) -> Option<Value> {
+        Some(Value::PlainTime(*self))
     }
     fn from_value(value: &Value) -> Option<Self> {
         match value {
@@ -240,8 +240,8 @@ impl fmt::Display for ZonedDateTime {
 }
 impl ValueType for ZonedDateTime {
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
-    fn to_value(&self) -> Value {
-        Value::ZonedDateTime(Box::new(self.clone()))
+    fn to_own_variant(&self) -> Option<Value> {
+        Some(Value::ZonedDateTime(Box::new(self.clone())))
     }
     fn from_value(value: &Value) -> Option<Self> {
         match value {
@@ -285,8 +285,8 @@ impl ValueType for PlainYearMonth {
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
     const PACKING: Option<Packing<Self>> =
         Some(Packing { pack: |ym| [pack_date(&ym.0), 0], unpack: |[d, _]| PlainYearMonth(unpack_date(d)), ordered: true });
-    fn to_value(&self) -> Value {
-        Value::PlainYearMonth(*self)
+    fn to_own_variant(&self) -> Option<Value> {
+        Some(Value::PlainYearMonth(*self))
     }
     fn from_value(value: &Value) -> Option<Self> {
         match value {
@@ -335,8 +335,8 @@ impl ValueType for PlainMonthDay {
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
     const PACKING: Option<Packing<Self>> =
         Some(Packing { pack: |md| [pack_date(&md.0), 0], unpack: |[d, _]| PlainMonthDay(unpack_date(d)), ordered: true });
-    fn to_value(&self) -> Value {
-        Value::PlainMonthDay(*self)
+    fn to_own_variant(&self) -> Option<Value> {
+        Some(Value::PlainMonthDay(*self))
     }
     fn from_value(value: &Value) -> Option<Self> {
         match value {
@@ -430,8 +430,8 @@ impl fmt::Display for Span {
     }
 }
 impl ValueType for Span {
-    fn to_value(&self) -> Value {
-        Value::Span(Box::new(*self))
+    fn to_own_variant(&self) -> Option<Value> {
+        Some(Value::Span(Box::new(*self)))
     }
     fn from_value(value: &Value) -> Option<Self> {
         match value {
@@ -490,8 +490,8 @@ impl fmt::Display for TimeZone {
     }
 }
 impl ValueType for TimeZone {
-    fn to_value(&self) -> Value {
-        Value::TimeZone(self.clone())
+    fn to_own_variant(&self) -> Option<Value> {
+        Some(Value::TimeZone(self.clone()))
     }
     fn from_value(value: &Value) -> Option<Self> {
         match value {

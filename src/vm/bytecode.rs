@@ -1227,7 +1227,8 @@ pub enum Piece {
 #[derive(Clone, Debug)]
 pub struct StructRt {
     pub name: String,
-    pub module: String,
+    /// The module of the type, or `None` for the prelude.
+    pub module: Option<String>,
     pub fields: Vec<String>,
     pub is_enum: bool,
 }

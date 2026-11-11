@@ -21,7 +21,7 @@ use crate::native::ty::Type;
 use crate::native::{BoundKind, EnumVariant, NativeDecl, StructField};
 use crate::syntax::ast::{self, ItemKind, TypeExpr, TypeExprKind};
 use crate::types::*;
-use crate::value::{Value, qualified_name};
+use crate::value::{Value, is_qualified_name};
 use crate::vm::value::{FxBuild, FxHashMap};
 use budget::{CompileBudget, MAX_TYPE_SIZE};
 use persist::{PMap, PVec};
@@ -1946,7 +1946,8 @@ impl Checker {
     /// [`qualified_name`] writes it.
     fn is_named(&self, def: TypeDefId, type_name: &str) -> bool {
         let ty = &self.types[def as usize];
-        type_name == qualified_name(self.name(ty.module_name), self.name(ty.name))
+        let module = (Some(ty.module) != self.prelude).then(|| self.name(ty.module_name));
+        is_qualified_name(type_name, module, self.name(ty.name))
     }
 
     /// Returns the type that module `module` declares with the name `name`.

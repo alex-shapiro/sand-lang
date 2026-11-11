@@ -1,6 +1,6 @@
 //! Runtime values and heap objects.
 
-use crate::value::{NativeValue, Value};
+use crate::value::{Value, is_qualified_name, rust_type_module};
 use compact_str::CompactString;
 use hashbrown::HashTable;
 use std::any::Any;
@@ -904,18 +904,20 @@ pub trait ValueType:
     fn size(&self) -> usize {
         std::mem::size_of::<Self>()
     }
-    /// Returns the [`Value`] form of `self`.
+    /// Returns the variant of [`Value`] that the type has for itself, such
+    /// as `Value::PlainDate`, or `None` if the [`Value`] of `self` is a
+    /// [`Value::Native`].
     #[doc(hidden)]
-    fn to_value(&self) -> Value {
-        Value::Native(Box::new(NativeValue { type_name: format!("{}.{}", Self::MODULE, Self::NAME).into(), text: self.to_string() }))
+    fn to_own_variant(&self) -> Option<Value> {
+        None
     }
     /// Returns `value` as `Self`, or `None` if `value` is not a `Self`. See
     /// [`Value::native`].
     #[doc(hidden)]
     fn from_value(value: &Value) -> Option<Self> {
         let Value::Native(native) = value else { return None };
-        let name = native.type_name.strip_prefix(Self::MODULE)?.strip_prefix('.')?;
-        if name == Self::NAME { Self::parse(&native.text).ok() } else { None }
+        let is_self = is_qualified_name(&native.type_name, rust_type_module(Self::MODULE), Self::NAME);
+        if is_self { Self::parse(&native.text).ok() } else { None }
     }
 }
 
@@ -939,16 +941,20 @@ impl<T> Copy for Packing<T> {}
 
 /// Object-safe trait for boxed [`ValueType`] values.
 pub trait ValueObj: Any + Send {
+    fn module_name(&self) -> &'static str;
     fn type_name(&self) -> &'static str;
     fn value_eq(&self, other: &dyn ValueObj) -> bool;
     fn value_cmp(&self, other: &dyn ValueObj) -> Option<std::cmp::Ordering>;
     fn value_hash(&self) -> u64;
     fn write_text(&self, out: &mut String);
     fn size(&self) -> usize;
-    fn to_value(&self) -> Value;
+    fn to_own_variant(&self) -> Option<Value>;
 }
 
 impl<T: ValueType> ValueObj for T {
+    fn module_name(&self) -> &'static str {
+        T::MODULE
+    }
     fn type_name(&self) -> &'static str {
         T::NAME
     }
@@ -970,8 +976,8 @@ impl<T: ValueType> ValueObj for T {
     fn size(&self) -> usize {
         ValueType::size(self)
     }
-    fn to_value(&self) -> Value {
-        ValueType::to_value(self)
+    fn to_own_variant(&self) -> Option<Value> {
+        ValueType::to_own_variant(self)
     }
 }
 
@@ -979,11 +985,12 @@ type PackedOrder = fn([u64; 2], [u64; 2]) -> std::cmp::Ordering;
 
 /// Type descriptor for an inline 16-byte [`ValueType`].
 pub struct PackedType {
+    module: &'static str,
     name: &'static str,
     order: Option<PackedOrder>,
     pub(crate) ordered_bits: bool,
     write_text: fn([u64; 2], &mut String),
-    to_value: fn([u64; 2]) -> Option<Value>,
+    to_own_variant: fn([u64; 2]) -> Option<Value>,
     type_id: fn() -> std::any::TypeId,
 }
 
@@ -1001,6 +1008,7 @@ impl<T: ValueType> PackedTypeOf<T> {
         None => false,
     };
     const TYPE: PackedType = PackedType {
+        module: T::MODULE,
         name: T::NAME,
         order: match (T::ORDER, Self::ORDERED_BITS) {
             (None, _) => None,
@@ -1016,7 +1024,7 @@ impl<T: ValueType> PackedTypeOf<T> {
                 x.write_text(out)
             }
         },
-        to_value: |a| unpack::<T>(a).map(|x| x.to_value()),
+        to_own_variant: |a| unpack::<T>(a).and_then(|x| x.to_own_variant()),
         type_id: std::any::TypeId::of::<T>,
     };
 }
@@ -1032,6 +1040,13 @@ pub enum ValueRef<'a> {
 }
 
 impl ValueRef<'_> {
+    pub fn module_name(self) -> &'static str {
+        match self {
+            ValueRef::Boxed(x) => x.module_name(),
+            ValueRef::Packed(t, _) => t.module,
+        }
+    }
+
     pub fn type_name(self) -> &'static str {
         match self {
             ValueRef::Boxed(x) => x.type_name(),
@@ -1080,12 +1095,12 @@ impl ValueRef<'_> {
         s
     }
 
-    /// Returns the [`Value`] form of the value, or `None` if a packed value
-    /// cannot be unpacked.
-    pub(crate) fn to_value(self) -> Option<Value> {
+    /// Returns the variant of [`Value`] that the type of the value has for
+    /// itself, or `None` if the [`Value`] of the value is a [`Value::Native`].
+    pub(crate) fn to_own_variant(self) -> Option<Value> {
         match self {
-            ValueRef::Boxed(x) => Some(x.to_value()),
-            ValueRef::Packed(t, a) => (t.to_value)(a),
+            ValueRef::Boxed(x) => x.to_own_variant(),
+            ValueRef::Packed(t, a) => (t.to_own_variant)(a),
         }
     }
 }

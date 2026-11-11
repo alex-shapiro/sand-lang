@@ -6,7 +6,7 @@ use crate::vm::bytecode::StructRt;
 use crate::vm::encode::{self, Container, EncodeSink, EnumVariant, Leaf, MAX_DEPTH, OpaqueKind, Opened};
 use crate::vm::heap::Heap;
 use crate::vm::meter::{Meter, Scratch};
-use crate::vm::value::{FxBuild, FxHashMap, ValueRef, ValueType, VmValue};
+use crate::vm::value::{FxHashMap, ValueRef, ValueType, VmValue};
 use crate::vm::{Fail, Vm, fail, internal};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::mem::{size_of, size_of_val};
@@ -185,6 +185,38 @@ impl Value {
     /// ```
     pub fn native<T: ValueType>(&self) -> Option<T> {
         T::from_value(self)
+    }
+
+    /// Returns the bytes that a value of a native value type with its own
+    /// variant allocates, or 0 for any other value.
+    fn own_variant_bytes(&self) -> usize {
+        match self {
+            Value::ZonedDateTime(_) => size_of::<ZonedDateTime>(),
+            Value::Span(_) => size_of::<Span>(),
+            Value::Instant(_)
+            | Value::PlainDateTime(_)
+            | Value::PlainDate(_)
+            | Value::PlainTime(_)
+            | Value::PlainYearMonth(_)
+            | Value::PlainMonthDay(_)
+            | Value::TimeZone(_)
+            | Value::Unit
+            | Value::Bool(_)
+            | Value::Int(_)
+            | Value::Float(_)
+            | Value::Duration(_)
+            | Value::Str(_)
+            | Value::Bytes(_)
+            | Value::List(_)
+            | Value::Tuple(_)
+            | Value::Set(_)
+            | Value::Map(_)
+            | Value::Range { .. }
+            | Value::Struct(_)
+            | Value::Variant(_)
+            | Value::Native(_)
+            | Value::Opaque { .. } => 0,
+        }
     }
 }
 
@@ -375,7 +407,7 @@ pub(crate) fn copy_from_vm(vm: &Vm, value: VmValue) -> Result<Value, Fail> {
         allocated: 0,
         scratch: Scratch::new(),
         depth: 0,
-        type_names: HashSet::default(),
+        type_names: FxHashMap::default(),
         structs: FxHashMap::default(),
         variants: FxHashMap::default(),
     };
@@ -386,9 +418,28 @@ pub(crate) fn copy_from_vm(vm: &Vm, value: VmValue) -> Result<Value, Fail> {
 }
 
 /// Returns the name of a type for a reader outside its module: `module.Name`,
-/// or `Name` for a prelude type, which no script can qualify.
-pub(crate) fn qualified_name(module: &str, name: &str) -> String {
-    if module == "prelude" { name.to_string() } else { format!("{module}.{name}") }
+/// or `Name` for a type of the prelude, which has the module `None`.
+pub(crate) fn qualified_name(module: Option<&str>, name: &str) -> String {
+    match module {
+        Some(module) => format!("{module}.{name}"),
+        None => name.to_string(),
+    }
+}
+
+/// Returns `true` if `text` is the name of the type `name` of `module`, as
+/// [`qualified_name`] writes it.
+pub(crate) fn is_qualified_name(text: &str, module: Option<&str>, name: &str) -> bool {
+    match module {
+        Some(module) => text.strip_prefix(module).and_then(|rest| rest.strip_prefix('.')) == Some(name),
+        None => text == name,
+    }
+}
+
+/// Returns the module of a type that Rust declares in `module`, for
+/// [`qualified_name`]: `None` for the prelude. The engine reserves the module
+/// name `prelude`, so no host module has it.
+pub(crate) fn rust_type_module(module: &str) -> Option<&str> {
+    (module != "prelude").then_some(module)
 }
 
 /// The [`EncodeSink`] that builds a [`Value`].
@@ -399,8 +450,9 @@ struct ValueSink<'h> {
     allocated: usize,
     scratch: Scratch,
     depth: usize,
-    /// The type names of the native values and opaque values in the copy.
-    type_names: HashSet<Arc<str>, FxBuild>,
+    /// The shared name of each native value type and each type of an opaque
+    /// value in the copy, by its module and name.
+    type_names: FxHashMap<(Option<&'static str>, &'static str), Arc<str>>,
     /// The description of each struct type in the copy, by runtime type ID.
     structs: FxHashMap<u32, Arc<StructDesc>>,
     /// The description of each variant in the copy, by runtime variant ID.
@@ -422,7 +474,9 @@ enum OpenValue {
 
 impl ValueSink<'_> {
     /// Counts `bytes` of new Rust memory against the memory limit. Call this
-    /// function before the allocation.
+    /// function before each allocation for the copy, except for a native
+    /// value: only the value itself gives its size, so the copy counts it
+    /// right after the value exists.
     fn reserve(&mut self, bytes: usize) -> Result<(), Fail> {
         self.allocated = self.allocated.saturating_add(bytes);
         self.scratch.check(self.heap, self.allocated)
@@ -448,21 +502,24 @@ impl ValueSink<'_> {
         Ok(Vec::with_capacity(len))
     }
 
-    fn type_name(&mut self, text: &str) -> Result<Arc<str>, Fail> {
-        if let Some(name) = self.type_names.get(text) {
-            return Ok(name.clone());
+    /// Returns the shared name of the type `name` of `module`, which Rust
+    /// declares.
+    fn type_name(&mut self, module: Option<&'static str>, name: &'static str) -> Result<Arc<str>, Fail> {
+        if let Some(type_name) = self.type_names.get(&(module, name)) {
+            return Ok(type_name.clone());
         }
-        self.reserve_copy(text.len(), 2 * size_of::<usize>())?;
-        let name: Arc<str> = Arc::from(text);
-        self.type_names.insert(name.clone());
-        Ok(name)
+        let type_name = qualified_name(module, name);
+        self.reserve_copy(type_name.len(), 2 * size_of::<usize>())?;
+        let type_name: Arc<str> = type_name.into();
+        self.type_names.insert((module, name), type_name.clone());
+        Ok(type_name)
     }
 
     fn struct_desc(&mut self, def: u32, ty: &StructRt) -> Result<Arc<StructDesc>, Fail> {
         if let Some(desc) = self.structs.get(&def) {
             return Ok(desc.clone());
         }
-        let name = qualified_name(&ty.module, &ty.name);
+        let name = qualified_name(ty.module.as_deref(), &ty.name);
         self.reserve_desc(size_of::<StructDesc>(), name.len(), &ty.fields)?;
         let desc = Arc::new(StructDesc { name, fields: ty.fields.clone() });
         self.structs.insert(def, desc.clone());
@@ -474,7 +531,7 @@ impl ValueSink<'_> {
             return Ok(desc.clone());
         }
         let ty = variant.enum_type();
-        let enum_name = qualified_name(&ty.module, &ty.name);
+        let enum_name = qualified_name(ty.module.as_deref(), &ty.name);
         let fields = variant.field_names.unwrap_or_default();
         self.reserve_desc(size_of::<VariantDesc>(), enum_name.len() + variant.name.len(), fields)?;
         let fields = variant.field_names.map(<[String]>::to_vec);
@@ -484,25 +541,22 @@ impl ValueSink<'_> {
     }
 
     fn native(&mut self, native: ValueRef<'_>) -> Result<Value, Fail> {
-        let Some(mut value) = native.to_value() else { return internal("to_value: a packed value without an unpacked form") };
-        match &mut value {
-            Value::Native(native) => {
-                self.reserve_copy(native.text.len(), size_of::<NativeValue>())?;
-                native.type_name = self.type_name(&native.type_name)?;
-            }
-            Value::ZonedDateTime(_) => self.reserve(size_of::<ZonedDateTime>())?,
-            Value::Span(_) => self.reserve(size_of::<Span>())?,
-            _ => {}
+        if let Some(value) = native.to_own_variant() {
+            self.reserve(value.own_variant_bytes())?;
+            return Ok(value);
         }
-        Ok(value)
+        let text = native.text();
+        self.reserve_copy(text.len(), size_of::<NativeValue>())?;
+        let type_name = self.type_name(rust_type_module(native.module_name()), native.type_name())?;
+        Ok(Value::Native(Box::new(NativeValue { type_name, text })))
     }
 
     fn opaque(&mut self, kind: OpaqueKind) -> Result<Value, Fail> {
         let type_name = match kind {
-            OpaqueKind::Function => self.type_name("fn")?,
-            OpaqueKind::Task => self.type_name("Task")?,
-            OpaqueKind::Channel => self.type_name("Channel")?,
-            OpaqueKind::Object { module, name } => self.type_name(&qualified_name(module, name))?,
+            OpaqueKind::Function => self.type_name(None, "fn")?,
+            OpaqueKind::Task => self.type_name(None, "Task")?,
+            OpaqueKind::Channel => self.type_name(None, "Channel")?,
+            OpaqueKind::Object { module, name } => self.type_name(rust_type_module(module), name)?,
             OpaqueKind::Internal => return internal("to_value: an internal heap object has no `Value` form"),
         };
         Ok(Value::Opaque { type_name })

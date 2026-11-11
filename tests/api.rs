@@ -4256,14 +4256,23 @@ fn rust_bound_field_types_meet_the_requirements_of_their_constructors() {
 // Values copied out of the VM
 // ---------------------------------------------------------------------------
 
-/// Runs `src` with the module `host` and the modules in `modules`. The
-/// function `host.copy` copies its argument out of the VM with
-/// [`Vm::to_value`]. Returns the result of the run and the copies.
+/// Runs `src` with the module of [`copy_module`] and the modules in
+/// `modules`. Returns the result of the run and the copies.
 fn run_and_copy_values(
     config: Config,
     modules: impl IntoIterator<Item = NativeModule>,
     src: &str,
 ) -> (Result<sandlang::engine::Outcome, Error>, Vec<Value>) {
+    let (host, copies) = copy_module();
+    let modules = HostModules::new(modules.into_iter().chain([host])).unwrap();
+    let (r, _, _) = run_src(config.host_modules(modules), &format!("import host\n{src}"));
+    let values = std::mem::take(&mut *copies.lock());
+    (r, values)
+}
+
+/// Returns the module `host`, whose function `host.copy` copies its argument
+/// out of the VM with [`Vm::to_value`], and the copies.
+fn copy_module() -> (NativeModule, Arc<Mutex<Vec<Value>>>) {
     use sandlang::native::ty::Param;
     let copies = Arc::new(Mutex::new(Vec::new()));
     let copied = copies.clone();
@@ -4273,10 +4282,17 @@ fn run_and_copy_values(
         copied.lock().push(vm.to_value(value.raw())?);
         Ok(())
     });
-    let modules = HostModules::new(modules.into_iter().chain([host])).unwrap();
-    let (r, _, _) = run_src(config.host_modules(modules), &format!("import host\n{src}"));
-    let values = std::mem::take(&mut *copies.lock());
-    (r, values)
+    (host, copies)
+}
+
+#[test]
+fn to_value_qualifies_the_types_of_a_script_named_prelude() {
+    let (host, copies) = copy_module();
+    let (mut engine, _, _) = engine_with(Config::new().host_modules(HostModules::new([host]).unwrap()));
+    let src = "import host\nstruct Order { id: int }\nhost.copy((Order(id: 1), Some(2)))\n";
+    rt().block_on(engine.run_source("prelude.sand", src)).unwrap();
+    let order = struct_value("prelude.Order", [("id", Value::Int(1))]);
+    assert_eq!(*copies.lock(), [Value::Tuple(vec![order, variant_value("Option", "Some", [Value::Int(2)])])]);
 }
 
 /// Returns the copies that `src` makes with `host.copy`.
