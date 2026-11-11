@@ -9,6 +9,7 @@ use crate::vm::meter::{Meter, Scratch};
 use crate::vm::value::{FxHashMap, ValueRef, ValueType, VmValue};
 use crate::vm::{Fail, Vm, internal};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fmt;
 use std::mem::{size_of, size_of_val};
 use std::sync::{Arc, OnceLock};
 
@@ -17,7 +18,10 @@ use std::sync::{Arc, OnceLock};
 /// Each part of the value whose type does not implement `Encode` is a
 /// [`Value::Opaque`]. A `Value` does not reference the VM, so it remains valid
 /// after the run ends.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// The `Debug` output shows a struct or a variant with its name, such as
+/// `shop.Order { id: Int(1), note: Option.None }`.
+#[derive(Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Value {
     /// The unit value `()`.
@@ -79,7 +83,7 @@ pub enum Value {
 }
 
 /// A struct value: its type and one value for each field.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct StructValue {
     /// The type of the struct.
     pub ty: Arc<StructDesc>,
@@ -98,7 +102,7 @@ pub struct StructDesc {
 }
 
 /// An enum variant value: its variant and its payload.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct VariantValue {
     /// The variant.
     pub ty: Arc<VariantDesc>,
@@ -231,6 +235,67 @@ impl Value {
             | Value::Opaque { .. } => 0,
         }
     }
+}
+
+impl fmt::Debug for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (variant, inner): (&str, &dyn fmt::Debug) = match self {
+            Value::Unit => return f.write_str("Unit"),
+            Value::Range { start, end, inclusive } => {
+                return f.debug_struct("Range").field("start", start).field("end", end).field("inclusive", inclusive).finish();
+            }
+            Value::Struct(s) => return s.fmt(f),
+            Value::Variant(v) => return v.fmt(f),
+            Value::Opaque { type_name } => return f.debug_struct("Opaque").field("type_name", type_name).finish(),
+            Value::Bool(b) => ("Bool", b),
+            Value::Int(i) => ("Int", i),
+            Value::Float(x) => ("Float", x),
+            Value::Duration(d) => ("Duration", d),
+            Value::Str(s) => ("Str", s),
+            Value::Bytes(b) => ("Bytes", b),
+            Value::List(items) => ("List", items),
+            Value::Tuple(items) => ("Tuple", items),
+            Value::Set(items) => ("Set", items),
+            Value::Map(entries) => ("Map", entries),
+            Value::Instant(t) => ("Instant", t),
+            Value::PlainDateTime(t) => ("PlainDateTime", t),
+            Value::PlainDate(t) => ("PlainDate", t),
+            Value::PlainTime(t) => ("PlainTime", t),
+            Value::PlainYearMonth(t) => ("PlainYearMonth", t),
+            Value::PlainMonthDay(t) => ("PlainMonthDay", t),
+            Value::ZonedDateTime(t) => ("ZonedDateTime", t),
+            Value::Span(t) => ("Span", t),
+            Value::TimeZone(t) => ("TimeZone", t),
+            Value::Native(native) => ("Native", native),
+        };
+        f.debug_tuple(variant).field(inner).finish()
+    }
+}
+
+impl fmt::Debug for StructValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        debug_named_fields(f.debug_struct(&self.ty.name), &self.ty.fields, &self.fields)
+    }
+}
+
+impl fmt::Debug for VariantValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.ty.enum_name)?;
+        f.write_str(".")?;
+        match &self.ty.fields {
+            Some(names) => debug_named_fields(f.debug_struct(&self.ty.name), names, &self.payload),
+            None => self.payload.iter().fold(&mut f.debug_tuple(&self.ty.name), |out, value| out.field(value)).finish(),
+        }
+    }
+}
+
+/// Writes each of `values` with its name in `names`, or with `_` if `names`
+/// is too short.
+fn debug_named_fields(mut out: fmt::DebugStruct<'_, '_>, names: &[String], values: &[Value]) -> fmt::Result {
+    for (i, value) in values.iter().enumerate() {
+        out.field(names.get(i).map_or("_", String::as_str), value);
+    }
+    out.finish()
 }
 
 /// A Rust type whose values have a [`Value`] form, the counterpart of the Sand
@@ -684,5 +749,20 @@ mod tests {
     #[cfg(target_pointer_width = "64")]
     fn value_is_at_most_32_bytes() {
         assert!(size_of::<Value>() <= 32, "Value is {} bytes", size_of::<Value>());
+    }
+
+    #[test]
+    fn debug_shows_structs_and_variants_by_name() {
+        let none = Value::Variant(VariantValue { ty: VariantDesc::new("Option", "None"), payload: Box::default() });
+        let some = Value::Variant(VariantValue { ty: VariantDesc::new("Option", "Some"), payload: Box::new([Value::Int(1)]) });
+        let order =
+            Value::Struct(StructValue { ty: StructDesc::new("shop.Order", ["id", "note"]), fields: Box::new([Value::Int(1), none]) });
+        let moved =
+            Value::Variant(VariantValue { ty: VariantDesc::with_fields("shop.Event", "Moved", ["x"]), payload: Box::new([Value::Int(1)]) });
+        assert_eq!(format!("{order:?}"), "shop.Order { id: Int(1), note: Option.None }");
+        assert_eq!(format!("{some:?}"), "Option.Some(Int(1))");
+        assert_eq!(format!("{moved:?}"), "shop.Event.Moved { x: Int(1) }");
+        assert_eq!(format!("{moved:#?}"), "shop.Event.Moved {\n    x: Int(\n        1,\n    ),\n}");
+        assert_eq!(format!("{:?}", Value::List(vec![some])), "List([Option.Some(Int(1))])");
     }
 }
