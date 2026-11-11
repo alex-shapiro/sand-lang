@@ -180,7 +180,7 @@ pub(crate) fn module() -> NativeModule {
 }
 
 #[derive(crate::SandEnum)]
-#[sand(module = "json", private, no_encode)]
+#[sand(module = "json", private, no_value)]
 enum Decoded<T> {
     Done(T),
     Pending(T, VmVal<Vec<fn()>>),

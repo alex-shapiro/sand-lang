@@ -7,8 +7,9 @@
 //! - `#[sand(private)]` makes the type private.
 //! - `#[sand(crate = <path>)]` overrides the `::sandlang` crate path.
 //! - `#[sand(manual_conversion)]` omits the `FromVmValue`, `IntoVmValue`, and `Encode` implementations.
-//! - `#[sand(no_encode)]` omits the `Encode` implementation, for a type with a field that has no
-//!   `Value` form, such as a `VmVal` handle.
+//! - `#[sand(no_value)]` states that the type has no `Value` form, and omits the `Encode`
+//!   implementation. Use it for a type with a field that has no `Value` form, such as a `VmVal`
+//!   handle.
 //!
 //! The macros copy Rust doc comments into Sand documentation.
 
@@ -88,7 +89,7 @@ struct TypeAttrs {
     krate: Path,
     doc: Tokens,
     manual_conversion: bool,
-    no_encode: bool,
+    no_value: bool,
 }
 
 fn parse_type_attrs(input: &DeriveInput, derive: &str) -> syn::Result<TypeAttrs> {
@@ -97,7 +98,7 @@ fn parse_type_attrs(input: &DeriveInput, derive: &str) -> syn::Result<TypeAttrs>
     let mut name = LitStr::new(&ty.unraw().to_string(), ty.span());
     let mut public = true;
     let mut manual_conversion = false;
-    let mut no_encode = false;
+    let mut no_value = false;
     let mut krate: Path = parse_quote!(::sandlang);
     for attr in input.attrs.iter().filter(|a| a.path().is_ident("sand")) {
         attr.parse_nested_meta(|meta| {
@@ -111,10 +112,10 @@ fn parse_type_attrs(input: &DeriveInput, derive: &str) -> syn::Result<TypeAttrs>
                 krate = meta.value()?.parse()?;
             } else if meta.path.is_ident("manual_conversion") && matches!(derive, "SandEnum" | "SandStruct") {
                 manual_conversion = true;
-            } else if meta.path.is_ident("no_encode") && matches!(derive, "SandEnum" | "SandStruct") {
-                no_encode = true;
+            } else if meta.path.is_ident("no_value") && matches!(derive, "SandEnum" | "SandStruct") {
+                no_value = true;
             } else if matches!(derive, "SandEnum" | "SandStruct") {
-                return Err(meta.error("expected `module`, `name`, `private`, `crate`, `manual_conversion` or `no_encode`"));
+                return Err(meta.error("expected `module`, `name`, `private`, `crate`, `manual_conversion` or `no_value`"));
             } else {
                 return Err(meta.error("expected `module`, `name`, `private` or `crate`"));
             }
@@ -124,7 +125,7 @@ fn parse_type_attrs(input: &DeriveInput, derive: &str) -> syn::Result<TypeAttrs>
     let Some(module) = module else {
         return Err(Error::new(Span::call_site(), format!("`{derive}` requires `#[sand(module = \"...\")]`")));
     };
-    Ok(TypeAttrs { module, name, public, krate, doc: doc_expr(&input.attrs), manual_conversion, no_encode })
+    Ok(TypeAttrs { module, name, public, krate, doc: doc_expr(&input.attrs), manual_conversion, no_value })
 }
 
 struct TypeParams {
@@ -424,7 +425,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
         return Ok(reflection);
     }
     let count = data.variants.len();
-    let encode = (!attrs.no_encode).then(|| {
+    let encode = (!attrs.no_value).then(|| {
         quote! {
             impl #imp #krate::value::Encode for #ty #tyg #wh_encode {
                 fn encode(&self) -> #krate::value::Value {
@@ -592,7 +593,7 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
     if attrs.manual_conversion {
         return Ok(reflection);
     }
-    let encode = (!attrs.no_encode).then(|| {
+    let encode = (!attrs.no_value).then(|| {
         quote! {
             impl #imp #krate::value::Encode for #ty #tyg #wh_encode {
                 fn encode(&self) -> #krate::value::Value {
@@ -803,7 +804,7 @@ mod tests {
             (
                 sand_enum,
                 "#[sand(module = \"m\", public)] enum E { A }",
-                "expected `module`, `name`, `private`, `crate`, `manual_conversion` or `no_encode`",
+                "expected `module`, `name`, `private`, `crate`, `manual_conversion` or `no_value`",
             ),
             (sand_object, "#[sand(module = \"m\", manual_conversion)] struct O;", "expected `module`, `name`, `private` or `crate`"),
         ];
@@ -835,9 +836,9 @@ mod tests {
     }
 
     #[test]
-    fn no_encode_omits_only_the_encode_impl() {
+    fn no_value_omits_only_the_encode_impl() {
         for (f, item) in [(sand_enum as Derive, "enum E { A(i64) }"), (sand_struct, "struct S { x: i64 }")] {
-            let out = expand(f, &format!("#[sand(module = \"m\", no_encode)] {item}"));
+            let out = expand(f, &format!("#[sand(module = \"m\", no_value)] {item}"));
             assert!(out.contains("FromVmValue for") && out.contains("IntoVmValue for") && !out.contains("Encode for"), "{out}");
         }
     }

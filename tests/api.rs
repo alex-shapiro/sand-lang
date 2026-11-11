@@ -1631,7 +1631,7 @@ fn rust_json_field_defaults_are_constants() {
 fn rust_field_defaults_cannot_hold_native_or_opaque_values() {
     use sandlang::value::Encode;
     #[derive(Default, sandlang::SandStruct)]
-    #[sand(module = "lab", no_encode)]
+    #[sand(module = "lab", no_value)]
     struct Hook {
         id: i64,
     }
@@ -1712,7 +1712,7 @@ fn rust_field_defaults_are_bounded() {
 fn rust_field_defaults_must_be_values_of_declared_types() {
     use sandlang::value::Encode;
     #[derive(Default, sandlang::SandEnum)]
-    #[sand(module = "lab", no_encode)]
+    #[sand(module = "lab", no_value)]
     enum Shade {
         #[default]
         Light,
@@ -1724,7 +1724,7 @@ fn rust_field_defaults_must_be_values_of_declared_types() {
         }
     }
     #[derive(Default, sandlang::SandEnum)]
-    #[sand(module = "lab", no_encode)]
+    #[sand(module = "lab", no_value)]
     enum Glow {
         #[default]
         Dim,
@@ -1739,7 +1739,7 @@ fn rust_field_defaults_must_be_values_of_declared_types() {
         }
     }
     #[derive(Default, sandlang::SandStruct)]
-    #[sand(module = "lab", no_encode)]
+    #[sand(module = "lab", no_value)]
     struct Spot {
         x: i64,
     }

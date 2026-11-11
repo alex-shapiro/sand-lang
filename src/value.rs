@@ -246,10 +246,10 @@ impl Value {
 /// ```
 ///
 /// A derived struct or enum with a field that has no `Value` form, such as a
-/// `VmVal` handle, takes `#[sand(no_encode)]`.
+/// `VmVal` handle, takes `#[sand(no_value)]`.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` has no `Value` form",
-    note = "a `SandStruct` or `SandEnum` with a field such as a `VmVal` handle takes `#[sand(no_encode)]`"
+    note = "a `SandStruct` or `SandEnum` with a field such as a `VmVal` handle takes `#[sand(no_value)]`"
 )]
 pub trait Encode {
     /// Returns the [`Value`] form of `self`.

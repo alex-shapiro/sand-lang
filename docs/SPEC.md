@@ -2191,9 +2191,10 @@ optional type attributes:
 - `#[sand(crate = <path>)]`: specifies a renamed `sandlang` dependency.
 - `#[sand(manual_conversion)]`: on `SandEnum` and `SandStruct`, omits the
   derived `FromVmValue`, `IntoVmValue`, and `Encode` implementations.
-- `#[sand(no_encode)]`: on `SandEnum` and `SandStruct`, omits the derived
-  `Encode` implementation. Use it for a type with a field that has no `Value`
-  form, such as a `VmVal<T>` handle.
+- `#[sand(no_value)]`: on `SandEnum` and `SandStruct`, states that the type
+  has no `Value` form, and omits the derived `Encode` implementation. Use it
+  for a type with a field that has no `Value` form, such as a `VmVal<T>`
+  handle.
 
 | Derive       | Sand type                                                                  |
 | ------------ | -------------------------------------------------------------------------- |
