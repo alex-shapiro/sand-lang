@@ -67,6 +67,28 @@ fn unpack_time(bits: u64) -> Time {
         .expect("packed by pack_time")
 }
 
+/// Implements the hooks of `ValueType` that give a `time` type its own
+/// variant of [`Value`]. A `boxed` variant holds the value in a `Box`.
+macro_rules! own_variant {
+    ($variant:ident) => {
+        own_variant!($variant, Clone::clone, Clone::clone);
+    };
+    (boxed $variant:ident) => {
+        own_variant!($variant, |x: &Self| Box::new(x.clone()), |x: &Box<Self>| (**x).clone());
+    };
+    ($variant:ident, $wrap:expr, $unwrap:expr) => {
+        fn to_own_variant(&self) -> Option<Value> {
+            Some(Value::$variant($wrap(self)))
+        }
+        fn from_value(value: &Value) -> Option<Self> {
+            match value {
+                Value::$variant(x) => Some($unwrap(x)),
+                _ => None,
+            }
+        }
+    };
+}
+
 macro_rules! bind_jiff_types {
     ($($rust:ty => $name:literal: $doc:literal),* $(,)?) => {$(
         impl NamedType for $rust {
@@ -103,15 +125,7 @@ impl ValueType for Timestamp {
         },
         ordered: true,
     });
-    fn to_own_variant(&self) -> Option<Value> {
-        Some(Value::Instant(*self))
-    }
-    fn from_value(value: &Value) -> Option<Self> {
-        match value {
-            Value::Instant(t) => Some(*t),
-            _ => None,
-        }
-    }
+    own_variant!(Instant);
     fn parse(text: &str) -> Result<Self, String> {
         text.parse().map_err(|_| parse_error(text, Self::NAME))
     }
@@ -124,15 +138,7 @@ impl ValueType for DateTime {
         unpack: |[d, t]| unpack_date(d).to_datetime(unpack_time(t)),
         ordered: true,
     });
-    fn to_own_variant(&self) -> Option<Value> {
-        Some(Value::PlainDateTime(*self))
-    }
-    fn from_value(value: &Value) -> Option<Self> {
-        match value {
-            Value::PlainDateTime(t) => Some(*t),
-            _ => None,
-        }
-    }
+    own_variant!(PlainDateTime);
     fn parse(text: &str) -> Result<Self, String> {
         text.parse().map_err(|_| parse_error(text, Self::NAME))
     }
@@ -141,15 +147,7 @@ impl ValueType for DateTime {
 impl ValueType for Date {
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
     const PACKING: Option<Packing<Self>> = Some(Packing { pack: |d| [pack_date(d), 0], unpack: |[d, _]| unpack_date(d), ordered: true });
-    fn to_own_variant(&self) -> Option<Value> {
-        Some(Value::PlainDate(*self))
-    }
-    fn from_value(value: &Value) -> Option<Self> {
-        match value {
-            Value::PlainDate(d) => Some(*d),
-            _ => None,
-        }
-    }
+    own_variant!(PlainDate);
     fn parse(text: &str) -> Result<Self, String> {
         text.parse().map_err(|_| parse_error(text, Self::NAME))
     }
@@ -158,15 +156,7 @@ impl ValueType for Date {
 impl ValueType for Time {
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
     const PACKING: Option<Packing<Self>> = Some(Packing { pack: |t| [pack_time(t), 0], unpack: |[t, _]| unpack_time(t), ordered: true });
-    fn to_own_variant(&self) -> Option<Value> {
-        Some(Value::PlainTime(*self))
-    }
-    fn from_value(value: &Value) -> Option<Self> {
-        match value {
-            Value::PlainTime(t) => Some(*t),
-            _ => None,
-        }
-    }
+    own_variant!(PlainTime);
     fn parse(text: &str) -> Result<Self, String> {
         text.parse().map_err(|_| parse_error(text, Self::NAME))
     }
@@ -240,15 +230,7 @@ impl fmt::Display for ZonedDateTime {
 }
 impl ValueType for ZonedDateTime {
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
-    fn to_own_variant(&self) -> Option<Value> {
-        Some(Value::ZonedDateTime(Box::new(self.clone())))
-    }
-    fn from_value(value: &Value) -> Option<Self> {
-        match value {
-            Value::ZonedDateTime(z) => Some((**z).clone()),
-            _ => None,
-        }
-    }
+    own_variant!(boxed ZonedDateTime);
     fn parse(text: &str) -> Result<Self, String> {
         let z = PARSER.parse_zoned_with(&DB, text).map_err(|_| parse_error(text, Self::NAME))?;
         check_supported_zone(z.time_zone())?;
@@ -285,15 +267,7 @@ impl ValueType for PlainYearMonth {
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
     const PACKING: Option<Packing<Self>> =
         Some(Packing { pack: |ym| [pack_date(&ym.0), 0], unpack: |[d, _]| PlainYearMonth(unpack_date(d)), ordered: true });
-    fn to_own_variant(&self) -> Option<Value> {
-        Some(Value::PlainYearMonth(*self))
-    }
-    fn from_value(value: &Value) -> Option<Self> {
-        match value {
-            Value::PlainYearMonth(ym) => Some(*ym),
-            _ => None,
-        }
-    }
+    own_variant!(PlainYearMonth);
     fn parse(text: &str) -> Result<Self, String> {
         format!("{text}-01")
             .parse::<Date>()
@@ -335,15 +309,7 @@ impl ValueType for PlainMonthDay {
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
     const PACKING: Option<Packing<Self>> =
         Some(Packing { pack: |md| [pack_date(&md.0), 0], unpack: |[d, _]| PlainMonthDay(unpack_date(d)), ordered: true });
-    fn to_own_variant(&self) -> Option<Value> {
-        Some(Value::PlainMonthDay(*self))
-    }
-    fn from_value(value: &Value) -> Option<Self> {
-        match value {
-            Value::PlainMonthDay(md) => Some(*md),
-            _ => None,
-        }
-    }
+    own_variant!(PlainMonthDay);
     fn parse(text: &str) -> Result<Self, String> {
         let short = text.strip_prefix("--").unwrap_or(text);
         let two_digits = |s: &str| (s.len() == 2 && s.bytes().all(|b| b.is_ascii_digit())).then(|| s.parse::<i8>().ok()).flatten();
@@ -430,15 +396,7 @@ impl fmt::Display for Span {
     }
 }
 impl ValueType for Span {
-    fn to_own_variant(&self) -> Option<Value> {
-        Some(Value::Span(Box::new(*self)))
-    }
-    fn from_value(value: &Value) -> Option<Self> {
-        match value {
-            Value::Span(s) => Some(**s),
-            _ => None,
-        }
-    }
+    own_variant!(boxed Span);
     fn parse(text: &str) -> Result<Self, String> {
         text.parse().and_then(Span::new).map_err(|_| parse_error(text, Self::NAME))
     }
@@ -490,15 +448,7 @@ impl fmt::Display for TimeZone {
     }
 }
 impl ValueType for TimeZone {
-    fn to_own_variant(&self) -> Option<Value> {
-        Some(Value::TimeZone(self.clone()))
-    }
-    fn from_value(value: &Value) -> Option<Self> {
-        match value {
-            Value::TimeZone(z) => Some(z.clone()),
-            _ => None,
-        }
-    }
+    own_variant!(TimeZone);
     fn parse(text: &str) -> Result<Self, String> {
         parse_zone(text).map(TimeZone)
     }

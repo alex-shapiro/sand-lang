@@ -446,6 +446,27 @@ proptest! {
         let sf = floats.iter().fold(0.0, |a, b| a + b);
         prop_assert_eq!(out, format!("{si}\n{si}\n({si}, {si})\n{sf:?}\n{sf:?}\n({sf:?}, {sf:?})\n{sf:?}\n"), "{}", src);
     }
+
+    #[test]
+    fn encode_equals_the_copy_out_of_the_vm(value in fig(), bs in prop::collection::vec(text(), 0..4), extra in prop::collection::vec(fig(), 0..3)) {
+        use sandlang::value::{Encode, Value};
+        let holder = Holder { a: value.clone(), pair: bs.first().map(|b| (value.clone(), b.clone())), bs, extra };
+        let mut m = fig_module(Arc::default(), value.clone());
+        let made = holder.clone();
+        m.function("make_holder", move || made.clone());
+        let copies: Arc<Mutex<Vec<Value>>> = Arc::default();
+        let copied = copies.clone();
+        let mut host = NativeModule::new("host");
+        host.source("pub native fn copy<T>(value: T)");
+        host.function("copy", move |vm: &mut Vm, value: Param<0>| -> Result<(), Fail> {
+            copied.lock().push(vm.to_value(value.raw())?);
+            Ok(())
+        });
+        let src = "import fig\nimport host\nhost.copy(fig.make())\nlet h: fig.Holder<fig.Fig, str> = fig.make_holder()\nhost.copy(h)";
+        let (r, _) = run(Config::new().host_modules(HostModules::new([m, host]).unwrap()), src);
+        prop_assert!(r.is_ok(), "{r:?}");
+        prop_assert_eq!(copies.lock().clone(), vec![value.encode(), holder.encode()]);
+    }
 }
 
 fn serde_str(s: &str) -> String {

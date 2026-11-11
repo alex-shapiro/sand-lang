@@ -294,19 +294,32 @@ fn expand_sand_type(input: &DeriveInput, krate: &Path, type_params: &TypeParams)
     }
 }
 
-/// Returns the generics of the conversion impls: the impl parameters, the type
-/// arguments, and the where clauses of the reflection, `FromVmValue`,
-/// `IntoVmValue`, and `Encode` impls.
-fn split_conversion_generics(
-    input: &DeriveInput,
-    krate: &Path,
-    type_params: &TypeParams,
-) -> (Tokens, Tokens, Tokens, Tokens, Tokens, Tokens) {
-    let (imp, tyg, wh) = type_params.split_for_impl(input, |_| quote!(#krate::native::ty::SandType));
-    let (_, _, from) = type_params.split_for_impl(input, |p| quote!(for<'a> #krate::native::convert::FromVmValue<Item<'a> = #p>));
-    let (_, _, into) = type_params.split_for_impl(input, |_| quote!(#krate::native::convert::IntoVmValue));
-    let (_, _, encode) = type_params.split_for_impl(input, |_| quote!(#krate::native::ty::SandType + #krate::value::Encode));
-    (imp, tyg, wh, from, into, encode)
+/// The generics of the reflection and conversion impls of a derived type.
+struct ConversionGenerics {
+    /// The parameters of each impl.
+    params: Tokens,
+    /// The type arguments of the derived type.
+    args: Tokens,
+    /// The where clause of the reflection impls.
+    reflection_where: Tokens,
+    from_vm_value_where: Tokens,
+    into_vm_value_where: Tokens,
+    encode_where: Tokens,
+}
+
+impl ConversionGenerics {
+    fn new(input: &DeriveInput, krate: &Path, type_params: &TypeParams) -> ConversionGenerics {
+        let (params, args, reflection_where) = type_params.split_for_impl(input, |_| quote!(#krate::native::ty::SandType));
+        let where_clause = |bound: &dyn Fn(&Ident) -> Tokens| type_params.split_for_impl(input, bound).2;
+        ConversionGenerics {
+            params,
+            args,
+            reflection_where,
+            from_vm_value_where: where_clause(&|p| quote!(for<'a> #krate::native::convert::FromVmValue<Item<'a> = #p>)),
+            into_vm_value_where: where_clause(&|_| quote!(#krate::native::convert::IntoVmValue)),
+            encode_where: where_clause(&|_| quote!(#krate::native::ty::SandType + #krate::value::Encode)),
+        }
+    }
 }
 
 fn parse_variant_field_name(f: &Field, ident: &Ident) -> syn::Result<LitStr> {
@@ -407,7 +420,14 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
     }
     let named = expand_named_type(input, &attrs, &type_params, quote! { #krate::native::Binding::of_enum() });
     let sand_type = expand_sand_type(input, krate, &type_params);
-    let (imp, tyg, wh, wh_from, wh_into, wh_encode) = split_conversion_generics(input, krate, &type_params);
+    let ConversionGenerics {
+        params: imp,
+        args: tyg,
+        reflection_where: wh,
+        from_vm_value_where: wh_from,
+        into_vm_value_where: wh_into,
+        encode_where: wh_encode,
+    } = ConversionGenerics::new(input, krate, &type_params);
     let reflection = quote! {
         #named
         #sand_type
@@ -581,7 +601,14 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
     }
     let named = expand_named_type(input, &attrs, &type_params, quote! { #krate::native::Binding::of_struct() });
     let sand_type = expand_sand_type(input, krate, &type_params);
-    let (imp, tyg, wh, wh_from, wh_into, wh_encode) = split_conversion_generics(input, krate, &type_params);
+    let ConversionGenerics {
+        params: imp,
+        args: tyg,
+        reflection_where: wh,
+        from_vm_value_where: wh_from,
+        into_vm_value_where: wh_into,
+        encode_where: wh_encode,
+    } = ConversionGenerics::new(input, krate, &type_params);
     let reflection = quote! {
         #named
         #sand_type
