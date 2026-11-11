@@ -3,7 +3,7 @@
 use crate::check::ModKind;
 use crate::native::NativeModule;
 use crate::native::convert::HostError;
-use crate::native::ty::Val;
+use crate::native::ty::VmVal;
 use crate::vm::{Fail, Vm};
 
 /// A parsed RFC 3986 URI. `host` is `Some` if the URI includes an authority
@@ -47,13 +47,13 @@ impl From<Uri> for Parts {
 pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("uri", ModKind::Std, include_str!("uri.sand"));
     m.bind::<Uri>();
-    m.vm_function("parse", |vm: &mut Vm, text: Val<String>| -> Result<Uri, HostError> {
+    m.vm_function("parse", |vm: &mut Vm, text: VmVal<String>| -> Result<Uri, HostError> {
         let n = text.str(&vm.heap).len();
         vm.check_memory(n.saturating_mul(2))?;
         vm.charge_slow_bytes(n)?;
         Ok(parse(text.str(&vm.heap), true).map_err(|msg| HostError::new("parse", msg))?.into())
     });
-    m.vm_function("Uri.join", |vm: &mut Vm, base: Uri, reference: Val<String>| -> Result<Uri, HostError> {
+    m.vm_function("Uri.join", |vm: &mut Vm, base: Uri, reference: VmVal<String>| -> Result<Uri, HostError> {
         let base = Parts::from(base);
         let n = base.len().saturating_add(reference.str(&vm.heap).len());
         vm.check_memory(n.saturating_mul(3))?;
@@ -61,15 +61,15 @@ pub(crate) fn module() -> NativeModule {
         let r = parse(reference.str(&vm.heap), false).map_err(|msg| HostError::new("parse", msg))?;
         Ok(resolve(&base, r).into())
     });
-    m.vm_function("encode_component", |vm: &mut Vm, s: Val<String>| encode_native(vm, s, b""));
-    m.vm_function("encode_path", |vm: &mut Vm, s: Val<String>| encode_native(vm, s, b"/"));
-    m.vm_function("decode_component", |vm: &mut Vm, s: Val<String>| -> Result<String, HostError> {
+    m.vm_function("encode_component", |vm: &mut Vm, s: VmVal<String>| encode_native(vm, s, b""));
+    m.vm_function("encode_path", |vm: &mut Vm, s: VmVal<String>| encode_native(vm, s, b"/"));
+    m.vm_function("decode_component", |vm: &mut Vm, s: VmVal<String>| -> Result<String, HostError> {
         let s = s.str(&vm.heap);
         vm.check_memory(s.len())?;
         vm.charge_slow_bytes(s.len())?;
         decode_component(s).map_err(|msg| HostError::new("parse", msg))
     });
-    m.vm_function("parse_query", |vm: &mut Vm, q: Val<String>| -> Result<Vec<(String, String)>, Fail> {
+    m.vm_function("parse_query", |vm: &mut Vm, q: VmVal<String>| -> Result<Vec<(String, String)>, Fail> {
         let q = q.str(&vm.heap);
         vm.check_memory(q.len().saturating_mul(4))?;
         vm.charge_slow_bytes(q.len())?;
@@ -299,7 +299,7 @@ pub(crate) fn remove_dot_segments(path: &str) -> String {
     out
 }
 
-fn encode_native(vm: &mut Vm, s: Val<String>, keep: &[u8]) -> Result<String, Fail> {
+fn encode_native(vm: &mut Vm, s: VmVal<String>, keep: &[u8]) -> Result<String, Fail> {
     let s = s.str(&vm.heap);
     vm.check_memory(s.len().saturating_mul(3))?;
     vm.charge_slow_bytes(s.len())?;

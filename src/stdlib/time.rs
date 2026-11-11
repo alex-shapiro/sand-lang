@@ -13,7 +13,7 @@
 
 use crate::check::ModKind;
 use crate::native::convert::{HostError, IntoVmValue};
-use crate::native::ty::Val;
+use crate::native::ty::VmVal;
 use crate::native::{Binding, NamedType, NativeModule, NativeObject};
 use crate::platform::{Instant as Monotonic, UNIX_EPOCH};
 use crate::policy::Capability;
@@ -729,8 +729,8 @@ fn span_relative_to(rel: &Option<ZonedDateTime>) -> SpanRelativeTo<'_> {
 
 fn parse_with<T: ValueType>(
     vm: &mut Vm,
-    text: Val<String>,
-    format: Val<String>,
+    text: VmVal<String>,
+    format: VmVal<String>,
     formatted: fn(&BrokenDownTime) -> Result<T, jiff::Error>,
 ) -> Result<T, HostError> {
     let (text, format) = (text.str(&vm.heap), format.str(&vm.heap));
@@ -743,14 +743,14 @@ fn parse_with<T: ValueType>(
     x.map_err(|e| HostError::new("parse", e))
 }
 
-fn parse<T: ValueType>(vm: &mut Vm, text: Val<String>) -> Result<T, HostError> {
+fn parse<T: ValueType>(vm: &mut Vm, text: VmVal<String>) -> Result<T, HostError> {
     let text = text.str(&vm.heap);
     vm.charge_bytes(text.len())?;
     let x = T::parse(text);
     x.map_err(|e| HostError::new("parse", e))
 }
 
-fn format(vm: &mut Vm, format: Val<String>, t: impl Into<BrokenDownTime>) -> Result<String, Fail> {
+fn format(vm: &mut Vm, format: VmVal<String>, t: impl Into<BrokenDownTime>) -> Result<String, Fail> {
     let format = format.str(&vm.heap);
     // Bound output size before formatting.
     vm.check_memory(format.len().saturating_mul(64))?;
@@ -891,7 +891,7 @@ pub(crate) fn module() -> NativeModule {
 
 fn register_module(m: &mut NativeModule) {
     m.function("utc", || TimeZone(tz::TimeZone::UTC));
-    m.vm_function("TimeZone.init", |vm: &mut Vm, name: Val<String>| {
+    m.vm_function("TimeZone.init", |vm: &mut Vm, name: VmVal<String>| {
         let name = name.str(&vm.heap);
         vm.charge_bytes(name.len())?;
         vm.charge(64)?;
@@ -910,7 +910,7 @@ fn register_module(m: &mut NativeModule) {
         let start = vm.host.clock.now();
         vm.new_object(Stopwatch(start))
     });
-    m.vm_function("Stopwatch.elapsed", |vm: &mut Vm, watch: Val<Stopwatch>| -> Result<_, Fail> {
+    m.vm_function("Stopwatch.elapsed", |vm: &mut Vm, watch: VmVal<Stopwatch>| -> Result<_, Fail> {
         let start = watch.get(&vm.heap)?.0;
         let elapsed = vm.host.clock.now().saturating_duration_since(start);
         Ok(SignedDuration::from_nanos(i64::try_from(elapsed.as_nanos()).unwrap_or(i64::MAX)))
@@ -983,7 +983,7 @@ fn register_difference<T: Difference>(m: &mut NativeModule) {
 }
 
 fn register_instant(m: &mut NativeModule) {
-    m.vm_function("Instant.parse", |vm: &mut Vm, text: Val<String>, format: Val<String>| {
+    m.vm_function("Instant.parse", |vm: &mut Vm, text: VmVal<String>, format: VmVal<String>| {
         parse_with(vm, text, format, BrokenDownTime::to_timestamp)
     });
     m.function("Instant.from_epoch_seconds", |s: i64| Timestamp::from_second(s).map_err(jiff_error));
@@ -997,14 +997,14 @@ fn register_instant(m: &mut NativeModule) {
         t.round(TimestampRound::new().smallest(smallest).increment(increment).mode(positive_epoch_round_mode(mode))).map_err(jiff_error)
     });
     m.function("Instant.to_zoned_datetime", |t: Timestamp, zone: TimeZone| ZonedDateTime(t.to_zoned(zone.0)));
-    m.vm_function("Instant.format", |vm: &mut Vm, t: Timestamp, pattern: Val<String>| {
+    m.vm_function("Instant.format", |vm: &mut Vm, t: Timestamp, pattern: VmVal<String>| {
         let z = t.to_zoned(tz::TimeZone::UTC);
         format(vm, pattern, &z)
     });
 }
 
 fn register_zoned(m: &mut NativeModule) {
-    m.vm_function("ZonedDateTime.parse", |vm: &mut Vm, text: Val<String>, format: Val<String>| {
+    m.vm_function("ZonedDateTime.parse", |vm: &mut Vm, text: VmVal<String>, format: VmVal<String>| {
         let (text, format) = (text.str(&vm.heap), format.str(&vm.heap));
         vm.charge_bytes(text.len() + format.len())?;
         let z = if format.is_empty() {
@@ -1062,11 +1062,11 @@ fn register_zoned(m: &mut NativeModule) {
     m.vm_function("ZonedDateTime.previous_transition", |vm: &mut Vm, z: ZonedDateTime| transition(vm, z, false));
     m.function("ZonedDateTime.to_instant", |z: ZonedDateTime| z.0.timestamp());
     m.function("ZonedDateTime.to_plain_datetime", |z: ZonedDateTime| z.0.datetime());
-    m.vm_function("ZonedDateTime.format", |vm: &mut Vm, z: ZonedDateTime, pattern: Val<String>| format(vm, pattern, &z.0));
+    m.vm_function("ZonedDateTime.format", |vm: &mut Vm, z: ZonedDateTime, pattern: VmVal<String>| format(vm, pattern, &z.0));
 }
 
 fn register_datetime(m: &mut NativeModule) {
-    m.vm_function("PlainDateTime.parse", |vm: &mut Vm, text: Val<String>, format: Val<String>| {
+    m.vm_function("PlainDateTime.parse", |vm: &mut Vm, text: VmVal<String>, format: VmVal<String>| {
         parse_with(vm, text, format, BrokenDownTime::to_datetime)
     });
     m.function(
@@ -1086,11 +1086,11 @@ fn register_datetime(m: &mut NativeModule) {
         let z = zone.0.to_ambiguous_zoned(dt).disambiguate(dis.into());
         z.map(ZonedDateTime).map_err(jiff_error)
     });
-    m.vm_function("PlainDateTime.format", |vm: &mut Vm, dt: DateTime, pattern: Val<String>| format(vm, pattern, dt));
+    m.vm_function("PlainDateTime.format", |vm: &mut Vm, dt: DateTime, pattern: VmVal<String>| format(vm, pattern, dt));
 }
 
 fn register_date(m: &mut NativeModule) {
-    m.vm_function("PlainDate.parse", |vm: &mut Vm, text: Val<String>, format: Val<String>| {
+    m.vm_function("PlainDate.parse", |vm: &mut Vm, text: VmVal<String>, format: VmVal<String>| {
         parse_with(vm, text, format, BrokenDownTime::to_date)
     });
     m.function("PlainDate.with", |_: Date, y: i64, m: i64, d: i64| constrain_date(y, m, d));
@@ -1102,11 +1102,11 @@ fn register_date(m: &mut NativeModule) {
     m.function("PlainDate.to_plain_month_day", |d: Date| {
         PlainMonthDay::new(d.month(), d.day()).ok_or_else(|| Fail::internal("no month-day"))
     });
-    m.vm_function("PlainDate.format", |vm: &mut Vm, d: Date, pattern: Val<String>| format(vm, pattern, d));
+    m.vm_function("PlainDate.format", |vm: &mut Vm, d: Date, pattern: VmVal<String>| format(vm, pattern, d));
 }
 
 fn register_time(m: &mut NativeModule) {
-    m.vm_function("PlainTime.parse", |vm: &mut Vm, text: Val<String>, format: Val<String>| {
+    m.vm_function("PlainTime.parse", |vm: &mut Vm, text: VmVal<String>, format: VmVal<String>| {
         parse_with(vm, text, format, BrokenDownTime::to_time)
     });
     m.function("PlainTime.with", |_: Time, h: i64, m: i64, s: i64, ms: i64, us: i64, ns: i64| constrain_time([h, m, s, ms, us, ns]));
@@ -1117,7 +1117,7 @@ fn register_time(m: &mut NativeModule) {
         check_clock_unit(smallest, "a PlainTime")?;
         t.round(TimeRound::new().smallest(smallest).increment(increment).mode(mode)).map_err(jiff_error)
     });
-    m.vm_function("PlainTime.format", |vm: &mut Vm, t: Time, pattern: Val<String>| format(vm, pattern, t));
+    m.vm_function("PlainTime.format", |vm: &mut Vm, t: Time, pattern: VmVal<String>| format(vm, pattern, t));
 }
 
 fn register_year_month(m: &mut NativeModule) {

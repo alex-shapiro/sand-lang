@@ -3,7 +3,7 @@
 use super::base64;
 use crate::check::ModKind;
 use crate::native::convert::{Conversion, FromVmValue, HostError, IntoVmValue, mismatch};
-use crate::native::ty::{Param, Reflect, Val};
+use crate::native::ty::{Param, Reflect, VmVal};
 use crate::native::{Constant, EnumType, NamedType, NativeModule, variant_const, variant_index};
 use crate::syntax::lexer::is_ident;
 use crate::types::ConstVal;
@@ -96,7 +96,7 @@ fn is_json(t: &TypeDesc) -> bool {
 pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("json", ModKind::Std, include_str!("json.sand"));
     m.bind::<Json>();
-    m.vm_function("parse", |vm: &mut Vm, text: Val<String>| -> Result<Val<Json>, HostError> {
+    m.vm_function("parse", |vm: &mut Vm, text: VmVal<String>| -> Result<VmVal<Json>, HostError> {
         let ids = JsonIds::of(&vm.prog)?;
         let meter = &vm.meter;
         let r = vm.heap.staged(|heap, st| {
@@ -108,7 +108,7 @@ pub(crate) fn module() -> NativeModule {
         });
         into_result(r)
     });
-    m.vm_function("encode", |vm: &mut Vm, value: Param<0, traits::Encode>, indent: i64| -> Result<Val<String>, Fail> {
+    m.vm_function("encode", |vm: &mut Vm, value: Param<0, traits::Encode>, indent: i64| -> Result<VmVal<String>, Fail> {
         let ids = JsonIds::of(&vm.prog)?;
         let indent = indent.clamp(0, 1 << 16) as usize;
         let mut e = Encoder {
@@ -123,10 +123,10 @@ pub(crate) fn module() -> NativeModule {
         };
         e.value(value.raw(), 0)?;
         let out = e.out;
-        Ok(Val::from_raw(vm.new_str(out)))
+        Ok(VmVal::from_raw(vm.new_str(out)))
     });
     m.bind::<Decoded<()>>();
-    m.vm_function("decode_raw", |vm: &mut Vm, ty: Reflect<0>, text: Val<String>| -> Result<Decoded<Param<0>>, Fail> {
+    m.vm_function("decode_raw", |vm: &mut Vm, ty: Reflect<0>, text: VmVal<String>| -> Result<Decoded<Param<0>>, Fail> {
         let desc = ty.desc(&vm.heap)?.clone();
         let ids = vm.prog.ids;
         let meter = &vm.meter;
@@ -146,7 +146,7 @@ pub(crate) fn module() -> NativeModule {
             let charged = d.p.charge(meter);
             let r = charged.map_err(Error::Fail).and(r).map(|v| match d.thunks.is_empty() {
                 true => Decoded::Done(Param::from_raw(v)),
-                false => Decoded::Pending(Param::from_raw(v), Val::from_raw(d.b.list(std::mem::take(&mut d.thunks)))),
+                false => Decoded::Pending(Param::from_raw(v), VmVal::from_raw(d.b.list(std::mem::take(&mut d.thunks)))),
             });
             (r, d.fills)
         });
@@ -174,7 +174,7 @@ pub(crate) fn module() -> NativeModule {
             Err(Error::Fail(c)) => Err(c),
         }
     });
-    m.vm_function("to_json", |vm: &mut Vm, value: Param<0, traits::Encode>| -> Result<Val<Json>, Fail> {
+    m.vm_function("to_json", |vm: &mut Vm, value: Param<0, traits::Encode>| -> Result<VmVal<Json>, Fail> {
         let ids = JsonIds::of(&vm.prog)?;
         let (prog, meter) = (&vm.prog, &vm.meter);
         let v = vm.heap.staged(|heap, st| {
@@ -182,7 +182,7 @@ pub(crate) fn module() -> NativeModule {
                 Converter { prog, heap, b: Builder::new(heap, st, meter), ids, fields: FxHashMap::default(), names: FxHashMap::default() };
             c.convert(value.raw(), 0)
         })?;
-        Ok(Val::from_raw(v))
+        Ok(VmVal::from_raw(v))
     });
     m
 }
@@ -191,7 +191,7 @@ pub(crate) fn module() -> NativeModule {
 #[sand(module = "json", private)]
 enum Decoded<T> {
     Done(T),
-    Pending(T, Val<Vec<fn()>>),
+    Pending(T, VmVal<Vec<fn()>>),
     Failed(super::core::Error),
 }
 
@@ -209,9 +209,9 @@ impl From<Fail> for Error {
 
 type PResult<T> = Result<T, Error>;
 
-fn into_result<T>(r: PResult<VmValue>) -> Result<Val<T>, HostError> {
+fn into_result<T>(r: PResult<VmValue>) -> Result<VmVal<T>, HostError> {
     match r {
-        Ok(v) => Ok(Val::from_raw(v)),
+        Ok(v) => Ok(VmVal::from_raw(v)),
         Err(Error::Parse(msg)) => Err(HostError::new("parse", msg)),
         Err(Error::Invalid(msg)) => Err(HostError::new("invalid", msg)),
         Err(Error::Fail(c)) => Err(c.into()),

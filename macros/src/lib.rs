@@ -348,7 +348,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
                 quote! { #krate::native::VariantField { name: #sname, ty: <#canonical as #krate::native::ty::SandType>::sand_type } },
             );
             let bind = format_ident!("f{k}");
-            let get = quote! { #krate::native::field_from_value::<#fty>(vm, #krate::native::variant_field(vm, v, #k)?, conv)? };
+            let get = quote! { #krate::native::field_from_vm_value::<#fty>(vm, #krate::native::variant_field(vm, v, #k)?, conv)? };
             match fname {
                 Some(n) => {
                     gets.push(quote!(#n: #get));
@@ -381,7 +381,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
             true => quote!(|_| ::std::result::Result::Ok([])),
             false => quote!(move |vm| ::std::result::Result::Ok([#(#puts),*])),
         };
-        writes.push(quote! { #pattern => #krate::native::variant_into_value::<Self, _>(vm, #i, #write) });
+        writes.push(quote! { #pattern => #krate::native::variant_into_vm_value::<Self, _>(vm, #i, #write) });
         consts.push(
             quote! { #pattern => #krate::native::variant_const::<Self>(#i, [#(#krate::native::convert::IntoVmValue::to_const(#names)),*]) },
         );
@@ -415,7 +415,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
                 v: #krate::vm::value::VmValue,
                 conv: &mut #krate::native::convert::Conversion,
             ) -> ::std::result::Result<Self, #krate::vm::Fail> {
-                #krate::native::enum_from_value::<Self>(vm, v, conv, |index, conv| {
+                #krate::native::enum_from_vm_value::<Self>(vm, v, conv, |index, conv| {
                     ::std::result::Result::Ok(match index {
                         #(#reads,)*
                         _ => return ::std::result::Result::Err(#krate::native::convert::mismatch::<Self>()),
@@ -465,12 +465,12 @@ fn sand_object(input: &DeriveInput) -> syn::Result<Tokens> {
                 v: #krate::vm::value::VmValue,
                 _: &mut #krate::native::convert::Conversion,
             ) -> ::std::result::Result<&'a #ty, #krate::vm::Fail> {
-                #krate::native::ty::Val::<#ty>::from_raw(v).get(&vm.heap)
+                #krate::native::ty::VmVal::<#ty>::from_raw(v).get(&vm.heap)
             }
         }
         impl #krate::native::convert::IntoVmValue for #ty {
             fn into_vm_value(self, vm: &mut #krate::vm::Vm) -> ::std::result::Result<#krate::vm::value::VmValue, #krate::vm::Fail> {
-                vm.new_object(self).map(#krate::native::ty::Val::raw)
+                vm.new_object(self).map(#krate::native::ty::VmVal::raw)
             }
         }
     })
@@ -545,7 +545,7 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
                 default: #default,
             }
         });
-        reads.push(quote! { #ident: #krate::native::field_from_value::<#fty>(vm, fields[#i], conv)? });
+        reads.push(quote! { #ident: #krate::native::field_from_vm_value::<#fty>(vm, fields[#i], conv)? });
         writes.push(quote! { #krate::native::convert::IntoVmValue::into_vm_value(self.#ident, vm)? });
         consts.push(quote! { #krate::native::convert::IntoVmValue::to_const(&self.#ident) });
     }
@@ -573,12 +573,12 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
                 v: #krate::vm::value::VmValue,
                 conv: &mut #krate::native::convert::Conversion,
             ) -> ::std::result::Result<Self, #krate::vm::Fail> {
-                #krate::native::struct_from_value(vm, v, conv, |fields, conv| ::std::result::Result::Ok(#ty { #(#reads),* }))
+                #krate::native::struct_from_vm_value(vm, v, conv, |fields, conv| ::std::result::Result::Ok(#ty { #(#reads),* }))
             }
         }
         impl #imp #krate::native::convert::IntoVmValue for #ty #tyg #wh_into {
             fn into_vm_value(self, vm: &mut #krate::vm::Vm) -> ::std::result::Result<#krate::vm::value::VmValue, #krate::vm::Fail> {
-                #krate::native::struct_into_value::<Self>(vm, move |vm| ::std::result::Result::Ok(::std::boxed::Box::new([#(#writes),*])))
+                #krate::native::struct_into_vm_value::<Self>(vm, move |vm| ::std::result::Result::Ok(::std::boxed::Box::new([#(#writes),*])))
             }
             fn to_const(&self) -> ::std::option::Option<#krate::native::Constant> {
                 #krate::native::struct_const::<Self>([#(#consts),*])
@@ -713,7 +713,7 @@ mod tests {
         assert!(out.contains("VariantField { name : :: std :: option :: Option :: None , ty : < i64 as"), "{out}");
         assert!(out.contains("VariantField { name : :: std :: option :: Option :: Some (\"w\") , ty : < f64 as"), "{out}");
         assert!(out.contains("E :: B (..) => 1usize"), "{out}");
-        assert!(out.contains("E :: C { w : f0 } => :: sandlang :: native :: variant_into_value :: < Self , _ > (vm , 2usize"), "{out}");
+        assert!(out.contains("E :: C { w : f0 } => :: sandlang :: native :: variant_into_vm_value :: < Self , _ > (vm , 2usize"), "{out}");
         let out = expand(sand_enum, "#[sand(module = \"m\")] enum E { A { #[sand(name = \"kind\")] r#type: i64 } }");
         assert!(out.contains("VariantField { name : :: std :: option :: Option :: Some (\"kind\")"), "{out}");
         assert!(out.contains("E :: A { r#type : f0 }"), "{out}");

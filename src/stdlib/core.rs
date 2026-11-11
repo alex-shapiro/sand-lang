@@ -3,7 +3,7 @@
 use crate::check::ModKind;
 use crate::native::convert::HostError;
 use crate::native::func::Later;
-use crate::native::ty::{Channel, Never, Num, Param, Task, Val};
+use crate::native::ty::{Channel, Never, Num, Param, Task, VmVal};
 use crate::native::{self, NativeModule};
 use crate::types::traits;
 use crate::vm::compare::{
@@ -23,13 +23,13 @@ const ITEM: usize = std::mem::size_of::<Obj>() + 2 * std::mem::size_of::<VmValue
 /// Approximate heap cost of a list element.
 const SLOT: usize = std::mem::size_of::<VmValue>();
 
-type Str = Val<String>;
-type Bytes = Val<Vec<u8>>;
-type List<T = Param<0>> = Val<Vec<T>>;
-type Map = Val<HashMap<Param<0, traits::Hash>, Param<1>>>;
-type Set = Val<HashSet<Param<0, traits::Hash>>>;
-type Range = Val<native::ty::Range>;
-type IterFn<T> = Val<fn() -> Option<T>>;
+type Str = VmVal<String>;
+type Bytes = VmVal<Vec<u8>>;
+type List<T = Param<0>> = VmVal<Vec<T>>;
+type Map = VmVal<HashMap<Param<0, traits::Hash>, Param<1>>>;
+type Set = VmVal<HashSet<Param<0, traits::Hash>>>;
+type Range = VmVal<native::ty::Range>;
+type IterFn<T> = VmVal<fn() -> Option<T>>;
 
 /// Charges for copying `n` bytes into a new value and checks the memory limit.
 fn copy_bytes(vm: &Vm, n: usize) -> Result<(), Fail> {
@@ -93,31 +93,31 @@ pub(crate) fn prelude() -> NativeModule {
     });
 
     // Tasks and channels.
-    m.vm_function("Task.wait", |vm: &mut Vm, t: Val<Task<Param<0>>>| vm.block(BlockOn::Join(t.raw())).map(Param::<0>::from_raw));
-    m.vm_function("Task.is_done", |vm: &mut Vm, t: Val<Task<Param<0>>>| -> Result<bool, Fail> {
+    m.vm_function("Task.wait", |vm: &mut Vm, t: VmVal<Task<Param<0>>>| vm.block(BlockOn::Join(t.raw())).map(Param::<0>::from_raw));
+    m.vm_function("Task.is_done", |vm: &mut Vm, t: VmVal<Task<Param<0>>>| -> Result<bool, Fail> {
         Ok(t.task(&vm.heap)?.state != TaskState::Running)
     });
-    m.vm_function("Task.cancel", |vm: &mut Vm, t: Val<Task<Param<0>>>| vm.cancel_task(t.raw()));
-    m.vm_function("Channel.init", |vm: &mut Vm, cap: i64| -> Result<Val<Channel<Param<0>>>, Fail> {
+    m.vm_function("Task.cancel", |vm: &mut Vm, t: VmVal<Task<Param<0>>>| vm.cancel_task(t.raw()));
+    m.vm_function("Channel.init", |vm: &mut Vm, cap: i64| -> Result<VmVal<Channel<Param<0>>>, Fail> {
         if cap < 0 {
             return fail("invalid", "channel capacity must not be negative");
         }
-        Ok(Val::from_raw(vm.heap.alloc(Obj::Channel(Box::new(ChannelObj::new(to_usize_saturating(cap)))))))
+        Ok(VmVal::from_raw(vm.heap.alloc(Obj::Channel(Box::new(ChannelObj::new(to_usize_saturating(cap)))))))
     });
-    m.vm_function("Channel.send", |vm: &mut Vm, c: Val<Channel<Param<0>>>, x: Param<0>| {
-        vm.block(BlockOn::Send(c.raw(), x.raw())).map(Val::<bool>::from_raw)
+    m.vm_function("Channel.send", |vm: &mut Vm, c: VmVal<Channel<Param<0>>>, x: Param<0>| {
+        vm.block(BlockOn::Send(c.raw(), x.raw())).map(VmVal::<bool>::from_raw)
     });
-    m.vm_function("Channel.recv", |vm: &mut Vm, c: Val<Channel<Param<0>>>| {
-        vm.block(BlockOn::Recv(c.raw())).map(Val::<Option<Param<0>>>::from_raw)
+    m.vm_function("Channel.recv", |vm: &mut Vm, c: VmVal<Channel<Param<0>>>| {
+        vm.block(BlockOn::Recv(c.raw())).map(VmVal::<Option<Param<0>>>::from_raw)
     });
-    m.vm_function("Channel.try_recv", |vm: &mut Vm, c: Val<Channel<Param<0>>>| -> Result<Option<Param<0>>, Fail> {
+    m.vm_function("Channel.try_recv", |vm: &mut Vm, c: VmVal<Channel<Param<0>>>| -> Result<Option<Param<0>>, Fail> {
         let Some((v, woken)) = c.channel_mut(&mut vm.heap)?.take() else { return Ok(None) };
         if let Some((sf, sg)) = woken {
             vm.deliver(sf, sg, VmValue::Bool(true));
         }
         Ok(Some(Param::from_raw(v)))
     });
-    m.vm_function("Channel.close", |vm: &mut Vm, c: Val<Channel<Param<0>>>| -> Result<(), Fail> {
+    m.vm_function("Channel.close", |vm: &mut Vm, c: VmVal<Channel<Param<0>>>| -> Result<(), Fail> {
         let c = c.channel_mut(&mut vm.heap)?;
         c.closed = true;
         let receivers: Vec<(u32, u64)> = c.receivers.drain(..).collect();
@@ -131,8 +131,10 @@ pub(crate) fn prelude() -> NativeModule {
         }
         Ok(())
     });
-    m.vm_function("Channel.len", |vm: &mut Vm, c: Val<Channel<Param<0>>>| -> Result<i64, Fail> { Ok(c.channel(&vm.heap)?.len() as i64) });
-    m.vm_function("Channel.is_closed", |vm: &mut Vm, c: Val<Channel<Param<0>>>| -> Result<bool, Fail> { Ok(c.channel(&vm.heap)?.closed) });
+    m.vm_function("Channel.len", |vm: &mut Vm, c: VmVal<Channel<Param<0>>>| -> Result<i64, Fail> { Ok(c.channel(&vm.heap)?.len() as i64) });
+    m.vm_function("Channel.is_closed", |vm: &mut Vm, c: VmVal<Channel<Param<0>>>| -> Result<bool, Fail> {
+        Ok(c.channel(&vm.heap)?.closed)
+    });
 
     numbers(&mut m);
     strings(&mut m);
@@ -191,7 +193,7 @@ fn numbers(m: &mut NativeModule) {
     });
     m.vm_function("int.to_char", |vm: &mut Vm, i: i64| -> Result<Option<Str>, Fail> {
         let c = u32::try_from(i).ok().and_then(char::from_u32);
-        Ok(c.map(|c| Val::from_raw(vm.short_str(c.encode_utf8(&mut [0; 4])))))
+        Ok(c.map(|c| VmVal::from_raw(vm.short_str(c.encode_utf8(&mut [0; 4])))))
     });
     m.function("float.abs", f64::abs);
     m.function("float.floor", f64::floor);
@@ -246,7 +248,7 @@ fn split_list(vm: &mut Vm, text: Str, split: impl for<'h> Fn(&'h Heap, &mut dyn 
     split(&vm.heap, &mut |_| count += 1);
     produce(vm, count, count)?;
     vm.check_memory(text.str(&vm.heap).len().saturating_add(count.saturating_mul(ITEM)))?;
-    Ok(Val::from_raw(vm.staged_strs(|heap, st, ascii| {
+    Ok(VmVal::from_raw(vm.staged_strs(|heap, st, ascii| {
         let mut items = Vec::with_capacity(count);
         split(heap, &mut |p| {
             items.push(match p.as_bytes() {
@@ -349,14 +351,14 @@ fn strings(m: &mut NativeModule) {
         vm.charge_bytes(t.len().saturating_add(sep_s.len()))?;
         split_list(vm, s, |heap, f| s.str(heap).split(sep.str(heap)).for_each(f))
     });
-    m.vm_function("str.split_once", |vm: &mut Vm, s: Str, sep: Str| -> Result<Option<Val<(String, String)>>, Fail> {
+    m.vm_function("str.split_once", |vm: &mut Vm, s: Str, sep: Str| -> Result<Option<VmVal<(String, String)>>, Fail> {
         let (t, sep) = (s.str(&vm.heap), sep.str(&vm.heap));
         vm.charge_bytes(t.len().saturating_add(sep.len()))?;
         let Some((x, y)) = t.split_once(sep) else { return Ok(None) };
         let (x, y) = (span_of(t, x), span_of(t, y));
         copy_bytes(vm, x.len() + y.len())?;
         let (x, y) = (new_substr(vm, s.raw(), x), new_substr(vm, s.raw(), y));
-        Ok(Some(Val::from_raw(vm.heap.new_tuple(&[x, y]))))
+        Ok(Some(VmVal::from_raw(vm.heap.new_tuple(&[x, y]))))
     });
     m.vm_function("str.split_whitespace", |vm: &mut Vm, s: Str| {
         vm.charge_bytes(s.str(&vm.heap).len())?;
@@ -375,7 +377,7 @@ fn strings(m: &mut NativeModule) {
         }
         let range = span_of(t, sub);
         copy_bytes(vm, range.len())?;
-        Ok(Val::from_raw(new_substr(vm, s.raw(), range)))
+        Ok(VmVal::from_raw(new_substr(vm, s.raw(), range)))
     }
     m.vm_function("str.trim", |vm: &mut Vm, s: Str| substr(vm, s, str::trim));
     m.vm_function("str.trim_start", |vm: &mut Vm, s: Str| substr(vm, s, str::trim_start));
@@ -386,7 +388,7 @@ fn strings(m: &mut NativeModule) {
         let Some(start) = f(t, affix) else { return Ok(None) };
         let range = start..start + t.len() - affix.len();
         copy_bytes(vm, range.len())?;
-        Ok(Some(Val::from_raw(new_substr(vm, s.raw(), range))))
+        Ok(Some(VmVal::from_raw(new_substr(vm, s.raw(), range))))
     }
     m.vm_function("str.strip_prefix", |vm: &mut Vm, s: Str, prefix: Str| strip(vm, s, prefix, |t, p| t.starts_with(p).then_some(p.len())));
     m.vm_function("str.strip_suffix", |vm: &mut Vm, s: Str, suffix: Str| strip(vm, s, suffix, |t, p| t.ends_with(p).then_some(0)));
@@ -423,7 +425,7 @@ fn strings(m: &mut NativeModule) {
         copy_bytes(vm, chars.saturating_mul(fill.len().min(4)).saturating_add(t.len()))?;
         let padding: String = fill.chars().cycle().take(chars).collect();
         let p = if start { padding + t } else { format!("{t}{padding}") };
-        Ok(Val::from_raw(vm.new_str(p)))
+        Ok(VmVal::from_raw(vm.new_str(p)))
     }
     m.vm_function("str.pad_start", |vm: &mut Vm, s: Str, width: i64, fill: Str| pad(vm, s, width, fill, true));
     m.vm_function("str.pad_end", |vm: &mut Vm, s: Str, width: i64, fill: Str| pad(vm, s, width, fill, false));
@@ -451,12 +453,12 @@ fn strings(m: &mut NativeModule) {
     m.vm_function("str.is_upper", |vm: &mut Vm, s: Str| char_class(vm, s, char::is_uppercase));
     m.vm_function("str.is_lower", |vm: &mut Vm, s: Str| char_class(vm, s, char::is_lowercase));
     m.vm_function("str.chars_iter_next", |vm: &mut Vm, s: Str| -> Result<IterFn<String>, Fail> {
-        Ok(Val::from_raw(vm.iter_fn(IterSrc::Chars { s: s.raw().handle().unwrap_or(0), i: 0 })))
+        Ok(VmVal::from_raw(vm.iter_fn(IterSrc::Chars { s: s.raw().handle().unwrap_or(0), i: 0 })))
     });
     m.vm_function("str.char_at", |vm: &mut Vm, s: Str, i: i64| -> Result<Option<Str>, Fail> {
         let t = s.str(&vm.heap);
         let c = to_index(i).filter(|&i| i < t.len() && t.is_char_boundary(i)).and_then(|i| t[i..].chars().next());
-        Ok(c.map(|c| Val::from_raw(vm.short_str(c.encode_utf8(&mut [0; 4])))))
+        Ok(c.map(|c| VmVal::from_raw(vm.short_str(c.encode_utf8(&mut [0; 4])))))
     });
     m.vm_function("str.ord", |vm: &mut Vm, s: Str| -> Result<i64, Fail> {
         let t = s.str(&vm.heap);
@@ -646,7 +648,7 @@ fn lists(m: &mut NativeModule) {
     });
     m.vm_function("List.iter_next", |vm: &mut Vm, xs: List| -> Result<IterFn<Param<0>>, Fail> {
         let n = list_len(vm, xs) as i64;
-        Ok(Val::from_raw(vm.iter_fn(IterSrc::List { list: xs.raw().handle().unwrap_or(0), i: 0, n })))
+        Ok(VmVal::from_raw(vm.iter_fn(IterSrc::List { list: xs.raw().handle().unwrap_or(0), i: 0, n })))
     });
     m.vm_function("List.pop", |vm: &mut Vm, xs: List| -> Result<Option<Param<0>>, Fail> {
         Ok(vm.heap.list_shrink(xs.raw()).and_then(Vec::pop).map(Param::from_raw))
@@ -762,7 +764,7 @@ fn lists(m: &mut NativeModule) {
         }
         let (n, len) = (to_usize_saturating(n), list_len(vm, xs));
         produce(vm, len, len.div_ceil(n))?;
-        Ok(Val::from_raw(vm.heap.staged(|heap, st| {
+        Ok(VmVal::from_raw(vm.heap.staged(|heap, st| {
             let parts = xs.items(heap).chunks(n).map(|c| st.new_list(c.to_vec())).collect();
             st.new_list(parts)
         })))
@@ -774,14 +776,14 @@ fn lists(m: &mut NativeModule) {
         let (n, l) = (to_usize_saturating(n), xs.items(&vm.heap));
         let windows = (l.len() + 1).saturating_sub(n);
         produce(vm, windows.saturating_mul(n), windows)?;
-        Ok(Val::from_raw(vm.heap.staged(|heap, st| {
+        Ok(VmVal::from_raw(vm.heap.staged(|heap, st| {
             let parts = xs.items(heap).windows(n).map(|w| st.new_list(w.to_vec())).collect();
             st.new_list(parts)
         })))
     });
     m.vm_function("List.enumerate", |vm: &mut Vm, xs: List| -> Result<List<(i64, Param<0>)>, Fail> {
         produce(vm, list_len(vm, xs), list_len(vm, xs))?;
-        Ok(Val::from_raw(vm.heap.staged(|heap, st| {
+        Ok(VmVal::from_raw(vm.heap.staged(|heap, st| {
             let pairs = xs.items(heap).iter().enumerate().map(|(i, &x)| st.new_tuple(vec![VmValue::Int(i as i64), x])).collect();
             st.new_list(pairs)
         })))
@@ -789,7 +791,7 @@ fn lists(m: &mut NativeModule) {
     m.vm_function("List.zip", |vm: &mut Vm, xs: List, ys: List<Param<1>>| -> Result<List<(Param<0>, Param<1>)>, Fail> {
         let n = list_len(vm, xs).min(list_len(vm, ys));
         produce(vm, n, n)?;
-        Ok(Val::from_raw(vm.heap.staged(|heap, st| {
+        Ok(VmVal::from_raw(vm.heap.staged(|heap, st| {
             let pairs = xs.items(heap).iter().zip(ys.items(heap)).map(|(&x, &y)| st.new_tuple(vec![x, y])).collect();
             st.new_list(pairs)
         })))
@@ -872,7 +874,7 @@ fn ranges(m: &mut NativeModule) {
             Some((i, last)) => IterSrc::Range { i, last },
             None => IterSrc::Done,
         };
-        Ok(Val::from_raw(vm.iter_fn(src)))
+        Ok(VmVal::from_raw(vm.iter_fn(src)))
     });
     m.vm_function("Range.start", |vm: &mut Vm, r: Range| -> Result<i64, Fail> { Ok(r.bounds(&vm.heap)?.0) });
     m.vm_function("Range.end", |vm: &mut Vm, r: Range| match r.bounds(&vm.heap)? {
@@ -985,7 +987,7 @@ fn set_filter(vm: &Vm, s: Set, mut keep: impl FnMut(VmValue) -> Result<bool, Fai
 }
 
 fn new_set(vm: &mut Vm, set: SetObj) -> Set {
-    Val::from_raw(vm.heap.alloc(Obj::Set(Box::new(set))))
+    VmVal::from_raw(vm.heap.alloc(Obj::Set(Box::new(set))))
 }
 
 fn alloc_copy(vm: &mut Vm, copy: Obj) -> Result<VmValue, Fail> {
@@ -1042,7 +1044,7 @@ fn maps(m: &mut NativeModule) {
             let items = map.map(heap)?.entries.iter().flatten().map(|&(k, v)| st.new_tuple(vec![k, v])).collect();
             Ok(st.new_list(items))
         })?;
-        Ok(Val::from_raw(list))
+        Ok(VmVal::from_raw(list))
     });
     m.vm_function("Map.clear", |vm: &mut Vm, map: Map| clear_container(vm, map.raw()));
     m.vm_function("Map.copy", |vm: &mut Vm, map: Map| {

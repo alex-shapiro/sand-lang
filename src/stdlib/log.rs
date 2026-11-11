@@ -2,7 +2,7 @@
 
 use crate::check::ModKind;
 use crate::native::NativeModule;
-use crate::native::ty::Val;
+use crate::native::ty::VmVal;
 use crate::vm::display::escape_str_debug;
 use crate::vm::{Ctl, Fail, Vm};
 use std::borrow::Cow;
@@ -105,14 +105,14 @@ impl LogSink for NullLogSink {
     fn log(&self, _: &LogRecord) {}
 }
 
-type Fields = Val<HashMap<String, String>>;
+type Fields = VmVal<HashMap<String, String>>;
 
 pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("log", ModKind::Std, include_str!("log.sand"));
-    m.vm_function("debug", |vm: &mut Vm, msg: Val<String>, fields: Fields| emit_record(vm, LogLevel::Debug, msg, fields));
-    m.vm_function("info", |vm: &mut Vm, msg: Val<String>, fields: Fields| emit_record(vm, LogLevel::Info, msg, fields));
-    m.vm_function("warn", |vm: &mut Vm, msg: Val<String>, fields: Fields| emit_record(vm, LogLevel::Warn, msg, fields));
-    m.vm_function("error", |vm: &mut Vm, msg: Val<String>, fields: Fields| emit_record(vm, LogLevel::Error, msg, fields));
+    m.vm_function("debug", |vm: &mut Vm, msg: VmVal<String>, fields: Fields| emit_record(vm, LogLevel::Debug, msg, fields));
+    m.vm_function("info", |vm: &mut Vm, msg: VmVal<String>, fields: Fields| emit_record(vm, LogLevel::Info, msg, fields));
+    m.vm_function("warn", |vm: &mut Vm, msg: VmVal<String>, fields: Fields| emit_record(vm, LogLevel::Warn, msg, fields));
+    m.vm_function("error", |vm: &mut Vm, msg: VmVal<String>, fields: Fields| emit_record(vm, LogLevel::Error, msg, fields));
     m.bind::<LogLevel>();
     m.vm_function("set_level", |vm: &mut Vm, level: LogLevel| -> Result<_, Fail> {
         vm.host.log_level = Some(level);
@@ -125,7 +125,7 @@ pub(crate) fn module() -> NativeModule {
     m
 }
 
-fn emit_record(vm: &mut Vm, level: LogLevel, msg: Val<String>, fields: Fields) -> Result<(), Ctl> {
+fn emit_record(vm: &mut Vm, level: LogLevel, msg: VmVal<String>, fields: Fields) -> Result<(), Ctl> {
     if vm.host.log_level.is_none_or(|l| level < l) {
         return Ok(());
     }

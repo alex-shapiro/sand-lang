@@ -621,7 +621,7 @@ pub struct Vm {
     pub(crate) retry_stress: bool,
     /// True while `retry_stress` runs an instruction a second time after garbage collection.
     pub(crate) instruction_retried: bool,
-    /// Struct nesting depth during conversion to Sand (see [`struct_into_value`](crate::native::struct_into_value)).
+    /// Struct nesting depth during conversion to Sand (see [`struct_into_vm_value`](crate::native::struct_into_vm_value)).
     pub(crate) struct_depth: usize,
 }
 

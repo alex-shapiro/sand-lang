@@ -1,6 +1,6 @@
 //! Conversion between VM values and the arguments and results of native functions.
 
-use super::ty::{Never, Num, Param, Reflect, SandType, Val};
+use super::ty::{Never, Num, Param, Reflect, SandType, VmVal};
 use super::{Constant, RustVariant};
 use crate::types::ConstVal;
 use crate::types::traits;
@@ -407,7 +407,7 @@ impl<T: IntoVmValue> IntoVmValue for Option<T> {
 impl<T: IntoVmValue, E: IntoHostError> IntoVmValue for Result<T, E> {
     fn into_vm_value(self, vm: &mut Vm) -> Result<VmValue, Fail> {
         match self {
-            Ok(x) => ok_value(x, vm),
+            Ok(x) => ok_vm_value(x, vm),
             Err(e) => e.into_host_error().into_sand_error(vm),
         }
     }
@@ -420,7 +420,7 @@ impl<T: IntoVmValue> IntoVmValue for Result<T, Fail> {
 }
 
 /// Converts `x` into a Sand `Ok` value.
-pub(crate) fn ok_value<T: IntoVmValue>(x: T, vm: &mut Vm) -> Result<VmValue, Fail> {
+pub(crate) fn ok_vm_value<T: IntoVmValue>(x: T, vm: &mut Vm) -> Result<VmValue, Fail> {
     let v = x.into_vm_value(vm)?;
     Ok(vm.ok(v))
 }
@@ -620,24 +620,24 @@ macro_rules! __value_type_impls {
                 v: $crate::vm::value::VmValue,
                 _: &mut $crate::native::convert::Conversion,
             ) -> ::std::result::Result<Self, $crate::vm::Fail> {
-                $crate::native::convert::value_from(vm, v)
+                $crate::native::convert::value_type_from_vm_value(vm, v)
             }
         }
         impl $crate::native::convert::IntoVmValue for $t {
             fn into_vm_value(self, vm: &mut $crate::vm::Vm) -> ::std::result::Result<$crate::vm::value::VmValue, $crate::vm::Fail> {
-                $crate::native::convert::value_into(self, vm)
+                $crate::native::convert::value_type_into_vm_value(self, vm)
             }
         }
     };
 }
 
 #[doc(hidden)]
-pub fn value_from<T: ValueType>(vm: &Vm, v: VmValue) -> Result<T, Fail> {
+pub fn value_type_from_vm_value<T: ValueType>(vm: &Vm, v: VmValue) -> Result<T, Fail> {
     vm.heap.value::<T>(v).ok_or_else(mismatch::<T>)
 }
 
 #[doc(hidden)]
-pub fn value_into<T: ValueType>(x: T, vm: &mut Vm) -> Result<VmValue, Fail> {
+pub fn value_type_into_vm_value<T: ValueType>(x: T, vm: &mut Vm) -> Result<VmValue, Fail> {
     if T::PACKING.is_none() {
         vm.check_memory(ValueType::size(&x))?;
     }
@@ -660,7 +660,7 @@ macro_rules! handle {
     )*};
 }
 handle! {
-    [T: SandType + ?Sized] Val<T>,
+    [T: SandType + ?Sized] VmVal<T>,
     [const N: u8, B: traits::Set] Param<N, B>,
 }
 

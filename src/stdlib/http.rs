@@ -12,7 +12,7 @@ use super::stream::{self, IoFailure, Suspended, read_line_bytes, strip_eol, susp
 use crate::check::ModKind;
 use crate::native::convert::HostError;
 use crate::native::func::Later;
-use crate::native::ty::Val;
+use crate::native::ty::VmVal;
 use crate::native::{NativeModule, NativeObject};
 use crate::network::{Network, Stream};
 use crate::platform::{Clock, Instant};
@@ -597,10 +597,10 @@ const IDEMPOTENT: &[&str] = &["GET", "HEAD", "OPTIONS", "TRACE", "PUT", "DELETE"
 
 fn send(
     vm: &mut Vm,
-    method: Val<String>,
-    url: Val<String>,
-    headers: Val<Vec<(String, String)>>,
-    body: Val<Vec<u8>>,
+    method: VmVal<String>,
+    url: VmVal<String>,
+    headers: VmVal<Vec<(String, String)>>,
+    body: VmVal<Vec<u8>>,
     timeout: SignedDuration,
 ) -> Suspended<ResponseStream> {
     let mut req = prepare_request(vm, method, url, headers)?;
@@ -736,9 +736,9 @@ struct Upload {
     #[sand(private)]
     url: String,
     #[sand(private)]
-    conn: Val<net::Conn>,
+    conn: VmVal<net::Conn>,
     #[sand(private)]
-    body: Val<Outgoing>,
+    body: VmVal<Outgoing>,
     #[sand(private)]
     head_only: bool,
     #[sand(private)]
@@ -749,9 +749,9 @@ struct Upload {
 /// The connection is not reused.
 fn upload(
     vm: &mut Vm,
-    method: Val<String>,
-    url: Val<String>,
-    headers: Val<Vec<(String, String)>>,
+    method: VmVal<String>,
+    url: VmVal<String>,
+    headers: VmVal<Vec<(String, String)>>,
     timeout: SignedDuration,
 ) -> Suspended<Upload> {
     let mut req = prepare_request(vm, method, url, headers)?;
@@ -796,7 +796,7 @@ fn upload(
 
 /// `write_body(conn, body, data, last)`: writes `data` to the body (an
 /// `Outgoing` on `conn`), then, if `last`, ends it.
-fn write_body(vm: &mut Vm, conn: Val<net::Conn>, body: Val<Outgoing>, data: Val<Vec<u8>>, last: bool) -> Suspended<()> {
+fn write_body(vm: &mut Vm, conn: VmVal<net::Conn>, body: VmVal<Outgoing>, data: VmVal<Vec<u8>>, last: bool) -> Suspended<()> {
     let n = data.bytes(&vm.heap).len();
     let out = body.get(&vm.heap)?;
     if out.finished {

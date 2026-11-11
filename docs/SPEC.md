@@ -2256,7 +2256,7 @@ collects garbage and checks the memory limit after the call completes.
 | `jiff::civil::Time`               | `time.PlainTime`                                      |
 | `sandlang::stdlib::json::Json`    | `json.Json`                                           |
 | bound type `T`                    | `T`, or `&T` for a borrowed object                    |
-| `Val<T>`                          | `T`, passed as an uncopied heap handle                |
+| `VmVal<T>`                        | `T`, passed as an uncopied heap handle                |
 | `Param<N, B>`                     | `N`-th type parameter                                 |
 | `Reflect<N>`                      | runtime type description of the `N`-th type parameter |
 | `Num<N>`                          | `Num` evidence of the `N`-th type parameter           |

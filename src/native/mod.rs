@@ -17,7 +17,7 @@ use std::any::{Any, TypeId};
 use std::borrow::Cow;
 use std::marker::PhantomData;
 use std::sync::Arc;
-use ty::{Channel, Num, Param, Range, Reflect, SandType, Task, Type, Val};
+use ty::{Channel, Num, Param, Range, Reflect, SandType, Task, Type, VmVal};
 
 /// A Rust type bound to a nominal Sand type in a [`NativeModule`].
 ///
@@ -223,7 +223,7 @@ pub fn struct_const<T: StructType>(fields: impl IntoIterator<Item = Option<Const
 }
 
 #[doc(hidden)]
-pub fn struct_from_value<T: StructType>(
+pub fn struct_from_vm_value<T: StructType>(
     vm: &Vm,
     v: VmValue,
     conv: &mut Conversion,
@@ -242,7 +242,10 @@ pub fn struct_from_value<T: StructType>(
 }
 
 #[doc(hidden)]
-pub fn struct_into_value<T: StructType>(vm: &mut Vm, write: impl FnOnce(&mut Vm) -> Result<Box<[VmValue]>, Fail>) -> Result<VmValue, Fail> {
+pub fn struct_into_vm_value<T: StructType>(
+    vm: &mut Vm,
+    write: impl FnOnce(&mut Vm) -> Result<Box<[VmValue]>, Fail>,
+) -> Result<VmValue, Fail> {
     let Some(&def) = vm.prog.struct_types.get(&T::rust_type()) else {
         return Err(Fail::internal(format!("struct {}.{} is not loaded", T::MODULE, T::NAME)));
     };
@@ -268,12 +271,12 @@ pub const fn is_name(name: &str) -> bool {
 }
 
 #[doc(hidden)]
-pub fn field_from_value<T: for<'a> FromVmValue<Item<'a> = T>>(vm: &Vm, v: VmValue, conv: &mut Conversion) -> Result<T, Fail> {
+pub fn field_from_vm_value<T: for<'a> FromVmValue<Item<'a> = T>>(vm: &Vm, v: VmValue, conv: &mut Conversion) -> Result<T, Fail> {
     T::from_vm_value(vm, v, conv)
 }
 
 #[doc(hidden)]
-pub fn enum_from_value<T: EnumType>(
+pub fn enum_from_vm_value<T: EnumType>(
     vm: &Vm,
     v: VmValue,
     conv: &mut Conversion,
@@ -303,7 +306,7 @@ pub fn variant_field(vm: &Vm, v: VmValue, i: usize) -> Result<VmValue, Fail> {
 }
 
 #[doc(hidden)]
-pub fn variant_into_value<T: EnumType, const N: usize>(
+pub fn variant_into_vm_value<T: EnumType, const N: usize>(
     vm: &mut Vm,
     index: usize,
     write: impl FnOnce(&mut Vm) -> Result<[VmValue; N], Fail>,
@@ -539,7 +542,7 @@ pub trait NativeObject: Any + Send {
 ///
 /// Functions registered with [`NativeModule::function`] borrow an object as
 /// `&T` and return a new object by value as `T`. Functions registered with
-/// [`NativeModule::vm_function`] accept a [`Val<T>`] handle.
+/// [`NativeModule::vm_function`] accept a [`VmVal<T>`] handle.
 pub trait ObjectType: NativeObject + NamedType + SandType {}
 
 /// Type-erased heap representation of an [`ObjectType`].
@@ -566,7 +569,7 @@ impl<T: ObjectType> DynObject for T {
     }
 }
 
-impl<T: ObjectType> Val<T> {
+impl<T: ObjectType> VmVal<T> {
     pub fn get(self, heap: &Heap) -> Result<&T, Fail> {
         heap.native::<T>(self.raw()).ok_or_else(mismatch::<T>)
     }
@@ -610,25 +613,25 @@ impl<const N: u8> Num<N> {
     }
 }
 
-impl Val<String> {
+impl VmVal<String> {
     pub fn str(self, heap: &Heap) -> &str {
         heap.str(self.raw())
     }
 }
 
-impl Val<Vec<u8>> {
+impl VmVal<Vec<u8>> {
     pub fn bytes(self, heap: &Heap) -> &[u8] {
         heap.bytes_of(self.raw())
     }
 }
 
-impl<T: SandType> Val<Vec<T>> {
+impl<T: SandType> VmVal<Vec<T>> {
     pub fn items(self, heap: &Heap) -> &[VmValue] {
         heap.list(self.raw())
     }
 }
 
-impl<K: SandType, V: SandType> Val<std::collections::HashMap<K, V>> {
+impl<K: SandType, V: SandType> VmVal<std::collections::HashMap<K, V>> {
     pub(crate) fn map(self, heap: &Heap) -> Result<&MapObj, Fail> {
         match heap.get(self.raw()) {
             Obj::Map(m) => Ok(m),
@@ -637,7 +640,7 @@ impl<K: SandType, V: SandType> Val<std::collections::HashMap<K, V>> {
     }
 }
 
-impl<T: SandType> Val<std::collections::HashSet<T>> {
+impl<T: SandType> VmVal<std::collections::HashSet<T>> {
     pub(crate) fn set(self, heap: &Heap) -> Result<&SetObj, Fail> {
         match heap.get(self.raw()) {
             Obj::Set(s) => Ok(s),
@@ -646,7 +649,7 @@ impl<T: SandType> Val<std::collections::HashSet<T>> {
     }
 }
 
-impl Val<Range> {
+impl VmVal<Range> {
     /// Returns the `(start, end, inclusive)` bounds of the range.
     pub(crate) fn bounds(self, heap: &Heap) -> Result<(i64, i64, bool), Fail> {
         match *heap.get(self.raw()) {
@@ -656,7 +659,7 @@ impl Val<Range> {
     }
 }
 
-impl<T: SandType> Val<Channel<T>> {
+impl<T: SandType> VmVal<Channel<T>> {
     pub(crate) fn channel(self, heap: &Heap) -> Result<&ChannelObj, Fail> {
         match heap.get(self.raw()) {
             Obj::Channel(c) => Ok(c),
@@ -669,7 +672,7 @@ impl<T: SandType> Val<Channel<T>> {
     }
 }
 
-impl<T: SandType> Val<Task<T>> {
+impl<T: SandType> VmVal<Task<T>> {
     pub(crate) fn task(self, heap: &Heap) -> Result<&TaskObj, Fail> {
         match heap.get(self.raw()) {
             Obj::Task(t) => Ok(t),
@@ -681,9 +684,9 @@ impl<T: SandType> Val<Task<T>> {
 impl Vm {
     /// Allocates `x` on the heap after checking `x.size()` bytes against the
     /// memory limit.
-    pub fn new_object<T: ObjectType>(&mut self, x: T) -> Result<Val<T>, Fail> {
+    pub fn new_object<T: ObjectType>(&mut self, x: T) -> Result<VmVal<T>, Fail> {
         self.check_memory(NativeObject::size(&x))?;
-        Ok(Val::from_raw(self.heap.alloc(Obj::Native(Box::new(x)))))
+        Ok(VmVal::from_raw(self.heap.alloc(Obj::Native(Box::new(x)))))
     }
 }
 
@@ -836,7 +839,7 @@ impl NativeModule {
 
     /// Registers a synchronous function `f` that receives `&mut Vm` as its
     /// first parameter. Heap values that the function does not copy must be
-    /// taken as [`Val`] handles.
+    /// taken as [`VmVal`] handles.
     ///
     /// Because the VM re-runs `f` from the start after a permission prompt
     /// ([`Vm::require`]) or after a garbage collection triggered by a memory or

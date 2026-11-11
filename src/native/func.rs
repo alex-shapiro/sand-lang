@@ -1,6 +1,6 @@
 //! Traits and types for registering Rust functions in a [`NativeModule`](super::NativeModule).
 
-use super::convert::{Conversion, FromVmValue, HostError, IntoVmValue, ok_value};
+use super::convert::{Conversion, FromVmValue, HostError, IntoVmValue, ok_vm_value};
 use super::ty::{SandType, Type};
 use crate::vm::value::VmValue;
 use crate::vm::{Ctl, Fail, Finisher, NativeFn, Suspension, Vm, WaitKind};
@@ -40,7 +40,7 @@ pub trait HostFunction<Marker>: Send + Sync + 'static {
 /// Synchronous function registered with [`NativeModule::vm_function`](super::NativeModule::vm_function).
 ///
 /// Receives `&mut Vm` as its first argument. Remaining arguments must be owned
-/// [`FromVmValue`] types or [`Val`](super::Val) handles, and the return type
+/// [`FromVmValue`] types or [`VmVal`](super::VmVal) handles, and the return type
 /// implements [`HostReturn<Ctl>`].
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be a `Vm` function",
@@ -98,7 +98,7 @@ impl<T: IntoVmValue> HostReturn<Ctl> for Result<T, Ctl> {
 impl<T: IntoVmValue, C: From<Fail>> HostReturn<C> for Result<T, HostError<C>> {
     fn into_call_result(self, vm: &mut Vm) -> Result<VmValue, C> {
         match self {
-            Ok(x) => Ok(ok_value(x, vm)?),
+            Ok(x) => Ok(ok_vm_value(x, vm)?),
             Err(e) => e.into_sand_error(vm),
         }
     }

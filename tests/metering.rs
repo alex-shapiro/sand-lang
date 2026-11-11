@@ -512,14 +512,14 @@ fn race_lists_are_charged_and_counted() {
 /// `probe.receivers(ch)` and `probe.waiters(task)`: the lengths of the wait
 /// lists of a channel and of a running task.
 fn probe() -> NativeModule {
-    use sandlang::native::ty::{Channel, Task, Val};
+    use sandlang::native::ty::{Channel, Task, VmVal};
     use sandlang::vm::value::Obj;
     let mut m = NativeModule::new("probe");
-    m.vm_function("receivers", |vm: &mut Vm, ch: Val<Channel<i64>>| match vm.heap.get(ch.raw()) {
+    m.vm_function("receivers", |vm: &mut Vm, ch: VmVal<Channel<i64>>| match vm.heap.get(ch.raw()) {
         Obj::Channel(c) => c.receivers.len() as i64,
         _ => -1,
     });
-    m.vm_function("waiters", |vm: &mut Vm, t: Val<Task<()>>| {
+    m.vm_function("waiters", |vm: &mut Vm, t: VmVal<Task<()>>| {
         let fid = match vm.heap.get(t.raw()) {
             Obj::Task(t) => t.fiber as usize,
             _ => return -1,

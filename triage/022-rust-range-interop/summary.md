@@ -3,7 +3,7 @@
 Host functions and `#[derive(SandStruct)]` structs cannot accept or return
 `std::ops::Range<i64>` or `RangeInclusive<i64>` because neither type implements
 `SandType`, `FromVmValue`, or `IntoVmValue`. The `bounds` method on
-`Val<sandlang::native::ty::Range>` is private. Host APIs must therefore use
+`VmVal<sandlang::native::ty::Range>` is private. Host APIs must therefore use
 tuples instead of Sand `Range` values.
 
 Building `repro.rs` fails with:

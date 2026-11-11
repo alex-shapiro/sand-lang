@@ -2,17 +2,17 @@
 
 use crate::check::ModKind;
 use crate::native::NativeModule;
-use crate::native::ty::Val;
+use crate::native::ty::VmVal;
 use crate::vm::value::FxHashMap;
 use crate::vm::{Fail, Vm};
 
-type Floats = Val<Vec<f64>>;
+type Floats = VmVal<Vec<f64>>;
 
 pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("statistics", ModKind::Std, include_str!("statistics.sand"));
 
     m.vm_function("mean", |vm: &mut Vm, xs: Floats| -> Result<Option<f64>, Fail> { Ok(mean(floats(vm, xs)?)) });
-    m.vm_function("mean_int", |vm: &mut Vm, xs: Val<Vec<i64>>| -> Result<_, Fail> {
+    m.vm_function("mean_int", |vm: &mut Vm, xs: VmVal<Vec<i64>>| -> Result<_, Fail> {
         let items = xs.items(&vm.heap);
         vm.charge(items.len() as u64)?;
         Ok(mean(items.iter().map(|v| v.as_int() as f64)))
