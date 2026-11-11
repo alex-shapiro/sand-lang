@@ -1798,7 +1798,7 @@ impl<'h> JsonOutput<'h> for JsonTextOutput<'h> {
     fn scalar(&mut self, _: &mut OpenJsonText, scalar: Scalar<'h>) -> Result<(), Fail> {
         match scalar {
             Scalar::Bool(b) => self.text.push_str(if b { "true" } else { "false" }),
-            Scalar::Int(i) => write_int(&mut self.text, i),
+            Scalar::Int(i) => self.text.push_str(itoa::Buffer::new().format(i)),
             Scalar::Float(f) if f.is_finite() => _ = write!(self.text, "{f:?}"),
             Scalar::Null | Scalar::Float(_) => self.text.push_str("null"),
             Scalar::Str(string) => self.string(&string.text)?,
@@ -1826,27 +1826,6 @@ impl<'h> JsonOutput<'h> for JsonTextOutput<'h> {
         self.text.push_str(if open.is_array { "]" } else { "}" });
         Ok(())
     }
-}
-
-fn write_int(out: &mut String, i: i64) {
-    let mut digits = [0u8; 20];
-    let mut at = digits.len();
-    let mut rest = i.unsigned_abs();
-    loop {
-        at -= 1;
-        digits[at] = b'0' + (rest % 10) as u8;
-        rest /= 10;
-        if rest == 0 {
-            break;
-        }
-    }
-    if i < 0 {
-        at -= 1;
-        digits[at] = b'-';
-    }
-    // The mask shows the compiler that each byte is ASCII, so `push` writes it
-    // without UTF-8 encoding.
-    out.extend(digits[at..].iter().map(|&digit| char::from(digit & 0x7f)));
 }
 
 fn json_number(st: &mut Staging, ids: &JsonIds, n: VmValue) -> VmValue {

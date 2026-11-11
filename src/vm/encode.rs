@@ -13,12 +13,18 @@ use super::bytecode::{Program, StructRt};
 use super::heap::Heap;
 use super::value::{Obj, ValueRef, VmValue};
 use super::{Fail, internal};
+use smallvec::SmallVec;
 
 /// The largest number of containers that a sink lets the walk nest.
 ///
 /// A script can build a value that contains itself, so each sink must fail
 /// with a limit error instead of opening a container beyond this depth.
 pub(crate) const MAX_DEPTH: usize = 512;
+
+/// The number of open containers whose frames the walk stores without an
+/// allocation. An allocation for each walk costs `json.encode` of a small
+/// struct more than 10% of its time.
+const INLINE_FRAMES: usize = 4;
 
 /// The receiver of the values that [`walk`] reports.
 ///
@@ -166,7 +172,7 @@ pub(crate) fn walk<'h, S: EncodeSink<'h>>(
     root: S::Open,
     value: VmValue,
 ) -> Result<S::Open, Fail> {
-    let mut outer = OuterFrames::new();
+    let mut outer = SmallVec::<[Frame<'h, S::Open>; INLINE_FRAMES]>::new();
     let mut top = Frame { children: Children::One(Role::Root, Some(value)), open: root };
     // The payload that the walk reports before the next child of `top`.
     let mut first = None;
@@ -336,56 +342,6 @@ impl<'h> Children<'h> {
                 *self = Children::One(Role::Item, Some(VmValue::Int(*second)));
                 Some(item(first))
             }
-        }
-    }
-}
-
-/// The number of frames that [`OuterFrames`] stores without an allocation.
-const INLINE_FRAMES: usize = 4;
-/// The number of frames in the first allocation of [`OuterFrames`].
-const FIRST_SPILLED_FRAMES: usize = 16;
-
-/// The frames of the open containers around the innermost one.
-///
-/// The first frames are stored inline, so the walk of a value with few levels
-/// does not allocate. An allocation for each walk costs `json.encode` of a
-/// small struct more than 10% of its time.
-struct OuterFrames<F> {
-    inline: [Option<F>; INLINE_FRAMES],
-    len: usize,
-    spilled: Vec<F>,
-}
-
-impl<F> OuterFrames<F> {
-    fn new() -> Self {
-        OuterFrames { inline: [const { None }; INLINE_FRAMES], len: 0, spilled: Vec::new() }
-    }
-
-    #[inline(always)]
-    fn push(&mut self, frame: F) {
-        match self.inline.get_mut(self.len) {
-            Some(slot) => *slot = Some(frame),
-            None => self.spill(frame),
-        }
-        self.len += 1;
-    }
-
-    /// Reserves the space for [`MAX_DEPTH`] frames when the first reservation
-    /// is full, so that the frames of a deep value move only one time.
-    #[inline(never)]
-    fn spill(&mut self, frame: F) {
-        if self.spilled.len() == self.spilled.capacity() {
-            self.spilled.reserve_exact(if self.spilled.is_empty() { FIRST_SPILLED_FRAMES } else { MAX_DEPTH });
-        }
-        self.spilled.push(frame);
-    }
-
-    #[inline(always)]
-    fn pop(&mut self) -> Option<F> {
-        self.len = self.len.checked_sub(1)?;
-        match self.inline.get_mut(self.len) {
-            Some(slot) => slot.take(),
-            None => self.spilled.pop(),
         }
     }
 }
