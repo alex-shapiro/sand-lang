@@ -100,6 +100,7 @@ const OPERATIONS: &[Operation] = &[
     },
     Operation { name: "encode_json", inputs: DOC_JSON, closure: "() => json.encode(value).len()", runs_per_call: None },
     Operation { name: "json_param", inputs: DOC_JSON, closure: "() => host.json_members(value)", runs_per_call: None },
+    Operation { name: "json_echo", inputs: DOC_JSON, closure: "() => [host.json_echo(value)].len()", runs_per_call: None },
     Operation { name: "to_value", inputs: DOC, closure: "() => host.copied_fields(doc)", runs_per_call: None },
     Operation {
         name: "small_encode",
@@ -108,6 +109,18 @@ const OPERATIONS: &[Operation] = &[
     var t = 0
     for _ in 0..20000 {
         t += json.encode(addr).len()
+    }
+    t
+}"#,
+        runs_per_call: Some(20000),
+    },
+    Operation {
+        name: "small_to_json",
+        inputs: ADDRESS,
+        closure: r#"() => {
+    var t = 0
+    for _ in 0..20000 {
+        t += [json.to_json(addr)].len()
     }
     t
 }"#,
@@ -198,7 +211,8 @@ print("check text length: \(text.len())")
 /// Returns the module `host`. Its function `copied_fields` copies a struct out
 /// of the VM with [`Vm::to_value`] and returns the number of fields of the
 /// copy. Its function `json_members` takes a `Json` object as a Rust [`Json`]
-/// and returns the number of its members.
+/// and returns the number of its members. Its function `json_echo` takes a
+/// `Json` value as a Rust [`Json`] and returns it as a Sand `Json` value.
 fn host_modules() -> HostModules {
     let mut host = NativeModule::new("host");
     host.source("pub native fn copied_fields<T>(value: T) -> int");
@@ -209,6 +223,7 @@ fn host_modules() -> HostModules {
         };
         Ok(fields as i64)
     });
+    host.function("json_echo", |value: Json| -> Json { value });
     host.function("json_members", |value: Json| -> i64 {
         match value {
             Json::Obj(members) => members.len() as i64,
