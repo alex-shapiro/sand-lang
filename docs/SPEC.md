@@ -2166,6 +2166,10 @@ returns a future. It also rejects a VM handle (`VmVal<T>`, `Param<N, B>`,
 a future, in the future or closure of `Later::new`, and in a `NativeObject`.
 Garbage collection during a wait can free the heap object of a handle.
 
+The compiler does not check a raw `VmValue`, which `IntoVmValue::into_vm_value`
+and the allocation methods of `Vm` return. Do not hold a raw `VmValue` across a
+wait. Allocate the value in the closure of `Later::new`, after the wait.
+
 Four derive macros bind a Rust type to a Sand type in a native module. Each
 macro implements `NamedType`, `SandType`, `FromVmValue`, and `IntoVmValue`. The
 macros copy Rust doc comments into Sand documentation. They reject type,

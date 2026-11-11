@@ -25,6 +25,19 @@ Untrusted code violates a valid policy.
 
 The host cannot rely on engine limits, stability, or control.
 
+- [ ] ❓ _Embedding._ Reject a raw `VmValue` that a native function holds
+      across a wait. The typed handles are not `Send`, so the compiler rejects
+      them in a future. `IntoVmValue::into_vm_value` and the allocation methods
+      of `Vm` return a raw `VmValue`, which is `Send` because the heap stores
+      it. A function that allocates before a wait and reads the value in the
+      closure of `Later::new` compiles. After a garbage collection during the
+      wait, the read returns the data of another object or fails with an
+      internal error. Options: a host value type that is not `Send`, or a
+      generation check on each heap slot.
+- [ ] ❓ _Embedding._ Add a rooted handle that keeps a script value alive
+      across a wait. A native function that must change an argument object or
+      return an early allocation after a wait has no checked way to do it.
+      `Vm::pinned` already holds garbage collection roots.
 - [ ] ❓ _Memory._ Share standard library and host module bytecode across
       programs. `compile_program` copies the snapshot `Program` into each
       `CompiledProgram`. A copy takes about 74 KB for `print(1)` and 173 KB
@@ -341,7 +354,8 @@ Visible defects that rarely block users.
 - [ ] ⚪ Run the playground page tests in CI across Chrome, Firefox, and Safari.
 - [ ] ⚪ `Config::retry_stress` fails only the first check in a native function
       that takes `&mut Vm`, so it does not detect a side effect between the
-      first and second checks. Run stressed tests for each check index reached during a call.
+      first and second checks. Run stressed tests for each check index reached
+      during a call.
 - [ ] ⚪ Schedule the `cargo fuzz` targets and update the `run` target to compare
       optimized and unoptimized executions.
 - [ ] ⚪ Extend `src/check/verify.rs` to verify full HIR expression typing in
@@ -368,9 +382,9 @@ Visible defects that rarely block users.
 ### Embedding
 
 - [ ] ⚪ Require at compile time that a native function that takes `&mut Vm`
-      makes its scheduler requests before its side effects. The engine runs the call again after a
-      prompt or a garbage collection, so a write before `Vm::require` runs
-      twice. A check phase that returns `Ctl` and an effect phase that returns
+      makes its scheduler requests before its side effects. The engine runs the
+      call again after a prompt or a garbage collection, so a write before
+      `Vm::require` runs twice. A check phase that returns `Ctl` and an effect phase that returns
       `Fail` would prevent this in journaled runs.
 - [ ] ❓ Decide whether `Config::stdin_bytes` should share its channel across
       every VM of an engine, as `StdinFeed` does. `Engine::new_vm` creates a
