@@ -3,11 +3,11 @@ title = "Embedding"
 description = "Embed in a Rust application or web page."
 +++
 
-The `sandlang` crate embeds the Sand compiler and virtual machine in a Rust application. Create a `Config` and an `Engine` to run scripts under a sandbox policy and resource limits.
+You can embed a Sand compiler and VM in a larger Rust application that runs natively or in a webassembly module.
 
 ## Running a script
 
-`Engine::run_source` compiles and executes a script inside a future. Run the future on any Tokio runtime with timers enabled:
+`Engine::run_source` compiles and executes a script inside a future. It runs on any Tokio runtime with timers enabled:
 
 ```rust
 use sandlang::engine::{Config, Engine, Error, Outcome};
@@ -16,7 +16,7 @@ async fn run(source: &str) -> Result<Outcome, Error> {
     Engine::new(Config::new()).run_source("main.sand", source).await
 }
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() {
     match run(r#"print("hello from Sand")"#).await {
         Ok(outcome) => println!("exit code {}", outcome.exit_code),
@@ -25,14 +25,14 @@ async fn main() {
 }
 ```
 
-The first argument to `run_source` is the file name shown in diagnostics and stack traces. Use `Engine::run_file` to load a script from disk instead. If compilation or execution fails, `err.render()` formats the error with source snippets and stack traces.
+Use `Engine::run_file` to load a script from disk instead. If compilation or execution fails, `err.render()` formats the error with source snippets and stack traces.
 
 Each `Engine` has its own state. You can run many engines at the same time across threads or tasks.
 
 To run the same script many times, compile it once with `Engine::compile_source` or `Engine::compile_file`. Pass the resulting `CompiledProgram` to `Engine::run_program`. Each run starts with fresh globals:
 
 ```rust
-# #[tokio::main(flavor = "current_thread")]
+# #[tokio::main]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 use sandlang::engine::{Config, Engine};
 
@@ -49,7 +49,7 @@ for _ in 0..3 {
 By default, `Config::new()` allows scripts to write to `stdout` and `stderr` and denies all other capabilities. Use builder methods on `Config` to grant permissions, set resource limits, and replace host I/O with in-memory files and streams:
 
 ```rust
-# #[tokio::main(flavor = "current_thread")]
+# #[tokio::main]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 use sandlang::engine::{Config, Engine, Limits, MemorySink};
 use sandlang::files::mem::MemFs;
@@ -239,7 +239,7 @@ stats.function("Counter.add", |c: &Counter, n: i64| c.0.fetch_add(n, Ordering::R
 To check a sandbox capability inside a native function, take `&mut Vm` as the first parameter and call `Vm::require` before performing any side effect. `Vm::require` returns a `"permission_denied"` error if the policy denies the request:
 
 ```rust
-# #[tokio::main(flavor = "current_thread")]
+# #[tokio::main]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 use sandlang::engine::{Config, Engine, HostModules};
 use sandlang::native::NativeModule;
@@ -272,7 +272,7 @@ Err(Error(message: "permission denied: door back", kind: "permission_denied"))
 `Session::new` creates a stateful `Session` that evaluates inputs one at a time and keeps bindings across calls:
 
 ```rust
-# #[tokio::main(flavor = "current_thread")]
+# #[tokio::main]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 # use sandlang::engine::Config;
 # use sandlang::session::Session;
@@ -291,7 +291,7 @@ assert_eq!(session.eval("hit() + hit()").await?, Some("3".to_string()));
 Use an `InterruptHandle` to cancel a running script from another thread. Pass a clone of the handle to `Config::interrupt` before creating the engine or session:
 
 ```rust
-# #[tokio::main(flavor = "current_thread")]
+# #[tokio::main]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 use sandlang::engine::{Config, Engine, Error, InterruptHandle};
 use std::time::Duration;
