@@ -218,7 +218,7 @@ impl Prepared {
 /// connection remains open until the body is read to completion or the `Stream`
 /// is closed.
 #[derive(crate::SandStruct)]
-#[sand(module = "http", name = "Stream")]
+#[sand(module = "http", name = "Stream", no_value)]
 pub(crate) struct ResponseStream {
     /// HTTP status code, such as `200` or `404`.
     pub status: i64,

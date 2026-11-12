@@ -17,6 +17,7 @@ use sandlang::policy::{Capability, Decision, PromptAnswer};
 use sandlang::session::Session;
 use sandlang::stdlib::log::{LogLevel, LogRecord, LogSink};
 use sandlang::stdlib::time::TimeZone;
+use sandlang::value::{NativeValue, StructValue, Value, VariantValue};
 use sandlang::vm::value::{ValueType, VmValue};
 use sandlang::vm::{Fail, Vm};
 use std::collections::HashMap;
@@ -1626,28 +1627,151 @@ fn rust_json_field_defaults_are_constants() {
     assert_eq!(out, "{\"on\":[true,-1,0.5,\"x\",null]}\ntrue\ntrue\n");
 }
 
+/// Formats the compile error for an invalid default on the Rust field `field`
+/// of `lab.<owner>` with Sand type `ty`.
+fn rust_default_error(owner: &str, field: &str, ty: &str) -> String {
+    format!(
+        "the Rust field `{field}` of `lab.{owner}` has a default that is not a constant of `{ty}` with at most 65536 parts and 64 levels"
+    )
+}
+
 #[test]
-#[should_panic(expected = "the default of field `at` of `Bad` is not a Sand constant")]
-fn rust_field_defaults_must_be_sand_constants() {
+fn rust_field_defaults_cannot_hold_native_or_opaque_values() {
+    use sandlang::value::Encode;
+    #[derive(Default, sandlang::SandStruct)]
+    #[sand(module = "lab", no_value)]
+    struct Hook {
+        id: i64,
+    }
+    impl Encode for Hook {
+        fn encode(&self) -> Value {
+            Value::Opaque { type_name: "fn".into() }
+        }
+    }
     #[derive(sandlang::SandStruct)]
     #[sand(module = "lab")]
     struct Bad {
         #[sand(default = jiff::Timestamp::UNIX_EPOCH)]
         at: jiff::Timestamp,
+        #[sand(default = Money(5))]
+        price: Money,
+        #[sand(default)]
+        hook: Hook,
     }
-    NativeModule::new("lab").bind::<Bad>();
+    let mut m = NativeModule::new("lab");
+    m.bind::<Hook>().bind::<Bad>();
+    let error = |field, ty| rust_default_error("Bad", field, ty);
+    assert_eq!(host_module_errors([bank_module(), m]), [error("at", "Instant"), error("price", "Money"), error("hook", "Hook")]);
+}
+
+/// A link of a chain that ends in `None`.
+#[derive(sandlang::SandStruct)]
+#[sand(module = "lab")]
+struct ChainLink {
+    next: Option<Box<ChainLink>>,
+}
+
+/// Returns `n` links. Each link adds a struct level and a `Some` level.
+fn chain(n: usize) -> Option<Box<ChainLink>> {
+    (0..n).fold(None, |next, _| Some(Box::new(ChainLink { next })))
 }
 
 #[test]
-#[should_panic(expected = "the default of field `table` of `Big` is not a Sand constant, or has more than 65536 parts or 64 levels")]
 fn rust_field_defaults_are_bounded() {
+    #[derive(sandlang::SandStruct)]
+    #[sand(module = "lab")]
+    struct Bounded {
+        #[sand(default = vec![0; (1 << 16) - 1])]
+        table: Vec<i64>,
+        #[sand(default = chain(31))]
+        head: Option<Box<ChainLink>>,
+    }
     #[derive(sandlang::SandStruct)]
     #[sand(module = "lab")]
     struct Big {
         #[sand(default = vec![0; 1 << 16])]
         table: Vec<i64>,
+        #[sand(default = chain(32))]
+        head: Option<Box<ChainLink>>,
     }
-    NativeModule::new("lab").bind::<Big>();
+    let mut m = NativeModule::new("lab");
+    m.bind::<ChainLink>().bind::<Bounded>();
+    let (r, out, _) = run_src(Config::new().host_modules(HostModules::new([m]).unwrap()), "import lab\nprint(lab.Bounded().table.len())");
+    r.unwrap();
+    assert_eq!(out, "65535\n");
+    let mut m = NativeModule::new("lab");
+    m.bind::<ChainLink>().bind::<Big>();
+    assert_eq!(host_module_errors([m]), [rust_default_error("Big", "table", "[int]"), rust_default_error("Big", "head", "ChainLink?")]);
+}
+
+#[test]
+fn rust_field_defaults_must_be_values_of_declared_types() {
+    use sandlang::value::Encode;
+    #[derive(Default, sandlang::SandEnum)]
+    #[sand(module = "lab", no_value)]
+    enum Shade {
+        #[default]
+        Light,
+        Tinted(i64),
+    }
+    impl Encode for Shade {
+        fn encode(&self) -> Value {
+            Value::Variant(VariantValue::new("lab.Shade", "Light", [Value::Int(1)]))
+        }
+    }
+    #[derive(Default, sandlang::SandStruct)]
+    #[sand(module = "lab", no_value)]
+    struct Spot {
+        x: i64,
+    }
+    impl Encode for Spot {
+        fn encode(&self) -> Value {
+            let field = if self.x == 0 { ("y", Value::Int(0)) } else { ("x", Value::Str("oops".into())) };
+            Value::Struct(StructValue::new("lab.Spot", [field]))
+        }
+    }
+    #[derive(sandlang::SandStruct)]
+    #[sand(module = "lab")]
+    struct Lamp {
+        #[sand(default)]
+        shade: Shade,
+        #[sand(default)]
+        spot: Spot,
+        #[sand(default = vec![Some(Spot { x: 1 })])]
+        trail: Vec<Option<Spot>>,
+    }
+    let mut m = NativeModule::new("lab");
+    m.bind::<Shade>().bind::<Spot>().bind::<Lamp>();
+    let error = |field, ty| rust_default_error("Lamp", field, ty);
+    assert_eq!(host_module_errors([m]), [error("shade", "Shade"), error("spot", "Spot"), error("trail", "[Spot?]")]);
+}
+
+#[test]
+fn rust_field_defaults_can_hold_private_types_of_other_modules() {
+    #[derive(Debug, sandlang::SandEnum)]
+    #[sand(module = "paint", private)]
+    enum Gloss {
+        High,
+    }
+    #[derive(Debug, sandlang::SandStruct)]
+    #[sand(module = "paint")]
+    struct Brush {
+        #[sand(private)]
+        gloss: Gloss,
+    }
+    #[derive(sandlang::SandStruct)]
+    #[sand(module = "lab")]
+    struct Easel {
+        #[sand(default = Brush { gloss: Gloss::High })]
+        brush: Brush,
+    }
+    let mut paint = NativeModule::new("paint");
+    paint.bind::<Gloss>().bind::<Brush>();
+    let mut lab = NativeModule::new("lab");
+    lab.bind::<Easel>();
+    let (r, out, _) = run_src(Config::new().host_modules(HostModules::new([paint, lab]).unwrap()), "import lab\nprint(lab.Easel())");
+    r.unwrap();
+    assert_eq!(out, "Easel(brush: Brush(gloss: High))\n");
 }
 
 #[test]
@@ -4085,4 +4209,261 @@ fn rust_bound_field_types_meet_the_requirements_of_their_constructors() {
     m.bind::<Seen>();
     let errors = host_module_errors([m]);
     assert_eq!(errors, ["field `rows` of `Seen`: [int] does not implement `Hash` (required for the elements of Set<[int]>)"]);
+}
+
+// ---------------------------------------------------------------------------
+// Values copied out of the VM
+// ---------------------------------------------------------------------------
+
+/// Runs `src` with [`copy_module`] and `modules`, and returns the run outcome
+/// and the copied values.
+fn run_and_copy_values(
+    config: Config,
+    modules: impl IntoIterator<Item = NativeModule>,
+    src: &str,
+) -> (Result<sandlang::engine::Outcome, Error>, Vec<Value>) {
+    let (host, copies) = copy_module();
+    let modules = HostModules::new(modules.into_iter().chain([host])).unwrap();
+    let (r, _, _) = run_src(config.host_modules(modules), &format!("import host\n{src}"));
+    let values = std::mem::take(&mut *copies.lock());
+    (r, values)
+}
+
+/// Builds the `host` module with `host.copy`, which copies its argument via
+/// [`Vm::to_value`].
+fn copy_module() -> (NativeModule, Arc<Mutex<Vec<Value>>>) {
+    use sandlang::native::ty::Param;
+    let copies = Arc::new(Mutex::new(Vec::new()));
+    let copied = copies.clone();
+    let mut host = NativeModule::new("host");
+    host.source("pub native fn copy<T>(value: T)");
+    host.function("copy", move |vm: &mut Vm, value: Param<0>| -> Result<(), Fail> {
+        copied.lock().push(vm.to_value(value.raw())?);
+        Ok(())
+    });
+    (host, copies)
+}
+
+/// Runs `src` and returns the values recorded by `host.copy`.
+fn copied_values(src: &str) -> Vec<Value> {
+    let (r, values) = run_and_copy_values(Config::new(), [bank_module(), stats_module()], src);
+    r.unwrap();
+    values
+}
+
+fn opaque_value(type_name: &str) -> Value {
+    Value::Opaque { type_name: type_name.into() }
+}
+
+#[test]
+fn to_value_copies_each_kind_of_value() {
+    let values = copied_values(
+        "host.copy(())\nhost.copy(true)\nhost.copy(-7)\nhost.copy(1.5)\nhost.copy(1500ms)\nhost.copy(\"text\")\n\
+         var grown = \"a\"\nfor _ in 0..3 {\n    grown += \"b\"\n}\nhost.copy(grown)\n\
+         host.copy(bytes.from_list([0, 255]))\nhost.copy([1, 2])\nhost.copy((1, \"a\", 2.5))\nhost.copy((1, 2))\n\
+         host.copy(Set([3, 1]))\nhost.copy([\"k\": [1], \"j\": []])\nhost.copy(0..3)\nhost.copy(-1..=1)\n\
+         host.copy([2: \"two\", 1: \"one\"])\nhost.copy([(1, 2): true])\nhost.copy([false: ()])\n",
+    );
+    let ints = |ints: &[i64]| ints.iter().map(|&i| Value::Int(i)).collect::<Vec<_>>();
+    let expected = [
+        Value::Unit,
+        Value::Bool(true),
+        Value::Int(-7),
+        Value::Float(1.5),
+        Value::Duration(jiff::SignedDuration::from_millis(1500)),
+        Value::Str("text".into()),
+        Value::Str("abbb".into()),
+        Value::Bytes(vec![0, 255]),
+        Value::List(ints(&[1, 2])),
+        Value::Tuple(vec![Value::Int(1), Value::Str("a".into()), Value::Float(2.5)]),
+        Value::Tuple(ints(&[1, 2])),
+        Value::Set(ints(&[3, 1])),
+        Value::Map(vec![(Value::Str("k".into()), Value::List(ints(&[1]))), (Value::Str("j".into()), Value::List(vec![]))]),
+        Value::Range { start: 0, end: 3, inclusive: false },
+        Value::Range { start: -1, end: 1, inclusive: true },
+        Value::Map(vec![(Value::Int(2), Value::Str("two".into())), (Value::Int(1), Value::Str("one".into()))]),
+        Value::Map(vec![(Value::Tuple(ints(&[1, 2])), Value::Bool(true))]),
+        Value::Map(vec![(Value::Bool(false), Value::Unit)]),
+    ];
+    assert_eq!(values, expected);
+}
+
+#[test]
+fn to_value_preserves_qualified_names_and_fields() {
+    let values = copied_values(
+        "import bank\nimport json\nstruct Order { id: int, note: str? }\nenum Status { Active, Suspended(reason: str), Banned(int, str) }\n\
+         host.copy(Order(id: 1, note: Some(\"gift\")))\nhost.copy(Order(id: 2, note: None))\n\
+         host.copy(Status.Active)\nhost.copy(Status.Suspended(reason: \"late\"))\nhost.copy(Status.Banned(3, \"spam\"))\n\
+         let failed: Result<int> = Err(Error(kind: \"io\", message: \"closed\"))\nhost.copy(failed)\n\
+         let done: Result<Order> = Ok(Order(id: 3, note: None))\nhost.copy(done)\n\
+         host.copy(json.Json.Null)\nhost.copy(json.Json.Arr([json.Json.Int(1)]))\nhost.copy(bank.cents(1250))\nhost.copy(bank.cell(2, 3))\n",
+    );
+    let str_ = |s: &str| Value::Str(s.into());
+    let variant = |type_name: &str, name: &str, payload: Vec<Value>| Value::Variant(VariantValue::new(type_name, name, payload));
+    let (some, none) = (|value| variant("Option", "Some", vec![value]), || variant("Option", "None", vec![]));
+    let order = |id, note| Value::Struct(StructValue::new("main.Order", [("id", Value::Int(id)), ("note", note)]));
+    let native = |type_name: &str, text: &str| Value::Native(Box::new(NativeValue { type_name: type_name.into(), text: text.into() }));
+    let error = Value::Struct(StructValue::new("Error", [("message", str_("closed")), ("kind", str_("io"))]));
+    let expected = [
+        order(1, some(str_("gift"))),
+        order(2, none()),
+        variant("main.Status", "Active", vec![]),
+        Value::Variant(VariantValue::with_fields("main.Status", "Suspended", [("reason", str_("late"))])),
+        variant("main.Status", "Banned", vec![Value::Int(3), str_("spam")]),
+        variant("Result", "Err", vec![error]),
+        variant("Result", "Ok", vec![order(3, none())]),
+        variant("json.Json", "Null", vec![]),
+        variant("json.Json", "Arr", vec![Value::List(vec![variant("json.Json", "Int", vec![Value::Int(1)])])]),
+        native("bank.Money", "12.50"),
+        native("bank.Cell", "2:3"),
+    ];
+    assert_eq!(values, expected);
+    let (Value::Struct(order), Value::Variant(suspended)) = (&values[0], &values[3]) else { panic!("{values:?}") };
+    let fields: Vec<(&str, &Value)> = order.named_fields().collect();
+    assert_eq!(fields, [("id", &Value::Int(1)), ("note", &some(str_("gift")))]);
+    assert_eq!((order.field("note"), order.field("missing")), (Some(&some(str_("gift"))), None));
+    assert_eq!((suspended.field("reason"), suspended.field("note")), (Some(&str_("late")), None));
+}
+
+#[test]
+fn to_value_keeps_the_shape_of_a_container_that_holds_values_without_encode() {
+    let values = copied_values(
+        "import stats\nimport time\nstruct Job { name: str, run: fn() -> int }\nfn one() -> int { 1 }\n\
+         let ch: Channel<int> = Channel()\nlet t = spawn 1 + 2\n\
+         host.copy(Job(name: \"first\", run: one))\nhost.copy([one, () => 2])\nhost.copy((1, ch, t))\n\
+         host.copy([\"a\": stats.counter()])\nhost.copy(Some(time.Stopwatch()))\nprint(t.wait())\n",
+    );
+    let expected = [
+        Value::Struct(StructValue::new("main.Job", [("name", Value::Str("first".into())), ("run", opaque_value("fn"))])),
+        Value::List(vec![opaque_value("fn"), opaque_value("fn")]),
+        Value::Tuple(vec![Value::Int(1), opaque_value("Channel"), opaque_value("Task")]),
+        Value::Map(vec![(Value::Str("a".into()), opaque_value("stats.Counter"))]),
+        Value::Variant(VariantValue::new("Option", "Some", [opaque_value("time.Stopwatch")])),
+    ];
+    assert_eq!(values, expected);
+}
+
+/// Defines `chain(n)` with `n` nested structs and a cyclic `ring` struct.
+const NESTED_VALUES: &str = "struct Link { var next: Link? }\nfn chain(n: int) -> Link {\n    var link = Link(next: None)\n    \
+                             for _ in 1..n {\n        link = Link(next: Some(link))\n    }\n    link\n}\n\
+                             let ring = Link(next: None)\nring.next = Some(ring)\n";
+
+#[test]
+fn encode_deep_and_cyclic_values_on_a_small_stack() {
+    let run = |src: String| {
+        let run = move || run_and_copy_values(Config::new(), [], &format!("import json\n{NESTED_VALUES}{src}"));
+        let (r, values) = std::thread::Builder::new().stack_size(512 << 10).spawn(run).unwrap().join().unwrap();
+        (r, values.len())
+    };
+    let (r, copies) =
+        run("let deep = chain(512)\nlet text = json.encode(deep)\nprint(text.len())\nprint(json.encode(json.to_json(deep)) == text)\n\
+                           host.copy([chain(256)])\n"
+            .to_string());
+    r.unwrap();
+    assert_eq!(copies, 1);
+    // In `Vm::to_value`, each `Link` after the first adds both a struct level
+    // and a `Some` level, so `[chain(256)]` reaches 512 levels.
+    for (operation, message, too_deep_expr) in [
+        ("json.encode", "limit: value too deeply nested to encode as JSON", "chain(513)"),
+        ("json.to_json", "limit: value too deeply nested to convert to JSON", "chain(513)"),
+        ("host.copy", "limit: value too deeply nested to copy", "[[chain(256)]]"),
+    ] {
+        for value in [too_deep_expr, "ring"] {
+            let (r, _) = run(format!("{operation}({value})"));
+            let Err(Error::Runtime { message: actual, .. }) = r else {
+                panic!("{operation}({value}): expected a runtime error, got {r:?}")
+            };
+            assert_eq!(actual, message, "{operation}({value})");
+        }
+    }
+}
+
+#[test]
+fn to_value_counts_its_memory_against_the_memory_limit() {
+    for (big, value) in [("(0..100000).to_list()", "list"), ("\"x\".repeat(4000000)", "str"), ("\"x\".repeat(4000000).bytes()", "bytes")] {
+        let src = format!("let big = {big}\nlet shared = []\nfor _ in 0..1000 {{\n    shared.push(big)\n}}\nhost.copy(shared)");
+        let config = Config::new().limits(Limits { max_memory: Some(64 << 20), ..Limits::default() });
+        let (r, values) = run_and_copy_values(config, [], &src);
+        assert!(matches!(r, Err(Error::Limit(LimitKind::Memory))), "{value}: {r:?}");
+        assert!(values.is_empty(), "{value}");
+    }
+}
+
+/// The state of a delivery, with each kind of variant payload.
+#[derive(Clone, sandlang::SandEnum)]
+#[sand(module = "shop")]
+enum Delivery {
+    Pending,
+    Shipped(i64, String),
+    Held { reason: String, days: i64 },
+}
+
+/// An order with a field of each kind that `Encode` covers.
+#[derive(Clone, sandlang::SandStruct)]
+#[sand(module = "shop")]
+struct Purchase {
+    id: i64,
+    deliveries: Vec<Delivery>,
+    note: Option<String>,
+    gift: Option<i64>,
+    counts: HashMap<String, i64>,
+    tags: std::collections::HashSet<String>,
+    price: Money,
+    due: Date,
+}
+
+#[test]
+fn encode_of_a_derived_type_equals_its_copy_out_of_the_vm() {
+    use sandlang::value::Encode;
+    let purchase = Purchase {
+        id: 7,
+        deliveries: vec![Delivery::Pending, Delivery::Shipped(2, "dock".into()), Delivery::Held { reason: "customs".into(), days: 3 }],
+        note: Some("fragile".into()),
+        gift: None,
+        counts: HashMap::from([("pens".into(), 2), ("cups".into(), 1), ("ink".into(), 5)]),
+        tags: ["red".to_string(), "blue".to_string(), "green".to_string()].into(),
+        price: Money(1250),
+        due: Date::new(2024, 3, 10).unwrap(),
+    };
+    let mut shop = NativeModule::new("shop");
+    shop.bind::<Delivery>().bind::<Purchase>();
+    let returned = purchase.clone();
+    shop.function("purchase", move || returned.clone());
+    let (r, copies) = run_and_copy_values(Config::new(), [bank_module(), shop], "import shop\nhost.copy(shop.purchase())\n");
+    r.unwrap();
+    let encoded = purchase.encode();
+    let Value::Struct(fields) = &encoded else { panic!("{encoded:?}") };
+    assert_eq!(fields.ty.type_name, "shop.Purchase");
+    assert_eq!(copies, [encoded]);
+    let encoded = &copies[0];
+    assert_eq!(vec![&purchase].encode(), Value::List(vec![encoded.clone()]));
+    let Value::Struct(fields) = encoded else { panic!("{encoded:?}") };
+    assert_eq!(purchase.deliveries.as_slice().encode(), fields.fields[1]);
+    assert_eq!(purchase.note.as_deref().encode(), fields.fields[2]);
+    let tags: Vec<&str> = ["blue", "green", "red"].into();
+    assert_eq!(tags.encode(), Value::List(["blue", "green", "red"].map(|t| Value::Str(t.into())).into()));
+    assert_eq!(b"ab"[..].encode(), Value::Bytes(b"ab".to_vec()));
+    assert_eq!([1i64, 2][..].encode(), vec![1i64, 2].encode());
+}
+
+#[test]
+fn encode_of_json_equals_its_copy_out_of_the_vm() {
+    use sandlang::value::Encode;
+    let mut doc = NativeModule::new("doc");
+    doc.function("make", default_doc);
+    let (r, copies) = run_and_copy_values(Config::new(), [doc], "import doc\nhost.copy(doc.make())\n");
+    r.unwrap();
+    assert_eq!(copies, [default_doc().encode()]);
+}
+
+#[test]
+fn native_reads_a_native_value_type_from_its_value() {
+    let native = |type_name: &str, text: &str| Value::Native(Box::new(NativeValue { type_name: type_name.into(), text: text.into() }));
+    let (money, date) = (native("bank.Money", "12.50"), native("time.PlainDate", "2024-03-10"));
+    assert_eq!(money.native::<Money>(), Some(Money(1250)));
+    assert_eq!(date.native::<Date>(), Some(Date::new(2024, 3, 10).unwrap()));
+    assert_eq!(money.native::<Date>(), None);
+    for other in [native("bank.Cell", "12.50"), native("bank.Money", "twelve"), Value::Int(1250), date] {
+        assert_eq!(other.native::<Money>(), None, "{other:?}");
+    }
 }

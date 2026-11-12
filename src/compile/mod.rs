@@ -414,12 +414,14 @@ impl<'a> Compiler<'a> {
         let known = self.prog.global_names.len();
         let name = |s| cp.name(s).to_string();
         self.prog.global_names.extend(cp.globals.iter_from(known).map(|g| name(g.name)));
+        let prelude = cp.types[cp.wk.option as usize].module;
         for t in cp.types.iter_from(self.prog.types.len()) {
             self.prog.types.push(StructRt {
                 name: name(t.name),
-                module: name(t.module_name),
+                module: (t.module != prelude).then(|| name(t.module_name)),
                 fields: t.fields().iter().map(|f| name(f.name)).collect(),
                 is_enum: t.is_enum(),
+                desc: Default::default(),
             });
         }
         for &(d, i) in cp.variants.iter_from(self.prog.variants.len()) {
@@ -430,6 +432,7 @@ impl<'a> Compiler<'a> {
                 name: name(v.name),
                 field_names: v.field_names.as_ref().map(|ns| ns.iter().map(|&n| name(n)).collect()),
                 arity: v.fields.len(),
+                desc: Default::default(),
             });
         }
         let wk = cp.wk;

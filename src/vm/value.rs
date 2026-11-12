@@ -925,6 +925,7 @@ impl<T> Copy for Packing<T> {}
 
 /// Object-safe trait for boxed [`ValueType`] values.
 pub trait ValueObj: Any + Send {
+    fn module_name(&self) -> &'static str;
     fn type_name(&self) -> &'static str;
     fn value_eq(&self, other: &dyn ValueObj) -> bool;
     fn value_cmp(&self, other: &dyn ValueObj) -> Option<std::cmp::Ordering>;
@@ -934,6 +935,9 @@ pub trait ValueObj: Any + Send {
 }
 
 impl<T: ValueType> ValueObj for T {
+    fn module_name(&self) -> &'static str {
+        T::MODULE
+    }
     fn type_name(&self) -> &'static str {
         T::NAME
     }
@@ -961,6 +965,7 @@ type PackedOrder = fn([u64; 2], [u64; 2]) -> std::cmp::Ordering;
 
 /// Type descriptor for an inline 16-byte [`ValueType`].
 pub struct PackedType {
+    module: &'static str,
     name: &'static str,
     order: Option<PackedOrder>,
     pub(crate) ordered_bits: bool,
@@ -982,6 +987,7 @@ impl<T: ValueType> PackedTypeOf<T> {
         None => false,
     };
     const TYPE: PackedType = PackedType {
+        module: T::MODULE,
         name: T::NAME,
         order: match (T::ORDER, Self::ORDERED_BITS) {
             (None, _) => None,
@@ -1012,6 +1018,13 @@ pub enum ValueRef<'a> {
 }
 
 impl ValueRef<'_> {
+    pub fn module_name(self) -> &'static str {
+        match self {
+            ValueRef::Boxed(x) => x.module_name(),
+            ValueRef::Packed(t, _) => t.module,
+        }
+    }
+
     pub fn type_name(self) -> &'static str {
         match self {
             ValueRef::Boxed(x) => x.type_name(),
@@ -1131,8 +1144,18 @@ pub enum FieldDefault {
     },
 }
 
-/// Enum variant descriptor: `(name, runtime_id, payload_types, payload_field_names)`.
-pub type VariantDesc = (String, u32, Vec<Arc<TypeDesc>>, Option<Vec<String>>);
+/// Variant descriptor within an enum [`TypeDesc`].
+#[derive(Clone)]
+pub struct ReflectVariantDesc {
+    /// Variant name, such as `Shipped`.
+    pub name: String,
+    /// Program-wide runtime variant ID.
+    pub runtime_id: u32,
+    /// Payload field types in declaration order.
+    pub payload_types: Vec<Arc<TypeDesc>>,
+    /// Payload field names, or `None` for a positional or empty payload.
+    pub field_names: Option<Vec<String>>,
+}
 
 /// Runtime type descriptor for `reflect` type parameters, constructed as a
 /// directed acyclic graph (DAG) by `compile::reflect`.
@@ -1164,7 +1187,7 @@ pub enum TypeDesc {
     Enum {
         id: u32,
         name: String,
-        variants: Vec<VariantDesc>,
+        variants: Vec<ReflectVariantDesc>,
         /// [`NamedType::rust_type`](crate::native::NamedType::rust_type) for a Rust-bound enum.
         rust: Option<std::any::TypeId>,
     },
@@ -1333,7 +1356,7 @@ impl DescTemplate {
                 TypeDesc::Map(k, v) => deepest(&mut [k, v].into_iter()),
                 TypeDesc::Tuple(ts) => deepest(&mut ts.iter()),
                 TypeDesc::Struct { fields, .. } => deepest(&mut fields.iter().map(|f| &f.1)),
-                TypeDesc::Enum { variants, .. } => deepest(&mut variants.iter().flat_map(|v| &v.2)),
+                TypeDesc::Enum { variants, .. } => deepest(&mut variants.iter().flat_map(|v| &v.payload_types)),
                 _ => None,
             };
             seen.insert(addr(d), n);
@@ -1438,15 +1461,23 @@ impl TemplateInstantiator<'_> {
                 TypeDesc::Struct { id: *id, def: *def, name: self.name(name), fields, rust: *rust }
             }
             TypeDesc::Enum { id, name, variants, rust } => {
-                let variants: Vec<VariantDesc> = variants
+                let variants: Vec<ReflectVariantDesc> = variants
                     .iter()
-                    .map(|(n, rt, ts, names)| (n.clone(), *rt, ts.iter().map(|t| self.node(t)).collect(), names.clone()))
+                    .map(|v| ReflectVariantDesc {
+                        name: v.name.clone(),
+                        runtime_id: v.runtime_id,
+                        payload_types: v.payload_types.iter().map(|t| self.node(t)).collect(),
+                        field_names: v.field_names.clone(),
+                    })
                     .collect();
                 self.allocated_bytes += variants
                     .iter()
                     .map(|v| {
-                        let names = v.3.iter().flatten().map(|n| n.len() + std::mem::size_of::<String>()).sum::<usize>();
-                        v.0.len() + v.2.len() * std::mem::size_of::<Arc<TypeDesc>>() + names + std::mem::size_of::<VariantDesc>()
+                        let names = v.field_names.iter().flatten().map(|n| n.len() + std::mem::size_of::<String>()).sum::<usize>();
+                        v.name.len()
+                            + v.payload_types.len() * std::mem::size_of::<Arc<TypeDesc>>()
+                            + names
+                            + std::mem::size_of::<ReflectVariantDesc>()
                     })
                     .sum::<usize>();
                 TypeDesc::Enum { id: *id, name: self.name(name), variants, rust: *rust }
@@ -1478,7 +1509,7 @@ impl Drop for TypeDesc {
                 }
                 TypeDesc::Tuple(ts) => ts.iter_mut().for_each(one),
                 TypeDesc::Struct { fields, .. } => fields.iter_mut().for_each(|f| one(&mut f.1)),
-                TypeDesc::Enum { variants, .. } => variants.iter_mut().flat_map(|v| &mut v.2).for_each(one),
+                TypeDesc::Enum { variants, .. } => variants.iter_mut().flat_map(|v| &mut v.payload_types).for_each(one),
                 _ => {}
             }
         }

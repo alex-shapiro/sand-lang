@@ -259,7 +259,7 @@ fn each_captures(
 
 /// A substring match and its UTF-8 byte range `start..end`.
 #[derive(crate::SandStruct)]
-#[sand(module = "regex")]
+#[sand(module = "regex", no_value)]
 struct Match {
     /// Matched substring.
     text: VmVal<String>,
@@ -279,7 +279,7 @@ impl Match {
 /// Capture groups from a regular expression match. Group `0` corresponds to
 /// the full match.
 #[derive(crate::SandStruct)]
-#[sand(module = "regex")]
+#[sand(module = "regex", no_value)]
 struct Captures {
     /// Input string that was searched.
     text: VmVal<String>,

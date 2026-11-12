@@ -18,9 +18,10 @@ use crate::engine::NativeDecls;
 use crate::hir::*;
 use crate::native::func::Signature;
 use crate::native::ty::Type;
-use crate::native::{BoundKind, Constant, EnumVariant, NativeDecl, RustVariant, StructField};
+use crate::native::{BoundKind, EnumVariant, NativeDecl, StructField};
 use crate::syntax::ast::{self, ItemKind, TypeExpr, TypeExprKind};
 use crate::types::*;
+use crate::value::{StructValue, Value, VariantValue, is_qualified_name};
 use crate::vm::value::{FxBuild, FxHashMap};
 use budget::{CompileBudget, MAX_TYPE_SIZE};
 use persist::{PMap, PVec};
@@ -214,8 +215,16 @@ struct ConstFoldState {
 }
 
 enum BoundMembers {
-    Struct(&'static [StructField], Arc<[Option<Constant>]>),
+    Struct(&'static [StructField], Arc<[Option<Value>]>),
     Enum(&'static [EnumVariant]),
+}
+
+/// Rust field defaults for the bound struct `def`, indexed by field position.
+/// The checker resolves these defaults after declaring all bound types in the
+/// module so defaults can contain values of those types.
+struct RustFieldDefaults {
+    def: TypeDefId,
+    values: Arc<[Option<Value>]>,
 }
 
 /// Location of a function body in the module AST, or a synthetic body kind.
@@ -1293,10 +1302,12 @@ impl Checker {
         // types run after `impl` declarations are registered.
         let mut member_types: Vec<(TypeDefId, TypeId, Span)> = Vec::new();
         let mut bound_ids = Vec::new();
+        let mut bound_defaults = Vec::new();
         for (id, members) in bound_members {
-            self.resolve_bound_members(id, members);
+            bound_defaults.extend(self.resolve_bound_members(id, members));
             bound_ids.push(id);
         }
+        self.resolve_bound_defaults(bound_defaults);
         let mut k = 0;
         for (idx, item) in items.iter().enumerate() {
             match &item.kind {
@@ -1710,18 +1721,17 @@ impl Checker {
         members
     }
 
-    /// Resolves field or payload types for a Rust-bound type after all types in
-    /// the module are declared.
-    fn resolve_bound_members(&mut self, id: TypeDefId, members: BoundMembers) {
+    /// Resolves field or payload types for a Rust-bound type after the checker
+    /// declares all types in the module. Returns any struct field defaults.
+    fn resolve_bound_members(&mut self, id: TypeDefId, members: BoundMembers) -> Option<RustFieldDefaults> {
         let span = self.types[id as usize].span;
         let qual = format!("{}.{}", self.name(self.types[id as usize].module_name), self.name(self.types[id as usize].name));
         let generics = self.types[id as usize].generics.clone();
         let public = self.types[id as usize].is_pub;
         match members {
             BoundMembers::Struct(rust, defaults) => {
-                let self_ty = self.def_self_ty(id, &generics);
                 let mut fields = Vec::new();
-                for (i, (f, default)) in rust.iter().zip(defaults.iter()).enumerate() {
+                for f in rust {
                     let owner = format!("the Rust field `{}` of `{qual}`", f.name);
                     let ty = self.host_type(&(f.ty)(), &generics, &owner, span).unwrap_or(TypeId::ERROR);
                     if public && f.public {
@@ -1729,32 +1739,10 @@ impl Checker {
                     }
                     let doc = Some(f.doc).filter(|d| !d.is_empty()).map(Arc::from);
                     let name = self.sym(f.name);
-                    let const_default = default.as_ref().and_then(|c| self.resolve_bound_const(c)).map(Arc::new);
-                    let helper = const_default.is_some().then(|| {
-                        let helper_name = self.sym(&format!("{}.{}", self.name(self.types[id as usize].name), f.name));
-                        self.add_fn(FnInfo {
-                            name: helper_name,
-                            module: self.cur_mod,
-                            generics: generics.clone(),
-                            outer: generics.len(),
-                            params: vec![],
-                            ret: ty,
-                            has_self: false,
-                            kind: FnKind::DefaultHelper,
-                            doc: None,
-                            span,
-                            is_pub: false,
-                            owner: None,
-                            self_ty: Some(self_ty),
-                            decl: Some(FnDeclRef::BoundDefault(i as u32)),
-                            dicts: vec![],
-                            impl_of: None,
-                            trait_of: None,
-                        })
-                    });
-                    fields.push(FieldDef { name, ty, mutable: f.var, is_pub: f.public, default: helper, const_default, doc });
+                    fields.push(FieldDef { name, ty, mutable: f.var, is_pub: f.public, default: None, const_default: None, doc });
                 }
                 self.types[id as usize].kind = TypeDefKind::Struct { fields };
+                Some(RustFieldDefaults { def: id, values: defaults })
             }
             BoundMembers::Enum(rust) => {
                 for (i, v) in rust.iter().enumerate() {
@@ -1768,6 +1756,64 @@ impl Checker {
                         variants[i].fields = tys;
                     }
                 }
+                None
+            }
+        }
+    }
+
+    /// Resolves each Rust field default into a constant of the declared field
+    /// type and registers its default helper function.
+    fn resolve_bound_defaults(&mut self, defaults: Vec<RustFieldDefaults>) {
+        let rust_defaults =
+            defaults.iter().flat_map(|d| d.values.iter().enumerate().filter_map(|(field, value)| Some((d.def, field, value.as_ref()?))));
+        for (def, field, value) in rust_defaults {
+            let span = self.types[def as usize].span;
+            let (ty, field_name) = {
+                let f = &self.types[def as usize].fields()[field];
+                (f.ty, f.name)
+            };
+            if ty == TypeId::ERROR {
+                continue;
+            }
+            let Some(const_default) = self.resolve_bound_const(value, ty).filter(|c| c.measure().is_some()) else {
+                let def = &self.types[def as usize];
+                let (module, name, field) = (self.name(def.module_name), self.name(def.name), self.name(field_name));
+                let ty = self.printer().show(ty);
+                self.error(
+                    span,
+                    format!(
+                        "the Rust field `{field}` of `{module}.{name}` has a default that is not a constant of `{ty}` \
+                         with at most {MAX_CONST_PARTS} parts and {MAX_CONST_DEPTH} levels"
+                    ),
+                );
+                continue;
+            };
+            let const_default = Arc::new(const_default);
+            let generics = self.types[def as usize].generics.clone();
+            let self_ty = self.def_self_ty(def, &generics);
+            let helper_name = self.sym(&format!("{}.{}", self.name(self.types[def as usize].name), self.name(field_name)));
+            let helper = self.add_fn(FnInfo {
+                name: helper_name,
+                module: self.cur_mod,
+                generics: generics.clone(),
+                outer: generics.len(),
+                params: vec![],
+                ret: ty,
+                has_self: false,
+                kind: FnKind::DefaultHelper,
+                doc: None,
+                span,
+                is_pub: false,
+                owner: None,
+                self_ty: Some(self_ty),
+                decl: Some(FnDeclRef::BoundDefault(field as u32)),
+                dicts: vec![],
+                impl_of: None,
+                trait_of: None,
+            });
+            if let TypeDefKind::Struct { fields } = &mut self.types[def as usize].kind {
+                fields[field].default = Some(helper);
+                fields[field].const_default = Some(const_default);
             }
         }
     }
@@ -1798,18 +1844,75 @@ impl Checker {
         None
     }
 
-    /// Resolves a Rust field default `c` into a [`ConstVal`].
-    fn resolve_bound_const(&self, c: &Constant) -> Option<ConstVal> {
-        let variant = |v: &RustVariant| match v {
-            RustVariant::None => Some(self.none_rt()),
-            RustVariant::Some => Some(self.some_rt()),
-            RustVariant::Bound { rust, index } => {
-                let first = self.enum_bindings.iter_from(0).find(|(t, _)| t == rust).map(|&(_, first)| first)?;
-                Some(first + *index as u32)
+    /// Converts `value` into a [`ConstVal`] of type `ty`, or returns `None` if
+    /// `value` is not a valid constant of `ty`.
+    fn resolve_bound_const(&mut self, value: &Value, ty: TypeId) -> Option<ConstVal> {
+        Some(match (value, self.arena.get(ty)) {
+            (Value::Unit, Ty::Unit) => ConstVal::Unit,
+            (Value::Bool(b), Ty::Bool) => ConstVal::Bool(*b),
+            (Value::Int(i), Ty::Int) => ConstVal::Int(*i),
+            (Value::Float(f), Ty::Float) => ConstVal::Float(*f),
+            (Value::Duration(d), Ty::Duration) => ConstVal::Dur(i64::try_from(d.as_nanos()).ok()?),
+            (Value::Str(s), Ty::Str) => ConstVal::Str(s.clone()),
+            (Value::Bytes(b), Ty::Bytes) => ConstVal::Bytes(b.clone()),
+            (Value::Range { start, end, inclusive }, Ty::Range) => ConstVal::Range(*start, *end, *inclusive),
+            (Value::List(items), Ty::List(e)) => ConstVal::List(self.resolve_bound_consts(items, std::iter::repeat(e))?),
+            (Value::Set(items), Ty::Set(e)) => ConstVal::Set(self.resolve_bound_consts(items, std::iter::repeat(e))?),
+            (Value::Tuple(items), Ty::Tuple(ts)) if items.len() == self.arena.list_len(ts) => {
+                let ts = self.arena.list(ts).to_vec();
+                ConstVal::Tuple(self.resolve_bound_consts(items, ts)?)
             }
-        };
-        let def = |rust: &std::any::TypeId| self.struct_bindings.iter_from(0).find(|(t, _)| t == rust).map(|&(_, d)| d);
-        c.0.resolve(&variant, &def)
+            (Value::Map(entries), Ty::Map(k, v)) => ConstVal::Map(
+                entries
+                    .iter()
+                    .map(|(key, value)| Some((self.resolve_bound_const(key, k)?, self.resolve_bound_const(value, v)?)))
+                    .collect::<Option<_>>()?,
+            ),
+            (Value::Struct(s), Ty::Named(def, args)) if self.matches_struct_def(def, s) => {
+                let args = self.arena.list(args).to_vec();
+                let tys: Vec<TypeId> = (0..s.fields.len()).map(|i| self.field_type(def, i, &args)).collect();
+                ConstVal::Struct(def, self.resolve_bound_consts(&s.fields, tys)?)
+            }
+            (Value::Variant(v), Ty::Named(def, args)) => {
+                let variant = self.declared_variant(def, v)?;
+                let (rt_id, fields, generics) = (variant.rt_id, variant.fields.clone(), self.types[def as usize].generics.clone());
+                let args = self.arena.list(args).to_vec();
+                let tys: Vec<TypeId> = fields.into_iter().map(|t| self.arena.instantiate(t, &generics, &args)).collect();
+                ConstVal::Variant(rt_id, self.resolve_bound_consts(&v.payload, tys)?)
+            }
+            _ => return None,
+        })
+    }
+
+    /// Converts each element of `values` into a [`ConstVal`] of the
+    /// corresponding type in `tys`.
+    fn resolve_bound_consts(&mut self, values: &[Value], tys: impl IntoIterator<Item = TypeId>) -> Option<Vec<ConstVal>> {
+        values.iter().zip(tys).map(|(value, ty)| self.resolve_bound_const(value, ty)).collect()
+    }
+
+    /// Returns `true` if `s` matches the qualified name and field names of the
+    /// struct `def`.
+    fn matches_struct_def(&self, def: TypeDefId, s: &StructValue) -> bool {
+        let fields = self.types[def as usize].fields();
+        self.types[def as usize].is_struct()
+            && self.matches_type_name(def, &s.ty.type_name)
+            && s.fields.len() == fields.len()
+            && s.ty.fields.iter().map(String::as_str).eq(fields.iter().map(|f| self.name(f.name)))
+    }
+
+    /// Returns the variant of the enum `def` that matches `v`.
+    fn declared_variant(&self, def: TypeDefId, v: &VariantValue) -> Option<&VariantDef> {
+        let variant = self.types[def as usize].variants().iter().find(|x| self.name(x.name) == v.variant.name)?;
+        let names = v.variant.fields.iter().flatten().map(String::as_str);
+        let has_payload = v.payload.len() == variant.fields.len() && names.eq(variant.field_names.iter().flatten().map(|&n| self.name(n)));
+        (self.matches_type_name(def, &v.variant.type_name) && has_payload).then_some(variant)
+    }
+
+    /// Returns `true` if `type_name` equals the qualified name of `def`.
+    fn matches_type_name(&self, def: TypeDefId, type_name: &str) -> bool {
+        let ty = &self.types[def as usize];
+        let module = (Some(ty.module) != self.prelude).then(|| self.name(ty.module_name));
+        is_qualified_name(type_name, module, self.name(ty.name))
     }
 
     /// Evaluates constant field defaults for structs declared in the current module.
@@ -2148,9 +2251,13 @@ impl Checker {
                     "prelude" => self.prelude,
                     m => self.module_named(m),
                 };
-                let def = match module.and_then(|m| self.scope_def(m, n.name)) {
-                    Some(Def::Type(TyRef::Def(d))) if Some(self.types[d as usize].module) == module => d,
-                    _ => {
+                let declared = module.and_then(|m| match self.scope_def(m, n.name)? {
+                    Def::Type(TyRef::Def(d)) if self.types[d as usize].module == m => Some(d),
+                    _ => None,
+                });
+                let def = match declared {
+                    Some(d) => d,
+                    None => {
                         let (m, t) = (n.module, n.name);
                         let msg = match module {
                             Some(_) => format!("{owner} uses `{m}.{t}`, which module `{m}` does not declare"),

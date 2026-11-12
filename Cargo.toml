@@ -38,6 +38,8 @@ indexmap = { version = "2", default-features = false, features = ["std"] }
 compact_str = { version = "0.9", default-features = false }
 jiff = { version = "0.2.38", default-features = false, features = ["std", "tzdb-bundle-always", "perf-inline"] }
 parking_lot = "0.12"
+itoa = "1"
+smallvec = "1"
 
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
 tokio = { version = "1", features = ["time"] }
@@ -98,6 +100,10 @@ harness = false
 
 [[bench]]
 name = "policy"
+harness = false
+
+[[bench]]
+name = "codec"
 harness = false
 
 [profile.release]
