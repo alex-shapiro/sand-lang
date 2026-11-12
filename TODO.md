@@ -427,14 +427,6 @@ Visible defects that rarely block users.
 - [ ] ❓ Return a typed error from `format_source_with`. This function returns a
       `String` error today. Callers must parse the error message to distinguish
       syntax errors, fuel exhaustion, timeouts, and interrupts.
-- [ ] ❓ Read a Sand `Json` value into a Rust `Json` through `encode::walk`.
-      `stdlib/json.rs` keeps a second walk (`Walk`, `Reader`, `Writer`) for
-      `FromVmValue` and `IntoVmValue` of `Json`. `Reader` cannot be a
-      `JsonOutput` today without a change of its fuel and memory accounting. It
-      charges one unit for each `Json` value, but `JsonSink` reports a `Json`
-      variant and its payload as two values. It also charges for the entries
-      of an object when the object begins, and `Begin::Object` has no entry
-      count.
 - [ ] ❓ Make `display::render_metered` (`src/vm/display.rs`) a sink of
       `encode::walk`. It is a second walk over a heap value with an explicit
       stack, and it selects the work for each value by its kind, as
@@ -486,18 +478,6 @@ Visible defects that rarely block users.
       shift loop alignment. On Apple silicon, code placement changes alter
       `integer loop 10M`, `game of life`, and `option ? chains` in
       `benches/vm.rs` by up to 13% at identical instruction counts.
-- [ ] ❓ Add a comparison mode to `benches/codec.rs`. Speed evidence for the
-      `json` module and for `Vm::to_value` needs two benchmark executables,
-      alternating runs, and a process environment of a different size in each
-      round. The size of the environment alone changes one operation by up to
-      45%. The repository records none of these steps.
-- [ ] ❓ Reduce the cost of `encode::walk` for each value that it reports.
-      `json.to_json` of one small struct (`small_to_json` in
-      `benches/codec.rs`) runs 2% more instructions than the direct recursion
-      that the walk replaced, although `json.to_json` of a large document
-      runs 7% fewer. For the same reason, the conversion of a `Json` parameter
-      keeps its own loop in `FromVmValue for Json`: a `JsonOutput` that builds
-      the Rust `Json` took 10% more time.
 - [ ] ⚪ Replace the VM dispatch loop with a threaded dispatch table once Rust
       stabilizes the `become` keyword for guaranteed tail calls.
 

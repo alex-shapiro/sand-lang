@@ -7,13 +7,6 @@
 //! has `BENCH_USERS` users (default 5000). `BENCH_OPS=encode,decode` limits the
 //! operations.
 //!
-//! `cargo bench --bench codec -- --limits` reports the memory and fuel that the
-//! engine charges for each operation on `BENCH_LIMIT_USERS` users (default
-//! 1000). The harness finds the smallest `max_memory` and `max_instructions` at
-//! which a program runs to the end, and subtracts the values of the same
-//! program without the operation. The memory value is the increase in peak
-//! memory.
-//!
 //! `cargo test --benches` runs each program once and checks its output.
 
 use sandlang::engine::{Config, Engine, Error, HostModules, Limits, MemorySink};
@@ -258,44 +251,7 @@ fn env(name: &str, default: usize) -> usize {
     std::env::var(name).ok().and_then(|n| n.parse().ok()).unwrap_or(default).max(1)
 }
 
-/// Returns the smallest value in `lo..=hi` for which `ok` is true, to a
-/// precision of `step`. `ok` must be monotonic.
-fn smallest(mut lo: u64, mut hi: u64, step: u64, ok: impl Fn(u64) -> bool) -> u64 {
-    assert!(ok(hi), "the program fails at the upper bound {hi}");
-    while hi - lo > step {
-        let mid = lo + (hi - lo) / 2;
-        if ok(mid) {
-            hi = mid;
-        } else {
-            lo = mid;
-        }
-    }
-    hi
-}
-
-/// Returns the smallest memory limit and fuel limit at which `src` runs to the end.
-fn charged(src: &str) -> (u64, u64) {
-    let memory = smallest(0, 1 << 31, 16 << 10, |b| run(src, Limits { max_memory: Some(b as usize), ..Default::default() }).is_ok());
-    let fuel = smallest(0, 1 << 36, 1000, |f| run(src, Limits { max_instructions: Some(f), ..Default::default() }).is_ok());
-    (memory, fuel)
-}
-
-fn limits_report() {
-    let users = env("BENCH_LIMIT_USERS", 1000);
-    println!("charged memory (KiB) and fuel for one call of each operation on {users} users, beyond the setup");
-    println!("{:<14} {:>12} {:>14}", "operation", "memory KiB", "fuel");
-    for op in selected_operations() {
-        let setup = program(op, users);
-        let (base_memory, base_fuel) = charged(&setup);
-        let (memory, fuel) = charged(&format!("{setup}let r = operation()\n"));
-        println!("{:<14} {:>12} {:>14}", op.name, memory.saturating_sub(base_memory) >> 10, fuel.saturating_sub(base_fuel));
-    }
-}
-
 fn main() {
-    if std::env::args().any(|a| a == "--limits") {
-        return limits_report();
-    }
     let quick = std::env::var("BENCH_QUICK").is_ok() || !std::env::args().any(|a| a == "--bench");
     let (users, runs, reps) = if quick { (200, 1, 1) } else { (env("BENCH_USERS", 5000), env("BENCH_RUNS", 3), env("BENCH_REPS", 5)) };
     let checks = CHECKS.replace("{n}", &users.to_string());
