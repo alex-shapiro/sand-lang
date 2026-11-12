@@ -4372,7 +4372,7 @@ fn to_value_names_structs_variants_and_native_value_types() {
 }
 
 #[test]
-fn to_value_gives_each_time_type_its_own_variant() {
+fn to_value_gives_each_time_type_its_dedicated_case() {
     use sandlang::stdlib::time::{PlainMonthDay, PlainYearMonth, Span, ZonedDateTime};
     let values = copied_values(
         "import time\nhost.copy(time.Instant.parse(\"2024-03-10T07:30:00Z\")?)\nhost.copy(time.PlainDateTime.parse(\"2024-03-10T03:30:00\")?)\n\

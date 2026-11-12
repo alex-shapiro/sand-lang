@@ -74,7 +74,7 @@ pub enum Value {
     Span(Box<Span>),
     /// A `time.TimeZone`.
     TimeZone(TimeZone),
-    /// A value of a native value type without its own variant, from the
+    /// A value of a native value type without a dedicated case, from the
     /// standard library or a host.
     Native(Box<NativeValue>),
     /// A part whose type does not implement the Sand trait `Encode`, such as
@@ -233,38 +233,6 @@ impl Value {
     /// ```
     pub fn native<T: ValueType>(&self) -> Option<T> {
         T::from_value(self)
-    }
-
-    /// Returns the bytes that a value of a native value type with its own
-    /// variant allocates, or 0 for any other value.
-    fn own_variant_bytes(&self) -> usize {
-        match self {
-            Value::ZonedDateTime(_) => size_of::<ZonedDateTime>(),
-            Value::Span(_) => size_of::<Span>(),
-            Value::Instant(_)
-            | Value::PlainDateTime(_)
-            | Value::PlainDate(_)
-            | Value::PlainTime(_)
-            | Value::PlainYearMonth(_)
-            | Value::PlainMonthDay(_)
-            | Value::TimeZone(_)
-            | Value::Unit
-            | Value::Bool(_)
-            | Value::Int(_)
-            | Value::Float(_)
-            | Value::Duration(_)
-            | Value::Str(_)
-            | Value::Bytes(_)
-            | Value::List(_)
-            | Value::Tuple(_)
-            | Value::Set(_)
-            | Value::Map(_)
-            | Value::Range { .. }
-            | Value::Struct(_)
-            | Value::Variant(_)
-            | Value::Native(_)
-            | Value::Opaque { .. } => 0,
-        }
     }
 }
 
@@ -642,8 +610,13 @@ impl ValueSink<'_> {
     }
 
     fn native(&mut self, native: ValueRef<'_>) -> Result<Value, Fail> {
-        if let Some(value) = native.to_own_variant() {
-            self.reserve(value.own_variant_bytes())?;
+        if let Some(value) = native.to_dedicated_value() {
+            // A dedicated case holds a packed value inline and a boxed value
+            // in a `Box`, so the heap size of the value bounds its allocation.
+            self.reserve(match native {
+                ValueRef::Boxed(x) => x.size(),
+                ValueRef::Packed(..) => 0,
+            })?;
             return Ok(value);
         }
         let text = native.text();

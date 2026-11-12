@@ -904,11 +904,11 @@ pub trait ValueType:
     fn size(&self) -> usize {
         std::mem::size_of::<Self>()
     }
-    /// Returns the variant of [`Value`] that the type has for itself, such
-    /// as `Value::PlainDate`, or `None` if the [`Value`] of `self` is a
-    /// [`Value::Native`].
+    /// Returns `self` as the case of [`Value`] that is dedicated to the type,
+    /// such as `Value::PlainDate`, or `None` if the type has no dedicated
+    /// case, so that the [`Value`] of `self` is a [`Value::Native`].
     #[doc(hidden)]
-    fn to_own_variant(&self) -> Option<Value> {
+    fn to_dedicated_value(&self) -> Option<Value> {
         None
     }
     /// Returns `value` as `Self`, or `None` if `value` is not a `Self`. See
@@ -948,7 +948,7 @@ pub trait ValueObj: Any + Send {
     fn value_hash(&self) -> u64;
     fn write_text(&self, out: &mut String);
     fn size(&self) -> usize;
-    fn to_own_variant(&self) -> Option<Value>;
+    fn to_dedicated_value(&self) -> Option<Value>;
 }
 
 impl<T: ValueType> ValueObj for T {
@@ -976,8 +976,8 @@ impl<T: ValueType> ValueObj for T {
     fn size(&self) -> usize {
         ValueType::size(self)
     }
-    fn to_own_variant(&self) -> Option<Value> {
-        ValueType::to_own_variant(self)
+    fn to_dedicated_value(&self) -> Option<Value> {
+        ValueType::to_dedicated_value(self)
     }
 }
 
@@ -990,7 +990,7 @@ pub struct PackedType {
     order: Option<PackedOrder>,
     pub(crate) ordered_bits: bool,
     write_text: fn([u64; 2], &mut String),
-    to_own_variant: fn([u64; 2]) -> Option<Value>,
+    to_dedicated_value: fn([u64; 2]) -> Option<Value>,
     type_id: fn() -> std::any::TypeId,
 }
 
@@ -1024,7 +1024,7 @@ impl<T: ValueType> PackedTypeOf<T> {
                 x.write_text(out)
             }
         },
-        to_own_variant: |a| unpack::<T>(a).and_then(|x| x.to_own_variant()),
+        to_dedicated_value: |a| unpack::<T>(a).and_then(|x| x.to_dedicated_value()),
         type_id: std::any::TypeId::of::<T>,
     };
 }
@@ -1095,12 +1095,13 @@ impl ValueRef<'_> {
         s
     }
 
-    /// Returns the variant of [`Value`] that the type of the value has for
-    /// itself, or `None` if the [`Value`] of the value is a [`Value::Native`].
-    pub(crate) fn to_own_variant(self) -> Option<Value> {
+    /// Returns the value as the case of [`Value`] that is dedicated to its
+    /// type, or `None` if the type has no dedicated case. See
+    /// [`ValueType::to_dedicated_value`].
+    pub(crate) fn to_dedicated_value(self) -> Option<Value> {
         match self {
-            ValueRef::Boxed(x) => x.to_own_variant(),
-            ValueRef::Packed(t, a) => (t.to_own_variant)(a),
+            ValueRef::Boxed(x) => x.to_dedicated_value(),
+            ValueRef::Packed(t, a) => (t.to_dedicated_value)(a),
         }
     }
 }
