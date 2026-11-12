@@ -3,7 +3,7 @@ title = "Embedding"
 description = "Embed in a Rust application or web page."
 +++
 
-You can embed a Sand compiler and VM in a larger Rust application that runs natively or in a webassembly module.
+You can embed a Sand compiler and VM in a larger Rust application running natively or in a webassembly module.
 
 ## Running a script
 
