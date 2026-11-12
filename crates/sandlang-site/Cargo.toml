@@ -1,0 +1,19 @@
+[package]
+name = "sandlang-site"
+description = "Static site generator and local server for sandlang.com"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "site"
+path = "src/main.rs"
+
+[dependencies]
+sandlang = { workspace = true, features = ["default"] }
+pulldown-cmark = { workspace = true, features = ["html"] }
+tokio = { workspace = true, features = ["rt", "net", "fs", "io-util", "time", "signal", "macros"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread"] }

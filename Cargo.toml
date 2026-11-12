@@ -1,110 +1,54 @@
 [workspace]
-members = [".", "cli", "macros", "wasm", "site"]
-default-members = [".", "cli", "macros"]
 resolver = "3"
+members = ["crates/sandlang", "crates/sandlang-macros", "crates/sand-cli", "crates/sandlang-wasm", "crates/sandlang-site"]
+default-members = ["crates/sandlang", "crates/sandlang-macros", "crates/sand-cli"]
 
-[package]
-name = "sandlang"
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-description = "A sandboxed, statically typed bytecode interpreter"
 license = "AGPLv3"
 
-[lib]
-name = "sandlang"
-path = "src/lib.rs"
-
-[features]
-default = ["os", "tls"]
-os = ["dep:rustix", "dep:fs_at", "dep:same-file", "dep:winx", "dep:socket2", "tokio/net", "tokio/io-std", "tokio/macros", "jiff/tz-system"]
-tls = ["os", "dep:rustls", "dep:tokio-rustls", "dep:webpki-roots"]
-
-[dependencies]
-sandlang-macros = { path = "macros" }
-tokio = { version = "1", features = ["rt", "sync", "io-util"] }
-regex-automata = { version = "0.4.16", default-features = false, features = ["std", "syntax", "meta", "nfa-pikevm", "nfa-backtrack", "hybrid", "dfa-onepass", "perf-inline", "perf-literal", "unicode"] }
-rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std", "tls12"] }
-tokio-rustls = { version = "0.26", optional = true, default-features = false, features = ["ring", "tls12"] }
-webpki-roots = { version = "1", optional = true }
-socket2 = { version = "0.6", optional = true }
-unicode-normalization = "0.1"
-sha2 = { version = "0.11", default-features = false }
-sha1 = { version = "0.11", default-features = false }
-md-5 = { version = "0.11", default-features = false }
-hmac = { version = "0.13", default-features = false }
-getrandom = "0.4"
-hashbrown = { version = "0.16", default-features = false, features = ["inline-more"] }
-indexmap = { version = "2", default-features = false, features = ["std"] }
+[workspace.dependencies]
+sandlang = { path = "crates/sandlang", default-features = false }
+sandlang-macros = { path = "crates/sandlang-macros" }
 compact_str = { version = "0.9", default-features = false }
-jiff = { version = "0.2.38", default-features = false, features = ["std", "tzdb-bundle-always", "perf-inline"] }
-parking_lot = "0.12"
+fs_at = "0.2.1"
+getrandom = "0.4"
+hashbrown = { version = "0.16", default-features = false }
+hmac = { version = "0.13", default-features = false }
+indexmap = { version = "2", default-features = false }
 itoa = "1"
-smallvec = "1"
-
-[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
-tokio = { version = "1", features = ["time"] }
-
-[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
-getrandom = { version = "0.4", features = ["wasm_js"] }
-web-time = "1.1"
+jiff = { version = "0.2.38", default-features = false }
 js-sys = "0.3.105"
+junction = "2"
+md-5 = { version = "0.11", default-features = false }
+nix = { version = "0.29", default-features = false }
+nu-ansi-term = "0.50"
+parking_lot = "0.12"
+portable-pty = "0.9"
+proc-macro2 = "1"
+proptest = "1"
+pulldown-cmark = { version = "0.13", default-features = false }
+quote = "1"
+reedline = "0.51"
+regex-automata = { version = "0.4.16", default-features = false }
+rustix = { version = "1.1.5", default-features = false }
+rustls = { version = "0.23", default-features = false }
+same-file = "1.0.6"
+sha1 = { version = "0.11", default-features = false }
+sha2 = { version = "0.11", default-features = false }
+smallvec = "1"
+socket2 = "0.6"
+syn = "2"
+tokio = { version = "1", default-features = false }
+tokio-rustls = { version = "0.26", default-features = false }
+unicode-normalization = "0.1"
+url = "2"
 wasm-bindgen = "0.2.128"
 wasm-bindgen-futures = "0.4.78"
-
-[target.'cfg(unix)'.dependencies]
-rustix = { version = "1.1.5", optional = true, default-features = false, features = ["fs", "std", "time"] }
-
-[target.'cfg(windows)'.dependencies]
-fs_at = { version = "0.2.1", optional = true }
-same-file = { version = "1.0.6", optional = true }
-winx = { version = "0.36", optional = true }
-
-[dev-dependencies]
-proptest = "1"
-url = "2"
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "io-util", "macros", "test-util"] }
-
-[target.'cfg(windows)'.dev-dependencies]
-junction = "2"
-
-[target.'cfg(unix)'.dev-dependencies]
-nix = { version = "0.29", default-features = false, features = ["resource"] }
-
-[[test]]
-name = "examples"
-required-features = ["os"]
-
-[[test]]
-name = "net_http"
-required-features = ["os"]
-
-[[test]]
-name = "sandbox_io"
-required-features = ["os"]
-
-[[test]]
-name = "resources"
-required-features = ["os"]
-
-[[test]]
-name = "tls"
-required-features = ["os"]
-
-[[bench]]
-name = "vm"
-harness = false
-
-[[bench]]
-name = "front"
-harness = false
-
-[[bench]]
-name = "policy"
-harness = false
-
-[[bench]]
-name = "codec"
-harness = false
+web-time = "1.1"
+webpki-roots = "1"
+winx = "0.36"
 
 [profile.release]
 lto = "thin"

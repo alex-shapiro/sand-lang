@@ -1,6 +1,6 @@
 # HTTP matrix parameters bypass path-scoped `deny http` rules
 
-`url_segments` in `src/policy/net.rs` treats `;` matrix parameters as literal
+`url_segments` in `crates/sandlang/src/policy/net.rs` treats `;` matrix parameters as literal
 characters in path segments, so a script can bypass `deny http host/admin/**`
 with `/admin;x/secret` or `/public/..;/admin/secret` against servers such as
 Tomcat, Spring, and Jetty that strip `;` parameters before routing. In

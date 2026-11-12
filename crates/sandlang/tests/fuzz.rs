@@ -212,7 +212,7 @@ fn corpus() -> Vec<String> {
         }
     }
     for ex in ["life.sand", "calc.sand", "template.sand", "adventure.sand", "search_index.sand", "ledger.sand", "s3/s3.sand"] {
-        out.push(std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples").join(ex)).unwrap());
+        out.push(std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples").join(ex)).unwrap());
     }
     out
 }

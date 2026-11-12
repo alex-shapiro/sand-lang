@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 fn example(rel: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("examples").join(rel)
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples").join(rel)
 }
 
 struct Output {

@@ -1,4 +1,4 @@
-// Executes every example in site/playground/examples.js against the Node.js
+// Executes every example in crates/sandlang-site/playground/examples.js against the Node.js
 // WebAssembly build using a stubbed `fetch` implementation.
 
 import { test } from "node:test";
@@ -10,7 +10,7 @@ import { examples } from "../playground/examples.js";
 import { engineOptions, MAIN } from "../playground/sandbox.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const pkg = process.env.SAND_WASM_PKG ?? path.join(here, "../../target/wasm-node");
+const pkg = process.env.SAND_WASM_PKG ?? path.join(here, "../../../target/wasm-node");
 const sand = createRequire(import.meta.url)(path.join(pkg, "sandlang_wasm.js"));
 
 const answers = {

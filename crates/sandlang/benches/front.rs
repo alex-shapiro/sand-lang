@@ -23,7 +23,7 @@ fn main() {
     // one run checks that every stage still works.
     let quick = std::env::var("BENCH_QUICK").is_ok() || !std::env::args().any(|a| a == "--bench");
     let runs = if quick { 1 } else { std::env::var("BENCH_RUNS").ok().and_then(|n| n.parse().ok()).unwrap_or(5usize).max(1) };
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
     let mut sources: Vec<(PathBuf, String)> = std::fs::read_dir(&dir)
         .unwrap()
         .filter_map(|e| e.ok().map(|e| e.path()))

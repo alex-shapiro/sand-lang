@@ -1,7 +1,7 @@
 // Tests of the WebAssembly build in Node.js:
 //
-//   wasm/build.sh nodejs target/wasm-node
-//   node --test wasm/tests/
+//   crates/sandlang-wasm/build.sh nodejs target/wasm-node
+//   node --test crates/sandlang-wasm/tests/
 //
 // SAND_WASM_PKG overrides the package directory.
 
@@ -13,7 +13,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const pkg = process.env.SAND_WASM_PKG ?? path.join(here, "../../target/wasm-node");
+const pkg = process.env.SAND_WASM_PKG ?? path.join(here, "../../../target/wasm-node");
 const sand = createRequire(import.meta.url)(path.join(pkg, "sandlang_wasm.js"));
 
 /** Runs `source` in a new engine; returns the result and the output. */

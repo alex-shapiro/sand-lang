@@ -3,7 +3,7 @@
 * `PageServer`: serves generated HTML pages (plus a redirect, a 404 and a
   non-HTML resource) for http_fetch.
 * `FakeS3`: an in-memory, S3-shaped HTTP server for s3/cli. Like the mock in
-  tests/examples.rs it only checks that requests carry SigV4-looking headers.
+  crates/sandlang/tests/examples.rs it only checks that requests carry SigV4-looking headers.
 * `chat_session`: drives many concurrent clients against a chat server and
   summarises what each client received.
 """

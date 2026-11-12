@@ -1,6 +1,6 @@
 # Windows `rename` junction race
 
-`rename` in `src/files/windows.rs` checks for directory junctions before and
+`rename` in `crates/sandlang/src/files/windows.rs` checks for directory junctions before and
 after calling `std::fs::rename`, which leaves a race window during the call. If
 a second local process converts an empty destination directory into a junction
 during this window, `std::fs::rename` follows the junction and moves the file

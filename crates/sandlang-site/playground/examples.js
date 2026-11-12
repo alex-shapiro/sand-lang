@@ -1,4 +1,4 @@
-// Built-in playground examples verified by site/tests/playground.test.mjs.
+// Built-in playground examples verified by crates/sandlang-site/tests/playground.test.mjs.
 
 export const examples = [
   {

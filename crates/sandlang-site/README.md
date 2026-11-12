@@ -7,7 +7,7 @@ cargo site serve            # build and serve at http://127.0.0.1:8000/
 cargo site build            # build into target/site; exit with 1 if a check fails
 ```
 
-`cargo site build` compiles the WebAssembly playground engine with `wasm/build.sh`, which requires the `wasm32-unknown-unknown` target and `wasm-bindgen-cli`. Pass `--engine=dev` for faster unoptimized builds, or `--engine=none` to reuse a previously built engine in the output directory. `cargo site serve` defaults to `--engine=dev` and starts the server even if a documentation check fails.
+`cargo site build` compiles the WebAssembly playground engine with `crates/sandlang-wasm/build.sh`, which requires the `wasm32-unknown-unknown` target and `wasm-bindgen-cli`. Pass `--engine=dev` for faster unoptimized builds, or `--engine=none` to reuse a previously built engine in the output directory. `cargo site serve` defaults to `--engine=dev` and starts the server even if a documentation check fails.
 
 ## Verification
 

@@ -1,0 +1,98 @@
+[package]
+name = "sandlang"
+description = "A sandboxed, statically typed bytecode interpreter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["os", "tls"]
+os = ["dep:rustix", "dep:fs_at", "dep:same-file", "dep:winx", "dep:socket2", "tokio/net", "tokio/io-std", "tokio/macros", "jiff/tz-system"]
+tls = ["os", "dep:rustls", "dep:tokio-rustls", "dep:webpki-roots"]
+
+[dependencies]
+sandlang-macros.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "io-util"] }
+regex-automata = { workspace = true, features = ["std", "syntax", "meta", "nfa-pikevm", "nfa-backtrack", "hybrid", "dfa-onepass", "perf-inline", "perf-literal", "unicode"] }
+rustls = { workspace = true, optional = true, features = ["ring", "std", "tls12"] }
+tokio-rustls = { workspace = true, optional = true, features = ["ring", "tls12"] }
+webpki-roots = { workspace = true, optional = true }
+socket2 = { workspace = true, optional = true }
+unicode-normalization.workspace = true
+sha2.workspace = true
+sha1.workspace = true
+md-5.workspace = true
+hmac.workspace = true
+getrandom.workspace = true
+hashbrown = { workspace = true, features = ["inline-more"] }
+indexmap = { workspace = true, features = ["std"] }
+compact_str.workspace = true
+jiff = { workspace = true, features = ["std", "tzdb-bundle-always", "perf-inline"] }
+parking_lot.workspace = true
+itoa.workspace = true
+smallvec.workspace = true
+
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
+tokio = { workspace = true, features = ["time"] }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { workspace = true, features = ["wasm_js"] }
+web-time.workspace = true
+js-sys.workspace = true
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, optional = true, features = ["fs", "std", "time"] }
+
+[target.'cfg(windows)'.dependencies]
+fs_at = { workspace = true, optional = true }
+same-file = { workspace = true, optional = true }
+winx = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest.workspace = true
+url.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "time", "io-util", "macros", "test-util"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+junction.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+nix = { workspace = true, features = ["resource"] }
+
+[[test]]
+name = "examples"
+required-features = ["os"]
+
+[[test]]
+name = "net_http"
+required-features = ["os"]
+
+[[test]]
+name = "sandbox_io"
+required-features = ["os"]
+
+[[test]]
+name = "resources"
+required-features = ["os"]
+
+[[test]]
+name = "tls"
+required-features = ["os"]
+
+[[bench]]
+name = "vm"
+harness = false
+
+[[bench]]
+name = "front"
+harness = false
+
+[[bench]]
+name = "policy"
+harness = false
+
+[[bench]]
+name = "codec"
+harness = false
