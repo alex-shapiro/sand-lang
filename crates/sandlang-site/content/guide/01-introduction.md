@@ -36,7 +36,7 @@ Build and install the `sand` CLI from source with Cargo:
 ```sh
 git clone https://github.com/alex-shapiro/sand-lang
 cd sand-lang
-cargo install --path cli
+cargo install --path crates/sand-cli
 ```
 
 ## Hello, world

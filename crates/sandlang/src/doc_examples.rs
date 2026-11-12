@@ -1,4 +1,4 @@
-//! Exposes Markdown files in `site/content/` as doc-test targets so `cargo test --doc`
+//! Exposes Markdown files in `crates/sandlang-site/content/` as doc-test targets so `cargo test --doc`
 //! verifies their Rust code blocks.
 
 macro_rules! doc_examples {
@@ -14,7 +14,7 @@ macro_rules! doc_examples {
     };
 }
 
-doc_examples!(SiteIndex = "../site/content/index.md", EmbeddingGuide = "../site/content/guide/15-embedding.md");
+doc_examples!(SiteIndex = "../../sandlang-site/content/index.md", EmbeddingGuide = "../../sandlang-site/content/guide/15-embedding.md");
 
 #[cfg(test)]
 mod tests {
@@ -35,7 +35,7 @@ mod tests {
     fn every_page_with_rust_examples_is_a_doctest() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut files = Vec::new();
-        markdown_files(&root.join("site/content"), &mut files);
+        markdown_files(&root.join("../sandlang-site/content"), &mut files);
         let src = root.join("src");
         let listed: Vec<PathBuf> = super::FILES.iter().map(|f| src.join(f).canonicalize().unwrap()).collect();
         for file in files {

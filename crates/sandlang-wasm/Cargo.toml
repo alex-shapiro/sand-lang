@@ -1,0 +1,18 @@
+[package]
+name = "sandlang-wasm"
+description = "JavaScript bindings for Sand"
+version.workspace = true
+edition.workspace = true
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+sandlang.workspace = true
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+js-sys.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+parking_lot.workspace = true

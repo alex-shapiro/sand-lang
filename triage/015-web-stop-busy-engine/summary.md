@@ -8,7 +8,7 @@ REPL session and unloads the WebAssembly module.
 Run:
 
 ```
-wasm/build.sh nodejs target/wasm-node
+crates/sandlang-wasm/build.sh nodejs target/wasm-node
 PKG=$PWD/target/wasm-node node repro.mjs
 ```
 

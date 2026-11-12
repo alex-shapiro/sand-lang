@@ -47,7 +47,7 @@ fn formatting_preserves_meaning() {
         }
     }
     paths.clear();
-    files(&root.join("examples"), "sand", &mut paths);
+    files(&root.join("../../examples"), "sand", &mut paths);
     sources.extend(paths.iter().map(|p| (p.display().to_string(), std::fs::read_to_string(p).unwrap())));
 
     let mut failures = Vec::new();

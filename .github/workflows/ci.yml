@@ -74,7 +74,7 @@ jobs:
           rustup default stable
       - uses: Swatinem/rust-cache@v2
       # wasm-bindgen-cli must match the wasm-bindgen crate in Cargo.lock;
-      # wasm/build.sh requires wasm-opt in CI.
+      # crates/sandlang-wasm/build.sh requires wasm-opt in CI.
       - name: Install wasm-bindgen-cli and wasm-opt
         run: |
           cargo install wasm-bindgen-cli --locked --version "$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)"
@@ -85,9 +85,9 @@ jobs:
       - name: Clippy
         run: cargo clippy -p sandlang-wasm --target wasm32-unknown-unknown -- -D warnings
       - name: Build for Node.js
-        run: wasm/build.sh nodejs target/wasm-node
+        run: crates/sandlang-wasm/build.sh nodejs target/wasm-node
       - name: Test
-        run: node --test --test-timeout=120000 wasm/tests/ site/tests/
+        run: node --test --test-timeout=120000 crates/sandlang-wasm/tests/ crates/sandlang-site/tests/
       - name: Test the website generator
         run: cargo test -p sandlang-site
       - name: Build the website

@@ -1,6 +1,6 @@
 # Coverage-guided fuzz targets for `cargo fuzz` (requires nightly).
 # This crate is separate from the main build; the in-tree randomized tests in
-# tests/fuzz.rs run on stable as part of `cargo test`.
+# crates/sandlang/tests/fuzz.rs run on stable as part of `cargo test`.
 [package]
 name = "sandlang-fuzz"
 version = "0.0.0"
@@ -13,7 +13,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 tokio = { version = "1", features = ["rt", "time"] }
-sandlang = { path = ".." }
+sandlang = { path = "../crates/sandlang" }
 
 [workspace]
 members = ["."]

@@ -43,7 +43,7 @@ for p in task.all(pages) {
 Install the `sand` command line tool:
 
 ```sh
-cargo install --path cli
+cargo install --path crates/sand-cli
 ```
 
 Common commands:
@@ -83,7 +83,7 @@ assert_eq!(result, Some("5.0".to_string()));
 
 ## Website
 
-[`site/`](site/README.md) contains the static site generator and web playground for sandlang.com. To build and serve the site locally:
+[`crates/sandlang-site/`](crates/sandlang-site/README.md) contains the static site generator and web playground for sandlang.com. To build and serve the site locally:
 
 ```sh
 cargo site serve

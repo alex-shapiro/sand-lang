@@ -2388,7 +2388,7 @@ an asynchronous I/O operation, or a permission prompt; hosts should run engines
 inside Web Workers to avoid blocking the UI thread and to run multiple engines
 in parallel.
 
-The `sandlang-wasm` crate in `wasm/` exposes this build as a JavaScript `Engine`
+The `sandlang-wasm` crate in `crates/sandlang-wasm/` exposes this build as a JavaScript `Engine`
 class configured with a policy file, initial virtual files, environment
 variables, arguments, standard input, a time zone, and `onOutput` and
 `onPrompt` callbacks. The engine denies any prompt if `onPrompt` is not

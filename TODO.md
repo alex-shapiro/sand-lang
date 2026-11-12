@@ -137,7 +137,7 @@ The host cannot rely on engine limits, stability, or control.
 - [ ] ❓ _Sandbox._ Cap the number of worker threads for blocking I/O jobs. If
       a call stops at a limit or an interrupt during a blocking job, the
       engine abandons the job. The worker thread remains blocked, and
-      `Pool::run` in `src/platform.rs` spawns a new thread for the next job.
+      `Pool::run` in `crates/sandlang/src/platform.rs` spawns a new thread for the next job.
       Repeated calls against a hung path can exhaust host threads. Cap the
       thread pool or the blocked jobs per engine. Return an I/O error if a new
       job exceeds the cap.
@@ -169,8 +169,8 @@ The host cannot rely on engine limits, stability, or control.
       Either cap identifier length in the lexer or charge fuel per byte before
       formatting warning text.
 - [ ] ❓ _Performance._ Index enum variants and struct fields by name in
-      `TypeDef`. Variant and field lookups in `src/check/expr.rs` and
-      `src/check/pat.rs` scan the member list linearly without charging compile
+      `TypeDef`. Variant and field lookups in `crates/sandlang/src/check/expr.rs` and
+      `crates/sandlang/src/check/pat.rs` scan the member list linearly without charging compile
       fuel. A 16 MiB script with 400,000 variants runs for 91 seconds before
       exhausting compile fuel.
 - [ ] ❓ _Embedding._ Charge lint-only checker work to the lint budget. During
@@ -223,7 +223,7 @@ Common scripts fail, require workarounds, or produce misleading diagnostics.
       fails every test in the module. A script that calls `exit(0)` at the top
       level cannot have passing tests.
 - [ ] ❓ _Testing._ Measure fuel or probe counts instead of wall-clock time in
-      `keys_chosen_to_collide_do_not_slow_down_maps` in `tests/metering.rs`.
+      `keys_chosen_to_collide_do_not_slow_down_maps` in `crates/sandlang/tests/metering.rs`.
       The test currently compares elapsed times and fails if the host is under
       load.
 - [ ] ❓ _Testing._ Capture test output in `Engine::run_tests` and display it
@@ -237,14 +237,14 @@ Common scripts fail, require workarounds, or produce misleading diagnostics.
       function values can omit defaulted arguments.
 - [ ] 🔴 [066](triage/066-trait-objects/summary.md) _Language._ Support trait objects, associated types and constants, and
       blanket implementations.
-- [ ] 🔴 [070](triage/070-generic-plus/summary.md) _Language._ Replace the hardcoded `+` operand check in `src/check/unify.rs`
+- [ ] 🔴 [070](triage/070-generic-plus/summary.md) _Language._ Replace the hardcoded `+` operand check in `crates/sandlang/src/check/unify.rs`
       with a prelude `Add` trait so that generic functions can concatenate
       `str`, `bytes`, and lists in addition to adding numbers.
 - [ ] 🔴 [063](triage/063-decode-with-init/summary.md) _Language._ Support `Decode` for structs that declare `init` by calling `init` with
       the JSON object members as named arguments:
 
       - Propagate `Err` results from deferred `Decoded::Pending` thunks in
-        `src/stdlib/json.rs` so that a fallible `init` fails `json.decode`.
+        `crates/sandlang/src/stdlib/json.rs` so that a fallible `init` fails `json.decode`.
       - Pass trait dictionaries to `Decoded::Pending` thunks so that a generic
         `init` can call trait methods on its type parameters.
       - Execute `init` before inserting decoded structs into a `Set`, as
@@ -291,7 +291,7 @@ Visible defects that rarely block users.
 - [ ] 🔴 [024](triage/024-encoded-slash-rules/summary.md) _Policy._ Support HTTP paths with encoded separators `%2F` and `%5C` in `rule_for`
       so that "always" prompt answers can generate rules for those requests.
 - [ ] 🔴 [025](triage/025-matrix-param-deny-bypass/summary.md) _Policy._ Evaluate HTTP paths that contain `;` parameters both with and without
-      matrix parameters in `url_segments` in `src/policy/net.rs` so that `deny http a.com/admin/**` blocks `/admin;x/secret` and `/public/..;/admin`.
+      matrix parameters in `url_segments` in `crates/sandlang/src/policy/net.rs` so that `deny http a.com/admin/**` blocks `/admin;x/secret` and `/public/..;/admin`.
       Also distinguish raw non-UTF-8 bytes from percent-encoded `%25` sequences in `percent_decode` so that `allow http a.com/%25FF` does not match `/%FF`.
 - [ ] 🔴 [026](triage/026-prompt-ip-rule-never-prompts/summary.md) _Policy._ Support interactive prompts for resolved IP addresses that match a
       `prompt` address rule instead of denying them during address resolution.
@@ -358,17 +358,17 @@ Visible defects that rarely block users.
       Stable `rustdoc` ignores error codes, so a snippet that fails for another
       reason still passes.
 - [ ] ⚪ Run the CI workflow on Windows and Linux, including the ConPTY variant of
-      `cli/tests/prompt_tty.rs` and the REPL line editor.
+      `crates/sand-cli/tests/prompt_tty.rs` and the REPL line editor.
 - [ ] ⚪ Run the Windows path resolver and file operations in `files/windows.rs` on
       Windows; CI currently only cross-compiles them.
 - [ ] ⚪ Run the Linux path resolver in `files/unix.rs` and the non-UTF-8 file name
-      tests in `tests/sandbox_io.rs` on Linux.
+      tests in `crates/sandlang/tests/sandbox_io.rs` on Linux.
 - [ ] ⚪ Replace wall-clock bounds with work bounds such as fuel, instruction counts,
       or input-size ratios in `hostile_runtime_programs_are_contained` in
-      `tests/fuzz.rs`, `code_generation_is_covered_by_the_compile_budget`,
+      `crates/sandlang/tests/fuzz.rs`, `code_generation_is_covered_by_the_compile_budget`,
       `many_loop_constants_compile_in_linear_time`, and
-      `many_locals_resolve_in_linear_time` in `tests/compile_limits.rs`, and
-      `keys_chosen_to_collide_do_not_slow_down_maps` in `tests/metering.rs`.
+      `many_locals_resolve_in_linear_time` in `crates/sandlang/tests/compile_limits.rs`, and
+      `keys_chosen_to_collide_do_not_slow_down_maps` in `crates/sandlang/tests/metering.rs`.
 - [ ] ⚪ Run the playground page tests in CI across Chrome, Firefox, and Safari.
 - [ ] ⚪ `Config::retry_stress` fails only the first check in a native function
       that takes `&mut Vm`. It does not detect a side effect between the first
@@ -376,15 +376,15 @@ Visible defects that rarely block users.
       reaches.
 - [ ] ⚪ Schedule the `cargo fuzz` targets and update the `run` target to compare
       optimized and unoptimized executions.
-- [ ] ⚪ Extend `src/check/verify.rs` to verify full HIR expression typing in
+- [ ] ⚪ Extend `crates/sandlang/src/check/verify.rs` to verify full HIR expression typing in
       addition to trait evidence and written type bounds. Record the type of
       each local in `LocalInfo` to verify local variable uses.
-- [ ] ⚪ Extend `tests/props/generics.rs` to generate enums with payloads, generic
+- [ ] ⚪ Extend `crates/sandlang/tests/props/generics.rs` to generate enums with payloads, generic
       traits, method type parameters, `where` clauses, `extend` blocks, generic
       function values, local generic functions, and Rust-bound types.
 - [ ] ⚪ Compile the `triage/` `repro.rs` files in a test. Several `repro.rs`
       files call removed APIs such as `Config::module`.
-- [ ] ⚪ Mutate typed ASTs in `tests/fuzz.rs` instead of mutating raw source
+- [ ] ⚪ Mutate typed ASTs in `crates/sandlang/tests/fuzz.rs` instead of mutating raw source
       characters.
 
 ### Spec
@@ -472,7 +472,7 @@ Visible defects that rarely block users.
       `-C llvm-args=-align-loops=64` so that unrelated code changes do not
       shift loop alignment. On Apple silicon, code placement changes alter
       `integer loop 10M`, `game of life`, and `option ? chains` in
-      `benches/vm.rs` by up to 13% at identical instruction counts.
+      `crates/sandlang/benches/vm.rs` by up to 13% at identical instruction counts.
 - [ ] ⚪ Replace the VM dispatch loop with a threaded dispatch table once Rust
       stabilizes the `become` keyword for guaranteed tail calls.
 

@@ -35,6 +35,9 @@ serve   build the site and serve it at http://127.0.0.1:PORT/ (default: 8000)
 /// Marker file that identifies a directory created by `cargo site build`.
 const MARKER: &str = ".sand-site";
 
+/// The script that builds the playground engine, relative to the repository root.
+const WASM_BUILD_SCRIPT: &str = "crates/sandlang-wasm/build.sh";
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EngineBuild {
     Release,
@@ -59,7 +62,7 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
         return Ok(ExitCode::from(2));
     };
     let site = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let repo = site.parent().ok_or("missing parent directory")?;
+    let repo = site.parent().and_then(Path::parent).ok_or("missing repository directory")?;
     let mut out = repo.join("target/site");
     let mut engine = if command == "serve" { EngineBuild::Dev } else { EngineBuild::Release };
     let mut port = 8000;
@@ -108,7 +111,7 @@ fn report(errors: &[String]) -> bool {
 }
 
 fn build(repo: &Path, out: &Path, engine: EngineBuild) -> Result<Vec<String>, String> {
-    let site = repo.join("site");
+    let site = Path::new(env!("CARGO_MANIFEST_DIR"));
     let pkg = out.join("play/pkg");
     if engine == EngineBuild::None && !pkg.join("sandlang_wasm_bg.wasm").is_file() {
         return Err(format!("missing engine in {}; build with --engine=dev or --engine=release", out.display()));
@@ -213,13 +216,13 @@ fn fnv(data: &[u8]) -> u64 {
 
 fn build_engine(repo: &Path, pkg: &Path, engine: EngineBuild) -> Result<(), String> {
     let mut cmd = Command::new("sh");
-    cmd.arg(repo.join("wasm/build.sh")).arg("web").arg(pkg);
+    cmd.arg(repo.join(WASM_BUILD_SCRIPT)).arg("web").arg(pkg);
     if engine == EngineBuild::Dev {
         cmd.arg("--dev");
     }
-    let status = cmd.status().map_err(|e| format!("cannot run wasm/build.sh: {e}"))?;
+    let status = cmd.status().map_err(|e| format!("cannot run {WASM_BUILD_SCRIPT}: {e}"))?;
     if !status.success() {
-        return Err("wasm/build.sh failed; pass --engine=none to skip building the engine".into());
+        return Err(format!("{WASM_BUILD_SCRIPT} failed; pass --engine=none to skip building the engine"));
     }
     Ok(())
 }
@@ -262,7 +265,7 @@ fn guide(dir: &Path, checks: &mut Checks) -> Result<(Vec<Page>, Vec<Entry>), Str
         let slug = stem.split_once('-').map(|(_, s)| s.to_string()).unwrap_or(stem);
         let text = read(file)?;
         let (fields, body) = markdown::front_matter(&text);
-        let source = format!("site/content/guide/{}", file.file_name().unwrap_or_default().to_string_lossy());
+        let source = format!("crates/sandlang-site/content/guide/{}", file.file_name().unwrap_or_default().to_string_lossy());
         let title = fields.get("title").cloned().ok_or(format!("{source}: missing title"))?;
         let description = fields.get("description").cloned().unwrap_or_default();
         let rendered = markdown::render(body, &Style::page(&source, true), checks);
@@ -353,7 +356,7 @@ fn spec(path: &Path, checks: &mut Checks) -> Result<(Page, Vec<Entry>), String> 
 fn home(path: &Path, checks: &mut Checks) -> Result<Page, String> {
     let text = read(path)?;
     let (fields, body) = markdown::front_matter(&text);
-    let rendered = markdown::render(body, &Style::page("site/content/index.md", true), checks);
+    let rendered = markdown::render(body, &Style::page("crates/sandlang-site/content/index.md", true), checks);
     Ok(Page {
         path: "/".into(),
         title: "Sand".into(),

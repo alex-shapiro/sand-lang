@@ -1,0 +1,21 @@
+[package]
+name = "sand-cli"
+description = "The `sand` CLI: runner, type checker, linter, formatter, test runner, and REPL"
+version.workspace = true
+edition.workspace = true
+license = "MIT OR Apache-2.0"
+publish = false
+
+[[bin]]
+name = "sand"
+path = "src/main.rs"
+
+[dependencies]
+sandlang = { workspace = true, features = ["default"] }
+tokio = { workspace = true, features = ["rt", "net", "io-util", "time", "signal", "macros"] }
+reedline = { workspace = true, features = ["external_printer"] }
+nu-ansi-term.workspace = true
+parking_lot.workspace = true
+
+[dev-dependencies]
+portable-pty.workspace = true
