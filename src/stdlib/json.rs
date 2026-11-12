@@ -14,7 +14,7 @@ use crate::vm::encode::{self, Container, EncodeSink, Leaf, MAX_DEPTH, Opened, Ro
 use crate::vm::heap::{Heap, Staging};
 use crate::vm::meter::{Meter, SLOW_BYTES_PER_UNIT, Scratch};
 use crate::vm::value::{
-    FieldDefault, FieldDesc, FxHashMap, KeyIndex, KeyTable, MAP_ENTRY_SIZE, MapObj, Obj, TypeDesc, VariantDesc, VmValue, slot_fits,
+    FieldDefault, FieldDesc, FxHashMap, KeyIndex, KeyTable, MAP_ENTRY_SIZE, MapObj, Obj, ReflectVariantDesc, TypeDesc, VmValue, slot_fits,
 };
 use crate::vm::{Fail, Vm, fail, internal, without_trait};
 use hashbrown::HashTable;
@@ -1100,7 +1100,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
             }
             TypeDesc::Struct { id, def, fields, .. } => self.decode_struct(t, *id, *def, fields),
             TypeDesc::Enum { variants, .. } if is_json(t) => {
-                let ids = JsonIds::at(variants.first().map_or(0, |v| v.1));
+                let ids = JsonIds::at(variants.first().map_or(0, |v| v.runtime_id));
                 self.p.parse_json(&mut self.b, &ids)
             }
             TypeDesc::Enum { name, variants, .. } => {
@@ -1299,8 +1299,8 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                 "false" => VmValue::Bool(false),
                 _ => return Err(bad(self)),
             },
-            TypeDesc::Enum { variants, .. } => match lookup(self.b.meter, variants, |v| v.0 == *key && v.2.is_empty())? {
-                Some(i) => VmValue::Tag(variants[i].1),
+            TypeDesc::Enum { variants, .. } => match lookup(self.b.meter, variants, |v| v.name == *key && v.payload_types.is_empty())? {
+                Some(i) => VmValue::Tag(variants[i].runtime_id),
                 None => return Err(bad(self)),
             },
             TypeDesc::Value { parse, .. } => {
@@ -1315,8 +1315,8 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
         Ok((k, hash_key(self.b.heap, self.b.meter, k)?, None))
     }
 
-    fn decode_enum(&mut self, name: &str, variants: &'d [VariantDesc]) -> PResult<VmValue> {
-        let find = |d: &Self, tag: &str| match lookup(d.b.meter, variants, |v| v.0 == tag)? {
+    fn decode_enum(&mut self, name: &str, variants: &'d [ReflectVariantDesc]) -> PResult<VmValue> {
+        let find = |d: &Self, tag: &str| match lookup(d.b.meter, variants, |v| v.name == tag)? {
             Some(i) => Ok(&variants[i]),
             None => Err(d.fail(&format!("unknown variant `{}` of {name}", super::truncate(tag, QUOTED_KEY)))),
         };
@@ -1324,10 +1324,10 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
             Some(b'"') => {
                 let tag = self.p.string(true)?;
                 let v = find(self, &tag)?;
-                if !v.2.is_empty() {
+                if !v.payload_types.is_empty() {
                     return Err(self.fail(&format!("variant `{tag}` of {name} needs a payload")));
                 }
-                Ok(VmValue::Tag(v.1))
+                Ok(VmValue::Tag(v.runtime_id))
             }
             Some(b'{') => {
                 let mut result = None;
@@ -1345,8 +1345,8 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
         }
     }
 
-    fn decode_payload(&mut self, v: &'d VariantDesc) -> PResult<VmValue> {
-        let (_, id, types, names) = v;
+    fn decode_payload(&mut self, v: &'d ReflectVariantDesc) -> PResult<VmValue> {
+        let ReflectVariantDesc { runtime_id: id, payload_types: types, field_names: names, .. } = v;
         self.p.ws();
         let mut slots: Vec<Option<VmValue>> = vec![None; types.len()];
         match (self.p.peek(), names) {

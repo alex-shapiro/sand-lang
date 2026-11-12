@@ -17,7 +17,7 @@
 use crate::check::CheckedProgram;
 use crate::check::persist::PMap;
 use crate::types::{FieldDef, FnId, Opaque, PARAM_PLACEHOLDER, Ty, TyList, TypeArena, TypeDefId, TypeDefKind, TypeId, TypePrinter};
-use crate::vm::value::{DescTemplate, FieldDefault, MAX_DESC_DEPTH, TypeDesc, truncate_type_name};
+use crate::vm::value::{DescTemplate, FieldDefault, MAX_DESC_DEPTH, ReflectVariantDesc, TypeDesc, truncate_type_name};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -357,7 +357,7 @@ impl Builder<'_, '_> {
                 let variants = variants
                     .iter()
                     .map(|v| {
-                        let payload = v
+                        let payload_types = v
                             .fields
                             .iter()
                             .map(|&x| {
@@ -367,7 +367,12 @@ impl Builder<'_, '_> {
                                 fd
                             })
                             .collect();
-                        (name_of(v.name), v.rt_id, payload, v.field_names.as_ref().map(|ns| ns.iter().map(|&n| name_of(n)).collect()))
+                        ReflectVariantDesc {
+                            name: name_of(v.name),
+                            runtime_id: v.rt_id,
+                            payload_types,
+                            field_names: v.field_names.as_ref().map(|ns| ns.iter().map(|&n| name_of(n)).collect()),
+                        }
                     })
                     .collect();
                 TypeDesc::Enum { id, name, variants, rust: self.cp.rust_type(d) }
