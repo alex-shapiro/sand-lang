@@ -30,8 +30,9 @@ use syn::{
 ///
 /// Implements `NamedType`, `EnumType`, `SandType`, `FromVmValue`, `IntoVmValue`,
 /// and `Encode`. Supports unit, tuple, and struct variants, as well as type
-/// parameters. Each payload type must implement `IntoVmValue`, owned
-/// `FromVmValue`, and `Encode`, unless the enum uses `#[sand(no_value)]`.
+/// parameters. Each payload type must implement `IntoVmValue` and owned
+/// `FromVmValue`. It must also implement `Encode`, unless the enum uses
+/// `#[sand(no_value)]`.
 ///
 /// Optional attributes:
 ///
@@ -44,9 +45,9 @@ pub fn derive_sand_enum(input: TokenStream) -> TokenStream {
 /// Binds a Rust struct to a Sand struct.
 ///
 /// Implements `NamedType`, `StructType`, `SandType`, `FromVmValue`, `IntoVmValue`,
-/// and `Encode`. Each field type must implement `IntoVmValue`, owned
-/// `FromVmValue`, and `Encode`, unless the struct uses `#[sand(no_value)]`.
-/// Rust type parameters define Sand type parameters.
+/// and `Encode`. Each field type must implement `IntoVmValue` and owned
+/// `FromVmValue`. It must also implement `Encode`, unless the struct uses
+/// `#[sand(no_value)]`. Rust type parameters define Sand type parameters.
 ///
 /// Optional field attributes:
 ///

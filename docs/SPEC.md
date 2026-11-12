@@ -2205,8 +2205,8 @@ optional type attributes:
 | `SandStruct` | `struct` with the named fields of a Rust struct, copied on each conversion |
 
 Each field of a `SandStruct` and each payload of a `SandEnum` variant must
-implement `IntoVmValue`, owned `FromVmValue`, and `Encode`, unless the type uses
-`#[sand(no_value)]`. Unit variants map
+implement `IntoVmValue` and owned `FromVmValue`. It must also implement
+`Encode`, unless the type uses `#[sand(no_value)]`. Unit variants map
 to variants without a payload. Tuple and struct variants map to variants with
 positional and named payloads. On a struct variant field, `#[sand(name = "<name>")]` overrides
 the payload field name. Generic type parameters on a `SandEnum` or `SandStruct`

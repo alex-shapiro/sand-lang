@@ -310,10 +310,10 @@ builds a Sand `Json` value, and `Vm::to_value` builds a `Value`.
   `json.encode`. A cyclic value hits the depth limit. Exceeding a limit returns
   a limit error.
 - A benchmark verifies `json.encode` throughput.
-- Rename `Vm::new_value` and `Heap::value` to `Vm::new_value_type` and
-  `Heap::value_type`.
+- Rename `Vm::new_value` and `Heap::value` to `Vm::new_native_value` and
+  `Heap::native_value`.
 - Replace `IntoVmValue::to_const` with `value::Encode` and
-  `Value::to_const_val`.
+  `Checker::resolve_bound_const`.
 
 Commit `03076c5` returned `Json`. That representation lost the distinction
 between `bytes` and `str`, and between `()` and `None`.
