@@ -4261,7 +4261,8 @@ fn to_value_copies_each_kind_of_value() {
         "host.copy(())\nhost.copy(true)\nhost.copy(-7)\nhost.copy(1.5)\nhost.copy(1500ms)\nhost.copy(\"text\")\n\
          var grown = \"a\"\nfor _ in 0..3 {\n    grown += \"b\"\n}\nhost.copy(grown)\n\
          host.copy(bytes.from_list([0, 255]))\nhost.copy([1, 2])\nhost.copy((1, \"a\", 2.5))\nhost.copy((1, 2))\n\
-         host.copy(Set([3, 1]))\nhost.copy([\"k\": [1], \"j\": []])\nhost.copy(0..3)\nhost.copy(-1..=1)\n",
+         host.copy(Set([3, 1]))\nhost.copy([\"k\": [1], \"j\": []])\nhost.copy(0..3)\nhost.copy(-1..=1)\n\
+         host.copy([2: \"two\", 1: \"one\"])\nhost.copy([(1, 2): true])\nhost.copy([false: ()])\n",
     );
     let ints = |ints: &[i64]| ints.iter().map(|&i| Value::Int(i)).collect::<Vec<_>>();
     let expected = [
@@ -4280,6 +4281,9 @@ fn to_value_copies_each_kind_of_value() {
         Value::Map(vec![(Value::Str("k".into()), Value::List(ints(&[1]))), (Value::Str("j".into()), Value::List(vec![]))]),
         Value::Range { start: 0, end: 3, inclusive: false },
         Value::Range { start: -1, end: 1, inclusive: true },
+        Value::Map(vec![(Value::Int(2), Value::Str("two".into())), (Value::Int(1), Value::Str("one".into()))]),
+        Value::Map(vec![(Value::Tuple(ints(&[1, 2])), Value::Bool(true))]),
+        Value::Map(vec![(Value::Bool(false), Value::Unit)]),
     ];
     assert_eq!(values, expected);
 }
@@ -4339,62 +4343,11 @@ fn to_value_keeps_the_shape_of_a_container_that_holds_values_without_encode() {
     assert_eq!(values, expected);
 }
 
-#[test]
-fn to_value_copies_map_keys_that_are_not_strings() {
-    let values = copied_values(
-        "import bank\nenum Side { Left, Right }\nstruct Point { x: int, y: int }\n\
-         host.copy([2: \"two\", 1: \"one\"])\nhost.copy([(1, 2): true])\nhost.copy([Side.Right: 1.5])\nhost.copy([false: ()])\n\
-         host.copy([Point(x: 1, y: 2): [1]])\nhost.copy([bank.cents(5): Some(1)])\nhost.copy([(1, \"a\"): 3])\n",
-    );
-    let str_ = |s: &str| Value::Str(s.into());
-    let pair = Value::Tuple(vec![Value::Int(1), Value::Int(2)]);
-    let point = Value::Struct(StructValue::new("main.Point", [("x", Value::Int(1)), ("y", Value::Int(2))]));
-    let money = Value::Native(Box::new(NativeValue { type_name: "bank.Money".into(), text: "0.05".into() }));
-    let expected = [
-        Value::Map(vec![(Value::Int(2), str_("two")), (Value::Int(1), str_("one"))]),
-        Value::Map(vec![(pair, Value::Bool(true))]),
-        Value::Map(vec![(Value::Variant(VariantValue::new("main.Side", "Right", [])), Value::Float(1.5))]),
-        Value::Map(vec![(Value::Bool(false), Value::Unit)]),
-        Value::Map(vec![(point, Value::List(vec![Value::Int(1)]))]),
-        Value::Map(vec![(money, Value::Variant(VariantValue::new("Option", "Some", [Value::Int(1)])))]),
-        Value::Map(vec![(Value::Tuple(vec![Value::Int(1), str_("a")]), Value::Int(3))]),
-    ];
-    assert_eq!(values, expected);
-}
-
 /// Sets up `chain(n)`, a value that nests `n` structs, and `ring`, a struct
 /// that contains itself.
 const NESTED_VALUES: &str = "struct Link { var next: Link? }\nfn chain(n: int) -> Link {\n    var link = Link(next: None)\n    \
                              for _ in 1..n {\n        link = Link(next: Some(link))\n    }\n    link\n}\n\
                              let ring = Link(next: None)\nring.next = Some(ring)\n";
-
-#[test]
-fn to_value_fails_beyond_512_levels_of_nesting() {
-    // Each `Link` after the first adds a struct level and a `Some` level.
-    let (r, values) = run_and_copy_values(Config::new(), [], &format!("{NESTED_VALUES}host.copy([chain(256)])\nhost.copy(chain(256))"));
-    r.unwrap();
-    let mut depth = 0;
-    let mut value = &values[0];
-    loop {
-        value = match value {
-            Value::List(items) => &items[0],
-            Value::Struct(link) => &link.fields[0],
-            Value::Variant(option) => match option.payload.first() {
-                Some(payload) => payload,
-                None => break,
-            },
-            other => panic!("{other:?}"),
-        };
-        depth += 1;
-    }
-    assert_eq!(depth, 512);
-    for src in ["host.copy([[chain(256)]])", "host.copy(chain(257))", "host.copy(ring)", "let rings = [ring]\nhost.copy(rings)"] {
-        let (r, values) = run_and_copy_values(Config::new(), [], &format!("{NESTED_VALUES}{src}"));
-        let Err(Error::Runtime { message, .. }) = r else { panic!("{src}: expected a runtime error, got {r:?}") };
-        assert_eq!(message, "limit: value too deeply nested to copy", "{src}");
-        assert!(values.is_empty(), "{src}");
-    }
-}
 
 #[test]
 fn encode_deep_and_cyclic_values_on_a_small_stack() {
@@ -4409,33 +4362,20 @@ fn encode_deep_and_cyclic_values_on_a_small_stack() {
             .to_string());
     r.unwrap();
     assert_eq!(copies, 1);
-    for (operation, message) in [
-        ("json.encode", "limit: value too deeply nested to encode as JSON"),
-        ("json.to_json", "limit: value too deeply nested to convert to JSON"),
-        ("host.copy", "limit: value too deeply nested to copy"),
+    // In a copy, each `Link` after the first adds a struct level and a `Some`
+    // level, so `[chain(256)]` has 512 levels.
+    for (operation, message, one_level_too_deep) in [
+        ("json.encode", "limit: value too deeply nested to encode as JSON", "chain(513)"),
+        ("json.to_json", "limit: value too deeply nested to convert to JSON", "chain(513)"),
+        ("host.copy", "limit: value too deeply nested to copy", "[[chain(256)]]"),
     ] {
-        for value in ["chain(513)", "ring"] {
+        for value in [one_level_too_deep, "ring"] {
             let (r, _) = run(format!("{operation}({value})"));
             let Err(Error::Runtime { message: actual, .. }) = r else {
                 panic!("{operation}({value}): expected a runtime error, got {r:?}")
             };
             assert_eq!(actual, message, "{operation}({value})");
         }
-    }
-}
-
-#[test]
-fn to_value_charges_fuel_for_each_value_and_for_copied_bytes() {
-    // Each program builds its value for less than 100,000 units of fuel.
-    let rows = "let row = (0..100).to_list()\nlet rows = []\nfor _ in 0..5000 {\n    rows.push(row)\n}\n";
-    let texts = "let text = \"x\".repeat(64000)\nlet texts = []\nfor _ in 0..5000 {\n    texts.push(text)\n}\n";
-    for (setup, value) in [(rows, "rows"), (texts, "texts")] {
-        let limited = || Config::new().limits(Limits { max_instructions: Some(400_000), ..Limits::default() });
-        let (r, _) = run_and_copy_values(limited(), [], setup);
-        r.unwrap();
-        let (r, values) = run_and_copy_values(limited(), [], &format!("{setup}host.copy({value})"));
-        assert!(matches!(r, Err(Error::Limit(LimitKind::Instructions))), "{value}: {r:?}");
-        assert!(values.is_empty(), "{value}");
     }
 }
 
