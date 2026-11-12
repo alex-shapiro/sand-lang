@@ -35,7 +35,7 @@ source branch only as a reference.
 11. Deterministic fuel: merged in #38 from `deterministic-fuel`
 12. `VmValue` rename: merged in #39 from `vm-value-rename`
 13. Single native function registration: merged in #40 from `single-native-function`
-14. `Value` and the shared encode path: in review on `value-encode`
+14. `Value` and `Vm::to_value`: in review on `value-encode`
 15. Shared decode path and `Value` input: not started; requires 14
 16. `serde` support for `Value`: not started; requires 14
 17. Single run method and `Outcome`: not started; requires 14
@@ -273,7 +273,7 @@ module.function("slow", |url: String| async move { fetch(url).await });
 
 This changeset has no source commits.
 
-### 14. `Value` and the shared encode path
+### 14. `Value` and `Vm::to_value`
 
 `sandlang::value::Value` is the Rust form of every Sand value that implements
 `Encode`. It holds unit, bool, int, float, duration, string, bytes, list, tuple,
@@ -281,16 +281,23 @@ map, set, range, structs and enums with their names, and native value types. A
 `Value` does not reference the VM, so it remains valid after the run ends. `Value`
 is `#[non_exhaustive]`, so a new variant does not break hosts.
 
-The Sand trait `Encode` defines what can leave the VM, and `json` already implements
-it twice: in `Encoder` and in `Converter`, which is `to_json`. Replace both walks with
-a single heap walk that writes to a sink. The sinks are JSON text, the Sand `Json`
-value, and `Value`.
+The Sand trait `Encode` defines what can leave the VM. Three functions read such a
+value from the heap: `json.encode` writes JSON text, `json.to_json` builds the Sand
+`Json` value, and `Vm::to_value` builds a `Value`.
 
-- The walk reports what each value is: list, tuple, set, map with its key values,
-  struct or variant with its name, and native value.
-- Rules that are specific to JSON exist only in the JSON sinks. These rules flatten
+- Each function has its own `match` on the kinds of heap value, and its own stack of
+  the containers that it has entered. No function recurses, so a deep value cannot
+  overflow the thread stack.
+- The functions share only `ContainerChildren`, an iterator over the children of one
+  container.
+- A shared heap walk that writes to a sink was the first design. It cost about 300
+  lines more than three functions, and its speed depended on `#[inline(always)]` on
+  each method of two layers of traits.
+- Rules that are specific to JSON exist only in the `json` module. These rules flatten
   `Some`, write `None` as `null`, pass the `Json` enum through, write map keys as
   text, and use Base64 for `bytes` and text for native value types.
+- The compiler cannot check that `json.encode` and `json.to_json` agree. A property
+  test checks that `json.encode(json.to_json(x)) == json.encode(x)`.
 - Every native value type, from the standard library or a host, is
   `Value::Native { type_name, text }`. The `time` types have no variants of their
   own. The type name includes the module. The text is lossless, because

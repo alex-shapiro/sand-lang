@@ -427,10 +427,6 @@ Visible defects that rarely block users.
 - [ ] ❓ Return a typed error from `format_source_with`. This function returns a
       `String` error today. Callers must parse the error message to distinguish
       syntax errors, fuel exhaustion, timeouts, and interrupts.
-- [ ] ❓ Make `display::render_metered` (`src/vm/display.rs`) a sink of
-      `encode::walk`. It is a second walk over a heap value with an explicit
-      stack, and it selects the work for each value by its kind, as
-      `encode::walk` does.
 
 ### Policy
 

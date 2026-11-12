@@ -8,16 +8,18 @@ use crate::native::{EnumType, NamedType, NativeModule, variant_index};
 use crate::syntax::lexer::is_ident;
 use crate::types::ConstVal;
 use crate::types::traits;
-use crate::vm::bytecode::{Program, RtIds};
+use crate::vm::bytecode::{Program, VariantRt};
 use crate::vm::compare::{hash_key, str_hash};
-use crate::vm::encode::{self, Container, EncodeSink, Leaf, MAX_DEPTH, Opened, Role, VariantRef};
+use crate::vm::container_children::{ChildRole, ContainerChildren, INLINE_OPEN_CONTAINERS, MAX_NESTING_DEPTH};
 use crate::vm::heap::{Heap, Staging};
 use crate::vm::meter::{Meter, SLOW_BYTES_PER_UNIT, Scratch};
 use crate::vm::value::{
-    FieldDefault, FieldDesc, FxHashMap, KeyIndex, KeyTable, MAP_ENTRY_SIZE, MapObj, Obj, ReflectVariantDesc, TypeDesc, VmValue, slot_fits,
+    FieldDefault, FieldDesc, FxHashMap, KeyIndex, KeyTable, MAP_ENTRY_SIZE, MapObj, Obj, ReflectVariantDesc, TypeDesc, ValueRef, VmValue,
+    slot_fits,
 };
 use crate::vm::{Fail, Vm, fail, internal, without_trait};
 use hashbrown::HashTable;
+use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::fmt::Write;
 
@@ -62,7 +64,7 @@ struct JsonIds {
 }
 
 impl JsonIds {
-    fn of(prog: &Program) -> Result<JsonIds, Fail> {
+    fn new(prog: &Program) -> Result<JsonIds, Fail> {
         match prog.enum_types.get(&Json::rust_type()) {
             Some(&first) => Ok(JsonIds::at(first)),
             None => internal("the json module is not loaded"),
@@ -96,7 +98,7 @@ pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("json", ModKind::Std, include_str!("json.sand"));
     m.bind::<Json>();
     m.function("parse", |vm: &mut Vm, text: VmVal<String>| -> Result<VmVal<Json>, HostError> {
-        let ids = JsonIds::of(&vm.prog)?;
+        let ids = JsonIds::new(&vm.prog)?;
         let meter = &vm.meter;
         let r = vm.heap.staged(|heap, st| {
             let mut b = Builder::new(heap, st, meter);
@@ -108,11 +110,15 @@ pub(crate) fn module() -> NativeModule {
         into_result(r)
     });
     m.function("encode", |vm: &mut Vm, value: Param<0, traits::Encode>, indent: i64| -> Result<VmVal<String>, Fail> {
-        let (heap, meter, indent) = (&vm.heap, &vm.meter, indent.clamp(0, 1 << 16) as usize);
-        let mut out = JsonTextOutput { heap, meter, indent, text: String::new(), charged: 0, scratch: Scratch::new() };
-        let root = OpenBracket { is_array: false, is_empty: true };
-        write_json(&vm.prog, heap, meter, JsonIds::of(&vm.prog)?, &mut out, root, value.raw())?;
-        Ok(VmVal::from_raw(vm.new_str(out.text)))
+        let (prog, heap, meter, indent) = (&vm.prog, &vm.heap, &vm.meter, indent.clamp(0, 1 << 16) as usize);
+        let ids = JsonIds::new(prog)?;
+        let out = {
+            let (out, scratch, open_brackets) = (String::new(), Scratch::new(), SmallVec::new());
+            let mut e = JsonTextEncoder { prog, heap, meter, ids, indent, out, charged: 0, scratch, open_brackets };
+            e.encode(value.raw())?;
+            e.out
+        };
+        Ok(VmVal::from_raw(vm.new_str(out)))
     });
     m.bind::<Decoded<()>>();
     m.function("decode_raw", |vm: &mut Vm, ty: Reflect<0>, text: VmVal<String>| -> Result<Decoded<Param<0>>, Fail> {
@@ -164,15 +170,9 @@ pub(crate) fn module() -> NativeModule {
         }
     });
     m.function("to_json", |vm: &mut Vm, value: Param<0, traits::Encode>| -> Result<VmVal<Json>, Fail> {
-        let json_ids = JsonIds::of(&vm.prog)?;
+        let ids = JsonIds::new(&vm.prog)?;
         let (prog, meter) = (&vm.prog, &vm.meter);
-        let v = vm.heap.staged(|heap, st| {
-            let mut out = JsonValueOutput::new(Builder::new(heap, st, meter), json_ids);
-            match write_json(prog, heap, meter, json_ids, &mut out, PartialJson::Root(VmValue::Unit), value.raw())? {
-                PartialJson::Root(v) => Ok(v),
-                _ => internal("json.to_json: the walk did not return the root"),
-            }
-        })?;
+        let v = vm.heap.staged(|heap, st| ToJsonConverter::new(prog, heap, Builder::new(heap, st, meter), ids).build_json(value.raw()))?;
         Ok(VmVal::from_raw(v))
     });
     m
@@ -369,7 +369,7 @@ const ENTRY_PENDING: usize = std::mem::size_of::<Entry>() + MAP_ENTRY_SIZE;
 impl FromVmValue for Json {
     type Item<'a> = Json;
     fn from_vm_value(vm: &Vm, v: VmValue, conv: &mut Conversion) -> Result<Json, Fail> {
-        let ids = JsonIds::of(&vm.prog)?;
+        let ids = JsonIds::new(&vm.prog)?;
         let mut stack = Vec::new();
         let mut node = v;
         loop {
@@ -397,7 +397,7 @@ impl FromVmValue for Json {
                 }
                 _ => return Err(mismatch::<Json>()),
             };
-            if stack.len() > MAX_DEPTH {
+            if stack.len() > MAX_NESTING_DEPTH {
                 return fail("limit", "value too deeply nested to convert");
             }
             node = loop {
@@ -430,7 +430,7 @@ impl FromVmValue for Json {
 
 impl IntoVmValue for Json {
     fn into_vm_value(self, vm: &mut Vm) -> Result<VmValue, Fail> {
-        let ids = JsonIds::of(&vm.prog)?;
+        let ids = JsonIds::new(&vm.prog)?;
         let meter = &vm.meter;
         vm.heap.staged(|heap, st| Builder::new(heap, st, meter).json(ids, self))
     }
@@ -499,7 +499,7 @@ impl Builder<'_, '_, '_> {
                     None
                 }
             };
-            if stack.len() > MAX_DEPTH {
+            if stack.len() > MAX_NESTING_DEPTH {
                 return fail("limit", "value too deeply nested to convert");
             }
             node = loop {
@@ -634,7 +634,7 @@ impl<'a> Parser<'a> {
     }
 
     fn enter(&mut self) -> PResult<()> {
-        if self.depth >= MAX_DEPTH {
+        if self.depth >= MAX_NESTING_DEPTH {
             return Err(self.err_at(self.pos, "nesting too deep"));
         }
         self.depth += 1;
@@ -1091,7 +1091,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
                 self.expect_open(b'{', "object")?;
                 let mut m = self.b.start_map();
                 self.object(true, |d, key| {
-                    let (k, hash, text) = d.map_key(key_type, key)?;
+                    let (k, hash, text) = d.map_key_text(key_type, key)?;
                     let seg = Seg::Key(text.clone().unwrap_or_default());
                     let v = d.with_seg(seg, |d| d.decode(value_type))?;
                     Ok(d.b.put(&mut m, hash, text, k, v)?)
@@ -1283,7 +1283,7 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
         Ok(self.indexes[&id].get(key).copied())
     }
 
-    fn map_key(&mut self, t: &TypeDesc, key: Cow<'a, str>) -> PResult<(VmValue, u64, Option<Cow<'a, str>>)> {
+    fn map_key_text(&mut self, t: &TypeDesc, key: Cow<'a, str>) -> PResult<(VmValue, u64, Option<Cow<'a, str>>)> {
         let quoted = super::truncate(&key, QUOTED_KEY);
         let bad = |d: &Self| d.fail(&format!("invalid map key `{quoted}`"));
         let k = match t {
@@ -1389,402 +1389,276 @@ impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
 
 const SPACES: &str = "                                                                ";
 
-fn invalid_key<T>() -> Result<T, Fail> {
+fn invalid_key_error<T>() -> Result<T, Fail> {
     fail("invalid", "a JSON object key must be a string, int, duration, bool, payload-less variant, or value type")
 }
 
-/// The text of a JSON string or of an object key.
-struct JsonText<'h> {
-    text: Cow<'h, str>,
-    sand_str: SandStr,
+fn nesting_limit_error<T>(action: &str) -> Result<T, Fail> {
+    fail("limit", format!("value too deeply nested to {action}"))
 }
 
-/// The Sand `str` that an output can use for a [`JsonText`].
-#[derive(Clone, Copy)]
-enum SandStr {
-    /// The `str` on the heap that has the text.
-    OnHeap(VmValue),
-    /// One `str` for each use of the name of the variant with this runtime
-    /// ID.
-    VariantName(u32),
-    /// A new copy of the text.
-    Copy,
-}
-
-impl<'h> JsonText<'h> {
-    fn new(text: impl Into<Cow<'h, str>>) -> Self {
-        JsonText { text: text.into(), sand_str: SandStr::Copy }
-    }
-
-    /// Returns the text of a string. `heap_str` is the string if it is an
-    /// immutable `str` on the heap.
-    fn for_str(text: &'h str, heap_str: Option<VmValue>) -> Self {
-        JsonText { text: text.into(), sand_str: heap_str.map_or(SandStr::Copy, SandStr::OnHeap) }
-    }
-
-    fn variant_name(variant: VariantRef<'h>) -> Self {
-        JsonText { text: variant.name.into(), sand_str: SandStr::VariantName(variant.id) }
-    }
-
-    /// Returns the text of `leaf` as a JSON object key, or `None` if `leaf`
-    /// has no text form.
-    #[inline(always)]
-    fn for_key(leaf: Leaf<'h>, rt_ids: RtIds) -> Option<Self> {
-        Some(match leaf {
-            Leaf::Int(i) | Leaf::Duration(i) => JsonText::new(i.to_string()),
-            Leaf::Bool(b) => JsonText::new(if b { "true" } else { "false" }),
-            Leaf::Tag(variant) if variant.id != rt_ids.none => JsonText::new(variant.name),
-            Leaf::Str { text, heap_str } => JsonText::for_str(text, heap_str),
-            Leaf::Native(native) => JsonText::new(native.text()),
-            _ => return None,
-        })
+fn runtime_variant(prog: &Program, id: u32) -> Result<&VariantRt, Fail> {
+    match prog.variants.get(id as usize) {
+        Some(variant) => Ok(variant),
+        None => internal("json: unknown variant ID"),
     }
 }
 
-/// A JSON value without members.
-enum Scalar<'h> {
-    Null,
-    Bool(bool),
-    Int(i64),
-    Float(f64),
-    Str(JsonText<'h>),
-    /// The Base64 text of a `bytes` value.
-    Base64(String),
-}
-
-/// The key of a member of a JSON object.
-enum JsonKey<'h> {
-    Text(JsonText<'h>),
-    /// The next of the field names that the object began with.
-    Field(&'h str),
-}
-
-/// A JSON array or object that begins.
-enum Begin<'h> {
-    /// An array with this number of members.
-    Array(usize),
-    Object,
-    /// An object with a [`JsonKey::Field`] for each of the field names
-    /// `names` of `owner`, in order.
-    Fields {
-        owner: FieldsOwner,
-        names: &'h [String],
-    },
-}
-
-/// A struct type or a variant with field names, by its runtime ID.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum FieldsOwner {
-    Struct(u32),
-    Variant(u32),
-}
-
-/// The receiver of the JSON values that a [`JsonSink`] makes from Sand values.
-///
-/// The sink starts each member of an array or object with
-/// [`JsonOutput::member`]. The value of the member follows: a scalar, a `Json`
-/// value, or an array or object with its own members. An output charges fuel
-/// only for the bytes that it writes or copies, because [`encode::walk`]
-/// charges for each value.
-///
-/// Each method of an implementation must be `#[inline(always)]`, for the
-/// reason that [`EncodeSink`] gives.
-trait JsonOutput<'h> {
-    /// The state of a JSON array or object that waits for its members.
-    type Open;
-
-    /// The message of the limit error for a value with more than
-    /// [`MAX_DEPTH`] levels of JSON arrays and objects.
-    const TOO_DEEP: &'static str;
-
-    /// Fails with a memory limit error if the output has no room for a string
-    /// of `len` bytes.
-    fn reserve(&mut self, len: usize) -> Result<(), Fail>;
-
-    /// Starts the next member of `parent`. `key` is `None` in an array.
-    /// `depth` is the number of open arrays and objects.
-    fn member(&mut self, parent: &mut Self::Open, key: Option<JsonKey<'h>>, depth: usize) -> Result<(), Fail>;
-
-    /// Receives `scalar` as the value of the member of `parent` that started
-    /// last.
-    fn scalar(&mut self, parent: &mut Self::Open, scalar: Scalar<'h>) -> Result<(), Fail>;
-
-    /// Receives the Sand `Json` value `json` as the value of the member of
-    /// `parent` that started last, and returns true. An output that returns
-    /// false receives the content of `json` as the value instead.
-    fn embed(&mut self, parent: &mut Self::Open, json: VmValue) -> Result<bool, Fail>;
-
-    fn begin(&mut self, begin: Begin<'h>) -> Result<Self::Open, Fail>;
-
-    /// Receives the end of `open` as the value of the member of `parent` that
-    /// started last. `depth` is the number of arrays and objects that stay
-    /// open.
-    fn end(&mut self, parent: &mut Self::Open, open: Self::Open, depth: usize) -> Result<(), Fail>;
-}
-
-/// The [`EncodeSink`] that gives each Sand value its JSON form and sends that
-/// form to a [`JsonOutput`].
-struct JsonSink<'h, 'o, O> {
-    out: &'o mut O,
-    meter: &'h Meter,
-    json_ids: JsonIds,
-    rt_ids: RtIds,
-    /// The number of open JSON arrays and objects.
-    depth: usize,
-}
-
-/// The JSON arrays and objects that are open for a Sand container.
-struct JsonLevels<O> {
-    /// The array or object that receives the children of the container.
-    members: O,
-    /// The object that has the variant name as its key and `members` as its
-    /// value, if the container is a variant with a payload.
-    wrapper: Option<O>,
-}
-
-/// Sends the JSON form of `value` to `out`, and returns `root` with the value
-/// in it.
-#[inline(always)]
-fn write_json<'h, O: JsonOutput<'h>>(
-    prog: &'h Program,
-    heap: &'h Heap,
-    meter: &'h Meter,
-    json_ids: JsonIds,
-    out: &mut O,
-    root: O::Open,
-    value: VmValue,
-) -> Result<O::Open, Fail> {
-    let mut sink = JsonSink { out, meter, json_ids, rt_ids: prog.ids, depth: 0 };
-    Ok(encode::walk(prog, heap, meter, &mut sink, JsonLevels { members: root, wrapper: None }, value)?.members)
-}
-
-impl<'h, O: JsonOutput<'h>> JsonSink<'h, '_, O> {
-    /// Starts a value with the role `role` in `parent`.
-    #[inline(always)]
-    fn begin_value(&mut self, parent: &mut O::Open, role: Role<'h>) -> Result<(), Fail> {
-        match role {
-            Role::Root | Role::Payload | Role::MapValue => Ok(()),
-            Role::Item => self.out.member(parent, None, self.depth),
-            Role::Field(name) => self.out.member(parent, Some(JsonKey::Field(name)), self.depth),
-            Role::MapKey => invalid_key(),
-        }
-    }
-
-    #[inline(always)]
-    fn begin(&mut self, begin: Begin<'h>) -> Result<O::Open, Fail> {
-        if self.depth >= MAX_DEPTH {
-            return fail("limit", O::TOO_DEEP);
-        }
-        self.depth += 1;
-        self.out.begin(begin)
-    }
-
-    #[inline(always)]
-    fn end(&mut self, parent: &mut O::Open, open: O::Open) -> Result<(), Fail> {
-        self.depth -= 1;
-        self.out.end(parent, open, self.depth)
-    }
-
-    fn range(&mut self, parent: &mut O::Open, start: i64, end: i64, inclusive: bool) -> Result<(), Fail> {
-        let mut object = self.begin(Begin::Object)?;
-        let fields = [("start", Scalar::Int(start)), ("end", Scalar::Int(end)), ("inclusive", Scalar::Bool(true))];
-        for (name, value) in fields.into_iter().take(if inclusive { 3 } else { 2 }) {
-            self.out.member(&mut object, Some(JsonKey::Text(JsonText::new(name))), self.depth)?;
-            self.out.scalar(&mut object, value)?;
-        }
-        self.end(parent, object)
+/// Returns the runtime variant ID and the payload of the inline variant `v`.
+fn inline_variant_payload(v: VmValue) -> Result<(u32, VmValue), Fail> {
+    match v.as_inline_variant() {
+        Some(inline) => Ok(inline),
+        None => internal("json: not an inline variant"),
     }
 }
 
-impl<'h, O: JsonOutput<'h>> EncodeSink<'h> for JsonSink<'h, '_, O> {
-    type Open = JsonLevels<O::Open>;
-
-    const TOO_DEEP: &'static str = O::TOO_DEEP;
-
-    #[inline(always)]
-    fn leaf(&mut self, parent: &mut Self::Open, role: Role<'h>, leaf: Leaf<'h>) -> Result<(), Fail> {
-        let parent = &mut parent.members;
-        if let Role::MapKey = role {
-            let Some(key) = JsonText::for_key(leaf, self.rt_ids) else { return invalid_key() };
-            return self.out.member(parent, Some(JsonKey::Text(key)), self.depth);
-        }
-        self.begin_value(parent, role)?;
-        let scalar = match leaf {
-            Leaf::Unit => Scalar::Null,
-            Leaf::Bool(b) => Scalar::Bool(b),
-            Leaf::Int(i) | Leaf::Duration(i) => Scalar::Int(i),
-            Leaf::Float(f) => Scalar::Float(f),
-            Leaf::Str { text, heap_str } => Scalar::Str(JsonText::for_str(text, heap_str)),
-            Leaf::Bytes(bytes) => {
-                self.out.reserve(bytes.len() / 3 * 4 + 4)?;
-                self.meter.charge_slow_bytes(bytes.len())?;
-                Scalar::Base64(base64::encode(bytes, false))
-            }
-            Leaf::Range { start, end, inclusive } => return self.range(parent, start, end, inclusive),
-            Leaf::Tag(variant) if variant.id == self.rt_ids.none || variant.id == self.json_ids.null => Scalar::Null,
-            Leaf::Tag(variant) => Scalar::Str(JsonText::variant_name(variant)),
-            Leaf::Native(native) => Scalar::Str(JsonText::new(native.text())),
-            Leaf::Opaque { kind_name, .. } => return Err(without_trait(kind_name, "encoded as JSON", "Encode")),
-        };
-        self.out.scalar(parent, scalar)
-    }
-
-    #[inline(always)]
-    fn open(&mut self, parent: &mut Self::Open, role: Role<'h>, container: Container<'h>, len: usize) -> Result<Opened<Self::Open>, Fail> {
-        let parent = &mut parent.members;
-        let mut wrapper = None;
-        if let Container::Variant(variant) = container {
-            if variant.id == self.rt_ids.some || self.json_ids.has(variant.id) {
-                self.begin_value(parent, role)?;
-                let is_embedded = self.json_ids.has(variant.id) && self.out.embed(parent, variant.value)?;
-                return Ok(if is_embedded { Opened::Closed } else { Opened::Unwrapped });
-            }
-            self.begin_value(parent, role)?;
-            let mut object = self.begin(Begin::Object)?;
-            self.out.member(&mut object, Some(JsonKey::Text(JsonText::variant_name(variant))), self.depth)?;
-            wrapper = Some(object);
-        } else {
-            self.begin_value(parent, role)?;
-        }
-        let members = self.begin(match container {
-            Container::Map => Begin::Object,
-            Container::Struct { def, ty } => Begin::Fields { owner: FieldsOwner::Struct(def), names: &ty.fields },
-            Container::Variant(VariantRef { id, field_names: Some(names), .. }) => Begin::Fields { owner: FieldsOwner::Variant(id), names },
-            _ => Begin::Array(len),
-        })?;
-        Ok(Opened::Children(JsonLevels { members, wrapper }))
-    }
-
-    #[inline(always)]
-    fn close(&mut self, parent: &mut Self::Open, open: Self::Open) -> Result<(), Fail> {
-        let mut outermost = open.members;
-        if let Some(mut wrapper) = open.wrapper {
-            self.end(&mut wrapper, outermost)?;
-            outermost = wrapper;
-        }
-        self.end(&mut parent.members, outermost)
-    }
+/// Returns the text of the map key `key` as a JSON object key.
+fn map_key_text<'v>(prog: &'v Program, heap: &'v Heap, key: VmValue) -> Result<Cow<'v, str>, Fail> {
+    Ok(match key {
+        VmValue::Int(i) | VmValue::Dur(i) => Cow::Owned(i.to_string()),
+        VmValue::Bool(b) => Cow::Borrowed(if b { "true" } else { "false" }),
+        VmValue::Tag(id) if id != prog.ids.none => Cow::Borrowed(runtime_variant(prog, id)?.name.as_str()),
+        VmValue::Obj(_) => match heap.get(key) {
+            Obj::Str(s) => Cow::Borrowed(&**s),
+            Obj::StrBuf(s) => Cow::Borrowed(s.as_str()),
+            o @ (Obj::Value(_) | Obj::Packed(..)) => Cow::Owned(o.value().map(ValueRef::text).unwrap_or_default()),
+            _ => return invalid_key_error(),
+        },
+        _ => return invalid_key_error(),
+    })
 }
 
-/// The [`JsonOutput`] of `json.encode`, which writes JSON text.
-struct JsonTextOutput<'h> {
-    heap: &'h Heap,
-    meter: &'h Meter,
+/// The writer of the JSON text of `json.encode`.
+struct JsonTextEncoder<'v> {
+    prog: &'v Program,
+    heap: &'v Heap,
+    meter: &'v Meter,
+    ids: JsonIds,
     indent: usize,
-    text: String,
-    /// The number of bytes of `text` that the output has charged fuel for.
+    out: String,
+    /// The number of bytes of `out` that the encoder has charged fuel for.
     charged: usize,
     scratch: Scratch,
+    /// The JSON arrays and objects that wait for their members.
+    open_brackets: SmallVec<[OpenJsonBracket<'v>; INLINE_OPEN_CONTAINERS]>,
 }
 
 /// A JSON array or object in the text that waits for its members.
-struct OpenBracket {
+struct OpenJsonBracket<'v> {
+    /// The Sand values that become the members.
+    children: ContainerChildren<'v>,
     is_array: bool,
     is_empty: bool,
 }
 
-impl JsonTextOutput<'_> {
-    /// Starts a line for a member at `depth`, if the text has an indent.
-    #[inline(always)]
-    fn newline(&mut self, depth: usize) -> Result<(), Fail> {
-        if self.indent > 0 { self.indented_line(depth) } else { Ok(()) }
+impl<'v> JsonTextEncoder<'v> {
+    /// Writes the JSON text of `root`. The encoder charges one unit of fuel
+    /// for each Sand value, and for the bytes that it writes.
+    fn encode(&mut self, root: VmValue) -> Result<(), Fail> {
+        let (prog, heap) = (self.prog, self.heap);
+        let mut v = root;
+        loop {
+            self.meter.charge(1)?;
+            self.charge_written()?;
+            match v {
+                VmValue::Unit | VmValue::Uninit => self.out.push_str("null"),
+                VmValue::Bool(b) => self.out.push_str(if b { "true" } else { "false" }),
+                VmValue::Int(i) | VmValue::Dur(i) => self.out.push_str(itoa::Buffer::new().format(i)),
+                VmValue::Float(f) if f.is_finite() => _ = write!(self.out, "{f:?}"),
+                VmValue::Float(_) => self.out.push_str("null"),
+                VmValue::Tag(id) if id == prog.ids.none || id == self.ids.null => self.out.push_str("null"),
+                VmValue::Tag(id) => self.write_json_string(&runtime_variant(prog, id)?.name)?,
+                VmValue::Pair(first, second) => self.begin_bracket(true, ContainerChildren::Pair(first, second))?,
+                VmValue::Obj(_) => match heap.get(v) {
+                    Obj::Str(s) => self.write_json_string(s)?,
+                    Obj::StrBuf(s) => self.write_json_string(s)?,
+                    Obj::Bytes(b) => {
+                        self.check_room(b.len() / 3 * 4 + 4)?;
+                        self.meter.charge_slow_bytes(b.len())?;
+                        self.out.extend(["\"", &base64::encode(b, false), "\""]);
+                    }
+                    Obj::List(items) => self.begin_bracket(true, ContainerChildren::Items(items.iter()))?,
+                    Obj::Tuple(items) => self.begin_bracket(true, ContainerChildren::Items(items.iter()))?,
+                    Obj::Set(set) => self.begin_bracket(true, ContainerChildren::Set(set.entries.iter()))?,
+                    Obj::Map(map) => self.begin_bracket(false, ContainerChildren::Map(map.entries.iter(), None))?,
+                    Obj::Struct(def, values) => {
+                        self.begin_bracket(false, ContainerChildren::Fields(prog.types[*def as usize].fields.iter(), values.iter()))?
+                    }
+                    Obj::Variant(id, values) => {
+                        if let Some(&payload) = values.first()
+                            && self.encodes_as_payload(*id)
+                        {
+                            v = payload;
+                            continue;
+                        }
+                        let variant = runtime_variant(prog, *id)?;
+                        self.begin_variant_object(variant, ContainerChildren::from_payload(variant, values))?
+                    }
+                    Obj::Range(start, end, inclusive) => {
+                        self.begin_bracket(false, ContainerChildren::empty())?;
+                        for (name, bound) in [("start", start), ("end", end)] {
+                            self.begin_member(Some(name))?;
+                            self.charge_written()?;
+                            self.out.push_str(itoa::Buffer::new().format(*bound));
+                        }
+                        if *inclusive {
+                            self.begin_member(Some("inclusive"))?;
+                            self.charge_written()?;
+                            self.out.push_str("true");
+                        }
+                    }
+                    o @ (Obj::Value(_) | Obj::Packed(..)) => self.write_json_string(&o.value().map(ValueRef::text).unwrap_or_default())?,
+                    o @ (Obj::Closure(..)
+                    | Obj::NativeFn(_)
+                    | Obj::IterFn(_)
+                    | Obj::Task(_)
+                    | Obj::Channel(_)
+                    | Obj::Native(_)
+                    | Obj::TypeDesc(_)
+                    | Obj::Cell(_)
+                    | Obj::Free(_)) => return Err(without_trait(o.kind_name(), "encoded as JSON", "Encode")),
+                },
+                VmValue::VUnit(..)
+                | VmValue::VBool(..)
+                | VmValue::VInt(..)
+                | VmValue::VFloat(..)
+                | VmValue::VDur(..)
+                | VmValue::VTag(..)
+                | VmValue::VObj(..) => {
+                    let (id, payload) = inline_variant_payload(v)?;
+                    if self.encodes_as_payload(id) {
+                        v = payload;
+                        continue;
+                    }
+                    let variant = runtime_variant(prog, id)?;
+                    self.begin_variant_object(variant, ContainerChildren::from_inline_payload(variant, payload))?
+                }
+            }
+            v = loop {
+                let Some(top) = self.open_brackets.last_mut() else { return Ok(()) };
+                match top.children.next() {
+                    Some((ChildRole::MapKey, key)) => self.begin_member(Some(&map_key_text(prog, heap, key)?))?,
+                    Some((ChildRole::MapValue, value)) => break value,
+                    Some((ChildRole::Item, item)) => {
+                        self.begin_member(None)?;
+                        break item;
+                    }
+                    Some((ChildRole::Field(name), value)) => {
+                        self.begin_member(Some(name))?;
+                        break value;
+                    }
+                    None => self.end_bracket()?,
+                }
+            };
+        }
     }
 
-    fn indented_line(&mut self, depth: usize) -> Result<(), Fail> {
-        let n = self.indent.saturating_mul(depth);
-        self.scratch.check(self.heap, self.text.len().saturating_add(n))?;
-        self.text.push('\n');
-        let mut left = n;
+    // Each helper below is `#[inline(always)]`. Without the attribute,
+    // `json.encode` takes about 20% more time (`encode` in `benches/codec.rs`).
+
+    /// Returns true if the JSON form of the variant `id` is the JSON form of
+    /// its payload: a `Some`, or a variant of `Json`.
+    #[inline(always)]
+    fn encodes_as_payload(&self, id: u32) -> bool {
+        id == self.prog.ids.some || self.ids.has(id)
+    }
+
+    /// Begins an object with the name of `variant` as its only key, and the
+    /// array or object of `payload` as the value of that key.
+    #[inline(always)]
+    fn begin_variant_object(&mut self, variant: &VariantRt, payload: ContainerChildren<'v>) -> Result<(), Fail> {
+        self.begin_bracket(false, ContainerChildren::empty())?;
+        self.begin_member(Some(&variant.name))?;
+        self.charge_written()?;
+        self.begin_bracket(variant.field_names.is_none(), payload)
+    }
+
+    /// Begins an array or an object whose members are the JSON forms of
+    /// `children`.
+    #[inline(always)]
+    fn begin_bracket(&mut self, is_array: bool, children: ContainerChildren<'v>) -> Result<(), Fail> {
+        if self.open_brackets.len() >= MAX_NESTING_DEPTH {
+            return nesting_limit_error("encode as JSON");
+        }
+        self.out.push(if is_array { '[' } else { '{' });
+        self.open_brackets.push(OpenJsonBracket { children, is_array, is_empty: true });
+        Ok(())
+    }
+
+    /// Ends the array or object that began last.
+    #[inline(always)]
+    fn end_bracket(&mut self) -> Result<(), Fail> {
+        let Some(ended) = self.open_brackets.pop() else { return Ok(()) };
+        if !ended.is_empty {
+            self.start_line()?;
+        }
+        self.out.push(if ended.is_array { ']' } else { '}' });
+        Ok(())
+    }
+
+    /// Starts the next member of the array or object that began last, with
+    /// `key` if it is an object.
+    #[inline(always)]
+    fn begin_member(&mut self, key: Option<&str>) -> Result<(), Fail> {
+        if let Some(top) = self.open_brackets.last_mut()
+            && !std::mem::replace(&mut top.is_empty, false)
+        {
+            self.out.push(',');
+        }
+        self.start_line()?;
+        let Some(key) = key else { return Ok(()) };
+        self.write_json_string(key)?;
+        self.out.push(':');
+        if self.indent > 0 {
+            self.out.push(' ');
+        }
+        Ok(())
+    }
+
+    /// Starts a line at the depth of the open arrays and objects, if the text
+    /// has an indent.
+    #[inline(always)]
+    fn start_line(&mut self) -> Result<(), Fail> {
+        if self.indent == 0 {
+            return Ok(());
+        }
+        let mut left = self.indent.saturating_mul(self.open_brackets.len());
+        self.scratch.check(self.heap, self.out.len().saturating_add(left))?;
+        self.out.push('\n');
         while left > 0 {
             let spaces = &SPACES[..left.min(SPACES.len())];
-            self.text.push_str(spaces);
+            self.out.push_str(spaces);
             left -= spaces.len();
         }
         Ok(())
     }
 
+    /// Writes `s` as a JSON string, after a check of a long string against
+    /// the memory limit.
     #[inline(always)]
-    fn string(&mut self, s: &str) -> Result<(), Fail> {
+    fn write_json_string(&mut self, s: &str) -> Result<(), Fail> {
         if s.len() > 1024 {
-            self.reserve(escaped_len(s))?;
+            self.check_room(escaped_len(s))?;
         }
-        write_str(&mut self.text, s);
+        write_str(&mut self.out, s);
         Ok(())
     }
 
-    /// Charges fuel for the text that the output wrote before the JSON value
+    /// Fails with a memory limit error if the text has no room for `len` more
+    /// bytes.
+    #[inline(always)]
+    fn check_room(&self, len: usize) -> Result<(), Fail> {
+        self.heap.check_memory(self.out.len().saturating_add(len))
+    }
+
+    /// Charges fuel for the text that the encoder wrote before the JSON value
     /// that starts now, and checks the text against the memory limit.
     #[inline(always)]
     fn charge_written(&mut self) -> Result<(), Fail> {
-        let written = self.text.len() - self.charged;
-        self.charged = self.text.len();
+        let written = self.out.len() - self.charged;
+        self.charged = self.out.len();
         self.meter.charge_bytes(written)?;
-        self.scratch.check(self.heap, self.text.capacity())
-    }
-}
-
-impl<'h> JsonOutput<'h> for JsonTextOutput<'h> {
-    type Open = OpenBracket;
-
-    const TOO_DEEP: &'static str = "value too deeply nested to encode as JSON";
-
-    #[inline(always)]
-    fn reserve(&mut self, len: usize) -> Result<(), Fail> {
-        self.heap.check_memory(self.text.len().saturating_add(len))
-    }
-
-    #[inline(always)]
-    fn member(&mut self, parent: &mut OpenBracket, key: Option<JsonKey<'h>>, depth: usize) -> Result<(), Fail> {
-        if !std::mem::replace(&mut parent.is_empty, false) {
-            self.text.push(',');
-        }
-        self.newline(depth)?;
-        match key {
-            Some(JsonKey::Text(key)) => self.string(&key.text)?,
-            Some(JsonKey::Field(name)) => self.string(name)?,
-            None => return Ok(()),
-        }
-        self.text.push(':');
-        if self.indent > 0 {
-            self.text.push(' ');
-        }
-        Ok(())
-    }
-
-    #[inline(always)]
-    fn scalar(&mut self, _: &mut OpenBracket, scalar: Scalar<'h>) -> Result<(), Fail> {
-        self.charge_written()?;
-        match scalar {
-            Scalar::Bool(b) => self.text.push_str(if b { "true" } else { "false" }),
-            Scalar::Int(i) => self.text.push_str(itoa::Buffer::new().format(i)),
-            Scalar::Float(f) if f.is_finite() => _ = write!(self.text, "{f:?}"),
-            Scalar::Null | Scalar::Float(_) => self.text.push_str("null"),
-            Scalar::Str(string) => self.string(&string.text)?,
-            Scalar::Base64(text) => self.text.extend(["\"", &text, "\""]),
-        }
-        Ok(())
-    }
-
-    #[inline(always)]
-    fn embed(&mut self, _: &mut OpenBracket, _: VmValue) -> Result<bool, Fail> {
-        Ok(false)
-    }
-
-    #[inline(always)]
-    fn begin(&mut self, begin: Begin<'h>) -> Result<OpenBracket, Fail> {
-        self.charge_written()?;
-        let is_array = matches!(begin, Begin::Array(_));
-        self.text.push(if is_array { '[' } else { '{' });
-        Ok(OpenBracket { is_array, is_empty: true })
-    }
-
-    #[inline(always)]
-    fn end(&mut self, _: &mut OpenBracket, open: OpenBracket, depth: usize) -> Result<(), Fail> {
-        if !open.is_empty {
-            self.newline(depth)?;
-        }
-        self.text.push_str(if open.is_array { "]" } else { "}" });
-        Ok(())
+        self.scratch.check(self.heap, self.out.capacity())
     }
 }
 
@@ -1805,6 +1679,7 @@ fn escaped_len(s: &str) -> usize {
     s.len() + escapes + 2
 }
 
+#[inline(always)]
 fn write_str(out: &mut String, s: &str) {
     out.reserve(s.len() + 2);
     out.push('"');
@@ -1817,7 +1692,7 @@ fn write_str(out: &mut String, s: &str) {
 }
 
 /// Returns true if a JSON string must escape a byte of `bytes`.
-#[inline]
+#[inline(always)]
 fn has_escape(bytes: &[u8]) -> bool {
     const LOW_BITS: u64 = u64::from_ne_bytes([0x01; 8]);
     const HIGH_BITS: u64 = u64::from_ne_bytes([0x80; 8]);
@@ -1866,26 +1741,36 @@ fn write_escaped(out: &mut String, s: &str) {
     out.push_str(&s[start..]);
 }
 
-/// The [`JsonOutput`] of `json.to_json`, which builds a Sand `Json` value.
-struct JsonValueOutput<'a, 's, 'h> {
+/// The builder of the Sand `Json` value of `json.to_json`.
+struct ToJsonConverter<'a, 's, 'h> {
+    prog: &'a Program,
+    heap: &'a Heap,
     b: Builder<'a, 's, 'h>,
-    json_ids: JsonIds,
-    /// The keys of the fields of each struct type and variant that the output
-    /// has received, in order. `None` follows the keys of each type.
-    field_keys: Vec<Option<FieldKey>>,
+    ids: JsonIds,
+    /// The innermost `Json.Arr` or `Json.Obj` value that waits for its
+    /// members. At the start it is the place of the result.
+    innermost: PartialJson<'a>,
+    /// The arrays and objects that hold `innermost`, from the outermost one.
+    parents: SmallVec<[PartialJson<'a>; INLINE_OPEN_CONTAINERS]>,
+    /// The keys of the fields of each struct type and variant that the
+    /// converter has met, one type after the other.
+    field_keys: Vec<FieldKey>,
     /// The index in `field_keys` of the first field of each struct type and
-    /// variant that the output has received.
+    /// variant that the converter has met.
     first_field_keys: FxHashMap<FieldsOwner, usize>,
-    /// The name string of each variant that the output has received, by
-    /// runtime variant ID.
+    /// The name string of each variant that the converter has met, by runtime
+    /// variant ID.
     variant_names: FxHashMap<u32, VmValue>,
-    /// The key string and the key text of each object member that waits for
-    /// its value.
-    pending_keys: Vec<(VmValue, Cow<'a, str>)>,
+}
+
+/// A struct type or a variant with field names, by its runtime ID.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum FieldsOwner {
+    Struct(u32),
+    Variant(u32),
 }
 
 /// The key of an object member for a field.
-#[derive(Clone, Copy)]
 struct FieldKey {
     /// The Sand `str` that has the field name.
     name: VmValue,
@@ -1894,146 +1779,267 @@ struct FieldKey {
 }
 
 /// A `Json.Arr` or `Json.Obj` value that waits for its members.
-enum PartialJson {
+struct PartialJson<'a> {
+    /// The Sand values that become the members.
+    children: ContainerChildren<'a>,
+    members: PartialJsonMembers<'a>,
+}
+
+/// The members that a [`PartialJson`] has received.
+enum PartialJsonMembers<'a> {
+    /// The place of the result of `json.to_json`.
     Root(VmValue),
     Array(Vec<VmValue>),
-    Object(MapBuilder),
-    /// An object with field names, and the index in
-    /// [`JsonValueOutput::field_keys`] of the key of its first member.
+    /// An object, and the key string and the key text of the member that
+    /// waits for its value.
+    Object(MapBuilder, Option<(VmValue, Cow<'a, str>)>),
+    /// An object with a member for each field of a type, and the index in
+    /// [`ToJsonConverter::field_keys`] of the key of its next member.
     Fields(MapBuilder, usize),
 }
 
-impl<'a, 's, 'h> JsonValueOutput<'a, 's, 'h> {
-    fn new(b: Builder<'a, 's, 'h>, json_ids: JsonIds) -> Self {
-        let (field_keys, first_field_keys, variant_names, pending_keys) = Default::default();
-        JsonValueOutput { b, json_ids, field_keys, first_field_keys, variant_names, pending_keys }
+impl<'a, 's, 'h> ToJsonConverter<'a, 's, 'h> {
+    fn new(prog: &'a Program, heap: &'a Heap, b: Builder<'a, 's, 'h>, ids: JsonIds) -> Self {
+        let innermost = PartialJson { children: ContainerChildren::empty(), members: PartialJsonMembers::Root(VmValue::Unit) };
+        let (parents, field_keys, first_field_keys, variant_names) = Default::default();
+        ToJsonConverter { prog, heap, b, ids, innermost, parents, field_keys, first_field_keys, variant_names }
     }
 
-    /// Returns the Sand `str` that has the text of `text`, or `None` if the
-    /// output must copy the text to make one.
-    #[inline(always)]
-    fn shared_str(&mut self, text: &JsonText<'_>) -> Option<VmValue> {
-        match text.sand_str {
-            SandStr::OnHeap(heap_str) => Some(heap_str),
-            SandStr::VariantName(id) => Some(*self.variant_names.entry(id).or_insert_with(|| self.b.st.new_str(&*text.text))),
-            SandStr::Copy => None,
-        }
-    }
-
-    /// Returns the key of the next member of an object with field names, or
-    /// `None` if the object has a member for each field name. The walk
-    /// reports the fields of a type in order, so the number of members that
-    /// the object has gives the next field.
-    #[inline(always)]
-    fn next_field_key(&self, map: &MapBuilder, first_key: usize) -> Option<FieldKey> {
-        self.field_keys.get(first_key + self.b.entries.len() - map.base).copied().flatten()
-    }
-
-    #[inline]
-    fn put(&mut self, parent: &mut PartialJson, value: VmValue) -> Result<(), Fail> {
-        match parent {
-            PartialJson::Root(root) => *root = value,
-            PartialJson::Array(items) => items.push(value),
-            PartialJson::Object(map) => {
-                let Some((key, text)) = self.pending_keys.pop() else { return internal("json.to_json: a member without a key") };
-                let hash = self.b.hash(&text)?;
-                self.b.put(map, hash, Some(text), key, value)?;
-            }
-            PartialJson::Fields(map, first_key) => {
-                let Some(key) = self.next_field_key(map, *first_key) else {
-                    return internal("json.to_json: more members than field names");
-                };
-                self.b.meter.charge_bytes(key.name_len)?;
-                self.b.append(map, key.hash, key.name, value)?;
-            }
-        }
-        Ok(())
-    }
-}
-
-impl<'a> JsonOutput<'a> for JsonValueOutput<'a, '_, '_> {
-    type Open = PartialJson;
-
-    const TOO_DEEP: &'static str = "value too deeply nested to convert to JSON";
-
-    #[inline(always)]
-    fn reserve(&mut self, len: usize) -> Result<(), Fail> {
-        self.b.st.check_memory(self.b.pending.saturating_add(len))
-    }
-
-    #[inline(always)]
-    fn member(&mut self, _: &mut PartialJson, key: Option<JsonKey<'a>>, _: usize) -> Result<(), Fail> {
-        if let Some(JsonKey::Text(key)) = key {
-            let string = match self.shared_str(&key) {
-                Some(string) => string,
-                None => self.b.st.new_str(&*key.text),
-            };
-            self.pending_keys.push((string, key.text));
-        }
-        Ok(())
-    }
-
-    #[inline(always)]
-    fn scalar(&mut self, parent: &mut PartialJson, scalar: Scalar<'a>) -> Result<(), Fail> {
-        self.b.reserve()?;
-        let json_ids = self.json_ids;
-        let (id, payload) = match scalar {
-            Scalar::Null => return self.put(parent, VmValue::Tag(json_ids.null)),
-            Scalar::Bool(b) => (json_ids.bool_, VmValue::Bool(b)),
-            Scalar::Int(i) => (json_ids.int, VmValue::Int(i)),
-            Scalar::Float(f) => (json_ids.float, VmValue::Float(f)),
-            Scalar::Str(text) => match self.shared_str(&text) {
-                Some(string) => (json_ids.str_, string),
-                None => {
-                    self.b.meter.charge_bytes(text.text.len())?;
-                    (json_ids.str_, self.b.st.new_str(&*text.text))
+    /// Returns the Sand `Json` value of `root`. The converter charges one
+    /// unit of fuel for each Sand value, and for the bytes that it copies.
+    fn build_json(&mut self, root: VmValue) -> Result<VmValue, Fail> {
+        let (prog, heap, ids) = (self.prog, self.heap, self.ids);
+        self.innermost.children = ContainerChildren::One(ChildRole::Item, Some(root));
+        'next_member: loop {
+            let mut v = match self.innermost.children.next() {
+                Some((ChildRole::MapKey, key)) => {
+                    let (key, text) = match heap.get(key) {
+                        Obj::Str(s) => (key, Cow::Borrowed(&**s)),
+                        _ => {
+                            let text = map_key_text(prog, heap, key)?;
+                            (self.b.st.new_str(&*text), text)
+                        }
+                    };
+                    self.set_member_key(key, text);
+                    continue;
                 }
-            },
-            Scalar::Base64(text) => (json_ids.str_, self.b.st.new_str(text)),
-        };
-        let value = self.b.st.new_variant(id, &[payload]);
-        self.put(parent, value)
+                Some((_, member)) => member,
+                None => {
+                    let Some(parent) = self.parents.pop() else {
+                        return match self.innermost.members {
+                            PartialJsonMembers::Root(json) => Ok(json),
+                            _ => Err(empty_stack()),
+                        };
+                    };
+                    let complete = std::mem::replace(&mut self.innermost, parent).members;
+                    let json = self.finish_container(complete);
+                    self.put_member(json)?;
+                    continue;
+                }
+            };
+            // This loop runs again only for the payload of a `Some`, which
+            // has the JSON form of its payload.
+            let json = 'convert: loop {
+                self.b.meter.charge(1)?;
+                self.b.reserve()?;
+                let container = match v {
+                    VmValue::Unit | VmValue::Uninit => break 'convert VmValue::Tag(ids.null),
+                    VmValue::Bool(_) => break 'convert self.json_variant(ids.bool_, v),
+                    VmValue::Int(i) | VmValue::Dur(i) => break 'convert self.json_variant(ids.int, VmValue::Int(i)),
+                    VmValue::Float(_) => break 'convert self.json_variant(ids.float, v),
+                    VmValue::Tag(id) if id == prog.ids.none || id == ids.null => break 'convert VmValue::Tag(ids.null),
+                    VmValue::Tag(id) => {
+                        let name = self.variant_name_str(id, runtime_variant(prog, id)?);
+                        break 'convert self.json_variant(ids.str_, name);
+                    }
+                    VmValue::Pair(first, second) => self.partial_array(2, ContainerChildren::Pair(first, second))?,
+                    VmValue::Obj(_) => match heap.get(v) {
+                        Obj::Str(_) => break 'convert self.json_variant(ids.str_, v),
+                        Obj::StrBuf(s) => break 'convert self.json_str_copy(s)?,
+                        Obj::Bytes(b) => {
+                            self.b.st.check_memory(self.b.pending.saturating_add(b.len() / 3 * 4 + 4))?;
+                            self.b.meter.charge_slow_bytes(b.len())?;
+                            let text = self.b.st.new_str(base64::encode(b, false));
+                            break 'convert self.json_variant(ids.str_, text);
+                        }
+                        Obj::List(items) => self.partial_array(items.len(), ContainerChildren::Items(items.iter()))?,
+                        Obj::Tuple(items) => self.partial_array(items.len(), ContainerChildren::Items(items.iter()))?,
+                        Obj::Set(set) => self.partial_array(set.live, ContainerChildren::Set(set.entries.iter()))?,
+                        Obj::Map(map) => PartialJson {
+                            children: ContainerChildren::Map(map.entries.iter(), None),
+                            members: PartialJsonMembers::Object(self.b.start_map(), None),
+                        },
+                        Obj::Struct(def, values) => {
+                            let names = &prog.types[*def as usize].fields;
+                            self.partial_fields_object(
+                                FieldsOwner::Struct(*def),
+                                names,
+                                ContainerChildren::Fields(names.iter(), values.iter()),
+                            )
+                        }
+                        Obj::Variant(id, _) if ids.has(*id) => break 'convert v,
+                        Obj::Variant(id, values) => {
+                            if let Some(&payload) = values.first()
+                                && *id == prog.ids.some
+                            {
+                                v = payload;
+                                continue 'convert;
+                            }
+                            let variant = runtime_variant(prog, *id)?;
+                            self.enter_variant_object(*id, variant, values.len(), ContainerChildren::from_payload(variant, values))?
+                        }
+                        Obj::Range(start, end, inclusive) => {
+                            let range = PartialJsonMembers::Object(self.b.start_map(), None);
+                            self.enter_container(PartialJson { children: ContainerChildren::empty(), members: range })?;
+                            let bounds = [("start", ids.int, VmValue::Int(*start)), ("end", ids.int, VmValue::Int(*end))];
+                            let inclusive = inclusive.then_some(("inclusive", ids.bool_, VmValue::Bool(true)));
+                            for (name, id, payload) in bounds.into_iter().chain(inclusive) {
+                                let key = self.b.st.new_str(name);
+                                self.set_member_key(key, Cow::Borrowed(name));
+                                let member = self.json_variant(id, payload);
+                                self.put_member(member)?;
+                            }
+                            continue 'next_member;
+                        }
+                        o @ (Obj::Value(_) | Obj::Packed(..)) => {
+                            break 'convert self.json_str_copy(&o.value().map(ValueRef::text).unwrap_or_default())?;
+                        }
+                        o @ (Obj::Closure(..)
+                        | Obj::NativeFn(_)
+                        | Obj::IterFn(_)
+                        | Obj::Task(_)
+                        | Obj::Channel(_)
+                        | Obj::Native(_)
+                        | Obj::TypeDesc(_)
+                        | Obj::Cell(_)
+                        | Obj::Free(_)) => return Err(without_trait(o.kind_name(), "encoded as JSON", "Encode")),
+                    },
+                    VmValue::VUnit(..)
+                    | VmValue::VBool(..)
+                    | VmValue::VInt(..)
+                    | VmValue::VFloat(..)
+                    | VmValue::VDur(..)
+                    | VmValue::VTag(..)
+                    | VmValue::VObj(..) => {
+                        let (id, payload) = inline_variant_payload(v)?;
+                        if ids.has(id) {
+                            break 'convert v;
+                        }
+                        if id == prog.ids.some {
+                            v = payload;
+                            continue 'convert;
+                        }
+                        let variant = runtime_variant(prog, id)?;
+                        self.enter_variant_object(id, variant, 1, ContainerChildren::from_inline_payload(variant, payload))?
+                    }
+                };
+                self.enter_container(container)?;
+                continue 'next_member;
+            };
+            self.put_member(json)?;
+        }
     }
 
-    #[inline(always)]
-    fn embed(&mut self, parent: &mut PartialJson, json: VmValue) -> Result<bool, Fail> {
-        self.b.reserve()?;
-        self.put(parent, json)?;
-        Ok(true)
+    /// Returns the `Json` variant `id` with `payload`.
+    fn json_variant(&mut self, id: u32, payload: VmValue) -> VmValue {
+        self.b.st.new_variant(id, &[payload])
     }
 
-    #[inline(always)]
-    fn begin(&mut self, begin: Begin<'a>) -> Result<PartialJson, Fail> {
-        self.b.reserve()?;
-        let (owner, names) = match begin {
-            Begin::Array(len) => return Ok(PartialJson::Array(self.b.list_buffer(len)?)),
-            Begin::Object => return Ok(PartialJson::Object(self.b.start_map())),
-            Begin::Fields { owner, names } => (owner, names),
-        };
+    /// Returns a `Json.Str` with a copy of `text`.
+    fn json_str_copy(&mut self, text: &str) -> Result<VmValue, Fail> {
+        self.b.meter.charge_bytes(text.len())?;
+        let text = self.b.st.new_str(text);
+        Ok(self.json_variant(self.ids.str_, text))
+    }
+
+    /// Returns the one Sand `str` that has the name of the variant `id`.
+    fn variant_name_str(&mut self, id: u32, variant: &VariantRt) -> VmValue {
+        *self.variant_names.entry(id).or_insert_with(|| self.b.st.new_str(variant.name.as_str()))
+    }
+
+    /// Makes `container` the innermost array or object, and the former
+    /// innermost one its parent.
+    fn enter_container(&mut self, container: PartialJson<'a>) -> Result<(), Fail> {
+        if self.parents.len() >= MAX_NESTING_DEPTH {
+            return nesting_limit_error("convert to JSON");
+        }
+        self.parents.push(std::mem::replace(&mut self.innermost, container));
+        Ok(())
+    }
+
+    /// Enters an object with the name of `variant` as its only key. Returns
+    /// the value of that key: the array or object of `payload`, which has
+    /// `len` values.
+    fn enter_variant_object(
+        &mut self,
+        id: u32,
+        variant: &'a VariantRt,
+        len: usize,
+        payload: ContainerChildren<'a>,
+    ) -> Result<PartialJson<'a>, Fail> {
+        let key = (self.variant_name_str(id, variant), Cow::Borrowed(variant.name.as_str()));
+        let members = PartialJsonMembers::Object(self.b.start_map(), Some(key));
+        self.enter_container(PartialJson { children: ContainerChildren::empty(), members })?;
+        match &variant.field_names {
+            Some(names) => Ok(self.partial_fields_object(FieldsOwner::Variant(id), names, payload)),
+            None => self.partial_array(len, payload),
+        }
+    }
+
+    /// Returns an object with a member for each of the field names `names`
+    /// of `owner`, which is a key of [`ToJsonConverter::first_field_keys`].
+    fn partial_fields_object(&mut self, owner: FieldsOwner, names: &[String], children: ContainerChildren<'a>) -> PartialJson<'a> {
         let first_key = *self.first_field_keys.entry(owner).or_insert_with(|| {
             let first_key = self.field_keys.len();
-            let key = |name: &String| Some(FieldKey { name: self.b.st.new_str(name.as_str()), hash: str_hash(name), name_len: name.len() });
-            self.field_keys.extend(names.iter().map(key).chain([None]));
+            let key = |name: &String| FieldKey { name: self.b.st.new_str(name.as_str()), hash: str_hash(name), name_len: name.len() };
+            self.field_keys.extend(names.iter().map(key));
             first_key
         });
-        Ok(PartialJson::Fields(self.b.start_map(), first_key))
+        PartialJson { children, members: PartialJsonMembers::Fields(self.b.start_map(), first_key) }
     }
 
-    #[inline(always)]
-    fn end(&mut self, parent: &mut PartialJson, open: PartialJson, _: usize) -> Result<(), Fail> {
-        let (id, payload) = match open {
-            PartialJson::Root(_) => return internal("json.to_json: the root has no end"),
-            PartialJson::Array(items) => (self.json_ids.arr, self.b.list(items)),
-            PartialJson::Object(map) => (self.json_ids.obj, self.b.map(map)),
-            PartialJson::Fields(map, first_key) => {
-                if self.next_field_key(&map, first_key).is_some() {
-                    return internal("json.to_json: fewer members than field names");
-                }
-                (self.json_ids.obj, self.b.map(map))
-            }
+    /// Returns an array with room for `len` members.
+    fn partial_array(&mut self, len: usize, children: ContainerChildren<'a>) -> Result<PartialJson<'a>, Fail> {
+        Ok(PartialJson { children, members: PartialJsonMembers::Array(self.b.list_buffer(len)?) })
+    }
+
+    /// Returns the `Json` value of an array or object that has all its
+    /// members.
+    fn finish_container(&mut self, members: PartialJsonMembers<'a>) -> VmValue {
+        let (id, payload) = match members {
+            PartialJsonMembers::Root(json) => return json,
+            PartialJsonMembers::Array(items) => (self.ids.arr, self.b.list(items)),
+            PartialJsonMembers::Object(map, _) | PartialJsonMembers::Fields(map, _) => (self.ids.obj, self.b.map(map)),
         };
-        let value = self.b.st.new_variant(id, &[payload]);
-        self.put(parent, value)
+        self.json_variant(id, payload)
+    }
+
+    /// Makes `key`, which has the text `text`, the key of the next member of
+    /// the innermost object.
+    fn set_member_key(&mut self, key: VmValue, text: Cow<'a, str>) {
+        if let PartialJsonMembers::Object(_, next_key) = &mut self.innermost.members {
+            *next_key = Some((key, text));
+        }
+    }
+
+    /// Makes `json` the next member of the innermost array or object.
+    fn put_member(&mut self, json: VmValue) -> Result<(), Fail> {
+        match &mut self.innermost.members {
+            PartialJsonMembers::Root(root) => *root = json,
+            PartialJsonMembers::Array(items) => items.push(json),
+            PartialJsonMembers::Object(map, key) => {
+                let Some((key, text)) = key.take() else { return internal("json.to_json: a member without a key") };
+                let hash = self.b.hash(&text)?;
+                self.b.put(map, hash, Some(text), key, json)?;
+            }
+            PartialJsonMembers::Fields(map, next_key) => {
+                let Some(key) = self.field_keys.get(*next_key) else { return internal("json.to_json: a member without a field name") };
+                *next_key += 1;
+                self.b.meter.charge_bytes(key.name_len)?;
+                self.b.append(map, key.hash, key.name, json)?;
+            }
+        }
+        Ok(())
     }
 }
 

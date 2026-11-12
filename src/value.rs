@@ -2,11 +2,12 @@
 
 use crate::native::ty::Never;
 use crate::vm::bytecode::Program;
-use crate::vm::encode::{self, Container, EncodeSink, Leaf, OpaqueKind, Opened, Role};
+use crate::vm::container_children::{ChildRole, ContainerChildren, INLINE_OPEN_CONTAINERS, MAX_NESTING_DEPTH};
 use crate::vm::heap::Heap;
 use crate::vm::meter::{Meter, Scratch};
-use crate::vm::value::{FxHashMap, ValueRef, ValueType, VmValue};
-use crate::vm::{Fail, Vm, internal};
+use crate::vm::value::{FxHashMap, Obj, ValueRef, ValueType, VmValue};
+use crate::vm::{Fail, Vm, fail, internal};
+use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::mem::size_of;
@@ -447,18 +448,8 @@ encode_tuples! {
 
 /// Copies `value` out of the heap of `vm`. See [`Vm::to_value`].
 pub(crate) fn copy_from_vm(vm: &Vm, value: VmValue) -> Result<Value, Fail> {
-    let mut sink = ValueSink {
-        prog: &vm.prog,
-        heap: &vm.heap,
-        meter: &vm.meter,
-        allocated: 0,
-        scratch: Scratch::new(),
-        type_names: FxHashMap::default(),
-    };
-    match encode::walk(&vm.prog, &vm.heap, &vm.meter, &mut sink, PartialValue::Root(Value::Unit), value)? {
-        PartialValue::Root(value) => Ok(value),
-        _ => internal("to_value: the walk did not return the root"),
-    }
+    let (allocated, scratch, type_names) = (0, Scratch::new(), FxHashMap::default());
+    ValueCopier { prog: &vm.prog, heap: &vm.heap, meter: &vm.meter, allocated, scratch, type_names }.copy_value(value)
 }
 
 /// Returns the name of a type for a reader outside its module: `module.Name`,
@@ -487,8 +478,8 @@ pub(crate) fn qualified_name_module(rust_module: &str) -> Option<&str> {
     (rust_module != "prelude").then_some(rust_module)
 }
 
-/// The [`EncodeSink`] that builds a [`Value`].
-struct ValueSink<'h> {
+/// Copies a Sand value out of the VM heap into a [`Value`].
+struct ValueCopier<'h> {
     prog: &'h Program,
     heap: &'h Heap,
     meter: &'h Meter,
@@ -500,8 +491,16 @@ struct ValueSink<'h> {
     type_names: FxHashMap<(Option<&'static str>, &'static str), Arc<str>>,
 }
 
+/// A container that waits for its children.
+struct OpenContainer<'h> {
+    /// The Sand values that become the children.
+    children: ContainerChildren<'h>,
+    partial: PartialValue,
+}
+
 /// A [`Value`] that waits for its children.
 enum PartialValue {
+    /// The place of the value that the copy starts from.
     Root(Value),
     List(Vec<Value>),
     Tuple(Vec<Value>),
@@ -513,11 +512,135 @@ enum PartialValue {
     Variant(Arc<VariantDesc>, Vec<Value>),
 }
 
-impl ValueSink<'_> {
+impl<'h> ValueCopier<'h> {
+    /// Returns the copy of `root`. The copier charges one unit of fuel for
+    /// each value, except for a map key: a map entry costs one unit. It also
+    /// charges for the bytes that it copies.
+    fn copy_value(&mut self, root: VmValue) -> Result<Value, Fail> {
+        let (prog, heap) = (self.prog, self.heap);
+        // `root` is the one child of the first container.
+        let root = ContainerChildren::One(ChildRole::Item, Some(root));
+        let mut innermost = OpenContainer { children: root, partial: PartialValue::Root(Value::Unit) };
+        let mut parents = SmallVec::<[OpenContainer<'h>; INLINE_OPEN_CONTAINERS]>::new();
+        'next_value: loop {
+            let Some((role, v)) = innermost.children.next() else {
+                let Some(parent) = parents.pop() else { return Ok(innermost.partial.into_value()) };
+                let complete = std::mem::replace(&mut innermost, parent).partial;
+                innermost.partial.put_child(complete.into_value());
+                continue;
+            };
+            if !matches!(role, ChildRole::MapKey) {
+                self.meter.charge(1)?;
+            }
+            let copy = 'without_children: {
+                let container = match v {
+                    VmValue::Unit | VmValue::Uninit => break 'without_children Value::Unit,
+                    VmValue::Bool(b) => break 'without_children Value::Bool(b),
+                    VmValue::Int(i) => break 'without_children Value::Int(i),
+                    VmValue::Float(f) => break 'without_children Value::Float(f),
+                    VmValue::Dur(nanos) => break 'without_children Value::Duration(jiff::SignedDuration::from_nanos(nanos)),
+                    VmValue::Tag(id) => {
+                        break 'without_children Value::Variant(VariantValue { variant: self.variant_desc(id)?, payload: Box::default() });
+                    }
+                    VmValue::Pair(first, second) => {
+                        self.meter.charge(2)?;
+                        let mut ints = self.value_buffer(2)?;
+                        ints.extend([Value::Int(i64::from(first)), Value::Int(second)]);
+                        break 'without_children Value::Tuple(ints);
+                    }
+                    VmValue::Obj(_) => match heap.get(v) {
+                        Obj::Str(s) => break 'without_children self.copy_str(s)?,
+                        Obj::StrBuf(s) => break 'without_children self.copy_str(s)?,
+                        Obj::Bytes(bytes) => {
+                            self.reserve_copy(bytes.len(), 0)?;
+                            break 'without_children Value::Bytes(bytes.to_vec());
+                        }
+                        Obj::Range(start, end, inclusive) => {
+                            break 'without_children Value::Range { start: *start, end: *end, inclusive: *inclusive };
+                        }
+                        Obj::Value(native) => break 'without_children self.native_value(ValueRef::Boxed(&**native))?,
+                        Obj::Packed(ty, bits) => break 'without_children self.native_value(ValueRef::Packed(ty, *bits))?,
+                        Obj::Closure(..) | Obj::NativeFn(_) | Obj::IterFn(_) => break 'without_children self.opaque_value(None, "fn")?,
+                        Obj::Task(_) => break 'without_children self.opaque_value(None, "Task")?,
+                        Obj::Channel(_) => break 'without_children self.opaque_value(None, "Channel")?,
+                        Obj::Native(object) => {
+                            break 'without_children self.opaque_value(qualified_name_module(object.module_name()), object.type_name())?;
+                        }
+                        Obj::TypeDesc(_) | Obj::Cell(_) | Obj::Free(_) => {
+                            return internal("to_value: an internal heap object has no `Value` form");
+                        }
+                        Obj::List(items) => OpenContainer {
+                            children: ContainerChildren::Items(items.iter()),
+                            partial: PartialValue::List(self.value_buffer(items.len())?),
+                        },
+                        Obj::Tuple(items) => OpenContainer {
+                            children: ContainerChildren::Items(items.iter()),
+                            partial: PartialValue::Tuple(self.value_buffer(items.len())?),
+                        },
+                        Obj::Set(set) => OpenContainer {
+                            children: ContainerChildren::Set(set.entries.iter()),
+                            partial: PartialValue::Set(self.value_buffer(set.live)?),
+                        },
+                        Obj::Map(map) => {
+                            self.reserve(map.live.saturating_mul(size_of::<(Value, Value)>()))?;
+                            OpenContainer {
+                                children: ContainerChildren::Map(map.entries.iter(), None),
+                                partial: PartialValue::Map(Vec::with_capacity(map.live), false),
+                            }
+                        }
+                        Obj::Struct(def, values) => {
+                            let desc = prog.types[*def as usize].desc().clone();
+                            OpenContainer {
+                                children: ContainerChildren::Items(values.iter()),
+                                partial: PartialValue::Struct(desc, self.value_buffer(values.len())?),
+                            }
+                        }
+                        Obj::Variant(id, values) => {
+                            let desc = self.variant_desc(*id)?;
+                            OpenContainer {
+                                children: ContainerChildren::Items(values.iter()),
+                                partial: PartialValue::Variant(desc, self.value_buffer(values.len())?),
+                            }
+                        }
+                    },
+                    VmValue::VUnit(..)
+                    | VmValue::VBool(..)
+                    | VmValue::VInt(..)
+                    | VmValue::VFloat(..)
+                    | VmValue::VDur(..)
+                    | VmValue::VTag(..)
+                    | VmValue::VObj(..) => {
+                        let Some((id, payload)) = v.as_inline_variant() else { return internal("to_value: not an inline variant") };
+                        let desc = self.variant_desc(id)?;
+                        OpenContainer {
+                            children: ContainerChildren::One(ChildRole::Item, Some(payload)),
+                            partial: PartialValue::Variant(desc, self.value_buffer(1)?),
+                        }
+                    }
+                };
+                if parents.len() >= MAX_NESTING_DEPTH {
+                    return fail("limit", "value too deeply nested to copy");
+                }
+                parents.push(std::mem::replace(&mut innermost, container));
+                continue 'next_value;
+            };
+            innermost.partial.put_child(copy);
+        }
+    }
+
+    /// Returns an empty buffer with room for `len` values, after it counts
+    /// the buffer against the memory limit.
+    #[inline]
+    fn value_buffer(&mut self, len: usize) -> Result<Vec<Value>, Fail> {
+        self.reserve(len.saturating_mul(size_of::<Value>()))?;
+        Ok(Vec::with_capacity(len))
+    }
+
     /// Counts `bytes` of new Rust memory against the memory limit. Call this
     /// function before each allocation for the copy, except for a native
     /// value: only the value itself gives its size, so the copy counts it
     /// right after the value exists.
+    #[inline]
     fn reserve(&mut self, bytes: usize) -> Result<(), Fail> {
         self.allocated = self.allocated.saturating_add(bytes);
         self.scratch.check(self.heap, self.allocated)
@@ -526,14 +649,16 @@ impl ValueSink<'_> {
     /// Charges fuel for a copy of `content` bytes of text, and counts the
     /// copy and `header` more bytes of new Rust memory against the memory
     /// limit. The fuel does not depend on the pointer width of the host.
+    #[inline]
     fn reserve_copy(&mut self, content: usize, header: usize) -> Result<(), Fail> {
         self.meter.charge_bytes(content)?;
         self.reserve(content.saturating_add(header))
     }
 
-    fn items(&mut self, len: usize) -> Result<Vec<Value>, Fail> {
-        self.reserve(len.saturating_mul(size_of::<Value>()))?;
-        Ok(Vec::with_capacity(len))
+    /// Returns a `Value::Str` with a copy of `text`.
+    fn copy_str(&mut self, text: &str) -> Result<Value, Fail> {
+        self.reserve_copy(text.len(), 0)?;
+        Ok(Value::Str(text.to_string()))
     }
 
     /// Returns the shared name of the type `name` of `module`, which Rust
@@ -558,101 +683,54 @@ impl ValueSink<'_> {
         }
     }
 
-    fn native(&mut self, native: ValueRef<'_>) -> Result<Value, Fail> {
+    /// Returns the copy of the native value `native`: its type name and its
+    /// text.
+    fn native_value(&mut self, native: ValueRef<'_>) -> Result<Value, Fail> {
         let text = native.text();
         self.reserve_copy(text.len(), size_of::<NativeValue>())?;
         let type_name = self.type_name(qualified_name_module(native.module_name()), native.type_name())?;
         Ok(Value::Native(Box::new(NativeValue { type_name, text })))
     }
 
-    fn opaque(&mut self, kind: OpaqueKind) -> Result<Value, Fail> {
-        let type_name = match kind {
-            OpaqueKind::Function => self.type_name(None, "fn")?,
-            OpaqueKind::Task => self.type_name(None, "Task")?,
-            OpaqueKind::Channel => self.type_name(None, "Channel")?,
-            OpaqueKind::Object { module, name } => self.type_name(qualified_name_module(module), name)?,
-            OpaqueKind::Internal => return internal("to_value: an internal heap object has no `Value` form"),
-        };
-        Ok(Value::Opaque { type_name })
+    /// Returns the opaque value of a value whose type, `name` of `module`,
+    /// does not implement `Encode`.
+    fn opaque_value(&mut self, module: Option<&'static str>, name: &'static str) -> Result<Value, Fail> {
+        Ok(Value::Opaque { type_name: self.type_name(module, name)? })
     }
 }
 
-fn put(parent: &mut PartialValue, value: Value) {
-    match parent {
-        PartialValue::Root(root) => *root = value,
-        PartialValue::List(items)
-        | PartialValue::Tuple(items)
-        | PartialValue::Set(items)
-        | PartialValue::Struct(_, items)
-        | PartialValue::Variant(_, items) => items.push(value),
-        PartialValue::Map(entries, has_key) => {
-            match entries.last_mut() {
-                Some(entry) if *has_key => entry.1 = value,
-                _ => entries.push((value, Value::Unit)),
+impl PartialValue {
+    /// Makes `value` the next child.
+    #[inline]
+    fn put_child(&mut self, value: Value) {
+        match self {
+            PartialValue::Root(root) => *root = value,
+            PartialValue::List(items)
+            | PartialValue::Tuple(items)
+            | PartialValue::Set(items)
+            | PartialValue::Struct(_, items)
+            | PartialValue::Variant(_, items) => items.push(value),
+            PartialValue::Map(entries, has_key) => {
+                match entries.last_mut() {
+                    Some(entry) if *has_key => entry.1 = value,
+                    _ => entries.push((value, Value::Unit)),
+                }
+                *has_key = !*has_key;
             }
-            *has_key = !*has_key;
         }
     }
-}
 
-impl<'h> EncodeSink<'h> for ValueSink<'h> {
-    type Open = PartialValue;
-
-    const TOO_DEEP: &'static str = "value too deeply nested to copy";
-
-    #[inline(always)]
-    fn leaf(&mut self, parent: &mut PartialValue, _: Role<'h>, leaf: Leaf<'h>) -> Result<(), Fail> {
-        let value = match leaf {
-            Leaf::Unit => Value::Unit,
-            Leaf::Bool(b) => Value::Bool(b),
-            Leaf::Int(i) => Value::Int(i),
-            Leaf::Float(f) => Value::Float(f),
-            Leaf::Duration(nanos) => Value::Duration(jiff::SignedDuration::from_nanos(nanos)),
-            Leaf::Str { text, .. } => {
-                self.reserve_copy(text.len(), 0)?;
-                Value::Str(text.to_string())
-            }
-            Leaf::Bytes(bytes) => {
-                self.reserve_copy(bytes.len(), 0)?;
-                Value::Bytes(bytes.to_vec())
-            }
-            Leaf::Range { start, end, inclusive } => Value::Range { start, end, inclusive },
-            Leaf::Tag(variant) => Value::Variant(VariantValue { variant: self.variant_desc(variant.id)?, payload: Box::default() }),
-            Leaf::Native(native) => self.native(native)?,
-            Leaf::Opaque { kind, .. } => self.opaque(kind)?,
-        };
-        put(parent, value);
-        Ok(())
-    }
-
-    #[inline(always)]
-    fn open(&mut self, _: &mut PartialValue, _: Role<'h>, container: Container<'h>, len: usize) -> Result<Opened<PartialValue>, Fail> {
-        Ok(Opened::Children(match container {
-            Container::List => PartialValue::List(self.items(len)?),
-            Container::Tuple => PartialValue::Tuple(self.items(len)?),
-            Container::Set => PartialValue::Set(self.items(len)?),
-            Container::Map => {
-                self.reserve(len.saturating_mul(size_of::<(Value, Value)>()))?;
-                PartialValue::Map(Vec::with_capacity(len), false)
-            }
-            Container::Struct { ty, .. } => PartialValue::Struct(ty.desc().clone(), self.items(len)?),
-            Container::Variant(variant) => PartialValue::Variant(self.variant_desc(variant.id)?, self.items(len)?),
-        }))
-    }
-
-    #[inline(always)]
-    fn close(&mut self, parent: &mut PartialValue, open: PartialValue) -> Result<(), Fail> {
-        let value = match open {
-            PartialValue::Root(_) => return internal("to_value: the walk closed the root"),
+    /// Returns the value, which has all its children.
+    fn into_value(self) -> Value {
+        match self {
+            PartialValue::Root(root) => root,
             PartialValue::List(items) => Value::List(items),
             PartialValue::Tuple(items) => Value::Tuple(items),
             PartialValue::Set(items) => Value::Set(items),
             PartialValue::Map(entries, _) => Value::Map(entries),
             PartialValue::Struct(ty, fields) => Value::Struct(StructValue { ty, fields: fields.into_boxed_slice() }),
             PartialValue::Variant(variant, payload) => Value::Variant(VariantValue { variant, payload: payload.into_boxed_slice() }),
-        };
-        put(parent, value);
-        Ok(())
+        }
     }
 }
 

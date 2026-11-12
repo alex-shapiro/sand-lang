@@ -2,8 +2,8 @@
 
 pub mod bytecode;
 pub mod compare;
+pub(crate) mod container_children;
 pub mod display;
-pub(crate) mod encode;
 pub mod heap;
 mod interp;
 pub mod iomem;
