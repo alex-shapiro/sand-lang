@@ -3,7 +3,7 @@ name = "sandlang-site"
 description = "Static site generator and local server for sandlang.com"
 version.workspace = true
 edition.workspace = true
-license = "MIT OR Apache-2.0"
+license.workspace = true
 publish = false
 
 [[bin]]

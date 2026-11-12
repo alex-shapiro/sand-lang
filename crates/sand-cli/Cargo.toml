@@ -3,7 +3,7 @@ name = "sand-cli"
 description = "The `sand` CLI: runner, type checker, linter, formatter, test runner, and REPL"
 version.workspace = true
 edition.workspace = true
-license = "MIT OR Apache-2.0"
+license.workspace = true
 publish = false
 
 [[bin]]

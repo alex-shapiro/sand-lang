@@ -3,7 +3,7 @@ name = "sandlang-wasm"
 description = "JavaScript bindings for Sand"
 version.workspace = true
 edition.workspace = true
-license = "MIT OR Apache-2.0"
+license.workspace = true
 publish = false
 
 [lib]
