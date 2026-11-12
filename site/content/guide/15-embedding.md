@@ -27,7 +27,7 @@ async fn main() {
 
 The first argument to `run_source` is the file name shown in diagnostics and stack traces. Use `Engine::run_file` to load a script from disk instead. If compilation or execution fails, `err.render()` formats the error with source snippets and stack traces.
 
-Each `Engine` has independent state and implements `Send`. A single process can run many engines concurrently across threads or tasks.
+Each `Engine` has its own state. You can run many engines at the same time across threads or tasks.
 
 To run the same script many times, compile it once with `Engine::compile_source` or `Engine::compile_file`. Pass the resulting `CompiledProgram` to `Engine::run_program`. Each run starts with fresh globals:
 
@@ -46,7 +46,7 @@ for _ in 0..3 {
 
 ## Configuration
 
-By default, `Config::new()` uses `RulePolicy::standard()`. This policy allows scripts to write to `stdout` and `stderr` and denies all other capabilities. Use builder methods on `Config` to grant permissions, set resource limits, and replace host I/O with in-memory files and streams:
+By default, `Config::new()` allows scripts to write to `stdout` and `stderr` and denies all other capabilities. Use builder methods on `Config` to grant permissions, set resource limits, and replace host I/O with in-memory files and streams:
 
 ```rust
 # #[tokio::main(flavor = "current_thread")]
@@ -86,7 +86,7 @@ let report = files.read("/out/report.txt")?;
 # }
 ```
 
-- **Policies.** `RulePolicy` provides `allow_`, `deny_`, and `prompt_` builder methods for each capability in [Sandbox and policies](/guide/sandbox/). `RulePolicy::allow_all()` allows all capabilities for trusted scripts.
+- **Policies.** `RulePolicy::standard()` allows `stdout` and `stderr`. Chain `allow_` and `deny_` methods for each capability in [Sandbox and policies](/guide/sandbox/). Use `RulePolicy::allow_all()` for trusted scripts.
 - **Limits.** `Limits` configures the resource bounds described in [Sandbox and policies](/guide/sandbox/#resource-limits).
 - **Virtual file system.** `Config::memory_fs` replaces host disk access with an in-memory `MemFs`. Clones of a `MemFs` share storage. Populate input files before a run and read output files afterward.
 - **Streams and environment.** `Config::stdout` and `Config::stderr` redirect script output to a `MemorySink`. `Config::stdin_bytes` supplies fixed input bytes. `Config::args` and `Config::env` set the command-line arguments and environment variables exposed by the `env` module.
@@ -167,7 +167,7 @@ A function that returns `Result<T, HostError>`, `Result<T, std::io::Error>`, or 
 
 ### Custom types
 
-Derive `SandStruct` or `SandEnum` to copy structured values between Rust and Sand. Set the target module with `#[sand(module = "...")]` and register the type with `NativeModule::bind`. Registering a function as `"Type.name"` defines a method on `Type`:
+Derive `SandStruct` to copy a Rust struct between Rust and Sand. Set the module name with `#[sand(module = "...")]` and register the type with `NativeModule::bind`. Registering a function as `"Type.name"` defines a method on `Type`:
 
 ```rust
 use sandlang::SandStruct;
@@ -190,7 +190,7 @@ geo.function("Point.norm", |p: Point| (p.x * p.x + p.y * p.y).sqrt());
 
 Struct fields are public and immutable by default. Add `#[sand(default)]` to give a field a default value.
 
-`SandEnum` maps unit, tuple, and struct variants to a Sand `enum`:
+Derive `SandEnum` to map unit, tuple, and struct variants to a Sand `enum`:
 
 ```rust
 use sandlang::SandEnum;
@@ -214,7 +214,7 @@ geo.function("area", |s: Shape| match s {
 });
 ```
 
-Derive `SandObject` and implement `NativeObject` to pass an opaque handle to a Rust value instead of copying it. Registered functions borrow an object parameter as `&T` and return a new object by value as `T`:
+Derive `SandObject` and implement `NativeObject` to pass an opaque handle to a Rust value instead of copying it. Registered functions borrow an object parameter as `&T`. They return a new object by value as `T`:
 
 ```rust
 use sandlang::SandObject;
@@ -328,4 +328,4 @@ const result = await engine.run(
 console.log(result.ok, result.exitCode);
 ```
 
-Run `Engine` inside a Web Worker so that CPU-intensive scripts do not block the browser UI thread. For the complete Rust embedding reference, see [§16 of the specification](/spec/#16-embedding-api-rust).
+Run `Engine` inside a Web Worker to keep the browser UI thread responsive. For the complete Rust embedding reference, see [§16 of the specification](/spec/#16-embedding-api-rust).
