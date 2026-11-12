@@ -4345,7 +4345,7 @@ fn to_value_names_structs_variants_and_native_value_types() {
          host.copy(json.Json.Null)\nhost.copy(json.Json.Arr([json.Json.Int(1)]))\nhost.copy(bank.cents(1250))\nhost.copy(bank.cell(2, 3))\n",
     );
     let str_ = |s: &str| Value::Str(s.into());
-    let variant = |enum_name: &str, name: &str, payload: Vec<Value>| Value::Variant(VariantValue::new(enum_name, name, payload));
+    let variant = |type_name: &str, name: &str, payload: Vec<Value>| Value::Variant(VariantValue::new(type_name, name, payload));
     let (some, none) = (|value| variant("Option", "Some", vec![value]), || variant("Option", "None", vec![]));
     let order = |id, note| Value::Struct(StructValue::new("main.Order", [("id", Value::Int(id)), ("note", note)]));
     let native = |type_name: &str, text: &str| Value::Native(Box::new(NativeValue { type_name: type_name.into(), text: text.into() }));
@@ -4644,7 +4644,7 @@ fn encode_of_a_derived_type_equals_its_copy_out_of_the_vm() {
     r.unwrap();
     let encoded = purchase.encode();
     let Value::Struct(fields) = &encoded else { panic!("{encoded:?}") };
-    assert_eq!(fields.ty.name, "shop.Purchase");
+    assert_eq!(fields.ty.type_name, "shop.Purchase");
     assert_eq!(copies, [encoded]);
     let encoded = &copies[0];
     assert_eq!(vec![&purchase].encode(), Value::List(vec![encoded.clone()]));

@@ -101,7 +101,7 @@ pub struct StructDesc {
     /// type from the main script is the file stem of the script, such as
     /// `main.Order` for a type of `main.sand`, so a script can declare a type
     /// whose name equals the name of a host type.
-    pub name: String,
+    pub type_name: String,
     /// The field names in declaration order.
     pub fields: Vec<String>,
 }
@@ -119,9 +119,9 @@ pub struct VariantValue {
 /// One variant of an enum type. All values of the variant share it.
 #[derive(Debug, PartialEq, Eq)]
 pub struct VariantDesc {
-    /// The module-qualified enum name, such as `shop.Status`. The name is a
-    /// label, as [`StructDesc::name`] describes.
-    pub enum_name: String,
+    /// The module-qualified name of the enum, such as `shop.Status`. The
+    /// name is a label, as [`StructDesc::type_name`] describes.
+    pub type_name: String,
     /// The variant name, such as `Shipped`.
     pub name: String,
     /// The names of the payload fields, or `None` for a positional payload.
@@ -129,25 +129,25 @@ pub struct VariantDesc {
 }
 
 impl StructDesc {
-    /// Returns the description of the struct type `name` with the fields
-    /// `fields`.
-    pub fn new(name: impl Into<String>, fields: impl IntoIterator<Item = impl Into<String>>) -> Arc<StructDesc> {
-        Arc::new(StructDesc { name: name.into(), fields: fields.into_iter().map(Into::into).collect() })
+    /// Returns the description of the struct type `type_name` with the
+    /// fields `fields`.
+    pub fn new(type_name: impl Into<String>, fields: impl IntoIterator<Item = impl Into<String>>) -> Arc<StructDesc> {
+        Arc::new(StructDesc { type_name: type_name.into(), fields: fields.into_iter().map(Into::into).collect() })
     }
 }
 
 impl StructValue {
-    /// Returns a value of the struct type `name` with `fields`, each a field
-    /// name and its value, in declaration order.
+    /// Returns a value of the struct type `type_name` with `fields`, each a
+    /// field name and its value, in declaration order.
     ///
     /// ```
     /// # use sandlang::value::{StructValue, Value};
     /// let order = StructValue::new("shop.Order", [("id", Value::Int(1))]);
     /// assert_eq!(order.field("id"), Some(&Value::Int(1)));
     /// ```
-    pub fn new<N: Into<String>>(name: impl Into<String>, fields: impl IntoIterator<Item = (N, Value)>) -> StructValue {
+    pub fn new<N: Into<String>>(type_name: impl Into<String>, fields: impl IntoIterator<Item = (N, Value)>) -> StructValue {
         let (names, values): (Vec<String>, Vec<Value>) = fields.into_iter().map(|(n, v)| (n.into(), v)).unzip();
-        StructValue { ty: StructDesc::new(name, names), fields: values.into() }
+        StructValue { ty: StructDesc::new(type_name, names), fields: values.into() }
     }
 
     /// Returns the value of the field `name`, or `None` if the struct has no
@@ -163,40 +163,40 @@ impl StructValue {
 }
 
 impl VariantDesc {
-    /// Returns the description of the variant `name` of the enum `enum_name`,
+    /// Returns the description of the variant `name` of the enum `type_name`,
     /// with a positional payload or none.
-    pub fn new(enum_name: impl Into<String>, name: impl Into<String>) -> Arc<VariantDesc> {
-        Arc::new(VariantDesc { enum_name: enum_name.into(), name: name.into(), fields: None })
+    pub fn new(type_name: impl Into<String>, name: impl Into<String>) -> Arc<VariantDesc> {
+        Arc::new(VariantDesc { type_name: type_name.into(), name: name.into(), fields: None })
     }
 
-    /// Returns the description of the variant `name` of the enum `enum_name`,
+    /// Returns the description of the variant `name` of the enum `type_name`,
     /// with the named payload fields `fields`.
     pub fn with_fields(
-        enum_name: impl Into<String>,
+        type_name: impl Into<String>,
         name: impl Into<String>,
         fields: impl IntoIterator<Item = impl Into<String>>,
     ) -> Arc<VariantDesc> {
         let fields = Some(fields.into_iter().map(Into::into).collect());
-        Arc::new(VariantDesc { enum_name: enum_name.into(), name: name.into(), fields })
+        Arc::new(VariantDesc { type_name: type_name.into(), name: name.into(), fields })
     }
 }
 
 impl VariantValue {
-    /// Returns the variant `name` of the enum `enum_name` with the positional
+    /// Returns the variant `name` of the enum `type_name` with the positional
     /// payload `payload`. An empty payload gives a variant without a payload.
-    pub fn new(enum_name: impl Into<String>, name: impl Into<String>, payload: impl IntoIterator<Item = Value>) -> VariantValue {
-        VariantValue { variant: VariantDesc::new(enum_name, name), payload: payload.into_iter().collect() }
+    pub fn new(type_name: impl Into<String>, name: impl Into<String>, payload: impl IntoIterator<Item = Value>) -> VariantValue {
+        VariantValue { variant: VariantDesc::new(type_name, name), payload: payload.into_iter().collect() }
     }
 
-    /// Returns the variant `name` of the enum `enum_name` with the named
+    /// Returns the variant `name` of the enum `type_name` with the named
     /// payload `fields`, each a field name and its value.
     pub fn with_fields<N: Into<String>>(
-        enum_name: impl Into<String>,
+        type_name: impl Into<String>,
         name: impl Into<String>,
         fields: impl IntoIterator<Item = (N, Value)>,
     ) -> VariantValue {
         let (names, payload): (Vec<String>, Vec<Value>) = fields.into_iter().map(|(n, v)| (n.into(), v)).unzip();
-        VariantValue { variant: VariantDesc::with_fields(enum_name, name, names), payload: payload.into() }
+        VariantValue { variant: VariantDesc::with_fields(type_name, name, names), payload: payload.into() }
     }
 
     /// Returns the value of the named payload field `name`, or `None` if the
@@ -305,13 +305,13 @@ impl fmt::Debug for Value {
 
 impl fmt::Debug for StructValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        debug_named_fields(f.debug_struct(&self.ty.name), &self.ty.fields, &self.fields)
+        debug_named_fields(f.debug_struct(&self.ty.type_name), &self.ty.fields, &self.fields)
     }
 }
 
 impl fmt::Debug for VariantValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.variant.enum_name)?;
+        f.write_str(&self.variant.type_name)?;
         f.write_str(".")?;
         match &self.variant.fields {
             Some(names) => debug_named_fields(f.debug_struct(&self.variant.name), names, &self.payload),
@@ -353,7 +353,7 @@ fn debug_named_fields(mut out: fmt::DebugStruct<'_, '_>, names: &[String], value
 /// }
 ///
 /// let Value::Struct(point) = Point { x: 1.0, y: 2.0 }.encode() else { unreachable!() };
-/// assert_eq!(point.ty.name, "geo.Point");
+/// assert_eq!(point.ty.type_name, "geo.Point");
 /// assert_eq!(point.field("y"), Some(&Value::Float(2.0)));
 /// ```
 ///

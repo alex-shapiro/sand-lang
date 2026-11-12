@@ -2471,10 +2471,10 @@ reference the VM, so it remains valid after the run ends. `Value` is
 | part whose type does not implement the Sand trait `Encode` | `Opaque { type_name }`                                             |
 
 A struct holds an `Arc<StructDesc>` with the type name and the field names. A
-variant holds an `Arc<VariantDesc>` with the enum name, the variant name, and
-the payload field names, or `None` for a positional payload. A variant without
-a payload has an empty payload. All values of a type in one copy share one
-description. All values that `encode` returns for one derived type, or one
+variant holds an `Arc<VariantDesc>` with the type name of the enum, the
+variant name, and the payload field names, or `None` for a positional payload.
+A variant without a payload has an empty payload. All values of a type in one
+copy share one description. All values that `encode` returns for one derived type, or one
 variant of a derived enum, share one description. `StructValue::field` and
 `VariantValue::field` return a value by its field name. `StructValue::new`
 and `VariantValue::with_fields` make a value from pairs of a field name and a

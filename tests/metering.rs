@@ -1311,7 +1311,7 @@ fn to_value_takes_each_type_description_from_the_program() {
     assert_eq!(out, "(true, true)\n");
     let copies = copies.lock().unwrap();
     let (Value::Struct(first), Value::Struct(second)) = (&copies[1], &copies[4]) else { panic!("{copies:?}") };
-    assert!(Arc::ptr_eq(&first.ty, &second.ty) && first.ty.name == format!("main.{long}"));
+    assert!(Arc::ptr_eq(&first.ty, &second.ty) && first.ty.type_name == format!("main.{long}"));
     let (Value::Variant(first), Value::Variant(second)) = (&copies[3], &copies[5]) else { panic!("{copies:?}") };
     assert!(Arc::ptr_eq(&first.variant, &second.variant) && first.variant.fields.as_deref() == Some(&[long][..]));
 }

@@ -345,7 +345,7 @@ let mut audit = NativeModule::new("audit");
 audit.source("pub native fn record<T>(event: T)");
 audit.function("record", |vm: &mut Vm, event: Param<0>| -> Result<(), Fail> {
     if let Value::Struct(event) = vm.to_value(event.raw())? {
-        println!("{} with {} fields", event.ty.name, event.fields.len());
+        println!("{} with {} fields", event.ty.type_name, event.fields.len());
     }
     Ok(())
 });
@@ -366,7 +366,7 @@ struct Point {
 }
 
 let Value::Struct(point) = Point { x: 1.0, y: 2.0 }.encode() else { unreachable!() };
-assert_eq!(point.ty.name, "geo.Point");
+assert_eq!(point.ty.type_name, "geo.Point");
 assert_eq!(point.field("x"), Some(&Value::Float(1.0)));
 ```
 

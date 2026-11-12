@@ -1244,7 +1244,7 @@ impl StructRt {
     /// Returns the description of the struct type that each
     /// [`Value`](crate::value::Value) of the type shares.
     pub(crate) fn desc(&self) -> &Arc<StructDesc> {
-        self.desc.get_or_init(|| Arc::new(StructDesc { name: self.qualified_name(), fields: self.fields.clone() }))
+        self.desc.get_or_init(|| Arc::new(StructDesc { type_name: self.qualified_name(), fields: self.fields.clone() }))
     }
 }
 
@@ -1308,7 +1308,7 @@ impl Program {
     pub(crate) fn variant_desc(&self, id: u32) -> Option<&Arc<VariantDesc>> {
         let variant = self.variants.get(id as usize)?;
         let ty = self.types.get(variant.def as usize)?;
-        let desc = || VariantDesc { enum_name: ty.qualified_name(), name: variant.name.clone(), fields: variant.field_names.clone() };
+        let desc = || VariantDesc { type_name: ty.qualified_name(), name: variant.name.clone(), fields: variant.field_names.clone() };
         Some(variant.desc.get_or_init(|| Arc::new(desc())))
     }
 }
