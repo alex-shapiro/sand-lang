@@ -182,28 +182,28 @@ Running the script above prints `5.0` and `Err(Error(message: "unknown country X
 
 Sand infers the Sand function signature from the Rust parameter and return types:
 
-| Rust type                                                    | Sand type                    |
-| ------------------------------------------------------------ | ---------------------------- |
-| `i64`, `f64`, `bool`, `()`                                   | `int`, `float`, `bool`, `()` |
-| `String`, `&str`                                             | `str`                        |
-| `Vec<u8>`, `&[u8]`                                           | `bytes`                      |
-| `Vec<T>`                                                     | `[T]`                        |
-| `Option<T>`                                                  | `T?`                         |
-| `Box<T>`                                                     | `T`                          |
-| `Result<T, E>`                                               | `Result<T, Error>`           |
-| `HashMap<K, V>`, `BTreeMap<K, V>`, `IndexMap<K, V>`          | `[K: V]`                     |
-| `HashSet<T>`, `BTreeSet<T>`                                  | `Set<T>`                     |
-| `jiff::SignedDuration`                                       | `duration`                   |
-| `jiff::Timestamp`                                            | `time.Instant`               |
-| `jiff::civil::DateTime`                                      | `time.PlainDateTime`         |
-| `jiff::civil::Date`                                          | `time.PlainDate`             |
-| `jiff::civil::Time`                                          | `time.PlainTime`             |
-| `sandlang::stdlib::json::Json`                               | `json.Json`                  |
-| tuples of up to 8 elements                                   | tuples                       |
-| Rust enum with `#[derive(SandEnum)]`                         | matching Sand `enum`         |
-| Rust struct with `#[derive(SandStruct)]`                     | matching Sand `struct`       |
-| `&T` parameter or `T` return with `#[derive(SandObject)]`    | opaque type `T`              |
-| `ValueType` `T` with `#[derive(SandValue)]`                  | opaque value type `T`        |
+| Rust type                                                 | Sand type                    |
+| --------------------------------------------------------- | ---------------------------- |
+| `i64`, `f64`, `bool`, `()`                                | `int`, `float`, `bool`, `()` |
+| `String`, `&str`                                          | `str`                        |
+| `Vec<u8>`, `&[u8]`                                        | `bytes`                      |
+| `Vec<T>`                                                  | `[T]`                        |
+| `Option<T>`                                               | `T?`                         |
+| `Box<T>`                                                  | `T`                          |
+| `Result<T, E>`                                            | `Result<T, Error>`           |
+| `HashMap<K, V>`, `BTreeMap<K, V>`, `IndexMap<K, V>`       | `[K: V]`                     |
+| `HashSet<T>`, `BTreeSet<T>`                               | `Set<T>`                     |
+| `jiff::SignedDuration`                                    | `duration`                   |
+| `jiff::Timestamp`                                         | `time.Instant`               |
+| `jiff::civil::DateTime`                                   | `time.PlainDateTime`         |
+| `jiff::civil::Date`                                       | `time.PlainDate`             |
+| `jiff::civil::Time`                                       | `time.PlainTime`             |
+| `sandlang::stdlib::json::Json`                            | `json.Json`                  |
+| tuples of up to 8 elements                                | tuples                       |
+| Rust enum with `#[derive(SandEnum)]`                      | matching Sand `enum`         |
+| Rust struct with `#[derive(SandStruct)]`                  | matching Sand `struct`       |
+| `&T` parameter or `T` return with `#[derive(SandObject)]` | opaque type `T`              |
+| `ValueType` `T` with `#[derive(SandValue)]`               | opaque value type `T`        |
 
 Add `indexmap` 2 or `jiff` 0.2 to `Cargo.toml` to use `IndexMap` or the `jiff` types directly. `sandlang::stdlib::time` defines the remaining `time` types.
 
