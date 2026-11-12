@@ -27,7 +27,7 @@ async fn main() {
 
 Use `Engine::run_file` to load a script from disk instead. If compilation or execution fails, `err.render()` formats the error with source snippets and stack traces.
 
-Each `Engine` has its own state. You can run many engines at the same time across threads or tasks.
+Each `Engine` runs independently. You can run multiple engines in parallel across threads or tasks.
 
 To run the same script many times, compile it once with `Engine::compile_source` or `Engine::compile_file`. Pass the resulting `CompiledProgram` to `Engine::run_program`. Each run starts with fresh globals:
 
@@ -86,10 +86,7 @@ let report = files.read("/out/report.txt")?;
 # }
 ```
 
-- **Policies.** `RulePolicy::standard()` allows `stdout` and `stderr`. Chain `allow_` and `deny_` methods for each capability in [Sandbox and policies](/guide/sandbox/). Use `RulePolicy::allow_all()` for trusted scripts.
-- **Limits.** `Limits` configures the resource bounds described in [Sandbox and policies](/guide/sandbox/#resource-limits).
-- **Virtual file system.** `Config::memory_fs` replaces host disk access with an in-memory `MemFs`. Clones of a `MemFs` share storage. Populate input files before a run and read output files afterward.
-- **Streams and environment.** `Config::stdout` and `Config::stderr` redirect script output to a `MemorySink`. `Config::stdin_bytes` supplies fixed input bytes. `Config::args` and `Config::env` set the command-line arguments and environment variables exposed by the `env` module.
+The full set of capabilities and limits can be found in [Sandbox and policies](/guide/sandbox/).
 
 You can also load rules and limits from a `.policy` file with `PolicyFile::parse`:
 
@@ -108,11 +105,9 @@ let config = Config::new().policy(file.rules.with_defaults(RulePolicy::standard(
 # }
 ```
 
-The second argument to `PolicyFile::parse` sets the base directory for `./` paths. The third argument sets an optional home directory for `~/` paths. Calling `with_defaults(RulePolicy::standard())` allows `stdout` and `stderr` unless a rule in the file overrides them.
-
 ## Native modules
 
-`NativeModule` exposes Rust functions and types to Sand scripts as an importable module. Compile native modules with `HostModules::new` and register them on a `Config` with `Config::host_modules`:
+Native modules expose Rust functions and types as Sand modules. The Sandlang standard library is a collection of native modules, and you can register your own:
 
 ```rust
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -135,7 +130,7 @@ let config = Config::new().host_modules(HostModules::new([geo])?);
 # }
 ```
 
-Clones of a `HostModules` share the compiled modules. Build `HostModules` once and pass clones to each `Config`. Scripts can then import and call the module:
+A Sand script can then import and call the module:
 
 ```sand ignore
 import geo
@@ -146,7 +141,7 @@ print(geo.country("XX"))
 
 Running the script above prints `5.0` and `Err(Error(message: "unknown country XX", kind: "not_found"))`.
 
-Sand infers each function's signature from its Rust parameter and return types:
+Native function signatures are inferred from their Rust parameter and return types:
 
 | Rust type                                                 | Sand type                    |
 | --------------------------------------------------------- | ---------------------------- |
@@ -163,11 +158,11 @@ Sand infers each function's signature from its Rust parameter and return types:
 | Rust enum with `#[derive(SandEnum)]`                      | matching Sand `enum`         |
 | `&T` parameter or `T` return with `#[derive(SandObject)]` | opaque type `T`              |
 
-A function that returns `Result<T, HostError>`, `Result<T, std::io::Error>`, or `Result<T, String>` returns a `Result<T, Error>` in Sand. `NativeModule::function` also accepts `async` functions. An `async` function suspends only the calling Sand task.
+A native function may be `async` as long as its parameter and return types are `Send`.
 
 ### Custom types
 
-Derive `SandStruct` to copy a Rust struct between Rust and Sand. Set the module name with `#[sand(module = "...")]` and register the type with `NativeModule::bind`. Registering a function as `"Type.name"` defines a method on `Type`:
+You can expose a Rust struct to Sand with the `SandStruct` macro. Set the struct's module name with `#[sand(module = "...")]` and register the type with `NativeModule::bind`. You can also register type methods:
 
 ```rust
 use sandlang::SandStruct;
@@ -214,7 +209,7 @@ geo.function("area", |s: Shape| match s {
 });
 ```
 
-Derive `SandObject` and implement `NativeObject` to pass an opaque handle to a Rust value instead of copying it. Registered functions borrow an object parameter as `&T`. They return a new object by value as `T`:
+To expose an opaque type to Sand, derive `SandObject` and implement `NativeObject`.
 
 ```rust
 use sandlang::SandObject;
@@ -269,7 +264,7 @@ Err(Error(message: "permission denied: door back", kind: "permission_denied"))
 
 ## Interactive sessions
 
-`Session::new` creates a stateful `Session` that evaluates inputs one at a time and keeps bindings across calls:
+`Session::new` creates an interactive, REPL-like `Session` that evaluates inputs one at a time and maintains state across calls:
 
 ```rust
 # #[tokio::main]
@@ -284,7 +279,7 @@ assert_eq!(session.eval("hit() + hit()").await?, Some("3".to_string()));
 # }
 ```
 
-`Session::eval` returns the formatted value of a trailing expression, or `None` for statements and declarations. Call `Session::reset` to clear all session state.
+`Session::eval` returns the formatted value of a trailing expression, or `None` for statements and declarations. Call `Session::reset` to clear session state.
 
 ## Interrupts
 
@@ -310,9 +305,7 @@ assert!(matches!(result, Err(Error::Interrupted)));
 
 ## WebAssembly
 
-Building `sandlang` with `default-features = false` disables the `os` feature. This removes all host OS dependencies and compiles to `wasm32-unknown-unknown` with an in-memory file system.
-
-The `sandlang-wasm` crate in `wasm/` wraps this build in a JavaScript API. Build the ES module bundle with `wasm/build.sh web OUT_DIR`:
+Run Sand as a WASM component with the `sandlang-wasm` crate, which wraps a WASM build in a JavaScript API:
 
 ```js
 import init, { Engine } from "./pkg/sandlang_wasm.js";
@@ -328,4 +321,4 @@ const result = await engine.run(
 console.log(result.ok, result.exitCode);
 ```
 
-Run `Engine` inside a Web Worker to keep the browser UI thread responsive. For the complete Rust embedding reference, see [§16 of the specification](/spec/#16-embedding-api-rust).
+Run an `Engine` inside a Web Worker to keep the browser UI thread responsive. For an example, see the code for the sandlang web playground. For a complete Rust embedding reference, see [§16 of the specification](/spec/#16-embedding-api-rust).
