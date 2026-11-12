@@ -88,10 +88,10 @@ The host cannot rely on engine limits, stability, or control.
       break paused runs.
 - [ ] ❓ _Testing._ Compare fuel across hash seeds in the spec suite. Add a test
       configuration option to set the hash seed.
-- [ ] ❓ _Testing._ Compare fuel between a 32-bit and a 64-bit target.
-      Cross-platform fuel determinism is currently verified only by review. Add
-      programs with pinned fuel totals that run on both a native target and
-      `wasm32`. Include a host function that calls `Vm::to_value`.
+- [ ] ❓ _Testing._ Compare fuel between a 32-bit and a 64-bit target. Only code
+      review currently verifies cross-platform fuel determinism. Add programs
+      with pinned fuel totals that run on both a native target and `wasm32`.
+      Include a host function that calls `Vm::to_value`.
 - [ ] ❓ _Embedding._ Convert derived `SandEnum` and `SandStruct` values iteratively with an
       explicit stack. The derived `FromVmValue` and `IntoVmValue` implementations
       recurse once per nesting level. Deep values can overflow a small host

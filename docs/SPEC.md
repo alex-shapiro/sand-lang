@@ -2220,9 +2220,8 @@ field private to the module, `#[sand(var)]` makes it mutable with `var`, and
 uses `<expr>`. The field default is the `Encode` form of the Rust value.
 `HostModules::new` requires that this value be a constant of the declared field
 type with at most 65,536 parts and 64 nesting levels. Constants can contain
-primitives, strings, byte arrays, durations, ranges, collections, structs, and
-enum variants. Native value types, such as `jiff::Timestamp`, cannot be field
-defaults.
+primitives, collections, structs, and enum variants. Native value types, such as
+`jiff::Timestamp`, cannot be field defaults.
 
 Recursive types can reference themselves through `Vec`, map, or `Box` fields.
 Because the engine copies each reachable struct and enum value during
@@ -2453,7 +2452,7 @@ from `sandlang::session::RESET_NOTE` to the error message and sets
 ### 16.7 Values outside the VM
 
 `sandlang::value::Value` is the Rust representation of a Sand value. A `Value`
-is independent of the VM and remains valid after a run ends. `Value` is marked
+is independent of the VM and remains valid after a run ends. `Value` has
 `#[non_exhaustive]`.
 
 | Sand value                             | `Value` variant                              |
@@ -2492,25 +2491,24 @@ prefix distinguishes script types from host types with the same base name.
 `None` if the type or text does not match.
 
 `Vm::to_value` copies a VM value into a `Value`. Any part whose type does not
-implement the Sand `Encode` trait, such as a function, task, channel, or native
-object, becomes `Value::Opaque`. For example, a struct with a function field
-becomes a `Value::Struct` with an `Opaque` field. The copy charges fuel and
-memory against the run limits. It fails with a `"limit"` error if nesting
-exceeds 512 levels, which includes cyclic values. Each `Some` wrapper adds a
-nesting level in `Vm::to_value`, whereas `json.encode` flattens `Some`. If the
-copy exceeds the memory limit, `Vm::to_value` returns a memory limit error. If a
-native function returns that error, the engine collects garbage and reruns the
-function from the start (§16.3). A native function must call `Vm::to_value`
-before performing any side effect.
+implement the Sand `Encode` trait, such as a function or a native object,
+becomes `Value::Opaque`. For example, a struct with a function field becomes a
+`Value::Struct` with an `Opaque` field. The copy charges fuel and memory against
+the run limits. It fails with a `"limit"` error if nesting exceeds 512 levels,
+which includes cyclic values. Each `Some` wrapper adds a nesting level in
+`Vm::to_value`, whereas `json.encode` flattens `Some`. If the copy exceeds the
+memory limit, `Vm::to_value` returns a memory limit error. If a native function
+returns that error, the engine collects garbage and reruns the function from the
+start (§16.3). A native function must call `Vm::to_value` before performing any
+side effect.
 
 `value::Encode` is the Rust counterpart of the Sand `Encode` trait. Its `encode`
-method converts a Rust value into a `Value`. It is implemented for primitives,
-strings, byte slices, collections, options, tuples of 2 to 8 elements,
-references, `Value`, and every `ValueType`. `encode` sorts the entries of a
-`HashMap` and the elements of a `HashSet`. For a derived `SandEnum` or
-`SandStruct`, `encode` produces the same `Value` as `Vm::to_value`. A manual
-`Encode` implementation for a type that also implements `IntoVmValue` must
-preserve this equality.
+method converts a Rust value into a `Value`. Standard Rust primitives,
+collections, tuples, `Value`, and every `ValueType` implement `Encode`. `encode`
+sorts the entries of a `HashMap` and the elements of a `HashSet`. For a derived
+`SandEnum` or `SandStruct`, `encode` produces the same `Value` as
+`Vm::to_value`. A manual `Encode` implementation for a type that also implements
+`IntoVmValue` must preserve this equality.
 
 ## 17. Tooling
 

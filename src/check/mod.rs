@@ -1721,8 +1721,8 @@ impl Checker {
         members
     }
 
-    /// Resolves field or payload types for a Rust-bound type after all types in
-    /// the module are declared. Returns any struct field defaults.
+    /// Resolves field or payload types for a Rust-bound type after the checker
+    /// declares all types in the module. Returns any struct field defaults.
     fn resolve_bound_members(&mut self, id: TypeDefId, members: BoundMembers) -> Option<RustFieldDefaults> {
         let span = self.types[id as usize].span;
         let qual = format!("{}.{}", self.name(self.types[id as usize].module_name), self.name(self.types[id as usize].name));

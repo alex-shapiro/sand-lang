@@ -1550,8 +1550,8 @@ impl<'v> JsonTextEncoder<'v> {
         }
     }
 
-    /// Returns `true` if the variant `id` encodes directly as its payload (`Some`
-    /// or a `Json` variant).
+    /// Returns `true` if `json.encode` writes the variant `id` as its payload.
+    /// This applies to `Some` and to `Json` variants.
     #[inline(always)]
     fn encodes_as_payload(&self, id: u32) -> bool {
         id == self.prog.ids.some || self.ids.contains(id)

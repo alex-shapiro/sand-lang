@@ -292,8 +292,8 @@ builds a Sand `Json` value, and `Vm::to_value` builds a `Value`.
   required about 300 extra lines and `#[inline(always)]` across two trait
   layers.
 - JSON-specific rules stay in the `json` module. These rules flatten `Some`,
-  write `None` as `null`, pass the `Json` enum through, convert map keys to
-  text, encode `bytes` as Base64, and format native value types as text.
+  pass the `Json` enum through, and format `bytes`, map keys, and native value
+  types as text.
 - A property test checks that `json.encode(json.to_json(x)) == json.encode(x)`.
 - A native value from the standard library or the host is a
   `Value::Native(Box<NativeValue>)`. `NativeValue` stores the module-qualified
@@ -310,9 +310,9 @@ builds a Sand `Json` value, and `Vm::to_value` builds a `Value`.
   `json.encode`. A cyclic value hits the depth limit. Exceeding a limit returns
   a limit error.
 - A benchmark verifies `json.encode` throughput.
-- `Vm::new_value` and `Heap::value` are renamed to `Vm::new_value_type` and
+- Rename `Vm::new_value` and `Heap::value` to `Vm::new_value_type` and
   `Heap::value_type`.
-- `IntoVmValue::to_const` is replaced by `value::Encode` and
+- Replace `IntoVmValue::to_const` with `value::Encode` and
   `Value::to_const_val`.
 
 Commit `03076c5` returned `Json`. That representation lost the distinction

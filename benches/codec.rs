@@ -40,8 +40,8 @@ fn make(n: int) -> Doc {
 /// A benchmark operation.
 struct Operation {
     name: &'static str,
-    /// Sand statements that initialize the inputs. `{n}` is replaced with the
-    /// user count.
+    /// Sand statements that initialize the inputs. `operation_source` replaces
+    /// `{n}` with the user count.
     inputs: &'static str,
     /// Sand closure of type `fn() -> int` that executes the operation.
     closure: &'static str,
