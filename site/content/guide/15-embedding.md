@@ -3,11 +3,11 @@ title = "Embedding"
 description = "Embed in a Rust application or web page."
 +++
 
-You can embed a Sand compiler and VM in a larger Rust application running natively or in a webassembly module.
+You can embed a Sand compiler and VM in a larger Rust application running natively or in a webassembly module. Each `Engine` runs independently, and you can run multiple engines in parallel across threads or tasks.
 
 ## Running a script
 
-`Engine::run_source` compiles and executes a script inside a future. It runs on any Tokio runtime with timers enabled:
+`Engine::run_source` compiles and executes a script. It runs in a Tokio runtime with timers enabled:
 
 ```rust
 use sandlang::engine::{Config, Engine, Error, Outcome};
@@ -25,11 +25,9 @@ async fn main() {
 }
 ```
 
-Use `Engine::run_file` to load a script from disk instead. If compilation or execution fails, `err.render()` formats the error with source snippets and stack traces.
+Call `Engine::run_file` to load a script from disk instead.
 
-Each `Engine` runs independently. You can run multiple engines in parallel across threads or tasks.
-
-To run the same script many times, compile it once with `Engine::compile_source` or `Engine::compile_file`. Pass the resulting `CompiledProgram` to `Engine::run_program`. Each run starts with fresh globals:
+To run a program many times, compile the source once with `Engine::compile_source` or `Engine::compile_file`, then pass the resulting `CompiledProgram` to `Engine::run_program`. Each run starts with fresh state:
 
 ```rust
 # #[tokio::main]
@@ -46,7 +44,7 @@ for _ in 0..3 {
 
 ## Configuration
 
-By default, `Config::new()` allows scripts to write to `stdout` and `stderr` and denies all other capabilities. Use builder methods on `Config` to grant permissions, set resource limits, and replace host I/O with in-memory files and streams:
+By default, `Config::new()` lets scripts write to `stdout` and `stderr` and denies all other capabilities. You can use builder methods to grant additional permissions, set resource limits, and replace host I/O. The full set of capabilities and limits is at [Sandbox and policies](/guide/sandbox/).
 
 ```rust
 # #[tokio::main]
@@ -86,8 +84,6 @@ let report = files.read("/out/report.txt")?;
 # }
 ```
 
-The full set of capabilities and limits can be found in [Sandbox and policies](/guide/sandbox/).
-
 You can also load rules and limits from a `.policy` file with `PolicyFile::parse`:
 
 ```rust no_run
@@ -107,7 +103,7 @@ let config = Config::new().policy(file.rules.with_defaults(RulePolicy::standard(
 
 ## Native modules
 
-Native modules expose Rust functions and types as Sand modules. The Sandlang standard library is a collection of native modules, and you can register your own:
+Native modules expose Rust functions and types as Sand modules. The standard library is a collection of native modules, and you can register your own:
 
 ```rust
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -130,7 +126,7 @@ let config = Config::new().host_modules(HostModules::new([geo])?);
 # }
 ```
 
-A Sand script can then import and call the module:
+A script can then import and call the module:
 
 ```sand ignore
 import geo
@@ -158,7 +154,7 @@ Native function signatures are inferred from their Rust parameter and return typ
 | Rust enum with `#[derive(SandEnum)]`                      | matching Sand `enum`         |
 | `&T` parameter or `T` return with `#[derive(SandObject)]` | opaque type `T`              |
 
-A native function may be `async` as long as its parameter and return types are `Send`.
+A native function may be `async` if its parameter and return types are `Send`.
 
 ### Custom types
 
