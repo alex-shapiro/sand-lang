@@ -11,7 +11,6 @@
 
 use crate::check::persist::{PHash, PVec};
 use crate::diag::Span;
-use crate::value::rust_type_module;
 use crate::vm::value::FxBuild;
 use std::fmt::Write as _;
 use std::hash::BuildHasher;
@@ -823,7 +822,7 @@ pub struct TypePrinter<'a> {
     /// (see [`param_placeholder`]).
     pub placeholder_params: bool,
     /// Writes each type with its module, such as `lab.Spot`, except a type of
-    /// the prelude.
+    /// the prelude, which is the module of `Option`.
     pub qualify_names: bool,
 }
 
@@ -971,8 +970,9 @@ impl Tagged<'_, '_> {
                     return;
                 }
                 let def = defs.get(d as usize);
-                if *qualify_names && let Some(module) = def.and_then(|d| rust_type_module(syms.str(d.module_name))) {
-                    s.push_str(module);
+                let in_prelude = |d: &TypeDef| defs.get(wk.option as usize).is_some_and(|o| o.module == d.module);
+                if *qualify_names && let Some(def) = def.filter(|d| !in_prelude(d)) {
+                    s.push_str(syms.str(def.module_name));
                     s.push('.');
                 }
                 s.push_str(def.map(|d| syms.str(d.name)).unwrap_or("?"));

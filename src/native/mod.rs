@@ -8,7 +8,7 @@ use crate::check::ModKind;
 use crate::engine::Registry;
 use crate::syntax::lexer::{is_ident, is_keyword};
 use crate::types::ValueTypeInfo;
-use crate::value::{StructDesc, StructValue, Value, VariantDesc, VariantValue, qualified_name, rust_type_module};
+use crate::value::{StructDesc, StructValue, Value, VariantDesc, VariantValue, qualified_name, qualified_name_module};
 use crate::vm::heap::Heap;
 use crate::vm::value::{ChannelObj, MapObj, Obj, SetObj, TaskObj, TypeDesc, ValueType, VmValue};
 use crate::vm::{Ctl, Fail, HostFn, NativeFn, Vm};
@@ -198,14 +198,15 @@ pub type VariantDescCell = OnceLock<Arc<VariantDesc>>;
 
 #[doc(hidden)]
 pub fn encode_struct<T: StructType>(ty: &StructDescCell, fields: impl IntoIterator<Item = Value>) -> Value {
-    let ty = ty.get_or_init(|| StructDesc::new(qualified_name(rust_type_module(T::MODULE), T::NAME), T::FIELDS.iter().map(|f| f.name)));
+    let ty =
+        ty.get_or_init(|| StructDesc::new(qualified_name(qualified_name_module(T::MODULE), T::NAME), T::FIELDS.iter().map(|f| f.name)));
     Value::Struct(StructValue { ty: ty.clone(), fields: fields.into_iter().collect() })
 }
 
 #[doc(hidden)]
 pub fn encode_variant<T: EnumType>(variants: &[VariantDescCell], index: usize, payload: impl IntoIterator<Item = Value>) -> Value {
     let desc = variants[index].get_or_init(|| {
-        let (type_name, variant) = (qualified_name(rust_type_module(T::MODULE), T::NAME), &T::VARIANTS[index]);
+        let (type_name, variant) = (qualified_name(qualified_name_module(T::MODULE), T::NAME), &T::VARIANTS[index]);
         let field_names: Option<Vec<&str>> = variant.fields.iter().map(|f| f.name).collect();
         match field_names.filter(|names| !names.is_empty()) {
             Some(names) => VariantDesc::with_fields(type_name, variant.name, names),

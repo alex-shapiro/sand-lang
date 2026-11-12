@@ -1,6 +1,6 @@
 //! Runtime values and heap objects.
 
-use crate::value::{Value, is_qualified_name, rust_type_module};
+use crate::value::{Value, is_qualified_name, qualified_name_module};
 use compact_str::CompactString;
 use hashbrown::HashTable;
 use std::any::Any;
@@ -916,7 +916,7 @@ pub trait ValueType:
     #[doc(hidden)]
     fn from_value(value: &Value) -> Option<Self> {
         let Value::Native(native) = value else { return None };
-        let is_self = is_qualified_name(&native.type_name, rust_type_module(Self::MODULE), Self::NAME);
+        let is_self = is_qualified_name(&native.type_name, qualified_name_module(Self::MODULE), Self::NAME);
         if is_self { Self::parse(&native.text).ok() } else { None }
     }
 }

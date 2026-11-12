@@ -2,7 +2,7 @@
 
 use super::ty::{Never, Num, Param, Reflect, SandType, VmVal};
 use crate::types::traits;
-use crate::value::{NativeValue, Value, qualified_name, rust_type_module};
+use crate::value::{NativeValue, Value, qualified_name, qualified_name_module};
 use crate::vm::meter::Scratch;
 use crate::vm::value::{Obj, ValueType, VmValue};
 use crate::vm::{Ctl, Fail, Vm};
@@ -581,7 +581,7 @@ pub type TypeNameCell = std::sync::OnceLock<std::sync::Arc<str>>;
 #[doc(hidden)]
 pub fn encode_value_type<T: ValueType>(type_name: &TypeNameCell, x: &T) -> Value {
     x.to_dedicated_value().unwrap_or_else(|| {
-        let type_name = type_name.get_or_init(|| qualified_name(rust_type_module(T::MODULE), T::NAME).into()).clone();
+        let type_name = type_name.get_or_init(|| qualified_name(qualified_name_module(T::MODULE), T::NAME).into()).clone();
         Value::Native(Box::new(NativeValue { type_name, text: x.to_string() }))
     })
 }

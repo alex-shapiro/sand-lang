@@ -531,11 +531,12 @@ pub(crate) fn is_qualified_name(text: &str, module: Option<&str>, name: &str) ->
     }
 }
 
-/// Returns the module of a type that Rust declares in `module`, for
-/// [`qualified_name`]: `None` for the prelude. The engine reserves the module
-/// name `prelude`, so no host module has it.
-pub(crate) fn rust_type_module(module: &str) -> Option<&str> {
-    (module != "prelude").then_some(module)
+/// Returns the module part of the qualified name of a type that Rust
+/// declares in `rust_module`, for [`qualified_name`]: `None` for the prelude,
+/// whose types have no module part. The engine reserves the module name
+/// `prelude`, so no host module has it.
+pub(crate) fn qualified_name_module(rust_module: &str) -> Option<&str> {
+    (rust_module != "prelude").then_some(rust_module)
 }
 
 /// The [`EncodeSink`] that builds a [`Value`].
@@ -621,7 +622,7 @@ impl ValueSink<'_> {
         }
         let text = native.text();
         self.reserve_copy(text.len(), size_of::<NativeValue>())?;
-        let type_name = self.type_name(rust_type_module(native.module_name()), native.type_name())?;
+        let type_name = self.type_name(qualified_name_module(native.module_name()), native.type_name())?;
         Ok(Value::Native(Box::new(NativeValue { type_name, text })))
     }
 
@@ -630,7 +631,7 @@ impl ValueSink<'_> {
             OpaqueKind::Function => self.type_name(None, "fn")?,
             OpaqueKind::Task => self.type_name(None, "Task")?,
             OpaqueKind::Channel => self.type_name(None, "Channel")?,
-            OpaqueKind::Object { module, name } => self.type_name(rust_type_module(module), name)?,
+            OpaqueKind::Object { module, name } => self.type_name(qualified_name_module(module), name)?,
             OpaqueKind::Internal => return internal("to_value: an internal heap object has no `Value` form"),
         };
         Ok(Value::Opaque { type_name })
