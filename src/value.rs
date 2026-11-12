@@ -1,7 +1,6 @@
 //! Sand values in a Rust form that does not reference the VM.
 
 use crate::native::ty::Never;
-use crate::stdlib::time::{PlainMonthDay, PlainYearMonth, Span, TimeZone, ZonedDateTime};
 use crate::vm::bytecode::Program;
 use crate::vm::encode::{self, Container, EncodeSink, Leaf, OpaqueKind, Opened, Role};
 use crate::vm::heap::Heap;
@@ -20,8 +19,8 @@ use std::sync::{Arc, OnceLock};
 /// after the run ends.
 ///
 /// The `Debug` output shows a struct or a variant with its name, such as
-/// `shop.Order { id: Int(1), note: Option.None }`.
-#[derive(Clone, PartialEq)]
+/// `Struct(shop.Order { id: Int(1) })`.
+#[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum Value {
     /// The unit value `()`.
@@ -56,26 +55,8 @@ pub enum Value {
     Struct(StructValue),
     /// An enum variant.
     Variant(VariantValue),
-    /// A `time.Instant`.
-    Instant(jiff::Timestamp),
-    /// A `time.PlainDateTime`.
-    PlainDateTime(jiff::civil::DateTime),
-    /// A `time.PlainDate`.
-    PlainDate(jiff::civil::Date),
-    /// A `time.PlainTime`.
-    PlainTime(jiff::civil::Time),
-    /// A `time.PlainYearMonth`.
-    PlainYearMonth(PlainYearMonth),
-    /// A `time.PlainMonthDay`.
-    PlainMonthDay(PlainMonthDay),
-    /// A `time.ZonedDateTime`.
-    ZonedDateTime(Box<ZonedDateTime>),
-    /// A `time.Span`.
-    Span(Box<Span>),
-    /// A `time.TimeZone`.
-    TimeZone(TimeZone),
-    /// A value of a native value type without a dedicated case, from the
-    /// standard library or a host.
+    /// A value of a native value type, from the standard library or a host,
+    /// such as a `time.PlainDate`.
     Native(Box<NativeValue>),
     /// A part whose type does not implement the Sand trait `Encode`, such as
     /// a function, a task, a channel, or a native object. It holds only the
@@ -226,48 +207,15 @@ impl Value {
     /// is not a `T`.
     ///
     /// ```
-    /// # use sandlang::value::Value;
-    /// let start = Value::PlainDate(jiff::civil::date(2024, 3, 10));
+    /// # use sandlang::value::{Encode, Value};
+    /// let start = jiff::civil::date(2024, 3, 10).encode();
     /// assert_eq!(start.native::<jiff::civil::Date>(), Some(jiff::civil::date(2024, 3, 10)));
     /// assert_eq!(start.native::<jiff::Timestamp>(), None);
     /// ```
     pub fn native<T: ValueType>(&self) -> Option<T> {
-        T::from_value(self)
-    }
-}
-
-impl fmt::Debug for Value {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (variant, inner): (&str, &dyn fmt::Debug) = match self {
-            Value::Unit => return f.write_str("Unit"),
-            Value::Range { start, end, inclusive } => {
-                return f.debug_struct("Range").field("start", start).field("end", end).field("inclusive", inclusive).finish();
-            }
-            Value::Struct(s) => return s.fmt(f),
-            Value::Variant(v) => return v.fmt(f),
-            Value::Opaque { type_name } => return f.debug_struct("Opaque").field("type_name", type_name).finish(),
-            Value::Bool(b) => ("Bool", b),
-            Value::Int(i) => ("Int", i),
-            Value::Float(x) => ("Float", x),
-            Value::Duration(d) => ("Duration", d),
-            Value::Str(s) => ("Str", s),
-            Value::Bytes(b) => ("Bytes", b),
-            Value::List(items) => ("List", items),
-            Value::Tuple(items) => ("Tuple", items),
-            Value::Set(items) => ("Set", items),
-            Value::Map(entries) => ("Map", entries),
-            Value::Instant(t) => ("Instant", t),
-            Value::PlainDateTime(t) => ("PlainDateTime", t),
-            Value::PlainDate(t) => ("PlainDate", t),
-            Value::PlainTime(t) => ("PlainTime", t),
-            Value::PlainYearMonth(t) => ("PlainYearMonth", t),
-            Value::PlainMonthDay(t) => ("PlainMonthDay", t),
-            Value::ZonedDateTime(t) => ("ZonedDateTime", t),
-            Value::Span(t) => ("Span", t),
-            Value::TimeZone(t) => ("TimeZone", t),
-            Value::Native(native) => ("Native", native),
-        };
-        f.debug_tuple(variant).field(inner).finish()
+        let Value::Native(native) = self else { return None };
+        let is_t = is_qualified_name(&native.type_name, qualified_name_module(T::MODULE), T::NAME);
+        if is_t { T::parse(&native.text).ok() } else { None }
     }
 }
 
@@ -611,15 +559,6 @@ impl ValueSink<'_> {
     }
 
     fn native(&mut self, native: ValueRef<'_>) -> Result<Value, Fail> {
-        if let Some(value) = native.to_dedicated_value() {
-            // A dedicated case holds a packed value inline and a boxed value
-            // in a `Box`, so the heap size of the value bounds its allocation.
-            self.reserve(match native {
-                ValueRef::Boxed(x) => x.size(),
-                ValueRef::Packed(..) => 0,
-            })?;
-            return Ok(value);
-        }
         let text = native.text();
         self.reserve_copy(text.len(), size_of::<NativeValue>())?;
         let type_name = self.type_name(qualified_name_module(native.module_name()), native.type_name())?;
@@ -733,10 +672,8 @@ mod tests {
         let some = Value::Variant(VariantValue::new("Option", "Some", [Value::Int(1)]));
         let order = Value::Struct(StructValue::new("shop.Order", [("id", Value::Int(1)), ("note", none)]));
         let moved = Value::Variant(VariantValue::with_fields("shop.Event", "Moved", [("x", Value::Int(1))]));
-        assert_eq!(format!("{order:?}"), "shop.Order { id: Int(1), note: Option.None }");
-        assert_eq!(format!("{some:?}"), "Option.Some(Int(1))");
-        assert_eq!(format!("{moved:?}"), "shop.Event.Moved { x: Int(1) }");
-        assert_eq!(format!("{moved:#?}"), "shop.Event.Moved {\n    x: Int(\n        1,\n    ),\n}");
-        assert_eq!(format!("{:?}", Value::List(vec![some])), "List([Option.Some(Int(1))])");
+        assert_eq!(format!("{order:?}"), "Struct(shop.Order { id: Int(1), note: Variant(Option.None) })");
+        assert_eq!(format!("{moved:?}"), "Variant(shop.Event.Moved { x: Int(1) })");
+        assert_eq!(format!("{:?}", Value::List(vec![some])), "List([Variant(Option.Some(Int(1)))])");
     }
 }

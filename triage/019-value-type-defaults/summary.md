@@ -8,8 +8,8 @@ support, every caller and JSON document must supply those fields explicitly.
 The struct of `repro.rs` fails with these errors:
 
 ```
-the Rust field `since` of `jobs.Retention` has a default with a value of the native value type `time.PlainDate`, which cannot be a field default
-the Rust field `last_run` of `jobs.Retention` has a default with a value of the native value type `time.Instant`, which cannot be a field default
+the Rust field `since` of `jobs.Retention` has a default that is not a constant of `PlainDate` with at most 65536 parts and 64 levels
+the Rust field `last_run` of `jobs.Retention` has a default that is not a constant of `Instant` with at most 65536 parts and 64 levels
 ```
 
 Representing `ValueType` constants in `ConstVal` by their text form allows

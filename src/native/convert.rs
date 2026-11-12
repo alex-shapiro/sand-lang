@@ -580,10 +580,8 @@ pub type TypeNameCell = std::sync::OnceLock<std::sync::Arc<str>>;
 
 #[doc(hidden)]
 pub fn encode_value_type<T: ValueType>(type_name: &TypeNameCell, x: &T) -> Value {
-    x.to_dedicated_value().unwrap_or_else(|| {
-        let type_name = type_name.get_or_init(|| qualified_name(qualified_name_module(T::MODULE), T::NAME).into()).clone();
-        Value::Native(Box::new(NativeValue { type_name, text: x.to_string() }))
-    })
+    let type_name = type_name.get_or_init(|| qualified_name(qualified_name_module(T::MODULE), T::NAME).into()).clone();
+    Value::Native(Box::new(NativeValue { type_name, text: x.to_string() }))
 }
 
 #[doc(hidden)]

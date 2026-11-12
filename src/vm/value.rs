@@ -1,6 +1,5 @@
 //! Runtime values and heap objects.
 
-use crate::value::{Value, is_qualified_name, qualified_name_module};
 use compact_str::CompactString;
 use hashbrown::HashTable;
 use std::any::Any;
@@ -904,21 +903,6 @@ pub trait ValueType:
     fn size(&self) -> usize {
         std::mem::size_of::<Self>()
     }
-    /// Returns `self` as the case of [`Value`] that is dedicated to the type,
-    /// such as `Value::PlainDate`, or `None` if the type has no dedicated
-    /// case, so that the [`Value`] of `self` is a [`Value::Native`].
-    #[doc(hidden)]
-    fn to_dedicated_value(&self) -> Option<Value> {
-        None
-    }
-    /// Returns `value` as `Self`, or `None` if `value` is not a `Self`. See
-    /// [`Value::native`].
-    #[doc(hidden)]
-    fn from_value(value: &Value) -> Option<Self> {
-        let Value::Native(native) = value else { return None };
-        let is_self = is_qualified_name(&native.type_name, qualified_name_module(Self::MODULE), Self::NAME);
-        if is_self { Self::parse(&native.text).ok() } else { None }
-    }
 }
 
 /// Packs a [`ValueType`] into 16 bytes so it can be stored inline in a heap slot.
@@ -948,7 +932,6 @@ pub trait ValueObj: Any + Send {
     fn value_hash(&self) -> u64;
     fn write_text(&self, out: &mut String);
     fn size(&self) -> usize;
-    fn to_dedicated_value(&self) -> Option<Value>;
 }
 
 impl<T: ValueType> ValueObj for T {
@@ -976,9 +959,6 @@ impl<T: ValueType> ValueObj for T {
     fn size(&self) -> usize {
         ValueType::size(self)
     }
-    fn to_dedicated_value(&self) -> Option<Value> {
-        ValueType::to_dedicated_value(self)
-    }
 }
 
 type PackedOrder = fn([u64; 2], [u64; 2]) -> std::cmp::Ordering;
@@ -990,7 +970,6 @@ pub struct PackedType {
     order: Option<PackedOrder>,
     pub(crate) ordered_bits: bool,
     write_text: fn([u64; 2], &mut String),
-    to_dedicated_value: fn([u64; 2]) -> Option<Value>,
     type_id: fn() -> std::any::TypeId,
 }
 
@@ -1024,7 +1003,6 @@ impl<T: ValueType> PackedTypeOf<T> {
                 x.write_text(out)
             }
         },
-        to_dedicated_value: |a| unpack::<T>(a).and_then(|x| x.to_dedicated_value()),
         type_id: std::any::TypeId::of::<T>,
     };
 }
@@ -1093,16 +1071,6 @@ impl ValueRef<'_> {
         let mut s = String::new();
         self.write_text(&mut s);
         s
-    }
-
-    /// Returns the value as the case of [`Value`] that is dedicated to its
-    /// type, or `None` if the type has no dedicated case. See
-    /// [`ValueType::to_dedicated_value`].
-    pub(crate) fn to_dedicated_value(self) -> Option<Value> {
-        match self {
-            ValueRef::Boxed(x) => x.to_dedicated_value(),
-            ValueRef::Packed(t, a) => (t.to_dedicated_value)(a),
-        }
     }
 }
 

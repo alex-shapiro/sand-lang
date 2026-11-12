@@ -17,7 +17,6 @@ use crate::native::ty::VmVal;
 use crate::native::{Binding, NamedType, NativeModule, NativeObject};
 use crate::platform::{Instant as Monotonic, UNIX_EPOCH};
 use crate::policy::Capability;
-use crate::value::Value;
 use crate::vm::value::{Packing, ValueType};
 use crate::vm::{Ctl, Fail, Vm};
 use jiff::civil::{Date, DateDifference, DateTime, DateTimeDifference, DateTimeRound, Time, TimeRound};
@@ -67,29 +66,6 @@ fn unpack_time(bits: u64) -> Time {
         .expect("packed by pack_time")
 }
 
-/// Implements the hooks of `ValueType` that convert a `time` type to and
-/// from the case of [`Value`] that is dedicated to it, such as
-/// `Value::Instant`. A `boxed` case holds the value in a `Box`.
-macro_rules! dedicated_value {
-    ($case:ident) => {
-        dedicated_value!($case, Clone::clone, Clone::clone);
-    };
-    (boxed $case:ident) => {
-        dedicated_value!($case, |x: &Self| Box::new(x.clone()), |x: &Box<Self>| (**x).clone());
-    };
-    ($case:ident, $wrap:expr, $unwrap:expr) => {
-        fn to_dedicated_value(&self) -> Option<Value> {
-            Some(Value::$case($wrap(self)))
-        }
-        fn from_value(value: &Value) -> Option<Self> {
-            match value {
-                Value::$case(x) => Some($unwrap(x)),
-                _ => None,
-            }
-        }
-    };
-}
-
 macro_rules! bind_jiff_types {
     ($($rust:ty => $name:literal: $doc:literal),* $(,)?) => {$(
         impl NamedType for $rust {
@@ -126,7 +102,6 @@ impl ValueType for Timestamp {
         },
         ordered: true,
     });
-    dedicated_value!(Instant);
     fn parse(text: &str) -> Result<Self, String> {
         text.parse().map_err(|_| parse_error(text, Self::NAME))
     }
@@ -139,7 +114,6 @@ impl ValueType for DateTime {
         unpack: |[d, t]| unpack_date(d).to_datetime(unpack_time(t)),
         ordered: true,
     });
-    dedicated_value!(PlainDateTime);
     fn parse(text: &str) -> Result<Self, String> {
         text.parse().map_err(|_| parse_error(text, Self::NAME))
     }
@@ -148,7 +122,6 @@ impl ValueType for DateTime {
 impl ValueType for Date {
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
     const PACKING: Option<Packing<Self>> = Some(Packing { pack: |d| [pack_date(d), 0], unpack: |[d, _]| unpack_date(d), ordered: true });
-    dedicated_value!(PlainDate);
     fn parse(text: &str) -> Result<Self, String> {
         text.parse().map_err(|_| parse_error(text, Self::NAME))
     }
@@ -157,7 +130,6 @@ impl ValueType for Date {
 impl ValueType for Time {
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
     const PACKING: Option<Packing<Self>> = Some(Packing { pack: |t| [pack_time(t), 0], unpack: |[t, _]| unpack_time(t), ordered: true });
-    dedicated_value!(PlainTime);
     fn parse(text: &str) -> Result<Self, String> {
         text.parse().map_err(|_| parse_error(text, Self::NAME))
     }
@@ -231,7 +203,6 @@ impl fmt::Display for ZonedDateTime {
 }
 impl ValueType for ZonedDateTime {
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
-    dedicated_value!(boxed ZonedDateTime);
     fn parse(text: &str) -> Result<Self, String> {
         let z = PARSER.parse_zoned_with(&DB, text).map_err(|_| parse_error(text, Self::NAME))?;
         check_supported_zone(z.time_zone())?;
@@ -268,7 +239,6 @@ impl ValueType for PlainYearMonth {
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
     const PACKING: Option<Packing<Self>> =
         Some(Packing { pack: |ym| [pack_date(&ym.0), 0], unpack: |[d, _]| PlainYearMonth(unpack_date(d)), ordered: true });
-    dedicated_value!(PlainYearMonth);
     fn parse(text: &str) -> Result<Self, String> {
         format!("{text}-01")
             .parse::<Date>()
@@ -310,7 +280,6 @@ impl ValueType for PlainMonthDay {
     const ORDER: Option<fn(&Self, &Self) -> Ordering> = Some(Ord::cmp);
     const PACKING: Option<Packing<Self>> =
         Some(Packing { pack: |md| [pack_date(&md.0), 0], unpack: |[d, _]| PlainMonthDay(unpack_date(d)), ordered: true });
-    dedicated_value!(PlainMonthDay);
     fn parse(text: &str) -> Result<Self, String> {
         let short = text.strip_prefix("--").unwrap_or(text);
         let two_digits = |s: &str| (s.len() == 2 && s.bytes().all(|b| b.is_ascii_digit())).then(|| s.parse::<i8>().ok()).flatten();
@@ -397,7 +366,6 @@ impl fmt::Display for Span {
     }
 }
 impl ValueType for Span {
-    dedicated_value!(boxed Span);
     fn parse(text: &str) -> Result<Self, String> {
         text.parse().and_then(Span::new).map_err(|_| parse_error(text, Self::NAME))
     }
@@ -449,7 +417,6 @@ impl fmt::Display for TimeZone {
     }
 }
 impl ValueType for TimeZone {
-    dedicated_value!(TimeZone);
     fn parse(text: &str) -> Result<Self, String> {
         parse_zone(text).map(TimeZone)
     }

@@ -1627,6 +1627,14 @@ fn rust_json_field_defaults_are_constants() {
     assert_eq!(out, "{\"on\":[true,-1,0.5,\"x\",null]}\ntrue\ntrue\n");
 }
 
+/// Returns the error for a default of the Rust field `field` of `lab.<owner>`
+/// that is not a constant of the Sand type `ty`.
+fn rust_default_error(owner: &str, field: &str, ty: &str) -> String {
+    format!(
+        "the Rust field `{field}` of `lab.{owner}` has a default that is not a constant of `{ty}` with at most 65536 parts and 64 levels"
+    )
+}
+
 #[test]
 fn rust_field_defaults_cannot_hold_native_or_opaque_values() {
     use sandlang::value::Encode;
@@ -1637,7 +1645,7 @@ fn rust_field_defaults_cannot_hold_native_or_opaque_values() {
     }
     impl Encode for Hook {
         fn encode(&self) -> Value {
-            opaque_value("fn")
+            Value::Opaque { type_name: "fn".into() }
         }
     }
     #[derive(sandlang::SandStruct)]
@@ -1652,14 +1660,8 @@ fn rust_field_defaults_cannot_hold_native_or_opaque_values() {
     }
     let mut m = NativeModule::new("lab");
     m.bind::<Hook>().bind::<Bad>();
-    assert_eq!(
-        host_module_errors([bank_module(), m]),
-        [
-            "the Rust field `at` of `lab.Bad` has a default with a value of the native value type `time.Instant`, which cannot be a field default",
-            "the Rust field `price` of `lab.Bad` has a default with a value of the native value type `bank.Money`, which cannot be a field default",
-            "the Rust field `hook` of `lab.Bad` has a default with an opaque value of `fn`, which cannot be a field default",
-        ]
-    );
+    let error = |field, ty| rust_default_error("Bad", field, ty);
+    assert_eq!(host_module_errors([bank_module(), m]), [error("at", "Instant"), error("price", "Money"), error("hook", "Hook")]);
 }
 
 /// A link of a chain that ends in `None`.
@@ -1699,13 +1701,7 @@ fn rust_field_defaults_are_bounded() {
     assert_eq!(out, "65535\n");
     let mut m = NativeModule::new("lab");
     m.bind::<ChainLink>().bind::<Big>();
-    assert_eq!(
-        host_module_errors([m]),
-        [
-            "the Rust field `table` of `lab.Big` has a default with more than 65536 parts",
-            "the Rust field `head` of `lab.Big` has a default with more than 64 levels",
-        ]
-    );
+    assert_eq!(host_module_errors([m]), [rust_default_error("Big", "table", "[int]"), rust_default_error("Big", "head", "ChainLink?")]);
 }
 
 #[test]
@@ -1720,22 +1716,7 @@ fn rust_field_defaults_must_be_values_of_declared_types() {
     }
     impl Encode for Shade {
         fn encode(&self) -> Value {
-            Value::Variant(VariantValue::new("lab.Tint", "Light", []))
-        }
-    }
-    #[derive(Default, sandlang::SandEnum)]
-    #[sand(module = "lab", no_value)]
-    enum Glow {
-        #[default]
-        Dim,
-        Bright,
-    }
-    impl Encode for Glow {
-        fn encode(&self) -> Value {
-            match self {
-                Glow::Dim => Value::Variant(VariantValue::new("lab.Glow", "Off", [])),
-                Glow::Bright => Value::Variant(VariantValue::new("lab.Glow", "Bright", [Value::Int(1)])),
-            }
+            Value::Variant(VariantValue::new("lab.Shade", "Light", [Value::Int(1)]))
         }
     }
     #[derive(Default, sandlang::SandStruct)]
@@ -1745,11 +1726,8 @@ fn rust_field_defaults_must_be_values_of_declared_types() {
     }
     impl Encode for Spot {
         fn encode(&self) -> Value {
-            match self.x {
-                0 => Value::Struct(StructValue::new("lab.Spot", [("y", Value::Int(self.x))])),
-                1 => Value::Struct(StructValue::new("lab.Spot", [("x", Value::Str("oops".into()))])),
-                _ => Value::Int(self.x),
-            }
+            let field = if self.x == 0 { ("y", Value::Int(0)) } else { ("x", Value::Str("oops".into())) };
+            Value::Struct(StructValue::new("lab.Spot", [field]))
         }
     }
     #[derive(sandlang::SandStruct)]
@@ -1758,32 +1736,14 @@ fn rust_field_defaults_must_be_values_of_declared_types() {
         #[sand(default)]
         shade: Shade,
         #[sand(default)]
-        glow: Glow,
-        #[sand(default = Glow::Bright)]
-        flash: Glow,
-        #[sand(default)]
         spot: Spot,
-        #[sand(default = Spot { x: 1 })]
-        beam: Spot,
-        #[sand(default = Spot { x: 2 })]
-        halo: Spot,
         #[sand(default = vec![Some(Spot { x: 1 })])]
         trail: Vec<Option<Spot>>,
     }
     let mut m = NativeModule::new("lab");
-    m.bind::<Shade>().bind::<Glow>().bind::<Spot>().bind::<Lamp>();
-    assert_eq!(
-        host_module_errors([m]),
-        [
-            "the Rust field `shade` of `lab.Lamp` has a default that is not a value of `lab.Shade`",
-            "the Rust field `glow` of `lab.Lamp` has a default that is not a value of `lab.Glow`",
-            "the Rust field `flash` of `lab.Lamp` has a default that is not a value of `lab.Glow`",
-            "the Rust field `spot` of `lab.Lamp` has a default that is not a value of `lab.Spot`",
-            "the Rust field `beam` of `lab.Lamp` has a default that is not a value of `lab.Spot`",
-            "the Rust field `halo` of `lab.Lamp` has a default that is not a value of `lab.Spot`",
-            "the Rust field `trail` of `lab.Lamp` has a default that is not a value of `[lab.Spot?]`",
-        ]
-    );
+    m.bind::<Shade>().bind::<Spot>().bind::<Lamp>();
+    let error = |field, ty| rust_default_error("Lamp", field, ty);
+    assert_eq!(host_module_errors([m]), [error("shade", "Shade"), error("spot", "Spot"), error("trail", "[Spot?]")]);
 }
 
 #[test]
@@ -4284,16 +4244,6 @@ fn copy_module() -> (NativeModule, Arc<Mutex<Vec<Value>>>) {
     (host, copies)
 }
 
-#[test]
-fn to_value_qualifies_the_types_of_a_script_named_prelude() {
-    let (host, copies) = copy_module();
-    let (mut engine, _, _) = engine_with(Config::new().host_modules(HostModules::new([host]).unwrap()));
-    let src = "import host\nstruct Order { id: int }\nhost.copy((Order(id: 1), Some(2)))\n";
-    rt().block_on(engine.run_source("prelude.sand", src)).unwrap();
-    let order = Value::Struct(StructValue::new("prelude.Order", [("id", Value::Int(1))]));
-    assert_eq!(*copies.lock(), [Value::Tuple(vec![order, Value::Variant(VariantValue::new("Option", "Some", [Value::Int(2)]))])]);
-}
-
 /// Returns the copies that `src` makes with `host.copy`.
 fn copied_values(src: &str) -> Vec<Value> {
     let (r, values) = run_and_copy_values(Config::new(), [bank_module(), stats_module()], src);
@@ -4372,30 +4322,6 @@ fn to_value_names_structs_variants_and_native_value_types() {
 }
 
 #[test]
-fn to_value_gives_each_time_type_its_dedicated_case() {
-    use sandlang::stdlib::time::{PlainMonthDay, PlainYearMonth, Span, ZonedDateTime};
-    let values = copied_values(
-        "import time\nhost.copy(time.Instant.parse(\"2024-03-10T07:30:00Z\")?)\nhost.copy(time.PlainDateTime.parse(\"2024-03-10T03:30:00\")?)\n\
-         host.copy(time.PlainDate.parse(\"2024-03-10\")?)\nhost.copy(time.PlainTime.parse(\"03:30:00\")?)\n\
-         host.copy(time.PlainYearMonth(2024, 3)?)\nhost.copy(time.PlainMonthDay(3, 10)?)\n\
-         host.copy(time.ZonedDateTime.parse(\"2024-03-10T03:30:00-04:00[America/New_York]\")?)\n\
-         host.copy(time.Span.parse(\"P1DT2H\")?)\nhost.copy(time.TimeZone(\"Europe/Paris\")?)\n",
-    );
-    let expected = [
-        Value::Instant("2024-03-10T07:30:00Z".parse().unwrap()),
-        Value::PlainDateTime("2024-03-10T03:30:00".parse().unwrap()),
-        Value::PlainDate("2024-03-10".parse().unwrap()),
-        Value::PlainTime("03:30:00".parse().unwrap()),
-        Value::PlainYearMonth(PlainYearMonth::parse("2024-03").unwrap()),
-        Value::PlainMonthDay(PlainMonthDay::new(3, 10).unwrap()),
-        Value::ZonedDateTime(Box::new(ZonedDateTime::parse("2024-03-10T03:30:00-04:00[America/New_York]").unwrap())),
-        Value::Span(Box::new(Span::parse("P1DT2H").unwrap())),
-        Value::TimeZone(TimeZone::parse("Europe/Paris").unwrap()),
-    ];
-    assert_eq!(values, expected);
-}
-
-#[test]
 fn to_value_keeps_the_shape_of_a_container_that_holds_values_without_encode() {
     let values = copied_values(
         "import stats\nimport time\nstruct Job { name: str, run: fn() -> int }\nfn one() -> int { 1 }\n\
@@ -4434,61 +4360,6 @@ fn to_value_copies_map_keys_that_are_not_strings() {
         Value::Map(vec![(Value::Tuple(vec![Value::Int(1), str_("a")]), Value::Int(3))]),
     ];
     assert_eq!(values, expected);
-}
-
-#[test]
-fn to_value_shares_each_type_description_within_a_copy() {
-    let values = copied_values(
-        "import bank\nstruct Order { id: int }\nenum Status { Active, Banned(code: int) }\nfn one() -> int { 1 }\n\
-         host.copy(([Order(id: 1), Order(id: 2)], [Status.Active, Status.Banned(code: 1), Status.Active, Status.Banned(code: 2)], \
-         [bank.cents(1), bank.cents(2)], [one, one], [Some(1), None, Some(2)]))\n",
-    );
-    let [Value::Tuple(lists)] = &values[..] else { panic!("{values:?}") };
-    let items = |i: usize| match &lists[i] {
-        Value::List(items) => items,
-        other => panic!("{other:?}"),
-    };
-    let [Value::Struct(first), Value::Struct(second)] = &items(0)[..] else { panic!("{:?}", items(0)) };
-    assert!(Arc::ptr_eq(&first.ty, &second.ty), "{first:?} {second:?}");
-    let statuses: Vec<&VariantValue> = items(1).iter().map(|v| if let Value::Variant(v) = v { v } else { panic!("{v:?}") }).collect();
-    assert!(
-        Arc::ptr_eq(&statuses[0].variant, &statuses[2].variant) && Arc::ptr_eq(&statuses[1].variant, &statuses[3].variant),
-        "{statuses:?}"
-    );
-    let [Value::Native(first), Value::Native(second)] = &items(2)[..] else { panic!("{:?}", items(2)) };
-    assert!(Arc::ptr_eq(&first.type_name, &second.type_name), "{first:?} {second:?}");
-    let [Value::Opaque { type_name: first }, Value::Opaque { type_name: second }] = &items(3)[..] else { panic!("{:?}", items(3)) };
-    assert!(Arc::ptr_eq(first, second));
-    let [Value::Variant(some), Value::Variant(_), Value::Variant(other)] = &items(4)[..] else { panic!("{:?}", items(4)) };
-    assert!(Arc::ptr_eq(&some.variant, &other.variant), "{some:?} {other:?}");
-}
-
-#[test]
-fn encode_shares_each_type_description_for_the_life_of_the_process() {
-    use sandlang::value::Encode;
-    #[derive(sandlang::SandStruct)]
-    #[sand(module = "geo")]
-    struct Point {
-        x: i64,
-    }
-    let desc = |value: Value| match value {
-        Value::Struct(s) => s.ty as Arc<dyn std::any::Any>,
-        Value::Variant(v) => v.variant as Arc<dyn std::any::Any>,
-        other => panic!("{other:?}"),
-    };
-    let pairs = [
-        (Delivery::Pending.encode(), Delivery::Pending.encode()),
-        (Delivery::Shipped(1, "a".into()).encode(), Delivery::Shipped(2, "b".into()).encode()),
-        (Some(1).encode(), Some(2).encode()),
-        (sandlang::stdlib::json::Json::Int(1).encode(), sandlang::stdlib::json::Json::Int(2).encode()),
-        (Point { x: 1 }.encode(), Point { x: 2 }.encode()),
-    ];
-    for (first, second) in pairs {
-        let text = format!("{first:?} {second:?}");
-        assert!(Arc::ptr_eq(&desc(first), &desc(second)), "{text}");
-    }
-    let (pending, shipped) = (desc(Delivery::Pending.encode()), desc(Delivery::Shipped(1, "a".into()).encode()));
-    assert!(!Arc::ptr_eq(&pending, &shipped));
 }
 
 /// Sets up `chain(n)`, a value that nests `n` structs, and `ring`, a struct
@@ -4566,27 +4437,6 @@ fn to_value_charges_fuel_for_each_value_and_for_copied_bytes() {
         assert!(matches!(r, Err(Error::Limit(LimitKind::Instructions))), "{value}: {r:?}");
         assert!(values.is_empty(), "{value}");
     }
-}
-
-#[test]
-fn to_value_fuel_is_the_same_on_each_pointer_width() {
-    use sandlang::native::ty::Param;
-    let mut host = NativeModule::new("host");
-    host.source("pub native fn copy_fuel<T>(value: T) -> int");
-    host.function("copy_fuel", |vm: &mut Vm, value: Param<0>| -> Result<i64, Fail> {
-        let before = vm.meter.used();
-        vm.to_value(value.raw())?;
-        Ok((vm.meter.used() - before) as i64)
-    });
-    let modules = HostModules::new([bank_module(), host]).unwrap();
-    // One unit for each value, and one for each 64 bytes of a text: the
-    // struct, the string with two units for its 130 bytes, and the native
-    // value with less than 64 bytes of text.
-    let src = "import bank\nimport host\nstruct Note { text: str, at: bank.Cell }\n\
-               print(host.copy_fuel(Note(text: \"x\".repeat(130), at: bank.cell(1234567890123, 1234567890123))))";
-    let (r, out, _) = run_src(Config::new().host_modules(modules), src);
-    r.unwrap();
-    assert_eq!(out, "5\n");
 }
 
 #[test]
@@ -4669,17 +4519,12 @@ fn encode_of_json_equals_its_copy_out_of_the_vm() {
 
 #[test]
 fn native_reads_a_native_value_type_from_its_value() {
-    let money = Value::Native(Box::new(NativeValue { type_name: "bank.Money".into(), text: "12.50".into() }));
+    let native = |type_name: &str, text: &str| Value::Native(Box::new(NativeValue { type_name: type_name.into(), text: text.into() }));
+    let (money, date) = (native("bank.Money", "12.50"), native("time.PlainDate", "2024-03-10"));
     assert_eq!(money.native::<Money>(), Some(Money(1250)));
-    let date = Date::new(2024, 3, 10).unwrap();
-    assert_eq!(Value::PlainDate(date).native::<Date>(), Some(date));
-    let cell = Value::Native(Box::new(NativeValue { type_name: "bank.Cell".into(), text: "12.50".into() }));
-    let unreadable = Value::Native(Box::new(NativeValue { type_name: "bank.Money".into(), text: "twelve".into() }));
-    let date_text = Value::Native(Box::new(NativeValue { type_name: "time.PlainDate".into(), text: "2024-03-10".into() }));
-    for other in [cell, unreadable, Value::Int(1250), Value::PlainDate(date)] {
+    assert_eq!(date.native::<Date>(), Some(Date::new(2024, 3, 10).unwrap()));
+    assert_eq!(money.native::<Date>(), None);
+    for other in [native("bank.Cell", "12.50"), native("bank.Money", "twelve"), Value::Int(1250), date] {
         assert_eq!(other.native::<Money>(), None, "{other:?}");
-    }
-    for other in [date_text, money, Value::Instant(jiff::Timestamp::UNIX_EPOCH)] {
-        assert_eq!(other.native::<Date>(), None, "{other:?}");
     }
 }

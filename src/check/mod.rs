@@ -227,14 +227,6 @@ struct RustFieldDefaults {
     values: Arc<[Option<Value>]>,
 }
 
-/// The reason that a Rust field default is not a constant of its field type.
-enum RustDefaultError {
-    /// A part of the default is not a value of its type.
-    Mismatch,
-    /// A part of the default breaks the rule that the text states.
-    Rule(String),
-}
-
 /// Location of a function body in the module AST, or a synthetic body kind.
 #[derive(Clone, Copy, Debug)]
 pub enum FnDeclRef {
@@ -1784,21 +1776,20 @@ impl Checker {
             if ty == TypeId::ERROR {
                 continue;
             }
-            let const_default = match self.resolve_bound_const(value, ty, &mut ConstSize::default(), 1) {
-                Ok(c) => Arc::new(c),
-                Err(error) => {
-                    let problem = match error {
-                        RustDefaultError::Mismatch => {
-                            format!("that is not a value of `{}`", TypePrinter { qualify_names: true, ..self.printer() }.show(ty))
-                        }
-                        RustDefaultError::Rule(problem) => problem,
-                    };
-                    let ty = &self.types[def as usize];
-                    let (module, name, field) = (self.name(ty.module_name), self.name(ty.name), self.name(field_name));
-                    self.error(span, format!("the Rust field `{field}` of `{module}.{name}` has a default {problem}"));
-                    continue;
-                }
+            let Some(const_default) = self.resolve_bound_const(value, ty).filter(|c| c.measure().is_some()) else {
+                let def = &self.types[def as usize];
+                let (module, name, field) = (self.name(def.module_name), self.name(def.name), self.name(field_name));
+                let ty = self.printer().show(ty);
+                self.error(
+                    span,
+                    format!(
+                        "the Rust field `{field}` of `{module}.{name}` has a default that is not a constant of `{ty}` \
+                         with at most {MAX_CONST_PARTS} parts and {MAX_CONST_DEPTH} levels"
+                    ),
+                );
+                continue;
             };
+            let const_default = Arc::new(const_default);
             let generics = self.types[def as usize].generics.clone();
             let self_ty = self.def_self_ty(def, &generics);
             let helper_name = self.sym(&format!("{}.{}", self.name(self.types[def as usize].name), self.name(field_name)));
@@ -1854,74 +1845,50 @@ impl Checker {
         None
     }
 
-    /// Resolves a part of a Rust field default at the nesting level `level`
-    /// into a [`ConstVal`] of the type `ty`, and adds the part to `size`.
-    fn resolve_bound_const(&mut self, value: &Value, ty: TypeId, size: &mut ConstSize, level: usize) -> Result<ConstVal, RustDefaultError> {
-        use RustDefaultError::{Mismatch, Rule};
-        size.add_part(level).map_err(|limit| Rule(format!("with {limit}")))?;
-        if let Value::Opaque { type_name } = value {
-            return Err(Rule(format!("with an opaque value of `{type_name}`, which cannot be a field default")));
-        }
-        if let Ty::Named(def, _) = self.arena.get(ty)
-            && let def = &self.types[def as usize]
-            && matches!(def.kind, TypeDefKind::Opaque(Opaque::Value(_)))
-        {
-            let (module, name) = (self.name(def.module_name), self.name(def.name));
-            return Err(Rule(format!("with a value of the native value type `{module}.{name}`, which cannot be a field default")));
-        }
-        let level = level + 1;
-        Ok(match (value, self.arena.get(ty)) {
+    /// Resolves a Rust field default, or a part of one, into a [`ConstVal`] of
+    /// the type `ty`. Returns `None` if `value` is not a constant of `ty`.
+    fn resolve_bound_const(&mut self, value: &Value, ty: TypeId) -> Option<ConstVal> {
+        Some(match (value, self.arena.get(ty)) {
             (Value::Unit, Ty::Unit) => ConstVal::Unit,
             (Value::Bool(b), Ty::Bool) => ConstVal::Bool(*b),
             (Value::Int(i), Ty::Int) => ConstVal::Int(*i),
             (Value::Float(f), Ty::Float) => ConstVal::Float(*f),
-            (Value::Duration(d), Ty::Duration) => {
-                ConstVal::Dur(i64::try_from(d.as_nanos()).map_err(|_| Rule("with a duration out of range".to_string()))?)
-            }
+            (Value::Duration(d), Ty::Duration) => ConstVal::Dur(i64::try_from(d.as_nanos()).ok()?),
             (Value::Str(s), Ty::Str) => ConstVal::Str(s.clone()),
             (Value::Bytes(b), Ty::Bytes) => ConstVal::Bytes(b.clone()),
             (Value::Range { start, end, inclusive }, Ty::Range) => ConstVal::Range(*start, *end, *inclusive),
-            (Value::List(items), Ty::List(e)) => ConstVal::List(self.resolve_bound_consts(items, std::iter::repeat(e), size, level)?),
-            (Value::Set(items), Ty::Set(e)) => ConstVal::Set(self.resolve_bound_consts(items, std::iter::repeat(e), size, level)?),
+            (Value::List(items), Ty::List(e)) => ConstVal::List(self.resolve_bound_consts(items, std::iter::repeat(e))?),
+            (Value::Set(items), Ty::Set(e)) => ConstVal::Set(self.resolve_bound_consts(items, std::iter::repeat(e))?),
             (Value::Tuple(items), Ty::Tuple(ts)) if items.len() == self.arena.list_len(ts) => {
                 let ts = self.arena.list(ts).to_vec();
-                ConstVal::Tuple(self.resolve_bound_consts(items, ts, size, level)?)
+                ConstVal::Tuple(self.resolve_bound_consts(items, ts)?)
             }
             (Value::Map(entries), Ty::Map(k, v)) => ConstVal::Map(
                 entries
                     .iter()
-                    .map(|(key, value)| {
-                        let key = self.resolve_bound_const(key, k, size, level)?;
-                        Ok((key, self.resolve_bound_const(value, v, size, level)?))
-                    })
-                    .collect::<Result<_, _>>()?,
+                    .map(|(key, value)| Some((self.resolve_bound_const(key, k)?, self.resolve_bound_const(value, v)?)))
+                    .collect::<Option<_>>()?,
             ),
             (Value::Struct(s), Ty::Named(def, args)) if self.has_struct_shape(def, s) => {
                 let args = self.arena.list(args).to_vec();
                 let tys: Vec<TypeId> = (0..s.fields.len()).map(|i| self.field_type(def, i, &args)).collect();
-                ConstVal::Struct(def, self.resolve_bound_consts(&s.fields, tys, size, level)?)
+                ConstVal::Struct(def, self.resolve_bound_consts(&s.fields, tys)?)
             }
             (Value::Variant(v), Ty::Named(def, args)) => {
-                let Some(variant) = self.declared_variant(def, v) else { return Err(Mismatch) };
+                let variant = self.declared_variant(def, v)?;
                 let (rt_id, fields, generics) = (variant.rt_id, variant.fields.clone(), self.types[def as usize].generics.clone());
                 let args = self.arena.list(args).to_vec();
                 let tys: Vec<TypeId> = fields.into_iter().map(|t| self.arena.instantiate(t, &generics, &args)).collect();
-                ConstVal::Variant(rt_id, self.resolve_bound_consts(&v.payload, tys, size, level)?)
+                ConstVal::Variant(rt_id, self.resolve_bound_consts(&v.payload, tys)?)
             }
-            _ => return Err(Mismatch),
+            _ => return None,
         })
     }
 
     /// Resolves each of `values` against the type at the same position in
     /// `tys`. See [`Self::resolve_bound_const`].
-    fn resolve_bound_consts(
-        &mut self,
-        values: &[Value],
-        tys: impl IntoIterator<Item = TypeId>,
-        size: &mut ConstSize,
-        level: usize,
-    ) -> Result<Vec<ConstVal>, RustDefaultError> {
-        values.iter().zip(tys).map(|(value, ty)| self.resolve_bound_const(value, ty, size, level)).collect()
+    fn resolve_bound_consts(&mut self, values: &[Value], tys: impl IntoIterator<Item = TypeId>) -> Option<Vec<ConstVal>> {
+        values.iter().zip(tys).map(|(value, ty)| self.resolve_bound_const(value, ty)).collect()
     }
 
     /// Returns `true` if `s` has the name and the fields of the struct `def`.

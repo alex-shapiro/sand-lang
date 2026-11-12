@@ -2466,8 +2466,7 @@ reference the VM, so it remains valid after the run ends. `Value` is
 | range                                                      | `Range { start, end, inclusive }`                                  |
 | struct                                                     | `Struct`, with its type and the field values in declaration order  |
 | enum variant                                               | `Variant`, with its variant and the payload values                 |
-| `time` value types                                         | `Instant`, `PlainDate`, and one variant for each other `time` type |
-| other native value type                                    | `Native`, with a `NativeValue` of the type name and the text       |
+| native value type, such as `time.PlainDate`                 | `Native`, with a `NativeValue` of the type name and the text       |
 | part whose type does not implement the Sand trait `Encode` | `Opaque { type_name }`                                             |
 
 A struct holds an `Arc<StructDesc>` with the type name and the field names. A

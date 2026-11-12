@@ -656,58 +656,20 @@ pub const MAX_CONST_PARTS: usize = 1 << 16;
 /// Maximum nesting depth of a constant field default (a scalar has depth 1).
 pub const MAX_CONST_DEPTH: usize = 64;
 
-/// The number of parts of a constant, which [`ConstSize::add_part`] keeps
-/// within [`MAX_CONST_PARTS`] parts and [`MAX_CONST_DEPTH`] levels.
-#[derive(Default)]
-pub struct ConstSize {
-    parts: usize,
-}
-
-/// A size limit of a constant.
-pub enum ConstLimit {
-    /// [`MAX_CONST_PARTS`]
-    Parts,
-    /// [`MAX_CONST_DEPTH`]
-    Depth,
-}
-
-impl ConstSize {
-    /// Counts one part at the nesting level `level`, where the root has
-    /// level 1. Returns the limit that the part exceeds.
-    pub fn add_part(&mut self, level: usize) -> Result<(), ConstLimit> {
-        if level > MAX_CONST_DEPTH {
-            return Err(ConstLimit::Depth);
-        }
-        if self.parts == MAX_CONST_PARTS {
-            return Err(ConstLimit::Parts);
-        }
-        self.parts += 1;
-        Ok(())
-    }
-}
-
-impl std::fmt::Display for ConstLimit {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ConstLimit::Parts => write!(f, "more than {MAX_CONST_PARTS} parts"),
-            ConstLimit::Depth => write!(f, "more than {MAX_CONST_DEPTH} levels"),
-        }
-    }
-}
-
 impl ConstVal {
     /// Returns the node count and total string and byte length of `self`, or
-    /// `None` if `self` exceeds a limit of [`ConstSize`].
+    /// `None` if `self` exceeds [`MAX_CONST_PARTS`] or [`MAX_CONST_DEPTH`].
     pub fn measure(&self) -> Option<(usize, usize)> {
-        fn walk(c: &ConstVal, size: &mut ConstSize, bytes: &mut usize, level: usize) -> bool {
-            if size.add_part(level).is_err() {
+        fn walk(c: &ConstVal, left: &mut usize, bytes: &mut usize, depth: usize) -> bool {
+            if depth == 0 || *left == 0 {
                 return false;
             }
+            *left -= 1;
             match c {
                 ConstVal::Tuple(xs) | ConstVal::List(xs) | ConstVal::Set(xs) | ConstVal::Variant(_, xs) | ConstVal::Struct(_, xs) => {
-                    xs.iter().all(|x| walk(x, size, bytes, level + 1))
+                    xs.iter().all(|x| walk(x, left, bytes, depth - 1))
                 }
-                ConstVal::Map(kvs) => kvs.iter().all(|(k, v)| walk(k, size, bytes, level + 1) && walk(v, size, bytes, level + 1)),
+                ConstVal::Map(kvs) => kvs.iter().all(|(k, v)| walk(k, left, bytes, depth - 1) && walk(v, left, bytes, depth - 1)),
                 ConstVal::Str(s) => {
                     *bytes = bytes.saturating_add(s.len());
                     true
@@ -719,8 +681,8 @@ impl ConstVal {
                 _ => true,
             }
         }
-        let (mut size, mut bytes) = (ConstSize::default(), 0);
-        walk(self, &mut size, &mut bytes, 1).then_some((size.parts, bytes))
+        let (mut left, mut bytes) = (MAX_CONST_PARTS, 0);
+        walk(self, &mut left, &mut bytes, MAX_CONST_DEPTH).then_some((MAX_CONST_PARTS - left, bytes))
     }
 }
 
@@ -821,9 +783,6 @@ pub struct TypePrinter<'a> {
     /// [`TypeDesc::Param`](crate::vm::value::TypeDesc::Param) instantiation
     /// (see [`param_placeholder`]).
     pub placeholder_params: bool,
-    /// Writes each type with its module, such as `lab.Spot`, except a type of
-    /// the prelude, which is the module of `Option`.
-    pub qualify_names: bool,
 }
 
 /// Returns the placeholder string for type parameter `p` in
@@ -837,7 +796,7 @@ pub const PARAM_PLACEHOLDER: char = '\u{E000}';
 
 impl<'a> TypePrinter<'a> {
     pub fn new(arena: &'a TypeArena, defs: &'a PVec<TypeDef>, params: &'a PVec<ParamInfo>, syms: &'a Symbols, wk: WellKnown) -> Self {
-        TypePrinter { arena, defs, params, syms, wk, subst: &[], var_names: &[], placeholder_params: false, qualify_names: false }
+        TypePrinter { arena, defs, params, syms, wk, subst: &[], var_names: &[], placeholder_params: false }
     }
 
     pub fn show(&self, t: TypeId) -> String {
@@ -903,7 +862,7 @@ impl Tagged<'_, '_> {
     }
 
     fn write(&self, s: &mut String, t: TypeId) {
-        let TypePrinter { arena, defs, params, syms, wk, var_names, placeholder_params, qualify_names, .. } = self.p;
+        let TypePrinter { arena, defs, params, syms, wk, var_names, placeholder_params, .. } = self.p;
         let t = self.p.resolve(t);
         match arena.get(t) {
             Ty::Int => s.push_str("int"),
@@ -969,13 +928,8 @@ impl Tagged<'_, '_> {
                     s.push('?');
                     return;
                 }
-                let def = defs.get(d as usize);
-                let in_prelude = |d: &TypeDef| defs.get(wk.option as usize).is_some_and(|o| o.module == d.module);
-                if *qualify_names && let Some(def) = def.filter(|d| !in_prelude(d)) {
-                    s.push_str(syms.str(def.module_name));
-                    s.push('.');
-                }
-                s.push_str(def.map(|d| syms.str(d.name)).unwrap_or("?"));
+                let name = defs.get(d as usize).map(|d| syms.str(d.name)).unwrap_or("?");
+                s.push_str(name);
                 if !args.is_empty() {
                     s.push('<');
                     self.list(s, l);

@@ -291,16 +291,11 @@ value, and `Value`.
 - Rules that are specific to JSON exist only in the JSON sinks. These rules flatten
   `Some`, write `None` as `null`, pass the `Json` enum through, write map keys as
   text, and use Base64 for `bytes` and text for native value types.
-- The value types of the `time` module have their own variants, such as
-  `Value::Instant(jiff::Timestamp)` and `Value::PlainDate(jiff::civil::Date)`,
-  because dates and times are central to Sand programs.
-- Every other native value type, from the standard library or a host, is
-  `Value::Native { type_name, text }`. The type name includes the module. The text
-  is lossless, because `ValueType::parse` must turn the `Display` output back into
-  an equal value. `value.native::<Money>()` checks the type name and returns a
-  `Money`.
-- `ValueObj` gains a method that makes the `Value`, and the `time` types override
-  it, so the heap walk needs no list of special types.
+- Every native value type, from the standard library or a host, is
+  `Value::Native { type_name, text }`. The `time` types have no variants of their
+  own. The type name includes the module. The text is lossless, because
+  `ValueType::parse` must turn the `Display` output back into an equal value.
+  `value.native::<Money>()` checks the type name and returns a `Money`.
 - A result whose type does not implement `Encode` is `Value::Opaque`, which holds
   the type name. Native objects, such as files and connections, are not `Encode`.
   A native object lives on the heap of the VM, and its resources count against the
