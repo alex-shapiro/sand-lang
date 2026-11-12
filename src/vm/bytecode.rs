@@ -1228,11 +1228,11 @@ pub enum Piece {
 #[derive(Clone, Debug)]
 pub struct StructRt {
     pub name: String,
-    /// The module of the type, or `None` for the prelude.
+    /// Module name, or `None` for prelude types.
     pub module: Option<String>,
     pub fields: Vec<String>,
     pub is_enum: bool,
-    /// The value of [`StructRt::desc`], which the first call makes.
+    /// Cached descriptor returned by [`StructRt::desc`].
     pub desc: OnceLock<Arc<StructDesc>>,
 }
 
@@ -1241,8 +1241,7 @@ impl StructRt {
         qualified_name(self.module.as_deref(), &self.name)
     }
 
-    /// Returns the description of the struct type that each
-    /// [`Value`](crate::value::Value) of the type shares.
+    /// Returns the shared [`StructDesc`] for this struct type.
     pub(crate) fn desc(&self) -> &Arc<StructDesc> {
         self.desc.get_or_init(|| Arc::new(StructDesc { type_name: self.qualified_name(), fields: self.fields.clone() }))
     }
@@ -1255,7 +1254,7 @@ pub struct VariantRt {
     pub name: String,
     pub field_names: Option<Vec<String>>,
     pub arity: usize,
-    /// The value of [`Program::variant_desc`], which the first call makes.
+    /// Cached descriptor returned by [`Program::variant_desc`].
     pub desc: OnceLock<Arc<VariantDesc>>,
 }
 
@@ -1302,9 +1301,8 @@ pub struct Program {
 }
 
 impl Program {
-    /// Returns the description that each [`Value`](crate::value::Value) of
-    /// the variant with the runtime ID `id` shares, or `None` if the program
-    /// has no such variant.
+    /// Returns the shared [`VariantDesc`] for the variant with runtime ID `id`,
+    /// or `None` if `id` is out of bounds.
     pub(crate) fn variant_desc(&self, id: u32) -> Option<&Arc<VariantDesc>> {
         let variant = self.variants.get(id as usize)?;
         let ty = self.types.get(variant.def as usize)?;

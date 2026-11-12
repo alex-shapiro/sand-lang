@@ -573,8 +573,8 @@ macro_rules! __value_type_impls {
     };
 }
 
-/// The type name of a native value type that each value from `encode`
-/// shares.
+/// Cached qualified type name shared across values from a derived `Encode`
+/// implementation.
 #[doc(hidden)]
 pub type TypeNameCell = std::sync::OnceLock<std::sync::Arc<str>>;
 

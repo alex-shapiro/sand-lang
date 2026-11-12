@@ -331,9 +331,9 @@ A generic Rust function accepts values of its `N`-th type parameter as `Param<N,
 
 ## Values outside the VM
 
-`sandlang::value::Value` holds a Sand value in a Rust form. A `Value` does not reference the VM, so you can keep it after the run ends. A struct or an enum variant in a `Value` holds a shared description of its type: the type name with its module, such as `shop.Order`, and the field names. `field("id")` returns the value of a field by its name. A value of a native value type, such as `time.PlainDate`, is a `Value::Native` with its type name and text.
+`sandlang::value::Value` represents a Sand value in Rust. A `Value` is independent of the VM, so you can keep it after a run ends. A struct or enum variant in a `Value` holds a shared type descriptor with the module-qualified type name, such as `shop.Order`, and the field names. `field("id")` looks up a field value by name. A value of a native value type, such as `time.PlainDate`, becomes a `Value::Native` with its type name and text.
 
-`Vm::to_value` copies any script value out of the VM. Each part whose type does not implement the Sand trait `Encode`, such as a function or a native object, is a `Value::Opaque`, so a struct with a function field is a `Value::Struct` with an opaque field. A type name is a label: a type of the main script `main.sand` has the module `main`, so a script can declare a type whose name equals the name of a host type. The copy charges fuel and counts against the memory limit, and it fails with a `"limit"` error beyond 512 levels of nesting:
+`Vm::to_value` copies any script value out of the VM. Any part whose type does not implement the Sand `Encode` trait, such as a function or a native object, becomes `Value::Opaque`. For example, a struct with a function field becomes a `Value::Struct` with an opaque field. A type from the main script `main.sand` uses the module prefix `main`, which distinguishes it from a host type with the same base name. The copy charges fuel and memory against the run limits. It fails with a `"limit"` error if nesting exceeds 512 levels:
 
 ```rust
 use sandlang::native::NativeModule;
@@ -351,7 +351,7 @@ audit.function("record", |vm: &mut Vm, event: Param<0>| -> Result<(), Fail> {
 });
 ```
 
-The trait `sandlang::value::Encode` gives the `Value` form of a Rust value without a VM. Primitives, strings, collections, slices, `Option`, tuples, references, and native value types implement it. `SandStruct`, `SandEnum`, and `SandValue` derive it. The `Value` of a derived type is equal to the copy that `Vm::to_value` makes of the same Sand value:
+The `sandlang::value::Encode` trait converts a Rust value into a `Value` without a VM. Common Rust types implement `Encode`, and `SandStruct`, `SandEnum`, and `SandValue` derive it. For a derived type, `Encode::encode` produces the same `Value` as `Vm::to_value`:
 
 ```rust
 use sandlang::SandStruct;
@@ -370,9 +370,9 @@ assert_eq!(point.ty.type_name, "geo.Point");
 assert_eq!(point.field("x"), Some(&Value::Float(1.0)));
 ```
 
-`Value::native::<T>()` returns a value as the native value type `T`, such as `value.native::<jiff::civil::Date>()`, or `None` if the value is not a `T`.
+`Value::native::<T>()` parses a `Value` as the native value type `T`, such as `value.native::<jiff::civil::Date>()`. It returns `None` if the value is not of type `T`.
 
-A `#[sand(default)]` field default is the `Encode` form of its Rust value. The default must be a Sand constant of the field type, so a native value type such as `jiff::Timestamp` cannot be a field default. `HostModules::new` returns a compile error for a default that is not such a constant. A derived type with a field that has no `Value` form, such as a `VmVal` handle, takes `#[sand(no_value)]`.
+A `#[sand(default)]` field default uses the `Encode` form of its Rust value. The default must be a Sand constant of the field type. Native value types such as `jiff::Timestamp` cannot be field defaults. `HostModules::new` returns a compile error if a default is not a valid constant. Add `#[sand(no_value)]` to a derived type if a field type such as `VmVal` does not implement `Encode`.
 
 ## Interactive sessions
 

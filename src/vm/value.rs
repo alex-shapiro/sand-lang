@@ -1144,16 +1144,16 @@ pub enum FieldDefault {
     },
 }
 
-/// A variant of an enum [`TypeDesc`], which `reflect` and `json.decode` use.
+/// Variant descriptor within an enum [`TypeDesc`].
 #[derive(Clone)]
 pub struct ReflectVariantDesc {
-    /// The variant name, such as `Shipped`.
+    /// Variant name, such as `Shipped`.
     pub name: String,
-    /// The runtime ID of the variant, which a [`VmValue::Tag`] holds.
+    /// Program-wide runtime variant ID.
     pub runtime_id: u32,
-    /// The type of each payload value in declaration order.
+    /// Payload field types in declaration order.
     pub payload_types: Vec<Arc<TypeDesc>>,
-    /// The names of the payload fields, or `None` for a positional payload.
+    /// Payload field names, or `None` for a positional or empty payload.
     pub field_names: Option<Vec<String>>,
 }
 

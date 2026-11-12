@@ -180,8 +180,8 @@ impl Ty {
         own && self.implements(BuiltinTrait::Eq) && self.implements(BuiltinTrait::Encode) && self.parts().iter().all(|t| t.round_trips())
     }
 
-    /// Returns `true` if `json.encode` and `json.to_json` accept each value of
-    /// `self`: `self` implements `Encode`, and each map key has a text form.
+    /// Returns `true` if `json.encode` and `json.to_json` accept values of
+    /// `self`.
     fn has_json_form(&self) -> bool {
         let own = match self {
             Ty::Map(k, _) => matches!(**k, Ty::Int | Ty::Str | Ty::Bool),

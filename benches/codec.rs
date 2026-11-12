@@ -1,13 +1,13 @@
-//! Benchmarks for the `json` module and for [`Vm::to_value`].
+//! Benchmarks for the `json` module and [`Vm::to_value`].
 //!
-//! `cargo bench --bench codec` reports the best time for each operation over
-//! `BENCH_RUNS` engine runs (default 3). Each operation runs in its own engine,
-//! so one operation does not change the time of another. Each run executes the
-//! operation `BENCH_REPS` times (default 5) and keeps the fastest. The document
-//! has `BENCH_USERS` users (default 5000). `BENCH_OPS=encode,decode` limits the
-//! operations.
+//! `cargo bench --bench codec` reports the fastest time per operation across
+//! `BENCH_RUNS` engine runs. The default is 3 runs. Each operation runs in its
+//! own engine instance. Each run executes the operation `BENCH_REPS` times and
+//! keeps the fastest repetition. The default is 5 repetitions. The test
+//! document contains `BENCH_USERS` users, which defaults to 5000. Set
+//! `BENCH_OPS=encode,decode` to filter operations.
 //!
-//! `cargo test --benches` runs each program once and checks its output.
+//! `cargo test --benches` runs each benchmark once and verifies its output.
 
 use sandlang::engine::{Config, Engine, Error, HostModules, Limits, MemorySink};
 use sandlang::native::NativeModule;
@@ -16,8 +16,8 @@ use sandlang::stdlib::json::Json;
 use sandlang::value::Value;
 use sandlang::vm::{Fail, Vm};
 
-/// Declares the types of a document and `make`, which returns a document of
-/// `n` users.
+/// Declares the benchmark document types and `make(n)`, which builds a document
+/// with `n` users.
 const PRELUDE: &str = r#"import json
 import time
 import host
@@ -40,14 +40,13 @@ fn make(n: int) -> Doc {
 /// A benchmark operation.
 struct Operation {
     name: &'static str,
-    /// The Sand statements that make the inputs of the operation. `{n}` is the
-    /// number of users.
+    /// Sand statements that initialize the inputs. `{n}` is replaced with the
+    /// user count.
     inputs: &'static str,
-    /// The Sand closure of type `fn() -> int` that runs the operation.
+    /// Sand closure of type `fn() -> int` that executes the operation.
     closure: &'static str,
-    /// The number of times that one call of `closure` runs the operation, or
-    /// `None` if one call runs the operation once on a document. The
-    /// benchmark reports the time of one run, or of one user of the document.
+    /// Iterations per call of `closure`, or `None` if `closure` processes a
+    /// full document once.
     runs_per_call: Option<usize>,
 }
 
@@ -201,11 +200,8 @@ print("check host.copied_fields(doc) == 1: \(host.copied_fields(doc) == 1)")
 print("check text length: \(text.len())")
 "#;
 
-/// Returns the module `host`. Its function `copied_fields` copies a struct out
-/// of the VM with [`Vm::to_value`] and returns the number of fields of the
-/// copy. Its function `json_members` takes a `Json` object as a Rust [`Json`]
-/// and returns the number of its members. Its function `json_echo` takes a
-/// `Json` value as a Rust [`Json`] and returns it as a Sand `Json` value.
+/// Builds the `host` module with helper functions for `Vm::to_value` and
+/// `Json` conversion benchmarks.
 fn host_modules() -> HostModules {
     let mut host = NativeModule::new("host");
     host.source("pub native fn copied_fields<T>(value: T) -> int");
@@ -226,20 +222,20 @@ fn host_modules() -> HostModules {
     HostModules::new([host]).unwrap()
 }
 
-/// Returns the program that declares `operation`, the closure of `op`, for a
-/// document of `users` users.
-fn program(op: &Operation, users: usize) -> String {
+/// Builds the Sand source for `op` with `users` users.
+fn operation_source(op: &Operation, users: usize) -> String {
     format!("{PRELUDE}{}let operation = {}\n", op.inputs.replace("{n}", &users.to_string()), op.closure)
 }
 
-/// Returns the operations that `BENCH_OPS` names, or all operations.
+/// Returns the operations selected by `BENCH_OPS`, or all operations if
+/// `BENCH_OPS` is unset.
 fn selected_operations() -> impl Iterator<Item = &'static Operation> {
     let names = std::env::var("BENCH_OPS").unwrap_or_default();
     let names: Vec<String> = names.split(',').filter(|name| !name.is_empty()).map(str::to_string).collect();
     OPERATIONS.iter().filter(move |op| names.is_empty() || names.iter().any(|name| name == op.name))
 }
 
-fn run(src: &str, limits: Limits) -> Result<String, Error> {
+fn run_source(src: &str, limits: Limits) -> Result<String, Error> {
     let out = MemorySink::new();
     let mut engine = Engine::new(Config::new().limits(limits).host_modules(host_modules()).stdout(out.clone()));
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -247,16 +243,17 @@ fn run(src: &str, limits: Limits) -> Result<String, Error> {
     Ok(out.contents())
 }
 
-fn env(name: &str, default: usize) -> usize {
+fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name).ok().and_then(|n| n.parse().ok()).unwrap_or(default).max(1)
 }
 
 fn main() {
     let quick = std::env::var("BENCH_QUICK").is_ok() || !std::env::args().any(|a| a == "--bench");
-    let (users, runs, reps) = if quick { (200, 1, 1) } else { (env("BENCH_USERS", 5000), env("BENCH_RUNS", 3), env("BENCH_REPS", 5)) };
+    let (users, runs, reps) =
+        if quick { (200, 1, 1) } else { (env_usize("BENCH_USERS", 5000), env_usize("BENCH_RUNS", 3), env_usize("BENCH_REPS", 5)) };
     let checks = CHECKS.replace("{n}", &users.to_string());
-    let checks = run(&format!("{PRELUDE}{checks}"), Limits::default()).unwrap_or_else(|e| panic!("checks: {e}"));
-    assert!(!checks.is_empty(), "the program printed no checks");
+    let checks = run_source(&format!("{PRELUDE}{checks}"), Limits::default()).unwrap_or_else(|e| panic!("checks: {e}"));
+    assert!(!checks.is_empty(), "expected check output from benchmark prelude");
     for check in checks.lines() {
         assert!(check.starts_with("check ") && !check.ends_with("false"), "{check}");
     }
@@ -265,9 +262,9 @@ fn main() {
     for op in selected_operations() {
         let items = op.runs_per_call.unwrap_or(users);
         let timing = TIMING.replace("{reps}", &reps.to_string()).replace("{items}", &items.to_string());
-        let src = format!("{}{timing}", program(op, users));
+        let src = format!("{}{timing}", operation_source(op, users));
         let ns_per_item = |_| {
-            let out = run(&src, Limits::default()).unwrap_or_else(|e| panic!("{}: {e}", op.name));
+            let out = run_source(&src, Limits::default()).unwrap_or_else(|e| panic!("{}: {e}", op.name));
             let ns = out.split(' ').next().and_then(|ns| ns.parse::<u64>().ok());
             ns.unwrap_or_else(|| panic!("{}: unexpected output {out:?}", op.name))
         };

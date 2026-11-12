@@ -275,54 +275,48 @@ This changeset has no source commits.
 
 ### 14. `Value` and `Vm::to_value`
 
-`sandlang::value::Value` is the Rust form of every Sand value that implements
-`Encode`. It holds unit, bool, int, float, duration, string, bytes, list, tuple,
-map, set, range, structs and enums with their names, and native value types. A
-`Value` does not reference the VM, so it remains valid after the run ends. `Value`
-is `#[non_exhaustive]`, so a new variant does not break hosts.
+`sandlang::value::Value` is the Rust form of a Sand value. A `Value` is
+independent of the VM, so it remains valid after a run ends. `Value` has
+`#[non_exhaustive]` so that new variants are backward-compatible.
 
-The Sand trait `Encode` defines what can leave the VM. Three functions read such a
-value from the heap: `json.encode` writes JSON text, `json.to_json` builds the Sand
-`Json` value, and `Vm::to_value` builds a `Value`.
+The Sand trait `Encode` defines what can leave the VM. Three functions read an
+encodable value from the heap: `json.encode` writes JSON text, `json.to_json`
+builds a Sand `Json` value, and `Vm::to_value` builds a `Value`.
 
-- Each function has its own `match` on the kinds of heap value, and its own stack of
-  the containers that it has entered. No function recurses, so a deep value cannot
-  overflow the thread stack.
-- The functions share only `ContainerChildren`, an iterator over the children of one
-  container.
-- A shared heap walk that writes to a sink was the first design. It cost about 300
-  lines more than three functions, and its speed depended on `#[inline(always)]` on
-  each method of two layers of traits.
-- Rules that are specific to JSON exist only in the `json` module. These rules flatten
-  `Some`, write `None` as `null`, pass the `Json` enum through, write map keys as
-  text, and use Base64 for `bytes` and text for native value types.
-- The compiler cannot check that `json.encode` and `json.to_json` agree. A property
-  test checks that `json.encode(json.to_json(x)) == json.encode(x)`.
-- Every native value type, from the standard library or a host, is
-  `Value::Native { type_name, text }`. The `time` types have no variants of their
-  own. The type name includes the module. The text is lossless, because
-  `ValueType::parse` must turn the `Display` output back into an equal value.
-  `value.native::<Money>()` checks the type name and returns a `Money`.
-- A result whose type does not implement `Encode` is `Value::Opaque`, which holds
-  the type name. Native objects, such as files and connections, are not `Encode`.
-  A native object lives on the heap of the VM, and its resources count against the
-  limits of the run, so it cannot leave the VM.
-- `value::Encode` mirrors the Sand trait. Primitives, collections, and `ValueType`
-  types implement it. `#[derive(SandStruct)]`, `#[derive(SandEnum)]`, and
-  `#[derive(SandValue)]` generate it.
-- The copy out of the heap uses the fuel, memory, and 512-level depth bounds of
-  `json.encode`. A cycle reaches the depth bound. A copy that exceeds a bound
-  returns a limit error.
-- A benchmark must show that `json.encode` keeps its speed.
-- Rename `Vm::new_value` and `Heap::value` to reflect `ValueType` rather than
-  `Value`.
-- Decide how `Constant` relates to `Value`. `IntoVmValue::to_const` builds
-  compile-time constants. The derive macros generate a separate walk for
-  `to_const`. Building constants from `Encode` or `Value` removes that walk so
-  that `IntoVmValue` only converts to `VmValue`.
+- Each function matches on heap value kinds and tracks open containers on an
+  explicit stack. This iterative walk prevents thread stack overflow on deep
+  values.
+- The three functions share only `ContainerChildren`, which iterates over the
+  children of a container.
+- The first design used a shared heap walk that wrote to a sink. That design
+  required about 300 extra lines and `#[inline(always)]` across two trait
+  layers.
+- JSON-specific rules stay in the `json` module. These rules flatten `Some`,
+  write `None` as `null`, pass the `Json` enum through, convert map keys to
+  text, encode `bytes` as Base64, and format native value types as text.
+- A property test checks that `json.encode(json.to_json(x)) == json.encode(x)`.
+- A native value from the standard library or the host is a
+  `Value::Native(Box<NativeValue>)`. `NativeValue` stores the module-qualified
+  type name and the `Display` text. `ValueType::parse` reconstructs an equal
+  value from this text. `value.native::<Money>()` checks the type name and
+  parses a `Money`.
+- A part whose type does not implement `Encode` becomes `Value::Opaque` with its
+  type name. Native objects stay on the VM heap because the run tracks their
+  resources.
+- `value::Encode` is the Rust counterpart of the Sand `Encode` trait.
+  `#[derive(SandStruct)]`, `#[derive(SandEnum)]`, and `#[derive(SandValue)]`
+  implement it.
+- `Vm::to_value` uses the fuel, memory, and 512-level depth limits of
+  `json.encode`. A cyclic value hits the depth limit. Exceeding a limit returns
+  a limit error.
+- A benchmark verifies `json.encode` throughput.
+- `Vm::new_value` and `Heap::value` are renamed to `Vm::new_value_type` and
+  `Heap::value_type`.
+- `IntoVmValue::to_const` is replaced by `value::Encode` and
+  `Value::to_const_val`.
 
-This changeset has no source commits. `03076c5` returned `Json`, which loses the
-difference between `bytes` and a string, and between `()` and `None`.
+Commit `03076c5` returned `Json`. That representation lost the distinction
+between `bytes` and `str`, and between `()` and `None`.
 
 ### 15. Shared decode path and `Value` input
 

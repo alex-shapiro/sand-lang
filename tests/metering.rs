@@ -1084,10 +1084,8 @@ print((total, probe.fuel()))
     assert!(completed > 0, "every limit was too small");
 }
 
-/// Prints the JSON text of one value of each kind, and the fuel of each way
-/// out of the VM for the value: `json.encode`, `json.encode` with an indent,
-/// `json.to_json`, a `Json` parameter of a native function, and
-/// `Vm::to_value`.
+/// Prints the JSON text and fuel cost of encoding and copying representative
+/// Sand values.
 const VALUE_OF_EACH_KIND: &str = r#"import json
 import probe
 import time

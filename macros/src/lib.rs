@@ -3,15 +3,15 @@
 //! Each type requires a `#[sand(module = "<module>")]` attribute and accepts
 //! optional type attributes:
 //!
-//! - `#[sand(name = "<Name>")]` overrides the Sand type name.
-//! - `#[sand(private)]` makes the type private.
-//! - `#[sand(crate = <path>)]` overrides the `::sandlang` crate path.
-//! - `#[sand(manual_conversion)]` omits the `FromVmValue` and `IntoVmValue` implementations. If the
-//!   VM form of the type differs from its Rust shape, also add `no_value` or implement `Encode` by
-//!   hand, so that `encode` returns the copy that `Vm::to_value` returns.
-//! - `#[sand(no_value)]` states that the type has no `Value` form, and omits the `Encode`
-//!   implementation. Use it for a type with a field that has no `Value` form, such as a `VmVal`
-//!   handle.
+//! - `#[sand(name = "<Name>")]`: overrides the Sand type name.
+//! - `#[sand(private)]`: makes the type private.
+//! - `#[sand(crate = <path>)]`: overrides the `::sandlang` crate path.
+//! - `#[sand(manual_conversion)]`: omits the `FromVmValue` and `IntoVmValue`
+//!   implementations. If the VM representation differs from the Rust struct or
+//!   enum, also add `#[sand(no_value)]` or implement `Encode` manually to match
+//!   `Vm::to_value`.
+//! - `#[sand(no_value)]`: omits the `Encode` implementation. Use this attribute
+//!   if a field type such as `VmVal` does not implement `Encode`.
 //!
 //! The macros copy Rust doc comments into Sand documentation.
 
@@ -31,7 +31,7 @@ use syn::{
 /// Implements `NamedType`, `EnumType`, `SandType`, `FromVmValue`, `IntoVmValue`,
 /// and `Encode`. Supports unit, tuple, and struct variants, as well as type
 /// parameters. Each payload type must implement `IntoVmValue`, owned
-/// `FromVmValue`, and `Encode`.
+/// `FromVmValue`, and `Encode`, unless the enum uses `#[sand(no_value)]`.
 ///
 /// Optional attributes:
 ///
@@ -45,17 +45,19 @@ pub fn derive_sand_enum(input: TokenStream) -> TokenStream {
 ///
 /// Implements `NamedType`, `StructType`, `SandType`, `FromVmValue`, `IntoVmValue`,
 /// and `Encode`. Each field type must implement `IntoVmValue`, owned
-/// `FromVmValue`, and `Encode`. Rust type parameters define Sand type parameters.
+/// `FromVmValue`, and `Encode`, unless the struct uses `#[sand(no_value)]`.
+/// Rust type parameters define Sand type parameters.
 ///
 /// Optional field attributes:
 ///
 /// - `#[sand(name = "<name>")]`: overrides the Sand field name.
 /// - `#[sand(private)]`: makes the field private.
 /// - `#[sand(var)]`: makes the field mutable.
-/// - `#[sand(default)]` or `#[sand(default = <expr>)]`: sets a default value from the `Default` trait or `Into::into(<expr>)`.
-///   The field default is the `Encode` form of the value. It must be a Sand constant of the field
-///   type, so it cannot hold a native value type. `HostModules::new` reports a default that is not
-///   such a constant as a compile error.
+/// - `#[sand(default)]` or `#[sand(default = <expr>)]`: sets a default value
+///   from `Default::default()` or `Into::into(<expr>)`. The default uses the
+///   `Encode` form of the value and must be a Sand constant of the field type.
+///   Native value types cannot be field defaults. `HostModules::new` returns a
+///   compile error if a default is not a valid constant.
 #[proc_macro_derive(SandStruct, attributes(sand))]
 pub fn derive_sand_struct(input: TokenStream) -> TokenStream {
     expand(input, sand_struct)
@@ -170,9 +172,8 @@ impl TypeParams {
         self.substitute(ty, &|i| parse_quote!(#krate::native::ty::Param<#i>))
     }
 
-    /// Replaces each type parameter in `ty`, also in `Self`, with the
-    /// uninhabited `Never`. A value of the result holds no value of a type
-    /// parameter.
+    /// Replaces `Self` and each type parameter in `ty` with the uninhabited
+    /// `Never` type.
     fn replace_params_with_never(&self, krate: &Path, ty: &Type) -> Type {
         self.substitute(ty, &|_| parse_quote!(#krate::native::ty::Never))
     }
@@ -861,7 +862,7 @@ mod tests {
     }
 
     #[test]
-    fn encode_names_each_field_and_variant_payload() {
+    fn encode_converts_each_field_and_variant_payload() {
         let out = expand(sand_struct, "#[sand(module = \"m\")] struct S<T> { x: i64, y: T }");
         assert!(out.contains(":: sandlang :: native :: encode_struct :: < Self > (& SAND_STRUCT_DESC , [:: sandlang :: value :: Encode :: encode (& self . x) , :: sandlang :: value :: Encode :: encode (& self . y)])"), "{out}");
         assert!(out.contains("static SAND_STRUCT_DESC : :: sandlang :: native :: StructDescCell"), "{out}");

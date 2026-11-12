@@ -179,20 +179,19 @@ pub struct StructField {
     pub var: bool,
     /// Returns the Sand [`Type`] of the field.
     pub ty: fn() -> Type,
-    /// Returns the default value of the field (`#[sand(default)]`): the
-    /// [`Encode`](crate::value::Encode) form of the Rust default. The default
-    /// must be a Sand constant of the field type, so it cannot hold a native
-    /// value type.
+    /// Returns the default value of the field (`#[sand(default)]`) as an
+    /// encoded [`Value`]. The default must be a Sand constant of the field
+    /// type, so it cannot contain a native value type.
     pub default: Option<fn() -> Value>,
 }
 
-/// The description of a struct type that each value from a derived `encode`
-/// shares.
+/// Cached [`StructDesc`] shared across values from a derived `Encode`
+/// implementation.
 #[doc(hidden)]
 pub type StructDescCell = OnceLock<Arc<StructDesc>>;
 
-/// The description of a variant that each value from a derived `encode`
-/// shares.
+/// Cached [`VariantDesc`] shared across values from a derived `Encode`
+/// implementation.
 #[doc(hidden)]
 pub type VariantDescCell = OnceLock<Arc<VariantDesc>>;
 

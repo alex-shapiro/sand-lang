@@ -916,22 +916,23 @@ impl Vm {
         self.heap.alloc(value::value_obj(x))
     }
 
-    /// Copies `v` out of the VM as a [`Value`](crate::value::Value), which
-    /// remains valid after the run ends.
+    /// Copies `v` out of the VM into a [`Value`](crate::value::Value).
     ///
-    /// The copy has each value that `v` contains, with the names of structs,
-    /// enums, and native value types. Each part of `v` whose type does not
-    /// implement the Sand trait `Encode`, such as a function, is a
-    /// [`Value::Opaque`](crate::value::Value::Opaque), so a struct with a
-    /// function field is a struct with an opaque field. The copy charges fuel
-    /// and counts its memory against the limits of the run. It fails with kind
-    /// `"limit"` if `v` has more than 512 levels of nesting, which includes a
-    /// value that contains itself. Each `Some` counts as one level.
+    /// A `Value` is independent of the VM and remains valid after a run ends.
+    /// Structs, enum variants, and native values keep their qualified names.
+    /// Any part whose type does not implement the Sand `Encode` trait, such as
+    /// a function, becomes [`Value::Opaque`](crate::value::Value::Opaque). For
+    /// example, a struct with a function field becomes a `Value::Struct` with
+    /// an opaque field.
+    ///
+    /// The copy charges fuel and memory against the run limits. It fails with a
+    /// `"limit"` error if `v` exceeds 512 nesting levels, which includes cyclic
+    /// values. Each `Some` wrapper adds a nesting level.
     ///
     /// If the copy exceeds the memory limit, `to_value` returns a memory limit
-    /// error. When a native function returns that error, the engine collects
-    /// garbage and runs the function again from the start, so call `to_value`
-    /// before any side effect.
+    /// error. If a native function returns that error, the engine collects
+    /// garbage and reruns the function from the start. Call `to_value` before
+    /// performing any side effect.
     ///
     /// ```
     /// # use sandlang::native::NativeModule;

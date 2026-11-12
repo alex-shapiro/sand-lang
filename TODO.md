@@ -88,11 +88,10 @@ The host cannot rely on engine limits, stability, or control.
       break paused runs.
 - [ ] ❓ _Testing._ Compare fuel across hash seeds in the spec suite. Add a test
       configuration option to set the hash seed.
-- [ ] ❓ _Testing._ Compare fuel between a 32-bit and a 64-bit target. No test
-      runs a program on both, so the deterministic fuel rule holds across
-      platforms only by review. Add a small set of programs with pinned fuel
-      totals that runs on a native target and on `wasm32`. Include a host
-      function that calls `Vm::to_value`.
+- [ ] ❓ _Testing._ Compare fuel between a 32-bit and a 64-bit target.
+      Cross-platform fuel determinism is currently verified only by review. Add
+      programs with pinned fuel totals that run on both a native target and
+      `wasm32`. Include a host function that calls `Vm::to_value`.
 - [ ] ❓ _Embedding._ Convert derived `SandEnum` and `SandStruct` values iteratively with an
       explicit stack. The derived `FromVmValue` and `IntoVmValue` implementations
       recurse once per nesting level. Deep values can overflow a small host
@@ -101,15 +100,15 @@ The host cannot rely on engine limits, stability, or control.
       stack without regressing throughput. These functions recurse up to the
       512-level nesting limit, which can overflow a 2 MiB thread stack in debug
       builds.
-- [ ] ❓ _Embedding._ Clone, compare, and drop a deep `Value` without
-      recursion. The derived `Clone` and `PartialEq` and the default drop
-      recurse once per level. For a 512-level value, which `Vm::to_value` can
-      return, a debug build needs up to 721 KiB of stack for `clone`, 417 KiB
-      for `==`, and 129 KiB for drop, so `clone` overflows a 512 KiB thread.
-      A host can also build a `Value` deeper than 512 levels in Rust.
-- [ ] 🔴 [019](triage/019-value-type-defaults/summary.md) _Embedding._ Represent `ValueType` constants in `ConstVal` by their text form so that
-      `#[sand(default)]` supports value-type fields and `json.decode` evaluates
-      constant value-type defaults directly.
+- [ ] ❓ _Embedding._ Clone, compare, and drop a deep `Value` iteratively. The
+      derived `Clone` and `PartialEq` implementations and the default drop
+      recurse once per level. On a 512-level value from `Vm::to_value`, a debug
+      build uses up to 721 KiB of stack for `clone`, 417 KiB for `==`, and
+      129 KiB for drop. A host can also construct a `Value` deeper than 512
+      levels in Rust.
+- [ ] 🔴 [019](triage/019-value-type-defaults/summary.md) _Embedding._ Represent `ValueType` constants in `ConstVal` by their text form. This lets
+      `#[sand(default)]` support value-type fields and lets `json.decode`
+      evaluate constant value-type defaults directly.
 - [ ] 🔴 [027](triage/027-netaddr-missing-request-context/summary.md) _Policy._ Include the originating HTTP method and URL on `Capability::NetAddr` so
       that `CustomPolicy` and `RulePolicy::check` evaluate resolved addresses
       with full request context.

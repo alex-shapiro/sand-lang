@@ -1,61 +1,55 @@
-//! [`ContainerChildren`], an iterator over the children of one container on the VM
-//! heap: the items of a list, the entries of a map, or the fields of a struct.
+//! [`ContainerChildren`] iterates over the children of a heap container.
 //!
 //! `json.encode`, `json.to_json`, and [`Vm::to_value`](super::Vm::to_value)
-//! read a value without recursion. Each of them keeps one `ContainerChildren` for each
-//! container that it has entered and not yet left.
+//! walk heap values iteratively. Each function keeps a `ContainerChildren`
+//! iterator for every open container on its stack.
 
 use super::bytecode::VariantRt;
 use super::value::VmValue;
 use std::slice::Iter;
 
-/// The largest nesting depth of a value that the `json` module and
-/// [`Vm::to_value`](super::Vm::to_value) accept.
+/// Maximum nesting depth accepted by the `json` module and
+/// [`Vm::to_value`](super::Vm::to_value).
 ///
-/// A script can build a value that contains itself, so each of these
-/// functions fails with a limit error beyond this depth.
+/// Exceeding this depth returns a limit error, which also stops cyclic values.
 pub(crate) const MAX_NESTING_DEPTH: usize = 512;
 
-/// The number of open containers that `json.encode`, `json.to_json`, and
-/// [`Vm::to_value`](super::Vm::to_value) store without an allocation. An
-/// allocation for each call costs `json.encode` of a small struct more than
-/// 10% of its time.
+/// Number of open containers stored inline before spilling to the heap.
 pub(crate) const INLINE_OPEN_CONTAINERS: usize = 4;
 
-/// The place of a child in its container.
+/// Role of a child value within its parent container.
 #[derive(Clone, Copy)]
 pub(crate) enum ChildRole<'h> {
-    /// An item of a list, tuple, or set, or a value of a positional payload.
+    /// Element of a list, tuple, set, or positional variant payload.
     Item,
     MapKey,
-    /// The value of the map key that came last.
+    /// Value corresponding to the preceding `MapKey`.
     MapValue,
-    /// The value of the field with this name in a struct or in a named payload.
+    /// Value of a named field in a struct or variant payload.
     Field(&'h str),
 }
 
-/// The children of one container that the iterator has not returned.
+/// Remaining children of an open heap container.
 pub(crate) enum ContainerChildren<'h> {
     Items(Iter<'h, VmValue>),
     Set(Iter<'h, Option<VmValue>>),
-    /// The entries of a map from the next key on, and the value of the key
-    /// that came last, until that value comes.
+    /// Remaining map entries and the pending value for the current key.
     Map(Iter<'h, Option<(VmValue, VmValue)>>, Option<VmValue>),
-    /// The field names and the field values of a struct or of a named payload.
+    /// Field names and values of a struct or named variant payload.
     Fields(Iter<'h, String>, Iter<'h, VmValue>),
-    /// One child and its role.
-    One(ChildRole<'h>, Option<VmValue>),
-    /// The two integers of an inline tuple.
+    /// A single child value and its role.
+    Single(ChildRole<'h>, Option<VmValue>),
+    /// The two integers of an inline pair tuple.
     Pair(i32, i64),
 }
 
 impl<'h> ContainerChildren<'h> {
-    /// Returns an iterator without children.
+    /// Returns an empty child iterator.
     pub(crate) fn empty() -> Self {
         ContainerChildren::Items(Iter::default())
     }
 
-    /// Returns the children of the payload `values` of `variant`.
+    /// Returns an iterator over the payload `values` of `variant`.
     pub(crate) fn from_payload(variant: &'h VariantRt, values: &'h [VmValue]) -> Self {
         match &variant.field_names {
             Some(names) => ContainerChildren::Fields(names.iter(), values.iter()),
@@ -63,10 +57,10 @@ impl<'h> ContainerChildren<'h> {
         }
     }
 
-    /// Returns the one child of the payload `value` of `variant`.
+    /// Returns an iterator over the single inline payload `value` of `variant`.
     pub(crate) fn from_inline_payload(variant: &'h VariantRt, value: VmValue) -> Self {
         let role = variant.field_names.as_ref().and_then(|names| names.first()).map_or(ChildRole::Item, |name| ChildRole::Field(name));
-        ContainerChildren::One(role, Some(value))
+        ContainerChildren::Single(role, Some(value))
     }
 }
 
@@ -88,10 +82,10 @@ impl<'h> Iterator for ContainerChildren<'h> {
                 }
             },
             ContainerChildren::Fields(names, values) => Some((ChildRole::Field(names.next()?), *values.next()?)),
-            ContainerChildren::One(role, value) => Some((*role, value.take()?)),
+            ContainerChildren::Single(role, value) => Some((*role, value.take()?)),
             ContainerChildren::Pair(first, second) => {
                 let first = VmValue::Int(i64::from(*first));
-                *self = ContainerChildren::One(ChildRole::Item, Some(VmValue::Int(*second)));
+                *self = ContainerChildren::Single(ChildRole::Item, Some(VmValue::Int(*second)));
                 Some(item(first))
             }
         }

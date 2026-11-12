@@ -644,9 +644,9 @@ pub enum ConstVal {
     Map(Vec<(ConstVal, ConstVal)>),
     /// `set([...])`, with the elements in insertion order.
     Set(Vec<ConstVal>),
-    /// A variant, by runtime variant ID, and its payload.
+    /// Variant runtime ID and payload values.
     Variant(u32, Vec<ConstVal>),
-    /// A struct and its fields in declaration order.
+    /// Struct definition ID and field values in declaration order.
     Struct(TypeDefId, Vec<ConstVal>),
 }
 

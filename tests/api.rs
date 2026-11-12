@@ -1627,8 +1627,8 @@ fn rust_json_field_defaults_are_constants() {
     assert_eq!(out, "{\"on\":[true,-1,0.5,\"x\",null]}\ntrue\ntrue\n");
 }
 
-/// Returns the error for a default of the Rust field `field` of `lab.<owner>`
-/// that is not a constant of the Sand type `ty`.
+/// Formats the compile error for an invalid default on the Rust field `field`
+/// of `lab.<owner>` with Sand type `ty`.
 fn rust_default_error(owner: &str, field: &str, ty: &str) -> String {
     format!(
         "the Rust field `{field}` of `lab.{owner}` has a default that is not a constant of `{ty}` with at most 65536 parts and 64 levels"
@@ -4215,8 +4215,8 @@ fn rust_bound_field_types_meet_the_requirements_of_their_constructors() {
 // Values copied out of the VM
 // ---------------------------------------------------------------------------
 
-/// Runs `src` with the module of [`copy_module`] and the modules in
-/// `modules`. Returns the result of the run and the copies.
+/// Runs `src` with [`copy_module`] and `modules`, and returns the run outcome
+/// and the copied values.
 fn run_and_copy_values(
     config: Config,
     modules: impl IntoIterator<Item = NativeModule>,
@@ -4229,8 +4229,8 @@ fn run_and_copy_values(
     (r, values)
 }
 
-/// Returns the module `host`, whose function `host.copy` copies its argument
-/// out of the VM with [`Vm::to_value`], and the copies.
+/// Builds the `host` module with `host.copy`, which copies its argument via
+/// [`Vm::to_value`].
 fn copy_module() -> (NativeModule, Arc<Mutex<Vec<Value>>>) {
     use sandlang::native::ty::Param;
     let copies = Arc::new(Mutex::new(Vec::new()));
@@ -4244,7 +4244,7 @@ fn copy_module() -> (NativeModule, Arc<Mutex<Vec<Value>>>) {
     (host, copies)
 }
 
-/// Returns the copies that `src` makes with `host.copy`.
+/// Runs `src` and returns the values recorded by `host.copy`.
 fn copied_values(src: &str) -> Vec<Value> {
     let (r, values) = run_and_copy_values(Config::new(), [bank_module(), stats_module()], src);
     r.unwrap();
@@ -4289,7 +4289,7 @@ fn to_value_copies_each_kind_of_value() {
 }
 
 #[test]
-fn to_value_names_structs_variants_and_native_value_types() {
+fn to_value_preserves_qualified_names_and_fields() {
     let values = copied_values(
         "import bank\nimport json\nstruct Order { id: int, note: str? }\nenum Status { Active, Suspended(reason: str), Banned(int, str) }\n\
          host.copy(Order(id: 1, note: Some(\"gift\")))\nhost.copy(Order(id: 2, note: None))\n\
@@ -4343,8 +4343,7 @@ fn to_value_keeps_the_shape_of_a_container_that_holds_values_without_encode() {
     assert_eq!(values, expected);
 }
 
-/// Sets up `chain(n)`, a value that nests `n` structs, and `ring`, a struct
-/// that contains itself.
+/// Defines `chain(n)` with `n` nested structs and a cyclic `ring` struct.
 const NESTED_VALUES: &str = "struct Link { var next: Link? }\nfn chain(n: int) -> Link {\n    var link = Link(next: None)\n    \
                              for _ in 1..n {\n        link = Link(next: Some(link))\n    }\n    link\n}\n\
                              let ring = Link(next: None)\nring.next = Some(ring)\n";
@@ -4362,14 +4361,14 @@ fn encode_deep_and_cyclic_values_on_a_small_stack() {
             .to_string());
     r.unwrap();
     assert_eq!(copies, 1);
-    // In a copy, each `Link` after the first adds a struct level and a `Some`
-    // level, so `[chain(256)]` has 512 levels.
-    for (operation, message, one_level_too_deep) in [
+    // In `Vm::to_value`, each `Link` after the first adds both a struct level
+    // and a `Some` level, so `[chain(256)]` reaches 512 levels.
+    for (operation, message, too_deep_expr) in [
         ("json.encode", "limit: value too deeply nested to encode as JSON", "chain(513)"),
         ("json.to_json", "limit: value too deeply nested to convert to JSON", "chain(513)"),
         ("host.copy", "limit: value too deeply nested to copy", "[[chain(256)]]"),
     ] {
-        for value in [one_level_too_deep, "ring"] {
+        for value in [too_deep_expr, "ring"] {
             let (r, _) = run(format!("{operation}({value})"));
             let Err(Error::Runtime { message: actual, .. }) = r else {
                 panic!("{operation}({value}): expected a runtime error, got {r:?}")
