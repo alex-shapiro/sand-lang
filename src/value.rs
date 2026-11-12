@@ -110,7 +110,7 @@ pub struct StructDesc {
 #[derive(Clone, PartialEq)]
 pub struct VariantValue {
     /// The variant.
-    pub ty: Arc<VariantDesc>,
+    pub variant: Arc<VariantDesc>,
     /// The payload values in declaration order. A variant without a payload
     /// has none.
     pub payload: Box<[Value]>,
@@ -185,7 +185,7 @@ impl VariantValue {
     /// Returns the variant `name` of the enum `enum_name` with the positional
     /// payload `payload`. An empty payload gives a variant without a payload.
     pub fn new(enum_name: impl Into<String>, name: impl Into<String>, payload: impl IntoIterator<Item = Value>) -> VariantValue {
-        VariantValue { ty: VariantDesc::new(enum_name, name), payload: payload.into_iter().collect() }
+        VariantValue { variant: VariantDesc::new(enum_name, name), payload: payload.into_iter().collect() }
     }
 
     /// Returns the variant `name` of the enum `enum_name` with the named
@@ -196,13 +196,13 @@ impl VariantValue {
         fields: impl IntoIterator<Item = (N, Value)>,
     ) -> VariantValue {
         let (names, payload): (Vec<String>, Vec<Value>) = fields.into_iter().map(|(n, v)| (n.into(), v)).unzip();
-        VariantValue { ty: VariantDesc::with_fields(enum_name, name, names), payload: payload.into() }
+        VariantValue { variant: VariantDesc::with_fields(enum_name, name, names), payload: payload.into() }
     }
 
     /// Returns the value of the named payload field `name`, or `None` if the
     /// payload has no such field.
     pub fn field(&self, name: &str) -> Option<&Value> {
-        field_named(self.ty.fields.as_deref().unwrap_or_default(), &self.payload, name)
+        field_named(self.variant.fields.as_deref().unwrap_or_default(), &self.payload, name)
     }
 }
 
@@ -311,11 +311,11 @@ impl fmt::Debug for StructValue {
 
 impl fmt::Debug for VariantValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.ty.enum_name)?;
+        f.write_str(&self.variant.enum_name)?;
         f.write_str(".")?;
-        match &self.ty.fields {
-            Some(names) => debug_named_fields(f.debug_struct(&self.ty.name), names, &self.payload),
-            None => self.payload.iter().fold(&mut f.debug_tuple(&self.ty.name), |out, value| out.field(value)).finish(),
+        match &self.variant.fields {
+            Some(names) => debug_named_fields(f.debug_struct(&self.variant.name), names, &self.payload),
+            None => self.payload.iter().fold(&mut f.debug_tuple(&self.variant.name), |out, value| out.field(value)).finish(),
         }
     }
 }
@@ -466,7 +466,7 @@ impl<T: Encode> Encode for Option<T> {
             Some(x) => (&SOME, "Some", Box::new([x.encode()])),
             None => (&NONE, "None", Box::default()),
         };
-        Value::Variant(VariantValue { ty: desc.get_or_init(|| VariantDesc::new("Option", name)).clone(), payload })
+        Value::Variant(VariantValue { variant: desc.get_or_init(|| VariantDesc::new("Option", name)).clone(), payload })
     }
 }
 
@@ -704,7 +704,7 @@ impl<'h> EncodeSink<'h> for ValueSink<'h> {
                 Value::Bytes(bytes.to_vec())
             }
             Leaf::Range { start, end, inclusive } => Value::Range { start, end, inclusive },
-            Leaf::Tag(variant) => Value::Variant(VariantValue { ty: self.variant_desc(variant.id)?, payload: Box::default() }),
+            Leaf::Tag(variant) => Value::Variant(VariantValue { variant: self.variant_desc(variant.id)?, payload: Box::default() }),
             Leaf::Native(native) => self.native(native)?,
             Leaf::Opaque { kind, .. } => self.opaque(kind)?,
         };
@@ -736,7 +736,7 @@ impl<'h> EncodeSink<'h> for ValueSink<'h> {
             PartialValue::Set(items) => Value::Set(items),
             PartialValue::Map(entries, _) => Value::Map(entries),
             PartialValue::Struct(ty, fields) => Value::Struct(StructValue { ty, fields: fields.into_boxed_slice() }),
-            PartialValue::Variant(ty, payload) => Value::Variant(VariantValue { ty, payload: payload.into_boxed_slice() }),
+            PartialValue::Variant(variant, payload) => Value::Variant(VariantValue { variant, payload: payload.into_boxed_slice() }),
         };
         put(parent, value);
         Ok(())

@@ -204,7 +204,7 @@ pub fn encode_struct<T: StructType>(ty: &StructDescCell, fields: impl IntoIterat
 
 #[doc(hidden)]
 pub fn encode_variant<T: EnumType>(variants: &[VariantDescCell], index: usize, payload: impl IntoIterator<Item = Value>) -> Value {
-    let ty = variants[index].get_or_init(|| {
+    let desc = variants[index].get_or_init(|| {
         let (enum_name, variant) = (qualified_name(rust_type_module(T::MODULE), T::NAME), &T::VARIANTS[index]);
         let field_names: Option<Vec<&str>> = variant.fields.iter().map(|f| f.name).collect();
         match field_names.filter(|names| !names.is_empty()) {
@@ -212,7 +212,7 @@ pub fn encode_variant<T: EnumType>(variants: &[VariantDescCell], index: usize, p
             None => VariantDesc::new(enum_name, variant.name),
         }
     });
-    Value::Variant(VariantValue { ty: ty.clone(), payload: payload.into_iter().collect() })
+    Value::Variant(VariantValue { variant: desc.clone(), payload: payload.into_iter().collect() })
 }
 
 #[doc(hidden)]

@@ -1936,10 +1936,10 @@ impl Checker {
     /// Returns the variant of the enum `def` that `v` names, if `v` has the
     /// payload of that variant.
     fn declared_variant(&self, def: TypeDefId, v: &VariantValue) -> Option<&VariantDef> {
-        let variant = self.types[def as usize].variants().iter().find(|x| self.name(x.name) == v.ty.name)?;
-        let names = v.ty.fields.iter().flatten().map(String::as_str);
+        let variant = self.types[def as usize].variants().iter().find(|x| self.name(x.name) == v.variant.name)?;
+        let names = v.variant.fields.iter().flatten().map(String::as_str);
         let has_payload = v.payload.len() == variant.fields.len() && names.eq(variant.field_names.iter().flatten().map(|&n| self.name(n)));
-        (self.is_named(def, &v.ty.enum_name) && has_payload).then_some(variant)
+        (self.is_named(def, &v.variant.enum_name) && has_payload).then_some(variant)
     }
 
     /// Returns `true` if `type_name` is the name of the type `def` as

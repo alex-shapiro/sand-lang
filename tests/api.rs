@@ -4451,13 +4451,16 @@ fn to_value_shares_each_type_description_within_a_copy() {
     let [Value::Struct(first), Value::Struct(second)] = &items(0)[..] else { panic!("{:?}", items(0)) };
     assert!(Arc::ptr_eq(&first.ty, &second.ty), "{first:?} {second:?}");
     let statuses: Vec<&VariantValue> = items(1).iter().map(|v| if let Value::Variant(v) = v { v } else { panic!("{v:?}") }).collect();
-    assert!(Arc::ptr_eq(&statuses[0].ty, &statuses[2].ty) && Arc::ptr_eq(&statuses[1].ty, &statuses[3].ty), "{statuses:?}");
+    assert!(
+        Arc::ptr_eq(&statuses[0].variant, &statuses[2].variant) && Arc::ptr_eq(&statuses[1].variant, &statuses[3].variant),
+        "{statuses:?}"
+    );
     let [Value::Native(first), Value::Native(second)] = &items(2)[..] else { panic!("{:?}", items(2)) };
     assert!(Arc::ptr_eq(&first.type_name, &second.type_name), "{first:?} {second:?}");
     let [Value::Opaque { type_name: first }, Value::Opaque { type_name: second }] = &items(3)[..] else { panic!("{:?}", items(3)) };
     assert!(Arc::ptr_eq(first, second));
     let [Value::Variant(some), Value::Variant(_), Value::Variant(other)] = &items(4)[..] else { panic!("{:?}", items(4)) };
-    assert!(Arc::ptr_eq(&some.ty, &other.ty), "{some:?} {other:?}");
+    assert!(Arc::ptr_eq(&some.variant, &other.variant), "{some:?} {other:?}");
 }
 
 #[test]
@@ -4468,9 +4471,9 @@ fn encode_shares_each_type_description_for_the_life_of_the_process() {
     struct Point {
         x: i64,
     }
-    let ty = |value: Value| match value {
+    let desc = |value: Value| match value {
         Value::Struct(s) => s.ty as Arc<dyn std::any::Any>,
-        Value::Variant(v) => v.ty as Arc<dyn std::any::Any>,
+        Value::Variant(v) => v.variant as Arc<dyn std::any::Any>,
         other => panic!("{other:?}"),
     };
     let pairs = [
@@ -4482,9 +4485,9 @@ fn encode_shares_each_type_description_for_the_life_of_the_process() {
     ];
     for (first, second) in pairs {
         let text = format!("{first:?} {second:?}");
-        assert!(Arc::ptr_eq(&ty(first), &ty(second)), "{text}");
+        assert!(Arc::ptr_eq(&desc(first), &desc(second)), "{text}");
     }
-    let (pending, shipped) = (ty(Delivery::Pending.encode()), ty(Delivery::Shipped(1, "a".into()).encode()));
+    let (pending, shipped) = (desc(Delivery::Pending.encode()), desc(Delivery::Shipped(1, "a".into()).encode()));
     assert!(!Arc::ptr_eq(&pending, &shipped));
 }
 
