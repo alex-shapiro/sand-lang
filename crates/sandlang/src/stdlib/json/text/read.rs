@@ -11,7 +11,7 @@
 
 use super::super::{Number, Parser};
 use super::TextDecoder;
-use crate::codec::fast::{Schema, SchemaId};
+use crate::codec::fast::{FieldDefault, Schema, SchemaId, omitted_field};
 use crate::vm::bytecode::Program;
 use crate::vm::meter::SLOW_BYTES_PER_UNIT;
 use crate::vm::value::{MapObj, Obj, VmValue};
@@ -65,6 +65,7 @@ enum Frame<'p> {
     /// variant `id` (`variant`), whose slots hold `Uninit` until read.
     Fields {
         parts: &'p [SchemaId],
+        defaults: &'p [Option<FieldDefault>],
         names: &'p [String],
         id: u32,
         variant: bool,
@@ -224,10 +225,10 @@ impl<'p> Reader<'_, 'p> {
                 self.stack.push(Frame::Tuple { parts, base: self.values.len(), variant: None });
                 return Ok(None);
             }
-            Schema::Struct(def, parts) => {
+            Schema::Struct(def, parts, defaults) => {
                 self.enter(b'{')?;
                 let names = prog.types.get(*def as usize).map_or(&[][..], |t| &t.fields[..]);
-                self.open_fields(parts, names, *def, false);
+                self.open_fields(parts, defaults, names, *def, false);
                 return Ok(None);
             }
             Schema::Enum(first, variants) => return self.open_variant(vm, *first, variants),
@@ -235,10 +236,10 @@ impl<'p> Reader<'_, 'p> {
         }))
     }
 
-    fn open_fields(&mut self, parts: &'p [SchemaId], names: &'p [String], id: u32, variant: bool) {
+    fn open_fields(&mut self, parts: &'p [SchemaId], defaults: &'p [Option<FieldDefault>], names: &'p [String], id: u32, variant: bool) {
         let base = self.values.len();
         self.values.resize(base + parts.len(), VmValue::Uninit);
-        self.stack.push(Frame::Fields { parts, names, id, variant, base, field: 0, guess: 0 });
+        self.stack.push(Frame::Fields { parts, defaults, names, id, variant, base, field: 0, guess: 0 });
     }
 
     /// Reads a variant of the enum whose first variant is `first`, as
@@ -287,7 +288,7 @@ impl<'p> Reader<'_, 'p> {
         match rts[k].field_names.as_deref() {
             Some(names) => {
                 self.enter(b'{')?;
-                self.open_fields(parts, names, id, true);
+                self.open_fields(parts, &[], names, id, true);
             }
             None => {
                 self.enter(b'[')?;
@@ -428,15 +429,15 @@ impl<'p> Reader<'_, 'p> {
                 self.values.truncate(base);
                 v
             }
-            Frame::Fields { parts, id, variant, base, .. } => {
+            Frame::Fields { parts, defaults, id, variant, base, .. } => {
                 for (i, &part) in parts.iter().enumerate() {
                     if !matches!(self.values[base + i], VmValue::Uninit) {
                         continue;
                     }
-                    if !matches!(self.prog.schemas.get(part as usize), Some(Schema::Option(_))) {
+                    let Some(v) = omitted_field(vm, self.prog, part, defaults.get(i).and_then(Option::as_ref))? else {
                         return Err(Fallback::General);
-                    }
-                    self.values[base + i] = VmValue::Tag(self.prog.ids.none);
+                    };
+                    self.values[base + i] = v;
                 }
                 vm.check_memory(size_of::<Obj>() + parts.len() * size_of::<VmValue>())?;
                 let v = if variant {

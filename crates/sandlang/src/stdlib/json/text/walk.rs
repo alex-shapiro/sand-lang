@@ -173,7 +173,7 @@ impl TextEncoder {
                     return copy_parts(vm, values, v, parts)
                         .map(|base| Some(Frame::Parts { base, next: 0, parts, names: None, wrapped: false }));
                 }
-                (Schema::Struct(def, parts), _) => {
+                (Schema::Struct(def, parts, _), _) => {
                     self.open_bracket_at(vm, '{')?;
                     let names = prog.types.get(*def as usize).map(|t| &t.fields[..]);
                     return copy_parts(vm, values, v, parts).map(|base| Some(Frame::Parts { base, next: 0, parts, names, wrapped: false }));

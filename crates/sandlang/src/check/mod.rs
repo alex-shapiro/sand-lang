@@ -1689,6 +1689,7 @@ impl Checker {
                     trait_of: None,
                 });
                 fields[i].default = Some(helper);
+                fields[i].const_default = self.literal_default(d, fields[i].ty).map(Arc::new);
             }
         }
         self.types[id as usize].kind = TypeDefKind::Struct { fields };
@@ -1942,6 +1943,49 @@ impl Checker {
         let ty = &self.types[def as usize];
         let module = (Some(ty.module) != self.prelude).then(|| self.name(ty.module_name));
         is_qualified_name(type_name, module, self.name(ty.name))
+    }
+
+    /// Returns the constant of a field default `e` of type `ty` that is a
+    /// literal. The checker knows these constants before it checks the
+    /// bodies of the module, where it chooses the codec fast path of the
+    /// struct; [`Checker::fold_field_defaults`] finds the others after.
+    fn literal_default(&self, e: &ast::Expr, ty: TypeId) -> Option<ConstVal> {
+        fn literal(e: &ast::Expr) -> Option<ConstVal> {
+            use ast::ExprKind;
+            Some(match &e.kind {
+                ExprKind::Unit => ConstVal::Unit,
+                &ExprKind::Bool(b) => ConstVal::Bool(b),
+                &ExprKind::Int(i) => ConstVal::Int(i),
+                &ExprKind::Float(f) => ConstVal::Float(f),
+                &ExprKind::Duration(d) => ConstVal::Dur(d),
+                ExprKind::Str(segs) => ConstVal::Str(
+                    segs.iter().map(|s| if let ast::StrSeg::Text(t) = s { Some(t.as_str()) } else { None }).collect::<Option<String>>()?,
+                ),
+                ExprKind::List(items) if items.is_empty() => ConstVal::List(Vec::new()),
+                ExprKind::Map(entries) if entries.is_empty() => ConstVal::Map(Vec::new()),
+                ExprKind::Paren(x) => literal(x)?,
+                ExprKind::Unary(ast::UnOp::Neg, x) => match literal(x)? {
+                    ConstVal::Int(i) => ConstVal::Int(i.checked_neg()?),
+                    ConstVal::Float(f) => ConstVal::Float(-f),
+                    ConstVal::Dur(d) => ConstVal::Dur(d.checked_neg()?),
+                    _ => return None,
+                },
+                _ => return None,
+            })
+        }
+        let c = literal(e)?;
+        let fits = matches!(
+            (&c, self.arena.get(ty)),
+            (ConstVal::Unit, Ty::Unit)
+                | (ConstVal::Bool(_), Ty::Bool)
+                | (ConstVal::Int(_), Ty::Int)
+                | (ConstVal::Float(_), Ty::Float)
+                | (ConstVal::Dur(_), Ty::Duration)
+                | (ConstVal::Str(_), Ty::Str)
+                | (ConstVal::List(_), Ty::List(_))
+                | (ConstVal::Map(_), Ty::Map(..))
+        );
+        fits.then_some(c)
     }
 
     /// Evaluates constant field defaults for structs declared in the current module.

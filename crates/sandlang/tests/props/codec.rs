@@ -34,6 +34,10 @@ enum Ty {
     /// `struct Bag<T> { s: Set<T> }`, which requires `T: Hash`.
     Bag(Box<Ty>),
     Param,
+    /// `struct Defaulted`, whose fields after `req: int` have the constant
+    /// defaults of a case, declared in the main module (`false`) or in the
+    /// module `host` (`true`).
+    Defaulted(bool),
 }
 
 impl Ty {
@@ -65,6 +69,8 @@ impl Ty {
             Ty::Tree(t) => format!("Tree<{}>", t.sand()),
             Ty::Bag(t) => format!("Bag<{}>", t.sand()),
             Ty::Param => "T".into(),
+            Ty::Defaulted(false) => "Defaulted".into(),
+            Ty::Defaulted(true) => "host.Defaulted".into(),
         }
     }
 
@@ -155,18 +161,20 @@ fn hashable() -> impl Strategy<Value = Ty> {
 }
 
 fn ty() -> impl Strategy<Value = Ty> {
-    ty_with(0, 1)
+    ty_with(0, 1, 0)
 }
 
-/// Generates types with type parameter `T` weighted by `param`, and non-`Hash`
-/// or non-`Decode` types weighted by `bad`.
-fn ty_with(param: u32, bad: u32) -> impl Strategy<Value = Ty> {
+/// Generates types with type parameter `T` weighted by `param`, non-`Hash`
+/// or non-`Decode` types weighted by `bad`, and `Defaulted` weighted by
+/// `defaulted`.
+fn ty_with(param: u32, bad: u32, defaulted: u32) -> impl Strategy<Value = Ty> {
     let leaf = prop_oneof![
         6 => prop_oneof![Just(Ty::Int), Just(Ty::Float), Just(Ty::Bool), Just(Ty::Str), Just(Ty::Bytes), Just(Ty::Unit), Just(Ty::Duration)],
         4 => prop_oneof![Just(Ty::Json), Just(Ty::UnitEnum), Just(Ty::Shape), Just(Ty::Date), Just(Ty::Rec)],
         1 => prop_oneof![Just(Ty::Range), Just(Ty::Keyed)],
         bad => prop_oneof![Just(Ty::Fn), Just(Ty::Task), Just(Ty::Valid)],
         param => Just(Ty::Param),
+        defaulted => prop_oneof![Just(Ty::Defaulted(false)), Just(Ty::Defaulted(true))],
     ];
     leaf.prop_recursive(3, 12, 3, move |inner| {
         let key = || prop_oneof![4 => hashable(), bad => inner.clone()];
@@ -250,7 +258,7 @@ proptest! {
 }
 
 fn context() -> impl Strategy<Value = Ty> {
-    ty_with(10, 0).prop_map(|t| if t.has_param() { t } else { Ty::Tuple(vec![t, Ty::Param]) })
+    ty_with(10, 0, 0).prop_map(|t| if t.has_param() { t } else { Ty::Tuple(vec![t, Ty::Param]) })
 }
 
 struct Rng(u64);
@@ -296,6 +304,7 @@ fn json_text(t: &Ty, rng: &mut Rng, depth: u32, wrong: u64) -> String {
         Ty::Valid => "{\"a\": 1}".into(),
         Ty::Range => ["{\"start\": 1, \"end\": 3}", "{\"start\": 0, \"end\": 0, \"inclusive\": true}"][rng.below(2) as usize].into(),
         Ty::Fn | Ty::Task | Ty::Param => "null".into(),
+        Ty::Defaulted(_) => ["{\"req\": 1}", "{\"req\": 2, \"extra\": 3}"][rng.below(2) as usize].into(),
         Ty::List(e) | Ty::Set(e) => format!("[{}]", many(e, rng).join(", ")),
         Ty::Map(k, v) => {
             let key = match **k {
@@ -333,7 +342,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
     #[test]
-    fn generic_decode_builds_dictionaries_of_types_that_contain_type_parameters(ctx in context(), arg in ty_with(0, 0), seed in 1..u64::MAX) {
+    fn generic_decode_builds_dictionaries_of_types_that_contain_type_parameters(ctx in context(), arg in ty_with(0, 0, 0), seed in 1..u64::MAX) {
         let full = ctx.subst(&arg);
         let mut rng = Rng(seed);
         let texts: Vec<String> = (0..8).map(|i| format!("{:?}", json_text(&full, &mut rng, 0, [1000, 12][i % 2]))).collect();
@@ -551,9 +560,10 @@ proptest! {
 /// (`fast`) or off, and with the stress modes of [`Config::retry_stress`]
 /// and [`Config::gc_stress`], and returns its output and the message of its
 /// runtime failure. `host.keep` returns
-/// the host `Value` form of its argument, and `host.input()` returns a
-/// `Decoder` over the last kept value.
-fn run_codec_path(src: &str, fast: bool, retry_stress: bool, gc_stress: bool) -> (String, Option<String>) {
+/// the host `Value` form of its argument, `host.input()` returns a
+/// `Decoder` over the last kept value, and `host_items` are more items of
+/// the module `host`.
+fn run_codec_path(src: &str, host_items: &str, fast: bool, retry_stress: bool, gc_stress: bool) -> (String, Option<String>) {
     use sandlang::codec::Decoder;
     use sandlang::engine::HostModules;
     use sandlang::native::NativeModule;
@@ -563,7 +573,7 @@ fn run_codec_path(src: &str, fast: bool, retry_stress: bool, gc_stress: bool) ->
     use std::sync::{Arc, Mutex};
     let kept: Arc<Mutex<Option<Value>>> = Arc::default();
     let mut host = NativeModule::new("host");
-    host.source("pub native fn keep<T: Encode>(value: T) -> str\npub native fn input() -> Decoder");
+    host.source(&format!("pub native fn keep<T: Encode>(value: T) -> str\npub native fn input() -> Decoder\n{host_items}"));
     let keep = kept.clone();
     host.function("keep", move |value: Encoded<0>| -> String {
         let value = value.into_value();
@@ -593,6 +603,34 @@ fn run_codec_path(src: &str, fast: bool, retry_stress: bool, gc_stress: bool) ->
     (out.contents(), r.err().map(|e| e.to_string().lines().next().unwrap_or_default().to_string()))
 }
 
+/// Generates the type and the expression of a constant field default. The
+/// fast path fills the literals, the empty collections, and, from an
+/// imported module, the variants without a payload. The others need the
+/// synthesized path.
+fn codec_default() -> impl Strategy<Value = (String, String)> {
+    let finite = any::<f64>().prop_filter("finite", |f| f.is_finite());
+    prop_oneof![
+        8 => prop_oneof![
+            int().prop_map(|i| ("int".to_string(), int_lit(i))),
+            finite.prop_map(|f| ("float".to_string(), if f.is_sign_negative() { format!("(-{:?})", -f) } else { format!("{f:?}") })),
+            (-1000i64..1000).prop_map(|n| ("duration".to_string(), if n < 0 { format!("-{}ms", -n) } else { format!("{n}ms") })),
+            "[a-z\"\\\n é]{0,4}".prop_map(|t| ("str".to_string(), str_lit(&t))),
+            any::<bool>().prop_map(|b| ("bool".to_string(), b.to_string())),
+            Just(("()".to_string(), "()".to_string())),
+            Just(("[str]".to_string(), "[]".to_string())),
+            Just(("[str: int]".to_string(), "[:]".to_string())),
+            Just(("Set<int>".to_string(), "Set()".to_string())),
+            Just(("int?".to_string(), "None".to_string())),
+            Just(("Mode".to_string(), "Mode.Write".to_string())),
+        ],
+        1 => prop_oneof![
+            Just(("[int]".to_string(), "[1, 2]".to_string())),
+            Just(("(int, str)".to_string(), "(1, \"a\")".to_string())),
+            Just(("int".to_string(), "1 + 2".to_string())),
+        ],
+    ]
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(128))]
 
@@ -603,12 +641,18 @@ proptest! {
     /// when the collector runs at each safe point (`gc_stress`), between the
     /// calls of the Sand implementations.
     #[test]
-    fn native_and_synthesized_codecs_agree(t in ty_with(0, 0), seed in 1..u64::MAX) {
+    fn native_and_synthesized_codecs_agree(
+        t in ty_with(0, 0, 3),
+        seed in 1..u64::MAX,
+        defaults in prop::collection::vec(codec_default(), 0..4),
+    ) {
         prop_assume!(t.well_formed());
+        let fields: String = defaults.iter().enumerate().map(|(i, (ty, e))| format!(", pub f{i}: {ty} = {e}")).collect();
+        let defaulted = format!("pub enum Mode {{ Read, Write }}\npub struct Defaulted {{ pub req: int{fields} }}\n");
         let mut rng = Rng(seed);
         let texts: Vec<String> = (0..6).map(|i| format!("{:?}", json_text(&t, &mut rng, 0, [1000, 6][i % 2]))).collect();
         let src = format!(
-            "import json\nimport host\n{TYPES}\n\
+            "import json\nimport host\n{TYPES}\n{defaulted}\
              fn show(v: {ty}) {{\n\
              \x20   print(json.encode(v))\n\
              \x20   print(json.encode(v, indent: 1))\n\
@@ -634,12 +678,12 @@ proptest! {
             ty = t.sand(),
             texts = texts.join(", "),
         );
-        let synthesized = run_codec_path(&src, false, false, false);
-        let native = run_codec_path(&src, true, false, false);
+        let synthesized = run_codec_path(&src, &defaulted, false, false, false);
+        let native = run_codec_path(&src, &defaulted, true, false, false);
         prop_assert_eq!(&native, &synthesized, "program:\n{}", src);
-        let retried = run_codec_path(&src, true, true, false);
+        let retried = run_codec_path(&src, &defaulted, true, true, false);
         prop_assert_eq!(&retried, &synthesized, "retry_stress; program:\n{}", src);
-        let collected = run_codec_path(&src, false, false, true);
+        let collected = run_codec_path(&src, &defaulted, false, false, true);
         prop_assert_eq!(&collected, &synthesized, "gc_stress; program:\n{}", src);
     }
 }
@@ -776,14 +820,14 @@ fn implementations_that_break_the_codec_protocol_fail_in_each_format() {
         for context in PART_CONTEXTS {
             for format in PART_FORMATS {
                 let src = part_program(part, context, format);
-                let synthesized = run_codec_path(&src, false, false, false);
+                let synthesized = run_codec_path(&src, "", false, false, false);
                 let (out, failure) = &synthesized;
                 let shown = format!("{out}{}", failure.as_deref().unwrap_or_default());
                 assert!(shown.contains(part.expected()), "expected {:?}, got {shown:?}; program:\n{src}", part.expected());
                 assert!(!shown.contains("internal error"), "{shown}; program:\n{src}");
-                assert_eq!(run_codec_path(&src, true, false, false), synthesized, "program:\n{src}");
-                assert_eq!(run_codec_path(&src, true, true, false), synthesized, "retry_stress; program:\n{src}");
-                assert_eq!(run_codec_path(&src, false, false, true), synthesized, "gc_stress; program:\n{src}");
+                assert_eq!(run_codec_path(&src, "", true, false, false), synthesized, "program:\n{src}");
+                assert_eq!(run_codec_path(&src, "", true, true, false), synthesized, "retry_stress; program:\n{src}");
+                assert_eq!(run_codec_path(&src, "", false, false, true), synthesized, "gc_stress; program:\n{src}");
             }
         }
     }

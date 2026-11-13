@@ -11,7 +11,7 @@ use super::derive::Derived;
 use super::expr::mk;
 use super::traits::{add_impl, impl_key};
 use super::*;
-use crate::codec::fast::{Schema, SchemaId};
+use crate::codec::fast::{FieldDefault, Schema, SchemaId};
 
 /// The deepest type that has a native impl of `Encode` or `Decode`.
 const MAX_FAST_TYPE_DEPTH: usize = 64;
@@ -273,8 +273,9 @@ impl Checker {
     /// type `ty`, and registers it on first use. Only a list, set, map,
     /// tuple, struct, or enum other than `Option` has one, and only if
     /// every type in it has a synthesized or built-in implementation of `b`
-    /// (and, for `Decode`, no field default). The impl's method walks the
-    /// value natively, with the same format operations as the Sand code.
+    /// (and, for `Decode`, no computed field default). The impl's method
+    /// walks the value natively, with the same format operations as the Sand
+    /// code.
     pub(crate) fn fast_codec_impl(&mut self, ty: TypeId, b: Builtin) -> Option<ImplId> {
         if !self.codec_fast_path || self.arena.has_params(ty) || self.arena.has_vars(ty) {
             return None;
@@ -297,7 +298,7 @@ impl Checker {
     /// Returns `true` if every type in the closed type `root` has a
     /// synthesized or built-in implementation of `b` and satisfies the bounds
     /// of its type constructor, and, for `Decode`, no struct in it has a
-    /// field default.
+    /// computed field default.
     fn codec_is_native(&mut self, root: TypeId, b: Builtin) -> bool {
         let decode = b == Builtin::Decode;
         let Some(hash) = self.builtin_trait(Builtin::Hash) else { return false };
@@ -326,7 +327,8 @@ impl Checker {
                         let ids = self.impls_by.get(&(tr.trait_id, Ctor::Def(d), 0));
                         ids.and_then(|ids| ids.first()).is_some_and(|&i| self.impls[i as usize].derived)
                     });
-                    if !derived || (decode && def.fields().iter().any(|f| f.default.is_some())) {
+                    let computed = |f: &FieldDef| f.default.is_some() && f.const_default.as_deref().and_then(FieldDefault::new).is_none();
+                    if !derived || (decode && def.fields().iter().any(computed)) {
                         return false;
                     }
                     let gens = def.generics.clone();
@@ -468,7 +470,13 @@ impl Checker {
             Ty::Named(d, _) if d == self.wk.option => Schema::Option(ids[0]),
             Ty::Named(d, _) if self.is_json_def(d) => Schema::Json,
             Ty::Named(d, _) => match &self.types[d as usize].kind {
-                TypeDefKind::Struct { .. } => Schema::Struct(d, ids.into()),
+                TypeDefKind::Struct { fields } => {
+                    let defaults: Box<[Option<FieldDefault>]> = match fields.iter().any(|f| f.default.is_some()) {
+                        true => fields.iter().map(|f| f.const_default.as_deref().and_then(FieldDefault::new)).collect(),
+                        false => Box::default(),
+                    };
+                    Schema::Struct(d, ids.into(), defaults)
+                }
                 TypeDefKind::Enum { variants } => {
                     let mut rest = &ids[..];
                     let mut payloads = Vec::with_capacity(variants.len());

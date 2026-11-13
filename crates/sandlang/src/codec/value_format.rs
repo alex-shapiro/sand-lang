@@ -365,7 +365,7 @@ impl ValueEncoder {
                 self.reserve(vm, ps.len() * size_of::<Value>())?;
                 return parts(vm, ps, PartsOf::Tuple);
             }
-            (Schema::Struct(def, ps), _) => {
+            (Schema::Struct(def, ps, _), _) => {
                 let Some(t) = prog.types.get(*def as usize) else { return internal("encode: unknown struct") };
                 self.reserve(vm, ps.len() * size_of::<Value>())?;
                 return parts(vm, ps, PartsOf::Struct(t.desc().clone()));

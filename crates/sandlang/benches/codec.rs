@@ -26,6 +26,8 @@ enum Status { Active, Suspended(reason: str), Banned(int, str) }
 struct Address { street: str, city: str, zip: str? }
 struct User { id: int, name: str, email: str, score: float, active: bool, tags: [str], address: Address, status: Status, logins: [int], meta: [str: int] }
 struct Doc { users: [User] }
+struct DefaultedUser { id: int, name: str, email: str, score: float, active: bool = true, tags: [str], address: Address, status: Status, logins: [int], meta: [str: int] }
+struct DefaultedDoc { users: [DefaultedUser] }
 struct Email {
     address: str
 
@@ -123,6 +125,15 @@ const OPERATIONS: &[Operation] = &[
         inputs: DOC_TEXT,
         closure: r#"() => {
     let d: Doc = json.decode(text).unwrap()
+    d.users[d.users.len() - 1].id
+}"#,
+        runs_per_call: None,
+    },
+    Operation {
+        name: "decode_default_const",
+        inputs: DOC_TEXT,
+        closure: r#"() => {
+    let d: DefaultedDoc = json.decode(text).unwrap()
     d.users[d.users.len() - 1].id
 }"#,
         runs_per_call: None,

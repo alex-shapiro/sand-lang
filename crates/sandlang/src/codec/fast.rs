@@ -16,6 +16,7 @@
 //! collection.
 
 use super::{DecodeFail, DecodeFormat, DecodeResult, EncodeFormat, Frame, SeqKind};
+use crate::types::ConstVal;
 use crate::vm::bytecode::Program;
 use crate::vm::value::{MapObj, Obj, SetObj, VmValue};
 use crate::vm::{Fail, Vm, internal};
@@ -54,11 +55,79 @@ pub enum Schema {
     Map(SchemaId, SchemaId),
     Option(SchemaId),
     Tuple(Box<[SchemaId]>),
-    /// A struct: its runtime definition and the schema of each field.
-    Struct(u32, Box<[SchemaId]>),
+    /// A struct: its runtime definition, the schema of each field, and the
+    /// constant default of each field. The defaults are empty if no field
+    /// has one.
+    Struct(u32, Box<[SchemaId]>, Box<[Option<FieldDefault>]>),
     /// An enum: the runtime id of its first variant, and the payload
     /// schemas of each variant.
     Enum(u32, Box<[Box<[SchemaId]>]>),
+}
+
+/// The constant default of a struct field, which a walk fills if the input
+/// omits the field.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FieldDefault {
+    /// A value without a heap object, such as an `int` or a variant
+    /// without a payload.
+    Scalar(VmValue),
+    Str(Box<str>),
+    EmptyList,
+    EmptySet,
+    EmptyMap,
+}
+
+impl FieldDefault {
+    /// Returns the default that makes the constant `c`, or `None` if a walk
+    /// cannot make `c`.
+    pub(crate) fn new(c: &ConstVal) -> Option<FieldDefault> {
+        Some(match c {
+            ConstVal::Unit => FieldDefault::Scalar(VmValue::Unit),
+            &ConstVal::Bool(b) => FieldDefault::Scalar(VmValue::Bool(b)),
+            &ConstVal::Int(i) => FieldDefault::Scalar(VmValue::Int(i)),
+            &ConstVal::Float(x) => FieldDefault::Scalar(VmValue::Float(x)),
+            &ConstVal::Dur(d) => FieldDefault::Scalar(VmValue::Dur(d)),
+            &ConstVal::Variant(id, ref payload) if payload.is_empty() => FieldDefault::Scalar(VmValue::Tag(id)),
+            ConstVal::Str(text) => FieldDefault::Str(text.as_str().into()),
+            ConstVal::List(items) if items.is_empty() => FieldDefault::EmptyList,
+            ConstVal::Set(items) if items.is_empty() => FieldDefault::EmptySet,
+            ConstVal::Map(entries) if entries.is_empty() => FieldDefault::EmptyMap,
+            _ => return None,
+        })
+    }
+
+    /// Makes a new value of the default.
+    fn value(&self, vm: &mut Vm) -> Result<VmValue, Fail> {
+        Ok(match self {
+            &FieldDefault::Scalar(v) => v,
+            FieldDefault::Str(text) => {
+                vm.check_memory(size_of::<Obj>() + text.len())?;
+                vm.short_str(text)
+            }
+            FieldDefault::EmptyList => {
+                vm.check_memory(size_of::<Obj>())?;
+                vm.heap.new_list(Vec::new())
+            }
+            FieldDefault::EmptySet => {
+                vm.check_memory(size_of::<Obj>() + size_of::<SetObj>())?;
+                vm.heap.alloc(Obj::Set(Box::default()))
+            }
+            FieldDefault::EmptyMap => {
+                vm.check_memory(size_of::<Obj>() + size_of::<MapObj>())?;
+                vm.heap.alloc(Obj::Map(Box::default()))
+            }
+        })
+    }
+}
+
+/// Returns the value of an omitted struct field with schema `part` and
+/// constant default `default`: the default, or `None` for an `Option`.
+/// Returns `Ok(None)` if the field is required.
+pub(crate) fn omitted_field(vm: &mut Vm, prog: &Program, part: SchemaId, default: Option<&FieldDefault>) -> Result<Option<VmValue>, Fail> {
+    if let Some(default) = default {
+        return default.value(vm).map(Some);
+    }
+    Ok(matches!(prog_schema(prog, part)?, Schema::Option(_)).then_some(VmValue::Tag(prog.ids.none)))
 }
 
 /// Writes `value`, whose type has schema `schema`, to `f`.
@@ -222,7 +291,7 @@ impl<'p> EncodeWalk<'p> {
                 f.begin_seq(vm, SeqKind::Tuple(parts.len()), parts.len())?;
                 self.parts(vm, v, parts, false)?
             }
-            (Schema::Struct(def, parts), _) => {
+            (Schema::Struct(def, parts, _), _) => {
                 f.begin_struct(vm, *def)?;
                 self.parts(vm, v, parts, true)?
             }
@@ -369,6 +438,7 @@ enum DecodeFrame<'p> {
     /// named payload of variant `id`, whose slots hold `Uninit` until read.
     Fields {
         parts: &'p [SchemaId],
+        defaults: &'p [Option<FieldDefault>],
         names: &'p [String],
         id: u32,
         variant: bool,
@@ -552,17 +622,17 @@ impl<'p> DecodeWalk<'p> {
                 self.values.truncate(base);
                 v
             }
-            DecodeFrame::Fields { parts, id, variant, base, .. } => {
+            DecodeFrame::Fields { parts, defaults, id, variant, base, .. } => {
                 for (i, &part) in parts.iter().enumerate() {
                     if !matches!(self.values[base + i], VmValue::Uninit) {
                         continue;
                     }
-                    if !matches!(prog_schema(self.prog, part)?, Schema::Option(_)) {
+                    let Some(v) = omitted_field(vm, self.prog, part, defaults.get(i).and_then(Option::as_ref))? else {
                         let mut frames = path.to_vec();
                         self.extend_path(&mut frames);
                         return Err(DecodeFail::Syntax(super::missing_message(vm, &frames, id, variant, i)));
-                    }
-                    self.values[base + i] = VmValue::Tag(self.prog.ids.none);
+                    };
+                    self.values[base + i] = v;
                 }
                 vm.check_memory(size_of::<Obj>() + parts.len() * size_of::<VmValue>())?;
                 let v = if variant {
@@ -631,11 +701,11 @@ impl<'p> DecodeWalk<'p> {
                 f.begin_seq(vm, SeqKind::Tuple(parts.len()))?;
                 return Ok(Opened::Frame(DecodeFrame::Tuple { parts, base, index: None, variant: None }));
             }
-            Schema::Struct(def, parts) => {
+            Schema::Struct(def, parts, defaults) => {
                 f.begin_fields(vm, self.type_name(*def))?;
                 let names = prog.types.get(*def as usize).map_or(&[][..], |t| &t.fields[..]);
                 self.values.resize(base + parts.len(), VmValue::Uninit);
-                let frame = DecodeFrame::Fields { parts, names, id: *def, variant: false, base, field: None, guess: 0 };
+                let frame = DecodeFrame::Fields { parts, defaults, names, id: *def, variant: false, base, field: None, guess: 0 };
                 return Ok(Opened::Frame(frame));
             }
             Schema::Enum(first, variants) => return self.open_variant(vm, f, *first, variants),
@@ -705,7 +775,7 @@ impl<'p> DecodeWalk<'p> {
             Some(names) => {
                 f.begin_fields(vm, "")?;
                 self.values.resize(base + parts.len(), VmValue::Uninit);
-                Ok(Opened::Frame(DecodeFrame::Fields { parts, names, id, variant: true, base, field: None, guess: 0 }))
+                Ok(Opened::Frame(DecodeFrame::Fields { parts, defaults: &[], names, id, variant: true, base, field: None, guess: 0 }))
             }
             None => {
                 f.begin_seq(vm, SeqKind::Tuple(parts.len()))?;
