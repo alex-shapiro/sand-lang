@@ -367,10 +367,10 @@ impl<const N: u8, B: traits::Set> SandType for Param<N, B> {
 ///     }
 /// });
 /// ```
-pub struct Encoded<const N: u8>(crate::value::Value);
+pub struct Encoded<const N: u8>(std::sync::Arc<crate::value::Value>);
 
 impl<const N: u8> Encoded<N> {
-    pub(crate) fn new(value: crate::value::Value) -> Self {
+    pub(crate) fn new(value: std::sync::Arc<crate::value::Value>) -> Self {
         Encoded(value)
     }
 
@@ -379,9 +379,10 @@ impl<const N: u8> Encoded<N> {
         &self.0
     }
 
-    /// Returns the encoded value.
+    /// Returns the encoded value. It copies the value if the engine still
+    /// holds it.
     pub fn into_value(self) -> crate::value::Value {
-        self.0
+        std::sync::Arc::unwrap_or_clone(self.0)
     }
 }
 

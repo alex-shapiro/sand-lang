@@ -298,7 +298,7 @@ impl Encoder {
     }
 
     /// Returns the value that a host `Value` encoder holds.
-    pub(crate) fn encoded_value(&self) -> Option<&Value> {
+    pub(crate) fn encoded_value(&self) -> Option<&std::sync::Arc<Value>> {
         let format: &dyn Any = self.format.as_deref()?;
         format.downcast_ref::<value_format::ValueEncoder>()?.encoded()
     }

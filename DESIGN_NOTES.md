@@ -648,3 +648,14 @@ collection, between those calls. So the encoder holds tokens, not Sand
 values, and the copy of each text stays. A native object that the
 collector traces (with a write barrier for the generational collector)
 would remove both costs; that is a VM feature beyond this pass.
+
+### C3: `Encoded<N>` shares the encoded value
+
+A native parameter of type `Encoded<N>` cloned the whole `Value` out of the
+`Encoder`, so `to_value` built the value twice. `ValueEncoder` now keeps
+the finished value in an `Arc`, and `Encoded<N>` shares it.
+`Encoded::value` costs nothing; `Encoded::into_value` copies the value only
+while the engine still holds the `Encoder`.
+
+Measured (3 alternating rounds, ns per item; value-decode, C2, C3):
+`to_value` 368, 616, 357; `small_to_value` 95, 361, 298.

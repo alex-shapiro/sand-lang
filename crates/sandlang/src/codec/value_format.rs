@@ -21,7 +21,9 @@ use std::sync::Arc;
 
 /// A container that the encoder is building.
 enum Partial {
-    Root(Option<Value>),
+    /// The finished value, which [`Encoded`](crate::native::ty::Encoded)
+    /// parameters share.
+    Root(Option<Arc<Value>>),
     List(Vec<Value>),
     Tuple(Vec<Value>),
     Set(Vec<Value>),
@@ -60,7 +62,7 @@ impl ValueEncoder {
 
     /// Returns the finished value, or `None` if a container is open or no
     /// value was written.
-    pub(crate) fn encoded(&self) -> Option<&Value> {
+    pub(crate) fn encoded(&self) -> Option<&Arc<Value>> {
         match self.stack.as_slice() {
             [Partial::Root(v)] => v.as_ref(),
             _ => None,
@@ -98,7 +100,7 @@ impl ValueEncoder {
     /// Adds `v` to the innermost container.
     fn place(&mut self, v: Value) -> Result<(), Fail> {
         match self.stack.last_mut() {
-            Some(Partial::Root(root)) => *root = Some(v),
+            Some(Partial::Root(root)) => *root = Some(Arc::new(v)),
             Some(
                 Partial::List(items) | Partial::Tuple(items) | Partial::Set(items) | Partial::Struct(_, items) | Partial::Variant(_, items),
             ) => items.push(v),
