@@ -13,6 +13,7 @@
 //! failure. Both objects check that each call of an implementation writes or
 //! reads exactly one value (`protocol.rs`).
 
+pub(crate) mod composed;
 pub(crate) mod fast;
 mod protocol;
 pub(crate) mod value_format;
@@ -785,11 +786,7 @@ pub(crate) type DecodeDict = CodecDict<0, traits::Decode>;
 /// Returns the fast-path schema of the type whose `Encode` or `Decode`
 /// dictionary is `dict`, or `None` if the type has no fast-path `impl`.
 pub(crate) fn fast_schema<B>(vm: &Vm, dict: CodecDict<0, B>) -> Option<SchemaId> {
-    let Obj::Tuple(slots) = vm.heap.get(dict.raw()) else { return None };
-    match vm.heap.get(*slots.first()?) {
-        Obj::Closure(proto, _) => vm.prog.proto_schemas.get(*proto as usize).copied().filter(|&s| s != fast::NO_SCHEMA),
-        _ => None,
-    }
+    composed::dict_schema(vm, dict.raw())
 }
 
 /// Reads one whole value of the closed type with fast-path schema `schema`
@@ -872,6 +869,7 @@ pub(crate) fn register(m: &mut NativeModule) {
     });
     encoder_methods(m);
     decoder_methods(m);
+    composed::register(m);
 }
 
 type Enc = VmVal<Encoder>;

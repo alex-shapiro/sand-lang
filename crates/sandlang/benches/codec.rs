@@ -67,6 +67,8 @@ fn stamp() -> int {
 }
 struct Stamped { id: int, stamp: int = stamp() }
 fn load<T: Decode>(text: str) -> Result<T> { json.decode(text) }
+fn load_list<T: Decode>(text: str) -> Result<[T]> { json.decode(text) }
+fn save_list<T: Encode>(xs: [T]) -> str { json.encode(xs) }
 fn contacts(n: int) -> [Contact] {
     let out: [Contact] = []
     for i in 0..n {
@@ -266,6 +268,31 @@ const OPERATIONS: &[Operation] = &[
     let xs: [int] = load(itext).unwrap()
     xs[xs.len() - 1]
 }"#,
+        runs_per_call: None,
+    },
+    Operation {
+        name: "decode_list_generic",
+        inputs: "let utext = json.encode(make({n}).users)\n",
+        closure: r#"() => {
+    let us: [User] = load_list(utext).unwrap()
+    us[us.len() - 1].id
+}"#,
+        runs_per_call: None,
+    },
+    Operation {
+        name: "decode_ints_list_generic",
+        inputs: "let itext = json.encode((0..({n} * 10)).to_list())\n",
+        closure: r#"() => {
+    let xs: [int] = load_list(itext).unwrap()
+    xs[xs.len() - 1]
+}"#,
+        runs_per_call: None,
+    },
+    Operation { name: "encode_list_generic", inputs: DOC, closure: "() => save_list(doc.users).len()", runs_per_call: None },
+    Operation {
+        name: "encode_ints_list_generic",
+        inputs: "let ints = (0..({n} * 10)).to_list()\n",
+        closure: "() => save_list(ints).len()",
         runs_per_call: None,
     },
     Operation {

@@ -396,6 +396,13 @@ fn encode_value<T: Encode>(value: T) -> Encoder {
 
 native fn value_encoder<T: Encode>(value: T) -> ValueEncoding
 
+/// Returns `dict`, the dictionary of a generic impl of `Encode` or `Decode`
+/// that generic code builds at run time, with the fast path if the
+/// dictionary of each type argument has it. The first method of the new
+/// dictionary is `method`. Generated code calls it with the id of the
+/// schema template of the impl.
+native fn compose_codec_dict<D, F>(dict: D, method: F, template: int) -> D
+
 extend Encoder {
     /// Writes `value` with its `Encode` implementation.
     pub fn encode<T: Encode>(self, value: T) {

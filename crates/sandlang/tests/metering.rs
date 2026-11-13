@@ -1148,25 +1148,25 @@ print("512 variants: Encoded \(d4 - d3 - call)")
 "#;
 
 const FUEL_OF_EACH_KIND: &str = r#"unit: null
-    encode 2, indent 2 for 4 bytes, to_json 2, Json parameter 1, Encoded 2
+    encode 1, indent 1 for 4 bytes, to_json 1, Json parameter 1, Encoded 1
 bool: true
-    encode 2, indent 2 for 4 bytes, to_json 2, Json parameter 1, Encoded 2
+    encode 1, indent 1 for 4 bytes, to_json 1, Json parameter 1, Encoded 1
 int: -7
-    encode 2, indent 2 for 2 bytes, to_json 2, Json parameter 1, Encoded 2
+    encode 1, indent 1 for 2 bytes, to_json 1, Json parameter 1, Encoded 1
 float: 1.5
-    encode 2, indent 2 for 3 bytes, to_json 2, Json parameter 1, Encoded 2
+    encode 1, indent 1 for 3 bytes, to_json 1, Json parameter 1, Encoded 1
 duration: 1500000000
-    encode 2, indent 2 for 10 bytes, to_json 2, Json parameter 1, Encoded 2
+    encode 1, indent 1 for 10 bytes, to_json 1, Json parameter 1, Encoded 1
 str: "plain"
-    encode 2, indent 2 for 7 bytes, to_json 2, Json parameter 1, Encoded 2
+    encode 1, indent 1 for 7 bytes, to_json 1, Json parameter 1, Encoded 1
 str with escapes: "q\"b\\n\n\t\u0001é"
-    encode 2, indent 2 for 21 bytes, to_json 2, Json parameter 1, Encoded 2
+    encode 1, indent 1 for 21 bytes, to_json 1, Json parameter 1, Encoded 1
 str of 3000 bytes: 3002 bytes
-    encode 48, indent 48 for 3002 bytes, to_json 48, Json parameter 47, Encoded 48
+    encode 47, indent 47 for 3002 bytes, to_json 47, Json parameter 47, Encoded 47
 bytes: "AP8H"
-    encode 2, indent 2 for 6 bytes, to_json 2, Json parameter 1, Encoded 2
+    encode 1, indent 1 for 6 bytes, to_json 1, Json parameter 1, Encoded 1
 bytes of 3000 bytes: 4002 bytes
-    encode 439, indent 439 for 4002 bytes, to_json 439, Json parameter 63, Encoded 48
+    encode 438, indent 438 for 4002 bytes, to_json 438, Json parameter 63, Encoded 47
 list: [1,2,3]
     encode 4, indent 4 for 17 bytes, to_json 4, Json parameter 7, Encoded 4
 empty list: []
@@ -1192,9 +1192,9 @@ map with date keys: {"2024-03-10":1}
 map with a key of 3000 bytes: 3006 bytes
     encode 48, indent 49 for 3011 bytes, to_json 94, Json parameter 49, Encoded 48
 range: {"start":0,"end":3}
-    encode 2, indent 2 for 28 bytes, to_json 2, Json parameter 5, Encoded 2
+    encode 1, indent 1 for 28 bytes, to_json 1, Json parameter 5, Encoded 1
 inclusive range: {"start":-1,"end":1,"inclusive":true}
-    encode 2, indent 2 for 50 bytes, to_json 2, Json parameter 7, Encoded 2
+    encode 1, indent 1 for 50 bytes, to_json 1, Json parameter 7, Encoded 1
 struct: {"id":1,"note":"gift","tags":["a"]}
     encode 6, indent 6 for 56 bytes, to_json 6, Json parameter 9, Encoded 6
 variant without payload: "Active"

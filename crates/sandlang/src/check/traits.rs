@@ -1387,6 +1387,9 @@ impl Checker {
             }
             m
         };
+        if builtin.is_some_and(|b| b.is_synthesized()) && self.arena.has_params(ty) {
+            self.codec_template(id);
+        }
         let mut args = Vec::new();
         let supers = self.supers_of(ty, tr);
         for (s, e) in supers.into_iter().map(|s| (s, None)).chain(inst.evidence.into_iter().map(|(t, s)| (s, Some(t)))) {

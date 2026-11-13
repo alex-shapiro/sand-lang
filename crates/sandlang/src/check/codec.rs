@@ -11,6 +11,7 @@ use super::derive::Derived;
 use super::expr::mk;
 use super::traits::{add_impl, impl_key};
 use super::*;
+use crate::codec::composed::{SchemaTemplate, TemplateId, TemplateRef};
 use crate::codec::fast::{FieldDefault, Schema, SchemaId};
 
 /// The deepest type that has a native impl of `Encode` or `Decode`.
@@ -31,6 +32,31 @@ pub enum DerivedMethod {
     /// `decode` of a hand-written impl, which calls the hand-written body
     /// (this function) between the protocol checks of its `Decoder`.
     CheckedDecode(FnId),
+    /// `encode` of a dictionary that the engine builds from a schema
+    /// template, which walks the schema that the dictionary holds.
+    ComposedEncode,
+    /// `decode` of a dictionary that the engine builds from a schema
+    /// template, which walks the schema that the dictionary holds.
+    ComposedDecode,
+}
+
+/// The schema templates of the generic impls of `Encode` and `Decode`, which
+/// give the fast path to generic code (`codec/composed.rs`).
+#[derive(Clone, Default)]
+pub(crate) struct CodecTemplates {
+    pub templates: PVec<SchemaTemplate>,
+    /// The template of each generic impl that generic code uses, or `None`
+    /// if the impl has none.
+    pub by_impl: PMap<ImplId, Option<TemplateId>>,
+    /// The first method of a dictionary with a template, for `Encode` and
+    /// for `Decode`.
+    pub methods: [Option<FnId>; 2],
+    /// The native `compose_codec_dict`, which builds such a dictionary.
+    pub compose: Option<u32>,
+    /// The schema of the scalar type of each first method of a prelude impl
+    /// of `Encode` or `Decode` for a scalar type, so that the dictionary of
+    /// a scalar fills a hole of a template.
+    pub scalar_methods: PMap<FnId, SchemaId>,
 }
 
 impl Checker {
@@ -276,8 +302,20 @@ impl Checker {
         let imp = &self.impls[id as usize];
         let (tr, target, ps, module, span) = (imp.trait_ref, imp.target, imp.generics.clone(), imp.module, imp.span);
         let ctor = impl_key(&self.arena, target).map_or(Ctor::Unit, |(c, _)| c);
+        let f =
+            self.add_codec_method(CodecMethodSig { tr, target, generics: ps, module, span, owner: Some(ctor), impl_of: Some(id) }, method);
+        let mut slots = vec![f];
+        // Default methods, such as `decode_missing`, fill the other slots.
+        slots.extend(self.traits[tr.trait_id as usize].methods.iter().skip(1).map(|m| m.default.unwrap_or(m.sig)));
+        self.impls[id as usize].slots = slots;
+    }
+
+    /// Declares the first method of `Encode` or `Decode` with the body
+    /// `method`, and returns it.
+    fn add_codec_method(&mut self, sig: CodecMethodSig, method: DerivedMethod) -> FnId {
+        let CodecMethodSig { tr, target, generics: ps, module, span, owner, impl_of } = sig;
         let (name, params, ret, has_self) = match method {
-            DerivedMethod::Encode | DerivedMethod::FastEncode(_) | DerivedMethod::CheckedEncode(_) => {
+            DerivedMethod::Encode | DerivedMethod::FastEncode(_) | DerivedMethod::CheckedEncode(_) | DerivedMethod::ComposedEncode => {
                 let enc = self.codec_type("Encoder");
                 let params = vec![
                     ParamSig { name: Symbol::SELF, ty: target, default: None },
@@ -285,18 +323,18 @@ impl Checker {
                 ];
                 (self.sym("encode"), params, TypeId::UNIT, true)
             }
-            DerivedMethod::Decode | DerivedMethod::FastDecode(_) | DerivedMethod::CheckedDecode(_) => {
+            DerivedMethod::Decode | DerivedMethod::FastDecode(_) | DerivedMethod::CheckedDecode(_) | DerivedMethod::ComposedDecode => {
                 let dec = self.codec_type("Decoder");
                 let err = self.error_ty();
                 let ret = self.result_of(target, err);
                 (self.sym("decode"), vec![ParamSig { name: self.sym("d"), ty: dec, default: None }], ret, false)
             }
         };
-        let f = self.add_fn(FnInfo {
+        self.add_fn(FnInfo {
             name,
             module,
-            generics: ps.clone(),
             outer: ps.len(),
+            generics: ps,
             params,
             ret,
             has_self,
@@ -304,17 +342,138 @@ impl Checker {
             doc: None,
             span,
             is_pub: true,
-            owner: Some(ctor),
+            owner,
             self_ty: Some(target),
             decl: Some(FnDeclRef::Derived(method)),
             dicts: vec![(target, tr)],
-            impl_of: Some(id),
+            impl_of,
             trait_of: None,
+        })
+    }
+
+    /// Returns the schema template of the generic `impl` `id` of `Encode` or
+    /// `Decode`, and builds it on first use. Returns `None` if no type
+    /// arguments give the `impl` the fast path.
+    pub(crate) fn codec_template(&mut self, id: ImplId) -> Option<TemplateId> {
+        if let Some(&known) = self.codec_templates.by_impl.get(&id) {
+            return known;
+        }
+        let found = self.build_codec_template(id);
+        self.codec_templates.by_impl.insert(id, found);
+        found
+    }
+
+    fn build_codec_template(&mut self, id: ImplId) -> Option<TemplateId> {
+        let imp = self.impls[id as usize].clone();
+        let b = self.traits[imp.trait_ref.trait_id as usize].builtin.filter(|b| b.is_synthesized())?;
+        if !self.codec_fast_path || !(imp.derived || Some(imp.module) == self.prelude) {
+            return None;
+        }
+        self.composed_method(b)?;
+        let methods = self.traits[imp.trait_ref.trait_id as usize].methods.len();
+        let with_dicts: Vec<(TypeId, TraitRef)> = imp.evidence.iter().copied().filter(|(_, x)| self.has_dict(x)).collect();
+        let mut holes: Vec<(TypeId, u16)> = Vec::new();
+        for (j, &(t, x)) in with_dicts.iter().enumerate() {
+            if x.trait_id == imp.trait_ref.trait_id && matches!(self.arena.get(t), Ty::Param(_)) {
+                holes.push((t, u16::try_from(methods + j).ok()?));
+            }
+        }
+        // The types of the template that contain a type argument.
+        let mut open: Vec<TypeId> = Vec::new();
+        let mut index: HashMap<TypeId, u32> = HashMap::new();
+        let mut todo = vec![imp.target];
+        while let Some(t) = todo.pop() {
+            if index.contains_key(&t) || matches!(self.arena.get(t), Ty::Param(_)) {
+                continue;
+            }
+            if !self.arena.has_params(t) {
+                if !self.codec_is_native(t, b) {
+                    return None;
+                }
+                continue;
+            }
+            if !self.budget.charge(1) || self.type_depth(t, MAX_FAST_TYPE_DEPTH) >= MAX_FAST_TYPE_DEPTH {
+                return None;
+            }
+            if let Ty::Named(d, _) = self.arena.get(t)
+                && d != self.wk.option
+                && !self.derives_codec(d, b)
+            {
+                return None;
+            }
+            index.insert(t, open.len() as u32);
+            open.push(t);
+            todo.extend(self.codec_parts(t)?);
+        }
+        let mut nodes = Vec::with_capacity(open.len());
+        for &t in &open {
+            nodes.push(self.schema_node(t, &mut |c, part| match index.get(&part) {
+                Some(&k) => Some(TemplateRef::Node(k)),
+                None => match holes.iter().position(|&(x, _)| x == part) {
+                    Some(h) => Some(TemplateRef::Hole(h as u32)),
+                    None if c.arena.has_params(part) => None,
+                    None => c.schema_of(part).map(TemplateRef::Closed),
+                },
+            })?);
+        }
+        let holes = holes.iter().map(|&(_, at)| at).collect();
+        let template = SchemaTemplate { nodes: nodes.into(), holes, methods: methods as u16 };
+        self.codec_templates.templates.push(template);
+        Some((self.codec_templates.templates.len() - 1) as TemplateId)
+    }
+
+    /// Records the schema of each scalar type for the first method of its
+    /// prelude impls of `Encode` and `Decode`. Runs once, after the prelude.
+    pub(crate) fn add_scalar_codec_schemas(&mut self) {
+        let scalars = [TypeId::UNIT, TypeId::BOOL, TypeId::INT, TypeId::FLOAT, TypeId::DURATION, TypeId::STR, TypeId::BYTES, TypeId::RANGE];
+        for b in [Builtin::Encode, Builtin::Decode] {
+            let Some(tr) = self.builtin_trait(b) else { continue };
+            for ty in scalars {
+                let Some((ctor, arity)) = impl_key(&self.arena, ty) else { continue };
+                let Some(&f) = self
+                    .impls_by
+                    .get(&(tr.trait_id, ctor, arity))
+                    .and_then(|ids| ids.first())
+                    .and_then(|&i| self.impls[i as usize].slots.first())
+                else {
+                    continue;
+                };
+                if let Some(s) = self.schema_of(ty) {
+                    self.codec_templates.scalar_methods.insert(f, s);
+                }
+            }
+        }
+    }
+
+    /// Returns `true` if the type definition `d` has the synthesized `impl` of
+    /// `b`, and, for `Decode`, no computed field default.
+    fn derives_codec(&self, d: TypeDefId, b: Builtin) -> bool {
+        let derived = self.builtin_trait(b).is_some_and(|tr| {
+            let ids = self.impls_by.get(&(tr.trait_id, Ctor::Def(d), 0));
+            ids.and_then(|ids| ids.first()).is_some_and(|&i| self.impls[i as usize].derived)
         });
-        let mut slots = vec![f];
-        // Default methods, such as `decode_missing`, fill the other slots.
-        slots.extend(self.traits[tr.trait_id as usize].methods.iter().skip(1).map(|m| m.default.unwrap_or(m.sig)));
-        self.impls[id as usize].slots = slots;
+        let computed = |f: &FieldDef| f.default.is_some() && f.const_default.as_deref().and_then(FieldDefault::new).is_none();
+        derived && !(b == Builtin::Decode && self.types[d as usize].fields().iter().any(computed))
+    }
+
+    /// Returns the first method of a dictionary that the engine builds from a
+    /// schema template for `b`, and declares it on first use.
+    fn composed_method(&mut self, b: Builtin) -> Option<FnId> {
+        let slot = usize::from(b == Builtin::Decode);
+        if let Some(f) = self.codec_templates.methods[slot] {
+            return Some(f);
+        }
+        let tr = self.builtin_trait(b)?;
+        let name = self.sym("T");
+        let p = self.new_param(name);
+        self.params[p as usize].traits.push(tr);
+        let target = self.param_ty(p);
+        let module = self.prelude?;
+        let sig = CodecMethodSig { tr, target, generics: vec![p], module, span: Span::default(), owner: None, impl_of: None };
+        let method = if b == Builtin::Decode { DerivedMethod::ComposedDecode } else { DerivedMethod::ComposedEncode };
+        let f = self.add_codec_method(sig, method);
+        self.codec_templates.methods[slot] = Some(f);
+        Some(f)
     }
 
     /// Returns the native `impl` of `b` (`Encode` or `Decode`) for the closed
@@ -370,16 +529,10 @@ impl Checker {
                 }
                 Ty::Set(x) | Ty::Map(x, _) => bounds.push((x, hash)),
                 Ty::Named(d, args) if d != self.wk.option && !self.is_json_def(d) => {
-                    let def = &self.types[d as usize];
-                    let derived = self.builtin_trait(b).is_some_and(|tr| {
-                        let ids = self.impls_by.get(&(tr.trait_id, Ctor::Def(d), 0));
-                        ids.and_then(|ids| ids.first()).is_some_and(|&i| self.impls[i as usize].derived)
-                    });
-                    let computed = |f: &FieldDef| f.default.is_some() && f.const_default.as_deref().and_then(FieldDefault::new).is_none();
-                    if !derived || (decode && def.fields().iter().any(computed)) {
+                    if !self.derives_codec(d, b) {
                         return false;
                     }
-                    let gens = def.generics.clone();
+                    let gens = self.types[d as usize].generics.clone();
                     for (g, a) in gens.into_iter().zip(self.arena.list(args).to_vec()) {
                         bounds.extend(self.params[g as usize].traits.iter().map(|&tr| (a, tr)));
                     }
@@ -492,16 +645,16 @@ impl Checker {
             todo.extend(self.codec_parts(t)?);
         }
         for (t, id) in added {
-            let node = self.schema_node(t)?;
+            let node = self.schema_node(t, &mut |c, p| c.schema_ids.get(&p).copied())?;
             *self.schemas.get_mut(id as usize) = node;
         }
         self.schema_ids.get(&root).copied()
     }
 
-    /// Builds the schema of `t` from the schemas of its parts.
-    fn schema_node(&mut self, t: TypeId) -> Option<Schema> {
+    /// Builds the schema of `t`, where `part` gives the schema of each part.
+    fn schema_node<R: Copy>(&mut self, t: TypeId, part: &mut dyn FnMut(&mut Checker, TypeId) -> Option<R>) -> Option<Schema<R>> {
         let parts = self.codec_parts(t)?;
-        let ids: Vec<SchemaId> = parts.iter().map(|p| self.schema_ids.get(p).copied()).collect::<Option<_>>()?;
+        let ids: Vec<R> = parts.into_iter().map(|p| part(self, p)).collect::<Option<_>>()?;
         Some(match self.arena.get(t) {
             Ty::Int => Schema::Int,
             Ty::Float => Schema::Float,
@@ -651,6 +804,23 @@ impl Checker {
                 let leave = b.method(self, "Encoder", "leave_impl", vec![], vec![b.local(self, enc)]);
                 b.block(vec![enter, call, leave], TypeId::UNIT)
             }
+            DerivedMethod::ComposedEncode | DerivedMethod::ComposedDecode => {
+                // The dictionary holds its schema after its methods.
+                let methods = self.fns[f as usize].dicts.first().map_or(0, |(_, tr)| self.traits[tr.trait_id as usize].methods.len());
+                let dict = b.local(self, params[0]);
+                let schema = b.e(HKind::Field { obj: Box::new(dict), index: methods as u32 }, TypeId::INT);
+                match method {
+                    DerivedMethod::ComposedEncode => {
+                        let (value, enc) = (params[params.len() - 2], params[params.len() - 1]);
+                        let args = vec![b.local(self, enc), b.local(self, value), schema];
+                        b.method(self, "Encoder", "write_fast", vec![target], args)
+                    }
+                    _ => {
+                        let dec = params[params.len() - 1];
+                        b.method(self, "Decoder", "read_fast", vec![target], vec![b.local(self, dec), schema])
+                    }
+                }
+            }
             DerivedMethod::CheckedDecode(body) => {
                 let dec = params[params.len() - 1];
                 let ret = self.fns[f as usize].ret;
@@ -661,6 +831,18 @@ impl Checker {
             }
         }
     }
+}
+
+/// The signature of a method of `Encode` or `Decode` that the checker
+/// declares.
+struct CodecMethodSig {
+    tr: TraitRef,
+    target: TypeId,
+    generics: Vec<ParamId>,
+    module: ModId,
+    span: Span,
+    owner: Option<Ctor>,
+    impl_of: Option<ImplId>,
 }
 
 /// The owner of the fields that a synthesized `decode` reads.

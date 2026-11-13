@@ -674,7 +674,8 @@ proptest! {
     /// JSON. The native implementations of `Encode` and `Decode` give the same
     /// text, `Json`, host `Value`, decoded values, and errors as the
     /// synthesized Sand implementations, for JSON text, `Json` values, and
-    /// host values, also when native calls run again (`retry_stress`), and
+    /// host values, in closed and in generic code, also when native calls
+    /// run again (`retry_stress`), and
     /// when the collector runs at each safe point (`gc_stress`), between the
     /// calls of the Sand implementations.
     #[test]
@@ -700,10 +701,19 @@ proptest! {
              \x20   print(back)\n\
              \x20   let from: Result<{ty}> = json.from_json(json.to_json(v))\n\
              \x20   print(from)\n\
+             \x20   show_generic(v)\n\
              }}\n\
+             fn show_generic<T: Encode>(v: T) {{\n\
+             \x20   print(json.encode([Wrap(v: v)]))\n\
+             \x20   print(json.to_json((v, [v])))\n\
+             \x20   print(host.keep(Wrap(v: [v])))\n\
+             }}\n\
+             fn read_generic<T: Decode>(s: str) -> Result<[Wrap<T>]> {{ json.decode(s) }}\n\
              for s in [{texts}] {{\n\
              \x20   let r: Result<{ty}> = json.decode(s)\n\
              \x20   print(r)\n\
+             \x20   let g: Result<[Wrap<{ty}>]> = read_generic(\"[{{\\\"v\\\": \\(s)}}]\")\n\
+             \x20   print(g)\n\
              \x20   if let Ok(j) = json.parse(s) {{\n\
              \x20       let from: Result<{ty}> = json.from_json(j)\n\
              \x20       print(from)\n\

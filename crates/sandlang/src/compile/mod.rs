@@ -15,7 +15,7 @@ use crate::check::{CheckedProgram, FnDeclRef, FnKind};
 use crate::diag::{Diag, SourceMap, Span};
 use crate::engine::NativeDecls;
 use crate::hir::*;
-use crate::types::{FnId, Ty, TypeArena, TypeDefId, TypeId};
+use crate::types::{Builtin, FnId, ImplId, Ty, TypeArena, TypeDefId, TypeId};
 use crate::vm::bytecode::*;
 use crate::vm::value::FxHashMap;
 use init_order::{InitOrder, Time};
@@ -276,6 +276,8 @@ pub(crate) struct ProgramMark {
     nglobals: usize,
     files: usize,
     schemas: usize,
+    schema_templates: usize,
+    runtime_schemas: usize,
     ids: RtIds,
 }
 
@@ -294,6 +296,8 @@ impl ProgramMark {
             nglobals: p.nglobals,
             files: p.files.len(),
             schemas: p.schemas.len(),
+            schema_templates: p.schema_templates.len(),
+            runtime_schemas: p.runtime_schemas.len(),
             ids: p.ids,
         }
     }
@@ -320,6 +324,8 @@ impl ProgramMark {
             switches,
             schemas,
             proto_schemas,
+            schema_templates,
+            runtime_schemas,
         } = p;
         protos.truncate(self.protos);
         proto_schemas.truncate(self.protos);
@@ -335,6 +341,8 @@ impl ProgramMark {
         global_names.truncate(self.nglobals);
         files.truncate(self.files);
         schemas.truncate(self.schemas);
+        schema_templates.truncate(self.schema_templates);
+        runtime_schemas.truncate(self.runtime_schemas, self.schema_templates);
         *ids = self.ids;
         debug_assert_eq!(ProgramMark::of(p), *self, "a table of the program is not rolled back");
     }
@@ -467,6 +475,9 @@ impl<'a> Compiler<'a> {
         // of the earlier compilations and no more.
         assert_eq!(self.prog.schemas.len(), cp.first_new_schema, "the program's schemas differ from the checker's");
         self.prog.schemas.extend(cp.schemas.iter_from(cp.first_new_schema).cloned());
+        let templates = &cp.codec_templates.templates;
+        assert_eq!(self.prog.schema_templates.len(), cp.first_new_template, "the program's schema templates differ from the checker's");
+        self.prog.schema_templates.extend(templates.iter_from(cp.first_new_template).cloned());
         let wk = cp.wk;
         let vid = |d: u32, n: &str| {
             let s = cp.syms.get(n);
@@ -497,7 +508,11 @@ impl<'a> Compiler<'a> {
                     inlined: Vec::new(),
                 });
                 self.fn_protos[i] = Some(idx);
-                if let Some(FnDeclRef::Derived(DerivedMethod::FastEncode(schema) | DerivedMethod::FastDecode(schema))) = f.decl {
+                let schema = match f.decl {
+                    Some(FnDeclRef::Derived(DerivedMethod::FastEncode(schema) | DerivedMethod::FastDecode(schema))) => Some(schema),
+                    _ => self.cp.codec_templates.scalar_methods.get(&(i as FnId)).copied(),
+                };
+                if let Some(schema) = schema {
                     let schemas = &mut self.prog.proto_schemas;
                     schemas.resize(schemas.len().max(idx as usize + 1), crate::codec::fast::NO_SCHEMA);
                     schemas[idx as usize] = schema;
@@ -2259,7 +2274,20 @@ impl<'a> Compiler<'a> {
                 for (i, a) in args.iter().enumerate() {
                     self.expr_to(f, a, start + (slots.len() + i) as Reg);
                 }
-                self.emit(f, Op::NewTuple { dst, start, count: n as u16 });
+                match self.composed_dict(*impl_id) {
+                    // The dictionary gets the fast path at run time.
+                    Some((template, method, compose)) => {
+                        let base = self.alloc_n(f, 3);
+                        self.emit(f, Op::NewTuple { dst: base, start, count: n as u16 });
+                        let k = self.fn_const(method);
+                        self.emit(f, Op::LoadConst { dst: base + 1, k });
+                        self.emit(f, Op::LoadInt { dst: base + 2, v: template });
+                        self.call_native(f, base, compose, dst);
+                    }
+                    None => {
+                        self.emit(f, Op::NewTuple { dst, start, count: n as u16 });
+                    }
+                }
                 f.next_reg = mark;
             }
             HKind::MakeVariant { rt_id, args } => {
@@ -2744,6 +2772,16 @@ impl<'a> Compiler<'a> {
             (_, Some(p)) => self.const_idx(Const::Fn(p)),
             _ => self.const_idx(Const::Str("<missing fn>".into())),
         }
+    }
+
+    /// Returns the schema template of the generic `impl` `id` of `Encode` or
+    /// `Decode`, the first method of a dictionary built from it, and the
+    /// native that builds that dictionary, if the `impl` has a template.
+    fn composed_dict(&self, id: ImplId) -> Option<(i32, FnId, u32)> {
+        let t = &self.cp.codec_templates;
+        let template = (*t.by_impl.get(&id)?)?;
+        let decode = self.cp.traits[self.cp.impls[id as usize].trait_ref.trait_id as usize].builtin == Some(Builtin::Decode);
+        Some((i32::try_from(template).ok()?, t.methods[usize::from(decode)]?, t.compose?))
     }
 
     /// A dictionary that does not depend on the function's own dictionaries

@@ -36,7 +36,8 @@ pub(crate) const NO_SCHEMA: SchemaId = SchemaId::MAX;
 
 /// The shape of a closed type that the fast path encodes and decodes. Each
 /// node mirrors the synthesized or prelude implementation of its type. `R`
-/// refers to the schema of a part, by its [`SchemaId`] by default.
+/// refers to the schema of a part: a [`SchemaId`], or a
+/// [`TemplateRef`](super::composed::TemplateRef) in a template.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Schema<R = SchemaId> {
     Unit,

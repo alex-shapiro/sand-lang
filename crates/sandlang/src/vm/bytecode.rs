@@ -1274,7 +1274,8 @@ pub struct RtIds {
 }
 
 /// A compiled program, shared by `Arc`. It is immutable once built, except
-/// that a REPL session appends to it between inputs (never renumbering).
+/// that a REPL session appends to it between inputs (never renumbering), and
+/// that runs add to its [`RuntimeSchemas`](crate::codec::composed::RuntimeSchemas).
 #[derive(Clone, Debug, Default)]
 pub struct Program {
     pub protos: Vec<Proto>,
@@ -1310,12 +1311,21 @@ pub struct Program {
     /// [`NO_SCHEMA`](crate::codec::fast::NO_SCHEMA). Protos past its end
     /// have no schema.
     pub(crate) proto_schemas: Vec<crate::codec::fast::SchemaId>,
+    /// The schema templates of the generic impls of `Encode` and `Decode`,
+    /// by [`TemplateId`](crate::codec::composed::TemplateId).
+    pub(crate) schema_templates: Vec<crate::codec::composed::SchemaTemplate>,
+    /// The schemas that runs build from `schema_templates`.
+    pub(crate) runtime_schemas: crate::codec::composed::RuntimeSchemas,
 }
 
 impl Program {
     /// Returns the fast-path schema with id `id`.
+    #[inline]
     pub(crate) fn schema(&self, id: crate::codec::fast::SchemaId) -> Option<&crate::codec::fast::Schema> {
-        self.schemas.get(id as usize)
+        match self.schemas.get(id as usize) {
+            Some(schema) => Some(schema),
+            None => self.runtime_schemas.get(id.wrapping_sub(crate::codec::composed::RUNTIME_SCHEMA_BASE)),
+        }
     }
 
     /// Returns the shared [`VariantDesc`] for the variant with runtime ID `id`,

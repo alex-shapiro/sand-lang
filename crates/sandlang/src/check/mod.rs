@@ -401,6 +401,10 @@ pub struct CheckedProgram {
     /// The id of the first schema that an earlier compilation of the same
     /// program does not have.
     pub(crate) first_new_schema: usize,
+    pub(crate) codec_templates: codec::CodecTemplates,
+    /// The id of the first schema template that an earlier compilation of
+    /// the same program does not have.
+    pub(crate) first_new_template: usize,
 }
 
 impl CheckedProgram {
@@ -678,6 +682,10 @@ pub struct Checker {
     pub(crate) schema_ids: PMap<TypeId, crate::codec::fast::SchemaId>,
     /// The number of schemas that [`Checker::take_checked`] gave out before.
     taken_schemas: usize,
+    pub(crate) codec_templates: codec::CodecTemplates,
+    /// The number of schema templates that [`Checker::take_checked`] gave out
+    /// before.
+    taken_templates: usize,
 }
 
 const MAX_ERRORS: usize = 50;
@@ -743,6 +751,8 @@ impl Default for Checker {
             schemas: PVec::new(),
             schema_ids: PMap::new(),
             taken_schemas: 0,
+            codec_templates: codec::CodecTemplates::default(),
+            taken_templates: 0,
         }
     }
 }
@@ -1099,6 +1109,8 @@ impl Checker {
             impls: self.impls.clone(),
             schemas: self.schemas.clone(),
             first_new_schema: std::mem::replace(&mut self.taken_schemas, self.schemas.len()),
+            codec_templates: codec::CodecTemplates { compose: self.prelude_native("compose_codec_dict"), ..self.codec_templates.clone() },
+            first_new_template: std::mem::replace(&mut self.taken_templates, self.codec_templates.templates.len()),
         }
     }
 
@@ -1429,6 +1441,9 @@ impl Checker {
         // which replace or prevent the synthesized impls.
         self.derive_impls(first_type, &[Builtin::Encode, Builtin::Decode]);
         self.synthesize_codec_impls(first_type, &ill_formed);
+        if Some(mi) == self.prelude {
+            self.add_scalar_codec_schemas();
+        }
         for id in impl_ids {
             self.check_impl_supertraits(id);
         }
