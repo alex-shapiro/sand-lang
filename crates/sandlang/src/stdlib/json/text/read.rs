@@ -231,7 +231,7 @@ impl<'p> Reader<'_, 'p> {
             vm.charge_bytes(key.len())?;
             return Ok(Some(vm.new_str(&*key)));
         }
-        let Some(schema) = prog.schemas.get(s as usize) else { return Err(Fallback::General) };
+        let Some(schema) = prog.schema(s) else { return Err(Fallback::General) };
         Ok(Some(match schema {
             Schema::Unit => {
                 expect(p, b'n')?;
@@ -269,7 +269,7 @@ impl<'p> Reader<'_, 'p> {
                 return Ok(None);
             }
             &Schema::Map(key, val) => {
-                if !matches!(prog.schemas.get(key as usize), Some(Schema::Str)) {
+                if !matches!(prog.schema(key), Some(Schema::Str)) {
                     return self.rare(s);
                 }
                 self.enter(b'{')?;

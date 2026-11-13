@@ -325,7 +325,7 @@ impl ValueEncoder {
         v: VmValue,
         s: SchemaId,
     ) -> Result<Result<Value, BuildFrame<'p>>, Fail> {
-        let Some(schema) = prog.schemas.get(s as usize) else { return internal("codec: unknown schema") };
+        let Some(schema) = prog.schema(s) else { return internal("codec: unknown schema") };
         let mut parts = |vm: &Vm, parts: &'p [SchemaId], of: PartsOf| {
             let base = values.len();
             match v {

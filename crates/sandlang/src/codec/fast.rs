@@ -35,9 +35,10 @@ pub type SchemaId = u32;
 pub(crate) const NO_SCHEMA: SchemaId = SchemaId::MAX;
 
 /// The shape of a closed type that the fast path encodes and decodes. Each
-/// node mirrors the synthesized or prelude implementation of its type.
+/// node mirrors the synthesized or prelude implementation of its type. `R`
+/// refers to the schema of a part, by its [`SchemaId`] by default.
 #[derive(Clone, Debug, PartialEq)]
-pub enum Schema {
+pub enum Schema<R = SchemaId> {
     Unit,
     Bool,
     Int,
@@ -50,18 +51,18 @@ pub enum Schema {
     Native(u32),
     /// `json.Json`.
     Json,
-    List(SchemaId),
-    Set(SchemaId),
-    Map(SchemaId, SchemaId),
-    Option(SchemaId),
-    Tuple(Box<[SchemaId]>),
+    List(R),
+    Set(R),
+    Map(R, R),
+    Option(R),
+    Tuple(Box<[R]>),
     /// A struct: its runtime definition, the schema of each field, and the
     /// constant default of each field. The defaults are empty if no field
     /// has one.
-    Struct(u32, Box<[SchemaId]>, Box<[Option<FieldDefault>]>),
+    Struct(u32, Box<[R]>, Box<[Option<FieldDefault>]>),
     /// An enum: the runtime id of its first variant, and the payload
     /// schemas of each variant.
-    Enum(u32, Box<[Box<[SchemaId]>]>),
+    Enum(u32, Box<[Box<[R]>]>),
 }
 
 /// The constant default of a struct field, which a walk fills if the input
@@ -375,7 +376,7 @@ fn next_encode_part<F: EncodeFormat + ?Sized>(
 }
 
 fn prog_schema(prog: &Program, id: SchemaId) -> Result<&Schema, Fail> {
-    match prog.schemas.get(id as usize) {
+    match prog.schema(id) {
         Some(s) => Ok(s),
         None => internal("codec: unknown schema"),
     }

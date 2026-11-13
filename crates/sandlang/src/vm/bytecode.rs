@@ -1313,6 +1313,11 @@ pub struct Program {
 }
 
 impl Program {
+    /// Returns the fast-path schema with id `id`.
+    pub(crate) fn schema(&self, id: crate::codec::fast::SchemaId) -> Option<&crate::codec::fast::Schema> {
+        self.schemas.get(id as usize)
+    }
+
     /// Returns the shared [`VariantDesc`] for the variant with runtime ID `id`,
     /// or `None` if `id` is out of bounds.
     pub(crate) fn variant_desc(&self, id: u32) -> Option<&Arc<VariantDesc>> {

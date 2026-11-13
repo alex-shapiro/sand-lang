@@ -435,7 +435,7 @@ impl TextEncoder {
 }
 
 fn schema(prog: &Program, id: SchemaId) -> Result<&Schema, Fail> {
-    match prog.schemas.get(id as usize) {
+    match prog.schema(id) {
         Some(s) => Ok(s),
         None => internal("codec: unknown schema"),
     }
