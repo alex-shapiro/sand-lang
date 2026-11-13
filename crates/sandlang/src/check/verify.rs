@@ -45,6 +45,8 @@ struct Verifier<'a> {
     derived: Vec<[Option<Vec<u32>>; DERIVED.len()]>,
     /// Type definitions that declare `init` (which do not implement `Decode`).
     inits: HashSet<TypeDefId>,
+    /// The `impl` blocks of each trait by the type constructor of their target.
+    impls_by_head: HashMap<(TraitId, Ctor, u32), Vec<ImplId>>,
 }
 
 #[derive(Default)]
@@ -75,10 +77,16 @@ impl<'a> Verifier<'a> {
                 inits.insert(d);
             }
         }
+        let mut impls_by_head: HashMap<(TraitId, Ctor, u32), Vec<ImplId>> = HashMap::new();
+        for (i, imp) in cp.impls.iter().enumerate() {
+            if let Some((c, n)) = super::traits::impl_key(&cp.arena, imp.target) {
+                impls_by_head.entry((imp.trait_ref.trait_id, c, n)).or_default().push(i as ImplId);
+            }
+        }
         let builtins = (0..cp.traits.len())
             .filter_map(|t| Some((cp.traits[t].builtin?, TraitRef { trait_id: t as TraitId, args: TyList::EMPTY })))
             .collect();
-        let mut v = Verifier { cp, arena: cp.arena.clone(), natives, builtins, derived: Vec::new(), inits };
+        let mut v = Verifier { cp, arena: cp.arena.clone(), natives, builtins, derived: Vec::new(), inits, impls_by_head };
         v.derive_all();
         v
     }
@@ -220,7 +228,7 @@ impl<'a> Verifier<'a> {
         if self.arena.has_vars(ty) {
             return Ok(());
         }
-        if depth > 64 {
+        if depth > 128 {
             return Err(format!("too deep a proof that {} implements `{}`", self.show(ty), self.show_trait(tr)));
         }
         match self.arena.get(ty) {
@@ -285,7 +293,11 @@ impl<'a> Verifier<'a> {
     /// and type argument substitutions.
     fn find_matching_impl(&self, ty: TypeId, tr: TraitRef) -> Result<(ImplId, Vec<TypeId>), &'static str> {
         let mut found = None;
-        for i in (0..self.cp.impls.len() as ImplId).filter(|&i| !self.cp.impls[i as usize].replaced) {
+        let candidates: Vec<ImplId> = match super::traits::impl_key(&self.arena, ty) {
+            Some((c, n)) => self.impls_by_head.get(&(tr.trait_id, c, n)).cloned().unwrap_or_default(),
+            None => (0..self.cp.impls.len() as ImplId).collect(),
+        };
+        for i in candidates.into_iter().filter(|&i| !self.cp.impls[i as usize].replaced) {
             if let Some(sigma) = self.match_impl(i, ty, tr) {
                 if found.is_some() {
                     return Err("several impls match");

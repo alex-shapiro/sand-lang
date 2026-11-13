@@ -1146,7 +1146,7 @@ impl Checker {
         let ty = self.zonk(ty);
         let tr = self.zonk_trait(tr);
         let span = Span::default();
-        if depth > 32 {
+        if depth > 128 {
             return Err(Unmet::new(format!("overflow while checking that {} implements `{}`", self.show(ty), self.show_trait(&tr))));
         }
         // Prefer static `impl` dictionaries for concrete types so that trait
