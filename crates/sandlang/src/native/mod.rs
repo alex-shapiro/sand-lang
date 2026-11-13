@@ -13,7 +13,7 @@ use crate::value::{
     without_json_variant,
 };
 use crate::vm::heap::Heap;
-use crate::vm::value::{ChannelObj, MapObj, Obj, SetObj, TaskObj, TypeDesc, ValueType, VmValue};
+use crate::vm::value::{ChannelObj, MapObj, Obj, SetObj, TaskObj, ValueType, VmValue};
 use crate::vm::{Ctl, Fail, HostFn, NativeFn, Vm};
 use convert::{Conversion, FromVmValue, mismatch};
 use func::{NativeFunction, Signature};
@@ -21,7 +21,7 @@ use std::any::{Any, TypeId};
 use std::borrow::Cow;
 use std::marker::PhantomData;
 use std::sync::{Arc, OnceLock};
-use ty::{Channel, Num, Param, Range, Reflect, SandType, Task, Type, VmVal};
+use ty::{Channel, Num, Param, Range, SandType, Task, Type, VmVal};
 
 /// A Rust type bound to a nominal Sand type in a [`NativeModule`].
 ///
@@ -707,15 +707,6 @@ impl<T: ObjectType> VmVal<T> {
 
     pub fn get_mut(self, heap: &mut Heap) -> Result<&mut T, Fail> {
         heap.native_mut::<T>(self.raw()).ok_or_else(mismatch::<T>)
-    }
-}
-
-impl<const N: u8> Reflect<N> {
-    pub fn desc(self, heap: &Heap) -> Result<&Arc<TypeDesc>, Fail> {
-        match heap.get(self.raw()) {
-            Obj::TypeDesc(d) => Ok(&d.desc),
-            _ => Err(Fail::internal("a native function expected a type description")),
-        }
     }
 }
 

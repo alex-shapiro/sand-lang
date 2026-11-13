@@ -68,6 +68,10 @@ pub struct ImplDef {
     pub evidence: Vec<(TypeId, TraitRef)>,
     /// Indicates whether a later REPL input replaced this `impl`.
     pub replaced: bool,
+    /// Indicates that the checker synthesized this `impl` of `Encode` or
+    /// `Decode`. Its methods exist once a dictionary needs them
+    /// ([`Checker::ensure_derived_methods`]).
+    pub derived: bool,
 }
 
 struct Requirement {
@@ -86,6 +90,8 @@ struct ImplInst {
 #[derive(Clone, Debug)]
 pub(crate) struct Unmet {
     pub unknown: bool,
+    /// Indicates that the proof was too deep to check.
+    pub overflow: bool,
     pub head: String,
     pub because: Option<String>,
     pub required: Option<String>,
@@ -97,7 +103,7 @@ pub(crate) struct Unmet {
 
 impl Unmet {
     pub fn new(head: String) -> Box<Unmet> {
-        Box::new(Unmet { unknown: false, head, because: None, required: None, hint: None, explain: None })
+        Box::new(Unmet { unknown: false, overflow: false, head, because: None, required: None, hint: None, explain: None })
     }
 
     /// Formats the diagnostic message with `context` appended to the outermost
@@ -364,9 +370,9 @@ impl Checker {
                 self.error(g.name.span, "the type parameters of a trait cannot require traits; require them on the methods or impls");
             }
             let name = self.sym(&g.name.name);
-            generics.push(self.new_param(name, false));
+            generics.push(self.new_param(name));
         }
-        let self_param = self.new_param(Symbol::SELF_TYPE, false);
+        let self_param = self.new_param(Symbol::SELF_TYPE);
         let name = self.sym(&t.name.name);
         self.traits.push(TraitDef {
             name,
@@ -426,7 +432,6 @@ impl Checker {
         let mut methods: Vec<TraitMethod> = Vec::new();
         let mut seen_names = HashSet::new();
         for (j, m) in d.methods.iter().enumerate() {
-            self.reject_reflect_params(m);
             if m.name.name == "init" {
                 self.error(m.name.span, "a trait cannot declare `init`; only a type declares its `init`");
             }
@@ -489,7 +494,7 @@ impl Checker {
         };
         let tid = self.resolve_trait_path(path, span)?;
         if let Some(b) = self.traits[tid as usize].builtin
-            && (b.is_derived() || Some(self.cur_mod) != self.prelude)
+            && (b.is_derived() || (b == Builtin::Num && Some(self.cur_mod) != self.prelude))
         {
             let msg = if b.is_derived() {
                 format!("`{}` is a built-in trait; the compiler derives its impls, so it cannot be implemented", b.name())
@@ -566,6 +571,7 @@ impl Checker {
             slots: Vec::new(),
             evidence,
             replaced: false,
+            derived: false,
         });
         add_impl(&mut self.impls_by, key, id);
         add_impl(&mut self.impls_by_ctor, (ctor, arity), id);
@@ -591,7 +597,6 @@ impl Checker {
             for p in m.params.iter().filter(|p| p.default.is_some()) {
                 self.error(p.name.span, "default values are declared by the trait, not the impl");
             }
-            self.reject_reflect_params(m);
             let at = DeclPath { item, method: j as u32 };
             let f = self.declare_fn(m, at, rules, Some(ctor), &scope, Some(target));
             if self.traits[tid as usize].builtin == Some(Builtin::Num) && !m.is_native {
@@ -880,7 +885,7 @@ impl Checker {
         self.wrapper_value(sig, &bindings, span)
     }
 
-    /// Builds a closure that supplies hidden `reflect` and dictionary arguments
+    /// Builds a closure that supplies hidden dictionary arguments
     /// if generic function or trait method `f` is used as a first-class
     /// function value.
     pub(crate) fn wrapper_value(&mut self, f: FnId, pre: &[(ParamId, TypeId)], span: Span) -> HExpr {
@@ -898,14 +903,14 @@ impl Checker {
             args.push(HArg::Expr(mk(HKind::Local(l), t, span)));
         }
         let name = self.fns[f as usize].runtime_name(&self.types, &self.syms);
+        self.encode_native_args(f, &inst.fresh, &mut args, span);
         let body = mk(self.call_kind(f, inst.fresh, args), inst.ret, span);
         let lam = HLambda { id, name, params, body, self_local: None };
         let fty = self.fn_ty(&inst.params, inst.ret);
         mk(HKind::Lambda(Box::new(lam)), fty, span)
     }
 
-    /// Builds hidden call arguments for `f` (`reflect` type descriptions
-    /// followed by trait evidence placeholders).
+    /// Builds hidden call arguments for `f`: trait evidence placeholders.
     pub(crate) fn hidden_args(
         &mut self,
         f: FnId,
@@ -915,48 +920,13 @@ impl Checker {
         lenient: &dyn Fn(&Self, TypeId) -> bool,
         span: Span,
     ) -> Vec<HArg> {
+        let _ = (f, fresh, what);
         let mut out = Vec::new();
-        for (k, &t) in fresh.iter().enumerate() {
-            if self.params[self.fns[f as usize].generics[k] as usize].reflect {
-                self.fs.reflect_checks.push((t, span, what));
-                out.push(HArg::Expr(mk(HKind::TypeDesc { ty: t, args: Vec::new() }, TypeId::UNIT, span)));
-            }
-        }
         for &(t, tr) in dicts {
             let lenient = lenient(self, t);
             out.push(HArg::Expr(self.evidence_hole(t, tr, lenient, span)));
         }
         out
-    }
-
-    fn reject_reflect_params(&mut self, m: &ast::FnDecl) {
-        for g in m.generics.iter().filter(|g| g.reflect) {
-            self.error(g.name.span, "the type parameters of trait and impl methods cannot be `reflect`");
-        }
-    }
-
-    pub(crate) fn declare_reflect_params(&mut self, f: FnId) -> Vec<LocalId> {
-        let span = self.fns[f as usize].span;
-        let mut out = Vec::new();
-        for k in 0..self.fns[f as usize].generics.len() {
-            let p = self.fns[f as usize].generics[k];
-            if self.params[p as usize].reflect {
-                let l = self.declare_local_sym(Symbol::DESC, TypeId::UNIT, false, span, true);
-                self.fs.data[l as usize].used = true;
-                self.fs.reflect_locals.push((p, l));
-                out.push(l);
-            }
-        }
-        out
-    }
-
-    pub(crate) fn reflect_local(&self, t: TypeId) -> Option<LocalId> {
-        let Ty::Param(p) = self.rty(t) else { return None };
-        self.reflect_param_local(p)
-    }
-
-    pub(crate) fn reflect_param_local(&self, p: ParamId) -> Option<LocalId> {
-        self.fs.reflect_locals.iter().find(|&&(q, _)| q == p).map(|&(_, l)| l)
     }
 
     /// Declares hidden dictionary parameters for `f` and records the trait
@@ -1147,7 +1117,9 @@ impl Checker {
         let tr = self.zonk_trait(tr);
         let span = Span::default();
         if depth > 128 {
-            return Err(Unmet::new(format!("overflow while checking that {} implements `{}`", self.show(ty), self.show_trait(&tr))));
+            let mut m = Unmet::new(format!("overflow while checking that {} implements `{}`", self.show(ty), self.show_trait(&tr)));
+            m.overflow = true;
+            return Err(m);
         }
         // Prefer static `impl` dictionaries for concrete types so that trait
         // calls can be devirtualized.
@@ -1333,10 +1305,22 @@ impl Checker {
 
     fn resolve_by_impl(&mut self, ty: TypeId, tr: TraitRef, depth: u32) -> Result<HExpr, Box<Unmet>> {
         let span = Span::default();
-        let not_impl = |c: &Checker| Unmet::new(format!("{} does not implement `{}`", c.show(ty), c.show_trait(&tr)));
+        let builtin = self.traits[tr.trait_id as usize].builtin;
+        let not_impl = |c: &Checker| {
+            let mut m = Unmet::new(format!("{} does not implement `{}`", c.show(ty), c.show_trait(&tr)));
+            if let Some(b) = builtin.filter(|b| b.is_synthesized()) {
+                m.explain = Some((ty, tr, b));
+            }
+            m
+        };
         let Some(key) = impl_key(&self.arena, ty) else { return Err(not_impl(self)) };
-        if let Some(b) = self.traits[tr.trait_id as usize].builtin.filter(|b| b.is_derived()) {
+        if let Some(b) = builtin.filter(|b| b.is_derived()) {
             return self.resolve_derived(ty, tr, b, depth).map(|()| dict_expr(HKind::Unit, span));
+        }
+        if let Some(b) = builtin.filter(|b| b.is_synthesized())
+            && key.0 == Ctor::Tuple
+        {
+            self.tuple_codec_impl(b, key.1);
         }
         let ids = self.impls_by.get(&(tr.trait_id, key.0, key.1)).map(|v| v.to_vec()).unwrap_or_default();
         let targs = self.elems(tr.args);
@@ -1357,6 +1341,7 @@ impl Checker {
             )));
         }
         let Some(id) = matching.pop() else { return Err(not_impl(self)) };
+        self.ensure_derived_methods(id);
         let inst = self.instantiate_impl(id);
         let mut pairs = vec![(inst.target, ty)];
         pairs.extend(self.arena.list(inst.args).iter().copied().zip(targs.iter().copied()));
@@ -1378,6 +1363,19 @@ impl Checker {
                     if self.has_dict(&s) {
                         args.push(dict_expr(HKind::Error, span));
                     }
+                }
+                // A synthesized or built-in impl of `Encode` or `Decode` explains
+                // the failure by the component of `ty` that fails, as a derived
+                // trait does.
+                Err(m)
+                    if !m.unknown
+                        && !m.overflow
+                        && s.trait_id == tr.trait_id
+                        && m.explain.is_some_and(|(_, _, b)| b.is_synthesized())
+                        && builtin.is_some_and(|b| b.is_synthesized())
+                        && (self.impls[id as usize].derived || Some(self.impls[id as usize].module) == self.prelude) =>
+                {
+                    return Err(not_impl(self));
                 }
                 Err(m) => return Err(context(self, m)),
             }
@@ -1452,7 +1450,7 @@ impl Checker {
     }
 }
 
-fn add_impl<K: std::hash::Hash + Eq + Clone>(table: &mut PMap<K, Arc<[ImplId]>>, key: K, id: ImplId) {
+pub(crate) fn add_impl<K: std::hash::Hash + Eq + Clone>(table: &mut PMap<K, Arc<[ImplId]>>, key: K, id: ImplId) {
     let mut ids: Vec<ImplId> = table.get(&key).map(|v| v.to_vec()).unwrap_or_default();
     ids.push(id);
     table.insert(key, ids.into());

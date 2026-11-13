@@ -13,6 +13,7 @@
 extern crate self as sandlang;
 
 pub mod check;
+pub mod codec;
 mod compile;
 pub mod diag;
 #[cfg(any(test, doctest))]

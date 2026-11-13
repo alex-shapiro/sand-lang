@@ -616,13 +616,10 @@ impl Checker {
             let self_ty = self.fs.self_ty;
             let own = self.declare_params(&f.generics, &scope, self_ty);
             let mut dicts = Vec::new();
-            for (g, &p) in f.generics.iter().zip(&own) {
+            for &p in &own {
                 scope.push((self.params[p as usize].name, p));
                 let pt = self.param_ty(p);
                 dicts.extend(self.params[p as usize].traits.iter().filter(|tr| self.has_dict(tr)).map(|&tr| (pt, tr)));
-                if g.reflect {
-                    self.error(g.name.span, "local functions cannot have `reflect` type parameters; declare the function at the top level");
-                }
             }
             let mut ptys = Vec::new();
             self.check_param_names(f.params.iter().map(|p| &p.name));
@@ -1160,7 +1157,7 @@ impl Checker {
 
     fn fn_value(&mut self, f: FnId, span: Span) -> HExpr {
         let fi = &self.fns[f as usize];
-        if !fi.dicts.is_empty() || fi.generics.iter().any(|&p| self.params[p as usize].reflect) {
+        if !fi.dicts.is_empty() {
             return self.wrapper_value(f, &[], span);
         }
         let inst = self.instantiate_fn_with(f, span, &[]);
@@ -1600,6 +1597,7 @@ impl Checker {
             hidden.extend(hargs);
             hargs = hidden;
         }
+        self.encode_native_args(f, &fresh, &mut hargs, span);
         mk(self.call_kind(f, fresh, hargs), ret, span)
     }
 
@@ -2264,7 +2262,7 @@ impl Checker {
     /// Returns the evidence for the hidden dictionary parameters of the field
     /// default helper `helper`, instantiated with the struct's type arguments
     /// `targs`.
-    fn default_helper_evidence(&mut self, helper: FnId, targs: &[TypeId], span: Span) -> Vec<HArg> {
+    pub(crate) fn default_helper_evidence(&mut self, helper: FnId, targs: &[TypeId], span: Span) -> Vec<HArg> {
         let gens = self.fns[helper as usize].generics.clone();
         let map = |p: ParamId| gens.iter().position(|&g| g == p).map(|i| targs[i]);
         let mut out = Vec::new();

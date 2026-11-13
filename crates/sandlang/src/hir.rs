@@ -259,13 +259,6 @@ pub enum HKind {
         targs: Vec<TypeId>,
         args: Vec<HArg>,
     },
-    /// Runtime description for a `reflect` type argument `ty`. If `ty`
-    /// contains type parameters, `args` provides their descriptions in the
-    /// order returned by `TypeArena::params_of`.
-    TypeDesc {
-        ty: TypeId,
-        args: Vec<HExpr>,
-    },
     CallValue {
         callee: Box<HExpr>,
         args: Vec<HExpr>,
@@ -504,10 +497,6 @@ impl HExpr {
                 args_parts(args, f)
             }
             HKind::FnValue { targs, .. } => targs.iter_mut().for_each(|t| f(Part::Type(t))),
-            HKind::TypeDesc { ty, args } => {
-                args.iter_mut().for_each(e);
-                f(Part::Type(ty));
-            }
             HKind::CallValue { callee, args } => {
                 e(callee);
                 args.iter_mut().for_each(e);

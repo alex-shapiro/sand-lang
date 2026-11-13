@@ -219,8 +219,13 @@ proptest! {
                     else { None }
                 };
                 prop_assert!(ds.iter().all(|d| trait_of(d).is_some()), "{ds:?}\n{src}");
-                prop_assert_eq!(ds.iter().any(|d| trait_of(d) == Some(true)), !t.decodable(), "{:?}\n{}", ds, src);
-                prop_assert_eq!(ds.iter().any(|d| trait_of(d) == Some(false)), !t.well_formed(), "{:?}\n{}", ds, src);
+                // Each error names a trait that the type lacks. A type that lacks
+                // both gets an error for at least one: trait resolution stops at
+                // the first unmet bound.
+                let (decode_error, hash_error) = (ds.iter().any(|d| trait_of(d) == Some(true)), ds.iter().any(|d| trait_of(d) == Some(false)));
+                prop_assert!(!decode_error || !t.decodable(), "{:?}\n{}", ds, src);
+                prop_assert!(!hash_error || !t.well_formed(), "{:?}\n{}", ds, src);
+                prop_assert!(decode_error || hash_error, "{:?}\n{}", ds, src);
                 prop_assert!(ds.iter().all(|d| !d.message.contains("``")), "{ds:?}\n{src}");
             }
             Err(e) => prop_assert!(false, "{e}\n{src}"),
@@ -302,14 +307,14 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
     #[test]
-    fn reflect_type_parameters_build_descriptions_of_types_that_contain_them(ctx in context(), arg in ty_with(0, 0), seed in 1..u64::MAX) {
+    fn generic_decode_builds_dictionaries_of_types_that_contain_type_parameters(ctx in context(), arg in ty_with(0, 0), seed in 1..u64::MAX) {
         let full = ctx.subst(&arg);
         let mut rng = Rng(seed);
         let texts: Vec<String> = (0..8).map(|i| format!("{:?}", json_text(&full, &mut rng, 0, [1000, 12][i % 2]))).collect();
         let src = format!(
             "import json\n{TYPES}\n\
              fn direct(s: str) -> Result<{}> {{ json.decode(s) }}\n\
-             fn via<reflect T: Decode>(s: str) -> Result<{}> {{ json.decode(s) }}\n\
+             fn via<T: Decode>(s: str) -> Result<{}> {{ json.decode(s) }}\n\
              fn read(s: str) -> Result<{}> {{ via(s) }}\n\
              for s in [{}] {{\n    print(direct(s))\n    print(read(s))\n}}",
             full.sand(),

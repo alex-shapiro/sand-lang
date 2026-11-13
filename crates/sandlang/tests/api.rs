@@ -144,26 +144,29 @@ fn json_decode_defaults_appear_in_stack_traces() {
     let (r, _, _) = run_src(Config::new(), src);
     let Err(Error::Runtime { trace, .. }) = r else { panic!("expected a runtime error, got {r:?}") };
     let frames: Vec<(&str, usize)> = trace.iter().map(|f| (f.function.as_str(), f.line)).collect();
+    // The synthesized `S.decode` and the `json.decode` wrapper run the default.
     assert_eq!(frames[..2], [("boom", 2), ("S.a", 4)], "{trace:?}");
-    assert_eq!(frames[2].0, "decode", "{trace:?}");
-    assert_eq!(frames[3], ("<top level>", 6), "{trace:?}");
-    assert_eq!(frames.len(), 4, "{trace:?}");
+    assert_eq!(frames[2], ("decode", 3), "{trace:?}");
+    assert_eq!(frames[3].0, "decode", "{trace:?}");
+    assert_eq!(frames[4], ("<top level>", 6), "{trace:?}");
+    assert_eq!(frames.len(), 5, "{trace:?}");
 }
 
 #[test]
 fn json_decode_of_deep_options_runs_on_a_small_stack() {
+    // Decoding `int???…` needs one `Option` dictionary for each `?`. Trait
+    // resolution stops at 32 nested dictionaries with a compile error.
     let deep = format!("int{}", "?".repeat(9000));
-    let src = format!(
-        "import json\nlet a: {deep} = json.decode(\"1\").unwrap()\nprint(json.encode(a))\nlet b: Result<[{deep}]> = json.decode(\"[{{}}]\")\n\
-         print(b.unwrap_err().message)\nlet c: Result<[{deep}: str]> = json.decode(\"{{\\\"1\\\": \\\"a\\\"}}\")\nprint(c.unwrap_err().message)\n"
-    );
+    let src = format!("import json\nlet a: {deep} = json.decode(\"1\").unwrap()\nprint(json.encode(a))\n");
     let run = move || run_src(Config::new(), &src);
-    let (r, out, err) = std::thread::Builder::new().stack_size(512 << 10).spawn(run).unwrap().join().unwrap();
+    let (r, _, _) = std::thread::Builder::new().stack_size(512 << 10).spawn(run).unwrap().join().unwrap();
+    let Err(Error::Compile(ds)) = r else { panic!("{r:?}") };
+    assert!(ds[0].message.starts_with("overflow while checking that int??"), "{}", ds[0].message);
+    let shallow = format!("int{}", "?".repeat(30));
+    let src = format!("import json\nlet a: {shallow} = json.decode(\"1\").unwrap()\nprint(json.encode(a))\n");
+    let (r, out, err) = run_src(Config::new(), &src);
     assert!(r.is_ok(), "{r:?} {err}");
-    let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines[..2], ["1", "$[0]: expected int"]);
-    assert!(lines[2].starts_with("$: cannot decode map keys of type int??") && lines[2].ends_with("?…"), "{}", lines[2]);
-    assert!(lines[2].len() < 300, "{}", lines[2].len());
+    assert_eq!(out, "1\n");
 }
 
 #[test]
@@ -1645,7 +1648,7 @@ fn rust_field_defaults_cannot_hold_native_or_opaque_values() {
     }
     impl Encode for Hook {
         fn encode(&self) -> Value {
-            Value::Opaque { type_name: "fn".into() }
+            Value::Native(Box::new(NativeValue { type_name: "lab.Hook".into(), text: "hook".into() }))
         }
     }
     impl Decode for Hook {
@@ -2146,7 +2149,7 @@ fn native_declarations_must_require_the_traits_of_their_rust_functions() {
 
 #[test]
 fn generic_natives_take_type_parameters() {
-    use sandlang::native::ty::{Param, Reflect, VmVal};
+    use sandlang::native::ty::{Param, VmVal};
     use sandlang::vm::{Fail, Vm};
     let module = |src: &str| {
         let mut m = NativeModule::new("gen");
@@ -2167,15 +2170,12 @@ fn generic_natives_take_type_parameters() {
     assert_eq!(out, "Some(\"b\")\n(\"x\", 1)\n");
 
     type Register = fn(&mut NativeModule);
-    let cases: [(&str, Register); 4] = [
+    let cases: [(&str, Register); 3] = [
         ("is declared `fn([T]) -> T?`, but its Rust function is `fn([T]) -> T`", |m| {
             m.function("second", |_: &mut Vm, xs: VmVal<Vec<Param<0>>>| -> Result<Param<0>, Fail> { Ok(Param::from_raw(xs.raw())) });
         }),
         ("uses type parameter 1, which its declaration does not have", |m| {
             m.function("second", |_: &mut Vm, _: VmVal<Vec<Param<1>>>| -> Result<Option<Param<1>>, Fail> { Ok(None) });
-        }),
-        ("is declared `fn([T]) -> T?`, but its Rust function is `fn(<description of T>, [T]) -> T?`", |m| {
-            m.function("second", |_: &mut Vm, _: Reflect<0>, _: VmVal<Vec<Param<0>>>| -> Result<Option<Param<0>>, Fail> { Ok(None) });
         }),
         ("is declared `fn([T]) -> T?`, but its Rust function is `fn([int]) -> int?`", |m| {
             m.function("second", |xs: Vec<i64>| xs.get(1).copied());
@@ -2192,19 +2192,6 @@ fn generic_natives_take_type_parameters() {
     m.function("second", |_: &mut Vm, _: VmVal<Vec<Param<0>>>| -> Result<Option<Param<0>>, Fail> { Ok(None) });
     let errors = host_module_errors([m]);
     assert!(errors[0].contains("native `gen.second` is generic, so the module must declare it with `native fn`"), "{errors:?}");
-}
-
-#[test]
-fn reflecting_natives_take_type_descriptions() {
-    use sandlang::native::ty::{Param, Reflect};
-    use sandlang::vm::Fail;
-    use sandlang::vm::Vm;
-    let mut m = NativeModule::new("desc");
-    m.source("pub native fn describe<reflect T>(x: T) -> str");
-    m.function("describe", |vm: &mut Vm, t: Reflect<0>, _: Param<0>| -> Result<String, Fail> { Ok(format!("{:?}", t.desc(&vm.heap)?)) });
-    let (r, out, _) = run_src(Config::new().host_modules(HostModules::new([m]).unwrap()), "import desc\nprint(desc.describe([1]))");
-    r.unwrap();
-    assert_eq!(out, "List(Int)\n");
 }
 
 #[test]
@@ -4208,9 +4195,11 @@ fn deep_set_elements_and_map_keys_of_fields_are_checked_on_a_small_stack() {
     let run = move || run_src(Config::new(), &src);
     let (r, _, _) = std::thread::Builder::new().stack_size(512 << 10).spawn(run).unwrap().join().unwrap();
     let Err(Error::Compile(ds)) = r else { panic!("{r:?}") };
-    assert_eq!(ds.len(), 1, "{ds:?}");
+    assert_eq!(ds.len(), 2, "{ds:?}");
     assert_eq!(ds[0].line, 3, "{ds:?}");
     assert!(ds[0].message.starts_with(&format!("{bad} does not implement `Hash`")), "{}", ds[0].message);
+    // Decoding `K` needs 9000 nested `Option` dictionaries.
+    assert!(ds[1].message.starts_with("overflow while checking that int??"), "{}", ds[1].message);
 }
 
 #[test]
@@ -4244,18 +4233,15 @@ fn run_and_copy_values(
     (r, values)
 }
 
-/// Builds the `host` module with `host.copy`, which copies its argument via
-/// [`Vm::to_value`].
+/// Builds the `host` module with `host.copy`, which records the `Encode`
+/// form of its argument through `Encoded<N>`.
 fn copy_module() -> (NativeModule, Arc<Mutex<Vec<Value>>>) {
-    use sandlang::native::ty::Param;
+    use sandlang::native::ty::Encoded;
     let copies = Arc::new(Mutex::new(Vec::new()));
     let copied = copies.clone();
     let mut host = NativeModule::new("host");
-    host.source("pub native fn copy<T>(value: T)");
-    host.function("copy", move |vm: &mut Vm, value: Param<0>| -> Result<(), Fail> {
-        copied.lock().push(vm.to_value(value.raw())?);
-        Ok(())
-    });
+    host.source("pub native fn copy<T: Encode>(value: T)");
+    host.function("copy", move |value: Encoded<0>| copied.lock().push(value.into_value()));
     (host, copies)
 }
 
@@ -4266,12 +4252,8 @@ fn copied_values(src: &str) -> Vec<Value> {
     values
 }
 
-fn opaque_value(type_name: &str) -> Value {
-    Value::Opaque { type_name: type_name.into() }
-}
-
 #[test]
-fn to_value_copies_each_kind_of_value() {
+fn encoded_copies_each_kind_of_value() {
     let values = copied_values(
         "host.copy(())\nhost.copy(true)\nhost.copy(-7)\nhost.copy(1.5)\nhost.copy(1500ms)\nhost.copy(\"text\")\n\
          var grown = \"a\"\nfor _ in 0..3 {\n    grown += \"b\"\n}\nhost.copy(grown)\n\
@@ -4304,7 +4286,7 @@ fn to_value_copies_each_kind_of_value() {
 }
 
 #[test]
-fn to_value_preserves_qualified_names_and_fields() {
+fn encoded_preserves_qualified_names_and_fields() {
     let values = copied_values(
         "import bank\nimport json\nstruct Order { id: int, note: str? }\nenum Status { Active, Suspended(reason: str), Banned(int, str) }\n\
          host.copy(Order(id: 1, note: Some(\"gift\")))\nhost.copy(Order(id: 2, note: None))\n\
@@ -4340,24 +4322,6 @@ fn to_value_preserves_qualified_names_and_fields() {
     assert_eq!((suspended.field("reason"), suspended.field("note")), (Some(&str_("late")), None));
 }
 
-#[test]
-fn to_value_keeps_the_shape_of_a_container_that_holds_values_without_encode() {
-    let values = copied_values(
-        "import stats\nimport time\nstruct Job { name: str, run: fn() -> int }\nfn one() -> int { 1 }\n\
-         let ch: Channel<int> = Channel()\nlet t = spawn 1 + 2\n\
-         host.copy(Job(name: \"first\", run: one))\nhost.copy([one, () => 2])\nhost.copy((1, ch, t))\n\
-         host.copy([\"a\": stats.counter()])\nhost.copy(Some(time.Stopwatch()))\nprint(t.wait())\n",
-    );
-    let expected = [
-        Value::Struct(StructValue::new("main.Job", [("name", Value::Str("first".into())), ("run", opaque_value("fn"))])),
-        Value::List(vec![opaque_value("fn"), opaque_value("fn")]),
-        Value::Tuple(vec![Value::Int(1), opaque_value("Channel"), opaque_value("Task")]),
-        Value::Map(vec![(Value::Str("a".into()), opaque_value("stats.Counter"))]),
-        Value::Variant(VariantValue::new("Option", "Some", [opaque_value("time.Stopwatch")])),
-    ];
-    assert_eq!(values, expected);
-}
-
 /// Defines `chain(n)` with `n` nested structs and a cyclic `ring` struct.
 const NESTED_VALUES: &str = "struct Link { var next: Link? }\nfn chain(n: int) -> Link {\n    var link = Link(next: None)\n    \
                              for _ in 1..n {\n        link = Link(next: Some(link))\n    }\n    link\n}\n\
@@ -4376,8 +4340,8 @@ fn encode_deep_and_cyclic_values_on_a_small_stack() {
             .to_string());
     r.unwrap();
     assert_eq!(copies, 1);
-    // In `Vm::to_value`, each `Link` after the first adds both a struct level
-    // and a `Some` level, so `[chain(256)]` reaches 512 levels.
+    // In the host `Value` format, each `Link` after the first adds both a
+    // struct level and a `Some` level, so `[chain(256)]` reaches 512 levels.
     for (operation, message, too_deep_expr) in [
         ("json.encode", "limit: value too deeply nested to encode as JSON", "chain(513)"),
         ("json.to_json", "limit: value too deeply nested to convert to JSON", "chain(513)"),
@@ -4394,7 +4358,7 @@ fn encode_deep_and_cyclic_values_on_a_small_stack() {
 }
 
 #[test]
-fn to_value_counts_its_memory_against_the_memory_limit() {
+fn encoded_counts_its_memory_against_the_memory_limit() {
     for (big, value) in [("(0..100000).to_list()", "list"), ("\"x\".repeat(4000000)", "str"), ("\"x\".repeat(4000000).bytes()", "bytes")] {
         let src = format!("let big = {big}\nlet shared = []\nfor _ in 0..1000 {{\n    shared.push(big)\n}}\nhost.copy(shared)");
         let config = Config::new().limits(Limits { max_memory: Some(64 << 20), ..Limits::default() });

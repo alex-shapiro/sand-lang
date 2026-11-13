@@ -508,6 +508,7 @@ spec_files!(
     std_fs,
     std_io_env,
     std_json,
+    codec_traits,
     std_log,
     std_math,
     std_random,

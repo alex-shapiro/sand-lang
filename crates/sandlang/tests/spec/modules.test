@@ -193,11 +193,6 @@ pub fn cents(n: int) -> Money { Money(cents: n) }
 --- error
 2: method `to_str` of `money.Money` is private
 
-=== only functions take type descriptions
-struct Box<reflect T> { x: T }
---- error
-1: only the type parameters of a function can be `reflect`
-
 === private fields cannot be assigned in other modules
 import "./account.sand"
 let a = account.open()
@@ -210,19 +205,21 @@ pub fn open() -> Account { Account(count: 0) }
 --- error
 3: field `count` of `account.Account` is private
 
-=== reflection cannot build types with private fields of other modules
+=== the derived Decode of a type builds its private fields in other modules
 import "./account.sand"
 import json
 print(json.encode(account.open()))
 let a: Result<account.Account> = json.decode("{\"owner\": \"x\"}")
+print(a?.owner)
 --- file account.sand
 pub struct Account {
     pub owner: str
     balance: int = 0
 }
 pub fn open() -> Account { Account(owner: "ann") }
---- error
-4: this call cannot build `account.Account` here: its field `balance` is private
+--- stdout
+{"owner":"ann","balance":0}
+x
 
 === private items are not visible
 import "./m.sand"

@@ -3,24 +3,15 @@
 use crate::native::NamedType;
 use crate::native::ty::Never;
 use crate::stdlib::json::Json;
-use crate::vm::bytecode::Program;
-use crate::vm::container_children::{ChildRole, ContainerChildren, INLINE_OPEN_CONTAINERS, MAX_NESTING_DEPTH};
-use crate::vm::heap::Heap;
-use crate::vm::meter::{Meter, Scratch};
-use crate::vm::value::{FxHashMap, Obj, ValueRef, ValueType, VmValue};
-use crate::vm::{Fail, Vm, fail, internal};
-use smallvec::SmallVec;
+use crate::vm::value::ValueType;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
-use std::mem::size_of;
 use std::sync::{Arc, OnceLock};
 
-/// The Rust representation of a Sand value.
-///
-/// Any part whose type does not implement the Sand `Encode` trait becomes
-/// [`Value::Opaque`]. A `Value` is independent of the VM and remains valid
-/// after a run ends.
+/// The Rust representation of a Sand value, as the Sand `Encode` trait
+/// writes it. A `Value` is independent of the VM and remains valid after a
+/// run ends.
 ///
 /// `Debug` formats structs and variants with their type names, such as
 /// `Struct(shop.Order { id: Int(1) })`.
@@ -59,9 +50,6 @@ pub enum Value {
     Variant(VariantValue),
     /// A value of a native value type, such as `time.PlainDate`.
     Native(Box<NativeValue>),
-    /// A value whose type does not implement the Sand `Encode` trait, such as a
-    /// function, task, channel, or native object.
-    Opaque { type_name: Arc<str> },
 }
 
 /// A struct value and its type descriptor.
@@ -905,19 +893,12 @@ pub(crate) fn kind_name(value: &Value) -> Cow<'_, str> {
         Value::Struct(s) => &s.ty.type_name,
         Value::Variant(v) => return Cow::Owned(format!("{}.{}", v.variant.type_name, v.variant.name)),
         Value::Native(native) => &native.type_name,
-        Value::Opaque { type_name } => type_name,
     })
 }
 
 /// Converts `f` to an `int` if it is integral and in the `int` range.
 pub(crate) fn integral_float_to_int(f: f64) -> Option<i64> {
     (f.fract() == 0.0 && (-9223372036854775808.0..9223372036854775808.0).contains(&f)).then_some(f as i64)
-}
-
-/// Copies `value` from the heap of `vm`. See [`Vm::to_value`].
-pub(crate) fn copy_from_vm(vm: &Vm, value: VmValue) -> Result<Value, Fail> {
-    let (allocated, scratch, type_names) = (0, Scratch::new(), FxHashMap::default());
-    ValueCopier { prog: &vm.prog, heap: &vm.heap, meter: &vm.meter, allocated, scratch, type_names }.copy_value(value)
 }
 
 /// Formats a qualified type name: `module.Name`, or `Name` if `module` is
@@ -942,250 +923,6 @@ pub(crate) fn is_qualified_name(text: &str, module: Option<&str>, name: &str) ->
 /// `"prelude"`. The engine reserves the module name `"prelude"`.
 pub(crate) fn qualified_name_module(rust_module: &str) -> Option<&str> {
     (rust_module != "prelude").then_some(rust_module)
-}
-
-/// Copies a Sand value from the VM heap into a [`Value`].
-struct ValueCopier<'h> {
-    prog: &'h Program,
-    heap: &'h Heap,
-    meter: &'h Meter,
-    /// Bytes of Rust memory allocated by the copy.
-    allocated: usize,
-    scratch: Scratch,
-    /// Cached qualified names for native value types and opaque types.
-    type_names: FxHashMap<(Option<&'static str>, &'static str), Arc<str>>,
-}
-
-/// A container being copied and its remaining children.
-struct OpenContainer<'h> {
-    children: ContainerChildren<'h>,
-    partial: PartialValue,
-}
-
-/// A [`Value`] container being assembled from its children.
-enum PartialValue {
-    /// Slot for the root value of the copy.
-    Root(Value),
-    List(Vec<Value>),
-    Tuple(Vec<Value>),
-    Set(Vec<Value>),
-    /// Map entries and a flag that is `true` while the last entry awaits its
-    /// value.
-    Map(Vec<(Value, Value)>, bool),
-    Struct(Arc<StructDesc>, Vec<Value>),
-    Variant(Arc<VariantDesc>, Vec<Value>),
-}
-
-impl<'h> ValueCopier<'h> {
-    /// Copies `root` into a [`Value`]. Charges a fuel unit per value, except
-    /// map keys, and charges for copied byte slices and strings.
-    fn copy_value(&mut self, root: VmValue) -> Result<Value, Fail> {
-        let (prog, heap) = (self.prog, self.heap);
-        let root = ContainerChildren::Single(ChildRole::Item, Some(root));
-        let mut innermost = OpenContainer { children: root, partial: PartialValue::Root(Value::Unit) };
-        let mut parents = SmallVec::<[OpenContainer<'h>; INLINE_OPEN_CONTAINERS]>::new();
-        'next_value: loop {
-            let Some((role, v)) = innermost.children.next() else {
-                let Some(parent) = parents.pop() else { return Ok(innermost.partial.into_value()) };
-                let complete = std::mem::replace(&mut innermost, parent).partial;
-                innermost.partial.push_child(complete.into_value());
-                continue;
-            };
-            if !matches!(role, ChildRole::MapKey) {
-                self.meter.charge(1)?;
-            }
-            let copy = 'without_children: {
-                let container = match v {
-                    VmValue::Unit | VmValue::Uninit => break 'without_children Value::Unit,
-                    VmValue::Bool(b) => break 'without_children Value::Bool(b),
-                    VmValue::Int(i) => break 'without_children Value::Int(i),
-                    VmValue::Float(f) => break 'without_children Value::Float(f),
-                    VmValue::Dur(nanos) => break 'without_children Value::Duration(jiff::SignedDuration::from_nanos(nanos)),
-                    VmValue::Tag(id) => {
-                        break 'without_children Value::Variant(VariantValue { variant: self.variant_desc(id)?, payload: Box::default() });
-                    }
-                    VmValue::Pair(first, second) => {
-                        self.meter.charge(2)?;
-                        let mut ints = self.value_buffer(2)?;
-                        ints.extend([Value::Int(i64::from(first)), Value::Int(second)]);
-                        break 'without_children Value::Tuple(ints);
-                    }
-                    VmValue::Obj(_) => match heap.get(v) {
-                        Obj::Str(s) => break 'without_children self.copy_str(s)?,
-                        Obj::StrBuf(s) => break 'without_children self.copy_str(s)?,
-                        Obj::Bytes(bytes) => {
-                            self.reserve_copy(bytes.len(), 0)?;
-                            break 'without_children Value::Bytes(bytes.to_vec());
-                        }
-                        Obj::Range(start, end, inclusive) => {
-                            break 'without_children Value::Range { start: *start, end: *end, inclusive: *inclusive };
-                        }
-                        Obj::Value(native) => break 'without_children self.native_value(ValueRef::Boxed(&**native))?,
-                        Obj::Packed(ty, bits) => break 'without_children self.native_value(ValueRef::Packed(ty, *bits))?,
-                        Obj::Closure(..) | Obj::NativeFn(_) | Obj::IterFn(_) => break 'without_children self.opaque_value(None, "fn")?,
-                        Obj::Task(_) => break 'without_children self.opaque_value(None, "Task")?,
-                        Obj::Channel(_) => break 'without_children self.opaque_value(None, "Channel")?,
-                        Obj::Native(object) => {
-                            break 'without_children self.opaque_value(qualified_name_module(object.module_name()), object.type_name())?;
-                        }
-                        Obj::TypeDesc(_) | Obj::Cell(_) | Obj::Free(_) => {
-                            return internal("to_value: unexpected internal heap object");
-                        }
-                        Obj::List(items) => OpenContainer {
-                            children: ContainerChildren::Items(items.iter()),
-                            partial: PartialValue::List(self.value_buffer(items.len())?),
-                        },
-                        Obj::Tuple(items) => OpenContainer {
-                            children: ContainerChildren::Items(items.iter()),
-                            partial: PartialValue::Tuple(self.value_buffer(items.len())?),
-                        },
-                        Obj::Set(set) => OpenContainer {
-                            children: ContainerChildren::Set(set.entries.iter()),
-                            partial: PartialValue::Set(self.value_buffer(set.live)?),
-                        },
-                        Obj::Map(map) => {
-                            self.reserve(map.live.saturating_mul(size_of::<(Value, Value)>()))?;
-                            OpenContainer {
-                                children: ContainerChildren::Map(map.entries.iter(), None),
-                                partial: PartialValue::Map(Vec::with_capacity(map.live), false),
-                            }
-                        }
-                        Obj::Struct(def, values) => {
-                            let desc = prog.types[*def as usize].desc().clone();
-                            OpenContainer {
-                                children: ContainerChildren::Items(values.iter()),
-                                partial: PartialValue::Struct(desc, self.value_buffer(values.len())?),
-                            }
-                        }
-                        Obj::Variant(id, values) => {
-                            let desc = self.variant_desc(*id)?;
-                            OpenContainer {
-                                children: ContainerChildren::Items(values.iter()),
-                                partial: PartialValue::Variant(desc, self.value_buffer(values.len())?),
-                            }
-                        }
-                    },
-                    VmValue::VUnit(..)
-                    | VmValue::VBool(..)
-                    | VmValue::VInt(..)
-                    | VmValue::VFloat(..)
-                    | VmValue::VDur(..)
-                    | VmValue::VTag(..)
-                    | VmValue::VObj(..) => {
-                        let Some((id, payload)) = v.as_inline_variant() else { return internal("to_value: not an inline variant") };
-                        let desc = self.variant_desc(id)?;
-                        OpenContainer {
-                            children: ContainerChildren::Single(ChildRole::Item, Some(payload)),
-                            partial: PartialValue::Variant(desc, self.value_buffer(1)?),
-                        }
-                    }
-                };
-                if parents.len() >= MAX_NESTING_DEPTH {
-                    return fail("limit", "value too deeply nested to copy");
-                }
-                parents.push(std::mem::replace(&mut innermost, container));
-                continue 'next_value;
-            };
-            innermost.partial.push_child(copy);
-        }
-    }
-
-    /// Reserves memory for `len` values and returns a vector with that
-    /// capacity.
-    #[inline]
-    fn value_buffer(&mut self, len: usize) -> Result<Vec<Value>, Fail> {
-        self.reserve(len.saturating_mul(size_of::<Value>()))?;
-        Ok(Vec::with_capacity(len))
-    }
-
-    /// Counts `bytes` of Rust memory against the memory limit.
-    #[inline]
-    fn reserve(&mut self, bytes: usize) -> Result<(), Fail> {
-        self.allocated = self.allocated.saturating_add(bytes);
-        self.scratch.check(self.heap, self.allocated)
-    }
-
-    /// Charges fuel for `content` bytes and reserves `content + header` bytes
-    /// against the memory limit.
-    #[inline]
-    fn reserve_copy(&mut self, content: usize, header: usize) -> Result<(), Fail> {
-        self.meter.charge_bytes(content)?;
-        self.reserve(content.saturating_add(header))
-    }
-
-    /// Copies `text` into a `Value::Str`.
-    fn copy_str(&mut self, text: &str) -> Result<Value, Fail> {
-        self.reserve_copy(text.len(), 0)?;
-        Ok(Value::Str(text.to_string()))
-    }
-
-    /// Returns the cached qualified name of `name` in `module`.
-    fn type_name(&mut self, module: Option<&'static str>, name: &'static str) -> Result<Arc<str>, Fail> {
-        if let Some(type_name) = self.type_names.get(&(module, name)) {
-            return Ok(type_name.clone());
-        }
-        let type_name = qualified_name(module, name);
-        self.reserve_copy(type_name.len(), 2 * size_of::<usize>())?;
-        let type_name: Arc<str> = type_name.into();
-        self.type_names.insert((module, name), type_name.clone());
-        Ok(type_name)
-    }
-
-    /// Returns the program descriptor for the variant with runtime ID `id`.
-    fn variant_desc(&self, id: u32) -> Result<Arc<VariantDesc>, Fail> {
-        match self.prog.variant_desc(id) {
-            Some(desc) => Ok(desc.clone()),
-            None => internal("to_value: unknown variant ID"),
-        }
-    }
-
-    /// Copies `native` into a `Value::Native`.
-    fn native_value(&mut self, native: ValueRef<'_>) -> Result<Value, Fail> {
-        let text = native.text();
-        self.reserve_copy(text.len(), size_of::<NativeValue>())?;
-        let type_name = self.type_name(qualified_name_module(native.module_name()), native.type_name())?;
-        Ok(Value::Native(Box::new(NativeValue { type_name, text })))
-    }
-
-    /// Builds a `Value::Opaque` for the type `name` in `module`.
-    fn opaque_value(&mut self, module: Option<&'static str>, name: &'static str) -> Result<Value, Fail> {
-        Ok(Value::Opaque { type_name: self.type_name(module, name)? })
-    }
-}
-
-impl PartialValue {
-    /// Appends `value` as the next child.
-    #[inline]
-    fn push_child(&mut self, value: Value) {
-        match self {
-            PartialValue::Root(root) => *root = value,
-            PartialValue::List(items)
-            | PartialValue::Tuple(items)
-            | PartialValue::Set(items)
-            | PartialValue::Struct(_, items)
-            | PartialValue::Variant(_, items) => items.push(value),
-            PartialValue::Map(entries, has_key) => {
-                match entries.last_mut() {
-                    Some(entry) if *has_key => entry.1 = value,
-                    _ => entries.push((value, Value::Unit)),
-                }
-                *has_key = !*has_key;
-            }
-        }
-    }
-
-    /// Converts a completed container into a [`Value`].
-    fn into_value(self) -> Value {
-        match self {
-            PartialValue::Root(root) => root,
-            PartialValue::List(items) => Value::List(items),
-            PartialValue::Tuple(items) => Value::Tuple(items),
-            PartialValue::Set(items) => Value::Set(items),
-            PartialValue::Map(entries, _) => Value::Map(entries),
-            PartialValue::Struct(ty, fields) => Value::Struct(StructValue { ty, fields: fields.into_boxed_slice() }),
-            PartialValue::Variant(variant, payload) => Value::Variant(VariantValue { variant, payload: payload.into_boxed_slice() }),
-        }
-    }
 }
 
 #[cfg(test)]

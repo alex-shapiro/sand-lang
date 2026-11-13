@@ -172,12 +172,6 @@ pub trait NativeFunction<Kind>: Send + Sync + 'static {
 /// ```
 ///
 /// ```compile_fail,E0277
-/// # use sandlang::native::ty::Reflect;
-/// fn assert_send<T: Send>() {}
-/// assert_send::<Reflect<0>>();
-/// ```
-///
-/// ```compile_fail,E0277
 /// # use sandlang::native::ty::VmVal;
 /// #[derive(sandlang::SandObject)]
 /// #[sand(module = "db")]

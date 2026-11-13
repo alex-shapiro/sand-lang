@@ -1,6 +1,6 @@
 //! Conversion between VM values and the arguments and results of native functions.
 
-use super::ty::{Never, Num, Param, Reflect, SandType, VmVal};
+use super::ty::{Never, Num, Param, SandType, VmVal};
 use crate::types::traits;
 use crate::value::{DecodeError, NativeValue, Value, qualified_name, qualified_name_module};
 use crate::vm::meter::Scratch;
@@ -632,6 +632,16 @@ handle! {
     [const N: u8, B: traits::Set] Param<N, B>,
 }
 
+impl<const N: u8> FromVmValue for super::ty::Encoded<N> {
+    type Item<'a> = Self;
+    fn from_vm_value(vm: &Vm, v: VmValue, _: &mut Conversion) -> Result<Self, Fail> {
+        match vm.heap.native::<crate::codec::Encoder>(v).and_then(crate::codec::Encoder::encoded_value) {
+            Some(value) => Ok(Self::new(value.clone())),
+            None => Err(mismatch::<Self>()),
+        }
+    }
+}
+
 impl<const N: u8> FromVmValue for Num<N> {
     type Item<'a> = Self;
     fn from_vm_value(vm: &Vm, v: VmValue, _: &mut Conversion) -> Result<Self, Fail> {
@@ -639,14 +649,5 @@ impl<const N: u8> FromVmValue for Num<N> {
             Obj::Tuple(_) => Ok(Num::from_raw(v)),
             _ => Err(mismatch::<Self>()),
         }
-    }
-}
-
-impl<const N: u8> FromVmValue for Reflect<N> {
-    type Item<'a> = Self;
-    fn from_vm_value(vm: &Vm, v: VmValue, _: &mut Conversion) -> Result<Self, Fail> {
-        let r = Reflect::from_raw(v);
-        r.desc(&vm.heap)?;
-        Ok(r)
     }
 }

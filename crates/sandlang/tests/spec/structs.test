@@ -455,7 +455,7 @@ print(json.encode(Port(80)?))
 let c: Result<Config> = json.decode("{}")
 --- error
 8: Config does not implement `Decode`
-8: `Port` declares `init`, which decoding does not call
+8: `Port` declares `init`, which a derived `Decode` does not call
 
 === `..base` and `..` must come last
 struct P { x: int, y: int }

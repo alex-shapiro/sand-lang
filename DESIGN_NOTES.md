@@ -295,3 +295,56 @@ Facts that matter for Sand:
 - The checker's `TypeDefId` is the runtime struct def id, and variant ids
   are the checker's `variants` index, so synthesized HIR can pass them as
   int constants to natives, which read names from `vm.prog`.
+
+### D1 build log
+
+- Shape: prelude traits `Encode { encode(self, e: Encoder) }` and
+  `Decode { decode(d: Decoder) -> Result<Self>; decode_missing() -> Self? }`.
+  `Encoder`/`Decoder` are prelude native objects over a Rust `EncodeFormat` /
+  `DecodeFormat` (`src/codec/`). Formats: JSON text and `json.Json`
+  (`stdlib/json/text.rs`), host `Value` (`codec/value_format.rs`).
+- Synthesized impls: `check/codec.rs` builds HIR (`FnDeclRef::Derived`).
+  Impls are registered eagerly (cheap) and get their methods on first use
+  (`ensure_derived_methods`), so a program pays only for the types it codes.
+  Measured: a 20,000-struct chain compiled in 111 s in a debug build before
+  two fixes (lazy methods, and a verifier index of impls by head); 2.6 s after.
+  Release: 0.27 s (`value-decode`: 0.14 s).
+- Path tracking lives in the `Decoder` (frames); errors of formats get the
+  path at the failing call; `d.finish(r)` adds the path to errors that
+  hand-written code returns (`Decoder.locate`).
+- Retry rule (`retry_stress`): every format op checks memory before it changes
+  state. Bugs found by the spec suite under retry stress and fixed: `end()` of
+  the tree and value encoders popped before the memory check; the tree
+  encoder opened a variant's two containers in two checks; the value decoder
+  consumed its value before the memory check of a long text.
+- General changes needed by D1 (own commits): trait proof depth 32 -> 128 in
+  the checker and the verifier (a nested `[[...]]` type of 64 levels needs 64
+  nested `List` impls; measured: 250 levels fit a 512 KiB stack); the
+  verifier indexes impls by trait and head (was a scan of all impls).
+- Container mismatch messages: JSON text messages already named kinds
+  (`expected array`, `expected object`) and are unchanged. Only the `Value`
+  decoder (a test hook on `value-decode`) named full container types; it now
+  names the kind: before `expected [int], found str`, after
+  `expected list, found str`. Map keys without a JSON key form: before
+  `cannot decode map keys of type (int, int)`, after
+  `cannot decode map keys of type tuple`. Enum names lose their type
+  arguments: before `unknown variant `Other` of Shape<[P]>`, after `of Shape`.
+- Text copy: `TextDecoder::new` copies the text once (counted by `Budget`).
+  To measure in the benches (small_decode).
+
+### Fuel of each kind (tests/metering.rs, `a_value_of_each_kind...`)
+
+value-decode -> D1, units for encode / to_json / Encoded (was to_value):
+
+| value                    | encode    | to_json   | to_value/Encoded |
+| ------------------------ | --------- | --------- | ---------------- |
+| int                      | 1 -> 3    | 1 -> 4    | 1 -> 3           |
+| list of 3 ints           | 4 -> 11   | 4 -> 15   | 4 -> 11          |
+| map, 2 str keys          | 4 -> 15   | 4 -> 19   | 4 -> 15          |
+| struct (3 fields)        | 6 -> 12   | 6 -> 18   | 6 -> 13          |
+| list of 2 structs        | 12 -> 26  | 12 -> 38  | 12 -> 27         |
+| Json array and object    | 13 -> 12  | 1 -> 19   | 13 -> 16         |
+| 256 nested variants      | 257 -> 551| 257 -> 1028 | 513 -> 1027 (512 variants) |
+
+Encode costs 2 to 4 times the fuel of the native walk: one unit for each Sand
+call plus one for each format op. `to_json` no longer reuses `Json` values.

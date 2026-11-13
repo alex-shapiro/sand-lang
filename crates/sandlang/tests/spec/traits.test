@@ -584,7 +584,7 @@ print(Box(item: 1).show())
 --- error
 8: int does not implement `Describe`
 
-=== reflect natives alongside dictionaries
+=== json natives alongside dictionaries
 import json
 trait Describe {
     fn describe(self) -> str

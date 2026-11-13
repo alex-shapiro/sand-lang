@@ -716,7 +716,14 @@ impl Checker {
         let mut traits = self.derived_traits(c, arity);
         for i in self.visible_impls(c, arity) {
             let imp = &self.impls[i as usize];
-            let wheres = imp.evidence.iter().map(|(t, tr)| format!("{}: {}", self.show(*t), self.show_trait(tr))).collect();
+            // A synthesized impl repeats the bounds of the type; show only its own.
+            let synthesized = imp.derived;
+            let wheres = imp
+                .evidence
+                .iter()
+                .filter(|(_, tr)| !synthesized || tr.trait_id == imp.trait_ref.trait_id)
+                .map(|(t, tr)| format!("{}: {}", self.show(*t), self.show_trait(tr)))
+                .collect();
             traits.push(with_wheres(self.show_trait(&imp.trait_ref), wheres));
         }
         let traits: Vec<(String, Option<Arc<str>>)> = traits.into_iter().map(|t| (t, None)).collect();
@@ -1004,7 +1011,7 @@ impl Checker {
 
     fn param_text(&self, p: ParamId) -> String {
         let info = &self.params[p as usize];
-        let name = format!("{}{}", if info.reflect { "reflect " } else { "" }, self.name(info.name));
+        let name = self.name(info.name).to_string();
         let traits = self.traits_text(p, &[]);
         if traits.is_empty() { name } else { format!("{name}: {traits}") }
     }

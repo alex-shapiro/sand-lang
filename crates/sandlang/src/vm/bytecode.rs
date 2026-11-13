@@ -3,7 +3,7 @@
 //! Every instruction is 8 bytes. Registers are frame-relative `u16` slots.
 //! Jump offsets are relative to the instruction *after* the jump.
 
-use super::value::{DescTemplate, FxHashMap, TypeDesc};
+use super::value::FxHashMap;
 use crate::hir::FormatSpec;
 use crate::value::{StructDesc, VariantDesc, qualified_name};
 use std::sync::{Arc, OnceLock};
@@ -902,12 +902,6 @@ pub enum Op {
         dst: Reg,
         tmpl: u32,
     },
-    /// Instantiates `Program::desc_templates[tmpl]` with the type descriptors
-    /// in `base..` and writes the result to `base`.
-    Describe {
-        base: Reg,
-        tmpl: u32,
-    },
     /// `local += "..."` (an interpolation) for a string builder local (see
     /// `AppendStr`): formats the template and appends it in place.
     AppendInterp {
@@ -1121,9 +1115,6 @@ impl Op {
     }
 }
 
-/// Prototype name for helper functions that evaluate field defaults and populate sets during `json.decode` (omitted from stack traces).
-pub const FILL_PROTO: &str = "<fill>";
-
 #[derive(Clone, Debug)]
 pub struct Proto {
     pub name: String,
@@ -1184,7 +1175,6 @@ pub enum Const {
     /// A script function (closure without captures).
     Fn(u32),
     Native(u32),
-    TypeDesc(Arc<TypeDesc>),
     /// An immutable tuple of earlier constants (constant trait dictionaries).
     Tuple(Vec<u32>),
 }
@@ -1232,8 +1222,12 @@ pub struct StructRt {
     pub module: Option<String>,
     pub fields: Vec<String>,
     pub is_enum: bool,
+    /// Parses the text of a native value type.
+    pub parse: Option<crate::vm::value::ParseValue>,
     /// Cached descriptor returned by [`StructRt::desc`].
     pub desc: OnceLock<Arc<StructDesc>>,
+    /// Cached positions of `fields` by name (see [`field_index`]).
+    pub by_name: OnceLock<FxHashMap<String, usize>>,
 }
 
 impl StructRt {
@@ -1256,6 +1250,18 @@ pub struct VariantRt {
     pub arity: usize,
     /// Cached descriptor returned by [`Program::variant_desc`].
     pub desc: OnceLock<Arc<VariantDesc>>,
+    /// Cached positions of `field_names` by name (see [`field_index`]).
+    pub by_name: OnceLock<FxHashMap<String, usize>>,
+}
+
+/// Returns the position of `name` in `names`, through `index`, which this
+/// function builds on first use, if `names` is long.
+pub(crate) fn field_index(names: &[String], index: &OnceLock<FxHashMap<String, usize>>, name: &str) -> Option<usize> {
+    const SCANNED: usize = 8;
+    if names.len() <= SCANNED {
+        return names.iter().position(|n| n == name);
+    }
+    index.get_or_init(|| names.iter().enumerate().rev().map(|(i, n)| (n.clone(), i)).collect()).get(name).copied()
 }
 
 /// Well-known runtime ids.
@@ -1294,8 +1300,6 @@ pub struct Program {
     pub native_argc: Arc<[u16]>,
     /// Templates for string interpolations (`Op::Interp`).
     pub templates: Vec<Template>,
-    /// Templates for parameterized type descriptors (`Op::Describe`).
-    pub desc_templates: Vec<DescTemplate>,
     /// The jump tables of `SwitchVariant`, `SwitchInt` and `SwitchChar`.
     pub switches: Vec<Switch>,
 }

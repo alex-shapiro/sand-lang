@@ -10,7 +10,6 @@ mod common;
 use common::{StoppedClock, rt, run_with};
 use sandlang::engine::{Config, Engine, Error, HostModules, InterruptHandle, LimitKind, Limits, MemorySink, Outcome};
 use sandlang::native::NativeModule;
-use sandlang::native::ty::Param;
 use sandlang::stdlib::json::Json;
 use sandlang::vm::{Fail, Vm};
 use std::sync::{Arc, mpsc};
@@ -778,40 +777,6 @@ fn iterating_maps_and_sets_copies_nothing() {
 }
 
 #[test]
-fn names_of_type_descriptions_built_at_run_time_stay_short() {
-    let doubling = "struct P<A, B> { a: A, b: B }\nfn grow<reflect A, reflect B>(n: int, a: A?, b: B?) -> int {\n    \
-                    let x: P<A, B>? = None\n    grow(n + 1, x, x)\n}\nprint(grow(0, Some(1), Some(2)))";
-    let deep = |e: &Error| matches!(e, Error::Runtime { message, .. } if message.contains("nested too deeply"));
-    expect_stop(limits(|l| l.max_memory = None), doubling, deep, Duration::from_secs(10));
-    let shared = "import json\nstruct P<T> { v: T }\nfn grow<reflect A: Decode + Hash>(n: int, a: A?) -> int {\n    if n == 0 {\n        \
-                  let m: Result<[A: int]> = json.decode(\"{\\\"k\\\": 1}\")\n        let p: Result<P<A>> = json.decode(\"{\\\"v\\\": 1}\")\n        \
-                  print(m)\n        print(p)\n        return 0\n    }\n    let x: (A, A)? = None\n    grow(n - 1, x)\n}\nlet a: int? = None\nprint(grow(200, a))";
-    let start = Instant::now();
-    let (r, out) = run(Config::new(), shared);
-    r.unwrap();
-    assert!(start.elapsed() < Duration::from_secs(10), "took {:?}", start.elapsed());
-    let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines.len(), 3, "{out}");
-    assert!(
-        lines[0].starts_with("Err(Error(message: \"$: cannot decode map keys of type ((((")
-            && lines[0].ends_with("kind: \"invalid\"))")
-            && lines[0].len() < 400,
-        "{out}"
-    );
-    assert!(lines[0].contains('…') && lines[1].contains("expected array of length 2"), "{out}");
-}
-
-#[test]
-fn type_descriptions_count_the_nodes_they_share_once() {
-    let src = "import json\nstruct P<A, B> { a: A, b: B }\nfn deep<reflect A: Decode, reflect B: Decode>(n: int, x: [A], y: [B]) -> int {\n    \
-               if n == 0 {\n        let r: Result<[(A, B)]> = json.decode(\"[]\")\n        return if r.is_ok() { 0 } else { -1 }\n    }\n    \
-               let w: [P<A, B>] = []\n    deep(n - 1, w, w) + 1\n}\nlet w: [int] = []\nprint(deep(200, w, w))";
-    let (r, out) = run(limits(|l| l.max_memory = Some(16 << 20)), src);
-    r.unwrap();
-    assert_eq!(out, "200\n");
-}
-
-#[test]
 fn the_collection_at_the_memory_limit_releases_the_staging_buffer() {
     let src = |churn: bool, mib: usize| {
         let churn = if churn { "for i in 0..400 {\n    let s = \"y\".repeat(1 << 20)\n}\n" } else { "" };
@@ -844,8 +809,8 @@ fn fuel_probe() -> NativeModule {
         vm.check_memory(n as usize)?;
         Ok(n)
     });
-    m.source("pub native fn copy<T>(value: T)");
-    m.function("copy", |vm: &mut Vm, value: Param<0>| vm.to_value(value.raw()).map(drop));
+    m.source("pub native fn copy<T: Encode>(value: T)");
+    m.function("copy", |value: sandlang::native::ty::Encoded<0>| drop(value));
     m.function("take_json", |_: Json| {});
     m
 }
@@ -1110,7 +1075,7 @@ fn show<T: Encode>(name: str, x: T) {
     let f5 = probe.fuel()
     let shown = if text.len() <= 80 { text } else { "\(text.len()) bytes" }
     print("\(name): \(shown)")
-    print("    encode \(f1 - f0 - call), indent \(f2 - f1 - call) for \(indented.len()) bytes, to_json \(f3 - f2 - call), Json parameter \(f4 - f3 - call), to_value \(f5 - f4 - call)")
+    print("    encode \(f1 - f0 - call), indent \(f2 - f1 - call) for \(indented.len()) bytes, to_json \(f3 - f2 - call), Json parameter \(f4 - f3 - call), Encoded \(f5 - f4 - call)")
 }
 show("unit", ())
 show("bool", true)
@@ -1179,85 +1144,85 @@ probe.copy(copy_bound)
 let d4 = probe.fuel()
 print("256 variants, which are 512 levels of JSON: encode \(d1 - d0 - call) for \(text.len()) bytes, to_json \(d2 - d1 - call)")
 print("512 Json arrays: Json parameter \(d3 - d2 - call)")
-print("512 variants: to_value \(d4 - d3 - call)")
+print("512 variants: Encoded \(d4 - d3 - call)")
 "#;
 
 const FUEL_OF_EACH_KIND: &str = r#"unit: null
-    encode 1, indent 1 for 4 bytes, to_json 1, Json parameter 1, to_value 1
+    encode 3, indent 3 for 4 bytes, to_json 4, Json parameter 1, Encoded 3
 bool: true
-    encode 1, indent 1 for 4 bytes, to_json 1, Json parameter 1, to_value 1
+    encode 3, indent 3 for 4 bytes, to_json 4, Json parameter 1, Encoded 3
 int: -7
-    encode 1, indent 1 for 2 bytes, to_json 1, Json parameter 1, to_value 1
+    encode 3, indent 3 for 2 bytes, to_json 4, Json parameter 1, Encoded 3
 float: 1.5
-    encode 1, indent 1 for 3 bytes, to_json 1, Json parameter 1, to_value 1
+    encode 3, indent 3 for 3 bytes, to_json 4, Json parameter 1, Encoded 3
 duration: 1500000000
-    encode 1, indent 1 for 10 bytes, to_json 1, Json parameter 1, to_value 1
+    encode 3, indent 3 for 10 bytes, to_json 4, Json parameter 1, Encoded 3
 str: "plain"
-    encode 1, indent 1 for 7 bytes, to_json 1, Json parameter 1, to_value 1
+    encode 3, indent 3 for 7 bytes, to_json 4, Json parameter 1, Encoded 3
 str with escapes: "q\"b\\n\n\t\u0001é"
-    encode 1, indent 1 for 21 bytes, to_json 1, Json parameter 1, to_value 1
+    encode 3, indent 3 for 21 bytes, to_json 4, Json parameter 1, Encoded 3
 str of 3000 bytes: 3002 bytes
-    encode 1, indent 1 for 3002 bytes, to_json 1, Json parameter 47, to_value 47
+    encode 49, indent 49 for 3002 bytes, to_json 96, Json parameter 47, Encoded 49
 bytes: "AP8H"
-    encode 1, indent 1 for 6 bytes, to_json 1, Json parameter 1, to_value 1
+    encode 3, indent 3 for 6 bytes, to_json 4, Json parameter 1, Encoded 3
 bytes of 3000 bytes: 4002 bytes
-    encode 376, indent 376 for 4002 bytes, to_json 376, Json parameter 63, to_value 47
+    encode 440, indent 440 for 4002 bytes, to_json 503, Json parameter 63, Encoded 49
 list: [1,2,3]
-    encode 4, indent 4 for 17 bytes, to_json 4, Json parameter 7, to_value 4
+    encode 11, indent 11 for 17 bytes, to_json 15, Json parameter 7, Encoded 11
 empty list: []
-    encode 1, indent 1 for 2 bytes, to_json 1, Json parameter 1, to_value 1
+    encode 3, indent 3 for 2 bytes, to_json 4, Json parameter 1, Encoded 3
 tuple: [1,"a",2.5]
-    encode 4, indent 4 for 21 bytes, to_json 4, Json parameter 7, to_value 4
+    encode 9, indent 9 for 21 bytes, to_json 13, Json parameter 7, Encoded 9
 pair of ints: [1,2]
-    encode 3, indent 3 for 12 bytes, to_json 3, Json parameter 5, to_value 3
+    encode 7, indent 7 for 12 bytes, to_json 10, Json parameter 5, Encoded 7
 set: [3,1,2]
-    encode 4, indent 4 for 17 bytes, to_json 4, Json parameter 7, to_value 4
+    encode 12, indent 12 for 17 bytes, to_json 16, Json parameter 7, Encoded 12
 map with str keys: {"k":[1],"j":[]}
-    encode 4, indent 4 for 33 bytes, to_json 4, Json parameter 7, to_value 4
+    encode 15, indent 15 for 33 bytes, to_json 19, Json parameter 7, Encoded 15
 map with int keys: {"2":"two","1":"one"}
-    encode 3, indent 3 for 30 bytes, to_json 3, Json parameter 5, to_value 3
+    encode 13, indent 13 for 30 bytes, to_json 16, Json parameter 5, Encoded 13
 map with bool keys: {"true":1,"false":2}
-    encode 3, indent 3 for 29 bytes, to_json 3, Json parameter 5, to_value 3
+    encode 13, indent 13 for 29 bytes, to_json 16, Json parameter 5, Encoded 13
 map with duration keys: {"5000000":"d"}
-    encode 2, indent 2 for 20 bytes, to_json 2, Json parameter 3, to_value 2
+    encode 8, indent 8 for 20 bytes, to_json 10, Json parameter 3, Encoded 8
 map with variant keys: {"Right":1.5,"Left":2.5}
-    encode 3, indent 3 for 33 bytes, to_json 3, Json parameter 5, to_value 3
+    encode 13, indent 13 for 33 bytes, to_json 16, Json parameter 5, Encoded 13
 map with date keys: {"2024-03-10":1}
-    encode 2, indent 2 for 21 bytes, to_json 2, Json parameter 3, to_value 2
+    encode 8, indent 8 for 21 bytes, to_json 10, Json parameter 3, Encoded 8
 map with a key of 3000 bytes: 3006 bytes
-    encode 48, indent 49 for 3011 bytes, to_json 48, Json parameter 49, to_value 48
+    encode 54, indent 55 for 3011 bytes, to_json 102, Json parameter 49, Encoded 54
 range: {"start":0,"end":3}
-    encode 1, indent 1 for 28 bytes, to_json 1, Json parameter 5, to_value 1
+    encode 3, indent 3 for 28 bytes, to_json 6, Json parameter 5, Encoded 3
 inclusive range: {"start":-1,"end":1,"inclusive":true}
-    encode 1, indent 1 for 50 bytes, to_json 1, Json parameter 7, to_value 1
+    encode 3, indent 3 for 50 bytes, to_json 7, Json parameter 7, Encoded 3
 struct: {"id":1,"note":"gift","tags":["a"]}
-    encode 6, indent 6 for 56 bytes, to_json 6, Json parameter 9, to_value 6
+    encode 12, indent 12 for 56 bytes, to_json 18, Json parameter 9, Encoded 13
 variant without payload: "Active"
-    encode 1, indent 1 for 8 bytes, to_json 1, Json parameter 1, to_value 1
+    encode 3, indent 3 for 8 bytes, to_json 4, Json parameter 1, Encoded 3
 variant with named payload: {"Suspended":{"reason":"late"}}
-    encode 2, indent 2 for 45 bytes, to_json 2, Json parameter 5, to_value 2
+    encode 5, indent 5 for 45 bytes, to_json 8, Json parameter 5, Encoded 5
 variant with positional payload: {"Banned":[3,"spam"]}
-    encode 3, indent 3 for 39 bytes, to_json 3, Json parameter 7, to_value 3
+    encode 7, indent 7 for 39 bytes, to_json 11, Json parameter 7, Encoded 7
 variant with one int: {"One":[1]}
-    encode 2, indent 2 for 24 bytes, to_json 2, Json parameter 5, to_value 2
+    encode 5, indent 5 for 24 bytes, to_json 8, Json parameter 5, Encoded 5
 nested Some: 1
-    encode 3, indent 3 for 1 bytes, to_json 3, Json parameter 1, to_value 3
+    encode 5, indent 5 for 1 bytes, to_json 8, Json parameter 1, Encoded 7
 None: null
-    encode 1, indent 1 for 4 bytes, to_json 1, Json parameter 1, to_value 1
+    encode 3, indent 3 for 4 bytes, to_json 4, Json parameter 1, Encoded 3
 Err: {"Err":[{"message":"closed","kind":"io"}]}
-    encode 4, indent 4 for 76 bytes, to_json 4, Json parameter 9, to_value 4
+    encode 9, indent 9 for 76 bytes, to_json 14, Json parameter 9, Encoded 9
 date: "2024-03-10"
-    encode 1, indent 1 for 12 bytes, to_json 1, Json parameter 1, to_value 1
+    encode 3, indent 3 for 12 bytes, to_json 4, Json parameter 1, Encoded 3
 span: "P1MT23H"
-    encode 1, indent 1 for 9 bytes, to_json 1, Json parameter 1, to_value 1
+    encode 3, indent 3 for 9 bytes, to_json 4, Json parameter 1, Encoded 3
 Json scalars: [null,true,3,2.5,"x"]
-    encode 10, indent 10 for 37 bytes, to_json 6, Json parameter 11, to_value 10
+    encode 17, indent 17 for 37 bytes, to_json 23, Json parameter 11, Encoded 22
 Json array and object: {"a":[1,null,{"b":{}}],"c":"s"}
-    encode 13, indent 13 for 71 bytes, to_json 1, Json parameter 13, to_value 13
+    encode 12, indent 12 for 71 bytes, to_json 19, Json parameter 13, Encoded 16
 struct with Json fields: {"json":[null],"maybe":1}
-    encode 7, indent 7 for 42 bytes, to_json 4, Json parameter 7, to_value 7
+    encode 8, indent 8 for 42 bytes, to_json 13, Json parameter 7, Encoded 12
 list of structs: [{"id":1,"note":"gift","tags":["a","b"]},{"id":2,"note":null,"tags":[]}]
-    encode 12, indent 12 for 140 bytes, to_json 12, Json parameter 21, to_value 12
+    encode 26, indent 26 for 140 bytes, to_json 38, Json parameter 21, Encoded 27
 {
   "id": 1,
   "note": null,
@@ -1265,9 +1230,9 @@ list of structs: [{"id":1,"note":"gift","tags":["a","b"]},{"id":2,"note":null,"t
     "a"
   ]
 }
-256 variants, which are 512 levels of JSON: encode 257 for 2821 bytes, to_json 257
+256 variants, which are 512 levels of JSON: encode 551 for 2821 bytes, to_json 1028
 512 Json arrays: Json parameter 1025
-512 variants: to_value 513
+512 variants: Encoded 1027
 "#;
 
 #[test]
@@ -1286,16 +1251,13 @@ fn a_value_of_each_kind_leaves_the_vm_for_pinned_fuel() {
 }
 
 #[test]
-fn to_value_takes_each_type_description_from_the_program() {
+fn encoded_takes_each_type_description_from_the_program() {
     use sandlang::value::Value;
     let copies: Arc<std::sync::Mutex<Vec<Value>>> = Arc::default();
     let copied = copies.clone();
     let mut host = NativeModule::new("host");
-    host.source("pub native fn copy<T>(value: T)");
-    host.function("copy", move |vm: &mut Vm, value: Param<0>| -> Result<(), Fail> {
-        copied.lock().unwrap().push(vm.to_value(value.raw())?);
-        Ok(())
-    });
+    host.source("pub native fn copy<T: Encode>(value: T)");
+    host.function("copy", move |value: sandlang::native::ty::Encoded<0>| copied.lock().unwrap().push(value.into_value()));
     let long = "Long".repeat(200);
     let src = format!(
         "import host\nimport probe\nstruct {long} {{ {long}: int }}\nstruct Short {{ x: int }}\nenum Status {{ Active, {long}({long}: int) }}\n\

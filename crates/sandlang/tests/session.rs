@@ -205,19 +205,19 @@ fn a_later_input_cannot_add_init() {
 }
 
 #[test]
-fn reflect_descriptions_from_type_parameters_across_inputs() {
+fn decode_dictionaries_from_type_parameters_across_inputs() {
     let mut r = Repl::new();
     r.ok(r#"import json
 struct P { x: int }
-fn all<reflect T: Decode>(s: str) -> Result<[T]> { json.decode(s) }"#);
+fn all<T: Decode>(s: str) -> Result<[T]> { json.decode(s) }"#);
     r.compile_error(
-        r#"fn opt<reflect T: Decode>(s: str) -> Result<T?> { json.decode(s) }
+        r#"fn opt<T: Decode>(s: str) -> Result<T?> { json.decode(s) }
 let o: P? = opt("null")?
 let bad: int = "no""#,
     );
     r.ok(r#"let a: [P] = all("[{\"x\": 1}]")?"#);
     assert_eq!(r.value("a"), "[P(x: 1)]");
-    r.ok(r#"fn opt<reflect T: Decode>(s: str) -> Result<[T?]> { json.decode(s) }
+    r.ok(r#"fn opt<T: Decode>(s: str) -> Result<[T?]> { json.decode(s) }
 let b: [[P]?] = opt("[null, [{\"x\": 2}]]")?"#);
     assert_eq!(r.value("b"), "[None, Some([P(x: 2)])]");
 }

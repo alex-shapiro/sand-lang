@@ -451,23 +451,15 @@ impl<'a> Parser<'a> {
         Ok(Import { source, alias: None, names: Some(names) })
     }
 
-    fn generics(&mut self, function: bool) -> PResult<Vec<GenericParam>> {
+    fn generics(&mut self) -> PResult<Vec<GenericParam>> {
         let mut out = Vec::new();
         if !self.eat(&Tok::Lt) {
             return Ok(out);
         }
         loop {
-            let mut reflect = false;
-            if self.at(&Tok::Ident) && self.cur_text() == "reflect" && matches!(self.peek_tok(1), Tok::Ident) {
-                let span = self.bump();
-                if !function {
-                    self.errors.push(Diag::error(span, "only the type parameters of a function can be `reflect`"));
-                }
-                reflect = true;
-            }
             let name = self.ident("type parameter")?;
             let traits = if self.eat(&Tok::Colon) { self.traits()? } else { Vec::new() };
-            out.push(GenericParam { name, traits, reflect });
+            out.push(GenericParam { name, traits });
             if self.eat(&Tok::Comma) {
                 continue;
             }
@@ -555,7 +547,7 @@ impl<'a> Parser<'a> {
         let is_native = self.eat(&Tok::Native);
         self.expect(&Tok::Fn, "`fn`")?;
         let name = self.name_or_keyword("function name")?;
-        let generics = self.generics(true)?;
+        let generics = self.generics()?;
         self.expect(&Tok::LParen, "`(`")?;
         let mut params = Vec::new();
         let mut seen_default = false;
@@ -600,7 +592,7 @@ impl<'a> Parser<'a> {
     fn struct_decl(&mut self, is_pub: bool, doc: Option<String>) -> PResult<StructDecl> {
         self.bump();
         let name = self.ident("struct name")?;
-        let generics = self.generics(false)?;
+        let generics = self.generics()?;
         self.expect(&Tok::LBrace, "`{`")?;
         let mut fields = Vec::new();
         let mut methods = Vec::new();
@@ -636,7 +628,7 @@ impl<'a> Parser<'a> {
     fn enum_decl(&mut self, is_pub: bool, doc: Option<String>) -> PResult<EnumDecl> {
         self.bump();
         let name = self.ident("enum name")?;
-        let generics = self.generics(false)?;
+        let generics = self.generics()?;
         self.expect(&Tok::LBrace, "`{`")?;
         let mut variants = Vec::new();
         let mut methods = Vec::new();
@@ -683,7 +675,7 @@ impl<'a> Parser<'a> {
 
     fn extend_decl(&mut self, doc: Option<String>) -> PResult<ExtendDecl> {
         self.bump();
-        let generics = self.generics(false)?;
+        let generics = self.generics()?;
         let target = self.ty()?;
         self.expect(&Tok::LBrace, "`{`")?;
         let mut methods = Vec::new();
@@ -734,7 +726,7 @@ impl<'a> Parser<'a> {
     fn trait_decl(&mut self, is_pub: bool, doc: Option<String>) -> PResult<TraitDecl> {
         self.bump();
         let name = self.ident("trait name")?;
-        let generics = self.generics(false)?;
+        let generics = self.generics()?;
         let supers = if self.eat(&Tok::Colon) { self.traits()? } else { Vec::new() };
         let methods = self.trait_body(true)?;
         Ok(TraitDecl { name, generics, supers, methods, is_pub, doc })
@@ -742,7 +734,7 @@ impl<'a> Parser<'a> {
 
     fn impl_decl(&mut self) -> PResult<ImplDecl> {
         self.bump();
-        let generics = self.generics(false)?;
+        let generics = self.generics()?;
         let trait_ref = self.trait_name()?;
         self.expect(&Tok::For, "`for`")?;
         let target = self.ty()?;
@@ -759,7 +751,7 @@ impl<'a> Parser<'a> {
     fn type_alias(&mut self, is_pub: bool, doc: Option<String>) -> PResult<TypeAlias> {
         self.bump();
         let name = self.ident("type name")?;
-        let generics = self.generics(false)?;
+        let generics = self.generics()?;
         self.expect(&Tok::Eq, "`=`")?;
         let ty = self.ty()?;
         Ok(TypeAlias { name, generics, ty, is_pub, doc })

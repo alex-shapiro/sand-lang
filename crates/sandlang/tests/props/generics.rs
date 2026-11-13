@@ -79,7 +79,7 @@ const TYPES: &str = "struct Wrap<A> { v: A }\nstruct Keyed<A> { s: Set<A> }\nstr
 const PROBES: &str = "fn eqp<X: Eq>(x: X, y: X) -> str { \"\\(x == y)\" }
 fn hashp<X: Hash>(x: X, y: X) -> str { \"\\(Set([x, y, x]).len())\" }
 fn ordp<X: Ord>(x: X, y: X) -> str { \"\\(x < y) \\(x <= y)\" }
-fn rtp<reflect X: Decode + Eq>(x: X) -> str {
+fn rtp<X: Decode + Encode + Eq>(x: X) -> str {
     let r: Result<X> = json.decode(json.encode(x))
     \"\\(r == Ok(x))\"
 }

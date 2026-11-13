@@ -7,8 +7,8 @@
 //!   enum variant satisfies the trait bounds of its type parameter.
 //! - Every dictionary expression passed to a call matches the trait and target
 //!   type expected by the callee's hidden dictionary parameter.
-//! - Every struct field type, enum variant payload type, and `reflect` type
-//!   argument satisfies the trait bounds of its type constructors.
+//! - Every struct field type and enum variant payload type satisfies the
+//!   trait bounds of its type constructors.
 //! - Every `impl` target type satisfies all supertraits of the implemented
 //!   trait.
 //!
@@ -17,7 +17,7 @@
 
 use super::*;
 
-const DERIVED: [Builtin; 5] = [Builtin::Eq, Builtin::Ord, Builtin::Hash, Builtin::Encode, Builtin::Decode];
+const DERIVED: [Builtin; 3] = [Builtin::Eq, Builtin::Ord, Builtin::Hash];
 
 /// Verifies all type definitions, `impl` blocks, and function `bodies` in `cp`.
 /// Returns an error describing the first violation found.
@@ -43,8 +43,6 @@ struct Verifier<'a> {
     /// Required type parameter indices for each type definition and derived
     /// trait in [`DERIVED`], or `None` if the type never implements the trait.
     derived: Vec<[Option<Vec<u32>>; DERIVED.len()]>,
-    /// Type definitions that declare `init` (which do not implement `Decode`).
-    inits: HashSet<TypeDefId>,
     /// The `impl` blocks of each trait by the type constructor of their target.
     impls_by_head: HashMap<(TraitId, Ctor, u32), Vec<ImplId>>,
 }
@@ -66,15 +64,9 @@ type VerifyResult = Result<(), String>;
 impl<'a> Verifier<'a> {
     fn new(cp: &'a CheckedProgram) -> Self {
         let mut natives = HashMap::new();
-        let mut inits = HashSet::new();
         for (f, fi) in cp.fns.iter().enumerate() {
             if let FnKind::Native(n) = fi.kind {
                 natives.entry(n).or_insert(f as FnId);
-            }
-            if let Some(Ctor::Def(d)) = fi.owner
-                && fi.is_init(&cp.syms)
-            {
-                inits.insert(d);
             }
         }
         let mut impls_by_head: HashMap<(TraitId, Ctor, u32), Vec<ImplId>> = HashMap::new();
@@ -86,7 +78,7 @@ impl<'a> Verifier<'a> {
         let builtins = (0..cp.traits.len())
             .filter_map(|t| Some((cp.traits[t].builtin?, TraitRef { trait_id: t as TraitId, args: TyList::EMPTY })))
             .collect();
-        let mut v = Verifier { cp, arena: cp.arena.clone(), natives, builtins, derived: Vec::new(), inits, impls_by_head };
+        let mut v = Verifier { cp, arena: cp.arena.clone(), natives, builtins, derived: Vec::new(), impls_by_head };
         v.derive_all();
         v
     }
@@ -183,16 +175,13 @@ impl<'a> Verifier<'a> {
         let trait_ = DERIVED[b];
         if let TypeDefKind::Opaque(o) = def.kind {
             let ok = match (trait_, o) {
-                (Builtin::Eq, _) | (Builtin::Hash | Builtin::Encode | Builtin::Decode, Opaque::Value(_)) => true,
+                (Builtin::Eq, _) | (Builtin::Hash, Opaque::Value(_)) => true,
                 (Builtin::Ord, Opaque::Value(v)) => v.ord,
                 _ => false,
             };
             return ok.then(Vec::new);
         }
         if trait_ == Builtin::Hash && def.fields().iter().any(|f| f.mutable) {
-            return None;
-        }
-        if trait_ == Builtin::Decode && self.inits.contains(&(d as TypeDefId)) {
             return None;
         }
         let generics = def.generics.clone();
@@ -510,13 +499,12 @@ impl<'a> Verifier<'a> {
 
     fn check_body(&mut self, f: FnId, b: &HFn) -> VerifyResult {
         let fi = &self.cp.fns[f as usize];
-        let reflect = fi.generics.iter().filter(|&&g| self.cp.params[g as usize].reflect).count();
         let mut cx = VerifyCtx { f: Some(f), ..VerifyCtx::default() };
         for (k, &d) in fi.dicts.iter().enumerate() {
-            let l = *b.params.get(reflect + k).ok_or("a dictionary parameter is missing")?;
+            let l = *b.params.get(k).ok_or("a dictionary parameter is missing")?;
             cx.dicts.insert(l, d);
         }
-        if let (Some(i), Some(&d0)) = (fi.impl_of, b.params.get(reflect)) {
+        if let (Some(i), Some(&d0)) = (fi.impl_of, b.params.first()) {
             cx.impl_dict = Some((d0, i));
         }
         cx.dicts.extend(b.local_dicts.iter().map(|&(l, t, tr)| (l, (t, tr))));
@@ -562,13 +550,12 @@ impl<'a> Verifier<'a> {
                 Ty::Fn(_, ret) => self.check_type_args(cx, ret),
                 _ => Ok(()),
             },
-            HKind::TypeDesc { ty, .. } => self.check_well_formed(cx, *ty),
             _ => Ok(()),
         }
     }
 
     /// Verifies an instantiation of function `f` with `targs`, checking hidden
-    /// `reflect` and dictionary arguments if `args` is `Some`.
+    /// dictionary arguments if `args` is `Some`.
     fn check_fn_instance(&mut self, cx: &VerifyCtx, f: FnId, targs: &[TypeId], args: Option<&[HArg]>) -> VerifyResult {
         let cp = self.cp;
         let fi = &cp.fns[f as usize];
@@ -585,16 +572,6 @@ impl<'a> Verifier<'a> {
         }
         let Some(args) = args else { return Ok(()) };
         let mut hidden = 0;
-        for (&g, &t) in gens.iter().zip(targs) {
-            if cp.params[g as usize].reflect {
-                match args.get(hidden) {
-                    Some(HArg::Expr(HExpr { kind: HKind::TypeDesc { ty, .. }, .. })) if *ty == t => {}
-                    Some(HArg::Expr(HExpr { kind: HKind::Local(_), .. })) => {}
-                    _ => return Err(format!("a call of `{name}` lacks the description of {}", self.show(t))),
-                }
-                hidden += 1;
-            }
-        }
         for &(t, tr) in &fi.dicts {
             let (t, tr) = (self.subst(t, gens, targs), self.subst_trait(tr, gens, targs));
             match args.get(hidden) {

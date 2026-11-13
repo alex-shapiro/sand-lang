@@ -3,7 +3,7 @@
 /// Works for any int.
 fn double(x: int) -> int { x * 2 }
 fn pick<T: Ord>(a: T, b: T, label: str = "max") -> T { a }
-fn size<reflect T: Encode>(x: int) -> int { x }
+fn size<T: Encode>(x: int) -> int { x }
 help(double)
 help(pick)
 help(size)
@@ -13,7 +13,7 @@ fn double(x: int) -> int
 Doubles a number.
 Works for any int.
 fn pick<T: Ord>(a: T, b: T, label: str = "max") -> T
-fn size<reflect T: Encode>(x: int) -> int
+fn size<T: Encode>(x: int) -> int
 
 === functions of modules are qualified, imported or not
 help(base64.encode)
@@ -111,9 +111,9 @@ Methods:
 Implements:
     Eq
     Ord
+    Describe
     Encode
     Decode
-    Describe
 struct Counter
 
 Fields:
@@ -176,8 +176,8 @@ Methods:
 
 Implements:
     Eq where T: Eq
-    Encode where T: Encode
-    Decode where T: Decode
+    Encode where T: Encode, T: Hash
+    Decode where T: Decode, T: Hash
 trait Iterator<T>
 
 Sequential element source supporting `for` loops and lazy `Iter<T>` pipelines.
@@ -301,10 +301,10 @@ print(members(Some(1)).contains("unwrap"))
 fn f(a: int) -> [str] { members() }
 print([f(1).contains("a"), f(1).contains("p"), f(1).contains("print")])
 --- stdout
-["Json", "decode", "encode", "parse", "to_json"]
-["debug", "norm", "to_str", "x"]
+["Json", "decode", "encode", "from_json", "parse", "to_json"]
+["debug", "decode", "decode_missing", "encode", "norm", "to_str", "x"]
 true
-["debug", "end", "start", "text", "to_str"]
+["debug", "decode", "decode_missing", "encode", "end", "start", "text", "to_str"]
 true
 [true, false, false]
 
@@ -333,7 +333,8 @@ Functions:
 
 Types:
     bool, int, float, str, bytes, duration, Range, List<T>, Map<K, V>, Set<T>,
-    Task<T>, Channel<T>, Error, Option<T>, Result<T, E>, Iter<T>
+    Task<T>, Channel<T>, Error, Encoder, Decoder, Option<T>, Result<T, E>,
+    Iter<T>
 
 Traits:
     Close, Eq, Ord, Hash, Encode, Decode, Num, Iterator<T>
@@ -491,9 +492,9 @@ Implements:
     Eq where T: Eq
     Ord where T: Ord
     Hash where T: Hash
+    Close where T: Close
     Encode where T: Encode
     Decode where T: Decode
-    Close where T: Close
 
 === types show the traits of their type parameters once
 struct Bag<T: Hash> {

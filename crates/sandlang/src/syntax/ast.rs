@@ -57,7 +57,6 @@ pub struct GenericParam {
     /// Trait bounds (`Ord`, `Describe`, `geo.Shape`, `Into<str>`), represented
     /// as named type expressions.
     pub traits: Vec<TypeExpr>,
-    pub reflect: bool,
 }
 
 #[derive(Clone, Debug)]

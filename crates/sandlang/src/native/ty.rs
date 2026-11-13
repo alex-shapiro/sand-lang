@@ -28,10 +28,11 @@ pub enum Type {
     /// type parameters before the function's own type parameters) and the
     /// built-in traits that the Rust function requires of it.
     Param(u8, Builtins),
-    /// Runtime type descriptor for the `reflect` type parameter at index `0..`.
-    Reflect(u8),
     /// `Num` trait dictionary for the type parameter at index `0..` (see [`Num`]).
     Num(u8),
+    /// The `Encode` form of a value of the type parameter at index `0..`
+    /// (see [`Encoded`]).
+    Encoded(u8),
     /// Nominal type declared in a module.
     Named(Named),
 }
@@ -143,8 +144,7 @@ impl Type {
                 out.push_str(") -> ");
                 r.write(module, param, out);
             }
-            Type::Param(i, _) => out.push_str(&param(*i)),
-            Type::Reflect(i) => out.push_str(&format!("<description of {}>", param(*i))),
+            Type::Param(i, _) | Type::Encoded(i) => out.push_str(&param(*i)),
             Type::Num(i) => out.push_str(&format!("<Num evidence of {}>", param(*i))),
             Type::Named(n) if n.module == "prelude" && n.name == "Option" && n.args.len() == 1 => {
                 let fn_type = matches!(n.args[0], Type::Fn(..));
@@ -347,12 +347,62 @@ impl<const N: u8, B: traits::Set> SandType for Param<N, B> {
     }
 }
 
+/// The `Encode` form of an argument whose type is the `N`-th type parameter
+/// of a `native fn`.
+///
+/// The `native fn` declaration must declare `T: Encode`. Sand code encodes
+/// the argument with its `Encode` implementation before the call, so a
+/// hand-written implementation applies. The encoding charges fuel and memory
+/// to the run.
+///
+/// ```
+/// # use sandlang::native::{NativeModule, ty::Encoded};
+/// # use sandlang::value::Value;
+/// let mut m = NativeModule::new("host");
+/// m.source("pub native fn fields<T: Encode>(value: T) -> int");
+/// m.function("fields", |value: Encoded<0>| -> i64 {
+///     match value.value() {
+///         Value::Struct(s) => s.fields.len() as i64,
+///         _ => 0,
+///     }
+/// });
+/// ```
+pub struct Encoded<const N: u8>(crate::value::Value);
+
+impl<const N: u8> Encoded<N> {
+    pub(crate) fn new(value: crate::value::Value) -> Self {
+        Encoded(value)
+    }
+
+    /// Returns the encoded value.
+    pub fn value(&self) -> &crate::value::Value {
+        &self.0
+    }
+
+    /// Returns the encoded value.
+    pub fn into_value(self) -> crate::value::Value {
+        self.0
+    }
+}
+
+impl<const N: u8> fmt::Debug for Encoded<N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Encoded({:?})", self.0)
+    }
+}
+
+impl<const N: u8> SandType for Encoded<N> {
+    fn sand_type() -> Type {
+        Type::Encoded(N)
+    }
+}
+
 /// Runtime dictionary of `Num` for the `N`-th generic type parameter (`int`
 /// or `float`).
 ///
 /// A Rust function can accept `Num<N>` for any type parameter that the
-/// `native fn` declaration declares as `T: Num`. Place `Num<N>` parameters in ascending order of `N`, after
-/// any [`Reflect`] parameters and before regular value parameters.
+/// `native fn` declaration declares as `T: Num`. Place `Num<N>` parameters in ascending order of `N`, before
+/// regular value parameters.
 pub struct Num<const N: u8>(VmValue, PhantomData<UnrootedVmHandle>);
 
 impl<const N: u8> Num<N> {
@@ -385,33 +435,6 @@ impl<const N: u8> SandType for Num<N> {
     }
 }
 
-/// Runtime type descriptor for the `N`-th `reflect` type parameter of a
-/// `native fn` (see [`Type::Reflect`]).
-#[derive(Clone, Copy)]
-pub struct Reflect<const N: u8>(VmValue, PhantomData<UnrootedVmHandle>);
-
-impl<const N: u8> Reflect<N> {
-    pub fn raw(self) -> VmValue {
-        self.0
-    }
-
-    pub(crate) fn from_raw(v: VmValue) -> Self {
-        Reflect(v, PhantomData)
-    }
-}
-
-impl<const N: u8> fmt::Debug for Reflect<N> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Reflect({:?})", self.0)
-    }
-}
-
-impl<const N: u8> SandType for Reflect<N> {
-    fn sand_type() -> Type {
-        Type::Reflect(N)
-    }
-}
-
 /// An uncopied [`VmValue`] with the Sand type of `T`.
 ///
 /// A [`NativeFunction`](super::func::NativeFunction) that takes `&mut Vm` can
@@ -420,7 +443,7 @@ impl<const N: u8> SandType for Reflect<N> {
 /// A `VmVal` is valid only during the native call that received or allocated
 /// it. The garbage collector does not trace a `VmVal` that Rust code holds. A
 /// collection during a wait can free the heap object. For this reason, `VmVal`
-/// is not `Send`, and neither are [`Param`], [`Num`], and [`Reflect`]. The
+/// is not `Send`, and neither are [`Param`] and [`Num`]. The
 /// compiler rejects a VM handle in these places:
 ///
 /// - a [`NativeObject`](super::NativeObject)

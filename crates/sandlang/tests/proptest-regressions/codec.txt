@@ -1,0 +1,15 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 47ce2cd304d02dbc00d54cf5ee46b5d92c0c9555bb0b9a71103eadc8bcbec0de # shrinks to t = Bag(Tree(Int))
+cc b70e924939a1358eaf7e06a5abba6404556b55c97c5ea0e33b8ce2a39c6398e2 # shrinks to (width, depth) = (1, 33), chain = 1
+cc d33dc549cb63ed0861f59992636126fa83514866a1ca5ab8b7f6769c118d074e # shrinks to t = Tuple([Bag(Keyed), Int])
+cc 639a25c20f6fbce0a8ab07600d16a94dbd780b942130b9c43e0fcce012847c23 # shrinks to t = Map(Tuple([Int, Json]), Map(Int, Fn))
+cc 57a3ccb0cece9f66b1d3eff70ab7e29c4234f44a56d29bab9d6f075f8f736b25 # shrinks to fields = [(("()?", "Some(())"), false)]
+cc 5fd686b19c4222d85dfc47596725481cf3934687263a858b98032c0129eb730e # shrinks to t = Tuple([Map(Keyed, Int), Int])
+cc e19c01c943119fa061a07beb32131a7c394d412174383fd05e4e003503ff88bc # shrinks to t = Map(Int, Fn)
+cc 505d74e8e4efcdf09d92e1208e4d83ecb0ea5552b496b2513d78a238add05e99 # shrinks to t = Bag(Fn)
+cc 024c5ba6a2c5d9a7da686d84ec4573e95baf46fe26b0513deed45a09a56dce2a # shrinks to (width, depth) = (1, 33), chain = 1

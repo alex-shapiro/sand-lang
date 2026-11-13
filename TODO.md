@@ -91,18 +91,18 @@ The host cannot rely on engine limits, stability, or control.
 - [ ] ❓ _Testing._ Compare fuel between a 32-bit and a 64-bit target. Only code
       review currently verifies cross-platform fuel determinism. Add programs
       with pinned fuel totals that run on both a native target and `wasm32`.
-      Include a host function that calls `Vm::to_value`.
+      Include a host function that takes `Encoded<N>`.
 - [ ] ❓ _Embedding._ Convert derived `SandEnum` and `SandStruct` values iteratively with an
       explicit stack. The derived `FromVmValue` and `IntoVmValue` implementations
       recurse once per nesting level. Deep values can overflow a small host
       thread stack in debug builds before reaching the 256-level limit.
-- [ ] ❓ _Embedding._ Convert `json.parse` and `json.decode` to use an explicit
-      stack without regressing throughput. These functions recurse up to the
-      512-level nesting limit, which can overflow a 2 MiB thread stack in debug
-      builds.
+- [ ] ❓ _Embedding._ Convert `json.parse`, and the JSON text decoder's
+      `skip` of unknown fields, to use an explicit stack without regressing
+      throughput. These functions recurse up to the 512-level nesting limit,
+      which can overflow a 2 MiB thread stack in debug builds.
 - [ ] ❓ _Embedding._ Clone, compare, and drop a deep `Value` iteratively. The
       derived `Clone` and `PartialEq` implementations and the default drop
-      recurse once per level. On a 512-level value from `Vm::to_value`, a debug
+      recurse once per level. On a 512-level value from `Encoded<N>`, a debug
       build uses up to 721 KiB of stack for `clone`, 417 KiB for `==`, and
       129 KiB for drop. A host can also construct a `Value` deeper than 512
       levels in Rust.
@@ -240,20 +240,10 @@ Common scripts fail, require workarounds, or produce misleading diagnostics.
 - [ ] 🔴 [070](triage/070-generic-plus/summary.md) _Language._ Replace the hardcoded `+` operand check in `crates/sandlang/src/check/unify.rs`
       with a prelude `Add` trait so that generic functions can concatenate
       `str`, `bytes`, and lists in addition to adding numbers.
-- [ ] 🔴 [063](triage/063-decode-with-init/summary.md) _Language._ Support `Decode` for structs that declare `init` by calling `init` with
-      the JSON object members as named arguments:
+- [ ] 🔴 [063](triage/063-decode-with-init/summary.md) _Language._ Derive `Decode` for a struct that declares `init`, by
+      decoding the parameters of `init` and calling it, when each parameter
+      type implements `Decode`. Today such a struct implements `Decode` by hand.
 
-      - Propagate `Err` results from deferred `Decoded::Pending` thunks in
-        `crates/sandlang/src/stdlib/json.rs` so that a fallible `init` fails `json.decode`.
-      - Pass trait dictionaries to `Decoded::Pending` thunks so that a generic
-        `init` can call trait methods on its type parameters.
-      - Execute `init` before inserting decoded structs into a `Set`, as
-        `json.decode` does for computed field defaults.
-      - Verify that `init` is visible at the `json.decode` call site.
-
-- [ ] 🔴 [068](triage/068-generic-field-defaults/summary.md) _Language._ Allow struct field defaults to call methods from traits required by the
-      struct type parameters by passing trait dictionaries to default-value
-      helpers and `json.decode` field initializers.
 - [ ] 🔴 [062](triage/062-error-kind-enum/summary.md) _Language._ Evaluate replacing string error kinds with an enum.
 - [ ] 🔴 [072](triage/072-explicit-type-args/summary.md) _Diagnostics._ Accept explicit type arguments in calls, or make the parser error suggest
       `let config: Config = json.decode(text)` instead of `comparison operators cannot be chained`.
@@ -463,11 +453,6 @@ Visible defects that rarely block users.
       dispatch; if not, keep only `Arc`.
 - [ ] ⚪ Profile `HostFn` dispatch and argument slice construction on `fannkuch` and
       `results` in `bench/programs` to reduce typed native call overhead.
-- [ ] ⚪ Reduce `json.decode` dispatch overhead in the Sand wrapper around
-      `decode_raw`.
-- [ ] ⚪ Cache instantiated `TypeDesc` objects in `Op::Describe` by their
-      template and argument descriptions to avoid allocation on each generic
-      `reflect` call.
 - [ ] ❓ Align the VM dispatch loop or build benchmarks with
       `-C llvm-args=-align-loops=64` so that unrelated code changes do not
       shift loop alignment. On Apple silicon, code placement changes alter
@@ -478,6 +463,4 @@ Visible defects that rarely block users.
 
 ### Language
 
-- [ ] ⚪ Allow local functions to declare `reflect` type parameters by passing
-      hidden type-description arguments to closures.
 - [ ] ⚪ Support non-constant default expressions on trait method parameters.

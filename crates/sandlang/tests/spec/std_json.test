@@ -279,7 +279,7 @@ print(shapes)
 import json
 let x = json.decode("1")
 --- error
-2: cannot infer type
+2: cannot infer the type that must implement `Decode`; add a type annotation
 
 === decode rejects types that JSON cannot represent
 import json
@@ -345,7 +345,7 @@ print(keyed)
 print(json.encode([(1, 2): "a"]))
 --- stdout
 [:]
-Err(Error(message: "$: cannot decode map keys of type (int, int)", kind: "invalid"))
+Err(Error(message: "$: cannot decode map keys of type tuple", kind: "invalid"))
 --- fail
 a JSON object key must be a string, int, duration, bool, payload-less variant, or value type
 
@@ -657,7 +657,7 @@ print(calls.len())
 Outer(x: 2, inner: Inner(a: 1, b: "b"), y: Some(3), items: Set([Item(id: 1, name: "p"), Item(id: 9, name: "q"), Item(id: 2, name: "p")]), label: "ab")
 ["inner.a", "item.id", "item.id", "outer.x", "outer.y"]
 Err(Error(message: "$.items: expected array", kind: "parse"))
-5
+6
 
 === a default that never ends fails decode as it fails a construction
 import json
@@ -680,11 +680,11 @@ print(s)
 --- stdout
 [S(a: 4, b: [5]), S(a: 1, b: [5])]
 
-=== functions pass reflect type parameters on to json.decode
+=== generic functions pass their Decode dictionaries on to json.decode
 import json
 struct P { x: int, y: int = 7 }
-fn load<reflect T: Decode>(text: str) -> Result<T> { json.decode(text) }
-fn both<reflect T: Decode>(a: str, b: str = "{\"x\": 3}", first: Result<T> = load(b)) -> Result<(T, T)> {
+fn load<T: Decode>(text: str) -> Result<T> { json.decode(text) }
+fn both<T: Decode>(a: str, b: str = "{\"x\": 3}", first: Result<T> = load(b)) -> Result<(T, T)> {
     let later: fn() -> Result<T> = () => load(a)
     Ok((first?, later()?))
 }
@@ -699,27 +699,19 @@ P(x: 1, y: 7)
 (P(x: 3, y: 7), P(x: 2, y: 7))
 Ok((2, 1))
 
-=== the type parameters of reflect type arguments must be reflect
-import json
-fn plain<T: Decode>(text: str) -> Result<T> { json.decode(text) }
-fn mixed<reflect T: Decode, U: Decode>(text: str) -> Result<(T, [U])> { json.decode(text) }
---- error
-2: this call needs a description of `T` at run time, so `T` must be a `reflect` type parameter of this function
-3: this call needs a description of `(T, [U])` at run time, so `U` must be a `reflect` type parameter of this function
-
-=== reflect type arguments build on reflect type parameters
+=== decode builds the dictionaries of types that contain type parameters
 import json
 struct P { x: int, tag: str = "t\(1 + 1)" }
 struct Page<T> { items: [T], next: str? = None }
 enum Shape<T> { Dot, Named(label: str, value: T) }
 struct Tree<T> { value: T, kids: [Tree<T>] = [] }
-fn all<reflect T: Decode>(text: str) -> Result<[T]> { json.decode(text) }
-fn page<reflect T: Decode>(text: str) -> Result<Page<T>> { json.decode(text) }
-fn pair<reflect A: Decode + Hash, reflect B: Decode>(text: str) -> Result<(A, [str: B], Set<A>)> { json.decode(text) }
-fn shape<reflect T: Decode>(text: str) -> Result<Shape<T>> { json.decode(text) }
-fn tree<reflect T: Decode>(text: str) -> Result<Tree<T>> { json.decode(text) }
-fn later<reflect T: Decode>(text: str) -> fn() -> Result<T?> { () => json.decode(text) }
-fn pages<reflect T: Decode>(text: str) -> Result<Page<Page<T>>> { page(text) }
+fn all<T: Decode>(text: str) -> Result<[T]> { json.decode(text) }
+fn page<T: Decode>(text: str) -> Result<Page<T>> { json.decode(text) }
+fn pair<A: Decode + Hash, B: Decode>(text: str) -> Result<(A, [str: B], Set<A>)> { json.decode(text) }
+fn shape<T: Decode>(text: str) -> Result<Shape<T>> { json.decode(text) }
+fn tree<T: Decode>(text: str) -> Result<Tree<T>> { json.decode(text) }
+fn later<T: Decode>(text: str) -> fn() -> Result<T?> { () => json.decode(text) }
+fn pages<T: Decode>(text: str) -> Result<Page<Page<T>>> { page(text) }
 let a: [P] = all("[{\"x\": 1}, {\"x\": 2}]")?
 print(a)
 let p: Result<Page<P>> = page("{\"items\": [{\"y\": 3}]}")
@@ -741,14 +733,14 @@ print(n)
 Err(Error(message: "$.items[0]: missing field `x`", kind: "parse"))
 (1, ["k": P(x: 5, tag: "t2")], Set([2]))
 Named(label: "n", value: P(x: 9, tag: "t2"))
-Err(Error(message: "$: unknown variant `Other` of Shape<[P]>", kind: "parse"))
+Err(Error(message: "$: unknown variant `Other` of Shape", kind: "parse"))
 Tree(value: "a", kids: [Tree(value: "b", kids: [Tree(value: "c", kids: [])])])
 Ok(Some(P(x: 7, tag: "t2")))
 Err(Error(message: "$.items[0].items[0].x: expected int", kind: "parse"))
 
-=== recursion that nests reflect type arguments without end aborts
+=== recursion that nests type arguments builds deeper dictionaries
 import json
-fn deep<reflect T: Decode>(n: int, witness: [T]) -> int {
+fn deep<T: Decode>(n: int, witness: [T]) -> int {
     if n == 0 {
         let r: Result<T> = json.decode("[[1]]")
         print(r.is_ok())
@@ -760,47 +752,16 @@ fn deep<reflect T: Decode>(n: int, witness: [T]) -> int {
 let w: [int] = []
 print(deep(2, w))
 print(deep(256, w))
-print(deep(1000, w))
 --- stdout
 true
 2
 false
 256
---- fail
-limit: the description of a type argument is nested too deeply
 
-=== long type names in messages are cut
+=== functions with Decode type parameters are values
 import json
-enum Wrapped<T> { Of(T) }
-fn wrap<reflect T: Decode>(text: str) -> Result<Wrapped<T>> { json.decode(text) }
-let direct: Result<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<int>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> = json.decode("1")
-let built: Result<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<int>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> = wrap("1")
-print(direct)
-print(direct == built)
---- stdout
-Err(Error(message: "$: expected Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<Wrapped<int>>>>>>>>>>>>>…", kind: "parse"))
-true
-
-=== trait methods cannot be reflect
-trait Load { fn load<reflect T>() -> int }
---- error
-1: the type parameters of trait and impl methods cannot be `reflect`
-
-=== local functions cannot be reflect
-import json
-fn outer<reflect T: Decode>(text: str) -> Result<[T]> {
-    fn inner<reflect U: Decode>(t: str) -> Result<[U]> { json.decode(t) }
-    fn same(t: str) -> Result<[T]> { json.decode(t) }
-    let _ = same(text)
-    inner(text)
-}
---- error
-3: local functions cannot have `reflect` type parameters; declare the function at the top level
-
-=== functions with reflect type parameters are values
-import json
-fn load<reflect T: Decode>(text: str) -> Result<[T]> { json.decode(text) }
-fn loader<reflect T: Decode>(x: T?) -> fn(str) -> Result<[T]> { load }
+fn load<T: Decode>(text: str) -> Result<[T]> { json.decode(text) }
+fn loader<T: Decode>(x: T?) -> fn(str) -> Result<[T]> { load }
 let f: fn(str) -> Result<[int]> = load
 let g: fn(str) -> Result<str> = json.decode
 let none: bool? = None
@@ -812,20 +773,14 @@ Ok([1, 2])
 Ok("a")
 Ok([true])
 
-=== a function value needs the reflect type argument
-fn size<reflect T>(x: int) -> int { x }
-let f = size
---- error
-2: cannot infer type for this function value; add a type annotation
-
 === decode cannot build sets, maps or types whose type arguments lack required traits
 import json
 struct Bag<T: Hash> { items: Set<T> }
 struct Outer<U> { b: Bag<U> }
 struct Rows { seen: Set<[int]> }
-fn load<reflect T: Decode>(s: str) -> Result<Set<T>> { json.decode(s) }
-fn load_hashed<reflect T: Decode + Hash>(s: str) -> Result<Set<T>> { json.decode(s) }
-fn any<reflect T: Decode>(s: str) -> Result<T> { json.decode(s) }
+fn load<T: Decode>(s: str) -> Result<Set<T>> { json.decode(s) }
+fn load_hashed<T: Decode + Hash>(s: str) -> Result<Set<T>> { json.decode(s) }
+fn any<T: Decode>(s: str) -> Result<T> { json.decode(s) }
 let a: Result<Set<[int]>> = json.decode("[[1], [1]]")
 let b: Result<[float: int]> = json.decode("{}")
 let c: Result<Outer<[int]>> = json.decode("{\"b\": {\"items\": [[1], [1]]}}")
@@ -834,28 +789,31 @@ let e: Result<Set<[int]>> = any("[]")
 let f: Result<Set<int>> = load_hashed("[1]")
 --- error
 4: [int] does not implement `Hash` (required for the elements of Set<[int]>)
-5: type parameter `T` does not implement `Hash` (required for the elements of Set<T>); add `T: Hash`
-8: this call cannot build Set<[int]>: [int] does not implement `Hash` (required for the elements of Set<[int]>)
-9: [float: int]: float does not implement `Hash` (required for the keys of [float: int])
-10: Outer<[int]>: [int] does not implement `Hash` (required for Outer<[int]>)
-12: Set<[int]>: [int] does not implement `Hash`
+5: type parameter `T` does not implement `Hash` (required for Set<T> to implement `Decode`); add `T: Hash`
+8: [int] does not implement `Hash` (required for Set<[int]> to implement `Decode`)
+9: float does not implement `Hash` (required for [float: int] to implement `Decode`)
+10: [int] does not implement `Hash` (required for Outer<[int]> to implement `Decode`)
+11: Rows does not implement `Decode` because field `seen` of `Rows` has type `Set<[int]>`
+12: [int] does not implement `Hash` (required for Set<[int]> to implement `Decode`)
 
 === decode builds a set of hashable elements once
 import json
-fn load_hashed<reflect T: Decode + Hash>(s: str) -> Result<Set<T>> { json.decode(s) }
+fn load_hashed<T: Decode + Hash>(s: str) -> Result<Set<T>> { json.decode(s) }
 let f: Result<Set<int>> = load_hashed("[1, 1, 2]")
 print(f)
 --- stdout
 Ok(Set([1, 2]))
 
-=== decode cannot compute field defaults that call trait methods
+=== decode computes field defaults that call trait methods
 import json
 trait Make { fn make() -> Self }
 impl Make for int { fn make() -> int { 7 } }
 struct Bag<T: Make> { x: T = T.make(), n: int = 3 }
-struct Plain<T: Make> { x: T, n: int = 3 }
-let p: Plain<int> = json.decode("{\"x\": 1}").unwrap()
-print(p.n)
+fn load<T: Make + Decode>(text: str) -> Result<Bag<T>> { json.decode(text) }
 let b: Bag<int> = json.decode("{}").unwrap()
---- error
-8: this call cannot build `Bag<T>`: the default of its field `x` calls trait methods
+print("\(b.x) \(b.n)")
+let c: Bag<int> = load("{\"n\": 4}").unwrap()
+print("\(c.x) \(c.n)")
+--- stdout
+7 3
+7 4

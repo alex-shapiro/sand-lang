@@ -24,6 +24,19 @@ impl Checker {
     /// never implements `b`.
     pub(crate) fn derived_required_params(&self, c: Ctor, n: usize, b: Builtin) -> Option<Vec<u32>> {
         use Builtin::*;
+        if b.is_synthesized() {
+            if let Some(r) = self.codec_impl_params(c, n, b) {
+                return r;
+            }
+            return match c {
+                Ctor::Def(d) => match self.derived.get(d as usize).map(|x| &x[b as usize]) {
+                    Some(Derived::Needs(ps)) => Some(ps.clone()),
+                    _ => None,
+                },
+                Ctor::Tuple => Some((0..n as u32).collect()),
+                _ => None,
+            };
+        }
         let ok = match c {
             Ctor::Def(d) => {
                 return match self.derived.get(d as usize).map(|x| &x[b as usize]) {
@@ -192,6 +205,9 @@ impl Checker {
     fn derive(&self, d: usize, b: Builtin) -> Derived {
         let def = &self.types[d];
         let mut required = Vec::new();
+        if b.is_synthesized() && self.has_codec_impl(d as TypeDefId, b) {
+            return Derived::Never;
+        }
         let ok = match &def.kind {
             TypeDefKind::Opaque(kind) => match (b, kind) {
                 (Builtin::Eq, _) | (Builtin::Hash | Builtin::Encode | Builtin::Decode, Opaque::Value(_)) => true,
@@ -248,8 +264,11 @@ impl Checker {
             Step::Field(f, _) => format!("field `{}` of `{owner}` has type `{child}`", self.name(f)),
             Step::Payload(v, _) => format!("the payload of variant `{}` of `{owner}` has type `{child}`", self.name(v)),
             Step::Mutable(f) => format!("field `{}` of `{owner}` is mutable", self.name(f)),
-            Step::Init => format!("`{owner}` declares `init`, which decoding does not call"),
+            Step::Init => format!("`{owner}` declares `init`, which a derived `Decode` does not call"),
         });
+        if let Step::Init = step {
+            m.hint = Some(format!("implement `Decode` for `{owner}`"));
+        }
     }
 
     /// Finds a non-cyclic component path in `ty` that fails to implement

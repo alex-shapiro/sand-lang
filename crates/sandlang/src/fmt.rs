@@ -1032,9 +1032,6 @@ impl<'a> Formatter<'a> {
             if i > 0 {
                 parts.push(text(", "));
             }
-            if g.reflect {
-                parts.push(text("reflect "));
-            }
             parts.push(text(&g.name.name));
             if !g.traits.is_empty() {
                 parts.push(text(": "));

@@ -1,0 +1,344 @@
+=== scenario 1: derived types round-trip through JSON text and Json values
+import json
+import time
+
+enum Shape { Dot, Circle(float), Rect(w: float, h: float) }
+enum Color { Red, Green }
+struct Point { x: int, y: int }
+struct Box<T> { label: str, item: T }
+enum Tree { Leaf(int), Node([Tree]) }
+struct Catalog {
+    shapes: [Shape]
+    boxed: Box<Point>
+    maybe: int?
+    nested: int??
+    outcome: Result<int, str>
+    tags: Set<str>
+    by_name: [str: int]
+    by_id: [int: str]
+    by_color: [Color: int]
+    pair: (int, str)
+    raw: bytes
+    wait: duration
+    span: Range
+    day: time.PlainDate
+    extra: json.Json
+    tree: Tree
+}
+
+let c = Catalog(
+    shapes: [Shape.Dot, Shape.Circle(1.5), Shape.Rect(w: 2.0, h: 3.0)],
+    boxed: Box(label: "p", item: Point(x: 1, y: 2)),
+    maybe: None,
+    nested: Some(Some(5)),
+    outcome: Err("no"),
+    tags: Set(["a", "b"]),
+    by_name: ["one": 1],
+    by_id: [2: "two"],
+    by_color: [Color.Green: 3],
+    pair: (4, "four"),
+    raw: "hi".bytes(),
+    wait: 1500ms,
+    span: 1..=3,
+    day: time.PlainDate(2024, 2, 29).unwrap(),
+    extra: json.parse("{\"k\": [1, null]}").unwrap(),
+    tree: Tree.Node([Tree.Leaf(1), Tree.Node([])]),
+)
+let text = json.encode(c)
+print(text)
+let back: Catalog = json.decode(text)?
+print(back == c)
+print(json.encode(json.to_json(c)) == text)
+let again: Catalog = json.from_json(json.to_json(c))?
+print(again == c)
+print(json.encode(c.shapes, indent: 2))
+let bad: Result<Catalog> = json.decode(text.replace("\"by_id\":{\"2\":\"two\"}", "\"by_id\":{\"x\":\"two\"}"))
+print(bad)
+let wrong: Result<[Box<Point>]> = json.decode("[{\"label\": \"a\", \"item\": {\"x\": 1, \"y\": 2}}, {\"label\": \"b\", \"item\": {\"x\": 1, \"y\": \"2\"}}]")
+print(wrong)
+--- stdout
+{"shapes":["Dot",{"Circle":[1.5]},{"Rect":{"w":2.0,"h":3.0}}],"boxed":{"label":"p","item":{"x":1,"y":2}},"maybe":null,"nested":5,"outcome":{"Err":["no"]},"tags":["a","b"],"by_name":{"one":1},"by_id":{"2":"two"},"by_color":{"Green":3},"pair":[4,"four"],"raw":"aGk=","wait":1500000000,"span":{"start":1,"end":3,"inclusive":true},"day":"2024-02-29","extra":{"k":[1,null]},"tree":{"Node":[[{"Leaf":[1]},{"Node":[[]]}]]}}
+true
+true
+true
+[
+  "Dot",
+  {
+    "Circle": [
+      1.5
+    ]
+  },
+  {
+    "Rect": {
+      "w": 2.0,
+      "h": 3.0
+    }
+  }
+]
+Err(Error(message: "$.by_id: invalid map key `x`", kind: "parse"))
+Err(Error(message: "$[1].item.y: expected int", kind: "parse"))
+
+=== scenario 2: a hand-written Decode validates through init at every position
+import json
+
+struct Email {
+    address: str
+
+    fn init(address: str) -> Result<Email> {
+        if not address.contains("@") {
+            return Err(Error("invalid email: \(address)", kind: "invalid"))
+        }
+        Ok(Self(address: address))
+    }
+}
+
+impl Encode for Email {
+    fn encode(self, e: Encoder) {
+        e.encode(self.address)
+    }
+}
+
+impl Decode for Email {
+    fn decode(d: Decoder) -> Result<Email> {
+        Email(d.decode()?)
+    }
+}
+
+struct User { name: str, email: Email }
+enum Contact { Phone(str), Mail(Email), Both(phone: str, email: Email) }
+struct Page<T> { items: [T], next: str? }
+
+let ok: [Email] = json.decode("[\"a@x.io\", \"b@x.io\"]")?
+print(ok.map(e => e.address))
+print(json.encode(ok))
+let r1: Result<[Email]> = json.decode("[\"a@x.io\", \"nope\"]")
+print(r1)
+let r2: Result<[str: Email]> = json.decode("{\"home\": \"h@x.io\", \"work\": \"w\"}")
+print(r2)
+let r3: Result<Email?> = json.decode("\"bad\"")
+print(r3)
+let r4: Result<Email?> = json.decode("null")
+print(r4)
+let r5: Result<User> = json.decode("{\"name\": \"n\", \"email\": \"bad\"}")
+print(r5)
+let r6: Result<[Contact]> = json.decode("[{\"Mail\": [\"m@x.io\"]}, {\"Both\": {\"phone\": \"1\", \"email\": \"x\"}}]")
+print(r6)
+let r7: Result<Page<Email>> = json.decode("{\"items\": [\"a@x.io\", \"b@x.io\", \"c\"]}")
+print(r7)
+let r8: Result<Page<Email>> = json.decode("{\"items\": [\"a@x.io\"], \"next\": \"p2\"}")
+print(r8?.items[0].address)
+let r9: Result<Email> = json.decode("5")
+print(r9)
+--- stdout
+["a@x.io", "b@x.io"]
+["a@x.io","b@x.io"]
+Err(Error(message: "$[1]: invalid email: nope", kind: "invalid"))
+Err(Error(message: "$.work: invalid email: w", kind: "invalid"))
+Err(Error(message: "$: invalid email: bad", kind: "invalid"))
+Ok(None)
+Err(Error(message: "$.email: invalid email: bad", kind: "invalid"))
+Err(Error(message: "$[1].Both.email: invalid email: x", kind: "invalid"))
+Err(Error(message: "$.items[2]: invalid email: c", kind: "invalid"))
+a@x.io
+Err(Error(message: "$: expected str", kind: "parse"))
+
+=== scenario 3: a hand-written Encode and Decode change the encoded form
+import json
+
+struct Money {
+    cents: int
+    currency: str
+}
+
+impl Encode for Money {
+    fn encode(self, e: Encoder) {
+        let fraction = "\(self.cents % 100)".pad_start(2, "0")
+        e.encode("\(self.cents / 100).\(fraction) \(self.currency)")
+    }
+}
+
+impl Decode for Money {
+    fn decode(d: Decoder) -> Result<Money> {
+        let text: str = d.decode()?
+        let parts = text.split(" ")
+        if parts.len() != 2 {
+            return Err(Error("expected an amount and a currency", kind: "invalid"))
+        }
+        let amount = parts[0].split(".")
+        let whole = amount[0].parse_int() ?? return Err(Error("invalid amount", kind: "invalid"))
+        let cents = amount.get(1).and_then(c => c.parse_int()) ?? 0
+        Ok(Money(cents: whole * 100 + cents, currency: parts[1]))
+    }
+}
+
+struct Order { id: int, total: Money, lines: [str: Money] }
+
+let o = Order(id: 7, total: Money(cents: 1250, currency: "USD"), lines: ["tea": Money(cents: 305, currency: "USD")])
+let text = json.encode(o)
+print(text)
+let back: Order = json.decode(text)?
+print(back == o)
+print(json.to_json(o.total))
+let bad: Result<Order> = json.decode("{\"id\": 1, \"total\": \"12 USD EUR\", \"lines\": {}}")
+print(bad)
+let worse: Result<[Money]> = json.decode("[\"1.00 USD\", \"x.y USD\"]")
+print(worse)
+--- stdout
+{"id":7,"total":"12.50 USD","lines":{"tea":"3.05 USD"}}
+true
+Str("12.50 USD")
+Err(Error(message: "$.total: expected an amount and a currency", kind: "invalid"))
+Err(Error(message: "$[1]: invalid amount", kind: "invalid"))
+
+=== scenario 4: generic code decodes with a plain Decode bound
+import json
+
+struct Email {
+    address: str
+
+    fn init(address: str) -> Result<Email> {
+        if not address.contains("@") {
+            return Err(Error("invalid email", kind: "invalid"))
+        }
+        Ok(Self(address: address))
+    }
+}
+
+impl Encode for Email {
+    fn encode(self, e: Encoder) {
+        e.encode(self.address)
+    }
+}
+
+impl Decode for Email {
+    fn decode(d: Decoder) -> Result<Email> {
+        Email(d.decode()?)
+    }
+}
+
+struct Page<T> { items: [T], next: str? }
+
+fn load<T: Decode>(text: str) -> Result<[T]> {
+    json.decode(text)
+}
+
+fn first_page<T: Decode>(text: str) -> Result<Page<T>> {
+    json.decode(text)
+}
+
+fn roundtrip<T: Encode + Decode>(x: T) -> Result<T> {
+    json.decode(json.encode(x))
+}
+
+let ints: [int] = load("[1, 2, 3]")?
+print(ints)
+let emails: [Email] = load("[\"a@b.c\"]")?
+print(emails.map(e => e.address))
+let page: Page<Email> = first_page("{\"items\": [\"x@y.z\"], \"next\": null}")?
+print(page.items[0].address)
+let bad: Result<Page<Email>> = first_page("{\"items\": [\"x@y.z\", \"q\"]}")
+print(bad)
+let p2: Page<int> = roundtrip(Page(items: [1, 2], next: Some("n")))?
+print(p2.items)
+fn local_load() -> Result<[(int, str)]> {
+    fn inner<T: Decode>(text: str) -> Result<T> { json.decode(text) }
+    inner("[[1, \"a\"]]")
+}
+print(local_load())
+--- stdout
+[1, 2, 3]
+["a@b.c"]
+x@y.z
+Err(Error(message: "$.items[1]: invalid email", kind: "invalid"))
+[1, 2]
+Ok([(1, "a")])
+
+=== scenario 5: omitted fields take their constant and computed defaults
+import json
+
+var counter = 0
+fn next_id() -> int {
+    counter += 1
+    counter
+}
+
+struct Settings {
+    name: str
+    retries: int = 3
+    tags: [str] = ["default"]
+    id: int = next_id()
+    label: str = "item-\(next_id())"
+    note: str?
+}
+
+let a: Settings = json.decode("{\"name\": \"a\"}")?
+print(a)
+let b: Settings = json.decode("{\"name\": \"b\", \"retries\": 0, \"id\": 99}")?
+print(b)
+let list: [Settings] = json.decode("[{\"name\": \"x\"}, {\"name\": \"y\"}]")?
+print(list.map(s => (s.id, s.label)))
+a.tags.push("changed")
+let c: Settings = json.decode("{\"name\": \"c\"}")?
+print(c.tags)
+let missing: Result<Settings> = json.decode("{}")
+print(missing)
+--- stdout
+Settings(name: "a", retries: 3, tags: ["default"], id: 1, label: "item-2", note: None)
+Settings(name: "b", retries: 0, tags: ["default"], id: 99, label: "item-3", note: None)
+[(4, "item-5"), (6, "item-7")]
+["default"]
+Err(Error(message: "$: missing field `name`", kind: "parse"))
+
+=== scenario 10: a hand-written Decode works for a type whose fields lack Decode
+import json
+struct Job { name: str, run: fn() -> int }
+
+impl Decode for Job {
+    fn decode(d: Decoder) -> Result<Job> {
+        let name: str = d.decode()?
+        Ok(Job(name: name, run: () => name.len()))
+    }
+}
+
+let j: Job = json.decode("\"hello\"")?
+print(j.run())
+--- stdout
+5
+
+=== scenario 10: a type that cannot implement a trait gets an error at the use site
+import json
+struct Job { name: str, run: fn() -> int }
+struct Email {
+    address: str
+    fn init(address: str) -> Result<Email> { Ok(Self(address: address)) }
+}
+struct Account { owner: str, email: Email }
+print(json.encode([Job(name: "a", run: () => 1)]))
+let j: Result<Job> = json.decode("{}")
+let a: Result<Account> = json.decode("{}")
+--- error
+8: [Job] does not implement `Encode` because field `run` of `Job` has type `fn() -> int`
+9: Job does not implement `Decode` because field `run` of `Job` has type `fn() -> int`
+10: Account does not implement `Decode` because `Email` declares `init`, which a derived `Decode` does not call; implement `Decode` for `Email`
+
+=== scenario 8: encoding and decoding stop at 512 levels of nesting
+import json
+struct Link { next: Link? }
+fn chain(n: int) -> Link {
+    var link = Link(next: None)
+    for _ in 1..n {
+        link = Link(next: Some(link))
+    }
+    link
+}
+let text = json.encode(chain(512))
+let back: Link = json.decode(text)?
+print(back == chain(512))
+let deeper: Result<Link> = json.decode("{\"next\": ".repeat(513) + "null" + "}".repeat(513))
+print(deeper)
+print(json.encode(chain(513)))
+--- stdout
+true
+Err(Error(message: "nesting too deep at line 1, column 4609", kind: "parse"))
+--- fail
+limit: value too deeply nested to encode as JSON

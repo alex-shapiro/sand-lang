@@ -308,14 +308,300 @@ pub trait Ord: Eq {}
 /// implement `Hash`.
 pub trait Hash: Eq {}
 
-/// Encodes values as JSON with `json.encode`. The compiler derives `Encode`
-/// for tuples, structs, and enums whose components implement `Encode`.
-pub trait Encode {}
+/// A type whose values can be written to any data format, such as JSON text
+/// with `json.encode`.
+///
+/// The compiler derives `Encode` for tuples, structs, and enums whose
+/// components implement `Encode`. An `impl` replaces the derived form:
+///
+/// ```
+/// struct Money { cents: int, currency: str }
+///
+/// impl Encode for Money {
+///     fn encode(self, e: Encoder) {
+///         e.encode("\(self.cents / 100).\(self.cents % 100) \(self.currency)")
+///     }
+/// }
+///
+/// print(json.encode(Money(cents: 1250, currency: "USD")))  // "12.50 USD"
+/// ```
+pub trait Encode {
+    /// Writes `self` to `e`.
+    fn encode(self, e: Encoder)
+}
 
-/// Decodes values from JSON with `json.decode`. The compiler derives `Decode`
-/// for tuples, structs without `init`, and enums whose components implement
-/// `Decode`.
-pub trait Decode: Encode {}
+/// A type whose values can be read from any data format, such as JSON text
+/// with `json.decode`.
+///
+/// The compiler derives `Decode` for tuples, structs without `init`, and
+/// enums whose components implement `Decode`. An `impl` replaces the derived
+/// form, and can validate its input:
+///
+/// ```
+/// struct Email {
+///     address: str
+///
+///     fn init(address: str) -> Result<Email> {
+///         if not address.contains("@") {
+///             return Err(Error("invalid email", kind: "invalid"))
+///         }
+///         Ok(Self(address: address))
+///     }
+/// }
+///
+/// impl Decode for Email {
+///     fn decode(d: Decoder) -> Result<Email> {
+///         Email(d.decode()?)
+///     }
+/// }
+///
+/// let e: Result<[Email]> = json.decode("[\"a@b.c\", \"x\"]")
+/// print(e)  // Err(Error(message: "$[1]: invalid email", kind: "invalid"))
+/// ```
+pub trait Decode {
+    /// Reads a value of this type from `d`.
+    fn decode(d: Decoder) -> Result<Self>
+
+    /// Returns the value of an omitted struct field of this type, or `None`
+    /// if the field is required. `Option` returns `Some(None)`.
+    fn decode_missing() -> Self? { None }
+}
+
+/// Encodes `value` to a host value, for a native parameter of type `Encoded<N>`.
+fn encode_value<T: Encode>(value: T) -> Encoder {
+    let e = value_encoder()
+    value.encode(e)
+    e
+}
+
+native fn value_encoder() -> Encoder
+
+extend Encoder {
+    /// Writes `value` with its `Encode` implementation.
+    pub fn encode<T: Encode>(self, value: T) {
+        value.encode(self)
+    }
+
+    native fn write_unit(self)
+    native fn write_bool(self, b: bool)
+    native fn write_int(self, i: int)
+    native fn write_float(self, f: float)
+    native fn write_duration(self, d: duration)
+    native fn write_str(self, s: str)
+    native fn write_bytes(self, b: bytes)
+    native fn write_range(self, r: Range)
+    native fn write_native<T>(self, x: T)
+    native fn begin_list(self, len: int)
+    native fn begin_set(self, len: int)
+    native fn begin_tuple(self, len: int)
+    native fn begin_map(self, len: int)
+    native fn begin_struct(self, def: int)
+    native fn field(self, index: int)
+    native fn write_variant(self, variant: int)
+    native fn begin_variant(self, variant: int)
+    native fn begin_some(self)
+    native fn write_none(self)
+    native fn end(self)
+}
+
+extend Decoder {
+    /// Reads a value of type `T` with its `Decode` implementation.
+    pub fn decode<T: Decode>(self) -> Result<T> {
+        T.decode(self)
+    }
+
+    /// Ends a decode with the result `result` of the outermost `Decode`
+    /// implementation. Fails if input follows the value. Adds the path of the
+    /// failure to an error from a hand-written implementation.
+    pub fn finish<T>(self, result: Result<T>) -> Result<T> {
+        match result {
+            Ok(v) => {
+                self.end_input()?
+                Ok(v)
+            }
+            Err(e) => Err(self.locate(e))
+        }
+    }
+
+    native fn read_unit(self) -> Result<()>
+    native fn read_bool(self) -> Result<bool>
+    native fn read_int(self) -> Result<int>
+    native fn read_float(self) -> Result<float>
+    native fn read_duration(self) -> Result<duration>
+    native fn read_str(self) -> Result<str>
+    native fn read_bytes(self) -> Result<bytes>
+    native fn read_range(self) -> Result<Range>
+    native fn read_native<T>(self, def: int) -> Result<T>
+    native fn read_some(self) -> Result<bool>
+    native fn begin_list(self) -> Result<()>
+    native fn begin_set(self) -> Result<()>
+    native fn next_item(self) -> Result<bool>
+    native fn begin_tuple(self, len: int) -> Result<()>
+    native fn element(self) -> Result<()>
+    native fn end_tuple(self) -> Result<()>
+    native fn begin_map(self) -> Result<()>
+    native fn next_entry(self) -> Result<bool>
+    native fn map_value(self) -> Result<()>
+    native fn begin_struct(self, def: int) -> Result<()>
+    native fn begin_fields(self, variant: int) -> Result<()>
+    native fn field(self) -> Result<int>
+    native fn missing(self, id: int, variant: bool, index: int) -> Error
+    native fn variant(self, first: int, count: int) -> Result<int>
+    native fn end_variant(self) -> Result<()>
+    native fn end_input(self) -> Result<()>
+    native fn locate(self, e: Error) -> Error
+}
+
+impl Encode for () {
+    fn encode(self, e: Encoder) { e.write_unit() }
+}
+
+impl Encode for bool {
+    fn encode(self, e: Encoder) { e.write_bool(self) }
+}
+
+impl Encode for int {
+    fn encode(self, e: Encoder) { e.write_int(self) }
+}
+
+impl Encode for float {
+    fn encode(self, e: Encoder) { e.write_float(self) }
+}
+
+impl Encode for duration {
+    fn encode(self, e: Encoder) { e.write_duration(self) }
+}
+
+impl Encode for str {
+    fn encode(self, e: Encoder) { e.write_str(self) }
+}
+
+impl Encode for bytes {
+    fn encode(self, e: Encoder) { e.write_bytes(self) }
+}
+
+impl Encode for Range {
+    fn encode(self, e: Encoder) { e.write_range(self) }
+}
+
+impl<T: Encode> Encode for [T] {
+    fn encode(self, e: Encoder) {
+        e.begin_list(self.len())
+        for x in self {
+            x.encode(e)
+        }
+        e.end()
+    }
+}
+
+impl<T: Encode + Hash> Encode for Set<T> {
+    fn encode(self, e: Encoder) {
+        e.begin_set(self.len())
+        for x in self {
+            x.encode(e)
+        }
+        e.end()
+    }
+}
+
+impl<K: Encode + Hash, V: Encode> Encode for [K: V] {
+    fn encode(self, e: Encoder) {
+        e.begin_map(self.len())
+        for (k, v) in self {
+            k.encode(e)
+            v.encode(e)
+        }
+        e.end()
+    }
+}
+
+impl<T: Encode> Encode for T? {
+    fn encode(self, e: Encoder) {
+        match self {
+            Some(x) => {
+                e.begin_some()
+                x.encode(e)
+                e.end()
+            }
+            None => e.write_none()
+        }
+    }
+}
+
+impl Decode for () {
+    fn decode(d: Decoder) -> Result<()> { d.read_unit() }
+}
+
+impl Decode for bool {
+    fn decode(d: Decoder) -> Result<bool> { d.read_bool() }
+}
+
+impl Decode for int {
+    fn decode(d: Decoder) -> Result<int> { d.read_int() }
+}
+
+impl Decode for float {
+    fn decode(d: Decoder) -> Result<float> { d.read_float() }
+}
+
+impl Decode for duration {
+    fn decode(d: Decoder) -> Result<duration> { d.read_duration() }
+}
+
+impl Decode for str {
+    fn decode(d: Decoder) -> Result<str> { d.read_str() }
+}
+
+impl Decode for bytes {
+    fn decode(d: Decoder) -> Result<bytes> { d.read_bytes() }
+}
+
+impl Decode for Range {
+    fn decode(d: Decoder) -> Result<Range> { d.read_range() }
+}
+
+impl<T: Decode> Decode for [T] {
+    fn decode(d: Decoder) -> Result<[T]> {
+        d.begin_list()?
+        let items: [T] = []
+        while d.next_item()? {
+            items.push(T.decode(d)?)
+        }
+        Ok(items)
+    }
+}
+
+impl<T: Decode + Hash> Decode for Set<T> {
+    fn decode(d: Decoder) -> Result<Set<T>> {
+        d.begin_set()?
+        let items: Set<T> = Set([])
+        while d.next_item()? {
+            items.add(T.decode(d)?)
+        }
+        Ok(items)
+    }
+}
+
+impl<K: Decode + Hash, V: Decode> Decode for [K: V] {
+    fn decode(d: Decoder) -> Result<[K: V]> {
+        d.begin_map()?
+        let entries: [K: V] = [:]
+        while d.next_entry()? {
+            let k = K.decode(d)?
+            d.map_value()?
+            entries[k] = V.decode(d)?
+        }
+        Ok(entries)
+    }
+}
+
+impl<T: Decode> Decode for T? {
+    fn decode(d: Decoder) -> Result<T?> {
+        if d.read_some()? { Ok(Some(T.decode(d)?)) } else { Ok(None) }
+    }
+
+    fn decode_missing() -> T?? { Some(None) }
+}
 
 /// Performs arithmetic on numeric types (`int` and `float`).
 pub trait Num: Ord + Encode {

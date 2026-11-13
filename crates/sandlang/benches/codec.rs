@@ -11,10 +11,9 @@
 
 use sandlang::engine::{Config, Engine, Error, HostModules, Limits, MemorySink};
 use sandlang::native::NativeModule;
-use sandlang::native::ty::Param;
+use sandlang::native::ty::Encoded;
 use sandlang::stdlib::json::Json;
 use sandlang::value::Value;
-use sandlang::vm::{Fail, Vm};
 
 /// Declares the benchmark document types and `make(n)`, which builds a document
 /// with `n` users.
@@ -25,6 +24,42 @@ enum Status { Active, Suspended(reason: str), Banned(int, str) }
 struct Address { street: str, city: str, zip: str? }
 struct User { id: int, name: str, email: str, score: float, active: bool, tags: [str], address: Address, status: Status, logins: [int], meta: [str: int] }
 struct Doc { users: [User] }
+struct Email {
+    address: str
+
+    fn init(address: str) -> Result<Email> {
+        if not address.contains("@") {
+            return Err(Error("invalid email", kind: "invalid"))
+        }
+        Ok(Self(address: address))
+    }
+}
+impl Encode for Email {
+    fn encode(self, e: Encoder) {
+        e.encode(self.address)
+    }
+}
+impl Decode for Email {
+    fn decode(d: Decoder) -> Result<Email> {
+        Email(d.decode()?)
+    }
+}
+struct Contact { id: int, name: str, email: Email, tags: [str] }
+struct Page<T> { items: [T], next: str? }
+var stamp_counter = 0
+fn stamp() -> int {
+    stamp_counter += 1
+    stamp_counter
+}
+struct Stamped { id: int, stamp: int = stamp() }
+fn load<T: Decode>(text: str) -> Result<T> { json.decode(text) }
+fn contacts(n: int) -> [Contact] {
+    let out: [Contact] = []
+    for i in 0..n {
+        out.push(Contact(id: i, name: "c \(i)", email: Email("c\(i)@example.com").unwrap(), tags: ["x", "y\(i % 3)"]))
+    }
+    out
+}
 fn make(n: int) -> Doc {
     let users: [User] = []
     for i in 0..n {
@@ -155,6 +190,65 @@ const OPERATIONS: &[Operation] = &[
 }"#,
         runs_per_call: Some(200),
     },
+    Operation { name: "encode_custom", inputs: "let cs = contacts({n})\n", closure: "() => json.encode(cs).len()", runs_per_call: None },
+    Operation {
+        name: "decode_custom",
+        inputs: "let ctext = json.encode(contacts({n}))\n",
+        closure: r#"() => {
+    let cs: [Contact] = json.decode(ctext).unwrap()
+    cs[cs.len() - 1].id
+}"#,
+        runs_per_call: None,
+    },
+    Operation {
+        name: "decode_generic",
+        inputs: DOC_TEXT,
+        closure: r#"() => {
+    let d: Doc = load(text).unwrap()
+    d.users[d.users.len() - 1].id
+}"#,
+        runs_per_call: None,
+    },
+    Operation {
+        name: "decode_page",
+        inputs: "let ptext = json.encode(Page(items: make({n}).users, next: None))\n",
+        closure: r#"() => {
+    let p: Page<User> = json.decode(ptext).unwrap()
+    p.items[p.items.len() - 1].id
+}"#,
+        runs_per_call: None,
+    },
+    Operation {
+        name: "decode_ints",
+        inputs: "let itext = json.encode((0..({n} * 10)).to_list())\n",
+        closure: r#"() => {
+    let xs: [int] = json.decode(itext).unwrap()
+    xs[xs.len() - 1]
+}"#,
+        runs_per_call: None,
+    },
+    Operation {
+        name: "decode_ints_generic",
+        inputs: "let itext = json.encode((0..({n} * 10)).to_list())\n",
+        closure: r#"() => {
+    let xs: [int] = load(itext).unwrap()
+    xs[xs.len() - 1]
+}"#,
+        runs_per_call: None,
+    },
+    Operation {
+        name: "small_decode_default",
+        inputs: "let stext = \"{\\\"id\\\": 7}\"\n",
+        closure: r#"() => {
+    var t = 0
+    for _ in 0..20000 {
+        let s: Stamped = json.decode(stext).unwrap()
+        t += s.id
+    }
+    t
+}"#,
+        runs_per_call: Some(20000),
+    },
     Operation {
         name: "deep_decode",
         inputs: DEEP_TEXT,
@@ -204,13 +298,12 @@ print("check text length: \(text.len())")
 /// `Json` conversion benchmarks.
 fn host_modules() -> HostModules {
     let mut host = NativeModule::new("host");
-    host.source("pub native fn copied_fields<T>(value: T) -> int");
-    host.function("copied_fields", |vm: &mut Vm, value: Param<0>| -> Result<i64, Fail> {
-        let fields = match vm.to_value(value.raw())? {
-            Value::Struct(value) => value.fields.len(),
+    host.source("pub native fn copied_fields<T: Encode>(value: T) -> int");
+    host.function("copied_fields", |value: Encoded<0>| -> i64 {
+        match value.value() {
+            Value::Struct(value) => value.fields.len() as i64,
             _ => 0,
-        };
-        Ok(fields as i64)
+        }
     });
     host.function("json_echo", |value: Json| -> Json { value });
     host.function("json_members", |value: Json| -> i64 {

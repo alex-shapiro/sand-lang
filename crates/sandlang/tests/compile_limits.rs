@@ -147,8 +147,8 @@ fn trait_checks_on_structs_sharing_field_types() {
     let (r, took) = check(Config::new(), &src);
     r.unwrap();
     assert!(took < FAST, "took {took:?}");
-    // Runtime type descriptions (`json.decode`) share the descriptions of
-    // such structs, so they stay small (see `reflected_types_are_shared`).
+    // The `Decode` impls of such structs require only their own fields, so
+    // `json.decode` stays cheap to check.
     let mut src = String::from("import json\nstruct S0 { x: int }\n");
     for i in 1..60 {
         src += &format!("struct S{i} {{ a: S{}, b: S{} }}\n", i - 1, i - 1);
@@ -476,7 +476,7 @@ fn source_size_limit_covers_imports() {
 /// Runs the script `main` (with the script modules `files` beside it),
 /// returning its output.
 fn run_files(files: &[(&str, &str)], main: &str) -> Result<String, Error> {
-    let dir = TempDir::new("reflect");
+    let dir = TempDir::new("codec");
     for (name, body) in files {
         dir.write(name, body);
     }
@@ -490,10 +490,9 @@ fn run_files(files: &[(&str, &str)], main: &str) -> Result<String, Error> {
 
 #[cfg(feature = "os")]
 #[test]
-fn reflected_types_are_described_once() {
-    // Struct descriptions that double at each level, used by many call
-    // sites: each struct is described once and shared, within a
-    // description and by every call site.
+fn doubling_struct_types_decode_at_many_call_sites() {
+    // Structs that double at each level, decoded by many call sites: each
+    // struct has one `Decode` impl that every call site shares.
     let mut src = String::from("import json\nstruct S0 { x: int }\n");
     for i in 1..40 {
         src += &format!("struct S{i} {{ a: S{}, b: S{} }}\n", i - 1, i - 1);
@@ -511,7 +510,7 @@ print(s.a.b.x * 10 + s.b.a.x)
 
 #[cfg(feature = "os")]
 #[test]
-fn shared_reflected_types_with_back_references() {
+fn shared_types_with_back_references_decode() {
     // Shared descriptions that refer back to an enclosing type, and
     // recursive enums.
     let src = r#"import json
@@ -533,7 +532,7 @@ print(t)
 
 #[cfg(feature = "os")]
 #[test]
-fn reflected_types_with_the_same_name() {
+fn types_with_the_same_name_decode() {
     // Two structs named `Config` in different modules are different types.
     let files = [("a.sand", "pub struct Config { pub p: int, pub q: int, pub r: int }\n")];
     let src = r#"import json
@@ -547,16 +546,18 @@ print(bad.is_err())
     assert_eq!(run_files(&files, src).unwrap(), "3\ntrue\n");
 }
 
+#[cfg(feature = "os")]
 #[test]
-fn reflected_types_too_large_to_describe() {
-    // Polymorphic recursion: `P<int>` contains `P<[int]>`, which contains
-    // `P<[[int]]>`, ... (each new). Many call sites stay cheap: the work of
-    // all descriptions of a compilation is bounded too.
+fn polymorphically_recursive_types_decode_with_dictionaries() {
+    // `P<int>` contains `P<[int]>`, which contains `P<[[int]]>`, ... (each
+    // new). The decoder builds the dictionary of each level as it reads it, so
+    // many call sites stay cheap to compile.
     let mut src = String::from("import json\nstruct P<T> { v: T, next: P<[T]>? }\n");
     for i in 0..300 {
         src += &format!("struct Q{i} {{ x: int }}\nlet r{i}: Result<P<Q{i}>> = json.decode(\"1\")\n");
     }
-    rejects(&src, "type too large to describe at runtime");
+    src += "let p: P<int> = json.decode(\"{\\\"v\\\": 1, \\\"next\\\": {\\\"v\\\": [2], \\\"next\\\": {\\\"v\\\": [[3]]}}}\").unwrap()\nprint(p.next.unwrap().next.unwrap().v)\n";
+    assert_eq!(run_files(&[], &src).unwrap(), "[[3]]\n");
 }
 
 /// Compiles the sources `source(n)` and `source(4 * n)` and asserts that the larger

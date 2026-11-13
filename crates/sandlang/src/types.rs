@@ -436,7 +436,7 @@ impl TypeArena {
 pub struct Symbol(u32);
 
 /// Names every symbol table has, with fixed symbols.
-const KNOWN: [&str; 10] = ["", "Self", "self", "_", "<tmp>", "<dict>", "<arg>", "next", "close", "<desc>"];
+const KNOWN: [&str; 9] = ["", "Self", "self", "_", "<tmp>", "<dict>", "<arg>", "next", "close"];
 
 impl Symbol {
     pub const EMPTY: Symbol = Symbol(0);
@@ -451,8 +451,6 @@ impl Symbol {
     pub const ARG: Symbol = Symbol(6);
     pub const NEXT: Symbol = Symbol(7);
     pub const CLOSE: Symbol = Symbol(8);
-    /// Hidden parameters that hold runtime descriptions for `reflect` type arguments.
-    pub const DESC: Symbol = Symbol(9);
 }
 
 /// Interned names (persistent, like the [`TypeArena`]).
@@ -564,10 +562,17 @@ impl Builtin {
         Builtin::ALL.iter().copied().find(|b| b.name() == s)
     }
 
-    /// Returns `true` if the checker derives `self` from the structure of a type
-    /// (all built-in traits except `Num`).
+    /// Returns `true` if the checker derives `self` from the structure of a
+    /// type, with no `impl` and no dictionary (`Eq`, `Ord`, and `Hash`).
     pub fn is_derived(self) -> bool {
-        self != Builtin::Num
+        matches!(self, Builtin::Eq | Builtin::Ord | Builtin::Hash)
+    }
+
+    /// Returns `true` if the checker synthesizes an `impl` of `self` from the
+    /// structure of a type that has no hand-written `impl` (`Encode` and
+    /// `Decode`).
+    pub fn is_synthesized(self) -> bool {
+        matches!(self, Builtin::Encode | Builtin::Decode)
     }
 }
 
@@ -610,7 +615,6 @@ pub struct ParamInfo {
     pub name: Symbol,
     /// Direct trait bounds declared on the type parameter, excluding supertraits.
     pub traits: Vec<TraitRef>,
-    pub reflect: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -779,24 +783,11 @@ pub struct TypePrinter<'a> {
     pub subst: &'a [Option<TypeId>],
     /// Names for inference variables shown as type parameters (others are `_`).
     pub var_names: &'a [(VarId, String)],
-    /// Formats each type parameter as a placeholder for
-    /// [`TypeDesc::Param`](crate::vm::value::TypeDesc::Param) instantiation
-    /// (see [`param_placeholder`]).
-    pub placeholder_params: bool,
 }
-
-/// Returns the placeholder string for type parameter `p` in
-/// [`TypeDesc`](crate::vm::value::TypeDesc) template names.
-pub fn param_placeholder(p: ParamId) -> String {
-    format!("{PARAM_PLACEHOLDER}{p}{PARAM_PLACEHOLDER}")
-}
-
-/// Delimiter character for [`param_placeholder`]. Type names cannot contain this character.
-pub const PARAM_PLACEHOLDER: char = '\u{E000}';
 
 impl<'a> TypePrinter<'a> {
     pub fn new(arena: &'a TypeArena, defs: &'a PVec<TypeDef>, params: &'a PVec<ParamInfo>, syms: &'a Symbols, wk: WellKnown) -> Self {
-        TypePrinter { arena, defs, params, syms, wk, subst: &[], var_names: &[], placeholder_params: false }
+        TypePrinter { arena, defs, params, syms, wk, subst: &[], var_names: &[] }
     }
 
     pub fn show(&self, t: TypeId) -> String {
@@ -862,7 +853,7 @@ impl Tagged<'_, '_> {
     }
 
     fn write(&self, s: &mut String, t: TypeId) {
-        let TypePrinter { arena, defs, params, syms, wk, var_names, placeholder_params, .. } = self.p;
+        let TypePrinter { arena, defs, params, syms, wk, var_names, .. } = self.p;
         let t = self.p.resolve(t);
         match arena.get(t) {
             Ty::Int => s.push_str("int"),
@@ -879,7 +870,6 @@ impl Tagged<'_, '_> {
                 Some((_, n)) => s.push_str(n),
                 None => s.push('_'),
             },
-            Ty::Param(p) if *placeholder_params => s.push_str(&param_placeholder(p)),
             Ty::Param(p) => s.push_str(params.get(p as usize).map(|p| syms.str(p.name)).unwrap_or("?")),
             Ty::List(t) => {
                 s.push('[');
