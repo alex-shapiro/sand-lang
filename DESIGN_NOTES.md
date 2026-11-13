@@ -699,3 +699,22 @@ C5): `encode_custom` 15, 12; `decode_custom` 26.8, 23.8;
 Native stack at 512 nesting levels (KiB; main, value-decode, D2 before,
 C5): `json.parse` 152, 152, 120, 120; `json.decode` of structs 808, 824,
 16, 16; `json.encode` 16, 16, 16, 16. 16 KiB is the floor of an empty run.
+
+### C6: the text of `json.decode` is copied once
+
+`text_decoder` copied the input twice: into a `String`, and then into the
+decoder's `Box<str>`. It now copies once. Timing build (a timer around
+`text_decoder`, minimum of 3 runs): before, the copies took 22 ns of a
+390 ns small decode (`Address`) and 32 µs of a 3972 µs decode of `Doc`
+(1.28 MB); after, the copy takes 18 ns (about 5%) and 17 µs (0.4%). The
+benchmark shows 1 to 2% on `small_decode` and `decode_json`, inside its
+noise (5 alternating runs: `decode_json` mean 887 to 880,
+`small_decode` 351 to 346).
+
+The one copy stays, for a reason that I could not remove: the `Decoder`
+is a native object that lives across native calls, and a hand-written
+`Decode` runs Sand code, and so maybe a garbage collection, between its
+operations. The collector does not trace values in native objects, so
+the decoder cannot hold the Sand `str`. The copy is counted against the
+memory limit, so a decode of a text of N bytes needs N more bytes of
+memory than on value-decode while it runs.

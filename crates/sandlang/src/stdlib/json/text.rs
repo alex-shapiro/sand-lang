@@ -524,10 +524,12 @@ pub(crate) struct TextDecoder {
 }
 
 impl TextDecoder {
-    pub(crate) fn new(vm: &mut Vm, text: &str) -> Result<TextDecoder, Fail> {
+    /// Returns a decoder of a copy of the Sand `str` `text`.
+    pub(crate) fn new(vm: &mut Vm, text: VmValue) -> Result<TextDecoder, Fail> {
         let mut budget = Budget::default();
-        budget.grow(vm, text.len())?;
-        Ok(TextDecoder { text: text.into(), pos: 0, depth: 0, charged: 0, open: Vec::new(), key: None, saved: None, budget })
+        budget.grow(vm, vm.heap.str(text).len())?;
+        let text = vm.heap.str(text).into();
+        Ok(TextDecoder { text, pos: 0, depth: 0, charged: 0, open: Vec::new(), key: None, saved: None, budget })
     }
 
     /// Runs `f` on a parser at the current position. On an error, the

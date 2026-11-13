@@ -161,8 +161,7 @@ pub(crate) fn module() -> NativeModule {
         Ok(VmVal::from_raw(json?))
     });
     m.function("text_decoder", |vm: &mut Vm, text: VmVal<String>| -> Result<VmVal<Decoder>, Fail> {
-        let text = text.str(&vm.heap).to_string();
-        let format = TextDecoder::new(vm, &text)?;
+        let format = TextDecoder::new(vm, text.raw())?;
         vm.new_object(Decoder::new(Box::new(format)))
     });
     m.function("json_decoder", |vm: &mut Vm, json: Json| vm.new_object(Decoder::new(Box::new(ValueDecoder::new(text::json_value(&json))))));
