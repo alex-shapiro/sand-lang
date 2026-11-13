@@ -632,7 +632,8 @@ fn codec_default() -> impl Strategy<Value = (String, String)> {
 }
 
 /// The line that a program prints if `json.from_json` gives another result
-/// than `json.decode` for the same JSON.
+/// than `json.decode` for the same JSON. A parsed `Json` keeps the last of
+/// two equal keys, so the program decodes the text of the parsed value.
 const TREE_DIFFERS: &str = "json.from_json differs from json.decode";
 
 proptest! {
@@ -675,7 +676,8 @@ proptest! {
              \x20   if let Ok(j) = json.parse(s) {{\n\
              \x20       let from: Result<{ty}> = json.from_json(j)\n\
              \x20       print(from)\n\
-             \x20       if \"\\(from)\" != \"\\(r)\" {{\n\
+             \x20       let same: Result<{ty}> = json.decode(json.encode(j))\n\
+             \x20       if \"\\(from)\" != \"\\(same)\" {{\n\
              \x20           print(\"{TREE_DIFFERS}\")\n\
              \x20       }}\n\
              \x20   }}\n\
