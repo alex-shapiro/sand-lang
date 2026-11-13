@@ -375,3 +375,31 @@ true
 Err(Error(message: "nesting too deep at line 1, column 4609", kind: "parse"))
 --- fail
 limit: value too deeply nested to encode as JSON
+
+=== a hand-written impl for other type arguments is the reason a type lacks the trait
+import json
+struct Box<T> { v: T }
+impl Encode for Box<int> {
+    fn encode(self, e: Encoder) {
+        e.encode(self.v + 1)
+    }
+}
+print(json.encode(Box(v: "a")))
+--- error
+8: Box<str> does not implement `Encode` because a hand-written `impl Encode` for other `Box` types replaces the derived impl; implement `Encode` for `Box<str>`
+
+=== the operations of Encoder and Decoder point to encode and decode
+struct P { x: int }
+impl Decode for P {
+    fn decode(d: Decoder) -> Result<P> {
+        Ok(P(x: d.read_int()?))
+    }
+}
+impl Encode for P {
+    fn encode(self, e: Encoder) {
+        e.write_int(self.x)
+    }
+}
+--- error
+4: method `read_int` of `Decoder` is private; read a value with `d.decode()`
+9: method `write_int` of `Encoder` is private; write a value with `e.encode(x)`

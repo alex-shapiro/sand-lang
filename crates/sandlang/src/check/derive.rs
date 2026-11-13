@@ -265,9 +265,15 @@ impl Checker {
             Step::Payload(v, _) => format!("the payload of variant `{}` of `{owner}` has type `{child}`", self.name(v)),
             Step::Mutable(f) => format!("field `{}` of `{owner}` is mutable", self.name(f)),
             Step::Init => format!("`{owner}` declares `init`, which a derived `Decode` does not call"),
+            Step::HandWritten(d) => {
+                let name = self.name(self.types[d as usize].name);
+                format!("a hand-written `impl {}` for other `{name}` types replaces the derived impl", b.name())
+            }
         });
-        if let Step::Init = step {
-            m.hint = Some(format!("implement `Decode` for `{owner}`"));
+        match step {
+            Step::Init => m.hint = Some(format!("implement `Decode` for `{owner}`")),
+            Step::HandWritten(_) => m.hint = Some(format!("implement `{}` for `{owner}`", b.name())),
+            _ => {}
         }
     }
 
@@ -292,7 +298,7 @@ impl Checker {
                 return None;
             }
             let top = stack.last_mut()?;
-            if let Some(&(Step::Mutable(_) | Step::Init)) = top.parts.first() {
+            if let Some(&(Step::Mutable(_) | Step::Init | Step::HandWritten(_))) = top.parts.first() {
                 break;
             }
             if top.next == top.parts.len() {
@@ -317,7 +323,7 @@ impl Checker {
             }
         }
         let leaf = stack.last()?.ty;
-        if let Some(&step @ (Step::Mutable(_) | Step::Init)) = stack.last()?.parts.first() {
+        if let Some(&step @ (Step::Mutable(_) | Step::Init | Step::HandWritten(_))) = stack.last()?.parts.first() {
             return Some((leaf, step, leaf));
         }
         let member = |f: &Frame| matches!(f.via, Some(Step::Field(..) | Step::Payload(..)));
@@ -334,6 +340,9 @@ impl Checker {
                     && let Some(f) = self.mutable_field(d)
                 {
                     return vec![Step::Mutable(f)];
+                }
+                if b.is_synthesized() && self.codec_impls_miss(d as TypeDefId, t, b) {
+                    return vec![Step::HandWritten(d as TypeDefId)];
                 }
                 if b == Builtin::Decode && self.declares_init(d) {
                     return vec![Step::Init];
@@ -354,13 +363,16 @@ enum Step {
     Payload(Symbol, TypeId),
     Mutable(Symbol),
     Init,
+    /// The type definition has a hand-written impl of the trait that does
+    /// not apply to these type arguments.
+    HandWritten(TypeDefId),
 }
 
 impl Step {
     fn child(self) -> TypeId {
         match self {
             Step::Arg(_, _, x) | Step::Field(_, x) | Step::Payload(_, x) => x,
-            Step::Mutable(_) | Step::Init => TypeId::ERROR,
+            Step::Mutable(_) | Step::Init | Step::HandWritten(_) => TypeId::ERROR,
         }
     }
 
@@ -369,7 +381,7 @@ impl Step {
             Step::Arg(c, i, _) => Step::Arg(c, i, x),
             Step::Field(f, _) => Step::Field(f, x),
             Step::Payload(v, _) => Step::Payload(v, x),
-            Step::Mutable(_) | Step::Init => self,
+            Step::Mutable(_) | Step::Init | Step::HandWritten(_) => self,
         }
     }
 }

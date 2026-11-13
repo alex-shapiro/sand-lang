@@ -1456,6 +1456,18 @@ impl Checker {
         ok
     }
 
+    /// Returns `true` if an `impl` of built-in trait `b` for type definition
+    /// `d` exists, and none of them has a target that unifies with `ty`.
+    pub(crate) fn codec_impls_miss(&mut self, d: TypeDefId, ty: TypeId, b: Builtin) -> bool {
+        let Some(tr) = self.builtin_trait(b) else { return false };
+        let ids = self.impls_by.get(&(tr.trait_id, Ctor::Def(d), 0)).map(|v| v.to_vec()).unwrap_or_default();
+        !ids.is_empty()
+            && ids.into_iter().all(|id| {
+                let target = self.instantiate_impl(id).target;
+                !self.unify_probe(&[(target, ty)])
+            })
+    }
+
     /// Removes `impl` `id` from the lookup tables. Code compiled before keeps
     /// using it.
     pub(crate) fn retire_impl(&mut self, id: ImplId) {

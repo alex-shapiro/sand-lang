@@ -1314,8 +1314,22 @@ impl Checker {
         }
         let c = ctor_of(ty)?;
         let declared = self.methods_named(c, name).is_some_and(|fs| fs.iter().any(|&f| !self.is_init(f)));
-        let hidden = declared && self.visible_method(c, name).is_none();
-        hidden.then(|| format!("method `{name}` of `{}` is private", self.ctor_name(c, 0)))
+        if !declared || self.visible_method(c, name).is_some() {
+            return None;
+        }
+        let owner = self.ctor_name(c, 0);
+        // The operations of the codec objects are for the synthesized code.
+        let hint = match owner.as_str() {
+            "Encoder" if self.is_prelude_type(c) => "; write a value with `e.encode(x)`",
+            "Decoder" if self.is_prelude_type(c) => "; read a value with `d.decode()`",
+            _ => "",
+        };
+        Some(format!("method `{name}` of `{owner}` is private{hint}"))
+    }
+
+    /// Returns `true` if `c` is a type that the prelude declares.
+    fn is_prelude_type(&self, c: Ctor) -> bool {
+        matches!(c, Ctor::Def(d) if Some(self.types[d as usize].module) == self.prelude)
     }
 
     pub(crate) fn field_type(&mut self, d: TypeDefId, i: usize, args: &[TypeId]) -> TypeId {
