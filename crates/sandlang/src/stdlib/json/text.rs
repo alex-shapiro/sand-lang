@@ -3,11 +3,13 @@
 use super::{Builder, Error as ParseError, Json, JsonIds, Parser, SPACES, base64, json_from_vm, write_str};
 use crate::codec::MAX_NESTING_DEPTH;
 use crate::codec::value_format::write_json_form;
-use crate::codec::{Budget, DecodeFail, DecodeFormat, DecodeResult, EncodeFormat, FormatMark, SeqKind};
+use crate::codec::{Budget, DecodeFail, DecodeFormat, DecodeResult, EncodeFormat, SeqKind};
 use crate::value::Value;
+use crate::vm::bytecode::Program;
 use crate::vm::meter::SLOW_BYTES_PER_UNIT;
 use crate::vm::value::{Obj, VmValue};
 use crate::vm::{Fail, Vm, fail, internal};
+use compact_str::CompactString;
 use std::any::Any;
 use std::borrow::Cow;
 use std::fmt::Write;
@@ -42,6 +44,15 @@ struct Open {
     names: Option<(u32, bool)>,
 }
 
+/// The state of a [`TextEncoder`] that [`EncodeFormat::save`] keeps.
+struct EncoderState {
+    out: usize,
+    charged: usize,
+    open: usize,
+    top: Option<Open>,
+    depth: usize,
+}
+
 /// Writes JSON text.
 pub(crate) struct TextEncoder {
     indent: usize,
@@ -51,26 +62,30 @@ pub(crate) struct TextEncoder {
     open: Vec<Open>,
     /// The number of open arrays and objects.
     depth: usize,
+    saved: Option<EncoderState>,
     budget: Budget,
 }
 
 impl TextEncoder {
     pub(crate) fn new(indent: usize) -> TextEncoder {
-        TextEncoder { indent, out: String::new(), charged: 0, open: Vec::new(), depth: 0, budget: Budget::default() }
+        TextEncoder { indent, out: String::new(), charged: 0, open: Vec::new(), depth: 0, saved: None, budget: Budget::default() }
     }
 
-    /// Returns the text written.
-    pub(crate) fn take_text(&mut self) -> String {
-        std::mem::take(&mut self.out)
+    /// Returns the text written, and the bytes that the heap counted for
+    /// it (see [`Budget::release`]).
+    pub(crate) fn take_text(&mut self) -> (String, usize) {
+        (std::mem::take(&mut self.out), self.budget.release())
     }
 
     /// Counts `extra` more bytes of output, and the indentation of a new line,
     /// against the memory limit.
+    #[inline(always)]
     fn room(&mut self, vm: &mut Vm, extra: usize) -> Result<(), Fail> {
         let line = if self.indent > 0 { 1 + self.indent * (self.depth + 1) } else { 0 };
         self.budget.grow(vm, self.out.len().saturating_add(extra).saturating_add(line + 2))
     }
 
+    #[inline(always)]
     fn charge_written(&mut self, vm: &Vm) -> Result<(), Fail> {
         let written = self.out.len() - self.charged;
         self.charged = self.out.len();
@@ -82,8 +97,8 @@ impl TextEncoder {
     }
 
     /// Writes a scalar that `text` holds: as a value, or as a map key.
+    #[inline(always)]
     fn scalar(&mut self, vm: &mut Vm, text: &str, quote: bool) -> Result<(), Fail> {
-        vm.charge(1)?;
         self.room(vm, text.len() * if quote { 6 } else { 1 } + 4)?;
         if self.in_key() {
             self.begin_member(Some(text));
@@ -99,8 +114,8 @@ impl TextEncoder {
     }
 
     /// Writes a value that cannot be a map key.
+    #[inline(always)]
     fn value_only(&mut self, vm: &mut Vm, extra: usize) -> Result<(), Fail> {
-        vm.charge(1)?;
         if self.in_key() {
             return invalid_key_error();
         }
@@ -111,6 +126,7 @@ impl TextEncoder {
 
     /// Writes the separator and the key of the next member of the innermost
     /// array or object, and updates a map's key state.
+    #[inline(always)]
     fn begin_member(&mut self, key: Option<&str>) {
         let Some(top) = self.open.last_mut() else { return };
         match top.bracket {
@@ -187,20 +203,24 @@ impl TextEncoder {
 }
 
 impl EncodeFormat for TextEncoder {
+    #[inline(always)]
     fn unit(&mut self, vm: &mut Vm) -> Result<(), Fail> {
         self.value_only(vm, 4)?;
         self.out.push_str("null");
         self.charge_written(vm)
     }
 
+    #[inline(always)]
     fn bool(&mut self, vm: &mut Vm, b: bool) -> Result<(), Fail> {
         self.scalar(vm, if b { "true" } else { "false" }, false)
     }
 
+    #[inline(always)]
     fn int(&mut self, vm: &mut Vm, i: i64) -> Result<(), Fail> {
         self.scalar(vm, itoa::Buffer::new().format(i), false)
     }
 
+    #[inline(always)]
     fn float(&mut self, vm: &mut Vm, f: f64) -> Result<(), Fail> {
         self.value_only(vm, 32)?;
         if f.is_finite() {
@@ -211,10 +231,12 @@ impl EncodeFormat for TextEncoder {
         self.charge_written(vm)
     }
 
+    #[inline(always)]
     fn duration(&mut self, vm: &mut Vm, nanos: i64) -> Result<(), Fail> {
         self.int(vm, nanos)
     }
 
+    #[inline(always)]
     fn str(&mut self, vm: &mut Vm, s: &str) -> Result<(), Fail> {
         self.scalar(vm, s, true)
     }
@@ -245,49 +267,48 @@ impl EncodeFormat for TextEncoder {
         self.charge_written(vm)
     }
 
+    #[inline(always)]
     fn begin_seq(&mut self, vm: &mut Vm, _: SeqKind, _: usize) -> Result<(), Fail> {
         self.value_only(vm, 1)?;
         self.open_bracket(Bracket::Array, None)
     }
 
+    #[inline(always)]
     fn begin_map(&mut self, vm: &mut Vm, _: usize) -> Result<(), Fail> {
         self.value_only(vm, 1)?;
         self.open_bracket(Bracket::Map(true), None)
     }
 
+    #[inline(always)]
     fn begin_struct(&mut self, vm: &mut Vm, def: u32) -> Result<(), Fail> {
         self.value_only(vm, 1)?;
         self.open_bracket(Bracket::Fields, Some((def, false)))
     }
 
+    #[inline(always)]
     fn field(&mut self, vm: &mut Vm, index: usize) -> Result<(), Fail> {
-        let Some(Open { names: Some((id, variant)), .. }) = self.open.last() else { return internal("json.encode: no open struct") };
-        let (id, variant) = (*id, *variant);
-        let names = if variant {
-            vm.prog.variants.get(id as usize).and_then(|v| v.field_names.as_deref())
-        } else {
-            vm.prog.types.get(id as usize).map(|t| &t.fields[..])
-        };
-        let Some(name) = names.and_then(|n| n.get(index)) else { return internal("json.encode: unknown field") };
-        let need = name.len() * 6 + 4;
-        let name = name.clone();
-        self.room(vm, need)?;
-        self.begin_member(Some(&name));
-        self.charge_written(vm)
+        let Some(&Open { names: Some((id, variant)), .. }) = self.open.last() else { return internal("json.encode: no open struct") };
+        let Some(len) = field_name(&vm.prog, id, variant, index).map(str::len) else { return internal("json.encode: unknown field") };
+        self.room(vm, len * 6 + 4)?;
+        self.begin_member(field_name(&vm.prog, id, variant, index));
+        Ok(())
     }
 
+    #[inline(always)]
     fn unit_variant(&mut self, vm: &mut Vm, variant: u32) -> Result<(), Fail> {
         if variant == vm.prog.ids.none {
             return self.none(vm);
         }
-        let Some(v) = vm.prog.variants.get(variant as usize) else { return internal("json.encode: unknown variant") };
-        let name = v.name.clone();
-        self.scalar(vm, &name, true)
+        let prog = vm.prog.clone();
+        let Some(v) = prog.variants.get(variant as usize) else { return internal("json.encode: unknown variant") };
+        self.scalar(vm, &v.name, true)
     }
 
+    #[inline(always)]
     fn begin_variant(&mut self, vm: &mut Vm, variant: u32) -> Result<(), Fail> {
-        let Some(v) = vm.prog.variants.get(variant as usize) else { return internal("json.encode: unknown variant") };
-        let (name, named) = (v.name.clone(), v.field_names.is_some());
+        let prog = vm.prog.clone();
+        let Some(v) = prog.variants.get(variant as usize) else { return internal("json.encode: unknown variant") };
+        let (name, named) = (&v.name, v.field_names.is_some());
         self.value_only(vm, name.len() * 6 + 8 + 2 * self.indent * (self.depth + 2))?;
         self.open_bracket(Bracket::VariantWrapper, None)?;
         // The wrapper has one member: the variant name.
@@ -295,7 +316,7 @@ impl EncodeFormat for TextEncoder {
             top.is_empty = false;
         }
         self.start_line();
-        write_str(&mut self.out, &name);
+        write_str(&mut self.out, name);
         self.out.push(':');
         if self.indent > 0 {
             self.out.push(' ');
@@ -303,6 +324,7 @@ impl EncodeFormat for TextEncoder {
         if named { self.open_bracket(Bracket::Fields, Some((variant, true))) } else { self.open_bracket(Bracket::Array, None) }
     }
 
+    #[inline(always)]
     fn begin_some(&mut self, vm: &mut Vm) -> Result<(), Fail> {
         if self.in_key() {
             return invalid_key_error();
@@ -312,10 +334,12 @@ impl EncodeFormat for TextEncoder {
         self.open_bracket(Bracket::Some, None)
     }
 
+    #[inline(always)]
     fn none(&mut self, vm: &mut Vm) -> Result<(), Fail> {
         self.unit(vm)
     }
 
+    #[inline(always)]
     fn end(&mut self, vm: &mut Vm) -> Result<(), Fail> {
         self.room(vm, 2)?;
         self.close_bracket()?;
@@ -330,19 +354,19 @@ impl EncodeFormat for TextEncoder {
         write_json_form(self, vm, value)
     }
 
-    fn mark(&self) -> FormatMark {
-        FormatMark(Box::new((self.out.len(), self.charged, self.open.len(), self.open.last().copied(), self.depth)))
+    fn save(&mut self) {
+        let (out, charged, open, top, depth) = (self.out.len(), self.charged, self.open.len(), self.open.last().copied(), self.depth);
+        self.saved = Some(EncoderState { out, charged, open, top, depth });
     }
 
-    fn rollback(&mut self, mark: FormatMark) {
-        let Ok(m) = mark.0.downcast::<(usize, usize, usize, Option<Open>, usize)>() else { return };
-        let (out, charged, open, top, depth) = *m;
-        self.out.truncate(out);
-        self.open.truncate(open);
-        if let (Some(top), Some(last)) = (top, self.open.last_mut()) {
+    fn restore(&mut self) {
+        let Some(s) = self.saved.take() else { return };
+        self.out.truncate(s.out);
+        self.open.truncate(s.open);
+        if let (Some(top), Some(last)) = (s.top, self.open.last_mut()) {
             *last = top;
         }
-        (self.charged, self.depth) = (charged, depth);
+        (self.charged, self.depth) = (s.charged, s.depth);
     }
 
     fn heap_size(&self) -> usize {
@@ -354,60 +378,97 @@ impl EncodeFormat for TextEncoder {
     }
 }
 
-/// Writes the Sand `Json` value `root` to `f` with the format's operations.
-fn emit_json(vm: &mut Vm, root: VmValue, f: &mut dyn EncodeFormat) -> Result<(), Fail> {
-    enum Step {
-        Value(VmValue),
-        Key(VmValue),
-        End,
+/// Returns the name of field `index` of struct definition `id`, or of the
+/// named payload of variant `id`.
+#[inline(always)]
+fn field_name(prog: &Program, id: u32, variant: bool, index: usize) -> Option<&str> {
+    let names = match variant {
+        true => prog.variants.get(id as usize)?.field_names.as_deref()?,
+        false => &prog.types.get(id as usize)?.fields[..],
+    };
+    names.get(index).map(String::as_str)
+}
+
+/// Writes the Sand `Json` value `root` to `f` with the format's operations,
+/// and charges a fuel unit for each value.
+fn emit_json<F: EncodeFormat + ?Sized>(vm: &mut Vm, root: VmValue, f: &mut F) -> Result<(), Fail> {
+    /// An open array or object, the index of its next element or entry
+    /// slot, and the value of the entry whose key was written last.
+    enum Open {
+        Arr(VmValue, usize),
+        Obj(VmValue, usize, Option<VmValue>),
     }
     let ids = JsonIds::new(&vm.prog)?;
-    let mut todo = vec![Step::Value(root)];
-    while let Some(step) = todo.pop() {
-        let v = match step {
-            Step::End => {
-                f.end(vm)?;
-                continue;
+    let mut stack: Vec<Open> = Vec::new();
+    let mut next = Some(root);
+    loop {
+        if let Some(v) = next.take() {
+            vm.charge(1)?;
+            let id = vm.heap.variant_id(v);
+            match vm.heap.field(v, 0) {
+                _ if id == ids.null => f.unit(vm)?,
+                Some(VmValue::Bool(b)) if id == ids.bool_ => f.bool(vm, b)?,
+                Some(VmValue::Int(i)) if id == ids.int => f.int(vm, i)?,
+                Some(VmValue::Float(x)) if id == ids.float => f.float(vm, x)?,
+                Some(p) if id == ids.str_ => {
+                    let s = heap_text(vm, p);
+                    f.str(vm, &s)?;
+                }
+                Some(p) if id == ids.arr => {
+                    let len = vm.heap.list(p).len();
+                    f.begin_seq(vm, SeqKind::List, len)?;
+                    stack.push(Open::Arr(p, 0));
+                }
+                Some(p) if id == ids.obj => {
+                    let Obj::Map(m) = vm.heap.get(p) else { return internal("json: not an object") };
+                    f.begin_map(vm, m.live)?;
+                    stack.push(Open::Obj(p, 0, None));
+                }
+                _ => return internal("json: not a Json value"),
             }
-            Step::Key(k) => {
-                let k = vm.heap.str(k).to_string();
-                f.str(vm, &k)?;
-                continue;
-            }
-            Step::Value(v) => v,
-        };
-        let id = vm.heap.variant_id(v);
-        let payload = vm.heap.field(v, 0);
-        match payload {
-            _ if id == ids.null => f.unit(vm)?,
-            Some(VmValue::Bool(b)) if id == ids.bool_ => f.bool(vm, b)?,
-            Some(VmValue::Int(i)) if id == ids.int => f.int(vm, i)?,
-            Some(VmValue::Float(x)) if id == ids.float => f.float(vm, x)?,
-            Some(p) if id == ids.str_ => {
-                let s = vm.heap.str(p).to_string();
-                f.str(vm, &s)?;
-            }
-            Some(p) if id == ids.arr => {
-                let Obj::List(items) = vm.heap.get(p) else { return internal("json: not an array") };
-                let items = items.clone();
-                f.begin_seq(vm, SeqKind::List, items.len())?;
-                todo.push(Step::End);
-                todo.extend(items.into_iter().rev().map(Step::Value));
-            }
-            Some(p) if id == ids.obj => {
-                let Obj::Map(m) = vm.heap.get(p) else { return internal("json: not an object") };
-                let entries: Vec<(VmValue, VmValue)> = m.entries.iter().flatten().copied().collect();
-                f.begin_map(vm, entries.len())?;
-                todo.push(Step::End);
-                for (k, v) in entries.into_iter().rev() {
-                    todo.push(Step::Value(v));
-                    todo.push(Step::Key(k));
+        }
+        let Some(top) = stack.last_mut() else { return Ok(()) };
+        match top {
+            Open::Arr(list, i) => match vm.heap.list(*list).get(*i) {
+                Some(&x) => {
+                    *i += 1;
+                    next = Some(x);
+                }
+                None => {
+                    f.end(vm)?;
+                    stack.pop();
+                }
+            },
+            Open::Obj(map, i, value) => {
+                if let Some(x) = value.take() {
+                    next = Some(x);
+                    continue;
+                }
+                let Obj::Map(m) = vm.heap.get(*map) else { return internal("json: not an object") };
+                match m.entries.get(*i..).and_then(|rest| rest.iter().enumerate().find_map(|(k, e)| Some((k, (*e)?)))) {
+                    Some((k, (key, x))) => {
+                        *i += k + 1;
+                        *value = Some(x);
+                        let key = heap_text(vm, key);
+                        f.str(vm, &key)?;
+                    }
+                    None => {
+                        f.end(vm)?;
+                        stack.pop();
+                    }
                 }
             }
-            _ => return internal("json: not a Json value"),
         }
     }
-    Ok(())
+}
+
+/// Returns a copy of the text of the Sand `str` `v`, which needs no
+/// allocation for a short text.
+fn heap_text(vm: &Vm, v: VmValue) -> CompactString {
+    match vm.heap.get(v) {
+        Obj::Str(s) => s.clone(),
+        _ => vm.heap.str(v).into(),
+    }
 }
 
 /// Returns the JSON form of `json` as a host value.
@@ -429,15 +490,36 @@ struct Container {
     is_first: bool,
 }
 
+/// The text of the map key that the next operations of [`TextDecoder`]
+/// read: a span of the input, or the unescaped text of a key with escapes.
+#[derive(Clone)]
+enum KeyText {
+    Span(usize, usize),
+    Owned(String),
+}
+
+/// The state of a [`TextDecoder`] that [`DecodeFormat::save`] keeps.
+#[derive(Clone)]
+struct DecoderState {
+    pos: usize,
+    depth: usize,
+    charged: usize,
+    open: usize,
+    top: Option<Container>,
+    key: Option<KeyText>,
+}
+
 /// Reads JSON text.
 pub(crate) struct TextDecoder {
     text: Box<str>,
     pos: usize,
     depth: usize,
+    /// The input up to this position has been charged as fuel.
     charged: usize,
     open: Vec<Container>,
     /// The key of the map entry that the next operations read.
-    key: Option<String>,
+    key: Option<KeyText>,
+    saved: Option<DecoderState>,
     budget: Budget,
 }
 
@@ -445,12 +527,13 @@ impl TextDecoder {
     pub(crate) fn new(vm: &mut Vm, text: &str) -> Result<TextDecoder, Fail> {
         let mut budget = Budget::default();
         budget.grow(vm, text.len())?;
-        Ok(TextDecoder { text: text.into(), pos: 0, depth: 0, charged: 0, open: Vec::new(), key: None, budget })
+        Ok(TextDecoder { text: text.into(), pos: 0, depth: 0, charged: 0, open: Vec::new(), key: None, saved: None, budget })
     }
 
     /// Runs `f` on a parser at the current position. On an error, the
     /// position does not move, so a run of the native function again starts
     /// from the same input.
+    #[inline(always)]
     fn parse<R>(&mut self, vm: &mut Vm, f: impl FnOnce(&mut Parser<'_>, &mut Vm) -> Result<R, ParseError>) -> DecodeResult<R> {
         let mut p = Parser { src: &self.text, b: self.text.as_bytes(), pos: self.pos, depth: self.depth, charged: self.charged };
         p.ws();
@@ -458,9 +541,7 @@ impl TextDecoder {
         if let Err(ParseError::Fail(_)) = r {
             return r.map_err(into_fail);
         }
-        let consumed = p.pos.saturating_sub(p.charged);
-        (self.pos, self.depth, self.charged) = (p.pos, p.depth, p.pos);
-        vm.charge(1 + (consumed / SLOW_BYTES_PER_UNIT) as u64)?;
+        (self.pos, self.depth) = (p.pos, p.depth);
         r.map_err(into_fail)
     }
 
@@ -472,16 +553,19 @@ impl TextDecoder {
         }
     }
 
-    /// Returns the key of the current map entry, if the next operation reads
-    /// a key.
-    fn take_key(&mut self) -> Option<String> {
-        self.key.take()
+    /// Returns the text of `key`.
+    fn key_str<'s>(&'s self, key: &'s KeyText) -> &'s str {
+        match key {
+            &KeyText::Span(start, end) => self.text.get(start..end).unwrap_or_default(),
+            KeyText::Owned(s) => s,
+        }
     }
 
     fn invalid_key(key: &str) -> DecodeFail {
         DecodeFail::Mismatch(format!("invalid map key `{}`", crate::stdlib::truncate(key, crate::codec::QUOTED_KEY)))
     }
 
+    /// Returns the error for a map key of a type without a JSON key form.
     fn container_key(&mut self, what: &str) -> DecodeFail {
         self.key = None;
         DecodeFail::Invalid(format!("cannot decode map keys of type {what}"))
@@ -516,6 +600,7 @@ impl TextDecoder {
 
     /// Moves to the next element of the innermost container that ends with
     /// `close`. Returns `false` after its last element.
+    #[inline(always)]
     fn next(&mut self, vm: &mut Vm, close: u8) -> DecodeResult<bool> {
         let Some(&Container { is_first }) = self.open.last() else { return Err(Fail::internal("json: no open container").into()) };
         let more = self.parse(vm, |p, _| {
@@ -541,28 +626,35 @@ impl TextDecoder {
 
     /// Reads the next key of the innermost object, or returns `None` after
     /// its last member.
-    fn next_key(&mut self, vm: &mut Vm) -> DecodeResult<Option<Cow<'_, str>>> {
+    #[inline(always)]
+    fn next_key(&mut self, vm: &mut Vm) -> DecodeResult<Option<KeyText>> {
         if !self.next(vm, b'}')? {
             return Ok(None);
         }
-        let (start, end, owned) = self.parse(vm, |p, _| {
-            p.ws();
+        let key = self.parse(vm, |p, _| {
             if p.peek() != Some(b'"') {
                 return Err(p.unexpected());
             }
             let start = p.pos + 1;
-            let key = p.string(true)?;
-            let end = p.pos - 1;
+            let key = match p.string(true)? {
+                Cow::Borrowed(_) => KeyText::Span(start, p.pos - 1),
+                Cow::Owned(s) => KeyText::Owned(s),
+            };
             p.ws();
             if !p.eat(b':') {
                 return Err(p.unexpected());
             }
-            Ok((start, end, matches!(key, Cow::Owned(_)).then(|| key.into_owned())))
+            Ok(key)
         })?;
-        Ok(Some(match owned {
-            Some(key) => Cow::Owned(key),
-            None => Cow::Borrowed(&self.text[start..end]),
-        }))
+        Ok(Some(key))
+    }
+
+    /// Returns `key` as a `Cow` of the text.
+    fn key_cow(&self, key: KeyText) -> Cow<'_, str> {
+        match key {
+            KeyText::Span(start, end) => Cow::Borrowed(self.text.get(start..end).unwrap_or_default()),
+            KeyText::Owned(s) => Cow::Owned(s),
+        }
     }
 }
 
@@ -577,9 +669,10 @@ fn into_fail(e: ParseError) -> DecodeFail {
 }
 
 impl DecodeFormat for TextDecoder {
+    #[inline]
     fn unit(&mut self, vm: &mut Vm) -> DecodeResult<()> {
-        if let Some(key) = self.take_key() {
-            return Err(Self::invalid_key(&key));
+        if let Some(key) = self.key.take() {
+            return Err(Self::invalid_key(self.key_str(&key)));
         }
         self.parse(vm, |p, _| match p.peek() {
             Some(b'n') => p.literal(b"null"),
@@ -587,12 +680,13 @@ impl DecodeFormat for TextDecoder {
         })
     }
 
+    #[inline]
     fn bool(&mut self, vm: &mut Vm) -> DecodeResult<bool> {
-        if let Some(key) = self.take_key() {
-            return match &*key {
+        if let Some(key) = self.key.take() {
+            return match self.key_str(&key) {
                 "true" => Ok(true),
                 "false" => Ok(false),
-                _ => Err(Self::invalid_key(&key)),
+                key => Err(Self::invalid_key(key)),
             };
         }
         self.parse(vm, |p, _| match p.peek() {
@@ -602,26 +696,32 @@ impl DecodeFormat for TextDecoder {
         })
     }
 
+    #[inline]
     fn int(&mut self, vm: &mut Vm) -> DecodeResult<i64> {
-        if let Some(key) = self.take_key() {
-            return key.parse().map_err(|_| Self::invalid_key(&key));
+        if let Some(key) = self.key.take() {
+            let key = self.key_str(&key);
+            return key.parse().map_err(|_| Self::invalid_key(key));
         }
         self.parse(vm, |p, _| Self::int_value(p))
     }
 
+    #[inline]
     fn float(&mut self, vm: &mut Vm) -> DecodeResult<f64> {
-        if let Some(key) = self.take_key() {
-            return Err(self.container_key_for(&key, "float"));
+        if self.key.is_some() {
+            return Err(self.container_key("float"));
         }
         self.parse(vm, |p, _| Ok(Self::number(p, "float")?.float()))
     }
 
+    #[inline]
     fn duration(&mut self, vm: &mut Vm) -> DecodeResult<i64> {
         self.int(vm)
     }
 
+    #[inline]
     fn str(&mut self, vm: &mut Vm) -> DecodeResult<VmValue> {
-        if let Some(key) = self.take_key() {
+        if let Some(key) = self.key.take() {
+            let key = self.key_str(&key);
             vm.charge_bytes(key.len())?;
             return Ok(vm.new_str(key));
         }
@@ -638,8 +738,8 @@ impl DecodeFormat for TextDecoder {
     }
 
     fn bytes(&mut self, vm: &mut Vm) -> DecodeResult<VmValue> {
-        if let Some(key) = self.take_key() {
-            return Err(self.container_key_for(&key, "bytes"));
+        if self.key.is_some() {
+            return Err(self.container_key("bytes"));
         }
         self.parse(vm, |p, vm| {
             if p.peek() != Some(b'"') {
@@ -653,8 +753,8 @@ impl DecodeFormat for TextDecoder {
     }
 
     fn native_text(&mut self, vm: &mut Vm, name: &str) -> DecodeResult<String> {
-        if let Some(key) = self.take_key() {
-            return Ok(key);
+        if let Some(key) = self.key.take() {
+            return Ok(self.key_str(&key).to_owned());
         }
         self.parse(vm, |p, _| {
             if p.peek() != Some(b'"') {
@@ -665,13 +765,13 @@ impl DecodeFormat for TextDecoder {
     }
 
     fn range(&mut self, vm: &mut Vm) -> DecodeResult<(i64, i64, bool)> {
-        if let Some(key) = self.take_key() {
-            return Err(self.container_key_for(&key, "Range"));
+        if self.key.is_some() {
+            return Err(self.container_key("Range"));
         }
         self.open(vm, b'{', "object")?;
         let (mut start, mut end, mut inclusive) = (None, None, false);
-        while let Some(key) = self.next_key(vm)?.map(Cow::into_owned) {
-            match &*key {
+        while let Some(key) = self.next_key(vm)? {
+            match self.key_str(&key) {
                 "start" => start = Some(self.parse(vm, |p, _| Self::int_value(p))?),
                 "end" => end = Some(self.parse(vm, |p, _| Self::int_value(p))?),
                 "inclusive" => {
@@ -691,6 +791,7 @@ impl DecodeFormat for TextDecoder {
         }
     }
 
+    #[inline]
     fn some(&mut self, vm: &mut Vm) -> DecodeResult<bool> {
         if self.key.is_some() {
             return Ok(true);
@@ -704,6 +805,7 @@ impl DecodeFormat for TextDecoder {
         })
     }
 
+    #[inline]
     fn begin_seq(&mut self, vm: &mut Vm, kind: SeqKind) -> DecodeResult<()> {
         if self.key.is_some() {
             return Err(self.container_key(match kind {
@@ -712,17 +814,18 @@ impl DecodeFormat for TextDecoder {
                 SeqKind::Tuple(_) => "tuple",
             }));
         }
-        let what = match kind {
-            SeqKind::Tuple(n) => format!("array of length {n}"),
-            _ => "array".into(),
-        };
-        self.open(vm, b'[', &what)
+        match kind {
+            SeqKind::Tuple(n) => self.open(vm, b'[', &format!("array of length {n}")),
+            _ => self.open(vm, b'[', "array"),
+        }
     }
 
+    #[inline]
     fn next_item(&mut self, vm: &mut Vm) -> DecodeResult<bool> {
         self.next(vm, b']')
     }
 
+    #[inline]
     fn begin_map(&mut self, vm: &mut Vm) -> DecodeResult<()> {
         if self.key.is_some() {
             return Err(self.container_key("map"));
@@ -730,17 +833,20 @@ impl DecodeFormat for TextDecoder {
         self.open(vm, b'{', "object")
     }
 
-    fn next_entry(&mut self, vm: &mut Vm) -> DecodeResult<Option<String>> {
-        let key = self.next_key(vm)?.map(Cow::into_owned);
+    #[inline]
+    fn next_entry(&mut self, vm: &mut Vm) -> DecodeResult<Option<Cow<'_, str>>> {
+        let key = self.next_key(vm)?;
         self.key.clone_from(&key);
-        Ok(key)
+        Ok(key.map(|key| self.key_cow(key)))
     }
 
+    #[inline]
     fn map_value(&mut self, _: &mut Vm) -> DecodeResult<()> {
         self.key = None;
         Ok(())
     }
 
+    #[inline]
     fn begin_fields(&mut self, vm: &mut Vm, name: &str) -> DecodeResult<()> {
         if self.key.is_some() {
             return Err(self.container_key(if name.is_empty() { "variant" } else { name }));
@@ -748,17 +854,20 @@ impl DecodeFormat for TextDecoder {
         self.open(vm, b'{', "object")
     }
 
+    #[inline]
     fn next_field(&mut self, vm: &mut Vm) -> DecodeResult<Option<Cow<'_, str>>> {
-        self.next_key(vm)
+        let key = self.next_key(vm)?;
+        Ok(key.map(|key| self.key_cow(key)))
     }
 
     fn skip(&mut self, vm: &mut Vm) -> DecodeResult<()> {
         self.parse(vm, |p, _| p.skip())
     }
 
+    #[inline]
     fn variant(&mut self, vm: &mut Vm, name: &str) -> DecodeResult<(Cow<'_, str>, bool)> {
-        if let Some(key) = self.take_key() {
-            return Ok((Cow::Owned(key), false));
+        if let Some(key) = self.key.take() {
+            return Ok((self.key_cow(key), false));
         }
         let is_object = self.parse(vm, |p, _| match p.peek() {
             Some(b'"') => Ok(false),
@@ -766,16 +875,23 @@ impl DecodeFormat for TextDecoder {
             _ => Err(Self::mismatch(p, name)),
         })?;
         if !is_object {
-            let tag = self.parse(vm, |p, _| Ok(p.string(true)?.into_owned()))?;
-            return Ok((Cow::Owned(tag), false));
+            let tag = self.parse(vm, |p, _| {
+                let start = p.pos + 1;
+                Ok(match p.string(true)? {
+                    Cow::Borrowed(_) => KeyText::Span(start, p.pos - 1),
+                    Cow::Owned(s) => KeyText::Owned(s),
+                })
+            })?;
+            return Ok((self.key_cow(tag), false));
         }
         self.open(vm, b'{', name)?;
-        match self.next_key(vm)?.map(Cow::into_owned) {
-            Some(tag) => Ok((Cow::Owned(tag), true)),
+        match self.next_key(vm)? {
+            Some(tag) => Ok((self.key_cow(tag), true)),
             None => Err(DecodeFail::Mismatch(format!("expected a variant of {name}"))),
         }
     }
 
+    #[inline]
     fn end_variant(&mut self, vm: &mut Vm, name: &str) -> DecodeResult<()> {
         if self.next(vm, b'}')? {
             return Err(DecodeFail::Mismatch(format!("expected a single variant of {name}")));
@@ -784,8 +900,8 @@ impl DecodeFormat for TextDecoder {
     }
 
     fn json(&mut self, vm: &mut Vm) -> DecodeResult<VmValue> {
-        if let Some(key) = self.take_key() {
-            return Err(self.container_key_for(&key, "Json"));
+        if self.key.is_some() {
+            return Err(self.container_key("Json"));
         }
         let ids = JsonIds::new(&vm.prog)?;
         let (text, pos, depth, charged) = (&self.text, self.pos, self.depth, self.charged);
@@ -811,29 +927,29 @@ impl DecodeFormat for TextDecoder {
         Ok(json_value(&json_from_vm(vm, v)?))
     }
 
-    fn mark(&self) -> FormatMark {
-        FormatMark(Box::new((self.pos, self.depth, self.charged, self.open.len(), self.open.last().copied(), self.key.clone())))
+    #[inline]
+    fn take_input_fuel(&mut self) -> u64 {
+        let read = self.pos.saturating_sub(self.charged);
+        self.charged = self.pos;
+        (read / SLOW_BYTES_PER_UNIT) as u64
     }
 
-    fn rollback(&mut self, mark: FormatMark) {
-        let Ok(m) = mark.0.downcast::<(usize, usize, usize, usize, Option<Container>, Option<String>)>() else { return };
-        let (pos, depth, charged, open, top, key) = *m;
-        self.open.truncate(open);
-        if let (Some(top), Some(last)) = (top, self.open.last_mut()) {
+    fn save(&mut self) {
+        let (pos, depth, charged, open, top) = (self.pos, self.depth, self.charged, self.open.len(), self.open.last().copied());
+        self.saved = Some(DecoderState { pos, depth, charged, open, top, key: self.key.clone() });
+    }
+
+    fn restore(&mut self) {
+        let Some(s) = self.saved.take() else { return };
+        self.open.truncate(s.open);
+        if let (Some(top), Some(last)) = (s.top, self.open.last_mut()) {
             *last = top;
         }
-        (self.pos, self.depth, self.charged, self.key) = (pos, depth, charged, key);
+        (self.pos, self.depth, self.charged, self.key) = (s.pos, s.depth, s.charged, s.key);
     }
 
     fn heap_size(&self) -> usize {
         self.budget.counted()
-    }
-}
-
-impl TextDecoder {
-    /// Returns the error for a map key of a type without a JSON key form.
-    fn container_key_for(&mut self, _key: &str, what: &str) -> DecodeFail {
-        self.container_key(what)
     }
 }
 
@@ -859,12 +975,14 @@ pub(crate) struct TreeEncoder {
     depth: usize,
     /// Bytes of Rust memory that the tree holds.
     allocated: usize,
+    /// The stack length, depth, and allocated bytes that `save` kept.
+    saved: Option<(usize, usize, usize)>,
     budget: Budget,
 }
 
 impl TreeEncoder {
     pub(crate) fn new() -> TreeEncoder {
-        TreeEncoder { stack: vec![Node::Root(None)], depth: 0, allocated: 0, budget: Budget::default() }
+        TreeEncoder { stack: vec![Node::Root(None)], depth: 0, allocated: 0, saved: None, budget: Budget::default() }
     }
 
     /// Returns the encoded `Json` value.
@@ -888,9 +1006,8 @@ impl TreeEncoder {
         self.place(json)
     }
 
-    /// Charges for a value and counts its memory before any change.
+    /// Counts the memory of a value before any change.
     fn prepare(&mut self, vm: &mut Vm) -> Result<(), Fail> {
-        vm.charge(1)?;
         self.reserve(vm, size_of::<Json>() + 16)
     }
 
@@ -1068,15 +1185,14 @@ impl EncodeFormat for TreeEncoder {
     fn value(&mut self, vm: &mut Vm, value: &Value) -> Result<(), Fail> {
         write_json_form(self, vm, value)
     }
-    fn mark(&self) -> FormatMark {
-        FormatMark(Box::new((self.stack.len(), self.depth, self.allocated)))
+    fn save(&mut self) {
+        self.saved = Some((self.stack.len(), self.depth, self.allocated));
     }
 
     // A failed write changes only the containers that it opened: it places
     // its value in the container below only when the value ends.
-    fn rollback(&mut self, mark: FormatMark) {
-        let Ok(m) = mark.0.downcast::<(usize, usize, usize)>() else { return };
-        let (stack, depth, allocated) = *m;
+    fn restore(&mut self) {
+        let Some((stack, depth, allocated)) = self.saved.take() else { return };
         self.stack.truncate(stack);
         (self.depth, self.allocated) = (depth, allocated);
     }

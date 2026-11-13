@@ -8,14 +8,14 @@
 //! operations, in the same order, as the synthesized Sand implementations.
 //! So the formats, the errors, and the paths are the same on both paths.
 //!
-//! A walk is one native call. If a memory check fails during the walk, the
-//! format and the decoder's path go back to their state before the walk, so
-//! that the engine can run the call again after a garbage collection.
+//! A walk is one native call, which Rust compiles once for each format
+//! ([`EncodeFormat::write_fast`] and [`DecodeFormat::read_fast`]). It charges
+//! a fuel unit for each value, as the native walkers of `json.parse` do. If a
+//! memory check fails during the walk, the format goes back to its state
+//! before the walk, so that the engine can run the call again after a garbage
+//! collection.
 
-use super::{DecodeFail, DecodeFormat, DecodeResult, EncodeFormat};
-use super::{Decoder, Encoder, Frame, SeqKind};
-use crate::native::convert::HostError;
-use crate::native::ty::VmVal;
+use super::{DecodeFail, DecodeFormat, DecodeResult, EncodeFormat, Frame, SeqKind};
 use crate::vm::bytecode::Program;
 use crate::vm::value::{MapObj, Obj, SetObj, VmValue};
 use crate::vm::{Fail, Vm, internal};
@@ -51,108 +51,228 @@ pub enum Schema {
     Enum(u32, Box<[Box<[SchemaId]>]>),
 }
 
-/// Writes `value`, whose type has schema `schema`, to the encoder `e`.
-pub(super) fn encode(vm: &mut Vm, e: VmVal<Encoder>, value: VmValue, schema: SchemaId) -> Result<(), Fail> {
-    let Some(mut format) = e.get_mut(&mut vm.heap)?.format.take() else { return internal("the encoder is in use") };
-    let mark = format.mark();
+/// Writes `value`, whose type has schema `schema`, to `f`.
+pub(super) fn encode<F: EncodeFormat + ?Sized>(vm: &mut Vm, f: &mut F, value: VmValue, schema: SchemaId) -> Result<(), Fail> {
+    f.save();
     let prog = vm.prog.clone();
-    let r = encode_walk(vm, &prog, &mut *format, value, schema);
-    if r.as_ref().is_err_and(|f| f.as_limit().is_some()) {
-        format.rollback(mark);
+    let mut w = EncodeWalk { prog: &prog, stack: Vec::new(), values: Vec::new(), text: String::new() };
+    let r = w.run(vm, f, value, schema);
+    if r.as_ref().is_err_and(|e| e.as_limit().is_some()) {
+        f.restore();
     }
-    e.get_mut(&mut vm.heap)?.format = Some(format);
     r
 }
 
 /// An open container of the encode walk, with the index of its next part.
-enum EncodeFrame {
-    /// A list, or the entries of a set.
-    Items { obj: VmValue, next: usize, elem: SchemaId, set: bool },
-    /// The entries of a map; `value` is `true` while the value of entry
-    /// `next` comes next.
-    Entries { obj: VmValue, next: usize, key: SchemaId, val: SchemaId, value: bool },
-    /// The elements of a tuple, the fields of a struct, or the payload of
-    /// variant `variant` of the enum `schema`. `named` means that a field
-    /// call comes before each part.
-    Parts { obj: VmValue, next: usize, schema: SchemaId, variant: Option<usize>, named: bool },
-    /// The payload of `Some`.
-    Some { payload: Option<VmValue>, schema: SchemaId },
+enum EncodeFrame<'p> {
+    List {
+        list: VmValue,
+        next: usize,
+        elem: SchemaId,
+    },
+    /// A set, and the slot of its next entry.
+    Set {
+        set: VmValue,
+        next: usize,
+        elem: SchemaId,
+    },
+    /// A map, the slot of its next entry, and the value of the entry whose
+    /// key the walk wrote last.
+    Map {
+        map: VmValue,
+        next: usize,
+        key: SchemaId,
+        val: SchemaId,
+        value: Option<VmValue>,
+    },
+    /// The elements of a tuple, the fields of a struct, or a variant
+    /// payload, which are on the walk's value stack from `base`. `named`
+    /// means that a field call comes before each part.
+    Parts {
+        base: usize,
+        next: usize,
+        parts: &'p [SchemaId],
+        named: bool,
+    },
+    /// The payload of `Some`, until the walk writes it.
+    Some(Option<(VmValue, SchemaId)>),
 }
 
-fn encode_walk(vm: &mut Vm, prog: &Program, f: &mut dyn EncodeFormat, value: VmValue, schema: SchemaId) -> Result<(), Fail> {
-    let mut stack: Vec<EncodeFrame> = Vec::new();
-    let mut part = Some((value, schema));
-    loop {
-        if let Some((v, s)) = part.take()
-            && let Some(frame) = encode_one(vm, prog, f, v, s)?
-        {
-            stack.push(frame);
-        }
-        let Some(frame) = stack.last_mut() else { return Ok(()) };
-        part = match frame {
-            EncodeFrame::Items { obj, next, elem, set } => {
-                let item = match vm.heap.get(*obj) {
-                    Obj::List(items) if !*set => items.get(*next).copied(),
-                    Obj::Set(s) => {
-                        let found = s.entries[(*next).min(s.entries.len())..].iter().position(Option::is_some);
-                        found.and_then(|k| {
-                            *next += k;
-                            s.entries[*next]
-                        })
-                    }
-                    _ => None,
-                };
-                *next += 1;
-                item.map(|x| (x, *elem))
+/// A part that the encode walk writes next: the value, its schema, and
+/// whether it is a map key, which the walk does not charge as a value.
+type EncodePart = (VmValue, SchemaId, bool);
+
+/// The state of an encode walk.
+struct EncodeWalk<'p> {
+    prog: &'p Program,
+    stack: Vec<EncodeFrame<'p>>,
+    /// The parts of the open tuples, structs, and variant payloads.
+    values: Vec<VmValue>,
+    /// A buffer for the text of a `str`.
+    text: String,
+}
+
+impl<'p> EncodeWalk<'p> {
+    fn run<F: EncodeFormat + ?Sized>(&mut self, vm: &mut Vm, f: &mut F, value: VmValue, schema: SchemaId) -> Result<(), Fail> {
+        let (mut v, mut s, mut is_key) = (value, schema, false);
+        loop {
+            if !is_key {
+                vm.charge(1)?;
             }
-            EncodeFrame::Entries { obj, next, key, val, value } => {
-                let Obj::Map(m) = vm.heap.get(*obj) else { return internal("encode: not a map") };
-                if !*value {
-                    *next += m.entries[(*next).min(m.entries.len())..].iter().position(Option::is_some).unwrap_or(m.entries.len());
-                }
-                match m.entries.get(*next).copied().flatten() {
-                    Some((k, _)) if !*value => {
-                        *value = true;
-                        Some((k, *key))
-                    }
-                    Some((_, x)) => {
-                        *value = false;
-                        *next += 1;
-                        Some((x, *val))
-                    }
-                    None => None,
-                }
+            if let Some(frame) = self.open(vm, f, v, s)? {
+                self.stack.push(frame);
             }
-            EncodeFrame::Parts { obj, next, schema, variant, named } => {
-                let parts = match (&prog_schema(prog, *schema)?, *variant) {
-                    (Schema::Tuple(parts) | Schema::Struct(_, parts), None) => parts.len(),
-                    (Schema::Enum(_, variants), Some(k)) => variants.get(k).map_or(0, |p| p.len()),
-                    _ => return internal("encode: no parts"),
-                };
-                if *next < parts {
-                    let i = *next;
-                    *next += 1;
-                    let s = match (prog_schema(prog, *schema)?, *variant) {
-                        (Schema::Tuple(p) | Schema::Struct(_, p), None) => p[i],
-                        (Schema::Enum(_, variants), Some(k)) => variants[k][i],
-                        _ => return internal("encode: no parts"),
-                    };
-                    if *named {
-                        f.field(vm, i)?;
+            (v, s, is_key) = loop {
+                let Some(frame) = self.stack.last_mut() else { return Ok(()) };
+                match next_encode_part(vm, f, frame, &self.values)? {
+                    Some(part) => break part,
+                    None => {
+                        f.end(vm)?;
+                        if let Some(EncodeFrame::Parts { base, .. }) = self.stack.pop() {
+                            self.values.truncate(base);
+                        }
                     }
-                    let Some(x) = vm.heap.field(*obj, i) else { return internal("encode: missing part") };
-                    Some((x, s))
-                } else {
-                    None
                 }
-            }
-            EncodeFrame::Some { payload, schema } => payload.take().map(|x| (x, *schema)),
-        };
-        if part.is_none() {
-            f.end(vm)?;
-            stack.pop();
+            };
         }
     }
+
+    /// Writes the scalar `v`, or opens the container `v` and returns its
+    /// frame.
+    #[inline(always)]
+    fn open<F: EncodeFormat + ?Sized>(&mut self, vm: &mut Vm, f: &mut F, v: VmValue, s: SchemaId) -> Result<Option<EncodeFrame<'p>>, Fail> {
+        let prog = self.prog;
+        let frame = match (prog_schema(prog, s)?, v) {
+            (Schema::Unit, _) => return f.unit(vm).map(|()| None),
+            (Schema::Bool, VmValue::Bool(b)) => return f.bool(vm, b).map(|()| None),
+            (Schema::Int, VmValue::Int(i)) => return f.int(vm, i).map(|()| None),
+            (Schema::Float, VmValue::Float(x)) => return f.float(vm, x).map(|()| None),
+            (Schema::Duration, VmValue::Dur(d)) => return f.duration(vm, d).map(|()| None),
+            (Schema::Str, _) => {
+                self.text.clear();
+                self.text.push_str(vm.heap.str(v));
+                return f.str(vm, &self.text).map(|()| None);
+            }
+            (Schema::Bytes, _) => {
+                let bytes = vm.heap.bytes_of(v).to_vec();
+                return f.bytes(vm, &bytes).map(|()| None);
+            }
+            (Schema::Range, _) => {
+                let Obj::Range(start, end, inclusive) = *vm.heap.get(v) else { return internal("encode: not a range") };
+                return f.range(vm, start, end, inclusive).map(|()| None);
+            }
+            (Schema::Native(_), _) => {
+                let Some((type_name, text)) = super::native_text(vm, v) else { return internal("encode: not a native value") };
+                return f.native(vm, &type_name, &text).map(|()| None);
+            }
+            (Schema::Json, _) => return f.json(vm, v).map(|()| None),
+            (&Schema::List(elem), _) => {
+                let len = vm.heap.list(v).len();
+                f.begin_seq(vm, SeqKind::List, len)?;
+                EncodeFrame::List { list: v, next: 0, elem }
+            }
+            (&Schema::Set(elem), _) => {
+                let Obj::Set(set) = vm.heap.get(v) else { return internal("encode: not a set") };
+                f.begin_seq(vm, SeqKind::Set, set.live)?;
+                EncodeFrame::Set { set: v, next: 0, elem }
+            }
+            (&Schema::Map(key, val), _) => {
+                let Obj::Map(map) = vm.heap.get(v) else { return internal("encode: not a map") };
+                f.begin_map(vm, map.live)?;
+                EncodeFrame::Map { map: v, next: 0, key, val, value: None }
+            }
+            (&Schema::Option(payload), _) => match vm.heap.payload_if(&v, prog.ids.some) {
+                VmValue::Uninit => return f.none(vm).map(|()| None),
+                x => {
+                    f.begin_some(vm)?;
+                    EncodeFrame::Some(Some((x, payload)))
+                }
+            },
+            (Schema::Tuple(parts), _) => {
+                f.begin_seq(vm, SeqKind::Tuple(parts.len()), parts.len())?;
+                self.parts(vm, v, parts, false)?
+            }
+            (Schema::Struct(def, parts), _) => {
+                f.begin_struct(vm, *def)?;
+                self.parts(vm, v, parts, true)?
+            }
+            (Schema::Enum(first, variants), _) => {
+                let id = vm.heap.variant_id(v);
+                let Some(parts) = variants.get(id.wrapping_sub(*first) as usize) else { return internal("encode: unknown variant") };
+                if parts.is_empty() {
+                    return f.unit_variant(vm, id).map(|()| None);
+                }
+                f.begin_variant(vm, id)?;
+                let named = prog.variants.get(id as usize).is_some_and(|x| x.field_names.is_some());
+                self.parts(vm, v, parts, named)?
+            }
+            _ => return internal("encode: the value does not match its schema"),
+        };
+        Ok(Some(frame))
+    }
+
+    /// Copies the parts of the tuple, struct, or variant `v` to the value
+    /// stack, and returns the frame that writes them.
+    #[inline(always)]
+    fn parts(&mut self, vm: &Vm, v: VmValue, parts: &'p [SchemaId], named: bool) -> Result<EncodeFrame<'p>, Fail> {
+        let base = self.values.len();
+        match v {
+            VmValue::Obj(_) => self.values.extend_from_slice(vm.heap.fields(v)),
+            // A pair of ints, or a variant with its payload inline.
+            _ => self.values.extend((0..parts.len()).map_while(|i| vm.heap.field(v, i))),
+        }
+        if self.values.len() - base != parts.len() {
+            return internal("encode: the value does not match its schema");
+        }
+        Ok(EncodeFrame::Parts { base, next: 0, parts, named })
+    }
+}
+
+/// Moves to the next part of `frame`. Returns `None` after its last part.
+#[inline(always)]
+fn next_encode_part<F: EncodeFormat + ?Sized>(
+    vm: &mut Vm,
+    f: &mut F,
+    frame: &mut EncodeFrame<'_>,
+    values: &[VmValue],
+) -> Result<Option<EncodePart>, Fail> {
+    Ok(match frame {
+        EncodeFrame::List { list, next, elem } => {
+            let item = vm.heap.list(*list).get(*next).copied();
+            *next += 1;
+            item.map(|x| (x, *elem, false))
+        }
+        EncodeFrame::Set { set, next, elem } => {
+            let Obj::Set(s) = vm.heap.get(*set) else { return internal("encode: not a set") };
+            let found = s.entries.get(*next..).and_then(|rest| rest.iter().enumerate().find_map(|(k, x)| Some((k, (*x)?))));
+            found.map(|(k, x)| {
+                *next += k + 1;
+                (x, *elem, false)
+            })
+        }
+        EncodeFrame::Map { map, next, key, val, value } => {
+            if let Some(x) = value.take() {
+                return Ok(Some((x, *val, false)));
+            }
+            let Obj::Map(m) = vm.heap.get(*map) else { return internal("encode: not a map") };
+            let found = m.entries.get(*next..).and_then(|rest| rest.iter().enumerate().find_map(|(k, e)| Some((k, (*e)?))));
+            found.map(|(k, (key_value, x))| {
+                *next += k + 1;
+                *value = Some(x);
+                (key_value, *key, true)
+            })
+        }
+        EncodeFrame::Parts { base, next, parts, named } => {
+            let Some(&s) = parts.get(*next) else { return Ok(None) };
+            let i = *next;
+            *next += 1;
+            if *named {
+                f.field(vm, i)?;
+            }
+            Some((values[*base + i], s, false))
+        }
+        EncodeFrame::Some(payload) => payload.take().map(|(x, s)| (x, s, false)),
+    })
 }
 
 fn prog_schema(prog: &Program, id: SchemaId) -> Result<&Schema, Fail> {
@@ -162,232 +282,207 @@ fn prog_schema(prog: &Program, id: SchemaId) -> Result<&Schema, Fail> {
     }
 }
 
-/// Writes the scalar `v`, or opens the container `v` and returns its frame.
-fn encode_one(vm: &mut Vm, prog: &Program, f: &mut dyn EncodeFormat, v: VmValue, s: SchemaId) -> Result<Option<EncodeFrame>, Fail> {
-    vm.charge(1)?;
-    let frame = match (prog_schema(prog, s)?, v) {
-        (Schema::Unit, _) => return f.unit(vm).map(|()| None),
-        (Schema::Bool, VmValue::Bool(b)) => return f.bool(vm, b).map(|()| None),
-        (Schema::Int, VmValue::Int(i)) => return f.int(vm, i).map(|()| None),
-        (Schema::Float, VmValue::Float(x)) => return f.float(vm, x).map(|()| None),
-        (Schema::Duration, VmValue::Dur(d)) => return f.duration(vm, d).map(|()| None),
-        (Schema::Str, _) => {
-            let text = match vm.heap.get(v) {
-                Obj::Str(s) => s.clone(),
-                _ => vm.heap.str(v).into(),
-            };
-            return f.str(vm, &text).map(|()| None);
-        }
-        (Schema::Bytes, _) => {
-            let bytes = vm.heap.bytes_of(v).to_vec();
-            return f.bytes(vm, &bytes).map(|()| None);
-        }
-        (Schema::Range, _) => {
-            let Obj::Range(start, end, inclusive) = *vm.heap.get(v) else { return internal("encode: not a range") };
-            return f.range(vm, start, end, inclusive).map(|()| None);
-        }
-        (Schema::Native(_), _) => {
-            let Some((type_name, text)) = super::native_text(vm, v) else { return internal("encode: not a native value") };
-            return f.native(vm, &type_name, &text).map(|()| None);
-        }
-        (Schema::Json, _) => return f.json(vm, v).map(|()| None),
-        (&Schema::List(elem), _) => {
-            let len = vm.heap.list(v).len();
-            f.begin_seq(vm, SeqKind::List, len)?;
-            EncodeFrame::Items { obj: v, next: 0, elem, set: false }
-        }
-        (&Schema::Set(elem), _) => {
-            let Obj::Set(set) = vm.heap.get(v) else { return internal("encode: not a set") };
-            f.begin_seq(vm, SeqKind::Set, set.live)?;
-            EncodeFrame::Items { obj: v, next: 0, elem, set: true }
-        }
-        (&Schema::Map(key, val), _) => {
-            let Obj::Map(map) = vm.heap.get(v) else { return internal("encode: not a map") };
-            f.begin_map(vm, map.live)?;
-            EncodeFrame::Entries { obj: v, next: 0, key, val, value: false }
-        }
-        (&Schema::Option(payload), _) => match vm.heap.payload_if(&v, prog.ids.some) {
-            VmValue::Uninit => return f.none(vm).map(|()| None),
-            x => {
-                f.begin_some(vm)?;
-                EncodeFrame::Some { payload: Some(x), schema: payload }
-            }
-        },
-        (Schema::Tuple(parts), _) => {
-            f.begin_seq(vm, SeqKind::Tuple(parts.len()), parts.len())?;
-            EncodeFrame::Parts { obj: v, next: 0, schema: s, variant: None, named: false }
-        }
-        (&Schema::Struct(def, _), _) => {
-            f.begin_struct(vm, def)?;
-            EncodeFrame::Parts { obj: v, next: 0, schema: s, variant: None, named: true }
-        }
-        (&Schema::Enum(first, ref variants), _) => {
-            let id = vm.heap.variant_id(v);
-            let k = id.wrapping_sub(first) as usize;
-            let Some(payload) = variants.get(k) else { return internal("encode: unknown variant") };
-            if payload.is_empty() {
-                return f.unit_variant(vm, id).map(|()| None);
-            }
-            f.begin_variant(vm, id)?;
-            let named = prog.variants.get(id as usize).is_some_and(|x| x.field_names.is_some());
-            EncodeFrame::Parts { obj: v, next: 0, schema: s, variant: Some(k), named }
-        }
-        _ => return internal("encode: the value does not match its schema"),
-    };
-    Ok(Some(frame))
-}
-
-/// Reads a value whose type has schema `schema` from the decoder `d`.
-pub(super) fn decode(vm: &mut Vm, d: VmVal<Decoder>, schema: SchemaId) -> Result<VmValue, HostError> {
-    super::with_decoder(vm, d, |f, frames, vm| {
-        let mark = (f.mark(), frames.len(), frames.last().cloned());
-        let prog = vm.prog.clone();
-        let r = decode_walk(vm, &prog, f, frames, schema);
-        if let Err(DecodeFail::Fail(fail)) = &r
-            && fail.as_limit().is_some()
-        {
-            let (format, len, top) = mark;
-            f.rollback(format);
-            frames.truncate(len);
-            if let (Some(top), Some(last)) = (top, frames.last_mut()) {
-                *last = top;
-            }
-        }
-        r
-    })
+/// Reads a value whose type has schema `schema` from `f`. `path` holds the
+/// open containers of the decoder before the walk; the walk adds its own if
+/// it fails.
+pub(super) fn decode<F: DecodeFormat + ?Sized>(vm: &mut Vm, f: &mut F, path: &mut Vec<Frame>, schema: SchemaId) -> DecodeResult<VmValue> {
+    f.save();
+    let prog = vm.prog.clone();
+    let mut w = DecodeWalk { prog: &prog, stack: Vec::new(), values: Vec::new(), key_texts: String::new() };
+    let r = w.run(vm, f, path, schema);
+    match &r {
+        Ok(_) => {}
+        Err(DecodeFail::Fail(fail)) if fail.as_limit().is_some() => f.restore(),
+        Err(_) => w.extend_path(path),
+    }
+    r
 }
 
 /// A container that the decode walk is reading. The parts that a list,
 /// tuple, or struct has read are on the walk's value stack from `base`.
-enum DecodeFrame {
+/// `index` and `field` are the part being read, for the path of an error.
+enum DecodeFrame<'p> {
     List {
         elem: SchemaId,
         base: usize,
+        index: Option<usize>,
     },
     Set {
         elem: SchemaId,
         set: VmValue,
+        index: Option<usize>,
     },
-    /// A map; `key` holds the key of the entry whose value comes next.
+    /// A map. `entry_key` holds the key of the entry whose value comes
+    /// next. The text of the current key starts at `text` in the walk's
+    /// `key_texts`.
     Map {
-        key_schema: SchemaId,
+        key: SchemaId,
         val: SchemaId,
         map: VmValue,
-        key: Option<VmValue>,
+        entry_key: Option<VmValue>,
+        text: usize,
     },
-    /// A tuple, or the positional payload of variant `variant`.
+    /// A tuple, or the positional payload of the variant in the
+    /// [`DecodeFrame::Variant`] frame below.
     Tuple {
-        schema: SchemaId,
-        variant: Option<usize>,
+        parts: &'p [SchemaId],
         base: usize,
+        index: Option<usize>,
+        variant: Option<u32>,
     },
-    /// The fields of a struct, or the named payload of variant `variant`,
-    /// whose slots hold `Uninit` until read; `field` is the field being read.
+    /// The fields of struct definition `id` (`variant == false`), or the
+    /// named payload of variant `id`, whose slots hold `Uninit` until read.
     Fields {
-        schema: SchemaId,
-        variant: Option<usize>,
+        parts: &'p [SchemaId],
+        names: &'p [String],
+        id: u32,
+        variant: bool,
         base: usize,
-        field: usize,
+        field: Option<usize>,
+        guess: usize,
     },
+    /// The payload of variant `id`, which the frame above reads.
+    Variant(u32),
     /// `Some`, and the schema of its payload until the walk reads it.
     Some(Option<SchemaId>),
-}
-
-/// The result of reading the start of a value.
-enum Opened {
-    Value(VmValue),
-    Frame(DecodeFrame),
 }
 
 /// The state of a decode walk.
 struct DecodeWalk<'p> {
     prog: &'p Program,
-    stack: Vec<DecodeFrame>,
+    stack: Vec<DecodeFrame<'p>>,
     /// The parts read so far of the open lists, tuples, and structs.
     values: Vec<VmValue>,
+    /// The texts of the current keys of the open maps.
+    key_texts: String,
 }
 
-fn decode_walk(vm: &mut Vm, prog: &Program, f: &mut dyn DecodeFormat, frames: &mut Vec<Frame>, schema: SchemaId) -> DecodeResult<VmValue> {
-    let mut w = DecodeWalk { prog, stack: Vec::new(), values: Vec::new() };
-    let mut part = schema;
-    loop {
-        let mut done = match w.open(vm, f, frames, part)? {
-            Opened::Value(v) => Some(v),
-            Opened::Frame(frame) => {
-                w.stack.push(frame);
-                None
+/// What reading the start of a value gives.
+enum Opened<'p> {
+    Value(VmValue),
+    Frame(DecodeFrame<'p>),
+}
+
+impl<'p> DecodeWalk<'p> {
+    fn run<F: DecodeFormat + ?Sized>(&mut self, vm: &mut Vm, f: &mut F, path: &[Frame], schema: SchemaId) -> DecodeResult<VmValue> {
+        let mut part = schema;
+        let mut is_key = false;
+        loop {
+            // A map key is part of its entry, as in `json.parse`: the walk
+            // charges a unit for each value, and the input bytes since the
+            // last value.
+            if !is_key {
+                vm.charge(1 + f.take_input_fuel())?;
             }
-        };
-        // Gives finished values to their containers until a container needs
-        // its next part.
-        part = loop {
-            if let Some(v) = done.take() {
-                let Some(frame) = w.stack.last_mut() else { return Ok(v) };
-                match frame {
-                    DecodeFrame::List { .. } | DecodeFrame::Tuple { .. } => w.values.push(v),
-                    DecodeFrame::Set { set, .. } => _ = vm.set_add(*set, v)?,
-                    DecodeFrame::Map { map, key, .. } => match key.take() {
-                        None => {
-                            *key = Some(v);
-                            super::dec_map_value(f, frames, vm)?;
+            let mut done = match self.open(vm, f, part)? {
+                Opened::Value(v) => Some(v),
+                Opened::Frame(frame) => {
+                    self.stack.push(frame);
+                    None
+                }
+            };
+            // Gives finished values to their containers until a container
+            // needs its next part.
+            (part, is_key) = loop {
+                if let Some(v) = done.take() {
+                    let Some(frame) = self.stack.last_mut() else { return Ok(v) };
+                    match frame {
+                        DecodeFrame::List { .. } | DecodeFrame::Tuple { .. } => self.values.push(v),
+                        DecodeFrame::Set { set, .. } => _ = vm.set_add(*set, v)?,
+                        DecodeFrame::Map { map, entry_key, .. } => match entry_key.take() {
+                            None => {
+                                *entry_key = Some(v);
+                                f.map_value(vm)?;
+                            }
+                            Some(k) => vm.map_set(*map, k, v)?,
+                        },
+                        DecodeFrame::Fields { base, field, .. } => {
+                            let slot = *base + field.unwrap_or_default();
+                            self.values[slot] = v;
                         }
-                        Some(k) => vm.map_set(*map, k, v)?,
-                    },
-                    DecodeFrame::Fields { base, field, .. } => w.values[*base + *field] = v,
-                    DecodeFrame::Some(_) => {
-                        w.stack.pop();
-                        done = Some(vm.heap.new_variant(prog.ids.some, &[v]));
-                        continue;
+                        DecodeFrame::Some(_) => {
+                            self.stack.pop();
+                            done = Some(vm.heap.new_variant(self.prog.ids.some, &[v]));
+                            continue;
+                        }
+                        DecodeFrame::Variant(_) => return Err(Fail::internal("decode: a variant without its payload").into()),
                     }
                 }
-            }
-            match w.next_part(vm, f, frames)? {
-                Some(s) => break s,
-                None => {
-                    let frame = w.stack.pop().unwrap_or_else(|| unreachable!());
-                    done = Some(w.finish(vm, f, frames, frame)?);
+                match self.next_part(vm, f)? {
+                    Some(next) => break next,
+                    None => done = Some(self.finish(vm, f, path)?),
                 }
-            }
-        };
+            };
+        }
     }
-}
 
-impl DecodeWalk<'_> {
     /// Moves to the next part of the innermost frame. Returns the schema of
-    /// the part, or `None` after the last part.
-    fn next_part(&mut self, vm: &mut Vm, f: &mut dyn DecodeFormat, frames: &mut Vec<Frame>) -> DecodeResult<Option<SchemaId>> {
-        let prog = self.prog;
+    /// the part and whether it is a map key, or `None` after the last part.
+    #[inline(always)]
+    fn next_part<F: DecodeFormat + ?Sized>(&mut self, vm: &mut Vm, f: &mut F) -> DecodeResult<Option<(SchemaId, bool)>> {
         let len = self.values.len();
         let Some(frame) = self.stack.last_mut() else { return Err(Fail::internal("decode: no open container").into()) };
         Ok(match frame {
-            DecodeFrame::List { elem, .. } | DecodeFrame::Set { elem, .. } => super::dec_next_item(f, frames, vm)?.then_some(*elem),
-            DecodeFrame::Map { val, key: Some(_), .. } => Some(*val),
-            DecodeFrame::Map { key_schema, key: None, .. } => super::dec_next_entry(f, frames, vm)?.then_some(*key_schema),
-            DecodeFrame::Tuple { schema, variant, base } => match parts(prog, *schema, *variant)?.get(len - *base) {
-                Some(&s) => {
-                    super::dec_element(f, frames, vm)?;
-                    Some(s)
-                }
-                None => None,
-            },
-            DecodeFrame::Fields { schema, variant, field, .. } => {
-                let i = super::next_field(f, frames, vm)?;
-                if i < 0 {
+            DecodeFrame::List { elem, index, .. } | DecodeFrame::Set { elem, index, .. } => {
+                if !f.next_item(vm)? {
                     return Ok(None);
                 }
-                *field = i as usize;
-                match parts(prog, *schema, *variant)?.get(*field) {
-                    Some(&s) => Some(s),
-                    None => return Err(Fail::internal("decode: unknown field").into()),
-                }
+                *index = Some(index.map_or(0, |i| i + 1));
+                Some((*elem, false))
             }
-            DecodeFrame::Some(payload) => payload.take(),
+            DecodeFrame::Map { val, entry_key: Some(_), .. } => Some((*val, false)),
+            DecodeFrame::Map { key, text, .. } => {
+                let (key, text) = (*key, *text);
+                let Some(key_text) = f.next_entry(vm)? else { return Ok(None) };
+                self.key_texts.truncate(text);
+                self.key_texts.push_str(&key_text);
+                Some((key, true))
+            }
+            DecodeFrame::Tuple { parts, base, index, .. } => {
+                let Some(&s) = parts.get(len - *base) else { return Ok(None) };
+                if !f.next_item(vm)? {
+                    let n = parts.len();
+                    self.stack.pop();
+                    return Err(DecodeFail::Mismatch(f.length_mismatch(n)));
+                }
+                *index = Some(index.map_or(0, |i| i + 1));
+                Some((s, false))
+            }
+            DecodeFrame::Fields { parts, names, id, variant, field, guess, .. } => loop {
+                let found = {
+                    let Some(key) = f.next_field(vm)? else { return Ok(None) };
+                    if names.get(*guess).is_some_and(|n| *n == *key) {
+                        Some(*guess)
+                    } else {
+                        vm.charge(1)?;
+                        let by_name = match *variant {
+                            true => self.prog.variants.get(*id as usize).map(|v| &v.by_name),
+                            false => self.prog.types.get(*id as usize).map(|t| &t.by_name),
+                        };
+                        by_name.and_then(|by_name| crate::vm::bytecode::field_index(names, by_name, &key))
+                    }
+                };
+                match found {
+                    Some(i) => {
+                        *field = Some(i);
+                        *guess = i + 1;
+                        match parts.get(i) {
+                            Some(&s) => break Some((s, false)),
+                            None => return Err(Fail::internal("decode: unknown field").into()),
+                        }
+                    }
+                    None => f.skip(vm)?,
+                }
+            },
+            DecodeFrame::Some(payload) => payload.take().map(|s| (s, false)),
+            DecodeFrame::Variant(_) => return Err(Fail::internal("decode: a variant without its payload").into()),
         })
     }
 
-    /// Builds the value of `frame` after its last part.
-    fn finish(&mut self, vm: &mut Vm, f: &mut dyn DecodeFormat, frames: &mut Vec<Frame>, frame: DecodeFrame) -> DecodeResult<VmValue> {
-        let prog = self.prog;
+    /// Ends the innermost frame after its last part and builds its value.
+    /// The frame is not on the path of an error that ending it finds.
+    fn finish<F: DecodeFormat + ?Sized>(&mut self, vm: &mut Vm, f: &mut F, path: &[Frame]) -> DecodeResult<VmValue> {
+        let Some(frame) = self.stack.pop() else { return Err(Fail::internal("decode: no open container").into()) };
         Ok(match frame {
             DecodeFrame::List { base, .. } => {
                 let n = self.values.len() - base;
@@ -395,56 +490,69 @@ impl DecodeWalk<'_> {
                 vm.heap.new_list(self.values.drain(base..).collect())
             }
             DecodeFrame::Set { set, .. } => set,
-            DecodeFrame::Map { map, .. } => map,
-            DecodeFrame::Tuple { schema, variant, base } => {
-                super::dec_end_tuple(f, frames, vm)?;
-                vm.check_memory(size_of::<Obj>() + (self.values.len() - base) * size_of::<VmValue>())?;
+            DecodeFrame::Map { map, text, .. } => {
+                self.key_texts.truncate(text);
+                map
+            }
+            DecodeFrame::Tuple { parts, base, variant, .. } => {
+                if f.next_item(vm)? {
+                    return Err(DecodeFail::Mismatch(f.length_mismatch(parts.len())));
+                }
+                vm.check_memory(size_of::<Obj>() + parts.len() * size_of::<VmValue>())?;
                 let v = match variant {
                     None => vm.heap.new_tuple(&self.values[base..]),
-                    Some(k) => {
-                        super::dec_end_variant(f, frames, vm)?;
-                        vm.heap.new_variant(variant_id(prog, schema, k)?, &self.values[base..])
+                    Some(id) => {
+                        self.end_variant(vm, f)?;
+                        vm.heap.new_variant(id, &self.values[base..])
                     }
                 };
                 self.values.truncate(base);
                 v
             }
-            DecodeFrame::Fields { schema, variant, base, .. } => {
-                let parts = parts(prog, schema, variant)?;
+            DecodeFrame::Fields { parts, id, variant, base, .. } => {
                 for (i, &part) in parts.iter().enumerate() {
                     if !matches!(self.values[base + i], VmValue::Uninit) {
                         continue;
                     }
-                    if !matches!(prog_schema(prog, part)?, Schema::Option(_)) {
-                        let (id, is_variant) = match variant {
-                            Some(k) => (variant_id(prog, schema, k)?, true),
-                            None => (struct_def(prog, schema)?, false),
-                        };
-                        return Err(DecodeFail::Syntax(super::missing_message(vm, frames, id, is_variant, i)));
+                    if !matches!(prog_schema(self.prog, part)?, Schema::Option(_)) {
+                        let mut frames = path.to_vec();
+                        self.extend_path(&mut frames);
+                        return Err(DecodeFail::Syntax(super::missing_message(vm, &frames, id, variant, i)));
                     }
-                    self.values[base + i] = VmValue::Tag(prog.ids.none);
+                    self.values[base + i] = VmValue::Tag(self.prog.ids.none);
                 }
                 vm.check_memory(size_of::<Obj>() + parts.len() * size_of::<VmValue>())?;
-                let v = match variant {
-                    None => {
-                        let fields = vm.heap.boxed(&self.values[base..]);
-                        vm.heap.alloc(Obj::Struct(struct_def(prog, schema)?, fields))
-                    }
-                    Some(k) => {
-                        super::dec_end_variant(f, frames, vm)?;
-                        vm.heap.new_variant(variant_id(prog, schema, k)?, &self.values[base..])
-                    }
+                let v = if variant {
+                    self.end_variant(vm, f)?;
+                    vm.heap.new_variant(id, &self.values[base..])
+                } else {
+                    let fields = vm.heap.boxed(&self.values[base..]);
+                    vm.heap.alloc(Obj::Struct(id, fields))
                 };
                 self.values.truncate(base);
                 v
             }
-            DecodeFrame::Some(_) => return Err(Fail::internal("decode: Some without a payload").into()),
+            DecodeFrame::Variant(_) | DecodeFrame::Some(_) => return Err(Fail::internal("decode: a frame without parts").into()),
         })
     }
 
-    /// Reads a scalar, or opens a container and returns its frame.
-    fn open(&mut self, vm: &mut Vm, f: &mut dyn DecodeFormat, frames: &mut Vec<Frame>, s: SchemaId) -> DecodeResult<Opened> {
-        vm.charge(1)?;
+    /// Closes the variant whose payload ended, which is the innermost frame.
+    fn end_variant<F: DecodeFormat + ?Sized>(&mut self, vm: &mut Vm, f: &mut F) -> DecodeResult<()> {
+        let Some(DecodeFrame::Variant(id)) = self.stack.pop() else { return Err(Fail::internal("decode: no open variant").into()) };
+        let def = self.prog.variants.get(id as usize).map_or(0, |v| v.def);
+        f.end_variant(vm, self.type_name(def))
+    }
+
+    /// Returns the name of runtime type definition `def`, as messages show
+    /// it.
+    fn type_name(&self, def: u32) -> &'p str {
+        self.prog.types.get(def as usize).map_or("", |t| t.name.as_str())
+    }
+
+    /// Reads a scalar, or opens a container and returns its frame. A
+    /// container adds nothing to the path until its first part.
+    #[inline(always)]
+    fn open<F: DecodeFormat + ?Sized>(&mut self, vm: &mut Vm, f: &mut F, s: SchemaId) -> DecodeResult<Opened<'p>> {
         let prog = self.prog;
         let base = self.values.len();
         let v = match prog_schema(prog, s)? {
@@ -463,77 +571,115 @@ impl DecodeWalk<'_> {
             &Schema::Native(def) => super::read_native_value(f, vm, def)?,
             Schema::Json => f.json(vm)?,
             &Schema::List(elem) => {
-                super::dec_begin_seq(f, frames, vm, SeqKind::List)?;
-                return Ok(Opened::Frame(DecodeFrame::List { elem, base }));
+                f.begin_seq(vm, SeqKind::List)?;
+                return Ok(Opened::Frame(DecodeFrame::List { elem, base, index: None }));
             }
             &Schema::Set(elem) => {
-                super::dec_begin_seq(f, frames, vm, SeqKind::Set)?;
+                f.begin_seq(vm, SeqKind::Set)?;
                 vm.check_memory(size_of::<Obj>() + size_of::<SetObj>())?;
                 let set = vm.heap.alloc(Obj::Set(Box::default()));
-                return Ok(Opened::Frame(DecodeFrame::Set { elem, set }));
+                return Ok(Opened::Frame(DecodeFrame::Set { elem, set, index: None }));
             }
-            &Schema::Map(key_schema, val) => {
-                super::dec_begin_map(f, frames, vm)?;
+            &Schema::Map(key, val) => {
+                f.begin_map(vm)?;
                 vm.check_memory(size_of::<Obj>() + size_of::<MapObj>())?;
                 let map = vm.heap.alloc(Obj::Map(Box::default()));
-                return Ok(Opened::Frame(DecodeFrame::Map { key_schema, val, map, key: None }));
+                return Ok(Opened::Frame(DecodeFrame::Map { key, val, map, entry_key: None, text: self.key_texts.len() }));
             }
             &Schema::Option(payload) => match f.some(vm)? {
                 true => return Ok(Opened::Frame(DecodeFrame::Some(Some(payload)))),
                 false => VmValue::Tag(prog.ids.none),
             },
             Schema::Tuple(parts) => {
-                super::dec_begin_seq(f, frames, vm, SeqKind::Tuple(parts.len()))?;
-                return Ok(Opened::Frame(DecodeFrame::Tuple { schema: s, variant: None, base }));
+                f.begin_seq(vm, SeqKind::Tuple(parts.len()))?;
+                return Ok(Opened::Frame(DecodeFrame::Tuple { parts, base, index: None, variant: None }));
             }
-            &Schema::Struct(def, ref fields) => {
-                super::dec_begin_struct(f, frames, vm, def)?;
-                self.values.resize(base + fields.len(), VmValue::Uninit);
-                return Ok(Opened::Frame(DecodeFrame::Fields { schema: s, variant: None, base, field: 0 }));
+            Schema::Struct(def, parts) => {
+                f.begin_fields(vm, self.type_name(*def))?;
+                let names = prog.types.get(*def as usize).map_or(&[][..], |t| &t.fields[..]);
+                self.values.resize(base + parts.len(), VmValue::Uninit);
+                let frame = DecodeFrame::Fields { parts, names, id: *def, variant: false, base, field: None, guess: 0 };
+                return Ok(Opened::Frame(frame));
             }
-            &Schema::Enum(first, ref variants) => {
-                let k = super::read_variant(f, frames, vm, first, variants.len())? as usize;
-                let id = first + k as u32;
-                let Some(payload) = variants.get(k) else { return Err(Fail::internal("decode: unknown variant").into()) };
-                if payload.is_empty() {
-                    VmValue::Tag(id)
-                } else if prog.variants.get(id as usize).is_some_and(|x| x.field_names.is_some()) {
-                    super::dec_begin_fields(f, frames, vm, id)?;
-                    self.values.resize(base + payload.len(), VmValue::Uninit);
-                    return Ok(Opened::Frame(DecodeFrame::Fields { schema: s, variant: Some(k), base, field: 0 }));
-                } else {
-                    super::dec_begin_seq(f, frames, vm, SeqKind::Tuple(payload.len()))?;
-                    return Ok(Opened::Frame(DecodeFrame::Tuple { schema: s, variant: Some(k), base }));
-                }
-            }
+            Schema::Enum(first, variants) => return self.open_variant(vm, f, *first, variants),
         };
         Ok(Opened::Value(v))
     }
-}
 
-fn struct_def(prog: &Program, schema: SchemaId) -> Result<u32, Fail> {
-    match prog_schema(prog, schema)? {
-        &Schema::Struct(def, _) => Ok(def),
-        _ => internal("decode: not a struct"),
+    /// Reads a variant of the enum whose first variant has runtime id
+    /// `first`, and whose variants have the payloads `variants`.
+    fn open_variant<F: DecodeFormat + ?Sized>(
+        &mut self,
+        vm: &mut Vm,
+        f: &mut F,
+        first: u32,
+        variants: &'p [Box<[SchemaId]>],
+    ) -> DecodeResult<Opened<'p>> {
+        let prog = self.prog;
+        let rts = prog.variants.get(first as usize..first as usize + variants.len()).unwrap_or_default();
+        let enum_name = self.type_name(rts.first().map_or(0, |v| v.def));
+        let (k, has_payload) = {
+            let (name, has_payload) = f.variant(vm, enum_name)?;
+            vm.charge(1 + (variants.len() / 16) as u64)?;
+            let Some(k) = rts.iter().position(|v| v.name == *name) else {
+                let tag = crate::stdlib::truncate(&name, super::QUOTED_KEY);
+                return Err(DecodeFail::Mismatch(format!("unknown variant `{tag}` of {enum_name}")));
+            };
+            if !has_payload && !variants[k].is_empty() {
+                return Err(DecodeFail::Mismatch(format!("variant `{name}` of {enum_name} needs a payload")));
+            }
+            (k, has_payload)
+        };
+        let id = first + k as u32;
+        let parts = &variants[k][..];
+        if !has_payload {
+            return Ok(Opened::Value(VmValue::Tag(id)));
+        }
+        self.stack.push(DecodeFrame::Variant(id));
+        if parts.is_empty() {
+            // A payload-less variant in object form has an empty payload.
+            f.begin_seq(vm, SeqKind::Tuple(0))?;
+            if f.next_item(vm)? {
+                return Err(DecodeFail::Mismatch("expected array of length 0".into()));
+            }
+            self.end_variant(vm, f)?;
+            return Ok(Opened::Value(VmValue::Tag(id)));
+        }
+        let base = self.values.len();
+        match rts[k].field_names.as_deref() {
+            Some(names) => {
+                f.begin_fields(vm, "")?;
+                self.values.resize(base + parts.len(), VmValue::Uninit);
+                Ok(Opened::Frame(DecodeFrame::Fields { parts, names, id, variant: true, base, field: None, guess: 0 }))
+            }
+            None => {
+                f.begin_seq(vm, SeqKind::Tuple(parts.len()))?;
+                Ok(Opened::Frame(DecodeFrame::Tuple { parts, base, index: None, variant: Some(id) }))
+            }
+        }
     }
-}
 
-fn variant_id(prog: &Program, schema: SchemaId, k: usize) -> Result<u32, Fail> {
-    match prog_schema(prog, schema)? {
-        &Schema::Enum(first, _) => Ok(first + k as u32),
-        _ => internal("decode: not an enum"),
-    }
-}
-
-/// The schemas of the parts of a tuple or struct, or of the payload of
-/// variant `variant` of an enum.
-fn parts(prog: &Program, schema: SchemaId, variant: Option<usize>) -> Result<&[SchemaId], Fail> {
-    match (prog_schema(prog, schema)?, variant) {
-        (Schema::Tuple(p) | Schema::Struct(_, p), None) => Ok(p),
-        (Schema::Enum(_, variants), Some(k)) => match variants.get(k) {
-            Some(p) => Ok(p),
-            None => internal("decode: unknown variant"),
-        },
-        _ => internal("decode: no parts"),
+    /// Adds the open containers of the walk to `path`, as the synthesized
+    /// implementations would have them at the same point.
+    fn extend_path(&self, path: &mut Vec<Frame>) {
+        for (i, frame) in self.stack.iter().enumerate() {
+            path.push(match *frame {
+                DecodeFrame::List { index, .. } | DecodeFrame::Set { index, .. } => Frame::Seq { index, len: None },
+                DecodeFrame::Tuple { parts, index, .. } => Frame::Seq { index, len: Some(parts.len()) },
+                DecodeFrame::Map { entry_key, text, .. } => {
+                    // The key of a map ends where the key of the next open map
+                    // starts.
+                    let end = self.stack[i + 1..].iter().find_map(|f| match f {
+                        DecodeFrame::Map { text, .. } => Some(*text),
+                        _ => None,
+                    });
+                    let key = self.key_texts.get(text..end.unwrap_or(self.key_texts.len())).unwrap_or_default();
+                    Frame::Map { key: entry_key.is_some().then(|| key.to_owned()), pending: None }
+                }
+                DecodeFrame::Fields { id, variant, field, guess, .. } => Frame::Fields { id, variant, field, guess },
+                DecodeFrame::Variant(id) => Frame::Variant { id },
+                DecodeFrame::Some(_) => continue,
+            });
+        }
     }
 }

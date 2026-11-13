@@ -5,7 +5,7 @@
 //! the JSON form of the target type, such as a Base64 `Value::Str` for
 //! `bytes`.
 
-use super::{Budget, DecodeFail, DecodeFormat, DecodeResult, EncodeFormat, FormatMark, SeqKind};
+use super::{Budget, DecodeFail, DecodeFormat, DecodeResult, EncodeFormat, SeqKind};
 use crate::codec::MAX_NESTING_DEPTH;
 use crate::stdlib::base64;
 use crate::stdlib::json::Json;
@@ -41,11 +41,21 @@ pub(crate) struct ValueEncoder {
     depth: usize,
     /// For each open container, whether it counts as a nesting level.
     counted: Vec<bool>,
+    /// The lengths of `stack` and `counted`, the depth, and the allocated
+    /// bytes that `save` kept.
+    saved: Option<(usize, usize, usize, usize)>,
 }
 
 impl ValueEncoder {
     pub(crate) fn new() -> ValueEncoder {
-        ValueEncoder { stack: vec![Partial::Root(None)], allocated: 0, budget: Budget::default(), depth: 0, counted: Vec::new() }
+        ValueEncoder {
+            stack: vec![Partial::Root(None)],
+            allocated: 0,
+            budget: Budget::default(),
+            depth: 0,
+            counted: Vec::new(),
+            saved: None,
+        }
     }
 
     /// Returns the finished value, or `None` if a container is open or no
@@ -69,10 +79,9 @@ impl ValueEncoder {
         self.place(v)
     }
 
-    /// Charges for a value that container `at` of the stack receives, and
-    /// counts its growth against the memory limit, before any change.
+    /// Counts the growth of container `at` of the stack for a new value
+    /// against the memory limit, before any change.
     fn prepare(&mut self, vm: &mut Vm, at: usize) -> Result<(), Fail> {
-        vm.charge(1)?;
         let grow = match self.stack.get(at) {
             Some(Partial::Map(entries, false)) if entries.len() == entries.capacity() => entries.len().max(4) * size_of::<(Value, Value)>(),
             Some(
@@ -223,7 +232,6 @@ impl EncodeFormat for ValueEncoder {
         if self.stack.len() < 2 {
             return internal("encode: no open container");
         }
-        // `prepare` charges a unit for the value; containers are charged once.
         self.prepare(vm, self.stack.len() - 2)?;
         let Some(top) = self.stack.pop() else { return internal("encode: no open value") };
         self.depth -= usize::from(self.counted.pop().unwrap_or(false));
@@ -248,15 +256,14 @@ impl EncodeFormat for ValueEncoder {
         self.push(vm, value.clone())
     }
 
-    fn mark(&self) -> FormatMark {
-        FormatMark(Box::new((self.stack.len(), self.counted.len(), self.depth, self.allocated)))
+    fn save(&mut self) {
+        self.saved = Some((self.stack.len(), self.counted.len(), self.depth, self.allocated));
     }
 
     // A failed write changes only the containers that it opened: it places
     // its value in the container below only when the value ends.
-    fn rollback(&mut self, mark: FormatMark) {
-        let Ok(m) = mark.0.downcast::<(usize, usize, usize, usize)>() else { return };
-        let (stack, counted, depth, allocated) = *m;
+    fn restore(&mut self) {
+        let Some((stack, counted, depth, allocated)) = self.saved.take() else { return };
         self.stack.truncate(stack);
         self.counted.truncate(counted);
         (self.depth, self.allocated) = (depth, allocated);
@@ -292,15 +299,17 @@ pub(crate) struct ValueDecoder {
     open: Vec<Open>,
     /// Whether the next operations read a map key.
     in_key: bool,
+    /// The next value, the number of open containers, and `in_key`, that
+    /// `save` kept.
+    saved: Option<(Option<Next>, usize, bool)>,
 }
 
 impl ValueDecoder {
     pub(crate) fn new(value: Value) -> ValueDecoder {
-        ValueDecoder { next: Some(Next::Value(value)), open: Vec::new(), in_key: false }
+        ValueDecoder { next: Some(Next::Value(value)), open: Vec::new(), in_key: false, saved: None }
     }
 
-    fn take(&mut self, vm: &Vm) -> DecodeResult<Value> {
-        vm.charge(1)?;
+    fn take(&mut self) -> DecodeResult<Value> {
         match self.next.take() {
             Some(Next::Value(v)) => Ok(match v {
                 Value::Variant(ref variant) if is_json_variant(variant) => without_json_variant(&v).clone(),
@@ -363,36 +372,36 @@ fn is_json_variant(v: &VariantValue) -> bool {
 }
 
 impl DecodeFormat for ValueDecoder {
-    fn unit(&mut self, vm: &mut Vm) -> DecodeResult<()> {
-        match self.take(vm)? {
+    fn unit(&mut self, _: &mut Vm) -> DecodeResult<()> {
+        match self.take()? {
             Value::Unit => Ok(()),
             v => Err(self.mismatch("()", &v)),
         }
     }
 
-    fn bool(&mut self, vm: &mut Vm) -> DecodeResult<bool> {
-        match self.take(vm)? {
+    fn bool(&mut self, _: &mut Vm) -> DecodeResult<bool> {
+        match self.take()? {
             Value::Bool(b) => Ok(b),
             Value::Str(s) if self.in_key && (s == "true" || s == "false") => Ok(s == "true"),
             v => Err(self.mismatch("bool", &v)),
         }
     }
 
-    fn int(&mut self, vm: &mut Vm) -> DecodeResult<i64> {
-        let v = self.take(vm)?;
+    fn int(&mut self, _: &mut Vm) -> DecodeResult<i64> {
+        let v = self.take()?;
         self.int_of(&v)
     }
 
-    fn float(&mut self, vm: &mut Vm) -> DecodeResult<f64> {
-        match self.take(vm)? {
+    fn float(&mut self, _: &mut Vm) -> DecodeResult<f64> {
+        match self.take()? {
             Value::Float(f) => Ok(f),
             Value::Int(i) => Ok(i as f64),
             v => Err(self.mismatch("float", &v)),
         }
     }
 
-    fn duration(&mut self, vm: &mut Vm) -> DecodeResult<i64> {
-        match self.take(vm)? {
+    fn duration(&mut self, _: &mut Vm) -> DecodeResult<i64> {
+        match self.take()? {
             Value::Duration(d) => i64::try_from(d.as_nanos()).map_err(|_| DecodeFail::Mismatch("integer out of range".into())),
             v => self.int_of(&v).map_err(|e| match e {
                 DecodeFail::Mismatch(_) if !matches!(v, Value::Float(_)) => self.mismatch("duration", &v),
@@ -403,7 +412,7 @@ impl DecodeFormat for ValueDecoder {
 
     fn str(&mut self, vm: &mut Vm) -> DecodeResult<VmValue> {
         self.check_text(vm)?;
-        match self.take(vm)? {
+        match self.take()? {
             Value::Str(s) => {
                 vm.charge_bytes(s.len())?;
                 Ok(vm.new_str(s))
@@ -414,7 +423,7 @@ impl DecodeFormat for ValueDecoder {
 
     fn bytes(&mut self, vm: &mut Vm) -> DecodeResult<VmValue> {
         self.check_text(vm)?;
-        let b = match self.take(vm)? {
+        let b = match self.take()? {
             Value::Bytes(b) => b,
             Value::Str(s) => base64::decode(&s, false).map_err(|_| DecodeFail::Mismatch("invalid base64".into()))?,
             v => return Err(self.mismatch("bytes", &v)),
@@ -423,16 +432,16 @@ impl DecodeFormat for ValueDecoder {
         Ok(vm.heap.new_bytes(b))
     }
 
-    fn native_text(&mut self, vm: &mut Vm, name: &str) -> DecodeResult<String> {
-        match self.take(vm)? {
+    fn native_text(&mut self, _: &mut Vm, name: &str) -> DecodeResult<String> {
+        match self.take()? {
             Value::Native(native) => Ok(native.text),
             Value::Str(s) => Ok(s),
             v => Err(self.mismatch(name, &v)),
         }
     }
 
-    fn range(&mut self, vm: &mut Vm) -> DecodeResult<(i64, i64, bool)> {
-        match self.take(vm)? {
+    fn range(&mut self, _: &mut Vm) -> DecodeResult<(i64, i64, bool)> {
+        match self.take()? {
             Value::Range { start, end, inclusive } => Ok((start, end, inclusive)),
             Value::Map(entries) => {
                 let (mut start, mut end, mut inclusive) = (None, None, false);
@@ -459,8 +468,7 @@ impl DecodeFormat for ValueDecoder {
         }
     }
 
-    fn some(&mut self, vm: &mut Vm) -> DecodeResult<bool> {
-        vm.charge(1)?;
+    fn some(&mut self, _: &mut Vm) -> DecodeResult<bool> {
         let v = match self.next.take() {
             Some(Next::Value(v)) => v,
             other => {
@@ -484,8 +492,8 @@ impl DecodeFormat for ValueDecoder {
         }
     }
 
-    fn begin_seq(&mut self, vm: &mut Vm, kind: SeqKind) -> DecodeResult<()> {
-        let v = self.take(vm)?;
+    fn begin_seq(&mut self, _: &mut Vm, kind: SeqKind) -> DecodeResult<()> {
+        let v = self.take()?;
         let items = match (kind, v) {
             (SeqKind::List, Value::List(items)) => items,
             (SeqKind::Set, Value::Set(items) | Value::List(items)) => items,
@@ -516,14 +524,14 @@ impl DecodeFormat for ValueDecoder {
         }
     }
 
-    fn begin_map(&mut self, vm: &mut Vm) -> DecodeResult<()> {
-        match self.take(vm)? {
+    fn begin_map(&mut self, _: &mut Vm) -> DecodeResult<()> {
+        match self.take()? {
             Value::Map(entries) => self.enter(Open::Map(entries.into_iter(), None)),
             v => Err(self.mismatch("map", &v)),
         }
     }
 
-    fn next_entry(&mut self, _: &mut Vm) -> DecodeResult<Option<String>> {
+    fn next_entry(&mut self, _: &mut Vm) -> DecodeResult<Option<Cow<'_, str>>> {
         let Some(Open::Map(entries, value)) = self.open.last_mut() else { return Err(Fail::internal("next_entry: no open map").into()) };
         match entries.next() {
             Some((k, v)) => {
@@ -531,7 +539,7 @@ impl DecodeFormat for ValueDecoder {
                 *value = Some(v);
                 self.next = Some(Next::Value(k));
                 self.in_key = true;
-                Ok(Some(text))
+                Ok(Some(Cow::Owned(text)))
             }
             None => {
                 self.open.pop();
@@ -547,12 +555,16 @@ impl DecodeFormat for ValueDecoder {
         Ok(())
     }
 
-    fn begin_fields(&mut self, vm: &mut Vm, name: &str) -> DecodeResult<()> {
-        vm.charge(1)?;
-        let fields: Vec<(String, Value)> = match self.next.take() {
-            Some(Next::Fields(fields)) => fields,
-            Some(Next::Value(Value::Struct(s))) => s.ty.fields.iter().cloned().zip(s.fields.into_vec()).collect(),
-            Some(Next::Value(Value::Map(entries))) => {
+    fn begin_fields(&mut self, _: &mut Vm, name: &str) -> DecodeResult<()> {
+        let v = match self.next.take() {
+            Some(Next::Fields(fields)) => return self.enter(Open::Fields(fields.into_iter())),
+            Some(Next::Value(v @ (Value::Struct(_) | Value::Map(_)))) => v,
+            Some(Next::Value(v)) => without_json_variant(&v).clone(),
+            None => return Err(Fail::internal("begin_fields: no value").into()),
+        };
+        let fields: Vec<(String, Value)> = match v {
+            Value::Struct(s) => s.ty.fields.iter().cloned().zip(s.fields.into_vec()).collect(),
+            Value::Map(entries) => {
                 let mut fields = Vec::with_capacity(entries.len());
                 for (k, v) in entries {
                     match without_json_variant(&k) {
@@ -562,15 +574,7 @@ impl DecodeFormat for ValueDecoder {
                 }
                 fields
             }
-            Some(Next::Value(v)) => {
-                let v = without_json_variant(&v).clone();
-                if let Value::Map(_) | Value::Struct(_) = v {
-                    self.next = Some(Next::Value(v));
-                    return self.begin_fields(vm, name);
-                }
-                return Err(self.mismatch(if name.is_empty() { "map" } else { name }, &v));
-            }
-            None => return Err(Fail::internal("begin_fields: no value").into()),
+            v => return Err(self.mismatch(if name.is_empty() { "map" } else { name }, &v)),
         };
         self.enter(Open::Fields(fields.into_iter()))
     }
@@ -594,8 +598,8 @@ impl DecodeFormat for ValueDecoder {
         Ok(())
     }
 
-    fn variant(&mut self, vm: &mut Vm, name: &str) -> DecodeResult<(Cow<'_, str>, bool)> {
-        let v = self.take(vm)?;
+    fn variant(&mut self, _: &mut Vm, name: &str) -> DecodeResult<(Cow<'_, str>, bool)> {
+        let v = self.take()?;
         match v {
             Value::Str(tag) => Ok((Cow::Owned(tag), false)),
             Value::Variant(variant) if variant.payload.is_empty() => Ok((Cow::Owned(variant.variant.name.clone()), false)),
@@ -636,13 +640,12 @@ impl DecodeFormat for ValueDecoder {
         let json = match &self.next {
             Some(Next::Value(v)) => Json::decode(v).map_err(|e| DecodeFail::Mismatch(e.message().to_string()))?,
             _ => {
-                let v = self.take(vm)?;
+                let v = self.take()?;
                 return Err(self.mismatch("Json", &v));
             }
         };
         let v = crate::stdlib::json::json_into_vm(vm, json)?;
         self.next = None;
-        vm.charge(1)?;
         Ok(v)
     }
 
@@ -650,23 +653,22 @@ impl DecodeFormat for ValueDecoder {
         Ok(())
     }
 
-    fn value(&mut self, vm: &mut Vm) -> DecodeResult<Value> {
-        self.take(vm)
+    fn value(&mut self, _: &mut Vm) -> DecodeResult<Value> {
+        self.take()
     }
 
     fn length_mismatch(&self, len: usize) -> String {
         format!("expected list of length {len}")
     }
 
-    fn mark(&self) -> FormatMark {
-        FormatMark(Box::new((self.next.clone(), self.open.len(), self.in_key)))
+    fn save(&mut self) {
+        self.saved = Some((self.next.clone(), self.open.len(), self.in_key));
     }
 
     // A read takes its value from `next`, and changes only the containers
     // that it opens.
-    fn rollback(&mut self, mark: FormatMark) {
-        let Ok(m) = mark.0.downcast::<(Option<Next>, usize, bool)>() else { return };
-        let (next, open, in_key) = *m;
+    fn restore(&mut self) {
+        let Some((next, open, in_key)) = self.saved.take() else { return };
         self.open.truncate(open);
         (self.next, self.in_key) = (next, in_key);
     }

@@ -23,6 +23,7 @@ use crate::syntax::lexer::is_ident;
 use crate::value::Value;
 use crate::vm::value::{Obj, VmValue};
 use crate::vm::{Fail, Vm, internal};
+use fast::SchemaId;
 use std::any::Any;
 use std::borrow::Cow;
 use std::fmt::Write;
@@ -51,7 +52,8 @@ pub enum SeqKind {
 ///
 /// Each method checks the memory limit before it changes the format's
 /// state, so that the engine can run a native function again after a
-/// garbage collection (SPEC §16.3).
+/// garbage collection (SPEC §16.3). The caller charges a fuel unit for each
+/// value; a method charges only for the bytes that it writes.
 pub trait EncodeFormat: Any + Send {
     fn unit(&mut self, vm: &mut Vm) -> Result<(), Fail>;
     fn bool(&mut self, vm: &mut Vm, b: bool) -> Result<(), Fail>;
@@ -83,22 +85,23 @@ pub trait EncodeFormat: Any + Send {
     fn json(&mut self, vm: &mut Vm, json: VmValue) -> Result<(), Fail>;
     /// Writes the host value `value`, which has the data model of the format.
     fn value(&mut self, vm: &mut Vm, value: &Value) -> Result<(), Fail>;
-    /// Returns the state of the format before a value, for
-    /// [`EncodeFormat::rollback`].
-    fn mark(&self) -> FormatMark;
-    /// Returns to the state of `mark` after a write of one value failed
-    /// before it ended, so that the write can run again.
-    fn rollback(&mut self, mark: FormatMark);
+    /// Writes `value`, whose closed type has the fast-path schema `schema`,
+    /// as the synthesized `Encode` implementations would. Formats keep this
+    /// default, which Rust compiles for each format.
+    fn write_fast(&mut self, vm: &mut Vm, value: VmValue, schema: SchemaId) -> Result<(), Fail> {
+        fast::encode(vm, self, value, schema)
+    }
+    /// Keeps the state of the format before a value, for
+    /// [`EncodeFormat::restore`].
+    fn save(&mut self);
+    /// Returns to the state that [`EncodeFormat::save`] kept, after a write
+    /// of one value failed before it ended, so that the write can run again.
+    fn restore(&mut self);
     /// Bytes of Rust memory that the format holds and that the heap counts
     /// (see [`Budget`]).
     fn heap_size(&self) -> usize;
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
-
-/// The state of a format before a value, which a format returns to if a
-/// native function must run again (see [`EncodeFormat::rollback`] and
-/// [`DecodeFormat::rollback`]).
-pub struct FormatMark(pub Box<dyn Any>);
 
 /// The bytes of a format's Rust buffers that the heap counts.
 #[derive(Default)]
@@ -109,10 +112,16 @@ pub struct Budget {
 impl Budget {
     /// Counts `needed` bytes against the memory limit before a format grows
     /// to that size. Call it before any change to the format's state.
+    #[inline(always)]
     pub fn grow(&mut self, vm: &mut Vm, needed: usize) -> Result<(), Fail> {
         if needed <= self.counted {
             return Ok(());
         }
+        self.grow_counted(vm, needed)
+    }
+
+    #[inline(never)]
+    fn grow_counted(&mut self, vm: &mut Vm, needed: usize) -> Result<(), Fail> {
         let after = needed.saturating_add(ACCOUNT_STEP - 1) / ACCOUNT_STEP * ACCOUNT_STEP;
         vm.check_memory(after - self.counted)?;
         vm.heap.account(self.counted, after);
@@ -122,6 +131,13 @@ impl Budget {
 
     pub fn counted(&self) -> usize {
         self.counted
+    }
+
+    /// Stops counting the buffers, which the format no longer holds, and
+    /// returns the bytes that the heap counted for them. The caller passes
+    /// them to [`Heap::account`](crate::vm::heap::Heap::account).
+    pub fn release(&mut self) -> usize {
+        std::mem::take(&mut self.counted)
     }
 }
 
@@ -149,8 +165,10 @@ pub type DecodeResult<T> = Result<T, DecodeFail>;
 
 /// A source format for `Decode`.
 ///
-/// After [`DecodeFormat::next_entry`] returns `true`, the format reads the
-/// map key with the next operations, until [`DecodeFormat::map_value`].
+/// After [`DecodeFormat::next_entry`] returns a key, the format reads the
+/// map key with the next operations, until [`DecodeFormat::map_value`]. The
+/// caller charges a fuel unit for each value, and the fuel of the input that
+/// the format read (see [`DecodeFormat::take_input_fuel`]).
 pub trait DecodeFormat: Any + Send {
     fn unit(&mut self, vm: &mut Vm) -> DecodeResult<()>;
     fn bool(&mut self, vm: &mut Vm) -> DecodeResult<bool>;
@@ -170,7 +188,7 @@ pub trait DecodeFormat: Any + Send {
     fn begin_map(&mut self, vm: &mut Vm) -> DecodeResult<()>;
     /// Returns the text of the next key of the innermost map for the path,
     /// or `None` after the last entry.
-    fn next_entry(&mut self, vm: &mut Vm) -> DecodeResult<Option<String>>;
+    fn next_entry(&mut self, vm: &mut Vm) -> DecodeResult<Option<Cow<'_, str>>>;
     /// Ends the key of the current map entry.
     fn map_value(&mut self, vm: &mut Vm) -> DecodeResult<()>;
     /// Opens a struct, or the named payload of a variant, whose type is
@@ -192,12 +210,23 @@ pub trait DecodeFormat: Any + Send {
     fn value(&mut self, vm: &mut Vm) -> DecodeResult<Value>;
     /// Checks that no input follows the decoded value.
     fn finish(&mut self, vm: &mut Vm) -> DecodeResult<()>;
-    /// Returns the state of the format before a value, for
-    /// [`DecodeFormat::rollback`].
-    fn mark(&self) -> FormatMark;
-    /// Returns to the state of `mark` after a read of one value failed
-    /// before it ended, so that the read can run again.
-    fn rollback(&mut self, mark: FormatMark);
+    /// Reads a value of the closed type whose fast-path schema is `schema`,
+    /// as its synthesized `Decode` implementation would. Formats keep this
+    /// default, which Rust compiles for each format.
+    fn read_fast(&mut self, vm: &mut Vm, path: &mut DecodePath, schema: SchemaId) -> DecodeResult<VmValue> {
+        fast::decode(vm, self, &mut path.0, schema)
+    }
+    /// Returns the fuel of the input that the format read since the last
+    /// call, such as a unit for each 8 bytes of text.
+    fn take_input_fuel(&mut self) -> u64 {
+        0
+    }
+    /// Keeps the state of the format before a value, for
+    /// [`DecodeFormat::restore`].
+    fn save(&mut self);
+    /// Returns to the state that [`DecodeFormat::save`] kept, after a read
+    /// of one value failed before it ended, so that the read can run again.
+    fn restore(&mut self);
     /// The message for a tuple or positional payload without `len` elements.
     fn length_mismatch(&self, len: usize) -> String {
         format!("expected array of length {len}")
@@ -218,8 +247,7 @@ pub struct Encoder {
 #[sand(module = "prelude")]
 pub struct Decoder {
     format: Option<Box<dyn DecodeFormat>>,
-    /// The open containers, which give the path of the current part.
-    frames: Vec<Frame>,
+    path: DecodePath,
     /// The message of the last error that the decoder made, which already
     /// has its path.
     last_error: Option<String>,
@@ -236,6 +264,11 @@ impl NativeObject for Decoder {
         64 + self.format.as_ref().map_or(0, |f| f.heap_size())
     }
 }
+
+/// The open containers of a [`Decoder`], which give the path of the part
+/// that it reads, such as `$.items[2].price`.
+#[derive(Default)]
+pub struct DecodePath(Vec<Frame>);
 
 /// An open container of a [`Decoder`].
 #[derive(Clone, Debug)]
@@ -274,7 +307,7 @@ impl Encoder {
 impl Decoder {
     /// Returns a new decoder for `format`.
     pub fn new(format: Box<dyn DecodeFormat>) -> Decoder {
-        Decoder { format: Some(format), frames: Vec::new(), last_error: None }
+        Decoder { format: Some(format), path: DecodePath::default(), last_error: None }
     }
 
     /// Returns a decoder that reads the host value `value`. The value can
@@ -297,25 +330,66 @@ pub fn with_encoder<R>(
     r
 }
 
-/// Runs `op` on `d` and its format. An error gets the decoder's path.
+/// Charges a fuel unit for a value, and runs `op`, which writes the value or
+/// opens it, on the format of `e`.
+fn write_part<R>(vm: &mut Vm, e: VmVal<Encoder>, op: impl FnOnce(&mut dyn EncodeFormat, &mut Vm) -> Result<R, Fail>) -> Result<R, Fail> {
+    vm.charge(1)?;
+    with_encoder(vm, e, op)
+}
+
+/// Runs `op`, which writes one whole value to `e`. If a memory check fails,
+/// the format returns to its state before `op`, so that the native function
+/// can run again.
+pub(crate) fn write_whole(
+    vm: &mut Vm,
+    e: VmVal<Encoder>,
+    op: impl FnOnce(&mut dyn EncodeFormat, &mut Vm) -> Result<(), Fail>,
+) -> Result<(), Fail> {
+    with_encoder(vm, e, |f, vm| {
+        f.save();
+        let r = op(f, vm);
+        if r.as_ref().is_err_and(|e| e.as_limit().is_some()) {
+            f.restore();
+        }
+        r
+    })
+}
+
+/// Charges a fuel unit for a value, and runs `op`, which reads the value or
+/// opens it, on `d` and its format (see [`with_decoder`]).
+fn read_part<R>(
+    vm: &mut Vm,
+    d: VmVal<Decoder>,
+    op: impl FnOnce(&mut dyn DecodeFormat, &mut DecodePath, &mut Vm) -> DecodeResult<R>,
+) -> Result<R, HostError> {
+    vm.charge(1)?;
+    with_decoder(vm, d, op)
+}
+
+/// Runs `op` on `d` and its format, and charges the fuel of the input that
+/// the format read. An error gets the decoder's path.
 fn with_decoder<R>(
     vm: &mut Vm,
     d: VmVal<Decoder>,
-    op: impl FnOnce(&mut dyn DecodeFormat, &mut Vec<Frame>, &mut Vm) -> DecodeResult<R>,
+    op: impl FnOnce(&mut dyn DecodeFormat, &mut DecodePath, &mut Vm) -> DecodeResult<R>,
 ) -> Result<R, HostError> {
     let obj = d.get_mut(&mut vm.heap)?;
     let Some(mut format) = obj.format.take() else { return Err(Fail::internal("the decoder is in use").into()) };
-    let mut frames = std::mem::take(&mut obj.frames);
-    let r = op(&mut *format, &mut frames, vm);
+    let mut path = std::mem::take(&mut obj.path);
+    let r = op(&mut *format, &mut path, vm);
+    let r = match vm.charge(format.take_input_fuel()) {
+        Ok(()) => r,
+        Err(fail) => Err(fail.into()),
+    };
     let error = match &r {
-        Err(DecodeFail::Mismatch(m)) => Some(("parse", format!("{}: {m}", path_text(vm, &frames)))),
-        Err(DecodeFail::Invalid(m)) => Some(("invalid", format!("{}: {m}", path_text(vm, &frames)))),
+        Err(DecodeFail::Mismatch(m)) => Some(("parse", format!("{}: {m}", path_text(vm, &path.0)))),
+        Err(DecodeFail::Invalid(m)) => Some(("invalid", format!("{}: {m}", path_text(vm, &path.0)))),
         Err(DecodeFail::Syntax(m)) => Some(("parse", m.clone())),
         _ => None,
     };
     let obj = d.get_mut(&mut vm.heap)?;
     obj.format = Some(format);
-    obj.frames = frames;
+    obj.path = path;
     match (r, error) {
         (Ok(v), _) => Ok(v),
         (Err(DecodeFail::Fail(f)), _) => Err(f.into()),
@@ -391,47 +465,49 @@ type Dec = VmVal<Decoder>;
 type Decoded<T> = Result<T, HostError>;
 
 fn encoder_methods(m: &mut NativeModule) {
-    m.function("Encoder.write_unit", |vm: &mut Vm, e: Enc| with_encoder(vm, e, |f, vm| f.unit(vm)));
-    m.function("Encoder.write_bool", |vm: &mut Vm, e: Enc, b: bool| with_encoder(vm, e, |f, vm| f.bool(vm, b)));
-    m.function("Encoder.write_int", |vm: &mut Vm, e: Enc, i: i64| with_encoder(vm, e, |f, vm| f.int(vm, i)));
-    m.function("Encoder.write_float", |vm: &mut Vm, e: Enc, x: f64| with_encoder(vm, e, |f, vm| f.float(vm, x)));
+    m.function("Encoder.write_unit", |vm: &mut Vm, e: Enc| write_part(vm, e, |f, vm| f.unit(vm)));
+    m.function("Encoder.write_bool", |vm: &mut Vm, e: Enc, b: bool| write_part(vm, e, |f, vm| f.bool(vm, b)));
+    m.function("Encoder.write_int", |vm: &mut Vm, e: Enc, i: i64| write_part(vm, e, |f, vm| f.int(vm, i)));
+    m.function("Encoder.write_float", |vm: &mut Vm, e: Enc, x: f64| write_part(vm, e, |f, vm| f.float(vm, x)));
     m.function("Encoder.write_duration", |vm: &mut Vm, e: Enc, d: jiff::SignedDuration| {
-        with_encoder(vm, e, |f, vm| f.duration(vm, d.as_nanos() as i64))
+        write_part(vm, e, |f, vm| f.duration(vm, d.as_nanos() as i64))
     });
     m.function("Encoder.write_str", |vm: &mut Vm, e: Enc, s: VmVal<String>| {
         let text = s.str(&vm.heap).to_string();
-        with_encoder(vm, e, |f, vm| f.str(vm, &text))
+        write_part(vm, e, |f, vm| f.str(vm, &text))
     });
     m.function("Encoder.write_bytes", |vm: &mut Vm, e: Enc, b: VmVal<Vec<u8>>| {
         let bytes = b.bytes(&vm.heap).to_vec();
-        with_encoder(vm, e, |f, vm| f.bytes(vm, &bytes))
+        write_part(vm, e, |f, vm| f.bytes(vm, &bytes))
     });
     m.function("Encoder.write_range", |vm: &mut Vm, e: Enc, r: VmVal<crate::native::ty::Range>| {
         let Obj::Range(start, end, inclusive) = *vm.heap.get(r.raw()) else { return internal("write_range: not a range") };
-        with_encoder(vm, e, |f, vm| f.range(vm, start, end, inclusive))
+        write_part(vm, e, |f, vm| f.range(vm, start, end, inclusive))
     });
     m.function("Encoder.write_native", |vm: &mut Vm, e: Enc, x: Param<0>| {
         let Some((type_name, text)) = native_text(vm, x.raw()) else { return internal("write_native: not a native value") };
-        with_encoder(vm, e, |f, vm| f.native(vm, &type_name, &text))
+        write_part(vm, e, |f, vm| f.native(vm, &type_name, &text))
     });
     m.function("Encoder.begin_list", |vm: &mut Vm, e: Enc, len: i64| {
-        with_encoder(vm, e, |f, vm| f.begin_seq(vm, SeqKind::List, to_index(len)))
+        write_part(vm, e, |f, vm| f.begin_seq(vm, SeqKind::List, to_index(len)))
     });
     m.function("Encoder.begin_set", |vm: &mut Vm, e: Enc, len: i64| {
-        with_encoder(vm, e, |f, vm| f.begin_seq(vm, SeqKind::Set, to_index(len)))
+        write_part(vm, e, |f, vm| f.begin_seq(vm, SeqKind::Set, to_index(len)))
     });
     m.function("Encoder.begin_tuple", |vm: &mut Vm, e: Enc, len: i64| {
-        with_encoder(vm, e, |f, vm| f.begin_seq(vm, SeqKind::Tuple(to_index(len)), to_index(len)))
+        write_part(vm, e, |f, vm| f.begin_seq(vm, SeqKind::Tuple(to_index(len)), to_index(len)))
     });
-    m.function("Encoder.begin_map", |vm: &mut Vm, e: Enc, len: i64| with_encoder(vm, e, |f, vm| f.begin_map(vm, to_index(len))));
-    m.function("Encoder.begin_struct", |vm: &mut Vm, e: Enc, def: i64| with_encoder(vm, e, |f, vm| f.begin_struct(vm, def as u32)));
+    m.function("Encoder.begin_map", |vm: &mut Vm, e: Enc, len: i64| write_part(vm, e, |f, vm| f.begin_map(vm, to_index(len))));
+    m.function("Encoder.begin_struct", |vm: &mut Vm, e: Enc, def: i64| write_part(vm, e, |f, vm| f.begin_struct(vm, def as u32)));
     m.function("Encoder.field", |vm: &mut Vm, e: Enc, i: i64| with_encoder(vm, e, |f, vm| f.field(vm, to_index(i))));
-    m.function("Encoder.write_variant", |vm: &mut Vm, e: Enc, v: i64| with_encoder(vm, e, |f, vm| f.unit_variant(vm, v as u32)));
-    m.function("Encoder.begin_variant", |vm: &mut Vm, e: Enc, v: i64| with_encoder(vm, e, |f, vm| f.begin_variant(vm, v as u32)));
-    m.function("Encoder.begin_some", |vm: &mut Vm, e: Enc| with_encoder(vm, e, |f, vm| f.begin_some(vm)));
-    m.function("Encoder.write_none", |vm: &mut Vm, e: Enc| with_encoder(vm, e, |f, vm| f.none(vm)));
+    m.function("Encoder.write_variant", |vm: &mut Vm, e: Enc, v: i64| write_part(vm, e, |f, vm| f.unit_variant(vm, v as u32)));
+    m.function("Encoder.begin_variant", |vm: &mut Vm, e: Enc, v: i64| write_part(vm, e, |f, vm| f.begin_variant(vm, v as u32)));
+    m.function("Encoder.begin_some", |vm: &mut Vm, e: Enc| write_part(vm, e, |f, vm| f.begin_some(vm)));
+    m.function("Encoder.write_none", |vm: &mut Vm, e: Enc| write_part(vm, e, |f, vm| f.none(vm)));
     m.function("Encoder.end", |vm: &mut Vm, e: Enc| with_encoder(vm, e, |f, vm| f.end(vm)));
-    m.function("Encoder.write_fast", |vm: &mut Vm, e: Enc, x: Param<0>, schema: i64| fast::encode(vm, e, x.raw(), schema as u32));
+    m.function("Encoder.write_fast", |vm: &mut Vm, e: Enc, x: Param<0>, schema: i64| {
+        with_encoder(vm, e, |f, vm| f.write_fast(vm, x.raw(), schema as u32))
+    });
 }
 
 /// Reads a `json.Json` value from `d`.
@@ -447,62 +523,76 @@ pub(crate) fn native_text(vm: &Vm, v: VmValue) -> Option<(String, String)> {
 }
 
 fn decoder_methods(m: &mut NativeModule) {
-    m.function("Decoder.read_unit", |vm: &mut Vm, d: Dec| -> Decoded<()> { with_decoder(vm, d, |f, _, vm| f.unit(vm)) });
-    m.function("Decoder.read_bool", |vm: &mut Vm, d: Dec| -> Decoded<bool> { with_decoder(vm, d, |f, _, vm| f.bool(vm)) });
-    m.function("Decoder.read_int", |vm: &mut Vm, d: Dec| -> Decoded<i64> { with_decoder(vm, d, |f, _, vm| f.int(vm)) });
-    m.function("Decoder.read_float", |vm: &mut Vm, d: Dec| -> Decoded<f64> { with_decoder(vm, d, |f, _, vm| f.float(vm)) });
+    m.function("Decoder.read_unit", |vm: &mut Vm, d: Dec| -> Decoded<()> { read_part(vm, d, |f, _, vm| f.unit(vm)) });
+    m.function("Decoder.read_bool", |vm: &mut Vm, d: Dec| -> Decoded<bool> { read_part(vm, d, |f, _, vm| f.bool(vm)) });
+    m.function("Decoder.read_int", |vm: &mut Vm, d: Dec| -> Decoded<i64> { read_part(vm, d, |f, _, vm| f.int(vm)) });
+    m.function("Decoder.read_float", |vm: &mut Vm, d: Dec| -> Decoded<f64> { read_part(vm, d, |f, _, vm| f.float(vm)) });
     m.function("Decoder.read_duration", |vm: &mut Vm, d: Dec| -> Decoded<jiff::SignedDuration> {
-        with_decoder(vm, d, |f, _, vm| f.duration(vm)).map(jiff::SignedDuration::from_nanos)
+        read_part(vm, d, |f, _, vm| f.duration(vm)).map(jiff::SignedDuration::from_nanos)
     });
     m.function("Decoder.read_str", |vm: &mut Vm, d: Dec| -> Decoded<VmVal<String>> {
-        with_decoder(vm, d, |f, _, vm| f.str(vm)).map(VmVal::from_raw)
+        read_part(vm, d, |f, _, vm| f.str(vm)).map(VmVal::from_raw)
     });
     m.function("Decoder.read_bytes", |vm: &mut Vm, d: Dec| -> Decoded<VmVal<Vec<u8>>> {
-        with_decoder(vm, d, |f, _, vm| f.bytes(vm)).map(VmVal::from_raw)
+        read_part(vm, d, |f, _, vm| f.bytes(vm)).map(VmVal::from_raw)
     });
     m.function("Decoder.read_range", |vm: &mut Vm, d: Dec| -> Decoded<VmVal<crate::native::ty::Range>> {
-        let (start, end, inclusive) = with_decoder(vm, d, |f, _, vm| f.range(vm))?;
+        let (start, end, inclusive) = read_part(vm, d, |f, _, vm| f.range(vm))?;
         Ok(VmVal::from_raw(vm.heap.alloc(Obj::Range(start, end, inclusive))))
     });
     m.function("Decoder.read_native", |vm: &mut Vm, d: Dec, def: i64| -> Decoded<Param<0>> {
-        with_decoder(vm, d, |f, _, vm| read_native_value(f, vm, def as u32)).map(Param::from_raw)
+        read_part(vm, d, |f, _, vm| read_native_value(f, vm, def as u32)).map(Param::from_raw)
     });
-    m.function("Decoder.read_some", |vm: &mut Vm, d: Dec| -> Decoded<bool> { with_decoder(vm, d, |f, _, vm| f.some(vm)) });
+    m.function("Decoder.read_some", |vm: &mut Vm, d: Dec| -> Decoded<bool> { read_part(vm, d, |f, _, vm| f.some(vm)) });
     m.function("Decoder.begin_list", |vm: &mut Vm, d: Dec| -> Decoded<()> {
-        with_decoder(vm, d, |f, frames, vm| dec_begin_seq(f, frames, vm, SeqKind::List))
+        read_part(vm, d, |f, path, vm| dec_begin_seq(f, &mut path.0, vm, SeqKind::List))
     });
     m.function("Decoder.begin_set", |vm: &mut Vm, d: Dec| -> Decoded<()> {
-        with_decoder(vm, d, |f, frames, vm| dec_begin_seq(f, frames, vm, SeqKind::Set))
+        read_part(vm, d, |f, path, vm| dec_begin_seq(f, &mut path.0, vm, SeqKind::Set))
     });
-    m.function("Decoder.next_item", |vm: &mut Vm, d: Dec| -> Decoded<bool> { with_decoder(vm, d, dec_next_item) });
+    m.function("Decoder.next_item", |vm: &mut Vm, d: Dec| -> Decoded<bool> {
+        with_decoder(vm, d, |f, path, vm| dec_next_item(f, &mut path.0, vm))
+    });
     m.function("Decoder.begin_tuple", |vm: &mut Vm, d: Dec, len: i64| -> Decoded<()> {
-        with_decoder(vm, d, |f, frames, vm| dec_begin_seq(f, frames, vm, SeqKind::Tuple(to_index(len))))
+        read_part(vm, d, |f, path, vm| dec_begin_seq(f, &mut path.0, vm, SeqKind::Tuple(to_index(len))))
     });
-    m.function("Decoder.element", |vm: &mut Vm, d: Dec| -> Decoded<()> { with_decoder(vm, d, dec_element) });
-    m.function("Decoder.end_tuple", |vm: &mut Vm, d: Dec| -> Decoded<()> { with_decoder(vm, d, dec_end_tuple) });
-    m.function("Decoder.begin_map", |vm: &mut Vm, d: Dec| -> Decoded<()> { with_decoder(vm, d, dec_begin_map) });
-    m.function("Decoder.next_entry", |vm: &mut Vm, d: Dec| -> Decoded<bool> { with_decoder(vm, d, dec_next_entry) });
+    m.function("Decoder.element", |vm: &mut Vm, d: Dec| -> Decoded<()> {
+        with_decoder(vm, d, |f, path, vm| dec_element(f, &mut path.0, vm))
+    });
+    m.function("Decoder.end_tuple", |vm: &mut Vm, d: Dec| -> Decoded<()> {
+        with_decoder(vm, d, |f, path, vm| dec_end_tuple(f, &mut path.0, vm))
+    });
+    m.function("Decoder.begin_map", |vm: &mut Vm, d: Dec| -> Decoded<()> {
+        read_part(vm, d, |f, path, vm| dec_begin_map(f, &mut path.0, vm))
+    });
+    m.function("Decoder.next_entry", |vm: &mut Vm, d: Dec| -> Decoded<bool> {
+        with_decoder(vm, d, |f, path, vm| dec_next_entry(f, &mut path.0, vm))
+    });
     m.function("Decoder.map_value", |vm: &mut Vm, d: Dec| -> Decoded<()> {
-        with_decoder(vm, d, |f, frames, vm| dec_map_value(f, frames, vm))
+        with_decoder(vm, d, |f, path, vm| dec_map_value(f, &mut path.0, vm))
     });
     m.function("Decoder.begin_struct", |vm: &mut Vm, d: Dec, def: i64| -> Decoded<()> {
-        with_decoder(vm, d, |f, frames, vm| dec_begin_struct(f, frames, vm, def as u32))
+        read_part(vm, d, |f, path, vm| dec_begin_struct(f, &mut path.0, vm, def as u32))
     });
     m.function("Decoder.begin_fields", |vm: &mut Vm, d: Dec, variant: i64| -> Decoded<()> {
-        with_decoder(vm, d, |f, frames, vm| dec_begin_fields(f, frames, vm, variant as u32))
+        with_decoder(vm, d, |f, path, vm| dec_begin_fields(f, &mut path.0, vm, variant as u32))
     });
-    m.function("Decoder.field", |vm: &mut Vm, d: Dec| -> Decoded<i64> { with_decoder(vm, d, next_field) });
+    m.function("Decoder.field", |vm: &mut Vm, d: Dec| -> Decoded<i64> {
+        with_decoder(vm, d, |f, path, vm| next_field(f, &mut path.0, vm))
+    });
     m.function("Decoder.missing", |vm: &mut Vm, d: Dec, id: i64, variant: bool, index: i64| -> Result<core::Error, Fail> {
-        let message = missing_message(vm, &d.get(&vm.heap)?.frames, id as u32, variant, to_index(index));
+        let message = missing_message(vm, &d.get(&vm.heap)?.path.0, id as u32, variant, to_index(index));
         d.get_mut(&mut vm.heap)?.last_error = Some(message.clone());
         Ok(core::Error { message, kind: "parse".into() })
     });
     m.function("Decoder.variant", |vm: &mut Vm, d: Dec, first: i64, count: i64| -> Decoded<i64> {
-        with_decoder(vm, d, |f, frames, vm| read_variant(f, frames, vm, first as u32, to_index(count)))
+        read_part(vm, d, |f, path, vm| read_variant(f, &mut path.0, vm, first as u32, to_index(count)))
     });
-    m.function("Decoder.end_variant", |vm: &mut Vm, d: Dec| -> Decoded<()> { with_decoder(vm, d, dec_end_variant) });
+    m.function("Decoder.end_variant", |vm: &mut Vm, d: Dec| -> Decoded<()> {
+        with_decoder(vm, d, |f, path, vm| dec_end_variant(f, &mut path.0, vm))
+    });
     m.function("Decoder.read_fast", |vm: &mut Vm, d: Dec, schema: i64| -> Decoded<Param<0>> {
-        fast::decode(vm, d, schema as u32).map(Param::from_raw)
+        with_decoder(vm, d, |f, path, vm| f.read_fast(vm, path, schema as u32)).map(Param::from_raw)
     });
     m.function("Decoder.end_input", |vm: &mut Vm, d: Dec| -> Decoded<()> { with_decoder(vm, d, |f, _, vm| f.finish(vm)) });
     m.function("Decoder.locate", |vm: &mut Vm, d: Dec, e: core::Error| -> Result<core::Error, Fail> {
@@ -510,17 +600,17 @@ fn decoder_methods(m: &mut NativeModule) {
         if obj.last_error.as_deref() == Some(e.message.as_str()) {
             return Ok(e);
         }
-        Ok(core::Error { message: format!("{}: {}", path_text(vm, &obj.frames), e.message), kind: e.kind })
+        Ok(core::Error { message: format!("{}: {}", path_text(vm, &obj.path.0), e.message), kind: e.kind })
     });
 }
 
 /// Reads the text of a value of the native value type with runtime
 /// definition `def`, and parses it.
-fn read_native_value(f: &mut dyn DecodeFormat, vm: &mut Vm, def: u32) -> DecodeResult<VmValue> {
-    let Some(t) = vm.prog.types.get(def as usize) else { return Err(Fail::internal("read_native: unknown type").into()) };
-    let (name, parse) = (t.name.clone(), t.parse);
-    let Some(parse) = parse else { return Err(Fail::internal("read_native: not a value type").into()) };
-    let text = f.native_text(vm, &name)?;
+fn read_native_value<F: DecodeFormat + ?Sized>(f: &mut F, vm: &mut Vm, def: u32) -> DecodeResult<VmValue> {
+    let prog = vm.prog.clone();
+    let Some(t) = prog.types.get(def as usize) else { return Err(Fail::internal("read_native: unknown type").into()) };
+    let Some(parse) = t.parse else { return Err(Fail::internal("read_native: not a value type").into()) };
+    let text = f.native_text(vm, &t.name)?;
     vm.charge_bytes(text.len())?;
     let v = parse(&text).map_err(DecodeFail::Mismatch)?;
     Ok(vm.heap.alloc(v))
@@ -584,7 +674,7 @@ fn dec_begin_map(f: &mut dyn DecodeFormat, frames: &mut Vec<Frame>, vm: &mut Vm)
 /// Moves to the key of the next entry of the innermost map. Returns `false`
 /// after the last entry.
 fn dec_next_entry(f: &mut dyn DecodeFormat, frames: &mut Vec<Frame>, vm: &mut Vm) -> DecodeResult<bool> {
-    let next = f.next_entry(vm)?;
+    let next = f.next_entry(vm)?.map(Cow::into_owned);
     let Some(Frame::Map { key, pending }) = frames.last_mut() else { return Err(Fail::internal("next_entry: no open map").into()) };
     // The key reads at the path of the map.
     *key = None;
@@ -705,12 +795,13 @@ fn read_variant(f: &mut dyn DecodeFormat, frames: &mut Vec<Frame>, vm: &mut Vm, 
 impl VmVal<Encoder> {
     /// Writes the text `s`.
     pub fn write_str(self, vm: &mut Vm, s: &str) -> Result<(), Fail> {
-        with_encoder(vm, self, |f, vm| f.str(vm, s))
+        write_part(vm, self, |f, vm| f.str(vm, s))
     }
 
     /// Writes `value`, which has the data model of the `Encoder`.
     pub fn write_value(self, vm: &mut Vm, value: &crate::value::Value) -> Result<(), Fail> {
-        with_encoder(vm, self, |f, vm| f.value(vm, value))
+        vm.charge(1)?;
+        write_whole(vm, self, |f, vm| f.value(vm, value))
     }
 }
 
@@ -718,19 +809,28 @@ impl VmVal<Encoder> {
 impl VmVal<Decoder> {
     /// Reads a text.
     pub fn read_str(self, vm: &mut Vm) -> Result<String, HostError> {
-        let v = with_decoder(vm, self, |f, _, vm| f.str(vm))?;
+        let v = read_part(vm, self, |f, _, vm| f.str(vm))?;
         Ok(vm.heap.str(v).to_string())
     }
 
     /// Reads a host value in the data model of the format.
     pub fn read_value(self, vm: &mut Vm) -> Result<Value, HostError> {
-        with_decoder(vm, self, |f, _, vm| f.value(vm))
+        read_part(vm, self, |f, _, vm| {
+            f.save();
+            let r = f.value(vm);
+            if let Err(DecodeFail::Fail(fail)) = &r
+                && fail.as_limit().is_some()
+            {
+                f.restore();
+            }
+            r
+        })
     }
 
     /// Returns a decode error with the decoder's path and `message`.
     pub fn error(self, vm: &mut Vm, message: &str) -> Result<HostError, Fail> {
         let obj = self.get(&vm.heap)?;
-        let message = format!("{}: {message}", path_text(vm, &obj.frames));
+        let message = format!("{}: {message}", path_text(vm, &obj.path.0));
         self.get_mut(&mut vm.heap)?.last_error = Some(message.clone());
         Ok(HostError::new("parse", message))
     }

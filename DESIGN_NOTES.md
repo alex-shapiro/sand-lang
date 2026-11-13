@@ -483,3 +483,131 @@ converts it to a Sand value. Taking it instead of copying it saved 13% but
 broke `retry_stress` (the conversion can fail a memory check and run
 again), so it is not in. A faster form records the operations and builds
 the Sand value in one staged pass, as `json.parse` does.
+
+## 6. D2 performance pass
+
+Goal: on every benchmark case without a hand-written part, D2 runs within
+10% of `value-decode` (`fe58101`) and uses the same fuel, with a flat native
+stack. Tools: release builds with `-C llvm-args=-align-loops=64` in separate
+target directories; `sample` on a `profiling` build (release plus debug
+lines); the aggregator `scratchpad/ptools/prof.py` (inclusive and self
+samples for each function).
+
+### P1: profiles of D2 before the pass (commit `664a7d3`)
+
+Decode of `Doc` (5000 users), share of the engine thread:
+
+| part                                   | D2  | value-decode |
+| -------------------------------------- | --- | ------------ |
+| walk, inclusive                        | 85% | 74%          |
+| walker or `Decoder::decode`, self      | 17% | 22%          |
+| `Parser::string`, self                 | 10% | 13%          |
+| `TextDecoder::next` + `next_key`, self | 14% | (inlined)    |
+| `codec::next_field`, self              | 5%  | (inlined)    |
+| malloc and free                        | 12% | 10%          |
+| garbage collection                     | 12% | 18%          |
+
+In ns per user (share times total time), the walker self time is 168 against
+143, and `Parser::string` 100 against 83. The explicit stack costs little.
+The extra time is in the format operations: 360 ns per user in `next`,
+`next_key`, `next_field`, and the walker, against 143. Each operation builds
+a `Parser`, skips white space, charges fuel, updates the path frames, and
+goes through a `dyn DecodeFormat` call. Map keys allocate two `String`s
+(`next_entry` returns an owned key, and `TextDecoder` keeps a copy).
+
+Encode of `Doc`: `TextEncoder::field` takes 40% of the walk. It clones the
+field name (a `malloc` and a `free` for each field). `begin_member`,
+`scalar`, and `room` add 33%.
+
+Small cases: `json.encode(1)` takes 102 ns on D2 and 35 ns on
+value-decode. The difference is the Sand plumbing of the trait design: the
+`json.encode` wrapper, a dictionary call, three native calls
+(`text_encoder`, the write, `encoded_text`), an `Encoder` object with two
+boxes, and its sweep (garbage collection is 16% of this loop). The
+`Budget` of each new encoder counts 4096 bytes on the heap, so small encodes
+make the collector run often.
+
+Fuel: D2 charges a unit in the walker for each value, and the format
+charges one more unit for each operation (`TextDecoder::parse`,
+`TextEncoder::scalar`, `TreeEncoder::prepare`). value-decode charges one
+unit for each JSON value plus the input bytes, and no unit for map keys.
+
+Conclusion: the cause is the cost of each format operation, not the explicit
+stack or `mark` and `rollback` (those run once for each walk). The plan:
+monomorphize the walker over the format, charge fuel once for each value,
+keep the path in the walker's own stack and build the path frames only on an
+error, and remove the allocations in the format operations.
+
+### C1: walker compiled for each format, fuel once for each value
+
+Changes:
+
+- `EncodeFormat::write_fast` and `DecodeFormat::read_fast` are default
+  methods that call the walkers in `codec/fast.rs`. Rust compiles a default
+  method for each format that implements the trait, so the walker calls the
+  format's operations statically, and can inline them. No format writes code
+  for this, and a host format gets the fast path as well.
+- `mark` and `rollback` (a boxed state) became `save` and `restore`, which
+  keep the state in the format. No allocation for each walk.
+- The decode walker keeps the path in its own stack, and writes the path
+  frames of the `Decoder` only when it fails. The map key texts that a path
+  needs go to one reused buffer.
+- `next_entry` returns a borrowed key. `TextDecoder` keeps a pending key as
+  a span of the input, not a `String`.
+- The encode walker copies the fields of a struct, tuple, or variant to its
+  own stack once, and copies a `str` into one reused buffer.
+- `TextEncoder::field` no longer clones the field name.
+- `encoded_text` stops counting the encoder's buffer when it takes the text.
+  Before, the heap counted the text twice until the encoder was swept, and
+  the collector ran more often.
+- Fuel: the walkers charge a unit for each value and no unit for a map key,
+  as value-decode does. Formats charge only for bytes (`TextDecoder` reports
+  its input through `take_input_fuel`, a unit for each 8 bytes). A Sand call
+  of a format operation that writes or reads a value charges a unit;
+  `field`, `end`, `next_item`, and the other structural operations charge
+  only for the input that they read.
+- `Json.encode` and `Encoder::write_value` restore the format if a memory
+  check fails. Before, a run again after a garbage collection wrote the
+  value twice.
+
+Timing build (`ptools/inst_build.sh`): a timer around the `write_fast`
+native shows that the walk is 99% of `json.encode(doc)` (509 of 512 ns per
+user before the last two changes). A format whose operations do nothing
+gives the cost of the walker alone: 120 ns per user. The JSON text
+operations cost the rest. `sample` shows 18% of samples in
+`__thread_selfusage`, but a timer around the 200 `cpu_time` calls of 100
+encodes measured 82 µs in total. The sampler distorts the weight of the
+time functions; I ignore them.
+
+Measurements (3 alternating rounds, minimum, ns per item):
+
+| case                 | value-decode | D2 before | C1   |
+| -------------------- | ------------ | --------- | ---- |
+| encode               | 294          | 623       | 424  |
+| encode_indent        | 390          | 731       | 515  |
+| decode               | 653          | 1009      | 785  |
+| to_json              | 493          | 2006      | 2350 |
+| decode_json          | 856          | 966       | 907  |
+| encode_json          | 387          | 888       | 411  |
+| to_value             | 365          | 663       | 619  |
+| small_encode         | 123          | 303       | 291  |
+| small_to_json        | 261          | 766       | 936  |
+| small_decode         | 239          | 374       | 352  |
+| small_to_value       | 99           | 332       | 358  |
+| deep_encode          | 4166         | 9650      | 5109 |
+| deep_decode          | 15176        | 14840     | 15074 |
+| encode_custom        | 83           | 376       | 341  |
+| decode_custom        | 211          | 657       | 656  |
+| decode_generic       | 653          | 1010      | 795  |
+| decode_page          | 654          | 1007      | 790  |
+| decode_ints          | 114          | 162       | 160  |
+| small_decode_default | 265          | 301       | 294  |
+
+Fuel per item (value-decode, D2 before, C1): encode 22.8, 48.8, 22.8;
+decode 47.1, 108.5, 45.7; to_value 22.8, 49.5, 22.8; decode_ints 10, 30, 10;
+encode_json 45.1, 38.7, 22.7; small_decode 16, 26, 16; small_encode 6, 12,
+8; encode_custom 8, 18, 15; decode_custom 15, 40.8, 26.8;
+small_decode_default 8, 14, 10. `to_json` (45.4) still converts a Rust
+`Json`, which charges again.
+
+The differential test passed 5000 cases (with `retry_stress`).
