@@ -556,13 +556,30 @@ impl Synth {
         self.e(HKind::CallTrait { trait_id: tr.trait_id, slot, targs: vec![ty], args: all, impl_id: None }, ret)
     }
 
+    /// `value.encode(e)` for type `ty`. For a scalar, and for a type with a
+    /// native impl, it calls the `Encoder` operation that the impl calls.
     fn encode(&self, c: &mut Checker, ty: TypeId, value: HExpr, enc: LocalId) -> HExpr {
+        if let Some(op) = scalar_codec_op(c, ty, Builtin::Encode) {
+            return self.enc_op(c, enc, op, vec![value]);
+        }
+        if let Some(schema) = fast_schema(c, ty, Builtin::Encode) {
+            let args = vec![self.local(c, enc), value, self.int(schema as i64)];
+            return self.method(c, "Encoder", "write_fast", vec![ty], args);
+        }
         let e = self.local(c, enc);
         self.trait_call(c, Builtin::Encode, 0, ty, vec![value, e], TypeId::UNIT)
     }
 
-    /// `T.decode(d)?` for type `ty`.
+    /// `T.decode(d)?` for type `ty`. For a scalar, and for a type with a
+    /// native impl, it calls the `Decoder` operation that the impl calls.
     fn decode(&self, c: &mut Checker, ty: TypeId, dec: LocalId) -> HExpr {
+        if let Some(op) = scalar_codec_op(c, ty, Builtin::Decode) {
+            return self.dec_op(c, dec, op, vec![], ty);
+        }
+        if let Some(schema) = fast_schema(c, ty, Builtin::Decode) {
+            let call = self.method(c, "Decoder", "read_fast", vec![ty], vec![self.local(c, dec), self.int(schema as i64)]);
+            return self.try_(call, ty);
+        }
         let err = c.error_ty();
         let ret = c.result_of(ty, err);
         let d = self.local(c, dec);
@@ -838,4 +855,75 @@ impl Synth {
             _ => ret_err(self, c),
         }
     }
+}
+
+/// Returns the `Encoder` or `Decoder` operation of the prelude impl of `b`
+/// for the scalar type `ty`, or `None` if `ty` is not a scalar.
+fn scalar_codec_op(c: &Checker, ty: TypeId, b: Builtin) -> Option<&'static str> {
+    let decode = b == Builtin::Decode;
+    Some(match c.arena.get(ty) {
+        Ty::Unit => {
+            if decode {
+                "read_unit"
+            } else {
+                "write_unit"
+            }
+        }
+        Ty::Bool => {
+            if decode {
+                "read_bool"
+            } else {
+                "write_bool"
+            }
+        }
+        Ty::Int => {
+            if decode {
+                "read_int"
+            } else {
+                "write_int"
+            }
+        }
+        Ty::Float => {
+            if decode {
+                "read_float"
+            } else {
+                "write_float"
+            }
+        }
+        Ty::Duration => {
+            if decode {
+                "read_duration"
+            } else {
+                "write_duration"
+            }
+        }
+        Ty::Str => {
+            if decode {
+                "read_str"
+            } else {
+                "write_str"
+            }
+        }
+        Ty::Bytes => {
+            if decode {
+                "read_bytes"
+            } else {
+                "write_bytes"
+            }
+        }
+        Ty::Range => {
+            if decode {
+                "read_range"
+            } else {
+                "write_range"
+            }
+        }
+        _ => return None,
+    })
+}
+
+/// Returns the schema of the native impl of `b` for `ty`, if `ty` has one.
+fn fast_schema(c: &mut Checker, ty: TypeId, b: Builtin) -> Option<SchemaId> {
+    c.fast_codec_impl(ty, b)?;
+    c.schema_ids.get(&ty).copied()
 }

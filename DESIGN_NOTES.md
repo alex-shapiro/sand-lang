@@ -679,3 +679,23 @@ this size.
 `sample` keeps one address for each function, so it cannot show which
 lines of the inlined walker cost the time; `atos -i` on those addresses
 gives only the call site.
+
+### C5: synthesized code calls the operation of a scalar or native field directly
+
+The synthesized `Encode` and `Decode` of a type with a hand-written part
+called the trait method of each field: a Sand call to the prelude impl of
+`int`, which calls `Encoder.write_int`, or to a native impl, which calls
+`write_fast`. The synthesized code now calls `write_int`, `read_str`,
+`write_fast`, `read_fast`, and the other operations directly for a scalar
+field and for a field whose type has a native impl. The prelude impls of
+the scalars cannot be replaced, so the meaning is the same.
+
+Measured (3 alternating rounds of `BENCH_RUNS=5 BENCH_REPS=10`, ns per
+item; value-decode, C4, C5): `encode_custom` 81, 335, 310; `decode_custom`
+205, 644, 612; `small_decode_default` 255, 288, 277. Fuel per item (C4,
+C5): `encode_custom` 15, 12; `decode_custom` 26.8, 23.8;
+`small_decode_default` 10, 9.
+
+Native stack at 512 nesting levels (KiB; main, value-decode, D2 before,
+C5): `json.parse` 152, 152, 120, 120; `json.decode` of structs 808, 824,
+16, 16; `json.encode` 16, 16, 16, 16. 16 KiB is the floor of an empty run.
