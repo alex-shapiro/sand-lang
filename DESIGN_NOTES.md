@@ -348,3 +348,70 @@ value-decode -> D1, units for encode / to_json / Encoded (was to_value):
 
 Encode costs 2 to 4 times the fuel of the native walk: one unit for each Sand
 call plus one for each format op. `to_json` no longer reuses `Json` values.
+
+### D1 measurements (tag `codec-d1`)
+
+Method: release bench binaries of main `625d1b9`, value-decode `fe58101`, and
+D1, each built with `-C llvm-args=-align-loops=64` in its own target
+directory and copied aside; three alternating rounds of
+`cargo bench --bench codec` (5000 users, 3 runs of 5 repetitions); the
+minimum of each case. Baselines use proxies for the new cases: `Email` is a
+plain derived struct, and `load` is `fn load<reflect T: Decode>`.
+
+| case (ns per item)   | main  | value-decode | D1    | D1 / vd |
+| -------------------- | ----- | ------------ | ----- | ------- |
+| encode               | 284   | 288          | 1530  | 5.3     |
+| encode_indent        | 379   | 373          | 1595  | 4.3     |
+| decode               | 662   | 646          | 2611  | 4.0     |
+| to_json              | 498   | 480          | 3330  | 6.9     |
+| decode_json          | 859   | 845          | 888   | 1.05    |
+| encode_json          | 381   | 386          | 883   | 2.3     |
+| to_value             | 358   | 369          | 1523  | 4.1     |
+| small_encode         | 116   | 127          | 417   | 3.3     |
+| small_to_json        | 260   | 263          | 1026  | 3.9     |
+| small_decode         | 234   | 231          | 538   | 2.3     |
+| small_to_value       | 97    | 94           | 444   | 4.7     |
+| deep_encode          | 3823  | 4198         | 9398  | 2.2     |
+| deep_decode          | 13820 | 14892        | 14737 | 0.99    |
+| encode_custom        | 80    | 80           | 394   | 4.9     |
+| decode_custom        | 198   | 212          | 725   | 3.4     |
+| decode_generic       | 655   | 645          | 2598  | 4.0     |
+| decode_page          | 636   | 645          | 2588  | 4.0     |
+| decode_ints          | 106   | 113          | 657   | 5.8     |
+| decode_ints_generic  | 104   | 113          | 658   | 5.8     |
+| small_decode_default | 248   | 253          | 286   | 1.1     |
+
+Fuel per item (`BENCH_FUEL=1`; main and value-decode are equal):
+
+| case                 | main, vd | D1    |
+| -------------------- | -------- | ----- |
+| encode, to_value     | 22.8     | 55.8, 56.5 |
+| to_json              | 22.8     | 79.2  |
+| decode               | 46.0     | 135.9 |
+| decode_json          | 43.6     | 43.6  |
+| encode_json          | 45.1     | 38.7  |
+| small_encode         | 6.0      | 11.0  |
+| small_to_json        | 6.0      | 16.0  |
+| small_decode         | 16.0     | 29.0  |
+| small_to_value       | 6.0      | 12.0  |
+| deep_encode          | 805      | 412   |
+| deep_decode          | 457      | 459   |
+| encode_custom        | 8.0      | 18.0  |
+| decode_custom        | 14.5     | 41.0  |
+| decode_generic, page | 46.0     | 135.9 |
+| decode_ints          | 10.0     | 40.0  |
+| small_decode_default | 8.0      | 14.0  |
+
+Native stack at 512 nesting levels (smallest thread stack that runs the
+case, binary search in 8 KiB steps; 16 KiB is the floor of an empty run):
+
+| case                     | main | value-decode | D1  |
+| ------------------------ | ---- | ------------ | --- |
+| `json.parse` of arrays   | 152  | 152          | 120 |
+| `json.decode` of structs | 808  | 824          | 16  |
+| `json.encode` of structs | 16   | 16           | 16  |
+
+Profile of `decode_ints` on D1 (`sample`): the interpreter loop 21%, native
+call dispatch 12%, the two `Decoder` natives 16%, number parsing 15%,
+`Ok` wrapping 5%. The cost is the Sand loop and two native calls for each
+element, not the format.
