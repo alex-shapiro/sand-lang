@@ -529,15 +529,6 @@ impl EncodeFormat for ValueEncoder {
         self.place(v)
     }
 
-    fn json(&mut self, vm: &mut Vm, json: VmValue) -> Result<(), Fail> {
-        let allocated = self.allocated;
-        let r = crate::stdlib::json::json_host_value(vm, json, &mut |vm, bytes| self.reserve(vm, bytes)).and_then(|v| self.push(vm, v));
-        if r.is_err() {
-            self.allocated = allocated;
-        }
-        r
-    }
-
     fn value(&mut self, vm: &mut Vm, value: &Value) -> Result<(), Fail> {
         self.reserve(vm, owned_size(value))?;
         self.push(vm, value.clone())

@@ -104,8 +104,12 @@ pub(crate) trait EncodeFormat: Any + Send {
     fn none(&mut self, vm: &mut Vm) -> Result<(), Fail>;
     /// Closes the innermost sequence, map, struct, variant, or `Some`.
     fn end(&mut self, vm: &mut Vm) -> Result<(), Fail>;
-    /// Writes the `json.Json` value `json`.
-    fn json(&mut self, vm: &mut Vm, json: VmValue) -> Result<(), Fail>;
+    /// Writes the `json.Json` value `json`. The default writes its host
+    /// value with [`EncodeFormat::value`].
+    fn json(&mut self, vm: &mut Vm, json: VmValue) -> Result<(), Fail> {
+        let value = crate::stdlib::json::json_host_value(vm, json, &mut |vm, bytes| vm.check_memory(bytes))?;
+        self.value(vm, &value)
+    }
     /// Writes the host value `value`, which has the data model of the format.
     fn value(&mut self, vm: &mut Vm, value: &Value) -> Result<(), Fail>;
     /// Writes `value`, whose closed type has the fast-path schema `schema`,
@@ -240,8 +244,21 @@ pub(crate) trait DecodeFormat: Any + Send {
     /// Closes the variant of the enum `name` that [`DecodeFormat::variant`]
     /// opened with a payload.
     fn end_variant(&mut self, vm: &mut Vm, name: &str) -> DecodeResult<()>;
-    /// Reads a `json.Json` value.
-    fn json(&mut self, vm: &mut Vm) -> DecodeResult<VmValue>;
+    /// Reads a `json.Json` value. The default reads a host value with
+    /// [`DecodeFormat::value`], which the read leaves unread if it fails.
+    fn json(&mut self, vm: &mut Vm) -> DecodeResult<VmValue> {
+        let mark = self.mark();
+        let r = self.value(vm).and_then(|v| {
+            let json = crate::value::ValueReader::new(&v).decode::<crate::stdlib::json::Json>();
+            let json = json.map_err(|e| DecodeFail::Mismatch(e.message().to_string()))?;
+            Ok(crate::stdlib::json::json_into_vm(vm, json)?)
+        });
+        if r.is_err() {
+            self.rewind(mark);
+        }
+        self.release(mark);
+        r
+    }
     /// Reads a host value in the data model of the format.
     fn value(&mut self, vm: &mut Vm) -> DecodeResult<Value>;
     /// Checks that no input follows the decoded value.
