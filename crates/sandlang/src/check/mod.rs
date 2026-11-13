@@ -1,7 +1,7 @@
 //! Name resolution and type checking: AST to typed HIR.
 
 pub mod budget;
-mod codec;
+pub(crate) mod codec;
 mod derive;
 mod docs;
 mod expr;
@@ -2151,7 +2151,7 @@ impl Checker {
         }
         let mut generic = false;
         for t in sig.params.iter().chain([&sig.ret]) {
-            t.visit(&mut |t| generic |= matches!(t, Type::Param(..) | Type::Num(_) | Type::Encoded(_)));
+            t.visit(&mut |t| generic |= matches!(t, Type::Param(..) | Type::Dict(..) | Type::Encoded(_)));
         }
         if generic {
             let msg = format!("native `{key}` is generic, so the module must declare it with `native fn`");
@@ -2260,8 +2260,8 @@ impl Checker {
                     return None;
                 }
             },
-            Type::Num(_) => {
-                self.error(span, format!("{owner} takes `Num` evidence that is not one of its first parameters"));
+            Type::Dict(_, b) => {
+                self.error(span, format!("{owner} takes `{}` evidence that is not one of its first parameters", b.name()));
                 return None;
             }
             Type::Named(n) => {
@@ -2322,18 +2322,24 @@ impl Checker {
         generics: &[ParamId],
         params: &[ParamSig],
         ret: TypeId,
-    ) -> Vec<u8> {
+    ) -> Vec<(u8, Builtin)> {
         let span = f.name.span;
         let owner = format!("the Rust function of native `{key}`");
-        let num_trait = self.builtins[Builtin::Num as usize];
-        let num: Vec<u8> =
-            (0..generics.len() as u8).filter(|&i| num_trait.is_some_and(|n| self.param_has_trait(generics[i as usize], n))).collect();
+        let mut dicts: Vec<(u8, Builtin)> = Vec::new();
+        for i in 0..generics.len() as u8 {
+            for b in [Builtin::Num, Builtin::Encode, Builtin::Decode] {
+                if self.builtins[b as usize].is_some_and(|tr| self.param_has_trait(generics[i as usize], tr)) {
+                    dicts.push((i, b));
+                }
+            }
+        }
         let rest = &sig.params[..];
-        let k = rest.iter().take_while(|t| matches!(t, Type::Num(_))).count();
+        let k = rest.iter().take_while(|t| matches!(t, Type::Dict(..))).count();
         let (evidence, rest) = rest.split_at(k);
-        let taken: Vec<u8> = evidence.iter().filter_map(|t| if let Type::Num(i) = t { Some(*i) } else { None }).collect();
-        let mut wanted = num.iter();
-        let leads_match = taken.iter().all(|i| wanted.any(|j| j == i)) && !rest.iter().any(|t| matches!(t, Type::Num(_)));
+        let taken: Vec<(u8, Builtin)> =
+            evidence.iter().filter_map(|t| if let Type::Dict(i, b) = t { Some((*i, *b)) } else { None }).collect();
+        let mut wanted = dicts.iter();
+        let leads_match = taken.iter().all(|i| wanted.any(|j| j == i)) && !rest.iter().any(|t| matches!(t, Type::Dict(..)));
         if leads_match {
             let mark = self.diags.len();
             let want: Option<Vec<TypeId>> = rest.iter().map(|t| self.host_type(t, generics, &owner, span)).collect();
@@ -2347,7 +2353,7 @@ impl Checker {
                 return taken;
             }
         }
-        let leads: Vec<Type> = num.iter().map(|&i| Type::Num(i)).collect();
+        let leads: Vec<Type> = dicts.iter().filter(|(_, b)| *b == Builtin::Num).map(|&(i, b)| Type::Dict(i, b)).collect();
         let module = self.name(self.mods[self.cur_mod as usize].name).to_string();
         let names: Vec<String> = generics.iter().map(|&p| self.name(self.params[p as usize].name).to_string()).collect();
         let show_rust =
@@ -2685,7 +2691,7 @@ impl Checker {
             "members" => Some(Intrinsic::Members),
             _ => None,
         };
-        let mut num_evidence = Vec::new();
+        let mut native_dicts = Vec::new();
         let mut encoded: Vec<u32> = Vec::new();
         let kind = if let Some(i) = intrinsic.filter(|_| f.is_native && owner.is_none() && Some(self.cur_mod) == self.prelude) {
             FnKind::Intrinsic(i)
@@ -2697,8 +2703,8 @@ impl Checker {
             };
             match self.natives.get(&key).cloned() {
                 Some(decl) => {
-                    num_evidence = self.check_native_signature(f, &key, &decl.sig, &generics, &params, ret);
-                    let values = decl.sig.params.iter().skip_while(|t| matches!(t, Type::Num(_)));
+                    native_dicts = self.check_native_signature(f, &key, &decl.sig, &generics, &params, ret);
+                    let values = decl.sig.params.iter().skip_while(|t| matches!(t, Type::Dict(..)));
                     encoded = values.enumerate().filter(|(_, t)| matches!(t, Type::Encoded(_))).map(|(i, _)| i as u32).collect();
                     if decl.names.is_some() || decl.doc.is_some() {
                         let msg =
@@ -2725,10 +2731,7 @@ impl Checker {
             {
                 self.error(f.name.span, "native functions can only require built-in traits");
             }
-            dicts.clear();
-            if let Some(num) = self.builtin_trait(Builtin::Num) {
-                dicts = num_evidence.iter().map(|&i| (self.param_ty(generics[i as usize]), num)).collect();
-            }
+            dicts = native_dicts.iter().filter_map(|&(i, b)| Some((self.param_ty(generics[i as usize]), self.builtin_trait(b)?))).collect();
         }
         let name = self.sym(&f.name.name);
         let id = self.add_fn(FnInfo {

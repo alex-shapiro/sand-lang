@@ -951,3 +951,47 @@ Measured alone (3 rounds; lead, after): `small_encode` 183, 166;
 `small_decode` 306, 291; `small_decode_default` 273, 264; `decode_custom`
 613, 582; the other cases within ±3%. Fuel: the small cases lose the unit
 of the wrapper call (`small_encode` 8 to 7, `small_decode` 16 to 14).
+
+### Q3: a fast type is encoded or decoded in one native call
+
+Design. A native function can now take the `Encode` or `Decode`
+dictionary of a type parameter, as it takes `Num` evidence (`Type::Dict`,
+Rust type `CodecDict<N, B>`). `Program::proto_schemas` gives the schema of
+each proto that is the method of a fast-path `impl`, so a native finds the
+schema of `T` from the method in the dictionary. The start natives
+(`json.encode_text`, `json.decode_text`, `json.encode_json`,
+`json.decode_json`, `prelude.value_encoder`) walk a fast type at once, with
+the format on the Rust stack and no `Encoder` or `Decoder` object. For
+another type they return the `Encoder` or `Decoder` that the Sand
+implementations drive (`Encoding.Driven`, `Decoding.Driven`), so that path
+makes no more native calls than before. The wrappers have no `return`, so
+the inliner (Q2) takes them.
+
+Tried first: `T.encode` as an argument. A method value of a type parameter
+is a new lambda that captures the dictionary, so the native could not see
+the impl, and each call allocated a closure.
+
+Measured (4 rounds for the last three rows, 3 for the rest; vd, after Q2,
+after Q3):
+
+| case                 | vd  | Q2  | Q3  |
+| -------------------- | --- | --- | --- |
+| small_encode         | 122 | 173 | 125 |
+| small_decode         | 235 | 296 | 191 |
+| small_to_json        | 253 | 661 | 620 |
+| small_to_value       | 94  | 303 | 304 |
+| decode_custom        | 210 | 586 | 583 |
+| small_decode_default | 261 | 257 | 294 |
+| deep_encode          | 4019| 3237| 3366|
+| decode_json          | 835 | 946 | 922 |
+
+Every other case within ±3%. Fuel per item now equals or is less than
+value-decode on every case without a hand-written part: `small_encode`,
+`small_to_json`, `small_to_value` 6 (vd 6), `small_decode` 12 (vd 16).
+
+Open: `small_decode_default` (a computed field default, so no fast path)
+is 14% slower. The driven path converts the dictionary, looks up the
+schema, and converts the `Decoding` result. The profile gives 11 ns to the
+result conversion alone. `small_to_value` does not change: the general
+walker into a `ValueEncoder` costs as much as the Sand plumbing that it
+removes (Q4).

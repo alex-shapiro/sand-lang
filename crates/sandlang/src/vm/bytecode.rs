@@ -1305,6 +1305,11 @@ pub struct Program {
     /// The schemas of the types that the fast path of `Encode` and `Decode`
     /// walks, by [`SchemaId`](crate::codec::fast::SchemaId).
     pub(crate) schemas: Vec<crate::codec::fast::Schema>,
+    /// By proto, the schema of the fast path if the proto is the method of a
+    /// fast-path `impl` of `Encode` or `Decode`, else
+    /// [`NO_SCHEMA`](crate::codec::fast::NO_SCHEMA). Protos past its end
+    /// have no schema.
+    pub(crate) proto_schemas: Vec<crate::codec::fast::SchemaId>,
 }
 
 impl Program {

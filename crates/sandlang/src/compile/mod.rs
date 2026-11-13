@@ -9,8 +9,9 @@ mod init_order;
 mod inline;
 
 use crate::check::budget::CompileBudget;
+use crate::check::codec::DerivedMethod;
 use crate::check::persist::{PMap, PVec};
-use crate::check::{CheckedProgram, FnKind};
+use crate::check::{CheckedProgram, FnDeclRef, FnKind};
 use crate::diag::{Diag, SourceMap, Span};
 use crate::engine::NativeDecls;
 use crate::hir::*;
@@ -293,6 +294,7 @@ impl ProgramMark {
     /// Truncates `p` to the marked sizes.
     pub(crate) fn rollback(&self, p: &mut Program) {
         p.protos.truncate(self.protos);
+        p.proto_schemas.truncate(self.protos);
         p.consts.truncate(self.consts);
         p.types.truncate(self.types);
         p.variants.truncate(self.variants);
@@ -462,6 +464,11 @@ impl<'a> Compiler<'a> {
                     inlined: Vec::new(),
                 });
                 self.fn_protos[i] = Some(idx);
+                if let Some(FnDeclRef::Derived(DerivedMethod::FastEncode(schema) | DerivedMethod::FastDecode(schema))) = f.decl {
+                    let schemas = &mut self.prog.proto_schemas;
+                    schemas.resize(schemas.len().max(idx as usize + 1), crate::codec::fast::NO_SCHEMA);
+                    schemas[idx as usize] = schema;
+                }
             }
         }
         for i in first..cp.fns.len() {

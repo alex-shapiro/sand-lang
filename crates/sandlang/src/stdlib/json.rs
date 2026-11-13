@@ -4,9 +4,9 @@ use super::base64;
 use crate::check::ModKind;
 use crate::codec::MAX_NESTING_DEPTH;
 use crate::codec::value_format::ValueDecoder;
-use crate::codec::{Decoder, EncodeFormat, Encoder, read_json, write_whole};
+use crate::codec::{DecodeDict, DecodeFormat, Decoder, EncodeDict, EncodeFormat, Encoder, fast_schema, read_json, read_whole, write_whole};
 use crate::native::convert::{Conversion, FromVmValue, HostError, IntoVmValue, mismatch};
-use crate::native::ty::VmVal;
+use crate::native::ty::{Param, VmVal};
 use crate::native::{EnumType, NamedType, NativeModule, variant_index};
 use crate::native::{VariantDescCell, encode_variant};
 use crate::value::{Decode, DecodeError, Encode, Value, without_json_variant};
@@ -121,6 +121,8 @@ impl JsonIds {
 pub(crate) fn module() -> NativeModule {
     let mut m = NativeModule::std("json", ModKind::Std, include_str!("json.sand"));
     m.bind::<Json>();
+    m.bind::<Encoding<()>>();
+    m.bind::<Decoding<()>>();
     m.function("parse", |vm: &mut Vm, text: VmVal<String>| -> Result<VmVal<Json>, HostError> {
         let ids = JsonIds::new(&vm.prog)?;
         let meter = &vm.meter;
@@ -133,8 +135,14 @@ pub(crate) fn module() -> NativeModule {
         });
         into_result(r)
     });
-    m.function("text_encoder", |vm: &mut Vm, indent: i64| {
-        vm.new_object(Encoder::new(Box::new(TextEncoder::new(indent.clamp(0, 1 << 16) as usize))))
+    m.function("encode_text", |vm: &mut Vm, encode: EncodeDict, value: Param<0>, indent: i64| -> Result<Encoding<VmVal<String>>, Fail> {
+        let mut f = TextEncoder::new(indent.clamp(0, 1 << 16) as usize);
+        let Some(schema) = fast_schema(vm, encode) else { return vm.new_object(Encoder::new(Box::new(f))).map(Encoding::Driven) };
+        let r = f.write_fast(vm, value.raw(), schema);
+        let (text, counted) = f.take_text();
+        vm.heap.account(counted, 0);
+        r?;
+        Ok(Encoding::Done(VmVal::from_raw(vm.new_str(text))))
     });
     m.function("encoded_text", |vm: &mut Vm, e: VmVal<Encoder>| -> Result<VmVal<String>, Fail> {
         let Some((text, counted)) = e.get_mut(&mut vm.heap)?.format_mut::<TextEncoder>().map(TextEncoder::take_text) else {
@@ -143,7 +151,13 @@ pub(crate) fn module() -> NativeModule {
         vm.heap.account(counted, 0);
         Ok(VmVal::from_raw(vm.new_str(text)))
     });
-    m.function("tree_encoder", |vm: &mut Vm| vm.new_object(Encoder::new(Box::new(TreeEncoder::new()))));
+    m.function("encode_json", |vm: &mut Vm, encode: EncodeDict, value: Param<0>| -> Result<Encoding<VmVal<Json>>, Fail> {
+        let mut f = TreeEncoder::new();
+        let Some(schema) = fast_schema(vm, encode) else { return vm.new_object(Encoder::new(Box::new(f))).map(Encoding::Driven) };
+        let r = f.write_fast(vm, value.raw(), schema).and_then(|()| f.build(vm));
+        vm.heap.account(EncodeFormat::heap_size(&f), 0);
+        Ok(Encoding::Done(VmVal::from_raw(r?)))
+    });
     m.function("encoded_json", |vm: &mut Vm, e: VmVal<Encoder>| -> Result<VmVal<Json>, Fail> {
         let Some(tree) = e.get_mut(&mut vm.heap)?.format_mut::<TreeEncoder>().map(|f| std::mem::replace(f, TreeEncoder::new())) else {
             return internal("json.to_json: not a Json encoder");
@@ -160,14 +174,49 @@ pub(crate) fn module() -> NativeModule {
         }
         Ok(VmVal::from_raw(json?))
     });
-    m.function("text_decoder", |vm: &mut Vm, text: VmVal<String>| -> Result<VmVal<Decoder>, Fail> {
-        let format = TextDecoder::new(vm, text.raw())?;
-        vm.new_object(Decoder::new(Box::new(format)))
+    m.function("decode_text", |vm: &mut Vm, decode: DecodeDict, text: VmVal<String>| -> Result<Decoding<Param<0>>, Fail> {
+        let mut f = TextDecoder::new(vm, text.raw())?;
+        let Some(schema) = fast_schema(vm, decode) else { return vm.new_object(Decoder::new(Box::new(f))).map(Decoding::Driven) };
+        let r = read_whole(vm, &mut f, schema);
+        vm.heap.account(DecodeFormat::heap_size(&f), 0);
+        Ok(Decoding::of(r?))
     });
-    m.function("json_decoder", |vm: &mut Vm, json: Json| vm.new_object(Decoder::new(Box::new(ValueDecoder::new(text::json_value(&json))))));
+    m.function("decode_json", |vm: &mut Vm, decode: DecodeDict, json: Json| -> Result<Decoding<Param<0>>, Fail> {
+        let mut f = ValueDecoder::new(text::json_value(&json));
+        let Some(schema) = fast_schema(vm, decode) else { return vm.new_object(Decoder::new(Box::new(f))).map(Decoding::Driven) };
+        Ok(Decoding::of(read_whole(vm, &mut f, schema)?))
+    });
     m.function("Json.encode", |vm: &mut Vm, json: VmVal<Json>, e: VmVal<Encoder>| write_whole(vm, e, |f, vm| f.json(vm, json.raw())));
     m.function("Json.decode", |vm: &mut Vm, d: VmVal<Decoder>| -> Result<VmVal<Json>, HostError> { read_json(vm, d).map(VmVal::from_raw) });
     m
+}
+
+/// The start of an encode: the encoded value of a type with a fast path, or
+/// the `Encoder` that the Sand implementations of the type write to.
+#[derive(crate::SandEnum)]
+#[sand(module = "json", private, no_value)]
+enum Encoding<T> {
+    Done(T),
+    Driven(VmVal<Encoder>),
+}
+
+/// The start of a decode: the result for a type with a fast path, or the
+/// `Decoder` that the Sand implementations of the type read from.
+#[derive(crate::SandEnum)]
+#[sand(module = "json", private, no_value)]
+enum Decoding<T> {
+    Done(T),
+    Failed(super::core::Error),
+    Driven(VmVal<Decoder>),
+}
+
+impl Decoding<Param<0>> {
+    fn of(r: Result<VmValue, super::core::Error>) -> Decoding<Param<0>> {
+        match r {
+            Ok(v) => Decoding::Done(Param::from_raw(v)),
+            Err(e) => Decoding::Failed(e),
+        }
+    }
 }
 
 /// Converts the Sand `Json` value `v` into a Rust [`Json`].

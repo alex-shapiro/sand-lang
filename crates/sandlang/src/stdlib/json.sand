@@ -125,9 +125,13 @@ pub native fn parse(text: str) -> Result<Json>
 /// value type, or with kind `"limit"` if array or object nesting exceeds 512
 /// levels.
 pub fn encode<T: Encode>(value: T, indent: int = 0) -> str {
-    let e = text_encoder(indent)
-    value.encode(e)
-    encoded_text(e)
+    match encode_text(value, indent) {
+        Done(text) => text
+        Driven(e) => {
+            value.encode(e)
+            encoded_text(e)
+        }
+    }
 }
 
 /// Decodes JSON `text` into a value of type `T`.
@@ -145,8 +149,11 @@ pub fn encode<T: Encode>(value: T, indent: int = 0) -> str {
 /// JSON object key form. An error from a hand-written `Decode`
 /// implementation keeps its kind and gets the path.
 pub fn decode<T: Decode>(text: str) -> Result<T> {
-    let d = text_decoder(text)
-    d.finish(T.decode(d))
+    match decode_text(text) {
+        Done(value) => Ok(value)
+        Failed(e) => Err(e)
+        Driven(d) => d.finish(T.decode(d))
+    }
 }
 
 /// Converts `value` into a `Json` value using the same representation as
@@ -154,16 +161,23 @@ pub fn decode<T: Decode>(text: str) -> Result<T> {
 /// that `encode` does not support, or with kind `"limit"` if array or object
 /// nesting exceeds 512 levels.
 pub fn to_json<T: Encode>(value: T) -> Json {
-    let e = tree_encoder()
-    value.encode(e)
-    encoded_json(e)
+    match encode_json(value) {
+        Done(json) => json
+        Driven(e) => {
+            value.encode(e)
+            encoded_json(e)
+        }
+    }
 }
 
 /// Decodes the `Json` value `value` into a value of type `T`, as `decode`
 /// decodes the JSON text of `value`.
 pub fn from_json<T: Decode>(value: Json) -> Result<T> {
-    let d = json_decoder(value)
-    d.finish(T.decode(d))
+    match decode_json(value) {
+        Done(v) => Ok(v)
+        Failed(e) => Err(e)
+        Driven(d) => d.finish(T.decode(d))
+    }
 }
 
 /// Writes `self` in its JSON form, such as `1` for `Json.Int(1)`.
@@ -176,9 +190,9 @@ impl Decode for Json {
     native fn decode(d: Decoder) -> Result<Json>
 }
 
-native fn text_encoder(indent: int) -> Encoder
+native fn encode_text<T: Encode>(value: T, indent: int) -> Encoding<str>
 native fn encoded_text(e: Encoder) -> str
-native fn tree_encoder() -> Encoder
+native fn encode_json<T: Encode>(value: T) -> Encoding<Json>
 native fn encoded_json(e: Encoder) -> Json
-native fn text_decoder(text: str) -> Decoder
-native fn json_decoder(value: Json) -> Decoder
+native fn decode_text<T: Decode>(text: str) -> Decoding<T>
+native fn decode_json<T: Decode>(value: Json) -> Decoding<T>

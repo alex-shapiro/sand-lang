@@ -1,6 +1,6 @@
 //! Rust representations of Sand types.
 
-use crate::types::{Builtins, traits};
+use crate::types::{Builtin, Builtins, traits};
 use crate::vm::value::VmValue;
 use std::any::TypeId;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -28,8 +28,9 @@ pub enum Type {
     /// type parameters before the function's own type parameters) and the
     /// built-in traits that the Rust function requires of it.
     Param(u8, Builtins),
-    /// `Num` trait dictionary for the type parameter at index `0..` (see [`Num`]).
-    Num(u8),
+    /// The dictionary of a built-in trait with methods, such as `Num`, for
+    /// the type parameter at index `0..` (see [`Num`]).
+    Dict(u8, Builtin),
     /// The `Encode` form of a value of the type parameter at index `0..`
     /// (see [`Encoded`]).
     Encoded(u8),
@@ -145,7 +146,7 @@ impl Type {
                 r.write(module, param, out);
             }
             Type::Param(i, _) | Type::Encoded(i) => out.push_str(&param(*i)),
-            Type::Num(i) => out.push_str(&format!("<Num evidence of {}>", param(*i))),
+            Type::Dict(i, b) => out.push_str(&format!("<{} evidence of {}>", b.name(), param(*i))),
             Type::Named(n) if n.module == "prelude" && n.name == "Option" && n.args.len() == 1 => {
                 let fn_type = matches!(n.args[0], Type::Fn(..));
                 out.push_str(if fn_type { "(" } else { "" });
@@ -432,7 +433,57 @@ impl<const N: u8> fmt::Debug for Num<N> {
 
 impl<const N: u8> SandType for Num<N> {
     fn sand_type() -> Type {
-        Type::Num(N)
+        Type::Dict(N, Builtin::Num)
+    }
+}
+
+/// The runtime dictionary of the built-in trait `B` (`Encode` or `Decode`)
+/// for the `N`-th generic type parameter. A native function takes it as
+/// `Num<N>` is taken: before its value parameters.
+pub(crate) struct CodecDict<const N: u8, B>(VmValue, PhantomData<fn() -> B>, PhantomData<UnrootedVmHandle>);
+
+impl<const N: u8, B> CodecDict<N, B> {
+    pub(crate) fn raw(self) -> VmValue {
+        self.0
+    }
+}
+
+impl<const N: u8, B> Clone for CodecDict<N, B> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<const N: u8, B> Copy for CodecDict<N, B> {}
+
+impl<const N: u8, B> fmt::Debug for CodecDict<N, B> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "CodecDict({:?})", self.0)
+    }
+}
+
+impl<const N: u8> SandType for CodecDict<N, traits::Encode> {
+    fn sand_type() -> Type {
+        Type::Dict(N, Builtin::Encode)
+    }
+}
+
+impl<const N: u8> SandType for CodecDict<N, traits::Decode> {
+    fn sand_type() -> Type {
+        Type::Dict(N, Builtin::Decode)
+    }
+}
+
+impl<const N: u8, B> crate::native::convert::FromVmValue for CodecDict<N, B>
+where
+    CodecDict<N, B>: SandType,
+{
+    type Item<'a> = Self;
+    fn from_vm_value(vm: &crate::vm::Vm, v: VmValue, _: &mut crate::native::convert::Conversion) -> Result<Self, crate::vm::Fail> {
+        match vm.heap.get(v) {
+            crate::vm::value::Obj::Tuple(_) => Ok(CodecDict(v, PhantomData, PhantomData)),
+            _ => Err(crate::native::convert::mismatch::<Self>()),
+        }
     }
 }
 

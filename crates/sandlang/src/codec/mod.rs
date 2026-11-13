@@ -16,10 +16,11 @@ pub(crate) mod fast;
 pub(crate) mod value_format;
 
 use crate::native::convert::HostError;
-use crate::native::ty::{Param, VmVal};
+use crate::native::ty::{CodecDict, Param, VmVal};
 use crate::native::{NativeModule, NativeObject};
 use crate::stdlib::core;
 use crate::syntax::lexer::is_ident;
+use crate::types::traits;
 use crate::value::Value;
 use crate::vm::value::{Obj, VmValue};
 use crate::vm::{Fail, Vm, internal};
@@ -318,6 +319,16 @@ impl Decoder {
     }
 }
 
+/// The `Encoder` of a native parameter of type `Encoded<N>`: one that holds
+/// the value of a type with a fast path, or one that the Sand
+/// implementations of the type write to.
+#[derive(crate::SandEnum)]
+#[sand(module = "prelude", private, no_value)]
+enum ValueEncoding {
+    Done(VmVal<Encoder>),
+    Driven(VmVal<Encoder>),
+}
+
 /// Runs `op` on the format of `e`.
 pub fn with_encoder<R>(
     vm: &mut Vm,
@@ -413,6 +424,40 @@ fn with_decoder<R>(
     }
 }
 
+/// The `Encode` dictionary of the first type parameter of a native function.
+pub(crate) type EncodeDict = CodecDict<0, traits::Encode>;
+
+/// The `Decode` dictionary of the first type parameter of a native function.
+pub(crate) type DecodeDict = CodecDict<0, traits::Decode>;
+
+/// Returns the fast-path schema of the type whose `Encode` or `Decode`
+/// dictionary is `dict`, or `None` if the type has no fast-path `impl`.
+pub(crate) fn fast_schema<B>(vm: &Vm, dict: CodecDict<0, B>) -> Option<SchemaId> {
+    let Obj::Tuple(slots) = vm.heap.get(dict.raw()) else { return None };
+    match vm.heap.get(*slots.first()?) {
+        Obj::Closure(proto, _) => vm.prog.proto_schemas.get(*proto as usize).copied().filter(|&s| s != fast::NO_SCHEMA),
+        _ => None,
+    }
+}
+
+/// Reads one whole value of the closed type with fast-path schema `schema`
+/// from `f`, and checks that no input follows. `f` belongs to this native
+/// call only, so a failed read needs no restore. A decode error gets its
+/// path.
+pub(crate) fn read_whole<F: DecodeFormat>(vm: &mut Vm, f: &mut F, schema: SchemaId) -> Result<Result<VmValue, core::Error>, Fail> {
+    let mut path = DecodePath::default();
+    let r = f.read_fast(vm, &mut path, schema).and_then(|v| f.finish(vm).map(|()| v));
+    vm.charge(f.take_input_fuel())?;
+    let (kind, message) = match r {
+        Ok(v) => return Ok(Ok(v)),
+        Err(DecodeFail::Fail(fail)) => return Err(fail),
+        Err(DecodeFail::Mismatch(m)) => ("parse", format!("{}: {m}", path_text(vm, &path.0))),
+        Err(DecodeFail::Invalid(m)) => ("invalid", format!("{}: {m}", path_text(vm, &path.0))),
+        Err(DecodeFail::Syntax(m)) => ("parse", m),
+    };
+    Ok(Err(core::Error { message, kind: kind.into() }))
+}
+
 /// Formats the path of the innermost part of `frames`, such as
 /// `$.items[2].price`.
 fn path_text(vm: &Vm, frames: &[Frame]) -> String {
@@ -467,7 +512,16 @@ fn to_index(i: i64) -> usize {
 pub(crate) fn register(m: &mut NativeModule) {
     m.bind::<Encoder>();
     m.bind::<Decoder>();
-    m.function("value_encoder", |vm: &mut Vm| vm.new_object(Encoder::new(Box::new(value_format::ValueEncoder::new()))));
+    m.bind::<ValueEncoding>();
+    m.function("value_encoder", |vm: &mut Vm, encode: EncodeDict, value: Param<0>| -> Result<ValueEncoding, Fail> {
+        let mut f = value_format::ValueEncoder::new();
+        let Some(schema) = fast_schema(vm, encode) else { return vm.new_object(Encoder::new(Box::new(f))).map(ValueEncoding::Driven) };
+        let r = f.write_fast(vm, value.raw(), schema);
+        // The heap counts the buffers again as part of the new object.
+        vm.heap.account(f.heap_size(), 0);
+        r?;
+        vm.new_object(Encoder::new(Box::new(f))).map(ValueEncoding::Done)
+    });
     encoder_methods(m);
     decoder_methods(m);
 }

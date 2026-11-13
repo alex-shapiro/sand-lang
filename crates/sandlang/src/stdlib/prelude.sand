@@ -369,12 +369,16 @@ pub trait Decode {
 
 /// Encodes `value` to a host value, for a native parameter of type `Encoded<N>`.
 fn encode_value<T: Encode>(value: T) -> Encoder {
-    let e = value_encoder()
-    value.encode(e)
-    e
+    match value_encoder(value) {
+        Done(e) => e
+        Driven(e) => {
+            value.encode(e)
+            e
+        }
+    }
 }
 
-native fn value_encoder() -> Encoder
+native fn value_encoder<T: Encode>(value: T) -> ValueEncoding
 
 extend Encoder {
     /// Writes `value` with its `Encode` implementation.

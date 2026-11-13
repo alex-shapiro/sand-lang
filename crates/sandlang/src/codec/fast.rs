@@ -30,6 +30,9 @@ pub(crate) const OPEN_VALUES: usize = 32;
 /// The index of a [`Schema`] in the program's schema table.
 pub type SchemaId = u32;
 
+/// The [`SchemaId`] that stands for no schema.
+pub(crate) const NO_SCHEMA: SchemaId = SchemaId::MAX;
+
 /// The shape of a closed type that the fast path encodes and decodes. Each
 /// node mirrors the synthesized or prelude implementation of its type.
 #[derive(Clone, Debug, PartialEq)]
