@@ -643,3 +643,148 @@ proptest! {
         prop_assert_eq!(&collected, &synthesized, "gc_stress; program:\n{}", src);
     }
 }
+
+/// A hand-written implementation of `Encode` or `Decode` for `struct Part { v: int }`.
+#[derive(Clone, Copy, Debug)]
+enum PartImpl {
+    WritesNoValue,
+    WritesTwoValues,
+    KeepsItsEncoder,
+    ReadsNoValue,
+    ReadsTwoValues,
+    FinishesTheDecode,
+    KeepsItsDecoder,
+    /// Reads an `int`, and after a failure a `str`, which follows the protocol.
+    RetriesAnotherType,
+}
+
+impl PartImpl {
+    fn source(self) -> &'static str {
+        match self {
+            PartImpl::WritesNoValue => "impl Encode for Part {\n    fn encode(self, e: Encoder) {}\n}",
+            PartImpl::WritesTwoValues => {
+                "impl Encode for Part {\n    fn encode(self, e: Encoder) {\n        e.encode(self.v)\n        e.encode(self.v)\n    }\n}"
+            }
+            PartImpl::KeepsItsEncoder => {
+                "impl Encode for Part {\n    fn encode(self, e: Encoder) {\n        kept_encoders.push(e)\n        e.encode(self.v)\n    }\n}"
+            }
+            PartImpl::ReadsNoValue => "impl Decode for Part {\n    fn decode(d: Decoder) -> Result<Part> { Ok(Part(v: 0)) }\n}",
+            PartImpl::ReadsTwoValues => {
+                "impl Decode for Part {\n    fn decode(d: Decoder) -> Result<Part> {\n        let a: int = d.decode()?\n        let b: int = d.decode()?\n        Ok(Part(v: a + b))\n    }\n}"
+            }
+            PartImpl::FinishesTheDecode => {
+                "impl Decode for Part {\n    fn decode(d: Decoder) -> Result<Part> {\n        let v: Result<int> = d.decode()\n        d.finish(v.map((v) => Part(v: v)))\n    }\n}"
+            }
+            PartImpl::KeepsItsDecoder => {
+                "impl Decode for Part {\n    fn decode(d: Decoder) -> Result<Part> {\n        kept_decoders.push(d)\n        Ok(Part(v: d.decode()?))\n    }\n}"
+            }
+            PartImpl::RetriesAnotherType => {
+                "impl Decode for Part {\n    fn decode(d: Decoder) -> Result<Part> {\n        let i: Result<int> = d.decode()\n        if let Ok(v) = i {\n            return Ok(Part(v: v))\n        }\n        let s: str = d.decode()?\n        Ok(Part(v: s.len()))\n    }\n}"
+            }
+        }
+    }
+
+    fn encodes(self) -> bool {
+        matches!(self, PartImpl::WritesNoValue | PartImpl::WritesTwoValues | PartImpl::KeepsItsEncoder)
+    }
+
+    /// The text that the result or the failure of each program has.
+    fn expected(self) -> &'static str {
+        match self {
+            PartImpl::WritesNoValue => "Encode for Part wrote no value",
+            PartImpl::WritesTwoValues => "Encode for Part wrote 2 values",
+            PartImpl::KeepsItsEncoder => "the encoder",
+            PartImpl::ReadsNoValue => "Decode for Part read no value",
+            PartImpl::ReadsTwoValues => "Decode for Part read 2 values",
+            PartImpl::FinishesTheDecode => "a `Decode` implementation cannot call it",
+            PartImpl::KeepsItsDecoder => "the decoder is used after its decode ended",
+            PartImpl::RetriesAnotherType => "Ok(",
+        }
+    }
+}
+
+/// A type that contains `Part`, a value of it, and the JSON text of a value,
+/// in which the part `"p"` is a `str`, which only `RetriesAnotherType`
+/// reads, and the other parts are ints.
+const PART_CONTEXTS: [(&str, &str, &str); 8] = [
+    ("Part", "Part(v: 1)", "\"p\""),
+    ("[Part]", "[Part(v: 1), Part(v: 2)]", "[1, \"p\"]"),
+    ("[str: Part]", "[\"a\": Part(v: 1), \"b\": Part(v: 2)]", "{\"a\": \"p\", \"b\": 2}"),
+    ("Wrap<Part>", "Wrap(v: Part(v: 1))", "{\"v\": \"p\"}"),
+    ("Part?", "Some(Part(v: 1))", "\"p\""),
+    ("(int, Part, int)", "(1, Part(v: 2), 3)", "[1, \"p\", 3]"),
+    ("Pay", "Pay.Named(x: Part(v: 1), y: 2)", "{\"Named\": {\"x\": \"p\", \"y\": 2}}"),
+    (
+        "[Pay]",
+        "[Pay.Positional(1, Part(v: 2)), Pay.Named(x: Part(v: 3), y: 4)]",
+        "[{\"Positional\": [1, 2]}, {\"Named\": {\"x\": \"p\", \"y\": 4}}]",
+    ),
+];
+
+const PART_FORMATS: [&str; 3] = ["JSON text", "Json", "host Value"];
+
+/// Returns a program that encodes or decodes a value of the type of
+/// `context` in format `format`, with the implementation `part` of `Part`.
+fn part_program(part: PartImpl, context: (&str, &str, &str), format: &str) -> String {
+    let (ty, value, text) = context;
+    let text = match part {
+        PartImpl::RetriesAnotherType => text.to_string(),
+        _ => text.replace("\"p\"", "7"),
+    };
+    let types = "import json\nimport host\nstruct Part { v: int }\nstruct Wrap<T> { v: T }\nenum Pay { Positional(int, Part), Named(x: Part, y: int) }\n\
+                 var kept_encoders: [Encoder] = []\nvar kept_decoders: [Decoder] = []";
+    let run = if part.encodes() {
+        let encode = match format {
+            "JSON text" => "json.encode(v)",
+            "Json" => "json.to_json(v)",
+            _ => "host.keep(v)",
+        };
+        format!("let v: {ty} = {value}\nprint({encode})\nfor e in kept_encoders {{\n    e.encode(1)\n}}")
+    } else {
+        let decode = match format {
+            "JSON text" => format!("json.decode({text:?})"),
+            "Json" => format!("json.from_json(json.parse({text:?}).unwrap())"),
+            _ => format!("{{\n    host.keep(json.parse({text:?}).unwrap())\n    let d = host.input()\n    d.finish(d.decode())\n}}"),
+        };
+        format!(
+            "let r: Result<{ty}> = {decode}\nprint(r)\nfor d in kept_decoders {{\n    let again: Result<int> = d.decode()\n    print(again)\n}}"
+        )
+    };
+    format!("{types}\n{}\n{run}\n", part.source())
+}
+
+const PART_IMPLS: [PartImpl; 8] = [
+    PartImpl::WritesNoValue,
+    PartImpl::WritesTwoValues,
+    PartImpl::KeepsItsEncoder,
+    PartImpl::ReadsNoValue,
+    PartImpl::ReadsTwoValues,
+    PartImpl::FinishesTheDecode,
+    PartImpl::KeepsItsDecoder,
+    PartImpl::RetriesAnotherType,
+];
+
+/// A hand-written implementation that writes or reads no value or two,
+/// keeps its `Encoder` or `Decoder` after the encode or decode ends, or
+/// calls `Decoder.finish`, fails with a message that names the type, in each
+/// format and in each container, also when native calls run again
+/// (`retry_stress`). An implementation that reads another type after a
+/// failed read gets the value.
+#[test]
+fn implementations_that_break_the_codec_protocol_fail_in_each_format() {
+    for part in PART_IMPLS {
+        for context in PART_CONTEXTS {
+            for format in PART_FORMATS {
+                let src = part_program(part, context, format);
+                let synthesized = run_codec_path(&src, false, false, false);
+                let (out, failure) = &synthesized;
+                let shown = format!("{out}{}", failure.as_deref().unwrap_or_default());
+                assert!(shown.contains(part.expected()), "expected {:?}, got {shown:?}; program:\n{src}", part.expected());
+                assert!(!shown.contains("internal error"), "{shown}; program:\n{src}");
+                assert_eq!(run_codec_path(&src, true, false, false), synthesized, "program:\n{src}");
+                assert_eq!(run_codec_path(&src, true, true, false), synthesized, "retry_stress; program:\n{src}");
+                assert_eq!(run_codec_path(&src, false, false, true), synthesized, "gc_stress; program:\n{src}");
+            }
+        }
+    }
+}

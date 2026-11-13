@@ -314,9 +314,9 @@ fn prog_schema(prog: &Program, id: SchemaId) -> Result<&Schema, Fail> {
 
 /// Reads a value whose type has schema `schema` from `f`. `path` holds the
 /// open containers of the decoder before the walk; the walk adds its own if
-/// it fails.
+/// it fails. After a failed memory check, the caller returns `f` to a mark
+/// before the walk.
 pub(super) fn decode<F: DecodeFormat + ?Sized>(vm: &mut Vm, f: &mut F, path: &mut Vec<Frame>, schema: SchemaId) -> DecodeResult<VmValue> {
-    let mark = f.mark();
     let prog = vm.prog.clone();
     let mut w = DecodeWalk {
         prog: &prog,
@@ -325,12 +325,11 @@ pub(super) fn decode<F: DecodeFormat + ?Sized>(vm: &mut Vm, f: &mut F, path: &mu
         key_texts: String::new(),
     };
     let r = w.run(vm, f, path, schema);
-    match &r {
-        Ok(_) => {}
-        Err(DecodeFail::Fail(fail)) if fail.as_limit().is_some() => f.rewind(mark),
-        Err(_) => w.extend_path(path),
+    if let Err(e) = &r
+        && !matches!(e, DecodeFail::Fail(_))
+    {
+        w.extend_path(path);
     }
-    f.release(mark);
     r
 }
 

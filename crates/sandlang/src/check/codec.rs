@@ -25,6 +25,12 @@ pub enum DerivedMethod {
     FastEncode(SchemaId),
     /// `decode` of a native impl, which walks the schema with this id.
     FastDecode(SchemaId),
+    /// `encode` of a hand-written impl, which calls the hand-written body
+    /// (this function) between the protocol checks of its `Encoder`.
+    CheckedEncode(FnId),
+    /// `decode` of a hand-written impl, which calls the hand-written body
+    /// (this function) between the protocol checks of its `Decoder`.
+    CheckedDecode(FnId),
 }
 
 impl Checker {
@@ -165,6 +171,20 @@ impl Checker {
         add_impl(&mut self.impls_by_ctor, (ctor, arity), id);
     }
 
+    /// Makes `f`, the first method of a hand-written `impl` of the built-in
+    /// trait `b`, check that each call writes or reads exactly one value,
+    /// if `b` is `Encode` or `Decode`. `f` keeps its signature and calls a
+    /// copy of itself with the hand-written body.
+    pub(crate) fn check_codec_protocol(&mut self, f: FnId, b: Option<Builtin>) {
+        let checked: fn(FnId) -> DerivedMethod = match b {
+            Some(Builtin::Encode) => DerivedMethod::CheckedEncode,
+            Some(Builtin::Decode) => DerivedMethod::CheckedDecode,
+            _ => return,
+        };
+        let body = self.add_fn(self.fns[f as usize].clone());
+        self.fns[f as usize].decl = Some(FnDeclRef::Derived(checked(body)));
+    }
+
     /// Declares the methods of the synthesized `impl` `id` on first use. A
     /// program pays for the code of only the impls that it uses.
     pub(crate) fn ensure_derived_methods(&mut self, id: ImplId) {
@@ -186,7 +206,7 @@ impl Checker {
         let (tr, target, ps, module, span) = (imp.trait_ref, imp.target, imp.generics.clone(), imp.module, imp.span);
         let ctor = impl_key(&self.arena, target).map_or(Ctor::Unit, |(c, _)| c);
         let (name, params, ret, has_self) = match method {
-            DerivedMethod::Encode | DerivedMethod::FastEncode(_) => {
+            DerivedMethod::Encode | DerivedMethod::FastEncode(_) | DerivedMethod::CheckedEncode(_) => {
                 let enc = self.codec_type("Encoder");
                 let params = vec![
                     ParamSig { name: Symbol::SELF, ty: target, default: None },
@@ -194,7 +214,7 @@ impl Checker {
                 ];
                 (self.sym("encode"), params, TypeId::UNIT, true)
             }
-            DerivedMethod::Decode | DerivedMethod::FastDecode(_) => {
+            DerivedMethod::Decode | DerivedMethod::FastDecode(_) | DerivedMethod::CheckedDecode(_) => {
                 let dec = self.codec_type("Decoder");
                 let err = self.error_ty();
                 let ret = self.result_of(target, err);
@@ -502,6 +522,21 @@ impl Checker {
                 let args = vec![b.local(self, dec), b.int(schema as i64)];
                 b.method(self, "Decoder", "read_fast", vec![target], args)
             }
+            DerivedMethod::CheckedEncode(body) => {
+                let (value, enc) = (params[params.len() - 2], params[params.len() - 1]);
+                let enter = b.enter_impl(self, "Encoder", enc, target);
+                let call = b.call_body(self, f, body, vec![b.local(self, value), b.local(self, enc)]);
+                let leave = b.method(self, "Encoder", "leave_impl", vec![], vec![b.local(self, enc)]);
+                b.block(vec![enter, call, leave], TypeId::UNIT)
+            }
+            DerivedMethod::CheckedDecode(body) => {
+                let dec = params[params.len() - 1];
+                let ret = self.fns[f as usize].ret;
+                let enter = b.enter_impl(self, "Decoder", dec, target);
+                let call = b.call_body(self, f, body, vec![b.local(self, dec)]);
+                let leave = b.method(self, "Decoder", "leave_impl", vec![ret], vec![b.local(self, dec), call]);
+                b.block(vec![enter, leave], ret)
+            }
         }
     }
 }
@@ -540,6 +575,26 @@ impl Synth {
         let ret = c.arena.instantiate(ret, &gens, &targs);
         let kind = c.call_kind(f, targs, args.into_iter().map(HArg::Expr).collect());
         self.e(kind, ret)
+    }
+
+    /// Calls `owner.enter_impl` on the local `codec` for the target type
+    /// `target` of a hand-written impl.
+    fn enter_impl(&self, c: &mut Checker, owner: &str, codec: LocalId, target: TypeId) -> HExpr {
+        let def = match c.arena.get(target) {
+            Ty::Named(d, _) => d as i64,
+            _ => -1,
+        };
+        let args = vec![self.local(c, codec), self.int(def)];
+        self.method(c, owner, "enter_impl", vec![], args)
+    }
+
+    /// Calls `body`, the hand-written body of the method `f`, with `args`
+    /// and the dictionaries of `f`.
+    fn call_body(&self, c: &mut Checker, f: FnId, body: FnId, args: Vec<HExpr>) -> HExpr {
+        let targs: Vec<TypeId> = c.fns[f as usize].generics.clone().into_iter().map(|g| c.param_ty(g)).collect();
+        let mut all = c.default_helper_evidence(body, &targs, self.span);
+        all.extend(args.into_iter().map(HArg::Expr));
+        self.e(HKind::Call { func: body, targs, args: all }, c.fns[body as usize].ret)
     }
 
     /// `e?` for a `Result` with payload type `ty`.

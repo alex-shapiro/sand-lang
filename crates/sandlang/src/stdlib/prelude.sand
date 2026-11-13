@@ -407,6 +407,8 @@ extend Encoder {
     native fn write_none(self)
     native fn end(self)
     native fn write_fast<T>(self, value: T, schema: int)
+    native fn enter_impl(self, def: int)
+    native fn leave_impl(self)
 }
 
 extend Decoder {
@@ -417,15 +419,10 @@ extend Decoder {
 
     /// Ends a decode with the result `result` of the outermost `Decode`
     /// implementation. Fails if input follows the value. Adds the path of the
-    /// failure to an error from a hand-written implementation.
+    /// failure to an error from a hand-written implementation. After
+    /// `finish`, each use of the decoder is a runtime error.
     pub fn finish<T>(self, result: Result<T>) -> Result<T> {
-        match result {
-            Ok(v) => {
-                self.end_input()?
-                Ok(v)
-            }
-            Err(e) => Err(self.locate(e))
-        }
+        self.end_decode(result)
     }
 
     native fn read_unit(self) -> Result<()>
@@ -453,9 +450,10 @@ extend Decoder {
     native fn missing(self, id: int, variant: bool, index: int) -> Error
     native fn variant(self, first: int, count: int) -> Result<int>
     native fn end_variant(self) -> Result<()>
-    native fn end_input(self) -> Result<()>
-    native fn locate(self, e: Error) -> Error
+    native fn end_decode<R>(self, result: R) -> R
     native fn read_fast<T>(self, schema: int) -> Result<T>
+    native fn enter_impl(self, def: int)
+    native fn leave_impl<R>(self, result: R) -> R
 }
 
 impl Encode for () {

@@ -441,6 +441,12 @@ impl DecodeFormat for TreeDecoder {
         self.marks.truncate(mark);
     }
 
+    fn rewind_to_start(&mut self) {
+        self.values.truncate(1);
+        self.open.clear();
+        self.ready = true;
+    }
+
     fn keeps_values(&self) -> bool {
         true
     }

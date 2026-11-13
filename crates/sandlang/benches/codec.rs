@@ -47,6 +47,16 @@ impl Decode for Email {
     }
 }
 struct Contact { id: int, name: str, email: Email, tags: [str] }
+enum IntOrStr { I(int), S(str) }
+impl Decode for IntOrStr {
+    fn decode(d: Decoder) -> Result<IntOrStr> {
+        let i: Result<int> = d.decode()
+        if let Ok(i) = i {
+            return Ok(IntOrStr.I(i))
+        }
+        Ok(IntOrStr.S(d.decode()?))
+    }
+}
 struct Page<T> { items: [T], next: str? }
 var stamp_counter = 0
 fn stamp() -> int {
@@ -199,6 +209,15 @@ const OPERATIONS: &[Operation] = &[
         closure: r#"() => {
     let cs: [Contact] = json.decode(ctext).unwrap()
     cs[cs.len() - 1].id
+}"#,
+        runs_per_call: None,
+    },
+    Operation {
+        name: "decode_two_types",
+        inputs: "let mixed = \"[\" + (0..{n}).to_list().map((i) => if i % 2 == 0 { \"\\(i)\" } else { \"\\\"s\\(i)\\\"\" }).join(\",\") + \"]\"\n",
+        closure: r#"() => {
+    let xs: [IntOrStr] = json.decode(mixed).unwrap()
+    xs.len()
 }"#,
         runs_per_call: None,
     },

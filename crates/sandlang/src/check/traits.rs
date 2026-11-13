@@ -614,6 +614,9 @@ impl Checker {
             }
             self.fns[f as usize].impl_of = Some(id);
             self.check_impl_method(id, slot as u32, f, m);
+            if slot == 0 && !m.is_native && Some(self.cur_mod) != self.prelude {
+                self.check_codec_protocol(f, self.traits[tid as usize].builtin);
+            }
             slots[slot] = Some(f);
         }
         let mut missing = Vec::new();

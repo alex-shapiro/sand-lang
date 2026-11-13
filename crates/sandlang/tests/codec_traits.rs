@@ -117,6 +117,21 @@ fn scenario_6_host_values_go_through_the_hand_written_implementations() {
 }
 
 #[test]
+fn a_host_decoder_reads_another_type_after_a_failed_read() {
+    let inputs = vec![str_("x"), str_("y")];
+    let src = "import host\n\
+               let d = host.input()\nlet n: Result<int> = d.decode()\nprint(n)\nlet s: str = d.finish(d.decode())?\nprint(s)\n\
+               let twice = host.input()\nlet a: str = twice.decode()?\nlet b: Result<str> = twice.decode()\nprint(b)\n";
+    let (r, out) = run(vec![host_module(Arc::default(), inputs)], Limits::default(), src);
+    r.unwrap();
+    assert_eq!(
+        out,
+        "Err(Error(message: \"$: expected int, found str\", kind: \"parse\"))\nx\n\
+         Err(Error(message: \"$: the decoder already read its value\", kind: \"invalid\"))\n"
+    );
+}
+
+#[test]
 fn scenario_6_rust_and_sand_derived_forms_agree() {
     use sandlang::value::Encode;
     /// A shipment.

@@ -4,7 +4,8 @@ use super::base64;
 use crate::check::ModKind;
 use crate::codec::MAX_NESTING_DEPTH;
 use crate::codec::{
-    DecodeDict, Decoder, EncodeDict, EncodeFormat, Encoder, fast_schema, read_json, read_whole, with_encoder, with_input, write_whole,
+    DecodeDict, Decoder, EncodeDict, EncodeFormat, EncodeStep, Encoder, fast_schema, read_json, read_whole, with_encoder, with_input,
+    write_whole,
 };
 use crate::native::convert::{Conversion, FromVmValue, HostError, IntoVmValue, mismatch};
 use crate::native::ty::{Param, VmVal};
@@ -156,9 +157,11 @@ pub(crate) fn module() -> NativeModule {
         Ok(Encoding::Done(VmVal::from_raw(vm.new_str(text))))
     });
     m.function("encoded_text", |vm: &mut Vm, e: VmVal<Encoder>| -> Result<VmVal<String>, Fail> {
-        let Some((text, counted)) = e.get_mut(&mut vm.heap)?.format_mut::<TextEncoder>().map(TextEncoder::take_text) else {
-            return internal("json.encode: not a JSON text encoder");
-        };
+        let (text, counted) =
+            with_encoder(vm, e, EncodeStep::Finish, |f, _| match (f as &mut dyn std::any::Any).downcast_mut::<TextEncoder>() {
+                Some(text) => Ok(text.take_text()),
+                None => internal("json.encode: not a JSON text encoder"),
+            })?;
         vm.heap.account(counted, 0);
         Ok(VmVal::from_raw(vm.new_str(text)))
     });
@@ -170,7 +173,7 @@ pub(crate) fn module() -> NativeModule {
         Ok(Encoding::Done(VmVal::from_raw(r?)))
     });
     m.function("encoded_json", |vm: &mut Vm, e: VmVal<Encoder>| -> Result<VmVal<Json>, Fail> {
-        let root = with_encoder(vm, e, |f, _| match (f as &mut dyn std::any::Any).downcast_mut::<TreeEncoder>() {
+        let root = with_encoder(vm, e, EncodeStep::Finish, |f, _| match (f as &mut dyn std::any::Any).downcast_mut::<TreeEncoder>() {
             Some(tree) => tree.encoded(),
             None => internal("json.to_json: not a Json encoder"),
         });

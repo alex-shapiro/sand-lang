@@ -91,6 +91,7 @@ impl TextEncoder {
     /// Returns the text written, and the bytes that the heap counted for
     /// it (see [`Budget::release`]).
     pub(crate) fn take_text(&mut self) -> (String, usize) {
+        self.charged = 0;
         (std::mem::take(&mut self.out), self.budget.release())
     }
 
@@ -566,18 +567,15 @@ impl TextDecoder {
     }
 
     /// Runs `f` on a parser at the current position. On an error, the
-    /// position does not move, so a run of the native function again starts
-    /// from the same input.
+    /// position does not move, so that a run of the native function again,
+    /// or a read of another type, starts from the same input.
     #[inline(always)]
     fn parse<R>(&mut self, vm: &mut Vm, f: impl FnOnce(&mut Parser<'_>, &mut Vm) -> Result<R, ParseError>) -> DecodeResult<R> {
         let mut p = Parser { src: &self.text, b: self.text.as_bytes(), pos: self.pos, depth: self.depth, charged: self.charged };
         p.ws();
-        let r = f(&mut p, vm);
-        if let Err(ParseError::Fail(_)) = r {
-            return r.map_err(into_fail);
-        }
+        let r = f(&mut p, vm).map_err(into_fail)?;
         (self.pos, self.depth) = (p.pos, p.depth);
-        r.map_err(into_fail)
+        Ok(r)
     }
 
     /// Returns the error for a value that does not match `what`.
@@ -1004,6 +1002,11 @@ impl DecodeFormat for TextDecoder {
 
     fn release(&mut self, mark: usize) {
         self.marks.truncate(mark);
+    }
+
+    fn rewind_to_start(&mut self) {
+        (self.pos, self.depth, self.charged, self.key) = (0, 0, 0, None);
+        self.open.clear();
     }
 
     fn heap_size(&self) -> usize {

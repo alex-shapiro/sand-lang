@@ -936,6 +936,12 @@ impl DecodeFormat for ValueDecoder {
         self.marks.truncate(mark);
     }
 
+    fn rewind_to_start(&mut self) {
+        self.steps.clear();
+        self.open.clear();
+        (self.ready, self.payload, self.in_key) = (true, false, false);
+    }
+
     fn heap_size(&self) -> usize {
         self.steps.capacity() * size_of::<Step>()
             + self.open.capacity() * size_of::<Open>()
