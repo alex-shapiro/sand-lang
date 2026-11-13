@@ -131,6 +131,36 @@ fn a_host_decoder_reads_another_type_after_a_failed_read() {
     );
 }
 
+/// Returns the time and the fuel of a host decode of `leaves` leaves of an
+/// enum, nested `depth` levels deep.
+fn deep_host_decode(depth: usize, leaves: usize) -> (std::time::Duration, u64) {
+    let variant = |name: &str, payload: Value| Value::Variant(VariantValue::new("main.T", name, [payload]));
+    let mut value = variant("L", Value::List((0..leaves).map(|i| variant("I", Value::Int(i as i64))).collect()));
+    for _ in 0..depth {
+        value = variant("L", Value::List(vec![value]));
+    }
+    let mut meter = NativeModule::new("meter");
+    meter.function("fuel", |vm: &mut Vm| vm.meter.used() as i64);
+    let src = "import host\nimport meter\nenum T { L([T]), I(int) }\nlet d = host.input()\nlet start = meter.fuel()\n\
+               let r: Result<T> = d.finish(d.decode())\nprint(meter.fuel() - start)\nprint(r.is_ok())\n";
+    let modules = vec![host_module(Arc::default(), vec![value]), meter];
+    let start = std::time::Instant::now();
+    let (r, out) = run(modules, Limits::default(), src);
+    let time = start.elapsed();
+    r.unwrap();
+    let (fuel, ok) = out.trim().split_once("\n").unwrap();
+    assert_eq!(ok, "true");
+    (time, fuel.parse().unwrap())
+}
+
+#[test]
+fn a_host_decoder_reads_each_part_in_constant_time_at_any_depth() {
+    let (shallow, shallow_fuel) = deep_host_decode(1, 20_000);
+    let (deep, deep_fuel) = deep_host_decode(200, 20_000);
+    assert!(deep_fuel < shallow_fuel + shallow_fuel / 10, "fuel {shallow_fuel} at depth 1, {deep_fuel} at depth 200");
+    assert!(deep < shallow * 3, "{shallow:?} at depth 1, {deep:?} at depth 200");
+}
+
 #[test]
 fn scenario_6_rust_and_sand_derived_forms_agree() {
     use sandlang::value::Encode;

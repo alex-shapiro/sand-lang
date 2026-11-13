@@ -2588,8 +2588,13 @@ Sand `Encode`. A manual `Encode` implementation for a type that also implements
 `Value::decode::<T>()` converts a `Value` into a `T`. Standard Rust primitives,
 collections, tuples, `Value`, and every `ValueType` implement `Decode`, and
 `SandStruct` and `SandEnum` derive it. `Decode` does not require `Encode`.
-`decode` reads with the rules and the messages of a Sand `Decoder` of the same
-`Value` (`Decoder::from_value`). It accepts the `Value` that `Encode::encode`
+`Decode::decode` reads from a `value::ValueReader`, as a Sand `decode` reads
+from a `Decoder`. A Sand `Decoder` of a `Value` (`Decoder::from_value`) reads
+through the same `ValueReader`, so both accept the same forms and give the
+same messages. A manual implementation usually reads one value with
+`r.decode::<T>()`. As with `d.decode()` in Sand, a failed `r.decode` leaves the
+reader at the start of its value, so the implementation can read the value as
+another type. `decode` accepts the `Value` that `Encode::encode`
 and `Encoded<N>` produce. It also accepts the `Value` that parsing JSON text
 gives, so that a host can decode data that comes from JSON:
 
@@ -2618,8 +2623,9 @@ field takes its `#[sand(default)]` value, or `None` if the field is an
 If a part of the `Value` does not match, `decode` returns a `DecodeError`. Its
 `Display` form starts with the path of the part, such as
 `$.items[2].price: expected float, found str`. `DecodeError::path` and
-`DecodeError::message` return the two parts. A manual `Decode` implementation
-adds a path segment with `DecodeError::in_key` or `DecodeError::in_index`.
+`DecodeError::message` return the two parts. An error that a manual `Decode`
+implementation returns with `DecodeError::new` gets the path of its value;
+`ValueReader::error` gives the path of the current part.
 
 `stdlib::core::Error` is the Rust form of the prelude `Error` struct. A host
 decodes an error payload with `value.decode::<Error>()`.

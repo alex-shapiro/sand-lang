@@ -1,5 +1,7 @@
 //! Sand values in a Rust form that is independent of the VM.
 
+use crate::codec::SeqKind;
+pub use crate::codec::value_input::ValueReader;
 use crate::codec::value_input::{InputNode, InputResult};
 use crate::native::NamedType;
 use crate::native::ty::Never;
@@ -483,15 +485,9 @@ encode_tuples! {
     note = "add `#[sand(no_value)]` to a `SandStruct` or `SandEnum` whose fields do not implement `Decode`"
 )]
 pub trait Decode: Sized {
-    /// Converts `value` into `Self`.
-    fn decode(value: &Value) -> Result<Self, DecodeError>;
-
-    /// Converts the map key `key` into `Self`. The default calls
-    /// [`Decode::decode`]. A type whose JSON object key is text, such as
-    /// `int` with the key `"1"`, also accepts that `Value::Str`.
-    fn decode_key(key: &Value) -> Result<Self, DecodeError> {
-        Self::decode(key)
-    }
+    /// Reads a value of this type from `r` as exactly one value, usually
+    /// with [`ValueReader::decode`] for each part.
+    fn decode(r: &mut ValueReader<'_>) -> Result<Self, DecodeError>;
 
     /// Returns the value of an omitted struct field of type `Self`, or `None`
     /// if the field is required. `Option` returns `Some(None)`.
@@ -509,7 +505,7 @@ impl Value {
     /// assert_eq!(Value::Str("3".into()).decode::<i64>().unwrap_err().to_string(), "$: expected int, found str");
     /// ```
     pub fn decode<T: Decode>(&self) -> Result<T, DecodeError> {
-        T::decode(self)
+        ValueReader::new(self).decode()
     }
 }
 
@@ -522,41 +518,34 @@ impl Value {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DecodeError {
     message: String,
-    /// The path segments, from the innermost to the outermost.
-    path: Vec<PathSegment>,
+    /// The path segments from the outermost, or `None` until the error gets
+    /// the path of the value that failed.
+    path: Option<Vec<PathSegment>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum PathSegment {
+pub(crate) enum PathSegment {
     Index(usize),
     Key(String),
 }
 
 impl DecodeError {
     /// Builds an error with `message` for the value that a [`Decode`]
-    /// implementation reads.
+    /// implementation reads. [`ValueReader::decode`] adds the path of the
+    /// value.
     pub fn new(message: impl Into<String>) -> DecodeError {
-        DecodeError { message: message.into(), path: Vec::new() }
+        DecodeError { message: message.into(), path: None }
     }
 
-    /// Builds the error for a value `found` that is not of the type
-    /// `expected`, such as "expected int, found str".
-    pub fn expected(expected: &str, found: &Value) -> DecodeError {
-        DecodeError::new(format!("expected {expected}, found {}", kind_name(found)))
-    }
-
-    /// Moves the error into the item `index` of a list, tuple, set, or
-    /// positional payload.
-    pub fn in_index(mut self, index: usize) -> DecodeError {
-        self.path.push(PathSegment::Index(index));
+    /// Returns the error with the path `path`.
+    pub(crate) fn at(mut self, path: Vec<PathSegment>) -> DecodeError {
+        self.path = Some(path);
         self
     }
 
-    /// Moves the error into the struct field, payload field, or map entry
-    /// `key`.
-    pub fn in_key(mut self, key: impl Into<String>) -> DecodeError {
-        self.path.push(PathSegment::Key(key.into()));
-        self
+    /// Returns `true` if the error has its path.
+    pub(crate) fn has_path(&self) -> bool {
+        self.path.is_some()
     }
 
     /// Returns the message without the path, such as "expected int, found
@@ -569,7 +558,7 @@ impl DecodeError {
     /// `$.items[2].price`.
     pub fn path(&self) -> String {
         let mut out = String::from("$");
-        for segment in self.path.iter().rev() {
+        for segment in self.path.iter().flatten() {
             match segment {
                 PathSegment::Index(i) => {
                     let _ = fmt::Write::write_fmt(&mut out, format_args!("[{i}]"));
@@ -620,111 +609,87 @@ pub(crate) fn key_text(key: &Value) -> Cow<'_, str> {
     }
 }
 
-fn invalid_map_key(text: &str) -> DecodeError {
-    DecodeError::new(format!("invalid map key `{}`", crate::stdlib::truncate(text, PATH_KEY_CHARS)))
-}
-
 impl Decode for Never {
-    fn decode(value: &Value) -> Result<Never, DecodeError> {
-        Err(DecodeError::expected("no value", value))
+    fn decode(r: &mut ValueReader<'_>) -> Result<Never, DecodeError> {
+        decode_scalar(r, |n, in_key| Err(n.mismatch("no value", in_key)))
     }
 }
 
 impl Decode for Value {
-    fn decode(value: &Value) -> Result<Value, DecodeError> {
-        Ok(value.clone())
+    fn decode(r: &mut ValueReader<'_>) -> Result<Value, DecodeError> {
+        r.read_value().cloned()
     }
 }
 
-/// Reads the scalar `value`, or the map key `value` if `in_key`, with the
-/// rules of host `Value` input that the Sand `Decoder` uses.
-pub(crate) fn decode_scalar<'v, T>(
-    value: &'v Value,
-    in_key: bool,
-    read: impl FnOnce(InputNode<'v>, bool) -> InputResult<T>,
+/// Reads the current part of `r` with the scalar rule `read`.
+pub(crate) fn decode_scalar<T>(
+    r: &mut ValueReader<'_>,
+    read: impl FnOnce(InputNode<'_>, bool) -> InputResult<T>,
 ) -> Result<T, DecodeError> {
-    read(InputNode::of(value), in_key).map_err(|e| DecodeError::new(e.0))
+    r.read(read).map_err(|e| r.fail(e))
 }
 
 impl Decode for () {
-    fn decode(value: &Value) -> Result<(), DecodeError> {
-        decode_scalar(value, false, |n, in_key| n.unit(in_key))
+    fn decode(r: &mut ValueReader<'_>) -> Result<(), DecodeError> {
+        decode_scalar(r, |n, in_key| n.unit(in_key))
     }
 }
 
 impl Decode for bool {
-    fn decode(value: &Value) -> Result<bool, DecodeError> {
-        decode_scalar(value, false, |n, in_key| n.bool(in_key))
-    }
-
-    fn decode_key(key: &Value) -> Result<bool, DecodeError> {
-        decode_scalar(key, true, |n, in_key| n.bool(in_key))
+    fn decode(r: &mut ValueReader<'_>) -> Result<bool, DecodeError> {
+        decode_scalar(r, |n, in_key| n.bool(in_key))
     }
 }
 
 impl Decode for i64 {
-    fn decode(value: &Value) -> Result<i64, DecodeError> {
-        decode_scalar(value, false, |n, in_key| n.int(in_key))
-    }
-
-    fn decode_key(key: &Value) -> Result<i64, DecodeError> {
-        decode_scalar(key, true, |n, in_key| n.int(in_key))
+    fn decode(r: &mut ValueReader<'_>) -> Result<i64, DecodeError> {
+        decode_scalar(r, |n, in_key| n.int(in_key))
     }
 }
 
 impl Decode for f64 {
-    fn decode(value: &Value) -> Result<f64, DecodeError> {
-        decode_scalar(value, false, |n, in_key| n.float(in_key))
+    fn decode(r: &mut ValueReader<'_>) -> Result<f64, DecodeError> {
+        decode_scalar(r, |n, in_key| n.float(in_key))
     }
 }
 
 impl Decode for jiff::SignedDuration {
-    fn decode(value: &Value) -> Result<jiff::SignedDuration, DecodeError> {
-        decode_scalar(value, false, |n, in_key| n.duration(in_key)).map(jiff::SignedDuration::from_nanos)
-    }
-
-    fn decode_key(key: &Value) -> Result<jiff::SignedDuration, DecodeError> {
-        decode_scalar(key, true, |n, in_key| n.duration(in_key)).map(jiff::SignedDuration::from_nanos)
+    fn decode(r: &mut ValueReader<'_>) -> Result<jiff::SignedDuration, DecodeError> {
+        decode_scalar(r, |n, in_key| n.duration(in_key)).map(jiff::SignedDuration::from_nanos)
     }
 }
 
 impl Decode for String {
-    fn decode(value: &Value) -> Result<String, DecodeError> {
-        decode_scalar(value, false, |n, in_key| n.str(in_key).map(str::to_owned))
-    }
-
-    fn decode_key(key: &Value) -> Result<String, DecodeError> {
-        decode_scalar(key, true, |n, in_key| n.str(in_key).map(str::to_owned))
+    fn decode(r: &mut ValueReader<'_>) -> Result<String, DecodeError> {
+        decode_scalar(r, |n, in_key| n.str(in_key).map(str::to_owned))
     }
 }
 
 impl Decode for Vec<u8> {
-    fn decode(value: &Value) -> Result<Vec<u8>, DecodeError> {
-        decode_scalar(value, false, |n, in_key| n.bytes(in_key).map(std::borrow::Cow::into_owned))
+    fn decode(r: &mut ValueReader<'_>) -> Result<Vec<u8>, DecodeError> {
+        decode_scalar(r, |n, in_key| n.bytes(in_key).map(Cow::into_owned))
     }
 }
 
-/// Decodes each item of `items` with its index in the error path.
-fn decode_items<'v, T: Decode>(items: impl IntoIterator<Item = &'v Value>) -> impl Iterator<Item = Result<T, DecodeError>> {
-    items.into_iter().enumerate().map(|(i, item)| T::decode(item).map_err(|e| e.in_index(i)))
+/// Reads the items of a sequence of `kind` into `C`.
+fn decode_items<T: Decode, C: FromIterator<T>>(r: &mut ValueReader<'_>, kind: SeqKind) -> Result<C, DecodeError> {
+    r.open_seq(kind).map_err(|e| r.fail(e))?;
+    let mut items = Vec::new();
+    while r.next_item()? {
+        items.push(r.decode()?);
+    }
+    Ok(items.into_iter().collect())
 }
 
 impl<T: Decode> Decode for Vec<T> {
-    fn decode(value: &Value) -> Result<Vec<T>, DecodeError> {
-        match without_json_variant(value) {
-            Value::List(items) => decode_items(items).collect(),
-            value => Err(DecodeError::expected("list", value)),
-        }
+    fn decode(r: &mut ValueReader<'_>) -> Result<Vec<T>, DecodeError> {
+        decode_items(r, SeqKind::List)
     }
 }
 
 impl<T: Decode> Decode for Box<T> {
-    fn decode(value: &Value) -> Result<Box<T>, DecodeError> {
-        T::decode(value).map(Box::new)
-    }
-
-    fn decode_key(key: &Value) -> Result<Box<T>, DecodeError> {
-        T::decode_key(key).map(Box::new)
+    fn decode(r: &mut ValueReader<'_>) -> Result<Box<T>, DecodeError> {
+        T::decode(r).map(Box::new)
     }
 
     fn decode_missing_field() -> Option<Box<T>> {
@@ -733,15 +698,10 @@ impl<T: Decode> Decode for Box<T> {
 }
 
 impl<T: Decode> Decode for Option<T> {
-    fn decode(value: &Value) -> Result<Option<T>, DecodeError> {
-        match without_json_variant(value) {
-            Value::Unit => Ok(None),
-            Value::Variant(v) if is_option_variant(v) => match &*v.payload {
-                [] => Ok(None),
-                [payload] => T::decode(payload).map(Some),
-                _ => T::decode(value).map(Some),
-            },
-            value => T::decode(value).map(Some),
+    fn decode(r: &mut ValueReader<'_>) -> Result<Option<T>, DecodeError> {
+        match r.some()? {
+            true => r.decode().map(Some),
+            false => Ok(None),
         }
     }
 
@@ -750,79 +710,68 @@ impl<T: Decode> Decode for Option<T> {
     }
 }
 
-/// Decodes the entries of the map `value` into `C`.
-fn decode_map<K: Decode, V: Decode, C: FromIterator<(K, V)>>(value: &Value) -> Result<C, DecodeError> {
-    let value = without_json_variant(value);
-    let Value::Map(entries) = value else { return Err(DecodeError::expected("map", value)) };
-    let key = |k: &Value| K::decode_key(k).map_err(|_| invalid_map_key(&key_text(k)));
-    entries.iter().map(|(k, v)| Ok((key(k)?, V::decode(v).map_err(|e| e.in_key(key_text(k)))?))).collect()
+/// Reads the entries of a map into `C`.
+fn decode_map<K: Decode, V: Decode, C: FromIterator<(K, V)>>(r: &mut ValueReader<'_>) -> Result<C, DecodeError> {
+    r.begin_map()?;
+    let mut entries = Vec::new();
+    while r.next_key()? {
+        let key = r.decode()?;
+        r.map_value()?;
+        entries.push((key, r.decode()?));
+    }
+    Ok(entries.into_iter().collect())
 }
 
 impl<K: Decode + Ord + std::hash::Hash, V: Decode> Decode for HashMap<K, V> {
-    fn decode(value: &Value) -> Result<HashMap<K, V>, DecodeError> {
-        decode_map(value)
+    fn decode(r: &mut ValueReader<'_>) -> Result<HashMap<K, V>, DecodeError> {
+        decode_map(r)
     }
 }
 
 impl<K: Decode + Ord, V: Decode> Decode for BTreeMap<K, V> {
-    fn decode(value: &Value) -> Result<BTreeMap<K, V>, DecodeError> {
-        decode_map(value)
+    fn decode(r: &mut ValueReader<'_>) -> Result<BTreeMap<K, V>, DecodeError> {
+        decode_map(r)
     }
 }
 
 impl<K: Decode + std::hash::Hash + Eq, V: Decode> Decode for indexmap::IndexMap<K, V> {
-    fn decode(value: &Value) -> Result<indexmap::IndexMap<K, V>, DecodeError> {
-        decode_map(value)
-    }
-}
-
-/// Decodes the elements of the set or list `value` into `C`.
-fn decode_set<T: Decode, C: FromIterator<T>>(value: &Value) -> Result<C, DecodeError> {
-    match without_json_variant(value) {
-        Value::Set(items) | Value::List(items) => decode_items(items).collect(),
-        value => Err(DecodeError::expected("set", value)),
+    fn decode(r: &mut ValueReader<'_>) -> Result<indexmap::IndexMap<K, V>, DecodeError> {
+        decode_map(r)
     }
 }
 
 impl<T: Decode + Ord + std::hash::Hash> Decode for HashSet<T> {
-    fn decode(value: &Value) -> Result<HashSet<T>, DecodeError> {
-        decode_set(value)
+    fn decode(r: &mut ValueReader<'_>) -> Result<HashSet<T>, DecodeError> {
+        decode_items(r, SeqKind::Set)
     }
 }
 
 impl<T: Decode + Ord> Decode for BTreeSet<T> {
-    fn decode(value: &Value) -> Result<BTreeSet<T>, DecodeError> {
-        decode_set(value)
-    }
-}
-
-/// Returns the items of the tuple or list `value` if it has `len` items.
-fn tuple_items(value: &Value, len: usize) -> Result<&[Value], DecodeError> {
-    match without_json_variant(value) {
-        Value::Tuple(items) | Value::List(items) if items.len() == len => Ok(items),
-        Value::Tuple(_) | Value::List(_) => Err(DecodeError::new(crate::codec::value_input::length_mismatch(len))),
-        value => Err(DecodeError::expected(&format!("tuple of {len} elements"), value)),
+    fn decode(r: &mut ValueReader<'_>) -> Result<BTreeSet<T>, DecodeError> {
+        decode_items(r, SeqKind::Set)
     }
 }
 
 macro_rules! decode_tuples {
-    ($($len:literal: ($($n:ident $i:tt),+)),* $(,)?) => {$(
+    ($($len:literal: ($($n:ident),+)),* $(,)?) => {$(
         impl<$($n: Decode),+> Decode for ($($n,)+) {
-            fn decode(value: &Value) -> Result<Self, DecodeError> {
-                let items = tuple_items(value, $len)?;
-                Ok(($($n::decode(&items[$i]).map_err(|e| e.in_index($i))?,)+))
+            fn decode(r: &mut ValueReader<'_>) -> Result<Self, DecodeError> {
+                r.begin_tuple($len)?;
+                let value = ($(r.element::<$n>($len)?,)+);
+                r.end_tuple($len)?;
+                Ok(value)
             }
         }
     )*};
 }
 decode_tuples! {
-    2: (A 0, B 1),
-    3: (A 0, B 1, C 2),
-    4: (A 0, B 1, C 2, D 3),
-    5: (A 0, B 1, C 2, D 3, E 4),
-    6: (A 0, B 1, C 2, D 3, E 4, F 5),
-    7: (A 0, B 1, C 2, D 3, E 4, F 5, G 6),
-    8: (A 0, B 1, C 2, D 3, E 4, F 5, G 6, H 7),
+    2: (A, B),
+    3: (A, B, C),
+    4: (A, B, C, D),
+    5: (A, B, C, D, E),
+    6: (A, B, C, D, E, F),
+    7: (A, B, C, D, E, F, G),
+    8: (A, B, C, D, E, F, G, H),
 }
 
 /// Returns the JSON form of `value` if it is a `json.Json` variant, such as
@@ -830,11 +779,16 @@ decode_tuples! {
 pub(crate) fn without_json_variant(mut value: &Value) -> &Value {
     static UNIT: Value = Value::Unit;
     while let Value::Variant(v) = value
-        && is_qualified_name(&v.variant.type_name, Some(<Json as NamedType>::MODULE), <Json as NamedType>::NAME)
+        && is_json_variant(v)
     {
         value = v.payload.first().unwrap_or(&UNIT);
     }
     value
+}
+
+/// Returns `true` if `v` is a variant of `json.Json`.
+pub(crate) fn is_json_variant(v: &VariantValue) -> bool {
+    is_qualified_name(&v.variant.type_name, Some(<Json as NamedType>::MODULE), <Json as NamedType>::NAME)
 }
 
 /// Returns `true` if `v` is a variant of the prelude `Option` type.

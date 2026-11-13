@@ -6,11 +6,11 @@
 //! `bytes`.
 
 use super::fast::{Schema, SchemaId};
-use super::value_input::{self, InputNode};
+use super::value_input::{self, ValueReader};
 use super::{Budget, DecodeFail, DecodeFormat, DecodeResult, EncodeFormat, SeqKind};
 use crate::codec::MAX_NESTING_DEPTH;
 use crate::stdlib::json::Json;
-use crate::value::{Decode, NativeValue, StructValue, Value, VariantDesc, VariantValue, is_option_variant, key_text, without_json_variant};
+use crate::value::{NativeValue, StructValue, Value, VariantDesc, VariantValue, is_json_variant, is_option_variant};
 use crate::vm::bytecode::Program;
 use crate::vm::value::{Obj, VmValue};
 use crate::vm::{Fail, Vm, fail, internal};
@@ -537,366 +537,118 @@ impl EncodeFormat for ValueEncoder {
     }
 }
 
-/// A step from a node of the input to one of its parts.
-#[derive(Clone, Copy)]
-enum Step {
-    /// An item of a list, tuple, or set, a field of a struct, or an element
-    /// of a variant payload.
-    Part(usize),
-    /// The key of a map entry.
-    Key(usize),
-    /// The value of a map entry.
-    Value(usize),
-}
-
-/// The parts of an open container of [`ValueDecoder`].
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum OpenParts {
-    /// The items of a sequence, or the elements of a positional payload.
-    Items,
-    /// The entries of a map, each a key and then a value.
-    Entries,
-    /// The fields of a struct or of a named payload.
-    Fields,
-    /// The entries of a map that has the JSON form of a struct.
-    MapFields,
-}
-
-/// An open container of [`ValueDecoder`]: the number of steps to it, its
-/// parts, the index of its next part, and its number of parts.
-#[derive(Clone, Copy)]
-struct Open {
-    depth: usize,
-    parts: OpenParts,
-    next: usize,
-    len: usize,
-}
-
-/// The state of a [`ValueDecoder`] that [`DecodeFormat::mark`] keeps.
-#[derive(Clone, Copy)]
-struct ValueMark {
-    steps: usize,
-    open: usize,
-    top: Option<Open>,
-    ready: bool,
-    payload: bool,
-    in_key: bool,
-}
-
-/// Reads a [`Value`]. The decoder keeps its position in the value, so that
-/// it reads each part in place.
+/// Reads a host [`Value`] with a [`ValueReader`], which keeps its position
+/// in the value.
 pub(crate) struct ValueDecoder {
-    root: Value,
-    /// The steps from `root` to the node that the next operation reads.
-    steps: Vec<Step>,
-    open: Vec<Open>,
-    /// Whether the node at `steps` waits for a read.
-    ready: bool,
-    /// Whether the node is a variant whose payload the next operation reads.
-    payload: bool,
-    /// Whether the next operations read a map key.
-    in_key: bool,
-    marks: Vec<ValueMark>,
-}
-
-/// Returns part `step` of `node`, without the `json.Json` variants of `node`.
-fn part(node: &Value, step: Step) -> &Value {
-    static UNIT: Value = Value::Unit;
-    let found = match (without_json_variant(node), step) {
-        (Value::List(items) | Value::Tuple(items) | Value::Set(items), Step::Part(i)) => items.get(i),
-        (Value::Struct(s), Step::Part(i)) => s.fields.get(i),
-        (Value::Variant(v), Step::Part(i)) => v.payload.get(i),
-        (Value::Map(entries), Step::Key(i)) => entries.get(i).map(|e| &e.0),
-        (Value::Map(entries), Step::Value(i)) => entries.get(i).map(|e| &e.1),
-        _ => None,
-    };
-    found.unwrap_or(&UNIT)
+    reader: ValueReader<'static>,
 }
 
 impl ValueDecoder {
     pub(crate) fn new(value: Value) -> ValueDecoder {
-        ValueDecoder { root: value, steps: Vec::new(), open: Vec::new(), ready: true, payload: false, in_key: false, marks: Vec::new() }
-    }
-
-    /// Returns the node at the first `depth` steps, without its `json.Json`
-    /// variants.
-    fn node_at(&self, depth: usize) -> &Value {
-        without_json_variant(self.steps[..depth].iter().fold(&self.root, |node, &step| part(node, step)))
-    }
-
-    /// Returns the node that the next operation reads.
-    fn node(&self) -> DecodeResult<&Value> {
-        if !self.ready {
-            return Err(Fail::internal("decode: no value to read").into());
-        }
-        Ok(self.node_at(self.steps.len()))
-    }
-
-    /// Returns the scalar rules of the node that the next operation reads,
-    /// and `true` if it is a map key.
-    fn input(&self) -> DecodeResult<(InputNode<'_>, bool)> {
-        Ok((InputNode::of(self.node()?), self.in_key))
-    }
-
-    /// Reads the node that the next operation reads with `read`.
-    fn read<T>(&mut self, read: impl FnOnce(InputNode<'_>, bool) -> value_input::InputResult<T>) -> DecodeResult<T> {
-        let (node, in_key) = self.input()?;
-        let r = read(node, in_key)?;
-        self.ready = false;
-        Ok(r)
-    }
-
-    /// Opens the node as a container of `len` `parts`.
-    fn enter(&mut self, parts: OpenParts, len: usize) -> DecodeResult<()> {
-        if self.open.len() >= MAX_NESTING_DEPTH {
-            return Err(DecodeFail::Mismatch("value too deeply nested to decode".into()));
-        }
-        self.open.push(Open { depth: self.steps.len(), parts, next: 0, len });
-        (self.ready, self.payload) = (false, false);
-        Ok(())
-    }
-
-    /// Moves to the next part of the innermost container, which has `parts`,
-    /// with `step`. Returns the index of the part, or `None` after the last.
-    fn advance(&mut self, parts: OpenParts, step: fn(usize) -> Step) -> DecodeResult<Option<usize>> {
-        let Some(top) = self.open.last_mut().filter(|o| o.parts == parts) else {
-            return Err(Fail::internal("decode: no open container").into());
-        };
-        let (depth, i) = (top.depth, top.next);
-        self.steps.truncate(depth);
-        (self.payload, self.in_key) = (false, false);
-        if i >= top.len {
-            self.open.pop();
-            self.ready = false;
-            return Ok(None);
-        }
-        top.next += 1;
-        self.steps.push(step(i));
-        self.ready = true;
-        Ok(Some(i))
+        ValueDecoder { reader: ValueReader::owned(value) }
     }
 }
 
 impl DecodeFormat for ValueDecoder {
     fn unit(&mut self, _: &mut Vm) -> DecodeResult<()> {
-        self.read(|n, in_key| n.unit(in_key))
+        Ok(self.reader.read(|n, in_key| n.unit(in_key))?)
     }
 
     fn bool(&mut self, _: &mut Vm) -> DecodeResult<bool> {
-        self.read(|n, in_key| n.bool(in_key))
+        Ok(self.reader.read(|n, in_key| n.bool(in_key))?)
     }
 
     fn int(&mut self, _: &mut Vm) -> DecodeResult<i64> {
-        self.read(|n, in_key| n.int(in_key))
+        Ok(self.reader.read(|n, in_key| n.int(in_key))?)
     }
 
     fn float(&mut self, _: &mut Vm) -> DecodeResult<f64> {
-        self.read(|n, in_key| n.float(in_key))
+        Ok(self.reader.read(|n, in_key| n.float(in_key))?)
     }
 
     fn duration(&mut self, _: &mut Vm) -> DecodeResult<i64> {
-        self.read(|n, in_key| n.duration(in_key))
+        Ok(self.reader.read(|n, in_key| n.duration(in_key))?)
     }
 
     fn str(&mut self, vm: &mut Vm) -> DecodeResult<VmValue> {
-        let (node, in_key) = self.input()?;
-        let s = node.str(in_key)?;
+        let s = self.reader.peek(|n, in_key| n.str(in_key))?;
         if s.len() > 1024 {
             vm.check_memory(s.len())?;
         }
         vm.charge_bytes(s.len())?;
         let v = vm.new_str(s);
-        self.ready = false;
+        self.reader.skip();
         Ok(v)
     }
 
     fn bytes(&mut self, vm: &mut Vm) -> DecodeResult<VmValue> {
-        let (node, in_key) = self.input()?;
-        let b = node.bytes(in_key)?;
+        let b = self.reader.peek(|n, in_key| n.bytes(in_key))?;
         vm.check_memory(b.len())?;
         vm.charge_bytes(b.len())?;
         let v = vm.heap.new_bytes(b.into_owned());
-        self.ready = false;
+        self.reader.skip();
         Ok(v)
     }
 
     fn native_text(&mut self, _: &mut Vm, name: &str) -> DecodeResult<String> {
-        self.read(|n, in_key| n.native_text(name, in_key).map(str::to_owned))
+        Ok(self.reader.read(|n, in_key| n.native_text(name, in_key).map(str::to_owned))?)
     }
 
     fn range(&mut self, _: &mut Vm) -> DecodeResult<(i64, i64, bool)> {
-        self.read(|node, in_key| match node {
-            InputNode::Range(start, end, inclusive) => Ok((start, end, inclusive)),
-            InputNode::Value(Value::Map(entries)) if !in_key => {
-                value_input::range_of(entries.iter().map(|(k, v)| (InputNode::of(k), InputNode::of(v))))
-            }
-            node => Err(node.mismatch("Range", in_key)),
-        })
+        Ok(self.reader.range()?)
     }
 
     fn some(&mut self, _: &mut Vm) -> DecodeResult<bool> {
-        if self.payload {
-            return Ok(true);
-        }
-        match self.node()? {
-            Value::Unit => {
-                self.ready = false;
-                Ok(false)
-            }
-            Value::Variant(option) if is_option_variant(option) && option.payload.len() <= 1 => {
-                if option.payload.is_empty() {
-                    self.ready = false;
-                    return Ok(false);
-                }
-                self.steps.push(Step::Part(0));
-                Ok(true)
-            }
-            _ => Ok(true),
-        }
+        Ok(self.reader.read_some()?)
     }
 
     fn begin_seq(&mut self, _: &mut Vm, kind: SeqKind) -> DecodeResult<()> {
-        let payload = self.payload;
-        let node = self.node()?;
-        let len = match (kind, node) {
-            (SeqKind::Tuple(_), Value::Variant(v)) if payload => v.payload.len(),
-            (SeqKind::List, Value::List(items)) => items.len(),
-            (SeqKind::Set, Value::Set(items) | Value::List(items)) => items.len(),
-            (SeqKind::Tuple(_), Value::Tuple(items) | Value::List(items)) => items.len(),
-            (SeqKind::List, v) => return Err(InputNode::of(v).mismatch("list", self.in_key).into()),
-            (SeqKind::Set, v) => return Err(InputNode::of(v).mismatch("set", self.in_key).into()),
-            (SeqKind::Tuple(n), v) => return Err(InputNode::of(v).mismatch(&format!("tuple of {n} elements"), self.in_key).into()),
-        };
-        if let SeqKind::Tuple(n) = kind
-            && len != n
-        {
-            return Err(DecodeFail::Mismatch(self.length_mismatch(n)));
-        }
-        self.enter(OpenParts::Items, len)
+        Ok(self.reader.open_seq(kind)?)
     }
 
     fn next_item(&mut self, _: &mut Vm) -> DecodeResult<bool> {
-        Ok(self.advance(OpenParts::Items, Step::Part)?.is_some())
+        Ok(self.reader.advance_item()?)
     }
 
     fn begin_map(&mut self, _: &mut Vm) -> DecodeResult<()> {
-        match self.node()? {
-            Value::Map(entries) if !self.payload => {
-                let len = entries.len();
-                self.enter(OpenParts::Entries, len)
-            }
-            v => Err(InputNode::of(v).mismatch("map", self.in_key).into()),
-        }
+        Ok(self.reader.open_map()?)
     }
 
     fn next_entry(&mut self, _: &mut Vm) -> DecodeResult<Option<Cow<'_, str>>> {
-        let Some(i) = self.advance(OpenParts::Entries, Step::Key)? else { return Ok(None) };
-        self.in_key = true;
-        let key = match self.node_at(self.steps.len() - 1) {
-            Value::Map(entries) => entries.get(i).map(|(k, _)| key_text(k)),
-            _ => None,
-        };
-        Ok(Some(key.unwrap_or_default()))
+        Ok(self.reader.next_entry()?)
     }
 
     fn map_value(&mut self, _: &mut Vm) -> DecodeResult<()> {
-        let Some(top) = self.open.last().filter(|o| o.parts == OpenParts::Entries && o.next > 0) else {
-            return Err(Fail::internal("map_value: no open map").into());
-        };
-        let (depth, i) = (top.depth, top.next - 1);
-        self.steps.truncate(depth);
-        self.steps.push(Step::Value(i));
-        (self.ready, self.payload, self.in_key) = (true, false, false);
-        Ok(())
+        Ok(self.reader.enter_map_value()?)
     }
 
     fn begin_fields(&mut self, _: &mut Vm, name: &str) -> DecodeResult<()> {
-        let payload = self.payload;
-        let (parts, len) = match self.node()? {
-            Value::Variant(v) if payload && v.variant.fields.is_some() => (OpenParts::Fields, v.payload.len()),
-            Value::Struct(s) if !payload => (OpenParts::Fields, s.fields.len()),
-            Value::Map(entries) if !payload => {
-                if let Some((key, _)) = entries.iter().find(|(k, _)| !matches!(without_json_variant(k), Value::Str(_))) {
-                    return Err(InputNode::of(key).mismatch("str key", false).into());
-                }
-                (OpenParts::MapFields, entries.len())
-            }
-            v => return Err(InputNode::of(v).mismatch(if name.is_empty() { "map" } else { name }, self.in_key).into()),
-        };
-        self.enter(parts, len)
+        Ok(self.reader.open_fields(name)?)
     }
 
     fn next_field(&mut self, _: &mut Vm) -> DecodeResult<Option<Cow<'_, str>>> {
-        let parts = match self.open.last() {
-            Some(o) if o.parts == OpenParts::MapFields => OpenParts::MapFields,
-            _ => OpenParts::Fields,
-        };
-        let step = if parts == OpenParts::MapFields { Step::Value } else { Step::Part };
-        let Some(i) = self.advance(parts, step)? else { return Ok(None) };
-        let name = match self.node_at(self.steps.len() - 1) {
-            Value::Struct(s) => s.ty.fields.get(i).map(String::as_str),
-            Value::Variant(v) => v.variant.fields.as_ref().and_then(|names| names.get(i)).map(String::as_str),
-            Value::Map(entries) => entries.get(i).and_then(|(k, _)| match without_json_variant(k) {
-                Value::Str(k) => Some(k.as_str()),
-                _ => None,
-            }),
-            _ => None,
-        };
-        Ok(Some(Cow::Borrowed(name.unwrap_or_default())))
+        Ok(self.reader.next_field_name()?.map(Cow::Borrowed))
     }
 
     fn skip(&mut self, _: &mut Vm) -> DecodeResult<()> {
-        self.ready = false;
+        self.reader.skip();
         Ok(())
     }
 
     fn variant(&mut self, _: &mut Vm, name: &str) -> DecodeResult<(Cow<'_, str>, bool)> {
-        let in_key = self.in_key;
-        let payload = match self.node()? {
-            Value::Str(_) => false,
-            Value::Variant(variant) => !variant.payload.is_empty(),
-            Value::Map(entries) if entries.len() == 1 => match without_json_variant(&entries[0].0) {
-                Value::Str(_) => true,
-                key => return Err(InputNode::of(key).mismatch("str key", false).into()),
-            },
-            Value::Map(entries) => {
-                let what = if entries.is_empty() { "expected a variant" } else { "expected a single variant" };
-                return Err(DecodeFail::Mismatch(format!("{what} of {name}")));
-            }
-            v => return Err(InputNode::of(v).mismatch(name, in_key).into()),
-        };
-        let depth = self.steps.len();
-        match self.node_at(depth) {
-            Value::Map(_) => self.steps.push(Step::Value(0)),
-            _ if payload => self.payload = true,
-            _ => self.ready = false,
-        }
-        let tag = match self.node_at(depth) {
-            Value::Str(tag) => tag.as_str(),
-            Value::Variant(variant) => variant.variant.name.as_str(),
-            Value::Map(entries) => match without_json_variant(&entries[0].0) {
-                Value::Str(tag) => tag.as_str(),
-                _ => "",
-            },
-            _ => "",
-        };
+        let (tag, payload) = self.reader.read_variant(name)?;
         Ok((Cow::Borrowed(tag), payload))
     }
 
     fn end_variant(&mut self, _: &mut Vm, _: &str) -> DecodeResult<()> {
+        self.reader.end_variant();
         Ok(())
     }
 
     fn json(&mut self, vm: &mut Vm) -> DecodeResult<VmValue> {
-        let json = {
-            let node = self.node()?;
-            if self.payload {
-                return Err(InputNode::of(node).mismatch("Json", self.in_key).into());
-            }
-            Json::decode(node).map_err(|e| DecodeFail::Mismatch(e.message().to_string()))?
-        };
+        let json = ValueReader::new(self.reader.node()?).decode::<Json>().map_err(|e| DecodeFail::Mismatch(e.message().to_string()))?;
         let v = crate::stdlib::json::json_into_vm(vm, json)?;
-        self.ready = false;
+        self.reader.skip();
         Ok(v)
     }
 
@@ -905,9 +657,9 @@ impl DecodeFormat for ValueDecoder {
     }
 
     fn value(&mut self, _: &mut Vm) -> DecodeResult<Value> {
-        let v = self.node()?.clone();
-        self.ready = false;
-        Ok(v)
+        let node = self.reader.node()?.clone();
+        self.reader.skip();
+        Ok(node)
     }
 
     fn length_mismatch(&self, len: usize) -> String {
@@ -915,42 +667,24 @@ impl DecodeFormat for ValueDecoder {
     }
 
     fn mark(&mut self) -> usize {
-        let (steps, open, top) = (self.steps.len(), self.open.len(), self.open.last().copied());
-        self.marks.push(ValueMark { steps, open, top, ready: self.ready, payload: self.payload, in_key: self.in_key });
-        self.marks.len() - 1
+        self.reader.mark()
     }
 
-    // A read after the mark changes only the steps and the containers that
-    // it adds.
     fn rewind(&mut self, mark: usize) {
-        let Some(&m) = self.marks.get(mark) else { return };
-        self.steps.truncate(m.steps);
-        self.open.truncate(m.open);
-        if let (Some(top), Some(last)) = (m.top, self.open.last_mut()) {
-            *last = top;
-        }
-        (self.ready, self.payload, self.in_key) = (m.ready, m.payload, m.in_key);
+        self.reader.rewind(mark);
     }
 
     fn release(&mut self, mark: usize) {
-        self.marks.truncate(mark);
+        self.reader.release(mark);
     }
 
     fn rewind_to_start(&mut self) {
-        self.steps.clear();
-        self.open.clear();
-        (self.ready, self.payload, self.in_key) = (true, false, false);
+        self.reader.rewind_to_start();
     }
 
     fn heap_size(&self) -> usize {
-        self.steps.capacity() * size_of::<Step>()
-            + self.open.capacity() * size_of::<Open>()
-            + self.marks.capacity() * size_of::<ValueMark>()
+        self.reader.heap_size()
     }
-}
-
-fn is_json_variant(v: &VariantValue) -> bool {
-    crate::value::is_qualified_name(&v.variant.type_name, Some("json"), "Json")
 }
 
 /// Writes `value` to `f` in its JSON form, with the operations of the

@@ -1651,7 +1651,7 @@ fn rust_default_error(owner: &str, field: &str, ty: &str) -> String {
 
 #[test]
 fn rust_field_defaults_cannot_hold_native_or_opaque_values() {
-    use sandlang::value::{Decode, DecodeError, Encode};
+    use sandlang::value::{Decode, DecodeError, Encode, ValueReader};
     #[derive(Default, sandlang::SandStruct)]
     #[sand(module = "lab", no_value)]
     struct Hook {
@@ -1663,8 +1663,8 @@ fn rust_field_defaults_cannot_hold_native_or_opaque_values() {
         }
     }
     impl Decode for Hook {
-        fn decode(value: &Value) -> Result<Hook, DecodeError> {
-            Err(DecodeError::expected("Hook", value))
+        fn decode(r: &mut ValueReader<'_>) -> Result<Hook, DecodeError> {
+            Err(r.error("expected Hook"))
         }
     }
     #[derive(sandlang::SandStruct)]
@@ -1725,7 +1725,7 @@ fn rust_field_defaults_are_bounded() {
 
 #[test]
 fn rust_field_defaults_must_be_values_of_declared_types() {
-    use sandlang::value::{Decode, DecodeError, Encode};
+    use sandlang::value::{Decode, DecodeError, Encode, ValueReader};
     #[derive(Default, sandlang::SandEnum)]
     #[sand(module = "lab", no_value)]
     enum Shade {
@@ -1739,8 +1739,8 @@ fn rust_field_defaults_must_be_values_of_declared_types() {
         }
     }
     impl Decode for Shade {
-        fn decode(value: &Value) -> Result<Shade, DecodeError> {
-            Err(DecodeError::expected("Shade", value))
+        fn decode(r: &mut ValueReader<'_>) -> Result<Shade, DecodeError> {
+            Err(r.error("expected Shade"))
         }
     }
     #[derive(Default, sandlang::SandStruct)]
@@ -1755,8 +1755,8 @@ fn rust_field_defaults_must_be_values_of_declared_types() {
         }
     }
     impl Decode for Spot {
-        fn decode(value: &Value) -> Result<Spot, DecodeError> {
-            Err(DecodeError::expected("Spot", value))
+        fn decode(r: &mut ValueReader<'_>) -> Result<Spot, DecodeError> {
+            Err(r.error("expected Spot"))
         }
     }
     #[derive(sandlang::SandStruct)]
@@ -4611,7 +4611,7 @@ fn decode_reads_json_variants_in_their_json_form() {
 
 #[test]
 fn decode_errors_give_the_path_and_the_cause() {
-    use sandlang::value::{Decode, DecodeError, Encode};
+    use sandlang::value::{DecodeError, Encode};
     let mut purchase = sample_purchase().encode();
     let Value::Struct(fields) = &mut purchase else { panic!() };
     fields.fields[1] = Value::List(vec![Value::Variant(VariantValue::new("shop.Delivery", "Shipped", [Value::Int(2), Value::Unit]))]);
@@ -4629,9 +4629,11 @@ fn decode_errors_give_the_path_and_the_cause() {
     for (r, message) in cases {
         assert_eq!(r.unwrap_err().to_string(), message);
     }
-    let nested = DecodeError::new("bad").in_key("unit price").in_index(2).in_key("lines");
-    assert_eq!(nested.to_string(), "$.lines[2][\"unit price\"]: bad");
-    assert_eq!(<Vec<i64> as Decode>::decode(&Value::List(vec![Value::Int(1), Value::Unit])).unwrap_err().path(), "$[1]");
+    let line = Value::Map(vec![(Value::Str("unit price".into()), Value::Str("x".into()))]);
+    let lines = Value::List(vec![Value::Map(Vec::new()), Value::Map(Vec::new()), line]);
+    let nested = Value::Map(vec![(Value::Str("lines".into()), lines)]).decode::<HashMap<String, Vec<HashMap<String, i64>>>>();
+    assert_eq!(nested.unwrap_err().to_string(), "$.lines[2][\"unit price\"]: expected int, found str");
+    assert_eq!(Value::List(vec![Value::Int(1), Value::Unit]).decode::<Vec<i64>>().unwrap_err().path(), "$[1]");
 }
 
 #[test]

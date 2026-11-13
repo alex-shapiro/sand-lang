@@ -807,7 +807,10 @@ impl<'p> DecodeWalk<'p> {
                         _ => None,
                     });
                     let key = self.key_texts.get(text..end.unwrap_or(self.key_texts.len())).unwrap_or_default();
-                    Frame::Map { key: entry_key.is_some().then(|| key.to_owned()), pending: None }
+                    match entry_key {
+                        Some(_) => Frame::Map { key: Some(key.to_owned()), pending: None },
+                        None => Frame::Map { key: None, pending: Some(String::new()) },
+                    }
                 }
                 DecodeFrame::Fields { id, variant, field, guess, .. } => Frame::Fields { id, variant, field, guess },
                 DecodeFrame::Variant(id) => Frame::Variant { id },

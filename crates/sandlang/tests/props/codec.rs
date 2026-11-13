@@ -911,16 +911,11 @@ fn host_value() -> impl Strategy<Value = sandlang::value::Value> {
             prop::collection::vec(inner.clone(), 0..3).prop_map(Value::List),
             prop::collection::vec(inner.clone(), 0..3).prop_map(Value::Tuple),
             prop::collection::vec(inner.clone(), 0..3).prop_map(Value::Set),
-            // A host map has each key once.
-            prop::collection::vec((key, inner), 0..3).prop_map(|mut entries| {
-                let mut seen = Vec::new();
-                entries.retain(|(k, _)| {
-                    let new = !seen.contains(k);
-                    seen.push(k.clone());
-                    new
-                });
-                Value::Map(entries)
-            }),
+            // A host map can have a key twice, as a host builds it.
+            prop::collection::vec((key, inner.clone()), 0..4).prop_map(Value::Map),
+            // A positional payload of a variant whose type has a named one.
+            prop::collection::vec(inner, 0..3)
+                .prop_map(|payload| { Value::Variant(sandlang::value::VariantValue::new("rs.RsShape", "Rect", payload)) }),
         ]
     })
 }
@@ -951,7 +946,7 @@ fn rust_decodes(value: &sandlang::value::Value) -> Vec<String> {
     use indexmap::IndexMap;
     use sandlang::value::{Decode, Encode};
     fn show<T: Decode + Encode>(value: &sandlang::value::Value) -> String {
-        match T::decode(value) {
+        match value.decode::<T>() {
             Ok(v) => format!("{:?}", v.encode()),
             Err(e) => e.to_string(),
         }

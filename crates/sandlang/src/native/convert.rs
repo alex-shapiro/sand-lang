@@ -605,8 +605,8 @@ macro_rules! __value_type_impls {
             }
         }
         impl $crate::value::Decode for $t {
-            fn decode(value: &$crate::value::Value) -> ::std::result::Result<Self, $crate::value::DecodeError> {
-                $crate::native::convert::decode_value_type(value)
+            fn decode(r: &mut $crate::value::ValueReader<'_>) -> ::std::result::Result<Self, $crate::value::DecodeError> {
+                $crate::native::convert::decode_value_type(r)
             }
         }
     };
@@ -624,10 +624,10 @@ pub fn encode_value_type<T: ValueType>(type_name: &TypeNameCell, x: &T) -> Value
 }
 
 #[doc(hidden)]
-pub fn decode_value_type<T: ValueType>(value: &Value) -> Result<T, DecodeError> {
+pub fn decode_value_type<T: ValueType>(r: &mut crate::value::ValueReader<'_>) -> Result<T, DecodeError> {
     let name = qualified_name(qualified_name_module(T::MODULE), T::NAME);
-    let text = crate::value::decode_scalar(value, false, |n, in_key| n.native_text(&name, in_key))?;
-    T::parse(text).map_err(DecodeError::new)
+    let text = crate::value::decode_scalar(r, |n, in_key| n.native_text(&name, in_key).map(str::to_owned))?;
+    T::parse(&text).map_err(|e| r.error(e))
 }
 
 #[doc(hidden)]

@@ -374,13 +374,22 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
         let mut binds = Vec::new();
         let mut snames = Vec::new();
         let mut field_decodes = Vec::new();
+        let (mut slot_decls, mut slot_arms, mut payload_names) = (Vec::new(), Vec::new(), Vec::new());
+        let len = v.fields.len();
         for (k, f) in v.fields.iter().enumerate() {
             let (fname, fty) = (f.ident.as_ref(), &f.ty);
+            let slot = format_ident!("field_{k}");
             let canonical = type_params.replace_self(krate, fty);
             let sname = match fname {
                 Some(n) => {
                     let lit = parse_variant_field_name(f, n)?;
-                    field_decodes.push(quote!(#n: payload.field::<#fty>(#k, ::std::option::Option::Some(#lit))?));
+                    field_decodes.push(quote!(#n: match #slot {
+                        ::std::option::Option::Some(v) => v,
+                        ::std::option::Option::None => #krate::native::decode_missing::<#fty>(r, #lit)?,
+                    }));
+                    slot_decls.push(quote!(let mut #slot: ::std::option::Option<#fty> = ::std::option::Option::None;));
+                    slot_arms.push(quote!(#k => #slot = ::std::option::Option::Some(r.decode()?)));
+                    payload_names.push(lit.clone());
                     if snames.contains(&lit.value()) {
                         return Err(Error::new_spanned(&lit, format!("the Sand payload name `{}` is used twice", lit.value())));
                     }
@@ -389,7 +398,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
                     quote!(::std::option::Option::Some(#lit))
                 }
                 None => {
-                    field_decodes.push(quote!(payload.field::<#fty>(#k, ::std::option::Option::None)?));
+                    field_decodes.push(quote!(r.element::<#fty>(#len)?));
                     quote!(::std::option::Option::None)
                 }
             };
@@ -427,8 +436,26 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
         indexes.push(quote! { #skip => #i });
         decodes.push(match &v.fields {
             Fields::Unit => quote! { #i => #ty::#ident },
-            Fields::Unnamed(_) => quote! { #i => #ty::#ident(#(#field_decodes),*) },
-            Fields::Named(_) => quote! { #i => #ty::#ident { #(#field_decodes),* } },
+            Fields::Unnamed(_) => quote! { #i => {
+                r.begin_tuple(#len)?;
+                let value = #ty::#ident(#(#field_decodes),*);
+                r.end_tuple(#len)?;
+                r.end_variant();
+                value
+            } },
+            Fields::Named(_) => quote! { #i => {
+                #(#slot_decls)*
+                #krate::native::decode_fields(r, "", &[#(#payload_names),*], |r, i| {
+                    match i {
+                        #(#slot_arms,)*
+                        _ => {}
+                    }
+                    ::std::result::Result::Ok(())
+                })?;
+                let value = #ty::#ident { #(#field_decodes),* };
+                r.end_variant();
+                value
+            } },
         });
         reads.push(quote! { #i => #build });
         let write = match names.is_empty() {
@@ -456,11 +483,10 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
             }
             impl #params #krate::value::Decode for #ty #args #decode_where {
                 #[allow(unused_variables)]
-                fn decode(value: &#krate::value::Value) -> ::std::result::Result<Self, #krate::value::DecodeError> {
-                    let (index, payload) = #krate::native::decode_variant::<Self>(value)?;
-                    ::std::result::Result::Ok(match index {
+                fn decode(r: &mut #krate::value::ValueReader<'_>) -> ::std::result::Result<Self, #krate::value::DecodeError> {
+                    ::std::result::Result::Ok(match #krate::native::decode_variant::<Self>(r)? {
                         #(#decodes,)*
-                        _ => return ::std::result::Result::Err(#krate::value::DecodeError::new("unknown variant")),
+                        _ => return ::std::result::Result::Err(r.error("unknown variant")),
                     })
                 }
             }
@@ -596,20 +622,17 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
         checks.push(assert_field_name(krate, &name, true));
         let (fty, doc) = (&f.ty, doc_expr(&f.attrs));
         let canonical = type_params.replace_self(krate, fty);
-        let read = quote! { #krate::native::decode_field::<#fty>(fields.values[#i], #name)? };
         let slot = syn::Ident::new(&format!("field_{i}"), ident.span());
-        let decode = match &default {
-            None => read,
-            Some(value) => {
-                let value = value
-                    .as_ref()
-                    .map_or_else(|| quote!(<#fty as ::std::default::Default>::default()), |e| quote!(::std::convert::Into::into(#e)));
-                quote! { match fields.values[#i] {
-                    ::std::option::Option::None => #value,
-                    ::std::option::Option::Some(_) => #read,
-                } }
-            }
+        let omitted = match &default {
+            None => quote! { #krate::native::decode_missing::<#fty>(r, #name)? },
+            Some(value) => value
+                .as_ref()
+                .map_or_else(|| quote!(<#fty as ::std::default::Default>::default()), |e| quote!(::std::convert::Into::into(#e))),
         };
+        let decode = quote! { match #slot {
+            ::std::option::Option::Some(v) => v,
+            ::std::option::Option::None => #omitted,
+        } };
         decodes.push((ident.clone(), slot, fty.clone(), decode));
         let default = match default {
             None => quote!(::std::option::Option::None),
@@ -642,12 +665,12 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
     let sand_type = expand_sand_type(input, krate, &type_params);
     let ConversionGenerics { params, args, reflection_where, from_vm_value_where, into_vm_value_where, encode_where, decode_where } =
         ConversionGenerics::new(input, krate, &type_params);
-    let count = fields.len();
     let idents: Vec<_> = decodes.iter().map(|d| d.0.clone()).collect();
     let slots: Vec<_> = decodes.iter().map(|d| d.1.clone()).collect();
     let slot_types: Vec<_> = decodes.iter().map(|d| d.2.clone()).collect();
     let arms: Vec<_> = (0..decodes.len()).collect();
-    let arm_values: Vec<_> = decodes.iter().map(|d| d.3.clone()).collect();
+    let field_values: Vec<_> = decodes.iter().map(|d| d.3.clone()).collect();
+    let field_names = &names;
     let encode = (!attrs.no_value).then(|| {
         quote! {
             impl #params #krate::value::Encode for #ty #args #encode_where {
@@ -658,19 +681,16 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
             }
             impl #params #krate::value::Decode for #ty #args #decode_where {
                 #[allow(unused_variables, unused_mut)]
-                fn decode(value: &#krate::value::Value) -> ::std::result::Result<Self, #krate::value::DecodeError> {
-                    let fields = #krate::native::decode_struct_fields::<Self, #count>(value)?;
+                fn decode(r: &mut #krate::value::ValueReader<'_>) -> ::std::result::Result<Self, #krate::value::DecodeError> {
                     #(let mut #slots: ::std::option::Option<#slot_types> = ::std::option::Option::None;)*
-                    // The fields decode in the order of the input, as the
-                    // Sand `Decoder` reads them, so that the first error is
-                    // the same.
-                    for i in fields.order {
+                    #krate::native::decode_fields(r, <Self as #krate::native::NamedType>::NAME, &[#(#field_names),*], |r, i| {
                         match i {
-                            #(#arms => #slots = ::std::option::Option::Some(#arm_values),)*
+                            #(#arms => #slots = ::std::option::Option::Some(r.decode()?),)*
                             _ => {}
                         }
-                    }
-                    ::std::result::Result::Ok(#ty { #(#idents: #slots.ok_or_else(|| #krate::value::DecodeError::new("missing field"))?),* })
+                        ::std::result::Result::Ok(())
+                    })?;
+                    ::std::result::Result::Ok(#ty { #(#idents: #field_values),* })
                 }
             }
         }

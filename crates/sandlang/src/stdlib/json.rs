@@ -11,7 +11,7 @@ use crate::native::convert::{Conversion, FromVmValue, HostError, IntoVmValue, mi
 use crate::native::ty::{Param, VmVal};
 use crate::native::{EnumType, NamedType, NativeModule, variant_index};
 use crate::native::{VariantDescCell, encode_variant};
-use crate::value::{Decode, DecodeError, Encode, Value, without_json_variant};
+use crate::value::{Decode, DecodeError, Encode, Value, ValueReader};
 use crate::vm::bytecode::Program;
 use crate::vm::compare::str_hash;
 use crate::vm::heap::Staging;
@@ -82,17 +82,19 @@ impl Encode for Json {
 
 /// Accepts a `Json` variant and any `Value` in JSON form.
 impl Decode for Json {
-    fn decode(value: &Value) -> Result<Json, DecodeError> {
-        Ok(match without_json_variant(value) {
+    fn decode(r: &mut ValueReader<'_>) -> Result<Json, DecodeError> {
+        let scalar = match r.node().map_err(|e| r.fail(e))? {
             Value::Unit => Json::Null,
-            Value::Bool(b) => Json::Bool(*b),
-            Value::Int(i) => Json::Int(*i),
-            Value::Float(f) => Json::Float(*f),
+            &Value::Bool(b) => Json::Bool(b),
+            &Value::Int(i) => Json::Int(i),
+            &Value::Float(f) => Json::Float(f),
             Value::Str(s) => Json::Str(s.clone()),
-            Value::List(_) => Json::Arr(Vec::decode(value)?),
-            Value::Map(_) => Json::Obj(indexmap::IndexMap::decode(value)?),
-            value => return Err(DecodeError::expected("Json", value)),
-        })
+            Value::List(_) => return Vec::decode(r).map(Json::Arr),
+            Value::Map(_) => return indexmap::IndexMap::decode(r).map(Json::Obj),
+            _ => return crate::value::decode_scalar(r, |n, in_key| Err(n.mismatch("Json", in_key))),
+        };
+        r.skip();
+        Ok(scalar)
     }
 }
 

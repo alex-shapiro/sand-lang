@@ -807,6 +807,8 @@ fn path_text(vm: &Vm, frames: &[Frame]) -> String {
     };
     for f in frames {
         match f {
+            // A part of a map key is at the path of the map.
+            Frame::Map { pending: Some(_), .. } => break,
             Frame::Seq { index: Some(i), .. } => _ = write!(s, "[{i}]"),
             Frame::Map { key: Some(k), .. } => key(&mut s, k),
             Frame::Fields { id, variant, field: Some(i), .. } => {
