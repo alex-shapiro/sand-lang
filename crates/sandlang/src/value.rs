@@ -771,6 +771,10 @@ impl<T: Decode> Decode for Box<T> {
     fn decode_key(key: &Value) -> Result<Box<T>, DecodeError> {
         T::decode_key(key).map(Box::new)
     }
+
+    fn decode_missing_field() -> Option<Box<T>> {
+        T::decode_missing_field().map(Box::new)
+    }
 }
 
 impl<T: Decode> Decode for Option<T> {
@@ -794,7 +798,8 @@ impl<T: Decode> Decode for Option<T> {
 /// Decodes the entries of the map `value` into `C`.
 fn decode_map<K: Decode, V: Decode, C: FromIterator<(K, V)>>(value: &Value) -> Result<C, DecodeError> {
     let Value::Map(entries) = without_json_variant(value) else { return Err(DecodeError::expected("map", value)) };
-    entries.iter().map(|(k, v)| Ok((K::decode_key(k)?, V::decode(v).map_err(|e| e.in_key(key_text(k)))?))).collect()
+    let key = |k: &Value| K::decode_key(k).map_err(|_| invalid_map_key(&key_text(k)));
+    entries.iter().map(|(k, v)| Ok((key(k)?, V::decode(v).map_err(|e| e.in_key(key_text(k)))?))).collect()
 }
 
 impl<K: Decode + Ord + std::hash::Hash, V: Decode> Decode for HashMap<K, V> {

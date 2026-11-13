@@ -288,7 +288,7 @@ impl VariantPayload<'_> {
             }
             (PayloadFields::Named(names, values), Some(name)) => (names.iter().position(|n| n == name).and_then(|i| values.get(i)), name),
             (PayloadFields::Entries(entries), Some(name)) => {
-                let field = entries.iter().find(|(key, _)| matches!(without_json_variant(key), Value::Str(key) if key == name));
+                let field = entries.iter().rfind(|(key, _)| matches!(without_json_variant(key), Value::Str(key) if key == name));
                 (field.map(|(_, field)| field), name)
             }
             (_, None) => return Err(DecodeError::new("expected a positional payload").in_key(self.variant)),

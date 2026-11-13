@@ -321,14 +321,18 @@ between `bytes` and `str`, and between `()` and `None`.
 ### 15. Shared decode path and `Value` input
 
 The Sand trait `Decode` defines what can enter the VM, and `Decoder` implements it
-for JSON text. Make `Decoder` read from a source. The sources are JSON text and
-`Value`.
+for JSON text. A second decoder reads a `Value`. The two decoders share the parts
+that do not read input, and each one writes its own `match` over the type.
 
-- A source answers requests for a type, such as "give me bytes" or "give me this
-  map key as this type". The JSON source parses Base64 or key text, and the `Value`
-  source matches a variant.
-- Error paths, field defaults, computed-default thunks, and deferred set and map
-  fills stay in the shared decoder.
+- The first design shared one walk over the type and read the input through a
+  `DecodeSource` trait, as the first design of changeset 14 shared one heap walk.
+  It added about 310 more lines than two walks, used more native stack in
+  `json.parse`, changed `json.decode` fuel for some map types, and was slower on
+  `decode_json`. The `value-decode-shared-walk` branch keeps it.
+- `DecodeTarget` holds the shared parts: error paths, field defaults,
+  computed-default thunks, and deferred set and map fills.
+- The JSON decoder keeps the walk and the fuel of `main`. The `Value` decoder also
+  decodes map keys without a JSON text form, such as tuple keys.
 - The `Value` source also accepts the JSON form of each type, so a `Value` that
   comes from JSON is valid input.
 - `value::Decode: Encode` mirrors the Sand trait. Primitives, collections, and

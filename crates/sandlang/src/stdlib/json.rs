@@ -13,11 +13,11 @@ use crate::vm::compare::str_hash;
 use crate::vm::container_children::{ChildRole, ContainerChildren, INLINE_OPEN_CONTAINERS, MAX_NESTING_DEPTH};
 use crate::vm::heap::{Heap, Staging};
 use crate::vm::meter::{Meter, SLOW_BYTES_PER_UNIT, Scratch};
-use crate::vm::value::{FxHashMap, KeyIndex, KeyTable, MAP_ENTRY_SIZE, MapObj, Obj, TypeDesc, ValueRef, VmValue, slot_fits};
-use crate::vm::{Fail, Vm, fail, internal, without_trait};
-use decode::{
-    BytesInput, DecodeSource, Decoder, Found, JsonNode, KeyInput, ObjectKind, OptionLayer, PayloadForm, SequenceKind, VariantInput,
+use crate::vm::value::{
+    FieldDesc, FxHashMap, KeyIndex, KeyTable, MAP_ENTRY_SIZE, MapObj, Obj, ReflectVariantDesc, TypeDesc, ValueRef, VmValue, slot_fits,
 };
+use crate::vm::{Fail, Vm, fail, internal, without_trait};
+use decode::{DecodeTarget, QUOTED_KEY, Seg, finish_decode, lookup};
 use hashbrown::HashTable;
 use smallvec::SmallVec;
 use std::borrow::Cow;
@@ -134,8 +134,13 @@ pub(crate) fn module() -> NativeModule {
     m.function("parse", |vm: &mut Vm, text: VmVal<String>| -> Result<VmVal<Json>, HostError> {
         let ids = JsonIds::new(&vm.prog)?;
         let meter = &vm.meter;
-        let r =
-            vm.heap.staged(|heap, st| Decoder::new(Parser::new(text.str(heap)), Builder::new(heap, st, meter), vm.prog.ids).run_json(&ids));
+        let r = vm.heap.staged(|heap, st| {
+            let mut b = Builder::new(heap, st, meter);
+            let mut p = Parser::new(text.str(heap));
+            let r = p.parse_json(&mut b, &ids).and_then(|v| p.finish().map(|()| v));
+            p.charge(meter)?;
+            r
+        });
         into_result(r)
     });
     m.function("encode", |vm: &mut Vm, value: Param<0, traits::Encode>, indent: i64| -> Result<VmVal<String>, Fail> {
@@ -152,7 +157,14 @@ pub(crate) fn module() -> NativeModule {
     m.bind::<Decoded<()>>();
     m.function("decode_raw", |vm: &mut Vm, ty: Reflect<0>, text: VmVal<String>| -> Result<Decoded<Param<0>>, Fail> {
         let desc = ty.desc(&vm.heap)?.clone();
-        Ok(match decode::decode_json_text(vm, &desc, text)? {
+        let (ids, meter) = (vm.prog.ids, &vm.meter);
+        let (r, fills) = vm.heap.staged(|heap, st| {
+            let mut d = Decoder { p: Parser::new(text.str(heap)), t: DecodeTarget::new(Builder::new(heap, st, meter), ids) };
+            let r = d.decode(&desc).and_then(|v| d.p.finish().map(|()| v));
+            let r = d.p.charge(meter).map_err(Error::Fail).and(r);
+            d.t.finish(r)
+        });
+        Ok(match finish_decode(vm, r, fills)? {
             Decoded::Done(v) => Decoded::Done(Param::from_raw(v)),
             Decoded::Pending(v, thunks) => Decoded::Pending(Param::from_raw(v), thunks),
             Decoded::Failed(e) => Decoded::Failed(e),
@@ -176,12 +188,8 @@ enum Decoded<T> {
 }
 
 enum Error {
-    /// Invalid JSON syntax. The message includes the line and column.
     Parse(String),
-    /// A part of the input does not match the target type.
-    Mismatch(DecodeError),
-    /// The decoder cannot decode a part of the target type.
-    Invalid(DecodeError),
+    Invalid(String),
     Fail(Fail),
 }
 
@@ -197,8 +205,7 @@ fn into_result<T>(r: PResult<VmValue>) -> Result<VmVal<T>, HostError> {
     match r {
         Ok(v) => Ok(VmVal::from_raw(v)),
         Err(Error::Parse(msg)) => Err(HostError::new("parse", msg)),
-        Err(Error::Mismatch(e)) => Err(HostError::new("parse", e.to_string())),
-        Err(Error::Invalid(e)) => Err(HostError::new("invalid", e.to_string())),
+        Err(Error::Invalid(msg)) => Err(HostError::new("invalid", msg)),
         Err(Error::Fail(c)) => Err(c.into()),
     }
 }
@@ -532,44 +539,29 @@ impl Builder<'_, '_, '_> {
     }
 }
 
-/// A number that a decode source read.
-#[derive(Clone, Copy)]
-enum Number<'a> {
-    /// JSON number text, and whether it has no fraction or exponent.
-    Text {
-        text: &'a str,
-        is_int: bool,
-    },
-    Int(i64),
-    Float(f64),
+struct Number<'a> {
+    text: &'a str,
+    is_int: bool,
 }
 
 impl Number<'_> {
     fn float(&self) -> f64 {
-        match *self {
-            Number::Text { text, .. } => text.parse().unwrap_or(f64::NAN),
-            Number::Int(i) => i as f64,
-            Number::Float(f) => f,
-        }
+        self.text.parse().unwrap_or(f64::NAN)
     }
 
     fn value(&self) -> VmValue {
-        match *self {
-            Number::Text { text, is_int } => match text.parse::<i64>() {
-                Ok(i) if is_int && !(i == 0 && text.starts_with('-')) => VmValue::Int(i),
-                _ => VmValue::Float(self.float()),
-            },
-            Number::Int(i) => VmValue::Int(i),
-            Number::Float(f) => VmValue::Float(f),
+        match self.text.parse::<i64>() {
+            Ok(i) if self.is_int && !(i == 0 && self.text.starts_with('-')) => VmValue::Int(i),
+            _ => VmValue::Float(self.float()),
         }
     }
 
     fn int(&self) -> Option<i64> {
-        match *self {
-            Number::Text { text, is_int: true } => text.parse().ok(),
-            Number::Int(i) => Some(i),
-            _ => crate::value::integral_float_to_int(self.float()),
+        if self.is_int {
+            return self.text.parse().ok();
         }
+        let f = self.float();
+        (f.fract() == 0.0 && (-9223372036854775808.0..9223372036854775808.0).contains(&f)).then_some(f as i64)
     }
 }
 
@@ -682,7 +674,7 @@ impl<'a> Parser<'a> {
             }
             self.digits();
         }
-        Ok(Number::Text { text: &self.src[start..self.pos], is_int })
+        Ok(Number { text: &self.src[start..self.pos], is_int })
     }
 
     fn hex4(&mut self, esc: usize) -> PResult<u32> {
@@ -773,238 +765,396 @@ impl<'a> Parser<'a> {
             Some(b'f') => self.literal(b"false"),
             Some(b'"') => self.string(false).map(drop),
             Some(b'-' | b'0'..=b'9') => self.number().map(drop),
-            Some(b'[') => {
-                self.enter()?;
-                let mut i = 0;
-                while self.next_array_item(i)? {
-                    self.skip()?;
-                    i += 1;
-                }
-                Ok(())
-            }
-            Some(b'{') => {
-                self.enter()?;
-                let mut i = 0;
-                while self.next_object_key(i, false)?.is_some() {
-                    self.skip()?;
-                    i += 1;
-                }
-                Ok(())
-            }
+            Some(b'[') => self.array(|p, _| p.skip()),
+            Some(b'{') => self.object(false, |p, _| p.skip()),
             _ => Err(self.unexpected()),
         }
     }
 
-    /// Moves to item `index` of the innermost open array, or closes the array
-    /// and returns `false` at its end.
-    #[inline(always)]
-    fn next_array_item(&mut self, index: usize) -> PResult<bool> {
+    fn parse_json(&mut self, b: &mut Builder<'a, '_, '_>, ids: &JsonIds) -> PResult<VmValue> {
         self.ws();
-        if self.eat(b']') {
-            self.depth -= 1;
-            return Ok(false);
-        }
-        if index > 0 && !self.eat(b',') {
-            return Err(self.unexpected());
-        }
-        Ok(true)
-    }
-
-    /// Reads key `index` of the innermost open object and moves to its value,
-    /// or closes the object and returns `None` at its end. Builds the key text
-    /// only if `keep` is true.
-    #[inline(always)]
-    fn next_object_key(&mut self, index: usize, keep: bool) -> PResult<Option<Cow<'a, str>>> {
-        self.ws();
-        if self.eat(b'}') {
-            self.depth -= 1;
-            return Ok(None);
-        }
-        if index > 0 {
-            if !self.eat(b',') {
-                return Err(self.unexpected());
+        self.charge(b.meter)?;
+        b.reserve()?;
+        Ok(match self.peek() {
+            Some(b'n') => {
+                self.literal(b"null")?;
+                VmValue::Tag(ids.null)
             }
-            self.ws();
-        }
-        if self.peek() != Some(b'"') {
-            return Err(self.unexpected());
-        }
-        let key = self.string(keep)?;
-        self.ws();
-        if !self.eat(b':') {
-            return Err(self.unexpected());
-        }
-        self.ws();
-        Ok(Some(key))
-    }
-
-    /// Opens the array or object at the cursor if its first byte is `open`.
-    #[inline(always)]
-    fn open(&mut self, open: u8) -> PResult<bool> {
-        if self.peek() != Some(open) {
-            return Ok(false);
-        }
-        self.enter()?;
-        Ok(true)
-    }
-
-    #[inline(always)]
-    fn json_string(&mut self) -> PResult<Option<Cow<'a, str>>> {
-        if self.peek() == Some(b'"') { self.string(true).map(Some) } else { Ok(None) }
+            Some(b't') => {
+                self.literal(b"true")?;
+                b.st.new_variant(ids.bool_, &[VmValue::Bool(true)])
+            }
+            Some(b'f') => {
+                self.literal(b"false")?;
+                b.st.new_variant(ids.bool_, &[VmValue::Bool(false)])
+            }
+            Some(b'"') => {
+                let s = self.string(true)?;
+                let s = b.st.new_str(&*s);
+                b.st.new_variant(ids.str_, &[s])
+            }
+            Some(b'-' | b'0'..=b'9') => json_number(b.st, ids, self.number()?.value()),
+            Some(b'[') => {
+                let mut items = Vec::new();
+                self.array(|p, _| {
+                    let v = p.parse_json(b, ids)?;
+                    Ok(b.push(&mut items, v)?)
+                })?;
+                let list = b.list(items);
+                b.st.new_variant(ids.arr, &[list])
+            }
+            Some(b'{') => {
+                let mut m = b.start_map();
+                self.object(true, |p, key| {
+                    let v = p.parse_json(b, ids)?;
+                    let hash = b.hash(&key)?;
+                    let k = b.key(&key, hash);
+                    Ok(b.put(&mut m, hash, Some(key), k, v)?)
+                })?;
+                let map = b.map(m);
+                b.st.new_variant(ids.obj, &[map])
+            }
+            _ => return Err(self.unexpected()),
+        })
     }
 }
 
-/// The JSON text source of `json.decode`.
-impl<'a> DecodeSource<'a> for Parser<'a> {
-    const SEQUENCE: &'static str = "array";
+trait Source<'a>: Sized {
+    fn parser(&mut self) -> &mut Parser<'a>;
 
-    #[inline(always)]
-    fn begin_value(&mut self, meter: &Meter) -> Result<(), Fail> {
-        self.ws();
-        Parser::charge(self, meter)
+    fn array(&mut self, mut f: impl FnMut(&mut Self, usize) -> PResult<()>) -> PResult<()> {
+        self.parser().enter()?;
+        self.parser().ws();
+        if !self.parser().eat(b']') {
+            let mut i = 0;
+            loop {
+                f(self, i)?;
+                i += 1;
+                let p = self.parser();
+                p.ws();
+                if p.eat(b']') {
+                    break;
+                }
+                if !p.eat(b',') {
+                    return Err(p.unexpected());
+                }
+            }
+        }
+        self.parser().depth -= 1;
+        Ok(())
     }
 
-    #[inline(always)]
-    fn charge(&mut self, meter: &Meter) -> Result<(), Fail> {
-        Parser::charge(self, meter)
+    fn object(&mut self, keys: bool, mut f: impl FnMut(&mut Self, Cow<'a, str>) -> PResult<()>) -> PResult<()> {
+        self.parser().enter()?;
+        self.parser().ws();
+        if !self.parser().eat(b'}') {
+            loop {
+                let p = self.parser();
+                p.ws();
+                if p.peek() != Some(b'"') {
+                    return Err(p.unexpected());
+                }
+                let key = p.string(keys)?;
+                p.ws();
+                if !p.eat(b':') {
+                    return Err(p.unexpected());
+                }
+                f(self, key)?;
+                let p = self.parser();
+                p.ws();
+                if p.eat(b'}') {
+                    break;
+                }
+                if !p.eat(b',') {
+                    return Err(p.unexpected());
+                }
+            }
+        }
+        self.parser().depth -= 1;
+        Ok(())
     }
+}
 
-    #[inline(always)]
-    fn finish(&mut self) -> PResult<()> {
-        Parser::finish(self)
+impl<'a> Source<'a> for Parser<'a> {
+    fn parser(&mut self) -> &mut Parser<'a> {
+        self
     }
+}
 
-    #[inline(always)]
-    fn found(&self) -> Found {
-        match self.peek() {
-            Some(b'n' | b't' | b'f' | b'"' | b'-' | b'0'..=b'9' | b'[' | b'{') => Found::Json,
-            _ => Found::Syntax(self.unexpected()),
+/// Decodes JSON text into a VM value of a reflected type.
+struct Decoder<'a, 'd, 's, 'h> {
+    p: Parser<'a>,
+    t: DecodeTarget<'a, 'd, 's, 'h>,
+}
+
+impl<'a> Source<'a> for Decoder<'a, '_, '_, '_> {
+    fn parser(&mut self) -> &mut Parser<'a> {
+        &mut self.p
+    }
+}
+
+impl<'a, 'd> Decoder<'a, 'd, '_, '_> {
+    fn mismatch(&self, what: &str) -> Error {
+        match self.p.peek() {
+            Some(b'n' | b't' | b'f' | b'"' | b'-' | b'0'..=b'9' | b'[' | b'{') => self.t.fail(&format!("expected {what}")),
+            _ => self.p.unexpected(),
         }
     }
 
-    #[inline(always)]
-    fn null(&mut self) -> PResult<bool> {
-        if self.peek() != Some(b'n') {
-            return Ok(false);
-        }
-        self.literal(b"null")?;
-        Ok(true)
-    }
-
-    #[inline(always)]
-    fn bool(&mut self) -> PResult<Option<bool>> {
-        match self.peek() {
-            Some(b't') => self.literal(b"true").map(|()| Some(true)),
-            Some(b'f') => self.literal(b"false").map(|()| Some(false)),
-            _ => Ok(None),
+    fn number(&mut self, what: &str) -> PResult<Number<'a>> {
+        match self.p.peek() {
+            Some(b'-' | b'0'..=b'9') => self.p.number(),
+            _ => Err(self.mismatch(what)),
         }
     }
 
-    #[inline(always)]
-    fn number(&mut self, _: bool) -> PResult<Option<Number<'a>>> {
-        match self.peek() {
-            Some(b'-' | b'0'..=b'9') => Parser::number(self).map(Some),
-            _ => Ok(None),
+    fn int(&mut self) -> PResult<i64> {
+        let n = self.number("int")?;
+        n.int().ok_or_else(|| {
+            let f = n.float();
+            self.t.fail(if f.is_finite() && f.fract() == 0.0 { "integer out of range" } else { "expected int" })
+        })
+    }
+
+    fn bool(&mut self) -> PResult<bool> {
+        match self.p.peek() {
+            Some(b't') => self.p.literal(b"true").map(|()| true),
+            Some(b'f') => self.p.literal(b"false").map(|()| false),
+            _ => Err(self.mismatch("bool")),
         }
     }
 
-    #[inline(always)]
-    fn str(&mut self) -> PResult<Option<Cow<'a, str>>> {
-        self.json_string()
+    fn string(&mut self, what: &str) -> PResult<Cow<'a, str>> {
+        if self.p.peek() == Some(b'"') { self.p.string(true) } else { Err(self.mismatch(what)) }
     }
 
-    #[inline(always)]
-    fn bytes(&mut self) -> PResult<Option<BytesInput<'a>>> {
-        Ok(self.json_string()?.map(BytesInput::Base64))
+    fn expect_open(&self, open: u8, what: &str) -> PResult<()> {
+        if self.p.peek() == Some(open) { Ok(()) } else { Err(self.mismatch(what)) }
     }
 
-    #[inline(always)]
-    fn value_text(&mut self) -> PResult<Option<Cow<'a, str>>> {
-        self.json_string()
+    fn with_seg<T>(&mut self, seg: Seg<'a>, f: impl FnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
+        self.t.path.push(seg);
+        let r = f(self);
+        self.t.path.pop();
+        r
     }
 
-    #[inline(always)]
-    fn option_layer(&mut self) -> PResult<OptionLayer> {
-        Ok(if self.null()? { OptionLayer::None } else { OptionLayer::Payload })
+    fn decode(&mut self, t: &'d TypeDesc) -> PResult<VmValue> {
+        self.p.ws();
+        self.p.charge(self.t.b.meter)?;
+        self.t.b.reserve()?;
+        match t {
+            TypeDesc::Int => Ok(VmValue::Int(self.int()?)),
+            TypeDesc::Duration => Ok(VmValue::Dur(self.int()?)),
+            TypeDesc::Float => Ok(VmValue::Float(self.number("float")?.float())),
+            TypeDesc::Bool => Ok(VmValue::Bool(self.bool()?)),
+            TypeDesc::Unit => match self.p.peek() {
+                Some(b'n') => self.p.literal(b"null").map(|()| VmValue::Unit),
+                _ => Err(self.mismatch("null")),
+            },
+            TypeDesc::Str => {
+                let s = self.string("str")?;
+                Ok(self.t.b.st.new_str(&*s))
+            }
+            TypeDesc::Bytes => {
+                let s = self.string("base64 str")?;
+                let b = base64::decode(&s, false).map_err(|_| self.t.fail("invalid base64"))?;
+                Ok(self.t.b.st.new_bytes(b))
+            }
+            TypeDesc::Option(_) => {
+                // Handle nested `Option` types iteratively because they do not increment `self.p.depth`.
+                let (mut inner, mut layers) = (t, 0);
+                while let TypeDesc::Option(e) = inner {
+                    (inner, layers) = (e, layers + 1);
+                }
+                self.t.b.meter.charge(layers)?;
+                if self.p.peek() == Some(b'n') {
+                    self.p.literal(b"null")?;
+                    return Ok(VmValue::Tag(self.t.ids.none));
+                }
+                let mut v = self.decode(inner)?;
+                for _ in 0..layers {
+                    self.t.b.reserve()?;
+                    v = self.t.b.st.new_variant(self.t.ids.some, &[v]);
+                }
+                Ok(v)
+            }
+            TypeDesc::List(elem) => {
+                self.expect_open(b'[', "array")?;
+                let mut items = Vec::new();
+                self.array(|d, i| {
+                    let v = d.with_seg(Seg::Index(i), |d| d.decode(elem))?;
+                    Ok(d.t.b.push(&mut items, v)?)
+                })?;
+                Ok(self.t.b.list(items))
+            }
+            TypeDesc::Set(elem, fill) => {
+                self.expect_open(b'[', "array")?;
+                let mut items = Vec::new();
+                let thunks = self.t.thunks.len();
+                self.array(|d, i| {
+                    let v = d.with_seg(Seg::Index(i), |d| d.decode(elem))?;
+                    Ok(d.t.b.push(&mut items, v)?)
+                })?;
+                self.t.new_set(items, *fill, thunks)
+            }
+            TypeDesc::Tuple(elems) => {
+                let what = format!("array of length {}", elems.len());
+                self.expect_open(b'[', &what)?;
+                let mut items = Vec::with_capacity(elems.len());
+                self.array(|d, i| {
+                    let Some(elem) = elems.get(i) else { return Err(d.t.fail(&format!("expected {what}"))) };
+                    items.push(d.with_seg(Seg::Index(i), |d| d.decode(elem))?);
+                    Ok(())
+                })?;
+                if items.len() != elems.len() {
+                    return Err(self.t.fail(&format!("expected {what}")));
+                }
+                Ok(self.t.b.st.new_tuple(items))
+            }
+            TypeDesc::Map(key_type, value_type, _) => {
+                self.expect_open(b'{', "object")?;
+                let mut m = self.t.b.start_map();
+                self.object(true, |d, key| {
+                    let seg = Seg::Key(key.clone());
+                    let (k, hash, text) = d.t.map_key_from_text(key_type, key)?;
+                    let v = d.with_seg(seg, |d| d.decode(value_type))?;
+                    Ok(d.t.b.put(&mut m, hash, text, k, v)?)
+                })?;
+                Ok(self.t.b.map(m))
+            }
+            TypeDesc::Struct { id, def, fields, .. } => self.decode_struct(t, *id, *def, fields),
+            TypeDesc::Enum { variants, .. } if is_json(t) => {
+                let ids = JsonIds::at(variants.first().map_or(0, |v| v.runtime_id));
+                self.p.parse_json(&mut self.t.b, &ids)
+            }
+            TypeDesc::Enum { name, variants, .. } => {
+                self.t.stack.push(t);
+                let r = self.decode_enum(name, variants);
+                self.t.stack.pop();
+                r
+            }
+            TypeDesc::Recur(id) => {
+                let d = self.t.resolve_recur(*id)?;
+                self.decode(d)
+            }
+            TypeDesc::Value { name, parse } => {
+                let s = self.string(name)?;
+                self.t.b.meter.charge_bytes(s.len())?;
+                match parse(&s) {
+                    Ok(v) => Ok(self.t.b.st.alloc(v)),
+                    Err(msg) => Err(self.t.fail(&msg)),
+                }
+            }
+            TypeDesc::Range => self.decode_range(),
+            TypeDesc::Unsupported(name) => Err(self.t.unsupported(&format!("values of type {name}"))),
+            TypeDesc::Param(_) => Err(Error::Fail(Fail::internal("json.decode: uninstantiated type parameter"))),
+        }
     }
 
-    #[inline(always)]
-    fn range(&mut self) -> Option<(i64, i64, bool)> {
-        None
+    fn decode_struct(&mut self, t: &'d TypeDesc, id: u32, def: u32, fields: &'d [FieldDesc]) -> PResult<VmValue> {
+        self.expect_open(b'{', "object")?;
+        self.t.stack.push(t);
+        let base = self.t.slots.len();
+        self.t.slots.resize(base + fields.len(), None);
+        let mut next = 0;
+        let r = self.object(true, |d, key| match d.t.field_index(id, fields, &key, next)? {
+            Some(i) => {
+                next = i + 1;
+                d.t.slots[base + i] = Some(d.with_seg(Seg::Key(key), |d| d.decode(&fields[i].1))?);
+                Ok(())
+            }
+            None => d.p.skip(),
+        });
+        self.t.stack.pop();
+        if let Err(e) = r {
+            self.t.slots.truncate(base);
+            return Err(e);
+        }
+        self.t.finish_struct(def, fields, base)
     }
 
-    #[inline(always)]
-    fn open_sequence(&mut self, _: SequenceKind) -> PResult<bool> {
-        self.open(b'[')
+    fn decode_range(&mut self) -> PResult<VmValue> {
+        self.expect_open(b'{', "object")?;
+        let (mut start, mut end, mut inclusive) = (None, None, false);
+        self.object(true, |d, key| {
+            d.p.ws();
+            match &*key {
+                "start" => start = Some(d.with_seg(Seg::Key(key), |d| d.int())?),
+                "end" => end = Some(d.with_seg(Seg::Key(key), |d| d.int())?),
+                "inclusive" => inclusive = d.with_seg(Seg::Key(key), |d| d.bool())?,
+                _ => d.p.skip()?,
+            }
+            Ok(())
+        })?;
+        let (Some(start), Some(end)) = (start, end) else {
+            return Err(self.t.fail(&format!("missing field `{}`", if start.is_none() { "start" } else { "end" })));
+        };
+        Ok(self.t.b.st.alloc(Obj::Range(start, end, inclusive)))
     }
 
-    #[inline(always)]
-    fn next_item(&mut self, index: usize) -> PResult<bool> {
-        self.next_array_item(index)
-    }
-
-    #[inline(always)]
-    fn open_object(&mut self, _: ObjectKind) -> PResult<bool> {
-        self.open(b'{')
-    }
-
-    #[inline(always)]
-    fn next_key(&mut self, index: usize) -> PResult<Option<KeyInput<'a>>> {
-        Ok(self.next_object_key(index, true)?.map(KeyInput::Text))
-    }
-
-    #[inline(always)]
-    fn next_whole_key(&mut self, index: usize) -> PResult<Option<KeyInput<'a>>> {
-        DecodeSource::next_key(self, index)
-    }
-
-    fn enter_entry_value(&mut self) {}
-
-    fn skip(&mut self) -> PResult<()> {
-        Parser::skip(self)
-    }
-
-    #[inline(always)]
-    fn variant(&mut self) -> PResult<Option<VariantInput<'a>>> {
-        match self.peek() {
-            Some(b'"') => Ok(Some(VariantInput::Name(self.string(true)?))),
+    fn decode_enum(&mut self, name: &str, variants: &'d [ReflectVariantDesc]) -> PResult<VmValue> {
+        let find = |d: &Self, tag: &str| match lookup(d.t.b.meter, variants, |v| v.name == tag)? {
+            Some(i) => Ok(&variants[i]),
+            None => Err(d.t.fail(&format!("unknown variant `{}` of {name}", super::truncate(tag, QUOTED_KEY)))),
+        };
+        match self.p.peek() {
+            Some(b'"') => {
+                let tag = self.p.string(true)?;
+                let v = find(self, &tag)?;
+                if !v.payload_types.is_empty() {
+                    return Err(self.t.fail(&format!("variant `{tag}` of {name} needs a payload")));
+                }
+                Ok(VmValue::Tag(v.runtime_id))
+            }
             Some(b'{') => {
-                self.enter()?;
-                Ok(Some(VariantInput::Object))
+                let mut result = None;
+                self.object(true, |d, tag| {
+                    if result.is_some() {
+                        return Err(d.t.fail(&format!("expected a single variant of {name}")));
+                    }
+                    let v = find(d, &tag)?;
+                    result = Some(d.with_seg(Seg::Key(tag), |d| d.decode_payload(v))?);
+                    Ok(())
+                })?;
+                result.ok_or_else(|| self.t.fail(&format!("expected a variant of {name}")))
             }
-            _ => Ok(None),
+            _ => Err(self.mismatch(name)),
         }
     }
 
-    #[inline(always)]
-    fn open_payload(&mut self, named: bool) -> PResult<Option<PayloadForm>> {
-        match self.peek() {
-            Some(b'{') if named => self.enter().map(|()| Some(PayloadForm::Named)),
-            Some(b'[') => self.enter().map(|()| Some(PayloadForm::Positional)),
-            _ => Ok(None),
+    fn decode_payload(&mut self, v: &'d ReflectVariantDesc) -> PResult<VmValue> {
+        let ReflectVariantDesc { runtime_id: id, payload_types: types, field_names: names, .. } = v;
+        self.p.ws();
+        let mut slots: Vec<Option<VmValue>> = vec![None; types.len()];
+        match (self.p.peek(), names) {
+            (Some(b'{'), Some(names)) => {
+                self.object(true, |d, key| match lookup(d.t.b.meter, names, |n| *n == *key)? {
+                    Some(i) => {
+                        slots[i] = Some(d.with_seg(Seg::Key(key), |d| d.decode(&types[i]))?);
+                        Ok(())
+                    }
+                    None => d.p.skip(),
+                })?;
+                self.t.fill_omitted_payload(&mut slots, types, names)?;
+            }
+            (Some(b'['), _) => {
+                let what = format!("array of length {}", types.len());
+                let mut n = 0;
+                self.array(|d, i| {
+                    let Some(ty) = types.get(i) else { return Err(d.t.fail(&format!("expected {what}"))) };
+                    slots[i] = Some(d.with_seg(Seg::Index(i), |d| d.decode(ty))?);
+                    n += 1;
+                    Ok(())
+                })?;
+                if n != types.len() {
+                    return Err(self.t.fail(&format!("expected {what}")));
+                }
+            }
+            _ => return Err(self.mismatch(if names.is_some() { "object" } else { "array" })),
         }
-    }
-
-    #[inline(always)]
-    fn json_node(&mut self) -> PResult<Option<JsonNode<'a>>> {
-        Ok(Some(match self.peek() {
-            Some(b'n') => {
-                self.literal(b"null")?;
-                JsonNode::Null
-            }
-            Some(b't' | b'f') => JsonNode::Bool(DecodeSource::bool(self)?.unwrap_or_default()),
-            Some(b'"') => JsonNode::Str(self.string(true)?),
-            Some(b'-' | b'0'..=b'9') => JsonNode::Number(Parser::number(self)?),
-            Some(b'[') => {
-                self.enter()?;
-                JsonNode::Array
-            }
-            Some(b'{') => {
-                self.enter()?;
-                JsonNode::Object
-            }
-            _ => return Ok(None),
-        }))
+        let fields: Vec<VmValue> = slots.into_iter().map(|s| s.unwrap_or(VmValue::Unit)).collect();
+        Ok(self.t.b.st.new_variant(*id, &fields))
     }
 }
 

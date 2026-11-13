@@ -227,7 +227,7 @@ print(d)";
         "Ok([Dot: 1, Circle(2): 2])",
         "Ok([Stamp(n: 1, at: 1): \"one\", Stamp(n: 2, at: 2): \"two\"])",
         "Some(\"two\")",
-        "Err(Error(message: \"$[\\\"(1, x)\\\"][1]: expected int, found str\", kind: \"parse\"))",
+        "Err(Error(message: \"$: invalid map key `(1, x)`\", kind: \"parse\"))",
     ];
     assert_eq!(run(inputs, src), expected.map(|line| format!("{line}\n")).concat());
 }
@@ -256,7 +256,7 @@ print(d)";
     let expected = [
         "Ok([Red: true])",
         "Ok([Green: false])",
-        "Err(Error(message: \"$: expected Color key, found int\", kind: \"parse\"))",
+        "Err(Error(message: \"$: invalid map key `1`\", kind: \"parse\"))",
         "Err(Error(message: \"$: invalid map key `Blue`\", kind: \"parse\"))",
         "Err(Error(message: \"$.Red: expected bool, found str\", kind: \"parse\"))",
         "Ok([2024-03-10: 1, 2024-03-11: 2])",
@@ -527,6 +527,8 @@ struct Mix {
     date: Option<jiff::civil::Date>,
     j: Json,
     pairs: std::collections::BTreeMap<(i64, i64), String>,
+    waits: std::collections::BTreeMap<jiff::SignedDuration, i64>,
+    days: std::collections::BTreeMap<jiff::civil::Date, String>,
     #[sand(default = 9)]
     n: i64,
 }
@@ -558,6 +560,8 @@ fn random_mix(rng: &mut Rng) -> Mix {
         date: (rng.below(2) == 0).then(|| jiff::civil::date(2024, 3, 10)),
         j: json,
         pairs: (0..rng.below(3) as i64).map(|k| ((k, small(rng)), "p".into())).collect(),
+        waits: (0..rng.below(3) as i64).map(|k| (jiff::SignedDuration::from_nanos(k), small(rng))).collect(),
+        days: (1..=rng.below(3) as i8).map(|d| (jiff::civil::date(2024, 3, d), "d".into())).collect(),
         n: small(rng),
     }
 }
@@ -584,7 +588,7 @@ fn reshape(value: &Value, rng: &mut Rng, wrong: u64) -> Value {
                 .iter()
                 .map(|(k, v)| {
                     let text_key = json_form && !matches!(k, Value::Tuple(_));
-                    let k = if text_key { Value::Str(crate::value::key_text(k).into_owned()) } else { reshape(k, rng, wrong) };
+                    let k = if text_key { Value::Str(crate::value::key_text(k).into_owned()) } else { reshape_key(k, rng, wrong) };
                     (k, reshape(v, rng, wrong))
                 })
                 .collect(),
@@ -618,8 +622,24 @@ fn reshape(value: &Value, rng: &mut Rng, wrong: u64) -> Value {
     }
 }
 
+/// Rewrites the map key `key` like [`reshape`], and also into the other forms
+/// of a key: an integral `Float` for an `int`, an `Int` for a `duration`, and
+/// a `Str` for a native value. With probability `1 / wrong`, a `Str` key
+/// becomes a native value.
+fn reshape_key(key: &Value, rng: &mut Rng, wrong: u64) -> Value {
+    match (key, rng.below(3)) {
+        (Value::Int(i), 0) => Value::Float(*i as f64),
+        (Value::Duration(d), 0) => Value::Int(d.as_nanos() as i64),
+        (Value::Native(native), 0) => Value::Str(native.text.clone()),
+        (Value::Str(s), _) if rng.below(wrong) == 0 => {
+            Value::Native(Box::new(crate::value::NativeValue { type_name: "time.PlainDate".into(), text: s.clone() }))
+        }
+        _ => reshape(key, rng, wrong),
+    }
+}
+
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(64))]
+    #![proptest_config(ProptestConfig::with_cases(256))]
 
     /// `Decode` for Rust types accepts the same `Value` inputs as the VM, and
     /// decodes them to the same values.
