@@ -266,6 +266,9 @@ impl<'a, 's, 'h> Builder<'a, 's, 'h> {
         MapBuilder { base: self.entries.len(), index: None }
     }
 
+    /// Adds an entry to the map `m`. It is not inlined, so that the stack
+    /// frame of each nesting level of [`Parser::parse_json`] stays small.
+    #[inline(never)]
     fn put(&mut self, m: &mut MapBuilder, hash: u64, text: Option<Cow<'a, str>>, key: VmValue, value: VmValue) -> Result<(), Fail> {
         let segment = &self.entries[m.base..];
         let same = |e: &Entry| {
@@ -746,24 +749,6 @@ impl<'a> Parser<'a> {
         self.charge(b.meter)?;
         b.reserve()?;
         Ok(match self.peek() {
-            Some(b'n') => {
-                self.literal(b"null")?;
-                VmValue::Tag(ids.null)
-            }
-            Some(b't') => {
-                self.literal(b"true")?;
-                b.st.new_variant(ids.bool_, &[VmValue::Bool(true)])
-            }
-            Some(b'f') => {
-                self.literal(b"false")?;
-                b.st.new_variant(ids.bool_, &[VmValue::Bool(false)])
-            }
-            Some(b'"') => {
-                let s = self.string(true)?;
-                let s = b.st.new_str(&*s);
-                b.st.new_variant(ids.str_, &[s])
-            }
-            Some(b'-' | b'0'..=b'9') => json_number(b.st, ids, self.number()?.value()),
             Some(b'[') => {
                 let mut items = Vec::new();
                 self.array(|p, _| {
@@ -784,6 +769,34 @@ impl<'a> Parser<'a> {
                 let map = b.map(m);
                 b.st.new_variant(ids.obj, &[map])
             }
+            _ => return self.parse_scalar(b, ids),
+        })
+    }
+
+    /// Parses a JSON value that is not an array or an object. It is a
+    /// separate function so that the stack frame of each nesting level of
+    /// [`Parser::parse_json`] stays small.
+    #[inline(never)]
+    fn parse_scalar(&mut self, b: &mut Builder<'a, '_, '_>, ids: &JsonIds) -> PResult<VmValue> {
+        Ok(match self.peek() {
+            Some(b'n') => {
+                self.literal(b"null")?;
+                VmValue::Tag(ids.null)
+            }
+            Some(b't') => {
+                self.literal(b"true")?;
+                b.st.new_variant(ids.bool_, &[VmValue::Bool(true)])
+            }
+            Some(b'f') => {
+                self.literal(b"false")?;
+                b.st.new_variant(ids.bool_, &[VmValue::Bool(false)])
+            }
+            Some(b'"') => {
+                let s = self.string(true)?;
+                let s = b.st.new_str(&*s);
+                b.st.new_variant(ids.str_, &[s])
+            }
+            Some(b'-' | b'0'..=b'9') => json_number(b.st, ids, self.number()?.value()),
             _ => return Err(self.unexpected()),
         })
     }
