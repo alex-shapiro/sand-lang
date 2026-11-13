@@ -355,6 +355,18 @@ pub(crate) fn write_whole(
     })
 }
 
+/// Reads a value of the closed type whose fast-path schema is `schema` with
+/// the general walker, for a format that overrides
+/// [`DecodeFormat::read_fast`].
+pub(crate) fn read_fast_general<F: DecodeFormat + ?Sized>(
+    vm: &mut Vm,
+    f: &mut F,
+    path: &mut DecodePath,
+    schema: SchemaId,
+) -> DecodeResult<VmValue> {
+    fast::decode(vm, f, &mut path.0, schema)
+}
+
 /// Charges a fuel unit for a value, and runs `op`, which reads the value or
 /// opens it, on `d` and its format (see [`with_decoder`]).
 fn read_part<R>(

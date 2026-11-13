@@ -805,3 +805,39 @@ goes through `emit_json`. The walk file is now 455 lines.
 Measured (4 alternating rounds of `BENCH_RUNS=5 BENCH_REPS=10`, ns per
 item; value-decode, C8, C9): `encode_json` 387, 415, 325; `deep_encode`
 4194, 4761, 3335; `encode` 291, 338, 331.
+
+### C10: an optimistic JSON text read for `TextDecoder`
+
+After E1 and C7, the decode family was still 1.2 to 1.3 times value-decode
+with the general walker. `TextDecoder` now overrides `read_fast` with a
+read that knows JSON text (`stdlib/json/text/read.rs`): one `Parser` for
+the whole value, its own frames for separators and keys, and the same
+acceptance rules and fuel points as the `TextDecoder` operations.
+
+The read handles valid input only. At an error, or at a part that it
+leaves to the format operations (`bytes`, `Range`, `Set`, native values,
+`Json`, map keys other than `str`), it stops. The decoder's state then is
+as before the read (the read writes its position back only on success),
+the fuel that it charged is refunded, and the general walker reads the
+value from the same place. So errors and their paths come from one
+implementation, and a script pays the fuel of the general path. The cost
+of an error is the work of the read up to the error, without fuel.
+
+Line count: 474 lines (410 without comments and blank lines).
+
+Measured (4 alternating rounds of `BENCH_RUNS=5 BENCH_REPS=10`, ns per
+item; value-decode, C9, C10):
+
+| case                 | value-decode | C9  | C10 |
+| -------------------- | ------------ | --- | --- |
+| decode               | 644          | 791 | 579 |
+| decode_generic       | 645          | 776 | 582 |
+| decode_page          | 651          | 785 | 570 |
+| decode_ints          | 104          | 144 | 110 |
+| decode_ints_generic  | 111          | 146 | 109 |
+| small_decode         | 234          | 342 | 310 |
+| decode_custom        | 205          | 624 | 612 |
+| small_decode_default | 256          | 271 | 270 |
+
+Fuel is the same (`decode` 45.7, `decode_ints` 10, `small_decode` 16).
+The differential test passed 10000 cases (with `retry_stress`).

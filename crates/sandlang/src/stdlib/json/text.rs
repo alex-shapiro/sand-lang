@@ -1,5 +1,6 @@
 //! The JSON text format of `Encoder` and `Decoder`.
 
+mod read;
 mod walk;
 
 use super::{Builder, Error as ParseError, Json, JsonIds, Parser, SPACES, base64, json_from_vm, write_str};
@@ -697,6 +698,25 @@ fn into_fail(e: ParseError) -> DecodeFail {
 }
 
 impl DecodeFormat for TextDecoder {
+    fn read_fast(
+        &mut self,
+        vm: &mut Vm,
+        path: &mut crate::codec::DecodePath,
+        schema: crate::codec::fast::SchemaId,
+    ) -> DecodeResult<VmValue> {
+        let fuel = vm.meter.fuel();
+        match self.read_schema(vm, schema) {
+            Ok(v) => Ok(v),
+            Err(read::Fallback::Limit(f)) => Err(f.into()),
+            // The general walker reads the value again, with the exact
+            // error and path, and charges as if the read had not run.
+            Err(read::Fallback::General) => {
+                vm.meter.refund_to(fuel);
+                crate::codec::read_fast_general(vm, self, path, schema)
+            }
+        }
+    }
+
     #[inline]
     fn unit(&mut self, vm: &mut Vm) -> DecodeResult<()> {
         if let Some(key) = self.key.take() {
