@@ -1,4 +1,4 @@
-//! Function inlining for small non-generic functions without early returns or closures.
+//! Function inlining for small functions without early returns or closures.
 //!
 //! Inlined calls expand to:
 //!
@@ -13,7 +13,7 @@ use crate::check::budget::CompileBudget;
 use crate::check::persist::PMap;
 use crate::check::{CheckedProgram, FnKind};
 use crate::hir::*;
-use crate::types::{FnId, TypeId};
+use crate::types::{FnId, Symbol, TypeId};
 use std::sync::Arc;
 
 /// Bodies of at most this many expression nodes are inlined.
@@ -24,11 +24,7 @@ const MAX_DEPTH: u32 = 2;
 /// The body of function `f` if calls to it can be inlined.
 pub(super) fn inlinable(cp: &CheckedProgram, f: FnId, body: &HFn) -> Option<Arc<HFn>> {
     let fi = &cp.fns[f as usize];
-    if !matches!(fi.kind, FnKind::Script)
-        || !fi.generics.is_empty()
-        || !fi.dicts.is_empty()
-        || fi.params.iter().any(|p| p.default.is_some())
-    {
+    if !matches!(fi.kind, FnKind::Script) {
         return None;
     }
     let mut nodes = 0;
@@ -102,7 +98,11 @@ impl Cx<'_> {
             }),
         }
         let HKind::Call { func, args, .. } = &e.kind else { return };
-        if depth >= MAX_DEPTH || args.iter().any(|a| !matches!(a, HArg::Expr(_))) {
+        // A call with named arguments out of order reads locals that an
+        // earlier argument declares, which parameter bindings cannot keep.
+        let hoisted =
+            |a: &HArg| matches!(a, HArg::Expr(HExpr { kind: HKind::Local(l), .. }) if self.locals[*l as usize].name == Symbol::TMP);
+        if depth >= MAX_DEPTH || args.iter().any(|a| !matches!(a, HArg::Expr(_)) || hoisted(a)) {
             return;
         }
         let func = *func;

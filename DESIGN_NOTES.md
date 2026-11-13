@@ -909,3 +909,45 @@ Cases that miss the goal, and why:
   call; `json.encode(1)` costs 102 ns against 35 on value-decode (P1).
   `small_to_value` and `small_to_json` have the same plumbing plus a
   Value or token build.
+
+## 7. Second performance pass
+
+Goals: the small cases within 10% of `value-decode` in time and fuel, and
+native objects that the collector traces. Baselines: `bench-vd`
+(`fe58101`), `bench-lead` (`2592b5c`). Method as in §6: release builds with
+`-C llvm-args=-align-loops=64`, each in its own target directory; the
+minimum of 3 alternating rounds of `BENCH_RUNS=5 BENCH_REPS=10`. The
+`stack_probe` example is now in the crate (`crates/sandlang/examples`).
+
+### Q1: where the fixed cost of a call goes
+
+Timing script on one binary (`json.encode(addr)` of the `Address` of the
+benchmark, ns per call, minimum of 5 runs of 2,000,000 calls):
+
+| path                                                  | ns  |
+| ----------------------------------------------------- | --- |
+| `json.encode` (wrapper, dictionary call, 3 natives)   | 213 |
+| the 3 natives called from user code (no Sand frames)  | 185 |
+| one native that walks into a `TextEncoder` on the Rust stack | 126 |
+| value-decode `json.encode`                            | 131 |
+
+So the two Sand frames cost about 28 ns, and the `Encoder` object with two
+more native calls about 60 ns. One native call for a fast type reaches
+value-decode. The same experiment for decode: 321 (now), 188 (one native),
+260 (value-decode). For `to_json`: 695, 595, 264; the token build is the
+cost there, not the plumbing.
+
+### Q2: the inliner takes generic functions
+
+`compile/inline.rs` inlined only functions without type parameters,
+dictionaries, and parameter defaults. A dictionary parameter is a local
+like any other, so the same rewrite works for generic functions. Calls
+with named arguments out of order are not inlined: `reorder_args` hoists
+them into locals of an earlier argument's block, and a parameter binding
+after that block can reuse their registers (the spec case `default
+parameters` caught it).
+
+Measured alone (3 rounds; lead, after): `small_encode` 183, 166;
+`small_decode` 306, 291; `small_decode_default` 273, 264; `decode_custom`
+613, 582; the other cases within ±3%. Fuel: the small cases lose the unit
+of the wrapper call (`small_encode` 8 to 7, `small_decode` 16 to 14).
