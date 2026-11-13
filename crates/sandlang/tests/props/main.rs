@@ -1,5 +1,9 @@
 //! Property-based tests that compare Sand execution against Rust reference
 //! models on generated inputs.
+//!
+//! The differential tests of the codecs run 32 times as many cases when the
+//! variable `SAND_LONG_DIFFERENTIAL` is set, which CI does not do:
+//! `SAND_LONG_DIFFERENTIAL=1 cargo test --release -p sandlang --test props codec::`.
 
 mod bindings;
 mod codec;

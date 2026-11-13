@@ -33,6 +33,12 @@ enum Ty {
     Tree(Box<Ty>),
     /// `struct Bag<T> { s: Set<T> }`, which requires `T: Hash`.
     Bag(Box<Ty>),
+    /// `struct Retried<T> { v: T }`, whose hand-written `Decode` reads two
+    /// other types that fail, and then `T`, and whose `Encode` writes `T`.
+    Retried(Box<Ty>),
+    /// `enum Nest { Leaf(int), In([Nest]) }`, whose input can be hundreds of
+    /// levels deep.
+    Deep,
     Param,
     /// `struct Defaulted`, whose fields after `req: int` have the constant
     /// defaults of a case, declared in the main module (`false`) or in the
@@ -68,6 +74,8 @@ impl Ty {
             Ty::Wrap(t) => format!("Wrap<{}>", t.sand()),
             Ty::Tree(t) => format!("Tree<{}>", t.sand()),
             Ty::Bag(t) => format!("Bag<{}>", t.sand()),
+            Ty::Retried(t) => format!("Retried<{}>", t.sand()),
+            Ty::Deep => "Nest".into(),
             Ty::Param => "T".into(),
             Ty::Defaulted(false) => "Defaulted".into(),
             Ty::Defaulted(true) => "host.Defaulted".into(),
@@ -86,6 +94,7 @@ impl Ty {
             Ty::Wrap(t) => Ty::Wrap(b(t)),
             Ty::Tree(t) => Ty::Tree(b(t)),
             Ty::Bag(t) => Ty::Bag(b(t)),
+            Ty::Retried(t) => Ty::Retried(b(t)),
             t => t.clone(),
         }
     }
@@ -93,7 +102,7 @@ impl Ty {
     fn has_param(&self) -> bool {
         match self {
             Ty::Param => true,
-            Ty::List(t) | Ty::Set(t) | Ty::Option(t) | Ty::Wrap(t) | Ty::Tree(t) | Ty::Bag(t) => t.has_param(),
+            Ty::List(t) | Ty::Set(t) | Ty::Option(t) | Ty::Wrap(t) | Ty::Tree(t) | Ty::Bag(t) | Ty::Retried(t) => t.has_param(),
             Ty::Map(k, v) => k.has_param() || v.has_param(),
             Ty::Tuple(ts) => ts.iter().any(Ty::has_param),
             _ => false,
@@ -103,7 +112,7 @@ impl Ty {
     fn decodable(&self) -> bool {
         match self {
             Ty::Fn | Ty::Task | Ty::Valid => false,
-            Ty::List(t) | Ty::Set(t) | Ty::Option(t) | Ty::Wrap(t) | Ty::Tree(t) | Ty::Bag(t) => t.decodable(),
+            Ty::List(t) | Ty::Set(t) | Ty::Option(t) | Ty::Wrap(t) | Ty::Tree(t) | Ty::Bag(t) | Ty::Retried(t) => t.decodable(),
             Ty::Map(k, v) => k.decodable() && v.decodable(),
             Ty::Tuple(ts) => ts.iter().all(Ty::decodable),
             _ => true,
@@ -124,7 +133,7 @@ impl Ty {
             | Ty::Rec
             | Ty::Valid
             | Ty::Range => true,
-            Ty::Option(t) | Ty::Wrap(t) => t.hashable(),
+            Ty::Option(t) | Ty::Wrap(t) | Ty::Retried(t) => t.hashable(),
             Ty::Tuple(ts) => ts.iter().all(Ty::hashable),
             _ => false,
         }
@@ -135,7 +144,7 @@ impl Ty {
         match self {
             Ty::Set(t) | Ty::Bag(t) => t.hashable() && t.well_formed(),
             Ty::Map(k, v) => k.hashable() && k.well_formed() && v.well_formed(),
-            Ty::List(t) | Ty::Option(t) | Ty::Wrap(t) | Ty::Tree(t) => t.well_formed(),
+            Ty::List(t) | Ty::Option(t) | Ty::Wrap(t) | Ty::Tree(t) | Ty::Retried(t) => t.well_formed(),
             Ty::Tuple(ts) => ts.iter().all(Ty::well_formed),
             _ => true,
         }
@@ -144,7 +153,7 @@ impl Ty {
     fn keys_decodable(&self) -> bool {
         match self {
             Ty::Keyed => false,
-            Ty::List(t) | Ty::Set(t) | Ty::Option(t) | Ty::Wrap(t) | Ty::Tree(t) | Ty::Bag(t) => t.keys_decodable(),
+            Ty::List(t) | Ty::Set(t) | Ty::Option(t) | Ty::Wrap(t) | Ty::Tree(t) | Ty::Bag(t) | Ty::Retried(t) => t.keys_decodable(),
             Ty::Map(k, v) => matches!(**k, Ty::Int | Ty::Bool | Ty::Str | Ty::Duration | Ty::UnitEnum) && v.keys_decodable(),
             Ty::Tuple(ts) => ts.iter().all(Ty::keys_decodable),
             _ => true,
@@ -171,7 +180,7 @@ fn ty_with(param: u32, bad: u32, defaulted: u32) -> impl Strategy<Value = Ty> {
     let leaf = prop_oneof![
         6 => prop_oneof![Just(Ty::Int), Just(Ty::Float), Just(Ty::Bool), Just(Ty::Str), Just(Ty::Bytes), Just(Ty::Unit), Just(Ty::Duration)],
         4 => prop_oneof![Just(Ty::Json), Just(Ty::UnitEnum), Just(Ty::Shape), Just(Ty::Date), Just(Ty::Rec)],
-        1 => prop_oneof![Just(Ty::Range), Just(Ty::Keyed)],
+        1 => prop_oneof![Just(Ty::Range), Just(Ty::Keyed), Just(Ty::Deep)],
         bad => prop_oneof![Just(Ty::Fn), Just(Ty::Task), Just(Ty::Valid)],
         param => Just(Ty::Param),
         defaulted => prop_oneof![Just(Ty::Defaulted(false)), Just(Ty::Defaulted(true))],
@@ -186,6 +195,7 @@ fn ty_with(param: u32, bad: u32, defaulted: u32) -> impl Strategy<Value = Ty> {
             2 => prop::collection::vec(inner.clone(), 2..4).prop_map(Ty::Tuple),
             2 => inner.clone().prop_map(|t| Ty::Wrap(Box::new(t))),
             2 => inner.clone().prop_map(|t| Ty::Tree(Box::new(t))),
+            2 => inner.clone().prop_map(|t| Ty::Retried(Box::new(t))),
             2 * bad => inner.prop_map(|t| Ty::Bag(Box::new(t))),
         ]
     })
@@ -193,7 +203,13 @@ fn ty_with(param: u32, bad: u32, defaulted: u32) -> impl Strategy<Value = Ty> {
 
 const TYPES: &str = "import time\nenum Unit { A, B }\nenum Shape { Dot, Circle(float), Rect(w: int, h: int?), Pair(Unit, str) }\nstruct Rec { a: int, b: str? }\nstruct Key { a: int }\nstruct Keyed { m: [Key: int]? }\nstruct Wrap<T> { v: T }\n\
                      struct Tree<T> { v: T, kids: [Tree<T>] = [] }\nstruct Bag<T> { s: Set<T> }\n\
-                     struct Valid {\n    a: int\n    fn init(a: int) -> Valid { Self(a) }\n}";
+                     struct Valid {\n    a: int\n    fn init(a: int) -> Valid { Self(a) }\n}\n\
+                     struct Probe { zz: int }\nstruct Retried<T> { v: T }\n\
+                     impl<T: Encode> Encode for Retried<T> {\n    fn encode(self, e: Encoder) { e.encode(self.v) }\n}\n\
+                     impl<T: Decode> Decode for Retried<T> {\n    fn decode(d: Decoder) -> Result<Retried<T>> {\n        \
+                     let probe: Result<Probe> = d.decode()\n        let pair: Result<(Probe, Probe)> = d.decode()\n        \
+                     if probe.is_ok() or pair.is_ok() {\n            return Err(Error(\"a probe matched\"))\n        }\n        \
+                     Ok(Retried(v: d.decode()?))\n    }\n}\nenum Nest { Leaf(int), In([Nest]) }";
 
 const INPUTS: [&str; 14] = [
     "null",
@@ -326,6 +342,12 @@ fn json_text(t: &Ty, rng: &mut Rng, depth: u32, wrong: u64) -> String {
         Ty::Tuple(ts) => format!("[{}]", ts.iter().map(|t| json_text(t, rng, depth + 1, wrong)).collect::<Vec<_>>().join(", ")),
         Ty::Wrap(e) => format!("{{\"v\": {}}}", json_text(e, rng, depth + 1, wrong)),
         Ty::Bag(e) => format!("{{\"s\": [{}]}}", many(e, rng).join(", ")),
+        Ty::Retried(e) => json_text(e, rng, depth + 1, wrong),
+        Ty::Deep => {
+            let levels = if rng.below(3) == 0 { rng.below(300) } else { rng.below(4) };
+            let leaf = format!("{{\"Leaf\": [{}]}}", rng.below(5));
+            (0..levels).fold(leaf, |inner, _| format!("{{\"In\": [[{inner}]]}}"))
+        }
         Ty::Tree(e) => {
             let kids = many(t, rng);
             let v = json_text(e, rng, depth + 1, wrong);
@@ -636,8 +658,17 @@ fn codec_default() -> impl Strategy<Value = (String, String)> {
 /// two equal keys, so the program decodes the text of the parsed value.
 const TREE_DIFFERS: &str = "json.from_json differs from json.decode";
 
+/// Returns the number of cases of a differential test: `default`, or 32
+/// times as many in a long run (see the doc of `tests/props/main.rs`).
+fn differential_cases(default: u32) -> u32 {
+    match std::env::var_os("SAND_LONG_DIFFERENTIAL") {
+        Some(_) => default * 32,
+        None => default,
+    }
+}
+
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(128))]
+    #![proptest_config(ProptestConfig::with_cases(differential_cases(128)))]
 
     /// `json.from_json` gives the same result as `json.decode` for the same
     /// JSON. The native implementations of `Encode` and `Decode` give the same
@@ -1019,7 +1050,7 @@ fn sand_decodes(value: &sandlang::value::Value) -> Vec<String> {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(256))]
+    #![proptest_config(ProptestConfig::with_cases(differential_cases(256)))]
 
     /// The Rust `value::Decode` of a host `Value` gives the same value or
     /// error message as a Sand host `Decoder`, which reads with the same
