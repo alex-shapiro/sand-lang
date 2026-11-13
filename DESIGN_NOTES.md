@@ -415,3 +415,71 @@ Profile of `decode_ints` on D1 (`sample`): the interpreter loop 21%, native
 call dispatch 12%, the two `Decoder` natives 16%, number parsing 15%,
 `Ok` wrapping 5%. The cost is the Sand loop and two native calls for each
 element, not the format.
+
+### D2: native fast path (commit after tag `codec-d1`)
+
+- Shape: a closed list, set, map, tuple, struct, or enum (not `Option`)
+  whose parts all have synthesized or prelude impls, and, for `Decode`, no
+  field default, gets one more impl per type (`ImplDef.fast`). Its method
+  calls `Encoder.write_fast` or `Decoder.read_fast` with a compile-time
+  `Schema` (`codec/fast.rs`, table `Program.schemas`). Trait resolution
+  prefers it for closed types, so closed instances of generic types
+  (`Page<User>`, `[int]`) and generic callers (`load<T: Decode>` with
+  `T = Doc`) get it. Types deeper than 64 levels, such as polymorphic
+  recursion (`P<[T]>` in `P<T>`), keep the synthesized impls.
+- The walkers call the same format operations in the same order as the
+  synthesized code, with an explicit stack. Formats implement `mark` and
+  `rollback`, so a walk that fails a memory check runs again after garbage
+  collection. The value decoder's mark copies the value that the walk reads.
+- Verifier: fast impls are not in the impl index; tuple impls that a fast
+  type contains are registered so that the verifier proves tuple bounds.
+- Differential property test `native_and_synthesized_codecs_agree`: random
+  types (now with payload enums and `time.PlainDate`) and JSON inputs; JSON
+  text, `Json`, host `Value`, decoded values, errors, also under
+  `retry_stress`. 3000 cases pass. Failure traces differ: the fast path runs
+  fewer Sand functions, and its method shows as `encode (<prelude>:1)`.
+
+Measurements (same method as D1, a new set of 3 alternating rounds of all
+four builds):
+
+| case (ns per item)   | main  | value-decode | D1    | D2    | D1 / D2 |
+| -------------------- | ----- | ------------ | ----- | ----- | ------- |
+| encode               | 290   | 285          | 1522  | 618   | 2.5     |
+| encode_indent        | 389   | 395          | 1599  | 713   | 2.2     |
+| decode               | 651   | 650          | 2613  | 992   | 2.6     |
+| to_json              | 495   | 491          | 3381  | 2307  | 1.5     |
+| decode_json          | 861   | 846          | 900   | 967   | 0.9     |
+| encode_json          | 387   | 389          | 859   | 881   | 1.0     |
+| to_value             | 372   | 367          | 1530  | 668   | 2.3     |
+| small_encode         | 127   | 126          | 414   | 301   | 1.4     |
+| small_to_json        | 262   | 260          | 1006  | 867   | 1.2     |
+| small_decode         | 235   | 244          | 532   | 374   | 1.4     |
+| small_to_value       | 99    | 95           | 436   | 328   | 1.3     |
+| deep_encode          | 4044  | 4187         | 9291  | 9374  | 1.0     |
+| deep_decode          | 15082 | 14289        | 14565 | 14841 | 1.0     |
+| encode_custom        | 80    | 82           | 406   | 377   | 1.1     |
+| decode_custom        | 209   | 214          | 724   | 650   | 1.1     |
+| decode_generic       | 647   | 650          | 2619  | 999   | 2.6     |
+| decode_page          | 653   | 638          | 2586  | 1003  | 2.6     |
+| decode_ints          | 114   | 114          | 639   | 155   | 4.1     |
+| decode_ints_generic  | 114   | 114          | 656   | 161   | 4.1     |
+| small_decode_default | 252   | 256          | 287   | 300   | 1.0     |
+
+Decision rule of the memo (keep the fast path only with at least 1.5x on
+decode and encode): decode 2.6x, encode 2.5x. The fast path stays.
+
+Fuel per item, D2 (D1): encode 48.8 (55.8), to_json 72.2 (79.2), decode
+108.6 (135.9), decode_ints 30.0 (40.0), small_decode 26.0 (29.0). Native
+stack at 512 levels, D2: parse 120 KiB, decode 16 KiB, encode 16 KiB.
+
+Compile time of 20,000 chained structs (`struct S{i} { v: int, next:
+S{i+1}? }`, decode and encode `S0`, release, wall time of `sand run`):
+value-decode rejects it ("type too large to describe at runtime"), D1
+0.38 s, D2 0.08 s.
+
+`to_json` stays slow in both: the tree encoder builds a Rust `Json` (an
+`IndexMap` with SipHash and a `String` for each key), copies it, and then
+converts it to a Sand value. Taking it instead of copying it saved 13% but
+broke `retry_stress` (the conversion can fail a memory check and run
+again), so it is not in. A faster form records the operations and builds
+the Sand value in one staged pass, as `json.parse` does.
