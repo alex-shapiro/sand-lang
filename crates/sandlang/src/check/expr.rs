@@ -662,7 +662,7 @@ impl Checker {
                 let d = self.declare_local_sym(Symbol::DICT, TypeId::UNIT, false, f.name.span, true);
                 self.fs.data[d as usize].used = true;
                 self.fs.evidence.push((t, tr, mk(HKind::Local(d), TypeId::UNIT, f.name.span)));
-                self.fs.local_dict_params.push(d);
+                self.fs.local_dict_params.push((d, t, tr));
                 params.push(d);
             }
             for (p, &t) in f.params.iter().zip(&ptys) {

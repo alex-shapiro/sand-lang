@@ -553,9 +553,10 @@ pub(crate) struct FnState {
     /// The bounds that the hidden dictionary parameters of each generic local
     /// function prove, in parameter order.
     pub local_fn_dicts: Vec<(LocalId, Vec<(TypeId, TraitRef)>)>,
-    /// The hidden dictionary parameters of local functions. A dictionary that
-    /// uses one cannot move to the entry of the enclosing function.
-    pub local_dict_params: Vec<LocalId>,
+    /// The hidden dictionary parameters of local functions, with the bounds
+    /// that they prove. A dictionary that uses one cannot move to the entry of
+    /// the enclosing function.
+    pub local_dict_params: Vec<(LocalId, TypeId, TraitRef)>,
     /// The inference variables made before the function, and those of them
     /// bound while checking it (see `release_vars`).
     pub var_mark: VarId,
@@ -3311,8 +3312,9 @@ impl Checker {
         }
         let locals = std::mem::take(&mut self.fs.locals);
         let doc_refs = std::mem::take(&mut self.fs.doc_refs);
+        let local_dicts = std::mem::take(&mut self.fs.local_dict_params);
         self.release_vars();
-        HFn { name, params, body, locals, span, doc_refs }
+        HFn { name, params, body, locals, span, doc_refs, local_dicts }
     }
 
     /// Drops the inference variables made while checking the function just

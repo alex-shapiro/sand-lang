@@ -225,7 +225,7 @@ impl<'a> Verifier<'a> {
         }
         match self.arena.get(ty) {
             Ty::Error => Err(fail(self)),
-            Ty::Never if self.has_dict(tr) => Err(fail(self)),
+            Ty::Never if self.has_dict(tr) && !self.never_implements(tr.trait_id) => Err(fail(self)),
             Ty::Never => Ok(()),
             Ty::Param(p) if self.param_traits(cx, p, ty).contains(&tr) => Ok(()),
             Ty::Param(_) => Err(fail(self)),
@@ -412,6 +412,7 @@ impl<'a> Verifier<'a> {
             HKind::Dict { impl_id, args } => {
                 self.check_impl_dict(cx, *impl_id, args, ty, tr).map_err(|m| format!("{}: {m}", expected_desc(self)))
             }
+            HKind::Tuple(_) if ty == TypeId::NEVER && self.never_implements(tr.trait_id) => Ok(()),
             _ => Err(format!("{} is not a dictionary expression", expected_desc(self))),
         }
     }
@@ -442,6 +443,13 @@ impl<'a> Verifier<'a> {
             }
             _ => Err("a dictionary is not a parameter or a projection of one".into()),
         }
+    }
+
+    /// Returns `true` if `never` implements trait `t`: each method of `t` and
+    /// of its supertraits takes `self`.
+    fn never_implements(&self, t: TraitId) -> bool {
+        let def = &self.cp.traits[t as usize];
+        def.methods.iter().all(|m| self.cp.fns[m.sig as usize].has_self) && def.supers.iter().all(|s| self.never_implements(s.trait_id))
     }
 
     fn check_impl_dict(&mut self, cx: &VerifyCtx, i: ImplId, args: &[HExpr], ty: TypeId, tr: TraitRef) -> VerifyResult {
@@ -499,6 +507,7 @@ impl<'a> Verifier<'a> {
         if let (Some(i), Some(&d0)) = (fi.impl_of, b.params.get(reflect)) {
             cx.impl_dict = Some((d0, i));
         }
+        cx.dicts.extend(b.local_dicts.iter().map(|&(l, t, tr)| (l, (t, tr))));
         let mut body = b.body.clone();
         let mut result = Ok(());
         body.visit_mut(&mut |e| {

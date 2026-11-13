@@ -629,4 +629,7 @@ pub struct HFn {
     /// Functions referenced by `help` and `members` calls in the body, which
     /// the `unused-function` lint treats as used.
     pub doc_refs: Vec<FnId>,
+    /// The hidden dictionary parameters of the local functions in the body,
+    /// with the bounds that they prove.
+    pub local_dicts: Vec<(LocalId, TypeId, TraitRef)>,
 }
