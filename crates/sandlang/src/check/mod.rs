@@ -1109,7 +1109,7 @@ impl Checker {
             impls: self.impls.clone(),
             schemas: self.schemas.clone(),
             first_new_schema: std::mem::replace(&mut self.taken_schemas, self.schemas.len()),
-            codec_templates: codec::CodecTemplates { compose: self.prelude_native("compose_codec_dict"), ..self.codec_templates.clone() },
+            codec_templates: self.codec_templates.clone(),
             first_new_template: std::mem::replace(&mut self.taken_templates, self.codec_templates.templates.len()),
         }
     }

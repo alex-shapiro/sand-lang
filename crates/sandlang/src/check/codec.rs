@@ -51,8 +51,6 @@ pub(crate) struct CodecTemplates {
     /// The first method of a dictionary with a template, for `Encode` and
     /// for `Decode`.
     pub methods: [Option<FnId>; 2],
-    /// The native `compose_codec_dict`, which builds such a dictionary.
-    pub compose: Option<u32>,
     /// The schema of the scalar type of each first method of a prelude impl
     /// of `Encode` or `Decode` for a scalar type, so that the dictionary of
     /// a scalar fills a hole of a template.
@@ -729,7 +727,8 @@ impl Checker {
         let (Some(Def::Fn(encode)), Some(tr)) =
             (self.prelude.and_then(|p| self.scope_def(p, "encode_value")), self.builtin_trait(Builtin::Encode))
         else {
-            return mk(HKind::Error, encoder, span);
+            let ty = self.missing_prelude_item("encode_value", span);
+            return mk(HKind::Error, ty, span);
         };
         let dict = self.evidence_hole(ty, tr, false, span);
         mk(HKind::Call { func: encode, targs: vec![ty], args: vec![HArg::Expr(dict), HArg::Expr(value)] }, encoder, span)
@@ -751,8 +750,15 @@ impl Checker {
     fn codec_type(&mut self, name: &str) -> TypeId {
         match self.prelude.and_then(|p| self.scope_def(p, name)) {
             Some(Def::Type(TyRef::Def(d))) => self.arena.named(d, &[]),
-            _ => TypeId::ERROR,
+            _ => self.missing_prelude_item(name, Span::default()),
         }
+    }
+
+    /// Reports that the prelude has no item `name`, which synthesized code
+    /// uses. Only a change of the prelude can cause it.
+    fn missing_prelude_item(&mut self, name: &str, span: Span) -> TypeId {
+        self.error(span, format!("internal error: the prelude has no `{name}`"));
+        TypeId::ERROR
     }
 
     /// Returns the method `name` of the prelude type `owner`.
@@ -879,7 +885,10 @@ impl Synth {
 
     /// Calls the prelude method `owner.name` with `args`.
     fn method(&self, c: &mut Checker, owner: &str, name: &str, targs: Vec<TypeId>, args: Vec<HExpr>) -> HExpr {
-        let Some(f) = c.codec_method(owner, name) else { return self.e(HKind::Error, TypeId::ERROR) };
+        let Some(f) = c.codec_method(owner, name) else {
+            let ty = c.missing_prelude_item(&format!("{owner}.{name}"), self.span);
+            return self.e(HKind::Error, ty);
+        };
         let ret = c.fns[f as usize].ret;
         let gens = c.fns[f as usize].generics.clone();
         let ret = c.arena.instantiate(ret, &gens, &targs);

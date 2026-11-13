@@ -64,6 +64,9 @@ struct Compiler<'a> {
     dict_consts: PMap<Vec<u32>, u32>,
     errors: Vec<Diag>,
     recv_native: Option<u32>,
+    /// The native that gives a dictionary built at run time the fast path
+    /// (`codec/composed.rs`).
+    compose_native: Option<u32>,
     /// Natives compiled to dedicated instructions.
     inline: HashMap<u32, Inline>,
     /// The bodies of the functions to compile, with calls inlined.
@@ -357,6 +360,11 @@ impl ProgramMark {
 /// extended (see [`ProgramMark`]).
 pub(crate) fn compile_more(mut input: CompileInput, prog: &mut Program, inc: &mut Incremental, inits: &[FnId]) -> Result<u32, Vec<Diag>> {
     let cp = input.checked;
+    // Schema ids are the checker's, so the program must have the schemas of
+    // the earlier compilations and no more.
+    if prog.schemas.len() != cp.first_new_schema || prog.schema_templates.len() != cp.first_new_template {
+        return Err(vec![Diag::error(Span::default(), "internal error: the program's schemas differ from the checker's")]);
+    }
     let first = inc.fn_protos.len();
     if cfg!(debug_assertions)
         && let Err(m) = crate::check::verify::verify(cp, cp.bodies.from(first as FnId))
@@ -388,6 +396,7 @@ pub(crate) fn compile_more(mut input: CompileInput, prog: &mut Program, inc: &mu
         dict_consts: std::mem::take(&mut inc.dict_consts),
         errors: Vec::new(),
         recv_native: input.natives.id("prelude.Channel.recv"),
+        compose_native: input.natives.id("prelude.compose_codec_dict"),
         inline: HashMap::new(),
         bodies,
         order,
@@ -471,13 +480,8 @@ impl<'a> Compiler<'a> {
                 by_name: Default::default(),
             });
         }
-        // Schema ids are the checker's, so the program must have the schemas
-        // of the earlier compilations and no more.
-        assert_eq!(self.prog.schemas.len(), cp.first_new_schema, "the program's schemas differ from the checker's");
         self.prog.schemas.extend(cp.schemas.iter_from(cp.first_new_schema).cloned());
-        let templates = &cp.codec_templates.templates;
-        assert_eq!(self.prog.schema_templates.len(), cp.first_new_template, "the program's schema templates differ from the checker's");
-        self.prog.schema_templates.extend(templates.iter_from(cp.first_new_template).cloned());
+        self.prog.schema_templates.extend(cp.codec_templates.templates.iter_from(cp.first_new_template).cloned());
         let wk = cp.wk;
         let vid = |d: u32, n: &str| {
             let s = cp.syms.get(n);
@@ -2781,7 +2785,7 @@ impl<'a> Compiler<'a> {
         let t = &self.cp.codec_templates;
         let template = (*t.by_impl.get(&id)?)?;
         let decode = self.cp.traits[self.cp.impls[id as usize].trait_ref.trait_id as usize].builtin == Some(Builtin::Decode);
-        Some((i32::try_from(template).ok()?, t.methods[usize::from(decode)]?, t.compose?))
+        Some((i32::try_from(template).ok()?, t.methods[usize::from(decode)]?, self.compose_native?))
     }
 
     /// A dictionary that does not depend on the function's own dictionaries
