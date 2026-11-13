@@ -402,6 +402,7 @@ extend Encoder {
     native fn begin_some(self)
     native fn write_none(self)
     native fn end(self)
+    native fn write_fast<T>(self, value: T, schema: int)
 }
 
 extend Decoder {
@@ -450,6 +451,7 @@ extend Decoder {
     native fn end_variant(self) -> Result<()>
     native fn end_input(self) -> Result<()>
     native fn locate(self, e: Error) -> Error
+    native fn read_fast<T>(self, schema: int) -> Result<T>
 }
 
 impl Encode for () {

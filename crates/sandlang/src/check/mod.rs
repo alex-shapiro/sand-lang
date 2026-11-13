@@ -394,6 +394,7 @@ pub struct CheckedProgram {
     pub main_module: ModId,
     pub traits: PVec<TraitDef>,
     pub impls: PVec<ImplDef>,
+    pub(crate) schemas: PVec<crate::codec::fast::Schema>,
 }
 
 impl CheckedProgram {
@@ -656,6 +657,16 @@ pub struct Checker {
     /// Prelude functions taking part in iterator fusion (found on first use).
     pub(crate) fuse_fns: Option<Arc<fuse::FuseFns>>,
     pub(crate) optimize: bool,
+    /// Whether closed types with no hand-written part get a native `impl` of
+    /// `Encode` and `Decode` (`codec/fast.rs`). Off only in tests that
+    /// compare it with the synthesized implementations.
+    pub(crate) codec_fast_path: bool,
+    /// The native `impl` of `Encode` (`false`) or `Decode` (`true`) for each
+    /// closed type, or `None` if the type has a hand-written part.
+    pub(crate) fast_impls: PMap<(TypeId, bool), Option<ImplId>>,
+    /// The schemas of the types that the native impls walk.
+    pub(crate) schemas: PVec<crate::codec::fast::Schema>,
+    pub(crate) schema_ids: PMap<TypeId, crate::codec::fast::SchemaId>,
 }
 
 const MAX_ERRORS: usize = 50;
@@ -716,6 +727,10 @@ impl Default for Checker {
             iter_struct: None,
             fuse_fns: None,
             optimize: true,
+            codec_fast_path: true,
+            fast_impls: PMap::new(),
+            schemas: PVec::new(),
+            schema_ids: PMap::new(),
         }
     }
 }
@@ -1070,6 +1085,7 @@ impl Checker {
             main_module: self.main_module,
             traits: self.traits.clone(),
             impls: self.impls.clone(),
+            schemas: self.schemas.clone(),
         }
     }
 

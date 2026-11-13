@@ -12,6 +12,7 @@
 //! returns at once through `?`, so the path at the top is the path of the
 //! failure.
 
+pub(crate) mod fast;
 pub(crate) mod value_format;
 
 use crate::native::convert::HostError;
@@ -82,11 +83,22 @@ pub trait EncodeFormat: Any + Send {
     fn json(&mut self, vm: &mut Vm, json: VmValue) -> Result<(), Fail>;
     /// Writes the host value `value`, which has the data model of the format.
     fn value(&mut self, vm: &mut Vm, value: &Value) -> Result<(), Fail>;
+    /// Returns the state of the format before a value, for
+    /// [`EncodeFormat::rollback`].
+    fn mark(&self) -> FormatMark;
+    /// Returns to the state of `mark` after a write of one value failed
+    /// before it ended, so that the write can run again.
+    fn rollback(&mut self, mark: FormatMark);
     /// Bytes of Rust memory that the format holds and that the heap counts
     /// (see [`Budget`]).
     fn heap_size(&self) -> usize;
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
+
+/// The state of a format before a value, which a format returns to if a
+/// native function must run again (see [`EncodeFormat::rollback`] and
+/// [`DecodeFormat::rollback`]).
+pub struct FormatMark(pub Box<dyn Any>);
 
 /// The bytes of a format's Rust buffers that the heap counts.
 #[derive(Default)]
@@ -180,6 +192,12 @@ pub trait DecodeFormat: Any + Send {
     fn value(&mut self, vm: &mut Vm) -> DecodeResult<Value>;
     /// Checks that no input follows the decoded value.
     fn finish(&mut self, vm: &mut Vm) -> DecodeResult<()>;
+    /// Returns the state of the format before a value, for
+    /// [`DecodeFormat::rollback`].
+    fn mark(&self) -> FormatMark;
+    /// Returns to the state of `mark` after a read of one value failed
+    /// before it ended, so that the read can run again.
+    fn rollback(&mut self, mark: FormatMark);
     /// The message for a tuple or positional payload without `len` elements.
     fn length_mismatch(&self, len: usize) -> String {
         format!("expected array of length {len}")
@@ -220,7 +238,7 @@ impl NativeObject for Decoder {
 }
 
 /// An open container of a [`Decoder`].
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum Frame {
     /// A sequence and the index of its current element.
     Seq { index: Option<usize>, len: Option<usize> },
@@ -413,6 +431,7 @@ fn encoder_methods(m: &mut NativeModule) {
     m.function("Encoder.begin_some", |vm: &mut Vm, e: Enc| with_encoder(vm, e, |f, vm| f.begin_some(vm)));
     m.function("Encoder.write_none", |vm: &mut Vm, e: Enc| with_encoder(vm, e, |f, vm| f.none(vm)));
     m.function("Encoder.end", |vm: &mut Vm, e: Enc| with_encoder(vm, e, |f, vm| f.end(vm)));
+    m.function("Encoder.write_fast", |vm: &mut Vm, e: Enc, x: Param<0>, schema: i64| fast::encode(vm, e, x.raw(), schema as u32));
 }
 
 /// Reads a `json.Json` value from `d`.
@@ -446,136 +465,44 @@ fn decoder_methods(m: &mut NativeModule) {
         Ok(VmVal::from_raw(vm.heap.alloc(Obj::Range(start, end, inclusive))))
     });
     m.function("Decoder.read_native", |vm: &mut Vm, d: Dec, def: i64| -> Decoded<Param<0>> {
-        with_decoder(vm, d, |f, _, vm| {
-            let Some(t) = vm.prog.types.get(def as usize) else { return Err(Fail::internal("read_native: unknown type").into()) };
-            let (name, parse) = (t.name.clone(), t.parse);
-            let Some(parse) = parse else { return Err(Fail::internal("read_native: not a value type").into()) };
-            let text = f.native_text(vm, &name)?;
-            vm.charge_bytes(text.len())?;
-            let v = parse(&text).map_err(DecodeFail::Mismatch)?;
-            Ok(Param::from_raw(vm.heap.alloc(v)))
-        })
+        with_decoder(vm, d, |f, _, vm| read_native_value(f, vm, def as u32)).map(Param::from_raw)
     });
     m.function("Decoder.read_some", |vm: &mut Vm, d: Dec| -> Decoded<bool> { with_decoder(vm, d, |f, _, vm| f.some(vm)) });
     m.function("Decoder.begin_list", |vm: &mut Vm, d: Dec| -> Decoded<()> {
-        with_decoder(vm, d, |f, frames, vm| {
-            f.begin_seq(vm, SeqKind::List)?;
-            frames.push(Frame::Seq { index: None, len: None });
-            Ok(())
-        })
+        with_decoder(vm, d, |f, frames, vm| dec_begin_seq(f, frames, vm, SeqKind::List))
     });
     m.function("Decoder.begin_set", |vm: &mut Vm, d: Dec| -> Decoded<()> {
-        with_decoder(vm, d, |f, frames, vm| {
-            f.begin_seq(vm, SeqKind::Set)?;
-            frames.push(Frame::Seq { index: None, len: None });
-            Ok(())
-        })
+        with_decoder(vm, d, |f, frames, vm| dec_begin_seq(f, frames, vm, SeqKind::Set))
     });
-    m.function("Decoder.next_item", |vm: &mut Vm, d: Dec| -> Decoded<bool> {
-        with_decoder(vm, d, |f, frames, vm| {
-            let more = f.next_item(vm)?;
-            match (frames.last_mut(), more) {
-                (Some(Frame::Seq { index, .. }), true) => *index = Some(index.map_or(0, |i| i + 1)),
-                (Some(Frame::Seq { .. }), false) => _ = frames.pop(),
-                _ => return Err(Fail::internal("next_item: no open sequence").into()),
-            }
-            Ok(more)
-        })
-    });
+    m.function("Decoder.next_item", |vm: &mut Vm, d: Dec| -> Decoded<bool> { with_decoder(vm, d, dec_next_item) });
     m.function("Decoder.begin_tuple", |vm: &mut Vm, d: Dec, len: i64| -> Decoded<()> {
-        with_decoder(vm, d, |f, frames, vm| {
-            f.begin_seq(vm, SeqKind::Tuple(to_index(len)))?;
-            frames.push(Frame::Seq { index: None, len: Some(to_index(len)) });
-            Ok(())
-        })
+        with_decoder(vm, d, |f, frames, vm| dec_begin_seq(f, frames, vm, SeqKind::Tuple(to_index(len))))
     });
-    m.function("Decoder.element", |vm: &mut Vm, d: Dec| -> Decoded<()> {
-        with_decoder(vm, d, |f, frames, vm| {
-            let more = f.next_item(vm)?;
-            let Some(Frame::Seq { index, len: Some(len) }) = frames.last_mut() else {
-                return Err(Fail::internal("element: no open tuple").into());
-            };
-            if !more {
-                let len = *len;
-                frames.pop();
-                return Err(DecodeFail::Mismatch(f.length_mismatch(len)));
-            }
-            *index = Some(index.map_or(0, |i| i + 1));
-            Ok(())
-        })
-    });
-    m.function("Decoder.end_tuple", |vm: &mut Vm, d: Dec| -> Decoded<()> {
-        with_decoder(vm, d, |f, frames, vm| {
-            let Some(Frame::Seq { len: Some(len), .. }) = frames.pop() else {
-                return Err(Fail::internal("end_tuple: no open tuple").into());
-            };
-            if f.next_item(vm)? {
-                return Err(DecodeFail::Mismatch(f.length_mismatch(len)));
-            }
-            Ok(())
-        })
-    });
-    m.function("Decoder.begin_map", |vm: &mut Vm, d: Dec| -> Decoded<()> {
-        with_decoder(vm, d, |f, frames, vm| {
-            f.begin_map(vm)?;
-            frames.push(Frame::Map { key: None, pending: None });
-            Ok(())
-        })
-    });
-    m.function("Decoder.next_entry", |vm: &mut Vm, d: Dec| -> Decoded<bool> {
-        with_decoder(vm, d, |f, frames, vm| {
-            let next = f.next_entry(vm)?;
-            let Some(Frame::Map { key, pending }) = frames.last_mut() else { return Err(Fail::internal("next_entry: no open map").into()) };
-            // The key reads at the path of the map.
-            *key = None;
-            *pending = next;
-            if pending.is_none() {
-                frames.pop();
-                return Ok(false);
-            }
-            Ok(true)
-        })
-    });
+    m.function("Decoder.element", |vm: &mut Vm, d: Dec| -> Decoded<()> { with_decoder(vm, d, dec_element) });
+    m.function("Decoder.end_tuple", |vm: &mut Vm, d: Dec| -> Decoded<()> { with_decoder(vm, d, dec_end_tuple) });
+    m.function("Decoder.begin_map", |vm: &mut Vm, d: Dec| -> Decoded<()> { with_decoder(vm, d, dec_begin_map) });
+    m.function("Decoder.next_entry", |vm: &mut Vm, d: Dec| -> Decoded<bool> { with_decoder(vm, d, dec_next_entry) });
     m.function("Decoder.map_value", |vm: &mut Vm, d: Dec| -> Decoded<()> {
-        with_decoder(vm, d, |f, frames, vm| {
-            f.map_value(vm)?;
-            let Some(Frame::Map { key, pending }) = frames.last_mut() else { return Err(Fail::internal("map_value: no open map").into()) };
-            *key = pending.take();
-            Ok(())
-        })
+        with_decoder(vm, d, |f, frames, vm| dec_map_value(f, frames, vm))
     });
     m.function("Decoder.begin_struct", |vm: &mut Vm, d: Dec, def: i64| -> Decoded<()> {
-        with_decoder(vm, d, |f, frames, vm| {
-            let name = type_name(vm, def as u32);
-            f.begin_fields(vm, &name)?;
-            frames.push(Frame::Fields { id: def as u32, variant: false, field: None, guess: 0 });
-            Ok(())
-        })
+        with_decoder(vm, d, |f, frames, vm| dec_begin_struct(f, frames, vm, def as u32))
     });
     m.function("Decoder.begin_fields", |vm: &mut Vm, d: Dec, variant: i64| -> Decoded<()> {
-        with_decoder(vm, d, |f, frames, vm| {
-            f.begin_fields(vm, "")?;
-            frames.push(Frame::Fields { id: variant as u32, variant: true, field: None, guess: 0 });
-            Ok(())
-        })
+        with_decoder(vm, d, |f, frames, vm| dec_begin_fields(f, frames, vm, variant as u32))
     });
     m.function("Decoder.field", |vm: &mut Vm, d: Dec| -> Decoded<i64> { with_decoder(vm, d, next_field) });
     m.function("Decoder.missing", |vm: &mut Vm, d: Dec, id: i64, variant: bool, index: i64| -> Result<core::Error, Fail> {
-        let obj = d.get(&vm.heap)?;
-        let name = field_names(vm, id as u32, variant).get(to_index(index)).cloned().unwrap_or_default();
-        let message = format!("{}: missing field `{name}`", path_text(vm, &obj.frames));
+        let message = missing_message(vm, &d.get(&vm.heap)?.frames, id as u32, variant, to_index(index));
         d.get_mut(&mut vm.heap)?.last_error = Some(message.clone());
         Ok(core::Error { message, kind: "parse".into() })
     });
     m.function("Decoder.variant", |vm: &mut Vm, d: Dec, first: i64, count: i64| -> Decoded<i64> {
         with_decoder(vm, d, |f, frames, vm| read_variant(f, frames, vm, first as u32, to_index(count)))
     });
-    m.function("Decoder.end_variant", |vm: &mut Vm, d: Dec| -> Decoded<()> {
-        with_decoder(vm, d, |f, frames, vm| {
-            let Some(Frame::Variant { id }) = frames.pop() else { return Err(Fail::internal("end_variant: no open variant").into()) };
-            let name = vm.prog.variants.get(id as usize).map_or_else(String::new, |v| type_name(vm, v.def));
-            f.end_variant(vm, &name)
-        })
+    m.function("Decoder.end_variant", |vm: &mut Vm, d: Dec| -> Decoded<()> { with_decoder(vm, d, dec_end_variant) });
+    m.function("Decoder.read_fast", |vm: &mut Vm, d: Dec, schema: i64| -> Decoded<Param<0>> {
+        fast::decode(vm, d, schema as u32).map(Param::from_raw)
     });
     m.function("Decoder.end_input", |vm: &mut Vm, d: Dec| -> Decoded<()> { with_decoder(vm, d, |f, _, vm| f.finish(vm)) });
     m.function("Decoder.locate", |vm: &mut Vm, d: Dec, e: core::Error| -> Result<core::Error, Fail> {
@@ -585,6 +512,125 @@ fn decoder_methods(m: &mut NativeModule) {
         }
         Ok(core::Error { message: format!("{}: {}", path_text(vm, &obj.frames), e.message), kind: e.kind })
     });
+}
+
+/// Reads the text of a value of the native value type with runtime
+/// definition `def`, and parses it.
+fn read_native_value(f: &mut dyn DecodeFormat, vm: &mut Vm, def: u32) -> DecodeResult<VmValue> {
+    let Some(t) = vm.prog.types.get(def as usize) else { return Err(Fail::internal("read_native: unknown type").into()) };
+    let (name, parse) = (t.name.clone(), t.parse);
+    let Some(parse) = parse else { return Err(Fail::internal("read_native: not a value type").into()) };
+    let text = f.native_text(vm, &name)?;
+    vm.charge_bytes(text.len())?;
+    let v = parse(&text).map_err(DecodeFail::Mismatch)?;
+    Ok(vm.heap.alloc(v))
+}
+
+/// Opens a list, a set, or a tuple.
+fn dec_begin_seq(f: &mut dyn DecodeFormat, frames: &mut Vec<Frame>, vm: &mut Vm, kind: SeqKind) -> DecodeResult<()> {
+    f.begin_seq(vm, kind)?;
+    let len = match kind {
+        SeqKind::Tuple(n) => Some(n),
+        SeqKind::List | SeqKind::Set => None,
+    };
+    frames.push(Frame::Seq { index: None, len });
+    Ok(())
+}
+
+/// Moves to the next element of the innermost list or set. Returns `false`
+/// after the last.
+fn dec_next_item(f: &mut dyn DecodeFormat, frames: &mut Vec<Frame>, vm: &mut Vm) -> DecodeResult<bool> {
+    let more = f.next_item(vm)?;
+    match (frames.last_mut(), more) {
+        (Some(Frame::Seq { index, .. }), true) => *index = Some(index.map_or(0, |i| i + 1)),
+        (Some(Frame::Seq { .. }), false) => _ = frames.pop(),
+        _ => return Err(Fail::internal("next_item: no open sequence").into()),
+    }
+    Ok(more)
+}
+
+/// Moves to the next element of the innermost tuple, which must have one.
+fn dec_element(f: &mut dyn DecodeFormat, frames: &mut Vec<Frame>, vm: &mut Vm) -> DecodeResult<()> {
+    let more = f.next_item(vm)?;
+    let Some(Frame::Seq { index, len: Some(len) }) = frames.last_mut() else {
+        return Err(Fail::internal("element: no open tuple").into());
+    };
+    if !more {
+        let len = *len;
+        frames.pop();
+        return Err(DecodeFail::Mismatch(f.length_mismatch(len)));
+    }
+    *index = Some(index.map_or(0, |i| i + 1));
+    Ok(())
+}
+
+/// Closes the innermost tuple, which must have no more elements.
+fn dec_end_tuple(f: &mut dyn DecodeFormat, frames: &mut Vec<Frame>, vm: &mut Vm) -> DecodeResult<()> {
+    let Some(Frame::Seq { len: Some(len), .. }) = frames.pop() else {
+        return Err(Fail::internal("end_tuple: no open tuple").into());
+    };
+    if f.next_item(vm)? {
+        return Err(DecodeFail::Mismatch(f.length_mismatch(len)));
+    }
+    Ok(())
+}
+
+fn dec_begin_map(f: &mut dyn DecodeFormat, frames: &mut Vec<Frame>, vm: &mut Vm) -> DecodeResult<()> {
+    f.begin_map(vm)?;
+    frames.push(Frame::Map { key: None, pending: None });
+    Ok(())
+}
+
+/// Moves to the key of the next entry of the innermost map. Returns `false`
+/// after the last entry.
+fn dec_next_entry(f: &mut dyn DecodeFormat, frames: &mut Vec<Frame>, vm: &mut Vm) -> DecodeResult<bool> {
+    let next = f.next_entry(vm)?;
+    let Some(Frame::Map { key, pending }) = frames.last_mut() else { return Err(Fail::internal("next_entry: no open map").into()) };
+    // The key reads at the path of the map.
+    *key = None;
+    *pending = next;
+    if pending.is_none() {
+        frames.pop();
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+/// Moves from the key to the value of the current map entry.
+fn dec_map_value(f: &mut dyn DecodeFormat, frames: &mut [Frame], vm: &mut Vm) -> DecodeResult<()> {
+    f.map_value(vm)?;
+    let Some(Frame::Map { key, pending }) = frames.last_mut() else { return Err(Fail::internal("map_value: no open map").into()) };
+    *key = pending.take();
+    Ok(())
+}
+
+/// Opens the struct with runtime definition `def`.
+fn dec_begin_struct(f: &mut dyn DecodeFormat, frames: &mut Vec<Frame>, vm: &mut Vm, def: u32) -> DecodeResult<()> {
+    let name = type_name(vm, def);
+    f.begin_fields(vm, &name)?;
+    frames.push(Frame::Fields { id: def, variant: false, field: None, guess: 0 });
+    Ok(())
+}
+
+/// Opens the named payload of the variant with runtime id `variant`.
+fn dec_begin_fields(f: &mut dyn DecodeFormat, frames: &mut Vec<Frame>, vm: &mut Vm, variant: u32) -> DecodeResult<()> {
+    f.begin_fields(vm, "")?;
+    frames.push(Frame::Fields { id: variant, variant: true, field: None, guess: 0 });
+    Ok(())
+}
+
+/// Closes the innermost variant payload.
+fn dec_end_variant(f: &mut dyn DecodeFormat, frames: &mut Vec<Frame>, vm: &mut Vm) -> DecodeResult<()> {
+    let Some(Frame::Variant { id }) = frames.pop() else { return Err(Fail::internal("end_variant: no open variant").into()) };
+    let name = vm.prog.variants.get(id as usize).map_or_else(String::new, |v| type_name(vm, v.def));
+    f.end_variant(vm, &name)
+}
+
+/// The message of a missing field `index` of struct definition `id`, or of
+/// the named payload of variant `id`, at the path of `frames`.
+fn missing_message(vm: &Vm, frames: &[Frame], id: u32, variant: bool, index: usize) -> String {
+    let name = field_names(vm, id, variant).get(index).cloned().unwrap_or_default();
+    format!("{}: missing field `{name}`", path_text(vm, frames))
 }
 
 /// Reads the next field of the innermost struct or named payload. Returns

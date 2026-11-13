@@ -13,3 +13,5 @@ cc 5fd686b19c4222d85dfc47596725481cf3934687263a858b98032c0129eb730e # shrinks to
 cc e19c01c943119fa061a07beb32131a7c394d412174383fd05e4e003503ff88bc # shrinks to t = Map(Int, Fn)
 cc 505d74e8e4efcdf09d92e1208e4d83ecb0ea5552b496b2513d78a238add05e99 # shrinks to t = Bag(Fn)
 cc 024c5ba6a2c5d9a7da686d84ec4573e95baf46fe26b0513deed45a09a56dce2a # shrinks to (width, depth) = (1, 33), chain = 1
+cc 42392bae478bb0c5facc34795df3547272377ed5b5a0c8a6b6bdbfe782657810 # shrinks to t = Set(Option(Json))
+cc 03a8179e292d854d7362edf00a78fb2af3407ea61dae000abab6b3f6dee6dbf6 # shrinks to t = Map(Option(Str), Int), seed = 1

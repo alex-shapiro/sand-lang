@@ -419,6 +419,7 @@ impl Session {
         let file = graph.sm.add("<repl>", "");
         let mut checker = snapshot.checker.clone();
         checker.optimize = self.engine.config().optimize;
+        checker.codec_fast_path = self.engine.config().codec_fast_path;
         let module = ParsedModule {
             name: SESSION_MODULE.into(),
             file,

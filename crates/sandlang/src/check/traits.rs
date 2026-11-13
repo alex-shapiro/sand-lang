@@ -72,6 +72,10 @@ pub struct ImplDef {
     /// `Decode`. Its methods exist once a dictionary needs them
     /// ([`Checker::ensure_derived_methods`]).
     pub derived: bool,
+    /// Indicates the native `impl` of `Encode` or `Decode` for one closed
+    /// type ([`Checker::fast_codec_impl`]). Trait resolution prefers it, and
+    /// it is not in the lookup tables of impls.
+    pub fast: bool,
 }
 
 struct Requirement {
@@ -572,6 +576,7 @@ impl Checker {
             evidence,
             replaced: false,
             derived: false,
+            fast: false,
         });
         add_impl(&mut self.impls_by, key, id);
         add_impl(&mut self.impls_by_ctor, (ctor, arity), id);
@@ -1145,6 +1150,12 @@ impl Checker {
                 return Err(m);
             }
             _ => {}
+        }
+        if ground
+            && let Some(b) = self.traits[tr.trait_id as usize].builtin.filter(|b| b.is_synthesized())
+            && let Some(id) = self.fast_codec_impl(ty, b)
+        {
+            return Ok(dict_expr(HKind::Dict { impl_id: id, args: Vec::new() }, span));
         }
         match self.resolve_by_impl(ty, tr, depth) {
             Err(m)

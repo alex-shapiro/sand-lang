@@ -1302,6 +1302,9 @@ pub struct Program {
     pub templates: Vec<Template>,
     /// The jump tables of `SwitchVariant`, `SwitchInt` and `SwitchChar`.
     pub switches: Vec<Switch>,
+    /// The schemas of the types that the fast path of `Encode` and `Decode`
+    /// walks, by [`SchemaId`](crate::codec::fast::SchemaId).
+    pub(crate) schemas: Vec<crate::codec::fast::Schema>,
 }
 
 impl Program {

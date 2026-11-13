@@ -11,12 +11,20 @@ use super::derive::Derived;
 use super::expr::mk;
 use super::traits::{add_impl, impl_key};
 use super::*;
+use crate::codec::fast::{Schema, SchemaId};
+
+/// The deepest type that has a native impl of `Encode` or `Decode`.
+const MAX_FAST_TYPE_DEPTH: usize = 64;
 
 /// A derived method to build.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DerivedMethod {
     Encode,
     Decode,
+    /// `encode` of a native impl, which walks the schema with this id.
+    FastEncode(SchemaId),
+    /// `decode` of a native impl, which walks the schema with this id.
+    FastDecode(SchemaId),
 }
 
 impl Checker {
@@ -151,6 +159,7 @@ impl Checker {
             evidence,
             replaced: false,
             derived: true,
+            fast: false,
         });
         add_impl(&mut self.impls_by, (tr.trait_id, ctor, arity), id);
         add_impl(&mut self.impls_by_ctor, (ctor, arity), id);
@@ -163,14 +172,21 @@ impl Checker {
         if !imp.derived || !imp.slots.is_empty() {
             return;
         }
-        let (tr, target, ps, module, span) = (imp.trait_ref, imp.target, imp.generics.clone(), imp.module, imp.span);
-        let ctor = impl_key(&self.arena, target).map_or(Ctor::Unit, |(c, _)| c);
-        let method = match self.traits[tr.trait_id as usize].builtin {
+        let method = match self.traits[imp.trait_ref.trait_id as usize].builtin {
             Some(Builtin::Decode) => DerivedMethod::Decode,
             _ => DerivedMethod::Encode,
         };
+        self.add_codec_methods(id, method);
+    }
+
+    /// Declares the methods of the `impl` `id` of `Encode` or `Decode`, whose
+    /// first method is `method`, and fills its slots.
+    fn add_codec_methods(&mut self, id: ImplId, method: DerivedMethod) {
+        let imp = &self.impls[id as usize];
+        let (tr, target, ps, module, span) = (imp.trait_ref, imp.target, imp.generics.clone(), imp.module, imp.span);
+        let ctor = impl_key(&self.arena, target).map_or(Ctor::Unit, |(c, _)| c);
         let (name, params, ret, has_self) = match method {
-            DerivedMethod::Encode => {
+            DerivedMethod::Encode | DerivedMethod::FastEncode(_) => {
                 let enc = self.codec_type("Encoder");
                 let params = vec![
                     ParamSig { name: Symbol::SELF, ty: target, default: None },
@@ -178,7 +194,7 @@ impl Checker {
                 ];
                 (self.sym("encode"), params, TypeId::UNIT, true)
             }
-            DerivedMethod::Decode => {
+            DerivedMethod::Decode | DerivedMethod::FastDecode(_) => {
                 let dec = self.codec_type("Decoder");
                 let err = self.error_ty();
                 let ret = self.result_of(target, err);
@@ -208,6 +224,222 @@ impl Checker {
         // Default methods, such as `decode_missing`, fill the other slots.
         slots.extend(self.traits[tr.trait_id as usize].methods.iter().skip(1).map(|m| m.default.unwrap_or(m.sig)));
         self.impls[id as usize].slots = slots;
+    }
+
+    /// Returns the native `impl` of `b` (`Encode` or `Decode`) for the closed
+    /// type `ty`, and registers it on first use. Only a list, set, map,
+    /// tuple, struct, or enum other than `Option` has one, and only if
+    /// every type in it has a synthesized or built-in implementation of `b`
+    /// (and, for `Decode`, no field default). The impl's method walks the
+    /// value natively, with the same format operations as the Sand code.
+    pub(crate) fn fast_codec_impl(&mut self, ty: TypeId, b: Builtin) -> Option<ImplId> {
+        if !self.codec_fast_path || self.arena.has_params(ty) || self.arena.has_vars(ty) {
+            return None;
+        }
+        match self.arena.get(ty) {
+            Ty::List(_) | Ty::Set(_) | Ty::Map(..) | Ty::Tuple(_) => {}
+            Ty::Named(d, _)
+                if d != self.wk.option && !self.is_json_def(d) && !matches!(self.types[d as usize].kind, TypeDefKind::Opaque(_)) => {}
+            _ => return None,
+        }
+        let decode = b == Builtin::Decode;
+        if let Some(&known) = self.fast_impls.get(&(ty, decode)) {
+            return known;
+        }
+        let found = self.codec_is_native(ty, b).then(|| self.add_fast_impl(ty, b)).flatten();
+        self.fast_impls.insert((ty, decode), found);
+        found
+    }
+
+    /// Returns `true` if every type in the closed type `root` has a
+    /// synthesized or built-in implementation of `b` and satisfies the bounds
+    /// of its type constructor, and, for `Decode`, no struct in it has a
+    /// field default.
+    fn codec_is_native(&mut self, root: TypeId, b: Builtin) -> bool {
+        let decode = b == Builtin::Decode;
+        let Some(hash) = self.builtin_trait(Builtin::Hash) else { return false };
+        let mut todo = vec![root];
+        let mut seen = HashSet::new();
+        while let Some(t) = todo.pop() {
+            if !seen.insert(t) || self.fast_impls.get(&(t, decode)).is_some_and(Option::is_some) {
+                continue;
+            }
+            // Types that grow without end, such as `P<[T]>` in `P<T>`, are
+            // left to the synthesized impls.
+            if !self.budget.charge(1) || self.type_depth(t, MAX_FAST_TYPE_DEPTH) >= MAX_FAST_TYPE_DEPTH {
+                return false;
+            }
+            let mut bounds: Vec<(TypeId, TraitRef)> = Vec::new();
+            match self.arena.get(t) {
+                // The verifier proves tuple bounds with the synthesized impl.
+                Ty::Tuple(l) => {
+                    let n = self.arena.list_len(l) as u32;
+                    self.tuple_codec_impl(b, n);
+                }
+                Ty::Set(x) | Ty::Map(x, _) => bounds.push((x, hash)),
+                Ty::Named(d, args) if d != self.wk.option && !self.is_json_def(d) => {
+                    let def = &self.types[d as usize];
+                    let derived = self.builtin_trait(b).is_some_and(|tr| {
+                        let ids = self.impls_by.get(&(tr.trait_id, Ctor::Def(d), 0));
+                        ids.and_then(|ids| ids.first()).is_some_and(|&i| self.impls[i as usize].derived)
+                    });
+                    if !derived || (decode && def.fields().iter().any(|f| f.default.is_some())) {
+                        return false;
+                    }
+                    let gens = def.generics.clone();
+                    for (g, a) in gens.into_iter().zip(self.arena.list(args).to_vec()) {
+                        bounds.extend(self.params[g as usize].traits.iter().map(|&tr| (a, tr)));
+                    }
+                }
+                _ => {}
+            }
+            for (x, tr) in bounds {
+                if self.implements(x, tr) != Some(true) {
+                    return false;
+                }
+            }
+            match self.codec_parts(t) {
+                Some(parts) => todo.extend(parts),
+                None => return false,
+            }
+        }
+        true
+    }
+
+    /// Returns the nesting depth of type `t`, up to `cap`.
+    fn type_depth(&self, t: TypeId, cap: usize) -> usize {
+        if cap == 0 {
+            return 0;
+        }
+        let below = |ts: &[TypeId]| ts.iter().map(|&x| self.type_depth(x, cap - 1)).max().unwrap_or(0);
+        1 + match self.arena.get(t) {
+            Ty::List(x) | Ty::Set(x) => below(&[x]),
+            Ty::Map(k, v) => below(&[k, v]),
+            Ty::Tuple(l) | Ty::Named(_, l) => below(self.arena.list(l)),
+            Ty::Fn(l, r) => below(self.arena.list(l)).max(below(&[r])),
+            _ => 0,
+        }
+    }
+
+    /// Returns `true` if `d` is `json.Json`, whose impls are native.
+    fn is_json_def(&self, d: TypeDefId) -> bool {
+        let def = &self.types[d as usize];
+        self.name(def.name) == "Json"
+            && self.name(def.module_name) == "json"
+            && self.builtin_trait(Builtin::Encode).is_some_and(|tr| {
+                let ids = self.impls_by.get(&(tr.trait_id, Ctor::Def(d), 0));
+                ids.and_then(|ids| ids.first())
+                    .and_then(|&i| self.impls[i as usize].slots.first())
+                    .is_some_and(|&f| matches!(self.fns[f as usize].kind, FnKind::Native(_)))
+            })
+    }
+
+    /// Returns the types that the schema of `t` refers to, or `None` if `t`
+    /// has no schema.
+    fn codec_parts(&mut self, t: TypeId) -> Option<Vec<TypeId>> {
+        Some(match self.arena.get(t) {
+            Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Bytes | Ty::Duration | Ty::Unit | Ty::Range => Vec::new(),
+            Ty::List(x) | Ty::Set(x) => vec![x],
+            Ty::Map(k, v) => vec![k, v],
+            Ty::Tuple(l) => self.arena.list(l).to_vec(),
+            Ty::Named(d, args) => {
+                let args = self.arena.list(args).to_vec();
+                if d == self.wk.option || self.is_json_def(d) {
+                    return Some(if d == self.wk.option { args } else { Vec::new() });
+                }
+                match self.types[d as usize].kind.clone() {
+                    TypeDefKind::Struct { fields } => (0..fields.len()).map(|i| self.field_type(d, i, &args)).collect(),
+                    TypeDefKind::Enum { variants } => {
+                        let gens = self.types[d as usize].generics.clone();
+                        variants.iter().flat_map(|v| v.fields.clone()).map(|t| self.arena.instantiate(t, &gens, &args)).collect()
+                    }
+                    TypeDefKind::Opaque(Opaque::Value(_)) => Vec::new(),
+                    TypeDefKind::Opaque(_) => return None,
+                }
+            }
+            _ => return None,
+        })
+    }
+
+    /// Registers the native impl of `b` for `ty` and its schema.
+    fn add_fast_impl(&mut self, ty: TypeId, b: Builtin) -> Option<ImplId> {
+        let tr = self.builtin_trait(b)?;
+        let schema = self.schema_of(ty)?;
+        let id = self.impls.len() as ImplId;
+        self.impls.push(ImplDef {
+            trait_ref: tr,
+            target: ty,
+            generics: Vec::new(),
+            module: self.cur_mod,
+            span: Span::default(),
+            slots: Vec::new(),
+            evidence: Vec::new(),
+            replaced: false,
+            derived: false,
+            fast: true,
+        });
+        let method = if b == Builtin::Decode { DerivedMethod::FastDecode(schema) } else { DerivedMethod::FastEncode(schema) };
+        self.add_codec_methods(id, method);
+        Some(id)
+    }
+
+    /// Returns the id of the schema of the closed type `root`, and adds the
+    /// schemas of the types in it that have none yet.
+    fn schema_of(&mut self, root: TypeId) -> Option<SchemaId> {
+        let mut added = Vec::new();
+        let mut todo = vec![root];
+        while let Some(t) = todo.pop() {
+            if self.schema_ids.contains_key(&t) {
+                continue;
+            }
+            let id = self.schemas.len() as SchemaId;
+            self.schemas.push(Schema::Unit);
+            self.schema_ids.insert(t, id);
+            added.push((t, id));
+            todo.extend(self.codec_parts(t)?);
+        }
+        for (t, id) in added {
+            let node = self.schema_node(t)?;
+            *self.schemas.get_mut(id as usize) = node;
+        }
+        self.schema_ids.get(&root).copied()
+    }
+
+    /// Builds the schema of `t` from the schemas of its parts.
+    fn schema_node(&mut self, t: TypeId) -> Option<Schema> {
+        let parts = self.codec_parts(t)?;
+        let ids: Vec<SchemaId> = parts.iter().map(|p| self.schema_ids.get(p).copied()).collect::<Option<_>>()?;
+        Some(match self.arena.get(t) {
+            Ty::Int => Schema::Int,
+            Ty::Float => Schema::Float,
+            Ty::Bool => Schema::Bool,
+            Ty::Str => Schema::Str,
+            Ty::Bytes => Schema::Bytes,
+            Ty::Duration => Schema::Duration,
+            Ty::Unit => Schema::Unit,
+            Ty::Range => Schema::Range,
+            Ty::List(_) => Schema::List(ids[0]),
+            Ty::Set(_) => Schema::Set(ids[0]),
+            Ty::Map(..) => Schema::Map(ids[0], ids[1]),
+            Ty::Tuple(_) => Schema::Tuple(ids.into()),
+            Ty::Named(d, _) if d == self.wk.option => Schema::Option(ids[0]),
+            Ty::Named(d, _) if self.is_json_def(d) => Schema::Json,
+            Ty::Named(d, _) => match &self.types[d as usize].kind {
+                TypeDefKind::Struct { .. } => Schema::Struct(d, ids.into()),
+                TypeDefKind::Enum { variants } => {
+                    let mut rest = &ids[..];
+                    let mut payloads = Vec::with_capacity(variants.len());
+                    for v in variants {
+                        let (now, later) = rest.split_at(v.fields.len());
+                        payloads.push(now.into());
+                        rest = later;
+                    }
+                    Schema::Enum(variants.first().map_or(0, |v| v.rt_id), payloads.into())
+                }
+                TypeDefKind::Opaque(_) => Schema::Native(d),
+            },
+            _ => return None,
+        })
     }
 
     /// Replaces each argument of native function `f` whose Rust type is
@@ -259,6 +491,16 @@ impl Checker {
             DerivedMethod::Decode => {
                 let dec = params[params.len() - 1];
                 b.decode_body(self, target, dec)
+            }
+            DerivedMethod::FastEncode(schema) => {
+                let (value, enc) = (params[params.len() - 2], params[params.len() - 1]);
+                let args = vec![b.local(self, enc), b.local(self, value), b.int(schema as i64)];
+                b.method(self, "Encoder", "write_fast", vec![target], args)
+            }
+            DerivedMethod::FastDecode(schema) => {
+                let dec = params[params.len() - 1];
+                let args = vec![b.local(self, dec), b.int(schema as i64)];
+                b.method(self, "Decoder", "read_fast", vec![target], args)
             }
         }
     }

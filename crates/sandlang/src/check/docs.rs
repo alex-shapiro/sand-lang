@@ -110,7 +110,7 @@ impl Checker {
             .map(|m| member_doc(MemberKind::Method, self.name(m.name), self.signature(m.sig, false), &self.fns[m.sig as usize].doc))
             .collect();
         let mut related: Vec<String> = Vec::new();
-        for imp in self.impls.iter().filter(|i| i.trait_ref.trait_id == t) {
+        for imp in self.impls.iter().filter(|i| i.trait_ref.trait_id == t && !i.fast) {
             let name = self.item_name(imp.target);
             if !related.contains(&name) {
                 related.push(name);

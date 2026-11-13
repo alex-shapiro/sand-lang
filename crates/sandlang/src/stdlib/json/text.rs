@@ -3,7 +3,7 @@
 use super::{Builder, Error as ParseError, Json, JsonIds, Parser, SPACES, base64, json_from_vm, write_str};
 use crate::codec::MAX_NESTING_DEPTH;
 use crate::codec::value_format::write_json_form;
-use crate::codec::{Budget, DecodeFail, DecodeFormat, DecodeResult, EncodeFormat, SeqKind};
+use crate::codec::{Budget, DecodeFail, DecodeFormat, DecodeResult, EncodeFormat, FormatMark, SeqKind};
 use crate::value::Value;
 use crate::vm::meter::SLOW_BYTES_PER_UNIT;
 use crate::vm::value::{Obj, VmValue};
@@ -34,6 +34,7 @@ enum Bracket {
     Some,
 }
 
+#[derive(Clone, Copy)]
 struct Open {
     bracket: Bracket,
     is_empty: bool,
@@ -327,6 +328,21 @@ impl EncodeFormat for TextEncoder {
 
     fn value(&mut self, vm: &mut Vm, value: &Value) -> Result<(), Fail> {
         write_json_form(self, vm, value)
+    }
+
+    fn mark(&self) -> FormatMark {
+        FormatMark(Box::new((self.out.len(), self.charged, self.open.len(), self.open.last().copied(), self.depth)))
+    }
+
+    fn rollback(&mut self, mark: FormatMark) {
+        let Ok(m) = mark.0.downcast::<(usize, usize, usize, Option<Open>, usize)>() else { return };
+        let (out, charged, open, top, depth) = *m;
+        self.out.truncate(out);
+        self.open.truncate(open);
+        if let (Some(top), Some(last)) = (top, self.open.last_mut()) {
+            *last = top;
+        }
+        (self.charged, self.depth) = (charged, depth);
     }
 
     fn heap_size(&self) -> usize {
@@ -795,6 +811,20 @@ impl DecodeFormat for TextDecoder {
         Ok(json_value(&json_from_vm(vm, v)?))
     }
 
+    fn mark(&self) -> FormatMark {
+        FormatMark(Box::new((self.pos, self.depth, self.charged, self.open.len(), self.open.last().copied(), self.key.clone())))
+    }
+
+    fn rollback(&mut self, mark: FormatMark) {
+        let Ok(m) = mark.0.downcast::<(usize, usize, usize, usize, Option<Container>, Option<String>)>() else { return };
+        let (pos, depth, charged, open, top, key) = *m;
+        self.open.truncate(open);
+        if let (Some(top), Some(last)) = (top, self.open.last_mut()) {
+            *last = top;
+        }
+        (self.pos, self.depth, self.charged, self.key) = (pos, depth, charged, key);
+    }
+
     fn heap_size(&self) -> usize {
         self.budget.counted()
     }
@@ -1038,6 +1068,19 @@ impl EncodeFormat for TreeEncoder {
     fn value(&mut self, vm: &mut Vm, value: &Value) -> Result<(), Fail> {
         write_json_form(self, vm, value)
     }
+    fn mark(&self) -> FormatMark {
+        FormatMark(Box::new((self.stack.len(), self.depth, self.allocated)))
+    }
+
+    // A failed write changes only the containers that it opened: it places
+    // its value in the container below only when the value ends.
+    fn rollback(&mut self, mark: FormatMark) {
+        let Ok(m) = mark.0.downcast::<(usize, usize, usize)>() else { return };
+        let (stack, depth, allocated) = *m;
+        self.stack.truncate(stack);
+        (self.depth, self.allocated) = (depth, allocated);
+    }
+
     fn heap_size(&self) -> usize {
         self.budget.counted()
     }

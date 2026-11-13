@@ -5,7 +5,7 @@
 //! the JSON form of the target type, such as a Base64 `Value::Str` for
 //! `bytes`.
 
-use super::{Budget, DecodeFail, DecodeFormat, DecodeResult, EncodeFormat, SeqKind};
+use super::{Budget, DecodeFail, DecodeFormat, DecodeResult, EncodeFormat, FormatMark, SeqKind};
 use crate::codec::MAX_NESTING_DEPTH;
 use crate::stdlib::base64;
 use crate::stdlib::json::Json;
@@ -248,6 +248,20 @@ impl EncodeFormat for ValueEncoder {
         self.push(vm, value.clone())
     }
 
+    fn mark(&self) -> FormatMark {
+        FormatMark(Box::new((self.stack.len(), self.counted.len(), self.depth, self.allocated)))
+    }
+
+    // A failed write changes only the containers that it opened: it places
+    // its value in the container below only when the value ends.
+    fn rollback(&mut self, mark: FormatMark) {
+        let Ok(m) = mark.0.downcast::<(usize, usize, usize, usize)>() else { return };
+        let (stack, counted, depth, allocated) = *m;
+        self.stack.truncate(stack);
+        self.counted.truncate(counted);
+        (self.depth, self.allocated) = (depth, allocated);
+    }
+
     fn heap_size(&self) -> usize {
         self.budget.counted()
     }
@@ -258,6 +272,7 @@ impl EncodeFormat for ValueEncoder {
 }
 
 /// The value that the next operation reads.
+#[derive(Clone)]
 enum Next {
     Value(Value),
     /// The named payload of a variant, from its field names.
@@ -641,6 +656,19 @@ impl DecodeFormat for ValueDecoder {
 
     fn length_mismatch(&self, len: usize) -> String {
         format!("expected list of length {len}")
+    }
+
+    fn mark(&self) -> FormatMark {
+        FormatMark(Box::new((self.next.clone(), self.open.len(), self.in_key)))
+    }
+
+    // A read takes its value from `next`, and changes only the containers
+    // that it opens.
+    fn rollback(&mut self, mark: FormatMark) {
+        let Ok(m) = mark.0.downcast::<(Option<Next>, usize, bool)>() else { return };
+        let (next, open, in_key) = *m;
+        self.open.truncate(open);
+        (self.next, self.in_key) = (next, in_key);
     }
 
     fn heap_size(&self) -> usize {

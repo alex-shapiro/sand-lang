@@ -431,6 +431,7 @@ impl<'a> Compiler<'a> {
                 by_name: Default::default(),
             });
         }
+        self.prog.schemas.extend(cp.schemas.iter_from(self.prog.schemas.len()).cloned());
         let wk = cp.wk;
         let vid = |d: u32, n: &str| {
             let s = cp.syms.get(n);

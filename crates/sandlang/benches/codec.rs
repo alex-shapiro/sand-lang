@@ -366,7 +366,8 @@ fn main() {
     for op in selected_operations() {
         let items = op.runs_per_call.unwrap_or(users);
         if std::env::var("BENCH_FUEL").is_ok() {
-            let out = run_source(&format!("{}{FUEL}", operation_source(op, users)), Limits::default()).unwrap_or_else(|e| panic!("{}: {e}", op.name));
+            let out = run_source(&format!("{}{FUEL}", operation_source(op, users)), Limits::default())
+                .unwrap_or_else(|e| panic!("{}: {e}", op.name));
             let fuel: u64 = out.split(' ').next().and_then(|n| n.parse().ok()).unwrap_or_else(|| panic!("{}: {out:?}", op.name));
             println!("{:<20} {:>10} {:>10.1}", op.name, fuel, fuel as f64 / items as f64);
             continue;

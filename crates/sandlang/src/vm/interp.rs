@@ -2250,7 +2250,7 @@ impl Vm {
 
     /// `m[k] = v`: `map_insert` without the old value.
     #[inline(never)]
-    fn map_set(&mut self, m: VmValue, k: VmValue, v: VmValue) -> Result<(), Fail> {
+    pub(crate) fn map_set(&mut self, m: VmValue, k: VmValue, v: VmValue) -> Result<(), Fail> {
         let Obj::Map(mo) = self.heap.get(m) else { return Err(internal("not a map")) };
         let found = match k {
             VmValue::Int(i) => mo.index.find_int(i, |s| matches!(mo.entries[s], Some((VmValue::Int(x), _)) if x == i)),

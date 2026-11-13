@@ -1168,25 +1168,25 @@ bytes: "AP8H"
 bytes of 3000 bytes: 4002 bytes
     encode 440, indent 440 for 4002 bytes, to_json 503, Json parameter 63, Encoded 49
 list: [1,2,3]
-    encode 11, indent 11 for 17 bytes, to_json 15, Json parameter 7, Encoded 11
+    encode 10, indent 10 for 17 bytes, to_json 14, Json parameter 7, Encoded 10
 empty list: []
-    encode 3, indent 3 for 2 bytes, to_json 4, Json parameter 1, Encoded 3
+    encode 4, indent 4 for 2 bytes, to_json 5, Json parameter 1, Encoded 4
 tuple: [1,"a",2.5]
-    encode 9, indent 9 for 21 bytes, to_json 13, Json parameter 7, Encoded 9
+    encode 10, indent 10 for 21 bytes, to_json 14, Json parameter 7, Encoded 10
 pair of ints: [1,2]
-    encode 7, indent 7 for 12 bytes, to_json 10, Json parameter 5, Encoded 7
+    encode 8, indent 8 for 12 bytes, to_json 11, Json parameter 5, Encoded 8
 set: [3,1,2]
-    encode 12, indent 12 for 17 bytes, to_json 16, Json parameter 7, Encoded 12
+    encode 10, indent 10 for 17 bytes, to_json 14, Json parameter 7, Encoded 10
 map with str keys: {"k":[1],"j":[]}
-    encode 15, indent 15 for 33 bytes, to_json 19, Json parameter 7, Encoded 15
+    encode 14, indent 14 for 33 bytes, to_json 18, Json parameter 7, Encoded 14
 map with int keys: {"2":"two","1":"one"}
-    encode 13, indent 13 for 30 bytes, to_json 16, Json parameter 5, Encoded 13
+    encode 12, indent 12 for 30 bytes, to_json 15, Json parameter 5, Encoded 12
 map with bool keys: {"true":1,"false":2}
-    encode 13, indent 13 for 29 bytes, to_json 16, Json parameter 5, Encoded 13
+    encode 12, indent 12 for 29 bytes, to_json 15, Json parameter 5, Encoded 12
 map with duration keys: {"5000000":"d"}
     encode 8, indent 8 for 20 bytes, to_json 10, Json parameter 3, Encoded 8
 map with variant keys: {"Right":1.5,"Left":2.5}
-    encode 13, indent 13 for 33 bytes, to_json 16, Json parameter 5, Encoded 13
+    encode 12, indent 12 for 33 bytes, to_json 15, Json parameter 5, Encoded 12
 map with date keys: {"2024-03-10":1}
     encode 8, indent 8 for 21 bytes, to_json 10, Json parameter 3, Encoded 8
 map with a key of 3000 bytes: 3006 bytes
@@ -1196,33 +1196,33 @@ range: {"start":0,"end":3}
 inclusive range: {"start":-1,"end":1,"inclusive":true}
     encode 3, indent 3 for 50 bytes, to_json 7, Json parameter 7, Encoded 3
 struct: {"id":1,"note":"gift","tags":["a"]}
-    encode 12, indent 12 for 56 bytes, to_json 18, Json parameter 9, Encoded 13
+    encode 13, indent 13 for 56 bytes, to_json 19, Json parameter 9, Encoded 14
 variant without payload: "Active"
-    encode 3, indent 3 for 8 bytes, to_json 4, Json parameter 1, Encoded 3
+    encode 4, indent 4 for 8 bytes, to_json 5, Json parameter 1, Encoded 4
 variant with named payload: {"Suspended":{"reason":"late"}}
-    encode 5, indent 5 for 45 bytes, to_json 8, Json parameter 5, Encoded 5
+    encode 6, indent 6 for 45 bytes, to_json 9, Json parameter 5, Encoded 6
 variant with positional payload: {"Banned":[3,"spam"]}
-    encode 7, indent 7 for 39 bytes, to_json 11, Json parameter 7, Encoded 7
+    encode 8, indent 8 for 39 bytes, to_json 12, Json parameter 7, Encoded 8
 variant with one int: {"One":[1]}
-    encode 5, indent 5 for 24 bytes, to_json 8, Json parameter 5, Encoded 5
+    encode 6, indent 6 for 24 bytes, to_json 9, Json parameter 5, Encoded 6
 nested Some: 1
     encode 5, indent 5 for 1 bytes, to_json 8, Json parameter 1, Encoded 7
 None: null
     encode 3, indent 3 for 4 bytes, to_json 4, Json parameter 1, Encoded 3
 Err: {"Err":[{"message":"closed","kind":"io"}]}
-    encode 9, indent 9 for 76 bytes, to_json 14, Json parameter 9, Encoded 9
+    encode 10, indent 10 for 76 bytes, to_json 15, Json parameter 9, Encoded 10
 date: "2024-03-10"
     encode 3, indent 3 for 12 bytes, to_json 4, Json parameter 1, Encoded 3
 span: "P1MT23H"
     encode 3, indent 3 for 9 bytes, to_json 4, Json parameter 1, Encoded 3
 Json scalars: [null,true,3,2.5,"x"]
-    encode 17, indent 17 for 37 bytes, to_json 23, Json parameter 11, Encoded 22
+    encode 14, indent 14 for 37 bytes, to_json 20, Json parameter 11, Encoded 19
 Json array and object: {"a":[1,null,{"b":{}}],"c":"s"}
     encode 12, indent 12 for 71 bytes, to_json 19, Json parameter 13, Encoded 16
 struct with Json fields: {"json":[null],"maybe":1}
-    encode 8, indent 8 for 42 bytes, to_json 13, Json parameter 7, Encoded 12
+    encode 10, indent 10 for 42 bytes, to_json 15, Json parameter 7, Encoded 14
 list of structs: [{"id":1,"note":"gift","tags":["a","b"]},{"id":2,"note":null,"tags":[]}]
-    encode 26, indent 26 for 140 bytes, to_json 38, Json parameter 21, Encoded 27
+    encode 25, indent 25 for 140 bytes, to_json 37, Json parameter 21, Encoded 26
 {
   "id": 1,
   "note": null,
@@ -1230,9 +1230,9 @@ list of structs: [{"id":1,"note":"gift","tags":["a","b"]},{"id":2,"note":null,"t
     "a"
   ]
 }
-256 variants, which are 512 levels of JSON: encode 551 for 2821 bytes, to_json 1028
+256 variants, which are 512 levels of JSON: encode 552 for 2821 bytes, to_json 1029
 512 Json arrays: Json parameter 1025
-512 variants: Encoded 1027
+512 variants: Encoded 1028
 "#;
 
 #[test]

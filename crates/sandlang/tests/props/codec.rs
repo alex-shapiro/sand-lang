@@ -13,6 +13,10 @@ enum Ty {
     Duration,
     Json,
     UnitEnum,
+    /// `enum Shape`, whose variants have no payload, a positional payload,
+    /// and a named payload.
+    Shape,
+    Date,
     Rec,
     Keyed,
     /// `struct Valid { a: int }` with an `init` method (which does not implement `Decode`).
@@ -44,6 +48,8 @@ impl Ty {
             Ty::Duration => "duration".into(),
             Ty::Json => "json.Json".into(),
             Ty::UnitEnum => "Unit".into(),
+            Ty::Shape => "Shape".into(),
+            Ty::Date => "time.PlainDate".into(),
             Ty::Rec => "Rec".into(),
             Ty::Keyed => "Keyed".into(),
             Ty::Valid => "Valid".into(),
@@ -101,7 +107,17 @@ impl Ty {
     /// Returns `true` if the type implements `Hash`.
     fn hashable(&self) -> bool {
         match self {
-            Ty::Int | Ty::Bool | Ty::Str | Ty::Bytes | Ty::Unit | Ty::Duration | Ty::UnitEnum | Ty::Rec | Ty::Valid | Ty::Range => true,
+            Ty::Int
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::Unit
+            | Ty::Duration
+            | Ty::UnitEnum
+            | Ty::Date
+            | Ty::Rec
+            | Ty::Valid
+            | Ty::Range => true,
             Ty::Option(t) | Ty::Wrap(t) => t.hashable(),
             Ty::Tuple(ts) => ts.iter().all(Ty::hashable),
             _ => false,
@@ -147,7 +163,7 @@ fn ty() -> impl Strategy<Value = Ty> {
 fn ty_with(param: u32, bad: u32) -> impl Strategy<Value = Ty> {
     let leaf = prop_oneof![
         6 => prop_oneof![Just(Ty::Int), Just(Ty::Float), Just(Ty::Bool), Just(Ty::Str), Just(Ty::Bytes), Just(Ty::Unit), Just(Ty::Duration)],
-        4 => prop_oneof![Just(Ty::Json), Just(Ty::UnitEnum), Just(Ty::Rec)],
+        4 => prop_oneof![Just(Ty::Json), Just(Ty::UnitEnum), Just(Ty::Shape), Just(Ty::Date), Just(Ty::Rec)],
         1 => prop_oneof![Just(Ty::Range), Just(Ty::Keyed)],
         bad => prop_oneof![Just(Ty::Fn), Just(Ty::Task), Just(Ty::Valid)],
         param => Just(Ty::Param),
@@ -167,7 +183,7 @@ fn ty_with(param: u32, bad: u32) -> impl Strategy<Value = Ty> {
     })
 }
 
-const TYPES: &str = "enum Unit { A, B }\nstruct Rec { a: int, b: str? }\nstruct Key { a: int }\nstruct Keyed { m: [Key: int]? }\nstruct Wrap<T> { v: T }\n\
+const TYPES: &str = "import time\nenum Unit { A, B }\nenum Shape { Dot, Circle(float), Rect(w: int, h: int?), Pair(Unit, str) }\nstruct Rec { a: int, b: str? }\nstruct Key { a: int }\nstruct Keyed { m: [Key: int]? }\nstruct Wrap<T> { v: T }\n\
                      struct Tree<T> { v: T, kids: [Tree<T>] = [] }\nstruct Bag<T> { s: Set<T> }\n\
                      struct Valid {\n    a: int\n    fn init(a: int) -> Valid { Self(a) }\n}";
 
@@ -265,6 +281,16 @@ fn json_text(t: &Ty, rng: &mut Rng, depth: u32, wrong: u64) -> String {
         Ty::Unit => "null".into(),
         Ty::Json => ["{\"a\": [1, null]}", "2", "\"s\""][rng.below(3) as usize].into(),
         Ty::UnitEnum => ["\"A\"", "\"B\""][rng.below(2) as usize].into(),
+        Ty::Shape => [
+            "\"Dot\"",
+            "{\"Circle\": [1.5]}",
+            "{\"Rect\": {\"w\": 1}}",
+            "{\"Rect\": {\"w\": 1, \"h\": 2}}",
+            "{\"Pair\": [\"A\", \"s\"]}",
+            "{\"Rect\": {}}",
+        ][rng.below(6) as usize]
+            .into(),
+        Ty::Date => ["\"2024-01-02\"", "\"2024-13-01\""][rng.below(2) as usize].into(),
         Ty::Rec => ["{\"a\": 1, \"b\": \"x\"}", "{\"a\": 2}"][rng.below(2) as usize].into(),
         Ty::Keyed => ["{}", "{\"m\": null}"][rng.below(2) as usize].into(),
         Ty::Valid => "{\"a\": 1}".into(),
@@ -518,5 +544,93 @@ proptest! {
         }
         src += &format!("struct S{chain} {{ v: int = 1 }}\nlet s: S0 = json.decode(\"{{}}\")?\nprint(s == S0())\nprint(json.encode(s) == json.encode(S0()))\n");
         check(&src, "true\ntrue\n", None)?;
+    }
+}
+
+/// Runs `src` with the native implementations of `Encode` and `Decode` on
+/// (`fast`) or off, and returns its output and the message of its runtime
+/// failure. `host.keep` returns
+/// the host `Value` form of its argument, and `host.input()` returns a
+/// `Decoder` over the last kept value.
+fn run_codec_path(src: &str, fast: bool, retry_stress: bool) -> (String, Option<String>) {
+    use sandlang::codec::Decoder;
+    use sandlang::engine::HostModules;
+    use sandlang::native::NativeModule;
+    use sandlang::native::ty::{Encoded, VmVal};
+    use sandlang::value::Value;
+    use sandlang::vm::{Fail, Vm};
+    use std::sync::{Arc, Mutex};
+    let kept: Arc<Mutex<Option<Value>>> = Arc::default();
+    let mut host = NativeModule::new("host");
+    host.source("pub native fn keep<T: Encode>(value: T) -> str\npub native fn input() -> Decoder");
+    let keep = kept.clone();
+    host.function("keep", move |value: Encoded<0>| -> String {
+        let value = value.into_value();
+        let shown = format!("{value:?}");
+        *keep.lock().unwrap() = Some(value);
+        shown
+    });
+    host.function("input", move |vm: &mut Vm| -> Result<VmVal<Decoder>, Fail> {
+        let value = kept.lock().unwrap().clone().unwrap_or(Value::Unit);
+        vm.new_object(Decoder::from_value(value))
+    });
+    let out = MemorySink::new();
+    let config =
+        Config::new().codec_fast_path(fast).retry_stress(retry_stress).host_modules(HostModules::new([host]).unwrap()).stdout(out.clone());
+    let mut engine = Engine::new(config);
+    let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    let r = rt.block_on(engine.run_source("main.sand", src));
+    if let Err(Error::Compile(ds)) = &r {
+        panic!("{ds:?}\n{src}");
+    }
+    // The stack trace of a failure differs: the native path runs fewer Sand
+    // functions.
+    (out.contents(), r.err().map(|e| e.to_string().lines().next().unwrap_or_default().to_string()))
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(128))]
+
+    /// The native implementations of `Encode` and `Decode` give the same
+    /// text, `Json`, host `Value`, decoded values, and errors as the
+    /// synthesized Sand implementations, for JSON text, `Json` values, and
+    /// host values, also when native calls run again (`retry_stress`).
+    #[test]
+    fn native_and_synthesized_codecs_agree(t in ty_with(0, 0), seed in 1..u64::MAX) {
+        prop_assume!(t.well_formed());
+        let mut rng = Rng(seed);
+        let texts: Vec<String> = (0..6).map(|i| format!("{:?}", json_text(&t, &mut rng, 0, [1000, 6][i % 2]))).collect();
+        let src = format!(
+            "import json\nimport host\n{TYPES}\n\
+             fn show(v: {ty}) {{\n\
+             \x20   print(json.encode(v))\n\
+             \x20   print(json.encode(v, indent: 1))\n\
+             \x20   print(json.to_json(v))\n\
+             \x20   print(host.keep(v))\n\
+             \x20   let d = host.input()\n\
+             \x20   let back: Result<{ty}> = d.finish(d.decode())\n\
+             \x20   print(back)\n\
+             \x20   let from: Result<{ty}> = json.from_json(json.to_json(v))\n\
+             \x20   print(from)\n\
+             }}\n\
+             for s in [{texts}] {{\n\
+             \x20   let r: Result<{ty}> = json.decode(s)\n\
+             \x20   print(r)\n\
+             \x20   if let Ok(j) = json.parse(s) {{\n\
+             \x20       let from: Result<{ty}> = json.from_json(j)\n\
+             \x20       print(from)\n\
+             \x20   }}\n\
+             \x20   if let Ok(v) = r {{\n\
+             \x20       show(v)\n\
+             \x20   }}\n\
+             }}\n",
+            ty = t.sand(),
+            texts = texts.join(", "),
+        );
+        let synthesized = run_codec_path(&src, false, false);
+        let native = run_codec_path(&src, true, false);
+        prop_assert_eq!(&native, &synthesized, "program:\n{}", src);
+        let retried = run_codec_path(&src, true, true);
+        prop_assert_eq!(&retried, &synthesized, "retry_stress; program:\n{}", src);
     }
 }

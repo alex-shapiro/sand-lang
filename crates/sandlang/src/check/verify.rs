@@ -70,7 +70,7 @@ impl<'a> Verifier<'a> {
             }
         }
         let mut impls_by_head: HashMap<(TraitId, Ctor, u32), Vec<ImplId>> = HashMap::new();
-        for (i, imp) in cp.impls.iter().enumerate() {
+        for (i, imp) in cp.impls.iter().enumerate().filter(|(_, imp)| !imp.fast) {
             if let Some((c, n)) = super::traits::impl_key(&cp.arena, imp.target) {
                 impls_by_head.entry((imp.trait_ref.trait_id, c, n)).or_default().push(i as ImplId);
             }

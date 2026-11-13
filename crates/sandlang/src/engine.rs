@@ -243,6 +243,7 @@ pub struct Config {
     pub(crate) gc_stress: bool,
     pub(crate) retry_stress: bool,
     pub(crate) optimize: bool,
+    pub(crate) codec_fast_path: bool,
     pub(crate) dump_bytecode: bool,
     pub(crate) exit_after_run: bool,
     #[cfg(feature = "os")]
@@ -296,6 +297,7 @@ impl Config {
             gc_stress: false,
             retry_stress: false,
             optimize: true,
+            codec_fast_path: true,
             dump_bytecode: false,
             exit_after_run: false,
             #[cfg(feature = "os")]
@@ -472,6 +474,15 @@ impl Config {
     #[doc(hidden)]
     pub fn optimize(mut self, on: bool) -> Self {
         self.optimize = on;
+        self
+    }
+    /// Testing aid: enables or disables the native implementations of
+    /// `Encode` and `Decode` for closed types with no hand-written part. With
+    /// the option off, the synthesized Sand implementations run instead.
+    /// Use this option to compare the two.
+    #[doc(hidden)]
+    pub fn codec_fast_path(mut self, on: bool) -> Self {
+        self.codec_fast_path = on;
         self
     }
     /// Debugging aid: print the bytecode of the program's own functions to
@@ -1458,7 +1469,7 @@ impl Engine {
             _ => None,
         };
         let has_natives = g.has_natives(&g.order);
-        let (base, registry, optimize) = (snap.clone(), self.registry().clone(), self.config.optimize);
+        let (base, registry, optimize) = (snap.clone(), self.registry().clone(), (self.config.optimize, self.config.codec_fast_path));
         let (program, lints) =
             on_compile_stack(move || compile_program(&base, &mut g, &registry, &budget, main_file, options.lint, optimize, spare))?;
         let host_modules = self.config.host_modules.clone();
@@ -1815,7 +1826,7 @@ fn compile_program(
     budget: &Arc<CompileBudget>,
     main_file: FileId,
     lint: bool,
-    optimize: bool,
+    (optimize, codec_fast_path): (bool, bool),
     spare: Option<Program>,
 ) -> Result<(Arc<Program>, Option<Vec<crate::lint::LintWarning>>), Error> {
     let order = g.order.clone();
@@ -1824,6 +1835,7 @@ fn compile_program(
     let mut checker = snap.checker.clone();
     checker.lint_facts = lint;
     checker.optimize = optimize;
+    checker.codec_fast_path = codec_fast_path;
     let checked = checker.check_modules(&modules, &registry.decls, budget);
     let sm = &g.sm;
     if let Some(stop) = budget.stopped() {
