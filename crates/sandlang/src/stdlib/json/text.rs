@@ -541,7 +541,9 @@ struct DecoderState {
 
 /// Reads JSON text.
 pub(crate) struct TextDecoder {
-    text: Box<str>,
+    /// The input, which the Sand `str` lends to the decoder for the length
+    /// of one native call (see [`DecodeFormat::swap_input`]).
+    text: CompactString,
     pos: usize,
     depth: usize,
     /// The input up to this position has been charged as fuel.
@@ -550,16 +552,13 @@ pub(crate) struct TextDecoder {
     /// The key of the map entry that the next operations read.
     key: Option<KeyText>,
     saved: Option<DecoderState>,
-    budget: Budget,
 }
 
 impl TextDecoder {
-    /// Returns a decoder of a copy of the Sand `str` `text`.
-    pub(crate) fn new(vm: &mut Vm, text: VmValue) -> Result<TextDecoder, Fail> {
-        let mut budget = Budget::default();
-        budget.grow(vm, vm.heap.str(text).len())?;
-        let text = vm.heap.str(text).into();
-        Ok(TextDecoder { text, pos: 0, depth: 0, charged: 0, open: Vec::with_capacity(16), key: None, saved: None, budget })
+    /// Returns a decoder at the start of the input that
+    /// [`DecodeFormat::swap_input`] lends to it.
+    pub(crate) fn new() -> TextDecoder {
+        TextDecoder { text: CompactString::default(), pos: 0, depth: 0, charged: 0, open: Vec::with_capacity(16), key: None, saved: None }
     }
 
     /// Runs `f` on a parser at the current position. On an error, the
@@ -1000,7 +999,11 @@ impl DecodeFormat for TextDecoder {
     }
 
     fn heap_size(&self) -> usize {
-        self.budget.counted()
+        self.open.capacity() * size_of::<Container>()
+    }
+
+    fn swap_input(&mut self, text: &mut CompactString) {
+        std::mem::swap(&mut self.text, text);
     }
 }
 

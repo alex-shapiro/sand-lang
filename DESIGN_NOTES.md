@@ -1069,3 +1069,33 @@ of a non-function". Measured (3 rounds; value-decode-free cases that use
 native objects; previous commit, this commit): `encode_custom` 311, 307;
 `decode_custom` 581, 587; `small_decode_default` 300, 298;
 `small_to_value` 170, 179.
+
+### Q6: `json.decode` reads its text without a copy
+
+A fast type decodes in one native call (Q3), so the `str` argument stays
+alive during the read. The call lends the text of the `str` to a
+`TextDecoder` on the Rust stack: `with_input` swaps the `CompactString`
+of the `str` object with the empty text of the decoder, and swaps it back
+before the call returns. Nothing reads the `str` in between, because no
+Sand code runs during a native call. The swap moves 24 bytes; no text is
+copied.
+
+A driven decode (a type with a hand-written part) spans many native calls.
+Its `Decoder` keeps the input `str` as its first object value (Q5), so the
+`str` stays alive, and `with_decoder` lends the text to the format for each
+call in the same way. Before, the decoder copied the text once and counted
+it against the memory limit, so a decode of a text of N bytes needed N
+more bytes while it ran.
+
+Cost of the lending: about 2 ns for each format operation of a driven
+decode. Two forms cost more and were replaced: taking the text out of the
+`str` and writing an empty `CompactString` in its place made a
+store-to-load forwarding stall at each operation (`decode_custom` 710);
+lending through a generic helper with a nested `Result` cost 4 ns more
+for each operation (639, against 600 with a copy and the old path).
+
+Measured (3 rounds; lead, Q4, Q6): `decode` 584, 577, 569; `small_decode`
+309, 195, 181; `decode_custom` 609, 585, 625; `small_decode_default` 275,
+303, 282; `decode_json` 938, 886, 861; `decode_generic` 583, 579, 564;
+`decode_page` 579, 582, 566; `decode_ints` 111, 111, 105; `deep_decode`
+14417, 14774, 14384.

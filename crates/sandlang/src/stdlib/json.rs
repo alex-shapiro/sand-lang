@@ -4,7 +4,7 @@ use super::base64;
 use crate::check::ModKind;
 use crate::codec::MAX_NESTING_DEPTH;
 use crate::codec::value_format::ValueDecoder;
-use crate::codec::{DecodeDict, DecodeFormat, Decoder, EncodeDict, EncodeFormat, Encoder, fast_schema, read_json, read_whole, write_whole};
+use crate::codec::{DecodeDict, Decoder, EncodeDict, EncodeFormat, Encoder, fast_schema, read_json, read_whole, with_input, write_whole};
 use crate::native::convert::{Conversion, FromVmValue, HostError, IntoVmValue, mismatch};
 use crate::native::ty::{Param, VmVal};
 use crate::native::{EnumType, NamedType, NativeModule, variant_index};
@@ -175,11 +175,13 @@ pub(crate) fn module() -> NativeModule {
         Ok(VmVal::from_raw(json?))
     });
     m.function("decode_text", |vm: &mut Vm, decode: DecodeDict, text: VmVal<String>| -> Result<Decoding<Param<0>>, Fail> {
-        let mut f = TextDecoder::new(vm, text.raw())?;
-        let Some(schema) = fast_schema(vm, decode) else { return vm.new_object(Decoder::new(Box::new(f))).map(Decoding::Driven) };
-        let r = read_whole(vm, &mut f, schema);
-        vm.heap.account(DecodeFormat::heap_size(&f), 0);
-        Ok(Decoding::of(r?))
+        let mut f = TextDecoder::new();
+        let Some(schema) = fast_schema(vm, decode) else {
+            let d = vm.new_object(Decoder::new(Box::new(f)))?;
+            d.push_value(vm, text.raw())?;
+            return Ok(Decoding::Driven(d));
+        };
+        Ok(Decoding::of(with_input(vm, Some(text.raw()), &mut f, |f, vm| read_whole(vm, f, schema))??))
     });
     m.function("decode_json", |vm: &mut Vm, decode: DecodeDict, json: Json| -> Result<Decoding<Param<0>>, Fail> {
         let mut f = ValueDecoder::new(text::json_value(&json));

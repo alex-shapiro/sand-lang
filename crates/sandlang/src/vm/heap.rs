@@ -1172,6 +1172,29 @@ impl Heap {
         }
     }
 
+    /// Returns the text of the `str` `v`, for a reader that swaps it out and
+    /// back in the same native call. Nothing reads `v` in between.
+    pub(crate) fn str_text_mut(&mut self, v: VmValue) -> Option<&mut CompactString> {
+        let VmValue::Obj(h) = v else { return None };
+        match &mut self.objs[h as usize] {
+            Obj::Str(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Returns the native object `v` of type `T`, and its first VM value.
+    pub(crate) fn native_and_first_value<T: 'static>(&mut self, v: VmValue) -> Option<(&mut T, Option<VmValue>)> {
+        let VmValue::Obj(h) = v else { return None };
+        match &mut self.objs[h as usize] {
+            Obj::Native(n) => {
+                let cell = (&mut **n as &mut dyn std::any::Any).downcast_mut::<NativeCell<T>>()?;
+                let first = cell.values.first().copied();
+                Some((&mut cell.object, first))
+            }
+            _ => None,
+        }
+    }
+
     /// Returns the VM values of the native object `v` of type `T`.
     pub(crate) fn native_values<T: 'static>(&self, v: VmValue) -> Option<&ObjectValues> {
         match self.get(v) {

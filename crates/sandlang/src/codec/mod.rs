@@ -24,6 +24,7 @@ use crate::types::traits;
 use crate::value::Value;
 use crate::vm::value::{Obj, VmValue};
 use crate::vm::{Fail, Vm, internal};
+use compact_str::CompactString;
 use fast::SchemaId;
 use std::any::Any;
 use std::borrow::Cow;
@@ -234,6 +235,11 @@ pub trait DecodeFormat: Any + Send {
     }
     /// Bytes of Rust memory that the format holds and that the heap counts.
     fn heap_size(&self) -> usize;
+    /// Swaps the text that the format reads with `text`. A `Decoder` lends
+    /// its input `str` to the format for the length of each native call,
+    /// so that the format reads the text without a copy. A format that does
+    /// not read text keeps this default.
+    fn swap_input(&mut self, _text: &mut CompactString) {}
 }
 
 /// A destination of `Encode`, created by a format such as `json.encode`.
@@ -384,6 +390,26 @@ pub(crate) fn read_fast_general<F: DecodeFormat + ?Sized>(
     fast::decode(vm, f, &mut path.0, schema)
 }
 
+/// Runs `op` on `f` with the text of the `str` `input`, if any, lent to `f`
+/// (see [`DecodeFormat::swap_input`]).
+pub(crate) fn with_input<F: DecodeFormat + ?Sized, R>(
+    vm: &mut Vm,
+    input: Option<VmValue>,
+    f: &mut F,
+    op: impl FnOnce(&mut F, &mut Vm) -> R,
+) -> Result<R, Fail> {
+    let Some(input) = input else { return Ok(op(f, vm)) };
+    // Each swap exchanges the texts in place, which leaves the empty text of
+    // the format in the `str` meanwhile.
+    let Some(text) = vm.heap.str_text_mut(input) else { return internal("decode: the input is not a str") };
+    f.swap_input(text);
+    let r = op(f, vm);
+    if let Some(text) = vm.heap.str_text_mut(input) {
+        f.swap_input(text);
+    }
+    Ok(r)
+}
+
 /// Charges a fuel unit for a value, and runs `op`, which reads the value or
 /// opens it, on `d` and its format (see [`with_decoder`]).
 fn read_part<R>(
@@ -402,10 +428,20 @@ fn with_decoder<R>(
     d: VmVal<Decoder>,
     op: impl FnOnce(&mut dyn DecodeFormat, &mut DecodePath, &mut Vm) -> DecodeResult<R>,
 ) -> Result<R, HostError> {
-    let obj = d.get_mut(&mut vm.heap)?;
+    let Some((obj, input)) = vm.heap.native_and_first_value::<Decoder>(d.raw()) else {
+        return Err(Fail::internal("not a decoder").into());
+    };
     let Some(mut format) = obj.format.take() else { return Err(Fail::internal("the decoder is in use").into()) };
     let mut path = std::mem::take(&mut obj.path);
+    // The input `str` lends its text to the format for this call (see
+    // `with_input`).
+    if let Some(text) = input.and_then(|input| vm.heap.str_text_mut(input)) {
+        format.swap_input(text);
+    }
     let r = op(&mut *format, &mut path, vm);
+    if let Some(text) = input.and_then(|input| vm.heap.str_text_mut(input)) {
+        format.swap_input(text);
+    }
     let r = match vm.charge(format.take_input_fuel()) {
         Ok(()) => r,
         Err(fail) => Err(fail.into()),
