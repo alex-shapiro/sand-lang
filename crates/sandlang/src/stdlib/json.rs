@@ -4,7 +4,7 @@ use super::base64;
 use crate::check::ModKind;
 use crate::codec::MAX_NESTING_DEPTH;
 use crate::codec::value_format::ValueDecoder;
-use crate::codec::{Decoder, Encoder, read_json, write_whole};
+use crate::codec::{Decoder, EncodeFormat, Encoder, read_json, write_whole};
 use crate::native::convert::{Conversion, FromVmValue, HostError, IntoVmValue, mismatch};
 use crate::native::ty::VmVal;
 use crate::native::{EnumType, NamedType, NativeModule, variant_index};
@@ -14,7 +14,7 @@ use crate::vm::bytecode::Program;
 use crate::vm::compare::str_hash;
 use crate::vm::heap::Staging;
 use crate::vm::meter::{Meter, SLOW_BYTES_PER_UNIT};
-use crate::vm::value::{KeyIndex, KeyTable, MAP_ENTRY_SIZE, MapObj, Obj, VmValue, slot_fits};
+use crate::vm::value::{FxHashMap, KeyIndex, KeyTable, MAP_ENTRY_SIZE, MapObj, Obj, VmValue, slot_fits};
 use crate::vm::{Fail, Vm, fail, internal};
 use hashbrown::HashTable;
 use std::borrow::Cow;
@@ -22,7 +22,7 @@ use std::fmt::Write;
 
 mod text;
 
-use text::{TextDecoder, TextEncoder, TreeEncoder};
+use text::{TextDecoder, TextEncoder, Token, TreeEncoder};
 
 const NODE_BYTES: usize = 64;
 
@@ -145,10 +145,20 @@ pub(crate) fn module() -> NativeModule {
     });
     m.function("tree_encoder", |vm: &mut Vm| vm.new_object(Encoder::new(Box::new(TreeEncoder::new()))));
     m.function("encoded_json", |vm: &mut Vm, e: VmVal<Encoder>| -> Result<VmVal<Json>, Fail> {
-        let Some(json) = e.get_mut(&mut vm.heap)?.format_mut::<TreeEncoder>().map(|f| f.json_value()) else {
+        let Some(tree) = e.get_mut(&mut vm.heap)?.format_mut::<TreeEncoder>().map(|f| std::mem::replace(f, TreeEncoder::new())) else {
             return internal("json.to_json: not a Json encoder");
         };
-        Ok(VmVal::from_raw(json_into_vm(vm, json?)?))
+        let json = tree.build(vm);
+        match json {
+            Ok(_) => vm.heap.account(EncodeFormat::heap_size(&tree), 0),
+            // The native function can run again.
+            Err(_) => {
+                if let Some(f) = e.get_mut(&mut vm.heap)?.format_mut::<TreeEncoder>() {
+                    *f = tree;
+                }
+            }
+        }
+        Ok(VmVal::from_raw(json?))
     });
     m.function("text_decoder", |vm: &mut Vm, text: VmVal<String>| -> Result<VmVal<Decoder>, Fail> {
         let text = text.str(&vm.heap).to_string();
@@ -510,6 +520,126 @@ impl Builder<'_, '_, '_> {
                 });
             };
         }
+    }
+}
+
+/// An open array or object of [`Builder::tokens`].
+enum TokenFrame {
+    Arr(Vec<VmValue>),
+    /// An object, whether its keys are distinct, and the key of the member
+    /// whose value comes next.
+    Obj(MapBuilder, bool, Option<MemberKey>),
+}
+
+/// The key of an object member in [`Builder::tokens`].
+struct MemberKey {
+    key: VmValue,
+    hash: u64,
+    /// The span of the key in the token texts, or `None` for the name of a
+    /// field or a variant.
+    span: Option<(usize, usize)>,
+}
+
+/// Tokens between two memory checks of [`Builder::tokens`].
+const TOKENS_PER_CHECK: usize = 32;
+
+impl<'a> Builder<'a, '_, '_> {
+    /// Builds the `Json` value that `tokens` record, whose texts are `text`
+    /// (see [`TreeEncoder`]).
+    fn tokens(&mut self, ids: JsonIds, prog: &'a Program, tokens: &[Token], text: &'a str) -> Result<VmValue, Fail> {
+        let mut stack: Vec<TokenFrame> = Vec::new();
+        // The `str` value and hash of each field and variant name.
+        let mut names: FxHashMap<(u32, bool, u32), (VmValue, u64)> = FxHashMap::default();
+        let (mut at, mut root) = (0, None);
+        for (i, &token) in tokens.iter().enumerate() {
+            if i % TOKENS_PER_CHECK == 0 {
+                self.st.check_memory((TOKENS_PER_CHECK * NODE_BYTES).saturating_add(self.pending))?;
+            }
+            let (name, span) = match token {
+                Token::Str(len) => {
+                    at += len;
+                    (None, Some((at - len, at)))
+                }
+                Token::Field { owner, variant, index } => (Some((owner, variant, index)), None),
+                Token::Variant(id) => (Some((id, true, u32::MAX)), None),
+                _ => (None, None),
+            };
+            let v = match token {
+                Token::Null => VmValue::Tag(ids.null),
+                Token::Bool(b) => self.st.new_variant(ids.bool_, &[VmValue::Bool(b)]),
+                Token::Int(i) => self.st.new_variant(ids.int, &[VmValue::Int(i)]),
+                Token::Float(f) => self.st.new_variant(ids.float, &[VmValue::Float(f)]),
+                Token::Str(_) | Token::Field { .. } | Token::Variant(_) => {
+                    let (s, hash) = match name {
+                        Some(name) => match names.get(&name) {
+                            Some(&known) => known,
+                            None => {
+                                let (owner, variant, index) = name;
+                                let text = match index {
+                                    u32::MAX => prog.variants.get(owner as usize).map_or("", |v| v.name.as_str()),
+                                    _ => text::field_name(prog, owner, variant, index as usize).unwrap_or_default(),
+                                };
+                                let hash = self.hash(text)?;
+                                let key = (self.key(&Cow::Borrowed(text), hash), hash);
+                                self.pending += NODE_BYTES;
+                                names.insert(name, key);
+                                key
+                            }
+                        },
+                        None => {
+                            let (start, end) = span.unwrap_or_default();
+                            let s = text.get(start..end).unwrap_or_default();
+                            if let Some(TokenFrame::Obj(_, _, key @ None)) = stack.last_mut() {
+                                let hash = self.hash(s)?;
+                                *key = Some(MemberKey { key: self.key(&Cow::Borrowed(s), hash), hash, span });
+                                continue;
+                            }
+                            self.st.check_memory((NODE_BYTES + self.pending).saturating_add(s.len()))?;
+                            (self.st.new_str(s), 0)
+                        }
+                    };
+                    if let Some(TokenFrame::Obj(_, _, key @ None)) = stack.last_mut() {
+                        *key = Some(MemberKey { key: s, hash, span: None });
+                        continue;
+                    }
+                    self.st.new_variant(ids.str_, &[s])
+                }
+                Token::Arr => {
+                    stack.push(TokenFrame::Arr(Vec::new()));
+                    continue;
+                }
+                Token::Obj | Token::Map => {
+                    stack.push(TokenFrame::Obj(self.start_map(), matches!(token, Token::Obj), None));
+                    continue;
+                }
+                Token::End => match stack.pop() {
+                    Some(TokenFrame::Arr(items)) => {
+                        let list = self.list(items);
+                        self.st.new_variant(ids.arr, &[list])
+                    }
+                    Some(TokenFrame::Obj(m, ..)) => {
+                        let map = self.map(m);
+                        self.st.new_variant(ids.obj, &[map])
+                    }
+                    None => return internal("json.to_json: no open container"),
+                },
+            };
+            match stack.last_mut() {
+                None => root = Some(v),
+                Some(TokenFrame::Arr(items)) => self.push(items, v)?,
+                Some(TokenFrame::Obj(m, distinct, key)) => {
+                    let Some(MemberKey { key, hash, span }) = key.take() else { return internal("json.to_json: a member without a key") };
+                    match (*distinct, span) {
+                        (false, Some((start, end))) => {
+                            self.put(m, hash, Some(Cow::Borrowed(text.get(start..end).unwrap_or_default())), key, v)?
+                        }
+                        (false, None) => self.put(m, hash, None, key, v)?,
+                        (true, _) => self.append(m, hash, key, v)?,
+                    }
+                }
+            }
+        }
+        root.ok_or_else(missing_root_error)
     }
 }
 

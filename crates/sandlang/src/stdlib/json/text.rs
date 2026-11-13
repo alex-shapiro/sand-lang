@@ -381,7 +381,7 @@ impl EncodeFormat for TextEncoder {
 /// Returns the name of field `index` of struct definition `id`, or of the
 /// named payload of variant `id`.
 #[inline(always)]
-fn field_name(prog: &Program, id: u32, variant: bool, index: usize) -> Option<&str> {
+pub(super) fn field_name(prog: &Program, id: u32, variant: bool, index: usize) -> Option<&str> {
     let names = match variant {
         true => prog.variants.get(id as usize)?.field_names.as_deref()?,
         false => &prog.types.get(id as usize)?.fields[..],
@@ -953,253 +953,320 @@ impl DecodeFormat for TextDecoder {
     }
 }
 
-/// A `Json` array or object that [`TreeEncoder`] is building.
-enum Node {
-    Root(Option<Json>),
-    Arr(Vec<Json>),
-    /// An object, the struct or variant whose names `field` uses, and the key
-    /// of the next member.
-    Obj(indexmap::IndexMap<String, Json>, Option<(u32, bool)>, Option<String>),
-    /// A map, and the key of the next value once a key is written.
-    Map(indexmap::IndexMap<String, Json>, Option<String>),
-    /// The outer object of a variant with a payload: the variant's name.
-    Wrapper(String),
-    /// `Some` and its payload, once written.
-    Some(Option<Json>),
+/// A node of the `json.Json` value that [`TreeEncoder`] records.
+#[derive(Clone, Copy)]
+pub(super) enum Token {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    /// A text of this many bytes, which follows the texts of the tokens
+    /// before it in [`TreeEncoder`]'s `text`. In an object, a text before
+    /// each member is its key.
+    Str(usize),
+    /// The name of field `index` of struct definition `owner`, or of the
+    /// named payload of variant `owner`, as a text.
+    Field {
+        owner: u32,
+        variant: bool,
+        index: u32,
+    },
+    /// The name of a variant, as a text.
+    Variant(u32),
+    /// Opens an array, which ends at the matching [`Token::End`].
+    Arr,
+    /// Opens an object whose keys are distinct, such as the fields of a
+    /// struct.
+    Obj,
+    /// Opens an object from a map, whose key texts can repeat.
+    Map,
+    End,
 }
 
-/// Builds a `json.Json` value.
+/// An open array or object of [`TreeEncoder`].
+#[derive(Clone, Copy)]
+enum TreeOpen {
+    Arr,
+    /// An object whose member keys come from `field` calls, of the struct or
+    /// the variant `names`.
+    Fields(Option<(u32, bool)>),
+    /// A map, and `true` while the next value is a key.
+    Map(bool),
+    /// The outer object of a variant with a payload; its payload follows.
+    VariantWrapper,
+    /// `Some`, which writes only its payload.
+    Some,
+}
+
+/// The state of a [`TreeEncoder`] that [`EncodeFormat::save`] keeps.
+#[derive(Clone, Copy)]
+struct TreeState {
+    tokens: usize,
+    text: usize,
+    open: usize,
+    top: Option<TreeOpen>,
+    depth: usize,
+}
+
+/// Builds a `json.Json` value. It records the value as tokens, and
+/// [`TreeEncoder::build`] makes the Sand value from them in one pass.
 pub(crate) struct TreeEncoder {
-    stack: Vec<Node>,
+    tokens: Vec<Token>,
+    /// The texts of the `Str` tokens, in order.
+    text: String,
+    open: Vec<TreeOpen>,
     /// The number of open arrays and objects.
     depth: usize,
-    /// Bytes of Rust memory that the tree holds.
-    allocated: usize,
-    /// The stack length, depth, and allocated bytes that `save` kept.
-    saved: Option<(usize, usize, usize)>,
+    saved: Option<TreeState>,
     budget: Budget,
 }
 
 impl TreeEncoder {
     pub(crate) fn new() -> TreeEncoder {
-        TreeEncoder { stack: vec![Node::Root(None)], depth: 0, allocated: 0, saved: None, budget: Budget::default() }
+        TreeEncoder { tokens: Vec::new(), text: String::new(), open: Vec::new(), depth: 0, saved: None, budget: Budget::default() }
     }
 
-    /// Returns the encoded `Json` value.
-    pub(crate) fn json_value(&self) -> Result<Json, Fail> {
-        match self.stack.as_slice() {
-            [Node::Root(Some(json))] => Ok(json.clone()),
-            _ => internal("json.to_json: no value"),
+    /// Builds the encoded value. The tokens stay, so that the native
+    /// function can run again if a memory check fails.
+    pub(crate) fn build(&self, vm: &mut Vm) -> Result<VmValue, Fail> {
+        if !self.open.is_empty() || self.tokens.is_empty() {
+            return internal("json.to_json: no value");
         }
+        let ids = JsonIds::new(&vm.prog)?;
+        let (prog, meter) = (&vm.prog, &vm.meter);
+        vm.heap.staged(|_, st| Builder::new(st, meter).tokens(ids, prog, &self.tokens, &self.text))
     }
 
-    fn reserve(&mut self, vm: &mut Vm, bytes: usize) -> Result<(), Fail> {
-        self.budget.grow(vm, self.allocated.saturating_add(bytes))?;
-        self.allocated += bytes;
-        Ok(())
-    }
-
-    /// Adds `json` to the innermost container, or uses it as the key of a map
-    /// entry.
-    fn push(&mut self, vm: &mut Vm, json: Json) -> Result<(), Fail> {
-        self.prepare(vm)?;
-        self.place(json)
-    }
-
-    /// Counts the memory of a value before any change.
-    fn prepare(&mut self, vm: &mut Vm) -> Result<(), Fail> {
-        self.reserve(vm, size_of::<Json>() + 16)
-    }
-
-    fn place(&mut self, json: Json) -> Result<(), Fail> {
-        let mut json = json;
-        loop {
-            match self.stack.last_mut() {
-                Some(Node::Root(root)) => *root = Some(json),
-                Some(Node::Arr(items)) => items.push(json),
-                Some(Node::Obj(members, _, key)) => {
-                    members.insert(key.take().unwrap_or_default(), json);
-                }
-                Some(Node::Map(members, key)) => match key.take() {
-                    Some(k) => {
-                        members.insert(k, json);
-                    }
-                    None => *key = Some(Self::key_text(json)?),
-                },
-                Some(Node::Wrapper(name)) => {
-                    let name = std::mem::take(name);
-                    self.stack.pop();
-                    self.depth -= 1;
-                    json = Json::Obj(indexmap::IndexMap::from([(name, json)]));
-                    continue;
-                }
-                Some(Node::Some(payload)) => *payload = Some(json),
-                None => return internal("json.to_json: no open value"),
-            }
-            return Ok(());
-        }
-    }
-
-    /// Returns the object key for the map key `key`.
-    fn key_text(key: Json) -> Result<String, Fail> {
-        match key {
-            Json::Str(s) => Ok(s),
-            Json::Int(i) => Ok(i.to_string()),
-            Json::Bool(b) => Ok(b.to_string()),
-            _ => invalid_key_error(),
-        }
+    /// Counts the memory of a new token and `text` more bytes of text,
+    /// before any change.
+    #[inline(always)]
+    fn reserve(&mut self, vm: &mut Vm, text: usize) -> Result<(), Fail> {
+        let tokens = (self.tokens.len() + 4).saturating_mul(size_of::<Token>());
+        self.budget.grow(vm, tokens.saturating_add(self.text.len()).saturating_add(text))
     }
 
     fn in_key(&self) -> bool {
-        matches!(self.stack.last(), Some(Node::Map(_, None)))
+        matches!(self.open.last(), Some(TreeOpen::Map(true)))
     }
 
-    /// Opens the containers `nodes`, after the checks for all of them.
-    fn open(&mut self, vm: &mut Vm, nodes: impl ExactSizeIterator<Item = Node>) -> Result<(), Fail> {
+    /// Notes that a value or a key of the innermost container ended.
+    #[inline(always)]
+    fn item_done(&mut self) {
+        if let Some(TreeOpen::Map(is_key)) = self.open.last_mut() {
+            *is_key = !*is_key;
+        }
+    }
+
+    /// Adds the scalar `token`, which cannot be a map key.
+    #[inline(always)]
+    fn value(&mut self, vm: &mut Vm, token: Token) -> Result<(), Fail> {
         if self.in_key() {
             return invalid_key_error();
         }
-        if self.depth + nodes.len() > MAX_NESTING_DEPTH {
+        self.reserve(vm, 0)?;
+        self.tokens.push(token);
+        self.item_done();
+        Ok(())
+    }
+
+    /// Adds `token`, the name of a field or a variant, as a value or as a
+    /// map key.
+    #[inline(always)]
+    fn name(&mut self, vm: &mut Vm, token: Token) -> Result<(), Fail> {
+        self.reserve(vm, 0)?;
+        self.tokens.push(token);
+        self.item_done();
+        Ok(())
+    }
+
+    /// Adds a text, as a value or as a map key.
+    #[inline(always)]
+    fn text(&mut self, vm: &mut Vm, s: &str) -> Result<(), Fail> {
+        vm.charge_bytes(s.len())?;
+        self.reserve(vm, s.len())?;
+        self.text.push_str(s);
+        self.tokens.push(Token::Str(s.len()));
+        self.item_done();
+        Ok(())
+    }
+
+    /// Opens `open`, which `token` starts, after the checks.
+    fn begin(&mut self, vm: &mut Vm, token: Token, open: TreeOpen) -> Result<(), Fail> {
+        if self.in_key() {
+            return invalid_key_error();
+        }
+        if self.depth >= MAX_NESTING_DEPTH {
             return fail("limit", "value too deeply nested to convert to JSON");
         }
-        self.reserve(vm, 64 * nodes.len())?;
-        for node in nodes {
-            self.depth += 1;
-            self.stack.push(node);
-        }
+        self.reserve(vm, 0)?;
+        self.tokens.push(token);
+        self.open.push(open);
+        self.depth += 1;
         Ok(())
     }
 }
 
 impl EncodeFormat for TreeEncoder {
     fn unit(&mut self, vm: &mut Vm) -> Result<(), Fail> {
-        if self.in_key() {
-            return invalid_key_error();
-        }
-        self.push(vm, Json::Null)
+        self.value(vm, Token::Null)
     }
+
     fn bool(&mut self, vm: &mut Vm, b: bool) -> Result<(), Fail> {
-        self.push(vm, Json::Bool(b))
-    }
-    fn int(&mut self, vm: &mut Vm, i: i64) -> Result<(), Fail> {
-        self.push(vm, Json::Int(i))
-    }
-    fn float(&mut self, vm: &mut Vm, f: f64) -> Result<(), Fail> {
         if self.in_key() {
-            return invalid_key_error();
+            return self.text(vm, if b { "true" } else { "false" });
         }
-        self.push(vm, if f.is_finite() { Json::Float(f) } else { Json::Null })
+        self.value(vm, Token::Bool(b))
     }
+
+    fn int(&mut self, vm: &mut Vm, i: i64) -> Result<(), Fail> {
+        if self.in_key() {
+            return self.text(vm, itoa::Buffer::new().format(i));
+        }
+        self.value(vm, Token::Int(i))
+    }
+
+    fn float(&mut self, vm: &mut Vm, f: f64) -> Result<(), Fail> {
+        self.value(vm, if f.is_finite() { Token::Float(f) } else { Token::Null })
+    }
+
     fn duration(&mut self, vm: &mut Vm, nanos: i64) -> Result<(), Fail> {
-        self.push(vm, Json::Int(nanos))
+        self.int(vm, nanos)
     }
+
     fn str(&mut self, vm: &mut Vm, s: &str) -> Result<(), Fail> {
-        vm.charge_bytes(s.len())?;
-        self.reserve(vm, s.len())?;
-        self.push(vm, Json::Str(s.to_string()))
+        self.text(vm, s)
     }
+
     fn bytes(&mut self, vm: &mut Vm, b: &[u8]) -> Result<(), Fail> {
         if self.in_key() {
             return invalid_key_error();
         }
         vm.charge_slow_bytes(b.len())?;
-        self.str(vm, &base64::encode(b, false))
+        self.text(vm, &base64::encode(b, false))
     }
+
     fn native(&mut self, vm: &mut Vm, _: &str, text: &str) -> Result<(), Fail> {
-        self.str(vm, text)
+        self.text(vm, text)
     }
+
     fn range(&mut self, vm: &mut Vm, start: i64, end: i64, inclusive: bool) -> Result<(), Fail> {
-        if self.in_key() {
-            return invalid_key_error();
+        self.begin(vm, Token::Obj, TreeOpen::Fields(None))?;
+        let members = [("start", Token::Int(start)), ("end", Token::Int(end))];
+        for (name, bound) in members.into_iter().chain(inclusive.then_some(("inclusive", Token::Bool(true)))) {
+            self.text(vm, name)?;
+            self.reserve(vm, 0)?;
+            self.tokens.push(bound);
         }
-        let mut m = indexmap::IndexMap::new();
-        m.insert("start".to_string(), Json::Int(start));
-        m.insert("end".to_string(), Json::Int(end));
-        if inclusive {
-            m.insert("inclusive".to_string(), Json::Bool(true));
-        }
-        self.push(vm, Json::Obj(m))
+        self.end(vm)
     }
-    fn begin_seq(&mut self, vm: &mut Vm, _: SeqKind, len: usize) -> Result<(), Fail> {
-        self.open(vm, [Node::Arr(Vec::with_capacity(len.min(1 << 10)))].into_iter())
+
+    fn begin_seq(&mut self, vm: &mut Vm, _: SeqKind, _: usize) -> Result<(), Fail> {
+        self.begin(vm, Token::Arr, TreeOpen::Arr)
     }
+
     fn begin_map(&mut self, vm: &mut Vm, _: usize) -> Result<(), Fail> {
-        self.open(vm, [Node::Map(indexmap::IndexMap::new(), None)].into_iter())
+        self.begin(vm, Token::Map, TreeOpen::Map(true))
     }
+
     fn begin_struct(&mut self, vm: &mut Vm, def: u32) -> Result<(), Fail> {
-        self.open(vm, [Node::Obj(indexmap::IndexMap::new(), Some((def, false)), None)].into_iter())
+        self.begin(vm, Token::Obj, TreeOpen::Fields(Some((def, false))))
     }
+
     fn field(&mut self, vm: &mut Vm, index: usize) -> Result<(), Fail> {
-        let Some(Node::Obj(_, Some((id, variant)), _)) = self.stack.last() else { return internal("json.to_json: no open struct") };
-        let (id, variant) = (*id, *variant);
-        let names = if variant {
-            vm.prog.variants.get(id as usize).and_then(|v| v.field_names.as_deref())
-        } else {
-            vm.prog.types.get(id as usize).map(|t| &t.fields[..])
-        };
-        let Some(name) = names.and_then(|n| n.get(index)).cloned() else { return internal("json.to_json: unknown field") };
-        if let Some(Node::Obj(_, _, key)) = self.stack.last_mut() {
-            *key = Some(name);
+        let Some(&TreeOpen::Fields(Some((owner, variant)))) = self.open.last() else { return internal("json.to_json: no open struct") };
+        if field_name(&vm.prog, owner, variant, index).is_none() {
+            return internal("json.to_json: unknown field");
         }
+        self.reserve(vm, 0)?;
+        self.tokens.push(Token::Field { owner, variant, index: index as u32 });
         Ok(())
     }
+
     fn unit_variant(&mut self, vm: &mut Vm, variant: u32) -> Result<(), Fail> {
         if variant == vm.prog.ids.none {
             return self.none(vm);
         }
-        let Some(name) = vm.prog.variants.get(variant as usize).map(|v| v.name.clone()) else {
+        if vm.prog.variants.get(variant as usize).is_none() {
+            return internal("json.to_json: unknown variant");
+        }
+        self.name(vm, Token::Variant(variant))
+    }
+
+    fn begin_variant(&mut self, vm: &mut Vm, variant: u32) -> Result<(), Fail> {
+        let Some(named) = vm.prog.variants.get(variant as usize).map(|v| v.field_names.is_some()) else {
             return internal("json.to_json: unknown variant");
         };
-        self.push(vm, Json::Str(name))
+        if self.depth + 2 > MAX_NESTING_DEPTH {
+            return fail("limit", "value too deeply nested to convert to JSON");
+        }
+        self.begin(vm, Token::Obj, TreeOpen::VariantWrapper)?;
+        self.reserve(vm, 0)?;
+        self.tokens.push(Token::Variant(variant));
+        match named {
+            true => self.begin(vm, Token::Obj, TreeOpen::Fields(Some((variant, true)))),
+            false => self.begin(vm, Token::Arr, TreeOpen::Arr),
+        }
     }
-    fn begin_variant(&mut self, vm: &mut Vm, variant: u32) -> Result<(), Fail> {
-        let Some(v) = vm.prog.variants.get(variant as usize) else { return internal("json.to_json: unknown variant") };
-        let (name, named) = (v.name.clone(), v.field_names.is_some());
-        let inner = if named { Node::Obj(indexmap::IndexMap::new(), Some((variant, true)), None) } else { Node::Arr(Vec::new()) };
-        self.open(vm, [Node::Wrapper(name), inner].into_iter())
-    }
+
     fn begin_some(&mut self, _: &mut Vm) -> Result<(), Fail> {
         if self.in_key() {
             return invalid_key_error();
         }
-        self.stack.push(Node::Some(None));
+        self.open.push(TreeOpen::Some);
         Ok(())
     }
+
     fn none(&mut self, vm: &mut Vm) -> Result<(), Fail> {
         self.unit(vm)
     }
+
     fn end(&mut self, vm: &mut Vm) -> Result<(), Fail> {
-        self.prepare(vm)?;
-        let json = match self.stack.pop() {
-            Some(Node::Arr(items)) => Json::Arr(items),
-            Some(Node::Obj(members, ..) | Node::Map(members, _)) => Json::Obj(members),
-            Some(Node::Some(Some(payload))) => return self.place(payload),
-            _ => return internal("json.to_json: no open container"),
-        };
-        self.depth -= 1;
-        self.place(json)
+        self.reserve(vm, 0)?;
+        match self.open.pop() {
+            Some(TreeOpen::Some) => {}
+            Some(_) => {
+                self.tokens.push(Token::End);
+                self.depth -= 1;
+                if let Some(TreeOpen::VariantWrapper) = self.open.last() {
+                    self.open.pop();
+                    self.tokens.push(Token::End);
+                    self.depth -= 1;
+                }
+            }
+            None => return internal("json.to_json: no open container"),
+        }
+        self.item_done();
+        Ok(())
     }
+
     fn json(&mut self, vm: &mut Vm, json: VmValue) -> Result<(), Fail> {
         emit_json(vm, json, self)
     }
+
     fn value(&mut self, vm: &mut Vm, value: &Value) -> Result<(), Fail> {
         write_json_form(self, vm, value)
     }
+
     fn save(&mut self) {
-        self.saved = Some((self.stack.len(), self.depth, self.allocated));
+        let (tokens, text, open, top, depth) = (self.tokens.len(), self.text.len(), self.open.len(), self.open.last().copied(), self.depth);
+        self.saved = Some(TreeState { tokens, text, open, top, depth });
     }
 
-    // A failed write changes only the containers that it opened: it places
-    // its value in the container below only when the value ends.
     fn restore(&mut self) {
-        let Some((stack, depth, allocated)) = self.saved.take() else { return };
-        self.stack.truncate(stack);
-        (self.depth, self.allocated) = (depth, allocated);
+        let Some(s) = self.saved.take() else { return };
+        self.tokens.truncate(s.tokens);
+        self.text.truncate(s.text);
+        self.open.truncate(s.open);
+        if let (Some(top), Some(last)) = (s.top, self.open.last_mut()) {
+            *last = top;
+        }
+        self.depth = s.depth;
     }
 
     fn heap_size(&self) -> usize {
         self.budget.counted()
     }
+
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }

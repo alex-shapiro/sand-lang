@@ -611,3 +611,40 @@ small_decode_default 8, 14, 10. `to_json` (45.4) still converts a Rust
 `Json`, which charges again.
 
 The differential test passed 5000 cases (with `retry_stress`).
+
+### C2: `to_json` records tokens and builds the `Json` value in one staged pass
+
+Profile of `to_json` after C1: the old `TreeEncoder` built a Rust `Json`
+(an `IndexMap` and a `String` for each key), copied it, and converted it
+with `json_into_vm`, which charged a unit for each node again.
+
+Change: `TreeEncoder` records the value as compact tokens (`Token`: scalars,
+`Str` with its text in one buffer, `Field` and `Variant` names by id,
+`Arr`, `Obj`, `Map`, `End`). `encoded_json` builds the Sand value from the
+tokens in one `Heap::staged` pass with the `Builder` of `json.parse`, which
+shares key strings. The build caches the key `str` and hash of each field
+and variant name, and checks memory once for each 32 tokens. The tokens
+stay until the build succeeds, so the call can run again after a garbage
+collection (`retry_stress`). The build charges no fuel for each node, so
+`to_json` charges what `encode` charges.
+
+Measured (3 alternating rounds, ns per item; value-decode, C1, C2):
+`to_json` 491, 2350, 785; `small_to_json` 263, 936, 671. Fuel per item:
+`to_json` 22.8, 45.4, 22.8; `small_to_json` 6, 12, 8.
+
+Profile of C2 (`to_json`, share of the engine thread): the build 50%, the
+recording walk 26%, garbage collection 20%. Normalized to the work of
+`Builder::map` (the same maps in both), the build alone costs as much as
+the whole conversion of value-decode (410 against 390 ns per user). The
+rest is the recording walk (about 210 ns per user) and more garbage
+collection: the build allocates a new `str` for each text value, and
+value-decode shares the `str` objects of the source value.
+
+Tradeoff that I could not resolve: one pass, as value-decode has, needs the
+`Encoder` to hold Sand values between the native calls of a `to_json` (the
+walk, then `encoded_json`). The collector does not trace values in native
+objects, and a hand-written `Encode` can run Sand code, and so a
+collection, between those calls. So the encoder holds tokens, not Sand
+values, and the copy of each text stays. A native object that the
+collector traces (with a write barrier for the generational collector)
+would remove both costs; that is a VM feature beyond this pass.
