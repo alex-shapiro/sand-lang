@@ -256,3 +256,42 @@ Facts that matter for Sand:
   to measure in phase 2.
 - Q5. `retry_stress`: each `Decoder` and `Encoder` native must check memory
   before it moves its cursor or writes output. To test in phase 2.
+
+## 5. Phase 2 log
+
+### Shared prerequisites (on `codec-traits`, commits `204fb7e`, `e753d17`, `ec986e6`)
+
+- Local functions take hidden dictionaries. A dictionary built from them is
+  not hoisted to the outer function entry.
+- Field default helpers take the struct's dictionaries. On the base,
+  `json.decode` rejects a type whose computed default reads a dictionary
+  (checked at module end, after default bodies are checked).
+- `never` implements a trait if all methods of it and its supertraits take
+  `self`; an unknown type in a bound defaults to `never` if `never`
+  satisfies the bound.
+
+### Contest decisions in force (CONTEST.md)
+
+- Contestants: D1 (all Sand), D2 (D1 + fast path), W (agent A: native
+  walker with continuations).
+- A value leaves the VM only through `Encode`. Native functions take
+  `Encoded<N>`. Remove public `Vm::to_value`.
+- Lead asks: measure fuel for every case; keep full-type container mismatch
+  messages unless costly (show before/after if changed); measure or avoid
+  the text copy; closed instances of generic types in D2; keep these notes.
+
+### Facts found while planning D1
+
+- JSON text mismatch messages already name kinds, not full types:
+  `expected array`, `expected object`, `expected array of length 2`,
+  `expected int`, `expected Status` (enum name). Only the `Value` decoder
+  (a test hook on `value-decode`) names full container types
+  (`expected [int], found str`).
+- Named variant payloads: an omitted field is `None` for `Option`, else
+  `missing field`; payloads have no defaults.
+- JSON forms: `Some(x)` writes `x`; `Json` variants write their payload;
+  `Range` writes `{"start","end"}` and `"inclusive": true` only when
+  inclusive; a payload variant writes `{"Name": [..]}` or `{"Name": {..}}`.
+- The checker's `TypeDefId` is the runtime struct def id, and variant ids
+  are the checker's `variants` index, so synthesized HIR can pass them as
+  int constants to natives, which read names from `vm.prog`.
