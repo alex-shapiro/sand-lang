@@ -2373,16 +2373,25 @@ argument before the call, so a hand-written `Encode` applies, and the encoding
 charges fuel and memory to the run. `Encoded<N>` is `Send`, so an asynchronous
 native function can take it.
 
-A native module implements `Encode` or `Decode` for its own types in its Sand
-source, with Sand code or with `native fn encode(self, e: Encoder)` and
-`native fn decode(d: Decoder) -> Result<T>` methods. The Rust functions write
-and read through `VmVal<Encoder>` and `VmVal<Decoder>`: `write_str`,
+A bound type that derives the Rust `value::Encode` and `value::Decode`
+(§16.7) also derives the Sand `Encode` and `Decode`, with the same form. A
+hand-written Sand `impl Encode` or `impl Decode` for such a type is a compile
+error, because it would give the type a second form. For a custom form, such
+as the text `"21C"` for a temperature, the Rust type has
+`#[sand(no_value)]` and hand-written Rust `Encode` and `Decode`, and
+`NativeModule::custom_codec::<T>()` implements the Sand traits of `T` with
+them. Every format and the host then see the one form that the Rust code
+gives.
+
+A native module can also implement `Encode` or `Decode` for its other types
+in its Sand source, with Sand code or with `native fn encode(self, e: Encoder)`
+and `native fn decode(d: Decoder) -> Result<T>` methods. The Rust functions
+write and read through `VmVal<Encoder>` and `VmVal<Decoder>`: `write_str`,
 `write_value`, `read_str`, `read_value`, and `error`, which returns a decode
 error with the path of the decoded part. As after a failed `d.decode()`, the
 caller of a `decode` that returns this error can read the value as another
-type. Such a Rust function cannot decode
-the values of a type parameter; an implementation for a generic type is
-written in Sand.
+type. Such a Rust function cannot decode the values of a type parameter; an
+implementation for a generic type is written in Sand.
 
 The engine automatically generates Sand declarations for registered types and
 functions that are not declared in `NativeModule::source`. Registered types use
@@ -2582,8 +2591,9 @@ method converts a Rust value into a `Value`. Standard Rust primitives,
 collections, tuples, `Value`, and every `ValueType` implement `Encode`. `encode`
 sorts the entries of a `HashMap` and the elements of a `HashSet`. For a derived
 `SandEnum` or `SandStruct`, `encode` produces the same `Value` as the derived
-Sand `Encode`. A manual `Encode` implementation for a type that also implements
-`IntoVmValue` must preserve this equality.
+Sand `Encode`. A bound type with a manual `Encode` and `Decode` registers them
+with `NativeModule::custom_codec` (§16.3), so that its Sand `Encode` and
+`Decode` use them.
 
 `value::Decode` is the Rust counterpart of the Sand `Decode` trait.
 `Value::decode::<T>()` converts a `Value` into a `T`. Standard Rust primitives,

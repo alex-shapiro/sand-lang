@@ -5,12 +5,11 @@ mod common;
 
 use common::rt;
 use parking_lot::Mutex;
-use sandlang::codec::{Decoder, Encoder};
+use sandlang::codec::Decoder;
 use sandlang::engine::{Config, Engine, Error, HostModules, Limits, MemorySink};
 use sandlang::native::NativeModule;
-use sandlang::native::convert::HostError;
 use sandlang::native::ty::{Encoded, VmVal};
-use sandlang::value::{StructValue, Value, VariantValue};
+use sandlang::value::{Decode, DecodeError, Encode, StructValue, Value, ValueReader, VariantValue};
 use sandlang::vm::{Fail, Vm};
 use std::sync::Arc;
 
@@ -210,11 +209,25 @@ fn scenario_6_rust_and_sand_derived_forms_agree() {
 }
 
 /// A temperature reading whose Rust `Encode` and `Decode` write a text such
-/// as `"21C"`.
+/// as `"21C"`, which is its form in every format.
 #[derive(Clone, Debug, PartialEq, sandlang::SandStruct)]
-#[sand(module = "lab")]
+#[sand(module = "lab", no_value)]
 pub struct Reading {
     pub celsius: i64,
+}
+
+impl Encode for Reading {
+    fn encode(&self) -> Value {
+        Value::Str(format!("{}C", self.celsius))
+    }
+}
+
+impl Decode for Reading {
+    fn decode(r: &mut ValueReader<'_>) -> Result<Reading, DecodeError> {
+        let text: String = r.decode()?;
+        let celsius = text.strip_suffix('C').and_then(|c| c.parse().ok());
+        celsius.map(|celsius| Reading { celsius }).ok_or_else(|| DecodeError::new("expected a temperature such as 21C"))
+    }
 }
 
 /// A value with a label, generic over its value.
@@ -227,16 +240,7 @@ pub struct Labeled<T> {
 
 fn lab_module() -> NativeModule {
     let mut lab = NativeModule::new("lab");
-    lab.bind::<Reading>().bind::<Labeled<()>>();
-    lab.source("impl Encode for Reading {\n    native fn encode(self, e: Encoder)\n}\nimpl Decode for Reading {\n    native fn decode(d: Decoder) -> Result<Reading>\n}");
-    lab.function("Reading.encode", |vm: &mut Vm, r: Reading, e: VmVal<Encoder>| e.write_str(vm, &format!("{}C", r.celsius)));
-    lab.function("Reading.decode", |vm: &mut Vm, d: VmVal<Decoder>| -> Result<Reading, HostError> {
-        let text = d.read_str(vm)?;
-        match text.strip_suffix('C').and_then(|c| c.parse().ok()) {
-            Some(celsius) => Ok(Reading { celsius }),
-            None => Err(d.error(vm, "expected a temperature such as 21C")?),
-        }
-    });
+    lab.bind::<Reading>().custom_codec::<Reading>().bind::<Labeled<()>>();
     lab
 }
 
@@ -272,6 +276,36 @@ fn a_native_decode_error_lets_the_caller_read_another_type() {
     let (r, out) = run(vec![lab_module()], Limits::default(), src);
     r.unwrap();
     assert_eq!(out, "Ok([Reading(Reading(celsius: 21)), Note(\"hot\")])\n");
+}
+
+#[test]
+fn a_custom_codec_gives_one_form_to_rust_and_sand() {
+    let kept = Arc::new(Mutex::new(Vec::new()));
+    let reading = Reading { celsius: 3 };
+    let inputs = vec![reading.encode()];
+    let src = "import host\nimport lab\nhost.keep(lab.Reading(celsius: 3))\n\
+               let d = host.input()\nlet r: lab.Reading = d.finish(d.decode())?\nprint(r.celsius)\n";
+    let (r, out) = run(vec![host_module(kept.clone(), inputs), lab_module()], Limits::default(), src);
+    r.unwrap();
+    assert_eq!(out, "3\n");
+    assert_eq!(*kept.lock(), [Value::Str("3C".into())]);
+    assert_eq!(kept.lock()[0].decode::<Reading>(), Ok(reading));
+}
+
+#[test]
+fn a_hand_written_sand_codec_cannot_change_a_derived_rust_form() {
+    /// A probe whose Rust `Encode` and `Decode` are derived.
+    #[derive(Clone, Debug, PartialEq, sandlang::SandStruct)]
+    #[sand(module = "lab")]
+    pub struct Probe {
+        pub depth: i64,
+    }
+    let mut lab = NativeModule::new("lab");
+    lab.bind::<Probe>();
+    lab.source("impl Encode for Probe {\n    fn encode(self, e: Encoder) {\n        e.encode(\"probe\")\n    }\n}");
+    let Err(Error::Compile(errors)) = HostModules::new([lab]) else { panic!("the registration passed") };
+    let message = &errors[0].message;
+    assert!(message.starts_with("`lab.Probe` derives the Rust `value::Encode` and `value::Decode`"), "{message}");
 }
 
 #[test]

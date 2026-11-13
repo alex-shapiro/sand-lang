@@ -1284,6 +1284,14 @@ impl VmVal<Decoder> {
         })
     }
 
+    /// Returns the decode error of the Rust `Decode` error `e` of the value
+    /// that [`VmVal::<Decoder>::read_value`] read, with the decoder's path.
+    pub(crate) fn value_error(self, vm: &mut Vm, e: &crate::value::DecodeError) -> Result<HostError, Fail> {
+        let inner = e.path();
+        let message = with_decoder_state(vm, self, false, |_, p, vm| format!("{}{}: {}", p.path_text(vm), &inner[1..], e.message()))?;
+        decoder_error(vm, self, core::Error { message, kind: "parse".into() })
+    }
+
     /// Returns a decode error with the decoder's path and `message`, for a
     /// native `decode` to return. It fails the read, so that the caller can
     /// read the value as another type.

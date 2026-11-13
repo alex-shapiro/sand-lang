@@ -255,7 +255,9 @@ fn reject_member_attrs(data: &Data) -> syn::Result<()> {
     }
 }
 
-fn expand_named_type(input: &DeriveInput, a: &TypeAttrs, type_params: &TypeParams, binding: Tokens) -> Tokens {
+/// Implements `NamedType`. `value_codec` is `true` if the derive also
+/// implements `value::Encode` and `value::Decode`.
+fn expand_named_type(input: &DeriveInput, a: &TypeAttrs, type_params: &TypeParams, binding: Tokens, value_codec: bool) -> Tokens {
     let TypeAttrs { module, name, public, krate, doc, .. } = a;
     let ty = &input.ident;
     let check = assert_type_name(krate, "type", &name.value(), name.span());
@@ -280,6 +282,7 @@ fn expand_named_type(input: &DeriveInput, a: &TypeAttrs, type_params: &TypeParam
             const DOC: &'static str = #doc;
             const PUBLIC: bool = #public;
             const PARAMS: &'static [&'static str] = &[#(#params),*];
+            const VALUE_CODEC: bool = #value_codec;
             #rust_type
             fn binding() -> #krate::native::Binding<Self> {
                 #binding
@@ -465,7 +468,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
         writes.push(quote! { #pattern => #krate::native::variant_into_vm_value::<Self, _>(vm, #i, #write) });
         encodes.push(quote! { #pattern => #krate::native::encode_variant::<Self>(&SAND_VARIANT_DESCS, #i, [#(#krate::value::Encode::encode(#names)),*]) });
     }
-    let named = expand_named_type(input, &attrs, &type_params, quote! { #krate::native::Binding::of_enum() });
+    let named = expand_named_type(input, &attrs, &type_params, quote! { #krate::native::Binding::of_enum() }, !attrs.no_value);
     let sand_type = expand_sand_type(input, krate, &type_params);
     let ConversionGenerics { params, args, reflection_where, from_vm_value_where, into_vm_value_where, encode_where, decode_where } =
         ConversionGenerics::new(input, krate, &type_params);
@@ -545,7 +548,7 @@ fn sand_object(input: &DeriveInput) -> syn::Result<Tokens> {
     let empty_params = TypeParams::empty(input, "SandObject")?;
     reject_member_attrs(&input.data)?;
     let krate = &attrs.krate;
-    let named = expand_named_type(input, &attrs, &empty_params, quote! { #krate::native::Binding::of_object() });
+    let named = expand_named_type(input, &attrs, &empty_params, quote! { #krate::native::Binding::of_object() }, false);
     let sand_type = expand_sand_type(input, krate, &empty_params);
     Ok(quote! {
         #named
@@ -661,7 +664,7 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
         writes.push(quote! { #krate::native::convert::IntoVmValue::into_vm_value(self.#ident, vm)? });
         encodes.push(quote! { #krate::value::Encode::encode(&self.#ident) });
     }
-    let named = expand_named_type(input, &attrs, &type_params, quote! { #krate::native::Binding::of_struct() });
+    let named = expand_named_type(input, &attrs, &type_params, quote! { #krate::native::Binding::of_struct() }, !attrs.no_value);
     let sand_type = expand_sand_type(input, krate, &type_params);
     let ConversionGenerics { params, args, reflection_where, from_vm_value_where, into_vm_value_where, encode_where, decode_where } =
         ConversionGenerics::new(input, krate, &type_params);
@@ -736,7 +739,7 @@ fn sand_value(input: &DeriveInput) -> syn::Result<Tokens> {
     let empty_params = TypeParams::empty(input, "SandValue")?;
     reject_member_attrs(&input.data)?;
     let krate = &attrs.krate;
-    let named = expand_named_type(input, &attrs, &empty_params, quote! { #krate::native::Binding::of_value() });
+    let named = expand_named_type(input, &attrs, &empty_params, quote! { #krate::native::Binding::of_value() }, true);
     Ok(quote! {
         #named
         #krate::__value_type_impls!(#ty);

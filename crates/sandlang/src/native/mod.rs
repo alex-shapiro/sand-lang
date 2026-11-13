@@ -14,7 +14,7 @@ use crate::value::{
 use crate::vm::heap::Heap;
 use crate::vm::value::{ChannelObj, MapObj, NativeCell, Obj, SetObj, TaskObj, VALUE_SIZE, ValueType, VmValue};
 use crate::vm::{Ctl, Fail, HostFn, NativeFn, Vm};
-use convert::{Conversion, FromVmValue, mismatch};
+use convert::{Conversion, FromVmValue, HostError, IntoVmValue, mismatch};
 use func::{NativeFunction, Signature};
 use std::any::{Any, TypeId};
 use std::borrow::Cow;
@@ -39,6 +39,12 @@ pub trait NamedType: Sized + 'static {
     const PUBLIC: bool;
     /// Type parameter names for a generic enum or struct.
     const PARAMS: &'static [&'static str] = &[];
+    /// `true` if the derive of the type implements [`value::Encode`] and
+    /// [`value::Decode`](crate::value::Decode), whose form the derived Sand
+    /// `Encode` and `Decode` of the type also have.
+    ///
+    /// [`value::Encode`]: crate::value::Encode
+    const VALUE_CODEC: bool = false;
     /// Returns a [`TypeId`] that uniquely identifies the Sand type across all generic instantiations.
     #[doc(hidden)]
     fn rust_type() -> TypeId {
@@ -773,6 +779,8 @@ pub(crate) struct BoundType {
     pub doc: &'static str,
     pub public: bool,
     pub kind: BoundKind,
+    /// See [`NamedType::VALUE_CODEC`].
+    pub value_codec: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -971,6 +979,66 @@ impl NativeModule {
         }
     }
 
+    /// Implements the Sand `Encode` and `Decode` of the bound type `T` with its
+    /// Rust [`Encode`](crate::value::Encode) and [`Decode`], so that every
+    /// format and the host see the one form that the Rust code gives, such
+    /// as the text `"21C"` for a temperature. `T` has `#[sand(no_value)]`
+    /// and hand-written Rust `Encode` and `Decode`.
+    ///
+    /// ```
+    /// # use sandlang::native::NativeModule;
+    /// # use sandlang::value::{Decode, DecodeError, Encode, Value, ValueReader};
+    /// /// A temperature reading.
+    /// #[derive(sandlang::SandStruct)]
+    /// #[sand(module = "lab", no_value)]
+    /// pub struct Reading {
+    ///     pub celsius: i64,
+    /// }
+    ///
+    /// impl Encode for Reading {
+    ///     fn encode(&self) -> Value {
+    ///         Value::Str(format!("{}C", self.celsius))
+    ///     }
+    /// }
+    ///
+    /// impl Decode for Reading {
+    ///     fn decode(r: &mut ValueReader<'_>) -> Result<Reading, DecodeError> {
+    ///         let text: String = r.decode()?;
+    ///         let celsius = text.strip_suffix('C').and_then(|c| c.parse().ok());
+    ///         celsius.map(|celsius| Reading { celsius }).ok_or_else(|| DecodeError::new("expected a temperature such as 21C"))
+    ///     }
+    /// }
+    ///
+    /// let mut lab = NativeModule::new("lab");
+    /// lab.bind::<Reading>().custom_codec::<Reading>();
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if `T` derives `Encode` and `Decode` (see
+    /// [`NamedType::VALUE_CODEC`]), or has type parameters.
+    pub fn custom_codec<T>(&mut self) -> &mut Self
+    where
+        T: NamedType + crate::value::Encode + Decode + IntoVmValue + for<'a> FromVmValue<Item<'a> = T> + SandType,
+    {
+        assert!(!T::VALUE_CODEC, "`{}` derives `Encode` and `Decode`; give it `#[sand(no_value)]` for a custom form", T::NAME);
+        assert!(T::PARAMS.is_empty(), "`{}` has type parameters; implement its `Encode` and `Decode` in Sand", T::NAME);
+        let name = T::NAME;
+        self.source(&format!(
+            "impl Encode for {name} {{\n    native fn encode(self, e: Encoder)\n}}\n\
+             impl Decode for {name} {{\n    native fn decode(d: Decoder) -> Result<{name}>\n}}"
+        ));
+        self.function(&format!("{name}.encode"), |vm: &mut Vm, x: T, e: VmVal<crate::codec::Encoder>| e.write_value(vm, &x.encode()));
+        self.function(&format!("{name}.decode"), |vm: &mut Vm, d: VmVal<crate::codec::Decoder>| -> Result<T, HostError> {
+            let value = d.read_value(vm)?;
+            match value.decode::<T>() {
+                Ok(x) => Ok(x),
+                Err(e) => Err(d.value_error(vm, &e)?),
+            }
+        });
+        self
+    }
+
     /// Registers the Rust-bound type `T` in this module (see [`NamedType`]).
     ///
     /// # Panics
@@ -1013,12 +1081,12 @@ impl NativeModule {
             }
             _ => {}
         }
-        self.add_type(BoundType { module: T::MODULE, name: T::NAME, doc: T::DOC, public: T::PUBLIC, kind })
+        self.add_type(BoundType { module: T::MODULE, name: T::NAME, doc: T::DOC, public: T::PUBLIC, kind, value_codec: T::VALUE_CODEC })
     }
 
     pub(crate) fn builtin_type(&mut self, name: &'static str, doc: &'static str, params: &'static [&'static str]) -> &mut Self {
         assert!(self.kind == ModKind::Prelude, "only the prelude has built-in types");
-        self.add_type(BoundType { module: "prelude", name, doc, public: true, kind: BoundKind::Builtin(params) })
+        self.add_type(BoundType { module: "prelude", name, doc, public: true, kind: BoundKind::Builtin(params), value_codec: false })
     }
 
     fn add_type(&mut self, t: BoundType) -> &mut Self {

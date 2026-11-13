@@ -487,6 +487,15 @@ impl Checker {
     // ------------------------------------------------------------------
     // Impls
 
+    /// Returns the qualified name of the type definition `def` if it is a
+    /// host type whose derive implements the Rust `value::Encode` and
+    /// `value::Decode` (see [`NamedType::VALUE_CODEC`](crate::native::NamedType::VALUE_CODEC)).
+    fn bound_value_codec_type(&self, def: TypeDefId) -> Option<String> {
+        let t = &self.types[def as usize];
+        let (module, name) = (self.name(t.module_name), self.name(t.name));
+        self.natives.types.iter().any(|b| b.value_codec && b.module == module && b.name == name).then(|| format!("{module}.{name}"))
+    }
+
     pub(crate) fn declare_impl(&mut self, d: &ast::ImplDecl, item: u32) -> Option<ImplId> {
         let span = d.trait_ref.span;
         let generics = self.declare_params(&d.generics, &[], None);
@@ -532,6 +541,18 @@ impl Checker {
             if !self.arena.mentions(target, p) && !args.iter().any(|&a| self.arena.mentions(a, p)) {
                 self.error(g.name.span, format!("type parameter `{}` is not used by the impl's type or trait arguments", g.name.name));
             }
+        }
+        if let (Some(b @ (Builtin::Encode | Builtin::Decode)), Ctor::Def(def)) = (self.traits[tid as usize].builtin, ctor)
+            && let Some(name) = self.bound_value_codec_type(def)
+        {
+            let msg = format!(
+                "`{name}` derives the Rust `value::Encode` and `value::Decode`, which must give the form of its Sand `{}`; \
+                 for a custom form, give the Rust type `#[sand(no_value)]` and a Rust `Encode` and `Decode`, and \
+                 register them with `NativeModule::custom_codec`",
+                b.name()
+            );
+            self.error(span, msg);
+            return None;
         }
         // Built-in types belong to the prelude for the orphan rule check.
         let type_mod = match ctor {

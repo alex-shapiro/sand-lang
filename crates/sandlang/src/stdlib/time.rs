@@ -73,6 +73,7 @@ macro_rules! bind_jiff_types {
             const NAME: &'static str = $name;
             const DOC: &'static str = $doc;
             const PUBLIC: bool = true;
+            const VALUE_CODEC: bool = true;
             fn binding() -> Binding<Self> {
                 Binding::of_value()
             }
