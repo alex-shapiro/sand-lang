@@ -289,6 +289,39 @@ Settings(name: "b", retries: 0, tags: ["default"], id: 99, label: "item-3", note
 ["default"]
 Err(Error(message: "$: missing field `name`", kind: "parse"))
 
+=== scenario 5: a hand-written decode_missing fills each omitted field of its type
+import json
+
+struct Tags { names: [str] }
+
+impl Decode for Tags {
+    fn decode(d: Decoder) -> Result<Tags> {
+        Ok(Tags(names: d.decode()?))
+    }
+
+    fn decode_missing() -> Tags? {
+        Some(Tags(names: []))
+    }
+}
+
+struct Post { title: str, tags: Tags }
+struct Wrap<T> { v: T }
+enum Item { Post(title: str, tags: Tags) }
+
+let post: Result<Post> = json.decode("{\"title\": \"a\"}")
+print(post)
+let wrap: Result<Wrap<Tags>> = json.decode("{}")
+print(wrap)
+let item: Result<Item> = json.decode("{\"Post\": {\"title\": \"b\"}}")
+print(item)
+let given: Result<Post> = json.decode("{\"title\": \"c\", \"tags\": [\"x\"]}")
+print(given)
+--- stdout
+Ok(Post(title: "a", tags: Tags(names: [])))
+Ok(Wrap(v: Tags(names: [])))
+Ok(Post(title: "b", tags: Tags(names: [])))
+Ok(Post(title: "c", tags: Tags(names: ["x"])))
+
 === scenario 10: a hand-written Decode works for a type whose fields lack Decode
 import json
 struct Job { name: str, run: fn() -> int }

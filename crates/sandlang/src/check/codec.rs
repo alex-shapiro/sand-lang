@@ -483,6 +483,18 @@ impl Checker {
         }
     }
 
+    /// Returns `true` if `ty` is a type parameter, or if an `impl` of
+    /// `Decode` for the type constructor of `ty` defines `decode_missing`.
+    fn may_decode_missing(&self, ty: TypeId) -> bool {
+        if matches!(self.arena.get(ty), Ty::Param(_)) {
+            return true;
+        }
+        let (Some(tr), Some((ctor, arity))) = (self.builtin_trait(Builtin::Decode), impl_key(&self.arena, ty)) else { return false };
+        let default = self.traits[tr.trait_id as usize].methods.get(1).and_then(|m| m.default);
+        let ids = self.impls_by.get(&(tr.trait_id, ctor, arity));
+        ids.is_some_and(|ids| ids.iter().any(|&i| self.impls[i as usize].slots.get(1).is_some_and(|&f| Some(f) != default)))
+    }
+
     /// Returns the type of the prelude type `name`.
     fn codec_type(&mut self, name: &str) -> TypeId {
         match self.prelude.and_then(|p| self.scope_def(p, name)) {
@@ -859,8 +871,8 @@ impl Synth {
     }
 
     /// The value of the omitted field `i` of type `ty`: its default, `None`
-    /// for an `Option`, `T.decode_missing()` for a type parameter, or a
-    /// return with a missing-field error.
+    /// for an `Option`, `T.decode_missing()` for a type parameter or a type
+    /// whose `Decode` defines it, or a return with a missing-field error.
     #[allow(clippy::too_many_arguments)]
     fn missing(
         &self,
@@ -876,7 +888,6 @@ impl Synth {
             let args = c.default_helper_evidence(helper, targs, self.span);
             return self.e(HKind::Call { func: helper, targs: targs.to_vec(), args }, ty);
         }
-        let err = c.error_ty();
         let ret_err = |s: &Self, c: &mut Checker| {
             let args = vec![s.local(c, dec), s.int(owner.0 as i64), s.e(HKind::Bool(owner.1), TypeId::BOOL), s.int(i as i64)];
             let error = s.method(c, "Decoder", "missing", Vec::new(), args);
@@ -889,8 +900,7 @@ impl Synth {
         let some = c.types[c.wk.option as usize].variants()[0].rt_id;
         match c.arena.get(ty) {
             Ty::Named(d, _) if d == c.wk.option => self.e(HKind::Tag(none), ty),
-            Ty::Param(_) => {
-                let _ = err;
+            _ if c.may_decode_missing(ty) => {
                 let opt = c.option_of(ty);
                 let call = self.trait_call(c, Builtin::Decode, 1, ty, vec![], opt);
                 let v = c.hidden_local(ty, self.span);
