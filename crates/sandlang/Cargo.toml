@@ -97,6 +97,3 @@ harness = false
 name = "codec"
 harness = false
 
-[[bench]]
-name = "codec_design"
-harness = false

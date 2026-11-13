@@ -350,11 +350,11 @@ Visible defects that rarely block users.
       in the argument conversion of the host call. The call now makes an
       `Encoder` object, an `Arc<Value>`, and one more native call, and the
       collector frees the value later: `small_to_value` takes 180 ns against
-      93 ns on `value-decode` (DESIGN_NOTES §7, Q4). The conversion could take
+      93 ns on `value-decode` (`experiments/codec-traits/notes.md` §7, Q4). The conversion could take
       the raw value and the `Encode` dictionary as evidence, as natives take
       `Num` evidence.
 - [ ] ❓ _Performance._ Remove the lending of the input text for each format
-      operation of a driven decode (about 2 ns each, DESIGN_NOTES §7, Q6). The
+      operation of a driven decode (about 2 ns each, `experiments/codec-traits/notes.md` §7, Q6). The
       `TextDecoder` operations could read the text from the heap and allocate
       their results after the read.
 
