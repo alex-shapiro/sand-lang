@@ -1,7 +1,6 @@
 # State of the `Encode` and `Decode` redesign
 
-This file records the state of the work on 2026-11-13. It describes what
-exists. It does not plan work.
+This file records the state of the work on 2026-11-13.
 
 ## Branch
 
