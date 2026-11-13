@@ -1173,6 +1173,7 @@ pub enum Obj {
     Range(i64, i64, bool),
     Task(Box<TaskObj>),
     Channel(Box<ChannelObj>),
+    /// A [`NativeCell`].
     Native(Box<dyn crate::native::DynObject>),
     Value(Box<dyn ValueObj>),
     Packed(&'static PackedType, [u64; 2]),
@@ -1207,6 +1208,21 @@ impl std::fmt::Debug for Obj {
 
 /// The size of a value in bytes.
 pub const VALUE_SIZE: usize = std::mem::size_of::<VmValue>();
+
+/// The VM values of a native object. Most objects hold one at most, which
+/// needs no allocation.
+pub(crate) type ObjectValues = smallvec::SmallVec<[VmValue; 1]>;
+
+/// A native object on the heap, and the VM values that it holds.
+///
+/// The object itself cannot hold a VM handle: handle types are `!Send`, and
+/// a native object is `Send`. Its VM values live here instead, where the
+/// collector traces them (see
+/// [`VmVal::push_value`](crate::native::ty::VmVal::push_value)).
+pub struct NativeCell<T> {
+    pub(crate) values: ObjectValues,
+    pub(crate) object: T,
+}
 
 const _: () = assert!(std::mem::size_of::<Obj>() == 32);
 
@@ -1266,6 +1282,7 @@ impl Obj {
                 c.queue.iter().for_each(|v| f(*v));
                 c.senders.iter().for_each(|(_, _, v)| f(*v));
             }
+            Obj::Native(n) => n.values().iter().for_each(|v| f(*v)),
             _ => {}
         }
     }

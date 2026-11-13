@@ -3986,6 +3986,82 @@ fn host_modules_can_define_resources() {
 }
 
 #[test]
+fn native_objects_keep_the_sand_values_that_they_hold() {
+    use sandlang::native::NativeObject;
+    use sandlang::native::ty::VmVal;
+
+    type Callbacks = Vec<VmVal<fn() -> i64>>;
+
+    /// A list of callbacks.
+    #[derive(sandlang::SandObject)]
+    #[sand(module = "keep")]
+    struct Keeper {
+        dropped: Arc<AtomicUsize>,
+    }
+    impl NativeObject for Keeper {}
+    impl Drop for Keeper {
+        fn drop(&mut self) {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let mut m = NativeModule::new("keep");
+    m.bind::<Keeper>();
+    let d = dropped.clone();
+    m.function("new", move || Keeper { dropped: d.clone() });
+    m.function("Keeper.add", |vm: &mut Vm, k: VmVal<Keeper>, f: VmVal<fn() -> i64>| k.push_value(vm, f.raw()));
+    m.function("Keeper.count", |vm: &mut Vm, k: VmVal<Keeper>| -> Result<i64, Fail> { Ok(k.values(&vm.heap)?.len() as i64) });
+    m.function("Keeper.callbacks", |vm: &mut Vm, k: VmVal<Keeper>| -> Result<Callbacks, Fail> {
+        Ok(k.values(&vm.heap)?.iter().map(|&f| VmVal::from_raw(f)).collect())
+    });
+    m.function("Keeper.keep_first", |vm: &mut Vm, k: VmVal<Keeper>| k.truncate_values(&mut vm.heap, 1));
+    let d = dropped.clone();
+    m.function("dropped", move || d.load(Ordering::Relaxed) as i64);
+    // Each callback captures a new `str`, and the loop makes garbage, so a
+    // collection that does not trace the keeper frees the strings. Each
+    // keeper of the second loop holds a callback that holds the keeper.
+    let src = r#"import keep
+let k = keep.new()
+for i in 0..300 {
+    let s = "item \(i) of the keeper"
+    k.add(() => s.len() + i)
+    let garbage = [s, s + "!"]
+}
+var total = 0
+for f in k.callbacks() {
+    total += f()
+}
+print(total)
+for _ in 0..40 {
+    let cyclic = keep.new()
+    cyclic.add(() => cyclic.count())
+    let garbage = ["x".repeat(100)]
+}
+k.keep_first()
+print("\(k.count()) \(k.callbacks()[0]())")
+for _ in 0..3000 {
+    let garbage = ["y".repeat(100)]
+}
+print(keep.dropped())
+"#;
+    let item = |i: usize| format!("item {i} of the keeper").len() + i;
+    let total: usize = (0..300).map(item).sum();
+    let want = [total.to_string(), format!("1 {}", item(0))];
+    for (config, collects) in [(Config::new(), false), (Config::new().gc_stress(true), true), (Config::new().retry_stress(true), false)] {
+        dropped.store(0, Ordering::Relaxed);
+        let (r, out, err) = run_src(config.host_modules(HostModules::new([m.clone()]).unwrap()), src);
+        assert!(r.is_ok(), "{r:?} {err}");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[..2], want, "{out}");
+        // A collection at each safe point frees the keepers of the cycles.
+        if collects {
+            assert!(lines[2].parse::<usize>().unwrap() >= 40, "{out}");
+        }
+    }
+}
+
+#[test]
 fn host_errors_are_err_values_and_aborts_end_the_run() {
     use sandlang::native::convert::HostError;
     use sandlang::native::func::Later;

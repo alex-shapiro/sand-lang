@@ -1167,7 +1167,28 @@ impl Heap {
 
     pub fn native<T: 'static>(&self, v: VmValue) -> Option<&T> {
         match self.get(v) {
-            Obj::Native(n) => (&**n as &dyn std::any::Any).downcast_ref::<T>(),
+            Obj::Native(n) => (&**n as &dyn std::any::Any).downcast_ref::<NativeCell<T>>().map(|c| &c.object),
+            _ => None,
+        }
+    }
+
+    /// Returns the VM values of the native object `v` of type `T`.
+    pub(crate) fn native_values<T: 'static>(&self, v: VmValue) -> Option<&ObjectValues> {
+        match self.get(v) {
+            Obj::Native(n) => (&**n as &dyn std::any::Any).downcast_ref::<NativeCell<T>>().map(|c| &c.values),
+            _ => None,
+        }
+    }
+
+    /// Returns the VM values of the native object `v` of type `T`, to which
+    /// the caller adds `stored`. Applies the write barrier for `stored`.
+    pub(crate) fn native_values_mut<T: 'static>(&mut self, v: VmValue, stored: &[VmValue]) -> Option<&mut ObjectValues> {
+        match self.get(v) {
+            Obj::Native(n) if (&**n as &dyn std::any::Any).is::<NativeCell<T>>() => {}
+            _ => return None,
+        }
+        match self.get_mut_storing(v, stored) {
+            Obj::Native(n) => (&mut **n as &mut dyn std::any::Any).downcast_mut::<NativeCell<T>>().map(|c| &mut c.values),
             _ => None,
         }
     }
@@ -1177,10 +1198,11 @@ impl Heap {
     }
 
     pub fn native_mut<T: 'static>(&mut self, v: VmValue) -> Option<&mut T> {
-        // Native objects hold no values: no write barrier needed.
+        // The object holds no VM values (its cell does): no write barrier
+        // needed.
         let VmValue::Obj(h) = v else { return None };
         match &mut self.objs[h as usize] {
-            Obj::Native(n) => (&mut **n as &mut dyn std::any::Any).downcast_mut::<T>(),
+            Obj::Native(n) => (&mut **n as &mut dyn std::any::Any).downcast_mut::<NativeCell<T>>().map(|c| &mut c.object),
             _ => None,
         }
     }
@@ -1642,6 +1664,12 @@ fn chunk_children(obj: &Obj, start: usize, mut f: impl FnMut(VmValue)) -> Option
         Obj::Set(s) => {
             let (r, next) = chunk(s.entries.len());
             s.entries[r].iter().flatten().for_each(|&v| f(v));
+            next
+        }
+        Obj::Native(n) => {
+            let values = n.values();
+            let (r, next) = chunk(values.len());
+            values[r].iter().for_each(|&v| f(v));
             next
         }
         Obj::Channel(c) => {

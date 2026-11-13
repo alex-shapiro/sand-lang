@@ -2190,6 +2190,13 @@ compiler rejects it in these places:
 - the future or finisher closure of `Later::new`
 - a `NativeObject`
 
+A native object keeps VM values between calls in its own value list. The
+collector traces the list while the object is alive. `VmVal::push_value`
+adds a value, `VmVal::set_value` replaces one, `VmVal::truncate_values`
+removes the last ones, and `VmVal::values` reads them. A cycle through the
+list, such as an object that holds a closure that holds the object, is
+collected like any other cycle.
+
 `IntoVmValue::into_vm_value` and `Vm` allocation methods return a raw
 `VmValue`. The compiler does not check `VmValue` across a wait. Do not hold a
 raw `VmValue` across a wait; allocate the value in the `Later::new` finisher

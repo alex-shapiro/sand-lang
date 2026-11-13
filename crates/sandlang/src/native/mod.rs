@@ -13,7 +13,7 @@ use crate::value::{
     without_json_variant,
 };
 use crate::vm::heap::Heap;
-use crate::vm::value::{ChannelObj, MapObj, Obj, SetObj, TaskObj, ValueType, VmValue};
+use crate::vm::value::{ChannelObj, MapObj, NativeCell, Obj, SetObj, TaskObj, VALUE_SIZE, ValueType, VmValue};
 use crate::vm::{Ctl, Fail, HostFn, NativeFn, Vm};
 use convert::{Conversion, FromVmValue, mismatch};
 use func::{NativeFunction, Signature};
@@ -632,8 +632,11 @@ pub struct VariantField {
 
 /// Memory and resource accounting for a heap-allocated [`ObjectType`].
 ///
-/// Do not store [`VmValue`] values inside an implementor. The garbage collector
-/// does not trace native objects.
+/// An object keeps VM values with [`VmVal::push_value`], which stores them
+/// next to the object, where the garbage collector traces them. A VM handle
+/// type cannot be a field: handle types are `!Send`. Do not store a raw
+/// [`VmValue`] in a field either, because the collector does not trace the
+/// fields of an object.
 pub trait NativeObject: Any + Send {
     /// Approximate heap memory used by `self`, in bytes.
     ///
@@ -672,20 +675,24 @@ pub trait NativeObject: Any + Send {
 /// handle.
 pub trait ObjectType: NativeObject + NamedType + SandType {}
 
-/// Type-erased heap representation of an [`ObjectType`].
+/// Type-erased heap representation of an [`ObjectType`] and the VM values
+/// that it holds (a [`NativeCell`]).
 pub trait DynObject: Any + Send + sealed::Sealed {
     fn module_name(&self) -> &'static str;
     fn type_name(&self) -> &'static str;
+    /// The bytes of the object and of its values.
     fn size(&self) -> usize;
     fn is_resource(&self) -> bool;
+    /// The VM values of the object, which the collector traces.
+    fn values(&self) -> &crate::vm::value::ObjectValues;
 }
 
 mod sealed {
     pub trait Sealed {}
-    impl<T: super::ObjectType> Sealed for T {}
+    impl<T: super::ObjectType> Sealed for crate::vm::value::NativeCell<T> {}
 }
 
-impl<T: ObjectType> DynObject for T {
+impl<T: ObjectType> DynObject for NativeCell<T> {
     fn module_name(&self) -> &'static str {
         T::MODULE
     }
@@ -693,10 +700,13 @@ impl<T: ObjectType> DynObject for T {
         T::NAME
     }
     fn size(&self) -> usize {
-        NativeObject::size(self)
+        NativeObject::size(&self.object) + self.values.capacity() * VALUE_SIZE
     }
     fn is_resource(&self) -> bool {
-        NativeObject::is_resource(self)
+        NativeObject::is_resource(&self.object)
+    }
+    fn values(&self) -> &crate::vm::value::ObjectValues {
+        &self.values
     }
 }
 
@@ -707,6 +717,50 @@ impl<T: ObjectType> VmVal<T> {
 
     pub fn get_mut(self, heap: &mut Heap) -> Result<&mut T, Fail> {
         heap.native_mut::<T>(self.raw()).ok_or_else(mismatch::<T>)
+    }
+
+    /// Returns the VM values that the object holds, in the order of
+    /// [`VmVal::push_value`]. The handles in them are valid during the
+    /// native call.
+    pub fn values(self, heap: &Heap) -> Result<&[VmValue], Fail> {
+        heap.native_values::<T>(self.raw()).map(|values| values.as_slice()).ok_or_else(mismatch::<T>)
+    }
+
+    /// Adds `value` to the VM values that the object holds. The collector
+    /// keeps them alive and up to date while the object is alive, so the
+    /// object can keep Sand values, such as callbacks or a partly built
+    /// result, between native calls. Fails with a memory limit error before
+    /// any change.
+    pub fn push_value(self, vm: &mut Vm, value: VmValue) -> Result<(), Fail> {
+        let values = vm.heap.native_values::<T>(self.raw()).ok_or_else(mismatch::<T>)?;
+        let (len, capacity) = (values.len(), values.capacity());
+        if len == capacity {
+            let grown = capacity.saturating_mul(2).max(4);
+            vm.check_memory((grown - capacity) * VALUE_SIZE)?;
+            vm.heap.account(capacity * VALUE_SIZE, grown * VALUE_SIZE);
+            self.values_mut(&mut vm.heap, &[])?.reserve_exact(grown - len);
+        }
+        self.values_mut(&mut vm.heap, &[value])?.push(value);
+        Ok(())
+    }
+
+    /// Replaces the VM value at `index` with `value`.
+    pub fn set_value(self, heap: &mut Heap, index: usize, value: VmValue) -> Result<(), Fail> {
+        let Some(slot) = self.values_mut(heap, &[value])?.get_mut(index) else {
+            return Err(Fail::internal(format!("{}: no value {index}", T::NAME)));
+        };
+        *slot = value;
+        Ok(())
+    }
+
+    /// Keeps the first `len` VM values that the object holds.
+    pub fn truncate_values(self, heap: &mut Heap, len: usize) -> Result<(), Fail> {
+        self.values_mut(heap, &[])?.truncate(len);
+        Ok(())
+    }
+
+    fn values_mut<'h>(self, heap: &'h mut Heap, stored: &[VmValue]) -> Result<&'h mut crate::vm::value::ObjectValues, Fail> {
+        heap.native_values_mut::<T>(self.raw(), stored).ok_or_else(mismatch::<T>)
     }
 }
 
@@ -808,7 +862,7 @@ impl Vm {
     /// memory limit.
     pub fn new_object<T: ObjectType>(&mut self, x: T) -> Result<VmVal<T>, Fail> {
         self.check_memory(NativeObject::size(&x))?;
-        Ok(VmVal::from_raw(self.heap.alloc(Obj::Native(Box::new(x)))))
+        Ok(VmVal::from_raw(self.heap.alloc(Obj::Native(Box::new(NativeCell { values: Default::default(), object: x })))))
     }
 }
 

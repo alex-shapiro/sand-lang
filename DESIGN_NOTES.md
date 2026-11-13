@@ -1022,3 +1022,50 @@ timer itself adds about 28 ns): the walk with its six allocations about
 75 ns; the `Encoder` object, the `Arc`, two native calls, and the sweep of
 the encoder the rest. value-decode copied the value inside the argument
 conversion of the host call and freed it when the call returned.
+
+### Q5: native objects that keep VM values
+
+Requirements: a native object can hold VM values between native calls,
+the collector traces them, and safe Rust cannot hold an untraced handle.
+Uses beyond codecs: a native object that holds Sand callbacks, and the
+state of a P2 continuation (the callbacks research, §8.2 item 4: "pass all
+heap state through a typed, rooted container").
+
+Design. Each native object lives in a `NativeCell<T> { values, object }`
+on the heap, boxed as `dyn DynObject`. The object `T` is the host's Rust
+type; `values` is a list of VM values that the collector traces as the
+children of the object, in chunks like a list. A host cannot put a VM
+handle in `T`: handle types are `!Send`, and `NativeObject: Send`. So
+the values list is the only place for a handle that outlives a call.
+API on `VmVal<T>` for an object type `T`:
+
+- `values(&Heap) -> &[VmValue]`
+- `push_value(&mut Vm, VmValue)`: checks memory before any change, and
+  counts the growth of the list;
+- `set_value(&mut Heap, index, VmValue)`;
+- `truncate_values(&mut Heap, len)`.
+
+The mutators apply the write barrier of the generational collector and
+shade the stored value during incremental marking. Values are not pinned
+roots: a cycle through them (an object, its callback, and the callback's
+capture of the object) is collected. One value is stored inline, so an
+object with one value allocates nothing more.
+
+Not closed: a raw `VmValue` is `Send`, so a host can still store one in a
+field, as it can today across a wait. Making `VmValue` `!Send` would make
+the heap, the `Vm`, and the `Engine` `!Send`.
+
+Tried first: `NativeCell<dyn DynObject>` with an unsized last field. Each
+downcast then computed the offset of the object from the alignment in the
+vtable; `encode_custom` lost 8% and `small_to_value` 9%. With the cell
+sized and generic, a downcast to `NativeCell<T>` has a fixed offset, as
+before.
+
+Test: `native_objects_keep_the_sand_values_that_they_hold` (tests/api.rs)
+keeps 300 callbacks that capture new strings while the loop makes
+garbage, and 40 cycles through a callback, under the default config,
+`gc_stress`, and `retry_stress`. Without the tracing, it fails with "call
+of a non-function". Measured (3 rounds; value-decode-free cases that use
+native objects; previous commit, this commit): `encode_custom` 311, 307;
+`decode_custom` 581, 587; `small_decode_default` 300, 298;
+`small_to_value` 170, 179.
