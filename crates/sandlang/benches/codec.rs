@@ -1,11 +1,13 @@
-//! Benchmarks for the `json` module and [`Vm::to_value`].
+//! Benchmarks for the `json` module and native parameters of type `Encoded<N>`.
 //!
 //! `cargo bench --bench codec` reports the fastest time per operation across
 //! `BENCH_RUNS` engine runs. The default is 3 runs. Each operation runs in its
 //! own engine instance. Each run executes the operation `BENCH_REPS` times and
 //! keeps the fastest repetition. The default is 5 repetitions. The test
 //! document contains `BENCH_USERS` users, which defaults to 5000. Set
-//! `BENCH_OPS=encode,decode` to filter operations.
+//! `BENCH_OPS=encode,decode` to filter operations. Set `BENCH_FUEL=1` to print
+//! the fuel of one call of each operation, in total and per item, instead of
+//! its time.
 //!
 //! `cargo test --benches` runs each benchmark once and verifies its output.
 
@@ -279,6 +281,13 @@ for _ in 0..{reps} {
 print("\(best / {items}) \(check)")
 "#;
 
+/// Prints the fuel that one call of the closure `operation` uses.
+const FUEL: &str = r#"
+let fuel_before = host.fuel()
+let check = operation()
+print("\(host.fuel() - fuel_before) \(check)")
+"#;
+
 /// Prints a `check` line for each property that the benchmark relies on.
 const CHECKS: &str = r#"
 let doc = make({n})
@@ -294,7 +303,7 @@ print("check host.copied_fields(doc) == 1: \(host.copied_fields(doc) == 1)")
 print("check text length: \(text.len())")
 "#;
 
-/// Builds the `host` module with helper functions for `Vm::to_value` and
+/// Builds the `host` module with helper functions for `Encoded<N>`, fuel, and
 /// `Json` conversion benchmarks.
 fn host_modules() -> HostModules {
     let mut host = NativeModule::new("host");
@@ -305,6 +314,8 @@ fn host_modules() -> HostModules {
             _ => 0,
         }
     });
+    host.source("pub native fn fuel() -> int");
+    host.function("fuel", |vm: &mut sandlang::vm::Vm| vm.meter.used() as i64);
     host.function("json_echo", |value: Json| -> Json { value });
     host.function("json_members", |value: Json| -> i64 {
         match value {
@@ -354,6 +365,12 @@ fn main() {
     println!("{:<14} {:>10}", "operation", "ns");
     for op in selected_operations() {
         let items = op.runs_per_call.unwrap_or(users);
+        if std::env::var("BENCH_FUEL").is_ok() {
+            let out = run_source(&format!("{}{FUEL}", operation_source(op, users)), Limits::default()).unwrap_or_else(|e| panic!("{}: {e}", op.name));
+            let fuel: u64 = out.split(' ').next().and_then(|n| n.parse().ok()).unwrap_or_else(|| panic!("{}: {out:?}", op.name));
+            println!("{:<20} {:>10} {:>10.1}", op.name, fuel, fuel as f64 / items as f64);
+            continue;
+        }
         let timing = TIMING.replace("{reps}", &reps.to_string()).replace("{items}", &items.to_string());
         let src = format!("{}{timing}", operation_source(op, users));
         let ns_per_item = |_| {
