@@ -1,13 +1,14 @@
 //! The fast path of `Decode` for JSON text: a read of a value with its
 //! [`Schema`] straight from the input of a [`TextDecoder`].
 //!
-//! The read handles valid input only. At an error, or at a part that it
-//! leaves to the format operations (`Range`, `Set`, native values, `Json`,
-//! map keys other than `str`), it returns [`Fallback::General`], and the
-//! decoder runs the general walker of [`crate::codec::fast`] from the same
-//! place. So errors, their paths, and the rare parts behave as on the
-//! general path, and the differential property test checks that the values
-//! are the same.
+//! The read handles valid input only. The general walker of
+//! [`crate::codec::fast`] reads each part that the read leaves to the format
+//! operations (`bytes`, `Range`, `Set`, native values, `Json`, map keys other
+//! than `str`), and then the read continues. At an error, the read returns
+//! [`Fallback::General`], and the general walker reads the whole value again
+//! from the same place. So errors, their paths, and the rare parts behave as
+//! on the general path, and the differential property test checks that the
+//! values are the same.
 
 use super::super::{Number, Parser};
 use super::TextDecoder;
@@ -17,11 +18,13 @@ use crate::vm::meter::SLOW_BYTES_PER_UNIT;
 use crate::vm::value::{MapObj, Obj, VmValue};
 use crate::vm::{Fail, Vm};
 
-/// Why the read stopped before the end of its value.
+/// Why the read stopped before the end of its value. It has the size of a
+/// pointer, which keeps each result of the read small.
 pub(super) enum Fallback {
     /// A memory or fuel limit, which ends the native call.
     Limit(Fail),
-    /// An error or a rare part, which the general walker reads.
+    /// An error, after which the general walker reads the whole value, or a
+    /// rare part ([`Reader::rare`]), which the general walker reads.
     General,
 }
 
@@ -86,21 +89,82 @@ struct Reader<'t, 'p> {
     values: Vec<VmValue>,
     /// Whether the innermost array or object has no part yet.
     first: bool,
+    /// The schema of the rare part at which the read stopped, if any.
+    rare: Option<SchemaId>,
+    /// The rare part that the general walker read, which the read gives to
+    /// its container when it continues.
+    resumed: Option<VmValue>,
 }
 
 impl TextDecoder {
     /// Reads a value of schema `schema`, or returns why the general walker
-    /// must read it. The decoder's state changes only on success.
+    /// must read it. On a failure, the decoder's state does not change.
     pub(super) fn read_schema(&mut self, vm: &mut Vm, schema: SchemaId) -> Read<VmValue> {
         if self.key.is_some() {
             return Err(Fallback::General);
         }
         let prog = vm.prog.clone();
         let p = Parser { src: &self.text, b: self.text.as_bytes(), pos: self.pos, depth: self.depth, charged: self.charged };
-        let mut r = Reader { p, prog: &prog, stack: Vec::with_capacity(16), values: Vec::with_capacity(32), first: false };
-        let v = r.run(vm, schema)?;
-        (self.pos, self.depth, self.charged) = (r.p.pos, r.p.depth, r.p.charged);
-        Ok(v)
+        let (stack, values) = (Vec::with_capacity(16), Vec::with_capacity(32));
+        let mut r = Reader { p, prog: &prog, stack, values, first: false, rare: None, resumed: None };
+        let rare = match r.run(vm, schema) {
+            Ok(v) => {
+                (self.pos, self.depth, self.charged) = (r.p.pos, r.p.depth, r.p.charged);
+                return Ok(v);
+            }
+            Err(Fallback::General) if r.rare.is_some() => r.rare.unwrap_or_default(),
+            Err(e) => return Err(e),
+        };
+        let at = (r.p.pos, r.p.depth, r.p.charged);
+        let open = (r.stack, r.values, r.first);
+        self.read_with_rare_parts(vm, &prog, open, at, rare)
+    }
+
+    /// Continues a read at `at`, with the open containers of `open`, from a
+    /// part of schema `rare`, which the general walker reads, as each later
+    /// rare part. On a failure, the decoder's state does not change.
+    #[cold]
+    fn read_with_rare_parts<'p>(
+        &mut self,
+        vm: &mut Vm,
+        prog: &'p Program,
+        mut open: (Vec<Frame<'p>>, Vec<VmValue>, bool),
+        at: (usize, usize, usize),
+        mut rare: SchemaId,
+    ) -> Read<VmValue> {
+        let before = (self.pos, self.depth, self.charged);
+        (self.pos, self.depth, self.charged) = at;
+        let r = loop {
+            // The read charged the rare part as a value, and the general
+            // walker and the read charge it again.
+            vm.meter.refund_to(vm.meter.fuel() + 2);
+            let containers = self.open.len();
+            let v = match crate::codec::fast::decode(vm, self, &mut crate::codec::DecodePath::default(), rare) {
+                Ok(v) => v,
+                Err(e) => {
+                    self.open.truncate(containers);
+                    self.key = None;
+                    break Err(match e {
+                        crate::codec::DecodeFail::Fail(f) => Fallback::Limit(f),
+                        _ => Fallback::General,
+                    });
+                }
+            };
+            let p = Parser { src: &self.text, b: self.text.as_bytes(), pos: self.pos, depth: self.depth, charged: self.charged };
+            let (stack, values, first) = open;
+            let mut r = Reader { p, prog, stack, values, first, rare: None, resumed: Some(v) };
+            let read = r.run(vm, rare);
+            (self.pos, self.depth, self.charged) = (r.p.pos, r.p.depth, r.p.charged);
+            open = (r.stack, r.values, r.first);
+            match (read, r.rare) {
+                (Err(Fallback::General), Some(next)) => rare = next,
+                (read, _) => break read,
+            }
+        };
+        if r.is_err() {
+            (self.pos, self.depth, self.charged) = before;
+        }
+        r
     }
 }
 
@@ -212,7 +276,7 @@ impl<'p> Reader<'_, 'p> {
             }
             &Schema::Map(key, val) => {
                 if !matches!(prog.schemas.get(key as usize), Some(Schema::Str)) {
-                    return Err(Fallback::General);
+                    return self.rare(s);
                 }
                 self.enter(b'{')?;
                 vm.check_memory(size_of::<Obj>() + size_of::<MapObj>())?;
@@ -232,8 +296,21 @@ impl<'p> Reader<'_, 'p> {
                 return Ok(None);
             }
             Schema::Enum(first, variants) => return self.open_variant(vm, *first, variants),
-            Schema::Bytes | Schema::Range | Schema::Native(_) | Schema::Json | Schema::Set(_) => return Err(Fallback::General),
+            Schema::Bytes | Schema::Range | Schema::Native(_) | Schema::Json | Schema::Set(_) => return self.rare(s),
         }))
+    }
+
+    /// Stops the read at a rare part of schema `s`, or returns the part that
+    /// the general walker read.
+    #[cold]
+    fn rare(&mut self, s: SchemaId) -> Read<Option<VmValue>> {
+        match self.resumed.take() {
+            Some(v) => Ok(Some(v)),
+            None => {
+                self.rare = Some(s);
+                Err(Fallback::General)
+            }
+        }
     }
 
     fn open_fields(&mut self, parts: &'p [SchemaId], defaults: &'p [Option<FieldDefault>], names: &'p [String], id: u32, variant: bool) {

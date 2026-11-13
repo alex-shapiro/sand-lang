@@ -161,6 +161,27 @@ fn a_host_decoder_reads_each_part_in_constant_time_at_any_depth() {
     assert!(deep < shallow * 3, "{shallow:?} at depth 1, {deep:?} at depth 200");
 }
 
+/// Returns `true` if a decode of JSON text with `items` items and a `Set`
+/// field passes under the memory limit `max_memory`. The `Set` is the first
+/// field of the text if `early`, and the last if not.
+fn decode_with_a_set_field(items: usize, early: bool, max_memory: usize) -> bool {
+    let order = if early { "when: Set<int>, items: [Item]" } else { "items: [Item], when: Set<int>" };
+    let src = format!(
+        "import json\nstruct Item {{ name: str, n: int, tags: [str] }}\nstruct Doc {{ {order} }}\n\
+         fn text() -> str {{\n    var items: [Item] = []\n    for i in 0..{items} {{\n        items.push(Item(name: \"item \\(i)\", n: i, tags: [\"a\", \"b\"]))\n    }}\n    json.encode(Doc(when: Set([1]), items: items))\n}}\n\
+         let t = text()\nlet r: Result<Doc> = json.decode(t)\nprint(r.is_ok())\n"
+    );
+    let (r, out) = run(Vec::new(), Limits { max_memory: Some(max_memory), ..Limits::default() }, &src);
+    r.is_ok() && out == "true\n"
+}
+
+#[test]
+fn a_rare_field_late_in_json_text_needs_no_second_read() {
+    let limit = 36 << 20;
+    assert!(decode_with_a_set_field(50_000, true, limit), "the limit is too low for the decode");
+    assert!(decode_with_a_set_field(50_000, false, limit), "a late `Set` field needs more memory than an early one");
+}
+
 #[test]
 fn scenario_6_rust_and_sand_derived_forms_agree() {
     use sandlang::value::Encode;
