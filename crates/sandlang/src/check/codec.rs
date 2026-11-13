@@ -185,6 +185,29 @@ impl Checker {
         self.fns[f as usize].decl = Some(FnDeclRef::Derived(checked(body)));
     }
 
+    /// Replaces each impl of the codec trait `tr` that the compiler built
+    /// from the components of its type, after a REPL input replaced the
+    /// impl of a component. A later use builds the impl again from the
+    /// current components. Code compiled before keeps the old impls.
+    pub(crate) fn renew_codec_impls(&mut self, tr: TraitId) {
+        self.fast_impls = PMap::new();
+        let built: Vec<ImplId> = (0..self.impls.len() as ImplId)
+            .filter(|&i| {
+                let imp = &self.impls[i as usize];
+                imp.trait_ref.trait_id == tr && imp.derived && !imp.replaced && !imp.slots.is_empty()
+            })
+            .collect();
+        for id in built {
+            let Some((ctor, arity)) = impl_key(&self.arena, self.impls[id as usize].target) else { continue };
+            self.retire_impl(id);
+            let fresh = ImplDef { slots: Vec::new(), replaced: false, ..self.impls[id as usize].clone() };
+            let new = self.impls.len() as ImplId;
+            self.impls.push(fresh);
+            add_impl(&mut self.impls_by, (tr, ctor, arity), new);
+            add_impl(&mut self.impls_by_ctor, (ctor, arity), new);
+        }
+    }
+
     /// Declares the methods of the synthesized `impl` `id` on first use. A
     /// program pays for the code of only the impls that it uses.
     pub(crate) fn ensure_derived_methods(&mut self, id: ImplId) {

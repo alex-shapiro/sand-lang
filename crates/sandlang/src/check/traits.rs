@@ -548,9 +548,10 @@ impl Checker {
             if self.impls_overlap(trait_ref, &generics, other) {
                 if self.impls[other as usize].module == self.cur_mod && self.defined_by_earlier_input(self.impls[other as usize].span) {
                     // Replace an overlapping `impl` from an earlier REPL input.
-                    remove_impl(&mut self.impls_by, &key, other);
-                    remove_impl(&mut self.impls_by_ctor, &(ctor, arity), other);
-                    self.impls[other as usize].replaced = true;
+                    self.retire_impl(other);
+                    if self.traits[tid as usize].builtin.is_some_and(Builtin::is_synthesized) {
+                        self.renew_codec_impls(tid);
+                    }
                     continue;
                 }
                 let other_span = self.impls[other as usize].span;
@@ -1461,6 +1462,17 @@ impl Checker {
             self.subst[v as usize] = None;
         }
         ok
+    }
+
+    /// Removes `impl` `id` from the lookup tables. Code compiled before keeps
+    /// using it.
+    pub(crate) fn retire_impl(&mut self, id: ImplId) {
+        let imp = &self.impls[id as usize];
+        if let Some((ctor, arity)) = impl_key(&self.arena, imp.target) {
+            remove_impl(&mut self.impls_by, &(imp.trait_ref.trait_id, ctor, arity), id);
+            remove_impl(&mut self.impls_by_ctor, &(ctor, arity), id);
+        }
+        self.impls[id as usize].replaced = true;
     }
 }
 

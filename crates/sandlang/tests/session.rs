@@ -258,6 +258,29 @@ fn traits_and_impls_across_inputs() {
 }
 
 #[test]
+fn a_later_codec_impl_applies_to_every_type_that_contains_its_type() {
+    let mut r = Repl::new();
+    r.ok("import json\nstruct P { x: int }\nstruct N { v: int }");
+    r.ok("impl Encode for N {\n    fn encode(self, e: Encoder) { e.encode(self.v) }\n}");
+    r.ok("impl Decode for N {\n    fn decode(d: Decoder) -> Result<N> { Ok(N(v: d.decode()?)) }\n}");
+    // `Q` has a hand-written part, so it uses the synthesized impl.
+    r.ok("struct Q { p: P, n: N }");
+    assert_eq!(r.value("json.encode([P(x: 1)])"), r#""[{\"x\":1}]""#);
+    assert_eq!(r.value("json.encode(Q(p: P(x: 1), n: N(v: 2)))"), r#""{\"p\":{\"x\":1},\"n\":2}""#);
+    r.ok("let before: Result<[P]> = json.decode(\"[{\\\"x\\\": 1}]\")");
+    assert_eq!(r.value("before"), "Ok([P(x: 1)])");
+    r.ok("impl Encode for P {\n    fn encode(self, e: Encoder) { e.encode(self.x) }\n}");
+    r.ok("impl Decode for P {\n    fn decode(d: Decoder) -> Result<P> { Ok(P(x: d.decode()?)) }\n}");
+    assert_eq!(r.value("json.encode(P(x: 3))"), r#""3""#);
+    assert_eq!(r.value("json.encode([P(x: 4)])"), r#""[4]""#);
+    assert_eq!(r.value("json.encode([[P(x: 5)]])"), r#""[[5]]""#);
+    assert_eq!(r.value("json.encode((P(x: 6), 1))"), r#""[6,1]""#);
+    assert_eq!(r.value("json.encode(Q(p: P(x: 7), n: N(v: 8)))"), r#""{\"p\":7,\"n\":8}""#);
+    r.ok("let after: Result<[P]> = json.decode(\"[9]\")");
+    assert_eq!(r.value("after"), "Ok([P(x: 9)])");
+}
+
+#[test]
 fn iterators_labels_and_defer_across_inputs() {
     let mut r = Repl::new();
     r.ok("struct Countdown {\n    var n: int\n}");
