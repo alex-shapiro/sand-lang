@@ -6,6 +6,9 @@
 //! { let p1 = a1; let p2 = a2; body }
 //! ```
 //!
+//! An argument that is a block of `let`s and a value adds its `let`s to the
+//! inlined block before its binding.
+//!
 //! Inlining appends callee locals to caller locals and marks inlined bodies with `HKind::Inlined`.
 //! Immutable local arguments replace parameter bindings directly.
 
@@ -13,7 +16,7 @@ use crate::check::budget::CompileBudget;
 use crate::check::persist::PMap;
 use crate::check::{CheckedProgram, FnKind};
 use crate::hir::*;
-use crate::types::{FnId, Symbol, TypeId};
+use crate::types::{FnId, TypeId};
 use std::sync::Arc;
 
 /// Bodies of at most this many expression nodes are inlined.
@@ -98,11 +101,7 @@ impl Cx<'_> {
             }),
         }
         let HKind::Call { func, args, .. } = &e.kind else { return };
-        // A call with named arguments out of order reads locals that an
-        // earlier argument declares, which parameter bindings cannot keep.
-        let hoisted =
-            |a: &HArg| matches!(a, HArg::Expr(HExpr { kind: HKind::Local(l), .. }) if self.locals[*l as usize].name == Symbol::TMP);
-        if depth >= MAX_DEPTH || args.iter().any(|a| !matches!(a, HArg::Expr(_)) || hoisted(a)) {
+        if depth >= MAX_DEPTH || args.iter().any(|a| !matches!(a, HArg::Expr(_))) {
             return;
         }
         let func = *func;
@@ -118,6 +117,23 @@ impl Cx<'_> {
         let mut items = Vec::new();
         for (&p, a) in callee.params.iter().zip(args) {
             let HArg::Expr(a) = a else { unreachable!() };
+            // A call with named arguments out of order declares them in the
+            // block of an earlier argument, and later arguments read them. The
+            // declarations move to the inlined block, which encloses every
+            // binding and the body.
+            let a = match a.kind {
+                HKind::Block(stmts)
+                    if stmts
+                        .split_last()
+                        .is_some_and(|(value, lets)| !matches!(value.kind, HKind::Let { .. }) && lets.iter().all(is_plain_let)) =>
+                {
+                    let mut stmts = stmts;
+                    let value = stmts.pop().expect("a block with a value");
+                    items.extend(stmts);
+                    value
+                }
+                kind => HExpr { kind, ..a },
+            };
             match a.kind {
                 HKind::Local(l)
                     if !self.locals[l as usize].mutable && !self.locals[l as usize].cell && !callee.locals[p as usize].mutable =>
@@ -143,6 +159,11 @@ impl Cx<'_> {
         e.kind = HKind::Block(items);
         self.changed = true;
     }
+}
+
+/// Returns `true` if `e` is a `let` without `else`.
+fn is_plain_let(e: &HExpr) -> bool {
+    matches!(e.kind, HKind::Let { else_: None, .. })
 }
 
 /// Renames the locals of an inlined body.
