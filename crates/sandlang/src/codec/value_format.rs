@@ -38,18 +38,21 @@ pub(crate) struct ValueEncoder {
     /// Bytes of Rust memory that the value holds.
     allocated: usize,
     budget: Budget,
-    /// The number of open containers that count as nesting levels.
-    depth: usize,
-    /// For each open container, whether it counts as a nesting level.
-    counted: Vec<bool>,
-    /// The lengths of `stack` and `counted`, the depth, and the allocated
-    /// bytes that `save` kept.
-    saved: Option<(usize, usize, usize, usize)>,
+    /// The state that [`EncodeFormat::save`] kept.
+    saved: Option<EncoderMark>,
+}
+
+/// The state of a [`ValueEncoder`] before a value.
+#[derive(Clone, Copy)]
+struct EncoderMark {
+    /// The open containers.
+    open: usize,
+    allocated: usize,
 }
 
 impl ValueEncoder {
     pub(crate) fn new() -> ValueEncoder {
-        ValueEncoder { root: None, stack: Vec::new(), allocated: 0, budget: Budget::default(), depth: 0, counted: Vec::new(), saved: None }
+        ValueEncoder { root: None, stack: Vec::new(), allocated: 0, budget: Budget::default(), saved: None }
     }
 
     /// Returns the finished value, or `None` if a container is open or no
@@ -113,12 +116,10 @@ impl ValueEncoder {
         Ok(())
     }
 
-    fn open(&mut self, partial: Partial, counts: bool) -> Result<(), Fail> {
-        if counts && self.depth >= MAX_NESTING_DEPTH {
+    fn open(&mut self, partial: Partial) -> Result<(), Fail> {
+        if self.stack.len() >= MAX_NESTING_DEPTH {
             return fail("limit", "value too deeply nested to copy");
         }
-        self.depth += usize::from(counts);
-        self.counted.push(counts);
         self.stack.push(partial);
         Ok(())
     }
@@ -135,6 +136,38 @@ impl ValueEncoder {
             None => internal("encode: unknown variant"),
         }
     }
+}
+
+/// Returns the bytes of Rust memory that a copy of `value` holds besides the
+/// `Value` itself.
+fn owned_size(value: &Value) -> usize {
+    let mut size = 0;
+    let mut todo = vec![value];
+    while let Some(v) = todo.pop() {
+        size += match v {
+            Value::Str(s) => s.len(),
+            Value::Bytes(b) => b.len(),
+            Value::Native(n) => size_of::<NativeValue>() + n.text.len(),
+            Value::List(items) | Value::Tuple(items) | Value::Set(items) => {
+                todo.extend(items);
+                items.len() * size_of::<Value>()
+            }
+            Value::Map(entries) => {
+                todo.extend(entries.iter().flat_map(|(k, v)| [k, v]));
+                entries.len() * size_of::<(Value, Value)>()
+            }
+            Value::Struct(s) => {
+                todo.extend(&s.fields[..]);
+                s.fields.len() * size_of::<Value>()
+            }
+            Value::Variant(v) => {
+                todo.extend(&v.payload[..]);
+                v.payload.len() * size_of::<Value>()
+            }
+            _ => 0,
+        };
+    }
+    size
 }
 
 /// A container that [`ValueEncoder::build`] is copying, with its next part.
@@ -196,7 +229,7 @@ impl ValueEncoder {
         vm.charge(1)?;
         match self.build_part(vm, &prog, &mut values, value, schema)? {
             Ok(copy) => return Ok(copy),
-            Err(_) if self.depth >= MAX_NESTING_DEPTH => return fail("limit", "value too deeply nested to copy"),
+            Err(_) if self.stack.len() >= MAX_NESTING_DEPTH => return fail("limit", "value too deeply nested to copy"),
             Err(frame) => stack.push(frame),
         }
         loop {
@@ -240,7 +273,7 @@ impl ValueEncoder {
                     match self.build_part(vm, &prog, &mut values, v, s)? {
                         Ok(copy) => copy,
                         Err(frame) => {
-                            if self.depth + stack.len() >= MAX_NESTING_DEPTH {
+                            if self.stack.len() + stack.len() >= MAX_NESTING_DEPTH {
                                 return fail("limit", "value too deeply nested to copy");
                             }
                             stack.push(frame);
@@ -437,13 +470,13 @@ impl EncodeFormat for ValueEncoder {
             SeqKind::Set => Partial::Set(Vec::with_capacity(len)),
             SeqKind::Tuple(_) => Partial::Tuple(Vec::with_capacity(len)),
         };
-        self.open(partial, true)
+        self.open(partial)
     }
 
     fn begin_map(&mut self, vm: &mut Vm, len: usize) -> Result<(), Fail> {
         let len = len.min(1 << 16);
         self.reserve(vm, len * size_of::<(Value, Value)>())?;
-        self.open(Partial::Map(Vec::with_capacity(len), false), true)
+        self.open(Partial::Map(Vec::with_capacity(len), false))
     }
 
     fn begin_struct(&mut self, vm: &mut Vm, def: u32) -> Result<(), Fail> {
@@ -451,7 +484,7 @@ impl EncodeFormat for ValueEncoder {
         let desc = t.desc().clone();
         let n = desc.fields.len();
         self.reserve(vm, n * size_of::<Value>())?;
-        self.open(Partial::Struct(desc, Vec::with_capacity(n)), true)
+        self.open(Partial::Struct(desc, Vec::with_capacity(n)))
     }
 
     fn field(&mut self, _: &mut Vm, _: usize) -> Result<(), Fail> {
@@ -465,12 +498,12 @@ impl EncodeFormat for ValueEncoder {
 
     fn begin_variant(&mut self, vm: &mut Vm, variant: u32) -> Result<(), Fail> {
         let desc = Self::variant_desc(vm, variant)?;
-        self.open(Partial::Variant(desc, Vec::new()), true)
+        self.open(Partial::Variant(desc, Vec::new()))
     }
 
     fn begin_some(&mut self, vm: &mut Vm) -> Result<(), Fail> {
         let desc = Self::variant_desc(vm, vm.prog.ids.some)?;
-        self.open(Partial::Variant(desc, Vec::with_capacity(1)), true)
+        self.open(Partial::Variant(desc, Vec::with_capacity(1)))
     }
 
     fn none(&mut self, vm: &mut Vm) -> Result<(), Fail> {
@@ -485,7 +518,6 @@ impl EncodeFormat for ValueEncoder {
             self.prepare(vm, at)?;
         }
         let Some(top) = self.stack.pop() else { return internal("encode: no open value") };
-        self.depth -= usize::from(self.counted.pop().unwrap_or(false));
         let v = match top {
             Partial::List(items) => Value::List(items),
             Partial::Tuple(items) => Value::Tuple(items),
@@ -507,6 +539,7 @@ impl EncodeFormat for ValueEncoder {
     }
 
     fn value(&mut self, vm: &mut Vm, value: &Value) -> Result<(), Fail> {
+        self.reserve(vm, owned_size(value))?;
         self.push(vm, value.clone())
     }
 
@@ -520,16 +553,15 @@ impl EncodeFormat for ValueEncoder {
     }
 
     fn save(&mut self) {
-        self.saved = Some((self.stack.len(), self.counted.len(), self.depth, self.allocated));
+        self.saved = Some(EncoderMark { open: self.stack.len(), allocated: self.allocated });
     }
 
     // A failed write changes only the containers that it opened: it places
     // its value in the container below only when the value ends.
     fn restore(&mut self) {
-        let Some((stack, counted, depth, allocated)) = self.saved.take() else { return };
-        self.stack.truncate(stack);
-        self.counted.truncate(counted);
-        (self.depth, self.allocated) = (depth, allocated);
+        let Some(mark) = self.saved.take() else { return };
+        self.stack.truncate(mark.open);
+        self.allocated = mark.allocated;
     }
 
     fn heap_size(&self) -> usize {

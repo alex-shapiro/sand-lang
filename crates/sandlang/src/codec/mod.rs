@@ -776,17 +776,24 @@ pub(crate) fn fast_schema<B>(vm: &Vm, dict: CodecDict<0, B>) -> Option<SchemaId>
 }
 
 /// Reads one whole value of the closed type with fast-path schema `schema`
-/// from `f`, and checks that no input follows. `f` belongs to this native
-/// call only, so a failed read needs no mark. A decode error gets its
-/// path.
-pub(crate) fn read_whole<F: DecodeFormat>(vm: &mut Vm, f: &mut F, schema: SchemaId) -> Result<Result<VmValue, core::Error>, Fail> {
-    let mut path = DecodePath::default();
-    let r = f.read_fast(vm, &mut path, schema).and_then(|v| f.finish(vm).map(|()| v));
-    vm.charge(f.take_input_fuel())?;
-    match r {
-        Ok(v) => Ok(Ok(v)),
-        Err(e) => e.into_error(|| path_text(vm, &path.0)).map(Err),
-    }
+/// from `f`, with the text of the `str` `input`, if any, lent to `f`, and
+/// checks that no input follows. `f` belongs to this native call only, so a
+/// failed read needs no mark. A decode error gets its path.
+pub(crate) fn read_whole<F: DecodeFormat>(
+    vm: &mut Vm,
+    f: &mut F,
+    input: Option<VmValue>,
+    schema: SchemaId,
+) -> Result<Result<VmValue, core::Error>, Fail> {
+    with_input(vm, input, f, |f, vm| {
+        let mut path = DecodePath::default();
+        let r = f.read_fast(vm, &mut path, schema).and_then(|v| f.finish(vm).map(|()| v));
+        vm.charge(f.take_input_fuel())?;
+        match r {
+            Ok(v) => Ok(Ok(v)),
+            Err(e) => e.into_error(|| path_text(vm, &path.0)).map(Err),
+        }
+    })?
 }
 
 /// Formats the path of the innermost part of `frames`, such as

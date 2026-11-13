@@ -1,14 +1,8 @@
 //! The fast path of `Decode` for JSON text: a read of a value with its
-//! [`Schema`] straight from the input of a [`TextDecoder`].
-//!
-//! The read handles valid input only. The general walker of
-//! [`crate::codec::fast`] reads each part that the read leaves to the format
-//! operations (`bytes`, `Range`, `Set`, native values, `Json`, map keys other
-//! than `str`), and then the read continues. At an error, the read returns
-//! [`Fallback::General`], and the general walker reads the whole value again
-//! from the same place. So errors, their paths, and the rare parts behave as
-//! on the general path, and the differential property test checks that the
-//! values are the same.
+//! [`Schema`] straight from the input of a [`TextDecoder`]. It gives the
+//! values, the errors, and the paths of the general walker of
+//! [`crate::codec::fast`], which reads each rare part, such as a `Set`, and
+//! the whole value after an error.
 
 use super::super::{Number, Parser};
 use super::TextDecoder;

@@ -380,8 +380,8 @@ impl<const N: u8> Encoded<N> {
         &self.0
     }
 
-    /// Returns the encoded value. It copies the value if the engine still
-    /// holds it.
+    /// Returns a copy of the encoded value. [`Encoded::value`] borrows it
+    /// without a copy.
     pub fn into_value(self) -> crate::value::Value {
         std::sync::Arc::unwrap_or_clone(self.0)
     }

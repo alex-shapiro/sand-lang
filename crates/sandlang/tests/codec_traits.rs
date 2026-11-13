@@ -293,6 +293,32 @@ fn a_custom_codec_gives_one_form_to_rust_and_sand() {
 }
 
 #[test]
+fn a_host_value_that_a_rust_encode_writes_counts_against_the_memory_limit() {
+    /// A block whose Rust `Encode` writes 32 MiB of text.
+    #[derive(Clone, Debug, PartialEq, sandlang::SandStruct)]
+    #[sand(module = "lab", no_value)]
+    pub struct Block {
+        pub size: i64,
+    }
+    impl Encode for Block {
+        fn encode(&self) -> Value {
+            Value::Str("x".repeat(self.size as usize))
+        }
+    }
+    impl Decode for Block {
+        fn decode(r: &mut ValueReader<'_>) -> Result<Block, DecodeError> {
+            let text: String = r.decode()?;
+            Ok(Block { size: text.len() as i64 })
+        }
+    }
+    let mut lab = NativeModule::new("lab");
+    lab.bind::<Block>().custom_codec::<Block>();
+    let src = "import host\nimport lab\nhost.keep(lab.Block(size: 32 * 1024 * 1024))\n";
+    let (r, _) = run(vec![host_module(Arc::default(), Vec::new()), lab], Limits { max_memory: Some(16 << 20), ..Limits::default() }, src);
+    assert!(matches!(r, Err(Error::Limit(sandlang::engine::LimitKind::Memory))), "{r:?}");
+}
+
+#[test]
 fn a_hand_written_sand_codec_cannot_change_a_derived_rust_form() {
     /// A probe whose Rust `Encode` and `Decode` are derived.
     #[derive(Clone, Debug, PartialEq, sandlang::SandStruct)]

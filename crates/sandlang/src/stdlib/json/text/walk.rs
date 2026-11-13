@@ -1,11 +1,6 @@
 //! The fast path of `Encode` for JSON text: a walk of a value with its
-//! [`Schema`] that writes the text of a [`TextEncoder`] directly.
-//!
-//! The general walker of [`crate::codec::fast`] calls the operations of
-//! `TextEncoder`, and each operation finds its place in the text again from
-//! the encoder's bracket stack. This walk knows the place from its own
-//! frames. The differential property test checks that both write the same
-//! text.
+//! [`Schema`] that writes the text of a [`TextEncoder`] directly. It writes
+//! the text of the general walker of [`crate::codec::fast`].
 
 use super::{Bracket, JsonIds, Open, TextEncoder, write_str};
 use crate::codec::fast::{self, OPEN_FRAMES, OPEN_VALUES, Schema, SchemaId};

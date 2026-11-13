@@ -4,8 +4,7 @@ use super::base64;
 use crate::check::ModKind;
 use crate::codec::MAX_NESTING_DEPTH;
 use crate::codec::{
-    DecodeDict, Decoder, EncodeDict, EncodeFormat, EncodeStep, Encoder, fast_schema, read_json, read_whole, with_encoder, with_input,
-    write_whole,
+    DecodeDict, Decoder, EncodeDict, EncodeFormat, EncodeStep, Encoder, fast_schema, read_json, read_whole, with_encoder, write_whole,
 };
 use crate::native::convert::{Conversion, FromVmValue, HostError, IntoVmValue, mismatch};
 use crate::native::ty::{Param, VmVal};
@@ -26,8 +25,9 @@ mod input;
 mod text;
 mod tree;
 
-use text::{TextDecoder, TextEncoder, TreeEncoder};
+use text::{TextDecoder, TextEncoder};
 use tree::TreeDecoder;
+use tree::TreeEncoder;
 
 const NODE_BYTES: usize = 64;
 
@@ -189,7 +189,7 @@ pub(crate) fn module() -> NativeModule {
             d.push_value(vm, text.raw())?;
             return Ok(Decoding::Driven(d));
         };
-        Ok(Decoding::of(with_input(vm, Some(text.raw()), &mut f, |f, vm| read_whole(vm, f, schema))??))
+        Ok(Decoding::of(read_whole(vm, &mut f, Some(text.raw()), schema)?))
     });
     m.function("decode_json", |vm: &mut Vm, decode: DecodeDict, json: VmVal<Json>| -> Result<Decoding<Param<0>>, Fail> {
         let Some(schema) = fast_schema(vm, decode) else {
@@ -198,7 +198,7 @@ pub(crate) fn module() -> NativeModule {
             return Ok(Decoding::Driven(d));
         };
         let mut f = TreeDecoder::new(vm, Some(json.raw()))?;
-        let r = read_whole(vm, &mut f, schema);
+        let r = read_whole(vm, &mut f, None, schema);
         f.release_values(vm);
         Ok(Decoding::of(r?))
     });
