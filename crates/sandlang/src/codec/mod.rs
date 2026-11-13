@@ -14,6 +14,7 @@
 
 pub(crate) mod fast;
 pub(crate) mod value_format;
+pub(crate) mod value_input;
 
 use crate::native::convert::HostError;
 use crate::native::ty::{CodecDict, Param, VmVal};
@@ -240,12 +241,22 @@ pub(crate) trait DecodeFormat: Any + Send {
     fn take_input_fuel(&mut self) -> u64 {
         0
     }
-    /// Keeps the state of the format before a value, for
-    /// [`DecodeFormat::restore`].
-    fn save(&mut self);
-    /// Returns to the state that [`DecodeFormat::save`] kept, after a read
-    /// of one value failed before it ended, so that the read can run again.
-    fn restore(&mut self);
+    /// Keeps the state of the format before a value, and returns the index
+    /// of the mark for [`DecodeFormat::rewind`].
+    fn mark(&mut self) -> usize;
+    /// Returns to the state of mark `mark`, after a read failed before it
+    /// ended, so that the read can run again. The mark stays.
+    fn rewind(&mut self, mark: usize);
+    /// Forgets mark `mark` and the marks after it.
+    fn release(&mut self, mark: usize);
+    /// Returns `true` if the format keeps Sand values, so that the
+    /// `Decoder` lends it its values ([`DecodeFormat::swap_values`]).
+    fn keeps_values(&self) -> bool {
+        false
+    }
+    /// Swaps the Sand values that the format keeps with `values`, as
+    /// [`EncodeFormat::swap_values`] does.
+    fn swap_values(&mut self, _values: &mut ObjectValues) {}
     /// The message for a tuple or positional payload without `len` elements.
     fn length_mismatch(&self, len: usize) -> String {
         format!("expected array of length {len}")
@@ -460,15 +471,25 @@ fn with_decoder<R>(
     };
     let Some(mut format) = obj.format.take() else { return Err(Fail::internal("the decoder is in use").into()) };
     let mut path = std::mem::take(&mut obj.path);
-    // The input `str` lends its text to the format for this call (see
-    // `with_input`).
-    if let Some(text) = input.and_then(|input| vm.heap.str_text_mut(input)) {
-        format.swap_input(text);
-    }
-    let r = op(&mut *format, &mut path, vm);
-    if let Some(text) = input.and_then(|input| vm.heap.str_text_mut(input)) {
-        format.swap_input(text);
-    }
+    let r = if format.keeps_values() {
+        let mut values = vm.heap.take_native_values::<Decoder>(d.raw()).unwrap_or_default();
+        format.swap_values(&mut values);
+        let r = op(&mut *format, &mut path, vm);
+        format.swap_values(&mut values);
+        vm.heap.put_native_values::<Decoder>(d.raw(), values);
+        r
+    } else {
+        // The input `str` lends its text to the format for this call (see
+        // `with_input`).
+        if let Some(text) = input.and_then(|input| vm.heap.str_text_mut(input)) {
+            format.swap_input(text);
+        }
+        let r = op(&mut *format, &mut path, vm);
+        if let Some(text) = input.and_then(|input| vm.heap.str_text_mut(input)) {
+            format.swap_input(text);
+        }
+        r
+    };
     let r = match vm.charge(format.take_input_fuel()) {
         Ok(()) => r,
         Err(fail) => Err(fail.into()),
@@ -949,13 +970,14 @@ impl VmVal<Decoder> {
     /// Reads a host value in the data model of the format.
     pub fn read_value(self, vm: &mut Vm) -> Result<Value, HostError> {
         read_part(vm, self, |f, _, vm| {
-            f.save();
+            let mark = f.mark();
             let r = f.value(vm);
             if let Err(DecodeFail::Fail(fail)) = &r
                 && fail.as_limit().is_some()
             {
-                f.restore();
+                f.rewind(mark);
             }
+            f.release(mark);
             r
         })
     }

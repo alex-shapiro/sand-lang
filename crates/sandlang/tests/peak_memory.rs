@@ -50,6 +50,11 @@ const PROGRAMS: &[(&str, &str)] = &[
          let keep = []\nwhile true {\n    let r: Result<[P]> = json.decode(text)\n    keep.push(r)\n}",
     ),
     (
+        "decoded Json values",
+        "import json\nlet items: [json.Json] = []\nfor i in 0..300000 { items.push(json.Json.Str(\"abcdefghijklmnopqrstuvwxyz0123456789\")) }\n\
+         let j = json.Json.Arr(items)\nlet keep = []\nwhile true {\n    let r: Result<[str]> = json.from_json(j)\n    keep.push(r)\n}",
+    ),
+    (
         "decoded constant defaults",
         "import json\nstruct P { a: int = 1, b: int = 2 }\nlet text = \"[\" + \"{},\".repeat(100000) + \"{}]\"\n\
          let keep = []\nwhile true {\n    let r: Result<[P]> = json.decode(text)\n    keep.push(r)\n}",

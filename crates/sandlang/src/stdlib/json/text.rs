@@ -524,7 +524,7 @@ enum KeyText {
     Owned(String),
 }
 
-/// The state of a [`TextDecoder`] that [`DecodeFormat::save`] keeps.
+/// The state of a [`TextDecoder`] that [`DecodeFormat::mark`] keeps.
 #[derive(Clone)]
 struct DecoderState {
     pos: usize,
@@ -547,14 +547,22 @@ pub(crate) struct TextDecoder {
     open: Vec<Container>,
     /// The key of the map entry that the next operations read.
     key: Option<KeyText>,
-    saved: Option<DecoderState>,
+    marks: Vec<DecoderState>,
 }
 
 impl TextDecoder {
     /// Returns a decoder at the start of the input that
     /// [`DecodeFormat::swap_input`] lends to it.
     pub(crate) fn new() -> TextDecoder {
-        TextDecoder { text: CompactString::default(), pos: 0, depth: 0, charged: 0, open: Vec::with_capacity(16), key: None, saved: None }
+        TextDecoder {
+            text: CompactString::default(),
+            pos: 0,
+            depth: 0,
+            charged: 0,
+            open: Vec::with_capacity(16),
+            key: None,
+            marks: Vec::new(),
+        }
     }
 
     /// Runs `f` on a parser at the current position. On an error, the
@@ -978,22 +986,28 @@ impl DecodeFormat for TextDecoder {
         (read / SLOW_BYTES_PER_UNIT) as u64
     }
 
-    fn save(&mut self) {
+    fn mark(&mut self) -> usize {
         let (pos, depth, charged, open, top) = (self.pos, self.depth, self.charged, self.open.len(), self.open.last().copied());
-        self.saved = Some(DecoderState { pos, depth, charged, open, top, key: self.key.clone() });
+        self.marks.push(DecoderState { pos, depth, charged, open, top, key: self.key.clone() });
+        self.marks.len() - 1
     }
 
-    fn restore(&mut self) {
-        let Some(s) = self.saved.take() else { return };
+    fn rewind(&mut self, mark: usize) {
+        let Some(s) = self.marks.get(mark) else { return };
         self.open.truncate(s.open);
         if let (Some(top), Some(last)) = (s.top, self.open.last_mut()) {
             *last = top;
         }
-        (self.pos, self.depth, self.charged, self.key) = (s.pos, s.depth, s.charged, s.key);
+        (self.pos, self.depth, self.charged) = (s.pos, s.depth, s.charged);
+        self.key.clone_from(&s.key);
+    }
+
+    fn release(&mut self, mark: usize) {
+        self.marks.truncate(mark);
     }
 
     fn heap_size(&self) -> usize {
-        self.open.capacity() * size_of::<Container>()
+        self.open.capacity() * size_of::<Container>() + self.marks.capacity() * size_of::<DecoderState>()
     }
 
     fn swap_input(&mut self, text: &mut CompactString) {

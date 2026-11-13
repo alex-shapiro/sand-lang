@@ -3,7 +3,6 @@
 use super::base64;
 use crate::check::ModKind;
 use crate::codec::MAX_NESTING_DEPTH;
-use crate::codec::value_format::ValueDecoder;
 use crate::codec::{
     DecodeDict, Decoder, EncodeDict, EncodeFormat, Encoder, fast_schema, read_json, read_whole, with_encoder, with_input, write_whole,
 };
@@ -23,8 +22,10 @@ use std::borrow::Cow;
 use std::fmt::Write;
 
 mod text;
+mod tree;
 
 use text::{TextDecoder, TextEncoder, TreeEncoder};
+use tree::TreeDecoder;
 
 const NODE_BYTES: usize = 64;
 
@@ -54,9 +55,17 @@ pub enum Json {
     Obj(indexmap::IndexMap<String, Json>),
 }
 
+/// The host descriptors of the variants of `Json`.
+static VARIANT_DESCS: [VariantDescCell; Json::VARIANTS.len()] = [const { VariantDescCell::new() }; Json::VARIANTS.len()];
+
+/// Returns the host value of the `Json` variant with index `index` and
+/// `payload`.
+fn json_variant(index: usize, payload: Option<Value>) -> Value {
+    encode_variant::<Json>(&VARIANT_DESCS, index, payload)
+}
+
 impl Encode for Json {
     fn encode(&self) -> Value {
-        static VARIANT_DESCS: [VariantDescCell; Json::VARIANTS.len()] = [const { VariantDescCell::new() }; Json::VARIANTS.len()];
         let payload = match self {
             Json::Null => None,
             Json::Bool(b) => Some(b.encode()),
@@ -66,7 +75,7 @@ impl Encode for Json {
             Json::Arr(items) => Some(items.encode()),
             Json::Obj(members) => Some(members.encode()),
         };
-        encode_variant::<Json>(&VARIANT_DESCS, self.index(), payload)
+        json_variant(self.index(), payload)
     }
 }
 
@@ -176,10 +185,16 @@ pub(crate) fn module() -> NativeModule {
         };
         Ok(Decoding::of(with_input(vm, Some(text.raw()), &mut f, |f, vm| read_whole(vm, f, schema))??))
     });
-    m.function("decode_json", |vm: &mut Vm, decode: DecodeDict, json: Json| -> Result<Decoding<Param<0>>, Fail> {
-        let mut f = ValueDecoder::new(text::json_value(&json));
-        let Some(schema) = fast_schema(vm, decode) else { return vm.new_object(Decoder::new(Box::new(f))).map(Decoding::Driven) };
-        Ok(Decoding::of(read_whole(vm, &mut f, schema)?))
+    m.function("decode_json", |vm: &mut Vm, decode: DecodeDict, json: VmVal<Json>| -> Result<Decoding<Param<0>>, Fail> {
+        let Some(schema) = fast_schema(vm, decode) else {
+            let d = vm.new_object(Decoder::new(Box::new(TreeDecoder::new(vm, None)?)))?;
+            d.push_value(vm, json.raw())?;
+            return Ok(Decoding::Driven(d));
+        };
+        let mut f = TreeDecoder::new(vm, Some(json.raw()))?;
+        let r = read_whole(vm, &mut f, schema);
+        f.release_values(vm);
+        Ok(Decoding::of(r?))
     });
     m.function("Json.encode", |vm: &mut Vm, json: VmVal<Json>, e: VmVal<Encoder>| write_whole(vm, e, |f, vm| f.json(vm, json.raw())));
     m.function("Json.decode", |vm: &mut Vm, d: VmVal<Decoder>| -> Result<VmVal<Json>, HostError> { read_json(vm, d).map(VmVal::from_raw) });
@@ -217,6 +232,92 @@ impl Decoding<Param<0>> {
 /// Converts the Sand `Json` value `v` into a Rust [`Json`].
 pub(crate) fn json_from_vm(vm: &Vm, v: VmValue) -> Result<Json, Fail> {
     Json::from_vm_value(vm, v, &mut Conversion::new())
+}
+
+/// Copies the Sand `Json` value `root` to the host value that
+/// [`Json::encode`] gives. `count` counts the bytes of each part of the copy
+/// against the memory limit before the part exists.
+pub(crate) fn json_host_value(
+    vm: &mut Vm,
+    root: VmValue,
+    count: &mut dyn FnMut(&mut Vm, usize) -> Result<(), Fail>,
+) -> Result<Value, Fail> {
+    /// An open array or object, the index of its next element or entry,
+    /// its finished parts, and the key of the entry being copied.
+    enum Open {
+        Arr(VmValue, usize, Vec<Value>),
+        Obj(VmValue, usize, Vec<(Value, Value)>, Option<Value>),
+    }
+    let ids = JsonIds::new(&vm.prog)?;
+    let index = |id: u32| (id - ids.null) as usize;
+    let mut stack: Vec<Open> = Vec::new();
+    let mut node = root;
+    loop {
+        vm.charge(1)?;
+        let id = vm.heap.variant_id(node);
+        count(vm, 2 * size_of::<Value>())?;
+        let mut done = match vm.heap.field(node, 0) {
+            _ if id == ids.null => Some(json_variant(index(id), None)),
+            Some(VmValue::Bool(b)) if id == ids.bool_ => Some(json_variant(index(id), Some(Value::Bool(b)))),
+            Some(VmValue::Int(i)) if id == ids.int => Some(json_variant(index(id), Some(Value::Int(i)))),
+            Some(VmValue::Float(f)) if id == ids.float => Some(json_variant(index(id), Some(Value::Float(f)))),
+            Some(p) if id == ids.str_ => {
+                let len = vm.heap.str(p).len();
+                vm.charge_bytes(len)?;
+                count(vm, len)?;
+                Some(json_variant(index(id), Some(Value::Str(vm.heap.str(p).to_string()))))
+            }
+            Some(p) if id == ids.arr => {
+                let len = vm.heap.list(p).len();
+                count(vm, len * size_of::<Value>())?;
+                stack.push(Open::Arr(p, 0, Vec::with_capacity(len)));
+                None
+            }
+            Some(p) if id == ids.obj => {
+                let Obj::Map(m) = vm.heap.get(p) else { return internal("json: not an object") };
+                let len = m.live;
+                count(vm, len * size_of::<(Value, Value)>())?;
+                stack.push(Open::Obj(p, 0, Vec::with_capacity(len), None));
+                None
+            }
+            _ => return internal("json: not a Json value"),
+        };
+        if stack.len() > MAX_NESTING_DEPTH {
+            return fail("limit", "value too deeply nested to copy");
+        }
+        node = loop {
+            match stack.last_mut() {
+                None => return done.ok_or_else(missing_root_error),
+                Some(Open::Arr(list, i, items)) => {
+                    items.extend(done.take());
+                    if let Some(&x) = vm.heap.list(*list).get(*i) {
+                        *i += 1;
+                        break x;
+                    }
+                }
+                Some(Open::Obj(map, i, entries, key)) => {
+                    if let (Some(k), Some(v)) = (key.take(), done.take()) {
+                        entries.push((k, v));
+                    }
+                    let Obj::Map(m) = vm.heap.get(*map) else { return internal("json: not an object") };
+                    let next = m.entries.get(*i..).and_then(|rest| rest.iter().enumerate().find_map(|(k, e)| Some((k, (*e)?))));
+                    if let Some((k, (key_str, x))) = next {
+                        *i += k + 1;
+                        let text = vm.heap.str(key_str).to_string();
+                        vm.charge_bytes(text.len())?;
+                        count(vm, text.len())?;
+                        *key = Some(Value::Str(text));
+                        break x;
+                    }
+                }
+            }
+            done = Some(match stack.pop() {
+                Some(Open::Arr(.., items)) => json_variant(index(ids.arr), Some(Value::List(items))),
+                Some(Open::Obj(_, _, entries, _)) => json_variant(index(ids.obj), Some(Value::Map(entries))),
+                None => return internal("json: no open value"),
+            });
+        };
+    }
 }
 
 /// Converts `json` into a Sand `Json` value.

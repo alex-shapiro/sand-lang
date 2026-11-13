@@ -1218,9 +1218,9 @@ span: "P1MT23H"
 Json scalars: [null,true,3,2.5,"x"]
     encode 11, indent 11 for 37 bytes, to_json 11, Json parameter 11, Encoded 11
 Json array and object: {"a":[1,null,{"b":{}}],"c":"s"}
-    encode 8, indent 8 for 71 bytes, to_json 8, Json parameter 13, Encoded 14
+    encode 8, indent 8 for 71 bytes, to_json 8, Json parameter 13, Encoded 8
 struct with Json fields: {"json":[null],"maybe":1}
-    encode 7, indent 7 for 42 bytes, to_json 7, Json parameter 7, Encoded 8
+    encode 7, indent 7 for 42 bytes, to_json 7, Json parameter 7, Encoded 7
 list of structs: [{"id":1,"note":"gift","tags":["a","b"]},{"id":2,"note":null,"tags":[]}]
     encode 12, indent 12 for 140 bytes, to_json 12, Json parameter 21, Encoded 12
 {

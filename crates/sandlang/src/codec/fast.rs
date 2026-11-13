@@ -316,7 +316,7 @@ fn prog_schema(prog: &Program, id: SchemaId) -> Result<&Schema, Fail> {
 /// open containers of the decoder before the walk; the walk adds its own if
 /// it fails.
 pub(super) fn decode<F: DecodeFormat + ?Sized>(vm: &mut Vm, f: &mut F, path: &mut Vec<Frame>, schema: SchemaId) -> DecodeResult<VmValue> {
-    f.save();
+    let mark = f.mark();
     let prog = vm.prog.clone();
     let mut w = DecodeWalk {
         prog: &prog,
@@ -327,9 +327,10 @@ pub(super) fn decode<F: DecodeFormat + ?Sized>(vm: &mut Vm, f: &mut F, path: &mu
     let r = w.run(vm, f, path, schema);
     match &r {
         Ok(_) => {}
-        Err(DecodeFail::Fail(fail)) if fail.as_limit().is_some() => f.restore(),
+        Err(DecodeFail::Fail(fail)) if fail.as_limit().is_some() => f.rewind(mark),
         Err(_) => w.extend_path(path),
     }
+    f.release(mark);
     r
 }
 
