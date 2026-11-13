@@ -205,6 +205,21 @@ fn a_later_input_cannot_add_init() {
 }
 
 #[test]
+fn a_cell_after_a_failed_cell_decodes_its_own_types() {
+    let mut r = Repl::new();
+    r.ok("import json\nstruct A { x: int, y: str }\nstruct B { p: [int], q: bool }");
+    // Code generation fails after the checker made the schema of `B`.
+    let mut failed = String::from("let b: Result<B> = json.decode(\"{}\")\nfn f(n: int) -> int {\n");
+    for i in 0..1500 {
+        failed.push_str(&format!("    defer print(\"{i}\")\n    if n == {i} {{ return {i} }}\n"));
+    }
+    failed.push_str("    0\n}");
+    assert!(r.compile_error(&failed).contains("too much deferred code"));
+    r.ok("let a: Result<A> = json.decode(\"{\\\"p\\\": [7], \\\"q\\\": true}\")");
+    assert_eq!(r.value("a"), "Err(Error(message: \"$: missing field `x`\", kind: \"parse\"))");
+}
+
+#[test]
 fn decode_dictionaries_from_type_parameters_across_inputs() {
     let mut r = Repl::new();
     r.ok(r#"import json

@@ -47,11 +47,6 @@ The host cannot rely on engine limits, stability, or control.
       that stops only at those fields measured 1.8 times in design C (E11 on
       branch `codec-traits-a`), before native objects could keep VM values.
       See `experiments/codec-traits/README.md`.
-- [ ] ❓ _Embedding._ Truncate `Program::schemas` in `ProgramMark::rollback`.
-      Codegen appends the fast-path schemas of the checker from the length of
-      the program's table, and a rollback does not remove the schemas of a
-      failed input. In a session, a failed input that added schemas could
-      shift the schemas of the next input. Not reproduced yet.
 - [ ] ❓ _Embedding._ Add a rooted handle that keeps a script value alive
       across a wait. A native function cannot safely change an argument object
       or return an early allocation after a wait. `Vm::pinned` already holds

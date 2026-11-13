@@ -395,6 +395,9 @@ pub struct CheckedProgram {
     pub traits: PVec<TraitDef>,
     pub impls: PVec<ImplDef>,
     pub(crate) schemas: PVec<crate::codec::fast::Schema>,
+    /// The id of the first schema that an earlier compilation of the same
+    /// program does not have.
+    pub(crate) first_new_schema: usize,
 }
 
 impl CheckedProgram {
@@ -667,6 +670,8 @@ pub struct Checker {
     /// The schemas of the types that the native impls walk.
     pub(crate) schemas: PVec<crate::codec::fast::Schema>,
     pub(crate) schema_ids: PMap<TypeId, crate::codec::fast::SchemaId>,
+    /// The number of schemas that [`Checker::take_checked`] gave out before.
+    taken_schemas: usize,
 }
 
 const MAX_ERRORS: usize = 50;
@@ -731,6 +736,7 @@ impl Default for Checker {
             fast_impls: PMap::new(),
             schemas: PVec::new(),
             schema_ids: PMap::new(),
+            taken_schemas: 0,
         }
     }
 }
@@ -1086,6 +1092,7 @@ impl Checker {
             traits: self.traits.clone(),
             impls: self.impls.clone(),
             schemas: self.schemas.clone(),
+            first_new_schema: std::mem::replace(&mut self.taken_schemas, self.schemas.len()),
         }
     }
 

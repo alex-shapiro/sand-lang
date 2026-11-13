@@ -34,7 +34,7 @@
 mod common;
 
 use common::{StoppedClock, rt};
-use sandlang::engine::{Config, Engine, Error, HostModules, Limits, MemorySink};
+use sandlang::engine::{Config, Engine, Error, HostModules, Limits, MemorySink, Outcome};
 use sandlang::files::mem::MemFs;
 use sandlang::native::NativeModule;
 use sandlang::vm::Vm;
@@ -267,11 +267,14 @@ fn run_case(case: &Case, mode: Mode, backend: Backend) -> Result<(), String> {
     }
 
     let result = runtime.block_on(engine.run_file(&main));
-    let stdout = out.contents();
-    let stderr = err.contents();
+    check_run(case, &result, &out.contents(), &err.contents())
+}
 
+/// Checks the result and output of a run of `case` against its expectations.
+fn check_run(case: &Case, result: &Result<Outcome, Error>, stdout: &str, stderr: &str) -> Result<(), String> {
+    let get = |name: &str| case.sections.iter().find(|(h, _)| h == name).map(|(_, b)| b.clone());
     if let Some(expected) = get("error") {
-        let diags = match &result {
+        let diags = match result {
             Err(Error::Compile(d)) => d.clone(),
             Err(other) => return Err(format!("expected compile error, got: {other}")),
             Ok(_) => {
@@ -304,7 +307,7 @@ fn run_case(case: &Case, mode: Mode, backend: Backend) -> Result<(), String> {
     }
 
     if let Some(expected) = get("fail") {
-        match &result {
+        match result {
             Err(Error::Runtime { message, .. }) => {
                 if !message.contains(expected.trim()) {
                     return Err(format!("error message {message:?} does not contain {:?}", expected.trim()));
@@ -319,14 +322,14 @@ fn run_case(case: &Case, mode: Mode, backend: Backend) -> Result<(), String> {
         }
     } else if let Some(code) = case.sections.iter().find_map(|(h, _)| h.strip_prefix("exit ")) {
         let code: i32 = code.trim().parse().unwrap();
-        match &result {
+        match result {
             Ok(o) if o.exit_code == code => {}
             Ok(o) => return Err(format!("expected exit {code}, got {}", o.exit_code)),
             Err(e) => {
                 return Err(format!("expected exit {code}, got error: {e}\nstdout:\n{stdout}"));
             }
         }
-    } else if let Err(e) = &result {
+    } else if let Err(e) = result {
         return Err(format!("run failed: {e}\nstdout:\n{stdout}\nstderr:\n{stderr}"));
     }
 
@@ -396,22 +399,15 @@ fn output_with_fuel(case: &Case, mode: Mode) -> String {
 
 #[test]
 fn spec_cases_use_identical_fuel_under_gc_and_retry_stress() {
-    const UNSUPPORTED: [&str; 8] = ["error", "fmt", "lint", "test", "file", "stdin", "args", "env"];
     let dir = format!("{}/tests/spec", env!("CARGO_MANIFEST_DIR"));
     let mut failures = Vec::new();
     for entry in std::fs::read_dir(&dir).unwrap() {
         let path = entry.unwrap().path();
         let text = std::fs::read_to_string(&path).unwrap();
-        for case in parse_cases(&text) {
-            let is_plain_run = !case.sections.iter().any(|(header, _)| {
-                header.starts_with("requires") || UNSUPPORTED.iter().any(|name| header.split_whitespace().next() == Some(*name))
-            });
-            if !is_plain_run {
-                continue;
-            }
-            let plain = output_with_fuel(&case, Mode::Plain);
+        for case in parse_cases(&text).iter().filter(|case| is_plain_run(case)) {
+            let plain = output_with_fuel(case, Mode::Plain);
             for mode in [Mode::GcStress, Mode::RetryStress] {
-                let stressed = output_with_fuel(&case, mode);
+                let stressed = output_with_fuel(case, mode);
                 if plain != stressed {
                     failures.push(format!(
                         "[{}:{}] {}{}\nplain:\n{plain}stressed:\n{stressed}",
@@ -425,6 +421,56 @@ fn spec_cases_use_identical_fuel_under_gc_and_retry_stress() {
         }
     }
     assert!(failures.is_empty(), "{} runs differ:\n\n{}", failures.len(), failures.join("\n\n"));
+}
+
+/// Returns `true` if `case` is a plain run: a script without files, input,
+/// formatting, lint, or tests, and with no required features.
+fn is_plain_run(case: &Case) -> bool {
+    const UNSUPPORTED: [&str; 8] = ["error", "fmt", "lint", "test", "file", "stdin", "args", "env"];
+    !case
+        .sections
+        .iter()
+        .any(|(header, _)| header.starts_with("requires") || UNSUPPORTED.iter().any(|name| header.split_whitespace().next() == Some(*name)))
+}
+
+/// Runs every plain run and every compile error case in order on one
+/// engine, as a host that runs many scripts does. Each compilation then
+/// starts from the program of the one before.
+#[test]
+fn spec_cases_run_in_order_on_one_engine() {
+    let fs = MemFs::new();
+    fs.create_dir_all("/case").unwrap();
+    let (out, err) = (MemorySink::new(), MemorySink::new());
+    let config = Config::new()
+        .policy(sandlang::policy::rules::RulePolicy::allow_all())
+        .stdout(out.clone())
+        .stderr(err.clone())
+        .seed(42)
+        .cwd("/case")
+        .memory_fs(fs.clone());
+    let mut engine = Engine::new(config);
+    let runtime = rt();
+    let dir = format!("{}/tests/spec", env!("CARGO_MANIFEST_DIR"));
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).collect();
+    paths.sort();
+    let mut failures = Vec::new();
+    for path in paths {
+        let text = std::fs::read_to_string(&path).unwrap();
+        for case in parse_cases(&text) {
+            let compile_error = case.sections.iter().all(|(header, _)| header == "error");
+            if !is_plain_run(&case) && !compile_error {
+                continue;
+            }
+            fs.write("/case/main.sand", &case.source).unwrap();
+            out.clear();
+            err.clear();
+            let result = runtime.block_on(engine.run_file("/case/main.sand"));
+            if let Err(msg) = check_run(&case, &result, &out.contents(), &err.contents()) {
+                failures.push(format!("[{}:{}] {}\n{msg}", path.display(), case.line, case.name));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{} cases fail on a shared engine:\n\n{}", failures.len(), failures.join("\n\n"));
 }
 
 macro_rules! spec_files {

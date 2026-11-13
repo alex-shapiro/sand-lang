@@ -225,6 +225,17 @@ fn engine_can_run_multiple_sources_independently() {
 }
 
 #[test]
+fn scripts_on_one_engine_encode_their_own_types() {
+    let (mut engine, out, _) = engine_with(Config::new());
+    let rt = rt();
+    let first = "import json\nstruct A { x: int }\nprint(json.encode(A(x: 1)))";
+    let second = "import json\nstruct B { p: [int], q: bool }\nprint(json.encode(B(p: [2], q: true)))\nlet b: Result<B> = json.decode(\"{\\\"p\\\": [3], \\\"q\\\": false}\")\nprint(b)";
+    rt.block_on(engine.run_source("a.sand", first)).unwrap();
+    rt.block_on(engine.run_source("b.sand", second)).unwrap();
+    assert_eq!(out.contents(), "{\"x\":1}\n{\"p\":[2],\"q\":true}\nOk(B(p: [3], q: false))\n");
+}
+
+#[test]
 fn script_args_and_env_are_virtual() {
     let config = Config::new()
         .policy(sandlang::policy::rules::RulePolicy::allow_all())

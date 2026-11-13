@@ -1265,7 +1265,7 @@ pub(crate) fn field_index(names: &[String], index: &OnceLock<FxHashMap<String, u
 }
 
 /// Well-known runtime ids.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RtIds {
     pub some: u32,
     pub none: u32,

@@ -262,16 +262,20 @@ pub(crate) struct Incremental {
 }
 
 /// The sizes of a program's tables, to undo a failed [`compile_more`].
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ProgramMark {
     protos: usize,
     consts: usize,
     types: usize,
     variants: usize,
+    enum_types: usize,
+    struct_types: usize,
     templates: usize,
     switches: usize,
     tests: usize,
     nglobals: usize,
     files: usize,
+    schemas: usize,
     ids: RtIds,
 }
 
@@ -282,31 +286,57 @@ impl ProgramMark {
             consts: p.consts.len(),
             types: p.types.len(),
             variants: p.variants.len(),
+            enum_types: p.enum_types.len(),
+            struct_types: p.struct_types.len(),
             templates: p.templates.len(),
             switches: p.switches.len(),
             tests: p.tests.len(),
             nglobals: p.nglobals,
             files: p.files.len(),
+            schemas: p.schemas.len(),
             ids: p.ids,
         }
     }
 
     /// Truncates `p` to the marked sizes.
     pub(crate) fn rollback(&self, p: &mut Program) {
-        p.protos.truncate(self.protos);
-        p.proto_schemas.truncate(self.protos);
-        p.consts.truncate(self.consts);
-        p.types.truncate(self.types);
-        p.variants.truncate(self.variants);
-        p.enum_types.retain(|_, &mut first| first < self.variants as u32);
-        p.struct_types.retain(|_, &mut def| def < self.types as u32);
-        p.templates.truncate(self.templates);
-        p.switches.truncate(self.switches);
-        p.tests.truncate(self.tests);
-        p.nglobals = self.nglobals;
-        p.global_names.truncate(self.nglobals);
-        p.files.truncate(self.files);
-        p.ids = self.ids;
+        // Every table is named, so that a new table cannot be left out.
+        let Program {
+            protos,
+            consts,
+            nglobals,
+            global_names,
+            types,
+            variants,
+            enum_types,
+            struct_types,
+            ids,
+            entry: _,
+            tests,
+            files,
+            native_names: _,
+            native_argc: _,
+            templates,
+            switches,
+            schemas,
+            proto_schemas,
+        } = p;
+        protos.truncate(self.protos);
+        proto_schemas.truncate(self.protos);
+        consts.truncate(self.consts);
+        types.truncate(self.types);
+        variants.truncate(self.variants);
+        enum_types.retain(|_, &mut first| first < self.variants as u32);
+        struct_types.retain(|_, &mut def| def < self.types as u32);
+        templates.truncate(self.templates);
+        switches.truncate(self.switches);
+        tests.truncate(self.tests);
+        *nglobals = self.nglobals;
+        global_names.truncate(self.nglobals);
+        files.truncate(self.files);
+        schemas.truncate(self.schemas);
+        *ids = self.ids;
+        debug_assert_eq!(ProgramMark::of(p), *self, "a table of the program is not rolled back");
     }
 }
 
@@ -433,7 +463,10 @@ impl<'a> Compiler<'a> {
                 by_name: Default::default(),
             });
         }
-        self.prog.schemas.extend(cp.schemas.iter_from(self.prog.schemas.len()).cloned());
+        // Schema ids are the checker's, so the program must have the schemas
+        // of the earlier compilations and no more.
+        assert_eq!(self.prog.schemas.len(), cp.first_new_schema, "the program's schemas differ from the checker's");
+        self.prog.schemas.extend(cp.schemas.iter_from(cp.first_new_schema).cloned());
         let wk = cp.wk;
         let vid = |d: u32, n: &str| {
             let s = cp.syms.get(n);
