@@ -596,19 +596,21 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
         checks.push(assert_field_name(krate, &name, true));
         let (fty, doc) = (&f.ty, doc_expr(&f.attrs));
         let canonical = type_params.replace_self(krate, fty);
-        let read = quote! { #krate::native::decode_field::<#fty>(fields[#i], #name)? };
-        decodes.push(match &default {
-            None => quote! { #ident: #read },
+        let read = quote! { #krate::native::decode_field::<#fty>(fields.values[#i], #name)? };
+        let slot = syn::Ident::new(&format!("field_{i}"), ident.span());
+        let decode = match &default {
+            None => read,
             Some(value) => {
                 let value = value
                     .as_ref()
                     .map_or_else(|| quote!(<#fty as ::std::default::Default>::default()), |e| quote!(::std::convert::Into::into(#e)));
-                quote! { #ident: match fields[#i] {
+                quote! { match fields.values[#i] {
                     ::std::option::Option::None => #value,
                     ::std::option::Option::Some(_) => #read,
                 } }
             }
-        });
+        };
+        decodes.push((ident.clone(), slot, fty.clone(), decode));
         let default = match default {
             None => quote!(::std::option::Option::None),
             Some(value) => {
@@ -641,6 +643,11 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
     let ConversionGenerics { params, args, reflection_where, from_vm_value_where, into_vm_value_where, encode_where, decode_where } =
         ConversionGenerics::new(input, krate, &type_params);
     let count = fields.len();
+    let idents: Vec<_> = decodes.iter().map(|d| d.0.clone()).collect();
+    let slots: Vec<_> = decodes.iter().map(|d| d.1.clone()).collect();
+    let slot_types: Vec<_> = decodes.iter().map(|d| d.2.clone()).collect();
+    let arms: Vec<_> = (0..decodes.len()).collect();
+    let arm_values: Vec<_> = decodes.iter().map(|d| d.3.clone()).collect();
     let encode = (!attrs.no_value).then(|| {
         quote! {
             impl #params #krate::value::Encode for #ty #args #encode_where {
@@ -650,10 +657,20 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
                 }
             }
             impl #params #krate::value::Decode for #ty #args #decode_where {
-                #[allow(unused_variables)]
+                #[allow(unused_variables, unused_mut)]
                 fn decode(value: &#krate::value::Value) -> ::std::result::Result<Self, #krate::value::DecodeError> {
                     let fields = #krate::native::decode_struct_fields::<Self, #count>(value)?;
-                    ::std::result::Result::Ok(#ty { #(#decodes),* })
+                    #(let mut #slots: ::std::option::Option<#slot_types> = ::std::option::Option::None;)*
+                    // The fields decode in the order of the input, as the
+                    // Sand `Decoder` reads them, so that the first error is
+                    // the same.
+                    for i in fields.order {
+                        match i {
+                            #(#arms => #slots = ::std::option::Option::Some(#arm_values),)*
+                            _ => {}
+                        }
+                    }
+                    ::std::result::Result::Ok(#ty { #(#idents: #slots.ok_or_else(|| #krate::value::DecodeError::new("missing field"))?),* })
                 }
             }
         }

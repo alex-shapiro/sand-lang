@@ -218,24 +218,41 @@ pub fn encode_variant<T: EnumType>(variants: &[VariantDescCell], index: usize, p
     Value::Variant(VariantValue { variant: desc.clone(), payload: payload.into_iter().collect() })
 }
 
-/// Returns the module-qualified name of `T`, such as `shop.Order`.
-fn qualified_type_name<T: NamedType>() -> String {
-    qualified_name(qualified_name_module(T::MODULE), T::NAME)
+/// Returns the name of `T` in decode messages, such as `Order`, as the Sand
+/// `Decoder` writes it.
+fn message_type_name<T: NamedType>() -> String {
+    T::NAME.to_string()
+}
+
+/// The fields of a struct value, in the declaration order of its type.
+#[doc(hidden)]
+pub struct StructFields<'v, const N: usize> {
+    /// Each field, or `None` for each field that the value omits.
+    pub values: [Option<&'v Value>; N],
+    /// The indices of the fields in the order in which the value has them,
+    /// and then the omitted fields.
+    pub order: [usize; N],
 }
 
 /// Returns the fields of the struct value `value` in the declaration order of
-/// `T`, or `None` for each field that `value` omits.
+/// `T`.
 #[doc(hidden)]
-pub fn decode_struct_fields<'v, T: StructType, const N: usize>(value: &'v Value) -> Result<[Option<&'v Value>; N], DecodeError> {
-    let mut fields = [None; N];
+pub fn decode_struct_fields<'v, T: StructType, const N: usize>(value: &'v Value) -> Result<StructFields<'v, N>, DecodeError> {
+    let mut values = [None; N];
+    let mut order = [0; N];
+    let mut found = 0;
     let mut next = 0;
     let mut put = |name: &str, field: &'v Value| {
-        let found = match T::FIELDS.get(next) {
+        let index = match T::FIELDS.get(next) {
             Some(f) if f.name == name => Some(next),
             _ => T::FIELDS.iter().position(|f| f.name == name),
         };
-        if let Some(i) = found {
-            fields[i] = Some(field);
+        if let Some(i) = index {
+            if values[i].is_none() && found < N {
+                order[found] = i;
+                found += 1;
+            }
+            values[i] = Some(field);
             next = i + 1;
         }
     };
@@ -249,9 +266,15 @@ pub fn decode_struct_fields<'v, T: StructType, const N: usize>(value: &'v Value)
                 }
             }
         }
-        value => return Err(DecodeError::expected(&qualified_type_name::<T>(), value)),
+        value => return Err(DecodeError::expected(&message_type_name::<T>(), value)),
     }
-    Ok(fields)
+    for i in (0..N).filter(|&i| values[i].is_none()) {
+        if found < N {
+            order[found] = i;
+            found += 1;
+        }
+    }
+    Ok(StructFields { values, order })
 }
 
 /// Decodes the struct field `name` from `field`, or returns the value of an
@@ -315,21 +338,21 @@ pub fn decode_variant<T: EnumType>(value: &Value) -> Result<(usize, VariantPaylo
                 Value::Str(name) => (name.as_str(), Payload::Json(payload)),
                 key => return Err(DecodeError::expected("str key", key)),
             },
-            [] => return Err(DecodeError::new(format!("expected a variant of {}", qualified_type_name::<T>()))),
-            _ => return Err(DecodeError::new(format!("expected a single variant of {}", qualified_type_name::<T>()))),
+            [] => return Err(DecodeError::new(format!("expected a variant of {}", message_type_name::<T>()))),
+            _ => return Err(DecodeError::new(format!("expected a single variant of {}", message_type_name::<T>()))),
         },
-        value => return Err(DecodeError::expected(&qualified_type_name::<T>(), value)),
+        value => return Err(DecodeError::expected(&message_type_name::<T>(), value)),
     };
     let Some(index) = T::VARIANTS.iter().position(|v| v.name == name) else {
         let name = crate::stdlib::truncate(name, 64);
-        return Err(DecodeError::new(format!("unknown variant `{name}` of {}", qualified_type_name::<T>())));
+        return Err(DecodeError::new(format!("unknown variant `{name}` of {}", message_type_name::<T>())));
     };
     let variant = &T::VARIANTS[index];
     let named = variant.fields.first().is_some_and(|f| f.name.is_some());
     let fields = match payload {
         Payload::None if variant.fields.is_empty() => PayloadFields::Positional(&[]),
         Payload::None => {
-            return Err(DecodeError::new(format!("variant `{name}` of {} needs a payload", qualified_type_name::<T>())));
+            return Err(DecodeError::new(format!("variant `{name}` of {} needs a payload", message_type_name::<T>())));
         }
         Payload::Variant(v) => match &v.variant.fields {
             Some(names) if named => PayloadFields::Named(names, &v.payload),
@@ -337,8 +360,12 @@ pub fn decode_variant<T: EnumType>(value: &Value) -> Result<(usize, VariantPaylo
         },
         Payload::Json(payload) => match without_json_variant(payload) {
             Value::Map(entries) if named => PayloadFields::Entries(entries),
-            Value::List(items) => PayloadFields::Positional(items),
-            payload => return Err(DecodeError::expected(if named { "list or map" } else { "list" }, payload).in_key(variant.name)),
+            Value::List(items) | Value::Tuple(items) if !named => PayloadFields::Positional(items),
+            payload if named => return Err(DecodeError::expected("map", payload).in_key(variant.name)),
+            payload => {
+                let expected = format!("tuple of {} elements", variant.fields.len());
+                return Err(DecodeError::expected(&expected, payload).in_key(variant.name));
+            }
         },
     };
     if let PayloadFields::Positional(items) = fields

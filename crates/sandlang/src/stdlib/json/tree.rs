@@ -136,7 +136,7 @@ impl TreeDecoder {
     }
 
     /// Reads the current node with `read`.
-    fn read<T>(&mut self, vm: &mut Vm, read: impl FnOnce(InputNode<'_>, bool) -> DecodeResult<T>) -> DecodeResult<T> {
+    fn read<T>(&mut self, vm: &mut Vm, read: impl FnOnce(InputNode<'_>, bool) -> value_input::InputResult<T>) -> DecodeResult<T> {
         let node = self.node(vm)?;
         let (n, in_key) = self.input(vm, node);
         let r = read(n, in_key)?;
@@ -251,7 +251,7 @@ impl DecodeFormat for TreeDecoder {
             Node::Json(id, Some(s)) if id == self.ids.str_ => s,
             node => {
                 let (n, in_key) = self.input(vm, node);
-                return Err(n.mismatch("str", in_key));
+                return Err(n.mismatch("str", in_key).into());
             }
         };
         self.ready = false;
@@ -372,7 +372,7 @@ impl DecodeFormat for TreeDecoder {
             }
             node => {
                 let (n, in_key) = self.input(vm, node);
-                return Err(n.mismatch(name, in_key));
+                return Err(n.mismatch(name, in_key).into());
             }
         };
         self.ready = false;

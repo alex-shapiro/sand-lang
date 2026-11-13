@@ -591,11 +591,8 @@ pub fn encode_value_type<T: ValueType>(type_name: &TypeNameCell, x: &T) -> Value
 
 #[doc(hidden)]
 pub fn decode_value_type<T: ValueType>(value: &Value) -> Result<T, DecodeError> {
-    let text = match crate::value::without_json_variant(value) {
-        Value::Native(native) => &native.text,
-        Value::Str(text) => text,
-        value => return Err(DecodeError::expected(&qualified_name(qualified_name_module(T::MODULE), T::NAME), value)),
-    };
+    let name = qualified_name(qualified_name_module(T::MODULE), T::NAME);
+    let text = crate::value::decode_scalar(value, false, |n, in_key| n.native_text(&name, in_key))?;
     T::parse(text).map_err(DecodeError::new)
 }
 

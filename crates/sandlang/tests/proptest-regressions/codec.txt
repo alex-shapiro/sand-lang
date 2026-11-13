@@ -16,3 +16,7 @@ cc 024c5ba6a2c5d9a7da686d84ec4573e95baf46fe26b0513deed45a09a56dce2a # shrinks to
 cc 42392bae478bb0c5facc34795df3547272377ed5b5a0c8a6b6bdbfe782657810 # shrinks to t = Set(Option(Json))
 cc 03a8179e292d854d7362edf00a78fb2af3407ea61dae000abab6b3f6dee6dbf6 # shrinks to t = Map(Option(Str), Int), seed = 1
 cc aee36b8536dc1b824fe14a54ae601ff06244a6dc03cea8bbfcbd8f14cac40e12 # shrinks to t = Option(Range), seed = 1
+cc c4b50ed3c9b4295580db80493cd0b62a97e097f644b1fd7f67f42fa888ee0101 # shrinks to value = Variant(json.Json.Int(Int(3)))
+cc 50118ae947903f77a8aee4fe709a11a7c65ca89fbf3d2f842ca06b11f4137efd # shrinks to value = Map([(Str("tag"), Bool(false))])
+cc ce61833aa82ffeb97345c865b1d5b9bd2d82520f261baefb54212890627467ea # shrinks to value = Set([Int(0), Int(-7)])
+cc b9f6a0b605000154702faebfa9c89cfe31990447dab0a01ba54e0d44935f2896 # shrinks to value = List([Map([(Str("Dot"), Unit)])])

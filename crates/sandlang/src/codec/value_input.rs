@@ -5,10 +5,24 @@
 //! the `json.Json` decoder read their scalars with these rules, so that both
 //! accept the same forms and give the same messages.
 
-use super::{DecodeFail, DecodeResult, QUOTED_KEY};
+use super::{DecodeFail, QUOTED_KEY};
 use crate::stdlib::base64;
 use crate::value::{Value, integral_float_to_int, key_text, kind_name, without_json_variant};
 use std::borrow::Cow;
+
+/// A node of the input that does not match the type that a read expects,
+/// with the message of the error.
+#[derive(Debug)]
+pub(crate) struct InputMismatch(pub(crate) String);
+
+impl From<InputMismatch> for DecodeFail {
+    fn from(m: InputMismatch) -> DecodeFail {
+        DecodeFail::Mismatch(m.0)
+    }
+}
+
+/// The result of a read of a scalar node.
+pub(crate) type InputResult<T> = Result<T, InputMismatch>;
 
 /// A node of a decoder input, as the rules see it.
 #[derive(Clone, Copy)]
@@ -77,21 +91,21 @@ impl<'a> InputNode<'a> {
 
     /// The error for a node that is not a value of `expected`. A map key
     /// (`in_key`) gets the message of an invalid key.
-    pub(crate) fn mismatch(&self, expected: &str, in_key: bool) -> DecodeFail {
+    pub(crate) fn mismatch(&self, expected: &str, in_key: bool) -> InputMismatch {
         if in_key {
             return invalid_key(&self.key_text());
         }
-        DecodeFail::Mismatch(format!("expected {expected}, found {}", self.kind()))
+        InputMismatch(format!("expected {expected}, found {}", self.kind()))
     }
 
-    pub(crate) fn unit(&self, in_key: bool) -> DecodeResult<()> {
+    pub(crate) fn unit(&self, in_key: bool) -> InputResult<()> {
         match self {
             InputNode::Unit => Ok(()),
             _ => Err(self.mismatch("()", in_key)),
         }
     }
 
-    pub(crate) fn bool(&self, in_key: bool) -> DecodeResult<bool> {
+    pub(crate) fn bool(&self, in_key: bool) -> InputResult<bool> {
         match *self {
             InputNode::Bool(b) => Ok(b),
             InputNode::Str(s) if in_key && (s == "true" || s == "false") => Ok(s == "true"),
@@ -100,12 +114,12 @@ impl<'a> InputNode<'a> {
     }
 
     /// Reads an integer, or an integral float, as a value of `expected`.
-    fn integer(&self, expected: &str, in_key: bool) -> DecodeResult<i64> {
+    fn integer(&self, expected: &str, in_key: bool) -> InputResult<i64> {
         match *self {
             InputNode::Int(i) => Ok(i),
             InputNode::Float(f) => match integral_float_to_int(f) {
                 Some(i) => Ok(i),
-                None if f.is_finite() && f.fract() == 0.0 && !in_key => Err(DecodeFail::Mismatch("integer out of range".into())),
+                None if f.is_finite() && f.fract() == 0.0 && !in_key => Err(InputMismatch("integer out of range".into())),
                 None => Err(self.mismatch(expected, in_key)),
             },
             InputNode::Str(s) if in_key => s.parse().map_err(|_| invalid_key(s)),
@@ -113,11 +127,11 @@ impl<'a> InputNode<'a> {
         }
     }
 
-    pub(crate) fn int(&self, in_key: bool) -> DecodeResult<i64> {
+    pub(crate) fn int(&self, in_key: bool) -> InputResult<i64> {
         self.integer("int", in_key)
     }
 
-    pub(crate) fn float(&self, in_key: bool) -> DecodeResult<f64> {
+    pub(crate) fn float(&self, in_key: bool) -> InputResult<f64> {
         match *self {
             InputNode::Float(f) => Ok(f),
             InputNode::Int(i) => Ok(i as f64),
@@ -126,14 +140,14 @@ impl<'a> InputNode<'a> {
     }
 
     /// Reads a duration, or an integer count of nanoseconds.
-    pub(crate) fn duration(&self, in_key: bool) -> DecodeResult<i64> {
+    pub(crate) fn duration(&self, in_key: bool) -> InputResult<i64> {
         match *self {
-            InputNode::Duration(d) => i64::try_from(d.as_nanos()).map_err(|_| DecodeFail::Mismatch("integer out of range".into())),
+            InputNode::Duration(d) => i64::try_from(d.as_nanos()).map_err(|_| InputMismatch("integer out of range".into())),
             _ => self.integer("duration", in_key),
         }
     }
 
-    pub(crate) fn str(&self, in_key: bool) -> DecodeResult<&'a str> {
+    pub(crate) fn str(&self, in_key: bool) -> InputResult<&'a str> {
         match *self {
             InputNode::Str(s) => Ok(s),
             _ => Err(self.mismatch("str", in_key)),
@@ -141,16 +155,16 @@ impl<'a> InputNode<'a> {
     }
 
     /// Reads bytes, or their standard Base64 text.
-    pub(crate) fn bytes(&self, in_key: bool) -> DecodeResult<Cow<'a, [u8]>> {
+    pub(crate) fn bytes(&self, in_key: bool) -> InputResult<Cow<'a, [u8]>> {
         match *self {
             InputNode::Bytes(b) => Ok(Cow::Borrowed(b)),
-            InputNode::Str(s) => base64::decode(s, false).map(Cow::Owned).map_err(|_| DecodeFail::Mismatch("invalid base64".into())),
+            InputNode::Str(s) => base64::decode(s, false).map(Cow::Owned).map_err(|_| InputMismatch("invalid base64".into())),
             _ => Err(self.mismatch("bytes", in_key)),
         }
     }
 
     /// Reads the text of a value of the native value type `name`.
-    pub(crate) fn native_text(&self, name: &str, in_key: bool) -> DecodeResult<&'a str> {
+    pub(crate) fn native_text(&self, name: &str, in_key: bool) -> InputResult<&'a str> {
         match *self {
             InputNode::Native(_, text) | InputNode::Str(text) => Ok(text),
             _ => Err(self.mismatch(name, in_key)),
@@ -159,14 +173,14 @@ impl<'a> InputNode<'a> {
 }
 
 /// The error for the map key text `key` that the key type cannot read.
-pub(crate) fn invalid_key(key: &str) -> DecodeFail {
-    DecodeFail::Mismatch(format!("invalid map key `{}`", crate::stdlib::truncate(key, QUOTED_KEY)))
+pub(crate) fn invalid_key(key: &str) -> InputMismatch {
+    InputMismatch(format!("invalid map key `{}`", crate::stdlib::truncate(key, QUOTED_KEY)))
 }
 
 /// Reads a `Range` from the entries of its JSON form, an object with the
 /// fields `start`, `end`, and `inclusive`. A key that is not a `str` is an
 /// error.
-pub(crate) fn range_of<'a>(entries: impl Iterator<Item = (InputNode<'a>, InputNode<'a>)>) -> DecodeResult<(i64, i64, bool)> {
+pub(crate) fn range_of<'a>(entries: impl Iterator<Item = (InputNode<'a>, InputNode<'a>)>) -> InputResult<(i64, i64, bool)> {
     let (mut start, mut end, mut inclusive) = (None, None, false);
     for (key, value) in entries {
         match key {
@@ -179,8 +193,8 @@ pub(crate) fn range_of<'a>(entries: impl Iterator<Item = (InputNode<'a>, InputNo
     }
     match (start, end) {
         (Some(s), Some(e)) => Ok((s, e, inclusive)),
-        (None, _) => Err(DecodeFail::Mismatch("missing field `start`".into())),
-        _ => Err(DecodeFail::Mismatch("missing field `end`".into())),
+        (None, _) => Err(InputMismatch("missing field `start`".into())),
+        _ => Err(InputMismatch("missing field `end`".into())),
     }
 }
 

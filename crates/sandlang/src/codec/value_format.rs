@@ -639,7 +639,7 @@ impl ValueDecoder {
     }
 
     /// Reads the node that the next operation reads with `read`.
-    fn read<T>(&mut self, read: impl FnOnce(InputNode<'_>, bool) -> DecodeResult<T>) -> DecodeResult<T> {
+    fn read<T>(&mut self, read: impl FnOnce(InputNode<'_>, bool) -> value_input::InputResult<T>) -> DecodeResult<T> {
         let (node, in_key) = self.input()?;
         let r = read(node, in_key)?;
         self.ready = false;
@@ -763,9 +763,9 @@ impl DecodeFormat for ValueDecoder {
             (SeqKind::List, Value::List(items)) => items.len(),
             (SeqKind::Set, Value::Set(items) | Value::List(items)) => items.len(),
             (SeqKind::Tuple(_), Value::Tuple(items) | Value::List(items)) => items.len(),
-            (SeqKind::List, v) => return Err(InputNode::of(v).mismatch("list", self.in_key)),
-            (SeqKind::Set, v) => return Err(InputNode::of(v).mismatch("set", self.in_key)),
-            (SeqKind::Tuple(n), v) => return Err(InputNode::of(v).mismatch(&format!("tuple of {n} elements"), self.in_key)),
+            (SeqKind::List, v) => return Err(InputNode::of(v).mismatch("list", self.in_key).into()),
+            (SeqKind::Set, v) => return Err(InputNode::of(v).mismatch("set", self.in_key).into()),
+            (SeqKind::Tuple(n), v) => return Err(InputNode::of(v).mismatch(&format!("tuple of {n} elements"), self.in_key).into()),
         };
         if let SeqKind::Tuple(n) = kind
             && len != n
@@ -785,7 +785,7 @@ impl DecodeFormat for ValueDecoder {
                 let len = entries.len();
                 self.enter(OpenParts::Entries, len)
             }
-            v => Err(InputNode::of(v).mismatch("map", self.in_key)),
+            v => Err(InputNode::of(v).mismatch("map", self.in_key).into()),
         }
     }
 
@@ -817,11 +817,11 @@ impl DecodeFormat for ValueDecoder {
             Value::Struct(s) if !payload => (OpenParts::Fields, s.fields.len()),
             Value::Map(entries) if !payload => {
                 if let Some((key, _)) = entries.iter().find(|(k, _)| !matches!(without_json_variant(k), Value::Str(_))) {
-                    return Err(InputNode::of(key).mismatch("str key", false));
+                    return Err(InputNode::of(key).mismatch("str key", false).into());
                 }
                 (OpenParts::MapFields, entries.len())
             }
-            v => return Err(InputNode::of(v).mismatch(if name.is_empty() { "map" } else { name }, self.in_key)),
+            v => return Err(InputNode::of(v).mismatch(if name.is_empty() { "map" } else { name }, self.in_key).into()),
         };
         self.enter(parts, len)
     }
@@ -857,13 +857,13 @@ impl DecodeFormat for ValueDecoder {
             Value::Variant(variant) => !variant.payload.is_empty(),
             Value::Map(entries) if entries.len() == 1 => match without_json_variant(&entries[0].0) {
                 Value::Str(_) => true,
-                key => return Err(InputNode::of(key).mismatch("str key", false)),
+                key => return Err(InputNode::of(key).mismatch("str key", false).into()),
             },
             Value::Map(entries) => {
                 let what = if entries.is_empty() { "expected a variant" } else { "expected a single variant" };
                 return Err(DecodeFail::Mismatch(format!("{what} of {name}")));
             }
-            v => return Err(InputNode::of(v).mismatch(name, in_key)),
+            v => return Err(InputNode::of(v).mismatch(name, in_key).into()),
         };
         let depth = self.steps.len();
         match self.node_at(depth) {
@@ -891,7 +891,7 @@ impl DecodeFormat for ValueDecoder {
         let json = {
             let node = self.node()?;
             if self.payload {
-                return Err(InputNode::of(node).mismatch("Json", self.in_key));
+                return Err(InputNode::of(node).mismatch("Json", self.in_key).into());
             }
             Json::decode(node).map_err(|e| DecodeFail::Mismatch(e.message().to_string()))?
         };

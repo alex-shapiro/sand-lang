@@ -4611,8 +4611,8 @@ fn decode_errors_give_the_path_and_the_cause() {
         (Value::Float(1e300).decode::<i64>().map(drop), "$: integer out of range"),
         (Value::Str("!".into()).decode::<Vec<u8>>().map(drop), "$: invalid base64"),
         (Value::Map(vec![(Value::Str("x y".into()), Value::Unit)]).decode::<HashMap<i64, ()>>().map(drop), "$: invalid map key `x y`"),
-        (Value::Str("Lost".into()).decode::<Delivery>().map(drop), "$: unknown variant `Lost` of shop.Delivery"),
-        (Value::Str("Held".into()).decode::<Delivery>().map(drop), "$: variant `Held` of shop.Delivery needs a payload"),
+        (Value::Str("Lost".into()).decode::<Delivery>().map(drop), "$: unknown variant `Lost` of Delivery"),
+        (Value::Str("Held".into()).decode::<Delivery>().map(drop), "$: variant `Held` of Delivery needs a payload"),
         (Value::Str("12".into()).decode::<Money>().map(drop), "$: expected 0.00"),
     ];
     for (r, message) in cases {

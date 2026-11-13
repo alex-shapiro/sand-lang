@@ -1,5 +1,6 @@
 //! Sand values in a Rust form that is independent of the VM.
 
+use crate::codec::value_input::{InputNode, InputResult};
 use crate::native::NamedType;
 use crate::native::ty::Never;
 use crate::stdlib::json::Json;
@@ -238,9 +239,10 @@ fn debug_named_fields(mut out: fmt::DebugStruct<'_, '_>, names: &[String], value
 /// Common Rust types and native value types implement `Encode`.
 /// [`#[derive(SandStruct)]`](crate::SandStruct) and
 /// [`#[derive(SandEnum)]`](crate::SandEnum) derive it for structs and enums.
-/// For a derived type, `encode` returns the same `Value` that [`Vm::to_value`]
-/// copies from the VM. A manual `Encode` implementation for a type that also
-/// converts to `VmValue` must preserve this equality.
+/// For a derived type, `encode` returns the same `Value` that the derived
+/// Sand `Encode` writes for the value in the VM. A manual `Encode`
+/// implementation for a type that also converts to `VmValue` must preserve
+/// this equality.
 ///
 /// ```
 /// # use sandlang::value::{Encode, Value};
@@ -480,7 +482,7 @@ encode_tuples! {
     message = "`{Self}` does not implement `sandlang::value::Decode`",
     note = "add `#[sand(no_value)]` to a `SandStruct` or `SandEnum` whose fields do not implement `Decode`"
 )]
-pub trait Decode: Encode + Sized {
+pub trait Decode: Sized {
     /// Converts `value` into `Self`.
     fn decode(value: &Value) -> Result<Self, DecodeError>;
 
@@ -634,106 +636,71 @@ impl Decode for Value {
     }
 }
 
+/// Reads the scalar `value`, or the map key `value` if `in_key`, with the
+/// rules of host `Value` input that the Sand `Decoder` uses.
+pub(crate) fn decode_scalar<'v, T>(
+    value: &'v Value,
+    in_key: bool,
+    read: impl FnOnce(InputNode<'v>, bool) -> InputResult<T>,
+) -> Result<T, DecodeError> {
+    read(InputNode::of(value), in_key).map_err(|e| DecodeError::new(e.0))
+}
+
 impl Decode for () {
     fn decode(value: &Value) -> Result<(), DecodeError> {
-        match without_json_variant(value) {
-            Value::Unit => Ok(()),
-            value => Err(DecodeError::expected("()", value)),
-        }
+        decode_scalar(value, false, |n, in_key| n.unit(in_key))
     }
 }
 
 impl Decode for bool {
     fn decode(value: &Value) -> Result<bool, DecodeError> {
-        match without_json_variant(value) {
-            Value::Bool(b) => Ok(*b),
-            value => Err(DecodeError::expected("bool", value)),
-        }
+        decode_scalar(value, false, |n, in_key| n.bool(in_key))
     }
 
     fn decode_key(key: &Value) -> Result<bool, DecodeError> {
-        match without_json_variant(key) {
-            Value::Str(text) if text == "true" => Ok(true),
-            Value::Str(text) if text == "false" => Ok(false),
-            Value::Str(text) => Err(invalid_map_key(text)),
-            key => bool::decode(key),
-        }
-    }
-}
-
-/// Converts the integer or integral float `value` into an `i64`.
-fn decode_int(value: &Value, expected: &str) -> Result<i64, DecodeError> {
-    match without_json_variant(value) {
-        Value::Int(i) => Ok(*i),
-        Value::Float(f) => match integral_float_to_int(*f) {
-            Some(i) => Ok(i),
-            None if f.is_finite() && f.fract() == 0.0 => Err(DecodeError::new("integer out of range")),
-            None => Err(DecodeError::expected(expected, value)),
-        },
-        value => Err(DecodeError::expected(expected, value)),
-    }
-}
-
-/// Converts the map key text `key` into an `i64`.
-fn decode_int_key(key: &Value) -> Option<Result<i64, DecodeError>> {
-    match without_json_variant(key) {
-        Value::Str(text) => Some(text.parse().map_err(|_| invalid_map_key(text))),
-        _ => None,
+        decode_scalar(key, true, |n, in_key| n.bool(in_key))
     }
 }
 
 impl Decode for i64 {
     fn decode(value: &Value) -> Result<i64, DecodeError> {
-        decode_int(value, "int")
+        decode_scalar(value, false, |n, in_key| n.int(in_key))
     }
 
     fn decode_key(key: &Value) -> Result<i64, DecodeError> {
-        decode_int_key(key).unwrap_or_else(|| i64::decode(key))
+        decode_scalar(key, true, |n, in_key| n.int(in_key))
     }
 }
 
 impl Decode for f64 {
     fn decode(value: &Value) -> Result<f64, DecodeError> {
-        match without_json_variant(value) {
-            Value::Float(f) => Ok(*f),
-            Value::Int(i) => Ok(*i as f64),
-            value => Err(DecodeError::expected("float", value)),
-        }
+        decode_scalar(value, false, |n, in_key| n.float(in_key))
     }
 }
 
 impl Decode for jiff::SignedDuration {
     fn decode(value: &Value) -> Result<jiff::SignedDuration, DecodeError> {
-        match without_json_variant(value) {
-            Value::Duration(d) => Ok(*d),
-            value => decode_int(value, "duration").map(jiff::SignedDuration::from_nanos),
-        }
+        decode_scalar(value, false, |n, in_key| n.duration(in_key)).map(jiff::SignedDuration::from_nanos)
     }
 
     fn decode_key(key: &Value) -> Result<jiff::SignedDuration, DecodeError> {
-        match decode_int_key(key) {
-            Some(nanos) => nanos.map(jiff::SignedDuration::from_nanos),
-            None => jiff::SignedDuration::decode(key),
-        }
+        decode_scalar(key, true, |n, in_key| n.duration(in_key)).map(jiff::SignedDuration::from_nanos)
     }
 }
 
 impl Decode for String {
     fn decode(value: &Value) -> Result<String, DecodeError> {
-        match without_json_variant(value) {
-            Value::Str(s) => Ok(s.clone()),
-            value => Err(DecodeError::expected("str", value)),
-        }
+        decode_scalar(value, false, |n, in_key| n.str(in_key).map(str::to_owned))
+    }
+
+    fn decode_key(key: &Value) -> Result<String, DecodeError> {
+        decode_scalar(key, true, |n, in_key| n.str(in_key).map(str::to_owned))
     }
 }
 
 impl Decode for Vec<u8> {
     fn decode(value: &Value) -> Result<Vec<u8>, DecodeError> {
-        match without_json_variant(value) {
-            Value::Bytes(b) => Ok(b.clone()),
-            Value::Str(text) => crate::stdlib::base64::decode(text, false).map_err(|_| DecodeError::new("invalid base64")),
-            value => Err(DecodeError::expected("bytes", value)),
-        }
+        decode_scalar(value, false, |n, in_key| n.bytes(in_key).map(std::borrow::Cow::into_owned))
     }
 }
 
@@ -785,7 +752,8 @@ impl<T: Decode> Decode for Option<T> {
 
 /// Decodes the entries of the map `value` into `C`.
 fn decode_map<K: Decode, V: Decode, C: FromIterator<(K, V)>>(value: &Value) -> Result<C, DecodeError> {
-    let Value::Map(entries) = without_json_variant(value) else { return Err(DecodeError::expected("map", value)) };
+    let value = without_json_variant(value);
+    let Value::Map(entries) = value else { return Err(DecodeError::expected("map", value)) };
     let key = |k: &Value| K::decode_key(k).map_err(|_| invalid_map_key(&key_text(k)));
     entries.iter().map(|(k, v)| Ok((key(k)?, V::decode(v).map_err(|e| e.in_key(key_text(k)))?))).collect()
 }
@@ -832,8 +800,8 @@ impl<T: Decode + Ord> Decode for BTreeSet<T> {
 fn tuple_items(value: &Value, len: usize) -> Result<&[Value], DecodeError> {
     match without_json_variant(value) {
         Value::Tuple(items) | Value::List(items) if items.len() == len => Ok(items),
-        Value::Tuple(_) | Value::List(_) => Err(DecodeError::new(format!("expected list of length {len}"))),
-        value => Err(DecodeError::expected("tuple", value)),
+        Value::Tuple(_) | Value::List(_) => Err(DecodeError::new(crate::codec::value_input::length_mismatch(len))),
+        value => Err(DecodeError::expected(&format!("tuple of {len} elements"), value)),
     }
 }
 

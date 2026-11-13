@@ -788,3 +788,169 @@ fn implementations_that_break_the_codec_protocol_fail_in_each_format() {
         }
     }
 }
+
+/// A host struct that both the Rust `value::Decode` and the Sand `Decode`
+/// read.
+#[derive(Clone, Debug, PartialEq, sandlang::SandStruct)]
+#[sand(module = "rs")]
+struct RsPoint {
+    x: f64,
+    tag: Option<String>,
+    n: i64,
+}
+
+/// A host enum that both the Rust `value::Decode` and the Sand `Decode`
+/// read.
+#[derive(Clone, Debug, PartialEq, sandlang::SandEnum)]
+#[sand(module = "rs")]
+enum RsShape {
+    Dot,
+    Circle(f64),
+    Rect { w: i64, h: i64 },
+}
+
+/// A random host `Value`: scalars, containers, the JSON forms of the target
+/// types, `json.Json` variants, and the values of host types.
+fn host_value() -> impl Strategy<Value = sandlang::value::Value> {
+    use sandlang::value::Value;
+    let leaf = prop_oneof![
+        Just(Value::Unit),
+        any::<bool>().prop_map(Value::Bool),
+        prop_oneof![Just(0i64), Just(1), Just(-7), Just(i64::MAX)].prop_map(Value::Int),
+        prop_oneof![Just(1.0f64), Just(1.5), Just(-0.0), Just(1e300), Just(f64::NAN)].prop_map(Value::Float),
+        prop_oneof![Just(0i64), Just(1500)].prop_map(|n| Value::Duration(jiff::SignedDuration::from_nanos(n))),
+        prop_oneof![Just(""), Just("x"), Just("AQI="), Just("1"), Just("true"), Just("Dot"), Just("Circle"), Just("Rect")]
+            .prop_map(|s: &str| Value::Str(s.into())),
+        prop_oneof![Just(vec![]), Just(vec![1u8, 2])].prop_map(Value::Bytes),
+        Just(sandlang::stdlib::json::Json::Int(3)).prop_map(|j| sandlang::value::Encode::encode(&j)),
+        prop_oneof![
+            Just(sandlang::value::Encode::encode(&Some(1i64))),
+            Just(sandlang::value::Encode::encode(&None::<i64>)),
+            Just(sandlang::value::Encode::encode(&RsPoint { x: 1.0, tag: None, n: 2 })),
+            Just(sandlang::value::Encode::encode(&RsShape::Dot)),
+            Just(sandlang::value::Encode::encode(&RsShape::Circle(2.0))),
+            Just(sandlang::value::Encode::encode(&RsShape::Rect { w: 1, h: 2 })),
+        ],
+    ];
+    leaf.prop_recursive(3, 16, 4, |inner| {
+        let key = prop_oneof![
+            prop_oneof![Just("x"), Just("tag"), Just("n"), Just("w"), Just("h"), Just("Dot"), Just("Circle"), Just("Rect"), Just("1")]
+                .prop_map(|s: &str| Value::Str(s.into())),
+            prop_oneof![Just(1i64), Just(2)].prop_map(Value::Int),
+        ];
+        prop_oneof![
+            prop::collection::vec(inner.clone(), 0..3).prop_map(Value::List),
+            prop::collection::vec(inner.clone(), 0..3).prop_map(Value::Tuple),
+            prop::collection::vec(inner.clone(), 0..3).prop_map(Value::Set),
+            // A host map has each key once.
+            prop::collection::vec((key, inner), 0..3).prop_map(|mut entries| {
+                let mut seen = Vec::new();
+                entries.retain(|(k, _)| {
+                    let new = !seen.contains(k);
+                    seen.push(k.clone());
+                    new
+                });
+                Value::Map(entries)
+            }),
+        ]
+    })
+}
+
+/// Rust types and their Sand names, which `rust_decodes` reads. The maps keep
+/// the order of their entries, as Sand maps do.
+const RUST_TYPES: [&str; 15] = [
+    "()",
+    "bool",
+    "int",
+    "float",
+    "duration",
+    "str",
+    "bytes",
+    "int?",
+    "[int?]",
+    "[[int]]",
+    "[str: int]",
+    "[int: bool]",
+    "(int, str)",
+    "rs.RsPoint",
+    "[rs.RsShape]",
+];
+
+/// Returns the result of the Rust `value::Decode` of `value` as each type of
+/// [`RUST_TYPES`]: the debug form of the encoded value, or the error.
+fn rust_decodes(value: &sandlang::value::Value) -> Vec<String> {
+    use indexmap::IndexMap;
+    use sandlang::value::{Decode, Encode};
+    fn show<T: Decode + Encode>(value: &sandlang::value::Value) -> String {
+        match T::decode(value) {
+            Ok(v) => format!("{:?}", v.encode()),
+            Err(e) => e.to_string(),
+        }
+    }
+    vec![
+        show::<()>(value),
+        show::<bool>(value),
+        show::<i64>(value),
+        show::<f64>(value),
+        show::<jiff::SignedDuration>(value),
+        show::<String>(value),
+        show::<Vec<u8>>(value),
+        show::<Option<i64>>(value),
+        show::<Vec<Option<i64>>>(value),
+        show::<Vec<Vec<i64>>>(value),
+        show::<IndexMap<String, i64>>(value),
+        show::<IndexMap<i64, bool>>(value),
+        show::<(i64, String)>(value),
+        show::<RsPoint>(value),
+        show::<Vec<RsShape>>(value),
+    ]
+}
+
+/// Returns the result of the Sand `Decode` of `value` from a host `Decoder`
+/// as each type of [`RUST_TYPES`], in the form of [`rust_decodes`].
+fn sand_decodes(value: &sandlang::value::Value) -> Vec<String> {
+    use sandlang::codec::Decoder;
+    use sandlang::engine::HostModules;
+    use sandlang::native::NativeModule;
+    use sandlang::native::ty::{Encoded, VmVal};
+    use sandlang::vm::{Fail, Vm};
+    let mut host = NativeModule::new("host");
+    host.source("pub native fn show<T: Encode>(value: T) -> str\npub native fn input() -> Decoder");
+    host.function("show", |value: Encoded<0>| -> String { format!("{:?}", value.into_value()) });
+    let input = value.clone();
+    host.function("input", move |vm: &mut Vm| -> Result<VmVal<Decoder>, Fail> { vm.new_object(Decoder::from_value(input.clone())) });
+    let mut rs = NativeModule::new("rs");
+    rs.bind::<RsPoint>();
+    rs.bind::<RsShape>();
+    let reads: String = RUST_TYPES
+        .iter()
+        .map(|ty| {
+            format!(
+                "let d{n} = host.input()\nlet r{n}: Result<{ty}> = d{n}.finish(d{n}.decode())\n\
+                 print(match r{n} {{\n    Ok(v) => host.show(v)\n    Err(e) => e.message\n}})\n",
+                n = ty.len() + ty.bytes().map(usize::from).sum::<usize>(),
+            )
+        })
+        .collect();
+    let src = format!("import host\nimport rs\n{reads}");
+    let out = MemorySink::new();
+    let config = Config::new().host_modules(HostModules::new([host, rs]).unwrap()).stdout(out.clone());
+    let mut engine = Engine::new(config);
+    let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    if let Err(e) = rt.block_on(engine.run_source("main.sand", &src)) {
+        panic!("{e}\n{src}");
+    }
+    out.contents().lines().map(str::to_string).collect()
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// The Rust `value::Decode` of a host `Value` gives the same value or
+    /// error message as a Sand host `Decoder`, which reads with the same
+    /// rules of `Value` input.
+    #[test]
+    fn rust_and_sand_decode_host_values_alike(value in host_value()) {
+        prop_assert_eq!(rust_decodes(&value), sand_decodes(&value), "value: {:?}", value);
+    }
+}
