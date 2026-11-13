@@ -1107,15 +1107,11 @@ impl<T> Describe<int> for [T] {
     fn describe(self, prefix: str = "") -> str { prefix }
     fn other<U>(self, u: U) -> str where T: Ord { "" }
 }
-fn outer() {
-    fn local<T: Describe<int>>(x: T) {}
-}
 --- error
 2: default values of trait method parameters must be constants
 3: `where` clauses in trait methods may only constrain the method's own type parameters
 8: default values are declared by the trait, not the impl
 9: impl methods cannot require traits of the impl's type parameters
-12: local functions cannot require traits with methods
 
 === pub is not allowed on trait and impl methods
 trait Describe {
@@ -1455,7 +1451,53 @@ fn main() {
 --- error
 20: float does not implement `Hash` (required for [float] to implement `Marker`)
 
-=== a local function that requires a trait with methods is reported once
+=== local functions can require traits with methods
+trait Describe {
+    fn describe(self) -> str
+}
+trait Loud: Describe {
+    fn loud(self) -> str { self.describe().to_upper() }
+}
+trait Make { fn make() -> Self }
+impl Describe for int {
+    fn describe(self) -> str { "i\(self)" }
+}
+impl Describe for str {
+    fn describe(self) -> str { "s:\(self)" }
+}
+impl Loud for str {}
+impl<T: Describe> Describe for [T] {
+    fn describe(self) -> str { "[" + self.map(x => x.describe()).join(",") + "]" }
+}
+impl Make for int {
+    fn make() -> int { 7 }
+}
+fn outer<U: Describe>(u: U) -> str {
+    fn twice<T: Num>(x: T) -> T { x + x }
+    fn nest<T: Describe>(x: T, n: int) -> str {
+        if n == 0 { x.describe() } else { [x].describe() + nest(x, n - 1) }
+    }
+    fn even<T: Describe>(x: T, n: int) -> str { if n == 0 { "e" + x.describe() } else { odd(x, n - 1) } }
+    fn odd<T: Describe>(x: T, n: int) -> str { if n == 0 { "o" + x.describe() } else { even(x, n - 1) } }
+    fn shout<T: Loud>(x: T) -> str { x.loud() }
+    fn made<T: Make>() -> T { T.make() }
+    fn with_outer(n: int) -> str { u.describe() + "\(n)" }
+    let as_value = nest
+    let typed: fn(str, int) -> str = nest
+    let m: int = made()
+    let parts = [nest(1, 2), even([1, 2], 3), as_value(u, 1), typed("a", 0), shout("hi"), "\(m) \(twice(m))", with_outer(3)]
+    for _ in 0..2 {
+        parts.push(nest([u], 0))
+    }
+    parts.join(" | ")
+}
+print(outer(5))
+print(outer("x"))
+--- stdout
+[i1][i1]i1 | o[i1,i2] | [i5]i5 | s:a | S:HI | 7 14 | i53 | [i5] | [i5]
+[i1][i1]i1 | o[i1,i2] | [s:x]s:x | s:a | S:HI | 7 14 | s:x3 | [s:x] | [s:x]
+
+=== a call of a local function checks its trait bounds
 trait Describe {
     fn describe(self) -> str
 }
@@ -1463,15 +1505,14 @@ impl Describe for int {
     fn describe(self) -> str { "i" }
 }
 fn outer() {
-    fn twice<T: Num>(x: T) -> T { x + x }
     fn show<T: Describe>(x: T) -> str { x.describe() }
     print(show(1))
     print(show("s"))
+    let f: fn(float) -> str = show
 }
 --- error
-8: local functions cannot require traits with methods
-9: local functions cannot require traits with methods
-11: str does not implement `Describe`
+10: str does not implement `Describe`
+11: float does not implement `Describe`
 
 === the traits of a type's parameters may take types declared later
 trait Into<T> {

@@ -615,15 +615,11 @@ impl Checker {
             let mut scope = self.fs.generics.clone();
             let self_ty = self.fs.self_ty;
             let own = self.declare_params(&f.generics, &scope, self_ty);
+            let mut dicts = Vec::new();
             for (g, &p) in f.generics.iter().zip(&own) {
                 scope.push((self.params[p as usize].name, p));
-                let with_dicts: Vec<TraitRef> = self.params[p as usize].traits.iter().copied().filter(|tr| self.has_dict(tr)).collect();
-                if !with_dicts.is_empty() {
-                    self.error(g.name.span, "local functions cannot require traits with methods; declare the function at the top level");
-                    // Insert error evidence so the body can use the traits without cascading errors.
-                    let pt = self.param_ty(p);
-                    self.fs.evidence.extend(with_dicts.into_iter().map(|tr| (pt, tr, mk(HKind::Error, TypeId::UNIT, g.name.span))));
-                }
+                let pt = self.param_ty(p);
+                dicts.extend(self.params[p as usize].traits.iter().filter(|tr| self.has_dict(tr)).map(|&tr| (pt, tr)));
                 if g.reflect {
                     self.error(g.name.span, "local functions cannot have `reflect` type parameters; declare the function at the top level");
                 }
@@ -649,16 +645,26 @@ impl Checker {
             self.fs.locals[l as usize].cell = true;
             self.fs.data[l as usize].scheme = own.clone();
             self.fs.data[l as usize].used = true;
+            if !dicts.is_empty() {
+                self.fs.local_fn_dicts.push((l, dicts.clone()));
+            }
             locals.push(l);
-            sigs.push((ptys, ret, scope, fty));
+            sigs.push((ptys, ret, scope, fty, dicts));
         }
         let mut lambdas = Vec::new();
-        for ((f, (ptys, ret, scope, fty)), &self_local) in group.iter().zip(sigs).zip(&locals) {
+        for ((f, (ptys, ret, scope, fty, dicts)), &self_local) in group.iter().zip(sigs).zip(&locals) {
             let saved_generics = std::mem::replace(&mut self.fs.generics, scope);
             let id = self.new_lambda();
             self.fs.ctx.push(FnCtx { ret, kind: CtxKind::Lambda, loops: vec![], lambda: id, in_defer: None });
             self.push_scope();
             let mut params = Vec::new();
+            for (t, tr) in dicts {
+                let d = self.declare_local_sym(Symbol::DICT, TypeId::UNIT, false, f.name.span, true);
+                self.fs.data[d as usize].used = true;
+                self.fs.evidence.push((t, tr, mk(HKind::Local(d), TypeId::UNIT, f.name.span)));
+                self.fs.local_dict_params.push(d);
+                params.push(d);
+            }
             for (p, &t) in f.params.iter().zip(&ptys) {
                 params.push(self.declare_local(&p.name.name, t, false, p.name.span, true));
             }
@@ -1007,15 +1013,45 @@ impl Checker {
     // ------------------------------------------------------------------
     // Names
 
-    fn instantiate_local(&mut self, l: LocalId, span: Span) -> TypeId {
+    /// Instantiates the type of local `l`. For a generic local function, also
+    /// returns the evidence for its hidden dictionary parameters.
+    fn instantiate_local(&mut self, l: LocalId, span: Span) -> (TypeId, Vec<HExpr>) {
         let t = self.fs.data[l as usize].ty;
         if self.fs.data[l as usize].scheme.is_empty() {
-            return t;
+            return (t, Vec::new());
         }
         let scheme = self.fs.data[l as usize].scheme.clone();
         let fresh: Vec<TypeId> = scheme.iter().map(|_| self.fresh()).collect();
-        self.require_traits(&scheme, &fresh, &[], span);
-        self.arena.instantiate(t, &scheme, &fresh)
+        let dicts = self.fs.local_fn_dicts.iter().find(|(x, _)| *x == l).map(|(_, d)| d.clone()).unwrap_or_default();
+        self.require_traits(&scheme, &fresh, &dicts, span);
+        let map = |p: ParamId| scheme.iter().position(|&g| g == p).map(|i| fresh[i]);
+        let mut evidence = Vec::new();
+        for (dt, tr) in dicts {
+            let dt = self.arena.subst_params(dt, &map);
+            let tr = tr.subst_params(&mut self.arena, &map);
+            evidence.push(self.evidence_hole(dt, tr, false, span));
+        }
+        (self.arena.instantiate(t, &scheme, &fresh), evidence)
+    }
+
+    /// The value of the generic local function `l`, which takes hidden
+    /// dictionaries: a closure that passes `evidence` and its own arguments.
+    fn local_fn_value(&mut self, l: LocalId, fty: TypeId, evidence: Vec<HExpr>, span: Span) -> HExpr {
+        let Ty::Fn(ps, ret) = self.ty(fty) else { return err(span) };
+        let ptys = self.elems(ps);
+        let id = self.new_lambda();
+        let mut params = Vec::new();
+        let mut args = evidence;
+        for t in ptys {
+            self.fs.locals.push(LocalInfo { name: Symbol::ARG, mutable: false, owner: id, cell: false, span });
+            self.fs.data.push(LocalData { ty: t, scheme: vec![], used: true, assigned: false, is_param: true, decl_span: span });
+            let a = (self.fs.locals.len() - 1) as LocalId;
+            params.push(a);
+            args.push(mk(HKind::Local(a), t, span));
+        }
+        let name = self.name(self.fs.locals[l as usize].name).to_string();
+        let body = mk(HKind::CallValue { callee: Box::new(mk(HKind::Local(l), fty, span)), args }, ret, span);
+        mk(HKind::Lambda(Box::new(HLambda { id, name, params, body, self_local: None })), fty, span)
     }
 
     fn check_ident(&mut self, id: &ast::Ident, hint: Option<TypeId>) -> HExpr {
@@ -1026,7 +1062,10 @@ impl Checker {
         }
         if let Some(l) = self.find_local(&id.name) {
             self.use_local(l);
-            let t = self.instantiate_local(l, span);
+            let (t, evidence) = self.instantiate_local(l, span);
+            if !evidence.is_empty() {
+                return self.local_fn_value(l, t, evidence, span);
+            }
             return mk(HKind::Local(l), t, span);
         }
         match self.lookup_global(&id.name) {
@@ -1787,6 +1826,18 @@ impl Checker {
                 if let Some(ns) = self.resolve_ns(obj) {
                     return self.ns_call(ns, obj, name, args, span);
                 }
+            }
+            ExprKind::Ident(id)
+                if let Some(l) = self.find_local(&id.name)
+                    && self.fs.local_fn_dicts.iter().any(|(x, _)| *x == l) =>
+            {
+                self.use_local(l);
+                let (t, evidence) = self.instantiate_local(l, id.span);
+                let mut call = self.call_value(mk(HKind::Local(l), t, id.span), args, span);
+                if let HKind::CallValue { args, .. } = &mut call.kind {
+                    args.splice(0..0, evidence);
+                }
+                return call;
             }
             _ => {}
         }

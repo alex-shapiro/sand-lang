@@ -277,9 +277,10 @@ Local functions, trait methods, and `impl` methods cannot declare `reflect` type
 If recursive calls nest constructed type descriptions more than 256 levels deep, execution aborts
 with kind `"limit"`.
 
-A function may be declared inside a block; such a function may capture enclosing variables and
+A function may be declared inside a block; such a function may capture enclosing variables
 and may call itself recursively. Local functions declared consecutively in the same block
-may call each other. Their type parameters can only require traits that do not declare methods.
+may call each other. Their type parameters can require traits, as those of top-level
+functions can.
 
 ### 4.2 Structs
 

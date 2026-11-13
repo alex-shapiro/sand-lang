@@ -197,7 +197,7 @@ impl Checker {
             HKind::Evidence(i) => {
                 let i = *i as usize;
                 *e = HExpr { span: e.span, ..fin.dicts[i].clone() };
-                if nested && fin.hoist && matches!(e.kind, HKind::Dict { .. }) && !is_const_dict(e) {
+                if nested && fin.hoist && matches!(e.kind, HKind::Dict { .. }) && !is_const_dict(e) && !self.uses_local_dict_params(e) {
                     self.hoist_dict(e, &mut fin.hoisted);
                 }
                 return;
@@ -239,6 +239,17 @@ impl Checker {
             Part::Pat(p) => self.zonk_pat(p),
             Part::Type(t) => *t = self.zonk(*t),
         });
+    }
+
+    /// Returns `true` if dictionary expression `e` reads a hidden dictionary
+    /// parameter of a local function.
+    fn uses_local_dict_params(&self, e: &HExpr) -> bool {
+        match &e.kind {
+            HKind::Local(l) => self.fs.local_dict_params.contains(l),
+            HKind::Dict { args, .. } => args.iter().any(|a| self.uses_local_dict_params(a)),
+            HKind::Field { obj, .. } => self.uses_local_dict_params(obj),
+            _ => false,
+        }
     }
 
     pub fn zonk_pat(&mut self, p: &mut HPat) {

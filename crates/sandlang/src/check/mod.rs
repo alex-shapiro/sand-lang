@@ -553,6 +553,12 @@ pub(crate) struct FnState {
     pub evidence: Vec<(TypeId, TraitRef, HExpr)>,
     /// Pending [`HKind::Evidence`] placeholders in the current function body.
     pub holes: Vec<EvidenceReq>,
+    /// The bounds that the hidden dictionary parameters of each generic local
+    /// function prove, in parameter order.
+    pub local_fn_dicts: Vec<(LocalId, Vec<(TypeId, TraitRef)>)>,
+    /// The hidden dictionary parameters of local functions. A dictionary that
+    /// uses one cannot move to the entry of the enclosing function.
+    pub local_dict_params: Vec<LocalId>,
     /// The inference variables made before the function, and those of them
     /// bound while checking it (see `release_vars`).
     pub var_mark: VarId,

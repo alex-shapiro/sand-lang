@@ -478,7 +478,6 @@ Visible defects that rarely block users.
 
 ### Language
 
-- [ ] ⚪ Allow local functions to require traits with methods and to declare
-      `reflect` type parameters by passing hidden dictionary and
-      type-description arguments to closures.
+- [ ] ⚪ Allow local functions to declare `reflect` type parameters by passing
+      hidden type-description arguments to closures.
 - [ ] ⚪ Support non-constant default expressions on trait method parameters.
