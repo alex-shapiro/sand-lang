@@ -726,7 +726,38 @@ for its own types with an `impl` block, which replaces the derived
 implementation. A hand-written implementation usually encodes or decodes
 another value with `e.encode(x)` or `d.decode()`, and it works for every
 format. An error that a hand-written `decode` returns keeps its kind, and the
-format adds the path of the decoded part to its message. A struct that declares
+format adds the path of the decoded part to its message.
+
+Each call of `encode` writes exactly one value, and each call of `decode`
+reads exactly one value. If a hand-written `encode` writes no value or two,
+the encode stops with a runtime error of kind `"invalid"`, such as
+`$.price: Encode for Money wrote 2 values`. If a hand-written `decode` reads
+no value or two, the decode returns an error of kind `"invalid"`, such as
+`$[1]: Decode for Email read no value`. A failed `d.decode()` leaves the input
+at the start of its value in every format, so an implementation can read the
+value as another type:
+
+```sand
+enum IdOrName { Id(int), Name(str) }
+
+impl Decode for IdOrName {
+    fn decode(d: Decoder) -> Result<IdOrName> {
+        let id: Result<int> = d.decode()
+        if let Ok(n) = id {
+            return Ok(IdOrName.Id(n))
+        }
+        Ok(IdOrName.Name(d.decode()?))
+    }
+}
+```
+
+An encode ends when its format takes the result, as `json.encode` does, and a
+decode ends with `Decoder.finish`. After the end, each use of the `Encoder` or
+`Decoder` is a runtime error. A `Decode` implementation cannot call `finish`.
+
+`json.from_json` reads its `Json` value in place, with the rules of a host
+`Value` (§16.7), so an error names the kind of the part that does not match,
+such as `$.id: expected int, found str`. A struct that declares
 `init` does not derive `Decode`, because a derived implementation would not
 call `init`; such a struct can implement `Decode` by hand. The compiler derives
 `Encode` and `Decode` for tuples, structs, enums, and native value types, and
@@ -2553,10 +2584,12 @@ Sand `Encode`. A manual `Encode` implementation for a type that also implements
 `IntoVmValue` must preserve this equality.
 
 `value::Decode` is the Rust counterpart of the Sand `Decode` trait.
-`Value::decode::<T>()` converts a `Value` into a `T`. Each Rust type that
-implements `Encode` also implements `Decode`, except references and unsized
-types such as `str`. `decode` accepts the `Value` that `Encode::encode` and
-`Encoded<N>` produce. It also accepts the `Value` that parsing JSON text
+`Value::decode::<T>()` converts a `Value` into a `T`. Standard Rust primitives,
+collections, tuples, `Value`, and every `ValueType` implement `Decode`, and
+`SandStruct` and `SandEnum` derive it. `Decode` does not require `Encode`.
+`decode` reads with the rules and the messages of a Sand `Decoder` of the same
+`Value` (`Decoder::from_value`). It accepts the `Value` that `Encode::encode`
+and `Encoded<N>` produce. It also accepts the `Value` that parsing JSON text
 gives, so that a host can decode data that comes from JSON:
 
 | Type              | Other accepted `Value`                                                  |
@@ -2576,8 +2609,10 @@ The payload in a `Map` is a `List`, or a `Map` with `Str` keys for a variant
 with named fields. `decode` reads a `json.Json` variant as its JSON form, such
 as `Value::Int(1)` for `Json.Int(1)`. It ignores the type names of structs,
 variants, and native values. It matches fields and variants by name and
-ignores unknown struct fields, as `json.decode` does. An omitted field takes
-its `#[sand(default)]` value, or `None` if the field is an `Option`.
+ignores unknown struct fields, as `json.decode` does. A derived struct reads
+its fields in the order of the input, as a Sand `Decoder` does. An omitted
+field takes its `#[sand(default)]` value, or `None` if the field is an
+`Option`.
 
 If a part of the `Value` does not match, `decode` returns a `DecodeError`. Its
 `Display` form starts with the path of the part, such as

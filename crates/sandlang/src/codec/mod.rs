@@ -10,7 +10,8 @@
 //!
 //! A `Decoder` keeps the path of the part being decoded. A failed decode
 //! returns at once through `?`, so the path at the top is the path of the
-//! failure.
+//! failure. Both objects check that each call of an implementation writes or
+//! reads exactly one value (`protocol.rs`).
 
 pub(crate) mod fast;
 mod protocol;
@@ -276,6 +277,11 @@ pub(crate) trait DecodeFormat: Any + Send {
 }
 
 /// A destination of `Encode`, created by a format such as `json.encode`.
+///
+/// Each call of an `encode` writes exactly one value, usually with
+/// `e.encode(x)`. A call that writes no value or two stops the encode with a
+/// runtime error. After the encode ends, each use of the encoder is a runtime
+/// error.
 #[derive(crate::SandObject)]
 #[sand(module = "prelude")]
 pub struct Encoder {
@@ -287,6 +293,12 @@ pub struct Encoder {
 }
 
 /// A source of `Decode`, created by a format such as `json.decode`.
+///
+/// Each call of a `decode` reads exactly one value, usually with
+/// `d.decode()`. A call that reads no value or two fails with an error of
+/// kind `"invalid"`. A failed `d.decode()` leaves the input at the start of
+/// its value, so a `decode` can read the value as another type. After
+/// `finish`, each use of the decoder is a runtime error.
 #[derive(crate::SandObject)]
 #[sand(module = "prelude")]
 pub struct Decoder {

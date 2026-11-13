@@ -326,7 +326,9 @@ pub trait Hash: Eq {}
 /// print(json.encode(Money(cents: 1250, currency: "USD")))  // "12.50 USD"
 /// ```
 pub trait Encode {
-    /// Writes `self` to `e`.
+    /// Writes `self` to `e` as exactly one value, usually with
+    /// `e.encode(x)`. A call that writes no value or two stops the encode
+    /// with a runtime error of kind `"invalid"`.
     fn encode(self, e: Encoder)
 }
 
@@ -359,7 +361,10 @@ pub trait Encode {
 /// print(e)  // Err(Error(message: "$[1]: invalid email", kind: "invalid"))
 /// ```
 pub trait Decode {
-    /// Reads a value of this type from `d`.
+    /// Reads a value of this type from `d` as exactly one value, usually with
+    /// `d.decode()`. A call that reads no value or two fails with kind
+    /// `"invalid"`. A failed `d.decode()` leaves the input at the start of
+    /// its value, so the call can read the value as another type.
     fn decode(d: Decoder) -> Result<Self>
 
     /// Returns the value of an omitted struct field of this type, or `None`
