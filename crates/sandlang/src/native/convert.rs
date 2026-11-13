@@ -626,7 +626,7 @@ pub fn encode_value_type<T: ValueType>(type_name: &TypeNameCell, x: &T) -> Value
 #[doc(hidden)]
 pub fn decode_value_type<T: ValueType>(r: &mut crate::value::ValueReader<'_>) -> Result<T, DecodeError> {
     let name = qualified_name(qualified_name_module(T::MODULE), T::NAME);
-    let text = crate::value::decode_scalar(r, |n, in_key| n.native_text(&name, in_key).map(str::to_owned))?;
+    let text = crate::value::decode_scalar(r, |n, _| n.native_text(&name).map(str::to_owned))?;
     T::parse(&text).map_err(|e| r.error(e))
 }
 

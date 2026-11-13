@@ -78,31 +78,15 @@ impl<'a> InputNode<'a> {
         })
     }
 
-    /// The JSON object key text of the node, for a message.
-    fn key_text(&self) -> Cow<'a, str> {
-        match *self {
-            InputNode::Str(s) | InputNode::Native(_, s) => Cow::Borrowed(s),
-            InputNode::Int(i) => Cow::Owned(i.to_string()),
-            InputNode::Bool(b) => Cow::Borrowed(if b { "true" } else { "false" }),
-            InputNode::Duration(d) => Cow::Owned(d.as_nanos().to_string()),
-            InputNode::Value(v) => key_text(v),
-            _ => self.kind(),
-        }
-    }
-
-    /// The error for a node that is not a value of `expected`. A map key
-    /// (`in_key`) gets the message of an invalid key.
-    pub(crate) fn mismatch(&self, expected: &str, in_key: bool) -> InputMismatch {
-        if in_key {
-            return invalid_key(&self.key_text());
-        }
+    /// The error for a node that is not a value of `expected`.
+    pub(crate) fn mismatch(&self, expected: &str) -> InputMismatch {
         InputMismatch(format!("expected {expected}, found {}", self.kind()))
     }
 
-    pub(crate) fn unit(&self, in_key: bool) -> InputResult<()> {
+    pub(crate) fn unit(&self) -> InputResult<()> {
         match self {
             InputNode::Unit => Ok(()),
-            _ => Err(self.mismatch("()", in_key)),
+            _ => Err(self.mismatch("()")),
         }
     }
 
@@ -110,7 +94,7 @@ impl<'a> InputNode<'a> {
         match *self {
             InputNode::Bool(b) => Ok(b),
             InputNode::Str(s) if in_key && (s == "true" || s == "false") => Ok(s == "true"),
-            _ => Err(self.mismatch("bool", in_key)),
+            _ => Err(self.mismatch("bool")),
         }
     }
 
@@ -121,10 +105,10 @@ impl<'a> InputNode<'a> {
             InputNode::Float(f) => match integral_float_to_int(f) {
                 Some(i) => Ok(i),
                 None if f.is_finite() && f.fract() == 0.0 && !in_key => Err(InputMismatch("integer out of range".into())),
-                None => Err(self.mismatch(expected, in_key)),
+                None => Err(self.mismatch(expected)),
             },
             InputNode::Str(s) if in_key => s.parse().map_err(|_| invalid_key(s)),
-            _ => Err(self.mismatch(expected, in_key)),
+            _ => Err(self.mismatch(expected)),
         }
     }
 
@@ -132,11 +116,11 @@ impl<'a> InputNode<'a> {
         self.integer("int", in_key)
     }
 
-    pub(crate) fn float(&self, in_key: bool) -> InputResult<f64> {
+    pub(crate) fn float(&self) -> InputResult<f64> {
         match *self {
             InputNode::Float(f) => Ok(f),
             InputNode::Int(i) => Ok(i as f64),
-            _ => Err(self.mismatch("float", in_key)),
+            _ => Err(self.mismatch("float")),
         }
     }
 
@@ -148,27 +132,27 @@ impl<'a> InputNode<'a> {
         }
     }
 
-    pub(crate) fn str(&self, in_key: bool) -> InputResult<&'a str> {
+    pub(crate) fn str(&self) -> InputResult<&'a str> {
         match *self {
             InputNode::Str(s) => Ok(s),
-            _ => Err(self.mismatch("str", in_key)),
+            _ => Err(self.mismatch("str")),
         }
     }
 
     /// Reads bytes, or their standard Base64 text.
-    pub(crate) fn bytes(&self, in_key: bool) -> InputResult<Cow<'a, [u8]>> {
+    pub(crate) fn bytes(&self) -> InputResult<Cow<'a, [u8]>> {
         match *self {
             InputNode::Bytes(b) => Ok(Cow::Borrowed(b)),
             InputNode::Str(s) => base64::decode(s, false).map(Cow::Owned).map_err(|_| InputMismatch("invalid base64".into())),
-            _ => Err(self.mismatch("bytes", in_key)),
+            _ => Err(self.mismatch("bytes")),
         }
     }
 
     /// Reads the text of a value of the native value type `name`.
-    pub(crate) fn native_text(&self, name: &str, in_key: bool) -> InputResult<&'a str> {
+    pub(crate) fn native_text(&self, name: &str) -> InputResult<&'a str> {
         match *self {
             InputNode::Native(_, text) | InputNode::Str(text) => Ok(text),
-            _ => Err(self.mismatch(name, in_key)),
+            _ => Err(self.mismatch(name)),
         }
     }
 }
@@ -189,7 +173,7 @@ pub(crate) fn range_of<'a>(entries: impl Iterator<Item = (InputNode<'a>, InputNo
             InputNode::Str("end") => end = Some(value.int(false)?),
             InputNode::Str("inclusive") => inclusive = value.bool(false)?,
             InputNode::Str(_) => {}
-            key => return Err(key.mismatch("str key", false)),
+            key => return Err(key.mismatch("str key")),
         }
     }
     match (start, end) {
@@ -421,7 +405,7 @@ impl<'v> ValueReader<'v> {
     fn mismatch(&self, node: &Value, expected: &str) -> ReadFail {
         match self.key_root() {
             Some(key) => invalid_key(&key_text(key)).into(),
-            None => InputNode::of(node).mismatch(expected, false).into(),
+            None => InputNode::of(node).mismatch(expected).into(),
         }
     }
 
@@ -443,9 +427,10 @@ impl<'v> ValueReader<'v> {
         let node = self.node()?;
         // Only a whole key has a key text, such as `"1"` for the `int` key `1`.
         let whole_key = self.key.is_some_and(|k| k + 1 == self.open.len());
+        // Each failure in a map key is the failure of the whole key.
         read(InputNode::of(node), whole_key).map_err(|e| match self.key_root() {
-            Some(key) if !whole_key => invalid_key(&key_text(key)).into(),
-            _ => e.into(),
+            Some(key) => invalid_key(&key_text(key)).into(),
+            None => e.into(),
         })
     }
 
@@ -462,7 +447,7 @@ impl<'v> ValueReader<'v> {
         self.read(|node, _| match node {
             InputNode::Range(start, end, inclusive) => Ok((start, end, inclusive)),
             InputNode::Value(Value::Map(entries)) if !in_key => range_of(entries.iter().map(|(k, v)| (InputNode::of(k), InputNode::of(v)))),
-            node => Err(node.mismatch("Range", in_key)),
+            node => Err(node.mismatch("Range")),
         })
     }
 
@@ -704,7 +689,7 @@ impl<'v> ValueReader<'v> {
             };
             let node = without_json_variant(&top.node);
             if !matches!(node, Value::Variant(v) if v.variant.fields.is_some()) {
-                return Err(InputNode::of(node).mismatch("map", false).into());
+                return Err(InputNode::of(node).mismatch("map").into());
             }
             top.parts = Parts::PayloadFields;
             self.payload = false;
@@ -714,7 +699,7 @@ impl<'v> ValueReader<'v> {
             Value::Struct(s) => (Parts::Fields, s.fields.len()),
             Value::Map(entries) => {
                 if let Some((key, _)) = entries.iter().find(|(k, _)| !matches!(without_json_variant(k), Value::Str(_))) {
-                    return Err(InputNode::of(key).mismatch("str key", false).into());
+                    return Err(InputNode::of(key).mismatch("str key").into());
                 }
                 (Parts::MapFields, entries.len())
             }
@@ -777,7 +762,7 @@ impl<'v> ValueReader<'v> {
             Value::Variant(variant) => !variant.payload.is_empty(),
             Value::Map(entries) if entries.len() == 1 => match without_json_variant(&entries[0].0) {
                 Value::Str(_) => true,
-                key => return Err(InputNode::of(key).mismatch("str key", false).into()),
+                key => return Err(InputNode::of(key).mismatch("str key").into()),
             },
             Value::Map(entries) => {
                 let what = if entries.is_empty() { "expected a variant" } else { "expected a single variant" };
@@ -835,13 +820,12 @@ impl<'v> ValueReader<'v> {
                 if payload {
                     self.end_variant();
                 }
-                let tag = crate::stdlib::truncate(&tag, QUOTED_KEY);
-                return Err(self.error(format!("unknown variant `{tag}` of {name}")));
+                return Err(self.error(super::fast::unknown_variant(&tag, name)));
             }
         };
         match (payload, len) {
             (false, 0) => {}
-            (false, _) => return Err(self.error(format!("variant `{tag}` of {name} needs a payload"))),
+            (false, _) => return Err(self.error(super::fast::needs_payload(&tag, name))),
             (true, 0) => {
                 // A payload-less variant in object form has an empty payload.
                 self.begin_tuple(0)?;

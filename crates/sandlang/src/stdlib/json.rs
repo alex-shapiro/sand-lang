@@ -92,7 +92,7 @@ impl Decode for Json {
             Value::Str(s) => Json::Str(s.clone()),
             Value::List(_) => return Vec::decode(r).map(Json::Arr),
             Value::Map(_) => return indexmap::IndexMap::decode(r).map(Json::Obj),
-            _ => return crate::value::decode_scalar(r, |n, in_key| Err(n.mismatch("Json", in_key))),
+            _ => return crate::value::decode_scalar(r, |n, _| Err(n.mismatch("Json"))),
         };
         r.skip();
         Ok(scalar)

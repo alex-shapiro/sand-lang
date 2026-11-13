@@ -551,7 +551,7 @@ impl ValueDecoder {
 
 impl DecodeFormat for ValueDecoder {
     fn unit(&mut self, _: &mut Vm) -> DecodeResult<()> {
-        Ok(self.reader.read(|n, in_key| n.unit(in_key))?)
+        Ok(self.reader.read(|n, _| n.unit())?)
     }
 
     fn bool(&mut self, _: &mut Vm) -> DecodeResult<bool> {
@@ -563,7 +563,7 @@ impl DecodeFormat for ValueDecoder {
     }
 
     fn float(&mut self, _: &mut Vm) -> DecodeResult<f64> {
-        Ok(self.reader.read(|n, in_key| n.float(in_key))?)
+        Ok(self.reader.read(|n, _| n.float())?)
     }
 
     fn duration(&mut self, _: &mut Vm) -> DecodeResult<i64> {
@@ -571,7 +571,7 @@ impl DecodeFormat for ValueDecoder {
     }
 
     fn str(&mut self, vm: &mut Vm) -> DecodeResult<VmValue> {
-        let s = self.reader.peek(|n, in_key| n.str(in_key))?;
+        let s = self.reader.peek(|n, _| n.str())?;
         if s.len() > 1024 {
             vm.check_memory(s.len())?;
         }
@@ -582,7 +582,7 @@ impl DecodeFormat for ValueDecoder {
     }
 
     fn bytes(&mut self, vm: &mut Vm) -> DecodeResult<VmValue> {
-        let b = self.reader.peek(|n, in_key| n.bytes(in_key))?;
+        let b = self.reader.peek(|n, _| n.bytes())?;
         vm.check_memory(b.len())?;
         vm.charge_bytes(b.len())?;
         let v = vm.heap.new_bytes(b.into_owned());
@@ -591,7 +591,7 @@ impl DecodeFormat for ValueDecoder {
     }
 
     fn native_text(&mut self, _: &mut Vm, name: &str) -> DecodeResult<String> {
-        Ok(self.reader.read(|n, in_key| n.native_text(name, in_key).map(str::to_owned))?)
+        Ok(self.reader.read(|n, _| n.native_text(name).map(str::to_owned))?)
     }
 
     fn range(&mut self, _: &mut Vm) -> DecodeResult<(i64, i64, bool)> {

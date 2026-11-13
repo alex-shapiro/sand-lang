@@ -22,7 +22,6 @@ use crate::native::convert::{FromVmValue, HostError, IntoVmValue};
 use crate::native::ty::{CodecDict, Param, VmVal};
 use crate::native::{NativeModule, NativeObject};
 use crate::stdlib::core;
-use crate::syntax::lexer::is_ident;
 use crate::types::traits;
 use crate::value::Value;
 use crate::vm::value::{Obj, ObjectValues, VALUE_SIZE, VmValue};
@@ -38,7 +37,7 @@ use std::fmt::Write;
 /// such as a cyclic one, fails with a limit error.
 pub(crate) const MAX_NESTING_DEPTH: usize = 512;
 
-/// The longest key text that an error message quotes.
+/// The longest key text that an error message or a path quotes.
 pub(crate) const QUOTED_KEY: usize = 64;
 
 /// Bytes of a format's buffers that the heap counts before it checks the
@@ -794,17 +793,7 @@ pub(crate) fn read_whole<F: DecodeFormat>(vm: &mut Vm, f: &mut F, schema: Schema
 /// `$.items[2].price`.
 fn path_text(vm: &Vm, frames: &[Frame]) -> String {
     let mut s = String::from("$");
-    let key = |s: &mut String, k: &str| {
-        let k = crate::stdlib::truncate(k, QUOTED_KEY);
-        if is_ident(k) {
-            s.push('.');
-            s.push_str(k);
-        } else {
-            s.push('[');
-            crate::stdlib::json::write_str(s, k);
-            s.push(']');
-        }
-    };
+    let key = crate::value::write_key_segment;
     for f in frames {
         match f {
             // A part of a map key is at the path of the map.
@@ -1189,18 +1178,7 @@ fn next_field(f: &mut dyn DecodeFormat, frames: &mut Vec<Frame>, vm: &mut Vm) ->
                 frames.pop();
                 return Ok(-1);
             };
-            let names = field_names(vm, id, variant);
-            if names.get(guess).is_some_and(|n| *n == *key) {
-                Some(guess)
-            } else {
-                vm.charge(1)?;
-                let index = if variant {
-                    vm.prog.variants.get(id as usize).map(|v| &v.by_name)
-                } else {
-                    vm.prog.types.get(id as usize).map(|t| &t.by_name)
-                };
-                index.and_then(|index| crate::vm::bytecode::field_index(names, index, &key))
-            }
+            fast::find_field(vm, &vm.prog, id, variant, field_names(vm, id, variant), guess, &key)?
         };
         match found {
             Some(i) => {
@@ -1221,16 +1199,14 @@ fn read_variant(f: &mut dyn DecodeFormat, frames: &mut Vec<Frame>, vm: &mut Vm, 
     let Some(def) = vm.prog.variants.get(first as usize).map(|v| v.def) else { return Err(Fail::internal("variant: unknown enum").into()) };
     let enum_name = type_name(vm, def);
     let (name, payload) = f.variant(vm, &enum_name)?;
-    vm.charge(1 + (count / 16) as u64)?;
     let variants = &vm.prog.variants[first as usize..(first as usize + count).min(vm.prog.variants.len())];
-    let Some(i) = variants.iter().position(|v| v.name == *name) else {
-        let tag = crate::stdlib::truncate(&name, QUOTED_KEY).to_string();
-        return Err(DecodeFail::Mismatch(format!("unknown variant `{tag}` of {enum_name}")));
+    let Some(i) = fast::find_variant(vm, variants, &name)? else {
+        return Err(DecodeFail::Mismatch(fast::unknown_variant(&name, &enum_name)));
     };
     let arity = variants[i].arity;
     if !payload {
         if arity > 0 {
-            return Err(DecodeFail::Mismatch(format!("variant `{name}` of {enum_name} needs a payload")));
+            return Err(DecodeFail::Mismatch(fast::needs_payload(&name, &enum_name)));
         }
         return Ok(i as i64);
     }

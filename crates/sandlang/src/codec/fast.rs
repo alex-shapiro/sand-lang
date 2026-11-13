@@ -17,7 +17,7 @@
 
 use super::{DecodeFail, DecodeFormat, DecodePath, DecodeResult, EncodeFormat, Frame, SeqKind};
 use crate::types::ConstVal;
-use crate::vm::bytecode::Program;
+use crate::vm::bytecode::{Program, VariantRt};
 use crate::vm::value::{MapObj, Obj, SetObj, VmValue};
 use crate::vm::{Fail, Vm, internal};
 
@@ -565,16 +565,7 @@ impl<'p> DecodeWalk<'p> {
             DecodeFrame::Fields { parts, names, id, variant, field, guess, .. } => loop {
                 let found = {
                     let Some(key) = f.next_field(vm)? else { return Ok(None) };
-                    if names.get(*guess).is_some_and(|n| *n == *key) {
-                        Some(*guess)
-                    } else {
-                        vm.charge(1)?;
-                        let by_name = match *variant {
-                            true => self.prog.variants.get(*id as usize).map(|v| &v.by_name),
-                            false => self.prog.types.get(*id as usize).map(|t| &t.by_name),
-                        };
-                        by_name.and_then(|by_name| crate::vm::bytecode::field_index(names, by_name, &key))
-                    }
+                    find_field(vm, self.prog, *id, *variant, names, *guess, &key)?
                 };
                 match found {
                     Some(i) => {
@@ -753,13 +744,9 @@ impl<'p> DecodeWalk<'p> {
         let enum_name = self.type_name(rts.first().map_or(0, |v| v.def));
         let (k, has_payload) = {
             let (name, has_payload) = f.variant(vm, enum_name)?;
-            vm.charge(1 + (variants.len() / 16) as u64)?;
-            let Some(k) = rts.iter().position(|v| v.name == *name) else {
-                let tag = crate::stdlib::truncate(&name, super::QUOTED_KEY);
-                return Err(DecodeFail::Mismatch(format!("unknown variant `{tag}` of {enum_name}")));
-            };
+            let Some(k) = find_variant(vm, rts, &name)? else { return Err(DecodeFail::Mismatch(unknown_variant(&name, enum_name))) };
             if !has_payload && !variants[k].is_empty() {
-                return Err(DecodeFail::Mismatch(format!("variant `{name}` of {enum_name} needs a payload")));
+                return Err(DecodeFail::Mismatch(needs_payload(&name, enum_name)));
             }
             (k, has_payload)
         };
@@ -818,6 +805,50 @@ impl<'p> DecodeWalk<'p> {
             });
         }
     }
+}
+
+/// Returns the index of the field `key` of struct definition `id`, or of
+/// the named payload of variant `id`, whose fields have the names `names`.
+/// Tries `guess` first, and charges a fuel unit for a lookup by name.
+#[inline(always)]
+pub(crate) fn find_field(
+    vm: &Vm,
+    prog: &Program,
+    id: u32,
+    variant: bool,
+    names: &[String],
+    guess: usize,
+    key: &str,
+) -> Result<Option<usize>, Fail> {
+    if names.get(guess).is_some_and(|n| n == key) {
+        return Ok(Some(guess));
+    }
+    vm.charge(1)?;
+    let by_name = match variant {
+        true => prog.variants.get(id as usize).map(|v| &v.by_name),
+        false => prog.types.get(id as usize).map(|t| &t.by_name),
+    };
+    Ok(by_name.and_then(|by_name| crate::vm::bytecode::field_index(names, by_name, key)))
+}
+
+/// Returns the index of the variant `tag` among `variants`, the variants of
+/// an enum, and charges the fuel of the lookup.
+#[inline(always)]
+pub(crate) fn find_variant(vm: &Vm, variants: &[VariantRt], tag: &str) -> Result<Option<usize>, Fail> {
+    vm.charge(1 + (variants.len() / 16) as u64)?;
+    Ok(variants.iter().position(|v| v.name == tag))
+}
+
+/// The message for the variant `tag`, which the enum `enum_name` does not
+/// have.
+pub(crate) fn unknown_variant(tag: &str, enum_name: &str) -> String {
+    format!("unknown variant `{}` of {enum_name}", crate::stdlib::truncate(tag, super::QUOTED_KEY))
+}
+
+/// The message for the variant `tag` of the enum `enum_name`, whose payload
+/// the input does not have.
+pub(crate) fn needs_payload(tag: &str, enum_name: &str) -> String {
+    format!("variant `{tag}` of {enum_name} needs a payload")
 }
 
 /// Returns `true` if a value of schema `s` is one format operation.

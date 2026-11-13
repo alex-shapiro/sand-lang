@@ -2,7 +2,7 @@
 //! decoder share, so that `json.decode` and `json.from_json` accept the same
 //! input and give the same messages.
 
-use crate::codec::{DecodeFail, DecodeResult, QUOTED_KEY, SeqKind};
+use crate::codec::{DecodeFail, DecodeResult, SeqKind};
 use crate::stdlib::base64;
 
 /// The kind of a JSON value, which a message names.
@@ -64,7 +64,7 @@ pub(super) fn seq_expected(kind: SeqKind) -> std::borrow::Cow<'static, str> {
 
 /// The error for the map key text `key` that the key type cannot read.
 pub(super) fn invalid_key(key: &str) -> DecodeFail {
-    DecodeFail::Mismatch(format!("invalid map key `{}`", crate::stdlib::truncate(key, QUOTED_KEY)))
+    crate::codec::value_input::invalid_key(key).into()
 }
 
 /// Reads a `bool` map key from its text.

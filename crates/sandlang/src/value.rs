@@ -578,13 +578,10 @@ impl fmt::Display for DecodeError {
 
 impl std::error::Error for DecodeError {}
 
-/// The most characters of a key that a path shows.
-const PATH_KEY_CHARS: usize = 64;
-
 /// Writes the path segment for the object key `key`, such as `.price` or
 /// `["unit price"]`.
 pub(crate) fn write_key_segment(out: &mut String, key: &str) {
-    let key = crate::stdlib::truncate(key, PATH_KEY_CHARS);
+    let key = crate::stdlib::truncate(key, crate::codec::QUOTED_KEY);
     if crate::syntax::lexer::is_ident(key) {
         out.push('.');
         out.push_str(key);
@@ -611,7 +608,7 @@ pub(crate) fn key_text(key: &Value) -> Cow<'_, str> {
 
 impl Decode for Never {
     fn decode(r: &mut ValueReader<'_>) -> Result<Never, DecodeError> {
-        decode_scalar(r, |n, in_key| Err(n.mismatch("no value", in_key)))
+        decode_scalar(r, |n, _| Err(n.mismatch("no value")))
     }
 }
 
@@ -631,7 +628,7 @@ pub(crate) fn decode_scalar<T>(
 
 impl Decode for () {
     fn decode(r: &mut ValueReader<'_>) -> Result<(), DecodeError> {
-        decode_scalar(r, |n, in_key| n.unit(in_key))
+        decode_scalar(r, |n, _| n.unit())
     }
 }
 
@@ -649,7 +646,7 @@ impl Decode for i64 {
 
 impl Decode for f64 {
     fn decode(r: &mut ValueReader<'_>) -> Result<f64, DecodeError> {
-        decode_scalar(r, |n, in_key| n.float(in_key))
+        decode_scalar(r, |n, _| n.float())
     }
 }
 
@@ -661,13 +658,13 @@ impl Decode for jiff::SignedDuration {
 
 impl Decode for String {
     fn decode(r: &mut ValueReader<'_>) -> Result<String, DecodeError> {
-        decode_scalar(r, |n, in_key| n.str(in_key).map(str::to_owned))
+        decode_scalar(r, |n, _| n.str().map(str::to_owned))
     }
 }
 
 impl Decode for Vec<u8> {
     fn decode(r: &mut ValueReader<'_>) -> Result<Vec<u8>, DecodeError> {
-        decode_scalar(r, |n, in_key| n.bytes(in_key).map(Cow::into_owned))
+        decode_scalar(r, |n, _| n.bytes().map(Cow::into_owned))
     }
 }
 

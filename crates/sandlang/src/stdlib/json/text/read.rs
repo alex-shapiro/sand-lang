@@ -12,7 +12,7 @@
 
 use super::super::{Number, Parser};
 use super::TextDecoder;
-use crate::codec::fast::{FieldDefault, Schema, SchemaId, omitted_field};
+use crate::codec::fast::{FieldDefault, Schema, SchemaId, find_field, find_variant, omitted_field};
 use crate::vm::bytecode::Program;
 use crate::vm::meter::SLOW_BYTES_PER_UNIT;
 use crate::vm::value::{MapObj, Obj, VmValue};
@@ -343,8 +343,7 @@ impl<'p> Reader<'_, 'p> {
                 return Err(Fallback::General);
             }
         }
-        vm.charge(1 + (variants.len() / 16) as u64)?;
-        let Some(k) = rts.iter().position(|v| v.name == *tag) else { return Err(Fallback::General) };
+        let Some(k) = find_variant(vm, rts, &tag)? else { return Err(Fallback::General) };
         let id = first + k as u32;
         let parts = &variants[k][..];
         if !is_object {
@@ -456,17 +455,7 @@ impl<'p> Reader<'_, 'p> {
                 let Some(Frame::Fields { parts, names, id, variant, field, guess, .. }) = self.stack.last_mut() else {
                     return Err(Fallback::General);
                 };
-                let found = match names.get(*guess).is_some_and(|n| *n == *key) {
-                    true => Some(*guess),
-                    false => {
-                        vm.charge(1)?;
-                        let by_name = match *variant {
-                            true => self.prog.variants.get(*id as usize).map(|v| &v.by_name),
-                            false => self.prog.types.get(*id as usize).map(|t| &t.by_name),
-                        };
-                        by_name.and_then(|by_name| crate::vm::bytecode::field_index(names, by_name, &key))
-                    }
-                };
+                let found = find_field(vm, self.prog, *id, *variant, names, *guess, &key)?;
                 match found {
                     Some(i) => {
                         (*field, *guess) = (i, i + 1);
