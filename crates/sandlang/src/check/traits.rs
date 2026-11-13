@@ -902,7 +902,7 @@ impl Checker {
         let id = self.new_lambda();
         let params_ty = inst.params.clone();
         let lenient = move |c: &Self, t: TypeId| matches!(c.rty(t), Ty::Var(_)) && params_ty.iter().any(|&p| c.occurs_in(t, p));
-        let mut args = self.hidden_args(f, &inst.fresh, &inst.dicts, "function value", &lenient, span);
+        let mut args = self.hidden_args(&inst.dicts, &lenient, span);
         let mut params = Vec::new();
         for &t in &inst.params {
             self.fs.locals.push(LocalInfo { name: Symbol::ARG, mutable: false, owner: id, cell: false, span });
@@ -919,17 +919,9 @@ impl Checker {
         mk(HKind::Lambda(Box::new(lam)), fty, span)
     }
 
-    /// Builds hidden call arguments for `f`: trait evidence placeholders.
-    pub(crate) fn hidden_args(
-        &mut self,
-        f: FnId,
-        fresh: &[TypeId],
-        dicts: &[(TypeId, TraitRef)],
-        what: &'static str,
-        lenient: &dyn Fn(&Self, TypeId) -> bool,
-        span: Span,
-    ) -> Vec<HArg> {
-        let _ = (f, fresh, what);
+    /// Builds the hidden arguments of a call: a trait evidence placeholder
+    /// for each of `dicts`.
+    pub(crate) fn hidden_args(&mut self, dicts: &[(TypeId, TraitRef)], lenient: &dyn Fn(&Self, TypeId) -> bool, span: Span) -> Vec<HArg> {
         let mut out = Vec::new();
         for &(t, tr) in dicts {
             let lenient = lenient(self, t);

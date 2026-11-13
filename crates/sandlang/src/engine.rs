@@ -1469,9 +1469,9 @@ impl Engine {
             _ => None,
         };
         let has_natives = g.has_natives(&g.order);
-        let (base, registry, optimize) = (snap.clone(), self.registry().clone(), (self.config.optimize, self.config.codec_fast_path));
-        let (program, lints) =
-            on_compile_stack(move || compile_program(&base, &mut g, &registry, &budget, main_file, options.lint, optimize, spare))?;
+        let (base, registry) = (snap.clone(), self.registry().clone());
+        let check = CheckOptions { lint: options.lint, optimize: self.config.optimize, codec_fast_path: self.config.codec_fast_path };
+        let (program, lints) = on_compile_stack(move || compile_program(&base, &mut g, &registry, &budget, main_file, check, spare))?;
         let host_modules = self.config.host_modules.clone();
         Ok(Compiled { program, host_modules, lints, deadline, snapshot: (!has_natives).then_some(snap) })
     }
@@ -1816,19 +1816,26 @@ impl From<Trap> for Error {
 
 type ImportFrame = (usize, Vec<ImportRef>, usize);
 
+/// How [`compile_program`] checks a program.
+struct CheckOptions {
+    /// Whether to lint the main module.
+    lint: bool,
+    optimize: bool,
+    codec_fast_path: bool,
+}
+
 /// Checks and compiles the modules of `g` (in `g.order`; the main module is
 /// in `main_file`) on top of the snapshot `snap`.
-#[allow(clippy::too_many_arguments)]
 fn compile_program(
     snap: &Snapshot,
     g: &mut ModuleGraph,
     registry: &Registry,
     budget: &Arc<CompileBudget>,
     main_file: FileId,
-    lint: bool,
-    (optimize, codec_fast_path): (bool, bool),
+    check: CheckOptions,
     spare: Option<Program>,
 ) -> Result<(Arc<Program>, Option<Vec<crate::lint::LintWarning>>), Error> {
+    let CheckOptions { lint, optimize, codec_fast_path } = check;
     let order = g.order.clone();
     let modules =
         g.parse(&order, snap.checker.mods.len() as ModId).map_err(|ds| Error::Compile(ds.iter().map(|d| g.sm.resolve(d)).collect()))?;

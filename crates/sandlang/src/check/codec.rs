@@ -584,6 +584,23 @@ impl Checker {
     }
 }
 
+/// The owner of the fields that a synthesized `decode` reads.
+#[derive(Clone, Copy)]
+enum FieldOwner {
+    Struct(TypeDefId),
+    /// A variant with named fields, by its runtime id.
+    Variant(u32),
+}
+
+/// The fields that a synthesized `decode` reads: their owner, their types,
+/// the default helper of each field, and the type arguments of the owner.
+struct FieldSet<'a> {
+    owner: FieldOwner,
+    tys: &'a [TypeId],
+    defaults: &'a [Option<FnId>],
+    targs: &'a [TypeId],
+}
+
 /// Builds HIR for a derived method.
 struct Synth {
     span: Span,
@@ -789,9 +806,9 @@ impl Synth {
                 match c.types[d as usize].kind.clone() {
                     TypeDefKind::Struct { fields } => {
                         let tys: Vec<TypeId> = (0..fields.len()).map(|i| c.field_type(d, i, &args)).collect();
-                        let open = self.dec_op(c, dec, "begin_struct", vec![self.int(d as i64)], TypeId::UNIT);
                         let defaults: Vec<Option<FnId>> = fields.iter().map(|f| f.default).collect();
-                        let (mut items, values) = self.fields(c, dec, open, (d, false), &tys, &defaults, &args);
+                        let set = FieldSet { owner: FieldOwner::Struct(d), tys: &tys, defaults: &defaults, targs: &args };
+                        let (mut items, values) = self.fields(c, dec, &set);
                         items.push(self.e(HKind::MakeStruct { def: d, fields: values }, target));
                         self.block(items, target)
                     }
@@ -806,8 +823,8 @@ impl Synth {
                             let body = if tys.is_empty() {
                                 self.e(HKind::Tag(v.rt_id), target)
                             } else if v.field_names.is_some() {
-                                let open = self.dec_op(c, dec, "begin_fields", vec![self.int(v.rt_id as i64)], TypeId::UNIT);
-                                let (mut items, values) = self.fields(c, dec, open, (v.rt_id, true), &tys, &vec![None; tys.len()], &args);
+                                let set = FieldSet { owner: FieldOwner::Variant(v.rt_id), tys: &tys, defaults: &[], targs: &args };
+                                let (mut items, values) = self.fields(c, dec, &set);
                                 items.push(self.dec_op(c, dec, "end_variant", vec![], TypeId::UNIT));
                                 items.push(self.e(HKind::MakeVariant { rt_id: v.rt_id, args: values }, target));
                                 self.block(items, target)
@@ -851,19 +868,14 @@ impl Synth {
         self.e(HKind::Assign { place: Place::Local(l), op: None, op_ty: ty, value: Box::new(value) }, TypeId::UNIT)
     }
 
-    /// Builds the statements that read the fields of types `tys` after `open`,
-    /// fill each omitted field, and return the field values.
-    #[allow(clippy::too_many_arguments)]
-    fn fields(
-        &self,
-        c: &mut Checker,
-        dec: LocalId,
-        open: HExpr,
-        owner: (u32, bool),
-        tys: &[TypeId],
-        defaults: &[Option<FnId>],
-        targs: &[TypeId],
-    ) -> (Vec<HExpr>, Vec<HExpr>) {
+    /// Builds the statements that read the fields of `set`, fill each
+    /// omitted field, and return the field values.
+    fn fields(&self, c: &mut Checker, dec: LocalId, set: &FieldSet) -> (Vec<HExpr>, Vec<HExpr>) {
+        let tys = set.tys;
+        let open = match set.owner {
+            FieldOwner::Struct(d) => self.dec_op(c, dec, "begin_struct", vec![self.int(d as i64)], TypeId::UNIT),
+            FieldOwner::Variant(id) => self.dec_op(c, dec, "begin_fields", vec![self.int(id as i64)], TypeId::UNIT),
+        };
         let mut items = vec![open];
         let slots: Vec<LocalId> = tys.iter().map(|&t| c.hidden_local(t, self.span)).collect();
         let seen: Vec<LocalId> = tys.iter().map(|_| c.hidden_local(TypeId::BOOL, self.span)).collect();
@@ -892,7 +904,7 @@ impl Synth {
         body.push(self.e(HKind::Match { scrut: Box::new(self.local(c, index)), arms }, TypeId::UNIT));
         items.push(self.e(HKind::Loop(Box::new(self.block(body, TypeId::UNIT))), TypeId::UNIT));
         for (i, &t) in tys.iter().enumerate() {
-            let missing = self.missing(c, dec, owner, i, t, defaults.get(i).copied().flatten(), targs);
+            let missing = self.missing(c, dec, set, i);
             let unseen = self.e(HKind::Unary { op: HUnOp::Not, e: Box::new(self.local(c, seen[i])) }, TypeId::BOOL);
             let fill = self.assign(slots[i], t, missing);
             items.push(self.e(HKind::If { cond: Box::new(unseen), then: Box::new(fill), else_: None }, TypeId::UNIT));
@@ -901,26 +913,21 @@ impl Synth {
         (items, values)
     }
 
-    /// The value of the omitted field `i` of type `ty`: its default, `None`
-    /// for an `Option`, `T.decode_missing()` for a type parameter or a type
-    /// whose `Decode` defines it, or a return with a missing-field error.
-    #[allow(clippy::too_many_arguments)]
-    fn missing(
-        &self,
-        c: &mut Checker,
-        dec: LocalId,
-        owner: (u32, bool),
-        i: usize,
-        ty: TypeId,
-        default: Option<FnId>,
-        targs: &[TypeId],
-    ) -> HExpr {
-        if let Some(helper) = default {
-            let args = c.default_helper_evidence(helper, targs, self.span);
-            return self.e(HKind::Call { func: helper, targs: targs.to_vec(), args }, ty);
+    /// The value of the omitted field `i` of `set`: its default, `None` for
+    /// an `Option`, `T.decode_missing()` for a type parameter or a type whose
+    /// `Decode` defines it, or a return with a missing-field error.
+    fn missing(&self, c: &mut Checker, dec: LocalId, set: &FieldSet, i: usize) -> HExpr {
+        let ty = set.tys[i];
+        if let Some(helper) = set.defaults.get(i).copied().flatten() {
+            let args = c.default_helper_evidence(helper, set.targs, self.span);
+            return self.e(HKind::Call { func: helper, targs: set.targs.to_vec(), args }, ty);
         }
+        let (id, variant) = match set.owner {
+            FieldOwner::Struct(d) => (d, false),
+            FieldOwner::Variant(id) => (id, true),
+        };
         let ret_err = |s: &Self, c: &mut Checker| {
-            let args = vec![s.local(c, dec), s.int(owner.0 as i64), s.e(HKind::Bool(owner.1), TypeId::BOOL), s.int(i as i64)];
+            let args = vec![s.local(c, dec), s.int(id as i64), s.e(HKind::Bool(variant), TypeId::BOOL), s.int(i as i64)];
             let error = s.method(c, "Decoder", "missing", Vec::new(), args);
             let err_id = c.types[c.wk.result as usize].variants()[1].rt_id;
             let fty = c.fs.ctx.last().map_or(TypeId::ERROR, |x| x.ret);
@@ -956,66 +963,18 @@ impl Synth {
 /// Returns the `Encoder` or `Decoder` operation of the prelude impl of `b`
 /// for the scalar type `ty`, or `None` if `ty` is not a scalar.
 fn scalar_codec_op(c: &Checker, ty: TypeId, b: Builtin) -> Option<&'static str> {
-    let decode = b == Builtin::Decode;
-    Some(match c.arena.get(ty) {
-        Ty::Unit => {
-            if decode {
-                "read_unit"
-            } else {
-                "write_unit"
-            }
-        }
-        Ty::Bool => {
-            if decode {
-                "read_bool"
-            } else {
-                "write_bool"
-            }
-        }
-        Ty::Int => {
-            if decode {
-                "read_int"
-            } else {
-                "write_int"
-            }
-        }
-        Ty::Float => {
-            if decode {
-                "read_float"
-            } else {
-                "write_float"
-            }
-        }
-        Ty::Duration => {
-            if decode {
-                "read_duration"
-            } else {
-                "write_duration"
-            }
-        }
-        Ty::Str => {
-            if decode {
-                "read_str"
-            } else {
-                "write_str"
-            }
-        }
-        Ty::Bytes => {
-            if decode {
-                "read_bytes"
-            } else {
-                "write_bytes"
-            }
-        }
-        Ty::Range => {
-            if decode {
-                "read_range"
-            } else {
-                "write_range"
-            }
-        }
+    let (read, write) = match c.arena.get(ty) {
+        Ty::Unit => ("read_unit", "write_unit"),
+        Ty::Bool => ("read_bool", "write_bool"),
+        Ty::Int => ("read_int", "write_int"),
+        Ty::Float => ("read_float", "write_float"),
+        Ty::Duration => ("read_duration", "write_duration"),
+        Ty::Str => ("read_str", "write_str"),
+        Ty::Bytes => ("read_bytes", "write_bytes"),
+        Ty::Range => ("read_range", "write_range"),
         _ => return None,
-    })
+    };
+    Some(if b == Builtin::Decode { read } else { write })
 }
 
 /// Returns the schema of the native impl of `b` for `ty`, if `ty` has one.

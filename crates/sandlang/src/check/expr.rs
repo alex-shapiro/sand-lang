@@ -1586,7 +1586,7 @@ impl Checker {
         let Some(mut hargs) = self.bind_args(Callee::Fn(f), &ptys, recv, args, span) else {
             return mk(HKind::Error, ret, span);
         };
-        let mut hidden = self.hidden_args(f, &fresh, &dicts, "call", &|_, _| false, span);
+        let mut hidden = self.hidden_args(&dicts, &|_, _| false, span);
         if !hidden.is_empty() {
             let k = hidden.len();
             for a in &mut hargs {
