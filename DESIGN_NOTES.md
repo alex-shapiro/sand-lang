@@ -841,3 +841,71 @@ item; value-decode, C9, C10):
 
 Fuel is the same (`decode` 45.7, `decode_ints` 10, `small_decode` 16).
 The differential test passed 10000 cases (with `retry_stress`).
+
+### C11: a 64-byte start for encoder output
+
+The heap counts a `str` by its capacity, and the `str` of `json.encode`
+keeps the capacity of the encoder's buffer. With 128 bytes (C8), a 60-byte
+text counted 128 bytes, where value-decode counts 64. The buffer now
+starts with 64 bytes and doubles from there, as a buffer that grows from
+8 bytes does. `small_encode` 203 to 178 ns (3 alternating rounds); `encode`
+and `encode_indent` unchanged.
+
+### Summary of the pass
+
+Final measurements: 3 alternating rounds of `BENCH_RUNS=5 BENCH_REPS=10`,
+minimum, ns per item (`small_encode` from C11; the rest from the round
+before it, which C11 does not change):
+
+| case                 | value-decode | D2 before | after | after / vd |
+| -------------------- | ------------ | --------- | ----- | ---------- |
+| encode               | 291          | 615       | 332   | 1.14       |
+| encode_indent        | 389          | 710       | 416   | 1.07       |
+| decode               | 651          | 979       | 571   | 0.88       |
+| to_json              | 489          | 1993      | 794   | 1.62       |
+| decode_json          | 845          | 870       | 888   | 1.05       |
+| encode_json          | 387          | 878       | 329   | 0.85       |
+| json_param           | 870          | 941       | 928   | 1.07       |
+| json_echo            | 1516         | 1578      | 1591  | 1.05       |
+| to_value             | 362          | 665       | 348   | 0.96       |
+| small_encode         | 120          | 299       | 178   | 1.48       |
+| small_to_json        | 257          | 761       | 683   | 2.66       |
+| small_decode         | 240          | 371       | 312   | 1.30       |
+| small_to_value       | 98           | 321       | 310   | 3.16       |
+| deep_encode          | 4200         | 9397      | 3370  | 0.80       |
+| deep_decode          | 15242        | 14341     | 15016 | 0.99       |
+| encode_custom        | 81           | 377       | 325   | 4.0        |
+| decode_custom        | 208          | 645       | 616   | 3.0        |
+| decode_generic       | 657          | 992       | 574   | 0.87       |
+| decode_page          | 656          | 1000      | 571   | 0.87       |
+| decode_ints          | 114          | 157       | 109   | 0.96       |
+| decode_ints_generic  | 114          | 160       | 109   | 0.96       |
+| small_decode_default | 263          | 296       | 275   | 1.05       |
+
+Fuel per item (value-decode, D2 before, after): equal on every derived
+case except the small ones and the hand-written ones: `small_encode`,
+`small_to_value`, `small_to_json` 6, 12 to 17, 8 (two Sand calls of the
+trait design); `small_decode` 16, 26, 16; `encode_json` 45.1, 38.7, 22.7
+(value-decode charged a `Json` variant and its payload);
+`encode_custom` 8, 18, 12; `decode_custom` 15, 40.8, 23.8;
+`small_decode_default` 8, 14, 9.
+
+Native stack at 512 levels: `json.decode` of structs 16 KiB (main 808),
+`json.encode` 16 KiB, `json.parse` 120 KiB.
+
+Production lines against `664a7d3`: 2547 added, 829 removed. The JSON text
+walk (463) and read (474) are code for one format.
+
+Cases that miss the goal, and why:
+
+- `encode` (1.14): the JSON text walk reads a schema node for each value;
+  the walk's own time is 1.26 times that of value-decode's walker
+  (normalized to float formatting).
+- `to_json` (1.62): the `Encoder` cannot hold Sand values between the
+  walk and `encoded_json`, because the collector does not trace native
+  objects (C2).
+- Small cases: the trait design runs the `json.encode` wrapper, a
+  dictionary call, three native calls, and an `Encoder` object for each
+  call; `json.encode(1)` costs 102 ns against 35 on value-decode (P1).
+  `small_to_value` and `small_to_json` have the same plumbing plus a
+  Value or token build.

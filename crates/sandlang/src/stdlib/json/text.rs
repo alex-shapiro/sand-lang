@@ -57,7 +57,10 @@ struct EncoderState {
 }
 
 /// The bytes of output that a new [`TextEncoder`] holds without growing.
-const SMALL_TEXT: usize = 128;
+/// The `str` that `json.encode` returns keeps this capacity, which the
+/// heap counts, so it is the size that doubling from 8 bytes would give a
+/// small text.
+const SMALL_TEXT: usize = 64;
 
 /// Writes JSON text.
 pub(crate) struct TextEncoder {
