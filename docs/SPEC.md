@@ -642,9 +642,12 @@ enum to store values of different concrete types in a single collection.
 `break`, `continue`, `fail(...)`) may appear where any type is expected.
 Inside other types it is ordinary: `[never]` and `fn() -> never` are distinct
 types, so `let xs: [never] = [1]` and passing `() => 5` where a
-`fn() -> never` is expected are type errors. `never` implements only traits that
-do not declare methods (§4.9), such as `Eq` and `Hash`, because a trait method
-such as `T.zero()` can be called without a value of type `T`.
+`fn() -> never` is expected are type errors. `never` implements each trait whose
+methods, and the methods of whose supertraits, all take `self` (§4.9), such as `Eq`,
+`Hash`, and `trait Describe { fn describe(self) -> str }`. No value has type `never`,
+so no code can call these methods. `never` does not implement a trait with a static
+method, such as `Num`, because a static method such as `T.zero()` can be called
+without a value of type `T`.
 
 ### 5.2 Composite types
 
@@ -1205,6 +1208,10 @@ needed`).
 - The type checker verifies trait bounds at each generic instantiation, or at
   the end of function type inference if a type argument contains inference
   variables at the call site.
+- If inference leaves a type unknown in a trait bound, such as the element type
+  of `[]` in `show([])` with `fn show<T: Describe>(x: T)`, the type is `never`,
+  if `never` satisfies the bound (§5.1). Otherwise the bound is an error
+  (`cannot infer the type that must implement ...`).
 - A type, with inference variables resolved, has at most 10,000 components
   (type constructors and leaves); larger types, which only arise by repeated
   doubling (`let b = (a, a)`, or similar aliases or generic calls), are

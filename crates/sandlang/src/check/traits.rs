@@ -1067,16 +1067,53 @@ impl Checker {
                 None if r.lenient && matches!(self.rty(r.ty), Ty::Var(_)) => dict_expr(HKind::Unit, r.span),
                 None => match self.resolve_evidence(r.ty, r.tr, 0) {
                     Ok(e) => e,
-                    Err(m) => {
-                        let msg = self.unmet_message(m, "");
-                        self.error(r.span, msg);
-                        mk(HKind::Error, TypeId::UNIT, r.span)
-                    }
+                    Err(m) => match self.resolve_with_never(r.ty, r.tr) {
+                        Some(e) if m.unknown => e,
+                        _ => {
+                            let msg = self.unmet_message(m, "");
+                            self.error(r.span, msg);
+                            mk(HKind::Error, TypeId::UNIT, r.span)
+                        }
+                    },
                 },
             };
             out.push(e);
         }
         out
+    }
+
+    /// Binds each inference variable left in `ty` to `never` and resolves
+    /// `ty: tr`. If `never` does not satisfy the bound, undoes the bindings
+    /// and returns `None`.
+    fn resolve_with_never(&mut self, ty: TypeId, tr: TraitRef) -> Option<HExpr> {
+        let z = self.zonk(ty);
+        let mut vars = Vec::new();
+        self.arena.any(z, &mut |x| {
+            if let Ty::Var(v) = x
+                && !vars.contains(&v)
+            {
+                vars.push(v);
+            }
+            false
+        });
+        if vars.is_empty() {
+            return None;
+        }
+        let outer = self.unify_log.replace(Vec::new());
+        for &v in &vars {
+            let var = self.arena.var(v);
+            self.unify(var, TypeId::NEVER);
+        }
+        let r = self.resolve_evidence(ty, tr, 0).ok();
+        let bound = std::mem::replace(&mut self.unify_log, outer).unwrap_or_default();
+        if r.is_none() {
+            for v in bound {
+                self.subst[v as usize] = None;
+            }
+        } else if let Some(log) = &mut self.unify_log {
+            log.extend(bound);
+        }
+        r
     }
 
     /// Hoists non-constant dictionary expressions into entry-block local
@@ -1121,6 +1158,7 @@ impl Checker {
         match self.ty(ty) {
             Ty::Error => return Ok(dict_expr(HKind::Error, span)),
             Ty::Never if !self.has_dict(&tr) => return Ok(dict_expr(HKind::Unit, span)),
+            Ty::Never if let Some(d) = self.never_dict(tr.trait_id, span) => return Ok(d),
             Ty::Var(_) => {
                 let mut m = Unmet::new(format!("cannot infer the type that must implement `{}`", self.show_trait(&tr)));
                 m.unknown = true;
@@ -1146,6 +1184,22 @@ impl Checker {
             }
             r => r,
         }
+    }
+
+    /// Returns the dictionary that proves `never: t`, or `None` if `t` or a
+    /// supertrait declares a static method. No value has type `never`, so no
+    /// code can call an instance method through this dictionary, and each
+    /// method slot holds `()`.
+    fn never_dict(&self, t: TraitId, span: Span) -> Option<HExpr> {
+        let def = &self.traits[t as usize];
+        if def.methods.iter().any(|m| !self.fns[m.sig as usize].has_self) {
+            return None;
+        }
+        let mut items: Vec<HExpr> = def.methods.iter().map(|_| dict_expr(HKind::Unit, span)).collect();
+        for i in self.supertraits_with_dicts(t).collect::<Vec<_>>() {
+            items.push(self.never_dict(self.traits[t as usize].supers[i].trait_id, span)?);
+        }
+        Some(dict_expr(HKind::Tuple(items), span))
     }
 
     /// Returns `Some(true)` if `ty` implements `tr`, `Some(false)` if it does

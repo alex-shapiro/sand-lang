@@ -1558,26 +1558,66 @@ fn f(x: Keys<float>) -> int { x.len() }
 --- error
 1: the type parameters of a type alias cannot require traits; require them on the functions that use the alias
 
-=== never implements only the traits without methods
+=== never implements the traits whose methods all take self
 trait D { fn d(self) -> int }
-trait Make { fn make() -> Self }
+trait E: D { fn e(self) -> int { self.d() + 1 } }
 impl D for int { fn d(self) -> int { self } }
+impl E for int {}
 fn total<T: D>(xs: [T]) -> int {
     var s = 0
     for x in xs { s += x.d() }
     s
 }
-fn make<T: Make>() -> T { T.make() }
+fn total_e<T: E>(xs: [T]) -> int { total(xs) + xs.len() }
 fn largest<T: Ord + Hash + Encode>(xs: [T]) -> T? { xs.max() }
 let e: [never] = []
 print(largest(e))
 print(total(e))
+print(total_e(e))
+print(total_e([1, 2]))
+--- stdout
+None
+0
+0
+5
+
+=== never does not implement traits with static methods
+trait Make { fn make() -> Self }
+trait D: Make { fn d(self) -> int }
+fn make<T: Make>() -> T { T.make() }
+fn total<T: D>(xs: [T]) -> int { xs.len() }
+let e: [never] = []
 print(e.sum())
 let x: never = make()
+print(total(e))
 --- error
-13: never does not implement `D`
-14: never does not implement `Num`
-15: never does not implement `Make`
+6: never does not implement `Num`
+7: never does not implement `Make`
+8: never does not implement `D`
+
+=== an unconstrained type defaults to never if never satisfies its bounds
+trait Show { fn show(self) -> str }
+trait Make { fn make() -> Self }
+impl Show for int { fn show(self) -> str { "i" } }
+impl<T: Show> Show for [T] {
+    fn show(self) -> str { "[" + self.map(x => x.show()).join(",") + "]" }
+}
+impl<T: Show> Show for T? {
+    fn show(self) -> str {
+        match self {
+            Some(x) => x.show()
+            None => "none"
+        }
+    }
+}
+fn show<T: Show>(x: T) -> str { x.show() }
+fn count<T: Make>(xs: [T]) -> int { xs.len() }
+print(show([]))
+print(show([[], [1]]))
+print(show(None))
+print(count([]))
+--- error
+20: cannot infer the type that must implement `Make`; add a type annotation
 
 === structs and enums get the requirements of their field and payload types
 struct Bag<T: Hash> { items: Set<T> }
