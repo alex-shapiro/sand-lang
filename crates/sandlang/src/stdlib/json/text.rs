@@ -714,7 +714,7 @@ impl DecodeFormat for TextDecoder {
             // error and path, and charges as if the read had not run.
             Err(read::Fallback::General) => {
                 vm.meter.refund_to(fuel);
-                crate::codec::read_fast_general(vm, self, path, schema)
+                crate::codec::fast::decode(vm, self, path, schema)
             }
         }
     }

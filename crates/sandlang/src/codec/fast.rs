@@ -15,7 +15,7 @@
 //! before the walk, so that the engine can run the call again after a garbage
 //! collection.
 
-use super::{DecodeFail, DecodeFormat, DecodeResult, EncodeFormat, Frame, SeqKind};
+use super::{DecodeFail, DecodeFormat, DecodePath, DecodeResult, EncodeFormat, Frame, SeqKind};
 use crate::types::ConstVal;
 use crate::vm::bytecode::Program;
 use crate::vm::value::{MapObj, Obj, SetObj, VmValue};
@@ -385,7 +385,7 @@ fn prog_schema(prog: &Program, id: SchemaId) -> Result<&Schema, Fail> {
 /// open containers of the decoder before the walk; the walk adds its own if
 /// it fails. After a failed memory check, the caller returns `f` to a mark
 /// before the walk.
-pub(super) fn decode<F: DecodeFormat + ?Sized>(vm: &mut Vm, f: &mut F, path: &mut Vec<Frame>, schema: SchemaId) -> DecodeResult<VmValue> {
+pub(crate) fn decode<F: DecodeFormat + ?Sized>(vm: &mut Vm, f: &mut F, path: &mut DecodePath, schema: SchemaId) -> DecodeResult<VmValue> {
     let prog = vm.prog.clone();
     let mut w = DecodeWalk {
         prog: &prog,
@@ -393,11 +393,11 @@ pub(super) fn decode<F: DecodeFormat + ?Sized>(vm: &mut Vm, f: &mut F, path: &mu
         values: Vec::with_capacity(OPEN_VALUES),
         key_texts: String::new(),
     };
-    let r = w.run(vm, f, path, schema);
+    let r = w.run(vm, f, schema);
     if let Err(e) = &r
         && !matches!(e, DecodeFail::Fail(_))
     {
-        w.extend_path(path);
+        w.extend_path(&mut path.0);
     }
     r
 }
@@ -469,7 +469,7 @@ enum Opened<'p> {
 }
 
 impl<'p> DecodeWalk<'p> {
-    fn run<F: DecodeFormat + ?Sized>(&mut self, vm: &mut Vm, f: &mut F, path: &[Frame], schema: SchemaId) -> DecodeResult<VmValue> {
+    fn run<F: DecodeFormat + ?Sized>(&mut self, vm: &mut Vm, f: &mut F, schema: SchemaId) -> DecodeResult<VmValue> {
         let mut part = schema;
         let mut is_key = false;
         loop {
@@ -524,7 +524,7 @@ impl<'p> DecodeWalk<'p> {
                         }
                         _ => break (s, is_key),
                     },
-                    None => done = Some(self.finish(vm, f, path)?),
+                    None => done = Some(self.finish(vm, f)?),
                 }
             };
         }
@@ -593,9 +593,28 @@ impl<'p> DecodeWalk<'p> {
         })
     }
 
+    /// Fills the omitted fields of the innermost frame, if it reads fields.
+    /// A missing field fails at the path of the frame.
+    fn fill_omitted(&mut self, vm: &mut Vm) -> DecodeResult<()> {
+        let Some(DecodeFrame::Fields { parts, defaults, id, variant, base, field, .. }) = self.stack.last_mut() else { return Ok(()) };
+        for (i, &part) in parts.iter().enumerate() {
+            if !matches!(self.values[*base + i], VmValue::Uninit) {
+                continue;
+            }
+            let Some(v) = omitted_field(vm, self.prog, part, defaults.get(i).and_then(Option::as_ref))? else {
+                *field = None;
+                return Err(DecodeFail::Mismatch(super::missing_field(vm, *id, *variant, i)));
+            };
+            self.values[*base + i] = v;
+        }
+        Ok(())
+    }
+
     /// Ends the innermost frame after its last part and builds its value.
-    /// The frame is not on the path of an error that ending it finds.
-    fn finish<F: DecodeFormat + ?Sized>(&mut self, vm: &mut Vm, f: &mut F, path: &[Frame]) -> DecodeResult<VmValue> {
+    /// The frame is not on the path of an error that ending it finds, except
+    /// for a missing field.
+    fn finish<F: DecodeFormat + ?Sized>(&mut self, vm: &mut Vm, f: &mut F) -> DecodeResult<VmValue> {
+        self.fill_omitted(vm)?;
         let Some(frame) = self.stack.pop() else { return Err(Fail::internal("decode: no open container").into()) };
         Ok(match frame {
             DecodeFrame::List { items, .. } => {
@@ -622,18 +641,7 @@ impl<'p> DecodeWalk<'p> {
                 self.values.truncate(base);
                 v
             }
-            DecodeFrame::Fields { parts, defaults, id, variant, base, .. } => {
-                for (i, &part) in parts.iter().enumerate() {
-                    if !matches!(self.values[base + i], VmValue::Uninit) {
-                        continue;
-                    }
-                    let Some(v) = omitted_field(vm, self.prog, part, defaults.get(i).and_then(Option::as_ref))? else {
-                        let mut frames = path.to_vec();
-                        self.extend_path(&mut frames);
-                        return Err(DecodeFail::Syntax(super::missing_message(vm, &frames, id, variant, i)));
-                    };
-                    self.values[base + i] = v;
-                }
+            DecodeFrame::Fields { parts, id, variant, base, .. } => {
                 vm.check_memory(size_of::<Obj>() + parts.len() * size_of::<VmValue>())?;
                 let v = if variant {
                     self.end_variant(vm, f)?;

@@ -2377,7 +2377,9 @@ source, with Sand code or with `native fn encode(self, e: Encoder)` and
 `native fn decode(d: Decoder) -> Result<T>` methods. The Rust functions write
 and read through `VmVal<Encoder>` and `VmVal<Decoder>`: `write_str`,
 `write_value`, `read_str`, `read_value`, and `error`, which returns a decode
-error with the path of the decoded part. Such a Rust function cannot decode
+error with the path of the decoded part. As after a failed `d.decode()`, the
+caller of a `decode` that returns this error can read the value as another
+type. Such a Rust function cannot decode
 the values of a type parameter; an implementation for a generic type is
 written in Sand.
 

@@ -101,7 +101,18 @@ pub trait IntoVmValue: SandType {
 pub struct HostError<C = Ctl>(Box<HostErrorKind<C>>);
 
 enum HostErrorKind<C> {
-    Error { kind: String, message: String },
+    Error {
+        kind: String,
+        message: String,
+    },
+    /// An error that the engine already made as the Sand `Err` value `err`.
+    /// It holds the `kind` and `message` of `err` in case `err` is no longer
+    /// live.
+    Made {
+        err: VmValue,
+        kind: String,
+        message: String,
+    },
     Abort(C),
 }
 
@@ -111,6 +122,13 @@ impl<C> HostError<C> {
     /// `message`.
     pub fn new(kind: impl Into<String>, message: impl Into<String>) -> HostError<C> {
         HostError(Box::new(HostErrorKind::Error { kind: kind.into(), message: message.into() }))
+    }
+
+    /// Returns the error of the Sand `Err` value `err`, which holds an
+    /// `Error` with `kind` and `message`. The native function returns `err`
+    /// itself, so that the engine knows the error as one it made.
+    pub(crate) fn made(err: VmValue, kind: String, message: String) -> HostError<C> {
+        HostError(Box::new(HostErrorKind::Made { err, kind, message }))
     }
 }
 
@@ -131,12 +149,28 @@ impl<C: From<Fail>> HostError<C> {
     /// control signal that stops the call.
     pub(crate) fn into_sand_error(self, vm: &mut Vm) -> Result<VmValue, C> {
         match *self.0 {
-            HostErrorKind::Error { kind, message } => {
+            HostErrorKind::Made { err, kind, message } if holds_error(vm, err, &kind, &message) => Ok(err),
+            HostErrorKind::Error { kind, message } | HostErrorKind::Made { kind, message, .. } => {
                 let e = crate::stdlib::core::Error { kind, message }.into_vm_value(vm)?;
                 Ok(vm.err(e))
             }
             HostErrorKind::Abort(c) => Err(c),
         }
+    }
+}
+
+/// Returns `true` if `err` is a Sand `Err` value whose `Error` has `kind` and
+/// `message`.
+fn holds_error(vm: &Vm, err: VmValue, kind: &str, message: &str) -> bool {
+    let has_slot = |v: VmValue| !matches!(v, VmValue::Obj(_)) || vm.heap.has_slot(v);
+    if !has_slot(err) || vm.heap.variant_id(err) != vm.prog.ids.err {
+        return false;
+    }
+    let Some(e) = vm.heap.field(err, 0).filter(|&e| has_slot(e)) else { return false };
+    let is_str = |v: VmValue, text: &str| matches!(vm.heap.get(v), Obj::Str(s) if s.as_str() == text);
+    match vm.heap.get(e) {
+        Obj::Struct(_, fields) => matches!(**fields, [m, k] if has_slot(m) && has_slot(k) && is_str(m, message) && is_str(k, kind)),
+        _ => false,
     }
 }
 
@@ -149,7 +183,7 @@ impl<C> From<std::io::Error> for HostError<C> {
 impl<C: std::fmt::Debug> std::fmt::Debug for HostError<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &*self.0 {
-            HostErrorKind::Error { kind, message } => write!(f, "HostError({kind}: {message})"),
+            HostErrorKind::Error { kind, message } | HostErrorKind::Made { kind, message, .. } => write!(f, "HostError({kind}: {message})"),
             HostErrorKind::Abort(c) => write!(f, "HostError({c:?})"),
         }
     }

@@ -700,6 +700,12 @@ enum PartImpl {
     KeepsItsDecoder,
     /// Reads an `int`, and after a failure a `str`, which follows the protocol.
     RetriesAnotherType,
+    /// Reads a struct with a missing field, and after the failure a struct
+    /// without it, or an `int`.
+    RetriesAfterAMissingField,
+    /// Reads a `[int]`, and after the failure returns its own error, which
+    /// gets the path of the part.
+    FailsWithItsOwnError,
 }
 
 impl PartImpl {
@@ -725,6 +731,23 @@ impl PartImpl {
             PartImpl::RetriesAnotherType => {
                 "impl Decode for Part {\n    fn decode(d: Decoder) -> Result<Part> {\n        let i: Result<int> = d.decode()\n        if let Ok(v) = i {\n            return Ok(Part(v: v))\n        }\n        let s: str = d.decode()?\n        Ok(Part(v: s.len()))\n    }\n}"
             }
+            PartImpl::RetriesAfterAMissingField => {
+                "fn zero() -> int { 0 }\nstruct Full { v: int, w: int, z: int = zero() }\nstruct Single { v: int }\n\
+                 impl Decode for Part {\n    fn decode(d: Decoder) -> Result<Part> {\n        let full: Result<Full> = d.decode()\n        if let Ok(f) = full {\n            return Ok(Part(v: f.v))\n        }\n        let single: Result<Single> = d.decode()\n        if let Ok(s) = single {\n            return Ok(Part(v: s.v))\n        }\n        Ok(Part(v: d.decode()?))\n    }\n}"
+            }
+            PartImpl::FailsWithItsOwnError => {
+                "impl Decode for Part {\n    fn decode(d: Decoder) -> Result<Part> {\n        let r: Result<[int]> = d.decode()\n        if let Ok(v) = r {\n            return Ok(Part(v: v.len()))\n        }\n        Err(Error(\"bad part\", kind: \"invalid\"))\n    }\n}"
+            }
+        }
+    }
+
+    /// The JSON text of the part `"p"` in the text of each context.
+    fn part_text(self) -> &'static str {
+        match self {
+            PartImpl::RetriesAnotherType => "\"p\"",
+            PartImpl::RetriesAfterAMissingField => "{\"v\": 7}",
+            PartImpl::FailsWithItsOwnError => "[1, \"x\"]",
+            _ => "7",
         }
     }
 
@@ -742,14 +765,15 @@ impl PartImpl {
             PartImpl::ReadsTwoValues => "Decode for Part read 2 values",
             PartImpl::FinishesTheDecode => "a `Decode` implementation cannot call it",
             PartImpl::KeepsItsDecoder => "the decoder is used after its decode ended",
-            PartImpl::RetriesAnotherType => "Ok(",
+            PartImpl::RetriesAnotherType | PartImpl::RetriesAfterAMissingField => "Ok(",
+            PartImpl::FailsWithItsOwnError => ": bad part\"",
         }
     }
 }
 
 /// A type that contains `Part`, a value of it, and the JSON text of a value,
-/// in which the part `"p"` is a `str`, which only `RetriesAnotherType`
-/// reads, and the other parts are ints.
+/// in which the part `"p"` has the text of [`PartImpl::part_text`], and the
+/// other parts are ints.
 const PART_CONTEXTS: [(&str, &str, &str); 8] = [
     ("Part", "Part(v: 1)", "\"p\""),
     ("[Part]", "[Part(v: 1), Part(v: 2)]", "[1, \"p\"]"),
@@ -771,10 +795,7 @@ const PART_FORMATS: [&str; 3] = ["JSON text", "Json", "host Value"];
 /// `context` in format `format`, with the implementation `part` of `Part`.
 fn part_program(part: PartImpl, context: (&str, &str, &str), format: &str) -> String {
     let (ty, value, text) = context;
-    let text = match part {
-        PartImpl::RetriesAnotherType => text.to_string(),
-        _ => text.replace("\"p\"", "7"),
-    };
+    let text = text.replace("\"p\"", part.part_text());
     let types = "import json\nimport host\nstruct Part { v: int }\nstruct Wrap<T> { v: T }\nenum Pay { Positional(int, Part), Named(x: Part, y: int) }\n\
                  var kept_encoders: [Encoder] = []\nvar kept_decoders: [Decoder] = []";
     let run = if part.encodes() {
@@ -797,7 +818,7 @@ fn part_program(part: PartImpl, context: (&str, &str, &str), format: &str) -> St
     format!("{types}\n{}\n{run}\n", part.source())
 }
 
-const PART_IMPLS: [PartImpl; 8] = [
+const PART_IMPLS: [PartImpl; 10] = [
     PartImpl::WritesNoValue,
     PartImpl::WritesTwoValues,
     PartImpl::KeepsItsEncoder,
@@ -806,6 +827,8 @@ const PART_IMPLS: [PartImpl; 8] = [
     PartImpl::FinishesTheDecode,
     PartImpl::KeepsItsDecoder,
     PartImpl::RetriesAnotherType,
+    PartImpl::RetriesAfterAMissingField,
+    PartImpl::FailsWithItsOwnError,
 ];
 
 /// A hand-written implementation that writes or reads no value or two,
@@ -813,7 +836,8 @@ const PART_IMPLS: [PartImpl; 8] = [
 /// calls `Decoder.finish`, fails with a message that names the type, in each
 /// format and in each container, also when native calls run again
 /// (`retry_stress`). An implementation that reads another type after a
-/// failed read gets the value.
+/// failed read gets the value, and the error of an implementation gets the
+/// path of its part.
 #[test]
 fn implementations_that_break_the_codec_protocol_fail_in_each_format() {
     for part in PART_IMPLS {
@@ -825,6 +849,7 @@ fn implementations_that_break_the_codec_protocol_fail_in_each_format() {
                 let shown = format!("{out}{}", failure.as_deref().unwrap_or_default());
                 assert!(shown.contains(part.expected()), "expected {:?}, got {shown:?}; program:\n{src}", part.expected());
                 assert!(!shown.contains("internal error"), "{shown}; program:\n{src}");
+                assert!(!shown.contains("message: \"bad part"), "the error has no path: {shown}; program:\n{src}");
                 assert_eq!(run_codec_path(&src, "", true, false, false), synthesized, "program:\n{src}");
                 assert_eq!(run_codec_path(&src, "", true, true, false), synthesized, "retry_stress; program:\n{src}");
                 assert_eq!(run_codec_path(&src, "", false, false, true), synthesized, "gc_stress; program:\n{src}");

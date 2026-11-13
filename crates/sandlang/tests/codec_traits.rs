@@ -214,6 +214,16 @@ fn scenario_7_native_implementations_compose_with_script_types() {
 }
 
 #[test]
+fn a_native_decode_error_lets_the_caller_read_another_type() {
+    let src = "import json\nimport lab\nenum Entry { Reading(lab.Reading), Note(str) }\n\
+               impl Decode for Entry {\n    fn decode(d: Decoder) -> Result<Entry> {\n        let r: Result<lab.Reading> = d.decode()\n        if let Ok(v) = r {\n            return Ok(Entry.Reading(v))\n        }\n        Ok(Entry.Note(d.decode()?))\n    }\n}\n\
+               let entries: Result<[Entry]> = json.decode(\"[\\\"21C\\\", \\\"hot\\\"]\")\nprint(entries)\n";
+    let (r, out) = run(vec![lab_module()], Limits::default(), src);
+    r.unwrap();
+    assert_eq!(out, "Ok([Reading(Reading(celsius: 21)), Note(\"hot\")])\n");
+}
+
+#[test]
 fn scenario_8_deep_input_needs_little_native_stack() {
     let deep_struct = "struct Link { next: Link? }\nfn chain(n: int) -> Link {\n    var link = Link(next: None)\n    for _ in 1..n {\n        link = Link(next: Some(link))\n    }\n    link\n}\n";
     let src = format!(

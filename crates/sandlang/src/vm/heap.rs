@@ -1182,14 +1182,13 @@ impl Heap {
         }
     }
 
-    /// Returns the native object `v` of type `T`, and its first VM value.
-    pub(crate) fn native_and_first_value<T: 'static>(&mut self, v: VmValue) -> Option<(&mut T, Option<VmValue>)> {
+    /// Returns the native object `v` of type `T`, and its VM values.
+    pub(crate) fn native_and_values<T: 'static>(&mut self, v: VmValue) -> Option<(&mut T, &ObjectValues)> {
         let VmValue::Obj(h) = v else { return None };
         match &mut self.objs[h as usize] {
             Obj::Native(n) => {
                 let cell = (&mut **n as &mut dyn std::any::Any).downcast_mut::<NativeCell<T>>()?;
-                let first = cell.values.first().copied();
-                Some((&mut cell.object, first))
+                Some((&mut cell.object, &cell.values))
             }
             _ => None,
         }
@@ -1269,6 +1268,12 @@ impl Heap {
 
     pub fn len(&self) -> usize {
         self.live_objects
+    }
+
+    /// Returns `true` if `v` is a handle of a slot of the heap, which can be
+    /// free.
+    pub(crate) fn has_slot(&self, v: VmValue) -> bool {
+        matches!(v, VmValue::Obj(h) if (h as usize) < self.objs.len())
     }
 
     pub fn is_empty(&self) -> bool {

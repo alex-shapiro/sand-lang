@@ -10,6 +10,7 @@
 //! that the call can read the value as another type.
 
 use super::{DecodeFormat, field_names, path_text, type_name};
+use crate::stdlib::core;
 use crate::vm::{Fail, Vm, fail};
 
 /// A running call of a hand-written implementation of `Encode`.
@@ -216,6 +217,34 @@ pub(super) struct DecodeCall {
     read: u32,
     /// The mark of the format at the start of the value.
     mark: usize,
+    /// The errors that the decoder had made before the call.
+    errors: u32,
+}
+
+/// The origin of the error that a call or a decode returns.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ErrorOrigin {
+    /// The decoder made the error, which has its path.
+    Decoder,
+    /// The implementation made the error, which gets the path of its value.
+    Implementation,
+}
+
+/// How a call of a hand-written `Decode`, or a decode, ends.
+pub(super) enum Ending {
+    /// With its result.
+    Result,
+    /// With its error, which gets this path.
+    Locate(String),
+    /// With this error instead of its result.
+    Fail(core::Error),
+}
+
+impl Ending {
+    /// The ending of a broken protocol with the message `message`.
+    fn violation(message: String) -> Ending {
+        Ending::Fail(core::Error { message, kind: VIOLATION_KIND.into() })
+    }
 }
 
 /// The protocol state of a `Decoder`, with the path of the part that it
@@ -226,11 +255,13 @@ pub(super) struct DecodeProtocol {
     /// The values read at the top level.
     top: u32,
     calls: Vec<DecodeCall>,
-    /// Whether the last operation failed. The next operation returns to the
-    /// start of the value of the innermost running call.
-    failed: bool,
-    /// Whether the last error has its path.
-    pub(super) located: bool,
+    /// The errors that the decoder made and keeps (see [`Decoder`](super::Decoder)).
+    pub(super) errors: u32,
+    /// The errors that the decoder made before the input last returned to
+    /// the start of a value. Each later error is a failed read, after which
+    /// the next operation returns to the start of the value of the innermost
+    /// running call.
+    settled: u32,
     /// The message of the error of a call that broke the protocol, which
     /// each later operation returns.
     violation: Option<String>,
@@ -246,6 +277,19 @@ impl DecodeProtocol {
         self.path.0.len()
     }
 
+    /// Returns `true` if a read failed after the input last returned to the
+    /// start of a value.
+    #[inline]
+    fn failed(&self) -> bool {
+        self.errors > self.settled
+    }
+
+    /// Notes an error that the decoder made and keeps. It fails the read
+    /// that made it.
+    pub(super) fn add_error(&mut self) {
+        self.errors += 1;
+    }
+
     /// Returns the values read at `level` by the innermost call at that
     /// level, or at the top level. Other levels belong to synthesized and
     /// prelude implementations, which read one value for each part.
@@ -259,11 +303,11 @@ impl DecodeProtocol {
     }
 
     /// Returns `true` if operation `op` needs no work of the protocol before
-    /// it runs: no failure, no broken protocol, and no second value of a
+    /// it runs: no failed read, no broken protocol, and no second value of a
     /// call.
     #[inline]
     pub(super) fn is_ready(&self, op: DecodeOp) -> bool {
-        if self.ended || self.failed || self.violation.is_some() {
+        if self.ended || self.failed() || self.violation.is_some() {
             return false;
         }
         let level = self.level();
@@ -281,7 +325,7 @@ impl DecodeProtocol {
     /// protocol.
     #[inline]
     pub(super) fn before(&mut self, vm: &Vm, format: &mut dyn DecodeFormat, op: DecodeOp) -> Result<Result<(), String>, Fail> {
-        if self.ended || self.failed || self.violation.is_some() {
+        if self.ended || self.failed() || self.violation.is_some() {
             return self.before_cold(vm, format, op);
         }
         Ok(self.check_value(vm, op))
@@ -318,15 +362,9 @@ impl DecodeProtocol {
     /// that read a value there if `read`.
     #[inline]
     pub(super) fn after(&mut self, level: usize, read: bool) {
-        self.located = false;
         if read && let Some(n) = self.read_at(level) {
             *n += 1;
         }
-    }
-
-    /// Notes a failed read, whose error has its path.
-    pub(super) fn failed(&mut self) {
-        (self.failed, self.located) = (true, true);
     }
 
     /// Returns to mark `mark` of `format`, or to the start of the input if
@@ -340,7 +378,7 @@ impl DecodeProtocol {
         if let Some(n) = self.read_at(level) {
             *n = 0;
         }
-        (self.failed, self.located) = (false, false);
+        self.settled = self.errors;
     }
 
     /// Records a broken protocol of the innermost call at the current level,
@@ -362,77 +400,83 @@ impl DecodeProtocol {
         // A broken protocol stays in the state, and each later operation
         // returns it, so the call starts in any case.
         let _ = self.before(vm, format, DecodeOp::Value)?;
-        self.calls.push(DecodeCall { def, level: self.level(), read: 0, mark: format.mark() });
+        self.calls.push(DecodeCall { def, level: self.level(), read: 0, mark: format.mark(), errors: self.errors });
         Ok(())
     }
 
-    /// Ends the innermost call, whose result is an error if `failed`.
-    /// Returns the message of a broken protocol, or `true` if the error of
-    /// the call needs its path.
-    pub(super) fn leave(&mut self, vm: &Vm, format: &mut dyn DecodeFormat, failed: bool) -> Result<Result<bool, String>, Fail> {
+    /// Ends the innermost call, whose result is an error from `error` if
+    /// that is `Some`. The decoder then keeps only the errors that it made
+    /// before the call, and the caller adds the error that the call returns,
+    /// if any, with [`DecodeProtocol::add_error`].
+    pub(super) fn leave(&mut self, vm: &Vm, format: &mut dyn DecodeFormat, error: Option<ErrorOrigin>) -> Result<Ending, Fail> {
         if self.ended {
             return decoder_ended();
         }
         let Some(&call) = self.calls.last() else { return crate::vm::internal("decode: no running implementation") };
-        if let Some(v) = &self.violation {
-            let v = v.clone();
-            self.pop(format);
-            return Ok(Err(v));
-        }
-        if failed {
-            let needs_path = !self.located;
-            (self.failed, self.located) = (true, true);
-            self.pop(format);
-            return Ok(Ok(needs_path));
-        }
-        if self.failed {
-            self.rewind(format, Some(call.mark), call.level);
-        }
-        let read = self.calls.last().map_or(0, |c| c.read);
-        if self.level() != call.level || read == 0 {
+        let ending = if let Some(v) = &self.violation {
+            Ending::violation(v.clone())
+        } else if let Some(origin) = error {
             self.path.0.truncate(call.level);
-            let message = self.violate(vm, "read no value");
-            self.pop(format);
-            return Ok(Err(message));
+            match origin {
+                ErrorOrigin::Decoder => Ending::Result,
+                ErrorOrigin::Implementation => Ending::Locate(self.path_text(vm)),
+            }
+        } else {
+            if self.failed() {
+                self.rewind(format, Some(call.mark), call.level);
+            }
+            if self.level() != call.level || self.calls.last().is_some_and(|c| c.read == 0) {
+                self.path.0.truncate(call.level);
+                Ending::violation(self.violate(vm, "read no value"))
+            } else {
+                Ending::Result
+            }
+        };
+        self.calls.pop();
+        format.release(call.mark);
+        (self.errors, self.settled) = (call.errors, self.settled.min(call.errors));
+        if error.is_none() && matches!(ending, Ending::Result) {
+            // The value of the call is the value of the call or the level
+            // that called it.
+            self.after(call.level, true);
         }
-        self.pop(format);
-        // The value of the call is the value of the call or the level that
-        // called it.
-        self.after(call.level, true);
-        Ok(Ok(false))
+        Ok(ending)
     }
 
-    /// Ends the innermost call.
-    fn pop(&mut self, format: &mut dyn DecodeFormat) {
-        if let Some(call) = self.calls.pop() {
-            format.release(call.mark);
-        }
-    }
-
-    /// Ends the decode, whose result is an error if `failed`. Returns the
-    /// message of a broken protocol, or `true` if the input must end here,
-    /// or if the error needs its path.
-    pub(super) fn end(&mut self, format: &mut dyn DecodeFormat, failed: bool) -> Result<Result<bool, String>, Fail> {
+    /// Returns how the decode ends, whose result is an error from `error` if
+    /// that is `Some`. After [`Ending::Result`] for a value, the caller
+    /// checks that no input follows it. Then it ends the decode with
+    /// [`DecodeProtocol::close`].
+    pub(super) fn end(&mut self, vm: &Vm, format: &mut dyn DecodeFormat, error: Option<ErrorOrigin>) -> Result<Ending, Fail> {
         if self.ended {
             return decoder_ended();
         }
         if !self.calls.is_empty() {
             return fail("invalid", "`Decoder.finish` ends a decode, so a `Decode` implementation cannot call it");
         }
-        self.ended = true;
         if let Some(v) = &self.violation {
-            return Ok(Err(v.clone()));
+            return Ok(Ending::violation(v.clone()));
         }
-        if failed {
-            return Ok(Ok(!self.located));
+        match error {
+            Some(ErrorOrigin::Decoder) => return Ok(Ending::Result),
+            Some(ErrorOrigin::Implementation) => {
+                self.path.0.clear();
+                return Ok(Ending::Locate(self.path_text(vm)));
+            }
+            None => {}
         }
-        if self.failed {
+        if self.failed() {
             self.rewind(format, None, 0);
         }
         if self.top == 0 {
-            return Ok(Err("$: the decoder read no value".into()));
+            return Ok(Ending::violation("$: the decoder read no value".into()));
         }
-        Ok(Ok(true))
+        Ok(Ending::Result)
+    }
+
+    /// Ends the decode, after which each use is an error.
+    pub(super) fn close(&mut self) {
+        self.ended = true;
     }
 
     /// Returns the path of the current part, such as `$.items[2]`.

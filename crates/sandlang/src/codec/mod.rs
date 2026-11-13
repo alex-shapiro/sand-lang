@@ -25,11 +25,11 @@ use crate::stdlib::core;
 use crate::syntax::lexer::is_ident;
 use crate::types::traits;
 use crate::value::Value;
-use crate::vm::value::{Obj, ObjectValues, VmValue};
+use crate::vm::value::{Obj, ObjectValues, VALUE_SIZE, VmValue};
 use crate::vm::{Fail, Vm, internal};
 use compact_str::CompactString;
 use fast::SchemaId;
-use protocol::{DecodeOp, DecodeProtocol, EncodeProtocol, LevelKind};
+use protocol::{DecodeOp, DecodeProtocol, EncodeProtocol, Ending, ErrorOrigin, LevelKind};
 use std::any::Any;
 use std::borrow::Cow;
 use std::fmt::Write;
@@ -184,6 +184,20 @@ impl From<Fail> for DecodeFail {
     }
 }
 
+impl DecodeFail {
+    /// Returns the error of the failure at the path that `path` returns, or
+    /// the failure that ends the run.
+    fn into_error(self, path: impl FnOnce() -> String) -> Result<core::Error, Fail> {
+        let (kind, message) = match self {
+            DecodeFail::Mismatch(m) => ("parse", format!("{}: {m}", path())),
+            DecodeFail::Invalid(m) => ("invalid", format!("{}: {m}", path())),
+            DecodeFail::Syntax(m) => ("parse", m),
+            DecodeFail::Fail(fail) => return Err(fail),
+        };
+        Ok(core::Error { message, kind: kind.into() })
+    }
+}
+
 pub(crate) type DecodeResult<T> = Result<T, DecodeFail>;
 
 /// A source format for `Decode`.
@@ -237,7 +251,7 @@ pub(crate) trait DecodeFormat: Any + Send {
     /// as its synthesized `Decode` implementation would. Formats keep this
     /// default, which Rust compiles for each format.
     fn read_fast(&mut self, vm: &mut Vm, path: &mut DecodePath, schema: SchemaId) -> DecodeResult<VmValue> {
-        fast::decode(vm, self, &mut path.0, schema)
+        fast::decode(vm, self, path, schema)
     }
     /// Returns the fuel of the input that the format read since the last
     /// call, such as a unit for each 8 bytes of text.
@@ -302,6 +316,11 @@ pub struct Encoder {
 #[derive(crate::SandObject)]
 #[sand(module = "prelude")]
 pub struct Decoder {
+    // The Sand values of a decoder are the values of its format: the input
+    // `str` of a format that reads text, or the values that a format keeps
+    // (see `DecodeFormat::keeps_values`). The `Error` values of the errors
+    // that the decoder made follow them, so that the decoder knows which
+    // errors already have their path (`DecodeProtocol::errors`).
     format: Option<Box<dyn DecodeFormat>>,
     protocol: DecodeProtocol,
 }
@@ -476,18 +495,6 @@ pub(crate) fn write_whole(
     })
 }
 
-/// Reads a value of the closed type whose fast-path schema is `schema` with
-/// the general walker, for a format that overrides
-/// [`DecodeFormat::read_fast`].
-pub(crate) fn read_fast_general<F: DecodeFormat + ?Sized>(
-    vm: &mut Vm,
-    f: &mut F,
-    path: &mut DecodePath,
-    schema: SchemaId,
-) -> DecodeResult<VmValue> {
-    fast::decode(vm, f, &mut path.0, schema)
-}
-
 /// Runs `op` on `f` with the text of the `str` `input`, if any, lent to `f`
 /// (see [`DecodeFormat::swap_input`]).
 pub(crate) fn with_input<F: DecodeFormat + ?Sized, R>(
@@ -510,261 +517,247 @@ pub(crate) fn with_input<F: DecodeFormat + ?Sized, R>(
 
 /// Charges a fuel unit for a value, and runs `op`, which reads the value or
 /// opens it, on `d` and its format (see [`with_decoder`]).
-fn read_part<R: 'static>(
+fn read_part<R>(
     vm: &mut Vm,
     d: VmVal<Decoder>,
     op: impl FnOnce(&mut dyn DecodeFormat, &mut DecodePath, &mut Vm) -> DecodeResult<R>,
 ) -> Result<R, HostError> {
     vm.charge(1)?;
-    with_decoder(vm, d, DecodeOp::Value, op)
+    with_decoder(vm, d, DecodeOp::Value, |_| true, op)
 }
 
-/// Runs `op` on `format`, the format of `d`, with the input `str` `input` of
-/// `d` lent to it if `reads`, and with the values of `d` if the format keeps
-/// values.
+/// Runs `op` on `format`, the format of `d`, with the values of the format
+/// lent to it (see [`Decoder`]): its input `input`, or the values that it
+/// keeps if `d` holds `errors` errors after them.
 fn lend<R>(
     vm: &mut Vm,
     d: VmVal<Decoder>,
-    input: Option<VmValue>,
     format: &mut dyn DecodeFormat,
-    reads: bool,
+    input: Option<VmValue>,
+    errors: u32,
     op: impl FnOnce(&mut dyn DecodeFormat, &mut Vm) -> R,
-) -> R {
-    if format.keeps_values() {
-        let mut values = vm.heap.take_native_values::<Decoder>(d.raw()).unwrap_or_default();
-        format.swap_values(&mut values);
-        let r = op(format, vm);
-        format.swap_values(&mut values);
-        vm.heap.put_native_values::<Decoder>(d.raw(), values);
-        return r;
+) -> Result<R, Fail> {
+    if !format.keeps_values() {
+        return with_input(vm, input, format, op);
     }
-    let Some(input) = input.filter(|_| reads) else { return op(format, vm) };
-    // The input `str` lends its text to the format for this call (see
-    // `with_input`).
-    if let Some(text) = vm.heap.str_text_mut(input) {
-        format.swap_input(text);
-    }
+    let Some(mut values) = vm.heap.take_native_values::<Decoder>(d.raw()) else { return internal("not a decoder") };
+    let errors: ObjectValues = values.drain(values.len().saturating_sub(errors as usize)..).collect();
+    format.swap_values(&mut values);
     let r = op(format, vm);
-    if let Some(text) = vm.heap.str_text_mut(input) {
-        format.swap_input(text);
+    format.swap_values(&mut values);
+    let (capacity, needed) = (values.capacity(), values.len() + errors.len());
+    if needed > capacity {
+        values.reserve_exact(needed - values.len());
+        vm.heap.account(capacity * VALUE_SIZE, values.capacity() * VALUE_SIZE);
     }
-    r
+    values.extend(errors);
+    vm.heap.put_native_values::<Decoder>(d.raw(), values);
+    Ok(r)
 }
 
-/// Runs `op` on the format and the protocol state of `d`, with the input of
-/// `d` lent to the format if `reads` (see [`lend`]).
+/// Runs `op` on the format and the protocol state of `d`, with the values of
+/// the format lent to it (see [`lend`]). The input of a format that reads
+/// text is lent only if `reads`.
+#[inline]
 fn with_decoder_state<R>(
     vm: &mut Vm,
     d: VmVal<Decoder>,
     reads: bool,
     op: impl FnOnce(&mut dyn DecodeFormat, &mut DecodeProtocol, &mut Vm) -> R,
 ) -> Result<R, Fail> {
-    let Some((obj, input)) = vm.heap.native_and_first_value::<Decoder>(d.raw()) else { return internal("not a decoder") };
+    let Some((obj, values)) = vm.heap.native_and_values::<Decoder>(d.raw()) else { return internal("not a decoder") };
+    let errors = obj.protocol.errors;
+    let input = values.first().copied().filter(|_| reads && values.len() > errors as usize);
     let Some(mut format) = obj.format.take() else { return internal("the decoder is in use") };
     let mut p = std::mem::take(&mut obj.protocol);
-    let r = lend(vm, d, input, &mut *format, reads, |f, vm| op(f, &mut p, vm));
+    let r = lend(vm, d, &mut *format, input, errors, |f, vm| op(f, &mut p, vm));
     let obj = d.get_mut(&mut vm.heap)?;
     obj.format = Some(format);
     obj.protocol = p;
-    Ok(r)
-}
-
-/// Returns `true` if `v`, the result of an operation of kind `kind`, is a
-/// value that the operation read.
-fn reads_value<R: 'static>(kind: DecodeOp, v: &R) -> bool {
-    match kind {
-        DecodeOp::Value => true,
-        // `false` is `None`.
-        DecodeOp::Option => (v as &dyn Any).downcast_ref::<bool>() == Some(&false),
-        DecodeOp::Other => false,
-    }
-}
-
-/// Returns the error of the failed operation `fail` at the path `path`, or
-/// the failure that ends the run.
-fn decode_error(fail: DecodeFail, path: impl FnOnce() -> String) -> Result<HostError, Fail> {
-    match fail {
-        DecodeFail::Mismatch(m) => Ok(HostError::new("parse", format!("{}: {m}", path()))),
-        DecodeFail::Invalid(m) => Ok(HostError::new("invalid", format!("{}: {m}", path()))),
-        DecodeFail::Syntax(m) => Ok(HostError::new("parse", m)),
-        DecodeFail::Fail(fail) => Err(fail),
-    }
+    r
 }
 
 /// Runs `op`, an operation of kind `kind`, on `d` and its format, checks the
 /// protocol of `d`, and charges the fuel of the input that the format read.
-/// An error gets the decoder's path.
+/// `reads` returns `true` if the result of `op` is a value that it read. An
+/// error gets the decoder's path.
 #[inline]
-fn with_decoder<R: 'static>(
+fn with_decoder<R>(
     vm: &mut Vm,
     d: VmVal<Decoder>,
     kind: DecodeOp,
+    reads: impl FnOnce(&R) -> bool,
     op: impl FnOnce(&mut dyn DecodeFormat, &mut DecodePath, &mut Vm) -> DecodeResult<R>,
 ) -> Result<R, HostError> {
-    let Some((obj, input)) = vm.heap.native_and_first_value::<Decoder>(d.raw()) else {
-        return Err(Fail::internal("not a decoder").into());
-    };
+    let Some((obj, values)) = vm.heap.native_and_values::<Decoder>(d.raw()) else { return Err(Fail::internal("not a decoder").into()) };
     if !obj.protocol.is_ready(kind) {
-        return with_decoder_checked(vm, d, kind, op);
+        return with_decoder_protocol(vm, d, kind, reads, op);
     }
-    // Only the path leaves the protocol state for the operation.
+    // The operation needs no work of the protocol, so only the path leaves
+    // the protocol state.
+    let errors = obj.protocol.errors;
+    let input = values.first().copied().filter(|_| values.len() > errors as usize);
     let Some(mut format) = obj.format.take() else { return Err(Fail::internal("the decoder is in use").into()) };
     let mut path = std::mem::take(&mut obj.protocol.path);
     let level = path.0.len();
-    let r = lend(vm, d, input, &mut *format, true, |f, vm| op(f, &mut path, vm));
-    let r = match vm.charge(format.take_input_fuel()) {
-        Ok(()) => r,
-        Err(fail) => Err(fail.into()),
-    };
-    let r = r.map_err(|e| decode_error(e, || path_text(vm, &path.0)));
+    let r = lend(vm, d, &mut *format, input, errors, |f, vm| charged(f, vm, |f, vm| op(f, &mut path, vm)))?;
+    let r = r.map_err(|e| e.into_error(|| path_text(vm, &path.0)));
     let obj = d.get_mut(&mut vm.heap)?;
     obj.format = Some(format);
     obj.protocol.path = path;
     match r {
         Ok(v) => {
-            obj.protocol.after(level, reads_value(kind, &v));
+            obj.protocol.after(level, reads(&v));
             Ok(v)
         }
-        Err(Ok(error)) => {
-            obj.protocol.failed();
-            Err(error)
-        }
-        Err(Err(fail)) => Err(fail.into()),
+        Err(error) => Err(decoder_error(vm, d, error?)?),
     }
 }
 
 /// Runs `op` as [`with_decoder`] does, after the work of the protocol: a
-/// return to the start of a value after a failure, or a check of a broken
-/// protocol.
+/// return to the start of a value after a failed read, or a check of a
+/// broken protocol.
 #[cold]
-fn with_decoder_checked<R: 'static>(
+fn with_decoder_protocol<R>(
     vm: &mut Vm,
     d: VmVal<Decoder>,
     kind: DecodeOp,
+    reads: impl FnOnce(&R) -> bool,
     op: impl FnOnce(&mut dyn DecodeFormat, &mut DecodePath, &mut Vm) -> DecodeResult<R>,
 ) -> Result<R, HostError> {
-    with_decoder_state(vm, d, true, |f, p, vm| {
-        if let Err(violation) = p.before(vm, f, kind)? {
-            return Err(HostError::new(protocol::VIOLATION_KIND, violation));
+    let r = with_decoder_state(vm, d, true, |f, p, vm| {
+        if let Err(message) = p.before(vm, f, kind)? {
+            return Ok(Err(core::Error { message, kind: protocol::VIOLATION_KIND.into() }));
         }
         let level = p.path.0.len();
-        let r = op(f, &mut p.path, vm);
-        let r = match vm.charge(f.take_input_fuel()) {
-            Ok(()) => r,
-            Err(fail) => Err(fail.into()),
-        };
-        match r {
+        match charged(f, vm, |f, vm| op(f, &mut p.path, vm)) {
             Ok(v) => {
-                p.after(level, reads_value(kind, &v));
-                Ok(v)
+                p.after(level, reads(&v));
+                Ok(Ok(v))
             }
-            Err(e) => {
-                let error = decode_error(e, || p.path_text(vm))?;
-                p.failed();
-                Err(error)
-            }
+            Err(e) => e.into_error(|| p.path_text(vm)).map(Err),
         }
-    })?
+    })??;
+    match r {
+        Ok(v) => Ok(v),
+        Err(error) => Err(decoder_error(vm, d, error)?),
+    }
 }
 
-/// Returns the error of the `Result` value `r`, or `None` if `r` is `Ok`.
-fn result_error(vm: &Vm, r: VmValue) -> Result<Option<core::Error>, Fail> {
+/// Runs `op` on `f`, and charges the fuel of the input that `f` read.
+#[inline(always)]
+fn charged<R>(
+    f: &mut dyn DecodeFormat,
+    vm: &mut Vm,
+    op: impl FnOnce(&mut dyn DecodeFormat, &mut Vm) -> DecodeResult<R>,
+) -> DecodeResult<R> {
+    let r = op(f, vm);
+    vm.charge(f.take_input_fuel())?;
+    r
+}
+
+/// Keeps the `Error` value `e`, which the decoder `d` made (see
+/// [`Decoder`]). It fails the read that made it.
+fn keep_error(vm: &mut Vm, d: VmVal<Decoder>, e: VmValue) -> Result<(), Fail> {
+    vm.unchecked(|vm| d.push_value(vm, e))?;
+    d.get_mut(&mut vm.heap)?.protocol.add_error();
+    Ok(())
+}
+
+/// Returns the error `error`, which the decoder `d` made, and keeps it.
+fn decoder_error<C>(vm: &mut Vm, d: VmVal<Decoder>, error: core::Error) -> Result<HostError<C>, Fail> {
+    let err = decoder_err(vm, d, error.clone())?;
+    Ok(HostError::made(err, error.kind, error.message))
+}
+
+/// Returns the `Err` value of `error`, which the decoder `d` made, and keeps
+/// it.
+fn decoder_err(vm: &mut Vm, d: VmVal<Decoder>, error: core::Error) -> Result<VmValue, Fail> {
+    let e = vm.unchecked(|vm| error.into_vm_value(vm))?;
+    keep_error(vm, d, e)?;
+    Ok(vm.unchecked(|vm| vm.err(e)))
+}
+
+/// The error of the `Result` value of a decode, or of a call of a
+/// hand-written `Decode`.
+struct ResultError {
+    origin: ErrorOrigin,
+    /// The `Error` value.
+    value: VmValue,
+    error: core::Error,
+}
+
+/// Returns the error of the `Result` value `r` of a decode with `d`, or
+/// `None` if `r` is `Ok`.
+fn result_error(vm: &Vm, d: VmVal<Decoder>, r: VmValue) -> Result<Option<ResultError>, Fail> {
     if vm.heap.variant_id(r) != vm.prog.ids.err {
         return Ok(None);
     }
-    let Some(e) = vm.heap.field(r, 0) else { return internal("decode: an Err without its error") };
-    core::Error::from_vm_value(vm, e, &mut crate::native::convert::Conversion::new()).map(Some)
-}
-
-/// Returns a new `Err` with `error`. The value counts against the memory
-/// limit after the native call, so that the call does not run again.
-fn new_err(vm: &mut Vm, error: core::Error) -> Result<VmValue, Fail> {
-    vm.unchecked(|vm| {
-        let e = error.into_vm_value(vm)?;
-        Ok(vm.heap.new_variant(vm.prog.ids.err, &[e]))
-    })
-}
-
-/// How a call of a hand-written `Decode`, or a decode, ends.
-enum Ending {
-    /// With its result.
-    Result,
-    /// With its error, which gets the path of the decoder.
-    Locate,
-    /// With this error instead of its result.
-    Fail(core::Error),
-}
-
-impl Ending {
-    /// Returns the ending of a protocol check whose outcome is the message of
-    /// a broken protocol, or `true` if the error of the result needs its
-    /// path.
-    fn of(outcome: Result<bool, String>) -> Ending {
-        match outcome {
-            Ok(true) => Ending::Locate,
-            Ok(false) => Ending::Result,
-            Err(message) => Ending::Fail(core::Error { message, kind: protocol::VIOLATION_KIND.into() }),
-        }
-    }
-
-    /// Returns the result value for the `Result` value `r`, whose error is
-    /// `error`, and `path`, the path of the decoder for [`Ending::Locate`].
-    fn apply(self, vm: &mut Vm, r: VmValue, error: Option<core::Error>, path: Option<String>) -> Result<VmValue, Fail> {
-        match (self, error, path) {
-            (Ending::Fail(e), ..) => new_err(vm, e),
-            (Ending::Locate, Some(e), Some(path)) => new_err(vm, core::Error { message: format!("{path}: {}", e.message), kind: e.kind }),
-            _ => Ok(r),
-        }
-    }
-
-    /// Returns the path of `p` if the ending needs it.
-    fn path(&self, vm: &Vm, p: &DecodeProtocol) -> Option<String> {
-        matches!(self, Ending::Locate).then(|| p.path_text(vm))
-    }
+    let Some(value) = vm.heap.field(r, 0) else { return internal("decode: an Err without its error") };
+    let error = core::Error::from_vm_value(vm, value, &mut crate::native::convert::Conversion::new())?;
+    let (Some(values), errors) = (vm.heap.native_values::<Decoder>(d.raw()), d.get(&vm.heap)?.protocol.errors as usize) else {
+        return internal("not a decoder");
+    };
+    let made = values[values.len().saturating_sub(errors)..].contains(&value);
+    let origin = if made { ErrorOrigin::Decoder } else { ErrorOrigin::Implementation };
+    Ok(Some(ResultError { origin, value, error }))
 }
 
 /// Ends the innermost call of a hand-written `Decode` with the `Result`
-/// value `r`. An error gets the decoder's path, and a call that read no
-/// value fails.
+/// value `r`. An error of the implementation gets the decoder's path, and a
+/// call that read no value fails.
 fn leave_decode(vm: &mut Vm, d: VmVal<Decoder>, r: VmValue) -> Result<VmValue, Fail> {
-    let error = result_error(vm, r)?;
-    let (ending, path) = with_decoder_state(vm, d, false, |f, p, vm| {
-        let ending = p.leave(vm, f, error.is_some()).map(Ending::of);
-        let path = ending.as_ref().ok().and_then(|e| e.path(vm, p));
-        (ending, path)
-    })?;
-    ending?.apply(vm, r, error, path)
+    let error = result_error(vm, d, r)?;
+    let origin = error.as_ref().map(|e| e.origin);
+    let (ending, dropped) = with_decoder_state(vm, d, false, |f, p, vm| {
+        let errors = p.errors;
+        p.leave(vm, f, origin).map(|ending| (ending, errors - p.errors))
+    })??;
+    if dropped > 0 {
+        let values = vm.heap.native_values::<Decoder>(d.raw()).map_or(0, |v| v.len());
+        d.truncate_values(&mut vm.heap, values - dropped as usize)?;
+    }
+    apply_ending(vm, d, ending, r, error)
+}
+
+/// Returns the result of a call or a decode that ends with `ending`, the
+/// `Result` value `r`, and its error `error`. Keeps the error of the result,
+/// if any (see [`Decoder`]).
+fn apply_ending(vm: &mut Vm, d: VmVal<Decoder>, ending: Ending, r: VmValue, error: Option<ResultError>) -> Result<VmValue, Fail> {
+    match (ending, error) {
+        (Ending::Result, Some(error)) => {
+            keep_error(vm, d, error.value)?;
+            Ok(r)
+        }
+        (Ending::Result, None) => Ok(r),
+        (Ending::Locate(path), Some(ResultError { error, .. })) => {
+            decoder_err(vm, d, core::Error { message: format!("{path}: {}", error.message), kind: error.kind })
+        }
+        (Ending::Locate(_), None) => internal("decode: a path for no error"),
+        (Ending::Fail(e), _) => decoder_err(vm, d, e),
+    }
 }
 
 /// Ends the decode of `d` with the `Result` value `r` of the outermost
 /// `Decode`: checks that no input follows a value, and adds the path to an
-/// error.
+/// error of an implementation.
 fn end_decode(vm: &mut Vm, d: VmVal<Decoder>, r: VmValue) -> Result<VmValue, Fail> {
-    let error = result_error(vm, r)?;
-    let failed = error.is_some();
-    let (ending, path) = with_decoder_state(vm, d, true, |f, p, vm| {
-        let ending = p.end(f, failed).and_then(|outcome| match outcome {
-            Ok(true) if !failed => {
-                let end = f.finish(vm);
-                let r = vm.charge(f.take_input_fuel()).map_err(DecodeFail::Fail).and(end);
-                Ok(match r {
-                    Ok(()) => Ending::Result,
-                    Err(DecodeFail::Fail(fail)) => return Err(fail),
-                    Err(DecodeFail::Mismatch(m)) => {
-                        Ending::Fail(core::Error { message: format!("{}: {m}", p.path_text(vm)), kind: "parse".into() })
-                    }
-                    Err(DecodeFail::Invalid(m)) => {
-                        Ending::Fail(core::Error { message: format!("{}: {m}", p.path_text(vm)), kind: "invalid".into() })
-                    }
-                    Err(DecodeFail::Syntax(m)) => Ending::Fail(core::Error { message: m, kind: "parse".into() }),
-                })
+    let error = result_error(vm, d, r)?;
+    let origin = error.as_ref().map(|e| e.origin);
+    let ending = with_decoder_state(vm, d, true, |f, p, vm| {
+        let mut ending = p.end(vm, f, origin)?;
+        if origin.is_none() && matches!(ending, Ending::Result) {
+            let end = f.finish(vm);
+            if let Err(e) = vm.charge(f.take_input_fuel()).map_err(DecodeFail::Fail).and(end) {
+                // A failed memory check returns before the decode closes,
+                // so that the native call can run again.
+                ending = Ending::Fail(e.into_error(|| p.path_text(vm))?);
             }
-            outcome => Ok(Ending::of(outcome)),
-        });
-        let path = ending.as_ref().ok().and_then(|e| e.path(vm, p));
-        (ending, path)
-    })?;
-    ending?.apply(vm, r, error, path)
+        }
+        p.close();
+        Ok::<_, Fail>(ending)
+    })??;
+    apply_ending(vm, d, ending, r, error)
 }
 
 /// The `Encode` dictionary of the first type parameter of a native function.
@@ -791,14 +784,10 @@ pub(crate) fn read_whole<F: DecodeFormat>(vm: &mut Vm, f: &mut F, schema: Schema
     let mut path = DecodePath::default();
     let r = f.read_fast(vm, &mut path, schema).and_then(|v| f.finish(vm).map(|()| v));
     vm.charge(f.take_input_fuel())?;
-    let (kind, message) = match r {
-        Ok(v) => return Ok(Ok(v)),
-        Err(DecodeFail::Fail(fail)) => return Err(fail),
-        Err(DecodeFail::Mismatch(m)) => ("parse", format!("{}: {m}", path_text(vm, &path.0))),
-        Err(DecodeFail::Invalid(m)) => ("invalid", format!("{}: {m}", path_text(vm, &path.0))),
-        Err(DecodeFail::Syntax(m)) => ("parse", m),
-    };
-    Ok(Err(core::Error { message, kind: kind.into() }))
+    match r {
+        Ok(v) => Ok(Ok(v)),
+        Err(e) => e.into_error(|| path_text(vm, &path.0)).map(Err),
+    }
 }
 
 /// Formats the path of the innermost part of `frames`, such as
@@ -949,7 +938,7 @@ fn encoder_methods(m: &mut NativeModule) {
 
 /// Reads a `json.Json` value from `d`.
 pub(crate) fn read_json(vm: &mut Vm, d: VmVal<Decoder>) -> Result<VmValue, HostError> {
-    with_decoder(vm, d, DecodeOp::Value, |f, _, vm| f.json(vm))
+    read_part(vm, d, |f, _, vm| f.json(vm))
 }
 
 /// Returns the qualified type name and the text of the native value `v`.
@@ -983,7 +972,7 @@ fn decoder_methods(m: &mut NativeModule) {
     });
     m.function("Decoder.read_some", |vm: &mut Vm, d: Dec| -> Decoded<bool> {
         vm.charge(1)?;
-        with_decoder(vm, d, DecodeOp::Option, |f, _, vm| f.some(vm))
+        with_decoder(vm, d, DecodeOp::Option, |&some: &bool| !some, |f, _, vm| f.some(vm))
     });
     m.function("Decoder.begin_list", |vm: &mut Vm, d: Dec| -> Decoded<()> {
         read_part(vm, d, |f, path, vm| dec_begin_seq(f, &mut path.0, vm, SeqKind::List))
@@ -992,61 +981,70 @@ fn decoder_methods(m: &mut NativeModule) {
         read_part(vm, d, |f, path, vm| dec_begin_seq(f, &mut path.0, vm, SeqKind::Set))
     });
     m.function("Decoder.next_item", |vm: &mut Vm, d: Dec| -> Decoded<bool> {
-        with_decoder(vm, d, Other, |f, path, vm| dec_next_item(f, &mut path.0, vm))
+        with_decoder(vm, d, Other, |_| false, |f, path, vm| dec_next_item(f, &mut path.0, vm))
     });
     m.function("Decoder.begin_tuple", |vm: &mut Vm, d: Dec, len: i64| -> Decoded<()> {
         read_part(vm, d, |f, path, vm| dec_begin_seq(f, &mut path.0, vm, SeqKind::Tuple(to_index(len))))
     });
     m.function("Decoder.element", |vm: &mut Vm, d: Dec| -> Decoded<()> {
-        with_decoder(vm, d, Other, |f, path, vm| dec_element(f, &mut path.0, vm))
+        with_decoder(vm, d, Other, |_| false, |f, path, vm| dec_element(f, &mut path.0, vm))
     });
     m.function("Decoder.end_tuple", |vm: &mut Vm, d: Dec| -> Decoded<()> {
-        with_decoder(vm, d, Other, |f, path, vm| dec_end_tuple(f, &mut path.0, vm))
+        with_decoder(vm, d, Other, |_| false, |f, path, vm| dec_end_tuple(f, &mut path.0, vm))
     });
     m.function("Decoder.begin_map", |vm: &mut Vm, d: Dec| -> Decoded<()> {
         read_part(vm, d, |f, path, vm| dec_begin_map(f, &mut path.0, vm))
     });
     m.function("Decoder.next_entry", |vm: &mut Vm, d: Dec| -> Decoded<bool> {
-        with_decoder(vm, d, Other, |f, path, vm| dec_next_entry(f, &mut path.0, vm))
+        with_decoder(vm, d, Other, |_| false, |f, path, vm| dec_next_entry(f, &mut path.0, vm))
     });
     m.function("Decoder.map_value", |vm: &mut Vm, d: Dec| -> Decoded<()> {
-        with_decoder(vm, d, Other, |f, path, vm| dec_map_value(f, &mut path.0, vm))
+        with_decoder(vm, d, Other, |_| false, |f, path, vm| dec_map_value(f, &mut path.0, vm))
     });
     m.function("Decoder.begin_struct", |vm: &mut Vm, d: Dec, def: i64| -> Decoded<()> {
         read_part(vm, d, |f, path, vm| dec_begin_struct(f, &mut path.0, vm, def as u32))
     });
     m.function("Decoder.begin_fields", |vm: &mut Vm, d: Dec, variant: i64| -> Decoded<()> {
-        with_decoder(vm, d, Value, |f, path, vm| dec_begin_fields(f, &mut path.0, vm, variant as u32))
+        with_decoder(vm, d, Value, |_| true, |f, path, vm| dec_begin_fields(f, &mut path.0, vm, variant as u32))
     });
     m.function("Decoder.field", |vm: &mut Vm, d: Dec| -> Decoded<i64> {
-        with_decoder(vm, d, Other, |f, path, vm| next_field(f, &mut path.0, vm))
+        with_decoder(vm, d, Other, |_| false, |f, path, vm| next_field(f, &mut path.0, vm))
     });
-    m.function("Decoder.missing", |vm: &mut Vm, d: Dec, id: i64, variant: bool, index: i64| -> Result<core::Error, Fail> {
+    m.function("Decoder.missing", |vm: &mut Vm, d: Dec, id: i64, variant: bool, index: i64| -> Result<VmVal<core::Error>, Fail> {
         let message = with_decoder_state(vm, d, false, |_, p, vm| {
-            p.located = true;
-            missing_message(vm, &p.path.0, id as u32, variant, to_index(index))
+            format!("{}: {}", p.path_text(vm), missing_field(vm, id as u32, variant, to_index(index)))
         })?;
-        Ok(core::Error { message, kind: "parse".into() })
+        let err = decoder_err(vm, d, core::Error { message, kind: "parse".into() })?;
+        match vm.heap.field(err, 0) {
+            Some(e) => Ok(VmVal::from_raw(e)),
+            None => internal("decode: an Err without its error"),
+        }
     });
     m.function("Decoder.variant", |vm: &mut Vm, d: Dec, first: i64, count: i64| -> Decoded<i64> {
         read_part(vm, d, |f, path, vm| read_variant(f, &mut path.0, vm, first as u32, to_index(count)))
     });
     m.function("Decoder.end_variant", |vm: &mut Vm, d: Dec| -> Decoded<()> {
-        with_decoder(vm, d, Other, |f, path, vm| dec_end_variant(f, &mut path.0, vm))
+        with_decoder(vm, d, Other, |_| false, |f, path, vm| dec_end_variant(f, &mut path.0, vm))
     });
     m.function("Decoder.read_fast", |vm: &mut Vm, d: Dec, schema: i64| -> Decoded<Param<0>> {
-        with_decoder(vm, d, Value, |f, path, vm| {
-            // The native call runs again after a failed memory check.
-            let mark = f.mark();
-            let r = f.read_fast(vm, path, schema as u32);
-            if let Err(DecodeFail::Fail(fail)) = &r
-                && fail.as_limit().is_some()
-            {
-                f.rewind(mark);
-            }
-            f.release(mark);
-            r
-        })
+        with_decoder(
+            vm,
+            d,
+            Value,
+            |_| true,
+            |f, path, vm| {
+                // The native call runs again after a failed memory check.
+                let mark = f.mark();
+                let r = f.read_fast(vm, path, schema as u32);
+                if let Err(DecodeFail::Fail(fail)) = &r
+                    && fail.as_limit().is_some()
+                {
+                    f.rewind(mark);
+                }
+                f.release(mark);
+                r
+            },
+        )
         .map(Param::from_raw)
     });
     m.function("Decoder.end_decode", |vm: &mut Vm, d: Dec, r: Param<0>| -> Result<Param<0>, Fail> {
@@ -1173,10 +1171,10 @@ fn dec_end_variant(f: &mut dyn DecodeFormat, frames: &mut Vec<Frame>, vm: &mut V
 }
 
 /// The message of a missing field `index` of struct definition `id`, or of
-/// the named payload of variant `id`, at the path of `frames`.
-fn missing_message(vm: &Vm, frames: &[Frame], id: u32, variant: bool, index: usize) -> String {
-    let name = field_names(vm, id, variant).get(index).cloned().unwrap_or_default();
-    format!("{}: missing field `{name}`", path_text(vm, frames))
+/// the named payload of variant `id`.
+fn missing_field(vm: &Vm, id: u32, variant: bool, index: usize) -> String {
+    let name = field_names(vm, id, variant).get(index).map_or("", String::as_str);
+    format!("missing field `{name}`")
 }
 
 /// Reads the next field of the innermost struct or named payload. Returns
@@ -1284,12 +1282,11 @@ impl VmVal<Decoder> {
         })
     }
 
-    /// Returns a decode error with the decoder's path and `message`.
+    /// Returns a decode error with the decoder's path and `message`, for a
+    /// native `decode` to return. It fails the read, so that the caller can
+    /// read the value as another type.
     pub fn error(self, vm: &mut Vm, message: &str) -> Result<HostError, Fail> {
-        let message = with_decoder_state(vm, self, false, |_, p, vm| {
-            p.located = true;
-            format!("{}: {message}", p.path_text(vm))
-        })?;
-        Ok(HostError::new("parse", message))
+        let message = with_decoder_state(vm, self, false, |_, p, vm| format!("{}: {message}", p.path_text(vm)))?;
+        decoder_error(vm, self, core::Error { message, kind: "parse".into() })
     }
 }
