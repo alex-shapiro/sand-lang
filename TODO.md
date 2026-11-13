@@ -37,6 +37,14 @@ The host cannot rely on engine limits, stability, or control.
       internal error. A `panic = "abort"` build stops the process. Options: a
       host value type that is not `Send`, or a generation check on each heap
       slot.
+      The same hole lets a host store a raw `VmValue` in a field of a
+      `NativeObject`, where the collector does not trace it; the object's
+      value list (`VmVal::push_value`) is the traced place.
+- [ ] ❓ _Embedding._ Truncate `Program::schemas` in `ProgramMark::rollback`.
+      Codegen appends the fast-path schemas of the checker from the length of
+      the program's table, and a rollback does not remove the schemas of a
+      failed input. In a session, a failed input that added schemas could
+      shift the schemas of the next input. Not reproduced yet.
 - [ ] ❓ _Embedding._ Add a rooted handle that keeps a script value alive
       across a wait. A native function cannot safely change an argument object
       or return an early allocation after a wait. `Vm::pinned` already holds
@@ -337,6 +345,18 @@ Visible defects that rarely block users.
       specified in §3.1.
 
 ## Items without significant user impact
+
+- [ ] ❓ _Performance._ Encode an `Encoded<N>` argument of a closed fast type
+      in the argument conversion of the host call. The call now makes an
+      `Encoder` object, an `Arc<Value>`, and one more native call, and the
+      collector frees the value later: `small_to_value` takes 180 ns against
+      93 ns on `value-decode` (DESIGN_NOTES §7, Q4). The conversion could take
+      the raw value and the `Encode` dictionary as evidence, as natives take
+      `Num` evidence.
+- [ ] ❓ _Performance._ Remove the lending of the input text for each format
+      operation of a driven decode (about 2 ns each, DESIGN_NOTES §7, Q6). The
+      `TextDecoder` operations could read the text from the heap and allocate
+      their results after the read.
 
 ### Miscellaneous
 

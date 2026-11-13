@@ -1134,3 +1134,58 @@ Measured (3 rounds; lead, Q6, Q7): `to_json` 798, 784, 646;
 `small_to_json` 686, 613, 363; `encode` 340, 337, 336; `encode_json` 328,
 329, 323; `deep_encode` 3439, 3527, 3326; `encode_custom` 321, 319, 321;
 `to_value` 360, 325, 327. Fuel is unchanged (`to_json` 22.8 per user).
+
+### Summary of the second pass
+
+Final measurements: 3 alternating rounds of `BENCH_RUNS=5 BENCH_REPS=10`,
+minimum, ns per item; the rows marked * from a second set of 5 rounds of
+the cases that varied most.
+
+| case                 | value-decode | lead (`2592b5c`) | after | after / vd |
+| -------------------- | ------------ | ---------------- | ----- | ---------- |
+| encode               | 291          | 335              | 334   | 1.15       |
+| encode_indent        | 374          | 421              | 408   | 1.09       |
+| decode               | 643          | 575              | 561   | 0.87       |
+| to_json              | 477          | 786              | 646   | 1.35       |
+| decode_json *        | 835          | 947              | 859   | 1.03       |
+| encode_json          | 386          | 327              | 325   | 0.84       |
+| json_param *         | 852          | 888              | 920   | 1.08       |
+| json_echo            | 1523         | 1557             | 1552  | 1.02       |
+| to_value             | 364          | 343              | 326   | 0.90       |
+| small_encode         | 125          | 175              | 128   | 1.02       |
+| small_to_json        | 254          | 664              | 362   | 1.43       |
+| small_decode         | 241          | 304              | 182   | 0.76       |
+| small_to_value       | 97           | 307              | 174   | 1.79       |
+| deep_encode          | 4188         | 3251             | 3166  | 0.76       |
+| encode_custom *      | 81           | 306              | 304   | 3.8        |
+| decode_custom *      | 209          | 596              | 603   | 2.9        |
+| decode_generic       | 647          | 573              | 554   | 0.86       |
+| decode_page          | 645          | 578              | 570   | 0.88       |
+| decode_ints          | 114          | 111              | 105   | 0.92       |
+| decode_ints_generic *| 114          | 100              | 105   | 0.92       |
+| small_decode_default *| 263         | 265              | 279   | 1.06       |
+| deep_decode *        | 13976        | 13832            | 14515 | 1.04       |
+
+Fuel per item: every case without a hand-written part now uses the fuel
+of value-decode or less (`small_encode`, `small_to_json`, `small_to_value`
+6, value-decode 6, lead 8; `small_decode` 12, value-decode 16). The
+hand-written cases: `encode_custom` 11 (lead 12), `decode_custom` 22.8
+(23.8), `small_decode_default` 7 (9).
+
+Native stack at 512 levels (KiB): `json.decode` of structs 16,
+`json.encode` 16, `json.parse` 120; 16 is the floor of an empty run.
+
+Production lines against `2592b5c` (`crates/sandlang/src`): 1085 added,
+392 removed. Tests and the example: 178 added, 49 removed.
+
+Cases that miss the goal, and why:
+
+- `small_to_value` (1.79): the host call still makes an `Encoder` object
+  and an `Arc<Value>`, and the collector frees the value later; see TODO.
+- `small_to_json` (1.43) and `to_json` (1.35): each object needs a map with
+  a key index; value-decode built the same maps, but in one staged pass
+  with a shared key table.
+- `encode` (1.15): unchanged in this pass (see §6, C7).
+- `deep_decode` and `small_decode_default` are about 5% slower than lead in
+  the second set; the first set had `small_decode_default` equal (276
+  against 275). The driven decode lends its text at each operation (Q6).
