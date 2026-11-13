@@ -6,7 +6,7 @@ this file after you merge the final changeset.
 
 The source branch has 82 commits after `c6703df`. Most commits revise the
 journal. Changesets 1 to 7 group these commits into self-contained changes.
-Changesets 8 to 26 implement the journal design in this file, and use the
+Changesets 8 to 30 implement the journal design in this file, and use the
 source branch only as a reference.
 
 ## How to carve a changeset
@@ -36,18 +36,23 @@ source branch only as a reference.
 12. `VmValue` rename: merged in #39 from `vm-value-rename`
 13. Single native function registration: merged in #40 from `single-native-function`
 14. `Value` and `Vm::to_value`: merged in #41 from `value-encode`
-15. Shared decode path and `Value` input: in review on `value-decode`
-16. `serde` support for `Value`: not started; requires 14
-17. Single run method and `Outcome`: not started; requires 14
-18. Host function calls: not started; requires 15 and 17
-19. Host context: not started; requires 13 and 17
-20. Run statistics: not started
-21. Journal core: not started; requires 10, 11, 18, and 19
-22. Journaled operations: not started; requires 21
-23. Host function classes: not started; requires 13 and 22
-24. Suspension and parked host calls: not started; requires 23
-25. File system restriction in journaled runs: not started; requires 21
-26. Journal corpus and Sahara acceptance: not started; requires 24 and 25
+15. Dictionaries for local functions and field defaults: not started
+16. Verifier impl index and proof depth: not started
+17. Inlining of generic functions: not started
+18. Native objects that keep VM values: not started
+19. `Encode` and `Decode` as regular traits: in review on `codec-traits-b`;
+    requires 14, 15, 16, 17, and 18
+20. `serde` support for `Value`: not started; requires 14
+21. Single run method and `Outcome`: not started; requires 14
+22. Host function calls: not started; requires 19 and 21
+23. Host context: not started; requires 13 and 21
+24. Run statistics: not started
+25. Journal core: not started; requires 10, 11, 22, and 23
+26. Journaled operations: not started; requires 25
+27. Host function classes: not started; requires 13 and 26
+28. Suspension and parked host calls: not started; requires 27
+29. File system restriction in journaled runs: not started; requires 25
+30. Journal corpus and Sahara acceptance: not started; requires 28 and 29
 
 ## Independent changesets
 
@@ -140,7 +145,7 @@ We judge each decision by two questions:
 2. After the change, does each affected feature work as a user expects?
 
 The source branch built the journal first and then corrected it. Changesets 8
-to 26 land the foundations first and the journal last, so that each changeset
+to 30 land the foundations first and the journal last, so that each changeset
 builds on finished work. Each changeset merges on its own and has its own tests.
 
 **Keep the replay model of the source branch.** Scripts need no special syntax.
@@ -283,6 +288,9 @@ The Sand trait `Encode` defines what can leave the VM. Three functions read an
 encodable value from the heap: `json.encode` writes JSON text, `json.to_json`
 builds a Sand `Json` value, and `Vm::to_value` builds a `Value`.
 
+Changeset 19 later removes `Vm::to_value`, `Value::Opaque`, and
+`ContainerChildren`, and replaces the three walks with the `Encode` trait.
+
 - Each function matches on heap value kinds and tracks open containers on an
   explicit stack. This iterative walk prevents thread stack overflow on deep
   values.
@@ -318,45 +326,167 @@ builds a Sand `Json` value, and `Vm::to_value` builds a `Value`.
 Commit `03076c5` returned `Json`. That representation lost the distinction
 between `bytes` and `str`, and between `()` and `None`.
 
-### 15. Shared decode path and `Value` input
+### 15. Dictionaries for local functions and field defaults
 
-The Sand trait `Decode` defines what can enter the VM, and `Decoder` implements it
-for JSON text. A second decoder reads a `Value`. The two decoders share the parts
-that do not read input, and each one writes its own `match` over the type.
+Generic code gets fewer arbitrary limits on traits with methods.
 
-- The first design shared one walk over the type and read the input through a
-  `DecodeSource` trait, as the first design of changeset 14 shared one heap walk.
-  It added about 310 more lines than two walks, used more native stack in
-  `json.parse`, changed `json.decode` fuel for some map types, and was slower on
-  `decode_json`. The `value-decode-shared-walk` branch keeps it.
-- `DecodeTarget` holds the shared parts: error paths, field defaults,
-  computed-default thunks, and deferred set and map fills.
-- The JSON decoder keeps the walk and the fuel of `main`. The `Value` decoder also
-  decodes map keys without a JSON text form, such as tuple keys.
-- The `Value` source also accepts the JSON form of each type, so a `Value` that
-  comes from JSON is valid input.
-- `value::Decode: Encode` mirrors the Sand trait. Primitives, collections, and
-  `ValueType` types implement it, and the derives in changeset 14 generate it. A
-  host that knows a type writes `let receipt: Receipt = value.decode()?`.
-- `stdlib::core::Error` is public, and implements `value::Decode`.
-- A benchmark must show that `json.decode` keeps its speed.
+- A generic local function takes a hidden dictionary for each bound on a trait
+  with methods, as a top-level function does.
+- A field default can use the traits of the bounds of its struct, such as
+  `x: T = T.zero()` with `T: Num`. Each construction that omits the field
+  passes the dictionaries.
+- `never` implements a trait if every method of the trait and its supertraits
+  takes `self`. No value has type `never`, so no code can call these methods.
+  If inference leaves a type unknown in such a bound, such as the element
+  type of `[]` in `show([])`, the type becomes `never`.
+- Debug builds verify the dictionaries of local functions and of `never`.
 
-Do not convert a `Value` to JSON text and decode the text. `NaN` and infinity encode
-as `null`, which fails to decode as a float.
+On `main`, `json.decode` fills a computed default through a closure that gets
+no dictionaries. So this changeset makes a `reflect` type argument a compile
+error if a default of its type reads a dictionary. Changeset 19 removes this
+limit with `reflect`.
 
-This changeset has no source commits.
+Source commits: `204fb7e`, `e753d17`, `ec986e6`, `5c6e21c`.
 
-### 16. `serde` support for `Value`
+### 16. Verifier impl index and proof depth
+
+The debug-build verifier indexes impls by trait and target constructor, as the
+checker does. A chain of 20,000 structs, each with its own impls, took 111 s to
+verify, and now takes 2.6 s. The checker and the verifier both allow trait
+proofs 128 levels deep, up from 32 and 64. A valid type nested 33 levels deep
+failed before with "overflow while checking".
+
+Source commit: `9fd0ec8`.
+
+### 17. Inlining of generic functions
+
+The inliner takes functions with type parameters, dictionaries, and parameter
+defaults. A dictionary parameter is a local like any other. On the codec
+branch, this made the small codec cases 5% to 9% faster.
+
+Source commits: `82665d4`, and the fix of the inliner for named arguments out
+of order ("Inline calls with named arguments out of order").
+
+### 18. Native objects that keep VM values
+
+A native object can keep VM values between native calls, and the collector
+traces them. Each native object lives in a `NativeCell` with a list of VM
+values. `VmVal<T>` gets `values`, `push_value`, `set_value`, and
+`truncate_values`, which apply the write barrier. A host type cannot keep a VM
+handle in a field, because handle types are not `Send`. A cycle through the
+list is collected. Other uses are a native object that keeps Sand callbacks,
+and the state of a continuation.
+
+Source commit: `eeec0f3`.
+
+### 19. `Encode` and `Decode` as regular traits
+
+`Encode` and `Decode` become traits with one method each, over an `Encoder` or
+a `Decoder` that the engine supplies, as in Swift `Codable`. The compiler
+synthesizes the implementations of derived types. A script or a native module
+can implement either trait by hand for any of its types, and the
+implementation works for every format. A closed type with no hand-written part
+and no computed field default also gets a native fast path. A property test
+checks that the fast path and the synthesized path agree for every format.
+
+```sand
+impl Decode for Email {
+    fn decode(d: Decoder) -> Result<Email> {
+        Email(d.decode()?)
+    }
+}
+```
+
+A value leaves the VM only through `Encode`. Run results, host call results,
+and native parameters of type `Encoded<N>` go through `Encode`, so a
+hand-written implementation always applies.
+
+This changeset replaces the old changeset 15, "Shared decode path and `Value`
+input", which was in review on `value-decode`. It keeps these parts of it:
+
+- `value::Decode` and `DecodeError`. A host that knows a type writes
+  `let receipt: Receipt = value.decode()?`.
+- `Decoder::from_value`, which reads a `Value`. The input can also be the JSON
+  form of each type, so a `Value` that comes from JSON is valid input.
+- The public `stdlib::core::Error`, which implements `value::Decode`.
+- A `Value` input decodes map keys that have no JSON text form, such as tuple
+  keys.
+
+It removes:
+
+- `reflect`, `TypeDesc`, and `Decoded.Pending`;
+- the public `Vm::to_value`;
+- `Value::Opaque`, because a part that does not implement `Encode` is a
+  compile error;
+- `ContainerChildren`;
+- the supertrait `Encode` of `value::Decode`;
+- the parts of the old changeset 15 that the traits replace: `DecodeTarget`,
+  the computed-default closures, the deferred set and map fills, and
+  `stdlib/json/decode.rs`.
+
+It adds:
+
+- `json.from_json`, which decodes a `json.Json` value into any `Decode` type;
+- `Encoded<N>`, a native parameter that takes any `Encode` argument as a
+  `Value`.
+
+Speed in ns per item, against `main` (`625d1b9`) and `value-decode`
+(`fe58101`):
+
+| case                 | main  | value-decode | this change |
+| -------------------- | ----- | ------------ | ----------- |
+| encode               | 289   | 297          | 339         |
+| encode_indent        | 388   | 398          | 422         |
+| decode               | 655   | 664          | 579         |
+| to_json              | 502   | 499          | 641         |
+| decode_json          | 859   | 855          | 879         |
+| encode_json          | 393   | 391          | 327         |
+| json_param           | 894   | 887          | 956         |
+| json_echo            | 1564  | 1542         | 1615        |
+| to_value             | 369   | 370          | 336         |
+| small_encode         | 126   | 126          | 126         |
+| small_to_json        | 263   | 263          | 374         |
+| small_decode         | 257   | 245          | 181         |
+| small_to_value       | 99    | 99           | 181         |
+| deep_encode          | 4167  | 4251         | 3562        |
+| deep_decode          | 15082 | 15391        | 15118       |
+| encode_custom        | 79    | 83           | 327         |
+| decode_custom        | 231   | 211          | 622         |
+| decode_generic       | 649   | 655          | 581         |
+| decode_page          | 649   | 659          | 591         |
+| decode_ints          | 117   | 116          | 114         |
+| small_decode_default | 260   | 265          | 291         |
+
+The custom cases have a hand-written `Email`. On `main` and `value-decode`
+they derive `Email` instead, so they measure the cost of the hand-written
+part. `decode_default_const` (the bench `User` with `active: bool = true`) is
+648 on `value-decode` and 570 with this change. Method: release builds with
+`-C llvm-args=-align-loops=64`, the minimum of 3 alternating rounds of
+`BENCH_RUNS=5 BENCH_REPS=10`.
+
+`experiments/codec-traits/README.md` records the designs that were not used:
+D1 (synthesized Sand code only), C (native walks that return to Sand at each
+hand-written part), and W (a native walker that pauses through a VM
+continuation). `experiments/codec-traits/notes.md` records each experiment and
+measurement.
+
+Do not convert a `Value` to JSON text and decode the text. `NaN` and infinity
+encode as `null`, which fails to decode as a float.
+
+Source commits: `c2f6887`, `fe58101`, and the codec commits from `49b3c7f` to
+the end of `codec-traits-b`, except those of changesets 15 to 18.
+
+### 20. `serde` support for `Value`
 
 The only effect of this optional feature is to implement `Serialize` and
 `Deserialize` for `Value`. A host can write a `Value` directly to JSON without an
 intermediate form. In a human-readable format the mapping matches `json.encode`,
 so `bytes` is a Base64 string and `duration` is a nanosecond count. A test must
-compare the two outputs. Serializing `Value::Opaque` fails.
+compare the two outputs.
 
 This changeset has no source commits.
 
-### 17. Single run method and `Outcome`
+### 21. Single run method and `Outcome`
 
 `Engine::run` replaces `run_source`, `run_file`, and `run_program`. It accepts a
 script or a compiled program. Every run returns a single type, which replaces the
@@ -370,7 +500,15 @@ match engine.run(target).await? {
 }
 ```
 
-- `Returned(Value)` holds the result. A result of `()` is `Value::Unit`.
+- `Returned(Value)` holds the result, which the engine gets through `Encode`.
+  A result of `()` is `Value::Unit`.
+- If the type of the result does not implement `Encode`, such as a closure or a
+  `Task`, `Returned` holds `Value::Unit`. The compiler knows the type, so a
+  script always gives the same form. A compile error would reject valid
+  scripts whose final expression is a call for its effect, such as
+  `task.spawn(f)`. `CompiledProgram::function` in changeset 22 rejects a
+  function whose return type does not implement `Encode`, so a host learns it
+  before the call. The same rule applies to the payload of `Failed`.
 - `Failed(Value)` holds the payload of a returned `Err`, for a script or a
   function.
 - `Exited(i32)` holds the code of a call to `exit`.
@@ -382,7 +520,7 @@ match engine.run(target).await? {
 This changeset has no source commits. The generic `Outcome<R, S>` of the source
 branch is not used.
 
-### 18. Host function calls
+### 22. Host function calls
 
 Hosts can call a function of a script and receive its result. Today a host can
 only run a script to an exit code. Sahara spliced an entry point into user source
@@ -399,15 +537,16 @@ the same result type.
 
 - `CompiledProgram::function` returns a `Function` or a `FunctionError`.
   `Function::signature` describes the parameters and the return type.
-- `with_args` takes `Value` arguments and cannot fail. `run` converts each argument
-  to its parameter type with the shared decoder, including computed defaults.
+- `with_args` takes `Value` arguments and cannot fail. `run` converts each
+  argument to its parameter type through `Decode` with `Decoder::from_value`, so
+  hand-written implementations and field defaults apply.
 - A bad argument returns `Error::Argument`, and a wrong number of arguments returns
   `Error::ArgumentCount`. Both are host input errors with exit code 2.
 
 Source commits: `4ebd15b`, `f43460f`, and the `Error::Argument` part of
 `29e1f37`.
 
-### 19. Host context
+### 23. Host context
 
 Host functions can read per-run data, such as a run ID. Changeset 5 shares
 compiled host modules across engines, so this data cannot live in the module.
@@ -436,14 +575,14 @@ The per-run binder and `context_function` of the source branch are not used.
 
 Source commit: the parameter `C` from `18f7bf7`.
 
-### 20. Run statistics
+### 24. Run statistics
 
 `Engine::run_stats` reports the fuel, peak memory, output bytes, and garbage
 collection statistics of the last run.
 
 Source commit: `run_stats` from `eeda440`.
 
-### 21. Journal core
+### 25. Journal core
 
 ```rust
 let journal = Journal::new(storage);           // a new run
@@ -489,7 +628,7 @@ Source commits: `4aad4b0`, `4b9a0ea`, `b6ca288`, `610e371`, `98727a1`, `f7bbeb6`
 `19e04e3`, `667e651`, `f858796`, `ae3c293`, `2c037fe`, `be1871b`, `733c8dd`, and
 the `HostAbort` part of `a31c9fb`.
 
-### 22. Journaled operations
+### 26. Journaled operations
 
 This changeset adds timers, HTTP, standard input, and local futures to journaled
 runs. `main` has a single path for timers, standard input, and `http.send`. The
@@ -502,7 +641,7 @@ delivers the result after the same slice.
 Source commits: `d4a4ac0`, `16da2fb`, `483ac31`, `e541a7a`, `3bf577b`, `5c5068e`,
 `385677e`, and `3a59f06`, because replay decodes values inside a finisher.
 
-### 23. Host function classes
+### 27. Host function classes
 
 **Require a class for each host function in a journaled call.** On the source
 branch an unmarked function runs again in replay, so a function with a side effect
@@ -549,7 +688,7 @@ crash leaves its outcome unknown, for an operation that cannot be repeated safel
 Source commits: `722ea6d`, `f46c14c`, `5cf6fae`, `9b0a692`, `9630b0e`, `ff1d63e`,
 `c24783a`, `12895c8`, `561cff0`, `b490c8e`, `4672531`.
 
-### 24. Suspension and parked host calls
+### 28. Suspension and parked host calls
 
 A journaled run can pause if every task waits for a timer or a parked host call
 that is not due soon. The run returns `Suspended`, and the host resumes it later.
@@ -565,7 +704,7 @@ its result is ready, as Sahara's `wait_until` does if a signal has arrived.
 
 Source commits: `e791c8c`, `e23f85a`, `e06eb83`, `3aa2937`, `a49201d`, `bedb787`.
 
-### 25. File system restriction in journaled runs
+### 29. File system restriction in journaled runs
 
 `fs` operations on the operating-system file system fail with kind
 `"unsupported"` in a journaled run. On the source branch replay repeats each write
@@ -574,7 +713,7 @@ valid, and the host resets it for each execution.
 
 This changeset has no source commits.
 
-### 26. Journal corpus and Sahara acceptance
+### 30. Journal corpus and Sahara acceptance
 
 Keep a corpus of journals from earlier engine versions in the repository, and run
 it as a release gate. A change that moves slice boundaries without a format number
@@ -602,12 +741,12 @@ This changeset has no source commits.
 - Formatting, lint, and build fixes: `52a3fff`, `d39a7ff`, `61e9587`, `f5ef1da`,
   `90282ca`, `87342a7`. Fold each fix into the changeset that needs it.
 - TODO entries from Sahara: `bdad37d`. Include the two journal TODO entries in
-  changeset 21.
+  changeset 25.
 
 ## Merge conflicts with `main`
 
 Commit `eeee3b6` on `main` streams standard input from the host. It also pauses
 `max_wall_time` during user waits. Reconcile `eeee3b6` with these changes:
 
-- `483ac31` in changeset 22, which modifies standard input scheduling
-- `19e04e3` in changeset 21, which modifies the wall-time deadline
+- `483ac31` in changeset 26, which modifies standard input scheduling
+- `19e04e3` in changeset 25, which modifies the wall-time deadline
