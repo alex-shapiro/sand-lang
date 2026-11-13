@@ -349,7 +349,7 @@ value-decode -> D1, units for encode / to_json / Encoded (was to_value):
 Encode costs 2 to 4 times the fuel of the native walk: one unit for each Sand
 call plus one for each format op. `to_json` no longer reuses `Json` values.
 
-### D1 measurements (tag `codec-d1`)
+### D1 measurements (the last commit before D2)
 
 Method: release bench binaries of main `625d1b9`, value-decode `fe58101`, and
 D1, each built with `-C llvm-args=-align-loops=64` in its own target
@@ -416,7 +416,7 @@ call dispatch 12%, the two `Decoder` natives 16%, number parsing 15%,
 `Ok` wrapping 5%. The cost is the Sand loop and two native calls for each
 element, not the format.
 
-### D2: native fast path (commit after tag `codec-d1`)
+### D2: native fast path
 
 - Shape: a closed list, set, map, tuple, struct, or enum (not `Option`)
   whose parts all have synthesized or prelude impls, and, for `Decode`, no

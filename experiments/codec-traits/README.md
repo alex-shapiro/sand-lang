@@ -55,7 +55,7 @@ of release builds with `-C llvm-args=-align-loops=64`.
 
 | Design | How derived code runs | Result |
 | ------ | --------------------- | ------ |
-| D1 | All implementations are synthesized Sand code. | Built (tag `codec-d1`). Decode is 4 times slower and encode is 5 times slower than `value-decode`. |
+| D1 | All implementations are synthesized Sand code. | Built, then extended into D2. Decode is 4 times slower and encode is 5 times slower than `value-decode`. |
 | D2 | D1, plus a native fast path for closed types. | Chosen. Built on this branch, and then made faster in two performance passes. |
 | C | Native walks for table types. Synthesized shells that return to Sand at each hand-written part. | Dropped. A hand-written part cost 180 ns, against a limit of 150 ns. On narrow structs it was only about 10% faster than D1. |
 | W | One native walker for each format. It pauses through a VM continuation at each hand-written part. | Dropped. A hand-written field cost about 435 ns, against a limit of 150 ns. Ordinary decode was 40–45% slower, because the resumable walker keeps its state on the heap. |
@@ -76,9 +76,8 @@ runs. This branch later added native objects that keep VM values, which
 removes one cost of C. So a native walk that stops only at hand-written
 fields is still an open option for wide types. `TODO.md` records it.
 
-The evidence for C and W is on the branch `codec-traits-a`: the memo, the
-log in `DESIGN_NOTES.md` §7 and §8, and the general VM continuation in commit
-`e1f8588`.
+`rejected-designs.md` records the prototypes of C and W, the VM feature that
+lets a native function call a Sand function, and their measurements.
 
 ## Files
 
@@ -86,5 +85,7 @@ log in `DESIGN_NOTES.md` §7 and §8, and the general VM continuation in commit
   a native walk with continuations, and representation proxies.
 - `notes.md`: facts about the earlier system, the experiments, the build log,
   and both performance passes, with each profile and measurement.
-- The Phase 1 experiment scripts and the host module of experiment E2 (the
-  bench target `codec_design`) are in commit `49b3c7f`.
+- `rejected-designs.md`: the prototypes of C and W, and the prototype of one
+  general encode walker.
+- The Phase 1 experiment scripts were not kept. `notes.md` §2 describes each
+  experiment and its result.

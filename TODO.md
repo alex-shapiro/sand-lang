@@ -40,6 +40,27 @@ The host cannot rely on engine limits, stability, or control.
       The same hole lets a host store a raw `VmValue` in a field of a
       `NativeObject`, where the collector does not trace it; the object's
       value list (`VmVal::push_value`) is the traced place.
+- [ ] ❓ _Reliability._ Make each `d.decode()` call the boundary of its read.
+      The decoder cannot see where a read starts or ends inside a hand-written
+      `decode`, so it infers a failed read from a count of the errors that it
+      made, and returns the input to the start of the value at the next
+      operation. It decides whether an error has its path by the identity of
+      the `Error` object. Both inferences depend on what Sand code does with
+      `Result` values. They also rely on an unchecked rule: synthesized and
+      prelude code return only errors that the decoder made. Review rounds 1
+      and 2 each found a bug in this bookkeeping. In the fix, `d.decode()`
+      saves the position, runs the decode method of the type, and on an error
+      returns the input to that position at once and adds its path if the
+      error has none. Measure the cost on the cases with hand-written
+      implementations, and test each way that an implementation can handle an
+      error: retry, return, wrap, and replace.
+- [ ] ❓ _Code._ Replace the general encode walker (`codec/fast.rs`) and the
+      JSON text walk (`stdlib/json/text/walk.rs`) with one walker over formats
+      that keep the state of each open container. A prototype matched the
+      speed of the JSON text walk (`experiments/codec-traits/rejected-designs.md`,
+      "One general encode walker"). Then try the same trait for the `Value`
+      build and the `Json` value writers, and build a prototype for the decode
+      side.
 - [ ] ❓ _Performance._ Encode and decode the fast fields of a struct natively
       when the struct has a hand-written field, or, for decode, a computed
       default. Today the whole struct takes the synthesized Sand path. The
@@ -47,8 +68,8 @@ The host cannot rely on engine limits, stability, or control.
       its fast path. The bench `Contact` with a hand-written `Email` encodes
       (`encode_custom`) at 4.1 times the derived `Contact` on `value-decode`.
       A native decode walk that stops only at those fields measured 1.8 times
-      in design C (E11 on branch `codec-traits-a`), before native objects
-      could keep VM values. See `experiments/codec-traits/README.md`.
+      in design C (E11 in `experiments/codec-traits/rejected-designs.md`),
+      before native objects could keep VM values.
 - [ ] ❓ _Embedding._ Add a rooted handle that keeps a script value alive
       across a wait. A native function cannot safely change an argument object
       or return an early allocation after a wait. `Vm::pinned` already holds

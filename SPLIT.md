@@ -40,7 +40,7 @@ source branch only as a reference.
 16. Verifier impl index and proof depth: not started
 17. Inlining of generic functions: not started
 18. Native objects that keep VM values: not started
-19. `Encode` and `Decode` as regular traits: in review on `codec-traits-b`;
+19. `Encode` and `Decode` as regular traits: in review on `encode-decode-traits`;
     requires 14, 15, 16, 17, and 18
 20. `serde` support for `Value`: not started; requires 14
 21. Single run method and `Outcome`: not started; requires 14
@@ -488,13 +488,14 @@ part. `decode_default_const` (the bench `User` with `active: bool = true`) is
 D1 (synthesized Sand code only), C (native walks that return to Sand at each
 hand-written part), and W (a native walker that pauses through a VM
 continuation). `experiments/codec-traits/notes.md` records each experiment and
-measurement.
+measurement of D1 and D2, and `experiments/codec-traits/rejected-designs.md`
+records those of C and W.
 
 Do not convert a `Value` to JSON text and decode the text. `NaN` and infinity
 encode as `null`, which fails to decode as a float.
 
 Source commits: `c2f6887`, `fe58101`, and the codec commits from `49b3c7f` to
-the end of `codec-traits-b`, except those of changesets 15 to 18.
+the end of `encode-decode-traits`, except those of changesets 15 to 18.
 
 ### 20. `serde` support for `Value`
 
