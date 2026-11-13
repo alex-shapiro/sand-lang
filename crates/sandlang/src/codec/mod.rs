@@ -241,6 +241,9 @@ pub trait DecodeFormat: Any + Send {
 #[sand(module = "prelude")]
 pub struct Encoder {
     format: Option<Box<dyn EncodeFormat>>,
+    /// A host value that the fast path wrote whole, and the bytes of Rust
+    /// memory that it holds.
+    encoded: Option<(std::sync::Arc<Value>, usize)>,
 }
 
 /// A source of `Decode`, created by a format such as `json.decode`.
@@ -256,7 +259,7 @@ pub struct Decoder {
 
 impl NativeObject for Encoder {
     fn size(&self) -> usize {
-        64 + self.format.as_ref().map_or(0, |f| f.heap_size())
+        64 + self.format.as_ref().map_or(0, |f| f.heap_size()) + self.encoded.as_ref().map_or(0, |e| e.1)
     }
 }
 
@@ -290,7 +293,7 @@ enum Frame {
 impl Encoder {
     /// Returns a new encoder for `format`.
     pub fn new(format: Box<dyn EncodeFormat>) -> Encoder {
-        Encoder { format: Some(format) }
+        Encoder { format: Some(format), encoded: None }
     }
 
     /// Returns the format of `e` if it has type `F`.
@@ -300,6 +303,9 @@ impl Encoder {
 
     /// Returns the value that a host `Value` encoder holds.
     pub(crate) fn encoded_value(&self) -> Option<&std::sync::Arc<Value>> {
+        if let Some((value, _)) = &self.encoded {
+            return Some(value);
+        }
         let format: &dyn Any = self.format.as_deref()?;
         format.downcast_ref::<value_format::ValueEncoder>()?.encoded()
     }
@@ -517,10 +523,11 @@ pub(crate) fn register(m: &mut NativeModule) {
         let mut f = value_format::ValueEncoder::new();
         let Some(schema) = fast_schema(vm, encode) else { return vm.new_object(Encoder::new(Box::new(f))).map(ValueEncoding::Driven) };
         let r = f.write_fast(vm, value.raw(), schema);
-        // The heap counts the buffers again as part of the new object.
+        // The new object counts the bytes of the value.
         vm.heap.account(f.heap_size(), 0);
         r?;
-        vm.new_object(Encoder::new(Box::new(f))).map(ValueEncoding::Done)
+        let Some(encoded) = f.into_encoded() else { return internal("encode: no value") };
+        vm.new_object(Encoder { format: None, encoded: Some(encoded) }).map(ValueEncoding::Done)
     });
     encoder_methods(m);
     decoder_methods(m);

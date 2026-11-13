@@ -995,3 +995,30 @@ schema, and converts the `Decoding` result. The profile gives 11 ns to the
 result conversion alone. `small_to_value` does not change: the general
 walker into a `ValueEncoder` costs as much as the Sand plumbing that it
 removes (Q4).
+
+### Q4: a direct `Value` walk for the fast path
+
+`ValueEncoder` now overrides `write_fast` with a walk that builds the
+`Value` of a schema directly (`ValueEncoder::build`), as C7 does for JSON
+text. A walk keeps its frames and parts in `SmallVec`s, so a small value
+allocates nothing for the walk itself. A host `Encoder` that the fast path
+filled holds the finished value and its byte count, not a format. The
+finished value no longer counts as a 4096-byte budget step, so the
+collector runs less often.
+
+Steps (3 rounds each, `small_to_value` ns): general walker 282; direct
+walk 195; `SmallVec` stacks 173; each part read and copied in one step
+165. The last step follows a profile in which one load at the head of the
+walk loop took 24% of the samples; the loop carried a `VmValue` in a stack
+slot that three smaller stores had written, which stalls store-to-load
+forwarding.
+
+Measured (3 rounds; vd, Q3, Q4): `small_to_value` 92, 282, 171;
+`to_value` 364, 329, 326; `json_param` 842, 922, 915; `json_echo` 1464,
+1571, 1576.
+
+Where the rest of `small_to_value` goes, by a timer around the walk (the
+timer itself adds about 28 ns): the walk with its six allocations about
+75 ns; the `Encoder` object, the `Arc`, two native calls, and the sweep of
+the encoder the rest. value-decode copied the value inside the argument
+conversion of the host call and freed it when the call returned.

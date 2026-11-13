@@ -5,6 +5,7 @@
 //! the JSON form of the target type, such as a Base64 `Value::Str` for
 //! `bytes`.
 
+use super::fast::{Schema, SchemaId};
 use super::{Budget, DecodeFail, DecodeFormat, DecodeResult, EncodeFormat, SeqKind};
 use crate::codec::MAX_NESTING_DEPTH;
 use crate::stdlib::base64;
@@ -13,17 +14,16 @@ use crate::value::{
     Decode, Encode, NativeValue, StructValue, Value, VariantDesc, VariantValue, integral_float_to_int, is_option_variant, key_text,
     kind_name, without_json_variant,
 };
-use crate::vm::value::VmValue;
+use crate::vm::bytecode::Program;
+use crate::vm::value::{Obj, VmValue};
 use crate::vm::{Fail, Vm, fail, internal};
+use smallvec::SmallVec;
 use std::any::Any;
 use std::borrow::Cow;
 use std::sync::Arc;
 
 /// A container that the encoder is building.
 enum Partial {
-    /// The finished value, which [`Encoded`](crate::native::ty::Encoded)
-    /// parameters share.
-    Root(Option<Arc<Value>>),
     List(Vec<Value>),
     Tuple(Vec<Value>),
     Set(Vec<Value>),
@@ -35,6 +35,9 @@ enum Partial {
 
 /// Builds a [`Value`].
 pub(crate) struct ValueEncoder {
+    /// The finished value, which [`Encoded`](crate::native::ty::Encoded)
+    /// parameters share.
+    root: Option<Arc<Value>>,
     stack: Vec<Partial>,
     /// Bytes of Rust memory that the value holds.
     allocated: usize,
@@ -50,23 +53,20 @@ pub(crate) struct ValueEncoder {
 
 impl ValueEncoder {
     pub(crate) fn new() -> ValueEncoder {
-        ValueEncoder {
-            stack: vec![Partial::Root(None)],
-            allocated: 0,
-            budget: Budget::default(),
-            depth: 0,
-            counted: Vec::new(),
-            saved: None,
-        }
+        ValueEncoder { root: None, stack: Vec::new(), allocated: 0, budget: Budget::default(), depth: 0, counted: Vec::new(), saved: None }
     }
 
     /// Returns the finished value, or `None` if a container is open or no
     /// value was written.
     pub(crate) fn encoded(&self) -> Option<&Arc<Value>> {
-        match self.stack.as_slice() {
-            [Partial::Root(v)] => v.as_ref(),
-            _ => None,
-        }
+        if self.stack.is_empty() { self.root.as_ref() } else { None }
+    }
+
+    /// Returns the finished value and the bytes of Rust memory that it
+    /// holds.
+    pub(crate) fn into_encoded(self) -> Option<(Arc<Value>, usize)> {
+        let allocated = self.allocated;
+        self.stack.is_empty().then_some(self.root?).map(|v| (v, allocated))
     }
 
     /// Counts `bytes` more of Rust memory against the memory limit.
@@ -77,7 +77,9 @@ impl ValueEncoder {
     }
 
     fn push(&mut self, vm: &mut Vm, v: Value) -> Result<(), Fail> {
-        self.prepare(vm, self.stack.len() - 1)?;
+        if let Some(at) = self.stack.len().checked_sub(1) {
+            self.prepare(vm, at)?;
+        }
         self.place(v)
     }
 
@@ -100,7 +102,6 @@ impl ValueEncoder {
     /// Adds `v` to the innermost container.
     fn place(&mut self, v: Value) -> Result<(), Fail> {
         match self.stack.last_mut() {
-            Some(Partial::Root(root)) => *root = Some(Arc::new(v)),
             Some(
                 Partial::List(items) | Partial::Tuple(items) | Partial::Set(items) | Partial::Struct(_, items) | Partial::Variant(_, items),
             ) => items.push(v),
@@ -111,7 +112,7 @@ impl ValueEncoder {
                 }
                 *has_key = !*has_key;
             }
-            None => return internal("encode: no open value"),
+            None => self.root = Some(Arc::new(v)),
         }
         Ok(())
     }
@@ -137,6 +138,256 @@ impl ValueEncoder {
             Some(d) => Ok(d.clone()),
             None => internal("encode: unknown variant"),
         }
+    }
+}
+
+/// A container that [`ValueEncoder::build`] is copying, with its next part.
+enum BuildFrame<'p> {
+    List {
+        list: VmValue,
+        next: usize,
+        elem: SchemaId,
+        items: Vec<Value>,
+    },
+    Set {
+        set: VmValue,
+        next: usize,
+        elem: SchemaId,
+        items: Vec<Value>,
+    },
+    /// A map, its next entry, and the value of the entry whose key the walk
+    /// copied last.
+    Map {
+        map: VmValue,
+        next: usize,
+        key: SchemaId,
+        val: SchemaId,
+        entries: Vec<(Value, Value)>,
+        value: Option<VmValue>,
+    },
+    /// The parts of a tuple, struct, or variant payload, which are on the
+    /// walk's value stack from `base`.
+    Parts {
+        base: usize,
+        parts: &'p [SchemaId],
+        items: Vec<Value>,
+        of: PartsOf,
+    },
+    /// `Some` and its payload, until the walk copies it.
+    Some {
+        payload: Option<(VmValue, SchemaId)>,
+        items: Vec<Value>,
+    },
+}
+
+/// The kind of value that the parts of a [`BuildFrame::Parts`] make.
+enum PartsOf {
+    Tuple,
+    Struct(Arc<crate::value::StructDesc>),
+    Variant(Arc<VariantDesc>),
+}
+
+impl ValueEncoder {
+    /// Copies `value`, whose closed type has the fast-path schema `schema`,
+    /// to a [`Value`], as the general walker and the operations of this
+    /// format would. It charges a fuel unit for each value except map keys.
+    fn build(&mut self, vm: &mut Vm, value: VmValue, schema: SchemaId) -> Result<Value, Fail> {
+        let prog = vm.prog.clone();
+        // Most values that a host receives are small: their walk allocates
+        // nothing for its own state.
+        let mut stack: SmallVec<[BuildFrame<'_>; 8]> = SmallVec::new();
+        let mut values: SmallVec<[VmValue; 16]> = SmallVec::new();
+        vm.charge(1)?;
+        match self.build_part(vm, &prog, &mut values, value, schema)? {
+            Ok(copy) => return Ok(copy),
+            Err(_) if self.depth >= MAX_NESTING_DEPTH => return fail("limit", "value too deeply nested to copy"),
+            Err(frame) => stack.push(frame),
+        }
+        loop {
+            let Some(frame) = stack.last_mut() else { return internal("encode: no open value") };
+            // The part is read and copied in one step, so that the walk
+            // keeps no `VmValue` across steps.
+            let next = match frame {
+                BuildFrame::List { list, next, elem, .. } => {
+                    let item = vm.heap.list(*list).get(*next).copied();
+                    *next += 1;
+                    item.map(|x| (x, *elem, false))
+                }
+                BuildFrame::Set { set, next, elem, .. } => {
+                    let Obj::Set(set) = vm.heap.get(*set) else { return internal("encode: not a set") };
+                    let found = set.entries.get(*next..).and_then(|rest| rest.iter().enumerate().find_map(|(k, x)| Some((k, (*x)?))));
+                    found.map(|(k, x)| {
+                        *next += k + 1;
+                        (x, *elem, false)
+                    })
+                }
+                BuildFrame::Map { map, next, key, val, value, .. } => match value.take() {
+                    Some(x) => Some((x, *val, false)),
+                    None => {
+                        let Obj::Map(m) = vm.heap.get(*map) else { return internal("encode: not a map") };
+                        let found = m.entries.get(*next..).and_then(|rest| rest.iter().enumerate().find_map(|(k, e)| Some((k, (*e)?))));
+                        found.map(|(k, (key_value, x))| {
+                            *next += k + 1;
+                            *value = Some(x);
+                            (key_value, *key, true)
+                        })
+                    }
+                },
+                BuildFrame::Parts { base, parts, items, .. } => parts.get(items.len()).map(|&p| (values[*base + items.len()], p, false)),
+                BuildFrame::Some { payload, .. } => payload.take().map(|(x, p)| (x, p, false)),
+            };
+            let copy = match next {
+                Some((v, s, is_key)) => {
+                    if !is_key {
+                        vm.charge(1)?;
+                    }
+                    match self.build_part(vm, &prog, &mut values, v, s)? {
+                        Ok(copy) => copy,
+                        Err(frame) => {
+                            if self.depth + stack.len() >= MAX_NESTING_DEPTH {
+                                return fail("limit", "value too deeply nested to copy");
+                            }
+                            stack.push(frame);
+                            continue;
+                        }
+                    }
+                }
+                None => {
+                    let Some(frame) = stack.pop() else { return internal("encode: no open value") };
+                    match frame {
+                        BuildFrame::List { items, .. } => Value::List(items),
+                        BuildFrame::Set { items, .. } => Value::Set(items),
+                        BuildFrame::Map { entries, .. } => Value::Map(entries),
+                        BuildFrame::Parts { base, items, of, .. } => {
+                            values.truncate(base);
+                            match of {
+                                PartsOf::Tuple => Value::Tuple(items),
+                                PartsOf::Struct(ty) => Value::Struct(StructValue { ty, fields: items.into_boxed_slice() }),
+                                PartsOf::Variant(variant) => Value::Variant(VariantValue { variant, payload: items.into_boxed_slice() }),
+                            }
+                        }
+                        BuildFrame::Some { items, .. } => Value::Variant(VariantValue {
+                            variant: Self::variant_desc(vm, prog.ids.some)?,
+                            payload: items.into_boxed_slice(),
+                        }),
+                    }
+                }
+            };
+            match stack.last_mut() {
+                None => return Ok(copy),
+                Some(BuildFrame::List { items, .. } | BuildFrame::Set { items, .. }) => items.push(copy),
+                Some(BuildFrame::Parts { items, .. } | BuildFrame::Some { items, .. }) => items.push(copy),
+                Some(BuildFrame::Map { entries, value, .. }) => match entries.last_mut() {
+                    Some(entry) if value.is_none() => entry.1 = copy,
+                    _ => entries.push((copy, Value::Unit)),
+                },
+            }
+        }
+    }
+
+    /// Copies the scalar `v`, or opens the container `v` and returns its
+    /// frame.
+    #[inline(always)]
+    fn build_part<'p>(
+        &mut self,
+        vm: &mut Vm,
+        prog: &'p Program,
+        values: &mut SmallVec<[VmValue; 16]>,
+        v: VmValue,
+        s: SchemaId,
+    ) -> Result<Result<Value, BuildFrame<'p>>, Fail> {
+        let Some(schema) = prog.schemas.get(s as usize) else { return internal("codec: unknown schema") };
+        let mut parts = |vm: &Vm, parts: &'p [SchemaId], of: PartsOf| {
+            let base = values.len();
+            match v {
+                VmValue::Obj(_) => values.extend_from_slice(vm.heap.fields(v)),
+                // A pair of ints, or a variant with its payload inline.
+                _ => values.extend((0..parts.len()).map_while(|i| vm.heap.field(v, i))),
+            }
+            if values.len() - base != parts.len() {
+                return internal("encode: the value does not match its schema");
+            }
+            Ok(Err(BuildFrame::Parts { base, parts, items: Vec::with_capacity(parts.len()), of }))
+        };
+        let value = match (schema, v) {
+            (Schema::Unit, _) => Value::Unit,
+            (Schema::Bool, VmValue::Bool(b)) => Value::Bool(b),
+            (Schema::Int, VmValue::Int(i)) => Value::Int(i),
+            (Schema::Float, VmValue::Float(x)) => Value::Float(x),
+            (Schema::Duration, VmValue::Dur(d)) => Value::Duration(jiff::SignedDuration::from_nanos(d)),
+            (Schema::Str, _) => {
+                let len = vm.heap.str(v).len();
+                vm.charge_bytes(len)?;
+                self.reserve(vm, len)?;
+                Value::Str(vm.heap.str(v).to_string())
+            }
+            (Schema::Bytes, _) => {
+                let len = vm.heap.bytes_of(v).len();
+                vm.charge_bytes(len)?;
+                self.reserve(vm, len)?;
+                Value::Bytes(vm.heap.bytes_of(v).to_vec())
+            }
+            (Schema::Range, _) => {
+                let Obj::Range(start, end, inclusive) = *vm.heap.get(v) else { return internal("encode: not a range") };
+                Value::Range { start, end, inclusive }
+            }
+            (Schema::Native(_), _) => {
+                let Some((type_name, text)) = super::native_text(vm, v) else { return internal("encode: not a native value") };
+                let text = self.text(vm, &text)?;
+                let type_name: Arc<str> = self.text(vm, &type_name)?.into();
+                Value::Native(Box::new(NativeValue { type_name, text }))
+            }
+            (Schema::Json, _) => crate::stdlib::json::json_from_vm(vm, v)?.encode(),
+            (&Schema::List(elem), _) => {
+                let len = vm.heap.list(v).len();
+                self.reserve(vm, len.min(1 << 16) * size_of::<Value>())?;
+                return Ok(Err(BuildFrame::List { list: v, next: 0, elem, items: Vec::with_capacity(len.min(1 << 16)) }));
+            }
+            (&Schema::Set(elem), _) => {
+                let Obj::Set(set) = vm.heap.get(v) else { return internal("encode: not a set") };
+                let len = set.live.min(1 << 16);
+                self.reserve(vm, len * size_of::<Value>())?;
+                return Ok(Err(BuildFrame::Set { set: v, next: 0, elem, items: Vec::with_capacity(len) }));
+            }
+            (&Schema::Map(key, val), _) => {
+                let Obj::Map(map) = vm.heap.get(v) else { return internal("encode: not a map") };
+                let len = map.live.min(1 << 16);
+                self.reserve(vm, len * size_of::<(Value, Value)>())?;
+                let entries = Vec::with_capacity(len);
+                return Ok(Err(BuildFrame::Map { map: v, next: 0, key, val, entries, value: None }));
+            }
+            (&Schema::Option(payload), _) => match vm.heap.payload_if(&v, prog.ids.some) {
+                VmValue::Uninit => {
+                    Value::Variant(VariantValue { variant: Self::variant_desc(vm, prog.ids.none)?, payload: Box::default() })
+                }
+                x => {
+                    self.reserve(vm, size_of::<Value>())?;
+                    return Ok(Err(BuildFrame::Some { payload: Some((x, payload)), items: Vec::with_capacity(1) }));
+                }
+            },
+            (Schema::Tuple(ps), _) => {
+                self.reserve(vm, ps.len() * size_of::<Value>())?;
+                return parts(vm, ps, PartsOf::Tuple);
+            }
+            (Schema::Struct(def, ps), _) => {
+                let Some(t) = prog.types.get(*def as usize) else { return internal("encode: unknown struct") };
+                self.reserve(vm, ps.len() * size_of::<Value>())?;
+                return parts(vm, ps, PartsOf::Struct(t.desc().clone()));
+            }
+            (Schema::Enum(first, variants), _) => {
+                let id = vm.heap.variant_id(v);
+                let Some(ps) = variants.get(id.wrapping_sub(*first) as usize) else { return internal("encode: unknown variant") };
+                let variant = Self::variant_desc(vm, id)?;
+                if ps.is_empty() {
+                    Value::Variant(VariantValue { variant, payload: Box::default() })
+                } else {
+                    self.reserve(vm, ps.len() * size_of::<Value>())?;
+                    return parts(vm, ps, PartsOf::Variant(variant));
+                }
+            }
+            _ => return internal("encode: the value does not match its schema"),
+        };
+        Ok(Ok(value))
     }
 }
 
@@ -231,14 +482,15 @@ impl EncodeFormat for ValueEncoder {
     }
 
     fn end(&mut self, vm: &mut Vm) -> Result<(), Fail> {
-        if self.stack.len() < 2 {
+        if self.stack.is_empty() {
             return internal("encode: no open container");
         }
-        self.prepare(vm, self.stack.len() - 2)?;
+        if let Some(at) = self.stack.len().checked_sub(2) {
+            self.prepare(vm, at)?;
+        }
         let Some(top) = self.stack.pop() else { return internal("encode: no open value") };
         self.depth -= usize::from(self.counted.pop().unwrap_or(false));
         let v = match top {
-            Partial::Root(_) => return internal("encode: no open container"),
             Partial::List(items) => Value::List(items),
             Partial::Tuple(items) => Value::Tuple(items),
             Partial::Set(items) => Value::Set(items),
@@ -256,6 +508,15 @@ impl EncodeFormat for ValueEncoder {
 
     fn value(&mut self, vm: &mut Vm, value: &Value) -> Result<(), Fail> {
         self.push(vm, value.clone())
+    }
+
+    fn write_fast(&mut self, vm: &mut Vm, value: VmValue, schema: SchemaId) -> Result<(), Fail> {
+        self.save();
+        let r = self.build(vm, value, schema).and_then(|v| self.push(vm, v));
+        if r.is_err() {
+            self.restore();
+        }
+        r
     }
 
     fn save(&mut self) {
