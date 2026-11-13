@@ -385,9 +385,12 @@ Source commit: `eeec0f3`.
 a `Decoder` that the engine supplies, as in Swift `Codable`. The compiler
 synthesizes the implementations of derived types. A script or a native module
 can implement either trait by hand for any of its types, and the
-implementation works for every format. A closed type with no hand-written part
-and no computed field default also gets a native fast path. A property test
-checks that the fast path and the synthesized path agree for every format.
+implementation works for every format. A type with no hand-written part and no
+computed field default also gets a native fast path. In generic code, the
+engine builds the schema of the fast path at run time from a template, when
+each type argument has the fast path. A property test checks that the fast
+path and the synthesized path agree for every format, in closed and in generic
+code.
 
 ```sand
 impl Decode for Email {
@@ -397,9 +400,9 @@ impl Decode for Email {
 }
 ```
 
-A value leaves the VM only through `Encode`. Run results, host call results,
-and native parameters of type `Encoded<N>` go through `Encode`, so a
-hand-written implementation always applies.
+A native parameter of type `Encoded<N>` gets its argument through `Encode` on
+every call path, so a hand-written implementation applies. Changesets 21 and
+22 send run results and host call results through `Encode` too.
 
 This changeset replaces the old changeset 15, "Shared decode path and `Value`
 input", which was in review on `value-decode`. It keeps these parts of it:
@@ -428,7 +431,24 @@ It adds:
 
 - `json.from_json`, which decodes a `json.Json` value into any `Decode` type;
 - `Encoded<N>`, a native parameter that takes any `Encode` argument as a
-  `Value`.
+  `Value`;
+- the public `codec` module for native implementations: `Decoder::from_value`,
+  `VmVal<Encoder>::write_str` and `write_value`, and `VmVal<Decoder>::read_str`,
+  `read_value`, and `error`;
+- the hidden option `Config::codec_fast_path`, which turns off the native fast
+  path so that tests can compare it with the synthesized implementations.
+
+It changes this behavior:
+
+- A derived `Decode` builds a struct with private fields only in the module
+  of the struct, as `reflect` did on `main`. A field type follows the rule of
+  the module of its struct, so `acct.Ledger { pub accounts: [Account] }`
+  decodes in other modules, where `main` rejected it. A hand-written `Decode`
+  applies in all modules. SPEC 3.3 states the rule.
+- `json.to_json(nan)` gives `Json.Null`. `value-decode` gave `Json.Float(nan)`.
+- Some error messages change. For example, a map key that names no variant
+  gives "unknown variant `Blue` of Color", and a tuple of the wrong length
+  gives "expected array of length N".
 
 Speed in ns per item, against `main` (`625d1b9`) and `value-decode`
 (`fe58101`):
@@ -539,7 +559,9 @@ the same result type.
   `Function::signature` describes the parameters and the return type.
 - `with_args` takes `Value` arguments and cannot fail. `run` converts each
   argument to its parameter type through `Decode` with `Decoder::from_value`, so
-  hand-written implementations and field defaults apply.
+  hand-written implementations and field defaults apply. Build this conversion
+  as a boundary function (`FnDeclRef::Boundary` of changeset 19), which
+  already encodes the `Encoded<N>` arguments of native functions.
 - A bad argument returns `Error::Argument`, and a wrong number of arguments returns
   `Error::ArgumentCount`. Both are host input errors with exit code 2.
 

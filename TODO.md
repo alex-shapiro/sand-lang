@@ -40,13 +40,15 @@ The host cannot rely on engine limits, stability, or control.
       The same hole lets a host store a raw `VmValue` in a field of a
       `NativeObject`, where the collector does not trace it; the object's
       value list (`VmVal::push_value`) is the traced place.
-- [ ] ❓ _Performance._ Decode the fast fields of a struct natively when the
-      struct has a hand-written field or a computed default. Today the whole
-      struct takes the synthesized Sand path: the 10-field bench `User` with a
-      hand-written `Email` decodes at 3.2 times its fast path. A native walk
-      that stops only at those fields measured 1.8 times in design C (E11 on
-      branch `codec-traits-a`), before native objects could keep VM values.
-      See `experiments/codec-traits/README.md`.
+- [ ] ❓ _Performance._ Encode and decode the fast fields of a struct natively
+      when the struct has a hand-written field, or, for decode, a computed
+      default. Today the whole struct takes the synthesized Sand path. The
+      10-field bench `User` with a hand-written `Email` decodes at 3.2 times
+      its fast path. The bench `Contact` with a hand-written `Email` encodes
+      (`encode_custom`) at 4.1 times the derived `Contact` on `value-decode`.
+      A native decode walk that stops only at those fields measured 1.8 times
+      in design C (E11 on branch `codec-traits-a`), before native objects
+      could keep VM values. See `experiments/codec-traits/README.md`.
 - [ ] ❓ _Embedding._ Add a rooted handle that keeps a script value alive
       across a wait. A native function cannot safely change an argument object
       or return an early allocation after a wait. `Vm::pinned` already holds

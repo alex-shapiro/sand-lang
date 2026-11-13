@@ -43,8 +43,10 @@ struct Money { cents: int, currency: str }
 
 impl Encode for Money {
     fn encode(self, e: Encoder) {
-        let fraction = "\(self.cents % 100)".pad_start(2, "0")
-        e.encode("\(self.cents / 100).\(fraction) \(self.currency)")
+        let sign = if self.cents < 0 { "-" } else { "" }
+        let cents = self.cents.abs()
+        let fraction = "\(cents % 100)".pad_start(2, "0")
+        e.encode("\(sign)\(cents / 100).\(fraction) \(self.currency)")
     }
 }
 
@@ -52,11 +54,13 @@ impl Decode for Money {
     fn decode(d: Decoder) -> Result<Money> {
         let text: str = d.decode()?
         let parts = text.split(" ")
-        let amount = parts[0].split(".")
+        let unsigned = parts[0].strip_prefix("-")
+        let amount = (unsigned ?? parts[0]).split(".")
         let (Some(whole), Some(cents)) = (amount[0].parse_int(), amount.get(1).and_then(c => c.parse_int())) else {
             return Err(Error("invalid amount", kind: "invalid"))
         }
-        Ok(Money(cents: whole * 100 + cents, currency: parts.get(1) ?? ""))
+        let total = whole * 100 + cents
+        Ok(Money(cents: if unsigned.is_some() { -total } else { total }, currency: parts.get(1) ?? ""))
     }
 }
 
@@ -129,6 +133,21 @@ fn every_use_of_a_native_function_encodes_its_encoded_arguments() {
     let (r, _) = run(vec![host_module(kept.clone(), Vec::new())], Limits::default(), src);
     r.unwrap();
     assert_eq!(*kept.lock(), (1..=5).map(Value::Int).collect::<Vec<_>>());
+}
+
+#[test]
+fn the_money_example_keeps_the_sign_of_an_amount() {
+    let src = format!(
+        "import json\n{TYPES}\n\
+         for cents in [-1205, -5, 0, 1205] {{\n\
+         \x20   let text = json.encode(Money(cents: cents, currency: \"USD\"))\n\
+         \x20   let back: Money = json.decode(text)?\n\
+         \x20   print(\"\\(text) \\(back.cents)\")\n\
+         }}\n"
+    );
+    let (r, out) = run(Vec::new(), Limits::default(), &src);
+    r.unwrap();
+    assert_eq!(out, "\"-12.05 USD\" -1205\n\"-0.05 USD\" -5\n\"0.00 USD\" 0\n\"12.05 USD\" 1205\n");
 }
 
 #[test]

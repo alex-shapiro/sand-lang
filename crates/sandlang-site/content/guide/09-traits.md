@@ -272,7 +272,7 @@ print(bad)
 
 A struct that declares `init` does not derive `Decode`, because a derived implementation would not call `init`. Implement `Decode` by hand, as `Email` does. A hand-written `Encode` does not change the derived `Decode`. If a type must read what it writes, implement both.
 
-Derived types encode and decode on a fast native path. A hand-written implementation, or a field default that runs code, such as `next_id()`, makes each type that contains it use slower Sand code.
+Derived types encode and decode on a fast native path, also in generic code such as `fn load<T: Decode>(text: str) -> Result<[T]>`. A hand-written implementation, also a generic one such as `impl<T: Decode> Decode for Box<T>`, makes each type that contains it use slower Sand code. For `Decode`, a field default that runs code, such as `next_id()`, does the same. A default that is a scalar literal or an empty `[]` or `[:]` keeps the fast path.
 
 ## Qualified calls
 

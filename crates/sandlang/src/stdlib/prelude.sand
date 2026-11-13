@@ -319,12 +319,15 @@ pub trait Hash: Eq {}
 ///
 /// impl Encode for Money {
 ///     fn encode(self, e: Encoder) {
-///         let cents = "\(self.cents % 100)".pad_start(2, "0")
-///         e.encode("\(self.cents / 100).\(cents) \(self.currency)")
+///         let sign = if self.cents < 0 { "-" } else { "" }
+///         let cents = self.cents.abs()
+///         let fraction = "\(cents % 100)".pad_start(2, "0")
+///         e.encode("\(sign)\(cents / 100).\(fraction) \(self.currency)")
 ///     }
 /// }
 ///
 /// print(json.encode(Money(cents: 1205, currency: "USD")))  // "12.05 USD"
+/// print(json.encode(Money(cents: -5, currency: "USD")))  // "-0.05 USD"
 /// ```
 ///
 /// A hand-written `Encode` does not change the derived `Decode` of the
@@ -365,12 +368,21 @@ pub trait Encode {
 /// print(e)  // Err(Error(message: "$[1]: invalid email", kind: "invalid"))
 /// ```
 ///
-/// A derived type decodes on a fast native path. A hand-written
-/// implementation, or a field default that runs code, such as `next_id()`,
-/// makes each type that contains it decode through slower Sand code. A
-/// default that is a scalar literal, such as `3` or `"x"`, or an empty `[]`
-/// or `[:]`, keeps the fast path. A hand-written `Encode` also makes each
-/// type that contains it encode more slowly.
+/// A derived type decodes on a fast native path, also in generic code such
+/// as `fn load<T: Decode>(text: str) -> Result<[T]>`. These parts make each
+/// type that contains them decode through slower Sand code:
+///
+/// - a hand-written implementation, also a generic one such as
+///   `impl<T: Decode> Decode for Box<T>`;
+/// - a field default that runs code, such as `next_id()`. A default that is
+///   a scalar literal, such as `3` or `"x"`, or an empty `[]` or `[:]`,
+///   keeps the fast path;
+/// - 64 or more levels of nested types.
+///
+/// Generic code that makes more than 1024 new type layouts in one program,
+/// as a recursive generic function can, uses Sand code for the later types.
+/// A hand-written `Encode` also makes each type that contains it encode more
+/// slowly.
 pub trait Decode {
     /// Reads a value of this type from `d` as exactly one value, usually with
     /// `d.decode()`. A call that reads no value or two fails with kind
