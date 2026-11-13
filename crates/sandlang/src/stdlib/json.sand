@@ -3,8 +3,7 @@
 //! ### Enum Encodings
 //!
 //! - Unit enum variants map to strings like `"Red"`
-//! - Tuple variants with a single payload field map to `{"Variant": payload}`
-//! - Tuple variants with multiple payload fields map to `{"Variant": [f0, f1, ...]}`
+//! - Tuple variants map to `{"Variant": [f0, f1, ...]}`
 //! - Struct variants map to `{"Variant": {...}}`
 //!
 //! ### Other Type Encodings

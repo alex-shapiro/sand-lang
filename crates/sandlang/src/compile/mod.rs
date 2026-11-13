@@ -4383,6 +4383,20 @@ impl reflect::DescSink for DescCode<'_> {
         ];
         self.add(0, 2, 6, code)
     }
+
+    fn map_fill(&mut self) -> u32 {
+        // r0 holds the map; r1..=r3 hold the list, index, and length for ForList; r4 and r5 hold the key and value.
+        let code = vec![
+            Op::LoadInt { dst: 2, v: 0 },
+            Op::Len { dst: 3, src: 1 },
+            Op::ForList { elem: 4, base: 1, off: 3 },
+            Op::ForList { elem: 5, base: 1, off: 2 },
+            Op::SetIndexMap { obj: 0, key: 4, src: 5 },
+            Op::Loop { off: -4 },
+            Op::RetUnit,
+        ];
+        self.add(0, 2, 6, code)
+    }
 }
 
 #[cfg(test)]

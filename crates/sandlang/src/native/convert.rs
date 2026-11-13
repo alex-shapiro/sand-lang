@@ -2,7 +2,7 @@
 
 use super::ty::{Never, Num, Param, Reflect, SandType, VmVal};
 use crate::types::traits;
-use crate::value::{NativeValue, Value, qualified_name, qualified_name_module};
+use crate::value::{DecodeError, NativeValue, Value, qualified_name, qualified_name_module};
 use crate::vm::meter::Scratch;
 use crate::vm::value::{Obj, ValueType, VmValue};
 use crate::vm::{Ctl, Fail, Vm};
@@ -570,6 +570,11 @@ macro_rules! __value_type_impls {
                 $crate::native::convert::encode_value_type(&SAND_TYPE_NAME, self)
             }
         }
+        impl $crate::value::Decode for $t {
+            fn decode(value: &$crate::value::Value) -> ::std::result::Result<Self, $crate::value::DecodeError> {
+                $crate::native::convert::decode_value_type(value)
+            }
+        }
     };
 }
 
@@ -582,6 +587,16 @@ pub type TypeNameCell = std::sync::OnceLock<std::sync::Arc<str>>;
 pub fn encode_value_type<T: ValueType>(type_name: &TypeNameCell, x: &T) -> Value {
     let type_name = type_name.get_or_init(|| qualified_name(qualified_name_module(T::MODULE), T::NAME).into()).clone();
     Value::Native(Box::new(NativeValue { type_name, text: x.to_string() }))
+}
+
+#[doc(hidden)]
+pub fn decode_value_type<T: ValueType>(value: &Value) -> Result<T, DecodeError> {
+    let text = match crate::value::without_json_variant(value) {
+        Value::Native(native) => &native.text,
+        Value::Str(text) => text,
+        value => return Err(DecodeError::expected(&qualified_name(qualified_name_module(T::MODULE), T::NAME), value)),
+    };
+    T::parse(text).map_err(DecodeError::new)
 }
 
 #[doc(hidden)]

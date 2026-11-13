@@ -2178,8 +2178,8 @@ instead.
 
 Four derive macros bind a Rust type to a Sand type in a native module. Each
 macro implements `NamedType`, `SandType`, `FromVmValue`, and `IntoVmValue`.
-`SandEnum`, `SandStruct`, and `SandValue` also implement `value::Encode`
-(§16.7). The macros copy Rust doc comments into Sand documentation. They reject
+`SandEnum`, `SandStruct`, and `SandValue` also implement `value::Encode` and
+`value::Decode` (§16.7). The macros copy Rust doc comments into Sand documentation. They reject
 type, variant, and field names that are Sand keywords or invalid Sand
 identifiers.
 
@@ -2192,10 +2192,11 @@ optional type attributes:
 - `#[sand(manual_conversion)]`: on `SandEnum` and `SandStruct`, omits the
   derived `FromVmValue` and `IntoVmValue` implementations. If the VM
   representation differs from the Rust struct or enum, the type must also use
-  `#[sand(no_value)]` or implement `Encode` manually to match `Vm::to_value`.
+  `#[sand(no_value)]` or implement `Encode` and `Decode` manually to match
+  `Vm::to_value`.
 - `#[sand(no_value)]`: on `SandEnum` and `SandStruct`, omits the derived
-  `Encode` implementation. Use this attribute if a field type does not implement
-  `Encode`, such as `VmVal<T>`.
+  `Encode` and `Decode` implementations. Use this attribute if a field type does
+  not implement `Encode` or `Decode`, such as `VmVal<T>`.
 
 | Derive       | Sand type                                                                  |
 | ------------ | -------------------------------------------------------------------------- |
@@ -2206,7 +2207,7 @@ optional type attributes:
 
 Each field of a `SandStruct` and each payload of a `SandEnum` variant must
 implement `IntoVmValue` and owned `FromVmValue`. It must also implement
-`Encode`, unless the type uses `#[sand(no_value)]`. Unit variants map
+`Encode` and `Decode`, unless the type uses `#[sand(no_value)]`. Unit variants map
 to variants without a payload. Tuple and struct variants map to variants with
 positional and named payloads. On a struct variant field, `#[sand(name = "<name>")]` overrides
 the payload field name. Generic type parameters on a `SandEnum` or `SandStruct`
@@ -2509,6 +2510,42 @@ sorts the entries of a `HashMap` and the elements of a `HashSet`. For a derived
 `SandEnum` or `SandStruct`, `encode` produces the same `Value` as
 `Vm::to_value`. A manual `Encode` implementation for a type that also implements
 `IntoVmValue` must preserve this equality.
+
+`value::Decode` is the Rust counterpart of the Sand `Decode` trait.
+`Value::decode::<T>()` converts a `Value` into a `T`. Each Rust type that
+implements `Encode` also implements `Decode`, except references and unsized
+types such as `str`. `decode` accepts the `Value` that `Encode::encode` and
+`Vm::to_value` produce. It also accepts the `Value` that parsing JSON text
+gives, so that a host can decode data that comes from JSON:
+
+| Type              | Other accepted `Value`                                                  |
+| ----------------- | ----------------------------------------------------------------------- |
+| `int`             | an integral `Float`                                                     |
+| `duration`        | an `Int` or integral `Float` count of nanoseconds                       |
+| `float`           | `Int`                                                                   |
+| `bytes`           | a standard Base64 `Str`                                                 |
+| `Option`          | `Unit` for `None`, and the payload for `Some`                           |
+| tuple, `Set`      | `List`                                                                  |
+| map               | `Map` with `Str` keys, such as `"1"` for the `int` key `1`              |
+| range, struct     | `Map` with `Str` keys                                                   |
+| enum variant      | the variant name as a `Str`, or a `Map` from the name to the payload    |
+| native value type | its text as a `Str`                                                     |
+
+The payload in a `Map` is a `List`, or a `Map` with `Str` keys for a variant
+with named fields. `decode` reads a `json.Json` variant as its JSON form, such
+as `Value::Int(1)` for `Json.Int(1)`. It ignores the type names of structs,
+variants, and native values. It matches fields and variants by name and
+ignores unknown struct fields, as `json.decode` does. An omitted field takes
+its `#[sand(default)]` value, or `None` if the field is an `Option`.
+
+If a part of the `Value` does not match, `decode` returns a `DecodeError`. Its
+`Display` form starts with the path of the part, such as
+`$.items[2].price: expected float, found str`. `DecodeError::path` and
+`DecodeError::message` return the two parts. A manual `Decode` implementation
+adds a path segment with `DecodeError::in_key` or `DecodeError::in_index`.
+
+`stdlib::core::Error` is the Rust form of the prelude `Error` struct. A host
+decodes an error payload with `value.decode::<Error>()`.
 
 ## 17. Tooling
 

@@ -8,10 +8,11 @@
 //! - `#[sand(crate = <path>)]`: overrides the `::sandlang` crate path.
 //! - `#[sand(manual_conversion)]`: omits the `FromVmValue` and `IntoVmValue`
 //!   implementations. If the VM representation differs from the Rust struct or
-//!   enum, also add `#[sand(no_value)]` or implement `Encode` manually to match
-//!   `Vm::to_value`.
-//! - `#[sand(no_value)]`: omits the `Encode` implementation. Use this attribute
-//!   if a field type such as `VmVal` does not implement `Encode`.
+//!   enum, also add `#[sand(no_value)]` or implement `Encode` and `Decode`
+//!   manually to match `Vm::to_value`.
+//! - `#[sand(no_value)]`: omits the `Encode` and `Decode` implementations. Use
+//!   this attribute if a field type such as `VmVal` does not implement `Encode`
+//!   or `Decode`.
 //!
 //! The macros copy Rust doc comments into Sand documentation.
 
@@ -29,10 +30,10 @@ use syn::{
 /// Binds a Rust enum to a Sand enum.
 ///
 /// Implements `NamedType`, `EnumType`, `SandType`, `FromVmValue`, `IntoVmValue`,
-/// and `Encode`. Supports unit, tuple, and struct variants, as well as type
-/// parameters. Each payload type must implement `IntoVmValue` and owned
-/// `FromVmValue`. It must also implement `Encode`, unless the enum uses
-/// `#[sand(no_value)]`.
+/// `Encode`, and `Decode`. Supports unit, tuple, and struct variants, as well
+/// as type parameters. Each payload type must implement `IntoVmValue` and owned
+/// `FromVmValue`. It must also implement `Encode` and `Decode`, unless the enum
+/// uses `#[sand(no_value)]`.
 ///
 /// Optional attributes:
 ///
@@ -45,9 +46,10 @@ pub fn derive_sand_enum(input: TokenStream) -> TokenStream {
 /// Binds a Rust struct to a Sand struct.
 ///
 /// Implements `NamedType`, `StructType`, `SandType`, `FromVmValue`, `IntoVmValue`,
-/// and `Encode`. Each field type must implement `IntoVmValue` and owned
-/// `FromVmValue`. It must also implement `Encode`, unless the struct uses
-/// `#[sand(no_value)]`. Rust type parameters define Sand type parameters.
+/// `Encode`, and `Decode`. Each field type must implement `IntoVmValue` and
+/// owned `FromVmValue`. It must also implement `Encode` and `Decode`, unless
+/// the struct uses `#[sand(no_value)]`. Rust type parameters define Sand type
+/// parameters.
 ///
 /// Optional field attributes:
 ///
@@ -55,8 +57,9 @@ pub fn derive_sand_enum(input: TokenStream) -> TokenStream {
 /// - `#[sand(private)]`: makes the field private.
 /// - `#[sand(var)]`: makes the field mutable.
 /// - `#[sand(default)]` or `#[sand(default = <expr>)]`: sets a default value
-///   from `Default::default()` or `Into::into(<expr>)`. The default uses the
-///   `Encode` form of the value and must be a Sand constant of the field type.
+///   from `Default::default()` or `Into::into(<expr>)`. The Sand default uses
+///   the `Encode` form of the value and must be a Sand constant of the field
+///   type. `Decode` uses the Rust value for an omitted field.
 ///   Native value types cannot be field defaults. `HostModules::new` returns a
 ///   compile error if a default is not a valid constant.
 #[proc_macro_derive(SandStruct, attributes(sand))]
@@ -75,8 +78,8 @@ pub fn derive_sand_object(input: TokenStream) -> TokenStream {
 
 /// Binds a Rust type to an opaque Sand value type.
 ///
-/// Implements `NamedType`, `SandType`, `FromVmValue`, `IntoVmValue`, and
-/// `Encode`. The type must implement `ValueType`.
+/// Implements `NamedType`, `SandType`, `FromVmValue`, `IntoVmValue`, `Encode`,
+/// and `Decode`. The type must implement `ValueType`.
 #[proc_macro_derive(SandValue, attributes(sand))]
 pub fn derive_sand_value(input: TokenStream) -> TokenStream {
     expand(input, sand_value)
@@ -309,6 +312,7 @@ struct ConversionGenerics {
     from_vm_value_where: Tokens,
     into_vm_value_where: Tokens,
     encode_where: Tokens,
+    decode_where: Tokens,
 }
 
 impl ConversionGenerics {
@@ -322,6 +326,7 @@ impl ConversionGenerics {
             from_vm_value_where: where_clause(&|p| quote!(for<'a> #krate::native::convert::FromVmValue<Item<'a> = #p>)),
             into_vm_value_where: where_clause(&|_| quote!(#krate::native::convert::IntoVmValue)),
             encode_where: where_clause(&|_| quote!(#krate::native::ty::SandType + #krate::value::Encode)),
+            decode_where: where_clause(&|_| quote!(#krate::native::ty::SandType + #krate::value::Decode)),
         }
     }
 }
@@ -357,6 +362,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
     let mut reads = Vec::new();
     let mut writes = Vec::new();
     let mut encodes = Vec::new();
+    let mut decodes = Vec::new();
     let mut checks = Vec::new();
     for (i, v) in data.variants.iter().enumerate() {
         let (ident, vname, vdoc) = (&v.ident, v.ident.unraw().to_string(), doc_expr(&v.attrs));
@@ -367,12 +373,14 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
         let mut puts = Vec::new();
         let mut binds = Vec::new();
         let mut snames = Vec::new();
+        let mut field_decodes = Vec::new();
         for (k, f) in v.fields.iter().enumerate() {
             let (fname, fty) = (f.ident.as_ref(), &f.ty);
             let canonical = type_params.replace_self(krate, fty);
             let sname = match fname {
                 Some(n) => {
                     let lit = parse_variant_field_name(f, n)?;
+                    field_decodes.push(quote!(#n: payload.field::<#fty>(#k, ::std::option::Option::Some(#lit))?));
                     if snames.contains(&lit.value()) {
                         return Err(Error::new_spanned(&lit, format!("the Sand payload name `{}` is used twice", lit.value())));
                     }
@@ -380,7 +388,10 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
                     checks.push(assert_field_name(krate, &lit, true));
                     quote!(::std::option::Option::Some(#lit))
                 }
-                None => quote!(::std::option::Option::None),
+                None => {
+                    field_decodes.push(quote!(payload.field::<#fty>(#k, ::std::option::Option::None)?));
+                    quote!(::std::option::Option::None)
+                }
             };
             infos.push(
                 quote! { #krate::native::VariantField { name: #sname, ty: <#canonical as #krate::native::ty::SandType>::sand_type } },
@@ -414,6 +425,11 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
             Fields::Named(_) => quote!(#ty::#ident { .. }),
         };
         indexes.push(quote! { #skip => #i });
+        decodes.push(match &v.fields {
+            Fields::Unit => quote! { #i => #ty::#ident },
+            Fields::Unnamed(_) => quote! { #i => #ty::#ident(#(#field_decodes),*) },
+            Fields::Named(_) => quote! { #i => #ty::#ident { #(#field_decodes),* } },
+        });
         reads.push(quote! { #i => #build });
         let write = match names.is_empty() {
             true => quote!(|_| ::std::result::Result::Ok([])),
@@ -424,7 +440,7 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
     }
     let named = expand_named_type(input, &attrs, &type_params, quote! { #krate::native::Binding::of_enum() });
     let sand_type = expand_sand_type(input, krate, &type_params);
-    let ConversionGenerics { params, args, reflection_where, from_vm_value_where, into_vm_value_where, encode_where } =
+    let ConversionGenerics { params, args, reflection_where, from_vm_value_where, into_vm_value_where, encode_where, decode_where } =
         ConversionGenerics::new(input, krate, &type_params);
     let count = data.variants.len();
     let encode = (!attrs.no_value).then(|| {
@@ -436,6 +452,16 @@ fn sand_enum(input: &DeriveInput) -> syn::Result<Tokens> {
                     match self {
                         #(#encodes),*
                     }
+                }
+            }
+            impl #params #krate::value::Decode for #ty #args #decode_where {
+                #[allow(unused_variables)]
+                fn decode(value: &#krate::value::Value) -> ::std::result::Result<Self, #krate::value::DecodeError> {
+                    let (index, payload) = #krate::native::decode_variant::<Self>(value)?;
+                    ::std::result::Result::Ok(match index {
+                        #(#decodes,)*
+                        _ => return ::std::result::Result::Err(#krate::value::DecodeError::new("unknown variant")),
+                    })
                 }
             }
         }
@@ -540,6 +566,7 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
     let mut writes = Vec::new();
     let mut names = Vec::new();
     let mut encodes = Vec::new();
+    let mut decodes = Vec::new();
     let mut checks = Vec::new();
     for (i, f) in fields.iter().enumerate() {
         let ident = f.ident.as_ref().expect("named field");
@@ -569,6 +596,19 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
         checks.push(assert_field_name(krate, &name, true));
         let (fty, doc) = (&f.ty, doc_expr(&f.attrs));
         let canonical = type_params.replace_self(krate, fty);
+        let read = quote! { #krate::native::decode_field::<#fty>(fields[#i], #name)? };
+        decodes.push(match &default {
+            None => quote! { #ident: #read },
+            Some(value) => {
+                let value = value
+                    .as_ref()
+                    .map_or_else(|| quote!(<#fty as ::std::default::Default>::default()), |e| quote!(::std::convert::Into::into(#e)));
+                quote! { #ident: match fields[#i] {
+                    ::std::option::Option::None => #value,
+                    ::std::option::Option::Some(_) => #read,
+                } }
+            }
+        });
         let default = match default {
             None => quote!(::std::option::Option::None),
             Some(value) => {
@@ -598,14 +638,22 @@ fn sand_struct(input: &DeriveInput) -> syn::Result<Tokens> {
     }
     let named = expand_named_type(input, &attrs, &type_params, quote! { #krate::native::Binding::of_struct() });
     let sand_type = expand_sand_type(input, krate, &type_params);
-    let ConversionGenerics { params, args, reflection_where, from_vm_value_where, into_vm_value_where, encode_where } =
+    let ConversionGenerics { params, args, reflection_where, from_vm_value_where, into_vm_value_where, encode_where, decode_where } =
         ConversionGenerics::new(input, krate, &type_params);
+    let count = fields.len();
     let encode = (!attrs.no_value).then(|| {
         quote! {
             impl #params #krate::value::Encode for #ty #args #encode_where {
                 fn encode(&self) -> #krate::value::Value {
                     static SAND_STRUCT_DESC: #krate::native::StructDescCell = #krate::native::StructDescCell::new();
                     #krate::native::encode_struct::<Self>(&SAND_STRUCT_DESC, [#(#encodes),*])
+                }
+            }
+            impl #params #krate::value::Decode for #ty #args #decode_where {
+                #[allow(unused_variables)]
+                fn decode(value: &#krate::value::Value) -> ::std::result::Result<Self, #krate::value::DecodeError> {
+                    let fields = #krate::native::decode_struct_fields::<Self, #count>(value)?;
+                    ::std::result::Result::Ok(#ty { #(#decodes),* })
                 }
             }
         }

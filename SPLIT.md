@@ -35,8 +35,8 @@ source branch only as a reference.
 11. Deterministic fuel: merged in #38 from `deterministic-fuel`
 12. `VmValue` rename: merged in #39 from `vm-value-rename`
 13. Single native function registration: merged in #40 from `single-native-function`
-14. `Value` and `Vm::to_value`: in review on `value-encode`
-15. Shared decode path and `Value` input: not started; requires 14
+14. `Value` and `Vm::to_value`: merged in #41 from `value-encode`
+15. Shared decode path and `Value` input: in review on `value-decode`
 16. `serde` support for `Value`: not started; requires 14
 17. Single run method and `Outcome`: not started; requires 14
 18. Host function calls: not started; requires 15 and 17
@@ -582,16 +582,16 @@ This changeset has no source commits.
 
 ### Source commits that this plan does not use
 
-| Commits             | Change                  | Reason                                  |
-| ------------------- | ----------------------- | --------------------------------------- |
-| `33beccd`,`e4ed4cb` | `Call<'a>` for natives  | Adds a parameter to fix internal state  |
-| `35f7476`           | `AfterEffect` VM view   | A flag already gives this behavior      |
-| `2c23b85`           | `IntoValue` depth       | Adds work to manual `IntoValue` impls   |
-| `18f7bf7`           | `Run` and `D`           | Run-scoped values are arguments         |
-| `300c107`           | `JournaledCall` borrow  | A sequence number is a plain value      |
-| `fe2dd83`           | Non-suspending end type | `run` cannot suspend                    |
-| `03076c5`           | `Json` results          | See changeset 14                        |
-| `29e1f37`           | `bind` and `BoundCall`  | `run` reports the argument count error  |
+| Commits             | Change                  | Reason                                 |
+| ------------------- | ----------------------- | -------------------------------------- |
+| `33beccd`,`e4ed4cb` | `Call<'a>` for natives  | Adds a parameter to fix internal state |
+| `35f7476`           | `AfterEffect` VM view   | A flag already gives this behavior     |
+| `2c23b85`           | `IntoValue` depth       | Adds work to manual `IntoValue` impls  |
+| `18f7bf7`           | `Run` and `D`           | Run-scoped values are arguments        |
+| `300c107`           | `JournaledCall` borrow  | A sequence number is a plain value     |
+| `fe2dd83`           | Non-suspending end type | `run` cannot suspend                   |
+| `03076c5`           | `Json` results          | See changeset 14                       |
+| `29e1f37`           | `bind` and `BoundCall`  | `run` reports the argument count error |
 
 ## Other commits on the source branch
 

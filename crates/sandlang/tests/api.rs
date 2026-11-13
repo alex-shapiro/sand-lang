@@ -1637,7 +1637,7 @@ fn rust_default_error(owner: &str, field: &str, ty: &str) -> String {
 
 #[test]
 fn rust_field_defaults_cannot_hold_native_or_opaque_values() {
-    use sandlang::value::Encode;
+    use sandlang::value::{Decode, DecodeError, Encode};
     #[derive(Default, sandlang::SandStruct)]
     #[sand(module = "lab", no_value)]
     struct Hook {
@@ -1646,6 +1646,11 @@ fn rust_field_defaults_cannot_hold_native_or_opaque_values() {
     impl Encode for Hook {
         fn encode(&self) -> Value {
             Value::Opaque { type_name: "fn".into() }
+        }
+    }
+    impl Decode for Hook {
+        fn decode(value: &Value) -> Result<Hook, DecodeError> {
+            Err(DecodeError::expected("Hook", value))
         }
     }
     #[derive(sandlang::SandStruct)]
@@ -1706,7 +1711,7 @@ fn rust_field_defaults_are_bounded() {
 
 #[test]
 fn rust_field_defaults_must_be_values_of_declared_types() {
-    use sandlang::value::Encode;
+    use sandlang::value::{Decode, DecodeError, Encode};
     #[derive(Default, sandlang::SandEnum)]
     #[sand(module = "lab", no_value)]
     enum Shade {
@@ -1719,6 +1724,11 @@ fn rust_field_defaults_must_be_values_of_declared_types() {
             Value::Variant(VariantValue::new("lab.Shade", "Light", [Value::Int(1)]))
         }
     }
+    impl Decode for Shade {
+        fn decode(value: &Value) -> Result<Shade, DecodeError> {
+            Err(DecodeError::expected("Shade", value))
+        }
+    }
     #[derive(Default, sandlang::SandStruct)]
     #[sand(module = "lab", no_value)]
     struct Spot {
@@ -1728,6 +1738,11 @@ fn rust_field_defaults_must_be_values_of_declared_types() {
         fn encode(&self) -> Value {
             let field = if self.x == 0 { ("y", Value::Int(0)) } else { ("x", Value::Str("oops".into())) };
             Value::Struct(StructValue::new("lab.Spot", [field]))
+        }
+    }
+    impl Decode for Spot {
+        fn decode(value: &Value) -> Result<Spot, DecodeError> {
+            Err(DecodeError::expected("Spot", value))
         }
     }
     #[derive(sandlang::SandStruct)]
@@ -4390,7 +4405,7 @@ fn to_value_counts_its_memory_against_the_memory_limit() {
 }
 
 /// The state of a delivery, with each kind of variant payload.
-#[derive(Clone, sandlang::SandEnum)]
+#[derive(Clone, Debug, PartialEq, sandlang::SandEnum)]
 #[sand(module = "shop")]
 enum Delivery {
     Pending,
@@ -4399,7 +4414,7 @@ enum Delivery {
 }
 
 /// An order with a field of each kind that `Encode` covers.
-#[derive(Clone, sandlang::SandStruct)]
+#[derive(Clone, Debug, PartialEq, sandlang::SandStruct)]
 #[sand(module = "shop")]
 struct Purchase {
     id: i64,
@@ -4466,4 +4481,118 @@ fn native_reads_a_native_value_type_from_its_value() {
     for other in [native("bank.Cell", "12.50"), native("bank.Money", "twelve"), Value::Int(1250), date] {
         assert_eq!(other.native::<Money>(), None, "{other:?}");
     }
+}
+
+fn sample_purchase() -> Purchase {
+    Purchase {
+        id: 7,
+        deliveries: vec![Delivery::Pending, Delivery::Shipped(2, "dock".into()), Delivery::Held { reason: "customs".into(), days: 3 }],
+        note: Some("fragile".into()),
+        gift: None,
+        counts: HashMap::from([("pens".into(), 2), ("cups".into(), 1)]),
+        tags: ["red".to_string(), "blue".to_string()].into(),
+        price: Money(1250),
+        due: Date::new(2024, 3, 10).unwrap(),
+    }
+}
+
+#[test]
+fn decode_of_a_derived_type_reads_its_encoding_and_its_copy_out_of_the_vm() {
+    use sandlang::value::Encode;
+    let purchase = sample_purchase();
+    let mut shop = NativeModule::new("shop");
+    shop.bind::<Delivery>().bind::<Purchase>();
+    let returned = purchase.clone();
+    shop.function("purchase", move || returned.clone());
+    let (r, copies) = run_and_copy_values(Config::new(), [bank_module(), shop], "import shop\nhost.copy(shop.purchase())\n");
+    r.unwrap();
+    assert_eq!(copies[0].decode::<Purchase>(), Ok(purchase.clone()));
+    assert_eq!(purchase.encode().decode::<Purchase>(), Ok(purchase.clone()));
+    assert_eq!(vec![purchase.clone()].encode().decode::<Vec<Purchase>>(), Ok(vec![purchase]));
+}
+
+#[test]
+fn decode_reads_the_json_form_of_each_type() {
+    let str_ = |s: &str| Value::Str(s.into());
+    let entry = |key: &str, value: Value| (str_(key), value);
+    let json_form = Value::Map(vec![
+        entry("id", Value::Float(7.0)),
+        entry(
+            "deliveries",
+            Value::List(vec![
+                str_("Pending"),
+                Value::Map(vec![entry("Shipped", Value::List(vec![Value::Int(2), str_("dock")]))]),
+                Value::Map(vec![entry("Held", Value::Map(vec![entry("days", Value::Int(3)), entry("reason", str_("customs"))]))]),
+            ]),
+        ),
+        entry("note", str_("fragile")),
+        entry("counts", Value::Map(vec![entry("pens", Value::Int(2)), entry("cups", Value::Int(1))])),
+        entry("tags", Value::List(vec![str_("red"), str_("blue")])),
+        entry("price", str_("12.50")),
+        entry("due", str_("2024-03-10")),
+        entry("ignored", Value::Bytes(vec![1])),
+    ]);
+    assert_eq!(json_form.decode::<Purchase>(), Ok(sample_purchase()));
+    let keyed = Value::Map(vec![entry("1", str_("AQI=")), (Value::Int(2), Value::Bytes(vec![3]))]);
+    assert_eq!(keyed.decode::<std::collections::BTreeMap<i64, Vec<u8>>>(), Ok([(1, vec![1, 2]), (2, vec![3])].into()));
+    assert_eq!(Value::Int(1500).decode::<jiff::SignedDuration>(), Ok(jiff::SignedDuration::from_nanos(1500)));
+    assert_eq!(Value::List(vec![Value::Int(1), str_("a")]).decode::<(i64, String)>(), Ok((1, "a".into())));
+    assert_eq!(Value::Unit.decode::<Option<Option<i64>>>(), Ok(None));
+    let some_none = Value::Variant(VariantValue::new("Option", "Some", [Value::Variant(VariantValue::new("Option", "None", []))]));
+    assert_eq!(some_none.decode::<Option<Option<i64>>>(), Ok(Some(None)));
+}
+
+#[test]
+fn decode_reads_json_variants_in_their_json_form() {
+    use sandlang::stdlib::json::Json;
+    use sandlang::value::Encode;
+    assert_eq!(default_doc().encode().decode::<Json>(), Ok(default_doc()));
+    let parsed = Value::Map(vec![(
+        Value::Str("on".into()),
+        Value::List(vec![Value::Bool(true), Value::Int(-1), Value::Float(0.5), Value::Str("x".into()), Value::Unit]),
+    )]);
+    assert_eq!(parsed.decode::<Json>(), Ok(default_doc()));
+    let point = Json::Obj([("id".to_string(), Json::Int(3)), ("deliveries".to_string(), Json::Arr(vec![]))].into_iter().collect());
+    let error = point.encode().decode::<Purchase>().unwrap_err();
+    assert_eq!(error.to_string(), "$: missing field `counts`");
+    assert_eq!(Value::Bytes(vec![]).decode::<Json>().unwrap_err().to_string(), "$: expected Json, found bytes");
+}
+
+#[test]
+fn decode_errors_give_the_path_and_the_cause() {
+    use sandlang::value::{Decode, DecodeError, Encode};
+    let mut purchase = sample_purchase().encode();
+    let Value::Struct(fields) = &mut purchase else { panic!() };
+    fields.fields[1] = Value::List(vec![Value::Variant(VariantValue::new("shop.Delivery", "Shipped", [Value::Int(2), Value::Unit]))]);
+    let error = purchase.decode::<Purchase>().unwrap_err();
+    assert_eq!((error.path(), error.message()), ("$.deliveries[0].Shipped[1]".into(), "expected str, found ()"));
+    let cases: [(Result<(), DecodeError>, &str); 7] = [
+        (Value::Float(1.5).decode::<i64>().map(drop), "$: expected int, found float"),
+        (Value::Float(1e300).decode::<i64>().map(drop), "$: integer out of range"),
+        (Value::Str("!".into()).decode::<Vec<u8>>().map(drop), "$: invalid base64"),
+        (Value::Map(vec![(Value::Str("x y".into()), Value::Unit)]).decode::<HashMap<i64, ()>>().map(drop), "$: invalid map key `x y`"),
+        (Value::Str("Lost".into()).decode::<Delivery>().map(drop), "$: unknown variant `Lost` of shop.Delivery"),
+        (Value::Str("Held".into()).decode::<Delivery>().map(drop), "$: variant `Held` of shop.Delivery needs a payload"),
+        (Value::Str("12".into()).decode::<Money>().map(drop), "$: expected 0.00"),
+    ];
+    for (r, message) in cases {
+        assert_eq!(r.unwrap_err().to_string(), message);
+    }
+    let nested = DecodeError::new("bad").in_key("unit price").in_index(2).in_key("lines");
+    assert_eq!(nested.to_string(), "$.lines[2][\"unit price\"]: bad");
+    assert_eq!(<Vec<i64> as Decode>::decode(&Value::List(vec![Value::Int(1), Value::Unit])).unwrap_err().path(), "$[1]");
+}
+
+#[test]
+fn decode_reads_a_script_error() {
+    use sandlang::stdlib::core::Error as ScriptError;
+    let values = copied_values(
+        "let failed: Result<int> = Err(Error(kind: \"io\", message: \"closed\"))\nhost.copy(failed)\nhost.copy(Error(message: \"lost\"))\n",
+    );
+    let Value::Variant(failed) = &values[0] else { panic!("{values:?}") };
+    let expected = ScriptError { message: "closed".into(), kind: "io".into() };
+    assert_eq!(failed.payload[0].decode::<ScriptError>(), Ok(expected));
+    assert_eq!(values[1].decode::<ScriptError>(), Ok(ScriptError { message: "lost".into(), kind: "error".into() }));
+    let message_only = Value::Map(vec![(Value::Str("message".into()), Value::Str("gone".into()))]);
+    assert_eq!(message_only.decode::<ScriptError>(), Ok(ScriptError { message: "gone".into(), kind: "error".into() }));
 }

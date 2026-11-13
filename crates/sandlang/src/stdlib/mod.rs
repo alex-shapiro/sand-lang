@@ -1,9 +1,10 @@
 //! The Sand standard library.
 //!
-//! Host code can use the Rust types in [`json`], [`log`], and [`time`].
+//! Host code can use the Rust types in [`core`], [`json`], [`log`], and
+//! [`time`].
 
-mod base64;
-pub(crate) mod core;
+pub(crate) mod base64;
+pub mod core;
 mod crypto;
 mod fs;
 #[cfg(feature = "os")]

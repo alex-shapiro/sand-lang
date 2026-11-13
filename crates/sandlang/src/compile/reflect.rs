@@ -45,6 +45,8 @@ pub(crate) struct DescCache {
     struct_fills: PMap<TypeDefId, StructFills>,
     /// Helper function prototype that populates a set from a list.
     set_fill: Option<u32>,
+    /// Helper function prototype that populates a map from a list.
+    map_fill: Option<u32>,
     /// Work units consumed during the current compilation.
     total: usize,
 }
@@ -65,6 +67,9 @@ pub(crate) trait DescSink {
     fn struct_fill(&mut self, def: TypeDefId, fields: &[(u32, FnId)]) -> Vec<Option<(u32, u8)>>;
     /// Emits a helper function that inserts elements from a captured list into a captured set.
     fn set_fill(&mut self) -> u32;
+    /// Emits a helper function that inserts entries from a captured list of
+    /// alternating keys and values into a captured map.
+    fn map_fill(&mut self) -> u32;
 }
 
 impl DescCache {
@@ -245,7 +250,8 @@ impl Builder<'_, '_> {
             }
             Ty::Map(k, v) => {
                 let ((k, lk), (v, lv)) = (self.desc(k), self.desc(v));
-                (Arc::new(TypeDesc::Map(k, v)), min_depth(lk, lv))
+                let fill = *self.cache.map_fill.get_or_insert_with(|| self.sink.map_fill());
+                (Arc::new(TypeDesc::Map(k, v, fill)), min_depth(lk, lv))
             }
             Ty::Tuple(ts) => {
                 let mut l = None;

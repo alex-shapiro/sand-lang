@@ -1169,7 +1169,9 @@ pub enum TypeDesc {
     Duration,
     Unit,
     List(Arc<TypeDesc>),
-    Map(Arc<TypeDesc>, Arc<TypeDesc>),
+    /// Key and value descriptors, and the helper function prototype that
+    /// inserts entries from a list of alternating keys and values.
+    Map(Arc<TypeDesc>, Arc<TypeDesc>, u32),
     /// Set element descriptor and the helper function prototype that populates a set from a list.
     Set(Arc<TypeDesc>, u32),
     Tuple(Vec<Arc<TypeDesc>>),
@@ -1231,7 +1233,7 @@ impl TypeDesc {
                 e.write_name(recur, out);
                 out.push(']');
             }
-            TypeDesc::Map(k, v) => {
+            TypeDesc::Map(k, v, _) => {
                 out.push('[');
                 k.write_name(recur, out);
                 out.push_str(": ");
@@ -1353,7 +1355,7 @@ impl DescTemplate {
             let n = match &**d {
                 TypeDesc::Param(_) => Some(0),
                 TypeDesc::List(e) | TypeDesc::Set(e, _) | TypeDesc::Option(e) => deepest(&mut std::iter::once(e)),
-                TypeDesc::Map(k, v) => deepest(&mut [k, v].into_iter()),
+                TypeDesc::Map(k, v, _) => deepest(&mut [k, v].into_iter()),
                 TypeDesc::Tuple(ts) => deepest(&mut ts.iter()),
                 TypeDesc::Struct { fields, .. } => deepest(&mut fields.iter().map(|f| &f.1)),
                 TypeDesc::Enum { variants, .. } => deepest(&mut variants.iter().flat_map(|v| &v.payload_types)),
@@ -1450,7 +1452,7 @@ impl TemplateInstantiator<'_> {
             TypeDesc::List(e) => TypeDesc::List(self.node(e)),
             TypeDesc::Set(e, fill) => TypeDesc::Set(self.node(e), *fill),
             TypeDesc::Option(e) => TypeDesc::Option(self.node(e)),
-            TypeDesc::Map(k, v) => TypeDesc::Map(self.node(k), self.node(v)),
+            TypeDesc::Map(k, v, fill) => TypeDesc::Map(self.node(k), self.node(v), *fill),
             TypeDesc::Tuple(ts) => {
                 self.allocated_bytes += ts.len() * std::mem::size_of::<Arc<TypeDesc>>();
                 TypeDesc::Tuple(ts.iter().map(|t| self.node(t)).collect())
@@ -1503,7 +1505,7 @@ impl Drop for TypeDesc {
             };
             match d {
                 TypeDesc::List(e) | TypeDesc::Set(e, _) | TypeDesc::Option(e) => one(e),
-                TypeDesc::Map(k, v) => {
+                TypeDesc::Map(k, v, _) => {
                     one(k);
                     one(v);
                 }
@@ -1534,7 +1536,7 @@ impl std::fmt::Debug for TypeDesc {
             TypeDesc::Duration => write!(f, "Duration"),
             TypeDesc::Unit => write!(f, "Unit"),
             TypeDesc::List(e) => write!(f, "List({e:?})"),
-            TypeDesc::Map(k, v) => write!(f, "Map({k:?}, {v:?})"),
+            TypeDesc::Map(k, v, _) => write!(f, "Map({k:?}, {v:?})"),
             TypeDesc::Set(e, _) => write!(f, "Set({e:?})"),
             TypeDesc::Tuple(ts) => f.debug_tuple("Tuple").field(ts).finish(),
             TypeDesc::Option(e) => write!(f, "Option({e:?})"),
@@ -1721,7 +1723,7 @@ mod tests {
         for i in 0..200_000 {
             d = Arc::new(match i % 4 {
                 0 => TypeDesc::List(d),
-                1 => TypeDesc::Map(shared.clone(), d),
+                1 => TypeDesc::Map(shared.clone(), d, 0),
                 2 => TypeDesc::Tuple(vec![shared.clone(), d]),
                 _ => TypeDesc::Struct { id: 0, def: 0, name: "S".into(), fields: vec![("f".into(), d, FieldDefault::None)], rust: None },
             });

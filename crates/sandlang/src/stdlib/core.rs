@@ -1,4 +1,4 @@
-//! Natives for the prelude and the `task` module.
+//! The prelude and the `task` module.
 
 use crate::check::ModKind;
 use crate::native::convert::HostError;
@@ -58,9 +58,12 @@ fn nanos(d: SignedDuration) -> i64 {
 
 /// Standard error record with a human-readable `message` and a
 /// machine-readable `kind` tag that defaults to `"error"`.
+///
+/// A host decodes the error payload of a failed run with
+/// [`Value::decode`](crate::value::Value::decode).
 #[derive(Clone, Debug, PartialEq, crate::SandStruct)]
 #[sand(module = "prelude")]
-pub(crate) struct Error {
+pub struct Error {
     /// Human-readable error description.
     pub message: String,
     /// Machine-readable category tag such as `"not_found"` or `"permission_denied"`.
