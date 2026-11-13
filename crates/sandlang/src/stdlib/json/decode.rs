@@ -231,8 +231,8 @@ impl Error {
             Seg::Index(i) => e.in_index(i),
         };
         match self {
-            Error::Mismatch(e) => Error::Mismatch(in_seg(e)),
-            Error::Invalid(e) => Error::Invalid(in_seg(e)),
+            Error::Mismatch(e) => Error::Mismatch(Box::new(in_seg(*e))),
+            Error::Invalid(e) => Error::Invalid(Box::new(in_seg(*e))),
             e => e,
         }
     }
@@ -305,11 +305,11 @@ impl<'a, 'd, 's, 'h, S: DecodeSource<'a>> Decoder<'a, 'd, 's, 'h, S> {
 
     #[cold]
     fn fail(&self, msg: &str) -> Error {
-        Error::Mismatch(DecodeError::new(msg))
+        Error::Mismatch(Box::new(DecodeError::new(msg)))
     }
 
     fn unsupported(&self, what: &str) -> Error {
-        Error::Invalid(DecodeError::new(format!("cannot decode {what}")))
+        Error::Invalid(Box::new(DecodeError::new(format!("cannot decode {what}"))))
     }
 
     #[cold]

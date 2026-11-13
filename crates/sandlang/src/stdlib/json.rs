@@ -179,9 +179,9 @@ enum Error {
     /// Invalid JSON syntax. The message includes the line and column.
     Parse(String),
     /// A part of the input does not match the target type.
-    Mismatch(DecodeError),
+    Mismatch(Box<DecodeError>),
     /// The decoder cannot decode a part of the target type.
-    Invalid(DecodeError),
+    Invalid(Box<DecodeError>),
     Fail(Fail),
 }
 
