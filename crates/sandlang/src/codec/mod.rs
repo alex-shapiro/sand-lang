@@ -43,7 +43,7 @@ const ACCOUNT_STEP: usize = 4096;
 
 /// The kind of a sequence in the data model.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SeqKind {
+pub(crate) enum SeqKind {
     List,
     Set,
     /// A tuple, or the positional payload of a variant, with this many elements.
@@ -56,7 +56,7 @@ pub enum SeqKind {
 /// state, so that the engine can run a native function again after a
 /// garbage collection (SPEC §16.3). The caller charges a fuel unit for each
 /// value; a method charges only for the bytes that it writes.
-pub trait EncodeFormat: Any + Send {
+pub(crate) trait EncodeFormat: Any + Send {
     fn unit(&mut self, vm: &mut Vm) -> Result<(), Fail>;
     fn bool(&mut self, vm: &mut Vm, b: bool) -> Result<(), Fail>;
     fn int(&mut self, vm: &mut Vm, i: i64) -> Result<(), Fail>;
@@ -120,12 +120,11 @@ pub trait EncodeFormat: Any + Send {
     /// Bytes of Rust memory that the format holds and that the heap counts
     /// (see [`Budget`]).
     fn heap_size(&self) -> usize;
-    fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
 /// The bytes of a format's Rust buffers that the heap counts.
 #[derive(Default)]
-pub struct Budget {
+pub(crate) struct Budget {
     counted: usize,
 }
 
@@ -133,7 +132,7 @@ impl Budget {
     /// Counts `needed` bytes against the memory limit before a format grows
     /// to that size. Call it before any change to the format's state.
     #[inline(always)]
-    pub fn grow(&mut self, vm: &mut Vm, needed: usize) -> Result<(), Fail> {
+    pub(crate) fn grow(&mut self, vm: &mut Vm, needed: usize) -> Result<(), Fail> {
         if needed <= self.counted {
             return Ok(());
         }
@@ -149,21 +148,21 @@ impl Budget {
         Ok(())
     }
 
-    pub fn counted(&self) -> usize {
+    pub(crate) fn counted(&self) -> usize {
         self.counted
     }
 
     /// Stops counting the buffers, which the format no longer holds, and
     /// returns the bytes that the heap counted for them. The caller passes
     /// them to [`Heap::account`](crate::vm::heap::Heap::account).
-    pub fn release(&mut self) -> usize {
+    pub(crate) fn release(&mut self) -> usize {
         std::mem::take(&mut self.counted)
     }
 }
 
 /// A failure to decode.
 #[derive(Debug)]
-pub enum DecodeFail {
+pub(crate) enum DecodeFail {
     /// The input does not match the target type. The decoder adds the path.
     Mismatch(String),
     /// The target type cannot be decoded from the format, such as a tuple
@@ -181,7 +180,7 @@ impl From<Fail> for DecodeFail {
     }
 }
 
-pub type DecodeResult<T> = Result<T, DecodeFail>;
+pub(crate) type DecodeResult<T> = Result<T, DecodeFail>;
 
 /// A source format for `Decode`.
 ///
@@ -189,7 +188,7 @@ pub type DecodeResult<T> = Result<T, DecodeFail>;
 /// map key with the next operations, until [`DecodeFormat::map_value`]. The
 /// caller charges a fuel unit for each value, and the fuel of the input that
 /// the format read (see [`DecodeFormat::take_input_fuel`]).
-pub trait DecodeFormat: Any + Send {
+pub(crate) trait DecodeFormat: Any + Send {
     fn unit(&mut self, vm: &mut Vm) -> DecodeResult<()>;
     fn bool(&mut self, vm: &mut Vm) -> DecodeResult<bool>;
     fn int(&mut self, vm: &mut Vm) -> DecodeResult<i64>;
@@ -296,7 +295,7 @@ impl NativeObject for Decoder {
 /// The open containers of a [`Decoder`], which give the path of the part
 /// that it reads, such as `$.items[2].price`.
 #[derive(Default)]
-pub struct DecodePath(Vec<Frame>);
+pub(crate) struct DecodePath(Vec<Frame>);
 
 /// An open container of a [`Decoder`].
 #[derive(Clone, Debug)]
@@ -316,13 +315,14 @@ enum Frame {
 
 impl Encoder {
     /// Returns a new encoder for `format`.
-    pub fn new(format: Box<dyn EncodeFormat>) -> Encoder {
+    pub(crate) fn new(format: Box<dyn EncodeFormat>) -> Encoder {
         Encoder { format: Some(format), encoded: None }
     }
 
     /// Returns the format of `e` if it has type `F`.
-    pub fn format_mut<F: EncodeFormat>(&mut self) -> Option<&mut F> {
-        self.format.as_deref_mut()?.as_any_mut().downcast_mut::<F>()
+    pub(crate) fn format_mut<F: EncodeFormat>(&mut self) -> Option<&mut F> {
+        let format: &mut dyn Any = self.format.as_deref_mut()?;
+        format.downcast_mut::<F>()
     }
 
     /// Returns the value that a host `Value` encoder holds.
@@ -337,7 +337,7 @@ impl Encoder {
 
 impl Decoder {
     /// Returns a new decoder for `format`.
-    pub fn new(format: Box<dyn DecodeFormat>) -> Decoder {
+    pub(crate) fn new(format: Box<dyn DecodeFormat>) -> Decoder {
         Decoder { format: Some(format), path: DecodePath::default(), last_error: None }
     }
 
@@ -360,7 +360,7 @@ enum ValueEncoding {
 }
 
 /// Runs `op` on the format of `e`.
-pub fn with_encoder<R>(
+pub(crate) fn with_encoder<R>(
     vm: &mut Vm,
     e: VmVal<Encoder>,
     op: impl FnOnce(&mut dyn EncodeFormat, &mut Vm) -> Result<R, Fail>,

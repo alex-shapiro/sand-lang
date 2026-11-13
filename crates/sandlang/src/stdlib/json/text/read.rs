@@ -35,7 +35,7 @@ impl From<super::super::Error> for Fallback {
     fn from(e: super::super::Error) -> Self {
         match e {
             super::super::Error::Fail(f) => Fallback::Limit(f),
-            super::super::Error::Parse(_) => Fallback::General,
+            super::super::Error::Parse(_) | super::super::Error::Mismatch(_) => Fallback::General,
         }
     }
 }

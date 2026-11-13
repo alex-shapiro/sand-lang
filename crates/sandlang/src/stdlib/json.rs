@@ -161,7 +161,7 @@ pub(crate) fn module() -> NativeModule {
         Ok(Encoding::Done(VmVal::from_raw(r?)))
     });
     m.function("encoded_json", |vm: &mut Vm, e: VmVal<Encoder>| -> Result<VmVal<Json>, Fail> {
-        let root = with_encoder(vm, e, |f, _| match f.as_any_mut().downcast_mut::<TreeEncoder>() {
+        let root = with_encoder(vm, e, |f, _| match (f as &mut dyn std::any::Any).downcast_mut::<TreeEncoder>() {
             Some(tree) => tree.encoded(),
             None => internal("json.to_json: not a Json encoder"),
         });
@@ -225,7 +225,11 @@ pub(crate) fn json_into_vm(vm: &mut Vm, json: Json) -> Result<VmValue, Fail> {
 }
 
 enum Error {
+    /// Invalid JSON syntax, with its location.
     Parse(String),
+    /// Valid JSON that does not match the type that a decoder reads, such as
+    /// "expected int".
+    Mismatch(String),
     Fail(Fail),
 }
 
@@ -240,7 +244,7 @@ type PResult<T> = Result<T, Error>;
 fn into_result<T>(r: PResult<VmValue>) -> Result<VmVal<T>, HostError> {
     match r {
         Ok(v) => Ok(VmVal::from_raw(v)),
-        Err(Error::Parse(msg)) => Err(HostError::new("parse", msg)),
+        Err(Error::Parse(msg) | Error::Mismatch(msg)) => Err(HostError::new("parse", msg)),
         Err(Error::Fail(c)) => Err(c.into()),
     }
 }

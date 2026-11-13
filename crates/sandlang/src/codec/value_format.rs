@@ -18,7 +18,6 @@ use crate::vm::bytecode::Program;
 use crate::vm::value::{Obj, VmValue};
 use crate::vm::{Fail, Vm, fail, internal};
 use smallvec::SmallVec;
-use std::any::Any;
 use std::borrow::Cow;
 use std::sync::Arc;
 
@@ -534,10 +533,6 @@ impl EncodeFormat for ValueEncoder {
 
     fn heap_size(&self) -> usize {
         self.budget.counted()
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
     }
 }
 

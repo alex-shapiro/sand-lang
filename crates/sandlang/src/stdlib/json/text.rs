@@ -14,7 +14,6 @@ use crate::vm::meter::{BYTES_PER_UNIT, SLOW_BYTES_PER_UNIT};
 use crate::vm::value::{FxHashMap, KeyIndex, MAP_ENTRY_SIZE, MapObj, Obj, ObjectValues, VALUE_SIZE, VmValue, slot_fits};
 use crate::vm::{Fail, Vm, fail, internal};
 use compact_str::CompactString;
-use std::any::Any;
 use std::borrow::Cow;
 use std::fmt::Write;
 
@@ -403,10 +402,6 @@ impl EncodeFormat for TextEncoder {
     fn heap_size(&self) -> usize {
         self.budget.counted()
     }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
 }
 
 /// Returns the name of field `index` of struct definition `id`, or of the
@@ -580,7 +575,7 @@ impl TextDecoder {
     /// Returns the error for a value that does not match `what`.
     fn mismatch(p: &Parser<'_>, what: &str) -> ParseError {
         match p.peek() {
-            Some(b'n' | b't' | b'f' | b'"' | b'-' | b'0'..=b'9' | b'[' | b'{') => ParseError::Parse(format!("expected {what}")),
+            Some(b'n' | b't' | b'f' | b'"' | b'-' | b'0'..=b'9' | b'[' | b'{') => ParseError::Mismatch(format!("expected {what}")),
             _ => p.unexpected(),
         }
     }
@@ -614,7 +609,7 @@ impl TextDecoder {
         let n = Self::number(p, "int")?;
         n.int().ok_or_else(|| {
             let f = n.float();
-            ParseError::Parse(if f.is_finite() && f.fract() == 0.0 { "integer out of range" } else { "expected int" }.into())
+            ParseError::Mismatch(if f.is_finite() && f.fract() == 0.0 { "integer out of range" } else { "expected int" }.into())
         })
     }
 
@@ -692,9 +687,7 @@ impl TextDecoder {
 
 fn into_fail(e: ParseError) -> DecodeFail {
     match e {
-        ParseError::Parse(m) if m.starts_with("expected") || m.starts_with("integer out of range") || m.starts_with("invalid base64") => {
-            DecodeFail::Mismatch(m)
-        }
+        ParseError::Mismatch(m) => DecodeFail::Mismatch(m),
         ParseError::Parse(m) => DecodeFail::Syntax(m),
         ParseError::Fail(f) => DecodeFail::Fail(f),
     }
@@ -797,7 +790,7 @@ impl DecodeFormat for TextDecoder {
                 return Err(Self::mismatch(p, "base64 str"));
             }
             let s = p.string(true)?;
-            let b = base64::decode(&s, false).map_err(|_| ParseError::Parse("invalid base64".into()))?;
+            let b = base64::decode(&s, false).map_err(|_| ParseError::Mismatch("invalid base64".into()))?;
             vm.check_memory(b.len())?;
             Ok(vm.heap.new_bytes(b))
         })
@@ -1472,9 +1465,5 @@ impl EncodeFormat for TreeEncoder {
 
     fn heap_size(&self) -> usize {
         self.budget.counted()
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
     }
 }
