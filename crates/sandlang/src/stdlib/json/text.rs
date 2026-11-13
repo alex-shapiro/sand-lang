@@ -55,6 +55,9 @@ struct EncoderState {
     depth: usize,
 }
 
+/// The bytes of output that a new [`TextEncoder`] holds without growing.
+const SMALL_TEXT: usize = 128;
+
 /// Writes JSON text.
 pub(crate) struct TextEncoder {
     indent: usize,
@@ -70,7 +73,15 @@ pub(crate) struct TextEncoder {
 
 impl TextEncoder {
     pub(crate) fn new(indent: usize) -> TextEncoder {
-        TextEncoder { indent, out: String::new(), charged: 0, open: Vec::new(), depth: 0, saved: None, budget: Budget::default() }
+        TextEncoder {
+            indent,
+            out: String::with_capacity(SMALL_TEXT),
+            charged: 0,
+            open: Vec::with_capacity(8),
+            depth: 0,
+            saved: None,
+            budget: Budget::default(),
+        }
     }
 
     /// Returns the text written, and the bytes that the heap counted for
@@ -544,7 +555,7 @@ impl TextDecoder {
         let mut budget = Budget::default();
         budget.grow(vm, vm.heap.str(text).len())?;
         let text = vm.heap.str(text).into();
-        Ok(TextDecoder { text, pos: 0, depth: 0, charged: 0, open: Vec::new(), key: None, saved: None, budget })
+        Ok(TextDecoder { text, pos: 0, depth: 0, charged: 0, open: Vec::with_capacity(16), key: None, saved: None, budget })
     }
 
     /// Runs `f` on a parser at the current position. On an error, the

@@ -20,6 +20,13 @@ use crate::vm::bytecode::Program;
 use crate::vm::value::{MapObj, Obj, SetObj, VmValue};
 use crate::vm::{Fail, Vm, internal};
 
+/// The open containers for which a walk allocates room at its start.
+pub(crate) const OPEN_FRAMES: usize = 16;
+
+/// The parts of open containers for which a walk allocates room at its
+/// start.
+pub(crate) const OPEN_VALUES: usize = 32;
+
 /// The index of a [`Schema`] in the program's schema table.
 pub type SchemaId = u32;
 
@@ -55,7 +62,7 @@ pub enum Schema {
 pub(crate) fn encode<F: EncodeFormat + ?Sized>(vm: &mut Vm, f: &mut F, value: VmValue, schema: SchemaId) -> Result<(), Fail> {
     f.save();
     let prog = vm.prog.clone();
-    let mut w = EncodeWalk { prog: &prog, stack: Vec::new(), values: Vec::new(), text: String::new() };
+    let mut w = EncodeWalk::new(&prog);
     let r = w.run(vm, f, value, schema, false);
     if r.as_ref().is_err_and(|e| e.as_limit().is_some()) {
         f.restore();
@@ -67,7 +74,7 @@ pub(crate) fn encode<F: EncodeFormat + ?Sized>(vm: &mut Vm, f: &mut F, value: Vm
 /// format's own walk. It keeps no state of `f` (see [`EncodeFormat::save`]).
 pub(crate) fn encode_key<F: EncodeFormat + ?Sized>(vm: &mut Vm, f: &mut F, key: VmValue, schema: SchemaId) -> Result<(), Fail> {
     let prog = vm.prog.clone();
-    let mut w = EncodeWalk { prog: &prog, stack: Vec::new(), values: Vec::new(), text: String::new() };
+    let mut w = EncodeWalk::new(&prog);
     w.run(vm, f, key, schema, true)
 }
 
@@ -121,6 +128,10 @@ struct EncodeWalk<'p> {
 }
 
 impl<'p> EncodeWalk<'p> {
+    fn new(prog: &'p Program) -> EncodeWalk<'p> {
+        EncodeWalk { prog, stack: Vec::with_capacity(OPEN_FRAMES), values: Vec::with_capacity(OPEN_VALUES), text: String::new() }
+    }
+
     fn run<F: EncodeFormat + ?Sized>(
         &mut self,
         vm: &mut Vm,
@@ -303,7 +314,12 @@ fn prog_schema(prog: &Program, id: SchemaId) -> Result<&Schema, Fail> {
 pub(super) fn decode<F: DecodeFormat + ?Sized>(vm: &mut Vm, f: &mut F, path: &mut Vec<Frame>, schema: SchemaId) -> DecodeResult<VmValue> {
     f.save();
     let prog = vm.prog.clone();
-    let mut w = DecodeWalk { prog: &prog, stack: Vec::new(), values: Vec::new(), key_texts: String::new() };
+    let mut w = DecodeWalk {
+        prog: &prog,
+        stack: Vec::with_capacity(OPEN_FRAMES),
+        values: Vec::with_capacity(OPEN_VALUES),
+        key_texts: String::new(),
+    };
     let r = w.run(vm, f, path, schema);
     match &r {
         Ok(_) => {}

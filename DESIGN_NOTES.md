@@ -773,3 +773,23 @@ node for each value, which value-decode does not need. `deep_encode` and
 
 The differential test passed 10000 cases (JSON text with and without
 indentation, `retry_stress`).
+
+### C8: buffers with room at the start
+
+Profile of `small_encode` (C7): growing buffers took 27% of the samples
+(`RawVecInner::finish_grow` and `realloc`). The output `String` of a
+`TextEncoder` started empty and grew several times for 60 bytes, and each
+walk grew a new frame stack and value stack. The output now starts with
+room for 128 bytes, and the stacks of a walk start with room for 16 frames
+and 32 parts.
+
+Tried and rejected: `SmallVec` stacks (no allocation for small values)
+gave `small_encode` 170 ns, but made `encode` 5% and `decode_ints` 6%
+slower, because each access checks where the items are. Smaller
+`Budget` steps for small buffers (powers of two from 256 bytes) made no
+difference (`small_encode` 237 to 236).
+
+Measured (4 alternating rounds of `BENCH_RUNS=5 BENCH_REPS=10`, ns per
+item; value-decode, C7, C8): `small_encode` 119, 234, 204;
+`small_decode` 233, 344, 345; `small_to_value` 93, 301, 302; `encode` 282,
+338, 338; `decode` 652, 786, 788; `decode_ints` 108, 146, 146.

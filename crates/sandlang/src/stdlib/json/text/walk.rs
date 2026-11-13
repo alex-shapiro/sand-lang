@@ -8,7 +8,7 @@
 //! text.
 
 use super::{Bracket, Open, TextEncoder, write_str};
-use crate::codec::fast::{self, Schema, SchemaId};
+use crate::codec::fast::{self, OPEN_FRAMES, OPEN_VALUES, Schema, SchemaId};
 use crate::codec::{EncodeFormat, MAX_NESTING_DEPTH};
 use crate::vm::bytecode::Program;
 use crate::vm::value::{Obj, VmValue};
@@ -84,8 +84,8 @@ impl TextEncoder {
         // The operations that the walk calls for rare values write no
         // separator in this bracket.
         self.open.push(Open { bracket: Bracket::Some, is_empty: true, names: None });
-        let mut stack: Vec<Frame<'_>> = Vec::new();
-        let mut values: Vec<VmValue> = Vec::new();
+        let mut stack: Vec<Frame<'_>> = Vec::with_capacity(OPEN_FRAMES);
+        let mut values: Vec<VmValue> = Vec::with_capacity(OPEN_VALUES);
         let (mut v, mut s) = (value, schema);
         loop {
             vm.charge(1)?;
