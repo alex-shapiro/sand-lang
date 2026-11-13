@@ -546,6 +546,9 @@ pub(crate) struct FnState {
     /// Enclosing type constructor if currently checking its `init` method
     /// (where `T(...)` constructs the struct field by field).
     pub init_of: Option<Ctor>,
+    /// Inside the body of a synthesized `impl` method. Its uses of `Decode`
+    /// skip the privacy rule, which the use of the `impl` checks.
+    pub synthesized: bool,
     pub infer_checks: Vec<(TypeId, Span)>,
     /// Inside a top-level statement of a module (lets become globals).
     pub top_level: bool,
@@ -3080,6 +3083,7 @@ impl Checker {
         self.begin_fn(generics, self_ty);
         let fi = &self.fns[id as usize];
         self.fs.init_of = fi.owner.filter(|_| fi.is_init(&self.syms));
+        self.fs.synthesized = matches!(decl, FnDeclRef::Derived(_));
         let mut param_locals = self.declare_dict_params(id);
         let f = match decl {
             FnDeclRef::Fn(at) => Some(at.get(m)),

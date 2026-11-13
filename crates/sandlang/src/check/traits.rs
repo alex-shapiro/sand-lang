@@ -1143,6 +1143,14 @@ impl Checker {
             m.overflow = true;
             return Err(m);
         }
+        if depth == 0
+            && !self.fs.synthesized
+            && self.traits[tr.trait_id as usize].builtin == Some(Builtin::Decode)
+            && let Some((d, field)) = self.private_decoded_field(ty)
+        {
+            let (owner, field) = (self.ctor_name(Ctor::Def(d), 0), self.name(field));
+            return Err(Unmet::new(format!("this call cannot build `{owner}` here: its field `{field}` is private")));
+        }
         // Prefer static `impl` dictionaries for concrete types so that trait
         // calls can be devirtualized.
         let ground = !self.arena.has_params(ty);

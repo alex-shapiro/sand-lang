@@ -205,21 +205,63 @@ pub fn open() -> Account { Account(count: 0) }
 --- error
 3: field `count` of `account.Account` is private
 
-=== the derived Decode of a type builds its private fields in other modules
+=== a derived Decode cannot build private fields of other modules
 import "./account.sand"
 import json
 print(json.encode(account.open()))
 let a: Result<account.Account> = json.decode("{\"owner\": \"x\"}")
-print(a?.owner)
 --- file account.sand
 pub struct Account {
     pub owner: str
     balance: int = 0
 }
 pub fn open() -> Account { Account(owner: "ann") }
+--- error
+4: this call cannot build `account.Account` here: its field `balance` is private
+
+=== a derived Decode builds private fields in the module of their struct
+import "./account.sand"
+import json
+let l: Result<account.Ledger> = json.decode("{\"accounts\": [{\"owner\": \"x\", \"balance\": 5}]}")
+print(l?.accounts[0].balance())
+print(account.parse("{\"owner\": \"y\", \"balance\": 7}")?.balance())
+let p: Result<account.Pin> = json.decode("42")
+print(p?.digits)
+--- file account.sand
+import json
+pub struct Account { pub owner: str, balance: int }
+extend Account { pub fn balance(self) -> int { self.balance } }
+pub struct Ledger { pub accounts: [Account] }
+pub fn parse(text: str) -> Result<Account> { json.decode(text) }
+pub struct Pin { pub digits: int, checked: bool }
+impl Decode for Pin {
+    fn decode(d: Decoder) -> Result<Pin> {
+        Ok(Pin(digits: d.decode()?, checked: true))
+    }
+}
 --- stdout
-{"owner":"ann","balance":0}
-x
+5
+7
+42
+
+=== a derived Decode of a type argument with private fields follows the privacy rule where the argument becomes concrete
+import "./account.sand"
+import json
+struct Holder { account: account.Account }
+fn load<T: Decode>(text: str) -> Result<T> { json.decode(text) }
+let a: Result<[account.Account]> = json.decode("[]")
+let b: Result<account.Account> = load("{}")
+let c: Result<account.Account> = account.parse("{}")
+let h: Result<Holder> = json.decode("{}")
+--- file account.sand
+import json
+pub struct Account { pub owner: str, balance: int }
+pub fn parse<T: Decode>(text: str) -> Result<T> { json.decode(text) }
+--- error
+5: this call cannot build `account.Account` here: its field `balance` is private
+6: this call cannot build `account.Account` here: its field `balance` is private
+7: this call cannot build `account.Account` here: its field `balance` is private
+8: this call cannot build `account.Account` here: its field `balance` is private
 
 === private items are not visible
 import "./m.sand"

@@ -232,7 +232,11 @@ Any item declaration may be exposed publicly with a `pub` prefix: `pub fn`.
 An item that lacks a `pub` prefix is considered private and cannot be referenced
 outside of its module.
 
-Value formatting and `json.encode` include all struct fields regardless of visibility.
+Value formatting and a derived `Encode` (§5.6) include all struct fields, also the
+private fields. A derived `Decode` can build a struct with a private field only in the
+module of the struct. In other modules, a use of that `Decode` is a compile error. A
+field type uses the rule of the module of its struct, and a type argument uses the rule
+of the module that gives the argument. A hand-written `Decode` applies in all modules.
 A public enum's variants and a public trait's methods are always public. `impl` blocks
 do not have visibility modifiers (§4.9). Importing modules can read a `pub var`, but only
 the declaring module can set it.

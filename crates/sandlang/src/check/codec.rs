@@ -72,6 +72,54 @@ impl Checker {
         self.builtin_trait(b).is_some_and(|tr| self.impls_by.get(&(tr.trait_id, Ctor::Def(d), 0)).is_some_and(|ids| !ids.is_empty()))
     }
 
+    /// Returns a struct and its field that a derived `Decode` must build for
+    /// `root` in the current module, where the field is private, or `None`.
+    ///
+    /// A proof that a struct implements its derived `Decode` is valid only in
+    /// a module that can see each of its fields. The proof of a field type
+    /// happens in the module of the struct, and the proof of a type argument
+    /// happens where the argument becomes concrete. A hand-written `Decode`
+    /// is valid in each module.
+    pub(crate) fn private_decoded_field(&mut self, root: TypeId) -> Option<(TypeDefId, Symbol)> {
+        let tr = self.builtin_trait(Builtin::Decode)?;
+        let mut todo = vec![(root, self.cur_mod)];
+        let mut seen = HashSet::new();
+        while let Some((t, module)) = todo.pop() {
+            if !seen.insert((t, module)) || !self.budget.charge(1) {
+                continue;
+            }
+            match self.arena.get(t) {
+                Ty::List(x) | Ty::Set(x) => todo.push((x, module)),
+                Ty::Map(k, v) => todo.extend([(k, module), (v, module)]),
+                Ty::Tuple(l) => todo.extend(self.arena.list(l).iter().map(|&x| (x, module))),
+                Ty::Named(d, args) => {
+                    let args = self.arena.list(args).to_vec();
+                    let def = &self.types[d as usize];
+                    let derived = self
+                        .impls_by
+                        .get(&(tr.trait_id, Ctor::Def(d), 0))
+                        .and_then(|ids| ids.first())
+                        .is_some_and(|&i| self.impls[i as usize].derived);
+                    let required = match (derived, self.derived.get(d as usize).map(|x| &x[Builtin::Decode as usize])) {
+                        (true, Some(Derived::Needs(required))) => required.clone(),
+                        _ => self.codec_impl_params(Ctor::Def(d), args.len(), Builtin::Decode).flatten().unwrap_or_default(),
+                    };
+                    todo.extend(required.iter().filter_map(|&i| args.get(i as usize)).map(|&x| (x, module)));
+                    if !derived {
+                        continue;
+                    }
+                    if let Some(f) = def.fields().iter().find(|f| !f.is_pub && def.module != module) {
+                        return Some((d, f.name));
+                    }
+                    let members = self.member_types(d as usize);
+                    todo.extend(members.into_iter().map(|x| (x, self.types[d as usize].module)));
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
     /// Registers the derived `impl` blocks of `Encode` and `Decode` for the
     /// type definitions from `first`.
     pub(crate) fn synthesize_codec_impls(&mut self, first: usize, skip: &HashSet<TypeDefId>) {
