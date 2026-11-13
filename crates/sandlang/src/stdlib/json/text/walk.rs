@@ -7,7 +7,7 @@
 //! frames. The differential property test checks that both write the same
 //! text.
 
-use super::{Bracket, Open, TextEncoder, write_str};
+use super::{Bracket, JsonIds, Open, TextEncoder, write_str};
 use crate::codec::fast::{self, OPEN_FRAMES, OPEN_VALUES, Schema, SchemaId};
 use crate::codec::{EncodeFormat, MAX_NESTING_DEPTH};
 use crate::vm::bytecode::Program;
@@ -288,6 +288,102 @@ impl TextEncoder {
                 Some((x, s))
             }
         })
+    }
+
+    /// Writes the Sand `json.Json` value `root`, and charges a fuel unit for
+    /// each value, as `emit_json` does with the format operations.
+    pub(super) fn write_json_value(&mut self, vm: &mut Vm, root: VmValue) -> Result<(), Fail> {
+        /// An open array or object, and the index of its next element or
+        /// entry slot.
+        enum JsonFrame {
+            Arr(VmValue, usize),
+            Obj(VmValue, usize, bool),
+        }
+        // A map key needs the checks of the format operations.
+        if self.in_key() {
+            return super::emit_json(vm, root, self);
+        }
+        let ids = JsonIds::new(&vm.prog)?;
+        self.room(vm, PART_ROOM)?;
+        self.begin_member(None);
+        self.open.push(Open { bracket: Bracket::Some, is_empty: true, names: None });
+        let mut stack: Vec<JsonFrame> = Vec::new();
+        let mut next = Some(root);
+        loop {
+            if let Some(v) = next.take() {
+                vm.charge(1)?;
+                let id = vm.heap.variant_id(v);
+                match vm.heap.field(v, 0) {
+                    _ if id == ids.null => self.literal(vm, "null")?,
+                    Some(VmValue::Bool(b)) if id == ids.bool_ => self.literal(vm, if b { "true" } else { "false" })?,
+                    Some(VmValue::Int(i)) if id == ids.int => self.literal(vm, itoa::Buffer::new().format(i))?,
+                    Some(VmValue::Float(x)) if id == ids.float => {
+                        match x.is_finite() {
+                            true => _ = write!(self.out, "{x:?}"),
+                            false => self.out.push_str("null"),
+                        }
+                        self.charge_written(vm)?;
+                    }
+                    Some(p) if id == ids.str_ => {
+                        let len = vm.heap.str(p).len();
+                        if len > SHORT_STR {
+                            self.room(vm, len * 6 + 4)?;
+                        }
+                        write_str(&mut self.out, vm.heap.str(p));
+                        self.charge_written(vm)?;
+                    }
+                    Some(p) if id == ids.arr => {
+                        self.open_bracket_at(vm, '[')?;
+                        stack.push(JsonFrame::Arr(p, 0));
+                    }
+                    Some(p) if id == ids.obj => {
+                        self.open_bracket_at(vm, '{')?;
+                        stack.push(JsonFrame::Obj(p, 0, true));
+                    }
+                    _ => return internal("json: not a Json value"),
+                }
+            }
+            let Some(top) = stack.last_mut() else {
+                self.open.pop();
+                return Ok(());
+            };
+            match top {
+                JsonFrame::Arr(list, i) => match vm.heap.list(*list).get(*i) {
+                    Some(&x) => {
+                        self.member(vm, *i == 0, None)?;
+                        *i += 1;
+                        next = Some(x);
+                    }
+                    None => {
+                        let is_empty = *i == 0;
+                        stack.pop();
+                        self.close(vm, ']', is_empty)?;
+                    }
+                },
+                JsonFrame::Obj(map, i, first) => {
+                    let Obj::Map(m) = vm.heap.get(*map) else { return internal("json: not an object") };
+                    match m.entries.get(*i..).and_then(|rest| rest.iter().enumerate().find_map(|(k, e)| Some((k, (*e)?)))) {
+                        Some((k, (key, x))) => {
+                            *i += k + 1;
+                            let is_first = std::mem::replace(first, false);
+                            self.room(vm, vm.heap.str(key).len() * 6 + 4)?;
+                            self.member(vm, is_first, None)?;
+                            write_str(&mut self.out, vm.heap.str(key));
+                            self.out.push(':');
+                            if self.indent > 0 {
+                                self.out.push(' ');
+                            }
+                            next = Some(x);
+                        }
+                        None => {
+                            let is_empty = *first;
+                            stack.pop();
+                            self.close(vm, '}', is_empty)?;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Writes the separator and the key `name` of the next member of an

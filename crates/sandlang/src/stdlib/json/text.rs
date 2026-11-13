@@ -373,7 +373,7 @@ impl EncodeFormat for TextEncoder {
     }
 
     fn json(&mut self, vm: &mut Vm, json: VmValue) -> Result<(), Fail> {
-        emit_json(vm, json, self)
+        self.write_json_value(vm, json)
     }
 
     fn value(&mut self, vm: &mut Vm, value: &Value) -> Result<(), Fail> {
@@ -417,7 +417,7 @@ pub(super) fn field_name(prog: &Program, id: u32, variant: bool, index: usize) -
 
 /// Writes the Sand `Json` value `root` to `f` with the format's operations,
 /// and charges a fuel unit for each value.
-fn emit_json<F: EncodeFormat + ?Sized>(vm: &mut Vm, root: VmValue, f: &mut F) -> Result<(), Fail> {
+pub(super) fn emit_json<F: EncodeFormat + ?Sized>(vm: &mut Vm, root: VmValue, f: &mut F) -> Result<(), Fail> {
     /// An open array or object, the index of its next element or entry
     /// slot, and the value of the entry whose key was written last.
     enum Open {

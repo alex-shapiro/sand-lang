@@ -793,3 +793,15 @@ Measured (4 alternating rounds of `BENCH_RUNS=5 BENCH_REPS=10`, ns per
 item; value-decode, C7, C8): `small_encode` 119, 234, 204;
 `small_decode` 233, 344, 345; `small_to_value` 93, 301, 302; `encode` 282,
 338, 338; `decode` 652, 786, 788; `decode_ints` 108, 146, 146.
+
+### C9: `TextEncoder` writes `Json` values directly
+
+`deep_encode` and `encode_json` write `json.Json` values, whose `Encode` is
+native: `emit_json` called the format operations for each node.
+`TextEncoder::json` now writes the value with the frames of the JSON text
+walk (`write_json_value`), as C7 does for schemas. A `Json` map key still
+goes through `emit_json`. The walk file is now 455 lines.
+
+Measured (4 alternating rounds of `BENCH_RUNS=5 BENCH_REPS=10`, ns per
+item; value-decode, C8, C9): `encode_json` 387, 415, 325; `deep_encode`
+4194, 4761, 3335; `encode` 291, 338, 331.
