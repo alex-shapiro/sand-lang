@@ -25,10 +25,21 @@ impl Decode for Email {
 ```
 
 The compiler synthesizes Sand implementations for derived types. A closed
-type with no hand-written part and no computed default also gets a native fast
-path, which keeps the speed of `value-decode`. A hand-written part is a plain
-Sand call. A property test checks that the native path and the synthesized
-path agree for every format.
+type with no hand-written part and no computed field default also gets a
+native fast path. A hand-written
+part is a plain Sand call. A property test checks that the native path and
+the synthesized path agree for every format.
+
+Speed against `value-decode`, from `notes.md` §7:
+
+- Types on the fast path decode at the same speed or faster, with
+  equal fuel. Encode is 1.15 times slower, `to_json` 1.35 times, and the
+  small-value cases up to 1.8 times.
+- A type with a hand-written part or a computed default loses the fast path
+  for the whole type.
+  For the 4-field `Contact` with a hand-written `Email`, decode is 2.9 times
+  the cost of a plain `Contact` on `value-decode`. For the 10-field bench
+  `User` with a hand-written `Email`, decode is 3.2 times the fast path.
 
 ## Method
 
@@ -49,10 +60,21 @@ of release builds with `-C llvm-args=-align-loops=64`.
 | C | Native walks for table types. Synthesized shells that return to Sand at each hand-written part. | Dropped. A hand-written part cost 180 ns, against a limit of 150 ns. On narrow structs it was only about 10% faster than D1. |
 | W | One native walker for each format. It pauses through a VM continuation at each hand-written part. | Dropped. A hand-written field cost about 435 ns, against a limit of 150 ns. Ordinary decode was 40–45% slower, because the resumable walker keeps its state on the heap. |
 
-C and W failed for the same reason. A switch from a native walk into Sand
-code must save and restore the walk state. In W, this cost about 270 ns, and
-the VM callback alone cost about 50 ns. In D1 and D2, a hand-written part is
-an ordinary Sand call.
+C and W failed their limits for different reasons:
+
+- In W, a switch from the native walk into Sand code must save and restore
+  the walk state. This cost about 270 ns, and the VM callback alone cost
+  about 50 ns. The resumable walker also made ordinary decode slower.
+- In C, each shell call cost 40 to 50 ns before it decoded anything. About
+  19% of the time was allocation, and the shells lost the map-key cache
+  of the native walk, because a native object could not hold VM values.
+
+D2 wins clearly on types on the fast path. On a wide struct with
+one hand-written field, C measured 1.8 times the native walk (E11), and D2
+now measures 3.2 times its fast path. These numbers come from different
+runs. This branch later added native objects that keep VM values, which
+removes one cost of C. So a native walk that stops only at hand-written
+fields is still an open option for wide types. `TODO.md` records it.
 
 The evidence for C and W is on the branch `codec-traits-a`: the memo, the
 log in `DESIGN_NOTES.md` §7 and §8, and the general VM continuation in commit
@@ -64,6 +86,5 @@ log in `DESIGN_NOTES.md` §7 and §8, and the general VM continuation in commit
   a native walk with continuations, and representation proxies.
 - `notes.md`: facts about the earlier system, the experiments, the build log,
   and both performance passes, with each profile and measurement.
-- `e1_tree.sand`, `e2_stream.sand`, `e3_calls.sand`, `probes/`: the Phase 1
-  experiments. The host module of experiment E2 was the bench target
-  `codec_design` in commit `49b3c7f`.
+- The Phase 1 experiment scripts and the host module of experiment E2 (the
+  bench target `codec_design`) are in commit `49b3c7f`.

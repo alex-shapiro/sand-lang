@@ -40,6 +40,13 @@ The host cannot rely on engine limits, stability, or control.
       The same hole lets a host store a raw `VmValue` in a field of a
       `NativeObject`, where the collector does not trace it; the object's
       value list (`VmVal::push_value`) is the traced place.
+- [ ] ❓ _Performance._ Decode the fast fields of a struct natively when the
+      struct has a hand-written field or a computed default. Today the whole
+      struct takes the synthesized Sand path: the 10-field bench `User` with a
+      hand-written `Email` decodes at 3.2 times its fast path. A native walk
+      that stops only at those fields measured 1.8 times in design C (E11 on
+      branch `codec-traits-a`), before native objects could keep VM values.
+      See `experiments/codec-traits/README.md`.
 - [ ] ❓ _Embedding._ Truncate `Program::schemas` in `ProgramMark::rollback`.
       Codegen appends the fast-path schemas of the checker from the length of
       the program's table, and a rollback does not remove the schemas of a

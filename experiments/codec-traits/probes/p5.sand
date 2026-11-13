@@ -1,6 +1,0 @@
-import json
-trait Show { fn show(self) -> str }
-impl Show for int { fn show(self) -> str { "i" } }
-print(json.encode([]))
-let e: [never] = []
-print(json.encode(e))
