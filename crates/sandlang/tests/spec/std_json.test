@@ -263,8 +263,8 @@ print(r2.unwrap_err().message)
 let r3: Result<Item> = json.decode("{}")
 print(r3.unwrap_err().message)
 --- stdout
-$.items[1].name: expected str
-$[1]: expected int
+$.items[1].name: expected str, found number
+$[1]: expected int, found number
 $: missing field `name`
 
 === decode enums
@@ -656,7 +656,7 @@ print(calls.len())
 --- stdout
 Outer(x: 2, inner: Inner(a: 1, b: "b"), y: Some(3), items: Set([Item(id: 1, name: "p"), Item(id: 9, name: "q"), Item(id: 2, name: "p")]), label: "ab")
 ["inner.a", "item.id", "item.id", "outer.x", "outer.y"]
-Err(Error(message: "$.items: expected array", kind: "parse"))
+Err(Error(message: "$.items: expected array, found number", kind: "parse"))
 6
 
 === a default that never ends fails decode as it fails a construction
@@ -736,7 +736,7 @@ Named(label: "n", value: P(x: 9, tag: "t2"))
 Err(Error(message: "$: unknown variant `Other` of Shape", kind: "parse"))
 Tree(value: "a", kids: [Tree(value: "b", kids: [Tree(value: "c", kids: [])])])
 Ok(Some(P(x: 7, tag: "t2")))
-Err(Error(message: "$.items[0].items[0].x: expected int", kind: "parse"))
+Err(Error(message: "$.items[0].items[0].x: expected int, found string", kind: "parse"))
 
 === recursion that nests type arguments builds deeper dictionaries
 import json

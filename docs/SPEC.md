@@ -754,9 +754,10 @@ An encode ends when its format takes the result, as `json.encode` does, and a
 decode ends with `Decoder.finish`. After the end, each use of the `Encoder` or
 `Decoder` is a runtime error. A `Decode` implementation cannot call `finish`.
 
-`json.from_json` reads its `Json` value in place, with the rules of a host
-`Value` (§16.7), so an error names the kind of the part that does not match,
-such as `$.id: expected int, found str`. A struct that declares
+`json.from_json` reads its `Json` value in place, with the rules and the
+messages of `json.decode` for the same JSON text. An error names the JSON kind
+of the part that does not match, such as `$.id: expected int, found string`.
+A struct that declares
 `init` does not derive `Decode`, because a derived implementation would not
 call `init`; such a struct can implement `Decode` by hand. The compiler derives
 `Encode` and `Decode` for tuples, structs, enums, and native value types, and

@@ -171,8 +171,8 @@ pub fn to_json<T: Encode>(value: T) -> Json {
 }
 
 /// Decodes the `Json` value `value` into a value of type `T`. It reads
-/// `value` in place, with the rules of `decode`, and an error names the kind
-/// of the part that does not match, such as `$.id: expected int, found str`.
+/// `value` in place, with the rules and the messages of `decode`, such as
+/// `$.id: expected int, found string`.
 pub fn from_json<T: Decode>(value: Json) -> Result<T> {
     match decode_json(value) {
         Done(v) => Ok(v)

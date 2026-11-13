@@ -43,8 +43,6 @@ pub(crate) enum InputNode<'a> {
     Native(&'a str, &'a str),
     /// Another host value, such as a list or a struct.
     Value(&'a Value),
-    /// A list or a map of a `json.Json` value, by its kind name.
-    Container(&'static str),
 }
 
 impl<'a> InputNode<'a> {
@@ -77,7 +75,6 @@ impl<'a> InputNode<'a> {
             InputNode::Range(..) => "range",
             InputNode::Native(type_name, _) => type_name,
             InputNode::Value(v) => return kind_name(v),
-            InputNode::Container(kind) => kind,
         })
     }
 

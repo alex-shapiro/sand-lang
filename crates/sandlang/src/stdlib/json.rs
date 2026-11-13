@@ -22,6 +22,7 @@ use hashbrown::HashTable;
 use std::borrow::Cow;
 use std::fmt::Write;
 
+mod input;
 mod text;
 mod tree;
 

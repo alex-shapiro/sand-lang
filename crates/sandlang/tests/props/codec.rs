@@ -631,10 +631,15 @@ fn codec_default() -> impl Strategy<Value = (String, String)> {
     ]
 }
 
+/// The line that a program prints if `json.from_json` gives another result
+/// than `json.decode` for the same JSON.
+const TREE_DIFFERS: &str = "json.from_json differs from json.decode";
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(128))]
 
-    /// The native implementations of `Encode` and `Decode` give the same
+    /// `json.from_json` gives the same result as `json.decode` for the same
+    /// JSON. The native implementations of `Encode` and `Decode` give the same
     /// text, `Json`, host `Value`, decoded values, and errors as the
     /// synthesized Sand implementations, for JSON text, `Json` values, and
     /// host values, also when native calls run again (`retry_stress`), and
@@ -670,6 +675,9 @@ proptest! {
              \x20   if let Ok(j) = json.parse(s) {{\n\
              \x20       let from: Result<{ty}> = json.from_json(j)\n\
              \x20       print(from)\n\
+             \x20       if \"\\(from)\" != \"\\(r)\" {{\n\
+             \x20           print(\"{TREE_DIFFERS}\")\n\
+             \x20       }}\n\
              \x20   }}\n\
              \x20   if let Ok(v) = r {{\n\
              \x20       show(v)\n\
@@ -679,6 +687,7 @@ proptest! {
             texts = texts.join(", "),
         );
         let synthesized = run_codec_path(&src, &defaulted, false, false, false);
+        prop_assert!(!synthesized.0.contains(TREE_DIFFERS), "{}; program:\n{}", synthesized.0, src);
         let native = run_codec_path(&src, &defaulted, true, false, false);
         prop_assert_eq!(&native, &synthesized, "program:\n{}", src);
         let retried = run_codec_path(&src, &defaulted, true, true, false);

@@ -1,10 +1,10 @@
 //! The `json.Json` value format of `Decoder`, for `json.from_json`.
 
+use super::input::{self, JsonKind, RangeFields};
 use super::text::json_value;
 use super::{JsonIds, json_from_vm};
-use crate::codec::value_input::{self, InputNode};
 use crate::codec::{DecodeFail, DecodeFormat, DecodeResult, MAX_NESTING_DEPTH, SeqKind};
-use crate::value::Value;
+use crate::value::{Value, integral_float_to_int};
 use crate::vm::value::{Obj, ObjectValues, VALUE_SIZE, VmValue};
 use crate::vm::{Fail, Vm};
 use std::borrow::Cow;
@@ -39,8 +39,9 @@ struct TreeMark {
     ready: bool,
 }
 
-/// Reads a Sand `json.Json` value in place, with the rules of host `Value`
-/// input. A `str` in the input becomes the decoded `str`, without a copy.
+/// Reads a Sand `json.Json` value in place, with the rules of JSON text
+/// (see [`input`]). A `str` in the input becomes the decoded `str`, without a
+/// copy.
 pub(crate) struct TreeDecoder {
     /// The root `Json` value, and then the list or map of each open
     /// container. A `Decoder` keeps them, where the collector traces them,
@@ -119,38 +120,39 @@ impl TreeDecoder {
         }
     }
 
-    /// Returns the scalar rules of `node`, and `true` if it is a map key.
-    fn input<'v>(&self, vm: &'v Vm, node: Node) -> (InputNode<'v>, bool) {
+    /// Returns the kind of the `Json` variant `id`.
+    fn kind(&self, id: u32) -> JsonKind {
         let ids = &self.ids;
-        let n = match node {
-            Node::Key(k) => return (InputNode::Str(vm.heap.str(k)), true),
-            Node::Json(id, _) if id == ids.null => InputNode::Unit,
-            Node::Json(id, Some(VmValue::Bool(b))) if id == ids.bool_ => InputNode::Bool(b),
-            Node::Json(id, Some(VmValue::Int(i))) if id == ids.int => InputNode::Int(i),
-            Node::Json(id, Some(VmValue::Float(f))) if id == ids.float => InputNode::Float(f),
-            Node::Json(id, Some(s)) if id == ids.str_ => InputNode::Str(vm.heap.str(s)),
-            Node::Json(id, _) if id == ids.arr => InputNode::Container("list"),
-            _ => InputNode::Container("map"),
-        };
-        (n, false)
+        match id {
+            _ if id == ids.null => JsonKind::Null,
+            _ if id == ids.bool_ => JsonKind::Bool,
+            _ if id == ids.int || id == ids.float => JsonKind::Number,
+            _ if id == ids.str_ => JsonKind::String,
+            _ if id == ids.arr => JsonKind::Array,
+            _ => JsonKind::Object,
+        }
     }
 
-    /// Reads the current node with `read`.
-    fn read<T>(&mut self, vm: &mut Vm, read: impl FnOnce(InputNode<'_>, bool) -> value_input::InputResult<T>) -> DecodeResult<T> {
-        let node = self.node(vm)?;
-        let (n, in_key) = self.input(vm, node);
-        let r = read(n, in_key)?;
+    /// Reads the current node with `read`, which gets the text of a map key,
+    /// or the variant and the payload of a `Json` value.
+    fn read<T>(&mut self, vm: &Vm, read: impl FnOnce(&Self, Result<&str, (u32, Option<VmValue>)>) -> DecodeResult<T>) -> DecodeResult<T> {
+        let r = match self.node(vm)? {
+            Node::Key(k) => read(self, Ok(vm.heap.str(k))),
+            Node::Json(id, payload) => read(self, Err((id, payload))),
+        }?;
         self.ready = false;
         Ok(r)
     }
 
-    /// Returns the payload of the current node if it is the `Json` variant
-    /// `id`.
-    fn payload(&self, vm: &Vm, id: u32) -> DecodeResult<Option<VmValue>> {
-        Ok(match self.node(vm)? {
-            Node::Json(i, p) if i == id => p,
-            _ => None,
-        })
+    /// Reads an `int` from the `Json` value with variant `id` and `payload`.
+    fn int_of(&self, id: u32, payload: Option<VmValue>) -> DecodeResult<i64> {
+        match payload {
+            Some(VmValue::Int(i)) if id == self.ids.int => Ok(i),
+            Some(VmValue::Float(f)) if id == self.ids.float => {
+                integral_float_to_int(f).ok_or_else(|| DecodeFail::Mismatch(input::not_int(f)))
+            }
+            _ => Err(input::mismatch("int", self.kind(id))),
+        }
     }
 
     /// Counts room for one more value against the memory limit, before any
@@ -224,45 +226,69 @@ impl TreeDecoder {
     }
 }
 
+impl TreeDecoder {
+    /// Opens an object, which is a value of `what` for a message.
+    fn begin_object(&mut self, vm: &mut Vm, what: &str) -> DecodeResult<()> {
+        match self.node(vm)? {
+            Node::Key(_) => Err(input::container_key(what)),
+            Node::Json(id, Some(map)) if id == self.ids.obj => self.enter(vm, map, true),
+            Node::Json(id, _) => Err(input::mismatch("object", self.kind(id))),
+        }
+    }
+}
+
 impl DecodeFormat for TreeDecoder {
     fn unit(&mut self, vm: &mut Vm) -> DecodeResult<()> {
-        self.read(vm, |n, in_key| n.unit(in_key))
+        self.read(vm, |t, node| match node {
+            Ok(key) => Err(input::invalid_key(key)),
+            Err((id, _)) if id == t.ids.null => Ok(()),
+            Err((id, _)) => Err(input::mismatch("null", t.kind(id))),
+        })
     }
 
     fn bool(&mut self, vm: &mut Vm) -> DecodeResult<bool> {
-        self.read(vm, |n, in_key| n.bool(in_key))
+        self.read(vm, |t, node| match node {
+            Ok(key) => input::key_bool(key),
+            Err((id, Some(VmValue::Bool(b)))) if id == t.ids.bool_ => Ok(b),
+            Err((id, _)) => Err(input::mismatch("bool", t.kind(id))),
+        })
     }
 
     fn int(&mut self, vm: &mut Vm) -> DecodeResult<i64> {
-        self.read(vm, |n, in_key| n.int(in_key))
+        self.read(vm, |t, node| match node {
+            Ok(key) => input::key_int(key),
+            Err((id, payload)) => t.int_of(id, payload),
+        })
     }
 
     fn float(&mut self, vm: &mut Vm) -> DecodeResult<f64> {
-        self.read(vm, |n, in_key| n.float(in_key))
+        self.read(vm, |t, node| match node {
+            Ok(_) => Err(input::container_key("float")),
+            Err((id, Some(VmValue::Int(i)))) if id == t.ids.int => Ok(i as f64),
+            Err((id, Some(VmValue::Float(f)))) if id == t.ids.float => Ok(f),
+            Err((id, _)) => Err(input::mismatch("float", t.kind(id))),
+        })
     }
 
     fn duration(&mut self, vm: &mut Vm) -> DecodeResult<i64> {
-        self.read(vm, |n, in_key| n.duration(in_key))
+        self.int(vm)
     }
 
     fn str(&mut self, vm: &mut Vm) -> DecodeResult<VmValue> {
         let s = match self.node(vm)? {
             Node::Key(k) => k,
             Node::Json(id, Some(s)) if id == self.ids.str_ => s,
-            node => {
-                let (n, in_key) = self.input(vm, node);
-                return Err(n.mismatch("str", in_key).into());
-            }
+            Node::Json(id, _) => return Err(input::mismatch("str", self.kind(id))),
         };
         self.ready = false;
         Ok(s)
     }
 
     fn bytes(&mut self, vm: &mut Vm) -> DecodeResult<VmValue> {
-        let node = self.node(vm)?;
-        let b = {
-            let (n, in_key) = self.input(vm, node);
-            n.bytes(in_key)?.into_owned()
+        let b = match self.node(vm)? {
+            Node::Key(_) => return Err(input::container_key("bytes")),
+            Node::Json(id, Some(s)) if id == self.ids.str_ => input::bytes_of(vm.heap.str(s)).map_err(DecodeFail::Mismatch)?,
+            Node::Json(id, _) => return Err(input::mismatch("base64 str", self.kind(id))),
         };
         vm.check_memory(b.len())?;
         vm.charge_bytes(b.len())?;
@@ -271,19 +297,36 @@ impl DecodeFormat for TreeDecoder {
     }
 
     fn native_text(&mut self, vm: &mut Vm, name: &str) -> DecodeResult<String> {
-        self.read(vm, |n, in_key| n.native_text(name, in_key).map(str::to_owned))
+        self.read(vm, |t, node| match node {
+            Ok(key) => Ok(key.to_owned()),
+            Err((id, Some(s))) if id == t.ids.str_ => Ok(vm.heap.str(s).to_owned()),
+            Err((id, _)) => Err(input::mismatch(name, t.kind(id))),
+        })
     }
 
     fn range(&mut self, vm: &mut Vm) -> DecodeResult<(i64, i64, bool)> {
-        let Some(map) = self.payload(vm, self.ids.obj)? else {
-            return self.read(vm, |n, in_key| Err(n.mismatch("Range", in_key)));
+        let map = match self.node(vm)? {
+            Node::Key(_) => return Err(input::container_key("Range")),
+            Node::Json(id, Some(map)) if id == self.ids.obj => map,
+            Node::Json(id, _) => return Err(input::mismatch("object", self.kind(id))),
         };
         let Obj::Map(m) = vm.heap.get(map) else { return Err(Fail::internal("json: not an object").into()) };
-        let entries = m.entries.iter().flatten().map(|&(k, v)| {
-            let node = Node::Json(vm.heap.variant_id(v), vm.heap.field(v, 0));
-            (InputNode::Str(vm.heap.str(k)), self.input(vm, node).0)
-        });
-        let r = value_input::range_of(entries)?;
+        let mut range = RangeFields::default();
+        for &(k, v) in m.entries.iter().flatten() {
+            let (id, payload) = (vm.heap.variant_id(v), vm.heap.field(v, 0));
+            match vm.heap.str(k) {
+                "start" => range.start = Some(self.int_of(id, payload)?),
+                "end" => range.end = Some(self.int_of(id, payload)?),
+                "inclusive" => {
+                    range.inclusive = match payload {
+                        Some(VmValue::Bool(b)) if id == self.ids.bool_ => b,
+                        _ => return Err(input::mismatch("bool", self.kind(id))),
+                    }
+                }
+                _ => {}
+            }
+        }
+        let r = range.finish()?;
         self.ready = false;
         Ok(r)
     }
@@ -299,20 +342,11 @@ impl DecodeFormat for TreeDecoder {
     }
 
     fn begin_seq(&mut self, vm: &mut Vm, kind: SeqKind) -> DecodeResult<()> {
-        let Some(list) = self.payload(vm, self.ids.arr)? else {
-            let what = match kind {
-                SeqKind::List => "list".into(),
-                SeqKind::Set => "set".into(),
-                SeqKind::Tuple(n) => format!("tuple of {n} elements"),
-            };
-            return self.read(vm, |n, in_key| Err(n.mismatch(&what, in_key)));
-        };
-        if let SeqKind::Tuple(n) = kind
-            && vm.heap.list(list).len() != n
-        {
-            return Err(DecodeFail::Mismatch(self.length_mismatch(n)));
+        match self.node(vm)? {
+            Node::Key(_) => Err(input::container_key(input::seq_key_type(kind))),
+            Node::Json(id, Some(list)) if id == self.ids.arr => self.enter(vm, list, false),
+            Node::Json(id, _) => Err(input::mismatch(&input::seq_expected(kind), self.kind(id))),
         }
-        self.enter(vm, list, false)
     }
 
     fn next_item(&mut self, vm: &mut Vm) -> DecodeResult<bool> {
@@ -320,10 +354,7 @@ impl DecodeFormat for TreeDecoder {
     }
 
     fn begin_map(&mut self, vm: &mut Vm) -> DecodeResult<()> {
-        match self.payload(vm, self.ids.obj)? {
-            Some(map) => self.enter(vm, map, true),
-            None => self.read(vm, |n, in_key| Err(n.mismatch("map", in_key))),
-        }
+        self.begin_object(vm, "map")
     }
 
     fn next_entry(&mut self, vm: &mut Vm) -> DecodeResult<Option<Cow<'_, str>>> {
@@ -340,10 +371,7 @@ impl DecodeFormat for TreeDecoder {
     }
 
     fn begin_fields(&mut self, vm: &mut Vm, name: &str) -> DecodeResult<()> {
-        match self.payload(vm, self.ids.obj)? {
-            Some(map) => self.enter(vm, map, true),
-            None => self.read(vm, |n, in_key| Err(n.mismatch(if name.is_empty() { "map" } else { name }, in_key))),
-        }
+        self.begin_object(vm, if name.is_empty() { "variant" } else { name })
     }
 
     fn next_field(&mut self, vm: &mut Vm) -> DecodeResult<Option<Cow<'_, str>>> {
@@ -356,24 +384,15 @@ impl DecodeFormat for TreeDecoder {
     }
 
     fn variant(&mut self, vm: &mut Vm, name: &str) -> DecodeResult<(Cow<'_, str>, bool)> {
-        let node = self.node(vm)?;
-        let tag = match node {
+        let tag = match self.node(vm)? {
             Node::Key(k) => k,
             Node::Json(id, Some(s)) if id == self.ids.str_ => s,
             Node::Json(id, Some(map)) if id == self.ids.obj => {
-                let Obj::Map(m) = vm.heap.get(map) else { return Err(Fail::internal("json: not an object").into()) };
-                if m.live != 1 {
-                    let what = if m.live == 0 { "expected a variant" } else { "expected a single variant" };
-                    return Err(DecodeFail::Mismatch(format!("{what} of {name}")));
-                }
                 self.enter(vm, map, true)?;
-                let Some(tag) = self.next_member(vm, EntryPart::Value)? else { return Err(Fail::internal("json: no variant").into()) };
+                let Some(tag) = self.next_member(vm, EntryPart::Value)? else { return Err(input::no_variant(name)) };
                 return Ok((tag, true));
             }
-            node => {
-                let (n, in_key) = self.input(vm, node);
-                return Err(n.mismatch(name, in_key).into());
-            }
+            Node::Json(id, _) => return Err(input::mismatch(name, self.kind(id))),
         };
         self.ready = false;
         self.key.clear();
@@ -381,17 +400,16 @@ impl DecodeFormat for TreeDecoder {
         Ok((Cow::Borrowed(&self.key), false))
     }
 
-    fn end_variant(&mut self, _: &mut Vm, _: &str) -> DecodeResult<()> {
-        self.leave();
+    fn end_variant(&mut self, vm: &mut Vm, name: &str) -> DecodeResult<()> {
+        if self.next_member(vm, EntryPart::Value)?.is_some() {
+            return Err(input::not_single_variant(name));
+        }
         Ok(())
     }
 
     fn json(&mut self, vm: &mut Vm) -> DecodeResult<VmValue> {
         let v = match self.node(vm)? {
-            Node::Key(k) => {
-                vm.check_memory(size_of::<Obj>())?;
-                vm.heap.new_variant(self.ids.str_, &[k])
-            }
+            Node::Key(_) => return Err(input::container_key("Json")),
             Node::Json(..) => match self.open.is_empty() {
                 true => self.values[0],
                 false => self.node_value(vm).ok_or_else(|| Fail::internal("json: no value"))?,
@@ -406,19 +424,8 @@ impl DecodeFormat for TreeDecoder {
     }
 
     fn value(&mut self, vm: &mut Vm) -> DecodeResult<Value> {
-        let v = match self.node(vm)? {
-            Node::Key(k) => Value::Str(vm.heap.str(k).to_string()),
-            Node::Json(..) => {
-                let v = if self.open.is_empty() { Some(self.values[0]) } else { self.node_value(vm) };
-                json_value(&json_from_vm(vm, v.ok_or_else(|| Fail::internal("json: no value"))?)?)
-            }
-        };
-        self.ready = false;
-        Ok(v)
-    }
-
-    fn length_mismatch(&self, len: usize) -> String {
-        value_input::length_mismatch(len)
+        let v = self.json(vm)?;
+        Ok(json_value(&json_from_vm(vm, v)?))
     }
 
     fn mark(&mut self) -> usize {

@@ -3,6 +3,7 @@
 mod read;
 mod walk;
 
+use super::input::{self, JsonKind, RangeFields};
 use super::{Builder, Error as ParseError, Json, JsonIds, Parser, SPACES, base64, json_from_vm, write_str};
 use crate::codec::MAX_NESTING_DEPTH;
 use crate::codec::value_format::write_json_form;
@@ -580,10 +581,16 @@ impl TextDecoder {
 
     /// Returns the error for a value that does not match `what`.
     fn mismatch(p: &Parser<'_>, what: &str) -> ParseError {
-        match p.peek() {
-            Some(b'n' | b't' | b'f' | b'"' | b'-' | b'0'..=b'9' | b'[' | b'{') => ParseError::Mismatch(format!("expected {what}")),
-            _ => p.unexpected(),
-        }
+        let found = match p.peek() {
+            Some(b'n') => JsonKind::Null,
+            Some(b't' | b'f') => JsonKind::Bool,
+            Some(b'"') => JsonKind::String,
+            Some(b'-' | b'0'..=b'9') => JsonKind::Number,
+            Some(b'[') => JsonKind::Array,
+            Some(b'{') => JsonKind::Object,
+            _ => return p.unexpected(),
+        };
+        ParseError::Mismatch(input::mismatch_message(what, found))
     }
 
     /// Returns the text of `key`.
@@ -594,14 +601,11 @@ impl TextDecoder {
         }
     }
 
-    fn invalid_key(key: &str) -> DecodeFail {
-        DecodeFail::Mismatch(format!("invalid map key `{}`", crate::stdlib::truncate(key, crate::codec::QUOTED_KEY)))
-    }
-
-    /// Returns the error for a map key of a type without a JSON key form.
+    /// Returns the error for a map key of the type `what`, which has no JSON
+    /// key form.
     fn container_key(&mut self, what: &str) -> DecodeFail {
         self.key = None;
-        DecodeFail::Invalid(format!("cannot decode map keys of type {what}"))
+        input::container_key(what)
     }
 
     fn number<'a>(p: &mut Parser<'a>, what: &str) -> Result<super::Number<'a>, ParseError> {
@@ -613,10 +617,15 @@ impl TextDecoder {
 
     fn int_value(p: &mut Parser<'_>) -> Result<i64, ParseError> {
         let n = Self::number(p, "int")?;
-        n.int().ok_or_else(|| {
-            let f = n.float();
-            ParseError::Mismatch(if f.is_finite() && f.fract() == 0.0 { "integer out of range" } else { "expected int" }.into())
-        })
+        n.int().ok_or_else(|| ParseError::Mismatch(input::not_int(n.float())))
+    }
+
+    fn bool_value(p: &mut Parser<'_>) -> Result<bool, ParseError> {
+        match p.peek() {
+            Some(b't') => p.literal(b"true").map(|()| true),
+            Some(b'f') => p.literal(b"false").map(|()| false),
+            _ => Err(Self::mismatch(p, "bool")),
+        }
     }
 
     /// Opens an array or object at `open`, as `what` for a mismatch.
@@ -722,7 +731,7 @@ impl DecodeFormat for TextDecoder {
     #[inline]
     fn unit(&mut self, vm: &mut Vm) -> DecodeResult<()> {
         if let Some(key) = self.key.take() {
-            return Err(Self::invalid_key(self.key_str(&key)));
+            return Err(input::invalid_key(self.key_str(&key)));
         }
         self.parse(vm, |p, _| match p.peek() {
             Some(b'n') => p.literal(b"null"),
@@ -733,24 +742,15 @@ impl DecodeFormat for TextDecoder {
     #[inline]
     fn bool(&mut self, vm: &mut Vm) -> DecodeResult<bool> {
         if let Some(key) = self.key.take() {
-            return match self.key_str(&key) {
-                "true" => Ok(true),
-                "false" => Ok(false),
-                key => Err(Self::invalid_key(key)),
-            };
+            return input::key_bool(self.key_str(&key));
         }
-        self.parse(vm, |p, _| match p.peek() {
-            Some(b't') => p.literal(b"true").map(|()| true),
-            Some(b'f') => p.literal(b"false").map(|()| false),
-            _ => Err(Self::mismatch(p, "bool")),
-        })
+        self.parse(vm, |p, _| Self::bool_value(p))
     }
 
     #[inline]
     fn int(&mut self, vm: &mut Vm) -> DecodeResult<i64> {
         if let Some(key) = self.key.take() {
-            let key = self.key_str(&key);
-            return key.parse().map_err(|_| Self::invalid_key(key));
+            return input::key_int(self.key_str(&key));
         }
         self.parse(vm, |p, _| Self::int_value(p))
     }
@@ -796,7 +796,7 @@ impl DecodeFormat for TextDecoder {
                 return Err(Self::mismatch(p, "base64 str"));
             }
             let s = p.string(true)?;
-            let b = base64::decode(&s, false).map_err(|_| ParseError::Mismatch("invalid base64".into()))?;
+            let b = input::bytes_of(&s).map_err(ParseError::Mismatch)?;
             vm.check_memory(b.len())?;
             Ok(vm.heap.new_bytes(b))
         })
@@ -819,26 +819,16 @@ impl DecodeFormat for TextDecoder {
             return Err(self.container_key("Range"));
         }
         self.open(vm, b'{', "object")?;
-        let (mut start, mut end, mut inclusive) = (None, None, false);
+        let mut range = RangeFields::default();
         while let Some(key) = self.next_key(vm)? {
             match self.key_str(&key) {
-                "start" => start = Some(self.parse(vm, |p, _| Self::int_value(p))?),
-                "end" => end = Some(self.parse(vm, |p, _| Self::int_value(p))?),
-                "inclusive" => {
-                    inclusive = self.parse(vm, |p, _| match p.peek() {
-                        Some(b't') => p.literal(b"true").map(|()| true),
-                        Some(b'f') => p.literal(b"false").map(|()| false),
-                        _ => Err(Self::mismatch(p, "bool")),
-                    })?
-                }
+                "start" => range.start = Some(self.parse(vm, |p, _| Self::int_value(p))?),
+                "end" => range.end = Some(self.parse(vm, |p, _| Self::int_value(p))?),
+                "inclusive" => range.inclusive = self.parse(vm, |p, _| Self::bool_value(p))?,
                 _ => self.skip(vm)?,
             }
         }
-        match (start, end) {
-            (Some(s), Some(e)) => Ok((s, e, inclusive)),
-            (None, _) => Err(DecodeFail::Mismatch("missing field `start`".into())),
-            _ => Err(DecodeFail::Mismatch("missing field `end`".into())),
-        }
+        range.finish()
     }
 
     #[inline]
@@ -858,16 +848,9 @@ impl DecodeFormat for TextDecoder {
     #[inline]
     fn begin_seq(&mut self, vm: &mut Vm, kind: SeqKind) -> DecodeResult<()> {
         if self.key.is_some() {
-            return Err(self.container_key(match kind {
-                SeqKind::List => "list",
-                SeqKind::Set => "Set",
-                SeqKind::Tuple(_) => "tuple",
-            }));
+            return Err(self.container_key(input::seq_key_type(kind)));
         }
-        match kind {
-            SeqKind::Tuple(n) => self.open(vm, b'[', &format!("array of length {n}")),
-            _ => self.open(vm, b'[', "array"),
-        }
+        self.open(vm, b'[', &input::seq_expected(kind))
     }
 
     #[inline]
@@ -937,14 +920,14 @@ impl DecodeFormat for TextDecoder {
         self.open(vm, b'{', name)?;
         match self.next_key(vm)? {
             Some(tag) => Ok((self.key_cow(tag), true)),
-            None => Err(DecodeFail::Mismatch(format!("expected a variant of {name}"))),
+            None => Err(input::no_variant(name)),
         }
     }
 
     #[inline]
     fn end_variant(&mut self, vm: &mut Vm, name: &str) -> DecodeResult<()> {
         if self.next(vm, b'}')? {
-            return Err(DecodeFail::Mismatch(format!("expected a single variant of {name}")));
+            return Err(input::not_single_variant(name));
         }
         Ok(())
     }

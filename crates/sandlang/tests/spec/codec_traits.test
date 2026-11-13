@@ -76,7 +76,7 @@ true
   }
 ]
 Err(Error(message: "$.by_id: invalid map key `x`", kind: "parse"))
-Err(Error(message: "$[1].item.y: expected int", kind: "parse"))
+Err(Error(message: "$[1].item.y: expected int, found string", kind: "parse"))
 
 === scenario 2: a hand-written Decode validates through init at every position
 import json
@@ -140,7 +140,7 @@ Err(Error(message: "$.email: invalid email: bad", kind: "invalid"))
 Err(Error(message: "$[1].Both.email: invalid email: x", kind: "invalid"))
 Err(Error(message: "$.items[2]: invalid email: c", kind: "invalid"))
 a@x.io
-Err(Error(message: "$: expected str", kind: "parse"))
+Err(Error(message: "$: expected str, found number", kind: "parse"))
 
 === scenario 3: a hand-written Encode and Decode change the encoded form
 import json

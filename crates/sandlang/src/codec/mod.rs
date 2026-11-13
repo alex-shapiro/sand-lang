@@ -1239,7 +1239,7 @@ fn read_variant(f: &mut dyn DecodeFormat, frames: &mut Vec<Frame>, vm: &mut Vm, 
         // A payload-less variant in object form has an empty payload.
         f.begin_seq(vm, SeqKind::Tuple(0))?;
         if f.next_item(vm)? {
-            return Err(DecodeFail::Mismatch("expected array of length 0".into()));
+            return Err(DecodeFail::Mismatch(f.length_mismatch(0)));
         }
         frames.pop();
         f.end_variant(vm, &enum_name)?;

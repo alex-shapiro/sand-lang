@@ -773,7 +773,7 @@ impl<'p> DecodeWalk<'p> {
             // A payload-less variant in object form has an empty payload.
             f.begin_seq(vm, SeqKind::Tuple(0))?;
             if f.next_item(vm)? {
-                return Err(DecodeFail::Mismatch("expected array of length 0".into()));
+                return Err(DecodeFail::Mismatch(f.length_mismatch(0)));
             }
             self.end_variant(vm, f)?;
             return Ok(Opened::Value(VmValue::Tag(id)));
