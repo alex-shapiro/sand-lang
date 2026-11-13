@@ -52,15 +52,23 @@ pub enum Schema {
 }
 
 /// Writes `value`, whose type has schema `schema`, to `f`.
-pub(super) fn encode<F: EncodeFormat + ?Sized>(vm: &mut Vm, f: &mut F, value: VmValue, schema: SchemaId) -> Result<(), Fail> {
+pub(crate) fn encode<F: EncodeFormat + ?Sized>(vm: &mut Vm, f: &mut F, value: VmValue, schema: SchemaId) -> Result<(), Fail> {
     f.save();
     let prog = vm.prog.clone();
     let mut w = EncodeWalk { prog: &prog, stack: Vec::new(), values: Vec::new(), text: String::new() };
-    let r = w.run(vm, f, value, schema);
+    let r = w.run(vm, f, value, schema, false);
     if r.as_ref().is_err_and(|e| e.as_limit().is_some()) {
         f.restore();
     }
     r
+}
+
+/// Writes the map key `key`, whose type has schema `schema`, to `f`, for a
+/// format's own walk. It keeps no state of `f` (see [`EncodeFormat::save`]).
+pub(crate) fn encode_key<F: EncodeFormat + ?Sized>(vm: &mut Vm, f: &mut F, key: VmValue, schema: SchemaId) -> Result<(), Fail> {
+    let prog = vm.prog.clone();
+    let mut w = EncodeWalk { prog: &prog, stack: Vec::new(), values: Vec::new(), text: String::new() };
+    w.run(vm, f, key, schema, true)
 }
 
 /// An open container of the encode walk, with the index of its next part.
@@ -113,8 +121,15 @@ struct EncodeWalk<'p> {
 }
 
 impl<'p> EncodeWalk<'p> {
-    fn run<F: EncodeFormat + ?Sized>(&mut self, vm: &mut Vm, f: &mut F, value: VmValue, schema: SchemaId) -> Result<(), Fail> {
-        let (mut v, mut s, mut is_key) = (value, schema, false);
+    fn run<F: EncodeFormat + ?Sized>(
+        &mut self,
+        vm: &mut Vm,
+        f: &mut F,
+        value: VmValue,
+        schema: SchemaId,
+        is_key: bool,
+    ) -> Result<(), Fail> {
+        let (mut v, mut s, mut is_key) = (value, schema, is_key);
         loop {
             if !is_key {
                 vm.charge(1)?;

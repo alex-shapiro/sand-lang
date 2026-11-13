@@ -718,3 +718,58 @@ operations. The collector does not trace values in native objects, so
 the decoder cannot hold the Sand `str`. The copy is counted against the
 memory limit, so a decode of a text of N bytes needs N more bytes of
 memory than on value-decode while it runs.
+
+### E1: general walker against a walker specialized to JSON text
+
+Experiment (not committed): `TextEncoder::write_fast` overridden with a
+walk that knows JSON text, for the subset of schemas of `Doc` without
+indentation (about 110 lines). It writes separators, keys, and brackets
+from its own frames, so it needs no bracket stack, no field name lookup,
+and one memory check for each value.
+
+Timing build, `json.encode(doc)`, ns per user (minimum of 3 runs): the
+general walker compiled for `TextEncoder` 399, the specialized walk 263,
+value-decode about 290. A format whose operations do nothing gives 120 for
+the general walker alone. Removing the memory checks and the byte fuel of
+`TextEncoder` saves only 5% (399 to 377).
+
+Conclusion: the cost is the interface between the walker and a stateful
+format. Each operation finds its context again (the innermost bracket, a
+map's key state, the names of the open struct), which the walker already
+knows. Only a walk that knows the format reaches the goal for JSON text.
+
+### C7: a JSON text walk for `TextEncoder`
+
+After E1, `TextEncoder` overrides `write_fast` with a walk that knows JSON
+text (`stdlib/json/text/walk.rs`). It writes separators, keys, brackets,
+and indentation from its own frames, and makes one memory check for each
+part that also covers a short scalar. Rare values (`Range`, `bytes`,
+native values, `Json`) and map keys other than `str` go through the
+format operations, so their text and their errors stay the same. A map key
+of a fast type, in Sand-driven code, takes the general walker.
+`start_line` is now an inlined check with the indentation out of line,
+which saved about 4% on its own (timing build 331 to 318 ns per user).
+`charge_written` skips the meter below 64 bytes; it charges the same units.
+
+Line counts: the general encode walker in `codec/fast.rs` is 246 lines and
+serves every format; the JSON text walk adds 367 lines for one format.
+
+Measured (4 alternating rounds of `BENCH_RUNS=5 BENCH_REPS=10`, ns per
+item; value-decode, C6 (general walker), C7):
+
+| case          | value-decode | C6   | C7   |
+| ------------- | ------------ | ---- | ---- |
+| encode        | 290          | 412  | 340  |
+| encode_indent | 382          | 508  | 412  |
+| small_encode  | 122          | 280  | 232  |
+| deep_encode   | 3987         | 5189 | 4811 |
+| encode_json   | 386          | 410  | 415  |
+
+`encode` is still 1.17 times value-decode. With the share of float
+formatting (the same work in both) as the yardstick, the walk's own time is
+1.26 times that of value-decode's walker. The schema walk reads a schema
+node for each value, which value-decode does not need. `deep_encode` and
+`encode_json` write `Json` values through the format operations.
+
+The differential test passed 10000 cases (JSON text with and without
+indentation, `retry_stress`).

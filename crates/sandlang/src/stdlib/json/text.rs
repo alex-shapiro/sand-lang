@@ -1,12 +1,14 @@
 //! The JSON text format of `Encoder` and `Decoder`.
 
+mod walk;
+
 use super::{Builder, Error as ParseError, Json, JsonIds, Parser, SPACES, base64, json_from_vm, write_str};
 use crate::codec::MAX_NESTING_DEPTH;
 use crate::codec::value_format::write_json_form;
 use crate::codec::{Budget, DecodeFail, DecodeFormat, DecodeResult, EncodeFormat, SeqKind};
 use crate::value::Value;
 use crate::vm::bytecode::Program;
-use crate::vm::meter::SLOW_BYTES_PER_UNIT;
+use crate::vm::meter::{BYTES_PER_UNIT, SLOW_BYTES_PER_UNIT};
 use crate::vm::value::{Obj, VmValue};
 use crate::vm::{Fail, Vm, fail, internal};
 use compact_str::CompactString;
@@ -89,7 +91,10 @@ impl TextEncoder {
     fn charge_written(&mut self, vm: &Vm) -> Result<(), Fail> {
         let written = self.out.len() - self.charged;
         self.charged = self.out.len();
-        vm.charge_bytes(written)
+        match written >= BYTES_PER_UNIT {
+            true => vm.charge_bytes(written),
+            false => Ok(()),
+        }
     }
 
     fn in_key(&self) -> bool {
@@ -151,10 +156,16 @@ impl TextEncoder {
         }
     }
 
+    /// Starts a new line with the indentation of the current depth, if
+    /// the text is indented.
+    #[inline(always)]
     fn start_line(&mut self) {
-        if self.indent == 0 {
-            return;
+        if self.indent > 0 {
+            self.new_line();
         }
+    }
+
+    fn new_line(&mut self) {
         self.out.push('\n');
         let mut left = self.indent * self.depth;
         while left > 0 {
@@ -203,6 +214,10 @@ impl TextEncoder {
 }
 
 impl EncodeFormat for TextEncoder {
+    fn write_fast(&mut self, vm: &mut Vm, value: VmValue, schema: crate::codec::fast::SchemaId) -> Result<(), Fail> {
+        self.write_schema(vm, value, schema)
+    }
+
     #[inline(always)]
     fn unit(&mut self, vm: &mut Vm) -> Result<(), Fail> {
         self.value_only(vm, 4)?;
