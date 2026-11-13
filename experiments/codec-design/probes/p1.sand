@@ -1,0 +1,2 @@
+import json
+fn load<T: Decode>(text: str) -> Result<[T]> { json.decode(text) }

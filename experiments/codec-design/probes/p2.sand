@@ -1,0 +1,5 @@
+struct Email {
+    s: str
+    pub fn init(s: str) -> Result<Email> { if s.contains("@") { Ok(Self(s: s)) } else { Err(Error("no @", kind: "invalid")) } }
+}
+impl Decode for Email {}

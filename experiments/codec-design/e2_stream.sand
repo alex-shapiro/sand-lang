@@ -1,0 +1,314 @@
+// E2: the code that a compiler would synthesize for a Sand-driven codec over
+// a native streaming reader and writer (the serde and kotlinx design).
+// Run with `cargo bench --bench codec_design`.
+import codec
+import json
+import time
+
+enum Status { Active, Suspended(reason: str), Banned(int, str) }
+struct Address { street: str, city: str, zip: str? }
+struct User { id: int, name: str, email: str, score: float, active: bool, tags: [str], address: Address, status: Status, logins: [int], meta: [str: int] }
+struct Doc { users: [User] }
+
+fn make(n: int) -> Doc {
+    let users: [User] = []
+    for i in 0..n {
+        let status = if i % 3 == 0 { Status.Active } else if i % 3 == 1 { Status.Suspended(reason: "r\(i)") } else { Status.Banned(i, "b") }
+        let zip = if i % 4 == 0 { None } else { Some("0\(i % 1000)") }
+        let address = Address(street: "\(i) Main St", city: "Springfield", zip: zip)
+        users.push(User(id: i, name: "user \(i)", email: "u\(i)@example.com", score: i.to_float() * 0.5, active: i % 2 == 0, tags: ["a", "b\(i % 5)"], address: address, status: status, logins: [i, i + 1, i + 2], meta: ["k": i, "j": i * 2]))
+    }
+    Doc(users: users)
+}
+
+trait Dec {
+    fn dec(r: codec.Reader) -> Result<Self>
+}
+trait Enc {
+    fn enc(self, w: codec.Writer)
+}
+
+fn missing(name: str) -> Error { Error("missing field `\(name)`", kind: "parse") }
+
+impl Dec for int { fn dec(r: codec.Reader) -> Result<int> { r.int() } }
+impl Dec for float { fn dec(r: codec.Reader) -> Result<float> { r.float() } }
+impl Dec for bool { fn dec(r: codec.Reader) -> Result<bool> { r.bool() } }
+impl Dec for str { fn dec(r: codec.Reader) -> Result<str> { r.str() } }
+impl<T: Dec> Dec for [T] {
+    fn dec(r: codec.Reader) -> Result<[T]> {
+        r.begin_list()?
+        let out: [T] = []
+        while r.next_item()? {
+            out.push(T.dec(r)?)
+        }
+        Ok(out)
+    }
+}
+impl<V: Dec> Dec for [str: V] {
+    fn dec(r: codec.Reader) -> Result<[str: V]> {
+        r.begin_map()?
+        let out: [str: V] = [:]
+        while let Some(k) = r.next_key()? {
+            out[k] = V.dec(r)?
+        }
+        Ok(out)
+    }
+}
+impl<T: Dec> Dec for T? {
+    fn dec(r: codec.Reader) -> Result<T?> {
+        if r.null() { Ok(None) } else { Ok(Some(T.dec(r)?)) }
+    }
+}
+
+let ADDRESS_FIELDS = codec.Names(["street", "city", "zip"])
+let USER_FIELDS = codec.Names(["id", "name", "email", "score", "active", "tags", "address", "status", "logins", "meta"])
+let DOC_FIELDS = codec.Names(["users"])
+let STATUS_VARIANTS = codec.Names(["Active", "Suspended", "Banned"])
+let SUSPENDED_FIELDS = codec.Names(["reason"])
+
+impl Dec for Address {
+    fn dec(r: codec.Reader) -> Result<Address> {
+        r.begin_struct()?
+        var street = ""
+        var city = ""
+        var zip: str? = None
+        var seen = 0
+        while true {
+            let i = r.field(ADDRESS_FIELDS)?
+            if i < 0 { break }
+            if i == 0 { street = str.dec(r)?; seen = seen | 1 }
+            else if i == 1 { city = str.dec(r)?; seen = seen | 2 }
+            else { zip = Option.dec(r)? }
+        }
+        if seen != 3 { return Err(missing(if seen & 1 == 0 { "street" } else { "city" })) }
+        Ok(Address(street: street, city: city, zip: zip))
+    }
+}
+impl Dec for Status {
+    fn dec(r: codec.Reader) -> Result<Status> {
+        let v = r.variant(STATUS_VARIANTS)?
+        let s = if v == 0 {
+            Status.Active
+        } else if v == 1 {
+            r.begin_struct()?
+            var reason = ""
+            var seen = 0
+            while true {
+                let i = r.field(SUSPENDED_FIELDS)?
+                if i < 0 { break }
+                reason = str.dec(r)?
+                seen = seen | 1
+            }
+            if seen != 1 { return Err(missing("reason")) }
+            Status.Suspended(reason: reason)
+        } else {
+            r.begin_list()?
+            if not r.next_item()? { return Err(missing("0")) }
+            let a = int.dec(r)?
+            if not r.next_item()? { return Err(missing("1")) }
+            let b = str.dec(r)?
+            if r.next_item()? { return Err(Error("extra payload", kind: "parse")) }
+            Status.Banned(a, b)
+        }
+        r.end_variant()?
+        Ok(s)
+    }
+}
+impl Dec for User {
+    fn dec(r: codec.Reader) -> Result<User> {
+        r.begin_struct()?
+        var id = 0
+        var name = ""
+        var email = ""
+        var score = 0.0
+        var active = false
+        var tags: [str] = []
+        var address: Address? = None
+        var status: Status? = None
+        var logins: [int] = []
+        var meta: [str: int] = [:]
+        var seen = 0
+        while true {
+            let i = r.field(USER_FIELDS)?
+            if i < 0 { break }
+            match i {
+                0 => { id = int.dec(r)?; seen = seen | 1 }
+                1 => { name = str.dec(r)?; seen = seen | 2 }
+                2 => { email = str.dec(r)?; seen = seen | 4 }
+                3 => { score = float.dec(r)?; seen = seen | 8 }
+                4 => { active = bool.dec(r)?; seen = seen | 16 }
+                5 => { tags = List.dec(r)?; seen = seen | 32 }
+                6 => { address = Some(Address.dec(r)?); seen = seen | 64 }
+                7 => { status = Some(Status.dec(r)?); seen = seen | 128 }
+                8 => { logins = List.dec(r)?; seen = seen | 256 }
+                _ => { meta = Map.dec(r)?; seen = seen | 512 }
+            }
+        }
+        if seen != 1023 { return Err(missing("some field")) }
+        Ok(User(id: id, name: name, email: email, score: score, active: active, tags: tags, address: address.unwrap(), status: status.unwrap(), logins: logins, meta: meta))
+    }
+}
+impl Dec for Doc {
+    fn dec(r: codec.Reader) -> Result<Doc> {
+        r.begin_struct()?
+        var users: [User] = []
+        var seen = 0
+        while true {
+            let i = r.field(DOC_FIELDS)?
+            if i < 0 { break }
+            users = List.dec(r)?
+            seen = seen | 1
+        }
+        if seen != 1 { return Err(missing("users")) }
+        Ok(Doc(users: users))
+    }
+}
+
+impl Enc for int { fn enc(self, w: codec.Writer) { w.int(self) } }
+impl Enc for float { fn enc(self, w: codec.Writer) { w.float(self) } }
+impl Enc for bool { fn enc(self, w: codec.Writer) { w.bool(self) } }
+impl Enc for str { fn enc(self, w: codec.Writer) { w.str(self) } }
+impl<T: Enc> Enc for [T] {
+    fn enc(self, w: codec.Writer) {
+        w.begin_list()
+        for x in self { x.enc(w) }
+        w.end_list()
+    }
+}
+impl<V: Enc> Enc for [str: V] {
+    fn enc(self, w: codec.Writer) {
+        w.begin_struct()
+        for (k, v) in self {
+            w.key(k)
+            v.enc(w)
+        }
+        w.end_struct()
+    }
+}
+impl<T: Enc> Enc for T? {
+    fn enc(self, w: codec.Writer) {
+        match self {
+            Some(x) => x.enc(w)
+            None => w.null()
+        }
+    }
+}
+impl Enc for Address {
+    fn enc(self, w: codec.Writer) {
+        w.begin_struct()
+        w.field(ADDRESS_FIELDS, 0)
+        self.street.enc(w)
+        w.field(ADDRESS_FIELDS, 1)
+        self.city.enc(w)
+        w.field(ADDRESS_FIELDS, 2)
+        self.zip.enc(w)
+        w.end_struct()
+    }
+}
+impl Enc for Status {
+    fn enc(self, w: codec.Writer) {
+        match self {
+            Active => w.str("Active")
+            Suspended(reason) => {
+                w.begin_struct()
+                w.field(STATUS_VARIANTS, 1)
+                w.begin_struct()
+                w.field(SUSPENDED_FIELDS, 0)
+                reason.enc(w)
+                w.end_struct()
+                w.end_struct()
+            }
+            Banned(a, b) => {
+                w.begin_struct()
+                w.field(STATUS_VARIANTS, 2)
+                w.begin_list()
+                a.enc(w)
+                b.enc(w)
+                w.end_list()
+                w.end_struct()
+            }
+        }
+    }
+}
+impl Enc for User {
+    fn enc(self, w: codec.Writer) {
+        w.begin_struct()
+        w.field(USER_FIELDS, 0)
+        self.id.enc(w)
+        w.field(USER_FIELDS, 1)
+        self.name.enc(w)
+        w.field(USER_FIELDS, 2)
+        self.email.enc(w)
+        w.field(USER_FIELDS, 3)
+        self.score.enc(w)
+        w.field(USER_FIELDS, 4)
+        self.active.enc(w)
+        w.field(USER_FIELDS, 5)
+        self.tags.enc(w)
+        w.field(USER_FIELDS, 6)
+        self.address.enc(w)
+        w.field(USER_FIELDS, 7)
+        self.status.enc(w)
+        w.field(USER_FIELDS, 8)
+        self.logins.enc(w)
+        w.field(USER_FIELDS, 9)
+        self.meta.enc(w)
+        w.end_struct()
+    }
+}
+impl Enc for Doc {
+    fn enc(self, w: codec.Writer) {
+        w.begin_struct()
+        w.field(DOC_FIELDS, 0)
+        self.users.enc(w)
+        w.end_struct()
+    }
+}
+
+fn best(reps: int, f: fn() -> int) -> int {
+    var b = -1
+    for _ in 0..reps {
+        let sw = time.Stopwatch()
+        let _ = f()
+        let t = sw.elapsed().nanos()
+        if b < 0 or t < b { b = t }
+    }
+    b
+}
+
+fn stream_encode(d: Doc) -> str {
+    let w = codec.Writer()
+    d.enc(w)
+    w.text()
+}
+
+let n = {n}
+let doc = make(n)
+let text = json.encode(doc)
+let a: Doc = json.decode(text).unwrap()
+let b = Doc.dec(codec.Reader(text)).unwrap()
+assert(a == doc and b == doc, "decoders disagree")
+assert(stream_encode(doc) == text, "encoders disagree: \(stream_encode(make(1)))")
+let bad: Result<Doc> = Doc.dec(codec.Reader(text.replace("\"score\":1.5", "\"score\":\"x\"")))
+print("error: \(bad)")
+let reps = 7
+var native_decode = -1
+var stream_decode = -1
+var native_encode = -1
+var stream_enc = -1
+// Alternate the two variants of each operation within one process.
+for _ in 0..3 {
+    let nd = best(reps, () => { let d: Doc = json.decode(text).unwrap(); d.users.len() })
+    let sd = best(reps, () => Doc.dec(codec.Reader(text)).unwrap().users.len())
+    let ne = best(reps, () => json.encode(doc).len())
+    let se = best(reps, () => stream_encode(doc).len())
+    if native_decode < 0 or nd < native_decode { native_decode = nd }
+    if stream_decode < 0 or sd < stream_decode { stream_decode = sd }
+    if native_encode < 0 or ne < native_encode { native_encode = ne }
+    if stream_enc < 0 or se < stream_enc { stream_enc = se }
+}
+print("ns per user, n=\(n)")
+print("native_decode \(native_decode / n)")
+print("stream_decode \(stream_decode / n)")
+print("native_encode \(native_encode / n)")
+print("stream_encode \(stream_enc / n)")
