@@ -319,12 +319,16 @@ pub trait Hash: Eq {}
 ///
 /// impl Encode for Money {
 ///     fn encode(self, e: Encoder) {
-///         e.encode("\(self.cents / 100).\(self.cents % 100) \(self.currency)")
+///         let cents = "\(self.cents % 100)".pad_start(2, "0")
+///         e.encode("\(self.cents / 100).\(cents) \(self.currency)")
 ///     }
 /// }
 ///
-/// print(json.encode(Money(cents: 1250, currency: "USD")))  // "12.50 USD"
+/// print(json.encode(Money(cents: 1205, currency: "USD")))  // "12.05 USD"
 /// ```
+///
+/// A hand-written `Encode` does not change the derived `Decode` of the
+/// type. If the type must read what it writes, also implement `Decode`.
 pub trait Encode {
     /// Writes `self` to `e` as exactly one value, usually with
     /// `e.encode(x)`. A call that writes no value or two stops the encode
@@ -360,6 +364,13 @@ pub trait Encode {
 /// let e: Result<[Email]> = json.decode("[\"a@b.c\", \"x\"]")
 /// print(e)  // Err(Error(message: "$[1]: invalid email", kind: "invalid"))
 /// ```
+///
+/// A derived type decodes on a fast native path. A hand-written
+/// implementation, or a field default that runs code, such as `next_id()`,
+/// makes each type that contains it decode through slower Sand code. A
+/// default that is a scalar literal, such as `3` or `"x"`, or an empty `[]`
+/// or `[:]`, keeps the fast path. A hand-written `Encode` also makes each
+/// type that contains it encode more slowly.
 pub trait Decode {
     /// Reads a value of this type from `d` as exactly one value, usually with
     /// `d.decode()`. A call that reads no value or two fails with kind

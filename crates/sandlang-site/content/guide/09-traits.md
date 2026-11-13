@@ -31,7 +31,7 @@ An unconstrained type parameter `T` supports only storage, passing, and formatti
 | `Hash`   | map keys and set elements        | `int`, `bool`, `str`, tuples                                    |
 | `Num`    | `+`, `-`, `*`, `/`, `T.zero()`   | `int`, `float`                                                  |
 | `Encode` | `json.encode()`                  | all types except functions, tasks, channels, and native objects |
-| `Decode` | `json.decode()`                  | `Encode` types except structs that declare `init`               |
+| `Decode` | `json.decode()`                  | the same types, except structs that declare `init`              |
 
 ```sand
 fn largest<T: Ord>(xs: [T]) -> T? {
@@ -61,7 +61,7 @@ print(total([1.5, 2.5]))
 print(counts(["a", "b", "a"]))
 ```
 
-The compiler derives `Eq`, `Ord`, `Hash`, and `Encode` for each struct, enum, and tuple whose fields implement them. A struct with a `var` field does not implement `Hash`. `help(Type)` lists the traits that a type implements. For complete rules, see [§5.6 of the specification](/spec/#56-built-in-traits).
+The compiler derives `Eq`, `Ord`, `Hash`, `Encode`, and `Decode` for each struct, enum, and tuple whose fields implement them. A struct with a `var` field does not implement `Hash`, and a struct that declares `init` does not derive `Decode`. `help(Type)` lists the traits that a type implements. For complete rules, see [§5.6 of the specification](/spec/#56-built-in-traits).
 
 If a function uses an operation of a trait that its type parameter does not require, the compiler reports the missing trait:
 
@@ -230,6 +230,49 @@ print(Countdown(n: 4).iter().map(x => x * 10).to_list())
 ```
 
 For the complete list of iterator adapters and consumers, see the [`Iterator` reference](/std/prelude/Iterator/).
+
+## Implementing `Encode` and `Decode`
+
+Write an `impl` of `Encode` or `Decode` to change the encoded form of a type or to validate input. A hand-written implementation writes or reads one value through an `Encoder` or a `Decoder`, and it works for every format, such as JSON text and `json.Json` values.
+
+```sand
+import json
+
+struct Email {
+    address: str
+
+    fn init(address: str) -> Result<Email> {
+        if not address.contains("@") {
+            return Err(Error("invalid email", kind: "invalid"))
+        }
+        Ok(Self(address: address))
+    }
+}
+
+impl Encode for Email {
+    fn encode(self, e: Encoder) {
+        e.encode(self.address)
+    }
+}
+
+impl Decode for Email {
+    fn decode(d: Decoder) -> Result<Email> {
+        Email(d.decode()?)
+    }
+}
+
+struct Contact { name: str, email: Email }
+
+print(json.encode(Contact(name: "ana", email: Email("ana@example.com")?)))
+let bad: Result<Contact> = json.decode("{\"name\": \"bo\", \"email\": \"bo\"}")
+print(bad)
+```
+
+`e.encode(x)` writes `x` with its own `Encode` implementation. `d.decode()` reads a value of the type that the context expects. An error from a hand-written `decode` keeps its kind, and the decoder adds the path of the value to its message.
+
+A struct that declares `init` does not derive `Decode`, because a derived implementation would not call `init`. Implement `Decode` by hand, as `Email` does. A hand-written `Encode` does not change the derived `Decode`. If a type must read what it writes, implement both.
+
+Derived types encode and decode on a fast native path. A hand-written implementation, or a field default that runs code, such as `next_id()`, makes each type that contains it use slower Sand code.
 
 ## Qualified calls
 

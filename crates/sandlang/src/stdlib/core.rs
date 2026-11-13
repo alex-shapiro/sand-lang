@@ -59,8 +59,7 @@ fn nanos(d: SignedDuration) -> i64 {
 /// Standard error record with a human-readable `message` and a
 /// machine-readable `kind` tag that defaults to `"error"`.
 ///
-/// A host decodes the error payload of a failed run with
-/// [`Value::decode`](crate::value::Value::decode).
+/// A host decodes the error payload of a failed run with `Value::decode`.
 #[derive(Clone, Debug, PartialEq, crate::SandStruct)]
 #[sand(module = "prelude")]
 pub struct Error {

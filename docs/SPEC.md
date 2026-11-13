@@ -310,8 +310,7 @@ Struct fields are separated by newlines or commas. A field is immutable unless
 declared `var`. If a field defines a default and the type construction omits
 that field, it is evaluated with its default expression. A field default can
 use the traits of the struct's type parameter bounds, such as `x: T = T.zero()` with
-`T: Num`. `json.decode` cannot fill a default that calls a trait method of a type
-parameter.
+`T: Num`.
 
 Fields and methods are private unless marked `pub` (§3.3).
 
@@ -698,8 +697,8 @@ The prelude declares six built-in traits:
 | `Eq`     |                | every type except function types, and types containing them                                                                                                                                |
 | `Ord`    | `Eq`           | `int`, `float`, `bool`, `str`, `bytes`, `duration`, `()`, ordered value types (§5.4), and tuples, lists, `Option`, structs and enums all of whose components are `Ord`                     |
 | `Hash`   | `Eq`           | `int`, `bool`, `str`, `bytes`, `duration`, `()`, `Range`, value types (§5.4), and tuples, `Option`, `Result`, enums and structs without `var` fields where all components implement `Hash` |
-| `Encode` |                | every type except function types, `Task`, `Channel`, native objects (§5.4), and types containing them; and each type with an `impl Encode`                                                |
-| `Decode` |                | every `Encode` type except structs that declare `init` (§4.2) and types containing them; and each type with an `impl Decode`                                                              |
+| `Encode` |                | every type except function types, `Task`, `Channel`, native objects (§5.4), and types containing them; and each type with an `impl Encode`                                                 |
+| `Decode` |                | every type except function types, `Task`, `Channel`, native objects (§5.4), structs that declare `init` (§4.2), and types containing them; and each type with an `impl Decode`             |
 | `Num`    | `Ord + Encode` | `int`, `float`                                                                                                                                                                             |
 
 The compiler automatically derives `Eq`, `Ord`, `Hash`, `Encode`, and `Decode` from a type's components.
