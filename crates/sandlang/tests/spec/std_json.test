@@ -847,3 +847,15 @@ let f: Result<Set<int>> = load_hashed("[1, 1, 2]")
 print(f)
 --- stdout
 Ok(Set([1, 2]))
+
+=== decode cannot compute field defaults that call trait methods
+import json
+trait Make { fn make() -> Self }
+impl Make for int { fn make() -> int { 7 } }
+struct Bag<T: Make> { x: T = T.make(), n: int = 3 }
+struct Plain<T: Make> { x: T, n: int = 3 }
+let p: Plain<int> = json.decode("{\"x\": 1}").unwrap()
+print(p.n)
+let b: Bag<int> = json.decode("{}").unwrap()
+--- error
+8: this call cannot build `Bag<T>`: the default of its field `x` calls trait methods

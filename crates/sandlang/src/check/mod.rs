@@ -531,9 +531,6 @@ pub(crate) struct FnState {
     /// Deferred `+` operand checks on types that contained unresolved inference
     /// variables.
     pub plus_checks: Vec<(TypeId, Span)>,
-    /// Indicates that the checker is checking a struct field default, which
-    /// does not receive trait dictionaries.
-    pub field_default: bool,
     /// Enclosing type constructor if currently checking its `init` method
     /// (where `T(...)` constructs the struct field by field).
     pub init_of: Option<Ctor>,
@@ -638,6 +635,9 @@ pub struct Checker {
     /// checked is its value, and then (after checking) the value's type.
     pub(crate) want_cell_value: bool,
     pub(crate) cell_value: Option<TypeId>,
+    /// `reflect` type arguments to check for computed field defaults that
+    /// read trait dictionaries, once the module's default helpers are checked.
+    reflect_default_checks: Vec<(TypeId, Span, &'static str)>,
     /// Whether the session input being checked has a top-level `return` of a value.
     pub(crate) cell_returns: bool,
     /// Set while checking an expression for `Session::type_of`.
@@ -702,6 +702,7 @@ impl Default for Checker {
             session: None,
             want_cell_value: false,
             cell_value: None,
+            reflect_default_checks: Vec::new(),
             cell_returns: false,
             type_query: None,
             budget: Arc::new(CompileBudget::default()),
@@ -1428,6 +1429,7 @@ impl Checker {
             i += 1;
         }
         self.fold_field_defaults(first_fn);
+        self.check_reflect_defaults();
         // 7. Tests (those of imported modules are type checked, not run).
         for (idx, item) in items.iter().enumerate() {
             if let ItemKind::Test(t) = &item.kind {
@@ -1457,6 +1459,7 @@ impl Checker {
                 }
             }
         }
+        self.check_reflect_defaults();
         // Where resources go (for the resource lints).
         self.resource_flows(first_fn, &pm.ast);
         // 8. Globals must have fully inferred types.
@@ -1613,7 +1616,12 @@ impl Checker {
                 doc: f.doc.as_deref().map(Arc::from),
             });
         }
-        // Default helpers.
+        // Default helpers, which receive the dictionaries of the struct's bounds.
+        let mut dicts: Vec<(TypeId, TraitRef)> = Vec::new();
+        for &p in &gens {
+            let pt = self.param_ty(p);
+            dicts.extend(self.params[p as usize].traits.iter().filter(|tr| self.has_dict(tr)).map(|&tr| (pt, tr)));
+        }
         for (i, f) in s.fields.iter().enumerate() {
             if let Some(d) = &f.default {
                 if i >= fields.len() {
@@ -1635,7 +1643,7 @@ impl Checker {
                     owner: None,
                     self_ty: Some(self_ty),
                     decl: Some(FnDeclRef::FieldDefault { item, field: i as u32 }),
-                    dicts: vec![],
+                    dicts: dicts.clone(),
                     impl_of: None,
                     trait_of: None,
                 });
@@ -1848,6 +1856,59 @@ impl Checker {
             }
         }
         None
+    }
+
+    /// Reports each `reflect` type argument whose type description would need
+    /// a computed field default that reads trait dictionaries.
+    fn check_reflect_defaults(&mut self) {
+        for (z, sp, what) in std::mem::take(&mut self.reflect_default_checks) {
+            if let Some((d, f)) = self.dict_default_in(z) {
+                let (ty, field) = (self.ctor_name(Ctor::Def(d), 0), self.name(f));
+                self.error(sp, format!("this {what} cannot build `{ty}`: the default of its field `{field}` calls trait methods"));
+            }
+        }
+    }
+
+    /// Returns a struct reachable from `t` with a computed field default that
+    /// receives trait dictionaries, which a type description cannot pass.
+    fn dict_default_in(&self, t: TypeId) -> Option<(TypeDefId, Symbol)> {
+        let mut seen = HashSet::new();
+        let mut todo = vec![t];
+        while let Some(t) = todo.pop() {
+            let mut found = None;
+            self.arena.any(t, &mut |ty| {
+                if let Ty::Named(d, _) = ty
+                    && seen.insert(d)
+                {
+                    let def = &self.types[d as usize];
+                    let computed = |f: &&FieldDef| f.const_default.is_none() && f.default.is_some_and(|h| self.default_uses_dicts(h));
+                    if let Some(f) = def.fields().iter().find(computed) {
+                        found = Some((d, f.name));
+                        return true;
+                    }
+                    todo.extend(def.fields().iter().map(|f| f.ty).chain(def.variants().iter().flat_map(|v| v.fields.iter().copied())));
+                }
+                false
+            });
+            if found.is_some() {
+                return found;
+            }
+        }
+        None
+    }
+
+    /// Returns `true` if the body of field default helper `h` reads one of its
+    /// dictionary parameters, or if the body is not available.
+    fn default_uses_dicts(&self, h: FnId) -> bool {
+        let n = self.fns[h as usize].dicts.len();
+        if n == 0 {
+            return false;
+        }
+        let Some(b) = self.bodies.get(h) else { return true };
+        let dicts = &b.params[..n.min(b.params.len())];
+        let mut used = false;
+        b.body.clone().visit_mut(&mut |e| used |= matches!(e.kind, HKind::Local(l) if dicts.contains(&l)));
+        used
     }
 
     /// Converts `value` into a [`ConstVal`] of type `ty`, or returns `None` if
@@ -3010,7 +3071,6 @@ impl Checker {
             || fi.trait_of.is_some()
             || matches!(decl, FnDeclRef::ParamDefault(..) | FnDeclRef::FieldDefault { .. } | FnDeclRef::BoundDefault(_));
         self.begin_fn(generics, self_ty);
-        self.fs.field_default = matches!(decl, FnDeclRef::FieldDefault { .. });
         let fi = &self.fns[id as usize];
         self.fs.init_of = fi.owner.filter(|_| fi.is_init(&self.syms));
         let mut param_locals = self.declare_reflect_params(id);
@@ -3223,6 +3283,8 @@ impl Checker {
             } else if let Some(m) = self.first_unmet_requirement(z) {
                 let msg = format!("this {what} cannot build {}: {}", self.show(z), self.unmet_message(m, ""));
                 self.error(sp, msg);
+            } else {
+                self.reflect_default_checks.push((z, sp, what));
             }
         }
         for info in self.fs.locals.iter_mut().filter(|l| l.mutable) {

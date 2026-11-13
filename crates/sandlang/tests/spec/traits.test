@@ -1630,13 +1630,21 @@ enum E { Keyed([float: int]) }
 6: str does not implement `Describe` (required for Wrap<str>)
 7: float does not implement `Hash` (required for the keys of [float: int])
 
-=== field defaults cannot use traits with methods of the type's parameters
+=== field defaults can use traits with methods of the type's parameters
 trait Make { fn make() -> Self }
 impl Make for int { fn make() -> int { 7 } }
-struct Bag<T: Make + Ord> { x: T = T.make(), big: bool = false }
+impl Make for str { fn make() -> str { "made" } }
+impl<T: Make> Make for [T] { fn make() -> [T] { [T.make(), T.make()] } }
+struct Bag<T: Make + Ord> { x: T = T.make(), many: [T] = List.make(), big: bool = false }
 struct Keys<T: Hash> { s: Set<T> = Set([]) }
---- error
-3: field defaults cannot use `Make`, which type parameter `T` requires, because defaults receive no trait dictionaries
+fn fresh<T: Make + Ord>() -> Bag<T> { Bag() }
+let a: Bag<int> = Bag()
+let b: Bag<str> = fresh()
+let c: Bag<[int]> = Bag(big: true)
+let k: Keys<int> = Keys()
+print("\(a.x) \(a.many) \(b.x) \(b.many) \(c.x) \(c.big) \(k.s.len())")
+--- stdout
+7 [7, 7] made ["made", "made"] [7, 7] true 0
 
 === required traits take the type arguments that the trait declares
 trait Into<T> {

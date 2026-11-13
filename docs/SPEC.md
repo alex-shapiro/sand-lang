@@ -317,9 +317,10 @@ Structs are reference types; variable assignment shares a struct value without c
 
 Struct fields are separated by newlines or commas. A field is immutable unless
 declared `var`. If a field defines a default and the type construction omits
-that field, it is is evaluated with its default expression. A field default can
-use traits without methods from the struct's type parameter bounds (`s: Set<T> = Set([])`
-with `T: Hash`), but cannot use traits that declare methods (§4.9).
+that field, it is evaluated with its default expression. A field default can
+use the traits of the struct's type parameter bounds, such as `x: T = T.zero()` with
+`T: Num`. `json.decode` cannot fill a default that calls a trait method of a type
+parameter.
 
 Fields and methods are private unless marked `pub` (§3.3).
 

@@ -2241,7 +2241,10 @@ impl Checker {
             let v = match (given, &base, self.types[d as usize].fields()[i].default) {
                 (Some(h), _, _) => h,
                 (None, Some(b), _) => mk(HKind::Field { obj: Box::new(b.clone()), index: i as u32 }, fty, span),
-                (None, None, Some(helper)) => mk(HKind::Call { func: helper, targs: targs.clone(), args: vec![] }, fty, span),
+                (None, None, Some(helper)) => {
+                    let args = self.default_helper_evidence(helper, &targs, span);
+                    mk(HKind::Call { func: helper, targs: targs.clone(), args }, fty, span)
+                }
                 (None, None, None) => {
                     let field = self.name(self.types[d as usize].fields()[i].name);
                     self.error(span, format!("missing field `{field}` in `{name}(...)`"));
@@ -2256,6 +2259,21 @@ impl Checker {
         }
         stmts.push(make);
         mk(HKind::Block(stmts), t, span)
+    }
+
+    /// Returns the evidence for the hidden dictionary parameters of the field
+    /// default helper `helper`, instantiated with the struct's type arguments
+    /// `targs`.
+    fn default_helper_evidence(&mut self, helper: FnId, targs: &[TypeId], span: Span) -> Vec<HArg> {
+        let gens = self.fns[helper as usize].generics.clone();
+        let map = |p: ParamId| gens.iter().position(|&g| g == p).map(|i| targs[i]);
+        let mut out = Vec::new();
+        for (t, tr) in self.fns[helper as usize].dicts.clone() {
+            let t = self.arena.subst_params(t, &map);
+            let tr = tr.subst_params(&mut self.arena, &map);
+            out.push(HArg::Expr(self.evidence_hole(t, tr, false, span)));
+        }
+        out
     }
 
     // ------------------------------------------------------------------
