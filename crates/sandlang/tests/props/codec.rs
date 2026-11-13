@@ -548,11 +548,12 @@ proptest! {
 }
 
 /// Runs `src` with the native implementations of `Encode` and `Decode` on
-/// (`fast`) or off, and returns its output and the message of its runtime
-/// failure. `host.keep` returns
+/// (`fast`) or off, and with the stress modes of [`Config::retry_stress`]
+/// and [`Config::gc_stress`], and returns its output and the message of its
+/// runtime failure. `host.keep` returns
 /// the host `Value` form of its argument, and `host.input()` returns a
 /// `Decoder` over the last kept value.
-fn run_codec_path(src: &str, fast: bool, retry_stress: bool) -> (String, Option<String>) {
+fn run_codec_path(src: &str, fast: bool, retry_stress: bool, gc_stress: bool) -> (String, Option<String>) {
     use sandlang::codec::Decoder;
     use sandlang::engine::HostModules;
     use sandlang::native::NativeModule;
@@ -575,8 +576,12 @@ fn run_codec_path(src: &str, fast: bool, retry_stress: bool) -> (String, Option<
         vm.new_object(Decoder::from_value(value))
     });
     let out = MemorySink::new();
-    let config =
-        Config::new().codec_fast_path(fast).retry_stress(retry_stress).host_modules(HostModules::new([host]).unwrap()).stdout(out.clone());
+    let config = Config::new()
+        .codec_fast_path(fast)
+        .retry_stress(retry_stress)
+        .gc_stress(gc_stress)
+        .host_modules(HostModules::new([host]).unwrap())
+        .stdout(out.clone());
     let mut engine = Engine::new(config);
     let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
     let r = rt.block_on(engine.run_source("main.sand", src));
@@ -594,7 +599,9 @@ proptest! {
     /// The native implementations of `Encode` and `Decode` give the same
     /// text, `Json`, host `Value`, decoded values, and errors as the
     /// synthesized Sand implementations, for JSON text, `Json` values, and
-    /// host values, also when native calls run again (`retry_stress`).
+    /// host values, also when native calls run again (`retry_stress`), and
+    /// when the collector runs at each safe point (`gc_stress`), between the
+    /// calls of the Sand implementations.
     #[test]
     fn native_and_synthesized_codecs_agree(t in ty_with(0, 0), seed in 1..u64::MAX) {
         prop_assume!(t.well_formed());
@@ -627,10 +634,12 @@ proptest! {
             ty = t.sand(),
             texts = texts.join(", "),
         );
-        let synthesized = run_codec_path(&src, false, false);
-        let native = run_codec_path(&src, true, false);
+        let synthesized = run_codec_path(&src, false, false, false);
+        let native = run_codec_path(&src, true, false, false);
         prop_assert_eq!(&native, &synthesized, "program:\n{}", src);
-        let retried = run_codec_path(&src, true, true);
+        let retried = run_codec_path(&src, true, true, false);
         prop_assert_eq!(&retried, &synthesized, "retry_stress; program:\n{}", src);
+        let collected = run_codec_path(&src, false, false, true);
+        prop_assert_eq!(&collected, &synthesized, "gc_stress; program:\n{}", src);
     }
 }

@@ -22,7 +22,7 @@ use crate::stdlib::core;
 use crate::syntax::lexer::is_ident;
 use crate::types::traits;
 use crate::value::Value;
-use crate::vm::value::{Obj, VmValue};
+use crate::vm::value::{Obj, ObjectValues, VmValue};
 use crate::vm::{Fail, Vm, internal};
 use compact_str::CompactString;
 use fast::SchemaId;
@@ -63,6 +63,24 @@ pub trait EncodeFormat: Any + Send {
     fn float(&mut self, vm: &mut Vm, f: f64) -> Result<(), Fail>;
     fn duration(&mut self, vm: &mut Vm, nanos: i64) -> Result<(), Fail>;
     fn str(&mut self, vm: &mut Vm, s: &str) -> Result<(), Fail>;
+    /// Returns `true` if the format keeps Sand values, so that the
+    /// `Encoder` lends it its values ([`EncodeFormat::swap_values`]) and
+    /// writes a `str` with [`EncodeFormat::str_value`].
+    fn keeps_values(&self) -> bool {
+        false
+    }
+    /// Writes the Sand `str` `s`, for a format that keeps Sand values and
+    /// can share `s`.
+    fn str_value(&mut self, vm: &mut Vm, s: VmValue) -> Result<(), Fail> {
+        let text = vm.heap.str(s).to_string();
+        self.str(vm, &text)
+    }
+    /// Swaps the Sand values that the format keeps with `values`. The
+    /// `Encoder` keeps the values, where the collector traces them, and
+    /// lends them to a format that [`EncodeFormat::keeps_values`] for the
+    /// length of each native call. The format holds no other Sand value
+    /// between calls.
+    fn swap_values(&mut self, _values: &mut ObjectValues) {}
     fn bytes(&mut self, vm: &mut Vm, b: &[u8]) -> Result<(), Fail>;
     /// Writes a native value type as its qualified type name and its text.
     fn native(&mut self, vm: &mut Vm, type_name: &str, text: &str) -> Result<(), Fail>;
@@ -348,7 +366,16 @@ pub fn with_encoder<R>(
     op: impl FnOnce(&mut dyn EncodeFormat, &mut Vm) -> Result<R, Fail>,
 ) -> Result<R, Fail> {
     let Some(mut format) = e.get_mut(&mut vm.heap)?.format.take() else { return internal("the encoder is in use") };
+    if !format.keeps_values() {
+        let r = op(&mut *format, vm);
+        e.get_mut(&mut vm.heap)?.format = Some(format);
+        return r;
+    }
+    let mut values = vm.heap.take_native_values::<Encoder>(e.raw()).unwrap_or_default();
+    format.swap_values(&mut values);
     let r = op(&mut *format, vm);
+    format.swap_values(&mut values);
+    vm.heap.put_native_values::<Encoder>(e.raw(), values);
     e.get_mut(&mut vm.heap)?.format = Some(format);
     r
 }
@@ -581,10 +608,7 @@ fn encoder_methods(m: &mut NativeModule) {
     m.function("Encoder.write_duration", |vm: &mut Vm, e: Enc, d: jiff::SignedDuration| {
         write_part(vm, e, |f, vm| f.duration(vm, d.as_nanos() as i64))
     });
-    m.function("Encoder.write_str", |vm: &mut Vm, e: Enc, s: VmVal<String>| {
-        let text = s.str(&vm.heap).to_string();
-        write_part(vm, e, |f, vm| f.str(vm, &text))
-    });
+    m.function("Encoder.write_str", |vm: &mut Vm, e: Enc, s: VmVal<String>| write_part(vm, e, |f, vm| f.str_value(vm, s.raw())));
     m.function("Encoder.write_bytes", |vm: &mut Vm, e: Enc, b: VmVal<Vec<u8>>| {
         let bytes = b.bytes(&vm.heap).to_vec();
         write_part(vm, e, |f, vm| f.bytes(vm, &bytes))

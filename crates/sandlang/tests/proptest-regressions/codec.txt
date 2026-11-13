@@ -15,3 +15,4 @@ cc 505d74e8e4efcdf09d92e1208e4d83ecb0ea5552b496b2513d78a238add05e99 # shrinks to
 cc 024c5ba6a2c5d9a7da686d84ec4573e95baf46fe26b0513deed45a09a56dce2a # shrinks to (width, depth) = (1, 33), chain = 1
 cc 42392bae478bb0c5facc34795df3547272377ed5b5a0c8a6b6bdbfe782657810 # shrinks to t = Set(Option(Json))
 cc 03a8179e292d854d7362edf00a78fb2af3407ea61dae000abab6b3f6dee6dbf6 # shrinks to t = Map(Option(Str), Int), seed = 1
+cc aee36b8536dc1b824fe14a54ae601ff06244a6dc03cea8bbfcbd8f14cac40e12 # shrinks to t = Option(Range), seed = 1

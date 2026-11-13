@@ -1099,3 +1099,38 @@ Measured (3 rounds; lead, Q4, Q6): `decode` 584, 577, 569; `small_decode`
 303, 282; `decode_json` 938, 886, 861; `decode_generic` 583, 579, 564;
 `decode_page` 579, 582, 566; `decode_ints` 111, 111, 105; `deep_decode`
 14417, 14774, 14384.
+
+### Q7: `json.to_json` builds the `Json` value in one pass
+
+`TreeEncoder` no longer records tokens. Each operation makes Sand values at
+once: a scalar becomes its `Json` variant, `end` makes the list or map of
+the parts of its container, and the outer object of a variant follows its
+payload. The parts of the open containers are values of the `Encoder`
+object (Q5). `with_encoder` lends them to the format for the length of
+each native call (`EncodeFormat::swap_values`) and puts them back with the
+write barrier. On the fast path, the encoder lives on the Rust stack for
+one call and keeps its parts in its own list.
+
+Two more savings follow from Sand values:
+
+- A `str` field becomes `Json.Str` of the same `str` object, as
+  value-decode did (`EncodeFormat::str_value`); no text is copied.
+- The key `str` and the hash of each field and variant name are made once
+  in each native call.
+
+Each map is built directly (`MapObj`, `KeyIndex`), not through a staged
+`Builder` for each object: the staged form cost 25% more on `to_json`
+(983 against 783 before the change). Operations that make more than one
+change (`range`, `begin_variant`) go back to their state if a memory check
+fails (`TreeEncoder::atomic`); the differential test found that case
+under `retry_stress` (`Some(0..=0)`), and its seed is now in
+`proptest-regressions/codec.txt`.
+
+The differential test now also runs the synthesized path under
+`gc_stress`, which collects at each safe point between the native calls
+of a driven encode or decode. It passes 20000 cases.
+
+Measured (3 rounds; lead, Q6, Q7): `to_json` 798, 784, 646;
+`small_to_json` 686, 613, 363; `encode` 340, 337, 336; `encode_json` 328,
+329, 323; `deep_encode` 3439, 3527, 3326; `encode_custom` 321, 319, 321;
+`to_value` 360, 325, 327. Fuel is unchanged (`to_json` 22.8 per user).

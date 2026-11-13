@@ -9,8 +9,9 @@ use crate::codec::value_format::write_json_form;
 use crate::codec::{Budget, DecodeFail, DecodeFormat, DecodeResult, EncodeFormat, SeqKind};
 use crate::value::Value;
 use crate::vm::bytecode::Program;
+use crate::vm::compare::str_hash;
 use crate::vm::meter::{BYTES_PER_UNIT, SLOW_BYTES_PER_UNIT};
-use crate::vm::value::{Obj, VmValue};
+use crate::vm::value::{FxHashMap, KeyIndex, MAP_ENTRY_SIZE, MapObj, Obj, ObjectValues, VALUE_SIZE, VmValue, slot_fits};
 use crate::vm::{Fail, Vm, fail, internal};
 use compact_str::CompactString;
 use std::any::Any;
@@ -1007,47 +1008,19 @@ impl DecodeFormat for TextDecoder {
     }
 }
 
-/// A node of the `json.Json` value that [`TreeEncoder`] records.
-#[derive(Clone, Copy)]
-pub(super) enum Token {
-    Null,
-    Bool(bool),
-    Int(i64),
-    Float(f64),
-    /// A text of this many bytes, which follows the texts of the tokens
-    /// before it in [`TreeEncoder`]'s `text`. In an object, a text before
-    /// each member is its key.
-    Str(usize),
-    /// The name of field `index` of struct definition `owner`, or of the
-    /// named payload of variant `owner`, as a text.
-    Field {
-        owner: u32,
-        variant: bool,
-        index: u32,
-    },
-    /// The name of a variant, as a text.
-    Variant(u32),
-    /// Opens an array, which ends at the matching [`Token::End`].
-    Arr,
-    /// Opens an object whose keys are distinct, such as the fields of a
-    /// struct.
-    Obj,
-    /// Opens an object from a map, whose key texts can repeat.
-    Map,
-    End,
-}
-
-/// An open array or object of [`TreeEncoder`].
+/// An open container of a [`TreeEncoder`], with the index of its first part
+/// in the encoder's values.
 #[derive(Clone, Copy)]
 enum TreeOpen {
-    Arr,
-    /// An object whose member keys come from `field` calls, of the struct or
-    /// the variant `names`.
-    Fields(Option<(u32, bool)>),
+    Arr(usize),
+    /// An object whose member keys come from `field` calls on the struct or
+    /// the variant `names`, or from the bounds of a `Range`.
+    Fields(usize, Option<(u32, bool)>),
     /// A map, and `true` while the next value is a key.
-    Map(bool),
-    /// The outer object of a variant with a payload; its payload follows.
-    VariantWrapper,
+    Map(usize, bool),
+    /// The outer object of a variant with a payload: the variant name, then
+    /// the payload.
+    VariantWrapper(usize),
     /// `Some`, which writes only its payload.
     Some,
 }
@@ -1055,132 +1028,277 @@ enum TreeOpen {
 /// The state of a [`TreeEncoder`] that [`EncodeFormat::save`] keeps.
 #[derive(Clone, Copy)]
 struct TreeState {
-    tokens: usize,
-    text: usize,
+    values: usize,
     open: usize,
     top: Option<TreeOpen>,
     depth: usize,
 }
 
-/// Builds a `json.Json` value. It records the value as tokens, and
-/// [`TreeEncoder::build`] makes the Sand value from them in one pass.
+/// Builds a `json.Json` value as the encode runs.
 pub(crate) struct TreeEncoder {
-    tokens: Vec<Token>,
-    /// The texts of the `Str` tokens, in order.
-    text: String,
+    /// The finished parts of the open containers, and then the finished
+    /// value. The `Encoder` keeps them, where the collector traces them, and
+    /// lends them to the format for each native call (see
+    /// [`EncodeFormat::swap_values`]).
+    values: ObjectValues,
     open: Vec<TreeOpen>,
     /// The number of open arrays and objects.
     depth: usize,
     saved: Option<TreeState>,
+    /// The key `str` of each field and variant name that this native call
+    /// made.
+    names: FxHashMap<(u32, bool, u32), VmValue>,
+    /// The hashes of the texts of those keys, by heap handle.
+    name_hashes: FxHashMap<u32, u64>,
+    /// The variant ids of `Json`, from the first call.
+    ids: Option<JsonIds>,
     budget: Budget,
 }
 
 impl TreeEncoder {
     pub(crate) fn new() -> TreeEncoder {
-        TreeEncoder { tokens: Vec::new(), text: String::new(), open: Vec::new(), depth: 0, saved: None, budget: Budget::default() }
-    }
-
-    /// Builds the encoded value. The tokens stay, so that the native
-    /// function can run again if a memory check fails.
-    pub(crate) fn build(&self, vm: &mut Vm) -> Result<VmValue, Fail> {
-        if !self.open.is_empty() || self.tokens.is_empty() {
-            return internal("json.to_json: no value");
+        TreeEncoder {
+            values: ObjectValues::new(),
+            open: Vec::new(),
+            depth: 0,
+            saved: None,
+            names: FxHashMap::default(),
+            name_hashes: FxHashMap::default(),
+            ids: None,
+            budget: Budget::default(),
         }
-        let ids = JsonIds::new(&vm.prog)?;
-        let (prog, meter) = (&vm.prog, &vm.meter);
-        vm.heap.staged(|_, st| Builder::new(st, meter).tokens(ids, prog, &self.tokens, &self.text))
     }
 
-    /// Counts the memory of a new token and `text` more bytes of text,
-    /// before any change.
-    #[inline(always)]
-    fn reserve(&mut self, vm: &mut Vm, text: usize) -> Result<(), Fail> {
-        let tokens = (self.tokens.len() + 4).saturating_mul(size_of::<Token>());
-        self.budget.grow(vm, tokens.saturating_add(self.text.len()).saturating_add(text))
+    /// Returns the encoded value.
+    pub(crate) fn encoded(&self) -> Result<VmValue, Fail> {
+        match (self.open.is_empty(), self.values.as_slice()) {
+            (true, &[root]) => Ok(root),
+            _ => internal("json.to_json: no value"),
+        }
+    }
+
+    /// Stops counting the values that the encoder holds, after a native
+    /// call that kept the encoder on the Rust stack.
+    pub(crate) fn release(self, vm: &mut Vm) {
+        // `room` counted the growth past the inline slot.
+        let grown = self.values.capacity() - self.values.inline_size();
+        vm.heap.account(grown * VALUE_SIZE + self.budget.counted(), 0);
     }
 
     fn in_key(&self) -> bool {
-        matches!(self.open.last(), Some(TreeOpen::Map(true)))
+        matches!(self.open.last(), Some(TreeOpen::Map(_, true)))
+    }
+
+    fn state(&self) -> TreeState {
+        TreeState { values: self.values.len(), open: self.open.len(), top: self.open.last().copied(), depth: self.depth }
+    }
+
+    fn rewind(&mut self, s: TreeState) {
+        self.values.truncate(s.values);
+        self.open.truncate(s.open);
+        if let (Some(top), Some(last)) = (s.top, self.open.last_mut()) {
+            *last = top;
+        }
+        self.depth = s.depth;
+    }
+
+    /// Runs `op`, which makes more than one change, and goes back to the
+    /// state before it if it fails, so that the native function can run
+    /// again.
+    fn atomic(&mut self, vm: &mut Vm, op: impl FnOnce(&mut Self, &mut Vm) -> Result<(), Fail>) -> Result<(), Fail> {
+        let before = self.state();
+        let r = op(self, vm);
+        if r.is_err() {
+            self.rewind(before);
+        }
+        r
     }
 
     /// Notes that a value or a key of the innermost container ended.
     #[inline(always)]
     fn item_done(&mut self) {
-        if let Some(TreeOpen::Map(is_key)) = self.open.last_mut() {
+        if let Some(TreeOpen::Map(_, is_key)) = self.open.last_mut() {
             *is_key = !*is_key;
         }
     }
 
-    /// Adds the scalar `token`, which cannot be a map key.
+    /// Counts room for one more value against the memory limit, before any
+    /// change.
     #[inline(always)]
-    fn value(&mut self, vm: &mut Vm, token: Token) -> Result<(), Fail> {
+    fn room(&mut self, vm: &mut Vm) -> Result<(), Fail> {
+        if self.values.len() < self.values.capacity() {
+            return Ok(());
+        }
+        let (before, after) = (self.values.capacity(), self.values.capacity().max(4) * 2);
+        vm.check_memory((after - before) * VALUE_SIZE)?;
+        vm.heap.account(before * VALUE_SIZE, after * VALUE_SIZE);
+        self.values.reserve_exact(after - self.values.len());
+        Ok(())
+    }
+
+    /// Adds the finished part `v`, after [`TreeEncoder::room`].
+    #[inline(always)]
+    fn put(&mut self, v: VmValue) {
+        self.values.push(v);
+        self.item_done();
+    }
+
+    /// Adds the scalar `v`, which cannot be a map key.
+    #[inline(always)]
+    fn value(&mut self, vm: &mut Vm, v: VmValue) -> Result<(), Fail> {
         if self.in_key() {
             return invalid_key_error();
         }
-        self.reserve(vm, 0)?;
-        self.tokens.push(token);
-        self.item_done();
+        self.room(vm)?;
+        self.put(v);
         Ok(())
     }
 
-    /// Adds `token`, the name of a field or a variant, as a value or as a
-    /// map key.
     #[inline(always)]
-    fn name(&mut self, vm: &mut Vm, token: Token) -> Result<(), Fail> {
-        self.reserve(vm, 0)?;
-        self.tokens.push(token);
-        self.item_done();
+    fn ids(&mut self, vm: &Vm) -> Result<JsonIds, Fail> {
+        match self.ids {
+            Some(ids) => Ok(ids),
+            None => Ok(*self.ids.insert(JsonIds::new(&vm.prog)?)),
+        }
+    }
+
+    /// Adds the `str` `s`, as a `Json.Str` or as a map key.
+    fn str_part(&mut self, vm: &mut Vm, s: VmValue) -> Result<(), Fail> {
+        let str_ = self.ids(vm)?.str_;
+        let v = if self.in_key() { s } else { vm.heap.new_variant(str_, &[s]) };
+        self.room(vm)?;
+        self.put(v);
         Ok(())
     }
 
-    /// Adds a text, as a value or as a map key.
-    #[inline(always)]
-    fn text(&mut self, vm: &mut Vm, s: &str) -> Result<(), Fail> {
-        vm.charge_bytes(s.len())?;
-        self.reserve(vm, s.len())?;
-        self.text.push_str(s);
-        self.tokens.push(Token::Str(s.len()));
-        self.item_done();
-        Ok(())
+    /// Adds a new `str` with the text `text`, as a `Json.Str` or as a map key.
+    fn text(&mut self, vm: &mut Vm, text: &str) -> Result<(), Fail> {
+        vm.charge_bytes(text.len())?;
+        vm.check_memory(size_of::<Obj>() + text.len())?;
+        let s = vm.heap.new_str(text);
+        self.str_part(vm, s)
     }
 
-    /// Opens `open`, which `token` starts, after the checks.
-    fn begin(&mut self, vm: &mut Vm, token: Token, open: TreeOpen) -> Result<(), Fail> {
+    /// Returns the key `str` of field `index` of `owner`, or of the name of
+    /// variant `owner` if `index` is `u32::MAX`.
+    fn name(&mut self, vm: &mut Vm, owner: u32, variant: bool, index: u32) -> Result<VmValue, Fail> {
+        if let Some(&s) = self.names.get(&(owner, variant, index)) {
+            return Ok(s);
+        }
+        let text = match index {
+            u32::MAX => vm.prog.variants.get(owner as usize).map(|v| v.name.clone()),
+            _ => field_name(&vm.prog, owner, variant, index as usize).map(str::to_string),
+        };
+        let Some(text) = text else { return internal("json.to_json: unknown field or variant") };
+        vm.check_memory(size_of::<Obj>() + text.len())?;
+        vm.charge_bytes(text.len())?;
+        let hash = str_hash(&text);
+        let s = vm.heap.new_str(text);
+        self.names.insert((owner, variant, index), s);
+        if let Some(h) = s.handle() {
+            self.name_hashes.insert(h, hash);
+        }
+        Ok(s)
+    }
+
+    /// Opens `open`, after the checks.
+    fn begin(&mut self, vm: &mut Vm, open: TreeOpen) -> Result<(), Fail> {
         if self.in_key() {
             return invalid_key_error();
         }
         if self.depth >= MAX_NESTING_DEPTH {
             return fail("limit", "value too deeply nested to convert to JSON");
         }
-        self.reserve(vm, 0)?;
-        self.tokens.push(token);
+        self.budget.grow(vm, (self.open.len() + 1) * size_of::<TreeOpen>())?;
         self.open.push(open);
         self.depth += 1;
         Ok(())
+    }
+
+    /// Makes the `Json` array or object of the parts that `open` holds.
+    fn finish(&mut self, vm: &mut Vm, open: TreeOpen) -> Result<VmValue, Fail> {
+        let ids = self.ids(vm)?;
+        match open {
+            TreeOpen::Arr(base) => {
+                let items = &self.values[base..];
+                vm.check_memory(size_of::<Obj>() + items.len() * VALUE_SIZE)?;
+                let list = vm.heap.new_list(items.to_vec());
+                Ok(vm.heap.new_variant(ids.arr, &[list]))
+            }
+            TreeOpen::Fields(base, _) | TreeOpen::Map(base, _) | TreeOpen::VariantWrapper(base) => {
+                let map = self.object(vm, base, !matches!(open, TreeOpen::Map(..)))?;
+                Ok(vm.heap.new_variant(ids.obj, &[map]))
+            }
+            TreeOpen::Some => internal("json.to_json: no open container"),
+        }
+    }
+
+    /// Makes the map of the key and value pairs from `base`. A later pair
+    /// replaces an earlier one with the same key, unless the keys are
+    /// `distinct`.
+    fn object(&self, vm: &mut Vm, base: usize, distinct: bool) -> Result<VmValue, Fail> {
+        let members = &self.values[base..];
+        let n = members.len() / 2;
+        vm.check_memory(size_of::<Obj>() + n * (MAP_ENTRY_SIZE + 2 * VALUE_SIZE))?;
+        let keys = members.iter().step_by(2).copied();
+        let mut map = MapObj { entries: Vec::with_capacity(n), index: KeyIndex::for_keys(n, keys), ..MapObj::default() };
+        for &[key, value] in members.as_chunks::<2>().0 {
+            let hash = match key.handle().and_then(|h| self.name_hashes.get(&h)) {
+                Some(&hash) => hash,
+                None => {
+                    let text = vm.heap.str(key);
+                    vm.charge_bytes(text.len())?;
+                    str_hash(text)
+                }
+            };
+            if !distinct {
+                let (heap, entries) = (&vm.heap, &map.entries);
+                let same = |slot: usize| entries[slot].is_some_and(|(k, _)| heap.str(k) == heap.str(key));
+                if let Some(slot) = map.index.find(key, hash, same) {
+                    map.entries[slot] = Some((key, value));
+                    continue;
+                }
+            }
+            let slot = map.entries.len();
+            if !slot_fits(slot) {
+                return fail("limit", "map too large");
+            }
+            map.index.insert(key, hash, slot);
+            map.entries.push(Some((key, value)));
+        }
+        map.live = map.entries.len();
+        Ok(vm.heap.alloc(Obj::Map(Box::new(map))))
     }
 }
 
 impl EncodeFormat for TreeEncoder {
     fn unit(&mut self, vm: &mut Vm) -> Result<(), Fail> {
-        self.value(vm, Token::Null)
+        let null = self.ids(vm)?.null;
+        self.value(vm, VmValue::Tag(null))
     }
 
     fn bool(&mut self, vm: &mut Vm, b: bool) -> Result<(), Fail> {
         if self.in_key() {
             return self.text(vm, if b { "true" } else { "false" });
         }
-        self.value(vm, Token::Bool(b))
+        let v = vm.heap.new_variant(self.ids(vm)?.bool_, &[VmValue::Bool(b)]);
+        self.value(vm, v)
     }
 
     fn int(&mut self, vm: &mut Vm, i: i64) -> Result<(), Fail> {
         if self.in_key() {
             return self.text(vm, itoa::Buffer::new().format(i));
         }
-        self.value(vm, Token::Int(i))
+        let v = vm.heap.new_variant(self.ids(vm)?.int, &[VmValue::Int(i)]);
+        self.value(vm, v)
     }
 
     fn float(&mut self, vm: &mut Vm, f: f64) -> Result<(), Fail> {
-        self.value(vm, if f.is_finite() { Token::Float(f) } else { Token::Null })
+        if !f.is_finite() {
+            return self.unit(vm);
+        }
+        let v = vm.heap.new_variant(self.ids(vm)?.float, &[VmValue::Float(f)]);
+        self.value(vm, v)
     }
 
     fn duration(&mut self, vm: &mut Vm, nanos: i64) -> Result<(), Fail> {
@@ -1189,6 +1307,15 @@ impl EncodeFormat for TreeEncoder {
 
     fn str(&mut self, vm: &mut Vm, s: &str) -> Result<(), Fail> {
         self.text(vm, s)
+    }
+
+    fn keeps_values(&self) -> bool {
+        true
+    }
+
+    fn str_value(&mut self, vm: &mut Vm, s: VmValue) -> Result<(), Fail> {
+        vm.charge_bytes(vm.heap.str(s).len())?;
+        self.str_part(vm, s)
     }
 
     fn bytes(&mut self, vm: &mut Vm, b: &[u8]) -> Result<(), Fail> {
@@ -1204,35 +1331,44 @@ impl EncodeFormat for TreeEncoder {
     }
 
     fn range(&mut self, vm: &mut Vm, start: i64, end: i64, inclusive: bool) -> Result<(), Fail> {
-        self.begin(vm, Token::Obj, TreeOpen::Fields(None))?;
-        let members = [("start", Token::Int(start)), ("end", Token::Int(end))];
-        for (name, bound) in members.into_iter().chain(inclusive.then_some(("inclusive", Token::Bool(true)))) {
-            self.text(vm, name)?;
-            self.reserve(vm, 0)?;
-            self.tokens.push(bound);
-        }
-        self.end(vm)
+        self.atomic(vm, |f, vm| {
+            f.begin(vm, TreeOpen::Fields(f.values.len(), None))?;
+            let members = [("start", start, false), ("end", end, false)];
+            for (name, bound, is_bool) in members.into_iter().chain(inclusive.then_some(("inclusive", 1, true))) {
+                vm.charge_bytes(name.len())?;
+                vm.check_memory(size_of::<Obj>() + name.len())?;
+                let key = vm.heap.new_str(name);
+                f.room(vm)?;
+                f.values.push(key);
+                let ids = f.ids(vm)?;
+                let v = match is_bool {
+                    true => vm.heap.new_variant(ids.bool_, &[VmValue::Bool(true)]),
+                    false => vm.heap.new_variant(ids.int, &[VmValue::Int(bound)]),
+                };
+                f.room(vm)?;
+                f.values.push(v);
+            }
+            f.end(vm)
+        })
     }
 
     fn begin_seq(&mut self, vm: &mut Vm, _: SeqKind, _: usize) -> Result<(), Fail> {
-        self.begin(vm, Token::Arr, TreeOpen::Arr)
+        self.begin(vm, TreeOpen::Arr(self.values.len()))
     }
 
     fn begin_map(&mut self, vm: &mut Vm, _: usize) -> Result<(), Fail> {
-        self.begin(vm, Token::Map, TreeOpen::Map(true))
+        self.begin(vm, TreeOpen::Map(self.values.len(), true))
     }
 
     fn begin_struct(&mut self, vm: &mut Vm, def: u32) -> Result<(), Fail> {
-        self.begin(vm, Token::Obj, TreeOpen::Fields(Some((def, false))))
+        self.begin(vm, TreeOpen::Fields(self.values.len(), Some((def, false))))
     }
 
     fn field(&mut self, vm: &mut Vm, index: usize) -> Result<(), Fail> {
-        let Some(&TreeOpen::Fields(Some((owner, variant)))) = self.open.last() else { return internal("json.to_json: no open struct") };
-        if field_name(&vm.prog, owner, variant, index).is_none() {
-            return internal("json.to_json: unknown field");
-        }
-        self.reserve(vm, 0)?;
-        self.tokens.push(Token::Field { owner, variant, index: index as u32 });
+        let Some(&TreeOpen::Fields(_, Some((owner, variant)))) = self.open.last() else { return internal("json.to_json: no open struct") };
+        let key = self.name(vm, owner, variant, index as u32)?;
+        self.room(vm)?;
+        self.values.push(key);
         Ok(())
     }
 
@@ -1240,10 +1376,8 @@ impl EncodeFormat for TreeEncoder {
         if variant == vm.prog.ids.none {
             return self.none(vm);
         }
-        if vm.prog.variants.get(variant as usize).is_none() {
-            return internal("json.to_json: unknown variant");
-        }
-        self.name(vm, Token::Variant(variant))
+        let s = self.name(vm, variant, true, u32::MAX)?;
+        self.str_part(vm, s)
     }
 
     fn begin_variant(&mut self, vm: &mut Vm, variant: u32) -> Result<(), Fail> {
@@ -1253,19 +1387,23 @@ impl EncodeFormat for TreeEncoder {
         if self.depth + 2 > MAX_NESTING_DEPTH {
             return fail("limit", "value too deeply nested to convert to JSON");
         }
-        self.begin(vm, Token::Obj, TreeOpen::VariantWrapper)?;
-        self.reserve(vm, 0)?;
-        self.tokens.push(Token::Variant(variant));
-        match named {
-            true => self.begin(vm, Token::Obj, TreeOpen::Fields(Some((variant, true)))),
-            false => self.begin(vm, Token::Arr, TreeOpen::Arr),
-        }
+        let key = self.name(vm, variant, true, u32::MAX)?;
+        self.atomic(vm, |f, vm| {
+            f.room(vm)?;
+            f.begin(vm, TreeOpen::VariantWrapper(f.values.len()))?;
+            f.values.push(key);
+            match named {
+                true => f.begin(vm, TreeOpen::Fields(f.values.len(), Some((variant, true)))),
+                false => f.begin(vm, TreeOpen::Arr(f.values.len())),
+            }
+        })
     }
 
-    fn begin_some(&mut self, _: &mut Vm) -> Result<(), Fail> {
+    fn begin_some(&mut self, vm: &mut Vm) -> Result<(), Fail> {
         if self.in_key() {
             return invalid_key_error();
         }
+        self.budget.grow(vm, (self.open.len() + 1) * size_of::<TreeOpen>())?;
         self.open.push(TreeOpen::Some);
         Ok(())
     }
@@ -1275,21 +1413,36 @@ impl EncodeFormat for TreeEncoder {
     }
 
     fn end(&mut self, vm: &mut Vm) -> Result<(), Fail> {
-        self.reserve(vm, 0)?;
-        match self.open.pop() {
-            Some(TreeOpen::Some) => {}
-            Some(_) => {
-                self.tokens.push(Token::End);
-                self.depth -= 1;
-                if let Some(TreeOpen::VariantWrapper) = self.open.last() {
-                    self.open.pop();
-                    self.tokens.push(Token::End);
-                    self.depth -= 1;
-                }
-            }
-            None => return internal("json.to_json: no open container"),
+        let Some(&top) = self.open.last() else { return internal("json.to_json: no open container") };
+        if let TreeOpen::Some = top {
+            self.open.pop();
+            self.item_done();
+            return Ok(());
         }
-        self.item_done();
+        // Builds the value, and the outer object of a variant, before any
+        // change.
+        self.room(vm)?;
+        let mut v = self.finish(vm, top)?;
+        let mut closed = 1;
+        let mut base = match top {
+            TreeOpen::Arr(base) | TreeOpen::Fields(base, _) | TreeOpen::Map(base, _) | TreeOpen::VariantWrapper(base) => base,
+            TreeOpen::Some => 0,
+        };
+        if let Some(&TreeOpen::VariantWrapper(outer)) = self.open.len().checked_sub(2).and_then(|i| self.open.get(i)) {
+            // The wrapper's key is in the values; its payload is `v`.
+            self.values.truncate(base);
+            self.values.push(v);
+            let map = self.object(vm, outer, true);
+            self.values.pop();
+            v = vm.heap.new_variant(self.ids(vm)?.obj, &[map?]);
+            (closed, base) = (2, outer);
+        }
+        for _ in 0..closed {
+            self.open.pop();
+            self.depth -= 1;
+        }
+        self.values.truncate(base);
+        self.put(v);
         Ok(())
     }
 
@@ -1302,19 +1455,19 @@ impl EncodeFormat for TreeEncoder {
     }
 
     fn save(&mut self) {
-        let (tokens, text, open, top, depth) = (self.tokens.len(), self.text.len(), self.open.len(), self.open.last().copied(), self.depth);
-        self.saved = Some(TreeState { tokens, text, open, top, depth });
+        self.saved = Some(self.state());
     }
 
     fn restore(&mut self) {
-        let Some(s) = self.saved.take() else { return };
-        self.tokens.truncate(s.tokens);
-        self.text.truncate(s.text);
-        self.open.truncate(s.open);
-        if let (Some(top), Some(last)) = (s.top, self.open.last_mut()) {
-            *last = top;
+        if let Some(s) = self.saved.take() {
+            self.rewind(s);
         }
-        self.depth = s.depth;
+    }
+
+    fn swap_values(&mut self, values: &mut ObjectValues) {
+        std::mem::swap(&mut self.values, values);
+        self.names.clear();
+        self.name_hashes.clear();
     }
 
     fn heap_size(&self) -> usize {

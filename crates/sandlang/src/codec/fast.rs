@@ -177,6 +177,7 @@ impl<'p> EncodeWalk<'p> {
             (Schema::Int, VmValue::Int(i)) => return f.int(vm, i).map(|()| None),
             (Schema::Float, VmValue::Float(x)) => return f.float(vm, x).map(|()| None),
             (Schema::Duration, VmValue::Dur(d)) => return f.duration(vm, d).map(|()| None),
+            (Schema::Str, _) if f.keeps_values() => return f.str_value(vm, v).map(|()| None),
             (Schema::Str, _) => {
                 self.text.clear();
                 self.text.push_str(vm.heap.str(v));

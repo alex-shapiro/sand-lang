@@ -1195,6 +1195,27 @@ impl Heap {
         }
     }
 
+    /// Takes the VM values of the native object `v` of type `T`, for the
+    /// length of one native call: [`Heap::put_native_values`] puts them
+    /// back before the call returns.
+    pub(crate) fn take_native_values<T: 'static>(&mut self, v: VmValue) -> Option<ObjectValues> {
+        let VmValue::Obj(h) = v else { return None };
+        match &mut self.objs[h as usize] {
+            Obj::Native(n) => Some(std::mem::take(&mut (&mut **n as &mut dyn std::any::Any).downcast_mut::<NativeCell<T>>()?.values)),
+            _ => None,
+        }
+    }
+
+    /// Puts back the VM values that [`Heap::take_native_values`] took.
+    pub(crate) fn put_native_values<T: 'static>(&mut self, v: VmValue, values: ObjectValues) {
+        if self.native_values::<T>(v).is_some()
+            && let Obj::Native(n) = self.get_mut(v)
+            && let Some(cell) = (&mut **n as &mut dyn std::any::Any).downcast_mut::<NativeCell<T>>()
+        {
+            cell.values = values;
+        }
+    }
+
     /// Returns the VM values of the native object `v` of type `T`.
     pub(crate) fn native_values<T: 'static>(&self, v: VmValue) -> Option<&ObjectValues> {
         match self.get(v) {
