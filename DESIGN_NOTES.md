@@ -659,3 +659,23 @@ while the engine still holds the `Encoder`.
 
 Measured (3 alternating rounds, ns per item; value-decode, C2, C3):
 `to_value` 368, 616, 357; `small_to_value` 95, 361, 298.
+
+### C4: list items in their own buffer; scalar parts read in the inner loop
+
+Profile of `decode_ints` (C3): number parsing 54% (value-decode does the
+same work), the walker 25%, `next_item` 11%, and the copy of the list from
+the value stack (`drain(..).collect()`) 6%. A list frame now owns its items
+(with a memory check when the buffer grows), so finishing a list moves the
+buffer into the heap object. A part with a scalar schema is read in the
+inner loop of the walk, without the round trip through the code that opens
+containers.
+
+Measured, 6 alternating runs of `BENCH_RUNS=5 BENCH_REPS=20` (min, mean):
+`decode_ints` C3 147, 152; C4 140, 149. `decode_ints_generic` C3 148, 156;
+C4 145, 148. value-decode: 109 to 114. The benchmark varies about ±5%
+between runs, so 3 rounds of the default settings cannot show changes of
+this size.
+
+`sample` keeps one address for each function, so it cannot show which
+lines of the inlined walker cost the time; `atos -i` on those addresses
+gives only the call site.

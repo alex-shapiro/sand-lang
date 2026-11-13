@@ -298,13 +298,13 @@ pub(super) fn decode<F: DecodeFormat + ?Sized>(vm: &mut Vm, f: &mut F, path: &mu
     r
 }
 
-/// A container that the decode walk is reading. The parts that a list,
-/// tuple, or struct has read are on the walk's value stack from `base`.
-/// `index` and `field` are the part being read, for the path of an error.
+/// A container that the decode walk is reading. The parts that a tuple or
+/// struct has read are on the walk's value stack from `base`. `index` and
+/// `field` are the part being read, for the path of an error.
 enum DecodeFrame<'p> {
     List {
         elem: SchemaId,
-        base: usize,
+        items: Vec<VmValue>,
         index: Option<usize>,
     },
     Set {
@@ -387,7 +387,8 @@ impl<'p> DecodeWalk<'p> {
                 if let Some(v) = done.take() {
                     let Some(frame) = self.stack.last_mut() else { return Ok(v) };
                     match frame {
-                        DecodeFrame::List { .. } | DecodeFrame::Tuple { .. } => self.values.push(v),
+                        DecodeFrame::List { items, .. } => push_item(vm, items, v)?,
+                        DecodeFrame::Tuple { .. } => self.values.push(v),
                         DecodeFrame::Set { set, .. } => _ = vm.set_add(*set, v)?,
                         DecodeFrame::Map { map, entry_key, .. } => match entry_key.take() {
                             None => {
@@ -409,7 +410,15 @@ impl<'p> DecodeWalk<'p> {
                     }
                 }
                 match self.next_part(vm, f)? {
-                    Some(next) => break next,
+                    Some((s, is_key)) => match prog_schema(self.prog, s)? {
+                        scalar if is_scalar(scalar) => {
+                            if !is_key {
+                                vm.charge(1 + f.take_input_fuel())?;
+                            }
+                            done = Some(self.read_scalar(vm, f, scalar)?);
+                        }
+                        _ => break (s, is_key),
+                    },
                     None => done = Some(self.finish(vm, f, path)?),
                 }
             };
@@ -484,10 +493,9 @@ impl<'p> DecodeWalk<'p> {
     fn finish<F: DecodeFormat + ?Sized>(&mut self, vm: &mut Vm, f: &mut F, path: &[Frame]) -> DecodeResult<VmValue> {
         let Some(frame) = self.stack.pop() else { return Err(Fail::internal("decode: no open container").into()) };
         Ok(match frame {
-            DecodeFrame::List { base, .. } => {
-                let n = self.values.len() - base;
-                vm.check_memory(size_of::<Obj>() + n * size_of::<VmValue>())?;
-                vm.heap.new_list(self.values.drain(base..).collect())
+            DecodeFrame::List { items, .. } => {
+                vm.check_memory(size_of::<Obj>())?;
+                vm.heap.new_list(items)
             }
             DecodeFrame::Set { set, .. } => set,
             DecodeFrame::Map { map, text, .. } => {
@@ -556,13 +564,7 @@ impl<'p> DecodeWalk<'p> {
         let prog = self.prog;
         let base = self.values.len();
         let v = match prog_schema(prog, s)? {
-            Schema::Unit => f.unit(vm).map(|()| VmValue::Unit)?,
-            Schema::Bool => VmValue::Bool(f.bool(vm)?),
-            Schema::Int => VmValue::Int(f.int(vm)?),
-            Schema::Float => VmValue::Float(f.float(vm)?),
-            Schema::Duration => VmValue::Dur(f.duration(vm)?),
-            Schema::Str => f.str(vm)?,
-            Schema::Bytes => f.bytes(vm)?,
+            scalar if is_scalar(scalar) => self.read_scalar(vm, f, scalar)?,
             Schema::Range => {
                 let (start, end, inclusive) = f.range(vm)?;
                 vm.check_memory(size_of::<Obj>())?;
@@ -572,7 +574,7 @@ impl<'p> DecodeWalk<'p> {
             Schema::Json => f.json(vm)?,
             &Schema::List(elem) => {
                 f.begin_seq(vm, SeqKind::List)?;
-                return Ok(Opened::Frame(DecodeFrame::List { elem, base, index: None }));
+                return Ok(Opened::Frame(DecodeFrame::List { elem, items: Vec::new(), index: None }));
             }
             &Schema::Set(elem) => {
                 f.begin_seq(vm, SeqKind::Set)?;
@@ -602,8 +604,26 @@ impl<'p> DecodeWalk<'p> {
                 return Ok(Opened::Frame(frame));
             }
             Schema::Enum(first, variants) => return self.open_variant(vm, f, *first, variants),
+            Schema::Unit | Schema::Bool | Schema::Int | Schema::Float | Schema::Duration | Schema::Str | Schema::Bytes => {
+                return Err(Fail::internal("decode: a scalar schema").into());
+            }
         };
         Ok(Opened::Value(v))
+    }
+
+    /// Reads a value of the scalar schema `s` (see [`is_scalar`]).
+    #[inline(always)]
+    fn read_scalar<F: DecodeFormat + ?Sized>(&self, vm: &mut Vm, f: &mut F, s: &Schema) -> DecodeResult<VmValue> {
+        Ok(match s {
+            Schema::Unit => f.unit(vm).map(|()| VmValue::Unit)?,
+            Schema::Bool => VmValue::Bool(f.bool(vm)?),
+            Schema::Int => VmValue::Int(f.int(vm)?),
+            Schema::Float => VmValue::Float(f.float(vm)?),
+            Schema::Duration => VmValue::Dur(f.duration(vm)?),
+            Schema::Str => f.str(vm)?,
+            Schema::Bytes => f.bytes(vm)?,
+            _ => return Err(Fail::internal("decode: not a scalar schema").into()),
+        })
     }
 
     /// Reads a variant of the enum whose first variant has runtime id
@@ -682,4 +702,22 @@ impl<'p> DecodeWalk<'p> {
             });
         }
     }
+}
+
+/// Returns `true` if a value of schema `s` is one format operation.
+#[inline(always)]
+fn is_scalar(s: &Schema) -> bool {
+    matches!(s, Schema::Unit | Schema::Bool | Schema::Int | Schema::Float | Schema::Duration | Schema::Str | Schema::Bytes)
+}
+
+/// Adds `v` to the list `items`, after a memory check if the list grows.
+#[inline(always)]
+fn push_item(vm: &Vm, items: &mut Vec<VmValue>, v: VmValue) -> Result<(), Fail> {
+    if items.len() == items.capacity() {
+        let more = items.capacity().max(4);
+        vm.check_memory((items.capacity() + more) * size_of::<VmValue>())?;
+        items.reserve_exact(more);
+    }
+    items.push(v);
+    Ok(())
 }
