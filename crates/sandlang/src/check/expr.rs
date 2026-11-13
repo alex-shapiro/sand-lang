@@ -1611,7 +1611,6 @@ impl Checker {
             hidden.extend(hargs);
             hargs = hidden;
         }
-        self.encode_native_args(f, &fresh, &mut hargs, span);
         mk(self.call_kind(f, fresh, hargs), ret, span)
     }
 

@@ -541,25 +541,56 @@ impl Checker {
         })
     }
 
-    /// Replaces each argument of native function `f` whose Rust type is
-    /// `Encoded<N>` with its encoding, `encode_value(arg)`. `args` starts with
-    /// the hidden arguments, and `targs` instantiates `f`.
-    pub(crate) fn encode_native_args(&mut self, f: FnId, targs: &[TypeId], args: &mut [HArg], span: Span) {
-        let Some(positions) = self.encoded_params.get(&f).cloned() else { return };
-        let Some(Def::Fn(encode)) = self.prelude.and_then(|p| self.scope_def(p, "encode_value")) else { return };
-        let Some(tr) = self.builtin_trait(Builtin::Encode) else { return };
-        let hidden = self.fns[f as usize].dicts.len();
-        let gens = self.fns[f as usize].generics.clone();
-        let encoder = self.codec_type("Encoder");
-        for i in positions.iter() {
-            let ty = self.fns[f as usize].params[*i as usize].ty;
-            let ty = self.arena.instantiate(ty, &gens, targs);
-            let Some(HArg::Expr(arg)) = args.get_mut(hidden + *i as usize) else { continue };
-            let value = std::mem::replace(arg, mk(HKind::Unit, TypeId::UNIT, span));
-            let dict = self.evidence_hole(ty, tr, false, span);
-            let call = HKind::Call { func: encode, targs: vec![ty], args: vec![HArg::Expr(dict), HArg::Expr(value)] };
-            *arg = mk(call, encoder, span);
+    /// Declares the function that Sand code calls in place of the native
+    /// function `raw`, whose parameters at `encoded` have the Rust type
+    /// `Encoded<N>`, and returns it. The new function has the signature of
+    /// `raw` and the dictionaries `dicts`. It encodes each of those arguments
+    /// and calls `raw`, so that direct calls, function values, and method
+    /// values all encode their arguments. The inliner removes it at direct
+    /// calls.
+    pub(crate) fn add_native_boundary(&mut self, raw: FnId, encoded: Arc<[u32]>, dicts: Vec<(TypeId, TraitRef)>) -> FnId {
+        let boundary = FnInfo { kind: FnKind::Script, decl: Some(FnDeclRef::Boundary(raw)), dicts, ..self.fns[raw as usize].clone() };
+        let raw_fn = &mut self.fns[raw as usize];
+        raw_fn.is_pub = false;
+        raw_fn.doc = None;
+        self.encoded_params.insert(raw, encoded);
+        self.add_fn(boundary)
+    }
+
+    /// Builds the body of the boundary function `f` of the native function
+    /// `target`: a call of `target` with the arguments `params`, after the
+    /// hidden dictionaries of `f`, where each argument of an `Encoded<N>`
+    /// parameter becomes its encoding, `encode_value(arg)`.
+    pub(crate) fn boundary_body(&mut self, f: FnId, target: FnId, params: &[LocalId], span: Span) -> HExpr {
+        let FnKind::Native(native) = self.fns[target as usize].kind else { return mk(HKind::Error, TypeId::ERROR, span) };
+        let encoded = self.encoded_params.get(&target).cloned().unwrap_or_default();
+        let (generics, ret) = (self.fns[f as usize].generics.clone(), self.fns[f as usize].ret);
+        let targs: Vec<TypeId> = generics.iter().map(|&g| self.param_ty(g)).collect();
+        let dicts = self.fns[target as usize].dicts.clone();
+        let mut args = self.hidden_args(&dicts, &|_, _| false, span);
+        let values = &params[params.len() - self.fns[f as usize].params.len()..];
+        for (i, &l) in values.iter().enumerate() {
+            let ty = self.fs.data[l as usize].ty;
+            let value = mk(HKind::Local(l), ty, span);
+            args.push(HArg::Expr(match encoded.contains(&(i as u32)) {
+                true => self.encode_value(ty, value, span),
+                false => value,
+            }));
         }
+        mk(HKind::CallNative { native, targs, args }, ret, span)
+    }
+
+    /// `encode_value(value)`: the encoding of `value`, of type `ty`, as an
+    /// `Encoder` that holds the encoded `Value`.
+    fn encode_value(&mut self, ty: TypeId, value: HExpr, span: Span) -> HExpr {
+        let encoder = self.codec_type("Encoder");
+        let (Some(Def::Fn(encode)), Some(tr)) =
+            (self.prelude.and_then(|p| self.scope_def(p, "encode_value")), self.builtin_trait(Builtin::Encode))
+        else {
+            return mk(HKind::Error, encoder, span);
+        };
+        let dict = self.evidence_hole(ty, tr, false, span);
+        mk(HKind::Call { func: encode, targs: vec![ty], args: vec![HArg::Expr(dict), HArg::Expr(value)] }, encoder, span)
     }
 
     /// Returns `true` if `ty` is a type parameter, or if an `impl` of

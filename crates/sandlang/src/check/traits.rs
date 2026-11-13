@@ -933,7 +933,6 @@ impl Checker {
             args.push(HArg::Expr(mk(HKind::Local(l), t, span)));
         }
         let name = self.fns[f as usize].runtime_name(&self.types, &self.syms);
-        self.encode_native_args(f, &inst.fresh, &mut args, span);
         let body = mk(self.call_kind(f, inst.fresh, args), inst.ret, span);
         let lam = HLambda { id, name, params, body, self_local: None };
         let fty = self.fn_ty(&inst.params, inst.ret);

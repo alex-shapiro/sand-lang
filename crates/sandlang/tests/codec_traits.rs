@@ -116,6 +116,22 @@ fn scenario_6_host_values_go_through_the_hand_written_implementations() {
 }
 
 #[test]
+fn every_use_of_a_native_function_encodes_its_encoded_arguments() {
+    let kept = Arc::new(Mutex::new(Vec::new()));
+    let src = "import host\n\
+               struct P { a: int }\n\
+               impl Encode for P {\n    fn encode(self, e: Encoder) { e.encode(self.a) }\n}\n\
+               host.keep(P(a: 1))\n\
+               let f = host.keep\nf(P(a: 2))\n\
+               fn apply<T: Encode>(g: fn(T), x: T) { g(x) }\napply(host.keep, P(a: 3))\n\
+               fn later() { defer host.keep(P(a: 4)) }\nlater()\n\
+               let t = spawn host.keep(P(a: 5))\nt.wait()\n";
+    let (r, _) = run(vec![host_module(kept.clone(), Vec::new())], Limits::default(), src);
+    r.unwrap();
+    assert_eq!(*kept.lock(), (1..=5).map(Value::Int).collect::<Vec<_>>());
+}
+
+#[test]
 fn a_host_decoder_reads_another_type_after_a_failed_read() {
     let inputs = vec![str_("x"), str_("y")];
     let src = "import host\n\

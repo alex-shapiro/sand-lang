@@ -244,6 +244,9 @@ pub enum FnDeclRef {
     },
     /// A method of a synthesized `impl` of `Encode` or `Decode`.
     Derived(codec::DerivedMethod),
+    /// A function that converts its arguments for the native function
+    /// `target`, and then calls it ([`Checker::add_native_boundary`]).
+    Boundary(FnId),
 }
 
 /// A function or method declared by the index of an item in a module.
@@ -635,7 +638,7 @@ pub struct Checker {
     pub(crate) impls_by: PMap<(TraitId, Ctor, u32), Arc<[ImplId]>>,
     pub(crate) impls_by_ctor: PMap<(Ctor, u32), Arc<[ImplId]>>,
     /// The parameters of each native function whose Rust type is
-    /// `Encoded<N>`: each call encodes its argument in Sand code.
+    /// `Encoded<N>`. Its boundary function encodes these arguments.
     pub(crate) encoded_params: PMap<FnId, Arc<[u32]>>,
     /// Records variable bindings made by `unify` so they can be undone.
     pub(crate) unify_log: Option<Vec<VarId>>,
@@ -2775,11 +2778,12 @@ impl Checker {
         } else {
             FnKind::Script
         };
-        let mut dicts: Vec<(TypeId, TraitRef)> = Vec::new();
+        let mut script_dicts: Vec<(TypeId, TraitRef)> = Vec::new();
         for &p in &generics {
             let pt = self.param_ty(p);
-            dicts.extend(self.params[p as usize].traits.iter().filter(|tr| self.has_dict(tr)).map(|&tr| (pt, tr)));
+            script_dicts.extend(self.params[p as usize].traits.iter().filter(|tr| self.has_dict(tr)).map(|&tr| (pt, tr)));
         }
+        let mut dicts = script_dicts.clone();
         if f.is_native {
             if generics.iter().any(|&p| self.params[p as usize].traits.iter().any(|tr| self.traits[tr.trait_id as usize].builtin.is_none()))
             {
@@ -2807,9 +2811,10 @@ impl Checker {
             impl_of: None,
             trait_of: None,
         });
-        if !encoded.is_empty() {
-            self.encoded_params.insert(id, encoded.into());
-        }
+        let (id, dicts) = match encoded.is_empty() {
+            true => (id, dicts),
+            false => (self.add_native_boundary(id, encoded.into(), script_dicts.clone()), script_dicts),
+        };
         // Default argument helpers.
         for (i, p) in f.params.iter().enumerate() {
             let kept = |d: &&ast::Expr| match rules.defaults {
@@ -3078,7 +3083,11 @@ impl Checker {
             || fi.trait_of.is_some()
             || matches!(
                 decl,
-                FnDeclRef::ParamDefault(..) | FnDeclRef::FieldDefault { .. } | FnDeclRef::BoundDefault(_) | FnDeclRef::Derived(_)
+                FnDeclRef::ParamDefault(..)
+                    | FnDeclRef::FieldDefault { .. }
+                    | FnDeclRef::BoundDefault(_)
+                    | FnDeclRef::Derived(_)
+                    | FnDeclRef::Boundary(_)
             );
         self.begin_fn(generics, self_ty);
         let fi = &self.fns[id as usize];
@@ -3143,6 +3152,10 @@ impl Checker {
             FnDeclRef::Derived(method) => {
                 let span = self.fns[id as usize].span;
                 (self.derived_body(id, method, &param_locals, span), span)
+            }
+            FnDeclRef::Boundary(target) => {
+                let span = self.fns[id as usize].span;
+                (self.boundary_body(id, target, &param_locals, span), span)
             }
             FnDeclRef::Init => unreachable!(),
         };
