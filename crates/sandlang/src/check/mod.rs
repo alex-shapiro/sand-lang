@@ -674,9 +674,9 @@ pub struct Checker {
     /// `Encode` and `Decode` (`codec/fast.rs`). Off only in tests that
     /// compare it with the synthesized implementations.
     pub(crate) codec_fast_path: bool,
-    /// The native `impl` of `Encode` (`false`) or `Decode` (`true`) for each
-    /// closed type, or `None` if the type has a hand-written part.
-    pub(crate) fast_impls: PMap<(TypeId, bool), Option<ImplId>>,
+    /// The native `impl` of `Encode` or `Decode` for each closed type, or
+    /// `None` if the type has a hand-written part.
+    pub(crate) fast_impls: PMap<(TypeId, Builtin), Option<ImplId>>,
     /// The schemas of the types that the native impls walk.
     pub(crate) schemas: PVec<crate::codec::fast::Schema>,
     pub(crate) schema_ids: PMap<TypeId, crate::codec::fast::SchemaId>,

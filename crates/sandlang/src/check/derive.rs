@@ -25,8 +25,8 @@ impl Checker {
     pub(crate) fn derived_required_params(&self, c: Ctor, n: usize, b: Builtin) -> Option<Vec<u32>> {
         use Builtin::*;
         if b.is_synthesized() {
-            if let Some(r) = self.codec_impl_params(c, n, b) {
-                return r;
+            if let Some(id) = self.first_codec_impl(b, c, n) {
+                return self.codec_impl_params(id);
             }
             return match c {
                 Ctor::Def(d) => match self.derived.get(d as usize).map(|x| &x[b as usize]) {

@@ -68,14 +68,22 @@ pub struct ImplDef {
     pub evidence: Vec<(TypeId, TraitRef)>,
     /// Indicates whether a later REPL input replaced this `impl`.
     pub replaced: bool,
-    /// Indicates that the checker synthesized this `impl` of `Encode` or
-    /// `Decode`. Its methods exist once a dictionary needs them
-    /// ([`Checker::ensure_derived_methods`]).
-    pub derived: bool,
-    /// Indicates the native `impl` of `Encode` or `Decode` for one closed
-    /// type ([`Checker::fast_codec_impl`]). Trait resolution prefers it, and
-    /// it is not in the lookup tables of impls.
-    pub fast: bool,
+    pub origin: ImplOrigin,
+}
+
+/// The source of an `impl`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImplOrigin {
+    /// An `impl` block of a module.
+    Written,
+    /// An `impl` of `Encode` or `Decode` that the checker synthesizes from
+    /// the components of its type. Its methods exist once a dictionary needs
+    /// them ([`Checker::ensure_derived_methods`]).
+    Derived,
+    /// The native `impl` of `Encode` or `Decode` for one closed type
+    /// ([`Checker::fast_codec_impl`]). Trait resolution prefers it, and it is
+    /// not in the lookup tables of impls.
+    Fast,
 }
 
 struct Requirement {
@@ -597,8 +605,7 @@ impl Checker {
             slots: Vec::new(),
             evidence,
             replaced: false,
-            derived: false,
-            fast: false,
+            origin: ImplOrigin::Written,
         });
         add_impl(&mut self.impls_by, key, id);
         add_impl(&mut self.impls_by_ctor, (ctor, arity), id);
@@ -1411,7 +1418,8 @@ impl Checker {
                         && s.trait_id == tr.trait_id
                         && m.explain.is_some_and(|(_, _, b)| b.is_synthesized())
                         && builtin.is_some_and(|b| b.is_synthesized())
-                        && (self.impls[id as usize].derived || Some(self.impls[id as usize].module) == self.prelude) =>
+                        && (self.impls[id as usize].origin == ImplOrigin::Derived
+                            || Some(self.impls[id as usize].module) == self.prelude) =>
                 {
                     return Err(not_impl(self));
                 }

@@ -9,7 +9,7 @@
 
 use super::derive::Derived;
 use super::expr::mk;
-use super::traits::{add_impl, impl_key};
+use super::traits::{ImplOrigin, add_impl, impl_key};
 use super::*;
 use crate::codec::composed::{SchemaTemplate, TemplateId, TemplateRef};
 use crate::codec::fast::{FieldDefault, Schema, SchemaId};
@@ -60,15 +60,26 @@ pub(crate) struct CodecTemplates {
 }
 
 impl Checker {
-    /// Returns the type parameter indices of constructor `c` (with `n` type
-    /// arguments) that a hand-written or synthesized `impl` of built-in trait
-    /// `b` requires, `Some(None)` if the `impl` cannot be derived through, or
-    /// `None` if no `impl` exists.
-    pub(crate) fn codec_impl_params(&self, c: Ctor, n: usize, b: Builtin) -> Option<Option<Vec<u32>>> {
+    /// Returns the first `impl` of the built-in trait `b` for constructor `c`
+    /// with `n` type arguments.
+    pub(crate) fn first_codec_impl(&self, b: Builtin, c: Ctor, n: usize) -> Option<ImplId> {
         let tr = self.builtin_trait(b)?;
-        let ids = self.impls_by.get(&(tr.trait_id, c, if c == Ctor::Tuple { n as u32 } else { 0 }))?;
-        let &id = ids.first()?;
+        let arity = if c == Ctor::Tuple { n as u32 } else { 0 };
+        self.impls_by.get(&(tr.trait_id, c, arity))?.first().copied()
+    }
+
+    /// Returns `true` if the first `impl` of `b` for the type definition `d`
+    /// is synthesized.
+    fn is_derived_codec(&self, b: Builtin, d: TypeDefId) -> bool {
+        self.first_codec_impl(b, Ctor::Def(d), 0).is_some_and(|i| self.impls[i as usize].origin == ImplOrigin::Derived)
+    }
+
+    /// Returns the type parameter indices of the target of `impl` `id` of
+    /// `Encode` or `Decode` that the `impl` requires to implement its trait,
+    /// or `None` if the `impl` cannot be derived through.
+    pub(crate) fn codec_impl_params(&self, id: ImplId) -> Option<Vec<u32>> {
         let imp = &self.impls[id as usize];
+        let tr = imp.trait_ref;
         let args: Vec<TypeId> = match self.arena.get(imp.target) {
             Ty::List(x) | Ty::Set(x) => vec![x],
             Ty::Map(k, v) => vec![k, v],
@@ -77,9 +88,9 @@ impl Checker {
         };
         let mut required = Vec::new();
         for (i, &a) in args.iter().enumerate() {
-            let Ty::Param(p) = self.arena.get(a) else { return Some(None) };
+            let Ty::Param(p) = self.arena.get(a) else { return None };
             if !imp.generics.contains(&p) {
-                return Some(None);
+                return None;
             }
             if imp.evidence.iter().any(|&(t, x)| self.arena.get(t) == Ty::Param(p) && x.trait_id == tr.trait_id) {
                 required.push(i as u32);
@@ -87,15 +98,15 @@ impl Checker {
         }
         // A bound on another trait with methods cannot be derived through.
         if imp.evidence.iter().any(|(_, x)| x.trait_id != tr.trait_id && self.has_dict(x)) {
-            return Some(None);
+            return None;
         }
-        Some(Some(required))
+        Some(required)
     }
 
     /// Returns `true` if a hand-written `impl` of `b` exists for type
     /// definition `d`.
     pub(crate) fn has_codec_impl(&self, d: TypeDefId, b: Builtin) -> bool {
-        self.builtin_trait(b).is_some_and(|tr| self.impls_by.get(&(tr.trait_id, Ctor::Def(d), 0)).is_some_and(|ids| !ids.is_empty()))
+        self.first_codec_impl(b, Ctor::Def(d), 0).is_some()
     }
 
     /// Returns a struct and its field that a derived `Decode` must build for
@@ -107,7 +118,6 @@ impl Checker {
     /// happens where the argument becomes concrete. A hand-written `Decode`
     /// is valid in each module.
     pub(crate) fn private_decoded_field(&mut self, root: TypeId) -> Option<(TypeDefId, Symbol)> {
-        let tr = self.builtin_trait(Builtin::Decode)?;
         let mut todo = vec![(root, self.cur_mod)];
         let mut seen = HashSet::new();
         while let Some((t, module)) = todo.pop() {
@@ -121,14 +131,13 @@ impl Checker {
                 Ty::Named(d, args) => {
                     let args = self.arena.list(args).to_vec();
                     let def = &self.types[d as usize];
-                    let derived = self
-                        .impls_by
-                        .get(&(tr.trait_id, Ctor::Def(d), 0))
-                        .and_then(|ids| ids.first())
-                        .is_some_and(|&i| self.impls[i as usize].derived);
+                    let derived = self.is_derived_codec(Builtin::Decode, d);
                     let required = match (derived, self.derived.get(d as usize).map(|x| &x[Builtin::Decode as usize])) {
                         (true, Some(Derived::Needs(required))) => required.clone(),
-                        _ => self.codec_impl_params(Ctor::Def(d), args.len(), Builtin::Decode).flatten().unwrap_or_default(),
+                        _ => self
+                            .first_codec_impl(Builtin::Decode, Ctor::Def(d), 0)
+                            .and_then(|i| self.codec_impl_params(i))
+                            .unwrap_or_default(),
                     };
                     todo.extend(required.iter().filter_map(|&i| args.get(i as usize)).map(|&x| (x, module)));
                     if !derived {
@@ -165,11 +174,10 @@ impl Checker {
         }
     }
 
-    /// Returns the derived `impl` of `b` for tuples of `n` elements, and
-    /// registers it on first use.
+    /// Registers the derived `impl` of `b` for tuples of `n` elements, if it
+    /// is not registered yet.
     pub(crate) fn tuple_codec_impl(&mut self, b: Builtin, n: u32) {
-        let Some(tr) = self.builtin_trait(b) else { return };
-        if self.impls_by.get(&(tr.trait_id, Ctor::Tuple, n)).is_some_and(|ids| !ids.is_empty()) {
+        if self.first_codec_impl(b, Ctor::Tuple, n as usize).is_some() {
             return;
         }
         let generics: Vec<ParamId> = (0..n)
@@ -238,8 +246,7 @@ impl Checker {
             slots: Vec::new(),
             evidence,
             replaced: false,
-            derived: true,
-            fast: false,
+            origin: ImplOrigin::Derived,
         });
         add_impl(&mut self.impls_by, (tr.trait_id, ctor, arity), id);
         add_impl(&mut self.impls_by_ctor, (ctor, arity), id);
@@ -268,7 +275,7 @@ impl Checker {
         let built: Vec<ImplId> = (0..self.impls.len() as ImplId)
             .filter(|&i| {
                 let imp = &self.impls[i as usize];
-                imp.trait_ref.trait_id == tr && imp.derived && !imp.replaced && !imp.slots.is_empty()
+                imp.trait_ref.trait_id == tr && imp.origin == ImplOrigin::Derived && !imp.replaced && !imp.slots.is_empty()
             })
             .collect();
         for id in built {
@@ -286,7 +293,7 @@ impl Checker {
     /// program pays for the code of only the impls that it uses.
     pub(crate) fn ensure_derived_methods(&mut self, id: ImplId) {
         let imp = &self.impls[id as usize];
-        if !imp.derived || !imp.slots.is_empty() {
+        if imp.origin != ImplOrigin::Derived || !imp.slots.is_empty() {
             return;
         }
         let method = match self.traits[imp.trait_ref.trait_id as usize].builtin {
@@ -366,7 +373,7 @@ impl Checker {
     fn build_codec_template(&mut self, id: ImplId) -> Option<TemplateId> {
         let imp = self.impls[id as usize].clone();
         let b = self.traits[imp.trait_ref.trait_id as usize].builtin.filter(|b| b.is_synthesized())?;
-        if !self.codec_fast_path || !(imp.derived || Some(imp.module) == self.prelude) {
+        if !self.codec_fast_path || !(imp.origin == ImplOrigin::Derived || Some(imp.module) == self.prelude) {
             return None;
         }
         self.composed_method(b)?;
@@ -427,17 +434,9 @@ impl Checker {
     pub(crate) fn add_scalar_codec_schemas(&mut self) {
         let scalars = [TypeId::UNIT, TypeId::BOOL, TypeId::INT, TypeId::FLOAT, TypeId::DURATION, TypeId::STR, TypeId::BYTES, TypeId::RANGE];
         for b in [Builtin::Encode, Builtin::Decode] {
-            let Some(tr) = self.builtin_trait(b) else { continue };
             for ty in scalars {
-                let Some((ctor, arity)) = impl_key(&self.arena, ty) else { continue };
-                let Some(&f) = self
-                    .impls_by
-                    .get(&(tr.trait_id, ctor, arity))
-                    .and_then(|ids| ids.first())
-                    .and_then(|&i| self.impls[i as usize].slots.first())
-                else {
-                    continue;
-                };
+                let Some((ctor, _)) = impl_key(&self.arena, ty) else { continue };
+                let Some(&f) = self.first_codec_impl(b, ctor, 0).and_then(|i| self.impls[i as usize].slots.first()) else { continue };
                 if let Some(s) = self.schema_of(ty) {
                     self.codec_templates.scalar_methods.insert(f, s);
                 }
@@ -448,10 +447,7 @@ impl Checker {
     /// Returns `true` if the type definition `d` has the synthesized `impl` of
     /// `b`, and, for `Decode`, no computed field default.
     fn derives_codec(&self, d: TypeDefId, b: Builtin) -> bool {
-        let derived = self.builtin_trait(b).is_some_and(|tr| {
-            let ids = self.impls_by.get(&(tr.trait_id, Ctor::Def(d), 0));
-            ids.and_then(|ids| ids.first()).is_some_and(|&i| self.impls[i as usize].derived)
-        });
+        let derived = self.is_derived_codec(b, d);
         let computed = |f: &FieldDef| f.default.is_some() && f.const_default.as_deref().and_then(FieldDefault::new).is_none();
         derived && !(b == Builtin::Decode && self.types[d as usize].fields().iter().any(computed))
     }
@@ -493,12 +489,11 @@ impl Checker {
                 if d != self.wk.option && !self.is_json_def(d) && !matches!(self.types[d as usize].kind, TypeDefKind::Opaque(_)) => {}
             _ => return None,
         }
-        let decode = b == Builtin::Decode;
-        if let Some(&known) = self.fast_impls.get(&(ty, decode)) {
+        if let Some(&known) = self.fast_impls.get(&(ty, b)) {
             return known;
         }
         let found = self.codec_is_native(ty, b).then(|| self.add_fast_impl(ty, b)).flatten();
-        self.fast_impls.insert((ty, decode), found);
+        self.fast_impls.insert((ty, b), found);
         found
     }
 
@@ -507,12 +502,11 @@ impl Checker {
     /// of its type constructor, and, for `Decode`, no struct in it has a
     /// computed field default.
     fn codec_is_native(&mut self, root: TypeId, b: Builtin) -> bool {
-        let decode = b == Builtin::Decode;
         let Some(hash) = self.builtin_trait(Builtin::Hash) else { return false };
         let mut todo = vec![root];
         let mut seen = HashSet::new();
         while let Some(t) = todo.pop() {
-            if !seen.insert(t) || self.fast_impls.get(&(t, decode)).is_some_and(Option::is_some) {
+            if !seen.insert(t) || self.fast_impls.get(&(t, b)).is_some_and(Option::is_some) {
                 continue;
             }
             // Types that grow without end, such as `P<[T]>` in `P<T>`, are
@@ -569,15 +563,7 @@ impl Checker {
 
     /// Returns `true` if `d` is `json.Json`, whose impls are native.
     fn is_json_def(&self, d: TypeDefId) -> bool {
-        let def = &self.types[d as usize];
-        self.name(def.name) == "Json"
-            && self.name(def.module_name) == "json"
-            && self.builtin_trait(Builtin::Encode).is_some_and(|tr| {
-                let ids = self.impls_by.get(&(tr.trait_id, Ctor::Def(d), 0));
-                ids.and_then(|ids| ids.first())
-                    .and_then(|&i| self.impls[i as usize].slots.first())
-                    .is_some_and(|&f| matches!(self.fns[f as usize].kind, FnKind::Native(_)))
-            })
+        self.rust_type(d) == Some(std::any::TypeId::of::<crate::stdlib::json::Json>())
     }
 
     /// Returns the types that the schema of `t` refers to, or `None` if `t`
@@ -621,8 +607,7 @@ impl Checker {
             slots: Vec::new(),
             evidence: Vec::new(),
             replaced: false,
-            derived: false,
-            fast: true,
+            origin: ImplOrigin::Fast,
         });
         let method = if b == Builtin::Decode { DerivedMethod::FastDecode(schema) } else { DerivedMethod::FastEncode(schema) };
         self.add_codec_methods(id, method);
@@ -632,21 +617,25 @@ impl Checker {
     /// Returns the id of the schema of the closed type `root`, and adds the
     /// schemas of the types in it that have none yet.
     fn schema_of(&mut self, root: TypeId) -> Option<SchemaId> {
-        let mut added = Vec::new();
+        let first = self.schemas.len() as SchemaId;
+        let mut added: Vec<TypeId> = Vec::new();
+        let mut ids: HashMap<TypeId, SchemaId> = HashMap::new();
         let mut todo = vec![root];
         while let Some(t) = todo.pop() {
-            if self.schema_ids.contains_key(&t) {
+            if self.schema_ids.contains_key(&t) || ids.contains_key(&t) {
                 continue;
             }
-            let id = self.schemas.len() as SchemaId;
-            self.schemas.push(Schema::Unit);
-            self.schema_ids.insert(t, id);
-            added.push((t, id));
+            ids.insert(t, first + added.len() as SchemaId);
+            added.push(t);
             todo.extend(self.codec_parts(t)?);
         }
-        for (t, id) in added {
-            let node = self.schema_node(t, &mut |c, p| c.schema_ids.get(&p).copied())?;
-            *self.schemas.get_mut(id as usize) = node;
+        let mut nodes = Vec::with_capacity(added.len());
+        for &t in &added {
+            nodes.push(self.schema_node(t, &mut |c, p| c.schema_ids.get(&p).or(ids.get(&p)).copied())?);
+        }
+        for (t, node) in added.into_iter().zip(nodes) {
+            self.schema_ids.insert(t, ids[&t]);
+            self.schemas.push(node);
         }
         self.schema_ids.get(&root).copied()
     }
@@ -1031,9 +1020,8 @@ impl Synth {
                         out.push(self.e(HKind::Match { scrut, arms }, TypeId::UNIT));
                     }
                     TypeDefKind::Opaque(_) => {
-                        let mut all = vec![self.local(c, enc), self.local(c, value)];
-                        let call = self.method(c, "Encoder", "write_native", vec![target], std::mem::take(&mut all));
-                        out.push(call);
+                        let args = vec![self.local(c, enc), self.local(c, value)];
+                        out.push(self.method(c, "Encoder", "write_native", vec![target], args));
                     }
                 }
             }
@@ -1049,17 +1037,8 @@ impl Synth {
         let value = match c.arena.get(target) {
             Ty::Tuple(l) => {
                 let elems = c.arena.list(l).to_vec();
-                let mut items = vec![self.dec_op(c, dec, "begin_tuple", vec![self.int(elems.len() as i64)], TypeId::UNIT)];
-                let mut locals = Vec::new();
-                for &t in &elems {
-                    items.push(self.dec_op(c, dec, "element", vec![], TypeId::UNIT));
-                    let l = c.hidden_local(t, self.span);
-                    let init = self.decode(c, t, dec);
-                    items.push(self.let_(l, t, init));
-                    locals.push(self.local(c, l));
-                }
-                items.push(self.dec_op(c, dec, "end_tuple", vec![], TypeId::UNIT));
-                items.push(self.e(HKind::Tuple(locals), target));
+                let (mut items, values) = self.elements(c, dec, &elems);
+                items.push(self.e(HKind::Tuple(values), target));
                 self.block(items, target)
             }
             Ty::Named(d, args) => {
@@ -1090,16 +1069,7 @@ impl Synth {
                                 items.push(self.e(HKind::MakeVariant { rt_id: v.rt_id, args: values }, target));
                                 self.block(items, target)
                             } else {
-                                let mut items = vec![self.dec_op(c, dec, "begin_tuple", vec![self.int(tys.len() as i64)], TypeId::UNIT)];
-                                let mut values = Vec::new();
-                                for &t in &tys {
-                                    items.push(self.dec_op(c, dec, "element", vec![], TypeId::UNIT));
-                                    let l = c.hidden_local(t, self.span);
-                                    let init = self.decode(c, t, dec);
-                                    items.push(self.let_(l, t, init));
-                                    values.push(self.local(c, l));
-                                }
-                                items.push(self.dec_op(c, dec, "end_tuple", vec![], TypeId::UNIT));
+                                let (mut items, values) = self.elements(c, dec, &tys);
                                 items.push(self.dec_op(c, dec, "end_variant", vec![], TypeId::UNIT));
                                 items.push(self.e(HKind::MakeVariant { rt_id: v.rt_id, args: values }, target));
                                 self.block(items, target)
@@ -1118,6 +1088,22 @@ impl Synth {
             _ => return self.e(HKind::Error, ret),
         };
         self.e(HKind::MakeVariant { rt_id: ok, args: vec![value] }, ret)
+    }
+
+    /// Builds the statements that read a tuple with elements of the types
+    /// `tys`, and returns the element values.
+    fn elements(&self, c: &mut Checker, dec: LocalId, tys: &[TypeId]) -> (Vec<HExpr>, Vec<HExpr>) {
+        let mut items = vec![self.dec_op(c, dec, "begin_tuple", vec![self.int(tys.len() as i64)], TypeId::UNIT)];
+        let mut values = Vec::new();
+        for &t in tys {
+            items.push(self.dec_op(c, dec, "element", vec![], TypeId::UNIT));
+            let l = c.hidden_local(t, self.span);
+            let init = self.decode(c, t, dec);
+            items.push(self.let_(l, t, init));
+            values.push(self.local(c, l));
+        }
+        items.push(self.dec_op(c, dec, "end_tuple", vec![], TypeId::UNIT));
+        (items, values)
     }
 
     fn let_(&self, l: LocalId, ty: TypeId, init: HExpr) -> HExpr {

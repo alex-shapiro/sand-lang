@@ -717,7 +717,7 @@ impl Checker {
         for i in self.visible_impls(c, arity) {
             let imp = &self.impls[i as usize];
             // A synthesized impl repeats the bounds of the type; show only its own.
-            let synthesized = imp.derived;
+            let synthesized = imp.origin == super::traits::ImplOrigin::Derived;
             let wheres = imp
                 .evidence
                 .iter()
