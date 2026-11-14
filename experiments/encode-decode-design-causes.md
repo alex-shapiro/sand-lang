@@ -14,16 +14,16 @@ Authors on `origin/encode-decode-traits` built the dual-codec design. At least a
 
 Six other compiler and VM rules add work to any codec design. The table below summarizes all eight findings:
 
-| Finding | Impact | Evidence |
-| --- | --- | --- |
-| 1. Native functions run only as leaf calls | Root cause | Verified, likely conclusion |
-| 2. The VM runs user traits through dictionaries | Root cause | Verified, measured |
-| 3. The type checker restricts traits with methods | Partial cause | Verified |
-| 4. The VM restarts native calls on memory limits | Partial cause | Verified |
-| 5. Native functions use fixed trait wrappers | Partial cause | Verified, likely link |
-| 6. The type checker builds derived codecs in Rust | Minor | Verified |
-| 7. The engine enforces sandbox limits on type data | Minor | Verified |
-| 8. Sand codecs use more VM fuel than native codecs | Tangential | Verified |
+| Finding                                            | Impact        | Evidence                    |
+| -------------------------------------------------- | ------------- | --------------------------- |
+| 1. Native functions run only as leaf calls         | Root cause    | Verified, likely conclusion |
+| 2. The VM runs user traits through dictionaries    | Root cause    | Verified, measured          |
+| 3. The type checker restricts traits with methods  | Partial cause | Verified                    |
+| 4. The VM restarts native calls on memory limits   | Partial cause | Verified                    |
+| 5. Native functions use fixed trait wrappers       | Partial cause | Verified, likely link       |
+| 6. The type checker builds derived codecs in Rust  | Minor         | Verified                    |
+| 7. The engine enforces sandbox limits on type data | Minor         | Verified                    |
+| 8. Sand codecs use more VM fuel than native codecs | Tangential    | Verified                    |
 
 ### Impact and evidence ratings
 
@@ -114,22 +114,22 @@ The bytecode interpreter runs every dictionary call. In a dictionary-based codec
 
 We timed 2,000,000 passes per loop on a release build of `main` at `625d1b9`. Across 5 rounds in each of two runs, the minimum times differed by at most 0.3 ns:
 
-| Loop body | Time per pass, ns |
-| --- | ---: |
-| Empty loop | 5.0 |
-| Direct Sand function call | 16.6 |
-| Generic call with trait method call | 28.3 |
+| Loop body                           | Time per pass, ns |
+| ----------------------------------- | ----------------: |
+| Empty loop                          |               5.0 |
+| Direct Sand function call           |              16.6 |
+| Generic call with trait method call |              28.3 |
 
 The generic trait call takes about 23 ns more than the empty loop. On `origin/encode-decode-traits`, the native walker spends about 26 ns per value in total.
 
 In a second benchmark on `main`, we implemented `ToJson` and `FromJson` as user traits for scalars, lists, and a five-field struct. Across 9 rounds in two runs on 20,000 structs, the Sand traits took 2.3 to 3.6 times as long as the native walkers:
 
-| Operation | Time per struct, ns |
-| --- | ---: |
-| `json.to_json` native walk | 200 to 216 |
-| `ToJson` user trait in Sand | 458 to 540 |
-| `json.decode` native from text | 305 to 317 |
-| `json.parse` plus `FromJson` in Sand | 1,109 to 1,134 |
+| Operation                            | Time per struct, ns |
+| ------------------------------------ | ------------------: |
+| `json.to_json` native walk           |          200 to 216 |
+| `ToJson` user trait in Sand          |          458 to 540 |
+| `json.decode` native from text       |          305 to 317 |
+| `json.parse` plus `FromJson` in Sand |      1,109 to 1,134 |
 
 In the branch benchmarks, the all-Sand Design D1 prototype took 2 to 5 times as long as `main`.
 
@@ -143,12 +143,12 @@ In `codec/composed.rs`, the VM builds schemas at run time from compile-time temp
 
 To keep `main` speed while supporting custom codecs, `origin/encode-decode-traits` maintains both a native schema walker and generated Sand methods. Both codecs must produce the same output, field paths, errors, and retries. In `check/codec.rs`, the type checker generates four pairs of derived methods to support both paths:
 
-| Derived method pair | Purpose |
-| --- | --- |
-| `Encode`, `Decode` | Custom codec implementations in Sand |
-| `FastEncode`, `FastDecode` | Native walk speed for derived types |
-| `ComposedEncode`, `ComposedDecode` | Run-time schema building in generic functions |
-| `CheckedEncode`, `CheckedDecode` | State checks for Sand-driven encoders and decoders |
+| Derived method pair                | Purpose                                            |
+| ---------------------------------- | -------------------------------------------------- |
+| `Encode`, `Decode`                 | Custom codec implementations in Sand               |
+| `FastEncode`, `FastDecode`         | Native walk speed for derived types                |
+| `ComposedEncode`, `ComposedDecode` | Run-time schema building in generic functions      |
+| `CheckedEncode`, `CheckedDecode`   | State checks for Sand-driven encoders and decoders |
 
 The branch adds 2,065 lines across four files for the native fast path alone:
 
@@ -167,12 +167,12 @@ Adding methods to `Encode` and `Decode` requires trait dictionaries. On `main`, 
 
 The type checker checks `TraitDef::has_dict` in 24 places on `main`. It accepts marker traits in every position because it checks them only at compile time. For traits with methods, the checker enforces four limits:
 
-| Checker limit on traits with methods | Source |
-| --- | --- |
-| Only top-level functions can require them | Probe 1 |
-| The checker derives only marker traits for `never` | Probe 5 |
-| Struct field defaults accept only marker trait bounds | SPEC §4.2 |
-| Native functions accept only fixed trait wrappers | SPEC §16.3 |
+| Checker limit on traits with methods                  | Source     |
+| ----------------------------------------------------- | ---------- |
+| Only top-level functions can require them             | Probe 1    |
+| The checker derives only marker traits for `never`    | Probe 5    |
+| Struct field defaults accept only marker trait bounds | SPEC §4.2  |
+| Native functions accept only fixed trait wrappers     | SPEC §16.3 |
 
 Existing Sand programs use `Encode` and `Decode` on local functions, empty `[never]` lists, and struct defaults. Authors on `origin/encode-decode-traits` landed four commits to lift these checker limits before adding codec methods. Adding methods to any other built-in marker trait requires the same checker changes.
 
