@@ -2455,16 +2455,16 @@ from `sandlang::session::RESET_NOTE` to the error message and sets
 is independent of the VM and remains valid after a run ends. `Value` has
 `#[non_exhaustive]`.
 
-| Sand value                             | `Value` variant                              |
-| -------------------------------------- | -------------------------------------------- |
-| `()`, `bool`, `int`, `float`           | `Unit`, `Bool`, `Int`, `Float`               |
-| `duration`, `str`, `bytes`             | `Duration`, `Str`, `Bytes`                   |
-| list, tuple, `Set`, map                | `List`, `Tuple`, `Set`, `Map`                |
-| range                                  | `Range { start, end, inclusive }`            |
-| struct                                 | `Struct(StructValue)`                        |
-| enum variant                           | `Variant(VariantValue)`                      |
-| native value type                      | `Native(Box<NativeValue>)`                   |
-| value that does not implement `Encode` | `Opaque { type_name }`                       |
+| Sand value                             | `Value` variant                   |
+| -------------------------------------- | --------------------------------- |
+| `()`, `bool`, `int`, `float`           | `Unit`, `Bool`, `Int`, `Float`    |
+| `duration`, `str`, `bytes`             | `Duration`, `Str`, `Bytes`        |
+| list, tuple, `Set`, map                | `List`, `Tuple`, `Set`, `Map`     |
+| range                                  | `Range { start, end, inclusive }` |
+| struct                                 | `Struct(StructValue)`             |
+| enum variant                           | `Variant(VariantValue)`           |
+| native value type                      | `Native(Box<NativeValue>)`        |
+| value that does not implement `Encode` | `Opaque { type_name }`            |
 
 `List`, `Tuple`, `Set`, and `Map` store their elements in iteration order.
 `StructValue` holds an `Arc<StructDesc>` and the field values in declaration
