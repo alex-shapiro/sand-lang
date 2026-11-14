@@ -12,8 +12,7 @@ typed, rooted container" for heap state. This file fills in that outline.
 
 ## The problem
 
-A native function cannot call a Sand function on `main`. Three facts cause
-this:
+A native function cannot call a Sand function on `main`. Three facts cause this:
 
 - Any Sand function can suspend. SPEC §11 states that Sand does not
   have `async`/`await` coloring. To suspend a task, the interpreter returns to the
@@ -76,14 +75,11 @@ While `f` runs, these conditions hold:
 
 ## Why the current async natives cannot do this
 
-Sand already has async native functions. SPEC §16.3 describes them:
+Sand already supports async native functions. SPEC §16.3 describes them:
 
-- An async native returns a future, and only the calling Sand task waits for
-  it.
-- Its parameters, its future, and the future's output must be owned `Send`
-  types.
-- VM handle types are `!Send`, so the future cannot hold a handle to a VM
-  value.
+- An async native returns a future, and only the calling Sand task waits for it.
+- Its parameters, its future, and the future's output must be owned `Send` types.
+- VM handle types are `!Send`, so the future cannot hold a handle to a VM value.
 - Only the _finisher closure_ receives `&mut Vm`. The finisher runs after the
   future completes, and converts its output into a Sand value.
 
@@ -98,7 +94,7 @@ The `!Send` rule is a compile-time way to keep handles out of code that waits.
 A future pinned to the VM thread would therefore not be safe to give handles.
 Two problems would remain:
 
-- **A kept handle can become stale.** During an `await`, Sand code runs and can
+- **A handle can become stale.** During an `await`, Sand code runs and can
   trigger a collection. The collector does not see the future's handle. It can
   free the object and give its slot to a new object. Sand is safe Rust, so the
   result is not undefined behavior. It is a wrong answer: the handle reads a
@@ -111,7 +107,51 @@ A future pinned to one thread also conflicts with SPEC §16, which promises that
 the VM stores that future, the VM and the `Engine` become `!Send`. Only
 `unsafe impl Send` could restore `Send`, and the safe-Rust rule forbids it.
 
-## Part 1: The VM owns the future and polls it
+## Part 1: One future type for every async native
+
+The new future type replaces `Suspension`, the type that async natives return
+on `main`. Every async native then follows one path through the scheduler.
+
+### What exists on `main`
+
+The VM already polls the futures of async natives:
+
+1. An async native returns a `Suspension`, which holds a boxed future.
+2. The VM puts the `Suspension` in its `IoTable`, a table of pending
+   operations.
+3. Each slot of the table has a waker. An I/O event wakes the slot.
+4. The scheduler polls each woken future between slices of Sand execution
+   (`IoTable::poll_ready`, `crates/sandlang/src/vm/sched.rs`).
+5. A completed future gives a _finisher closure_. The scheduler runs the
+   finisher with `&mut Vm`, and the task continues with the result.
+
+A future on `main` can only wait for an external event. It cannot use the VM
+until it completes.
+
+### The new future type
+
+A future of the new type returns `Pending` for one of two reasons:
+
+- **It waits for an external event**, such as I/O. A waker reports the event,
+  as on `main`.
+- **It asks the VM to run a Sand function.** The VM runs the function, and
+  then polls the future again.
+
+An I/O native is a special case. Its future awaits the I/O, and then uses the
+VM once at the end, through `cx.with_vm` (Part 2). That last `cx.with_vm` does
+the work of the finisher on `main`, so the finisher closure is removed.
+
+The futures live with their tasks, not in the `IoTable`. A future that calls
+Sand must stay with its task while the task runs Sand code. The same future can
+then wait for I/O. The `IoTable` keeps only the map from each waker to its
+task.
+
+Synchronous natives do not change. A synchronous native call costs about
+10 ns, and most natives are synchronous. A boxed future for each call would add
+an allocation. Only natives that wait, for I/O or for Sand code, use the future
+type.
+
+### How a call into Sand works
 
 1. A Sand task calls the native. The native returns a future instead of a
    value.
@@ -197,6 +237,9 @@ This part removes the copies of state and the logs of changes that the codec
 branch needed for each step. Those existed only because the VM could run a
 step again.
 
+Synchronous natives keep the restart rule. They do not call Sand code, so a
+restart from the start stays correct for them.
+
 ## Part 5: The shape of a codec walker
 
 This sketch shows the shape of the code. It is not a tested API.
@@ -235,8 +278,10 @@ Each cost in this section is an estimate. Nobody has measured it.
   these subtrees would also avoid the slowdown of an explicit stack.
 - **One lock operation for each VM access.** The lock is uncontended, but it
   is not free. A walker should do many reads inside one `with_vm`.
-- **Two lock operations for each poll.** The scheduler releases the lock
-  before each poll, and takes it again after.
+- **Two lock operations for each batch of polls.** The scheduler releases the
+  lock before it polls, and takes it again after. `IoTable::poll_ready`
+  already polls woken futures in a batch, so one release can serve many
+  futures. An I/O wait costs far more than these lock operations.
 
 ## Open questions
 
@@ -249,6 +294,9 @@ Each cost in this section is an estimate. Nobody has measured it.
   to the scheduler for async natives (`FiberStop::Async` in
   `crates/sandlang/src/vm/interp.rs`). The size of the change to move the VM
   state behind a lock is not known.
+- **The host API.** `Later::new` and its finisher closure go away. Each
+  async native in the standard library and in host modules must move to the
+  new future type.
 - **Changes to inputs during a callback.** A Sand callback can change a value
   that the native reads, such as a list. The research report lists two
   choices: fail with an error, as CPython does, or work on a snapshot. Each
