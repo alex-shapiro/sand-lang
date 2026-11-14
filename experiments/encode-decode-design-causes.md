@@ -2,28 +2,28 @@
 
 Two rules in the Sand compiler and VM make it hard to let users implement `Encode` and `Decode`:
 
-1. **Native functions run only as leaf calls.** Most interpreters walk standard values in host code. The walker calls script hooks only for custom types. Sand prevents this pattern because native Rust functions run to completion on the Rust stack and return directly to the VM.
-2. **The VM runs user traits through interpreted dictionaries.** For built-in traits, the VM walks heap values directly in Rust. User traits require static types because a decoder starts from raw input. An `impl` can also target an erased type argument such as `[int]`. Callers therefore pass user trait closures in run-time dictionaries. The bytecode interpreter runs those closures for every value.
+1. **The VM runs native functions as leaf calls.** Most interpreters walk standard values in host code. The walker calls script hooks only for custom types. In Sand, the VM must finish each native Rust call on the Rust stack before running Sand code.
+2. **The VM runs user traits through interpreted dictionaries.** On `main`, the VM encodes heap values directly in Rust. User traits require static types because a decoder starts from raw input. An `impl` can also target an erased type argument such as `[int]`. Callers therefore pass user trait closures in run-time dictionaries. The bytecode interpreter runs those closures for every value.
 
 These two rules leave two codec designs:
 
 - **Pure Sand codec.** The compiler generates Sand codec methods for every type. Encoding and decoding then take 2 to 5 times as long as on `main`.
-- **Dual native and Sand codecs.** A native walker handles compiler-derived types at `main` speed. Generated Sand methods handle custom types. Both codecs must produce the same output, errors, and retries across every format.
+- **Dual native and Sand codecs.** A native walker handles compiler-derived types at `main` speed. Generated Sand methods handle custom types. Both codecs must produce the same output, field paths, and errors across every format and retry.
 
 Authors on `origin/encode-decode-traits` built the dual-codec design. At least a quarter of its 8,210 new production lines maintain the native fast path alongside the Sand path.
 
 Six other compiler and VM rules add work to any codec design. The table below summarizes all eight findings:
 
-| Finding                                            | Impact        | Evidence                    |
-| -------------------------------------------------- | ------------- | --------------------------- |
-| 1. Native functions run only as leaf calls         | Root cause    | Verified, likely conclusion |
-| 2. The VM runs user traits through dictionaries    | Root cause    | Verified, measured          |
-| 3. The type checker restricts traits with methods  | Partial cause | Verified                    |
-| 4. The VM restarts native calls on memory limits   | Partial cause | Verified                    |
-| 5. Native functions use fixed trait wrappers       | Partial cause | Verified, likely link       |
-| 6. The type checker builds derived codecs in Rust  | Minor         | Verified                    |
-| 7. The engine enforces sandbox limits on type data | Minor         | Verified                    |
-| 8. Sand codecs use more VM fuel than native codecs | Tangential    | Verified                    |
+| Finding | Impact | Evidence |
+| --- | --- | --- |
+| 1. The VM runs native functions as leaf calls | Root cause | Verified, likely conclusion |
+| 2. The VM runs user traits through dictionaries | Root cause | Verified, measured |
+| 3. The type checker restricts traits with methods | Partial cause | Verified |
+| 4. The VM restarts native calls on memory limits | Partial cause | Verified |
+| 5. Native functions use fixed trait wrappers | Partial cause | Verified, likely link |
+| 6. The type checker builds derived codecs in Rust | Minor | Verified |
+| 7. The engine enforces sandbox limits on type data | Minor | Verified |
+| 8. Sand codecs use more VM fuel than native codecs | Tangential | Verified |
 
 ### Impact and evidence ratings
 
@@ -31,7 +31,7 @@ We rate each finding by its effect on codec design:
 
 - **Root cause**: Changing this rule allows a single codec at native speed.
 - **Partial cause**: This rule adds large effort to every codec design.
-- **Minor**: This rule increases code size only.
+- **Minor**: This rule adds bounded work to every codec design alike.
 - **Tangential**: This rule changes fuel counts and test outputs only.
 
 We label the evidence for each claim:
@@ -42,21 +42,21 @@ We label the evidence for each claim:
 
 ## Background
 
-**Built-in and user traits.** A trait lists methods that a type can implement. The prelude defines six built-in traits: `Eq`, `Ord`, `Hash`, `Encode`, `Decode`, and `Num`. On `main`, `Encode` and `Decode` are marker traits. Only the compiler implements them; see Probe 2. If a struct declares an `init` constructor, the compiler skips `Decode` for that struct and any type that contains it; see Probe 4.
+**Built-in and user traits.** A trait lists methods that a type can implement. The prelude defines five built-in marker traits, including `Encode` and `Decode`, plus the `Num` trait. A marker trait has an empty body. Probe 2 shows that only the compiler can implement `Encode` and `Decode` on `main`. If a struct declares an `init` constructor, the compiler skips `Decode` for that struct and any outer type. Probe 4 demonstrates this rule.
 
 **Automatic derivation.** The type checker derives a built-in trait for any struct or enum whose fields implement that trait. On `main`, `check/derive.rs` records only whether each type implements the trait.
 
 **Type erasure and dictionaries.** The compiler erases type arguments at compile time. It builds a single bytecode function for each generic definition. For each trait bound with methods, callers pass a hidden tuple of closures called a dictionary.
 
-**`reflect` type parameters.** On `main`, a generic function that decodes values requires a `reflect` type parameter; see Probe 3. Callers then pass a hidden run-time type description from `compile/reflect.rs`.
+**`reflect` type parameters.** Probe 3 shows that a generic function on `main` requires a `reflect` type parameter to decode values. Callers then pass a hidden run-time type description from `compile/reflect.rs`.
 
 **Fibers, safe points, and roots.** Each fiber holds the state of a Sand task. It stores Sand call frames in a heap `Vec`. The garbage collector runs only at interpreter safe points such as loop back edges. It traces VM registers and VM structures. It ignores `VmValue` variables on the Rust stack.
 
-**Native functions and retries.** A native function is a Rust callback that takes `&mut Vm` and a `VmValue` slice. If a native call reaches the memory limit or requests host permission, the VM rewinds the call instruction. After garbage collection or the permission prompt finishes, the VM runs the native function again from the start.
+**Native functions and retries.** A native function is a Rust callback that takes `&mut Vm` and a `VmValue` slice. If a native call reaches the memory limit or requests host permission, the VM rewinds the call instruction. After the VM collects garbage or receives host permission, it runs the native function again from the start.
 
 **Custom codecs and schemas.** On `origin/encode-decode-traits`, users can implement `Encode` or `Decode` for a type or any of its fields. For types with only derived implementations, a native Rust walker reads a static type schema.
 
-## Finding 1: Native functions run only as leaf calls
+## Finding 1: The VM runs native functions as leaf calls
 
 **Impact:** Root cause. **Evidence:** Verified mechanism, likely conclusion.
 
@@ -65,7 +65,7 @@ We label the evidence for each claim:
 The VM runs each native Rust function to completion on the Rust stack. The function returns a value, an error, or a scheduler signal. Three VM rules prevent calls from Rust back into Sand:
 
 - The `Vm` API starts only top-level fibers from Rust.
-- To suspend a task for async I/O, the interpreter loop returns `FiberStop::Async` to the scheduler. The interpreter can return to the scheduler only after every native Rust frame returns.
+- To suspend a task for async I/O, the interpreter loop returns `FiberStop::Async` to the scheduler. Active native frames on the Rust stack block that return to the scheduler.
 - A nested Sand call could trigger garbage collection at a safe point. Collection would then free unrooted heap objects held in outer Rust variables.
 
 ### Why this prevents a single codec
@@ -77,7 +77,7 @@ On `origin/encode-decode-traits`, authors tested two ways to switch between nati
 - **Heap-state continuations.** In Design W, the native walker kept its state on the heap. It returned control to the VM at each custom field. Handling a custom field took about 435 ns. The walker spent 270 ns of that time saving and restoring heap state. Heap state also made standard decoding 40% to 45% slower.
 - **Native struct shells.** In Design C, generated Sand code called a native shell for each struct. The shell handled standard fields in Rust and returned to Sand at each custom field. Each custom field added about 180 ns.
 
-In the callback study, we measured a raw continuation hop at about 70 ns. A nested interpreter call took about 101 ns. Design W spent most of its extra time saving and restoring walker state.
+The callback study measured a raw continuation hop at about 70 ns. A nested interpreter call took about 101 ns. Design W spent most of its extra time saving and restoring walker state.
 
 Direct calls from Rust to Sand would let a native walker keep its state on the Rust stack. A single native walker could then handle both derived and custom types.
 
@@ -85,7 +85,7 @@ Direct calls from Rust to Sand would let a native walker keep its state on the R
 
 To support nested Rust-to-Sand calls, we must make three VM changes:
 
-- Block task suspension inside nested calls, or save native state across suspensions.
+- Block task suspension inside nested calls, or handle suspension across them.
 - Track `VmValue` handles in active Rust frames as garbage-collector roots.
 - Collect garbage in place during nested calls instead of restarting the outer native call.
 
@@ -141,14 +141,14 @@ In `codec/composed.rs`, the VM builds schemas at run time from compile-time temp
 
 ## How Findings 1 and 2 force dual codecs
 
-To keep `main` speed while supporting custom codecs, `origin/encode-decode-traits` maintains both a native schema walker and generated Sand methods. Both codecs must produce the same output, field paths, errors, and retries. In `check/codec.rs`, the type checker generates four pairs of derived methods to support both paths:
+To keep `main` speed while supporting custom codecs, `origin/encode-decode-traits` maintains both a native schema walker and generated Sand methods. Both codecs must produce the same output, field paths, and errors across retries. In `check/codec.rs`, the type checker generates four pairs of derived methods to support both paths:
 
-| Derived method pair                | Purpose                                            |
-| ---------------------------------- | -------------------------------------------------- |
-| `Encode`, `Decode`                 | Custom codec implementations in Sand               |
-| `FastEncode`, `FastDecode`         | Native walk speed for derived types                |
-| `ComposedEncode`, `ComposedDecode` | Run-time schema building in generic functions      |
-| `CheckedEncode`, `CheckedDecode`   | State checks for Sand-driven encoders and decoders |
+| Derived method pair | Purpose |
+| --- | --- |
+| `Encode`, `Decode` | Generated Sand walks for types with custom fields |
+| `FastEncode`, `FastDecode` | Native walk speed for derived types |
+| `ComposedEncode`, `ComposedDecode` | Run-time schema building in generic functions |
+| `CheckedEncode`, `CheckedDecode` | Protocol checks around custom Sand codec methods |
 
 The branch adds 2,065 lines across four files for the native fast path alone:
 
@@ -167,14 +167,14 @@ Adding methods to `Encode` and `Decode` requires trait dictionaries. On `main`, 
 
 The type checker checks `TraitDef::has_dict` in 24 places on `main`. It accepts marker traits in every position because it checks them only at compile time. For traits with methods, the checker enforces four limits:
 
-| Checker limit on traits with methods                  | Source     |
-| ----------------------------------------------------- | ---------- |
-| Only top-level functions can require them             | Probe 1    |
-| The checker derives only marker traits for `never`    | Probe 5    |
-| Struct field defaults accept only marker trait bounds | SPEC §4.2  |
-| Native functions accept only fixed trait wrappers     | SPEC §16.3 |
+| Checker limit on traits with methods | Source |
+| --- | --- |
+| Only top-level functions can require them | Probe 1 |
+| `never` implements only marker traits | Probe 5 |
+| Struct field defaults accept only marker trait bounds | SPEC §4.2 |
+| Native functions accept only fixed trait wrappers | SPEC §16.3 |
 
-Existing Sand programs use `Encode` and `Decode` on local functions, empty `[never]` lists, and struct defaults. Authors on `origin/encode-decode-traits` landed four commits to lift these checker limits before adding codec methods. Adding methods to any other built-in marker trait requires the same checker changes.
+Existing Sand programs use `Encode` and `Decode` on local functions, empty `[never]` lists, and struct defaults. Authors on `origin/encode-decode-traits` landed four prerequisite checker commits before adding codec methods. Adding methods to any other built-in marker trait requires the same checker changes.
 
 ## Finding 4: The VM restarts native calls on memory limits
 
@@ -186,13 +186,13 @@ If a native function reaches `max_memory`, the interpreter returns `FiberStop::C
 
 On `main`, `json.encode` and `json.decode` each build a fresh result in a single native call. In a trait-based codec, Sand methods make many small native calls on a stateful `Encoder` or `Decoder`.
 
-Encoders and decoders on `origin/encode-decode-traits` use `mark`, `rollback`, and `atomic` helpers to protect format state. Even with those helpers, `Config::retry_stress` tests found four retry bugs. In each bug, an encoder or decoder changed its state before a memory check failed.
+Encoders and decoders on `origin/encode-decode-traits` use `mark`, `rollback`, and `atomic` helpers to protect format state. Even with those helpers, `Config::retry_stress` tests found four retry bugs. In each bug, an encoder or decoder changed its state before checking memory.
 
 ## Finding 5: Native functions use fixed trait wrappers
 
 **Impact:** Partial cause. **Evidence:** Verified mechanism, likely link to Finding 1.
 
-Native Rust functions run outside the bytecode interpreter. They read trait information through fixed Rust parameter wrappers rather than calling Sand closures.
+The VM runs native Rust functions outside the bytecode interpreter. Native functions read trait information through fixed Rust parameter wrappers rather than calling Sand closures.
 
 SPEC §16.3 defines three wrapper types for generic native parameters on `main`:
 
@@ -213,9 +213,9 @@ The branch also changed how the Rust host reads VM values. On `main`, `Vm::to_va
 
 The type checker builds derived codec methods directly as typed HIR in Rust. On `origin/encode-decode-traits`, `check/codec.rs` uses 1,240 lines to build this HIR.
 
-The checker derives `Encode` and `Decode` automatically for every compatible type. At first, it built method bodies for every type immediately. Type-checking 20,000 structs then took 111 seconds in a debug build. On the branch, the checker builds a method body only on first use. That change cut the 20,000-struct check time to 2.6 seconds. In REPL sessions, a later input can replace an `impl`. The checker must then rebuild derived codecs and roll back cached schemas.
+The checker derives `Encode` and `Decode` automatically for every compatible type. At first, compiling a chain of 20,000 structs took 111 seconds in a debug build. On the branch, the checker builds method bodies only on first use and indexes `impl` blocks in the verifier. Those two changes cut the 20,000-struct debug compile time to 2.6 seconds. In REPL sessions, a later input can replace an `impl`. The checker must then rebuild derived codecs and roll back cached schemas.
 
-The Swift and Kotlin compilers generate codecs in the same way. Building codecs in the compiler increases code size only.
+The Swift and Kotlin compilers generate codecs in the same way. Building codecs in the compiler adds code size to every codec design alike.
 
 ## Finding 7: The engine enforces sandbox limits on type data
 
@@ -243,8 +243,8 @@ The VM charges fixed fuel for each bytecode instruction and call. In the all-San
 
 Four parts of `main` look like separate causes of the codec problem. Each part actually results from Findings 1 through 5:
 
-- **Special built-in traits.** The VM walks heap values for built-in traits. The checker also skips dictionaries for them. See Findings 2 and 3.
-- **Native interop rules.** Native functions use fixed parameter wrappers because Rust code runs outside the Sand call stack. See Findings 1 and 5.
+- **Special built-in traits.** The VM walks heap values for built-in traits such as `Encode`. The checker also skips dictionaries for built-in marker traits. See Findings 2 and 3.
+- **Native interop rules.** Native functions use fixed parameter wrappers because the VM runs Rust code outside the Sand call stack. See Findings 1 and 5.
 - **`Decode` as a marker trait.** Generic decoders use `reflect` type descriptions because they build new values from raw input. See Finding 2.
 - **Structure of `stdlib/json`.** Finding 2 shapes the three value walkers and the `reflect` decoder in `json`. Rewriting `stdlib/json` alone leaves both root causes in place.
 
@@ -256,7 +256,7 @@ Before starting a new codec branch, we must choose among three designs:
 
 - **Allow nested Rust-to-Sand calls.** Make the three VM changes listed in Finding 1. A single native walker can then call custom Sand methods.
 - **Run all codecs in Sand.** Generate Sand codec methods for every type. Encoding and decoding will take 2 to 5 times as long as on `main`.
-- **Generate the fast path from the Sand path.** Keep both a native walker and generated Sand methods. Have the compiler build the native schema from the generated Sand methods so both codecs always match.
+- **Generate the fast path from the Sand path.** Keep both a native walker and generated Sand methods. Have the compiler build the native schema from those methods so both codecs always match.
 
 ## Scope and limits
 
