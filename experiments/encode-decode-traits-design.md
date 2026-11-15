@@ -151,21 +151,48 @@ On `main`, every trait method receives `Self`'s dictionary as its first hidden a
 
 ## Part 2: Structural implementations
 
-A structural implementation inherits the native default methods of its trait. The prelude and the type checker create structural implementations:
+A structural implementation inherits the native default methods of its trait. The registration of a native default declares the types that the native default supports. The type checker creates the structural implementations from that declaration. The prelude therefore declares no structural implementations.
 
-- **Explicit prelude implementations.** The prelude declares empty-body implementations for built-in types:
+### Type kinds
 
-  ```sand
-  impl Encode for int {}
-  impl<T: Encode> Encode for [T] {}
-  impl<K: Encode, V: Encode> Encode for [K: V] {}
-  ```
+A Rust enum, `TypeKind`, lists the kinds of types that a native default can support. Examples of kinds:
 
-- **Compiler-derived implementations.** The type checker generates a structural implementation for each eligible struct or enum. Its existing field-bound pass selects the type parameter bounds. For example, `struct Pair<A, B> { first: A, second: [B] }` gets `impl<A: Encode, B: Encode> Encode for Pair<A, B> {}`.
+- Built-in scalar kinds, such as `Int`, `Str`, and `Bytes`
+- Built-in constructor kinds, such as `List`, `Map`, and `Tuple`
+- `Struct` and `Enum`
+- `NativeValue`, for native value types such as `time.PlainDate`
+- `Never`
+
+The `ImplShape` constant in Part 3 stores the kind of its type with this same enum.
+
+### Registration
+
+The Rust code that registers a native default method also passes a list of `TypeKind` values. For example, the registration of `Encode.encode` lists every kind that the encode walker supports.
+
+The type checker reads that list when it declares the trait:
+
+- **Built-in kinds.** For each built-in kind, the checker creates a structural implementation. The bounds follow a single rule: each type argument must implement the trait. For example, the `List` kind creates `impl<T: Encode> Encode for [T] {}`.
+- **`Struct` and `Enum` kinds.** These kinds tell the checker to derive the trait for structs and enums. The checker generates a structural implementation for each eligible struct or enum. Its existing field-bound pass selects the type parameter bounds. For example, `struct Pair<A, B> { first: A, second: [B] }` gets `impl<A: Encode, B: Encode> Encode for Pair<A, B> {}`.
+- **Derivation conditions.** A kind can carry a condition. For `Decode`, the `Struct` kind excludes structs that declare `init`. The checker still evaluates the condition. The registration selects the condition, so the checker does not select it by trait name.
 
 If a user writes a custom implementation for a type, the checker skips deriving that trait for the type.
 
 The checker registers derived implementations as ordinary implementations. Standard implementation lookup therefore resolves `Encode` and `Decode` bounds directly.
+
+### Synchronization
+
+Two checks keep the registration and the walker in agreement:
+
+- **The walker uses the same enum.** The walker matches on the `TypeKind` of each `ImplShape`. The match must cover every variant. If a developer adds a kind, the Rust compiler rejects the walker until the walker handles the kind.
+- **The checker checks supertraits.** The checker checks the supertraits of every implementation, including structural implementations. `Decode` requires `Encode`. If `Decode` declares a kind that `Encode` does not declare, the prelude fails to compile. Every test run would therefore detect the mismatch.
+
+### Completeness for built-in types
+
+The orphan rule allows an implementation of a prelude trait only in the prelude or in the module that declares the type. A user therefore cannot implement `Encode` for a built-in type. The registered list is the complete set of `Encode` implementations for built-in types.
+
+### Scope: `Eq`, `Ord`, and `Hash`
+
+This design changes only `Encode` and `Decode`. `Eq`, `Ord`, and `Hash` keep their current derivation path. On `main`, a table in `check/derive.rs` lists the built-in types that implement each derived trait. That table stays for `Eq`, `Ord`, and `Hash`. A later pull request can move those traits to native default methods and registered kinds. That change also deletes the table.
 
 ## Part 3: Implementation shapes and part templates
 
@@ -185,7 +212,7 @@ Ordinary trait method calls read only the method closures and supertrait diction
 
 Each `ImplShape` holds two fields:
 
-- **Type kind.** The kind tells the walker how to represent the type. Struct kinds also store field identifiers and field defaults. Native value kinds also store their text parser.
+- **Type kind.** The kind is a `TypeKind` value from Part 2. It tells the walker how to represent the type. Struct kinds also store field identifiers and field defaults. Native value kinds also store their text parser.
 - **Part templates.** This list holds a `PartTemplate` for each part so the walker can build that part's dictionary.
 
 ### Part templates
@@ -315,7 +342,7 @@ If a walk records zero holes, the native function returns right away. It skips a
 ## Part 6: Type checker and compiler changes
 
 1. **Native default methods.** Trait declarations accept `native fn` methods. On `main`, only `impl` blocks accept `native fn`.
-2. **Ordinary derived implementations.** The checker registers derived implementations as ordinary structural implementations, as described in Part 2. The checker keeps both existing derivation exclusions: it skips `Hash` for structs with `var` fields, and it skips `Decode` for structs with `init` constructors.
+2. **Structural implementations from registered kinds.** The checker creates structural implementations from the `TypeKind` list of each native default, as Part 2 describes. It registers them as ordinary implementations. The `Struct` kind of `Decode` keeps the existing exclusion of structs with `init` constructors. `Hash` keeps its exclusion of structs with `var` fields on its existing path.
 3. **Part templates.** For each structural implementation, the checker builds trait-evidence trees for all parts. The compiler lowers those trees to `PartTemplate` constants.
 4. **Structural implementations for `never`.** Under SPEC §5.1 on `main`, `never` implements only traits without methods. Expressions such as `json.encode([])` require `[never]: Encode`. In this design, `never` gets a structural implementation with shape kind `Never` for each derived trait. Its native default `decode` always returns an error. Because `never` has zero runtime values, its native default `encode` never runs.
 5. **Trait dictionary parameters for native functions.** Generic native functions such as `json.encode<T: Encode>` receive `T`'s dictionary through a new `TraitDict<N>` parameter wrapper. `TraitDict<N>` reads the `N`-th method-bearing bound dictionary, just as `Num<N>` reads `Num` dictionaries.
@@ -326,7 +353,7 @@ Two existing restrictions on traits with methods now apply to `Encode` and `Deco
 - **Local functions.** Local functions cannot require traits with methods. The checker rejects local `Encode` or `Decode` bounds with `local functions cannot require traits with methods`.
 - **Struct field defaults.** Struct field default expressions cannot require traits with methods under SPEC §4.2.
 
-See [Open question 2](#open-questions) on keeping both restrictions in this branch.
+See [Open question 1](#open-questions) on keeping both restrictions in this branch.
 
 ## Part 7: JSON and `Value`
 
@@ -376,7 +403,7 @@ See [Open question 2](#open-questions) on keeping both restrictions in this bran
   - The native encode and decode walkers
   - `ImplShape` constants and `PartTemplate` lowering
   - Native default trait methods
-  - Structural implementations for built-in types and `never`
+  - `TypeKind` registration for native default methods, and structural implementations created from it
   - The `TraitDict<N>` native parameter wrapper
 
 ## Rejected alternatives
@@ -418,6 +445,5 @@ This design drops all four special cases listed in [Limits of the earlier draft]
 
 ## Open questions
 
-1. **How should traits opt into compiler derivation?** We propose a `derive` modifier on trait declarations, such as `pub derive trait Encode { ... }`, instead of matching trait identifiers in the checker. The checker keeps both existing derivation exclusions for now: it skips `Hash` for structs with `var` fields, and it skips `Decode` for structs with `init` constructors. Alternatively, this branch can keep identifier-based recognition.
-2. **Should this branch keep the trait-method restrictions on local functions and struct field defaults?** We recommend keeping both restrictions in this branch. The checker will then reject local functions that require `Encode` or `Decode`, as it does for other traits with methods.
-3. **Should this branch delete `reflect`?** We recommend deleting `reflect` in this branch. Deleting `reflect` leaves a single source of runtime type metadata for decoding. It also removes substantial compiler and VM code.
+1. **Should this branch keep the trait-method restrictions on local functions and struct field defaults?** We recommend keeping both restrictions in this branch. The checker will then reject local functions that require `Encode` or `Decode`, as it does for other traits with methods.
+2. **Should this branch delete `reflect`?** We recommend deleting `reflect` in this branch. Deleting `reflect` leaves a single source of runtime type metadata for decoding. It also removes substantial compiler and VM code.
