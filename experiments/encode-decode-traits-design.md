@@ -151,7 +151,7 @@ On `main`, every trait method receives `Self`'s dictionary as its first hidden a
 
 ## Part 2: Structural implementations
 
-A structural implementation inherits the native default methods of its trait. Two sources create structural implementations:
+A structural implementation inherits the native default methods of its trait. The prelude and the type checker create structural implementations:
 
 - **Explicit prelude implementations.** The prelude declares empty-body implementations for built-in types:
 
@@ -185,8 +185,8 @@ Ordinary trait method calls read only the method closures and supertrait diction
 
 Each `ImplShape` holds two fields:
 
-- **Type kind.** Identifies whether the type is a primitive, container, composite type, native value type, or `never`. Struct kinds also store field identifiers and default values. Native value kinds also store their text parser.
-- **Part templates.** Holds a `PartTemplate` for each part so the walker can build that part's dictionary.
+- **Type kind.** The kind tells the walker how to represent the type. Struct kinds also store field identifiers and default values. Native value kinds also store their text parser.
+- **Part templates.** This list holds a `PartTemplate` for each part so the walker can build that part's dictionary.
 
 ### Part templates
 
@@ -262,7 +262,7 @@ Recursive types create cycles between dictionaries and implementation shapes. Co
 
 The walker breaks dictionary cycles by building each part's dictionary only if the walk visits that part:
 
-- **Constant dictionaries.** `PartTemplate::Constant` stores a constant-pool index rather than an inline value. The VM reads that constant slot during the walk. Before compiling an `ImplShape`'s part templates, the compiler reserves the shape's constant index. Recursive references reuse that reserved index, keeping constant values acyclic.
+- **Constant dictionaries.** `PartTemplate::Constant` stores a constant-pool index rather than an inline value. The VM reads that constant slot during the walk. Before compiling an `ImplShape`'s part templates, the compiler reserves the shape's constant index. Recursive references reuse that reserved index. Constant values therefore stay acyclic.
 - **Runtime dictionaries.** For generic `Tree<T>`, `children` uses the finite template `Tuple([list_method, list_shape, Tuple([tree_method, tree_shape, Bound(0)])])`. The walker builds `[Tree<T>]`'s dictionary at `children`. It then builds each child `Tree<T>` dictionary as it visits that child.
 - **Polymorphic recursion.** A generic type can recurse with a nested type argument, such as `enum Nest<T> { Leaf(T), Deep(Nest<[T]>) }`. `Deep`'s template builds `Nest<[T]>`'s dictionary from `T`'s dictionary at each `Deep` layer. The runtime depth of the value limits dictionary construction.
 
@@ -306,7 +306,7 @@ If the walker records any holes, it runs in two passes:
 2. The native function runs callbacks for all holes and saves their heap results.
 3. Pass 2 decodes the input again and inserts the saved results at each hole.
 
-Two-pass decoding keeps two guarantees. First, computed field defaults run in post-order after the walker validates the whole input, matching `main`. Second, sets and maps insert finished values with their final hashes.
+Two-pass decoding keeps two guarantees. First, computed field defaults run in post-order after the walker validates the whole input, as on `main`. Second, sets and maps insert finished values with their final hashes.
 
 ### Synchronous fast path
 
@@ -319,7 +319,7 @@ If a walk records zero holes, the native function returns right away. It skips a
 3. **Part templates.** For each structural implementation, the checker builds trait-evidence trees for all parts. The compiler lowers those trees to `PartTemplate` constants.
 4. **Structural implementations for `never`.** Under SPEC §5.1 on `main`, `never` implements only traits without methods. Expressions such as `json.encode([])` require `[never]: Encode`. In this design, `never` gets a structural implementation with shape kind `Never` for each derived trait. Its native default `decode` always returns an error. Because `never` has zero runtime values, its native default `encode` never runs.
 5. **Trait dictionary parameters for native functions.** Generic native functions such as `json.encode<T: Encode>` receive `T`'s dictionary through a new `TraitDict<N>` parameter wrapper. `TraitDict<N>` reads the `N`-th method-bearing bound dictionary, just as `Num<N>` reads `Num` dictionaries.
-6. **Removal of `reflect`.** `Decode` dictionaries include `ImplShape` metadata, which replaces `reflect` type descriptors in generic decoders. On `main`, only `json.decode` uses `reflect` in the standard library, so we delete the `reflect` feature entirely.
+6. **Removal of `reflect`.** `Decode` dictionaries include `ImplShape` metadata, which replaces `reflect` type descriptors in generic decoders. On `main`, only `json.decode` uses `reflect` in the standard library. We therefore delete the `reflect` feature.
 
 Two existing restrictions on traits with methods now apply to `Encode` and `Decode`:
 
@@ -360,11 +360,11 @@ See [Open question 2](#open-questions) on keeping both restrictions in this bran
 
 ## Costs and risks
 
-- **Dictionary passing.** Generic calls with `T: Encode` bounds pass a dictionary tuple. Callers pass a program constant for concrete types and build a tuple at runtime for generic types. The triage report measured generic trait calls at about 12 ns above direct calls.
+- **Dictionary passing.** Generic calls with `T: Encode` bounds pass a dictionary tuple. For concrete types, callers pass a program constant. For generic types, callers build a tuple at runtime. The triage report measured generic trait calls at about 12 ns above direct calls.
 - **Per-part dispatch.** For each part, the walker gets a part dictionary and checks its method pointer. Concrete types use `Constant` templates, so the walker reads program constants directly.
 - **Intermediate `Value` allocation.** `json.encode` builds a `Value` tree before writing JSON text. On `main`, `json.encode` writes JSON text directly from heap values. We will benchmark `json.encode` to measure any slowdown.
 - **Memory accounting across callbacks.** The walkers count `Value` memory against `max_memory` during each structural pass. During a Sand callback, the VM omits the in-progress `Value` tree from `max_memory`. `TODO.md` already tracks this issue class under "Charge boxed recursive futures against `max_memory`."
-- **Net codebase size.** We expect total code size to shrink, and we will report the measured line delta.
+- **Net codebase size.** We expect total code size to shrink. The implementation pull request will report the measured line delta.
 
   This design deletes:
   - `compile/reflect.rs` and `reflect` support in the parser and checker
@@ -418,6 +418,6 @@ This design drops all four special cases listed in [Limits of the earlier draft]
 
 ## Open questions
 
-1. **How should traits opt into compiler derivation?** I propose a `derive` modifier on trait declarations, such as `pub derive trait Encode { ... }`, instead of matching trait identifiers in the checker. The checker keeps both existing derivation exclusions for now: it skips `Hash` for structs with `var` fields, and it skips `Decode` for structs with `init` constructors. Alternatively, this branch can keep identifier-based recognition.
-2. **Should this branch keep the trait-method restrictions on local functions and struct field defaults?** I recommend keeping both restrictions in this branch. The checker will then reject local functions that require `Encode` or `Decode`, matching other traits with methods.
-3. **Should this branch delete `reflect`?** I recommend deleting `reflect` in this branch. Deleting `reflect` leaves a single source of runtime type metadata for decoding and removes substantial compiler and VM code.
+1. **How should traits opt into compiler derivation?** We propose a `derive` modifier on trait declarations, such as `pub derive trait Encode { ... }`, instead of matching trait identifiers in the checker. The checker keeps both existing derivation exclusions for now: it skips `Hash` for structs with `var` fields, and it skips `Decode` for structs with `init` constructors. Alternatively, this branch can keep identifier-based recognition.
+2. **Should this branch keep the trait-method restrictions on local functions and struct field defaults?** We recommend keeping both restrictions in this branch. The checker will then reject local functions that require `Encode` or `Decode`, as it does for other traits with methods.
+3. **Should this branch delete `reflect`?** We recommend deleting `reflect` in this branch. Deleting `reflect` leaves a single source of runtime type metadata for decoding. It also removes substantial compiler and VM code.
