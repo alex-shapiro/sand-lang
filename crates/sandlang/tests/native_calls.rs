@@ -283,6 +283,20 @@ fn cancellation_drops_native_futures_in_reverse_call_order() {
 }
 
 #[test]
+fn cancelling_a_host_wait_lets_the_engine_report_a_deadlock() {
+    // If the cancelled wait still counted, the engine would wait for a host
+    // event that never comes, until the wall-time limit.
+    let limits = Limits { max_wall_time: Some(Duration::from_secs(5)), ..Limits::default() };
+    let src = "let t = spawn calls.wait_ms(10000)\n\
+               task.sleep(5ms)\n\
+               t.cancel()\n\
+               let ch: Channel<int> = Channel()\n\
+               ch.recv()";
+    let (r, _) = run(Config::new().limits(limits), &Log::default(), src);
+    assert!(matches!(&r, Err(Error::Runtime { message, .. }) if message.contains("deadlock")), "{r:?}");
+}
+
+#[test]
 fn ending_the_run_drops_native_futures_waiting_on_callbacks() {
     let log = Log::default();
     run(Config::new(), &log, "spawn calls.guard(() => calls.wait_ms(10000))\ntask.sleep(5ms)").0.unwrap();

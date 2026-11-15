@@ -585,7 +585,7 @@ pub struct Vm {
     pub live_tasks: usize,
     pub host: Host,
     /// The host-event wakers of the fibers, by fiber id.
-    fiber_wakers: Vec<std::task::Waker>,
+    fiber_wakers: Vec<Arc<sched::FiberWaker>>,
     pub gen_counter: u64,
     /// Fuel accounting (see `meter`).
     pub meter: Meter,

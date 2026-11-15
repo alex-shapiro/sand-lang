@@ -6,6 +6,7 @@ use crate::engine::LimitKind;
 use crate::native::context::VmRequest;
 use crate::platform::{ClockFuture, Instant};
 use parking_lot::MutexGuard;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
@@ -14,6 +15,8 @@ use std::time::Duration;
 pub struct IoShared {
     /// The fibers woken since the scheduler last made them ready.
     woken_fibers: Mutex<Vec<u32>>,
+    /// The number of fibers that wait on a host event, by [`WaitKind`].
+    host_waits: [AtomicUsize; 2],
     waker: Mutex<Option<Waker>>,
 }
 
@@ -37,8 +40,10 @@ impl IoShared {
 
 /// Wakes fiber `fid`, whose innermost native call waits on a host event. A
 /// stale wake-up only polls the fiber's current native call once more.
-struct FiberWaker {
+pub(crate) struct FiberWaker {
     fid: u32,
+    /// Whether `fid` is in `IoShared::woken_fibers`.
+    queued: AtomicBool,
     shared: Arc<IoShared>,
 }
 
@@ -47,8 +52,29 @@ impl Wake for FiberWaker {
         self.wake_by_ref();
     }
     fn wake_by_ref(self: &Arc<Self>) {
-        self.shared.woken_fibers.lock().push(self.fid);
-        self.shared.wake();
+        if !self.queued.swap(true, Ordering::Relaxed) {
+            self.shared.woken_fibers.lock().push(self.fid);
+            self.shared.wake();
+        }
+    }
+}
+
+/// A fiber's wait for a host event, counted in [`IoShared`] while it lives.
+struct HostWait {
+    kind: WaitKind,
+    shared: Arc<IoShared>,
+}
+
+impl HostWait {
+    fn new(kind: WaitKind, shared: Arc<IoShared>) -> HostWait {
+        shared.host_waits[kind as usize].fetch_add(1, Ordering::Relaxed);
+        HostWait { kind, shared }
+    }
+}
+
+impl Drop for HostWait {
+    fn drop(&mut self) {
+        self.shared.host_waits[self.kind as usize].fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -61,6 +87,8 @@ pub(crate) struct NativeCall {
     result_slot: usize,
     /// Memory counted in `Heap::fiber_bytes`: the future and its roots.
     pub bytes: usize,
+    /// The call's wait for a host event, if it waits on one.
+    host_wait: Option<HostWait>,
 }
 
 impl NativeCall {
@@ -71,13 +99,6 @@ impl NativeCall {
 }
 
 impl Fiber {
-    /// The kind of host event that the fiber waits on. A waiting fiber waits
-    /// on one when its innermost native call is on top of its frames.
-    fn host_wait(&self) -> Option<WaitKind> {
-        let native = self.top_native()?;
-        (self.state == FiberState::Waiting).then_some(native.start.wait_kind)
-    }
-
     /// The innermost native call, if it is on top of the frames.
     fn top_native(&self) -> Option<&NativeCall> {
         self.natives.last().filter(|native| native.depth == self.frames.len())
@@ -325,7 +346,7 @@ impl Vm {
     fn begin_native(&mut self, f: &mut Fiber, start: NativeStart) {
         let capacity = f.natives.capacity();
         // The first poll, which follows at once, counts the future's size.
-        f.natives.push(NativeCall { start, depth: f.frames.len(), result_slot: f.result_slot, bytes: 0 });
+        f.natives.push(NativeCall { start, depth: f.frames.len(), result_slot: f.result_slot, bytes: 0, host_wait: None });
         self.heap.fiber_bytes += (f.natives.capacity() - capacity) * std::mem::size_of::<NativeCall>();
     }
 
@@ -393,9 +414,9 @@ impl Vm {
     fn fiber_waker(&mut self, fid: u32) -> Waker {
         while self.fiber_wakers.len() <= fid as usize {
             let fid = self.fiber_wakers.len() as u32;
-            self.fiber_wakers.push(Waker::from(Arc::new(FiberWaker { fid, shared: self.host.interrupt.io.clone() })));
+            self.fiber_wakers.push(Arc::new(FiberWaker { fid, queued: AtomicBool::new(false), shared: self.host.interrupt.io.clone() }));
         }
-        self.fiber_wakers[fid as usize].clone()
+        Waker::from(self.fiber_wakers[fid as usize].clone())
     }
 
     /// Makes the fibers whose host events fired ready. Returns whether any
@@ -403,8 +424,10 @@ impl Vm {
     fn wake_host_waits(&mut self) -> bool {
         let mut woke = false;
         for fid in std::mem::take(&mut *self.host.interrupt.io.woken_fibers.lock()) {
+            self.fiber_wakers[fid as usize].queued.store(false, Ordering::Relaxed);
             if let Some(Some(f)) = self.fibers.get_mut(fid as usize)
-                && f.host_wait().is_some()
+                && let Some(native) = f.natives.last_mut()
+                && native.host_wait.take().is_some()
             {
                 f.state = FiberState::Ready;
                 self.ready.push_back(fid);
@@ -417,15 +440,8 @@ impl Vm {
     /// The kind of host event that tasks wait on: `User` if any task waits
     /// for the user, or `None` if no task waits on a host event.
     pub(crate) fn host_wait_kind(&self) -> Option<WaitKind> {
-        let mut kind = None;
-        for f in self.fibers.iter().flatten() {
-            match f.host_wait() {
-                Some(WaitKind::User) => return Some(WaitKind::User),
-                Some(WaitKind::Io) => kind = Some(WaitKind::Io),
-                None => {}
-            }
-        }
-        kind
+        let waits = &self.host.interrupt.io.host_waits;
+        [WaitKind::User, WaitKind::Io].into_iter().find(|&kind| waits[kind as usize].load(Ordering::Relaxed) > 0)
     }
 }
 
@@ -494,6 +510,8 @@ fn poll_native(vm: &mut MutexGuard<'_, Vm>, shared: &SharedVm, f: &mut Fiber) ->
         match request {
             None => {
                 f.wait_gen = vm.next_gen();
+                let native = f.natives.last_mut().expect("a native call is on top");
+                native.host_wait = Some(HostWait::new(native.start.wait_kind, vm.host.interrupt.io.clone()));
                 return Ok(Some(FiberStop::Blocked));
             }
             Some(VmRequest::Call { callee, args }) => {
