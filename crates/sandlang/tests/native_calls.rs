@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::rt;
+use common::{StoppedClock, rt};
 use parking_lot::Mutex;
 use sandlang::engine::{Config, Engine, Error, HostModules, LimitKind, Limits, MemorySink};
 use sandlang::native::NativeModule;
@@ -89,6 +89,11 @@ fn calls_module(log: &Log) -> NativeModule {
                 Ok(())
             }
         }))
+    });
+    m.function("spend_budget", |n: i64| async move {
+        for _ in 0..n {
+            tokio::task::consume_budget().await;
+        }
     });
     m.function("wait_ms", |ms: i64| async move { tokio::time::sleep(Duration::from_millis(ms as u64)).await });
     m.function("check_memory", |bytes: i64| -> Result<Later<(), Fail>, Fail> {
@@ -262,4 +267,11 @@ fn engines_and_runs_with_native_calls_are_send() {
     let mut engine = Engine::new(Config::new().host_modules(HostModules::new([calls_module(&Log::default())]).unwrap()));
     assert_send(&engine);
     assert_send(&engine.run_source("main.sand", "import calls\nprint(calls.apply((x) => x, 1))"));
+}
+
+#[test]
+fn a_spent_tokio_budget_does_not_hang_a_clock_that_yields_at_once() {
+    let clock = Arc::new(StoppedClock(sandlang::platform::Instant::now()));
+    let src = "let t = spawn calls.spend_budget(1000)\ncalls.spend_budget(1000)\nt.wait()\nprint(\"done\")";
+    assert_eq!(run_ok(Config::new().clock(clock), src), "done\n");
 }

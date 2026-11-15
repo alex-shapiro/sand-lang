@@ -589,13 +589,7 @@ enum Pause<S> {
 /// Runs ready tasks until none is ready, a task needs a prompt, or the engine
 /// must let other tasks of the host's executor run.
 fn run_ready<U: DriveUntil>(vm: &mut VmGuard<'_>, shared: &SharedVm, until: &U, timer: &mut RunTimer) -> Result<Pause<U::Stop>, RunEnding> {
-    while let Some(&fid) = vm.ready.front() {
-        // Once the host task spends its tokio budget, tokio futures return
-        // `Pending` until the task yields, so polling them would only repeat.
-        if !tokio::task::coop::has_budget_remaining() {
-            return Ok(Pause::Yield);
-        }
-        vm.ready.pop_front();
+    while let Some(fid) = vm.ready.pop_front() {
         let Some(mut f) = vm.fibers.get_mut(fid as usize).and_then(|f| f.take()) else { continue };
         if f.state != FiberState::Ready {
             vm.fibers[fid as usize] = Some(f);
@@ -661,7 +655,9 @@ fn run_ready<U: DriveUntil>(vm: &mut VmGuard<'_>, shared: &SharedVm, until: &U, 
             }
         }
         vm.check_limits(timer)?;
-        if timer.now.saturating_duration_since(timer.last_yield) > YIELD_EVERY {
+        // Once the host task spends its tokio budget, tokio futures return
+        // `Pending` until the task yields, so polling them would only repeat.
+        if !tokio::task::coop::has_budget_remaining() || timer.now.saturating_duration_since(timer.last_yield) > YIELD_EVERY {
             vm.wake_host_waits();
             // On the web a computing engine keeps the thread (yielding does
             // not reach the event loop), so output reaches the host only when
@@ -727,7 +723,11 @@ pub(crate) async fn drive<U: DriveUntil>(shared: &SharedVm, until: U) -> Result<
             Pause::Stop(stop) => return Ok(stop),
             Pause::Yield => {
                 timer.read();
-                timer.yield_now().await;
+                if tokio::task::coop::has_budget_remaining() {
+                    timer.yield_now().await;
+                } else {
+                    tokio::task::yield_now().await;
+                }
                 timer.resume();
                 timer.last_yield = timer.now;
             }
