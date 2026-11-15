@@ -42,7 +42,7 @@ impl HostFn {
         }
     }
 }
-/// Shared [`Vm`] handle lent to async native futures during a poll.
+/// Mutex-guarded [`Vm`] shared between the scheduler and polled native futures.
 pub(crate) type SharedVm = Arc<Mutex<Vm>>;
 
 #[derive(Clone)]
@@ -179,7 +179,7 @@ impl Fail {
 
 impl Ctl {
     /// Suspends the calling task on `call`.
-    pub(crate) fn native_call(call: AsyncNativeCall) -> Ctl {
+    pub(crate) fn async_native(call: AsyncNativeCall) -> Ctl {
         Ctl(Box::new(CtlKind::AsyncNative(call)))
     }
 
@@ -192,7 +192,7 @@ impl Ctl {
         &self.0
     }
 
-    /// Returns `true` if garbage collection can resolve this native-call failure.
+    /// Returns `true` if the garbage collector can free memory or resources for this failure.
     pub(crate) fn collection_may_help(&self) -> bool {
         match self.kind() {
             CtlKind::Collect => true,
@@ -617,9 +617,10 @@ pub struct Vm {
     /// made); shared, since strings are immutable. GC roots.
     ascii_strs: Vec<VmValue>,
 
-    /// Marks the VM inconsistent after an internal error or caught Rust panic
-    /// in the interpreter, a native function, or a native future. Memory stays
-    /// safe, and REPL sessions discard a broken VM.
+    /// True after an internal error or caught Rust panic in the interpreter, a
+    /// native function, or a native future. A broken VM preserves Rust memory
+    /// safety. [`Session`](crate::session::Session) resets its state if `broken`
+    /// is `true`.
     pub(crate) broken: bool,
     /// Testing aid that fails the first memory or resource check in each native call and retryable instruction. See [`crate::engine::Config::retry_stress`].
     pub(crate) retry_stress: bool,
@@ -780,7 +781,7 @@ impl Vm {
     }
 
     /// Resets per-run counters and attaches `call` for a new session run.
-    /// `call` must share the VM's [`sched::IoShared`].
+    /// `call` must share the VM's [`sched::HostWakeState`].
     pub(crate) fn begin_session_run(&mut self, call: &crate::engine::CallInterrupt) {
         self.meter.reset(call.flag.clone());
         self.host.output_bytes = 0;
@@ -1589,19 +1590,21 @@ impl Vm {
         racer.race_contenders > 0
     }
 
-    /// Unwinds `f` to the innermost frame with a pending cleanup pad, drops any
-    /// frames and async native calls above that pad, and sets its instruction
-    /// pointer to the pad. Returns `false` if every frame lacks a pending pad.
-    /// Pass `in_call = true` if the top frame stopped inside a call.
-    pub(crate) fn unwind_to_pad(&mut self, f: &mut Fiber, in_call: bool) -> bool {
-        let n = f.frames.len();
+    /// Unwinds `fiber` to the innermost frame with a pending cleanup pad.
+    ///
+    /// Truncates frames and drops async native calls above that frame. Sets
+    /// that frame's instruction pointer to its pad. Returns `false` if every
+    /// frame lacks a pending pad. Pass `in_call = true` if the top frame
+    /// stopped inside a call.
+    pub(crate) fn unwind_to_pad(&mut self, fiber: &mut Fiber, in_call: bool) -> bool {
+        let n = fiber.frames.len();
         for i in (0..n).rev() {
-            let fr = &mut f.frames[i];
+            let fr = &mut fiber.frames[i];
             let pos = if i + 1 < n || in_call { (fr.ip as usize).saturating_sub(1) } else { fr.ip as usize };
             if let Some(pad) = self.prog.protos[fr.proto as usize].cleanup_at(pos) {
                 fr.ip = pad as u32;
-                f.frames.truncate(i + 1);
-                self.drop_native_calls(f, i);
+                fiber.frames.truncate(i + 1);
+                self.drop_native_calls(fiber, i);
                 return true;
             }
         }

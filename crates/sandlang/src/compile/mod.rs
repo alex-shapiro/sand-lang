@@ -445,7 +445,7 @@ impl<'a> Compiler<'a> {
         self.prog.enum_types.extend(cp.enum_bindings.iter().copied());
         self.prog.struct_types.extend(cp.struct_bindings.iter().copied());
         if self.prog.protos.is_empty() {
-            self.prog.protos.push(Proto::callback());
+            self.prog.protos.push(Proto::callback_trampoline());
         }
         // Reserve protos for every new script function so calls can refer to them.
         let first = self.fn_protos.len();

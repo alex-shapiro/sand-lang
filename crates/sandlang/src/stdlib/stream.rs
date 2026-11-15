@@ -30,7 +30,7 @@ impl<C> From<IoFailure> for HostError<C> {
 
 pub(crate) type Suspended<T> = Result<Later<T, HostError>, HostError>;
 
-/// Result produced on the VM after an async I/O operation succeeds.
+/// Result of converting completed async I/O data on the VM.
 pub(crate) type PostIoResult<T> = Result<T, HostError<Fail>>;
 
 /// Suspends the calling task on `fut` with `wait_kind`. After `fut` returns
@@ -42,7 +42,8 @@ pub(crate) fn suspend<T: Send + 'static, R: IntoVmValue + 'static>(
 ) -> Suspended<R> {
     Ok(Later::new(wait_kind, |context| async move {
         let output = fut.await?;
-        // Defer the memory-limit check until the call finishes so completed I/O returns its result before garbage collection.
+        // Skip immediate `max_memory` checks while converting `output`.
+        // `poll_native_call` collects garbage and enforces `max_memory` after this future returns `Ready`.
         context.with_vm(|vm| vm.unchecked(|vm| convert(vm, output)))
     }))
 }

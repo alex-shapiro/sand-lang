@@ -2222,7 +2222,7 @@ fn script_with_deferred_task(deferred: &str) -> String {
 
 #[cfg(feature = "os")]
 #[test]
-fn exit_from_a_future_ends_a_test_like_a_script_exit() {
+fn engine_ends_test_on_exit_from_future() {
     let dir = TempDir::new("exit-tests");
     let main = dir.write("t.sand", "import quit\ntest \"zero\" { quit.now(0) }\ntest \"one\" { quit.now(1) }\ntest \"plain\" { exit(0) }");
     let mut engine = Engine::new(Config::new().host_modules(quit_module()));
@@ -2233,7 +2233,7 @@ fn exit_from_a_future_ends_a_test_like_a_script_exit() {
 
 #[cfg(feature = "os")]
 #[test]
-fn exit_from_a_future_in_module_init_fails_each_test_like_a_script_exit() {
+fn engine_fails_each_test_on_exit_from_future_in_module_init() {
     for code in [0, 4] {
         let dir = TempDir::new("exit-init");
         let main = dir.write("t.sand", &format!("import quit\nquit.now({code})\ntest \"t\" {{ }}"));
@@ -2244,7 +2244,7 @@ fn exit_from_a_future_in_module_init_fails_each_test_like_a_script_exit() {
 }
 
 #[test]
-fn exit_from_a_future_in_deferred_code_sets_the_exit_code() {
+fn engine_sets_exit_code_from_future_in_deferred_code() {
     for deferred in ["quit.now(5)", "exit(5)"] {
         let (outcome, _, _) = run_src(Config::new().host_modules(quit_module()), &script_with_deferred_task(deferred));
         assert_eq!(outcome.unwrap().exit_code, 5, "{deferred}");

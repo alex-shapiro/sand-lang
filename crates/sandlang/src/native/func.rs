@@ -88,8 +88,8 @@ impl Signature {
 /// module.function("fetch", |url: VmVal<String>| async move { 0 });
 /// ```
 ///
-/// A future makes scheduler requests through [`NativeContext`], so its output
-/// cannot hold a [`Ctl`]:
+/// A future makes scheduler requests through [`NativeContext`]. Its output
+/// error type is therefore [`Fail`] or [`HostError<Fail>`]:
 ///
 /// ```compile_fail,E0277
 /// # use sandlang::native::NativeModule;
@@ -278,7 +278,7 @@ where
     fn into_call_result(self, vm: &mut Vm) -> Result<VmValue, Ctl> {
         match self {
             Ok(Later(Completion::Now(result))) => Ok(result.into_call_result(vm)?),
-            Ok(Later(Completion::After(call))) => Err(Ctl::native_call(call)),
+            Ok(Later(Completion::After(call))) => Err(Ctl::async_native(call)),
             Err(e) => e.stop_call(vm),
         }
     }
@@ -303,8 +303,9 @@ enum Completion<T, E: NativeError> {
 
 /// Error type for a [`Later`] result ([`Ctl`], [`Fail`], or [`HostError`]).
 pub trait NativeError: Send + Sized + 'static + sealed::NativeError {
-    /// Error type of the future output. The future makes scheduler requests
-    /// through [`NativeContext`], so this type excludes [`Ctl`].
+    /// Error type of the future output. Because the future makes scheduler
+    /// requests through [`NativeContext`], this type is [`Fail`] or
+    /// [`HostError<Fail>`].
     type FutureError: From<Fail> + 'static;
     #[doc(hidden)]
     fn stop_call(self, vm: &mut Vm) -> Result<VmValue, Ctl>;
@@ -364,15 +365,15 @@ where
     /// first poll. Inside `build`, call [`NativeContext::root`] to root heap
     /// values before returning the future. Call [`NativeContext::with_vm`] and
     /// [`NativeContext::step`] only inside the returned future. After the
-    /// future finishes, the engine converts its output into the Sand return
-    /// value.
+    /// future returns `Ready`, the engine converts its output into the Sand
+    /// return value.
     ///
     /// `wait_kind` classifies host I/O waits. Pass [`WaitKind::User`] if the
-    /// task waits for user input so the engine excludes idle wait time from
-    /// `max_wall_time`.
+    /// task waits for user input. The engine excludes [`WaitKind::User`] wait
+    /// time from `max_wall_time`.
     ///
-    /// The future cannot hold a VM handle because garbage collection can free
-    /// the heap object during a wait:
+    /// The garbage collector can free unrooted heap objects during a wait. The
+    /// compiler therefore rejects VM handles inside the future:
     ///
     /// ```compile_fail,E0277
     /// # use sandlang::native::func::Later;
@@ -383,7 +384,7 @@ where
     /// }
     /// ```
     ///
-    /// Root the value with [`NativeContext::root`] before the wait instead:
+    /// Root the value with [`NativeContext::root`] before building the future:
     ///
     /// ```
     /// # use sandlang::native::func::Later;
@@ -397,8 +398,10 @@ where
     /// }
     /// ```
     ///
-    /// The compiler does not check a raw [`VmValue`]. Keep only
-    /// [`RootedValue`](super::context::RootedValue) handles across waits.
+    /// [`VmValue`] implements [`Send`]. The compiler therefore accepts a raw
+    /// [`VmValue`] inside a future even though garbage collection can
+    /// invalidate it. Keep only [`RootedValue`](super::context::RootedValue)
+    /// handles across waits.
     pub fn new<F>(wait_kind: WaitKind, build: impl FnOnce(NativeContext) -> F) -> Later<T, E>
     where
         F: Future<Output = Result<T, E::FutureError>> + Send + 'static,
@@ -406,7 +409,7 @@ where
         Later(Completion::After(AsyncNativeCall::new(wait_kind, build)))
     }
 
-    /// Returns a [`Later`] that produces `result` without suspending the calling task.
+    /// Wraps an immediate `result` in a [`Later`] and keeps the calling task running.
     pub fn ready(result: Result<T, E::FutureError>) -> Later<T, E> {
         Later(Completion::Now(result))
     }
@@ -497,7 +500,7 @@ macro_rules! fn_impls {
                 Box::new(move |vm: &mut Vm, args: &[VmValue]| -> Result<VmValue, Ctl> {
                     read_params!(vm, args, $($param),*);
                     let future = self($($param),*);
-                    Err(Ctl::native_call(AsyncNativeCall::new(WaitKind::Io, |_| future)))
+                    Err(Ctl::async_native(AsyncNativeCall::new(WaitKind::Io, |_| future)))
                 })
             }
         }

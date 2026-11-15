@@ -11,17 +11,17 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-/// Handle that lets an async native future access the VM, call Sand functions,
-/// and root heap values across waits.
+/// Context for accessing the VM, rooting heap values, and calling Sand
+/// functions inside [`Later::new`](super::func::Later::new).
 ///
 /// [`Later::new`](super::func::Later::new) passes a `NativeContext` to the
-/// closure that builds the future. The engine runs the future on the calling
-/// Sand task. While the future waits on a Sand callback or host I/O, the
-/// scheduler runs other tasks. Garbage collection during a wait can free any
-/// unrooted heap value.
+/// closure that builds the future. The engine runs that future on the calling
+/// Sand task. While the future awaits a Sand callback or host I/O, the
+/// scheduler can run other tasks. The garbage collector can free any unrooted
+/// heap value during a wait.
 ///
-/// Request methods borrow `&mut self`, so a future can await only a single VM
-/// request at a time:
+/// [`NativeContext::call`] and [`NativeContext::step`] borrow `&mut self`. A
+/// future can therefore await a single VM request at a time:
 ///
 /// ```compile_fail,E0499
 /// # use sandlang::native::context::{NativeContext, RootedValue};
@@ -55,7 +55,7 @@ pub struct NativeContext {
     state: Arc<Mutex<NativeCallState>>,
 }
 
-/// Handle to a heap value that an async native call keeps alive across waits.
+/// Handle to a heap value rooted in a [`NativeContext`] across waits.
 ///
 /// Pass this handle to [`NativeContext::value`] on the context that created it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,14 +68,14 @@ pub(crate) struct NativeCallState {
     pub lent_vm: Option<SharedVm>,
     /// Garbage-collection roots indexed by [`RootedValue`].
     pub roots: Vec<VmValue>,
-    /// Request submitted by the most recent poll.
+    /// Pending scheduler request from the future.
     pub request: Option<VmRequest>,
     /// Rooted return value from the most recent [`VmRequest::Call`].
     pub callback_result: Option<RootedValue>,
 }
 
 impl NativeCallState {
-    /// Appends `value` to `roots` and returns its handle.
+    /// Roots `value` in this call and returns its handle.
     pub fn root(&mut self, value: VmValue) -> RootedValue {
         self.roots.push(value);
         RootedValue((self.roots.len() - 1) as u32)
@@ -100,8 +100,8 @@ pub(crate) struct AsyncNativeCall {
 }
 
 impl AsyncNativeCall {
-    /// Builds an async native call from `build` and converts its output into a
-    /// Sand result on completion.
+    /// Wraps the future from `build` in an async native call that converts its
+    /// output on the VM.
     pub fn new<F, R>(wait_kind: WaitKind, build: impl FnOnce(NativeContext) -> F) -> AsyncNativeCall
     where
         F: Future<Output = R> + Send + 'static,
@@ -121,10 +121,11 @@ impl AsyncNativeCall {
 impl NativeContext {
     /// Runs `f` with exclusive access to the [`Vm`].
     ///
-    /// Any raw [`VmValue`] read from the VM stays valid only until the next
-    /// wait. Pass it to [`NativeContext::root`] to keep it across a wait. Use
-    /// [`NativeContext::step`] for heap allocations so the engine can collect
-    /// garbage and retry before failing on `max_memory`.
+    /// The garbage collector can invalidate any raw [`VmValue`] at the next
+    /// wait. Pass a [`VmValue`] to [`NativeContext::root`] to keep it across a
+    /// wait. Use [`NativeContext::step`] to allocate heap values or resources.
+    /// If a limit check fails inside `step`, the engine collects garbage and
+    /// retries.
     ///
     /// # Panics
     ///
@@ -136,11 +137,12 @@ impl NativeContext {
         let mut vm = vm
             .as_deref()
             .and_then(Mutex::try_lock)
-            .expect("`NativeContext::with_vm` runs only while the engine polls the call, and not inside another `with_vm`");
+            .expect("`NativeContext::with_vm` called outside a poll or inside an active `with_vm` closure");
         f(&mut vm)
     }
 
-    /// Roots `value` until the native call returns and returns its handle.
+    /// Keeps `value` rooted for the duration of the native call. Returns its
+    /// handle.
     pub fn root(&self, value: VmValue) -> RootedValue {
         self.state.lock().root(value)
     }
@@ -149,7 +151,8 @@ impl NativeContext {
     ///
     /// # Panics
     ///
-    /// Panics if `rooted` is out of bounds or if the native call has returned.
+    /// Panics if `rooted` is out of bounds, including after the engine finishes
+    /// this native call.
     pub fn value(&self, rooted: RootedValue) -> VmValue {
         self.state.lock().roots[rooted.0 as usize]
     }
@@ -157,10 +160,11 @@ impl NativeContext {
     /// Calls the Sand function `callee` with `args` on the calling task and
     /// returns its rooted result.
     ///
-    /// While `callee` runs, the scheduler can suspend it on I/O and run other
-    /// tasks. If the calling task is cancelled, the engine drops this native
-    /// future before unwinding the caller. A timer or `select!` branch around
-    /// `call` cannot interrupt `callee`.
+    /// While the engine runs `callee`, the scheduler can suspend `callee` on
+    /// I/O and run other tasks. If the calling task is cancelled, the engine
+    /// drops this native future before unwinding the caller. Once `callee`
+    /// starts, the engine runs `callee` to completion before polling this
+    /// future again.
     ///
     /// # Panics
     ///
@@ -176,7 +180,8 @@ impl NativeContext {
         self.state.lock().callback_result.take().expect("the scheduler stores the callback result before polling again")
     }
 
-    /// Runs `f` with the VM under the restart rule of a `&mut Vm` function.
+    /// Runs `f` with `&mut Vm` and retries after garbage collection or
+    /// permission prompts.
     ///
     /// `f` must check limits and capabilities before any side effect. After a
     /// memory or resource limit error, the engine collects all garbage and runs
@@ -215,12 +220,12 @@ impl NativeContext {
             }
             match ctl.into_kind() {
                 CtlKind::NeedPermission(capability) => {
-                    // Reset `collected` so the retried step can still trigger garbage collection after the prompt.
+                    // Allow garbage collection again if the post-prompt retry hits a limit.
                     collected = false;
                     self.wait_for_request(VmRequest::Prompt(capability)).await;
                 }
                 CtlKind::Fail(fail) => break Err(fail.into()),
-                other => break Err(Fail::internal(format!("a native step made the scheduler request {other:?}")).into()),
+                other => break Err(Fail::internal(format!("unsupported scheduler request in `NativeContext::step`: {other:?}")).into()),
             }
         };
         self.with_vm(Vm::forget_once_answers);
@@ -235,8 +240,8 @@ impl NativeContext {
 
 /// Future that submits a [`VmRequest`] and waits for the next scheduler poll.
 ///
-/// Dropping this future before the scheduler takes the request clears the
-/// pending request, such as in a losing `select!` branch.
+/// If a losing `select!` branch drops this future before the scheduler takes
+/// the request, [`Drop`] clears the pending request.
 struct VmRequestFuture<'a> {
     context: &'a mut NativeContext,
     request: Option<VmRequest>,
@@ -250,11 +255,11 @@ impl Future for VmRequestFuture<'_> {
             return Poll::Ready(());
         };
         let mut state = self.context.state.lock();
-        assert!(state.lent_vm.is_some(), "`NativeContext` requests run only while the engine polls the call");
+        assert!(state.lent_vm.is_some(), "poll `NativeContext` requests only while the engine polls this call");
         state.request = Some(request);
         drop(state);
-        // Combinators such as `FuturesUnordered` poll a child again only after its waker fires.
-        // Wake the waker now so the combinator polls this future on the next call poll.
+        // Combinators such as `FuturesUnordered` skip a child until the child wakes its waker.
+        // Mark this child ready for the scheduler's next poll of the outer future.
         task_context.waker().wake_by_ref();
         Poll::Pending
     }
@@ -262,7 +267,7 @@ impl Future for VmRequestFuture<'_> {
 
 impl Drop for VmRequestFuture<'_> {
     fn drop(&mut self) {
-        // `&mut NativeContext` allows a single active request, so any remaining request belongs to this future.
+        // `&mut NativeContext` ensures that only this future could have stored `state.request`.
         self.context.state.lock().request = None;
     }
 }

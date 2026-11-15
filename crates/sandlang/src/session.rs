@@ -401,7 +401,7 @@ impl Session {
     /// current call.
     fn begin_call(&mut self) {
         self.was_reset = false;
-        self.call = self.engine.begin_call_with_io(self.call.io.clone());
+        self.call = self.engine.begin_call_with_wake_state(self.call.wake_state.clone());
     }
 
     /// Makes sure the session is started and its standard modules initialized.
@@ -577,7 +577,7 @@ impl Session {
         {
             let mut vm = st.vm.lock();
             vm.begin_session_run(call);
-            // Exclude user-input wait time from the wall-time limit.
+            // Clear the previous input's deadline while waiting for the next REPL input.
             vm.deadline = None;
         }
         let drive_result = sched::drive(&st.vm, UntilIdle { waits_for_io: true }).await;

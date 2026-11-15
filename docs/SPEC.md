@@ -2163,38 +2163,43 @@ function signature:
   types.
 
 The compiler rejects a borrowed parameter in a function that takes `&mut Vm` or
-returns a future. Garbage collection during a wait can free the heap object
-that a VM handle refers to. Each VM handle type is therefore `!Send`, and the
-compiler rejects it in these places:
+returns a future. The garbage collector can free a heap object during a wait.
+Each VM handle type is therefore `!Send`. The compiler rejects VM handles in
+these places:
 
 - a parameter or output of an async native function
 - the future of `Later::new`
 - a `NativeObject`
 
 `IntoVmValue::into_vm_value` and `Vm` allocation methods return a raw
-`VmValue`. The compiler does not check `VmValue` across a wait. Keep only
-`RootedValue` handles from `NativeContext::root` across a wait.
+`VmValue`. `VmValue` implements `Send`. The compiler therefore accepts a raw
+`VmValue` inside a future even though garbage collection can invalidate it.
+Keep only `RootedValue` handles from `NativeContext::root` across a wait.
 
-`Later::new(wait_kind, build)` passes a `NativeContext` to `build` and runs the
-returned future on the calling task. `NativeContext` provides four operations:
+`Later::new(wait_kind, build)` passes a `NativeContext` to `build`. The engine
+runs the returned future on the calling task. `NativeContext` provides four
+operations:
 
 - `with_vm(f)` runs `f` with `&mut Vm` while the engine polls the call.
-- `root(value)` and `value(rooted)` keep heap values alive across waits until
-  the native call returns.
+- `root(value)` keeps a heap value alive for the duration of the native call
+  and returns a `RootedValue`. `value(rooted)` reads that `VmValue` from the
+  call's root table.
 - `step(f)` runs `f` with `&mut Vm` under the `&mut Vm` restart rule. After a
   memory or resource limit error, the engine collects garbage and runs `f`
   again. After a permission prompt, the engine asks the user and runs `f` again
   from the start.
 - `call(callee, args)` calls a Sand function with at most 255 arguments on the
-  calling task. The scheduler can suspend the callee on I/O while other tasks
-  run. A timer or `select!` branch around `call` cannot interrupt the callee.
+  calling task. The scheduler can suspend the callee on I/O and run other tasks.
+  Once `callee` starts, the engine runs `callee` to completion before polling
+  the native future again. A timer or `select!` branch inside the native future
+  therefore waits for `callee` to finish.
 
 Each callback uses two frames toward `max_call_depth`. If a task is cancelled
 during a callback, the engine runs the callee's `defer` blocks, drops the
 native future, and runs the caller's `defer` blocks. The engine charges the
-top-level future and its root table against `max_memory`. It polls nested
-futures on the Rust stack without charging their boxes, so a recursive future
-must bound its depth.
+top-level future and its root table against `max_memory`. Nested boxed futures
+sit outside this memory count. Bound the recursion depth of any async native
+function.
 
 Four derive macros bind a Rust type to a Sand type in a native module. Each
 macro implements `NamedType`, `SandType`, `FromVmValue`, and `IntoVmValue`.
@@ -2270,12 +2275,12 @@ returns a Sand `Result` or aborts the run on failure:
 - `Result<Later<T, E>, E>` suspends the calling task on a future and maps to
   the same Sand return type as `Result<T, E>`. `Later::new(wait_kind, build)`
   sets the `WaitKind` of host I/O waits. Pass `WaitKind::User` if the task
-  waits for user input so the engine excludes idle wait time from
-  `max_wall_time` (§16.2). An async native function uses `WaitKind::Io`. If
-  `E` is `Ctl` or `Fail`, the future returns `Result<T, Fail>`. If `E` is
-  `HostError`, the future returns `Result<T, HostError<Fail>>`. An unchecked
-  memory-limit error inside the future ends the run; call
-  `NativeContext::step` to retry after garbage collection.
+  waits for user input. The engine excludes `WaitKind::User` wait time from
+  `max_wall_time` (§16.2). An async native function uses `WaitKind::Io`. If `E`
+  is `Ctl` or `Fail`, the future returns `Result<T, Fail>`. If `E` is
+  `HostError`, the future returns `Result<T, HostError<Fail>>`. If the future
+  returns a memory-limit `Fail`, the engine ends the run. Call
+  `NativeContext::step` to collect garbage and retry before failing.
 - A future makes scheduler requests only through its `NativeContext`. Its
   output is a type that converts to a Sand value, `Result<T, Fail>`, or
   `Result<T, HostError<Fail>>`.
@@ -2287,9 +2292,9 @@ To check a sandbox capability inside a function that takes `&mut Vm`, call
 runs the function again from the start after a permission prompt or a garbage
 collection during a memory or resource check. `Config::retry_stress` tests this
 requirement by failing the first memory or resource check in each `&mut Vm`
-call and in each poll of a `Later` future. During return-value conversion, the
-engine defers the memory check until the call finishes and then collects
-garbage if needed.
+call and in each poll of a `Later` future. After a native function returns, the
+engine converts the return value before checking `max_memory`. If heap usage
+exceeds `max_memory`, the engine collects garbage before enforcing the limit.
 
 | Rust type                         | Sand type                                             |
 | --------------------------------- | ----------------------------------------------------- |

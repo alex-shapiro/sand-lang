@@ -59,10 +59,10 @@ pub enum FiberStop {
     Preempt,
     /// Waiting on a scheduler or host event.
     Blocked,
-    /// Started an async native call whose result goes to `Fiber::result_slot`.
+    /// Started an async native call. The scheduler writes its result to `Fiber::result_slot`.
     AsyncNative(AsyncNativeCall),
-    /// Finished a callback for the innermost async native call.
-    NativeReturn(VmValue),
+    /// Finished a Sand callback for the innermost async native call.
+    CallbackReturn(VmValue),
     Prompt(Capability),
     /// `task.yield_now()`.
     YieldNow,
@@ -1265,7 +1265,7 @@ impl Vm {
                         do_return!(v);
                     }
                     Op::RetUnit => do_return!(VmValue::Unit),
-                    Op::ResumeNative => return Ok(FiberStop::NativeReturn(r!(0))),
+                    Op::ResumeNative => return Ok(FiberStop::CallbackReturn(r!(0))),
                     Op::Unwind => {
                         fiber.frames.pop();
                         if !self.unwind_to_pad(fiber, true) {

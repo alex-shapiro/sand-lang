@@ -34,16 +34,16 @@ impl Drop for LogOnDrop {
 
 type Callback = VmVal<fn() -> ()>;
 
-/// Wrapper future that polls `inner` again only after `inner` wakes its waker,
-/// matching combinators such as `FuturesUnordered`.
+/// Test future that polls `inner` only after `inner` wakes its waker, like `FuturesUnordered`.
 struct WakeGatedFuture<F> {
     inner: Pin<Box<F>>,
     gate: Arc<WakeGate>,
 }
 
-/// Waker state for [`WakeGatedFuture`]. The scheduler polls the outer future
-/// after each callback, so this waker records readiness locally without
-/// forwarding wakes.
+/// Waker flag for [`WakeGatedFuture`].
+///
+/// [`Wake::wake`] sets `is_woken` locally. The scheduler already polls the
+/// outer call future after each callback.
 struct WakeGate {
     is_woken: AtomicBool,
 }
@@ -72,7 +72,7 @@ impl<F: Future> Future for WakeGatedFuture<F> {
     }
 }
 
-/// Builds the `calls` host module and records events in `log`.
+/// Builds the `calls` test module backed by `log`.
 fn calls_module(log: &EventLog) -> NativeModule {
     let mut module = NativeModule::new("calls");
     module.source("pub native fn apply<T>(f: fn(T) -> T, x: T, times: int) -> T");
@@ -90,7 +90,7 @@ fn calls_module(log: &EventLog) -> NativeModule {
             }))
         },
     );
-    // Allocates `"kept"` before the callback so only the call's root table references it during GC.
+    // Allocate `"kept"` before the callback to root it solely in `NativeCallState::roots`.
     module.function("keep", |vm: &mut Vm, callback: Callback| -> Result<Later<String, Fail>, Fail> {
         let kept = "kept".into_vm_value(vm)?;
         Ok(Later::new(WaitKind::Io, |mut context| {
@@ -115,7 +115,8 @@ fn calls_module(log: &EventLog) -> NativeModule {
             }
         }))
     });
-    // Races a callback request against an immediately ready branch, then sleeps.
+    // With `biased`, `select!` polls `call` first, stores `VmRequest::Call`, and drops `call` once `ready` completes.
+    // `sleep` then returns `Pending` to the scheduler, testing that `Drop` cleared `state.request`.
     module.function("race_callback", |callback: Callback| -> Result<Later<String, Fail>, Fail> {
         Ok(Later::new(WaitKind::Io, |mut context| {
             let callback = context.root(callback.raw());
@@ -155,7 +156,7 @@ fn calls_module(log: &EventLog) -> NativeModule {
     module.function("open_door", |name: String| -> Result<Later<String, HostError>, HostError> {
         Ok(Later::new(WaitKind::Io, |mut context| async move {
             let door = Capability::Custom { name: "door".into(), detail: name.clone() };
-            // Check a resource slot before prompting so `retry_stress` triggers garbage collection first.
+            // Under `retry_stress`, `vm.resource_slot()` forces a garbage-collection retry before `vm.require` prompts.
             context
                 .step(|vm| {
                     vm.resource_slot()?;
@@ -165,18 +166,17 @@ fn calls_module(log: &EventLog) -> NativeModule {
             Ok(format!("opened {name}"))
         }))
     });
-    // Stores the first call's `NativeContext` so a second call can test out-of-poll access.
-    let saved_context: Arc<Mutex<Option<NativeContext>>> = Arc::default();
-    let saved_for_store = saved_context.clone();
+    let context_slot: Arc<Mutex<Option<NativeContext>>> = Arc::default();
+    let slot_for_save = context_slot.clone();
     module.function("save_context", move || -> Result<Later<(), Fail>, Fail> {
-        let saved_for_store = saved_for_store.clone();
+        let slot_for_save = slot_for_save.clone();
         Ok(Later::new(WaitKind::Io, move |context| {
-            *saved_for_store.lock() = Some(context);
+            *slot_for_save.lock() = Some(context);
             async { Ok(()) }
         }))
     });
     module.function("use_saved_context", move || -> Result<Later<(bool, bool), Fail>, Fail> {
-        let mut stale_context = saved_context.lock().take().expect("a saved context");
+        let mut stale_context = context_slot.lock().take().expect("a saved context");
         Ok(Later::new(WaitKind::Io, |_| async move {
             let can_access_vm = catch_unwind(AssertUnwindSafe(|| stale_context.with_vm(|_| ()))).is_ok();
             let callee = stale_context.root(VmValue::Unit);
@@ -222,7 +222,6 @@ fn callbacks_return_their_results_to_the_native_call() {
 
 #[test]
 fn callbacks_wait_on_io_and_channels_while_other_tasks_run() {
-    // Wait for a channel message sent by another task during the callback.
     let source = "let ch: Channel<int> = Channel()\n\
                   let sender = spawn {\n\
                       calls.wait_ms(5)\n\
@@ -255,14 +254,14 @@ fn engine_enforces_call_depth_limit_across_nested_callbacks() {
 }
 
 #[test]
-fn exit_in_a_callback_ends_the_run() {
+fn engine_exits_run_from_callback() {
     let (result, stdout) = run(Config::new(), &EventLog::default(), "calls.apply((x) => { exit(3)\nx }, 1, 1)\nprint(\"unreachable\")");
     assert_eq!(result.unwrap(), 3);
     assert_eq!(stdout, "");
 }
 
 #[test]
-fn callback_error_traces_include_outer_caller() {
+fn engine_includes_outer_caller_in_callback_error_trace() {
     let source = "fn divide(x: int) -> int { x / 0 }\nfn outer() -> int { calls.apply(divide, 1, 1) }\nprint(outer())";
     let (result, _) = run(Config::new(), &EventLog::default(), source);
     let Err(Error::Runtime { trace, .. }) = result else { panic!("{result:?}") };
@@ -271,7 +270,7 @@ fn callback_error_traces_include_outer_caller() {
 }
 
 #[test]
-fn cancellation_drops_native_futures_in_reverse_call_order() {
+fn engine_drops_cancelled_native_futures_in_reverse_call_order() {
     let log = EventLog::default();
     let source = "let t = spawn {\n\
                       defer { calls.log(\"caller defer\") }\n\
@@ -287,8 +286,8 @@ fn cancellation_drops_native_futures_in_reverse_call_order() {
 }
 
 #[test]
-fn cancelling_a_host_wait_lets_the_engine_report_a_deadlock() {
-    // Dropping the cancelled host wait must decrement the wait count so `ch.recv()` reports a deadlock.
+fn engine_reports_deadlock_after_cancelling_host_wait() {
+    // Cancelling `t` drops its `HostWaitGuard`. With zero active host waits, `ch.recv()` triggers deadlock detection.
     let limits = Limits { max_wall_time: Some(Duration::from_secs(5)), ..Limits::default() };
     let source = "let t = spawn calls.wait_ms(10000)\n\
                   task.sleep(5ms)\n\
@@ -300,7 +299,7 @@ fn cancelling_a_host_wait_lets_the_engine_report_a_deadlock() {
 }
 
 #[test]
-fn ending_the_run_drops_native_futures_waiting_on_callbacks() {
+fn engine_drops_callback_waiting_native_futures_at_run_end() {
     let log = EventLog::default();
     run(Config::new(), &log, "spawn calls.guard(() => calls.wait_ms(10000))\ntask.sleep(5ms)").0.unwrap();
     assert_eq!(*log.lock(), ["native dropped"]);
@@ -308,7 +307,8 @@ fn ending_the_run_drops_native_futures_waiting_on_callbacks() {
 
 #[test]
 fn step_collects_garbage_in_place_on_allocation() {
-    // Reassigning `strings` leaves 8 MB unreachable before a safe point, so `step` must collect garbage in place.
+    // `strings = []` leaves 8 MB unreachable before the next safe point.
+    // `calls.allocate` fits within the 16 MB limit only if `step` collects garbage in place.
     let source = "var block = \"x\"\n\
                   for _ in 0..10 { block = block + block }\n\
                   var strings: [str] = []\n\
@@ -323,7 +323,6 @@ fn step_collects_garbage_in_place_on_allocation() {
 
 #[test]
 fn engine_retries_step_resource_checks_after_collection() {
-    // `retry_stress` forces the first check in the poll to collect garbage and retry.
     assert_eq!(run_ok(Config::new().retry_stress(true), "print(calls.open_resource())"), "Ok(())\n");
 }
 
@@ -351,12 +350,12 @@ fn step_prompts_for_permission_and_resumes_future() {
 }
 
 #[test]
-fn context_panics_outside_its_call_poll() {
+fn native_context_panics_outside_call_poll() {
     assert_eq!(run_ok(Config::new(), "calls.save_context()\nprint(calls.use_saved_context())"), "(false, false)\n");
 }
 
 #[test]
-fn dropping_losing_select_branch_withdraws_callback_request() {
+fn dropped_select_branch_clears_callback_request() {
     let log = EventLog::default();
     let (result, stdout) = run(Config::new(), &log, "print(calls.race_callback(() => calls.log(\"callback ran\")))");
     result.unwrap();
@@ -365,7 +364,7 @@ fn dropping_losing_select_branch_withdraws_callback_request() {
 }
 
 #[test]
-fn request_wakes_combinator_with_custom_waker() {
+fn vm_request_wakes_combinator_waker() {
     let limits = Limits { max_wall_time: Some(Duration::from_secs(5)), ..Limits::default() };
     let log = EventLog::default();
     run(Config::new().limits(limits), &log, "calls.call_behind_own_waker(() => calls.log(\"called\"))").0.unwrap();

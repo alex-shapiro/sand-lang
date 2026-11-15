@@ -1124,7 +1124,7 @@ impl Op {
     }
 }
 
-/// Prototype index of the trampoline that runs Sand callbacks for async native calls.
+/// Prototype index of the callback trampoline for async native calls.
 pub const CALLBACK_PROTO: u32 = 0;
 
 /// Maximum argument count for a callback started from an async native call.
@@ -1182,10 +1182,10 @@ impl Proto {
 
     /// Builds the [`CALLBACK_PROTO`] trampoline prototype.
     ///
-    /// Register 0 holds the callee and registers `1..=argc` hold the arguments.
-    /// Jumping to [`Proto::callback_entry`] calls the callee and executes
-    /// [`Op::ResumeNative`].
-    pub(crate) fn callback() -> Proto {
+    /// Register 0 stores the callee. Registers `1..=argc` store the arguments.
+    /// At [`Proto::callback_entry`], the interpreter calls the callee with
+    /// `argc` arguments and then executes [`Op::ResumeNative`].
+    pub(crate) fn callback_trampoline() -> Proto {
         let code: Vec<Op> =
             (0..=MAX_CALLBACK_ARGS as u8).flat_map(|argc| [Op::CallR { callee: 0, base: 1, dst: 0, argc }, Op::ResumeNative]).collect();
         Proto {

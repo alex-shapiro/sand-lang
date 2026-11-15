@@ -20,7 +20,7 @@ use crate::stdlib::time::TimeZone;
 use crate::types::{FnId, ModId};
 use crate::vm::bytecode::Program;
 use crate::vm::heap::GcStats;
-use crate::vm::sched::{self, IoShared};
+use crate::vm::sched::{self, HostWakeState};
 use crate::vm::value::VmValue;
 use crate::vm::{
     Always, Host, HostFn, NativeEntry, OutputSink, Rng, RunEnding, SharedSink, SharedVm, TraceFrame, Trap, Vm, WaitKind, entropy_seed,
@@ -460,13 +460,14 @@ impl Config {
         self.gc_stress = on;
         self
     }
-    /// Testing aid that fails the first memory or resource check in each
-    /// synchronous native call, each async native poll, and each retryable
-    /// instruction. After a forced failure, the engine collects garbage and
-    /// retries the operation. Enable this option to verify that native
-    /// functions and instructions check limits before side effects and refund
-    /// fuel on retry. It also verifies that async native futures run checks
-    /// through [`NativeContext::step`](crate::native::context::NativeContext::step).
+    /// Enables or disables forced limit-check retries in tests.
+    ///
+    /// If `on` is `true`, the engine fails the first memory or resource check
+    /// in each `&mut Vm` call, each poll of a [`Later`](crate::native::func::Later)
+    /// future, and each retryable instruction. The engine then collects garbage
+    /// and retries the check. Enable this mode to catch side effects before
+    /// limit checks and unretried checks outside
+    /// [`NativeContext::step`](crate::native::context::NativeContext::step).
     pub fn retry_stress(mut self, on: bool) -> Self {
         self.retry_stress = on;
         self
@@ -532,17 +533,17 @@ struct InterruptTargets {
     cleanup_len: usize,
 }
 
-/// Weak references to a call's interrupt flag and I/O waker.
+/// Weak references to a call's interrupt flag and host-wake state.
 struct InterruptTarget {
     flag: Weak<AtomicBool>,
-    io: Weak<IoShared>,
+    wake_state: Weak<HostWakeState>,
 }
 
-/// Interrupt flag and I/O waker for an active engine or session call.
+/// Interrupt flag and host-wake state for an active engine or session call.
 #[derive(Clone)]
 pub(crate) struct CallInterrupt {
     pub flag: Arc<AtomicBool>,
-    pub io: Arc<IoShared>,
+    pub wake_state: Arc<HostWakeState>,
 }
 
 impl CallInterrupt {
@@ -554,7 +555,7 @@ impl CallInterrupt {
     pub async fn unless_interrupted<T>(&self, future: impl Future<Output = T>) -> Option<T> {
         let mut future = std::pin::pin!(future);
         std::future::poll_fn(|cx| {
-            self.io.set_waker(cx.waker());
+            self.wake_state.set_waker(cx.waker());
             if self.is_set() {
                 return std::task::Poll::Ready(None);
             }
@@ -573,10 +574,10 @@ impl InterruptHandle {
     /// Stops and returns from the engine or session.
     pub fn interrupt(&self) {
         let calls: Vec<_> =
-            self.targets.lock().calls.iter().filter_map(|target| Some((target.flag.upgrade()?, target.io.upgrade()?))).collect();
-        for (flag, io) in calls {
+            self.targets.lock().calls.iter().filter_map(|target| Some((target.flag.upgrade()?, target.wake_state.upgrade()?))).collect();
+        for (flag, wake_state) in calls {
             flag.store(true, Ordering::SeqCst);
-            io.wake();
+            wake_state.wake();
         }
     }
 
@@ -586,7 +587,7 @@ impl InterruptHandle {
             targets.calls.retain(|target| target.flag.strong_count() > 0);
             targets.cleanup_len = 2 * targets.calls.len().max(4);
         }
-        targets.calls.push(InterruptTarget { flag: Arc::downgrade(&call.flag), io: Arc::downgrade(&call.io) });
+        targets.calls.push(InterruptTarget { flag: Arc::downgrade(&call.flag), wake_state: Arc::downgrade(&call.wake_state) });
     }
 }
 
@@ -1032,13 +1033,13 @@ impl Engine {
     /// Creates a [`CallInterrupt`] for a new call and registers it with the
     /// configured [`InterruptHandle`].
     pub(crate) fn begin_call(&self) -> CallInterrupt {
-        self.begin_call_with_io(Arc::default())
+        self.begin_call_with_wake_state(Arc::default())
     }
 
-    /// Creates a [`CallInterrupt`] that shares `io` with an existing VM and
-    /// registers it with the configured [`InterruptHandle`].
-    pub(crate) fn begin_call_with_io(&self, io: Arc<IoShared>) -> CallInterrupt {
-        let call = CallInterrupt { flag: Arc::default(), io };
+    /// Creates a [`CallInterrupt`] that shares `wake_state` with an existing VM.
+    /// Registers the interrupt with the configured [`InterruptHandle`].
+    pub(crate) fn begin_call_with_wake_state(&self, wake_state: Arc<HostWakeState>) -> CallInterrupt {
+        let call = CallInterrupt { flag: Arc::default(), wake_state };
         if let Some(handle) = &self.config.interrupt {
             handle.attach(&call);
         }
