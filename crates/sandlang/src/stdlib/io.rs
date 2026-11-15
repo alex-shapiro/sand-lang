@@ -1,8 +1,8 @@
 //! The `io` and `env` modules.
 
-use super::stream::{self, IoFailure, Suspended, bytes_read, line_read, read_line, read_to_end_reserved, read_upto, strip_eol};
+use super::stream::{self, IoFailure, Suspended, line_read, read_line, read_to_end_reserved, read_upto, strip_eol};
 use crate::check::ModKind;
-use crate::native::convert::{HostError, IntoVmValue};
+use crate::native::convert::HostError;
 use crate::native::func::Later;
 use crate::native::ty::VmVal;
 use crate::native::{NativeModule, NativeObject, ObjectType};
@@ -26,10 +26,10 @@ pub(crate) fn module() -> NativeModule {
         if max <= 0 {
             return Err(HostError::new("invalid", "read: max must be positive"));
         }
-        read_stdin(vm, Read::Upto(to_usize_saturating(max)), bytes_read)
+        read_stdin_bytes(vm, Read::Upto(to_usize_saturating(max)))
     });
-    m.function("Stdin.read_line", |vm: &mut Vm, _: VmVal<Stdin>| read_stdin(vm, Read::Line, input_line));
-    m.function("Stdin.read_all", |vm: &mut Vm, _: VmVal<Stdin>| read_stdin(vm, Read::All, bytes_read));
+    m.function("Stdin.read_line", |vm: &mut Vm, _: VmVal<Stdin>| read_stdin_line(vm));
+    m.function("Stdin.read_all", |vm: &mut Vm, _: VmVal<Stdin>| read_stdin_bytes(vm, Read::All));
     output::<Stdout>(&mut m);
     output::<Stderr>(&mut m);
     m
@@ -99,17 +99,39 @@ enum Read {
     Upto(usize),
 }
 
-fn read_stdin<R: IntoVmValue + 'static>(vm: &mut Vm, what: Read, decode: fn(&Vm, Option<Vec<u8>>) -> stream::Decoded<R>) -> Suspended<R> {
+const INVALID_INPUT: &str = "stdin: input is not valid UTF-8";
+
+/// `read_bytes(max)` and `read_all()` of standard input.
+fn read_stdin_bytes(vm: &mut Vm, what: Read) -> Suspended<Vec<u8>> {
+    check_stdin(vm)?;
+    let (wait_kind, read) = start_stdin_read(vm, what)?;
+    stream::suspend(wait_kind, async move { Ok(read.await?.unwrap_or_default()) })
+}
+
+/// `read_line()` of standard input.
+fn read_stdin_line(vm: &mut Vm) -> Suspended<Option<String>> {
+    check_stdin(vm)?;
+    if let Some(line) = buffered_line(vm) {
+        return Ok(Later::ready(line_read(vm, line, INVALID_INPUT)));
+    }
+    let (wait_kind, read) = start_stdin_read(vm, Read::Line)?;
+    stream::suspend_line(wait_kind, read, INVALID_INPUT)
+}
+
+/// Checks the permission to read standard input, and flushes standard output.
+fn check_stdin(vm: &mut Vm) -> Result<(), HostError> {
     if !vm.permit(&Capability::Stdin)? {
         return Err(HostError::new("permission_denied", "permission denied: read standard input"));
     }
     // A prompt written before reading must be visible (on a terminal).
-    vm.flush_before_input()?;
-    if what == Read::Line
-        && let Some(data) = buffered_line(vm)
-    {
-        return Ok(Later::ready(decode(vm, data)));
-    }
+    Ok(vm.flush_before_input()?)
+}
+
+/// Starts a read of standard input. Returns its wait kind and the read.
+fn start_stdin_read(
+    vm: &mut Vm,
+    what: Read,
+) -> Result<(WaitKind, impl Future<Output = Result<Option<Vec<u8>>, IoFailure>> + Send + 'static), HostError> {
     let stdin = vm.host.stdin.clone();
     // The input is buffered outside the heap until it is complete.
     let mut res = match what {
@@ -123,11 +145,7 @@ fn read_stdin<R: IntoVmValue + 'static>(vm: &mut Vm, what: Read, decode: fn(&Vm,
         Ok(data)
     };
     let wait_kind = vm.host.stdin.as_ref().map_or(WaitKind::Io, |channel| channel.wait_kind);
-    stream::suspend_decoded(wait_kind, read, decode)
-}
-
-fn input_line(vm: &Vm, line: Option<Vec<u8>>) -> stream::Decoded<Option<String>> {
-    line_read(vm, line, "stdin: input is not valid UTF-8")
+    Ok((wait_kind, read))
 }
 
 /// The most `read` returns at once from standard input.

@@ -30,12 +30,8 @@ impl<C> From<IoFailure> for HostError<C> {
 
 pub(crate) type Suspended<T> = Result<Later<T, HostError>, HostError>;
 
-/// Result of decoding the bytes that an I/O operation read.
-pub(crate) type Decoded<T> = Result<T, HostError<Fail>>;
-
 /// Suspends the calling task on `fut` with `wait_kind`. When the call returns,
 /// the engine converts the output of `fut` into the Sand result.
-#[cfg(any(feature = "os", web))]
 pub(crate) fn suspend<T: IntoVmValue + 'static>(
     wait_kind: WaitKind,
     fut: impl Future<Output = Result<T, IoFailure>> + Send + 'static,
@@ -43,16 +39,17 @@ pub(crate) fn suspend<T: IntoVmValue + 'static>(
     Ok(Later::new(wait_kind, |_| async move { Ok(fut.await?) }))
 }
 
-/// Suspends the calling task on `fut` with `wait_kind`, and then decodes the
-/// bytes that `fut` read with `decode`, which charges the meter.
-pub(crate) fn suspend_decoded<R: IntoVmValue + 'static>(
+/// Suspends the calling task on the line read `read` with `wait_kind`. The
+/// result is `None` at the end of the stream, or an `"invalid"` error with
+/// `message` if the line is not UTF-8.
+pub(crate) fn suspend_line(
     wait_kind: WaitKind,
-    fut: impl Future<Output = Result<Option<Vec<u8>>, IoFailure>> + Send + 'static,
-    decode: impl FnOnce(&Vm, Option<Vec<u8>>) -> Decoded<R> + Send + 'static,
-) -> Suspended<R> {
+    read: impl Future<Output = Result<Option<Vec<u8>>, IoFailure>> + Send + 'static,
+    message: &'static str,
+) -> Suspended<Option<String>> {
     Ok(Later::new(wait_kind, |context| async move {
-        let data = fut.await?;
-        context.with_vm(|vm| decode(vm, data))
+        let line = read.await?;
+        context.with_vm(|vm| line_read(vm, line, message))
     }))
 }
 
@@ -73,11 +70,9 @@ pub(crate) fn utf8(vm: &Vm, data: Vec<u8>) -> Result<Option<String>, Fail> {
     Ok(String::from_utf8(data).ok())
 }
 
-pub(crate) fn bytes_read(_: &Vm, data: Option<Vec<u8>>) -> Decoded<Vec<u8>> {
-    Ok(data.unwrap_or_default())
-}
-
-pub(crate) fn line_read(vm: &Vm, line: Option<Vec<u8>>, message: &str) -> Decoded<Option<String>> {
+/// Returns `line` as a string, or an `"invalid"` error with `message` if it is
+/// not UTF-8.
+pub(crate) fn line_read(vm: &Vm, line: Option<Vec<u8>>, message: &str) -> Result<Option<String>, HostError<Fail>> {
     let Some(line) = line else { return Ok(None) };
     utf8(vm, line)?.map(Some).ok_or_else(|| HostError::new("invalid", message))
 }

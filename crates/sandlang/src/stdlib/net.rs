@@ -5,7 +5,7 @@
 //! policy checks every resolved IP address, and bound every wait on a peer
 //! with a timeout.
 
-use super::stream::{self, IoFailure, Suspended, line_read, read_line, read_to_end_reserved, read_upto, suspend, suspend_decoded};
+use super::stream::{self, IoFailure, Suspended, read_line, read_to_end_reserved, read_upto, suspend};
 use crate::check::ModKind;
 use crate::native::convert::{HostError, IntoVmValue};
 use crate::native::ty::VmVal;
@@ -522,15 +522,12 @@ fn conn_read_line(vm: &mut Vm, c: VmVal<Conn>) -> Suspended<Option<String>> {
     let h = conn_handle(vm, c)?;
     // The line may grow until it exhausts the memory limit.
     let mut res = vm.io_reservation();
-    suspend_decoded(
-        WaitKind::Io,
-        h.closed.guard(async move {
-            let line = read_line(&mut *h.reader.lock().await, &mut res).await?;
-            drop(res);
-            Ok(line)
-        }),
-        |vm, line| line_read(vm, line, "line is not valid UTF-8"),
-    )
+    let read = h.closed.guard(async move {
+        let line = read_line(&mut *h.reader.lock().await, &mut res).await?;
+        drop(res);
+        Ok(line)
+    });
+    stream::suspend_line(WaitKind::Io, read, "line is not valid UTF-8")
 }
 
 /// Reads until the peer has finished sending; the data is reserved as it

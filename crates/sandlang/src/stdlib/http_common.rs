@@ -1,6 +1,6 @@
 //! Shared HTTP client types and helpers for TCP and web `fetch` clients.
 
-use super::stream::{self, IoFailure, Suspended, bytes_read, line_read};
+use super::stream::{self, IoFailure, Suspended};
 use super::uri;
 use crate::native::convert::{HostError, IntoVmValue};
 use crate::native::ty::{SandType, Type, VmVal};
@@ -471,12 +471,12 @@ enum BodyRead {
     All,
 }
 
-fn read_body<R: IntoVmValue + 'static>(
+/// Starts a read of `body`.
+fn read_body(
     vm: &mut Vm,
     body: VmVal<Body>,
     what: BodyRead,
-    decode: fn(&Vm, Option<Vec<u8>>) -> stream::Decoded<R>,
-) -> Suspended<R> {
+) -> Result<impl Future<Output = Result<Option<Vec<u8>>, IoFailure>> + Send + 'static, HostError> {
     let body = body.get(&vm.heap)?;
     let Some(reader) = body.reader.clone() else { return Err(HostError::new("closed", "body closed")) };
     let mut closed = body.closed.subscribe();
@@ -515,7 +515,13 @@ fn read_body<R: IntoVmValue + 'static>(
         drop(res);
         Ok(data)
     };
-    stream::suspend_decoded(WaitKind::Io, op, decode)
+    Ok(op)
+}
+
+/// `Body.read(max)` and `Body.read_all()`.
+fn read_body_bytes(vm: &mut Vm, body: VmVal<Body>, what: BodyRead) -> Suspended<Vec<u8>> {
+    let read = read_body(vm, body, what)?;
+    stream::suspend(WaitKind::Io, async move { Ok(read.await?.unwrap_or_default()) })
 }
 
 fn body_natives(m: &mut NativeModule) {
@@ -523,12 +529,12 @@ fn body_natives(m: &mut NativeModule) {
         if max <= 0 {
             return Err(HostError::new("invalid", "read: max must be positive"));
         }
-        read_body(vm, body, BodyRead::Upto(to_usize_saturating(max)), bytes_read)
+        read_body_bytes(vm, body, BodyRead::Upto(to_usize_saturating(max)))
     });
     m.function("Body.read_line", |vm: &mut Vm, body: VmVal<Body>| {
-        read_body(vm, body, BodyRead::Line, |vm, line| line_read(vm, line, "line is not valid UTF-8"))
+        stream::suspend_line(WaitKind::Io, read_body(vm, body, BodyRead::Line)?, "line is not valid UTF-8")
     });
-    m.function("Body.read_all", |vm: &mut Vm, body: VmVal<Body>| read_body(vm, body, BodyRead::All, bytes_read));
+    m.function("Body.read_all", |vm: &mut Vm, body: VmVal<Body>| read_body_bytes(vm, body, BodyRead::All));
     m.function("Body.close", |vm: &mut Vm, body: VmVal<Body>| -> Result<_, Fail> {
         let b = body.get_mut(&mut vm.heap)?;
         b.closed.send_replace(true);
