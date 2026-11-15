@@ -55,7 +55,8 @@ On `main`, `json.encode` calls a single native encoder for all types. The VM sto
 
 - Immediate value slots tag scalars and inline enum variants.
 - Heap objects tag their container or composite kind.
-- Struct and enum objects store the ID of their type definition.
+- Struct objects store the ID of their type definition.
+- Enum values store the ID of their variant.
 - The VM type table maps each struct and variant ID to its identifiers.
 
 The native encoder walks values directly from these runtime tags. At compile time, the checker verifies `T: Encode`. That check rejects functions, tasks, channels, and native objects. The compiler then erases the bound.
@@ -70,13 +71,13 @@ We pass dictionaries for `Encode` and `Decode` for five reasons:
 
 1. Users can write custom `Encode` implementations.
 2. The native encoder must call custom methods for matching parts of a value.
-3. A heap object stores only the ID of its type definition. See [Why heap objects store only type definition IDs](#why-heap-objects-store-only-type-definition-ids).
+3. A heap object omits its type arguments. See [Why heap objects omit type arguments](#why-heap-objects-omit-type-arguments).
 4. In `impl<T: Encode> Encode for Box<T>`, the encoder must look up `T`'s `Encode` implementation at runtime.
 5. Callers pass `T`'s implementation through a hidden trait dictionary.
 
-## Why heap objects store only type definition IDs
+## Why heap objects omit type arguments
 
-The VM stores only type definition IDs on heap objects to avoid three runtime costs. If every value also stored its type arguments, the native encoder could look up generic implementations directly from values.
+The VM omits type arguments from heap objects to avoid three runtime costs. If every value also stored its type arguments, the native encoder could look up generic implementations directly from values.
 
 ### Cost 1: Callers would pass type arguments at every generic call
 
@@ -154,7 +155,7 @@ We define the Rust enum `TypeKind` to list the type kinds that a native default 
 
 - Built-in scalar kinds include `Int`, `Str`, and `Bytes`.
 - Built-in constructor kinds include `List`, `Map`, and `Tuple`.
-- User-defined composite kinds are `Struct` and `Enum`.
+- `Struct` and `Enum` cover structs and enums that Sand source declares, including prelude types such as `Option`.
 - `NativeValue` covers native value types such as `time.PlainDate`.
 - `Never` covers the `never` type.
 
@@ -330,7 +331,7 @@ With two passes, we keep two guarantees from `main`. First, the walker validates
 
 ### Synchronous return
 
-If every visited part uses the native default, the native function returns a synchronous result directly. The engine allocates a future only if the walker records any holes. The VM takes about 10 ns for a synchronous native call. It takes about 112 ns to poll an async native future that finishes on its first poll.
+If every visited part uses the native default, the native function returns a synchronous result directly. The engine allocates a future only if the walker records any holes. The VM takes about 10 ns for a synchronous native call. It takes about 112 ns for an async native call whose future finishes on its first poll.
 
 ## Part 6: Type checker and compiler changes
 
@@ -439,5 +440,5 @@ We drop all four special cases from [Limits of the previous draft](#limits-of-th
 
 ## Open questions
 
-1. **Should we keep the existing rules on local functions and field defaults in this branch?** Yes. Keeping both rules makes `Encode` and `Decode` match all other traits with methods.
-2. **Should we delete `reflect` in this branch?** Yes. With `reflect` deleted, `Decode` dictionaries are the single source of runtime type metadata. Deleting `reflect` also removes `reflect` code from the parser, checker, compiler, and VM.
+1. **Should we keep the existing rules on local functions and field defaults in this branch?** We recommend yes. Keeping both rules makes `Encode` and `Decode` match all other traits with methods.
+2. **Should we delete `reflect` in this branch?** We recommend yes. With `reflect` deleted, `Decode` dictionaries are the single source of runtime type metadata. Deleting `reflect` also removes `reflect` code from the parser, checker, compiler, and VM.
