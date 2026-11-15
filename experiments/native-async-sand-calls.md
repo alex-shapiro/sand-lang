@@ -27,7 +27,7 @@ Three VM rules prevent a native Rust function from calling a Sand function on `m
 - **The garbage collector ignores Rust stack handles.** The collector runs only at safe points in the interpreter loop. Only VM registers and VM structures belong to its root set.
 - **Memory-limit retries restart native functions.** Under SPEC §16.3, if a native function reaches `max_memory`, the VM collects garbage. It then runs the native function again from the start.
 
-As `experiments/encode-decode-design-causes.md` explains, these three rules prevent a single fast codec. On `main`, a codec must either run in Sand or duplicate derived walks in Rust and Sand.
+These three rules prevent a single fast codec. On `main`, a codec must either run in Sand or duplicate derived walks in Rust and Sand.
 
 ## Why the two tested callback designs fail for codecs
 
