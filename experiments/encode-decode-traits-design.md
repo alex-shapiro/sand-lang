@@ -225,11 +225,11 @@ enum PartTemplate {
 
 Examples:
 
-| Impl                                                   | Part    | Part template                                            |
-| ------------------------------------------------------ | ------- | -------------------------------------------------------- |
+| Impl                                                   | Part    | Part template                                               |
+| ------------------------------------------------------ | ------- | ----------------------------------------------------------- |
 | `impl Encode for User` with `email: Email`             | `Email` | `Const(k)`, where constant `k` is the dictionary of `Email` |
-| `impl<T: Encode> Encode for [T]`                       | `T`     | `Bound(0)`                                               |
-| `impl<T: Encode> Encode for Pair<T>` with `items: [T]` | `[T]`   | `Tuple([list method, list shape, Bound(0)])`             |
+| `impl<T: Encode> Encode for [T]`                       | `T`     | `Bound(0)`                                                  |
+| `impl<T: Encode> Encode for Pair<T>` with `items: [T]` | `[T]`   | `Tuple([list method, list shape, Bound(0)])`                |
 
 ### How the compiler builds part templates
 
@@ -313,10 +313,10 @@ The walker keeps a cache for the duration of a walk. The cache maps a part templ
 
 ### Two schemes that were not chosen
 
-| Scheme                                                      | Problem                                                                                                                                      |
-| ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| Store the part dictionaries in each dictionary              | Recursive types make cyclic dictionaries. Polymorphic recursion makes an infinite dictionary at compile time.                                |
-| Generate a Sand function that returns the part dictionaries | The walker must make a callback for each new dictionary. Each callback costs about 90 ns, also for types without user impls.                 |
+| Scheme                                                      | Problem                                                                                                                      |
+| ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| Store the part dictionaries in each dictionary              | Recursive types make cyclic dictionaries. Polymorphic recursion makes an infinite dictionary at compile time.                |
+| Generate a Sand function that returns the part dictionaries | The walker must make a callback for each new dictionary. Each callback costs about 90 ns, also for types without user impls. |
 
 Other languages solve the same problem in a similar way. Swift builds the witness tables of generic conformances at run time when it needs them, and caches them. A witness table in Swift has the same role as a dictionary in Sand. GHC builds the dictionaries of recursive instances as lazy values. These two statements come from general knowledge. I did not audit the Swift or GHC sources.
 
@@ -449,11 +449,11 @@ I expect the total line count to go down. I will report the measured count.
 
 ## Rejected alternatives
 
-| Alternative                                                                                    | Reason                                                                                                                                                                                                                      |
-| ---------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Find user impls through the runtime type of a value, in a table keyed by trait and type        | This table is a second way to find impls, beside dictionaries. The compiler erases type arguments, so the table cannot support generic impls. `Decode` has no value to inspect, so it still needs a runtime type description. |
-| Generate Sand code for each derived impl, as Swift does                                        | There is one code path. But each part costs a call from Sand code. The triage measured these codecs at 2.3 to 7 times slower.                                                                                               |
-| Generate Sand code, and keep a native fast path for derived types                              | The two code paths must give the same output, paths, and errors. The branch `origin/encode-decode-traits` used this design. The triage found that at least a quarter of its 8,210 new production lines kept the two paths in agreement.                                                                 |
+| Alternative                                                                             | Reason                                                                                                                                                                                                                                  |
+| --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Find user impls through the runtime type of a value, in a table keyed by trait and type | This table is a second way to find impls, beside dictionaries. The compiler erases type arguments, so the table cannot support generic impls. `Decode` has no value to inspect, so it still needs a runtime type description.           |
+| Generate Sand code for each derived impl, as Swift does                                 | There is one code path. But each part costs a call from Sand code. The triage measured these codecs at 2.3 to 7 times slower.                                                                                                           |
+| Generate Sand code, and keep a native fast path for derived types                       | The two code paths must give the same output, paths, and errors. The branch `origin/encode-decode-traits` used this design. The triage found that at least a quarter of its 8,210 new production lines kept the two paths in agreement. |
 
 ## What the earlier draft keeps
 
