@@ -38,7 +38,7 @@ A trait without methods, such as `Hash` on `main`, has no dictionary. Its eviden
 
 ## Summary
 
-`Encode` and `Decode` become traits with methods. Each trait therefore has a dictionary, as other traits with methods do.
+`Encode` and `Decode` become traits with methods. Users can write impls of both traits, including generic impls. A generic user impl, such as `impl<T: Encode> Encode for Box<T>`, needs to know `T` at run time. Only a hidden argument can tell it `T`. Each trait therefore has a dictionary. [Why `Encode` and `Decode` have no dictionary on `main`](#why-encode-and-decode-have-no-dictionary-on-main) explains the difference from `main`.
 
 Each method has a native default. The native default walks the value in Rust.
 
@@ -58,6 +58,83 @@ The design meets the four goals of the task:
 - **JSON can be encoded and decoded.** Plain Rust code converts JSON text to a `Value`. Other plain Rust code converts a `Value` to JSON text.
 - **`Encode` and `Decode` are ordinary traits.** User impls, generic impls, and bounds follow the trait rules in SPEC §4.9.
 - **`json.Json` uses the ordinary JSON encoder.** `Json` has ordinary impls of `Encode` and `Decode`. The JSON writer has no special case for `Json`.
+
+## Why `Encode` and `Decode` have no dictionary on `main`
+
+A dictionary lets generic code find code that depends on a type. On `main`, no code depends on the type for `Encode` or `Decode`. The prelude declares both traits without methods. The checker rejects every user impl of them.
+
+### `Encode` on `main`
+
+`json.encode` runs a single native encoder for every type. The native encoder does not need the type, because a heap value records its own structure:
+
+- Each heap object records its kind, such as list, map, or struct.
+- A struct object also records the ID of its type definition.
+- The VM type table maps that ID to the field names.
+
+The native encoder reads these facts and walks the value. A bound such as `T: Encode` is a compile-time check only. It proves that the value contains no functions, tasks, or channels. The bound has no form at run time.
+
+### `Decode` on `main`
+
+A decoder starts from text. It has no heap value to read, so it must get the type from somewhere else. On `main`, it gets the type from a `reflect` type parameter, as in `json.decode<reflect T: Decode>`. A `reflect` type parameter passes a runtime description of the type as a hidden argument. That hidden argument is not a dictionary. But it has the same role: it carries type information that type erasure removed.
+
+### What changes
+
+User impls are the cause of the change. The chain of reasons is:
+
+1. Users can write an impl of `Encode` for a type.
+2. The native encoder must therefore find user code for some parts of a value.
+3. A heap value records its type definition, but not its type arguments. [Why heap values do not record type arguments](#why-heap-values-do-not-record-type-arguments) explains this choice.
+4. A generic user impl, such as `impl<T: Encode> Encode for Box<T>`, needs to know `T`.
+5. Only a hidden argument can tell the impl `T`. That hidden argument is the dictionary.
+
+The dictionary is therefore the cost of generic user impls. Methods alone do not require it.
+
+## Why heap values do not record type arguments
+
+A heap value could record its type arguments. Then the native encoder could find a generic user impl from the value, without a dictionary. Sand does not record type arguments because of three costs.
+
+### Cost 1: Generic code would need its type arguments at run time
+
+This is the main cost. Consider this function:
+
+```sand
+fn empty<T>() -> [T] { [] }
+```
+
+The compiler compiles `empty` once, for every `T`. The function creates a new list. To record the element type in that list, the function must know `T` at run time. On `main`, it does not know `T`, because of type erasure.
+
+The caller would therefore have to pass `T` as a hidden argument. The same applies to every generic function that creates a value. In practice, every generic call would pass a runtime description of each type parameter.
+
+On `main`, a generic call passes hidden arguments only for bounds of traits with methods. A call to `fn f<T>(x: T)` passes no hidden argument.
+
+### Cost 2: Some values have no heap object
+
+The VM stores some values directly in the 16-byte value slot, outside the heap. Examples:
+
+- `None`
+- A payload-less enum variant, such as `Color.Red`
+- Some variants with a small payload, such as `Some(3)`
+
+These values have no heap object that could record a type argument. A `None` of type `Email?` and a `None` of type `int?` have the same bits. To record the type argument, the VM would have to allocate a heap object for every `None`. Most Sand programs use `Option`, so this cost would be large.
+
+### Cost 3: Memory per object
+
+Each heap object would need a reference to its type arguments. An interned type ID would cost about 4 bytes per object. This cost is the smallest of the three.
+
+### How other languages choose
+
+These statements come from general knowledge. I did not audit the source code of these languages.
+
+- Java erases type arguments, as Sand does.
+- C# and .NET record the exact type of each object, including type arguments. Generic code receives type information at run time.
+- Swift passes type metadata to generic functions as hidden arguments.
+- Rust and C++ compile a generic function once for each type, so they erase nothing.
+
+### The choice for this design
+
+If heap values recorded type arguments, every generic function in every program would pay Cost 1. That includes generic functions that never encode a value. Dictionaries are narrower. Only functions with an `Encode` or `Decode` bound receive the type information.
+
+`reflect` already gives Sand an opt-in way to pass type arguments. A `reflect` type parameter passes a runtime description of one type. If every value recorded its type arguments, every type parameter would act like a `reflect` type parameter.
 
 ## The problem with the earlier draft
 
@@ -109,9 +186,9 @@ A derived impl is an ordinary impl in the checker. The checker therefore finds t
 
 ### Why the dictionary needs more
 
-A native default must reach the impl of each part. The dictionary on `main` does not always give it that impl.
+A native default must reach the impl of each part. In this design, code finds impls only through dictionaries, as all other trait code does. But a dictionary on `main` does not hold the dictionaries of the parts.
 
-Consider `struct User { email: Email }`. `User` has no type parameters. Its dictionary therefore holds no bound dictionaries. The native default for `User` cannot find the `Encode` impl of `Email`.
+Consider `struct User { email: Email }`. `User` has no type parameters. The `User` dictionary therefore holds no bound dictionaries. With that layout, the native default for `User` cannot reach the `Encode` dictionary of `Email`.
 
 ### The impl shape
 
@@ -159,6 +236,60 @@ Examples:
 The type checker already builds trait evidence for the body of an impl method. That code produces an expression tree. Each node of the tree builds a dictionary, reads a bound dictionary, or loads a constant.
 
 For each part of a structural impl, the checker builds the evidence for `PartType: Trait` in the same way. The compiler then converts the expression tree into a part template. On `main`, the compiler converts the same kind of tree into bytecode.
+
+### Worked example
+
+This example shows the data at run time and each step of the native encoder.
+
+```sand
+struct Email { address: str }
+
+impl Encode for Email {
+    fn encode(self, e: Encoder) { e.encode(self.address) }
+}
+
+struct Page<T> { items: [T] }
+
+fn save<T: Encode>(page: Page<T>) -> str { json.encode(page) }
+
+save(Page(items: [Email(address: "a@b.c")]))
+```
+
+The type `Email` has a user impl of `Encode`. The type `Page<T>` has no user impl. The compiler therefore derives a structural impl of `Encode` for `Page<T>`. In this example, "the native encoder" is the native default method `Encode.encode`.
+
+**Step 1: The dictionary that `save` receives.** The function `save` requires `T: Encode`. The caller therefore passes the `Encode` dictionary of `T` to `save`. In this call, `T` is `Email`. The `Encode` dictionary of `Email` is a tuple with one item. That item is the user method `Email.encode`.
+
+**Step 2: The dictionary that `save` builds.** The function `save` calls `json.encode(page)`. The function `json.encode` needs the `Encode` dictionary of `Page<T>`. That dictionary depends on `T`, so the compiler cannot build it ahead of time. The function `save` builds it at run time. The `Encode` dictionary of `Page<T>` is a tuple with three items:
+
+1. The native encoder.
+2. The impl shape of `Page`. The impl shape is a program constant.
+3. The `Encode` dictionary of `T`. In this call, it is the `Email` dictionary from step 1.
+
+**Step 3: The impl shape of `Page`.** The impl shape of `Page` holds a part template for each field of `Page`. `Page` has one field, `items`. The part template for `items` tells the native encoder how to build the `Encode` dictionary of `[T]`. It says: build a tuple with three items.
+
+1. The first item is the native encoder.
+2. The second item is the impl shape of a list. This impl shape is a program constant.
+3. The third item is item 3 of the `Page` dictionary.
+
+**Step 4: The walk.**
+
+1. `json.encode` calls the native encoder with the `Page` value and the `Page` dictionary.
+2. The native encoder reads item 2 of the `Page` dictionary. This item is the impl shape of `Page`.
+3. The native encoder reaches the field `items`.
+4. The native encoder follows the part template for `items`. It builds the `Encode` dictionary of the list. Item 3 of the list dictionary is the `Email` dictionary. The native encoder copies it from item 3 of the `Page` dictionary.
+5. The native encoder reads item 1 of the list dictionary. This item is the native encoder itself. The native encoder therefore continues in Rust.
+6. The native encoder reaches the first element of the list.
+7. The impl shape of a list says that each element uses item 3 of the list dictionary. Item 3 is the `Email` dictionary.
+8. The native encoder reads item 1 of the `Email` dictionary. This item is the user method `Email.encode`, not the native encoder.
+9. The native encoder therefore calls the Sand method `Email.encode` for this element.
+
+**Why the part templates are necessary.** The `Page` value in the heap does not record that `T` is `Email`. Type erasure removed that information. Only the dictionaries connect the `Page` value to the method `Email.encode`. The connection has three links:
+
+1. From the `Page` dictionary to the list dictionary.
+2. From the list dictionary to the `Email` dictionary.
+3. From the `Email` dictionary to the method `Email.encode`.
+
+Each part template builds the next link. The native encoder builds each link when it reaches the part.
 
 ## Part 4: Recursive types
 
