@@ -5,7 +5,7 @@
 //! policy checks every resolved IP address, and bound every wait on a peer
 //! with a timeout.
 
-use super::stream::{self, IoFailure, Suspended, line_read, read_line, read_to_end_reserved, read_upto, suspend};
+use super::stream::{self, IoFailure, Suspended, read_line, read_to_end_reserved, read_upto, suspend};
 use crate::check::ModKind;
 use crate::native::convert::{HostError, IntoVmValue};
 use crate::native::ty::VmVal;
@@ -67,13 +67,16 @@ pub(crate) trait Resource: crate::native::ObjectType + IntoVmValue {
     fn attach(&mut self, slot: ResourceSlot);
 }
 
-/// Like [`suspend`] for operations that produce a resource object,
-/// counted by `slot` from the start (a socket being connected or accepted
-/// is open already).
-fn suspend_resource<T: Resource>(slot: ResourceSlot, fut: impl Future<Output = Result<T, IoFailure>> + Send + 'static) -> Suspended<T> {
-    suspend(WaitKind::Io, fut, move |_, mut obj: T| {
-        obj.attach(slot);
-        Ok(obj)
+/// Suspends the calling task on `future` to open a resource for `slot`.
+///
+/// Reserve `slot` before the wait. The engine then counts the in-flight socket
+/// toward `max_open_resources`. If `future` returns `Ok(resource)`,
+/// `suspend_resource` attaches `slot` to `resource`.
+fn suspend_resource<T: Resource>(slot: ResourceSlot, future: impl Future<Output = Result<T, IoFailure>> + Send + 'static) -> Suspended<T> {
+    suspend(WaitKind::Io, async move {
+        let mut resource = future.await?;
+        resource.attach(slot);
+        Ok(resource)
     })
 }
 
@@ -511,30 +514,22 @@ fn conn_read(vm: &mut Vm, c: VmVal<Conn>, max: i64) -> Suspended<Vec<u8>> {
         WaitKind::Io,
         h.closed.guard(async move {
             let data = read_upto(&mut *h.reader.lock().await, max).await?;
-            Ok((data, res))
-        }),
-        |_, (data, res)| {
             drop(res);
             Ok(data)
-        },
+        }),
     )
 }
 
-fn conn_read_line(vm: &mut Vm, c: VmVal<Conn>) -> Suspended<Option<String>> {
-    let h = conn_handle(vm, c)?;
-    // The line may grow until it exhausts the memory limit.
-    let mut res = vm.io_reservation();
-    suspend(
-        WaitKind::Io,
-        h.closed.guard(async move {
-            let line = read_line(&mut *h.reader.lock().await, &mut res).await?;
-            Ok((line, res))
-        }),
-        |vm, (line, res)| {
-            drop(res);
-            line_read(vm, line, "line is not valid UTF-8")
-        },
-    )
+fn conn_read_line(vm: &mut Vm, conn: VmVal<Conn>) -> Suspended<Option<String>> {
+    let handle = conn_handle(vm, conn)?;
+    // Reserve I/O bytes incrementally for each read chunk.
+    let mut reservation = vm.io_reservation();
+    let line_future = handle.closed.guard(async move {
+        let line = read_line(&mut *handle.reader.lock().await, &mut reservation).await?;
+        drop(reservation);
+        Ok(line)
+    });
+    stream::suspend_line(WaitKind::Io, line_future, "line is not valid UTF-8")
 }
 
 /// Reads until the peer has finished sending; the data is reserved as it
@@ -548,12 +543,9 @@ fn conn_read_all(vm: &mut Vm, c: VmVal<Conn>) -> Suspended<Vec<u8>> {
             let mut reader = h.reader.lock().await;
             let mut data = Vec::new();
             read_to_end_reserved(&mut *reader, &mut data, &mut res, usize::MAX).await?;
-            Ok((data, res))
-        }),
-        |_, (data, res)| {
             drop(res);
             Ok(data)
-        },
+        }),
     )
 }
 
@@ -579,7 +571,6 @@ pub(crate) fn write_bytes(vm: &mut Vm, c: VmVal<Conn>, data: Vec<u8>, res: Reser
             drop(res);
             Ok(())
         }),
-        |_, ()| Ok(()),
     )
 }
 

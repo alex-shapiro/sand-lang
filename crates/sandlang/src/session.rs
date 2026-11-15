@@ -20,9 +20,9 @@ use crate::syntax::ast::{ItemKind, StmtKind};
 use crate::types::{FnId, ModId, TypeId};
 use crate::unwind::CatchUnwind;
 use crate::vm::bytecode::Program;
-use crate::vm::sched::{IdleStop, UntilIdle};
+use crate::vm::sched::{self, IdleStop, UntilIdle};
 use crate::vm::value::VmValue;
-use crate::vm::{RunEnding, Trap, Vm};
+use crate::vm::{RunEnding, SharedVm, Trap, Vm};
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
@@ -87,7 +87,7 @@ struct State {
     graph: ModuleGraph,
     checker: Checker,
     compiler: Incremental,
-    vm: Vm,
+    vm: SharedVm,
     /// The entry that initializes the standard modules, until it has run.
     pending: Option<u32>,
     /// Set while an input's imports are being loaded or it is running, so
@@ -215,7 +215,7 @@ impl Session {
     async fn run_tests_inner(&mut self) -> Result<TestReport, Error> {
         self.start().await?;
         let mut tests: Vec<(String, u32)> = Vec::new();
-        for (name, proto) in &self.state()?.vm.prog.tests {
+        for (name, proto) in &self.state()?.vm.lock().prog.tests {
             match tests.iter_mut().find(|(n, _)| n == name) {
                 Some(t) => t.1 = *proto,
                 None => tests.push((name.clone(), *proto)),
@@ -294,7 +294,8 @@ impl Session {
         let mut until = std::pin::pin!(until);
         let runnable = self.state.as_mut().is_some_and(|state| {
             state.recover();
-            !state.vm.ready.is_empty() || !state.vm.io.is_empty()
+            let vm = state.vm.lock();
+            !vm.ready.is_empty() || vm.host_wait_kind().is_some()
         });
         let output = if runnable {
             // Poll background tasks until `until` completes or the tasks stop.
@@ -311,7 +312,7 @@ impl Session {
             match stopped {
                 Err(out) => {
                     if let Some(state) = self.state.as_ref() {
-                        state.vm.flush_stdout();
+                        state.vm.lock().flush_stdout();
                     }
                     out
                 }
@@ -336,7 +337,7 @@ impl Session {
                 None => Some(PromptAnswer::DenyOnce),
             };
             if let Some(answer) = answer {
-                state.vm.apply_answer(capability, answer);
+                state.vm.lock().apply_answer(capability, answer);
             }
         }
         // If an interrupt arrived outside `run_idle`, cancel the remaining tasks.
@@ -351,15 +352,16 @@ impl Session {
     pub fn cancel_tasks(&mut self) -> usize {
         let Some(st) = self.state.as_mut() else { return 0 };
         st.recover();
-        let n = st.vm.live_tasks;
-        st.vm.abandon_tasks();
+        let mut vm = st.vm.lock();
+        let n = vm.live_tasks;
+        vm.abandon_tasks();
         st.deferred_prompt = None;
         n
     }
 
     /// Whether an internal error broke the session's VM.
     fn poisoned(&self) -> bool {
-        self.state.as_ref().is_some_and(|st| st.vm.broken)
+        self.state.as_ref().is_some_and(|st| st.vm.lock().broken)
     }
 
     /// The result of a call, given `r` (`Err` if a Rust panic was caught).
@@ -399,7 +401,7 @@ impl Session {
     /// current call.
     fn begin_call(&mut self) {
         self.was_reset = false;
-        self.call = self.engine.begin_call_with_io(self.call.io.clone());
+        self.call = self.engine.begin_call_with_wake_state(self.call.wake_state.clone());
     }
 
     /// Makes sure the session is started and its standard modules initialized.
@@ -486,13 +488,16 @@ impl Session {
         let new_mods: Vec<usize> = st.graph.order[mark.order..].iter().copied().filter(|&mi| mi != cell).collect();
         let deadline = deadline.map(|d| d + prompted);
         // Compilation appends to the program; a failure truncates it again.
-        let prog_mark = ProgramMark::of(&st.vm.prog);
+        let (prog_mark, initialized, prog) = {
+            let mut vm = st.vm.lock();
+            (ProgramMark::of(&vm.prog), vm.initialized_globals(), std::mem::take(&mut vm.prog))
+        };
         let mut job = CellJob {
             natives: st.graph.has_natives(&new_mods),
-            initialized: st.vm.initialized_globals(),
+            initialized,
             new_std: st.graph.std[mark.std..].to_vec(),
             graph: std::mem::take(&mut st.graph),
-            prog: std::mem::take(&mut st.vm.prog),
+            prog,
             checker: st.checker.clone(),
             compiler: st.compiler.clone(),
             snapshot: st.snapshot.clone(),
@@ -512,18 +517,18 @@ impl Session {
         })
         .unwrap_or_else(|p| std::panic::resume_unwind(p));
         st.graph = job.graph;
-        st.vm.prog = job.prog;
+        st.vm.lock().prog = job.prog;
         match result {
             Ok((entry, value, returns)) => {
                 st.checker = job.checker;
                 st.compiler = job.compiler;
-                st.vm.load_program();
+                st.vm.lock().load_program();
                 Ok((entry, value, returns, deadline))
             }
             Err(e) => {
                 st.graph.rollback(&mark);
                 // A shared program was not changed.
-                if let Some(prog) = Arc::get_mut(&mut st.vm.prog) {
+                if let Some(prog) = Arc::get_mut(&mut st.vm.lock().prog) {
                     prog_mark.rollback(prog);
                 }
                 Err(e)
@@ -538,12 +543,15 @@ impl Session {
         let Session { state, exit_code, call, .. } = self;
         let st = state.as_mut().expect("session not started");
         st.recover();
-        let vm = &mut st.vm;
-        vm.begin_session_run(call);
-        vm.deadline = deadline;
+        {
+            let mut vm = st.vm.lock();
+            vm.begin_session_run(call);
+            vm.deadline = deadline;
+        }
         st.running = true;
-        let main_result = vm.run_main(proto).await;
+        let main_result = sched::run_main(&st.vm, proto).await;
         st.running = false;
+        let vm = &mut *st.vm.lock();
         let value = match main_result {
             Ok(value) => value,
             Err(ending) => return end_session_run(vm, ending, exit_code).map(|()| None),
@@ -566,11 +574,14 @@ impl Session {
     async fn run_idle(&mut self) -> Result<bool, Error> {
         let Session { state, exit_code, call, .. } = self;
         let st = state.as_mut().expect("session not started");
-        let vm = &mut st.vm;
-        vm.begin_session_run(call);
-        // Waiting for input may take any time.
-        vm.deadline = None;
-        let drive_result = vm.drive(UntilIdle { waits_for_io: true }).await;
+        {
+            let mut vm = st.vm.lock();
+            vm.begin_session_run(call);
+            // Clear the previous input's deadline between REPL inputs.
+            vm.deadline = None;
+        }
+        let drive_result = sched::drive(&st.vm, UntilIdle { waits_for_io: true }).await;
+        let vm = &mut *st.vm.lock();
         match vm.drain_output_after(drive_result) {
             Ok(IdleStop::Prompt(cap)) => {
                 st.deferred_prompt = Some(cap);
@@ -673,7 +684,7 @@ impl State {
     /// tasks where they wait.)
     fn recover(&mut self) {
         if std::mem::take(&mut self.running) {
-            self.vm.abandon_tasks();
+            self.vm.lock().abandon_tasks();
             self.deferred_prompt = None;
         }
     }

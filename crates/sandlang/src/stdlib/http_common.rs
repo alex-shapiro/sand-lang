@@ -1,13 +1,13 @@
 //! Shared HTTP client types and helpers for TCP and web `fetch` clients.
 
-use super::stream::{self, IoFailure, Suspended, bytes_read, line_read};
+use super::stream::{self, IoFailure, Suspended};
 use super::uri;
 use crate::native::convert::{HostError, IntoVmValue};
-use crate::native::ty::VmVal;
+use crate::native::ty::{SandType, Type, VmVal};
 use crate::native::{NativeModule, NativeObject};
 use crate::vm::WaitKind;
 use crate::vm::iomem::Reservation;
-use crate::vm::value::to_usize_saturating;
+use crate::vm::value::{VmValue, to_usize_saturating};
 use crate::vm::{Fail, Vm};
 use std::future::Future;
 use std::pin::Pin;
@@ -230,16 +230,25 @@ pub(crate) struct ResponseStream {
     pub url: String,
 }
 
-/// The response from `url` with `status`, `headers`, and a body read by `reader`.
-pub(crate) fn response(
-    vm: &mut Vm,
-    url: String,
-    status: i64,
-    headers: Vec<(String, String)>,
-    reader: BodyReader,
-) -> Result<ResponseStream, Fail> {
-    let body = vm.new_object(Body::new(reader))?;
-    Ok(ResponseStream { status, headers, body, url })
+/// Owned fields of an `http.Stream` before `IntoVmValue` allocates its `Body` object.
+pub(crate) struct NewResponseStream {
+    pub url: String,
+    pub status: i64,
+    pub headers: Vec<(String, String)>,
+    pub reader: BodyReader,
+}
+
+impl SandType for NewResponseStream {
+    fn sand_type() -> Type {
+        ResponseStream::sand_type()
+    }
+}
+
+impl IntoVmValue for NewResponseStream {
+    fn into_vm_value(self, vm: &mut Vm) -> Result<VmValue, Fail> {
+        let body = vm.new_object(Body::new(self.reader))?;
+        ResponseStream { status: self.status, headers: self.headers, body, url: self.url }.into_vm_value(vm)
+    }
 }
 
 // ----------------------------------------------------------------------
@@ -453,47 +462,48 @@ impl NativeObject for Body {
     }
 }
 
-/// What a read of a body reads.
+/// Read mode for an HTTP body.
 #[derive(Clone, Copy)]
-enum BodyRead {
-    Upto(usize),
+enum BodyReadMode {
+    UpTo(usize),
     Line,
     All,
 }
 
-fn read_body<R: IntoVmValue + 'static>(
+/// Reserves I/O memory for a `body` read. Returns the read future.
+fn start_body_read(
     vm: &mut Vm,
     body: VmVal<Body>,
-    what: BodyRead,
-    done: fn(&mut Vm, Option<Vec<u8>>) -> stream::FinishResult<R>,
-) -> Suspended<R> {
+    mode: BodyReadMode,
+) -> Result<impl Future<Output = Result<Option<Vec<u8>>, IoFailure>> + Send + 'static, HostError> {
     let body = body.get(&vm.heap)?;
     let Some(reader) = body.reader.clone() else { return Err(HostError::new("closed", "body closed")) };
     let mut closed = body.closed.subscribe();
-    let mut res = match what {
-        BodyRead::Upto(n) => vm.reserve_io(n.min(64 << 10))?,
+    let mut reservation = match mode {
+        BodyReadMode::UpTo(n) => vm.reserve_io(n.min(64 << 10))?,
         _ => vm.io_reservation(),
     };
-    let op = async move {
+    let read_future = async move {
         if *closed.borrow() {
             return Err(IoFailure::new("closed", "body closed"));
         }
         let read = async {
-            let mut r = reader.lock().await;
-            let res = &mut res;
-            r.reading(async move |r: &mut BodyReader| match what {
-                BodyRead::Upto(n) => r.read(n, res).await.map(Some),
-                BodyRead::Line => r.read_line(res).await,
-                BodyRead::All => r.read_all(res).await.map(Some),
-            })
-            .await
+            let mut body_reader = reader.lock().await;
+            let reservation = &mut reservation;
+            body_reader
+                .reading(async move |body_reader: &mut BodyReader| match mode {
+                    BodyReadMode::UpTo(n) => body_reader.read(n, reservation).await.map(Some),
+                    BodyReadMode::Line => body_reader.read_line(reservation).await,
+                    BodyReadMode::All => body_reader.read_all(reservation).await.map(Some),
+                })
+                .await
         };
         let data = {
             let mut read = std::pin::pin!(read);
-            let mut wait = std::pin::pin!(closed.wait_for(|c| *c));
+            let mut wait = std::pin::pin!(closed.wait_for(|is_closed| *is_closed));
             std::future::poll_fn(|cx| {
-                if let std::task::Poll::Ready(r) = read.as_mut().poll(cx) {
-                    return std::task::Poll::Ready(r);
+                if let std::task::Poll::Ready(read_result) = read.as_mut().poll(cx) {
+                    return std::task::Poll::Ready(read_result);
                 }
                 match wait.as_mut().poll(cx) {
                     std::task::Poll::Ready(_) => std::task::Poll::Ready(Err(IoFailure::new("closed", "body closed"))),
@@ -502,12 +512,16 @@ fn read_body<R: IntoVmValue + 'static>(
             })
             .await?
         };
-        Ok((data, res))
+        drop(reservation);
+        Ok(data)
     };
-    stream::suspend(WaitKind::Io, op, move |vm, (data, res)| {
-        drop(res);
-        done(vm, data)
-    })
+    Ok(read_future)
+}
+
+/// Reads bytes from `body` for `Body.read(max)` and `Body.read_all()`.
+fn read_body_bytes(vm: &mut Vm, body: VmVal<Body>, mode: BodyReadMode) -> Suspended<Vec<u8>> {
+    let read_future = start_body_read(vm, body, mode)?;
+    stream::suspend(WaitKind::Io, async move { Ok(read_future.await?.unwrap_or_default()) })
 }
 
 fn body_natives(m: &mut NativeModule) {
@@ -515,12 +529,12 @@ fn body_natives(m: &mut NativeModule) {
         if max <= 0 {
             return Err(HostError::new("invalid", "read: max must be positive"));
         }
-        read_body(vm, body, BodyRead::Upto(to_usize_saturating(max)), bytes_read)
+        read_body_bytes(vm, body, BodyReadMode::UpTo(to_usize_saturating(max)))
     });
     m.function("Body.read_line", |vm: &mut Vm, body: VmVal<Body>| {
-        read_body(vm, body, BodyRead::Line, |vm, line| line_read(vm, line, "line is not valid UTF-8"))
+        stream::suspend_line(WaitKind::Io, start_body_read(vm, body, BodyReadMode::Line)?, "line is not valid UTF-8")
     });
-    m.function("Body.read_all", |vm: &mut Vm, body: VmVal<Body>| read_body(vm, body, BodyRead::All, bytes_read));
+    m.function("Body.read_all", |vm: &mut Vm, body: VmVal<Body>| read_body_bytes(vm, body, BodyReadMode::All));
     m.function("Body.close", |vm: &mut Vm, body: VmVal<Body>| -> Result<_, Fail> {
         let b = body.get_mut(&mut vm.heap)?;
         b.closed.send_replace(true);

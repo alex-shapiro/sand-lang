@@ -25,27 +25,52 @@ Untrusted code violates a valid policy.
 
 The host cannot rely on engine limits, stability, or control.
 
-- [ ] ❓ _Embedding._ Reject a raw `VmValue` that a native function holds
-      across a wait. The compiler rejects typed VM handles in a future because
-      they are not `Send`. However, `IntoVmValue::into_vm_value` and `Vm`
-      allocation methods return a raw `VmValue`. `VmValue` is `Send` because the
-      heap stores it. The compiler therefore accepts a function that allocates a
-      `VmValue` before a wait and reads it in the `Later::new` finisher. After a
-      garbage collection during the wait, the read returns the data of another
-      object without an error. If the collector shrank the heap, the read or the
-      next collection causes a panic. The engine reports the panic as an
-      internal error. A `panic = "abort"` build stops the process. Options: a
-      host value type that is not `Send`, or a generation check on each heap
-      slot.
-- [ ] ❓ _Embedding._ Add a rooted handle that keeps a script value alive
-      across a wait. A native function cannot safely change an argument object
-      or return an early allocation after a wait. `Vm::pinned` already holds
-      garbage collection roots.
-- [ ] ❓ _Embedding._ Give native functions a narrow call context in place of
-      `&mut Vm`. With `&mut Vm`, a native function can call public scheduler and
-      collector methods such as `Vm::collect_all_garbage`. Typed accessors also
-      return raw `VmValue` slices. A narrow context exposes only host call
-      operations.
+- [ ] ❓ _Embedding._ Reject stale raw `VmValue` handles and cross-call
+      `RootedValue` handles. Typed VM handles are `!Send`. The compiler rejects
+      them in a future. `VmValue` implements `Send` for heap storage. The
+      compiler therefore accepts a future that keeps a `VmValue` across a wait.
+      `NativeContext::value` and `NativeContext::with_vm` return raw `VmValue`
+      handles. A Sand callback in `NativeContext::call` can trigger garbage
+      collection during a wait. After garbage collection, the VM returns an
+      unrelated object from a reused heap slot. If collection shrank the heap,
+      the VM panics on an out-of-bounds slot. The engine reports a caught panic
+      as an internal error. Under `panic = "abort"`, the Rust runtime aborts the
+      process on a panic. If a caller passes a `RootedValue` to another call's
+      `NativeContext`, `NativeContext::value` reads the wrong root slot. Either
+      wrap host values in a `!Send` handle or check a generation counter on each
+      heap slot.
+- [ ] ❓ _Embedding._ Detect collection changes during an async native walk. A
+      Sand callback in `NativeContext::call` can mutate a collection during
+      iteration. Either fail on mutation as in CPython or iterate over a
+      snapshot.
+- [ ] ❓ _Embedding._ Let an async native function release roots during a call.
+      `NativeContext::root` and `NativeContext::call` keep every rooted object
+      graph in the call's root table until the call returns. If a native future
+      runs 20,000 callbacks that each return a 1 KB string, the root table
+      retains all 20,000 strings. Those 20,000 strings exceed a 16 MB
+      `max_memory` limit. In the equivalent Sand loop, the collector frees
+      earlier strings within 16 MB. Either add `NativeContext::unroot` or reuse
+      scoped root slots across callbacks.
+- [ ] ❓ _Memory._ Charge boxed recursive futures against `max_memory`. The
+      engine counts only the top-level native future and its root table. A
+      recursive walker allocates a boxed future for each nesting level of its
+      input.
+- [ ] ❓ _Embedding._ Replace `&mut Vm` in native functions with a narrow call
+      context. `&mut Vm` exposes scheduler and collector methods such as
+      `Vm::collect_all_garbage`. During `NativeContext::with_vm`, the scheduler
+      keeps the calling fiber outside `Vm::fibers`. If that closure calls
+      `Vm::collect_all_garbage(None)`, the collector frees the calling task's
+      live values. Typed accessors also return raw `VmValue` slices. A narrow
+      context exposes only host call operations.
+- [ ] ❓ _Embedding._ Let a cancelled native future update VM state on drop. The
+      engine holds the VM lock while dropping a cancelled future. If
+      `Drop::drop` calls `NativeContext::with_vm`, `with_vm` panics. The engine
+      then ends the run with an internal error.
+- [ ] ❓ _Embedding._ Yield to the host executor under a fixed host clock. The
+      scheduler checks `YIELD_EVERY` against the host `Clock`. A manual or
+      replay clock returns a fixed timestamp between host advances. The
+      scheduler then skips time-based yields. Long Sand loops can starve other
+      tasks on the host executor.
 - [ ] ❓ _Memory._ Share standard library and host module bytecode across
       programs. `compile_program` copies the snapshot `Program` into each
       `CompiledProgram`. A copy takes about 74 KB for `print(1)` and 173 KB

@@ -30,19 +30,27 @@ impl<C> From<IoFailure> for HostError<C> {
 
 pub(crate) type Suspended<T> = Result<Later<T, HostError>, HostError>;
 
-/// Result of a finisher closure for a suspended I/O call.
-pub(crate) type FinishResult<T> = Result<T, HostError<Fail>>;
-
-/// Suspends the calling task on `fut` with `wait_kind`. If `fut` returns `Ok`,
-/// runs `ok` on the VM thread to produce the Sand result.
-pub(crate) fn suspend<T: Send + 'static, R: IntoVmValue + 'static>(
+/// Suspends the calling task on `future` with `wait_kind`.
+pub(crate) fn suspend<T: IntoVmValue + 'static>(
     wait_kind: WaitKind,
-    fut: impl Future<Output = Result<T, IoFailure>> + Send + 'static,
-    ok: impl FnOnce(&mut Vm, T) -> FinishResult<R> + Send + 'static,
-) -> Suspended<R> {
-    Ok(Later::new(wait_kind, async move {
-        let r = fut.await;
-        move |vm: &mut Vm| ok(vm, r?)
+    future: impl Future<Output = Result<T, IoFailure>> + Send + 'static,
+) -> Suspended<T> {
+    Ok(Later::new(wait_kind, |_| async move { Ok(future.await?) }))
+}
+
+/// Suspends the calling task on `line_future` with `wait_kind` to read a
+/// UTF-8 line.
+///
+/// Returns `None` at end of stream. Returns an `"invalid"` [`HostError`] with
+/// `invalid_utf8_message` on invalid UTF-8 bytes.
+pub(crate) fn suspend_line(
+    wait_kind: WaitKind,
+    line_future: impl Future<Output = Result<Option<Vec<u8>>, IoFailure>> + Send + 'static,
+    invalid_utf8_message: &'static str,
+) -> Suspended<Option<String>> {
+    Ok(Later::new(wait_kind, |context| async move {
+        let line = line_future.await?;
+        context.with_vm(|vm| decode_utf8_line(vm, line, invalid_utf8_message))
     }))
 }
 
@@ -63,13 +71,14 @@ pub(crate) fn utf8(vm: &Vm, data: Vec<u8>) -> Result<Option<String>, Fail> {
     Ok(String::from_utf8(data).ok())
 }
 
-pub(crate) fn bytes_read(_: &mut Vm, data: Option<Vec<u8>>) -> FinishResult<Vec<u8>> {
-    Ok(data.unwrap_or_default())
-}
-
-pub(crate) fn line_read(vm: &Vm, line: Option<Vec<u8>>, message: &str) -> FinishResult<Option<String>> {
+/// Decodes an optional byte line as UTF-8.
+///
+/// Charges fuel for the byte length of `line`. Returns `Ok(None)` if `line` is
+/// `None`. Returns an `"invalid"` [`HostError`] with `invalid_utf8_message` on
+/// invalid UTF-8 bytes.
+pub(crate) fn decode_utf8_line(vm: &Vm, line: Option<Vec<u8>>, invalid_utf8_message: &str) -> Result<Option<String>, HostError<Fail>> {
     let Some(line) = line else { return Ok(None) };
-    utf8(vm, line)?.map(Some).ok_or_else(|| HostError::new("invalid", message))
+    utf8(vm, line)?.map(Some).ok_or_else(|| HostError::new("invalid", invalid_utf8_message))
 }
 
 #[cfg(any(feature = "os", web))]

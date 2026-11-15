@@ -1,9 +1,10 @@
 //! Traits and types for registering Rust functions in a [`NativeModule`](super::NativeModule).
 
+use super::context::{AsyncNativeCall, NativeContext};
 use super::convert::{Conversion, FromVmValue, HostError, IntoVmValue, ok_vm_value};
 use super::ty::{SandType, Type};
 use crate::vm::value::VmValue;
-use crate::vm::{Ctl, Fail, NativeFn, Suspension, Vm, WaitKind};
+use crate::vm::{Ctl, Fail, NativeFn, Vm, WaitKind};
 use std::future::Future;
 
 /// Sand parameter and return types derived from a Rust function signature.
@@ -30,8 +31,8 @@ impl Signature {
 
 /// Rust function that [`NativeModule::function`](super::NativeModule::function) registers.
 ///
-/// [`NativeModule::function`](super::NativeModule::function) accepts three
-/// kinds of Rust function, selected by the function signature:
+/// [`NativeModule::function`](super::NativeModule::function) selects from three
+/// kinds of Rust function based on the signature:
 ///
 /// ```
 /// # use sandlang::native::NativeModule;
@@ -45,22 +46,22 @@ impl Signature {
 /// module.function("fetch", |url: String| async move { url.len() as i64 });
 /// ```
 ///
-/// - **Synchronous.** Each parameter implements [`NativeParam`] and can borrow
-///   `&str`, `&[u8]`, or `&T` from the VM heap. The return type implements
-///   [`NativeReturn<Ctl>`].
+/// - **Synchronous.** Each parameter implements [`NativeParam`]. Parameters can
+///   borrow `&str`, `&[u8]`, or `&T` from the VM heap. The return type
+///   implements [`NativeReturn<Ctl>`].
 /// - **Synchronous with `&mut Vm` first.** Each parameter after `&mut Vm` is an
-///   owned [`NativeParam`] type, such as `String` or
-///   [`VmVal`](super::ty::VmVal). The return type implements
+///   owned [`NativeParam`] type. The return type implements
 ///   [`NativeReturn<Ctl>`]. Check permissions and limits before any side
-///   effect. The engine runs the function again from the start after a
-///   permission prompt or a garbage collection during a memory or resource
-///   check. Return a [`Later`] to wait for a future.
+///   effect. The engine restarts the function from the start after a
+///   permission prompt or limit-triggered garbage collection. Return a
+///   [`Later`] to suspend the calling task on a future. That future can await
+///   host events or Sand callbacks.
 /// - **Asynchronous.** A function that returns a future suspends only the
 ///   calling Sand task. Each parameter is an owned `Send` [`NativeParam`] type.
-///   The future is `Send`. The future output is `Send` and implements
+///   The future and its output are `Send`. The output implements
 ///   [`NativeReturn<Fail>`].
 ///
-/// A function that takes `&mut Vm` cannot have a borrowed parameter:
+/// The compiler rejects borrowed parameters in a `&mut Vm` function:
 ///
 /// ```compile_fail,E0277
 /// # use sandlang::native::NativeModule;
@@ -69,9 +70,9 @@ impl Signature {
 /// module.function("len", |_: &mut Vm, s: &str| s.len() as i64);
 /// ```
 ///
-/// An async function cannot have a borrowed parameter. It also cannot take or
-/// return a VM handle, because garbage collection can free the heap object
-/// during the wait:
+/// Garbage collection can free unrooted heap objects during a wait. The
+/// compiler therefore rejects borrowed parameters and VM handles in an async
+/// function:
 ///
 /// ```compile_fail,E0277
 /// # use sandlang::native::NativeModule;
@@ -86,8 +87,8 @@ impl Signature {
 /// module.function("fetch", |url: VmVal<String>| async move { 0 });
 /// ```
 ///
-/// A future cannot make a scheduler request, so its output cannot hold a
-/// [`Ctl`]:
+/// A future makes scheduler requests through [`NativeContext`]. Its output
+/// error type is therefore [`Fail`] or [`HostError<Fail>`]:
 ///
 /// ```compile_fail,E0277
 /// # use sandlang::native::NativeModule;
@@ -271,18 +272,18 @@ impl<T: IntoVmValue, C: From<Fail>> NativeReturn<C> for Result<T, HostError<C>> 
 impl<T: IntoVmValue, E: NativeError> NativeReturn<Ctl> for Result<Later<T, E>, E>
 where
     Result<T, E>: SandType,
+    Result<T, E::FutureError>: NativeReturn<Fail>,
 {
     fn into_call_result(self, vm: &mut Vm) -> Result<VmValue, Ctl> {
         match self {
-            Ok(Later(Completion::Now(r))) => Ok(E::finish_call(r, vm)?),
-            Ok(Later(Completion::After(suspension))) => Err(Ctl::suspend(suspension)),
+            Ok(Later(Completion::Ready(result))) => Ok(result.into_call_result(vm)?),
+            Ok(Later(Completion::Async(call))) => Err(Ctl::async_native(call)),
             Err(e) => e.stop_call(vm),
         }
     }
 }
 
-/// Deferred result of a [`NativeFunction`] that can suspend the calling Sand
-/// task on a future.
+/// Immediate result or pending future returned by a [`NativeFunction`].
 ///
 /// Return `Result<Later<T, E>, E>` from the function. If `E` is [`Ctl`] or
 /// [`Fail`], the Sand return type is `T`. If `E` is [`HostError`], the Sand
@@ -292,21 +293,25 @@ pub struct Later<T, E: NativeError>(Completion<T, E>);
 
 /// Execution mode of a [`Later`] value.
 enum Completion<T, E: NativeError> {
-    /// Returns the result without suspending the calling task.
-    Now(Result<T, E::FinishError>),
-    /// Suspends the calling task until the future is resolved.
-    After(Suspension),
+    /// Returns the result immediately on the calling task.
+    Ready(Result<T, E::FutureError>),
+    /// Suspends the calling task on an async native call.
+    Async(AsyncNativeCall),
 }
 
-/// Error type for a [`Later`] result ([`Ctl`], [`Fail`], or [`HostError`]).
+/// Error type for a [`Later`] result: [`Ctl`], [`Fail`], or [`HostError`].
 pub trait NativeError: Send + Sized + 'static + sealed::NativeError {
-    /// Error type of the finisher closure. It excludes scheduler requests
-    /// because the closure runs after the wait.
-    type FinishError: Send + 'static;
+    /// Error type of the future output: [`Fail`] or [`HostError<Fail>`].
+    ///
+    /// The future submits scheduler requests through [`NativeContext`].
+    type FutureError: From<Fail> + 'static;
     #[doc(hidden)]
     fn stop_call(self, vm: &mut Vm) -> Result<VmValue, Ctl>;
+    /// Splits `self` into a [`Ctl`] signal for
+    /// [`NativeContext::step`](super::context::NativeContext::step) or a final
+    /// future error.
     #[doc(hidden)]
-    fn finish_call<T: IntoVmValue>(r: Result<T, Self::FinishError>, vm: &mut Vm) -> Result<VmValue, Fail>;
+    fn into_ctl(self) -> Result<Ctl, Self::FutureError>;
 }
 
 mod sealed {
@@ -319,96 +324,92 @@ mod sealed {
 }
 
 impl NativeError for Ctl {
-    type FinishError = Fail;
+    type FutureError = Fail;
     fn stop_call(self, _: &mut Vm) -> Result<VmValue, Ctl> {
         Err(self)
     }
-    fn finish_call<T: IntoVmValue>(r: Result<T, Fail>, vm: &mut Vm) -> Result<VmValue, Fail> {
-        r?.into_vm_value(vm)
+    fn into_ctl(self) -> Result<Ctl, Fail> {
+        Ok(self)
     }
 }
 
 impl NativeError for Fail {
-    type FinishError = Fail;
+    type FutureError = Fail;
     fn stop_call(self, _: &mut Vm) -> Result<VmValue, Ctl> {
         Err(self.into())
     }
-    fn finish_call<T: IntoVmValue>(r: Result<T, Fail>, vm: &mut Vm) -> Result<VmValue, Fail> {
-        r?.into_vm_value(vm)
+    fn into_ctl(self) -> Result<Ctl, Fail> {
+        Ok(self.into())
     }
 }
 
 impl NativeError for HostError {
-    type FinishError = HostError<Fail>;
+    type FutureError = HostError<Fail>;
     fn stop_call(self, vm: &mut Vm) -> Result<VmValue, Ctl> {
         self.into_sand_error(vm)
     }
-    fn finish_call<T: IntoVmValue>(r: Result<T, HostError<Fail>>, vm: &mut Vm) -> Result<VmValue, Fail> {
-        r.into_call_result(vm)
+    fn into_ctl(self) -> Result<Ctl, HostError<Fail>> {
+        self.into_abort()
     }
 }
 
-impl<T: IntoVmValue + 'static, E: NativeError> Later<T, E> {
-    /// Suspends the calling task until `fut` is resolved, and then executes the
-    /// returned closure on the VM thread to produce the Sand result.
+impl<T: IntoVmValue + 'static, E: NativeError> Later<T, E>
+where
+    Result<T, E::FutureError>: NativeReturn<Fail>,
+{
+    /// Suspends the calling task on the future returned by `build`.
     ///
-    /// The closure returns [`NativeError::FinishError`], so it cannot make a
-    /// scheduler request. It cannot write to standard output or standard error
-    /// because a write can prompt for permission. Return the data to the script
-    /// instead. The compiler rejects a closure that returns a [`Ctl`]:
+    /// The engine passes the call's [`NativeContext`] to `build` before the
+    /// first poll. Inside `build`, call [`NativeContext::root`] to root heap
+    /// values before returning the future. Access the VM through
+    /// [`NativeContext`] only inside the returned future. After the future
+    /// returns `Ready`, the engine converts its output into the Sand return
+    /// value.
     ///
-    /// ```compile_fail,E0271
-    /// # use sandlang::native::func::Later;
-    /// # use sandlang::vm::{Ctl, Vm, WaitKind};
-    /// fn later(ctl: Ctl) -> Later<i64, Ctl> {
-    ///     Later::new(WaitKind::Io, async { move |_: &mut Vm| -> Result<i64, Ctl> { Err(ctl) } })
-    /// }
-    /// ```
+    /// `wait_kind` classifies host I/O waits. Pass [`WaitKind::User`] if the
+    /// task waits for user input. The engine excludes [`WaitKind::User`] wait
+    /// time from `max_wall_time`.
     ///
-    /// `wait_kind` classifies the wait. Pass [`WaitKind::User`] if the task
-    /// waits for a user action so that idle wait time does not count toward
-    /// `max_wall_time`.
-    ///
-    /// `fut` and the closure cannot hold a VM handle, because garbage
-    /// collection can free the heap object during the wait. The closure can
-    /// allocate and return a new handle.
+    /// The garbage collector can free unrooted heap objects during a wait. The
+    /// compiler therefore rejects VM handles inside the future:
     ///
     /// ```compile_fail,E0277
     /// # use sandlang::native::func::Later;
     /// # use sandlang::native::ty::VmVal;
-    /// # use sandlang::vm::{Fail, Vm, WaitKind};
+    /// # use sandlang::vm::{Fail, WaitKind};
     /// fn later(text: VmVal<String>) -> Later<i64, Fail> {
-    ///     Later::new(WaitKind::Io, async move { move |vm: &mut Vm| Ok(text.str(&vm.heap).len() as i64) })
+    ///     Later::new(WaitKind::Io, |context| async move { Ok(context.with_vm(|vm| text.str(&vm.heap).len() as i64)) })
     /// }
     /// ```
     ///
-    /// Copy the data that the closure needs before the wait:
+    /// Root the value with [`NativeContext::root`] before building the future:
     ///
     /// ```
     /// # use sandlang::native::func::Later;
     /// # use sandlang::native::ty::VmVal;
-    /// # use sandlang::vm::{Fail, Vm, WaitKind};
-    /// fn later(vm: &Vm, text: VmVal<String>) -> Later<i64, Fail> {
-    ///     let len = text.str(&vm.heap).len() as i64;
-    ///     Later::new(WaitKind::Io, async move { move |_: &mut Vm| Ok(len) })
+    /// # use sandlang::vm::{Fail, WaitKind};
+    /// fn later(text: VmVal<String>) -> Later<i64, Fail> {
+    ///     Later::new(WaitKind::Io, |context| {
+    ///         let text = context.root(text.raw());
+    ///         async move { Ok(context.with_vm(|vm| vm.str(context.value(text)).len() as i64)) }
+    ///     })
     /// }
     /// ```
     ///
-    /// The compiler does not check a raw [`VmValue`]. Do not hold a raw
-    /// [`VmValue`] in `fut` or in the closure.
-    pub fn new<F>(wait_kind: WaitKind, fut: impl Future<Output = F> + Send + 'static) -> Later<T, E>
+    /// [`VmValue`] implements [`Send`]. The compiler therefore accepts a raw
+    /// [`VmValue`] inside a future. Garbage collection during a wait can
+    /// invalidate that [`VmValue`]. Keep only
+    /// [`RootedValue`](super::context::RootedValue) handles across waits.
+    pub fn new<F>(wait_kind: WaitKind, build: impl FnOnce(NativeContext) -> F) -> Later<T, E>
     where
-        F: FnOnce(&mut Vm) -> Result<T, E::FinishError> + Send + 'static,
+        F: Future<Output = Result<T, E::FutureError>> + Send + 'static,
     {
-        Later(Completion::After(Suspension::new(wait_kind, async move {
-            let finish = fut.await;
-            move |vm: &mut Vm| E::finish_call(finish(vm), vm)
-        })))
+        Later(Completion::Async(AsyncNativeCall::new(wait_kind, build)))
     }
 
-    /// Returns a [`Later`] that produces `r` without suspending the calling task.
-    pub fn ready(r: Result<T, E::FinishError>) -> Later<T, E> {
-        Later(Completion::Now(r))
+    /// Returns `result` immediately from a [`Later`] function on the calling task.
+    pub fn ready(result: Result<T, E::FutureError>) -> Later<T, E> {
+        Later(Completion::Ready(result))
     }
 }
 
@@ -453,11 +454,11 @@ macro_rules! fn_impls {
                     f($($param),*)
                 }
                 Box::new(move |vm: &mut Vm, args: &[VmValue]| -> Result<VmValue, Ctl> {
-                    let r = {
+                    let output = {
                         read_params!(vm, args, $($param),*);
                         call(&self, $($param),*)
                     };
-                    vm.unchecked(|vm| r.into_call_result(vm))
+                    vm.unchecked(|vm| output.into_call_result(vm))
                 })
             }
         }
@@ -476,8 +477,8 @@ macro_rules! fn_impls {
                 Box::new(move |vm: &mut Vm, args: &[VmValue]| -> Result<VmValue, Ctl> {
                     read_params!(vm, args, $($param),*);
                     vm.arm_retry_stress();
-                    let r = self(vm, $($param),*);
-                    vm.unchecked(|vm| r.into_call_result(vm))
+                    let output = self(vm, $($param),*);
+                    vm.unchecked(|vm| output.into_call_result(vm))
                 })
             }
         }
@@ -496,11 +497,8 @@ macro_rules! fn_impls {
             fn into_native_fn(self) -> Box<NativeFn> {
                 Box::new(move |vm: &mut Vm, args: &[VmValue]| -> Result<VmValue, Ctl> {
                     read_params!(vm, args, $($param),*);
-                    let fut = self($($param),*);
-                    Err(Ctl::suspend(Suspension::new(WaitKind::Io, async move {
-                        let r = fut.await;
-                        move |vm: &mut Vm| r.into_call_result(vm)
-                    })))
+                    let future = self($($param),*);
+                    Err(Ctl::async_native(AsyncNativeCall::new(WaitKind::Io, |_| future)))
                 })
             }
         }

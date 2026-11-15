@@ -412,20 +412,22 @@ impl<const N: u8> SandType for Reflect<N> {
     }
 }
 
-/// An uncopied [`VmValue`] with the Sand type of `T`.
+/// Uncopied [`VmValue`] with the Sand type of `T`.
 ///
 /// A [`NativeFunction`](super::func::NativeFunction) that takes `&mut Vm` can
-/// accept and return `VmVal<T>` to avoid copying heap values.
+/// accept and return `VmVal<T>` to pass heap handles directly.
 ///
-/// A `VmVal` is valid only during the native call that received or allocated
-/// it. The garbage collector does not trace a `VmVal` that Rust code holds. A
-/// collection during a wait can free the heap object. For this reason, `VmVal`
-/// is not `Send`, and neither are [`Param`], [`Num`], and [`Reflect`]. The
-/// compiler rejects a VM handle in these places:
+/// A `VmVal` is valid only until the call returns or suspends. Garbage
+/// collection during a wait can free an unrooted heap object. `VmVal`,
+/// [`Param`], [`Num`], and [`Reflect`] are therefore `!Send`. The compiler
+/// rejects these VM handles in three places:
 ///
 /// - a [`NativeObject`](super::NativeObject)
 /// - the future of an async native function
-/// - the future or finisher closure of [`Later::new`](super::func::Later::new)
+/// - the future of [`Later::new`](super::func::Later::new)
+///
+/// Root a value with [`NativeContext::root`](super::context::NativeContext::root)
+/// to keep it across a wait.
 ///
 /// ```compile_fail,E0277
 /// # use sandlang::native::ty::VmVal;
@@ -433,8 +435,8 @@ impl<const N: u8> SandType for Reflect<N> {
 /// assert_send::<VmVal<String>>();
 /// ```
 ///
-/// [`VmVal::raw`] returns a [`VmValue`] without this check. Do not hold a raw
-/// [`VmValue`] across a wait.
+/// [`VmVal::raw`] returns the underlying `Send` [`VmValue`]. Keep only
+/// [`RootedValue`](super::context::RootedValue) handles across waits.
 pub struct VmVal<T: ?Sized>(VmValue, PhantomData<fn() -> T>, PhantomData<UnrootedVmHandle>);
 
 impl<T: ?Sized> VmVal<T> {

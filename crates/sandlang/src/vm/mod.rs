@@ -13,6 +13,7 @@ pub mod sched;
 pub mod value;
 
 use crate::engine::{LimitKind, Limits};
+use crate::native::context::AsyncNativeCall;
 use crate::native::convert::HostError;
 use crate::policy::{Capability, Decision, Policy, PromptAnswer, Prompter};
 use bytecode::*;
@@ -20,9 +21,7 @@ use heap::{Heap, Staging};
 use meter::Meter;
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
-use std::future::Future;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Arc;
 use value::*;
 
@@ -43,8 +42,8 @@ impl HostFn {
         }
     }
 }
-pub(crate) type Finisher = Box<dyn FnOnce(&mut Vm) -> Result<VmValue, Fail> + Send>;
-pub(crate) type BoxFuture = Pin<Box<dyn Future<Output = Finisher> + Send>>;
+/// Shared [`Vm`] handle for the scheduler and polled native futures.
+pub(crate) type SharedVm = Arc<Mutex<Vm>>;
 
 #[derive(Clone)]
 pub struct NativeEntry {
@@ -91,30 +90,13 @@ pub enum WaitKind {
     User,
 }
 
-/// Suspended native call: the pending future and its [`WaitKind`].
-pub(crate) struct Suspension {
-    pub(crate) future: BoxFuture,
-    pub(crate) wait_kind: WaitKind,
-}
-
-impl Suspension {
-    /// Suspends the calling task until `fut` is resolved, and then runs the
-    /// returned closure on the VM thread to produce the call result.
-    pub(crate) fn new<F>(wait_kind: WaitKind, fut: impl Future<Output = F> + Send + 'static) -> Suspension
-    where
-        F: FnOnce(&mut Vm) -> Result<VmValue, Fail> + Send + 'static,
-    {
-        Suspension { future: Box::pin(async move { Box::new(fut.await) as Finisher }), wait_kind }
-    }
-}
-
 /// Variant of a [`Ctl`].
 pub(crate) enum CtlKind {
     Fail(Fail),
     /// Prompt the user for the capability, and then retry the call.
     NeedPermission(Capability),
-    /// Suspend the task until the future completes.
-    Async(Suspension),
+    /// Suspend the calling task on an async native call.
+    AsyncNative(AsyncNativeCall),
     /// Wait for the scheduler event that [`Vm::block`] registered as
     /// generation `wait_gen`. The call returns the value that wakes the task.
     Blocked {
@@ -196,9 +178,9 @@ impl Fail {
 }
 
 impl Ctl {
-    /// Suspends the calling task on `suspension`.
-    pub(crate) fn suspend(suspension: Suspension) -> Ctl {
-        Ctl(Box::new(CtlKind::Async(suspension)))
+    /// Suspends the calling task on `call`.
+    pub(crate) fn async_native(call: AsyncNativeCall) -> Ctl {
+        Ctl(Box::new(CtlKind::AsyncNative(call)))
     }
 
     /// Prompts the user for `cap`.
@@ -208,6 +190,15 @@ impl Ctl {
 
     pub(crate) fn kind(&self) -> &CtlKind {
         &self.0
+    }
+
+    /// Returns `true` if the caller can retry after garbage collection.
+    pub(crate) fn can_retry_after_collection(&self) -> bool {
+        match self.kind() {
+            CtlKind::Collect => true,
+            CtlKind::Fail(fail) => fail.as_limit() == Some(LimitKind::Memory),
+            _ => false,
+        }
     }
 
     pub(crate) fn into_kind(self) -> CtlKind {
@@ -252,7 +243,7 @@ impl std::fmt::Debug for CtlKind {
         match self {
             CtlKind::Fail(fail) => fail.fmt(f),
             CtlKind::NeedPermission(c) => write!(f, "NeedPermission({c})"),
-            CtlKind::Async(s) => write!(f, "Async({:?})", s.wait_kind),
+            CtlKind::AsyncNative(call) => write!(f, "AsyncNative({:?})", call.wait_kind),
             CtlKind::Blocked { wait_gen } => write!(f, "Blocked({wait_gen})"),
             CtlKind::Racing { wait_gen, .. } => write!(f, "Racing({wait_gen})"),
             CtlKind::Yield => write!(f, "Yield"),
@@ -357,8 +348,8 @@ pub struct Fiber {
     pub waiters: Vec<(u32, u64)>,
     /// Stale `waiters` are pruned when it reaches this length.
     pub waiters_prune_at: usize,
-    /// Pending IO operation id, if waiting on IO.
-    pub io: Option<u64>,
+    /// Active async native calls on this fiber, ordered from outermost to innermost.
+    pub(crate) native_calls: Vec<sched::ActiveNativeCall>,
     /// An error (`kind: message`) to raise when the fiber resumes.
     pub pending_error: Option<String>,
     /// Whether the fiber stopped in or just after a native call. Its
@@ -602,7 +593,8 @@ pub struct Vm {
     pub main_fiber: u32,
     pub live_tasks: usize,
     pub host: Host,
-    pub io: sched::IoTable,
+    /// Host-event wakers indexed by fiber ID.
+    fiber_wakers: Vec<Arc<sched::FiberWaker>>,
     pub gen_counter: u64,
     /// Fuel accounting (see `meter`).
     pub meter: Meter,
@@ -625,11 +617,12 @@ pub struct Vm {
     /// made); shared, since strings are immutable. GC roots.
     ascii_strs: Vec<VmValue>,
 
-    /// Set by an internal error (a bug), including a Rust panic caught in the
-    /// interpreter, a native or an I/O finisher: the VM is memory safe but may
-    /// be inconsistent, so a REPL session discards it.
+    /// True after an internal error or caught Rust panic in the interpreter, a
+    /// native function, or a native future. A broken VM preserves Rust memory
+    /// safety. [`Session`](crate::session::Session) resets its state if `broken`
+    /// is `true`.
     pub(crate) broken: bool,
-    /// Testing aid that fails the first memory or resource check in each native call and retryable instruction. See [`crate::engine::Config::retry_stress`].
+    /// Enables retry-stress limit failures. See [`crate::engine::Config::retry_stress`].
     pub(crate) retry_stress: bool,
     /// True while `retry_stress` runs an instruction a second time after garbage collection.
     pub(crate) instruction_retried: bool,
@@ -688,6 +681,8 @@ impl Fiber {
             + self.frames.capacity() * std::mem::size_of::<Frame>()
             + self.race.capacity() * std::mem::size_of::<VmValue>()
             + self.waiters.capacity() * std::mem::size_of::<(u32, u64)>()
+            + self.native_calls.capacity() * std::mem::size_of::<sched::ActiveNativeCall>()
+            + self.native_calls.iter().map(|active_call| active_call.tracked_bytes).sum::<usize>()
     }
 }
 
@@ -697,7 +692,6 @@ impl Vm {
         let consts = Vec::with_capacity(prog.consts.len());
         let globals = vec![VmValue::Uninit; prog.nglobals];
         let meter = Meter::new(host.limits.max_instructions, host.interrupt.flag.clone(), host.clock.clone());
-        let io = sched::IoTable::with_shared(host.interrupt.io.clone());
         let mut vm = Vm {
             prog,
             natives,
@@ -712,7 +706,7 @@ impl Vm {
             main_fiber: 0,
             live_tasks: 0,
             host,
-            io,
+            fiber_wakers: Vec::new(),
             gen_counter: 1,
             meter,
             deadline: None,
@@ -736,14 +730,14 @@ impl Vm {
     /// REPL session appended to the program.
     pub fn load_program(&mut self) {
         let prog = self.prog.clone();
-        for i in self.consts.len()..prog.consts.len() {
-            if let Const::Str(s) = &prog.consts[i] {
+        for constant in &prog.consts[self.consts.len()..] {
+            if let Const::Str(s) = constant {
                 let v = self.short_str(s);
                 self.consts.push(v);
                 continue;
             }
             let heap = &mut self.heap;
-            let v = match &prog.consts[i] {
+            let v = match constant {
                 Const::Int(i) => VmValue::Int(*i),
                 Const::Float(f) => VmValue::Float(*f),
                 Const::Dur(d) => VmValue::Dur(*d),
@@ -781,14 +775,15 @@ impl Vm {
         self.fibers.clear();
         self.free_fibers.clear();
         self.ready.clear();
-        self.io.clear();
         self.live_tasks = 0;
         self.host.grants_once.clear();
         self.host.denies_once.clear();
     }
 
-    /// Resets per-run counters and attaches `call` for a new session run.
-    /// `call` must share the VM's [`sched::IoShared`].
+    /// Resets per-run counters for a new session run.
+    ///
+    /// Attaches `call` as the active interrupt. `call` must share the VM's
+    /// [`sched::HostWakeState`].
     pub(crate) fn begin_session_run(&mut self, call: &crate::engine::CallInterrupt) {
         self.meter.reset(call.flag.clone());
         self.host.output_bytes = 0;
@@ -1402,7 +1397,7 @@ impl Vm {
                     race_contenders: 0,
                     waiters: vec![],
                     waiters_prune_at: MIN_PRUNE,
-                    io: None,
+                    native_calls: Vec::new(),
                     pending_error: None,
                     stopped_in_native_call: false,
                 });
@@ -1435,6 +1430,7 @@ impl Vm {
     /// window is a GC root before the new task writes every slot of it, so
     /// it must not hold handles of objects freed since.
     fn recycle_fiber(&mut self, mut f: Box<Fiber>) {
+        self.drop_native_calls(&mut f, 0);
         let small = f.stack.capacity() <= MAX_SPARE_STACK_SLOTS && f.frames.capacity() <= MAX_SPARE_FRAMES;
         if self.spare_fibers.len() >= MAX_SPARE_FIBERS || !small || f.waiters.capacity() > MIN_PRUNE {
             self.heap.fiber_bytes = self.heap.fiber_bytes.saturating_sub(f.footprint());
@@ -1450,7 +1446,6 @@ impl Vm {
         f.result_slot = 0;
         f.waiters.clear();
         f.waiters_prune_at = MIN_PRUNE;
-        f.io = None;
         f.stopped_in_native_call = false;
         f.pending_error = None;
         self.spare_fibers.push(f);
@@ -1492,7 +1487,6 @@ impl Vm {
             f.stack[slot] = v;
         }
         f.state = FiberState::Ready;
-        f.io = None;
         let race = std::mem::take(&mut f.race);
         self.ready.push_back(fid);
         for t in race {
@@ -1556,10 +1550,7 @@ impl Vm {
         if let Obj::Task(t) = self.heap.get_mut(task) {
             t.state = TaskState::Cancelled;
         }
-        if let Some(mut f) = self.fibers.get_mut(fid as usize).and_then(|f| f.take()) {
-            if let Some(io) = f.io.take() {
-                self.io.cancel(io);
-            }
+        if let Some(f) = self.fibers.get_mut(fid as usize).and_then(|f| f.take()) {
             let queued = f.state == FiberState::Ready;
             self.end_cancelled(fid, f);
             if !queued && self.fibers[fid as usize].is_some() {
@@ -1601,37 +1592,26 @@ impl Vm {
         racer.race_contenders > 0
     }
 
-    /// Drops the frames of `f` above the innermost one with deferred code
-    /// pending and resumes that frame at its cleanup pad; false if no frame
-    /// has any. Frames below the top stopped in a call; so did the top one
-    /// if `in_call`.
-    pub(crate) fn unwind_to_pad(&self, f: &mut Fiber, in_call: bool) -> bool {
-        let n = f.frames.len();
+    /// Unwinds `fiber` to the innermost frame with a pending cleanup pad.
+    ///
+    /// Truncates frames above that pad frame. Drops the async native calls of
+    /// that pad frame and of every frame above it. Sets the pad frame's
+    /// instruction pointer to its pad. Returns whether `fiber` has a pending
+    /// cleanup pad. Pass `in_call = true` if the top frame stopped inside a
+    /// call.
+    pub(crate) fn unwind_to_pad(&mut self, fiber: &mut Fiber, in_call: bool) -> bool {
+        let n = fiber.frames.len();
         for i in (0..n).rev() {
-            let fr = &mut f.frames[i];
+            let fr = &mut fiber.frames[i];
             let pos = if i + 1 < n || in_call { (fr.ip as usize).saturating_sub(1) } else { fr.ip as usize };
             if let Some(pad) = self.prog.protos[fr.proto as usize].cleanup_at(pos) {
                 fr.ip = pad as u32;
-                f.frames.truncate(i + 1);
+                fiber.frames.truncate(i + 1);
+                self.drop_native_calls(fiber, i);
                 return true;
             }
         }
         false
-    }
-
-    /// Cancels remaining tasks after the main task finishes. Runs their
-    /// pending `defer` blocks until they finish or block.
-    pub async fn end_tasks(&mut self) -> Result<(), RunEnding> {
-        self.release_main();
-        let tasks: Vec<VmValue> = self.fibers.iter().flatten().map(|f| f.task).collect();
-        for task in tasks {
-            self.cancel_other_task(task);
-        }
-        if self.ready.is_empty() {
-            return Ok(());
-        }
-        let drive_result = self.drive(sched::UntilIdle { waits_for_io: false }).await;
-        self.drain_output_after(drive_result).map(|_| ())
     }
 
     /// Converts `fail` into a [`RunEnding`], using `trace` to build stack
@@ -1666,10 +1646,10 @@ impl Vm {
         self.collect_garbage_with(current, true);
     }
 
-    /// GC roots: globals, constants, pinned values and the fibers' live stack
-    /// windows, closures, tasks and race lists. Clears dead slots of stacks so
-    /// that they never hold handles to objects freed later. Shrinks stacks left
-    /// large by deep recursion and recounts `heap.fiber_bytes`.
+    /// Gathers all garbage-collection roots for a collection pass.
+    ///
+    /// Clears dead stack slots on each fiber. Shrinks oversized fiber stacks.
+    /// Recomputes `heap.fiber_bytes`.
     fn gc_roots(&mut self, current: Option<&mut Fiber>) -> Vec<VmValue> {
         let mut roots: Vec<VmValue> = Vec::with_capacity(1024);
         roots.extend(self.globals.iter().copied());
@@ -1690,6 +1670,9 @@ impl Vm {
             roots.extend(f.frames.iter().map(|fr| fr.closure_value()));
             roots.push(f.task);
             roots.extend(f.race.iter().copied());
+            for active_call in &f.native_calls {
+                active_call.trace(roots);
+            }
             fiber_bytes += f.footprint();
         };
         for f in self.fibers.iter_mut().flatten() {
@@ -1767,11 +1750,11 @@ impl Vm {
         out.into_iter().next()
     }
 
-    /// Appends the stack trace entries for `proto` at instruction `at` to `out`,
+    /// Appends stack trace frames for `proto_id` at instruction `at` to `out`,
     /// from innermost inlined call to outermost.
-    fn trace_frame(&self, proto: u32, at: u32, out: &mut Vec<TraceFrame>) {
-        let proto = &self.prog.protos[proto as usize];
-        if proto.name == "<entry>" || proto.name == FILL_PROTO {
+    fn trace_frame(&self, proto_id: u32, at: u32, out: &mut Vec<TraceFrame>) {
+        let proto = &self.prog.protos[proto_id as usize];
+        if proto_id == CALLBACK_PROTO || proto.name == "<entry>" || proto.name == FILL_PROTO {
             return;
         }
         let idx = (at as usize).saturating_sub(1).min(proto.lines.len().saturating_sub(1));

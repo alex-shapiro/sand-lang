@@ -57,9 +57,12 @@ pub enum FiberStop {
     Done(VmValue),
     /// Out of fuel: preempted.
     Preempt,
-    /// Waiting on a scheduler event (already registered).
+    /// Waiting on a scheduler or host event.
     Blocked,
-    Async(Suspension),
+    /// Started an async native call. The scheduler writes its result to `Fiber::result_slot`.
+    AsyncNative(AsyncNativeCall),
+    /// Finished a Sand callback for the innermost async native call.
+    CallbackReturn(VmValue),
     Prompt(Capability),
     /// `task.yield_now()`.
     YieldNow,
@@ -1262,6 +1265,7 @@ impl Vm {
                         do_return!(v);
                     }
                     Op::RetUnit => do_return!(VmValue::Unit),
+                    Op::ResumeNative => return Ok(FiberStop::CallbackReturn(r!(0))),
                     Op::Unwind => {
                         fiber.frames.pop();
                         if !self.unwind_to_pad(fiber, true) {
@@ -1751,7 +1755,7 @@ impl Vm {
         let fuel_at_call = self.meter.fuel();
         let mut r = Self::invoke_native(self, natives, n, &fiber.stack[start..start + argc]);
         self.heap.fail_next_check.set(false);
-        if collection_may_help(&r) {
+        if r.as_ref().is_err_and(Ctl::can_retry_after_collection) {
             // Native functions check memory and resource limits before garbage
             // collection. Collect all garbage, refund the failed attempt's
             // fuel, and retry the call once.
@@ -1806,9 +1810,9 @@ impl Vm {
                 fiber.frames.last_mut().unwrap().ip = (ip - 1) as u32;
                 Ok(Some(FiberStop::Prompt(cap)))
             }
-            CtlKind::Async(suspension) => {
+            CtlKind::AsyncNative(call) => {
                 fiber.result_slot = slot;
-                Ok(Some(FiberStop::Async(suspension)))
+                Ok(Some(FiberStop::AsyncNative(call)))
             }
             CtlKind::Racing { wait_gen, tasks, contenders } => {
                 fiber.result_slot = slot;
@@ -1820,7 +1824,7 @@ impl Vm {
             CtlKind::Cancelled => Ok(Some(FiberStop::Cancelled)),
             CtlKind::Yield | CtlKind::Blocked { .. } => unreachable!("handled above"),
             CtlKind::Collect => Err(self.internal_trap(fiber, ip, "a native asked for a collection twice".into())),
-            // Do not retry memory limits here. `call_native` already retried the call after garbage collection.
+            // `call_native` already retried any memory-limit failure after garbage collection.
             CtlKind::Fail(fail) => Err(self.run_ending_of(fail, |vm| vm.trace_of(fiber, Some(ip as u32)))),
         }
     }
@@ -2543,16 +2547,4 @@ fn overflow(what: &str) -> Fail {
 /// Converts an integer arithmetic error (`kind: message`) into a [`Fail`].
 fn arith_fail(message: &str) -> Fail {
     Fail(Box::new(FailKind::RuntimeError(message.to_string())))
-}
-
-/// Returns `true` if a garbage collection can resolve the failure of a native call.
-fn collection_may_help(r: &Result<VmValue, Ctl>) -> bool {
-    match r {
-        Ok(_) => false,
-        Err(c) => match c.kind() {
-            CtlKind::Collect => true,
-            CtlKind::Fail(fail) => fail.as_limit() == Some(LimitKind::Memory),
-            _ => false,
-        },
-    }
 }

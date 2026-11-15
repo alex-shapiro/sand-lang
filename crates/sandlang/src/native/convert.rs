@@ -72,11 +72,13 @@ pub trait IntoVmValue: SandType {
 
 /// Error returned by a native function whose Sand return type is `Result<T>`.
 ///
-/// Construct a recoverable script error with [`HostError::new`], or propagate a
-/// [`Fail`], a [`Ctl`], or a `std::io::Error` with `?`.
+/// Call [`HostError::new`] to construct a recoverable script error. Use `?` to
+/// propagate a [`Fail`], a [`Ctl`], or a `std::io::Error`.
 ///
-/// `C` is the control signal that aborts or suspends the call. A
-/// `HostError<Fail>` cannot hold a scheduler request (`Ctl`):
+/// `C` is the control signal that stops the call. Synchronous functions use
+/// `HostError<Ctl>`. Futures submit scheduler requests through
+/// [`NativeContext`](super::context::NativeContext) instead of [`Ctl`]. The
+/// compiler therefore rejects [`Ctl`] conversions into `HostError<Fail>`:
 ///
 /// ```compile_fail,E0277
 /// # use sandlang::native::convert::HostError;
@@ -86,8 +88,8 @@ pub trait IntoVmValue: SandType {
 /// }
 /// ```
 ///
-/// Make a helper generic over `C` to share it between a native function and a
-/// finisher:
+/// Make a helper generic over `C` to share it between a `&mut Vm` function and
+/// a native future:
 ///
 /// ```
 /// # use sandlang::native::convert::HostError;
@@ -136,6 +138,15 @@ impl<C: From<Fail>> HostError<C> {
                 Ok(vm.err(e))
             }
             HostErrorKind::Abort(c) => Err(c),
+        }
+    }
+
+    /// Splits `self` into a control signal `Ok(c)` or a recoverable
+    /// `Err(HostError<Fail>)`.
+    pub(crate) fn into_abort(self) -> Result<C, HostError<Fail>> {
+        match *self.0 {
+            HostErrorKind::Error { kind, message } => Err(HostError::new(kind, message)),
+            HostErrorKind::Abort(c) => Ok(c),
         }
     }
 }
