@@ -4,13 +4,28 @@ We propose letting async native Rust functions call Sand functions and await the
 
 **Status: unimplemented proposal.** Every cost figure in this document is an estimate. This design builds on the async-adapter outline from the callback study on `origin/claude/sandlang-native-callbacks-research-i6bf14`. That study proposed giving an async block VM access only between awaits and storing heap values in a rooted container.
 
+## Precedent: piccolo async sequences
+
+[piccolo](https://github.com/kyren/piccolo), a stackless Lua VM in Rust, uses the core of this design. Its async sequences let a Rust `async` block call Lua functions and await their results. The piccolo README calls this feature critical for complex callbacks.
+
+Piccolo confirms two parts of this design:
+
+- The future asks the VM to act. Each await stores a request, such as a Lua call, and returns `Pending`. The executor runs the Lua function and polls the future again. Part 1 uses the same mechanism.
+- Values that cross an await are rooted by the call that owns them. The future holds only handles into a root set that belongs to the sequence. Part 3 uses the same ownership.
+
+Three choices in this design do not have a precedent in piccolo:
+
+- Safe access to the VM during a poll. Piccolo lends borrowed VM references to the future through `unsafe` code. Part 2 must lend VM state without `unsafe` code.
+- One future type for host I/O and VM requests. Piccolo forbids a sequence future to await any outside future. Part 1 merges both kinds of wait.
+- Hard memory limits inside a native call. Piccolo checks memory between execution steps, so it does not need a restart rule. Part 4 keeps Sand's hard limits.
+
 ## Why native functions cannot call Sand on `main`
 
 Three VM rules prevent a native Rust function from calling a Sand function on `main`:
 
-- **Any Sand function can suspend.** Under SPEC §11, Sand functions do not use `async` or `await` markers. To suspend a task, the interpreter returns to the scheduler. Active Rust frames on the call stack block that return.
-- **The garbage collector ignores Rust stack handles.** The collector runs only at safe points in the interpreter loop and does not trace `VmValue` handles held in Rust variables.
-- **Memory-limit retries restart native functions.** Under SPEC §16.3, if a native function reaches `max_memory`, the VM collects garbage and runs the function again from the start.
+- Any Sand function can suspend. Under SPEC §11, Sand functions do not use `async` or `await` markers. To suspend a task, the interpreter returns to the scheduler. Active Rust frames on the call stack block that return.
+- The garbage collector ignores Rust stack handles. The collector runs only at safe points in the interpreter loop and does not trace `VmValue` handles held in Rust variables.
+- Memory-limit retries restart native functions. Under SPEC §16.3, if a native function reaches `max_memory`, the VM collects garbage and runs the function again from the start.
 
 As `experiments/encode-decode-design-causes.md` explains, these three rules prevent a single fast codec. A native codec walker cannot call a custom Sand `encode` or `decode` method.
 
@@ -74,6 +89,8 @@ Under the new design, a polled future returns `Pending` in two cases:
 - **Waiting on an external event.** A host waker marks the task ready after I/O completes, as on `main`.
 - **Requesting a Sand call.** The VM runs the requested Sand function on the task and then polls the future again.
 
+The scheduler tells the two cases apart by one rule: if the poll stored a request, the VM handles the request; otherwise, the future waits for its waker. A future that stores a request and also waits for an outside event in the same poll is an error. Piccolo avoids this case because its sequence futures cannot await outside futures at all. Sand must allow both kinds of wait, because the new type replaces `Suspension`.
+
 Host I/O functions use the same future type. An I/O future awaits the host operation and then calls `context.with_vm` from Part 2 to build its return value. That final `context.with_vm` call replaces the finisher closure from `main`.
 
 Each task stores its active native futures beside its Sand call frames rather than in `IoTable`. Keeping the future on the task lets the task run Sand frames while the future waits and lets the same future later wait on host I/O. `IoTable` maps only host wakers to waiting tasks.
@@ -92,11 +109,22 @@ Synchronous native functions keep their direct call path. Most native functions 
 
 This layout also supports nested callbacks. If a custom `encode` method calls the native encoder again, the VM pushes a second future onto the task above the `encode` frame. The Rust call stack holds only the single future that the scheduler is polling. `max_call_depth` bounds total Sand and native nesting depth.
 
-## Part 2: Share `&mut Vm` through a single-thread mutex
+## Part 2: Lend owned VM state to the future during a poll
 
 `Future::poll` accepts only `Pin<&mut Self>` and `&mut Context`, which provides a waker. Because of that fixed Rust signature, the scheduler cannot pass `&mut Vm` as a `poll` argument. The future also cannot store `&mut Vm` across awaits because the interpreter needs `&mut Vm` while Sand code runs.
 
-An `Arc<Mutex<VmState>>` transfers VM access cleanly in safe Rust:
+### Design choice: lend owned state, not a borrow
+
+The future is `'static`, so it cannot name the lifetime of a borrow. A design can lend VM access to the future in two ways:
+
+- **Lend a borrow through `unsafe` code.** Piccolo stores a raw pointer to its borrowed VM references for the length of each poll, and erases their lifetimes. Sand's safe-Rust rule forbids this.
+- **Lend owned state.** The VM state is an owned object in a shared holder. The scheduler and the future take turns to use it. The future does not need to name a lifetime, so safe Rust accepts it.
+
+This design lends owned state. As a result, the VM state that natives use must become an owned object in a shared holder, instead of a part of the `Vm` that the interpreter borrows. On `main`, the interpreter borrows the whole `Vm` for a slice of execution. This change to how the VM owns its state is the largest structural cost of the design.
+
+### Mechanism
+
+An `Arc<Mutex<VmState>>` transfers VM access in safe Rust:
 
 1. An `Arc<Mutex<VmState>>` holds the VM state. The scheduler holds the lock while running Sand bytecode.
 2. Before polling native futures, the scheduler releases the lock.
@@ -120,6 +148,15 @@ Each running future therefore owns a rooted value table:
 
 In commit `eeec0f3`, the codec branch added a similar traced value list for native objects.
 
+### Design choice: the call owns its roots
+
+The table belongs to the object that owns the native future. The collector traces the table as part of that object, and does not treat it as a set of global roots. This choice has two effects:
+
+- **Cycles stay collectable.** The table does not keep values alive by itself. Its values stay alive only while the object that owns the future is alive. So a cycle from a rooted value back to that object does not keep the cycle alive. The traced native objects on the codec branch follow the same rule.
+- **Roots end with the call.** If the call completes or the VM cancels the task, the roots go away with the future. A native cannot keep a value alive past its call by mistake.
+
+The alternative is a global root table, from which each native must remove its values explicitly. The piccolo docs warn that values in its global registry can form cycles that the collector never frees.
+
 ## Part 4: Await memory reservations and host permissions
 
 After an async native function calls Sand code, the VM cannot safely restart that native function from the start because the Sand call may have caused side effects. Async native functions therefore await memory reservations instead of restarting:
@@ -132,6 +169,14 @@ After an async native function calls Sand code, the VM cannot safely restart tha
 Async native functions request host permissions in the same way through `context.require(capability).await`.
 
 Collecting garbage in place removes the step snapshots and rollback logs required on the codec branch. Synchronous native functions cannot call Sand code, so they keep the existing restart rule.
+
+### Design choice: keep hard limits
+
+Part 4 exists because Sand promises hard limits on memory. Piccolo makes a different choice. It checks memory between execution steps, and accepts that a step can go over the limit by a bounded amount. Piccolo therefore never needs to stop a native in the middle of its work. Soft limits would remove Part 4 from this design, but they would break Sand's promise of hard limits.
+
+### Design choice: a future's own state counts against the limit
+
+A native future holds Rust state outside the VM heap, such as its locals and the boxes of recursive calls. Script input controls the size of that state. For example, a deeper input makes a recursive walker allocate more boxes. Under the sandbox rules in `docs/INTERNALS.md`, all such memory must count against `max_memory`. The VM must therefore charge each future's state to the task's memory. Piccolo does not count this memory.
 
 ## Part 5: Sketch of an async codec walker
 
