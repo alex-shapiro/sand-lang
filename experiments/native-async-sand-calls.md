@@ -1,255 +1,158 @@
-# Native functions that await Sand calls
+# Async native functions that call Sand
 
-This file proposes a way for a native Rust function to call a Sand function and
-continue after the result arrives. The native is a normal `async` Rust function.
-The VM owns its future and polls it.
+We propose letting async native Rust functions call Sand functions and await their results. Each async native function returns a Rust future that the VM stores on the calling task and polls.
 
-**Status: proposal.** Nobody has built or measured this design. Each claim
-about its cost is speculative. The research report on the branch
-`origin/claude/sandlang-native-callbacks-research-i6bf14` proposes the outline:
-an adapter in which "the block must get VM access only between awaits", and "a
-typed, rooted container" for heap state. This file fills in that outline.
+**Status: unimplemented proposal.** Every cost figure in this document is an estimate. This design builds on the async-adapter outline from the callback study on `origin/claude/sandlang-native-callbacks-research-i6bf14`. That study proposed giving an async block VM access only between awaits and storing heap values in a rooted container.
 
-## The problem
+## Why native functions cannot call Sand on `main`
 
-A native function cannot call a Sand function on `main`. Three facts cause this:
+Three VM rules prevent a native Rust function from calling a Sand function on `main`:
 
-- Any Sand function can suspend. SPEC §11 states that Sand does not
-  have `async`/`await` coloring. To suspend a task, the interpreter returns to the
-  scheduler. It cannot return past a native frame on the Rust stack.
-- The garbage collector does not trace a VM handle that Rust code holds. It
-  collects only at safe points in the interpreter loop.
-- If a native reaches the memory limit, the VM collects garbage and runs the
-  native again from the start (SPEC §16.3).
+- **Any Sand function can suspend.** Under SPEC §11, Sand functions do not use `async` or `await` markers. To suspend a task, the interpreter returns to the scheduler. Active Rust frames on the call stack block that return.
+- **The garbage collector ignores Rust stack handles.** The collector runs only at safe points in the interpreter loop and does not trace `VmValue` handles held in Rust variables.
+- **Memory-limit retries restart native functions.** Under SPEC §16.3, if a native function reaches `max_memory`, the VM collects garbage and runs the function again from the start.
 
-`experiments/encode-decode-design-causes.md` explains why this blocks a regular
-`Encode` and `Decode`. A native codec walker cannot call a hand-written `encode`
-or `decode`.
+As `experiments/encode-decode-design-causes.md` explains, these three rules prevent a single fast codec. A native codec walker cannot call a custom Sand `encode` or `decode` method.
 
-## Why the two tested designs do not fit a codec
+## Why the two tested callback designs fail for codecs
 
-The research branch tested two designs.
+The callback study tested two designs for calling Sand from Rust:
 
-**Nested call.** The native calls the Sand function directly, and waits for
-the result on the Rust stack. Lua and CPython work this way. A Sand function
-that suspends inside a nested call fails, because a native frame is on the
-Rust stack. The research branch rejected this design for that reason.
+- **Nested stack calls.** The native function calls the Sand function directly and waits on the Rust stack, as in Lua and CPython. If the Sand function suspends on I/O, the VM fails the call because an active Rust frame blocks the return to the scheduler. The callback study rejected nested stack calls for that reason.
+- **Continuation calls.** Instead of calling Sand directly, the native function returns a call request and a continuation closure to the VM. The VM runs the Sand function on the current task and passes its result to the continuation closure. The callback study recommended this design because it preserves task suspension, garbage collection, and safe Rust.
 
-**Continuation call.** The native does not call the Sand function. It returns a
-request to the VM. The VM runs the Sand function as a normal frame on the
-current task. Then the VM calls a Rust closure that the native supplied, with
-the result. That closure is the _continuation_. The research branch recommends
-this design, because it keeps every hard constraint that the branch tested.
+Authors on `origin/encode-decode-traits` built and measured a continuation-based codec walker in `experiments/codec-traits/rejected-designs.md`. That walker paid three costs:
 
-The codec branch `origin/encode-decode-traits` built a native walker with
-continuation calls, and measured it
-(`experiments/codec-traits/rejected-designs.md`). The design has two costs:
+- **Callbacks drop the Rust stack frame.** To run a Sand method, the walker must return from Rust to the VM. Before returning, the walker copies its local state to the heap. After the Sand method finishes, the continuation rebuilds the walk from that heap state. Handling a custom field added about 270 ns to stop the walk, call Sand, and resume. The VM call itself took about 50 ns of that 270 ns.
+- **Heap state slows down derived types.** A recursive Rust walker spreads its state across nested stack frames and cannot save that state mid-walk. The continuation walker therefore kept an explicit frame stack on the heap at all times. That heap stack made standard decoding 40% to 45% slower, even on inputs without custom types.
+- **Retries require per-step rollback state.** After garbage collection, the VM repeats only the current continuation step. To return to the start of a step, the codec branch copied walker state and logged format changes at every step.
 
-- **Each callback destroys the walker's Rust frame.** To run the Sand function,
-  the walker must return from its Rust function to the VM. A Rust function that
-  returns loses its local variables. So the walker must copy its state to the
-  heap before the call, and a continuation must rebuild the walk after it. A
-  hand-written field cost about 270 ns to stop, call Sand, and resume. The VM
-  call itself was about 50 ns of that.
-- **The walker must keep its state on the heap at all times.** A recursive
-  walker keeps its state across many nested Rust frames. It cannot copy that
-  state out in the middle of a walk. So the walker used an explicit stack of
-  frames on the heap instead of recursion. That made ordinary decode 40 to 45
-  percent slower, including values that never call Sand.
+## Design goals
 
-The restart rule adds a third cost. With continuation calls, a retry after a
-collection repeats only the current step. The walker must therefore be able to
-return to its state at the start of each step. The codec branch kept a copy of
-its state and a log of changes for each step.
+Authors write callback-capable native functions as `async` Rust functions. Inside the function, `context.call(sand_fn, args).await` runs `sand_fn` on the current task and returns its result. While `sand_fn` runs, four guarantees hold:
 
-## The goal
+- `sand_fn` can suspend on async I/O.
+- The garbage collector can run and traces every value that the native function roots.
+- The VM stores suspended native futures on the heap rather than growing the Rust stack.
+- `Engine` implements `Send` in 100% safe Rust.
 
-A native can be written as an `async` Rust function. Inside it,
-`cx.call(f, args).await` runs the Sand function `f` and returns its result.
-While `f` runs, these conditions hold:
+## Why current async native functions cannot call Sand
 
-- `f` can suspend on I/O.
-- The collector can run, and every value that the native keeps stays valid.
-- The Rust stack does not grow.
-- `Engine` stays `Send`, and the code stays safe Rust.
+SPEC §16.3 already defines async native functions for host I/O:
 
-## Why the current async natives cannot do this
+- An async native function returns a future that the calling Sand task awaits.
+- The parameters, the future, and the future output must be owned `Send` types.
+- VM handle types implement `!Send` so futures cannot hold them across waits.
+- After the future completes, the scheduler passes `&mut Vm` to a finisher closure that converts the output into a `VmValue`.
 
-Sand already supports async native functions. SPEC §16.3 describes them:
+An async native function on `main` can wait for host I/O, while only its finisher closure can access the VM heap.
 
-- An async native returns a future, and only the calling Sand task waits for it.
-- Its parameters, its future, and the future's output must be owned `Send` types.
-- VM handle types are `!Send`, so the future cannot hold a handle to a VM value.
-- Only the _finisher closure_ receives `&mut Vm`. The finisher runs after the
-  future completes, and converts its output into a Sand value.
+SPEC §16.3 marks VM handles `!Send` to prevent stale handles after garbage collection rather than thread races. Pinning a future to the VM thread would still leave three problems:
 
-So an async native can wait for host I/O, but it cannot touch the VM heap while
-it waits, and it cannot ask the VM to run Sand code.
+- **Garbage collection invalidates unrooted handles.** While a future awaits a Sand call, the Sand code can trigger garbage collection. An untraced handle in the future can then point to a freed or reused heap slot. In safe Rust, reading that stale handle returns the wrong heap object instead of causing undefined behavior. The callback study reproduced this bug.
+- **The VM needs exclusive access during awaits.** A future cannot hold `&mut Vm` across an `await` because the interpreter needs `&mut Vm` to run `sand_fn`.
+- **`Engine` requires `Send`.** Under SPEC §16, `Engine` implements `Send`. Storing a `!Send` future inside the VM would make both `Vm` and `Engine` `!Send`. Restoring `Send` would require `unsafe impl Send`, which Sand's safe-Rust rule forbids.
 
-The rule against handles in futures does not exist because of threads. SPEC
-§16.3 states the reason: "Garbage collection during a wait can free the heap
-object that a VM handle refers to. Each VM handle type is therefore `!Send`."
-The `!Send` rule is a compile-time way to keep handles out of code that waits.
+## Part 1: Unify async native functions under a single future type
 
-A future pinned to the VM thread would therefore not be safe to give handles.
-Two problems would remain:
+A new future type replaces `Suspension`, the type that async native functions return on `main`. Every async native function then uses the same scheduler path.
 
-- **A handle can become stale.** During an `await`, Sand code runs and can
-  trigger a collection. The collector does not see the future's handle. It can
-  free the object and give its slot to a new object. Sand is safe Rust, so the
-  conflict results in incorrect rather than undefined behavior: the handle
-  reads a different object than what was expected. The research branch reproduced
-  this case.
-- **The future cannot keep `&mut Vm` across an `await`.** The VM needs
-  `&mut Vm` to run the Sand function during that `await`.
+### Current scheduler path on `main`
 
-A future pinned to one thread also conflicts with SPEC §16, which promises that
-`Engine` implements `Send`. A future that holds `!Send` handles is `!Send`. If
-the VM stores that future, the VM and the `Engine` become `!Send`. Only
-`unsafe impl Send` could restore `Send`, and the safe-Rust rule forbids it.
+On `main`, async futures wait on external events and access the VM only after completion:
 
-## Part 1: Replace the future type for async natives
+1. An async native function returns a `Suspension` that wraps a boxed future.
+2. The VM stores the `Suspension` in its `IoTable` of pending operations.
+3. Each `IoTable` slot holds a waker. After I/O completes, the waker marks that slot ready.
+4. Between slices of Sand bytecode, the scheduler polls ready futures in `IoTable::poll_ready` inside `crates/sandlang/src/vm/sched.rs`.
+5. On completion, the future returns a finisher closure. The scheduler runs that closure with `&mut Vm` and resumes the task with the resulting value.
 
-The new future type replaces `Suspension`, the type that async natives return
-on `main`. Each async native then follows one path through the scheduler.
+### Unified future type
 
-### Existing future type
+Under the new design, a polled future returns `Pending` in two cases:
 
-A future on `main` can wait on external events but cannot access the VM:
+- **Waiting on an external event.** A host waker marks the task ready after I/O completes, as on `main`.
+- **Requesting a Sand call.** The VM runs the requested Sand function on the task and then polls the future again.
 
-1. An async native returns a `Suspension`, which holds a boxed future.
-2. The VM puts the `Suspension` in its `IoTable`, a table of pending
-   operations.
-3. Each slot of the table has a waker. An I/O event wakes the slot.
-4. The scheduler polls each woken future between slices of Sand execution
-   (`IoTable::poll_ready`, `crates/sandlang/src/vm/sched.rs`).
-5. A completed future gives a _finisher_ closure. The scheduler runs the
-   finisher with `&mut Vm`, and the task continues with the result.
+Host I/O functions use the same future type. An I/O future awaits the host operation and then calls `context.with_vm` from Part 2 to build its return value. That final `context.with_vm` call replaces the finisher closure from `main`.
 
-### The new future type
+Each task stores its active native futures beside its Sand call frames rather than in `IoTable`. Keeping the future on the task lets the task run Sand frames while the future waits and lets the same future later wait on host I/O. `IoTable` maps only host wakers to waiting tasks.
 
-The new future returns `Pending` for one of two reasons:
+Synchronous native functions keep their direct call path. Most native functions are synchronous and take about 10 ns per call. Only functions that await host I/O or Sand calls allocate a boxed future.
 
-- **It is waiting for an external event**, such as I/O. A waker reports the
-  event, as on `main`.
-- **It asks the VM to run a Sand function.** The VM runs the function, then
-  polls the future again.
-
-An I/O native is a special case. Its future awaits the I/O, and then uses the
-VM once at the end, through `cx.with_vm` (Part 2). That last `cx.with_vm` does
-the work of the finisher on `main`, so the finisher closure is removed.
-
-The futures live with their tasks, not in the `IoTable`. A future that calls
-Sand must stay with its task while the task runs Sand code. The same future can
-then wait for I/O. The `IoTable` keeps only the map from each waker to its
-task.
-
-Synchronous natives do not change. A synchronous native call costs about
-10 ns, and most natives are synchronous. A boxed future for each call would add
-an allocation. Only natives that wait, for I/O or for Sand code, use the future
-type.
-
-### How a call into Sand works
+### Steps of a Rust-to-Sand call
 
 1. A Sand task calls an async native function.
-2. The VM stores the future in the task, next to the task's Sand frames.
-   The future is not on the Rust stack.
-3. The VM polls the future.
-4. If the future awaits `cx.call(f, args)`, the poll returns `Pending`, with a
-   request to call `f`.
-5. The VM pushes a frame for `f` on the task, and runs `f` as normal Sand code.
-   If `f` suspends on I/O, the whole task suspends, and the future waits in the
-   task.
-6. `f` returns. The VM puts the result where the future can read it, and polls
-   the future again.
-7. The future completes. The VM drops it, and gives its output to the Sand
-   caller.
+2. The VM stores the returned future on the heap inside the task, beside the Sand call frames.
+3. The scheduler polls the future.
+4. At `context.call(sand_fn, args).await`, the poll returns `Pending` with a request to call `sand_fn`.
+5. The VM pushes a bytecode frame for `sand_fn` onto the task and runs `sand_fn`. If `sand_fn` suspends on I/O, the whole task suspends with the native future still stored on it.
+6. After `sand_fn` returns, the VM stores the return value for the future and polls the future again.
+7. After the future completes, the VM drops the future and passes its output to the Sand caller.
 
-Nested calls stay safe. Suppose a hand-written `encode` calls the codec native
-again. The VM stores a second future in the same task, above the Sand frame of
-`encode`. The Rust stack holds only the future that the VM polls at that
-moment. The VM's call depth limit, `max_call_depth`, counts the nesting.
+This layout also supports nested callbacks. If a custom `encode` method calls the native encoder again, the VM pushes a second future onto the task above the `encode` frame. The Rust call stack holds only the single future that the scheduler is polling. `max_call_depth` bounds total Sand and native nesting depth.
 
-## Part 2: How the future reaches the VM during a poll
+## Part 2: Share `&mut Vm` through a single-thread mutex
 
-`Future::poll` has a fixed signature. It receives only a `Context`, which holds
-a waker. The VM therefore cannot pass `&mut Vm` through `poll`. The future also
-cannot store `&mut Vm`, because the VM needs `&mut Vm` to run `f`.
+`Future::poll` accepts only `Pin<&mut Self>` and `&mut Context`, which provides a waker. Because of that fixed Rust signature, the scheduler cannot pass `&mut Vm` as a `poll` argument. The future also cannot store `&mut Vm` across awaits because the interpreter needs `&mut Vm` while Sand code runs.
 
-A lock that changes owner at each poll solves this in safe Rust:
+An `Arc<Mutex<VmState>>` transfers VM access cleanly in safe Rust:
 
-1. The VM state lives in an `Arc<Mutex<...>>`. The scheduler holds the lock
-   while Sand code runs.
-2. Before a poll, the scheduler releases the lock.
-3. Inside the future, `cx.with_vm(|vm| ...)` takes the lock, runs the closure,
-   and releases the lock.
-4. After the poll, the scheduler takes the lock again.
+1. An `Arc<Mutex<VmState>>` holds the VM state. The scheduler holds the lock while running Sand bytecode.
+2. Before polling native futures, the scheduler releases the lock.
+3. Inside a poll, `context.with_vm(|vm| ...)` acquires the lock, runs the closure, and drops the guard.
+4. After polling finishes, the scheduler acquires the lock again.
 
-All of this happens within a single thread, so the lock is never contended.
+Because the scheduler and the future run on the same thread, acquiring this mutex never blocks.
 
-The compiler enforces the rule against VM access across an `await`. A
-`MutexGuard` is `!Send`. If a future keeps a guard across an `await`, the
-future is `!Send`. The VM requires the future to be `Send`, so the compiler
-rejects that future. This is the same mechanism that SPEC §16.3 uses today for
-async natives.
+Rust's type system prevents holding VM access across an `await`. `MutexGuard` implements `!Send`, so holding a guard across an `await` makes the future `!Send`. Because the VM requires `Send` futures, the Rust compiler rejects any future that keeps a `MutexGuard` across a wait. SPEC §16.3 uses the same `!Send` check for VM handles today.
 
-## Part 3: A rooted table for values that cross an `await`
+## Part 3: Root VM values across awaits
 
-During a poll, Sand code does not run, so the collector does not run. A raw
-handle that the future uses within one poll is therefore safe. A handle that
-the future keeps across an `await` is not safe, because Sand code runs during
-the `await`.
+Sand bytecode and garbage collection never run during a `Future::poll` call. Raw VM handles remain valid within a single poll. Across an `await`, Sand code can run and trigger garbage collection, so raw handles become unsafe to keep.
 
-The fix is a rooted table for each running future:
+Each running future therefore owns a rooted value table:
 
-- `cx.root(value)` puts a value in the table, and returns a `Rooted` index.
-- The collector traces every value in the table.
-- The future keeps only `Rooted` indices across an `await`. An index is a plain
-  integer, so it is `Send`.
-- The VM frees the whole table if the future completes, or if the VM cancels
-  the task.
+- `context.root(value)` inserts a `VmValue` into the future's table and returns a `RootedValue` index.
+- The garbage collector traces every entry in active future tables.
+- Across awaits, the future stores only `RootedValue` indices. Each index wraps an integer and implements `Send`.
+- The VM frees the future's table after the future completes or if the VM cancels the task.
 
-The codec branch built most of this table. It gave native objects a list of VM
-values that the collector traces (commit `eeec0f3`, "Let native objects keep VM
-values that the collector traces").
+In commit `eeec0f3`, the codec branch added a similar traced value list for native objects.
 
-## Part 4: The restart rule becomes a wait
+## Part 4: Await memory reservations and host permissions
 
-A future that has called Sand code cannot restart from the start, because that
-call was a side effect. Memory checks therefore become `await` points:
+After an async native function calls Sand code, the VM cannot safely restart that native function from the start because the Sand call may have caused side effects. Async native functions therefore await memory reservations instead of restarting:
 
-1. The future calls `cx.reserve(bytes).await` before it allocates.
-2. If the reservation fails, the poll returns `Pending`, with a request to
-   collect garbage.
-3. At that point, every value that the future keeps is in its rooted table,
-   because Part 3 requires it at each `await`. So the VM can collect garbage at
-   once, without a restart.
-4. The VM polls the future again. The reservation then succeeds, or the run
-   ends with a memory error.
+1. Before allocating heap memory, the future calls `context.reserve(byte_count).await`.
+2. If the heap exceeds `max_memory`, the poll returns `Pending` with a garbage-collection request.
+3. Because Part 3 roots every value held across an `await`, the VM collects garbage in place without rewinding the native function.
+4. The scheduler polls the future again. If collection freed enough space, the reservation succeeds; otherwise the VM fails the task with a memory error.
 
-A permission prompt works in the same way, through `cx.require(capability).await`.
+Async native functions request host permissions in the same way through `context.require(capability).await`.
 
-This part removes the copies of state and the logs of changes that the codec
-branch needed for each step. Those existed only because the VM could run a
-step again.
+Collecting garbage in place removes the step snapshots and rollback logs required on the codec branch. Synchronous native functions cannot call Sand code, so they keep the existing restart rule.
 
-Synchronous natives keep the restart rule. They do not call Sand code, so a
-restart from the start stays correct for them.
+## Part 5: Sketch of an async codec walker
 
-## Part 5: The shape of a codec walker
-
-This sketch shows the shape of the code. It is not a tested API.
+The untested sketch below illustrates a recursive async encoder:
 
 ```rust
-async fn walk(cx: &NativeCx, value: Rooted, schema: &Schema, out: &mut String) -> Result<(), Ctl> {
+async fn encode_value(
+    context: &NativeContext,
+    value: RootedValue,
+    schema: &Schema,
+    output: &mut String,
+) -> Result<(), Ctl> {
     match schema {
-        Schema::HandWritten(encode) => {
-            cx.call(*encode, [value]).await?;
+        Schema::Custom(encode_fn) => {
+            context.call(*encode_fn, [value]).await?;
         }
         Schema::Struct(fields) => {
-            for (i, field_schema) in fields.iter().enumerate() {
-                let field = cx.with_vm(|vm| cx.root(vm.field(value, i)));
-                Box::pin(walk(cx, field, field_schema, out)).await?;
+            for (field_index, field_schema) in fields.iter().enumerate() {
+                let field_value =
+                    context.with_vm(|vm| context.root(vm.field(value, field_index)));
+                Box::pin(encode_value(context, field_value, field_schema, output)).await?;
             }
         }
         _ => {}
@@ -258,54 +161,27 @@ async fn walk(cx: &NativeCx, value: Rooted, schema: &Schema, out: &mut String) -
 }
 ```
 
-The walker keeps its state as normal Rust code, in local variables and
-recursion. The compiler writes the code that saves and restores that state at
-each `await`.
+The walker keeps its position in local variables and recursive calls. The Rust compiler generates the state machine that saves and restores local variables across each `await`.
 
-## Costs
+## Estimated costs
 
-Each cost in this section is an estimate. Nobody has measured it.
+Every cost below is an unmeasured estimate:
 
-- **One heap allocation for each nesting level.** Rust requires `Box::pin` for
-  each recursive `async` call. The walker can avoid this cost for subtrees
-  without hand-written parts. The schema tells the walker where those subtrees
-  are. For each such subtree, the walker can call a plain recursive function
-  that has no `await`. That function keeps its state in local variables, so
-  these subtrees would also avoid the slowdown of an explicit stack.
-- **One lock operation for each VM access.** The lock is uncontended, but it
-  is not free. A walker should do many reads inside one `with_vm`.
-- **Two lock operations for each batch of polls.** The scheduler releases the
-  lock before it polls, and takes it again after. `IoTable::poll_ready`
-  already polls woken futures in a batch, so one release can serve many
-  futures. An I/O wait costs far more than these lock operations.
+- **Heap allocation per recursive async call.** Rust requires `Box::pin` for recursive `async` calls. The walker can skip `Box::pin` on subtrees without custom codecs because the type schema marks those subtrees in advance. For purely derived subtrees, the walker can call a synchronous recursive function that keeps state in local variables instead of an explicit heap stack.
+- **Mutex operations for VM access.** Even without contention, locking and unlocking `Mutex<VmState>` executes atomic instructions. A walker should batch multiple heap reads inside each `context.with_vm` closure.
+- **Two mutex operations per poll batch.** The scheduler releases the mutex before polling ready futures and acquires it again afterward. `IoTable::poll_ready` already polls ready futures in batches, so a single release covers the whole batch. Host I/O latency dwarfs those two atomic operations.
 
 ## Open questions
 
-- **Raw handles across an `await`.** A raw `VmValue` is `Send` today. A future
-  could keep one across an `await`, and the compiler would not stop it. Async
-  natives have the same gap today.
-- **The scheduler change.** On `main`, the interpreter is a method of `Vm`,
-  and it holds `&mut Vm` for a whole slice of execution. Part 2 requires the
-  scheduler to release the VM before each poll. The interpreter already returns
-  to the scheduler for async natives (`FiberStop::Async` in
-  `crates/sandlang/src/vm/interp.rs`). The size of the change to move the VM
-  state behind a lock is not known.
-- **The host API.** `Later::new` and its finisher closure go away. Each
-  async native in the standard library and in host modules must move to the
-  new future type.
-- **Changes to inputs during a callback.** A Sand callback can change a value
-  that the native reads, such as a list. The research report lists two
-  choices: fail with an error, as CPython does, or work on a snapshot. Each
-  native that calls Sand must choose one.
-- **Unwinding.** If the VM cancels a task, or `defer` code runs, the VM must
-  drop the futures of that task in the correct order.
+- **Preventing raw `VmValue` across awaits.** `VmValue` implements `Send` on `main`, so the Rust compiler allows a future to keep an unrooted `VmValue` across an `await`. Current async native functions have the same gap.
+- **Scope of the scheduler refactor.** On `main`, the interpreter is a `&mut Vm` method that borrows the whole VM across an execution slice. To suspend a task, the interpreter returns `FiberStop::Async` from `crates/sandlang/src/vm/interp.rs`. Moving VM state into `Arc<Mutex<VmState>>` so the scheduler can release it before polling requires an unmeasured refactor.
+- **Migrating existing async native functions.** Replacing `Suspension` removes `Later::new` and its finisher closure. Every async native function in the standard library and host modules must migrate to the new future API.
+- **Concurrent mutation during callbacks.** A custom Sand callback can mutate a collection while a native walker iterates over it. Following the callback study, each native caller must either fail on concurrent mutation like CPython or read from a snapshot.
+- **Drop order on cancellation.** If the VM cancels a task or unwinds through `defer` blocks, it must drop interleaved native futures and Sand frames in reverse call order.
 
-## First measurement
+## First prototype and benchmark
 
-Build the smallest version: one native that awaits one Sand call, with Parts 1
-to 4. Then measure two cases:
+To test this design, build a minimal prototype of Parts 1 through 4 with a single async native function that awaits a Sand call. Then measure two benchmarks:
 
-- the cost of one hand-written field in a codec walk. The baseline is the
-  roughly 270 ns of the continuation walker on the codec branch;
-- the cost of a walk without hand-written parts. The baseline is the recursive
-  native decoder on `main`.
+- **Custom field overhead.** Time a single custom field inside a codec walk and compare it against the roughly 270 ns continuation hop on `origin/encode-decode-traits`.
+- **Derived walk speed.** Time a walk over purely derived types and compare it against the recursive native decoder on `main`.
