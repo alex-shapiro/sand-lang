@@ -177,6 +177,13 @@ impl StdinChannel {
         self.changed.notify_waiters();
     }
 
+    /// Records whether the engine is idle. Does not wake the read, whose
+    /// readiness depends only on the input.
+    fn set_engine_idle(&self, idle: bool) {
+        self.state.lock().engine_idle = idle;
+        self.changed.notify_waiters();
+    }
+
     async fn wait_until<T>(&self, predicate: impl Fn(&StdinChannelState) -> Option<T>) -> T {
         loop {
             let changed = self.changed.notified();
@@ -197,14 +204,14 @@ pub(crate) struct StdinIdleGuard {
 
 impl StdinIdleGuard {
     pub(crate) fn new(channel: Arc<StdinChannel>) -> StdinIdleGuard {
-        channel.change(|state| state.engine_idle = true);
+        channel.set_engine_idle(true);
         StdinIdleGuard { channel }
     }
 }
 
 impl Drop for StdinIdleGuard {
     fn drop(&mut self) {
-        self.channel.change(|state| state.engine_idle = false);
+        self.channel.set_engine_idle(false);
     }
 }
 
