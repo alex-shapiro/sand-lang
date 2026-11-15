@@ -5,7 +5,7 @@
 //! policy checks every resolved IP address, and bound every wait on a peer
 //! with a timeout.
 
-use super::stream::{self, IoFailure, Suspended, line_read, read_line, read_to_end_reserved, read_upto, suspend};
+use super::stream::{self, IoFailure, Suspended, line_read, read_line, read_to_end_reserved, read_upto, suspend, suspend_decoded};
 use crate::check::ModKind;
 use crate::native::convert::{HostError, IntoVmValue};
 use crate::native::ty::VmVal;
@@ -71,7 +71,8 @@ pub(crate) trait Resource: crate::native::ObjectType + IntoVmValue {
 /// counted by `slot` from the start (a socket being connected or accepted
 /// is open already).
 fn suspend_resource<T: Resource>(slot: ResourceSlot, fut: impl Future<Output = Result<T, IoFailure>> + Send + 'static) -> Suspended<T> {
-    suspend(WaitKind::Io, fut, move |_, mut obj: T| {
+    suspend(WaitKind::Io, async move {
+        let mut obj = fut.await?;
         obj.attach(slot);
         Ok(obj)
     })
@@ -511,12 +512,9 @@ fn conn_read(vm: &mut Vm, c: VmVal<Conn>, max: i64) -> Suspended<Vec<u8>> {
         WaitKind::Io,
         h.closed.guard(async move {
             let data = read_upto(&mut *h.reader.lock().await, max).await?;
-            Ok((data, res))
-        }),
-        |_, (data, res)| {
             drop(res);
             Ok(data)
-        },
+        }),
     )
 }
 
@@ -524,16 +522,14 @@ fn conn_read_line(vm: &mut Vm, c: VmVal<Conn>) -> Suspended<Option<String>> {
     let h = conn_handle(vm, c)?;
     // The line may grow until it exhausts the memory limit.
     let mut res = vm.io_reservation();
-    suspend(
+    suspend_decoded(
         WaitKind::Io,
         h.closed.guard(async move {
             let line = read_line(&mut *h.reader.lock().await, &mut res).await?;
-            Ok((line, res))
-        }),
-        |vm, (line, res)| {
             drop(res);
-            line_read(vm, line, "line is not valid UTF-8")
-        },
+            Ok(line)
+        }),
+        |vm, line| line_read(vm, line, "line is not valid UTF-8"),
     )
 }
 
@@ -548,12 +544,9 @@ fn conn_read_all(vm: &mut Vm, c: VmVal<Conn>) -> Suspended<Vec<u8>> {
             let mut reader = h.reader.lock().await;
             let mut data = Vec::new();
             read_to_end_reserved(&mut *reader, &mut data, &mut res, usize::MAX).await?;
-            Ok((data, res))
-        }),
-        |_, (data, res)| {
             drop(res);
             Ok(data)
-        },
+        }),
     )
 }
 
@@ -579,7 +572,6 @@ pub(crate) fn write_bytes(vm: &mut Vm, c: VmVal<Conn>, data: Vec<u8>, res: Reser
             drop(res);
             Ok(())
         }),
-        |_, ()| Ok(()),
     )
 }
 

@@ -3,11 +3,11 @@
 use super::stream::{self, IoFailure, Suspended, bytes_read, line_read};
 use super::uri;
 use crate::native::convert::{HostError, IntoVmValue};
-use crate::native::ty::VmVal;
+use crate::native::ty::{SandType, Type, VmVal};
 use crate::native::{NativeModule, NativeObject};
 use crate::vm::WaitKind;
 use crate::vm::iomem::Reservation;
-use crate::vm::value::to_usize_saturating;
+use crate::vm::value::{VmValue, to_usize_saturating};
 use crate::vm::{Fail, Vm};
 use std::future::Future;
 use std::pin::Pin;
@@ -230,16 +230,26 @@ pub(crate) struct ResponseStream {
     pub url: String,
 }
 
-/// The response from `url` with `status`, `headers`, and a body read by `reader`.
-pub(crate) fn response(
-    vm: &mut Vm,
-    url: String,
-    status: i64,
-    headers: Vec<(String, String)>,
-    reader: BodyReader,
-) -> Result<ResponseStream, Fail> {
-    let body = vm.new_object(Body::new(reader))?;
-    Ok(ResponseStream { status, headers, body, url })
+/// A response from `url` whose body `reader` reads. It becomes an
+/// `http.Stream` when the native call returns.
+pub(crate) struct NewResponse {
+    pub url: String,
+    pub status: i64,
+    pub headers: Vec<(String, String)>,
+    pub reader: BodyReader,
+}
+
+impl SandType for NewResponse {
+    fn sand_type() -> Type {
+        ResponseStream::sand_type()
+    }
+}
+
+impl IntoVmValue for NewResponse {
+    fn into_vm_value(self, vm: &mut Vm) -> Result<VmValue, Fail> {
+        let body = vm.new_object(Body::new(self.reader))?;
+        ResponseStream { status: self.status, headers: self.headers, body, url: self.url }.into_vm_value(vm)
+    }
 }
 
 // ----------------------------------------------------------------------
@@ -465,7 +475,7 @@ fn read_body<R: IntoVmValue + 'static>(
     vm: &mut Vm,
     body: VmVal<Body>,
     what: BodyRead,
-    convert: fn(&mut Vm, Option<Vec<u8>>) -> stream::PostIoResult<R>,
+    decode: fn(&Vm, Option<Vec<u8>>) -> stream::Decoded<R>,
 ) -> Suspended<R> {
     let body = body.get(&vm.heap)?;
     let Some(reader) = body.reader.clone() else { return Err(HostError::new("closed", "body closed")) };
@@ -502,12 +512,10 @@ fn read_body<R: IntoVmValue + 'static>(
             })
             .await?
         };
-        Ok((data, res))
-    };
-    stream::suspend(WaitKind::Io, op, move |vm, (data, res)| {
         drop(res);
-        convert(vm, data)
-    })
+        Ok(data)
+    };
+    stream::suspend_decoded(WaitKind::Io, op, decode)
 }
 
 fn body_natives(m: &mut NativeModule) {

@@ -10,16 +10,16 @@ use super::http_common::*;
 use super::net::{self, ConnHandle, Resource, TlsSettings};
 use super::stream::{self, IoFailure, Suspended, read_line_bytes, strip_eol, suspend};
 use crate::check::ModKind;
-use crate::native::convert::HostError;
+use crate::native::convert::{HostError, IntoVmValue};
 use crate::native::func::Later;
-use crate::native::ty::VmVal;
+use crate::native::ty::{SandType, Type, VmVal};
 use crate::native::{NativeModule, NativeObject};
 use crate::network::{Network, Stream};
 use crate::platform::{Clock, Instant};
 use crate::policy::Policy;
-use crate::vm::Vm;
-use crate::vm::WaitKind;
 use crate::vm::iomem::{Reservation, ResourceSlot};
+use crate::vm::value::VmValue;
+use crate::vm::{Fail, Vm, WaitKind};
 use jiff::SignedDuration;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
@@ -602,7 +602,7 @@ fn send(
     headers: VmVal<Vec<(String, String)>>,
     body: VmVal<Vec<u8>>,
     timeout: SignedDuration,
-) -> Suspended<ResponseStream> {
+) -> Suspended<NewResponse> {
     let mut req = prepare_request(vm, method, url, headers)?;
     // The request is held outside the heap while it is sent.
     let mut res = vm.reserve_io(body.bytes(&vm.heap).len())?;
@@ -646,44 +646,39 @@ fn send(
     let (policy, network) = (vm.host.policy.clone(), vm.host.network.clone());
     let (tls, clock) = (vm.host.tls.clone(), vm.host.clock.clone());
     let body_clock = clock.clone();
-    suspend(
-        WaitKind::Io,
-        async move {
-            let mut head_res = res.sibling();
-            let run = async {
-                let mut slot = slot;
-                if let Some(conn) = idle {
-                    match exchange(conn, &request, head_only, &mut head_res).await {
-                        Ok(r) => return Ok(r),
-                        Err((_, Some(s))) if replayable => slot = Some(s),
-                        Err((e, _)) => return Err(e),
-                    }
+    suspend(WaitKind::Io, async move {
+        let mut head_res = res.sibling();
+        let run = async {
+            let mut slot = slot;
+            if let Some(conn) = idle {
+                match exchange(conn, &request, head_only, &mut head_res).await {
+                    Ok(r) => return Ok(r),
+                    Err((_, Some(s))) if replayable => slot = Some(s),
+                    Err((e, _)) => return Err(e),
                 }
-                let conn = connect(&policy, &*network, &tls, &method, &url, slot.expect("a slot for a new connection")).await?;
-                exchange(conn, &request, head_only, &mut head_res).await.map_err(|(e, _)| e)
-            };
-            let r = match crate::platform::timeout(&*clock, timeout, run).await {
-                Some(r) => r?,
-                None => return Err(IoFailure::new("timeout", format!("request to {text} timed out"))),
-            };
-            drop(res);
-            Ok((r, head_res))
-        },
-        move |vm, ((conn, head), head_res): ((ClientConn, ResponseHead), Reservation)| {
-            drop(head_res);
-            let ResponseHead { status, headers, framing, persists } = head;
-            let reuse = (persists && !close).then(|| Arc::downgrade(&pool));
-            let source = Source::Owned { conn: Some(conn), reuse };
-            let mut framed = Framed { source, framing, timeout, clock: body_clock, continue_first: false };
-            let reader = if framing == Framing::Done {
-                framed.end(true);
-                BodyReader::empty(max_body)
-            } else {
-                BodyReader::new(Box::new(framed), max_body, None)
-            };
-            Ok(response(vm, url_text, status, headers, reader)?)
-        },
-    )
+            }
+            let conn = connect(&policy, &*network, &tls, &method, &url, slot.expect("a slot for a new connection")).await?;
+            exchange(conn, &request, head_only, &mut head_res).await.map_err(|(e, _)| e)
+        };
+        let r = match crate::platform::timeout(&*clock, timeout, run).await {
+            Some(r) => r?,
+            None => return Err(IoFailure::new("timeout", format!("request to {text} timed out"))),
+        };
+        drop(res);
+        let (conn, head) = r;
+        drop(head_res);
+        let ResponseHead { status, headers, framing, persists } = head;
+        let reuse = (persists && !close).then(|| Arc::downgrade(&pool));
+        let source = Source::Owned { conn: Some(conn), reuse };
+        let mut framed = Framed { source, framing, timeout, clock: body_clock, continue_first: false };
+        let reader = if framing == Framing::Done {
+            framed.end(true);
+            BodyReader::empty(max_body)
+        } else {
+            BodyReader::new(Box::new(framed), max_body, None)
+        };
+        Ok(NewResponse { url: url_text, status, headers, reader })
+    })
 }
 
 /// A request's head, with a `Connection: close` header if `close`.
@@ -753,7 +748,7 @@ fn upload(
     url: VmVal<String>,
     headers: VmVal<Vec<(String, String)>>,
     timeout: SignedDuration,
-) -> Suspended<Upload> {
+) -> Suspended<NewUpload> {
     let mut req = prepare_request(vm, method, url, headers)?;
     let length = given_length(&req.headers).map_err(|e| HostError::new("invalid", e))?;
     req.check_policy(vm)?;
@@ -772,26 +767,43 @@ fn upload(
     let open = async move {
         let (stream, peer) = net::connect_checked(&policy, &*network, &url.capability(&method)).await?;
         if url.scheme != "https" {
-            return Ok(net::Conn::from_stream(stream, peer));
+            return Ok::<_, IoFailure>(net::Conn::from_stream(stream, peer));
         }
         let (r, w) = tokio::io::split(net::tls::connect(&tls, &url.host, stream).await?);
         Ok(net::Conn::new(Box::new(r), Box::new(w), peer.into()))
     };
-    suspend(
-        WaitKind::Io,
-        async move {
-            match crate::platform::timeout(&*clock, timeout, open).await {
-                Some(r) => r.map(|c| (c, slot)),
-                None => Err(IoFailure::new("timeout", format!("connecting to {text} timed out"))),
-            }
-        },
-        move |vm, (mut conn, slot): (net::Conn, ResourceSlot)| {
-            conn.attach(slot);
-            let conn = vm.new_object(conn)?;
-            let body = vm.new_object(Outgoing { head: Some(head.into_bytes()), delimit, left: length, finished: false, after: None })?;
-            Ok(Upload { url: url_text, conn, body, head_only, timeout: sand_timeout })
-        },
-    )
+    suspend(WaitKind::Io, async move {
+        let mut conn = match crate::platform::timeout(&*clock, timeout, open).await {
+            Some(r) => r?,
+            None => return Err(IoFailure::new("timeout", format!("connecting to {text} timed out"))),
+        };
+        conn.attach(slot);
+        let body = Outgoing { head: Some(head.into_bytes()), delimit, left: length, finished: false, after: None };
+        Ok(NewUpload { url: url_text, conn, body, head_only, timeout: sand_timeout })
+    })
+}
+
+/// A connection opened for a streamed request. It becomes an `http.Upload`
+/// when the native call returns.
+struct NewUpload {
+    url: String,
+    conn: net::Conn,
+    body: Outgoing,
+    head_only: bool,
+    timeout: SignedDuration,
+}
+
+impl SandType for NewUpload {
+    fn sand_type() -> Type {
+        Upload::sand_type()
+    }
+}
+
+impl IntoVmValue for NewUpload {
+    fn into_vm_value(self, vm: &mut Vm) -> Result<VmValue, Fail> {
+        let (conn, body) = (vm.new_object(self.conn)?, vm.new_object(self.body)?);
+        Upload { url: self.url, conn, body, head_only: self.head_only, timeout: self.timeout }.into_vm_value(vm)
+    }
 }
 
 /// `write_body(conn, body, data, last)`: writes `data` to the body (an
@@ -846,7 +858,7 @@ fn write_body(vm: &mut Vm, conn: VmVal<net::Conn>, body: VmVal<Outgoing>, data: 
 
 /// `read_response(upload)`: reads the response to an upload, whose body is
 /// read from the upload's connection.
-fn read_response(vm: &mut Vm, upload: Upload) -> Suspended<ResponseStream> {
+fn read_response(vm: &mut Vm, upload: Upload) -> Suspended<NewResponse> {
     let Upload { url, conn, head_only, timeout, .. } = upload;
     let h = net::conn_handle(vm, conn)?;
     let timeout = stream::timeout(timeout);
@@ -864,19 +876,17 @@ fn read_response(vm: &mut Vm, upload: Upload) -> Suspended<ResponseStream> {
     suspend(
         WaitKind::Io,
         h.closed.clone().guard(async move {
-            match crate::platform::timeout(&*clock, timeout, read).await {
-                Some(r) => r,
-                None => Err(IoFailure::new("timeout", "timed out waiting for the response")),
-            }
-        }),
-        move |vm, head: ResponseHead| {
+            let head = match crate::platform::timeout(&*clock, timeout, read).await {
+                Some(r) => r?,
+                None => return Err(IoFailure::new("timeout", "timed out waiting for the response")),
+            };
             let reader = if head.framing == Framing::Done {
                 BodyReader::empty(max_body)
             } else {
                 BodyReader::new(Box::new(Framed::on_conn(&h, head.framing, timeout, body_clock, false)), max_body, None)
             };
-            Ok(response(vm, url, head.status, head.headers, reader)?)
-        },
+            Ok(NewResponse { url, status: head.status, headers: head.headers, reader })
+        }),
     )
 }
 

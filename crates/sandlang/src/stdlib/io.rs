@@ -99,11 +99,7 @@ enum Read {
     Upto(usize),
 }
 
-fn read_stdin<R: IntoVmValue + 'static>(
-    vm: &mut Vm,
-    what: Read,
-    convert: fn(&mut Vm, Option<Vec<u8>>) -> stream::PostIoResult<R>,
-) -> Suspended<R> {
+fn read_stdin<R: IntoVmValue + 'static>(vm: &mut Vm, what: Read, decode: fn(&Vm, Option<Vec<u8>>) -> stream::Decoded<R>) -> Suspended<R> {
     if !vm.permit(&Capability::Stdin)? {
         return Err(HostError::new("permission_denied", "permission denied: read standard input"));
     }
@@ -112,7 +108,7 @@ fn read_stdin<R: IntoVmValue + 'static>(
     if what == Read::Line
         && let Some(data) = buffered_line(vm)
     {
-        return Ok(Later::ready(convert(vm, data)));
+        return Ok(Later::ready(decode(vm, data)));
     }
     let stdin = vm.host.stdin.clone();
     // The input is buffered outside the heap until it is complete.
@@ -123,16 +119,14 @@ fn read_stdin<R: IntoVmValue + 'static>(
     let read = async move {
         let data =
             read_input(stdin.as_deref(), what, &mut res).await.map_err(|e| IoFailure::new(e.kind, format!("stdin: {}", e.message)))?;
-        Ok((data, res))
+        drop(res);
+        Ok(data)
     };
     let wait_kind = vm.host.stdin.as_ref().map_or(WaitKind::Io, |channel| channel.wait_kind);
-    stream::suspend(wait_kind, read, move |vm, (data, res)| {
-        drop(res);
-        convert(vm, data)
-    })
+    stream::suspend_decoded(wait_kind, read, decode)
 }
 
-fn input_line(vm: &mut Vm, line: Option<Vec<u8>>) -> stream::PostIoResult<Option<String>> {
+fn input_line(vm: &Vm, line: Option<Vec<u8>>) -> stream::Decoded<Option<String>> {
     line_read(vm, line, "stdin: input is not valid UTF-8")
 }
 

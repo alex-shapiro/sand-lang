@@ -7,12 +7,13 @@ use super::http_common::*;
 use super::net::{self, Detached};
 use super::stream::IoFailure;
 use super::stream::{self, Suspended};
-use crate::native::convert::HostError;
-use crate::native::ty::VmVal;
+use crate::native::convert::{HostError, IntoVmValue};
+use crate::native::ty::{SandType, Type, VmVal};
 use crate::native::{NativeModule, NativeObject};
 use crate::network::{Listener, NetworkFuture, Stream};
 use crate::vm::WaitKind;
 use crate::vm::iomem::{IoMemory, Reservation, ResourceSlot};
+use crate::vm::value::VmValue;
 use crate::vm::{Fail, Vm};
 use std::future::Future;
 use std::pin::Pin;
@@ -199,7 +200,7 @@ struct Request {
 
 /// `Server.accept(server)`: accepts connections and reads request heads until
 /// a complete request is available.
-fn accept_request(vm: &mut Vm, server: VmVal<Server>) -> Suspended<Request> {
+fn accept_request(vm: &mut Vm, server: VmVal<Server>) -> Suspended<AcceptedRequest> {
     let srv = server.get(&vm.heap)?;
     let Some(socket) = srv.listener.clone() else { return Err(HostError::new("closed", "server closed")) };
     let closed = net::CloseSignal::of(&srv.closed);
@@ -268,8 +269,8 @@ fn accept_request(vm: &mut Vm, server: VmVal<Server>) -> Suspended<Request> {
     };
     let max_body = vm.host.limits.max_http_body;
     let clock = vm.host.clock.clone();
-    stream::suspend(WaitKind::Io, closed.guard(serve), move |vm, received: Received| {
-        let Received { head: (method, path, query, headers), framing, expects_continue, persists, http10, conn, res } = received;
+    let accepted = async move {
+        let Received { head: (method, path, query, headers), framing, expects_continue, persists, http10, conn, res } = serve.await?;
         drop(res);
         let conn = conn.into_conn();
         let body = if framing == Framing::Done {
@@ -278,10 +279,36 @@ fn accept_request(vm: &mut Vm, server: VmVal<Server>) -> Suspended<Request> {
             let handle = conn.handle().expect("a new connection is open");
             BodyReader::new(Box::new(Framed::on_conn(&handle, framing, BODY_TIMEOUT, clock, expects_continue)), max_body, None)
         };
-        let exchange = vm.new_object(Exchange { persists, http10, server: weak })?;
-        let (body, conn) = (vm.new_object(Body::new(body))?, vm.new_object(conn)?);
-        Ok(Request { method, path, query, headers, body, conn, exchange })
-    })
+        let exchange = Exchange { persists, http10, server: weak };
+        Ok(AcceptedRequest { method, path, query, headers, body: Body::new(body), conn, exchange })
+    };
+    stream::suspend(WaitKind::Io, closed.guard(accepted))
+}
+
+/// A request that the server read. It becomes an `http.Request` when the
+/// native call returns.
+struct AcceptedRequest {
+    method: String,
+    path: String,
+    query: String,
+    headers: Vec<(String, String)>,
+    body: Body,
+    conn: net::Conn,
+    exchange: Exchange,
+}
+
+impl SandType for AcceptedRequest {
+    fn sand_type() -> Type {
+        Request::sand_type()
+    }
+}
+
+impl IntoVmValue for AcceptedRequest {
+    fn into_vm_value(self, vm: &mut Vm) -> Result<VmValue, Fail> {
+        let exchange = vm.new_object(self.exchange)?;
+        let (body, conn) = (vm.new_object(self.body)?, vm.new_object(self.conn)?);
+        Request { method: self.method, path: self.path, query: self.query, headers: self.headers, body, conn, exchange }.into_vm_value(vm)
+    }
 }
 
 /// A request's head, read by the server: method, path, query, headers.
@@ -465,24 +492,20 @@ fn after(vm: &Vm, exchange: VmVal<Exchange>, body: VmVal<Body>, delimit: Delimit
 pub(super) fn end_response(vm: &mut Vm, c: VmVal<net::Conn>, data: Vec<u8>, res: Reservation, after: After) -> Suspended<()> {
     let conn = net::detach(vm, c)?;
     let mem = vm.heap.io_memory.clone();
-    stream::suspend(
-        WaitKind::Io,
-        async move {
-            let written = async {
-                let mut w = conn.writer.lock().await;
-                w.write_all(&data).await?;
-                w.flush().await
-            };
-            let r = written.await;
-            drop(res);
-            match after.server.upgrade() {
-                Some(server) if after.persists && r.is_ok() => server.hand_back(conn, mem),
-                _ => conn.close(),
-            }
-            Ok(r?)
-        },
-        |_, ()| Ok(()),
-    )
+    stream::suspend(WaitKind::Io, async move {
+        let written = async {
+            let mut w = conn.writer.lock().await;
+            w.write_all(&data).await?;
+            w.flush().await
+        };
+        let r = written.await;
+        drop(res);
+        match after.server.upgrade() {
+            Some(server) if after.persists && r.is_ok() => server.hand_back(conn, mem),
+            _ => conn.close(),
+        }
+        Ok(r?)
+    })
 }
 
 /// A response's status and headers.
