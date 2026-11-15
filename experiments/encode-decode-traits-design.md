@@ -400,7 +400,7 @@ The decode source has a method for each request of the walker:
 - Enum values: read a variant name, then its payload.
 - Options: read `None`, or begin `Some`.
 - Native value types: read the text of a value.
-- Any value: read the next value in the form that the input itself describes. The `Decode` implementation of `Json` uses this request.
+- Next kind: report the kind of the next value, as the input describes it, such as `int`, list, or map. A reader of untyped data, such as the `Decode` implementation of `Json`, uses this request to choose its next read.
 - Skip: skip the next value.
 - Error paths: format the path of the current position, such as `$.items[2].price`.
 
@@ -410,6 +410,36 @@ This design has two decode sources:
 - **The `Value` source** reads a `Value`. It accepts only the exact form of each kind. For example, it accepts `Value::Bytes` for `bytes`, and rejects a Base64 `Value::Str`.
 
 The JSON rules therefore stay in the JSON sink and the JSON source. The walkers know only the structure of Sand values.
+
+### Native implementations of `Encode` and `Decode`
+
+A native module can implement `Encode` and `Decode` for its own types with Rust method bodies. The checker already accepts an `impl` block for any type definition, including an opaque native object type (`impl_key`, `src/check/traits.rs:121-127`). The orphan rule places the `impl` block in the module that declares the type. A host module can declare it in its Sand source, as a test on `main` does for `Close`: `impl Close for Conn { native fn close(self) }` (`tests/api.rs:3964`).
+
+The Rust function of a native `encode` method receives the `Encoder` argument as a handle. Through the handle, the function calls the [encode sink interface](#encode-sink-interface) on the sink of the current walk. The Rust function of a native `decode` method receives the `Decoder` argument as a handle, and calls the [decode source interface](#decode-source-interface) through it. serde gives the same access: a `Serialize` implementation calls the methods of its `Serializer` (`serde_core` 1.0.229, `src/ser/mod.rs:247-259`).
+
+For example, a host module encodes a connection as its peer address:
+
+```rust
+module.source("impl Encode for Conn { native fn encode(self, encoder: Encoder) -> Result<()> }");
+module.function("Conn.encode", |vm: &mut Vm, conn: VmVal<Conn>, encoder: VmVal<Encoder>| -> Result<(), HostError> {
+    let peer = conn.get(&vm.heap)?.peer.clone();
+    encoder.sink(vm)?.write_str(&peer)
+});
+```
+
+The handles add two conveniences, built on the interfaces:
+
+- `write_value` writes a host `Value`. A host can then encode a Rust type through the Rust trait `value::Encode` (`src/value.rs:243-275`).
+- `read_value` reads the next value as a host `Value`, with the "next kind" request.
+
+The rules for native bodies are the rules for Sand bodies. A method writes or reads exactly one value. The same run-time checks apply, and an error from the Rust function becomes the `Err` result of the method. A native body is synchronous, so it cannot run a callback. It therefore writes and reads only data that Rust holds. To encode or decode a Sand value that can have a custom implementation, a method uses a Sand body and calls `encoder.encode(value)` or `decoder.decode()`.
+
+`Json` uses this interface like any other native type, so the `json` module has no private codec path:
+
+- `Json.encode` walks the `Json` tree on the heap and calls the sink methods: unit for `Null`, a list for `Arr`, a map with `str` keys for `Obj`, and each scalar as itself.
+- `Json.decode` calls the "next kind" request, and then the matching typed read, for each value.
+
+Neither method builds an intermediate tree.
 
 ### Decoding a struct that declares `init`
 
@@ -459,7 +489,7 @@ With methods, `Encode` and `Decode` become subject to two existing checker limit
   impl Decode for Json { native fn decode(decoder: Decoder) -> Result<Json> }
   ```
 
-  `Json.encode` writes the whole `Json` tree to the sink of the `Encoder`, in the form of the JSON data model: `Null` as unit, `Arr` as a list, `Obj` as a map with `str` keys, and each scalar as itself. `Json.decode` reads one value with the "any value" request of the source. On `main`, the JSON encoder and the typed decoder special-case `Json` by variant ID (`src/stdlib/json.rs:1100-1103`, `:1556-1558`). This design removes those special cases. serde_json takes the same approach: `serde_json::Value` implements `Serialize` and `Deserialize` (`serde_json` 1.0.154, `src/value/ser.rs:11`, `src/value/de.rs:22`).
+  These methods use the public interface for native implementations. See [Native implementations of `Encode` and `Decode`](#native-implementations-of-encode-and-decode). On `main`, the JSON encoder and the typed decoder special-case `Json` by variant ID (`src/stdlib/json.rs:1100-1103`, `:1556-1558`). This design removes those special cases. serde_json takes the same approach: `serde_json::Value` implements `Serialize` and `Deserialize` (`serde_json` 1.0.154, `src/value/ser.rs:11`, `src/value/de.rs:22`).
 
   This form changes one behavior. On `main`, `Vm::to_value` copies a `Json` value as a `Value::Variant` of `json.Json`. With the `Value` sink, a `Json` value becomes its JSON data model form, such as `Value::Int(3)` for `Json.Int(3)`.
 
