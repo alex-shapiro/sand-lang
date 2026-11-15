@@ -30,9 +30,11 @@ The host cannot rely on engine limits, stability, or control.
       they are not `Send`. However, `IntoVmValue::into_vm_value` and `Vm`
       allocation methods return a raw `VmValue`. `VmValue` is `Send` because the
       heap stores it. The compiler therefore accepts a function that allocates a
-      `VmValue` before a wait and reads it after the wait. After a
-      garbage collection during the wait, the read returns the data of another
-      object without an error. If the collector shrank the heap, the read or the
+      `VmValue` before a wait and reads it after the wait. `NativeContext::value`
+      and `with_vm` return raw values, and every `NativeContext::call` is a
+      wait during which a collection can run, so async walkers hit this
+      easily. After a garbage collection during the wait, the read returns the
+      data of another object without an error. If the collector shrank the heap, the read or the
       next collection causes a panic. The engine reports the panic as an
       internal error. A `panic = "abort"` build stops the process. Options: a
       host value type that is not `Send`, or a generation check on each heap
