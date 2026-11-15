@@ -10,11 +10,12 @@ The compiler passes dictionaries for `Encode` and `Decode` to generic functions,
 
 The design has five goals:
 
-- **Ordinary traits.** `Encode` and `Decode` follow the same rules as every other trait.
-- **Custom encodings for any type.** A user can define how any type that they define is encoded and decoded. This includes concrete and generic types, and types defined in Sand or in Rust. A custom encoding takes effect wherever a value of the type appears, at any depth.
-- **JSON.** A script can encode any encodable value as JSON text, and decode JSON text into any decodable type.
-- **Host `Value` conversion.** A host can convert any encodable Sand value to a `Value`, and convert a `Value` into any decodable Sand type.
-- **`json.Json` as an ordinary type.** `json.Json` is encoded and decoded under the same rules as every other type.
+- `Encode` and `Decode` follow the same rules as every other trait.
+- `Encode` and `Decode` implementations are composable and nestable.
+- A user can define `Encode` and `Decode` for any of their types: concrete and generic types, defined in Sand or in Rust.
+- A script can encode any `Encode` value as JSON text, and decode JSON text into any `Decode` type.
+- A script can encode any `Encode` value as a host `Value`, and decode a host `Value` as a `Decode` type.
+- `json.Json` is encoded and decoded under the same rules as every other type.
 
 ## Terms
 
