@@ -236,7 +236,7 @@ We ran release benchmarks on an Apple M-series machine on 2026-11-15. Each numbe
 
 Compared with `main`:
 
-- The engine matches `main` speed on the `vm` benchmark, the `codec` benchmark, and `bench/run.py`.
+- The engine matches `main` speed on the `vm` benchmark, the `codec` benchmark, and the `bench/run.py` programs.
 - The engine completes an immediately ready async native call in 112 ns, compared with 114 ns on `main`.
 - Across 20,000 concurrent `task.sleep(1ms)` tasks, the engine spends about 1,000 ns per task, down from 2,880 ns on `main`.
 - With 50,000 sleeping tasks, the engine completes 20,000 yielding async calls in 0.36 s, down from 0.77 s on `main`.

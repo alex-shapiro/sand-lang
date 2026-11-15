@@ -2196,7 +2196,8 @@ operations:
 
 Each callback uses two frames toward `max_call_depth`. If a task is cancelled
 during a callback, the engine runs the callee's `defer` blocks, drops the
-native future, and runs the caller's `defer` blocks. The engine charges the
+native future, and runs the caller's `defer` blocks. Rooted values and callback
+results stay alive until the native call returns. The engine charges the
 top-level future and its root table against `max_memory`. Nested boxed futures
 sit outside this memory count. Bound the recursion depth of any async native
 function.

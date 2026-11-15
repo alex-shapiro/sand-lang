@@ -1592,7 +1592,8 @@ impl Vm {
 
     /// Unwinds `fiber` to the innermost frame with a pending cleanup pad.
     ///
-    /// Truncates frames and drops async native calls above that frame. Sets
+    /// Truncates frames and drops the async native calls of that frame and the
+    /// frames above it. Sets
     /// that frame's instruction pointer to its pad. Returns `false` if every
     /// frame lacks a pending pad. Pass `in_call = true` if the top frame
     /// stopped inside a call.

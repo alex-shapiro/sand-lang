@@ -649,7 +649,7 @@ pub(crate) async fn run_main(shared: &SharedVm, proto: u32) -> Result<VmValue, R
 }
 
 /// Cancels all remaining tasks after `run_main`. Drives their pending `defer`
-/// blocks until every task finishes unwinding or blocks on host I/O.
+/// blocks until every task finishes unwinding or blocks.
 pub(crate) async fn end_tasks(shared: &SharedVm) -> Result<(), RunEnding> {
     {
         let mut vm = shared.lock();
@@ -667,8 +667,8 @@ pub(crate) async fn end_tasks(shared: &SharedVm) -> Result<(), RunEnding> {
 }
 
 /// Runs ready tasks and awaits host events until the `until` policy stops.
-/// Releases the VM lock only while polling async native calls or awaiting host
-/// events. If the caller drops this future at an `.await` point, `Vm` retains
+/// Releases the VM lock only while polling async native calls or while it
+/// awaits. If the caller drops this future at an `.await` point, `Vm` retains
 /// all tasks in its scheduler tables.
 pub(crate) async fn drive<U: DriveUntil>(shared: &SharedVm, until: U) -> Result<U::Stop, RunEnding> {
     let mut timer = RunTimer::start(shared.lock().host.clock.clone());
