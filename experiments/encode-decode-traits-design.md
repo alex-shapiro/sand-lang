@@ -417,13 +417,16 @@ A native module can implement `Encode` and `Decode` for its own types with Rust 
 
 The Rust function of a native `encode` method receives the `Encoder` argument as a handle. Through the handle, the function calls the [encode sink interface](#encode-sink-interface) on the sink of the current walk. The Rust function of a native `decode` method receives the `Decoder` argument as a handle, and calls the [decode source interface](#decode-source-interface) through it. serde gives the same access: a `Serialize` implementation calls the methods of its `Serializer` (`serde_core` 1.0.229, `src/ser/mod.rs:247-259`).
 
-For example, a host module encodes a connection as its peer address:
+For example, a host module stores a dense matrix as a native object for speed, and encodes it as a struct:
 
 ```rust
-module.source("impl Encode for Conn { native fn encode(self, encoder: Encoder) -> Result<()> }");
-module.function("Conn.encode", |vm: &mut Vm, conn: VmVal<Conn>, encoder: VmVal<Encoder>| -> Result<(), HostError> {
-    let peer = conn.get(&vm.heap)?.peer.clone();
-    encoder.sink(vm)?.write_str(&peer)
+module.source("impl Encode for Matrix { native fn encode(self, encoder: Encoder) -> Result<()> }");
+module.function("Matrix.encode", |vm: &mut Vm, matrix: VmVal<Matrix>, encoder: VmVal<Encoder>| -> Result<(), HostError> {
+    let m = matrix.get(&vm.heap)?;
+    let values = m.values.iter().map(|&x| Value::Float(x)).collect();
+    let fields = [("rows", Value::Int(m.rows)), ("cols", Value::Int(m.cols)), ("values", Value::List(values))];
+    let value = Value::Struct(StructValue::new("linalg.Matrix", fields));
+    encoder.sink(vm)?.write_value(&value)
 });
 ```
 
