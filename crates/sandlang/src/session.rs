@@ -296,7 +296,7 @@ impl Session {
             state.recover();
             {
                 let vm = state.vm.lock();
-                !vm.ready.is_empty() || !vm.io.is_empty()
+                !vm.ready.is_empty() || vm.host_wait_kind().is_some()
             }
         });
         let output = if runnable {

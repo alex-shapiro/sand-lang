@@ -586,7 +586,7 @@ pub struct Vm {
     pub main_fiber: u32,
     pub live_tasks: usize,
     pub host: Host,
-    pub io: sched::IoTable,
+    pub wakers: sched::FiberWakers,
     pub gen_counter: u64,
     /// Fuel accounting (see `meter`).
     pub meter: Meter,
@@ -683,7 +683,7 @@ impl Vm {
         let consts = Vec::with_capacity(prog.consts.len());
         let globals = vec![VmValue::Uninit; prog.nglobals];
         let meter = Meter::new(host.limits.max_instructions, host.interrupt.flag.clone(), host.clock.clone());
-        let io = sched::IoTable::with_shared(host.interrupt.io.clone());
+        let wakers = sched::FiberWakers::new(host.interrupt.io.clone());
         let mut vm = Vm {
             prog,
             natives,
@@ -698,7 +698,7 @@ impl Vm {
             main_fiber: 0,
             live_tasks: 0,
             host,
-            io,
+            wakers,
             gen_counter: 1,
             meter,
             deadline: None,
@@ -767,7 +767,6 @@ impl Vm {
         self.fibers.clear();
         self.free_fibers.clear();
         self.ready.clear();
-        self.io.clear();
         self.live_tasks = 0;
         self.host.grants_once.clear();
         self.host.denies_once.clear();

@@ -56,18 +56,15 @@ impl Wake for FiberWaker {
     }
 }
 
-/// The host-event wakers of a VM's fibers, by fiber id, and the number of
-/// fibers that wait on a host event.
-#[derive(Default)]
-pub struct IoTable {
+/// The host-event wakers of a VM's fibers, by fiber id.
+pub struct FiberWakers {
     wakers: Vec<Waker>,
-    waiting: usize,
     pub shared: Arc<IoShared>,
 }
 
-impl IoTable {
-    pub fn with_shared(shared: Arc<IoShared>) -> IoTable {
-        IoTable { shared, ..IoTable::default() }
+impl FiberWakers {
+    pub fn new(shared: Arc<IoShared>) -> FiberWakers {
+        FiberWakers { wakers: Vec::new(), shared }
     }
 
     /// The waker of fiber `fid`.
@@ -77,15 +74,6 @@ impl IoTable {
             self.wakers.push(Waker::from(Arc::new(FiberWaker { fid, shared: self.shared.clone() })));
         }
         self.wakers[fid as usize].clone()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.waiting == 0
-    }
-
-    /// Forgets every wait, after the VM drops all fibers.
-    pub fn clear(&mut self) {
-        self.waiting = 0;
     }
 }
 
@@ -378,9 +366,7 @@ impl Vm {
     /// Drops the native calls of `f` that frames at index `depth` and above
     /// made, innermost first.
     pub(crate) fn drop_natives(&mut self, f: &mut Fiber, depth: usize) {
-        if f.host_wait.take().is_some() {
-            self.io.waiting -= 1;
-        }
+        f.host_wait = None;
         while f.natives.last().is_some_and(|native| native.depth > depth) {
             self.pop_native(f);
         }
@@ -434,11 +420,10 @@ impl Vm {
     /// fiber became ready.
     fn wake_host_waits(&mut self) -> bool {
         let mut woke = false;
-        for fid in std::mem::take(&mut *self.io.shared.ready.lock()) {
+        for fid in std::mem::take(&mut *self.wakers.shared.ready.lock()) {
             if let Some(Some(f)) = self.fibers.get_mut(fid as usize)
                 && f.host_wait.take().is_some()
             {
-                self.io.waiting -= 1;
                 f.state = FiberState::Ready;
                 self.ready.push_back(fid);
                 woke = true;
@@ -447,9 +432,18 @@ impl Vm {
         woke
     }
 
-    /// Returns `true` if any task waits for the user.
-    fn awaits_user(&self) -> bool {
-        self.fibers.iter().flatten().any(|f| f.host_wait == Some(WaitKind::User))
+    /// The kind of host event that tasks wait on: `User` if any task waits
+    /// for the user, or `None` if no task waits on a host event.
+    pub(crate) fn host_wait_kind(&self) -> Option<WaitKind> {
+        let mut kind = None;
+        for f in self.fibers.iter().flatten() {
+            match f.host_wait {
+                Some(WaitKind::User) => return Some(WaitKind::User),
+                Some(WaitKind::Io) => kind = Some(WaitKind::Io),
+                None => {}
+            }
+        }
+        kind
     }
 }
 
@@ -483,7 +477,7 @@ fn poll_native(vm: &mut MutexGuard<'_, Vm>, shared: &SharedVm, f: &mut Fiber) ->
     let mut collected = false;
     loop {
         let fid = vm.current;
-        let waker = vm.io.waker(fid);
+        let waker = vm.wakers.waker(fid);
         let native = f.natives.last_mut().expect("a native call is on top");
         native.call.lock().lent_vm = Some(shared.clone());
         vm.heap.fail_next_check.set(vm.retry_stress && !collected);
@@ -524,7 +518,6 @@ fn poll_native(vm: &mut MutexGuard<'_, Vm>, shared: &SharedVm, f: &mut Fiber) ->
             None => {
                 f.wait_gen = vm.next_gen();
                 f.host_wait = Some(wait_kind);
-                vm.io.waiting += 1;
                 return Ok(Some(FiberStop::Blocked));
             }
             Some(VmRequest::Call { callee, args }) => {
@@ -722,9 +715,9 @@ pub(crate) async fn drive<U: DriveUntil>(shared: &SharedVm, until: U) -> Result<
                 let wait = {
                     let mut vm = shared.lock();
                     vm.flush_stdout();
-                    if vm.io.is_empty() {
+                    let Some(wait_kind) = vm.host_wait_kind() else {
                         return until.stop_on_all_blocked(&vm);
-                    }
+                    };
                     if vm.wake_host_waits() {
                         vm.check_limits(&timer)?;
                         continue;
@@ -735,10 +728,10 @@ pub(crate) async fn drive<U: DriveUntil>(shared: &SharedVm, until: U) -> Result<
                     timer.read();
                     HostEventWait {
                         idle: vm.host.stdin.clone().map(crate::stdin_feed::StdinIdleGuard::new),
-                        pause_start: vm.awaits_user().then_some(timer.now),
+                        pause_start: (wait_kind == WaitKind::User).then_some(timer.now),
                         deadline: vm.deadline,
                         interrupt: vm.host.interrupt.clone(),
-                        io: vm.io.shared.clone(),
+                        io: vm.wakers.shared.clone(),
                     }
                 };
                 let mut sleep =
