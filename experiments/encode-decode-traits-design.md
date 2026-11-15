@@ -1,6 +1,6 @@
 # Design: `Encode` and `Decode` as ordinary traits
 
-**Status: proposal for review.** This document describes planned changes. Nothing in it is implemented. Code citations refer to `main` at commit `8a51c46`, with paths relative to `crates/sandlang/` unless a path says otherwise. [Open questions](#open-questions) lists the choices that the owner must make.
+**Status: proposal for review.** This document describes planned changes. Nothing in it is implemented. Code citations refer to `main` at commit `8a51c46`, with paths relative to `crates/sandlang/` unless a path says otherwise. [Design decisions](#design-decisions) records the choices that the owner made during review. [Open questions](#open-questions) lists the choices that remain.
 
 ## Summary
 
@@ -84,6 +84,8 @@ pub trait Decode {
 }
 ```
 
+A custom `encode` method writes its value through the `Encoder` argument, and returns `Result<()>`. See [Design decisions](#design-decisions).
+
 A native default method works as other default methods do. An `impl` block that omits the method uses the default. A caller passes the dictionary of `Self` to each trait method as its first hidden argument (`src/check/traits.rs:9-11`). The native default reads the shape and the part dictionaries from that dictionary.
 
 ### Independent traits
@@ -150,7 +152,7 @@ The derivation pass on `main` cannot do this, for two reasons. It records only t
 
 The fixed-point driver on `main`, `propagate_to_fixed_point` (`src/check/derive.rs:166-190`), already iterates in this way. Its documented rule is a greatest fixed point, "so that mutually recursive types implement a trait unless a component type refutes it" (`src/check/derive.rs:123-125`). The new pass keeps the driver and replaces its per-type record with a list of requirements, each a type parameter and a trait. The checker runs the pass after it declares the `impl` headers and before it checks the supertraits of each implementation (`check_impl_supertraits`, `src/check/mod.rs:1375-1377`).
 
-**Structs that declare `init`.** A struct that declares `init` derives `Decode` through its `init` parameters, not its fields. Its `Decode` requirements come from the parameter types of `init`. See [Decoding a struct that declares `init`](#decoding-a-struct-that-declares-init). [Open question 12](#open-questions) asks about the visibility and the bounds of `init`.
+**Structs that declare `init`.** A struct that declares `init` derives `Decode` through its `init` parameters, not its fields. Its `Decode` requirements come from the parameter types of `init`. See [Decoding a struct that declares `init`](#decoding-a-struct-that-declares-init). Decoding ignores the visibility of `init`. [Open question 3](#open-questions) asks about the trait bounds of `init`.
 
 **`never`.** If a registration declares support for `never`, the checker gives `never` a structural implementation. For other traits with methods, the rule on `main` stays: `never` does not implement them (`src/check/traits.rs:1123`, `src/check/verify.rs:228`). serde and Swift also implement the codec traits for `never` one trait at a time:
 
@@ -287,7 +289,7 @@ The walkers know the structure of Sand values. They know nothing about any forma
 
 The walkers differ from serde in one way. serde's derive generates code for each type. The walkers read shapes at run time, as Go's `encoding/json` reads type metadata at run time.
 
-This design reverses one decision of `SPLIT.md` changeset 14. That changeset rejected a shared heap walk with a sink, because the walk "required about 300 extra lines and `#[inline(always)]` across two trait layers." With callbacks inside a walk, three separate walkers would each need the callback, rooting, and resume logic. One walker with two sinks needs it once.
+This design reverses one decision of `SPLIT.md` changeset 14. That changeset rejected a shared heap walk with a sink, because the walk "required about 300 extra lines and `#[inline(always)]` across two trait layers." With callbacks inside a walk, three separate walkers would each need the callback, rooting, and resume logic. One walker with three sinks needs it once.
 
 ### Walker state across callbacks
 
@@ -361,10 +363,11 @@ The encode sink has a method for each kind of value:
 
 The walker identifies `Some` and `None` by their variant IDs in `RtIds` (`src/vm/bytecode.rs:1300-1305`). The sink therefore gets option calls and does not compare type names.
 
-This design has two encode sinks:
+This design has three encode sinks:
 
-- **The JSON sink** writes JSON text and applies the JSON rules. It writes `Some(inner)` as `inner`, `bytes` as a Base64 string, and map keys and native value types as strings. It writes a unit variant as a string and another variant as an object with the variant name as its key, as on `main` (`src/stdlib/json.sand:1-14`).
+- **The JSON sink** writes JSON text and applies the JSON rules. It writes `Some(inner)` as `inner`, `bytes` as a Base64 string, and map keys and native value types as strings. It writes a unit variant as a string and another variant as an object with the variant name as its key, as on `main` (`src/stdlib/json.sand:1-14`). It returns an error of kind `"invalid"` for a non-finite float and for a map key without a text form. Nesting beyond 512 levels stays a limit that stops the run.
 - **The `Value` sink** builds a `Value`. It writes `Option` as a `Value::Variant` of the prelude type `Option`, as `Vm::to_value` does on `main`.
+- **The `Json` sink** builds a `Json` tree for `json.to_json`. It shares the JSON rules of the JSON sink.
 
 ### Decode walker
 
@@ -376,7 +379,9 @@ The decode walker builds a Sand value from the shape of each dictionary. It read
 
 Each callback finishes before the walker uses its result. Sets and maps therefore insert finished values and hash them correctly.
 
-As with the sink, the source is in shared state that the outer walker and the `Decoder` both refer to. A `Decoder` reads at most one value, and only during its callback. If the custom method reads no value, the source skips the part after the callback. If a read fails, the decode fails with the error of that read, whatever the custom method returns. A failed read can leave the source inside a partly read value, so the walker cannot continue. [Open question 8](#open-questions) asks whether a custom method should be able to retry a read as another type.
+As with the sink, the source is in shared state that the outer walker and the `Decoder` both refer to. A `Decoder` reads at most one value, and only during its callback. If the custom method reads no value, the source skips the part after the callback. If a read fails, the decode fails with the error of that read, whatever the custom method returns. A failed read can leave the source inside a partly read value, so the walker cannot continue. A custom method cannot retry a read as another type.
+
+A struct field or `init` parameter that appears twice in the input is a decode error of kind `"parse"`. The decode returns that error, and the run continues. A map key that appears twice keeps its last value.
 
 ### Order of callbacks
 
@@ -402,7 +407,7 @@ The decode source has a method for each request of the walker:
 This design has two decode sources:
 
 - **The JSON source** reads JSON text as the walker makes requests, and applies the JSON rules. It decodes a Base64 string if the walker requests bytes. It parses a string key as an `int` if the walker requests an `int` key.
-- **The `Value` source** reads a `Value`. [Open question 9](#open-questions) asks whether it accepts only the exact form of each kind, or also the JSON form.
+- **The `Value` source** reads a `Value`. It accepts only the exact form of each kind. For example, it accepts `Value::Bytes` for `bytes`, and rejects a Base64 `Value::Str`.
 
 The JSON rules therefore stay in the JSON sink and the JSON source. The walkers know only the structure of Sand values.
 
@@ -438,13 +443,13 @@ The encode walker never visits a value of type `never`, because `never` has no v
 7. **`never`.** The checker and the debug verifier give `never` the dictionary of each trait whose registration declares `never` (`src/check/traits.rs:1123`, `src/check/verify.rs:228`).
 8. **Shapes and part templates.** The checker builds trait evidence for each part. The compiler lowers it to part templates and stores shapes in the shape table of `Program`.
 9. **Dictionary parameters for native functions.** A generic native function such as `json.encode<T: Encode>` receives the dictionary of `T` as a hidden argument. On `main`, the parameter type `Num<N>` reads the hidden `Num` dictionary of the `N`-th type parameter (`src/native/ty.rs:350-356`). This design generalizes it to `TraitDict<N>`, which reads the dictionary of any bound with methods. `Num<N>` becomes a typed view over `TraitDict<N>`.
-10. **`reflect`.** `Decode` dictionaries supply the type structure that `json.decode` needs, so `json.decode` stops using `reflect`. [Open question 3](#open-questions) asks whether to delete `reflect` from the language.
+10. **`reflect`.** `Decode` dictionaries supply the type structure that `json.decode` needs. This design deletes `reflect` from the language. A host native function that needs the structure of a type declares a `Decode` bound and takes `TraitDict<N>`, in place of `Reflect<N>`.
 
 With methods, `Encode` and `Decode` become subject to two existing checker limits on traits with methods. [Open question 2](#open-questions) asks whether to keep them.
 
 ## Part 7: JSON and `Value`
 
-- **`json.encode`.** `pub native fn encode<T: Encode>(value: T, indent: int = 0) -> Result<str>`. The encode walker writes the value to the JSON sink. On `main`, `json.encode` returns `str` (`src/stdlib/json.sand:128`). The new return type changes each caller. In the standard library, `http` calls `json.encode(value).bytes()` (`src/stdlib/http.sand:159`). That call becomes `json.encode(value)?.bytes()`. [Open question 13](#open-questions) asks which failures `json.encode` returns as errors.
+- **`json.encode`.** `pub native fn encode<T: Encode>(value: T, indent: int = 0) -> Result<str>`. The encode walker writes the value to the JSON sink. On `main`, `json.encode` returns `str` (`src/stdlib/json.sand:128`). The new return type changes each caller. In the standard library, `http` calls `json.encode(value).bytes()` (`src/stdlib/http.sand:159`). That call becomes `json.encode(value)?.bytes()`. `json.encode` returns an error for a non-finite float and for a map key without a text form.
 - **`json.decode`.** `pub native fn decode<T: Decode>(text: str) -> Result<T>`. The decode walker reads the text from the JSON source. The private `decode_raw` function, the `Decoded` enum, and the loop that runs computed defaults after the decode (`src/stdlib/json.sand:144-158`) go away.
 - **`json.parse`.** `json.parse` decodes the text into a `Json` value with the same walker and source.
 - **`Json`.** The `json` module implements `Encode` and `Decode` for `Json` with native methods:
@@ -458,20 +463,20 @@ With methods, `Encode` and `Decode` become subject to two existing checker limit
 
   This form changes one behavior. On `main`, `Vm::to_value` copies a `Json` value as a `Value::Variant` of `json.Json`. With the `Value` sink, a `Json` value becomes its JSON data model form, such as `Value::Int(3)` for `Json.Int(3)`.
 
-- **`json.to_json`.** [Open question 10](#open-questions) asks how `to_json` works. Because `encode` can return an error, `to_json` can fail too. [Open question 14](#open-questions) asks how `to_json` and the `json!` macro report that failure.
+- **`json.to_json`.** `to_json` writes the value to a `Json` sink, which builds the `Json` tree directly. The JSON sink and the `Json` sink share a single layer of JSON rules. `to_json` keeps the return type `Json`. If a conversion fails, `to_json` stops the run, so the `json!` macro keeps its form. Under the shared rules, a non-finite float is a conversion failure. On `main`, `to_json` keeps it as `Json.Float(NaN)`.
 - **Conversion to `Value`.** A conversion that applies custom `Encode` implementations needs an `Encode` dictionary. It can also reach a callback, so it must be able to wait. The engine therefore converts through one routine that starts synchronously and waits only if it reaches a custom implementation. Async native functions call it through a new method, `NativeContext::to_value(value, dictionary)`. [Open question 1](#open-questions) asks what happens to values whose types do not implement `Encode`, and to the synchronous `Vm::to_value`.
 
 ## Changes to the plan in `SPLIT.md`
 
 `SPLIT.md` divides the work of a source branch into numbered changesets. This design changes the plan for changesets 14, 15, and 18:
 
-- **Changeset 14: `Value` and `Vm::to_value`.** Pull request #41 merged this changeset as commit `a74cf0d`. This design replaces its three encode walks, in `json.encode`, `json.to_json`, and `Vm::to_value`, with one encode walker and two sinks. See [Walkers that do not know the format](#walkers-that-do-not-know-the-format) for why.
+- **Changeset 14: `Value` and `Vm::to_value`.** Pull request #41 merged this changeset as commit `a74cf0d`. This design replaces its three encode walks, in `json.encode`, `json.to_json`, and `Vm::to_value`, with one encode walker and three sinks. See [Walkers that do not know the format](#walkers-that-do-not-know-the-format) for why.
 - **Changeset 15: Shared decode path and `Value` input.** This design becomes changeset 15. The plan for changeset 15 already describes a decoder that reads from a JSON source and a `Value` source. Two parts of the plan change:
-  - The plan says that the `Value` source "also accepts the JSON form of each type". [Open question 9](#open-questions) asks whether to keep that rule.
+  - The plan says that the `Value` source "also accepts the JSON form of each type". This design drops that rule.
   - The plan says that "`value::Decode: Encode` mirrors the Sand trait." The Rust trait `value::Decode` drops `Encode` to mirror the independent Sand traits. Commit `6d23963` on branch `origin/encode-decode-traits` records the same choice: "`value::Decode` also required `Encode`, which the user decided against."
 - **Changeset 18: Host function calls.** The engine decodes each host `Value` argument with the decode walker and the `Value` source. For a parameter with a concrete type, the compiler emits a constant `Decode` dictionary.
 
-Changeset 16 adds only `Serialize` and `Deserialize` for `Value`. This design does not change it, unless the answer to [Open question 9](#open-questions) makes a JSON-shaped `Value` invalid input.
+Changeset 16 adds only `Serialize` and `Deserialize` for `Value`. A `Value` that `Deserialize` builds from JSON has JSON forms, which the `Value` source rejects. That part of changeset 16 therefore needs a new scope.
 
 ## Costs and risks
 
@@ -483,11 +488,11 @@ Changeset 16 adds only `Serialize` and `Deserialize` for `Value`. This design do
 - **Code size.** The net line change is unmeasured. We will report the measured change in the pull request.
 
   The design deletes these parts:
-  - The separate encode walks of `json.encode`, `json.to_json`, and `Vm::to_value`. The fate of `json.to_json` depends on [Open question 10](#open-questions).
+  - The separate encode walks of `json.encode`, `json.to_json`, and `Vm::to_value`. The `Json` sink replaces the converter of `json.to_json`.
   - The typed JSON decoder, which the decode walker replaces.
   - The post-order fill path of `json.decode`: `decode_raw`, `Decoded`, and the fill functions of `FieldDefault::Computed`.
   - The special cases for `Json` in the encoder and the decoder.
-  - If [Open question 3](#open-questions) deletes `reflect`: `src/compile/reflect.rs`, `TypeDesc`, `DescTemplate`, `Op::Describe`, and `reflect` support in the parser, checker, and VM.
+  - `src/compile/reflect.rs`, `TypeDesc`, `DescTemplate`, `Op::Describe`, and `reflect` support in the parser, checker, and VM.
 
   The design adds these parts:
   - The encode and decode walkers, with stacks that hold no borrows.
@@ -577,7 +582,9 @@ Each item below names an existing component and what this design takes from it.
   - Faulty `Encode` implementations that skip `encoder.encode`, call it twice, or keep the `Encoder` after the callback.
   - Error paths from failed custom `Decode` implementations.
   - Decoding through `init`, including missing arguments with defaults and `init` errors.
-  - The `Value` source with JSON-form input, such as `Value::Str` for `bytes`, under the rule that [Open question 9](#open-questions) chooses.
+  - The `Value` source with JSON-form input, such as `Value::Str` for `bytes`. The decode must fail.
+  - A struct field that appears twice in the input. The decode must return an error and the run must continue.
+  - `json.encode` of a non-finite float, which must return an error, and `json.to_json` of the same value, which must stop the run.
   - A custom `encode` method that changes a list that the walker visits.
 - **Robustness checks:**
   - Enable `Config::retry_stress` in tests to force retries at resource limits.
@@ -589,6 +596,23 @@ Each item below names an existing component and what this design takes from it.
   - Measure the cost of per-part dispatch on values without custom parts. This result decides whether the walker needs the flag from [Speed of the walker](#speed-of-the-walker).
   - Measure the decode walker with its explicit stack against the recursive decoder on `main`.
   - Measure call overhead for generic functions with `Encode` bounds.
+
+## Design decisions
+
+The owner made these decisions during review.
+
+- **Custom `encode` methods write through an `Encoder`.** The signature is `fn encode(self, encoder: Encoder) -> Result<()>`. A native implementation, such as `Json.encode`, can then write a whole tree in a single call. The engine checks at run time that a method writes exactly one value.
+- **`encode` returns `Result<()>`.** A custom method can report an error to the caller of `json.encode`. serde returns `Result<S::Ok, S::Error>` (`serde_core` 1.0.229, `src/ser/mod.rs:149-150`), and Swift's `encode(to:)` throws (`Codable.swift:24-25`). `json.encode` returns `Result<str>`.
+- **`json.encode` returns an error for a non-finite float**, and for a map key without a text form. The error has kind `"invalid"`. The output therefore conforms to RFC 8259, which does not allow `NaN` or infinity. Go's `encoding/json` also returns an error (`encoding/json/encode.go:80`). serde_json writes `null`, and its maintainer calls an error "better behavior" (https://github.com/serde-rs/json/issues/985). Nesting beyond 512 levels stays a limit that stops the run.
+- **`json.to_json` uses a dedicated `Json` sink.** The sink builds the `Json` tree directly. A single layer of JSON rules serves both the JSON sink and the `Json` sink.
+- **`json.to_json` keeps the return type `Json`.** If a conversion fails, `to_json` stops the run. The `json!` macro keeps its form.
+- **`reflect` is deleted.** `Decode` dictionaries supply type structure. Hosts use `TraitDict<N>` with a `Decode` bound in place of `Reflect<N>`.
+- **Derivation stays automatic,** as for `Eq`, `Ord`, and `Hash`. A type author changes the encoding of a type with a custom implementation.
+- **This branch adds no field options,** such as a rename or a skip. A type that needs one writes a custom implementation. Field options can come later.
+- **A custom `decode` method reads at most one value, without a retry.** A rewind could not undo the callbacks that a failed attempt already ran.
+- **The `Value` source accepts only exact forms.** The JSON rules stay in the JSON source, and a host with JSON data passes JSON text. serde_json reads bytes from a JSON string as UTF-8 text, not Base64 (`serde_json` 1.0.154, `src/value/de.rs:414-420`), so a JSON form of `bytes` is not universal.
+- **A duplicate struct field or `init` parameter is a decode error.** The decode returns an error of kind `"parse"`, and the run continues. serde's derive also reports `duplicate_field` (`serde_derive` 1.0.229, `src/de/struct_.rs:269`). A duplicate map key keeps its last value.
+- **Decoding ignores the visibility of `init`,** as decoding on `main` ignores the visibility of fields.
 
 ## Open questions
 
@@ -632,140 +656,11 @@ For field defaults:
 
 **Recommendation:** Option B for local functions. Option A for field defaults.
 
-### 3. Should we delete `reflect` in this branch?
+### 3. Which trait bounds can the `init` of a decoded struct use?
 
-After this design, `json.decode` gets its type structure from `Decode` dictionaries. In the standard library, only `json` uses `reflect` (`src/stdlib/json.sand:144`, `:158`). Hosts can also use the public parameter type `Reflect<N>` (`src/native/ty.rs:391`), as tests do (`tests/api.rs:2163`, `:2189`).
-
-- **Option A: delete `reflect`.** This removes `src/compile/reflect.rs`, `TypeDesc`, `DescTemplate`, `Op::Describe`, and `reflect` support in the parser, checker, and VM. Script authors lose `reflect` type parameters. A host native function that needs the structure of a type declares a `Decode` bound and takes `TraitDict<N>`, which gives it the shape.
-- **Option B: keep `reflect`.** The language keeps two sources of run-time type structure, and no standard library code reads `TypeDesc`.
-
-**Recommendation:** Option A.
-
-### 4. Should `encode` return its value instead of writing it?
-
-**Decided by the owner: Option A.** The options below record the comparison.
-
-- **Option A: `fn encode(self, encoder: Encoder)`.** This is the form in [Part 1](#part-1-trait-declarations). The engine checks at run time that the method writes exactly one value, and that Sand code does not use the `Encoder` after its callback. Each custom part runs a nested walk on a shared sink. `Json.encode` writes its tree through the `Encoder` in one native call.
-- **Option B: `fn encode(self) -> Encoded`.** `Encoded` is an opaque prelude type that holds a value and its `Encode` dictionary, as in `Encoded(self.address)`. A method returns exactly one value, so the type checker enforces the rule. The outer walker encodes the returned value after the callback with its own sink. This removes the `Encoder` type, its three run-time errors, the nested walk, and the shared sink on the encode side. serde also enforces one value through types: each `Serializer` method takes `self` and returns `S::Ok`, as in `fn serialize_bool(self, v: bool) -> Result<Self::Ok, Self::Error>` (`serde_core` 1.0.229, `src/ser/mod.rs:427`). Swift checks at run time instead: "If the value fails to encode anything, `encoder` will encode an empty keyed container in its place" (`Codable.swift:21-22`).
-
-Option B has a cost for `Json`. A native method that returns `Encoded` cannot write a tree. `Json.encode` would then be Sand code that returns `Encoded` of each payload, with one callback for each `Json` node. The speed of that form is unmeasured. The alternative is a Rust hook that lets a native implementation write to the sink directly. Under both options, the decode side keeps the shared source and the nested walk, because a custom `decode` must read input during its callback.
-
-### 5. Should `encode` be able to return an error?
-
-**Decided by the owner: Option B, `encode` returns `Result<()>`.** The options below record the comparison.
-
-`encode` returns unit. `json.encode` returns `str` and aborts on failure (`src/stdlib/json.sand:121-128`). A custom method can stop the run with `fail` (`src/stdlib/prelude.sand:274`), but it cannot report an error to the caller of `json.encode`.
-
-- **Option A: no error channel.** The trait and `json.encode` keep their signatures.
-- **Option B: `encode` returns `Result<()>`.** `json.encode` then returns `Result<str>`, and every caller changes. serde returns `Result<S::Ok, S::Error>`, and `Error::custom` is "Used when a [`Serialize`] implementation encounters any error while serializing a type" (`serde_core` 1.0.229, `src/ser/mod.rs:149-150`). Swift's `encode(to:)` "throws an error if any values are invalid for the given encoder's format" (`Codable.swift:24-25`).
-
-### 6. Should derivation stay automatic?
-
-On `main`, every qualifying struct and enum derives `Encode` and `Decode` automatically, and `json.encode` includes all fields regardless of visibility (`docs/SPEC.md:235`). Commit `8bc6eda`, which made `Encode` a prelude trait, states no reason for automatic derivation.
-
-- **Option A: automatic, as on `main`.** Scripts encode data types without extra declarations, and the codec traits behave as `Eq`, `Ord`, and `Hash` do in this branch. A type author can keep a type out of encoding only with a custom implementation that stops the run.
-- **Option B: opt-in.** A type implements `Encode` or `Decode` only through an `impl` block. `impl<T: Encode> Encode for Page<T> {}` gets the structural implementation. The user declares the bounds, so the checker only verifies them, and the computation of requirements through trait resolution goes away. Swift: "By adopting these protocols, user types opt in to this system" (SE-0166). Kotlin: "To make a class serializable, you need to mark it with the `@Serializable` annotation" (kotlinx.serialization documentation, "Get started"). serde: a type uses `#[derive(Serialize)]` or a manual implementation (`serde_core` 1.0.229, `src/ser/mod.rs:249`).
-
-**Recommendation:** Option A, for consistency with `Eq`, `Ord`, and `Hash`. Option B is simpler in the checker, but every program that encodes a struct must change.
-
-### 7. Should a type rename or skip a field without a custom implementation?
-
-With this design, a struct that renames one field in its JSON form needs a custom implementation, usually through a second struct with the new field name. serde offers field attributes: `#[serde(rename = "name")]` and `#[serde(skip)]` (serde.rs, "Field attributes"). Swift lets a type "provide a custom key subset and take advantage of automatic method synthesis" (SE-0166).
-
-- **Option A: no field options in this branch.** Users write custom implementations.
-- **Option B: add field options.** This needs new syntax and shape data.
-
-**Recommendation:** Option A. Field options are independent of this design and can come later.
-
-### 8. Should a custom `decode` method be able to retry a read?
-
-In this design, a failed read fails the whole decode. See [Decode walker](#decode-walker).
-
-- **Option A: one read, no retry.** The source needs no position save and restore.
-- **Option B: rewind after a failed read.** The source returns to the start of the part, and the method can read the part as another type. A failed attempt can already have run callbacks, such as computed defaults, nested custom methods, or `init`. Rewinding the input does not undo their side effects. serde retries untagged enums over buffered data: its derive first deserializes the input into `Content`, then tries each variant on that buffer (`serde_derive` 1.0.229, `src/de/enum_untagged.rs:46-47`).
-
-**Recommendation:** Option A. If users need alternatives, a later design can decode into a buffer type first, as serde does.
-
-### 9. Should the `Value` source accept the JSON form of each kind?
-
-`SPLIT.md` changeset 15 plans a lenient source: "The `Value` source also accepts the JSON form of each type, so a `Value` that comes from JSON is valid input." Commit `c2f6887` on branch `value-decode` built such a source. It accepted a Base64 `Str` for `bytes`, a `Map` for a struct, `Unit` for `None`, and text keys for other key types. Commit `6d23963` on branch `origin/encode-decode-traits` records a cost of copied rules: "the Rust `value::Decode` copied the rules and messages of the Sand `Value` decoder by hand, and the two copies disagreed."
-
-- **Option A: exact forms only.** A host builds a `Value` with `value::Encode` or the derives, or passes on a `Value` from Sand. Both give exact forms: a derived `encode` "returns the same `Value` that [`Vm::to_value`] copies from the VM" (`src/value.rs:250-251`). A host with JSON data passes JSON text to the JSON source. A host that holds a `serde_json::Value` calls `serde_json::to_string` first. The JSON rules stay in the JSON source.
-- **Option B: also accept JSON forms.** A host can pass a JSON-shaped `Value` directly. But the JSON form of `bytes` is not universal. serde_json reads bytes from a JSON string as UTF-8 text, not Base64 (`serde_json` 1.0.154, `src/value/de.rs:414-420`). `serde_json::to_value` writes bytes as an array of numbers (`src/value/ser.rs:172-175`). A lenient source would put Sand's Base64 rule into a format-neutral reader. It would also accept a `Str` of the wrong type if the text happens to be valid Base64, and return wrong data without an error.
-
-In this branch, no engine API reads a `Value` into the VM. Changeset 18 plans the first one. The `Value` source can also wait for that changeset.
-
-**Recommendation:** Option A. Also rescope the plan of changeset 16 for `Deserialize` of `Value` from JSON, because such a `Value` would have JSON forms.
-
-### 10. How should `json.to_json` work?
-
-On `main`, a separate converter of about 290 lines builds a `Json` tree (`ToJsonConverter`, `src/stdlib/json.rs:1736-2024`). Its documented promise is that it "reuses existing `Json` values without traversing them" (`src/stdlib/json.sand:162-163`).
-
-- **Option 1: write JSON text with the JSON sink, then parse the text.** The estimate is about 10 lines. The JSON rules stay in the JSON sink. Behavior changes:
-  - `NaN` and infinity become `Json.Null`. On `main`, `to_json` keeps `Json.Float(NaN)`, but `json.encode` writes `null` (`src/stdlib/json.rs:1464-1465`). serde_json's `From<f64>` also gives "`Value::Null` if infinite or NaN" (`serde_json` 1.0.154, `src/value/from.rs:47`).
-  - An embedded `Json` value and its strings are copied, not shared. Sand lists are mutable (`docs/SPEC.md:651`), so the copy also stops later changes to the input from reaching the result.
-  - The nesting-limit message changes from "convert to JSON" to "encode as JSON".
-  - The speed estimate is about 2.3 times as slow as `main`. This is a sum of separate measurements, recorded in `SPLIT.md` at commit `849a44a`: `to_json` 502 ns, `encode` 289 ns, and `decode_json` 859 ns. UNVERIFIED: nobody measured the combined path.
-- **Option 2: a `Json` sink that builds the tree directly.** It keeps the behavior of `main`. The JSON rules must then be in one layer that both the text sink and the tree sink use. serde_json has a separate tree serializer, `src/value/ser.rs`, beside its text serializer. UNVERIFIED: the size estimate of about 200 lines.
-- **Option 3: write a `Value` with the `Value` sink, then convert it to `Json`.** The converter repeats the JSON rules over `Value`, and the data is copied twice.
-
-**Recommendation:** Option 1. If a benchmark of real use shows that `to_json` speed matters, change to Option 2.
-
-### 11. Should the decoder reject duplicate field keys?
-
-On `main`, "duplicate keys overwrite earlier values" (`src/stdlib/json.sand:132-133`). With callbacks in place, a duplicate key also runs the callbacks inside its value again, such as a custom `decode`.
-
-- **Option A: the last value wins, as on `main`.** Callbacks run once for each occurrence of the key.
-- **Option B: a duplicate struct field or `init` parameter fails with kind `"parse"`.** serde's derive returns `duplicate_field` (`serde_derive` 1.0.229, `src/de/struct_.rs:269`). Maps keep the last-value rule.
-
-**Recommendation:** Option B.
-
-### 12. Which structs that declare `init` derive `Decode`?
-
-A struct that declares `init` derives `Decode` through `init`. `TODO.md:268-277` lists both issues below as open work for this feature.
-
-Visibility: a structural implementation is visible in every module that loads its module (`docs/SPEC.md:557`). A private `init` would then run from decodes in other modules.
-
-- **Option A: derive `Decode` only if `init` is at least as visible as the struct.** A struct with a more private `init` needs a custom implementation.
-- **Option B: always derive.** Decoding ignores the visibility of `init`, as decoding on `main` ignores the visibility of fields.
-
-Bounds: `init` inherits the bounds of the struct. A bound on a trait with methods, such as `T: Num`, needs a dictionary in the `init` call.
+A struct that declares `init` derives `Decode` through `init`. `init` inherits the bounds of the struct. A bound on a trait with methods, such as `T: Num`, needs a dictionary in the `init` call. `TODO.md:268-277` lists this issue as open work.
 
 - **Option A: the structural `Decode` implementation also requires the bounds of `init`.** Its shape holds part templates for their dictionaries, and the walker passes them to `init`. Parameter default helpers already take the dictionaries of their function (`src/check/mod.rs:2768`).
 - **Option B: a struct whose `init` needs dictionaries does not derive `Decode`.**
 
-**Recommendation:** Option A for visibility. Option A for bounds.
-
-### 13. Which failures does `json.encode` return as errors?
-
-With `Result<str>`, `json.encode` can report a failure to its caller instead of stopping the run. On `main`, it has three kinds of failure, and each behaves differently:
-
-- **Non-finite floats.** `json.encode` writes `NaN`, infinity, and negative infinity as `null`, with no error (`src/stdlib/json.rs:1464-1465`). The spec test "numbers" checks this: `json.encode(json.Json.Float(0.0 / 0.0))` prints `null`.
-- **Map keys without a text form.** `json.encode` stops the run with kind `"invalid"`, for example for a key of type `(int, int)` (`src/stdlib/json.rs:1390-1392`).
-- **Nesting beyond 512 levels.** `json.encode` stops the run with kind `"limit"` (`src/stdlib/json.rs:1394-1396`).
-
-Evidence on non-finite floats:
-
-- RFC 8259 does not allow them: "Numeric values that cannot be represented in the grammar below (such as Infinity and NaN) are not permitted" (RFC 8259, section 6).
-- serde_json writes them as `null` without an error (`serde_json` 1.0.154, `src/ser.rs:169-174`). It returns an error only for a non-finite float used as a map key (`src/ser.rs:1042-1044`). Its serializer documentation does not mention the `null` case. The `to_string` errors section lists only a failing `Serialize` implementation and "a map with non-string keys" (`src/ser.rs:2224-2227`). The serde maintainer considers this behavior a mistake that is kept for compatibility: "I agree that erroring during serialization on infinity and NaN would be better behavior. I think it's not worth changing now though." (https://github.com/serde-rs/json/issues/985). An open issue reports that these values do not round-trip: "Currently f32::NAN and f64::NAN get serialized as null but fail to deserialize back as NAN." (https://github.com/serde-rs/json/issues/202).
-- Go's `encoding/json` returns an error: "NaN and +/-Inf values will return an [UnsupportedValueError]" (`encoding/json/encode.go:80`, raised at `:567-568`).
-- Python's `json.dumps` has a switch. "If False, serialization of out-of-range float values (nan, inf, -inf) will result in a ValueError, in strict compliance with the JSON specification. If True (the default), their JavaScript equivalents (NaN, Infinity, -Infinity) are used." (https://docs.python.org/3/library/json.html)
-
-The options:
-
-- **Option A:** keep `null` for non-finite floats, and return an error for map keys without a text form. The nesting limit stays a run-stopping limit, as other resource limits do.
-- **Option B:** also return an error for non-finite floats. The output then always conforms to RFC 8259, and a decode of the output never meets a `null` in place of a `float`. Go makes this choice.
-
-**Recommendation:** None. This choice is a product trade-off for the owner.
-
-### 14. How do `json.to_json` and the `json!` macro report an encode failure?
-
-The `json!` macro builds a `Json` value. It converts each embedded Sand value with a call to `json.to_json` (`src/syntax/ast.rs:477-484`). On `main`, `json.to_json` returns `Json` (`src/stdlib/json.sand:165`). If `encode` can return an error, `to_json` can fail.
-
-The options:
-
-- **Option A:** `json.to_json` returns `Result<Json>`, and the `json!` macro also produces `Result<Json>`. Every use of the macro then needs `?` or a match.
-- **Option B:** `json.to_json` returns `Result<Json>`, and the macro stops the run if a conversion fails.
-- **Option C:** `json.to_json` keeps returning `Json`, and stops the run if a conversion fails.
-
-**Recommendation:** None. The answer depends on Open question 13, and on how often a value inside `json!` can fail to encode.
+**Recommendation:** Option A.
