@@ -531,7 +531,7 @@ Changeset 16 adds only `Serialize` and `Deserialize` for `Value`. A `Value` that
   - Native default trait methods and their registration.
   - The computation of structural implementations through trait resolution.
   - `TraitDict<N>`, `NativeContext::to_value`, and the release of roots during a native call.
-  - The `Encoder` and `Decoder` prelude types.
+  - The `Encoder` and `Decoder` prelude types, and their Rust handles for native method bodies.
 
 ## Rejected alternatives
 
