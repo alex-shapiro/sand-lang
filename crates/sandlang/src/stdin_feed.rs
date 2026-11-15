@@ -179,7 +179,7 @@ impl StdinChannel {
 
     /// Updates whether the engine is idle for host stdin waiters.
     ///
-    /// Wakes host waiters on `self.changed`. Any pending script read stays asleep.
+    /// Wakes host waiters on `self.changed`. Leaves any pending script read parked.
     fn set_engine_idle(&self, idle: bool) {
         self.state.lock().engine_idle = idle;
         self.changed.notify_waiters();

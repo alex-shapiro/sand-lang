@@ -116,7 +116,7 @@ fn calls_module(log: &EventLog) -> NativeModule {
         }))
     });
     // Under `biased`, `select!` polls `call` first to store `VmRequest::Call`.
-    // The `ready` branch completes immediately. `select!` then drops the `call` future.
+    // The `ready` branch returns `Ready` on its first poll. `select!` then drops the `call` future.
     // Next, `sleep` returns `Pending` to verify that `Drop` cleared `state.request`.
     module.function("race_callback", |callback: Callback| -> Result<Later<String, Fail>, Fail> {
         Ok(Later::new(WaitKind::Io, |mut context| {

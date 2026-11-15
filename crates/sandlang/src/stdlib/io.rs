@@ -95,7 +95,7 @@ enum StdinReadMode {
     Line,
     /// Remaining bytes until end of input.
     All,
-    /// Up to `usize` bytes from the next available chunk.
+    /// Maximum byte count to read from the next available chunk.
     UpTo(usize),
 }
 

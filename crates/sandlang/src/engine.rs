@@ -471,10 +471,10 @@ impl Config {
     /// - retryable instruction
     ///
     /// After that forced failure, the engine collects garbage. It then retries
-    /// retryable instructions, `&mut Vm` calls, and
+    /// the failed instruction, `&mut Vm` call, or
     /// [`NativeContext::step`](crate::native::context::NativeContext::step)
-    /// closures. Direct checks in a [`Later`](crate::native::func::Later)
-    /// future outside `step` fail the run.
+    /// closure. A check outside `step` in a
+    /// [`Later`](crate::native::func::Later) future fails the run.
     pub fn retry_stress(mut self, on: bool) -> Self {
         self.retry_stress = on;
         self

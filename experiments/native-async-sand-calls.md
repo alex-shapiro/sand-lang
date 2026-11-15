@@ -27,7 +27,7 @@ Three VM rules prevent a native Rust function from calling a Sand function on `m
 - **The garbage collector ignores Rust stack handles.** The collector runs only at safe points in the interpreter loop. The collector traces only VM registers and VM structures.
 - **The VM restarts native functions on memory-limit retries.** Under SPEC §16.3, if a native function reaches `max_memory`, the VM collects garbage. It then runs the native function again from the start.
 
-These three rules prevent a single fast codec. On `main`, a codec must either run in Sand or duplicate derived walks in Rust and Sand.
+These three rules prevent a single fast codec. On `main`, an author must choose between a Sand codec and duplicated walks in Rust and Sand.
 
 ## Why the two tested callback designs fail for codecs
 
@@ -38,7 +38,7 @@ The callback study tested two designs for calling Sand from Rust:
 
 Authors on `origin/encode-decode-traits` built and measured a continuation-based codec walker in `experiments/codec-traits/rejected-designs.md`. That walker paid three costs:
 
-- **Each callback returns to the VM.** To run a Sand method, the walker must return from Rust to the VM. Before returning, the walker copies its local state to the heap. After the VM finishes the Sand method, the continuation rebuilds the walk from that heap state. For each custom field, the walker spent about 270 ns to stop the walk, call Sand, and resume. The VM call itself took about 50 ns of that 270 ns.
+- **Each callback returns to the VM.** To run a Sand method, the walker must return from Rust to the VM. Before returning, the walker copies its local state to the heap. After the VM finishes the Sand method, the continuation rebuilds the walk from that heap state. Each custom field added about 270 ns of callback overhead. The VM call itself took about 50 ns of that 270 ns.
 - **Heap frame stacks slow derived walks.** A recursive Rust walker keeps its position in nested Rust stack frames. A return to the VM unwinds those frames. The continuation walker therefore kept an explicit frame stack on the heap. With walk frames on the heap, the walker decoded derived types 40% to 45% slower.
 - **Retries require per-step rollback state.** After garbage collection, the VM repeats only the current continuation step. Before each step, the continuation walker copied its state. During the step, it logged format changes for rollback.
 
@@ -89,11 +89,11 @@ Under the new design, a polled future returns `Pending` in two cases:
 - **Waiting on an external event.** After the host finishes the operation, a waker marks the task ready, as on `main`.
 - **Requesting a Sand call.** The VM runs the requested Sand function on the task. The scheduler then polls the future again.
 
-The scheduler checks whether the poll stored a VM request. If the poll stored a request, the VM runs that request. Otherwise, the scheduler parks the task on its host waker. Each poll must either submit a VM request or register a host waker. Piccolo restricts sequence futures to Lua requests. Sand supports both host I/O and VM requests in the same future type. This single type replaces `Suspension`.
+The scheduler checks whether the poll stored a VM request. If the poll stored a request, the VM runs that request. Otherwise, the scheduler parks the task on its host waker. Each `Pending` poll requires a VM request or a registered host waker. Piccolo restricts sequence futures to Lua requests. Sand supports both host I/O and VM requests in the same future type. This single type replaces `Suspension`.
 
 Host I/O functions use the same future type. An I/O future awaits the host operation. It then calls `context.with_vm` from Part 2 to build its return value. That final `context.with_vm` call replaces the finisher closure from `main`.
 
-Each task stores its active native futures on its own fiber beside its Sand call frames. The task can then run Sand frames while a native future waits. The same future can later await host I/O. `IoTable` maps only host wakers to waiting tasks.
+Each task stores its active native futures on its own fiber beside its Sand call frames. The task can then run Sand frames above a waiting native future. The same future can later await host I/O. `IoTable` maps only host wakers to waiting tasks.
 
 Synchronous native functions keep their direct call path. Each synchronous call takes about 10 ns. Only functions that await host I/O or Sand calls allocate a boxed future.
 
@@ -126,9 +126,9 @@ Every value captured by a `'static` future must satisfy `'static`. Two mechanism
 
 An `Arc<Mutex<Vm>>` transfers VM access in safe Rust:
 
-1. An `Arc<Mutex<Vm>>` owns the VM state. The scheduler locks the mutex while running Sand bytecode.
+1. An `Arc<Mutex<Vm>>` owns the VM state. The scheduler locks the mutex during each Sand bytecode slice.
 2. Before polling native futures, the scheduler releases the lock.
-3. Inside a poll, `context.with_vm(|vm| ...)` locks the mutex, runs the closure, and drops the guard.
+3. Inside a poll, `context.with_vm(|vm| ...)` locks the mutex for the closure call. It drops the guard before returning.
 4. After the poll returns, the scheduler locks the mutex again.
 
 The engine polls the future on the scheduler thread. `context.with_vm` therefore acquires the uncontended lock immediately.
@@ -144,7 +144,7 @@ Each running future therefore owns a rooted value table:
 - `context.root(value)` appends `value` to the future's table. It returns a `RootedValue` index.
 - The garbage collector traces every entry in active future tables.
 - Across `await` points, the future stores only `RootedValue` indices. Each index is a `Send` integer handle.
-- The VM frees the future's table after the future returns `Poll::Ready` or if the VM cancels the task.
+- The VM frees the future's table on `Poll::Ready` or task cancellation.
 
 In commit `eeec0f3`, `origin/encode-decode-traits` added a similar traced value list for native objects.
 
@@ -152,8 +152,8 @@ In commit `eeec0f3`, `origin/encode-decode-traits` added a similar traced value 
 
 The object that owns the native future also owns the future's root table. The collector traces that table through the owning object:
 
-- **The collector can free reference cycles.** The collector traces the table only while the owning object is reachable. If a rooted value points back to that owning object, the collector still reclaims both once the owning object is unreachable. Traced native objects on `origin/encode-decode-traits` follow the same rule. On `main`, the collector treats every live task as a root. Tasks gain cycle collection only if Sand later collects unreachable tasks.
-- **The VM frees roots automatically at the end of the call.** After the future returns or the VM cancels the task, the VM drops the future and its root table.
+- **The collector can free reference cycles.** The collector traces the table only for a reachable owner. Even with a reference back to that owner, the collector reclaims both after the owner becomes unreachable. Traced native objects on `origin/encode-decode-traits` follow the same rule. On `main`, the collector treats every live task as a root. Tasks gain cycle collection only if Sand later collects unreachable tasks.
+- **The VM frees roots automatically at the end of the call.** On `Poll::Ready` or task cancellation, the VM drops the future and its root table.
 
 In a global root table, each native function must remove its own entries explicitly. The piccolo docs warn that entries in its global registry can form uncollectable reference cycles.
 
@@ -163,7 +163,7 @@ A Sand callback can perform side effects. A full restart of an async native func
 
 1. Before allocating heap memory, the future calls `context.check_memory(byte_count).await`.
 2. If the heap exceeds `max_memory`, the poll returns `Pending` with a garbage-collection request.
-3. Part 3 roots every value stored across an `await` point. The VM therefore collects garbage in place while keeping the waiting future.
+3. Part 3 roots every value stored across an `await` point. The VM therefore retains the waiting future across in-place garbage collection.
 4. The scheduler polls the future again. If collection freed enough memory, `check_memory` returns `Poll::Ready`. Otherwise, the VM fails the task with a memory error.
 
 Async native functions request host permissions in the same way through `context.require(capability).await`.
@@ -206,14 +206,14 @@ async fn encode_value(
 }
 ```
 
-The walker keeps its position in local variables and recursive calls. The Rust compiler generates the state machine that saves and restores local variables across each `await` point.
+The walker keeps its position in local variables and recursive calls. The Rust compiler generates the state machine that preserves local variables across each `await` point.
 
 ## Implementation
 
 The implementation follows Parts 1 to 4 with seven refinements:
 
 - **`Later::new` builds the future directly.** `Later::new(wait_kind, |mut context| async move { ... })` passes a `NativeContext` to the builder closure. The engine converts the future's output directly into the Sand return value.
-- **The scheduler shares `Vm` through `Arc<Mutex<Vm>>`.** The scheduler unlocks the VM only while polling a native future or awaiting a host operation. `NativeContext` panics if code calls `with_vm` or polls a VM request outside a poll of that call.
+- **The scheduler shares `Vm` through `Arc<Mutex<Vm>>`.** The scheduler unlocks the VM only during a native future poll or an await in `drive`. `NativeContext::with_vm` and VM request polls require an active poll of that call. Calls at any other time panic.
 - **A trampoline prototype runs each callback.** In prototype 0 of every program, the interpreter executes `CallR` followed by `ResumeNative`. Regular Sand functions still return with `Ret`, `RetVariant`, and `RetUnit`.
 - **`NativeContext::step` replaces `check_memory` and `require`.** `context.step(f)` runs `f` under the synchronous `&mut Vm` restart rule. After a memory or resource limit error, the engine collects garbage before running `f` again. After a permission request, the engine prompts the user before running `f` again from the start.
 - **Each context allows a single active request.** `call` and `step` borrow `&mut NativeContext`. If the caller drops a request future before the scheduler takes it, `Drop` clears the pending VM request.
@@ -248,4 +248,4 @@ We recorded four follow-up items for async native walkers in `TODO.md`:
 - Reject raw `VmValue` handles kept across waits.
 - Let an async native function release roots during a call.
 - Charge boxed recursive futures against `max_memory`.
-- Detect collection changes made by a callback during iteration, or iterate a snapshot.
+- Detect collection changes during an async native walk.

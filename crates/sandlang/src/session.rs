@@ -577,7 +577,7 @@ impl Session {
         {
             let mut vm = st.vm.lock();
             vm.begin_session_run(call);
-            // Clear the previous input's deadline while waiting for the next REPL input.
+            // Clear the previous input's deadline between REPL inputs.
             vm.deadline = None;
         }
         let drive_result = sched::drive(&st.vm, UntilIdle { waits_for_io: true }).await;

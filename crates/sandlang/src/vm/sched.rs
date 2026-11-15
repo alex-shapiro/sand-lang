@@ -1,4 +1,4 @@
-//! Task scheduler: runs fibers round-robin and drives async native calls.
+//! Round-robin fiber scheduler for bytecode slices and async native calls.
 
 use super::interp::FiberStop;
 use super::*;
@@ -43,7 +43,7 @@ impl HostWakeState {
 /// most once.
 pub(crate) struct FiberWaker {
     fiber_id: u32,
-    /// True while `fiber_id` is queued in `HostWakeState::woken_fibers`.
+    /// True if `HostWakeState::woken_fibers` contains `fiber_id`.
     is_queued: AtomicBool,
     wake_state: Arc<HostWakeState>,
 }
@@ -355,7 +355,7 @@ impl Vm {
         self.heap.fiber_bytes += (fiber.native_calls.capacity() - old_capacity) * std::mem::size_of::<ActiveNativeCall>();
     }
 
-    /// Pops the innermost async native call from `fiber` and clears its roots.
+    /// Pops the innermost async native call from `fiber`. Clears its root table.
     fn pop_native_call(&mut self, fiber: &mut Fiber) {
         if let Some(active_call) = fiber.native_calls.pop() {
             active_call.call.state.lock().roots = Vec::new();
@@ -443,10 +443,9 @@ impl Vm {
         woke_any
     }
 
-    /// Returns the active host-event [`WaitKind`].
+    /// Returns the active host-event [`WaitKind`], if any.
     ///
-    /// Prefers [`WaitKind::User`] if any task waits for user input. Returns
-    /// `None` if every task is runnable or blocked on VM state.
+    /// Prefers [`WaitKind::User`] over [`WaitKind::Io`] if tasks wait on both.
     pub(crate) fn host_wait_kind(&self) -> Option<WaitKind> {
         let counts = &self.host.interrupt.wake_state.host_wait_counts;
         [WaitKind::User, WaitKind::Io].into_iter().find(|&kind| counts[kind as usize].load(Ordering::Relaxed) > 0)
@@ -481,8 +480,8 @@ fn run_fiber_turn(vm: &mut MutexGuard<'_, Vm>, shared_vm: &SharedVm, fiber: &mut
 /// Polls the top async native call of `fiber`.
 ///
 /// Releases the VM lock during each poll. Handles collection requests in place.
-/// Returns `Ok(None)` if the call finishes or starts a Sand callback. Returns
-/// `Ok(Some(stop))` if the call blocks on a host event or requests a prompt.
+/// Returns `Ok(None)` after `Poll::Ready` or a Sand callback request. Returns
+/// `Ok(Some(stop))` on a host-event wait or a permission prompt.
 fn poll_native_call(vm: &mut MutexGuard<'_, Vm>, shared_vm: &SharedVm, fiber: &mut Fiber) -> Result<Option<FiberStop>, RunEnding> {
     let mut collected = false;
     loop {
@@ -547,8 +546,7 @@ enum Pause<S> {
     Idle,
 }
 
-/// Runs tasks from `vm.ready` until the ready queue empties, `stop_policy`
-/// ends the drive, a task requests a prompt, or the scheduler yields.
+/// Runs ready fibers from `vm.ready` until a [`Pause`] condition stops the loop.
 fn run_ready<U: DriveUntil>(
     vm: &mut MutexGuard<'_, Vm>,
     shared_vm: &SharedVm,
@@ -562,12 +560,12 @@ fn run_ready<U: DriveUntil>(
             continue;
         }
         vm.current = fiber_id;
-        // Pass deadlines to the meter so long native calls can check time limits.
+        // Set meter deadlines for time-limit checks inside long native calls.
         let mut fuel = vm.meter.start_slice(timer.cpu_deadline(vm.host.limits.max_cpu_time), vm.deadline);
         let turn_result = run_fiber_turn(vm, shared_vm, &mut fiber, &mut fuel);
         vm.meter.sync(fuel);
         timer.ran(vm.meter.spent());
-        // Publish heap usage so background I/O readers enforce `max_memory`.
+        // Share current heap usage with background I/O readers for `max_memory` checks.
         let used = vm.heap.used();
         vm.heap.io_memory.publish_heap(used);
         vm.current = u32::MAX;

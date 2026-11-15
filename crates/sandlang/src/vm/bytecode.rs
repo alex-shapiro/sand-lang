@@ -1182,10 +1182,10 @@ impl Proto {
 
     /// Builds the [`CALLBACK_PROTO`] trampoline prototype.
     ///
-    /// The caller writes the callee to register 0 and the arguments to registers
-    /// `1..=argc`. At [`Proto::callback_entry`], the interpreter calls the
-    /// callee with `argc` arguments. After the callee returns, the interpreter
-    /// executes [`Op::ResumeNative`].
+    /// The caller writes the callee to register 0. It writes the arguments to
+    /// registers `1..=argc`. At [`Proto::callback_entry`], the interpreter
+    /// calls the callee with `argc` arguments. After the callee returns, the
+    /// interpreter executes [`Op::ResumeNative`].
     pub(crate) fn callback_trampoline() -> Proto {
         let code: Vec<Op> =
             (0..=MAX_CALLBACK_ARGS as u8).flat_map(|argc| [Op::CallR { callee: 0, base: 1, dst: 0, argc }, Op::ResumeNative]).collect();

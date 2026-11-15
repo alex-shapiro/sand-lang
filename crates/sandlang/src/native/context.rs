@@ -11,13 +11,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-/// Context for accessing the VM, rooting heap values, and calling Sand
-/// functions inside [`Later::new`](super::func::Later::new).
+/// VM and callback handle for a [`Later::new`](super::func::Later::new) future.
 ///
 /// [`Later::new`](super::func::Later::new) passes a `NativeContext` to the
 /// closure that builds the future. The engine runs that future on the calling
-/// Sand task. While the future waits, the scheduler can run other tasks. The
-/// garbage collector can free any unrooted heap value during a wait.
+/// Sand task. During a wait, the scheduler can run other tasks. The garbage
+/// collector can free any unrooted heap value during a wait.
 ///
 /// [`NativeContext::call`] and [`NativeContext::step`] borrow `&mut self`. A
 /// future can therefore await a single VM request at a time:
@@ -99,10 +98,8 @@ pub(crate) struct AsyncNativeCall {
 }
 
 impl AsyncNativeCall {
-    /// Builds an async native call from `build`.
-    ///
-    /// After the inner future finishes, the call wrapper converts the output
-    /// into a [`VmValue`].
+    /// Builds an async native call that converts `build`'s future output into a
+    /// [`VmValue`].
     pub fn new<F, R>(wait_kind: WaitKind, build: impl FnOnce(NativeContext) -> F) -> AsyncNativeCall
     where
         F: Future<Output = R> + Send + 'static,
@@ -151,19 +148,20 @@ impl NativeContext {
     ///
     /// # Panics
     ///
-    /// Panics if `rooted` is out of bounds for this call's root table. The
-    /// engine clears the root table after this native call returns.
+    /// Panics after this native call returns. Also panics if `rooted` is out of
+    /// bounds for this call's root table.
     pub fn value(&self, rooted: RootedValue) -> VmValue {
         self.state.lock().roots[rooted.0 as usize]
     }
 
     /// Calls the Sand function `callee` with `args` on the calling task.
     ///
-    /// Returns the callback's return value as a [`RootedValue`]. While `callee`
-    /// waits, the scheduler can run other tasks. On task cancellation during
-    /// `callee`, the engine runs `callee`'s `defer` blocks, drops this native
-    /// future, and unwinds the caller. After the engine starts `callee`, it
-    /// runs `callee` to completion before polling this future again.
+    /// Returns the callback's return value as a [`RootedValue`]. During a
+    /// `callee` wait, the scheduler can run other tasks. On task cancellation
+    /// during `callee`, the engine runs `callee`'s `defer` blocks before
+    /// dropping this native future. It then unwinds the caller. After the
+    /// engine starts `callee`, it runs `callee` to completion before polling
+    /// this future again.
     ///
     /// # Panics
     ///
@@ -231,13 +229,13 @@ impl NativeContext {
         result
     }
 
-    /// Submits `request` to the scheduler and waits for the next poll.
+    /// Builds a future that submits `request` to the scheduler.
     fn wait_for_request(&mut self, request: VmRequest) -> VmRequestFuture<'_> {
         VmRequestFuture { context: self, request: Some(request) }
     }
 }
 
-/// Future that submits a [`VmRequest`] and waits for the next scheduler poll.
+/// Future that yields a [`VmRequest`] to the scheduler for a single poll.
 ///
 /// If the caller drops this future before the scheduler takes the request,
 /// [`Drop`] clears the pending request.

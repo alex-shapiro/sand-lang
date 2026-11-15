@@ -417,10 +417,10 @@ impl<const N: u8> SandType for Reflect<N> {
 /// A [`NativeFunction`](super::func::NativeFunction) that takes `&mut Vm` can
 /// accept and return `VmVal<T>` to pass heap handles directly.
 ///
-/// A `VmVal` is valid only during the `&mut Vm` call that received or
-/// allocated it. Garbage collection during a wait can free an unrooted heap
-/// object. `VmVal`, [`Param`], [`Num`], and [`Reflect`] are therefore `!Send`.
-/// The compiler rejects these VM handles in three places:
+/// A `VmVal` is valid only until the call returns or suspends. Garbage
+/// collection during a wait can free an unrooted heap object. `VmVal`,
+/// [`Param`], [`Num`], and [`Reflect`] are therefore `!Send`. The compiler
+/// rejects these VM handles in three places:
 ///
 /// - a [`NativeObject`](super::NativeObject)
 /// - the future of an async native function

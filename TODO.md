@@ -31,13 +31,14 @@ The host cannot rely on engine limits, stability, or control.
       compiler therefore accepts a future that keeps a `VmValue` across a wait.
       `NativeContext::value` and `NativeContext::with_vm` return raw `VmValue`
       handles. A Sand callback in `NativeContext::call` can trigger garbage
-      collection during a wait. After garbage collection, a read of a stale
-      `VmValue` returns an unrelated object or panics. The engine reports a
-      caught panic as an internal error. Under `panic = "abort"`, the Rust
-      runtime aborts the process on a panic. If a caller passes a `RootedValue`
-      to another call's `NativeContext`, `NativeContext::value` reads the wrong
-      root slot. Either wrap host values in a `!Send` handle or check a
-      generation counter on each heap slot.
+      collection during a wait. After garbage collection, the VM returns an
+      unrelated object from a reused heap slot. If collection shrank the heap,
+      the VM panics on an out-of-bounds slot. The engine reports a caught panic
+      as an internal error. Under `panic = "abort"`, the Rust runtime aborts the
+      process on a panic. If a caller passes a `RootedValue` to another call's
+      `NativeContext`, `NativeContext::value` reads the wrong root slot. Either
+      wrap host values in a `!Send` handle or check a generation counter on each
+      heap slot.
 - [ ] ❓ _Embedding._ Detect collection changes during an async native walk. A
       Sand callback in `NativeContext::call` can mutate a collection during
       iteration. Either fail on mutation as in CPython or iterate over a
@@ -67,7 +68,7 @@ The host cannot rely on engine limits, stability, or control.
       then ends the run with an internal error.
 - [ ] ❓ _Embedding._ Yield to the host executor under a fixed host clock. The
       scheduler checks `YIELD_EVERY` against the host `Clock`. A manual or
-      replay clock returns a fixed timestamp unless the host advances it. The
+      replay clock returns a fixed timestamp between host advances. The
       scheduler then skips time-based yields. Long Sand loops can starve other
       tasks on the host executor.
 - [ ] ❓ _Memory._ Share standard library and host module bytecode across

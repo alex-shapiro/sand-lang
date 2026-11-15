@@ -2181,7 +2181,7 @@ wait.
 runs the returned future on the calling task. `NativeContext` provides four
 operations:
 
-- `with_vm(f)` runs `f` with `&mut Vm` while the engine polls the call.
+- `with_vm(f)` runs `f` with `&mut Vm` during an active poll of the call.
 - `root(value)` keeps a heap value alive until the native call returns. It
   returns a `RootedValue` handle. `value(rooted)` reads that `VmValue` from the
   call's root table.
@@ -2190,20 +2190,21 @@ operations:
   collects garbage before running `f` again. After a permission request, the
   engine prompts the user before running `f` again.
 - `call(callee, args)` calls a Sand function with at most 255 arguments on the
-  calling task. While `callee` waits, the scheduler can run other tasks. After
+  calling task. During a `callee` wait, the scheduler can run other tasks. After
   the engine starts `callee`, it runs `callee` to completion before polling the
   native future again. The engine polls timers or other `select!` branches
   inside the native future only after `callee` returns.
 
 Each callback uses two frames toward `max_call_depth`. On task cancellation
-during a callback, the engine runs the callee's `defer` blocks, drops the
-native future, and runs the caller's `defer` blocks.
+during a callback, the engine runs the callee's `defer` blocks before dropping
+the native future. It then runs the caller's `defer` blocks.
+
+The engine keeps rooted values and callback results alive until the native call
+returns.
 
 Bound the recursion depth of any async native function. The engine charges only
 the top-level future and its root table against `max_memory`. A recursive async
-native function allocates nested boxed futures outside that memory count. The
-engine keeps rooted values and callback results alive until the native call
-returns.
+native function allocates nested boxed futures outside that memory count.
 
 Four derive macros bind a Rust type to a Sand type in a native module. Each
 macro implements `NamedType`, `SandType`, `FromVmValue`, and `IntoVmValue`.
@@ -2287,21 +2288,25 @@ returns a Sand `Result` or aborts the run on failure:
   `Result<T, HostError<Fail>>`. If the future returns a memory-limit `Fail`,
   the engine ends the run. Call `NativeContext::step` to collect garbage before
   retrying a limit check.
-- A future makes scheduler requests only through its `NativeContext`. Its
-  output is `T`, `Result<T, Fail>`, or `Result<T, HostError<Fail>>`, for any `T`
-  that implements `IntoVmValue`.
+- A future makes scheduler requests only through its `NativeContext`. For any
+  `T` that implements `IntoVmValue`, the future returns:
+  - `T`
+  - `Result<T, Fail>`
+  - `Result<T, HostError<Fail>>`
 
 To check a sandbox capability inside a function that takes `&mut Vm`, call
 `Vm::require(&capability)` (§14). `Vm::require` returns an error of kind
-`"permission_denied"` if the policy denies the request. A function that takes
-`&mut Vm` must check capabilities and limits before any side effect. The engine
-runs the function again from the start after a permission prompt or a garbage
-collection during a memory or resource check. With `Config::retry_stress`
+`"permission_denied"` if the policy denies the request.
+
+A function that takes `&mut Vm` must check capabilities and limits before any
+side effect. The engine restarts the function from the start after a permission
+prompt or limit-triggered garbage collection. With `Config::retry_stress`
 enabled, the engine fails the first memory or resource check in each `&mut Vm`
-call and in each poll of a `Later` future. After a native function or future
-finishes, the engine converts the return value before checking `max_memory`. If
-heap usage exceeds `max_memory`, the engine collects garbage before enforcing
-the limit.
+call and in each `Later` poll.
+
+The engine converts a native call's return value before checking `max_memory`.
+If heap usage then exceeds `max_memory`, the engine collects garbage before
+enforcing the limit.
 
 | Rust type                         | Sand type                                             |
 | --------------------------------- | ----------------------------------------------------- |

@@ -50,13 +50,12 @@ impl Signature {
 ///   borrow `&str`, `&[u8]`, or `&T` from the VM heap. The return type
 ///   implements [`NativeReturn<Ctl>`].
 /// - **Synchronous with `&mut Vm` first.** Each parameter after `&mut Vm` is an
-///   owned [`NativeParam`] type, such as `String` or
-///   [`VmVal`](super::ty::VmVal). The return type implements
+///   owned [`NativeParam`] type. The return type implements
 ///   [`NativeReturn<Ctl>`]. Check permissions and limits before any side
-///   effect. The engine runs the function again from the start after a
-///   permission prompt or a garbage collection during a memory or resource
-///   check. Return a [`Later`] to suspend the calling task on a future. That
-///   future can await host I/O and call Sand functions.
+///   effect. The engine restarts the function from the start after a
+///   permission prompt or limit-triggered garbage collection. Return a
+///   [`Later`] to suspend the calling task on a future. That future can await
+///   host events or Sand callbacks.
 /// - **Asynchronous.** A function that returns a future suspends only the
 ///   calling Sand task. Each parameter is an owned `Send` [`NativeParam`] type.
 ///   The future and its output are `Send`. The output implements
@@ -362,10 +361,10 @@ where
     ///
     /// The engine passes the call's [`NativeContext`] to `build` before the
     /// first poll. Inside `build`, call [`NativeContext::root`] to root heap
-    /// values before returning the future. Call [`NativeContext::with_vm`] and
-    /// [`NativeContext::step`] only inside the returned future. After the
-    /// future returns `Ready`, the engine converts its output into the Sand
-    /// return value.
+    /// values before returning the future. Access the VM through
+    /// [`NativeContext`] only inside the returned future. After the future
+    /// returns `Ready`, the engine converts its output into the Sand return
+    /// value.
     ///
     /// `wait_kind` classifies host I/O waits. Pass [`WaitKind::User`] if the
     /// task waits for user input. The engine excludes [`WaitKind::User`] wait

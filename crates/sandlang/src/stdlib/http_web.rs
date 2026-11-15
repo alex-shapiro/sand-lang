@@ -75,7 +75,7 @@ fn send(
     let received = async move {
         let _abort = AbortOnDrop(id);
         let (status, headers, body, reservation) = done.await.unwrap_or_else(|_| Err(IoFailure::new("io", "the request was abandoned")))?;
-        // Browser `fetch` buffers `body` off-heap upfront. `BodyReader` holds `reservation` until the script reads or closes the body.
+        // Browser `fetch` buffers `body` outside the VM heap. `BodyReader` holds `reservation` until it drops `body`.
         let reader = BodyReader::new(Box::new(MemoryBody::new(body)), max_body, Some(reservation));
         Ok(NewResponseStream { url: text, status, headers, reader })
     };

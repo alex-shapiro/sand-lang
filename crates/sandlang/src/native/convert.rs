@@ -75,8 +75,8 @@ pub trait IntoVmValue: SandType {
 /// Call [`HostError::new`] to construct a recoverable script error. Use `?` to
 /// propagate a [`Fail`], a [`Ctl`], or a `std::io::Error`.
 ///
-/// `C` is the control signal that aborts or suspends the call. Synchronous
-/// functions use `HostError<Ctl>`. Futures submit scheduler requests through
+/// `C` is the control signal that stops the call. Synchronous functions use
+/// `HostError<Ctl>`. Futures submit scheduler requests through
 /// [`NativeContext`](super::context::NativeContext) instead of [`Ctl`]. The
 /// compiler therefore rejects [`Ctl`] conversions into `HostError<Fail>`:
 ///

@@ -622,7 +622,7 @@ pub struct Vm {
     /// safety. [`Session`](crate::session::Session) resets its state if `broken`
     /// is `true`.
     pub(crate) broken: bool,
-    /// Forces the first memory or resource check in each `&mut Vm` call, `Later` poll, and retryable instruction to fail. See [`crate::engine::Config::retry_stress`].
+    /// Enables retry-stress limit failures. See [`crate::engine::Config::retry_stress`].
     pub(crate) retry_stress: bool,
     /// True while `retry_stress` runs an instruction a second time after garbage collection.
     pub(crate) instruction_retried: bool,
@@ -1750,7 +1750,7 @@ impl Vm {
         out.into_iter().next()
     }
 
-    /// Appends the stack trace entries for `proto` at instruction `at` to `out`,
+    /// Appends stack trace frames for `proto_id` at instruction `at` to `out`,
     /// from innermost inlined call to outermost.
     fn trace_frame(&self, proto_id: u32, at: u32, out: &mut Vec<TraceFrame>) {
         let proto = &self.prog.protos[proto_id as usize];
