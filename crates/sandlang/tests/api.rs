@@ -2222,7 +2222,7 @@ fn script_with_deferred_task(deferred: &str) -> String {
 
 #[cfg(feature = "os")]
 #[test]
-fn exit_from_a_finisher_ends_a_test_like_a_script_exit() {
+fn exit_from_a_future_ends_a_test_like_a_script_exit() {
     let dir = TempDir::new("exit-tests");
     let main = dir.write("t.sand", "import quit\ntest \"zero\" { quit.now(0) }\ntest \"one\" { quit.now(1) }\ntest \"plain\" { exit(0) }");
     let mut engine = Engine::new(Config::new().host_modules(quit_module()));
@@ -2233,7 +2233,7 @@ fn exit_from_a_finisher_ends_a_test_like_a_script_exit() {
 
 #[cfg(feature = "os")]
 #[test]
-fn exit_from_a_finisher_in_module_init_fails_each_test_like_a_script_exit() {
+fn exit_from_a_future_in_module_init_fails_each_test_like_a_script_exit() {
     for code in [0, 4] {
         let dir = TempDir::new("exit-init");
         let main = dir.write("t.sand", &format!("import quit\nquit.now({code})\ntest \"t\" {{ }}"));
@@ -2244,7 +2244,7 @@ fn exit_from_a_finisher_in_module_init_fails_each_test_like_a_script_exit() {
 }
 
 #[test]
-fn exit_from_a_finisher_in_deferred_code_sets_the_exit_code() {
+fn exit_from_a_future_in_deferred_code_sets_the_exit_code() {
     for deferred in ["quit.now(5)", "exit(5)"] {
         let (outcome, _, _) = run_src(Config::new().host_modules(quit_module()), &script_with_deferred_task(deferred));
         assert_eq!(outcome.unwrap().exit_code, 5, "{deferred}");
@@ -3987,12 +3987,11 @@ fn host_modules_can_define_resources() {
 fn host_errors_are_err_values_and_aborts_end_the_run() {
     use sandlang::native::convert::HostError;
     use sandlang::native::func::Later;
-    use sandlang::vm::WaitKind;
-    use sandlang::vm::{Fail, Vm};
+    use sandlang::vm::{Fail, WaitKind};
     let mut m = NativeModule::new("errs");
     m.function("now", || -> Result<i64, HostError> { Err(HostError::new("invalid", "bad input")) });
     m.function("later", || -> Result<Later<i64, HostError>, HostError> {
-        Ok(Later::new(WaitKind::Io, async { |_: &mut Vm| Err(HostError::new("io", "broken pipe")) }))
+        Ok(Later::new(WaitKind::Io, |_| async { Err(HostError::new("io", "broken pipe")) }))
     });
     m.function("abort", || -> Result<i64, HostError> { Err(Fail::runtime_error("invalid", "no result").into()) });
     let run = |src: &str| run_src(Config::new().host_modules(HostModules::new([m.clone()]).unwrap()), &format!("import errs\n{src}"));
@@ -4007,12 +4006,10 @@ fn host_errors_are_err_values_and_aborts_end_the_run() {
 fn natives_that_cannot_make_scheduler_requests_return_fail() {
     use sandlang::native::convert::HostError;
     use sandlang::native::func::Later;
-    use sandlang::vm::{Fail, Vm, WaitKind};
+    use sandlang::vm::{Fail, WaitKind};
     let mut m = NativeModule::new("fails");
     m.function("stop", || -> Result<i64, Fail> { Err(Fail::runtime_error("invalid", "no result")) });
-    m.function("later_exit", || -> Result<Later<i64, Fail>, Fail> {
-        Ok(Later::new(WaitKind::Io, async { |_: &mut Vm| Err(Fail::exit(7)) }))
-    });
+    m.function("later_exit", || -> Result<Later<i64, Fail>, Fail> { Ok(Later::new(WaitKind::Io, |_| async { Err(Fail::exit(7)) })) });
     m.function("async_ok", || async { Ok::<i64, HostError<Fail>>(4) });
     m.function("async_err", || async { Err::<i64, HostError<Fail>>(HostError::new("io", "broken pipe")) });
     m.function("async_stop", || async { Err::<i64, Fail>(Fail::runtime_error("invalid", "no result")) });
@@ -4083,18 +4080,16 @@ fn native_functions_take_async_closures_and_twelve_params() {
 }
 
 #[test]
-fn later_new_finishers_and_later_ready_return_vm_handles() {
+fn later_new_futures_and_later_ready_return_vm_handles() {
     use sandlang::native::func::Later;
     use sandlang::native::ty::VmVal;
     use sandlang::vm::WaitKind;
     let mut m = NativeModule::new("handles");
     m.function("after_wait", |_: &mut Vm, n: i64| -> Result<Later<VmVal<String>, Fail>, Fail> {
-        Ok(Later::new(WaitKind::Io, async move {
+        Ok(Later::new(WaitKind::Io, move |cx| async move {
             tokio::task::yield_now().await;
-            move |vm: &mut Vm| {
-                let v = format!("made {n}").into_vm_value(vm)?;
-                Ok(VmVal::<String>::from_raw(v))
-            }
+            let v = cx.with_vm(|vm| format!("made {n}").into_vm_value(vm))?;
+            Ok(VmVal::<String>::from_raw(v))
         }))
     });
     m.function("now", |vm: &mut Vm, n: i64| -> Result<Later<VmVal<String>, Fail>, Fail> {

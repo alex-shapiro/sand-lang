@@ -86,8 +86,8 @@ pub trait IntoVmValue: SandType {
 /// }
 /// ```
 ///
-/// Make a helper generic over `C` to share it between a native function and a
-/// finisher:
+/// Make a helper generic over `C` to share it between a native function and the
+/// future of a [`Later`](super::func::Later):
 ///
 /// ```
 /// # use sandlang::native::convert::HostError;

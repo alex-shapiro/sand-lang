@@ -20,9 +20,11 @@ use crate::stdlib::time::TimeZone;
 use crate::types::{FnId, ModId};
 use crate::vm::bytecode::Program;
 use crate::vm::heap::GcStats;
-use crate::vm::sched::IoShared;
+use crate::vm::sched::{self, IoShared};
 use crate::vm::value::VmValue;
-use crate::vm::{Always, Host, HostFn, NativeEntry, OutputSink, Rng, RunEnding, SharedSink, TraceFrame, Trap, Vm, WaitKind, entropy_seed};
+use crate::vm::{
+    Always, Host, HostFn, NativeEntry, OutputSink, Rng, RunEnding, SharedSink, SharedVm, TraceFrame, Trap, Vm, WaitKind, entropy_seed,
+};
 use parking_lot::Mutex;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
@@ -1223,19 +1225,19 @@ impl Engine {
         let mut deadline = compiled.deadline;
         let mut report = TestReport::default();
         for (tname, proto) in prog.tests.clone() {
-            let mut vm = self.new_vm(prog.clone(), &compiled.host_modules, cwd.clone(), true, &call);
-            vm.deadline = deadline;
-            let init = vm.run_main(prog.entry).await;
+            let vm = self.new_vm(prog.clone(), &compiled.host_modules, cwd.clone(), true, &call);
+            vm.lock().deadline = deadline;
+            let init = sched::run_main(&vm, prog.entry).await;
             let failure = match init {
                 Ok(_) => {
-                    vm.ready.clear();
-                    let run_result = vm.run_main(proto).await;
-                    test_failure(end_run(&mut vm, run_result).await)?
+                    vm.lock().ready.clear();
+                    let run_result = sched::run_main(&vm, proto).await;
+                    test_failure(end_run(&vm, run_result).await)?
                 }
                 Err(RunEnding::Exit(code)) => Some(format!("module exited with code {code}")),
                 Err(RunEnding::Trap(trap)) => test_failure(Err(trap.into()))?,
             };
-            deadline = vm.deadline;
+            deadline = vm.lock().deadline;
             report.results.push(TestResult { name: tname, passed: failure.is_none(), message: failure });
         }
         self.recycle(prog, compiled.snapshot);
@@ -1264,7 +1266,14 @@ impl Engine {
     }
 
     /// Creates a VM to execute `prog` with `host_modules` during `call`.
-    pub(crate) fn new_vm(&self, prog: Arc<Program>, host_modules: &HostModules, cwd: PathBuf, quiet: bool, call: &CallInterrupt) -> Vm {
+    pub(crate) fn new_vm(
+        &self,
+        prog: Arc<Program>,
+        host_modules: &HostModules,
+        cwd: PathBuf,
+        quiet: bool,
+        call: &CallInterrupt,
+    ) -> SharedVm {
         let c = &self.config;
         let stdin = match &c.stdin {
             StdinConfig::None => None,
@@ -1311,7 +1320,7 @@ impl Engine {
             vm.heap.next_gc = 0;
         }
         vm.retry_stress = c.retry_stress;
-        vm
+        Arc::new(Mutex::new(vm))
     }
 
     async fn execute(&mut self, call: &CallInterrupt, compiled: Compiled, cwd: PathBuf) -> Result<Outcome, Error> {
@@ -1326,12 +1335,12 @@ impl Engine {
                 }
             }
         }
-        let mut vm = self.new_vm(prog.clone(), &compiled.host_modules, cwd, false, call);
-        vm.deadline = compiled.deadline;
-        let main_result = vm.run_main(prog.entry).await;
-        let run_result = end_run(&mut vm, main_result).await;
+        let vm = self.new_vm(prog.clone(), &compiled.host_modules, cwd, false, call);
+        vm.lock().deadline = compiled.deadline;
+        let main_result = sched::run_main(&vm, prog.entry).await;
+        let run_result = end_run(&vm, main_result).await;
         let _ = self.config.stdout.flush();
-        self.gc_stats = vm.heap.stats;
+        self.gc_stats = vm.lock().heap.stats;
         if self.config.exit_after_run {
             std::mem::forget(vm);
         } else {
@@ -1767,9 +1776,9 @@ const MAX_DISCOVERY_ERRORS: usize = 100;
 
 /// Finishes a VM run after the main task returns `main_result`. Returns
 /// the exit code or error.
-async fn end_run(vm: &mut Vm, main_result: Result<VmValue, RunEnding>) -> Result<i32, Error> {
+async fn end_run(vm: &SharedVm, main_result: Result<VmValue, RunEnding>) -> Result<i32, Error> {
     let ended = match main_result {
-        Ok(_) => vm.end_tasks().await,
+        Ok(_) => sched::end_tasks(vm).await,
         Err(ending) => Err(ending),
     };
     match ended {

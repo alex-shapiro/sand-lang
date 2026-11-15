@@ -2168,13 +2168,37 @@ that a VM handle refers to. Each VM handle type is therefore `!Send`, and the
 compiler rejects it in these places:
 
 - a parameter or output of an async native function
-- the future or finisher closure of `Later::new`
+- the future of `Later::new`
 - a `NativeObject`
 
 `IntoVmValue::into_vm_value` and `Vm` allocation methods return a raw
 `VmValue`. The compiler does not check `VmValue` across a wait. Do not hold a
-raw `VmValue` across a wait; allocate the value in the `Later::new` finisher
-instead.
+raw `VmValue` across a wait; root it with `NativeContext::root` instead.
+
+`Later::new(wait_kind, build)` passes a `NativeContext` to `build`, which
+returns the future. The future runs on the calling task and uses the context
+for these operations:
+
+- `with_vm(f)` runs `f` with `&mut Vm`. A raw `VmValue` from the VM is valid
+  until the next wait.
+- `root(value)` returns a `Send` `RootedValue` that keeps `value` alive until
+  the native call returns. `value(rooted)` reads it.
+- `call(callee, args).await` runs a Sand function on the calling task and
+  returns its rooted result. The callee can wait on I/O, and the scheduler
+  runs other tasks meanwhile. The callee takes at most 255 arguments.
+- `check_memory(bytes).await` collects garbage in place if `bytes` more heap
+  bytes exceed `max_memory`, and then fails with a memory limit error if they
+  still exceed it.
+- `require(capability).await` checks a capability and prompts the user if the
+  policy requires a prompt.
+
+Sand frames and native calls count toward `max_call_depth` together. If a
+task is cancelled during a callback, the engine runs the callee's `defer`
+blocks, drops the native future, and then runs the caller's `defer` blocks.
+The engine counts the size of each native future and its roots against
+`max_memory`. A future must not make two requests in one poll, and must not
+wait on host I/O while it waits on a request; the engine reports two requests
+as an internal error.
 
 Four derive macros bind a Rust type to a Sand type in a native module. Each
 macro implements `NamedType`, `SandType`, `FromVmValue`, and `IntoVmValue`.
@@ -2248,15 +2272,14 @@ returns a Sand `Result` or aborts the run on failure:
 - `Result<T, Ctl>` maps to the Sand return type `T`. A `Ctl` is a `Fail` or a
   request to the scheduler, such as a permission prompt.
 - `Result<Later<T, E>, E>` suspends the calling task on a future and maps to
-  the same Sand return type as `Result<T, E>`. `Later::new(wait_kind, fut)`
-  sets the `WaitKind` of `fut`. Use `WaitKind::User` if the task waits for a
-  user action so that idle wait time does not count toward `max_wall_time`
-  (§16.2). An async native function uses `WaitKind::Io`. The finisher closure
-  that `fut` returns runs after the wait, so it cannot make a scheduler
-  request. The finisher can allocate and return a new VM handle. If `E` is
-  `Ctl` or `Fail`, the finisher returns `Result<T, Fail>`. If `E` is
-  `HostError`, the finisher returns `Result<T, HostError<Fail>>`.
-- A future that a native function returns cannot make scheduler requests. Its
+  the same Sand return type as `Result<T, E>`. `Later::new(wait_kind, build)`
+  sets the `WaitKind` of host I/O waits. Use `WaitKind::User` if the task
+  waits for a user action so that idle wait time does not count toward
+  `max_wall_time` (§16.2). An async native function uses `WaitKind::Io`. If
+  `E` is `Ctl` or `Fail`, the future returns `Result<T, Fail>`. If `E` is
+  `HostError`, the future returns `Result<T, HostError<Fail>>`. The engine
+  does not run the future again after a memory limit error.
+- A future makes scheduler requests only through its `NativeContext`. Its
   output is a type that converts to a Sand value, `Result<T, Fail>`, or
   `Result<T, HostError<Fail>>`.
 

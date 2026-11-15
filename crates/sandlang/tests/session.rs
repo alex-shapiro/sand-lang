@@ -903,7 +903,7 @@ fn quit_module() -> HostModules {
 }
 
 #[test]
-fn exit_from_a_finisher_ends_the_input() {
+fn exit_from_a_future_ends_the_input() {
     let mut repl = Repl::with(Config::new().host_modules(quit_module()));
     repl.ok("import quit\nprint(\"a\")\nquit.now(3)\nprint(\"b\")");
     assert_eq!(repl.session.exit_code(), Some(3));
@@ -912,7 +912,7 @@ fn exit_from_a_finisher_ends_the_input() {
 }
 
 #[test]
-fn exit_from_a_finisher_in_a_task_between_inputs() {
+fn exit_from_a_future_in_a_task_between_inputs() {
     let mut repl = Repl::with(Config::new().host_modules(quit_module()));
     repl.ok("import quit\nspawn { task.sleep(10ms)\nquit.now(7) };");
     let got =
@@ -1284,13 +1284,13 @@ fn cancelled_read_resumes_wall_time_limit() {
 }
 
 fn waits_module() -> NativeModule {
-    async fn wait() -> impl FnOnce(&mut Vm) -> Result<(), Fail> {
+    async fn wait() -> Result<(), Fail> {
         tokio::time::sleep(Duration::from_secs(10)).await;
-        |_: &mut Vm| Ok(())
+        Ok(())
     }
     let mut m = NativeModule::new("waits");
-    m.function("user", |_: &mut Vm| Ok::<_, Fail>(Later::new(WaitKind::User, wait())));
-    m.function("io", |_: &mut Vm| Ok::<_, Fail>(Later::new(WaitKind::Io, wait())));
+    m.function("user", |_: &mut Vm| Ok::<_, Fail>(Later::new(WaitKind::User, |_| wait())));
+    m.function("io", |_: &mut Vm| Ok::<_, Fail>(Later::new(WaitKind::Io, |_| wait())));
     m.function("async_io", || tokio::time::sleep(Duration::from_secs(10)));
     m
 }

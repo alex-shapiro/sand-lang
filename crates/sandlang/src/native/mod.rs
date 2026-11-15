@@ -1,5 +1,6 @@
 //! Native module registration and Rust-to-Sand type bindings.
 
+pub mod context;
 pub mod convert;
 pub mod func;
 pub mod ty;

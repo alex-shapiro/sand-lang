@@ -425,7 +425,10 @@ impl<const N: u8> SandType for Reflect<N> {
 ///
 /// - a [`NativeObject`](super::NativeObject)
 /// - the future of an async native function
-/// - the future or finisher closure of [`Later::new`](super::func::Later::new)
+/// - the future of [`Later::new`](super::func::Later::new)
+///
+/// To keep a value across a wait, root it with
+/// [`NativeContext::root`](super::context::NativeContext::root).
 ///
 /// ```compile_fail,E0277
 /// # use sandlang::native::ty::VmVal;

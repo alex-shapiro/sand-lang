@@ -30,19 +30,19 @@ impl<C> From<IoFailure> for HostError<C> {
 
 pub(crate) type Suspended<T> = Result<Later<T, HostError>, HostError>;
 
-/// Result of a finisher closure for a suspended I/O call.
+/// Result of the VM step that ends a suspended I/O call.
 pub(crate) type FinishResult<T> = Result<T, HostError<Fail>>;
 
 /// Suspends the calling task on `fut` with `wait_kind`. If `fut` returns `Ok`,
-/// runs `ok` on the VM thread to produce the Sand result.
+/// runs `ok` with the VM to produce the Sand result.
 pub(crate) fn suspend<T: Send + 'static, R: IntoVmValue + 'static>(
     wait_kind: WaitKind,
     fut: impl Future<Output = Result<T, IoFailure>> + Send + 'static,
     ok: impl FnOnce(&mut Vm, T) -> FinishResult<R> + Send + 'static,
 ) -> Suspended<R> {
-    Ok(Later::new(wait_kind, async move {
-        let r = fut.await;
-        move |vm: &mut Vm| ok(vm, r?)
+    Ok(Later::new(wait_kind, |cx| async move {
+        let r = fut.await?;
+        cx.with_vm(|vm| ok(vm, r))
     }))
 }
 

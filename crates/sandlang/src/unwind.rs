@@ -1,7 +1,7 @@
 //! Defence in depth: a Rust panic reachable from a script (in the VM, a
 //! native or an I/O future) must not unwind into the host. Engine entry
 //! points run their futures inside [`CatchUnwind`]; the scheduler runs each
-//! interpreter slice and I/O finisher through [`catch`], per slice so that
+//! interpreter slice and native call poll through [`catch`], per slice so that
 //! native calls cost nothing extra. A panic becomes an error whose message
 //! starts with `internal error:`. With `panic = "abort"` the process still
 //! aborts.

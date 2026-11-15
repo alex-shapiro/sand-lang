@@ -30,17 +30,26 @@ The host cannot rely on engine limits, stability, or control.
       they are not `Send`. However, `IntoVmValue::into_vm_value` and `Vm`
       allocation methods return a raw `VmValue`. `VmValue` is `Send` because the
       heap stores it. The compiler therefore accepts a function that allocates a
-      `VmValue` before a wait and reads it in the `Later::new` finisher. After a
+      `VmValue` before a wait and reads it after the wait. After a
       garbage collection during the wait, the read returns the data of another
       object without an error. If the collector shrank the heap, the read or the
       next collection causes a panic. The engine reports the panic as an
       internal error. A `panic = "abort"` build stops the process. Options: a
       host value type that is not `Send`, or a generation check on each heap
       slot.
-- [ ] ❓ _Embedding._ Add a rooted handle that keeps a script value alive
-      across a wait. A native function cannot safely change an argument object
-      or return an early allocation after a wait. `Vm::pinned` already holds
-      garbage collection roots.
+- [ ] ❓ _Embedding._ Let a native call release roots before it returns.
+      Each `NativeContext::root` call and each callback result adds an entry
+      to the call's root table until the call returns. A walker over a list
+      of a million values keeps a million entries alive. The engine counts the
+      entries against `max_memory`. Options: `NativeContext::unroot`, or
+      scoped roots that a callback result reuses.
+- [ ] ❓ _Memory._ Count the boxes that an async native future allocates for
+      recursive calls against `max_memory`. The engine counts only the size
+      of the top-level future and its root table. A recursive walker
+      allocates one box for each nesting level of its input.
+- [ ] ❓ _Embedding._ Detect a native future that waits on a host event while
+      it waits on a VM request, for example with `select!`. The engine polls
+      the future again only after the request, so it can miss the host wake.
 - [ ] ❓ _Embedding._ Give native functions a narrow call context in place of
       `&mut Vm`. With `&mut Vm`, a native function can call public scheduler and
       collector methods such as `Vm::collect_all_garbage`. Typed accessors also

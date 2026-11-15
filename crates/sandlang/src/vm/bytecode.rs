@@ -588,6 +588,10 @@ pub enum Op {
     /// Ends a cleanup pad: leaves the frame and continues unwinding a
     /// cancelled task (`Proto::cleanups`).
     Unwind,
+    /// Ends the callback that an async native call requested: passes the
+    /// callee's result in register 0 back to the native call. Only the
+    /// [`CALLBACK_PROTO`] contains it.
+    ResumeNative,
 
     // Data structures.
     NewList {
@@ -1115,11 +1119,22 @@ impl Op {
                 | Op::RetVariant { .. }
                 | Op::RetUnit
                 | Op::Unwind
+                | Op::ResumeNative
                 | Op::TailCallDirect { .. }
                 | Op::Internal { .. }
         )
     }
 }
+
+/// The proto that runs a Sand callback for an async native call. Every
+/// program starts with it.
+pub const CALLBACK_PROTO: u32 = 0;
+
+/// Name of [`CALLBACK_PROTO`] (omitted from stack traces).
+pub const CALLBACK_PROTO_NAME: &str = "<callback>";
+
+/// Most arguments that an async native call passes to a callback.
+pub const MAX_CALLBACK_ARGS: usize = u8::MAX as usize;
 
 /// Prototype name for helper functions that evaluate field defaults and populate sets during `json.decode` (omitted from stack traces).
 pub const FILL_PROTO: &str = "<fill>";
@@ -1166,6 +1181,26 @@ pub struct Cleanup {
 }
 
 impl Proto {
+    /// Builds [`CALLBACK_PROTO`]. The callee is in register 0 and its `n`
+    /// arguments follow it. The frame starts at instruction `2 * n`, which
+    /// calls the callee and then passes its result to the native call.
+    pub(crate) fn callback() -> Proto {
+        let code: Vec<Op> =
+            (0..=MAX_CALLBACK_ARGS as u8).flat_map(|argc| [Op::CallR { callee: 0, base: 1, dst: 0, argc }, Op::ResumeNative]).collect();
+        Proto {
+            name: CALLBACK_PROTO_NAME.into(),
+            file: 0,
+            nparams: 0,
+            nregs: 1 + MAX_CALLBACK_ARGS as u16,
+            lines: vec![0; code.len()],
+            code,
+            captures: vec![],
+            cleanups: Vec::new(),
+            sites: Vec::new(),
+            inlined: Vec::new(),
+        }
+    }
+
     /// The cleanup pad for a frame stopped at instruction `pos`.
     pub fn cleanup_at(&self, pos: usize) -> Option<usize> {
         let i = self.cleanups.partition_point(|c| c.start as usize <= pos).checked_sub(1)?;

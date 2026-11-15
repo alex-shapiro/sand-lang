@@ -149,9 +149,9 @@ pub(crate) fn task() -> NativeModule {
     m.function("sleep", |vm: &mut Vm, d: SignedDuration| {
         let d = nanos(d).max(0) as u64;
         let sleep = vm.host.clock.sleep(std::time::Duration::from_nanos(d));
-        Ok::<_, Fail>(Later::new(WaitKind::Io, async move {
+        Ok::<_, Fail>(Later::new(WaitKind::Io, |_| async move {
             sleep.await;
-            |_: &mut Vm| Ok::<_, Fail>(())
+            Ok::<_, Fail>(())
         }))
     });
     m.function("yield_now", |vm: &mut Vm| Err::<(), _>(vm.yield_now()));
