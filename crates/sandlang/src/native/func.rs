@@ -276,7 +276,7 @@ where
 {
     fn into_call_result(self, vm: &mut Vm) -> Result<VmValue, Ctl> {
         match self {
-            Ok(Later(Completion::Now(r))) => Ok(E::finish_call(r, vm)?),
+            Ok(Later(Completion::Now(r))) => Ok(E::future_result(r, vm)?),
             Ok(Later(Completion::After(start))) => Err(Ctl::native_call(start)),
             Err(e) => e.stop_call(vm),
         }
@@ -295,7 +295,7 @@ pub struct Later<T, E: NativeError>(Completion<T, E>);
 /// Execution mode of a [`Later`] value.
 enum Completion<T, E: NativeError> {
     /// Returns the result without suspending the calling task.
-    Now(Result<T, E::FinishError>),
+    Now(Result<T, E::FutureError>),
     /// Suspends the calling task until the future is resolved.
     After(NativeStart),
 }
@@ -304,11 +304,11 @@ enum Completion<T, E: NativeError> {
 pub trait NativeError: Send + Sized + 'static + sealed::NativeError {
     /// Error type of the future output. It excludes scheduler requests, which
     /// the future makes through its [`NativeContext`].
-    type FinishError: 'static;
+    type FutureError: 'static;
     #[doc(hidden)]
     fn stop_call(self, vm: &mut Vm) -> Result<VmValue, Ctl>;
     #[doc(hidden)]
-    fn finish_call<T: IntoVmValue>(r: Result<T, Self::FinishError>, vm: &mut Vm) -> Result<VmValue, Fail>;
+    fn future_result<T: IntoVmValue>(r: Result<T, Self::FutureError>, vm: &mut Vm) -> Result<VmValue, Fail>;
 }
 
 mod sealed {
@@ -321,31 +321,31 @@ mod sealed {
 }
 
 impl NativeError for Ctl {
-    type FinishError = Fail;
+    type FutureError = Fail;
     fn stop_call(self, _: &mut Vm) -> Result<VmValue, Ctl> {
         Err(self)
     }
-    fn finish_call<T: IntoVmValue>(r: Result<T, Fail>, vm: &mut Vm) -> Result<VmValue, Fail> {
+    fn future_result<T: IntoVmValue>(r: Result<T, Fail>, vm: &mut Vm) -> Result<VmValue, Fail> {
         r?.into_vm_value(vm)
     }
 }
 
 impl NativeError for Fail {
-    type FinishError = Fail;
+    type FutureError = Fail;
     fn stop_call(self, _: &mut Vm) -> Result<VmValue, Ctl> {
         Err(self.into())
     }
-    fn finish_call<T: IntoVmValue>(r: Result<T, Fail>, vm: &mut Vm) -> Result<VmValue, Fail> {
+    fn future_result<T: IntoVmValue>(r: Result<T, Fail>, vm: &mut Vm) -> Result<VmValue, Fail> {
         r?.into_vm_value(vm)
     }
 }
 
 impl NativeError for HostError {
-    type FinishError = HostError<Fail>;
+    type FutureError = HostError<Fail>;
     fn stop_call(self, vm: &mut Vm) -> Result<VmValue, Ctl> {
         self.into_sand_error(vm)
     }
-    fn finish_call<T: IntoVmValue>(r: Result<T, HostError<Fail>>, vm: &mut Vm) -> Result<VmValue, Fail> {
+    fn future_result<T: IntoVmValue>(r: Result<T, HostError<Fail>>, vm: &mut Vm) -> Result<VmValue, Fail> {
         r.into_call_result(vm)
     }
 }
@@ -389,19 +389,19 @@ impl<T: IntoVmValue + 'static, E: NativeError> Later<T, E> {
     /// [`VmValue`] across a wait.
     pub fn new<F>(wait_kind: WaitKind, build: impl FnOnce(NativeContext) -> F) -> Later<T, E>
     where
-        F: Future<Output = Result<T, E::FinishError>> + Send + 'static,
+        F: Future<Output = Result<T, E::FutureError>> + Send + 'static,
     {
         Later(Completion::After(NativeStart::new(wait_kind, |cx| {
             let future = build(cx.clone());
             async move {
                 let r = future.await;
-                cx.with_vm(|vm| vm.unchecked(|vm| E::finish_call(r, vm)))
+                cx.with_vm(|vm| vm.unchecked(|vm| E::future_result(r, vm)))
             }
         })))
     }
 
     /// Returns a [`Later`] that produces `r` without suspending the calling task.
-    pub fn ready(r: Result<T, E::FinishError>) -> Later<T, E> {
+    pub fn ready(r: Result<T, E::FutureError>) -> Later<T, E> {
         Later(Completion::Now(r))
     }
 }

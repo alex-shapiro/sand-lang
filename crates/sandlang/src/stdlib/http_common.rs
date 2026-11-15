@@ -465,7 +465,7 @@ fn read_body<R: IntoVmValue + 'static>(
     vm: &mut Vm,
     body: VmVal<Body>,
     what: BodyRead,
-    done: fn(&mut Vm, Option<Vec<u8>>) -> stream::FinishResult<R>,
+    done: fn(&mut Vm, Option<Vec<u8>>) -> stream::FutureResult<R>,
 ) -> Suspended<R> {
     let body = body.get(&vm.heap)?;
     let Some(reader) = body.reader.clone() else { return Err(HostError::new("closed", "body closed")) };
