@@ -34,12 +34,12 @@ The host cannot rely on engine limits, stability, or control.
       and `with_vm` return raw values, and every `NativeContext::call` is a
       wait during which a collection can run, so async walkers hit this
       easily. After a garbage collection during the wait, the read returns the
-      data of another object without an error. A `RootedValue` has the same
-      gap: read through another call's context, it returns that call's root. If the collector shrank the heap, the read or the
-      next collection causes a panic. The engine reports the panic as an
-      internal error. A `panic = "abort"` build stops the process. Options: a
-      host value type that is not `Send`, or a generation check on each heap
-      slot.
+      data of another object without an error. If the collector shrank the
+      heap, the read or the next collection causes a panic. The engine reports
+      the panic as an internal error. A `panic = "abort"` build stops the
+      process. A `RootedValue` has the same gap: read through another call's
+      context, it returns that call's root. Options: a host value type that is
+      not `Send`, or a generation check on each heap slot.
 - [ ] ❓ _Embedding._ Detect a callback that changes a collection while an
       async native walker iterates it. `NativeContext::call` lets Sand code
       run in the middle of a walk. Options: fail on mutation like CPython, or
@@ -56,9 +56,14 @@ The host cannot rely on engine limits, stability, or control.
       allocates one box for each nesting level of its input.
 - [ ] ❓ _Embedding._ Give native functions a narrow call context in place of
       `&mut Vm`. With `&mut Vm`, a native function can call public scheduler and
-      collector methods such as `Vm::collect_all_garbage`. Typed accessors also
-      return raw `VmValue` slices. A narrow context exposes only host call
-      operations.
+      collector methods such as `Vm::collect_all_garbage`. Inside
+      `NativeContext::with_vm`, that call frees the live values of the calling
+      task, because its fiber is outside `Vm::fibers` during the poll. Typed
+      accessors also return raw `VmValue` slices. A narrow context exposes only
+      host call operations.
+- [ ] ❓ _Embedding._ Let a cancelled native future update VM state. The
+      engine drops the future while it holds the VM lock, so a `Drop` that
+      calls `with_vm` panics and the run ends with an internal error.
 - [ ] ❓ _Memory._ Share standard library and host module bytecode across
       programs. `compile_program` copies the snapshot `Program` into each
       `CompiledProgram`. A copy takes about 74 KB for `print(1)` and 173 KB

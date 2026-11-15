@@ -124,7 +124,10 @@ impl NativeContext {
     /// implementation. Do not send the context to another thread.
     pub fn with_vm<R>(&self, f: impl FnOnce(&mut Vm) -> R) -> R {
         let vm = self.call.lock().lent_vm.clone();
-        let mut vm = vm.as_deref().and_then(Mutex::try_lock).expect("`NativeContext::with_vm` runs only while the engine polls the call");
+        let mut vm = vm
+            .as_deref()
+            .and_then(Mutex::try_lock)
+            .expect("`NativeContext::with_vm` runs only while the engine polls the call, and not inside another `with_vm`");
         f(&mut vm)
     }
 
@@ -187,13 +190,8 @@ impl NativeContext {
                 permit
             });
             match permit {
-                Ok(allowed) => {
-                    return if allowed {
-                        Ok(())
-                    } else {
-                        Err(HostError::new("permission_denied", format!("permission denied: {capability}")))
-                    };
-                }
+                Ok(true) => return Ok(()),
+                Ok(false) => return Err(HostError::new("permission_denied", format!("permission denied: {capability}"))),
                 Err(_) => self.request(VmRequest::Prompt(capability.clone())).await,
             }
         }
