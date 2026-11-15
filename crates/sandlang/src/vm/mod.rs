@@ -341,6 +341,8 @@ pub struct Fiber {
     pub waiters_prune_at: usize,
     /// Async native calls in progress, innermost last.
     pub(crate) natives: Vec<sched::NativeCall>,
+    /// The kind of the host event that the innermost native call waits on.
+    pub(crate) host_wait: Option<WaitKind>,
     /// An error (`kind: message`) to raise when the fiber resumes.
     pub pending_error: Option<String>,
     /// Whether the fiber stopped in or just after a native call. Its
@@ -1387,6 +1389,7 @@ impl Vm {
                     waiters: vec![],
                     waiters_prune_at: MIN_PRUNE,
                     natives: Vec::new(),
+                    host_wait: None,
                     pending_error: None,
                     stopped_in_native_call: false,
                 });

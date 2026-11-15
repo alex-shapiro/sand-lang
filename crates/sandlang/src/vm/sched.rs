@@ -12,7 +12,7 @@ use std::time::Duration;
 /// State shared with wakers and interrupt handles.
 #[derive(Default)]
 pub struct IoShared {
-    /// The slots of the operations woken since the table last polled them.
+    /// The fibers woken since the scheduler last made them ready.
     ready: Mutex<Vec<u32>>,
     waker: Mutex<Option<Waker>>,
 }
@@ -39,38 +39,29 @@ impl IoShared {
     }
 }
 
-/// Wakes the native call in a slot of an [`IoTable`]; a stale wake-up only
-/// polls the slot's current call once more.
-struct SlotWaker {
-    slot: u32,
+/// Wakes fiber `fid`, whose innermost native call waits on a host event. A
+/// stale wake-up only polls the fiber's current native call once more.
+struct FiberWaker {
+    fid: u32,
     shared: Arc<IoShared>,
 }
 
-impl Wake for SlotWaker {
+impl Wake for FiberWaker {
     fn wake(self: Arc<Self>) {
         self.wake_by_ref();
     }
     fn wake_by_ref(self: &Arc<Self>) {
-        self.shared.ready.lock().push(self.slot);
+        self.shared.ready.lock().push(self.fid);
         self.shared.wake();
     }
 }
 
-/// The wait of fiber `fid` at generation `wait_gen` for a host event.
-struct HostWait {
-    fid: u32,
-    wait_gen: u64,
-    wait_kind: WaitKind,
-}
-
-/// The wakers of a VM's async native calls, in slots (each call owns one
-/// slot), and the waits for host events that they end.
+/// The host-event wakers of a VM's fibers, by fiber id, and the number of
+/// fibers that wait on a host event.
 #[derive(Default)]
 pub struct IoTable {
-    waits: Vec<Option<HostWait>>,
     wakers: Vec<Waker>,
-    free: Vec<u32>,
-    pending: usize,
+    waiting: usize,
     pub shared: Arc<IoShared>,
 }
 
@@ -79,56 +70,22 @@ impl IoTable {
         IoTable { shared, ..IoTable::default() }
     }
 
-    /// Reserves a slot for a native call, and returns the slot and its waker.
-    fn open_slot(&mut self) -> (u32, Waker) {
-        let slot = self.free.pop().unwrap_or_else(|| {
-            self.waits.push(None);
-            self.wakers.push(Waker::from(Arc::new(SlotWaker { slot: self.wakers.len() as u32, shared: self.shared.clone() })));
-            self.wakers.len() as u32 - 1
-        });
-        (slot, self.wakers[slot as usize].clone())
-    }
-
-    /// Releases the slot of a finished or dropped native call.
-    fn close_slot(&mut self, slot: u32) {
-        self.end_wait(slot);
-        self.free.push(slot);
-    }
-
-    fn wait(&mut self, slot: u32, wait: HostWait) {
-        if self.waits[slot as usize].replace(wait).is_none() {
-            self.pending += 1;
+    /// The waker of fiber `fid`.
+    fn waker(&mut self, fid: u32) -> Waker {
+        while self.wakers.len() <= fid as usize {
+            let fid = self.wakers.len() as u32;
+            self.wakers.push(Waker::from(Arc::new(FiberWaker { fid, shared: self.shared.clone() })));
         }
-    }
-
-    fn end_wait(&mut self, slot: u32) -> Option<HostWait> {
-        let wait = self.waits.get_mut(slot as usize)?.take();
-        if wait.is_some() {
-            self.pending -= 1;
-        }
-        wait
+        self.wakers[fid as usize].clone()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.pending == 0
+        self.waiting == 0
     }
 
-    /// Returns `true` if any task is waiting for the user.
-    pub fn awaits_user(&self) -> bool {
-        self.waits.iter().flatten().any(|wait| wait.wait_kind == WaitKind::User)
-    }
-
-    /// Ends every wait and releases every slot.
+    /// Forgets every wait, after the VM drops all fibers.
     pub fn clear(&mut self) {
-        self.waits.iter_mut().for_each(|wait| *wait = None);
-        self.pending = 0;
-        self.free = (0..self.waits.len() as u32).collect();
-    }
-
-    /// Ends the waits whose wakers fired.
-    fn take_woken(&mut self) -> Vec<HostWait> {
-        let slots = std::mem::take(&mut *self.shared.ready.lock());
-        slots.into_iter().filter_map(|slot| self.end_wait(slot)).collect()
+        self.waiting = 0;
     }
 }
 
@@ -142,8 +99,7 @@ pub(crate) struct NativeCall {
     depth: usize,
     /// Absolute stack slot receiving the call's result.
     result_slot: usize,
-    /// The [`IoTable`] slot of `waker`, which the future receives.
-    io_slot: u32,
+    /// The waker of the fiber, which the future receives.
     waker: Waker,
     future_bytes: usize,
     /// Memory counted in `Heap::fiber_bytes`: the future and its roots.
@@ -403,14 +359,13 @@ impl Vm {
         let _ = start.call.vm.set(Arc::downgrade(shared));
         let before = f.footprint();
         let future_bytes = std::mem::size_of_val(&*start.future);
-        let (io_slot, waker) = self.io.open_slot();
+        let waker = self.io.waker(self.current);
         f.natives.push(NativeCall {
             future: Some(start.future),
             call: start.call,
             wait_kind: start.wait_kind,
             depth: f.frames.len(),
             result_slot: f.result_slot,
-            io_slot,
             waker,
             future_bytes,
             bytes: future_bytes,
@@ -422,7 +377,6 @@ impl Vm {
     fn pop_native(&mut self, f: &mut Fiber) -> Option<NativeCall> {
         let before = f.footprint();
         let native = f.natives.pop()?;
-        self.io.close_slot(native.io_slot);
         self.heap.fiber_bytes = self.heap.fiber_bytes.saturating_sub(before - f.footprint());
         Some(native)
     }
@@ -430,6 +384,9 @@ impl Vm {
     /// Drops the native calls of `f` that frames at index `depth` and above
     /// made, innermost first.
     pub(crate) fn drop_natives(&mut self, f: &mut Fiber, depth: usize) {
+        if f.host_wait.take().is_some() {
+            self.io.waiting -= 1;
+        }
         while f.natives.last().is_some_and(|native| native.depth > depth) {
             self.pop_native(f);
         }
@@ -481,17 +438,22 @@ impl Vm {
     /// fiber became ready.
     fn wake_host_waits(&mut self) -> bool {
         let mut woke = false;
-        for wait in self.io.take_woken() {
-            if let Some(Some(f)) = self.fibers.get_mut(wait.fid as usize)
-                && f.state == FiberState::Waiting
-                && f.wait_gen == wait.wait_gen
+        for fid in std::mem::take(&mut *self.io.shared.ready.lock()) {
+            if let Some(Some(f)) = self.fibers.get_mut(fid as usize)
+                && f.host_wait.take().is_some()
             {
+                self.io.waiting -= 1;
                 f.state = FiberState::Ready;
-                self.ready.push_back(wait.fid);
+                self.ready.push_back(fid);
                 woke = true;
             }
         }
         woke
+    }
+
+    /// Returns `true` if any task waits for the user.
+    fn awaits_user(&self) -> bool {
+        self.fibers.iter().flatten().any(|f| f.host_wait == Some(WaitKind::User))
     }
 }
 
@@ -562,12 +524,12 @@ fn poll_native(vm: &mut VmGuard<'_>, f: &mut Fiber) -> Result<Option<FiberStop>,
         let bytes = native.future_bytes + roots * std::mem::size_of::<VmValue>();
         vm.heap.fiber_bytes = (vm.heap.fiber_bytes + bytes).saturating_sub(native.bytes);
         native.bytes = bytes;
-        let (io_slot, wait_kind) = (native.io_slot, native.wait_kind);
+        let wait_kind = native.wait_kind;
         match request {
             None => {
-                let (fid, wait_gen) = (vm.current, vm.next_gen());
-                f.wait_gen = wait_gen;
-                vm.io.wait(io_slot, HostWait { fid, wait_gen, wait_kind });
+                f.wait_gen = vm.next_gen();
+                f.host_wait = Some(wait_kind);
+                vm.io.waiting += 1;
                 vm.enforce_limit(Some(f)).map_err(Trap::Limit)?;
                 return Ok(Some(FiberStop::Blocked));
             }
@@ -774,7 +736,7 @@ pub(crate) async fn drive<U: DriveUntil>(shared: &SharedVm, until: U) -> Result<
                     timer.read();
                     HostEventWait {
                         idle: vm.host.stdin.clone().map(crate::stdin_feed::StdinIdleGuard::new),
-                        pause_start: vm.io.awaits_user().then_some(timer.now),
+                        pause_start: vm.awaits_user().then_some(timer.now),
                         deadline: vm.deadline,
                         interrupt: vm.host.interrupt.clone(),
                         io: vm.io.shared.clone(),
