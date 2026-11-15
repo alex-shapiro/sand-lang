@@ -47,9 +47,6 @@ The host cannot rely on engine limits, stability, or control.
       recursive calls against `max_memory`. The engine counts only the size
       of the top-level future and its root table. A recursive walker
       allocates one box for each nesting level of its input.
-- [ ] ❓ _Embedding._ Detect a native future that waits on a host event while
-      it waits on a VM request, for example with `select!`. The engine polls
-      the future again only after the request, so it can miss the host wake.
 - [ ] ❓ _Embedding._ Give native functions a narrow call context in place of
       `&mut Vm`. With `&mut Vm`, a native function can call public scheduler and
       collector methods such as `Vm::collect_all_garbage`. Typed accessors also

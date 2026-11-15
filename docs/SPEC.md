@@ -2197,9 +2197,11 @@ task is cancelled during a callback, the engine runs the callee's `defer`
 blocks, drops the native future, and then runs the caller's `defer` blocks.
 The engine counts the size of each native future and its roots against
 `max_memory`. Each rooted value and each callback result stays rooted until
-the native call returns. A future must not make two requests in one poll, and must not
-wait on host I/O while it waits on a request; the engine reports two requests
-as an internal error.
+the native call returns. The engine does not count the boxes of nested futures,
+so a recursive future must limit its nesting depth. A future must not make two
+requests in one poll; the engine reports two requests as an internal error. A
+timer or `select!` branch cannot interrupt a callback, because the engine
+polls the future again only after the callee returns.
 
 Four derive macros bind a Rust type to a Sand type in a native module. Each
 macro implements `NamedType`, `SandType`, `FromVmValue`, and `IntoVmValue`.

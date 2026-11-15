@@ -121,6 +121,12 @@ fn calls_module(log: &Log) -> NativeModule {
             }
         }))
     });
+    m.function("call_with_timeout", |f: VmVal<fn() -> ()>| -> Result<Later<bool, Fail>, Fail> {
+        Ok(Later::new(WaitKind::Io, |cx| {
+            let f = cx.root(f.raw());
+            async move { Ok(tokio::time::timeout(Duration::from_millis(1), cx.call(f, &[])).await.is_ok()) }
+        }))
+    });
     m.function("wait_ms", |ms: i64| async move { tokio::time::sleep(Duration::from_millis(ms as u64)).await });
     m.function("check_memory", |bytes: i64| -> Result<Later<(), Fail>, Fail> {
         Ok(Later::new(WaitKind::Io, move |cx| async move { cx.check_memory(bytes as usize).await }))
@@ -330,4 +336,9 @@ fn errors_in_callbacks_trace_through_the_native_call() {
     let Err(Error::Runtime { trace, .. }) = r else { panic!("{r:?}") };
     let functions: Vec<&str> = trace.iter().map(|frame| frame.function.as_str()).collect();
     assert_eq!(functions, ["divide", "outer", "<top level>"]);
+}
+
+#[test]
+fn a_timeout_around_a_callback_takes_effect_only_after_the_callee_returns() {
+    assert_eq!(run_ok(Config::new(), "print(calls.call_with_timeout(() => task.sleep(20ms)))"), "true\n");
 }

@@ -255,5 +255,5 @@ A/B runs against `main` show no other change in the interpreter:
 
 - **Raw `VmValue` across `await` points.** `VmValue` implements `Send`, so the compiler accepts a future that keeps an unrooted `VmValue` across a wait. `TODO.md` tracks this problem.
 - **Root tables only grow.** Each `root` call and each callback result adds an entry until the native call returns. A walker over a list of a million values keeps a million entries alive. The engine counts the entries against `max_memory`.
-- **Requests combined with host waits.** A future that both requests a Sand call and waits on a host event in the same poll, for example with `select!`, can miss the host wake. The engine detects two requests in one poll, but it cannot detect a waker that a request hides.
+- **Callbacks cannot be interrupted.** The engine polls a future again only after the callee returns, so a timer or `select!` branch around `context.call` takes effect only then.
 - **Concurrent mutation during callbacks.** A callback can change a collection that a native walker iterates. Each walker must fail on mutation or read a snapshot.
