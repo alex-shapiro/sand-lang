@@ -397,9 +397,22 @@ impl Vm {
     /// Pushes a [`CALLBACK_PROTO`] frame that calls `callee` with `args` for
     /// the innermost native call of `f`.
     fn begin_callback(&mut self, f: &mut Fiber, callee: VmValue, args: &[VmValue]) -> Result<(), RunEnding> {
-        if args.len() > MAX_CALLBACK_ARGS {
-            let fail = Fail::internal(format!("a native call passed more than {MAX_CALLBACK_ARGS} arguments to a callback"));
-            return Err(self.run_ending_of(fail, |vm| vm.trace_of(f, None)));
+        let takes = match callee {
+            VmValue::Obj(h) => match self.heap.obj(h) {
+                Obj::Closure(proto, _) => Some(self.prog.protos[*proto as usize].nparams as usize),
+                _ => None,
+            },
+            _ => None,
+        };
+        let misuse = match takes {
+            Some(n) if n != args.len() => Some(format!("a native call passed {} arguments to a callback that takes {n}", args.len())),
+            _ if args.len() > MAX_CALLBACK_ARGS => {
+                Some(format!("a native call passed more than {MAX_CALLBACK_ARGS} arguments to a callback"))
+            }
+            _ => None,
+        };
+        if let Some(message) = misuse {
+            return Err(self.run_ending_of(Fail::internal(message), |vm| vm.trace_of(f, None)));
         }
         let base = f.live_top(&self.prog);
         let need = base + 1 + MAX_CALLBACK_ARGS;

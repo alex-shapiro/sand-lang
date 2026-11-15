@@ -112,6 +112,15 @@ fn calls_module(log: &Log) -> NativeModule {
             Ok(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| saved.with_vm(|_| ()))).is_ok())
         }))
     });
+    m.function("call_without_args", |f: VmVal<fn(i64) -> i64>| -> Result<Later<(), Fail>, Fail> {
+        Ok(Later::new(WaitKind::Io, |cx| {
+            let f = cx.root(f.raw());
+            async move {
+                cx.call(f, &[]).await;
+                Ok(())
+            }
+        }))
+    });
     m.function("wait_ms", |ms: i64| async move { tokio::time::sleep(Duration::from_millis(ms as u64)).await });
     m.function("check_memory", |bytes: i64| -> Result<Later<(), Fail>, Fail> {
         Ok(Later::new(WaitKind::Io, move |cx| async move { cx.check_memory(bytes as usize).await }))
@@ -303,4 +312,13 @@ fn callback_results_count_against_the_memory_limit() {
     let limits = Limits { max_memory: Some(16 << 20), ..Limits::default() };
     let (r, _) = run(Config::new().limits(limits), &Log::default(), "print(calls.apply_n((x) => x + 1, 0, 1200000))");
     assert!(matches!(r, Err(Error::Limit(LimitKind::Memory))), "{r:?}");
+}
+
+#[test]
+fn a_callback_with_the_wrong_argument_count_is_an_internal_error() {
+    let (r, _) = run(Config::new(), &Log::default(), "calls.call_without_args((x) => x + 1)");
+    assert!(
+        matches!(&r, Err(Error::Internal { message, .. }) if message.contains("passed 0 arguments to a callback that takes 1")),
+        "{r:?}"
+    );
 }
