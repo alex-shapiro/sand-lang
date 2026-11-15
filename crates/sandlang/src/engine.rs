@@ -460,14 +460,15 @@ impl Config {
         self.gc_stress = on;
         self
     }
-    /// Enables or disables forced limit-check retries in tests.
+    /// Enables or disables forced limit-check failures in tests.
     ///
     /// If `on` is `true`, the engine fails the first memory or resource check
     /// in each `&mut Vm` call, each poll of a [`Later`](crate::native::func::Later)
-    /// future, and each retryable instruction. The engine then collects garbage
-    /// and retries the check. Enable this mode to catch side effects before
-    /// limit checks and unretried checks outside
-    /// [`NativeContext::step`](crate::native::context::NativeContext::step).
+    /// future, and each retryable instruction. Retryable instructions,
+    /// `&mut Vm` calls, and [`NativeContext::step`](crate::native::context::NativeContext::step)
+    /// collect garbage and retry after that failure. Enable this mode to catch
+    /// side effects before limit checks and unretried checks in
+    /// [`Later`](crate::native::func::Later) futures.
     pub fn retry_stress(mut self, on: bool) -> Self {
         self.retry_stress = on;
         self

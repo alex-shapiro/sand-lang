@@ -192,8 +192,8 @@ impl Ctl {
         &self.0
     }
 
-    /// Returns `true` if the garbage collector can free memory or resources for this failure.
-    pub(crate) fn collection_may_help(&self) -> bool {
+    /// Returns `true` if the caller can retry this failure after garbage collection.
+    pub(crate) fn can_retry_after_collection(&self) -> bool {
         match self.kind() {
             CtlKind::Collect => true,
             CtlKind::Fail(fail) => fail.as_limit() == Some(LimitKind::Memory),
@@ -780,8 +780,10 @@ impl Vm {
         self.host.denies_once.clear();
     }
 
-    /// Resets per-run counters and attaches `call` for a new session run.
-    /// `call` must share the VM's [`sched::HostWakeState`].
+    /// Resets per-run counters for a new session run.
+    ///
+    /// Attaches `call` as the active interrupt. `call` must share the VM's
+    /// [`sched::HostWakeState`].
     pub(crate) fn begin_session_run(&mut self, call: &crate::engine::CallInterrupt) {
         self.meter.reset(call.flag.clone());
         self.host.output_bytes = 0;
@@ -1592,11 +1594,11 @@ impl Vm {
 
     /// Unwinds `fiber` to the innermost frame with a pending cleanup pad.
     ///
-    /// Truncates frames and drops the async native calls of that frame and the
-    /// frames above it. Sets
-    /// that frame's instruction pointer to its pad. Returns `false` if every
-    /// frame lacks a pending pad. Pass `in_call = true` if the top frame
-    /// stopped inside a call.
+    /// Truncates frames above that pad frame. Drops the async native calls of
+    /// that pad frame and of every frame above it. Sets the pad frame's
+    /// instruction pointer to its pad. Returns `false` if every frame lacks a
+    /// pending pad. Pass `in_call = true` if the top frame stopped inside a
+    /// call.
     pub(crate) fn unwind_to_pad(&mut self, fiber: &mut Fiber, in_call: bool) -> bool {
         let n = fiber.frames.len();
         for i in (0..n).rev() {
@@ -1645,8 +1647,8 @@ impl Vm {
     }
 
     /// Collects all garbage-collection roots from globals, constants, pinned
-    /// values, and active fibers. Also clears dead stack slots, shrinks
-    /// oversized fiber stacks, and updates `heap.fiber_bytes`.
+    /// values, and active fibers. Clears dead stack slots, shrinks oversized
+    /// fiber stacks, and updates `heap.fiber_bytes`.
     fn gc_roots(&mut self, current: Option<&mut Fiber>) -> Vec<VmValue> {
         let mut roots: Vec<VmValue> = Vec::with_capacity(1024);
         roots.extend(self.globals.iter().copied());

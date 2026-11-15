@@ -67,14 +67,15 @@ pub(crate) trait Resource: crate::native::ObjectType + IntoVmValue {
     fn attach(&mut self, slot: ResourceSlot);
 }
 
-/// Like [`suspend`] for operations that produce a resource object,
-/// counted by `slot` from the start (a socket being connected or accepted
-/// is open already).
-fn suspend_resource<T: Resource>(slot: ResourceSlot, fut: impl Future<Output = Result<T, IoFailure>> + Send + 'static) -> Suspended<T> {
+/// Suspends the calling task on `future` and attaches `slot` to the opened resource.
+///
+/// Pass `slot` from before the wait so an in-flight socket counts toward
+/// `max_open_resources`.
+fn suspend_resource<T: Resource>(slot: ResourceSlot, future: impl Future<Output = Result<T, IoFailure>> + Send + 'static) -> Suspended<T> {
     suspend(WaitKind::Io, async move {
-        let mut obj = fut.await?;
-        obj.attach(slot);
-        Ok(obj)
+        let mut resource = future.await?;
+        resource.attach(slot);
+        Ok(resource)
     })
 }
 
@@ -518,16 +519,16 @@ fn conn_read(vm: &mut Vm, c: VmVal<Conn>, max: i64) -> Suspended<Vec<u8>> {
     )
 }
 
-fn conn_read_line(vm: &mut Vm, c: VmVal<Conn>) -> Suspended<Option<String>> {
-    let h = conn_handle(vm, c)?;
-    // The line may grow until it exhausts the memory limit.
-    let mut res = vm.io_reservation();
-    let read = h.closed.guard(async move {
-        let line = read_line(&mut *h.reader.lock().await, &mut res).await?;
-        drop(res);
+fn conn_read_line(vm: &mut Vm, conn: VmVal<Conn>) -> Suspended<Option<String>> {
+    let handle = conn_handle(vm, conn)?;
+    // Reserve bytes dynamically up to `max_memory` as the line arrives.
+    let mut reservation = vm.io_reservation();
+    let line_future = handle.closed.guard(async move {
+        let line = read_line(&mut *handle.reader.lock().await, &mut reservation).await?;
+        drop(reservation);
         Ok(line)
     });
-    stream::suspend_line(WaitKind::Io, read, "line is not valid UTF-8")
+    stream::suspend_line(WaitKind::Io, line_future, "line is not valid UTF-8")
 }
 
 /// Reads until the peer has finished sending; the data is reserved as it

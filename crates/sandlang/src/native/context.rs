@@ -16,9 +16,8 @@ use std::task::{Context, Poll};
 ///
 /// [`Later::new`](super::func::Later::new) passes a `NativeContext` to the
 /// closure that builds the future. The engine runs that future on the calling
-/// Sand task. While the future awaits a Sand callback or host I/O, the
-/// scheduler can run other tasks. The garbage collector can free any unrooted
-/// heap value during a wait.
+/// Sand task. While the future awaits, the scheduler can run other tasks. The
+/// garbage collector can free any unrooted heap value during a wait.
 ///
 /// [`NativeContext::call`] and [`NativeContext::step`] borrow `&mut self`. A
 /// future can therefore await a single VM request at a time:
@@ -75,7 +74,7 @@ pub(crate) struct NativeCallState {
 }
 
 impl NativeCallState {
-    /// Roots `value` in this call and returns its handle.
+    /// Roots `value` in this call. Returns its handle.
     pub fn root(&mut self, value: VmValue) -> RootedValue {
         self.roots.push(value);
         RootedValue((self.roots.len() - 1) as u32)
@@ -124,8 +123,8 @@ impl NativeContext {
     /// The garbage collector can invalidate any raw [`VmValue`] at the next
     /// wait. Pass a [`VmValue`] to [`NativeContext::root`] to keep it across a
     /// wait. Use [`NativeContext::step`] to allocate heap values or resources.
-    /// If a limit check fails inside `step`, the engine collects garbage and
-    /// retries.
+    /// If `f` reaches a memory or resource limit inside `step`, the engine
+    /// collects garbage and runs `f` again.
     ///
     /// # Panics
     ///
@@ -141,8 +140,7 @@ impl NativeContext {
         f(&mut vm)
     }
 
-    /// Keeps `value` rooted for the duration of the native call. Returns its
-    /// handle.
+    /// Keeps `value` rooted until this native call returns. Returns its handle.
     pub fn root(&self, value: VmValue) -> RootedValue {
         self.state.lock().root(value)
     }
@@ -157,13 +155,13 @@ impl NativeContext {
         self.state.lock().roots[rooted.0 as usize]
     }
 
-    /// Calls the Sand function `callee` with `args` on the calling task and
-    /// returns its rooted result.
+    /// Calls the Sand function `callee` with `args` on the calling task.
     ///
-    /// While the engine runs `callee`, the scheduler can suspend `callee` on
-    /// I/O and run other tasks. If the calling task is cancelled, the engine
-    /// drops this native future before unwinding the caller. Once `callee`
-    /// starts, the engine runs `callee` to completion before polling this
+    /// Returns the callback's return value as a [`RootedValue`]. While `callee`
+    /// waits, the scheduler can run other tasks. If the calling task is
+    /// canceled during `callee`, the engine runs `callee`'s `defer` blocks,
+    /// drops this native future, and unwinds the caller. After the engine
+    /// starts `callee`, it runs `callee` to completion before polling this
     /// future again.
     ///
     /// # Panics
@@ -213,7 +211,7 @@ impl NativeContext {
                 Err(Err(error)) => break Err(error),
                 Err(Ok(ctl)) => ctl,
             };
-            if !collected && ctl.collection_may_help() {
+            if !collected && ctl.can_retry_after_collection() {
                 collected = true;
                 self.wait_for_request(VmRequest::Collect).await;
                 continue;
@@ -267,7 +265,7 @@ impl Future for VmRequestFuture<'_> {
 
 impl Drop for VmRequestFuture<'_> {
     fn drop(&mut self) {
-        // `&mut NativeContext` ensures that only this future could have stored `state.request`.
+        // `&mut NativeContext` guarantees a single active `VmRequestFuture` per call.
         self.context.state.lock().request = None;
     }
 }

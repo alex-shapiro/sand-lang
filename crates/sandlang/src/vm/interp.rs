@@ -1755,7 +1755,7 @@ impl Vm {
         let fuel_at_call = self.meter.fuel();
         let mut r = Self::invoke_native(self, natives, n, &fiber.stack[start..start + argc]);
         self.heap.fail_next_check.set(false);
-        if r.as_ref().is_err_and(Ctl::collection_may_help) {
+        if r.as_ref().is_err_and(Ctl::can_retry_after_collection) {
             // Native functions check memory and resource limits before garbage
             // collection. Collect all garbage, refund the failed attempt's
             // fuel, and retry the call once.

@@ -177,7 +177,8 @@ impl StdinChannel {
         self.changed.notify_waiters();
     }
 
-    /// Updates `engine_idle` and wakes only host waiters.
+    /// Sets `engine_idle` to `idle`. Notifies host waiters while leaving any
+    /// pending script read asleep.
     fn set_engine_idle(&self, idle: bool) {
         self.state.lock().engine_idle = idle;
         self.changed.notify_waiters();

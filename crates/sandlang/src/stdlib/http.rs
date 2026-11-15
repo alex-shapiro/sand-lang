@@ -660,12 +660,11 @@ fn send(
             let conn = connect(&policy, &*network, &tls, &method, &url, slot.expect("a slot for a new connection")).await?;
             exchange(conn, &request, head_only, &mut head_res).await.map_err(|(e, _)| e)
         };
-        let r = match crate::platform::timeout(&*clock, timeout, run).await {
-            Some(r) => r?,
+        let (conn, head) = match crate::platform::timeout(&*clock, timeout, run).await {
+            Some(exchange_result) => exchange_result?,
             None => return Err(IoFailure::new("timeout", format!("request to {text} timed out"))),
         };
         drop(res);
-        let (conn, head) = r;
         drop(head_res);
         let ResponseHead { status, headers, framing, persists } = head;
         let reuse = (persists && !close).then(|| Arc::downgrade(&pool));
@@ -774,7 +773,7 @@ fn upload(
     };
     suspend(WaitKind::Io, async move {
         let mut conn = match crate::platform::timeout(&*clock, timeout, open).await {
-            Some(r) => r?,
+            Some(open_result) => open_result?,
             None => return Err(IoFailure::new("timeout", format!("connecting to {text} timed out"))),
         };
         conn.attach(slot);
@@ -783,8 +782,7 @@ fn upload(
     })
 }
 
-/// A connection opened for a streamed request. It becomes an `http.Upload`
-/// when the native call returns.
+/// Owned `http.Upload` parts returned from an async connect before heap allocation.
 struct NewUpload {
     url: String,
     conn: net::Conn,

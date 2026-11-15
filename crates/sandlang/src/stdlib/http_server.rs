@@ -285,8 +285,7 @@ fn accept_request(vm: &mut Vm, server: VmVal<Server>) -> Suspended<AcceptedReque
     stream::suspend(WaitKind::Io, closed.guard(accepted))
 }
 
-/// A request that the server read. It becomes an `http.Request` when the
-/// native call returns.
+/// Owned `http.Request` parts read by `Server.accept` before heap allocation.
 struct AcceptedRequest {
     method: String,
     path: String,

@@ -230,8 +230,7 @@ pub(crate) struct ResponseStream {
     pub url: String,
 }
 
-/// A response from `url` whose body `reader` reads. It becomes an
-/// `http.Stream` when the native call returns.
+/// Owned `http.Stream` parts returned from an async HTTP exchange before heap allocation.
 pub(crate) struct NewResponse {
     pub url: String,
     pub status: i64,
@@ -463,47 +462,48 @@ impl NativeObject for Body {
     }
 }
 
-/// What a read of a body reads.
+/// Read mode for an HTTP body.
 #[derive(Clone, Copy)]
-enum BodyRead {
+enum BodyReadMode {
     Upto(usize),
     Line,
     All,
 }
 
-/// Starts a read of `body`.
-fn read_body(
+/// Reserves I/O memory for a `body` read. Returns the read future.
+fn start_body_read(
     vm: &mut Vm,
     body: VmVal<Body>,
-    what: BodyRead,
+    mode: BodyReadMode,
 ) -> Result<impl Future<Output = Result<Option<Vec<u8>>, IoFailure>> + Send + 'static, HostError> {
     let body = body.get(&vm.heap)?;
     let Some(reader) = body.reader.clone() else { return Err(HostError::new("closed", "body closed")) };
     let mut closed = body.closed.subscribe();
-    let mut res = match what {
-        BodyRead::Upto(n) => vm.reserve_io(n.min(64 << 10))?,
+    let mut reservation = match mode {
+        BodyReadMode::Upto(n) => vm.reserve_io(n.min(64 << 10))?,
         _ => vm.io_reservation(),
     };
-    let op = async move {
+    let read_future = async move {
         if *closed.borrow() {
             return Err(IoFailure::new("closed", "body closed"));
         }
         let read = async {
-            let mut r = reader.lock().await;
-            let res = &mut res;
-            r.reading(async move |r: &mut BodyReader| match what {
-                BodyRead::Upto(n) => r.read(n, res).await.map(Some),
-                BodyRead::Line => r.read_line(res).await,
-                BodyRead::All => r.read_all(res).await.map(Some),
-            })
-            .await
+            let mut body_reader = reader.lock().await;
+            let reservation = &mut reservation;
+            body_reader
+                .reading(async move |body_reader: &mut BodyReader| match mode {
+                    BodyReadMode::Upto(n) => body_reader.read(n, reservation).await.map(Some),
+                    BodyReadMode::Line => body_reader.read_line(reservation).await,
+                    BodyReadMode::All => body_reader.read_all(reservation).await.map(Some),
+                })
+                .await
         };
         let data = {
             let mut read = std::pin::pin!(read);
-            let mut wait = std::pin::pin!(closed.wait_for(|c| *c));
+            let mut wait = std::pin::pin!(closed.wait_for(|is_closed| *is_closed));
             std::future::poll_fn(|cx| {
-                if let std::task::Poll::Ready(r) = read.as_mut().poll(cx) {
-                    return std::task::Poll::Ready(r);
+                if let std::task::Poll::Ready(read_result) = read.as_mut().poll(cx) {
+                    return std::task::Poll::Ready(read_result);
                 }
                 match wait.as_mut().poll(cx) {
                     std::task::Poll::Ready(_) => std::task::Poll::Ready(Err(IoFailure::new("closed", "body closed"))),
@@ -512,16 +512,16 @@ fn read_body(
             })
             .await?
         };
-        drop(res);
+        drop(reservation);
         Ok(data)
     };
-    Ok(op)
+    Ok(read_future)
 }
 
-/// `Body.read(max)` and `Body.read_all()`.
-fn read_body_bytes(vm: &mut Vm, body: VmVal<Body>, what: BodyRead) -> Suspended<Vec<u8>> {
-    let read = read_body(vm, body, what)?;
-    stream::suspend(WaitKind::Io, async move { Ok(read.await?.unwrap_or_default()) })
+/// Reads bytes from `body` for `Body.read(max)` and `Body.read_all()`.
+fn read_body_bytes(vm: &mut Vm, body: VmVal<Body>, mode: BodyReadMode) -> Suspended<Vec<u8>> {
+    let read_future = start_body_read(vm, body, mode)?;
+    stream::suspend(WaitKind::Io, async move { Ok(read_future.await?.unwrap_or_default()) })
 }
 
 fn body_natives(m: &mut NativeModule) {
@@ -529,12 +529,12 @@ fn body_natives(m: &mut NativeModule) {
         if max <= 0 {
             return Err(HostError::new("invalid", "read: max must be positive"));
         }
-        read_body_bytes(vm, body, BodyRead::Upto(to_usize_saturating(max)))
+        read_body_bytes(vm, body, BodyReadMode::Upto(to_usize_saturating(max)))
     });
     m.function("Body.read_line", |vm: &mut Vm, body: VmVal<Body>| {
-        stream::suspend_line(WaitKind::Io, read_body(vm, body, BodyRead::Line)?, "line is not valid UTF-8")
+        stream::suspend_line(WaitKind::Io, start_body_read(vm, body, BodyReadMode::Line)?, "line is not valid UTF-8")
     });
-    m.function("Body.read_all", |vm: &mut Vm, body: VmVal<Body>| read_body_bytes(vm, body, BodyRead::All));
+    m.function("Body.read_all", |vm: &mut Vm, body: VmVal<Body>| read_body_bytes(vm, body, BodyReadMode::All));
     m.function("Body.close", |vm: &mut Vm, body: VmVal<Body>| -> Result<_, Fail> {
         let b = body.get_mut(&mut vm.heap)?;
         b.closed.send_replace(true);

@@ -1,6 +1,6 @@
 //! The `io` and `env` modules.
 
-use super::stream::{self, IoFailure, Suspended, line_read, read_line, read_to_end_reserved, read_upto, strip_eol};
+use super::stream::{self, IoFailure, Suspended, decode_utf8_line, read_line, read_to_end_reserved, read_upto, strip_eol};
 use crate::check::ModKind;
 use crate::native::convert::HostError;
 use crate::native::func::Later;
@@ -26,10 +26,10 @@ pub(crate) fn module() -> NativeModule {
         if max <= 0 {
             return Err(HostError::new("invalid", "read: max must be positive"));
         }
-        read_stdin_bytes(vm, Read::Upto(to_usize_saturating(max)))
+        read_stdin_bytes(vm, StdinReadMode::Upto(to_usize_saturating(max)))
     });
     m.function("Stdin.read_line", |vm: &mut Vm, _: VmVal<Stdin>| read_stdin_line(vm));
-    m.function("Stdin.read_all", |vm: &mut Vm, _: VmVal<Stdin>| read_stdin_bytes(vm, Read::All));
+    m.function("Stdin.read_all", |vm: &mut Vm, _: VmVal<Stdin>| read_stdin_bytes(vm, StdinReadMode::All));
     output::<Stdout>(&mut m);
     output::<Stderr>(&mut m);
     m
@@ -88,64 +88,64 @@ fn flush_out(vm: &mut Vm, which: u8) -> Result<(), HostError> {
     Ok(sink.flush()?)
 }
 
-/// What a read of standard input reads.
+/// Read mode for standard input.
 #[derive(Clone, Copy, PartialEq)]
-enum Read {
+enum StdinReadMode {
     /// A line (`Result<str?>`).
     Line,
-    /// The rest (`Result<bytes>`).
+    /// Remaining bytes until end of input (`Result<bytes>`).
     All,
-    /// At most this many bytes, once some are available (`Result<bytes>`).
+    /// Up to `usize` bytes from the next available chunk (`Result<bytes>`).
     Upto(usize),
 }
 
-const INVALID_INPUT: &str = "stdin: input is not valid UTF-8";
+const INVALID_STDIN_UTF8: &str = "stdin: input is not valid UTF-8";
 
-/// `read_bytes(max)` and `read_all()` of standard input.
-fn read_stdin_bytes(vm: &mut Vm, what: Read) -> Suspended<Vec<u8>> {
-    check_stdin(vm)?;
-    let (wait_kind, read) = start_stdin_read(vm, what)?;
-    stream::suspend(wait_kind, async move { Ok(read.await?.unwrap_or_default()) })
+/// Reads bytes from standard input for `Stdin.read(max)` and `Stdin.read_all()`.
+fn read_stdin_bytes(vm: &mut Vm, mode: StdinReadMode) -> Suspended<Vec<u8>> {
+    prepare_stdin_read(vm)?;
+    let (wait_kind, read_future) = start_stdin_read(vm, mode)?;
+    stream::suspend(wait_kind, async move { Ok(read_future.await?.unwrap_or_default()) })
 }
 
-/// `read_line()` of standard input.
+/// Reads a UTF-8 line from standard input for `Stdin.read_line()`.
 fn read_stdin_line(vm: &mut Vm) -> Suspended<Option<String>> {
-    check_stdin(vm)?;
+    prepare_stdin_read(vm)?;
     if let Some(line) = buffered_line(vm) {
-        return Ok(Later::ready(line_read(vm, line, INVALID_INPUT)));
+        return Ok(Later::ready(decode_utf8_line(vm, line, INVALID_STDIN_UTF8)));
     }
-    let (wait_kind, read) = start_stdin_read(vm, Read::Line)?;
-    stream::suspend_line(wait_kind, read, INVALID_INPUT)
+    let (wait_kind, line_future) = start_stdin_read(vm, StdinReadMode::Line)?;
+    stream::suspend_line(wait_kind, line_future, INVALID_STDIN_UTF8)
 }
 
-/// Checks the permission to read standard input, and flushes standard output.
-fn check_stdin(vm: &mut Vm) -> Result<(), HostError> {
+/// Checks the `Stdin` capability. Flushes buffered output before reading.
+fn prepare_stdin_read(vm: &mut Vm) -> Result<(), HostError> {
     if !vm.permit(&Capability::Stdin)? {
         return Err(HostError::new("permission_denied", "permission denied: read standard input"));
     }
-    // A prompt written before reading must be visible (on a terminal).
     Ok(vm.flush_before_input()?)
 }
 
-/// Starts a read of standard input. Returns its wait kind and the read.
+/// Reserves I/O memory for a standard input read. Returns its [`WaitKind`] and read future.
 fn start_stdin_read(
     vm: &mut Vm,
-    what: Read,
+    mode: StdinReadMode,
 ) -> Result<(WaitKind, impl Future<Output = Result<Option<Vec<u8>>, IoFailure>> + Send + 'static), HostError> {
     let stdin = vm.host.stdin.clone();
-    // The input is buffered outside the heap until it is complete.
-    let mut res = match what {
-        Read::Upto(max) => vm.reserve_io(max.min(STDIN_CHUNK))?,
+    // Count the off-heap read buffer against the I/O memory limit during the read.
+    let mut reservation = match mode {
+        StdinReadMode::Upto(max) => vm.reserve_io(max.min(STDIN_CHUNK))?,
         _ => vm.io_reservation(),
     };
-    let read = async move {
-        let data =
-            read_input(stdin.as_deref(), what, &mut res).await.map_err(|e| IoFailure::new(e.kind, format!("stdin: {}", e.message)))?;
-        drop(res);
+    let read_future = async move {
+        let data = read_input(stdin.as_deref(), mode, &mut reservation)
+            .await
+            .map_err(|e| IoFailure::new(e.kind, format!("stdin: {}", e.message)))?;
+        drop(reservation);
         Ok(data)
     };
     let wait_kind = vm.host.stdin.as_ref().map_or(WaitKind::Io, |channel| channel.wait_kind);
-    Ok((wait_kind, read))
+    Ok((wait_kind, read_future))
 }
 
 /// The most `read` returns at once from standard input.
@@ -176,22 +176,29 @@ fn buffered_line(vm: &Vm) -> Option<Option<Vec<u8>>> {
     Some(Some(line))
 }
 
-/// Reads `what` from `stdin`, returning `Ok(None)` if `Read::Line` reaches
-/// end-of-file.
-async fn read_input(stdin: Option<&StdinChannel>, what: Read, res: &mut Reservation) -> Result<Option<Vec<u8>>, IoFailure> {
+/// Reads `mode` from `stdin`. Returns `Ok(None)` if [`StdinReadMode::Line`] reaches end of input.
+async fn read_input(
+    stdin: Option<&StdinChannel>,
+    mode: StdinReadMode,
+    reservation: &mut Reservation,
+) -> Result<Option<Vec<u8>>, IoFailure> {
     let stdin = stdin.ok_or_else(|| IoFailure::new("io", "the engine has no standard input"))?;
-    read_from(&mut stdin.begin_read().await, what, res).await
+    read_from(&mut stdin.begin_read().await, mode, reservation).await
 }
 
-async fn read_from<R: AsyncBufRead + Unpin>(r: &mut R, what: Read, res: &mut Reservation) -> Result<Option<Vec<u8>>, IoFailure> {
-    match what {
-        Read::Line => read_line(r, res).await,
-        Read::All => {
+async fn read_from<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    mode: StdinReadMode,
+    reservation: &mut Reservation,
+) -> Result<Option<Vec<u8>>, IoFailure> {
+    match mode {
+        StdinReadMode::Line => read_line(reader, reservation).await,
+        StdinReadMode::All => {
             let mut data = Vec::new();
-            read_to_end_reserved(r, &mut data, res, usize::MAX).await?;
+            read_to_end_reserved(reader, &mut data, reservation, usize::MAX).await?;
             Ok(Some(data))
         }
-        Read::Upto(max) => read_upto(r, max.min(STDIN_CHUNK)).await.map(Some),
+        StdinReadMode::Upto(max) => read_upto(reader, max.min(STDIN_CHUNK)).await.map(Some),
     }
 }
 

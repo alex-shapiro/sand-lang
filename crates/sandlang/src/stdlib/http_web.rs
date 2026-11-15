@@ -75,7 +75,7 @@ fn send(
     let received = async move {
         let _abort = AbortOnDrop(id);
         let (status, headers, body, res) = done.await.unwrap_or_else(|_| Err(IoFailure::new("io", "the request was abandoned")))?;
-        // The browser read the body: it stays reserved while it is read.
+        // Keep the body's I/O reservation in `BodyReader` until the script closes or drains the body.
         let reader = BodyReader::new(Box::new(MemoryBody::new(body)), max_body, Some(res));
         Ok(NewResponse { url: text, status, headers, reader })
     };

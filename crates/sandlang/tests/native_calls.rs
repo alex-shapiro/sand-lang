@@ -115,8 +115,8 @@ fn calls_module(log: &EventLog) -> NativeModule {
             }
         }))
     });
-    // With `biased`, `select!` polls `call` first, stores `VmRequest::Call`, and drops `call` once `ready` completes.
-    // `sleep` then returns `Pending` to the scheduler, testing that `Drop` cleared `state.request`.
+    // `biased` polls `call` first and stores `VmRequest::Call`. The `ready` branch wins and drops the `call` future.
+    // Next, `sleep` yields `Pending` to verify that `Drop` cleared `state.request`.
     module.function("race_callback", |callback: Callback| -> Result<Later<String, Fail>, Fail> {
         Ok(Later::new(WaitKind::Io, |mut context| {
             let callback = context.root(callback.raw());
@@ -270,7 +270,7 @@ fn engine_includes_outer_caller_in_callback_error_trace() {
 }
 
 #[test]
-fn engine_drops_cancelled_native_futures_in_reverse_call_order() {
+fn engine_drops_canceled_native_futures_in_reverse_call_order() {
     let log = EventLog::default();
     let source = "let t = spawn {\n\
                       defer { calls.log(\"caller defer\") }\n\
@@ -286,8 +286,8 @@ fn engine_drops_cancelled_native_futures_in_reverse_call_order() {
 }
 
 #[test]
-fn engine_reports_deadlock_after_cancelling_host_wait() {
-    // Cancelling `t` drops its `HostWaitGuard`. With zero active host waits, `ch.recv()` triggers deadlock detection.
+fn engine_reports_deadlock_after_canceling_host_wait() {
+    // Canceling `t` drops its `HostWaitGuard`. With zero active host waits, `ch.recv()` triggers deadlock detection.
     let limits = Limits { max_wall_time: Some(Duration::from_secs(5)), ..Limits::default() };
     let source = "let t = spawn calls.wait_ms(10000)\n\
                   task.sleep(5ms)\n\

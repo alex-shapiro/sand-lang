@@ -284,8 +284,7 @@ where
     }
 }
 
-/// Deferred result of a [`NativeFunction`] that suspends the calling Sand task
-/// on a future.
+/// Immediate result or pending future returned by a [`NativeFunction`].
 ///
 /// Return `Result<Later<T, E>, E>` from the function. If `E` is [`Ctl`] or
 /// [`Fail`], the Sand return type is `T`. If `E` is [`HostError`], the Sand
@@ -295,17 +294,17 @@ pub struct Later<T, E: NativeError>(Completion<T, E>);
 
 /// Execution mode of a [`Later`] value.
 enum Completion<T, E: NativeError> {
-    /// Returns the result without suspending the calling task.
+    /// Returns the result immediately on the calling task.
     Now(Result<T, E::FutureError>),
-    /// Suspends the calling task until the future is resolved.
+    /// Suspends the calling task on an async native call.
     After(AsyncNativeCall),
 }
 
-/// Error type for a [`Later`] result ([`Ctl`], [`Fail`], or [`HostError`]).
+/// Error type for a [`Later`] result: [`Ctl`], [`Fail`], or [`HostError`].
 pub trait NativeError: Send + Sized + 'static + sealed::NativeError {
-    /// Error type of the future output. Because the future makes scheduler
-    /// requests through [`NativeContext`], this type is [`Fail`] or
-    /// [`HostError<Fail>`].
+    /// Error type of the future output: [`Fail`] or [`HostError<Fail>`].
+    ///
+    /// The future submits scheduler requests through [`NativeContext`].
     type FutureError: From<Fail> + 'static;
     #[doc(hidden)]
     fn stop_call(self, vm: &mut Vm) -> Result<VmValue, Ctl>;
@@ -399,9 +398,9 @@ where
     /// ```
     ///
     /// [`VmValue`] implements [`Send`]. The compiler therefore accepts a raw
-    /// [`VmValue`] inside a future even though garbage collection can
-    /// invalidate it. Keep only [`RootedValue`](super::context::RootedValue)
-    /// handles across waits.
+    /// [`VmValue`] inside a future. Garbage collection during a wait can
+    /// invalidate that [`VmValue`]. Keep only
+    /// [`RootedValue`](super::context::RootedValue) handles across waits.
     pub fn new<F>(wait_kind: WaitKind, build: impl FnOnce(NativeContext) -> F) -> Later<T, E>
     where
         F: Future<Output = Result<T, E::FutureError>> + Send + 'static,
@@ -409,7 +408,7 @@ where
         Later(Completion::After(AsyncNativeCall::new(wait_kind, build)))
     }
 
-    /// Wraps an immediate `result` in a [`Later`] and keeps the calling task running.
+    /// Returns `result` immediately from a [`Later`] function on the calling task.
     pub fn ready(result: Result<T, E::FutureError>) -> Later<T, E> {
         Later(Completion::Now(result))
     }

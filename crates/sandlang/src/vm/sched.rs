@@ -28,7 +28,7 @@ impl HostWakeState {
         }
     }
 
-    /// Stores `waker` so host-event completions and interrupts wake the engine task.
+    /// Stores `waker` to wake the engine task on host events and interrupts.
     pub(crate) fn set_waker(&self, waker: &Waker) {
         let mut slot = self.waker.lock();
         if !slot.as_ref().is_some_and(|current| current.will_wake(waker)) {
@@ -264,10 +264,10 @@ impl Drop for RunTimer {
 }
 
 impl Vm {
-    /// Excludes the time elapsed since `since` from `max_wall_time` by advancing `self.deadline`.
-    fn exclude_wall_time(&mut self, since: Instant, timer: &RunTimer) {
+    /// Excludes the time elapsed since `wait_start` from `max_wall_time` by advancing `self.deadline`.
+    fn exclude_wall_time(&mut self, wait_start: Instant, timer: &RunTimer) {
         if let Some(deadline) = &mut self.deadline {
-            *deadline += timer.now().saturating_duration_since(since);
+            *deadline += timer.now().saturating_duration_since(wait_start);
         }
     }
 
@@ -355,7 +355,7 @@ impl Vm {
         self.heap.fiber_bytes += (fiber.native_calls.capacity() - old_capacity) * std::mem::size_of::<ActiveNativeCall>();
     }
 
-    /// Pops and drops the innermost async native call of `fiber`.
+    /// Pops the innermost async native call from `fiber` and clears its roots.
     fn pop_native_call(&mut self, fiber: &mut Fiber) {
         if let Some(active_call) = fiber.native_calls.pop() {
             active_call.call.state.lock().roots = Vec::new();
@@ -443,17 +443,19 @@ impl Vm {
         woke_any
     }
 
-    /// Returns the active host-event [`WaitKind`], preferring [`WaitKind::User`]
-    /// if any task waits for user input. Returns `None` if every task is
-    /// runnable or blocked on VM state.
+    /// Returns the active host-event [`WaitKind`].
+    ///
+    /// Prefers [`WaitKind::User`] if any task waits for user input. Returns
+    /// `None` if every task is runnable or blocked on VM state.
     pub(crate) fn host_wait_kind(&self) -> Option<WaitKind> {
         let counts = &self.host.interrupt.wake_state.host_wait_counts;
         [WaitKind::User, WaitKind::Io].into_iter().find(|&kind| counts[kind as usize].load(Ordering::Relaxed) > 0)
     }
 }
 
-/// Advances `fiber` until it stops or exhausts `fuel`, alternating between
-/// bytecode slices and top-level native-future polls.
+/// Advances `fiber` until it stops or exhausts `fuel`.
+///
+/// Alternates between bytecode slices and polls of the top native call.
 fn run_fiber_turn(vm: &mut MutexGuard<'_, Vm>, shared: &SharedVm, fiber: &mut Fiber, fuel: &mut i64) -> Result<FiberStop, RunEnding> {
     loop {
         if fiber.top_native_call().is_some() {
@@ -497,10 +499,10 @@ fn poll_native_call(vm: &mut MutexGuard<'_, Vm>, shared: &SharedVm, fiber: &mut 
         };
         let polled = match polled {
             Ok(polled) => polled,
-            Err(msg) => {
+            Err(panic_message) => {
                 let _ = crate::unwind::catch(|| vm.pop_native_call(fiber));
                 vm.broken = true;
-                return Err(Trap::Internal { message: msg, trace: vm.trace_of(fiber, None) }.into());
+                return Err(Trap::Internal { message: panic_message, trace: vm.trace_of(fiber, None) }.into());
             }
         };
         if let Poll::Ready(result) = polled {
@@ -534,43 +536,43 @@ fn poll_native_call(vm: &mut MutexGuard<'_, Vm>, shared: &SharedVm, fiber: &mut 
     }
 }
 
-/// Reason [`run_ready`] paused and returned to [`drive`].
+/// Reason [`run_ready`] returned control to [`drive`].
 enum Pause<S> {
     Stop(S),
     Prompt(Capability),
     Yield,
-    /// Every runnable task has paused or finished.
+    /// Ready queue is empty.
     Idle,
 }
 
-/// Drains `vm.ready` until `until` stops the drive, a task requests a prompt,
-/// or the engine yields to the host executor.
+/// Runs tasks from `vm.ready` until the `until` policy stops, a task requests
+/// a prompt, or the engine yields.
 fn run_ready<U: DriveUntil>(
     vm: &mut MutexGuard<'_, Vm>,
     shared: &SharedVm,
     until: &U,
     timer: &mut RunTimer,
 ) -> Result<Pause<U::Stop>, RunEnding> {
-    while let Some(fid) = vm.ready.pop_front() {
-        let Some(mut f) = vm.fibers.get_mut(fid as usize).and_then(|f| f.take()) else { continue };
-        if f.state != FiberState::Ready {
-            vm.fibers[fid as usize] = Some(f);
+    while let Some(fiber_id) = vm.ready.pop_front() {
+        let Some(mut fiber) = vm.fibers.get_mut(fiber_id as usize).and_then(|slot| slot.take()) else { continue };
+        if fiber.state != FiberState::Ready {
+            vm.fibers[fiber_id as usize] = Some(fiber);
             continue;
         }
-        vm.current = fid;
+        vm.current = fiber_id;
         // Pass deadlines to the meter so long native calls can check time limits.
         let mut fuel = vm.meter.start_slice(timer.cpu_deadline(vm.host.limits.max_cpu_time), vm.deadline);
-        let r = run_fiber_turn(vm, shared, &mut f, &mut fuel);
+        let turn_result = run_fiber_turn(vm, shared, &mut fiber, &mut fuel);
         vm.meter.sync(fuel);
         timer.ran(vm.meter.spent());
         // Publish heap usage so background I/O readers enforce `max_memory`.
         let used = vm.heap.used();
         vm.heap.io_memory.publish_heap(used);
         vm.current = u32::MAX;
-        let stop = match r {
+        let stop = match turn_result {
             Ok(stop) => stop,
             Err(ending) => {
-                vm.fibers[fid as usize] = Some(f);
+                vm.fibers[fiber_id as usize] = Some(fiber);
                 return Err(ending);
             }
         };
@@ -578,41 +580,41 @@ fn run_ready<U: DriveUntil>(
             FiberStop::CollectAndRetry(_) | FiberStop::AsyncNative(_) | FiberStop::CallbackReturn(_) => {
                 unreachable!("run_fiber_turn handles retries and native calls")
             }
-            FiberStop::Done(v) => {
-                vm.fibers[fid as usize] = Some(f);
-                if let Some(stop) = until.stop_on_finish(fid, v) {
+            FiberStop::Done(value) => {
+                vm.fibers[fiber_id as usize] = Some(fiber);
+                if let Some(stop) = until.stop_on_finish(fiber_id, value) {
                     return Ok(Pause::Stop(stop));
                 }
-                vm.finish_task(fid, v);
+                vm.finish_task(fiber_id, value);
             }
             FiberStop::Preempt | FiberStop::YieldNow => {
-                f.state = FiberState::Ready;
-                vm.fibers[fid as usize] = Some(f);
-                vm.ready.push_back(fid);
+                fiber.state = FiberState::Ready;
+                vm.fibers[fiber_id as usize] = Some(fiber);
+                vm.ready.push_back(fiber_id);
             }
             FiberStop::Blocked => {
-                f.state = FiberState::Waiting;
-                vm.fibers[fid as usize] = Some(f);
+                fiber.state = FiberState::Waiting;
+                vm.fibers[fiber_id as usize] = Some(fiber);
             }
             FiberStop::Prompt(cap) => {
-                f.state = FiberState::Ready;
-                vm.fibers[fid as usize] = Some(f);
-                vm.ready.push_front(fid);
+                fiber.state = FiberState::Ready;
+                vm.fibers[fiber_id as usize] = Some(fiber);
+                vm.ready.push_front(fiber_id);
                 return Ok(match until.stop_on_prompt(&cap) {
                     Some(stop) => Pause::Stop(stop),
                     None => Pause::Prompt(cap),
                 });
             }
             FiberStop::Cancelled => {
-                vm.end_cancelled(fid, f);
-                if vm.fibers[fid as usize].is_some() {
-                    vm.ready.push_back(fid);
+                vm.end_cancelled(fiber_id, fiber);
+                if vm.fibers[fiber_id as usize].is_some() {
+                    vm.ready.push_back(fiber_id);
                 }
             }
             FiberStop::Unwound => {
-                vm.free_fibers.push(fid);
+                vm.free_fibers.push(fiber_id);
                 vm.live_tasks = vm.live_tasks.saturating_sub(1);
-                vm.recycle_fiber(f);
+                vm.recycle_fiber(fiber);
             }
         }
         vm.check_limits(timer)?;
@@ -667,8 +669,8 @@ pub(crate) async fn end_tasks(shared: &SharedVm) -> Result<(), RunEnding> {
 }
 
 /// Runs ready tasks and awaits host events until the `until` policy stops.
-/// Releases the VM lock only while polling async native calls or while it
-/// awaits. If the caller drops this future at an `.await` point, `Vm` retains
+/// Releases the VM lock only while polling async native calls or awaiting in
+/// `drive`. If the caller drops this future at an `.await` point, `Vm` retains
 /// all tasks in its scheduler tables.
 pub(crate) async fn drive<U: DriveUntil>(shared: &SharedVm, until: U) -> Result<U::Stop, RunEnding> {
     let mut timer = RunTimer::start(shared.lock().host.clock.clone());
