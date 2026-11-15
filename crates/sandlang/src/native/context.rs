@@ -7,6 +7,7 @@ use crate::vm::{Fail, Vm, WaitKind};
 use parking_lot::Mutex;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use std::task::Poll;
 
@@ -52,6 +53,8 @@ pub struct RootedValue(u32);
 pub(crate) struct CallState {
     /// The VM that runs the call, set when the call starts.
     pub vm: OnceLock<Weak<Mutex<Vm>>>,
+    /// Whether the scheduler polls the call's future.
+    pub polled: AtomicBool,
     pub exchange: Mutex<CallExchange>,
 }
 
@@ -114,9 +117,10 @@ impl NativeContext {
     /// # Panics
     ///
     /// Panics if the engine is not polling the call's future, for example in
-    /// a task spawned on another executor or in a `Drop` implementation.
+    /// a task spawned on another executor, in another call, or in a `Drop`
+    /// implementation.
     pub fn with_vm<R>(&self, f: impl FnOnce(&mut Vm) -> R) -> R {
-        let vm = self.call.vm.get().and_then(Weak::upgrade);
+        let vm = self.call.vm.get().filter(|_| self.call.polled.load(Ordering::Relaxed)).and_then(Weak::upgrade);
         let mut vm = vm.as_deref().and_then(Mutex::try_lock).expect("`NativeContext::with_vm` runs only while the engine polls the call");
         f(&mut vm)
     }
@@ -126,11 +130,11 @@ impl NativeContext {
         self.call.exchange.lock().root(v)
     }
 
-    /// Returns the rooted value `r`.
+    /// Returns the rooted value `r`, which the call of this context rooted.
     ///
     /// # Panics
     ///
-    /// Panics if another context rooted `r`.
+    /// Panics if the call has returned.
     pub fn value(&self, r: RootedValue) -> VmValue {
         self.call.exchange.lock().roots[r.0 as usize]
     }

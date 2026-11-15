@@ -6,6 +6,7 @@ use crate::engine::LimitKind;
 use crate::native::context::{CallState, NativeFuture, VmRequest};
 use crate::platform::{ClockFuture, Instant};
 use parking_lot::MutexGuard;
+use std::sync::atomic::Ordering;
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
@@ -377,6 +378,7 @@ impl Vm {
     fn pop_native(&mut self, f: &mut Fiber) -> Option<NativeCall> {
         let before = f.footprint();
         let native = f.natives.pop()?;
+        native.call.exchange.lock().roots = Vec::new();
         self.heap.fiber_bytes = self.heap.fiber_bytes.saturating_sub(before - f.footprint());
         Some(native)
     }
@@ -494,7 +496,9 @@ fn poll_native(vm: &mut VmGuard<'_>, f: &mut Fiber) -> Result<Option<FiberStop>,
         // A panic in the future (a bug) becomes an internal error.
         let stress = vm.retry_stress && !collected;
         vm.heap.fail_next_check.set(stress);
+        native.call.polled.store(true, Ordering::Relaxed);
         let polled = MutexGuard::unlocked(vm, || crate::unwind::catch(|| future.as_mut().poll(&mut Context::from_waker(waker))));
+        native.call.polled.store(false, Ordering::Relaxed);
         vm.heap.fail_next_check.set(false);
         let (request, roots) = {
             let mut exchange = native.call.exchange.lock();

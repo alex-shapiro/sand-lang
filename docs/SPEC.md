@@ -2179,8 +2179,8 @@ raw `VmValue` across a wait; root it with `NativeContext::root` instead.
 returns the future. The future runs on the calling task and uses the context
 for these operations:
 
-- `with_vm(f)` runs `f` with `&mut Vm`. A raw `VmValue` from the VM is valid
-  until the next wait.
+- `with_vm(f)` runs `f` with `&mut Vm`. It panics unless the engine is polling
+  the call's future. A raw `VmValue` from the VM is valid until the next wait.
 - `root(value)` returns a `Send` `RootedValue` that keeps `value` alive until
   the native call returns. `value(rooted)` reads it.
 - `call(callee, args).await` runs a Sand function on the calling task and

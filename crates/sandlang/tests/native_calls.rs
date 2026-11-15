@@ -95,6 +95,23 @@ fn calls_module(log: &Log) -> NativeModule {
             tokio::task::consume_budget().await;
         }
     });
+    // Saves the context of one call, and uses it during the poll of another.
+    let saved: Arc<Mutex<Option<sandlang::native::context::NativeContext>>> = Arc::default();
+    let save = saved.clone();
+    m.function("save_context", move || -> Result<Later<(), Fail>, Fail> {
+        let save = save.clone();
+        Ok(Later::new(WaitKind::Io, move |cx| {
+            *save.lock() = Some(cx);
+            async { Ok(()) }
+        }))
+    });
+    m.function("use_saved_context", move || -> Result<Later<bool, Fail>, Fail> {
+        let saved = saved.lock().take();
+        Ok(Later::new(WaitKind::Io, |_| async move {
+            let saved = saved.expect("a saved context");
+            Ok(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| saved.with_vm(|_| ()))).is_ok())
+        }))
+    });
     m.function("wait_ms", |ms: i64| async move { tokio::time::sleep(Duration::from_millis(ms as u64)).await });
     m.function("check_memory", |bytes: i64| -> Result<Later<(), Fail>, Fail> {
         Ok(Later::new(WaitKind::Io, move |cx| async move { cx.check_memory(bytes as usize).await }))
@@ -274,4 +291,9 @@ fn a_spent_tokio_budget_does_not_hang_a_clock_that_yields_at_once() {
     let clock = Arc::new(StoppedClock(sandlang::platform::Instant::now()));
     let src = "let t = spawn calls.spend_budget(1000)\ncalls.spend_budget(1000)\nt.wait()\nprint(\"done\")";
     assert_eq!(run_ok(Config::new().clock(clock), src), "done\n");
+}
+
+#[test]
+fn a_context_works_only_while_the_engine_polls_its_call() {
+    assert_eq!(run_ok(Config::new(), "calls.save_context()\nprint(calls.use_saved_context())"), "false\n");
 }
