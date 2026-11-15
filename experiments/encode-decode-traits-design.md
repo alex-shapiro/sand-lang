@@ -10,7 +10,7 @@ The design has five goals:
 
 - `Encode` and `Decode` follow the same rules as every other trait.
 - `Encode` and `Decode` implementations are composable and nestable
-- A user can define `Encode` and `Decode` for any of their types: concrete and generic types, defined in Sand or in Rust.
+- A user can define `Encode` and `Decode` for concrete, generic, and native types.
 - A script can encode any `Encode` value as JSON text, and decode JSON text into any `Decode` type.
 - A script can encode any `Encode` value as a host `Value`, and decode a host `Value` as a `Decode` type.
 - `json.Json` is encoded and decoded under the same rules as every other type.
@@ -431,7 +431,7 @@ A native type implements `Encode` or `Decode` only if its derive attribute decla
 - `#[sand(encode, decode)]` derives both traits.
 - `#[sand(encode = "manual")]` declares `Encode` and omits the derived implementation. The author implements the Rust trait `sandlang::native::Encode` by hand. `decode = "manual"` works the same way for `Decode`.
 
-A `SandObject` type supports only the manual form, because the macro cannot see the structure of an opaque object.
+A `SandObject` type supports only the manual form, because the macro cannot see the structure of an opaque object. A native type with type parameters cannot implement `Encode` or `Decode`. Its macro rejects both attributes. No public native type in the standard library has type parameters.
 
 On `main`, a bound struct, enum, or value type gets Sand `Encode` automatically from the checker (`src/check/derive.rs:196-199`). In this design, it gets the trait only from its attribute. The standard library adds the attribute to each data type that keeps its codec.
 
@@ -487,7 +487,7 @@ The binding records, for each declared trait, whether the implementation is deri
   - The `Encode` wrapper of a `SandObject` type borrows `&T` from the heap (`VmVal::get`, `src/native/mod.rs:571`). The wrapper of another native type converts the heap value to `T` with `FromVmValue`. Each wrapper then calls `T::encode`.
   - The `Decode` wrapper calls `T::decode` and stores the result with `IntoVmValue`.
 
-A manual implementation follows the rules of a Sand implementation. It writes or reads exactly one value, and its error becomes the decode or encode error. [Open question 4](#open-questions) asks whether a native type with type parameters can have a manual implementation.
+A manual implementation follows the rules of a Sand implementation. It writes or reads exactly one value, and its error becomes the decode or encode error.
 
 ### Decoding a struct that declares `init`
 
@@ -692,6 +692,7 @@ The owner made these decisions during review.
 - **A duplicate struct field or `init` parameter is a decode error.** The decode returns an error of kind `"parse"`, and the run continues. serde's derive also reports `duplicate_field` (`serde_derive` 1.0.229, `src/de/struct_.rs:269`). A duplicate map key keeps its last value.
 - **Decoding ignores the visibility of `init`,** as decoding on `main` ignores the visibility of fields.
 - **Native types opt in to each trait.** `#[sand(encode, decode)]` derives both. `#[sand(encode = "manual")]` or `decode = "manual"` declares a trait that the author implements in Rust, with no Sand code in the path.
+- **Native types with type parameters cannot implement `Encode` or `Decode`.**
 - **`native::Encode` replaces `value::Encode`.** A single Rust trait serves both the walkers and the conversion to `Value`.
 
 ## Open questions
@@ -742,14 +743,5 @@ A struct that declares `init` derives `Decode` through `init`. `init` inherits t
 
 - **Option A: the structural `Decode` implementation also requires the bounds of `init`.** Its shape holds part templates for their dictionaries, and the walker passes them to `init`. Parameter default helpers already take the dictionaries of their function (`src/check/mod.rs:2768`).
 - **Option B: a struct whose `init` needs dictionaries does not derive `Decode`.**
-
-**Recommendation:** Option A.
-
-### 4. Can a native type with type parameters have a manual implementation?
-
-`SandStruct` and `SandEnum` support type parameters (`crates/sandlang-macros/src/lib.rs`, "Rust type parameters define Sand type parameters"). A Rust implementation of `encode` for such a type cannot encode a part of type `T` by itself. The Sand type of `T` is erased, so the part needs its dictionary, and Rust code has no access to it.
-
-- **Option A: only native types without type parameters can have a manual implementation.** A generic native type can still derive its implementation.
-- **Option B: give manual implementations a way to encode and decode a part with its dictionary.** The sink and source interfaces gain a request that runs the walker on a part. That part can then reach a custom Sand implementation, so the request must be able to wait for a callback.
 
 **Recommendation:** Option A.
