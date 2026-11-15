@@ -728,17 +728,16 @@ impl Vm {
     /// Creates the values of the program's constants and the slots of its
     /// globals that do not exist yet: all of them for a new VM, or those a
     /// REPL session appended to the program.
-    #[allow(clippy::needless_range_loop)]
     pub fn load_program(&mut self) {
         let prog = self.prog.clone();
-        for i in self.consts.len()..prog.consts.len() {
-            if let Const::Str(s) = &prog.consts[i] {
+        for constant in &prog.consts[self.consts.len()..] {
+            if let Const::Str(s) = constant {
                 let v = self.short_str(s);
                 self.consts.push(v);
                 continue;
             }
             let heap = &mut self.heap;
-            let v = match &prog.consts[i] {
+            let v = match constant {
                 Const::Int(i) => VmValue::Int(*i),
                 Const::Float(f) => VmValue::Float(*f),
                 Const::Dur(d) => VmValue::Dur(*d),

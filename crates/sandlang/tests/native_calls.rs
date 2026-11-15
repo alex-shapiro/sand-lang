@@ -271,7 +271,7 @@ fn engine_includes_outer_caller_in_callback_error_trace() {
 }
 
 #[test]
-fn engine_drops_canceled_native_futures_in_reverse_call_order() {
+fn engine_drops_cancelled_native_futures_in_reverse_call_order() {
     let log = EventLog::default();
     let source = "let t = spawn {\n\
                       defer { calls.log(\"caller defer\") }\n\
@@ -287,7 +287,7 @@ fn engine_drops_canceled_native_futures_in_reverse_call_order() {
 }
 
 #[test]
-fn engine_reports_deadlock_after_canceling_host_wait() {
+fn engine_reports_deadlock_after_cancelling_host_wait() {
     // `t.cancel()` drops `t`'s `HostWaitGuard`. With zero active host waits, `ch.recv()` triggers deadlock detection.
     let limits = Limits { max_wall_time: Some(Duration::from_secs(5)), ..Limits::default() };
     let source = "let t = spawn calls.wait_ms(10000)\n\

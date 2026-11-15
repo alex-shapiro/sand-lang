@@ -62,8 +62,8 @@ The host cannot rely on engine limits, stability, or control.
       `Vm::collect_all_garbage(None)`, the collector frees the calling task's
       live values. Typed accessors also return raw `VmValue` slices. A narrow
       context exposes only host call operations.
-- [ ] ❓ _Embedding._ Let a canceled native future update VM state on drop. The
-      engine holds the VM lock while dropping a canceled future. If
+- [ ] ❓ _Embedding._ Let a cancelled native future update VM state on drop. The
+      engine holds the VM lock while dropping a cancelled future. If
       `Drop::drop` calls `NativeContext::with_vm`, `with_vm` panics. The engine
       then ends the run with an internal error.
 - [ ] ❓ _Embedding._ Yield to the host executor under a fixed host clock. The
