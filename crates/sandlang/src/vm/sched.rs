@@ -358,7 +358,7 @@ impl Vm {
     /// Starts the async native call `start` on fiber `f`.
     fn begin_native(&mut self, shared: &SharedVm, f: &mut Fiber, start: NativeStart) {
         let _ = start.call.vm.set(Arc::downgrade(shared));
-        let before = f.footprint();
+        let capacity = f.natives.capacity();
         let future_bytes = std::mem::size_of_val(&*start.future);
         let waker = self.io.waker(self.current);
         f.natives.push(NativeCall {
@@ -371,15 +371,14 @@ impl Vm {
             future_bytes,
             bytes: future_bytes,
         });
-        self.heap.fiber_bytes += f.footprint() - before;
+        self.heap.fiber_bytes += future_bytes + (f.natives.capacity() - capacity) * std::mem::size_of::<NativeCall>();
     }
 
     /// Removes the innermost native call of `f` and drops its future.
     fn pop_native(&mut self, f: &mut Fiber) -> Option<NativeCall> {
-        let before = f.footprint();
         let native = f.natives.pop()?;
         native.call.exchange.lock().roots = Vec::new();
-        self.heap.fiber_bytes = self.heap.fiber_bytes.saturating_sub(before - f.footprint());
+        self.heap.fiber_bytes = self.heap.fiber_bytes.saturating_sub(native.bytes);
         Some(native)
     }
 
