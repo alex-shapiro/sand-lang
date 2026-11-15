@@ -1,255 +1,239 @@
 # Design: `Encode` and `Decode` as ordinary traits
 
-**Status: proposal for review.** We specify this design before implementation. See [Existing code that this design reuses](#existing-code-that-this-design-reuses) for the code on `main` that this design builds on.
+**Status: proposal for review.** This document describes planned changes. Nothing in it is implemented. Code citations refer to `main` at commit `8a51c46`, with paths relative to `crates/sandlang/` unless a path says otherwise. [Open questions](#open-questions) lists the choices that the owner must make.
 
 ## Summary
 
-We propose making `Encode` and `Decode` ordinary traits with native default methods. Users can implement both traits for concrete and generic types. The compiler erases type arguments from functions. Callers pass trait dictionaries to generic functions as hidden arguments. See [Why `Encode` and `Decode` need dictionaries](#why-encode-and-decode-need-dictionaries) for a comparison with `main`.
+We propose to make `Encode` and `Decode` ordinary traits that users can implement. Each trait declares a native Rust walker as the default body of its method. The type checker generates implementations for built-in types, structs, and enums, and these implementations use the native default. A user can write a custom implementation for a type that the user's module declares.
 
-Each trait declares a native Rust walker as its default method. The type checker generates ordinary implementations for built-in types, structs, and enums. Those generated implementations use the default methods. Users can write custom implementations for their own types to override generated defaults.
+The compiler passes dictionaries for `Encode` and `Decode` to generic functions, as it does for every trait with methods. The walker reads these dictionaries to find the implementation of each part of a value. It processes a part that uses the native default in Rust. For a part with a custom implementation, it calls the Sand method through a callback, waits for the result, and continues from the same position.
 
-During a walk, the walker looks up each part's implementation in trait dictionaries. For a part that uses the native default, the walker processes that part in Rust. For a part with a custom implementation, the walker runs a callback to the custom method.
+The design has four goals:
 
-The VM runs `Encode` and `Decode` like any other trait with native default methods. We meet four goals with this design:
-
-- **Host `Value` conversion.** The encode walker writes a Sand value to a `Value` sink. The decode walker builds a Sand value from a `Value` source.
-- **JSON encoding and decoding.** The encode walker writes JSON text directly to a JSON sink. The decode walker reads JSON text directly from a JSON source.
-- **Ordinary trait rules.** The checker enforces standard `docs/SPEC.md` §4.9 rules on trait bounds and custom implementations.
-- **Standard `json.Json` handling.** We implement `Encode` and `Decode` on `Json` as ordinary trait implementations. Callers encode and decode `Json` through `json.encode` and `json.decode` like any other type.
+- **Custom implementations.** A user can implement `Encode` and `Decode` for concrete and generic types. The walkers apply these implementations at every level of a value.
+- **JSON.** The encode walker writes JSON text directly. The decode walker reads JSON text directly. Neither builds an intermediate tree.
+- **Host `Value` conversion.** The encode walker can also write a `Value`, and the decode walker can read one.
+- **`json.Json` as an ordinary type.** `Json` implements `Encode` and `Decode` with ordinary implementations. The walkers treat `Json` as they treat any other type.
 
 ## Terms
 
-- **Trait evidence.** Callers pass a hidden argument called trait evidence to supply a trait implementation to a generic function.
-- **Dictionary.** The VM represents trait evidence as a tuple called a dictionary. On `main`, the compiler builds each dictionary with three sections in order:
-  1. Section 1 stores the method functions of the implementation.
-  2. Section 2 stores supertrait dictionaries, such as the `Encode` dictionary inside a `Decode` dictionary.
-  3. Section 3 stores bound dictionaries, such as `T`'s `Close` dictionary inside `impl<T: Close> Close for [T]`.
+- **Dictionary.** A dictionary is a tuple that supplies a trait implementation to generic code at run time. The checker selects it from static types, and the caller passes it as a hidden argument. A dictionary has three sections, in this order (`src/check/traits.rs:3-12`):
+  1. The method functions of the implementation.
+  2. The dictionaries of the supertraits that have dictionaries.
+  3. The dictionaries that the bounds of the implementation require, such as the `Close` dictionary of `T` in `impl<T: Close> Close for [T]`.
 
-  The compiler emits dictionaries only if a trait or a supertrait declares methods. For traits with empty bodies and empty supertraits, the checker verifies bounds at compile time. For example, `Hash` on `main` declares only its trait header.
-
-- **Constant dictionary.** The compiler stores a dictionary of concrete types in the constant pool. For example, `[fs.File]: Close` uses a constant dictionary.
-- **Dynamic dictionary.** Generic code builds a dynamic dictionary tuple at runtime from type-parameter dictionaries. For example, `fn close_all<T: Close>(items: [T])` builds the `[T]: Close` dictionary at runtime.
-- **Derived trait.** The type checker implements a derived trait automatically for qualifying types. On `main`, the checker derives five built-in traits, including `Encode` and `Decode`, under two rules:
-  - The checker derives a trait for a qualifying struct or enum if every field and variant payload implements that trait.
-  - The checker rejects custom implementations of derived traits.
-- **Native function.** Rust host code registers a native function so Sand code can call it.
-- **Native default method.** We add native default methods so a trait can use a native function as a method's default body. If an `impl` block has an empty body for that method, the checker uses the native default.
-- **Structural implementation.** The checker generates a structural implementation that uses the native default methods of its trait.
-- **Part.** A composite or container value holds direct child values called parts:
-  - Struct parts are field values.
-  - Enum parts are payload values of a variant.
-  - List and set parts are elements.
-  - Map parts are keys and values.
-- **Walker.** A walker is a Rust routine that visits a value and its parts in turn. The encode walker reads a Sand value from the VM. The decode walker builds a Sand value in the VM. If a walker reaches a part that needs Sand code, it waits for a callback at that point and then continues.
-- **Encode sink.** An encode sink is a Rust object that receives output from the encode walker. The walker makes requests such as "write bytes" or "begin a struct with these fields." Each output format has its own encode sink.
-- **Decode source.** A decode source is a Rust object that supplies input to the decode walker. The walker asks the source for a value of a specific kind, such as bytes or a map key of type `int`. Each input format has its own decode source.
-- **`Value`.** `sandlang::value::Value` is a host-owned Rust type that represents a Sand value outside the VM. A Rust host can build a `Value` or keep a `Value` after a VM run ends.
-- **Callback.** An async native function can call a Sand function through a callback. We added callbacks in commit `8a51c46`. In `experiments/native-async-sand-calls.md`, we measured each callback round trip at about 90 ns.
-- **Triage report.** In `experiments/encode-decode-design-causes.md` on branch `encode-decode-design-causes`, we analyzed the speed and complexity problems in earlier codec designs.
+  A trait has a dictionary only if the trait or a supertrait declares a method (`src/check/traits.rs:382`, `:408-411`). The checker verifies other traits, such as `Hash`, only at compile time.
+- **Trait evidence.** Trait evidence is the checker's expression for a dictionary: a hidden parameter, a slot read from another dictionary, or a dictionary constructor.
+- **Constant dictionary.** The compiler stores the dictionary of a concrete type in the constant pool. It stores each distinct dictionary once (`dict_consts`, `src/compile/mod.rs:2747-2762`).
+- **Dynamic dictionary.** Generic code builds a dynamic dictionary at run time from the dictionaries of its type parameters. For example, `fn close_all<T: Close>(items: [T])` builds the `[T]: Close` dictionary at run time.
+- **Derived trait.** On `main`, the checker implements five prelude traits automatically: `Eq`, `Ord`, `Hash`, `Encode`, and `Decode`. A struct or enum derives a trait if every field and payload type implements it, with two exceptions (`src/check/derive.rs:200-203`). A struct with a `var` field does not derive `Hash`, and a struct that declares `init` does not derive `Decode`. The checker rejects user implementations of derived traits (`src/check/traits.rs:492-497`).
+- **Native function.** A native function is a Rust function that Sand code calls.
+- **Native default method.** A native default method is a trait method whose default body is a native function. This design adds them.
+- **Structural implementation.** A structural implementation is an implementation that uses the native default method. The checker generates most of them from the structure of a type.
+- **Custom implementation.** A custom implementation is an `impl` block with a method body that a user writes.
+- **Part.** A part is a direct child of a value: a struct field, a variant payload value, an element of a list, set, or tuple, or a key or value of a map.
+- **Type constructor.** A type constructor is a type without its type arguments, such as `List` for `[int]`. The checker enum `TypeConstructor` lists them. On `main`, this enum has the name `Ctor`.
+- **Walker.** A walker is a Rust routine that visits a value and its parts. The encode walker reads a Sand value. The decode walker builds a Sand value.
+- **Encode sink.** An encode sink is a Rust object that receives the output of the encode walker. Each output format has its own encode sink.
+- **Decode source.** A decode source is a Rust object that supplies the input of the decode walker. Each input format has its own decode source.
+- **Implementation shape.** An implementation shape describes one level of a type to a walker. Each dictionary of a structural implementation refers to a shape.
+- **Part template.** A part template tells the walker how to get the dictionary of a part.
+- **`Value`.** `sandlang::value::Value` is a Rust type that represents a Sand value outside the VM. A `Value` stays valid after a run ends.
+- **Callback.** A callback is a call from an async native function to a Sand function through `NativeContext::call` (`src/native/context.rs:169`). Commit `8a51c46` added callbacks.
 
 ## Why `Encode` and `Decode` need dictionaries
 
-To support generic custom implementations, the compiler passes dictionaries for `Encode` and `Decode`. On `main`, the prelude declares both traits with empty bodies. The type checker rejects custom implementations of both traits.
+### The two traits on `main`
 
-### `Encode` on `main`
+On `main`, the prelude declares `Encode` and `Decode` without methods (`src/stdlib/prelude.sand:313`, `:318`). Neither trait has a dictionary. The checker verifies `T: Encode` at compile time, and then the compiler erases the bound.
 
-On `main`, `json.encode` calls a single native encoder for all types. The VM stores runtime tags on values that this encoder reads:
+`json.encode` reads the run-time tags of the VM. A value slot tags each scalar and each inline variant. A heap object tags its kind. A struct object stores the ID of its type definition, and a variant stores its variant ID. The VM type table maps each ID to field and variant names.
 
-- Immediate value slots tag scalars and inline enum variants.
-- Heap objects tag their container or composite kind.
-- Struct objects store the ID of their type definition.
-- Enum values store the ID of their variant.
-- The VM type table maps each struct and variant ID to its identifiers.
+`json.decode` must know the target type before it reads the input. Its type parameter is a `reflect` parameter (`src/stdlib/json.sand:144`). The caller therefore passes a run-time type descriptor, `TypeDesc`, as a hidden argument.
 
-The native encoder walks values directly from these runtime tags. At compile time, the checker verifies `T: Encode`. That check rejects functions, tasks, channels, and native objects. The compiler then erases the bound.
+### Custom implementations need dictionaries
 
-### `Decode` on `main`
+A custom implementation can target a generic type, such as `impl<T: Encode> Encode for Box<T>`. To encode a `Box<Email>`, the walker must find the implementation for `Email`. A heap object does not record its type arguments, so the walker cannot find `Email` from the value. The caller must supply that information. A trait dictionary is the mechanism that Sand already uses for this purpose.
 
-Callers of a decoder must supply the target type because the decoder starts from raw text. On `main`, callers pass a runtime type descriptor to `json.decode<reflect T: Decode>` through its `reflect` type parameter. That hidden argument supplies the type structure that the compiler erased.
+### Why heap objects do not record type arguments
 
-### Why custom implementations require dictionaries
+Two costs prevent the VM from recording type arguments on values:
 
-We pass dictionaries for `Encode` and `Decode` for five reasons:
+- **Each generic call would pass type descriptors.** The compiler emits one copy of a generic function for all type arguments. To record `T` in a new list, `fn empty_list<T>() -> [T] { [] }` would need a descriptor of `T`. Each caller would then pass one. On `main`, a caller passes hidden arguments only for `reflect` parameters and for bounds on traits with methods (`src/check/traits.rs:3-6`).
+- **Inline values would need heap objects.** A `VmValue` is 16 bytes (`src/vm/value.rs:60`). It stores scalars, payload-free variants such as `None`, single-payload variants such as `Some(3)`, and pairs of integers inline (`src/vm/value.rs:26-56`). An inline `None` of type `Email?` has the same bits as an inline `None` of type `int?`. To record type arguments, the VM would need a heap object for every `None`.
 
-1. Users can write custom `Encode` implementations.
-2. The native encoder must call custom methods for matching parts of a value.
-3. A heap object omits its type arguments. See [Why heap objects omit type arguments](#why-heap-objects-omit-type-arguments).
-4. In `impl<T: Encode> Encode for Box<T>`, the encoder must look up `T`'s `Encode` implementation at runtime.
-5. Callers pass `T`'s implementation through a hidden trait dictionary.
+With dictionaries, only a call to a function that requires a trait with methods pays a cost.
 
-## Why heap objects omit type arguments
+## Part 1: Trait declarations
 
-The VM omits type arguments from heap objects to avoid three runtime costs. If every value also stored its type arguments, the native encoder could look up generic implementations directly from values.
-
-### Cost 1: Callers would pass type arguments at every generic call
-
-With type erasure, callers pass only value arguments to unconstrained generic functions:
+The prelude declares the two traits with native default methods:
 
 ```sand
-fn empty_list<T>() -> [T] { [] }
-```
-
-The compiler emits a single copy of `empty_list` for all `T`. To record the element type inside the new list, `empty_list` would need `T`'s type descriptor at runtime. Every caller would pass a descriptor for `T`. Callers would pass hidden type descriptors to every generic function that builds a value.
-
-On `main`, callers pass hidden arguments only for `reflect` parameters and bounds on traits with methods. Callers of `fn identity<T>(value: T) -> T` pass only `value`.
-
-### Cost 2: The VM stores immediate values inline
-
-The VM stores immediate values directly in a 16-byte value slot outside the heap. Inline values include scalars, unit enum variants such as `None` and `Color.Red`, and single-payload variants such as `Some(3)`.
-
-An inline `None` of type `Email?` has the same bits as an inline `None` of type `int?`. To record type arguments on values, the VM would have to allocate a heap object for every `None`. Most Sand programs use `Option` heavily. Heap allocation for `None` would add large overhead.
-
-### Cost 3: Extra memory per heap object
-
-Storing an interned type-argument ID in each `Obj` slot on the heap would add about 4 bytes per heap object. This memory cost is smaller than Costs 1 and 2.
-
-### Choices in other languages
-
-From general knowledge, other languages balance type erasure and runtime metadata in four ways:
-
-- The Java compiler also erases type arguments at compile time.
-- The C# and .NET runtimes store generic type arguments on every object. Callers also pass runtime type metadata to generic code.
-- The Swift compiler passes type metadata to generic functions as hidden arguments.
-- The Rust and C++ compilers emit a separate copy of each generic function per concrete type. Each compiled copy knows all concrete types.
-
-### Why dictionaries fit Sand
-
-With dictionaries, callers pass metadata only to functions that require traits with methods. On `main`, we apply the same principle to `reflect` by passing type descriptors only for marked type parameters. Recording type arguments on values would add hidden metadata arguments to every generic call. Callers of generic functions that only manipulate values in memory would still pay Cost 1.
-
-## Limits of the previous draft
-
-By looking up implementations in standard dictionaries, we remove all four special cases from the previous draft. In the previous draft, the encode walker looked up custom implementations from runtime value types. That lookup worked only for concrete types and required four special cases:
-
-- **Dictionary exception in the checker.** The checker skipped dictionaries for `Encode` and `Decode` despite their declared methods.
-- **Method slots on type definitions.** The checker stored custom `encode` and `decode` method slots on each type definition.
-- **Method slots in the VM type table.** The VM stored custom `encode` and `decode` method slots on each struct and enum record.
-- **Concrete-type rule.** The checker allowed custom `Encode` and `Decode` implementations only on concrete structs and enums. Each type definition had a single fixed slot for all type arguments.
-
-## Part 1: Native default methods
-
-In the prelude, we declare `Encode` and `Decode` with native default methods:
-
-```sand
-/// Encodes values with `json.encode`.
+/// Converts a value into an external format, such as JSON text.
 pub trait Encode {
     /// Writes `self` to `encoder` as a single value.
-    /// Implementors call `encoder.encode(value)`.
     native fn encode(self, encoder: Encoder)
 }
 
-/// Decodes values with `json.decode`.
-pub trait Decode: Encode {
-    /// Decodes a value of `Self` from `decoder`.
-    /// Implementors call `decoder.decode()`.
+/// Builds a value from an external format, such as JSON text.
+pub trait Decode {
+    /// Reads a value of type `Self` from `decoder`.
     native fn decode(decoder: Decoder) -> Result<Self>
 }
 ```
 
-A native default method finds part implementations through `Self`'s dictionary. On `main`, callers pass `Self`'s dictionary to every trait method as its first hidden argument. The walker reads that dictionary to look up each part's implementation.
+[Open question 4](#open-questions) asks whether `encode` should return its value instead of writing it. [Open question 5](#open-questions) asks whether `encode` should be able to return an error.
+
+A native default method works as other default methods do. An `impl` block that omits the method uses the default. A caller passes the dictionary of `Self` to each trait method as its first hidden argument (`src/check/traits.rs:9-11`). The native default reads the shape and the part dictionaries from that dictionary.
+
+### Independent traits
+
+`Decode` does not require `Encode`. On `main`, the supertrait `Decode: Encode` limited `json.decode` to `Encode` types that do not declare `init` (commit `49d4022`). After this change, users implement `Decode` directly, so that reason no longer applies. serde and Swift also keep the two traits independent:
+
+- serde declares `pub trait Deserialize<'de>: Sized`, without a `Serialize` supertrait (`serde_core` 1.0.229, `src/de/mod.rs:554`).
+- Swift declares `Encodable` and `Decodable` as two protocols. `Codable` is "a type alias for the `Encodable` and `Decodable` protocols" (`stdlib/public/core/Codable.swift:43-47` in the Swift repository).
+
+### `Num` keeps `Encode`
+
+`Num` keeps its supertraits: `pub trait Num: Ord + Encode` (`src/stdlib/prelude.sand:321`). The spec test "data implements Encode, and Num implies it" (`tests/spec/std_json.test:554`) passes a `T: Num` value to a function that requires `T: Encode`.
+
+The cost is one more slot in each `Num` dictionary, for the `Encode` dictionary. Only the prelude can implement `Num` (`src/check/traits.rs:491-497`), and it implements `Num` only for `int` and `float` (`src/stdlib/prelude.sand:328-337`). The cost is therefore one slot in each of two constant dictionaries. `native::Num` reads `zero` and `one` by position (`src/check/traits.rs:466-474`). Methods stay first in a dictionary, so those positions do not change.
 
 ## Part 2: Structural implementations
 
-The type checker generates all structural implementations from the types registered with each native default method. Rust setup code registers each native default with the types that it supports. In the prelude, we declare only the traits themselves.
+### `TypeConstructor`
 
-### Supported types
+We rename the checker enum `Ctor` (`src/check/mod.rs:82-97`) to `TypeConstructor` and move it to `src/types.rs`, beside `TypeDefKind`. Identifiers that use the old name change with it, such as `ctor_of` (`src/check/mod.rs:3350`). `PatternKind::Ctor` in the parser is a different concept and keeps its name.
 
-The checker already has two enums that classify types. Registration uses both:
+The enum gets this doc comment:
 
-- **`Ctor`** in `crates/sandlang/src/check/mod.rs` lists the type constructors: `Int`, `Float`, `Bool`, `Str`, `Bytes`, `Duration`, `Unit`, `Range`, `List`, `Map`, `Set`, `Tuple`, `Fn`, and `Def`. On `main`, the checker keys implementation lookup by `Ctor`. The table in `crates/sandlang/src/check/derive.rs` also matches on `Ctor`.
-- **`TypeDefKind`** in `crates/sandlang/src/types.rs` classifies each type definition as a struct, an enum, or an opaque type. An opaque type with `Opaque::Value` is a native value type, such as `time.PlainDate`.
+```rust
+/// The constructor of a type without its type arguments, such as `List` for
+/// `[int]`. The checker indexes trait implementations by type constructor.
+pub enum TypeConstructor {
+    Int, Float, Bool, Str, Bytes, Duration, Unit, Range,
+    List, Map, Set, Tuple, Fn,
+    /// A struct, enum, or opaque type, by its type definition ID.
+    Def(TypeDefId),
+}
+```
 
-A registration lists two groups:
-
-- The built-in `Ctor` values that the native default supports, such as `List` and `Map`.
-- The categories of type definitions that the native default supports: structs, enums, and native value types. Each category names a variant of `TypeDefKind`.
-
-`Ctor::Def` holds a type definition ID. Registration runs before the checker creates any type definition, so registration names categories, not IDs. The `never` type has no `Ctor`, so a registration marks support for `never` separately.
+The checker keys implementation lookup by trait, type constructor, and tuple arity (`impl_key`, `src/check/traits.rs:119-127`). `TypeDefKind` (`src/types.rs:700-709`) classifies a type definition as a struct, an enum, or an opaque type. An opaque type with `Opaque::Value` is a native value type, such as `time.PlainDate`.
 
 ### Registration
 
-For example, prelude setup registers `Encode.encode` with every built-in `Ctor` that the encode walker supports, with all three categories of type definitions, and with `never`.
+Rust setup code registers each native default method with the types that it supports. A registration lists three things:
 
-The checker processes each registration to create structural implementations:
+- The built-in type constructors, such as `List` and `Map`.
+- The categories of type definitions: structs, enums, and native value types.
+- Whether `never` implements the trait.
 
-- **Built-in constructors.** During trait declaration, the checker creates a structural implementation for each registered `Ctor`. It requires every type argument to implement the trait. For `Ctor::List`, the checker creates `impl<T: Encode> Encode for [T] {}`.
-- **Structs and enums.** If the registration includes structs or enums, the checker derives a structural implementation for each qualifying struct or enum. Its derivation pass computes the bounds on each type parameter from the field and payload types. For `struct Pair<A, B> { first: A, second: [B] }`, the checker generates `impl<A: Encode, B: Encode> Encode for Pair<A, B> {}`.
-- **Structs that declare `init`.** For `Decode`, the struct category also covers structs that declare `init`. The decode walker constructs such a struct through its `init` method. See [Decoding a struct that declares `init`](#decoding-a-struct-that-declares-init). The checker derives `Decode` for such a struct if every parameter type of `init` implements `Decode`.
+Registration happens before the checker reads any source. It therefore lists categories, not type definition IDs.
 
-If a user writes a custom implementation for a type, the checker uses the custom implementation.
+Each walker owns its list of supported types. The walker module has one function that maps each type constructor and each category to a walker handler, or to "unsupported". The `match` in that function covers every variant, so the Rust compiler forces a decision for each new constructor or category. Registration calls the same function. The list therefore exists in one place.
 
-On `main`, the checker records derived traits in a table of required type parameters. Its fixed-point pass in `crates/sandlang/src/check/derive.rs` computes that table. For `Encode` and `Decode`, the checker keeps that pass and records each result as an ordinary implementation (`ImplDef`). The compiler then builds the dictionaries of structural implementations with its existing dictionary code. The trait resolver checks `Encode` and `Decode` bounds with standard lookup.
+Both walkers support the set that derives `Encode` on `main` (`src/check/derive.rs:34-37`, `:196-199`). This set has every built-in type constructor except `Fn`, plus structs, enums, and native value types. Tasks, channels, and native object types are not in the set. Both registrations declare support for `never`. The decode walker also supports structs that declare `init`.
 
-### Consistency checks
+### How the checker builds structural implementations
 
-Two compile-time checks keep registrations aligned with walkers:
+**Built-in type constructors.** For each registered type constructor, the checker creates an implementation that requires every type argument to implement the trait. For `List`, it creates `impl<T: Encode> Encode for [T] {}`. A tuple implementation needs one type parameter for each element, and the checker keys tuple implementations by arity. The checker therefore creates the tuple implementation for an arity at the first lookup of that arity.
 
-- **Exhaustive matching.** Each walker matches on the `Ctor` in `ImplShape`. For `Ctor::Def`, it also matches on the kind of the type definition. The Rust compiler requires both matches to cover every variant. If a developer adds a constructor or a kind of type definition, the Rust compiler reports an incomplete match in the walker.
-- **Supertrait verification.** The checker verifies supertrait bounds on all structural and custom implementations. Because `Decode` has supertrait `Encode`, prelude setup must register every type that `Decode` supports on `Encode` too. If prelude setup registers an extra type only on `Decode`, the checker rejects the prelude in every test run.
+**Structs and enums.** The checker computes the requirements of each structural implementation through ordinary trait resolution:
 
-### Completeness for built-in types
+1. The checker declares the headers of all custom implementations.
+2. For each struct and enum without a custom implementation, the checker resolves the trait for each part type. The type parameters of the struct or enum are the unknowns. The checker records each requirement on a type parameter, for any trait.
+3. During resolution, the checker assumes that the structural implementations under computation hold. It repeats step 2 until the requirements stop changing.
 
-Prelude registration alone determines which built-in types implement `Encode` and `Decode`. Under the orphan rule, a module can implement a prelude trait only for types declared in that module. Only the prelude can implement prelude traits for built-in types. The checker rejects user implementations on built-in types.
+For `struct Pair<A, B> { first: A, second: [B] }`, the result is `impl<A: Encode, B: Encode> Encode for Pair<A, B> {}`.
+
+The derivation pass on `main` cannot do this, for two reasons. It records only the indices of type parameters that must implement the same trait (`Derived::Needs`, `src/check/derive.rs:14-19`). Also, for type definitions it reads only its own table (`src/check/derive.rs:28-33`), and it first runs before the checker declares the `impl` blocks of a module (`src/check/mod.rs:1328-1330`, `:1365`, `:1366-1374`). Consider a field of type `Box<T>` with a custom `impl<T: Describe> Encode for Box<T>`. The outer struct then requires `T: Describe`, which the pass on `main` cannot record.
+
+The fixed-point driver on `main`, `propagate_to_fixed_point` (`src/check/derive.rs:166-190`), already iterates in this way. Its documented rule is a greatest fixed point, "so that mutually recursive types implement a trait unless a component type refutes it" (`src/check/derive.rs:123-125`). The new pass keeps the driver and replaces its per-type record with a list of requirements, each a type parameter and a trait. The checker runs the pass after it declares the `impl` headers and before it checks the supertraits of each implementation (`check_impl_supertraits`, `src/check/mod.rs:1375-1377`).
+
+**Structs that declare `init`.** A struct that declares `init` derives `Decode` through its `init` parameters, not its fields. Its `Decode` requirements come from the parameter types of `init`. See [Decoding a struct that declares `init`](#decoding-a-struct-that-declares-init). [Open question 12](#open-questions) asks about the visibility and the bounds of `init`.
+
+**`never`.** If a registration declares support for `never`, the checker gives `never` a structural implementation. For other traits with methods, the rule on `main` stays: `never` does not implement them (`src/check/traits.rs:1123`, `src/check/verify.rs:228`). serde and Swift also implement the codec traits for `never` one trait at a time:
+
+- serde implements `Serialize` and `Deserialize` for `!` separately. `deserialize` returns `Err(Error::custom("cannot deserialize `!`"))` (`serde_core` 1.0.229, `src/de/impls.rs:42-49`), and `serialize` returns `*self` (`src/ser/impls.rs:351-357`).
+- Swift SE-0396 conforms `Never` to `Encodable` and `Decodable`. For decoding, "the implementation throws a `DecodingError.typeMismatch` error if decoding is attempted."
+
+### Custom implementations
+
+The checker no longer rejects user implementations of `Encode` and `Decode`. It checks them as it checks implementations of any other trait.
+
+A custom implementation replaces the structural implementation for its type constructor. The checker rejects a second implementation of a trait for the same type constructor and tuple arity if the trait arguments unify (`src/check/traits.rs:537-550`). `Encode` and `Decode` have no trait arguments. So `impl Encode for W<int>` replaces the structural implementation for every `W<…>`, and `W<str>` does not implement `Encode`.
+
+An `impl` block that omits the method uses the native default. The checker treats the block as a structural implementation with the bounds that the block declares. It verifies that those bounds supply every part. For example, `impl<T: Encode> Encode for Box<T> {}` is valid if every part of `Box<T>` implements `Encode` under `T: Encode`.
+
+A module can implement a trait only if the module declares the trait or the type. Built-in types belong to the prelude for this check (`src/check/traits.rs:527-535`). The prelude registrations therefore decide which built-in types implement `Encode` and `Decode`.
 
 ### Scope: `Eq`, `Ord`, and `Hash`
 
-We update only `Encode` and `Decode` in this branch. We keep `Eq`, `Ord`, and `Hash` on their current derivation path. For those three traits, the checker continues to read the type table in `crates/sandlang/src/check/derive.rs`. We can migrate `Eq`, `Ord`, and `Hash` to native default methods in a follow-up pull request. At that point, we will delete the table in `crates/sandlang/src/check/derive.rs`.
+This branch changes only `Encode` and `Decode`. `Eq`, `Ord`, and `Hash` stay on their current derivation path in `src/check/derive.rs`. Until a later change migrates them, the checker has two derivation mechanisms.
 
 ## Part 3: Implementation shapes and part templates
 
-### Why structural dictionaries store extra metadata
+### Why structural dictionaries need more data
 
-Structural dictionaries store extra metadata so native default methods can look up concrete field and payload types. On `main`, the compiler places child dictionaries in a dictionary only for generic type parameters. For `struct User { email: Email }`, `User` takes concrete field `Email` directly. A standard `User` dictionary stores only `User`'s method. The walker needs another record of `Email`'s `Encode` dictionary.
+A walker needs the dictionary of each part, including parts with concrete types. The standard dictionary layout stores bound dictionaries only for type parameters. For `struct User { email: Email }`, the standard `User` dictionary stores only the method of `User`. The walker also needs the `Encode` dictionary of `Email`. The implementation shape supplies it.
 
-### Implementation shape
+### Dictionary layout
 
-The implementation shape replaces the runtime type description (`TypeDesc`) on `main`. A `TypeDesc` describes a whole type tree, and the decoder receives it through a `reflect` type parameter. An implementation shape describes a single level of a type. The dictionaries of the parts describe the levels below it. This design deletes `TypeDesc` together with `reflect`.
-
-The compiler emits a constant `ImplShape` for each structural implementation. It places the implementation shape right after the supertrait dictionaries:
+A structural dictionary has this layout:
 
 ```text
-[methods..., supertrait dictionaries..., implementation shape, bound dictionaries...]
+[native default method, shape ID, bound dictionaries...]
 ```
 
-Ordinary trait calls read only the method functions and supertrait dictionaries. For custom implementations, the compiler emits the standard dictionary layout. Only native default methods read the implementation shape.
+Neither trait has supertraits, so the shape ID follows the method. A custom dictionary keeps the standard layout, `[method, bound dictionaries...]`. The walker reads slot 0 to tell the two kinds apart. If slot 0 holds the native default method, slot 1 holds a shape ID. Ordinary trait calls read only slot 0.
 
-Each `ImplShape` struct has two fields:
+### The shape table
 
-- **Constructor.** This field stores the `Ctor` of the type. A type definition ID in `Ctor::Def` is also the ID of the type in the VM type table. The walker therefore reads field names and variants from the VM type table, as the encoder does on `main`. The shape also stores three facts that the VM type table lacks:
-  - For a struct, the field defaults. The shape reuses `FieldDefault` from `TypeDesc`.
-  - For a struct that declares `init`, the parameters of `init` and the `init` function. The `Decode` shape uses them instead of the fields.
-  - For a native value type, the parse function from the type's `ValueTypeInfo`.
-- **Part templates.** The compiler stores a `PartTemplate` for each part in this field. The walker evaluates each template to get that part's dictionary.
+The compiler stores shapes in a table in `Program`. Slot 1 of a structural dictionary holds the index of its shape as an integer. `Program` already keeps the templates of type descriptors in such a table (`desc_templates`, `src/vm/bytecode.rs:1335`).
+
+A side table keeps the constant pool acyclic. The VM builds constant tuples in index order, and each tuple can refer only to earlier constants (`src/vm/mod.rs:740-752`). A recursive type would otherwise need a cycle. For example, the dictionary of `Tree` refers to its shape, the shape refers to the `[Tree]` dictionary, and that dictionary refers to the `Tree` dictionary again. With an integer shape ID, the chain stops at the shape. The compiler allocates the ID of a shape before it lowers the part templates of that shape. A part template can therefore refer to a dictionary that holds the same shape ID.
+
+A shape has these fields:
+
+- **Constructor.** The `TypeConstructor` of the type, or a marker for `never`. For `TypeConstructor::Def`, the type definition ID is also the ID in the VM type table, because the compiler adds the VM type records in checker order (`src/compile/mod.rs:418-419`). The walker reads field names and variants from that table, as `json.encode` does on `main`.
+- **Part templates.** The shape has a part template for each part.
+- **Decode data.** A `Decode` shape has three more kinds of data, for facts that the VM type table does not store:
+  - For a struct, the field defaults. A default is a constant or the default helper function of the field (`src/check/mod.rs:1610-1632`). On `main`, `FieldDefault::Computed` refers to a fill function that runs after the decode (`src/vm/value.rs:1135-1145`). The shape refers to the field's default helper instead.
+  - For a struct that declares `init`, the parameters of `init`, their defaults, and the `init` function.
+  - For a native value type, the parse function from its `ValueTypeInfo` (`src/types.rs:721-725`).
+
+Only native default methods read shapes. In this branch, only `Encode` and `Decode` declare native defaults. A shape is therefore codec metadata, not a general part of the trait system.
 
 ### Part templates
 
-Part templates replace the type description templates (`DescTemplate`) on `main`. On `main`, a `DescTemplate` builds a `TypeDesc` at run time from the descriptions of type arguments. `DescTemplate::instantiate` charges fuel and stops at a nesting-depth limit. The instantiation of part templates keeps both rules.
-
-We define `PartTemplate` with three variants:
+Part templates replace the type descriptor templates of `main` (`DescTemplate`). A `DescTemplate` builds a whole `TypeDesc` at run time from the descriptors of the type arguments. A part template builds only the dictionary of one part.
 
 ```rust
 enum PartTemplate {
-    /// Loads a constant dictionary or shape from the constant pool.
+    /// Loads a constant: a dictionary, a method function, or a shape ID.
     Constant(u32),
-    /// Reads a bound dictionary from a slot in the enclosing dictionary.
+    /// Reads a bound dictionary from the enclosing dictionary.
     Bound(u32),
     /// Builds a dictionary tuple from element templates.
     Tuple(Vec<PartTemplate>),
 }
 ```
 
-The compiler and walker handle each variant by part form:
+The compiler emits a template for each form of part:
 
-- **Concrete field.** For field `email: Email` in `impl Encode for User`, the compiler emits `Constant(index)` for `Email`'s constant `Encode` dictionary. The walker loads that constant directly.
-- **Direct type parameter.** In `impl<T: Encode> Encode for [T]`, the compiler emits `Bound(0)`. The walker reads `T`'s dictionary from the first bound slot of the enclosing dictionary.
-- **Nested generic field.** For field `items: [T]` in `impl<T: Encode> Encode for Page<T>`, the compiler emits `Tuple([list_method, list_shape, Bound(0)])`. The walker evaluates those three elements. It then builds the `[T]` dictionary from them.
+- **Concrete part.** For the field `email: Email` in `impl Encode for User`, the compiler emits `Constant(k)`, where `k` is the index of the constant `Encode` dictionary of `Email`.
+- **Type parameter.** In `impl<T: Encode> Encode for [T]`, the compiler emits `Bound(0)` for each element. The walker reads the first bound dictionary of the enclosing dictionary.
+- **Generic part.** For the field `items: [T]` in `impl<T: Encode> Encode for Page<T>`, the compiler emits `Tuple([Constant(native_encode), Constant(list_shape), Bound(0)])`. The walker evaluates the three elements and builds the `[T]` dictionary from them.
+
+On `main`, `op_describe` charges fuel for each template instantiation (`src/vm/interp.rs:1952-1954`), and `DescTemplate::instantiate` stops at a depth limit (`src/vm/value.rs:1384-1389`). The evaluation of part templates applies both rules.
 
 ### How the compiler builds part templates
 
-The compiler lowers `PartTemplate` values from the checker's trait-evidence trees. For method bodies on `main`, the checker builds an expression tree of dictionary tuples, slot reads, and constant loads. The compiler lowers that tree to bytecode on `main`. For each part of a structural implementation, the checker resolves `PartType: Trait` into the same expression tree. The compiler then converts that tree into a `PartTemplate`.
+The checker already builds trait evidence for the bodies of generic functions. This evidence is an expression tree of dictionary constructors, slot reads, and constant loads, and the compiler lowers it to bytecode. For each part of a structural implementation, the checker resolves `PartType: Trait` into the same kind of tree. The compiler then converts that tree into a `PartTemplate` instead of bytecode.
 
 ### Worked example
 
-With part templates, the native encoder reaches custom methods across erased type arguments. At runtime, a `Page<Email>` object records only `Page`. The walker reaches `Email.encode` through dictionaries:
+This example shows how the walker reaches a custom method across an erased type argument. At run time, a `Page<Email>` object records only `Page`.
 
 ```sand
 struct Email { address: str }
@@ -265,320 +249,486 @@ fn format_page<T: Encode>(page: Page<T>) -> str { json.encode(page) }
 format_page(Page(items: [Email(address: "a@b.c")]))
 ```
 
-Here, the user defines a custom `Encode` implementation on `Email`. The checker derives a structural implementation on `Page<T>`. The native encoder is the native default method `Encode.encode`:
+The user writes a custom `Encode` implementation for `Email`. The checker generates a structural implementation for `Page<T>` that requires `T: Encode`.
 
-- **Step 1: Incoming bound dictionary.** Because `format_page` requires `T: Encode`, its caller passes `Email`'s `Encode` dictionary. That dictionary is a 1-item tuple containing `Email.encode`.
-- **Step 2: Dynamic `Page<T>` dictionary.** Inside `format_page`, the call `json.encode(page)` needs `Page<T>: Encode`. For generic `T`, `format_page` builds a 3-item `Page<T>` dictionary tuple at runtime:
-  1. Slot 0 stores the native encoder method.
-  2. Slot 1 stores the constant `ImplShape` for `Page`.
-  3. Slot 2 stores `T`'s `Encode` dictionary from Step 1. In this call, slot 2 holds `Email`'s dictionary.
-- **Step 3: `Page` part template.** `Page`'s `ImplShape` stores a `PartTemplate` for `items`. That template tells the walker how to build a 3-item `[T]` dictionary tuple:
-  1. Slot 0 stores the native encoder method.
-  2. Slot 1 stores the constant `ImplShape` for lists.
-  3. Slot 2 is `Bound(0)`. The walker resolves `Bound(0)` to slot 2 of the enclosing `Page` dictionary.
-- **Step 4: Runtime walk.**
-  1. `json.encode` calls the native encoder with `page` and the `Page` dictionary.
-  2. The native encoder reads slot 1 of the `Page` dictionary to get `Page`'s `ImplShape`.
-  3. At `items`, the native encoder evaluates `items`'s part template to build the list dictionary. It copies `Email`'s dictionary from slot 2 of the `Page` dictionary into slot 2 of the list dictionary.
-  4. Slot 0 of the list dictionary holds the native encoder itself. The walker processes the list directly in Rust.
-  5. For each list element, the walker reads `Bound(0)` from the list `ImplShape`. It loads slot 2 of the list dictionary to get `Email`'s dictionary.
-  6. Slot 0 of `Email`'s dictionary holds the custom method `Email.encode`. The walker calls `Email.encode` through a callback.
+1. **The caller passes the `Email` dictionary.** `format_page` requires `T: Encode`, so its caller passes the `Encode` dictionary of `Email`. The implementation is custom and has no bounds, so this dictionary is a 1-item tuple that holds `Email.encode`.
+2. **`format_page` builds the `Page<T>` dictionary.** The call `json.encode(page)` needs `Page<T>: Encode`. `T` is generic, so `format_page` builds a 3-item tuple at run time:
+   - Slot 0 holds the native default `Encode.encode`.
+   - Slot 1 holds the shape ID of `Page`.
+   - Slot 2 holds the first bound dictionary, for `T`. In this call, it is the `Email` dictionary.
+3. **The walker visits `page`.** `json.encode` starts the walker with `page` and the `Page<T>` dictionary. Slot 0 holds the native default, so the walker reads the shape ID from slot 1.
+4. **The walker builds the `[T]` dictionary.** The `Page` shape has the template `Tuple([Constant(native_encode), Constant(list_shape), Bound(0)])` for `items`. `Bound(0)` reads slot 2 of the `Page<T>` dictionary. The result is a 3-item tuple: the native default, the shape ID of lists, and the `Email` dictionary.
+5. **The walker visits the list.** Slot 0 of the `[T]` dictionary holds the native default, so the walker processes the list in Rust. The list shape has the template `Bound(0)` for each element. It reads slot 2 of the `[T]` dictionary, which is the `Email` dictionary.
+6. **The walker calls `Email.encode`.** Slot 0 of the `Email` dictionary holds `Email.encode`, which is not the native default. The walker calls it through a callback.
+
+The `Decode` dictionaries have the same layout. With independent traits, a `Decode` dictionary has no `Encode` slot.
 
 ## Part 4: Recursive types
 
-### Cyclic dictionary references
+### Dictionaries on demand
 
-Recursive type definitions create reference cycles between dictionaries and implementation shapes. In `struct Tree { children: [Tree] }`, `Tree`'s `ImplShape` refers to the `[Tree]` dictionary. The `[Tree]` dictionary stores `Tree`'s dictionary as a bound. `Tree`'s dictionary stores `Tree`'s `ImplShape`.
+The walker builds the dictionary of a part only if it visits a value of that part. This rule stops the walker from building dictionaries forever for recursive types:
 
-### Building part dictionaries on demand
+- **Direct recursion.** In `struct Tree { children: [Tree] }`, the `Tree` shape has `Constant(k)` for `children`, where `k` is the constant `[Tree]` dictionary. The `[Tree]` dictionary holds the `Tree` dictionary as its bound. See [The shape table](#the-shape-table) for why these constants stay acyclic.
+- **Generic recursion.** For `Tree<T>`, the compiler emits a finite template for `children`: `Tuple([native, list_shape, Tuple([native, tree_shape, Bound(0)])])`. The walker builds the `[Tree<T>]` dictionary at `children`, and the `Tree<T>` dictionary from it.
+- **Polymorphic recursion.** A recursive type can wrap its type parameter, as in `enum Nest<T> { Leaf(T), Deep(Nest<[T]>) }`. At each `Deep` value, the walker builds the `Nest<[T]>` dictionary from the dictionary of `T`. It builds one dictionary for each `Deep` layer in the value. Each layer is also a nesting level, so the 512-level limit (`src/vm/container_children.rs:15`) bounds the number of dictionaries.
 
-The walker breaks dictionary cycles by building a part's dictionary only if the walk visits a value of that part:
-
-- **Constant dictionaries.** `PartTemplate::Constant` stores an integer index into the constant pool. The VM resolves that index during the walk. The compiler already stores each constant dictionary once, in a table keyed by the dictionary's items (`dict_consts` in `crates/sandlang/src/compile/mod.rs`). Before lowering an `ImplShape`'s part templates, the compiler reserves the constant slot for that shape and emits `Tree`'s constant dictionary tuple. For recursive references, the compiler emits the index of `Tree`'s dictionary. Every loaded tuple in the constant pool stays acyclic.
-- **Dynamic dictionaries.** For generic `Tree<T>`, the compiler emits the finite template `Tuple([list_method, list_shape, Tuple([tree_method, tree_shape, Bound(0)])])` for `children`. The walker builds `[Tree<T>]`'s dictionary at `children`. As the walker visits each child element, it builds that child's `Tree<T>` dictionary.
-- **Polymorphic recursion.** A recursive type can wrap its type parameter in a nested type, as in `enum Nest<T> { Leaf(T), Deep(Nest<[T]>) }`. At each `Deep` value, the walker evaluates `Deep`'s template. That evaluation builds `Nest<[T]>`'s dictionary from `T`'s dictionary. The walker builds a single dictionary per `Deep` layer in the runtime value.
+Go's `encoding/json` also builds the handler for a type at run time, caches it, and breaks recursion with an indirect entry: "To deal with recursive types, populate the map with an indirect func before we build it" (`src/encoding/json/encode.go:386-400` in the Go repository).
 
 ### Per-walk dictionary cache
 
-During a walk, the walker caches dynamic part dictionaries by shape ID, part index, and parent dictionary. While encoding a list of 10,000 `Tree<T>` values inside a generic function, the walker builds the `Tree<T>` dictionary once.
-
-### Rejected recursion schemes
-
-We rejected two alternative schemes:
-
-- **Store part dictionaries inside every dictionary.** For recursive types, the compiler would have to build cyclic tuples. On polymorphic recursion, the compiler would expand nested dictionaries forever.
-- **Generate a Sand function that returns part dictionaries.** For each uncached lookup, the walker would run a Sand callback of about 90 ns. Callers encoding types that use only native defaults would still pay that cost.
-
-From general knowledge, other language runtimes also build dictionaries on demand:
-
-- The Swift runtime builds generic witness tables on demand and caches them.
-- GHC compiles recursive typeclass dictionaries as lazy thunks.
+During a walk, the walker caches each dynamic part dictionary by shape, part index, and enclosing dictionary. Thus, for a list of 10,000 `Tree<T>` values in a generic function, the walker builds the `children` dictionary of `Tree<T>` once for each enclosing dictionary, not once for each value. The walker roots the cached dictionaries, as it roots its other heap values.
 
 ## Part 5: Native walkers
 
-Each walker visits a value in a single pass. If the walker reaches a part that needs Sand code, it waits for a callback at that point. After the callback, the walker continues from the same position. This design matches the architecture of `serde`: walkers write to a sink or read from a source, and each format supplies the sink or the source.
+### Walkers that do not know the format
+
+The walkers know the structure of Sand values. They know nothing about any format. The encode walker writes to an encode sink, and the decode walker reads from a decode source. The walkers are generic over the sink and the source, as serde code is generic over the format: `fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error> where S: Serializer` (`serde_core` 1.0.229, `src/ser/mod.rs:263-265`).
+
+The walkers differ from serde in one way. serde's derive generates code for each type. The walkers read shapes at run time, as Go's `encoding/json` reads type metadata at run time.
+
+This design reverses one decision of `SPLIT.md` changeset 14. That changeset rejected a shared heap walk with a sink, because the walk "required about 300 extra lines and `#[inline(always)]` across two trait layers." With callbacks inside a walk, three separate walkers would each need the callback, rooting, and resume logic. One walker with two sinks needs it once.
 
 ### Walker state across callbacks
 
-Each walker keeps an explicit stack of open containers in a `Vec`. It does not recurse on the Rust stack. During a callback, Sand code can run the garbage collector. The collector does not trace heap values that a Rust variable holds.
+A walker keeps an explicit stack of open containers and does not recurse on the Rust stack. During a callback, Sand code can run the garbage collector. The collector does not trace values that Rust variables hold. A future that waits for a callback also cannot hold borrows of the heap. The stack entries therefore hold indices and rooted handles, not borrows.
 
-An async native call on `main` already has a root table for this purpose. `NativeContext::root` adds a heap value to the table, and the collector traces the table. The scheduler counts the capacity of the table against `max_memory`. Before each callback, the walker roots three groups of values:
+This rule requires new code in both walkers:
 
-- The containers that the walker is visiting
-- The partly built containers of the decode walker
-- The dictionaries of the open containers
+- **Encode walker.** The heap copier of `Vm::to_value` and the JSON text encoder already walk with explicit stacks. Their stack entries, `ContainerChildren`, hold borrowed slice iterators (`src/vm/container_children.rs:32-43`). The encode walker needs a new stack entry type.
+- **Decode walker.** The typed JSON decoder on `main` recurses on the Rust stack (`src/stdlib/json.rs:1007-1133`). The decoder needs a rewrite to an explicit stack. `TODO.md:124-127` lists this conversion, with the condition "without regressing throughput". The JSON parser also borrows its input text (`Parser<'a>`, `src/stdlib/json.rs:567`), and the error path holds borrowed keys (`Seg::Key(Cow<'a, str>)`, `src/stdlib/json.rs:883-886`). The JSON source must keep a rooted handle to the input and a byte offset instead.
 
-The heap does not move objects. A rooted heap value therefore keeps its handle across a callback.
+An async native call has a root table. `NativeContext::root` adds a heap value to it, and the collector traces it (`src/native/context.rs:143-145`). The scheduler counts the capacity of the table against `max_memory` (`src/vm/sched.rs:514`). Before each callback, the walker roots three groups of values:
 
-On `main`, the root table only grows during a call. A walker with many callbacks would add roots at each callback. This design therefore adds a way to release roots during a call. `TODO.md` already lists that change: "Let an async native function release roots during a call."
+- The containers that the walker is visiting.
+- The values that the decode walker holds for containers that it has not finished.
+- The dictionaries of the open containers.
 
-The decode walker builds heap values in a `Staging` area, as the JSON decoder on `main` does. A staged value becomes valid only after the staging closure returns. The decode walker therefore ends its staging closure before each callback, and starts a new one after the callback.
+The collector does not move objects (`src/vm/heap.rs:1-3`). A rooted handle therefore stays valid across a callback.
 
-A callback can also change a container that the walker is visiting. For example, a custom `encode` method can remove an element from a list that contains its value. The walker reads each child at the time it reaches that child. Rooting keeps every container alive, so a changed container gives changed output, not invalid memory access. `TODO.md` already tracks detection of such changes: "Detect collection changes during an async native walk."
+On `main`, the root table only grows during a call. A walk with many callbacks would add roots at each callback and keep them until the walk ends. This design therefore adds a way to release roots during a call. `TODO.md:46-53` lists this change: "Let an async native function release roots during a call."
+
+The decode walker builds heap values in a `Staging` area, as the JSON decoder on `main` does. A staged value becomes valid only after the staging closure returns (`src/vm/heap.rs:447-450`). The decode walker therefore ends its staging closure before each callback, and starts a new one after the callback.
+
+A callback can change a container that the walker visits. For example, a custom `encode` method can remove an element from the list that holds its value. The walker reads each child at the time that it reaches the child. Rooting keeps every container alive, so a changed container changes the output but cannot cause access to freed memory. `TODO.md:42-45` tracks detection of such changes.
 
 ### Synchronous start
 
-A native function runs its walker synchronously first. If the walk never needs a callback, the native function returns its result directly. It allocates no future. The VM takes about 10 ns for a synchronous native call. It takes about 112 ns for an async native call whose future finishes on its first poll.
+A native function runs its walker synchronously first. If the walk needs no callback, the function returns `Later::ready`, which does not allocate a future (`src/native/func.rs:411-413`). If the walk needs a callback, the walker moves its state into a future with `Later::new` (`src/native/func.rs:403-408`). Between two callbacks, the walker runs inside one `NativeContext::with_vm` call, not one call for each part.
 
-If the walker needs a callback, it moves its state into a future at that point. The explicit stack makes that move possible: the walker state is data, not Rust stack frames. In `experiments/native-async-sand-calls.md`, a walker of this form ran derived types at the speed of the synchronous walker on `main`. A custom field added about 340 to 360 ns per row.
+Before the first callback, a memory limit error makes the engine collect garbage and run the native function again from the start (`src/vm/mod.rs:927-929`). That restart is safe because no Sand code has run yet. After the first callback, a restart would repeat the side effects of the callbacks. The walker therefore allocates through `NativeContext::step`, which collects garbage and runs again only its own closure (`src/native/context.rs:179-199`).
+
+### Speed of the walker
+
+The speed of the proposed walker is unmeasured. The nearest measurements are in `experiments/native-async-sand-calls.md`, section "Measurements". They use the prototype walker from commit `1f7bb03` and encode 5,000 rows:
+
+- The synchronous walker, as on `main`, took 98 to 142 ns per row.
+- The async prototype took 98 to 119 ns per row. It reached this speed because a static check, `Schema::is_derived`, sent each subtree without custom parts to a synchronous walk inside one `with_vm` call.
+- Without that check, with a `with_vm` call and a boxed future for each node, the prototype took 470 ns per row.
+
+The proposed walker does not match either prototype. It does not box a future for each node, but it evaluates a part template and reads a dictionary at every part. The cost of that work is unknown. If the benchmark shows that this cost matters, the walker can skip it inside subtrees without custom parts. For that, it needs a precomputed flag that says that no custom implementation exists below a dictionary. The compiler can compute the flag for constant dictionaries. For a dynamic dictionary, the flag depends on its bound dictionaries, so the walker computes it when it builds the dictionary and keeps it in the per-walk cache. This design adds the flag only if the benchmark requires it.
 
 ### Encode walker
 
-The encode walker reads a Sand value and writes it to an encode sink. For each part, the walker gets the part dictionary from its `PartTemplate`. It then checks the method in that dictionary:
+The encode walker reads a Sand value and writes it to an encode sink. For each part, it gets the part dictionary from the part template and reads slot 0:
 
 - **Native default method.** The walker writes the part to the sink in Rust.
-- **Custom method.** The walker creates an `Encoder` that wraps the same sink. It calls the custom method through a callback. The custom method writes a value to the `Encoder` with `encoder.encode(value)`. That call runs the encode walker on `value` with the same sink. The value therefore appears in the output at the position of the part.
+- **Custom method.** The walker creates an `Encoder` that refers to the same sink, and calls the custom method through a callback. The method writes a value with `encoder.encode(value)`. That call runs the encode walker on `value` with the same sink, so the value appears in the output at the position of the part.
 
-An `Encoder` accepts a single value. If a custom method writes no value or a second value, the encode fails with kind `"invalid"`. [Open question 4](#open-questions) asks whether a return value should replace this runtime check.
+The sink is in shared state that the outer walker and the `Encoder` both refer to. While a callback runs, the outer walker waits, so only the nested call writes to the sink.
+
+An `Encoder` accepts exactly one value, and only during its callback. The encode fails with kind `"invalid"` in three cases:
+
+- The custom method writes no value.
+- The custom method writes a second value.
+- Sand code keeps the `Encoder` and uses it after the callback returns.
+
+Each nested `encoder.encode` call adds a nesting level. Thus, an `encode` method that writes `self` stops at the 512-level limit.
 
 ### Encode sink interface
 
-The encode sink has a method for each kind of value in the data model:
+The encode sink has a method for each kind of value:
 
-- Scalars: unit, `bool`, `int`, `float`, `str`, `bytes`, and `duration`
-- Sequences: begin a list, set, or tuple with its length, then end it
-- Maps: begin a map with its length, then end it
-- Structs: begin a struct with its type name and field names, then end it
-- Enum values: write a variant with its type name, variant name, and payload form
-- Options: write `None`, or begin `Some`
-- Native value types: write a value with its type name and text
+- Scalars: unit, `bool`, `int`, `float`, `str`, `bytes`, and `duration`.
+- Sequences: begin a list, set, or tuple with its length, then end it.
+- Maps: begin a map with its length, then end it.
+- Structs: begin a struct with its type name and field names, then end it.
+- Enum values: write a variant with its type name, variant name, and payload form.
+- Options: write `None`, or begin `Some`.
+- Native value types: write a value with its type name and text.
 
-The walker identifies `Option` by the ID of the prelude `Option` definition. The sink therefore receives option calls without comparing type names.
+The walker identifies `Some` and `None` by their variant IDs in `RtIds` (`src/vm/bytecode.rs:1300-1305`). The sink therefore gets option calls and does not compare type names.
 
 This design has two encode sinks:
 
-- **The JSON sink** writes JSON text. It holds the JSON rules. For example, it writes `Some(inner)` as `inner`, `bytes` as a Base64 string, and map keys and native value types as strings.
+- **The JSON sink** writes JSON text and applies the JSON rules. It writes `Some(inner)` as `inner`, `bytes` as a Base64 string, and map keys and native value types as strings. It writes a unit variant as a string and another variant as an object with the variant name as its key, as on `main` (`src/stdlib/json.sand:1-14`).
 - **The `Value` sink** builds a `Value`. It writes `Option` as a `Value::Variant` of the prelude type `Option`, as `Vm::to_value` does on `main`.
 
 ### Decode walker
 
-The decode walker builds a Sand value according to the constructor in each `ImplShape`. It reads its input from a decode source. It waits for a callback in three cases:
+The decode walker builds a Sand value from the shape of each dictionary. It reads its input from a decode source. It waits for a callback in three cases:
 
-- **Custom `Decode` implementation.** The walker creates a `Decoder` that wraps the same source at the current position. It calls the custom method through a callback. The method reads its input with `decoder.decode()`.
-- **Computed field default.** A struct field declares a computed default, such as `id: int = next_id()`. If the input lacks that field, the walker calls the default function through a callback after it reads the other fields of the struct.
+- **Custom `Decode` implementation.** The walker creates a `Decoder` that refers to the same source at the current position, and calls the custom method through a callback. The method reads its input with `decoder.decode()`.
+- **Computed field default.** A struct field can declare a computed default, such as `id: int = next_id()`. If the input lacks that field, the walker calls the default helper of the field after it reads the other fields of the struct.
 - **Struct that declares `init`.** See [Decoding a struct that declares `init`](#decoding-a-struct-that-declares-init).
 
 Each callback finishes before the walker uses its result. Sets and maps therefore insert finished values and hash them correctly.
 
-A `Decoder` reads a single value from its input. If a read fails, the source returns to the start of the part. The custom method can then try to read the part as another type. After the callback returns, the source skips any part of the input that the method did not read.
+As with the sink, the source is in shared state that the outer walker and the `Decoder` both refer to. A `Decoder` reads at most one value, and only during its callback. If the custom method reads no value, the source skips the part after the callback. If a read fails, the decode fails with the error of that read, whatever the custom method returns. A failed read can leave the source inside a partly read value, so the walker cannot continue. [Open question 8](#open-questions) asks whether a custom method should be able to retry a read as another type.
 
 ### Order of callbacks
 
-The decode walker runs each callback at the point where it reaches the part. This order changes a guarantee from `main`. On `main`, `json.decode` runs computed field defaults only after the whole input decodes. In this design, a default or a custom method can run before a later part of the input fails to decode.
+The decode walker runs each callback at the point where it reaches the part. This order follows from walkers that wait for each callback in place. It changes a behavior of `main`. On `main`, `json.decode` runs computed field defaults "in post-order after parsing succeeds" (`src/stdlib/json.sand:137-138`). In this design, a default or a custom method can run before a later part of the input fails to decode. serde's derive also calls a `default = "path"` function at the point where it finds the field missing (`serde_derive` 1.0.229, `src/de.rs:766-779`).
 
-The spec test "decode runs the defaults that are not constants, as a construction does" checks the `main` guarantee. Its last line prints the number of calls after a failed decode. That number changes from 5 to 6, because the default for `inner.a` runs before the walker reaches the invalid `items` field. [Open question 5](#open-questions) asks whether to accept this change.
+The spec test "decode runs the defaults that are not constants, as a construction does" (`tests/spec/std_json.test:634-660`) checks the behavior of `main`. Its last line prints the number of calls after a failed decode. That number changes from 5 to 6. The default of `inner.a` runs before the walker reaches the invalid `items` field.
 
 ### Decode source interface
 
-The decode source has a method for each kind of value that the walker can request:
+The decode source has a method for each request of the walker:
 
-- Scalars: unit, `bool`, `int`, `float`, `str`, `bytes`, and `duration`
-- Sequences: begin a list, set, or tuple, read each element, and end it
-- Maps: begin a map, read each key with the requested key kind, read each value, and end it
-- Structs: begin a struct, read each field name and value, and end it
-- Enum values: read a variant name, then its payload
-- Options: read `None`, or begin `Some`
-- Native value types: read the text of a value
-- Position: save a position, return to it, and skip a value
-- Error paths: format the path of the current position, such as `$.items[2].price`
+- Scalars: unit, `bool`, `int`, `float`, `str`, `bytes`, and `duration`.
+- Sequences: begin a list, set, or tuple, read each element, and end it.
+- Maps: begin a map, read each key as the requested key kind, read each value, and end it.
+- Structs: begin a struct, read each field name and value, and end it.
+- Enum values: read a variant name, then its payload.
+- Options: read `None`, or begin `Some`.
+- Native value types: read the text of a value.
+- Any value: read the next value in the form that the input itself describes. The `Decode` implementation of `Json` uses this request.
+- Skip: skip the next value.
+- Error paths: format the path of the current position, such as `$.items[2].price`.
 
 This design has two decode sources:
 
-- **The JSON source** reads JSON text as the walker makes requests. It holds the JSON rules. For example, it decodes a Base64 string if the walker requests bytes. It parses a string key as an `int` if the walker requests an `int` key.
-- **The `Value` source** reads a `Value`. It accepts only the exact form of each kind. For example, it accepts `Value::Bytes` for bytes, and it rejects `Value::Str`.
+- **The JSON source** reads JSON text as the walker makes requests, and applies the JSON rules. It decodes a Base64 string if the walker requests bytes. It parses a string key as an `int` if the walker requests an `int` key.
+- **The `Value` source** reads a `Value`. [Open question 9](#open-questions) asks whether it accepts only the exact form of each kind, or also the JSON form.
 
-The JSON rules therefore stay in the JSON sink and the JSON source. The walkers contain no format rules.
+The JSON rules therefore stay in the JSON sink and the JSON source. The walkers know only the structure of Sand values.
 
 ### Decoding a struct that declares `init`
 
-On `main`, a struct that declares `init` does not implement `Decode`. A derived decoder would build the struct field by field. That construction would skip the validation in `init`. The native decoder on `main` cannot call `init`, because `init` is Sand code. Commit `8a51c46` removed that limit.
+On `main`, a struct that declares `init` does not derive `Decode`. The error message is "`{owner}` declares `init`, which decoding does not call" (`src/check/derive.rs:251`). A field-by-field decode would skip the validation in `init`, and a native function could not call `init` before callbacks existed.
 
-In this design, the decode walker constructs such a struct through `init`. The walker reads the parameters of `init` from the input, in the same way that it reads the fields of a struct. For example, `struct Port { n: int, fn init(n: int) -> Result<Port> }` decodes from the JSON object `{"n": 80}`. The walker then runs these steps:
+In this design, the decode walker constructs such a struct through `init`. It reads the parameters of `init` from the input, as it reads the fields of a struct. For example, `struct Port { n: int, fn init(n: int) -> Result<Port> }` decodes from the JSON object `{"n": 80}`. The walker then takes these steps:
 
-1. It fills each missing argument. A missing argument of an `Option` type becomes `None`. A missing argument with a default uses that default. The compiler lowers a parameter default to an inline expression or to a helper function of the earlier parameters. The walker calls a helper function through a callback.
+1. It fills each missing argument. A missing argument of an `Option` type becomes `None`, as a missing `Option` field does on `main` (`src/stdlib/json.rs:1173`). A missing argument with a default uses that default. The checker lowers a parameter default to an inline expression or to a helper function of the earlier parameters (`src/check/mod.rs:2739-2775`). The walker calls a helper function through a callback.
 2. It calls `init` with the arguments through a callback.
-3. It converts the result of `init`. If `init` returns `Self` or `Ok`, the walker uses the value. If `init` returns `Err(e)`, the decode fails at the path of the struct. If `e` is an `Error`, the decode error keeps its kind. For any other error type, the decode error uses kind `"invalid"` and the display text of `e`.
+3. It converts the result of `init`. If `init` returns `Self` or `Ok`, the walker uses the value. If `init` returns `Err(e)`, the decode fails at the path of the struct. If `e` is an `Error`, the decode error keeps its kind. For any other error type, the decode error has kind `"invalid"` and the display text of `e`.
 
-The derived `Encode` implementation of the struct still writes the fields. If the parameters of `init` match the fields, a value survives a round trip through JSON. If they differ, the user writes a custom `Encode` or `Decode` implementation.
+The structural `Encode` implementation of the struct still writes the fields. If the parameters of `init` match the fields, a value keeps its content through a JSON round trip. If they differ, the user writes a custom implementation.
 
-From general knowledge, other libraries also decode through validating code:
+Other libraries also decode through validating code:
 
-- In Rust, the `serde` attribute `#[serde(try_from = "Type")]` decodes a value through a fallible conversion.
-- In Kotlin, `kotlinx.serialization` runs the `init` blocks of a class during decoding.
+- serde: `#[serde(try_from = "FromType")]` means "Deserialize this type by deserializing into FromType, then converting fallibly" (serde.rs, "Container attributes").
+- Kotlin: "After deserialization, the `kotlinx.serialization` plugin runs the class's initializer blocks, just like when you create an instance" (kotlinx.serialization documentation, `serialization-customization-options.md`).
 
-## Part 6: Type checker and compiler changes
+### `never`
 
-1. **Native default methods.** The checker treats a `native fn` method in a `trait` declaration as a native default method. On `main`, default trait methods must have Sand block bodies.
-2. **Custom and structural implementations.** We allow user `impl` blocks on `Encode` and `Decode` under `docs/SPEC.md` §4.9. The checker generates structural implementations from the registration of each native default, as Part 2 specifies. A struct that declares `init` derives `Decode` if every parameter type of `init` implements `Decode`. On `main`, such a struct never derives `Decode`. For `Hash`, the checker keeps its existing rule for `var` fields.
-3. **Part templates.** The checker builds part trait-evidence trees. The compiler lowers them to `PartTemplate` constants, as Part 3 specifies.
-4. **Structural implementations for `never`.** If a registration marks support for `never`, the checker gives `never` a structural implementation. The implementation shape of `never` has no `Ctor`. Under `docs/SPEC.md` §5.1 on `main`, `never` implements only traits with empty bodies. Expressions such as `json.encode([])` require `[never]: Encode`. The decode walker always returns an error for the shape of `never`. Because `never` is uninhabited, `[never]: Encode` only meets type bounds on empty containers.
-5. **Dictionary parameters for native functions.** Generic native functions such as `json.encode<T: Encode>` receive `T`'s dictionary as a hidden argument. On `main`, the parameter type `Num<N>` already reads the hidden `Num` dictionary of the `N`-th type parameter. This design generalizes `Num<N>` into `TraitDict<N>`, which reads the dictionary of any bound with methods. `Num<N>` becomes a typed view over `TraitDict<N>`, so a single mechanism reads hidden dictionaries.
-6. **Removal of `reflect`.** `Decode` dictionaries store `ImplShape` metadata. Decoders read target type structure from those dictionaries instead of `reflect` type descriptors. On `main`, only the `json` module uses `reflect` in the standard library. We delete `reflect` from the language.
+The encode walker never visits a value of type `never`, because `never` has no values. The decode walker returns an error with kind `"parse"` for the shape of `never`, as it does for other type mismatches (`src/stdlib/json.sand:140-142`). Thus, `let empty: [never] = []` encodes as `[]`, and the decode of `[1]` into `[never]` fails.
 
-The checker applies its two existing rules for traits with methods to `Encode` and `Decode`:
+## Part 6: Checker and compiler changes
 
-- **Local functions.** On local functions, the checker rejects bounds on traits with methods. It reports `local functions cannot require traits with methods; declare the function at the top level` for local `Encode` or `Decode` bounds.
-- **Struct field defaults.** Under `docs/SPEC.md` §4.2, the checker rejects calls inside field defaults that use a struct type parameter's bound on a trait with methods.
+1. **`TypeConstructor`.** Rename `Ctor` to `TypeConstructor`, add its doc comment, and move it to `src/types.rs`. See [`TypeConstructor`](#typeconstructor).
+2. **Native default methods.** The checker accepts a `native fn` method in a `trait` declaration as a native default method. On `main`, a trait method without a body is a required method (`src/check/traits.rs:455-461`).
+3. **Registration.** Rust setup code registers each native default with the types that its walker supports. See [Registration](#registration).
+4. **Structural implementations.** The checker computes structural implementations after it declares the `impl` headers, through ordinary trait resolution. See [How the checker builds structural implementations](#how-the-checker-builds-structural-implementations).
+5. **Custom implementations.** `Encode` and `Decode` stop being derived traits. The checker stops rejecting user implementations of them (`src/check/traits.rs:492-497`).
+6. **Independent traits.** `Decode` loses its supertrait `Encode`. `Num` keeps `Ord + Encode`.
+7. **`never`.** The checker and the debug verifier give `never` the dictionary of each trait whose registration declares `never` (`src/check/traits.rs:1123`, `src/check/verify.rs:228`).
+8. **Shapes and part templates.** The checker builds trait evidence for each part. The compiler lowers it to part templates and stores shapes in the shape table of `Program`.
+9. **Dictionary parameters for native functions.** A generic native function such as `json.encode<T: Encode>` receives the dictionary of `T` as a hidden argument. On `main`, the parameter type `Num<N>` reads the hidden `Num` dictionary of the `N`-th type parameter (`src/native/ty.rs:350-356`). This design generalizes it to `TraitDict<N>`, which reads the dictionary of any bound with methods. `Num<N>` becomes a typed view over `TraitDict<N>`.
+10. **`reflect`.** `Decode` dictionaries supply the type structure that `json.decode` needs, so `json.decode` stops using `reflect`. [Open question 3](#open-questions) asks whether to delete `reflect` from the language.
 
-See [Open questions](#open-questions) on keeping both rules and deleting `reflect` in this branch.
+With methods, `Encode` and `Decode` become subject to two existing checker limits on traits with methods. [Open question 2](#open-questions) asks whether to keep them.
 
 ## Part 7: JSON and `Value`
 
-- **`json.encode`.** The encode walker writes the value to the JSON sink. `json.encode` builds no intermediate tree.
-- **`json.decode`.** The decode walker reads the JSON text from the JSON source. `json.decode` builds no intermediate tree.
-- **`json.Json` implementations.** We implement `Encode` and `Decode` on `Json` with dedicated native methods:
+- **`json.encode`.** `pub native fn encode<T: Encode>(value: T, indent: int = 0) -> str`. The encode walker writes the value to the JSON sink.
+- **`json.decode`.** `pub native fn decode<T: Decode>(text: str) -> Result<T>`. The decode walker reads the text from the JSON source. The private `decode_raw` function, the `Decoded` enum, and the loop that runs computed defaults after the decode (`src/stdlib/json.sand:144-158`) go away.
+- **`json.parse`.** `json.parse` decodes the text into a `Json` value with the same walker and source.
+- **`Json`.** The `json` module implements `Encode` and `Decode` for `Json` with native methods:
 
   ```sand
   impl Encode for Json { native fn encode(self, encoder: Encoder) }
   impl Decode for Json { native fn decode(decoder: Decoder) -> Result<Json> }
   ```
 
-  `Json.encode` writes a whole `Json` tree to the sink of the `Encoder` in a single native call. `Json.decode` reads a whole JSON value from the source of the `Decoder` in a single native call. With the `Value` source, `Json.decode` converts the `Value` with the rules of the JSON sink. `json.parse(text)` calls `json.decode<Json>(text)`.
+  `Json.encode` writes the whole `Json` tree to the sink of the `Encoder`, in the form of the JSON data model: `Null` as unit, `Arr` as a list, `Obj` as a map with `str` keys, and each scalar as itself. `Json.decode` reads one value with the "any value" request of the source. On `main`, the JSON encoder and the typed decoder special-case `Json` by variant ID (`src/stdlib/json.rs:1100-1103`, `:1556-1558`). This design removes those special cases. serde_json takes the same approach: `serde_json::Value` implements `Serialize` and `Deserialize` (`serde_json` 1.0.154, `src/value/ser.rs:11`, `src/value/de.rs:22`).
 
-- **`json.to_json`.** `json.to_json(value)` writes the value with the JSON sink, and then parses the text into a `Json` tree. This path is slower than a direct conversion. It keeps the JSON rules in the JSON sink only.
-- **`Vm::to_value` and `NativeContext::to_value`.** These functions run the encode walker with the `Value` sink. Callers pass an `Encode` dictionary alongside the Sand value. `Vm::to_value` runs synchronously. If it reaches a custom `Encode` implementation, it returns an `"invalid"` error. The async `NativeContext::to_value` method runs custom `Encode` implementations through callbacks. [Open question 3](#open-questions) asks whether to keep the synchronous function.
+  This form changes one behavior. On `main`, `Vm::to_value` copies a `Json` value as a `Value::Variant` of `json.Json`. With the `Value` sink, a `Json` value becomes its JSON data model form, such as `Value::Int(3)` for `Json.Int(3)`.
+- **`json.to_json`.** [Open question 10](#open-questions) asks how `to_json` works.
+- **Conversion to `Value`.** A conversion that applies custom `Encode` implementations needs an `Encode` dictionary. It can also reach a callback, so it must be able to wait. The engine therefore converts through one routine that starts synchronously and waits only if it reaches a custom implementation. Async native functions call it through a new method, `NativeContext::to_value(value, dictionary)`. [Open question 1](#open-questions) asks what happens to values whose types do not implement `Encode`, and to the synchronous `Vm::to_value`.
 
-## Updates to `SPLIT.md` changesets 14, 15, and 18
+## Changes to the plan in `SPLIT.md`
 
-In `SPLIT.md`, we divide the work of a source branch into numbered changesets:
+`SPLIT.md` divides the work of a source branch into numbered changesets. This design changes the plan for changesets 14, 15, and 18:
 
-- **Changeset 14: `Value` and `Vm::to_value`.** We merged Changeset 14 in pull request #41. Here, we update two of its parts:
-  - Callers pass an `Encode` dictionary to `Vm::to_value` so it can detect custom `Encode` implementations.
-  - On `main`, three separate walkers read Sand values: `json.encode`, `json.to_json`, and `Vm::to_value`. We replace them with the single encode walker and two encode sinks. Changeset 14 rejected a shared walker with a sink. That design "required about 300 extra lines and `#[inline(always)]` across two trait layers." Callbacks in the middle of a walk now require a single walker, so we accept that cost.
-- **Changeset 15: `Encode` and `Decode` as ordinary traits.** We rename Changeset 15 to this title to cover Parts 1 through 7 of this design. Its original plan already used a decode walker that reads from a JSON source and a `Value` source. We defer host-side `Value` decoding to Changeset 16. Changeset 16 adds `serde` traits on `Value` for Rust hosts.
-- **Changeset 18: Host function calls.** In Changeset 18, the engine decodes each host `Value` argument with the decode walker and the `Value` source. Host-callable script functions take concrete parameter types. The compiler emits a constant `Decode` dictionary for each parameter.
+- **Changeset 14: `Value` and `Vm::to_value`.** Pull request #41 merged this changeset as commit `a74cf0d`. This design replaces its three encode walks, in `json.encode`, `json.to_json`, and `Vm::to_value`, with one encode walker and two sinks. See [Walkers that do not know the format](#walkers-that-do-not-know-the-format) for why.
+- **Changeset 15: Shared decode path and `Value` input.** This design becomes changeset 15. The plan for changeset 15 already describes a decoder that reads from a JSON source and a `Value` source. Two parts of the plan change:
+  - The plan says that the `Value` source "also accepts the JSON form of each type". [Open question 9](#open-questions) asks whether to keep that rule.
+  - The plan says that "`value::Decode: Encode` mirrors the Sand trait." The Rust trait `value::Decode` drops `Encode` to mirror the independent Sand traits. Commit `6d23963` on branch `origin/encode-decode-traits` records the same choice: "`value::Decode` also required `Encode`, which the user decided against."
+- **Changeset 18: Host function calls.** The engine decodes each host `Value` argument with the decode walker and the `Value` source. For a parameter with a concrete type, the compiler emits a constant `Decode` dictionary.
+
+Changeset 16 adds only `Serialize` and `Deserialize` for `Value`. This design does not change it, unless the answer to [Open question 9](#open-questions) makes a JSON-shaped `Value` invalid input.
 
 ## Costs and risks
 
-- **Dictionary passing.** Callers pass a dictionary to generic functions with `T: Encode` bounds. Callers pass a constant for concrete types. For constructed generic types, callers build a tuple at runtime. In the triage report, we measured generic trait calls at about 12 ns above direct calls.
-- **Per-part dispatch.** For each part, the walker resolves the part dictionary and checks its method function. For concrete types, the walker loads program constants directly from `Constant` templates.
-- **Sink and source dispatch.** The walkers call the sink and the source through Rust generics. The Rust compiler therefore builds a copy of each walker for each sink and each source.
-- **Walker state across callbacks.** Before the first callback, the walker moves its state into a future, and it roots its heap values in the root table of the call. The rooted values grow with the nesting depth of the value. The scheduler counts the root table against `max_memory`. `TODO.md` tracks the memory of the future itself under "Charge boxed recursive futures against `max_memory`."
+- **Dictionary passing.** A call to a generic function with a `T: Encode` bound passes a dictionary. For a concrete type, the dictionary is a constant. For a constructed generic type, the caller builds a tuple at run time. The report `experiments/encode-decode-design-causes.md` on branch `encode-decode-design-causes` measured a generic call with a trait method call at 28.3 ns, against 16.6 ns for a direct Sand function call.
+- **Per-part dispatch.** At each part, the walker evaluates a part template and reads slot 0 of the part dictionary. This cost is unmeasured. See [Speed of the walker](#speed-of-the-walker).
+- **Walker state across callbacks.** At the first callback, the walker moves its state into a future and roots its heap values. The rooted values grow with the nesting depth of the value. The scheduler counts the root table against `max_memory`. `TODO.md:54-57` tracks the memory of recursive futures, which the engine does not count. The proposed walker uses one future for each walk. Each nested walk from an `Encoder` or a `Decoder` adds one more future.
 - **Callback order.** A custom method or a computed default can run before a later part of the input fails to decode. See [Order of callbacks](#order-of-callbacks).
-- **Net codebase size.** We expect this design to reduce total code size. We will report the measured line delta in the pull request.
+- **Two derivation mechanisms.** In this branch, `Eq`, `Ord`, and `Hash` keep the derivation table in `src/check/derive.rs`, and `Encode` and `Decode` use registration.
+- **Code size.** The net line change is unmeasured. We will report the measured change in the pull request.
 
-  We delete four subsystems:
-  - We delete `crates/sandlang/src/compile/reflect.rs` and `reflect` support in the parser, checker, and VM.
-  - We delete runtime type descriptors and their templates.
-  - We delete the three separate encode walkers and the typed JSON decoder.
-  - We delete the helper functions that run computed field defaults after decoding.
+  The design deletes these parts:
+  - The separate encode walks of `json.encode`, `json.to_json`, and `Vm::to_value`. The fate of `json.to_json` depends on [Open question 10](#open-questions).
+  - The typed JSON decoder, which the decode walker replaces.
+  - The post-order fill path of `json.decode`: `decode_raw`, `Decoded`, and the fill functions of `FieldDefault::Computed`.
+  - The special cases for `Json` in the encoder and the decoder.
+  - If [Open question 3](#open-questions) deletes `reflect`: `src/compile/reflect.rs`, `TypeDesc`, `DescTemplate`, `Op::Describe`, and `reflect` support in the parser, checker, and VM.
 
-  We add these components:
-  - We add the native encode and decode walkers.
-  - We add the encode sink and decode source interfaces, with a JSON implementation and a `Value` implementation of each.
-  - We add `ImplShape` constants and `PartTemplate` lowering.
-  - We add native default trait methods.
-  - We add type registration for native defaults.
-  - We generate structural implementations in the type checker.
-  - We generalize the `Num<N>` parameter wrapper into `TraitDict<N>`.
+  The design adds these parts:
+  - The encode and decode walkers, with stacks that hold no borrows.
+  - The encode sink and decode source interfaces, each with a JSON implementation and a `Value` implementation.
+  - The shape table and part templates.
+  - Native default trait methods and their registration.
+  - The computation of structural implementations through trait resolution.
+  - `TraitDict<N>`, `NativeContext::to_value`, and the release of roots during a native call.
+  - The `Encoder` and `Decoder` prelude types.
 
 ## Rejected alternatives
 
-- **Runtime lookup table.** A runtime table indexed by trait and type would duplicate dictionary dispatch. Because the compiler erases type arguments, runtime lookup from values works only for concrete types. Callers of a decoder would also have to pass runtime type descriptors.
-- **Generated Sand methods for all derived implementations.** Swift uses this model. Under it, compiler-generated methods call a trait method for every part. In the triage report, Sand-only codecs took 2.3 to 7 times as long as native walkers.
-- **Dual generated Sand codecs and native walkers.** With two codec paths, developers must keep output, error paths, and retry behavior identical across both. In the triage report, we audited `origin/encode-decode-traits`. Over a quarter of its 8,210 added lines kept those two paths aligned.
-- **Deferred callbacks through an intermediate tree.** An earlier version of this design never waited for a callback inside a walk. The encode walker built a `Value` tree with placeholders and filled them after the walk. The decode walker decoded its input twice. This version built an intermediate tree for every `json.encode` and `json.decode` call. It also needed placeholders, child-index paths, and a second decode pass. It put JSON rules into the format-neutral decode walker, because a JSON parser that runs without the target type cannot tell bytes from text.
+- **Runtime lookup of custom implementations from value types.** A table indexed by trait and type definition would duplicate dictionary dispatch. A heap object does not record its type arguments, so a lookup from a value works only for concrete types. `impl<T: Encode> Encode for Box<T>` would not work, and the decoder would still need run-time type descriptors.
+- **Generated Sand methods for all structural implementations.** Swift uses this model: the compiler can synthesize the methods of a type "in cases where all properties are also `Encodable` or `Decodable`" (SE-0166). In `experiments/encode-decode-design-causes.md` on branch `encode-decode-design-causes`, `ToJson` and `FromJson` traits in Sand took 2.3 to 3.7 times as long as the native walkers on `main`. An all-Sand prototype took up to about 7 times as long.
+- **Generated Sand codecs beside native walkers.** With two codec paths, both must produce the same output, error paths, and retry behavior. The same report found that "at least a quarter" of the 8,210 new production lines on `origin/encode-decode-traits` kept the native path aligned with the Sand path.
+- **Walks without callbacks, with placeholders.** The encode walker would build a `Value` tree with placeholders for custom parts and fill them after the walk. The decode walker would read its input twice. This approach builds an intermediate tree for every `json.encode` and `json.decode` call. It also needs placeholders, child-index paths, and a second decode pass. Finally, it moves JSON rules into the walker: a JSON parser that runs without the target type cannot tell bytes from text, because both arrive as a JSON string.
+- **Part dictionaries stored inside each dictionary.** For a recursive type, the compiler would have to build cyclic tuples. For polymorphic recursion, it would expand nested dictionaries without end.
+- **A generated Sand function that returns part dictionaries.** Each uncached lookup would cost a callback. A callback round trip took about 90 ns in `experiments/native-async-sand-calls.md`. Types that use only native defaults would also pay that cost.
+- **Shapes as constant tuples.** The VM builds constant tuples in index order, and each tuple can refer only to earlier constants (`src/vm/mod.rs:740-752`). A recursive type needs a cycle through its shape, which a constant tuple cannot express. The shape table avoids the cycle.
+- **`Decode` with `Encode` as a supertrait.** The reason for the supertrait on `main` no longer applies, and serde and Swift keep the traits independent. See [Independent traits](#independent-traits).
 
 ## Existing code that this design reuses
 
-We checked each new part of this design against the code on `main`. Each part below reuses an existing component. Each part keeps that component's limits and metering.
+Each item below names an existing component and what this design takes from it.
 
 **Type classification and dispatch:**
 
-- **`Ctor` and `TypeDefKind`.** Registration and implementation shapes use these existing enums. See [Supported types](#supported-types).
-- **The derivation pass.** The fixed-point pass in `crates/sandlang/src/check/derive.rs` computes the bounds of each structural implementation.
-- **Dictionary construction.** The compiler builds structural dictionaries with its existing dictionary code. It stores constant dictionaries once through `dict_consts`.
-- **Trait evidence trees.** The checker builds part templates from the evidence trees that it already builds for method bodies.
-- **Supertrait checks.** The existing supertrait check on implementations verifies registrations.
-- **`never` evidence.** The checker already handles `never` as a special case in evidence resolution. This design extends that case to dictionaries.
+- **`Ctor`, renamed `TypeConstructor`, and `TypeDefKind`.** Registration and shapes use these enums.
+- **`propagate_to_fixed_point`** (`src/check/derive.rs:166-190`). The computation of structural implementations keeps this driver. It replaces the record for each type and the requirement computation.
+- **Dictionary construction.** The compiler builds structural dictionaries with its existing dictionary code, and stores constant dictionaries once through `dict_consts`.
+- **Trait evidence.** The checker builds part templates from the same evidence trees that it builds for function bodies.
+- **The `never` case in trait resolution** (`src/check/traits.rs:1123`, `src/check/verify.rs:228`). This design extends it to registered traits.
 
-**Runtime data:**
+**Run-time data:**
 
-- **`FieldDefault`** stores the field defaults in implementation shapes.
+- **`FieldDefault`.** Shapes reuse its constant variant. Its computed variant changes from a fill function to the default helper of the field.
 - **`ValueTypeInfo`** supplies the parse function of a native value type.
 - **The VM type table** supplies the field names and variants of each type definition.
-- **`RtIds`** identifies the `Some` and `None` variants of the prelude `Option`.
-- **`DescTemplate::instantiate`** supplies the fuel charge and depth limit for part templates.
+- **`RtIds`** identifies the `Some` and `None` variants.
+- **The fuel and depth rules of type descriptor templates** apply to part templates.
+- **The `desc_templates` table in `Program`** is the model for the shape table.
 
 **Native calls and memory:**
 
 - **`NativeContext::call`** runs each callback.
 - **`Later::ready` and `Later::new`** give the synchronous start and the move into a future.
+- **`NativeContext::step`** handles memory limits after the first callback.
 - **The root table of `NativeContext`** keeps heap values alive across callbacks.
 - **`Staging`** builds heap values in the decode walker.
-- **The scheduler's memory accounting** counts futures and root tables against `max_memory`.
+- **The memory accounting of the scheduler** counts the future and the root table against `max_memory`.
 - **`NativeObject` and `NativeModule::bind`** define the `Encoder` and `Decoder` types.
 - **`Num<N>`** becomes a typed view over `TraitDict<N>`.
 
 **Walkers, sinks, and sources:**
 
-- **The `Vm::to_value` copier** in `crates/sandlang/src/value.rs` becomes the encode walker. It already walks the heap with an explicit stack and `ContainerChildren`.
-- **The JSON text encoder** in `crates/sandlang/src/stdlib/json.rs` becomes the JSON sink. The sink keeps its string escaping, number formatting, indentation, map key rules, and memory checks.
+- **The heap copier of `Vm::to_value`** (`src/value.rs:442-678`). Its explicit-stack walk is the model for the encode walker. The walker needs a new stack entry type, because `ContainerChildren` holds borrows.
 - **The copier's value builders** become the `Value` sink, with their cached type names.
-- **The typed JSON decoder** in `crates/sandlang/src/stdlib/json.rs` becomes the decode walker. The walker keeps its struct, enum, map key, field index, and constant default logic. Its reads move behind the decode source interface.
-- **The JSON parser** becomes the JSON source. The source keeps its position tracking, `skip`, and error positions. The parser's `Source` trait already shares array and object iteration. The decode source interface generalizes that trait.
-- **The JSON decoder's path formatting** formats error paths such as `$.items[2].price`.
+- **The JSON text encoder** (`src/stdlib/json.rs:1430-1655`). Its string escaping, number formatting, indentation, map key text, and memory checks become the JSON sink. Its traversal moves into the encode walker.
+- **The typed JSON decoder** (`src/stdlib/json.rs:890-1386`). Its struct, enum, map key, field index, and constant default logic moves into the decode walker. The decoder needs a rewrite from recursion to an explicit stack.
+- **The JSON parser** becomes the JSON source. The source keeps its position tracking, `skip`, and error positions. It must stop borrowing its input across callbacks.
+- **The path formatting of the JSON decoder** (`path_str`, `src/stdlib/json.rs:923`) formats error paths such as `$.items[2].price`.
 
 **Parts without an existing equivalent:**
 
-- The encode sink interface. Changeset 14 rejected an earlier sink interface, so `main` has none. The `io.Writer` trait writes bytes, not structured values.
+- The encode sink interface. Changeset 14 rejected an earlier sink interface, so `main` has none.
 - The `Value` source. On `main`, no code converts a `Value` into a heap value.
 - The `Encoder` and `Decoder` prelude types.
-- Native default methods in traits. On `main`, a trait declaration cannot give a method a native default body.
+- Native default methods in traits, and their registration.
+- The computation of structural implementations through trait resolution.
+- The shape table and part templates.
+- `NativeContext::to_value`.
 - The release of roots during a native call.
-- The opaque `Encoded` type in [Open question 4](#open-questions).
-
-The previous uncommitted draft on `encode-decode-traits-v2` recorded holes and decoded twice. This design replaces that draft. We drop all four special cases from [Limits of the previous draft](#limits-of-the-previous-draft).
 
 ## Test and measurement plan
 
-- **Existing JSON behavior.** We keep existing test output in `crates/sandlang/tests/spec/std_json.test`, except for the callback order change in [Order of callbacks](#order-of-callbacks). We will list every planned error-message change in this document.
+- **Existing JSON behavior.** We keep the existing output in `tests/spec/std_json.test`, except for the changes that this document lists: the callback order and the `Value` form of `Json`. We will add each planned error-message change to this document.
 - **New spec tests:**
-  - We test custom `Encode` and `Decode` implementations on structs and enums.
-  - We test generic custom implementations, such as `impl<T: Encode> Encode for Box<T>`.
-  - We test direct recursive types and polymorphic recursion.
-  - We test `json.encode([])` with `[never]: Encode`.
-  - We test composite values whose outer and inner types both define custom implementations.
-  - We test async custom implementations that wait on `task.sleep`.
-  - We test faulty `Encode` implementations that skip `encoder.encode` or call it twice.
-  - We test error paths from failed custom `Decode` implementations.
-  - We test a custom `Decode` implementation that tries a second type after a failed read.
-  - We test decoding through `init`, including missing arguments with defaults and `init` errors.
-  - We test the `Value` source with input in JSON form, such as `Value::Str` for `bytes`. The decode must fail.
-  - We test a custom `encode` method that changes a list that the walker is visiting.
+  - Custom `Encode` and `Decode` implementations on structs and enums.
+  - Generic custom implementations, such as `impl<T: Encode> Encode for Box<T>`.
+  - A custom implementation with a bound on another trait, such as `impl<T: Describe> Encode for Box<T>`, inside a struct with a structural implementation.
+  - A concrete custom implementation, such as `impl Encode for W<int>`, and the error for `W<str>: Encode`.
+  - Tuples of several arities.
+  - Direct recursive types and polymorphic recursion.
+  - `json.encode(empty)` with `let empty: [never] = []`, and a failed decode into `[never]`.
+  - Composite values whose outer and inner types both have custom implementations.
+  - Async custom implementations that wait on `task.sleep`.
+  - Faulty `Encode` implementations that skip `encoder.encode`, call it twice, or keep the `Encoder` after the callback.
+  - Error paths from failed custom `Decode` implementations.
+  - Decoding through `init`, including missing arguments with defaults and `init` errors.
+  - The `Value` source with JSON-form input, such as `Value::Str` for `bytes`, under the rule that [Open question 9](#open-questions) chooses.
+  - A custom `encode` method that changes a list that the walker visits.
 - **Robustness checks:**
-  - We enable `Config::retry_stress` in tests to force retries at resource limits.
-  - On large inputs, we compare resident memory against `max_memory` and against matching Sand loops.
-  - We encode and decode deeply nested values on a 512 KiB thread stack.
-  - We encode and decode values with many custom-encoded parts, and we force a garbage collection in each callback.
+  - Enable `Config::retry_stress` in tests to force retries at resource limits.
+  - On large inputs, compare resident memory against `max_memory` and against equivalent Sand loops.
+  - Encode and decode deeply nested values on a 512 KiB thread stack.
+  - Encode and decode values with many custom parts, and force a garbage collection in each callback.
 - **Benchmarks:**
-  - We benchmark `json` functions against `main` with `bench/run.py` and `crates/sandlang/benches/codec.rs`.
-  - We measure call overhead for generic functions with `Encode` bounds.
+  - Benchmark the `json` functions against `main` with `bench/run.py` and `benches/codec.rs`.
+  - Measure the cost of per-part dispatch on values without custom parts. This result decides whether the walker needs the flag from [Speed of the walker](#speed-of-the-walker).
+  - Measure the decode walker with its explicit stack against the recursive decoder on `main`.
+  - Measure call overhead for generic functions with `Encode` bounds.
 
 ## Open questions
 
-1. **Should we keep the existing rules on local functions and field defaults in this branch?** We recommend yes. Keeping both rules makes `Encode` and `Decode` match all other traits with methods.
-2. **Should we delete `reflect` in this branch?** We recommend yes. With `reflect` deleted, `Decode` dictionaries are the single source of runtime type metadata. Deleting `reflect` also removes `reflect` code from the parser, checker, compiler, and VM.
-3. **Should we delete the synchronous `Vm::to_value`?** We recommend yes. Its result depends on script code. A host call works until a script author adds a custom `Encode` implementation, and then the call fails at runtime. With a single async function, every conversion can run custom implementations.
-4. **Should a custom `encode` method return its value instead of writing it?** With `fn encode(self) -> Encoded`, a method returns exactly one value, so the type checker enforces the rule. `Encoded` would be an opaque prelude type built from any `Encode` value, as in `Encoded(self.address)`. This change removes the `Encoder` type and its two runtime errors. We recommend yes.
-5. **Should we accept the callback order change?** We recommend yes. Callbacks then run in the same order as Sand code that builds the same value. The alternative is a syntax check of the whole JSON text before the walk. That check would still let a type error after a callback leave the callback's side effects in place.
+Each question below changes what host developers or script authors can do. Each lists the options, the evidence, and a recommendation.
+
+### 1. What happens to values whose types do not implement `Encode`?
+
+On `main`, `Vm::to_value` accepts any value and is synchronous (`src/vm/mod.rs:914-947`). Its doc example registers `pub native fn record<T>(event: T)`, without a bound. The copier turns closures, tasks, channels, and native objects into `Value::Opaque` (`src/value.rs:59-61`, `:549-553`).
+
+A conversion cannot both accept any value and apply custom implementations. An unbounded `T` brings no `Encode` dictionary. Without that dictionary, the walker cannot find a custom implementation, and its output would differ from `json.encode` for the same value. Also, a synchronous native function cannot run Sand code, because `NativeFn` is a plain `Fn(&mut Vm, &[VmValue])` (`src/vm/mod.rs:28`).
+
+- **Option A: keep `Value::Opaque` and an untyped copy.** `Vm::to_value` stays synchronous and keeps the copier.
+  - For: a host can inspect a value of any type.
+  - Against: the result ignores custom implementations. The engine keeps a second walker. A host can use an opaque part only to read its type name, and the engine cannot rebuild an opaque value in the VM. `Vm::display` and `Vm::debug` already format any value (`src/vm/mod.rs:974-981`).
+- **Option B: every conversion requires `T: Encode`.** Delete `Value::Opaque` and the public synchronous `Vm::to_value`. A synchronous native function that needs a `Value` declares `T: Encode` and takes a new parameter type, for example `ValueArg<N>`. The engine converts the argument before the Rust body runs. Branch `origin/encode-decode-traits` built this mechanism as `Encoded<N>` (commit `964029c`). An async native function calls `NativeContext::to_value`.
+  - For: the checker reports the problem at compile time, and custom implementations always apply. serde_json also requires the bound: `pub fn to_value<T>(value: T) -> Result<Value, Error> where T: Serialize` (`serde_json` 1.0.154, `src/value/mod.rs:995-998`).
+  - Against: a host cannot convert a value whose type does not implement `Encode`. `SPLIT.md` changeset 17 must then state what `Outcome::Returned(Value)` holds for such a result. One rule: the engine rejects a function whose return type does not implement `Encode` before the call, and a script result of such a type becomes `Value::Unit`.
+
+A synchronous `Vm::to_value` that takes a dictionary fits neither option. It would fail at run time as soon as a script author adds a custom `Encode` implementation.
+
+**Recommendation:** Option B.
+
+### 2. Should the limits on local functions and field defaults stay?
+
+With methods, `Encode` and `Decode` become subject to two checker limits:
+
+- The checker rejects a bound on a trait with methods on a local function: "local functions cannot require traits with methods; declare the function at the top level" (`src/check/expr.rs:618-626`). A local function is a closure value with a plain function type, so a call has no slot for hidden dictionaries.
+- The checker rejects the use of such a bound in a struct field default, "because defaults receive no trait dictionaries" (`src/check/traits.rs:1133-1138`). The default helper of a field takes no dictionaries (`src/check/mod.rs:1632`).
+
+On `main`, both accept `Encode` and `Decode`, because the traits have no methods. For example, a local `fn helper<T: Encode>(x: T) -> str { json.encode(x) }` compiles on `main` and fails under this design.
+
+For local functions:
+
+- **Option A: keep the limit.** Programs with local generic codec helpers stop compiling.
+- **Option B: lift the limit for all traits, in its own changeset before this one.** Commit `204fb7e` on `origin/encode-decode-traits` did this in the checker only: each local function gets hidden dictionary parameters, and a use as a value builds a closure that passes them. Its diff in `src/check/` was about 83 added and 15 deleted lines. Commit `5c6e21c` added verifier support in about 21 added and 7 deleted lines. A local function that uses the feature allocates one closure for each use as a value.
+
+For field defaults:
+
+- **Option A: keep the limit in this branch.** Struct type parameters cannot be `reflect` (`src/syntax/parser.rs:461-464`), so no field default can decode a `T` today. A default has no value of `T` to encode.
+- **Option B: lift the limit.** The default helper takes the struct's bound dictionaries. Commit `e753d17` on `origin/encode-decode-traits` did this for construction only. Most of its added checker code is a new compile error at decode calls, because `json.decode` could not pass the dictionaries. In this design, the decode walker must also pass them, so a structural `Decode` implementation must require them and its shape must hold templates for them. Lift the limit for both construction and decoding, or for neither.
+
+**Recommendation:** Option B for local functions. Option A for field defaults.
+
+### 3. Should we delete `reflect` in this branch?
+
+After this design, `json.decode` gets its type structure from `Decode` dictionaries. In the standard library, only `json` uses `reflect` (`src/stdlib/json.sand:144`, `:158`). Hosts can also use the public parameter type `Reflect<N>` (`src/native/ty.rs:391`), as tests do (`tests/api.rs:2163`, `:2189`).
+
+- **Option A: delete `reflect`.** This removes `src/compile/reflect.rs`, `TypeDesc`, `DescTemplate`, `Op::Describe`, and `reflect` support in the parser, checker, and VM. Script authors lose `reflect` type parameters. A host native function that needs the structure of a type declares a `Decode` bound and takes `TraitDict<N>`, which gives it the shape.
+- **Option B: keep `reflect`.** The language keeps two sources of run-time type structure, and no standard library code reads `TypeDesc`.
+
+**Recommendation:** Option A.
+
+### 4. Should `encode` return its value instead of writing it?
+
+- **Option A: `fn encode(self, encoder: Encoder)`.** This is the form in [Part 1](#part-1-trait-declarations). The engine checks at run time that the method writes exactly one value, and that Sand code does not use the `Encoder` after its callback. Each custom part runs a nested walk on a shared sink. `Json.encode` writes its tree through the `Encoder` in one native call.
+- **Option B: `fn encode(self) -> Encoded`.** `Encoded` is an opaque prelude type that holds a value and its `Encode` dictionary, as in `Encoded(self.address)`. A method returns exactly one value, so the type checker enforces the rule. The outer walker encodes the returned value after the callback with its own sink. This removes the `Encoder` type, its three run-time errors, the nested walk, and the shared sink on the encode side. serde also enforces one value through types: each `Serializer` method takes `self` and returns `S::Ok`, as in `fn serialize_bool(self, v: bool) -> Result<Self::Ok, Self::Error>` (`serde_core` 1.0.229, `src/ser/mod.rs:427`). Swift checks at run time instead: "If the value fails to encode anything, `encoder` will encode an empty keyed container in its place" (`Codable.swift:21-22`).
+
+Option B has a cost for `Json`. A native method that returns `Encoded` cannot write a tree. `Json.encode` would then be Sand code that returns `Encoded` of each payload, with one callback for each `Json` node. The speed of that form is unmeasured. The alternative is a Rust hook that lets a native implementation write to the sink directly. Under both options, the decode side keeps the shared source and the nested walk, because a custom `decode` must read input during its callback.
+
+**Recommendation:** Option B, with `Json.encode` in Sand at first. Measure `json.encode` of a large `Json` tree against `main`, and add the Rust hook only if that measurement requires it.
+
+### 5. Should `encode` be able to return an error?
+
+`encode` returns unit. `json.encode` returns `str` and aborts on failure (`src/stdlib/json.sand:121-128`). A custom method can stop the run with `fail` (`src/stdlib/prelude.sand:274`), but it cannot report an error to the caller of `json.encode`.
+
+- **Option A: no error channel.** The trait and `json.encode` keep their signatures.
+- **Option B: `encode` returns `Result<()>`, or `Result<Encoded>` under Open question 4.** `json.encode` then returns `Result<str>`, and every caller changes. serde returns `Result<S::Ok, S::Error>`, and `Error::custom` is "Used when a [`Serialize`] implementation encounters any error while serializing a type" (`serde_core` 1.0.229, `src/ser/mod.rs:149-150`). Swift's `encode(to:)` "throws an error if any values are invalid for the given encoder's format" (`Codable.swift:24-25`).
+
+**Recommendation:** Option A in this branch. It keeps the signatures of the trait and of `json.encode`. Option B is a later, separate change if scripts need to deny the encoding of some values without stopping the run.
+
+### 6. Should derivation stay automatic?
+
+On `main`, every qualifying struct and enum derives `Encode` and `Decode` automatically, and `json.encode` includes all fields regardless of visibility (`docs/SPEC.md:235`). Commit `8bc6eda`, which made `Encode` a prelude trait, states no reason for automatic derivation.
+
+- **Option A: automatic, as on `main`.** Scripts encode data types without extra declarations, and the codec traits behave as `Eq`, `Ord`, and `Hash` do in this branch. A type author can keep a type out of encoding only with a custom implementation that stops the run.
+- **Option B: opt-in.** A type implements `Encode` or `Decode` only through an `impl` block. `impl<T: Encode> Encode for Page<T> {}` gets the structural implementation. The user declares the bounds, so the checker only verifies them, and the computation of requirements through trait resolution goes away. Swift: "By adopting these protocols, user types opt in to this system" (SE-0166). Kotlin: "To make a class serializable, you need to mark it with the `@Serializable` annotation" (kotlinx.serialization documentation, "Get started"). serde: a type uses `#[derive(Serialize)]` or a manual implementation (`serde_core` 1.0.229, `src/ser/mod.rs:249`).
+
+**Recommendation:** Option A, for consistency with `Eq`, `Ord`, and `Hash`. Option B is simpler in the checker, but every program that encodes a struct must change.
+
+### 7. Should a type rename or skip a field without a custom implementation?
+
+With this design, a struct that renames one field in its JSON form needs a custom implementation, usually through a second struct with the new field name. serde offers field attributes: `#[serde(rename = "name")]` and `#[serde(skip)]` (serde.rs, "Field attributes"). Swift lets a type "provide a custom key subset and take advantage of automatic method synthesis" (SE-0166).
+
+- **Option A: no field options in this branch.** Users write custom implementations.
+- **Option B: add field options.** This needs new syntax and shape data.
+
+**Recommendation:** Option A. Field options are independent of this design and can come later.
+
+### 8. Should a custom `decode` method be able to retry a read?
+
+In this design, a failed read fails the whole decode. See [Decode walker](#decode-walker).
+
+- **Option A: one read, no retry.** The source needs no position save and restore.
+- **Option B: rewind after a failed read.** The source returns to the start of the part, and the method can read the part as another type. A failed attempt can already have run callbacks, such as computed defaults, nested custom methods, or `init`. Rewinding the input does not undo their side effects. serde retries untagged enums over buffered data: its derive first deserializes the input into `Content`, then tries each variant on that buffer (`serde_derive` 1.0.229, `src/de/enum_untagged.rs:46-47`).
+
+**Recommendation:** Option A. If users need alternatives, a later design can decode into a buffer type first, as serde does.
+
+### 9. Should the `Value` source accept the JSON form of each kind?
+
+`SPLIT.md` changeset 15 plans a lenient source: "The `Value` source also accepts the JSON form of each type, so a `Value` that comes from JSON is valid input." Commit `c2f6887` on branch `value-decode` built such a source. It accepted a Base64 `Str` for `bytes`, a `Map` for a struct, `Unit` for `None`, and text keys for other key types. Commit `6d23963` on branch `origin/encode-decode-traits` records a cost of copied rules: "the Rust `value::Decode` copied the rules and messages of the Sand `Value` decoder by hand, and the two copies disagreed."
+
+- **Option A: exact forms only.** A host builds a `Value` with `value::Encode` or the derives, or passes on a `Value` from Sand. Both give exact forms: a derived `encode` "returns the same `Value` that [`Vm::to_value`] copies from the VM" (`src/value.rs:250-251`). A host with JSON data passes JSON text to the JSON source. A host that holds a `serde_json::Value` calls `serde_json::to_string` first. The JSON rules stay in the JSON source.
+- **Option B: also accept JSON forms.** A host can pass a JSON-shaped `Value` directly. But the JSON form of `bytes` is not universal. serde_json reads bytes from a JSON string as UTF-8 text, not Base64 (`serde_json` 1.0.154, `src/value/de.rs:414-420`). `serde_json::to_value` writes bytes as an array of numbers (`src/value/ser.rs:172-175`). A lenient source would put Sand's Base64 rule into a format-neutral reader. It would also accept a `Str` of the wrong type if the text happens to be valid Base64, and return wrong data without an error.
+
+In this branch, no engine API reads a `Value` into the VM. Changeset 18 plans the first one. The `Value` source can also wait for that changeset.
+
+**Recommendation:** Option A. Also rescope the plan of changeset 16 for `Deserialize` of `Value` from JSON, because such a `Value` would have JSON forms.
+
+### 10. How should `json.to_json` work?
+
+On `main`, a separate converter of about 290 lines builds a `Json` tree (`ToJsonConverter`, `src/stdlib/json.rs:1736-2024`). Its documented promise is that it "reuses existing `Json` values without traversing them" (`src/stdlib/json.sand:162-163`).
+
+- **Option 1: write JSON text with the JSON sink, then parse the text.** The estimate is about 10 lines. The JSON rules stay in the JSON sink. Behavior changes:
+  - `NaN` and infinity become `Json.Null`. On `main`, `to_json` keeps `Json.Float(NaN)`, but `json.encode` writes `null` (`src/stdlib/json.rs:1464-1465`). serde_json's `From<f64>` also gives "`Value::Null` if infinite or NaN" (`serde_json` 1.0.154, `src/value/from.rs:47`).
+  - An embedded `Json` value and its strings are copied, not shared. Sand lists are mutable (`docs/SPEC.md:651`), so the copy also stops later changes to the input from reaching the result.
+  - The nesting-limit message changes from "convert to JSON" to "encode as JSON".
+  - The speed estimate is about 2.3 times as slow as `main`. This is a sum of separate measurements, recorded in `SPLIT.md` at commit `849a44a`: `to_json` 502 ns, `encode` 289 ns, and `decode_json` 859 ns. UNVERIFIED: nobody measured the combined path.
+- **Option 2: a `Json` sink that builds the tree directly.** It keeps the behavior of `main`. The JSON rules must then be in one layer that both the text sink and the tree sink use. serde_json has a separate tree serializer, `src/value/ser.rs`, beside its text serializer. UNVERIFIED: the size estimate of about 200 lines.
+- **Option 3: write a `Value` with the `Value` sink, then convert it to `Json`.** The converter repeats the JSON rules over `Value`, and the data is copied twice.
+
+**Recommendation:** Option 1. If a benchmark of real use shows that `to_json` speed matters, change to Option 2.
+
+### 11. Should the decoder reject duplicate field keys?
+
+On `main`, "duplicate keys overwrite earlier values" (`src/stdlib/json.sand:132-133`). With callbacks in place, a duplicate key also runs the callbacks inside its value again, such as a custom `decode`.
+
+- **Option A: the last value wins, as on `main`.** Callbacks run once for each occurrence of the key.
+- **Option B: a duplicate struct field or `init` parameter fails with kind `"parse"`.** serde's derive returns `duplicate_field` (`serde_derive` 1.0.229, `src/de/struct_.rs:269`). Maps keep the last-value rule.
+
+**Recommendation:** Option B.
+
+### 12. Which structs that declare `init` derive `Decode`?
+
+A struct that declares `init` derives `Decode` through `init`. `TODO.md:268-277` lists both issues below as open work for this feature.
+
+Visibility: a structural implementation is visible in every module that loads its module (`docs/SPEC.md:557`). A private `init` would then run from decodes in other modules.
+
+- **Option A: derive `Decode` only if `init` is at least as visible as the struct.** A struct with a more private `init` needs a custom implementation.
+- **Option B: always derive.** Decoding ignores the visibility of `init`, as decoding on `main` ignores the visibility of fields.
+
+Bounds: `init` inherits the bounds of the struct. A bound on a trait with methods, such as `T: Num`, needs a dictionary in the `init` call.
+
+- **Option A: the structural `Decode` implementation also requires the bounds of `init`.** Its shape holds part templates for their dictionaries, and the walker passes them to `init`. Parameter default helpers already take the dictionaries of their function (`src/check/mod.rs:2768`).
+- **Option B: a struct whose `init` needs dictionaries does not derive `Decode`.**
+
+**Recommendation:** Option A for visibility. Option A for bounds.
