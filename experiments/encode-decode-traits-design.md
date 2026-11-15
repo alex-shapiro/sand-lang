@@ -10,7 +10,7 @@ The compiler passes dictionaries for `Encode` and `Decode` to generic functions,
 
 The design has four goals:
 
-- **Custom implementations.** A module can implement `Encode` and `Decode` for any type that it declares: concrete or generic, and declared in Sand source or bound from Rust as a native type. A Sand type implements them in Sand, and a native type implements them in Rust. The walkers apply these implementations at every level of a value.
+- **Custom implementations.** A user can implement `Encode` and `Decode` for any type that they define. The type can be concrete or generic. It can be defined in Sand, or defined in Rust as a native type. A Sand type implements the traits in Sand, and a native type implements them in Rust. The walkers apply these implementations at every level of a value.
 - **JSON.** The encode walker writes JSON text directly. The decode walker reads JSON text directly. Neither builds an intermediate tree.
 - **Host `Value` conversion.** The encode walker can also write a `Value`, and the decode walker can read one.
 - **`json.Json` as an ordinary type.** `Json` implements `Encode` and `Decode` with ordinary implementations. The walkers treat `Json` as they treat any other type.
