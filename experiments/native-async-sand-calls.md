@@ -17,7 +17,7 @@ This design differs from piccolo in three ways:
 
 - **Part 2 lends VM state in safe Rust.** Piccolo lends borrowed VM references to the future through `unsafe` code. Sand requires 100% safe Rust, so Part 2 lends owned VM state instead.
 - **Part 1 uses a single future type for host I/O and Sand calls.** Piccolo restricts sequence futures to Lua requests. Part 1 handles both host I/O and Sand calls in the same future type.
-- **Part 4 enforces hard memory limits inside native calls.** Piccolo checks memory only between execution steps. Part 4 awaits memory reservations so the VM keeps native calls within Sand's hard limit.
+- **Part 4 enforces hard memory limits inside native calls.** Piccolo leaves memory checks to the host between execution steps. Part 4 awaits memory reservations so the VM keeps native calls within Sand's hard limit.
 
 ## Why native functions cannot call Sand on `main`
 
@@ -150,9 +150,9 @@ In commit `eeec0f3`, `origin/encode-decode-traits` added a similar traced value 
 
 ### Design choice: each call owns its root table
 
-The task object that owns the native future also owns the future's root table. The collector traces that table through the owning object rather than as a global root set:
+The object that owns the native future also owns the future's root table. The collector traces that table through the owning object rather than as a global root set:
 
-- **The collector can free reference cycles.** The collector traces the table only while the owning object is reachable. If a rooted value points back to that owning object, the collector still reclaims both once the owning object is unreachable. Traced native objects on `origin/encode-decode-traits` follow the same rule.
+- **The collector can free reference cycles.** The collector traces the table only while the owning object is reachable. If a rooted value points back to that owning object, the collector still reclaims both once the owning object is unreachable. Traced native objects on `origin/encode-decode-traits` follow the same rule. On `main`, the collector treats every live task as a root, so this benefit applies only if Sand later collects unreachable tasks.
 - **The VM drops roots automatically with the call.** Dropping the finished or cancelled future frees its root table. Each call therefore releases all of its roots upon return.
 
 In a global root table, each native function must remove its own entries explicitly. The piccolo docs warn that entries in its global registry can form uncollectable reference cycles.
@@ -172,7 +172,7 @@ Collecting garbage in place eliminates the step snapshots and rollback logs from
 
 ### Design choice: preserve hard memory limits
 
-Part 4 enforces Sand's hard per-engine memory limit inside async native calls. Piccolo instead checks memory only between execution steps. A single piccolo step can exceed the limit by a bounded amount, so piccolo runs each native call to completion. Soft limits would eliminate Part 4 at the cost of breaking Sand's hard memory guarantee.
+Part 4 enforces Sand's hard per-engine memory limit inside async native calls. Piccolo instead leaves memory checks to the host between execution steps. A single piccolo step can exceed the limit by a bounded amount, so piccolo never stops a native call to enforce the limit. Soft limits would eliminate Part 4 at the cost of breaking Sand's hard memory guarantee.
 
 ### Design choice: charge future state against `max_memory`
 

@@ -178,7 +178,7 @@ If a native function reaches `max_memory`, the VM collects garbage and runs the 
 
 To trigger a retry, the interpreter returns `FiberStop::CollectAndRetry` and rewinds the call instruction. On `main`, `json.encode` and `json.decode` each build a fresh result in a single native call. In a trait-based codec, Sand methods make many small native calls on a stateful `Encoder` or `Decoder`.
 
-Encoders and decoders on `origin/encode-decode-traits` use `mark`, `rollback`, and `atomic` helpers to protect format state. `Config::retry_stress` tests found four retry bugs before those helpers covered every path. In each bug, an encoder or decoder changed its state before checking memory.
+Encoders and decoders on `origin/encode-decode-traits` use `mark`, `rollback`, and `atomic` helpers to protect format state. `Config::retry_stress` tests found four retry bugs. In each bug, an encoder or decoder changed its state before checking memory.
 
 ## Finding 5: Native functions use fixed trait wrappers
 
@@ -197,7 +197,7 @@ To pass user codecs to Rust, `origin/encode-decode-traits` added two wrapper typ
 - `CodecDict<N, B>` stores a codec dictionary.
 - `Encoded<N>` stores a value already encoded as a host `Value`.
 
-The branch also changed how the Rust host reads VM values. On `main`, `Vm::to_value` walks raw `VmValue` trees directly and ignores custom `Encode` methods. Authors on `origin/encode-decode-traits` replaced `Vm::to_value` with conversion through `Encode`.
+The branch also changed how the Rust host reads VM values. On `main`, `Vm::to_value` walks raw `VmValue` trees directly and cannot call custom `Encode` methods. Authors on `origin/encode-decode-traits` replaced `Vm::to_value` with conversion through `Encode`.
 
 ## Finding 6: The type checker builds derived codecs in Rust
 
